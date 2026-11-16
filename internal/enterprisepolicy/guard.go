@@ -25,6 +25,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/jsonc"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // The foreign-hook guard exists because several agents run every
@@ -121,13 +122,20 @@ type Finding struct {
 	// key locates the entry inside its document for the cleanup (the
 	// entry's own canonical form, independent of what it references).
 	key string
+	// command is the full command; Command is shortened for reports, so
+	// cleanup decisions must use this one.
+	command string
 }
 
 // GuardRequest describes one scan.
 type GuardRequest struct {
-	Connector string
-	GOOS      string
-	Home      string
+	// RetireLegacyClaudeUserHooks is set only by managed cleanup after it
+	// verifies the replacement Claude machine policy. The guard never uses it
+	// to permit a user-owned executable.
+	RetireLegacyClaudeUserHooks bool
+	Connector                   string
+	GOOS                        string
+	Home                        string
 	// Homes are further homes the agent may read user config from (the
 	// home its environment names when that differs from the account's).
 	Homes      []string
@@ -164,7 +172,50 @@ type GuardRequest struct {
 	// StopAtFirstBlocking ends a remove-mode evaluation at the first
 	// unapproved finding; the hook needs only the decision.
 	StopAtFirstBlocking bool
+	// GuardRemoval, when set, runs each change cleanup makes to a user
+	// file: a plugin moved aside, or a config rewritten without its foreign
+	// hooks. paths names the files that change removes hooks from. It runs
+	// remove at most once and returns remove's error with its own. The
+	// guardian takes the machine's foreign-hook cleanup fence, runs remove,
+	// commits paths to the removal ledger and releases the fence, so the
+	// fence covers one change and never a scan. If remove does not run, the
+	// hook stays in place and is reported.
+	GuardRemoval func(paths []string, remove func() error) error
 }
+
+// errRemovalRefused is a GuardRemoval that returned without running the
+// removal or saying why.
+var errRemovalRefused = errors.New("foreign-hook removal refused")
+
+// guardedRemoval runs remove through r.GuardRemoval, if any. ran reports
+// whether remove ran and removeErr is its own error. err holds every error,
+// including one the guard returned after a removal that ran (a failed
+// ledger commit), which does not undo the removal.
+func (r GuardRequest) guardedRemoval(paths []string, remove func() error) (ran bool, removeErr, err error) {
+	if r.GuardRemoval == nil {
+		removeErr = remove()
+		return true, removeErr, removeErr
+	}
+	err = r.GuardRemoval(paths, func() error {
+		if ran {
+			return errors.New("foreign-hook removal ran twice")
+		}
+		ran = true
+		removeErr = remove()
+		return removeErr
+	})
+	if !ran && err == nil {
+		err = errRemovalRefused
+	}
+	if removeErr != nil && !errors.Is(err, removeErr) {
+		err = errors.Join(removeErr, err)
+	}
+	return ran, removeErr, err
+}
+
+// guardScanReadHook, when set, sees each path a scan reads. Tests use it to
+// check that cleanup holds no removal guard while it reads.
+var guardScanReadHook func(path string)
 
 // Scan budgets. Real hook trees are a few small files.
 const (
@@ -183,6 +234,10 @@ type GuardDecision struct {
 	// source the agent loaded may not have been checked. At a session start
 	// it blocks the session (ApplyForeignHookSession).
 	Incomplete bool `json:"incomplete,omitempty"`
+	// Outage is set only by the hook, never sent or decoded: the gateway
+	// is proven stopped and its clean-session entry vouches for this agent
+	// process, so the call is left to the managed outage fail mode.
+	Outage bool `json:"-"`
 }
 
 func (r GuardRequest) getenv(key string) string {
@@ -522,8 +577,9 @@ func (r GuardRequest) ownedCommand(command string) bool {
 	return ownedCommand(command, r.HookBinary)
 }
 
-// ownedHandlerKeys are the only keys DefenseClaw's own handlers carry
-// besides their command fields. Any other key (an OS-specific override, an
+// ownedHandlerKeys are the shared keys DefenseClaw's own handlers carry
+// besides their command fields. Hermes fail_closed has its own strict check
+// below. Any other key (an OS-specific override, an
 // environment block, a working directory, an http url, a prompt) can change
 // what the agent runs, so a handler that carries one is foreign.
 var ownedHandlerKeys = map[string]bool{
@@ -567,14 +623,31 @@ func (r GuardRequest) ownedHandler(handler any) bool {
 				return false
 			}
 		case key == "args":
-			// Claude's Windows exec form: the admin binary in command with
-			// its arguments listed separately.
-			if !ownedExecArgs(value) || !strings.EqualFold(strings.TrimSpace(stringField(handler, "command")), strings.TrimSpace(r.HookBinary)) {
+			// Exec form carries the admin binary and its arguments separately.
+			command := stringField(handler, "command")
+			matchesBinary := command == r.HookBinary
+			if r.goos() == "windows" {
+				matchesBinary = strings.EqualFold(command, r.HookBinary)
+			}
+			if !ownedExecArgs(value) || !matchesBinary {
+				return false
+			}
+		case key == "fail_closed":
+			// Reviewed Hermes v2 Setup writes this only as true. A false
+			// value weakens its timeout/spawn failure contract and is foreign.
+			closed, ok := value.(bool)
+			if r.Connector != ConnectorHermes || !ok || !closed {
 				return false
 			}
 		case !ownedHandlerKeys[key]:
 			return false
 		}
+	}
+	if r.Connector == ConnectorClaudeCode {
+		// Claude renders one command. Recognize its current exec form and
+		// the exact earlier shell form when reading user settings.
+		opts := Options{GOOS: r.goos(), HookBinary: r.HookBinary}
+		return commands == 1 && (claudeHandlerIsOwned(opts, handler) || claudeHandlerIsLegacyOwned(opts, handler))
 	}
 	return commands > 0
 }
@@ -609,7 +682,7 @@ func ownedCommand(command, hookBinary string) bool {
 	if command == "" || hookBinary == "" {
 		return false
 	}
-	// Windows exec-form handlers carry the binary alone in command.
+	// Exec-form handlers carry the binary alone in command.
 	if strings.EqualFold(command, hookBinary) {
 		return true
 	}
@@ -679,7 +752,7 @@ func truncate(value string, limit int) string {
 }
 
 func readGuardFileLimit(path string, limit int64) ([]byte, bool, error) {
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, false, nil
 	}
@@ -748,6 +821,7 @@ func findingFor(req GuardRequest, source hookSource, event, command string, dige
 		Digest:    digest,
 		Reason:    reason,
 		key:       digest,
+		command:   command,
 	}
 	for _, allowed := range req.Policy.AllowedHooks {
 		if allowed == digest {
@@ -971,6 +1045,9 @@ func (s *guardScan) readFileLimit(path string, limit int64) ([]byte, bool, error
 	if err := s.check(); err != nil {
 		return nil, true, err
 	}
+	if guardScanReadHook != nil {
+		guardScanReadHook(path)
+	}
 	data, exists, err := readGuardFileLimit(path, limit)
 	if exists {
 		s.files++
@@ -985,6 +1062,9 @@ func (s *guardScan) readFileLimit(path string, limit int64) ([]byte, bool, error
 func (s *guardScan) readDir(path string) ([]fs.DirEntry, bool, error) {
 	if err := s.check(); err != nil {
 		return nil, true, err
+	}
+	if guardScanReadHook != nil {
+		guardScanReadHook(path)
 	}
 	entries, exists, err := readGuardDir(path)
 	if err == nil && len(entries) > guardDirEntryLimit {
@@ -1038,8 +1118,12 @@ func (s *guardScan) scanPluginList(source hookSource, data []byte) []Finding {
 	if err != nil {
 		return []Finding{s.unreadable(source, err)}
 	}
-	value, _ := doc.get("plugin")
-	list, _ := value.([]any)
+	var list []any
+	for _, key := range []string{"plugin", "plugins"} {
+		value, _ := doc.get(key)
+		items, _ := value.([]any)
+		list = append(list, items...)
+	}
 	// Plugin paths in a config file resolve against its directory.
 	entrySource := source
 	entrySource.base = filepath.Dir(source.path)
@@ -1049,6 +1133,9 @@ func (s *guardScan) scanPluginList(source hookSource, data []byte) []Finding {
 		switch v := item.(type) {
 		case string:
 			name = v
+		case *object:
+			value, _ := v.get("package")
+			name, _ = value.(string)
 		case []any:
 			if len(v) > 0 {
 				name, _ = v[0].(string)
@@ -1058,10 +1145,23 @@ func (s *guardScan) scanPluginList(source hookSource, data []byte) []Finding {
 			continue
 		}
 		files, problem := s.referencedFiles([]handlerValue{{text: name, exec: true}}, entrySource, nil)
-		digest := sha256Hex(canonicalJSON(orderedFromMap(map[string]any{
+		tree := ""
+		if path, local := pluginSpecPath(name, entrySource.base); local {
+			if info, err := os.Stat(path); err == nil && info.IsDir() {
+				tree, err = s.treeDigest(path)
+				if err != nil {
+					problem = err.Error()
+				}
+			}
+		}
+		content := map[string]any{
 			"plugin": item,
 			"files":  files,
-		})))
+		}
+		if tree != "" {
+			content["tree"] = tree
+		}
+		digest := sha256Hex(canonicalJSON(orderedFromMap(content)))
 		finding := findingFor(req, source, "", name, digest, "plugin")
 		finding.key = sha256Hex(canonicalJSON(item))
 		if problem != "" {
@@ -1171,7 +1271,7 @@ func (s *guardScan) scanFlatDir(source hookSource) []Finding {
 	}
 	var findings []Finding
 	for _, entry := range entries {
-		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
+		if !effectivePolicyDropIn(entry) {
 			continue
 		}
 		child := source.child(filepath.Join(source.path, entry.Name()), formatFlat)

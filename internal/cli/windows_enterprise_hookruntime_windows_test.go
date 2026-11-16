@@ -14,6 +14,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // GAP-1461: status and verify fail on a missing hook runtime folder when the
@@ -44,6 +45,35 @@ func TestWindowsEnterpriseHookRuntimeMissingFailsStatus(t *testing.T) {
 			!strings.Contains(result.Errors[0].Message, dir+" is missing") ||
 			!strings.Contains(result.Errors[0].Message, "repair") {
 			t.Fatalf("missing hook runtime folder: errors = %+v", result.Errors)
+		}
+	}
+}
+
+// GAP-1461: ensure's drift check takes a missing hook runtime folder as
+// drift when an account is enrolled, so a no-op ensure repairs it.
+func TestWindowsEnterpriseHookRuntimeMissingIsDriftForEnsure(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "DefenseClaw-HookRuntime")
+	originalDir, originalTargets := windowsEnterpriseHookRuntimeDir, windowsEnterpriseEnrolledTargets
+	t.Cleanup(func() {
+		windowsEnterpriseHookRuntimeDir, windowsEnterpriseEnrolledTargets = originalDir, originalTargets
+	})
+	windowsEnterpriseHookRuntimeDir = func() (string, error) { return dir, nil }
+	for _, enrolled := range []bool{true, false} {
+		windowsEnterpriseEnrolledTargets = func() (map[string]bool, error) {
+			if !enrolled {
+				return map[string]bool{}, nil
+			}
+			return map[string]bool{"S-1-5-21-1-2-3-1001\x00claudecode": true}, nil
+		}
+		gotDir, problem := windowsEnterpriseHookRuntimeDrift()
+		if gotDir != dir {
+			t.Fatalf("drift folder = %q, want %q", gotDir, dir)
+		}
+		if enrolled && !strings.Contains(problem, dir+" is missing") {
+			t.Fatalf("missing folder with an enrolled account: drift = %q, want the missing folder named", problem)
+		}
+		if !enrolled && problem != "" {
+			t.Fatalf("missing folder with nobody enrolled: drift = %q, want none", problem)
 		}
 	}
 }
@@ -117,8 +147,20 @@ func TestWindowsEnterpriseHookRuntimeAccessFailsStatusInBothDirections(t *testin
 					called = path == dir
 					return nil
 				}
-				if repairWindowsEnterpriseHookRuntimeAccess() == "" || !called {
+				if change, refusal := repairWindowsEnterpriseHookRuntimeAccessOrRefuse(); change == "" || refusal != "" || !called {
 					t.Fatal("repair did not restore the drifted hook runtime directory")
+				}
+				// A standalone refusal is returned, not swallowed (GAP-0652).
+				windowsEnterpriseRepairPublicDir = func(path string) error {
+					return &managed.StandaloneContentDriftError{Err: errors.New("an untrusted principal can write or owns " + path), Recovery: "run icacls " + path}
+				}
+				change, refusal := repairWindowsEnterpriseHookRuntimeAccessOrRefuse()
+				if change != "" || !strings.Contains(refusal, dir) || !strings.Contains(refusal, "run icacls "+dir) {
+					t.Fatalf("a refused repair gave change %q refusal %q", change, refusal)
+				}
+				windowsEnterpriseRepairPublicDir = func(string) error { return errors.New("access denied") }
+				if change, refusal := repairWindowsEnterpriseHookRuntimeAccessOrRefuse(); change != "" || refusal != "" {
+					t.Fatalf("a failed write was reported as a refusal: %q %q", change, refusal)
 				}
 			}
 		})

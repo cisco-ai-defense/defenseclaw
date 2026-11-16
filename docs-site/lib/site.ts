@@ -7,7 +7,7 @@ export const site = {
   description:
     'DefenseClaw is the Cisco governance layer for AI coding agents. ' +
     'Scan skills, MCP servers, plugins, and generated code before they run. ' +
-    'Inspect prompts, completions, and tool calls at runtime. ' +
+    'Inspect the runtime events each connector sends. ' +
     'Export durable audit evidence to SQLite, JSONL, OTLP, Splunk, and webhooks.',
   organization: {
     name: 'Cisco Systems, Inc.',

@@ -72,6 +72,25 @@ func genericRawExecutionTool(name string) bool {
 	}
 }
 
+// IsImmediateShellExecutionTool identifies tool calls that run their command
+// now. Stored command payloads, including persistence entries, are excluded.
+func IsImmediateShellExecutionTool(tool string) bool {
+	if tool == "" || strings.TrimSpace(tool) != tool {
+		return false
+	}
+	name := strings.ToLower(tool)
+	if genericRawExecutionTool(name) {
+		return true
+	}
+	switch name {
+	case "bash_command", "bash", "sh", "zsh", "dash", "ksh", "mksh", "fish",
+		"powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd", "cmd.exe":
+		return true
+	default:
+		return false
+	}
+}
+
 // InferredRawCommandDialect is the dialect inferRawCommandDialect reads from
 // the grammar of source, as for a generic execution tool, or DialectNone when
 // its signals are mixed.
@@ -212,7 +231,7 @@ func powerShellCmdlet(program string) bool {
 		"start-process", "get-process", "stop-process", "remove-process",
 		"clear-disk", "add-localgroupmember", "get-localgroupmember",
 		"add-adgroupmember", "get-adgroupmember", "register-scheduledtask",
-		"write-output", "write-host", "get-date":
+		"write-output", "write-host", "get-date", "clear-content", "rename-item":
 		return true
 	default:
 		return false
@@ -221,7 +240,7 @@ func powerShellCmdlet(program string) bool {
 
 func powerShellAlias(program string) bool {
 	switch program {
-	case "gc", "gci", "gi", "gp", "sp", "rp", "ri", "ni", "iwr", "irm", "tee":
+	case "gc", "gci", "gi", "gp", "sp", "rp", "ri", "ni", "iwr", "irm", "tee", "clc", "rni":
 		return true
 	default:
 		return false

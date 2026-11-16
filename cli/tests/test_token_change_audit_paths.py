@@ -33,6 +33,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -41,7 +43,7 @@ from unittest.mock import patch
 import requests
 from click.testing import CliRunner
 from defenseclaw import config as config_module
-from defenseclaw.commands import cmd_init, cmd_setup
+from defenseclaw.commands import cmd_init, cmd_keys, cmd_setup
 from defenseclaw.commands.cmd_config import config_cmd
 from defenseclaw.commands.cmd_keys import keys_cmd
 from defenseclaw.commands.cmd_quickstart import quickstart_cmd
@@ -113,10 +115,10 @@ class KeysSetGatewayTokenTests(_RunningTokenCase):
     def tearDown(self) -> None:
         cleanup_app(self.app, self.db_path, self.tmp_dir)
 
-    def _set(self, gateway: _Gateway, name: str = "DEFENSECLAW_GATEWAY_TOKEN"):
+    def _set(self, gateway: _Gateway, name: str = "DEFENSECLAW_GATEWAY_TOKEN", value: str = _NEW):
         with patch("defenseclaw.logger.OrchestratorClient", side_effect=gateway.client):
             self.app.logger = Logger.from_config(self.app.cfg)
-            return CliRunner().invoke(keys_cmd, ["set", name, "--value", _NEW], obj=self.app)
+            return CliRunner().invoke(keys_cmd, ["set", name, "--value", value], obj=self.app)
 
     def test_a_new_gateway_token_audits_on_the_running_gateway(self) -> None:
         # Before the fix: 401, the same value from .env, then a traceback, exit 1.
@@ -130,11 +132,78 @@ class KeysSetGatewayTokenTests(_RunningTokenCase):
         self.assertIn("defenseclaw-gateway restart", result.output)
         self.assertNotIn(_NEW, result.output)
 
+    def test_gateway_token_name_has_managed_message(self) -> None:
+        _gateway_running(self.app.cfg.data_dir)
+        gateway = _Gateway(_RUNNING)
+        result = self._set(gateway)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("managed by DefenseClaw", result.output)
+        self.assertNotIn("not in the DefenseClaw registry", result.output)
+
+    def test_gateway_token_name_uses_windows_environment_spelling(self) -> None:
+        self.app.cfg.gateway.token_env = "DEFENSECLAW_GATEWAY_TOKEN"
+        with patch("defenseclaw.platform_support.host_os", return_value="windows"):
+            assert cmd_keys._gateway_token_name(self.app.cfg, "defenseclaw_gateway_token") == (
+                "DEFENSECLAW_GATEWAY_TOKEN"
+            )
+
     def test_a_stopped_gateway_gets_the_new_token_without_a_rejected_try(self) -> None:
         gateway = _Gateway(_NEW)
         result = self._set(gateway)
         self.assertEqual(result.exit_code, 0, result.output + repr(result.exception))
         self.assertEqual(gateway.tokens, [_NEW])
+
+    def test_two_rotations_before_restart_keep_the_loaded_gateway_token(self) -> None:
+        _gateway_running(self.app.cfg.data_dir)
+        gateway = _Gateway(_RUNNING)
+        first = self._set(gateway)
+        self.assertEqual(first.exit_code, 0, first.output + repr(first.exception))
+        # The next CLI invocation has loaded the first saved value.
+        os.environ["DEFENSECLAW_GATEWAY_TOKEN"] = _NEW
+        second = self._set(gateway, value="second-gateway-token")
+        self.assertEqual(second.exit_code, 0, second.output + repr(second.exception))
+        self.assertEqual(gateway.tokens, [_RUNNING, _RUNNING])
+        self.assertEqual(len(gateway.admitted), 2)
+
+    @unittest.skipUnless(os.name == "nt", "Windows ACL and new-process token handoff")
+    def test_windows_two_rotations_then_new_cli_process_uses_loaded_token(self) -> None:
+        _gateway_running(self.app.cfg.data_dir)
+        gateway = _Gateway(_RUNNING)
+        first = self._set(gateway)
+        self.assertEqual(first.exit_code, 0, first.output + repr(first.exception))
+        os.environ["DEFENSECLAW_GATEWAY_TOKEN"] = _NEW
+        second = self._set(gateway, value="second-gateway-token")
+        self.assertEqual(second.exit_code, 0, second.output + repr(second.exception))
+        code = """
+import sys
+from types import SimpleNamespace
+from unittest.mock import patch
+from defenseclaw.logger import _GatewayConfigRecorder
+
+seen = []
+class Client:
+    def __init__(self, **kwargs):
+        seen.append(kwargs.get('token'))
+    def emit_cli_observability(self, payload):
+        pass
+    def close(self):
+        pass
+cfg = SimpleNamespace(data_dir=sys.argv[1], gateway=SimpleNamespace(resolved_token=lambda: 'second-gateway-token'))
+with patch('defenseclaw.logger.OrchestratorClient', Client):
+    _GatewayConfigRecorder(cfg).emit_cli_observability({})
+sys.exit(0 if seen == ['running-gateway-token'] else 1)
+"""
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.pathsep.join([str(Path(__file__).resolve().parents[1]), env.get("PYTHONPATH", "")])
+        child = subprocess.run(
+            [sys.executable, "-c", code, self.app.cfg.data_dir],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(child.returncode, 0, child.stderr)
 
     def test_another_key_keeps_the_token_it_had(self) -> None:
         _gateway_running(self.app.cfg.data_dir)
@@ -160,8 +229,8 @@ class ConfigSetTokenEnvTests(_RunningTokenCase):
         ):
             os.environ.pop("DEFENSECLAW_DEPLOYMENT_MODE", None)
             app = AppContext()
-            app.cfg = config_module.load()
-            app.logger = Logger.from_config(app.cfg)
+            # The real top-level config command skips AppContext config/load.
+            self.assertIsNone(app.cfg)
             result = CliRunner().invoke(config_cmd, ["set", "gateway.token_env", "DC_D10_NEW_TOKEN"], obj=app)
         self.assertEqual(result.exit_code, 0, result.output + repr(result.exception))
         self.assertIn("token_env: DC_D10_NEW_TOKEN", path.read_text(encoding="utf-8"))

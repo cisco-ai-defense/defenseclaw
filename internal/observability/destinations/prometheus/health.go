@@ -11,6 +11,7 @@
 package prometheus
 
 import (
+	"reflect"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
@@ -74,6 +75,13 @@ func newBoundedObserver(target Observer) *boundedObserver {
 func (observer *boundedObserver) observe(transition HealthTransition) {
 	if observer == nil || observer.target == nil {
 		return
+	}
+	value := reflect.ValueOf(observer.target)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		if value.IsNil() {
+			return
+		}
 	}
 	select {
 	case observer.permit <- struct{}{}:

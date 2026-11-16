@@ -57,6 +57,7 @@ import click
 
 from defenseclaw import connector_paths, ux
 from defenseclaw.commands._audit_notice import saved_change_audit
+from defenseclaw.config import gateway_pid_path
 from defenseclaw.context import AppContext, pass_ctx
 
 #: Sentinel accepted by the Go gate meaning "every hook connector".
@@ -78,11 +79,8 @@ def _normalize_target(raw: str) -> str:
 
     ``all`` is the primary every-connector form (no shell quoting
     needed); the literal ``*`` — the actual config value — is accepted
-    for parity with config.yaml and scripts. Rejects empty input here
-    rather than relying on :func:`connector_paths.normalize`, whose
-    empty-input behavior is to default to ``"openclaw"`` — which would
-    turn a blank argument into a confusing "proxy-backed connector"
-    error.
+    for parity with config.yaml and scripts. Rejects empty input here so a
+    blank argument gets a useful error before connector normalization.
     """
     cleaned = (raw or "").strip()
     if not cleaned:
@@ -303,12 +301,11 @@ def _ensure_enabled_hook_judge_strategies(gc) -> bool:
 
 def _gateway_running(app: AppContext) -> bool:
     """Same PID-file probe as ``cmd_guardrail._gateway_running``."""
-    import os
 
     from defenseclaw.process_liveness import pid_file_alive
 
     try:
-        return pid_file_alive(os.path.join(app.cfg.data_dir, "gateway.pid"))
+        return pid_file_alive(gateway_pid_path(app.cfg.data_dir))
     except Exception:  # noqa: BLE001 - an unreadable PID file means "not running".
         return False
 
@@ -598,6 +595,14 @@ def judge_list(app: AppContext) -> None:
     timeout = gc.judge.hook_timeout or 0
     timeout_label = f"{timeout:g}s" if timeout else "8s (gateway default)"
     click.echo(f"  {ux.bold('guardrail.judge.hook_timeout:')}    {ux.accent(timeout_label)}")
+    max_parallel = int(getattr(gc.judge, "max_parallel", 0) or 0)
+    parallel_label = (
+        f"{max_parallel} (tool-call judging first)"
+        if max_parallel
+        else "no limit" if getattr(gc.judge, "_max_parallel_explicit_zero", False)
+        else "automatic (1 for local/private endpoints; no limit for public)"
+    )
+    click.echo(f"  {ux.bold('guardrail.judge.max_parallel:')}    {ux.accent(parallel_label)}")
     click.echo()
 
     try:

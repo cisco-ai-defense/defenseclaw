@@ -1,6 +1,9 @@
 package configs
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestApplyOverlayMergesRequestOverrides(t *testing.T) {
 	base := &ProvidersConfig{
@@ -73,6 +76,54 @@ func TestApplyOverlayMergesRequestOverrides(t *testing.T) {
 	}
 	if metadata["source"] != "defenseclaw" {
 		t.Fatalf("expected metadata.source to be defenseclaw, got %#v", metadata["source"])
+	}
+}
+
+// GAP-0361 (#1099): a same-name entry (an llm_providers.custom provider
+// named like a built-in, or a provider named twice) keeps every field it
+// sets. The merge kept request_path_overrides but dropped extra_headers.
+func TestApplyOverlayKeepsEverySameNameField(t *testing.T) {
+	profile := "team"
+	base := &ProvidersConfig{Providers: []Provider{{
+		Name: "openai", Domains: []string{"api.openai.com"}, EnvKeys: []string{"OPENAI_API_KEY"},
+		RequestPathOverrides: map[string]string{"embedding": "/v1/embeddings"},
+		ExtraHeaders:         map[string]string{"x-keep": "base"},
+	}}}
+	first := Provider{
+		Name: "OpenAI", Domains: []string{"llm.team.internal"}, ProfileID: &profile, EnvKeys: []string{"TEAM_KEY"},
+		BaseProviderType: "openai", BaseURL: "https://llm.team.internal/v1",
+		AllowedRequests: []string{"chat"}, AvailableModels: []string{"team-small"},
+		RequestPathOverrides: map[string]string{"chat": "/team/chat"},
+		ExtraHeaders:         map[string]string{"x-team": "sec", "x-keep": "first"},
+		TLS:                  &ProviderTLS{CACertPEM: "certificate"},
+		Bedrock:              &ProviderBedrock{Region: "us-east-1", DeploymentAliases: map[string]string{"a": "b"}},
+		Vertex:               &ProviderVertex{ProjectID: "p", Region: "r"},
+		Azure:                &ProviderAzure{Endpoint: "https://a.example", APIVersion: "2026-01-01"},
+	}
+	second := Provider{
+		Name: "openai", AllowedRequests: []string{"responses"}, AvailableModels: []string{"team-large"},
+		ExtraHeaders: map[string]string{"x-team": "platform", "x-route": "eu"},
+	}
+	firstHeaders := map[string]string{"x-team": "sec", "x-keep": "first"}
+	ApplyOverlay(base, ProvidersConfig{Providers: []Provider{first, second}})
+
+	if len(base.Providers) != 1 {
+		t.Fatalf("providers = %d, want one merged entry", len(base.Providers))
+	}
+	want := Provider{
+		Name: "openai", Domains: []string{"api.openai.com", "llm.team.internal"}, ProfileID: &profile,
+		EnvKeys: []string{"OPENAI_API_KEY", "TEAM_KEY"}, BaseProviderType: "openai", BaseURL: "https://llm.team.internal/v1",
+		AllowedRequests: []string{"chat", "responses"}, AvailableModels: []string{"team-small", "team-large"},
+		RequestPathOverrides: map[string]string{"embedding": "/v1/embeddings", "chat": "/team/chat"},
+		ExtraHeaders:         map[string]string{"x-keep": "first", "x-team": "platform", "x-route": "eu"},
+		TLS:                  first.TLS, Bedrock: first.Bedrock, Vertex: first.Vertex, Azure: first.Azure,
+	}
+	if got := base.Providers[0]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("merged provider =\n  %+v\nwant\n  %+v", got, want)
+	}
+	// The overlay's own maps are not written by the merge.
+	if !reflect.DeepEqual(first.ExtraHeaders, firstHeaders) || len(first.RequestPathOverrides) != 1 {
+		t.Fatalf("the merge changed the overlay entry: headers %v, paths %v", first.ExtraHeaders, first.RequestPathOverrides)
 	}
 }
 

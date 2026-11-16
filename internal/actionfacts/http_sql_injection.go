@@ -6,33 +6,32 @@ package actionfacts
 import (
 	"encoding/json"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 )
 
 var (
-	httpFieldNamePattern           = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.-]{0,127}$`)
-	httpSQLPrefixPattern           = regexp.MustCompile(`(?i)^[a-z0-9_.-]*'?$`)
-	httpSQLIdentifierPrefixPattern = regexp.MustCompile(`(?i)^[a-z0-9_.-]*$`)
-	httpSQLExpressionPattern       = regexp.MustCompile(
+	httpFieldNamePattern           = lazyMustCompile(`^[A-Za-z][A-Za-z0-9_.-]{0,127}$`)
+	httpSQLPrefixPattern           = lazyMustCompile(`(?i)^[a-z0-9_.-]*'?$`)
+	httpSQLIdentifierPrefixPattern = lazyMustCompile(`(?i)^[a-z0-9_.-]*$`)
+	httpSQLExpressionPattern       = lazyMustCompile(
 		`(?i)^(?:[a-z_][a-z0-9_]*|[0-9]{1,10}|null|'[a-z0-9_.@ -]{1,64}'|[a-z_][a-z0-9_]*\(\))$`,
 	)
-	httpSQLIdentifierPattern = regexp.MustCompile(`(?i)^[a-z_][a-z0-9_]*$`)
-	httpSQLWherePattern      = regexp.MustCompile(
+	httpSQLIdentifierPattern = lazyMustCompile(`(?i)^[a-z_][a-z0-9_]*$`)
+	httpSQLWherePattern      = lazyMustCompile(
 		`(?i)^([a-z_][a-z0-9_]*)\s*=\s*'([a-z0-9_.@ -]{1,64})'$`,
 	)
-	httpSQLStringTautologyTailPattern = regexp.MustCompile(
+	httpSQLStringTautologyTailPattern = lazyMustCompile(
 		`^([^'[:space:]]{1,32})'[[:space:]]*=[[:space:]]*'([^'[:space:]]{1,32})'?[[:space:]]*(?:--[[:space:]]*-?)?[[:space:]]*$`,
 	)
-	httpSQLNumericTautologyPattern = regexp.MustCompile(
+	httpSQLNumericTautologyPattern = lazyMustCompile(
 		`(?i)^([a-z0-9_.-]*)'\s+or\s+([0-9]{1,10})\s*=\s*([0-9]{1,10})\s*$`,
 	)
-	httpSQLXPCmdShellPattern = regexp.MustCompile(
+	httpSQLXPCmdShellPattern = lazyMustCompile(
 		`(?i)^(?:exec|execute)\s+xp_cmdshell\s*\(\s*'([^'\r\n]{1,512})'\s*\)\s*--(?:\s+-)?\s*$`,
 	)
-	httpSQLIntoOutfilePattern = regexp.MustCompile(
+	httpSQLIntoOutfilePattern = lazyMustCompile(
 		`(?i)^[0-9]{1,10}\s+union\s+select\s+0x([0-9a-f]+)\s+into\s+outfile\s+'([^'\r\n]{1,512})'\s*$`,
 	)
 )

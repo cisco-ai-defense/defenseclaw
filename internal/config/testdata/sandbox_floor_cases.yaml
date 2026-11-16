@@ -13,6 +13,26 @@ cases:
     source: |
       config_version: 9
 
+  # GAP-0691 (#1226): the words take any letter case.
+  - name: mixed-case-enum-values
+    valid: true
+    source: |
+      config_version: 9
+      openshell:
+        admin:
+          foreign_sandboxes: Alert
+          when_unavailable: ALERT
+          on_silence: Stop
+          driver_fallback: Docker
+      guardrail:
+        profiles:
+          contractors:
+            mode: action
+            sandbox:
+              foreign_sandboxes: Stop
+              when_unavailable: Refuse
+              user_approvals: Session
+
   - name: full-valid-floors
     valid: true
     source: |
@@ -297,3 +317,112 @@ cases:
         profiles:
           contractors:
             sandbox: {required_for: [Claude-Code, codex], allowed_harnesses: [codex, claudecode]}
+
+  - name: profile-invalid-min-profile
+    valid: false
+    error: 'sandbox.min_profile "none" must be one of open, balanced, strict'
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {min_profile: none}
+
+  - name: profile-pin-without-pack
+    valid: false
+    error: 'sandbox.required_pack_digest needs sandbox.required_pack'
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {required_pack_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+
+  - name: profile-invalid-egress-pattern
+    valid: false
+    error: 'sandbox.egress_block[0]: egress pattern "a.*.example" must be a host name, "*.<host>", an IP address or a CIDR prefix'
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {egress_block: ['a.*.example']}
+
+  - name: profile-invalid-wildcard-ip
+    valid: false
+    error: 'sandbox.egress_block[0]: egress pattern "*.192.168.1.1" must be a host name, "*.<host>", an IP address or a CIDR prefix'
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {egress_block: ['*.192.168.1.1']}
+
+  - name: profile-invalid-cidr-leading-zero
+    valid: false
+    error: 'sandbox.egress_allow_only[0]: egress pattern "192.0.2.1/08" must be a host name, "*.<host>", an IP address or a CIDR prefix'
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {egress_allow_only: ['192.0.2.1/08']}
+
+  - name: profile-invalid-locked-key
+    valid: false
+    error: 'sandbox.locked[0]: "enabled" is not a lockable key'
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {locked: [enabled]}
+
+  - name: profile-relative-copy-pattern
+    valid: false
+    error: 'sandbox.require_copy_for[0]: "project/*" must be an absolute path glob or start with "~/"; a relative pattern would never match'
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {require_copy_for: ['project/*']}
+
+  - name: profile-malformed-copy-glob
+    valid: false
+    error: 'sandbox.require_copy_for[0]: "/src/[]" has a malformed glob segment "[]"'
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {require_copy_for: ['/src/[]']}
+
+  - name: profile-invalid-resource-cpu
+    valid: false
+    error: 'sandbox.max_resources.cpu "many" must be cores ("2", "1.5") or millicores ("500m")'
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {max_resources: {cpu: many}}
+
+  - name: profile-resource-memory-overflow
+    valid: false
+    error: 'sandbox.max_resources.memory "999999999999999Ti" is out of range'
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {max_resources: {memory: 999999999999999Ti}}
+
+  - name: profile-valid-older-floor-keys
+    valid: true
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {min_profile: balanced, egress_block: ['*.example.com'], locked: [profile]}

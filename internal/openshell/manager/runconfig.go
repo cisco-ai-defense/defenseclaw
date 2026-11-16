@@ -30,7 +30,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -39,6 +38,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
@@ -280,7 +280,7 @@ func runFileChecks(files []connector.SandboxFile, how string, uid, gid int) []ve
 func withRunFileChecks(v *verifyRecord, uid, gid int, checks []verifyFile) *verifyRecord {
 	next := &verifyRecord{UID: uid, GID: gid}
 	if v != nil {
-		next.UID, next.GID, next.Files = v.UID, v.GID, slices.Clone(v.Files)
+		next.UID, next.GID, next.Files, next.LocalhostResolver = v.UID, v.GID, slices.Clone(v.Files), v.LocalhostResolver
 	}
 	replaced := map[string]bool{}
 	for _, c := range checks {
@@ -504,10 +504,10 @@ func (m *Manager) planRunConfig(ctx context.Context, in runConfigInput) (*runCon
 	if names := projectMCPList(project, projectOther); names != "" {
 		if allowProject {
 			notices = append(notices, "MCP: the repository's servers "+names+
-				" start without a DefenseClaw check (mcp.project_servers: allow)")
+				" start without a DefenseClaw check; review the repository before using them")
 		} else {
 			notices = append(notices, "MCP: blocked the repository's servers "+names+
-				" (mcp.project_servers: block; a sandbox pack with mcp.project_servers: allow runs them)")
+				"; ask your administrator for a sandbox pack that allows repository servers")
 		}
 	}
 	return &runConfig{files: files, mcp: summary, notices: notices}, nil
@@ -845,6 +845,13 @@ func localMCPURL(raw string) bool {
 	return false
 }
 
+// ProjectMCPServerCount is how many MCP servers a repository defines for
+// the harness (projectMCPServers).
+func ProjectMCPServerCount(harnessName, project string) int {
+	names, other := projectMCPServers(harnessName, project)
+	return len(names) + other
+}
+
 // projectMCPServers lists the MCP servers a repository defines for the
 // harness: .mcp.json for Claude Code, .codex/config.toml for Codex. Names a
 // terminal cannot show safely are only counted (other).
@@ -906,7 +913,7 @@ func projectMCPList(names []string, other int) string {
 }
 
 // safeMCPName is a server or variable name a notice can show verbatim.
-var safeMCPName = regexp.MustCompile(`^[A-Za-z0-9 _.:@/-]{1,64}$`)
+var safeMCPName = lazyregexp.New(`^[A-Za-z0-9 _.:@/-]{1,64}$`)
 
 func displayMCPName(name string) string {
 	if safeMCPName.MatchString(name) {
@@ -1054,7 +1061,7 @@ func errRunConfigStricter(rec record, why string) error {
 		e.Message = "the sandbox policy now runs the harness under stricter settings (safe mode or MCP servers) than sandbox " + name +
 			" was created with, and " + why + ", so it cannot start; its work stays in it, and deleting it discards what was never pulled"
 		e.Detail = "to bring the work back first, start it under the settings it was made with (undo the change that made the policy stricter, " +
-			"or ask your administrator), `defenseclaw sandbox pull " + name + "`, then `defenseclaw sandbox delete " + name +
+			"or ask your administrator), `defenseclaw sandbox pull " + name + " --apply` (or --branch or --patch-out FILE), confirm the project, branch or patch file contains the work, then `defenseclaw sandbox delete " + name +
 			"` and `defenseclaw sandbox run` with the same project"
 	}
 	return e

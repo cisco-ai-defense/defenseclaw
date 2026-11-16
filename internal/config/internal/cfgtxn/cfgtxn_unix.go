@@ -48,6 +48,9 @@ func keepOwner(tmp *os.File, target string) {
 
 func replaceDurable(source, target string) error { return os.Rename(source, target) }
 
+// mkdirDurable makes dir; MkdirDurable flushes its parent.
+func mkdirDurable(dir string) error { return os.Mkdir(dir, 0o700) }
+
 func syncDir(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {
@@ -55,4 +58,15 @@ func syncDir(dir string) error {
 	}
 	defer d.Close()
 	return d.Sync()
+}
+
+// syncFile flushes path, its owner and mode included. fsync needs no write
+// access, so a file published read-only is flushed too.
+func syncFile(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
 }

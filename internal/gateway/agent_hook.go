@@ -33,18 +33,25 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/managed/mcpasuser"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -79,50 +86,73 @@ func getFallbackConnectorRegistry() *connector.Registry {
 }
 
 type agentHookRequest struct {
-	ConnectorName               string
-	AgentID                     string
-	AgentName                   string
-	AgentType                   string
-	RootAgentID                 string
-	ParentAgentID               string
-	ChildAgentID                string
-	HookEventName               string
-	SemanticEventID             string
-	LogicalEventID              string
-	ConnectorInstanceID         string
-	SessionID                   string
-	ThreadID                    string
-	TurnID                      string
-	MessageID                   string
-	RootSessionID               string
-	ParentSessionID             string
-	ChildSessionID              string
-	ToolInvocationID            string
-	ModelRequestID              string
-	ModelResponseID             string
-	SourceEventID               string
-	SourceSequence              string
-	SourceTimestamp             string
-	SourceNamespace             string
-	SourceIDKind                string
-	ExecutionID                 string
-	StepID                      string
-	CorrelationProfileVersion   connector.CorrelationProfileVersion
-	CorrelationCompleteness     connector.CorrelationCompleteness
-	CorrelationSurface          connector.CorrelationSurface
-	CorrelationOrigins          map[connector.CorrelationTarget]connector.CorrelationOrigin
-	CorrelationValues           map[connector.CorrelationTarget]connector.CorrelationValue
-	CorrelationIdentifiers      []connector.CorrelationValue
-	SuppressCorrelationEmit     bool
-	CorrelationUnavailable      bool // correlation failed, not a replay: decision exported without join IDs, still audited
-	CorrelationReceipt          *audit.CorrelationReceiptLocator
-	CWD                         string
-	ReportedCWD                 string // the cwd as sent, before hookCWDForContext; user text only (requireSandboxHostRun)
-	ToolName                    string
+	pendingOccurrenceID          string
+	pendingBodyBytes             int64
+	pendingRecovery              bool
+	pendingProvenance            *pendingHookProvenance
+	sandboxReceiptAcknowledgment bool
+	pendingSandboxCallRef        string
+	managedWatch                 bool   // managed gateway: watch paths follow the verified caller (GAP-0066)
+	watchHome                    string // that caller's home, empty when unresolved
+	ConnectorName                string
+	AgentID                      string
+	AgentName                    string
+	AgentType                    string
+	RootAgentID                  string
+	ParentAgentID                string
+	ChildAgentID                 string
+	HookEventName                string
+	SemanticEventID              string
+	LogicalEventID               string
+	ConnectorInstanceID          string
+	SessionID                    string
+	ThreadID                     string
+	TurnID                       string
+	MessageID                    string
+	RootSessionID                string
+	ParentSessionID              string
+	ChildSessionID               string
+	ToolInvocationID             string
+	ModelRequestID               string
+	ModelResponseID              string
+	SourceEventID                string
+	SourceSequence               string
+	SourceTimestamp              string
+	SourceNamespace              string
+	SourceIDKind                 string
+	ExecutionID                  string
+	StepID                       string
+	CorrelationProfileVersion    connector.CorrelationProfileVersion
+	CorrelationCompleteness      connector.CorrelationCompleteness
+	CorrelationSurface           connector.CorrelationSurface
+	CorrelationOrigins           map[connector.CorrelationTarget]connector.CorrelationOrigin
+	CorrelationValues            map[connector.CorrelationTarget]connector.CorrelationValue
+	CorrelationIdentifiers       []connector.CorrelationValue
+	SuppressCorrelationEmit      bool
+	CorrelationUnavailable       bool // correlation failed, not a replay: decision exported without join IDs, still audited
+	CorrelationReceipt           *audit.CorrelationReceiptLocator
+	CWD                          string
+	ReportedCWD                  string // the cwd as sent, before hookCWDForContext; user text only (requireSandboxHostRun)
+	ToolName                     string
+	// ToolNameIsLabel marks ToolName as a placeholder ("tool", "session",
+	// "message", "subagent") filled in for logs and spans because the payload
+	// named no tool. It is never sent to AID as a tool call's name.
+	ToolNameIsLabel             bool
 	ToolArgs                    json.RawMessage
 	ToolArgsProjectionUncertain bool
-	Content                     string
-	Direction                   string
+	// ToolArgsAreHookEnvelope marks ToolArgs as the whole hook body, used when
+	// the payload carries no tool-argument object.
+	ToolArgsAreHookEnvelope bool
+	// ToolCallUnparsed: the connector's decoder found no tool call it can
+	// read (connector.HookProfileRequest.ToolCallUnparsed).
+	ToolCallUnparsed bool
+	// toolCallShapeUnparsed: ToolCallUnparsed for a reason other than the
+	// missing write evidence of an argumentless Copilot callback (a
+	// duplicate key, a decoy dialect field, both argument fields, a decoder
+	// refusal). Such a callback is never bound to an earlier call.
+	toolCallShapeUnparsed bool
+	Content               string
+	Direction             string
 	// HookSurface names the connector-owned hook config that invoked this
 	// request, for connectors that install more than one with differing veto
 	// contracts. Setup marks each config's command and the bridge forwards
@@ -136,6 +166,18 @@ type agentHookRequest struct {
 	Payload            map[string]interface{}
 	toolChain          *toolChainHookCapture
 	alertOnlySQLNotice bool
+}
+
+func hookActionCommandAuditExtra(req agentHookRequest, home string) map[string]string {
+	command, ok := trustedBashCommandInput(actionfacts.Input{Tool: req.ToolName, Args: req.ToolArgs})
+	if !ok {
+		return nil
+	}
+	reason := hookpaths.ActionCommandAuditReason(command, req.CWD, home)
+	if hookpaths.UnprovenWriteTitle(reason) == "" {
+		return nil
+	}
+	return map[string]string{"unresolved_command": reason}
 }
 
 type agentHookResponse struct {
@@ -156,9 +198,15 @@ type agentHookResponse struct {
 	// connector hook scripts ignore the fields.
 	EvaluationID string   `json:"evaluation_id,omitempty"`
 	RuleIDs      []string `json:"rule_ids,omitempty"`
+	// AgentIdentityID (agt-) and AgentInstanceID (ais-, the session or
+	// sub-agent instance) are the ids the gateway derived for this hook,
+	// the ones its audit rows and telemetry carry. hookAnswerBody stamps
+	// them; additive, and omitted when the hook has none.
+	AgentIdentityID string `json:"agent_identity_id,omitempty"`
+	AgentInstanceID string `json:"agent_instance_id,omitempty"`
 	// RedactionEnabled carries the cloud-controlled per-inspection
 	// redaction directive from the evaluator back to the HTTP handler
-	// so finalizeAgentHook can re-inject it onto the context before it
+	// so finalizeAgentHookAnswer can re-inject it onto the context before it
 	// emits the hook_decision event + audit row (the evaluator's
 	// ctx-injection is local to evaluate*). Never serialized on the
 	// hook response wire.
@@ -201,8 +249,15 @@ func hookSourceReason(resp agentHookResponse) string {
 // after its client has gone away. A var so tests can expire it.
 var agentHookDisconnectGrace = 30 * time.Second
 
-// agentHookPersistGrace bounds the terminal audit, hook_decision and receipt
-// writes once the hook's own work has been cancelled.
+type hookClientContextKey struct{}
+
+// hookDeliveryReceiptContextKey marks the finalization of a hook call that
+// used the GAP-0286 delivery receipt: the receipt, not the connection,
+// records whether the agent took the answer.
+type hookDeliveryReceiptContextKey struct{}
+
+// agentHookPersistGrace is the maximum lifetime of a persistence attempt.
+// A live request must not hold a stalled SQLite writer without a deadline.
 const agentHookPersistGrace = 10 * time.Second
 
 // agentHookCompletionContext keeps the request's values, but not its
@@ -212,14 +267,43 @@ const agentHookPersistGrace = 10 * time.Second
 // hook_decision. The work is cancelled agentHookDisconnectGrace after the
 // disconnect, or when the handler returns.
 func agentHookCompletionContext(parent context.Context) (context.Context, context.CancelFunc) {
-	return contextWithCancelGrace(parent, agentHookDisconnectGrace)
+	ctx, cancel := contextWithCancelGrace(parent, agentHookDisconnectGrace)
+	// Persistence may outlive the HTTP connection, but the connection's
+	// cancellation remains evidence that its client cannot receive an allow.
+	return context.WithValue(ctx, hookClientContextKey{}, parent), cancel
 }
 
-// agentHookPersistenceContext carries the terminal persistence of a verdict.
-// It outlives the completion context by agentHookPersistGrace, so a hook whose
-// work the disconnect grace cut off still records the verdict it returned.
+// agentHookPersistenceContext keeps the existing cancellation grace for
+// Secure Client finalization and sandbox receipts.
 func agentHookPersistenceContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return contextWithCancelGrace(ctx, agentHookPersistGrace)
+}
+
+// hookPersistenceContext gives ordinary hooks one deadline across telemetry,
+// finalization and batch close. Secure Client retains its existing grace.
+func (a *APIServer) hookPersistenceContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.SecureClientIntegration() {
+		persistCtx, cancel := agentHookPersistenceContext(ctx)
+		return audit.WithCallWriteAfterCancel(persistCtx), cancel
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), agentHookPersistGrace)
+}
+
+// A receipt-capable per-user call has already offered its answer before its
+// terminal records are written. Its pending occurrence is durable, so give
+// finalization a fresh window after earlier telemetry used the ordinary 10 s
+// window. Writes queued in that window finish after its deadline. This does
+// not extend the hook's answer deadline or Secure Client's path.
+func (a *APIServer) hookDeliveredPersistenceContext(ctx context.Context, receiptBacked bool) (context.Context, context.CancelFunc) {
+	if !receiptBacked {
+		return ctx, nil
+	}
+	cfg := a.decisionConfig(ctx)
+	if cfg == nil || cfg.SecureClientIntegration() || !perUserHookInstall(cfg) {
+		return ctx, nil
+	}
+	durableCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	return audit.WithCallWriteAfterCancel(durableCtx), cancel
 }
 
 // contextWithCancelGrace keeps parent's values and is cancelled grace after
@@ -243,16 +327,41 @@ func contextWithCancelGrace(parent context.Context, grace time.Duration) (contex
 
 func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// The request is one hook call: its reads wait for network shares
+		// one answer wait in all, its own (rel-1-0-6:GAP-0482).
+		defer hookpaths.HookCall()()
+		chargeBudget := func(receipt bool) bool {
+			if err := chargeSandboxHookBudget(r.Context(), receipt); err != nil {
+				reason, message := sandboxHookRefusal(err)
+				writeHookRateLimited(w, reason, message)
+				return false
+			}
+			return true
+		}
 		if r.Method != http.MethodPost {
+			if !chargeBudget(false) {
+				return
+			}
 			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "method", 0)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
+		}
+		// A tool call's hook waits a few seconds for the decision; tell it
+		// when the decision waits on a remote scanner (hook_progress.go).
+		w, r, closeProgress := withHookProgress(w, r)
+		defer closeProgress()
+		delivery := hookDeliveryReceiptForRequest(r)
+		if delivery == nil {
+			delivery = a.beginHookDeliveryReceipt(w, r)
+		}
+		if delivery != nil {
+			delivery.bindBody(r.Body)
 		}
 		// Resolve the identity-based guardrail profile once, after
 		// authentication, from the route's connector, the verified subject
 		// and the agent identity derived from both (never the payload).
 		// No-op without profiles.
-		r = r.WithContext(a.withGuardrailProfileDecision(r.Context(), connectorName))
+		r = r.WithContext(a.withGuardrailProfileDecision(withProfilePath(r.Context(), profilePathHook), connectorName))
 		// What a standalone hook read in its user's home for asset_policy
 		// (skill names, the MCP server definition): claims, never authority.
 		r = r.WithContext(withClaimedAssetFacts(r.Context(), r.Header))
@@ -263,9 +372,18 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// Run installs the same ordinary API ceiling globally. Keep the hook
 		// handler bounded as a standalone unit too because connector tests and
 		// internal adapters invoke it directly.
-		r.Body = http.MaxBytesReader(w, r.Body, apiRequestBodyMaxBytes)
-		rawBody, err := io.ReadAll(r.Body)
+		var rawBody []byte
+		var err error
+		if delivery != nil {
+			rawBody, err = delivery.readPayload()
+		} else {
+			r.Body = http.MaxBytesReader(w, r.Body, apiRequestBodyMaxBytes)
+			rawBody, err = io.ReadAll(r.Body)
+		}
 		if err != nil {
+			if !chargeBudget(false) {
+				return
+			}
 			var maxBytesError *http.MaxBytesError
 			if errors.As(err, &maxBytesError) {
 				a.recordConnectorHookRejection(
@@ -273,18 +391,45 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 					apiRequestBodyMaxBytes+1,
 				)
 				a.writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
-					"error": "request body too large",
+					"error": "request body too large", "reason": hookexec.MalformedHookPayloadReason,
 				})
 				return
 			}
 			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_json", 0)
-			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body", "reason": hookexec.MalformedHookPayloadReason})
+			return
+		}
+		receiptID, receiptBody, receiptLike := classifySandboxHookReceiptBody(rawBody)
+		if !chargeBudget(receiptLike) {
+			return
+		}
+		invalidReceipt := receiptLike && !receiptBody
+		if claimsSandboxHookReceipt(r) {
+			values := r.Header.Values(sandboxrelay.HookReceiptHeader)
+			invalidReceipt = invalidReceipt || len(values) != 1 || values[0] != sandboxrelay.HookReceiptHeaderValue || !receiptBody
+		}
+		if invalidReceipt {
+			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_receipt", int64(len(rawBody)))
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "invalid sandbox hook receipt", "reason": hookexec.MalformedHookPayloadReason,
+			})
+			return
+		}
+		if receiptBody {
+			a.handleSandboxHookReceipt(w, r, connectorName, receiptID)
 			return
 		}
 		payload, b, err := rawPayloadFromJSONDecoder(json.NewDecoder(bytes.NewReader(rawBody)))
 		if err != nil {
 			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_json", 0)
-			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body", "reason": hookexec.MalformedHookPayloadReason})
+			return
+		}
+		if _, reason := hookEventEnvelope(payload); reason != "" {
+			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", reason, int64(len(rawBody)))
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "malformed hook event: " + reason, "reason": hookexec.MalformedHookPayloadReason,
+			})
 			return
 		}
 		registeredEvent := ""
@@ -296,12 +441,12 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			event := strings.TrimSpace(r.Header.Get("X-DefenseClaw-Antigravity-Event"))
 			if event == "" {
 				a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "missing_event", int64(len(b)))
-				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Antigravity hook event registration is required"})
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Antigravity hook event registration is required", "reason": hookexec.MalformedHookPayloadReason})
 				return
 			}
 			if !validAntigravityHookEvent(event) {
 				a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_event", int64(len(b)))
-				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Antigravity hook event"})
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Antigravity hook event", "reason": hookexec.MalformedHookPayloadReason})
 				return
 			}
 			registeredEvent = event
@@ -314,41 +459,48 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			event := strings.TrimSpace(r.Header.Get("X-DefenseClaw-Copilot-Event"))
 			if event == "" {
 				a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "missing_event", int64(len(b)))
-				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Copilot hook event registration is required"})
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Copilot hook event registration is required", "reason": hookexec.MalformedHookPayloadReason})
 				return
 			}
-			vscodeLocal := copilotHookDialectFromHeaders(r.Header) == connector.CopilotHookSurfaceVSCodeLocal
-			if local, ok := connector.CopilotVSCodeLocalEventForCLIHook(event); !vscodeLocal && ok &&
-				payloadString(payload, "hook_event_name") == local &&
-				payload["toolName"] == nil && payload["toolArgs"] == nil {
-				// GAP-1903: the VS Code Local harness also runs the per-user
-				// Copilot CLI hook file, under the Local event the bound CLI
-				// event maps to, and sends it the Local payload (snake_case
-				// tool_name/tool_input). Decoded as a CLI body, the call had
-				// no authoritative arguments and its command rules stayed
-				// detection-only. The Copilot CLI's own camelCase bodies carry
-				// no hook_event_name, and the body may only name the event
-				// the hook command is bound to.
-				event, vscodeLocal = local, true
-			}
+			// The registered surface selects the profile and the command
+			// binds the event. The per-user CLI profile reads either body
+			// shape under the same CLI policy.
+			var vscodeLocal bool
+			event, vscodeLocal = copilotargs.LocalDialect(copilotHookDialectFromHeaders(r.Header), event)
 			if vscodeLocal {
 				// The VS Code Local harness names the event in its body.
 				// It must be the event the hook command is bound to, so a
 				// body cannot pick a weaker event's handling.
 				if !connector.ValidCopilotVSCodeLocalHookEvent(event) {
 					a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_event", int64(len(b)))
-					a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Copilot hook event"})
+					a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Copilot hook event", "reason": hookexec.MalformedHookPayloadReason})
 					return
 				}
 				if payloadString(payload, "hook_event_name") != event {
 					a.recordConnectorHookRejection(r.Context(), connectorName, event, "harness_event_mismatch", int64(len(b)))
-					a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "harness_event_mismatch"})
+					a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "harness_event_mismatch", "reason": hookexec.MalformedHookPayloadReason})
 					return
 				}
 				r = r.WithContext(withCopilotVSCodeLocal(r.Context()))
 			} else if !connector.ValidCopilotHookEvent(event) {
 				a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_event", int64(len(b)))
-				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Copilot hook event"})
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Copilot hook event", "reason": hookexec.MalformedHookPayloadReason})
+				return
+			} else {
+				// The per-user CLI document is read by both harnesses. Its
+				// shared parser accepts two disjoint body shapes under the
+				// command-bound event and keeps the same CLI policy for each.
+				// Strict, managed and Secure Client keep their exact schemas.
+				cfg := a.decisionConfig(r.Context())
+				if cfg != nil && !cfg.SecureClientIntegration() &&
+					!managed.IsManagedEnterprise(cfg.DeploymentMode) &&
+					cfg.HookPolicyTierForConnector("copilot") != config.HookPolicyTierStrict {
+					r = r.WithContext(withCopilotCLISharedEvent(r.Context(), event))
+				}
+			}
+			if hookName := payloadString(payload, "hookName"); hookName != "" && hookName != event {
+				a.recordConnectorHookRejection(r.Context(), connectorName, event, "bound_event_mismatch", int64(len(b)))
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Copilot stdin event does not match installer-bound event", "reason": hookexec.MalformedHookPayloadReason})
 				return
 			}
 			registeredEvent = event
@@ -362,15 +514,15 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			switch {
 			case boundEvent == "":
 				a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "missing_bound_event", int64(len(b)))
-				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "installer-bound Codex hook event is required"})
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "installer-bound Codex hook event is required", "reason": hookexec.MalformedHookPayloadReason})
 				return
 			case stdinEvent == "" || stdinEvent != boundEvent:
 				a.recordConnectorHookRejection(r.Context(), connectorName, boundEvent, "bound_event_mismatch", int64(len(b)))
-				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Codex stdin event does not match installer-bound event"})
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Codex stdin event does not match installer-bound event", "reason": hookexec.MalformedHookPayloadReason})
 				return
 			case boundContract == "":
 				a.recordConnectorHookRejection(r.Context(), connectorName, boundEvent, "missing_bound_contract", int64(len(b)))
-				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "installer-bound Codex hook contract is required"})
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "installer-bound Codex hook contract is required", "reason": hookexec.MalformedHookPayloadReason})
 				return
 			case profile.ContractID == "" || boundContract != profile.ContractID:
 				a.recordConnectorHookRejection(r.Context(), connectorName, boundEvent, "bound_contract_mismatch", int64(len(b)))
@@ -378,7 +530,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				return
 			case !eventIn(boundEvent, profile.SupportedEvents):
 				a.recordConnectorHookRejection(r.Context(), connectorName, boundEvent, "event_outside_contract", int64(len(b)))
-				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Codex hook event is not registered by protected runtime contract"})
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Codex hook event is not registered by protected runtime contract", "reason": hookexec.MalformedHookPayloadReason})
 				return
 			}
 		}
@@ -386,26 +538,158 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			targets, ok := hookpaths.Decode(header)
 			if !ok {
 				// Evidence that is present but unreadable never proves a
-				// write safe: every operand is unknown.
+				// write safe: every operand is unknown. The marker also drops
+				// the client's cwd, so a gateway that cannot resolve an
+				// operand itself denies a write it cannot place (GAP-0278
+				// review): a malformed header is never more permissive than
+				// a valid one without the fact.
 				targets = map[string]string{hookpaths.TruncatedKey: "1"}
 			}
 			r = r.WithContext(context.WithValue(r.Context(), resolvedWritesContextKey{}, targets))
 		}
 		if registeredEvent != "" && !eventIn(registeredEvent, profile.SupportedEvents) {
 			a.recordConnectorHookRejection(r.Context(), connectorName, registeredEvent, "event_outside_contract", int64(len(b)))
-			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook event is outside the active contract"})
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook event is outside the active contract", "reason": hookexec.MalformedHookPayloadReason})
 			return
+		}
+		if reason := malformedHookPayloadReason(connectorName, rawBody, payload, registeredEvent); reason != "" {
+			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", reason, int64(len(rawBody)))
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "malformed hook event: " + reason, "reason": hookexec.MalformedHookPayloadReason})
+			return
+		}
+		if connectorName == "hermes" && registeredEvent == "" {
+			named, alternate := strings.TrimSpace(payloadString(payload, "hook_event_name")), strings.TrimSpace(payloadString(payload, "event"))
+			if named != "" && alternate != "" && !strings.EqualFold(named, alternate) {
+				// A conflicting event is not a valid policy boundary. Return the
+				// native block even if an administrator chose open for outages.
+				a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "conflicting_event", int64(len(b)))
+				resp := agentHookResponse{
+					Action: "block", Reason: "Hermes hook event fields disagree",
+					HookOutput: map[string]interface{}{"action": "block", "message": "DefenseClaw blocked this tool call because its hook event could not be verified."},
+				}
+				resp = a.hermesWireBlockText(r.Context(), connectorName,
+					agentHookRequest{ConnectorName: "hermes", HookEventName: "pre_tool_call"}, resp)
+				a.writeJSON(w, http.StatusOK, map[string]interface{}{
+					"action": resp.Action, "reason": resp.Reason, "hook_output": resp.HookOutput,
+				})
+				return
+			}
 		}
 		runtime := hookRuntimeForProfile(profile)
 		// The agent identity (agt-) the hook runs under comes from the
 		// verified caller, not the payload. It scopes the agent ids the
 		// request mints.
-		agentIdentityID := resolveHookAgentIdentity(r.Context(), agentHookRequest{ConnectorName: connectorName, Payload: payload}).ID
-		req := normalizeAgentHookRequestWithRawProfileEvent(connectorName, payload, rawBody, profile, registeredEvent, agentIdentityID)
+		identityFacts := resolveHookAgentIdentity(r.Context(), agentHookRequest{ConnectorName: connectorName, Payload: payload})
+		req := normalizeAgentHookRequestWithRawProfileEvent(connectorName, payload, rawBody, profile, registeredEvent, identityFacts.ID)
+		req = req.withManagedWatchHome(r.Context())
+		r = r.WithContext(withHookIdentitySnapshot(r.Context(), identityFacts))
+		if len(profile.SupportedEvents) > 0 && !eventIn(req.HookEventName, profile.SupportedEvents) {
+			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "event_outside_contract", int64(len(rawBody)))
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "hook event is outside the active contract", "reason": hookexec.MalformedHookPayloadReason,
+			})
+			return
+		}
+		// A retained registration follows its configured outage mode while
+		// setup is unfinished. An absent agent remains denied until restart.
+		setupWarning := ""
+		if reason, state := a.health.connectorHookAdmission(connectorName); reason != "" {
+			cfg := a.runtimeConfigSnapshot()
+			if state != connectorHookSkipped && cfg != nil && !cfg.SecureClientIntegration() &&
+				!managed.IsManagedEnterprise(cfg.DeploymentMode) &&
+				cfg.EffectiveHookOutageFailModeForConnector(connectorName) == "open" {
+				// Continue through the ordinary policy path so a protected
+				// call can still receive its block during setup.
+				setupWarning = reason
+			} else {
+				// Health may include the executable path; this hook reason does not.
+				resp := agentHookResponseForProfile(profile, req, "block", "block", "HIGH", reason,
+					nil, "action", false, profile.Capabilities)
+				// The reason is gateway-authored and contains no user text or path.
+				// Preserve it in the native answer; generic scan-reason redaction
+				// would otherwise hide the restart instruction.
+				resp.Reason = reason
+				if profile.Respond != nil {
+					resp.HookOutput = profile.Respond(connector.HookRespondInput{
+						Req: hookProfileRequestFromAgentHook(req), Action: "block", RawAction: "block",
+						Reason: reason, Caps: profile.Capabilities,
+					}).Output
+				}
+				resp.RuleIDs = []string{"CONNECTOR-NOT-STARTED"}
+				a.writeHookAnswer(w, a.hookAnswerBody(r.Context(), profile, connectorName, req,
+					a.hermesWireBlockText(r.Context(), connectorName, req, resp), ""))
+				return
+			}
+		}
+		// A connector the administrator's config turns off is answered allow
+		// here, before anything about the call is recorded (rel-1-0-6:GAP-0325).
+		if a.answerDisabledConnectorHook(r.Context(), w, r.Header, profile, connectorName, req) {
+			return
+		}
+		a.noteProtectedFileActivity(r.Context(), connectorName, req, identityFacts.ID)
+		toolRoute := profile.ToolCallLifecycle.RouteForEvent(req.HookEventName)
+		if (connectorName == "claudecode" || connectorName == "codex") &&
+			req.HookEventName == "PreToolUse" && !preToolFieldsValid(payload) {
+			req.ToolCallUnparsed = true
+		}
+		structuredToolRoute := toolRoute == connector.ToolEventRouteStructuredAction ||
+			profile.ToolCallLifecycle.Version == 0 && isGenericToolInspectionEvent(req.HookEventName)
+		if structuredToolRoute {
+			copilotCLILocalBody := false
+			if connectorName == "copilot" {
+				_, copilotCLILocalBody = copilotargs.CLIHookLocalEvent(
+					copilotCLISharedEventFromContext(r.Context()), payloadString(payload, "hook_event_name"))
+			}
+			if !hookToolCallJSONUnambiguous(connectorName, rawBody) {
+				req.ToolCallUnparsed = true
+			}
+			// A mapped Local event owns snake_case tool fields. A CLI-shaped
+			// decoy cannot switch the registered route or hide its target.
+			if connectorName == "copilot" && copilotVSCodeLocalFromContext(r.Context()) &&
+				(payload["toolName"] != nil || payload["toolArgs"] != nil) {
+				req.ToolCallUnparsed = true
+			}
+			if connectorName == "copilot" && !copilotVSCodeLocalFromContext(r.Context()) &&
+				!copilotCLILocalBody &&
+				(payload["hook_event_name"] != nil || payload["tool_name"] != nil ||
+					payload["tool_input"] != nil) {
+				req.ToolCallUnparsed = true
+			}
+			if connectorName == "copilot" && copilotCLILocalBody &&
+				(copilotCLIMixedLocalFields(payload) ||
+					payload["tool_name"] == nil || payload["tool_input"] == nil ||
+					req.ToolName == "" || req.ToolArgsProjectionUncertain) {
+				req.ToolCallUnparsed = true
+			}
+			if connectorName == "copilot" && req.HookEventName == "permissionRequest" {
+				_, hasToolArgs := payload["toolArgs"]
+				_, hasToolInput := payload["toolInput"]
+				if hasToolArgs && hasToolInput {
+					req.ToolCallUnparsed = true
+				}
+			}
+		}
+		// Every reason so far is a shape no earlier decision can vouch for.
+		// Only the write evidence below is what an argumentless permission
+		// callback lacks by design (copilotPermissionJoin.match).
+		req.toolCallShapeUnparsed = req.ToolCallUnparsed
+		// writeProofCWD is the directory the write proof places targets in;
+		// a permission callback bound to an earlier call (below) is proven
+		// again the same way.
+		writeProofCWD := req.CWD
+		// A native Copilot preToolUse can carry a model's parallel tool
+		// calls; every call is proven and judged (copilotNativeToolCalls).
+		var nativeCalls []copilotargs.NativeCall
+		if structuredToolRoute && connectorName == "copilot" {
+			nativeCalls = copilotNativeToolCalls(req)
+			if copilotCallsUnproven(req, nativeCalls, writeProofCWD, hookActiveHome(r.Context()), copilotManagedPatchEvidence(r.Context())) {
+				req.ToolCallUnparsed = true
+			}
+		}
 		a.hermesTasks.fill(&req)
 		if req.HookEventName == "" {
 			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "missing_event", int64(len(b)))
-			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook event name is required"})
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook event name is required", "reason": hookexec.MalformedHookPayloadReason})
 			return
 		}
 		req.ReportedCWD = strings.TrimSpace(req.CWD)
@@ -420,45 +704,93 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		if connectorName == "copilot" && copilotVSCodeLocalFromContext(r.Context()) {
 			req.HookSurface = connector.CopilotHookSurfaceVSCodeLocal
 		}
+		// A session's prompts and tool calls wait for its start verdict and
+		// are refused while it blocks (GAP-0806, session_start_gate.go). A
+		// start that ends without a verdict blocks.
+		startGateKey := sessionStartGateKey(r.Context(), connectorName, req.SessionID)
+		var startTicket *sessionStartTicket
+		startVerdictBlocked, startVerdictReason := true, sessionStartUnfinishedReason
+		if canonicalHookLifecycleEvent(req.HookEventName) == "session_start" {
+			startTicket = a.sessionStartGate.begin(startGateKey)
+			// The refusal this request was resolved to was issued before the
+			// start began; the start is expected to end with it.
+			startTicket.adopt(profileRefusal(r.Context()))
+			defer func() { startTicket.finish(startVerdictBlocked, startVerdictReason) }()
+		}
 		// tokenAuth wraps this handler in APIServer.Run, so reaching this point
 		// proves the connector hook route authenticated the request. A fresh
 		// SessionStart is the last authoritative recovery signal before a
 		// Codex session proceeds; synchronously upsert a missing managed runtime
 		// registration through the Sidecar-owned guard. No other connector/event
-		// may mutate registration from hook input. A sandboxed Codex has no host
-		// registration to repair: its hooks are baked into the sandbox image.
-		if connectorName == "codex" && req.HookEventName == "SessionStart" && !isSandboxHookRequest(r.Context()) {
-			if err := a.ensureHookRegistration(r.Context(), connectorName); err != nil {
-				fmt.Fprintf(os.Stderr, "[gateway] Codex SessionStart registration recovery failed: %v\n", err)
+		// may mutate registration from hook input; a call of a session whose
+		// start never reached this gateway runs the same repair in that start's
+		// place (sessionStartCheck, GAP-1448), from nothing in the call. A
+		// sandboxed Codex has no host registration to repair: its hooks are
+		// baked into the sandbox image.
+		if req.HookEventName == "SessionStart" {
+			if refusal := a.codexStartRegistrationRefusal(r.Context(), connectorName); refusal != "" {
 				a.recordConnectorHookRejection(r.Context(), connectorName, req.HookEventName, "registration_recovery", int64(len(b)))
-				a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{
-					"error": "Codex runtime registration is unavailable",
-				})
+				startVerdictReason = refusal
+				a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": refusal})
 				return
 			}
 		}
 		// A second delivery of one Copilot tool call (see
 		// agent_hook_copilot_dedupe.go) gets the first delivery's verdict,
 		// rendered for its own profile, and is not evaluated or audited
-		// again.
-		earlier, deduped, dedupeTicket := a.copilotDedupe.begin(r.Context(), connectorName, req)
+		// again. The verdict was decided under the same generation and
+		// guardrail profile (the keys carry them); an allow is replayed only
+		// when the live profile and require-sandbox gates pass now, else the
+		// delivery is evaluated on its own.
+		earlier, deduped, dedupeTicket := a.copilotDedupe.begin(r.Context(), connectorName, req, a.copilotDedupePolicy(r.Context()))
 		defer dedupeTicket.release()
-		if deduped {
-			a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, copilotDedupedResponse(profile, req, earlier)))
+		if deduped && a.copilotDedupeReplayable(r.Context(), connectorName, req, requireSandboxSurface(r.Context(), r.Header), earlier) {
+			dedupedResp := copilotDedupedResponse(profile, req, earlier)
+			startVerdictBlocked, startVerdictReason = sessionStartVerdictBlocks(dedupedResp), dedupedResp.Reason
+			a.writeHookAnswer(w, a.hookAnswerBody(r.Context(), profile, connectorName, req,
+				a.hermesWireBlockText(r.Context(), connectorName, req, dedupedResp), ""))
 			return
 		}
-		// From here on the hook is accepted: its verdict is enforced, so its
-		// correlation, hook_decision and audit row must not depend on the client
-		// waiting for the response.
+		// From here on the hook is accepted. A managed native hook confirms
+		// delivery before the hook_decision and audit row claim enforcement.
+		// Other callers keep the ordinary response contract.
 		ctx, cancelCompletion := agentHookCompletionContext(r.Context())
 		defer cancelCompletion()
-		ctx, correlatedReq, correlationErr := a.correlateHookOccurrence(ctx, profile, req, b)
+		// The call's event-history rows and correlation observations commit
+		// together, with its audit row (audit.CallWriteBatch): one commit
+		// instead of one per row (GAP-1303, GAP-1791, GAP-0614). What the call
+		// writes after its verdict commits when the handler returns.
+		ctx = audit.WithCallWriteBatch(ctx, a.store)
+		var cancelTelemetry context.CancelFunc
+		var telemetryPersistenceCtx context.Context
+		var finalPersistenceCtx context.Context
+		var cancelFinalPersistence context.CancelFunc
+		defer func() {
+			if cancelTelemetry != nil {
+				defer cancelTelemetry()
+			}
+			if cancelFinalPersistence != nil {
+				defer cancelFinalPersistence()
+			}
+			closeCtx := finalPersistenceCtx
+			if closeCtx == nil {
+				closeCtx = telemetryPersistenceCtx
+			}
+			if closeCtx == nil {
+				var cancelClose context.CancelFunc
+				closeCtx, cancelClose = a.hookPersistenceContext(ctx)
+				defer cancelClose()
+			}
+			audit.CloseCallWrites(closeCtx)
+		}()
+		ctx, correlatedReq, correlationErr := a.correlateHookOccurrence(
+			a.hookCorrelationBoundContext(ctx, connectorName, req.HookEventName, r), profile, req, b)
 		if correlationErr != nil {
 			// Correlation persistence is fail-closed for the cross-call join IDs,
 			// not for policy enforcement or export. The hook must still be
 			// evaluated if the local ledger is temporarily unavailable; the
 			// verdict keeps its local audit row, its decision export
-			// (finalizeAgentHook) and its LLM event (hookLLMEventExportable).
+			// (finalizeAgentHookAnswer) and its LLM event (hookLLMEventExportable).
 			fmt.Fprintf(os.Stderr, "[gateway] hook correlation unavailable connector=%s event=%s: %v\n",
 				connectorName, req.HookEventName, correlationErr)
 			req.SuppressCorrelationEmit, req.CorrelationUnavailable = true, true
@@ -478,10 +810,20 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		ctx = withToolChainHookCapture(ctx, req.toolChain)
 		ctx = withSandboxCoverage(ctx)
 		ctx = withAgentHost(ctx, r.Header)
+		// Secure Client hook audit keeps the shape of main.
+		if coworkInspected(a.decisionConfig(ctx)) {
+			ctx = withCowork(ctx, r.Header, connectorName)
+		}
 		ctx = enrichAgentHookContext(ctx, req)
 		ctx = withHookToolCallCapture(ctx, &hookToolCallCapture{})
-		if judge := a.judgeFor(ctx); judge != nil && shouldResetToolJudgeSession(req) {
-			judge.ResetToolJudgeSession(sandboxSessionStateKey(ctx, req.SessionID))
+		ctx = withHookPanicCapture(ctx)
+		ctx = withHookJudgeFallbackNote(ctx)
+		if shouldResetToolJudgeSession(req) {
+			sessionKey := sandboxSessionStateKey(ctx, req.SessionID)
+			for _, judge := range a.hookSessionJudges(ctx) {
+				judge.ResetToolJudgeSession(sessionKey)
+			}
+			a.resetUserDownloadRequests(sessionKey)
 		}
 		t0 := time.Now()
 		// attemptedWrite covers BOTH "writeJSON returned successfully"
@@ -495,27 +837,79 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// finalized guards against a double-emit when the post-finalize
 		// code (renderAgentHookResponseForProfile / writeJSON) panics.
 		// Without this flag the deferred recover would re-run
-		// finalizeAgentHook, doubling audit rows, hook-outcome metrics,
+		// finalizeAgentHookAnswer, doubling audit rows, hook-outcome metrics,
 		// and the connector telemetry log for a single request.
 		finalized := false
+		// wireResp is the answer the hook is given; once the decision is
+		// finalized, a later panic answers with it (GAP-1096).
+		var wireResp agentHookResponse
+		// pending is the journal row of a receipt-capable call
+		// (agent_hook_pending.go); its records carry its IDs.
+		var pending *pendingHookOccurrence
+		// answered is the answer the agent was given once it is committed:
+		// the decision of an answer offered on a managed receipt channel, and
+		// otherwise the finalized answer about to be written. A panic after
+		// that point keeps it: the audit row, the export and the late write
+		// carry what the native hook applies, never a later fail-mode verdict
+		// (an acknowledged allow is never recorded as a block).
+		var answered *agentHookResponse
 		var rawEventIDs []string
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				elapsed := time.Since(t0)
-				resp := a.hookPanicResponse(ctx, connectorName, req, b, payload)
 				a.handleHookPanic(ctx, connectorName, req.HookEventName, recovered)
-				enrichAgentHookSpan(ctx, req, resp, elapsed)
-				enrichAgentHookSpanPanic(ctx)
-				if !finalized {
-					persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
-					defer cancelPersist()
-					finalization := a.finalizeAgentHook(persistCtx, connectorName, req, resp, rawEventIDs, b, elapsed, true, sandboxHookAuditExtra(ctx))
-					if finalization.AuditPersisted {
-						if err := a.finalizeHookCorrelationReceipt(persistCtx, req.CorrelationReceipt); err != nil {
-							fmt.Fprintf(os.Stderr, "[gateway] hook receipt finalization failed connector=%s event=%s: %v\n",
-								connectorName, req.HookEventName, err)
-						}
+				// A later empty permission callback must not reuse an older
+				// pre-tool allow after this call failed before its decision.
+				a.copilotPermission.record(ctx, req, false)
+				var resp agentHookResponse
+				if answered != nil {
+					resp = *answered
+				} else {
+					resp = a.hookPanicResponse(ctx, connectorName, req, b, payload)
+					if pending != nil && attemptedWrite {
+						// The proposal may have reached the hook; nothing
+						// proves which answer the hook gave.
+						resp = pending.NoReceipt.response()
 					}
+				}
+				enrichAgentHookSpan(ctx, req, resp, elapsed)
+				// A finalized call's row, export and metrics are written: the
+				// span keeps their result, and the late panic is on
+				// defenseclaw.panics.total and the gateway log (GAP-1014).
+				if !finalized {
+					persistCtx := telemetryPersistenceCtx
+					var cancelPersist context.CancelFunc
+					if persistCtx == nil {
+						persistCtx, cancelPersist = a.hookPersistenceContext(ctx)
+					}
+					if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+						if answered != nil {
+							if durableCtx, cancelDurable := a.hookDeliveredPersistenceContext(persistCtx, pending != nil && delivery != nil); cancelDurable != nil {
+								if cancelPersist != nil {
+									defer cancelPersist()
+								}
+								persistCtx = durableCtx
+								cancelPersist = cancelDurable
+							}
+						}
+						finalPersistenceCtx = persistCtx
+						if cancelPersist != nil {
+							cancelFinalPersistence = cancelPersist
+						}
+					} else {
+						defer cancelPersist()
+					}
+					// The panic is on the row either way (the hook's panic
+					// capture); only a fail-mode verdict is a panic verdict.
+					finalization := a.finalizeAgentHookAnswer(a.pendingHookDecidedContext(persistCtx, pending, resp),
+						connectorName, req, resp, rawEventIDs, b, elapsed, answered == nil, sandboxHookAuditExtra(ctx), answered != nil)
+					if finalization.Panicked {
+						enrichAgentHookSpanPanic(ctx)
+					}
+					if finalization.AuditPersisted {
+						a.finalizeHookCorrelationReceiptBounded(persistCtx, req.CorrelationReceipt, connectorName, req.HookEventName)
+					}
+					a.settlePendingHook(persistCtx, pending, finalization)
 					finalized = true
 				}
 				if !attemptedWrite {
@@ -526,8 +920,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 					// the HTTP server's serving goroutine.
 					func() {
 						defer func() { _ = recover() }()
+						body := a.hookAnswerBody(ctx, profile, connectorName, req,
+							a.hermesWireBlockText(ctx, connectorName, req, resp), "")
 						attemptedWrite = true
-						a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, resp))
+						a.writeHookAnswer(w, body)
 					}()
 				}
 			}
@@ -571,11 +967,20 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// managed_enterprise we defer the emit until after safeEvaluateHook
 		// stamps the directive onto ctx (see below), so the event's own
 		// directive governs its content fields. Outside managed_enterprise
-		// the emit stays BEFORE the evaluator (audit-honest ordering) and
-		// behavior is byte-for-byte unchanged.
+		// the emit stays BEFORE the evaluator (audit-honest ordering).
 		deferManagedHookEmit := managedEnterpriseActive.Load()
 		if !deferManagedHookEmit && hookLLMEventExportable(req) && !hookSideRefusal(ctx) {
-			runtime.EmitLLMEvent(a, ctx, req, b, payload, rawEventIDs)
+			// An expired client must not erase the attempted tool call while
+			// the verdict can still persist. Give emission the verdict's
+			// persistence grace and defer cancellation until the batch flush.
+			// Secure Client retains its existing telemetry lifetime.
+			telemetryCtx := ctx
+			if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+				telemetryCtx, cancelTelemetry = a.hookPersistenceContext(ctx)
+				telemetryCtx = observabilityruntime.WithDeadlineLossReporting(telemetryCtx)
+				telemetryPersistenceCtx = telemetryCtx
+			}
+			runtime.EmitLLMEvent(a, telemetryCtx, req, b, payload, rawEventIDs)
 		}
 
 		// Dispatch evaluation through the profile runtime. Connector-
@@ -607,16 +1012,74 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// per-profile evaluators (claudeCode / codex / generic) so
 		// they round-trip back to the HTTP response and onto the
 		// audit envelope without a second pass here.
+		if cfg := a.decisionConfig(ctx); shellHookBoundsToolGate(connectorName, req.HookEventName, r) &&
+			(cfg == nil || !cfg.SecureClientIntegration()) {
+			ctx = withShellToolGateBound(ctx, r)
+		}
 		accountingCtx := ctx
 		evaluationCtx, managedAIDFailOpenGate := deferManagedAIDFailOpenNativeHookAccounting(ctx)
-		// The require-sandbox gate (require_sandbox.go) answers a host run
-		// of a connector the caller's sandbox floor requires in a sandbox
-		// before anything is evaluated; finalizeAgentHook records its
-		// outcome on the audit row.
-		sandboxGate, resp, gated := a.requireSandboxHostRun(ctx, profile, connectorName, req, b, payload, requireSandboxSurface(ctx, r.Header))
+		// An argumentless Copilot permission callback is bound to the call of
+		// the one audited preToolUse allow it follows and decided again, now,
+		// like that call: its write targets are proven and resolved as they
+		// are now, under the live policy and sandbox floor. An earlier
+		// decision is never reused. Every callback consumes the candidate; one
+		// that cannot be bound, or whose bound call cannot be proven now (a
+		// private managed home the user-side hook did not prove for this
+		// callback), keeps its own unparsed decision.
+		// A callback after a parallel envelope is bound to each of its
+		// calls it can stand for and decided on all of them (GAP-1831).
+		if bound, ok := a.copilotPermission.bind(ctx, req, rawBody); ok {
+			req.ToolName, req.ToolArgs, req.ToolArgsProjectionUncertain = bound[0].Name, bound[0].Args, false
+			if len(bound) > 1 {
+				nativeCalls = bound
+			}
+			req.ToolCallUnparsed = copilotCallsUnproven(req, nativeCalls, writeProofCWD,
+				hookActiveHome(r.Context()), copilotManagedPatchEvidence(r.Context()))
+		}
+		// An uncertain identity refuses before any profile-specific gate can
+		// replace its missing-fact explanation.
+		resp, gated := a.refuseProfileHook(ctx, profile, connectorName, req, b, payload)
+		// An unparsed call is answered without evaluation. Its block stands
+		// at once; any other answer (the observe allow of an unreadable
+		// Copilot call) is given only after the live require-sandbox gate,
+		// which refuses a host run whatever the call. A hook's report of a
+		// call it refused as too large has no tool input by design: it is
+		// recorded under HOOK-PAYLOAD-TOO-LARGE (safeEvaluateHook), not as
+		// an unreadable call (GAP-1313).
+		var unparsedAnswer *agentHookResponse
+		if !gated && req.ToolCallUnparsed && !hookSideRefusal(ctx) &&
+			toolRoute == connector.ToolEventRouteStructuredAction {
+			a.recordParserUncertaintyMetricV8(ctx, req.ConnectorName, 1)
+			answer := a.unparsedStructuredHookResponse(ctx, profile, req)
+			if answer.Action == "block" {
+				resp, gated = answer, true
+			} else {
+				unparsedAnswer = &answer
+			}
+		}
+		if !gated && !hookSideRefusal(ctx) && sessionStartGateEvent(req.HookEventName) {
+			if reason, refuse := a.sessionStartGate.await(ctx, startGateKey, sessionStartGateWait(connectorName, req.HookEventName),
+				a.sessionStartArrival(ctx, profile, connectorName), a.sessionStartCheck(connectorName)); refuse {
+				resp, gated = a.sessionStartGateRefusal(ctx, profile, connectorName, req, payload, reason), true
+			}
+		}
+		sandboxGate := requireSandboxOutcome{}
+		if !gated {
+			// The require-sandbox gate answers a host run of a connector
+			// the caller's proven floor requires in a sandbox.
+			sandboxGate, resp, gated = a.requireSandboxHostRun(ctx, profile, connectorName, req, b, payload, requireSandboxSurface(ctx, r.Header))
+		}
+		if !gated {
+			// The strict tier refuses a call while an install or upgrade of
+			// this account holds its data directory (GAP-1438).
+			resp, gated = a.strictInstallWindowGate(ctx, profile, connectorName, req)
+		}
+		if !gated && unparsedAnswer != nil {
+			resp, gated = *unparsedAnswer, true
+		}
 		panicked := false
 		if !gated {
-			resp, panicked = a.safeEvaluateHook(evaluationCtx, connectorName, req, b, payload, runtime)
+			resp, panicked, req = a.safeEvaluateHookCalls(evaluationCtx, connectorName, req, nativeCalls, b, payload, runtime)
 		}
 		var chainFinalization toolChainHookFinalization
 		if !panicked && !gated {
@@ -643,17 +1106,45 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			// the kernel denials its tool calls hit (kernel_block_notice.go).
 			resp = a.safeAddKernelBlockNotice(ctx, profile, connectorName, req, b, payload, resp)
 		}
-		elapsed := time.Since(t0)
-		enrichAgentHookSpan(ctx, req, resp, elapsed)
-		if panicked {
-			enrichAgentHookSpanPanic(ctx)
+		if oversizeUninspectedPayload(payload) && (resp.Action == "allow" || resp.Action == "alert") {
+			// The hook could not send this oversized call whole: never a
+			// silent allow of what was not inspected (an observe-mode alert
+			// already warns and audits its own finding).
+			// The field only tightens a verdict, so any sender may set it.
+			if mode := a.agentHookMode(ctx, connectorName); resp.Action == "allow" || mode == "action" {
+				secureClient := false
+				if cfg := a.decisionConfig(ctx); cfg != nil {
+					secureClient = cfg.SecureClientIntegration()
+				}
+				resp = oversizeUninspectedHookResponse(profile, req, mode, resp,
+					secureClient || sandboxHookForConnector(ctx, connectorName))
+			}
 		}
-
+		if payload["bounded_prefix_review"] == true && (resp.Action == "allow" || resp.Action == "alert") {
+			// The gateway inspected only the bounded head. Keep the allow
+			// decision, but make its audit and telemetry severity conspicuous.
+			resp.Severity = "HIGH"
+		}
+		if setupWarning != "" && (resp.Action == "allow" || resp.Action == "alert") {
+			resp.Reason = strings.TrimSpace(resp.Reason + " " + setupWarning)
+			resp.AdditionalContext = strings.TrimSpace(resp.AdditionalContext + " " + setupWarning)
+			if profile.Respond != nil {
+				resp.HookOutput = profile.Respond(connector.HookRespondInput{
+					Req: hookProfileRequestFromAgentHook(req), Action: resp.Action, RawAction: resp.RawAction,
+					Reason: resp.Reason, AdditionalContext: resp.AdditionalContext, Caps: profile.Capabilities,
+				}).Output
+			} else {
+				resp.HookOutput = hookOutputFor(req, resp.Action, resp.RawAction, resp.Reason, resp.AdditionalContext, profile.Capabilities)
+			}
+		}
 		// Re-inject the cloud-controlled per-inspection redaction
 		// directive the evaluator resolved (evaluate*'s ctx-injection is
-		// local to that call) so finalizeAgentHook emits the
+		// local to that call) so finalizeAgentHookAnswer emits the
 		// hook_decision event + audit row under the same decision.
 		ctx = withRedactionDecision(ctx, resp.RedactionEnabled)
+		if telemetryPersistenceCtx != nil {
+			telemetryPersistenceCtx = withRedactionDecision(telemetryPersistenceCtx, resp.RedactionEnabled)
+		}
 
 		// Managed carve-out (see deferManagedHookEmit above): the directive
 		// from this event's evaluation is now on ctx, so emit the deferred
@@ -662,41 +1153,196 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// ordering. Fails closed to redact when the AID lane returned no
 		// directive (resp.RedactionEnabled == nil).
 		if deferManagedHookEmit && hookLLMEventExportable(req) && !hookSideRefusal(ctx) {
-			runtime.EmitLLMEvent(a, ctx, req, b, payload, rawEventIDs)
+			telemetryCtx := ctx
+			if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+				telemetryCtx, cancelTelemetry = a.hookPersistenceContext(ctx)
+				telemetryCtx = observabilityruntime.WithDeadlineLossReporting(telemetryCtx)
+				telemetryPersistenceCtx = telemetryCtx
+			}
+			runtime.EmitLLMEvent(a, telemetryCtx, req, b, payload, rawEventIDs)
 		}
 
-		if !panicked {
-			dedupeTicket.complete(resp)
-		}
-		persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
-		defer cancelPersist()
+		// A managed answer is only an evaluated proposal until the hook
+		// commits it to its agent: the audit row, hook_decision and
+		// dedupe get the decision the agent was given (GAP-0286).
+		wireResp = resp
 		auditExtra := mergeHookEnvelopeExtra(hookRequestAuditExtra(ctx, profile), sandboxGate.auditExtra())
+		auditExtra = mergeHookEnvelopeExtra(auditExtra, hookActionCommandAuditExtra(req, hookActiveHome(ctx)))
+		auditExtra = mergeHookEnvelopeExtra(auditExtra, coworkCallAuditExtra(ctx, req.Payload, req.ToolName))
+		if payload["bounded_prefix_review"] == true {
+			auditExtra = mergeHookEnvelopeExtra(auditExtra, map[string]string{"bounded_prefix_review": "true"})
+		}
+		if oversizeUninspectedPayload(payload) {
+			auditExtra = mergeHookEnvelopeExtra(auditExtra, map[string]string{hookexec.OversizeUninspectedField: "true"})
+		}
 		if len(resp.KernelBlocksTold) > 0 {
 			auditExtra = mergeHookEnvelopeExtra(auditExtra, map[string]string{kernelBlocksToldExtra: strings.Join(resp.KernelBlocksTold, ",")})
 		}
-		finalization := a.finalizeAgentHook(persistCtx, connectorName, req, resp, rawEventIDs, b, elapsed, panicked, auditExtra)
+		sandboxReceipt := a.wantsSandboxHookReceipt(ctx, connectorName, req.HookEventName, resp) &&
+			(!req.SuppressCorrelationEmit || req.CorrelationUnavailable)
+		if (delivery != nil || sandboxReceipt) && (!req.SuppressCorrelationEmit || req.CorrelationUnavailable) {
+			var journalErr error
+			pending, journalErr = a.journalHookDelivery(ctx, &req, resp, rawEventIDs,
+				int64(len(b)), time.Since(t0), panicked, auditExtra, sandboxReceipt)
+			if journalErr != nil {
+				fmt.Fprintf(os.Stderr, "[gateway] hook delivery journal unavailable connector=%s: %v\n",
+					connectorName, journalErr)
+				// No answer leaves this process unjournaled. The 503
+				// closes the managed hook before the proposal is offered.
+				resp = pendingFailureHookDecision(resp)
+				persistCtx := telemetryPersistenceCtx
+				var cancelPersist context.CancelFunc
+				if persistCtx == nil {
+					persistCtx, cancelPersist = a.hookPersistenceContext(ctx)
+				}
+				if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+					finalPersistenceCtx = persistCtx
+					if cancelPersist != nil {
+						cancelFinalPersistence = cancelPersist
+					}
+				}
+				finalization := a.finalizeAgentHookAnswer(a.pendingHookDecidedContext(persistCtx, pending, resp),
+					connectorName, req, resp, rawEventIDs, b, time.Since(t0), panicked, auditExtra, false)
+				a.settlePendingHook(persistCtx, pending, finalization)
+				if cancelPersist != nil && finalPersistenceCtx == nil {
+					cancelPersist()
+				}
+				finalized = true
+				attemptedWrite = true
+				a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "hook audit is unavailable"})
+				return
+			}
+		}
+		if sandboxReceipt {
+			// A buffered sandbox relay cannot keep the original request open
+			// for the native full-duplex receipt. Its hook sends the receipt
+			// on this authenticated route after validating the proposed
+			// answer. Only that second call writes the final audit verdict.
+			if err := chainFinalization.attach(ctx, resp.EvaluationID); err != nil {
+				fmt.Fprintf(os.Stderr, "[gateway] sandbox tool-call chain finalization failed connector=%s event=%s: %v\n",
+					connectorName, req.HookEventName, err)
+			}
+			body := a.hookAnswerBody(ctx, profile, connectorName, req,
+				a.hermesWireBlockText(ctx, connectorName, req, wireResp), pending.ID)
+			a.scheduleSandboxHookReceiptRecovery(pending.ID)
+			// The first request is done; a later authenticated receipt owns
+			// this journal row. The bounded recovery pass may now inspect it.
+			pendingHooksInFlight.Delete(pending.ID)
+			finalized = true
+			attemptedWrite = true
+			a.writeHookAnswer(w, body)
+			return
+		}
+		// Reading or closing the answer can cancel the HTTP request before
+		// offer returns. Only a hang-up observed before the answer was sent
+		// can establish that an unreceipted hook missed that answer.
+		hungUpBeforeAnswer := r.Context().Err() != nil
+		var preKey preToolDecisionKey
+		preNoted := false
+		shellBridge := r.Header.Get(hookexec.HookShellBridgeHeader) == "shell"
+		unreceipted := func(proposal agentHookResponse) agentHookResponse {
+			if a.scannerCfg != nil && !a.scannerCfg.SecureClientIntegration() && !shellBridge &&
+				r.Header.Get(hookexec.HookDeliveryReceiptHeader) == "1" &&
+				hookexec.DeliveryReceiptEvent(connectorName, req.HookEventName) {
+				return a.deliveredHookDecision(connectorName, proposal, "")
+			}
+			return a.unreceiptedHookDecision(shellBridge, hungUpBeforeAnswer, connectorName, req.HookEventName, proposal)
+		}
+		if delivery != nil {
+			preKey, preNoted = a.notePreToolDecision(ctx, req, wireResp)
+			body := a.hookAnswerBody(ctx, profile, connectorName, req,
+				a.hermesWireBlockText(ctx, connectorName, req, wireResp), "")
+			attemptedWrite = true
+			receipt := func() string {
+				resume := pauseHookRunSlot(ctx)
+				defer resume()
+				return delivery.offer(w, func() {
+					a.writeHookAnswer(w, body)
+				})
+			}()
+			if receipt == hookexec.HookDeliveryReleased {
+				resp = unreceipted(resp)
+			} else {
+				resp = a.deliveredHookDecision(connectorName, resp, receipt)
+			}
+			delivered := resp
+			answered = &delivered
+			hookStageForTest(ctx, "delivered")
+		} else {
+			resp = unreceipted(resp)
+		}
+		elapsed := time.Since(t0)
+		enrichAgentHookSpan(ctx, req, resp, elapsed)
+		persistCtx := telemetryPersistenceCtx
+		var cancelPersist context.CancelFunc
+		if persistCtx == nil {
+			persistCtx, cancelPersist = a.hookPersistenceContext(ctx)
+		}
+		if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+			if durableCtx, cancelDurable := a.hookDeliveredPersistenceContext(persistCtx, pending != nil && delivery != nil); cancelDurable != nil {
+				if cancelPersist != nil {
+					defer cancelPersist()
+				}
+				persistCtx = durableCtx
+				cancelPersist = cancelDurable
+			}
+			finalPersistenceCtx = persistCtx
+			if cancelPersist != nil {
+				cancelFinalPersistence = cancelPersist
+			}
+		} else {
+			defer cancelPersist()
+		}
+		if delivery != nil {
+			// The receipt decided what the agent got (delivered or
+			// unconfirmed); a hang-up after it is not a missed answer.
+			persistCtx = context.WithValue(persistCtx, hookDeliveryReceiptContextKey{}, true)
+		}
+		// A managed answer offered on the receipt channel is already on the
+		// wire: finalization records it as delivered and cannot replace it.
+		finalization := a.finalizeAgentHookAnswer(a.pendingHookDecidedContext(persistCtx, pending, resp),
+			connectorName, req, resp, rawEventIDs, b, elapsed, panicked, auditExtra, delivery != nil)
+		// A verdict whose audit row could not be written may be adjusted to
+		// a degraded-audit alert or a closed answer. The agent and accounting
+		// must receive the same final verdict.
+		resp = finalization.Response
+		if preNoted && (!finalization.AuditPersisted || panicked || resp.Action == hookActionUnconfirmed) {
+			a.preToolDecisions.forget(preKey)
+		}
+		a.copilotPermission.record(persistCtx, req, finalization.AuditPersisted && !panicked && resp.Action == "allow")
+		if delivery == nil && !finalization.AuditPersisted {
+			wireResp = resp
+		}
+		// The start verdict is final: release the session's waiting calls.
+		startVerdictBlocked, startVerdictReason = sessionStartVerdictBlocks(wireResp), wireResp.Reason
+		startTicket.finish(startVerdictBlocked, startVerdictReason)
+		if delivery == nil {
+			final := wireResp
+			answered = &final
+		}
+		// The span carries the result of the call's row and export.
+		if finalization.Panicked {
+			enrichAgentHookSpanPanic(ctx)
+		}
+		if !panicked && resp.Action != hookActionUnconfirmed {
+			dedupeTicket.complete(resp)
+		}
 		if err := chainFinalization.attach(persistCtx, resp.EvaluationID); err != nil {
 			fmt.Fprintf(os.Stderr, "[gateway] tool-call chain finalization failed connector=%s event=%s: %v\n",
 				connectorName, req.HookEventName, err)
 		}
 		if finalization.AuditPersisted {
-			if err := a.finalizeHookCorrelationReceipt(persistCtx, req.CorrelationReceipt); err != nil {
-				fmt.Fprintf(os.Stderr, "[gateway] hook receipt finalization failed connector=%s event=%s: %v\n",
-					connectorName, req.HookEventName, err)
-			}
+			a.finalizeHookCorrelationReceiptBounded(persistCtx, req.CorrelationReceipt, connectorName, req.HookEventName)
 		}
-		a.dispatchFinalizedAgentHookNotification(ctx, req, resp, finalization)
+		a.settlePendingHook(persistCtx, pending, finalization)
+		// The decision is persisted: a panic in the notifier must not
+		// finalize it again (GAP-1096).
 		finalized = true
+		hookStageForTest(ctx, "finalized")
+		a.dispatchFinalizedAgentHookNotification(ctx, req, resp, finalization)
 		a.recordManagedAIDFailOpenForSelectedNativeHookResult(
 			accountingCtx, managedAIDFailOpenGate, resp.Action, panicked,
 		)
-
-		// Mark the write attempt BEFORE invoking writeJSON. A panic
-		// from inside renderAgentHookResponseForProfile or json.Encode
-		// then signals "do not retry from the defer"; the response
-		// stream may already be partially written, and a second
-		// attempt against the same writer would just re-panic.
-		attemptedWrite = true
 
 		// Render the wire response with the connector-specific
 		// top-level field name for the output map (e.g.
@@ -704,10 +1350,133 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// Without this projection, agentHookResponse always
 		// renders the output under "hook_output", which Claude
 		// Code and Codex agent CLIs reject. See
-		// renderAgentHookResponse() for the canonical
-		// connector → field-name mapping.
-		a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, resp))
+		// renderAgentHookResponseForProfile() for the canonical
+		// connector → field-name mapping. hookAnswerBody cannot
+		// panic, so the native hook always gets the finalized answer.
+		if delivery == nil {
+			body := a.hookAnswerBody(ctx, profile, connectorName, req,
+				a.hermesWireBlockText(ctx, connectorName, req, wireResp), "")
+			// Mark the write attempt BEFORE writing. A panic from the
+			// writer then signals "do not retry from the defer"; the
+			// response stream may already be partially written, and a
+			// second attempt against the same writer would just re-panic.
+			attemptedWrite = true
+			a.writeHookAnswer(w, body)
+		}
 	}
+}
+
+// hookAnswerBody is the wire body of the hook answer resp, ready to write.
+// A body the native hook cannot read (the render panicked, or the encoder
+// failed on a value of the connector's output) makes the hook apply its own
+// fail mode, not the answer the audit row, the export and the metrics record
+// (GAP-1014). That answer then goes out with the callback-free native output
+// of its own action (failedCheckFallbackOutput). A recovered panic is counted
+// in defenseclaw.panics.total and logged with its stack, once per answer; it
+// does not change the answer, which may already be finalized. It cannot
+// panic.
+func (a *APIServer) hookAnswerBody(ctx context.Context, profile connector.HookProfile, connectorName string, req agentHookRequest, resp agentHookResponse, receiptID string) []byte {
+	if req.ConnectorName == "" {
+		req.ConnectorName = connectorName
+	}
+	resp = a.withHookAnswerAgentIDs(ctx, resp)
+	counted := false
+	onPanic := func(recovered any) {
+		defer func() { _ = recover() }()
+		if !counted {
+			counted = true
+			a.recordHookPanic(ctx, connectorName, req.HookEventName, fmt.Sprintf("hook answer render panic: %v", recovered))
+		}
+	}
+	body, err := encodeHookAnswer(profile, resp, receiptID, onPanic)
+	if err == nil {
+		return body
+	}
+	fmt.Fprintf(os.Stderr, "[gateway] hook answer render failed connector=%s event=%s action=%s: %v; answering with its native fallback output\n",
+		connectorName, req.HookEventName, resp.Action, err)
+	fallback := resp
+	fallback.HookOutput = func() (output map[string]interface{}) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				onPanic(recovered)
+				output = nil
+			}
+		}()
+		return failedCheckFallbackOutput(profile, req, resp.Action, resp.RawAction, resp.Reason, resp.AdditionalContext)
+	}()
+	if body, err = encodeHookAnswer(profile, fallback, receiptID, onPanic); err == nil {
+		return body
+	}
+	fallback.HookOutput = nil
+	body, _ = encodeHookAnswer(profile, fallback, receiptID, onPanic)
+	return body
+}
+
+// withHookAnswerAgentIDs puts the agent identity (agt-) and the session or
+// sub-agent instance (ais-) that enrichAgentHookContext derived for this hook
+// on its answer, next to evaluation_id, so a caller can join the answer to
+// DefenseClaw's audit rows and telemetry without deriving the ids itself.
+// Only the derived forms are copied. Secure Client keeps its process-scoped
+// instance ids and its answer shape, so it gets neither field.
+func (a *APIServer) withHookAnswerAgentIDs(ctx context.Context, resp agentHookResponse) agentHookResponse {
+	if ManagedEnterpriseActive() || a.managedAIDOnly() {
+		return resp
+	}
+	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.SecureClientIntegration() {
+		return resp
+	}
+	identity := AgentIdentityFromContext(ctx)
+	if resp.AgentIdentityID == "" && strings.HasPrefix(identity.IdentityID, agentidentity.AgentIDPrefix) {
+		resp.AgentIdentityID = identity.IdentityID
+	}
+	if resp.AgentInstanceID == "" && strings.HasPrefix(identity.AgentInstanceID, agentidentity.InstanceIDPrefix) {
+		resp.AgentInstanceID = identity.AgentInstanceID
+	}
+	return resp
+}
+
+// encodeHookAnswer renders and encodes resp as writeJSON did (HTML-escaped
+// JSON and a newline), with the delivery receipt ID of a sandbox receipt
+// channel when there is one. A render panic is reported to onPanic, in the
+// recovery, and returned as an error.
+func encodeHookAnswer(profile connector.HookProfile, resp agentHookResponse, receiptID string, onPanic func(any)) (body []byte, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			onPanic(recovered)
+			body, err = nil, fmt.Errorf("render panic: %v", recovered)
+		}
+	}()
+	wire := renderAgentHookResponseForProfile(profile, resp)
+	if receiptID != "" {
+		wire["delivery_receipt"] = receiptID
+	}
+	if body, err = json.Marshal(wire); err != nil {
+		return nil, err
+	}
+	return append(body, '\n'), nil
+}
+
+// writeHookAnswer writes an encoded hook answer.
+func (a *APIServer) writeHookAnswer(w http.ResponseWriter, body []byte) {
+	if runtime.GOOS == "linux" && a.scannerCfg != nil && a.scannerCfg.DeploymentMode != "managed_enterprise" &&
+		!a.firstHookAnswerRecorded.Load() {
+		a.firstHookAnswerMu.Lock()
+		if !a.firstHookAnswerRecorded.Load() {
+			dataDir := a.configDataDir()
+			if dataDir != "" {
+				if err := hookexec.PerUserGatewayRecordLocalAnswer(dataDir); err != nil {
+					a.firstHookAnswerMu.Unlock()
+					http.Error(w, "gateway answer unavailable", http.StatusServiceUnavailable)
+					return
+				}
+			}
+			a.firstHookAnswerRecorded.Store(true)
+		}
+		a.firstHookAnswerMu.Unlock()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
 
 func validAntigravityHookEvent(event string) bool {
@@ -717,6 +1486,26 @@ func validAntigravityHookEvent(event string) bool {
 	default:
 		return false
 	}
+}
+
+// hookReplayWritesNoRow reports an exact replay of an allowed delivery whose
+// audit row is already persisted, answered allow again: the one case that
+// collapses into the earlier row. Everything else has its own row and decision
+// export: a block, an alert or an unconfirmed answer, and an allow whose
+// earlier record is a block, an alert or a record that does not say allow (a
+// block answered by an allow on a re-sent id keeps both rows, GAP-1060). A
+// lookup that fails proves nothing, so it writes; an event with no linked hook
+// record has nothing to contradict and stays silent. A hook whose correlation
+// ledger write failed is not a replay (GAP-1536).
+func (a *APIServer) hookReplayWritesNoRow(ctx context.Context, req agentHookRequest, resp agentHookResponse) bool {
+	if !req.SuppressCorrelationEmit || req.CorrelationUnavailable || resp.Action != "allow" {
+		return false
+	}
+	if a.store == nil || req.SemanticEventID == "" {
+		return true
+	}
+	earlier, found, err := a.store.LatestHookVerdictOfEvent(ctx, req.SemanticEventID)
+	return err == nil && (!found || earlier.Action == "allow")
 }
 
 // hookLLMEventExportable reports whether the hook's prompt/tool/response
@@ -730,16 +1519,32 @@ func hookLLMEventExportable(req agentHookRequest) bool {
 }
 
 type hookFinalizationResult struct {
-	AuditPersisted       bool
+	AuditPersisted bool
+	// DecisionSettled: the hook_decision record is persisted, or no retry
+	// can keep it (its collection is off, or it cannot be built).
+	DecisionSettled      bool
 	EnforcementPersisted bool
 	Enforced             bool
+	// Response is the verdict to answer with: the evaluated one, or the
+	// fail-mode verdict when the audit row could not be written
+	// (AuditFailedClosed).
+	Response          agentHookResponse
+	AuditFailedClosed bool
+	// Panicked says the call's audit row and export record result panic.
+	// The hook span reports the same result.
+	Panicked bool
 }
 
 func (result hookFinalizationResult) notificationReady() bool {
 	return result.AuditPersisted && (!result.Enforced || result.EnforcementPersisted)
 }
 
-func (a *APIServer) finalizeAgentHook(
+// finalizeAgentHookAnswer finalizes a verdict. delivered says the answer is
+// already on the wire (a managed hook's receipt channel): a failed audit
+// write is then reported on its own and never replaces the verdict the
+// agent got, so the export, the status counters and the dedupe record keep
+// what was delivered.
+func (a *APIServer) finalizeAgentHookAnswer(
 	ctx context.Context,
 	connectorName string,
 	req agentHookRequest,
@@ -749,11 +1554,24 @@ func (a *APIServer) finalizeAgentHook(
 	elapsed time.Duration,
 	panicked bool,
 	extra map[string]string,
+	delivered bool,
 ) hookFinalizationResult {
+	receipted, _ := ctx.Value(hookDeliveryReceiptContextKey{}).(bool)
+	// clientLeft: a script caller that left without a delivery receipt. No
+	// answer reaches it, so what is recorded is only what the gateway can prove.
+	client, hasClient := ctx.Value(hookClientContextKey{}).(context.Context)
+	clientLeft := hasClient && client.Err() != nil && !receipted
+	if clientLeft && resp.Action != hookActionUnconfirmed {
+		resp = a.clientLeftHookDecision(ctx, connectorName, req, rawBody, resp)
+	}
 	// Treat a block response as enforced unless identity stamping proves
 	// otherwise. If identity stamping itself panics, notification stays
 	// fail-closed behind canonical enforcement persistence.
-	result := hookFinalizationResult{Enforced: resp.Action == "block"}
+	result := hookFinalizationResult{Enforced: resp.Action == "block", Response: resp}
+	// A recovered journal row writes only its durable records. A sandbox
+	// acknowledgement is a live answer even though it reuses the pending
+	// occurrence IDs to deduplicate audit writes.
+	live := !req.pendingRecovery || req.sandboxReceiptAcknowledgment
 	safeSection := func(section string, fn func()) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
@@ -761,6 +1579,7 @@ func (a *APIServer) finalizeAgentHook(
 					fmt.Sprintf("hook finalize %s panic: %v", section, recovered))
 			}
 		}()
+		hookStageForTest(ctx, "finalize_"+section)
 		fn()
 	}
 
@@ -770,16 +1589,13 @@ func (a *APIServer) finalizeAgentHook(
 	// rule_pack_dir). step_idx has a per-turn side effect, so it MUST be
 	// computed exactly once; stamping here (rather than per-sink) keeps
 	// the OTel log/span and the audit row in agreement (DN2 parity).
-	envResult := "ok"
-	if panicked {
-		envResult = "panic"
-	}
 	env := HookAuditEnvelope{
 		Connector:    connectorName,
 		Event:        req.HookEventName,
-		Result:       envResult,
+		Result:       "ok",
 		Action:       resp.Action,
 		RawAction:    resp.RawAction,
+		Enforced:     resp.Action == "block",
 		Severity:     resp.Severity,
 		Mode:         resp.Mode,
 		Reason:       hookSourceReason(resp),
@@ -790,48 +1606,55 @@ func (a *APIServer) finalizeAgentHook(
 		RawEventIDs:  rawEventIDs,
 		EvaluationID: resp.EvaluationID,
 		RuleIDs:      resp.RuleIDs,
+		// The connected Cowork folders ride in their own path-class field.
+		WorkspaceHostPaths: coworkWorkspaceHostPaths(ctx),
 	}
-	if panicked {
-		env.Extra = map[string]string{"panic": "true"}
+	if req.pendingOccurrenceID != "" {
+		env.occurrenceID = req.pendingOccurrenceID
+		env.BodyBytes = req.pendingBodyBytes
 	}
 	env.Extra = mergeHookEnvelopeExtra(env.Extra, extra)
+	if reason := hookJudgeFallbackReason(ctx); reason != "" {
+		// The rules decided because the judge gave no verdict in time (#1395).
+		env.Extra = mergeHookEnvelopeExtra(env.Extra, map[string]string{hookJudgeFallbackExtraKey: reason})
+	}
+	// Every panic recovered before the call's audit row is written is an
+	// evaluator failure on its row and export, whatever verdict was kept: the
+	// evaluator's, a later additive check's, a renderer's or the identity
+	// section's (GAP-0900). The row and the hook_decision export are one
+	// record of the decision and carry one result, so once the row is written
+	// its result is fixed for the export too. A panic in a section after the
+	// row (the status counters, the sandbox record, the managed hook join, the
+	// sensitive-result alert) changes no verdict: handleHookPanic counts it in
+	// defenseclaw.panics.total and logs its stack. A call without a row (the
+	// write failed or panicked, or no audit store is configured) is recorded
+	// by its export alone, which takes every panic recovered before it.
+	recordPanic := func() {
+		if result.AuditPersisted {
+			return
+		}
+		if panicked || hookPanicRecovered(ctx) {
+			env.Result = "panic"
+			env.Extra = mergeHookEnvelopeExtra(env.Extra, map[string]string{"panic": "true"})
+		}
+	}
+	recordPanic()
 	safeSection("identity", func() {
-		a.stampHookEnvelopeIdentity(ctx, connectorName, &env, req, resp)
+		if req.pendingProvenance != nil {
+			// A journaled call was stamped before its answer was offered.
+			req.pendingProvenance.stamp(&env)
+			env.Enforced = resp.Action == "block"
+		} else {
+			a.stampHookEnvelopeIdentity(ctx, connectorName, &env, req, resp)
+		}
 		result.Enforced = env.Enforced
 		// These fields describe the already-active HTTP/hook span. They are
 		// independent of metric export and must remain available even when the
 		// destination collects traces but not metrics.
-		enrichConnectorHookIdentitySpan(ctx, env.StepIdx, env.Enforced, env.RulePackDir)
-	})
-
-	safeSection("health", func() {
-		if !a.recordsConnectorHealth(ctx) {
-			return
-		}
-		a.health.RecordConnectorRequestFor(connectorName)
-		if connName(connectorName) == "opencode" {
-			loadProof, _ := req.Payload["load_heartbeat"].(bool)
-			if canonicalEvent(req.HookEventName) == "defenseclawpluginloaded" || loadProof {
-				a.health.RecordConnectorLoadHeartbeatFor(connectorName)
-			}
-		}
-		if resp.Action == "block" {
-			a.health.RecordToolBlockFor(connectorName)
-		}
-		if isGenericToolInspectionEvent(req.HookEventName) {
-			a.health.RecordToolInspectionFor(connectorName)
+		if live {
+			enrichConnectorHookIdentitySpan(ctx, env.StepIdx, env.Enforced, env.RulePackDir)
 		}
 	})
-	safeSection("sandbox", func() {
-		a.observeSandboxHookDecision(ctx, req, resp)
-	})
-	if !panicked {
-		// Before the response is written, so the decision is in the
-		// runtime planes' join ring when the tool's process starts.
-		safeSection("hook_join", func() {
-			a.recordManagedHookDecision(ctx, connectorName, req, resp)
-		})
-	}
 
 	// Compose both durable-audit invariants:
 	// (a) GAP-1536: a hook whose correlation ledger write failed (disk full)
@@ -845,30 +1668,221 @@ func (a *APIServer) finalizeAgentHook(
 	// enforcement companion that #850 wanted to persist here is not
 	// forward-ported; the primary hook_decision log + audit row are the
 	// only durable artefacts of this decision in Part 1.
-	if !req.SuppressCorrelationEmit || req.CorrelationUnavailable {
-		safeSection("observability_v8", func() {
-			a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
-			// With no companion to persist, an enforced hook is
-			// notification-ready as soon as the audit row below lands.
-			result.EnforcementPersisted = env.Enforced
-			if !panicked {
-				a.emitHookGuardrailOutcomeV8(ctx, req, resp, elapsed)
-			}
-		})
-	}
-	// Every verdict has its audit row, save the exact replay of a delivery
-	// whose row is already persisted: a hook whose correlation failed is
-	// audited too.
-	if !req.SuppressCorrelationEmit || req.CorrelationUnavailable {
+	replay := a.hookReplayWritesNoRow(ctx, req, resp)
+	// Every verdict has its audit row, save the exact replay of an allowed
+	// delivery whose row is already persisted: a hook whose correlation
+	// failed is audited too, and a block always has its own row (GAP-1060). The row is written first, so the export, the status
+	// counters, the sandbox's record, the managed hook join and the span all
+	// carry the verdict the agent gets: a call whose row could not be written
+	// gets the fail-mode verdict instead of its computed allow, unless that
+	// allow was already delivered.
+	recordPanic()
+	if !replay {
+		var auditErr error
 		safeSection("audit", func() {
-			auditErr := a.logConnectorHookAuditEnvelope(ctx, env)
-			result.AuditPersisted = auditErr == nil
-			if !panicked {
-				a.alertSensitiveHookToolResult(ctx, connectorName, req, resp)
+			if req.pendingRecovery && a.store != nil {
+				// A recovered pending occurrence whose row already landed
+				// is not written twice (w3-g3-obs).
+				persisted, err := a.store.HasAuditEventID(ctx, req.pendingOccurrenceID)
+				if err != nil {
+					auditErr = err
+					return
+				}
+				if persisted {
+					result.AuditPersisted = true
+					return
+				}
 			}
+			// The rows the call queued commit with its audit row, and the
+			// verdict waits for that commit, as it waited for its row alone.
+			auditCtx, auditOutcome := audit.WithCallWriteOutcome(ctx)
+			auditErr = a.logConnectorHookAuditEnvelope(auditCtx, env)
+			audit.FlushCallWrites(ctx)
+			if auditErr == nil {
+				auditErr = auditOutcome.Err()
+			}
+			result.AuditPersisted = auditErr == nil
+		})
+		// A call backed by a pending occurrence (w3-g3-obs; only a
+		// receipt-capable delivery has one) is recovered from the published
+		// occurrence, which holds the answer the agent got: the records keep
+		// that answer instead of a fail-mode verdict the agent never saw.
+		recoverable := req.pendingOccurrenceID != ""
+		if !result.AuditPersisted && !panicked && !errors.Is(auditErr, errHookAuditNotConfigured) {
+			if auditErr == nil {
+				auditErr = errors.New("the audit section panicked")
+			}
+			adjusted, denied := resp, false
+			// A pending occurrence keeps its delivery state for recovery: never
+			// report a retroactive block the agent did not receive (s2-obs). An
+			// answer already on the wire (delivered) is never replaced either.
+			if !delivered && !recoverable && req.pendingOccurrenceID == "" {
+				if !clientLeft || resp.Action != hookActionUnconfirmed {
+					// An unconfirmed call whose client left stays unconfirmed:
+					// an audit fault must not turn a proposal nobody delivered
+					// into a block (GAP-1028, GAP-1031).
+					adjusted, denied = a.hookAuditFailureResponse(ctx, connectorName, req, rawBody, resp)
+				}
+				// The answer goes out with no row; keep the call's record
+				// outside the store for the failure report (GAP-1031).
+				a.recordUnauditedHookCall(connectorName, req, adjusted)
+			}
+			resp = adjusted
+			env.adoptVerdict(resp)
+			result.Enforced, result.Response, result.AuditFailedClosed = env.Enforced, resp, denied
+			if denied {
+				safeSection("span", func() {
+					enrichConnectorHookIdentitySpan(ctx, env.StepIdx, env.Enforced, env.RulePackDir)
+					enrichAgentHookSpan(ctx, req, resp, elapsed)
+				})
+			}
+			fmt.Fprintf(os.Stderr, "[gateway] hook audit persistence failed connector=%s event=%s action=%s denied_for_audit=%t delivered=%t: %v\n",
+				connectorName, req.HookEventName, resp.Action, denied, delivered, auditErr)
+		}
+	}
+	if req.sandboxReceiptAcknowledgment && !result.AuditPersisted {
+		// This answer has not reached its sandbox agent. Do not emit a
+		// decision or count an allow while its audit write is uncertain;
+		// the receipt handler either confirms an existing row or closes.
+		return result
+	}
+	if !replay && result.AuditPersisted && !panicked {
+		safeSection("pre_tool_audit", func() {
+			a.auditMissingPreToolDecision(ctx, req, resp)
 		})
 	}
+
+	safeSection("health", func() {
+		if !live || !a.recordsConnectorHealth(ctx) {
+			return
+		}
+		a.health.RecordConnectorRequestFor(connectorName)
+		if _, cowork := coworkFromContext(ctx); cowork {
+			a.health.RecordConnectorSurfaceRequestFor(connectorName, connector.CoworkSurface, req.HookEventName)
+			// Kept across a gateway restart for status and doctor (GAP-0038).
+			persistCoworkActivity(a.configDataDir(), req.HookEventName, time.Now())
+		}
+		if connName(connectorName) == "opencode" {
+			loadProof, _ := req.Payload["load_heartbeat"].(bool)
+			if canonicalEvent(req.HookEventName) == "defenseclawpluginloaded" || loadProof {
+				a.health.RecordConnectorLoadHeartbeatFor(connectorName)
+			}
+		}
+		if resp.Action == "block" {
+			a.health.RecordToolBlockFor(connectorName)
+		}
+		if isGenericToolInspectionEvent(req.HookEventName) {
+			a.health.RecordToolInspectionFor(connectorName)
+		}
+	})
+	if live {
+		safeSection("sandbox", func() {
+			a.observeSandboxHookDecision(ctx, req, resp)
+		})
+	}
+	if live && !panicked {
+		// Before the response is written, so the decision is in the
+		// runtime planes' join ring when the tool's process starts.
+		safeSection("hook_join", func() {
+			a.recordManagedHookDecision(ctx, connectorName, req, resp)
+		})
+	}
+	if replay {
+		result.Panicked = env.Result == "panic"
+		return result
+	}
+	if live && !panicked {
+		safeSection("sensitive_result", func() {
+			a.alertSensitiveHookToolResult(ctx, connectorName, req, resp)
+		})
+	}
+	recordPanic()
+	safeSection("observability_v8", func() {
+		if req.pendingRecovery && a.store != nil {
+			var err error
+			result.DecisionSettled, err = a.store.HasAuditEventID(ctx, req.pendingOccurrenceID+"-decision")
+			if err != nil {
+				return
+			}
+		}
+		if !result.DecisionSettled {
+			decisionBaseCtx := ctx
+			if ctx.Err() != nil {
+				if renewed, cancel := a.hookDeliveredPersistenceContext(ctx, req.pendingOccurrenceID != "" && delivered); cancel != nil {
+					decisionBaseCtx = renewed
+					defer cancel()
+				}
+			}
+			decisionCtx, decisionOutcome := audit.WithCallWriteOutcome(decisionBaseCtx)
+			decision := a.emitHookDecisionObservabilityV8(decisionCtx, req, resp, env, panicked)
+			// The hook_decision record is committed before the answer.
+			audit.FlushCallWrites(decisionBaseCtx)
+			result.DecisionSettled = decision.settled() && decisionOutcome.Err() == nil
+			if decision == hookDecisionLogUnbuildable && req.pendingOccurrenceID != "" {
+				fmt.Fprintf(os.Stderr, "[gateway] hook_decision record cannot be built connector=%s event=%s; the connector audit row keeps the decision\n",
+					connectorName, req.HookEventName)
+			}
+		}
+		// With no companion to persist, an enforced hook is
+		// notification-ready as soon as its audit row has landed.
+		result.EnforcementPersisted = env.Enforced
+		if live && !panicked {
+			a.emitHookGuardrailOutcomeV8(ctx, req, resp, elapsed)
+		}
+	})
+	result.Panicked = env.Result == "panic"
 	return result
+}
+
+// hookAuditFailureResponse is the verdict of an accepted hook whose audit row
+// could not be written: the disk is full, or the audit store stayed busy
+// through its busy timeout and retries. A computed allow in a per-user
+// balanced or permissive tier remains allowed with a visible degraded-audit
+// alert. Strict and managed installs stay closed; Secure Client keeps its
+// separate failure contract. An existing block is never weakened. rawBody is
+// the hook's request body: Claude Code's native denial
+// (hookSpecificOutput.permissionDecision) is rendered from the event it
+// names, and without it the denial fell back to a generic decision:block.
+func (a *APIServer) hookAuditFailureResponse(
+	ctx context.Context,
+	connectorName string,
+	req agentHookRequest,
+	rawBody []byte,
+	resp agentHookResponse,
+) (agentHookResponse, bool) {
+	if resp.Action == "block" {
+		return resp, false
+	}
+	cfg := a.decisionConfig(ctx)
+	if (resp.Action == "allow" || resp.Action == hookActionUnconfirmed && resp.RawAction == "allow") &&
+		cfg != nil && !managed.IsManagedEnterprise(cfg.DeploymentMode) &&
+		cfg.HookPolicyTierForConnector(connectorName) != config.HookPolicyTierStrict &&
+		!sandboxHookForConnector(ctx, connectorName) {
+		// A missing receipt leaves a decision unconfirmed, but an audit
+		// failure still gives a balanced caller its visible allow answer.
+		resp.Action = "allow"
+		resp.RawAction = "alert"
+		resp.Severity = "WARN"
+		resp.WouldBlock = false
+		resp.SourceReason = "defenseclaw audit is degraded"
+		return a.renderSandboxVerdict(ctx, a.hookProfileForRequest(ctx, connectorName), req, rawBody, req.Payload, resp,
+			"DefenseClaw audit is degraded: this call was allowed, but its audit record could not be written. Check the DefenseClaw data directory and gateway log."), false
+	}
+	failure := hookCheckFailure{
+		base: agentHookResponse{
+			Severity: "WARN",
+			Reason:   "defenseclaw audit record could not be written",
+			AdditionalContext: fmt.Sprintf("DefenseClaw could not write the audit record of %s/%s. Operators: check the free space of the DefenseClaw data directory and the gateway log for \"hook audit persistence failed\".",
+				connectorName, req.HookEventName),
+		},
+		cause: "because it could not write the call's audit record",
+	}
+	closed := a.hookFailedCheckResponse(ctx, connectorName, req, rawBody, req.Payload, failure)
+	if closed.Action != "block" {
+		return resp, false
+	}
+	closed.EvaluationID = resp.EvaluationID
+	return closed, true
 }
 
 // dispatchFinalizedAgentHookNotification prevents a user-visible notification
@@ -914,6 +1928,17 @@ func (a *APIServer) hookDecisionMeta(
 	ctx context.Context,
 	req agentHookRequest,
 ) (llmEventMeta, string, bool) {
+	if req.ConnectorName == "opencode" && req.HookEventName == "defenseclaw.plugin.loaded" {
+		// A plugin load comes before any session, so it has no agent
+		// instance: it is a lifecycle event, and its connector audit row
+		// stays, rather than a hook decision that cannot name the instance
+		// (GAP-0577). A load that does carry an instance, and Secure Client,
+		// keep their decision.
+		cfg := a.decisionConfig(ctx)
+		if (cfg == nil || !cfg.SecureClientIntegration()) && AgentIdentityFromContext(ctx).AgentInstanceID == "" {
+			return llmEventMeta{}, "", false
+		}
+	}
 	source := strings.TrimSpace(req.ConnectorName)
 	if source == "" {
 		return llmEventMeta{}, "", false
@@ -941,11 +1966,13 @@ func (a *APIServer) hookDecisionMeta(
 	meta = a.applyCursorToolEventOutcome(meta, req.HookEventName, req.Payload)
 	meta = a.reconcileHookParent(meta)
 	meta = a.mergeHookSessionLifecycle(meta)
-	if snapshot, ok := a.hookPhaseSnapshot(meta); ok {
-		// The lifecycle emitter advanced the execution cursor immediately
-		// before evaluation. Reuse its phase/sequence/operation identifiers
-		// so the decision nests beside that hook transition rather than
-		// looking like a second, synthetic phase change.
+	if snapshot, ok := a.hookDeliveryPhaseSnapshot(meta, req.Payload); ok {
+		// The lifecycle emitter recorded this delivery's transition
+		// immediately before evaluation. Reuse its phase/sequence/operation
+		// identifiers so the decision nests beside that hook transition
+		// rather than looking like a second, synthetic phase change. The
+		// transition is this request's own (by its tool-use id), never the
+		// session cursor's latest, which a concurrent hook may have advanced.
 		//
 		// Start events are the important exception to the ordinary merge
 		// rule: mergeHookSessionLifecycle intentionally preserves a newly
@@ -975,6 +2002,11 @@ func (a *APIServer) hookDecisionMeta(
 	meta.AgentType = firstNonEmpty(meta.AgentType, identity.AgentType)
 
 	correlation := audit.EnvelopeFromContext(ctx)
+	if strings.EqualFold(source, "hermes") && req.HookEventName == "transform_terminal_output" &&
+		req.SessionID == "" && identity.IdentityVerified && correlation.SessionID != "" {
+		meta.SessionID = correlation.SessionID
+		meta.AgentID = correlation.AgentID
+	}
 	meta.RunID = firstNonEmpty(meta.RunID, correlation.RunID)
 	meta.RequestID = firstNonEmpty(meta.RequestID, correlation.RequestID)
 	meta.PolicyID = firstNonEmpty(meta.PolicyID, correlation.PolicyID)
@@ -986,31 +2018,11 @@ func (a *APIServer) hookDecisionMeta(
 	return meta, source, true
 }
 
-// renderAgentHookResponse projects the unified agentHookResponse
-// shape onto the wire JSON shape each connector's agent CLI
-// expects. The fixed agentHookResponse JSON tag for HookOutput
-// ("hook_output") works for generic hookOnly connectors
-// (hermes/cursor/devin/copilot) but Claude Code and
-// Codex agents expect "claude_code_output" and "codex_output"
-// respectively. Rendering as a map[string]interface{} lets us pick
-// the right top-level key per connector while keeping
-// agentHookResponse a single struct for all internal callers.
-//
-// Field name choice is driven by hookOutputFieldName(connectorName)
-// — a single function so adding a new connector with a different
-// output key (e.g. a future zeptoclaw_output) is a one-line change.
-// HookProfile.Respond.FieldName would be the obvious source of
-// truth here, but consulting it requires loading the registry and
-// constructing a profile per request; this hot-path helper inlines
-// the mapping for sub-microsecond cost. The connector_hook_profile
-// tests still assert FieldName parity so the two cannot drift.
-func renderAgentHookResponse(connectorName string, resp agentHookResponse) map[string]interface{} {
-	return renderAgentHookResponseForProfile(connector.HookProfile{
-		Name:              connectorName,
-		ResponseFieldName: hookOutputFieldName(connectorName),
-	}, resp)
-}
-
+// renderAgentHookResponseForProfile projects the unified
+// agentHookResponse onto the wire JSON each connector's agent CLI expects:
+// the output map goes under the profile's ResponseFieldName, else
+// hookOutputFieldName (Claude Code and Codex read "claude_code_output" and
+// "codex_output"; the others read "hook_output").
 func renderAgentHookResponseForProfile(profile connector.HookProfile, resp agentHookResponse) map[string]interface{} {
 	severity := resp.Severity
 	if severity == "" {
@@ -1055,6 +2067,12 @@ func renderAgentHookResponseForProfile(profile connector.HookProfile, resp agent
 	}
 	if len(resp.RuleIDs) > 0 {
 		out["rule_ids"] = resp.RuleIDs
+	}
+	if resp.AgentIdentityID != "" {
+		out["agent_identity_id"] = resp.AgentIdentityID
+	}
+	if resp.AgentInstanceID != "" {
+		out["agent_instance_id"] = resp.AgentInstanceID
 	}
 	return out
 }
@@ -1200,11 +2218,13 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 	// Keep observability and audit row gated by the same replay classification
 	// so a suppressed replay stays silent on both; the enforcement companion
 	// that #850 wanted here is not forward-ported in Part 1.
-	if !req.SuppressCorrelationEmit || req.CorrelationUnavailable {
+	silent := a.hookReplayWritesNoRow(ctx, req, resp)
+	if !silent {
 		a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
 	}
-	// As in finalizeAgentHook: only an exact replay goes without its row.
-	if !req.SuppressCorrelationEmit || req.CorrelationUnavailable {
+	// As in finalizeAgentHookAnswer: only an exact replay of an allow goes
+	// without its row.
+	if !silent {
 		if err := a.logConnectorHookAuditEnvelope(ctx, env); err != nil {
 			fmt.Fprintf(os.Stderr, "[gateway] synthetic hook audit persistence failed connector=%s event=%s: %v\n",
 				connectorName, req.HookEventName, err)
@@ -1279,6 +2299,7 @@ var hookReasonLabelAllowlist = map[string]struct{}{
 	"alert":       {},
 	"confirm":     {},
 	"would_block": {},
+	"unconfirmed": {},
 	"panic":       {},
 	"other":       {},
 	"none":        {},
@@ -1399,6 +2420,16 @@ func hookCompatibilityExtra(profile connector.HookProfile) map[string]string {
 	return extra
 }
 
+// adoptVerdict replaces the envelope's verdict fields with resp, which took
+// the evaluated verdict's place after the envelope was stamped (a failed audit
+// write, hookAuditFailureResponse). The identity fields stamped once
+// (step_idx and the rule pack) stay.
+func (env *HookAuditEnvelope) adoptVerdict(resp agentHookResponse) {
+	env.Action, env.RawAction, env.Severity, env.Mode = resp.Action, resp.RawAction, resp.Severity, resp.Mode
+	env.Reason, env.WouldBlock = hookSourceReason(resp), resp.WouldBlock
+	env.Enforced = resp.Action == "block"
+}
+
 func mergeHookEnvelopeExtra(base map[string]string, extra map[string]string) map[string]string {
 	if len(extra) == 0 {
 		return base
@@ -1449,6 +2480,9 @@ func (a *APIServer) safeEvaluateHook(
 	payload map[string]interface{},
 	runtime hookProfileRuntime,
 ) (resp agentHookResponse, panicked bool) {
+	defer hookpaths.HookCall()()
+	baseCtx := ctx
+	ctx = withShareBodyStrict(ctx, func() bool { return a.shareBodyStrictTier(baseCtx, connectorName) })
 	defer func() {
 		if r := recover(); r != nil {
 			panicked = true
@@ -1475,6 +2509,9 @@ func (a *APIServer) safeEvaluateSyntheticHook(
 	connectorName string,
 	req agentHookRequest,
 ) (resp agentHookResponse, panicked bool) {
+	defer hookpaths.HookCall()()
+	baseCtx := ctx
+	ctx = withShareBodyStrict(ctx, func() bool { return a.shareBodyStrictTier(baseCtx, connectorName) })
 	defer func() {
 		if r := recover(); r != nil {
 			panicked = true
@@ -1497,21 +2534,57 @@ func safeHookPanicResponse(connectorName, eventName string) agentHookResponse {
 }
 
 // hookPanicResponse renders one fail-mode verdict for every recovery path.
-// Sandbox ingress has its own mandatory closed verdict and is rendered once.
-//
-// A recovered error produced no policy verdict. On a standalone managed
-// device it is answered like every other missing verdict there (gateway
-// unreachable, invalid response): the administrator-owned hook fails closed
-// whatever the guardrail mode or hook_fail_mode says, so a blockable tool or
-// prompt event gets the connector's native deny in observe mode too, and a
-// stop or session-end event keeps its neutral allow. Per-user installs and
-// the Secure Client profile keep the configured mode and fail mode.
 func (a *APIServer) hookPanicResponse(
 	ctx context.Context,
 	connectorName string,
 	req agentHookRequest,
 	rawBody []byte,
 	payload map[string]interface{},
+) agentHookResponse {
+	return a.hookFailedCheckResponse(ctx, connectorName, req, rawBody, payload, hookCheckFailure{
+		base:           safeHookPanicResponse(connectorName, req.HookEventName),
+		cause:          "because of an internal evaluator error",
+		recoveredPanic: true,
+	})
+}
+
+// hookCheckFailure is why a hook check could not complete: base carries the
+// audit source reason and the operator context, and cause ends the plain
+// sentence "DefenseClaw could not complete its hook check ...".
+type hookCheckFailure struct {
+	base           agentHookResponse
+	cause          string
+	recoveredPanic bool
+}
+
+// hookFailedCheckResponse renders the fail-mode verdict of a hook check that
+// could not complete. Sandbox ingress has its own mandatory closed verdict and
+// is rendered once.
+//
+// A failed check produced no usable policy verdict. One rule covers every
+// connector:
+//   - On an enforcement event (any event that is not a lifecycle event,
+//     hookexec.LifecycleEvent), a recovered panic or a failed audit write
+//     answers the closed verdict, in observe mode too: closed blocks every
+//     event whose native hook can carry a block (failedCheckNativeAction).
+//     An advisory event whose native hook has no block control gets the
+//     allow with would_block, audited as not enforced. It is no gateway
+//     outage, so neither a per-user outage mode nor an administrator's
+//     outage-open applies; only Secure Client keeps its open failure verdict.
+//   - On a stop, session-end or idle event a block keeps the agent running
+//     and repeats the failing hook, so no failed check blocks it. It gets the
+//     connector's neutral allow without follow-up context, or its terminal
+//     answer where the connector documents one (Claude Code's continue:false
+//     ends the turn). The audit row still records the evaluator failure.
+//
+// Other failed checks retain the native event-capability mapping.
+func (a *APIServer) hookFailedCheckResponse(
+	ctx context.Context,
+	connectorName string,
+	req agentHookRequest,
+	rawBody []byte,
+	payload map[string]interface{},
+	failure hookCheckFailure,
 ) (out agentHookResponse) {
 	if req.ConnectorName == "" {
 		req.ConnectorName = connectorName
@@ -1519,60 +2592,209 @@ func (a *APIServer) hookPanicResponse(
 	if req.Payload == nil {
 		req.Payload = payload
 	}
-	base := safeHookPanicResponse(connectorName, req.HookEventName)
+	base := failure.base
 	profile := a.hookProfileForRequest(ctx, connectorName)
 	mode := a.agentHookMode(ctx, connectorName)
-	action, wouldBlock := mapHookActionForProfile("block", "action", req.HookEventName, profile.Capabilities, profile, req.Payload)
-	if sandboxHookForConnector(ctx, connectorName) && action == "block" {
+	lifecycle := hookexec.LifecycleEvent(connectorName, req.HookEventName)
+	action, wouldBlock := failedCheckNativeAction(ctx, profile, connectorName, req, failure.recoveredPanic)
+	// A sandbox's mandatory closed verdict refuses what the agent can be
+	// refused. A block on a lifecycle event refuses nothing and repeats the
+	// hook, whatever failed (an evaluator panic or an audit write): the
+	// lifecycle rule below answers it.
+	if sandboxHookForConnector(ctx, connectorName) && action == "block" && !lifecycle {
 		resp := agentHookResponse{Action: action, RawAction: "block", Severity: base.Severity, Mode: "action", WouldBlock: wouldBlock, Reason: base.Reason, AdditionalContext: base.AdditionalContext}
 		return a.failSandboxHookClosed(ctx, profile, connectorName, req, rawBody, payload, resp)
 	}
 	cfg := a.decisionConfig(ctx)
-	standalone := cfg != nil && cfg.StandaloneEnterprise()
-	lifecycle := standalone && hookexec.NeutralLifecycleEvent(connectorName, req.HookEventName)
-	if standalone && action == "block" && !lifecycle {
-		// Observe mode lets policy verdicts through; it does not let a
-		// missing verdict through on a managed device.
+	// A local evaluation or audit failure is not a gateway connection outage.
+	// Secure Client retains its configured failure contract, including its
+	// unset open default (#1163). Every other deployment closes this failure,
+	// even with a saved per-user open or managed outage-open preference.
+	failOpen := cfg != nil && cfg.SecureClientIntegration() &&
+		cfg.EffectiveActionHookFailModeForConnector(connectorName) == "open"
+	if !failOpen && !lifecycle && (action == "block" || failure.recoveredPanic) {
+		// Observe mode applies to policy verdicts, not failed checks.
 		mode = "action"
 	}
-	if mode != "action" {
+	if mode != "action" && !failure.recoveredPanic {
 		action, wouldBlock = mapHookActionForProfile("block", mode, req.HookEventName, profile.Capabilities, profile, req.Payload)
 	}
-	plain := "DefenseClaw could not complete its hook check because of an internal evaluator error. "
+	plain := "DefenseClaw could not complete its hook check " + failure.cause + ". "
+	terminal, neutral := false, false
 	switch {
-	case mode != "action":
-		plain += "The call was allowed because the guardrail is in observe mode. Ask your administrator to review the hook and audit log."
-	case !standalone && cfg != nil && (cfg.SecureClientIntegration() || cfg.EffectiveActionHookFailModeForConnector(connectorName) == "open"):
+	case failOpen:
 		action, wouldBlock = "allow", true
 		plain += "The call was allowed because the hook fails open. Ask your administrator to review the hook and audit log."
+	case failure.recoveredPanic && lifecycle && terminalLifecycleEvent(connectorName, req.HookEventName):
+		action, wouldBlock, mode, terminal = "block", false, "action", true
+		plain += "The agent turn was stopped because the hook fails closed. Contact your administrator before continuing."
+	case lifecycle:
+		// A denied stop, session-end or idle event keeps the agent running
+		// instead of stopping a tool call, and the failing hook runs again.
+		action, wouldBlock, neutral = "allow", true, true
+		plain += "The event was allowed because a denial would keep the agent running instead of stopping a tool call. Ask your administrator to review the hook and audit log."
 	case action != "block":
 		plain += "The call could not be blocked on this hook event. Ask your administrator to review the hook and audit log."
-	case lifecycle:
-		// A denied stop or session-end event keeps the session running
-		// instead of stopping a tool call. Standalone managed hooks answer
-		// it neutrally, with the exact event set the native hook runner
-		// uses for foreign-hook failures and invalid gateway actions.
-		action, wouldBlock = "allow", true
-		plain += "The event was allowed because it ends the session, and a denial would keep the session running. Ask your administrator to review the hook and audit log."
 	default:
 		plain += "The call was blocked because the hook fails closed. Retry the call; if this continues, contact your administrator."
 	}
+	// A fail-open allow of a lifecycle event is neutral too: a would-block
+	// follow-up there starts another turn as well.
+	neutral = neutral || (lifecycle && action == "allow")
 	resp := agentHookResponse{Action: action, RawAction: "block", Severity: base.Severity, Mode: mode, WouldBlock: wouldBlock, Reason: plain, SourceReason: base.Reason, AdditionalContext: base.AdditionalContext}
+	// A lifecycle answer is fixed by the event, not by the verdict text: a
+	// rendered follow-up or veto would start another turn.
+	lifecycleOutput := func(out agentHookResponse) agentHookResponse {
+		switch {
+		case terminal:
+			out.HookOutput = map[string]interface{}{"continue": false, "stopReason": out.Reason}
+		case neutral:
+			out.HookOutput = neutralLifecycleHookOutput(ctx, profile, req, rawBody, payload, out)
+		}
+		return out
+	}
 	// A connector-owned response renderer can be the source of the original
 	// evaluation error. Keep the configured verdict if it fails again.
 	defer func() {
-		if recover() != nil {
+		if recovered := recover(); recovered != nil {
+			// Usually the failure the answer reports, recurring: it is on
+			// the hook panic capture and the log, not counted again.
+			markHookPanicRecovered(ctx)
+			fmt.Fprintf(os.Stderr, "[gateway] failed-check response render panic connector=%s event=%s: %v\n",
+				connectorName, req.HookEventName, recovered)
 			out = resp
-			out.HookOutput = hookOutputFor(req, resp.Action, resp.RawAction, plain, resp.AdditionalContext, profile.Capabilities)
+			out.HookOutput = failedCheckFallbackOutput(profile, req, resp.Action, resp.RawAction, plain, resp.AdditionalContext)
+			out = lifecycleOutput(out)
 		}
 	}()
-	return a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, resp, plain)
+	return lifecycleOutput(a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, resp, plain))
+}
+
+// failedCheckNativeAction is the closed answer of a failed check (and of a
+// profile refusal) before the fail mode and the lifecycle rule apply: the
+// event's certified native
+// control. That is a block where the connector's resolved contract can block
+// the event, and otherwise the advisory allow with would_block, so the agent,
+// the enforced audit field and the export agree. An advisory event's native
+// answer carries no denial: Antigravity PostToolUse answers {}, Cursor
+// afterFileEdit and the other after* events only observe. With
+// everyNativeBlock (a recovered panic, a profile refusal) it also blocks the
+// events whose native hook documents a block the policy contract does not
+// list (nativeOnlyBlockEvent): neither is a policy verdict the contract maps.
+// The profile's verdict mapper may be the failing code: if it panics, the
+// capability table answers.
+func failedCheckNativeAction(ctx context.Context, profile connector.HookProfile, connectorName string, req agentHookRequest, everyNativeBlock bool) (action string, wouldBlock bool) {
+	func() {
+		defer func() {
+			if recover() != nil {
+				markHookPanicRecovered(ctx)
+				action, wouldBlock = mapHookAction("block", "action", req.HookEventName, profile.Capabilities)
+			}
+		}()
+		action, wouldBlock = mapHookActionForProfile("block", "action", req.HookEventName, profile.Capabilities, profile, req.Payload)
+	}()
+	if everyNativeBlock && action == "allow" && nativeOnlyBlockEvent(connectorName, req.HookEventName) {
+		return "block", false
+	}
+	return action, wouldBlock
+}
+
+// nativeOnlyBlockEvent names the events whose native hook can block although
+// the resolved policy contract keeps them advisory. Claude Code
+// honors decision:block on PostToolBatch in every certified contract:
+// claudecode-hooks-v2 lists it as a block event, and v1, the contract of an
+// unversioned install, documents that it blocks continuation before the next
+// model call (GAP-0440).
+func nativeOnlyBlockEvent(connectorName, event string) bool {
+	return connectorName == "claudecode" && event == "PostToolBatch"
+}
+
+// terminalLifecycleEvent names the lifecycle events whose connector documents
+// a closed answer that ends processing without another hook call. Claude
+// Code's universal continue:false takes precedence over the event's retrying
+// decision:block, so a persistent failure cannot repeat Stop.
+func terminalLifecycleEvent(connectorName, event string) bool {
+	if connectorName != "claudecode" {
+		return false
+	}
+	switch event {
+	case "Stop", "SubagentStop", "TeammateIdle":
+		return true
+	}
+	return false
+}
+
+// neutralLifecycleHookOutput renders the connector's plain allow for a
+// lifecycle event, without the would-block context: Cursor submits any stop
+// message as the next prompt. It cannot panic: the callback-free renderer
+// answers when the connector's responder fails again.
+func neutralLifecycleHookOutput(
+	ctx context.Context,
+	profile connector.HookProfile,
+	req agentHookRequest,
+	rawBody []byte,
+	payload map[string]interface{},
+	resp agentHookResponse,
+) (output map[string]interface{}) {
+	resp.Action, resp.RawAction, resp.AdditionalContext = "allow", "allow", ""
+	defer func() {
+		if recover() != nil {
+			markHookPanicRecovered(ctx)
+			output = failedCheckFallbackOutput(profile, req, "allow", "allow", resp.Reason, "")
+		}
+	}()
+	return sandboxHookOutput(ctx, profile, req, rawBody, payload, nil, resp)
+}
+
+// failedCheckFallbackOutput is the native output of a failed check when the
+// connector's response renderer failed as well. It calls no profile callback,
+// and it renders the control the healthy answer carries for the event and the
+// hook surface: Claude Code's and Codex's event-specific denials (a
+// PermissionRequest denies through hookSpecificOutput.decision), the VS Code
+// Local harness's own dialect (hookSpecificOutput.permissionDecision, and
+// continue:false for a prompt), and the Copilot CLI hook file answering a VS
+// Code Local tool. A block the agent would not read as a denial would let the
+// call run while the audit records it enforced.
+func failedCheckFallbackOutput(profile connector.HookProfile, req agentHookRequest, action, rawAction, reason, additional string) map[string]interface{} {
+	switch {
+	case req.ConnectorName == "claudecode":
+		return claudeCodeOutput(claudeCodeHookRequest{HookEventName: req.HookEventName}, action, rawAction, reason, additional)
+	case req.ConnectorName == "codex":
+		return codexOutput(req.HookEventName, action, rawAction, reason, additional)
+	case req.ConnectorName == "copilot" && profile.ContractID == connector.CopilotVSCodeLocalContractID:
+		return connector.CopilotVSCodeLocalHookOutput(req.HookEventName, action,
+			connectorReason(req.ConnectorName, action, req.ToolName, reason), additional)
+	}
+	return hookOutputFor(req, action, rawAction, reason, additional, profile.Capabilities)
+}
+
+// nativeFallbackOutput is the native output of an answer whose connector
+// renderer panicked: the callback-free render of failedCheckFallbackOutput. A
+// bare block without its native control reaches some agents as an allow
+// while the audit records it enforced.
+func nativeFallbackOutput(profile connector.HookProfile, connectorName string, req agentHookRequest, action, reason string) (output map[string]interface{}) {
+	defer func() {
+		if recover() != nil {
+			output = nil
+		}
+	}()
+	if req.ConnectorName == "" {
+		req.ConnectorName = connectorName
+	}
+	return failedCheckFallbackOutput(profile, req, action, "block", reason, "")
 }
 
 // handleHookPanic centralises the side-effects of a recovered hook panic. The
 // stack remains local on stderr; generated v8 telemetry receives only the
 // bounded panic counter and durable content-free health transition.
 func (a *APIServer) handleHookPanic(ctx context.Context, connectorName, eventName string, recovered any) {
+	markHookPanicRecovered(ctx)
+	a.recordHookPanic(ctx, connectorName, eventName, recovered)
+}
+
+// recordHookPanic logs a recovered hook panic with its stack and counts it,
+// without marking the hook's check failed: handleHookPanic does both.
+func (a *APIServer) recordHookPanic(ctx context.Context, connectorName, eventName string, recovered any) {
 	stack := debug.Stack()
 	fmt.Fprintf(os.Stderr, "[gateway] PANIC recovered in hook evaluator connector=%s event=%s value=%v\n%s\n",
 		connectorName, eventName, recovered, stack)
@@ -1582,10 +2804,77 @@ func (a *APIServer) handleHookPanic(ctx context.Context, connectorName, eventNam
 	}
 }
 
+// hookPanicCaptureKey carries a hook request's recovered-panic record. Every
+// recovery on the hook path reports through handleHookPanic (or, where it has
+// no server, markHookPanicRecovered), so finalization knows that the hook's
+// check failed wherever the panic was recovered: the evaluator, an additive
+// check after it (artifact promotion, tool-call chains), a verdict decorator
+// (the sandbox reason, the kernel-denial notice), a renderer or a
+// finalization section (GAP-0900).
+type hookPanicCaptureKey struct{}
+
+type hookPanicCapture struct{ recovered atomic.Bool }
+
+func withHookPanicCapture(ctx context.Context) context.Context {
+	return context.WithValue(ctx, hookPanicCaptureKey{}, &hookPanicCapture{})
+}
+
+// markHookPanicRecovered records a recovered panic on ctx's hook request. It
+// runs inside recovery paths, so it cannot panic itself.
+func markHookPanicRecovered(ctx context.Context) {
+	defer func() { _ = recover() }()
+	if ctx == nil {
+		return
+	}
+	if capture, _ := ctx.Value(hookPanicCaptureKey{}).(*hookPanicCapture); capture != nil {
+		capture.recovered.Store(true)
+	}
+}
+
+// hookPanicRecovered reports whether a panic was recovered while ctx's hook
+// request was answered.
+func hookPanicRecovered(ctx context.Context) (recovered bool) {
+	defer func() {
+		if recover() != nil {
+			recovered = true
+		}
+	}()
+	if ctx == nil {
+		return false
+	}
+	capture, _ := ctx.Value(hookPanicCaptureKey{}).(*hookPanicCapture)
+	return capture != nil && capture.recovered.Load()
+}
+
+// hookStagePanicHook is a test-only seam, like hookEvaluatorPanicHook: when
+// non-nil it runs at the named stages of a hook answer (the additive checks
+// and decorators after evaluation, the delivered and the finalized answer),
+// so a test can inject a panic there. Production never sets it.
+var hookStagePanicHook func(ctx context.Context, stage string)
+
+func hookStageForTest(ctx context.Context, stage string) {
+	if hookStagePanicHook != nil {
+		hookStagePanicHook(ctx, stage)
+	}
+}
+
 func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.Context {
 	ctx = ContextWithSessionID(ctx, req.SessionID)
 	identity := agentIdentityForGenericHook(ctx, req)
 	ctx = ContextWithAgentIdentity(ctx, identity)
+	var auditSessionID string
+	if strings.EqualFold(req.ConnectorName, "hermes") && req.SessionID == "" &&
+		audit.EnvelopeFromContext(ctx).SessionID == "" &&
+		req.HookEventName == "transform_terminal_output" && identity.IdentityVerified {
+		if reg := SharedAgentRegistry(); reg != nil {
+			if session, agent, instance := reg.hermesRecentSession(ctx, identity.IdentityID, time.Now()); session != "" {
+				auditSessionID = session
+				identity.AgentID = firstNonEmpty(identity.AgentID, agent)
+				identity.AgentInstanceID = instance
+				ctx = ContextWithAgentIdentity(ctx, identity)
+			}
+		}
+	}
 	// Refresh the audit correlation envelope with payload-derived
 	// correlation. CorrelationMiddleware snapshots the envelope
 	// from the HTTP headers BEFORE this handler runs; for hook
@@ -1601,16 +2890,32 @@ func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.C
 	// payload provides a more specific value, so a hook posted on
 	// a different session than the inbound header takes precedence.
 	ctx = refreshAuditEnvelopeFromHook(ctx, req, identity)
+	if auditSessionID != "" {
+		ctx = refreshAuditEnvelopeFromIdentity(ctx, auditSessionID, identity)
+	}
 	// Stamp the connector identity onto the audit envelope so every
 	// downstream surface (audit rows, canonical records, and routed exports) can filter by
 	// connector with the same identity. The hook payload's connector is
 	// authoritative on multi-connector installs.
-	if conn := strings.TrimSpace(req.ConnectorName); conn != "" {
-		env := audit.EnvelopeFromContext(ctx)
-		if env.Connector != conn {
-			env.Connector = conn
-			ctx = audit.ContextWithEnvelope(ctx, env)
-		}
+	//
+	// The tool and turn IDs of the request go on the envelope here too, not
+	// only once correlation is written (contextWithHookCorrelation): a hook
+	// whose correlation failed (concurrent hooks of one session, a busy
+	// store) still names its tool call on its connector-hook and
+	// hook_decision records (GAP-0980).
+	env := audit.EnvelopeFromContext(ctx)
+	changed := false
+	if conn := strings.TrimSpace(req.ConnectorName); conn != "" && env.Connector != conn {
+		env.Connector, changed = conn, true
+	}
+	if req.ToolInvocationID != "" && env.ToolID != req.ToolInvocationID {
+		env.ToolID, changed = req.ToolInvocationID, true
+	}
+	if req.TurnID != "" && env.TurnID != req.TurnID {
+		env.TurnID, changed = req.TurnID, true
+	}
+	if changed {
+		ctx = audit.ContextWithEnvelope(ctx, env)
 	}
 	return ctx
 }
@@ -1704,9 +3009,16 @@ func agentIdentityForGenericHook(ctx context.Context, req agentHookRequest) Agen
 	// who send the same session id get different instances.
 	facts := resolveHookAgentIdentity(ctx, req)
 	identity.IdentityID, identity.IdentityVerified = facts.ID, facts.Verified
-	newSession := false
+	newSession, subagentInstance := false, ""
 	if reg := SharedAgentRegistry(); reg != nil {
 		resolved, minted := reg.ResolveForAgentIdentity(ctx, facts.ID, req.SessionID, identity.AgentID)
+		if strings.EqualFold(req.ConnectorName, "hermes") {
+			// Hermes reports its logical id on a session's first events but
+			// often omits it on later events of that same session.
+			if id := reg.hermesAgentIDForSession(ctx, facts.ID, req.SessionID, identity.AgentID); identity.AgentID == "" && id != "" {
+				resolved.AgentID = id
+			}
+		}
 		if identity.AgentID == "" {
 			identity.AgentID = resolved.AgentID
 		}
@@ -1719,6 +3031,7 @@ func agentIdentityForGenericHook(ctx context.Context, req agentHookRequest) Agen
 		if facts.ID != "" && identity.AgentInstanceID != "" {
 			if subagent := hookSubagentID(req); subagent != "" {
 				identity.AgentInstanceID = agentidentity.SubagentInstanceID(identity.AgentInstanceID, subagent)
+				subagentInstance = identity.AgentInstanceID
 			}
 		}
 	}
@@ -1728,6 +3041,7 @@ func agentIdentityForGenericHook(ctx context.Context, req agentHookRequest) Agen
 		sharedAgentIdentities.observe(facts, "", false)
 	default:
 		sharedAgentIdentities.observe(facts, req.SessionID, newSession)
+		sharedAgentIdentities.observeSubagent(facts.ID, req.SessionID, subagentInstance, identity.AgentInstanceID)
 	}
 	return identity
 }
@@ -1837,9 +3151,13 @@ func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload
 			"event_name",
 			"eventName",
 			"agent_action_name",
+			"event",
 		)
-		if event == "" {
-			event = inferAgentHookEvent(payload)
+		if event == "" && connectorName == "hermes" {
+			// Hermes releases also use `event` for the same hook event.
+			// Keep this connector-scoped: other agents use that field for
+			// unrelated content and its provenance is not a hook binding.
+			event = firstString(payload, "event")
 		}
 	}
 	values := make(map[connector.CorrelationTarget]connector.CorrelationValue)
@@ -1941,6 +3259,7 @@ func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload
 			}
 		}
 	}
+	toolNameIsLabel := toolName == ""
 	if toolName == "" {
 		// Label-only mapping for lifecycle events that carry no tool:
 		// session start/end → "session", subagent stop → "subagent",
@@ -1984,6 +3303,7 @@ func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload
 	if args == nil {
 		args = firstValue(payload, "tool_info", "toolInfo")
 	}
+	argsAreEnvelope := args == nil
 	if args == nil {
 		args = payload
 	}
@@ -2054,8 +3374,9 @@ func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload
 		CorrelationProfileVersion: spec.ProfileVersion, CorrelationCompleteness: spec.Completeness,
 		CorrelationSurface: connector.CorrelationSurfaceHook, CorrelationOrigins: origins,
 		CorrelationValues: values, CorrelationIdentifiers: identifiers,
-		CWD: cwd, ToolName: toolName, ToolArgs: json.RawMessage(argBytes),
-		Content: content, Direction: direction, Payload: payload,
+		CWD: cwd, ToolName: toolName, ToolNameIsLabel: toolNameIsLabel, ToolArgs: json.RawMessage(argBytes),
+		ToolArgsAreHookEnvelope: argsAreEnvelope,
+		Content:                 content, Direction: direction, Payload: payload,
 		AgentIdentityID: agentIdentityID,
 	}
 }
@@ -2096,22 +3417,31 @@ func normalizeAgentHookRequestWithRawProfileEvent(connectorName string, payload 
 	}
 	if decoded.ToolName != "" {
 		req.ToolName = decoded.ToolName
+		req.ToolNameIsLabel = decoded.ToolNameIsLabel
 	}
+	req.ToolCallUnparsed = decoded.ToolCallUnparsed
 	if decoded.ToolArgsAuthoritative {
 		req.ToolArgs = append(json.RawMessage(nil), decoded.ToolArgs...)
 		req.ToolArgsProjectionUncertain = len(req.ToolArgs) == 0
+		req.ToolArgsAreHookEnvelope = false
 		if len(req.ToolArgs) == 0 {
 			req.ToolArgs = json.RawMessage(`{}`)
 		}
 	} else if len(decoded.ToolArgs) != 0 {
 		req.ToolArgs = append(json.RawMessage(nil), decoded.ToolArgs...)
+		req.ToolArgsAreHookEnvelope = false
 	}
 	// The raw-payload decoder is the final authority for native tool arguments.
 	// An empty result stays valid JSON but records parser uncertainty downstream.
 	if profile.DecodeToolArgs != nil && len(rawPayload) != 0 {
 		toolArgs := profile.DecodeToolArgs(rawPayload)
 		req.ToolArgsProjectionUncertain = len(toolArgs) == 0
+		req.ToolArgsAreHookEnvelope = false
 		if len(toolArgs) == 0 {
+			// A body the raw decoder rejects (a duplicate key, an alias
+			// collision) is an unread tool call even when the map decode
+			// found one: refuse it, never judge it as an empty call.
+			req.ToolCallUnparsed = true
 			toolArgs = json.RawMessage(`{}`)
 		}
 		req.ToolArgs = append(json.RawMessage(nil), toolArgs...)
@@ -2204,19 +3534,6 @@ func extractAgentIdentityFromHookPayload(payload map[string]interface{}) (agentI
 	return agentID, agentName, agentType
 }
 
-func inferAgentHookEvent(payload map[string]interface{}) string {
-	if firstValue(payload, "toolName", "tool_name", "toolArgs", "tool_args", "tool_input") != nil {
-		return "PreToolUse"
-	}
-	if firstString(payload, "prompt", "user_prompt", "initialPrompt", "initial_prompt") != "" {
-		return "UserPromptSubmit"
-	}
-	if firstValue(payload, "toolResult", "tool_result", "tool_response", "result") != nil {
-		return "PostToolUse"
-	}
-	return ""
-}
-
 // hookEvaluatorPanicHook is a test-only seam: when non-nil it is
 // invoked at the top of evaluateAgentHook, allowing
 // agent_hook_panic_test.go to inject a controlled panic and verify
@@ -2231,10 +3548,22 @@ func inferAgentHookEvent(payload map[string]interface{}) string {
 // avoids).
 var hookEvaluatorPanicHook func()
 
+// reportedToolInvocationID returns the id the agent itself reported, empty when
+// the id was minted here. A minted id changes per evaluation and is not the
+// agent's, so the AID tool call gets toolCallWireID's "dc-" id instead.
+func reportedToolInvocationID(req agentHookRequest) string {
+	if req.CorrelationOrigins[connector.CorrelationTargetTool] != connector.CorrelationOriginReported {
+		return ""
+	}
+	return req.ToolInvocationID
+}
+
 func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest) agentHookResponse {
 	if hookEvaluatorPanicHook != nil {
 		hookEvaluatorPanicHook()
 	}
+	startup := a.applyInstructionStartup(ctx, req.ConnectorName, req.SessionID, req.HookEventName, "", req.CWD)
+	ctx = a.withInstructionStartup(ctx, req.ConnectorName, req.SessionID, startup)
 	// A hook authenticated through a sandbox binding is always evaluated and
 	// enforced: DefenseClaw launched that harness itself, usually with its
 	// own permission prompts off, and the host's connector selection and
@@ -2269,8 +3598,11 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		// lifecycle events) can repeat or contain model-generated material;
 		// letting them replace the user's task would make the judge trust the
 		// very content it is meant to evaluate.
-		if judge := a.judgeFor(ctx); judge != nil && isToolJudgeIntentEvent(req.HookEventName) {
-			judge.ObserveSessionPrompt(ctx, req.Content)
+		if isToolJudgeIntentEvent(req.HookEventName) {
+			for _, judge := range a.hookSessionJudges(ctx) {
+				judge.ObserveSessionPrompt(ctx, req.Content)
+			}
+			a.observeUserDownloadRequest(ctx, req.Content)
 		}
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: req.Content, Direction: "prompt", Connector: req.ConnectorName})
 	case isResultLikeEvent(req.HookEventName):
@@ -2281,6 +3613,21 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		// handles the "non-enforceable event" case by downgrading to
 		// would-block automatically.
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
+	case structuredToolEvent && req.ToolCallUnparsed:
+		// A tool call the connector's decoder cannot read is refused, not
+		// judged as an empty call (fail closed, GAP-0337). The refusal is a
+		// finding like any other block: its rule ID reaches the audit row,
+		// the scan findings and the response.
+		a.recordParserUncertaintyMetricV8(ctx, req.ConnectorName, 1)
+		verdict = &ToolInspectVerdict{
+			Action: "block", Severity: "HIGH", Confidence: 1.0,
+			Reason:   unparsedToolCallReason(req.ConnectorName),
+			Findings: []string{hookToolCallUnparsedRuleID},
+			DetailedFindings: []RuleFinding{{
+				RuleID: hookToolCallUnparsedRuleID, Title: "tool call in the hook payload could not be read",
+				Severity: "HIGH", Confidence: 1.0, Tags: []string{"tool-arguments"},
+			}},
+		}
 	case structuredToolEvent:
 		if req.ToolArgsProjectionUncertain {
 			a.recordParserUncertaintyMetricV8(ctx, req.ConnectorName, 1)
@@ -2289,18 +3636,24 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			req.ConnectorName, req.ToolName, runtime.GOOS,
 		)
 		if req.ConnectorName == "copilot" && (req.HookSurface == connector.CopilotHookSurfaceVSCodeLocal ||
-			connector.CopilotVSCodeLocalTool(req.ToolName)) {
-			fallbackTool = connector.CopilotVSCodeLocalActionTool(req.ToolName)
+			copilotargs.LocalTool(req.ToolName)) {
+			fallbackTool = copilotargs.LocalActionTool(req.ToolName)
 		}
 		actionTool, resourceIdentity := trustedToolActionFromContext(
 			ctx, req.ConnectorName, req.ToolName, fallbackTool,
 		)
 		toolRequest := &ToolInspectRequest{
-			Tool:          req.ToolName,
-			Args:          req.ToolArgs,
-			Direction:     "tool_call",
-			Connector:     req.ConnectorName,
-			MCPServerName: payloadString(req.Payload, "mcp_server_name"),
+			Tool:                    req.ToolName,
+			Args:                    req.ToolArgs,
+			Direction:               "tool_call",
+			Connector:               req.ConnectorName,
+			MCPServerName:           payloadString(req.Payload, "mcp_server_name"),
+			callerCWD:               req.CWD,
+			toolUseID:               reportedToolInvocationID(req),
+			toolArgsAreHookEnvelope: req.ToolArgsAreHookEnvelope,
+			aidToolCallDeclared:     connector.HookProfileCarriesAIDToolCall(profile),
+			toolNameIsLabel:         req.ToolNameIsLabel,
+			hookEvent:               req.HookEventName,
 		}
 		enforcementCapable := profile.Capabilities.CanBlock &&
 			eventIn(req.HookEventName, profile.Capabilities.BlockEvents)
@@ -2323,6 +3676,13 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 				actionTool, trustedArgs, hermesWriteViews = views[0].Tool, views[0].Args, views
 			}
 		}
+		hermesV4APatch := false
+		if strings.EqualFold(req.ConnectorName, "hermes") && req.ToolName == "patch" && len(hermesWriteViews) > 0 {
+			var mode struct {
+				Mode string `json:"mode"`
+			}
+			hermesV4APatch = json.Unmarshal(req.ToolArgs, &mode) == nil && mode.Mode == "patch"
+		}
 		if strings.EqualFold(strings.TrimSpace(req.ConnectorName), "kiro") && actionTool == fallbackTool {
 			// Kiro native file writes (fs_write in the kiro-cli and IDE
 			// shapes, fs_append, str_replace) are judged as the reviewed
@@ -2337,8 +3697,9 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		actionInput := actionfacts.Input{
 			Tool:                     actionTool,
 			Args:                     trustedArgs,
-			CWD:                      agentHookTrustedActionCWD(ctx, req.CWD, toolCWD),
+			CWD:                      agentHookTrustedActionCWDReported(ctx, req.ConnectorName, req.CWD, req.ReportedCWD, toolCWD),
 			ActiveHome:               hookActiveHome(ctx),
+			CurrentWindowsDrive:      reportedWindowsDrive(req.ReportedCWD),
 			ToolResourceIdentity:     resourceIdentity,
 			CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
 		}
@@ -2353,15 +3714,21 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			conflictSource = agentHookConflictSource(ctx, req, actionInput, dialectHint)
 		}
 		verdict = a.inspectHermesWriteToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
-			Input:                actionInput,
-			LegacyText:           string(req.ToolArgs),
-			conflictSource:       conflictSource,
-			Connector:            req.ConnectorName,
-			EnforcementCapable:   enforcementCapable,
-			ResolvedWriteTargets: resolvedWritesFromContext(ctx),
-			SandboxGuestCWD:      sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),
-			windowsShellDialect:  dialectHint,
-			record:               toolChainRecorder(req.toolChain),
+			Input:                   actionInput,
+			LegacyText:              string(req.ToolArgs),
+			conflictSource:          conflictSource,
+			Connector:               req.ConnectorName,
+			CopilotSharedLocalFile:  copilotSharedLocalFileCall(ctx, req),
+			EnforcementCapable:      enforcementCapable,
+			StrictPolicy:            a.strictPolicyTierForHook(ctx, req.ConnectorName),
+			ManagedInstall:          a.managedInstallForHook(ctx),
+			ManagedHookOverflowHold: managedWindowsHookOverflowHold(ctx, a.scannerCfg, req.ConnectorName, runtime.GOOS),
+			ResolvedWriteTargets:    resolvedWritesFromContext(ctx),
+			patchTarget:             hermesV4APatch,
+			strictPatchLinks:        hermesV4APatch && a.strictPolicyTierForHook(ctx, req.ConnectorName),
+			SandboxGuestCWD:         sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),
+			windowsShellDialect:     dialectHint,
+			record:                  toolChainRecorder(ctx, req.ConnectorName, req.toolChain),
 		}, command, commandTool, hermesWriteViews)
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
 	}
@@ -2374,7 +3741,14 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
 	caps := profile.Capabilities
-	action, wouldBlock := mapHookActionForProfile(rawAction, mode, req.HookEventName, caps, profile, req.Payload)
+	effectiveMode := mode
+	if mode != "action" && a.provenHookActionMustEnforce(ctx, verdict) {
+		effectiveMode = "action"
+	}
+	action, wouldBlock := mapHookActionForProfile(rawAction, effectiveMode, req.HookEventName, caps, profile, req.Payload)
+	if rawAction == "confirm" {
+		action = decisionConfirmWithoutAsk(verdict, action)
+	}
 	aiDefenseEnforced := verdict.aiDefenseBlock && action == "block"
 	severity := verdict.Severity
 	reason := verdict.Reason
@@ -2385,7 +3759,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// by returning advisory-only changes (action stays allow,
 	// rawAction promoted to block, wouldBlock=true). For events
 	// the connector itself does not declare blockable, we further
-	// downgrade through mapHookAction so we never tell the agent
+	// downgrade through its capability map so we never tell the agent
 	// to block on a surface it cannot honor.
 	for _, asset := range assetDecisions {
 		mergedAction, mergedRawAction, mergedSeverity, mergedReason, mergedFindings, assetWouldBlock := mergeAssetDecision(
@@ -2393,7 +3767,10 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			action, rawAction, severity, reason, findings,
 		)
 		if mergedAction == "block" {
-			capable, capableWouldBlock := mapHookActionForProfile("block", mode, req.HookEventName, caps, profile, req.Payload)
+			capable, capableWouldBlock := mapAssetBlockForProfile(
+				effectiveMode, req.HookEventName, caps, profile, req.Payload,
+				a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration(),
+			)
 			if capable != "block" {
 				mergedAction = capable
 				if capableWouldBlock {
@@ -2408,6 +3785,26 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		findings = mergedFindings
 		if assetWouldBlock {
 			wouldBlock = true
+		}
+	}
+
+	// The managed OpenCode plugin can refuse an action after the gateway's
+	// policy answer when a later plugin may mutate its arguments, or when
+	// OpenCode cannot identify an MCP server uniquely. Fold that local
+	// refusal into the verdict before the audit and hook_decision are emitted.
+	// A missing authority claim is closed: the plugin starts unproven until
+	// its config hook has checked the final plugin order.
+	if a.scannerCfg != nil && a.scannerCfg.StandaloneEnterprise() &&
+		req.ConnectorName == "opencode" && mode == "action" &&
+		req.HookEventName == "tool.execute.before" && (action != "block" || rawAction != "block") {
+		var localRefusal string
+		if status, _ := req.Payload["mcp_identity_status"].(string); status == "ambiguous" {
+			localRefusal = "DefenseClaw refused an OpenCode tool with ambiguous MCP server identity."
+		} else if authoritative, _ := req.Payload["arguments_authoritative"].(bool); !authoritative {
+			localRefusal = "DefenseClaw refused an OpenCode action because later plugin argument mutations are not observable."
+		}
+		if localRefusal != "" {
+			action, rawAction, severity, reason, wouldBlock = "block", "block", "HIGH", localRefusal, false
 		}
 	}
 
@@ -2431,6 +3828,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	resp := agentHookResponseForProfile(
 		profile, req, action, rawAction, severity, responseReason, findings, mode, wouldBlock, caps, responsePolicy,
 	)
+	resp.HookOutput = a.copilotSecureClientPromptOutput(ctx, req, mode, rawAction, findings, resp.HookOutput)
 	// Secure Client keeps the block message as the reason of the hook
 	// records (issue #1092).
 	if !a.managedAIDOnly() {
@@ -2449,6 +3847,143 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	return resp
 }
 
+// hookOversizeUninspectedRuleID is the finding of an oversized call, which
+// its bounded review never carries whole (hookexec.OversizeUninspectedField).
+const hookOversizeUninspectedRuleID = "HOOK-OVERSIZE-COMMAND-NOT-INSPECTED"
+
+const oversizeUninspectedReason = "oversize, command not inspected: this hook payload is over DefenseClaw's size cap, " +
+	"so the gateway could read only part of the call."
+
+// oversizeUninspectedPayload reports a bounded review of an oversized call.
+// Every bounded review lacks part of the call (hookexec.OversizeUninspectedField),
+// so bounded_prefix_review alone marks it too: a sender that drops the
+// marker cannot turn a partial review into an allow in action mode.
+func oversizeUninspectedPayload(payload map[string]any) bool {
+	return payload[hookexec.OversizeUninspectedField] == true || payload["bounded_prefix_review"] == true
+}
+
+// oversizeUninspectedHookResponse answers such a call like an unparsed one,
+// in the connector's mode: observe warns and audits, action blocks. A
+// would-block finding the gateway made on the bounded review (observe mode)
+// stays in the answer and the audit row next to it.
+// The caller suppresses Hermes display text for verified Secure Client and
+// sandbox routes, which keep their existing response contracts.
+func oversizeUninspectedHookResponse(profile connector.HookProfile, req agentHookRequest, mode string, prior agentHookResponse, suppressDisplayText ...bool) agentHookResponse {
+	action, wouldBlock := mapHookActionForProfile("block", mode, req.HookEventName, profile.Capabilities, profile, req.Payload)
+	findings, ruleIDs := []string{hookOversizeUninspectedRuleID}, []string{hookOversizeUninspectedRuleID}
+	if prior.WouldBlock || prior.RawAction == "block" {
+		findings = append(findings, prior.Findings...)
+		ruleIDs = append(ruleIDs, prior.RuleIDs...)
+	}
+	resp := agentHookResponseForProfile(profile, req, action, "block", "HIGH", oversizeUninspectedReason,
+		findings, mode, wouldBlock, profile.Capabilities)
+	resp.RuleIDs = ruleIDs
+	if len(suppressDisplayText) > 0 && suppressDisplayText[0] {
+		return resp
+	}
+	return hermesBlockText(req, resp)
+}
+
+// hermesWireBlockText changes only the native model-facing field. The
+// canonical verdict reason remains the one used by audit and accounting.
+func (a *APIServer) hermesWireBlockText(ctx context.Context, connectorName string, req agentHookRequest, resp agentHookResponse) agentHookResponse {
+	if sandboxHookForConnector(ctx, connectorName) {
+		return resp
+	}
+	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.SecureClientIntegration() {
+		return resp
+	}
+	if req.ConnectorName == "" {
+		req.ConnectorName = connectorName
+	}
+	return hermesBlockText(req, resp)
+}
+
+// hermesBlockText gives every blocked Hermes tool-call answer the same
+// model-facing reason, including blocks produced after the main evaluator.
+func hermesBlockText(req agentHookRequest, resp agentHookResponse) agentHookResponse {
+	if req.ConnectorName != "hermes" || canonicalEvent(req.HookEventName) != "pretoolcall" || resp.Action != "block" {
+		return resp
+	}
+	rule := "policy"
+	for _, id := range resp.RuleIDs {
+		if agentRuleIDPattern.MatchString(id) {
+			rule = id
+			break
+		}
+	}
+	if rule == "policy" {
+		source := resp.SourceReason
+		if source == "" {
+			source = resp.Reason
+		}
+		matched := strings.TrimPrefix(agentMatchedRules(source), "rule ")
+		matched = strings.TrimPrefix(matched, "rules ")
+		candidate, _, _ := strings.Cut(matched, ",")
+		candidate, _, _ = strings.Cut(candidate, ":")
+		if agentRuleIDPattern.MatchString(candidate) {
+			rule = candidate
+		}
+	}
+	field := "reason"
+	if resp.HookOutput["action"] == "block" {
+		field = "message"
+	}
+	message := resp.Reason
+	if native, ok := resp.HookOutput[field].(string); ok && native != "" {
+		message = native
+	}
+	if !strings.HasPrefix(message, "DefenseClaw blocked this call: ") {
+		message = "DefenseClaw blocked this call: " + rule + ": " + message
+	}
+	if resp.HookOutput != nil {
+		output := make(map[string]interface{}, len(resp.HookOutput)+1)
+		for key, value := range resp.HookOutput {
+			output[key] = value
+		}
+		output[field] = message
+		resp.HookOutput = output
+	}
+	return resp
+}
+
+// hookToolCallUnparsedRuleID is the finding of a tool call whose hook
+// payload the connector's decoder cannot read: DefenseClaw blocks it.
+const hookToolCallUnparsedRuleID = "HOOK-TOOL-CALL-UNPARSED"
+
+const (
+	unparsedToolCallReasonPrefix = "DefenseClaw could not read the tool call in this "
+	unparsedToolCallReasonSuffix = " hook payload, so it cannot show the call is safe and blocks it. " +
+		"Update DefenseClaw and the agent if this repeats."
+)
+
+// unparsedToolCallReasonConnector is the connector name the reason may hold:
+// a registry name from the hook route, never payload text.
+var unparsedToolCallReasonConnector = lazyregexp.New(`^[a-z][a-z0-9-]{0,31}$`)
+
+// unparsedToolCallReason is the reason of the hookToolCallUnparsedRuleID
+// block for connectorName.
+func unparsedToolCallReason(connectorName string) string {
+	return unparsedToolCallReasonPrefix + connectorName + unparsedToolCallReasonSuffix
+}
+
+// trustedUnparsedToolCallReason reports whether reason is exactly an
+// unparsedToolCallReason or oversizeUninspectedReason: gateway text and a
+// connector name, nothing from the payload, so the agent is shown it as
+// written.
+func trustedUnparsedToolCallReason(reason string) bool {
+	if reason == oversizeUninspectedReason || reason == copilotObserveUnparsedReason ||
+		reason == copilotObserveProtectedUnparsedReason {
+		return true
+	}
+	name, ok := strings.CutPrefix(reason, unparsedToolCallReasonPrefix)
+	if !ok {
+		return false
+	}
+	name, ok = strings.CutSuffix(name, unparsedToolCallReasonSuffix)
+	return ok && unparsedToolCallReasonConnector.MatchString(name)
+}
+
 // selectWindowsShellDialect selects a complete grammar for a native Windows
 // shell call. Codex names its shell tool Bash everywhere, but on Windows it
 // runs the command in PowerShell, so a command such as
@@ -2459,8 +3994,11 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 // native program such as curl incomplete, because Windows PowerShell aliases
 // it; such a command keeps its inferred grammar, as before GAP-1134, so its
 // POSIX reading can still enforce instead of every finding turning into
-// detection-only. An exact cmd /d /c wrapper may instead use CMD grammar:
-// /d disables ambient AutoRun commands before the quoted body.
+// detection-only. CMD grammar decides only a command line that is one whole
+// cmd /c call with one literal quoted body (soleCMDInvocation): a later
+// PowerShell statement, pipeline, redirect or expansion is PowerShell code,
+// and reading the whole line as CMD would hide its write. An exact
+// cmd /d /c wrapper that PowerShell cannot read may still use CMD grammar.
 func selectWindowsShellDialect(tool, command string, input actionfacts.Input) actionfacts.Dialect {
 	tool = strings.ToLower(strings.TrimSpace(tool))
 	switch tool {
@@ -2471,6 +4009,9 @@ func selectWindowsShellDialect(tool, command string, input actionfacts.Input) ac
 	}
 	if command == "" {
 		return ""
+	}
+	if soleCMDInvocation(command) {
+		return actionfacts.DialectCMD
 	}
 	input.DialectHint = actionfacts.DialectPowerShell
 	if actionfacts.Analyze(input).Authoritative() ||
@@ -2499,21 +4040,21 @@ func agentHookWindowsShellDialect(input actionfacts.Input) actionfacts.Dialect {
 }
 
 // agentHookTrustedActionTool preserves the official connector tool label for
-// policy and telemetry while selecting the host shell grammar used for trusted
-// action facts. OpenCode calls its built-in terminal tool "bash" on every
-// platform, while Copilot calls the same Windows surface "powershell" even for
-// ordinary native executables such as az.cmd. Treat those labels as a generic
-// shell only at this server-owned boundary so dialect inference can recognize
-// exact PowerShell/CMD syntax and bare native commands without trusting a
-// payload-supplied dialect hint or changing the recorded tool identity.
+// policy and telemetry while selecting the parser used for trusted action
+// facts. OpenCode V2's native patch tool uses the reviewed apply_patch envelope.
+// Copilot calls its Windows shell surface "powershell" even for ordinary native
+// executables such as az.cmd; its generic shell label lets dialect inference
+// recognize exact PowerShell/CMD syntax and bare native commands. Both mappings
+// belong at this server-owned boundary, without trusting a payload-supplied
+// dialect hint or changing the recorded tool identity.
 func agentHookTrustedActionTool(connectorName, toolName, platformName string) string {
+	// The hook client describes the call under the same name (GAP-0073).
+	if mapped := hookpaths.ConnectorActionTool(connectorName, toolName); mapped != toolName {
+		return mapped
+	}
 	if strings.EqualFold(strings.TrimSpace(platformName), "windows") {
 		connectorName = strings.TrimSpace(connectorName)
 		toolName = strings.TrimSpace(toolName)
-		if strings.EqualFold(connectorName, "opencode") &&
-			strings.EqualFold(toolName, "bash") {
-			return "shell"
-		}
 		if strings.EqualFold(connectorName, "copilot") &&
 			strings.EqualFold(toolName, "powershell") {
 			return "shell"
@@ -2526,19 +4067,18 @@ func agentHookTrustedActionTool(connectorName, toolName, platformName string) st
 	// no command facts at all: every command rule stayed an unproven
 	// candidate and a CRITICAL finding still returned raw_action=allow on
 	// every platform. This is a name alias, not a capability grant -- the
-	// argument schema is the same {"command": "..."} shell shape.
-	if strings.EqualFold(strings.TrimSpace(connectorName), "kiro") &&
-		strings.EqualFold(strings.TrimSpace(toolName), "execute_bash") {
-		return "shell"
-	}
-	// OmniGent's os_env shell tool (an agent's os_env block registers
-	// sys_os_shell, {"command": "..."}; the DefenseClaw OpenShell sandbox
-	// agent uses it) is the same shell shape under another name. Unmapped,
-	// its commands parse to no command facts and a CRITICAL command finding
-	// stays an unproven candidate that allows.
-	if strings.EqualFold(strings.TrimSpace(connectorName), "omnigent") &&
-		strings.EqualFold(strings.TrimSpace(toolName), "sys_os_shell") {
-		return "shell"
+	// argument schema is the same {"command": "..."} shell shape. On
+	// Windows the kiro-cli --v3 engine (2.35.1) names the same tool
+	// execute_pwsh and runs its command in PowerShell; unmapped, the call
+	// had no command facts and a command-fact block rule was detection-only
+	// (rel-1-0-6:GAP-0589). As shell, the Windows dialect selection reads
+	// it as PowerShell when that reading is complete, as for Copilot's
+	// powershell tool.
+	if strings.EqualFold(strings.TrimSpace(connectorName), "kiro") {
+		switch strings.ToLower(strings.TrimSpace(toolName)) {
+		case "execute_bash", "execute_pwsh":
+			return "shell"
+		}
 	}
 	// Text sent to a running process is judged as shell input (see
 	// agentHookTrustedActionArgs): agy's send_command_input as run_command
@@ -2555,29 +4095,25 @@ func agentHookTrustedActionTool(connectorName, toolName, platformName string) st
 }
 
 // agentHookTrustedActionArgs selects the arguments the trusted-action parser
-// sees. OpenHands' terminal tool and agy's run_command report execution
-// controls and model labels next to the command;
-// connector.OpenHandsTrustedShellArgs and connector.AntigravityTrustedShellArgs
-// project them onto the plain shell shape when that is exact (as
+// sees. agy's run_command reports execution controls and model labels next
+// to the command; connector.AntigravityTrustedShellArgs projects them onto
+// the plain shell shape when that is exact (as
 // connector.AmpBashTrustedShellArgs does for Amp's Bash "cmd"), and
 // connector.TrustedShellArgs takes the working directory and control
 // arguments out of the other harnesses' shell tools. Text a tool sends to a
-// running process (OpenHands terminal input, agy send_command_input, Hermes
+// running process (agy send_command_input, Hermes
 // process write and submit) is projected the same way, so it is judged as
 // shell input rather than not at all. The recorded ToolArgs never change.
 //
 // cwd is the directory the tool call names for its command (agy's Cwd, and
-// the working-directory argument of the shell tools that have one), or "".
+// the working-directory argument of the shell tools that have one, also
+// when the projection refuses the call: connector.ShellCommandCWD), or "".
 // It is the command's working directory, so the caller uses it in place of
 // the session's; left in the arguments, any directory other than the
 // workspace conflicted with the request's working directory and the parse
 // was ambiguous.
 func agentHookTrustedActionArgs(connectorName, toolName string, args json.RawMessage) (projected json.RawMessage, cwd string) {
 	switch strings.ToLower(strings.TrimSpace(connectorName)) {
-	case "openhands":
-		if out, ok := connector.OpenHandsTrustedShellArgs(toolName, args); ok {
-			return out, ""
-		}
 	case "antigravity":
 		if out, dir, ok := connector.AntigravityTrustedShellArgs(toolName, args); ok {
 			return out, dir
@@ -2590,11 +4126,22 @@ func agentHookTrustedActionArgs(connectorName, toolName string, args json.RawMes
 		if out, dir, ok := connector.AmpBashTrustedShellArgs(toolName, args); ok {
 			return out, dir
 		}
+	case "copilot":
+		// The Copilot CLI edit and create tools carry a display-only
+		// description or file mode beside their reviewed fields; judged
+		// with it, the call stayed partial and named no target for the
+		// path rules and the hook's write evidence.
+		if out, ok := copilotargs.WriteArgsWithoutMetadata(copilotargs.LocalActionTool(toolName), args); ok {
+			return out, ""
+		}
 	}
 	if out, dir, ok := connector.TrustedShellArgs(connectorName, toolName, args); ok {
 		return out, dir
 	}
-	return args, ""
+	// A shell call whose projection was refused (an extra or mistyped
+	// argument) still runs its command in the directory it names; judged
+	// in the session's, the command alone could miss a rule (GAP-0694).
+	return args, connector.ShellCommandCWD(connectorName, toolName, args)
 }
 
 // agentHookWindowsDialectHint reports whether a structured tool call's
@@ -2606,6 +4153,12 @@ func (a *APIServer) agentHookWindowsDialectHint(ctx context.Context) bool {
 	}
 	cfg := a.decisionConfig(ctx)
 	return cfg == nil || !cfg.SecureClientIntegration()
+}
+
+func managedWindowsHookOverflowHold(ctx context.Context, cfg *config.Config, connector, goos string) bool {
+	return goos == "windows" && cfg != nil && cfg.StandaloneEnterprise() &&
+		!cfg.SecureClientIntegration() && !isSandboxHookRequest(ctx) &&
+		authenticatedHookConnector(ctx) == canonicalConnectorRulePackKey(connector)
 }
 
 // agentHookConflictSource is a structured tool call's arguments as the call
@@ -2624,7 +4177,7 @@ func agentHookConflictSource(
 			candidate := base
 			args, toolCWD := agentHookTrustedActionArgs(req.ConnectorName, req.ToolName, raw)
 			candidate.Args = args
-			candidate.CWD = agentHookTrustedActionCWD(ctx, req.CWD, toolCWD)
+			candidate.CWD = agentHookTrustedActionCWDReported(ctx, req.ConnectorName, req.CWD, req.ReportedCWD, toolCWD)
 			if dialectHint {
 				candidate.DialectHint = agentHookWindowsShellDialect(candidate)
 			}
@@ -2633,16 +4186,105 @@ func agentHookConflictSource(
 	}
 }
 
-// agentHookTrustedActionCWD is the working directory of a structured tool
-// call: the one the call names, mapped like the request's (host-sanitized,
-// or to the host directory a sandbox path is mounted from, "" when it has
-// none), else the request's. A relative directory is resolved against the
-// session's first; one the gateway cannot place ("~" or no session
-// directory) is none.
-func agentHookTrustedActionCWD(ctx context.Context, requestCWD, toolCWD string) string {
-	if toolCWD == "" {
+// agentHookTrustedActionCWDReported is the working directory of a structured
+// tool call: the one the call names, mapped like the request cwd
+// (host-sanitized, or to the host directory a sandbox path is mounted from,
+// "" when it has none), else the request cwd. A relative directory is
+// resolved against the session cwd first; one the gateway cannot place ("~"
+// or no session directory) is none. reportedCWD is the directory the hook
+// payload reported (before the gateway resolved it), for a managed peer whose
+// directory the service account cannot resolve.
+func agentHookTrustedActionCWDReported(ctx context.Context, connectorName, requestCWD, reportedCWD, toolCWD string) string {
+	toolCWD = agentCleanedToolCWD(ctx, connectorName, requestCWD, reportedCWD, toolCWD)
+	if toolCWD == "" && requestCWD != "" {
 		return requestCWD
 	}
+	if toolCWD != "" {
+		if cwd := agentHookToolCWD(ctx, requestCWD, toolCWD); cwd != "" {
+			return cwd
+		}
+	}
+	base := requestCWD
+	if base == "" {
+		base = reportedCWD
+	}
+	return managedPeerLexicalCWD(ctx, base, toolCWD)
+}
+
+// agentCleanedToolCWD is the directory a tool call starts in when its agent
+// cleans the directory it was given as text before it starts the process:
+// Codex exec_command resolves workdir "lnk/.." to the folder that holds lnk,
+// whatever lnk is (observed on Codex 0.159, GAP-0903 review 1). The call is
+// then placed there, not in the folder the file system reaches through lnk;
+// a directory whose agent hands it to the system unchanged keeps its spelling
+// and is read by the file system (agentHookToolCWD). A directory the text
+// join cannot place (no absolute base, or a base that itself has a parent
+// step) is returned as given.
+func agentCleanedToolCWD(ctx context.Context, connectorName, requestCWD, reportedCWD, toolCWD string) string {
+	if !hookpaths.WorkdirCleanedByAgent(connectorName) || toolCWD == "" || strings.HasPrefix(toolCWD, "~") {
+		return toolCWD
+	}
+	if _, sandboxed := sandboxHookView(ctx); sandboxed {
+		return toolCWD
+	}
+	base := requestCWD
+	if base == "" {
+		base = reportedCWD
+	}
+	if !filepath.IsAbs(toolCWD) && (!filepath.IsAbs(base) || hasParentElement(base)) {
+		return toolCWD
+	}
+	return hookpaths.CleanedDirectory(base, toolCWD)
+}
+
+// managedPeerLexicalCWD is the directory a managed hook peer's tool call
+// names, kept lexically when the gateway service cannot resolve it: the
+// service account has no access to the enrolled user's home, so
+// sanitizeHookCWD returned "" for every directory there and a command's
+// relative operands (cat id_rsa with Cwd ~/.ssh, cat ../.ssh/id_rsa from
+// the project) were judged without a directory. The per-user gateway and
+// the managed Claude Code route judged the same reads as the key file
+// (rel-1-0-2:GAP-0694, managed Antigravity parity). Only a clean absolute
+// directory that is the peer's verified home or inside it is kept, as
+// serviceAccountCallerCWD does on Windows; the directory only ever adds a
+// verdict (relative operands are resolved against it).
+func managedPeerLexicalCWD(ctx context.Context, requestCWD, toolCWD string) string {
+	peer, ok := managedHookPeerFromContext(ctx)
+	if !ok || peer.Home == "" || isSandboxHookRequest(ctx) {
+		return ""
+	}
+	dir := strings.TrimSpace(toolCWD)
+	if strings.HasPrefix(dir, "~") {
+		return ""
+	}
+	if dir == "" {
+		dir = strings.TrimSpace(requestCWD)
+	}
+	// The gateway cannot follow links in the home, so a directory with a
+	// parent step (project/lnk/.. is the folder lnk points out of) is not
+	// placed here: the hook client resolved it as the user and keyed its
+	// evidence there (hookpaths.CWDKey).
+	if hasParentElement(dir) {
+		return ""
+	}
+	if toolCWD = strings.TrimSpace(toolCWD); toolCWD != "" && !filepath.IsAbs(dir) {
+		base := strings.TrimSpace(requestCWD)
+		if base == "" || !filepath.IsAbs(base) || hasParentElement(base) {
+			return ""
+		}
+		dir = filepath.Join(base, dir)
+	}
+	if !filepath.IsAbs(dir) || strings.HasPrefix(dir, "~") {
+		return ""
+	}
+	dir = filepath.Clean(dir)
+	if dir != filepath.Clean(peer.Home) && !insideHome(peer.Home, dir) {
+		return ""
+	}
+	return dir
+}
+
+func agentHookToolCWD(ctx context.Context, requestCWD, toolCWD string) string {
 	if strings.HasPrefix(toolCWD, "~") {
 		return ""
 	}
@@ -2659,7 +4301,7 @@ func agentHookTrustedActionCWD(ctx context.Context, requestCWD, toolCWD string) 
 			}
 			return hookCWDForContext(ctx, path.Join(sandboxCWD, toolCWD))
 		}
-		toolCWD = filepath.Join(requestCWD, toolCWD)
+		toolCWD = hookpaths.JoinDirectoryText(requestCWD, toolCWD)
 	}
 	return hookCWDForContext(ctx, toolCWD)
 }
@@ -2691,15 +4333,36 @@ func (a *APIServer) agentHookMCPAssetDecision(ctx context.Context, req agentHook
 	toolInput := decodeAgentHookToolInput(req.ToolArgs)
 	if strings.EqualFold(req.ConnectorName, "cursor") && canonicalEvent(req.HookEventName) == "beforemcpexecution" {
 		probe := cursorMCPProbeFromPayload(req.Payload, req.ToolName)
+		probe.SessionID = req.SessionID
 		return a.evaluateRuntimeMCPAssetPolicy(ctx, req.ConnectorName, req.HookEventName, probe)
 	}
 	probe := mcpProbeFromFields(payloadString(req.Payload, "mcp_server_name"), req.ToolName, toolInput)
 	probe.WorkspaceDir = req.CWD
+	probe.SessionID = req.SessionID
+	// Kiro's servers on a managed Windows gateway are known only from the
+	// record the hook enumerator publishes: they are read again before a
+	// call about to run is decided, and a changed one waits for its own
+	// scan, as for Claude Code, never decided on the definition admitted
+	// before (GAP-0216). A refresh that fails refuses the call.
+	published := mcpasuser.PublishedConnector(req.ConnectorName) && agentHookMCPFromEnrolledSpool(a.liveConfig())
+	if published {
+		if decision, refused := a.mcpDefinitionRefreshDecision(ctx, req.ConnectorName, req.HookEventName, probe); refused {
+			return decision, true
+		}
+	}
 	if decision, refused := a.mcpStateUnreadableDecision(ctx, req.ConnectorName, req.HookEventName, probe); refused {
 		return decision, true
 	}
+	if published {
+		return a.mcpAdmissionAndAssetDecision(ctx, req.ConnectorName, req.HookEventName, probe)
+	}
 	return a.evaluateRuntimeMCPAssetPolicy(ctx, req.ConnectorName, req.HookEventName, probe)
 }
+
+// agentHookMCPFromEnrolledSpool reports a gateway that knows its enrolled
+// users' MCP servers only from the hook enumerator's records
+// (watcherUsesEnrolledUserDirs); tests replace it.
+var agentHookMCPFromEnrolledSpool = watcherUsesEnrolledUserDirs
 
 func (a *APIServer) agentHookSkillAssetDecision(ctx context.Context, req agentHookRequest) (config.AssetPolicyDecision, bool) {
 	toolInput := decodeAgentHookToolInput(req.ToolArgs)
@@ -2839,10 +4502,15 @@ func (a *APIServer) agentHookEnabled(ctx context.Context, name string) bool {
 	// for re-enable). Defense-in-depth alongside the boot-loop teardown.
 	// EffectiveEnabled defaults to true ⇒ no-op for single-connector
 	// installs and any connector never explicitly disabled.
-	if cfg.ManualConnectorConfigured(name) && !cfg.Guardrail.EffectiveEnabled(name) {
+	if cfg.ConnectorDisabled(name) {
 		return false
 	}
 	if cfg.ConnectorHookConfig(name).Enabled {
+		return true
+	}
+	// The agent-gateway route exists only while connectors.agent_gateway is
+	// on (agent_gateway_hook.go); every call that reaches it is evaluated.
+	if name == connector.AgentGatewayConnectorName && cfg.Connectors.AgentGateway.Enabled && !cfg.SecureClientIntegration() {
 		return true
 	}
 	if a.health != nil && a.health.HasConnectorSource(name, "automatic") && cfg.ApplicationProtection.EffectiveEnabled(name) {
@@ -2856,7 +4524,7 @@ func (a *APIServer) agentHookEnabled(ctx context.Context, name string) bool {
 	if cfg.Guardrail.HasConnector(name) {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(cfg.Guardrail.Connector), name)
+	return cfg.Guardrail.NamesConnector(name)
 }
 
 // hookEnablementConfig is the configuration agentHookEnabled reads: the
@@ -2881,33 +4549,7 @@ func (a *APIServer) agentHookMode(ctx context.Context, name string) string {
 	if a == nil {
 		return "observe"
 	}
-	return hookModeForConfig(a.decisionConfig(ctx), name)
-}
-
-// hookModeForConfig resolves a connector's hook mode in cfg: the legacy
-// per-connector hook mode when set, else the guardrail chain.
-func hookModeForConfig(cfg *config.Config, name string) string {
-	mode := "observe"
-	if cfg != nil {
-		hookCfg := cfg.ConnectorHookConfig(name)
-		mode = strings.TrimSpace(hookCfg.Mode)
-		if mode == "" || strings.EqualFold(mode, "inherit") {
-			// Per-connector guardrail override (guardrail.connectors[name].mode)
-			// wins over the global mode; EffectiveMode encapsulates that
-			// precedence and falls back to the global mode then "observe".
-			mode = strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector(name))
-		}
-	}
-	return normalizeAgentHookMode(mode)
-}
-
-func normalizeAgentHookMode(mode string) string {
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "action", "enforce":
-		return "action"
-	default:
-		return "observe"
-	}
+	return a.decisionConfig(ctx).HookModeForConnector(name)
 }
 
 // isRelayedSandboxRequest reports whether ctx is a sandbox call the managed
@@ -2954,6 +4596,57 @@ func mapHookAction(rawAction, mode, event string, caps connector.HookCapability)
 	return mapHookActionForProfile(rawAction, mode, event, caps, connector.HookProfile{}, nil)
 }
 
+// provenActiveStateMutation is the one observe-mode hard-block exception for
+// DefenseClaw's own state. A rule ID, path mention, or wire finding alone is
+// insufficient: the trusted ActionFacts owner must have proved a mutation of
+// the resolved active target. Secure Client keeps its existing hook mapping.
+func (a *APIServer) provenActiveStateMutation(ctx context.Context, verdict *ToolInspectVerdict) bool {
+	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.SecureClientIntegration() {
+		return false
+	}
+	if verdict == nil || normalizeCodexAction(verdict.Action) != "block" {
+		return false
+	}
+	for _, finding := range verdict.DetailedFindings {
+		if finding.RuleID == "tamper.detector_state_write" &&
+			finding.contributesToEnforcement() && finding.proof.authorizes(finding.RuleID) &&
+			(finding.proof.kind == findingProofActionFactsSemantic ||
+				finding.proof.kind == findingProofActionFactsSubgraph ||
+				finding.proof.kind == findingProofActiveStateMutation) {
+			return true
+		}
+	}
+	return false
+}
+
+// A holder-uncertain OSS fallback keeps ordinary work on the profile selected
+// by proven facts. It cannot turn a code-proven action finding into an
+// observe-only result while a possible account assignment would enforce it.
+func (a *APIServer) provenHookActionMustEnforce(ctx context.Context, verdict *ToolInspectVerdict) bool {
+	if a.provenActiveStateMutation(ctx, verdict) {
+		return true
+	}
+	resolved := resolvedGuardrailProfileFrom(ctx)
+	if resolved == nil || !resolved.decision.holderFallback || verdict == nil ||
+		normalizeCodexAction(verdict.Action) != "block" {
+		return false
+	}
+	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.SecureClientIntegration() {
+		return false
+	}
+	for _, finding := range verdict.DetailedFindings {
+		if !finding.contributesToEnforcement() || !finding.proof.authorizes(finding.RuleID) {
+			continue
+		}
+		switch finding.proof.kind {
+		case findingProofActionFactsSemantic, findingProofActionFactsSubgraph,
+			findingProofExactFallback, findingProofResolvedTarget, findingProofActiveStateMutation:
+			return true
+		}
+	}
+	return false
+}
+
 func mapHookActionForProfile(rawAction, mode, event string, caps connector.HookCapability, profile connector.HookProfile, payload map[string]interface{}) (string, bool) {
 	if profile.MapVerdict != nil {
 		out := profile.MapVerdict(connector.HookVerdictInput{
@@ -2993,7 +4686,7 @@ func mapHookActionForProfile(rawAction, mode, event string, caps connector.HookC
 
 // confirmWithoutAskAgent names the agent when the standalone enterprise
 // profile blocks a confirmation instead of downgrading it to an alert: a tool
-// call on Hermes or OpenHands, whose hooks can neither ask the user nor show
+// call on Hermes, whose hooks can neither ask the user nor show
 // a notice while the call runs, so the call would run unseen although the
 // organization's rule asked for a person's approval. It returns "" otherwise.
 func confirmWithoutAskAgent(connectorName, rawAction, mode, event string) string {
@@ -3003,8 +4696,6 @@ func confirmWithoutAskAgent(connectorName, rawAction, mode, event string) string
 	switch {
 	case connectorName == "hermes" && canonicalEvent(event) == "pretoolcall":
 		return "Hermes"
-	case connectorName == "openhands" && canonicalEvent(event) == "pretooluse":
-		return "OpenHands"
 	}
 	return ""
 }
@@ -3036,6 +4727,10 @@ func agentHookResponseForProfile(profile connector.HookProfile, req agentHookReq
 	}
 	if agent := confirmWithoutAskAgent(req.ConnectorName, rawAction, mode, req.HookEventName); action == "block" && agent != "" {
 		safeReason = agentConfirmUnavailableReason(agent, reason, agentDisplayReason(reason, notificationSinkPolicy(policy)), notificationSinkPolicy(policy))
+	}
+	if profile.Name == "copilot" && profile.ContractID != connector.CopilotVSCodeLocalContractID &&
+		action == "block" && rawAction == "confirm" && canonicalEvent(req.HookEventName) == "pretooluse" {
+		safeReason += " DefenseClaw cannot verify that Copilot CLI can show an approval prompt; this call was denied."
 	}
 	resp := agentHookResponse{
 		Action:            action,
@@ -3087,16 +4782,55 @@ func hookProfileRequestFromAgentHook(req agentHookRequest) connector.HookProfile
 		CorrelationIdentifiers:  req.CorrelationIdentifiers,
 		SuppressCorrelationEmit: req.SuppressCorrelationEmit,
 		CWD:                     req.CWD, ToolName: req.ToolName, Content: req.Content, Direction: req.Direction,
-		Payload: req.Payload,
+		Payload: req.Payload, ManagedWatch: req.managedWatch, WatchHome: req.watchHome, WatchCWD: req.managedWatchCWD(),
 	}
+}
+
+// withManagedWatchHome binds the watch paths of a managed (service-account)
+// gateway answer to the verified caller's home, as claudeCodeHookRequest
+// withWatchHome does for the Claude Code evaluator: the gateway's own
+// environment is the service account's (GAP-0066).
+func (req agentHookRequest) withManagedWatchHome(ctx context.Context) agentHookRequest {
+	if !managedCallerWatchContext(ctx) {
+		return req
+	}
+	req.managedWatch = true
+	if home := trustedActiveHome(ctx); home != unresolvedCallerHome {
+		req.watchHome = home
+	}
+	return req
+}
+
+// managedWatchCWD is the project a managed caller's Claude Code watches. The
+// gateway service account cannot resolve a directory in another user's home
+// (sanitizeHookCWD returns ""), so the reported directory is kept lexically
+// when it lies in the verified caller's home. It only names watch paths;
+// policy reads still use the resolved CWD (GAP-0066).
+func (req agentHookRequest) managedWatchCWD() string {
+	if !req.managedWatch || req.watchHome == "" {
+		return ""
+	}
+	if req.CWD != "" {
+		return req.CWD
+	}
+	if insideHome(req.watchHome, req.ReportedCWD) {
+		return filepath.Clean(strings.TrimSpace(req.ReportedCWD))
+	}
+	return ""
 }
 
 func hookOutputFor(req agentHookRequest, action, rawAction, reason, additional string, caps connector.HookCapability) map[string]interface{} {
 	reason = connectorReason(req.ConnectorName, action, req.ToolName, reason)
+	// Keep these native denial shapes independent of profile.Respond: this
+	// function is also the fallback when that callback panics.
 	switch req.ConnectorName {
 	case "hermes":
 		if action == "block" {
 			return map[string]interface{}{"decision": "block", "reason": reason}
+		}
+		if action == "continue" && canonicalEvent(req.HookEventName) == "preverify" {
+			// Hermes' bounded verification control, as the profile renders it.
+			return map[string]interface{}{"action": "continue", "message": reason}
 		}
 		if req.HookEventName == "pre_llm_call" && additional != "" {
 			return map[string]interface{}{"context": additional}
@@ -3116,17 +4850,31 @@ func hookOutputFor(req agentHookRequest, action, rawAction, reason, additional s
 			}
 		}
 	case "copilot":
-		return copilotHookOutput(req.HookEventName, action, rawAction, reason, additional)
-	case "openhands":
-		if action == "block" {
-			return map[string]interface{}{"decision": "deny", "reason": reason}
+		output := copilotHookOutput(req.HookEventName, action, rawAction, reason, additional)
+		if decision, ok := output["permissionDecision"]; ok && copilotargs.LocalTool(req.ToolName) {
+			// The VS Code Local harness running the CLI hook file reads its
+			// own decision shape (GAP-1903), as the profile renders it.
+			output["hookSpecificOutput"] = map[string]interface{}{
+				"hookEventName":            "PreToolUse",
+				"permissionDecision":       decision,
+				"permissionDecisionReason": reason,
+			}
 		}
-		if (action == "alert" || rawAction == "confirm") && additional != "" {
-			return map[string]interface{}{"additionalContext": additional}
-		}
+		return output
 	case "opencode":
 		if action == "block" {
 			return map[string]interface{}{"decision": "deny", "reason": reason}
+		}
+	case "antigravity":
+		if action == "block" && canonicalEvent(req.HookEventName) == "pretooluse" {
+			return map[string]interface{}{"decision": "deny", "reason": reason}
+		}
+		if action == "confirm" && canonicalEvent(req.HookEventName) == "pretooluse" {
+			return map[string]interface{}{"decision": "force_ask", "reason": reason}
+		}
+	case "kiro":
+		if action == "block" {
+			return map[string]interface{}{"decision": "block", "reason": reason}
 		}
 	}
 	if rawAction == "confirm" && additional != "" && !caps.CanAskNative {

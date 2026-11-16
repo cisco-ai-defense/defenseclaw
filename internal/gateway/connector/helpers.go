@@ -17,9 +17,12 @@
 package connector
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -33,9 +36,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf16"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookguard"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 var userHomeOverrideSessionMu sync.Mutex
@@ -126,6 +133,11 @@ const nativeHookFlag = "hook --connector "
 
 const windowsGatewayBinaryName = "defenseclaw-gateway.exe"
 const windowsHookBinaryName = "defenseclaw-hook.exe"
+
+// windowsHookGuardBinaryName is the one-line install's Claude Code PreToolUse
+// guard program, cmd/defenseclaw-hook-guard: a small GUI-subsystem file of
+// its own (see claudeCodeOneLinePreToolGuardFor).
+const windowsHookGuardBinaryName = "defenseclaw-hook-guard.exe"
 const nativeWindowsInstallStateMaxBytes = 128 * 1024
 const nativeWindowsLayoutValidationAttempts = 50
 const nativeWindowsLayoutValidationRetryDelay = 10 * time.Millisecond
@@ -306,10 +318,86 @@ func editedDefenseClawHookScript(command, scriptName string) (string, bool) {
 
 // editedDefenseClawHookCommand is editedDefenseClawHookScript for a command
 // that is the script alone or the script with DefenseClaw's --event or
-// --hook-surface binding (Kiro v3 registers "kiro-hook.sh --hook-surface v3").
+// --hook-surface binding (Kiro v3 registers "kiro-hook.sh --hook-surface v3"),
+// or a command that runs a copy of a DefenseClaw hook script
+// (copiedDefenseClawHookCommand).
 func editedDefenseClawHookCommand(command, scriptName string) bool {
-	rest, ok := editedDefenseClawHookScript(command, scriptName)
-	return ok && (rest == "" || strings.HasPrefix(rest, " --event ") || strings.HasPrefix(rest, " --hook-surface "))
+	if rest, ok := editedDefenseClawHookScript(command, scriptName); ok {
+		return rest == "" || defenseClawHookBinding(rest)
+	}
+	return copiedDefenseClawHookCommand(command, scriptName)
+}
+
+// defenseClawHookBinding reports whether rest, the text after a hook
+// command's script word, starts with DefenseClaw's --event or
+// --hook-surface binding.
+func defenseClawHookBinding(rest string) bool {
+	return strings.HasPrefix(rest, " --event ") || strings.HasPrefix(rest, " --hook-surface ")
+}
+
+// copiedDefenseClawHookCommand reports whether a Unix hook command runs a copy
+// of a DefenseClaw hook script in any folder: the first shell word is an
+// absolute, clean path to a file that carries the generated-hook marker of
+// any release (whatever follows it: Antigravity passes the event bare, Claude
+// Code appends its missing-script guard), or a path with the connector's
+// script name followed by DefenseClaw's binding (the copy may have been
+// deleted since). A shell or env wrapper in front of the script word
+// (hookScriptWordAfterWrapper) is looked through. A Copilot preToolUse entry
+// repointed at an old copy was kept next to the entry Setup added back, so
+// the agent still ran the old hook while doctor and fail-mode passed
+// (rel-1-0-4 GAP-0600). Only DefenseClaw's current hook is a working
+// registration: Setup replaces such an entry and teardown removes it.
+// Windows registers native launcher commands, which are never absolute POSIX
+// paths, and their files are not read.
+func copiedDefenseClawHookCommand(command, scriptName string) bool {
+	word, rest, ok := hookScriptWordAfterWrapper(strings.TrimSpace(command))
+	if !ok || strings.ContainsAny(word, "\x00\r\n") || !strings.HasPrefix(word, "/") ||
+		strings.HasPrefix(word, "//") || path.Clean(word) != word {
+		return false
+	}
+	return (defenseClawHookBinding(rest) && path.Base(word) == scriptName) || defenseClawHookFile(word)
+}
+
+// hookShellWrappers are the programs a hook command can run a script through
+// (bash /path/hook.sh, /usr/bin/env /path/hook.sh).
+var hookShellWrappers = map[string]bool{"sh": true, "bash": true, "dash": true, "zsh": true, "ksh": true, "env": true}
+
+// hookScriptWordAfterWrapper splits a hook command like posixHookCommandSplit,
+// after one shell or env wrapper word (bare or an absolute path) and, after
+// env, its NAME=value words. "bash /old/copilot-hook.sh --event preToolUse"
+// ran an old copy that the first-word check did not see (rel-1-0-4
+// GAP-0600).
+func hookScriptWordAfterWrapper(command string) (word, rest string, ok bool) {
+	word, rest, ok = posixHookCommandSplit(command)
+	if !ok || !hookShellWrappers[path.Base(word)] || (strings.Contains(word, "/") && !path.IsAbs(word)) {
+		return word, rest, ok
+	}
+	env := path.Base(word) == "env"
+	for {
+		word, rest, ok = posixHookCommandSplit(strings.TrimLeft(rest, " \t"))
+		if !ok || !env || !strings.Contains(word, "=") || strings.HasPrefix(word, "/") {
+			return word, rest, ok
+		}
+	}
+}
+
+// defenseClawHookFile reports whether name is a regular file whose first
+// bytes hold the generated-hook marker (hookSchemaVersionMarker).
+func defenseClawHookFile(name string) bool {
+	if runtime.GOOS == "windows" {
+		return false
+	}
+	file, err := openHookConfigForRead(name)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	if info, err := file.Stat(); err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	head := make([]byte, 512)
+	n, _ := io.ReadFull(file, head)
+	return bytes.Contains(head[:n], []byte(hookSchemaVersionMarker))
 }
 
 // editedDefenseClawHookHandler applies editedDefenseClawHookCommand to one
@@ -413,12 +501,53 @@ func windowsHermesDirectHookCommand(binary string) string {
 }
 
 func windowsDevinBashHookCommand(binary string) string {
+	word := windowsDevinProgramWord(binary)
+	if word == "" {
+		return ""
+	}
+	return word + " " + nativeHookFlag + "devin"
+}
+
+// windowsDevinProgramWord is the first word of a Windows Devin command: the
+// absolute program path with forward slashes in single quotes, a quote in it
+// written as '\”; "" for a path Devin's words cannot carry.
+func windowsDevinProgramWord(binary string) string {
 	binary = strings.TrimSpace(binary)
 	if binary == "" || strings.ContainsAny(binary, "\"\x00\r\n") || !isWindowsAbsolutePath(binary) {
 		return ""
 	}
 	binary = strings.ReplaceAll(binary, `\`, "/")
-	return "'" + strings.ReplaceAll(binary, "'", `'\''`) + "' " + nativeHookFlag + "devin"
+	return "'" + strings.ReplaceAll(binary, "'", `'\''`) + "'"
+}
+
+// windowsDevinGuardedHookCommand is the per-user Windows Devin command of a
+// block event (hookguard.DevinBlockEvent) that starts the one-line install's
+// guard program, which starts the defenseclaw-hook.exe beside it and blocks
+// when that launcher cannot start (rel-1-0-6 GAP-0676):
+//
+//	'C:/Users/<u>/.local/bin/defenseclaw-hook-guard.exe' launcher-guard-devin <Event> hook --connector devin
+//
+// The same words as windowsDevinBashHookCommand, with the guard first.
+func windowsDevinGuardedHookCommand(guard, event string) string {
+	word := windowsDevinProgramWord(guard)
+	if word == "" || !hookguard.DevinBlockEvent(event) || !strings.EqualFold(filepath.Base(strings.ReplaceAll(guard, `\`, "/")), windowsHookGuardBinaryName) {
+		return ""
+	}
+	return word + " " + hookguard.DevinSubcommand + " " + event + " " + nativeHookFlag + "devin"
+}
+
+// windowsDevinOwnedHookCommands are the per-user Windows Devin commands of
+// launcher this release and its upgrade sources write: the direct start
+// every release writes, and the guarded start of each block event, whether
+// or not the guard program is still there.
+func windowsDevinOwnedHookCommands(launcher string) []string {
+	commands := []string{windowsDevinBashHookCommand(launcher)}
+	if guard := windowsSiblingGuardPath(launcher); guard != "" {
+		for _, event := range devinHookEvents {
+			commands = append(commands, windowsDevinGuardedHookCommand(guard, event))
+		}
+	}
+	return uniqueNonEmptyStrings(commands)
 }
 
 // defenseclawHookBinary returns the stable native HookRuntime launcher on
@@ -651,15 +780,36 @@ func sameWindowsInstallPath(left, right string) bool {
 	return pathidentity.Same(left, right)
 }
 
+// openNativeReadOnly opens an installed file for a read-only check. It
+// shares delete access: an installer's replace of the hook binary failed
+// while a check that runs on every hook call held it (GAP-0200). The checks
+// keep their identity comparisons, which a replace fails. Tests replace it.
+var openNativeReadOnly = winpath.OpenReadShared
+
+// digestNativeFileShared hashes an installed file without retaining its bytes.
+func digestNativeFileShared(path string) (string, error) {
+	file, err := openNativeReadOnly(path)
+	if err != nil {
+		return "", err
+	}
+	hash := sha256.New()
+	_, err = io.Copy(hash, file)
+	_ = file.Close()
+	if err != nil {
+		return "", err
+	}
+	return "sha256:" + hex.EncodeToString(hash.Sum(nil)), nil
+}
+
 func stableNativeWindowsPE(path string) bool {
 	if !nativeWindowsPathHasNoReparsePoints(path) {
 		return false
 	}
-	before, err := os.Lstat(path)
+	before, err := pathidentity.LstatPinned(path)
 	if err != nil || before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
 		return false
 	}
-	file, err := os.Open(path)
+	file, err := openNativeReadOnly(path)
 	if err != nil {
 		return false
 	}
@@ -680,11 +830,11 @@ func readStableNativeWindowsFile(path string, limit int64) ([]byte, bool) {
 	if limit <= 0 || !nativeWindowsPathHasNoReparsePoints(path) {
 		return nil, false
 	}
-	before, err := os.Lstat(path)
+	before, err := pathidentity.LstatPinned(path)
 	if err != nil || before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() || before.Size() > limit {
 		return nil, false
 	}
-	file, err := os.Open(path)
+	file, err := openNativeReadOnly(path)
 	if err != nil {
 		return nil, false
 	}
@@ -737,9 +887,62 @@ func windowsQuoteExe(p string) string {
 // be invoked as `& '<path>'`; a quoted path without `&` is only an expression
 // and PowerShell rejects it as a pipeline target. Doubling a single quote is
 // PowerShell's literal escape and prevents a user-controlled home path from
-// changing the command structure.
+// changing the command structure. It is managed.PowerShellLiteral, the one
+// quoting rule: PowerShell reads U+2018 to U+201B as single quotes too, so a
+// hook under C:\Users\O’Brien ended the literal early and its command did
+// not parse, and the hook fell to its fail mode (g072 review 2 S3).
 func powershellQuoteLiteral(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+	return managed.PowerShellLiteral(value)
+}
+
+// powershellLiteralBody is powershellQuoteLiteral without the quotes, for a
+// template that holds them ('{{.HookBinaryPS}}').
+func powershellLiteralBody(value string) string {
+	return managed.PowerShellLiteralBody(value)
+}
+
+// powershellLiteralValue is the value of the inside of a single-quoted
+// literal powershellQuoteLiteral wrote.
+func powershellLiteralValue(body string) string {
+	return managed.PowerShellLiteralValue(body)
+}
+
+// preTypographicQuoteHookCommand is cmd as a release before 1.0.9 rendered
+// it, when cmd quotes a path with a typographic quote: those releases doubled
+// only the apostrophe (managed.PowerShellLiteralBeforeTypographicQuotes). An
+// encoded bridge, alone or inside Kiro's cmd.exe wrapper, is compared by the
+// script of its -EncodedCommand value (g072 review 4 M1). The form stays
+// owned, so setup rewrites it and teardown removes it.
+func preTypographicQuoteHookCommand(cmd string) (string, bool) {
+	const marker = " -EncodedCommand "
+	if index := strings.Index(cmd, marker); index >= 0 {
+		start := index + len(marker)
+		end := start
+		for end < len(cmd) && !unicode.IsSpace(rune(cmd[end])) {
+			end++
+		}
+		script, decoded := powershellDecodedCommand(cmd[start:end])
+		if !decoded {
+			return "", false
+		}
+		old, changed := managed.PowerShellLiteralBeforeTypographicQuotes(script)
+		if !changed {
+			return "", false
+		}
+		return cmd[:start] + powershellEncodedCommand(old) + cmd[end:], true
+	}
+	return managed.PowerShellLiteralBeforeTypographicQuotes(cmd)
+}
+
+// appendWithPreTypographicQuoteForm appends command and, when it quotes a
+// path with a typographic quote, its pre-1.0.9 render
+// (preTypographicQuoteHookCommand), for an exact-string ownership list.
+func appendWithPreTypographicQuoteForm(commands []string, command string) []string {
+	commands = append(commands, command)
+	if old, ok := preTypographicQuoteHookCommand(command); ok {
+		commands = append(commands, old)
+	}
+	return commands
 }
 
 func windowsAntigravityHookCommand() string {
@@ -752,10 +955,26 @@ func windowsAntigravityHookCommand() string {
 // event to the trusted registration and passes it as a DefenseClaw launcher
 // argument. Unix retains agy's direct command-tokenization contract; Windows
 // uses the system PowerShell EncodedCommand bridge so GUI-subsystem launchers
-// are awaited and stdin/stdout remain attached.
+// are awaited and stdin/stdout remain attached. It is the per-user render;
+// antigravityHookCommandForEvent renders a managed one.
 func antigravityHookInvocationCommandForEvent(goos, event, unixCommand string) string {
+	return antigravityHookCommandForEvent(goos, event, unixCommand, false)
+}
+
+// antigravityHookCommandForEvent is antigravityHookInvocationCommandForEvent
+// for a per-user or a managed install. On per-user Windows the PreToolUse
+// bridge denies the call when the launcher cannot start
+// (antigravityLauncherStartAnswer, rel-1-0-6 GAP-0676). A managed install
+// keeps the bridge without that answer, the form releases before 1.0.9
+// rendered everywhere (windowsNativePowerShellHookCommandForEvent), as Kiro
+// does: its guardian restores the launcher. Both forms stay owned.
+func antigravityHookCommandForEvent(goos, event, unixCommand string, managed bool) string {
 	if goos == "windows" {
-		return windowsNativePowerShellHookCommandForEvent("antigravity", event, defenseclawHookBinary())
+		var answer *launcherStartAnswer
+		if !managed {
+			answer = antigravityLauncherStartAnswer(event)
+		}
+		return windowsAnsweringPowerShellHookCommand("antigravity", event, "", defenseclawHookBinary(), answer)
 	}
 	return strings.TrimSpace(unixCommand) + " " + event
 }
@@ -790,6 +1009,98 @@ func windowsNativePowerShellHookCommandForBoundEvent(connector, event, contractI
 		"$env:NoDefaultCurrentDirectoryInExePath='1'",
 	}, windowsAwaitedHookStatements(hookBinary, nativeHookBridgeArguments(connector, event, contractID, extra))...), "; ")
 	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
+}
+
+// windowsCodexHookCommandForBinaryEvent is the per-user Codex command for
+// one event. On an event Codex can block (codexLauncherStartAnswer) it is
+// the direct cmd.exe start of the guard program beside the launcher
+// (windowsCodexGuardedHookCommand), which answers Codex's block when the
+// launcher cannot start (rel-1-0-6 GAP-0676). Otherwise, and without a guard
+// program, it is the direct cmd.exe start of the launcher
+// (windowsCmdDirectHookCommand), or, for a launcher path that form cannot
+// carry, the encoded system PowerShell bridge, which answers a launcher that
+// cannot start itself (windowsCodexAnsweringBridgeHookCommand). The forms
+// earlier releases registered stay owned for repair and teardown
+// (windowsCodexPerUserHookCommands) while those releases are upgrade sources.
+func windowsCodexHookCommandForBinaryEvent(event, contractID, hookBinary string) string {
+	if codexLauncherStartAnswer(event, contractID) != nil {
+		if guard := windowsSiblingLauncherGuard(hookBinary); guard != "" {
+			if command, ok := windowsCodexGuardedHookCommand(guard, event, contractID); ok {
+				return command
+			}
+		}
+	}
+	if command, ok := windowsCmdDirectHookCommand(hookBinary, nativeHookBridgeArguments("codex", event, contractID, nil)); ok {
+		return command
+	}
+	return windowsCodexAnsweringBridgeHookCommand(event, contractID, hookBinary)
+}
+
+// windowsCmdDirectHookCommand renders a hook command that starts the
+// GUI-subsystem launcher through the system cmd.exe, with no PowerShell:
+//
+//	<system>\cmd.exe /d /v:off /c "<launcher>" <arguments>
+//
+// Codex runs a hook command through the account's shell (PowerShell
+// -Command in current releases, %COMSPEC% /C before), so the encoded
+// PowerShell bridge started a second Windows PowerShell on every call.
+// Under load that start alone took 2 to 5 s, and the hook counts it against
+// its answer budget, so benign calls were blocked as unanswered (GAP-1908,
+// GAP-1489, GAP-1150, GAP-0050). cmd.exe /c waits for a GUI-subsystem
+// program, hands it the agent's standard handles and exits with its status.
+// The line runs the same under PowerShell 5.1 and 7, under cmd.exe (which
+// keeps the quotes of a single quoted program path) and when started
+// directly. /d skips AutoRun commands and /v:off delayed expansion.
+//
+// It is used only when the cmd.exe path is made of letters, digits and
+// \ : . _ - ~, the launcher path of those and spaces, and every argument of
+// letters, digits and . _ -: neither shell can expand, split or redirect
+// anything in it (no % ! ^ & | < > ( ) @ $ ` ' or quote). Any other path
+// keeps the PowerShell bridge.
+func windowsCmdDirectHookCommand(hookBinary string, arguments []string) (string, bool) {
+	cmdExe := windowsSystemCmdExe()
+	if !windowsCmdDirectPath(cmdExe, false) || !windowsCmdDirectPath(hookBinary, true) {
+		return "", false
+	}
+	for _, argument := range arguments {
+		if !windowsCmdDirectToken(argument) {
+			return "", false
+		}
+	}
+	return cmdExe + ` /d /v:off /c "` + hookBinary + `" ` + strings.Join(arguments, " "), true
+}
+
+// windowsCmdDirectPath reports an absolute drive path (X:\...) that
+// windowsCmdDirectHookCommand can carry; spaces only when it is quoted.
+func windowsCmdDirectPath(candidate string, quoted bool) bool {
+	if len(candidate) < 4 || candidate[1] != ':' || candidate[2] != '\\' ||
+		(candidate[0] < 'A' || candidate[0] > 'Z') && (candidate[0] < 'a' || candidate[0] > 'z') ||
+		strings.HasSuffix(candidate, `\`) || strings.Contains(candidate, `\\`) {
+		return false
+	}
+	for _, r := range candidate[3:] {
+		switch {
+		case unicode.IsLetter(r), unicode.IsDigit(r), strings.ContainsRune(`\._-~`, r):
+		case r == ' ' && quoted:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// windowsCmdDirectToken reports one bare hook argument (a flag, connector,
+// event or contract) that windowsCmdDirectHookCommand can carry unquoted.
+func windowsCmdDirectToken(argument string) bool {
+	if argument == "" {
+		return false
+	}
+	for _, r := range argument {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && !strings.ContainsRune("._-", r) {
+			return false
+		}
+	}
+	return true
 }
 
 // windowsGuardedPowerShellHookCommand is
@@ -835,30 +1146,112 @@ func nativeHookBridgeArguments(connector, event, contractID string, extra []stri
 // awaited on the handle PowerShell started it with, and $LASTEXITCODE is its
 // status. Its stdout then reaches the agent as console-encoded text lines.
 // Continue keeps a host that turns native stderr into error records from
-// ending the script with 1.
+// ending the script with 1. When the launcher cannot start at all (it is
+// missing, or WDAC/AppLocker blocks it) the call operator raises an error
+// that Continue lets pass and $LASTEXITCODE stays $null; exit $null is 0,
+// which agents read as allow, so that case exits 1 instead
+// (windowsAwaitedHookFallbackExit). Releases up to 1.0.6 rendered the
+// fallback without that check; their registrations stay owned
+// (legacyWindowsAwaitedHookCommand).
 //
 // Outside Constrained Language mode the statements call no cmdlet, and
 // Out-Host is module-qualified, so a fresh Windows PowerShell process does
 // not run a broad first-use module discovery scan.
 func windowsAwaitedHookStatements(hookBinary string, arguments []string) []string {
+	return windowsAwaitedHookStatementsAnswering(hookBinary, arguments, nil)
+}
+
+// windowsAwaitedHookStatementsAnswering is windowsAwaitedHookStatements
+// whose statements answer a launcher that cannot start with answer
+// (rel-1-0-6 GAP-0676): a Process.Start that throws (missing, a folder, a
+// damaged or empty image, no right to run it), a Constrained Language start
+// that set no exit status, and a launcher that ended with a Windows exception
+// status (negative as a .NET exit code). A nil answer renders
+// windowsAwaitedHookStatements unchanged.
+func windowsAwaitedHookStatementsAnswering(hookBinary string, arguments []string, answer *launcherStartAnswer) []string {
 	quoted := make([]string, len(arguments))
 	escaped := make([]string, len(arguments))
 	for i, argument := range arguments {
 		quoted[i] = powershellQuoteLiteral(argument)
 		escaped[i] = windowsCommandLineArgument(argument)
 	}
+	fallbackEnd := windowsAwaitedHookFallbackExit
+	start := "$hookProcess=[System.Diagnostics.Process]::Start($hookStart)"
+	end := "exit $hookProcess.ExitCode"
+	if answer != nil {
+		cannotStart := answer.powershell()
+		fallbackEnd = " | Microsoft.PowerShell.Core\\Out-Host; if ($null -eq $LASTEXITCODE -or $LASTEXITCODE -lt 0) { " +
+			cannotStart + " }; exit $LASTEXITCODE }"
+		start = "try { " + start + " } catch { " + cannotStart + " }"
+		end = "if ($hookProcess.ExitCode -lt 0) { " + cannotStart + " }; " + end
+	}
 	return []string{
 		"if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { $ErrorActionPreference='Continue'; & " +
-			powershellQuoteLiteral(hookBinary) + " " + strings.Join(quoted, " ") + " | Microsoft.PowerShell.Core\\Out-Host; exit $LASTEXITCODE }",
+			powershellQuoteLiteral(hookBinary) + " " + strings.Join(quoted, " ") + fallbackEnd,
 		"$hookStart=[System.Diagnostics.ProcessStartInfo]::new(" + powershellQuoteLiteral(hookBinary) + "," +
 			powershellQuoteLiteral(strings.Join(escaped, " ")) + ")",
 		"$hookStart.UseShellExecute=$false",
 		"$hookStart.RedirectStandardError=$true",
-		"$hookProcess=[System.Diagnostics.Process]::Start($hookStart)",
+		start,
 		"$hookProcess.StandardError.BaseStream.CopyTo([Console]::OpenStandardError())",
 		"$hookProcess.WaitForExit()",
-		"exit $hookProcess.ExitCode",
+		end,
 	}
+}
+
+// windowsAwaitedHookFallbackExit ends the Constrained Language fallback of
+// windowsAwaitedHookStatements; legacyWindowsAwaitedHookFallbackExit is the
+// end releases up to 1.0.6 rendered, which exited 0 when the launcher never
+// started.
+const (
+	windowsAwaitedHookFallbackExit       = " | Microsoft.PowerShell.Core\\Out-Host; if ($null -eq $LASTEXITCODE) { exit 1 }; exit $LASTEXITCODE }"
+	legacyWindowsAwaitedHookFallbackExit = " | Microsoft.PowerShell.Core\\Out-Host; exit $LASTEXITCODE }"
+)
+
+// legacyWindowsAwaitedHookCommand reconstructs, byte for byte, the form
+// releases up to 1.0.6 rendered of command, a command this release renders
+// with windowsAwaitedHookStatements (an encoded bridge, the Kiro cmd.exe
+// wrapper around one, or a plain PowerShell program): the same command with
+// the fallback end legacyWindowsAwaitedHookFallbackExit. Those registrations
+// stay DefenseClaw's own, so setup and the guardian rewrite them and
+// teardown removes them. ok is false for a command that carries no current
+// fallback end.
+func legacyWindowsAwaitedHookCommand(command string) (string, bool) {
+	return rewriteWindowsAwaitedHookFallback(command, windowsAwaitedHookFallbackExit, legacyWindowsAwaitedHookFallbackExit)
+}
+
+// currentWindowsAwaitedHookCommand is the inverse of
+// legacyWindowsAwaitedHookCommand: the current form of a 1.0.x command, for
+// a caller that compares a registration against the commands it renders now.
+// The result is DefenseClaw's only when it equals one of them byte for byte.
+func currentWindowsAwaitedHookCommand(command string) (string, bool) {
+	return rewriteWindowsAwaitedHookFallback(command, legacyWindowsAwaitedHookFallbackExit, windowsAwaitedHookFallbackExit)
+}
+
+// rewriteWindowsAwaitedHookFallback replaces the one fallback end from in
+// command, or in the script of its first -EncodedCommand value, with to. An
+// encoded value that is not the canonical encoding of its script, or a
+// script without exactly one from, is left alone (ok false).
+func rewriteWindowsAwaitedHookFallback(command, from, to string) (string, bool) {
+	const marker = " -EncodedCommand "
+	index := strings.Index(command, marker)
+	if index < 0 {
+		if strings.Count(command, from) != 1 {
+			return "", false
+		}
+		return strings.Replace(command, from, to, 1), true
+	}
+	start := index + len(marker)
+	end := start
+	for end < len(command) && !unicode.IsSpace(rune(command[end])) {
+		end++
+	}
+	encoded := command[start:end]
+	script, ok := powershellDecodedCommand(encoded)
+	if !ok || powershellEncodedCommand(script) != encoded || strings.Count(script, from) != 1 {
+		return "", false
+	}
+	return command[:start] + powershellEncodedCommand(strings.Replace(script, from, to, 1)) + command[end:], true
 }
 
 // windowsCommandLineArgument quotes one argument for
@@ -1009,17 +1402,29 @@ func legacyWindowsNativePowerShellHookCommandForBinary(connector, hookBinary str
 	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
 }
 
+// windowsSystemDirectory is trustedWindowsSystemDirectory; a test replaces
+// it to render for a Windows installed outside C:\Windows.
+var windowsSystemDirectory = trustedWindowsSystemDirectory
+
 func windowsSystemPowerShellExe() string {
 	// The system directory is resolved by a Windows API, never by mutable
 	// SystemRoot/WINDIR values inherited from the project launching an agent.
 	// Build this as a Windows path even in OS-parameterized tests.
-	return strings.TrimRight(trustedWindowsSystemDirectory(), `\/`) + `\WindowsPowerShell\v1.0\powershell.exe`
+	return strings.TrimRight(windowsSystemDirectory(), `\/`) + `\WindowsPowerShell\v1.0\powershell.exe`
 }
+
+// windowsHelperACLCheckMarker is the line of a per-user Amp or OpenCode
+// plugin that passes its Windows helper owner/DACL check only when the
+// PowerShell script reports every path checked. A plugin without it still
+// runs the check through cmdlets that PSModulePath resolves (a module the
+// agent's environment names first can answer for them), so verification
+// repairs it.
+const windowsHelperACLCheckMarker = `if (output.trim() !== "checked " + entries.length)`
 
 // windowsSystemCmdExe is cmd.exe in the trusted system directory, built as a
 // Windows path like windowsSystemPowerShellExe.
 func windowsSystemCmdExe() string {
-	return strings.TrimRight(trustedWindowsSystemDirectory(), `\/`) + `\cmd.exe`
+	return strings.TrimRight(windowsSystemDirectory(), `\/`) + `\cmd.exe`
 }
 
 // powershellDecodedCommand is the script of a -EncodedCommand argument
@@ -1103,7 +1508,7 @@ func isNativeHookCommand(cmd string) bool {
 		if len(exe) < 2 || !strings.HasPrefix(exe, `'`) || !strings.HasSuffix(exe, `'`) {
 			return false
 		}
-		exe = strings.ReplaceAll(exe[1:len(exe)-1], `''`, `'`)
+		exe = powershellLiteralValue(exe[1 : len(exe)-1])
 	}
 	if exe == "" || strings.Contains(exe, `"`) {
 		return false
@@ -1118,10 +1523,8 @@ func isHermesDirectNativeHookCommand(command string) bool {
 
 func isDevinBashNativeHookCommand(command string) bool {
 	for _, hookBinary := range nativeHookBinaryOwnershipCandidates() {
-		for _, expected := range []string{
-			windowsDevinBashHookCommand(hookBinary),
-		} {
-			if expected != "" && command == expected {
+		for _, expected := range windowsDevinOwnedHookCommands(hookBinary) {
+			if command == expected {
 				return true
 			}
 		}
@@ -1150,6 +1553,8 @@ func nativeHookExactCommands(hookBinaries []string) map[string]struct{} {
 	codexContracts := builtinHookContracts["codex"]
 	var key strings.Builder
 	key.WriteString(windowsSystemPowerShellExe())
+	key.WriteString("\x00s")
+	key.WriteString(windowsSystemCmdExe())
 	for _, hookBinary := range hookBinaries {
 		key.WriteString("\x00b")
 		key.WriteString(hookBinary)
@@ -1174,7 +1579,21 @@ func nativeHookExactCommands(hookBinaries []string) map[string]struct{} {
 		return cache.commands
 	}
 	commands := make(map[string]struct{})
-	add := func(cmd string) { commands[cmd] = struct{}{} }
+	add := func(cmd string) {
+		commands[cmd] = struct{}{}
+		// The 1.0.x render of an awaited bridge stays owned, so setup
+		// rewrites it to the current one and teardown removes it.
+		if legacy, ok := legacyWindowsAwaitedHookCommand(cmd); ok {
+			commands[legacy] = struct{}{}
+			if old, ok := preTypographicQuoteHookCommand(legacy); ok {
+				commands[old] = struct{}{}
+			}
+		}
+		// So does a pre-1.0.9 render of a path with a typographic quote.
+		if old, ok := preTypographicQuoteHookCommand(cmd); ok {
+			commands[old] = struct{}{}
+		}
+	}
 	for _, connectorName := range []string{"codex", "antigravity"} {
 		for _, hookBinary := range hookBinaries {
 			add(windowsNativePowerShellHookCommandForBinary(connectorName, hookBinary))
@@ -1186,7 +1605,9 @@ func nativeHookExactCommands(hookBinaries []string) map[string]struct{} {
 	for _, hookBinary := range hookBinaries {
 		for _, contract := range codexContracts {
 			for _, event := range contract.Events {
-				add(windowsNativePowerShellHookCommandForCodexEvent(event, contract.ContractID, hookBinary))
+				for _, command := range windowsCodexPerUserHookCommands(event, contract.ContractID, hookBinary) {
+					add(command)
+				}
 			}
 		}
 	}

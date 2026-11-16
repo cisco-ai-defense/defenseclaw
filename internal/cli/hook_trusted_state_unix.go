@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -48,36 +50,127 @@ const (
 	standaloneRuntimeReasonHookSocketMissing = "enterprise_managed_hook_socket_missing"
 )
 
-// standaloneHookInUserNamespace reports a hook that runs in a Linux user
-// namespace other than the host's (its uid_map is not the identity map).
-var standaloneHookInUserNamespace = func() bool {
-	if runtime.GOOS != "linux" {
-		return false
-	}
-	data, err := os.ReadFile("/proc/self/uid_map")
+// The hook inherits the agent's process context. A managed Linux hook refuses
+// a private user namespace, where it can not verify the gateway's listener,
+// and a traced process. A private mount view is not refused on its own (a
+// pam_namespace login has one). The hook does no policy-view work: the
+// gateway proves the published vendor policy when it changes and alerts off
+// the call path (gateway/managed_policy_view.go). This is an invocation
+// check: an agent that never loads its managed hook still has no invocation
+// to check, which status reports separately.
+var standaloneLinuxHookContext = func() string {
+	return linuxManagedHookContextReason(os.Readlink, openLinuxHookContextFile)
+}
+
+func openLinuxHookContextFile(path string) (io.ReadCloser, error) { return os.Open(path) }
+
+// linuxHookContextMaxBytes bounds every proc read so a replaced proc file
+// cannot consume unbounded memory. In the host user namespace uid_map is one
+// line. Only the head of status is read: TracerPid is its eighth line, while
+// later lines such as Groups grow with the account (up to 65,536
+// supplementary groups), and a large file must not refuse a valid call.
+const linuxHookContextMaxBytes = 16 * 1024
+
+func linuxManagedHookContextReason(readlink func(string) (string, error), open func(string) (io.ReadCloser, error)) string {
+	uidMap, err := readLinuxHookContextFile(open, "/proc/self/uid_map")
 	if err != nil {
-		return false
+		return hookexec.ManagedProcessContextUnknownReason
 	}
-	fields := strings.Fields(string(data))
-	return len(fields) != 3 || fields[0] != "0" || fields[1] != "0" || fields[2] != "4294967295"
+	fields := strings.Fields(string(uidMap))
+	if len(fields) != 3 || fields[0] != "0" || fields[1] != "0" || fields[2] != "4294967295" {
+		return hookexec.ManagedUserNamespaceReason
+	}
+	self, err := readlink("/proc/self/ns/user")
+	if err != nil || self == "" {
+		return hookexec.ManagedProcessContextUnknownReason
+	}
+	// SELinux on managed RHEL denies standard users readlink on /proc/1/ns,
+	// even in the host namespaces. An unprivileged private user namespace
+	// can not keep the full host uid map checked above, so that check
+	// stands alone then.
+	if host, err := readlink("/proc/1/ns/user"); err == nil && host != "" && host != self {
+		return hookexec.ManagedUserNamespaceReason
+	}
+	return linuxTracerPidReason(open)
+}
+
+func readLinuxHookContextFile(open func(string) (io.ReadCloser, error), path string) ([]byte, error) {
+	f, err := open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, linuxHookContextMaxBytes+1))
+	if err != nil || len(data) > linuxHookContextMaxBytes {
+		return nil, errors.New("cannot read bounded Linux process context")
+	}
+	return data, nil
+}
+
+// linuxTracerPidReason reads /proc/self/status only up to its first complete
+// TracerPid line. A status with no complete TracerPid line in its first
+// linuxHookContextMaxBytes, or an unparsable one, is unverifiable.
+func linuxTracerPidReason(open func(string) (io.ReadCloser, error)) string {
+	f, err := open("/proc/self/status")
+	if err != nil {
+		return hookexec.ManagedProcessContextUnknownReason
+	}
+	defer f.Close()
+	// Keep read-ahead smaller than the Uid/Gid/FDSize lines between
+	// TracerPid and Groups in the kernel's status format. A default-sized
+	// bufio reader asks proc for 4 KiB at once, making a valid hook wait
+	// for (or fail on) the account's entire Groups line before it can see
+	// TracerPid, even though the parser stops there.
+	head := bufio.NewReaderSize(io.LimitReader(f, linuxHookContextMaxBytes), 16)
+	for {
+		line, err := head.ReadString('\n')
+		if err != nil {
+			// EOF or the bound before a complete TracerPid line: a cut
+			// line is never trusted.
+			return hookexec.ManagedProcessContextUnknownReason
+		}
+		value, ok := strings.CutPrefix(line, "TracerPid:")
+		if !ok {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || pid < 0 {
+			return hookexec.ManagedProcessContextUnknownReason
+		}
+		if pid != 0 {
+			return hookexec.ManagedTracedProcessReason
+		}
+		return ""
+	}
 }
 
 // reportStandaloneHookRefusal tells the gateway, over the hook socket, that
 // this hook refused its agent, so the refusal is in the audit log and the
-// gateway log as a refused unenrolled account is (GAP-0923). From a private
-// user namespace the listener's owner cannot be checked (it reads as the
-// overflow uid), so the report carries only the connector and the reason;
-// it is best effort and bounded.
+// gateway log as a refused unenrolled account is (GAP-0923). It is best
+// effort and bounded.
+//
+// It dials the layout's fixed socket path without the listener proof of the
+// verified transport (managedStandaloneHTTPClient): from a private user
+// namespace the root-owned socket directory and the listener both read as
+// the overflow uid, and the refused runtime has no service uid, so the proof
+// can never pass and the report never left the hook (GAP-1335). The report
+// carries no credential, no event content and no decision (an empty body,
+// the connector and the refusal reason), and its answer is discarded. Only
+// root can hold that path in the host's mount namespace; in a private mount
+// namespace only the refused user can, and then receives its own report.
 var reportStandaloneHookRefusal = func(socket, connectorName, reason string) {
-	if strings.TrimSpace(socket) == "" {
+	socket = strings.TrimSpace(socket)
+	if socket == "" || !filepath.IsAbs(socket) {
 		return
 	}
 	client := &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{
+		DisableKeepAlives: true,
+		Proxy:             nil,
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var dialer net.Dialer
 			return dialer.DialContext(ctx, "unix", socket)
 		},
-	}}
+	}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	request, err := http.NewRequest(http.MethodPost, "http://defenseclaw-hook/api/v1/inspect/tool", strings.NewReader("{}"))
 	if err != nil {
 		return
@@ -130,14 +223,24 @@ func implicitEnterpriseManagedHook() bool { return false }
 // remains a fail-closed invocation even after machine policy is removed.
 func prepareEnterpriseManagedHookRuntime(connectorName string) bool {
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
+	contextReason := ""
+	if standaloneHookGOOS == "linux" {
+		contextReason = standaloneLinuxHookContext()
+	}
 	layout, err := managed.StandaloneLayoutFor(standaloneHookGOOS)
 	var loaded *managed.RuntimeDescriptor
 	if err == nil {
 		loaded, err = standaloneRuntimeDescriptorLoad(layout.DescriptorPath)
 	}
+	// The trusted descriptor is the managed policy this hook enforces; only
+	// a hook with no trusted descriptor at all refuses. The hook reads no
+	// vendor policy file: a view the gateway can not prove still has every
+	// call inspected under that policy, and the gateway raises the alert.
 	reason := ""
 	secureClientHost := false
 	switch {
+	case contextReason != "":
+		reason = contextReason
 	case err == nil && loaded != nil && strings.TrimSpace(loaded.HookSocket) == "":
 		reason = standaloneRuntimeReasonHookSocketMissing
 	case err == nil:
@@ -153,11 +256,6 @@ func prepareEnterpriseManagedHookRuntime(connectorName string) bool {
 		}
 	default:
 		reason = standaloneRuntimeReasonInvalid
-		if standaloneHookInUserNamespace() {
-			// The root-owned files read as owned by the overflow uid here,
-			// so they fail their checks; say why (GAP-0923).
-			reason = hookexec.ManagedUserNamespaceReason
-		}
 	}
 	standaloneHookRuntime.Lock()
 	standaloneHookRuntime.prepared = true
@@ -178,6 +276,23 @@ func enterpriseManagedHookRuntimeForceClosed() bool {
 	defer standaloneHookRuntime.Unlock()
 	return standaloneHookRuntime.prepared && standaloneHookRuntime.reason != ""
 }
+
+// enterpriseManagedHookRuntimeFailMode is the fail mode the root-owned runtime
+// descriptor records for the prepared connector (RuntimeDescriptor.HookFailMode):
+// open only when the administrator's config chose open for it, and closed
+// otherwise and whenever the runtime failed its checks.
+func enterpriseManagedHookRuntimeFailMode() string {
+	standaloneHookRuntime.Lock()
+	defer standaloneHookRuntime.Unlock()
+	if !standaloneHookRuntime.prepared || standaloneHookRuntime.reason != "" || standaloneHookRuntime.descriptor == nil {
+		return "closed"
+	}
+	return standaloneHookRuntime.descriptor.HookFailMode(standaloneHookRuntime.connector)
+}
+
+// enterpriseManagedHookRuntimeDriftFailMode: a Unix runtime failure is never
+// Windows runtime drift, so it stays closed.
+func enterpriseManagedHookRuntimeDriftFailMode() string { return "closed" }
 
 func enterpriseManagedHookRuntimeFailureReason() string {
 	standaloneHookRuntime.Lock()
@@ -227,7 +342,7 @@ func applyStandaloneManagedHookTransport(opts *hookexec.Options, connectorName s
 	if opts.ManagedRuntimeFailure != "" {
 		if prepared && failed && !secureClientHost {
 			opts.ManagedStandalone = true
-			if opts.ManagedRuntimeFailure == hookexec.ManagedUserNamespaceReason {
+			if hookexec.IsManagedProcessContextReason(opts.ManagedRuntimeFailure) {
 				reportStandaloneHookRefusal(layout.HookSocketPath, connectorName, opts.ManagedRuntimeFailure)
 			}
 		}
@@ -240,6 +355,9 @@ func applyStandaloneManagedHookTransport(opts *hookexec.Options, connectorName s
 	opts.ManagedStandalone = true
 	opts.ManagedServiceUID = descriptor.ServiceUID
 	opts.ManagedUnixSocket = descriptor.HookSocket
+	// opts.FailMode and StrictAvailability are the descriptor's
+	// (enterpriseManagedHookRuntimeFailMode): closed and strict unless the
+	// administrator's config chose open for this connector.
 	// An inherited generic gateway token never authenticates a managed hook.
 	opts.Token = ""
 	if opts.MaxBody <= 0 || opts.MaxBody > 1<<20 {
@@ -268,3 +386,7 @@ func pathExists(path string) bool {
 	_, err := os.Lstat(path)
 	return err == nil
 }
+
+// enterpriseManagedHookRuntimeEnrolledPending: only the Windows standalone
+// hook refuses an account as enrollment pending.
+func enterpriseManagedHookRuntimeEnrolledPending(string) bool { return false }

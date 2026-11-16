@@ -128,12 +128,6 @@ func connectorMatrix(t *testing.T) []ConnectorFixture {
 			Apply:          hookOnlyFixtureApply("copilot"),
 		},
 		{
-			Name:           "openhands",
-			DestinationApp: "openhands",
-			ClawMode:       "openhands",
-			Apply:          hookOnlyFixtureApply("openhands"),
-		},
-		{
 			Name:           "antigravity",
 			DestinationApp: "antigravity",
 			ClawMode:       "antigravity",
@@ -150,12 +144,6 @@ func connectorMatrix(t *testing.T) []ConnectorFixture {
 			DestinationApp: "amp",
 			ClawMode:       "amp",
 			Apply:          hookOnlyFixtureApply("amp"),
-		},
-		{
-			Name:           "omnigent",
-			DestinationApp: "omnigent",
-			ClawMode:       "omnigent",
-			Apply:          hookOnlyFixtureApply("omnigent"),
 		},
 	}
 }
@@ -181,10 +169,6 @@ func hookOnlyFixtureApply(name string) func(t *testing.T) (string, string) {
 			prev := connector.CopilotHooksPathOverride
 			connector.CopilotHooksPathOverride = filepath.Join(home, "workspace", ".github", "hooks", "defenseclaw.json")
 			t.Cleanup(func() { connector.CopilotHooksPathOverride = prev })
-		case "openhands":
-			prev := connector.OpenHandsHooksPathOverride
-			connector.OpenHandsHooksPathOverride = filepath.Join(home, "workspace", ".openhands", "hooks.json")
-			t.Cleanup(func() { connector.OpenHandsHooksPathOverride = prev })
 		case "antigravity":
 			prev := connector.AntigravityHooksPathOverride
 			connector.AntigravityHooksPathOverride = filepath.Join(home, ".gemini", "config", "hooks.json")
@@ -197,15 +181,6 @@ func hookOnlyFixtureApply(name string) func(t *testing.T) (string, string) {
 			prev := connector.AMPPluginPathOverride
 			connector.AMPPluginPathOverride = filepath.Join(home, ".config", "amp", "plugins", "defenseclaw.ts")
 			t.Cleanup(func() { connector.AMPPluginPathOverride = prev })
-		case "omnigent":
-			prevConfig := connector.OmnigentConfigPathOverride
-			prevSite := connector.OmnigentSitePackagesPathOverride
-			connector.OmnigentConfigPathOverride = filepath.Join(home, ".omnigent", "config.yaml")
-			connector.OmnigentSitePackagesPathOverride = filepath.Join(home, "site-packages")
-			t.Cleanup(func() {
-				connector.OmnigentConfigPathOverride = prevConfig
-				connector.OmnigentSitePackagesPathOverride = prevSite
-			})
 		}
 		return home, t.TempDir()
 	}

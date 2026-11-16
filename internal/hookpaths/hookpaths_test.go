@@ -9,7 +9,32 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 )
+
+func TestRedirectOnlyStatementsDoNotPanic(t *testing.T) {
+	for _, tc := range []struct{ id, command string }{
+		{"PAN-0001", "> proj/out/build.log"},
+		{"PAN-0002", "> proj/out/build.log && echo done"},
+		{"PAN-0003", "> /tmp/x.log"},
+		{"PAN-0004", ": > proj/out/build.log"},
+		{"PAN-0005", "true && > proj/out/build.log"},
+		{"PAN-0006", "  >> proj/out/build.log"},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			payload, err := json.Marshal(map[string]any{
+				"tool_name": "Bash", "cwd": "/home/test",
+				"tool_input": map[string]string{"command": tc.command},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := Decode(Resolve(payload)); !ok {
+				t.Fatal("resolver returned no decodable proof")
+			}
+		})
+	}
+}
 
 // A hard link is compared by file identity (inode, or volume serial and file
 // index on Windows), not by its own pathname.
@@ -112,12 +137,24 @@ func TestApplyPatchBoundEnvelopeInputs(t *testing.T) {
 		}
 	}
 	if runtime.GOOS == "windows" {
-		for _, path := range []string{"C:/tmp/notes.txt", "\\\\server\\share\\notes.txt"} {
+		unc := "\\\\server\\share\\notes.txt"
+		// The scans read below a network share once it has answered
+		// (rel-1-0-6 GAP-0127); this share answers at once.
+		fakeNetworkShare(t, `\\server\share`, time.Second, time.Second, func(string) {})
+		for _, path := range []string{"C:/tmp/notes.txt", unc} {
 			envelope := "*** Begin Patch\n*** Update File: " + path + "\n@@\n+x\n*** End Patch"
 			targets, ok := ApplyPatchWriteTargets("apply_patch", nil, envelope, "", "")
 			if !ok || len(targets) != 1 || targets[0] != filepath.Clean(path) {
 				t.Errorf("%q: targets %v, known %v", path, targets, ok)
 			}
+		}
+		// A write below a share that does not answer cannot be placed.
+		release := make(chan struct{})
+		defer close(release)
+		fakeNetworkShare(t, `\\server\share`, 20*time.Millisecond, 10*time.Millisecond, func(string) { <-release })
+		unanswered := "*** Begin Patch\n*** Update File: " + unc + "\n@@\n+x\n*** End Patch"
+		if targets, ok := ApplyPatchWriteTargets("apply_patch", nil, unanswered, "", ""); ok || len(targets) != 0 {
+			t.Errorf("%q below a share that does not answer: targets %v, known %v; want unknown", unc, targets, ok)
 		}
 		// A drive-relative path depends on per-drive process state, not cwd.
 		envelope := "*** Begin Patch\n*** Update File: C:notes.txt\n@@\n+x\n*** End Patch"
@@ -160,15 +197,31 @@ func TestResolveLinkCreatedInCommand(t *testing.T) {
 		{"ln -sf ../.ssh/authorized_keys sub/notes.txt; echo k >> sub/notes.txt", "sub/notes.txt", keys},
 		{"ln -s ~/.ssh dir; echo k >> dir/authorized_keys", "dir/authorized_keys", keys},
 		{"cp --link ~/.ssh/authorized_keys notes.txt; echo k >> notes.txt", "notes.txt", keys},
+		// cp -a of a link the command makes copies the link, and its target
+		// with it (rel-1-0-6:GAP-0259).
+		{"ln -s ~/.ssh/authorized_keys notes.txt; cp -a notes.txt n3.txt; echo k >> n3.txt", "n3.txt", keys},
 		{"ln ~/.ssh/authorized_keys notes.txt; mv notes.txt n2; echo k >> n2", "n2", ""},
 		{"ln \"$SRC\" notes.txt; echo k >> notes.txt", "notes.txt", ""},
-		{"python3 -c \"import os; os.link('a', 'notes.txt')\"; echo k >> notes.txt", "notes.txt", ""},
+		// An interpreter link call with a computed argument stays unknown; one
+		// with two string literals is read as link reads them: an ordinary file
+		// keeps its own name, the keys file is the keys file (rel-1-0-6:GAP-0157).
+		{"python3 -c \"import os; s='a'; os.link(s, 'notes.txt')\"; echo k >> notes.txt", "notes.txt", ""},
+		{"python3 -c \"import os; os.link('a', 'notes.txt')\"; echo k >> notes.txt", "notes.txt", notes},
+		{"python3 -c \"import os; os.link('.ssh/authorized_keys', 'notes.txt')\"; echo k >> notes.txt", "notes.txt", keys},
 		{"echo k >> notes.txt", "notes.txt", notes},
 		// A multicall binary runs its applet; archive and sync tools that
 		// link files make the write targets unknown (GAP-1521).
 		{"busybox ln ~/.ssh/autho\"\"rized_keys n1.txt && echo k >> n1.txt", "n1.txt", keys},
 		{"toybox ln -s ~/.ssh/authorized_keys n1.txt; echo k >> n1.txt", "n1.txt", keys},
-		{"sudo busybox ln ~/.ssh/authorized_keys n1.txt; echo k >> n1.txt", "n1.txt", ""},
+		// A static prefix wrapper runs its child here: the link it makes is
+		// read as the plain one, so the write reaches the keys file
+		// (RV-p3i3-1). A wrapper that moves the directory or the program
+		// resolution keeps the link unknown.
+		{"sudo busybox ln ~/.ssh/authorized_keys n1.txt; echo k >> n1.txt", "n1.txt", keys},
+		{"nohup ln -s ~/.ssh/authorized_keys n1.txt; echo k >> n1.txt", "n1.txt", keys},
+		{"sudo -i ln -s ~/.ssh/authorized_keys n1.txt; echo k >> n1.txt", "n1.txt", ""},
+		{"env PATH=/tmp/bin ln -s ~/.ssh/authorized_keys n1.txt; echo k >> n1.txt", "n1.txt", ""},
+		{"env -C sub ln -s ~/.ssh/authorized_keys n1.txt; echo k >> sub/n1.txt", "sub/n1.txt", ""},
 		{"rsync -a --link-dest=$HOME/.ssh $HOME/.ssh/ d/; echo k >> d/autho\"\"rized_keys", "d/authorized_keys", ""},
 		{"rsync -aH ~/.ssh/ d/; echo k >> d/authorized_keys", "d/authorized_keys", ""},
 		{"ls ~/.ssh/authorized_keys | cpio -pdl d; echo k >> d/n1.txt", "d/n1.txt", ""},
@@ -194,8 +247,8 @@ func TestResolveLinkCreatedInCommand(t *testing.T) {
 	}
 }
 
-// A ".." in a link target must be interpreted after the preceding component
-// has been inspected. A linked or unreadable component makes that path unknown.
+// A ".." in a link target is interpreted after resolving the preceding
+// component. A missing component remains unknown.
 func TestRelativeLinkTargetDotDot(t *testing.T) {
 	home, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -225,8 +278,8 @@ func TestRelativeLinkTargetDotDot(t *testing.T) {
 		name, path, want string
 		known            bool
 	}{
-		{"keys hop", filepath.Join(home, "a", "l"), "", false},
-		{"extractor hop", filepath.Join(home, "a2", "l"), "", false},
+		{"keys hop", filepath.Join(home, "a", "l"), filepath.Join(home, ".ssh", "authorized_keys"), true},
+		{"extractor hop", filepath.Join(home, "a2", "l"), filepath.Join(home, "unpack", "q", "t"), true},
 		{"unknown hop", filepath.Join(home, "a", "missing") + string(filepath.Separator) + ".." + string(filepath.Separator) + "out", "", false},
 		{"ordinary dot dot", filepath.Join(home, "ordinary") + string(filepath.Separator) + ".." + string(filepath.Separator) + "out", filepath.Join(home, "out"), true},
 		{"ordinary link", filepath.Join(home, "ordinary", "lib", "x"), filepath.Join(home, "shared", "x"), true},

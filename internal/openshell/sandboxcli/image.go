@@ -24,6 +24,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -81,7 +82,17 @@ type builderImages struct {
 
 func (b *builderImages) store() *image.Store { return image.NewStore(b.app.imageDataDir()) }
 
-func (b *builderImages) spec(h *harness.Spec, microVM bool) image.BuildSpec {
+// docker is the docker CLI for this computer's harness images: on a
+// managed Linux computer the system engine its gateway uses (#1195).
+func (b *builderImages) docker() image.CLI {
+	goos := b.app.GOOS
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+	return image.ManagedCLI(b.app.ManagedHost() || onManagedHost(), goos)
+}
+
+func (b *builderImages) spec(h *harness.Spec, microVM bool) (image.BuildSpec, error) {
 	a := b.app
 	bs := image.BuildSpec{
 		Harness: h, UID: os.Getuid(), GID: os.Getgid(), FailMode: connector.SandboxFailMode,
@@ -91,19 +102,25 @@ func (b *builderImages) spec(h *harness.Spec, microVM bool) image.BuildSpec {
 		bs.HarnessVersion = a.Cfg.OpenShell.Image.HarnessVersions[h.Name]
 		bs.BaseImage = a.Cfg.OpenShell.Image.Base
 		bs.IngressPort = a.Cfg.OpenShellIngressPort()
+		trusted, err := image.TrustedCAsFor(a.Cfg)
+		if err != nil {
+			return image.BuildSpec{}, err
+		}
+		bs.TrustedCAs = trusted
 	}
-	return bs
+	return bs, nil
 }
 
 func (b *builderImages) Build(ctx context.Context, h *harness.Spec, microVM, force bool, log io.Writer) (image.Record, bool, error) {
-	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: log}
-	spec := b.spec(h, microVM)
+	builder := &image.Builder{Docker: b.docker(), Store: b.store(), Log: log}
+	spec, err := b.spec(h, microVM)
+	if err != nil {
+		return image.Record{}, false, err
+	}
 	if !force {
-		// An image for the MicroVM driver not checked for it yet is
-		// probed again by the build (image.Record.MicroVMUnchecked).
 		if rec, ok, err := builder.Current(spec); err != nil {
 			return image.Record{}, false, err
-		} else if ok && rec.HookFireVerified && !rec.MicroVMUnchecked() {
+		} else if ok && rec.HookFireVerified {
 			return rec, false, nil
 		}
 	}
@@ -118,29 +135,39 @@ func (b *builderImages) Build(ctx context.Context, h *harness.Spec, microVM, for
 }
 
 func (b *builderImages) Preflight(ctx context.Context, h *harness.Spec, microVM, force bool) error {
-	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: io.Discard}
-	return builder.Preflight(ctx, b.spec(h, microVM), image.BuildOptions{Force: force})
+	builder := &image.Builder{Docker: b.docker(), Store: b.store(), Log: io.Discard}
+	spec, err := b.spec(h, microVM)
+	if err != nil {
+		return err
+	}
+	return builder.Preflight(ctx, spec, image.BuildOptions{Force: force})
 }
 
 func (b *builderImages) Current(h *harness.Spec, microVM bool) (bool, error) {
-	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: io.Discard}
-	rec, ok, err := builder.Current(b.spec(h, microVM))
-	// A MicroVM image whose MicroVM check settled nothing is checked
-	// again before its next sandbox, so it is not current yet.
-	return ok && rec.HookFireVerified && !rec.MicroVMUnchecked(), err
+	builder := &image.Builder{Docker: b.docker(), Store: b.store(), Log: io.Discard}
+	spec, err := b.spec(h, microVM)
+	if err != nil {
+		return false, err
+	}
+	rec, ok, err := builder.Current(spec)
+	return ok && rec.HookFireVerified, err
 }
 
 func (b *builderImages) List() ([]image.Record, error) { return b.store().List() }
 
 func (b *builderImages) Gone(ctx context.Context, recs []image.Record) (map[string]bool, error) {
-	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: io.Discard}
+	builder := &image.Builder{Docker: b.docker(), Store: b.store(), Log: io.Discard}
 	return builder.Gone(ctx, recs)
 }
 
 func (b *builderImages) Size(ctx context.Context, h *harness.Spec, microVM bool, ref string) (uint64, error) {
-	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: io.Discard}
+	builder := &image.Builder{Docker: b.docker(), Store: b.store(), Log: io.Discard}
 	if h != nil {
-		rec, ok, err := builder.Current(b.spec(h, microVM))
+		spec, err := b.spec(h, microVM)
+		if err != nil {
+			return 0, err
+		}
+		rec, ok, err := builder.Current(spec)
 		if err != nil || !ok {
 			return 0, err
 		}
@@ -153,12 +180,12 @@ func (b *builderImages) Size(ctx context.Context, h *harness.Spec, microVM bool,
 }
 
 func (b *builderImages) GoneIDs(ctx context.Context, ids []string) (map[string]bool, error) {
-	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: io.Discard}
+	builder := &image.Builder{Docker: b.docker(), Store: b.store(), Log: io.Discard}
 	return builder.GoneIDs(ctx, ids)
 }
 
 func (b *builderImages) Prune(ctx context.Context, opts image.PruneOptions) (image.PruneReport, error) {
-	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: io.Discard}
+	builder := &image.Builder{Docker: b.docker(), Store: b.store(), Log: io.Discard}
 	return builder.Prune(ctx, opts)
 }
 
@@ -201,7 +228,7 @@ func (b *builderImages) Remove(ctx context.Context, harnesses []string, dryRun b
 	var firstErr error
 	for _, tag := range tags {
 		var stderr bytes.Buffer
-		err := image.CLI{}.Run(ctx, nil, io.Discard, &stderr, "image", "rm", "--", tag)
+		err := b.docker().Run(ctx, nil, io.Discard, &stderr, "image", "rm", "--", tag)
 		if err != nil && !strings.Contains(stderr.String()+err.Error(), "No such image") {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("docker image rm %s: %w", tag, err)
@@ -338,18 +365,6 @@ func (a *App) buildImage(ctx context.Context, spec *harness.Spec, microVM, force
 			a.warn(warning)
 		}
 	}
-	if !rec.MicroVM || rec.MicroVMVerified {
-		return nil
-	}
-	recheck := "`" + CommandName + " image build " + spec.Name + " --force`"
-	switch {
-	case rec.MicroVMProblem != "":
-		a.warn(spec.DisplayName + " cannot start in an OpenShell MicroVM, so a gateway on the vm driver (a Mac's) refuses to run it: " + rec.MicroVMProblem +
-			"; " + recheck + " checks it again")
-	case rec.MicroVMInconclusive != "":
-		a.warn(spec.DisplayName + "'s image is not checked for an OpenShell MicroVM yet: " + rec.MicroVMInconclusive +
-			"; the next `" + CommandName + " run " + spec.Name + "` on the vm driver checks it again, as does " + recheck)
-	}
 	return nil
 }
 
@@ -435,7 +450,7 @@ func (a *App) vmDiskShortage(ctx context.Context, d openshell.Driver, spec *harn
 // MicroVM gateway boots only an image built for it, which answers
 // localhost itself; a docker gateway's images stay as they were.
 func (a *App) gatewayDriverNow(ctx context.Context) openshell.Driver {
-	if d, ok := a.gatewayDriverKnown(ctx); ok {
+	if d, _, ok := a.gatewayDriver(ctx); ok {
 		return d
 	}
 	d, _ := openshell.LookupDriver(string(openshell.DriverDocker))
@@ -444,22 +459,58 @@ func (a *App) gatewayDriverNow(ctx context.Context) openshell.Driver {
 
 // gatewayDriverKnown is the compute driver gatewayDriverNow finds when the
 // daemon or the gateway's configuration says which (a configuration that
-// names none selects docker), and false when neither does.
+// names none selects docker), and false when neither does or a managed
+// gateway that does not run may start on another (image prune then keeps
+// both kinds of image).
 func (a *App) gatewayDriverKnown(ctx context.Context) (openshell.Driver, bool) {
+	d, certain, ok := a.gatewayDriver(ctx)
+	return d, ok && certain
+}
+
+// gatewayDriver is the compute driver of the gateway sandboxes start on,
+// with ok false when nothing says which, and certain false when it is the
+// best guess for a managed gateway that does not run.
+func (a *App) gatewayDriver(ctx context.Context) (d openshell.Driver, certain, ok bool) {
 	if api, err := a.api(); err == nil {
-		if st, err := api.Status(ctx); err == nil && st.Gateway != nil && st.Gateway.Driver != "" {
+		st, err := api.Status(ctx)
+		if err == nil && st.Gateway != nil && st.Gateway.Driver != "" {
 			// A driver DefenseClaw does not drive (podman, say) is not
 			// known: nothing says which images it boots.
 			d, ok := openshell.LookupDriver(st.Gateway.Driver)
-			return d, ok
+			return d, true, ok
+		}
+		if err == nil && st.Managed != nil {
+			// A managed gateway that does not run yet starts on the driver
+			// the organization's settings select for this account, never on
+			// the account's own gateway.toml: an image built from that file
+			// was a docker one the MicroVM gateway could not boot (GAP-0005).
+			if name, certain := managedNextDriver(st.Managed); name != "" {
+				d, ok := openshell.LookupDriver(name)
+				return d, certain, ok
+			}
 		}
 	}
 	if st, err := a.Gateway.State(); err == nil && st != nil {
 		if d, ok := st.Driver(); ok {
-			return d, true
+			return d, true, true
 		}
 	}
-	return openshell.Driver{}, false
+	return openshell.Driver{}, false, false
+}
+
+// managedNextDriver is the driver a managed gateway that does not run
+// starts on at the next sandbox start: the managed gateway's choice for the
+// account (NextDriver), not Driver, which names the newest registration's
+// even when its sandbox is stopped and the organization changed drivers
+// since. certain is false when the account's own probe at the start may
+// still choose the docker fallback, or a daemon before 1.0.4 names only
+// Driver.
+func managedNextDriver(m *sandboxapi.ManagedStatus) (name string, certain bool) {
+	if m.NextDriver == "" {
+		return m.Driver, false
+	}
+	vm := m.NextDriver == string(openshell.DriverVM)
+	return m.NextDriver, !vm || m.DriverFallback != string(openshell.DriverDocker)
 }
 
 // defaultHarnesses are the harnesses setup selects, and image commands and

@@ -254,6 +254,65 @@ func TestWriterRepairabilityAdmitsAdministratorsOnlyWhenAsked(t *testing.T) {
 	}
 }
 
+// A folder the profile, an agent or an administrator created may be owned by
+// a Windows system owner (cowork-1-0-8 GAP-0085); with the trust set asked
+// for, those owners and TrustedInstaller as a writer are accepted, and
+// another account or BUILTIN Users never is.
+func TestWriterRepairabilityTrustsWindowsSystemOwnersOnlyWhenAsked(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := user.User.Sid.String()
+	subject := windowsProtectionSubject{sid: user.User.Sid}
+	const trustedInstaller = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+	profileDACL := "D:(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;" + sid + ")(A;;FA;;;" + trustedInstaller + ")"
+	for _, tc := range []struct {
+		name, owner string
+		trusted     bool
+	}{
+		{"BUILTIN Administrators", "BA", true},
+		{"LocalSystem", "SY", true},
+		{"TrustedInstaller", trustedInstaller, true},
+		{"BUILTIN Users", "BU", false},
+		{"another account", "S-1-5-21-1-2-3-1002", false},
+	} {
+		descriptor, err := windows.SecurityDescriptorFromString("O:" + tc.owner + profileDACL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		owner, _, err := descriptor.Owner()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, trust := range []bool{false, true} {
+			repairable, err := privateSecurityDescriptorIsWriterRepairableForSubject(descriptor, subject, trust)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := trust && tc.trusted; repairable != want {
+				t.Fatalf("%s owner, trustSystemOwners=%v: repairable=%v, want %v", tc.name, trust, repairable, want)
+			}
+			if got, want := ownerTrustedForSubject(owner, subject, trust), trust && tc.trusted; got != want {
+				t.Fatalf("%s owner, trustSystemOwners=%v: owner trusted=%v, want %v", tc.name, trust, got, want)
+			}
+		}
+	}
+	for _, writer := range []string{"BU", "AU", "WD", "S-1-5-21-1-2-3-1002"} {
+		descriptor, err := windows.SecurityDescriptorFromString("O:BA" + profileDACL + "(A;;FW;;;" + writer + ")")
+		if err != nil {
+			t.Fatal(err)
+		}
+		repairable, err := privateSecurityDescriptorIsWriterRepairableForSubject(descriptor, subject, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if repairable {
+			t.Fatalf("an Administrators-owned folder that %s can write was accepted", writer)
+		}
+	}
+}
+
 func TestOrdinaryWindowsProtectionRetainsLegacyAdministratorACENormalization(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ordinary-private.json")
 	if err := os.WriteFile(path, []byte("fixture"), 0o600); err != nil {
@@ -959,8 +1018,18 @@ func TestWriteWindowsPreservesStricterExistingDACL(t *testing.T) {
 	if err := Write(path, []byte("second")); err != nil {
 		t.Fatal(err)
 	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "second" {
+		t.Fatalf("published body = %q, err = %v", data, err)
+	}
 	if got := windowsAllowMaskForSID(t, path, system); got != wantSystemMask {
 		t.Fatalf("SYSTEM mask = 0x%x, want preserved 0x%x", uint32(got), uint32(wantSystemMask))
+	}
+	protected, err := windowsDACLProtected(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !protected {
+		t.Fatal("stricter DACL lost its protected inheritance state")
 	}
 }
 

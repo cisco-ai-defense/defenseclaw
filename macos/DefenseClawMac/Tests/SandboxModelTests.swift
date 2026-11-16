@@ -44,11 +44,174 @@ struct SandboxModelTests {
         anAskShowsEveryPortItOpens()
         notificationUnblockNeedsAnUnlockedMac()
         noAsksTextHoldsForEveryPackAndMatchesTheTUI()
+        anotherAccountsGatewayIsNotASetupProblem()
+        sshBlocksSayUseAnHTTPSRemote()
+        reasonTokensReadAsWords()
+        decodesTheRuntime103RowFields()
+        placeholderRefusalsAreAttributedAndRecoveryShown()
+        processTreeLinesMirrorTheTUI()
+        detachedRunTextMirrorsTheTUI()
+        branchNamesAreValidated()
+        raisedAlertsAreCountedPerSandbox()
         if failureCount > 0 {
             FileHandle.standardError.write("\(failureCount) failure(s)\n".data(using: .utf8)!)
             exit(1)
         }
         print("SandboxModelTests: all checks passed")
+    }
+
+    private static func anotherAccountsGatewayIsNotASetupProblem() {
+        var snapshot = SandboxSnapshot()
+        snapshot.apply(status: SandboxDecoding.status(from: [
+            "enabled": false, "available": false,
+            "reason": "another account runs this machine's OpenShell gateway",
+            "gateway_elsewhere": "uid 502 (pid 4411)",
+        ]), sandboxes: [], asks: [])
+        expect(snapshot.state == "off", "still off")
+        expect(snapshot.status.gatewayElsewhere == "uid 502 (pid 4411)", "gateway_elsewhere decoded")
+        expect(snapshot.headline.contains("another account runs this machine's OpenShell gateway")
+               && snapshot.headline.contains("defenseclaw sandbox doctor") && !snapshot.headline.contains("sandbox setup"),
+               "the headline sends the user to doctor, not setup: \(snapshot.headline)")
+        snapshot.apply(status: SandboxDecoding.status(from: ["enabled": false, "available": false]), sandboxes: [], asks: [])
+        expect(snapshot.headline.contains("defenseclaw sandbox setup"), "an ordinary off install still points at setup")
+    }
+
+    private static func sshBlocksSayUseAnHTTPSRemote() {
+        let event = SandboxDecoding.event([
+            "seq": 9, "kind": "egress.blocked", "sandbox": "docs", "host": "github.com", "port": 22,
+            "reason": "transparent_tcp_policy_denied", "unblockable": true,
+            "message": "✗ github.com (SSH does not leave a sandbox: use an HTTPS remote (https://github.com/…))",
+        ])!
+        expect(event.summary == "github.com:22 (SSH does not leave a sandbox: use an HTTPS remote (https://github.com/…))",
+               "a refused port 22 says how to fix it: \(event.summary)")
+        expect(!event.unblockable, "no unblock opens SSH")
+    }
+
+    private static func reasonTokensReadAsWords() {
+        let token = SandboxDecoding.event([
+            "seq": 10, "kind": "egress.blocked", "sandbox": "docs", "host": "webhook.site", "port": 443,
+            "category": "webhook_catcher", "repeats": 3, "message": "✗ webhook.site (webhook catcher) (and 3 more like it)",
+        ])!
+        expect(token.summary == "webhook.site (webhook catcher) (and 3 more like it)", "tokens become labels, repeats fold: \(token.summary)")
+        let unknown = SandboxDecoding.event([
+            "seq": 11, "kind": "egress.blocked", "sandbox": "docs", "host": "example.net", "port": 80, "reason": "some_new_reason",
+        ])!
+        expect(unknown.summary == "example.net:80 (some new reason)", "an unknown token reads with spaces: \(unknown.summary)")
+        let metadata = SandboxDecoding.event([
+            "seq": 12, "kind": "egress.blocked", "sandbox": "docs", "host": "169.254.169.254", "port": 80, "reason": "host_internal",
+        ])!
+        expect(metadata.summary.contains("cloud metadata or link-local address"), "a metadata host says so whatever refused it: \(metadata.summary)")
+        expect(SandboxReasonLabels.metadataOrLinkLocal("metadata.google.internal") && SandboxReasonLabels.metadataOrLinkLocal("[fe80::1]")
+               && SandboxReasonLabels.metadataOrLinkLocal("168.63.129.16") && !SandboxReasonLabels.metadataOrLinkLocal("10.0.0.5")
+               && !SandboxReasonLabels.metadataOrLinkLocal("github.com"), "metadata and link-local detection")
+        expect(SandboxReasonLabels.label("exfil destination") == "exfil destination", "a sentence is not a token")
+        let alias = SandboxDecoding.event([
+            "seq": 13, "kind": "egress.allowed", "sandbox": "docs", "host": "host.openshell.internal", "port": 5432,
+        ])!
+        expect(alias.summary == "host.openshell.internal:5432 (port 5432 on this machine)", "the host alias names the port on this machine: \(alias.summary)")
+    }
+
+    private static func decodesTheRuntime103RowFields() {
+        var raw = running
+        raw["created_at"] = "2026-10-20T08:00:00Z"
+        raw["process_tree"] = true
+        raw["repo_policy"] = ["path": ".defenseclaw/sandbox.yaml", "digest": "abc", "tightened": ["egress", "yolo"]]
+        raw["egress"] = ["destinations": 23, "blocked": 1, "model_providers": 1, "harness_vendor": 2, "shadow_ai": 1]
+        let row = SandboxDecoding.sandbox(raw)!
+        expect(row.createdAt != nil && row.processTree, "created_at and process_tree decode")
+        expect(row.repoPolicyText == ".defenseclaw/sandbox.yaml: tightened 2 settings (egress, yolo)", "repo policy text: \(row.repoPolicyText)")
+        expect(row.sitesText == "23 contacted, 1 blocked · AI: 1 model provider, 2 harness vendor hosts, 1 shadow AI", "sites text: \(row.sitesText)")
+        var asStrict = raw
+        asStrict["repo_policy"] = ["path": ".defenseclaw/sandbox.yaml"]
+        expect(SandboxDecoding.sandbox(asStrict)!.repoPolicyText == ".defenseclaw/sandbox.yaml: the policy is as strict already", "as strict already")
+        let plain = SandboxDecoding.sandbox(running)!
+        expect(!plain.repoPolicy && plain.repoPolicyText.isEmpty && plain.aiSitesText.isEmpty && !plain.processTree, "absent fields stay off")
+    }
+
+    private static func placeholderRefusalsAreAttributedAndRecoveryShown() {
+        var raw = stopped
+        raw["hooks"] = [
+            "hook_failed": 2, "last_hook_failure": "HTTP 400",
+            "last_hook_failure_cause": "credential_placeholder_refused",
+            "placeholder_refused_at": "2026-10-21T09:00:00Z",
+            "hooks_answered_at": "2026-10-21T09:05:30Z",
+        ]
+        let row = SandboxDecoding.sandbox(raw)!
+        expect(row.placeholderRefused && row.hookFailurePlaceholder && row.hooksAnsweredAt != nil, "placeholder fields decode")
+        expect(row.hookFailureAlert.contains("the last was a hook post of a conversation OpenShell refuses for its credential placeholder: HTTP 400")
+               && !row.hookFailureAlert.contains("DefenseClaw last answered"),
+               "the failure is attributed to the placeholder, not DefenseClaw: \(row.hookFailureAlert)")
+        expect(row.hookFailureAlert.contains("; hooks answered again since "), "recovery is shown: \(row.hookFailureAlert)")
+        expect(row.alerts.contains { $0.hasPrefix("OpenShell refuses this conversation's requests") && $0.contains("defenseclaw sandbox connect docs, without --continue") },
+               "the persistent alert names the remedy: \(row.alerts)")
+        var plain = stopped
+        plain["hooks"] = ["hook_failed": 1, "last_hook_failure": "HTTP 503"]
+        let ordinary = SandboxDecoding.sandbox(plain)!
+        expect(ordinary.hookFailureAlert == "1 hook call failed, so the harness's action was blocked (hooks fail closed); DefenseClaw answered HTTP 503",
+               "an ordinary failure still says DefenseClaw answered: \(ordinary.hookFailureAlert)")
+    }
+
+    private static func processTreeLinesMirrorTheTUI() {
+        let payload: [String: Any] = ["enabled": true, "interval_seconds": 15, "processes": [
+            ["pid": 1, "ppid": 0, "comm": "init"],
+            ["pid": 30, "ppid": 1, "cmdline": "claude --resume"],
+            ["pid": 31, "ppid": 30, "cmdline": "bash -lc make test"],
+            ["pid": 20, "ppid": 999, "comm": "orphan"],
+            ["pid": 0, "comm": "ignored"],
+        ]]
+        let lines = SandboxProcessTree.lines(from: payload)
+        expect(lines == ["1 init", "  30 claude --resume", "    31 bash -lc make test", "20 orphan"], "tree order and indent: \(lines)")
+        expect(SandboxProcessTree.placeholder(from: payload, running: true) == "none sampled yet (every 15 s while it runs)", "the interval the daemon reports")
+        expect(SandboxProcessTree.placeholder(from: nil, running: false) == "none while it is stopped", "stopped placeholder")
+        let many: [String: Any] = ["processes": (1...15).map { ["pid": $0, "ppid": 0, "comm": "p\($0)"] }]
+        let capped = SandboxProcessTree.lines(from: many)
+        expect(capped.count == 13 && capped.last == "...and 3 more (defenseclaw sandbox ps --tree)", "capped at 12 lines with a trailer: \(capped.count)")
+        let long: [String: Any] = ["processes": [["pid": 7, "cmdline": String(repeating: "x", count: 100)]]]
+        expect(SandboxProcessTree.lines(from: long)[0].count == 72 && SandboxProcessTree.lines(from: long)[0].hasSuffix("…"), "long lines are cut")
+    }
+
+    private static func detachedRunTextMirrorsTheTUI() {
+        let exited = SandboxRunLog.decode(["name": "docs", "state": "exited", "exit": "0", "log": "done"])!
+        expect(exited.text(name: "docs") == "finished: exited with status 0 · log: defenseclaw sandbox logs docs", "exited: \(exited.text(name: "docs"))")
+        let interrupted = SandboxRunLog.decode(["state": "interrupted", "started_at": "2026-10-21T09:05:30Z"])!
+        let text = interrupted.text(name: "docs")
+        expect(text.hasPrefix("did not finish: the sandbox stopped while it ran, started ") && text.hasSuffix(" · log: defenseclaw sandbox logs docs"), "interrupted with start time: \(text)")
+        expect(SandboxRunLog.decode(["state": "running"])!.text(name: "x") == "was still going when the sandbox stopped · log: defenseclaw sandbox logs x", "running")
+        expect(SandboxRunLog.decode(["state": "weird"])!.text(name: "x").isEmpty && SandboxRunLog.decode("nope") == nil, "unknown states and bodies yield nothing")
+    }
+
+    private static func branchNamesAreValidated() {
+        expect(SandboxRow.branchNameProblem("  ") == "Type a branch name.", "empty")
+        expect(SandboxRow.branchNameProblem("-x") != nil && SandboxRow.branchNameProblem("feat x") != nil, "dash prefix and spaces")
+        expect(SandboxRow.branchNameProblem("feat/x") == nil, "a plain name is for git to judge")
+        let row = SandboxDecoding.sandbox(stopped)!
+        expect(row.pullToBranchArguments(named: " feat/x ") == ["sandbox", "pull", "docs", "--branch-name", "feat/x"], "named branch argv")
+    }
+
+    private static func raisedAlertsAreCountedPerSandbox() {
+        var raw = running
+        raw["created_at"] = "2026-10-20T08:00:00Z"
+        let row = SandboxDecoding.sandbox(raw)!
+        func alert(_ id: String, at: String, severity: Severity, sandbox: String, target: String = "", action: String = "sandbox-finding") -> AlertRow {
+            .audit(AuditEvent(id: id, timestamp: DCDates.parse(at)!, action: action, eventType: "runtime-alert",
+                              connector: "claudecode", target: target, actor: "", details: "", structuredJSON: "",
+                              severity: severity, runID: "",
+                              runtimeFacts: sandbox.isEmpty ? [] : [InventoryField(label: "Sandbox", value: sandbox)]))
+        }
+        let alerts = [
+            alert("a", at: "2026-10-21T09:00:00Z", severity: .high, sandbox: row.name),
+            alert("b", at: "2026-10-21T09:01:00Z", severity: .medium, sandbox: row.name),
+            alert("c", at: "2026-10-21T09:02:00Z", severity: .high, sandbox: "", target: row.name),
+            alert("old", at: "2026-10-19T09:00:00Z", severity: .critical, sandbox: row.name),
+            alert("other", at: "2026-10-21T09:03:00Z", severity: .critical, sandbox: "docs"),
+            // A skill named like the sandbox: not a sandbox finding, so its target does not name the sandbox.
+            alert("skill", at: "2026-10-21T09:04:00Z", severity: .critical, sandbox: "", target: row.name, action: "scan-finding"),
+        ]
+        let counts = SandboxRaisedAlerts.counts(for: row, alerts: alerts)
+        expect(counts == [.high: 2, .medium: 1], "alerts since the sandbox was created, by sandbox fact or target: \(counts)")
+        expect(SandboxRaisedAlerts.cellText(counts) == "3 alerts" && SandboxRaisedAlerts.cellText([:]).isEmpty, "cell text")
+        expect(SandboxRaisedAlerts.detailText(counts) == "3 (2 HIGH, 1 MEDIUM): the Alerts panel lists them; or run defenseclaw alerts",
+               "detail text: \(SandboxRaisedAlerts.detailText(counts))")
     }
 
     private static func expect(_ condition: Bool, _ message: String) {
@@ -223,8 +386,10 @@ struct SandboxModelTests {
         expect(tool.summary == "Bash blocked", "tool summary")
         let ask = SandboxActivity(kind: "tool.asked", reason: "C2-WEBHOOK-SITE", tool: "Bash")
         expect(ask.glyph == "?" && ask.summary == "Bash asked for your confirmation: C2-WEBHOOK-SITE", "ask summary \(ask.summary)")
-        let private22 = SandboxActivity(kind: "egress.blocked", host: "10.0.0.5", port: 22, reason: "private network")
-        expect(private22.summary == "10.0.0.5:22 (private network)", "private summary")
+        // A refused port 22 is SSH whatever refused it (the TUI words SSH
+        // first); another port keeps the reason.
+        let privatePort = SandboxActivity(kind: "egress.blocked", host: "10.0.0.5", port: 5432, reason: "private_network")
+        expect(privatePort.summary == "10.0.0.5:5432 (private network)", "private summary: \(privatePort.summary)")
         let lifecycle = SandboxDecoding.event(["seq": 1, "kind": "sandbox.lifecycle", "phase": "Stopped"])!
         expect(lifecycle.summary == "now stopped", "lifecycle summary")
         // The large-upload block names the threshold the upload crossed.
@@ -456,7 +621,7 @@ struct SandboxModelTests {
         expect(SandboxDecoding.activity(from: ["events": [["seq": 1]]]).isEmpty, "event without a kind")
         let row = SandboxDecoding.sandbox(["name": "bare"])!
         expect(row.harnessLabel == "—" && row.policyLabel == "—" && !row.undoAvailable, "bare row")
-        expect(row.runImage.isEmpty && !row.copyMode && !row.undoOffered, "a bare row has no run image and no undo")
+        expect(row.image.isEmpty && !row.copyMode && !row.undoOffered, "a bare row has no image and no undo")
         // A daemon older than gateway.driver drove docker only.
         let older = SandboxDecoding.status(from: ["gateway": ["name": "openshell", "version": "0.1.1"]])
         expect(older.driver.isEmpty && older.copyOnlyNote.isEmpty, "no driver: docker, mount mode possible")
@@ -485,11 +650,13 @@ struct SandboxModelTests {
     }
 
     private static func copyRowsPullAndUndoTheLastApply() {
-        let image = "defenseclaw.invalid/sandbox-run:claudecode-0123456789ab-ba9876543210-u501"
+        // The harness image as `sandbox image list` tags it, never the
+        // MicroVM run image no other view shows (GAP-0188).
         var raw = stopped
-        raw["run_image"] = image
+        raw["image"] = "defenseclaw/sandbox-claudecode:1.0.3"
+        raw["run_image"] = "defenseclaw.invalid/sandbox-run:claudecode-0123456789ab-ba9876543210-u501"
         let copy = SandboxDecoding.sandbox(raw)!
-        expect(copy.copyMode && copy.runImage == image, "a copy row with its run image")
+        expect(copy.copyMode && copy.image == "defenseclaw/sandbox-claudecode:1.0.3", "a copy row with its harness image: \(copy.image)")
         // A copy's undo reverts the last pull --apply: no snapshot needed.
         expect(copy.undoOffered && !copy.undoAvailable, "undo is offered for a copy")
         expect(copy.undoLabel == "reverts the last pull --apply", "copy undo label: \(copy.undoLabel)")

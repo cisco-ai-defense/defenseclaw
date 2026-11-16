@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
@@ -34,8 +35,6 @@ const (
 	gatewayColdStartFailedName = "gateway.cold-start-failed"
 	// gatewayStartLockName serializes start, restart and hook starts.
 	gatewayStartLockName = "gateway.start.lock"
-	// installLockName is install.sh's upgrade lock directory.
-	installLockName = ".install.lock"
 	// gatewayLoginPathName records the PATH of the last start or restart run
 	// from the account's own session. A hook cold start runs with the hook's
 	// locked-down PATH, and the gateway it starts needs the account's PATH to
@@ -45,7 +44,6 @@ const (
 
 	hookColdStartBackoff          = 60 * time.Second
 	hookColdStartReadinessTimeout = 30 * time.Second
-	hookColdStartLockWait         = hookColdStartReadinessTimeout + 10*time.Second
 	gatewayStartLockWait          = startReadinessProgressFactor*defaultStartReadinessTimeout + 15*time.Second
 )
 
@@ -125,6 +123,14 @@ func recordGatewayLoginPath(dataDir string) {
 	}
 	if err != nil {
 		_ = os.Remove(tmp.Name())
+		return
+	}
+	// A root start for the account's home gives the file back to the home's
+	// owner, as every private file it writes there is. When the owner cannot
+	// be proven, nothing of this refused start stays behind to stop the
+	// account's own start (GAP-0714).
+	if safefile.ReclaimToDirectoryOwner(target) != nil {
+		_ = os.Remove(target)
 	}
 }
 
@@ -191,17 +197,29 @@ func recordHookColdStartFailure(dataDir string, cause error) {
 	_ = os.WriteFile(gatewayColdStartFailedPath(dataDir), []byte(body), 0o600)
 }
 
+// hookInstallInProgress reports an install or upgrade of this account's
+// DefenseClaw (install.sh or install.ps1 hold .install.lock in the data
+// directory while they run), or an interrupted one whose recovery waits for
+// the next installer run: a start would run the half-done install
+// (hookexec.InstallRecoveryPending, GAP-2082).
+func hookInstallInProgress(dataDir string) bool {
+	return hookexec.InstallLockHeld(dataDir) || hookexec.InstallRecoveryPending(dataDir)
+}
+
 // hookColdStartRefusal returns why a hook may not start the gateway now, or
 // nil when it may.
 func hookColdStartRefusal(dataDir string, now time.Time) error {
 	if !hookColdStartSupported() {
 		return errHookColdStartUnsupported
 	}
+	// An install or upgrade stops the gateway the way an operator does (the
+	// stop marker) and starts it again when it is done: name the install,
+	// not an operator stop (GAP-0196).
+	if hookInstallInProgress(dataDir) {
+		return errors.New("an install or upgrade is in progress")
+	}
 	if _, err := os.Lstat(gatewayStoppedMarkerPath(dataDir)); err == nil {
 		return errors.New("the gateway was stopped with defenseclaw-gateway stop; hooks do not start it")
-	}
-	if _, err := os.Lstat(filepath.Join(dataDir, installLockName)); err == nil {
-		return errors.New("an install or upgrade is in progress")
 	}
 	if info, err := os.Lstat(gatewayColdStartFailedPath(dataDir)); err == nil {
 		if since := now.Sub(info.ModTime()); since >= 0 && since < hookColdStartBackoff {

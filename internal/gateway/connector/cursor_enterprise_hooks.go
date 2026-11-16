@@ -18,11 +18,15 @@ package connector
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 var cursorHookEvents = []string{
@@ -49,9 +53,50 @@ var cursorHookEvents = []string{
 	"workspaceOpen",
 }
 
+// cursorEnterpriseRetiredHookEvents are events earlier releases registered in
+// the Windows machine policy (C:\ProgramData\Cursor\hooks.json) and this
+// release no longer does. The Cursor Agent CLI fires afterAgentThought once
+// per streamed reasoning chunk and awaits each command hook before it reads
+// the next chunk. A machine hook is a Windows PowerShell process (about 1.2 s
+// per call), so the CLI stalls its model stream until the server drops it
+// ("Connection lost ... WritableIterable is closed"). The event is
+// observe-only for DefenseClaw and afterAgentResponse already carries the
+// model output, so the machine policy omits it. The gateway still decodes an
+// incoming afterAgentThought, and the user-level (OSS) hooks.json keeps the
+// full cursorHookEvents roster.
+//
+// Merge removes DefenseClaw's entry from a retired event (and drops the event
+// key when nothing else remains), migration verification accepts one exact
+// entry there so a pre-upgrade policy stays callable until it is repaired, and
+// strict verification rejects it so reconcile always rewrites the file.
+var cursorEnterpriseRetiredHookEvents = []string{"afterAgentThought"}
+
+// cursorEnterpriseHookEvents is the roster the Windows machine policy
+// registers: cursorHookEvents minus cursorEnterpriseRetiredHookEvents, in the
+// same order.
+var cursorEnterpriseHookEvents = cursorHookEventsExcept(cursorEnterpriseRetiredHookEvents)
+
+func cursorHookEventsExcept(retired []string) []string {
+	out := make([]string, 0, len(cursorHookEvents))
+	for _, event := range cursorHookEvents {
+		keep := true
+		for _, candidate := range retired {
+			if event == candidate {
+				keep = false
+				break
+			}
+		}
+		if keep {
+			out = append(out, event)
+		}
+	}
+	return out
+}
+
 const (
 	windowsCursorEnterpriseHookTimeoutSeconds = 30
 	windowsCursorEnterpriseHooksJSONMax       = 4 << 20
+	windowsCursorTargetModesJSON64Max         = 256 << 10
 )
 
 // IsBuiltinCursorConnector reports whether conn is the package's concrete
@@ -79,34 +124,89 @@ func IsBuiltinAMPConnector(conn Connector) bool {
 
 // RenderWindowsCursorEnterpriseAdapter renders the shared, token-free adapter
 // installed in Cursor's protected machine hook directory. Managed enterprise
-// hooks are always fail closed; an explicit request for fail-open is rejected
-// rather than silently weakening the administrator-owned policy.
+// delivery policy is selected by the administrator-owned installation state.
 func RenderWindowsCursorEnterpriseAdapter(hookBinary, failMode string) ([]byte, error) {
 	if err := validateAbsoluteLocalWindowsPath("Cursor hook executable", hookBinary); err != nil {
 		return nil, err
 	}
-	if normalizeHookFailMode(failMode) != "closed" {
-		return nil, fmt.Errorf("Windows Cursor enterprise adapter must use fail mode closed")
-	}
-	return renderWindowsCursorAdapter(hookBinary, "closed", true, cursorAdapterTimeoutMS)
+	return renderWindowsCursorAdapter(hookBinary, normalizeHookFailMode(failMode), true, cursorAdapterTimeoutMS)
 }
 
 func renderWindowsCursorAdapter(hookBinary, failMode string, managed bool, timeoutMS int) ([]byte, error) {
+	return renderWindowsCursorAdapterWithTargets(hookBinary, failMode, managed, timeoutMS, "")
+}
+
+// RenderWindowsCursorEnterpriseAdapterForTargets selects delivery fallback by
+// process SID, not by the last user to reconcile the singleton machine policy.
+func RenderWindowsCursorEnterpriseAdapterForTargets(hookBinary string, modes map[string]string) ([]byte, error) {
+	if err := validateAbsoluteLocalWindowsPath("Cursor hook executable", hookBinary); err != nil {
+		return nil, err
+	}
+	if len(modes) == 0 || len(modes) > 1024 {
+		return nil, errors.New("cursor adapter requires a bounded target mode map")
+	}
+	for sid, mode := range modes {
+		if len(sid) > 184 || !windowsCursorAdapterSIDPattern.MatchString(sid) || (mode != "open" && mode != "closed") {
+			return nil, errors.New("cursor adapter has an invalid target mode")
+		}
+	}
+	body, err := json.Marshal(modes)
+	if err != nil {
+		return nil, err
+	}
+	encoded := base64.StdEncoding.EncodeToString(body)
+	if len(encoded) > windowsCursorTargetModesJSON64Max {
+		return nil, errors.New("cursor target mode map exceeds size limit")
+	}
+	return renderWindowsCursorAdapterWithTargets(hookBinary, "closed", true, cursorAdapterTimeoutMS, encoded)
+}
+
+var windowsCursorAdapterSIDPattern = lazyregexp.New(`^S-[0-9]+(?:-[0-9]+)+$`)
+var windowsCursorAdapterModesPattern = lazyregexp.New(`(?m)^        \$targetModesJSON64 = '([A-Za-z0-9+/=]+)'\r?$`)
+
+// WindowsCursorEnterpriseAdapterTargetModes recognizes only exact canonical
+// mapped adapters. Used to authenticate partial publication rollback before
+// its protected state file exists; it does not accept arbitrary script bodies.
+func WindowsCursorEnterpriseAdapterTargetModes(adapter []byte, hookBinary string) (map[string]string, error) {
+	if len(adapter) > 1<<20 {
+		return nil, errors.New("cursor adapter exceeds size limit")
+	}
+	match := windowsCursorAdapterModesPattern.FindSubmatch(adapter)
+	if len(match) != 2 || len(match[1]) > windowsCursorTargetModesJSON64Max {
+		return nil, errors.New("cursor adapter has no bounded target mode map")
+	}
+	body, err := base64.StdEncoding.DecodeString(string(match[1]))
+	if err != nil {
+		return nil, err
+	}
+	var modes map[string]string
+	if err := json.Unmarshal(body, &modes); err != nil {
+		return nil, err
+	}
+	expected, err := RenderWindowsCursorEnterpriseAdapterForTargets(hookBinary, modes)
+	if err != nil || !bytes.Equal(expected, adapter) {
+		return nil, errors.New("cursor mapped adapter identity changed")
+	}
+	return modes, nil
+}
+
+func renderWindowsCursorAdapterWithTargets(hookBinary, failMode string, managed bool, timeoutMS int, targetModesJSON64 string) ([]byte, error) {
 	if strings.TrimSpace(hookBinary) == "" {
-		return nil, fmt.Errorf("Cursor hook executable is empty")
+		return nil, fmt.Errorf("Cursor hook executable is empty") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if timeoutMS <= 0 {
-		return nil, fmt.Errorf("Cursor hook adapter timeout must be positive")
+		return nil, fmt.Errorf("Cursor hook adapter timeout must be positive") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	tmpl, err := hookFS.ReadFile("hooks/cursor-hook.ps1")
 	if err != nil {
 		return nil, fmt.Errorf("read Cursor adapter template: %w", err)
 	}
 	rendered, err := renderTemplate(string(tmpl), templateData{
-		FailMode:      normalizeHookFailMode(failMode),
-		Managed:       managed,
-		HookBinaryPS:  strings.ReplaceAll(hookBinary, "'", "''"),
-		HookTimeoutMS: timeoutMS,
+		FailMode:                normalizeHookFailMode(failMode),
+		Managed:                 managed,
+		HookBinaryPS:            powershellLiteralBody(hookBinary),
+		HookTimeoutMS:           timeoutMS,
+		CursorTargetModesJSON64: targetModesJSON64,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("render Cursor adapter template: %w", err)
@@ -115,17 +215,20 @@ func renderWindowsCursorAdapter(hookBinary, failMode string, managed bool, timeo
 }
 
 // MergeWindowsCursorEnterpriseHooks returns a Cursor hooks.json containing
-// exactly one DefenseClaw entry for every supported event. Existing unrelated
+// exactly one DefenseClaw entry for every machine-policy event
+// (cursorEnterpriseHookEvents) and none on any other event, including a
+// retired one an earlier release registered. Existing unrelated
 // top-level fields, hook events, and hook entries retain their JSON semantics
-// and order. Enterprise mode is always fail closed.
+// and order. Each entry's failClosed flag is set from failMode: Cursor's host
+// flag covers a hook process that never answers, so the caller passes the
+// delivery mode it wants for that case (closed outside Secure Client, the
+// administrator's mode under it, as effectiveFailClosed does per user).
 func MergeWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode string) ([]byte, error) {
 	command, legacyCommand, err := windowsCursorEnterpriseHookCommands(adapterPath)
 	if err != nil {
 		return nil, err
 	}
-	if normalizeHookFailMode(failMode) != "closed" {
-		return nil, fmt.Errorf("Windows Cursor enterprise hooks must use fail mode closed")
-	}
+	previousEncodedCommand := previousWindowsCursorEnterpriseHookCommand(adapterPath)
 	cfg, err := decodeCursorHooksJSON(existing)
 	if err != nil {
 		return nil, err
@@ -145,36 +248,65 @@ func MergeWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode st
 		entries, ok := cursorHookEntryList(raw)
 		if !ok {
 			if cursorHookEventManaged(event) {
-				return nil, fmt.Errorf("Cursor hooks event %q must be an array", event)
+				return nil, fmt.Errorf("Cursor hooks event %q must be an array", event) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			}
 			continue
 		}
-		filtered := removeCursorHookCommands(entries, command, legacyCommand)
-		if len(filtered) != len(entries) {
-			hooks[event] = filtered
+		filtered := removeCursorHookCommands(entries, command, legacyCommand, previousEncodedCommand)
+		if len(filtered) == len(entries) {
+			continue
 		}
+		if len(filtered) == 0 && !cursorHookEventManaged(event) {
+			// An event this release no longer registers (afterAgentThought)
+			// held only DefenseClaw's entry: drop the key, as removal does,
+			// so teardown restores the pre-install document exactly.
+			delete(hooks, event)
+			continue
+		}
+		hooks[event] = filtered
 	}
 
-	for _, event := range cursorHookEvents {
+	for _, event := range cursorEnterpriseHookEvents {
 		entries, ok := cursorHookEntryList(hooks[event])
 		if !ok {
-			return nil, fmt.Errorf("Cursor hooks event %q must be an array", event)
+			return nil, fmt.Errorf("Cursor hooks event %q must be an array", event) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
-		hooks[event] = append(entries, windowsCursorEnterpriseHookEntry(command))
+		hooks[event] = append(entries, windowsCursorEnterpriseHookEntry(command, failMode))
 	}
 	return encodeCursorHooksJSON(cfg)
 }
 
 // VerifyWindowsCursorEnterpriseHooks validates exact writer/reader parity for
 // the protected machine configuration while allowing unrelated hook entries.
+// A DefenseClaw entry on a retired event (afterAgentThought) fails it, so a
+// reconcile treats a pre-upgrade policy as needing a rewrite.
 func VerifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode string) error {
+	return verifyWindowsCursorEnterpriseHooks(existing, adapterPath, failMode, false, false)
+}
+
+// VerifyWindowsCursorEnterpriseHooksForMigration accepts the exact encoded
+// command written by the immediately preceding release, and one exact
+// DefenseClaw entry on an event this release retired, while reading a
+// protected policy before upgrade or restoring a journaled one. New policies
+// use strict verification.
+func VerifyWindowsCursorEnterpriseHooksForMigration(existing []byte, adapterPath, failMode string) error {
+	return verifyWindowsCursorEnterpriseHooks(existing, adapterPath, failMode, true, true)
+}
+
+// VerifyWindowsCursorEnterpriseHooksRegistered reports whether the current
+// command is registered on every machine-policy event, accepting a
+// not-yet-repaired DefenseClaw entry on a retired event. Presence checks use
+// it: a pre-upgrade policy is still DefenseClaw's installed registration.
+func VerifyWindowsCursorEnterpriseHooksRegistered(existing []byte, adapterPath, failMode string) error {
+	return verifyWindowsCursorEnterpriseHooks(existing, adapterPath, failMode, false, true)
+}
+
+func verifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode string, allowPrevious, allowRetired bool) error {
 	command, legacyCommand, err := windowsCursorEnterpriseHookCommands(adapterPath)
 	if err != nil {
 		return err
 	}
-	if normalizeHookFailMode(failMode) != "closed" {
-		return fmt.Errorf("Windows Cursor enterprise hooks must use fail mode closed")
-	}
+	previousEncodedCommand := previousWindowsCursorEnterpriseHookCommand(adapterPath)
 	cfg, err := decodeCursorHooksJSON(existing)
 	if err != nil {
 		return err
@@ -187,31 +319,70 @@ func VerifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode s
 		return err
 	}
 
-	for _, event := range cursorHookEvents {
-		entries, ok := cursorHookEntryList(hooks[event])
-		if !ok {
-			return fmt.Errorf("Cursor hooks event %q must be an array", event)
-		}
+	selectedCommand := ""
+	countOwned := func(event string, entries []interface{}) (int, error) {
 		owned := 0
 		for _, raw := range entries {
 			entryCommand := cursorHookCommand(raw)
 			if entryCommand == legacyCommand {
-				return fmt.Errorf("Cursor hooks event %q still has the legacy PowerShell-only DefenseClaw command", event)
+				return 0, fmt.Errorf("cursor hooks event %q still has the legacy PowerShell-only DefenseClaw command", event)
 			}
-			if entryCommand != command {
+			if entryCommand == previousEncodedCommand && !allowPrevious {
+				return 0, fmt.Errorf("cursor hooks event %q still has the previous encoded DefenseClaw command", event)
+			}
+			if entryCommand != command && (!allowPrevious || entryCommand != previousEncodedCommand) {
 				continue
 			}
 			owned++
-			if !isExactWindowsCursorEnterpriseHookEntry(raw, command) {
-				return fmt.Errorf("Cursor hooks event %q has a drifted DefenseClaw entry", event)
+			// until 1.1: a migration or presence read also accepts
+			// failClosed true, which 1.0.4 wrote for every mode, so an
+			// upgrade from 1.0.4 rewrites that file instead of refusing it.
+			// Remove once upgrades from 1.0.4 are no longer supported. A
+			// closed policy still requires true, so a flag turned off reads
+			// as drift.
+			if !isExactWindowsCursorEnterpriseHookEntry(raw, entryCommand, failMode,
+				allowPrevious || allowRetired) {
+				return 0, fmt.Errorf("cursor hooks event %q has a drifted DefenseClaw entry", event)
 			}
+			if selectedCommand != "" && selectedCommand != entryCommand {
+				return 0, fmt.Errorf("cursor hooks event %q mixes DefenseClaw command versions", event)
+			}
+			selectedCommand = entryCommand
+		}
+		return owned, nil
+	}
+	for _, event := range cursorEnterpriseHookEvents {
+		entries, ok := cursorHookEntryList(hooks[event])
+		if !ok {
+			return fmt.Errorf("cursor hooks event %q must be an array", event)
+		}
+		owned, err := countOwned(event, entries)
+		if err != nil {
+			return err
 		}
 		if owned != 1 {
-			return fmt.Errorf("Cursor hooks event %q has %d DefenseClaw entries, want exactly 1", event, owned)
+			return fmt.Errorf("Cursor hooks event %q has %d DefenseClaw entries, want exactly 1", event, owned) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+		}
+	}
+	if allowRetired {
+		// A policy written before the event was retired carries one exact
+		// entry there; the next merge removes it.
+		for _, event := range cursorEnterpriseRetiredHookEvents {
+			entries, ok := cursorHookEntryList(hooks[event])
+			if !ok {
+				continue // foreign shape; the unexpected-entry scan below skips it too
+			}
+			owned, err := countOwned(event, entries)
+			if err != nil {
+				return err
+			}
+			if owned > 1 {
+				return fmt.Errorf("cursor hooks event %q has %d DefenseClaw entries, want at most 1", event, owned)
+			}
 		}
 	}
 	for event, raw := range hooks {
-		if cursorHookEventManaged(event) {
+		if cursorHookEventManaged(event) || (allowRetired && cursorEnterpriseHookEventRetired(event)) {
 			continue
 		}
 		entries, ok := cursorHookEntryList(raw)
@@ -220,7 +391,10 @@ func VerifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode s
 		}
 		for _, entry := range entries {
 			entryCommand := cursorHookCommand(entry)
-			if entryCommand == command || entryCommand == legacyCommand {
+			if entryCommand == command || entryCommand == legacyCommand || entryCommand == previousEncodedCommand {
+				if cursorEnterpriseHookEventRetired(event) {
+					return fmt.Errorf("cursor hooks event %q still has the DefenseClaw entry an earlier release registered; this release no longer registers it and the next publish removes it", event)
+				}
 				return fmt.Errorf("Cursor hooks event %q has an unexpected DefenseClaw entry", event)
 			}
 		}
@@ -237,6 +411,7 @@ func RemoveWindowsCursorEnterpriseHooks(existing []byte, adapterPath string) ([]
 	if err != nil {
 		return nil, err
 	}
+	previousEncodedCommand := previousWindowsCursorEnterpriseHookCommand(adapterPath)
 	cfg, err := decodeCursorHooksJSON(existing)
 	if err != nil {
 		return nil, err
@@ -251,7 +426,7 @@ func RemoveWindowsCursorEnterpriseHooks(existing []byte, adapterPath string) ([]
 		if !ok {
 			continue
 		}
-		filtered := removeCursorHookCommands(entries, command, legacyCommand)
+		filtered := removeCursorHookCommands(entries, command, legacyCommand, previousEncodedCommand)
 		if len(filtered) == len(entries) {
 			continue
 		}
@@ -326,6 +501,9 @@ func normalizeCursorOwnedRemainder(config map[string]interface{}) bool {
 	if !ok {
 		return false
 	}
+	// cursorHookEvents is the superset of the machine-policy roster and the
+	// retired events, so empty scaffolding an earlier release created for
+	// afterAgentThought is ignored too.
 	for _, event := range cursorHookEvents {
 		entries, exists := hooks[event]
 		if !exists {
@@ -383,16 +561,32 @@ func windowsCursorEnterpriseHookCommands(adapterPath string) (string, string, er
 	// host. Windows PowerShell decodes $input before an encoded command can set
 	// Console.InputEncoding, so reading $input would corrupt non-ASCII Cursor
 	// JSON on machines whose OEM code page is not UTF-8. Read the inherited
-	// standard-input stream as strict UTF-8 instead, then pass the decoded JSON
-	// to the managed adapter as one PowerShell pipeline object.
+	// standard-input stream as strict UTF-8 instead. Remove a leading UTF-8 BOM
+	// when present. An outer Windows PowerShell host can also consume the first
+	// opening brace before the child reads stdin; restore it only when the next
+	// character begins a JSON object key. The gateway still validates the JSON.
+	powerShell := strings.ReplaceAll(windowsSystemPowerShellExe(), `\`, "/")
+	script := "$reader=[IO.StreamReader]::new([Console]::OpenStandardInput()," +
+		"[Text.UTF8Encoding]::new($false,$true),$false);" +
+		"try{$payload=$reader.ReadToEnd()}finally{$reader.Dispose()};" +
+		"if($payload.StartsWith([string][char]0xFEFF)){$payload=$payload.Substring(1)};" +
+		"if($payload.TrimStart().StartsWith([string][char]0x22)){$payload=([string][char]0x7B)+$payload};" +
+		"$payload | & " + powershellQuoteLiteral(adapterPath)
+	command := powerShell + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
+	legacyCommand := "& " + powershellQuoteLiteral(adapterPath)
+	return command, legacyCommand, nil
+}
+
+// previousWindowsCursorEnterpriseHookCommand reconstructs the exact
+// shell-neutral command installed before leading UTF-8 BOM handling was added.
+// It is recognized only for protected-policy migration and removal.
+func previousWindowsCursorEnterpriseHookCommand(adapterPath string) string {
 	powerShell := strings.ReplaceAll(windowsSystemPowerShellExe(), `\`, "/")
 	script := "$reader=[IO.StreamReader]::new([Console]::OpenStandardInput()," +
 		"[Text.UTF8Encoding]::new($false,$true),$false);" +
 		"try{$payload=$reader.ReadToEnd()}finally{$reader.Dispose()};" +
 		"$payload | & " + powershellQuoteLiteral(adapterPath)
-	command := powerShell + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
-	legacyCommand := "& " + powershellQuoteLiteral(adapterPath)
-	return command, legacyCommand, nil
+	return powerShell + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
 }
 
 func validateAbsoluteLocalWindowsPath(label, value string) error {
@@ -452,7 +646,7 @@ func isASCIIAlpha(value byte) bool {
 
 func decodeCursorHooksJSON(data []byte) (map[string]interface{}, error) {
 	if len(data) > windowsCursorEnterpriseHooksJSONMax {
-		return nil, fmt.Errorf("Cursor hooks JSON exceeds %d bytes", windowsCursorEnterpriseHooksJSONMax)
+		return nil, fmt.Errorf("Cursor hooks JSON exceeds %d bytes", windowsCursorEnterpriseHooksJSONMax) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
 		return map[string]interface{}{}, nil
@@ -478,10 +672,10 @@ func decodeCursorHooksJSON(data []byte) (map[string]interface{}, error) {
 
 func decodeCursorJSONValue(data []byte) (interface{}, error) {
 	if len(data) > windowsCursorEnterpriseHooksJSONMax {
-		return nil, fmt.Errorf("Cursor hooks JSON exceeds %d bytes", windowsCursorEnterpriseHooksJSONMax)
+		return nil, fmt.Errorf("Cursor hooks JSON exceeds %d bytes", windowsCursorEnterpriseHooksJSONMax) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
-		return nil, fmt.Errorf("Cursor hooks JSON is empty")
+		return nil, fmt.Errorf("Cursor hooks JSON is empty") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
@@ -557,18 +751,18 @@ func requireCursorHooksVersionOne(cfg map[string]interface{}, create bool) error
 	raw, exists := cfg["version"]
 	if !exists || raw == nil {
 		if !create {
-			return fmt.Errorf("Cursor hooks version is missing")
+			return fmt.Errorf("Cursor hooks version is missing") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		cfg["version"] = 1
 		return nil
 	}
 	number, ok := raw.(json.Number)
 	if !ok {
-		return fmt.Errorf("Cursor hooks version must be the integer 1")
+		return fmt.Errorf("Cursor hooks version must be the integer 1") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	version, err := number.Int64()
 	if err != nil || version != 1 {
-		return fmt.Errorf("Cursor hooks version must be the integer 1")
+		return fmt.Errorf("Cursor hooks version must be the integer 1") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	cfg["version"] = 1
 	return nil
@@ -586,7 +780,7 @@ func cursorHooksObject(cfg map[string]interface{}, create bool) (map[string]inte
 	}
 	hooks, ok := raw.(map[string]interface{})
 	if !ok {
-		return nil, fmt.Errorf("Cursor hooks must be a JSON object")
+		return nil, fmt.Errorf("Cursor hooks must be a JSON object") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	return hooks, nil
 }
@@ -599,12 +793,12 @@ func cursorHookEntryList(raw interface{}) ([]interface{}, bool) {
 	return entries, ok
 }
 
-func windowsCursorEnterpriseHookEntry(command string) map[string]interface{} {
+func windowsCursorEnterpriseHookEntry(command, failMode string) map[string]interface{} {
 	return map[string]interface{}{
 		"type":       "command",
 		"command":    command,
 		"timeout":    windowsCursorEnterpriseHookTimeoutSeconds,
-		"failClosed": true,
+		"failClosed": normalizeHookFailMode(failMode) == "closed",
 	}
 }
 
@@ -635,23 +829,34 @@ func cursorHookCommand(raw interface{}) string {
 	return strings.TrimSpace(command)
 }
 
-func isExactWindowsCursorEnterpriseHookEntry(raw interface{}, command string) bool {
+func isExactWindowsCursorEnterpriseHookEntry(raw interface{}, command, failMode string, acceptAlwaysClosed bool) bool {
 	entry, ok := raw.(map[string]interface{})
 	if !ok || len(entry) != 4 || cursorHookCommand(entry) != command {
 		return false
 	}
 	typeName, _ := entry["type"].(string)
-	failClosed, _ := entry["failClosed"].(bool)
+	failClosed, validFailMode := entry["failClosed"].(bool)
 	timeout, ok := entry["timeout"].(json.Number)
 	if !ok {
 		return false
 	}
 	timeoutSeconds, err := timeout.Int64()
-	return err == nil && typeName == "command" && failClosed && timeoutSeconds == windowsCursorEnterpriseHookTimeoutSeconds
+	return err == nil && typeName == "command" && validFailMode && (failClosed == (normalizeHookFailMode(failMode) == "closed") || (acceptAlwaysClosed && failClosed)) && timeoutSeconds == windowsCursorEnterpriseHookTimeoutSeconds
 }
 
+// cursorHookEventManaged reports whether the Windows machine policy registers
+// event.
 func cursorHookEventManaged(event string) bool {
-	for _, candidate := range cursorHookEvents {
+	for _, candidate := range cursorEnterpriseHookEvents {
+		if event == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func cursorEnterpriseHookEventRetired(event string) bool {
+	for _, candidate := range cursorEnterpriseRetiredHookEvents {
 		if event == candidate {
 			return true
 		}

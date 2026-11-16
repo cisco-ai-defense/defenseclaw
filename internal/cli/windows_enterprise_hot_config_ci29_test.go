@@ -15,7 +15,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -24,7 +23,7 @@ func TestWindowsHotBundlePostVerifyReportsFailureAndRestoresConfig(t *testing.T)
 	const next = "config_version: 9\nguardrail:\n  block_at: LOW\n"
 	host, opts := newHotConfigHost(t, previous, next)
 	host.adopted = true
-	opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{}}}
+	opts.bundle = host.bundleRun()
 	savedDigest := windowsEnterprisePolicyDigest
 	t.Cleanup(func() { windowsEnterprisePolicyDigest = savedDigest })
 	verify := installedStatus("Verify")
@@ -54,7 +53,7 @@ func TestWindowsHotBundleReloadFailureCanStillConfirmWatcherAdoption(t *testing.
 	const next = "config_version: 9\nguardrail:\n  block_at: LOW\n"
 	host, opts := newHotConfigHost(t, previous, next)
 	host.adopted = true
-	opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{}}}
+	opts.bundle = host.bundleRun()
 	savedDigest := windowsEnterprisePolicyDigest
 	t.Cleanup(func() { windowsEnterprisePolicyDigest = savedDigest })
 	windowsEnterpriseHotBundleReload = func(context.Context, managed.StandaloneLayout) error {

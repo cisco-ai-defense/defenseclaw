@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -103,6 +104,18 @@ func TestEnforceBlockWritesAssetPolicy(t *testing.T) {
 		t.Fatalf("unblock in another case = %d %v %#v", code, out, *casedRecorded)
 	}
 
+	// The same name in its other Unicode spelling (decomposed é) is the
+	// same asset: an allow removes the deny written in the composed one
+	// (p0 GAP-0878).
+	nfc, nfcRecorded := enforceTestAPI(t, "asset_policy:\n  skill:\n    denied:\n      - {name: \"caf\u00e9-skill\"}\n")
+	if code, out := enforceRequest(t, nfc.handleEnforceAllow, http.MethodPost, `{"target_type":"skill","target_name":"cafe\u0301-skill"}`); code != http.StatusOK ||
+		!reflect.DeepEqual(*nfcRecorded, []configwrite.Change{
+			{Path: "asset_policy.skill.denied", Value: []map[string]any{}},
+			{Path: "asset_policy.skill.allowed", Value: []map[string]any{{"name": "cafe\u0301-skill", "reason": "allowed via REST API"}}},
+		}) {
+		t.Fatalf("allow in the decomposed spelling = %d %v %#v", code, out, *nfcRecorded)
+	}
+
 	*recorded = nil
 	// A reload the gateway refused is reported, not the old digest.
 	api.configReloader = func(context.Context, string) error { return errors.New("requires gateway restart for: data_dir") }
@@ -169,6 +182,20 @@ func TestEnforceAllowWriterFailureDoesNotEnableRuntime(t *testing.T) {
 	disabled, err := api.store.HasAction("skill", "blocked-skill", "runtime", "disable")
 	if err != nil || !disabled {
 		t.Fatalf("runtime journal disabled = %t, %v; want true", disabled, err)
+	}
+}
+
+// A config.yaml with a second YAML document is refused by the writer; the
+// API answers 409 with the writer's text, not 500 (GAP-1421).
+func TestEnforceBlockOnAMultiDocumentConfigIs409(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	api, _ := enforceTestAPI(t, "config_version: 9\nguardrail:\n  mode: observe\n---\nguardrail:\n  mode: action\n")
+	api.configApply = configwrite.Apply
+	for _, method := range []string{http.MethodPost, http.MethodDelete} {
+		code, out := enforceRequest(t, api.handleEnforceBlock, method, `{"target_type":"skill","target_name":"s1"}`)
+		if code != http.StatusConflict || !strings.Contains(fmt.Sprint(out["error"]), "more than one YAML document") {
+			t.Fatalf("%s /enforce/block = %d %v, want 409 with the multiple-documents text", method, code, out)
+		}
 	}
 }
 

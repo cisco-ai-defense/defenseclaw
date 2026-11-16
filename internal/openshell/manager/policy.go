@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"maps"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -35,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
@@ -70,6 +70,8 @@ func (m *Manager) resolveBox(b *box) (*packs.Effective, error) {
 // policy no longer resolves fails closed (policyUnresolved) until it does
 // again (policyRestored).
 func (m *Manager) resolveBoxViolations(b *box) (*packs.Effective, []packs.Violation, error) {
+	b.resolveMu.Lock()
+	defer b.resolveMu.Unlock()
 	m.mu.Lock()
 	rec, unrecorded := b.rec, b.unrecorded
 	m.mu.Unlock()
@@ -78,7 +80,12 @@ func (m *Manager) resolveBoxViolations(b *box) (*packs.Effective, []packs.Violat
 		m.policyUnresolved(b, err)
 		return nil, nil, err
 	}
-	cfg := m.config()
+	cfg := m.configForSandbox(rec.Name)
+	if cfg == nil {
+		err := sandboxapi.Errorf(sandboxapi.CodeUnavailable, "the managed policy for sandbox %s is not confirmed", rec.Name)
+		m.policyUnresolved(b, err)
+		return nil, nil, err
+	}
 	eff, violations, err := m.resolve(cfg, rec.Flags.packs(rec.Harness, rec.Project, m.recordFacts(rec)))
 	if err == nil {
 		err = m.checkPolicySources(rec.WorkdirMode, rec.Project, eff)
@@ -230,7 +237,10 @@ func (m *Manager) orgPolicy(b *box) (*packs.Effective, error) {
 	m.mu.Lock()
 	rec := b.rec
 	m.mu.Unlock()
-	cfg := m.config()
+	cfg := m.configForSandbox(rec.Name)
+	if cfg == nil {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeUnavailable, "the managed policy for sandbox %s is not confirmed", rec.Name)
+	}
 	eff, _, err := packs.Resolve(cfg, packs.Flags{
 		Pack: packs.DefaultPackFor(cfg), Harness: rec.Harness, Project: rec.Project, OpenShellGatewayPort: m.gatewayPort(),
 	})
@@ -786,7 +796,7 @@ func (m *Manager) scheduleForeignStop(name, bindingID string) {
 	m.tamperStops.Add(1)
 	go func() {
 		defer m.tamperStops.Done()
-		ctx, cancel := context.WithTimeout(context.Background(), defaultOpTimeout)
+		ctx, cancel := context.WithTimeout(WithEmergencyStop(context.Background(), "repeated network rules added outside DefenseClaw"), defaultOpTimeout)
 		defer cancel()
 		b, unlock, err := m.lockBox(name)
 		if err != nil {
@@ -803,7 +813,7 @@ func (m *Manager) scheduleForeignStop(name, bindingID string) {
 		if err := m.stop(ctx, b); err != nil {
 			m.logf("foreign rules: stop %s: %v", name, err)
 			m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: name, Severity: "HIGH",
-				Reason: policyReasonForeignRule, Message: "⚠ DefenseClaw could not stop the sandbox for repeated foreign network rules: stop it yourself"})
+				Reason: policyReasonForeignRule, Message: "⚠ DefenseClaw could not stop the sandbox for repeated foreign network rules (" + sandboxapi.AsError(err).Error() + "): stop it yourself"})
 		}
 	}()
 }
@@ -1003,7 +1013,7 @@ func (m *Manager) violationErrorFor(ctx context.Context, err error, sandbox stri
 
 // policyTarget is the shape of a policy record's target reference (the
 // audit recorder refuses anything else).
-var policyTarget = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
+var policyTarget = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
 
 // recordAdminRefusal records a request the organization's policy refused as
 // a no-change policy record: of the sandbox when it exists (or is being
@@ -1244,12 +1254,52 @@ func (m *Manager) PolicyTest(_ context.Context, req sandboxapi.PolicyTestRequest
 			continue
 		}
 		chk := eff.CheckEgress(pol.Decider, pol.Principal, c.Host, c.Port)
+		if m.managedMode() {
+			chk = m.savedDecisionProvenance(b, eff, pol.Principal, c.Host, c.Port, chk)
+		}
 		out.Decisions = append(out.Decisions, sandboxapi.PolicyDecision{
 			PolicyCheck: c, Allowed: chk.Allowed, Rule: string(chk.Rule), Match: chk.Match, Source: chk.Source,
 			Reason: chk.Reason, Unblockable: chk.Unblockable, Direct: directProvider(rec.ProviderEndpoints, c.Host, c.Port),
 		})
 	}
 	return out, nil
+}
+
+// savedDecisionProvenance changes only the explanation of a verdict. The
+// actual sandbox decider above remains authoritative, including the guard,
+// organization lists, repository constraints and the current approval floor.
+func (m *Manager) savedDecisionProvenance(b *box, eff *packs.Effective, principal egress.Principal, host string, port int, chk packs.EgressCheck) packs.EgressCheck {
+	if chk.Rule != packs.RuleBlock && chk.Rule != packs.RuleUnblock {
+		return chk
+	}
+	if chk.Rule == packs.RuleBlock {
+		// A configured or repository block precedes appended user blocks.
+		if base := eff.CheckEgress(nil, principal, host, port); base.Rule == packs.RuleBlock {
+			return chk
+		}
+	} else if _, live := m.unblocks.Unblocked(principal, host); live {
+		return chk
+	}
+	for _, d := range m.savedDecisions(m.registrationOf(b), m.floor(eff)) {
+		if triage.NormalizeHost(d.Host) != triage.NormalizeHost(host) || d.Scope != sandboxrelay.DecisionScopeAlways {
+			continue
+		}
+		kind, action := "", ""
+		switch {
+		case chk.Rule == packs.RuleBlock && d.Kind == sandboxrelay.DecisionEgressBlock:
+			kind, action = "block", "blocked"
+		case chk.Rule == packs.RuleUnblock && d.Kind == sandboxrelay.DecisionEgressAllow:
+			kind, action = "allow", "allowed"
+		case chk.Rule == packs.RuleUnblock && d.Kind == sandboxrelay.DecisionUnblock:
+			kind, action = "unblock", "unblocked"
+		}
+		if kind != "" {
+			chk.Source = "your saved " + kind + " decision (managed gateway)"
+			chk.Reason = "You " + action + " this destination through your organization's DefenseClaw gateway."
+			return chk
+		}
+	}
+	return chk
 }
 
 // hostPortTest is what a policy test says of a --host-port the sandbox was

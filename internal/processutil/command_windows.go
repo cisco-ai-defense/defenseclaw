@@ -72,45 +72,108 @@ func createCapturedProcessJob(allowManagedBreakaway bool) (windows.Handle, error
 	return job, nil
 }
 
-func resumeCapturedProcess(pid uint32) error {
-	// syscall.StartProcess closes PROCESS_INFORMATION.hThread before returning,
-	// so recover the sole CREATE_SUSPENDED primary thread by PID. The snapshot
-	// retry is bounded and occurs before any child instruction can execute.
-	deadline := time.Now().Add(capturedTreeWaitDelay)
-	for {
-		snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPTHREAD, 0)
-		if err != nil {
-			return fmt.Errorf("snapshot captured-process threads: %w", err)
-		}
-		var entry windows.ThreadEntry32
-		entry.Size = uint32(unsafe.Sizeof(entry))
-		err = windows.Thread32First(snapshot, &entry)
-		for err == nil {
-			if entry.OwnerProcessID == pid {
-				thread, openErr := windows.OpenThread(windows.THREAD_SUSPEND_RESUME, false, entry.ThreadID)
-				if openErr == nil {
-					previous, resumeErr := windows.ResumeThread(thread)
-					windows.CloseHandle(thread)
-					windows.CloseHandle(snapshot)
-					if resumeErr != nil {
-						return fmt.Errorf("resume captured-process primary thread: %w", resumeErr)
-					}
-					if previous != 1 {
-						return fmt.Errorf("captured-process primary thread suspend count was %d, want 1", previous)
-					}
-					return nil
-				}
+// procNtResumeProcess resumes the threads of a process through a process
+// handle (PROCESS_SUSPEND_RESUME).
+var procNtResumeProcess = windows.NewLazySystemDLL("ntdll.dll").NewProc("NtResumeProcess")
+
+// errCapturedThreadAccessDenied reports that a thread of the child refused
+// THREAD_SUSPEND_RESUME: its security does not admit this thread either way,
+// so the child is resumed through the process handle instead.
+var errCapturedThreadAccessDenied = errors.New("captured-process thread refused THREAD_SUSPEND_RESUME")
+
+// capturedThreadOps lets the resume decision be tested without a real
+// suspended process.
+type capturedThreadOps struct {
+	// threads lists the thread IDs the snapshot shows for pid.
+	threads func(pid uint32) ([]uint32, error)
+	// resume resumes one thread and returns its previous suspend count. A
+	// thread that cannot be opened reports ok=false and is skipped; one whose
+	// security refuses the open reports errCapturedThreadAccessDenied.
+	resume func(threadID uint32) (previous uint32, ok bool, err error)
+	// resumeProcess resumes the child through its process handle once a
+	// thread reports errCapturedThreadAccessDenied.
+	resumeProcess func() error
+	now           func() time.Time
+	sleep         func(time.Duration)
+}
+
+func resumeCapturedProcess(pid uint32, process windows.Handle) error {
+	if callerThreadImpersonates() {
+		// The managed guardian runs connector Setup and Verify as the
+		// enrolled user. Its impersonating thread neither lists nor opens
+		// the threads of the child, which runs with this process's token,
+		// so the child was never resumed: RunContained failed after its
+		// wait and the managed Hermes execution probe with it (GAP-0887).
+		return resumeCapturedProcessByHandle(process)
+	}
+	return resumeCapturedProcessWithOps(pid, capturedThreadOps{
+		threads: snapshotProcessThreads,
+		resume: func(threadID uint32) (uint32, bool, error) {
+			thread, err := windows.OpenThread(windows.THREAD_SUSPEND_RESUME, false, threadID)
+			if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+				return 0, true, errCapturedThreadAccessDenied
 			}
-			err = windows.Thread32Next(snapshot, &entry)
+			if err != nil {
+				return 0, false, nil
+			}
+			defer windows.CloseHandle(thread)
+			previous, err := windows.ResumeThread(thread)
+			return previous, true, err
+		},
+		resumeProcess: func() error { return resumeCapturedProcessByHandle(process) },
+		now:           time.Now,
+		sleep:         time.Sleep,
+	})
+}
+
+// resumeCapturedProcessWithOps resumes the CREATE_SUSPENDED primary thread.
+// syscall.StartProcess closes PROCESS_INFORMATION.hThread before returning, so
+// the thread is recovered by PID; the snapshot retry is bounded and runs
+// before any child instruction can execute.
+//
+// Endpoint products routinely add their own suspension to a new process (a
+// previous count of 2 or more) or inject a running thread of their own (a
+// previous count of 0). The first is still our suspended thread: one resume
+// gives back our count and the product releases its own. The second is not
+// ours and is skipped. When every visible thread was already running, the
+// process is inside the kill-on-close job either way and is left to run.
+func resumeCapturedProcessWithOps(pid uint32, ops capturedThreadOps) error {
+	deadline := ops.now().Add(capturedTreeWaitDelay)
+	for {
+		threads, err := ops.threads(pid)
+		if err != nil {
+			return err
 		}
-		windows.CloseHandle(snapshot)
-		if err != nil && !errors.Is(err, windows.ERROR_NO_MORE_FILES) {
-			return fmt.Errorf("enumerate captured-process threads: %w", err)
+		running := 0
+		unopened := 0
+		for _, threadID := range threads {
+			previous, ok, resumeErr := ops.resume(threadID)
+			if !ok {
+				unopened++
+				continue
+			}
+			if errors.Is(resumeErr, errCapturedThreadAccessDenied) && ops.resumeProcess != nil {
+				return ops.resumeProcess()
+			}
+			if resumeErr != nil {
+				return fmt.Errorf("resume captured-process primary thread: %w", resumeErr)
+			}
+			if previous == 0 {
+				running++
+				continue
+			}
+			return nil
 		}
-		if time.Now().After(deadline) {
+		if running != 0 && unopened == 0 {
+			return nil
+		}
+		if ops.now().After(deadline) {
+			if running != 0 {
+				return nil
+			}
 			return fmt.Errorf("captured-process primary thread was not visible within %s", capturedTreeWaitDelay)
 		}
-		time.Sleep(5 * time.Millisecond)
+		ops.sleep(5 * time.Millisecond)
 	}
 }
 
@@ -201,6 +264,28 @@ func waitCapturedJobExited(job windows.Handle, limit time.Duration) error {
 	return nil
 }
 
+func snapshotProcessThreads(pid uint32) ([]uint32, error) {
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPTHREAD, 0)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot captured-process threads: %w", err)
+	}
+	defer windows.CloseHandle(snapshot)
+	var entry windows.ThreadEntry32
+	entry.Size = uint32(unsafe.Sizeof(entry))
+	var threads []uint32
+	err = windows.Thread32First(snapshot, &entry)
+	for err == nil {
+		if entry.OwnerProcessID == pid {
+			threads = append(threads, entry.ThreadID)
+		}
+		err = windows.Thread32Next(snapshot, &entry)
+	}
+	if !errors.Is(err, windows.ERROR_NO_MORE_FILES) {
+		return nil, fmt.Errorf("enumerate captured-process threads: %w", err)
+	}
+	return threads, nil
+}
+
 func combinedOutputTree(cmd *exec.Cmd, allowManagedBreakaway bool) ([]byte, error) {
 	if cmd.Stdout != nil {
 		return nil, errors.New("exec: Stdout already set")
@@ -213,6 +298,43 @@ func combinedOutputTree(cmd *exec.Cmd, allowManagedBreakaway bool) ([]byte, erro
 	cmd.Stderr = &output
 	err := runTree(cmd, allowManagedBreakaway)
 	return output.Bytes(), err
+}
+
+func outputTree(cmd *exec.Cmd, allowManagedBreakaway bool) ([]byte, []byte, error) {
+	if cmd.Stdout != nil {
+		return nil, nil, errors.New("exec: Stdout already set")
+	}
+	if cmd.Stderr != nil {
+		return nil, nil, errors.New("exec: Stderr already set")
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := runTree(cmd, allowManagedBreakaway)
+	return stdout.Bytes(), stderr.Bytes(), err
+}
+
+// callerThreadImpersonates reports whether the calling OS thread runs with
+// an impersonation token.
+func callerThreadImpersonates() bool {
+	var token windows.Token
+	if err := windows.OpenThreadToken(windows.CurrentThread(), windows.TOKEN_QUERY, true, &token); err != nil {
+		return false
+	}
+	token.Close()
+	return true
+}
+
+// resumeCapturedProcessByHandle resumes the suspended child through the
+// process handle this process holds from CreateProcess.
+func resumeCapturedProcessByHandle(process windows.Handle) error {
+	if err := procNtResumeProcess.Find(); err != nil {
+		return fmt.Errorf("resume captured process: %w", err)
+	}
+	if status, _, _ := procNtResumeProcess.Call(uintptr(process)); status != 0 {
+		return fmt.Errorf("resume captured process: %w", windows.NTStatus(status))
+	}
+	return nil
 }
 
 // runTree runs cmd, with the streams the caller set, inside a kill-on-close
@@ -265,7 +387,13 @@ func runTree(cmd *exec.Cmd, allowManagedBreakaway bool) error {
 		_ = cmd.Wait()
 		return fmt.Errorf("assign captured process to kill-on-close job: %w", assignErr)
 	}
-	if err := resumeCapturedProcess(uint32(cmd.Process.Pid)); err != nil {
+	var resumeErr error
+	if withErr := cmd.Process.WithHandle(func(handle uintptr) {
+		resumeErr = resumeCapturedProcess(uint32(cmd.Process.Pid), windows.Handle(handle))
+	}); withErr != nil {
+		resumeErr = withErr
+	}
+	if err := resumeErr; err != nil {
 		_ = windows.TerminateJobObject(job, 1)
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()

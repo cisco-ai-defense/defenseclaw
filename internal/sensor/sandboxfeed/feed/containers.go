@@ -19,11 +19,11 @@ package feed
 import (
 	"context"
 	"errors"
-	"regexp"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/sandboxfeed"
 )
@@ -85,8 +85,8 @@ const (
 )
 
 var (
-	containerIDPattern = regexp.MustCompile(`^[0-9a-f]{12,64}$`)
-	sandboxIDPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	containerIDPattern = lazyregexp.New(`^[0-9a-f]{12,64}$`)
+	sandboxIDPattern   = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 )
 
 // Containers resolves Tetragon's container ids through an Inspector, with a

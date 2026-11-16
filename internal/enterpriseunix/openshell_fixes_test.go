@@ -29,7 +29,7 @@ func TestSandboxDefaultUserUnitsComeFromTheEmbeddedAssets(t *testing.T) {
 			h := newOSHost(t, goos)
 			h.env.UserUnitSource = nil
 			var doc map[string]any
-			if err := yaml.Unmarshal(sandboxConfig(t, goos, true, map[string]any{"install": "setup", "version": "0.1.3"}), &doc); err != nil {
+			if err := yaml.Unmarshal(sandboxConfig(t, goos, true, map[string]any{"install": "setup", "version": "0.1.5"}), &doc); err != nil {
 				t.Fatal(err)
 			}
 			doc["enterprise"].(map[string]any)["network"] = map[string]any{"https_proxy": "http://proxy.example.test:3128", "no_proxy": "localhost"}

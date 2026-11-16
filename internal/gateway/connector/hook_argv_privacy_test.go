@@ -29,6 +29,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -72,9 +73,9 @@ func newHookArgvRecorder(t *testing.T) *hookArgvRecorder {
 	t.Helper()
 	logDir := t.TempDir()
 	r := &hookArgvRecorder{dir: t.TempDir(), log: filepath.Join(logDir, "argv.log"), envLog: filepath.Join(logDir, "env.log")}
-	cat, envBin := hookArgvLookPath("cat"), hookArgvLookPath("env")
-	if cat == "" || envBin == "" {
-		t.Skip("cat and env are required")
+	cat, envBin, rm := hookArgvLookPath("cat"), hookArgvLookPath("env"), hookArgvLookPath("rm")
+	if cat == "" || envBin == "" || rm == "" {
+		t.Skip("cat, env and rm are required")
 	}
 	for _, name := range hookArgvTools {
 		// The macOS /usr/bin/python3 may be the developer-tools stub that
@@ -86,14 +87,19 @@ func newHookArgvRecorder(t *testing.T) *hookArgvRecorder {
 		if real == "" {
 			continue
 		}
+		// Each record reaches its log in one append: commands of one
+		// pipeline (curl | tr) run at once and must not interleave.
 		wrapper := "#!/bin/sh\n" +
 			"{\n" +
 			"  printf '%s' " + shellSingleQuoteForTest(name) + "\n" +
 			"  for a in \"$@\"; do printf '\\037%s' \"$a\"; done\n" +
 			"  printf '\\036'\n" +
 			"  if [ -r /proc/$$/cmdline ]; then " + shellSingleQuoteForTest(cat) + " /proc/$$/cmdline; printf '\\036'; fi\n" +
-			"} >> " + shellSingleQuoteForTest(r.log) + "\n" +
-			"{ printf '%s\\n' " + shellSingleQuoteForTest(name) + "; " + shellSingleQuoteForTest(envBin) + "; printf '\\036'; } >> " + shellSingleQuoteForTest(r.envLog) + "\n" +
+			"} > " + shellSingleQuoteForTest(r.log) + ".$$\n" +
+			shellSingleQuoteForTest(cat) + " " + shellSingleQuoteForTest(r.log) + ".$$ >> " + shellSingleQuoteForTest(r.log) + "\n" +
+			"{ printf '%s\\n' " + shellSingleQuoteForTest(name) + "; " + shellSingleQuoteForTest(envBin) + "; printf '\\036'; } > " + shellSingleQuoteForTest(r.envLog) + ".$$\n" +
+			shellSingleQuoteForTest(cat) + " " + shellSingleQuoteForTest(r.envLog) + ".$$ >> " + shellSingleQuoteForTest(r.envLog) + "\n" +
+			shellSingleQuoteForTest(rm) + " -f -- " + shellSingleQuoteForTest(r.log) + ".$$ " + shellSingleQuoteForTest(r.envLog) + ".$$\n" +
 			"exec " + shellSingleQuoteForTest(real) + " \"$@\"\n"
 		if err := os.WriteFile(filepath.Join(r.dir, name), []byte(wrapper), 0o755); err != nil {
 			t.Fatal(err)
@@ -289,8 +295,6 @@ func hookArgvConnectorCase(t *testing.T, connector string) hookArgvCase {
 		return hookArgvCase{script: "devin-hook.sh", stdin: `{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"/work/proj","tool_name":"exec","tool_input":{"command":"echo ` + m + `"}}`, route: "/api/v1/devin/hook"}
 	case "hermes":
 		return hookArgvCase{script: "hermes-hook.sh", stdin: `{"hook_event_name":"pre_tool_call","tool_name":"terminal","tool_input":{"command":"echo ` + m + `"},"session_id":"s1","cwd":"/work/p","extra":{}}`, route: "/api/v1/hermes/hook"}
-	case "openhands":
-		return hookArgvCase{script: "openhands-hook.sh", stdin: `{"event_type":"PreToolUse","tool_name":"terminal","tool_input":{"command":"echo ` + m + `"},"session_id":"s1","working_dir":"/work/p","metadata":{}}`, route: "/api/v1/openhands/hook"}
 	case "antigravity":
 		return hookArgvCase{script: "antigravity-hook.sh", args: []string{"PreToolUse"}, stdin: `{"toolName":"run_command","toolInput":{"CommandLine":"echo ` + m + `"}}`, route: "/api/v1/antigravity/hook"}
 	}
@@ -316,7 +320,7 @@ func hookArgvInspectCases() []hookArgvCase {
 // hookArgvShellConnectors are the connectors with a host shell hook.
 var hookArgvShellConnectors = []Connector{
 	NewClaudeCodeConnector(), NewCodexConnector(), NewCopilotConnector(), NewCursorConnector(), NewKiroConnector(),
-	NewDevinConnector(), NewHermesConnector(), NewOpenHandsConnector(), NewAntigravityConnector(),
+	NewDevinConnector(), NewHermesConnector(), NewAntigravityConnector(),
 }
 
 // TestHookArgvCasesCoverEveryShellHook keeps the runtime tests in this file
@@ -420,6 +424,7 @@ func TestShellHooksKeepTokenAndPayloadOffEveryCommandLine(t *testing.T) {
 				rec.reset(t)
 				gateway.take()
 				home := t.TempDir()
+				installNativeGatewayForHookTest(t, home, hookDir)
 				curlrcEnv, trace := hookArgvCurlrcEnv(t)
 				code, stdout, stderr := runHookArgvCase(t, hookDir, tc, append([]string{"HOME=" + home, "DEFENSECLAW_HOME=" + home}, curlrcEnv...))
 				requireNoCurlTrace(t, trace)
@@ -434,7 +439,6 @@ func TestShellHooksKeepTokenAndPayloadOffEveryCommandLine(t *testing.T) {
 				}
 				rec.requireNone(t, token, hookArgvPayloadMarker)
 				rec.requireNoneInEnvironment(t, token, hookArgvPayloadMarker)
-				rec.requireCurlUsesDescriptors(t, true)
 			}
 		})
 	}
@@ -454,6 +458,7 @@ func TestLegacySharedTokenHooksKeepTokenOffEveryCommandLine(t *testing.T) {
 	for _, tc := range append([]hookArgvCase{hookArgvConnectorCase(t, "claudecode")}, hookArgvInspectCases()[0]) {
 		rec.reset(t)
 		home := t.TempDir()
+		installNativeGatewayForHookTest(t, home, hookDir)
 		code, stdout, stderr := runHookArgvCase(t, hookDir, tc, []string{"HOME=" + home, "DEFENSECLAW_HOME=" + home})
 		requests := gateway.take()
 		if code != 0 || len(requests) != 1 || requests[0].authorization != "Bearer "+token {
@@ -461,21 +466,67 @@ func TestLegacySharedTokenHooksKeepTokenOffEveryCommandLine(t *testing.T) {
 		}
 		rec.requireNone(t, token, hookArgvPayloadMarker)
 		rec.requireNoneInEnvironment(t, token, hookArgvPayloadMarker)
-		rec.requireCurlUsesDescriptors(t, true)
 	}
 }
 
 // hookArgvStatusGateway answers every request with status.
-func hookArgvStatusGateway(t *testing.T, status int) string {
+func hookArgvStatusGateway(t *testing.T, status int) (string, *atomic.Int32) {
 	t.Helper()
+	var answered atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		answered.Add(1)
 		_, _ = io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_, _ = io.WriteString(w, `{"error":"unauthorized"}`)
 	}))
 	t.Cleanup(srv.Close)
-	return strings.TrimPrefix(srv.URL, "http://")
+	return strings.TrimPrefix(srv.URL, "http://"), &answered
+}
+
+// runHookArgvReference runs a reference call until the gateway it is sent to
+// has answered it (answered grows), at most eight times in two minutes, and
+// returns the last run. On a heavily loaded build box a hook can give up on
+// a gateway that is listening, within its own per-call budget, and report it
+// unreachable; that run is no reference for the gateway's answer (GAP-0961).
+// The wait is on the gateway's answer, never a fixed sleep.
+func runHookArgvReference(t *testing.T, answered *atomic.Int32, run func() (int, string, string)) (int, string, string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Minute)
+	for attempt := 1; ; attempt++ {
+		before := answered.Load()
+		code, stdout, stderr := run()
+		if answered.Load() > before || attempt >= 8 || time.Now().After(deadline) {
+			return code, stdout, stderr
+		}
+		t.Logf("reference run %d did not reach its gateway (%s); running it again", attempt, strings.TrimSpace(stderr))
+	}
+}
+
+// GAP-0961: a reference run the gateway never answered is run again, and
+// only an answered run is the reference.
+func TestHookArgvReferenceWaitsForTheGatewaysAnswer(t *testing.T) {
+	var answered atomic.Int32
+	runs := 0
+	code, _, stderr := runHookArgvReference(t, &answered, func() (int, string, string) {
+		runs++
+		if runs < 3 {
+			return 2, "", "defenseclaw: gateway unreachable, blocking codex tool (fail mode closed)"
+		}
+		answered.Add(1)
+		return 2, "", "defenseclaw: gateway rejected the token (HTTP 401)"
+	})
+	if runs != 3 || code != 2 || !strings.Contains(stderr, "401") {
+		t.Fatalf("runs = %d, stderr = %q; want the third, answered run", runs, stderr)
+	}
+	runs = 0
+	_, _, stderr = runHookArgvReference(t, &answered, func() (int, string, string) {
+		runs++
+		return 2, "", "defenseclaw: gateway unreachable"
+	})
+	if runs != 8 || !strings.Contains(stderr, "unreachable") {
+		t.Fatalf("an unanswered reference ran %d times, want the bounded 8 and its last result", runs)
+	}
 }
 
 // TestShellHooksRefuseAMalformedToken: a bearer with CR or LF would end the
@@ -487,7 +538,7 @@ func hookArgvStatusGateway(t *testing.T, status int) string {
 func TestShellHooksRefuseAMalformedToken(t *testing.T) {
 	const malformed = "dccert-fake\rtoken"
 	gateway, addr := newHookArgvGateway(t)
-	rejectAddr := hookArgvStatusGateway(t, http.StatusUnauthorized)
+	rejectAddr, rejectAnswered := hookArgvStatusGateway(t, http.StatusUnauthorized)
 	type layout struct {
 		name  string
 		cases []hookArgvCase
@@ -552,6 +603,8 @@ func TestShellHooksRefuseAMalformedToken(t *testing.T) {
 			for _, tc := range l.cases {
 				for _, mode := range []string{"open", "closed"} {
 					home := t.TempDir()
+					// The reference run's hooks need their recorded helper too.
+					installNativeGatewayForHookTest(t, home, hookDir, rejectDir)
 					env := []string{"HOME=" + home, "DEFENSECLAW_HOME=" + home, "DEFENSECLAW_FAIL_MODE=" + mode}
 					rec.reset(t)
 					gateway.take()
@@ -567,7 +620,9 @@ func TestShellHooksRefuseAMalformedToken(t *testing.T) {
 					if !strings.Contains(stderr, "invalid gateway token") {
 						t.Fatalf("%s (%s): stderr = %q, want the invalid gateway token refusal", tc.script, mode, stderr)
 					}
-					wantCode, wantStdout, wantStderr := runHookArgvCase(t, rejectDir, tc, env)
+					wantCode, wantStdout, wantStderr := runHookArgvReference(t, rejectAnswered, func() (int, string, string) {
+						return runHookArgvCase(t, rejectDir, tc, env)
+					})
 					if !strings.Contains(wantStderr, "401") {
 						t.Fatalf("%s (%s): the reference run was not refused with HTTP 401: %s", tc.script, mode, wantStderr)
 					}
@@ -667,7 +722,9 @@ func TestPathShimsKeepTokenOffEveryCommandLine(t *testing.T) {
 			defer cancel()
 			cmd := exec.CommandContext(ctx, systemBashForTest(t), filepath.Join(shimDir, name), "--version", hookArgvPayloadMarker)
 			curlrcEnv, trace := hookArgvCurlrcEnv(t)
-			cmd.Env = append(append(hookArgvBaseEnv(), curlrcEnv...), "HOME="+t.TempDir(), "PATH="+shimDir+":"+rec.dir+":/usr/bin:/bin")
+			home := t.TempDir()
+			installNativeGatewayForHookTest(t, home)
+			cmd.Env = append(append(hookArgvBaseEnv(), curlrcEnv...), "HOME="+home, "PATH="+shimDir+":"+rec.dir+":/usr/bin:/bin")
 			var out bytes.Buffer
 			cmd.Stdout, cmd.Stderr = &out, &out
 			_ = cmd.Run() // the real tool may be missing; the inspection request came first
@@ -684,7 +741,8 @@ func TestPathShimsKeepTokenOffEveryCommandLine(t *testing.T) {
 					t.Fatalf("shim %s put the tool arguments on the gateway request's command line:\n%s", name, call)
 				}
 			}
-			rec.requireCurlUsesDescriptors(t, true)
+			// The shim's inspection now runs through the native connected-peer
+			// transport, so no curl process carries a gateway request.
 		})
 	}
 }
@@ -754,7 +812,9 @@ func runShimForTest(t *testing.T, shimDir, name, binDir string, env ...string) (
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, systemBashForTest(t), filepath.Join(shimDir, name), "--version", hookArgvPayloadMarker)
-	cmd.Env = append(append(hookArgvBaseEnv(), env...), "HOME="+t.TempDir(),
+	home := t.TempDir()
+	installNativeGatewayForHookTest(t, home)
+	cmd.Env = append(append(hookArgvBaseEnv(), env...), "HOME="+home,
 		"PATH="+strings.Join([]string{shimDir, binDir, filepath.Dir(jq), "/usr/bin", "/bin"}, ":"))
 	out, err := cmd.CombinedOutput()
 	code := 0
@@ -772,8 +832,8 @@ func runShimForTest(t *testing.T, shimDir, name, binDir string, env ...string) (
 // variable. Run from an agent environment that exports the names the shims
 // used for their own values (a user's API_TOKEN, ACTION, ...) and an empty
 // DEFENSECLAW_GATEWAY_TOKEN, so that the bearer comes from the .token file,
-// every shim must start the real tool, on the allow path and with the gateway
-// down, with the user's values unchanged and no copy of the bearer.
+// every shim must start the real tool on the allow path with the user's
+// values unchanged and no copy of the bearer. Gateway outage blocks the tool.
 func TestPathShimsLeaveTheRealToolsEnvironmentAlone(t *testing.T) {
 	const token = "dccert-fake-token-shim-env"
 	gateway, liveAddr := newHookArgvGateway(t)
@@ -818,8 +878,11 @@ func TestPathShimsLeaveTheRealToolsEnvironmentAlone(t *testing.T) {
 					}
 					ran = ran || strings.Contains(run.args, hookArgvPayloadMarker)
 				}
-				if code != 0 || !ran {
+				if state.name == "allow" && (code != 0 || !ran) {
 					t.Fatalf("shim exit %d, real tool started %v, want the real tool run\n%s", code, ran, out)
+				}
+				if state.name == "gateway-down" && (code == 0 || ran) {
+					t.Fatalf("shim exit %d, real tool started %v, want a closed outage\n%s", code, ran, out)
 				}
 			})
 		}

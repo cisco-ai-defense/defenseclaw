@@ -30,11 +30,11 @@ struct ConnectorOnboardingTests {
         multipleAdditiveSetupsRestartOnlyAfterTheFinalConnector()
         subsetActionLeadsWithAnEnforcedConnector()
         subsetWithoutGatewayStartNeverRestarts()
+        failModeIsAnActionProfileOption()
         emptyRegistrationDefensivelyRegistersEverything()
         proxyConnectorsNeverEnterInitializationPlans()
         setupCommandNameHyphenatesOnlyClaudeCode()
         commandRegistryIncludesAmpSetup()
-        commandRegistryIncludesOmniGentSetup()
         commandRegistryIncludesCanonicalDevinSetup()
         commandRegistryOmitsRemovedStandaloneSandboxCommands()
         parsesCommandArguments()
@@ -289,14 +289,6 @@ struct ConnectorOnboardingTests {
         expect(CommandRegistry.all.count == CommandRegistry.sourceCount, "native command count matches source")
     }
 
-    private static func commandRegistryIncludesOmniGentSetup() {
-        let command = CommandRegistry.all.first { $0.title == "setup omnigent" }
-        expect(
-            command?.arguments == ["setup", "omnigent", "--yes"],
-            "OmniGent setup command is available"
-        )
-    }
-
     private static func commandRegistryIncludesCanonicalDevinSetup() {
         let command = CommandRegistry.all.first { $0.title == "setup devin" }
         expect(command?.arguments == ["setup", "devin", "--yes"], "Devin setup command is available")
@@ -347,6 +339,21 @@ struct ConnectorOnboardingTests {
         }
     }
 
+    private static func failModeIsAnActionProfileOption() {
+        // tui/panels/first_run.py: --fail-mode (and HITL) only under the
+        // action profile; observe keeps failing open and preserves a saved
+        // setting, so the plan carries no --fail-mode there.
+        let observe = makePlan(detected: ["codex"], registered: [], action: [], profile: "observe")
+        expect(!observe[0].contains("--fail-mode"), "observe first run sends no --fail-mode")
+        expect(!observe[0].contains("--no-human-approval"), "observe first run sends no HITL option")
+        let action = makePlan(detected: ["codex"], registered: [], action: ["codex"], profile: "action")
+        guard let index = action[0].firstIndex(of: "--fail-mode") else {
+            expect(false, "action first run carries --fail-mode"); return
+        }
+        expect(action[0][index + 1] == "closed", "the chosen fail mode is forwarded in action")
+        expect(action[0].contains("--no-human-approval"), "action first run carries the HITL choice")
+    }
+
     private static func makePlan(
         detected: [String],
         registered: Set<String>,
@@ -363,7 +370,7 @@ struct ConnectorOnboardingTests {
             profile: profile,
             scannerMode: "local",
             llmJudge: false,
-            failMode: "open",
+            failMode: "closed",
             humanApproval: false,
             hiltSeverity: "HIGH",
             startGateway: startGateway,

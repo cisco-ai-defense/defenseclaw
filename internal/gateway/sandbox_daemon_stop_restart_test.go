@@ -259,7 +259,7 @@ func TestSandboxDaemonStatusConfirmsAgainOnTheClosedFloor(t *testing.T) {
 	// The managed gateway answers: the same status shows the
 	// organization's policy at once.
 	f.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
-		return sandboxrelay.CurrentPolicy{V: 1, Generation: 3}, nil
+		return sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Floor: &floor}, nil
 	}
 	sb, err = ctl.Get(ctx, "dc-a")
 	if err != nil {
@@ -378,7 +378,7 @@ func newClosedFloorFixture(t *testing.T, others ...string) *closedFloorFixture {
 	f.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
 		switch c.relay.Load() {
 		case relayAnswers:
-			return sandboxrelay.CurrentPolicy{V: 1, Generation: 3}, nil
+			return sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Floor: &closedFloorRegFloor}, nil
 		case relayRevokes:
 			return sandboxrelay.CurrentPolicy{V: 1, Revoked: true, RevokedReason: "profile removed"}, nil
 		}
@@ -425,6 +425,18 @@ func assertClosedFloorDeny(t *testing.T, what string, v sandboxapi.Sandbox) {
 	if !slices.ContainsFunc(v.Violations, closedFloorDeny) || v.Profile != "strict" || v.NetworkMode != "deny" ||
 		slices.Contains(v.Warnings, sandboxConfirmingNote) {
 		t.Fatalf("%s: %+v %s/%s %q, want the closed floor's deny", what, v.Violations, v.Profile, v.NetworkMode, v.Warnings)
+	}
+}
+
+// assertCreatedPolicy fails unless v shows the policy newClosedFloorFixture
+// created its sandboxes with (balanced, allowlist), with no violation and no
+// warning of the closed floor and no confirming note (GAP-0079).
+func assertCreatedPolicy(t *testing.T, what string, v sandboxapi.Sandbox) {
+	t.Helper()
+	if slices.ContainsFunc(v.Violations, closedFloorDeny) || v.Pack != "balanced" || v.Profile != "balanced" ||
+		v.NetworkMode != "allowlist" || v.Approvals != "triage" || slices.Contains(v.Warnings, sandboxConfirmingNote) ||
+		slices.ContainsFunc(v.Warnings, func(w string) bool { return strings.Contains(w, "policy changed since this sandbox was created") }) {
+		t.Fatalf("%s: %+v %s/%s/%s %q, want the policy it was created with", what, v.Violations, v.Pack, v.Profile, v.NetworkMode, v.Warnings)
 	}
 }
 
@@ -518,7 +530,7 @@ func TestSandboxDaemonStatusOpensTheClosedFloorForAConfirmedRegistration(t *test
 	for _, via := range []string{"status", "list"} {
 		t.Run(via, func(t *testing.T) {
 			c := newClosedFloorFixture(t)
-			c.d.regs.applyLive("dc-a", sandboxrelay.CurrentPolicy{V: 1, Generation: 3})
+			c.d.regs.applyLive("dc-a", sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Floor: &closedFloorRegFloor})
 			c.assertClosed(t, "confirmed, before the "+via)
 			ctx := context.Background()
 			if via == "status" {
@@ -543,11 +555,12 @@ func TestSandboxDaemonStatusOpensTheClosedFloorForAConfirmedRegistration(t *test
 }
 
 // Adopting a confirmed registration's floor (Start's adoptFloor)
-// re-resolves every sandbox's policy at once, not only the started one's
-// and not on the configuration check's next tick.
+// re-resolves every sandbox's policy at once. A second sandbox without a
+// confirmed registration remains closed rather than borrowing the first's
+// floor, without waiting for the configuration check's next tick.
 func TestSandboxDaemonAdoptFloorReResolvesAtOnce(t *testing.T) {
 	c := newClosedFloorFixture(t, "dc-x")
-	c.d.regs.applyLive("dc-a", sandboxrelay.CurrentPolicy{V: 1, Generation: 3})
+	c.d.regs.applyLive("dc-a", sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Floor: &closedFloorRegFloor})
 	c.d.adoptFloor("dc-a")
 	c.assertRegistrationFloor(t, "after adoptFloor")
 	for _, name := range []string{"dc-a", "dc-x"} {
@@ -555,7 +568,11 @@ func TestSandboxDaemonAdoptFloorReResolvesAtOnce(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		assertOrganizationPolicy(t, "the manager's view of "+name+" after adoptFloor", *raw)
+		if name == "dc-a" {
+			assertOrganizationPolicy(t, "the manager's view of dc-a after adoptFloor", *raw)
+		} else {
+			assertClosedFloorDeny(t, "the manager's view of dc-x after adoptFloor", *raw)
+		}
 	}
 }
 
@@ -593,7 +610,8 @@ func TestSandboxDaemonClosedFloorStaysWithoutAConfirmedRegistration(t *testing.T
 // A revoked registration keeps the closed floor and its deny: revoked by
 // the poll's answer, or confirmed and then revoked before its floor was
 // adopted (a start the managed gateway refused), even with the managed
-// gateway answering again.
+// gateway answering again. The sandbox's views show the policy it was
+// created with, not the closed floor's strict deny (GAP-0079).
 func TestSandboxDaemonRevokedRegistrationKeepsTheClosedFloor(t *testing.T) {
 	t.Run("revoked by the poll", func(t *testing.T) {
 		c := newClosedFloorFixture(t)
@@ -606,19 +624,19 @@ func TestSandboxDaemonRevokedRegistrationKeepsTheClosedFloor(t *testing.T) {
 		c.d.pollOnce(context.Background())
 		c.assertClosed(t, "after the polls")
 		for _, v := range c.statusAndList(t, "dc-a") {
-			assertClosedFloorDeny(t, "a revoked registration's sandbox", v)
+			assertCreatedPolicy(t, "a revoked registration's sandbox", v)
 		}
 		c.assertClosed(t, "after the status")
 	})
 	t.Run("confirmed then revoked", func(t *testing.T) {
 		c := newClosedFloorFixture(t)
-		c.d.regs.applyLive("dc-a", sandboxrelay.CurrentPolicy{V: 1, Generation: 3})
+		c.d.regs.applyLive("dc-a", sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Floor: &closedFloorRegFloor})
 		c.d.regs.markRevoked("dc-a", "profile removed")
 		c.relay.Store(relayAnswers)
 		c.d.pollOnce(context.Background())
 		c.assertClosed(t, "after the poll")
 		for _, v := range c.statusAndList(t, "dc-a") {
-			assertClosedFloorDeny(t, "a revoked registration's sandbox", v)
+			assertCreatedPolicy(t, "a revoked registration's sandbox", v)
 		}
 		c.assertClosed(t, "after the status")
 	})

@@ -22,13 +22,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -37,6 +37,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -72,13 +73,15 @@ import (
 // (sandboxapi.SettingsDrift) and is reported to the managed gateway (event
 // settings_drift).
 
+// openShellGatewayRepairCommand is the administrator's repair of a managed
+// Mac, with the gateway by its absolute path: it is not on the PATH.
+var openShellGatewayRepairCommand = "sudo " + managed.StandaloneGatewayPath("darwin") + " enterprise macos repair"
+
 const (
-	openShellGatewayUnit          = "defenseclaw-openshell-gateway.service"
-	openShellGatewayLabel         = "com.cisco.defenseclaw.openshell-gateway"
-	openShellGatewayPlist         = "/Library/LaunchAgents/com.cisco.defenseclaw.openshell-gateway.plist"
-	openShellGatewayRepairCommand = "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair"
-	daemonSystemctl               = "/usr/bin/systemctl"
-	daemonLaunchctl               = "/bin/launchctl"
+	openShellGatewayUnit      = "defenseclaw-openshell-gateway.service"
+	daemonSystemctl           = "/usr/bin/systemctl"
+	daemonLaunchctl           = "/bin/launchctl"
+	renderedGatewayDriftField = "gateway configuration"
 
 	// openShellPrerequisiteReason is the refusal detail of a missing
 	// OpenShell prerequisite.
@@ -89,11 +92,28 @@ const (
 	openShellTLSDirRel = ".local/state/openshell/tls"
 )
 
+// openShellLaunchAgentsDir holds the LaunchAgent plists; a var for tests.
+var openShellLaunchAgentsDir = openshell.LaunchAgentsDir
+
+// openShellGatewayAgent is the installed OpenShell gateway job: its label
+// carries the gateway program's tag (openshell.LaunchAgentLabel).
+func openShellGatewayAgent() (label, plist string) {
+	return openshell.FindLaunchAgent(openShellLaunchAgentsDir, openshell.GatewayAgentBase)
+}
+
 // Waits for the OpenShell gateway; vars so tests run at speed.
 var (
 	openShellGatewayStartWait = 90 * time.Second
 	openShellGatewayPollEvery = 500 * time.Millisecond
 	openShellGatewayHealAfter = 3 * time.Second
+	// openShellGatewayRestartEvery is how often the start wait looks
+	// whether the account's gateway unit stopped before it listened
+	// (Linux): a start asked while the unit was still stopping (after a
+	// SIGTERM, say) was a no-op, and the unit then stayed inactive for the
+	// whole wait (rel-1-0-2:GAP-0419, #1202). It is started again, up to
+	// openShellGatewayRestarts times.
+	openShellGatewayRestartEvery = 3 * time.Second
+	openShellGatewayRestarts     = 3
 )
 
 // daemonOpenShell is what the daemon does with the account's OpenShell;
@@ -103,6 +123,9 @@ type daemonOpenShell interface {
 	// differs from the rendered one, for a gateway the managed unit did not
 	// start (nil otherwise).
 	Drift(s sandboxrelay.DaemonSettings) ([]openshell.SettingDrift, error)
+	// RenderedConfigDrift is a cheap status probe of the lifecycle's pinned
+	// render; it does not inspect a running process or change readiness.
+	RenderedConfigDrift(s sandboxrelay.DaemonSettings) bool
 	// Prepare starts and registers the account's OpenShell gateway (setup
 	// mode installs it first). started reports that it started the gateway
 	// now.
@@ -150,6 +173,14 @@ type accountOpenShell struct {
 	// pid and the command line.
 	hostProcs func(ctx context.Context) (string, error)
 
+	// stopSync syncs the disk of every MicroVM the OpenShell gateway
+	// registered as gateway lists ready and says on out which it synced
+	// (openshell.SyncGatewaySandboxes), and recordUnsynced notes the ones it
+	// could not for the sandbox feed (manager.RecordUnsyncedStops). The
+	// macOS stop runs them: launchd gives the LaunchAgent no stop command.
+	stopSync       func(ctx context.Context, gateway string, out io.Writer) error
+	recordUnsynced func(names []string)
+
 	// installed is the release this process installed or found intact.
 	mu        sync.Mutex
 	installed string
@@ -177,8 +208,11 @@ func newAccountOpenShell(goos string, uid int, home string, logf func(string, ..
 		readRendered: openshell.ReadRenderedGateway,
 		configDir:    openshell.UserConfigDir,
 		discover:     openshell.Discover,
-		portPID:      loopbackPortPID,
-		procArgs:     processArgs,
+		stopSync: func(ctx context.Context, gateway string, out io.Writer) error {
+			return openshell.SyncGatewaySandboxes(ctx, openshell.DiscoverOptions{Gateway: gateway}, out)
+		},
+		portPID:  loopbackPortPID,
+		procArgs: processArgs,
 		accountProcs: func(ctx context.Context) (string, error) {
 			return runServiceCommand(ctx, "/bin/ps", []string{"-ww", "-u", strconv.Itoa(uid), "-o", "pid=,args="}, nil)
 		},
@@ -266,36 +300,52 @@ func (o *accountOpenShell) Drift(s sandboxrelay.DaemonSettings) ([]openshell.Set
 	e := s.Enterprise
 	compare := e.Install != config.EnterpriseOpenShellInstallSetup && e.GatewayConfigPath != ""
 	var want openshell.RenderedGateway
-	if compare {
+	var renderedDrift []openshell.SettingDrift
+	if e.GatewayConfigPath != "" {
+		// Both install modes run the administrator's rendered file (the
+		// managed unit's exec shim), so a hand edit of it is drift in setup
+		// mode too: reported, as status reports it, never a pause
+		// (blockingOpenShellDrift). Setup mode, whose gateway may also run
+		// the account's own install, does not fail on a render it cannot
+		// read (GAP-0730).
 		envPath := filepath.Join(filepath.Dir(e.GatewayConfigPath), openshell.GatewayEnvFile)
 		var digest string
 		var err error
-		if want, digest, err = o.readRendered(e.GatewayConfigPath, envPath); err != nil {
+		want, digest, err = o.readRendered(e.GatewayConfigPath, envPath)
+		switch {
+		case err != nil && compare:
 			return nil, err
-		}
-		if e.GatewayConfigDigest != "" && digest != e.GatewayConfigDigest {
-			// The lifecycle rendered again since the settings were read; the
-			// root-owned file is what counts.
-			o.logf("the rendered OpenShell gateway configuration changed since the managed settings were read")
+		case err == nil && e.GatewayConfigDigest != "" && digest != e.GatewayConfigDigest:
+			renderedDrift = []openshell.SettingDrift{{Field: renderedGatewayDriftField, Want: "installed render", Have: "changed"}}
 		}
 	}
 	if holder, held := o.portHolder(gatewayPort(s)); !held || holder != o.uid {
-		return nil, nil
+		return renderedDrift, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if o.managedUnitActive(ctx) {
-		return o.commandDrift(ctx, s), nil
+		return append(renderedDrift, o.commandDrift(ctx, s)...), nil
 	}
 	if !compare {
-		return nil, nil
+		return renderedDrift, nil
 	}
 	want = want.ForAccount(int64(o.uid), int64(o.gid))
 	have, err := o.readUser(o.goos)
 	if err != nil {
-		return []openshell.SettingDrift{{Field: "gateway configuration", Want: "readable", Have: "unreadable"}}, nil
+		return append(renderedDrift, openshell.SettingDrift{Field: renderedGatewayDriftField, Want: "readable", Have: "unreadable"}), nil
 	}
-	return tighterDrift(have.Drift(want), want), nil
+	return append(renderedDrift, tighterDrift(have.Drift(want), want)...), nil
+}
+
+func (o *accountOpenShell) RenderedConfigDrift(s sandboxrelay.DaemonSettings) bool {
+	e := s.Enterprise
+	if e.GatewayConfigPath == "" || e.GatewayConfigDigest == "" {
+		return false
+	}
+	envPath := filepath.Join(filepath.Dir(e.GatewayConfigPath), openshell.GatewayEnvFile)
+	_, digest, err := o.readRendered(e.GatewayConfigPath, envPath)
+	return err != nil || digest != e.GatewayConfigDigest
 }
 
 // commandDrift compares the command line of the gateway on the account's
@@ -555,12 +605,16 @@ func (o *accountOpenShell) ensureRunning(ctx context.Context, port int, cfg stri
 		if errors.As(err, &reloadErr) {
 			return true, openShellPrerequisiteError("your OpenShell gateway's LaunchAgent could not be reloaded; run `%s`", openShellGatewayRepairCommand)
 		}
-		return true, openShellPrerequisiteError("your OpenShell gateway could not be started (%s); "+
-			"`defenseclaw sandbox doctor` shows why", o.unitState(ctx))
+		// The unit's state stays in the log too (#1202, GAP-0419).
+		state := o.unitState(ctx)
+		o.logf("your OpenShell gateway could not be started: %s", state)
+		return true, openShellPrerequisiteError("your OpenShell gateway could not be started%s; "+
+			"`defenseclaw sandbox doctor` shows why", unitStateForPerson(state))
 	}
 	deadline := time.Now().Add(openShellGatewayStartWait)
 	healAt := time.Now().Add(openShellGatewayHealAfter)
 	healChecked := reloaded
+	restartAt, restarts := time.Now().Add(openShellGatewayRestartEvery), 0
 	for {
 		if holder, held := o.portHolder(port); held {
 			if holder == o.uid {
@@ -570,13 +624,28 @@ func (o *accountOpenShell) ensureRunning(ctx context.Context, port int, cfg stri
 			return true, accountBusyError()
 		}
 		if time.Now().After(deadline) {
-			return true, openShellPrerequisiteError("your OpenShell gateway did not start listening on 127.0.0.1:%d within %s (%s); "+
-				"`defenseclaw sandbox doctor` shows why", port, openShellGatewayStartWait, o.unitState(ctx))
+			// The address and the unit's state are for the log; the person
+			// reads a sentence (GAP-0419).
+			state := o.unitState(ctx)
+			o.logf("your OpenShell gateway did not start listening on 127.0.0.1:%d within %s (%s)", port, openShellGatewayStartWait, state)
+			return true, openShellPrerequisiteError("your OpenShell gateway did not start listening within %s%s; "+
+				"`defenseclaw sandbox doctor` shows why", openShellGatewayStartWait, unitStateForPerson(state))
+		}
+		if o.goos == "linux" && restarts < openShellGatewayRestarts && !time.Now().Before(restartAt) {
+			restartAt = time.Now().Add(openShellGatewayRestartEvery)
+			if o.unitStopped(ctx) {
+				restarts++
+				o.logf("your OpenShell gateway stopped before it listened (%s): starting it again", o.unitState(ctx))
+				if _, err := o.startUnit(ctx); err != nil {
+					o.logf("start your OpenShell gateway again: %v", err)
+				}
+			}
 		}
 		if o.goos == "darwin" && !healChecked && !time.Now().Before(healAt) {
 			healChecked = true
 			domain := o.launchDomain(ctx)
-			target := domain + "/" + openShellGatewayLabel
+			label, _ := openShellGatewayAgent()
+			target := domain + "/" + label
 			out, printErr := o.run(ctx, daemonLaunchctl, []string{"print", target}, nil)
 			if printErr == nil && openshell.ParseLaunchAgentState([]byte(out)).Failure(false) != "" {
 				if err := o.reloadLaunchAgent(ctx, domain); err != nil {
@@ -712,7 +781,8 @@ func (o *accountOpenShell) managedUnitActive(ctx context.Context) bool {
 		out, err := o.run(ctx, daemonSystemctl, []string{"--user", "is-active", openShellGatewayUnit}, userManagerEnv(o.uid))
 		return err == nil && strings.TrimSpace(out) == "active"
 	case "darwin":
-		out, err := o.run(ctx, daemonLaunchctl, []string{"print", o.launchDomain(ctx) + "/" + openShellGatewayLabel}, nil)
+		label, _ := openShellGatewayAgent()
+		out, err := o.run(ctx, daemonLaunchctl, []string{"print", o.launchDomain(ctx) + "/" + label}, nil)
 		return err == nil && strings.Contains(out, "state = running")
 	}
 	return false
@@ -731,10 +801,12 @@ func (o *accountOpenShell) Stop(ctx context.Context, s sandboxrelay.DaemonSettin
 	case "linux":
 		out, err = o.run(ctx, daemonSystemctl, []string{"--user", "stop", openShellGatewayUnit}, userManagerEnv(o.uid))
 	case "darwin":
-		target := o.launchDomain(ctx) + "/" + openShellGatewayLabel
+		label, _ := openShellGatewayAgent()
+		target := o.launchDomain(ctx) + "/" + label
 		if _, perr := o.run(ctx, daemonLaunchctl, []string{"print", target}, nil); perr != nil {
 			return false
 		}
+		o.syncBeforeStop(ctx, s)
 		out, err = o.run(ctx, daemonLaunchctl, []string{"kill", "SIGTERM", target}, nil)
 	default:
 		return false
@@ -747,6 +819,36 @@ func (o *accountOpenShell) Stop(ctx context.Context, s sandboxrelay.DaemonSettin
 	return true
 }
 
+// syncBeforeStop syncs the disk of every MicroVM the account's gateway lists
+// ready right before the macOS stop of its LaunchAgent (GAP-0380). The
+// daemon counted none a moment ago, but a raw openshell client can start one
+// in between, and the gateway's stop ends it with what its guest had not
+// synced. On Linux the managed unit's second ExecStop does this
+// (sandbox-daemon sync-sandboxes --managed); launchd runs no stop command.
+// A sandbox it could not sync is noted for the feed (stop_unflushed); the
+// stop goes ahead either way, as on Linux.
+func (o *accountOpenShell) syncBeforeStop(ctx context.Context, s sandboxrelay.DaemonSettings) {
+	if o.stopSync == nil {
+		return
+	}
+	sctx, cancel := context.WithTimeout(ctx, openshell.StopSyncTimeout)
+	defer cancel()
+	var out bytes.Buffer
+	err := o.stopSync(sctx, gatewayRegistrationName(s), &out)
+	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		if line != "" {
+			o.logf("%s", line)
+		}
+	}
+	names := openshell.UnsyncedSandboxes(err)
+	switch {
+	case len(names) > 0 && o.recordUnsynced != nil:
+		o.recordUnsynced(names)
+	case err != nil && len(names) == 0:
+		o.logf("sync the MicroVMs before the OpenShell gateway stops: %v", err)
+	}
+}
+
 // startUnit starts the account's OpenShell gateway unit.
 func (o *accountOpenShell) startUnit(ctx context.Context) (bool, error) {
 	switch o.goos {
@@ -755,10 +857,11 @@ func (o *accountOpenShell) startUnit(ctx context.Context) (bool, error) {
 		return false, commandError(daemonSystemctl+" --user start "+openShellGatewayUnit, out, err)
 	case "darwin":
 		domain := o.launchDomain(ctx)
-		target := domain + "/" + openShellGatewayLabel
+		label, plist := openShellGatewayAgent()
+		target := domain + "/" + label
 		printed, err := o.run(ctx, daemonLaunchctl, []string{"print", target}, nil)
 		if err != nil {
-			out, err := o.run(ctx, daemonLaunchctl, []string{"bootstrap", domain, openShellGatewayPlist}, nil)
+			out, err := o.run(ctx, daemonLaunchctl, []string{"bootstrap", domain, plist}, nil)
 			if err := commandError(daemonLaunchctl+" bootstrap "+domain, out, err); err != nil {
 				return false, err
 			}
@@ -781,11 +884,12 @@ func (e *openShellLaunchAgentReloadError) Error() string {
 func (e *openShellLaunchAgentReloadError) Unwrap() error { return e.err }
 
 func (o *accountOpenShell) reloadLaunchAgent(ctx context.Context, domain string) error {
-	target := domain + "/" + openShellGatewayLabel
+	label, plist := openShellGatewayAgent()
+	target := domain + "/" + label
 	if out, err := o.run(ctx, daemonLaunchctl, []string{"bootout", target}, nil); err != nil {
 		o.logf("boot out your OpenShell gateway LaunchAgent: %v: %s", err, firstOutputLine(out))
 	}
-	out, err := o.run(ctx, daemonLaunchctl, []string{"bootstrap", domain, openShellGatewayPlist}, nil)
+	out, err := o.run(ctx, daemonLaunchctl, []string{"bootstrap", domain, plist}, nil)
 	if err := commandError(daemonLaunchctl+" bootstrap "+domain, out, err); err != nil {
 		return &openShellLaunchAgentReloadError{err: err}
 	}
@@ -797,19 +901,50 @@ func (o *accountOpenShell) kickstartLaunchAgent(ctx context.Context, target stri
 	return commandError(daemonLaunchctl+" kickstart "+target, out, err)
 }
 
-// launchDomain is the launchd domain of the account's agents: the graphical
-// session when there is one, else the background session of an ssh login.
+// launchDomain is the launchd domain of the account's OpenShell gateway
+// agent (openshell.LaunchDomain): the one its job is loaded in, else the
+// graphical session when there is one, else the background session of an
+// ssh login.
 func (o *accountOpenShell) launchDomain(ctx context.Context) string {
-	gui := "gui/" + strconv.Itoa(o.uid)
-	if _, err := o.run(ctx, daemonLaunchctl, []string{"print", gui}, nil); err == nil {
-		return gui
-	}
-	return "user/" + strconv.Itoa(o.uid)
+	label, _ := openShellGatewayAgent()
+	domain, _ := openshell.LaunchDomain(o.uid, openshell.GatewayAgentBase, label, func(domain string) (string, error) {
+		return o.run(ctx, daemonLaunchctl, []string{"print", domain}, nil)
+	})
+	return domain
 }
 
-var launchdLastExit = regexp.MustCompile(`last exit code = (\d+)`)
+var launchdLastExit = lazyregexp.New(`last exit code = (\d+)`)
 
 // unitState says what the gateway unit is doing, for a start that timed out.
+// unitStateForPerson is unitState as the person reads it, in parentheses:
+// the sentences they can act on (the unit is missing, a prerequisite of the
+// account is missing). The service manager's raw states (active and sub
+// state, exit status, unknown) are for the log only (GAP-0419, #1202).
+func unitStateForPerson(state string) string {
+	if strings.HasPrefix(state, "its service unit was not found") || strings.HasPrefix(state, "it exited 78") {
+		return " (" + state + ")"
+	}
+	return ""
+}
+
+// unitStopped reports whether the account's gateway unit is inactive or
+// failed (Linux), but not for the exec shim's exit 78 (a missing
+// prerequisite, which another start does not fix).
+func (o *accountOpenShell) unitStopped(ctx context.Context) bool {
+	out, err := o.run(ctx, daemonSystemctl, []string{"--user", "show", "-p", "ActiveState", "-p", "ExecMainStatus", openShellGatewayUnit}, userManagerEnv(o.uid))
+	if err != nil {
+		return false
+	}
+	fields := map[string]string{}
+	for _, line := range strings.Split(out, "\n") {
+		if k, v, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
+			fields[k] = v
+		}
+	}
+	state := fields["ActiveState"]
+	return (state == "inactive" || state == "failed") && fields["ExecMainStatus"] != strconv.Itoa(78)
+}
+
 // Exit status 78 is the exec shim's: a prerequisite of the account is missing.
 func (o *accountOpenShell) unitState(ctx context.Context) string {
 	status := ""
@@ -836,7 +971,8 @@ func (o *accountOpenShell) unitState(ctx context.Context) string {
 			return fmt.Sprintf("the unit is %s/%s, last exit status %s", fields["ActiveState"], fields["SubState"], firstNonEmptyString(status, "none"))
 		}
 	case "darwin":
-		out, err := o.run(ctx, daemonLaunchctl, []string{"print", o.launchDomain(ctx) + "/" + openShellGatewayLabel}, nil)
+		label, _ := openShellGatewayAgent()
+		out, err := o.run(ctx, daemonLaunchctl, []string{"print", o.launchDomain(ctx) + "/" + label}, nil)
 		if err != nil {
 			return "its state is unknown"
 		}
@@ -871,15 +1007,31 @@ func registrationPortOf(reg *openshell.Registration) int {
 // accepts connections but has no listener this process can see (macOS lsof
 // lists only this account's processes) is another account's (-1).
 func loopbackPortHolder(port int) (int, bool) {
-	holder, err := daemon.FindPortHolder("127.0.0.1", port)
+	return portHolderSeen(port, daemon.FindPortHolder, func(addr string) (net.Conn, error) {
+		return net.DialTimeout("tcp", addr, time.Second)
+	})
+}
+
+// portHolderSeen is loopbackPortHolder with its lookup and dial. The
+// listener is looked up again after a dial that connected: the account's
+// own gateway that starts listening between the first lookup and the dial
+// (the daemon polls the port while the gateway it just started binds it)
+// is then seen as the account's, not as another account's (r103 GAP-0038:
+// a fresh run after kept sandboxes was refused as "another account is
+// using them" the moment its own gateway came up).
+func portHolderSeen(port int, find func(string, int) (daemon.PortHolder, error), dial func(string) (net.Conn, error)) (int, bool) {
+	holder, err := find("127.0.0.1", port)
 	if err == nil && holder.UID >= 0 {
 		return holder.UID, true
 	}
-	conn, derr := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second)
+	conn, derr := dial(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 	if derr != nil {
 		return 0, false
 	}
 	_ = conn.Close()
+	if holder, err := find("127.0.0.1", port); err == nil && holder.UID >= 0 {
+		return holder.UID, true
+	}
 	return -1, true
 }
 
@@ -957,7 +1109,7 @@ func firstOutputLine(s string) string {
 
 // driftFieldInvalid is what an event's settings field may not hold
 // (defenseclaw.openshell.settings.field is ^[a-z][a-z0-9_.]{0,63}$).
-var driftFieldInvalid = regexp.MustCompile(`[^a-z0-9_.]+`)
+var driftFieldInvalid = lazyregexp.New(`[^a-z0-9_.]+`)
 
 // driftEventField is a drift's field as the settings_drift record names it:
 // "gateway listener" is gateway_listener.
@@ -996,10 +1148,26 @@ func (d *SandboxDaemon) readyOpenShell(ctx context.Context, s sandboxrelay.Daemo
 			d.logf("OpenShell settings drift: %s", item)
 		}
 		d.reportDrift(ctx, registration, drift)
+		drift = blockingOpenShellDrift(drift)
+	}
+	if len(drift) > 0 {
 		return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Status: http.StatusServiceUnavailable,
 			Message: sandboxapi.SettingsDrift(driftFields(drift)), Detail: sandboxrelay.EventSettingsDrift}
 	}
 	return d.prepareOpenShell(ctx, s)
+}
+
+// A changed rendered file is reported to the organization, while a user
+// sandbox keeps its prior create/start behavior until the administrator
+// repairs that file. Other setting differences retain their existing pause.
+func blockingOpenShellDrift(drift []openshell.SettingDrift) []openshell.SettingDrift {
+	var blocking []openshell.SettingDrift
+	for _, item := range drift {
+		if item.Field != renderedGatewayDriftField || item.Have != "changed" {
+			blocking = append(blocking, item)
+		}
+	}
+	return blocking
 }
 
 // prepareOpenShell starts and registers the account's OpenShell gateway
@@ -1054,7 +1222,7 @@ func (d *SandboxDaemon) keepOpenShellLocked(ctx context.Context) {
 	if uid, held := d.openShell.PortHolder(s); !held || uid != d.uid {
 		return
 	}
-	if drift, err := d.openShell.Drift(s); err != nil || len(drift) > 0 {
+	if drift, err := d.openShell.Drift(s); err != nil || len(blockingOpenShellDrift(drift)) > 0 {
 		return
 	}
 	if _, err := d.openShell.Prepare(ctx, s); err != nil {
@@ -1066,8 +1234,9 @@ func (d *SandboxDaemon) keepOpenShellLocked(ctx context.Context) {
 // sandbox of the account runs and openShellGatewayLinger has passed since
 // the daemon last readied it, so the one gateway port is free for the next
 // account at once, not when the daemon idles out after 30 minutes
-// (GAP-0465). The caller holds the lifecycle.
-func (d *SandboxDaemon) stopIdleOpenShellLocked(ctx context.Context) {
+// (GAP-0465). handover says a stop or delete of the account's last sandbox
+// asks (handoverOpenShell). The caller holds the lifecycle.
+func (d *SandboxDaemon) stopIdleOpenShellLocked(ctx context.Context, handover bool) {
 	if since := time.Since(time.Unix(0, d.openShellUsed.Load())); since < openShellGatewayLinger {
 		d.scheduleCheck(openShellGatewayLinger - since + time.Second)
 		return
@@ -1082,15 +1251,53 @@ func (d *SandboxDaemon) stopIdleOpenShellLocked(ctx context.Context) {
 		// are stopped and recorded for the managed gateway under the
 		// organization's foreign_sandboxes policy. Stopped at once, a raw
 		// sandbox went to error with its gateway and no foreign_sandbox
-		// record reached the administrator (GAP-0263). One the policy leaves
-		// running (alert) keeps its gateway.
+		// record reached the administrator (GAP-0263).
+		// The person's foreign_sandboxes in the managed settings decides
+		// while no registration names a floor (GAP-0058): read them again
+		// when they are stale.
+		d.refreshStaleSettings(ctx)
 		sweep, cancel := context.WithTimeout(ctx, foreignSweepTimeout)
-		err := d.rt.manager.Reconcile(sweep)
+		running, err := d.sweepForeign(sweep)
 		cancel()
 		switch {
+		case err != nil && !sandboxapi.IsCode(err, sandboxapi.CodeUnavailable):
+			// The gateway answered, but its sandboxes could not be read:
+			// nothing proves that none of the account's runs, so it is kept,
+			// and looked at again soon.
+			d.logf("check the OpenShell gateway for sandboxes before stopping it: %v; it keeps running", err)
+			d.scheduleCheck(foreignRecheckEvery)
+			return
 		case err != nil:
-			d.logf("check the OpenShell gateway for foreign sandboxes before stopping it: %v", err)
-		case d.rt.manager.ForeignSandboxesRunning():
+			// DefenseClaw cannot connect to it (Unavailable), and its
+			// port is this account's (PortHolder): a gateway whose
+			// registration or certificates broke still runs its MicroVMs,
+			// which the stop would end with no flush. Only the account's
+			// processes tell that none runs.
+			if n, verr := d.microVMs(ctx); verr != nil || n > 0 {
+				d.logf("the OpenShell gateway does not answer (%v) and %s; it keeps running", err, microVMsHeld(n, verr))
+				d.scheduleCheck(foreignRecheckEvery)
+				return
+			}
+		case !running:
+		case handover:
+			// One the policy leaves running (alert) does not hold the one
+			// gateway port against the next account once the person's last
+			// sandbox ended: it was recorded above and stops with the
+			// gateway, so the hand-over still ends within the sweep's bound
+			// (GAP-0237).
+			d.logf("the last sandbox ended: stopping the OpenShell gateway with the sandboxes DefenseClaw did not start on it")
+		default:
+			// Otherwise it keeps its gateway while it runs; look again soon,
+			// so the port is free shortly after it ends (GAP-0237).
+			d.scheduleCheck(foreignRecheckEvery)
+			return
+		}
+		// The sweep read the gateway's sandboxes afresh, right before the
+		// stop: one of the account's that OpenShell does not report stopped
+		// (started since the count, by another OpenShell client) keeps it
+		// (manager.HoldsCompute).
+		if n, err := d.runningSandboxes(ctx); err != nil || n > 0 {
+			d.scheduleCheck(foreignRecheckEvery)
 			return
 		}
 	}
@@ -1099,9 +1306,51 @@ func (d *SandboxDaemon) stopIdleOpenShellLocked(ctx context.Context) {
 	}
 }
 
+// sweepForeign reconciles the account's gateway, which stops or reports
+// the foreign sandboxes on it under foreign_sandboxes, and reports whether
+// the policy leaves one running there.
+func (d *SandboxDaemon) sweepForeign(ctx context.Context) (bool, error) {
+	if d.opts.sweepForeign != nil {
+		return d.opts.sweepForeign(ctx)
+	}
+	if err := d.rt.manager.Reconcile(ctx); err != nil {
+		return false, err
+	}
+	return d.rt.manager.ForeignSandboxesRunning(), nil
+}
+
+// handoverOpenShell releases the shared gateway port before a successful
+// stop or delete returns. A preflight still gets its linger; completed
+// lifecycle work does not keep the previous account's idle gateway alive.
+func (d *SandboxDaemon) handoverOpenShell(ctx context.Context) {
+	if d.stops.Load() != 1 {
+		d.openShellUsed.Store(0)
+		return // another stop or delete still uses the gateway
+	}
+	check, cancel := context.WithTimeout(context.WithoutCancel(ctx), foreignSweepTimeout+15*time.Second)
+	defer cancel()
+	if err := d.lockLifecycle(check); err != nil {
+		d.openShellUsed.Store(0)
+		d.scheduleCheck(time.Second)
+		return
+	}
+	defer d.unlockLifecycle()
+	n, err := d.runningSandboxes(check)
+	if err != nil || n != 0 {
+		return
+	}
+	d.releaseListeners()
+	d.openShellUsed.Store(0)
+	d.stopIdleOpenShellLocked(check, true)
+}
+
 // foreignSweepTimeout bounds the foreign-sandbox sweep before an idle
 // gateway stops.
 const foreignSweepTimeout = 30 * time.Second
+
+// foreignRecheckEvery is how often an idle gateway that a foreign sandbox
+// keeps is looked at again (stopIdleOpenShellLocked). A variable for tests.
+var foreignRecheckEvery = 15 * time.Second
 
 // accountBusyReportEvery paces the account-busy reports: a client that retries
 // in a loop sends at most one batch per interval, which carries every refusal
@@ -1228,13 +1477,39 @@ func (d *SandboxDaemon) reportDrift(ctx context.Context, registration string, dr
 }
 
 // stopOpenShellIfIdle stops the account's managed gateway when the daemon
-// exits with no sandbox of the account running.
+// exits with no sandbox of the account that holds it (manager.HoldsCompute)
+// and no MicroVM running as the account (microVMs: one made with
+// OpenShell's own CLI, or one on a gateway DefenseClaw can no longer
+// read), which the stop would end with no flush. It counts them right
+// before the stop, holding the lifecycle, so no create or start of the
+// daemon's comes between; one it cannot take within the bound keeps the
+// gateway.
 func (d *SandboxDaemon) stopOpenShellIfIdle() {
 	s := d.currentSettings()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	if err := d.lockLifecycle(ctx); err != nil {
+		return
+	}
+	defer d.unlockLifecycle()
 	if n, err := d.runningSandboxes(ctx); err != nil || n > 0 {
 		return
 	}
+	if n, err := d.microVMs(ctx); err != nil || n > 0 {
+		d.logf("the OpenShell gateway keeps running: %s", microVMsHeld(n, err))
+		return
+	}
 	d.openShell.Stop(ctx, s)
+}
+
+// microVMsHeld says why the account's MicroVMs keep its gateway (microVMs
+// counted n, or failed with err).
+func microVMsHeld(n int, err error) string {
+	if err != nil {
+		return "the MicroVMs of this account could not be counted (" + err.Error() + ")"
+	}
+	if n == 1 {
+		return "1 MicroVM runs as this account, which the stop would end with no flush"
+	}
+	return strconv.Itoa(n) + " MicroVMs run as this account, which the stop would end with no flush"
 }

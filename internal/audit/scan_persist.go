@@ -11,8 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
-
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -36,8 +35,8 @@ INSERT INTO scan_results (
   verdict, exit_code, error,
   schema_version, content_hash, generation, binary_version,
   agent_id, agent_instance_id, sidecar_instance_id, session_id, request_id, trace_id,
-  evaluation_id
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  evaluation_id, retention_timestamp_unix_nano
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.ScanID,
 		p.Scanner,
 		p.Target,
@@ -49,7 +48,7 @@ INSERT INTO scan_results (
 		nullStr(runID),
 		nullStr(p.Verdict),
 		p.ExitCode,
-		nullStr(p.ScanError),
+		nullStr(scanner.ScanErrorForAudit(p.ScanError)),
 		nullInt(p.SchemaVersion),
 		nullStr(p.ContentHash),
 		nullUint64(p.Generation),
@@ -61,6 +60,7 @@ INSERT INTO scan_results (
 		nullStr(p.RequestID),
 		nullStr(p.TraceID),
 		nullStr(p.EvaluationID),
+		retentionInstantOf(ts),
 	)
 	if err != nil {
 		return fmt.Errorf("audit: insert scan summary: %w", err)
@@ -114,7 +114,7 @@ func insertScanFindings(ex dbExecer, scanID, target string, findings []scanner.F
 
 		id := f.FindingOccurrenceID
 		if id == "" {
-			id = uuid.New().String()
+			id = observability.NewTimeOrderedID()
 			f.FindingOccurrenceID = id
 		}
 		_, err := ex.Exec(`
@@ -299,12 +299,19 @@ func (s *Store) ListRecentFindingsInSession(
 	if maxInt := int(^uint(0) >> 1); limit <= maxInt/correlationCandidateMultiplier {
 		candidateLimit = limit * correlationCandidateMultiplier
 	}
+	instant := "julianday(timestamp)"
+	if s.findingsRetentionInstant.Load() {
+		instant = "retention_timestamp_unix_nano"
+	} else if ok, err := hasColumnDB(s.db, "scan_findings", "retention_timestamp_unix_nano"); err == nil && ok {
+		s.findingsRetentionInstant.Store(true)
+		instant = "retention_timestamp_unix_nano"
+	}
 	query := fmt.Sprintf(`
 WITH eligible AS (
 	SELECT id, COALESCE(agent_id, '') AS agent_id,
 	       COALESCE(agent_instance_id, '') AS agent_instance_id,
 	       scanner, rule_id, category, severity, tags,
-	       data_axis, tool_capability_class, content_fingerprint, external_endpoint, turn_id, timestamp
+	       data_axis, tool_capability_class, content_fingerprint, external_endpoint, turn_id, timestamp, rowid AS dc_rowid, %s AS dc_instant
 	FROM scan_findings
 	WHERE %s
 		AND COALESCE(scanner, '') <> ? COLLATE NOCASE
@@ -319,7 +326,7 @@ WITH eligible AS (
 			) AS finding_tag
 			WHERE LOWER(TRIM(CAST(finding_tag.value AS TEXT))) = ?
 		)
-	ORDER BY timestamp DESC, id DESC
+	ORDER BY dc_instant DESC, dc_rowid DESC
 	LIMIT ?
 ), ranked AS (
 	SELECT eligible.*,
@@ -329,7 +336,7 @@ WITH eligible AS (
 				CASE WHEN TRIM(COALESCE(content_fingerprint, '')) = '' THEN '' ELSE LOWER(TRIM(COALESCE(rule_id, ''))) END,
 				CASE WHEN TRIM(COALESCE(content_fingerprint, '')) = '' THEN '' ELSE LOWER(TRIM(COALESCE(category, ''))) END,
 				CASE WHEN TRIM(COALESCE(content_fingerprint, '')) = '' THEN '' ELSE LOWER(TRIM(content_fingerprint)) END
-			ORDER BY timestamp ASC, id ASC
+			ORDER BY dc_instant ASC, dc_rowid ASC
 	       ) AS primitive_rank
 	FROM eligible
 )
@@ -337,8 +344,8 @@ SELECT id, agent_id, agent_instance_id, scanner, rule_id, category, severity, ta
        data_axis, tool_capability_class, content_fingerprint, external_endpoint, turn_id, timestamp
 FROM ranked
 WHERE primitive_rank = 1
-ORDER BY timestamp DESC, id DESC
-	LIMIT ?`, identityWhere)
+ORDER BY dc_instant DESC, dc_rowid DESC
+	LIMIT ?`, instant, identityWhere)
 	queryArgs := append([]any(nil), identityArgs...)
 	queryArgs = append(queryArgs, "correlator", strings.ToLower(scanner.FindingTagDetectionOnly), candidateLimit, limit)
 	rows, err := s.db.Query(query, queryArgs...)

@@ -100,7 +100,7 @@ func TestWindowsManagedSetupSelectionCreatesMissingDataDir(t *testing.T) {
 			dataDir: filepath.Join(home, ".defenseclaw"),
 			sid:     target,
 			conn:    connector.NewHermesConnector(),
-			setup:   connector.SetupOpts{AgentExecutable: executable, AgentVersion: "0.20.0"},
+			setup:   connector.SetupOpts{AgentExecutable: executable, AgentVersion: "0.21.5"},
 		}
 	}
 	record := func(selection windowsGenericManagedTarget) (created bool, err error) {
@@ -259,15 +259,19 @@ func setWindowsTestPathExactOwner(
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := windows.SetNamedSecurityInfo(
-			extended,
-			windows.SE_FILE_OBJECT,
-			windows.OWNER_SECURITY_INFORMATION,
-			target,
-			nil,
-			nil,
-			nil,
-		); err != nil {
+		// Another account as owner needs SeRestorePrivilege, which an
+		// elevated token holds disabled (a GitHub runner's does).
+		if err := RunWithWindowsAdministratorOwnerRestorePrivilege(func() error {
+			return windows.SetNamedSecurityInfo(
+				extended,
+				windows.SE_FILE_OBJECT,
+				windows.OWNER_SECURITY_INFORMATION,
+				target,
+				nil,
+				nil,
+				nil,
+			)
+		}); err != nil {
 			t.Fatalf("assign exact test path owner on %s: %v", path, err)
 		}
 	}

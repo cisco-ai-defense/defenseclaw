@@ -28,6 +28,12 @@ func connectionRefused(err error) bool {
 	return errors.Is(err, syscall.ECONNREFUSED)
 }
 
+// connectionReset reports a connection the peer closed under a request, as
+// a gateway that exits does.
+func connectionReset(err error) bool {
+	return errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE)
+}
+
 // hookDialTimeout bounds the connect to the gateway. A refused loopback
 // connect fails at once here (see the Windows variant).
 const hookDialTimeout = 2 * time.Second

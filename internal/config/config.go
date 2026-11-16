@@ -19,14 +19,18 @@ package config
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -35,6 +39,7 @@ import (
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -78,7 +83,7 @@ const (
 	// Connector.Name() in internal/gateway/connector and with the
 	// `defenseclaw.claw.mode` enum in schemas/otel/resource.schema.json):
 	// "zeptoclaw", "claudecode", "codex", "hermes", "cursor",
-	// "devin", "copilot", "openhands", "antigravity". Constants for those modes
+	// "devin", "copilot", "antigravity". Constants for those modes
 	// are intentionally not introduced here yet — they're used as
 	// raw strings by Config.activeConnector() (see internal/config/
 	// claw.go) which dispatches to per-connector readers. Promoting
@@ -260,6 +265,22 @@ type ACPBinding struct {
 	Profile string `mapstructure:"profile" yaml:"profile,omitempty"`
 }
 
+// AllowListRefusals says which allow-list of the profile named name leaves
+// out the pair, by the gateway's rule: an empty allowed_clients or
+// allowed_agents admits every client or agent. The gateway refuses such a
+// pair ("outside the selected profile"); enterprise acp verify and list say
+// so with the same rule, they used to stay green (GAP-1155).
+func (p ACPProfile) AllowListRefusals(name, client, agent string) []string {
+	var refusals []string
+	if len(p.AllowedClients) > 0 && !slices.Contains(p.AllowedClients, client) {
+		refusals = append(refusals, fmt.Sprintf("acp.profiles.%s.allowed_clients does not name %s", name, client))
+	}
+	if len(p.AllowedAgents) > 0 && !slices.Contains(p.AllowedAgents, agent) {
+		refusals = append(refusals, fmt.Sprintf("acp.profiles.%s.allowed_agents does not name %s", name, agent))
+	}
+	return refusals
+}
+
 type ACPProfile struct {
 	Mode           string   `mapstructure:"mode" yaml:"mode,omitempty" json:"mode,omitempty"`
 	FailMode       string   `mapstructure:"fail_mode" yaml:"fail_mode,omitempty" json:"fail_mode,omitempty"`
@@ -286,6 +307,17 @@ type Config struct {
 	// (standaloneOpenShellPackDirDefault). Set only by the loader.
 	openShellPackDirDeclared bool
 	legacyOpenShellPackDir   string
+	// offlineInspection never probes a signer's filesystem for a device default.
+	offlineInspection bool
+	// openClawNotInstalled records that an implied OpenClaw has no local
+	// installation or remote fleet host, so HasConnectorConfigured reports no
+	// connector (GAP-0568). Set only by the loader, on a device load outside
+	// a managed enterprise service.
+	openClawNotInstalled bool
+	// offlineVendorPolicyDir and offlineVendorPolicyRoot redirect rule packs
+	// under the target layout's shipped policy folder to a private copy of
+	// the policies this binary embeds (UseOfflineVendorPolicies).
+	offlineVendorPolicyDir, offlineVendorPolicyRoot string
 	// legacyConnectorRouteSelectors names the observability route selectors
 	// that list a retired connector ID, for the migration notice.
 	legacyConnectorRouteSelectors []string
@@ -326,6 +358,12 @@ type Config struct {
 	// the input custom-providers.json is derived from. Decoded from the
 	// source bytes, not viper, so map keys keep their case.
 	LLMProviders LLMProvidersConfig `mapstructure:"-" yaml:"llm_providers,omitempty"`
+
+	// DecisionModel is the unified decision model (System One protocol):
+	// the guardrail's fast first pass in front of the LLM judge on tool
+	// calls, and the skill scanner's advisory score. Off by default. See
+	// decision_model.go.
+	DecisionModel DecisionModelConfig `mapstructure:"decision_model" yaml:"decision_model,omitempty"`
 
 	DataDir string `mapstructure:"data_dir"              yaml:"data_dir"`
 	AuditDB string `mapstructure:"audit_db"         yaml:"audit_db"`
@@ -390,6 +428,9 @@ type Config struct {
 	// Update holds the self-update settings (config_version 9).
 	Update UpdateConfig `mapstructure:"update" yaml:"update,omitempty"`
 	Fleet  FleetConfig  `mapstructure:"fleet"            yaml:"fleet,omitempty"`
+	// Connectors holds settings of connectors that install nothing into an
+	// agent, such as the agent-gateway hook route (trusted_connectors.go).
+	Connectors ConnectorsConfig `mapstructure:"connectors" yaml:"connectors,omitempty"`
 }
 
 // RoutingConfig mirrors routing.RoutingConfig for config.yaml parsing.
@@ -1047,7 +1088,27 @@ func (l LLMConfig) ProviderPrefix() string {
 	if idx := strings.Index(l.Model, "/"); idx > 0 {
 		return strings.ToLower(l.Model[:idx])
 	}
+	if IsBedrockModelID(l.Model) {
+		return "bedrock"
+	}
 	return ""
+}
+
+// bedrockModelIDPattern matches Amazon Bedrock model ids and cross-region
+// inference profile ids: "<vendor>.<model>" or "<geo>.<vendor>.<model>", for
+// example "anthropic.claude-haiku-4-5-20251001-v1:0",
+// "us.anthropic.claude-haiku-4-5-20251001-v1:0", "us.openai.gpt-5.6-luna" or
+// "amazon.nova-pro-v1:0". Ids of the other providers never start with a
+// vendor name and a dot ("gpt-4o", "claude-haiku-4-5", "gemini-2.5-pro").
+// Mirrors BEDROCK_MODEL_ID_RE in cli/defenseclaw/config.py.
+var bedrockModelIDPattern = regexp.MustCompile(`^(?:(?:us|eu|apac|jp|au|ca|global|us-gov)\.)?(?:anthropic|amazon|meta|mistral|cohere|ai21|openai|deepseek|qwen|writer|twelvelabs|stability|luma|google|nvidia|minimax|moonshot|moonshotai)\.[a-z0-9]`)
+
+// IsBedrockModelID reports whether model, written without a provider
+// prefix, is a Bedrock model or inference profile id. An unprefixed Bedrock
+// id then resolves to the bedrock provider everywhere (gateway judge,
+// scanners, credential injection) instead of to no provider (GAP-2640).
+func IsBedrockModelID(model string) bool {
+	return bedrockModelIDPattern.MatchString(strings.ToLower(strings.TrimSpace(model)))
 }
 
 // IsLocalProvider returns true when the resolved provider prefix points
@@ -1152,12 +1213,21 @@ var recognizedLLMProviders = map[string]struct{}{
 // warnedPrefixes keeps one-shot-per-process warning state.
 var warnedPrefixes = map[string]struct{}{}
 
-func maybeWarnUnknownProvider(prefix, componentPath string) {
+func maybeWarnUnknownProvider(prefix, componentPath, instanceName string) {
 	if prefix == "" {
 		return
 	}
 	if _, ok := recognizedLLMProviders[prefix]; ok {
 		return
+	}
+	// "custom" with a bound instance routes through its llm_providers.custom
+	// entry, so it is not an unknown prefix (GAP-2234). Without an instance it
+	// still warns: nothing tells the gateway where to send the call.
+	if prefix == "custom" && strings.TrimSpace(instanceName) != "" {
+		return
+	}
+	if componentPath == "" {
+		componentPath = "llm"
 	}
 	key := componentPath + "\x00" + prefix
 	if _, seen := warnedPrefixes[key]; seen {
@@ -1217,6 +1287,14 @@ func (c *Config) ResolveLLM(path string) LLMConfig {
 		out.Model = override.Model
 	}
 	if override.Provider != "" {
+		// A role naming another provider and no instance of its own does
+		// not inherit the custom instance binding (GAP-2379); the CLI's
+		// Config.resolve_llm applies the same rule.
+		roleProvider := strings.ToLower(strings.TrimSpace(override.Provider))
+		if override.InstanceName == "" && roleProvider != "custom" &&
+			roleProvider != strings.ToLower(strings.TrimSpace(out.Provider)) {
+			out.InstanceName = ""
+		}
 		out.Provider = override.Provider
 	}
 	if override.APIKey != "" {
@@ -1273,8 +1351,52 @@ func (c *Config) ResolveLLM(path string) LLMConfig {
 		out.protectedCredentialRequired = true
 	}
 
-	maybeWarnUnknownProvider(out.ProviderPrefix(), path)
+	c.applyLLMInstance(&out)
+	maybeWarnUnknownProvider(out.ProviderPrefix(), path, out.InstanceName)
 	return out
+}
+
+// applyLLMInstance fills the blanks of a resolved role from the
+// llm_providers.custom entry its instance_name binds, as the gateway
+// provider merge and the Python resolver (_apply_instance_overlay) do:
+// provider "custom" (what `setup llm --provider custom --instance-name`
+// saves) or no provider takes the instance's base_provider_type, and an
+// unset base_url or bedrock/vertex/azure sub-block comes from the
+// instance. Explicit role values win. Every Go caller of ResolveLLM,
+// the watcher and hook scanners included, so sees the instance's family
+// and routing instead of "custom/<model>" (GAP-2396). An instance_name
+// that names no entry is left as is (the gateway reports it).
+func (c *Config) applyLLMInstance(out *LLMConfig) {
+	name := strings.ToLower(strings.TrimSpace(out.InstanceName))
+	if name == "" {
+		return
+	}
+	for i := range c.LLMProviders.Custom {
+		inst := &c.LLMProviders.Custom[i]
+		if strings.ToLower(strings.TrimSpace(inst.Name)) != name {
+			continue
+		}
+		provider := strings.ToLower(strings.TrimSpace(out.Provider))
+		if base := strings.ToLower(strings.TrimSpace(inst.BaseProviderType)); base != "" && (provider == "" || provider == "custom") {
+			out.Provider = base
+		}
+		if strings.TrimSpace(out.BaseURL) == "" && strings.TrimSpace(inst.BaseURL) != "" {
+			out.BaseURL = inst.BaseURL
+		}
+		if out.Bedrock == nil && inst.Bedrock != nil {
+			b := *inst.Bedrock
+			out.Bedrock = &b
+		}
+		if out.Vertex == nil && inst.Vertex != nil {
+			v := *inst.Vertex
+			out.Vertex = &v
+		}
+		if out.Azure == nil && inst.Azure != nil {
+			a := *inst.Azure
+			out.Azure = &a
+		}
+		return
+	}
 }
 
 type FirewallConfig struct {
@@ -1340,12 +1462,17 @@ func (c *WebhookConfig) ResolvedSecret() string {
 //   - GuardrailConfig.HookFailMode (yaml: guardrail.hook_fail_mode)
 //     is the SHELL-side fail-mode baked into the generated hook
 //     templates (codex-hook.sh, claude-code-hook.sh, inspect-*).
-//     It governs what those scripts do when delivery, authentication,
-//     or the gateway response fails (connection/timeout/5xx, missing
-//     token, 4xx, malformed JSON, or no `action` field). "open"
-//     allows and logs; "closed" blocks where the connector exposes a
-//     block response. DEFENSECLAW_STRICT_AVAILABILITY=1 additionally
-//     forces transport and missing-token failures closed.
+//     On a managed install it is the administrator's outage mode: "open"
+//     allows, logs and warns for a confirmed gateway outage (the gateway
+//     not running or not accepting connections); "closed" (the default)
+//     blocks where the connector exposes a block response. A per-user
+//     install's outage mode follows its policy tier instead
+//     (HookOutageFailMode). Outside Secure Client any HTTP status,
+//     malformed or incomplete answer, or missing answer at the hook
+//     deadline blocks in every mode and tier. Secure Client keeps its
+//     separate fail-mode contract.
+//     DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces transport and
+//     missing-token failures closed.
 //
 //   - AgentHookConfig.FailMode (yaml: <connector>.fail_mode below)
 //     is a per-connector POLICY-LAYER hint that downstream
@@ -1355,9 +1482,8 @@ func (c *WebhookConfig) ResolvedSecret() string {
 //     compatibility with installs that wrote it before
 //     hook_fail_mode existed.
 //
-// Operators who want to change the runtime behavior of the
-// generated hooks should edit guardrail.hook_fail_mode (or run
-// `defenseclaw guardrail fail-mode`), NOT this field.
+// A managed administrator can select an outage mode through
+// guardrail.hook_fail_mode. This field never changes hook availability.
 type AgentHookConfig struct {
 	Enabled                      bool     `mapstructure:"enabled"                         yaml:"enabled"`
 	Mode                         string   `mapstructure:"mode"                            yaml:"mode,omitempty"`
@@ -1479,6 +1605,21 @@ type MCPScannerConfig struct {
 	// JudgeSource is "inherit" (top-level llm:) or "override" (LLM above).
 	JudgeSource string               `mapstructure:"judge_source" yaml:"judge_source,omitempty"`
 	YARA        MCPScannerYARAConfig `mapstructure:"yara"         yaml:"yara,omitempty"`
+	// UnverifiedServer is what `defenseclaw mcp set` and the gateway's
+	// install admission do with a server they could not verify (its scan did
+	// not finish): "warn" adds or keeps it with a warning and an audit record,
+	// "block" refuses it. Unset is "warn" in the balanced preset.
+	UnverifiedServer string `mapstructure:"unverified_server" yaml:"unverified_server,omitempty"`
+}
+
+// MCPUnverifiedServerBlocks reports whether an MCP server whose scan did not
+// finish is refused: scanners.mcp_scanner.unverified_server is block.
+// It reads the setting as the CLI's mcp set does (GAP-1195).
+func (c *Config) MCPUnverifiedServerBlocks() bool {
+	if c == nil {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(c.Scanners.MCPScanner.UnverifiedServer), "block")
 }
 
 // AnalyzersArg renders EffectiveAnalyzers as the scanner's comma-separated
@@ -1664,6 +1805,11 @@ type GuardrailConfig struct {
 	CiscoTrustLevel string      `mapstructure:"cisco_trust_level" yaml:"cisco_trust_level,omitempty"`
 	Judge           JudgeConfig `mapstructure:"judge"                yaml:"judge"`
 	HILT            HILTConfig  `mapstructure:"hilt"                 yaml:"hilt"`
+	// InternalDomains are the organization's own domains (corp.example.com):
+	// a host equal to or under one is inside its network, so a download
+	// from it does not start chain.download_then_execute_same_artifact
+	// (#1390). Empty by default. Read through IsInternalDomainHost.
+	InternalDomains []string `mapstructure:"internal_domains" yaml:"internal_domains,omitempty"`
 
 	// BlockAt and AlertAt replace the block and alert levels the rule
 	// pack's profile implies (strict / default / permissive) when the
@@ -1745,9 +1891,12 @@ type GuardrailConfig struct {
 	//     the event with a stderr warning and an entry in
 	//     $DEFENSECLAW_HOME/logs/hook-failures.jsonl.
 	//
-	//   - "closed" (fresh-install default): the same failures BLOCK where
-	//     the connector/event exposes a blocking response. Migrated legacy
-	//     configs can retain an explicit "open".
+	//   - "closed" (per-user and managed-host default): the same failures
+	//     BLOCK where the connector/event exposes a blocking response.
+	//
+	// Only an administrator-managed host can choose open for an outage.
+	// Per-user hosts resolve closed even if a migrated file contains open.
+	// Secure Client defaults open when unset (#1163).
 	//
 	// DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces transport and
 	// missing-token failures closed. See
@@ -1811,6 +1960,15 @@ type GuardrailConfig struct {
 	ProfileAssignments []ProfileAssignment         `mapstructure:"profile_assignments" yaml:"profile_assignments,omitempty"`
 	DefaultProfile     string                      `mapstructure:"default_profile"     yaml:"default_profile,omitempty"`
 
+	// ProtectedFiles configures the gateway's protected-file watch
+	// (protected_files.go). Unset keeps the default: alert on a change an
+	// agent tool call made, restore nothing. Never written while unset, so
+	// a rollback to a release without the key reads the file unchanged.
+	ProtectedFiles ProtectedFilesConfig `mapstructure:"protected_files" yaml:"protected_files,omitempty"`
+
+	// Chains tunes tool-call chain evaluation (trusted_connectors.go).
+	Chains GuardrailChainsConfig `mapstructure:"chains" yaml:"chains,omitempty"`
+
 	// profileConnectors is set only on a configuration DerivedForProfile
 	// returns: the profile's own connectors map, keyed by normalized
 	// connector name. policyOverride layers it over Connectors so a profile
@@ -1826,6 +1984,13 @@ type GuardrailConfig struct {
 	// derived configuration ("" when it inherits). ProfileModeForConnector
 	// reads it. Unexported like profileConnectors.
 	profileMode string
+	// customPackBase is the directory of the config file that declares
+	// custom_packs: the base of a relative custom_packs path. customRulePackChecks
+	// is each custom_packs entry as the loader checked it, once. Both are
+	// recorded by the loader and carried by every copy of the configuration
+	// (DeepCopy), so one load has one verdict for every reader.
+	customPackBase       string
+	customRulePackChecks map[string]customRulePackCheck
 }
 
 // PerConnectorGuardrailConfig carries the subset of guardrail policy
@@ -1874,9 +2039,8 @@ type PerConnectorGuardrailConfig struct {
 
 // normalizeConnectorKey canonicalizes a connector name for
 // guardrail.connectors map lookups: trim, lowercase, and fold the known
-// hyphen/underscore aliases onto their canonical registry name. It is
-// the leaf-package counterpart of the Python connector_paths.normalize
-// alias table and must be kept in sync with it. Unlike that helper this
+// hyphen/underscore aliases onto their canonical registry name. Unlike the
+// Python connector_paths.normalize helper this
 // one returns "" for an empty/whitespace input rather than defaulting to
 // "openclaw": callers (connectorOverride / HasConnector) guard the empty
 // case separately so an unset connector falls through to the global
@@ -1885,12 +2049,30 @@ func normalizeConnectorKey(name string) string {
 	n := strings.ToLower(strings.TrimSpace(name))
 	switch n {
 	case "open-hands", "open_hands":
+		// until 1.1: recognize old config aliases before dropping this connector.
 		return "openhands"
 	case "claude-code", "claude_code":
 		return "claudecode"
 	default:
 		return n
 	}
+}
+
+// canonicalizeConnectorSelection folds guardrail.connector and claw.mode
+// to their registry names (trim, lowercase, claude-code/claude_code ->
+// claudecode) once, right after load. activeConnector, the hook gates and
+// the CLI already read the folded name; this makes every other reader of the
+// loaded config read it too: the single-connector boot
+// (configuredConnectorName -> resolveActiveConnector), the API connector
+// label, the watcher and the enterprise enumerators. Before, a primary that
+// `config set` accepts as claude-code failed the boot with "not found in
+// registry" and its hooks failed open (GAP-2007, GAP-1971, GAP-1972).
+func canonicalizeConnectorSelection(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	cfg.Guardrail.Connector = normalizeConnectorKey(cfg.Guardrail.Connector)
+	cfg.Claw.Mode = ClawMode(normalizeConnectorKey(string(cfg.Claw.Mode)))
 }
 
 // connectorOverride returns the per-connector override block for the
@@ -1901,9 +2083,9 @@ func normalizeConnectorKey(name string) string {
 //
 // Lookup is connector-name-insensitive: an exact key hit is the fast
 // path, otherwise keys are compared after normalizeConnectorKey so that
-// a request for the registry-canonical name (e.g. "openhands") resolves
+// a request for the registry-canonical name (e.g. "claudecode") resolves
 // an override written with different case or a hyphen/underscore alias
-// (e.g. "OpenHands", "open-hands"). This matches HasConnector and keeps
+// (e.g. "Claude-Code", "claude_code"). This matches HasConnector and keeps
 // every Effective*() resolver consistent with the boot loop, which keys
 // connectors by their canonical registry name.
 func (g *GuardrailConfig) connectorOverride(connector string) (PerConnectorGuardrailConfig, bool) {
@@ -1935,6 +2117,21 @@ func (g *GuardrailConfig) connectorOverride(connector string) (PerConnectorGuard
 func (g *GuardrailConfig) HasConnector(connector string) bool {
 	_, ok := g.connectorOverride(connector)
 	return ok
+}
+
+// NamesConnector reports whether guardrail.connector selects the named
+// connector. It folds case and the aliases (claude-code, claude_code ->
+// claudecode) the same way activeConnector does when it installs the
+// connector's hooks, so a primary written as an alias is evaluated by the
+// hook gates instead of answered allow without a scan (GAP-1971, GAP-1972).
+// The CLI roster prune (cmd_guardrail.roster_entry_is_redundant) reads the
+// same fold through connector_paths.normalize.
+func (g *GuardrailConfig) NamesConnector(connector string) bool {
+	if g == nil {
+		return false
+	}
+	primary := normalizeConnectorKey(g.Connector)
+	return primary != "" && primary == normalizeConnectorKey(connector)
 }
 
 // EffectiveMode returns the guardrail mode for the named connector:
@@ -2091,6 +2288,9 @@ func (g *GuardrailConfig) Validate() error {
 	if g == nil {
 		return nil
 	}
+	if err := g.Judge.ValidateExtraBody(); err != nil {
+		return err
+	}
 	if err := validateGuardrailLevel("guardrail.block_at", g.BlockAt); err != nil {
 		return err
 	}
@@ -2104,7 +2304,7 @@ func (g *GuardrailConfig) Validate() error {
 	}
 	sort.Strings(names)
 	// Reject two distinct keys that canonicalize to the same connector
-	// (e.g. "OpenHands" + "openhands", or "open-hands" + "openhands").
+	// (e.g. "claude-code" + "claudecode").
 	// connectorOverride() resolves keys through normalizeConnectorKey, so a
 	// duplicate would make per-connector lookups (mode, fail mode, HILT) and
 	// the active-connector roster depend on Go map iteration order — a
@@ -2145,7 +2345,7 @@ func (g *GuardrailConfig) Validate() error {
 	if err := validateAllowPrivateUpstreams(g.AllowPrivateUpstreams); err != nil {
 		return err
 	}
-	return nil
+	return validateInternalDomains(g.InternalDomains)
 }
 
 // validateGuardrailMode accepts the empty string (inherit/default) and
@@ -2212,66 +2412,6 @@ func validateAllowPrivateUpstreams(ips []string) error {
 	return nil
 }
 
-// EffectiveHookFailMode returns the operator-chosen hook fail mode,
-// defaulting to "closed" when unset (CodeGuard rule
-// codeguard-0-authorization-access-control: deny by default). The
-// canonical "open" sentinel is the only way to get the legacy
-// fail-open behavior; any other value (typo, blank, malformed
-// migration row) collapses to "closed" so the agent never silently
-// fails open at the hook failure boundary. Centralized here so the
-// sidecar and any future config-edit surfaces never disagree on the
-// default.
-//
-// Backwards compatibility: existing operators on v3 are protected by
-// the _migrate_0_4_0_seed_hook_fail_mode migration in
-// cli/defenseclaw/migrations.py, which writes “hook_fail_mode: open“
-// into config.yaml on first upgrade. New installs and explicit-empty
-// values get the safer default.
-func (g *GuardrailConfig) EffectiveHookFailMode() string {
-	if g == nil {
-		return "closed"
-	}
-	if g.HookFailMode == "open" {
-		return "open"
-	}
-	return "closed"
-}
-
-// EffectiveHookFailModeFor returns the hook fail mode for the named
-// connector. An explicit connector override wins even in observe mode: it is
-// an operator-selected response-integrity posture, not a policy verdict.
-// Observe-only connectors without an override retain the historical fail-open
-// behavior; action mode falls through to the global value. Pass "" to resolve
-// the global connector mode/value. Pure lookup — never errors, never mutates.
-func (g *GuardrailConfig) EffectiveHookFailModeFor(connector string) string {
-	return g.effectiveHookFailModeForMode(connector, g.EffectiveMode(connector))
-}
-
-// effectiveHookFailModeForMode keeps the configured precedence when a request
-// profile selects a different decision mode from the connector default.
-func (g *GuardrailConfig) effectiveHookFailModeForMode(connector, mode string) string {
-	if g == nil {
-		return "closed"
-	}
-	if pc, ok := g.connectorOverride(connector); ok {
-		if strings.TrimSpace(pc.HookFailMode) != "" {
-			// Mirror the global EffectiveHookFailMode() normalization
-			// (avarice F-0681): the canonical "open" sentinel is the only
-			// way to opt into legacy fail-open; any other per-connector
-			// value (typo, blank, malformed row) collapses to "closed" so
-			// the multi-connector boot path never silently fails open.
-			if strings.EqualFold(strings.TrimSpace(pc.HookFailMode), "open") {
-				return "open"
-			}
-			return "closed"
-		}
-	}
-	if !strings.EqualFold(strings.TrimSpace(mode), "action") {
-		return "open"
-	}
-	return g.EffectiveHookFailMode()
-}
-
 // EffectiveStrategy returns the detection strategy for the given direction,
 // falling back to the global DetectionStrategy (default: "regex_judge").
 func (g *GuardrailConfig) EffectiveStrategy(direction string) string {
@@ -2332,6 +2472,20 @@ type JudgeConfig struct {
 	// gateway applies a 5s default when unset.
 	HookTimeout float64 `mapstructure:"hook_timeout" yaml:"hook_timeout,omitempty"`
 
+	// MaxParallel bounds how many judge calls the gateway sends to the
+	// judge model at once; an explicit 0 sets no bound. When omitted,
+	// local and private judge endpoints use 1, and public endpoints use 0.
+	// With a bound,
+	// tool-call judging goes ahead of prompt judging and keeps one of the
+	// slots when there are two or more, so a slow local model does not
+	// queue a pending tool call behind a turn's prompt checks (#1395).
+	MaxParallel int `mapstructure:"max_parallel" yaml:"max_parallel,omitempty"`
+	// ExtraBody adds top-level fields to OpenAI-compatible judge chat requests.
+	// Judge-owned request fields and authentication settings are refused at load.
+	ExtraBody map[string]any `mapstructure:"extra_body" yaml:"extra_body,omitempty"`
+	// MaxParallelExplicit distinguishes an explicit 0 from an omitted key.
+	MaxParallelExplicit bool `mapstructure:"-" yaml:"-"`
+
 	// LLM overrides the top-level llm: block for the LLM judge. Prefer
 	// Config.ResolveLLM("guardrail.judge") over reading LLM / legacy
 	// Model directly.
@@ -2348,22 +2502,64 @@ type JudgeConfig struct {
 	AdjudicationTimeout float64  `mapstructure:"adjudication_timeout" yaml:"adjudication_timeout,omitempty"`
 }
 
+// ValidateExtraBody keeps operator-supplied fields from replacing judge-owned
+// request parameters or provider credentials. Nested values remain available
+// for server-specific fields such as chat_template_kwargs.
+func (c *JudgeConfig) ValidateExtraBody() error {
+	if c == nil || len(c.ExtraBody) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(c.ExtraBody))
+	for key := range c.ExtraBody {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if key == "" {
+			return fmt.Errorf("guardrail.judge.extra_body: invalid key %q (use ASCII letters, digits, _, - or .)", key)
+		}
+		for _, ch := range key {
+			if (ch < 'a' || ch > 'z') && (ch < 'A' || ch > 'Z') &&
+				(ch < '0' || ch > '9') && ch != '_' && ch != '-' && ch != '.' {
+				return fmt.Errorf("guardrail.judge.extra_body: invalid key %q (use ASCII letters, digits, _, - or .)", key)
+			}
+		}
+		normalized := strings.NewReplacer("_", "", "-", "", ".", "").Replace(strings.ToLower(key))
+		switch normalized {
+		case "model", "messages", "tools", "toolchoice", "stream", "streamoptions",
+			"maxtokens", "maxcompletiontokens", "maxoutputtokens", "responseformat",
+			"temperature", "topp", "frequencypenalty", "presencepenalty", "stop",
+			"fallbacks", "provider", "baseurl", "url", "endpoint":
+			return fmt.Errorf("guardrail.judge.extra_body: key %q is reserved", key)
+		}
+		if strings.Contains(normalized, "auth") || strings.Contains(normalized, "credential") ||
+			strings.Contains(normalized, "token") || strings.Contains(normalized, "secret") ||
+			strings.Contains(normalized, "password") || strings.Contains(normalized, "header") ||
+			strings.Contains(normalized, "key") || strings.Contains(normalized, "url") ||
+			strings.Contains(normalized, "endpoint") || strings.Contains(normalized, "certificate") {
+			return fmt.Errorf("guardrail.judge.extra_body: key %q is reserved", key)
+		}
+	}
+	return nil
+}
+
 // HookConnectorEnabled reports whether the hook-lane judge is enabled
 // for the named connector. Requires the judge itself to be enabled;
-// matching against HookConnectors is case-insensitive and the "*"
+// matching against HookConnectors is in canonical form (case and the
+// claude-code alias folded, as the CLI does) and the "*"
 // entry matches every connector. Empty list (the default) keeps the
 // hook lane off so existing deployments see no behavior change.
 func (c *JudgeConfig) HookConnectorEnabled(name string) bool {
 	if c == nil || !c.Enabled {
 		return false
 	}
-	name = strings.TrimSpace(name)
+	name = normalizeConnectorKey(name)
 	if name == "" {
 		return false
 	}
 	for _, entry := range c.HookConnectors {
 		entry = strings.TrimSpace(entry)
-		if entry == "*" || strings.EqualFold(entry, name) {
+		if entry == "*" || (entry != "" && normalizeConnectorKey(entry) == name) {
 			return true
 		}
 	}
@@ -2491,17 +2687,19 @@ const legacyGatewayTokenEnv = "OPENCLAW_GATEWAY_TOKEN"
 // caller (judge LLM init, etc.). The sidecar boot path masked
 // the bug via EnsureGatewayToken's own fallback, so it only
 // surfaced in obscure code paths until investigation.
+//
+// SecretRef text an earlier build saved as a token is skipped (issue #1404).
 func (g *GatewayConfig) ResolvedToken() string {
-	if g.TokenEnv != "" {
-		if v := os.Getenv(g.TokenEnv); v != "" {
+	for _, name := range []string{g.TokenEnv, defaultGatewayTokenEnv, legacyGatewayTokenEnv} {
+		if name == "" {
+			continue
+		}
+		if v := os.Getenv(name); v != "" && !envvars.IsSecretRefText(v) {
 			return v
 		}
 	}
-	if v := os.Getenv(defaultGatewayTokenEnv); v != "" {
-		return v
-	}
-	if v := os.Getenv(legacyGatewayTokenEnv); v != "" {
-		return v
+	if envvars.IsSecretRefText(g.Token) {
+		return ""
 	}
 	return g.Token
 }
@@ -2574,14 +2772,15 @@ func LoadFromFile(configFile string) (*Config, error) {
 }
 
 // LoadManagedFileForLifecycleRecovery loads a managed config like
-// LoadFromFile, without publishing provenance and without requiring the
+// LoadFromFile, without publishing provenance, without requiring the
 // standalone policy inputs (policy_dir, rule-pack dirs) to be readable by
-// the gateway service. The Windows managed-hook lifecycle snapshot and
-// teardown read only listener settings from it, and they run during the
-// rollback of an install whose new config the services could not load:
-// refusing that config there failed the rollback too, and left every
-// service stopped (GAP-1291). The gateway and every activation keep the
-// strict loaders.
+// the gateway service, and without the loopback API bind check. The Windows
+// managed-hook lifecycle snapshot and teardown read only the API port (the
+// hooks always dial 127.0.0.1) and the connectors from it, and they run
+// during the rollback of an install whose new config the services could not
+// load: refusing that config there failed the rollback too, and left every
+// service stopped (GAP-1291, GAP-0647). The gateway and every activation
+// keep the strict loaders.
 func LoadManagedFileForLifecycleRecovery(configFile string) (*Config, error) {
 	return loadFromFile(configFile, false, false)
 }
@@ -2815,12 +3014,23 @@ func applyRuntimeV8DataDirDefaultsForPlatform(candidate *Config, document *V8YAM
 		candidate.Guardrail.RulePackDir = join(dataDir, "policies", "guardrail", "default")
 		if candidate.StandaloneEnterprise() {
 			standaloneRulePackDefault(candidate, dataDir, goos)
+		} else if policyDir := strings.TrimSpace(candidate.PolicyDir); policyDir != "" &&
+			join(policyDir) != join(dataDir, "policies") {
+			// The implicit default pack is the default preset under the
+			// policy_dir config.yaml names, where the CLI seeds and reads
+			// it and where a named "default" resolves (GAP-2126). A file
+			// from before that whose policy_dir has no such folder keeps
+			// the data_dir pack it started with.
+			policyPack := join(policyDir, "guardrail", "default")
+			if _, err := os.Stat(policyPack); err == nil || !errors.Is(err, fs.ErrNotExist) {
+				candidate.Guardrail.RulePackDir = policyPack
+			}
 		}
 	}
 	if !has("openshell", "pack_dir") {
 		candidate.OpenShell.PackDir = join(dataDir, "policies", DefaultOpenShellPackDirName)
 		if candidate.StandaloneEnterprise() {
-			standaloneOpenShellPackDirDefault(candidate, dataDir)
+			standaloneOpenShellPackDirDefault(candidate, dataDir, goos)
 		}
 	}
 	if !has("gateway", "device_key_file") {
@@ -2943,6 +3153,22 @@ func loadConfigSourceCheckedWithLayout(
 			return nil, fmt.Errorf("config: unmarshal: %w", err)
 		}
 	}
+	// Viper lowercases keys in open maps. Preserve the source spelling of
+	// server-specific request fields, which can be case sensitive.
+	if viper.InConfig("guardrail.judge.extra_body") {
+		parsed, err := ParseV8YAML(configFile, sourceBytes)
+		if err != nil {
+			return nil, err
+		}
+		if guardrail, ok := parsed.Plain["guardrail"].(map[string]any); ok {
+			if judge, ok := guardrail["judge"].(map[string]any); ok {
+				if extra, ok := judge["extra_body"].(map[string]any); ok {
+					cfg.Guardrail.Judge.ExtraBody = extra
+				}
+			}
+		}
+	}
+	cfg.Guardrail.Judge.MaxParallelExplicit = viper.InConfig("guardrail.judge.max_parallel")
 	foldV8ScannerKeys(&cfg)
 	cleanCustomPackPaths(&cfg)
 	if err := restoreRuntimeV8GuardrailConnectors(&cfg, configFile, sourceBytes); err != nil {
@@ -2955,12 +3181,14 @@ func loadConfigSourceCheckedWithLayout(
 		restoreEmptyGuardrailProfiles(&cfg)
 	}
 	cfg.ConfigFilePath = configFile
+	cfg.offlineInspection = inspection
 	cfg.rulePackDirDeclared = viper.InConfig("guardrail.rule_pack_dir")
+	cfg.CheckCustomRulePacks()
 	cfg.openShellPackDirDeclared = viper.InConfig("openshell.pack_dir")
 	cfg.legacyConnectorRouteSelectors = legacyConnectorRouteSelectorPaths(viper.Get("observability.destinations"))
 	// Move retired connector IDs to their replacement before any connector
 	// key is normalized or checked for duplicates.
-	migrateLegacyConnectorIDs(&cfg)
+	migrateConnectorSelection(&cfg, resolvesToSecureClient(&cfg, pinnedDeploymentMode))
 
 	if err := checkRuntimeConfigVersion(cfg.ConfigVersion, resolvesToSecureClient(&cfg, pinnedDeploymentMode)); err != nil {
 		return nil, err
@@ -2990,10 +3218,22 @@ func loadConfigSourceCheckedWithLayout(
 		return nil, err
 	}
 	applySecureClientScannerDefaults(&cfg)
+	// Viper supplies the historical closed default even when no value was
+	// saved. Preserve that distinction for the OSS outage tier decision.
+	if !managed.IsManagedEnterprise(cfg.DeploymentMode) && !viper.InConfig("guardrail.hook_fail_mode") {
+		cfg.Guardrail.HookFailMode = ""
+	}
 	cfg.CiscoAIDefense.protectedCredentialRequired = cfg.StandaloneEnterprise()
 	if ai := cfg.Enterprise.Inspection.AIDefense; cfg.StandaloneEnterprise() && ai.Enabled {
 		cfg.CiscoAIDefense.protectedCredential = strings.TrimSpace(ai.Credential)
 		cfg.CiscoAIDefense.protectedSecretsDir = managed.StandaloneSecretsDirForConfig(runtime.GOOS, cfg.ConfigFilePath)
+	}
+	// Resolve an omitted managed API bind on every load, offline inspection
+	// included, so a bundle signer, the device verifier and the running
+	// gateway load and digest the same listener (GAP-0007). Secure Client
+	// keeps its loader as is: its strict loads resolve the bind below.
+	if !cfg.SecureClientIntegration() {
+		applyManagedEnterpriseListenerDefault(&cfg)
 	}
 	if enforceManagedTrust && managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		if !managed.IsManagedEnterprise(pinnedDeploymentMode) {
@@ -3004,34 +3244,9 @@ func loadConfigSourceCheckedWithLayout(
 				return nil, fmt.Errorf("config: managed_enterprise config trust check failed: %w", err)
 			}
 		}
-		if err := managed.ValidateTrustedServiceRuntimeDir(
-			cfg.DataDir,
-			"managed data_dir",
-			os.Getenv(managed.WindowsServiceAccountEnv),
-		); err != nil {
-			if ReportConfigLoadError != nil {
-				ReportConfigLoadError(context.Background(), "managed_data_dir_untrusted")
-			}
-			return nil, fmt.Errorf("config: managed_enterprise data_dir trust check failed: %w", err)
-		}
-		if err := validateManagedEnterpriseListenerBindings(&cfg); err != nil {
-			if ReportConfigLoadError != nil {
-				ReportConfigLoadError(context.Background(), "managed_listener_non_loopback")
-			}
-			return nil, err
-		}
-		if checkPolicyInputs {
-			if err := validateManagedStandalonePolicyInputs(&cfg); err != nil {
-				if ReportConfigLoadError != nil {
-					ReportConfigLoadError(context.Background(), "managed_policy_input_untrusted")
-				}
-				return nil, err
-			}
-		}
-		if err := validateManagedEnterpriseWindowsPeerAuthKnobs(&cfg); err != nil {
-			if ReportConfigLoadError != nil {
-				ReportConfigLoadError(context.Background(), "managed_ipc_peer_auth_unsupported_on_windows")
-			}
+		// The recovery loader (checkPolicyInputs false) also skips the
+		// loopback listener check (GAP-1291, GAP-0647).
+		if err := validateManagedEnterpriseRuntime(&cfg, checkPolicyInputs, true, checkPolicyInputs); err != nil {
 			return nil, err
 		}
 	}
@@ -3083,11 +3298,29 @@ func loadConfigSourceCheckedWithLayout(
 		}
 		return nil, fmt.Errorf("config: guardrail: %w", err)
 	}
+	if err := cfg.DecisionModel.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "decision_model_invalid")
+		}
+		return nil, fmt.Errorf("config: decision_model: %w", settingErrorAt("decision_model", err))
+	}
 	if err := cfg.ValidateGuardrailProfiles(); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "guardrail_invalid")
 		}
 		return nil, fmt.Errorf("config: guardrail: %w", err)
+	}
+	if err := cfg.ValidateIdentityChainSettings(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "connectors_invalid")
+		}
+		return nil, err
+	}
+	if err := cfg.Guardrail.ProtectedFiles.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "guardrail_invalid")
+		}
+		return nil, fmt.Errorf("config: %w", err)
 	}
 	if err := cfg.Scanners.Validate(); err != nil {
 		if ReportConfigLoadError != nil {
@@ -3154,6 +3387,12 @@ func loadConfigSourceCheckedWithLayout(
 
 	if home, err := os.UserHomeDir(); err == nil {
 		cfg.Gateway.ClawHome = home
+	}
+
+	if !inspection && !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		// Older installs can use OpenClaw only through a remote fleet gateway.
+		// A remote host or explicit fleet mode must keep that connector on upgrade.
+		cfg.openClawNotInstalled = cfg.OpenClawImpliedButNotInstalled()
 	}
 
 	warnPlaintextSecrets(&cfg)
@@ -3448,44 +3687,59 @@ func dropEmptyGuardrailConnectors(cfg *Config, raw []byte) {
 	}
 }
 
-// validateManagedEnterpriseListenerBindings keeps every inbound enterprise
+// applyManagedEnterpriseListenerDefault persists the effective managed API
+// bind, 127.0.0.1, into the in-memory config when api_bind is omitted, so
+// standalone topology cannot later derive the API listener from an
+// independent IPv6 guardrail host, and a config that omits the bind loads
+// (and digests) like one that spells it out.
+func applyManagedEnterpriseListenerDefault(cfg *Config) {
+	if cfg != nil && managed.IsManagedEnterprise(cfg.DeploymentMode) && cfg.Gateway.APIBind == "" {
+		cfg.Gateway.APIBind = "127.0.0.1"
+	}
+}
+
+// ValidateManagedEnterpriseListenerBindings keeps every inbound enterprise
 // surface on loopback. The managed hook transport is intentionally pinned to
 // canonical numeric IPv4, so the API listener must be exactly 127.0.0.1 rather
 // than another loopback spelling or address. This is enterprise-only:
 // unmanaged/BYOD deployments retain their existing remote-bind behavior.
-func validateManagedEnterpriseListenerBindings(cfg *Config) error {
+func ValidateManagedEnterpriseListenerBindings(cfg *Config) error {
 	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		return nil
 	}
 
+	applyManagedEnterpriseListenerDefault(cfg)
 	apiBind := cfg.Gateway.APIBind
-	if apiBind == "" {
-		// Persist the effective managed bind into the in-memory config so
-		// standalone topology cannot later derive the API listener from an
-		// independent IPv6 guardrail host.
-		cfg.Gateway.APIBind = "127.0.0.1"
-		apiBind = cfg.Gateway.APIBind
-	}
 	if apiBind != "127.0.0.1" {
 		return fmt.Errorf(
 			"config: managed_enterprise gateway API must bind to exact canonical 127.0.0.1, got %q",
 			apiBind,
 		)
 	}
+	if cfg.StandaloneEnterprise() && effectiveAPIPort(cfg.Gateway.APIPort) != DefaultGatewayAPIPort {
+		return fmt.Errorf(
+			"config: managed_enterprise standalone gateway.api_port must be %d: the service socket owns that listener",
+			DefaultGatewayAPIPort,
+		)
+	}
 
-	if cfg.Guardrail.Enabled {
-		proxyBind := strings.TrimSpace(cfg.Guardrail.EffectiveHost())
-		if !isLoopbackListenerHost(proxyBind) {
-			return fmt.Errorf(
-				"config: managed_enterprise guardrail proxy must bind to loopback, got %q",
-				proxyBind,
-			)
-		}
+	return ValidateManagedGuardrailProxyBind(cfg)
+}
+
+// ValidateManagedGuardrailProxyBind is the proxy listener check shared by
+// live gateway loads, managed lifecycle candidates and config validate.
+func ValidateManagedGuardrailProxyBind(cfg *Config) error {
+	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) || !cfg.Guardrail.Enabled {
+		return nil
+	}
+	proxyBind := strings.TrimSpace(cfg.Guardrail.EffectiveHost())
+	if !isLoopbackListenerHost(proxyBind) {
+		return fmt.Errorf("config: managed_enterprise guardrail proxy must bind to loopback, got %q", proxyBind)
 	}
 	return nil
 }
 
-// validateManagedEnterpriseWindowsPeerAuthKnobs refuses to load a
+// ValidateManagedEnterpriseWindowsPeerAuthKnobs refuses to load a
 // managed_enterprise config on Windows that carries non-empty
 // AllowedTeamIDs / AllowedSigningIDs / AllowedBundleIDs. Those allowlists
 // only take effect on macOS / linux, where LOCAL_PEERCRED-style peer
@@ -3504,7 +3758,7 @@ func validateManagedEnterpriseListenerBindings(cfg *Config) error {
 // unmanaged/BYOD contract (unmanaged doesn't ship the IPC surface at
 // all outside dev rigs), so this validator is scoped to
 // managed_enterprise on Windows.
-func validateManagedEnterpriseWindowsPeerAuthKnobs(cfg *Config) error {
+func ValidateManagedEnterpriseWindowsPeerAuthKnobs(cfg *Config) error {
 	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		return nil
 	}
@@ -3526,11 +3780,11 @@ func validateManagedEnterpriseWindowsPeerAuthKnobs(cfg *Config) error {
 	}
 	return fmt.Errorf(
 		"config: %s cannot be set on Windows in the initial-cut managed IPC "+
-			"peer-auth posture (spec 004): the AF_UNIX socket has no peer-"+
+			"peer-auth posture: the AF_UNIX socket has no peer-"+
 			"credential API on Windows, so any allowlist here would be silently "+
 			"discarded. Remove these keys from config.yaml; the socket DACL is "+
-			"the enforcement boundary until parity plan §4.4 lands the Windows "+
-			"peer-auth mechanism.",
+			"the enforcement boundary until the Windows peer-auth mechanism "+
+			"lands.",
 		strings.Join(offending, ", "),
 	)
 }
@@ -3589,6 +3843,16 @@ func warnPlaintextSecrets(cfg *Config) {
 			"migrate it to ~/.defenseclaw/.env as %s and set %s.%s_env=%s instead",
 			section, field, envDefault, section, field, envDefault)
 	}
+	if cfg.StandaloneEnterprise() {
+		// A managed host has no per-user .env for the administrator's
+		// config: the key belongs in a protected credential (GAP-0138).
+		warn = func(section, field, _ string) {
+			log.Printf("WARNING: %s.%s contains a plain-text secret in the managed config.yaml — "+
+				"store the key with `enterprise secret set --name <name>`, name it in "+
+				"enterprise.inspection.llm.credential (the LLM key) or enterprise.inspection.ai_defense.credential "+
+				"(the AI Defense key), and remove %s.%s", section, field, section, field)
+		}
+	}
 	if cfg.LLM.APIKey != "" {
 		warn("llm", "api_key", DefenseClawLLMKeyEnv)
 	}
@@ -3643,7 +3907,9 @@ func normalizeDeploymentMode(mode string) string {
 }
 
 // applySecureClientScannerDefaults preserves the v8 scanner defaults when
-// Secure Client omits these keys. Explicit settings still win.
+// Secure Client omits these keys, and leaves an omitted
+// guardrail.hook_fail_mode unset so Secure Client resolves it to open.
+// Explicit settings still win.
 func applySecureClientScannerDefaults(cfg *Config) {
 	if !cfg.SecureClientIntegration() {
 		return
@@ -3653,6 +3919,12 @@ func applySecureClientScannerDefaults(cfg *Config) {
 	}
 	if !viper.InConfig("scanners.skill_scanner.policy") {
 		cfg.Scanners.SkillScanner.Policy = "permissive"
+	}
+	// Secure Client hooks fail open when hook_fail_mode is unset (#1163).
+	// Drop the platform default ("closed") so the resolver sees the key as
+	// unset; an explicit value in the source still wins.
+	if !viper.InConfig("guardrail.hook_fail_mode") {
+		cfg.Guardrail.HookFailMode = ""
 	}
 }
 
@@ -3827,6 +4099,7 @@ func setDefaultsForPlatform(dataDir, goos string, deterministic bool) {
 	viper.SetDefault("guardrail.rule_pack_dir", join(dataDir, "policies", "guardrail", "default"))
 	viper.SetDefault("guardrail.hilt.enabled", false)
 	viper.SetDefault("guardrail.hilt.min_severity", "HIGH")
+	viper.SetDefault("decision_model.enabled", false)
 	viper.SetDefault("guardrail.judge.enabled", false)
 	viper.SetDefault("guardrail.judge.injection", true)
 	viper.SetDefault("guardrail.judge.pii", true)

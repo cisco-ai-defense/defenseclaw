@@ -38,6 +38,8 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	collectorlogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
@@ -55,6 +57,67 @@ import (
 )
 
 var relayTestPeer = managedHookPeer{UID: 1000, Name: "dev"}
+
+func TestSandboxRelayNeverAdoptsSandboxTraceParent(t *testing.T) {
+	const path = sandboxrelay.PathHookPrefix + "claudecode"
+	var seen string
+	var forwardedTrace bool
+	var receiptMarker string
+	routes := map[string]sandboxRelayRoute{path: {
+		class: sandboxauth.RouteHook, connector: "claudecode", native: "/api/v1/claudecode/hook",
+		handler: func(w http.ResponseWriter, r *http.Request) {
+			seen = trace.SpanFromContext(r.Context()).SpanContext().TraceID().String()
+			forwardedTrace = r.Header.Get("Traceparent") != "" || r.Header.Get("Tracestate") != ""
+			receiptMarker = r.Header.Get(sandboxrelay.HookReceiptHeader)
+			w.WriteHeader(http.StatusOK)
+		},
+	}}
+	f := newRelayFixtureWith(t, routes)
+	reg := f.register(t, "trace", "claudecode", relayTestBindingID(401))
+	resp, _ := f.post(t, path, reg.ID, `{}`, "Traceparent", wellFormedTraceparent,
+		sandboxrelay.HookReceiptHeader, sandboxrelay.HookReceiptHeaderValue)
+	if resp.StatusCode != http.StatusOK || seen == "0af7651916cd43dd8448eb211c80319c" || forwardedTrace ||
+		receiptMarker != sandboxrelay.HookReceiptHeaderValue {
+		t.Fatalf("sandbox trace or receipt marker: status %d trace %q trace headers %t receipt %q",
+			resp.StatusCode, seen, forwardedTrace, receiptMarker)
+	}
+	seen = ""
+	resp, _ = f.post(t, path, "unknown", `{}`, "Traceparent", wellFormedTraceparent)
+	if resp.StatusCode == http.StatusOK || seen != "" {
+		t.Fatalf("unregistered trace reached handler: status %d trace %q", resp.StatusCode, seen)
+	}
+}
+
+// #1213 / GAP-0056: a hook the managed gateway answers 200 with a
+// fail-closed block carries failed_closed in the verdict trailer, which
+// the daemon counts as a hook failure (TestSandboxRelayForwarding); a
+// normal block does not.
+func TestSandboxRelayTrailerMarksAFailClosedBlock(t *testing.T) {
+	const path = sandboxrelay.PathHookPrefix + "claudecode"
+	failClosed := false
+	var f *relayFixture
+	routes := map[string]sandboxRelayRoute{path: {
+		class: sandboxauth.RouteHook, connector: "claudecode", native: "/api/v1/claudecode/hook",
+		handler: func(w http.ResponseWriter, r *http.Request) {
+			if failClosed {
+				markSandboxHookFailedClosed(r.Context())
+			}
+			f.api.observeSandboxHookDecision(r.Context(), agentHookRequest{HookEventName: "PreToolUse", ToolName: "Bash"},
+				agentHookResponse{Action: "block", WouldBlock: true})
+			w.WriteHeader(http.StatusOK)
+		},
+	}}
+	f = newRelayFixtureWith(t, routes)
+	reg := f.register(t, "failclosed", "claudecode", relayTestBindingID(402))
+	for _, want := range []bool{false, true} {
+		failClosed = want
+		resp, body := f.post(t, path, reg.ID, `{}`)
+		d, ok := relayTrailer(t, resp)
+		if resp.StatusCode != http.StatusOK || !ok || d.Action != "block" || d.FailedClosed != want {
+			t.Fatalf("fail closed %t: status %d %s trailer %+v (%t)", want, resp.StatusCode, body, d, ok)
+		}
+	}
+}
 
 // relayTestKey is the sandbox authority key of the relay tests.
 var relayTestKey = bytes.Repeat([]byte{7}, 32)
@@ -120,6 +183,16 @@ func (s *relayTestStore) Get(uid int, id string) (sandboxreg.Registration, bool,
 	return reg, ok, err
 }
 
+// GetWithRun answers the registration as Get does.
+func (s *relayTestStore) GetWithRun(uid int, id string) (sandboxreg.Registration, bool, sandboxreg.Run, bool, error) {
+	reg, ok, err := s.Get(uid, id)
+	if err != nil {
+		return sandboxreg.Registration{}, false, sandboxreg.Run{}, false, err
+	}
+	run, hasRun, err := s.Run(uid, id)
+	return reg, ok, run, hasRun, err
+}
+
 func (s *relayTestStore) set(err error, unbound bool) {
 	s.mu.Lock()
 	s.err, s.unbound = err, unbound
@@ -167,8 +240,11 @@ func newRelayFixtureWith(t *testing.T, routes map[string]sandboxRelayRoute, muta
 		sandboxAuthorityKey = prevKey
 		sandboxBudgetLimits[sandboxBudgetHook] = prevHook
 	})
+	// NewAPIServer publishes the config's profile set process-wide; the next
+	// test must not resolve against it (rel-1-0-6 GAP-0335).
+	previousProfiles := liveGuardrailProfiles.Load()
+	t.Cleanup(func() { liveGuardrailProfiles.Store(previousProfiles) })
 	api := NewAPIServer("127.0.0.1:18970", NewSidecarHealth(), nil, nil, nil, cfg)
-	t.Cleanup(func() { sandboxAuthorities.Delete(api) })
 	auth, err := api.sandboxAuth()
 	if err != nil {
 		t.Fatal(err)
@@ -255,6 +331,7 @@ func (f *relayFixture) post(t *testing.T, path, registration, body string, heade
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(sandboxrelay.ClientHeader, sandboxrelay.ClientHeaderValue)
+	req.Header.Set(sandboxrelay.DaemonContractHeader, strconv.Itoa(sandboxrelay.DaemonContract))
 	req.Header.Set(sandboxrelay.AgentSurfaceHeader, sandboxrelay.AgentSurfaceValue)
 	if registration != "" {
 		req.Header.Set(sandboxrelay.RegistrationHeader, registration)
@@ -283,6 +360,7 @@ func (f *relayFixture) currentGeneration(t *testing.T, registration string) stri
 	}
 	// Every sandbox route needs the CSRF client header, GET included.
 	req.Header.Set(sandboxrelay.ClientHeader, sandboxrelay.ClientHeaderValue)
+	req.Header.Set(sandboxrelay.DaemonContractHeader, strconv.Itoa(sandboxrelay.DaemonContract))
 	resp, err := f.server.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -352,7 +430,7 @@ func TestSandboxRelayMatchesLocalIngressForEveryHarness(t *testing.T) {
 	relay := newRelayFixture(t)
 
 	names := harness.Names()
-	if len(names) < 12 {
+	if len(names) < 10 {
 		t.Fatalf("harnesses = %v", names)
 	}
 	for _, name := range names {
@@ -597,6 +675,7 @@ func TestSandboxRelayRefusals(t *testing.T) {
 		t.Fatal(err)
 	}
 	getReq.Header.Set(sandboxrelay.ClientHeader, sandboxrelay.ClientHeaderValue)
+	getReq.Header.Set(sandboxrelay.DaemonContractHeader, strconv.Itoa(sandboxrelay.DaemonContract))
 	resp, err := f.server.Client().Do(getReq)
 	if err != nil {
 		t.Fatal(err)
@@ -865,6 +944,7 @@ func TestSandboxRelayDecisionTrailerBounds(t *testing.T) {
 		Event: long, Tool: long, ToolUseID: long, SessionID: long, CallRef: long, ResultStatus: long,
 		Action: "block", Severity: long, Reason: strings.Repeat("é", 400), ModelError: long, ModelStatus: 401,
 	})
+	sink.markFailedClosed()
 	raw, ok := sink.trailer()
 	if !ok || len(raw) > sandboxrelay.MaxHookDecisionBytes || strings.ContainsAny(raw, "\r\n\x00") {
 		t.Fatalf("trailer %d bytes ok=%v: %q", len(raw), ok, raw)
@@ -873,7 +953,7 @@ func TestSandboxRelayDecisionTrailerBounds(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &d); err != nil {
 		t.Fatal(err)
 	}
-	if d.V != 1 || d.Action != "block" || d.ModelStatus != 401 || len(d.Reason) > sandboxrelay.MaxHookDecisionReasonBytes ||
+	if d.V != 1 || d.Action != "block" || !d.FailedClosed || d.ModelStatus != 401 || len(d.Reason) > sandboxrelay.MaxHookDecisionReasonBytes ||
 		len(d.Tool) > sandboxrelay.MaxHookDecisionStringBytes || !strings.HasPrefix(d.Reason, "é") || d.CallRef != "" {
 		t.Fatalf("decision = %+v", d)
 	}
@@ -989,9 +1069,13 @@ func TestSandboxRelayThroughTheHookSocketServer(t *testing.T) {
 	cfg := &config.Config{DeploymentMode: "managed_enterprise", DataDir: dataDir}
 	cfg.Enterprise.Profile = managed.ProfileStandalone
 	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"claudecode": {}}
 	cfg.OpenShell.Enabled = true
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil, cfg)
-	t.Cleanup(func() { sandboxAuthorities.Delete(api) })
+	api.SetGenerationSource(func() *Generation {
+		return &Generation{N: 1, ConfigGen: 1, ConfigGenRecorded: true, Config: cfg}
+	})
 	api.SetConnectorRegistry(connector.NewDefaultRegistry())
 	api.bindOTLPObservabilityRuntime(newSidecarRuntimeFixture(t, true).runtime)
 	auth, err := api.sandboxAuth()
@@ -1033,6 +1117,7 @@ func TestSandboxRelayThroughTheHookSocketServer(t *testing.T) {
 		}
 		req.Header.Set("Content-Type", contentType)
 		req.Header.Set(sandboxrelay.ClientHeader, sandboxrelay.ClientHeaderValue)
+		req.Header.Set(sandboxrelay.DaemonContractHeader, strconv.Itoa(sandboxrelay.DaemonContract))
 		req.Header.Set(sandboxrelay.AgentSurfaceHeader, sandboxrelay.AgentSurfaceValue)
 		req.Header.Set(sandboxrelay.RegistrationHeader, reg.ID)
 		for i := 0; i+1 < len(headers); i += 2 {
@@ -1082,5 +1167,52 @@ func TestSandboxRelayThroughTheHookSocketServer(t *testing.T) {
 	}
 	if resp, body := post(sandboxrelay.PathOTLPPrefix+"logs", "application/x-protobuf", raw); resp.StatusCode/100 != 2 {
 		t.Fatalf("2 MiB protobuf OTLP export: %d %s", resp.StatusCode, body)
+	}
+}
+
+// A relayed hook with an unproven group uses the observe default when the
+// possible group profile also only observes. The registration's last proven
+// profile is not assumed to be the caller's current policy (GAP-0522).
+func TestSandboxRelayUsesObserveDefaultForUnprovenGroup(t *testing.T) {
+	restoreFacts, restoreBlocking := identityFactsEnabled.Load(), identityLookupBlocking.Load()
+	prevDirectory, prevRematched := managedHookPeerDirectory, sandboxRecordRematched
+	identityFactsEnabled.Store(true)
+	identityLookupBlocking.Store(true)
+	managedHookPeerDirectory = func(uid int, _ bool) (useridentity.DirectoryFacts, bool) {
+		if uid != relayTestPeer.UID {
+			return useridentity.DirectoryFacts{}, false
+		}
+		return useridentity.DirectoryFacts{
+			Principal: "dev@DCLAB.TEST", Domain: "dclab.test", Directory: useridentity.DirectoryActiveDirectory,
+			GroupsPartial: true, Source: "sssd", ResolvedAt: time.Now(),
+		}, true
+	}
+	sandboxRecordRematched = func(*APIServer, sandboxreg.Registration, sandboxreg.Registration, []string, string) {}
+	t.Cleanup(func() {
+		identityFactsEnabled.Store(restoreFacts)
+		identityLookupBlocking.Store(restoreBlocking)
+		managedHookPeerDirectory, sandboxRecordRematched = prevDirectory, prevRematched
+	})
+	f := newRelayFixture(t, func(c *config.Config) {
+		c.Guardrail.Connector = "claudecode"
+		c.Guardrail.Profiles = map[string]config.GuardrailProfile{
+			"contractors":   {Description: "Contractors", Mode: "observe"},
+			"offline-floor": {Description: "Offline floor", Mode: "observe"},
+		}
+		c.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+			{Profile: "contractors", Match: config.ProfileMatch{Groups: []string{"dc-sbx-contractors"}}},
+		}
+		c.Guardrail.DefaultProfile = "offline-floor"
+	})
+	reg := f.register(t, "unproven", "claudecode", relayTestBindingID(0xa02), func(r *sandboxreg.Registration) {
+		r.Profile, r.ProfileMatch = "contractors", "group"
+	})
+	resp, body := f.post(t, sandboxrelay.PathHookPrefix+"claudecode", reg.ID,
+		`{"hook_event_name":"UserPromptSubmit","session_id":"u1","prompt":"hello"}`)
+	d, ok := relayTrailer(t, resp)
+	if resp.StatusCode != http.StatusOK || !ok || d.Action != "allow" || d.FailedClosed ||
+		strings.Contains(body, "DefenseClaw refused this request") ||
+		strings.Contains(body, "contractors") || strings.Contains(body, "offline-floor") {
+		t.Fatalf("relayed hook: %d %s trailer %+v; want observe default without a profile name", resp.StatusCode, body, d)
 	}
 }

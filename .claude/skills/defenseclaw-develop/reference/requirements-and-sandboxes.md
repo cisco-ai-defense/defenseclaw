@@ -70,7 +70,7 @@ Example: a new optional feature needs a local container runtime.
 
 ## Where it lives
 
-`internal/openshell/` (doctor, driver_select, prerequisites, version, install, sandboxcli), `cli/defenseclaw/commands/cmd_doctor.py`, `cmd_sandbox.py`, `cli/defenseclaw/scanner/`, `docs/SANDBOX.md` (contributor notes only), `docs-site/content/docs/sandboxes/`.
+`internal/openshell/` (doctor, driver_select, prerequisites, version, install, sandboxcli), `cli/defenseclaw/commands/cmd_doctor.py`, `cmd_sandbox.py`, `cli/defenseclaw/scanner/`, `docs/SANDBOX.md` (contributor notes only), `docs-site/content/docs/reference/sandbox-cli.mdx`, `docs-site/content/docs/sandboxes/`.
 
 ## How to verify
 

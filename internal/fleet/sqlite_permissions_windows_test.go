@@ -61,7 +61,7 @@ func widenWindowsSQLiteAccess(path string, inherit bool) error {
 		nil, nil, acl, nil); err != nil {
 		return err
 	}
-	var validate func(string) error = safefile.ValidatePrivateFile
+	validate := safefile.ValidatePrivateFile
 	if inherit {
 		validate = safefile.ValidatePrivateDirectory
 	}

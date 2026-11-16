@@ -46,3 +46,35 @@ func TestSandboxDaemonPollReportsAStartingSandboxRunning(t *testing.T) {
 		t.Fatalf("reports after the start = %v", got)
 	}
 }
+
+// GAP-0433: a poll lists the phases first and reads the starting marker per
+// registration later. A Start that ended in between had reported the
+// sandbox running last, and the poll's report from the older list (stopped)
+// then undid it. A poll whose list predates a Start's end reports nothing
+// for that sandbox; the next poll reports it from a new list.
+func TestSandboxDaemonPollKeepsTheReportOfAStartThatEndedAfterItsList(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	if err := f.d.regs.put(daemonRegistration{ID: "reg-1", Sandbox: "dc-a", UpdatedAt: time.Now(), Confirmed: true}); err != nil {
+		t.Fatal(err)
+	}
+	first := true
+	f.d.opts.listPhases = func(context.Context) (map[string]string, bool) {
+		if first {
+			// The list says stopped; the Start then ends, as its deferred
+			// final report does, before the poll reads the marker.
+			first = false
+			f.d.starting.Store("dc-a", struct{}{})
+			f.d.startEnded.Store("dc-a", f.d.startsEnded.Add(1))
+			f.d.starting.Delete("dc-a")
+		}
+		return map[string]string{"dc-a": "stopped"}, true
+	}
+	f.d.pollOnce(context.Background())
+	if got := f.relay.reported(); len(got) != 0 {
+		t.Fatalf("reports from a list older than the start's end = %v", got)
+	}
+	f.d.pollOnce(context.Background())
+	if got := f.relay.reported(); !slices.Equal(got, []string{"reg-1=stopped"}) {
+		t.Fatalf("reports of the next poll = %v", got)
+	}
+}

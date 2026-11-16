@@ -45,3 +45,15 @@ func platformDiscoveryAccountIDs(user string) []string {
 
 // platformDiscoveryAccountName names Windows accounts only.
 func platformDiscoveryAccountName(string) string { return "" }
+
+// platformDiscoveryUIDName is the name of the account that holds uid, as NSS
+// gives it (the spelling the gateway's runtime findings carry), or "".
+func platformDiscoveryUIDName(uid int) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	account, err := unixidentity.Default(ctx).LookupUID(uid)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(account.Name)
+}

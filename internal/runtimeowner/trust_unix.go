@@ -17,7 +17,7 @@ import (
 // an account-verified sudo invoker. Running as root alone never makes an
 // arbitrary local UID trusted.
 func Trusted(uid uint32) bool {
-	return trusted(uid, os.Geteuid(), os.Getuid(), os.Getenv, user.Lookup)
+	return trusted(uid, os.Geteuid(), os.Getuid(), os.Getenv, lookupAccount)
 }
 
 func trusted(

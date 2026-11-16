@@ -13,6 +13,7 @@ package observability
 import (
 	"fmt"
 	"sort"
+	"sync"
 )
 
 type ProducerKind string
@@ -364,19 +365,29 @@ func bucketAllowed(bucket Bucket, allowed []Bucket) bool {
 	return false
 }
 
-var gatewayEventClassifications, auditActionClassifications = buildGeneratedProducerClassifications()
+var gatewayEventClassifications, auditActionClassifications map[ProducerKey]Classification
+var generatedProducerClassificationsOnce sync.Once
+
+func ensureGeneratedProducerClassifications() {
+	generatedProducerClassificationsOnce.Do(func() {
+		gatewayEventClassifications, auditActionClassifications = buildGeneratedProducerClassifications()
+	})
+}
 
 func GatewayEventClassification(key ProducerKey) (Classification, bool) {
+	ensureGeneratedProducerClassifications()
 	classification, ok := gatewayEventClassifications[key]
 	return cloneClassification(classification), ok
 }
 
 func AuditActionClassification(key ProducerKey) (Classification, bool) {
+	ensureGeneratedProducerClassifications()
 	classification, ok := auditActionClassifications[key]
 	return cloneClassification(classification), ok
 }
 
 func ClassificationKeys(kind ProducerKind) []ProducerKey {
+	ensureGeneratedProducerClassifications()
 	var source map[ProducerKey]Classification
 	switch kind {
 	case ProducerGatewayEvent:

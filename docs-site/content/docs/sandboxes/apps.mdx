@@ -10,253 +10,164 @@ keywords:
   - sandbox wizard
 ---
 
-You don't need a second terminal running `sandbox activity`. The TUI and
-the macOS app show the same sandboxes, the same live feed and the same asks,
-and they can stop, pull, undo and unblock for you. Both read the DefenseClaw
-daemon, so a sandbox started from any of them shows up in all of them.
+Watch the live feed, answer asks, unblock sites, and stop, pull or undo a sandbox from the TUI or the macOS app. Both read the DefenseClaw daemon, so a sandbox started from the command line shows up in both. Sandboxes must be set up and the daemon running. On Windows the panel only says that OpenShell sandboxes run on Linux and macOS.
 
-| Task | Command line | TUI | macOS app |
+| Task | Command line | TUI (`7`) | macOS app |
 | --- | --- | --- | --- |
-| Set up sandboxes | `defenseclaw sandbox setup` | Setup (`0`) → **Sandboxes (OpenShell)** | Setup → **Sandbox** (never installs OpenShell) |
-| Start a run | `defenseclaw sandbox run claude` | `n` in the Sandboxes panel | **Copy run command**, then paste it in Terminal |
-| Watch the feed | `defenseclaw sandbox activity -f` | `7`, then `t` for **Activity** | **Activity** in the Sandboxes view, plus notifications |
-| Unblock a site | `defenseclaw sandbox unblock HOST --sandbox NAME` | `u` | **Unblock** in a notification, the menu bar or the view |
-| Answer an ask | `defenseclaw sandbox approve NAME ID` | `a`, `A` or `x` in **Asks** | **Approve**, **Always…** or **Reject** |
-| Resume | `defenseclaw sandbox connect NAME` | `c` | **Copy connect command** |
-| Bring back a copy | `defenseclaw sandbox pull NAME --apply` | `P` | **Copy pull command** or **Pull to branch** |
-| Undo | `defenseclaw sandbox undo NAME` | `U` | **Undo…** |
+| Start a run | `sandbox run claude` | `n` | **Copy run command** |
+| Watch the feed | `sandbox activity -f` | `t` for **Activity** | **Activity**, plus notifications |
+| Unblock a site | `sandbox unblock HOST` | `u` | **Unblock** |
+| Answer an ask | `sandbox approve NAME ID` | `a`, `A`, `x` in **Asks** | **Approve**, **Always…**, **Reject** |
+| Bring back a copy | `sandbox pull NAME --apply` | `P` | **Pull to branch** |
+| Undo | `sandbox undo NAME` | `U` | **Undo…** |
 
 ## The TUI Sandboxes panel
-
-Open the TUI and press `7`:
 
 ```bash
 defenseclaw tui
 ```
 
-![DefenseClaw TUI Sandboxes panel on a Mac: READY header with the OpenShell gateway and its MicroVM driver, a blocked-destination line, the action bar and one running sandbox with its pack, mode, sites, blocked sites and tool calls](/images/sandboxes/screens/tui-sandboxes.png)
+Press `7` for the Sandboxes panel. The header shows the state (`READY`, `OFF`, `WAITING`, `UNAVAILABLE` or `UNREACHABLE`), how many sandboxes run, how many asks wait, and the gateway with its driver. `OFF` points to the setup wizard. `UNAVAILABLE` gives the daemon's reason.
 
-The header shows the state (`READY`, `OFF`, `WAITING`, `UNAVAILABLE` or
-`UNREACHABLE`), how many sandboxes run, how many asks wait, and the gateway
-with its compute driver: `docker` or `MicroVM` (a Mac always shows `MicroVM`).
-`OFF` points
-to the setup wizard, and `UNAVAILABLE` gives the daemon's reason and
-suggests `defenseclaw sandbox doctor`.
+![DefenseClaw TUI Sandboxes panel on a Mac: READY, one running sandbox and two asks waiting on the OpenShell 0.1.5 gateway (MicroVM), the unblock hint for a refused paste site, the button bar, and the myapp-claude row with its pack, copy mode, sites, blocks, tool calls and alerts](/images/sandboxes/screens/tui-sandboxes.png)
 
-`t` cycles through three views:
-
-| View | What it shows |
-| --- | --- |
-| **Sandboxes** | Every sandbox, running ones first: name, phase, harness, pack and profile, mode, uptime, sites, blocked sites, tool calls and alerts. Above the table, the newest block still in force and the most urgent alert. |
-| **Activity** | The live feed, newest first. `✓` an allowed site, `✗` a blocked site, `⊘` a blocked tool call, `↺` a lifted block, `⚠` a large upload or a finding, `?` an ask, `·` a lifecycle step. A block you can lift ends in `(u unblocks)`. |
-| **Asks** | Asks waiting for you, with the sandbox, the destination, the program that asked, the risk and the reason. |
-
-`Enter` opens the selected row's details, and `Esc` closes them.
-
-The **Activity** view on Linux, for a Claude Code sandbox whose agent reached
-two AI services it does not use, a paste site and a blocked tool call:
+Press `t` to switch views: **Sandboxes** (one row per sandbox), **Activity** (the live feed, newest first) and **Asks** (waiting for you). `Enter` opens details, `Esc` closes them.
 
 ![DefenseClaw TUI Activity view on Linux: the feed of one sandbox, newest first, with allowed sites, two shadow AI warnings, a paste site refused with the key that unblocks it, a blocked tool call and the sandbox's lifecycle lines](/images/sandboxes/screens/tui-sandboxes-activity.png)
 
-![DefenseClaw TUI Asks view on Linux: one ask waiting, with its sandbox, the kind (a port on this machine), the destination host.openshell.internal:9418, the program that asked (/usr/bin/git), the risk and the reason, and the keys to approve, reject and refresh](/images/sandboxes/screens/tui-sandboxes-asks.png)
+<TerminalAnimation
+  cwd="~/code/myapp"
+  speed={1.5}
+  height={400}
+  ariaLabel="Animated terminal replay of defenseclaw sandbox activity for a Claude Code sandbox on a Mac: the sandbox is created and ready, the project copy is uploaded, package and source hosts are allowed, a shadow AI warning for api.openai.com, a paste site refused with its unblock command, an ask for a port on the Mac, a flagged tool call and a webhook site refused."
+  caption="Recorded on DefenseClaw 1.0.4 from a real Claude Code sandbox on a Mac (MicroVM, copy mode). `⚠ shadow AI` is the finding, each `✗` line for a refused site ends with the command that lifts the block, the `?` line is an ask waiting for you, and the `⚠ Bash allowed but flagged` line is a tool call that DefenseClaw's hooks recorded and allowed (the default pack observes). The 1.0.3 recording ended with a blocked tool call; the default pack in 1.0.4 allows and flags it instead."
+  frames={[
+    { type: "cmd", text: "defenseclaw sandbox activity --sandbox myapp-19f3", pauseMs: 700 },
+    { type: "out", text: "15:00:39 creating sandbox myapp-19f3" },
+    { type: "out", text: "15:02:31 sandbox myapp-19f3 is ready" },
+    { type: "out", text: "15:02:33 uploaded the project copy" },
+    { type: "ok", text: "15:04:34 ✓ registry.npmjs.org" },
+    { type: "ok", text: "15:04:37 ✓ api.github.com" },
+    { type: "warn", text: "15:04:39 ⚠ shadow AI: reached api.openai.com (OpenAI)" },
+    { type: "ok", text: "15:04:39 ✓ api.openai.com" },
+    { type: "out", text: "15:04:41 ✗ pastebin.com (paste site)  → unblock: defenseclaw sandbox unblock pastebin.com --sandbox myapp-19f3" },
+    { type: "out", text: "15:04:45 ? ask ap_9d93e548e5332e92: host.openshell.internal:8765 (the sandbox asks to reach port 8765 on your machine (--host-port 8765))  → defenseclaw sandbox approve myapp-19f3 ap_9d93e548e5332e92" },
+    { type: "ok", text: "15:04:48 ✓ pypi.org" },
+    { type: "out", text: "15:05:28 approved port 8765 on your machine (host.openshell.internal:8765)" },
+    { type: "out", text: "15:06:58 pulled the sandbox's changes (apply)" },
+    { type: "out", text: "15:07:27 reverted the last apply of the sandbox's changes" },
+    { type: "ok", text: "15:07:51 ✓ example.org:80" },
+    { type: "warn", text: "15:08:27 ⚠ Bash allowed but flagged by DefenseClaw: C2-WEBHOOK-SITE (webhook.site (known exfil))" },
+    { type: "out", text: "15:08:27 ✗ webhook.site (webhook catcher)  → unblock: defenseclaw sandbox unblock webhook.site --sandbox myapp-19f3" },
+  ]}
+/>
+
+![DefenseClaw TUI Asks view on Linux: sandbox svc asks to reach host port 9418 (git) on the OpenShell 0.1.5 gateway (docker driver) and waits for an answer](/images/sandboxes/screens/tui-sandboxes-asks.png)
 
 ### Keys
 
 | Key | Action |
 | --- | --- |
-| `t` | Switch between Sandboxes, Activity and Asks |
 | `n` | Start a new sandboxed run |
 | `c` | Connect: start a stopped sandbox and attach its harness |
-| `s` | Stop the sandbox (asks first). It is kept, so `c` resumes it. |
-| `d` | Delete the sandbox (asks first). Undo is no longer possible. |
-| `R` | Review the changed files that can run code on your machine (a live mount) |
-| `P` | Pull the work of a sandbox on a copy: show it, apply it, or put it on a branch (`dc/NAME`, or a name you type) |
-| `U` | Undo: restore the pre-session snapshot, or revert the last pull on a copy |
-| `u` | Unblock a blocked site: **Only in** this sandbox, or **In every sandbox (always)** |
-| `a` / `A` / `x` | Approve an ask once, always approve it, or reject it |
-| `w` | Turn the shell wrapper on or off per harness, so `claude` runs sandboxed |
-| `r` | Refresh now |
+| `s` / `d` | Stop (kept) or delete the sandbox, after asking |
+| `R` / `P` | Review changed files (live mount), or pull a copy's work |
+| `U` | Undo the pre-session snapshot, or the last pull on a copy |
+| `u` | Unblock a blocked site, for this sandbox or all |
+| `a` / `A` / `x` | Approve an ask once, always, or reject it |
+| `w` | Turn the shell wrapper on or off per harness |
 
-The KEYS line at the bottom of the panel lists the keys that apply to the
-selected row, for example:
-
-```text
-KEYS  t view | c connect | s stop | d delete | U undo | R review | u unblock
-```
-
-Confirmations for delete, undo and the "always" choices start on
-**Cancel**. The unblock dialog says why DefenseClaw blocked the site. Blocks
-of private networks, metadata addresses and your organization's block lists
-cannot be lifted here.
+The KEYS line at the bottom lists the keys that apply to the selected row. Blocks of private networks, metadata addresses and your organization's block lists cannot be lifted here.
 
 ### Sandbox details
 
-`Enter` on a sandbox opens its details: the harness, phase, pack, the
-repository policy when the project has one (`.defenseclaw/sandbox.yaml:
-tightened 2 settings (network.mode, egress.block)`, as the launch banner
-says), project and
-the counts of sites and tool calls, how a stopped sandbox's last detached run
-ended (`finished: exited with status 0` or `did not finish: the sandbox stopped
-while it ran`, with its `sandbox logs` command), the hook events DefenseClaw
-received, the last blocked tool call, the image the sandbox runs, and the
-process tree when
-it is on (see
-[see what the sandbox runs](/docs/sandboxes/guide#see-what-the-sandbox-runs)).
-The dialog scrolls.
+![DefenseClaw TUI sandbox details on Linux: a mounted project, sites contacted and blocked, hook event counts, the last tool block (C2-METADATA-AWS), and one row per destination: the model provider, two shadow AI sites, package registries, source hosting and a refused paste site](/images/sandboxes/screens/tui-sandbox-destinations.png)
 
-![DefenseClaw TUI details of one sandbox on a Mac, started with the process tree on: name, harness, phase, uptime, pack, the project copy, sites contacted and blocked with the AI summary, tool calls, the hook events, the last blocked tool call, the run image, the process tree with a running curl, the pull and undo notes, and a Destination row for each site](/images/sandboxes/screens/tui-sandbox-processes.png)
+![DefenseClaw TUI sandbox details on a Mac in copy mode: asks waiting, the process tree from OpenShell's runtime through the DefenseClaw supervisor and Claude Code to a rate-limited curl, the pull and undo actions, and the destinations](/images/sandboxes/screens/tui-sandbox-processes.png)
 
-Each **Destination** row further down is one line of
-`defenseclaw sandbox destinations NAME`: the site, what it is, its requests and
-the program that connected, with its parents when the process tree is on.
-This one is from a Linux host, for a running sandbox started with
-`--process-tree`. The shadow AI service has no program next to it (its
-connection was too short for the tree), and the package registry shows `curl`
-under `bash` under `claude`:
+![defenseclaw sandbox ps myapp-claude --tree on Linux: OpenShell's runtime as the root, a login shell, the DefenseClaw supervisor, Claude Code, a shell it started and the rate-limited curl under that shell](/images/sandboxes/screens/terminal-sandbox-ps-tree-linux.png)
 
-![DefenseClaw TUI details of one running sandbox on Linux: harness, phase, pack, the live project, sites contacted and blocked with the AI summary, tool calls, hook events, the last blocked tool call, the image, the process tree with a running curl, and a Destination row for each site with its kind, requests and the program that connected with its parents](/images/sandboxes/screens/tui-sandbox-destinations.png)
+<TerminalAnimation
+  cwd="~/code/myapp"
+  speed={1.5}
+  height={320}
+  ariaLabel="Animated terminal replay of defenseclaw sandbox destinations for a Claude Code sandbox on Linux: one shadow AI destination, the model provider, a site the blocklist refused, package registries and a source host, each with its requests, bytes and the program that connected."
+  caption="Recorded on DefenseClaw 1.0.4 from a real Claude Code copy-mode sandbox named `myapp-a84c` on RHEL 9 with the process tree on and a model key from Amazon Bedrock. `api.openai.com` is shadow AI, `pastebin.com` was refused by the blocklist, and the BINARY column shows the program that connected. In 1.0.4 the BINARY column shows the program only (`/usr/bin/curl`); the parent chain (`curl ← bash ← claude`) from earlier builds did not appear here."
+  frames={[
+    { type: "cmd", text: "defenseclaw sandbox destinations myapp-a84c", pauseMs: 700 },
+    { type: "dim", text: "DESTINATION                       KIND                  PROVIDER        REQUESTS           UP / DOWN         BINARY                                    LAST SEEN" },
+    { type: "out", text: "api.openai.com                    shadow AI             OpenAI          1                  799 B / 4.1 KiB   /usr/bin/curl                             10-26 14:17" },
+    { type: "out", text: "bedrock-mantle.us-east-1.api.aws  model provider        Amazon Bedrock  10, 8 model calls  0 B / 0 B         …fenseclaw-harness/claudecode/bin/claude  10-26 14:17" },
+    { type: "out", text: "pastebin.com                      blocked (paste site)  -               0 (1 refused)      0 B / 0 B         /usr/bin/curl                             10-26 14:17" },
+    { type: "out", text: "pypi.org                          package registry      -               1                  762 B / 10.0 MiB  /usr/bin/curl                             10-26 14:18" },
+    { type: "out", text: "example.org:80                    other                 -               1                  74 B / 577 B      /usr/bin/curl                             10-26 14:17" },
+    { type: "out", text: "registry.npmjs.org                package registry      -               1                  782 B / 3.2 KiB   /usr/bin/curl                             10-26 14:17" },
+    { type: "out", text: "api.github.com                    source hosting        -               1                  783 B / 6.6 KiB   /usr/bin/curl                             10-26 14:17" },
+    { type: "warn", text: "⚠ 1 AI destination the harness does not use (shadow AI); block one with `defenseclaw sandbox policy block HOST`" },
+  ]}
+/>
+
+<TerminalAnimation
+  cwd="~/code/myapp"
+  speed={1.5}
+  height={420}
+  ariaLabel="Animated terminal replay of defenseclaw sandbox ps --tree: the sandbox's init process, a login shell, the DefenseClaw supervisor, Claude Code, and a shell that Claude Code started with a curl under it."
+  caption="Recorded on DefenseClaw 1.0.4 from a real Claude Code sandbox on a Mac, started with `--process-tree`, while a rate-limited `curl` ran: `curl` under `bash` under `claude`. In 1.0.4 each process prints as a block (pid, ppid, up, command) with the command indented by its depth, not as a table."
+  frames={[
+    { type: "cmd", text: "defenseclaw sandbox ps myapp-19f3 --tree", pauseMs: 700 },
+    { type: "out", text: "1" },
+    { type: "out", text: "  ppid     0" },
+    { type: "out", text: "  up       2m" },
+    { type: "out", text: "  command  /.openshell-bootstrap/opt/openshell/bin/openshell-sandbox launch-capability-free 509 20 /.openshell/state/bootstrap-<id>.json" },
+    { type: "out", text: "383" },
+    { type: "out", text: "  ppid     1" },
+    { type: "out", text: "  up       2m" },
+    { type: "out", text: "  command    /bin/bash -l" },
+    { type: "out", text: "463" },
+    { type: "out", text: "  ppid     1" },
+    { type: "out", text: "  up       2m" },
+    { type: "out", text: "  command    /usr/bin/python3 -I -S /usr/local/lib/defenseclaw/bin/dc_supervisor.py /usr/bin/env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u CDPATH -u" },
+    { type: "out", text: "468" },
+    { type: "out", text: "  ppid     463" },
+    { type: "out", text: "  up       2m" },
+    { type: "out", text: "  command      /usr/local/bin/claude --dangerously-skip-permissions" },
+    { type: "out", text: "1555" },
+    { type: "out", text: "  ppid     468" },
+    { type: "out", text: "  up       17s" },
+    { type: "out", text: "  command        /bin/bash -c source /sandbox/.claude/shell-snapshots/snapshot-bash-<id>.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && eval 'curl -s --limit-rate 20k -m 60 -o /dev/null -w \"%{http_code}\\n\" https://pypi.org/simple/' < /dev/null && pwd" },
+    { type: "out", text: "1560" },
+    { type: "out", text: "  ppid     1555" },
+    { type: "out", text: "  up       17s" },
+    { type: "out", text: "  command          curl -s --limit-rate 20k -m 60 -o /dev/null -w %{http_code}\\n https://pypi.org/simple/" },
+    { type: "dim", text: "  sampled every 5s; a process that starts and ends between two samples is not seen" },
+  ]}
+/>
 
 ### Start a run from the TUI
 
-Press `n` for **New sandboxed run**.
+`n` opens the launch dialog: harness, project folder, optional name, network profile, work on a copy (ticked and locked on a Mac), and keep the harness's prompts (`--safe`). `Ctrl+S` starts it and the TUI hands over your terminal until the harness exits.
 
-![DefenseClaw TUI New sandboxed run dialog on a Mac: harness, project folder, name, network profile, work on a copy (ticked and locked), keep the harness's own permission prompts](/images/sandboxes/screens/tui-sandbox-launch.png)
-
-| Field | Meaning |
-| --- | --- |
-| Harness | Claude Code, Codex or another harness DefenseClaw runs. The ones you set up come first. |
-| Project folder | The only folder the agent sees. Your home folder and system folders are refused. |
-| Name | Optional. The default is the folder name plus a short random suffix. |
-| Network profile | The pack default, `open`, `balanced` or `strict`. See [network profiles](/docs/sandboxes/network#network-profiles). |
-| Work on a copy | Same as `--copy`. On a Mac it is ticked and locked, with the note that `P` pulls the changes back. |
-| Keep the harness's own permission prompts | Same as `--safe`. |
-
-`Ctrl+S` starts and `Esc` cancels. The TUI hands your terminal to
-`defenseclaw sandbox run`, exactly as on the command line. The harness owns
-the terminal until it exits; after the end-of-session summary, `Enter`
-brings the TUI back.
-
-### Set up from the TUI
-
-Press `0` for Setup and choose **Sandboxes (OpenShell)** under **Guardrail &
-scanning**. The wizard checks the machine with `defenseclaw sandbox doctor`
-first, then shows setup's questions as fields:
-
-- **Action**: `setup`, or `doctor` to only check the machine.
-- **Harnesses**: Claude Code and Codex by default, and the other harnesses
-  DefenseClaw runs.
-- **Credentials**: which model key each harness would get, by name, never
-  its value.
-- **Install OpenShell**: on Linux with NVIDIA's installer, on a Mac from the
-  `nvidia/openshell` Homebrew formula.
-- **Mount project folder**: Linux only. On a Mac a **MicroVMs** section says
-  that every run works on a copy.
-- **OpenShell telemetry off**: on a Mac it names
-  `~/.config/openshell/gateway.env`, which the Homebrew service reads, and it
-  is not shown for a gateway no Homebrew service runs.
-- **Shell wrappers** and **Build images now**.
-
-Your answers are the consent: the wizard runs
-`defenseclaw sandbox setup --non-interactive` with the matching flags, and
-only `sudo` may still ask for your password. On Windows the wizard says that
-OpenShell sandboxes run on Linux and macOS only.
-
-![DefenseClaw TUI Setup, Sandboxes (OpenShell) wizard on a Mac: the command it will run, the harness choices, credentials, this machine's checks, the Install OpenShell option, the MicroVMs note and the OpenShell telemetry option](/images/sandboxes/screens/tui-setup.png)
-
-On Linux the wizard has a MicroVMs section only where the host has KVM. Its
-**This machine** checks name the Docker driver's needs (Docker, Landlock, OpenShell, bind mounts), and it asks
-**Mount Project Folder** and **OpenShell Telemetry Off**, each with what
-changing the answer restarts:
-
-![DefenseClaw TUI Setup, Sandboxes (OpenShell) wizard on Linux: the command it will run, the harness choices, credentials, this machine's checks for Docker, Landlock, OpenShell 0.1.2 and bind mounts, and the Install OpenShell, Mount Project Folder and OpenShell Telemetry Off options](/images/sandboxes/screens/tui-setup-linux.png)
-
-The full reference for the panel is in the [TUI guide](/docs/tui#sandboxes-panel).
+![DefenseClaw TUI New sandboxed run dialog on a Mac: harness, project folder, name, network profile, work on a copy, keep the harness's own permission prompts](/images/sandboxes/screens/tui-sandbox-launch.png)
 
 ## The macOS app
 
-The [DefenseClaw macOS app](/docs/macos-app) shows sandboxes in four places:
-the Sandboxes view, the menu bar, notifications and an Overview card. It
-refreshes every few seconds while it is open.
-
 ### The Sandboxes view
 
-Open **Sandboxes** in the sidebar, under **Govern**, or press `⌘⇧B`.
-
-{/* SCREENSHOT: macos-app-sandboxes.png — macOS app Sandboxes view with one running sandbox selected, the status line, the Sandboxes table, and the Activity card with a blocked site and its Unblock menu */}
-
-- **Header:** the status line (how many sandboxes run, how many there are,
-  how many asks wait, and the gateway), and two buttons: **Copy run command** copies
-  `cd <project> && defenseclaw sandbox run claude`, and **Refresh** reads the
-  daemon again.
-- **Sandboxes:** a table with Name, Phase, Harness, Pack/Profile, Mode, Up,
-  Sites and Alerts.
-- **The selected sandbox:** its harness, project, skip-permissions mode,
-  tool calls, hook events, last tool block and undo point, with actions.
-- **Asks:** each waiting ask, which reads `<sandbox> wants <kind>:
-  <host:port>`, with **Approve**, **Always…** and **Reject**.
-- **Activity:** the 60 newest events. A blocked site you can lift has an
-  **Unblock** menu: **Only in** the sandbox, or **In every sandbox
-  (always)…**, which asks first.
-
-The app has no launch dialog. Start runs in Terminal with the command
-**Copy run command** puts on the clipboard.
+The [macOS app](/docs/macos-app) shows sandboxes in the Sandboxes view (under **Govern**, or `⌘⇧B`), the menu bar and notifications. It refreshes every few seconds. The view has a table of sandboxes, a list of waiting asks and the 60 newest events.
 
 ### Sandbox details and actions
 
-{/* SCREENSHOT: macos-app-sandbox-detail.png — the selected sandbox's details in the macOS app (Harness, Project, Skip-permissions, Tool calls, Hook events, Last tool block, Undo, Run image) with the Stop…, Copy pull command, Pull to branch, Undo… and Copy connect command buttons */}
-
-| Action | What it does |
-| --- | --- |
-| **Stop…** | Asks first, then stops the sandbox. It is kept, and `defenseclaw sandbox connect NAME` resumes it. |
-| **Copy pull command** | Copies `defenseclaw sandbox pull NAME`. In Terminal it shows the changes, and `--apply`, `--branch` or `--patch-out FILE` brings them back. |
-| **Pull to branch** | Puts the work on branch `dc/NAME` and leaves your working tree alone. A change that can run code on your Mac is not brought back this way: pull it in Terminal, where it asks. |
-| **Review changes** | For a live mount (Linux): lists the changed files that can run code on your machine. |
-| **Undo…** | Asks first. On a copy it reverts the last `pull --apply`; on a live mount it restores the pre-session snapshot. |
-| **Copy connect command** | Copies the command that resumes the sandbox. |
-
-On a Mac every sandbox works on a copy, so you see the pull buttons rather
-than **Review changes**.
+Each selected sandbox offers **Stop…**, **Copy pull command**, **Pull to branch**, **Review changes**, **Undo…** and **Copy connect command**. The app has no launch dialog: start runs in Terminal.
 
 ### Menu bar and notifications
 
-Once sandboxes are on, the menu-bar popover gets a **Sandboxes** section:
-the number of active sandboxes, up to three of them with their harness and
-uptime, up to two blocked sites with an **Unblock** button for that sandbox,
-and up to two waiting asks.
+With **Notify on sandbox blocked destinations and asks** on in the app's settings, you get a notification for a blocked site (**Unblock for this sandbox**), an ask, a new git repository in a mounted project, and hooks that cannot reach DefenseClaw. At most one arrives per sandbox and site per minute. Unblocking a site everywhere is a confirmed choice in the Sandboxes view.
 
-With **Notify on sandbox blocked destinations and asks (with Unblock)** on
-in the app's settings, you get a notification when:
+## Check it worked
 
-| Event | Notification | Actions |
-| --- | --- | --- |
-| A blocked site you can unblock | "Blocked `<host>`": the sandbox tried to reach it, and why | **Unblock for this sandbox**, **Review** |
-| An ask | "`<sandbox>` asks for access" | **Review** |
-| A new git repository in a mounted project | "`<sandbox>`: planted git repository" | **Review** |
-| Hooks that cannot reach DefenseClaw | "`<sandbox>`: hooks are not reaching DefenseClaw" | **Review** |
+Run `defenseclaw sandbox run claude` in a terminal. The sandbox appears in the TUI Sandboxes panel or the app within a few seconds, and its sites appear in **Activity**.
 
-{/* SCREENSHOT: macos-app-blocked-notification.png — a macOS notification "Blocked webhook.site" from DefenseClaw with the Unblock for this sandbox and Review actions */}
+## Next
 
-**Unblock for this sandbox** needs an unlocked Mac. It lifts the block for
-that one sandbox only; unblocking a site everywhere is a confirmed choice in
-the Sandboxes view. **Review** opens the Sandboxes view. The app sends at
-most one notification per sandbox and site per minute.
-
-### Set up from the app
-
-Open **Setup** and choose **Sandbox**. Pick **setup** or **doctor**, tick
-**Claude Code**, **Codex** or both, and choose **Shell wrappers** and
-**Build images now**. The app runs
-`defenseclaw sandbox setup --non-interactive` with your answers as flags.
-
-{/* SCREENSHOT: macos-app-setup-wizard.png — macOS app Setup → Sandbox wizard with Action, Claude Code, Codex, Shell wrappers and Build images now */}
-
-The app never installs OpenShell. If it is missing, run
-`defenseclaw sandbox setup --install-openshell` in Terminal first. See
-[sandboxes on macOS](/docs/sandboxes/macos#set-up). On OpenShell 0.1.1 or 0.1.2
-that command also upgrades OpenShell to 0.1.3 in place, which restarts the gateway
-(see [upgrade OpenShell](/docs/sandboxes/guide#upgrade-openshell)).
-
-When sandboxes are off, the Sandboxes view says so and offers **Open
-Setup**. When they are unavailable, it offers **Run sandbox doctor**.
-
-The full reference is in the [macOS app guide](/docs/macos-app#openshell-sandboxes).
+- [Unblock a site](/docs/sandboxes/guide)
+- [TUI](/docs/tui) and [macOS app](/docs/macos-app)

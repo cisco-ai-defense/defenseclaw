@@ -30,18 +30,21 @@ const (
 )
 
 type windowsTargetRuntimeOptions struct {
-	manifest   string
-	request    string
-	claims     string
-	output     string
-	validation bool
+	manifest            string
+	skipBusyProfiles    bool
+	skipAccountFailures bool
+	request             string
+	claims              string
+	output              string
+	validation          bool
 }
 
 var (
-	windowsTargetRuntimeManifestTrust = managed.ValidateTrustedFilePath
+	windowsTargetRuntimeManifestTrust = managed.ValidateTrustedPolicyFilePath
 	windowsTargetRuntimeRequestTrust  = managed.ValidateTrustedFilePath
 	windowsTargetRuntimeAdminValidate = enterprisehooks.ValidateWindowsManagedRuntimeAdminFile
 	windowsTargetRuntimeManifestLoad  = enterprisehooks.LoadManifest
+	windowsTargetRuntimeManifestWrite = enterprisehooks.WriteTargetsManifestAtomic
 )
 
 func newWindowsTargetRuntimeCommand() *cobra.Command {
@@ -67,6 +70,10 @@ func newWindowsTargetRuntimeCommand() *cobra.Command {
 		if action == "plan" {
 			flags.StringVar(&opts.manifest, "manifest", "", "protected targets.yaml")
 			flags.BoolVar(&opts.validation, "validate-only", false, "Upgrade/Repair plan: validate existing roots and report a deferred account's pending root")
+			flags.BoolVar(&opts.skipBusyProfiles, "skip-busy-profiles", false,
+				"fresh Install only: leave out users whose profile folder stays busy, removing them from targets.yaml")
+			flags.BoolVar(&opts.skipAccountFailures, "skip-account-failures", false,
+				"standalone Upgrade/Repair only: leave unusable account roots pending without changing their folders")
 		} else {
 			flags.StringVar(&opts.request, "request", "", "protected target-runtime plan JSON")
 			if action == "finalize" || action == "cleanup" {
@@ -84,7 +91,7 @@ func runWindowsTargetRuntimeAction(cmd *cobra.Command, action string, opts *wind
 	}
 	// Authorization precedes every protected-file read so an unelevated caller
 	// cannot use this hidden command as a manifest/transaction oracle.
-	if err := enterpriseHooksNativePlatformPreflight(); err != nil {
+	if err := enterpriseHooksPlatformPreflight(); err != nil {
 		return err
 	}
 	output, err := requireWindowsTargetRuntimeProtectedPath(opts.output, "target-runtime output")
@@ -102,8 +109,25 @@ func runWindowsTargetRuntimeAction(cmd *cobra.Command, action string, opts *wind
 			return err
 		}
 		var plan enterprisehooks.WindowsManagedRuntimePlan
-		if opts.validation {
+		if opts.validation && opts.skipBusyProfiles {
+			return errors.New("target-runtime plan: --skip-busy-profiles is for a fresh Install and cannot be combined with --validate-only")
+		}
+		if opts.skipAccountFailures && !opts.validation {
+			return errors.New("target-runtime plan: --skip-account-failures requires --validate-only")
+		}
+		if opts.validation && opts.skipAccountFailures {
+			plan, err = enterprisehooks.PlanWindowsManagedRuntimeRootsForValidationSkippingAccountFailures(manifest, manifestPath, digest)
+		} else if opts.validation {
 			plan, err = enterprisehooks.PlanWindowsManagedRuntimeRootsForValidation(manifest, manifestPath, digest)
+		} else if opts.skipBusyProfiles {
+			plan, err = enterprisehooks.PlanWindowsManagedRuntimeRootsSkippingBusyProfiles(
+				manifest,
+				manifestPath,
+				digest,
+				func(reduced enterprisehooks.Manifest) (string, error) {
+					return publishWindowsTargetRuntimeManifest(manifestPath, reduced)
+				},
+			)
 		} else {
 			plan, err = enterprisehooks.PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest)
 		}
@@ -189,6 +213,27 @@ func runWindowsTargetRuntimeAction(cmd *cobra.Command, action string, opts *wind
 		return windowsTargetRuntimePublicMutationError(action, err)
 	}
 	return nil
+}
+
+// publishWindowsTargetRuntimeManifest writes the manifest without the skipped
+// users through the same protected writer the enumerator uses, then re-reads
+// it under the target-runtime trust checks and returns the digest of the
+// exact bytes now on disk.
+func publishWindowsTargetRuntimeManifest(path string, reduced enterprisehooks.Manifest) (string, error) {
+	// A process without the standalone scope would re-stamp a drifted
+	// manifest in place before the replace (GAP-1048).
+	defer pinWindowsStandaloneTrustScope()()
+	if _, err := windowsTargetRuntimeManifestWrite(path, reduced); err != nil {
+		return "", err
+	}
+	published, digest, err := loadWindowsTargetRuntimeManifest(path)
+	if err != nil {
+		return "", err
+	}
+	if len(published.Targets) != len(reduced.Targets) {
+		return "", errors.New("published target-runtime manifest does not match the reduced target set")
+	}
+	return digest, nil
 }
 
 func loadWindowsTargetRuntimeManifest(path string) (enterprisehooks.Manifest, string, error) {

@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
+from defenseclaw.inventory.claude_desktop import ClaudeDesktopInfo
+
 AIDiscoveryState = Literal["new", "changed", "active", "seen", "gone"]
 
 AI_MODEL_RECOMMENDED_MIN_CONFIDENCE = 0.8
@@ -352,6 +354,8 @@ class AIUsageSignal:
     component: AIUsageComponent | None = None
     model: AIUsageModel | None = None
     runtime: AIUsageRuntime | None = None
+    # Claude Desktop and Cowork facts (the claude_desktop detector only).
+    claude_desktop: ClaudeDesktopInfo | None = None
     evidence_types: tuple[str, ...] = ()
     # The OpenShell sandbox a sandbox scan found the signal in (empty: this
     # machine).
@@ -390,6 +394,7 @@ class AIUsageSignal:
             component=AIUsageComponent.from_mapping(component_raw if isinstance(component_raw, Mapping) else None),
             model=AIUsageModel.from_mapping(model_raw if isinstance(model_raw, Mapping) else None),
             runtime=AIUsageRuntime.from_mapping(runtime_raw if isinstance(runtime_raw, Mapping) else None),
+            claude_desktop=ClaudeDesktopInfo.from_mapping(raw.get("claude_desktop")),
             evidence_types=evidence_types,
             sandbox_name=str(raw.get("sandbox_name") or ""),
         )
@@ -1146,6 +1151,8 @@ class AIDiscoveryPanelModel:
                 if signal.runtime.comm:
                     parts.append(f"comm={signal.runtime.comm}")
                 lines.append(" ".join(parts))
+            if signal.claude_desktop:
+                lines.append(f"claude desktop: {signal.claude_desktop.summary()}")
             if signal.last_active_at:
                 lines.append(f"last active: {humanize_age(now - signal.last_active_at)} ago")
             elif signal.last_seen:

@@ -30,8 +30,11 @@ const hermesLastToolCallTTL = 10 * time.Minute
 // that call carries one, so the transform record had no session and no agent
 // instance (GAP-0945). A terminal output that names its task (extra.task_id)
 // takes the session of that task; Hermes 0.21.5 names none, so it takes the
-// session of the last pre_tool_call of the same agent identity. Tasks and
-// calls are kept per agent identity (agt-): two users never share one.
+// session of the last pre_tool_call of the same agent identity, while that
+// agent identity runs one chat: once another session of it made a tool call
+// within hermesLastToolCallTTL, the output's chat is not known and it keeps
+// no session (GAP-1131). Tasks and calls are kept per agent identity (agt-):
+// two users never share one.
 type hermesTaskSessions struct {
 	mu       sync.Mutex
 	sessions map[hermesTaskKey]string
@@ -43,6 +46,9 @@ type hermesTaskKey struct{ identity, task string }
 type hermesLastToolCall struct {
 	session string
 	at      time.Time
+	// sharedAt is when a tool call of another session last came within
+	// hermesLastToolCallTTL of one of this session.
+	sharedAt time.Time
 }
 
 // fill records the session of a Hermes hook that names one, and gives a
@@ -79,7 +85,14 @@ func (m *hermesTaskSessions) fill(req *agentHookRequest) {
 					break
 				}
 			}
-			m.lastCall[req.AgentIdentityID] = hermesLastToolCall{session: req.SessionID, at: now}
+			call := hermesLastToolCall{session: req.SessionID, at: now}
+			if last, ok := m.lastCall[req.AgentIdentityID]; ok {
+				call.sharedAt = last.sharedAt
+				if last.session != req.SessionID && now.Sub(last.at) <= hermesLastToolCallTTL {
+					call.sharedAt = now
+				}
+			}
+			m.lastCall[req.AgentIdentityID] = call
 		}
 		if task == "" {
 			return
@@ -101,7 +114,8 @@ func (m *hermesTaskSessions) fill(req *agentHookRequest) {
 		session = m.sessions[key]
 	}
 	if last, ok := m.lastCall[req.AgentIdentityID]; session == "" && event == "transformterminaloutput" && ok &&
-		now.Sub(last.at) <= hermesLastToolCallTTL {
+		now.Sub(last.at) <= hermesLastToolCallTTL &&
+		(last.sharedAt.IsZero() || now.Sub(last.sharedAt) > hermesLastToolCallTTL) {
 		session = last.session
 	}
 	if session != "" {

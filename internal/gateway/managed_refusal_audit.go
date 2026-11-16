@@ -4,24 +4,31 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
 	"golang.org/x/time/rate"
+
+	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // managedRefusalAuditPath is the hook-socket route a standard user CLI
 // reports a refused policy write on. A standard user holds no gateway token,
 // so the token-authenticated CLI ingress (cliObservabilityV8Path) is closed
 // to it; the kernel-verified peer of this socket is its credential instead.
-const managedRefusalAuditPath = "/api/v1/managed/refusal"
+const managedRefusalAuditPath = managed.CommandRefusalPath
 
 const (
 	managedRefusalMaxBodyBytes    = 4 << 10
@@ -93,14 +100,16 @@ type managedRefusalRequest struct {
 	Action  string `json:"action"`
 	Target  string `json:"target"`
 	Details string `json:"details,omitempty"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 // handleManagedRefusalAudit records, in the managed audit store, a policy
 // write that a local account attempted on a managed device and the CLI
 // refused. The caller is the kernel-verified peer of the hook socket, never
-// a name the request carries, and the row always reads outcome=refused
-// reason=managed_device plus one type= or command= field, so the route can
-// not be used to record anything else. Each account is rate limited.
+// a name the request carries, and the row always reads outcome=refused,
+// reason=managed_device (or not_root for a lifecycle command a standard
+// account ran) and one type= or command= field, so the route can not be
+// used to record anything else. Each account is rate limited.
 func (a *APIServer) handleManagedRefusalAudit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
@@ -122,6 +131,7 @@ func (a *APIServer) handleManagedRefusalAudit(w http.ResponseWriter, r *http.Req
 	err := decoder.Decode(&request)
 	field, fieldOK := managedRefusalField(request.Details)
 	if err != nil || !fieldOK || !managedRefusalActions[request.Action] ||
+		(request.Reason != "" && request.Reason != "not_root") ||
 		strings.TrimSpace(request.Target) == "" || len(request.Target) > managedRefusalMaxTargetBytes ||
 		len(request.Details) > managedRefusalMaxDetailsBytes ||
 		!utf8.ValidString(request.Target) || !utf8.ValidString(request.Details) {
@@ -132,7 +142,11 @@ func (a *APIServer) handleManagedRefusalAudit(w http.ResponseWriter, r *http.Req
 		http.Error(w, "{\"error\":\"too many refusal records\"}", http.StatusTooManyRequests)
 		return
 	}
-	details := fmt.Sprintf("outcome=refused reason=managed_device actor=uid:%d", peer.UID)
+	reason := "managed_device"
+	if request.Reason != "" {
+		reason = request.Reason
+	}
+	details := fmt.Sprintf("outcome=refused reason=%s actor=uid:%d", reason, peer.UID)
 	if name := strings.TrimSpace(stripLogInjectionRunes(peer.Name)); name != "" {
 		details += " user=" + strings.ReplaceAll(name, " ", "_")
 	}
@@ -145,4 +159,98 @@ func (a *APIServer) handleManagedRefusalAudit(w http.ResponseWriter, r *http.Req
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// managedPolicyViewAlertQueueSize is how many policy-view alerts may wait
+// for the audit store. Each account adds at most managedRefusalBurst at
+// once (managedAlertLimits), so a full queue means the store has stalled.
+const managedPolicyViewAlertQueueSize = 64
+
+// managedPolicyViewAlert is one policy-view alert, with every fact taken
+// from its call before the call is served.
+type managedPolicyViewAlert struct {
+	uid       int
+	connector string
+	route     string
+	envelope  audit.CorrelationEnvelope
+}
+
+// managedPolicyViewAlerts records policy-view alerts off the path of the
+// call that carries them: one writer drains a bounded queue, so an audit
+// store that stalls can delay the alerts, never the call's verdict (review
+// loop round 3, P2). An alert the full queue cannot take is counted and
+// reported with the next one written.
+type managedPolicyViewAlerts struct {
+	start   sync.Once
+	queue   chan managedPolicyViewAlert
+	dropped atomic.Uint64
+}
+
+// writeManagedPolicyViewAlert is the queue's writer (a test seam).
+var writeManagedPolicyViewAlert = (*APIServer).writeManagedPolicyViewAlert
+
+func (q *managedPolicyViewAlerts) enqueue(a *APIServer, alert managedPolicyViewAlert) bool {
+	q.start.Do(func() {
+		q.queue = make(chan managedPolicyViewAlert, managedPolicyViewAlertQueueSize)
+		go func() {
+			for alert := range q.queue {
+				writeManagedPolicyViewAlert(a, alert)
+				if n := q.dropped.Swap(0); n > 0 {
+					fmt.Fprintf(os.Stderr, "[sidecar-api] %d hook policy-view alerts were not recorded: the audit store did not keep up\n", n)
+				}
+			}
+		}()
+	})
+	select {
+	case q.queue <- alert:
+		return true
+	default:
+		q.dropped.Add(1)
+		return false
+	}
+}
+
+// managedPolicyViewHostAlert is the uid of a queued alert that no call
+// raised: the gateway found a view it can not prove when the policy changed
+// (publishManagedPolicyView).
+const managedPolicyViewHostAlert = -1
+
+// recordManagedPolicyViewAlert queues the gateway log line and the HIGH
+// runtime alert for a managed hook call under a vendor policy view the
+// gateway can not prove, and returns at once: the call is served without
+// waiting for either. The connector comes from the route scope and the
+// account from the kernel-verified peer; each account is rate limited like
+// refusal rows.
+func (a *APIServer) recordManagedPolicyViewAlert(r *http.Request, peer managedHookPeer, route string) {
+	if !a.managedAlertLimits.allow(peer.UID) {
+		return
+	}
+	connectorName, _ := a.managedHookRouteScope(r)
+	a.managedAlerts.enqueue(a, managedPolicyViewAlert{
+		uid: peer.UID, connector: connectorName, route: route,
+		envelope: audit.EnvelopeFromContext(r.Context()),
+	})
+}
+
+// writeManagedPolicyViewAlert writes one queued policy-view alert.
+func (a *APIServer) writeManagedPolicyViewAlert(alert managedPolicyViewAlert) {
+	actor := "host"
+	if alert.uid != managedPolicyViewHostAlert {
+		actor = "uid:" + strconv.Itoa(alert.uid)
+	}
+	fmt.Fprintf(os.Stderr,
+		"[sidecar-api] policy-view alert actor=%s connector=%q route=%s reason=%s: the managed vendor policy differs from the trusted pin or can not be read; managed hook calls are still inspected under the managed policy\n",
+		actor, alert.connector, alert.route, hookexec.ManagedPolicyViewReason)
+	if a.logger == nil {
+		return
+	}
+	envelope := alert.envelope
+	envelope.Connector = alert.connector
+	ctx := audit.ContextWithEnvelope(context.Background(), envelope)
+	if err := a.logger.LogAlertCtx(ctx, "managed_hook", "HIGH", hookexec.ManagedPolicyViewReason, map[string]any{
+		"actor": actor,
+		"route": alert.route,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "[sidecar-api] policy-view alert by %s was not recorded: %v\n", actor, err)
+	}
 }

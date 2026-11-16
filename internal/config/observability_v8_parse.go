@@ -29,6 +29,11 @@ type ObservabilityV8CompileOptions struct {
 	// uses the secrets directory next to it and any other source resolves
 	// none.
 	CredentialsDir string
+	// TolerateDeniedPaths compares a file path this account may not inspect
+	// by its name instead of refusing it. Offline bundle sign and verify set
+	// it: they check a target device's paths and run as any account, so a
+	// standard user on a managed device cannot read the service data_dir.
+	TolerateDeniedPaths bool
 }
 
 type ObservabilityV8CompiledConfig struct {
@@ -95,12 +100,13 @@ func ParseCompileObservabilityV8(
 		source.Local.JudgeBodiesPath = filepath.Join(dataDir, DefaultJudgeBodiesDBName)
 		source.judgePathDefaulted = true
 	}
+	resolveObservabilityV8StorePaths(&source, dataDir)
 	configuredFiles := append([]string(nil), options.ConfiguredFilePaths...)
 	if observabilityV8SourceNameIsPath(sourceName) {
 		configuredFiles = append(configuredFiles, sourceName)
 	}
 	secureClient := secureClientManagedDocument(runtime.GOOS, v8DocumentRoot(document.Document))
-	pathWarnings, err := validateObservabilityV8FilePaths(&source, configuredFiles, !secureClient)
+	pathWarnings, err := validateObservabilityV8FilePaths(&source, configuredFiles, !secureClient, options.TolerateDeniedPaths)
 	if err != nil {
 		return nil, annotateObservabilityV8SemanticError(document, err)
 	}

@@ -80,6 +80,7 @@ jq -s -r --arg mode "$mode" '
 	    "Hosts not ready: \(if ($notready | length) > 0 then ($notready | map(.host) | join(", ")) else "none" end)",
 	    "Hosts not checked: \(if ($unchecked | length) > 0 then ($unchecked | join(", ")) else "none" end)",
 	    "Users enforcing: \($users | map(select(.phase == "enforcing")) | length)",
+	    "Users armed (enforce loaded, no agent session anchored yet): \($users | map(select(.phase == "armed")) | length)",
 	    "Users ready for enforce: \($users | map(select(.phase == "ready")) | length)",
 	    "Users in burn-in: \($users | map(select(.phase == "burn_in")) | length)",
 	    "Users reset by a hit: \($users | map(select(.phase == "reset")) | length)",

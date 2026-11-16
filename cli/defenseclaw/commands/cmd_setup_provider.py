@@ -182,6 +182,8 @@ class _Overlay:
 
     providers: list[dict[str, Any]]
     ollama_ports: list[int]
+    # Seeded from a legacy operator overlay, which the save then replaces.
+    from_legacy: bool = False
 
     @classmethod
     def empty(cls) -> _Overlay:
@@ -397,6 +399,7 @@ def _load_providers(app: AppContext | None, path: str, *, seed_legacy: bool = Tr
             tls = dict(tls)
             tls["ca_cert_file"] = _store_legacy_ca(app, str(entry.get("name") or "provider"), tls.pop("ca_cert_pem"))
             entry["tls"] = tls
+    legacy.from_legacy = True
     return legacy
 
 
@@ -437,12 +440,21 @@ def _save_providers(app: AppContext | None, path: str, overlay: _Overlay) -> str
         providers.append(entry)
     app.cfg.llm_providers = _merge_llm_providers({"custom": providers, "ollama_ports": overlay.ollama_ports})
     app.cfg.save()
-    derived_providers.write(app.cfg, path)
+    derived_providers.write(app.cfg, path, absorbed=overlay.from_legacy)
     kept = derived_providers.legacy_request_override_providers(path)
     if kept:
         ux.subhead(
             f"{path} sets request_overrides for {', '.join(kept)} and stays a live input that the gateway "
             "merges with llm_providers; edit or remove it by hand once those overrides are no longer needed.",
+            indent="  ",
+        )
+        return "config.yaml llm_providers"
+    if derived_providers.overlay_state(app.cfg, path)[0] == derived_providers.STATE_LEGACY:
+        # GAP-0163: replacing it would drop what config.yaml does not hold.
+        ux.subhead(
+            f"{path} is a legacy overlay with providers or values that llm_providers in config.yaml does not "
+            "hold; it stays a live input that the gateway merges (config.yaml's values win). Run "
+            "`defenseclaw migrate` to fold it into config.yaml, or to see the fields that disagree.",
             indent="  ",
         )
         return "config.yaml llm_providers"
@@ -1861,8 +1873,16 @@ def _echo_provider_enforcement_legend(app: AppContext) -> None:
     configures DefenseClaw's judge/aux model only.
     """
     guardrail = getattr(app.cfg, "guardrail", None) if app.cfg else None
-    connector = connector_paths.normalize(getattr(guardrail, "connector", "") or "openclaw")
+    active = getattr(app.cfg, "active_connector", None) if app.cfg else None
+    connector = connector_paths.normalize(
+        active() if callable(active) else getattr(guardrail, "connector", "")
+    )
     click.echo()
+    if not connector:
+        ux.echo(
+            ux.dim("  No agent connector configured; a bound provider can serve DefenseClaw's judge/aux model only.")
+        )
+        return
     if platform_support.is_proxy_connector(connector):
         click.echo(
             ux.dim(

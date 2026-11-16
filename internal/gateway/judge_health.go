@@ -38,6 +38,30 @@ type judgeHealthTracker struct {
 	// unavailable says why the enabled judge could not start; the hook and
 	// proxy lanes then run on the rules only (GAP-0383).
 	unavailable string
+	// fallbacks counts the hook checks the rules decided because the judge
+	// gave no verdict in time, per connector, since the judge started
+	// (#1395).
+	fallbacks          map[string]int
+	lastFallback       string
+	lastFallbackReason string
+	lastFallbackAt     time.Time
+}
+
+// judgeHealthMaxFallbackConnectors bounds the per-connector fallback map.
+const judgeHealthMaxFallbackConnectors = 32
+
+func (t *judgeHealthTracker) recordFallback(connector, reason string, now time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.fallbacks == nil {
+		t.fallbacks = map[string]int{}
+	}
+	if _, ok := t.fallbacks[connector]; ok || len(t.fallbacks) < judgeHealthMaxFallbackConnectors {
+		t.fallbacks[connector]++
+	} else {
+		t.fallbacks["other"]++
+	}
+	t.lastFallback, t.lastFallbackReason, t.lastFallbackAt = connector, reason, now
 }
 
 var judgeHealth judgeHealthTracker
@@ -76,6 +100,8 @@ func (t *judgeHealthTracker) reset() {
 	t.count, t.next = 0, 0
 	t.lastError, t.lastFailure = "", time.Time{}
 	t.unavailable = ""
+	t.fallbacks = nil
+	t.lastFallback, t.lastFallbackReason, t.lastFallbackAt = "", "", time.Time{}
 }
 
 // details returns the judge_* health details, or nil before the first call.
@@ -89,7 +115,12 @@ func (t *judgeHealthTracker) details() map[string]interface{} {
 		}
 	}
 	if t.count == 0 {
-		return nil
+		if len(t.fallbacks) == 0 {
+			return nil
+		}
+		details := map[string]interface{}{}
+		t.addFallbackDetailsLocked(details)
+		return details
 	}
 	failed := 0
 	for i := 0; i < t.count; i++ {
@@ -113,7 +144,26 @@ func (t *judgeHealthTracker) details() map[string]interface{} {
 		details["judge_last_error"] = t.lastError
 		details["judge_last_failure_at"] = t.lastFailure.UTC().Format(time.RFC3339)
 	}
+	t.addFallbackDetailsLocked(details)
 	return details
+}
+
+// addFallbackDetailsLocked adds judge_fallbacks (total),
+// judge_fallbacks_by_connector and the last fallback when there were any.
+func (t *judgeHealthTracker) addFallbackDetailsLocked(details map[string]interface{}) {
+	if len(t.fallbacks) == 0 {
+		return
+	}
+	total := 0
+	byConnector := make(map[string]interface{}, len(t.fallbacks))
+	for connector, n := range t.fallbacks {
+		total += n
+		byConnector[connector] = n
+	}
+	details["judge_fallbacks"] = total
+	details["judge_fallbacks_by_connector"] = byConnector
+	details["judge_last_fallback"] = t.lastFallbackReason + " (" + t.lastFallback + ")"
+	details["judge_last_fallback_at"] = t.lastFallbackAt.UTC().Format(time.RFC3339)
 }
 
 // withJudgeHealth returns h with the judge_* details merged into a copy of

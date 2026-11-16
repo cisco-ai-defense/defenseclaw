@@ -21,6 +21,33 @@ import (
 	selinuxpolicy "github.com/defenseclaw/defenseclaw/packaging/selinux"
 )
 
+// A module in the store of a policy type the host does not run (mls next to
+// an active targeted policy) is not loaded for the kernel: status reports it
+// missing and the next transaction loads it into the active store (p0
+// GAP-1184).
+func TestSELinuxModuleInAnInactiveStoreIsNotLoaded(t *testing.T) {
+	h := newTestHost(t, "linux")
+	writeHostFile(t, h, "/sys/fs/selinux/enforce", "1\n")
+	writeHostFile(t, h, "/etc/selinux/config", "SELINUX=enforcing\nSELINUXTYPE=targeted\n")
+	writeHostFile(t, h, "/var/lib/selinux/mls/active/modules/400/defenseclaw/cil", "x")
+	writeHostFile(t, h, filepath.Join(h.env.Layout.LifecycleDir, selinuxModuleStamp), sha256Bytes(selinuxpolicy.Module())+"\n")
+	if !h.env.selinuxModuleStale() {
+		t.Fatal("a module in the inactive mls store counted as loaded")
+	}
+	writeHostFile(t, h, "/var/lib/selinux/targeted/active/modules/400/defenseclaw/cil", "x")
+	if h.env.selinuxModuleStale() {
+		t.Fatal("the module in the active targeted store did not count")
+	}
+	writeHostFile(t, h, "/etc/selinux/config", "SELINUXTYPE=mls\n")
+	if got := h.env.selinuxPolicyType(); got != "mls" {
+		t.Fatalf("policy type %q, want mls", got)
+	}
+	writeHostFile(t, h, "/etc/selinux/config", "SELINUXTYPE=../x\n")
+	if got := h.env.selinuxPolicyType(); got != "targeted" {
+		t.Fatalf("a path-like policy type was used: %q", got)
+	}
+}
+
 // GAP-0772: SELinux-confined users (user_u, staff_u) could not stat the
 // var_run_t hook socket, so every hook they ran was refused while status and
 // verify were green. On an SELinux host the install loads the DefenseClaw

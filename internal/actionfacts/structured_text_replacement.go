@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/netip"
-	"regexp"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -18,7 +17,7 @@ const (
 	maxStructuredReplacementIPv4s      = 16
 )
 
-var literalIPv4CandidatePattern = regexp.MustCompile(`(?:[0-9]{1,3}\.){3}[0-9]{1,3}`)
+var literalIPv4CandidatePattern = lazyMustCompile(`(?:[0-9]{1,3}\.){3}[0-9]{1,3}`)
 
 // ExactFirewallTrustExpansionIPv4 returns the only literal IPv4 address added
 // by one direct replacement of the protected firewall configuration. The old

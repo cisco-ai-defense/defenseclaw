@@ -57,10 +57,12 @@ func runStandaloneWindowsEnumerateCycleForTest(t *testing.T, cfg *config.Config)
 	previousConfig := enterpriseWindowsEnumerateConfigLoader
 	previousEnumerator := enterpriseWindowsEnumerateProfileEnumerator
 	previousWriter := enterpriseWindowsEnumerateManifestWriter
+	previousRecordWriter := enterpriseWindowsEnumerateUnprotectedWriter
 	t.Cleanup(func() {
 		enterpriseWindowsEnumerateConfigLoader = previousConfig
 		enterpriseWindowsEnumerateProfileEnumerator = previousEnumerator
 		enterpriseWindowsEnumerateManifestWriter = previousWriter
+		enterpriseWindowsEnumerateUnprotectedWriter = previousRecordWriter
 	})
 	enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) { return cfg, nil }
 	calls := 0
@@ -72,6 +74,7 @@ func runStandaloneWindowsEnumerateCycleForTest(t *testing.T, cfg *config.Config)
 		calls++
 		return false, nil
 	}
+	enterpriseWindowsEnumerateUnprotectedWriter = func(string, []enterprisehooks.UnprotectedAgent) (bool, error) { return false, nil }
 	stderr := new(bytes.Buffer)
 	manifest := filepath.Join(t.TempDir(), "targets.yaml")
 	if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), stderr, manifest); err != nil {
@@ -81,13 +84,14 @@ func runStandaloneWindowsEnumerateCycleForTest(t *testing.T, cfg *config.Config)
 }
 
 // enterprise.enrollment.mode manifest hands targets.yaml to the
-// administrator on Windows too: the enumerator neither walks nor publishes.
+// administrator on Windows too: the enumerator scans profiles for private
+// agents while leaving targets.yaml untouched.
 func TestEnterpriseWindowsEnumerateIdlesInManifestMode(t *testing.T) {
 	log, calls := runStandaloneWindowsEnumerateCycleForTest(t, standaloneWindowsEnrollmentConfig(
 		config.EnterpriseEnrollmentConfig{Mode: config.EnterpriseEnrollmentManifest},
 	))
-	if calls != 0 {
-		t.Fatalf("manifest mode walked or published targets (%d calls)", calls)
+	if calls != 1 {
+		t.Fatalf("manifest mode must scan profiles without publishing targets (%d calls)", calls)
 	}
 	if !strings.Contains(log, "cycle idle: enterprise.enrollment.mode is manifest") {
 		t.Fatalf("idle cycle must say why; log:\n%s", log)
@@ -101,6 +105,46 @@ func TestEnterpriseWindowsEnumerateIdlesInManifestMode(t *testing.T) {
 	}
 }
 
+func TestEnterpriseWindowsManifestModePublishesPrivateInstallScan(t *testing.T) {
+	cfg := standaloneWindowsEnrollmentConfig(config.EnterpriseEnrollmentConfig{Mode: config.EnterpriseEnrollmentManifest})
+	manifest := filepath.Join(t.TempDir(), "targets.yaml")
+	previousConfig, previousEnumerator := enterpriseWindowsEnumerateConfigLoader, enterpriseWindowsEnumerateProfileEnumerator
+	previousWriter, previousRecordWriter := enterpriseWindowsEnumerateManifestWriter, enterpriseWindowsEnumerateUnprotectedWriter
+	t.Cleanup(func() {
+		enterpriseWindowsEnumerateConfigLoader, enterpriseWindowsEnumerateProfileEnumerator = previousConfig, previousEnumerator
+		enterpriseWindowsEnumerateManifestWriter, enterpriseWindowsEnumerateUnprotectedWriter = previousWriter, previousRecordWriter
+	})
+	enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) { return cfg, nil }
+	enterpriseWindowsEnumerateProfileEnumerator = func(_ context.Context, _ *config.Config, opts enterprisehooks.EnumerateOptions) (enterprisehooks.Manifest, error) {
+		if opts.ReportUnprotected == nil {
+			t.Fatal("manifest mode did not enable unprotected install reporting")
+		}
+		opts.ReportUnprotected(enterprisehooks.UnprotectedAgent{
+			User: "alice", SID: "S-1-5-21-1-2-3-1001", Connector: "claudecode", Version: "2.0.77",
+			Code: enterprisehooks.UnprotectedCodeHookContractUnverified, InstallPath: `C:\Users\alice\old`,
+		})
+		return enterprisehooks.Manifest{Version: 1}, nil
+	}
+	enterpriseWindowsEnumerateManifestWriter = func(string, enterprisehooks.Manifest) (bool, error) {
+		t.Fatal("manifest mode rewrote administrator targets")
+		return false, nil
+	}
+	var published []enterprisehooks.UnprotectedAgent
+	enterpriseWindowsEnumerateUnprotectedWriter = func(path string, agents []enterprisehooks.UnprotectedAgent) (bool, error) {
+		if path != manifest {
+			t.Fatalf("record manifest path = %q", path)
+		}
+		published = append([]enterprisehooks.UnprotectedAgent(nil), agents...)
+		return true, nil
+	}
+	if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), new(bytes.Buffer), manifest); err != nil {
+		t.Fatal(err)
+	}
+	if len(published) != 1 || published[0].Version != "2.0.77" {
+		t.Fatalf("manifest mode hid private copy: %+v", published)
+	}
+}
+
 func TestEnterpriseWindowsManifestCyclePublishesCurrentUsersGroupFacts(t *testing.T) {
 	const alice = "S-1-5-21-111-222-333-1001"
 	const bob = "S-1-5-21-111-222-333-1002"
@@ -108,7 +152,10 @@ func TestEnterpriseWindowsManifestCyclePublishesCurrentUsersGroupFacts(t *testin
 	cfg.DataDir = t.TempDir()
 	manifestPath := filepath.Join(t.TempDir(), "targets.yaml")
 	home := t.TempDir()
-	data := fmt.Sprintf("version: 1\ntargets:\n  - sid: %s\n    user_home: %s\n    connector: codex\n    agent_version: 0.200.0\n", alice, home)
+	// bob's row is disabled: he is not enrolled, so his installs are not
+	// inspected (GAP-0906).
+	data := fmt.Sprintf("version: 1\ntargets:\n  - sid: %s\n    user_home: %s\n    connector: codex\n    agent_version: 0.200.0\n"+
+		"  - sid: %s\n    user_home: %s\n    connector: codex\n    agent_version: 0.200.0\n    enabled: false\n", alice, home, bob, t.TempDir())
 	if err := os.WriteFile(manifestPath, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -119,6 +166,7 @@ func TestEnterpriseWindowsManifestCyclePublishesCurrentUsersGroupFacts(t *testin
 	previousCacheWriter := enterpriseWindowsEnumerateGroupCacheWriter
 	previousRefresher := enterpriseWindowsManifestGroupCacheRefresher
 	previousSpoolWriter := enterpriseWindowsIdentitySpoolWriter
+	previousRecordWriter := enterpriseWindowsEnumerateUnprotectedWriter
 	t.Cleanup(func() {
 		enterpriseWindowsEnumerateConfigLoader = previousConfig
 		enterpriseWindowsEnumerateProfileEnumerator = previousEnumerator
@@ -127,12 +175,17 @@ func TestEnterpriseWindowsManifestCyclePublishesCurrentUsersGroupFacts(t *testin
 		enterpriseWindowsEnumerateGroupCacheWriter = previousCacheWriter
 		enterpriseWindowsManifestGroupCacheRefresher = previousRefresher
 		enterpriseWindowsIdentitySpoolWriter = previousSpoolWriter
+		enterpriseWindowsEnumerateUnprotectedWriter = previousRecordWriter
 	})
 	enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) { return cfg, nil }
-	enterpriseWindowsEnumerateProfileEnumerator = func(context.Context, *config.Config, enterprisehooks.EnumerateOptions) (enterprisehooks.Manifest, error) {
-		t.Fatal("manifest mode walked user profiles")
-		return enterprisehooks.Manifest{}, nil
+	// The profile walk is the install scan only: it is given the
+	// administrator's enabled targets as the accounts to inspect.
+	var subjects map[string]enterprisehooks.WindowsManifestSubject
+	enterpriseWindowsEnumerateProfileEnumerator = func(_ context.Context, _ *config.Config, opts enterprisehooks.EnumerateOptions) (enterprisehooks.Manifest, error) {
+		subjects = opts.ManifestSubjects
+		return enterprisehooks.Manifest{Version: 1}, nil
 	}
+	enterpriseWindowsEnumerateUnprotectedWriter = func(string, []enterprisehooks.UnprotectedAgent) (bool, error) { return true, nil }
 	enterpriseWindowsEnumerateManifestWriter = func(string, enterprisehooks.Manifest) (bool, error) {
 		t.Fatal("manifest mode rewrote administrator targets")
 		return false, nil
@@ -144,7 +197,7 @@ func TestEnterpriseWindowsManifestCyclePublishesCurrentUsersGroupFacts(t *testin
 	}
 	refreshed := false
 	enterpriseWindowsManifestGroupCacheRefresher = func(manifest enterprisehooks.Manifest, cache *enterprisehooks.WindowsEnrollmentGroupCache) (*enterprisehooks.WindowsEnrollmentGroupCache, error) {
-		if len(manifest.Targets) != 1 || manifest.Targets[0].SID != alice || len(cache.Users[bob]) != 1 {
+		if len(manifest.Targets) != 2 || manifest.Targets[0].SID != alice || len(cache.Users[bob]) != 1 {
 			t.Fatalf("manifest/cache = %+v / %+v", manifest, cache)
 		}
 		refreshed = true
@@ -153,7 +206,7 @@ func TestEnterpriseWindowsManifestCyclePublishesCurrentUsersGroupFacts(t *testin
 	}
 	enterpriseWindowsEnumerateGroupCacheWriter = func(string, *enterprisehooks.WindowsEnrollmentGroupCache) (bool, error) { return true, nil }
 	var published *enterprisehooks.WindowsEnrollmentGroupCache
-	enterpriseWindowsIdentitySpoolWriter = func(_ string, cache *enterprisehooks.WindowsEnrollmentGroupCache, _ map[string]map[string]string, _ func(string) error, _ func(string, ...any)) error {
+	enterpriseWindowsIdentitySpoolWriter = func(_ context.Context, _ string, cache *enterprisehooks.WindowsEnrollmentGroupCache, _ []string, _ map[string]map[string]string, _ func(string) error, _ func(string, ...any)) error {
 		published = cache
 		return nil
 	}
@@ -162,6 +215,9 @@ func TestEnterpriseWindowsManifestCyclePublishesCurrentUsersGroupFacts(t *testin
 	}
 	if !refreshed || published == nil || len(published.Users) != 1 || len(published.Users[alice]) != 1 {
 		t.Fatalf("manifest identity facts were not published: refreshed=%t cache=%+v", refreshed, published)
+	}
+	if len(subjects) != 1 || subjects[alice].Home != filepath.Clean(home) || strings.Join(subjects[alice].Connectors, ",") != "codex" {
+		t.Fatalf("manifest-mode install scan subjects = %+v, want only the enabled target", subjects)
 	}
 }
 
@@ -179,6 +235,7 @@ func TestEnterpriseWindowsEnumerateAppliesGroupFiltersAndPublishesUnprotectedAge
 	previousCacheLoader := enterpriseWindowsEnumerateGroupCacheLoader
 	previousCacheWriter := enterpriseWindowsEnumerateGroupCacheWriter
 	previousRecordWriter := enterpriseWindowsEnumerateUnprotectedWriter
+	previousSpoolWriter := enterpriseWindowsIdentitySpoolWriter
 	t.Cleanup(func() {
 		enterpriseWindowsEnumerateConfigLoader = previousConfig
 		enterpriseWindowsEnumerateProfileEnumerator = previousEnumerator
@@ -186,7 +243,17 @@ func TestEnterpriseWindowsEnumerateAppliesGroupFiltersAndPublishesUnprotectedAge
 		enterpriseWindowsEnumerateGroupCacheLoader = previousCacheLoader
 		enterpriseWindowsEnumerateGroupCacheWriter = previousCacheWriter
 		enterpriseWindowsEnumerateUnprotectedWriter = previousRecordWriter
+		enterpriseWindowsIdentitySpoolWriter = previousSpoolWriter
 	})
+	// The identity pass gets the cycle and the accounts the enrollment
+	// excluded (GAP-1049, GAP-1264).
+	var spoolExcluded []string
+	var spoolDeadline bool
+	enterpriseWindowsIdentitySpoolWriter = func(ctx context.Context, _ string, _ *enterprisehooks.WindowsEnrollmentGroupCache, excluded []string, _ map[string]map[string]string, _ func(string) error, _ func(string, ...any)) error {
+		spoolExcluded = excluded
+		_, spoolDeadline = ctx.Deadline()
+		return nil
+	}
 	enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) { return cfg, nil }
 	cached := enterprisehooks.NewWindowsEnrollmentGroupCache()
 	cached.Names["developers"] = "S-1-5-32-545"
@@ -202,6 +269,9 @@ func TestEnterpriseWindowsEnumerateAppliesGroupFiltersAndPublishesUnprotectedAge
 		seen = opts
 		if opts.ReportUnprotected != nil {
 			opts.ReportUnprotected(enterprisehooks.UnprotectedAgent{User: "alice", SID: "S-1-5-21-1-2-3-1001", Connector: "cursor", Version: "4.1.0", Reason: "version 4.1.0 is not verified against a known hook contract"})
+		}
+		if opts.ReportExcluded != nil {
+			opts.ReportExcluded(enterprisehooks.ManifestTarget{SID: "S-1-5-21-1-2-3-1002", UserHome: `C:\Users\bob`})
 		}
 		return enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{}}, nil
 	}
@@ -231,6 +301,9 @@ func TestEnterpriseWindowsEnumerateAppliesGroupFiltersAndPublishesUnprotectedAge
 	}
 	if len(published) != 1 || published[0].Connector != "cursor" {
 		t.Fatalf("published = %+v", published)
+	}
+	if strings.Join(spoolExcluded, ",") != "S-1-5-21-1-2-3-1002" || !spoolDeadline {
+		t.Fatalf("identity pass excluded = %v, cycle deadline = %v; want the excluded account and the cycle", spoolExcluded, spoolDeadline)
 	}
 	if log := stderr.String(); strings.Contains(log, "are not applied on Windows") || !strings.Contains(log, "cursor 4.1.0 for user alice") {
 		t.Fatalf("log:\n%s", log)

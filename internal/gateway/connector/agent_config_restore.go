@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -41,6 +42,12 @@ import (
 // install, which removes only the names it knows in
 // connector_backups\<connector>, knows theirs (AgentConfigBackupLeaves,
 // GAP-0588).
+//
+// The per-user Claude Code (~/.claude/settings.json) and Codex
+// (~/.codex/config.toml) setups keep the same copy and put the file back the
+// same way (GAP-0581); `defenseclaw setup` reads the notice and says what it
+// put back. Managed installs keep their own setup path for them, and the
+// standalone guardian reports only Hermes and Devin.
 
 // Where a missing agent config was put back from.
 const (
@@ -65,16 +72,35 @@ type agentConfigSpec struct {
 	// keys returns the top-level keys of a document the agent reads
 	// (false: not one).
 	keys func([]byte) ([]string, bool)
+	// owned are the top-level keys DefenseClaw's setup writes; any other
+	// key is the account's own setting.
+	owned []string
+	// perUserOnly: only an unmanaged per-user setup keeps the copy, and the
+	// standalone guardian does not report the file (Claude Code, Codex).
+	perUserOnly bool
 }
 
 func agentConfigSpecFor(connectorName string) (agentConfigSpec, bool) {
 	switch strings.ToLower(strings.TrimSpace(connectorName)) {
 	case "hermes":
-		return agentConfigSpec{connector: "hermes", logical: "config.yaml", label: "Hermes config", path: hermesConfigPath, keys: yamlTopKeys}, true
+		return agentConfigSpec{connector: "hermes", logical: "config.yaml", label: "Hermes config", path: hermesConfigPath, keys: yamlTopKeys, owned: []string{"hooks"}}, true
 	case "devin":
-		return agentConfigSpec{connector: "devin", logical: "config", label: "Devin config", path: devinHooksPath, keys: jsoncTopKeys}, true
+		return agentConfigSpec{connector: "devin", logical: "config", label: "Devin config", path: devinHooksPath, keys: jsoncTopKeys, owned: []string{"hooks"}}, true
+	case "claudecode":
+		return agentConfigSpec{connector: "claudecode", logical: "settings.json", label: "Claude Code settings",
+			path: func(SetupOpts) string { return claudeCodeSettingsPath() }, keys: jsoncTopKeys,
+			owned: []string{"hooks", "env"}, perUserOnly: true}, true
+	case "codex":
+		return agentConfigSpec{connector: "codex", logical: "config.toml", label: "Codex config",
+			path: func(SetupOpts) string { return codexConfigPath() }, keys: tomlTopKeys,
+			owned: []string{"hooks", "features", "notify", "otel"}, perUserOnly: true}, true
 	}
 	return agentConfigSpec{}, false
+}
+
+// keepsCopy reports whether this setup keeps and puts back the file.
+func (s agentConfigSpec) keepsCopy(opts SetupOpts) bool {
+	return !s.perUserOnly || (!opts.ManagedEnterprise && !opts.sandboxNativeOTLP)
 }
 
 // agentConfigCopy is the last known good copy of an agent config file.
@@ -83,7 +109,6 @@ type agentConfigCopy struct {
 	Path    string `json:"path"`
 	SHA256  string `json:"sha256"`
 	Bytes   []byte `json:"bytes"`
-	SavedAt string `json:"saved_at"`
 }
 
 // agentConfigNotice records how setup recreated a missing agent config.
@@ -96,8 +121,13 @@ type agentConfigNotice struct {
 	// could not put them back. It stays set across another loss of the file
 	// until the account has settings in it again: the file recreated without
 	// them is then the copy, which holds DefenseClaw's hooks only.
-	SettingsLost bool   `json:"settings_lost,omitempty"`
-	At           string `json:"at"`
+	SettingsLost bool `json:"settings_lost,omitempty"`
+	// HooksOnly is set when the copy that was put back held DefenseClaw's
+	// hooks only (a file setup created, say): `defenseclaw setup` then says
+	// the hooks were restored, not that the account's settings were
+	// (rel-1-0-6 GAP-0333).
+	HooksOnly bool   `json:"hooks_only,omitempty"`
+	At        string `json:"at"`
 }
 
 // The copy and the notice sit beside the managed backup record. Their names
@@ -112,6 +142,13 @@ func (s agentConfigSpec) noticePath(dataDir string) string {
 	return strings.TrimSuffix(record, ".json") + ".restore-notice"
 }
 
+// seenPath is the marker `defenseclaw setup` writes beside the notice with the
+// notice time it has reported (cli agent_config_notice.py), so each put-back
+// is said once (rel-1-0-6 GAP-0333).
+func (s agentConfigSpec) seenPath(dataDir string) string {
+	return s.noticePath(dataDir) + "-seen"
+}
+
 // AgentConfigBackupLeaves names the files the agent config of connectorName
 // keeps in connector_backups/<connector> beside its managed backup record
 // (the last known good copy and the restore notice); none for a connector
@@ -121,7 +158,7 @@ func AgentConfigBackupLeaves(connectorName string) []string {
 	if !ok {
 		return nil
 	}
-	return []string{filepath.Base(spec.copyPath("")), filepath.Base(spec.noticePath(""))}
+	return []string{filepath.Base(spec.copyPath("")), filepath.Base(spec.noticePath("")), filepath.Base(spec.seenPath(""))}
 }
 
 // agentConfigMaxBytes bounds the files read and kept.
@@ -161,6 +198,20 @@ func jsoncTopKeys(data []byte) ([]string, bool) {
 	return agentConfigTopKeys(doc), true
 }
 
+func tomlTopKeys(data []byte) ([]string, bool) {
+	if len(data) > agentConfigMaxBytes {
+		return nil, false
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil, true
+	}
+	doc := map[string]interface{}{}
+	if err := parseCodexTOML(data, &doc); err != nil {
+		return nil, false
+	}
+	return agentConfigTopKeys(doc), true
+}
+
 func agentConfigTopKeys(doc map[string]interface{}) []string {
 	keys := make([]string, 0, len(doc))
 	for key := range doc {
@@ -169,15 +220,15 @@ func agentConfigTopKeys(doc map[string]interface{}) []string {
 	return keys
 }
 
-// hasSettings reports whether a file holds anything but DefenseClaw's hooks
-// field.
+// hasSettings reports whether a file holds anything but the fields
+// DefenseClaw's setup writes.
 func (s agentConfigSpec) hasSettings(data []byte) bool {
 	keys, ok := s.keys(data)
 	if !ok {
 		return true // not a document setup wrote: the account's own
 	}
 	for _, key := range keys {
-		if key != "hooks" {
+		if !slices.Contains(s.owned, key) {
 			return true
 		}
 	}
@@ -225,7 +276,6 @@ func (s agentConfigSpec) recordCopy(dataDir, configPath string) error {
 		Path:    configPath,
 		SHA256:  sha256Hex(data),
 		Bytes:   data,
-		SavedAt: time.Now().UTC().Format(time.RFC3339),
 	})
 	if err != nil {
 		return err
@@ -258,7 +308,11 @@ func (s agentConfigSpec) seedMissing(dataDir, configPath string) (string, error)
 	case !os.IsNotExist(err):
 		return "", err
 	case !haveCopy:
-		return "", nil // a first setup
+		if _, copyErr := os.Lstat(s.copyPath(dataDir)); copyErr != nil {
+			return "", nil // a first setup
+		}
+		// The backup record is gone but a copy is there that no longer
+		// reads: DefenseClaw saw settings it cannot put back (GAP-0612).
 	}
 	haveRecord := err == nil
 	notice := agentConfigNotice{Version: agentConfigCopyVersion, Path: configPath, Source: AgentConfigHooksOnly,
@@ -291,6 +345,8 @@ func (s agentConfigSpec) seedMissing(dataDir, configPath string) (string, error)
 		notice.SettingsLost = notice.SettingsLost || pristine || copyErr == nil
 	} else if err := atomicWriteFile(configPath, seed, mode); err != nil {
 		return "", fmt.Errorf("put back %s %s: %w", s.label, configPath, err)
+	} else {
+		notice.HooksOnly = !s.hasSettings(seed)
 	}
 	if err := s.writeNotice(dataDir, notice); err != nil {
 		return notice.Source, err
@@ -327,7 +383,34 @@ func (s agentConfigSpec) readNotice(dataDir string) (agentConfigNotice, bool) {
 // manages).
 func (s agentConfigSpec) removeCopies(dataDir string) error {
 	var errs []error
-	for _, path := range []string{s.copyPath(dataDir), s.noticePath(dataDir)} {
+	for _, path := range []string{s.copyPath(dataDir), s.noticePath(dataDir), s.seenPath(dataDir)} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// removeOtherTargetState retires a valid copy and notice for a different
+// config target, including state left after a receipt moved to this target.
+// State with an unreadable target stays in place for recovery review.
+func (s agentConfigSpec) removeOtherTargetState(dataDir, target string) error {
+	var paths []string
+	if notice, ok := s.readNotice(dataDir); ok && notice.Path != "" && !sameManagedTargetPath(notice.Path, target) {
+		paths = append(paths, s.noticePath(dataDir), s.seenPath(dataDir))
+	}
+	if data, info, err := readManagedTarget(s.copyPath(dataDir)); err == nil && info != nil &&
+		info.Mode().IsRegular() && len(data) <= 4*agentConfigMaxBytes {
+		var copy agentConfigCopy
+		if json.Unmarshal(data, &copy) == nil && copy.Path != "" &&
+			!sameManagedTargetPath(copy.Path, target) {
+			if _, ok := s.readCopy(dataDir, copy.Path); ok {
+				paths = append(paths, s.copyPath(dataDir))
+			}
+		}
+	}
+	var errs []error
+	for _, path := range paths {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			errs = append(errs, err)
 		}
@@ -351,6 +434,33 @@ func recordAgentConfigCopy(connectorName, dataDir, configPath string) {
 	}
 }
 
+// seedMissingPerUserSettings and recordPerUserSettingsCopy are the Claude
+// Code and Codex setup's: their settings file, on an unmanaged per-user
+// install only (GAP-0581).
+func seedMissingPerUserSettings(connectorName string, opts SetupOpts) error {
+	spec, ok := agentConfigSpecFor(connectorName)
+	if !ok || !spec.keepsCopy(opts) {
+		return nil
+	}
+	_, err := spec.seedMissing(opts.DataDir, spec.path(opts))
+	return err
+}
+
+func recordPerUserSettingsCopy(connectorName string, opts SetupOpts) {
+	if spec, ok := agentConfigSpecFor(connectorName); ok && spec.keepsCopy(opts) {
+		_ = spec.recordCopy(opts.DataDir, spec.path(opts)) // best effort: the next setup keeps it too
+	}
+}
+
+// removePerUserSettingsCopies is teardown's: the copy holds the account's
+// settings and describes a file DefenseClaw no longer manages.
+func removePerUserSettingsCopies(connectorName, dataDir string) error {
+	if spec, ok := agentConfigSpecFor(connectorName); ok {
+		return spec.removeCopies(dataDir)
+	}
+	return nil
+}
+
 // What the standalone guardian reports for an account's agent config
 // (AgentConfigStatus). The enterprise status and verify word them; the
 // worker's answer carries only the code, as the account controls the worker.
@@ -368,13 +478,32 @@ const (
 	// DefenseClaw saw settings of the account in it that it could not put
 	// back; reported until the account has settings in the file again.
 	AgentConfigSettingsLost = "settings_lost"
+	// AgentConfigNativeOTLPTakeBackPending: the Codex or Claude Code config
+	// of the account keeps a native OTLP exporter an earlier per-user install
+	// wrote, which the managed install could not remove
+	// (NativeOTLPTakeBackPending, GAP-1839).
+	AgentConfigNativeOTLPTakeBackPending = "native_otlp_take_back_pending"
+	// AgentConfigNativeOTLPUnchecked (Codex, Claude Code on standalone
+	// Windows): a configuration the account's agent reads reaches, through
+	// a link or outside the profile, a file the account does not own, so
+	// the guardian could not check it for an earlier per-user native OTLP
+	// exporter (GAP-0929). Its hooks are in place: a warning, not a failed
+	// row.
+	AgentConfigNativeOTLPUnchecked = "native_otlp_unchecked"
+	// AgentConfigNativeOTLPMarkedRemoved (Codex, Claude Code on standalone
+	// Windows): the managed install removed an exporter of an earlier
+	// per-user install that only its DefenseClaw markers and an unserved
+	// loopback port proved, and kept a copy of the file (GAP-0836). Reported
+	// while the copy is there.
+	AgentConfigNativeOTLPMarkedRemoved = "native_otlp_marked_removed"
 )
 
 // ValidAgentConfigStatus reports whether code is one AgentConfigStatus
 // returns ("" included).
 func ValidAgentConfigStatus(code string) bool {
 	switch code {
-	case "", AgentConfigRestoredLastGood, AgentConfigRestoredPristine, AgentConfigRecreatedHooksOnly, AgentConfigSettingsLost:
+	case "", AgentConfigRestoredLastGood, AgentConfigRestoredPristine, AgentConfigRecreatedHooksOnly, AgentConfigSettingsLost,
+		AgentConfigNativeOTLPUnchecked, AgentConfigNativeOTLPTakeBackPending, AgentConfigNativeOTLPMarkedRemoved:
 		return true
 	}
 	return false
@@ -391,12 +520,17 @@ func ValidAgentConfigStatus(code string) bool {
 // for other connectors.
 func AgentConfigStatus(connectorName string, opts SetupOpts, since time.Time, refresh bool) string {
 	spec, ok := agentConfigSpecFor(connectorName)
-	if !ok {
+	if !ok || spec.perUserOnly {
 		return ""
 	}
 	configPath := spec.path(opts)
 	if strings.TrimSpace(configPath) == "" {
 		return ""
+	}
+	if refresh {
+		// A successful verify establishes the current target even if an
+		// earlier target's notice survived its receipt migration.
+		_ = spec.removeOtherTargetState(opts.DataDir, configPath)
 	}
 	status := ""
 	if notice, ok := spec.readNotice(opts.DataDir); ok && sameManagedTargetPath(notice.Path, configPath) {
@@ -406,8 +540,17 @@ func AgentConfigStatus(connectorName string, opts SetupOpts, since time.Time, re
 		switch {
 		case notice.SettingsLost && !settingsBack:
 			status = AgentConfigSettingsLost
+		case !settingsBack:
+			// A copy put back that held DefenseClaw's hooks only (a file
+			// setup created, say), or a file recreated without one, is
+			// reported as hooks only, not as the user's settings, and stays
+			// reported until the account has settings in it again. The
+			// guardian's next verify used to drop it seconds after the
+			// repair, so status and verify never showed it (rel-1-0-2
+			// GAP-0612).
+			status = AgentConfigRecreatedHooksOnly
 		case since.IsZero() || at.Before(since.Add(-time.Second)):
-			// Reported by the setup that recreated the file.
+			// Reported by the setup that put the file back.
 		case notice.Source == AgentConfigFromLastGood:
 			status = AgentConfigRestoredLastGood
 		case notice.Source == AgentConfigFromPristine:
@@ -415,7 +558,7 @@ func AgentConfigStatus(connectorName string, opts SetupOpts, since time.Time, re
 		default:
 			status = AgentConfigRecreatedHooksOnly
 		}
-		if refresh && (!notice.SettingsLost || settingsBack) {
+		if refresh && settingsBack {
 			_ = os.Remove(spec.noticePath(opts.DataDir))
 		}
 	}
@@ -423,6 +566,25 @@ func AgentConfigStatus(connectorName string, opts SetupOpts, since time.Time, re
 		_ = spec.recordCopy(opts.DataDir, configPath)
 	}
 	return status
+}
+
+// nativeOTLPConfigFiles names, per connector, the agent configuration an
+// AgentConfigNativeOTLPUnchecked notice is about.
+var nativeOTLPConfigFiles = map[string]string{"codex": "a Codex config.toml", "claudecode": "a Claude Code settings.json"}
+
+// nativeOTLPUncheckedNotice words AgentConfigNativeOTLPUnchecked for the
+// administrator's status and verify (warning native_otlp_config_unchecked):
+// which configuration of which account the guardian could not check, and
+// the remedy, never its path or values.
+func nativeOTLPUncheckedNotice(connectorName, user string) (string, bool) {
+	file, ok := nativeOTLPConfigFiles[connectorName]
+	if !ok {
+		return "", false
+	}
+	return fmt.Sprintf("%s for user %s: %s that the agent reads reaches a file the account does not own, through a link or "+
+		"outside the profile, so DefenseClaw cannot check it for a native OTLP exporter from an earlier per-user install, "+
+		"and repair leaves it as it is (it revokes that install's DefenseClaw credential): replace it with the account's "+
+		"own file, or remove the link, and the next repair checks it", connectorName, user, file), true
 }
 
 // agentConfigFiles names, per connector, the agent config a notice is about.
@@ -434,6 +596,15 @@ var agentConfigFiles = map[string]string{"hermes": "Hermes config.yaml", "devin"
 // AgentConfigStatus code). False for a code or connector it does not word,
 // which the per-user side may have written: only the known ones are.
 func AgentConfigNotice(connectorName, user, code string) (string, bool) {
+	if code == AgentConfigNativeOTLPTakeBackPending {
+		return nativeOTLPTakeBackPendingNotice(connectorName, user)
+	}
+	if code == AgentConfigNativeOTLPUnchecked {
+		return nativeOTLPUncheckedNotice(connectorName, user)
+	}
+	if code == AgentConfigNativeOTLPMarkedRemoved {
+		return nativeOTLPMarkedRemovedNotice(connectorName, user)
+	}
 	file, ok := agentConfigFiles[connectorName]
 	if !ok {
 		return "", false
@@ -443,7 +614,7 @@ func AgentConfigNotice(connectorName, user, code string) (string, bool) {
 	case AgentConfigSettingsLost:
 		what = "went missing and DefenseClaw had no copy of it to put back, so it holds DefenseClaw's hooks only: that user must enter the account's own settings in it (model, provider) again"
 	case AgentConfigRecreatedHooksOnly:
-		what = "went missing and DefenseClaw had no copy of it, so the guardian recreated it with DefenseClaw's hooks only: if that user had settings in it, they must be entered again"
+		what = "went missing and the guardian put it back with DefenseClaw's hooks only (DefenseClaw had no copy of it with that user's settings): if that user had settings in it, they must be entered again"
 	case AgentConfigRestoredLastGood:
 		what = "went missing; the guardian put back DefenseClaw's last copy of it, with that user's settings, and changes made after that copy are not in it"
 	case AgentConfigRestoredPristine:
@@ -452,4 +623,36 @@ func AgentConfigNotice(connectorName, user, code string) (string, bool) {
 		return "", false
 	}
 	return fmt.Sprintf("%s for user %s: the %s %s", connectorName, user, file, what), true
+}
+
+// nativeOTLPMarkedRemovedNotice words AgentConfigNativeOTLPMarkedRemoved.
+func nativeOTLPMarkedRemovedNotice(connectorName, user string) (string, bool) {
+	var file, what string
+	switch connectorName {
+	case "codex":
+		file, what = `.codex\config.toml`, "[otel] exporter tables"
+	case "claudecode":
+		file, what = `.claude\settings.json`, "OTEL_* env entries"
+	default:
+		return "", false
+	}
+	return fmt.Sprintf("%s for user %s: the managed install removed the %s of an earlier per-user DefenseClaw install from the account's %s "+
+		"(a 127.0.0.1 endpoint on a port the managed gateway does not serve, with DefenseClaw's x-defenseclaw-source and x-defenseclaw-client headers), "+
+		"so the agent no longer sends prompt telemetry to a port another account could hold; a copy of the file as it was is beside it (%s%s): "+
+		"if that exporter was the account's own collector, put it back from the copy; delete the copy to clear this notice",
+		connectorName, user, what, file, file, NativeOTLPMarkedOrphanBackupSuffix), true
+}
+
+// nativeOTLPTakeBackPendingNotice words AgentConfigNativeOTLPTakeBackPending.
+func nativeOTLPTakeBackPendingNotice(connectorName, user string) (string, bool) {
+	var file, step string
+	switch connectorName {
+	case "codex":
+		file, step = `.codex\config.toml`, "the [otel] exporter tables an earlier DefenseClaw setup wrote (a 127.0.0.1 endpoint with a DefenseClaw bearer)"
+	case "claudecode":
+		file, step = `.claude\settings.json`, "the OTEL_* entries and CLAUDE_CODE_ENABLE_TELEMETRY an earlier DefenseClaw setup wrote in its env block"
+	default:
+		return "", false
+	}
+	return fmt.Sprintf("%s for user %s: the account's %s still holds the native OTLP exporter of an earlier per-user DefenseClaw install, which the managed install could not remove (it could not read or write that file as the account, for example on a network share while the account was signed out); its DefenseClaw credential is revoked, but the agent may still send prompt telemetry to a port no DefenseClaw process holds: as that user, remove %s, then run repair (or the next ensure), which checks again and clears this warning", connectorName, user, file, step), true
 }

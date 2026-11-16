@@ -25,6 +25,9 @@ func withEnterpriseCredentialMutationLock(dataDir string, fn func() error) error
 	); err != nil {
 		return err
 	}
+	if err := managed.EnsureCanonicalLockFile(lockPath, managed.ObjectRuntimeFile); err != nil {
+		return fmt.Errorf("create ACP enterprise credential lock: %w", err)
+	}
 	name, err := windows.UTF16PtrFromString(lockPath)
 	if err != nil {
 		return fmt.Errorf("encode ACP enterprise credential lock path: %w", err)

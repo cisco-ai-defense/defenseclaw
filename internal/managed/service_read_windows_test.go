@@ -57,10 +57,13 @@ func TestValidateServiceCanReadTreeNamesAnUnreadableRulePack(t *testing.T) {
 	err := ValidateServiceCanReadTree(root, "guardrail.rule_pack_dir", account)
 	// The example icacls command is copyable as is: single backslashes
 	// (GAP-1477), not Go-quoted ones. It grants the service SID derived from
-	// the name, which icacls accepts before the service exists (#1251).
+	// the name. icacls refuses that SID with error 1332 until the service
+	// exists (#1251, GAP-0087), so the message also carries the PowerShell form.
 	serviceSID := "*" + WindowsServiceSIDString("TrustedInstaller")
 	if err == nil || !strings.Contains(err.Error(), "cannot read") || !strings.Contains(err.Error(), account) ||
-		!strings.Contains(err.Error(), `icacls "`+root+`" /grant "`+serviceSID+`:(OI)(CI)RX"`) {
+		!strings.Contains(err.Error(), `icacls "`+root+`" /grant "`+serviceSID+`:(OI)(CI)RX"`) ||
+		!strings.Contains(err.Error(), "error 1332 until the service exists") ||
+		!strings.Contains(strings.Join(printedGrantScripts(t, err.Error()), "\n"), "SecurityIdentifier]::new('"+strings.TrimPrefix(serviceSID, "*")+"'), 'ReadAndExecute', 'ContainerInherit,ObjectInherit'") {
 		t.Fatalf("admin-only rule pack: %v", err)
 	}
 	setDACL("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)", tree...)
@@ -82,7 +85,8 @@ func TestValidateServiceCanReadTreeNamesAnUnreadableRulePack(t *testing.T) {
 	setDACL("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x20020;;;BU)", parent)
 	err = ValidateServiceCanReadTree(root, "guardrail.rule_pack_dir", account)
 	if err == nil || !strings.Contains(err.Error(), "parent folder "+parent) ||
-		!strings.Contains(err.Error(), `icacls "`+parent+`" /grant "`+serviceSID+`:RX"`) {
+		!strings.Contains(err.Error(), `icacls "`+parent+`" /grant "`+serviceSID+`:RX"`) ||
+		!strings.Contains(strings.Join(printedGrantScripts(t, err.Error()), "\n"), "SecurityIdentifier]::new('"+strings.TrimPrefix(serviceSID, "*")+"'), 'ReadAndExecute', 'None'") {
 		t.Fatalf("pack under a locked parent: %v", err)
 	}
 	setDACL(readableParent, parent)
@@ -184,6 +188,58 @@ func TestValidateServiceCanWriteFileRequiresRotationPermission(t *testing.T) {
 	setDACL(folder, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x200c3;;;BU)")
 	if err := ValidateServiceCanWriteFile(path, account); err != nil {
 		t.Fatalf("folder permits rotation and pruning: %v", err)
+	}
+}
+
+// GAP-1432: compression reads each rotated file back. An existing file that
+// lets the service append to, rotate and prune it but not read it passes the
+// write check and fails the read-back check; Modify on it passes both. A
+// missing file passes even in a folder that passes no read to its files: the
+// gateway creates it with a protected DACL that gives the service full access.
+func TestValidateServiceCanReadRotatedFileRequiresReadData(t *testing.T) {
+	folder := t.TempDir()
+	path := filepath.Join(folder, "audit.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setDACL := func(path, sddl string) {
+		t.Helper()
+		sd, err := windows.SecurityDescriptorFromString(sddl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := sd.DACL()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const account = `NT SERVICE\TrustedInstaller`
+	// Modify on the folder itself; its files get Modify without read data.
+	setDACL(folder, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1301bf;;;BU)(A;OIIO;0x1301b6;;;BU)")
+	setDACL(path, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1301b6;;;BU)")
+	if err := ValidateServiceCanWriteFile(path, account); err != nil {
+		t.Fatalf("write check: %v", err)
+	}
+	if err := ValidateServiceCanReadRotatedFile(path, account); err == nil || !strings.Contains(err.Error(), "cannot read back "+path) {
+		t.Fatalf("accepted an existing file the service cannot read back: %v", err)
+	}
+	setDACL(path, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1301bf;;;BU)")
+	if err := ValidateServiceCanReadRotatedFile(path, account); err != nil {
+		t.Fatalf("Modify on the file: %v", err)
+	}
+	// The gateway creates a missing file itself, readable by the service.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateServiceCanWriteFile(path, account); err != nil {
+		t.Fatalf("write check, missing file: %v", err)
+	}
+	if err := ValidateServiceCanReadRotatedFile(path, account); err != nil {
+		t.Fatalf("refused a missing file the gateway would create readable: %v", err)
 	}
 }
 

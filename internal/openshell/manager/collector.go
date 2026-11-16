@@ -26,7 +26,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -35,6 +34,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 )
 
@@ -414,8 +414,8 @@ func (c *collection) started(p *collectedProcess) time.Time {
 }
 
 var (
-	collectEnvName  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
-	collectProcPath = regexp.MustCompile(`^/proc/([0-9]{1,10})$`)
+	collectEnvName  = lazyregexp.New(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
+	collectProcPath = lazyregexp.New(`^/proc/([0-9]{1,10})$`)
 )
 
 // parseCollection reads a collector answer. truncated reports an answer cut

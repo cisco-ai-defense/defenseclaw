@@ -7,8 +7,10 @@ package enterprisehooks
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,44 +31,111 @@ const maxClaudeProjectMCPBytes = 1 << 20
 // maxKiroMCPBytes bounds the ~/.kiro/settings/mcp.json read.
 const maxKiroMCPBytes = 1 << 20
 
+// maxCodexMCPBytes bounds the ~/.codex/config.toml read.
+const maxCodexMCPBytes = 1 << 20
+
 // windowsMCPSpoolSource is the MCP server file of one connector that the
 // enumerator publishes for each user it enrolls for that connector.
 type windowsMCPSpoolSource struct {
 	connector, label, tmpPattern string
 	// file is the file below the user home that holds the servers.
 	file string
-	// read returns the servers of the user whose profile is home, and the
-	// path of the file that failed when err is set; homes lists every
-	// enrolled profile.
-	read func(sid, home string, homes []string, logf func(string, ...any)) ([]config.MCPServerEntry, string, error)
+	// read returns the servers of the user whose profile is home, the path
+	// of a failed file, and the projects refused by path checks.
+	read func(sid, home string, logf func(string, ...any)) ([]config.MCPServerEntry, string, []ClaudeMCPProjectSkip, error)
 }
 
 var windowsClaudeMCPSpoolSource = windowsMCPSpoolSource{
 	connector: "claudecode", label: "Claude Code", tmpPattern: ".claude-mcp-*", file: ".claude.json",
-	read: func(sid, home string, homes []string, logf func(string, ...any)) ([]config.MCPServerEntry, string, error) {
-		servers, path, err := windowsClaudeStateServers(sid, home, logf)
-		if err == nil {
-			vetClaudeMCPWorkDirs(servers, home, otherWindowsHomes(homes, home), windowsClaudeMCPWorkDirChecks)
-		}
-		return servers, path, err
-	},
+	read: windowsClaudeStateServers,
 }
 
 var windowsKiroMCPSpoolSource = windowsMCPSpoolSource{
 	connector: "kiro", label: "Kiro", tmpPattern: ".kiro-mcp-*", file: `.kiro\settings\mcp.json`,
-	read: func(_, home string, _ []string, _ func(string, ...any)) ([]config.MCPServerEntry, string, error) {
+	read: func(_, home string, _ func(string, ...any)) ([]config.MCPServerEntry, string, []ClaudeMCPProjectSkip, error) {
 		path := filepath.Join(home, ".kiro", "settings", "mcp.json")
 		data, err := readWindowsProfileFile(home, `.kiro\settings\mcp.json`, maxKiroMCPBytes)
 		if err != nil {
-			return nil, path, err
+			return nil, path, nil, err
 		}
 		servers, err := config.ParseKiroUserMCPServers(data, path)
 		if err != nil {
-			return nil, path, fmt.Errorf("parse %s: %w", path, err)
+			return nil, path, nil, fmt.Errorf("parse %s: %w", path, err)
 		}
-		return servers, "", nil
+		return servers, "", nil, nil
 	},
 }
+
+var windowsCodexMCPSpoolSource = windowsMCPSpoolSource{
+	connector: "codex", label: "Codex", tmpPattern: ".codex-mcp-*", file: `.codex\config.toml`,
+	read: windowsCodexUserServers,
+}
+
+// windowsMCPSpoolSources holds the source of every connector the enumerator
+// publishes (mcpasuser.PublishedConnectors).
+var windowsMCPSpoolSources = map[string]windowsMCPSpoolSource{
+	windowsClaudeMCPSpoolSource.connector: windowsClaudeMCPSpoolSource,
+	windowsKiroMCPSpoolSource.connector:   windowsKiroMCPSpoolSource,
+	windowsCodexMCPSpoolSource.connector:  windowsCodexMCPSpoolSource,
+}
+
+// WriteWindowsMCPSpool publishes, the same way as WriteWindowsClaudeMCPSpool,
+// the MCP servers of connector for every user the manifest enrolls for it,
+// in dir (MCPSpoolDir). A connector with no source publishes nothing and
+// fails, so the gateway refuses its enrolled users calls (fail closed).
+func WriteWindowsMCPSpool(dir, connector string, manifest Manifest, setOwnership func(string) error, logf func(string, ...any)) error {
+	source, ok := windowsMCPSpoolSources[connector]
+	if !ok {
+		return fmt.Errorf("the hook enumerator has no MCP server source for %s", connector)
+	}
+	return writeWindowsMCPSpool(dir, manifest, source, setOwnership, logf)
+}
+
+// windowsCodexUserServers reads the Codex user MCP servers of the account
+// whose profile is home from the one config.toml Codex reads for it: the
+// file under the account persistent CODEX_HOME (its own value over the
+// machine one) when that is set, else ~/.codex/config.toml. Codex reads that
+// folder and no other, so a server of the other file is not published: an old
+// same-named definition could displace the one that runs, and an unreadable
+// file Codex does not read could refuse its calls (GAP-0686). It is read as
+// the agent reads it, through a link or outside the profile only when the
+// account owns the file (readWindowsAccountFile). A missing file adds no
+// server; any other failure makes the account Codex servers unknown, so none
+// of them is admitted (fail closed). A session-only CODEX_HOME is not seen
+// here: the hook names it, and the gateway admits only a server this record
+// holds (assetfacts MCPServer.Relocated).
+func windowsCodexUserServers(sid, home string, _ func(string, ...any)) ([]config.MCPServerEntry, string, []ClaudeMCPProjectSkip, error) {
+	path := filepath.Join(home, ".codex", "config.toml")
+	account, err := windows.StringToSid(sid)
+	if err != nil {
+		return nil, path, nil, err
+	}
+	relocated, err := windowsAccountFolderVariable(account, home, "CODEX_HOME")
+	if err != nil {
+		return nil, path, nil, fmt.Errorf("resolve CODEX_HOME: %w", err)
+	}
+	if relocated != "" {
+		path = filepath.Join(relocated, "config.toml")
+	}
+	data, err := windowsCodexConfigRead(path, account, home)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, "", nil, nil
+	}
+	if err == nil && len(data) > maxCodexMCPBytes {
+		err = fmt.Errorf("config.toml is larger than %d bytes", maxCodexMCPBytes)
+	}
+	if err != nil {
+		return nil, path, nil, err
+	}
+	servers, err := config.ParseCodexUserMCPServers(data, path)
+	if err != nil {
+		return nil, path, nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return servers, "", nil, nil
+}
+
+// windowsCodexConfigRead is readWindowsAccountFile; tests replace it.
+var windowsCodexConfigRead = readWindowsAccountFile
 
 // WriteWindowsClaudeMCPSpool publishes, for every user the manifest enrolls
 // for Claude Code, the MCP servers of that user (ClaudeMCPSpoolDirName). It
@@ -76,7 +145,10 @@ var windowsKiroMCPSpoolSource = windowsMCPSpoolSource{
 // longer enrolled are removed. A user whose state is unreadable or malformed
 // gets a record that says so, without servers: an old definition is never
 // presented as the current state, and the gateway fails closed for that
-// user's Claude Code MCP servers (GAP-0829).
+// user's Claude Code MCP servers (GAP-0829). A record that cannot be
+// updated is withdrawn for the same reason, and the error names it
+// (GAP-1405): each such record is an *MCPSpoolRecordError
+// (MCPSpoolRecordFailures), any other error is the folder's.
 func WriteWindowsClaudeMCPSpool(dir string, manifest Manifest, setOwnership func(string) error, logf func(string, ...any)) error {
 	return writeWindowsMCPSpool(dir, manifest, windowsClaudeMCPSpoolSource, setOwnership, logf)
 }
@@ -103,12 +175,7 @@ func writeWindowsMCPSpool(dir string, manifest Manifest, source windowsMCPSpoolS
 		}
 	}
 	keep := map[string]bool{}
-	var homes []string
-	for _, target := range manifest.Targets {
-		if home := strings.TrimSpace(target.UserHome); filepath.IsAbs(home) {
-			homes = append(homes, filepath.Clean(home))
-		}
-	}
+	var failed error
 	for _, target := range manifest.Targets {
 		if !strings.EqualFold(strings.TrimSpace(target.Connector), source.connector) || (target.Enabled != nil && !*target.Enabled) {
 			continue
@@ -120,18 +187,22 @@ func writeWindowsMCPSpool(dir string, manifest Manifest, source windowsMCPSpoolS
 			continue
 		}
 		keep[strings.ToLower(name)] = true
-		servers, unreadablePath, err := source.read(key, home, homes, logf)
+		servers, unreadablePath, skipped, err := source.read(key, home, logf)
 		var data []byte
+		unreadable := false
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			unreadable = true
 			if logf != nil {
 				logf("[hook-enumerator] WARN %s MCP servers for %s: %v", source.label, key, err)
 			}
 			data, err = MarshalClaudeMCPSpoolUnreadable(key, ClaudeStateUnreadable{
 				User: strings.TrimSpace(target.User), Home: home, Path: unreadablePath, Reason: err.Error(),
+				SignedOut: IsWindowsTargetSessionUnavailable(err),
 			})
 		} else {
 			data, err = MarshalClaudeMCPSpoolRecord(key, servers)
 			if err == nil && len(data) > maxClaudeMCPSpoolRecordBytes {
+				unreadable = true
 				if logf != nil {
 					logf("[hook-enumerator] WARN %s MCP spool for %s exceeds %d bytes", source.label, key, maxClaudeMCPSpoolRecordBytes)
 				}
@@ -142,13 +213,37 @@ func writeWindowsMCPSpool(dir string, manifest Manifest, source windowsMCPSpoolS
 			}
 		}
 		if err != nil {
+			failed = errors.Join(failed, &MCPSpoolRecordError{
+				Connector: source.connector, SID: key, Home: home, Err: withdrawMCPSpoolRecord(dir, name, err),
+			})
 			continue
 		}
-		if current, readErr := os.ReadFile(filepath.Join(dir, name)); readErr == nil && bytes.Equal(current, data) {
-			continue
+		if current, readErr := os.ReadFile(filepath.Join(dir, name)); readErr != nil || !bytes.Equal(current, data) {
+			if err := windowsMCPSpoolWrite(dir, name, source.tmpPattern, data, setOwnership); err != nil {
+				if logf != nil {
+					logf("[hook-enumerator] WARN publish %s MCP servers for %s: %v", source.label, key, err)
+				}
+				failed = errors.Join(failed, &MCPSpoolRecordError{
+					Connector: source.connector, SID: key, Home: home, Err: withdrawMCPSpoolRecord(dir, name, err),
+				})
+				continue
+			}
+			if logf != nil {
+				// What the gateway admits for the user, so a server that never
+				// reached admission can be traced to the record (GAP-0219).
+				logf("[hook-enumerator] published %s MCP servers for %s: %s", source.label, key, mcpSpoolPublishedSummary(servers, unreadable))
+			}
 		}
-		if err := writeSpoolBytes(dir, name, source.tmpPattern, data, setOwnership); err != nil && logf != nil {
-			logf("[hook-enumerator] WARN publish %s MCP servers for %s: %v", source.label, key, err)
+		if source.connector == "claudecode" && !unreadable && len(skipped) != 0 {
+			skipName := key + ".skipped"
+			note := ClaudeMCPProjectSkips{Key: key, User: strings.TrimSpace(target.User), Home: home, Projects: skipped}
+			if err := writeClaudeMCPProjectSkips(dir, skipName, note, setOwnership); err != nil {
+				if logf != nil {
+					logf("[hook-enumerator] WARN publish Claude Code skipped projects for %s: %v", key, err)
+				}
+			} else {
+				keep[strings.ToLower(skipName)] = true
+			}
 		}
 	}
 	if entries, err := os.ReadDir(dir); err == nil {
@@ -158,44 +253,97 @@ func writeWindowsMCPSpool(dir string, manifest Manifest, source windowsMCPSpoolS
 			}
 		}
 	}
-	return nil
+	return failed
+}
+
+// windowsMCPSpoolWrite is writeSpoolBytes; tests replace it.
+var windowsMCPSpoolWrite = writeSpoolBytes
+
+// The status sidecar is separate from the version 1 inventory record so an
+// older gateway can keep reading the servers after an enumerator upgrade.
+const maxClaudeMCPProjectStatusNotes = 128
+
+func writeClaudeMCPProjectSkips(dir, name string, note ClaudeMCPProjectSkips, setOwnership func(string) error) error {
+	if len(note.Projects) > maxClaudeMCPProjectStatusNotes {
+		note.Omitted = len(note.Projects) - maxClaudeMCPProjectStatusNotes
+		note.Projects = note.Projects[:maxClaudeMCPProjectStatusNotes]
+	}
+	data, err := json.Marshal(note)
+	if err != nil {
+		return err
+	}
+	for len(data) > maxClaudeMCPSpoolRecordBytes && len(note.Projects) > 1 {
+		note.Projects = note.Projects[:len(note.Projects)-1]
+		note.Omitted++
+		data, err = json.Marshal(note)
+		if err != nil {
+			return err
+		}
+	}
+	if len(data) > maxClaudeMCPSpoolRecordBytes {
+		return fmt.Errorf("claude code skipped project note exceeds %d bytes", maxClaudeMCPSpoolRecordBytes)
+	}
+	if current, err := os.Open(filepath.Join(dir, name)); err == nil {
+		previous, readErr := io.ReadAll(io.LimitReader(current, maxClaudeMCPSpoolRecordBytes+1))
+		_ = current.Close()
+		if readErr == nil && bytes.Equal(previous, data) {
+			return nil
+		}
+	}
+	return writeSpoolBytes(dir, name, ".claude-mcp-skipped-*", data, setOwnership)
+}
+
+// withdrawMCPSpoolRecord takes back the record name after its update failed
+// with cause. Left in place it would present the user's old servers as
+// current; the gateway reads a missing or unparsable record as unreadable
+// state and admits none of that user's servers. A record that cannot be
+// removed (the gateway holds it open) is emptied in place.
+func withdrawMCPSpoolRecord(dir, name string, cause error) error {
+	path := filepath.Join(dir, name)
+	removeErr := os.Remove(path)
+	if removeErr == nil || errors.Is(removeErr, os.ErrNotExist) {
+		return fmt.Errorf("%s not updated, previous record withdrawn: %w", name, cause)
+	}
+	if truncateErr := os.Truncate(path, 0); truncateErr != nil {
+		return fmt.Errorf("%s not updated and its previous record could not be withdrawn (%v): %w",
+			name, errors.Join(removeErr, truncateErr), cause)
+	}
+	return fmt.Errorf("%s not updated, previous record emptied: %w", name, cause)
 }
 
 // windowsClaudeStateServers reads the Claude Code MCP servers of the user
 // whose profile is home.
-func windowsClaudeStateServers(sid, home string, logf func(string, ...any)) ([]config.MCPServerEntry, string, error) {
+func windowsClaudeStateServers(sid, home string, logf func(string, ...any)) ([]config.MCPServerEntry, string, []ClaudeMCPProjectSkip, error) {
 	statePath := filepath.Join(home, ".claude.json")
 	data, err := readWindowsProfileFile(home, ".claude.json", maxClaudeStateBytes)
 	if err != nil {
-		return nil, statePath, err
+		return nil, statePath, nil, err
 	}
 	var projectErr error
 	var projectPath string
 	refused := map[string]bool{}
+	var skipped []ClaudeMCPProjectSkip
 	target, err := validateWindowsEnterpriseTargetSID(sid)
 	if err != nil {
-		return nil, statePath, err
+		return nil, statePath, nil, err
 	}
 	var servers []config.MCPServerEntry
 	var parseErr error
 	err = windowsClaudeProjectWithUserToken(target, home, func() error {
 		servers, parseErr = config.ClaudeStateMCPServers(data, func(project string) ([]byte, error) {
-			data, accessErr, readErr := windowsClaudeProjectRead(project)
-			switch decideClaudeProjectRead(accessErr, readErr) {
+			data, refusalErr, readErr := windowsClaudeProjectRead(project)
+			switch decideClaudeProjectRead(refusalErr, readErr) {
 			case claudeProjectRefused:
 				refused[filepath.Clean(project)] = true
+				skipped = append(skipped, ClaudeMCPProjectSkip{Project: project, Reason: refusalErr.Error()})
 				if logf != nil {
-					logf("[hook-enumerator] WARN skip Claude Code MCP project %s for %s: %v", project, sid, accessErr)
+					logf("[hook-enumerator] WARN skip Claude Code MCP project %s for %s: %v", project, sid, refusalErr)
 				}
-				return nil, accessErr
+				return nil, refusalErr
 			case claudeProjectUnreadable:
 				if projectErr == nil {
 					projectPath = filepath.Join(project, ".mcp.json")
-					cause := readErr
-					if accessErr != nil {
-						cause = accessErr
-					}
-					projectErr = fmt.Errorf("read Claude Code project MCP file %s: %w", projectPath, cause)
+					projectErr = fmt.Errorf("read Claude Code project MCP file %s: %w", projectPath, readErr)
 				}
 			}
 			return data, readErr
@@ -203,14 +351,26 @@ func windowsClaudeStateServers(sid, home string, logf func(string, ...any)) ([]c
 		return nil
 	})
 	if err != nil {
-		// Token and profile failures must never look like a missing .claude.json.
-		return nil, statePath, fmt.Errorf("read Claude Code projects as enrolled user: %v", err)
+		// Token and profile failures must never look like a missing
+		// .claude.json; only a signed-out account stays recognizable.
+		var signedOut *WindowsTargetSessionUnavailableError
+		if errors.As(err, &signedOut) {
+			return nil, statePath, nil, fmt.Errorf("read Claude Code projects as enrolled user: %w", signedOut)
+		}
+		return nil, statePath, nil, fmt.Errorf("read Claude Code projects as enrolled user: %v", err)
 	}
 	if parseErr != nil {
-		return nil, statePath, parseErr
+		// A project .mcp.json that does not parse is named; the user's
+		// servers are unknown either way (GAP-0219).
+		path := statePath
+		var fileErr *config.MCPFileParseError
+		if errors.As(parseErr, &fileErr) {
+			path = fileErr.Path
+		}
+		return nil, path, nil, parseErr
 	}
 	if projectErr != nil {
-		return nil, projectPath, projectErr
+		return nil, projectPath, nil, projectErr
 	}
 	out := servers[:0]
 	for _, server := range servers {
@@ -218,7 +378,7 @@ func windowsClaudeStateServers(sid, home string, logf func(string, ...any)) ([]c
 			out = append(out, server)
 		}
 	}
-	return out, "", nil
+	return out, "", skipped, nil
 }
 
 // Resolve one validated token for all projects of this user. A disconnected
@@ -233,47 +393,38 @@ var windowsClaudeProjectRead = readWindowsClaudeProjectMCP
 // drives before any filesystem access to the project, since the enumerator
 // runs as LocalSystem and must never connect to a user-selected network path.
 // The directory and file are then opened under the validated enrolled-user
-// token. A missing file leaves local-scope servers intact. Only an explicit
-// access denial refuses the project.
-func readWindowsClaudeProjectMCP(project string) (data []byte, accessErr, readErr error) {
+// token. A missing file leaves local-scope servers intact. A path that cannot
+// be used locally or an explicit access denial refuses only that project.
+func readWindowsClaudeProjectMCP(project string) (data []byte, refusalErr, readErr error) {
 	project = filepath.Clean(project)
 	if _, err := winpath.ValidateFixedNTFSMountedPath(project); err != nil {
-		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-			return nil, fmt.Errorf("%w: validate project path: %w", errClaudeProjectAccessDenied, err), nil
-		}
-		return nil, nil, err
+		return nil, fmt.Errorf("validate project path: %w", err), nil
 	}
 	if err := rejectWindowsReparseChain(project); err != nil {
-		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-			return nil, fmt.Errorf("%w: check project path for reparse points: %w", errClaudeProjectAccessDenied, err), nil
-		}
-		return nil, nil, err
+		return nil, fmt.Errorf("check project path for reparse points: %w", err), nil
 	}
 	ptr, err := winpath.UTF16Ptr(project)
 	if err != nil {
-		return nil, nil, err
+		return nil, fmt.Errorf("encode project path: %w", err), nil
 	}
 	dir, err := windows.CreateFile(ptr, windows.FILE_LIST_DIRECTORY,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
 		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	if err != nil {
 		wrapped := fmt.Errorf("open project directory as enrolled user: %w", err)
-		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-			return nil, fmt.Errorf("%w: %w", errClaudeProjectAccessDenied, wrapped), nil
-		}
-		return nil, nil, wrapped
+		return nil, wrapped, nil
 	}
 	windows.CloseHandle(dir)
+	if err := inventoryDACLRejectLinkBelow(project, ".mcp.json"); err != nil {
+		return nil, fmt.Errorf("check project MCP file for reparse points: %w", err), nil
+	}
 	file, err := os.Open(filepath.Join(project, ".mcp.json"))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil, err
 	}
 	if err != nil {
 		wrapped := fmt.Errorf("open project MCP file as enrolled user: %w", err)
-		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-			return nil, fmt.Errorf("%w: %w", errClaudeProjectAccessDenied, wrapped), nil
-		}
-		return nil, nil, wrapped
+		return nil, wrapped, nil
 	}
 	file.Close()
 	data, readErr = readWindowsProfileFile(project, ".mcp.json", maxClaudeProjectMCPBytes)
@@ -308,8 +459,9 @@ func otherWindowsHomes(homes []string, home string) []string {
 	return out
 }
 
-// windowsClaudeMCPWorkDirChecks check a server working folder as the
-// enumerator, which runs as LocalSystem and can read every profile.
+// windowsClaudeMCPWorkDirChecks check a server working folder. The
+// enumerator runs them while it impersonates the server's user
+// (WindowsMCPAsUserStarter), so the user's own access decides.
 var windowsClaudeMCPWorkDirChecks = claudeMCPWorkDirChecks{
 	volume: func(path string) error {
 		_, err := winpath.ValidateFixedNTFSMountedPath(path)
@@ -357,4 +509,21 @@ func windowsWorkDirFinalPath(path string) (string, error) {
 		return trimmed, nil
 	}
 	return "", fmt.Errorf("the folder opens as %s, not a local drive path", final)
+}
+
+// mcpSpoolPublishedSummary is the published record in the enumerator log:
+// the server count and names (at most 20), or that the state is unreadable.
+func mcpSpoolPublishedSummary(servers []config.MCPServerEntry, unreadable bool) string {
+	if unreadable {
+		return "state unreadable, no servers (the warning above says why)"
+	}
+	names := make([]string, 0, len(servers))
+	for i, server := range servers {
+		if i == 20 {
+			names = append(names, fmt.Sprintf("and %d more", len(servers)-20))
+			break
+		}
+		names = append(names, server.Name)
+	}
+	return fmt.Sprintf("%d servers %v", len(servers), names)
 }

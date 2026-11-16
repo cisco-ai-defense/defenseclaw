@@ -133,3 +133,17 @@ func TestEnterpriseOpenShellSchemaAndEmptiness(t *testing.T) {
 		t.Fatal("enterprise.openshell accepted in a non-managed config")
 	}
 }
+
+// gateway_port is the administrator's enterprise.openshell key. A per-user
+// openshell.gateway_port is not a setting: the per-user OpenShell gateway
+// listens on 17670, so the schema refuses it (rel-1-0-6:GAP-0094).
+func TestPerUserOpenShellHasNoGatewayPortKey(t *testing.T) {
+	raw := "config_version: 9\nopenshell:\n  gateway_port: 17691\nobservability: {}\n"
+	if err := ValidateV8SchemaBytes("config.yaml", []byte(raw)); err == nil {
+		t.Fatal("openshell.gateway_port accepted")
+	}
+	ok := "config_version: 9\nenterprise:\n  openshell: {gateway_port: 17691}\nobservability: {}\n"
+	if err := ValidateV8SchemaBytes("config.yaml", []byte(ok)); err != nil {
+		t.Fatalf("enterprise.openshell.gateway_port: %v", err)
+	}
+}

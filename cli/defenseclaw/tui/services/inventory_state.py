@@ -1040,6 +1040,8 @@ class InventoryPanelModel:
         self.detail_open = not self.detail_open
 
     def current_list_len(self) -> int:
+        if self.active_sub == "summary":
+            return len(self.summary_table_rows())
         return len(self._current_rows())
 
     def _current_rows(self) -> Sequence[object]:

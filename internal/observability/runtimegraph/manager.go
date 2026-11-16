@@ -642,13 +642,13 @@ func (manager *Manager) Acquire(ctx context.Context) (*Lease, *Error) {
 type ReloadStatus string
 
 const (
-	ReloadRejected        ReloadStatus = "rejected"
-	ReloadApplied         ReloadStatus = "applied"
-	ReloadAppliedDegraded ReloadStatus = "applied_degraded"
+	ReloadRejected ReloadStatus = "rejected"
+	ReloadApplied  ReloadStatus = "applied"
 )
 
 // ReloadResult always identifies the graph that remains active on return.
-// Post-publish drain failure is AppliedDegraded with no rejection error.
+// The previous graph is retired after the return (retireInBackground), so a
+// drain failure is reported later, never as a rejection of this reload.
 type ReloadResult struct {
 	active *Graph
 	status ReloadStatus
@@ -658,7 +658,7 @@ func (result ReloadResult) ActiveGraph() *Graph  { return result.active }
 func (result ReloadResult) Status() ReloadStatus { return result.status }
 
 // Reload builds a complete candidate off-path, publishes it with exactly one
-// atomic swap, then retires the old graph. Every pre-swap failure preserves the
+// atomic swap, then retires the old graph in the background. Every pre-swap failure preserves the
 // exact old pointer.
 func (manager *Manager) Reload(ctx context.Context, candidate Config) (ReloadResult, *Error) {
 	if manager == nil || ctx == nil {
@@ -723,17 +723,15 @@ func (manager *Manager) Reload(ctx context.Context, candidate Config) (ReloadRes
 		manager.addHealth(&reports, newGraph, ReportDrainFailed, "failed", "", "")
 	}
 	manager.activate(newGraph)
-	degraded := false
-	cleanup := manager.retire(previous, newGraph, context.Background())
-	if cleanup.failed {
-		degraded = true
-		manager.addHealth(&reports, newGraph, ReportDrainFailed, "failed", "", cleanup.componentName)
-		manager.addCompliance(&reports, newGraph, ReportDrainFailed, "failed", "", cleanup.componentName)
-	}
-	if degraded {
-		manager.addCompliance(&reports, newGraph, ReportReloadApplied, "applied", "", "")
-		return finish(ReloadResult{active: newGraph, status: ReloadAppliedDegraded}, nil)
-	}
+	// The previous graph retires in the background: its in-flight users
+	// (an agent trace, an import batch) finish on it, then it is torn down
+	// with its own bound. Waiting for that here held the reload, and the
+	// config manager and the policy swap behind it, for the whole drain
+	// timeout whenever an agent session was open or a destination was
+	// unreachable: a 30 s hot reload that the lifecycle then gave up on and
+	// replaced with a gateway restart (#1302, #1278). A teardown that fails
+	// still reports drain_failed, through the graph active by then.
+	manager.retireInBackground(previous, newGraph)
 	manager.addCompliance(&reports, newGraph, ReportReloadApplied, "applied", "", "")
 	return finish(ReloadResult{active: newGraph, status: ReloadApplied}, nil)
 }
@@ -902,6 +900,18 @@ func (manager *Manager) retire(graph, reportGraph *Graph, parent context.Context
 		go manager.cleanupAfterQuiescence(graph, reportGraph, quiescent)
 		return cleanupResult{failed: true, componentName: "inflight-users"}
 	}
+}
+
+// retireInBackground retires graph without waiting for it: once its last
+// lease is released it is torn down by cleanupAfterQuiescence, which Close
+// and WaitCleanup wait for (asyncCleanup).
+func (manager *Manager) retireInBackground(graph, reportGraph *Graph) {
+	if graph == nil {
+		return
+	}
+	quiescent := graph.beginRetirement()
+	manager.asyncCleanup.Add(1)
+	go manager.cleanupAfterQuiescence(graph, reportGraph, quiescent)
 }
 
 func (manager *Manager) cleanupAfterQuiescence(
@@ -1187,21 +1197,9 @@ func restartRequiredField(old *Graph, candidate Config) string {
 	if old.config.RetainJudgeBodies != candidate.RetainJudgeBodies {
 		return FieldRetainJudgeBodies
 	}
-	oldDestinations := old.config.Plan.Snapshot().Destinations
-	candidateDestinations := candidate.Plan.Snapshot().Destinations
-	for _, candidateDestination := range candidateDestinations {
-		if candidateDestination.Kind != config.ObservabilityV8DestinationPrometheus ||
-			!candidateDestination.Enabled || candidateDestination.Transport.Listen == "" {
-			continue
-		}
-		for _, oldDestination := range oldDestinations {
-			if oldDestination.Kind == config.ObservabilityV8DestinationPrometheus &&
-				oldDestination.Enabled &&
-				oldDestination.Transport.Listen == candidateDestination.Transport.Listen {
-				return "observability.destinations." + candidateDestination.Name + ".listen"
-			}
-		}
-	}
+	// A Prometheus destination that keeps its listen address is not a
+	// restart: the successor generation joins the socket the process already
+	// holds (prometheus.processListeners, GAP-2072).
 	return ""
 }
 

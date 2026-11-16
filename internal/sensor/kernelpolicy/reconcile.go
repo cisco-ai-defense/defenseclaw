@@ -107,6 +107,24 @@ type Hit struct {
 	At     time.Time
 }
 
+// Exec is a process start Tetragon reported on the event stream: the moment
+// its exec hook marks a session for a matchBinaries followChildren anchor.
+type Exec struct {
+	PID    int
+	ExecID string
+	// Exe is Tetragon's binary for the process.
+	Exe string
+	At  time.Time
+}
+
+// maxExecs bounds the process starts remembered between passes; only
+// starts of a loaded controls binary are kept, so this is generous.
+const maxExecs = 4096
+
+// execHorizon is how long the start of a process that is not a root is
+// kept: a scan finds a new session within a pass or two.
+const execHorizon = 10 * time.Minute
+
 type known struct {
 	family Family
 	index  PathIndex
@@ -123,6 +141,7 @@ type known struct {
 type nativeAnchor struct {
 	loadTicks uint64
 	enforce   bool
+	policy    string
 }
 
 // Controller is the reconciler. One goroutine (Run) owns all state; the
@@ -192,6 +211,18 @@ type Controller struct {
 	// streamNote is the event stream's last word about Tetragon, waiting
 	// for the off/consume loop to publish it.
 	streamNote *StreamStatus
+
+	// execMu guards execs, the latest Tetragon-reported start of each pid
+	// whose binary is in a loaded controls policy (anchorBins), which the
+	// event stream's goroutine writes. A native session counts as anchored
+	// only when Tetragon reported its start (GAP-0166).
+	execMu     sync.Mutex
+	execs      map[int]Exec
+	anchorBins atomic.Pointer[map[string]bool]
+	// confirmed are the live roots whose start Tetragon reported, keyed by
+	// pid and start time so a reused pid is never one of them. Loop-owned;
+	// kept in the state file, so a helper restart does not forget them.
+	confirmed map[rootKey]bool
 }
 
 // StreamStatus is what the helper's event stream knows about Tetragon.
@@ -242,6 +273,8 @@ func New(cfg Config) *Controller {
 		burn:        LoadBurnin(cfg.Dirs),
 		names:       map[string]known{},
 		totals:      map[string]int64{},
+		execs:       map[int]Exec{},
+		confirmed:   map[rootKey]bool{},
 	}
 	sweepInterruptedWrites(cfg.Dirs.State, cfg.Now(), cfg.Logger)
 	if err := readJSON(cfg.Dirs.StateFile(), &c.st); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -249,8 +282,19 @@ func New(cfg Config) *Controller {
 		c.st = FileState{}
 	}
 	c.reloadRecord()
+	for _, key := range c.st.ConfirmedSessions {
+		var k rootKey
+		if _, err := fmt.Sscanf(key, "%d:%d", &k.pid, &k.ticks); err == nil && k.pid > 1 {
+			c.confirmed[k] = true
+		}
+	}
 	c.st.Version = stateVersion
 	c.st.HelperPID = os.Getpid()
+	if c.st.SeqEpoch == 0 {
+		// A new state, or one that predates the epoch: the sequence from
+		// here on is named by this start.
+		c.st.SeqEpoch = NewEpoch()
+	}
 	c.st.KernelPolicy = Digest()
 	c.st.Intent = IntentStatus{
 		Mode: cfg.Intent.Mode, BurnIn: burnInText(cfg.Intent.BurnIn), EnforceAck: strings.Join(cfg.Intent.EnforceAcks, ","),
@@ -314,6 +358,7 @@ func (c *Controller) SetStream(connected bool) {
 	defer c.tallyMu.Unlock()
 	if c.stream != connected {
 		c.loss = true // the minute it changed is not a covered minute
+		defer c.forgetStarts()
 	}
 	c.stream = connected
 }
@@ -325,6 +370,17 @@ func (c *Controller) RecordLoss() {
 	c.tallyMu.Lock()
 	c.loss = true
 	c.tallyMu.Unlock()
+	c.forgetStarts()
+}
+
+// forgetStarts drops the process starts not yet matched to a root: after a
+// loss, or while the stream was down, an exit may have been missed, and a
+// start kept past its exit could be taken for a later process with the same
+// pid. Matched roots are kept by pid and start time (confirmed).
+func (c *Controller) forgetStarts() {
+	c.execMu.Lock()
+	clear(c.execs)
+	c.execMu.Unlock()
 }
 
 // RecordHit counts an event from a controls policy. It only counts events
@@ -352,6 +408,83 @@ func (c *Controller) RecordHit(h Hit) {
 		c.totals["would_block_total"]++
 	}
 	c.burn.Hit(h.UID, control, blocked, h.Path, h.Binary, at)
+}
+
+// RecordExec notes a process start Tetragon reported, when its binary is in
+// a loaded controls policy. Tetragon's exec hook is what marks a session for
+// the binaries anchor, so a session whose start Tetragon never reported is
+// not counted as anchored, and its user is not called enforcing
+// (GAP-0166). Safe from any goroutine; it never blocks on the loop.
+func (c *Controller) RecordExec(e Exec) {
+	bins := c.anchorBins.Load()
+	if e.PID <= 1 || e.Exe == "" || bins == nil || !(*bins)[e.Exe] {
+		return
+	}
+	if e.At.IsZero() {
+		e.At = c.cfg.Now()
+	}
+	c.execMu.Lock()
+	defer c.execMu.Unlock()
+	if _, ok := c.execs[e.PID]; !ok && len(c.execs) >= maxExecs {
+		c.pruneExecsLocked(nil)
+		if len(c.execs) >= maxExecs {
+			return // under-reports a session, never over-reports one
+		}
+	}
+	c.execs[e.PID] = e
+}
+
+// RecordExit forgets the start of a process that exited, so a reused pid
+// is never taken for the session Tetragon saw start.
+func (c *Controller) RecordExit(pid int, execID string) {
+	c.execMu.Lock()
+	defer c.execMu.Unlock()
+	if e, ok := c.execs[pid]; ok && (execID == "" || e.ExecID == "" || e.ExecID == execID) {
+		delete(c.execs, pid)
+	}
+}
+
+// pruneExecsLocked drops the starts older than execHorizon of the pids that
+// are not live roots. Callers hold execMu.
+func (c *Controller) pruneExecsLocked(live map[int]bool) {
+	cutoff := c.cfg.Now().Add(-execHorizon)
+	for pid, e := range c.execs {
+		if !live[pid] && e.At.Before(cutoff) {
+			delete(c.execs, pid)
+		}
+	}
+}
+
+// startSeenLocked reports whether Tetragon reported the start of root's
+// process under one of its two names. Callers hold execMu.
+func (c *Controller) startSeenLocked(root Root) bool {
+	e, ok := c.execs[root.PID]
+	return ok && (e.Exe == root.Exe || (root.Launch != "" && e.Exe == root.Launch))
+}
+
+// confirmStarts moves the roots whose start Tetragon reported into
+// confirmed, forgets the roots that ended, and records the set in the state.
+func (c *Controller) confirmStarts() {
+	live := map[rootKey]bool{}
+	c.execMu.Lock()
+	for _, root := range c.roots.Roots {
+		key := rootKey{root.PID, root.StartTicks}
+		live[key] = true
+		if c.startSeenLocked(root) {
+			c.confirmed[key] = true
+		}
+	}
+	c.execMu.Unlock()
+	keys := make([]string, 0, len(c.confirmed))
+	for key := range c.confirmed {
+		if !live[key] {
+			delete(c.confirmed, key)
+			continue
+		}
+		keys = append(keys, fmt.Sprintf("%d:%d", key.pid, key.ticks))
+	}
+	sort.Strings(keys)
+	c.st.ConfirmedSessions = keys
 }
 
 // Owns reports whether this helper recorded loading name (tetragon-loaded,
@@ -912,7 +1045,9 @@ func (c *Controller) refreshPending(publish bool) {
 		key := rootKey{root.PID, root.StartTicks}
 		live[key] = true
 		anchor := c.lastNative[root.UID][root.Exe]
-		binaryCovered := root.Native && (anchor.enforce || (anchor.loadTicks > 0 && root.StartTicks > anchor.loadTicks))
+		launch, launchCovered := c.lastNative[root.UID][root.Launch]
+		binaryCovered := root.Native && root.Launch != "" && launchCovered && anchor.policy == launch.policy &&
+			anchor.loadTicks > 0 && root.StartTicks > anchor.loadTicks
 		covered := c.lastPIDs[root.PID] || binaryCovered
 		eligible := c.cfg.Intent.Mode.LoadsPolicies()
 		if c.cfg.Intent.Mode == ModeEnforce {

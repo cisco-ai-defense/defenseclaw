@@ -529,6 +529,8 @@ func newBrokeredService(t *testing.T, acquirer *kernelAcquirer, now *time.Time) 
 		Resolver:  StaticResolver{Names: map[string]string{}},
 		Acquirer:  acquirer,
 		Now:       func() time.Time { return *now },
+		// newBrokeredService stands in for the managed helper path.
+		ManagedHooks: true,
 	})
 	if err != nil {
 		t.Fatalf("New(): %v", err)

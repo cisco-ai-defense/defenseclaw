@@ -162,7 +162,7 @@ func (rp *RulePack) ScanArtifact(ctx context.Context, path string) ([]scanner.Fi
 	var findings []scanner.Finding
 	if info.Mode().IsRegular() {
 		if text, ok := readArtifactText(path); ok {
-			findings = scanArtifactText(rules, text, filepath.Base(path))
+			findings = scanArtifactText(rules, text, filepath.Base(path), artifactAbsPath(path))
 		}
 		return findings, nil
 	}
@@ -197,7 +197,7 @@ func (rp *RulePack) ScanArtifact(ctx context.Context, path string) ([]scanner.Fi
 		if relErr != nil {
 			rel = entry.Name()
 		}
-		findings = append(findings, scanArtifactText(rules, text, rel)...)
+		findings = append(findings, scanArtifactText(rules, text, rel, artifactAbsPath(current))...)
 		return nil
 	})
 	return findings, err
@@ -239,7 +239,9 @@ func firstLineMatch(re *regexp.Regexp, text string) []int {
 	return nil
 }
 
-func scanArtifactText(rules []artifactRule, text, location string) []scanner.Finding {
+// scanArtifactText scans text, the file at location (relative to the
+// artifact), whose absolute path is file ("" when unknown).
+func scanArtifactText(rules []artifactRule, text, location, file string) []scanner.Finding {
 	python := strings.EqualFold(filepath.Ext(location), ".py")
 	doc := isArtifactDoc(location)
 	var findings []scanner.Finding
@@ -254,7 +256,7 @@ func scanArtifactText(rules []artifactRule, text, location string) []scanner.Fin
 			// rm -rf in a JSON example to a "/" further down (GAP-0364).
 			match = firstLineMatch(rule.re, text)
 		} else if python && rule.pathWrite {
-			match = pythonPathWriteMatch(rule.re, text)
+			match = pythonPathWriteMatch(rule.re, text, file)
 		} else {
 			match = rule.re.FindStringIndex(text)
 		}
@@ -342,4 +344,14 @@ func (o *artifactOverlay) Scan(ctx context.Context, target string) (*scanner.Sca
 	}
 	result.Duration += time.Since(started)
 	return result, nil
+}
+
+// artifactAbsPath is the absolute path of the file at path ("" when it is
+// not known). A script imports from its own directory first.
+func artifactAbsPath(path string) string {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return ""
+	}
+	return absolute
 }

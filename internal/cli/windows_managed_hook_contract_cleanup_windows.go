@@ -112,7 +112,7 @@ func runWindowsManagedHookContractCleanup(opts *windowsManagedHookContractCleanu
 	if opts == nil {
 		return errors.New("managed hook contract cleanup options are required")
 	}
-	if err := enterpriseHooksNativePlatformPreflight(); err != nil {
+	if err := enterpriseHooksPlatformPreflight(); err != nil {
 		return err
 	}
 	receiptPath, err := requireWindowsTargetRuntimeProtectedPath(
@@ -453,6 +453,47 @@ func completeWindowsManagedHookContractCleanupClaim(
 	// temporarily hidden lock/entry could be mistaken for completed cleanup and
 	// restored after this receipt is finalized.
 	claim.Completed = true
+}
+
+// windowsManagedHookContractCleanupPrepareReuses decides what native prepare
+// does with the cleanup receipt already at this scope's path: true resumes it,
+// false replaces it with a fresh capture, and an error refuses the teardown.
+// A prepared receipt of this deployment generation is resumed only when every
+// immutable claim still binds to the teardown identity. A finalized receipt is
+// a completed predecessor. A prepared receipt of another deployment generation
+// belongs to a deployment that no longer exists: the protected metadata names
+// this deployment, and a retained-state Install applies its predecessor's
+// receipt before that deployment is created. A forced or state-absent purge
+// used to leave it behind, and every later uninstall of every new deployment
+// then failed "does not match the authenticated retired scope", with the
+// rollback failing the same way (GAP-0029). It is replaced without applying
+// its claims, so no per-user file is touched on its authority. Its scope and
+// gateway service must still be this layout's. Only a standalone process
+// replaces it; Secure Client keeps the binding check for every prepared
+// receipt (Secure Client is out of scope for this fix).
+func windowsManagedHookContractCleanupPrepareReuses(
+	existing windowsManagedHookContractCleanupReceipt,
+	identity windowsManagedHooksTeardownJournal,
+	scopeSHA256 string,
+	standalone bool,
+) (bool, error) {
+	if existing.Phase != windowsManagedHookContractCleanupPrepared {
+		return false, nil
+	}
+	if standalone &&
+		existing.DeploymentGenerationID != identity.DeploymentGenerationID &&
+		existing.ScopeSHA256 == strings.TrimSpace(scopeSHA256) &&
+		strings.EqualFold(existing.GatewayServiceName, identity.GatewayServiceName) {
+		return false, nil
+	}
+	if err := validateWindowsManagedHookContractCleanupReceiptBinding(
+		existing,
+		identity,
+		scopeSHA256,
+	); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func validateWindowsManagedHookContractCleanupReceiptBinding(

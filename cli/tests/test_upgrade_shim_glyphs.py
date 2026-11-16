@@ -13,11 +13,12 @@
 from __future__ import annotations
 
 import io
-import os
 import sys
 
 import pytest
 from defenseclaw import upgrade_shim
+
+from tests.os_view import os_view
 
 
 class _Stream(io.TextIOWrapper):
@@ -50,6 +51,6 @@ def test_status_glyphs_are_ascii_where_the_stream_cannot_show_them(monkeypatch, 
 
 
 def test_redirected_windows_output_is_ascii(monkeypatch) -> None:
-    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(upgrade_shim, "os", os_view("nt"))
     assert not upgrade_shim._shows_glyphs(_Stream("utf-8", tty=False))
     assert upgrade_shim._shows_glyphs(_Stream("utf-8", tty=True))

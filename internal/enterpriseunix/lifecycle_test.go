@@ -28,6 +28,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	launchdstandalone "github.com/defenseclaw/defenseclaw/packaging/launchd-standalone"
@@ -356,6 +357,54 @@ func TestStatusNamesAnInterruptedTransactionInsteadOfAnEdit(t *testing.T) {
 	}
 }
 
+// GAP-0098: an ensure --config killed in its transaction left an intent
+// without the config it was applying, and status named a generic `ensure
+// --config <file>`. The intent records the config, and status names the
+// exact command, on Linux and macOS.
+func TestStatusNamesTheConfigAnInterruptedEnsureWasApplying(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			source := writeTempConfig(t, []byte("# pushed\n"+h.read(h.env.Layout.ConfigPath)))
+			var recorded *Pending
+			capture := func(string) {
+				if recorded == nil {
+					recorded, _ = h.env.loadPending()
+				}
+			}
+			h.env.Services = &hookedServices{fakeServices: h.services, onStop: capture, onStart: capture}
+			requireOK(t, h.run(Options{Action: ActionEnsure, PayloadDir: h.payload("1.0.1"), ConfigFile: source}))
+			if recorded == nil || recorded.ConfigFile != source {
+				t.Fatalf("the intent of an ensure --config does not record the config: %+v", recorded)
+			}
+			snap, err := h.env.takeSnapshot("killed", []string{h.env.Layout.ConfigPath}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := h.env.savePending(&Pending{Action: ActionEnsure, StartedAt: "2026-10-30T00:10:00Z", SnapshotDir: snap.Dir,
+				Phase: "quiesce", ConfigFile: recorded.ConfigFile}); err != nil {
+				t.Fatal(err)
+			}
+			got := messagesOf(h.run(Options{Action: ActionStatus}).Errors, codeVerify)
+			if !strings.Contains(got, "ensure that started at 2026-10-30T00:10:00Z was interrupted in its quiesce phase") ||
+				!strings.Contains(got, " repair` rolls it back") ||
+				!strings.Contains(got, h.env.lifecycleCommand(ActionEnsure)+" --config "+source+"` again") ||
+				strings.Contains(got, "<file>") {
+				t.Fatalf("status does not name the config the interrupted ensure was applying: %s", got)
+			}
+		})
+	}
+	h := newTestHost(t, "linux")
+	got := h.env.interruptedTransactionProblem(&Pending{Action: ActionEnsure, Phase: "apply", ConfigFile: "/root/g 18/it's.yaml"})
+	if !strings.Contains(got, ` --config '/root/g 18/it'\''s.yaml'`+"` again") {
+		t.Fatalf("a config path with a space or a quote is not one shell word: %s", got)
+	}
+	if got := h.env.interruptedTransactionProblem(&Pending{Action: ActionUpgrade, Phase: "apply"}); !strings.Contains(got, "--config <file>` again") {
+		t.Fatalf("an intent without a config lost the generic command: %s", got)
+	}
+}
+
 func TestInstallRefusals(t *testing.T) {
 	h := newTestHost(t, "linux")
 	payload := h.payload("1.0.0")
@@ -467,6 +516,93 @@ func TestInvalidConfigIsRefusedBeforeAnyChange(t *testing.T) {
 	}
 }
 
+// A managed listener the gateway would reject must be refused while the
+// previous deployment is still enforcing. Both Unix layouts share this
+// pre-swap check.
+func TestEnsureRefusesNonLoopbackProxyBeforeSwap(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			before := h.read(h.env.Layout.ConfigPath)
+			serviceCalls := len(h.services.calls)
+			candidate := filepath.Join(t.TempDir(), "config.yaml")
+			bad := strings.Replace(before, "  mode: observe", "  host: 0.0.0.0\n  mode: observe", 1)
+			if err := os.WriteFile(candidate, []byte(bad), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			r := h.run(Options{Action: ActionEnsure, ConfigFile: candidate})
+			requireError(t, r, codeConfig)
+			if got := h.read(h.env.Layout.ConfigPath); got != before {
+				t.Fatalf("installed config changed: %q", got)
+			}
+			for _, call := range h.services.calls[serviceCalls:] {
+				if strings.HasPrefix(call, "stop ") || strings.HasPrefix(call, "start ") {
+					t.Fatalf("refused listener restarted a service: %v", h.services.calls[serviceCalls:])
+				}
+			}
+		})
+	}
+}
+
+// The service checks the administrator policy tree as a runtime input.
+// Ensure must reject a replacement that points at a user-owned tree before
+// stopping the previous gateway.
+func TestEnsureRefusesUntrustedPolicyInputBeforeSwap(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		for _, tc := range []struct {
+			name, relative string
+		}{
+			{"directory", ""},
+			{"policy module", "rego/decision.rego"},
+		} {
+			t.Run(goos+"/"+tc.name, func(t *testing.T) {
+				h := newTestHost(t, goos)
+				requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+				before := h.read(h.env.Layout.ConfigPath)
+				serviceCalls := len(h.services.calls)
+				policyDir := filepath.Join(t.TempDir(), "policy")
+				untrusted := h.env.P(filepath.Join(policyDir, tc.relative))
+				if err := os.MkdirAll(filepath.Dir(untrusted), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if tc.relative == "" {
+					if err := os.Mkdir(untrusted, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.WriteFile(untrusted, []byte("package policy\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				originalTrust := h.env.Trust
+				h.env.Trust = func(path string, kind TrustKind) error {
+					if path == untrusted {
+						return errors.New("a standard user can write to the policy input")
+					}
+					return originalTrust(path, kind)
+				}
+				candidate := filepath.Join(t.TempDir(), "config.yaml")
+				bad := strings.Replace(before, "policy_dir: "+h.env.Layout.VendorPolicyDir, "policy_dir: "+policyDir, 1)
+				if err := os.WriteFile(candidate, []byte(bad), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				r := h.run(Options{Action: ActionEnsure, ConfigFile: candidate})
+				requireError(t, r, codeConfig)
+				if got := messagesOf(r.Errors, codeConfig); !strings.Contains(got, "policy_dir") || !strings.Contains(got, "not administrator-controlled") {
+					t.Fatalf("policy input refusal = %q", got)
+				}
+				if got := h.read(h.env.Layout.ConfigPath); got != before {
+					t.Fatalf("installed config changed: %q", got)
+				}
+				for _, call := range h.services.calls[serviceCalls:] {
+					if strings.HasPrefix(call, "stop ") || strings.HasPrefix(call, "start ") {
+						t.Fatalf("refused policy input restarted a service: %v", h.services.calls[serviceCalls:])
+					}
+				}
+			})
+		}
+	}
+}
+
 // A guardrail.rules layer the gateway would refuse when it starts is refused
 // with its reason before any change, not left to keep the gateway from
 // starting (GAP-0025).
@@ -522,11 +658,11 @@ func TestObservabilityCredentialMustBeStoredBeforeAnyChange(t *testing.T) {
 		t.Fatalf("staging before the install = %+v (stat %v), want a stored root-only credential", staged, err)
 	}
 
-	// While the installed config references it, the credential is not
-	// removed: the gateway could not start without it.
+	// A staged config can name the credential, but removal cannot proceed
+	// before the service account exists to prove it can read that config.
 	referenced := h.env.P(filepath.Join(h.env.Layout.SecretsDir, "galileo-api-key"))
 	unused := h.env.P(filepath.Join(h.env.Layout.SecretsDir, "unused-key"))
-	for path, body := range map[string]string{h.env.P(h.env.Layout.ConfigPath): raw, referenced: "key", unused: "key"} {
+	for path, body := range map[string]string{h.env.P(h.env.Layout.ConfigPath): raw, unused: "key"} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -537,8 +673,8 @@ func TestObservabilityCredentialMustBeStoredBeforeAnyChange(t *testing.T) {
 	if err := h.env.RemoveSecret("galileo-api-key"); err == nil || !exists(referenced) {
 		t.Fatalf("RemoveSecret of a referenced credential = %v, want a refusal that keeps it", err)
 	}
-	if err := h.env.RemoveSecret("unused-key"); err != nil || exists(unused) {
-		t.Fatalf("RemoveSecret of an unreferenced credential = %v, want it removed", err)
+	if err := h.env.RemoveSecret("unused-key"); enterprisebundle.CodeOf(err) != enterprisebundle.CodeStateInvalid || !exists(unused) {
+		t.Fatalf("RemoveSecret without a service account = %v, want state_invalid and a retained credential", err)
 	}
 }
 
@@ -756,6 +892,32 @@ func TestEnsureRefusesAnUntrustedRulePackUpFront(t *testing.T) {
 	}
 	if calls := touched(h.services.calls[before:], unitGateway); len(calls) > 0 {
 		t.Fatalf("the gateway was touched for a refused pack: %v", calls)
+	}
+}
+
+// A configured custom pack deleted after ensure applied it fails the next
+// gateway restart; status and verify say so now (p0 GAP-1207).
+func TestVerifyReportsADeletedCustomRulePack(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	const pack = "/etc/defenseclaw/policies/guardrail/custom"
+	if err := os.MkdirAll(h.env.P(pack), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := writeChangedConfig(t, h, "rule_pack: default",
+		"rule_pack: acme\n  custom_packs:\n    acme: {path: "+pack+", digest: \"sha256:"+strings.Repeat("a", 64)+"\"}")
+	requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: cfg}))
+	if r := h.run(Options{Action: ActionVerify}); strings.Contains(messagesOf(r.Errors, codeVerify), pack) {
+		t.Fatalf("verify reported the pack before it was deleted: %+v", r.Errors)
+	}
+	if err := os.RemoveAll(h.env.P(pack)); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		r := h.run(Options{Action: action})
+		if r.OK || !strings.Contains(messagesOf(r.Errors, codeVerify), pack+`" is missing`) {
+			t.Fatalf("%s did not report the deleted pack: %+v", action, r.Errors)
+		}
 	}
 }
 
@@ -998,11 +1160,14 @@ func TestStatusDuringAnotherRunReportsBusy(t *testing.T) {
 			}
 			status := h.run(Options{Action: ActionStatus})
 			held.release()
-			requireError(t, status, codeBusy)
+			// GAP-0129: a pending apply, not a failure.
+			if !status.OK || !status.PendingApply || len(status.Errors) != 0 {
+				t.Fatalf("busy status: ok=%v pending_apply=%v errors=%+v", status.OK, status.PendingApply, status.Errors)
+			}
 			// GAP-2409: it says how long it waited, as ensure does.
-			if len(status.Errors) != 1 || !strings.Contains(status.Errors[0].Message, "rerun status") ||
-				!strings.Contains(status.Errors[0].Message, "; waited "+FormatLockWait(h.env.LockTimeout)+" for it;") {
-				t.Fatalf("busy status must be the one busy error naming its next step: %+v", status.Errors)
+			if busy := messagesOf(status.Warnings, codeBusy); !strings.Contains(busy, "rerun status") ||
+				!strings.Contains(busy, "; waited "+FormatLockWait(h.env.LockTimeout)+" for it;") {
+				t.Fatalf("busy status must name its next step in the busy warning: %+v", status.Warnings)
 			}
 			if !status.Installed || status.InstalledVersion != "1.0.0" || status.ExitCode != enterprisestatus.UnixExitBusy {
 				t.Fatalf("busy status: installed=%v version=%q exit=%d", status.Installed, status.InstalledVersion, status.ExitCode)
@@ -1359,8 +1524,26 @@ func TestStatusAndVerify(t *testing.T) {
 	if !strings.Contains(changes, "rewrote /etc/systemd/system/"+unitGateway) || !strings.Contains(changes, "started "+unitEnumerator+", which was not running") {
 		t.Fatalf("repair does not list what it changed: %q", repair.Changes)
 	}
-	if again := h.run(Options{Action: ActionRepair}); len(again.Changes) != 0 {
-		t.Fatalf("a repair of a healthy deployment lists changes: %q", again.Changes)
+	if !strings.HasSuffix(changes, RepairRestartedServices) || strings.Contains(changes, RepairNothingChanged) {
+		t.Fatalf("repair does not end with the service restart: %q", repair.Changes)
+	}
+	// A healthy deployment: --json says there was nothing to repair and
+	// that repair restarted the services (GAP-0020, GAP-0061).
+	again := h.run(Options{Action: ActionRepair})
+	requireOK(t, again)
+	if strings.Join(again.Changes, "\n") != RepairNothingChanged+"\n"+RepairRestartedServices {
+		t.Fatalf("a repair of a healthy deployment lists %q", again.Changes)
+	}
+	raw, err := json.Marshal(again)
+	if err != nil || !strings.Contains(string(raw), `"changes":["nothing to repair"`) {
+		t.Fatalf("the repair JSON has no changes list: %s %v", raw, err)
+	}
+	// With --no-start (not_started) it does not claim a restart.
+	stopped := &lifecycle{env: h.env, result: enterprisestatus.New(ActionRepair, "standalone", "linux", "1.0.0")}
+	stopped.result.AddWarning(codeNotStarted, "installed without starting the services (--no-start)")
+	stopped.summarizeRepair()
+	if strings.Join(stopped.result.Changes, "\n") != RepairNothingChanged {
+		t.Fatalf("a --no-start repair lists %q", stopped.result.Changes)
 	}
 }
 
@@ -1475,7 +1658,7 @@ func TestUnverifiedHookContractIsVisible(t *testing.T) {
 	state, _ := json.Marshal(map[string]any{"results": []map[string]any{
 		{"user": "alice", "connector": "codex", "ok": true},
 		{"user": "bob", "connector": "devin", "ok": false, "error": `enterprise hooks: connector devin agent version "3999.0.0" is not verified against a known hook contract: no hook contract matches normalized agent version`},
-		{"user": "carol", "connector": "omnigent", "ok": false, "error": "enterprise hooks: connector omnigent setup failed: interpreter is not in a trusted install prefix"},
+		{"user": "carol", "connector": "codex", "ok": false, "error": "enterprise hooks: connector codex setup failed: executable is not in a trusted install prefix"},
 	}})
 	if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), state, 0o640); err != nil {
 		t.Fatal(err)
@@ -1496,7 +1679,7 @@ func TestUnverifiedHookContractIsVisible(t *testing.T) {
 	}
 	failedTarget := false
 	for _, w := range status.Warnings {
-		if w.Code == codeGuardianTargetFailed && strings.Contains(w.Message, "omnigent for user carol is not protected: connector omnigent setup failed") {
+		if w.Code == codeGuardianTargetFailed && strings.Contains(w.Message, "codex for user carol is not protected: connector codex setup failed") {
 			failedTarget = true
 		}
 	}
@@ -1520,9 +1703,9 @@ func TestGuardianTargetReasonKeepsItsRemedy(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 	remedy := "install it under an administrator-owned prefix listed in enterprise.enrollment.agent_prefixes"
-	oversized := "connector omnigent setup failed: " + strings.Repeat("path/segment/", 300) + "python3.12 is refused; " + remedy
+	oversized := "connector codex setup failed: " + strings.Repeat("path/segment/", 300) + "python3.12 is refused; " + remedy
 	state, _ := json.Marshal(map[string]any{"results": []map[string]any{
-		{"user": "alice", "connector": "omnigent", "ok": false, "error": "enterprise hooks: " + oversized},
+		{"user": "alice", "connector": "codex", "ok": false, "error": "enterprise hooks: " + oversized},
 	}})
 	if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), state, 0o640); err != nil {
 		t.Fatal(err)

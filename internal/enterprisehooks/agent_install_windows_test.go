@@ -269,7 +269,7 @@ func TestEnumerateWindowsStandaloneReportsAnInstalledCodexItCannotRead(t *testin
 		t.Fatalf("unprotected = %+v, want the Entra user's codex", reported)
 	}
 	message := reported[0].Message()
-	for _, want := range []string{bin, "version could not be read", "npm install -g @openai/codex", "requirements.toml is not published"} {
+	for _, want := range []string{bin, "version could not be read", "npm install -g @openai/codex", windowsCodexUnpublishedConsequence} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("message %q does not contain %q", message, want)
 		}
@@ -425,7 +425,7 @@ func TestWindowsWinGetPackageFolderBoundsOneStalledRead(t *testing.T) {
 	}
 	got := make(chan result, 1)
 	go func() {
-		match, complete := findWindowsWinGetPackageFolder(packages, []string{"OpenAI.Codex"})
+		match, complete, _ := findWindowsWinGetPackageFolder(packages, []string{"OpenAI.Codex"})
 		got <- result{match, complete}
 	}()
 	select {
@@ -450,7 +450,7 @@ func TestWindowsWinGetPackageFolderBoundsOneStalledRead(t *testing.T) {
 
 func waitWindowsWinGetPackageScanIdle(t *testing.T, packages string) {
 	t.Helper()
-	key := strings.ToLower(filepath.Clean(packages))
+	key := windowsWinGetPackageScanKey(packages)
 	deadline := time.Now().Add(time.Second)
 	for {
 		windowsWinGetPackageScans.Lock()
@@ -513,7 +513,7 @@ func TestWindowsWinGetPackageFolderLimitsStalledScansPerPath(t *testing.T) {
 	}
 	call := func(path string) result {
 		start := time.Now()
-		match, complete := findWindowsWinGetPackageFolder(path, ids)
+		match, complete, _ := findWindowsWinGetPackageFolder(path, ids)
 		return result{match, complete, time.Since(start)}
 	}
 	first := make(chan result, 1)
@@ -532,7 +532,7 @@ func TestWindowsWinGetPackageFolderLimitsStalledScansPerPath(t *testing.T) {
 	slotBusy := func() bool {
 		windowsWinGetPackageScans.Lock()
 		defer windowsWinGetPackageScans.Unlock()
-		return windowsWinGetPackageScans.inFlight[strings.ToLower(filepath.Clean(packagesA))]
+		return windowsWinGetPackageScans.inFlight[windowsWinGetPackageScanKey(packagesA)]
 	}
 	select {
 	case got := <-first:
@@ -607,7 +607,7 @@ func TestWindowsWinGetPackageFolderClearsSlotBeforeResult(t *testing.T) {
 	}
 	// The in-flight rejection is also part of the base negative control;
 	// the following normal calls check that each completed scan clears it.
-	key := strings.ToLower(filepath.Clean(packages))
+	key := windowsWinGetPackageScanKey(packages)
 	windowsWinGetPackageScans.Lock()
 	windowsWinGetPackageScans.inFlight[key] = true
 	windowsWinGetPackageScans.Unlock()
@@ -616,14 +616,14 @@ func TestWindowsWinGetPackageFolderClearsSlotBeforeResult(t *testing.T) {
 		delete(windowsWinGetPackageScans.inFlight, key)
 		windowsWinGetPackageScans.Unlock()
 	})
-	if match, complete := findWindowsWinGetPackageFolder(packages, []string{"OpenAI.Codex"}); match != "" || complete {
+	if match, complete, _ := findWindowsWinGetPackageFolder(packages, []string{"OpenAI.Codex"}); match != "" || complete {
 		t.Errorf("occupied slot = %q, complete %t; want an incomplete scan", match, complete)
 	}
 	windowsWinGetPackageScans.Lock()
 	delete(windowsWinGetPackageScans.inFlight, key)
 	windowsWinGetPackageScans.Unlock()
 	for i := 0; i < 100; i++ {
-		match, complete := findWindowsWinGetPackageFolder(packages, []string{"OpenAI.Codex"})
+		match, complete, _ := findWindowsWinGetPackageFolder(packages, []string{"OpenAI.Codex"})
 		if match != filepath.Join(packages, name) || !complete {
 			t.Fatalf("scan %d = %q, complete %t; want the matching entry", i, match, complete)
 		}
@@ -632,7 +632,7 @@ func TestWindowsWinGetPackageFolderClearsSlotBeforeResult(t *testing.T) {
 
 func TestWindowsWinGetPackageFolderCountsEntriesBeforeMatching(t *testing.T) {
 	packages := t.TempDir()
-	if match, complete := findWindowsWinGetPackageFolder(filepath.Join(packages, "absent"), []string{"OpenAI.Codex"}); match != "" || !complete {
+	if match, complete, _ := findWindowsWinGetPackageFolder(filepath.Join(packages, "absent"), []string{"OpenAI.Codex"}); match != "" || !complete {
 		t.Fatalf("absent Packages directory = %q, complete %t; want the old Glob result of no matches", match, complete)
 	}
 	previousRead, previousMax := windowsWinGetReadPackageNames, windowsWinGetPackagesMaxEntries
@@ -643,7 +643,7 @@ func TestWindowsWinGetPackageFolderCountsEntriesBeforeMatching(t *testing.T) {
 		return []string{"filler-one", "filler-two", "OpenAI.Codex_Microsoft.Winget.Source"}, nil
 	}
 	windowsWinGetPackagesMaxEntries = 2
-	if match, complete := findWindowsWinGetPackageFolder(packages, []string{"OpenAI.Codex"}); match != "" || complete {
+	if match, complete, _ := findWindowsWinGetPackageFolder(packages, []string{"OpenAI.Codex"}); match != "" || complete {
 		t.Fatalf("entry beyond the cap = %q, complete %t; want an incomplete scan", match, complete)
 	}
 }
@@ -685,5 +685,42 @@ func TestStandaloneWindowsCodexDiscoveryReadsAShortReleaseName(t *testing.T) {
 	}
 	if version, reason := discoverWindowsCodexStandaloneVersion(home); version != "" || !strings.Contains(reason, "refused reparse chain") || longNameRead {
 		t.Fatalf("short release link: version %q reason %q long-name read %t, want refusal before opening the leaf", version, reason, longNameRead)
+	}
+}
+
+// GAP-0626: another spelling of a folder whose scan is stuck (case, the
+// \\?\ prefix) shares its slot, and the account's message says the folder's
+// storage does not answer instead of asking to remove packages.
+func TestWindowsWinGetPackageFolderSharesTheSlotAcrossSpellings(t *testing.T) {
+	packages := t.TempDir()
+	key := windowsWinGetPackageScanKey(packages)
+	for _, spelling := range []string{strings.ToUpper(packages), `\\?\` + packages, packages + `\`} {
+		if got := windowsWinGetPackageScanKey(spelling); got != key {
+			t.Fatalf("key of %q = %q, want %q", spelling, got, key)
+		}
+	}
+	windowsWinGetPackageScans.Lock()
+	windowsWinGetPackageScans.inFlight[key] = true
+	windowsWinGetPackageScans.Unlock()
+	t.Cleanup(func() {
+		windowsWinGetPackageScans.Lock()
+		delete(windowsWinGetPackageScans.inFlight, key)
+		windowsWinGetPackageScans.Unlock()
+	})
+	match, complete, why := findWindowsWinGetPackageFolder(`\\?\`+strings.ToUpper(packages), []string{"OpenAI.Codex"})
+	if match != "" || complete || why != windowsWinGetScanStillRunning {
+		t.Fatalf("another spelling of a busy folder = %q, complete %t, why %q; want the busy slot", match, complete, why)
+	}
+	busy := windowsWinGetIncompleteScanMessage("codex", packages, why)
+	if !strings.Contains(busy, "not fully scanned") || !strings.Contains(busy, "has not returned") || strings.Contains(busy, "remove the packages") {
+		t.Fatalf("busy message = %q", busy)
+	}
+	full := windowsWinGetIncompleteScanMessage("codex", packages, windowsWinGetScanTooManyEntries)
+	if !strings.Contains(full, "remove the packages") {
+		t.Fatalf("too-many-entries message = %q", full)
+	}
+	slow := windowsWinGetIncompleteScanMessage("codex", packages, windowsWinGetScanTimedOut)
+	if !strings.Contains(slow, "did not list within") || strings.Contains(slow, "remove the packages") {
+		t.Fatalf("timed-out message = %q", slow)
 	}
 }

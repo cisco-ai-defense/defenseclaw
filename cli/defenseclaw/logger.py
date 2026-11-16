@@ -24,15 +24,18 @@ handling, local persistence, route-specific redaction, and destination fanout.
 
 from __future__ import annotations
 
+import ipaddress
+import json
 import os
 import secrets
+import stat
 from collections.abc import Mapping
 from typing import Any, Protocol
 
 import requests
 from urllib3.exceptions import NewConnectionError
 
-from defenseclaw.gateway import OrchestratorClient
+from defenseclaw.gateway import GatewayNotRunningError, OrchestratorClient
 from defenseclaw.models import ScanResult
 
 
@@ -62,7 +65,10 @@ class _GatewayConfigRecorder:
         if gateway is None:
             raise CanonicalObservabilityUnavailableError("gateway configuration is unavailable")
         token_resolver = getattr(gateway, "resolved_token", None)
-        token = self._runtime_token or (token_resolver() if callable(token_resolver) else "")
+        data_dir = str(getattr(self._cfg, "data_dir", "") or "")
+        token = self._runtime_token or _running_gateway_token(data_dir) or (
+            token_resolver() if callable(token_resolver) else ""
+        )
         if not token:
             # A first gateway start may create the canonical token after this
             # CLI process loaded config (for example: init --no-start-gateway,
@@ -109,9 +115,10 @@ class _GatewayConfigRecorder:
         gateway: Any,
         token: str,
     ) -> None:
+        address = _running_gateway_address(str(getattr(self._cfg, "data_dir", "") or ""))
         client = OrchestratorClient(
-            host=_gateway_api_host(self._cfg),
-            port=int(getattr(gateway, "api_port", 18970)),
+            host=address[0] if address else _gateway_api_host(self._cfg),
+            port=address[1] if address else int(getattr(gateway, "api_port", 18970)),
             timeout=10,
             token=token,
         )
@@ -129,6 +136,13 @@ class _GatewayConfigRecorder:
     def close(self) -> None:
         return
 
+
+
+def _gateway_pid_path(data_dir: str) -> str:
+    # Imported lazily, like this module's other config reads.
+    from defenseclaw.config import gateway_pid_path
+
+    return gateway_pid_path(data_dir)
 
 def _is_authentication_rejection(exc: requests.HTTPError) -> bool:
     response = getattr(exc, "response", None)
@@ -207,15 +221,91 @@ def keep_running_gateway_token(logger: Any, data_dir: str, running: str, saved: 
     gateway starts on the saved token. Call it before the new token is saved.
     """
 
-    if not running or running == saved or not data_dir:
+    if not data_dir:
         return
-    from defenseclaw.process_liveness import pid_file_alive
+    from defenseclaw.process_liveness import pid_alive, read_pid_file
 
-    if not pid_file_alive(os.path.join(data_dir, "gateway.pid")):
+    pid = read_pid_file(_gateway_pid_path(data_dir))
+    if pid is None or not pid_alive(pid):
+        return
+    # A second rotation must still authenticate with the value the gateway
+    # loaded before the first rotation. This private, PID-bound handoff is
+    # transient authentication evidence; config.yaml and .env remain the
+    # settings that the next gateway starts with.
+    running = _running_gateway_token(data_dir) or running
+    if not running or running == saved:
+        return
+    from defenseclaw.file_permissions import atomic_write_private_bytes
+
+    record = json.dumps({"pid": pid, "token": running}, separators=(",", ":")).encode()
+    atomic_write_private_bytes(os.path.join(data_dir, "gateway_running_token.json"), record)
+    if read_pid_file(_gateway_pid_path(data_dir)) != pid:
+        # A concurrent restart made this handoff stale. Its PID check keeps
+        # it from authorizing another process; let the caller re-evaluate.
         return
     keep = getattr(logger, "keep_gateway_token", None)
     if callable(keep):
         keep(running)
+
+
+def _running_gateway_token(data_dir: str) -> str:
+    """Read only a private handoff bound to the gateway's current PID."""
+    record = _running_gateway_record(data_dir, "gateway_running_token.json")
+    token = record.get("token") if record else None
+    return token if isinstance(token, str) and 0 < len(token) <= 2048 else ""
+
+
+def _running_gateway_address(data_dir: str) -> tuple[str, int] | None:
+    """Use the live process's loopback listener until restart applies saved settings."""
+    record = _running_gateway_record(data_dir, "gateway-api.json")
+    if not record:
+        return None
+    host, port = record.get("host"), record.get("port")
+    try:
+        if isinstance(host, str) and ipaddress.ip_address(host).is_loopback and type(port) is int and 0 < port < 65536:
+            return host, port
+    except ValueError:
+        pass
+    return None
+
+
+def _running_gateway_record(data_dir: str, name: str, *, expected_pid: int | None = None) -> dict | None:
+    """Read a private runtime descriptor bound to a live, known PID.
+
+    Ordinary callers obtain that PID from ``gateway.pid``. Status may supply
+    an independently verified listener PID for a foreground gateway that has
+    no daemon PID file.
+    """
+    if not data_dir:
+        return None
+    from defenseclaw.file_permissions import (
+        darwin_acl_confidentiality_error,
+        read_regular_file_no_follow,
+        trusted_runtime_owner,
+        windows_acl_custody_confidentiality_error,
+    )
+    from defenseclaw.process_liveness import pid_alive, read_pid_file
+
+    pid = read_pid_file(_gateway_pid_path(data_dir)) if expected_pid is None else expected_pid
+    if type(pid) is not int or pid <= 0 or not pid_alive(pid):
+        return None
+    path = os.path.join(data_dir, name)
+    try:
+        info = os.stat(path, follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode) or (os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077):
+            return None
+        # Written by this account's gateway or by root (an administrator's
+        # gateway for this home), as read_pid_record requires of gateway.pid.
+        if os.name != "nt" and not trusted_runtime_owner(info.st_uid):
+            return None
+        if darwin_acl_confidentiality_error(path) or windows_acl_custody_confidentiality_error(path):
+            return None
+        record = json.loads(read_regular_file_no_follow(path, max_bytes=4096))
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(record, dict) or type(record.get("pid")) is not int or record["pid"] != pid:
+        return None
+    return record
 
 
 class _NoRuntimeRecorder:
@@ -271,7 +361,14 @@ class Logger:
 
         return cls(_NoRuntimeRecorder())
 
-    def log_scan(self, result: ScanResult, *, error: str = "", connector: str | None = None) -> None:
+    def log_scan(
+        self,
+        result: ScanResult,
+        *,
+        error: str = "",
+        connector: str | None = None,
+        verdict: str = "",
+    ) -> None:
         scan: dict[str, Any] = {
             "scanner": result.scanner,
             "target": result.target,
@@ -287,6 +384,10 @@ class Logger:
         # scan telemetry says which connector the asset belongs to (GAP-1381).
         if connector:
             scan["connector"] = connector
+        # The admission decision the CLI printed (clean, warn or block), so
+        # the audit row reads what the user saw (GAP-0156).
+        if verdict:
+            scan["verdict"] = verdict
         self._emit({"kind": "scan", "run_id": _current_run_id(), "scan": scan})
 
     def log_scan_failed(self, scanner: str, target: str, error: str, *, duration_ms: int = 0) -> None:
@@ -559,7 +660,7 @@ def _is_definite_preconnect_failure(exc: requests.RequestException) -> bool:
     already have committed the canonical record.
     """
 
-    if isinstance(exc, requests.ConnectTimeout):
+    if isinstance(exc, (requests.ConnectTimeout, GatewayNotRunningError)):
         return True
     pending: list[BaseException] = [exc]
     seen: set[int] = set()

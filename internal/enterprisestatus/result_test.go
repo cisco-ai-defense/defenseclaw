@@ -52,6 +52,27 @@ func TestResultExitCodesAndJSON(t *testing.T) {
 	}
 }
 
+// Windows verify reported security_complete:true next to the error that the
+// guardian could not verify an enrolled target's hooks (GAP-0664). A result
+// with an error is never security-complete; a clean one keeps the flag.
+func TestFinishClearsSecurityCompleteOnError(t *testing.T) {
+	for _, goos := range []string{"windows", "linux", "darwin"} {
+		clean := New("verify", "standalone", goos, "1.0.3")
+		clean.SecurityComplete, clean.CoverageComplete = true, true
+		clean.Finish(goos, 0)
+		if !clean.SecurityComplete || !clean.CoverageComplete {
+			t.Fatalf("%s: a clean result lost security_complete=%v coverage_complete=%v", goos, clean.SecurityComplete, clean.CoverageComplete)
+		}
+		failed := New("verify", "standalone", goos, "1.0.3")
+		failed.SecurityComplete = true
+		failed.AddError("lifecycle_error", "guardian SCM process is running but protected target coverage is not verified")
+		failed.Finish(goos, 0)
+		if failed.SecurityComplete || failed.OK {
+			t.Fatalf("%s: a result with an error kept security_complete=%v ok=%v", goos, failed.SecurityComplete, failed.OK)
+		}
+	}
+}
+
 // GAP-2504: the PowerShell call operator in a message stays a literal & when
 // the CLI encodes a Result with SetEscapeHTML(false).
 // A standard user cannot read the root-only deployment record, so a not_root

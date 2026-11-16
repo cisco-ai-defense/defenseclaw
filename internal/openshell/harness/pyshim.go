@@ -25,8 +25,8 @@ import (
 // imports at every interpreter start, through a .pth file next to it in the
 // environment's site-packages. The shims adjust how the pinned harness
 // behaves in a sandbox where its own code cannot (a suspend the sandbox
-// refuses, a notice its TUI never shows); none of them touches a hook's
-// verdict.
+// refuses, a notice its TUI never shows, an agent it builds without the
+// hooks); none of them touches a hook's verdict.
 type pyShim struct {
 	// name is the module name (and the .py and .pth file names).
 	name string

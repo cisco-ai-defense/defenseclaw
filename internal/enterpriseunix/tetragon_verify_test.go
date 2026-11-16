@@ -245,6 +245,12 @@ func TestTetragonReadinessChecks(t *testing.T) {
 			*in = withUsers(*in)
 			in.State.Roots.Observed = []kernelpolicy.Observed{{UID: 1001, Reason: kernelpolicy.ReasonPredatesControls, Connector: "claudecode", Count: 2}}
 		}, []want{{checkAgents, checkWarn, "2 agent sessions of dcr-std1 (uid 1001) started before the kernel controls loaded and are not denied until restarted"}}},
+		// GAP-0166: a session whose start Tetragon never reported is not
+		// counted as denied.
+		{"session start not reported by Tetragon", "enforce", "enforce", func(in *tetragonInputs, _ *tetragonProbes) {
+			*in = withUsers(*in)
+			in.State.Roots.Observed = []kernelpolicy.Observed{{UID: 1001, Reason: kernelpolicy.ReasonKernelUnconfirmed, Connector: "claudecode", Count: 1}}
+		}, []want{{checkAgents, checkWarn, "Tetragon did not report the start of 1 agent session of dcr-std1 (uid 1001), so it is not counted as denied until restarted"}}},
 		{"new session pending controls load", "observe", "observe", func(in *tetragonInputs, _ *tetragonProbes) {
 			*in = withUsers(*in)
 			in.State.UIDs[0].Reason = kernelpolicy.WarnSessionPolicyPending
@@ -254,12 +260,12 @@ func TestTetragonReadinessChecks(t *testing.T) {
 		{"session over the limit", "observe", "observe", func(in *tetragonInputs, _ *tetragonProbes) {
 			*in = withUsers(*in)
 			in.State.UIDs[0].Reason = kernelpolicy.WarnRootsOverLimit
-		}, []want{{checkAgents, checkWarn, "the user dcr-std1 runs more than 8 agent sessions at once; the monitor controls measure 8, so covered time is paused until fewer run"}}},
+		}, []want{{checkAgents, checkWarn, "the user dcr-std1 runs more than 4 agent sessions at once; the monitor controls measure 4, so covered time is paused until fewer run"}}},
 		{"sessions of two users over the limit", "observe", "observe", func(in *tetragonInputs, _ *tetragonProbes) {
 			*in = withUsers(*in)
 			in.State.UIDs[0].Reason = kernelpolicy.WarnRootsOverLimit
 			in.State.UIDs[1].Reason = kernelpolicy.WarnRootsOverLimit
-		}, []want{{checkAgents, checkWarn, "the users dcr-std1 and dcr-std2 run more than 8 agent sessions at once"}}},
+		}, []want{{checkAgents, checkWarn, "the users dcr-std1 and dcr-std2 run more than 4 agent sessions at once"}}},
 		{"nobody enrolled", "observe", "observe", nil, []want{{checkAgents, checkWarn, "no user is enrolled"}}},
 		{"no agent for enforce", "enforce", "enforce", func(in *tetragonInputs, _ *tetragonProbes) {
 			in.State.UIDs = []kernelpolicy.UIDStatus{{UID: 1001, User: "dcr-std1", Connectors: []string{"claudecode"},
@@ -267,6 +273,12 @@ func TestTetragonReadinessChecks(t *testing.T) {
 			in.Intent.ObserveCLI = []string{"codex"}
 		}, []want{{checkAgents, checkFail, "no agent seen for dcr-std1; no enrolled user has a row for codex"},
 			{checkConnectorsAction, checkWarn, "codex is in observe mode"}}},
+		// GAP-1965: a user who runs only a shared install outside the home
+		// (an npm prefix in /opt) is told where the helper looks.
+		{"no agent names where agents are seen", "observe", "enforce", func(in *tetragonInputs, _ *tetragonProbes) {
+			in.State.UIDs = []kernelpolicy.UIDStatus{{UID: 1001, User: "dcr-std1", Connectors: []string{"claudecode"},
+				State: kernelpolicy.UIDInactive, Reason: kernelpolicy.ReasonNoAnchors}}
+		}, []want{{checkAgents, checkFail, "or enroll a user who runs one; an agent counts when it is installed in the user's home (for example ~/.local/bin/claude), in /usr/local/bin, /usr/bin or /home/linuxbrew/.linuxbrew/bin, or in the bin folder of a prefix listed in enterprise.enrollment.agent_prefixes, on a path only root or that user can change; a shared install anywhere else, or on a path other accounts can write, is not seen"}}},
 		{"approval missing", "observe", "enforce", func(in *tetragonInputs, _ *tetragonProbes) { *in = withUsers(*in) },
 			[]want{{checkApproval, checkInfo, "not approved yet"}, {checkBurnIn, checkInfo, "1 of 3"},
 				{checkConnectorsAction, checkPass, "claudecode"}}},
@@ -687,6 +699,12 @@ func TestPlaneCFromHealth(t *testing.T) {
 	for body, says := range map[string]string{
 		`{"api":{"state":"running"}}`:                    "no ai_runtime section",
 		`{"ai_runtime":{"details":{"planes":{"a":{}}}}}`: "has not reported Plane C yet",
+		// GAP-1964: a starting AI runtime lists the configured planes until
+		// its first poll; that is "not reported yet", not a /health that
+		// does not parse.
+		`{"ai_runtime":{"state":"starting","details":{"planes":["a","b","c"],"poll_interval_s":30}}}`: "has not reported Plane C yet",
+		`{"ai_runtime":{"state":"starting","details":{}}}`:                                            "has not reported Plane C yet",
+		`{"ai_runtime":{"details":{"planes":"c"}}}`:                                                   "does not parse",
 		`not json`: "does not parse",
 	} {
 		if got := planeCFromHealth([]byte(body)); got.Read || !strings.Contains(got.Err, says) {

@@ -62,6 +62,7 @@ func TestStandaloneCleanupRunsInTrustedCurrentHomeAndEndsRow(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
 			f := newStandaloneFixture(t, resolver)
+			useReportingStandaloneRunner(t)
 			newHome := f.home(t, "sample-user-new", 0o700)
 			uid, gid := rehomedTestUID(t, newHome)
 			oldHome := filepath.Join(f.homes, "sample-user-old")
@@ -88,7 +89,10 @@ func TestStandaloneCleanupRunsInTrustedCurrentHomeAndEndsRow(t *testing.T) {
 			if outcome != enterpriseHookUserCleanupDone || err != nil {
 				t.Fatalf("trusted re-home cleanup = %v, %v", outcome, err)
 			}
-			wantAudit := "the account was re-homed from " + oldHome + " to " + newHome
+			wantAudit := "the account's home moved from " + oldHome + " to " + newHome
+			if oldPresent {
+				wantAudit = "the account's home changed from " + oldHome + " to " + newHome + ", and the recorded home still holds files, so this is a copy, not a move"
+			}
 			if strings.Count(attemptLog.String(), wantAudit) != 1 {
 				t.Fatalf("re-home audit line = %q", attemptLog.String())
 			}
@@ -162,6 +166,7 @@ func TestStandaloneCleanupReconcileRemovesRegistrationInBothHomes(t *testing.T) 
 		t.Run(name, func(t *testing.T) {
 			resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
 			f := newStandaloneFixture(t, resolver)
+			useReportingStandaloneRunner(t)
 			newHome := f.home(t, "sample-user-new", 0o700)
 			uid, gid := rehomedTestUID(t, newHome)
 			oldHome := f.home(t, "sample-user-old", 0o700)
@@ -212,7 +217,7 @@ func TestStandaloneCleanupReconcileRemovesRegistrationInBothHomes(t *testing.T) 
 					t.Fatalf("registration %s remains: %v", config, err)
 				}
 			}
-			if strings.Count(log.String(), "the account was re-homed from "+oldHome+" to "+newHome) != 1 ||
+			if strings.Count(log.String(), "the account's home changed from "+oldHome+" to "+newHome+", and the recorded home still holds files, so this is a copy, not a move") != 1 ||
 				strings.Count(log.String(), "no longer enrolled; per-user cleanup done") != 1 {
 				t.Fatalf("guardian audit = %q", log.String())
 			}
@@ -225,6 +230,7 @@ func TestStandaloneCleanupKeepsRowWhenRecordedHomeWorkerDoesNotFinish(t *testing
 		t.Run(kind, func(t *testing.T) {
 			resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
 			f := newStandaloneFixture(t, resolver)
+			useReportingStandaloneRunner(t)
 			newHome := f.home(t, "sample-user-new", 0o700)
 			uid, gid := rehomedTestUID(t, newHome)
 			oldHome := f.home(t, "sample-user-old", 0o700)
@@ -291,6 +297,7 @@ func TestStandaloneCleanupKeepsUntrustedRecordedHomeAndReportsPending(t *testing
 			}
 			resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
 			f := newStandaloneFixture(t, resolver)
+			useReportingStandaloneRunner(t)
 			newHome := f.home(t, "sample-user-new", 0o700)
 			uid, gid := rehomedTestUID(t, newHome)
 			oldName := "sample-user-old"
@@ -348,9 +355,16 @@ func TestStandaloneCleanupKeepsUntrustedRecordedHomeAndReportsPending(t *testing
 				t.Fatal(err)
 			}
 			remaining, err := loadEnterpriseHookUserCleanups(f.dataDir)
+			// The ledger keeps the remedy within 512 bytes by shortening long
+			// paths while retaining their basename. This unusually long path
+			// is always shortened; the others are too when the checkout path
+			// (the fixture's root) is long (rel-1-0-4 GAP-0559).
+			namesHome := strings.Contains(guardianLog.String(), shortEnterpriseHookReportPath(oldHome)) ||
+				(kind != "long-path" && strings.Contains(guardianLog.String(), oldHome))
 			if err != nil || len(remaining) != 1 ||
 				!strings.Contains(guardianLog.String(), "warn: per-user cleanup of hermes/sample-user:") ||
-				!strings.Contains(guardianLog.String(), oldHome) ||
+				!namesHome ||
+				!strings.Contains(guardianLog.String(), "fix owner/permissions and rerun") ||
 				strings.Contains(guardianLog.String(), "no longer enrolled; per-user cleanup done") {
 				t.Fatalf("untrusted recorded-home guardian result = %+v, %v, log %q", remaining, err, guardianLog.String())
 			}
@@ -376,6 +390,7 @@ func TestStandaloneCleanupKeepsUntrustedRecordedHomeAndReportsPending(t *testing
 func TestStandaloneCleanupLeavesExternalDataDirAsRecorded(t *testing.T) {
 	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
 	f := newStandaloneFixture(t, resolver)
+	useReportingStandaloneRunner(t)
 	newHome := f.home(t, "sample-user-new", 0o700)
 	uid, gid := rehomedTestUID(t, newHome)
 	resolver.accounts["sample-user"] = unixidentity.Account{Name: "sample-user", UID: uid, GID: gid, Home: newHome}
@@ -394,6 +409,7 @@ func TestStandaloneCleanupRefusesUnsafeCurrentHomes(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
 			f := newStandaloneFixture(t, resolver)
+			useReportingStandaloneRunner(t)
 			newHome := f.home(t, "sample-user-new", 0o700)
 			uid, gid := rehomedTestUID(t, newHome)
 			oldHome := filepath.Join(f.homes, "sample-user-old")
@@ -459,6 +475,7 @@ func TestStandaloneCleanupDropsGoneOrReassignedAccountsWithoutWorker(t *testing.
 		t.Run(kind, func(t *testing.T) {
 			resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
 			f := newStandaloneFixture(t, resolver)
+			useReportingStandaloneRunner(t)
 			newHome := f.home(t, "sample-user-new", 0o700)
 			uid, gid := rehomedTestUID(t, newHome)
 			if kind == "reassigned" {
@@ -480,8 +497,12 @@ func TestStandaloneCleanupHandlesEmptyDirectoryHome(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
 			f := newStandaloneFixture(t, resolver)
+			useReportingStandaloneRunner(t)
 			oldHome := filepath.Join(f.homes, "sample-user-old")
 			uid, gid := os.Getuid()+1, os.Getgid()
+			// A home is gone only from a parent that still holds other
+			// homes: an empty parent can be an unmounted volume (GAP-0443).
+			f.home(t, "other-user", 0o700)
 			if kind != "recorded-home-gone" {
 				oldHome = f.home(t, "sample-user-old", 0o700)
 				uid, gid = rehomedTestUID(t, oldHome)
@@ -552,20 +573,22 @@ func TestStandaloneCleanupHandlesEmptyDirectoryHome(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// remove-all already dropped the rows it finished (rel-1-0-3
+			// GAP-0204): the guardian has nothing left to run for them.
 			switch kind {
 			case "recorded-home-kept-trusted":
-				if len(remaining) != 0 || strings.Count(guardianLog.String(), "no longer enrolled; per-user cleanup done") != 1 ||
-					len(f.requests) != 3 || f.requests[2].Targets[0].Options.UserHome != oldHome {
-					t.Fatalf("trusted recorded home did not finish: %+v, log %q, workers %+v", remaining, guardianLog.String(), f.requests)
+				if len(remaining) != 0 || strings.Contains(guardianLog.String(), "per-user cleanup") ||
+					len(f.requests) != 2 || f.requests[1].Targets[0].Options.UserHome != oldHome {
+					t.Fatalf("trusted recorded home did not finish in remove-all: %+v, log %q, workers %+v", remaining, guardianLog.String(), f.requests)
 				}
 			case "recorded-home-kept-untrusted":
 				if len(remaining) != 1 || !strings.Contains(guardianLog.String(), "will retry") || len(f.requests) != 0 {
 					t.Fatalf("untrusted recorded home was retired: %+v, log %q, workers %+v", remaining, guardianLog.String(), f.requests)
 				}
 			case "recorded-home-gone":
-				if len(remaining) != 0 || strings.Count(guardianLog.String(), "home gone:") != 1 ||
+				if len(remaining) != 0 || strings.Contains(guardianLog.String(), "home gone:") ||
 					strings.Contains(guardianLog.String(), "no longer enrolled; per-user cleanup done") || len(f.requests) != 0 {
-					t.Fatalf("gone recorded home was not retired once: %+v, log %q, workers %+v", remaining, guardianLog.String(), f.requests)
+					t.Fatalf("gone recorded home was not retired once, by remove-all: %+v, log %q, workers %+v", remaining, guardianLog.String(), f.requests)
 				}
 			}
 		})
@@ -581,6 +604,7 @@ func TestRemoveAllReportsTrustedRehomeRemovedAndUnsafeRehomeFailed(t *testing.T)
 		t.Run(name, func(t *testing.T) {
 			resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
 			f := newStandaloneFixture(t, resolver)
+			useReportingStandaloneRunner(t)
 			newHome := f.home(t, "sample-user-new", 0o700)
 			uid, gid := rehomedTestUID(t, newHome)
 			if !trusted {

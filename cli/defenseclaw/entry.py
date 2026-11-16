@@ -68,11 +68,18 @@ def use_bundled_litellm_cost_map(environ=None) -> None:
     env.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
 
+# The machine-wide deployment pins (``config._DEPLOYMENT_PIN_ENVS``).
+_DEPLOYMENT_PIN_ENVS = ("DEFENSECLAW_DEPLOYMENT_MODE", "DEFENSECLAW_ENTERPRISE_PROFILE")
+
+
 def ignore_stray_deployment_pins() -> None:
     """Drop a deployment mode exported in a user's shell (see
     ``config.ignore_unmanaged_deployment_pins``). A CLI that cannot import its
     config module must still upgrade and roll back, so a failure here is
-    ignored."""
+    ignored. With no pin set there is nothing to drop, and the config module
+    (about 60 ms to import) is not loaded for it."""
+    if not any(os.environ.get(name, "").strip() for name in _DEPLOYMENT_PIN_ENVS):
+        return
     try:
         from defenseclaw.config import ignore_unmanaged_deployment_pins
 
@@ -82,6 +89,11 @@ def ignore_stray_deployment_pins() -> None:
 
 
 def main() -> None:
+    if os.name == "nt":
+        # Elevated, files would be owned by Administrators (GAP-0050).
+        from defenseclaw.windows_owner import use_current_user_as_default_owner
+
+        use_current_user_as_default_owner(sys.argv[1:])
     exempt_instance_metadata_from_proxy()
     use_bundled_litellm_cost_map()
     ignore_stray_deployment_pins()
@@ -90,6 +102,15 @@ def main() -> None:
         from defenseclaw.upgrade_shim import run
 
         sys.exit(run(argv))
+    if argv == ["--version"]:
+        # Click's --version answer for the root group, without importing
+        # every command module first (about 330 ms).
+        from defenseclaw import __version__
+
+        sys.stdout.write(f"defenseclaw, version {__version__}\n")
+        sys.stdout.flush()
+        _notice(argv)
+        sys.exit(0)
 
     from defenseclaw.main import main as cli_main
 

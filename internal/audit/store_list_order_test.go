@@ -87,3 +87,159 @@ func TestListEventsOrdersByExactTimeNotText(t *testing.T) {
 		t.Fatalf("ListEvents order without the retention column %s, want %s", got, want)
 	}
 }
+
+func TestListAlertsOrdersByExactTime(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	for _, row := range []struct{ id, timestamp string }{
+		{"earlier", "2026-10-13T12:00:00.12345Z"},
+		{"later", "2026-10-13T12:00:00.123451Z"},
+	} {
+		if _, err := store.db.Exec(`INSERT INTO audit_events
+			(id, timestamp, action, actor, severity, bucket, event_name)
+			VALUES (?, ?, 'scan-finding', 'test', 'HIGH', 'security.finding', 'finding.observed')`, row.id, row.timestamp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	alerts, err := store.ListAlerts(2)
+	if err != nil || len(alerts) != 2 || alerts[0].ID != "later" || alerts[1].ID != "earlier" {
+		t.Fatalf("alerts = %+v, %v", alerts, err)
+	}
+}
+
+func TestActivityAndScanReadersUseExactTimeAndInsertTies(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	base := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	stamps := []struct {
+		id string
+		ts time.Time
+	}{
+		{"short", base.Add(123450 * time.Microsecond)},
+		{"long", base.Add(123451 * time.Microsecond)},
+		{"tie-first", base.Add(time.Second)},
+		{"tie-second", base.Add(time.Second)},
+		{"offset", base.Add(2 * time.Second).In(time.FixedZone("plus2", 7200))},
+	}
+	for _, item := range stamps {
+		if err := store.InsertActivityEvent(ActivityEventRow{ID: item.id, Timestamp: item.ts, Actor: "operator", Action: "change", TargetType: "policy", TargetID: item.id}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.db.Exec(`INSERT INTO scan_results (id, scanner, target, timestamp, duration_ms, finding_count) VALUES (?, 'scan', 'same', ?, 0, 1)`, item.id, item.ts.Format(time.RFC3339Nano)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := "offset,tie-second,tie-first,long,short"
+	activity, err := store.ListActivityEvents(5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]string, 0, len(activity))
+	for _, row := range activity {
+		ids = append(ids, row.ID)
+	}
+	if got := strings.Join(ids, ","); got != want {
+		t.Fatalf("activity: %s want %s", got, want)
+	}
+	scans, err := store.ListScanResults(5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids = ids[:0]
+	for _, row := range scans {
+		ids = append(ids, row.ID)
+	}
+	if got := strings.Join(ids, ","); got != want {
+		t.Fatalf("scan results: %s want %s", got, want)
+	}
+	latest, err := store.LatestScansByScanner("scan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(latest) != 1 || latest[0].ID != "offset" {
+		t.Fatalf("latest scan: %+v", latest)
+	}
+}
+
+func TestRecentSessionFindingsUseExactTimeAndInsertTies(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	if _, err := store.db.Exec(`INSERT INTO scan_results (id, scanner, target, timestamp)
+		VALUES ('scan', 'hook', 'target', '2026-10-13T12:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []struct{ id, stamp string }{
+		{"short", "2026-10-13T12:00:00.12345Z"},
+		{"long", "2026-10-13T12:00:00.123451Z"},
+		{"tie-first", "2026-10-13T12:00:01Z"},
+		{"tie-second", "2026-10-13T12:00:01Z"},
+		{"offset", "2026-10-13T14:00:02+02:00"},
+	} {
+		_, err := store.db.Exec(`INSERT INTO scan_findings
+   (id, scan_id, scanner, target, severity, tags, timestamp, session_id, agent_instance_id)
+   VALUES (?, 'scan', 'hook', 'target', 'HIGH', '[]', ?, 'session', 'agent')`, row.id, row.stamp)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := store.ListRecentFindingsInSession("session", "agent", "", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		ids = append(ids, row.ID)
+	}
+	if got, want := strings.Join(ids, ","), "offset,tie-second,tie-first,long,short"; got != want {
+		t.Fatalf("recent findings: %s want %s", got, want)
+	}
+}
+
+// The network egress readers list newest first by the exact instant, with
+// insert order on a tie, not by the timestamp text (GAP-0251): one instant
+// written in two zones, or with a shorter fraction, sorted by its text.
+func TestNetworkEgressReadersUseExactTimeAndInsertTies(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	base := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	stamps := []struct {
+		id string
+		ts time.Time
+	}{
+		{"short", base.Add(120 * time.Millisecond)},
+		{"long", base.Add(123 * time.Millisecond)},
+		{"tie-utc", base.Add(time.Second)},
+		{"tie-offset", base.Add(time.Second).In(time.FixedZone("minus4", -4*60*60))},
+		{"offset", base.Add(2 * time.Second).In(time.FixedZone("plus2", 7200))},
+	}
+	for _, item := range stamps {
+		if err := store.InsertNetworkEgressEvent(NetworkEgressRow{ID: item.id, Timestamp: item.ts,
+			Hostname: "egress.example", PolicyOutcome: "allowed"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := "offset,tie-offset,tie-utc,long,short"
+	ids := func(rows []NetworkEgressRow) string {
+		out := make([]string, 0, len(rows))
+		for _, row := range rows {
+			out = append(out, row.ID)
+		}
+		return strings.Join(out, ",")
+	}
+	for _, hostname := range []string{"", "egress.example"} {
+		rows, err := store.ListNetworkEgressEvents(10, hostname)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := ids(rows); got != want {
+			t.Fatalf("list (host %q): %s want %s", hostname, got, want)
+		}
+	}
+	rows, err := store.QueryNetworkEgressEvents(NetworkEgressFilter{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ids(rows); got != want {
+		t.Fatalf("query: %s want %s", got, want)
+	}
+}

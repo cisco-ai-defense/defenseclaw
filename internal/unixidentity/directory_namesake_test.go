@@ -17,6 +17,8 @@ import (
 )
 
 func TestAccountGroupsBelongToVerifiedUID(t *testing.T) {
+	// An nslcd that completes every search (nslcdSearchesComplete).
+	startFakeNSLCD(t, &fakeNSLCD{})
 	for _, tc := range []struct {
 		name, service, directoryName string
 	}{

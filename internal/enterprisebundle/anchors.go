@@ -9,7 +9,9 @@ package enterprisebundle
 import (
 	"bytes"
 	"crypto"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +21,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // AnchorsName is the trust anchor file name (in <etc>/trust/).
@@ -65,6 +69,42 @@ type AnchorKey struct {
 	notAfter  time.Time
 }
 
+// AnchorsSummary is the anchors_summary member of bundle status: what the
+// installed trust anchor file says, without the public keys, so a
+// management agent reports it without reading and hashing the file itself.
+// SHA256 is the lowercase hex SHA-256 of the file bytes status decoded.
+type AnchorsSummary struct {
+	SHA256       string             `json:"sha256"`
+	TenantID     string             `json:"tenant_id"`
+	DeviceGroups []string           `json:"device_groups"`
+	MinVersion   uint64             `json:"min_version"`
+	Keys         []AnchorKeySummary `json:"keys"`
+}
+
+// AnchorKeySummary is one key of AnchorsSummary: never the public key.
+type AnchorKeySummary struct {
+	KeyID     string `json:"key_id"`
+	Alg       string `json:"alg"`
+	Status    string `json:"status"`
+	NotBefore string `json:"not_before"`
+	NotAfter  string `json:"not_after"`
+}
+
+// SummarizeAnchors summarizes decoded anchors and the bytes they were
+// decoded from (ReadAnchorsFile); nil anchors summarize to nil.
+func SummarizeAnchors(a *Anchors, raw []byte) *AnchorsSummary {
+	if a == nil {
+		return nil
+	}
+	sum := sha256.Sum256(raw)
+	out := &AnchorsSummary{SHA256: hex.EncodeToString(sum[:]), TenantID: a.TenantID,
+		DeviceGroups: append([]string{}, a.DeviceGroups...), MinVersion: a.MinVersion, Keys: []AnchorKeySummary{}}
+	for _, k := range a.Keys {
+		out.Keys = append(out.Keys, AnchorKeySummary{KeyID: k.KeyID, Alg: k.Alg, Status: k.Status, NotBefore: k.NotBefore, NotAfter: k.NotAfter})
+	}
+	return out
+}
+
 // Public returns the parsed public key (set by DecodeAnchors).
 func (k *AnchorKey) Public() crypto.PublicKey { return k.public }
 
@@ -98,43 +138,99 @@ func (a *Anchors) AllowsDeviceGroup(group string) bool {
 	return false
 }
 
+// PinDeviceGroup pins decoded anchors (and the bytes they were decoded from)
+// to the one device group this device is in, for `enterprise bundle anchors
+// install --device-group` (the device_groups member names the groups this
+// device belongs to). The file may name several groups, the way a tenant-wide
+// file does, or none (any); either way it must allow group, so the pin only
+// narrows what the file trusts. A file that already names exactly that group
+// keeps its bytes. Otherwise the pinned file is the anchors re-encoded with
+// device_groups [group] and decoded again, so what is written is what a
+// device reads. The group is checked like a device_groups entry.
+func PinDeviceGroup(a *Anchors, raw []byte, group string) (*Anchors, []byte, error) {
+	if !scopeIDPattern.MatchString(group) {
+		return nil, nil, refuse(CodeAnchorInvalid, AnchorsName, "device group: want 1-128 characters of [A-Za-z0-9._-]")
+	}
+	if !a.AllowsDeviceGroup(group) {
+		return nil, nil, refuse(CodeAnchorInvalid, AnchorsName,
+			"device group %s is not one of the groups this anchor file lists (%s); a pin only narrows the file", group, strings.Join(a.DeviceGroups, ", "))
+	}
+	if len(a.DeviceGroups) == 1 {
+		return a, raw, nil
+	}
+	pinned := *a
+	pinned.DeviceGroups = []string{group}
+	out, err := json.MarshalIndent(&pinned, "", "  ")
+	if err != nil {
+		return nil, nil, refuse(CodeAnchorInvalid, AnchorsName, "cannot pin the device group: %v", err)
+	}
+	out = append(out, '\n')
+	decoded, err := DecodeAnchors(out)
+	if err != nil {
+		return nil, nil, err
+	}
+	return decoded, out, nil
+}
+
 // TrustCheck refuses an anchor path a standard user could replace or edit.
 type TrustCheck func(path string) error
 
 // LoadAnchors reads the anchor file at path. A missing file is
 // anchor_missing; a file or folder above it that fails trust (owner, mode,
 // ACL, links; nil skips the check) or that is not a regular file is
-// anchor_insecure; a malformed file is anchor_invalid.
+// anchor_insecure; a malformed file is anchor_invalid. An anchor_insecure
+// refusal caused by an operating system error wraps it: errors.Is(err,
+// fs.ErrPermission) tells an account that may not read the file.
 func LoadAnchors(path string, trust TrustCheck) (*Anchors, error) {
-	info, err := os.Lstat(path)
+	anchors, _, err := ReadAnchorsFile(path, trust)
+	return anchors, err
+}
+
+// ReadAnchorsFile is LoadAnchors that also returns the bytes it decoded
+// (nil on any error), so a caller that installs the file writes exactly
+// what was checked without reading the source again.
+func ReadAnchorsFile(path string, trust TrustCheck) (*Anchors, []byte, error) {
+	// The identity is read now, with the attributes, so the comparison after
+	// the open binds the file the trust check passed (GAP-1308 A-W05).
+	info, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, refuse(CodeAnchorMissing, AnchorsName, "no trust anchor file; bundle mode is off")
+		return nil, nil, refuse(CodeAnchorMissing, AnchorsName, "no trust anchor file; bundle mode is off")
 	}
 	if err != nil {
-		return nil, refuse(CodeAnchorInsecure, AnchorsName, "cannot inspect the trust anchor file: %s", boundedDetail(errors.Unwrap(err).Error()))
+		refusal := refuse(CodeAnchorInsecure, AnchorsName, "cannot inspect the trust anchor file: %s", boundedDetail(errors.Unwrap(err).Error()))
+		refusal.cause = err
+		return nil, nil, refusal
 	}
 	if !info.Mode().IsRegular() {
-		return nil, refuse(CodeAnchorInsecure, AnchorsName, "the trust anchor path is not a regular file")
+		return nil, nil, refuse(CodeAnchorInsecure, AnchorsName, "the trust anchor path is not a regular file")
 	}
 	if trust != nil {
 		if err := trust(path); err != nil {
-			return nil, refuse(CodeAnchorInsecure, AnchorsName, "%s", boundedDetail(err.Error()))
+			refusal := refuse(CodeAnchorInsecure, AnchorsName, "%s", boundedDetail(err.Error()))
+			refusal.cause = err
+			return nil, nil, refusal
 		}
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, refuse(CodeAnchorInsecure, AnchorsName, "cannot open the trust anchor file")
+		refusal := refuse(CodeAnchorInsecure, AnchorsName, "cannot open the trust anchor file")
+		refusal.cause = err
+		return nil, nil, refusal
 	}
 	defer file.Close()
 	opened, err := file.Stat()
 	if err != nil || !os.SameFile(info, opened) {
-		return nil, refuse(CodeAnchorInsecure, AnchorsName, "the trust anchor file was replaced while it was read")
+		return nil, nil, refuse(CodeAnchorInsecure, AnchorsName, "the trust anchor file was replaced while it was read")
 	}
 	raw, err := io.ReadAll(io.LimitReader(file, MaxAnchorsBytes+1))
 	if err != nil {
-		return nil, refuse(CodeAnchorInvalid, AnchorsName, "cannot read the trust anchor file")
+		return nil, nil, refuse(CodeAnchorInvalid, AnchorsName, "cannot read the trust anchor file")
 	}
-	return DecodeAnchors(raw)
+	anchors, err := DecodeAnchors(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	return anchors, raw, nil
 }
 
 // DecodeAnchors decodes bundle-anchors.json strictly (anchor_invalid).

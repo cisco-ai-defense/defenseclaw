@@ -12,11 +12,15 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -27,8 +31,20 @@ const (
 	windowsCodexMachineOwnershipLimit            = 4 << 20
 	windowsCodexManagedStateLimit                = 1 << 20
 	windowsCodexManagedStateFile                 = ".defenseclaw-managed-hooks.state"
-	windowsCodexManagedLockFile                  = ".defenseclaw-managed-hooks.lock"
+	// windowsCodexManagedLegacyLockFile is the transaction lock of 1.0.8 and
+	// earlier. Standard users could read it, so one of them could hold it and
+	// time out every Codex policy transaction (GAP-0650). Writers no longer
+	// take it; the hook reads under it only while no writer lock exists yet
+	// (an upgrade from 1.0.8 or earlier, until the first transaction of this
+	// release removes it). Keep it while upgrades from 1.0.8 are supported.
+	windowsCodexManagedLegacyLockFile = ".defenseclaw-managed-hooks.lock"
 )
+
+// WindowsCodexManagedWriterLockFile is the Codex machine-policy transaction
+// lock in the Codex policy folder. Only Administrators and SYSTEM can open it
+// for data; BUILTIN\Users can read its attributes, its size being the
+// transaction counter the hook-side reader checks (GAP-0650).
+const WindowsCodexManagedWriterLockFile = ".defenseclaw-managed-hooks.writer.lock"
 
 const (
 	// WindowsClaudeEffectivePolicyUnverifiedReason is returned because
@@ -45,6 +61,16 @@ const (
 // from Windows Known Folders, the running installed gateway, and protected
 // deployment metadata; none of them are accepted as public CLI flags.
 type WindowsCodexMachineRequirementsOptions struct {
+	// RenderBase, when RenderBaseSet, is the document a reconcile merges the
+	// managed policy into instead of the requirements file on disk (GAP-1001):
+	// the recovery of a hand-edited file renders from the recorded preimage
+	// off to the side, and only the validated, hook-bearing result is swapped
+	// in. The file on disk is read for the compare-and-swap, never used as
+	// the base, and stays as it is when the render or its check fails. An
+	// empty RenderBase renders the managed policy alone.
+	RenderBase    []byte
+	RenderBaseSet bool
+
 	RequirementsPath   string
 	ManagedDir         string
 	HookBinary         string
@@ -66,10 +92,15 @@ type WindowsCodexMachineRequirementsOptions struct {
 	CursorTargetEnabled           bool
 	// HookContractID binds every managed group's command to its Codex event
 	// and this hook contract. The hook refuses a Codex invocation that does
-	// not carry both, so an unbound command never reaches the gateway. Only
-	// the standalone profile sets it (WindowsCodexStandaloneHookContract);
-	// the Secure Client profile keeps its certified command byte for byte.
+	// not carry both, so an unbound command never reaches the gateway. Both
+	// Windows profiles set it (WindowsCodexManagedHookContract).
 	HookContractID string
+	// SecureClient is set for the Secure Client profile, which keeps its
+	// earlier reconcile and adoption of hooks.windows_managed_dir: a stale
+	// directory is overwritten outside strict trust mode, and adoption strips
+	// the current directory with the current groups. Secure Client is out of
+	// scope for GAP-0015 and GAP-0022; every other caller gets their fixes.
+	SecureClient bool
 }
 
 // WindowsCodexManagedRuntimeTarget is the non-secret mapping a standard-user
@@ -82,16 +113,28 @@ type WindowsCodexManagedRuntimeTarget struct {
 }
 
 type WindowsCodexManagedRuntimeRegistry struct {
-	Active             bool
+	Active bool
+	// Kept is set only by the teardown read: the link (or non-folder) at the
+	// Codex machine-policy folder, which is not read through. The registry is
+	// then empty and says nothing about what is behind the link (GAP-0773).
+	Kept               string
 	GatewayAddr        string
 	GatewayServiceName string
 	Targets            []WindowsCodexManagedRuntimeTarget
+	// AdminConflict names the administrator setting that turned DefenseClaw's
+	// managed Codex hooks off. Only a Secure Client host without the strict
+	// pin sets it; the registry is then inactive and Codex stays unhooked.
+	AdminConflict string
 }
 
 // WindowsCodexMachineRequirementsReport is stable machine-readable output for
 // the installer and guardian. Disposition distinguishes exact preimage restore
 // from surgical removal that preserves later unrelated administrator edits.
 type WindowsCodexMachineRequirementsReport struct {
+	// ErrorCode is a stable code for the failures a caller acts on without
+	// reading text: writer_lock_busy when a Codex writer holds the writer lock
+	// (GAP-1001).
+	ErrorCode                           string `json:"error_code,omitempty"`
 	SchemaVersion                       int    `json:"schema_version"`
 	Action                              string `json:"action"`
 	OK                                  bool   `json:"ok"`
@@ -127,6 +170,27 @@ type WindowsCodexMachineRequirementsReport struct {
 	ManagedEvents                 []string `json:"managed_events"`
 	Details                       []string `json:"details,omitempty"`
 	Error                         string   `json:"error,omitempty"`
+	// RequirementsHeldBy names the processes (Restart Manager, "<app> (PID
+	// <n>)") that held requirements.toml open so that it could not be
+	// written (Windows); the enforced policy stayed in place. Empty when
+	// Windows could not tell or the file was not held.
+	RequirementsHeldBy string `json:"requirements_held_by,omitempty"`
+	// PinMismatch reports that a content-hash pin no longer matches the live
+	// requirements bytes. It is advisory: verification still succeeds and the
+	// next privileged reconcile refreshes the pin.
+	PinMismatch bool `json:"pin_mismatch,omitempty"`
+	// LinkKept is set only by the teardown removal when a link sits at the
+	// Codex machine-policy folder: the link is kept, nothing behind it was
+	// read, and so nothing in the report says what it holds (GAP-0773). The
+	// report then attests neither SafeToRemoveBinary nor
+	// ManagedStateRemovedOrAbsent.
+	LinkKept string `json:"link_kept,omitempty"`
+	// CodexRequirementsConflict names the administrator setting in the
+	// machine requirements that turns DefenseClaw's managed Codex hooks off.
+	// Set only on Secure Client, where reconcile and verify then report ok
+	// and not security-complete instead of failing the lifecycle; DefenseClaw
+	// writes nothing and never overrides the setting.
+	CodexRequirementsConflict string `json:"codex_requirements_conflict,omitempty"`
 }
 
 type windowsCodexMachineOwnership struct {
@@ -213,7 +277,33 @@ func windowsCodexMachineHash(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// windowsCodexManagedHookCommand is the unbound machine-wide Codex hook
+// command (no event or hook contract), the form 26.8.4 Secure Client
+// releases write. It starts the GUI-subsystem launcher through the awaited
+// Process.Start statements (windowsAwaitedHookStatements) so both its exit
+// code and its stdout reach Codex: allow_managed_hooks_only leaves this the
+// only Codex hook, so a fail-closed exit 2 must not be lost. Both profiles
+// publish the bound command (windowsCodexManagedHookCommandFor); this one is
+// rendered only for options without a contract, and reconcile and removal
+// own it (windowsCodexRenderedHookCommand) while those releases are upgrade
+// sources.
 func windowsCodexManagedHookCommand(hookBinary string) string {
+	script := strings.Join(append([]string{
+		"$ErrorActionPreference='Stop'",
+		"$env:NoDefaultCurrentDirectoryInExePath='1'",
+	}, windowsAwaitedHookStatements(hookBinary, windowsCodexManagedHookArguments)...), "; ")
+	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
+}
+
+var windowsCodexManagedHookArguments = []string{"hook", "--connector", "codex", "--enterprise-managed"}
+
+// legacyCallOperatorWindowsCodexManagedHookCommand reconstructs the unbound
+// machine command pre-1.0 and earlier 26.8.x releases wrote. It ran the
+// launcher with the call operator, which does not await a GUI-subsystem
+// process, so $LASTEXITCODE was stale and a fail-closed exit 2 was lost. It is
+// never generated: reconcile replaces it and removal takes it
+// (windowsCodexRenderedHookCommand).
+func legacyCallOperatorWindowsCodexManagedHookCommand(hookBinary string) string {
 	script := strings.Join([]string{
 		"$ErrorActionPreference='Stop'",
 		"$env:NoDefaultCurrentDirectoryInExePath='1'",
@@ -236,21 +326,45 @@ type codexMachineRequirementsLayout struct {
 	samePath      func(left, right string) bool
 	groups        []codexHookGroup
 	handler       func(codexHookGroup) map[string]interface{}
+	// reclaimStaleManagedDir overwrites a managed directory that names
+	// another install instead of refusing it (Secure Client only, as before
+	// GAP-0015); TrustStrictAncestors restores the refusal.
+	reclaimStaleManagedDir bool
 	// owned, when set, recognizes a DefenseClaw group of any release that
-	// is not the exact one, so reconcile replaces it instead of adding the
-	// exact group next to it.
-	owned func(raw interface{}) bool
+	// is not the exact one under hooks.<event>, so reconcile replaces it
+	// instead of adding the exact group next to it.
+	owned func(event string, raw interface{}) bool
 }
 
 // windowsCodexBoundManagedHookCommand is the standalone command of one
 // managed group. It names the group's event and the hook contract, which
-// the hook requires, and starts the GUI-subsystem launcher through the
-// awaited Process.Start statements (windowsAwaitedHookStatements): the
-// PowerShell call operator does not wait for a GUI-subsystem process, so its
-// exit code (2 blocks) and stdout never reached Codex and every decision was
-// lost.
+// the hook requires, and starts the GUI-subsystem launcher directly through
+// the system cmd.exe (windowsCmdDirectHookCommand): the PowerShell bridge
+// releases up to 1.0.4 wrote started a second Windows PowerShell on every
+// call, which under load used up the hook's answer budget (GAP-1908). A
+// launcher path the direct form cannot carry keeps the bridge.
 func windowsCodexBoundManagedHookCommand(hookBinary, event, contractID string) string {
-	arguments := []string{"hook", "--connector", "codex", "--enterprise-managed", "--event", event, "--hook-contract", contractID}
+	if command, ok := windowsCmdDirectHookCommand(hookBinary, windowsCodexBoundManagedHookArguments(event, contractID)); ok {
+		return command
+	}
+	return bridgeWindowsCodexBoundManagedHookCommand(hookBinary, event, contractID)
+}
+
+func windowsCodexBoundManagedHookArguments(event, contractID string) []string {
+	return []string{"hook", "--connector", "codex", "--enterprise-managed", "--event", event, "--hook-contract", contractID}
+}
+
+// bridgeWindowsCodexBoundManagedHookCommand is the bound managed command
+// releases 1.0.1 to 1.0.4 wrote for every launcher path: the encoded system
+// PowerShell bridge that starts the GUI-subsystem launcher through the
+// awaited Process.Start statements (windowsAwaitedHookStatements); the
+// PowerShell call operator does not wait for a GUI-subsystem process, so its
+// exit code and stdout would never reach Codex. It is still rendered for a
+// launcher path windowsCmdDirectHookCommand cannot carry, and reconcile and
+// removal own it (windowsCodexRenderedHookCommand) while those releases are
+// upgrade sources.
+func bridgeWindowsCodexBoundManagedHookCommand(hookBinary, event, contractID string) string {
+	arguments := windowsCodexBoundManagedHookArguments(event, contractID)
 	script := strings.Join(append([]string{
 		"$ErrorActionPreference='Stop'",
 		"$env:NoDefaultCurrentDirectoryInExePath='1'",
@@ -278,35 +392,73 @@ func windowsCodexMachineHandler(command string, timeout int) map[string]interfac
 	}
 }
 
+// windowsCodexMachineGroups is the matrix a Windows machine requirements
+// file publishes for commands bound to hookContractID: the ten events every
+// supported Codex release accepts, with the compact SessionStart source on
+// the contracts that certify it, as per-user setup registers it. The older
+// matcher left a compact-source SessionStart unhooked, so it never reached a
+// block on managed Windows.
+func windowsCodexMachineGroups(hookContractID string) []codexHookGroup {
+	groups := append([]codexHookGroup(nil), codexHookGroups...)
+	if codexContractCertifiesCompactSessionStart(strings.TrimSpace(hookContractID)) {
+		for index := range groups {
+			if groups[index].eventType == "SessionStart" {
+				groups[index].matcher = codexCompactSessionStartMatcher
+			}
+		}
+	}
+	return groups
+}
+
+// windowsCodexMachineProfileGroups is the matrix opts publishes, the same
+// under every profile. Secure Client kept the earlier matrix (no compact
+// SessionStart source) while its writer picked the profile from the strict
+// host classifier and the guardian's check from the configured profile: a
+// first install wrote one matrix and refused it against the other, and the
+// hook's runtime check, which knows no profile, refused the Secure Client
+// file. Reconcile replaces that earlier group (windowsCodexOwnedHookGroup).
+func windowsCodexMachineProfileGroups(opts WindowsCodexMachineRequirementsOptions) []codexHookGroup {
+	return windowsCodexMachineGroups(opts.HookContractID)
+}
+
 func windowsCodexMachineLayout(opts WindowsCodexMachineRequirementsOptions) codexMachineRequirementsLayout {
 	layout := codexMachineRequirementsLayout{
-		managedDirKey: "windows_managed_dir",
-		managedDir:    opts.ManagedDir,
-		samePath:      sameWindowsCodexMachinePath,
-		groups:        codexHookGroups,
+		managedDirKey:          "windows_managed_dir",
+		managedDir:             opts.ManagedDir,
+		samePath:               sameWindowsCodexMachinePath,
+		groups:                 windowsCodexMachineProfileGroups(opts),
+		reclaimStaleManagedDir: opts.SecureClient,
 		handler: func(group codexHookGroup) map[string]interface{} {
 			return windowsCodexMachineHandler(windowsCodexManagedHookCommandFor(opts, group.eventType), group.timeout)
 		},
 	}
 	if strings.TrimSpace(opts.HookContractID) != "" {
 		// Standalone only; Secure Client keeps its exact-group merge.
-		layout.owned = func(raw interface{}) bool { return windowsCodexOwnedHookGroup(raw, opts.HookBinary) }
+		layout.owned = func(event string, raw interface{}) bool {
+			return windowsCodexOwnedHookGroup(raw, event, opts.HookBinary)
+		}
 	}
 	return layout
 }
 
-// windowsCodexOwnedHookGroup reports whether raw is a DefenseClaw managed
-// group of any release: one command handler whose command (and
-// command_windows) is the system PowerShell -EncodedCommand line that runs
-// hookBinary as the managed Codex hook. An upgrade from 1.0.0 kept the
-// 1.0.0 group (its Start-Process form) next to the current one, so every
-// Codex event ran, was audited and was judged twice (GAP-1025).
-func windowsCodexOwnedHookGroup(raw interface{}, hookBinary string) bool {
+// windowsCodexOwnedHookGroup reports whether raw, listed under
+// hooks.<event>, is a DefenseClaw managed group of any release: the complete
+// group DefenseClaw renders for event (windowsCodexRenderedGroupShapes: its
+// matcher, one command handler with its timeout and no other key) around a
+// command that is, byte for byte, a managed Codex command DefenseClaw
+// renders for hookBinary and event (windowsCodexRenderedHookCommand). An
+// upgrade from 1.0.0 kept the 1.0.0 group (its Start-Process form) next to
+// the current one, so every Codex event ran, was audited and was judged
+// twice (GAP-1025). Any other group is the administrator's, even one that
+// runs DefenseClaw's own command: a script that only names hookBinary or the
+// managed flags (in diagnostic text, with an extra statement or an extra
+// argument), or DefenseClaw's group edited with another matcher, timeout or
+// handler key, or moved under another event. Reconcile, removal, the
+// stale-layout strip and inference leave it alone, and its reference to the
+// launcher keeps the binary removal unsafe.
+func windowsCodexOwnedHookGroup(raw interface{}, event, hookBinary string) bool {
 	group, ok := raw.(map[string]interface{})
-	if !ok || len(group) == 0 || len(group) > 2 {
-		return false
-	}
-	if _, hasMatcher := group["matcher"]; len(group) == 2 && !hasMatcher {
+	if !ok {
 		return false
 	}
 	handlers, ok := group["hooks"].([]interface{})
@@ -314,20 +466,123 @@ func windowsCodexOwnedHookGroup(raw interface{}, hookBinary string) bool {
 		return false
 	}
 	handler, ok := handlers[0].(map[string]interface{})
-	if !ok || handler["type"] != "command" {
+	if !ok {
 		return false
 	}
 	command, _ := handler["command"].(string)
-	if windows, _ := handler["command_windows"].(string); windows != command {
+	boundEvent, contract, ok := windowsCodexRenderedHookCommand(command, hookBinary)
+	if !ok || boundEvent != "" && boundEvent != event {
 		return false
+	}
+	for _, shape := range windowsCodexRenderedGroupShapes(event, contract) {
+		if windowsCodexMachineGroupHasCommand(raw, shape, command) {
+			return true
+		}
+	}
+	return false
+}
+
+// windowsCodexRenderedGroupShapes is every group shape (matcher and timeout)
+// a release renders for event with commands bound to contractID (empty for
+// the unbound command): the shared matrix every release and Secure Client
+// write, and the compact SessionStart matcher of the contracts that certify
+// it (windowsCodexMachineGroups). An event no release hooks has none.
+func windowsCodexRenderedGroupShapes(event, contractID string) []codexHookGroup {
+	var shapes []codexHookGroup
+	for _, group := range append(append([]codexHookGroup(nil), codexHookGroups...), windowsCodexMachineGroups(contractID)...) {
+		if group.eventType == event && !slices.Contains(shapes, group) {
+			shapes = append(shapes, group)
+		}
+	}
+	return shapes
+}
+
+// windowsCodexBoundArgumentsPattern finds the event and hook contract in the
+// decoded script of a bound managed Codex command: both the awaited and the
+// Start-Process forms quote the launcher's argument list.
+var windowsCodexBoundArgumentsPattern = lazyregexp.New(
+	`'--event'[ ,]'((?:[^']|'')*)'[ ,]'--hook-contract'[ ,]'((?:[^']|'')*)'`,
+)
+
+// windowsCodexDirectBoundArgumentsPattern finds the event and hook contract
+// at the end of a direct bound managed command (windowsCmdDirectHookCommand).
+var windowsCodexDirectBoundArgumentsPattern = lazyregexp.New(
+	` --event ([A-Za-z0-9._-]+) --hook-contract ([A-Za-z0-9._-]+)$`,
+)
+
+// windowsCodexRenderedHookCommand reports whether command is exactly a
+// managed Codex command DefenseClaw renders for hookBinary, and for which
+// event and hook contract: the unbound form (windowsCodexManagedHookCommand,
+// no event or contract, or the call-operator form earlier releases wrote,
+// legacyCallOperatorWindowsCodexManagedHookCommand), or the bound form for
+// the event and hook contract
+// the command names, current (windowsCodexBoundManagedHookCommand, direct or
+// bridge), the bridge of releases 1.0.1 to 1.0.4
+// (bridgeWindowsCodexBoundManagedHookCommand), or of the
+// 1.0.0 certification builds
+// (legacyStartProcessWindowsCodexBoundManagedHookCommand), each awaited form
+// also as releases up to 1.0.6 rendered it (legacyWindowsAwaitedHookCommand).
+// The event and the
+// contract are read from the script only to render the candidate; ownership
+// is the byte-for-byte equality, so no script that merely mentions the
+// launcher is DefenseClaw's.
+func windowsCodexRenderedHookCommand(command, hookBinary string) (event, contract string, ok bool) {
+	if strings.TrimSpace(hookBinary) == "" || strings.TrimSpace(command) == "" {
+		return "", "", false
+	}
+	// A 1.0.x render of an awaited bridge (legacyWindowsAwaitedHookCommand)
+	// is compared in its current form.
+	if current, ok := currentWindowsAwaitedHookCommand(command); ok {
+		command = current
+	}
+	if command == windowsCodexManagedHookCommand(hookBinary) ||
+		command == legacyCallOperatorWindowsCodexManagedHookCommand(hookBinary) {
+		return "", "", true
+	}
+	if match := windowsCodexDirectBoundArgumentsPattern.FindStringSubmatch(command); match != nil &&
+		command == windowsCodexBoundManagedHookCommand(hookBinary, match[1], match[2]) {
+		return match[1], match[2], true
 	}
 	prefix := windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand "
 	if !strings.HasPrefix(command, prefix) {
-		return false
+		return "", "", false
 	}
-	script, ok := powershellDecodedCommand(strings.TrimPrefix(command, prefix))
-	return ok && strings.Contains(script, powershellQuoteLiteral(hookBinary)) &&
-		strings.Contains(script, "codex") && strings.Contains(script, "--enterprise-managed")
+	script, decoded := powershellDecodedCommand(strings.TrimPrefix(command, prefix))
+	if !decoded {
+		return "", "", false
+	}
+	for _, match := range windowsCodexBoundArgumentsPattern.FindAllStringSubmatch(script, -1) {
+		event := powershellLiteralValue(match[1])
+		contract := powershellLiteralValue(match[2])
+		if command == bridgeWindowsCodexBoundManagedHookCommand(hookBinary, event, contract) ||
+			command == legacyStartProcessWindowsCodexBoundManagedHookCommand(hookBinary, event, contract) {
+			return event, contract, true
+		}
+	}
+	return "", "", false
+}
+
+// legacyStartProcessWindowsCodexBoundManagedHookCommand reconstructs the
+// bound managed command of the 1.0.0 certification builds, which started the
+// launcher with Start-Process -Wait -PassThru before the awaited
+// Process.Start statements (windowsAwaitedHookStatements). It is never
+// generated: reconcile replaces it and a standalone removal takes it
+// (GAP-1025). It serves upgrades from those 1.0.0 builds; remove it with
+// the 1.0.x upgrade path.
+func legacyStartProcessWindowsCodexBoundManagedHookCommand(hookBinary, event, contractID string) string {
+	arguments := []string{"hook", "--connector", "codex", "--enterprise-managed", "--event", event, "--hook-contract", contractID}
+	quoted := make([]string, len(arguments))
+	for i, argument := range arguments {
+		quoted[i] = powershellQuoteLiteral(argument)
+	}
+	script := strings.Join([]string{
+		"$ErrorActionPreference='Stop'",
+		"$env:NoDefaultCurrentDirectoryInExePath='1'",
+		"$hookProcess=Microsoft.PowerShell.Management\\Start-Process -FilePath " + powershellQuoteLiteral(hookBinary) +
+			" -ArgumentList @(" + strings.Join(quoted, ",") + ") -NoNewWindow -Wait -PassThru",
+		"exit $hookProcess.ExitCode",
+	}, "; ")
+	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
 }
 
 func (l codexMachineRequirementsLayout) expectedGroup(group codexHookGroup) map[string]interface{} {
@@ -374,10 +629,42 @@ func (l codexMachineRequirementsLayout) groupMatches(raw interface{}, expected c
 	return ok && timeout == expected.timeout
 }
 
+// ErrCodexRequirementsAdminConflict matches, with errors.Is, the
+// administrator setting in the Codex machine requirements that turns every
+// Codex hook off: features.hooks=false.
+var ErrCodexRequirementsAdminConflict = errors.New("administrator requirements turn Codex hooks off")
+
+type codexRequirementsAdminConflictError struct{ msg string }
+
+func (e codexRequirementsAdminConflictError) Error() string { return e.msg }
+
+func (e codexRequirementsAdminConflictError) Is(target error) bool {
+	return target == ErrCodexRequirementsAdminConflict
+}
+
+// codexRequirementsAdminConflict reports, without changing cfg, an
+// administrator's features.hooks=false: Codex then runs no hooks at all, so
+// DefenseClaw can leave it unhooked and report it. allow_managed_hooks_only
+// =false and hooks.state are not conflicts here: Codex still runs
+// DefenseClaw's hooks with them, and reconcile keeps refusing them.
+func codexRequirementsAdminConflict(cfg map[string]interface{}) error {
+	if features, ok := cfg["features"].(map[string]interface{}); ok {
+		if value, ok := features["hooks"].(bool); ok && !value {
+			return codexRequirementsAdminConflictError{"features.hooks=false conflicts with required DefenseClaw managed hooks"}
+		}
+	}
+	return nil
+}
+
 // reconcile merges the DefenseClaw managed hook matrix into cfg in place,
 // preserving unrelated administrator content and refusing contradictory
 // isolation controls.
 func (l codexMachineRequirementsLayout) reconcile(cfg map[string]interface{}) error {
+	// features.hooks=false turns every Codex hook off, so it is reported
+	// first, whatever the other isolation controls say.
+	if conflict := codexRequirementsAdminConflict(cfg); conflict != nil {
+		return conflict
+	}
 	if existing, present := cfg["allow_managed_hooks_only"]; present {
 		value, ok := existing.(bool)
 		if !ok {
@@ -402,7 +689,7 @@ func (l codexMachineRequirementsLayout) reconcile(cfg map[string]interface{}) er
 			return fmt.Errorf("features.hooks has unsupported type %T", existing)
 		}
 		if !value {
-			return errors.New("features.hooks=false conflicts with required DefenseClaw managed hooks")
+			return codexRequirementsAdminConflictError{"features.hooks=false conflicts with required DefenseClaw managed hooks"}
 		}
 	}
 	features["hooks"] = true
@@ -423,13 +710,28 @@ func (l codexMachineRequirementsLayout) reconcile(cfg map[string]interface{}) er
 		if !ok {
 			return fmt.Errorf("hooks.%s has unsupported type %T", l.managedDirKey, existing)
 		}
+		// Another directory is the administrator's (or a prior install's
+		// that adoption could not prove DefenseClaw's): refuse, never
+		// overwrite it (GAP-0015). windowsCodexAdoptRequirements strips a
+		// prior DefenseClaw layout's directory before reconcile runs.
 		if !l.samePath(value, l.managedDir) {
-			return fmt.Errorf(
-				"hooks.%s=%q conflicts with protected managed directory %q",
-				l.managedDirKey,
-				value,
-				l.managedDir,
-			)
+			if !l.reclaimStaleManagedDir || managed.TrustStrictAncestors() {
+				return fmt.Errorf(
+					"hooks.%s=%q conflicts with protected managed directory %q",
+					l.managedDirKey,
+					value,
+					l.managedDir,
+				)
+			}
+			// Secure Client keeps its earlier bulldoze: a prior unsigned
+			// certification install at a scoped path left the managed
+			// directory pointing at its (now stale) bin directory. The
+			// statement below overwrites it with the current install's
+			// canonical directory; log it so a DART review can find the
+			// recovery.
+			fmt.Fprintf(os.Stderr,
+				"[enterprise-hooks] reclaiming stale Codex hooks.%s = %q, overwriting with current install's canonical ManagedDir %q\n",
+				l.managedDirKey, value, l.managedDir)
 		}
 	}
 	hooks[l.managedDirKey] = l.managedDir
@@ -452,7 +754,7 @@ func (l codexMachineRequirementsLayout) reconcile(cfg map[string]interface{}) er
 					continue
 				}
 				found = true
-			} else if l.owned != nil && l.owned(candidate) {
+			} else if l.owned != nil && l.owned(expected.eventType, candidate) {
 				continue
 			}
 			kept = append(kept, candidate)
@@ -464,6 +766,23 @@ func (l codexMachineRequirementsLayout) reconcile(cfg map[string]interface{}) er
 	}
 	cfg["hooks"] = hooks
 	return nil
+}
+
+// eventsWithExactGroup reports the managed events whose list in cfg already
+// holds the exact group this layout renders for them.
+func (l codexMachineRequirementsLayout) eventsWithExactGroup(cfg map[string]interface{}) map[string]bool {
+	exact := map[string]bool{}
+	hooks, _ := cfg["hooks"].(map[string]interface{})
+	for _, expected := range l.groups {
+		groups, _ := hooks[expected.eventType].([]interface{})
+		for _, candidate := range groups {
+			if l.groupMatches(candidate, expected) {
+				exact[expected.eventType] = true
+				break
+			}
+		}
+	}
+	return exact
 }
 
 // verify requires pinned isolation controls, the protected managed directory
@@ -530,15 +849,43 @@ func parseWindowsCodexRequirements(raw []byte) (map[string]interface{}, error) {
 	return cfg, nil
 }
 
+// reconcileWindowsCodexRequirements merges the managed hook matrix opts
+// publishes into raw. published reports that raw is, byte for byte, the file
+// DefenseClaw last published (the ownership record's postimage), so nobody
+// has edited it since.
+//
+// This install's own command in the SessionStart shape only an earlier
+// release renders (windowsCodexEditedCurrentGroup) is either that release's
+// group or this install's group as an administrator edited it: the two are
+// byte for byte the same. It is replaced, as the earlier release's group,
+// only when published proves DefenseClaw wrote it and the file holds no exact
+// group of this install for that event (an upgrade from 1.0.2 or 1.0.3 that
+// nobody edited since). Every other such group is kept and the exact group is
+// added beside it, so a repair never deletes what may be an administrator's
+// edit. A publication of this install that already kept it holds the exact
+// group, so later repairs keep it too. Uninstall takes it with the rest of
+// this install's groups (removeWindowsCodexOwnedGroups, GAP-0907): it runs
+// the hook binary the uninstall deletes.
 func reconcileWindowsCodexRequirements(
 	raw []byte,
 	opts WindowsCodexMachineRequirementsOptions,
+	published bool,
 ) ([]byte, bool, error) {
 	cfg, err := parseWindowsCodexRequirements(raw)
 	if err != nil {
 		return nil, false, fmt.Errorf("parse Codex requirements: %w", err)
 	}
-	if err := windowsCodexMachineLayout(opts).reconcile(cfg); err != nil {
+	layout := windowsCodexMachineLayout(opts)
+	if owned := layout.owned; owned != nil {
+		exact := layout.eventsWithExactGroup(cfg)
+		layout.owned = func(event string, group interface{}) bool {
+			if !owned(event, group) {
+				return false
+			}
+			return !windowsCodexEditedCurrentGroup(group, event, opts) || published && !exact[event]
+		}
+	}
+	if err := layout.reconcile(cfg); err != nil {
 		return nil, false, err
 	}
 
@@ -618,7 +965,7 @@ func windowsCodexRequirementsContainExactManagedHook(
 	if !ok {
 		return false, nil
 	}
-	for _, expected := range codexHookGroups {
+	for _, expected := range windowsCodexMachineProfileGroups(opts) {
 		groups, _ := hooks[expected.eventType].([]interface{})
 		for _, candidate := range groups {
 			if windowsCodexMachineGroupMatches(candidate, expected, opts) {
@@ -627,38 +974,6 @@ func windowsCodexRequirementsContainExactManagedHook(
 		}
 	}
 	return false, nil
-}
-
-// adoptWindowsCodexOrphanedRequirements is the standalone answer to Codex
-// requirements that still hold this deployment's exact DefenseClaw hooks
-// with no ownership record: a purge that ran without the state root left
-// requirements.toml and the managed runtime state behind, and the next
-// fresh ensure refused 1603 with no file and no way out (GAP-0938). The
-// preimage to adopt is the file without DefenseClaw's own changes; existed
-// reports whether anything else is left in it (an administrator's keys), so
-// a later removal restores those and deletes a file DefenseClaw created.
-// Secure Client (no hook contract) keeps the refusal.
-func adoptWindowsCodexOrphanedRequirements(
-	current []byte,
-	opts WindowsCodexMachineRequirementsOptions,
-) ([]byte, bool, error) {
-	if strings.TrimSpace(opts.HookContractID) == "" {
-		return nil, false, errors.New("Codex requirements contain an exact DefenseClaw hook without protected ownership metadata")
-	}
-	preimage, _, err := removeWindowsCodexRequirementsOwnedChanges(current, nil, opts)
-	if err != nil {
-		return nil, false, fmt.Errorf("%s holds DefenseClaw's Codex hooks from a removed deployment and they could not be separated from the rest (%w); "+
-			"remove DefenseClaw's [hooks] entries from it (or the file, if DefenseClaw created it) and %s, then run Setup /ensure again",
-			opts.RequirementsPath, err, opts.ManagedStatePath)
-	}
-	left, err := parseWindowsCodexRequirements(preimage)
-	if err != nil {
-		return nil, false, err
-	}
-	if len(left) == 0 {
-		return nil, false, nil
-	}
-	return preimage, true, nil
 }
 
 func removeWindowsCodexRequirementsOwnedChanges(
@@ -678,7 +993,7 @@ func removeWindowsCodexRequirementsOwnedChanges(
 	hooks, cfgHooks := cfg["hooks"].(map[string]interface{})
 	baseHooks, baseHadHooks := base["hooks"].(map[string]interface{})
 	if cfgHooks {
-		for _, expected := range codexHookGroups {
+		for _, expected := range windowsCodexMachineProfileGroups(opts) {
 			groups, _ := hooks[expected.eventType].([]interface{})
 			baselineGroups, _ := baseHooks[expected.eventType].([]interface{})
 			baselineCount := 0
@@ -715,6 +1030,17 @@ func removeWindowsCodexRequirementsOwnedChanges(
 				hooks[expected.eventType] = filtered
 			}
 		}
+		// A standalone removal also takes DefenseClaw's groups of any
+		// release or hook contract (windowsCodexOwnedHookGroup), whatever
+		// the baseline holds: a group that runs this install's hook binary
+		// in a shape a DefenseClaw release renders is DefenseClaw's, and one
+		// left behind would run a removed binary and strand the uninstall
+		// on its reference (GAP-0907). That includes this install's command
+		// in the SessionStart shape of 1.0.2 and 1.0.3, whether or not the
+		// recorded baseline holds it.
+		if windowsCodexOwnedGroupsRecognized(opts) {
+			removeWindowsCodexOwnedGroups(hooks, opts)
+		}
 
 		// The isolation booleans and managed directory are shared prerequisites
 		// for every managed hook. If an administrator added unrelated groups
@@ -725,7 +1051,11 @@ func removeWindowsCodexRequirementsOwnedChanges(
 		// rehomes those hooks.
 		if !windowsCodexHooksHaveManagedEntries(hooks) {
 			_, baselineManagedDir := baseHooks["windows_managed_dir"]
-			if !baseHadHooks || !baselineManagedDir {
+			// With no hook left, a managed directory that names this
+			// install's own directory serves nothing and points into the
+			// tree the removal deletes: a standalone removal takes it even
+			// when the baseline holds it (GAP-0907).
+			if !baseHadHooks || !baselineManagedDir || windowsCodexOwnedGroupsRecognized(opts) {
 				if value, ok := hooks["windows_managed_dir"].(string); ok &&
 					sameWindowsCodexMachinePath(value, opts.ManagedDir) {
 					delete(hooks, "windows_managed_dir")
@@ -776,6 +1106,144 @@ func removeWindowsCodexRequirementsOwnedChanges(
 		)
 	}
 	return rendered, !bytes.Equal(current, rendered), nil
+}
+
+// windowsCodexEditedCurrentGroup reports whether raw, listed under
+// hooks.<event>, runs exactly the command this install renders for event
+// but is not the group this install renders there. Another release renders
+// that shape (the SessionStart matcher before the compact source), so the
+// shape alone does not make it DefenseClaw's: it is what an administrator
+// who edits this install's group gets (the compact source cut from the
+// matcher). Reconcile replaces it only in a file nobody edited since
+// DefenseClaw published it that holds no exact group of this install (the
+// earlier release's own file, reconcileWindowsCodexRequirements). A
+// standalone removal takes it as DefenseClaw's: it runs the binary the
+// removal deletes (GAP-0907).
+func windowsCodexEditedCurrentGroup(raw interface{}, event string, opts WindowsCodexMachineRequirementsOptions) bool {
+	command := windowsCodexManagedHookCommandFor(opts, event)
+	for _, shape := range windowsCodexMachineProfileGroups(opts) {
+		if shape.eventType == event && windowsCodexMachineGroupHasCommand(raw, shape, command) {
+			return false
+		}
+	}
+	group, _ := raw.(map[string]interface{})
+	handlers, _ := group["hooks"].([]interface{})
+	if len(handlers) != 1 {
+		return false
+	}
+	handler, _ := handlers[0].(map[string]interface{})
+	got, _ := handler["command"].(string)
+	return got == command
+}
+
+// windowsCodexOwnedGroupsRecognized reports whether opts recognizes
+// DefenseClaw's managed groups of any release by their hook binary: a
+// standalone layout (bound to a hook contract), as reconcile does.
+func windowsCodexOwnedGroupsRecognized(opts WindowsCodexMachineRequirementsOptions) bool {
+	return strings.TrimSpace(opts.HookContractID) != "" && strings.TrimSpace(opts.HookBinary) != ""
+}
+
+// removeWindowsCodexOwnedGroups drops every DefenseClaw managed group of any
+// release (windowsCodexOwnedHookGroup) from each event list of hooks.
+func removeWindowsCodexOwnedGroups(hooks map[string]interface{}, opts WindowsCodexMachineRequirementsOptions) {
+	for key, raw := range hooks {
+		groups, ok := raw.([]interface{})
+		if !ok || key == "windows_managed_dir" || key == "state" {
+			continue
+		}
+		kept := make([]interface{}, 0, len(groups))
+		for _, group := range groups {
+			if !windowsCodexOwnedHookGroup(group, key, opts.HookBinary) {
+				kept = append(kept, group)
+			}
+		}
+		if len(kept) == len(groups) {
+			continue
+		}
+		if len(kept) == 0 {
+			delete(hooks, key)
+		} else {
+			hooks[key] = kept
+		}
+	}
+}
+
+// windowsCodexRemovalCandidate computes the requirements a removal publishes
+// from the live file and the protected ownership record: the recorded
+// preimage when the file is still DefenseClaw's exact publication, cleaned
+// of what an earlier release left in it, or else the live file with
+// DefenseClaw's changes removed surgically. candidateExists false deletes
+// the file.
+func windowsCodexRemovalCandidate(
+	current []byte,
+	currentExists bool,
+	state windowsCodexMachineOwnership,
+	opts WindowsCodexMachineRequirementsOptions,
+) (candidate []byte, candidateExists, changed bool, disposition string, err error) {
+	exactPostimage := currentExists && windowsCodexMachineHash(current) == state.PostimageSHA256
+	// A preimage an earlier release recorded with its own groups (or
+	// their managed directory alone) is DefenseClaw's in those parts:
+	// restoring it verbatim would strand the uninstall on them
+	// (GAP-0907, GAP-1456), so it is cleaned as a surgical removal is.
+	preimageLeftovers := false
+	if exactPostimage && state.PreimageExisted {
+		if preimageLeftovers, err = windowsCodexRequirementsHoldOwnedLeftovers(state.Preimage, opts); err != nil {
+			return nil, false, false, "", fmt.Errorf("inspect the recorded Codex requirements preimage: %w", err)
+		}
+	}
+	switch {
+	case exactPostimage && state.PreimageExisted && preimageLeftovers:
+		cleaned, _, cleanErr := removeWindowsCodexRequirementsOwnedChanges(state.Preimage, state.Preimage, opts)
+		if cleanErr != nil {
+			return nil, false, false, "", cleanErr
+		}
+		return cleaned, true, !bytes.Equal(current, cleaned), "restored_preimage", nil
+	case exactPostimage && state.PreimageExisted:
+		preimage := append([]byte(nil), state.Preimage...)
+		return preimage, true, !bytes.Equal(current, state.Preimage), "restored_preimage", nil
+	case exactPostimage:
+		return nil, false, currentExists, "restored_preimage", nil
+	default:
+		cleaned, cleanChanged, cleanErr := removeWindowsCodexRequirementsOwnedChanges(current, state.Preimage, opts)
+		if cleanErr != nil {
+			return nil, false, false, "", cleanErr
+		}
+		if len(bytes.TrimSpace(cleaned)) == 0 && !state.PreimageExisted {
+			return nil, false, cleanChanged, "surgical_preservation", nil
+		}
+		return cleaned, true, cleanChanged, "surgical_preservation", nil
+	}
+}
+
+// windowsCodexRequirementsHoldOwnedLeftovers reports whether raw still holds
+// what a standalone removal takes: a DefenseClaw managed group of any
+// release, or, with no hook left, a managed directory that names this
+// install's own directory.
+func windowsCodexRequirementsHoldOwnedLeftovers(raw []byte, opts WindowsCodexMachineRequirementsOptions) (bool, error) {
+	if !windowsCodexOwnedGroupsRecognized(opts) {
+		return false, nil
+	}
+	cfg, err := parseWindowsCodexRequirements(raw)
+	if err != nil {
+		return false, err
+	}
+	hooks, ok := cfg["hooks"].(map[string]interface{})
+	if !ok {
+		return false, nil
+	}
+	for key, value := range hooks {
+		groups, ok := value.([]interface{})
+		if !ok || key == "windows_managed_dir" || key == "state" {
+			continue
+		}
+		for _, group := range groups {
+			if windowsCodexOwnedHookGroup(group, key, opts.HookBinary) {
+				return true, nil
+			}
+		}
+	}
+	dir, ok := hooks["windows_managed_dir"].(string)
+	return ok && !windowsCodexHooksHaveManagedEntries(hooks) && sameWindowsCodexMachinePath(dir, opts.ManagedDir), nil
 }
 
 func windowsCodexHooksHaveManagedEntries(hooks map[string]interface{}) bool {
@@ -887,7 +1355,7 @@ func marshalWindowsCodexMachineOwnership(state windowsCodexMachineOwnership) ([]
 	}
 	data = append(data, '\n')
 	if len(data) > windowsCodexMachineOwnershipLimit {
-		return nil, fmt.Errorf("Codex requirements ownership exceeds %d bytes", windowsCodexMachineOwnershipLimit)
+		return nil, fmt.Errorf("Codex requirements ownership exceeds %d bytes", windowsCodexMachineOwnershipLimit) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	return data, nil
 }
@@ -907,4 +1375,283 @@ func parseWindowsCodexMachineOwnership(data []byte) (windowsCodexMachineOwnershi
 		return state, err
 	}
 	return state, nil
+}
+
+// windowsCodexAdoption is the result of windowsCodexAdoptRequirements.
+type windowsCodexAdoption struct {
+	// base is the requirements document reconcile starts from: the current
+	// file without the hook groups and managed directory of a discarded
+	// prior layout, so the stale DefenseClaw groups do not survive next to
+	// the current ones.
+	base []byte
+	// preimage and preimageExisted are what the fresh ownership record
+	// stores; uninstall restores (or surgically reduces to) this preimage.
+	preimage        []byte
+	preimageExisted bool
+}
+
+// windowsCodexAdoptRequirements prepares reconcile's adoption of a
+// requirements document whose ownership record is absent, unparseable, or
+// belongs to another protected layout. discarded is that other layout's
+// parseable record, or nil when there is none.
+//
+// The preimage is the current document without DefenseClaw's changes:
+//   - groups that run the discarded layout's hook binary, and its
+//     windows_managed_dir, are removed (from the live base too);
+//   - with no record of it, a prior layout the file itself proves
+//     DefenseClaw's (windowsCodexUnrecordedStaleLayout) is removed the same
+//     way; an administrator's windows_managed_dir is left for reconcile to
+//     refuse;
+//   - groups that run the current hook binary, in any release's command form,
+//     are removed, and the current windows_managed_dir with them unless
+//     administrator hook entries that need it survive;
+//   - allow_managed_hooks_only and features.hooks are DefenseClaw's (every
+//     reconcile pins them) unless the discarded record's trustworthy preimage
+//     of this same requirements file shows they predate DefenseClaw. Without
+//     that evidence they stay only while administrator hook entries that
+//     need them survive (removeWindowsCodexRequirementsOwnedChanges).
+//
+// A document with no DefenseClaw evidence at all (fresh install) is its own
+// preimage. preimageExisted reports whether anything is left, so a later
+// removal deletes a file DefenseClaw created (GAP-0938).
+func windowsCodexAdoptRequirements(
+	current []byte,
+	currentExisted bool,
+	discarded *windowsCodexMachineOwnership,
+	opts WindowsCodexMachineRequirementsOptions,
+) (windowsCodexAdoption, error) {
+	adoption := windowsCodexAdoption{base: current}
+	evidence := discarded != nil
+	if discarded != nil {
+		staleBinary := strings.TrimSpace(discarded.HookBinary)
+		if staleBinary != "" && sameWindowsCodexMachinePath(staleBinary, opts.HookBinary) {
+			staleBinary = ""
+		}
+		staleDir := strings.TrimSpace(discarded.ManagedDir)
+		if staleDir != "" && sameWindowsCodexMachinePath(staleDir, opts.ManagedDir) {
+			staleDir = ""
+		}
+		base, stripped, err := stripWindowsCodexLayout(current, staleBinary, staleDir)
+		if err != nil {
+			return windowsCodexAdoption{}, fmt.Errorf("strip prior Codex managed layout: %w", err)
+		}
+		if stripped {
+			adoption.base = base
+		}
+	}
+	if staleDir, staleBinary := windowsCodexUnrecordedStaleLayout(adoption.base, opts); !opts.SecureClient && staleDir != "" {
+		base, stripped, err := stripWindowsCodexLayout(adoption.base, staleBinary, staleDir)
+		if err != nil {
+			return windowsCodexAdoption{}, fmt.Errorf("strip unrecorded prior Codex managed layout: %w", err)
+		}
+		if stripped {
+			adoption.base = base
+			evidence = true
+		}
+	}
+	contains, err := windowsCodexRequirementsContainExactManagedHook(adoption.base, opts)
+	if err != nil {
+		return windowsCodexAdoption{}, fmt.Errorf("detect adopted Codex managed hooks: %w", err)
+	}
+	// Only the current launcher's groups are DefenseClaw's evidence. A
+	// windows_managed_dir equal to ManagedDir with no DefenseClaw group is the
+	// administrator's and stays in the verbatim preimage; when DefenseClaw
+	// groups are present, removeWindowsCodexRequirementsOwnedChanges decides
+	// whether the directory goes with them (GAP-0022). Secure Client keeps
+	// stripping the current directory here, as before.
+	currentDir := ""
+	if opts.SecureClient {
+		currentDir = opts.ManagedDir
+	}
+	// This install's own command in a shape only an earlier release renders
+	// (windowsCodexEditedCurrentGroup) leaves the preimage too: uninstall
+	// removes it with the rest of this install's groups (GAP-0907), so a
+	// restored preimage must not bring it back (GAP-1767).
+	withoutCurrent, strippedCurrent, err := stripWindowsCodexLayout(adoption.base, opts.HookBinary, currentDir)
+	if err != nil {
+		return windowsCodexAdoption{}, fmt.Errorf("strip current Codex managed layout: %w", err)
+	}
+	if !evidence && !contains && !strippedCurrent {
+		adoption.preimage = append([]byte(nil), current...)
+		adoption.preimageExisted = currentExisted
+		return adoption, nil
+	}
+	var baseline []byte
+	if windowsCodexDiscardedPreimageTrusted(discarded, opts) {
+		if baseline, err = windowsCodexAdoptPreimageBaseline(discarded.Preimage); err != nil {
+			return windowsCodexAdoption{}, err
+		}
+	}
+	cleaned, _, err := removeWindowsCodexRequirementsOwnedChanges(withoutCurrent, baseline, opts)
+	if err != nil {
+		return windowsCodexAdoption{}, err
+	}
+	left, err := parseWindowsCodexRequirements(cleaned)
+	if err != nil {
+		return windowsCodexAdoption{}, err
+	}
+	if len(left) != 0 {
+		adoption.preimage = cleaned
+		adoption.preimageExisted = true
+	}
+	return adoption, nil
+}
+
+// windowsCodexUnrecordedStaleLayout names a prior DefenseClaw layout that
+// requirements prove with no ownership record: hooks.windows_managed_dir is
+// another directory and at least one group runs that directory's DefenseClaw
+// hook launcher as the managed Codex hook (a purge that ran without the state
+// root left a scoped install's layout behind). Any other directory is the
+// administrator's; reconcile refuses it and nothing here overwrites it
+// (GAP-0015). Strict trust mode adopts nothing on inference.
+func windowsCodexUnrecordedStaleLayout(raw []byte, opts WindowsCodexMachineRequirementsOptions) (string, string) {
+	if managed.TrustStrictAncestors() {
+		return "", ""
+	}
+	cfg, err := parseWindowsCodexRequirements(raw)
+	if err != nil {
+		return "", ""
+	}
+	hooks, _ := cfg["hooks"].(map[string]interface{})
+	dir, _ := hooks["windows_managed_dir"].(string)
+	if strings.TrimSpace(dir) == "" || sameWindowsCodexMachinePath(dir, opts.ManagedDir) {
+		return "", ""
+	}
+	launcher := opts.HookBinary[strings.LastIndexAny(opts.HookBinary, `\/`)+1:]
+	if strings.TrimSpace(launcher) == "" {
+		return "", ""
+	}
+	staleBinary := strings.TrimRight(dir, `\/`) + `\` + launcher
+	for key, rawGroups := range hooks {
+		groups, _ := rawGroups.([]interface{})
+		for _, group := range groups {
+			if windowsCodexOwnedHookGroup(group, key, staleBinary) {
+				return dir, staleBinary
+			}
+		}
+	}
+	return "", ""
+}
+
+// windowsCodexDiscardedPreimageTrusted reports whether a discarded ownership
+// record's preimage is evidence about this requirements file: same path, a
+// hash that matches the stored bytes, and parseable TOML.
+func windowsCodexDiscardedPreimageTrusted(
+	discarded *windowsCodexMachineOwnership,
+	opts WindowsCodexMachineRequirementsOptions,
+) bool {
+	if discarded == nil || !discarded.PreimageExisted ||
+		!sameWindowsCodexMachinePath(discarded.RequirementsPath, opts.RequirementsPath) ||
+		discarded.PreimageSHA256 != windowsCodexMachineHash(discarded.Preimage) {
+		return false
+	}
+	_, err := parseWindowsCodexRequirements(discarded.Preimage)
+	return err == nil
+}
+
+// stripWindowsCodexLayout removes every hook group that runs hookBinary as
+// the managed Codex hook (in any release's command form) and a
+// windows_managed_dir equal to managedDir. Empty arguments strip nothing of
+// that kind. It reports whether anything was removed; the document is
+// re-rendered only then.
+func stripWindowsCodexLayout(raw []byte, hookBinary, managedDir string) ([]byte, bool, error) {
+	if strings.TrimSpace(hookBinary) == "" && strings.TrimSpace(managedDir) == "" {
+		return raw, false, nil
+	}
+	cfg, err := parseWindowsCodexRequirements(raw)
+	if err != nil {
+		return nil, false, err
+	}
+	hooks, ok := cfg["hooks"].(map[string]interface{})
+	if !ok {
+		return raw, false, nil
+	}
+	stripped := false
+	if strings.TrimSpace(managedDir) != "" {
+		if value, ok := hooks["windows_managed_dir"].(string); ok && sameWindowsCodexMachinePath(value, managedDir) {
+			delete(hooks, "windows_managed_dir")
+			stripped = true
+		}
+	}
+	if strings.TrimSpace(hookBinary) != "" {
+		for key, rawGroups := range hooks {
+			groups, ok := rawGroups.([]interface{})
+			if !ok {
+				continue
+			}
+			kept := make([]interface{}, 0, len(groups))
+			for _, candidate := range groups {
+				if windowsCodexOwnedHookGroup(candidate, key, hookBinary) {
+					stripped = true
+					continue
+				}
+				kept = append(kept, candidate)
+			}
+			if len(kept) == len(groups) {
+				continue
+			}
+			if len(kept) == 0 {
+				delete(hooks, key)
+			} else {
+				hooks[key] = kept
+			}
+		}
+	}
+	if !stripped {
+		return raw, false, nil
+	}
+	if len(hooks) == 0 {
+		delete(cfg, "hooks")
+	} else {
+		cfg["hooks"] = hooks
+	}
+	rendered, err := toml.Marshal(cfg)
+	if err != nil {
+		return nil, false, fmt.Errorf("marshal Codex requirements without a managed layout: %w", err)
+	}
+	return retainCodexTOMLBOM(raw, rendered), true, nil
+}
+
+// windowsCodexAdoptPreimageBaseline extracts the shared isolation controls
+// (allow_managed_hooks_only and features.hooks) from a trusted pre-DefenseClaw
+// preimage as a minimal baseline TOML. removeWindowsCodexRequirementsOwnedChanges
+// keeps exactly the controls a baseline names, so an uninstall that restores
+// the adopted preimage does not delete isolation controls the administrator
+// configured before DefenseClaw installed.
+func windowsCodexAdoptPreimageBaseline(preimage []byte) ([]byte, error) {
+	cfg, err := parseWindowsCodexRequirements(preimage)
+	if err != nil {
+		return nil, fmt.Errorf("parse Codex requirements for baseline synthesis: %w", err)
+	}
+	baseline := map[string]interface{}{}
+	if value, ok := cfg["allow_managed_hooks_only"]; ok {
+		baseline["allow_managed_hooks_only"] = value
+	}
+	if features, ok := cfg["features"].(map[string]interface{}); ok {
+		if hookValue, hookOk := features["hooks"]; hookOk {
+			baseline["features"] = map[string]interface{}{"hooks": hookValue}
+		}
+	}
+	if len(baseline) == 0 {
+		return nil, nil
+	}
+	rendered, err := toml.Marshal(baseline)
+	if err != nil {
+		return nil, fmt.Errorf("marshal Codex adopt baseline: %w", err)
+	}
+	return rendered, nil
+}
+
+// ErrWindowsCodexWriterLockBusy is what a failure of the Codex writer lock
+// matches when another program holds it (a sharing violation on the open, a
+// lock violation or a pending lock that the bound ran out on). The error text
+// is unchanged; callers read the class with errors.Is (GAP-1001).
+var ErrWindowsCodexWriterLockBusy = errors.New("a Codex writer holds the writer lock")
+
+type windowsCodexWriterLockBusyError struct{ err error }
+
+func (e windowsCodexWriterLockBusyError) Error() string { return e.err.Error() }
+func (e windowsCodexWriterLockBusyError) Unwrap() error { return e.err }
+func (e windowsCodexWriterLockBusyError) Is(target error) bool {
+	return target == ErrWindowsCodexWriterLockBusy
 }

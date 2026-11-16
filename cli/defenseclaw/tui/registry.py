@@ -29,11 +29,9 @@ _SETUP_CONNECTOR_ALIASES: dict[str, str] = {
     "cursor": "cursor",
     "devin": "devin",
     "copilot": "copilot",
-    "openhands": "openhands",
     "antigravity": "antigravity",
     "opencode": "opencode",
     "amp": "amp",
-    "omnigent": "omnigent",
     "kiro": "kiro",
 }
 

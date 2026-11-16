@@ -6,6 +6,8 @@
 package enterprisehooks
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -17,11 +19,143 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// An uninstall with purge removes an account's whole per-user folder as
-// LocalSystem: hook scripts, per-user hook tokens and the account's
-// moved-aside hooks included. A junction in the folder is removed, not
-// followed, and so is a subfolder whose access list denies the purge.
-func TestPurgeWindowsUserStateRemovesEverything(t *testing.T) {
+// A teardown may leave an edited plugin and its recovery receipt. The
+// standalone purge must keep both until the account resolves the edit.
+func TestPurgeWindowsUserStateKeepsConnectorBackup(t *testing.T) {
+	previous := windowsEnterpriseMutationIdentityCheck
+	windowsEnterpriseMutationIdentityCheck = func() error { return nil }
+	t.Cleanup(func() { windowsEnterpriseMutationIdentityCheck = previous })
+
+	home := filepath.Join(t.TempDir(), "home")
+	dataDir := filepath.Join(home, ".defenseclaw")
+	plugin := filepath.Join(home, ".config", "opencode", "plugins", "defenseclaw.js")
+	receipt := filepath.Join(dataDir, "connector_backups", "opencode", "config.json")
+	for _, path := range []string{plugin, receipt} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	edited := []byte("// edited OpenCode plugin\n")
+	if err := os.WriteFile(plugin, edited, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	backup, err := json.Marshal(map[string]any{
+		"version": 1, "connector": "opencode", "logical_name": "config",
+		"path": plugin, "pristine_sha256": "missing",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(receipt, backup, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	purge := func() error { return PurgeWindowsUserState(home, currentWindowsTestSID(t).String(), "") }
+	if err := purge(); err == nil || !strings.Contains(err.Error(), plugin) ||
+		!strings.Contains(err.Error(), "kept the per-user state for its backups") ||
+		!strings.Contains(err.Error(), "rerun the purge") {
+		t.Fatalf("purge with retained backup = %v", err)
+	}
+	for path, want := range map[string][]byte{plugin: edited, receipt: backup} {
+		got, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("purge changed %s: %v", path, err)
+		}
+	}
+	if err := os.WriteFile(receipt, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := purge(); err == nil || !strings.Contains(err.Error(), receipt) ||
+		!strings.Contains(err.Error(), "cannot be read") {
+		t.Fatalf("purge with unreadable backup = %v", err)
+	}
+	if _, err := os.Stat(dataDir); err != nil {
+		t.Fatalf("purge removed state with unreadable backup: %v", err)
+	}
+	// Removing the unneeded receipt is one remedy. A clean rerun then
+	// removes the state but leaves the account's edited plugin alone.
+	if err := os.Remove(receipt); err != nil {
+		t.Fatal(err)
+	}
+	if err := purge(); err != nil {
+		t.Fatalf("purge after removing the backup: %v", err)
+	}
+	if _, err := os.Lstat(dataDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("state remains after clean purge: %v", err)
+	}
+	if got, err := os.ReadFile(plugin); err != nil || !bytes.Equal(got, edited) {
+		t.Fatalf("clean purge changed the account's plugin: %v", err)
+	}
+}
+
+// Every per-user connector that keeps a backup record of an agent file it
+// patches or writes (amp, antigravity, devin, hermes, kiro, opencode) keeps
+// the account's state while that record is left after the teardowns, and
+// the error names the file. The check reads every record in
+// connector_backups, so this walks each record name the Windows cleanup
+// contract allows (GAP-0262).
+func TestPurgeWindowsUserStateKeepsEveryConnectorBackup(t *testing.T) {
+	previous := windowsEnterpriseMutationIdentityCheck
+	windowsEnterpriseMutationIdentityCheck = func() error { return nil }
+	t.Cleanup(func() { windowsEnterpriseMutationIdentityCheck = previous })
+
+	covered := map[string]bool{}
+	for _, name := range WindowsStandalonePerUserConnectorNames() {
+		var records []string
+		for _, leaf := range windowsManagedRuntimeCleanupConnectors[name].backups {
+			if strings.EqualFold(filepath.Ext(leaf), ".json") {
+				records = append(records, leaf)
+			}
+		}
+		for _, leaf := range records {
+			covered[name] = true
+			t.Run(name+"/"+leaf, func(t *testing.T) {
+				home := filepath.Join(t.TempDir(), "home")
+				dataDir := filepath.Join(home, ".defenseclaw")
+				logical := strings.TrimSuffix(leaf, filepath.Ext(leaf))
+				target := filepath.Join(home, "agent", name, logical)
+				receipt := filepath.Join(dataDir, "connector_backups", name, leaf)
+				for _, path := range []string{target, receipt} {
+					if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				edited := []byte("edited by the account after Setup\n")
+				if err := os.WriteFile(target, edited, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				backup, err := json.Marshal(map[string]any{
+					"version": 1, "connector": name, "logical_name": logical,
+					"path": target, "pristine_sha256": "missing",
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(receipt, backup, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				err = PurgeWindowsUserState(home, currentWindowsTestSID(t).String(), "")
+				if err == nil || !strings.Contains(err.Error(), target) ||
+					!strings.Contains(err.Error(), "kept the per-user state for its backups") {
+					t.Fatalf("purge with a %s backup left = %v", name, err)
+				}
+				for path, want := range map[string][]byte{target: edited, receipt: backup} {
+					if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, want) {
+						t.Fatalf("purge changed %s: %v", path, err)
+					}
+				}
+			})
+		}
+	}
+	for _, name := range []string{"amp", "antigravity", "devin", "hermes", "kiro", "opencode"} {
+		if !covered[name] {
+			t.Errorf("%s keeps a backup record but its cleanup contract lists none", name)
+		}
+	}
+}
+
+// A purge removes managed entries as LocalSystem while retaining account
+// entries, moved-aside originals and links in the same folder.
+func TestPurgeWindowsUserStateKeepsAccountEntries(t *testing.T) {
 	original := windowsEnterpriseMutationIdentityCheck
 	t.Cleanup(func() { windowsEnterpriseMutationIdentityCheck = original })
 	windowsEnterpriseMutationIdentityCheck = func() error { return errors.New("not LocalSystem") }
@@ -33,16 +167,16 @@ func TestPurgeWindowsUserStateRemovesEverything(t *testing.T) {
 	rollbackDir := filepath.Join(home, ".defenseclaw.rollback-0123456789abcdef0123456789abcdef")
 	outside := filepath.Join(t.TempDir(), "outside")
 	for path, body := range map[string]string{
-		filepath.Join(dataDir, "hooks", "amp-hook.sh"):                         "#!/bin/sh\n# defenseclaw-managed-hook v5\nexec forward\n",
-		filepath.Join(dataDir, "hooks", ".hook-amp.token"):                     "token",
-		filepath.Join(dataDir, "connector_backups", "amp", "settings.json"):    "{}",
-		filepath.Join(dataDir, "foreign-hook-sessions", "record.json"):         "{}",
-		filepath.Join(dataDir, "foreign-hooks-backup", "amp", "settings.json"): "{}",
-		filepath.Join(dataDir, "agent_selection.json"):                         "{}",
-		filepath.Join(dataDir, "logs", "denied", "secret.txt"):                 "secret",
-		filepath.Join(rollbackDir, "hooks", "amp-hook.sh"):                     "kept aside",
-		filepath.Join(home, ".defenseclaw.rollback-notes", "keep.txt"):         "keep",
-		filepath.Join(outside, "keep.txt"):                                     "keep",
+		filepath.Join(dataDir, "hooks", "amp-plugin.ts"):                                                   "managed plugin",
+		filepath.Join(dataDir, "hooks", ".hook-amp.token"):                                                 "token",
+		filepath.Join(dataDir, "foreign-hook-sessions", "p-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"): "{}",
+		filepath.Join(dataDir, "foreign-hooks-backup", "amp", "settings.json"):                             "{}",
+		filepath.Join(dataDir, "agent_selection.json"):                                                     "{}",
+		filepath.Join(dataDir, "logs", "hook-failures.jsonl"):                                              "log",
+		filepath.Join(dataDir, "personal.txt"):                                                             "account note",
+		filepath.Join(rollbackDir, "hooks", "codex-hook.sh"):                                               "managed aside",
+		filepath.Join(home, ".defenseclaw.rollback-notes", "keep.txt"):                                     "keep",
+		filepath.Join(outside, "keep.txt"):                                                                 "keep",
 	} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
@@ -55,9 +189,9 @@ func TestPurgeWindowsUserStateRemovesEverything(t *testing.T) {
 		t.Fatalf("create junction: %v: %s", err, output)
 	}
 	sid := currentWindowsTestSID(t)
-	// The account can deny SYSTEM on a folder it owns; the test denies its
+	// The account can deny SYSTEM on a file it owns; the test denies its
 	// own account, which the purge runs as here.
-	windowsRelaxTestSetDACL(t, filepath.Join(dataDir, "logs", "denied"), "D:P(D;OICI;FA;;;"+sid.String()+")")
+	windowsRelaxTestSetDACL(t, filepath.Join(dataDir, "logs", "hook-failures.jsonl"), "D:P(D;;FA;;;"+sid.String()+")")
 	if err := PurgeWindowsUserState(home, target, ""); err == nil {
 		t.Fatal("the purge ran without LocalSystem")
 	}
@@ -70,13 +204,25 @@ func TestPurgeWindowsUserStateRemovesEverything(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := os.Lstat(dataDir); !errors.Is(err, os.ErrNotExist) {
-		entries, _ := os.ReadDir(dataDir)
-		var names []string
-		for _, entry := range entries {
-			names = append(names, entry.Name())
+	for _, path := range []string{
+		filepath.Join(dataDir, "personal.txt"),
+		filepath.Join(dataDir, "foreign-hooks-backup", "amp", "settings.json"),
+		filepath.Join(dataDir, "link"),
+	} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("the purge removed account entry %s: %v", path, err)
 		}
-		t.Fatalf("the purge left %s: %v %v", dataDir, err, names)
+	}
+	for _, path := range []string{
+		filepath.Join(dataDir, "hooks", "amp-plugin.ts"),
+		filepath.Join(dataDir, "hooks", ".hook-amp.token"),
+		filepath.Join(dataDir, "foreign-hook-sessions", "p-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"),
+		filepath.Join(dataDir, "agent_selection.json"),
+		filepath.Join(dataDir, "logs", "hook-failures.jsonl"),
+	} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("the purge left managed entry %s: %v", path, err)
+		}
 	}
 	if _, err := os.Lstat(rollbackDir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the purge left the rolled-back copy %s: %v", rollbackDir, err)

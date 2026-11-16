@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"golang.org/x/sys/windows"
 )
@@ -83,6 +84,22 @@ func writeEnterpriseHookProtectedFile(path string, data []byte) error {
 	return nil
 }
 
+// writeEnterpriseHookGatewayRecord publishes a guardian record the gateway
+// service reads, such as the foreign-hook removal ledger.
+// writeEnterpriseHookProtectedFile gives the new file the record's ACL
+// before it replaces the old one, which keeps its own, so the gateway can
+// read the record at every moment; the ACL is then set again on the
+// published record.
+func writeEnterpriseHookGatewayRecord(path string, data []byte) error {
+	if err := writeEnterpriseHookProtectedFile(path, data); err != nil {
+		return err
+	}
+	if err := enterpriseHookAuthorizationOwnershipSetter(path); err != nil {
+		return err
+	}
+	return enterpriseHookAuthorizationFileTrustCheck(path)
+}
+
 // writeEnterpriseHookAdminOnlyFile publishes an installer-only machine file
 // whose readers are always elevated (never a running service). It stamps the
 // exact two-ACE AdminFile SDDL — Administrators owner+group, protected DACL
@@ -150,4 +167,28 @@ func writeEnterpriseHookAdminOnlyFile(path string, data []byte) error {
 		return fmt.Errorf("admin-only file changed during publication: %s", path)
 	}
 	return nil
+}
+
+// repairEnterpriseHookManifestACL re-stamps targets.yaml with the installer's
+// AdminFile descriptor. It succeeds only for a privileged caller (the
+// LocalSystem guardian or enumerator, or the elevated installer); the
+// protect helper refuses a reparse point or multiply-linked file first.
+func repairEnterpriseHookManifestACL(path string) error {
+	// On a standalone computer a manifest an untrusted account can write or
+	// owns is never re-stamped in place, in whichever process asks. The
+	// scope-gated refusals in front of this repair are inert in a process
+	// that carries no standalone scope (Setup's own, a copied binary), so the
+	// repair reads the file's own descriptor first (GAP-1048).
+	if _, standalone := managedHostWindowsStandalone(); standalone {
+		// Under the standalone scope the assessment also reads a descriptor
+		// that hides itself from this caller with backup privileges, and
+		// turns anything it cannot judge into a refusal.
+		restore := pinWindowsStandaloneTrustScope()
+		refused := managed.RefuseStandaloneInPlaceRepair(path, managed.ObjectAdminFile)
+		restore()
+		if refused != nil {
+			return refused
+		}
+	}
+	return enterprisehooks.ProtectWindowsManagedRuntimeAdminFile(path)
 }

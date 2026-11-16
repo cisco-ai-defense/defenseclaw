@@ -19,6 +19,8 @@ package sandboxrelay
 import (
 	"errors"
 	"net/http"
+
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
 // Client-side failures of the relay. Each one fails the sandbox's hook
@@ -64,6 +66,11 @@ const (
 	ReasonPolicyUnloadable      = "sandbox_policy_unloadable"
 	ReasonRelayFilesUnsupported = "sandbox_relay_files_unsupported"
 	ReasonDecisionRefused       = "sandbox_decision_refused"
+	// ReasonDaemonOutdated: the caller's daemon states a DaemonContract
+	// below the managed gateway's, so it cannot carry the complete floor.
+	// Its status is 403, which an older daemon treats as transient: it
+	// keeps its registrations and does not mark them confirmed.
+	ReasonDaemonOutdated = "sandbox_daemon_outdated"
 )
 
 // UnavailableSetupChanging is DaemonSettings.Unavailable while the
@@ -73,9 +80,8 @@ const (
 // notice that clears by itself, not a refusal to take to IT;
 // DetailSetupChanging is the reason code a refusal of it carries.
 const (
-	UnavailableSetupChanging = "your organization changed how sandboxes run on this computer, and DefenseClaw is still setting that up; " +
-		"try again in a few minutes"
-	DetailSetupChanging = "openshell_setup_changing"
+	UnavailableSetupChanging = sandboxapi.UnavailableSetupChanging
+	DetailSetupChanging      = "openshell_setup_changing"
 )
 
 // ReasonStatus is the HTTP status each refusal reason answers with; 0 for
@@ -86,11 +92,11 @@ func ReasonStatus(reason string) int {
 		return http.StatusNotFound
 	case ReasonRegistrationRevoked, ReasonRegistrationExpired:
 		return http.StatusGone
-	case ReasonConnectorMismatch, ReasonNotAllowed, ReasonDecisionRefused, ReasonRegistrationStopped:
+	case ReasonConnectorMismatch, ReasonNotAllowed, ReasonDecisionRefused, ReasonRegistrationStopped, ReasonDaemonOutdated:
 		return http.StatusForbidden
 	case ReasonSubjectChanged:
 		return http.StatusConflict
-	case ReasonUnavailable, ReasonPolicyUnloadable:
+	case ReasonUnavailable, ReasonPolicyUnloadable, DetailSetupChanging:
 		return http.StatusServiceUnavailable
 	case ReasonRelayFilesUnsupported:
 		return http.StatusBadRequest

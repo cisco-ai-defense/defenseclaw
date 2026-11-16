@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -37,6 +38,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -106,10 +108,19 @@ func TestSandboxConfigPersisterRefusals(t *testing.T) {
 		t.Fatalf("without a config runtime: %v", err)
 	}
 	api.SetConfigRuntime(func(context.Context, string) error { return nil }, func() *config.Config {
-		return &config.Config{DeploymentMode: "managed_enterprise"}
+		return &config.Config{DeploymentMode: "managed_enterprise", DataDir: cfg.DataDir}
 	})
+	path := configFilePathForSnapshot(api.runtimeConfigSnapshot())
+	before := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n")
+	if err := os.WriteFile(path, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := (sandboxConfigPersister{api: api}).AllowAlways(context.Background(), "a.example"); !sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) {
 		t.Fatalf("managed_enterprise: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("managed config changed: %v", err)
 	}
 }
 
@@ -128,15 +139,49 @@ func TestNewSandboxRuntimeDisabled(t *testing.T) {
 	}
 }
 
+// freePort is a 127.0.0.1 port nothing listens on now, for a listener the
+// code under test binds itself (the sandbox ingress and egress listeners,
+// the API port). It comes from below every OS ephemeral range (Linux
+// 32768-60999, macOS and Windows 49152-65535) and from a band no fixed
+// test port uses, so no port-0 listener of this or another process on the
+// box can take it between this probe and the bind. A port-0 probe was taken
+// that way under -race on a loaded box, and the daemon then refused Ready
+// with sandbox_account_busy (rel-1-0-6:GAP-0464). Calls in this process walk
+// the band, so a port comes back only after the whole band was handed out.
 func freePort(t *testing.T) int {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	freePortMu.Lock()
+	defer freePortMu.Unlock()
+	if freePortNext == 0 {
+		freePortNext = freePortLow + int(time.Now().UnixNano()%int64(freePortHigh-freePortLow))
 	}
-	defer ln.Close()
-	return ln.Addr().(*net.TCPAddr).Port
+	for range freePortHigh - freePortLow {
+		port := freePortNext
+		freePortNext++
+		if freePortNext >= freePortHigh {
+			freePortNext = freePortLow
+		}
+		ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		if err != nil {
+			continue
+		}
+		if err := ln.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return port
+	}
+	t.Fatal("no free loopback port in the sandbox test band")
+	return 0
 }
+
+// The freePort band: 14000-17599, clear of the fixed test ports (11434,
+// 12345, 13305, 17670, 18970) and of the connector outage band 21000-28999.
+const freePortLow, freePortHigh = 14000, 17600
+
+var (
+	freePortMu   sync.Mutex
+	freePortNext int
+)
 
 // sandboxRuntimeFixture is the sandbox subsystem on free ports with no
 // OpenShell gateway to reach; squatter, if set, is another program holding
@@ -240,6 +285,52 @@ func TestSandboxRuntimeServesListeners(t *testing.T) {
 	})
 }
 
+// GAP-0701: the configured address cannot be reported as this daemon's
+// listener when a second account owns the ingress port.
+func TestSandboxStatusDoesNotClaimAnotherAccountsIngress(t *testing.T) {
+	f := newSandboxRuntimeFixture(t, false)
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(f.cfg.OpenShell.IngressPort))
+	var err error
+	f.squatter, err = net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.squatter.Close() })
+	f.run(t, nil)
+	eventuallyTrue(t, func() bool {
+		f.rt.listenMu.Lock()
+		defer f.rt.listenMu.Unlock()
+		return f.rt.listening["egress"]
+	})
+	h := f.api.tokenAuth(f.api.apiCSRFProtect(f.api.sandboxAPIHandler()))
+	w := serve(h, sandboxRequest(http.MethodGet, sandboxapi.PathStatus, ""))
+	var st sandboxapi.Status
+	if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil {
+		t.Fatal(err)
+	}
+	// This fixture has no OpenShell gateway, so that earlier failure remains
+	// the status cause even though another account also holds ingress.
+	if w.Code != http.StatusOK || st.IngressAddr != "" || st.EgressAddr == "" || st.Available || !strings.Contains(st.Reason, "gateway") {
+		t.Fatalf("status claims a listener held by another account: %d %+v", w.Code, st)
+	}
+}
+
+func TestSandboxStatusListenerAvailabilityRequiresOwnership(t *testing.T) {
+	rt := &sandboxRuntime{}
+	rt.setListening("egress", true)
+	st := &sandboxapi.Status{Enabled: true, Available: true, IngressAddr: "127.0.0.1:19081", EgressAddr: "127.0.0.1:19082"}
+	rt.statusListenerAddresses(st)
+	if st.Available || st.IngressAddr != "" || st.EgressAddr == "" ||
+		!strings.Contains(st.Reason, "openshell.ingress_port") || !strings.Contains(st.Reason, "restart") {
+		t.Fatalf("unheld ingress still reported ready: %+v", st)
+	}
+	alreadyUnavailable := &sandboxapi.Status{Enabled: true, Reason: sandboxapi.AccountBusyMessage, IngressAddr: "127.0.0.1:19081"}
+	rt.statusListenerAddresses(alreadyUnavailable)
+	if alreadyUnavailable.Reason != sandboxapi.AccountBusyMessage || alreadyUnavailable.IngressAddr != "" {
+		t.Fatalf("listener status hid the primary unavailable cause: %+v", alreadyUnavailable)
+	}
+}
+
 // TestSandboxRuntimeRefusesSandboxesWithoutItsListeners pins that no
 // sandbox is created while another program holds a sandbox listener port:
 // OpenShell would relay the sandbox's hooks (with its real ingress token)
@@ -274,11 +365,15 @@ type fakeSandboxFleet struct {
 	failStops map[string]int
 	stopped   []string
 	listErr   error
+	listCalls int
+	// whys are the manager.EmergencyStopReason of every stop.
+	whys []string
 }
 
 func (f *fakeSandboxFleet) List(context.Context) ([]sandboxapi.Sandbox, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.listCalls++
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
@@ -290,9 +385,58 @@ func (f *fakeSandboxFleet) List(context.Context) ([]sandboxapi.Sandbox, error) {
 	return out, nil
 }
 
-func (f *fakeSandboxFleet) Stop(_ context.Context, name string) (*sandboxapi.Sandbox, error) {
+// The managed daemon must keep containing while a dead listener has not
+// rebound. A transient list or stop failure cannot make that one attempt
+// the only attempt. Rebinding ends the loop before another stop.
+func TestManagedListenerLossRetriesUntilRebound(t *testing.T) {
+	fleet := &fakeSandboxFleet{
+		phases:    map[string]string{"vm": "ready"},
+		listErr:   errors.New("gateway temporarily unavailable"),
+		failStops: map[string]int{"vm": 2},
+	}
+	var feed syncRecorder[sandboxapi.ActivityEvent]
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	d := &SandboxDaemon{
+		rt:        &sandboxRuntime{fleet: fleet, publish: feed.add, recheck: 5 * time.Millisecond},
+		lifecycle: make(chan struct{}, 1), runCtx: ctx,
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		d.containLostListener(ctx, "ingress")
+	}()
+	eventuallyTrue(t, func() bool {
+		fleet.mu.Lock()
+		defer fleet.mu.Unlock()
+		return fleet.listCalls >= 2
+	})
+	if got := fleet.stops(); len(got) != 0 {
+		t.Fatalf("stopped despite failed list: %v", got)
+	}
+	fleet.mu.Lock()
+	fleet.listErr = nil
+	fleet.mu.Unlock()
+	eventuallyTrue(t, func() bool { return slices.Equal(fleet.stops(), []string{"vm"}) })
+	eventuallyTrue(t, func() bool { return len(feed.snapshot()) == 2 })
+	if got := feed.snapshot(); len(got) != 2 || !strings.Contains(got[0].Message, "could not stop") ||
+		!strings.Contains(got[1].Message, "stopped it") {
+		t.Fatalf("containment events = %+v", got)
+	}
+	d.listenMu.Lock()
+	d.listenCancel = func() {}
+	d.listenMu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("containment did not end after listener rebind")
+	}
+}
+
+func (f *fakeSandboxFleet) Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.whys = append(f.whys, manager.EmergencyStopReason(ctx))
 	if f.failStops[name] > 0 {
 		f.failStops[name]--
 		return nil, errors.New("openshell unavailable")
@@ -401,6 +545,21 @@ func TestContainListenerLossStopsRunningSandboxes(t *testing.T) {
 	}
 	if len(failures) != 1 || failures["dc-stubborn"] != 1 {
 		t.Fatalf("failed stops reported = %v, want dc-stubborn once", failures)
+	}
+	// Each is a security stop: a MicroVM whose disk cannot be synced
+	// first is contained instead (GAP-0902), and a failed one says why.
+	fleet.mu.Lock()
+	whys := slices.Clone(fleet.whys)
+	fleet.mu.Unlock()
+	for _, why := range whys {
+		if why != "the sandbox ingress listener is not running" {
+			t.Fatalf("stop reasons = %q", whys)
+		}
+	}
+	for _, ev := range feed.snapshot() {
+		if strings.Contains(ev.Message, "stop it yourself") && !strings.Contains(ev.Message, "could not stop it (openshell unavailable)") {
+			t.Fatalf("the failed stop does not say why: %+v", ev)
+		}
 	}
 	for _, name := range want {
 		if stoppedMsgs[name] != 1 {

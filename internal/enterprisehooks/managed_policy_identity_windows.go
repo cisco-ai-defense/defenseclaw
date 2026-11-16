@@ -9,11 +9,9 @@ package enterprisehooks
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // VerifyWindowsClaudeManagedPolicyIdentity is a read-only proof that the
@@ -40,9 +38,17 @@ func VerifyWindowsClaudeManagedPolicyIdentity(
 		HookFailMode:      "closed",
 		ManagedEnterprise: true,
 		HookExecutable:    hookExecutable,
+
+		SecureClientHookDelivery: secureClientHookDelivery(),
 	})
 	provider := connector.NewClaudeCodeConnector()
-	return windowsClaudeManagedPolicyTransaction(func() error {
+	if kept, keptErr := windowsClaudeManagedPolicyLinkKept(); keptErr != nil || kept {
+		if keptErr != nil {
+			return keptErr
+		}
+		return errors.New("enterprise hooks: Claude managed policy is absent: a link sits at the managed-settings folder")
+	}
+	return withWindowsClaudeManagedPolicyTeardownTransaction(func() error {
 		path, err := windowsClaudeManagedPolicyPath()
 		if err != nil {
 			return err
@@ -72,17 +78,15 @@ func VerifyWindowsClaudeManagedPolicyIdentity(
 			return errors.New("enterprise hooks: Claude machine policy belongs to another protected gateway deployment")
 		}
 		if err := provider.VerifyManagedHookPolicy(policy.data, setup); err != nil {
-			if !windowsStandaloneProfilePinned() {
-				return fmt.Errorf("enterprise hooks: verify current Claude managed policy identity: %w", err)
-			}
 			// The policy was rendered for the enrolled Claude version's hook
 			// contract (for example with DirectoryAdded from 2.1.219), which
-			// this version-less setup cannot know. It is still this
-			// deployment's policy if it is byte-for-byte the rendering of
-			// one registered contract for the same executable and gateway,
-			// with or without the managed-hooks-only lock: a policy an older
-			// release published without the lock still belongs to this
-			// deployment, and the guardian's canonical check re-renders it.
+			// this version-less setup cannot know, under either profile. It
+			// is still this deployment's policy if it is byte-for-byte the
+			// rendering of one registered contract for the same executable
+			// and gateway, with or without the managed-hooks-only lock: a
+			// policy an older release published without the lock still
+			// belongs to this deployment, and the guardian's canonical check
+			// re-renders it.
 			if !claudeManagedPolicyMatchesKnownContract(provider, policy.data, setup) {
 				return fmt.Errorf("enterprise hooks: verify current Claude managed policy identity: %w", err)
 			}
@@ -92,27 +96,29 @@ func VerifyWindowsClaudeManagedPolicyIdentity(
 }
 
 func claudeManagedPolicyMatchesKnownContract(
-	provider *connector.ClaudeCodeConnector,
+	provider connector.ManagedHookPolicyProvider,
 	policy []byte,
 	setup connector.SetupOpts,
 ) bool {
-	for _, contract := range connector.KnownHookContracts("claudecode") {
+	for _, contractID := range windowsClaudeRecordedPolicyContracts() {
 		for _, lock := range []bool{setup.ClaudeAllowManagedHooksOnly, !setup.ClaudeAllowManagedHooksOnly} {
 			pinned := setup
-			pinned.HookContractID = contract.ContractID
+			pinned.HookContractID = contractID
 			pinned.ClaudeAllowManagedHooksOnly = lock
 			if provider.VerifyManagedHookPolicy(policy, pinned) == nil {
 				return true
 			}
+			// An authenticated standalone policy from the earlier direct
+			// delivery form remains this deployment's policy during upgrade.
+			if !setup.SecureClientHookDelivery {
+				pinned.SecureClientHookDelivery = true
+				if provider.VerifyManagedHookPolicy(policy, pinned) == nil {
+					return true
+				}
+			}
 		}
 	}
 	return false
-}
-
-// windowsStandaloneProfilePinned reports whether this service runs under the
-// standalone enterprise profile pin.
-func windowsStandaloneProfilePinned() bool {
-	return managed.IsStandaloneProfile(os.Getenv(managed.EnterpriseProfileEnv))
 }
 
 // VerifyWindowsCursorManagedPolicyIdentity is the equivalent read-only proof
@@ -133,12 +139,12 @@ func VerifyWindowsCursorManagedPolicyIdentity(
 	if err := connector.ValidateWindowsManagedGatewayServiceName(gatewayServiceName); err != nil {
 		return err
 	}
-	return withWindowsCursorManagedTransaction(func() error {
+	return withWindowsCursorManagedTeardownTransaction(func() error {
 		artifacts, err := snapshotWindowsCursorManagedArtifacts()
 		if err != nil {
 			return err
 		}
-		artifacts, err = validateWindowsCursorManagedArtifacts(artifacts)
+		artifacts, err = validateWindowsCursorManagedArtifactsForLockedRead(artifacts)
 		if err != nil {
 			return err
 		}

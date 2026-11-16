@@ -38,6 +38,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/stream"
@@ -728,10 +729,13 @@ func TestLargeUploadBlockCutsAndRefuses(t *testing.T) {
 	if n := len(e.events("upbox", sandboxapi.ActivityEgressLargeUpload, "")); n != 0 {
 		t.Fatalf("the cut was also reported as %d unblocked large uploads", n)
 	}
-	eventually(t, "the finding and the blocked record", func() bool {
-		return len(e.tel.findingsOf(audit.SandboxFindingLargeUpload)) == 1 &&
-			egressRecords(e, "upbox", func(r audit.SandboxEgressEvent) bool { return r.Blocked }) == 1
+	eventually(t, "the finding", func() bool {
+		return len(e.tel.findingsOf(audit.SandboxFindingLargeUpload)) == 1
 	})
+	e.m.sink.flushProxyAudit(t.Context(), e.m.now().Add(proxyOpenWindow), false)
+	if got := egressRecords(e, "upbox", func(r audit.SandboxEgressEvent) bool { return r.Blocked }); got != 1 {
+		t.Fatalf("blocked egress records = %d, want one", got)
+	}
 	finding := e.tel.findingsOf(audit.SandboxFindingLargeUpload)[0]
 	if finding.Severity != "HIGH" || !strings.Contains(finding.Title, "blocked") || !strings.Contains(finding.Description, "more than 1 MiB") ||
 		!strings.Contains(finding.Remediation, "defenseclaw sandbox unblock example.org --sandbox upbox") {
@@ -822,12 +826,16 @@ func TestEgressSinkMapping(t *testing.T) {
 	for _, ev := range []egress.Event{first, again, blocked, upload, {Kind: egress.EventAllowed, SandboxName: "unknown-box", Host: "x.example"}} {
 		sink.EgressEvent(ev)
 	}
-	// The sink publishes the large upload to the feed after recording its finding.
-	eventually(t, "egress telemetry and the large upload in the feed", func() bool {
-		return len(where(&e.tel.mu, &e.tel.egress, nil)) == 3 && len(e.tel.findingsOf(audit.SandboxFindingLargeUpload)) == 1 &&
+	// The sink publishes the large upload after recording its finding.
+	eventually(t, "the large upload in the feed", func() bool {
+		return len(e.tel.findingsOf(audit.SandboxFindingLargeUpload)) == 1 &&
 			len(e.events(sb.Name, sandboxapi.ActivityEgressLargeUpload, "")) == 1
 	})
+	e.m.sink.flushProxyAudit(t.Context(), e.m.now().Add(proxyOpenWindow), false)
 	recs, finding := where(&e.tel.mu, &e.tel.egress, nil), e.tel.findingsOf(audit.SandboxFindingLargeUpload)[0]
+	if len(recs) != 3 {
+		t.Fatalf("egress telemetry = %+v, want three records", recs)
+	}
 	if a := recs[0]; a.Source != audit.SandboxEgressSourceProxy || a.Blocked || a.Scheme != "https" || a.ResolvedIP != "104.16.0.1" ||
 		a.DecisionCode != "SANDBOX_EGRESS_ALLOWED" || a.Sandbox.Name != sb.Name {
 		t.Fatalf("allowed = %+v", a)
@@ -909,6 +917,20 @@ func TestRepeatedOpenShellFindingsAreOneAlert(t *testing.T) {
 	e.ocsf("findbox", uninspectable, e.m.now())
 	if got = findings(); len(got) != 3 || !strings.Contains(got[2].Description, "(OpenShell raised it 3 more times after the alert of ") {
 		t.Fatalf("findings = %+v, want the next one to name the 3 folded repeats", got)
+	}
+}
+
+func TestCredentialEndpointMismatchFindingNamesTheCauseAndFix(t *testing.T) {
+	e := newEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "findbox"})
+	const mismatch = `FINDING:BLOCKED [HIGH] "Provider credential used at an unauthorized endpoint" [type:openshell.provider_credential.endpoint_mismatch]`
+	for range 4 {
+		e.ocsf("findbox", mismatch, e.m.now())
+	}
+	findings := where(&e.tel.mu, &e.tel.findings, func(f audit.SandboxFindingEvent) bool { return f.Kind == audit.SandboxFindingOCSF })
+	if len(findings) != 1 || !strings.Contains(findings[0].Description, "credential placeholder is bound to its configured endpoint") ||
+		!strings.Contains(findings[0].Remediation, "model provider's configured credential") {
+		t.Fatalf("endpoint mismatch finding = %+v", findings)
 	}
 }
 
@@ -1350,6 +1372,44 @@ func TestTheModelChannelClosesAndReopensWithThePolicy(t *testing.T) {
 	}
 }
 
+// GAP-1859 (review R3-1): a provider the policy detached from a legacy guest
+// whose network DefenseClaw withdrew is not attached again when the policy
+// allows its endpoint again: the provider rule would open the endpoint on a
+// supervisor DefenseClaw cannot contain. It is attached once the guest runs
+// on the current supervisor.
+func TestAContainedLegacyGuestGetsNoProviderBack(t *testing.T) {
+	llm := &sandboxapi.LLMCredential{Profile: profiles.AnthropicID, Credentials: map[string]string{"ANTHROPIC_API_KEY": "sk-test"}}
+	e := newEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "legacymc", LLM: llm})
+	provider := providerName("legacymc", roleLLM, 0)
+	attached := func() bool {
+		got, err := e.client.GetSandbox(t.Context(), "legacymc")
+		return err == nil && slices.Contains(got.Spec.Providers, provider)
+	}
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.EgressAllowOnly = []string{"registry.example.org"} })
+	if !e.m.enforceAll(t.Context()) || attached() {
+		t.Fatal("the model provider stayed attached under an allow-only list without its endpoint")
+	}
+	b := e.boxOf("legacymc")
+	e.m.mu.Lock()
+	b.rec.OldSupervisorNetworkClosed = true
+	e.m.mu.Unlock()
+	e.setConfig(func(c *config.Config) {
+		c.OpenShell.Admin.EgressAllowOnly = []string{"registry.example.org", "api.anthropic.com"}
+	})
+	attaches := e.fake.Calls(openshelltest.MethodAttachProvider)
+	e.m.enforceAll(t.Context())
+	if n := e.fake.Calls(openshelltest.MethodAttachProvider) - attaches; n != 0 || attached() {
+		t.Fatalf("a contained legacy guest got its provider back (%d attach calls)", n)
+	}
+	e.m.mu.Lock()
+	b.rec.OldSupervisorNetworkClosed = false
+	e.m.mu.Unlock()
+	if !e.m.enforceAll(t.Context()) || !attached() {
+		t.Fatal("the provider was not attached once the guest no longer runs contained")
+	}
+}
+
 // GAP-0361: in a strict session one connection to the model host outside
 // its provider rule was refused, and the feed and the session summary read
 // "x bedrock-mantle... (no OpenShell rule allows this port)", as if strict
@@ -1368,6 +1428,32 @@ func TestARefusalOnTheModelHostSaysTheModelChannelStaysOpen(t *testing.T) {
 		return r.Blocked && strings.HasPrefix(r.Reason, "a connection outside the model channel") && strings.HasSuffix(r.Reason, "(transparent_tcp_mapping_denied)")
 	}); n != 1 {
 		t.Fatalf("%d records say the model channel stays open, want 1", n)
+	}
+}
+
+// GAP-0178, GAP-0183: an unblock of the sandbox's own model host said only
+// "unblocked", and the next fetch by another program was refused again by
+// the model host's provider rule, which opens the host to the agent's own
+// programs only. The unblock still lifts DefenseClaw's refusal, and says
+// that the other programs still cannot reach the model host; an unblock of
+// another host, or of the host for a sandbox without that model, does not.
+func TestAnUnblockOfTheModelHostSaysOtherProgramsStillCannotReachIt(t *testing.T) {
+	llm := &sandboxapi.LLMCredential{Profile: profiles.AnthropicID, Credentials: map[string]string{"ANTHROPIC_API_KEY": "sk-test"}}
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "mubox", Profile: "balanced", LLM: llm})
+	e.create(sandboxapi.CreateRequest{Name: "nomodel", Profile: "balanced", Project: e.otherProject("nomodel")})
+	resp, err := e.m.Unblock(t.Context(), sandboxapi.UnblockRequest{Host: "api.anthropic.com", Sandbox: "mubox"})
+	must(t, err)
+	want := "unblocked api.anthropic.com for sandbox mubox" + modelHostUnblockNote("api.anthropic.com")
+	if resp.Message != want || !strings.Contains(resp.Message, "still refuses the other programs in the sandbox") {
+		t.Fatalf("message = %q, want %q", resp.Message, want)
+	}
+	for _, req := range []sandboxapi.UnblockRequest{{Host: "example.org", Sandbox: "mubox"}, {Host: "api.anthropic.com", Sandbox: "nomodel"}} {
+		resp, err := e.m.Unblock(t.Context(), req)
+		must(t, err)
+		if resp.Message != "unblocked "+req.Host+" for sandbox "+req.Sandbox {
+			t.Errorf("%+v: message = %q", req, resp.Message)
+		}
 	}
 }
 
@@ -1503,6 +1589,7 @@ func TestPolicyReloadCutsAreNoBlocks(t *testing.T) {
 func TestAMappingDenialAfterAReloadIsNoBlock(t *testing.T) {
 	r := newReachEnv(t)
 	denied := "NET:OPEN [MED] DENIED " + testClaudeBin + "(0) -> bedrock-mantle.us-east-1.api.aws:443 [reason:transparent_tcp_mapping_denied]"
+	r.line("CONFIG:PUBLISHED [INFO] Policy DNS mapped bedrock-mantle.us-east-1.api.aws resolved=1.2.3.4 synthetic=198.18.0.2 ports=443 mapping_id=m1")
 	blocks := func() (int, int) {
 		return len(r.events(r.name, sandboxapi.ActivityEgressBlocked, "")), r.get(r.name).Egress.Blocked
 	}
@@ -1525,6 +1612,28 @@ func TestAMappingDenialAfterAReloadIsNoBlock(t *testing.T) {
 	r.line(denied)
 	if lines, n := blocks(); lines != 1 || n != 1 {
 		t.Fatalf("after a global profile import: feed %d, blocked %d; want no new block", lines, n)
+	}
+}
+
+// GAP-0684: a provider import can replay an earlier OCSF refusal and can
+// precede a real denial on a side port. Each distinct refusal appears once.
+func TestProviderImportKeepsSidePortRefusalAndDoesNotReplayOldOne(t *testing.T) {
+	r := newReachEnv(t)
+	const host = "bedrock-mantle.us-east-1.api.aws"
+	r.line("CONFIG:PUBLISHED [INFO] Policy DNS mapped " + host + " resolved=1.2.3.4 synthetic=198.18.0.2 ports=443 mapping_id=m1")
+	before := "NET:OPEN [MED] DENIED /usr/bin/curl(0) -> " + host + ":9443 [reason:transparent_tcp_policy_denied]"
+	at := r.m.now()
+	r.ocsf(r.name, before, at)
+	if got := r.get(r.name).Egress.Blocked; got != 1 {
+		t.Fatalf("pre-import blocked = %d, want one", got)
+	}
+	r.advance(feedFoldWindow + time.Second)
+	r.m.beforeGlobalImport(t.Context(), "another-provider")
+	r.ocsf(r.name, before, at) // the old stream event, with its original timestamp
+	r.line("NET:OPEN [MED] DENIED /usr/bin/curl(0) -> 198.18.0.2:8443 [reason:transparent_tcp_mapping_denied]")
+	lines := r.events(r.name, sandboxapi.ActivityEgressBlocked, "")
+	if got := r.get(r.name).Egress.Blocked; got != 1 || len(lines) != 2 || lines[0].Port != 9443 || lines[1].Port != 8443 {
+		t.Fatalf("blocked destinations = %d, feed = %+v; want the host refused and both distinct port attempts", got, lines)
 	}
 }
 

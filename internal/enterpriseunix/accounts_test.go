@@ -179,8 +179,12 @@ func (dsclLoginRunner) Run(_ context.Context, name string, args ...string) (Comm
 func TestDsclDeleteErrorNamesTheRecordAndTheError(t *testing.T) {
 	raw := errors.New("dscl . -delete /Users/_defenseclaw: exit status 40: <main> delete status: eDSPermissionError\nDS Error: -14120 (eDSPermissionError)")
 	got := dsclDeleteError("/Users/_defenseclaw", raw).Error()
-	if got != "macOS refused to delete the directory record /Users/_defenseclaw (eDSPermissionError)" {
+	if got != "macOS refused to delete the directory record /Users/_defenseclaw (eDSPermissionError: macOS lets only a process with Full Disk Access delete a user account, and this one has none)" {
 		t.Fatalf("message = %q", got)
+	}
+	notFound := errors.New("dscl . -delete /Groups/_defenseclaw: exit status 40: DS Error: -14136 (eDSRecordNotFound)")
+	if got := dsclDeleteError("/Groups/_defenseclaw", notFound).Error(); got != "macOS refused to delete the directory record /Groups/_defenseclaw (eDSRecordNotFound)" {
+		t.Fatalf("another Open Directory error = %q, want only its name", got)
 	}
 	other := errors.New("dscl: exit status 1: unexpected")
 	if got := dsclDeleteError("/Groups/_defenseclaw", other); !errors.Is(got, other) || !strings.Contains(got.Error(), "remove /Groups/_defenseclaw") {

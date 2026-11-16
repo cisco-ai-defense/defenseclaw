@@ -63,9 +63,13 @@ _EXEC_CONTROL_ENVIRONMENT_PREFIXES = ("LD_", "DYLD_")
 class ConfigInspectError(RuntimeError):
     """A bounded, display-safe helper invocation or protocol failure."""
 
-    def __init__(self, message: str, *, field_path: str | None = None, reason: str | None = None) -> None:
+    def __init__(
+        self, message: str, *, field_path: str | None = None, reason: str | None = None, note: str = ""
+    ) -> None:
         self.field_path = field_path
         self.reason = reason
+        # Extra advice the plain-words rewrite of field_path/reason would drop.
+        self.note = note
         super().__init__(message)
 
 
@@ -111,12 +115,15 @@ def inspect_v8_config(
         failure = _decode_validation_failure(completed.stdout, operation)
         if failure is not None:
             field_path, reason = failure
+            note = _older_gateway_note(argv[0])
             raise ConfigInspectError(
-                f"candidate field={field_path}; reason={reason}",
+                f"candidate field={field_path}; reason={reason}{note}",
                 field_path=field_path,
                 reason=reason,
+                note=note,
             )
-        raise ConfigInspectError(_helper_failure(completed.stderr, operation))
+        note = _older_gateway_note(argv[0])
+        raise ConfigInspectError(_helper_failure(completed.stderr, operation) + note, note=note)
     try:
         payload = json.loads(completed.stdout)
     except (TypeError, json.JSONDecodeError) as exc:
@@ -137,7 +144,8 @@ def migrate_config_v9(
 
     Returns the JSON result (``migrated``, ``dry_run``, ``written`` and the
     migration-v9.json ``record``). ``ack`` marks the record as read and
-    returns ``{}``.
+    returns ``{"message": ...}``, the helper's own sentence (it also says
+    when there is no record to acknowledge, GAP-1677).
     """
 
     try:
@@ -157,7 +165,7 @@ def migrate_config_v9(
     if completed.returncode != 0:
         raise ConfigInspectError(_helper_failure(completed.stderr, "migrate"))
     if ack:
-        return {}
+        return {"message": (completed.stdout or "").strip()}
     try:
         payload = json.loads(completed.stdout)
     except (TypeError, json.JSONDecodeError) as exc:
@@ -165,6 +173,131 @@ def migrate_config_v9(
     if not isinstance(payload, dict) or not isinstance(payload.get("record"), dict):
         raise ConfigInspectError("the config migration returned an invalid response; run defenseclaw upgrade")
     return payload
+
+
+HILT_PREVIEW_WIRE_VERSION: Final = 1
+_HOOK_MODES: Final = frozenset({"action", "observe"})
+_MAX_PREVIEW_PROFILES: Final = 100_000
+_PREVIEW_TEXT = re.compile(r"^[^\x00-\x1f\x7f]{0,256}$")
+
+
+@dataclass(frozen=True)
+class HILTPreviewScope:
+    """The hook mode and HILT block one set of accounts gets for a connector.
+
+    *profile* is "" for the accounts no guardrail profile matches.
+    *follows_connector_hilt* is False when the profile's own HILT block
+    replaces the connector's.
+    """
+
+    profile: str
+    mode: str
+    enabled: bool
+    min_severity: str
+    follows_connector_hilt: bool
+
+
+@dataclass(frozen=True)
+class ConnectorHILTPreview:
+    connector: str
+    base: HILTPreviewScope
+    profiles: tuple[HILTPreviewScope, ...]
+
+
+def connector_hilt_preview(
+    connector: str,
+    *,
+    enabled: bool,
+    min_severity: str,
+    config_path: str,
+    gateway_binary: str | None = None,
+) -> ConnectorHILTPreview:
+    """What saving a connector HILT block does, as the gateway resolves it.
+
+    Runs ``defenseclaw-gateway connector hilt-preview``: it loads config.yaml
+    as the gateway does and resolves the hook mode and HILT of the accounts no
+    guardrail profile matches, and of each profile, with the hook path's own
+    resolvers (the legacy claude_code, codex and connector_hooks modes and the
+    profile overrides included). There is no Python fallback: callers say the
+    preview is unavailable instead.
+    """
+
+    try:
+        binary = gateway_binary if gateway_binary is not None else resolve_trusted_gateway_binary()
+    except UnsafePathError as exc:
+        raise ConfigInspectError(unsafe_gateway_remedy(exc)) from exc
+    if not binary:
+        raise ConfigInspectError("defenseclaw-gateway is not installed; run defenseclaw upgrade")
+    argv = [
+        binary,
+        "connector",
+        "hilt-preview",
+        "--connector",
+        connector,
+        "--enabled=" + ("true" if enabled else "false"),
+        "--min-severity",
+        min_severity,
+        "--config",
+        config_path,
+    ]
+    completed = _run(argv)
+    if completed.returncode != 0:
+        lines = _safe_detail(completed.stderr).splitlines()
+        raise ConfigInspectError(
+            (lines[0].removeprefix("Error: ").strip() if lines else "")
+            or "defenseclaw-gateway could not resolve the preview; run defenseclaw upgrade"
+        )
+    try:
+        payload = json.loads(completed.stdout)
+    except (TypeError, json.JSONDecodeError) as exc:
+        # An older gateway has no hilt-preview and prints its help instead.
+        raise ConfigInspectError(
+            "this defenseclaw-gateway cannot resolve the preview; run defenseclaw upgrade"
+        ) from exc
+    return _decode_hilt_preview(payload)
+
+
+def _decode_hilt_preview(payload: Any) -> ConnectorHILTPreview:
+    def incompatible() -> ConfigInspectError:
+        return ConfigInspectError("defenseclaw-gateway returned an incompatible preview; run defenseclaw upgrade")
+
+    def text(value: Any) -> str:
+        if not isinstance(value, str) or _PREVIEW_TEXT.fullmatch(value) is None:
+            raise incompatible()
+        return value
+
+    def scope(value: Any, *, profile: bool) -> HILTPreviewScope:
+        if not isinstance(value, dict):
+            raise incompatible()
+        hilt = value.get("hilt")
+        mode = value.get("mode")
+        follows = value.get("follows_connector_hilt")
+        if not isinstance(hilt, dict) or mode not in _HOOK_MODES or not isinstance(follows, bool):
+            raise incompatible()
+        enabled = hilt.get("enabled")
+        if not isinstance(enabled, bool):
+            raise incompatible()
+        name = text(value.get("profile")) if profile else ""
+        if profile and not name:
+            raise incompatible()
+        return HILTPreviewScope(
+            profile=name,
+            mode=mode,
+            enabled=enabled,
+            min_severity=text(hilt.get("min_severity")).strip().upper(),
+            follows_connector_hilt=follows,
+        )
+
+    if not isinstance(payload, dict) or payload.get("wire_version") != HILT_PREVIEW_WIRE_VERSION:
+        raise ConfigInspectError("defenseclaw-gateway preview protocol is incompatible; run defenseclaw upgrade")
+    profiles = payload.get("profiles")
+    if not isinstance(profiles, list) or len(profiles) > _MAX_PREVIEW_PROFILES:
+        raise incompatible()
+    return ConnectorHILTPreview(
+        connector=text(payload.get("connector")),
+        base=scope(payload.get("base"), profile=False),
+        profiles=tuple(scope(item, profile=True) for item in profiles),
+    )
 
 
 def config_v8_schema() -> str:
@@ -379,6 +512,52 @@ def _decode_validation_failure(value: str | None, operation: str) -> tuple[str, 
     ):
         return None
     return field_path, reason.strip()
+
+
+_GATEWAY_VERSION = re.compile(r"\bversion\s+(\d+)\.(\d+)\.(\d+)")
+
+
+def _older_gateway_note(binary: str) -> str:
+    """Name the gateway that judged the config when it is an older release than this CLI.
+
+    A terminal opened before an install can list an older DefenseClaw (a
+    0.8.x Setup install) first on PATH; its gateway then reports this release's
+    config as newer than it supports (GAP-0099). Asked only after a failure.
+    "" when the binary is this release or newer, or cannot be asked.
+    """
+    from defenseclaw import __version__
+
+    # As the check itself ran: the pinned file, without the loader variables.
+    environment = {k: v for k, v in os.environ.items() if not _is_exec_control_environment_name(k)}
+    try:
+        out = run_pinned_executable(
+            [binary, "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+            env=environment,
+        ).stdout
+    except (OSError, subprocess.SubprocessError, UnsafePathError):
+        return ""
+    found = _GATEWAY_VERSION.search(out or "")
+    mine = re.match(r"(\d+)\.(\d+)\.(\d+)", __version__)
+    if not found or not mine:
+        return ""
+    theirs = tuple(int(part) for part in found.groups())
+    if theirs >= tuple(int(part) for part in mine.groups()):
+        return ""
+    version = ".".join(found.groups())
+    note = (
+        f" [the gateway that ran this check is DefenseClaw {version}, at {binary}, an older release than this "
+        f"defenseclaw ({__version__}); put the folder of this defenseclaw first on PATH or set "
+        "DEFENSECLAW_GATEWAY_BIN to the gateway beside it"
+    )
+    if theirs[0] == 0:
+        note += ", and run `defenseclaw uninstall` to remove the DefenseClaw Setup 0.8.x install"
+    return note + "]"
 
 
 def _helper_failure(stderr: str | None, operation: str) -> str:

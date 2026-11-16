@@ -19,8 +19,9 @@ package connector
 import (
 	"bytes"
 	"fmt"
-	"regexp"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // sandboxPluginHostOnlyMarkers must never survive into a rendered sandbox
@@ -69,7 +70,7 @@ func renderSandboxPlugin(asset string, rt resolvedSandboxTarget) ([]byte, error)
 	return body, nil
 }
 
-var sandboxPluginFailModeRE = regexp.MustCompile(`const DC_FAIL_MODE(?:: string)? = "closed"`)
+var sandboxPluginFailModeRE = lazyregexp.New(`const DC_FAIL_MODE(?:: string)? = "closed"`)
 
 // harnessBinary names the agent CLI an overlay image must provide.
 func harnessBinary(name string) SandboxBinary {

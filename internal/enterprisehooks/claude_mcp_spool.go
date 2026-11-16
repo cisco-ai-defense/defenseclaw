@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed/mcpasuser"
 )
 
 // ClaudeMCPSpoolDirName is the folder, beside the identity spool, where the
@@ -33,20 +34,51 @@ const ClaudeMCPSpoolDirName = "claude-mcp"
 // read the file; the enumerator reads it as LocalSystem (GAP-1468).
 const KiroMCPSpoolDirName = "kiro-mcp"
 
+// CodexMCPSpoolDirName is the folder, beside ClaudeMCPSpoolDirName, where the
+// managed Windows enumerator publishes, in the same record format, the Codex
+// user MCP servers of each user it enrolls for Codex: config.toml under
+// ~/.codex and under the account persistent CODEX_HOME. The gateway service
+// reads nothing in a profile, so without the record it admitted none of
+// these servers and refused none of their tool calls (GAP-0686).
+const CodexMCPSpoolDirName = "codex-mcp"
+
 // ClaudeMCPSpoolRecordVersion is the record format version.
 const ClaudeMCPSpoolRecordVersion = 1
 
 const maxClaudeMCPSpoolRecordBytes = 4 << 20
+
+// ClaudeMCPProjectSkip records one project whose path the enumerator refused.
+type ClaudeMCPProjectSkip struct {
+	Project string `json:"project"`
+	Reason  string `json:"reason"`
+}
+
+// ClaudeMCPProjectSkips is a status-only sidecar beside an account's inventory.
+type ClaudeMCPProjectSkips struct {
+	Key      string                 `json:"key"`
+	User     string                 `json:"user,omitempty"`
+	Home     string                 `json:"home"`
+	Projects []ClaudeMCPProjectSkip `json:"projects"`
+	Omitted  int                    `json:"omitted,omitempty"`
+}
+
+// Account names the enrolled account in a status warning.
+func (s ClaudeMCPProjectSkips) Account() string {
+	if strings.TrimSpace(s.User) != "" {
+		return s.User
+	}
+	return s.Home
+}
 
 // ClaudeMCPSpoolServer is one server of a record and the project folder
 // whose local scope or .mcp.json lists it (empty for the user scope).
 type ClaudeMCPSpoolServer struct {
 	Server  config.MCPServerEntry `json:"server"`
 	Project string                `json:"project,omitempty"`
-	// WorkDir is the folder a local stdio server starts in, which the
-	// enumerator checked as LocalSystem, where the profile is readable; the
-	// gateway service account cannot read the profile and so cannot check it
-	// (GAP-1317). WorkDirRefused is the folder it did not accept and why.
+	// WorkDir and WorkDirRefused are only read, so a record a 1.0.2
+	// enumerator wrote still parses while an upgrade replaces it; nothing
+	// uses them. The enumerator now checks a server's folder as the user
+	// when it starts the server for a scan (#1164). Remove in 1.1.
 	WorkDir        string `json:"work_dir,omitempty"`
 	WorkDirRefused string `json:"work_dir_refused,omitempty"`
 }
@@ -72,6 +104,22 @@ type ClaudeStateUnreadable struct {
 	Home   string `json:"home"`
 	Path   string `json:"path"`
 	Reason string `json:"reason"`
+	// SignedOut is set when the file could not be read because the account
+	// is not signed in: its projects are read as the user, with the user's
+	// session token. The refusals then say so, not that the file is
+	// unreadable (GAP-0643).
+	SignedOut bool `json:"signed_out,omitempty"`
+}
+
+// Blocked is why the account's MCP servers of the connector label are
+// blocked, for status and the gateway's refusal.
+func (u ClaudeStateUnreadable) Blocked(label string) string {
+	if u.SignedOut {
+		return fmt.Sprintf("the %s MCP servers of %s are blocked: %s is not signed in, so the hook enumerator cannot read "+
+			"%s as them; they are scanned again once they sign in", label, u.Account(), u.Account(), u.Path)
+	}
+	return fmt.Sprintf("the %s MCP servers of %s are blocked: the hook enumerator could not read %s (%s); "+
+		"give SYSTEM read access to the file again or repair the file so it parses", label, u.Account(), u.Path, u.Reason)
 }
 
 // Account is how status and the refusal name the account.
@@ -82,22 +130,65 @@ func (u ClaudeStateUnreadable) Account() string {
 	return u.Home
 }
 
-// ClaudeMCPSpoolDir is the spool folder below the hook guardian
-// authorization folder.
-func ClaudeMCPSpoolDir(authorizationDir string) string {
-	if strings.TrimSpace(authorizationDir) == "" {
+// MCPSpoolRecordError is the failure to publish the record of one enrolled
+// account and connector; the other records of the folder were published.
+type MCPSpoolRecordError struct {
+	Connector, SID, Home string
+	Err                  error
+}
+
+func (e *MCPSpoolRecordError) Error() string { return e.Err.Error() }
+
+func (e *MCPSpoolRecordError) Unwrap() error { return e.Err }
+
+// MCPSpoolRecordFailures splits the error of an MCP spool publication into
+// the records it could not publish. whole reports a failure that is not one
+// record's (the folder itself could not be written): none of the
+// connector's records can then be taken as current, and neither can they
+// when an error names no record.
+func MCPSpoolRecordFailures(err error) (records []*MCPSpoolRecordError, whole bool) {
+	var walk func(error)
+	walk = func(err error) {
+		switch typed := err.(type) {
+		case nil:
+		case *MCPSpoolRecordError:
+			records = append(records, typed)
+		case interface{ Unwrap() []error }:
+			for _, inner := range typed.Unwrap() {
+				walk(inner)
+			}
+		default:
+			whole = true
+		}
+	}
+	walk(err)
+	if err != nil && len(records) == 0 {
+		whole = true
+	}
+	return records, whole
+}
+
+// MCPSpoolDir is the folder below the hook guardian authorization folder
+// where the enumerator publishes the MCP servers of connector, "" for a
+// connector it does not publish (mcpasuser.PublishedConnectors).
+func MCPSpoolDir(authorizationDir, connector string) string {
+	published, ok := mcpasuser.LookupPublished(connector)
+	if !ok || strings.TrimSpace(authorizationDir) == "" {
 		return ""
 	}
-	return filepath.Join(authorizationDir, ClaudeMCPSpoolDirName)
+	return filepath.Join(authorizationDir, published.SpoolDir)
+}
+
+// ClaudeMCPSpoolDir is the Claude Code spool folder below the hook guardian
+// authorization folder.
+func ClaudeMCPSpoolDir(authorizationDir string) string {
+	return MCPSpoolDir(authorizationDir, "claudecode")
 }
 
 // KiroMCPSpoolDir is the Kiro spool folder below the hook guardian
 // authorization folder.
 func KiroMCPSpoolDir(authorizationDir string) string {
-	if strings.TrimSpace(authorizationDir) == "" {
-		return ""
-	}
-	return filepath.Join(authorizationDir, KiroMCPSpoolDirName)
+	return MCPSpoolDir(authorizationDir, "kiro")
 }
 
 // MarshalClaudeMCPSpoolRecord serializes the record of sid for servers.
@@ -105,7 +196,7 @@ func MarshalClaudeMCPSpoolRecord(sid string, servers []config.MCPServerEntry) ([
 	record := ClaudeMCPSpoolRecord{Version: ClaudeMCPSpoolRecordVersion, Key: sid, Servers: []ClaudeMCPSpoolServer{}}
 	for _, server := range servers {
 		record.Servers = append(record.Servers, ClaudeMCPSpoolServer{
-			Server: server, Project: server.Project, WorkDir: server.WorkDir, WorkDirRefused: server.WorkDirRefused,
+			Server: server, Project: server.Project,
 		})
 	}
 	return json.Marshal(record)
@@ -123,17 +214,20 @@ func MarshalClaudeMCPSpoolUnreadable(sid string, unreadable ClaudeStateUnreadabl
 // tagged claudecode, after trust validates the record file, and the marker
 // of a state the enumerator could not read.
 func ReadClaudeMCPSpool(dir, sid string, trust func(path, label string) error) ([]config.MCPServerEntry, *ClaudeStateUnreadable, error) {
-	return readMCPSpool(dir, sid, "claudecode", trust)
+	return ReadMCPSpool(dir, sid, "claudecode", trust)
 }
 
 // ReadKiroMCPSpool returns the Kiro user MCP servers published for sid,
 // tagged kiro, after trust validates the record file, and the marker of a
 // mcp.json the enumerator could not read (GAP-1468).
 func ReadKiroMCPSpool(dir, sid string, trust func(path, label string) error) ([]config.MCPServerEntry, *ClaudeStateUnreadable, error) {
-	return readMCPSpool(dir, sid, "kiro", trust)
+	return ReadMCPSpool(dir, sid, "kiro", trust)
 }
 
-func readMCPSpool(dir, sid, connector string, trust func(path, label string) error) ([]config.MCPServerEntry, *ClaudeStateUnreadable, error) {
+// ReadMCPSpool returns the MCP servers published in dir for sid, tagged
+// connector, after trust validates the record file, and the marker of a
+// file the enumerator could not read.
+func ReadMCPSpool(dir, sid, connector string, trust func(path, label string) error) ([]config.MCPServerEntry, *ClaudeStateUnreadable, error) {
 	key := strings.ToUpper(strings.TrimSpace(sid))
 	if dir == "" || !strings.HasPrefix(key, "S-1-") || !validIdentitySpoolKey(key) {
 		return nil, nil, os.ErrNotExist
@@ -179,11 +273,6 @@ func readMCPSpool(dir, sid, connector string, trust func(path, label string) err
 	for _, server := range record.Servers {
 		entry := server.Server
 		entry.Connector, entry.Project = connector, server.Project
-		// The working folder is the enumerator result only when trust has
-		// proved the record is the enumerator one.
-		if trust != nil {
-			entry.WorkDir, entry.WorkDirRefused = server.WorkDir, server.WorkDirRefused
-		}
 		out = append(out, entry)
 	}
 	return out, record.Unreadable, nil
@@ -210,8 +299,47 @@ func ReadClaudeStateUnreadable(dir string) []ClaudeStateUnreadable {
 	return out
 }
 
+// ReadClaudeMCPProjectSkips lists per-project path refusals for status. It
+// reports only notes beside a readable inventory record for the same SID.
+func ReadClaudeMCPProjectSkips(dir string) []ClaudeMCPProjectSkips {
+	entries, err := os.ReadDir(dir)
+	if dir == "" || err != nil {
+		return nil
+	}
+	var out []ClaudeMCPProjectSkips
+	for _, entry := range entries {
+		sid, ok := strings.CutSuffix(entry.Name(), ".skipped")
+		if !ok || !validIdentitySpoolKey(sid) {
+			continue
+		}
+		if _, unreadable, err := ReadClaudeMCPSpool(dir, sid, nil); err != nil || unreadable != nil {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || !info.Mode().IsRegular() || info.Size() > maxClaudeMCPSpoolRecordBytes {
+			continue
+		}
+		file, err := os.Open(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		data, readErr := io.ReadAll(io.LimitReader(file, maxClaudeMCPSpoolRecordBytes+1))
+		_ = file.Close()
+		if readErr != nil || len(data) > maxClaudeMCPSpoolRecordBytes {
+			continue
+		}
+		var note ClaudeMCPProjectSkips
+		if json.Unmarshal(data, &note) != nil || !strings.EqualFold(note.Key, sid) || len(note.Projects) == 0 {
+			continue
+		}
+		out = append(out, note)
+	}
+	return out
+}
+
 // claudeMCPWorkDirChecks are the file system checks of a server working
-// folder, made by the enumerator where the user profile is readable.
+// folder, made by the enumerator while it impersonates the user whose server
+// it starts for a scan (#1164).
 type claudeMCPWorkDirChecks struct {
 	// volume fails for a path that is not on a fixed local volume (UNC,
 	// device, mapped or substituted drive).
@@ -224,24 +352,21 @@ type claudeMCPWorkDirChecks struct {
 	final func(path string) (string, error)
 }
 
-// vetClaudeMCPWorkDirs sets WorkDir and WorkDirRefused of each local stdio
-// server of the account whose profile is home (GAP-1317).
-func vetClaudeMCPWorkDirs(servers []config.MCPServerEntry, home string, otherHomes []string, checks claudeMCPWorkDirChecks) {
-	for i := range servers {
-		servers[i].WorkDir, servers[i].WorkDirRefused = vetClaudeMCPWorkDir(servers[i], home, otherHomes, checks)
-	}
-}
-
 // vetClaudeMCPWorkDir is the folder a local stdio server starts in, as its
-// agent starts it: the entry cwd, else the project that lists the server.
+// agent starts it: the entry cwd when it names one, else the project that
+// lists the server, else the user home (a user-scope server). No other
+// folder stands in for a refused one: the scan must run the code the agent
+// runs, so a cwd that cannot be used refuses the start even when the
+// project could be (#1164).
+//
 // A folder is accepted only when it is absolute, on a fixed local volume,
 // inside the project or the user home and in no other user profile, no
 // folder of it is a link or reparse point, and the opened folder has the
 // same path (no short-name, junction or other alias). The returned folder
-// is the opened one. refused names the first folder not accepted and why.
-func vetClaudeMCPWorkDir(entry config.MCPServerEntry, home string, otherHomes []string, checks claudeMCPWorkDirChecks) (dir, refused string) {
+// is the opened one; the error names the folder and why it is refused.
+func vetClaudeMCPWorkDir(entry config.MCPServerEntry, home string, otherHomes []string, checks claudeMCPWorkDirChecks) (string, error) {
 	if entry.Command == "" || entry.URL != "" {
-		return "", ""
+		return "", errors.New("the server is not a local stdio server")
 	}
 	var roots []string
 	for _, root := range []string{entry.Project, home} {
@@ -249,19 +374,21 @@ func vetClaudeMCPWorkDir(entry config.MCPServerEntry, home string, otherHomes []
 			roots = append(roots, filepath.Clean(root))
 		}
 	}
-	for _, candidate := range []string{entry.CWD, entry.Project} {
-		if candidate == "" {
-			continue
-		}
-		vetted, err := vetClaudeMCPWorkDirCandidate(candidate, home, roots, otherHomes, checks)
-		if err == nil {
-			return vetted, refused
-		}
-		if refused == "" {
-			refused = candidate + ": " + err.Error()
-		}
+	candidate := entry.CWD
+	if candidate == "" {
+		candidate = entry.Project
 	}
-	return "", refused
+	if candidate == "" {
+		candidate = home
+	}
+	if candidate == "" {
+		return "", errors.New("the server names no folder and the user has no home folder")
+	}
+	vetted, err := vetClaudeMCPWorkDirCandidate(candidate, home, roots, otherHomes, checks)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", candidate, err)
+	}
+	return vetted, nil
 }
 
 func vetClaudeMCPWorkDirCandidate(dir, home string, roots, otherHomes []string, checks claudeMCPWorkDirChecks) (string, error) {

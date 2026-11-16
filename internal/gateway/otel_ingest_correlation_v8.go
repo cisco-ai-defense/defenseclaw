@@ -617,7 +617,7 @@ func resolveNativeOTLPContextualMatchV8(
 			return nativeOTLPContextualMatch{match: audit.CorrelationMatchResult{
 				Rank: audit.CorrelationMatchUniquePending, Method: audit.CorrelationMethodDerived,
 				RuleID: "unique-compatible-native-pending", RuleVersion: string(spec.ProfileVersion),
-				Ambiguous: true, CandidateCount: count,
+				Ambiguous: true,
 			}}, nil
 		}
 		if count == 1 {
@@ -627,7 +627,7 @@ func resolveNativeOTLPContextualMatchV8(
 					MatchedSemanticEventID: operation.StartSemanticEventID,
 					Method:                 audit.CorrelationMethodDerived,
 					RuleID:                 "unique-compatible-native-pending", RuleVersion: string(spec.ProfileVersion),
-					RelationshipType: audit.CorrelationCausedBy, CandidateCount: 1,
+					RelationshipType: audit.CorrelationCausedBy,
 				},
 				pending: locator,
 			}, nil
@@ -654,7 +654,7 @@ func resolveNativeOTLPContextualMatchV8(
 		return nativeOTLPContextualMatch{match: audit.CorrelationMatchResult{
 			Rank: audit.CorrelationMatchProfileComposite, Method: audit.CorrelationMethodDerived,
 			RuleID: "unique-active-prompt-boundary", RuleVersion: string(spec.ProfileVersion),
-			Ambiguous: true, CandidateCount: 2,
+			Ambiguous: true,
 		}}, nil
 	}
 	if err != nil {
@@ -670,7 +670,7 @@ func resolveNativeOTLPContextualMatchV8(
 		MatchedSemanticEventID: cursor.LastSemanticEventID,
 		Method:                 audit.CorrelationMethodDerived,
 		RuleID:                 "unique-active-prompt-boundary", RuleVersion: string(spec.ProfileVersion),
-		RelationshipType: audit.CorrelationCausedBy, CandidateCount: 1,
+		RelationshipType: audit.CorrelationCausedBy,
 	}, cursor: &cursor}, nil
 }
 

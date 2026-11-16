@@ -123,10 +123,11 @@ func (e *Env) retainedMarkerSHA(dir string) (string, bool) {
 	return sha256Bytes(data), true
 }
 
-// clearRetainedState forgets what a non-purge uninstall kept, once a
-// committed deployment owns that state again.
+// clearRetainedState forgets what a non-purge uninstall kept, the floor
+// checker included, once a committed deployment owns that state again.
 func (e *Env) clearRetainedState() {
 	_ = removeFile(e.retainedStatePath())
+	_ = e.removeFloorChecker()
 	for _, dir := range []string{e.Layout.DataDir, e.Layout.GuardianAuthDir} {
 		_ = removeFile(retainedMarkerPath(e.P(dir)))
 	}

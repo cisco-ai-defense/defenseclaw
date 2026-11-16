@@ -273,6 +273,45 @@ func TestEnforcementQuarantineGeneratedMappingPersistsExactlyOnce(t *testing.T) 
 	}
 }
 
+// p0 GAP-1000: the asset.quarantined stamp names the generation of the
+// decision that ordered the quarantine, not the live one a reload applied
+// while the files were being moved.
+func TestEnforcementQuarantineCarriesTheDecisionPolicyStamp(t *testing.T) {
+	SetPolicyStamp(func() (observability.Optional[string], observability.Optional[int64]) {
+		return observability.Present("sha256:" + strings.Repeat("b", 64)), observability.Present(int64(9))
+	})
+	t.Cleanup(func() { SetPolicyStamp(nil) })
+	logger := newTestLogger(t)
+	runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
+	logger.SetRuntimeV8Emitter(runtime)
+	decisionDigest := "sha256:" + strings.Repeat("c", 64)
+	if err := logger.LogEnforcementQuarantineApplied(context.Background(), Event{
+		Action: string(ActionQuarantine), Target: "/skills/risky", Actor: "defenseclaw",
+		Details: "dest=/quarantine/risky", Severity: "HIGH",
+	}, EnforcementQuarantineAppliedInput{
+		EnforcementID: "enforcement-78", RequestedAction: "quarantine",
+		EffectiveAction: "quarantine", Initiator: "defenseclaw", ResultingState: "quarantined",
+		AssetID: "risky", AssetType: "skill", SourcePath: "/skills/risky",
+		DestinationPath: "/quarantine/risky", PolicyStamped: true,
+		PolicyDigest: observability.Present(decisionDigest), PolicyGeneration: observability.Present(int64(7)),
+	}); err != nil {
+		t.Fatalf("LogEnforcementQuarantineApplied: %v", err)
+	}
+	_, records := runtime.snapshot()
+	for _, record := range records {
+		if record.EventName() != observability.EventName(observability.TelemetryEventAssetQuarantined) {
+			continue
+		}
+		body := securityActionBody(t, record)
+		if body["defenseclaw.policy.effective_digest"] != decisionDigest || fmt.Sprint(body["defenseclaw.policy.generation"]) != "7" {
+			t.Fatalf("asset.quarantined stamp = %v / %v, want the decision's %s / 7",
+				body["defenseclaw.policy.effective_digest"], body["defenseclaw.policy.generation"], decisionDigest)
+		}
+		return
+	}
+	t.Fatal("no asset.quarantined record")
+}
+
 func TestApprovalAndEnforcementMandatoryFloorsRemainContentFree(t *testing.T) {
 	const canary = "security-floor-secret-91ac"
 	t.Run("approval", func(t *testing.T) {

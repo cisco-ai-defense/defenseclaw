@@ -52,8 +52,9 @@ def test_card_detail_drops_whole_items_and_keeps_the_number() -> None:
     calls = "claudecode 366 · codex 16 · 7 with no calls"
     assert _plain(fit_metric_detail(calls, 36)) == "claudecode 366 · codex 16 …"
     assert _plain(fit_metric_detail(calls, 60)) == calls
-    # GAP-2443: at 80x24 the label gives way, never the count.
-    assert _plain(fit_metric_detail("claudecode 380 · codex 2", 13)) == "claudeco… 380"
+    # GAP-2443 cut the label to keep the count; GAP-0341 (DV18): the label
+    # stays whole and the count gives way, never cut into another number.
+    assert _plain(fit_metric_detail("claudecode 380 · codex 2", 13)) == "claudecode …"
     assert _plain(fit_metric_detail("Critical 15 · High 9", 14)) == "Critical 15 …"
 
 
@@ -119,7 +120,7 @@ def test_doctor_failure_for_a_removed_destination_is_not_a_current_failure() -> 
     model.set_observability_status(_status(_export("local-sqlite", "sqlite")))
     messages = [notice.message for notice in model.build_notices(now=NOW)]
     assert not any("Doctor found" in message or "failed outcome" in message for message in messages)
-    assert any("no longer exist - press [d] to refresh" in message for message in messages)
+    assert any("1 removed destination(s) - press [d] to refresh" in message for message in messages)
     box = model.doctor_box(now=NOW)
     assert "1 stale" in box.summary_parts
     assert box.checks[0].badge == "STALE" and "destination removed" in box.checks[0].detail

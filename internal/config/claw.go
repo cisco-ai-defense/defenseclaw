@@ -19,8 +19,10 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,8 +38,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/jsonc"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	toml "github.com/pelletier/go-toml/v2"
-	yaml "gopkg.in/yaml.v3"
 )
 
 func tomlUnmarshal(data []byte, v any) error { return toml.Unmarshal(data, v) }
@@ -84,15 +86,27 @@ type MCPServerEntry struct {
 	// Project is the project folder whose local or .mcp.json scope lists
 	// the server (never serialized); empty for a user-scope server.
 	Project string `json:"-"`
-	// WorkDir is the folder the server starts in, as the managed Windows
-	// enumerator checked it where the user profile is readable (GAP-1317):
-	// absolute, inside Project or the user home, no link or reparse point
-	// on the way, re-resolved after the check. WorkDirRefused is the folder
-	// it did not accept and why ("<folder>: <reason>"). Only the
-	// enumerator spool record sets them (never serialized), so no
-	// configuration file a user writes can name a vetted folder.
-	WorkDir        string `json:"-"`
-	WorkDirRefused string `json:"-"`
+	// RunAsSID is the Windows account whose own token starts the server for
+	// an admission scan on a managed Windows gateway: the hook enumerator
+	// published the server for that enrolled user, and starts it as the user
+	// (#1164). Only the gateway sets it, for servers it read from the
+	// enumerator record (never serialized), so no configuration file a user
+	// writes can name an account.
+	RunAsSID string `json:"-"`
+	// LocalRefusal is the scanner verdict on the complete definition of a
+	// local server (a mcplocal class), set when the entry is a bounded claim
+	// of a hook that read the complete one (never serialized). Empty when the
+	// entry is the complete definition and is judged as it stands.
+	LocalRefusal string `json:"-"`
+	// ArgsCut marks an entry whose Args are the start of a longer list (a
+	// bounded hook claim); an exact allow of the complete argument list does
+	// not match it (never serialized).
+	ArgsCut bool `json:"-"`
+	// Fingerprint is a digest of the complete definition (headers and
+	// environment included), set where an entry is kept without them so that
+	// two kept entries that differ only there stay two definitions (never
+	// serialized, never a secret value).
+	Fingerprint string `json:"-"`
 
 	// codexBuiltinShape records an exact parser-level match before the caller
 	// proves that the table came from a user-scope Codex config. It is never
@@ -128,74 +142,137 @@ func readOpenclawConfig(configFile string) (*openclawConfig, error) {
 		return nil, err
 	}
 
+	// OpenClaw reads openclaw.json as JSON5, so a file it runs on must not
+	// read as empty here (GAP-0846).
 	var oc openclawConfig
-	if err := json.Unmarshal(data, &oc); err != nil {
+	if err := json.Unmarshal(jsonc.JSON5ToJSON(data), &oc); err != nil {
 		return nil, err
 	}
 	return &oc, nil
 }
 
 // activeConnector returns the resolved connector name for this config.
-// Precedence: explicit guardrail.connector → claw.mode → "openclaw".
+// Precedence: explicit guardrail.connector → roster (favoring claw.mode when
+// present) → claw.mode without a roster.
+// An unconfigured install has no active connector.
 //
 // This is the single decision point for "which agent framework is this
 // sidecar running against?" — every polymorphic reader (SkillDirs,
 // PluginDirs, ReadMCPServers) goes through it so a future connector
 // is wired in by adding one switch arm, not by editing N call sites.
 func (c *Config) activeConnector() string {
-	if c == nil {
-		return "openclaw"
+	if c == nil || !c.HasConnectorConfigured() {
+		return ""
 	}
 	if name := strings.TrimSpace(c.Guardrail.Connector); name != "" {
 		return normalizeConnectorKey(name)
 	}
+	if roster := c.rosterConnectorNames(); len(roster) > 0 {
+		return rosterPrimary(roster, c.Claw.Mode)
+	}
 	if mode := strings.TrimSpace(string(c.Claw.Mode)); mode != "" {
 		return normalizeConnectorKey(mode)
 	}
-	return "openclaw"
+	return ""
+}
+
+// rosterPrimary is the connector a roster resolves to when no
+// guardrail.connector names one: claw.mode when the roster lists it, else the
+// first name in sorted order. roster is normalized and sorted
+// (rosterConnectorNames). The Python Config.active_connector follows the same
+// rule; test/testdata/active-connectors.json pins both (GAP-0707).
+func rosterPrimary(roster []string, mode ClawMode) string {
+	want := normalizeConnectorKey(string(mode))
+	for _, name := range roster {
+		if name == want {
+			return want
+		}
+	}
+	return roster[0]
+}
+
+// migrateConnectorSelection settles the connector fields a load reads from. A
+// roster with no guardrail.connector boots the connector claw.mode names when
+// the roster lists it (rosterPrimary), as the Python CLI does (GAP-0707).
+// until 1.1: a retired singular connector, and every Secure Client config,
+// keep the first sorted roster key that dropRetiredConnectorSettings picks;
+// Secure Client selection does not change.
+func migrateConnectorSelection(cfg *Config, secureClient bool) {
+	unnamed := strings.TrimSpace(cfg.Guardrail.Connector) == ""
+	migrateLegacyConnectorIDs(cfg)
+	dropRetiredConnectorSettings(cfg)
+	if unnamed && !secureClient {
+		if roster := cfg.rosterConnectorNames(); len(roster) > 0 {
+			cfg.Guardrail.Connector = rosterPrimary(roster, cfg.Claw.Mode)
+		}
+	}
+	canonicalizeConnectorSelection(cfg)
 }
 
 // activeConnectors returns the configured connector roster for this config, in
 // deterministic (sorted) order. Unlike activeConnector(), this plural list is
-// a roster surface: an unconfigured install returns an empty slice instead of
-// fabricating the legacy "openclaw" floor. The singular activeConnector()
-// keeps that default for path-resolution/back-compat callers that explicitly
-// need it.
+// a roster surface: an unconfigured install returns an empty slice.
 func (c *Config) activeConnectors() []string {
 	if c == nil || !c.HasConnectorConfigured() {
 		return nil
 	}
-	if len(c.Guardrail.Connectors) > 0 {
-		names := make([]string, 0, len(c.Guardrail.Connectors))
-		seen := make(map[string]struct{}, len(c.Guardrail.Connectors))
-		for name := range c.Guardrail.Connectors {
-			if normalized := normalizeConnectorKey(name); normalized != "" {
-				if _, ok := seen[normalized]; ok {
-					continue
-				}
-				seen[normalized] = struct{}{}
-				names = append(names, normalized)
-			}
-		}
-		if len(names) > 0 {
-			sort.Strings(names)
-			return names
-		}
+	if names := c.rosterConnectorNames(); len(names) > 0 {
+		return names
 	}
 	return []string{c.activeConnector()}
 }
 
-// HasConnectorConfigured reports whether this config explicitly selects at
-// least one connector — i.e. the operator has actually run setup. It is the
-// Go mirror of Python's Config.has_connector_configured() (mcp.md M1, the
-// phantom-openclaw root) and lets callers distinguish a genuinely
-// unconfigured install from an explicit openclaw one.
+// GuardrailBootSet is the one decision the gateway boot makes from the roster.
+// multi is true when more than one connector is listed under
+// guardrail.connectors, enabled or not: the shared (multi-connector) boot runs
+// then and the single-connector boot does not. enabled and disabled split the
+// listed connectors by guardrail.connectors.<name>.enabled; enabled is what the
+// shared boot sets up, and a proxy connector in it makes that boot fail.
+// The Python config set check (cmd_config._check_guardrail_connector_roster)
+// refuses the files this decision cannot boot; test/testdata/active-connectors.json
+// pins both sides to the same cases.
+func (c *Config) GuardrailBootSet() (multi bool, enabled, disabled []string) {
+	configured := c.ActiveConnectors()
+	for _, name := range configured {
+		if c.Guardrail.EffectiveEnabled(strings.ToLower(strings.TrimSpace(name))) {
+			enabled = append(enabled, name)
+		} else {
+			disabled = append(disabled, name)
+		}
+	}
+	return len(configured) > 1, enabled, disabled
+}
+
+func (c *Config) rosterConnectorNames() []string {
+	if c == nil {
+		return nil
+	}
+	names := make([]string, 0, len(c.Guardrail.Connectors))
+	seen := make(map[string]struct{}, len(c.Guardrail.Connectors))
+	for name := range c.Guardrail.Connectors {
+		if normalized := normalizeConnectorKey(name); normalized != "" {
+			if _, ok := seen[normalized]; ok {
+				continue
+			}
+			seen[normalized] = struct{}{}
+			names = append(names, normalized)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// HasConnectorConfigured reports whether this config selects at least one
+// connector. It is the Go mirror of Python's Config.has_connector_configured()
+// (mcp.md M1, the phantom-openclaw root) and distinguishes an unconfigured
+// install from a configured connector or a legacy remote OpenClaw fleet.
 //
-// activeConnectors() is wired to this helper so Go roster/status/runtime
-// callers mirror Python list semantics on a zero-config install. The singular
-// activeConnector() deliberately keeps flooring to "openclaw" for legacy path
-// dispatchers; callers using that API to touch connector state must check this
-// helper first when zero-config behavior matters.
+// Both connector resolvers use this helper so a zero-config install selects
+// neither an agent nor its on-disk paths.
+//
+// A claw.mode that only implies OpenClaw, loaded with a loopback gateway
+// and no local OpenClaw (openClawNotInstalled), counts as unconfigured, as
+// init --connector none does. A remote fleet host keeps the legacy connector.
 func (c *Config) HasConnectorConfigured() bool {
 	if c == nil {
 		return false
@@ -210,10 +287,10 @@ func (c *Config) HasConnectorConfigured() bool {
 	if strings.TrimSpace(c.Guardrail.Connector) != "" {
 		return true
 	}
-	if strings.TrimSpace(string(c.Claw.Mode)) != "" {
-		return true
-	}
-	return false
+	// A claw.mode that only implies an OpenClaw the machine does not have
+	// configures nothing (GAP-0568): watching its folders would create
+	// ~/.openclaw, and status would name an agent that is not there.
+	return strings.TrimSpace(string(c.Claw.Mode)) != "" && (!c.openClawNotInstalled || !c.OpenClawOnlyImplied())
 }
 
 // ActiveConnectors returns the full resolved set of connector names
@@ -226,7 +303,7 @@ func (c *Config) ActiveConnectors() []string {
 
 // ReadMCPServers returns the MCP servers for the active connector.
 // When guardrail.connector is set, it dispatches to the connector-specific
-// reader. Falls back to the OpenClaw path for backward compatibility.
+// reader. An unconfigured install reads no agent state.
 func (c *Config) ReadMCPServers() ([]MCPServerEntry, error) {
 	return c.ReadMCPServersForConnector(c.activeConnector())
 }
@@ -420,6 +497,8 @@ func lookupMCPToolServer(connector string, entries []MCPServerEntry, name string
 
 func (c *Config) readMCPServersForConnectorIn(connector, workspaceDir string) ([]MCPServerEntry, error) {
 	switch normalizeConnectorKey(connector) {
+	case "":
+		return nil, nil
 	case "claudecode":
 		return readMCPServersClaudeCode(workspaceDir)
 	case "codex":
@@ -436,21 +515,19 @@ func (c *Config) readMCPServersForConnectorIn(connector, workspaceDir string) ([
 		return readMCPServersDevin(workspaceDir)
 	case "copilot":
 		return readMCPServersCopilot(workspaceDir)
-	case "openhands":
-		return readMCPServersOpenHands()
 	case "opencode":
 		return readMCPServersOpenCode(workspaceDir)
 	case "amp":
 		return readMCPServersAMP(workspaceDir)
 	case "antigravity":
 		return readMCPServersAntigravity(workspaceDir)
-	case "omnigent":
-		return nil, nil
-	default:
+	case "openclaw":
 		if c == nil {
 			return nil, nil
 		}
 		return readMCPServersOpenClaw(c.Claw.ConfigFile)
+	default:
+		return nil, nil
 	}
 }
 
@@ -493,10 +570,26 @@ func claudeCodeProjectMCPServers() []MCPServerEntry {
 	if json.Unmarshal(data, &state) != nil {
 		return nil
 	}
-	return claudeStateProjectServers(state, func(project string) ([]byte, error) {
+	servers, _ := claudeStateProjectServers(state, func(project string) ([]byte, error) {
 		return readGatewayMCPFile(filepath.Join(project, ".mcp.json"))
-	})
+	}, false)
+	return servers
 }
+
+// MCPFileParseError is an MCP server file that the managed Windows
+// enumerator found but could not parse: the servers it lists are unknown,
+// so none of the user's servers may be taken as the complete list.
+type MCPFileParseError struct {
+	Path string
+	Err  error
+}
+
+func (e *MCPFileParseError) Error() string { return fmt.Sprintf("parse %s: %v", e.Path, e.Err) }
+
+func (e *MCPFileParseError) Unwrap() error { return e.Err }
+
+// utf8BOM leads a file some Windows editors save; JSON has none.
+var utf8BOM = []byte("\xef\xbb\xbf")
 
 // ClaudeStateMCPServers lists the MCP servers a Claude Code state file
 // (~/.claude.json) names: the user scope, the local scope of each project,
@@ -504,23 +597,84 @@ func claudeCodeProjectMCPServers() []MCPServerEntry {
 // them). Entries are tagged claudecode; project servers carry their project.
 // The managed Windows enumerator, which runs as LocalSystem, reads the state
 // file for the gateway service, whose account cannot read it (GAP-0424).
+//
+// It is strict: a server list that does not parse (a .mcp.json that is not
+// JSON, a server whose fields have the wrong type) is an error, never an
+// empty list, so the enumerator records the user's state as unreadable and
+// the gateway refuses that user's servers instead of leaving one out of
+// admission (GAP-0219). A .mcp.json error is an *MCPFileParseError naming
+// the file. A UTF-8 byte order mark is ignored.
 func ClaudeStateMCPServers(data []byte, readProjectMCP func(project string) ([]byte, error)) ([]MCPServerEntry, error) {
 	var state map[string]any
-	if err := json.Unmarshal(data, &state); err != nil {
+	if err := json.Unmarshal(bytes.TrimPrefix(data, utf8BOM), &state); err != nil {
 		return nil, err
 	}
-	user, _ := readMCPFromAnyPaths(state, []string{"mcpServers"})
+	user, err := strictMCPServersAt(state, "mcpServers")
+	if err != nil {
+		return nil, fmt.Errorf("parse the user-scope mcpServers: %w", err)
+	}
 	out := make([]MCPServerEntry, 0, len(user))
-	for _, entry := range dedupMCPEntries(user) {
+	for _, entry := range user {
 		entry.Connector = "claudecode"
 		out = append(out, entry)
 	}
-	return append(out, claudeStateProjectServers(state, readProjectMCP)...), nil
+	projects, err := claudeStateProjectServers(state, readProjectMCP, true)
+	if err != nil {
+		return nil, err
+	}
+	return append(out, projects...), nil
+}
+
+// strictMCPServersAt parses the server map (or array) at doc[key]; a
+// missing key is no servers, anything that does not parse is an error.
+func strictMCPServersAt(doc map[string]any, key string) ([]MCPServerEntry, error) {
+	value, ok := doc[key]
+	if !ok || value == nil {
+		return nil, nil
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	var parsed []MCPServerEntry
+	switch trimmed := bytes.TrimSpace(data); {
+	case len(trimmed) == 0:
+		return nil, nil
+	case trimmed[0] == '{':
+		parsed, err = parseMCPServersJSON(trimmed)
+	case trimmed[0] == '[':
+		parsed, err = parseMCPServersJSONArray(trimmed)
+	default:
+		return nil, fmt.Errorf("%s is not a list of servers", key)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return dedupMCPEntries(parsed), nil
+}
+
+// strictDotMCPServers parses an .mcp.json document strictly. A file of
+// whitespace only lists no servers.
+func strictDotMCPServers(data []byte) ([]MCPServerEntry, error) {
+	data = bytes.TrimSpace(bytes.TrimPrefix(data, utf8BOM))
+	if len(data) == 0 {
+		return nil, nil
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	if _, ok := raw["mcpServers"]; ok {
+		return strictMCPServersAt(raw, "mcpServers")
+	}
+	return strictMCPServersAt(map[string]any{"mcpServers": raw}, "mcpServers")
 }
 
 // claudeStateProjectServers lists the local-scope and .mcp.json servers of
-// every project in a decoded Claude Code state file.
-func claudeStateProjectServers(state map[string]any, readProjectMCP func(project string) ([]byte, error)) []MCPServerEntry {
+// every project in a decoded Claude Code state file. strict makes a server
+// list that does not parse an error (ClaudeStateMCPServers); otherwise it
+// is skipped, as the per-user reader always did.
+func claudeStateProjectServers(state map[string]any, readProjectMCP func(project string) ([]byte, error), strict bool) ([]MCPServerEntry, error) {
 	projectStates, _ := state["projects"].(map[string]any)
 	projects := make([]string, 0, len(projectStates))
 	for project := range projectStates {
@@ -532,7 +686,15 @@ func claudeStateProjectServers(state map[string]any, readProjectMCP func(project
 	var out []MCPServerEntry
 	for _, project := range projects {
 		if raw, ok := projectStates[project].(map[string]any); ok {
-			local, _ := readMCPFromAnyPaths(raw, []string{"mcpServers"})
+			var local []MCPServerEntry
+			if strict {
+				var err error
+				if local, err = strictMCPServersAt(raw, "mcpServers"); err != nil {
+					return nil, fmt.Errorf("parse the local-scope mcpServers of project %s: %w", project, err)
+				}
+			} else {
+				local, _ = readMCPFromAnyPaths(raw, []string{"mcpServers"})
+			}
 			for _, entry := range local {
 				entry.Connector, entry.Project, entry.SourceScope = "claudecode", filepath.Clean(project), "local"
 				out = append(out, entry)
@@ -545,14 +707,20 @@ func claudeStateProjectServers(state map[string]any, readProjectMCP func(project
 		if err != nil {
 			continue
 		}
-		if shared, err := parseDotMCPJSON(data); err == nil {
-			for _, entry := range shared {
-				entry.Connector, entry.Project, entry.SourceScope = "claudecode", filepath.Clean(project), "project"
-				out = append(out, entry)
+		var shared []MCPServerEntry
+		if strict {
+			if shared, err = strictDotMCPServers(data); err != nil {
+				return nil, &MCPFileParseError{Path: filepath.Join(filepath.Clean(project), ".mcp.json"), Err: err}
 			}
+		} else if shared, err = parseDotMCPJSON(bytes.TrimPrefix(data, utf8BOM)); err != nil {
+			continue
+		}
+		for _, entry := range shared {
+			entry.Connector, entry.Project, entry.SourceScope = "claudecode", filepath.Clean(project), "project"
+			out = append(out, entry)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // ReadUserMCPServersForConnector returns a sandbox harness's user-scope MCP
@@ -726,26 +894,6 @@ func parseMCPServersJSONArray(data []byte) ([]MCPServerEntry, error) {
 	return entries, nil
 }
 
-// ParseMCPServersJSON is the exported wrapper around parseMCPServersJSON
-// so packages outside `config` (e.g. inventory's AI-discovery scanner)
-// can enumerate the servers declared inside a matched `mcp.json` /
-// `.cursor/mcp.json` / claude-desktop config file without duplicating the
-// parser. The input is the raw file bytes; the output is one
-// MCPServerEntry per top-level key in the JSON object form
-// (`{"mcpServers": {...}}` callers must pass the inner `mcpServers`
-// object; plain-object callers pass their whole file). Callers that need
-// the array shape should use ParseMCPServersJSONArray.
-func ParseMCPServersJSON(data []byte) ([]MCPServerEntry, error) {
-	return parseMCPServersJSON(data)
-}
-
-// ParseMCPServersJSONArray is the exported wrapper around
-// parseMCPServersJSONArray for callers that need the alternate top-level
-// array form (`[{"name": "...", ...}, ...]`).
-func ParseMCPServersJSONArray(data []byte) ([]MCPServerEntry, error) {
-	return parseMCPServersJSONArray(data)
-}
-
 // ReadMCPFromDotMCPJSON is the exported wrapper around the internal
 // `.mcp.json` reader so AI-discovery / signature-catalog callers can
 // enumerate the servers declared inside a matched file without
@@ -764,17 +912,25 @@ func ReadMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
 // ReadMCPFromJSONCPaths reads the MCP servers found at each key chain of
 // paths in a JSON or JSONC file (union). AI discovery uses it for the agent
 // files whose servers are not a top-level mcpServers map: Amp's
-// amp.mcpServers and OpenClaw's and ZeptoClaw's mcp.servers (GAP-1062).
+// amp.mcpServers and ZeptoClaw's mcp.servers (GAP-1062). OpenClaw's file is
+// JSON5 and has its own reader, ReadMCPFromOpenClawConfig.
 func ReadMCPFromJSONCPaths(path string, paths ...[]string) ([]MCPServerEntry, error) {
 	data, err := readMCPConfigFile(path, maxMCPConfigFileBytes)
 	if err != nil {
 		return nil, err
 	}
-	var doc map[string]any
-	if err := json.Unmarshal(jsonc.Strip(data), &doc); err != nil {
+	return ParseMCPFromJSONCPaths(data, paths...)
+}
+
+// ReadMCPFromOpenClawConfig reads the MCP servers of one openclaw.json, a
+// JSON5 file (GAP-0907). AI discovery and the gateway inventory use it so a
+// file OpenClaw runs on lists the same servers here.
+func ReadMCPFromOpenClawConfig(path string) ([]MCPServerEntry, error) {
+	data, err := readMCPConfigFile(path, maxMCPConfigFileBytes)
+	if err != nil {
 		return nil, err
 	}
-	return readMCPFromAnyPaths(doc, paths...)
+	return ParseMCPFromOpenClawConfig(data)
 }
 
 // ReadMCPFromCodexConfigTOML is the exported wrapper around the
@@ -830,21 +986,16 @@ func (c *Config) pluginDirsOpenClaw() []string {
 
 // SkillDirs returns the skill directories for the active connector.
 //
-// Dispatches via activeConnector() — when guardrail.connector is set
-// (claudecode, codex, zeptoclaw), the connector-specific paths are
-// returned. With no connector configured, falls back to the OpenClaw
-// layout (workspace/skills → extraDirs from openclaw.json → home_dir/skills),
-// preserving backward compatibility for pre-S1.x deployments.
+// Dispatches via activeConnector(); with no connector configured, it returns
+// no agent paths.
 func (c *Config) SkillDirs() []string {
 	return c.SkillDirsForConnector(c.activeConnector())
 }
 
 // PluginDirs returns the plugin directories for the active connector.
 //
-// Dispatches via activeConnector() — when guardrail.connector is set,
-// the connector-specific layout is returned. With no connector configured,
-// falls back to the OpenClaw
-// extensions directory (claw_home/extensions).
+// Dispatches via activeConnector(); with no connector configured, it returns
+// no agent paths.
 func (c *Config) PluginDirs() []string {
 	return c.PluginDirsForConnector(c.activeConnector())
 }
@@ -901,6 +1052,95 @@ func (c *Config) OpenClawConfigCandidates() []string {
 		out = append(out, candidate)
 	}
 	return out
+}
+
+// OpenClawOnlyImplied reports whether only claw.mode names OpenClaw:
+// guardrail.connector and the connector roster are empty, so "openclaw"
+// comes from the claw.mode default (the loader default
+// when config.yaml has no claw block, and what init wrote before 1.0.4) or a
+// leftover of it. setup openclaw pins guardrail.connector. Mirrors
+// openclaw_presence.openclaw_only_implied in the Python CLI.
+func (c *Config) OpenClawOnlyImplied() bool {
+	if c == nil || strings.TrimSpace(c.Guardrail.Connector) != "" || len(c.Guardrail.Connectors) > 0 {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(string(c.Claw.Mode)), "openclaw")
+}
+
+// OpenClawImpliedButNotInstalled reports when the loader and fleet gateway
+// should treat a defaulted OpenClaw connector as absent. An explicit fleet
+// enabled mode keeps the connector, including for a loopback host without
+// OpenClaw installed locally. A disabled mode has no fleet link even with a
+// remote host. Mirrors openclaw_implied_but_not_installed in the CLI.
+func (c *Config) OpenClawImpliedButNotInstalled() bool {
+	if c == nil {
+		return false
+	}
+	mode := strings.ToLower(strings.TrimSpace(c.Gateway.FleetMode))
+	switch mode {
+	case "", "auto":
+		if host := strings.TrimSpace(c.Gateway.Host); host != "" && !isLoopbackListenerHost(host) {
+			return false
+		}
+	case "disabled", "off", "false", "0": // Viper decodes unquoted YAML false as "0".
+	default:
+		return false
+	}
+	return c.OpenClawOnlyImplied() && !c.OpenClawInstalled()
+}
+
+// OpenClawInstalled reports whether an openclaw.json candidate exists or an
+// openclaw binary is found. A stat error other than "does not exist" (for
+// example a permission error) counts as present. Mirrors
+// openclaw_presence.openclaw_installed in the Python CLI.
+func (c *Config) OpenClawInstalled() bool {
+	for _, path := range c.OpenClawConfigCandidates() {
+		if _, err := os.Stat(path); err == nil || !errors.Is(err, fs.ErrNotExist) {
+			return true
+		}
+	}
+	return OpenClawBinaryInstalled()
+}
+
+// OpenClawBinaryInstalled reports whether an openclaw executable is on PATH or
+// in one of the npm/Homebrew locations a daemon started without the login
+// shell's PATH would miss. Mirrors openclaw_presence.openclaw_binary_installed
+// in the Python CLI. A variable so tests do not depend on the host's PATH.
+var OpenClawBinaryInstalled = func() bool {
+	if _, err := exec.LookPath("openclaw"); err == nil {
+		return true
+	}
+	for _, path := range openClawBinaryFallbacks() {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
+func openClawBinaryFallbacks() []string {
+	paths := []string{"/usr/local/bin/openclaw", "/opt/homebrew/bin/openclaw"}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		paths = append(paths,
+			filepath.Join(home, ".npm-global", "bin", "openclaw"),
+			filepath.Join(home, ".local", "bin", "openclaw"),
+		)
+	}
+	return paths
+}
+
+// CodexHomeRelocated reports whether the calling process runs Codex with a
+// CODEX_HOME other than ~/.codex, so the config.toml it reads is not the one
+// under the user's home (GAP-0686).
+func CodexHomeRelocated() bool {
+	if strings.TrimSpace(os.Getenv("CODEX_HOME")) == "" {
+		return false
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return true
+	}
+	return !strings.EqualFold(connectorEnvHome("CODEX_HOME", ".codex"), filepath.Join(home, ".codex"))
 }
 
 func connectorEnvHome(variable, defaultDir string) string {
@@ -963,11 +1203,6 @@ func (c *Config) ConnectorHomeDir(connector string) string {
 		return configHome
 	case "copilot":
 		return filepath.Join(home, ".copilot")
-	case "openhands":
-		if workspace := c.ConnectorWorkspaceDir(); workspace != "" {
-			return filepath.Join(workspace, ".openhands")
-		}
-		return filepath.Join(home, ".openhands")
 	case "antigravity":
 		// agy's marketing-facing install dir; matches
 		// connector_paths.connector_home("antigravity") on the Python
@@ -984,22 +1219,19 @@ func (c *Config) ConnectorHomeDir(connector string) string {
 		// Amp uses this same config home on macOS, Linux, and native
 		// Windows (%USERPROFILE%\.config\amp).
 		return filepath.Join(home, ".config", "amp")
-	case "omnigent":
-		if configHome := strings.TrimSpace(os.Getenv("OMNIGENT_CONFIG_HOME")); configHome != "" {
-			return expandPath(configHome)
-		}
-		return filepath.Join(home, ".omnigent")
 	case "kiro":
 		// Kiro IDE and Kiro CLI share ~/.kiro; matches
 		// connector_paths.connector_home("kiro") on the Python side. It used to
 		// fall through to OpenClaw's home_dir, so Kiro's agent identity was
 		// keyed on ~/.openclaw.
 		return filepath.Join(home, ".kiro")
-	default:
+	case "openclaw":
 		if c == nil {
 			return expandPath("~/.openclaw")
 		}
 		return expandPath(c.Claw.HomeDir)
+	default:
+		return ""
 	}
 }
 
@@ -1076,8 +1308,7 @@ func SkillDirsForOpenClaw(homeDir string) []string {
 //
 // Used by callers that need to enumerate paths for a connector other than
 // the running one (e.g. multi-connector audits, doctor). Unknown connector
-// names — including "" and "openclaw" — fall through to the OpenClaw
-// layout via skillDirsOpenClaw().
+// names return no paths. OpenClaw has its own explicit branch.
 func (c *Config) SkillDirsForConnector(connector string) []string {
 	home, _ := os.UserHomeDir()
 	cwd := c.ConnectorWorkspaceDir()
@@ -1130,7 +1361,7 @@ func (c *Config) SkillDirsForConnector(connector string) []string {
 			workspaceJoin(cwd, ".devin", "skills"),
 			workspaceJoin(cwd, ".agents", "skills"),
 		}, legacyconnector.DesktopLegacySkillPaths(home, cwd)...))
-	case "opencode", "omnigent", "kiro":
+	case "opencode", "kiro":
 		// These connectors have no documented local skills surface (Kiro's
 		// reusable context is steering docs and specs). Keep them isolated
 		// from OpenClaw's skill directories: the install watcher creates the
@@ -1151,25 +1382,16 @@ func (c *Config) SkillDirsForConnector(connector string) []string {
 			workspaceJoin(cwd, ".github", "skills"),
 			workspaceJoin(cwd, ".agents", "skills"),
 		})
-	case "openhands":
-		return dedupNonEmpty([]string{
-			workspaceJoin(cwd, ".agents", "skills"),
-			workspaceJoin(cwd, ".openhands", "skills"),
-			workspaceJoin(cwd, ".openhands", "microagents"),
-			filepath.Join(home, ".agents", "skills"),
-			filepath.Join(home, ".openhands", "skills"),
-			filepath.Join(home, ".openhands", "microagents"),
-			filepath.Join(home, ".openhands", "skills", "installed"),
-			filepath.Join(home, ".openhands", "cache", "skills", "public-skills", "skills"),
-		})
-	default:
+	case "openclaw":
 		return c.skillDirsOpenClaw()
+	default:
+		return nil
 	}
 }
 
 // PluginDirsForConnector returns plugin directories for a specific connector,
-// independent of the config's active connector. Unknown / empty / "openclaw"
-// fall through to the OpenClaw extensions layout.
+// independent of the config's active connector. Unknown and empty names
+// return no paths.
 func (c *Config) PluginDirsForConnector(connector string) []string {
 	home, _ := os.UserHomeDir()
 	cwd := c.ConnectorWorkspaceDir()
@@ -1216,10 +1438,12 @@ func (c *Config) PluginDirsForConnector(connector string) []string {
 			filepath.Join(home, ".config", "amp", "plugins"),
 			workspaceJoin(cwd, ".amp", "plugins"),
 		})
-	case "cursor", "devin", "copilot", "openhands", "opencode", "omnigent", "kiro":
+	case "cursor", "devin", "copilot", "opencode", "kiro":
 		return nil
-	default:
+	case "openclaw":
 		return c.pluginDirsOpenClaw()
+	default:
+		return nil
 	}
 }
 
@@ -1249,7 +1473,7 @@ func readMCPServersClaudeCodeAt(statePath, settingsPath, workspaceDir string) []
 	if cwd != "" {
 		mcpJSONPath := filepath.Join(cwd, ".mcp.json")
 		if e, err := readMCPFromDotMCPJSON(mcpJSONPath); err == nil {
-			entries = append(entries, e...)
+			entries = append(entries, inMCPProjectScope(e, cwd)...)
 		}
 	}
 	if stateErr == nil {
@@ -1292,6 +1516,7 @@ func readMCPFromClaudeState(path, workspaceDir string) (local, user []MCPServerE
 				}
 				if projectState, ok := projectValue.(map[string]any); ok {
 					local, _ = readMCPFromAnyPaths(projectState, []string{"mcpServers"})
+					local = inMCPProjectScope(local, workspace)
 				}
 				break
 			}
@@ -1299,6 +1524,18 @@ func readMCPFromClaudeState(path, workspaceDir string) (local, user []MCPServerE
 	}
 	user, _ = readMCPFromAnyPaths(state, []string{"mcpServers"})
 	return local, user, nil
+}
+
+// inMCPProjectScope names the project folder whose local or .mcp.json scope
+// lists entries, as the watcher reader does, so a record kept per config scope
+// tells a project server from a user-scope one and from the same definition in
+// another project.
+func inMCPProjectScope(entries []MCPServerEntry, project string) []MCPServerEntry {
+	project = filepath.Clean(project)
+	for index := range entries {
+		entries[index].Project = project
+	}
+	return entries
 }
 
 func sameClaudeWorkspace(left, right string) bool {
@@ -1339,9 +1576,7 @@ type claudeJSONScopes struct {
 // parseClaudeJSONScopes unmarshals ~/.claude.json once and splits the two
 // MCP-server scopes out. `user` is the top-level mcpServers map (user scope);
 // `projects` is the flattened union of every projects.<path>.mcpServers block
-// (local scope). Callers that already have the raw bytes should prefer this
-// helper to the pair of ReadMCPFromClaudeSettings + ReadMCPFromClaudeJSONProjects
-// wrappers, which each open and decode the file independently.
+// (local scope), from one decode of the raw bytes.
 func parseClaudeJSONScopes(data []byte) (user, projects []MCPServerEntry, err error) {
 	var doc claudeJSONScopes
 	if err := json.Unmarshal(data, &doc); err != nil {
@@ -1375,37 +1610,46 @@ func parseClaudeJSONScopes(data []byte) (user, projects []MCPServerEntry, err er
 // ReadMCPFromClaudeJSONBothScopes is the exported single-read helper: it
 // opens ~/.claude.json once and returns the union of user-scope
 // (top-level mcpServers) and local-scope (projects.<path>.mcpServers)
-// entries. Callers that need both scopes should prefer this over pairing
-// ReadMCPFromClaudeSettings + ReadMCPFromClaudeJSONProjects, which would
-// each read and decode the (often multi-megabyte) conversation-state file.
+// entries, decoding the (often multi-megabyte) conversation-state file once.
 func ReadMCPFromClaudeJSONBothScopes(path string) ([]MCPServerEntry, error) {
 	data, err := readMCPConfigFile(path, maxClaudeJSONConfigBytes)
 	if err != nil {
 		return nil, err
 	}
-	user, projects, err := parseClaudeJSONScopes(data)
-	if err != nil {
-		return nil, err
-	}
-	return append(user, projects...), nil
+	return ParseMCPFromClaudeJSONBothScopes(data)
 }
 
 func readMCPServersCodex(workspaceDir string) ([]MCPServerEntry, error) {
 	return readMCPServersCodexAt(filepath.Join(connectorEnvHome("CODEX_HOME", ".codex"), "config.toml"), workspaceDir), nil
 }
 
-// readMCPServersCodexAt reads Codex's servers from the user config.toml at
+// readMCPServersCodexAt reads the Codex servers from the user config.toml at
 // userPath and the project layers of workspaceDir.
 func readMCPServersCodexAt(userPath, workspaceDir string) []MCPServerEntry {
+	return readMCPServersCodexLayers(userPath, workspaceDir, false)
+}
+
+// readMCPServersCodexLayers reads the layers readMCPServersCodexAt lists.
+// With effectiveOnly, a project layer Codex does not activate (one the user
+// config does not trust) is left out, so the entries are the servers a
+// session runs rather than the ones discovery should scan.
+func readMCPServersCodexLayers(userPath, workspaceDir string, effectiveOnly bool) []MCPServerEntry {
 	// Codex stores user and project MCP registries in config.toml
 	// [mcp_servers] tables. Candidate project layers are read closest-first so
 	// their entries take precedence, then the user layer fills remaining names.
 	// Filesystem presence is discovery only: project entries carry
 	// TrustRequired because Codex activates them only for trusted projects.
 	cwd := strings.TrimSpace(workspaceDir)
+	var trusted codexProjectTrust
+	if effectiveOnly {
+		trusted = readCodexProjectTrust(userPath)
+	}
 
 	var entries []MCPServerEntry
 	for _, layer := range gatewayconnector.CodexProjectLayerDirs(cwd) {
+		if effectiveOnly && !trusted.covers(layer, cwd) {
+			continue
+		}
 		projectPath := filepath.Join(layer, ".codex", "config.toml")
 		if e, err := readMCPFromCodexConfigTOML(projectPath); err == nil {
 			entries = append(entries, annotateCodexMCPEntries(e, projectPath, "project", true)...)
@@ -1415,6 +1659,20 @@ func readMCPServersCodexAt(userPath, workspaceDir string) []MCPServerEntry {
 		entries = append(entries, e...)
 	}
 	return dedupMCPEntries(entries)
+}
+
+// LookupEffectiveCodexMCPToolServer finds the Codex MCP server a tool call
+// names among the servers a session runs: Codex activates the .codex/config.toml
+// of a project only when the user config trusts the project, so an untrusted
+// project file does not override the server of that name in the user config
+// (GAP-0686).
+func LookupEffectiveCodexMCPToolServer(workspaceDir, name string) (MCPServerEntry, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return MCPServerEntry{}, false
+	}
+	userPath := filepath.Join(connectorEnvHome("CODEX_HOME", ".codex"), "config.toml")
+	return lookupMCPToolServer("codex", readMCPServersCodexLayers(userPath, workspaceDir, true), name)
 }
 
 func annotateCodexMCPEntries(entries []MCPServerEntry, source, scope string, trustRequired bool) []MCPServerEntry {
@@ -1478,11 +1736,27 @@ func ReadMCPFromCodexUserConfigTOML(path string) ([]MCPServerEntry, error) {
 	if err != nil {
 		return nil, err
 	}
+	return annotateCodexUserMCPEntries(entries, path), nil
+}
+
+// ParseCodexUserMCPServers parses the Codex user config.toml at path, which
+// the caller read: the managed Windows enumerator reads it as LocalSystem,
+// since the gateway service reads nothing in a profile (GAP-0686). It
+// annotates the entries as ReadMCPFromCodexUserConfigTOML does.
+func ParseCodexUserMCPServers(data []byte, path string) ([]MCPServerEntry, error) {
+	entries, err := ParseMCPFromCodexConfigTOML(data)
+	if err != nil {
+		return nil, err
+	}
+	return annotateCodexUserMCPEntries(entries, path), nil
+}
+
+func annotateCodexUserMCPEntries(entries []MCPServerEntry, path string) []MCPServerEntry {
 	entries = annotateCodexMCPEntries(entries, path, "user", false)
 	for index := range entries {
 		entries[index].Bundled = entries[index].codexBuiltinShape
 	}
-	return entries, nil
+	return entries
 }
 
 const maxCodexInventoryConfigBytes = 1 << 20
@@ -1542,39 +1816,9 @@ func readMCPConfigFile(path string, limit int64) ([]byte, error) {
 func readMCPFromCodexConfigTOML(path string) ([]MCPServerEntry, error) {
 	data, ok := gatewayconnector.ReadStableInventoryFile(path, maxCodexInventoryConfigBytes)
 	if !ok {
-		return nil, fmt.Errorf("Codex MCP config is unavailable, unstable, unsafe, or exceeds %d bytes: %s", maxCodexInventoryConfigBytes, path)
+		return nil, fmt.Errorf("Codex MCP config is unavailable, unstable, unsafe, or exceeds %d bytes: %s", maxCodexInventoryConfigBytes, path) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
-	var doc struct {
-		MCPServers map[string]struct {
-			Command   string            `toml:"command"`
-			Args      []string          `toml:"args"`
-			Env       map[string]string `toml:"env"`
-			URL       string            `toml:"url"`
-			Transport string            `toml:"transport"`
-		} `toml:"mcp_servers"`
-	}
-	if err := gatewayconnector.ParseCodexTOML(data, &doc); err != nil {
-		return nil, err
-	}
-	var rawDoc struct {
-		MCPServers map[string]map[string]any `toml:"mcp_servers"`
-	}
-	if err := gatewayconnector.ParseCodexTOML(data, &rawDoc); err != nil {
-		return nil, err
-	}
-	out := make([]MCPServerEntry, 0, len(doc.MCPServers))
-	for name, cfg := range doc.MCPServers {
-		out = append(out, MCPServerEntry{
-			Name:              name,
-			Command:           cfg.Command,
-			Args:              cfg.Args,
-			Env:               cfg.Env,
-			URL:               cfg.URL,
-			Transport:         cfg.Transport,
-			codexBuiltinShape: isCodexBuiltinMCPShape(name, rawDoc.MCPServers[name]),
-		})
-	}
-	return out, nil
+	return ParseMCPFromCodexConfigTOML(data)
 }
 
 func isCodexBuiltinMCPShape(name string, raw map[string]any) bool {
@@ -1731,7 +1975,7 @@ func devinConfigHome() (string, error) {
 
 	home, err := os.UserHomeDir()
 	if err != nil || strings.TrimSpace(home) == "" {
-		return "", fmt.Errorf("Devin user home is unavailable")
+		return "", fmt.Errorf("Devin user home is unavailable") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if runtime.GOOS == "windows" {
 		if appData := strings.TrimSpace(os.Getenv("APPDATA")); appData != "" {
@@ -1756,7 +2000,7 @@ func devinConfigHomeFor(home string) string {
 func ReadMCPFromDevinConfig(path string) ([]MCPServerEntry, error) {
 	data, ok := gatewayconnector.ReadStableInventoryFile(path, maxDevinInventoryConfigBytes)
 	if !ok {
-		return nil, fmt.Errorf("Devin MCP config is unavailable, unstable, unsafe, or exceeds %d bytes: %s", maxDevinInventoryConfigBytes, path)
+		return nil, fmt.Errorf("Devin MCP config is unavailable, unstable, unsafe, or exceeds %d bytes: %s", maxDevinInventoryConfigBytes, path) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -1782,11 +2026,6 @@ func readMCPServersCopilot(workspaceDir string) ([]MCPServerEntry, error) {
 		}
 	}
 	return dedupMCPEntries(entries), nil
-}
-
-func readMCPServersOpenHands() ([]MCPServerEntry, error) {
-	home, _ := os.UserHomeDir()
-	return readMCPFromDotMCPJSON(filepath.Join(home, ".openhands", "mcp.json"))
 }
 
 // readMCPServersAntigravity reads Antigravity-native MCP config. agy
@@ -1831,11 +2070,7 @@ func readMCPFromYAMLPath(path string, paths ...[]string) ([]MCPServerEntry, erro
 	if err != nil {
 		return nil, err
 	}
-	var doc map[string]any
-	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return nil, err
-	}
-	return readMCPFromAnyPaths(doc, paths...)
+	return ParseMCPFromYAMLPaths(data, paths...)
 }
 
 func readMCPFromAnyPaths(doc any, paths ...[]string) ([]MCPServerEntry, error) {
@@ -2248,15 +2483,15 @@ func readStableAMPSettingsFile(path string) ([]byte, error) {
 	if err := managed.RequireWindowsGatewayPathOutsideUserProfiles(path); err != nil {
 		return nil, err
 	}
-	before, err := os.Lstat(path)
+	before, err := pathidentity.LstatPinned(path)
 	if err != nil {
 		return nil, err
 	}
 	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
-		return nil, fmt.Errorf("Amp settings source is not a regular file")
+		return nil, fmt.Errorf("Amp settings source is not a regular file") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if before.Size() > ampSettingsReadLimit {
-		return nil, fmt.Errorf("Amp settings source exceeds %d bytes", ampSettingsReadLimit)
+		return nil, fmt.Errorf("Amp settings source exceeds %d bytes", ampSettingsReadLimit) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	file, err := os.Open(path)
 	if err != nil {
@@ -2275,16 +2510,16 @@ func readStableAMPSettingsFile(path string) ([]byte, error) {
 		return nil, closeErr
 	}
 	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
-		return nil, fmt.Errorf("Amp settings source changed during inspection")
+		return nil, fmt.Errorf("Amp settings source changed during inspection") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if int64(len(data)) > ampSettingsReadLimit {
-		return nil, fmt.Errorf("Amp settings source exceeds %d bytes", ampSettingsReadLimit)
+		return nil, fmt.Errorf("Amp settings source exceeds %d bytes", ampSettingsReadLimit) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	after, err := os.Lstat(path)
 	if err != nil || after.Mode()&os.ModeSymlink != 0 || !after.Mode().IsRegular() ||
 		!os.SameFile(opened, after) || before.Size() != after.Size() ||
 		!before.ModTime().Equal(after.ModTime()) {
-		return nil, fmt.Errorf("Amp settings source changed during inspection")
+		return nil, fmt.Errorf("Amp settings source changed during inspection") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	return data, nil
 }

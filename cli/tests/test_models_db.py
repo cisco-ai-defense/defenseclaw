@@ -122,6 +122,41 @@ class ModelsDbTests(unittest.TestCase):
         self.assertEqual(len(action_selects), 1)
         self.assertEqual(action_selects[0].count("SUM(CASE"), 4)
 
+    def test_runtime_write_or_clear_drops_the_runtime_provenance(self):
+        # The gateway records a runtime disable together with its deciding
+        # path (runtime_source); a CLI runtime write or clear never keeps it.
+        def stored():
+            row = self.store.db.execute(
+                "SELECT actions_json FROM actions WHERE target_type = 'mcp' AND target_name = 'key' AND connector = 'claudecode'"
+            ).fetchone()
+            return json.loads(row[0]) if row else None
+
+        self.store.db.execute(
+            """INSERT INTO actions (id, target_type, target_name, source_path, actions_json, reason, updated_at, connector)
+               VALUES ('r', 'mcp', 'key', 'key', '{"install":"block","runtime":"disable","runtime_source":"key"}', 'failed',
+                       CURRENT_TIMESTAMP, 'claudecode')"""
+        )
+        self.store.db.commit()
+        self.store.set_action_field("mcp", "key", "install", "allow", "operator", connector="claudecode")
+        self.assertEqual(stored()["runtime_source"], "key")
+        self.store.set_action_field("mcp", "key", "runtime", "disable", "operator", connector="claudecode")
+        self.assertEqual(stored(), {"install": "allow", "runtime": "disable"})
+        self.store.db.execute(
+            "UPDATE actions SET actions_json = json_set(actions_json, '$.runtime_source', 'key') WHERE id = 'r'"
+        )
+        self.store.db.commit()
+        self.store.clear_action_field("mcp", "key", "runtime", connector="claudecode")
+        self.assertEqual(stored(), {"install": "allow"})
+
+    def test_counts_include_blocked_account_mcp_rows(self):
+        # An enrolled account MCP server keeps its decision under its own
+        # target type; it is still a blocked MCP server.
+        self.store.set_action_field("mcp", "plain", "install", "block", "scan")
+        self.store.set_action_field("mcp-account", "account-key", "install", "block", "scan")
+
+        for counts in (self.store.get_counts(), self.store.get_enforcement_counts()):
+            self.assertEqual((counts.blocked_mcps, counts.allowed_mcps), (2, 0))
+
     def test_counts_include_the_operator_lists_of_asset_policy(self):
         from defenseclaw.config import AssetPolicyRule, default_config
 
@@ -383,6 +418,23 @@ class ModelsDbTests(unittest.TestCase):
         self.assertEqual(events[0].structured["schema"], "defenseclaw.hook.v1")
         self.assertEqual(events[0].structured["connector"], "codex")
         self.assertEqual(events[0].connector, "codex")
+
+    def test_audit_lists_use_exact_timestamp_and_insert_ties(self):
+        self.store.db.execute("ALTER TABLE audit_events ADD COLUMN retention_timestamp_unix_nano INTEGER")
+        for event_id, stamp, instant in (
+            ("earlier", "2026-10-13T12:00:00.12345Z", 123450),
+            ("later", "2026-10-13T12:00:00.123451Z", 123451),
+            ("tie", "2026-10-13T12:00:00.123451Z", 123451),
+        ):
+            self.store.db.execute(
+                "INSERT INTO audit_events (id, timestamp, action, actor, severity, retention_timestamp_unix_nano) "
+                "VALUES (?, ?, 'scan-finding', 'test', 'HIGH', ?)",
+                (event_id, stamp, instant),
+            )
+        self.store.db.commit()
+        want = ["tie", "later", "earlier"]
+        self.assertEqual([e.id for e in self.store.list_events(3)], want)
+        self.assertEqual([e.id for e in self.store.list_event_summaries(3)], want)
 
     def test_connector_hook_stats_aggregate_normalized_connector_names(self):
         self.store.log_event(
@@ -1002,3 +1054,45 @@ class ModelsDbTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_scan_result_readers_use_exact_time_and_rowid(tmp_path):
+    store = Store(str(tmp_path / "audit.db"))
+    store.init()
+    try:
+        store.db.execute("ALTER TABLE scan_results ADD COLUMN retention_timestamp_unix_nano INTEGER")
+        store.db.execute("ALTER TABLE scan_results ADD COLUMN exit_code INTEGER")
+        store.db.execute("ALTER TABLE scan_results ADD COLUMN error TEXT")
+        rows = [
+            ("short", "2026-10-13T12:00:00.12345Z", 1, 0),
+            ("long", "2026-10-13T12:00:00.123451Z", 2, 0),
+            ("tie-first", "2026-10-13T12:00:01Z", 3, 0),
+            ("tie-second", "2026-10-13T12:00:01Z", 3, 1),
+            ("offset", "2026-10-13T14:00:02+02:00", 4, 0),
+        ]
+        for scan_id, stamp, instant, exit_code in rows:
+            store.db.execute(
+                """INSERT INTO scan_results
+                   (id, scanner, target, timestamp, retention_timestamp_unix_nano,
+                    finding_count, exit_code, error)
+                   VALUES (?, 'scan', 'target', ?, ?, 1, ?, '')""",
+                (scan_id, stamp, instant, exit_code),
+            )
+            store.db.execute(
+                """INSERT INTO findings (id, scan_id, severity, title, scanner)
+                   VALUES (?, ?, 'HIGH', ?, 'scan')""",
+                ("finding-" + scan_id, scan_id, scan_id),
+            )
+        store.db.commit()
+        assert store.latest_scans_by_scanner("scan")[0]["id"] == "offset"
+        assert store.latest_failed_scans_by_scanner("scan") == []
+        assert store.get_severity_counts_for_target("target", "scan") == {"HIGH": 1}
+        assert store.get_findings_for_target("target", "scan")[0]["title"] == "offset"
+        store.db.execute(
+            "UPDATE scan_results SET exit_code = 1, error = 'failed' WHERE id = 'offset'"
+        )
+        store.db.commit()
+        assert store.latest_failed_scans_by_scanner("scan")[0]["target"] == "target"
+        assert store.latest_scans_by_scanner("scan")[0]["id"] == "tie-first"
+    finally:
+        store.close()

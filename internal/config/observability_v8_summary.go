@@ -30,13 +30,25 @@ func SummarizeObservabilityV8Destinations(
 	data []byte,
 	defaultDataDir string,
 ) ([]ObservabilityV8DestinationSummary, error) {
+	summaries, _, err := SummarizeObservabilityV8(path, data, defaultDataDir)
+	return summaries, err
+}
+
+// SummarizeObservabilityV8 is SummarizeObservabilityV8Destinations with the
+// effective local audit store (path, retention_days, max_store_mb) of the
+// same compile, for the managed status that shows both (GAP-0141).
+func SummarizeObservabilityV8(
+	path string,
+	data []byte,
+	defaultDataDir string,
+) ([]ObservabilityV8DestinationSummary, ObservabilityV8EffectiveLocal, error) {
 	compiled, err := ParseCompileObservabilityV8(path, data, ObservabilityV8CompileOptions{
 		DefaultDataDir: defaultDataDir, Secrets: observabilityV8PresentSecrets{},
 	})
 	if err != nil {
-		return nil, err
+		return nil, ObservabilityV8EffectiveLocal{}, err
 	}
-	return compiled.Plan.DestinationSummaries(), nil
+	return compiled.Plan.DestinationSummaries(), compiled.Plan.Snapshot().Local, nil
 }
 
 // DestinationSummaries lists every effective destination, the generated

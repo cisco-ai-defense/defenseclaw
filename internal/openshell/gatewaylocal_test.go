@@ -85,6 +85,28 @@ func TestDoctorStartsAndRegistersAFirstGateway(t *testing.T) {
 		}
 	})
 
+	// GAP-1040: on an account whose session reaches no systemd user
+	// manager (no login session, no linger) the gateway cannot start, so
+	// it never writes the client certificates. Setup applied the
+	// registration fix, waited 1m30s for them and then printed only the
+	// `openshell gateway add` line. The registration now names both
+	// commands, after the one that gives the account a user manager, and
+	// waits for nothing.
+	t.Run("no user manager: both commands, no wait", func(t *testing.T) {
+		f := newHost(t)
+		f.runner.On("systemctl --user show openshell-gateway", "Failed to connect to bus: No medium found", errors.New("exit status 1"))
+		r := f.run()
+		reg := expectCheck(t, r, "gateway-registration", openshell.StatusFail, "no gateway registration")
+		if reg.Fix == nil || reg.Fix.Apply != nil || reg.Fix.Command != "systemctl --user enable --now openshell-gateway && "+add ||
+			!strings.Contains(reg.Fix.Summary, "loginctl enable-linger") {
+			t.Fatalf("registration fix = %+v", reg.Fix)
+		}
+		svc := expectCheck(t, r, "gateway-service", openshell.StatusFail, "this session reaches no systemd user manager")
+		if svc.Fix == nil || !strings.HasPrefix(svc.Fix.Command, "sudo loginctl enable-linger ") {
+			t.Fatalf("service fix = %+v", svc.Fix)
+		}
+	})
+
 	t.Run("a failed start skips the fixes that need the gateway", func(t *testing.T) {
 		f := newHost(t)
 		f.runner.On("systemctl --user enable --now openshell-gateway", "Job failed", errors.New("exit status 1"))

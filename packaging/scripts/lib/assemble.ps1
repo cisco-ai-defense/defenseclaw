@@ -8,10 +8,11 @@
 # version; the cross-shell parity lint in
 # scripts/check-assemble-parity.sh keeps the two aligned.
 #
-# See docs/specs/002-windows-avc-packaging/design.md § Data flow.
-# REQ-09 (requirements.md) is this file's contract.
+# Contract: this file and assemble.sh implement the same argument
+# validation, exact payload inventory, signature check, manifest, build,
+# output, exit-code and provenance behavior.
 #
-# EXIT CODES (design.md § Interfaces) — throw'd through $LASTEXITCODE:
+# EXIT CODES — throw'd through $LASTEXITCODE:
 #   0 — success
 #   2 — invalid CLI args
 #   3 — preflight failure (missing env from repro-flags.ps1)
@@ -30,12 +31,12 @@ param(
     # missing, which hangs a non-interactive AVC pipeline. Accept
     # every param as optional and validate below via Invoke-DefenseClawDie
     # so the exit code matches the header's contract (exit 2 for CLI
-    # arg errors). See CR spec-002:PRRT_kwDORuAK-s6af8i2.
+    # arg errors).
     [string]$SourceCommit = '',
     [string]$Version = '',
     # Accepted for backward-compat with older bundler callers; the
     # bundler-side payload-metadata.json is the audit trail — assemble
-    # does not thread cmid through. See CR spec-002:PRRT_kwDORuAK-s6af8i8.
+    # does not thread cmid through.
     [string]$CmidPseudoVersion = '',
     [switch]$AllowUnsigned
 )
@@ -82,8 +83,7 @@ if (Test-Path -LiteralPath (Join-Path $scriptDir 'repro-flags.ps1')) {
 if ([string]::IsNullOrWhiteSpace($Version)) {
     # -Version is required by both emit-manifest and emit-provenance;
     # reaching those without a value would surface as exit 6 (I/O)
-    # instead of the documented exit 2 (usage). See CR
-    # spec-002:PRRT_kwDORuAK-s6ahACO.
+    # instead of the documented exit 2 (usage).
     Invoke-DefenseClawDie -Code 2 -Message "-Version is required (semver, e.g. 0.9.0)"
 }
 if ($SourceCommit -notmatch '^[0-9a-f]{40}$') {
@@ -246,7 +246,7 @@ try {
 # ---------------------------------------------------------------------------
 # Stage (g): emit-provenance. setup_sha256 is left empty; AVC fills it
 # after step-3 signtool sign. We do NOT write the .sha256 sidecar for
-# the same reason (design.md § Decisions).
+# the same reason.
 # ---------------------------------------------------------------------------
 Write-DefenseClawStage "stage 6/6  emit-provenance"
 $provArgs = @(

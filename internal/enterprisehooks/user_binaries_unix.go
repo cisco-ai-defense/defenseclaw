@@ -26,9 +26,17 @@ import (
 
 // The per-user install (scripts/install.sh) puts these in ~/.local/bin.
 var (
-	// userBinaryFiles are the Go binaries it copies there. The names are
-	// DefenseClaw's own, so a regular file of the account's goes.
-	userBinaryFiles = []string{"defenseclaw-gateway", "defenseclaw-acp"}
+	// userBinaryFiles are the Go binaries it copies there (MANAGED_BINARIES
+	// in install.sh). The names are DefenseClaw's own, so a regular file of
+	// the account's goes. The hook helpers and the Linux sensor helper
+	// stayed behind before GAP-0571.
+	userBinaryFiles = []string{
+		"defenseclaw-gateway",
+		"defenseclaw-acp",
+		"defenseclaw-hook-post",
+		"defenseclaw-hook-user",
+		"defenseclaw-sensor-helper",
+	}
 	// userBinaryLinks are the launchers it links to the per-user venv in
 	// ~/.defenseclaw/.venv (plus the console scripts a source install linked
 	// the same way). Only a link into the purged data directory goes: a
@@ -55,8 +63,8 @@ const (
 )
 
 // RemoveUserBinaries removes what the per-user install put in
-// <home>/.local/bin for the account uid: the defenseclaw-gateway and
-// defenseclaw-acp binaries, the launcher links into dataDir (which the purge
+// <home>/.local/bin for the account uid: the Go binaries (gateway, ACP
+// guard, hook helpers, sensor helper), the launcher links into dataDir (which the purge
 // of dataDir leaves dangling), the uv files that still match the installer's
 // record, the record itself, and the installer's bookkeeping. It also removes
 // the custody folder pre-1.0 installers left in the home. Only entries the

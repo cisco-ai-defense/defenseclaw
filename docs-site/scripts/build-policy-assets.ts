@@ -335,7 +335,7 @@ function buildRecipes(strict: PresetBundle, balanced?: PresetBundle): Recipe[] {
   // lookup the recipe still ships, just without seed samples.
   const RULE_HINTS: Record<string, { examples: string[]; counterexamples: string[]; why?: string }> = {
     'SEC-AWS-KEY': {
-      examples: ['AKIAIOSFODNN7EXAMPLE', 'ASIA1234567890ABCDEFGHIJ'],
+      examples: ['AKIA' + '0'.repeat(16), 'ASIA' + '0'.repeat(16)],
       counterexamples: ['BANANAFRUITNOTAKEY', 'AKI', 'AKIAtoolow'],
     },
     'SEC-OPENAI-V2': {
@@ -481,6 +481,7 @@ interface Scenario {
   input: Record<string, unknown>;
   description: string;
   expectedVerdict: string;
+  expectedByPreset?: Partial<Record<'default' | 'strict' | 'permissive', string>>;
 }
 
 function buildScenarios(): Scenario[] {
@@ -514,8 +515,9 @@ function buildScenarios(): Scenario[] {
       id: 'admission-medium-mcp',
       title: 'MEDIUM MCP scan',
       domain: 'admission',
-      description: 'An MCP server scan found a MEDIUM finding. Default policy clears it; strict rejects.',
-      expectedVerdict: 'rejected',
+      description: 'An MCP server scan found a MEDIUM finding. Balanced warns and keeps it enabled; Strict rejects.',
+      expectedVerdict: 'warning',
+      expectedByPreset: { strict: 'rejected' },
       input: {
         target_type: 'mcp',
         target_name: 'context-server',
@@ -598,8 +600,9 @@ function buildScenarios(): Scenario[] {
       id: 'guardrail-medium-completion',
       title: 'MEDIUM guardrail finding (completion)',
       domain: 'guardrail',
-      description: 'MEDIUM finding on completion. Default policy: alert. Strict: block.',
+      description: 'MEDIUM finding on completion. Default preset (alert threshold MEDIUM): alert. Strict: block. Permissive, or a policy whose alert threshold is raised to HIGH or above, allows it.',
       expectedVerdict: 'alert',
+      expectedByPreset: { strict: 'block', permissive: 'allow' },
       input: {
         direction: 'completion',
         model: 'gpt-4o-mini',

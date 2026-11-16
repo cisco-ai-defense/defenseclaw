@@ -88,7 +88,6 @@ func currentRecord(t *testing.T, cfg *config.Config, host sandboxEvidenceHost, n
 		FailMode: c.Spec.FailMode, Owner: c.Spec.Owner, MicroVM: microVM,
 		BuiltAt:          time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC),
 		HookFireVerified: true, HookFireVerifiedAt: time.Date(2026, 10, 13, 10, 1, 0, 0, time.UTC),
-		MicroVMVerified: microVM,
 	}
 }
 
@@ -174,10 +173,9 @@ func TestSandboxHarnessHookContractRefusesAnImageThatIsNotCurrentAndVerified(t *
 			other.UID, other.GID = 1001, 1001
 			return []image.Record{currentRecord(t, cfg, other, "claudecode", false)}
 		}},
-		{"MicroVM image whose MicroVM scenario did not pass", func(t *testing.T, cfg *config.Config, host *sandboxEvidenceHost, _ image.Record) []image.Record {
+		{"MicroVM image whose hooks are not verified", func(t *testing.T, cfg *config.Config, host *sandboxEvidenceHost, _ image.Record) []image.Record {
 			vm := currentRecord(t, cfg, *host, "claudecode", true)
-			vm.MicroVMVerified = false
-			vm.MicroVMInconclusive = "the probe settled nothing"
+			vm.HookFireVerified = false
 			return []image.Record{vm}
 		}},
 		{"macOS with only a docker-driver image", func(_ *testing.T, _ *config.Config, host *sandboxEvidenceHost, rec image.Record) []image.Record {
@@ -208,10 +206,9 @@ func TestSandboxHarnessHookContractRefusesAnImageThatIsNotCurrentAndVerified(t *
 	}
 }
 
-// TestSandboxHarnessHookContractAcceptsAMicroVMVerifiedImageOnMacOS: a Mac
-// runs the MicroVM driver, so its evidence is the MicroVM image, and only
-// once that image's MicroVM scenario passed.
-func TestSandboxHarnessHookContractAcceptsAMicroVMVerifiedImageOnMacOS(t *testing.T) {
+// TestR108OSMINGatewayAcceptsHookVerifiedMicroVM: a Mac runs the MicroVM
+// driver, and the image is evidence once its hooks have been verified.
+func TestR108OSMINGatewayAcceptsHookVerifiedMicroVM(t *testing.T) {
 	cfg := evidenceTestConfig(t)
 	host := evidenceTestHost(nil)
 	host.GOOS = "darwin"
@@ -219,8 +216,8 @@ func TestSandboxHarnessHookContractAcceptsAMicroVMVerifiedImageOnMacOS(t *testin
 	host.ImageID = func(context.Context, string) (string, error) { return vm.ImageID, nil }
 	writeImageStore(t, cfg.DataDir, vm)
 	evidence, ok, err := sandboxHarnessHookContractFor(cfg, "claudecode", host)
-	if err != nil || !ok || !evidence.Record.MicroVM {
-		t.Fatalf("MicroVM-verified image not accepted on macOS (ok=%v err=%v rec=%+v)", ok, err, evidence.Record)
+	if err != nil || !ok || !evidence.Record.MicroVM || !evidence.Record.HookFireVerified {
+		t.Fatalf("hook-verified MicroVM image not accepted on macOS (ok=%v err=%v rec=%+v)", ok, err, evidence.Record)
 	}
 }
 

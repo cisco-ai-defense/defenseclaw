@@ -220,11 +220,9 @@ func friendlyConnectorName(_ connector: String) -> String {
     case "cursor": return "Cursor"
     case "devin": return "Devin"
     case "copilot": return "GitHub Copilot CLI"
-    case "openhands": return "OpenHands"
     case "antigravity": return "Antigravity"
     case "opencode": return "OpenCode"
     case "amp": return "Amp"
-    case "omnigent": return "OmniGent"
     case let value where !value.isEmpty:
         return value.prefix(1).uppercased() + value.dropFirst()
     default: return "No connector"
@@ -337,10 +335,13 @@ struct AuditEvent: Identifiable, Sendable, Hashable {
     var structuredJSON: String
     var severity: Severity
     var runID: String
+    var runtimeFacts: [InventoryField] = []
 
     var isBlockClass: Bool {
         let a = action.lowercased()
+        let decision = runtimeFacts.first { $0.label == "Decision" }?.value.lowercased() ?? ""
         return a.contains("block") || a.contains("reject") || a.contains("enforce") || a.contains("quarantine")
+            || ["blocked", "rejected", "quarantined", "denied"].contains { decision.hasPrefix($0) }
     }
 }
 
@@ -423,7 +424,10 @@ enum AlertRow: Identifiable, Hashable {
     }
     var kind: String {
         switch self {
-        case .audit: "audit"
+        case .audit(let event):
+            if event.eventType == "runtime-alert", event.action.lowercased().hasPrefix("scan") { "scan" }
+            else if event.eventType == "runtime-alert", event.action.lowercased().contains("egress") { "egress" }
+            else { "audit" }
         case .scan: "scan"
         case .finding: "scan finding"
         case .egress: "egress"
@@ -731,7 +735,11 @@ struct AIUsageSnapshot: Sendable {
 
     /// Non-model discoveries stay in the existing one-row-per-product table.
     var rows: [AIDiscoveryRow] { AIDiscoveryGrouping.rows(from: signals) }
-
+    var productRows: [AIDiscoveryRow] {
+        AIDiscoveryGrouping.rows(from: signals.filter {
+            $0.category != "local_model" || ($0.model?.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        })
+    }
     var modelRows: [AIModelDiscoveryRow] { AIDiscoveryGrouping.modelRows(from: signals) }
 
     /// TUI `header_parts`: a reported zero remains `active=0`; churn counters
@@ -1025,9 +1033,19 @@ struct AISignal: Sendable, Hashable {
     var model: AIUsageModel? = nil
     var runtime: AIUsageRuntime? = nil
     var evidenceTypes: [String] = []
+    /// The OpenShell sandbox a sandbox scan found the signal in (source
+    /// "sandbox"); "" for a signal on this machine.
+    var sandboxName: String = ""
 
     func hasEligiblePresence(minimum: Double) -> Bool {
         !presenceAxisReported || presenceScore >= minimum
+    }
+
+    /// The product, tagged with the sandbox it was found in (the TUI's
+    /// AIUsageSignal.display_product).
+    var displayProduct: String {
+        guard !sandboxName.isEmpty else { return product }
+        return product.isEmpty ? "(sandbox \(sandboxName))" : "\(product) (sandbox \(sandboxName))"
     }
 }
 
@@ -1076,7 +1094,8 @@ enum AISignalDecoding {
             signatureID: string(raw["signature_id"]),
             model: model,
             runtime: runtime,
-            evidenceTypes: stringList(raw["evidence_types"])
+            evidenceTypes: stringList(raw["evidence_types"]),
+            sandboxName: string(raw["sandbox_name"])
         )
     }
 
@@ -1478,6 +1497,9 @@ enum AIDiscoveryGrouping {
         var component: String
         var version: String
         var model: String
+        /// What a sandbox holds is its own row, never folded into the same
+        /// product on this machine.
+        var sandbox: String
     }
 
     /// TUI state_weight(): new < changed < active < seen < gone < other.
@@ -1556,12 +1578,23 @@ enum AIDiscoveryGrouping {
     }
 
     static func runtimeDetail(_ runtime: AIUsageRuntime) -> String {
+        runtimeDetail(runtime, sandboxName: "", now: Date())
+    }
+
+    static func runtimeDetail(_ runtime: AIUsageRuntime, sandboxName: String, now: Date = Date()) -> String {
         guard runtime.pid > 0 else { return "" }
         var parts = ["runtime: pid=\(runtime.pid)"]
         let user = runtime.user.trimmingCharacters(in: .whitespacesAndNewlines)
         if !user.isEmpty { parts.append("user=\(user)") }
-        if runtime.uptimeSeconds > 0 {
-            parts.append("up=\(humanizeDuration(seconds: runtime.uptimeSeconds))")
+        var uptime = runtime.uptimeSeconds
+        if !sandboxName.isEmpty, let startedAt = runtime.startedAt,
+           let elapsed = safeElapsedSeconds(from: startedAt, to: now) {
+            // A sandbox's uptime_sec is as of the sandbox's last read, and
+            // the process was running then: count from its start (GAP-0392).
+            uptime = now >= startedAt ? elapsed : 0
+        }
+        if uptime > 0 {
+            parts.append("up=\(humanizeDuration(seconds: uptime))")
         }
         let command = runtime.command.trimmingCharacters(in: .whitespacesAndNewlines)
         if !command.isEmpty { parts.append("comm=\(command)") }
@@ -1618,10 +1651,11 @@ enum AIDiscoveryGrouping {
                 ecosystem: signal.ecosystem.lowercased(),
                 component: signal.componentName.lowercased(),
                 version: signal.version,
-                model: modelID
+                model: modelID,
+                sandbox: signal.sandboxName
             )
             var row = groups[key] ?? AIDiscoveryRow(
-                state: signal.state, product: signal.product, vendor: signal.vendor,
+                state: signal.state, product: signal.displayProduct, vendor: signal.vendor,
                 ecosystem: signal.ecosystem, component: signal.componentName,
                 version: signal.version, model: modelID, modelStatuses: [], modelFormats: [],
                 categories: [], detectors: [], count: 0,
@@ -1913,7 +1947,7 @@ enum AIOverviewGrouping {
 
 enum InventoryCategory: String, CaseIterable, Identifiable {
     case agents = "Agents", mcps = "MCPs", plugins = "Plugins",
-         skills = "Skills", tools = "Tools", memories = "Memories", providers = "Models"
+         skills = "Skills", tools = "Tools", memories = "Memories", providers = "Models", idePlugins = "IDE Plugins"
     var id: String { rawValue }
 }
 

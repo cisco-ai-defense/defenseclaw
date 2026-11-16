@@ -6,6 +6,7 @@ package enterprisestatus
 import (
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"time"
 )
@@ -15,10 +16,20 @@ const CodeSessionsNeedRestart = "sessions_need_restart"
 // SessionProcess is the minimal process information needed for a managed
 // hook activation check. Callers obtain it from the platform process scan.
 type SessionProcess struct {
-	PID       int
+	PID int
+	// PPID is the parent process, 0 when unknown. A launcher and the agent
+	// process it starts (the npm node script and its native Codex) are one
+	// session (GAP-2439).
+	PPID      int
 	User      string
 	Agent     string
 	StartedAt time.Time
+	// Background marks a long-lived helper of an agent that is not a session
+	// itself, such as the Codex background server and its supervisor. A
+	// restart brings it under enforcement the way it does a session, but it
+	// is named by its own warning and never counted as a session
+	// (rel-1-0-6 GAP-0183).
+	Background bool
 }
 
 // SessionEntry is one running agent that predates its managed hook settings.
@@ -77,9 +88,9 @@ func WriteSessionEntries(w io.Writer, status SessionRestartStatus) {
 func UnprotectedSessions(processes []SessionProcess, changed map[string]time.Time) SessionRestartStatus {
 	status := SessionRestartStatus{State: "known", Entries: []SessionEntry{}}
 	sort.Slice(processes, func(i, j int) bool { return processes[i].PID < processes[j].PID })
-	for _, process := range processes {
+	for _, process := range CountedSessions(processes) {
 		at := changed[process.Agent]
-		if process.PID <= 0 || at.IsZero() || process.StartedAt.IsZero() || !process.StartedAt.Before(at) {
+		if at.IsZero() || process.StartedAt.IsZero() || !process.StartedAt.Before(at) {
 			continue
 		}
 		status.Count++
@@ -91,6 +102,63 @@ func UnprotectedSessions(processes []SessionProcess, changed map[string]time.Tim
 	return status
 }
 
+// CountedSessions keeps one process for each running agent session: the
+// topmost process of a launcher and the agent it starts (SessionLeaders),
+// and no background helper. The lifecycle result (enforcement_pending of an
+// ensure, a bundle apply, status) and bundle status both count sessions
+// through it, so the two surfaces give one number for the same sessions
+// (rel-1-0-6 GAP-0183). A helper still takes part in the parent walk, so a
+// process it started is not a session of its own.
+func CountedSessions(processes []SessionProcess) []SessionProcess {
+	leaders := SessionLeaders(processes)
+	out := make([]SessionProcess, 0, len(processes))
+	for _, process := range processes {
+		if process.PID <= 0 || process.Background || leaders[process.PID] != process.PID {
+			continue
+		}
+		out = append(out, process)
+	}
+	return out
+}
+
+// SessionLeaders maps the pid of each listed process to the pid of the
+// session it belongs to. A process whose parent chain reaches another listed
+// process of the same agent and user belongs to the topmost such process:
+// one npm Codex runs as a node launcher and the native codex it starts, and
+// both match an agent CLI, but they are one session, which a restart of the
+// launcher restarts (GAP-2439, GitHub #1360). Processes of another agent or
+// user, and processes that only share a name, are never merged. A parent
+// cycle ends the walk; the lowest pid seen leads it.
+func SessionLeaders(processes []SessionProcess) map[int]int {
+	byPID := make(map[int]SessionProcess, len(processes))
+	for _, process := range processes {
+		if process.PID > 0 {
+			byPID[process.PID] = process
+		}
+	}
+	leaders := make(map[int]int, len(byPID))
+	for pid, process := range byPID {
+		leader := pid
+		seen := map[int]bool{pid: true}
+		for {
+			parent, ok := byPID[byPID[leader].PPID]
+			if !ok || parent.PID == leader || parent.Agent != process.Agent || parent.User != process.User {
+				break
+			}
+			if seen[parent.PID] {
+				for member := range seen {
+					leader = min(leader, member)
+				}
+				break
+			}
+			seen[parent.PID] = true
+			leader = parent.PID
+		}
+		leaders[pid] = leader
+	}
+	return leaders
+}
+
 // SetBundleSessions adds the live scan to the bundle block and warns while
 // keeping a confirmed receipt's state independent of running agent sessions.
 func (r *Result) SetBundleSessions(status SessionRestartStatus) {
@@ -99,8 +167,8 @@ func (r *Result) SetBundleSessions(status SessionRestartStatus) {
 	}
 	r.Bundle.SessionsRestartRequired = &status
 	if status.Count > 0 || status.State == "unknown" {
-		r.CoverageComplete, r.SecurityComplete = false, false
 		code, message := SessionWarning(status)
+		r.MarkCoverageIncomplete(code)
 		for _, warning := range r.Warnings {
 			if warning.Code == code {
 				return
@@ -110,25 +178,34 @@ func (r *Result) SetBundleSessions(status SessionRestartStatus) {
 	}
 }
 
-// SetBundleReceiptWarnings exposes a receipt's digest markers in lifecycle
-// status text as well as in its bundle JSON block.
+// SetBundleReceiptWarnings exposes a receipt's digest and publish markers
+// in lifecycle status text as well as in its bundle JSON block.
 func (r *Result) SetBundleReceiptWarnings() {
 	if r == nil || r.Bundle == nil {
 		return
 	}
 	for _, code := range r.Bundle.WarningCodes {
-		if code != "digest_unverifiable" && code != "digest_layout_unverifiable" {
+		message, ok := bundleReceiptWarningMessages[code]
+		if !ok || slices.ContainsFunc(r.Warnings, func(w Message) bool { return w.Code == code }) {
 			continue
-		}
-		for _, warning := range r.Warnings {
-			if warning.Code == code {
-				return
-			}
-		}
-		message := "the signer used a different product version, so its signed digest cannot be compared with this build's; bundle file hashes and the gateway-versus-installed digest were checked"
-		if code == "digest_layout_unverifiable" {
-			message = "the device's non-standard managed layout changed the effective digest; the signed digest matched this device's digest for the standard layout, and the gateway's enforcing digest was recorded"
 		}
 		r.AddWarning(code, message)
 	}
+}
+
+// BundleReceiptWarningMessage explains a receipt warning code that a
+// lifecycle result also lists in warnings[]; false for any other code.
+// bundle status uses the same words.
+func BundleReceiptWarningMessage(code string) (string, bool) {
+	message, ok := bundleReceiptWarningMessages[code]
+	return message, ok
+}
+
+// bundleReceiptWarningMessages are the receipt warning codes a lifecycle
+// result also lists in warnings[].
+var bundleReceiptWarningMessages = map[string]string{
+	"digest_unverifiable":        "the signer used a different product version, so its signed digest cannot be compared with this build's; bundle file hashes and the gateway-versus-installed digest were checked",
+	"digest_layout_unverifiable": "the device's non-standard managed layout changed the effective digest; the signed digest matched this device's digest for the standard layout, and the gateway's enforcing digest was recorded",
+	"receipt_publish_failed":     "the public copy of this receipt (receipt-events/ and receipt.json) could not be written, so the gateway does not report it; this result and bundle status are the record",
+	"receipt_events_dropped":     "receipt-events/ was full of events the gateway had not reported (is the gateway running?), so the oldest were removed and are missing from the audit log; bundle status lists the newest receipts",
 }

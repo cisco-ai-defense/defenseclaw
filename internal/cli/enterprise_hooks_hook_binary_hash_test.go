@@ -7,11 +7,69 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+type guardianLstatModeInfo struct {
+	fs.FileInfo
+	mode fs.FileMode
+	size int64
+}
+
+func (i guardianLstatModeInfo) Mode() fs.FileMode { return i.mode }
+func (i guardianLstatModeInfo) Size() int64       { return i.size }
+
+func TestGuardianTargetLstatClassifiesNonRegularEntries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hook.exe")
+	if err := os.WriteFile(path, []byte("release"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherErr := errors.New("invalid name")
+	for _, tc := range []struct {
+		name, damage string
+		mode         fs.FileMode
+		size         int64
+		lookupErr    error
+		missing      bool
+		wantErr      error
+	}{
+		{name: "regular", mode: 0o600, size: 7},
+		{name: "empty regular", mode: 0o600},
+		{name: "symbolic link", mode: os.ModeSymlink | 0o777, damage: "not a regular file (symbolic link)"},
+		{name: "directory", mode: os.ModeDir | 0o700, damage: "not a regular file (directory)"},
+		{name: "irregular", mode: os.ModeIrregular, damage: "not a regular file (reparse point or other irregular file)"},
+		{name: "named pipe", mode: os.ModeNamedPipe, damage: "not a regular file (other file type)"},
+		{name: "missing", lookupErr: fmt.Errorf("lookup: %w", os.ErrNotExist), damage: "missing", missing: true},
+		{name: "permission error", lookupErr: fmt.Errorf("lookup: %w", os.ErrPermission), wantErr: os.ErrPermission},
+		{name: "other error", lookupErr: otherErr, wantErr: otherErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var info fs.FileInfo
+			if tc.lookupErr == nil {
+				info = guardianLstatModeInfo{FileInfo: base, mode: tc.mode, size: tc.size}
+			}
+			got, err := classifyGuardianTargetLstat(info, tc.lookupErr)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) || got != (guardianTargetLstatDecision{}) {
+					t.Fatalf("lookup error read as clean: decision %+v, error %v", got, err)
+				}
+				return
+			}
+			if err != nil || got.damage != tc.damage || got.missing != tc.missing {
+				t.Fatalf("decision %+v, error %v; want damage %q, missing %t", got, err, tc.damage, tc.missing)
+			}
+		})
+	}
+}
 
 // The guardian's target and protected-copy hash routes retain the shared
 // digest's opened-file checks, including refusal of a link at either path.

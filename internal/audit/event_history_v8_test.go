@@ -516,17 +516,40 @@ func TestV8EventHistoryMigrationIsAdditiveAndIdempotent(t *testing.T) {
 		}
 	}
 
-	for _, index := range []string{
-		"idx_audit_bucket_timestamp", "idx_audit_event_name_timestamp", "idx_audit_source_timestamp",
-		"idx_audit_turn_id", "idx_audit_evaluation_id", "idx_audit_scan_id",
-		"idx_audit_enforcement_action_id",
-	} {
-		var count int
-		if err := store.db.QueryRow(
-			`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, index,
-		).Scan(&count); err != nil || count != 1 {
-			t.Fatalf("index %s count=%d err=%v", index, count, err)
+	// B-26: the index set a hook's audit row pays for is exactly the one the
+	// readers use (unreadAuditIndexes). A new index must name its reader here.
+	rows, err := store.db.Query(`SELECT name FROM sqlite_master
+		WHERE type='index' AND tbl_name='audit_events' AND name NOT LIKE 'sqlite_autoindex_%'
+		ORDER BY name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kept []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
 		}
+		kept = append(kept, name)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"idx_audit_action",                     // action filters (alerts, doctor, drift, hook counters)
+		"idx_audit_bucket_timestamp",           // TUI event history by bucket
+		"idx_audit_enforcement_action_id",      // quarantine target join (cli db.py)
+		"idx_audit_evaluation_id",              // enforcement block compatibility lookup
+		"idx_audit_event_name_timestamp",       // custody status, hook tool invocations, lifecycle
+		"idx_audit_request_id",                 // finding-to-hook join (cli db.py, TUI)
+		"idx_audit_run_id",                     // TUI audit panel by run
+		"idx_audit_session_id",                 // session lifecycle lookup
+		"idx_audit_severity_timestamp",         // ACK alert projection
+		"idx_audit_timestamp",                  // newest-first lists, export windows
+		"idx_retention_audit_events_timestamp", // retention reaper
+	}
+	if strings.Join(kept, ",") != strings.Join(want, ",") {
+		t.Fatalf("audit_events indexes = %v, want %v", kept, want)
 	}
 }
 
@@ -686,7 +709,8 @@ func TestEventHistoryWriterPersistsExactCanonicalProjectionAndLegacyView(t *test
 	digest := sha256.Sum256(wantEnvelope)
 	wantHash := ProjectionHashAlgorithm + ":" + hex.EncodeToString(digest[:])
 	if row.ID != record.RecordID() || row.Action != "diagnostic.emit" || row.Actor != "gateway.audit" ||
-		row.Details != "projected local message" || row.StructuredJSON != wantPayload || row.Severity != "HIGH" {
+		row.Details != "projected local message" || row.StructuredJSON != "" || row.Severity != "HIGH" {
+		// A native row keeps its body once, in payload_json (GAP-0614).
 		t.Fatalf("legacy columns = %#v", row)
 	}
 	if row.Bucket != "diagnostic" || row.EventName != "diagnostic.message" || row.Source != "gateway" ||
@@ -957,7 +981,7 @@ func TestEventHistoryWriterSignedAndUnavailableIntegrity(t *testing.T) {
 	}
 }
 
-func TestEventHistoryVerificationDetectsStoredTamperingAndSupportsRange(t *testing.T) {
+func TestEventHistoryVerificationDetectsStoredTampering(t *testing.T) {
 	store := newV8HistoryStore(t)
 	signer := &testProjectionSigner{key: bytes.Repeat([]byte{0x31}, 32), keyID: "integrity-key-v1"}
 	writer, err := NewEventHistoryWriter(store, signer, nil, testLocalProfileResolver{profile: observabilityredaction.ProfileNone})
@@ -979,44 +1003,20 @@ func TestEventHistoryVerificationDetectsStoredTamperingAndSupportsRange(t *testi
 	}); err != nil {
 		t.Fatal(err)
 	}
-	page, err := writer.VerifyEventHistoryRange(
-		t.Context(), base, base.Add(time.Second), 10,
-	)
+	legacy, err := writer.VerifyEventHistoryRecord(t.Context(), "legacy-range")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Truncated || len(page.Records) != 3 || page.Records[0].RecordID != first.RecordID() ||
-		page.Records[1].RecordID != "legacy-range" || page.Records[2].RecordID != second.RecordID() {
-		t.Fatalf("range verification order/results = %#v", page)
-	}
-	if legacy := page.Records[1]; legacy.Status != EventHistoryNotProjected || legacy.ProjectionHashValid ||
-		legacy.IntegrityVerified {
+	if legacy.Status != EventHistoryNotProjected || legacy.ProjectionHashValid || legacy.IntegrityVerified {
 		t.Fatalf("legacy verification = %#v", legacy)
 	}
-	for _, result := range []EventHistoryVerification{page.Records[0], page.Records[2]} {
-		if result.Status != EventHistoryVerified || !result.ProjectionHashValid || !result.IntegrityVerified {
-			t.Fatalf("range verification = %#v", result)
+	for _, record := range []observability.Record{first, second} {
+		result, err := writer.VerifyEventHistoryRecord(t.Context(), record.RecordID())
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	truncated, err := writer.VerifyEventHistoryRange(t.Context(), base, base.Add(time.Second), 2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !truncated.Truncated || len(truncated.Records) != 2 {
-		t.Fatalf("bounded range did not report truncation: %#v", truncated)
-	}
-	for _, invalid := range []struct {
-		from, until time.Time
-		limit       int
-	}{
-		{from: time.Time{}, until: base.Add(time.Second), limit: 1},
-		{from: base, until: base, limit: 1},
-		{from: base.Add(time.Second), until: base, limit: 1},
-		{from: base, until: base.Add(time.Second), limit: 0},
-		{from: base, until: base.Add(time.Second), limit: maxEventHistoryVerificationRange + 1},
-	} {
-		if _, err := writer.VerifyEventHistoryRange(t.Context(), invalid.from, invalid.until, invalid.limit); err == nil {
-			t.Fatalf("invalid range accepted: %#v", invalid)
+		if result.Status != EventHistoryVerified || !result.ProjectionHashValid || !result.IntegrityVerified {
+			t.Fatalf("verification = %#v", result)
 		}
 	}
 

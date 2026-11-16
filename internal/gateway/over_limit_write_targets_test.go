@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -47,9 +48,9 @@ func overLimitNativeWriteCalls() []nativeWriteCall {
 		{"claudecode", "MultiEdit", func(p string) map[string]any {
 			return map[string]any{"file_path": p, "edits": []any{map[string]any{"old_string": "# base", "new_string": overLimitWriteText}}}
 		}},
-		{"opencode", "write", func(p string) map[string]any { return map[string]any{"filePath": p, "content": overLimitWriteText} }},
+		{"opencode", "write", func(p string) map[string]any { return map[string]any{"path": p, "content": overLimitWriteText} }},
 		{"opencode", "edit", func(p string) map[string]any {
-			return map[string]any{"filePath": p, "oldString": "# base", "newString": overLimitWriteText}
+			return map[string]any{"path": p, "oldString": "# base", "newString": overLimitWriteText}
 		}},
 		{"codex", "apply_patch", func(p string) map[string]any {
 			return map[string]any{"command": "*** Begin Patch\n*** Update File: " + p + "\n@@\n # base\n" +
@@ -98,13 +99,29 @@ func overLimitNotUnverified(t *testing.T, got string) {
 
 func overLimitHostHook(t *testing.T, connector, home, body string) string {
 	t.Helper()
+	return overLimitHostHookWithEvidence(t, connector, home, body,
+		hookpaths.ResolveConnector(connector, "", "preToolUse", []byte(body)))
+}
+
+// overLimitHostHookWithEvidence is overLimitHostHook with the hook client's
+// write evidence computed by the caller.
+func overLimitHostHookWithEvidence(t *testing.T, connector, home, body, evidence string) string {
+	t.Helper()
+	return overLimitHostHookInPack(t, connector, "", home, body, evidence)
+}
+
+// overLimitHostHookInPack is overLimitHostHookWithEvidence judged in the
+// policy tier of rulePack ("" is the default tier, "strict" the strict tier).
+func overLimitHostHookInPack(t *testing.T, connector, rulePack, home, body, evidence string) string {
+	t.Helper()
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = connector
+	cfg.Guardrail.RulePack = rulePack
 	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/"+connector+"/hook", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(hookpaths.Header, hookpaths.Resolve([]byte(body)))
+	req.Header.Set(hookpaths.Header, evidence)
 	switch connector {
 	case "codex":
 		setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
@@ -157,12 +174,81 @@ func TestOverLimitNativeWritesOfAuthorizedKeysAreBlockedOnTheHost(t *testing.T) 
 	}
 }
 
+// overLimitProtectHomeRows are the rows of the ProtectHome table: the write
+// tools of each connector on the link, and two of them on a project file.
+var overLimitProtectHomeRows = map[string]bool{
+	"claudecode-Write-0": true, "claudecode-Edit-2": true, "opencode-write-4": true,
+	"codex-apply_patch-6": true, "copilot-create-7": true,
+}
+
+// TestOverLimitNativeWritesThroughAHomeSymlinkUnderProtectHome pins the
+// reduced call's write evidence on a managed gateway that cannot look into
+// the user's home (ProtectHome; the mode-zero parent stands in for it): a
+// native write tool call over the argument limit to a project symlink to
+// ~/.ssh/authorized_keys is blocked by the SSH persistence rule, and the
+// same call to an ordinary project file stays allowed. The hook client
+// listed no target of the reduced call and the gateway dropped the
+// truncation marker that said so, so the write through the link was
+// allowed with no rule.
+func TestOverLimitNativeWritesThroughAHomeSymlinkUnderProtectHome(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("requires an unprivileged POSIX gateway walk")
+	}
+	root := t.TempDir()
+	homes := filepath.Join(root, "homes")
+	home := filepath.Join(homes, "alice")
+	project := filepath.Join(home, "project")
+	for _, dir := range []string{filepath.Join(home, ".ssh"), project} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keys := filepath.Join(home, ".ssh", "authorized_keys")
+	notes := filepath.Join(project, "big.json")
+	for _, file := range []string{keys, notes} {
+		if err := os.WriteFile(file, []byte("# base\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(project, "deploy.cfg")
+	if err := os.Symlink(keys, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Cleanup(func() { _ = os.Chmod(homes, 0o700) })
+	for i, call := range overLimitNativeWriteCalls() {
+		if !overLimitProtectHomeRows[call.name(i)] {
+			continue
+		}
+		for target, want := range map[string]bool{link: true, notes: false} {
+			if !overLimitRow(overLimitHostBenign, call.name(i), want) {
+				continue
+			}
+			t.Run(fmt.Sprintf("%s/block=%t", call.name(i), want), func(t *testing.T) {
+				if err := os.Chmod(homes, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				body := call.body(t, project, target)
+				evidence := hookpaths.ResolveConnector(call.connector, "", "preToolUse", []byte(body))
+				if err := os.Chmod(homes, 0); err != nil {
+					t.Fatal(err)
+				}
+				got := overLimitHostHookWithEvidence(t, call.connector, home, body, evidence)
+				if blocked := nativeWriteBlocked(t, got); blocked != want {
+					t.Fatalf("blocked = %t, want %t: %.600s", blocked, want, got)
+				}
+				overLimitNotUnverified(t, got)
+			})
+		}
+	}
+}
+
 // TestOverLimitNativeWritesOfAuthorizedKeysAreBlockedInASandbox is the same
 // table through the authenticated sandbox ingress, with the guest home.
 func TestOverLimitNativeWritesOfAuthorizedKeysAreBlockedInASandbox(t *testing.T) {
 	f := newSandboxIngressFixture(t)
 	versions := map[string][3]string{
-		"opencode":   {"1.18.10", "opencode-hooks-v1", "/api/v1/opencode/hook"},
+		"opencode":   {"2.1.4", "opencode-hooks-v2", "/api/v1/opencode/hook"},
 		"claudecode": {"2.1.156", "claudecode-hooks-v1", "/api/v1/claude-code/hook"},
 		"codex":      {"0.128.0", "codex-hooks-v1", "/api/v1/codex/hook"},
 		"copilot":    {"1.0.40", "copilot-hooks-v1", "/api/v1/copilot/hook"},

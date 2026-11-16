@@ -127,6 +127,22 @@ func TestTrustedActionProofBoundaryAllowsBoundedActionFactsSubgraph(t *testing.T
 	}
 }
 
+func TestEvaluationFailureProofOnlyAuthorizesCompoundLimit(t *testing.T) {
+	for _, tt := range []struct {
+		ruleID string
+		want   bool
+	}{
+		{ruleID: "ACTION-COMPOUND-LIMIT", want: true},
+		{ruleID: "ACTION-COMPOUND-UNPROVEN"},
+		{ruleID: "ACTION-OTHER-UNCERTAINTY"},
+	} {
+		proof := newEvaluationFailureFindingProof(tt.ruleID)
+		if got := proof.authorizes(tt.ruleID); got != tt.want {
+			t.Errorf("%s authorizes=%v, want %v", tt.ruleID, got, tt.want)
+		}
+	}
+}
+
 func TestTrustedSemanticOwnerFindingProofRequiresCompleteOuterAction(t *testing.T) {
 	for _, test := range []struct {
 		name    string

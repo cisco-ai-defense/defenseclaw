@@ -11,10 +11,11 @@
 package gateway
 
 import (
-	"regexp"
 	"strings"
 
 	"golang.org/x/text/unicode/norm"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // slashWhitespaceRegex matches a `/` or `\` together with any
@@ -32,7 +33,7 @@ import (
 // preserved for the judge, and (b) any path-rooted triage regex that
 // cared about the collapse would also have cared about the original
 // form anyway.
-var slashWhitespaceRegex = regexp.MustCompile(`[\s\p{Z}]*([/\\])[\s\p{Z}]*`)
+var slashWhitespaceRegex = lazyregexp.New(`[\s\p{Z}]*([/\\])[\s\p{Z}]*`)
 
 // forwardSlashRunRegex and backSlashRunRegex collapse runs of 2+
 // forward OR back slashes down to a single slash of the SAME kind.
@@ -43,8 +44,8 @@ var slashWhitespaceRegex = regexp.MustCompile(`[\s\p{Z}]*([/\\])[\s\p{Z}]*`)
 // callers may legitimately need to match. Split into two regexes
 // because Go's RE2 engine does not support backreferences so
 // `([/\\])\1+` is not expressible in a single pattern.
-var forwardSlashRunRegex = regexp.MustCompile(`/{2,}`)
-var backSlashRunRegex = regexp.MustCompile(`\\{2,}`)
+var forwardSlashRunRegex = lazyregexp.New(`/{2,}`)
+var backSlashRunRegex = lazyregexp.New(`\\{2,}`)
 
 // stripZeroWidth drops zero-width / format characters that a human
 // reader does not see but that break ASCII fast paths. Covers the

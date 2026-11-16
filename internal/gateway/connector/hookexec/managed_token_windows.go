@@ -12,6 +12,8 @@ import (
 	"os"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // readManagedTokenFile closes the metadata/read TOCTOU window left by a prior
@@ -19,7 +21,7 @@ import (
 // design, so the hook must pin identity, reject reparse/hard-link aliases, cap
 // allocation, and require two byte-identical reads from the same handle.
 func readManagedTokenFile(path string, maxBytes int64) ([]byte, error) {
-	expected, err := os.Lstat(path)
+	expected, err := pathidentity.LstatPinned(path)
 	if err != nil {
 		return nil, err
 	}

@@ -48,7 +48,14 @@ var newSandboxApp = func(cmd *cobra.Command) *sandboxcli.App {
 			settings, ok := sandboxOpenShellDaemonSettings(ctx)
 			return settings.Enterprise.E2fsprogsDir, ok
 		},
+		ManagedTrustedCAs: func(ctx context.Context) (string, string, bool) {
+			settings, ok := sandboxOpenShellDaemonSettings(ctx)
+			return settings.Operational.TrustedCAs, settings.Operational.TrustedCAError, ok
+		},
 		ManagedAccountHome: sandboxAccountHome,
+		ManagedAccountPolicy: func(ctx context.Context, harness string) (*sandboxapi.ManagedExplain, error) {
+			return launcherAccountPolicy(ctx, harness)
+		},
 		IO: sandboxcli.IO{
 			In: cmd.InOrStdin(), Out: cmd.OutOrStdout(), Err: cmd.ErrOrStderr(),
 			TTY:    term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())),
@@ -110,6 +117,12 @@ func sandboxHelp(cmd *cobra.Command, args []string) {
 	rootCmd.HelpFunc()(cmd, args)
 }
 
+const managedSandboxDoctorLong = `Checks that your account can run sandboxes under the policy your organization set
+for you: the platform, sandbox service, OpenShell CLI and compute driver, harness
+images, shell wrappers and organization policy. Exits 1 when a check fails,
+with --output json too and with --json (both print ok=false). Your
+organization sets up and repairs sandboxes; if a check fails, ask your administrator.`
+
 func applyManagedSandboxHelp() {
 	sandboxCmd.Long = launcherSandboxLong
 	for _, cmd := range sandboxCmd.Commands() {
@@ -125,11 +138,7 @@ func applyManagedSandboxHelp() {
 				}
 			})
 		case "doctor":
-			cmd.Long = `Checks that your account can run sandboxes under the policy your organization set
-for you: the platform, sandbox service, OpenShell CLI and compute driver, harness
-images, shell wrappers and organization policy. Exits 1 when a check fails (with
---output json the result is printed and the exit status is 0; read "ok"). Your
-organization sets up and repairs sandboxes; if a check fails, ask your administrator.`
+			cmd.Long = managedSandboxDoctorLong
 		case "run":
 			cmd.Long = launcherRunLong
 			hide = []string{"context", "no-snapshot"}
@@ -156,14 +165,14 @@ with --output json it prints the pull's result.`
 			}
 		}
 		if cmd.Name() == "run" || cmd.Name() == "connect" {
-			cmd.Flags().Lookup("yes").Usage = "take the defaults at the end of the session (leave the changes in the sandbox for pull)"
+			cmd.Flags().Lookup("yes").Usage = "take the defaults at the end of the session (leave the changes in the sandbox for later pull --apply, --branch or --patch-out FILE)"
 		}
 	}
 }
 
 func sandboxPreRun(cmd *cobra.Command, _ []string) error {
 	if err := sandboxHostRefusal(runtime.GOOS, runtime.GOARCH, cmd.Annotations[sandboxConfigOptional] == "true"); err != nil {
-		return withExitCode(err, 3)
+		return withExitCode(managedWindowsSandboxRefusal(err), 3)
 	}
 	// A nested `sandbox run` inside a sandbox runs the harness natively and
 	// needs no configuration (there is none inside the sandbox).
@@ -258,6 +267,17 @@ func sandboxHostRefusal(goos, goarch string, cleanup bool) error {
 			strings.TrimPrefix(err.Error(), "openshell: "))
 	}
 	return nil
+}
+
+// managedWindowsSandboxRefusal adds to the platform refusal on a managed
+// Windows computer the one sandbox view there is, the administrator's list
+// of the account's registrations: it named no next step (GAP-0523).
+func managedWindowsSandboxRefusal(err error) error {
+	if _, managed := managedHostWindowsStandalone(); !managed {
+		return err
+	}
+	return fmt.Errorf("%w. %s", err, windowsManagedStandardUserViewAnswer("The sandbox registrations",
+		"enterprise", "windows", "sandbox", "list", "--user", managedHostCurrentAccountName()))
 }
 
 // sandboxRunE adapts a command to cobra: it prints the error once, styled,
@@ -445,8 +465,7 @@ func newSandboxDoctorCmd() *cobra.Command {
 version and compute driver (on a Mac, the MicroVM driver: e2fsprogs, its signature,
 the sandbox identity and resources), bind mounts, telemetry, ports, the DefenseClaw
 daemon, harness images, shell wrappers and the organization policy. Exits 1 when a
-check fails (with --output json the result is printed and the exit status is 0; read
-"ok").`,
+check fails, with --output json too and with --json (both print ok=false).`,
 		Args: cobra.NoArgs,
 		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Command, _ []string) error {
 			out, err := parseOutput(cmd.Flag("output").Value.String())
@@ -475,13 +494,13 @@ func newSandboxRunCmd() *cobra.Command {
 		Long: `Runs the harness in a new sandbox on the current folder: on Linux (the Docker driver)
 live-mounted by default with a pre-session snapshot, or a copy with --copy; on macOS
 (the MicroVM driver) every run works on a copy. The harness is claude, codex,
-copilot, opencode, kiro, hermes, openhands, omnigent or antigravity (its command, agy,
+copilot, opencode, kiro, hermes or antigravity (its command, agy,
 works too; amp, cursor-agent and devin are not verified yet, so they do not run).
 Skip-permissions mode is on by default;
 --safe keeps the harness's own prompts. The harness gets your terminal; when it exits
 you get a summary, a review of changed files that can run code on your machine, and
 the choice to keep or undo the changes (from a copy: to bring them back, or leave them
-in the sandbox for pull). Arguments after -- go to the harness.
+in the sandbox for later pull --apply, --branch or --patch-out FILE). Arguments after -- go to the harness.
 
 A headless run in the foreground (--prompt, or the harness's own print flag after --)
 deletes its sandbox when it ends and nothing is left in it to bring back or undo, as
@@ -515,7 +534,7 @@ deletes its sandbox when it ends and nothing is left in it to bring back or undo
 	}
 	f := cmd.Flags()
 	f.StringVar(&o.Name, "name", "", "sandbox name, at most 19 lowercase letters, digits and '-' (default <folder>-<random>)")
-	f.BoolVar(&o.Copy, "copy", false, "work on a copy of the folder with secrets held back; bring changes back with pull")
+	f.BoolVar(&o.Copy, "copy", false, "work on a copy of the folder with secrets held back; bring changes back with pull --apply (or --branch or --patch-out FILE)")
 	f.BoolVar(&o.Safe, "safe", false, "keep the harness's own permission prompts (skip-permissions off)")
 	f.StringVar(&o.Pack, "pack", "", "sandbox policy pack (open, balanced, strict, or a custom pack)")
 	f.StringVar(&o.Profile, "profile", "", "network profile: open, balanced or strict")
@@ -545,7 +564,7 @@ deletes its sandbox when it ends and nothing is left in it to bring back or undo
 
 // sessionYesUsage is the --yes of run and connect: a mount's changes are
 // kept, a copy's stay in the sandbox (nothing comes back unreviewed).
-const sessionYesUsage = "take the defaults at the end of the session (mount: keep the changes; copy: leave them in the sandbox for pull)"
+const sessionYesUsage = "take the defaults at the end of the session (mount: keep the changes; copy: leave them in the sandbox for later pull --apply, --branch or --patch-out FILE)"
 
 func nameArg(what string) cobra.PositionalArgs {
 	return func(_ *cobra.Command, args []string) error {
@@ -660,7 +679,10 @@ func newSandboxStopCmd() *cobra.Command {
 		Long: `Stops a sandbox and keeps it for start or connect. When its detached run is still
 going, the stop ends it: stop asks first on a terminal (--yes does not). Every stop,
 this one or one from the TUI, the macOS app or undo, marks the run interrupted and
-keeps its log, so "sandbox logs" still shows it.`,
+keeps its log, so "sandbox logs" still shows it. A MicroVM's disk is synced before
+its stop; when that sync fails the MicroVM keeps running, and stop says what a stop
+would lose and asks on a terminal (--yes does not answer that): --discard-unsynced
+stops it anyway.`,
 		Args: nameArg("sandbox"),
 		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, _ *cobra.Command, args []string) error {
 			o.Name = args[0]
@@ -668,6 +690,7 @@ keeps its log, so "sandbox logs" still shows it.`,
 		}),
 	}
 	cmd.Flags().BoolVarP(&o.Yes, "yes", "y", false, "stop without asking when a detached run or a session in another terminal is still going")
+	cmd.Flags().BoolVar(&o.DiscardUnsynced, "discard-unsynced", false, "stop a MicroVM whose disk could not be synced first, losing what it wrote since its last sync")
 	return cmd
 }
 
@@ -689,6 +712,8 @@ on): then the earlier undo point stays, so "sandbox undo" still reverts them.
 	cmd.Flags().BoolVar(&o.NoSnapshot, "no-snapshot", false, "keep the previous session's snapshot instead of taking a new one")
 	cmd.Flags().BoolVar(&o.NewSnapshot, "new-snapshot", false,
 		"take a new snapshot even if the folder still has an earlier session's changes (undo no longer reverts them)")
+	cmd.Flags().BoolVar(&o.EndVM, "end-vm", false,
+		"start a MicroVM whose workload completed or failed though its VM still runs: OpenShell ends that VM with no flush first, so what it has not written to its disk is lost")
 	return cmd
 }
 
@@ -1020,16 +1045,26 @@ is applied.`,
 	cmd.AddCommand(suggest)
 	for _, list := range []string{"allow", "block"} {
 		list := list
-		short := "Add hosts to openshell.egress.allow (used by the balanced and strict profiles)"
+		short := "Allow a destination under your sandbox policy"
 		if list == "block" {
-			short = "Add hosts to openshell.egress.block"
+			short = "Block a destination under your sandbox policy"
 		}
 		var remove bool
+		var decisionSandbox string
 		edit := &cobra.Command{
 			Use:   list + " <host>...",
 			Short: short,
 			Args:  cobra.MinimumNArgs(1),
 			RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, _ *cobra.Command, args []string) error {
+				if app.ManagedHost() {
+					if remove {
+						return errors.New("removing a saved managed decision is not available; contact your administrator")
+					}
+					return app.ManagedPolicyDecision(ctx, list, args, decisionSandbox)
+				}
+				if decisionSandbox != "" {
+					return errors.New("--sandbox is for managed computers")
+				}
 				if remove {
 					return app.PolicyRemove(ctx, list, args)
 				}
@@ -1037,6 +1072,7 @@ is applied.`,
 			}),
 		}
 		edit.Flags().BoolVar(&remove, "remove", false, "remove the hosts from openshell.egress."+list+" instead")
+		edit.Flags().StringVar(&decisionSandbox, "sandbox", "", "on a managed computer, use this sandbox's policy to check the decision")
 		cmd.AddCommand(edit)
 	}
 	return cmd

@@ -145,6 +145,61 @@ func closeCircuitTestDispatcher(t *testing.T, dispatcher *Dispatcher) {
 	}
 }
 
+type blockUntilCanceledAdapter struct{ started chan struct{} }
+
+func (*blockUntilCanceledAdapter) EncodedSize(sizes []int) (int, bool) {
+	return DelimitedEncodedSize(sizes, 0, 0, 0)
+}
+
+func (adapter *blockUntilCanceledAdapter) Deliver(ctx context.Context, _ Batch) DeliveryResult {
+	close(adapter.started)
+	<-ctx.Done()
+	return DeliveryResult{Outcome: OutcomeTransient}
+}
+
+// TestDroppedRecordIsNeverBothQueuedAndDropped holds the queue lock while a
+// shutdown abandons the in-flight record. The record is still charged to the
+// queue, so the dropped counter must not move until the charge falls with it:
+// the shutdown loss count adds the two and would count the record twice.
+func TestDroppedRecordIsNeverBothQueuedAndDropped(t *testing.T) {
+	adapter := &blockUntilCanceledAdapter{started: make(chan struct{})}
+	dispatcher, err := NewDispatcher(circuitTestConfig(1), adapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher.Activate()
+	if result := dispatcher.Enqueue(circuitTestPayload(t, "abandoned")); !result.Accepted() {
+		t.Fatalf("enqueue=%+v", result)
+	}
+	select {
+	case <-adapter.started:
+	case <-time.After(time.Second):
+		t.Fatal("delivery did not start")
+	}
+	dispatcher.queueMu.Lock()
+	dispatcher.cancelRoot()
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if dropped := dispatcher.counters.dropped.Load(); dropped != 0 && dispatcher.chargedItems != 0 {
+			dispatcher.queueMu.Unlock()
+			t.Fatalf("record counted dropped (%d) while still charged (%d items)", dropped, dispatcher.chargedItems)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	dispatcher.queueMu.Unlock()
+	snapshot := waitForCircuitSnapshot(t, dispatcher, func(snapshot HealthSnapshot) bool {
+		return snapshot.Counters.Dropped == 1
+	})
+	if snapshot.Queue == nil || snapshot.Queue.Items != 0 {
+		t.Fatalf("dropped record still queued: %+v", snapshot.Queue)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := dispatcher.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestHealthVocabularyHasExactlySevenStates(t *testing.T) {
 	states := []HealthState{
 		HealthDisabled, HealthInitializing, HealthHealthy, HealthDegraded,

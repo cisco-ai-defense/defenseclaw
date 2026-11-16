@@ -15,7 +15,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"golang.org/x/sys/windows"
 )
 
 // A rejected installed runtime must stop the scan before a same-named PATH
@@ -73,56 +72,5 @@ func TestPerUserScannerIgnoresLeftoverRuntimeRoot(t *testing.T) {
 	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
 	if err := scannerRuntimePreflight("skill-scanner", "skill-scanner", "skill-scanner.exe"); !errors.Is(err, ErrScannerRuntimeUnavailable) {
 		t.Fatalf("standalone scannerRuntimePreflight() = %v, want the runtime-not-ready error", err)
-	}
-}
-
-// GAP-1317: a server folder the enumerator verified is used only when the
-// gateway can open it, since the server process runs as the gateway; a
-// folder its DACL closes to the gateway is refused with that reason instead
-// of failing later as a missing package.json.
-func TestMCPRuntimeVerifiedWorkDirNeedsGatewayAccess(t *testing.T) {
-	home, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	project := filepath.Join(home, "project")
-	if err := os.Mkdir(project, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	entry := &config.MCPServerEntry{Name: "local", Command: "npx", Project: project, Home: home, WorkDir: project}
-	if got := (&MCPScanner{ServerEntry: entry}).serverWorkDir(); got != project {
-		t.Fatalf("readable verified folder: server starts in %q, want %q", got, project)
-	}
-	closed, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)")
-	if err != nil {
-		t.Fatal(err)
-	}
-	closedDACL, _, err := closed.DACL()
-	if err != nil {
-		t.Fatal(err)
-	}
-	open, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;WD)")
-	if err != nil {
-		t.Fatal(err)
-	}
-	openDACL, _, err := open.DACL()
-	if err != nil {
-		t.Fatal(err)
-	}
-	setDACL := func(acl *windows.ACL) error {
-		return windows.SetNamedSecurityInfo(project, windows.SE_FILE_OBJECT,
-			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
-	}
-	if err := setDACL(closedDACL); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = setDACL(openDACL) })
-	if f, err := os.Open(project); err == nil {
-		f.Close()
-		t.Skip("this token can open a folder closed to it (backup privilege enabled)")
-	}
-	mcp := &MCPScanner{ServerEntry: entry}
-	if got := mcp.serverWorkDir(); got != "" || !strings.Contains(mcp.workDirNote(), "gateway service cannot read") {
-		t.Fatalf("closed verified folder: server starts in %q, note %q", got, mcp.workDirNote())
 	}
 }

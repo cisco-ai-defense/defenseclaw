@@ -18,10 +18,10 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
-	"regexp"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"golang.org/x/text/unicode/norm"
 )
@@ -141,7 +141,7 @@ func normalizeHashV1Value(value string, fieldClass observability.FieldClass) (st
 	return normalizeLexicalPath(value), nil
 }
 
-var hierarchicalURIPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*://`)
+var hierarchicalURIPattern = lazyregexp.New(`^[A-Za-z][A-Za-z0-9+.-]*://`)
 
 func isWindowsDrivePath(value string) bool {
 	return len(value) >= 2 && isASCIILetter(value[0]) && value[1] == ':'

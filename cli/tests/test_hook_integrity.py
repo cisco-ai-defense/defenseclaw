@@ -37,6 +37,8 @@ from defenseclaw.hook_integrity import (
     unrunnable_hook_problem,
 )
 
+from tests.test_hook_integrity_layouts import approve_hermes_hooks
+
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Unix hook scripts only")
 
 
@@ -183,7 +185,7 @@ def test_empty_token_is_a_problem_like_a_missing_one(tmp_path, monkeypatch):
 def test_removed_hook_registration_is_reported(tmp_path):
     # GAP-1230: the hooks key deleted from the agent's settings file.
     settings = tmp_path / "settings.json"
-    hook = {"command": str(tmp_path / "hooks" / "claude-code-hook.sh")}
+    hook = {"type": "command", "command": str(tmp_path / "hooks" / "claude-code-hook.sh"), "timeout": 30}
     settings.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [hook]}]}}))
     lock = {"version": 2, "connectors": {"claudecode": {"locations": {"hook_config_paths": [str(settings)]}}}}
     (tmp_path / "hook_contract_lock.json").write_text(json.dumps(lock))
@@ -214,7 +216,8 @@ def test_unquoted_hook_path_with_a_space_fails_doctor(tmp_path):
     cfg = SimpleNamespace(data_dir=str(data_dir))
 
     def register(command):
-        settings.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [{"command": command}]}]}}))
+        handler = {"type": "command", "command": command, "timeout": 30}
+        settings.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [handler]}]}}))
 
     register(shlex.quote(script))
     assert hook_registration_problems(cfg, "claudecode") == []
@@ -242,6 +245,69 @@ def test_missing_windows_hook_launcher_names_the_installer(tmp_path, monkeypatch
     problems = hook_registration_problems(SimpleNamespace(data_dir=str(tmp_path)), "claudecode")
     assert problems and launcher in problems[0]
     assert "installer" in hook_integrity.repair_command("claudecode", problems[0])
+
+
+@pytest.mark.parametrize("connector", ["codex", "devin"])
+def test_unusable_windows_hook_guard_blocks_status(tmp_path, monkeypatch, connector):
+    # rel-1-0-6 GAP-0676 S4: a guarded Codex or Devin entry starts the hook
+    # guard; a missing, non-regular or altered guard lets those calls run
+    # uninspected while status said the connector was running.
+    from defenseclaw import hook_integrity
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    guard = bin_dir / "defenseclaw-hook-guard.exe"
+    guard.write_bytes(b"MZguard")
+    if connector == "codex":
+        config = tmp_path / "config.toml"
+        command = (
+            f'C:\\Windows\\System32\\cmd.exe /d /v:off /c "{guard}" launcher-guard-sibling '
+            "hook --connector codex --event PreToolUse --hook-contract codex-hooks-v4"
+        )
+        table = "[[hooks.PreToolUse]]\nmatcher = '*'\n[[hooks.PreToolUse.hooks]]\ntype = 'command'\ntimeout = 30\n"
+        config.write_text(f"{table}command = '{command}'\n")
+    else:
+        config = tmp_path / "hooks.json"
+        command = f"'{guard}' launcher-guard-devin PreToolUse hook --connector devin"
+        handler = {"type": "command", "command": command, "timeout": 10}
+        config.write_text(json.dumps({"hooks": {"PreToolUse": [{"matcher": "", "hooks": [handler]}]}}))
+    lock = {"version": 2, "connectors": {connector: {"locations": {"hook_config_paths": [str(config)]}}}}
+    (tmp_path / "hook_contract_lock.json").write_text(json.dumps(lock))
+    monkeypatch.setattr(hook_integrity, "_is_windows", lambda: True)
+    cfg = SimpleNamespace(data_dir=str(tmp_path))
+    agent = {"codex": "Codex", "devin": "Devin"}[connector]
+    record = tmp_path / "installer" / "binaries.sha256"
+    record.parent.mkdir()
+
+    assert hook_integrity.hook_guard_program(connector, command) == str(guard)
+    assert hook_registration_problems(cfg, connector) == []
+    record.write_text(f"{hashlib.sha256(b'MZguard').hexdigest()}  defenseclaw-hook-guard.exe\n")
+    assert hook_registration_problems(cfg, connector) == []
+
+    record.write_text(f"{'ab' * 32}  defenseclaw-hook-guard.exe\n")
+    problems = hook_registration_problems(cfg, connector)
+    assert problems == [
+        f"the DefenseClaw hook guard {guard} does not match the copy the installer recorded, "
+        f"so {agent} prompts and tool calls may run without DefenseClaw"
+    ]
+    assert problems[0].blocking and "installer again" in repair_command(connector, problems[0])
+
+    guard.unlink()
+    problems = hook_registration_problems(cfg, connector)
+    assert problems == [
+        f"the DefenseClaw hook guard {guard} is missing, so {agent} prompts and tool calls run without DefenseClaw"
+    ]
+    assert problems[0].blocking
+    assert "defenseclaw-gateway restart" in repair_command(connector, problems[0])
+    assert f"defenseclaw setup {connector}" in repair_command(connector, problems[0])
+
+    guard.mkdir()
+    problems = hook_registration_problems(cfg, connector)
+    assert problems and problems[0].startswith(f"the DefenseClaw hook guard {guard} is not a regular file")
+    assert problems[0].blocking and "installer again" in repair_command(connector, problems[0])
+
+    managed = SimpleNamespace(data_dir=str(tmp_path), deployment_mode="managed_enterprise")
+    assert hook_integrity.hook_launcher_problems(managed, connector) == []
 
 
 def test_older_build_render_is_not_reported_fresh(tmp_path, monkeypatch):
@@ -307,6 +373,18 @@ def test_install_moved_with_the_home_names_the_old_folder(tmp_path, monkeypatch)
     assert "not guarding" in problem
 
 
+def test_dangling_script_link_is_reported_as_unguarded(tmp_path, monkeypatch):
+    # p0 GAP-1384: a sealed hook script replaced by a link to a missing
+    # target is a hook the agent cannot run, so status and guardrail status
+    # show the not-guarded posture warning.
+    monkeypatch.delenv("DEFENSECLAW_GATEWAY_TOKEN", raising=False)
+    cfg, script = _install(tmp_path)
+    script.unlink()
+    script.symlink_to(tmp_path / "gone.sh")
+    problem = unrunnable_hook_problem(cfg, "codex")
+    assert str(script) in problem and "cannot run it" in problem and "not guarding" in problem
+
+
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads mode 000 files")
 def test_unreadable_script_is_reported_as_unguarded_not_edited(tmp_path, monkeypatch):
     # GAP-0403: chmod 000 makes every hook a non-blocking error, so the
@@ -339,6 +417,211 @@ def test_missing_hook_script_is_named_as_missing_with_one_repair(tmp_path):
     assert _repair_display_tag("blocked") == "skip"
 
 
+@pytest.mark.parametrize("remove_folder", [False, True])
+def test_missing_hook_script_is_one_finding_with_one_next_step(tmp_path, monkeypatch, remove_folder):
+    # p0-round GAP-0402 (lead ruling): the hook-script rows give `doctor --fix` once, for the
+    # one finding; the freshness row is skipped instead of printing a second step for the same cause.
+    import shutil
+
+    from defenseclaw.commands.cmd_doctor import _check_generated_hook_freshness
+
+    monkeypatch.delenv("DEFENSECLAW_GATEWAY_TOKEN", raising=False)
+    cfg, script = _install(tmp_path)
+    if remove_folder:
+        shutil.rmtree(script.parent)
+    else:
+        script.unlink()
+
+    result = _DoctorResult(passive=True, quiet=True)
+    _check_hook_runtime_integrity(cfg, "codex", result)
+    _check_generated_hook_freshness(cfg, "codex", "Codex hooks", result, hook_script_paths=[str(script)])
+    rows = {row["label"]: row for row in result.checks}
+    assert rows["Hook runtime files"]["status"] == "fail"
+    assert rows["Hook runtime files"]["detail"].count("doctor --fix") == 1
+    assert rows["Codex hooks freshness"]["status"] == "skip"
+    steps = [row.get("remediation") or "" for row in result.checks]
+    assert not any("setup codex" in step or "restart" in step for step in steps)
+
+
+@pytest.mark.parametrize("remove_folder", [False, True])
+def test_mode_and_codex_hooks_rows_defer_to_the_missing_hook_runtime(tmp_path, monkeypatch, remove_folder):
+    # p0-round GAP-0402 (DV18, lead ruling 10-31 08:41): with the hook runtime
+    # missing, Mode warned "re-render the hooks: defenseclaw-gateway start" and
+    # Codex hooks failed "re-register the hooks: defenseclaw setup codex --yes"
+    # beside the Hook runtime files row's doctor --fix: three next steps for one
+    # cause. A separate finding (an intact script whose fail mode is unreadable)
+    # keeps its own step.
+    import shutil
+
+    from defenseclaw import fail_mode
+    from defenseclaw.commands.cmd_doctor import _check_codex_hooks, _check_connector_mode
+
+    monkeypatch.delenv("DEFENSECLAW_GATEWAY_TOKEN", raising=False)
+    report = {"effective": "open", "provenance": "config", "desired": "open", "sources": []}
+    monkeypatch.setattr(fail_mode, "connector_fail_mode_report", lambda _cfg, _connector: dict(report))
+    monkeypatch.setattr(fail_mode, "rendered_fail_mode", lambda _report: None)
+    monkeypatch.setattr(fail_mode, "report_renders_fail_mode", lambda _report: True)
+    guardrail = SimpleNamespace(effective_mode=lambda _connector: "action")
+
+    def rows(cfg) -> list[dict]:
+        result = _DoctorResult(passive=True, quiet=True)
+        _check_connector_mode(cfg, guardrail, "codex", result)
+        _check_hook_runtime_integrity(cfg, "codex", result)
+        _check_codex_hooks(cfg, result, platform_name="posix", config_path=str(tmp_path / "config.toml"))
+        return result.checks
+
+    intact, script = _install(tmp_path)
+    mode = next(row for row in rows(intact) if row["label"] == "Mode")
+    assert mode["status"] == "warn" and "defenseclaw-gateway start" in mode["remediation"]
+
+    if remove_folder:
+        shutil.rmtree(script.parent)
+    else:
+        script.unlink()
+    checks = rows(intact)
+    by_label = {row["label"]: row for row in checks}
+    assert by_label["Hook runtime files"]["status"] == "fail"
+    assert by_label["Hook runtime files"]["detail"].count("doctor --fix") == 1
+    assert by_label["Mode"]["status"] == "skip" and "Hook runtime files" in by_label["Mode"]["detail"]
+    assert by_label["Codex hooks"]["status"] == "skip"
+    steps = " ".join((row.get("remediation") or "") + " " + row["detail"] for row in checks)
+    assert "setup codex" not in steps and "gateway start" not in steps and "restart" not in steps
+
+
+def test_windows_hooks_folder_gone_is_one_finding_with_doctor_fix(tmp_path, monkeypatch):
+    # p0-round GAP-0402 on Windows (L-win-J2-016, TST-3600): with the hooks
+    # folder moved aside, Copilot hooks and Hook contract failed with
+    # "setup copilot" and Mode warned "defenseclaw-gateway start", while no row
+    # named the missing folder. The gateway renders that folder when it
+    # starts (live dc-win2), so Hook runtime files names doctor --fix once and
+    # the rows it trips defer to it. The launcher outside the folder and
+    # managed installs are not part of it.
+    import shutil
+
+    from defenseclaw import fail_mode, hook_integrity
+    from defenseclaw.commands import cmd_doctor
+    from defenseclaw.hook_integrity import missing_hook_scripts
+
+    monkeypatch.setattr(hook_integrity, "_is_windows", lambda: True)
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    names = ["inspect-tool.sh", "copilot-hook.sh", "copilot-hook.ps1", "_hardening.sh"]
+    for name in names:
+        (hooks / name).write_text("# rendered\n")
+    launcher = tmp_path / "bin" / "defenseclaw-hook.exe"
+    launcher.parent.mkdir()
+    launcher.write_bytes(b"MZ")
+    paths = [str(hooks / name) for name in names] + [str(launcher)]
+    digests = {name: "sha256:" + hashlib.sha256(b"# rendered\n").hexdigest() for name in names}
+    lock = {"version": 2, "connectors": {"copilot": {"locations": {"hook_script_paths": paths}, "hook_script_digests": digests}}}
+    (tmp_path / "hook_contract_lock.json").write_text(json.dumps(lock))
+    cfg = SimpleNamespace(data_dir=str(tmp_path))
+    assert hook_runtime_problems(cfg, "copilot") == [] and missing_hook_scripts(cfg, "copilot") == []
+
+    shutil.rmtree(hooks)
+    adapter = tmp_path / "hooks" / "copilot-hook.ps1"
+    assert sorted(path.name for path in missing_hook_scripts(cfg, "copilot")) == sorted(names)
+    problems = hook_runtime_problems(cfg, "copilot")
+    assert len(problems) == 1 and str(adapter) in problems[0] and "cannot run it" in problems[0]
+    managed = SimpleNamespace(data_dir=str(tmp_path), deployment_mode="managed_enterprise")
+    assert hook_runtime_problems(managed, "copilot") == [] and missing_hook_scripts(managed, "copilot") == []
+
+    # As read live on dc-win2: no installed mode, so the hook runs closed.
+    report = {"effective": "closed", "runtime": "closed", "provenance": "no-installed-mode", "desired": "open", "sources": []}
+    monkeypatch.setattr(fail_mode, "connector_fail_mode_report", lambda _cfg, _connector: dict(report))
+    monkeypatch.setattr(fail_mode, "rendered_fail_mode", lambda _report: None)
+    monkeypatch.setattr(fail_mode, "report_renders_fail_mode", lambda _report: True)
+    step = "run 'defenseclaw setup copilot --mode action --yes --restart' to repair the native registration"
+    monkeypatch.setattr(
+        cmd_doctor,
+        "_windows_native_hook_check",
+        lambda *_a, **_k: SimpleNamespace(
+            state="missing",
+            detail=f"registered Copilot adapter cannot be resolved: {adapter}; {step}",
+            repair="defenseclaw setup copilot --mode action --yes --restart",
+            healthy=False,
+        ),
+    )
+    result = _DoctorResult(passive=True, quiet=True)
+    cmd_doctor._check_connector_mode(cfg, SimpleNamespace(effective_mode=lambda _c: "action"), "copilot", result)
+    _check_hook_runtime_integrity(cfg, "copilot", result)
+    cmd_doctor._check_windows_native_hooks(cfg, "copilot", "Copilot hooks", result)
+    rows = {row["label"]: row for row in result.checks}
+    assert rows["Hook runtime files"]["status"] == "fail" and "doctor --fix" in rows["Hook runtime files"]["detail"]
+    assert rows["Mode"]["status"] == "skip" and rows["Copilot hooks"]["status"] == "skip"
+    text = " ".join((row.get("remediation") or "") + " " + row["detail"] for row in result.checks)
+    assert "setup copilot" not in text and "gateway start" not in text
+    monkeypatch.setattr(cmd_doctor, "_doctor_active_connectors", lambda _cfg: ["copilot"])
+    assert cmd_doctor._drifted_hook_connectors(cfg) == ["copilot"], "doctor --fix restarts the gateway to render it"
+
+
+def test_an_unanswered_repair_prompt_is_declined_not_failed(tmp_path, monkeypatch):
+    # p0-round GAP-0402 (DV18): doctor --fix without --yes and no terminal
+    # answer printed "[FAIL] fix: generated hook scripts - Abort: fixer raised
+    # unexpectedly"; a repair nobody confirmed is declined (shown as SKIP).
+    import click
+    from defenseclaw.commands import cmd_doctor
+    from defenseclaw.doctor_engine import RepairDecision, RepairSpec
+
+    def unanswered(_cfg, *, assume_yes):
+        raise click.exceptions.Abort()
+
+    spec = RepairSpec(
+        repair_id="doctor.connector.hook-scripts.regenerate",
+        label="generated hook scripts",
+        risk="disruptive",
+        plan=lambda _cfg: RepairDecision("applicable", "restart the gateway", effects=("restart",)),
+        apply=unanswered,
+        verify=None,
+    )
+    monkeypatch.setattr(cmd_doctor, "_doctor_repair_specs", lambda *_a, **_k: (spec,))
+    result = _DoctorResult(passive=True, quiet=True)
+    cmd_doctor._run_fixers(SimpleNamespace(data_dir=str(tmp_path)), result, assume_yes=False, json_out=True)
+    record = next(row for row in result.repairs if row["label"] == "generated hook scripts")
+    assert record["state"] == "declined" and "--yes" in record["detail"]
+    assert cmd_doctor._repair_display_tag(record["state"]) == "skip"
+
+
+@pytest.mark.parametrize("remove_folder", [False, True])
+def test_doctor_fix_renders_a_deleted_hook_script_again(tmp_path, monkeypatch, remove_folder):
+    # p0-round GAP-0402: the Hook runtime files row names `doctor --fix` for a
+    # deleted script (or hooks folder), and --fix reported every repair as a
+    # no-op, so the file stayed missing until a gateway restart.
+    import shutil
+
+    from defenseclaw.commands import cmd_doctor
+
+    monkeypatch.delenv("DEFENSECLAW_GATEWAY_TOKEN", raising=False)
+    monkeypatch.setattr(cmd_doctor, "_doctor_active_connectors", lambda _cfg: ["codex"])
+    monkeypatch.setattr(
+        cmd_doctor, "_trusted_gateway_listener_for_lifecycle", lambda _cfg: SimpleNamespace(trusted=True, detail="")
+    )
+    cfg, script = _install(tmp_path)
+    body = script.read_bytes()
+    token = (script.parent / ".hook-codex.token").read_bytes()
+    assert cmd_doctor._drifted_hook_connectors(cfg) == []
+    assert cmd_doctor._fix_hook_script_drift(cfg, assume_yes=True)[0] == "skip"
+
+    if remove_folder:
+        shutil.rmtree(script.parent)
+    else:
+        script.unlink()
+    assert cmd_doctor._drifted_hook_connectors(cfg) == ["codex"]
+    assert cmd_doctor._fix_hook_script_drift(cfg, assume_yes=True, plan_only=True)[0] == "plan"
+
+    def restart(_cfg, *, start_if_stopped):
+        script.parent.mkdir(exist_ok=True)
+        script.write_bytes(body)  # the restarted gateway renders what setup sealed
+        script.chmod(0o700)
+        (script.parent / ".hook-codex.token").write_bytes(token)
+        return True, ""
+
+    monkeypatch.setattr(cmd_doctor, "_repair_gateway_lifecycle", restart)
+    assert cmd_doctor._fix_hook_script_drift(cfg, assume_yes=True)[0] == "pass"
+    assert hook_runtime_problems(cfg, "codex") == []
+    assert cmd_doctor._drifted_hook_connectors(cfg) == []
+
+
 def _agent_config(tmp_path, connector, name):
     config = tmp_path / name
     lock = {"version": 2, "connectors": {connector: {"locations": {"hook_config_paths": [str(config)]}}}}
@@ -350,7 +633,8 @@ def test_claude_disable_all_hooks_is_degraded_with_its_own_repair(tmp_path, monk
     # GAP-1066/GAP-1067: the hooks stay registered but Claude Code runs none of them.
     monkeypatch.chdir(tmp_path)
     cfg, settings = _agent_config(tmp_path, "claudecode", "settings.json")
-    hooks = {"PreToolUse": [{"hooks": [{"type": "command", "command": "/x/.defenseclaw/hooks/claude-code-hook.sh"}]}]}
+    handler = {"type": "command", "command": "/x/.defenseclaw/hooks/claude-code-hook.sh", "timeout": 30}
+    hooks = {"PreToolUse": [{"hooks": [handler]}]}
     settings.write_text(json.dumps({"hooks": hooks}))
     assert hook_registration_problems(cfg, "claudecode") == []
 
@@ -370,7 +654,7 @@ def test_codex_hooks_turned_off_or_left_without_command_fail_doctor(tmp_path):
     cfg, config = _agent_config(tmp_path, "codex", "config.toml")
     (tmp_path / "hooks").mkdir()
     (tmp_path / "hooks" / "codex-hook.sh").write_text("#!/bin/bash\n")
-    command = "/home/u/.defenseclaw/hooks/codex-hook.sh --event PreToolUse"
+    command = f"{tmp_path}/hooks/codex-hook.sh --event PreToolUse"
     entry = "[[hooks.PreToolUse]]\nmatcher = '*'\n[[hooks.PreToolUse.hooks]]\ntype = 'command'\ntimeout = 30\n"
     config.write_text("[features]\nhooks = false\n" + entry + f"command = '{command}'\n")
 
@@ -382,7 +666,22 @@ def test_codex_hooks_turned_off_or_left_without_command_fail_doctor(tmp_path):
 
     config.write_text(entry + entry + f"command = '{command}'\n")
     problems = hook_registration_problems(cfg, "codex")
-    assert problems and "without a command" in problems[0] and "refuses to start" in problems[0]
+    assert problems and "without a command" in problems[0]
+    assert "may run without its DefenseClaw hooks" in problems[0]
+
+    # GAP-0976: Doctor must inspect the config file passed to it even when
+    # stale trust records still contain the word "defenseclaw".
+    config.write_text(entry + "[hooks.state]\nold_defenseclaw = true\n")
+    result = _DoctorResult()
+    _check_codex_hooks(cfg, result, platform_name="posix", config_path=str(config))
+    row = next(check for check in result.checks if check["label"] == "Codex hooks")
+    assert row["status"] == "fail", row
+
+    config.write_text(entry + f"command = '{command}'\n" + entry + "[hooks.state]\nold_defenseclaw = true\n")
+    result = _DoctorResult()
+    _check_codex_hooks(cfg, result, platform_name="posix", config_path=str(config))
+    row = next(check for check in result.checks if check["label"] == "Codex hooks")
+    assert row["status"] == "fail", row
 
 
 _EDITED_GOLDEN = (
@@ -447,13 +746,15 @@ def test_edited_hook_entry_fails_doctor_and_fix_reruns_setup(tmp_path, monkeypat
 
     def register(*paths):
         if connector == "hermes":
-            entries = "".join(f"  - command: \"'{path}'\"\n" for path in paths)
+            entries = "".join(f"  - command: \"'{path}'\"\n    matcher: .*\n    timeout: 30\n" for path in paths)
             config.write_text("hooks:\n  pre_tool_call:\n" + entries)
+            approve_hermes_hooks(config)
         elif connector == "copilot":
-            entries = [{"type": "command", "bash": f"'{path}' --event 'preToolUse'"} for path in paths]
+            entries = [{"type": "command", "bash": f"'{path}' --event 'preToolUse'", "timeoutSec": 30} for path in paths]
             config.write_text(json.dumps({"version": 1, "hooks": {"preToolUse": entries}}))
         else:
-            config.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [{"command": p} for p in paths]}]}}))
+            handlers = [{"type": "command", "command": p, "timeout": 30} for p in paths]
+            config.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": handlers}]}}))
 
     register(current)
     assert hook_registration_problems(cfg, connector) == []

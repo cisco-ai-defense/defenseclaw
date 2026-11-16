@@ -263,7 +263,7 @@ func TestIncludeActivityWithoutHistoryNotesWhy(t *testing.T) {
 	if err := appendActivityLines(&stderr, db, &out, version.Provenance{}, auditExportWindow{}); err != nil {
 		t.Fatal(err)
 	}
-	if out.Len() != 0 || !strings.Contains(stderr.String(), "config-update") {
+	if out.Len() != 0 || !strings.Contains(stderr.String(), "action config.change.applied") {
 		t.Fatalf("stdout %q, stderr %q", out.String(), stderr.String())
 	}
 }
@@ -289,6 +289,49 @@ func TestAuditExportBadWindowIsUsageError(t *testing.T) {
 		}
 		if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
 			t.Fatalf("--since %q --until %q created %s", bad[0], bad[1], out)
+		}
+	}
+}
+
+func TestActivityExportUsesExactTimeAndInsertTies(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE activity_events (id TEXT PRIMARY KEY, timestamp TEXT, actor TEXT, action TEXT, target_type TEXT, target_id TEXT, reason TEXT, before_json TEXT, after_json TEXT, diff_json TEXT, version_from TEXT, version_to TEXT, retention_timestamp_unix_nano INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []struct {
+		id, stamp string
+		instant   int64
+	}{
+		{"short", "2026-10-13T12:00:00.12345Z", 1},
+		{"long", "2026-10-13T12:00:00.123451Z", 2},
+		{"tie-first", "2026-10-13T12:00:01Z", 3},
+		{"tie-second", "2026-10-13T12:00:01Z", 3},
+		{"offset", "2026-10-13T14:00:02+02:00", 4},
+	} {
+		if _, err := db.Exec(`INSERT INTO activity_events (id,timestamp,actor,action,target_type,target_id,retention_timestamp_unix_nano) VALUES (?,?,'operator','change','policy',?,?)`, row.id, row.stamp, row.id, row.instant); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out bytes.Buffer
+	if err := exportActivityLines(db, &out, version.Provenance{}, auditExportWindow{}); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 5 {
+		t.Fatalf("activity rows: %d", len(lines))
+	}
+	want := []string{"short", "long", "tie-first", "tie-second", "offset"}
+	for i, line := range lines {
+		var item map[string]any
+		if err := json.Unmarshal([]byte(line), &item); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(line, want[i]) {
+			t.Fatalf("row %d: %v want %s", i, item, want[i])
 		}
 	}
 }

@@ -38,6 +38,9 @@ type foreignGuardFixture struct {
 	loadErr error
 	// process is the agent process identity the guard sees ("" unknown).
 	process string
+	// cleanMirror is whether the gateway's clean-session entry of the agent
+	// process is present and trusted (hookForeignGuardCleanMirror).
+	cleanMirror bool
 }
 
 func newForeignGuardFixture(t *testing.T, mode string) *foreignGuardFixture {
@@ -53,6 +56,10 @@ func newForeignGuardFixture(t *testing.T, mode string) *foreignGuardFixture {
 func newPortableForeignGuardFixture(t *testing.T, mode string) *foreignGuardFixture {
 	t.Helper()
 	fixture := &foreignGuardFixture{home: t.TempDir()}
+	// The guard scan reads the agent environment: on Windows Devin keeps its
+	// user config under %APPDATA%, which must be the fixture home, not the
+	// account that runs the tests (GAP-0887).
+	t.Setenv("APPDATA", filepath.Join(fixture.home, "AppData", "Roaming"))
 	fixture.project = filepath.Join(fixture.home, "work", "repo")
 	if err := os.MkdirAll(filepath.Join(fixture.project, ".git"), 0o755); err != nil {
 		t.Fatal(err)
@@ -68,6 +75,14 @@ func newPortableForeignGuardFixture(t *testing.T, mode string) *foreignGuardFixt
 	previousAccountHome, previousEnvHomes := hookForeignGuardAccountHome, hookForeignGuardEnvHomes
 	previousProcess := hookForeignGuardAgentProcess
 	previousExchange := hookForeignGuardExchange
+	previousMirror, previousFailsOpen := hookForeignGuardCleanMirror, hookForeignGuardOutageFailsOpen
+	hookForeignGuardCleanMirror = func(enterprisepolicy.SessionKey) error {
+		if fixture.cleanMirror {
+			return nil
+		}
+		return os.ErrNotExist
+	}
+	hookForeignGuardOutageFailsOpen = func(string, string) bool { return false }
 	gatewayState := t.TempDir()
 	hookForeignGuardSummaryPath = func() (string, bool) { return "/etc/defenseclaw/machine-policy.json", true }
 	hookForeignGuardLoad = func(string) (*enterprisepolicy.PublicPolicy, error) {
@@ -82,7 +97,7 @@ func newPortableForeignGuardFixture(t *testing.T, mode string) *foreignGuardFixt
 	hookForeignGuardAccountHome = func() string { return fixture.home }
 	hookForeignGuardEnvHomes = func() []string { return nil }
 	hookForeignGuardAgentProcess = func() string { return fixture.process }
-	hookForeignGuardExchange = func(_ string, _ string, _ time.Time, exchange enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+	hookForeignGuardExchange = func(_ string, _ string, _, _ time.Time, exchange enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
 		if exchange.Key.Session == "" && exchange.Key.Process == "" {
 			return exchange.Decision, nil
 		}
@@ -96,6 +111,7 @@ func newPortableForeignGuardFixture(t *testing.T, mode string) *foreignGuardFixt
 		hookForeignGuardAccountHome, hookForeignGuardEnvHomes = previousAccountHome, previousEnvHomes
 		hookForeignGuardAgentProcess = previousProcess
 		hookForeignGuardExchange = previousExchange
+		hookForeignGuardCleanMirror, hookForeignGuardOutageFailsOpen = previousMirror, previousFailsOpen
 	})
 	return fixture
 }
@@ -511,7 +527,7 @@ func TestForeignHookCheckAmpOnWindowsKeepsTheSessionLocally(t *testing.T) {
 	fixture.summary.Connectors["amp"] = enterprisepolicy.PublicConnectorPolicy{Route: enterprisepolicy.RoutePerUser, ForeignHooks: config.ForeignHooksRemove, Guard: true}
 	previousGOOS, previousExchange := hookForeignGuardGOOS, hookForeignGuardExchange
 	hookForeignGuardGOOS = "windows"
-	hookForeignGuardExchange = func(string, string, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+	hookForeignGuardExchange = func(string, string, time.Time, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
 		return enterprisepolicy.GuardDecision{}, errors.New("standalone hook runtime unavailable")
 	}
 	t.Cleanup(func() { hookForeignGuardGOOS, hookForeignGuardExchange = previousGOOS, previousExchange })

@@ -20,11 +20,15 @@ private final class StubGatewayURLProtocol: URLProtocol {
     static var body = Data()
     static var headers: [String: String] = [:]
     static var statusCode = 200
+    static var lastAuthorization: String?
+    static var requests = 0
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        Self.lastAuthorization = request.value(forHTTPHeaderField: "Authorization")
+        Self.requests += 1
         let response = HTTPURLResponse(
             url: request.url!,
             statusCode: Self.statusCode,
@@ -47,9 +51,13 @@ struct ResourceBoundaryTests {
         try registryEnforcesAggregateMaterializationLimit()
         try await eventReaderRejectsOversizedRecords()
         try await eventReaderEnforcesAggregateRetainedByteLimit()
+        try await gatewayProjectsAppliedPolicy()
         try await gatewayAcceptsLegitimateResponse()
+        try await gatewayRefusesUntrustedListenerAndProtectsToken()
+        gatewayListenerOwnershipRules()
         try await gatewayDecodesOptionalAIDiscoveryMetadata()
         try await gatewayRuntimeCapabilities()
+        try await gatewaySandboxCapabilities()
         try await gatewayRejectsDeclaredOversizedResponse()
         try await gatewayStopsUnknownLengthOversizedResponse()
         print("Resource boundary tests passed")
@@ -261,6 +269,22 @@ struct ResourceBoundaryTests {
         expect(watchdogRows.last?.message.contains("watchdog-05") == true, "newest normal record remains visible")
     }
 
+    private static func gatewayProjectsAppliedPolicy() async throws {
+        StubGatewayURLProtocol.statusCode = 200
+        StubGatewayURLProtocol.headers = [:]
+        // Both routes deliberately receive the same fixture; only the typed
+        // allowlisted projections may leave GatewayClient.
+        StubGatewayURLProtocol.body = Data(#"{"policy":{"effective_digest":"digest-v9","generation":9},"profile":"engineers","effective":{"mode":"action","block_at":"HIGH","alert_at":"LOW","rule_pack":"default","secret":"never project"},"token":"never project"}"#.utf8)
+        let client = gatewayClient(maximumResponseBytes: 4096)
+        let fields = try await client.appliedPolicy(user: "fixture", connector: "codex", resolveProfile: true)
+        expect(fields["Policy digest"] == "digest-v9" && fields["Generation"] == "9", "effective policy identity is projected")
+        expect(fields["Profile"] == "engineers" && fields["Block at"] == "HIGH", "effective account profile is projected")
+        expect(!fields.values.contains("never project"), "non-display response fields never reach the overview")
+        StubGatewayURLProtocol.body = Data("{}".utf8)
+        do { _ = try await client.appliedPolicy(user: "fixture", connector: "codex", resolveProfile: true); fail("missing profile must not look healthy") }
+        catch GatewayError.badResponse { }
+    }
+
     private static func gatewayAcceptsLegitimateResponse() async throws {
         StubGatewayURLProtocol.body = Data(#"{"state":"running","version":"test"}"#.utf8)
         StubGatewayURLProtocol.headers = [
@@ -270,6 +294,62 @@ struct ResourceBoundaryTests {
         let client = gatewayClient(maximumResponseBytes: 256)
         let health = try await client.health()
         expect(health.state == "running", "normal bounded gateway JSON is parsed")
+    }
+
+    private static func gatewayRefusesUntrustedListenerAndProtectsToken() async throws {
+        var config = DefenseClawConfig()
+        let syntheticToken = UUID().uuidString
+        config.gatewayToken = syntheticToken
+        StubGatewayURLProtocol.statusCode = 200
+        StubGatewayURLProtocol.body = Data(#"{"state":"running"}"#.utf8)
+        StubGatewayURLProtocol.lastAuthorization = nil
+        let trusted = gatewayClient(maximumResponseBytes: 256, config: config)
+        _ = try await trusted.health()
+        expect(StubGatewayURLProtocol.lastAuthorization == nil, "unauthenticated health never carries the gateway token")
+
+        StubGatewayURLProtocol.body = Data("{}".utf8)
+        _ = try await trusted.status()
+        expect(StubGatewayURLProtocol.lastAuthorization == "Bearer \(syntheticToken)",
+               "authenticated routes still carry the token to a trusted listener")
+
+        let before = StubGatewayURLProtocol.requests
+        let untrusted = gatewayClient(maximumResponseBytes: 256, config: config, listenerTrust: { _ in false })
+        do {
+            _ = try await untrusted.health()
+            fail("an untrusted listener was allowed to report healthy")
+        } catch GatewayError.badResponse(let reason) {
+            expect(reason.contains("untrusted gateway listener"), "untrusted listener has a clear error")
+        }
+        do {
+            _ = try await untrusted.status()
+            fail("a token was sent to an untrusted listener")
+        } catch GatewayError.badResponse { }
+        expect(StubGatewayURLProtocol.requests == before, "untrusted listener received no requests")
+    }
+
+    private static func gatewayListenerOwnershipRules() {
+        let url = URL(string: "http://127.0.0.1:18970")!
+        let own = "p100\nu501\nf8\nn127.0.0.1:18970\n"
+        let root = "p101\nu0\nf8\nn127.0.0.1:18970\n"
+        let foreign = "p102\nu502\nf8\nn127.0.0.1:18970\n"
+        let expectedPath: (pid_t) -> String? = { _ in "/Users/example/.local/bin/defenseclaw-gateway" }
+        func trusted(_ listing: String, executablePath: (pid_t) -> String? = expectedPath) -> Bool {
+            GatewayListenerTrust.isTrusted(url, listing: listing, accountUID: 501, executablePath: executablePath)
+        }
+        expect(trusted(own),
+               "the selected account may own its gateway listener")
+        expect(trusted(root),
+               "administrator gateway mode may use a root listener")
+        expect(!trusted(foreign),
+               "another local account cannot impersonate the gateway")
+        expect(!trusted(own + foreign),
+               "a mixed-owner listener set is untrusted")
+        expect(!trusted(own, executablePath: { _ in "/usr/bin/python3" }),
+               "a same-account impostor executable cannot receive a token")
+        expect(!trusted("p100\nn127.0.0.1:18970\n"),
+               "an unknown listener owner fails closed")
+        expect(!trusted("p100\nu501\nn127.0.0.2:18970\n"),
+               "a listener on a different loopback address is not trusted")
     }
 
     private static func gatewayRuntimeCapabilities() async throws {
@@ -317,6 +397,37 @@ struct ResourceBoundaryTests {
             try await client.scanAIRuntime()
             preconditionFailure("read-only client must refuse Runtime mutations")
         } catch { }
+        StubGatewayURLProtocol.body = Data("{}".utf8)
+    }
+
+    private static func gatewaySandboxCapabilities() async throws {
+        let client = gatewayClient(maximumResponseBytes: 4096)
+        StubGatewayURLProtocol.headers = ["Content-Type": "application/json"]
+        StubGatewayURLProtocol.statusCode = 200
+        StubGatewayURLProtocol.body = Data(#"{"enabled":false,"available":false}"#.utf8)
+        let status = try await client.sandboxStatus()
+        expect(!status.enabled && !status.available, "disabled sandbox coverage is explicit")
+        StubGatewayURLProtocol.body = Data("{}".utf8)
+        do {
+            _ = try await client.sandboxStatus()
+            preconditionFailure("malformed sandbox status cannot appear disabled")
+        } catch GatewayError.badResponse { }
+        do {
+            _ = try await client.sandboxes()
+            preconditionFailure("missing sandbox list cannot appear empty")
+        } catch GatewayError.badResponse { }
+        StubGatewayURLProtocol.body = Data(#"{"sandboxes":[]}"#.utf8)
+        let rows = try await client.sandboxes()
+        expect(rows.isEmpty, "valid empty sandbox list remains empty")
+        StubGatewayURLProtocol.statusCode = 403
+        StubGatewayURLProtocol.body = Data(#"{"error":"policy denies sandbox approval"}"#.utf8)
+        do {
+            _ = try await client.sandboxApprovals()
+            preconditionFailure("sandbox policy refusal must surface")
+        } catch GatewayError.degraded(let code, _) {
+            expect(code == 403, "sandbox policy refusal is not mislabeled as an expired login")
+        }
+        StubGatewayURLProtocol.statusCode = 200
         StubGatewayURLProtocol.body = Data("{}".utf8)
     }
 
@@ -418,12 +529,18 @@ struct ResourceBoundaryTests {
         }
     }
 
-    private static func gatewayClient(maximumResponseBytes: Int) -> GatewayClient {
+    private static func gatewayClient(
+        maximumResponseBytes: Int,
+        config: DefenseClawConfig = DefenseClawConfig(),
+        listenerTrust: @escaping @Sendable (URL) -> Bool = { _ in true }
+    ) -> GatewayClient {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StubGatewayURLProtocol.self]
         return GatewayClient(
+            config: config,
             maximumResponseBytes: maximumResponseBytes,
-            session: URLSession(configuration: configuration)
+            session: URLSession(configuration: configuration),
+            listenerTrust: listenerTrust
         )
     }
 

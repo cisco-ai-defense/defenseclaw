@@ -7,10 +7,13 @@
 package cfgtxn
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -47,5 +50,87 @@ func TestWriteFileDurableKeepsTheDACLOfTheFileItReplaces(t *testing.T) {
 	}
 	if sddl := after.String(); !strings.Contains(sddl, "(A;;FR;;;BU)") {
 		t.Fatalf("replaced file lost its DACL: %s", sddl)
+	}
+}
+
+// The .env lock is the one Python's file_lock.locked_file_update takes on
+// Windows: msvcrt.locking at offset 0 locks byte 0 for length 1 on its own
+// handle (#1099). While another handle holds that byte, LockFile waits and
+// then reports ErrFileLockBusy; while LockFile holds it, another handle
+// cannot take that byte; release frees it; the sentinel is never written.
+func TestLockFileTakesThePythonSentinelByte(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".env")
+	other, err := os.OpenFile(path+LockSuffix, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	h := windows.Handle(other.Fd())
+	lockByte0 := func() error {
+		return windows.LockFileEx(h, windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, new(windows.Overlapped))
+	}
+	unlockByte0 := func() {
+		if err := windows.UnlockFileEx(h, 0, 1, 0, new(windows.Overlapped)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := lockByte0(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LockFile(context.Background(), path, 200*time.Millisecond); !errors.Is(err, ErrFileLockBusy) {
+		t.Fatalf("LockFile while byte 0 is held = %v, want ErrFileLockBusy", err)
+	}
+	unlockByte0()
+
+	release, err := LockFile(context.Background(), path, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lockByte0(); !errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+		t.Fatalf("taking byte 0 while LockFile holds it = %v, want ERROR_LOCK_VIOLATION", err)
+	}
+	release()
+	if err := lockByte0(); err != nil {
+		t.Fatalf("byte 0 after release: %v", err)
+	}
+	unlockByte0()
+	if info, err := os.Stat(path + LockSuffix); err != nil || info.Size() != 0 {
+		t.Fatalf("sentinel = %v, %v; want an empty file", info, err)
+	}
+}
+
+// A new folder is a temp folder moved into place with
+// MOVEFILE_WRITE_THROUGH, which returns once the move is on disk: a folder
+// made in place has no flush of its own. A folder already there is kept,
+// and a failed move leaves no temp folder.
+func TestMkdirDurableMovesANewFolderIntoPlaceWriteThrough(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "pins")
+	previous := moveFileEx
+	t.Cleanup(func() { moveFileEx = previous })
+	var flags []uint32
+	moveFileEx = func(from, to *uint16, flag uint32) error {
+		if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("the folder was there before the move: %v", err)
+		}
+		flags = append(flags, flag)
+		return previous(from, to, flag)
+	}
+	for range 2 {
+		if err := MkdirDurable(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(flags) != 1 || flags[0]&windows.MOVEFILE_WRITE_THROUGH == 0 {
+		t.Fatalf("move flags %v, want one write-through move", flags)
+	}
+	moveFileEx = func(*uint16, *uint16, uint32) error { return windows.ERROR_ACCESS_DENIED }
+	if err := MkdirDurable(filepath.Join(parent, "other")); err == nil {
+		t.Fatal("a folder was made although its move failed")
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "pins" {
+		t.Fatalf("beside the folder: %v (%v), want only pins", entries, err)
 	}
 }

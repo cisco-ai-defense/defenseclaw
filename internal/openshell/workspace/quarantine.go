@@ -76,7 +76,7 @@ func splitQuarantined(changes []TreeChange) ([]TreeChange, []Flag) {
 		if !containsStr(r.names, root) {
 			r.names = append(r.names, root)
 		}
-		if c.NewMode != "040000" && !(c.OldMode == "040000" && c.NewMode == "") {
+		if c.NewMode != "040000" && (c.OldMode != "040000" || c.NewMode != "") {
 			r.files++
 		}
 	}

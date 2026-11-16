@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
@@ -231,7 +232,7 @@ func TestVerifyD15FastPathDuringAdoption(t *testing.T) {
 		return map[string]string{"dc-a": "ready"}, true
 	}
 	f.set(sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:v2",
-		Live: sandboxrelay.LiveFields{EgressBlock: []string{"github.com"}}}, nil)
+		Floor: &config.OpenShellAdminConfig{EgressBlock: []string{"github.com"}}}, nil)
 	f.d.observeGeneration("reg-1", 3)
 	done := make(chan struct{})
 	go func() { f.confirm(); close(done) }()
@@ -262,7 +263,7 @@ func TestVerifyD15WaiterKeepsPreAdoptionDecider(t *testing.T) {
 		return f.answer, f.err
 	}
 	f.set(sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:v2",
-		Live: sandboxrelay.LiveFields{EgressBlock: []string{"github.com"}}}, nil)
+		Floor: &config.OpenShellAdminConfig{EgressBlock: []string{"github.com"}}}, nil)
 	f.d.observeGeneration("reg-1", 3)
 	slow.Store(true)
 	done := make(chan struct{})
@@ -329,7 +330,7 @@ func TestVerifyD15ConfirmSkipsSettingsRefresh(t *testing.T) {
 	}
 	// Same through the live-field change path.
 	f.set(sandboxrelay.CurrentPolicy{V: 1, Generation: 5, Digest: "sha256:v9",
-		Live: sandboxrelay.LiveFields{EgressBlock: []string{"github.com"}}}, nil)
+		Floor: &config.OpenShellAdminConfig{EgressBlock: []string{"github.com"}}}, nil)
 	f.d.observeGeneration("reg-1", 5)
 	before := settings.Load()
 	changed, off = f.confirm()
@@ -349,7 +350,7 @@ func TestVerifyD15OldPollRollback(t *testing.T) {
 	f.confirm()
 	oldA := sandboxrelay.CurrentPolicy{V: 1, Generation: 7, Digest: "sha256:v1"}
 	newA := sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:v2",
-		Live: sandboxrelay.LiveFields{EgressBlock: []string{"github.com"}}}
+		Floor: &config.OpenShellAdminConfig{EgressBlock: []string{"github.com"}}}
 	release := make(chan struct{})
 	var n atomic.Int32
 	f.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
@@ -415,7 +416,7 @@ func TestVerifyR2PollRenewsLeaseBeforeAdoption(t *testing.T) {
 	}
 	f.confirm()
 	newA := sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:v2", UpdatedAt: time.Now(),
-		Live: sandboxrelay.LiveFields{EgressBlock: []string{"github.com"}}}
+		Floor: &config.OpenShellAdminConfig{EgressBlock: []string{"github.com"}}}
 	oldB := sandboxrelay.CurrentPolicy{V: 1, Generation: 7, Digest: "sha256:v1", UpdatedAt: time.Now().Add(-time.Hour)}
 	release := make(chan struct{})
 	f.relay.current = func(id string) (sandboxrelay.CurrentPolicy, error) {

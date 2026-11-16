@@ -35,12 +35,16 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import click
+import pytest
 from click.testing import CliRunner
 from defenseclaw.commands import cmd_status
+from defenseclaw.commands.cmd_doctor import _managed_gateway_listener_evidence as _native_listener_evidence
 from defenseclaw.commands.cmd_status import _print_agents
 from defenseclaw.commands.cmd_status import status as status_cmd
 from defenseclaw.config import AIDiscoveryConfig, ApplicationProtectionConfig, GuardrailConfig
@@ -59,6 +63,43 @@ def _cfg(actives, *, modes=None, disabled=None):
     cfg.ai_discovery = AIDiscoveryConfig()
     cfg.data_dir = ""
     return cfg
+
+
+def test_json_roster_carries_healthy_manual_hook_state():
+    cfg = _cfg(["codex", "hermes"])
+    health = {"connectors": [
+        {"name": "codex", "state": "running", "source": "manual"},
+        {"name": "hermes", "state": "running", "source": "manual"},
+    ]}
+    with patch.object(cmd_status, "_agent_missing", return_value=False):
+        rows = cmd_status._connector_roster(cfg, health)
+    assert {row["name"]: row.get("state") for row in rows} == {
+        "codex": "running", "hermes": "running"
+    }
+
+
+def test_json_roster_preserves_disabled_manual_state_even_with_stale_health():
+    cfg = _cfg(["codex"], disabled={"codex"})
+    health = {"connectors": [{"name": "codex", "state": "running", "source": "manual"}]}
+    with patch.object(cmd_status, "_agent_missing", return_value=False):
+        rows = cmd_status._connector_roster(cfg, health)
+    assert rows[0]["enabled"] is False
+    assert rows[0]["state"] == "disabled"
+
+
+def test_running_cursor_json_reports_version_from_gateway_lock(tmp_path):
+    cfg = _cfg(["cursor"], modes={"cursor": "action"})
+    cfg.data_dir = str(tmp_path)
+    (tmp_path / "hook_contract_lock.json").write_text(json.dumps({
+        "connectors": {"cursor": {
+            "contract_id": "cursor-hooks-v1",
+            "raw_agent_version": "2026.10.01-14929f9",
+        }}
+    }), encoding="utf-8")
+    health = {"connectors": [{"name": "cursor", "state": "running", "source": "manual"}]}
+    with patch.object(cmd_status, "_agent_missing", return_value=False):
+        rows = cmd_status._connector_roster(cfg, health)
+    assert rows[0]["agent_version"] == "2026.10.01-14929f9"
 
 
 def _render(cfg) -> str:
@@ -93,14 +134,14 @@ class TestPrintAgentsRoster(unittest.TestCase):
     def test_roster_reports_effective_fail_mode_and_provenance(self):
         report = {
             "effective": "open",
-            "provenance": "process-env",
+            "provenance": "hook-script",
             "note": "observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed applies in action mode",
         }
         with patch.object(cmd_status, "_effective_status_fail_mode", return_value=report):
             out = _render(_cfg(["codex"], modes={"codex": "action"}))
 
         self.assertIn("fail-mode=open (observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed", out)
-        self.assertIn("provenance=process-env", out)
+        self.assertIn("provenance=hook-script", out)
 
     def test_zero_connectors_shows_no_active(self):
         out = _render(_cfg([]))
@@ -154,6 +195,59 @@ def _render_live(cfg, health: dict) -> str:
     with contextlib.redirect_stdout(buf):
         cmd_status._print_agents(cfg, health=health)
     return buf.getvalue()
+
+
+def test_refused_scoped_hook_credential_degrades_only_its_connector(tmp_path):
+    # GAP-0821: the gateway rejects a well-formed Claude token at POSIX 0640
+    # (or untrusted Windows custody), even while /status says running.
+    from defenseclaw import hook_integrity
+    from defenseclaw.commands import cmd_doctor
+
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    token = hooks / ".hook-claudecode.token"
+    token.write_text("a" * 64 + "\n", encoding="ascii")
+    cfg = _cfg(["claudecode", "codex"], modes={"claudecode": "action", "codex": "action"})
+    cfg.data_dir = str(tmp_path)
+    health = {"connectors": [
+        {"name": "claudecode", "state": "running", "source": "manual"},
+        {"name": "codex", "state": "running", "source": "manual"},
+    ]}
+    trust = type("Trust", (), {"trusted": True})()
+    fault = True
+
+    def gateway_verdict(*_args, **_kwargs):
+        if os.name != "nt":
+            assert token.stat().st_mode & 0o777 == (0o640 if fault else 0o600)
+        return (401 if fault else 405, "")
+
+    with (
+        patch.object(cmd_doctor, "_trusted_gateway_listener", return_value=trust),
+        patch.object(cmd_doctor, "_http_probe", side_effect=gateway_verdict) as probe,
+        # The hook credential is under test. On Windows status also asks Doctor's
+        # native registration check (rel-1-0-2 GAP-0645), which has its own tests;
+        # this fixture has no ~/.claude/settings.json, so it reads healthy here.
+        patch.object(hook_integrity, "_windows_native_problem", return_value=None),
+    ):
+        if os.name != "nt":
+            token.chmod(0o640)
+        out = _render_live(cfg, health)
+        rows = {row["name"]: row for row in cmd_status._connector_roster(cfg, health)}
+        claude = out.split("Claude Code (claudecode)", 1)[1].split("Codex (codex)", 1)[0]
+        assert "DEGRADED" in claude and "hook credential" in claude
+        assert "DEGRADED" not in out.split("Codex (codex)", 1)[1]
+        assert rows["claudecode"]["state"] == "degraded"
+        assert "hook credential" in rows["claudecode"]["runtime_detail"]
+        assert rows["codex"]["state"] == "running"
+        assert probe.call_count == 2
+
+        fault = False
+        if os.name != "nt":
+            token.chmod(0o600)
+        out = _render_live(cfg, health)
+        rows = {row["name"]: row for row in cmd_status._connector_roster(cfg, health)}
+        assert "DEGRADED" not in out
+        assert rows["claudecode"]["state"] == "running"
 
 
 @contextlib.contextmanager
@@ -283,31 +377,7 @@ class TestPrintAgentsLiveCounters(unittest.TestCase):
         self.assertIn("source=automatic", out)
         self.assertIn("requests: 2", out)
 
-    def test_omnigent_running_adapter_is_degraded_when_effective_policy_is_unverified(self):
-        health = {"connectors": [{"name": "omnigent", "state": "running", "requests": 0}]}
-        cfg = _cfg(["omnigent"], modes={"omnigent": "action"})
-        with patch(
-            "defenseclaw.commands.cmd_doctor._omnigent_runtime_readiness",
-            return_value=("warn", "server record is stale; effective policy config is unverified"),
-        ):
-            out = _render_live(cfg, health)
 
-        self.assertIn("DEGRADED", out)
-        self.assertNotIn("RUNNING", out)
-        self.assertIn("effective policy config is unverified", out)
-
-    def test_omnigent_verified_native_degraded_policy_remains_running(self):
-        health = {"connectors": [{"name": "omnigent", "state": "running", "requests": 0}]}
-        cfg = _cfg(["omnigent"], modes={"omnigent": "action"})
-        with patch(
-            "defenseclaw.commands.cmd_doctor._omnigent_runtime_readiness",
-            return_value=("pass", "live effective config verified through --config"),
-        ):
-            out = _render_live(cfg, health)
-
-        self.assertIn("RUNNING", out)
-        self.assertNotIn("DEGRADED", out)
-        self.assertIn("live effective config verified", out)
 
     def test_opencode_running_requires_fresh_current_generation_heartbeat(self):
         now = datetime.now(timezone.utc)
@@ -489,84 +559,6 @@ class TestOpenCodeRuntimeTruth(unittest.TestCase):
         self.assertIn("gateway status is unavailable", detail)
 
 
-class TestOmnigentJsonReadinessParity(unittest.TestCase):
-    def test_manual_plural_roster_degrades_stale_pid_and_preserves_opencode_truth(self):
-        now = datetime.now(timezone.utc)
-        health = {
-            "started_at": (now - timedelta(hours=1)).isoformat(),
-            "connectors": [
-                {"name": "omnigent", "state": "running", "source": "manual"},
-                {
-                    "name": "opencode",
-                    "state": "running",
-                    "source": "manual",
-                    "load_heartbeat_at": now.isoformat(),
-                },
-            ],
-        }
-        cfg = _cfg(["omnigent", "opencode"])
-        detail = "server record is stale; effective policy config is unverified"
-        with patch(
-            "defenseclaw.commands.cmd_doctor._omnigent_runtime_readiness",
-            return_value=("warn", detail),
-        ) as readiness:
-            rows = cmd_status._connector_roster(cfg, health=health)
-
-        by_name = {row["name"]: row for row in rows}
-        self.assertEqual(by_name["omnigent"]["state"], "degraded")
-        self.assertEqual(by_name["omnigent"]["readiness_detail"], detail)
-        self.assertEqual(by_name["omnigent"]["source"], "manual")
-        self.assertEqual(by_name["opencode"]["state"], "running")
-        self.assertIn("authenticated load heartbeat is fresh", by_name["opencode"]["runtime_detail"])
-        readiness.assert_called_once_with(cfg)
-
-    def test_automatic_singular_roster_degrades_live_config_mismatch(self):
-        health = {
-            "connector": {
-                "name": "omnigent",
-                "state": "running",
-                "source": "automatic",
-            }
-        }
-        cfg = _cfg([])
-        detail = "live --config selects C:\\other\\config.yaml, not managed C:\\managed\\config.yaml"
-        with patch(
-            "defenseclaw.commands.cmd_doctor._omnigent_runtime_readiness",
-            return_value=("fail", detail),
-        ):
-            rows = cmd_status._connector_roster(cfg, health=health)
-
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["name"], "omnigent")
-        self.assertEqual(rows[0]["source"], "automatic")
-        self.assertEqual(rows[0]["state"], "degraded")
-        self.assertEqual(rows[0]["readiness_detail"], detail)
-
-    def test_verified_runtime_remains_running_in_json_roster(self):
-        health = {"connectors": [{"name": "omnigent", "state": "running"}]}
-        cfg = _cfg(["omnigent"])
-        detail = "live effective config verified through --config"
-        with patch(
-            "defenseclaw.commands.cmd_doctor._omnigent_runtime_readiness",
-            return_value=("pass", detail),
-        ):
-            rows = cmd_status._connector_roster(cfg, health=health)
-
-        self.assertEqual(rows[0]["state"], "running")
-        self.assertEqual(rows[0]["readiness_detail"], detail)
-
-    def test_unavailable_readiness_is_degraded_without_failing_status(self):
-        with patch(
-            "defenseclaw.commands.cmd_doctor._omnigent_runtime_readiness",
-            side_effect=OSError("evidence unavailable"),
-        ):
-            state, detail = cmd_status._omnigent_effective_runtime_state(
-                _cfg(["omnigent"]),
-                "running",
-            )
-
-        self.assertEqual(state, "degraded")
-        self.assertIn("policy readiness unavailable", detail)
 
 
 class TestStatusRuntimeProcessIdentity(unittest.TestCase):
@@ -780,6 +772,51 @@ class TestStatusDbErrorSurfacing(unittest.TestCase):
         self.assertNotIn("disk I/O error", result.output)
 
 
+class TestStatusMovedAuditStore(unittest.TestCase):
+    """rel-1-0-3:GAP-0105 and GAP-0106: status said nothing about a corrupt
+    store the gateway moved aside, and a file that only had an archive's name
+    must not take the archive's place."""
+
+    def setUp(self):
+        self.app, self.tmp_dir, self.db_path = make_app_context()
+
+    def tearDown(self):
+        cleanup_app(self.app, self.db_path, self.tmp_dir)
+
+    def _invoke(self):
+        with patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=None):
+            return CliRunner().invoke(status_cmd, [], obj=self.app, catch_exceptions=False)
+
+    def test_status_names_the_archive_with_the_copy_first_hint(self):
+        from defenseclaw.commands import cmd_doctor
+
+        db = str(self.app.cfg.audit_db)
+        archive = Path(db + ".corrupt-20261018T021344Z-4bfc16b6-f3ca-490f-98a0-71b4f32de5ce")
+        others = [Path(db + ".corrupt-20261018T021344Z"), Path(db + ".corrupt-20261018T021513Z")]
+        for path in (archive, Path(str(archive) + "-wal"), Path(str(archive) + "-shm"), *others):
+            path.write_bytes(b"x")
+        Path(str(archive) + ".carryover.json").write_text(
+            '{"carried_over": 0, "error": "file is not a database"}', encoding="utf-8"
+        )
+
+        result = self._invoke()
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        output = " ".join(click.unstyle(result.output).split())
+        self.assertIn(f"moved to {archive} together with its -wal and -shm files on ", output)
+        self.assertIn("0 entries were carried over and earlier blocks no longer apply", output)
+        self.assertIn(cmd_doctor._archive_recovery_hint(archive), output)
+        self.assertIn("write the SQLite header back on the copy, never on the archive", output)
+        self.assertNotIn(f"sqlite3 {archive} .recover", output)
+        for other in others:
+            self.assertNotIn(f"{other} ", output)
+
+    def test_status_is_quiet_without_a_moved_store(self):
+        result = self._invoke()
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertNotIn("moved to", result.output)
+
+
 class TestStatusHeaderAndConfigProblems(unittest.TestCase):
     """GAP-1789 (version, sidecar PID/uptime/API, footer) and GAP-1788."""
 
@@ -798,6 +835,66 @@ class TestStatusHeaderAndConfigProblems(unittest.TestCase):
         self.assertEqual(detail, " (PID 4242, up 1h 2m, API http://127.0.0.1:19030)")
         self.assertEqual(cmd_status._sidecar_running_detail({}, "", 0), "")
 
+    def test_gap0613_status_names_unavailable_admission_connector(self):
+        with patch.object(cmd_status, "_status_row") as row:
+            cmd_status._print_watch_root_coverage({"watcher": {"details": {
+                "watch_roots_unavailable": 1, "admission_scanning_off": ["claudecode"]
+            }}})
+        self.assertEqual(row.call_args.args[0], "Admission scan")
+        self.assertIn("off for claudecode", row.call_args.args[1])
+
+    def test_gap0905_status_names_the_writable_folder_and_the_chmod(self):
+        details = {
+            "watch_roots_unavailable": 1,
+            "admission_scanning_off": ["claudecode"],
+            "admission_root_writable_folders": ["/home/u/my dotfiles", "/home/u/shared"],
+        }
+        with patch.object(cmd_status, "_status_row") as row:
+            cmd_status._print_watch_root_coverage({"watcher": {"details": details}})
+        text = row.call_args.args[1]
+        self.assertIn("off for claudecode", text)
+        self.assertIn("'/home/u/my dotfiles', /home/u/shared can be written by another account", text)
+        self.assertIn("chmod go-w '/home/u/my dotfiles' /home/u/shared", text)
+
+    def test_gap0905_status_warns_about_a_root_watched_closely(self):
+        details = {"admission_root_rescan_folders": ["/home/u/dotfiles"]}
+        with patch.object(cmd_status, "_status_row") as row:
+            cmd_status._print_watch_root_coverage({"watcher": {"details": details}})
+        self.assertEqual(row.call_args.args[0], "Admission scan")
+        text = row.call_args.args[1]
+        self.assertIn("on, watched closely", text)
+        self.assertIn("/home/u/dotfiles is group-writable and pam_group is loaded", text)
+        self.assertIn("chmod g-w /home/u/dotfiles", text)
+        self.assertNotIn("off", text)
+
+    def test_gap0905_status_names_both_folders_when_one_root_is_off_and_another_is_watched_closely(self):
+        details = {
+            "watch_roots_unavailable": 1,
+            "admission_scanning_off": ["claudecode"],
+            "admission_root_writable_folders": ["/home/u/shared-dotfiles"],
+            "admission_root_rescan_folders": ["/home/u/dotfiles"],
+        }
+        with patch.object(cmd_status, "_status_row") as row:
+            cmd_status._print_watch_root_coverage({"watcher": {"details": details}})
+        text = " ".join(call.args[1] for call in row.call_args_list)
+        self.assertIn("chmod go-w /home/u/shared-dotfiles", text)
+        self.assertIn("chmod g-w /home/u/dotfiles", text)
+
+    def test_gap0905_status_prints_nothing_for_a_root_without_the_warning(self):
+        with patch.object(cmd_status, "_status_row") as row:
+            cmd_status._print_watch_root_coverage({"watcher": {"details": {"skill_dirs": 2}}})
+        row.assert_not_called()
+
+    def test_gap0905_rescan_hint_ignores_malformed_folder_lists(self):
+        for value in (None, "/home/u/x", 7, [], [None, 3, "", "/home/u/x\x1b[31m"]):
+            with self.subTest(value=value):
+                self.assertEqual(cmd_status._watch_root_rescan_hint({"admission_root_rescan_folders": value}), "")
+
+    def test_gap0905_hint_ignores_malformed_folder_lists(self):
+        for value in (None, "/home/u/x", 7, [], [None, 3, "", "/home/u/x\x1b[31m"]):
+            with self.subTest(value=value):
+                self.assertEqual(cmd_status._watch_root_fix_hint({"admission_root_writable_folders": value}), "")
+
     def test_header_names_version_and_footer_skips_status_itself(self):
         from defenseclaw import __version__
 
@@ -814,6 +911,7 @@ class TestStatusHeaderAndConfigProblems(unittest.TestCase):
         self.assertIn("Sidecar", result.output)
         self.assertIn("not checked while config.yaml is invalid", result.output)
         self.assertNotIn("not running; start it", result.output)
+        self.assertNotIn("not enforced while the sidecar is stopped", result.output)
         self.assertIn("Enforcement", result.output)
         as_json = self._invoke(["--json"])
         self.assertEqual(as_json.exit_code, 1, msg=as_json.output)
@@ -876,6 +974,8 @@ class TestStatusJson(unittest.TestCase):
         ):
             self.assertIn(key, doc)
         self.assertFalse(doc["sidecar"]["running"])
+        self.assertIs(doc["sidecar"]["running"], False)
+        self.assertIn("no gateway process or API listener", doc["sidecar"]["reason"])
         self.assertEqual(doc["application_protection"]["guardrail_mode"], "observe")
         self.assertFalse(doc["application_protection"]["require_trusted_binary_paths"])
         self.assertEqual(doc["deployment_mode"], "managed_enterprise")
@@ -883,6 +983,37 @@ class TestStatusJson(unittest.TestCase):
         delivery = json.dumps(doc["native_otlp_delivery"], sort_keys=True)
         self.assertNotIn(self.tmp_dir, delivery)
         self.assertNotIn("token", delivery.lower())
+
+    def test_json_names_a_peer_holding_the_gateway_port(self):
+        self.app.cfg.gateway.api_port = 19081
+        with patch("defenseclaw.commands.cmd_doctor._foreign_gateway_port_holder", return_value="a process of another account"):
+            result = self._invoke_json()
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        sidecar = json.loads(result.output)["sidecar"]
+        self.assertIsNone(sidecar["running"])
+        self.assertIn("port 19081 is held by a process of another account", sidecar["reason"])
+
+    def test_text_and_json_name_this_homes_root_gateway(self):
+        from defenseclaw.commands.cmd_doctor import ROOT_GATEWAY_REASON
+
+        with (
+            patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=None),
+            patch("defenseclaw.commands.cmd_doctor._foreign_gateway_port_holder", return_value=ROOT_GATEWAY_REASON),
+        ):
+            as_json = CliRunner().invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+            as_text = CliRunner().invoke(status_cmd, [], obj=self.app, catch_exceptions=False)
+        self.assertEqual(as_json.exit_code, 0, as_json.output)
+        self.assertEqual(as_text.exit_code, 0, as_text.output)
+        reason = json.loads(as_json.output)["sidecar"]["reason"]
+        for shown in (reason, as_text.output):
+            self.assertIn(ROOT_GATEWAY_REASON, shown)
+            if sys.platform.startswith("win"):
+                # GAP-0747: the Windows remedy is an elevated PowerShell prompt, never sudo.
+                self.assertIn("elevated PowerShell prompt", shown)
+                self.assertNotIn("sudo", shown)
+            else:
+                self.assertIn("sudo env DEFENSECLAW_HOME=", shown)
+            self.assertNotIn("--api-port", shown)
 
     def test_json_roster_has_per_connector_mode(self):
         result = self._invoke_json()
@@ -944,6 +1075,144 @@ class TestStatusJson(unittest.TestCase):
         self.assertIsNone(doc["sidecar"]["running"])
         self.assertNotIn("policy", doc)
 
+    def test_json_does_not_report_a_live_gateway_stopped_when_status_is_unreadable(self):
+        with (
+            patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=None),
+            patch.object(cmd_status, "_live_gateway_pid", return_value=4242),
+            patch.object(cmd_status, "_status_refused_detail", return_value="the gateway token was rejected"),
+            patch("defenseclaw.commands.cmd_doctor._foreign_gateway_port_holder", return_value=""),
+        ):
+            result = CliRunner().invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        sidecar = json.loads(result.output)["sidecar"]
+        self.assertIsNone(sidecar["running"])
+        self.assertIn("token was rejected", sidecar["reason"])
+
+    def test_json_sidecar_names_foreign_port_holder_without_claiming_gateway_stopped(self):
+        with (
+            patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=None),
+            patch.object(cmd_status, "_live_gateway_pid", return_value=0),
+            patch("defenseclaw.commands.cmd_doctor._foreign_gateway_port_holder", return_value="PID 4343 (python3)"),
+        ):
+            result = CliRunner().invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        sidecar = json.loads(result.output)["sidecar"]
+        self.assertIsNone(sidecar["running"])
+        self.assertIn("port", sidecar["reason"])
+        self.assertIn("PID 4343 (python3)", sidecar["reason"])
+
+    def test_json_does_not_report_stopped_when_listener_probe_fails(self):
+        with (
+            patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=None),
+            patch.object(cmd_status, "_live_gateway_pid", return_value=0),
+            patch("defenseclaw.commands.cmd_doctor._foreign_gateway_port_holder", return_value=""),
+            patch(
+                "defenseclaw.commands.cmd_doctor._managed_gateway_listener_evidence",
+                return_value=MagicMock(status="unavailable", pid=0, reason="listener probe failed"),
+            ),
+        ):
+            result = CliRunner().invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+            human = CliRunner().invoke(status_cmd, [], obj=self.app, catch_exceptions=False)
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(human.exit_code, 0, msg=human.output)
+        sidecar = json.loads(result.output)["sidecar"]
+        self.assertIsNone(sidecar["running"])
+        self.assertIn("listener probe failed", sidecar["reason"])
+        self.assertIn("listener probe failed", human.output)
+        self.assertNotIn("not running; start it", human.output)
+
+        from defenseclaw.commands import cmd_doctor
+
+        native = MagicMock(status="unavailable", reason="Linux listener table unreadable")
+        with (
+            patch.object(cmd_doctor, "_linux_gateway_listener_evidence", return_value=native),
+            patch.object(cmd_doctor, "_lsof_gateway_listener_evidence", return_value=MagicMock(status="missing")),
+        ):
+            self.assertIs(
+                _native_listener_evidence(self.app.cfg.gateway.api_port, platform_name="linux"),
+                native,
+            )
+
+    def test_status_does_not_call_a_hidden_macos_listener_stopped(self):
+        with (
+            patch.object(cmd_status, "sys", SimpleNamespace(platform="darwin"), create=True),
+            patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=None),
+            patch.object(cmd_status, "_live_gateway_pid", return_value=0),
+            patch("defenseclaw.commands.cmd_doctor._foreign_gateway_port_holder", return_value=""),
+            patch(
+                "defenseclaw.commands.cmd_doctor._managed_gateway_listener_evidence",
+                return_value=MagicMock(status="missing", pid=0, reason="no visible listener"),
+            ),
+            patch.object(cmd_status, "socket", create=True) as status_socket,
+        ):
+            connect = status_socket.create_connection
+            runner = CliRunner()
+            as_json = runner.invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+            as_text = runner.invoke(status_cmd, [], obj=self.app, catch_exceptions=False)
+
+            self.assertEqual(as_json.exit_code, 0, msg=as_json.output)
+            self.assertIsNone(json.loads(as_json.output)["sidecar"]["running"])
+            self.assertIn("API port answers", json.loads(as_json.output)["sidecar"]["reason"])
+            self.assertIn("held by another account", json.loads(as_json.output)["sidecar"]["reason"])
+            self.assertIn("API port answers", as_text.output)
+            self.assertNotIn("not running; start it", as_text.output)
+            self.assertNotIn("not enforced while the sidecar is stopped", as_text.output)
+            self.assertEqual(connect.call_count, 2)
+
+            connect.reset_mock(side_effect=True)
+            connect.side_effect = ConnectionRefusedError("connection refused")
+            stopped_json = runner.invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+            stopped_text = runner.invoke(status_cmd, [], obj=self.app, catch_exceptions=False)
+
+            self.assertEqual(stopped_json.exit_code, 0, msg=stopped_json.output)
+            self.assertIs(json.loads(stopped_json.output)["sidecar"]["running"], False)
+            self.assertIn("not running; start it", stopped_text.output)
+
+            connect.side_effect = TimeoutError("loopback probe timed out")
+            uncertain_json = runner.invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+            uncertain_text = runner.invoke(status_cmd, [], obj=self.app, catch_exceptions=False)
+
+            self.assertIsNone(json.loads(uncertain_json.output)["sidecar"]["running"])
+            self.assertIn("state is unconfirmed", uncertain_text.output)
+            self.assertNotIn("not running; start it", uncertain_text.output)
+
+    def test_status_inside_a_sandbox_does_not_call_the_hidden_gateway_stopped(self):
+        # GAP-2206: Codex's workspace sandbox (another user namespace) hides the
+        # host's gateway process and listener; status said "not running".
+        from defenseclaw import file_permissions
+
+        for sandboxed in (True, False):
+            with (
+                patch.object(cmd_status, "sys", SimpleNamespace(platform="linux"), create=True),
+                patch.object(file_permissions, "in_child_user_namespace", return_value=sandboxed, create=True),
+                patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=None),
+                patch.object(cmd_status, "_live_gateway_pid", return_value=0),
+                patch("defenseclaw.commands.cmd_doctor._foreign_gateway_port_holder", return_value=""),
+                patch(
+                    "defenseclaw.commands.cmd_doctor._managed_gateway_listener_evidence",
+                    return_value=MagicMock(status="missing", pid=0, reason=""),
+                ),
+            ):
+                runner = CliRunner()
+                as_json = runner.invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+                as_text = runner.invoke(status_cmd, [], obj=self.app, catch_exceptions=False)
+
+            self.assertEqual(as_json.exit_code, 0, msg=as_json.output)
+            sidecar = json.loads(as_json.output)["sidecar"]
+            if sandboxed:
+                self.assertIsNone(sidecar["running"])
+                self.assertIn("not visible from this sandbox", sidecar["reason"])
+                self.assertIn("not visible from this sandbox", as_text.output)
+                self.assertIn("outside the sandbox", as_text.output)
+                self.assertNotIn("not running; start it", as_text.output)
+                self.assertNotIn("not enforced while the sidecar is stopped", as_text.output)
+            else:
+                self.assertIs(sidecar["running"], False)
+                self.assertIn("not running; start it", as_text.output)
+
     def test_json_db_error_is_explicit_null_not_dropped(self):
         self.app.store.get_counts = MagicMock(side_effect=RuntimeError("locked"))
         result = self._invoke_json()
@@ -988,7 +1257,16 @@ class TestStatusProfileIdentity(unittest.TestCase):
                 "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
                 return_value=MagicMock(trusted=True, pid=4242, detail=""),
             )
+            # The test varies the configured port in memory for each fake
+            # endpoint; the client now reloads that configuration to prove it.
+            config_patch = patch("defenseclaw.config.load", return_value=app.cfg)
+            # This fixture serves both endpoints in the test account. Socket
+            # ownership is covered separately; this case exercises profile
+            # binding after that connected-peer check succeeds.
+            socket_patch = patch("defenseclaw.gateway._verify_connected_gateway_socket", return_value=None)
             listener_patch.start()
+            config_patch.start()
+            socket_patch.start()
             try:
                 with _owned_status_endpoint(str(ambient_home), foreign_health, owned_token) as (port, seen):
                     app.cfg.gateway.api_port = port
@@ -1007,6 +1285,7 @@ class TestStatusProfileIdentity(unittest.TestCase):
                 doc = json.loads(result.output)
                 rendered = json.dumps(doc)
                 self.assertFalse(doc["sidecar"]["running"])
+                self.assertIs(doc["sidecar"]["running"], False)
                 self.assertNotIn(foreign_marker, rendered)
                 self.assertNotIn(str(ambient_home), rendered)
                 self.assertEqual(
@@ -1038,6 +1317,8 @@ class TestStatusProfileIdentity(unittest.TestCase):
                 self.assertTrue(doc["sidecar"]["running"])
                 self.assertIn(matching_marker, json.dumps(doc))
             finally:
+                socket_patch.stop()
+                config_patch.stop()
                 listener_patch.stop()
                 cleanup_app(app, db_path, app_tmp)
 
@@ -1078,12 +1359,208 @@ def test_status_names_a_connector_whose_setup_failed_at_gateway_start():
     # GAP-1937: the Agents count matches `defenseclaw-gateway status`.
     agents_row = next(line for line in out.splitlines() if "Agents" in line)
     assert "1 active, 1 not running" in agents_row
+    roster = {row["name"]: row for row in cmd_status._connector_roster(cfg, health)}
+    assert roster["hermes"]["state"] == "not running"
+    assert "not enforced" in roster["hermes"]["runtime_detail"]
+    assert roster["codex"]["state"] == "running"
 
 
-def test_status_marks_missing_claude_binary_as_not_detected(monkeypatch):
+def test_status_keeps_live_claude_code_health_without_claude_on_path(monkeypatch):
+    # GAP-1331/GAP-1333: Claude Code runs from an absolute path or an IDE and
+    # reports running; the status shell has no claude on PATH. Status keeps
+    # the gateway's live state and count instead of the caller's PATH.
     monkeypatch.setattr(cmd_status.shutil, "which", lambda name: None if name == "claude" else "/bin/true")
+    monkeypatch.setattr("defenseclaw.doctor_health._last_scan_found_no_agent", lambda data_dir, connector: False)
     cfg = _cfg(["claudecode"])
     out = _render_live(cfg, {"connectors": [{"name": "claudecode", "state": "running"}]})
     claude_row = next(line for line in out.splitlines() if "Claude Code (claudecode)" in line)
-    assert "not detected" in claude_row.lower()
-    assert "RUNNING" not in claude_row
+    assert "RUNNING" in claude_row and "not detected" not in claude_row.lower()
+    agents_row = next(line for line in out.splitlines() if "Agents" in line)
+    assert "1 active" in agents_row and "not running" not in agents_row
+
+
+def test_status_marks_claude_code_off_when_discovery_found_no_agent(monkeypatch):
+    # The gateway's discovery scan found no Claude Code installation and none
+    # is on PATH: the staged connector is shown off, as for other connectors.
+    monkeypatch.setattr(cmd_status.shutil, "which", lambda name: None if name == "claude" else "/bin/true")
+    monkeypatch.setattr("defenseclaw.doctor_health._last_scan_found_no_agent", lambda data_dir, connector: True)
+    monkeypatch.setattr("defenseclaw.inventory.agent_discovery.binary_on_path", lambda connector: False)
+    monkeypatch.setattr("defenseclaw.sandbox_images.verified_harness_contract", lambda data_dir, connector: None)
+    cfg = _cfg(["claudecode"])
+    out = _render_live(cfg, {"connectors": [{"name": "claudecode", "state": "running"}]})
+    claude_row = next(line for line in out.splitlines() if "Claude Code (claudecode)" in line)
+    assert "is not installed" in claude_row and "RUNNING" not in claude_row
+
+
+def _write_negative_scan(data_dir, connector, scanned_at):
+    import json as _json
+
+    from defenseclaw.inventory.agent_discovery import _cache_path
+
+    path = _cache_path(data_dir=str(data_dir))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_json.dumps({"scanned_at": scanned_at, "agents": {connector: {"installed": False, "binary_path": ""}}}))
+
+
+@pytest.mark.parametrize(
+    "scanned_at,activity,missing",
+    [
+        # A hook call after the negative scan: the agent runs (absolute path,
+        # IDE), so status keeps the live row and count (1.0.4 review).
+        ("2026-10-20T09:00:00Z", "2026-10-21T08:27:20.123456789Z", False),
+        # A scan time that cannot be read cannot outrank a live call.
+        ("", "2026-10-21T08:27:20Z", False),
+        # The scan came after the last call (the agent was removed since).
+        ("2026-10-21T09:00:00Z", "2026-10-21T08:27:20Z", True),
+        # No call recorded: the scan stands.
+        ("2026-10-20T09:00:00Z", None, True),
+        # An unreadable activity time is no evidence.
+        ("2026-10-20T09:00:00Z", "yesterday", True),
+    ],
+)
+def test_status_hook_activity_after_a_negative_scan_outranks_it(monkeypatch, tmp_path, scanned_at, activity, missing):
+    monkeypatch.setattr(cmd_status.shutil, "which", lambda name: None if name == "claude" else "/bin/true")
+    monkeypatch.setattr("defenseclaw.inventory.agent_discovery.binary_on_path", lambda connector: False)
+    monkeypatch.setattr("defenseclaw.sandbox_images.verified_harness_contract", lambda data_dir, connector: None)
+    cfg = _cfg(["claudecode"])
+    cfg.data_dir = str(tmp_path)
+    _write_negative_scan(tmp_path, "claudecode", scanned_at)
+    row = {"name": "claudecode", "state": "running", "requests": 3}
+    if activity is not None:
+        row["last_activity_at"] = activity
+    out = _render_live(cfg, {"connectors": [row]})
+    claude_row = next(line for line in out.splitlines() if "Claude Code (claudecode)" in line)
+    agents_row = next(line for line in out.splitlines() if "Agents" in line)
+    if missing:
+        assert "is not installed" in claude_row and "RUNNING" not in claude_row, out
+        assert "1 not running" in agents_row, out
+    else:
+        assert "RUNNING" in claude_row and "is not installed" not in claude_row, out
+        assert "1 active" in agents_row and "not running" not in agents_row, out
+
+
+def test_status_names_the_agent_settings_fix_for_a_connector_the_gateway_refused():
+    # GAP-0578: `codex features disable hooks`, then a restart. Rerunning
+    # setup cannot help, so status names the fix the gateway gave.
+    cfg = _cfg(["codex", "hermes"], modes={"codex": "action"})
+    reason = (
+        "Codex hooks are turned off in /home/u/.codex/config.toml ([features] hooks = false), "
+        "so Codex runs no DefenseClaw hook; turn them back on with: codex features enable hooks"
+    )
+    health = {
+        "connectors": [{"name": "hermes", "state": "running"}],
+        "guardrail": {"state": "running", "details": {
+            "connectors_not_started": ["codex"],
+            "connectors_refused_by_agent_settings": {"codex": reason},
+        }},
+    }
+    out = " ".join(_render_live(cfg, health).split())
+    codex_block = out[out.index("Codex (codex)"):out.index("Hermes (hermes)")]
+    assert "NOT RUNNING" in codex_block
+    assert "codex features enable hooks" in codex_block
+    assert "defenseclaw setup codex" not in codex_block
+    assert "1 active, 1 not running" in out
+
+
+def test_status_uses_gateway_removed_agent_reason_in_text_and_json():
+    # A stale local missing-agent cache cannot hide the gateway's named fix.
+    cfg = _cfg(["amp", "codex"], modes={"amp": "action", "codex": "action"})
+    reason = (
+        "the agent is not installed for this account (its executable C:\\amp\\amp.exe is gone); "
+        "reinstall it and run: defenseclaw-gateway restart, or remove the connector: defenseclaw setup remove amp"
+    )
+    health = {
+        "connectors": [{"name": "codex", "state": "running"}],
+        "guardrail": {"state": "running", "details": {
+            "connectors_not_started": ["amp"],
+            "connectors_refused_by_agent_settings": {"amp": reason},
+        }},
+    }
+    with patch.object(cmd_status, "_agent_missing", side_effect=lambda cfg, name, live: name == "amp"):
+        text = " ".join(_render_live(cfg, health).split())
+        rows = {row["name"]: row for row in cmd_status._connector_roster(cfg, health)}
+    amp_text = text[text.index("Amp (amp)"):text.index("Codex (codex)")]
+    assert "NOT RUNNING" in amp_text and "defenseclaw-gateway restart" in amp_text
+    assert "defenseclaw setup amp" not in amp_text
+    assert rows["amp"]["state"] == "not running"
+    assert rows["amp"]["runtime_detail"] == reason
+    assert rows["codex"]["state"] == "running"
+
+
+_CUSTODY_FOLDER = "/home/lane/.config/opencode"
+_CUSTODY_REASON = f"validate plugin directory custody: {_CUSTODY_FOLDER} is group/other writable"
+
+
+def _refused_health(name: str, reason: str, repair: dict | None) -> dict:
+    details: dict = {"connectors_not_started": [name], "connectors_not_started_reasons": {name: reason}}
+    if repair is not None:
+        details["connectors_not_started_repairs"] = {name: repair}
+    return {
+        "connectors": [{"name": "codex", "state": "running"}],
+        "guardrail": {"state": "running", "details": details},
+    }
+
+
+def test_status_names_the_folder_and_fix_for_an_opencode_the_gateway_refused():
+    # A custody-refused OpenCode has no connector row; status called it
+    # "DEGRADED runtime load unverified" and hid the folder and the fix.
+    cfg = _cfg(["codex", "opencode"], modes={"codex": "action", "opencode": "action"})
+    fix = f"chmod go-w {_CUSTODY_FOLDER}"
+    health = _refused_health("opencode", _CUSTODY_REASON, {"fix": fix})
+    out = " ".join(_render_live(cfg, health).split())
+    block = out[out.index("OpenCode (opencode)"):]
+    assert "NOT RUNNING" in block and "DEGRADED" not in block
+    assert "runtime load unverified" not in block
+    assert _CUSTODY_FOLDER in block and fix in block and "defenseclaw setup opencode" in block
+    rows = {row["name"]: row for row in cmd_status._connector_roster(cfg, health)}
+    assert rows["opencode"]["state"] == "not running"
+    assert _CUSTODY_FOLDER in rows["opencode"]["runtime_detail"] and fix in rows["opencode"]["runtime_detail"]
+    assert "runtime load unverified" not in rows["opencode"]["runtime_detail"]
+
+
+def test_status_gives_every_refused_connector_its_recorded_reason_and_fix():
+    # The same renderer serves every connector, not only OpenCode.
+    cfg = _cfg(["codex", "hermes"], modes={"codex": "action", "hermes": "action"})
+    health = _refused_health("hermes", "hermes config is busy", {"fix": "close Hermes", "by_hand": "then restart it"})
+    out = " ".join(_render_live(cfg, health).split())
+    block = out[out.index("Hermes (hermes)"):]
+    assert "hermes config is busy; fix: close Hermes; then by hand: then restart it" in block
+    detail = cmd_status._connector_roster(cfg, health)
+    hermes = next(row for row in detail if row["name"] == "hermes")["runtime_detail"]
+    assert "hermes config is busy; fix: close Hermes" in hermes
+
+
+def test_status_without_a_recorded_reason_still_points_to_the_gateway_log():
+    # Benign twin: an older gateway that records no reason keeps the generic line.
+    cfg = _cfg(["codex", "opencode"], modes={"codex": "action", "opencode": "action"})
+    health = {
+        "connectors": [{"name": "codex", "state": "running"}],
+        "guardrail": {"state": "running", "details": {"connectors_not_started": ["opencode"]}},
+    }
+    out = " ".join(_render_live(cfg, health).split())
+    block = out[out.index("OpenCode (opencode)"):]
+    assert "NOT RUNNING" in block and "see gateway.log, then run: defenseclaw setup opencode" in block
+
+
+def test_status_still_calls_an_opencode_with_no_row_and_no_refusal_unverified():
+    # Benign twin: with no refusal recorded, the runtime truth is unchanged.
+    cfg = _cfg(["codex", "opencode"], modes={"codex": "action", "opencode": "action"})
+    health = {"connectors": [{"name": "codex", "state": "running"}], "guardrail": {"state": "running", "details": {}}}
+    out = " ".join(_render_live(cfg, health).split())
+    block = out[out.index("OpenCode (opencode)"):]
+    assert "runtime load unverified: authenticated status has no OpenCode connector row" in block
+
+
+def test_policy_row_names_the_config_generation_that_survives_a_restart(capsys) -> None:
+    # GAP-0642: the row named policy.generation, which counts the rebuilds of
+    # the running gateway and starts again at 1 after a restart, while
+    # config.generation.json kept counting.
+    from defenseclaw.commands import cmd_status
+
+    digest = "sha256:" + "c" * 64
+    cmd_status._print_policy({"policy": {"effective_digest": digest, "generation": 1, "config_generation": 18}})
+    cmd_status._print_policy({"policy": {"effective_digest": digest, "generation": 3}})
+    rows = [line for line in capsys.readouterr().out.splitlines() if "Policy" in line]
+    assert len(rows) == 2, rows
+    assert rows[0].rstrip().endswith("config generation 18, sha256:cccccccccccc"), rows
+    assert rows[1].rstrip().endswith("sha256:cccccccccccc") and "generation" not in rows[1], rows

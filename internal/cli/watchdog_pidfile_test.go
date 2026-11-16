@@ -30,6 +30,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -355,5 +356,18 @@ func TestWatchdogForegroundAcquireErrorNamesRunningWatchdog(t *testing.T) {
 	want := "the watchdog already runs in the background (PID 4242). Stop it first to run it in the foreground: defenseclaw-gateway watchdog stop"
 	if msg != want {
 		t.Fatalf("message = %q, want %q", msg, want)
+	}
+}
+
+func TestWatchdogForegroundAcquireErrorNamesMissingDataDirectory(t *testing.T) {
+	pidPath := filepath.Join(t.TempDir(), "missing", watchdogPIDFile)
+	_, err := acquireWatchdogPIDFile(pidPath, watchdogPIDInfo{PID: os.Getpid()})
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("acquire = %v, want missing directory", err)
+	}
+	msg := watchdogForegroundAcquireError(pidPath, err).Error()
+	if !strings.Contains(msg, "data directory") || !strings.Contains(msg, "does not exist") ||
+		strings.Contains(msg, "another instance") {
+		t.Fatalf("wrong cause in message: %q", msg)
 	}
 }

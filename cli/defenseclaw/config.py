@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import codecs
 import copy
+import hashlib
 import json
 import locale
 import logging
@@ -34,6 +35,7 @@ import re
 import stat
 import subprocess
 import sys
+import threading
 import urllib.parse
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
@@ -44,7 +46,13 @@ from typing import Any
 
 import yaml
 
-from defenseclaw import connector_paths, credential_provenance, envvars, legacy_connector
+from defenseclaw import (
+    connector_paths,
+    credential_provenance,
+    envvars,
+    gateway_token_adoption,
+    legacy_connector,
+)
 from defenseclaw.config_writer import ManagedConfigWriteError
 
 # Back-compat re-exports — internal-but-imported-by-tests helpers that
@@ -78,8 +86,11 @@ from defenseclaw.file_permissions import (
     MAX_DOTENV_BYTES,
     dotenv_key_is_process_control,
     dotenv_key_is_valid,
+    namespace_hides_owner,
     read_regular_file_no_follow,
+    tracked_host_owner_uid,
 )
+from defenseclaw.openclaw_presence import openclaw_implied_but_not_installed, openclaw_only_implied
 
 # libyaml parses a 150 KB policy config in tens of milliseconds where the
 # pure-Python SafeLoader takes 2 s, and every command parses config.yaml more
@@ -115,7 +126,11 @@ def read_config_text(path: str | os.PathLike[str]) -> str:
     with the locale encoding, as before.
     """
     with open(path, "rb") as handle:
-        data = handle.read()
+        return decode_config_bytes(handle.read())
+
+
+def decode_config_bytes(data: bytes) -> str:
+    """config.yaml bytes as text, the way :func:`read_config_text` reads them."""
     data = data.removeprefix(codecs.BOM_UTF8)
     try:
         return data.decode("utf-8")
@@ -550,12 +565,298 @@ def config_path() -> Path:
 
 
 def config_path_for_data_dir(data_dir: str | os.PathLike[str] | None = None) -> Path:
-    """Return the active config path for a caller-scoped data directory."""
+    """Return the active config path for a caller-scoped data directory.
+
+    ``defenseclaw config set data_dir`` leaves config.yaml in the install home
+    (``~/.defenseclaw``), so a data_dir without its own config.yaml is run by
+    the account config that names it (:func:`gateway_home_for_data_dir`).
+    """
     if os.environ.get(CONFIG_PATH_ENV):
         return config_path()
     if data_dir:
-        return Path(data_dir) / CONFIG_FILE_NAME
+        return Path(os.path.join(gateway_home_for_data_dir(data_dir), CONFIG_FILE_NAME))
     return config_path()
+
+
+GATEWAY_PID_FILE_NAME = "gateway.pid"
+
+# (path, st_dev, st_ino, st_size, st_mtime_ns) -> (configured data_dir, managed mode).
+_home_config_cache: dict[tuple[str, str, int, int, int, int], tuple[str | None, bool]] = {}
+
+
+def gateway_home_for_data_dir(data_dir: str | os.PathLike[str]) -> str:
+    """The folder that holds the account config.yaml and gateway.pid for ``data_dir``.
+
+    The gateway reads config.yaml and keeps its PID records in the install
+    home (``DEFENSECLAW_HOME``, else ``~/.defenseclaw``), and keeps its stores,
+    hooks and connector state under the data_dir that config names. While the
+    two are one folder this is ``data_dir``. After ``defenseclaw config set
+    data_dir`` they differ: joining config.yaml to the data folder made every
+    config write create a second config.yaml there, without the account ports
+    (rel-1-0-6 GAP-0232), and setup read the default API port and found no
+    gateway.pid, so it rolled the connector back while the gateway served
+    (GAP-0230). The Go hook runtime had the same gap (GAP-0224). The active
+    config's data_dir binding selects the PID-record home even if a moved
+    store still has an older config.yaml. An explicit per-user config path can
+    be outside the install home; its PID record remains under
+    ``DEFENSECLAW_HOME`` (or the default home). Unrelated stores and managed
+    runtimes keep their own PID home.
+    """
+    own = os.fspath(data_dir)
+    try:
+        home, configured, managed = _install_home_binding()
+    except (OSError, KeyError, NotImplementedError):
+        return own
+    if managed:
+        return own
+    if configured and _same_folder(configured, own):
+        return home
+    return own
+
+
+def _install_home_binding() -> tuple[str, str | None, bool]:
+    """The install home, the store its active config binds, and whether it is managed."""
+    home = os.fspath(default_data_path())
+    active_config = os.environ.get(CONFIG_PATH_ENV) or os.path.join(home, CONFIG_FILE_NAME)
+    if not os.path.isabs(active_config):
+        # The gateway starts in the install home, so it reads a relative
+        # config path from there, whatever folder this process runs in.
+        active_config = os.path.join(home, active_config)
+    configured, managed = _home_config_binding(active_config, home)
+    return home, configured, managed or _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV))
+
+
+def configured_store_dir() -> str:
+    """The data_dir the active config.yaml names when it is a folder other than the install home, else "".
+
+    ``defenseclaw config set data_dir`` moves the stores, hooks and connector
+    records (hook scripts, setup receipts, rollback markers) to that folder,
+    while config.yaml, gateway.pid and the Python environment stay in the
+    install home. A caller that reads or tears down connector records must
+    use this folder: the install home holds none of them, so the hook
+    commands it computes there are not the ones Setup wrote (GAP-0874). A
+    managed runtime keeps its own folder, so it returns "".
+    """
+    try:
+        home, configured, managed = _install_home_binding()
+    except (OSError, KeyError, NotImplementedError):
+        return ""
+    if managed or not configured or _same_folder(configured, home):
+        return ""
+    return configured
+
+
+STORE_HISTORY_FILE = "previous-data-dirs.json"
+_STORE_HISTORY_MAX_FOLDERS = 16
+# Room for the newest _STORE_HISTORY_MAX_FOLDERS folders at the longest path a platform allows, each
+# spelled twice (the folder list and the backup digests); remember_previous_store keeps the file within it.
+_STORE_HISTORY_MAX_BYTES = 256 * 1024
+
+
+def _store_history_path() -> str:
+    return os.path.join(os.fspath(default_data_path()), STORE_HISTORY_FILE)
+
+
+def _account_private_regular_file(path: str, info: os.stat_result) -> bool:
+    """Whether *path* is a regular file only this account can read or change."""
+    if not stat.S_ISREG(info.st_mode):
+        return False
+    if os.name == "nt":
+        from defenseclaw.file_permissions import windows_guard_private_file_error
+
+        return windows_guard_private_file_error(path) is None
+    return info.st_uid == os.geteuid() and not info.st_mode & 0o077
+
+
+def _store_history_document() -> dict:
+    """The parsed list in the install home, or {} when it is absent, unsafe, oversized or malformed."""
+    path = _store_history_path()
+    try:
+        if _install_home_binding()[2]:
+            return {}  # a managed runtime keeps its own folder
+        info = os.lstat(path)
+        if not _account_private_regular_file(path, info):
+            return {}
+        document = json.loads(
+            read_regular_file_no_follow(path, max_bytes=_STORE_HISTORY_MAX_BYTES, expected_stat=info)
+        )
+    except (OSError, ValueError, NotImplementedError):
+        return {}
+    return document if isinstance(document, dict) else {}
+
+
+def previous_store_dirs() -> tuple[str, ...]:
+    """The folders ``config set data_dir`` moved the stores away from, oldest first.
+
+    A move carries the connector records and seals and leaves every other
+    record Setup wrote (ACP ownership records, probe and created-folder
+    records, the OpenClaw backup index, removed-connector state) in the
+    folder it was written in. The install home keeps this list so uninstall
+    can look in each of those folders, not only in the current one and the
+    install home (GAP-0874). The list only says where to look: every reader
+    still proves ownership of each record it finds. A list that is a link,
+    open to other accounts, oversized or malformed names nothing, and so does a
+    managed runtime.
+    """
+    folders = _store_history_document().get("folders")
+    if not isinstance(folders, list):
+        return ()
+    found: dict[str, None] = {}
+    for folder in folders[:_STORE_HISTORY_MAX_FOLDERS]:
+        if isinstance(folder, str) and os.path.isabs(folder) and os.path.isdir(folder) and not os.path.islink(folder):
+            found[folder] = None
+    return tuple(found)
+
+
+def previous_store_backup_digests() -> dict[str, dict[str, str]]:
+    """Per earlier folder, the sha256 of each top-level backup record the move left in it.
+
+    The move records the digest of the bytes it copied out of the folder it
+    leaves. A record that still has that digest is the copy the move left; one
+    that differs was changed afterwards by the account, and uninstall keeps it.
+    """
+    raw = _store_history_document().get("backups")
+    found: dict[str, dict[str, str]] = {}
+    if not isinstance(raw, dict):
+        return found
+    for folder, names in raw.items():
+        if not isinstance(folder, str) or not isinstance(names, dict):
+            continue
+        digests = {
+            name: digest for name, digest in names.items()
+            if isinstance(name, str) and isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest)
+        }
+        if digests:
+            found[folder] = digests
+    return found
+
+
+def remember_previous_store(old_dir: str, backup_digests: Mapping[str, str] | None = None) -> list[str]:
+    """Add the folder a data_dir move leaves behind to the list in the install home; return warning notes.
+
+    The install home is always searched, so it is never listed (its backup
+    digests are kept all the same). The newest ``_STORE_HISTORY_MAX_FOLDERS``
+    folders are kept. *backup_digests* maps the top-level backup records in
+    *old_dir* to their sha256 at the time of the move.
+    """
+    if _is_admin_process() or not old_dir or not os.path.isabs(old_dir):
+        return []
+    try:
+        home = os.fspath(default_data_path())
+        if not os.path.isdir(old_dir) or (_same_folder(old_dir, home) and not backup_digests):
+            return []
+        from defenseclaw.file_permissions import atomic_write_private_bytes
+
+        # Folders that no longer exist are dropped; an unreadable list starts again.
+        kept = [folder for folder in previous_store_dirs() if not _same_folder(folder, old_dir)]
+        if not _same_folder(old_dir, home):
+            kept.append(old_dir)
+        kept = kept[-_STORE_HISTORY_MAX_FOLDERS:]
+        digests = {
+            folder: names for folder, names in previous_store_backup_digests().items()
+            if not _same_folder(folder, old_dir) and (folder in kept or _same_folder(folder, home))
+        }
+        if backup_digests:
+            digests[old_dir] = dict(backup_digests)
+        # The reader refuses a list over _STORE_HISTORY_MAX_BYTES and then names no folder at all, so the
+        # writer keeps the file within it: the oldest folder goes first, and each is reported.
+        notes: list[str] = []
+        while True:
+            document: dict[str, Any] = {"folders": kept}
+            if digests:
+                document["backups"] = digests
+            body = json.dumps(document, indent=2).encode() + b"\n"
+            if len(body) <= _STORE_HISTORY_MAX_BYTES:
+                break
+            if len(kept) < 2:
+                raise ValueError("the list would be larger than uninstall reads")
+            dropped = kept.pop(0)
+            digests.pop(dropped, None)
+            notes.append(
+                f"warning: the data_dir list is full, so uninstall no longer searches {dropped}; "
+                "its setup records stay there until you remove them"
+            )
+        atomic_write_private_bytes(_store_history_path(), body, protect_parent=False)
+    except (OSError, ValueError, NotImplementedError) as exc:
+        return [
+            f"warning: the old data_dir {old_dir} could not be added to the list uninstall searches ({exc}); "
+            "its setup records stay there until you remove them"
+        ]
+    return notes
+
+
+def install_home_for_bound_store(store: str | os.PathLike[str]) -> str:
+    """The PID-record home of a store the install-home config itself names.
+
+    ``store`` came from reading that config's ``data_dir`` the way the gateway
+    does, so the config binds it by construction: the PID record is in the
+    install home. Asking :func:`gateway_home_for_data_dir` again would compare
+    the store with a second reading of the same text, which can differ (a
+    ``~/`` data_dir), and then name the store as the home (GAP-0711, GAP-0713).
+    A managed runtime keeps its own PID home.
+    """
+    try:
+        home, _configured, managed = _install_home_binding()
+    except (OSError, KeyError, NotImplementedError):
+        return os.fspath(store)
+    return os.fspath(store) if managed else home
+
+
+def gateway_pid_path(data_dir: str | os.PathLike[str]) -> str:
+    """Path of the gateway's PID record for the install that uses ``data_dir``."""
+    return os.path.join(gateway_home_for_data_dir(data_dir), GATEWAY_PID_FILE_NAME)
+
+
+def _home_config_binding(path: str, home: str) -> tuple[str | None, bool]:
+    """Return the config's resolved store and whether it declares managed mode.
+
+    The gateway starts in the install home ``home``, so it makes a relative
+    data_dir absolute from there, not from the folder of the config or the one
+    this process runs in.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None, False
+    key = (path, home, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+    if key in _home_config_cache:
+        return _home_config_cache[key]
+    resolved: str | None = None
+    managed = False
+    try:
+        raw = parse_config_yaml(read_config_text(path))
+    except (OSError, UnicodeError, yaml.YAMLError):
+        raw = None
+    if isinstance(raw, dict):
+        managed = _is_managed_enterprise_mode(str(raw.get("deployment_mode") or ""))
+        configured = raw.get("data_dir")
+        if isinstance(configured, str) and configured.strip():
+            resolved = clean_data_dir(configured, home)
+    if len(_home_config_cache) > 32:
+        _home_config_cache.clear()
+    _home_config_cache[key] = (resolved, managed)
+    return resolved, managed
+
+
+def clean_data_dir(configured: str, home: str) -> str:
+    """The one spelling of the data_dir *configured* names: ``~/`` expanded, absolute from *home*, ``.``/``..`` folded.
+
+    The gateway, every record, approval and seal use this spelling, so a value
+    typed with a ``..`` after a link (``~/lnk/../state``) must not reach the
+    file system as typed: the system would resolve the link first and name
+    another folder than the one the gateway and the records use (GAP-0939).
+    """
+    return os.path.abspath(os.path.join(home, _expand_store_home(configured.strip())))
+
+
+def _same_folder(a: str, b: str) -> bool:
+    def norm(value: str) -> str:
+        return os.path.normcase(os.path.realpath(_expand_store_home(value.strip())))
+
+    try:
+        return norm(a) == norm(b)
+    except (OSError, ValueError):
+        return False
 
 
 def _expand(p: str) -> str:
@@ -597,7 +898,9 @@ def detect_environment() -> str:
         )
         if "DGX" in out:
             return "dgx-spark"
-    except (FileNotFoundError, subprocess.CalledProcessError):
+    except (OSError, subprocess.CalledProcessError):
+        # No nvidia-smi on PATH, or a PATH folder this account cannot read
+        # (PermissionError): the same answer, a plain Linux host (GAP-0049).
         pass
     return "linux"
 
@@ -759,9 +1062,15 @@ def _managed_config_trust_problem(path: str) -> str | None:
         if acl_problem is not None:
             return acl_problem
 
-        owner_uid = getattr(info, "st_uid", None)
+        owner_uid = tracked_host_owner_uid(current, info) if hasattr(info, "st_uid") else None
         if owner_uid is None:
             return f"{current}: cannot inspect path owner"
+        if owner_uid == -1 and namespace_hides_owner(info):
+            # Unknown, not another account: a sandbox hides it (GAP-1395).
+            return (
+                f"{current}: its owner cannot be checked inside this sandbox (a user namespace hides it); "
+                "run the command outside the sandbox"
+            )
         if owner_uid != 0:
             return f"{current}: owner uid {owner_uid} is not trusted; expected root/admin uid 0"
 
@@ -951,6 +1260,26 @@ DEFENSECLAW_LLM_MODEL_ENV = "DEFENSECLAW_LLM_MODEL"
 _DEFAULT_LLM_TIMEOUT = 30
 _DEFAULT_LLM_MAX_RETRIES = 2
 
+# Amazon Bedrock model ids and cross-region inference profile ids:
+# "<vendor>.<model>" or "<geo>.<vendor>.<model>" ("us.anthropic.claude-haiku-
+# 4-5-20251001-v1:0", "us.openai.gpt-5.6-luna", "amazon.nova-pro-v1:0"). Ids
+# of the other providers never start with a vendor name and a dot. Mirrors
+# bedrockModelIDPattern in internal/config/config.go.
+BEDROCK_MODEL_ID_RE = re.compile(
+    r"^(?:(?:us|eu|apac|jp|au|ca|global|us-gov)\.)?"
+    r"(?:anthropic|amazon|meta|mistral|cohere|ai21|openai|deepseek|qwen|writer|twelvelabs|stability|luma|google|nvidia|minimax|moonshot|moonshotai)"
+    r"\.[a-z0-9]"
+)
+
+
+def is_bedrock_model_id(model: str) -> bool:
+    """Whether ``model``, written without a provider prefix, is a Bedrock id.
+
+    An unprefixed Bedrock id then resolves to the bedrock provider for the
+    scanners and for key injection, as the gateway does (GAP-2640).
+    """
+    return bool(BEDROCK_MODEL_ID_RE.match((model or "").strip().lower()))
+
 # Recognized "provider/" prefixes understood by both the Go gateway
 # (Bifrost routes by the provider prefix) and by the Python scanners
 # (LiteLLM accepts the same "provider/model" shape). Anything outside
@@ -996,9 +1325,15 @@ _OPENAI_STYLE_LLM_PROVIDERS = frozenset(
 _warned_llm_prefixes: set[tuple[str, str]] = set()
 
 
-def _maybe_warn_unknown_provider(prefix: str, component_path: str) -> None:
+def _maybe_warn_unknown_provider(prefix: str, component_path: str, instance_name: str = "") -> None:
     if not prefix or prefix in _RECOGNIZED_LLM_PROVIDERS:
         return
+    # ``provider: custom`` with a bound instance routes through its
+    # llm_providers.custom entry, so it is not an unknown prefix (GAP-2234).
+    # Without an instance it still warns: nothing tells the gateway where to go.
+    if prefix == "custom" and (instance_name or "").strip():
+        return
+    component_path = component_path or "llm"
     key = (component_path, prefix)
     if key in _warned_llm_prefixes:
         return
@@ -1186,6 +1521,8 @@ class LLMConfig:
             return self.provider.strip().lower()
         if "/" in self.model:
             return self.model.split("/", 1)[0].strip().lower()
+        if is_bedrock_model_id(self.model):
+            return "bedrock"
         return ""
 
     def keyless_auth_mode(self) -> str:
@@ -1425,6 +1762,158 @@ class UpdateConfig:
     source: str = ""
 
 
+DECISION_MODEL_KEY_ENV = "DEFENSECLAW_DECISION_MODEL_KEY"
+DECISION_MODEL_DEFAULT_ALLOW_THRESHOLD = 0.30
+DECISION_MODEL_DEFAULT_BLOCK_THRESHOLD = 0.75
+DECISION_MODEL_DEFAULT_TIMEOUT = 1.0
+DECISION_MODEL_ON_CONFIDENT_BLOCK = ("escalate", "decide")
+
+
+@dataclass
+class DecisionModelConfig:
+    """``decision_model:``, the unified decision model.
+
+    A small, fast model that speaks the System One protocol (``POST
+    {model, state, questions}``; answers carry calibrated probabilities).
+    The guardrail runs it in front of the LLM judge on tool calls and the
+    skill scanner records its advisory score. Off by default.
+
+    Shaped like the unified ``llm:`` block: ``api_key_env`` names the
+    variable holding the bearer token (``DEFENSECLAW_DECISION_MODEL_KEY``
+    when empty) and the value lives in the environment or
+    ``~/.defenseclaw/.env``, never in config.yaml. ``credential`` names the
+    protected credential a standalone managed host reads instead. Mirrors
+    internal/config/decision_model.go::DecisionModelConfig.
+    """
+
+    enabled: bool = False
+    model: str = ""
+    base_url: str = ""
+    api_key_env: str = ""
+    credential: str = ""
+    timeout: float = 0.0
+    allow_threshold: float = 0.0
+    block_threshold: float = 0.0
+    on_confident_block: str = ""
+    # Connectors whose hook-lane tool calls the model answers on its own
+    # where the LLM judge does not run ("*" = all). Empty = only in front
+    # of the judge. Omitted from YAML when empty.
+    hook_connectors: list[str] = field(default_factory=list)
+
+    def active(self) -> bool:
+        return bool(self.enabled and self.base_url.strip() and self.model.strip())
+
+    def effective_api_key_env(self) -> str:
+        return self.api_key_env.strip() or DECISION_MODEL_KEY_ENV
+
+    def effective_timeout(self) -> float:
+        return self.timeout if self.timeout > 0 else DECISION_MODEL_DEFAULT_TIMEOUT
+
+    def effective_allow_threshold(self) -> float:
+        return self.allow_threshold if self.allow_threshold > 0 else DECISION_MODEL_DEFAULT_ALLOW_THRESHOLD
+
+    def effective_block_threshold(self) -> float:
+        return self.block_threshold if self.block_threshold > 0 else DECISION_MODEL_DEFAULT_BLOCK_THRESHOLD
+
+    def effective_on_confident_block(self) -> str:
+        return (self.on_confident_block or "").strip().lower() or "escalate"
+
+    def resolved_api_key(self, data_dir: str) -> str:
+        """The bearer token from the environment, then ``<data_dir>/.env``
+        (the shared credential resolver); "" when unset."""
+        from defenseclaw import credentials
+
+        return credentials.resolve(self.effective_api_key_env(), data_dir).value.strip()
+
+    def validation_error(self) -> str:
+        """Return "" when the block is valid, else the first problem.
+        Mirrors DecisionModelConfig.Validate in Go."""
+        for name, value in (("allow_threshold", self.allow_threshold), ("block_threshold", self.block_threshold)):
+            if not 0 <= value <= 1:
+                return f"{name} must be between 0 and 1, got {value}"
+        if self.effective_allow_threshold() >= self.effective_block_threshold():
+            return (
+                f"allow_threshold ({self.effective_allow_threshold()}) must be lower than "
+                f"block_threshold ({self.effective_block_threshold()})"
+            )
+        if not 0 <= self.timeout <= 30:
+            return f"timeout must be between 0 and 30 seconds, got {self.timeout}"
+        if self.effective_on_confident_block() not in DECISION_MODEL_ON_CONFIDENT_BLOCK:
+            return f"on_confident_block must be escalate or decide, got {self.on_confident_block!r}"
+        if self.base_url.strip():
+            err = decision_model_url_error(self.base_url)
+            if err:
+                return err
+        if self.enabled:
+            if not self.base_url.strip():
+                return "enabled needs base_url (the decision model endpoint, e.g. http://127.0.0.1:8791/v1/systemone)"
+            if not self.model.strip():
+                return "enabled needs model (the model name the endpoint serves)"
+        return ""
+
+
+def decision_model_url_error(raw: str) -> str:
+    """https anywhere, plain http only to loopback, no credentials in the URL.
+    Mirrors config.ValidateDecisionModelURL in Go."""
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    try:
+        parsed = urlsplit(raw.strip())
+    except ValueError:
+        return "base_url must be an absolute http(s) URL"
+    if not parsed.netloc or not parsed.hostname:
+        return "base_url must be an absolute http(s) URL"
+    if parsed.username or parsed.password:
+        return f"base_url must not carry credentials; put the token in {DECISION_MODEL_KEY_ENV}"
+    scheme = parsed.scheme.lower()
+    if scheme == "https":
+        return ""
+    if scheme != "http":
+        return f"base_url must use http or https, not {parsed.scheme!r}"
+    host = parsed.hostname
+    if host.lower() == "localhost":
+        return ""
+    try:
+        if ipaddress.ip_address(host).is_loopback:
+            return ""
+    except ValueError:
+        pass
+    return "base_url must use https, or plain http only to a loopback host (127.0.0.1, ::1, localhost)"
+
+
+def _merge_decision_model(raw: Any) -> DecisionModelConfig:
+    raw = raw if isinstance(raw, dict) else {}
+
+    def _num(key: str) -> float:
+        try:
+            return float(raw.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    return DecisionModelConfig(
+        enabled=raw.get("enabled") is True or str(raw.get("enabled", "")).strip().lower() == "true",
+        model=str(raw.get("model", "") or ""),
+        base_url=str(raw.get("base_url", "") or ""),
+        api_key_env=str(raw.get("api_key_env", "") or ""),
+        credential=str(raw.get("credential", "") or ""),
+        timeout=_num("timeout"),
+        allow_threshold=_num("allow_threshold"),
+        block_threshold=_num("block_threshold"),
+        on_confident_block=str(raw.get("on_confident_block", "") or ""),
+        hook_connectors=_decision_model_connector_list(raw.get("hook_connectors")),
+    )
+
+
+def _decision_model_connector_list(raw: Any) -> list[str]:
+    """``decision_model.hook_connectors`` as a list of non-blank names."""
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list | tuple):
+        return []
+    return [str(item).strip() for item in raw if str(item).strip()]
+
+
 @dataclass
 class SkillScannerVirusTotal:
     enabled: bool = False
@@ -1504,6 +1993,12 @@ class MCPScannerConfig:
     # comma-separated string here; a v9 list loads joined with commas.
     judge_source: str = ""
     yara: MCPScannerYARAConfig = field(default_factory=MCPScannerYARAConfig)
+    #: What ``mcp set`` and the gateway's install admission do with a server
+    #: they could not verify (its scan did not finish, or an OpenCode command
+    #: outside the trusted prefixes): ``warn`` (unset) adds or keeps it with a
+    #: warning and an audit record, ``block`` refuses it (strict). Unset is
+    #: ``block`` on a managed standalone device.
+    unverified_server: str = ""
 
 
 @dataclass
@@ -1618,11 +2113,6 @@ class OpenShellMCPConfig:
 
 
 @dataclass
-class OpenShellMiddlewareConfig:
-    enabled: bool = False
-
-
-@dataclass
 class OpenShellAdminConfig:
     """Administrator sandbox constraints (``openshell.admin``).
 
@@ -1691,21 +2181,31 @@ _OPENSHELL_ADMIN_FLOOR_KEYS = (
 
 @dataclass
 class EnterpriseOpenShellConfig:
-    """``enterprise.openshell``: how the lifecycle provides and pins OpenShell.
+    """``enterprise.openshell`` as far as Python reads it: the compute driver.
 
-    Mirrors ``EnterpriseOpenShellConfig`` in internal/config/enterprise.go.
-    Every key is lifecycle (restart-required); DefenseClaw never ships
-    OpenShell.
+    The other keys (``install``, ``driver_fallback``, ``version``,
+    ``gateway_port``, ``e2fsprogs_dir``) are the administrator's and the
+    lifecycle's (internal/config/enterprise.go); Python never reads them, so
+    it does not model them. They are not per-user ``openshell.*`` keys: a
+    per-user config.yaml that carries one under ``openshell:`` is refused by
+    the schema, and the per-user OpenShell gateway port is fixed (17670).
     """
 
-    install: str = ""  # prerequisite | setup ("" = prerequisite)
     driver: str = ""  # docker | vm | auto ("" = vm on macOS, docker on Linux)
-    # Linux, driver vm or auto, KVM not available for the user: docker
-    # (the default) or none (refuse the sandbox).
-    driver_fallback: str = ""  # docker | none ("" = docker)
-    version: str = ""  # "0.1.3" or a range such as ">=0.1.1 <0.2.0"
-    gateway_port: int = 0  # 0 = 17670
-    e2fsprogs_dir: str = ""  # macOS only; absolute, root-owned chain
+
+
+@dataclass
+class EnterpriseCoworkVMSensorConfig:
+    """Load-only mirror of the standalone Cowork host delivery block."""
+
+    mode: str = "off"
+    tenant: str = ""
+    device: str = ""
+    collector: str = ""
+    vendor: str = ""
+    source_dir: str = ""
+    package_sha256: str = ""
+    signature_sha256: str = ""
 
 
 @dataclass
@@ -1747,7 +2247,10 @@ class OpenShellConfig:
     mcp: OpenShellMCPConfig = field(default_factory=OpenShellMCPConfig)
     upstream_telemetry: bool = False
     token_delivery: str = "provider"
-    middleware: OpenShellMiddlewareConfig = field(default_factory=OpenShellMiddlewareConfig)
+    # A PEM file of CA certificates sandboxes trust besides the image's public
+    # roots (a TLS-inspecting proxy's root): absolute or "~/...". Sandbox images
+    # built while it is set carry them; nothing comes from the host's store.
+    trusted_ca_bundle: str = ""
     admin: OpenShellAdminConfig = field(default_factory=OpenShellAdminConfig)
 
     def effective_ingress_port(self, api_port: int) -> int:
@@ -1864,20 +2367,25 @@ class GatewayConfig:
            resort because plaintext secrets in YAML are discouraged
            (and ``_warn_plaintext_secrets`` already nags about it).
 
+        When ``.env`` holds both gateway-token spellings with different
+        values, the earlier name in this order wins, except that a copy the
+        gateway adopted from ``openclaw.json`` (recorded by the marker comment
+        in ``.env``, see ``defenseclaw.gateway_token_adoption``) never shadows a
+        value the operator saved under the other spelling: the load leaves the
+        adopted copy out. ``defenseclaw keys set`` on either name replaces every
+        spelling already saved.
+
         Returns the empty string when no token is reachable; callers
         gate on the truthiness, so empty == "unauthenticated".
         """
-        if self.token_env:
-            val = os.environ.get(self.token_env, "")
-            if val:
+        # SecretRef text an earlier build saved as a token is never one (#1404).
+        from defenseclaw.connector_paths import is_secret_ref_text
+
+        for name in (self.token_env, "DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"):
+            val = os.environ.get(name, "") if name else ""
+            if val and not is_secret_ref_text(val):
                 return val
-        val = os.environ.get("DEFENSECLAW_GATEWAY_TOKEN", "")
-        if val:
-            return val
-        val = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
-        if val:
-            return val
-        return self.token
+        return "" if is_secret_ref_text(self.token) else self.token
 
 
 @dataclass
@@ -2220,10 +2728,18 @@ class JudgeConfig:
     # (the proxy lane is unaffected); ``"*"`` enables every connector.
     hook_connectors: list[str] = field(default_factory=list)
     # Hook-lane judge timeout in seconds (Go ``JudgeConfig.HookTimeout``).
-    # 0 means the gateway default (5s, sized under the hook scripts'
+    # 0 means the gateway default (8s, sized under the hook scripts'
     # ``curl --max-time 10`` budget — the proxy lane's 30s would let the
     # client hang up before a verdict lands).
     hook_timeout: float = 0.0
+    # Most judge calls sent to the judge model at once (Go
+    # ``JudgeConfig.MaxParallel``); 0 = no limit. With a limit, tool-call
+    # judging goes ahead of prompt judging (#1395).
+    max_parallel: int = 0
+    # Additional fields for an OpenAI-compatible judge request.
+    extra_body: dict[str, Any] = field(default_factory=dict)
+    # Preserve an operator's explicit unlimited setting across load/save.
+    _max_parallel_explicit_zero: bool = False
     # Log judge prompts and responses (was DEFENSECLAW_JUDGE_TRACE).
     trace: bool = False
     # LLM overrides the top-level ``llm:`` block for the LLM judge.
@@ -2243,7 +2759,7 @@ class JudgeConfig:
 class WebhookConfig:
     # Mirrors ``internal/config.WebhookConfig`` (notifier webhook, not an
     # audit sink). See the published webhook guide:
-    # https://cisco-ai-defense.github.io/defenseclaw/docs/setup/webhooks/
+    # https://cisco-ai-defense.github.io/defenseclaw/docs/observability/webhooks/
     #
     # ``name`` is the CLI-visible identifier used by
     # ``defenseclaw setup webhook {enable,disable,remove,show,test}``.
@@ -2423,7 +2939,7 @@ class GuardrailProfileMatch:
 
 @dataclass
 class GuardrailProfileAssignment:
-    """One ordered ``guardrail.profile_assignments`` entry (first match wins).
+    """One ``guardrail.profile_assignments`` entry (the strictest match wins).
 
     Mirrors ``config.ProfileAssignment``.
     """
@@ -2503,6 +3019,10 @@ class GuardrailConfig:
     custom_packs: dict[str, CustomRulePack] = field(default_factory=dict)
     rules: GuardrailRulesConfig = field(default_factory=GuardrailRulesConfig)
     cisco_trust_level: str = ""  # full | advisory | none ("" = full)
+    # The organization's own domains: a download from a host equal to or
+    # under one does not start the download-then-execute alert (#1390).
+    # Mirrors ``GuardrailConfig.InternalDomains`` in internal/config/config.go.
+    internal_domains: list[str] = field(default_factory=list)
     # Lowest severity a tool call is blocked / alerted at (``CRITICAL``
     # | ``HIGH`` | ``MEDIUM`` | ``LOW``). Empty keeps the rule pack's
     # profile levels (strict: MEDIUM / LOW, permissive: CRITICAL / HIGH,
@@ -2534,10 +3054,19 @@ class GuardrailConfig:
     # by ``_migrate_0_4_0_seed_hook_fail_mode`` so the flip is a
     # NEW-INSTALL-ONLY behavior change.
     #
+    # Secure Client exception: a config that resolves to the Secure Client profile
+    # and leaves ``hook_fail_mode`` unset loads as ``"open"``, and its
+    # delivery fail mode is independent of the guardrail mode; an explicit
+    # ``"closed"`` is always kept. See ``_apply_secure_client_hook_fail_default``.
+    # An explicit value always wins, on a managed computer too, where the
+    # administrator's config sets it.
+    #
     # ``DEFENSECLAW_STRICT_AVAILABILITY=1`` additionally forces transport and
     # missing-token failures closed. Mirrors ``GuardrailConfig.HookFailMode``
     # in internal/config/config.go.
-    hook_fail_mode: str = "closed"
+    # An empty constructor value means no operator choice. __post_init__ keeps
+    # the historical public value while recording whether a choice was made.
+    hook_fail_mode: str = ""
     # ``llm_role`` is the operator's answer to "should DefenseClaw's
     # LLM be used only as a judge, or also as the agent's upstream?".
     # One of:
@@ -2579,20 +3108,26 @@ class GuardrailConfig:
         uniformly fall through to the global value. Lookup is
         connector-name-insensitive: an exact key hit is the fast path,
         otherwise keys are compared after ``connector_paths.normalize`` so
-        a request for the canonical name (e.g. ``"openhands"``) resolves an
+        a request for the canonical name (e.g. ``"claudecode"``) resolves an
         override written with different case or a hyphen/underscore alias
-        (e.g. ``"OpenHands"``, ``"open-hands"``). Mirrors
+        (e.g. ``"Claude-Code"``, ``"claude_code"``). Mirrors
         ``GuardrailConfig.connectorOverride`` in Go.
         """
+        key = self._connector_override_key(connector)
+        return self.connectors[key] if key is not None else None
+
+    def _connector_override_key(self, connector: str) -> str | None:
+        """The key ``connectors`` holds ``connector``'s override under, as
+        saved (an alias spelling stays the alias), so a reported source names
+        a key that exists in config.yaml."""
         if not connector or not self.connectors:
             return None
-        pc = self.connectors.get(connector)
-        if pc is not None:
-            return pc
+        if self.connectors.get(connector) is not None:
+            return connector
         want = connector_paths.normalize(connector)
         for name, entry in self.connectors.items():
-            if connector_paths.normalize(name) == want:
-                return entry
+            if entry is not None and connector_paths.normalize(name) == want:
+                return name
         return None
 
     def effective_mode(self, connector: str = "") -> str:
@@ -2627,27 +3162,162 @@ class GuardrailConfig:
             return pc.hilt
         return self.hilt
 
-    def effective_hook_fail_mode(self, connector: str = "") -> str:
-        """Explicit connector posture > observe compatibility > global.
+    def __post_init__(self) -> None:
+        supplied = bool(self.hook_fail_mode.strip())
+        if not supplied:
+            object.__setattr__(self, "hook_fail_mode", "closed")
+        object.__setattr__(self, "_hook_fail_mode_saved", supplied)
+        object.__setattr__(self, "_hook_fail_mode_track", True)
 
-        Cursor always follows its guardrail mode: action is closed and
-        observe is open. Other connector-scoped values remain explicit
-        runtime response-integrity choices in observe mode.
+    def __setattr__(self, name: str, value: Any) -> None:
+        object.__setattr__(self, name, value)
+        if name == "hook_fail_mode" and getattr(self, "_hook_fail_mode_track", False):
+            object.__setattr__(self, "_hook_fail_mode_saved", bool(str(value or "").strip()))
+
+    def effective_hook_fail_mode(self, connector: str = "") -> str:
+        """Resolve hook failure behavior for this deployment profile.
+
+        The value of :meth:`hook_fail_mode_resolution`, the one place every
+        reader (config get, init, doctor, status, the hooks) takes it from.
         """
-        # Cursor's native hook registration follows policy mode. A stored
-        # fail mode from an older setup cannot override that contract.
-        if str(connector).strip().lower() == "cursor":
-            return "closed" if self.effective_mode(connector).strip().lower() == "action" else "open"
-        pc = self._connector_override(connector)
-        if pc is not None and pc.hook_fail_mode.strip():
-            if pc.hook_fail_mode.strip().lower() == "closed":
-                return "closed"
-            return "open"
-        if self.effective_mode(connector).strip().lower() != "action":
-            return "open"
-        if self.hook_fail_mode.strip().lower() == "closed":
+        return self.hook_fail_mode_resolution(connector)[0]
+
+    def hook_fail_mode_resolution(self, connector: str = "") -> tuple[str, str]:
+        """Resolve hook failure behavior and name where it comes from.
+
+        Mirrors Go ``Config.EffectiveHookFailModeForConnector``:
+
+        - a managed config (Secure Client or the standalone profile,
+          :meth:`Config.managed_outside_secure_client`) resolves
+          automatic-protection posture (for connectors outside manual setup)
+          > explicit connector posture > global, independent of the guardrail
+          mode; an explicit value always wins (the administrator's config
+          sets it), and an unset one is open under Secure Client (#1163) and
+          closed on the standalone profile;
+        - a per-user host reports its gateway-outage mode: an explicitly saved
+          ``hook_fail_mode`` wins; otherwise the connector's policy tier
+          (Go ``config.HookOutageFailMode``, owner decision 2026-10-23) is
+          ``closed`` for strict and ``open`` for default and permissive. Every failure that is
+          not an outage (an answer the gateway gave, a malformed or partial
+          one, a missing token, the install window) blocks in every tier.
+
+        The source is ``config:<key>`` for a saved value, ``managed-default``
+        or ``secure-client-default`` for an unset one on those profiles, and
+        ``pack-default:<tier>`` for an unset per-user one.
+        """
+        owner = getattr(self, "_owner", None)
+        cfg = owner() if callable(owner) else None
+        owned = cfg is not None and getattr(cfg, "guardrail", None) is self
+        standalone = owned and cfg.managed_outside_secure_client()
+        name = connector_paths.normalize(connector)
+        # The global key (no connector) is no automatic-protection connector:
+        # only a named connector outside the active set takes that overlay.
+        if owned and name:
+            application = cfg.application_protection
+            if application.enabled and name not in cfg.active_connectors():
+                saved = application._connector_override_key(connector)
+                overlay = application.connectors[saved].guardrail if saved is not None else application.guardrail
+                if overlay.hook_fail_mode.strip():
+                    key = (
+                        f"application_protection.connectors.{saved}.guardrail.hook_fail_mode"
+                        if saved is not None
+                        else "application_protection.guardrail.hook_fail_mode"
+                    )
+                    return _normalize_hook_fail_mode(overlay.hook_fail_mode), f"config:{key}"
+        saved = self._connector_override_key(connector)
+        if saved is not None and self.connectors[saved].hook_fail_mode.strip():
+            return (
+                _normalize_hook_fail_mode(self.connectors[saved].hook_fail_mode),
+                f"config:guardrail.connectors.{saved}.hook_fail_mode",
+            )
+        if getattr(self, "_hook_fail_mode_saved", False) and self.hook_fail_mode.strip():
+            return _normalize_hook_fail_mode(self.hook_fail_mode), "config:guardrail.hook_fail_mode"
+        if standalone:
+            return "closed", "managed-default"
+        if self.secure_client_hook_fail_modes():
+            return "open", "secure-client-default"
+        tier = self.hook_policy_tier(connector)
+        return ("closed" if tier == "strict" else "open"), f"pack-default:{tier}"
+
+    def effective_hook_outage_fail_mode(self, connector: str = "") -> str:
+        """What ``connector``'s hooks do while the gateway is down.
+
+        Mirrors Go ``Config.EffectiveHookOutageFailModeForConnector``: the
+        mode the current hooks, the OpenCode/Amp plugins and the shell helper
+        decide at call time, and the one Doctor, Status and the fail-mode
+        setter's runtime check read for them (GAP-1354, GAP-1730).
+        :meth:`effective_hook_fail_mode` already resolves it (a managed mode,
+        an explicit saved mode, else the connector's policy tier).
+
+        OpenClaw plugin tool inspection and model requests are in-process:
+        a strict policy stays closed even when an older saved hook setting says
+        open, on a host that is not managed (the Go rule in
+        ``EffectiveHookOutageFailModeForConnector``).
+        """
+        mode, source = self.hook_fail_mode_resolution(connector)
+        if (
+            mode == "open"
+            and source.startswith("config:")
+            and connector_paths.normalize(connector) == "openclaw"
+            and not self._managed_outage_install()
+            and self.hook_policy_tier(connector) == "strict"
+        ):
             return "closed"
-        return "open"
+        return mode
+
+    def _managed_outage_install(self) -> bool:
+        """Whether the outage mode is the administrator's, not the policy tier's (Go managed.IsManagedEnterprise)."""
+        owner = getattr(self, "_owner", None)
+        cfg = owner() if callable(owner) else None
+        if cfg is not None and getattr(cfg, "guardrail", None) is self:
+            if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
+                return True
+            if cfg.managed_outside_secure_client():
+                return True
+        return self.secure_client_hook_fail_modes()
+
+    def hook_policy_tier(self, connector: str = "") -> str:
+        """The connector's policy tier: its rule pack's posture (strict, default or permissive).
+
+        Mirrors Go ``Config.HookPolicyTierForConnector``: the pack manifest's
+        posture, else the pack folder's name (``policy_catalog.pack_profile``).
+        """
+        from defenseclaw import policy_catalog
+
+        name = self.effective_rule_pack(connector)
+        owner = getattr(self, "_owner", None)
+        cfg = owner() if callable(owner) else None
+        if cfg is None or getattr(cfg, "guardrail", None) is not self:
+            from types import SimpleNamespace
+
+            cfg = SimpleNamespace(guardrail=self, policy_dir="", data_dir="")
+        if name in (getattr(self, "custom_packs", None) or {}):
+            problem, verified = policy_catalog.custom_pack_check(cfg, name)
+            if problem or not verified:
+                # A broken custom_packs entry is a config error, whatever its
+                # name: its selection loads the built-in fallback, and no pack
+                # posture it claims can open an outage (Go:
+                # brokenCustomRulePackSelected). A pack the Go loader has not
+                # vouched for grants no posture either (Go: a standalone
+                # selection without the loader stays strict).
+                return "strict"
+        if name in {"default", "strict", "permissive"} and name not in (getattr(self, "custom_packs", None) or {}):
+            # A built-in pack's tier is its name, also where its folder is not
+            # installed (Go: a built-in name without a manifest posture).
+            return name
+        try:
+            return policy_catalog.pack_profile(self.effective_rule_pack_dir(connector))
+        except Exception:  # noqa: BLE001 - an unresolvable pack is the default tier, as in Go
+            return "default"
+
+    def secure_client_hook_fail_modes(self) -> bool:
+        """Whether this guardrail belongs to a Secure Client config.
+
+        Only there is an unset hook fail mode open (#1163). :func:`load` sets
+        it (:func:`_apply_secure_client_hook_fail_default`); a config built in
+        code is not Secure Client.
+        """
+        return bool(getattr(self, "_secure_client", False))
 
     def effective_block_message(self, connector: str = "") -> str:
         """Per-connector block message when set, else the global one."""
@@ -2727,6 +3397,9 @@ class GuardrailConfig:
         lives in the gateway boot loop. Raises :class:`ValueError` with a
         named message on the first violation.
         """
+        from defenseclaw.observability.v8_config import validate_judge_extra_body
+
+        validate_judge_extra_body(self.judge.extra_body, "config.yaml")
         _validate_guardrail_level("guardrail.block_at", self.block_at)
         _validate_guardrail_level("guardrail.alert_at", self.alert_at)
         seen: dict[str, str] = {}
@@ -2734,7 +3407,7 @@ class GuardrailConfig:
             if not name.strip():
                 raise ValueError("guardrail.connectors: empty connector name is not allowed")
             # Reject two distinct keys that canonicalize to the same connector
-            # (e.g. "claude-code" + "claudecode", or "OpenHands" + "openhands").
+            # (e.g. "claude-code" + "claudecode").
             # connector_override()/active_connectors() resolve keys through
             # connector_paths.normalize, so a duplicate would make per-connector
             # lookups and the active-connector roster ambiguous. Mirrors the Go
@@ -2815,17 +3488,18 @@ def validate_guardrail_profiles(gc: GuardrailConfig) -> None:
 # the raw document so an explicit empty list stays apart from an unset key.
 #
 # Python reports the first refusal where Go joins every refusal of a section;
-# the corpus checks that Go's text contains Python's. Only the Go loader (which
-# the gateway, ensure and verify run, so no such config takes effect) checks:
-# the older openshell.admin keys (required_pack_digest, min_profile, egress
-# patterns, require_copy_for, max_resources, locked) in openshell.admin and in
-# profile sandbox sections, the managed required_pack location rule, the pack
-# strictness hook, and enterprise.openshell (the lifecycle owns that block and
-# Python never writes it).
+# the corpus checks that Go's text contains Python's. The managed pack location
+# and strictness checks need the gateway's installed policy directory and are
+# performed by the Go loader before a managed config takes effect.
 
 _SANDBOX_INTERSECT_LISTS = ("required_for", "allowed_credentials", "allowed_harnesses", "egress_allow_only")
 _SANDBOX_CREDENTIAL_RE = re.compile(r"^(none|[a-z0-9][a-z0-9_-]{0,63})$")
 _SANDBOX_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_SANDBOX_PACK_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_SANDBOX_HOST_LABEL_RE = re.compile(r"^[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?$")
+_SANDBOX_LOCKABLE_KEYS = (
+    "mcp.host_ports", "mcp.import", "pack", "profile", "resources", "workdir.mode", "workdir.unmask", "yolo"
+)
 _SANDBOX_DAYS_RE = re.compile(r"^([0-9]{1,6})d$")
 _GO_DURATION_RE = re.compile(r"^(?:(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:ns|us|\u00b5s|\u03bcs|ms|s|m|h))+$")
 _GO_DURATION_PART_RE = re.compile(r"([0-9]*(?:\.[0-9]*)?)(ns|us|\u00b5s|\u03bcs|ms|s|m|h)")
@@ -2880,14 +3554,82 @@ def _go_quote(value: Any) -> str:
 
 
 def _sandbox_enum_error(field_name: str, value: Any, *allowed: str) -> str | None:
-    if value in (None, "") or value in allowed:
+    # Any letter case, as the Go loader folds it (GAP-0691, #1226).
+    if value in (None, "") or (isinstance(value, str) and value.lower() in allowed):
         return None
     return f"{field_name} {_go_quote(value)} must be one of {', '.join(allowed)}"
 
 
 def _sandbox_section_error(section: Mapping[str, Any], prefix: str) -> str | None:
-    """The first refusal of one floor section's managed keys (Go
-    validateManagedFloor), or None."""
+    """The first refusal of a floor section (Go validateAs), or None."""
+    pin = section.get("required_pack_digest") or ""
+    if pin:
+        if not _SANDBOX_PACK_DIGEST_RE.fullmatch(str(pin)):
+            return f"{prefix}.required_pack_digest {_go_quote(pin)} must be sha256:<64 lowercase hex digits>"
+        if not str(section.get("required_pack") or "").strip():
+            return f"{prefix}.required_pack_digest needs {prefix}.required_pack"
+    error = _sandbox_enum_error(f"{prefix}.min_profile", section.get("min_profile"), "open", "balanced", "strict")
+    if error:
+        return error
+    for index, name in enumerate(section.get("allowed_harnesses") or []):
+        if not _SANDBOX_NAME_RE.fullmatch(str(name).strip()):
+            return f"{prefix}.allowed_harnesses[{index}]: invalid name {_go_quote(name)}"
+    for key in ("egress_block", "egress_allow_only"):
+        for index, pattern in enumerate(section.get(key) or []):
+            error = _sandbox_egress_pattern_error(str(pattern))
+            if error:
+                return f"{prefix}.{key}[{index}]: {error}"
+    for index, pattern in enumerate(section.get("require_copy_for") or []):
+        p = str(pattern).strip()
+        if not p:
+            return f"{prefix}.require_copy_for[{index}]: pattern is empty"
+        if "\x00" in p:
+            return f"{prefix}.require_copy_for[{index}]: pattern contains a NUL byte"
+        if not (
+            p.startswith("/") or p == "~" or p.startswith("~/") or p == "**" or p.startswith("**/")
+            or re.match(r"^[A-Za-z]:[/\\]", p)
+        ):
+            return (
+                f"{prefix}.require_copy_for[{index}]: {_go_quote(pattern)} must be an absolute path glob "
+                'or start with "~/"; a relative pattern would never match'
+            )
+        for segment in p.split("/"):
+            if _sandbox_bad_glob_segment(segment):
+                return (
+                    f"{prefix}.require_copy_for[{index}]: {_go_quote(pattern)} "
+                    f"has a malformed glob segment {_go_quote(segment)}"
+                )
+    resources = section.get("max_resources") or {}
+    if isinstance(resources, Mapping):
+        cpu = str(resources.get("cpu") or "").strip()
+        if cpu:
+            if not re.fullmatch(r"(?:[0-9]{1,6}(?:\.[0-9]{1,3})?|[0-9]{1,9}m)", cpu):
+                return (
+                    f"{prefix}.max_resources.cpu {_go_quote(cpu)} "
+                    'must be cores ("2", "1.5") or millicores ("500m")'
+                )
+            if not any(ch in "123456789" for ch in cpu):
+                return f"{prefix}.max_resources.cpu {_go_quote(cpu)} must be positive"
+        memory = str(resources.get("memory") or "").strip()
+        if memory:
+            match = re.fullmatch(r"([0-9]{1,15})(Ki|Mi|Gi|Ti|k|K|M|G|T)?", memory)
+            if match is None:
+                return (
+                    f"{prefix}.max_resources.memory {_go_quote(memory)} "
+                    "must be bytes with an optional Ki/Mi/Gi/Ti or k/M/G/T suffix"
+                )
+            if int(match.group(1)) == 0:
+                return f"{prefix}.max_resources.memory {_go_quote(memory)} must be positive"
+            multiplier = {"": 1, "k": 1000, "K": 1000, "M": 1000**2, "G": 1000**3, "T": 1000**4,
+                          "Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4}[match.group(2) or ""]
+            if int(match.group(1)) > (2**63 - 1) // multiplier:
+                return f"{prefix}.max_resources.memory {_go_quote(memory)} is out of range"
+    for index, key in enumerate(section.get("locked") or []):
+        if str(key).strip() not in _SANDBOX_LOCKABLE_KEYS:
+            return (
+                f"{prefix}.locked[{index}]: {_go_quote(key)} is not a lockable key "
+                f"(want one of {', '.join(_SANDBOX_LOCKABLE_KEYS)})"
+            )
     for key in _SANDBOX_INTERSECT_LISTS:
         if isinstance(section.get(key), list) and not section[key]:
             return f"{prefix}.{key}: an empty list is refused; leave the key out for no constraint"
@@ -2948,6 +3690,96 @@ def _sandbox_section_error(section: Mapping[str, Any], prefix: str) -> str | Non
                 f"{prefix}: required_for [{', '.join(outside)}] is outside allowed_harnesses "
                 f"[{', '.join(str(n) for n in harnesses)}]: a required agent could not run anywhere"
             )
+    return None
+
+
+def _sandbox_bad_glob_segment(segment: str) -> bool:
+    """Check the malformed character classes and escapes rejected by Go path.Match."""
+    def char_at(index: int) -> tuple[str | None, int]:
+        if index >= len(segment) or segment[index] in "-]":
+            return None, index
+        if segment[index] == "\\":
+            index += 1
+            if index >= len(segment):
+                return None, index
+        return segment[index], index + 1
+
+    i = 0
+    while i < len(segment):
+        if segment[i] == "\\":
+            i += 2
+            if i > len(segment):
+                return True
+            continue
+        if segment[i] != "[":
+            i += 1
+            continue
+        i += 1
+        if i < len(segment) and segment[i] == "^":
+            i += 1
+        count = 0
+        while True:
+            if i < len(segment) and segment[i] == "]" and count > 0:
+                i += 1
+                break
+            char, i = char_at(i)
+            if char is None:
+                return True
+            if i < len(segment) and segment[i] == "-":
+                char, i = char_at(i + 1)
+                if char is None:
+                    return True
+            count += 1
+    return False
+
+
+def _sandbox_egress_pattern_error(pattern: str) -> str | None:
+    """Mirror ParseOpenShellEgressPattern's refusal of an invalid host pattern."""
+    import ipaddress
+
+    p = pattern.strip().lower()
+    if not p:
+        return "egress pattern is empty"
+    if p == "*":
+        return (
+            'egress pattern "*" matches every host; '
+            "choose the profile instead (open allows by default, strict turns the web off)"
+        )
+    invalid = f'egress pattern {_go_quote(pattern)} must be a host name, "*.<host>", an IP address or a CIDR prefix'
+    wildcard = p.startswith("*.")
+    if wildcard:
+        p = p[2:]
+    elif "*" in p:
+        return invalid
+    if not wildcard and "/" in p:
+        address, sep, bits = p.partition("/")
+        if not sep or not re.fullmatch(r"(?:0|[1-9][0-9]{0,2})", bits) or address.startswith("["):
+            return invalid
+        try:
+            addr = ipaddress.ip_address(address)
+            if "%" in address or int(bits) > addr.max_prefixlen:
+                return invalid
+            if getattr(addr, "ipv4_mapped", None) is not None and int(bits) < 96:
+                return f"egress pattern {_go_quote(pattern)}: an IPv4-mapped prefix must be at least /96"
+            ipaddress.ip_network(p, strict=False)
+            return None
+        except ValueError:
+            return invalid
+    if not wildcard:
+        try:
+            address = p[1:-1] if p.startswith("[") and p.endswith("]") else p
+            ipaddress.ip_address(address)
+            if "%" in address:
+                return f"egress pattern {_go_quote(pattern)}: zoned IPv6 addresses are not destinations"
+            return None
+        except ValueError:
+            pass
+    host = p.removesuffix(".")
+    labels = host.split(".")
+    if len(host) > 253 or not all(_SANDBOX_HOST_LABEL_RE.fullmatch(label) for label in labels):
+        return invalid
+    if not ("a" <= labels[-1][0] <= "z"):
+        return invalid
     return None
 
 
@@ -3648,15 +4480,19 @@ class ApplicationProtectionConfig:
         return any(_normalize_connector_key(c) == name for c in self.include_connectors)
 
     def _connector_override(self, connector: str) -> ApplicationProtectionConnectorConfig | None:
+        key = self._connector_override_key(connector)
+        return self.connectors[key] if key is not None else None
+
+    def _connector_override_key(self, connector: str) -> str | None:
+        """The key ``connectors`` holds ``connector``'s override under, as saved."""
         if not connector or not self.connectors:
             return None
-        pc = self.connectors.get(connector)
-        if pc is not None:
-            return pc
+        if self.connectors.get(connector) is not None:
+            return connector
         want = _normalize_connector_key(connector)
         for name, entry in self.connectors.items():
-            if _normalize_connector_key(name) == want:
-                return entry
+            if entry is not None and _normalize_connector_key(name) == want:
+                return name
         return None
 
     def validate(self) -> None:
@@ -3742,8 +4578,6 @@ def _validate_connector_name_list(path: str, names: list[str]) -> None:
 
 def _normalize_connector_key(name: str | None) -> str:
     n = (name or "").strip().lower()
-    if n in {"open-hands", "open_hands"}:
-        return "openhands"
     if n in {"claude-code", "claude_code"}:
         return "claudecode"
     return n
@@ -3800,6 +4634,10 @@ class Config:
     # document must never serialize the legacy audit_db/otel model over
     # the canonical observability graph.
     _source_config_version: int = field(default=0, repr=False, compare=False)
+    # config_generation of the config.yaml bytes load() read, -1 when not
+    # known (_generation_of_loaded_text). Audit rows of a decision made on
+    # this config name it (r103 GAP-0021).
+    _loaded_generation: int = field(default=-1, repr=False, compare=False)
     _loaded_v8_modeled_snapshot: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
     ai_discovery: AIDiscoveryConfig = field(default_factory=AIDiscoveryConfig)
     application_protection: ApplicationProtectionConfig = field(default_factory=ApplicationProtectionConfig)
@@ -3808,11 +4646,38 @@ class Config:
     fleet: FleetConfig = field(default_factory=FleetConfig)
     llm_providers: LLMProvidersConfig = field(default_factory=LLMProvidersConfig)
     update: UpdateConfig = field(default_factory=UpdateConfig)
+    # The unified decision model (decision_model:); off by default.
+    decision_model: DecisionModelConfig = field(default_factory=DecisionModelConfig)
     # enterprise.openshell as loaded. Load only: Python never writes the
     # enterprise block (the lifecycle owns it), so saves leave it alone.
     enterprise_openshell: EnterpriseOpenShellConfig = field(
         default_factory=EnterpriseOpenShellConfig, repr=False, compare=False
     )
+    enterprise_cowork_vm_sensor: EnterpriseCoworkVMSensorConfig = field(
+        default_factory=EnterpriseCoworkVMSensorConfig, repr=False, compare=False
+    )
+    # enterprise.profile as loaded ("" when unset). Load only, like
+    # enterprise_openshell; managed_outside_secure_client reads it.
+    enterprise_profile: str = field(default="", repr=False, compare=False)
+
+    def managed_outside_secure_client(self) -> bool:
+        """Whether this is a managed deployment outside Secure Client (the standalone profile).
+
+        There the hook fail mode is the administrator's: an explicit value
+        wins and an unset one is closed (owner decision 2026-10-20), and the
+        managed hooks block a call they cannot check through the connector's
+        native deny, so no connector is lowered to an upstream fail-open.
+        """
+        from defenseclaw import config_writer
+
+        if not (
+            _is_managed_enterprise_mode(self.deployment_mode)
+            or _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV))
+        ):
+            return False
+        if config_writer.machine_managed_standalone():
+            return True
+        return config_writer._standalone_profile({"enterprise": {"profile": self.enterprise_profile}})
 
     # -- Claw-mode path resolution (mirrors claw.go) --
 
@@ -3821,7 +4686,7 @@ class Config:
             self.active_connector(),
             openclaw_home=self.claw.home_dir,
             workspace_dir=self.connector_workspace_dir(),
-        ) or _expand(self.claw.home_dir)
+        )
 
     def connector_workspace_dir(self) -> str:
         """Return the explicitly pinned connector workspace, if any."""
@@ -3835,8 +4700,8 @@ class Config:
             return os.path.abspath(raw)
 
     def __post_init__(self) -> None:
-        # GuardrailConfig.effective_rule_pack_dir resolves a rule_pack preset
-        # under this config's policy_dir.
+        # Guardrail resolvers use the owning config's policy directory and
+        # automatic-protection overlay without keeping the whole config alive.
         import weakref
 
         try:
@@ -3848,16 +4713,26 @@ class Config:
         """Return the canonical connector name for this config.
 
         Mirrors ``Config.activeConnector`` in claw.go: precedence is
-        ``guardrail.connector`` → ``claw.mode`` → ``"openclaw"``,
-        whitespace-trimmed and lowercased. Public so cmd_doctor /
+        ``guardrail.connector`` → configured ``claw.mode`` → the roster,
+        whitespace-trimmed and lowercased. An unconfigured install returns
+        ``""``. Public so cmd_doctor /
         cmd_uninstall can answer "which framework is this install
         running against?" without recomputing the rule.
         """
+        if not self.has_connector_configured():
+            return ""
         if self.guardrail.connector.strip():
             return connector_paths.normalize(self.guardrail.connector)
+        if self.guardrail.connectors:
+            roster = sorted(
+                {connector_paths.normalize(name) for name in self.guardrail.connectors if name.strip()}
+            )
+            if roster:
+                mode = connector_paths.normalize(self.claw.mode)
+                return mode if mode in roster else roster[0]
         if self.claw.mode.strip():
             return connector_paths.normalize(self.claw.mode)
-        return "openclaw"
+        return ""
 
     def effective_webhooks(self, connector: str = "") -> list[WebhookConfig]:
         """Resolve which webhooks ``connector``'s events route to (D5b).
@@ -3870,22 +4745,26 @@ class Config:
         return self.observability.effective_webhooks(connector, self.webhooks)
 
     def has_connector_configured(self) -> bool:
-        """Return True when the operator has explicitly configured a connector.
+        """Return True when the config selects a connector.
 
         Distinguishes a genuinely unconfigured install — every connector
         marker empty, e.g. after ``setup remove`` clears the last one
-        (which persists ``claw.mode: ''``) — from a real single-connector
-        openclaw install, which pins ``claw.mode``/``guardrail.connector``
-        to ``openclaw`` (see ``cmd_setup``). :meth:`active_connectors` and
-        the shared list/scan resolver use this to avoid fabricating a
-        phantom ``openclaw`` when nothing is set up.
+        (which persists ``claw.mode: ''``) — from a single-connector
+        OpenClaw install or a legacy remote OpenClaw fleet. The shared
+        list/scan resolver uses this to avoid fabricating a phantom agent
+        when nothing is set up.
 
-        NOTE: a *missing* config file still loads ``claw.mode`` as the
-        ``"openclaw"`` default (``config.load``), so this reports True
-        there — the unconfigured signal is the explicit empty marker
-        written on removal, not file absence.
+        A *missing* config file or claw block loads ``claw.mode`` as the
+        ``"openclaw"`` default (``config.load``). With a loopback gateway,
+        that reports True only where OpenClaw is installed. A remote fleet
+        host also keeps the legacy connector (GAP-0568,
+        :func:`_mark_openclaw_not_installed`).
         """
-        return bool(self.guardrail.connectors or self.guardrail.connector.strip() or self.claw.mode.strip())
+        if any(name.strip() for name in self.guardrail.connectors) or self.guardrail.connector.strip():
+            return True
+        if getattr(self, "_openclaw_not_installed", False) and openclaw_only_implied(self):
+            return False
+        return bool(self.claw.mode.strip())
 
     def active_connectors(self) -> list[str]:
         """Return the full resolved set of connector names, sorted.
@@ -3903,9 +4782,8 @@ class Config:
         ``["openclaw"]`` — callers that fan out over connectors (``status``,
         ``aibom``, the shared list/scan resolver) then render an explicit
         "no connector configured" empty state instead of a phantom
-        openclaw. :meth:`active_connector` keeps its singular ``"openclaw"``
-        default untouched, so path resolution and other single-connector
-        callers are unaffected.
+        openclaw. :meth:`active_connector` also returns ``""`` so path
+        resolution does not invent an agent.
         """
         if self.guardrail.connectors:
             # Dedupe after normalization so two alias keys (e.g. "claude-code"
@@ -3942,8 +4820,7 @@ class Config:
         Polymorphic — when ``guardrail.connector`` is set, the
         connector-specific layout (for Codex, project and personal
         ``.agents/skills`` layers) is
-        returned; otherwise falls back to OpenClaw paths derived
-        from ``claw.home_dir`` and ``claw.config_file``.
+        returned; an unconfigured install has no agent paths.
 
         ``connector`` overrides the resolved connector so multi-connector
         callers (e.g. the TUI catalog focus selector via
@@ -4080,6 +4957,16 @@ class Config:
         if override.model:
             out.model = override.model
         if override.provider:
+            # A role naming another provider and no instance of its own does
+            # not inherit the custom instance binding (GAP-2379); Go ResolveLLM
+            # applies the same rule.
+            role_provider = override.provider.strip().lower()
+            if (
+                not override.instance_name
+                and role_provider != "custom"
+                and role_provider != (out.provider or "").strip().lower()
+            ):
+                out.instance_name = ""
             out.provider = override.provider
         if override.api_key:
             out.api_key = override.api_key
@@ -4133,7 +5020,7 @@ class Config:
                     out.instance_name,
                 )
 
-        _maybe_warn_unknown_provider(out.provider_prefix(), path)
+        _maybe_warn_unknown_provider(out.provider_prefix(), path, out.instance_name)
         return out
 
     def resolved_default_llm_api_key(self) -> str:
@@ -4179,7 +5066,24 @@ class Config:
             return
         _existing_document_for_save(path, current)
 
-    def save(self, *, actor: str | None = None, reason: str = "") -> Any:
+    def decide(self, *paths: str) -> None:
+        """Name config keys the next :meth:`save` writes as the caller's
+        decision, also when the value written equals the one on disk.
+
+        A save over the pre-1.0.4 default preset keeps its balanced MCP
+        compatibility only for the MCP severities no decided or changed key
+        covers (GAP-1488, ``config_writer._keep_chosen_admission``), so an
+        explicit quarantine is never compiled as a warning.
+        """
+        self.__dict__.setdefault("_decided_paths", []).extend(paths)
+
+    def save(
+        self,
+        *,
+        actor: str | None = None,
+        reason: str = "",
+        check_candidate: Callable[[str, bytes], None] | None = None,
+    ) -> Any:
         """Persist this :class:`Config` through the single config writer.
 
         Only modeled values that changed since load are applied to the file
@@ -4189,11 +5093,12 @@ class Config:
         The writer locks ``config.yaml.lock``, validates the candidate with
         the canonical validator, replaces the file durably and advances
         ``config.generation.json``. ``actor`` defaults to ``cli:<os user>``.
-        Returns the writer's :class:`~defenseclaw.config_writer.WriteResult`.
+        ``check_candidate`` inspects the final bytes under the writer lock and
+        may refuse the write. Returns the writer's :class:`~defenseclaw.config_writer.WriteResult`.
         """
         path = str(config_path_for_data_dir(self.data_dir))
         try:
-            return self._write(path, actor=actor, reason=reason)
+            return self._write(path, actor=actor, reason=reason, check_candidate=check_candidate)
         except ConfigSaveError:
             raise
         except OSError as exc:
@@ -4231,10 +5136,12 @@ class Config:
         actor: str | None = None,
         reason: str = "",
         verify: Callable[[str], None] | None = None,
+        check_candidate: Callable[[str, bytes], None] | None = None,
     ) -> Any:
         from defenseclaw import config_writer
 
         dataclass_data = _config_to_dict(self)
+        decided = self.__dict__.pop("_decided_paths", [])
 
         def mutate(current: bytes, source_name: str) -> tuple[bytes, list[str]]:
             merged = self._merged_document(path, dataclass_data, current)
@@ -4251,7 +5158,15 @@ class Config:
             reason or "config save",
             path=path,
             verify=verify,
+            decided=decided,
+            check_candidate=check_candidate,
         )
+        # The admission pins the writer added (GAP-1488) go into this Config
+        # too, so it reads as the file it wrote.
+        for parts, value in result.pins.items():
+            self.admission.mcp.actions[parts[-1]] = value
+            written = dataclass_data.setdefault("admission", {}).setdefault("mcp", {}).setdefault("actions", {})
+            written[parts[-1]] = value
         if self._source_config_version == 0:
             self._source_config_version = CURRENT_CONFIG_VERSION
         self._loaded_v8_modeled_snapshot = copy.deepcopy(dataclass_data)
@@ -4294,6 +5209,7 @@ class Config:
         # Load already moved a retired connector ID in memory; apply the same
         # rename to the on-disk document so any save persists it.
         legacy_connector.migrate_raw_config(existing, path)
+        _drop_retired_connector_settings(existing, path)
         merged = _merge_v8_modeled_changes(
             existing,
             dataclass_data,
@@ -4312,6 +5228,9 @@ class Config:
             acp_document["default_profile"] = self.acp.default_profile
         if version >= CONFIG_VERSION_V9:
             _project_v9_modeled_keys(merged)
+            openshell = merged.get("openshell")
+            if isinstance(openshell, dict):
+                openshell.pop("middleware", None)
         return merged
 
 
@@ -4494,8 +5413,10 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     d.pop("_loaded_authoritative_dicts", None)
     d.pop("_loaded_owned_nested_values", None)
     d.pop("_source_config_version", None)
+    d.pop("_loaded_generation", None)
     d.pop("_loaded_v8_modeled_snapshot", None)
     d.pop("enterprise_openshell", None)
+    d.pop("enterprise_cowork_vm_sensor", None)
     gw = d.get("gateway")
     if gw and not gw.get("token"):
         gw.pop("token", None)
@@ -4537,6 +5458,11 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         scanners.get("skill_scanner", {}).pop("virustotal_api_key", None)
     _strip_empty_llm(scanners, "plugin_llm")
     guardrail = d.get("guardrail") or {}
+    # The public in-memory default remains "closed" for existing callers,
+    # but an unset document must stay unset in the modeled save baseline.
+    # Otherwise choosing "closed" in setup looks unchanged and is omitted.
+    if isinstance(guardrail, dict) and not getattr(cfg.guardrail, "_hook_fail_mode_saved", False):
+        guardrail.pop("hook_fail_mode", None)
     if isinstance(guardrail, dict) and not guardrail.get("allow_private_upstreams"):
         guardrail.pop("allow_private_upstreams", None)
     _strip_unset_levels(guardrail)
@@ -4552,6 +5478,11 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
             judge.pop("hook_connectors", None)
         if not judge.get("hook_timeout"):
             judge.pop("hook_timeout", None)
+        judge.pop("_max_parallel_explicit_zero", None)
+        if not judge.get("max_parallel") and not cfg.guardrail.judge._max_parallel_explicit_zero:
+            judge.pop("max_parallel", None)
+        if not judge.get("extra_body"):
+            judge.pop("extra_body", None)
     # Mirror Go's ``yaml:"connectors,omitempty"`` — drop the empty
     # per-connector overrides map so existing single-connector configs
     # stay byte-identical after a load/save round-trip. The block
@@ -4620,6 +5551,9 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         _prune_asset_policy_rules(d["asset_policy"])
     for key in ("admission", "llm_providers", "update"):
         _prune_v9_block(d, key)
+    # An untouched decision_model block (off, nothing set) is omitted so
+    # configs from earlier releases stay byte-identical on a round trip.
+    _prune_v9_block(d, "decision_model", drop_false=True)
     # Per-connector observability (D5b): drop the empty block (omitempty),
     # or serialize it with inherited (None) dimensions + webhook omitempty
     # stripped. Mirrors the asset_policy.connectors handling.
@@ -4690,6 +5624,8 @@ def _serialize_v9_guardrail_keys(guardrail: Any) -> None:
     _prune_v9_block(guardrail, "custom_packs")
     if not guardrail.get("cisco_trust_level"):
         guardrail.pop("cisco_trust_level", None)
+    if not guardrail.get("internal_domains"):
+        guardrail.pop("internal_domains", None)
     judge = guardrail.get("judge")
     if isinstance(judge, dict) and not judge.get("trace"):
         judge.pop("trace", None)
@@ -4707,8 +5643,9 @@ def _serialize_v9_scanner_keys(scanners: Any) -> None:
             _prune_v9_block(skill, key, drop_false=True)
     mcp = scanners.get("mcp_scanner")
     if isinstance(mcp, dict):
-        if not mcp.get("judge_source"):
-            mcp.pop("judge_source", None)
+        for key in ("judge_source", "unverified_server"):
+            if not mcp.get(key):
+                mcp.pop(key, None)
         _prune_v9_block(mcp, "virustotal", drop_false=True)
         _prune_v9_block(mcp, "yara")
 
@@ -4995,8 +5932,12 @@ _OWNED_NESTED_KEYS: frozenset[str] = frozenset(
     {
         # Hook-lane judge gate: empty list = lane off, stripped on save.
         "guardrail.judge.hook_connectors",
+        # Decision-model-alone gate: empty list = only in front of the judge.
+        "decision_model.hook_connectors",
         # Hook-lane judge timeout: 0 = gateway default, stripped on save.
         "guardrail.judge.hook_timeout",
+        # Judge call bound: 0 = no limit, stripped on save.
+        "guardrail.judge.max_parallel",
         # Identity-based guardrail profile selection: empty = no profiles.
         "guardrail.profile_assignments",
         "guardrail.default_profile",
@@ -5123,6 +6064,11 @@ def _apply_v8_modeled_delta(
     if current is _V8_MISSING:
         target.pop(key, None)
         return
+    if isinstance(current, dict) and baseline is _V8_MISSING and isinstance(target.get(key), dict):
+        # The load left the mapping out (all defaults) and another writer has
+        # since saved it: merge this change into it, do not replace it
+        # (GAP-1293).
+        baseline = {}
     if isinstance(current, dict) and isinstance(baseline, dict):
         child = target.get(key)
         if not isinstance(child, dict):
@@ -5889,6 +6835,16 @@ def _merge_cisco_ai_defense(raw: dict[str, Any] | None) -> CiscoAIDefenseConfig:
     )
 
 
+def _judge_max_parallel(value: Any) -> int:
+    """guardrail.judge.max_parallel as an int (0 = no limit), as Go reads it."""
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
     if not raw:
         return JudgeConfig()
@@ -5903,6 +6859,9 @@ def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
         timeout=raw.get("timeout", 30.0),
         hook_connectors=raw.get("hook_connectors", []),
         hook_timeout=raw.get("hook_timeout", 0.0),
+        max_parallel=_judge_max_parallel(raw.get("max_parallel", 0)),
+        extra_body=raw.get("extra_body", {}),
+        _max_parallel_explicit_zero=type(raw.get("max_parallel")) is int and raw["max_parallel"] == 0,
         trace=raw.get("trace", False) is True,
         llm=_merge_llm(raw.get("llm")),
         model=raw.get("model", ""),
@@ -5923,7 +6882,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         if isinstance(private_upstreams_raw, list | tuple)
         else []
     )
-    return GuardrailConfig(
+    merged = GuardrailConfig(
         enabled=raw.get("enabled", False),
         mode=raw.get("mode", "observe"),
         scanner_mode=raw.get("scanner_mode", "both"),
@@ -5947,6 +6906,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         custom_packs=_merge_custom_rule_packs(raw.get("custom_packs")),
         rules=_merge_guardrail_rules(raw.get("rules")) or GuardrailRulesConfig(),
         cisco_trust_level=str(raw.get("cisco_trust_level", "") or ""),
+        internal_domains=_string_list(raw.get("internal_domains")),
         block_at=normalize_guardrail_level(raw.get("block_at")),
         alert_at=normalize_guardrail_level(raw.get("alert_at")),
         connector=raw.get("connector", ""),
@@ -5958,6 +6918,10 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         profile_assignments=_merge_guardrail_profile_assignments(raw.get("profile_assignments")),
         default_profile=str(raw.get("default_profile", "") or "").strip(),
     )
+    # The historical raw default is "closed"; keep presence for the OSS
+    # outage resolver without changing that public config value.
+    merged._hook_fail_mode_saved = bool(str(raw.get("hook_fail_mode", "") or "").strip())
+    return merged
 
 
 def _merge_guardrail_connectors(
@@ -6076,10 +7040,60 @@ def _normalize_hook_fail_mode(value: Any) -> str:
     typo in config.yaml never accidentally puts the agent into
     fail-OPEN mode at the hook failure boundary (CodeGuard rule
     codeguard-0-authorization-access-control: deny by default).
+    A Secure Client config's unset value is resolved by
+    :func:`_apply_secure_client_hook_fail_default`, not here.
     """
     if isinstance(value, str) and value.strip().lower() == "open":
         return "open"
     return "closed"
+
+
+def _mark_openclaw_not_installed(cfg: Config) -> None:
+    """Record that a claw.mode which only implies OpenClaw has no OpenClaw behind it.
+
+    A config.yaml without a claw block loads ``claw.mode: openclaw``, and init
+    wrote that default before 1.0.4. With a loopback gateway and no local
+    OpenClaw, :meth:`Config.has_connector_configured` reports no connector,
+    so status and the TUI name none (GAP-0568). An explicit fleet mode keeps
+    the legacy connector. Mirrors the Go loader, which leaves a managed
+    enterprise service as it was.
+    """
+    if _is_managed_enterprise_mode(cfg.deployment_mode):
+        return
+    if openclaw_implied_but_not_installed(cfg):
+        object.__setattr__(cfg, "_openclaw_not_installed", True)
+
+
+def _apply_secure_client_hook_fail_default(cfg: Config, raw: dict[str, Any]) -> None:
+    """Secure Client exception to the fail-closed hook default (#1163).
+
+    Hooks fail open by default only under Secure Client: a document that
+    resolves to the Secure Client profile (``deployment_mode:
+    managed_enterprise``, not the standalone profile and not a host the
+    enterprise lifecycle published as standalone, as
+    :func:`config_writer.secure_client_document`) loads an unset
+    ``guardrail.hook_fail_mode`` as ``"open"`` and marks the guardrail so
+    :meth:`GuardrailConfig.effective_hook_fail_mode` resolves independent of
+    the guardrail mode. An explicit value, ``"closed"`` included, is kept.
+    Every other install keeps the fail-closed default. The Secure Client
+    config is administrator-owned (local writers refuse it), so the gateway
+    remains the authority; this only keeps CLI reporting in step with it.
+    """
+    from defenseclaw import config_writer
+
+    if not config_writer.secure_client_document(raw):
+        return
+    try:
+        object.__setattr__(cfg.guardrail, "_secure_client", True)
+    except (AttributeError, TypeError):  # a test double without attributes
+        return
+    guardrail_raw = raw.get("guardrail")
+    configured = guardrail_raw.get("hook_fail_mode") if isinstance(guardrail_raw, dict) else None
+    if not str(configured or "").strip():
+        # The value the document runs with, not one it saves: the tracked
+        # setter would make config.yaml look as if it set the mode, and every
+        # reader would report "configured: open" for an unset key (GAP-0719).
+        object.__setattr__(cfg.guardrail, "hook_fail_mode", "open")
 
 
 def _merge_hilt(raw: dict[str, Any] | None) -> HILTConfig:
@@ -6102,6 +7116,7 @@ def _merge_mcp_scanner(raw: Any) -> MCPScannerConfig:
             llm=_merge_llm(raw.get("llm")),
             judge_source=str(raw.get("judge_source", "") or ""),
             yara=_merge_mcp_scanner_yara(raw.get("yara")),
+            unverified_server=str(raw.get("unverified_server", "") or ""),
         )
     return MCPScannerConfig()
 
@@ -6556,7 +7571,6 @@ def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShel
     image = _openshell_mapping(raw.get("image"))
     approvals = _openshell_mapping(raw.get("approvals"))
     mcp = _openshell_mapping(raw.get("mcp"))
-    middleware = _openshell_mapping(raw.get("middleware"))
     harness_versions = _openshell_mapping(image.get("harness_versions"))
     return OpenShellConfig(
         enabled=_coerce_bool(raw.get("enabled", False)),
@@ -6575,6 +7589,7 @@ def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShel
         yolo=_openshell_optional_bool(raw.get("yolo")),
         llm=_openshell_str(raw.get("llm")) or "auto",
         keep_headless=_coerce_bool(raw.get("keep_headless", False)),
+        trusted_ca_bundle=_openshell_str(raw.get("trusted_ca_bundle")),
         workdir=OpenShellWorkdirConfig(
             mode=_openshell_str(workdir.get("mode")),
             masks=_openshell_str_list(workdir.get("masks")),
@@ -6610,7 +7625,6 @@ def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShel
         ),
         upstream_telemetry=_coerce_bool(raw.get("upstream_telemetry", False)),
         token_delivery=_openshell_str(raw.get("token_delivery")) or "provider",
-        middleware=OpenShellMiddlewareConfig(enabled=_coerce_bool(middleware.get("enabled", False))),
         admin=_merge_openshell_admin(raw.get("admin")),
     )
 
@@ -6662,14 +7676,84 @@ def _merge_openshell_admin(raw: Any) -> OpenShellAdminConfig:
 def _merge_enterprise_openshell(raw: Any) -> EnterpriseOpenShellConfig:
     """Parse ``enterprise.openshell`` (load only; Go validates it)."""
     section = _openshell_mapping(_openshell_mapping(raw).get("openshell"))
-    return EnterpriseOpenShellConfig(
-        install=_openshell_str(section.get("install")),
-        driver=_openshell_str(section.get("driver")),
-        version=_openshell_str(section.get("version")),
-        gateway_port=_openshell_int(section.get("gateway_port")),
-        e2fsprogs_dir=_openshell_str(section.get("e2fsprogs_dir")),
-        driver_fallback=_openshell_str(section.get("driver_fallback")),
+    return EnterpriseOpenShellConfig(driver=_openshell_str(section.get("driver")))
+
+
+def _merge_enterprise_cowork_vm_sensor(raw: Any) -> EnterpriseCoworkVMSensorConfig:
+    section = _openshell_mapping(_openshell_mapping(raw).get("cowork_vm_sensor"))
+    return EnterpriseCoworkVMSensorConfig(
+        mode=_openshell_str(section.get("mode"), "off"),
+        tenant=_openshell_str(section.get("tenant")),
+        device=_openshell_str(section.get("device")),
+        collector=_openshell_str(section.get("collector")),
+        vendor=_openshell_str(section.get("vendor")),
+        source_dir=_openshell_str(section.get("source_dir")),
+        package_sha256=_openshell_str(section.get("package_sha256")),
+        signature_sha256=_openshell_str(section.get("signature_sha256")),
     )
+
+
+# Mirrors config.CoworkDerivedDeviceMaxLen.
+_COWORK_DERIVED_DEVICE_MAX_LEN = 64
+
+
+def _validate_enterprise_cowork_vm_sensor(raw: Mapping[str, Any]) -> None:
+    """Value-only mirror; the Go lifecycle owns all paths and delivery."""
+    enterprise = raw.get("enterprise")
+    if not isinstance(enterprise, Mapping) or "cowork_vm_sensor" not in enterprise:
+        return
+    prefix = "enterprise.cowork_vm_sensor"
+    if raw.get("deployment_mode") != "managed_enterprise" or enterprise.get("profile") != "standalone":
+        raise ValueError(f"{prefix} requires deployment_mode managed_enterprise and enterprise.profile standalone")
+    section = enterprise["cowork_vm_sensor"]
+    if not isinstance(section, Mapping):
+        raise ValueError(f"{prefix} must be an object")
+    fields = {"mode", "tenant", "device", "collector", "vendor", "source_dir", "package_sha256", "signature_sha256"}
+    if set(section) - fields:
+        raise ValueError(f"{prefix} contains an unknown setting")
+    if any(not isinstance(value, str) for value in section.values()):
+        raise ValueError(f"{prefix} values must be strings")
+    mode = section.get("mode", "off")
+    if mode not in {"off", "on"}:
+        raise ValueError(f"{prefix}.mode must be off or on")
+    patterns = {
+        "tenant": (r"[A-Za-z0-9][A-Za-z0-9._-]*", 128),
+        "device": (r"[A-Za-z0-9][A-Za-z0-9._-]*", 128),
+        "collector": (r"[A-Za-z0-9][A-Za-z0-9.-]*:[0-9]{1,5}", 253),
+        "vendor": (r"[a-z][a-z0-9_-]*", 64),
+        "package_sha256": (r"[0-9a-f]{64}", 64),
+        "signature_sha256": (r"[0-9a-f]{64}", 64),
+    }
+    for key, (pattern, limit) in patterns.items():
+        if key in section and (len(section[key]) > limit or re.fullmatch(pattern, section[key]) is None):
+            raise ValueError(f"{prefix}.{key} is invalid")
+    if "source_dir" in section and len(section["source_dir"]) > 4096:
+        raise ValueError(f"{prefix}.source_dir is too long")
+    if mode != "on":
+        return
+    # device is optional: unset, each host derives its own (macOS
+    # IOPlatformUUID, Windows MachineGuid; config.NormalizeCoworkDeviceID).
+    required = {"tenant", "collector", "vendor", "source_dir", "package_sha256"}
+    if required - section.keys():
+        raise ValueError(f"{prefix} requires tenant, collector, vendor, source_dir and package_sha256 while on")
+    source = section["source_dir"]
+    if source.startswith("/"):
+        absolute = source == "/" or all(part not in {"", ".", ".."} for part in source[1:].split("/"))
+    else:
+        absolute = bool(re.match(r"^[A-Za-z]:\\", source)) and not any(char in source[3:] for char in "/<>|?*:")
+        if absolute and len(source) > 3:
+            absolute = all(
+                part not in {"", ".", ".."} and part.rstrip(". ") == part for part in source[3:].split("\\")
+            )
+    if not absolute or source.strip() != source or any(char in source for char in '\x00\r\n"\t'):
+        raise ValueError(f"{prefix}.source_dir must be an absolute administrator-staged directory")
+    if not 1 <= int(section["collector"].rsplit(":", 1)[1]) <= 65535:
+        raise ValueError(f"{prefix}.collector port must be 1..65535")
+    # An unset device reserves the longest derived ID (CoworkDerivedDeviceMaxLen).
+    device = section.get("device") or "d" * _COWORK_DERIVED_DEVICE_MAX_LEN
+    arguments = f"tenant={section['tenant']},device={device},collector={section['collector']}"
+    if len(arguments) > 256:
+        raise ValueError(f"{prefix} arguments must match Anthropic's 1..256-byte ASCII format")
 
 
 def _serialize_openshell(d: dict[str, Any]) -> None:
@@ -6786,7 +7870,9 @@ def _apply_instance_overlay(out: LLMConfig, data_dir: str, providers: list[dict[
             break
     if entry is None:
         return
-    if not out.provider:
+    # provider "custom" is what ``setup llm --provider custom --instance-name``
+    # saves: the bound instance's base_provider_type is the family (GAP-2393).
+    if not out.provider or out.provider.strip().lower() == "custom":
         bp = entry.get("base_provider_type") or entry.get("provider") or ""
         if isinstance(bp, str) and bp:
             out.provider = bp.strip().lower()
@@ -6826,6 +7912,8 @@ def _load_dotenv_into_os(data_dir: str) -> None:
     managed_host: bool | None = None
     try:
         body = read_regular_file_no_follow(env_path, max_bytes=MAX_DOTENV_BYTES)
+        # An adopted gateway token copy never shadows the one the operator saved.
+        shadowed = gateway_token_adoption.shadowed_names(body)
         for raw_line in body.splitlines():
             line = raw_line.strip()
             if not line or line.startswith(b"#"):
@@ -6860,6 +7948,12 @@ def _load_dotenv_into_os(data_dir: str) -> None:
                 seen_keys.add(key)
                 current = os.environ.get(key)
                 injected = current is None or credential_provenance.holds_injected_value(data_dir, key, current)
+                if gateway_token_adoption.is_shadowed(shadowed, key):
+                    # A long-lived process (the TUI) may hold the adopted copy an
+                    # earlier load injected.
+                    if current is not None and injected:
+                        del os.environ[key]
+                    continue
                 if injected:
                     os.environ[key] = value
                 credential_provenance.note_dotenv_candidate(
@@ -6960,6 +8054,146 @@ def _default_policy_dir(cfg_file: str, data_dir: str) -> str:
     return os.path.join(data_dir, "policies")
 
 
+# until 1.1: OpenHands and OmniGent were removed in 1.0.4 (#1182). Older
+# 0.8.x and 1.0.x files can still name them in connector fields.
+_RETIRED_CONNECTOR_NAMES = frozenset({"openhands", "omnigent", "open-hands", "open_hands"})
+
+
+def _is_retired_connector_name(name: Any) -> bool:
+    return isinstance(name, str) and name.strip().lower() in _RETIRED_CONNECTOR_NAMES
+
+
+# Set once _drop_retired_connector_settings has warned in this process.
+_retired_settings_warned = threading.Event()
+
+
+def _drop_retired_connector_settings(
+    raw: dict[str, Any], source: str | os.PathLike[str] | None = None, *, emit_warning: bool = True
+) -> None:
+    """Until 1.1, accept old rosters and discard removed connector settings.
+
+    Only connector fields are touched (mirrors ``dropRetiredConnectorSettings``
+    and ``migrateObservabilityV8LegacyConnectors`` in Go): a skill, MCP server
+    or route that happens to share a removed connector's name is kept. A list
+    that named only removed connectors must not widen into "every connector"
+    when it empties, so its owner is disabled or dropped instead.
+    """
+
+    changed = False
+
+    def child(parent: Any, key: str) -> Any:
+        return parent.get(key) if isinstance(parent, dict) else None
+
+    def drop_keys(mapping: Any) -> None:
+        nonlocal changed
+        if not isinstance(mapping, dict):
+            return
+        for key in [key for key in mapping if _is_retired_connector_name(key)]:
+            del mapping[key]
+            changed = True
+
+    def drop_names(parent: Any, key: str, *, omit_empty: bool = False) -> bool:
+        """Strip removed names from parent[key]; True when only removed names were listed.
+
+        omit_empty removes a key left empty, for the sandbox lists that refuse
+        an empty list (an absent key means no constraint, so the caller keeps
+        the section restrictive where that would widen it).
+        """
+        nonlocal changed
+        names = child(parent, key)
+        if not isinstance(names, list) or not names:
+            return False
+        kept = [name for name in names if not _is_retired_connector_name(name)]
+        if len(kept) == len(names):
+            return False
+        if kept or not omit_empty:
+            parent[key] = kept
+        else:
+            del parent[key]
+        changed = True
+        return not kept
+
+    guardrail = child(raw, "guardrail")
+    application = child(raw, "application_protection")
+    observability = child(raw, "observability")
+    openshell = child(raw, "openshell")
+    admin = child(openshell, "admin")
+
+    for mapping in (
+        child(guardrail, "connectors"),
+        child(child(raw, "asset_policy"), "connectors"),
+        child(application, "connectors"),
+        child(observability, "connectors"),
+        child(raw, "connector_hooks"),
+        child(child(child(raw, "enterprise"), "machine_policy"), "connectors"),
+    ):
+        drop_keys(mapping)
+
+    drop_names(child(guardrail, "judge"), "hook_connectors")
+    drop_names(application, "exclude_connectors")
+    if drop_names(application, "include_connectors"):
+        application["enabled"] = False
+    if drop_names(openshell, "harnesses"):
+        openshell["enabled"] = False
+    drop_names(admin, "required_for", omit_empty=True)
+    if drop_names(admin, "allowed_harnesses", omit_empty=True):
+        admin["allowed"] = False
+
+    profiles = child(guardrail, "profiles")
+    if isinstance(profiles, dict):
+        for profile in profiles.values():
+            drop_keys(child(profile, "connectors"))
+            sandbox = child(profile, "sandbox")
+            drop_names(sandbox, "required_for", omit_empty=True)
+            if drop_names(sandbox, "allowed_harnesses", omit_empty=True):
+                sandbox["allowed"] = False
+
+    assignments = child(guardrail, "profile_assignments")
+    if isinstance(assignments, list):
+        # An assignment for only removed connectors would match every
+        # connector once its list empties, so it goes.
+        assignments[:] = [
+            assignment for assignment in assignments if not drop_names(child(assignment, "match"), "connectors")
+        ]
+
+    destinations = child(observability, "destinations")
+    if isinstance(destinations, list):
+        kept_destinations = []
+        for destination in destinations:
+            routes = child(destination, "routes")
+            if isinstance(routes, list) and routes:
+                # A route for only removed connectors would select every
+                # connector (and fails the v8 schema's minItems) once emptied.
+                routes[:] = [route for route in routes if not drop_names(child(route, "selector"), "connectors")]
+                if not routes:
+                    # Every route was for removed connectors: empty routes are
+                    # refused and no routes would send every signal, so the
+                    # destination goes (as in Go).
+                    continue
+            kept_destinations.append(destination)
+        destinations[:] = kept_destinations
+
+    if isinstance(guardrail, dict) and _is_retired_connector_name(guardrail.get("connector")):
+        remaining = guardrail.get("connectors")
+        guardrail["connector"] = sorted(remaining)[0] if isinstance(remaining, dict) and remaining else ""
+        changed = True
+    claw = child(raw, "claw")
+    if isinstance(claw, dict) and _is_retired_connector_name(claw.get("mode")):
+        claw["mode"] = ""
+        changed = True
+    if changed and emit_warning and not _retired_settings_warned.is_set():
+        # Once per process, through this module's logger: the root logger's
+        # implicit basicConfig printed a raw "WARNING:root:" line into the
+        # installer's output, and that line repeated the installers' one
+        # removal notice (GAP-2043). It names the file, which is what to fix.
+        _retired_settings_warned.set()
+        _log.warning(
+            "%s still names OpenHands/OmniGent, which DefenseClaw no longer supports; "
+            "they are ignored. Delete them from that file.",
+            os.fspath(source) if source else "config.yaml",
+        )
+
+
 def load(
     *,
     data_dir: str | os.PathLike[str] | None = None,
@@ -6984,8 +8218,13 @@ def load(
     cfg_file = str(config_path_for_data_dir(data_dir))
 
     raw: dict[str, Any] = {}
+    loaded_text: str | None = None
     try:
-        raw = parsed_source if parsed_source is not None else parse_config_yaml(read_config_text(cfg_file)) or {}
+        if parsed_source is not None:
+            raw = parsed_source
+        else:
+            loaded_text = read_config_text(cfg_file)
+            raw = parse_config_yaml(loaded_text) or {}
     except (FileNotFoundError, NotADirectoryError):
         pass
     except OSError as exc:
@@ -6997,6 +8236,8 @@ def load(
     # is normalized or checked for duplicates. The Go loader applies the same
     # rule; `defenseclaw migrate` persists it (see migrations.py).
     legacy_connector.migrate_raw_config(raw, cfg_file)
+    _drop_retired_connector_settings(raw, cfg_file)
+    _validate_enterprise_cowork_vm_sensor(raw)
     if without_guardrail_profiles:
         raw = _without_guardrail_profiles(raw)
 
@@ -7004,6 +8245,11 @@ def load(
     ss_raw = scanners_raw.get("skill_scanner", {})
     gw_raw = raw.get("gateway", {})
     source_config_version = _exact_config_version(raw.get("config_version"))
+    # config.yaml stays in the install home; the stores and folders the file
+    # leaves out are under the data_dir it names, as the gateway resolves them
+    # (GAP-2126: the CLI seeded and read <home>/policies after config set
+    # data_dir while the gateway read <data_dir>/policies).
+    data_dir = _configured_data_dir(raw, data_dir)
     audit_db = _audit_database_path(raw, data_dir)
 
     cfg = Config(
@@ -7097,7 +8343,12 @@ def load(
         admission=_merge_admission(raw.get("admission")),
         llm_providers=_merge_llm_providers(raw.get("llm_providers")),
         update=_merge_update(raw.get("update")),
+        decision_model=_merge_decision_model(raw.get("decision_model")),
         enterprise_openshell=_merge_enterprise_openshell(raw.get("enterprise")),
+        enterprise_cowork_vm_sensor=_merge_enterprise_cowork_vm_sensor(raw.get("enterprise")),
+        enterprise_profile=str((raw.get("enterprise") or {}).get("profile") or "")
+        if isinstance(raw.get("enterprise"), dict)
+        else "",
     )
     if not os.path.isabs(cfg.gateway.device_key_file):
         resolved_device_key = _resolve_relative_gateway_device_key_file(
@@ -7109,6 +8360,16 @@ def load(
     cfg._loaded_authoritative_dicts = _snapshot_authoritative_dicts(raw)
     cfg._loaded_owned_nested_values = _snapshot_owned_nested_values(raw)
     cfg._source_config_version = source_config_version
+    cfg._loaded_generation = _generation_of_loaded_text(cfg_file, loaded_text)
+    _apply_secure_client_hook_fail_default(cfg, raw)
+    # A relative guardrail.custom_packs path is read against the directory of the
+    # config file as loaded; hold that absolute base so a later chdir, or a copy
+    # of this config, never moves the pack (Go GuardrailConfig customPackBase).
+    try:
+        object.__setattr__(cfg.guardrail, "_custom_pack_base", os.path.dirname(os.path.abspath(cfg_file)))
+    except (AttributeError, TypeError):  # a test double without attributes
+        pass
+    _mark_openclaw_not_installed(cfg)
     _migrate_llm_fields(cfg)
     _warn_plaintext_secrets(cfg)
     # Fail loud on invalid guardrail value invariants, mirroring the Go
@@ -7129,6 +8390,23 @@ def load(
     if is_current_schema(source_config_version):
         cfg._loaded_v8_modeled_snapshot = copy.deepcopy(_config_to_dict(cfg))
     return cfg
+
+
+def _generation_of_loaded_text(cfg_file: str, text: str | None) -> int:
+    """config_generation of the config.yaml text load() read: the one
+    config.generation.json records when it records these bytes, -1 when a
+    writer changed the file since, nothing recorded it, or the record is
+    malformed (``"generation": null`` must not stop config.yaml loading)."""
+    if text is None:
+        return -1
+    from defenseclaw import config_writer
+
+    try:
+        state = config_writer.read_generation_state(cfg_file)
+    except (OSError, ValueError, TypeError, OverflowError):
+        return -1
+    recorded = state.config_sha256.strip().lower().removeprefix("sha256:")
+    return state.generation if recorded == hashlib.sha256(text.encode("utf-8")).hexdigest() else -1
 
 
 _GUARDRAIL_PROFILE_KEYS = ("profiles", "profile_assignments", "default_profile")
@@ -7153,18 +8431,40 @@ def _exact_config_version(value: Any) -> int:
     return 0
 
 
+def _configured_data_dir(raw: dict[str, Any], home: str) -> str:
+    """The data_dir config.yaml sets (``~/`` expanded, made absolute like the
+    Go compiler), else ``home``: the folder the omitted paths are under."""
+    configured = raw.get("data_dir")
+    if not isinstance(configured, str) or not configured.strip():
+        return home
+    return os.path.abspath(os.path.normpath(_expand_store_home(configured.strip())))
+
+
 def _audit_database_path(raw: dict[str, Any], data_dir: str) -> str:
-    """Resolve Python readers/writers to the same local store as config v8."""
+    """Resolve Python readers/writers to the same local store as config v8.
+
+    A leading ``~`` is the home folder and a relative path is under data_dir,
+    as the Go compiler resolves it. ``~/x`` used to be joined to data_dir
+    first, so it named ``<data_dir>/~/x`` (GAP-0005).
+    """
 
     observability = raw.get("observability")
     local = observability.get("local") if isinstance(observability, dict) else None
     configured = local.get("path") if isinstance(local, dict) else None
-    path = configured.strip() if isinstance(configured, str) else ""
+    path = _expand_store_home(configured.strip()) if isinstance(configured, str) else ""
     if not path:
         path = os.path.join(data_dir, AUDIT_DB_NAME)
     elif not os.path.isabs(path):
         path = os.path.join(data_dir, path)
-    return os.path.normpath(os.path.expanduser(path))
+    return os.path.normpath(path)
+
+
+def _expand_store_home(path: str) -> str:
+    """Expand ``~`` and ``~/`` (``~\\`` on Windows) like the Go compiler; not ``~user``."""
+    prefixes = ("~/", "~\\") if os.name == "nt" else ("~/",)
+    if path == "~" or path.startswith(prefixes):
+        return os.path.expanduser(path)
+    return path
 
 
 def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
@@ -7287,6 +8587,10 @@ def _merge_application_protection_guardrail(raw: Any) -> PerConnectorGuardrailCo
         hilt=_merge_hilt(hilt_entry) if hilt_entry is not None else None,
         hook_fail_mode=str(raw.get("hook_fail_mode", "") or ""),
         block_message=str(raw.get("block_message", "") or ""),
+        # The pack the gateway loads for connectors it protects automatically
+        # (EffectiveRulePackRefForConnector); the CLI needs it to know which
+        # scopes select a custom_packs pin.
+        rule_pack=str(raw.get("rule_pack", "") or ""),
         enabled=enabled_raw if isinstance(enabled_raw, bool) else None,
         block_at=normalize_guardrail_level(raw.get("block_at")),
         alert_at=normalize_guardrail_level(raw.get("alert_at")),
@@ -7455,3 +8759,35 @@ def prepare_fresh_v8_config(cfg: Config) -> Config:
     cfg._source_config_version = CURRENT_CONFIG_VERSION
     cfg._loaded_v8_modeled_snapshot = copy.deepcopy(_config_to_dict(cfg))
     return cfg
+
+
+def saved_hook_fail_mode_scope(guardrail: Any, connector: str = "") -> str:
+    """Where an explicitly saved ``hook_fail_mode`` that decides ``connector`` lives.
+
+    ``"connector"`` for the connector's own saved mode, ``"global"`` for a
+    saved top-level one, ``""`` when none is saved and the policy tier decides
+    (:meth:`GuardrailConfig.effective_hook_fail_mode`). A saved mode wins over
+    ``guardrail use-pack strict``, so a hint to close an outage names
+    ``guardrail fail-mode closed`` then (GAP-0039).
+    """
+    override = (getattr(guardrail, "connectors", None) or {}).get(connector)
+    if override is not None and str(getattr(override, "hook_fail_mode", "") or "").strip():
+        return "connector"
+    value = str(getattr(guardrail, "hook_fail_mode", "") or "").strip()
+    if value and getattr(guardrail, "_hook_fail_mode_saved", True):
+        return "global"
+    return ""
+
+
+def outage_block_hint(guardrail: Any, connector: str = "") -> str:
+    """The command that makes a per-user ``connector``'s hooks block while the gateway is down.
+
+    ``guardrail fail-mode closed`` (``--connector NAME`` for the connector's
+    own save) when a saved open decides it, else the strict policy (GAP-0039).
+    """
+    scope = saved_hook_fail_mode_scope(guardrail, connector)
+    if scope == "connector":
+        return f"defenseclaw guardrail fail-mode closed --connector {connector}"
+    if scope == "global":
+        return "defenseclaw guardrail fail-mode closed"
+    return "defenseclaw guardrail use-pack strict"

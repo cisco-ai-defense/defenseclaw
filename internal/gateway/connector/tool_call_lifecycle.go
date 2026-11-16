@@ -255,57 +255,16 @@ func (contract ToolCallLifecycleContract) ClassifyTerminalOutcome(
 			return classifyCancellationOrFailure(errorValue)
 		}
 		return ToolLifecycleOutcomeSuccess
-	case "openhands":
-		response, ok := nestedMap(payload, "tool_response", "toolResponse")
-		if !ok {
-			return ToolLifecycleOutcomeUnknown
-		}
-		isError, ok := firstPresent(response, "is_error", "isError")
-		if !ok {
-			return ToolLifecycleOutcomeUnknown
-		}
-		flag, ok := isError.(bool)
-		if !ok {
-			return ToolLifecycleOutcomeUnknown
-		}
-		if flag {
-			return ToolLifecycleOutcomeFailure
-		}
-		return ToolLifecycleOutcomeSuccess
 	case "opencode":
 		response, ok := nestedMap(payload, "tool_response", "toolResponse")
 		if !ok {
 			return ToolLifecycleOutcomeUnknown
 		}
-		output, exists := firstPresent(response, "output")
-		if !exists {
-			return ToolLifecycleOutcomeUnknown
-		}
-		// OpenCode's reviewed after-hook result always owns a string output
-		// field. The empty string is a valid result; a missing or differently
-		// typed field is a malformed bridge payload and cannot prove success.
-		if _, ok := output.(string); !ok {
-			return ToolLifecycleOutcomeUnknown
-		}
-		toolNameValue, _ := firstPresent(payload, "tool_name", "toolName")
-		toolName, _ := toolNameValue.(string)
-		if strings.EqualFold(strings.TrimSpace(toolName), "bash") {
-			metadata, ok := nestedMap(response, "metadata")
-			if !ok {
-				return ToolLifecycleOutcomeUnknown
-			}
-			exitValue, exists := firstPresent(metadata, "exit")
-			exitCode, ok := numericInt64(exitValue)
-			if !exists || !ok {
-				return ToolLifecycleOutcomeUnknown
-			}
-			if exitCode != 0 {
-				return ToolLifecycleOutcomeFailure
-			}
-		}
-		return ToolLifecycleOutcomeSuccess
+		return classifyOpenCodeV2Result(payload, response)
 	case "amp":
 		return classifyAmpResult(payload)
+	case AgentGatewayConnectorName:
+		return classifyAgentGatewayResult(payload)
 	default:
 		return ToolLifecycleOutcomeUnknown
 	}
@@ -763,13 +722,18 @@ func claudeCodeToolCallLifecycle() ToolCallLifecycleContract {
 
 func hermesToolCallLifecycle() ToolCallLifecycleContract {
 	return ToolCallLifecycleContract{
-		Version:                           ToolCallLifecycleContractVersion,
-		PreProposalEvents:                 []string{"pre_tool_call"},
-		AuthoritativeSuccessEvents:        []string{"post_tool_call"},
-		AuthoritativeFailureEvents:        []string{"post_tool_call"},
-		AuthoritativeDenialEvents:         []string{"post_tool_call"},
-		AuthoritativePendingDiscardEvents: []string{},
-		AuthoritativeTerminalEvents:       []string{"on_session_end", "on_session_finalize", "on_session_reset"},
+		Version:                    ToolCallLifecycleContractVersion,
+		PreProposalEvents:          []string{"pre_tool_call"},
+		AuthoritativeSuccessEvents: []string{"post_tool_call"},
+		AuthoritativeFailureEvents: []string{"post_tool_call"},
+		AuthoritativeDenialEvents:  []string{"post_tool_call"},
+		// Hermes sends on_session_end when each turn ends; the session goes on
+		// in the next prompt with no on_session_start. Like Claude Code's
+		// Stop it discards only unfinished proposals, so a reviewed chain can
+		// span turns (rel-1-0-4 GAP-0599). on_session_finalize and
+		// on_session_reset end the session.
+		AuthoritativePendingDiscardEvents: []string{"on_session_end"},
+		AuthoritativeTerminalEvents:       []string{"on_session_finalize", "on_session_reset"},
 		InvocationIDAuthority:             ToolInvocationIDPairedID,
 		OutcomeAuthority:                  ToolOutcomeResultPayload,
 		StatefulEnforcementLevel:          StatefulToolPairedOutcomes,
@@ -793,7 +757,7 @@ func hermesToolCallLifecycle() ToolCallLifecycleContract {
 		},
 		Limitations: []string{
 			"Only pre_tool_call can block, and hook subprocess errors, timeouts, or malformed output fail open upstream.",
-			"A post_tool_call commits success only when its documented top-level status is ok; error and blocked statuses must not advance state.",
+			"A post_tool_call commits success only when its documented extra.status is ok; error and blocked statuses must not advance state.",
 		},
 	}
 }
@@ -805,8 +769,8 @@ func hermesToolCallLifecycleV2() ToolCallLifecycleContract {
 		"https://github.com/NousResearch/hermes-agent/blob/345cd2b057a452236de401d3534b8502a7465e8d/hermes_cli/plugins.py",
 	}
 	contract.Limitations = []string{
-		"Only pre_tool_call can block. Exit code 2 now blocks pre_tool_call; other non-zero exits still parse stdout. Timeouts and spawn errors fail open unless the hook spec sets fail_closed.",
-		"A post_tool_call commits success only when its documented top-level status is ok; error and blocked statuses must not advance state.",
+		"Only pre_tool_call can block. Exit code 2 blocks pre_tool_call; Setup sets fail_closed on its v2 pre_tool_call entry outside Secure Client, so timeouts and spawn errors block. A killed hook can still fail open with a non-2 exit and empty stdout. Other events cannot block.",
+		"A post_tool_call commits success only when its documented extra.status is ok; error and blocked statuses must not advance state.",
 	}
 	return contract
 }
@@ -954,46 +918,12 @@ func antigravityToolCallLifecycle() ToolCallLifecycleContract {
 	}
 }
 
-func openHandsToolCallLifecycle() ToolCallLifecycleContract {
-	return ToolCallLifecycleContract{
-		Version:                           ToolCallLifecycleContractVersion,
-		PreProposalEvents:                 []string{"pre_tool_use"},
-		AuthoritativeSuccessEvents:        []string{"post_tool_use"},
-		AuthoritativeFailureEvents:        []string{"post_tool_use"},
-		AuthoritativeDenialEvents:         []string{},
-		AuthoritativePendingDiscardEvents: []string{"stop"},
-		AuthoritativeTerminalEvents:       []string{"session_end"},
-		InvocationIDAuthority:             ToolInvocationIDNone,
-		OutcomeAuthority:                  ToolOutcomeResultPayload,
-		StatefulEnforcementLevel:          StatefulToolDetectionOnly,
-		Routing: ToolEventRouting{
-			StructuredActionEvents: []string{"pre_tool_use"},
-			ResultContentEvents:    []string{"post_tool_use"},
-			StateTransitionEvents:  []string{},
-			AuditOnlyEvents:        []string{"session_start", "stop", "session_end"},
-		},
-		CoveredToolSurfaces: []ToolSurface{
-			ToolSurfaceGeneric, ToolSurfaceShell, ToolSurfaceFileRead,
-			ToolSurfaceFileWrite, ToolSurfaceFileEdit, ToolSurfaceMCP,
-			ToolSurfaceSkills,
-		},
-		OfficialSourceURLs: []string{
-			"https://github.com/OpenHands/software-agent-sdk/blob/6d597ff7d5d3c89ef8ba0c8e3b3c6a09169da07c/openhands-sdk/openhands/sdk/hooks/types.py",
-			"https://github.com/OpenHands/software-agent-sdk/blob/6d597ff7d5d3c89ef8ba0c8e3b3c6a09169da07c/openhands-sdk/openhands/sdk/hooks/conversation_hooks.py",
-		},
-		Limitations: []string{
-			"Shell hook input omits the SDK's internal action ID, so PreToolUse and PostToolUse cannot be joined by an authoritative per-call identifier.",
-			"Success requires tool_response.is_error=false; hook errors, timeouts, non-2 exits, and asynchronous PreToolUse hooks fail open.",
-		},
-	}
-}
-
 func openCodeToolCallLifecycle() ToolCallLifecycleContract {
 	return ToolCallLifecycleContract{
 		Version:                           ToolCallLifecycleContractVersion,
 		PreProposalEvents:                 []string{"tool.execute.before"},
 		AuthoritativeSuccessEvents:        []string{"tool.execute.after"},
-		AuthoritativeFailureEvents:        []string{},
+		AuthoritativeFailureEvents:        []string{"tool.execute.after"},
 		AuthoritativeDenialEvents:         []string{},
 		AuthoritativePendingDiscardEvents: []string{"session.idle"},
 		AuthoritativeTerminalEvents:       []string{"session.deleted"},
@@ -1004,7 +934,7 @@ func openCodeToolCallLifecycle() ToolCallLifecycleContract {
 			StructuredActionEvents: []string{"tool.execute.before"},
 			ResultContentEvents:    []string{"tool.execute.after"},
 			StateTransitionEvents:  []string{},
-			AuditOnlyEvents:        []string{"session.created", "session.error", "session.idle", "session.deleted"},
+			AuditOnlyEvents:        []string{"session.created", "session.status", "session.idle", "session.error", "session.deleted"},
 		},
 		CoveredToolSurfaces: []ToolSurface{
 			ToolSurfaceGeneric, ToolSurfaceShell, ToolSurfaceFileRead,
@@ -1012,12 +942,12 @@ func openCodeToolCallLifecycle() ToolCallLifecycleContract {
 			ToolSurfaceSkills,
 		},
 		OfficialSourceURLs: []string{
-			"https://github.com/anomalyco/opencode/blob/014614d35b397775e5d397a490fc72368c894ec2/packages/plugin/src/index.ts",
-			"https://github.com/anomalyco/opencode/blob/014614d35b397775e5d397a490fc72368c894ec2/packages/opencode/src/session/tools.ts",
+			"https://github.com/anomalyco/opencode/blob/f669c46c9604ea3d70b8a7ed1f0c10f3a5ac1f61/packages/plugin/src/promise/tool.ts",
+			"https://github.com/anomalyco/opencode/blob/f669c46c9604ea3d70b8a7ed1f0c10f3a5ac1f61/packages/core/src/tool.ts",
 		},
 		Limitations: []string{
-			"Stateful success requires the v7 bridge, which forwards input.args plus the actual output and awaits delivery before returning to the agent.",
-			"Exceptions can skip tool.execute.after, and delegated-task paths can emit it without a result; only a validated result payload is authoritative success. Bash additionally requires metadata.exit=0.",
+			"V2 binds event.id to tool_call_id and preserves native status and structured results. Missing or malformed results never prove success; shell requires a completed result with exit zero.",
+			"Lifecycle delivery is best-effort and disposed on plugin unload; it is not an enforcement boundary.",
 		},
 	}
 }
@@ -1052,40 +982,6 @@ func ampToolCallLifecycle() ToolCallLifecycleContract {
 			"toolUseID is Amp's stable per-invocation join; tool.result status must be exactly done, error, or cancelled, and missing, contradictory, or unknown statuses never prove success.",
 			"agent.end discards unfinished proposals for that turn but is not a documented session-end event; Amp exposes no terminal session or subagent-parent lifecycle boundary.",
 			"tool.result gating can withhold or replace model-bound content but cannot undo completed tool side effects; skill invocation and remote Orb execution do not have separately certified lifecycle coverage.",
-		},
-	}
-}
-
-func omniGentToolCallLifecycle() ToolCallLifecycleContract {
-	return ToolCallLifecycleContract{
-		Version:                           ToolCallLifecycleContractVersion,
-		PreProposalEvents:                 []string{"PreToolUse"},
-		AuthoritativeSuccessEvents:        []string{},
-		AuthoritativeFailureEvents:        []string{},
-		AuthoritativeDenialEvents:         []string{},
-		AuthoritativePendingDiscardEvents: []string{"AfterAgentResponse"},
-		AuthoritativeTerminalEvents:       []string{},
-		InvocationIDAuthority:             ToolInvocationIDNone,
-		OutcomeAuthority:                  ToolOutcomeNone,
-		StatefulEnforcementLevel:          StatefulToolDirectOnly,
-		Routing: ToolEventRouting{
-			StructuredActionEvents: []string{"PreToolUse"},
-			ResultContentEvents:    []string{"PostToolUse"},
-			StateTransitionEvents:  []string{},
-			AuditOnlyEvents:        []string{"AfterAgentResponse"},
-		},
-		CoveredToolSurfaces: []ToolSurface{
-			ToolSurfaceGeneric, ToolSurfaceShell, ToolSurfaceFileRead,
-			ToolSurfaceFileWrite, ToolSurfaceFileEdit, ToolSurfaceMCP,
-			ToolSurfaceSkills,
-		},
-		OfficialSourceURLs: []string{
-			"https://github.com/omnigent-ai/omnigent/blob/eebef804e1fe4beddc61ea232b951cddddd7f890/omnigent/policies/schema.py",
-			"https://omnigent.ai/docs/policies/custom",
-		},
-		Limitations: []string{
-			"PolicyEvent exposes no call, session, conversation, or parent identifier; tool_result repeats request data but does not report authoritative success or failure.",
-			"PostToolUse policy decisions can suppress or transform returned content but cannot undo side effects, so only direct pre-tool enforcement is enabled.",
 		},
 	}
 }

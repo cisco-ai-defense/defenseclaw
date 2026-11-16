@@ -41,7 +41,11 @@ func TestOpaqueCMDWrapperArgvReductionKeepsOnlyExactOuterArguments(t *testing.T)
 		{"static glob", `cmd.exe /c echo *.txt > marker.txt`, false},
 		{"call operator with another command", `& cmd.exe /c echo dccert-block-marker & whoami`, false},
 		{"call operator with dynamic target", `& $env:CMD /c echo dccert-block-marker`, false},
-		{"separate command", `cmd.exe /c echo dccert-block-marker > marker.txt; Write-Output done`, false},
+		{"separate command", `cmd.exe /c echo dccert-block-marker > marker.txt; Write-Output done`, true},
+		{"quoted body in list", `cmd.exe /c "echo dccert-block-marker > marker.txt" && type marker.txt`, true},
+		{"r quoted body in list", `cmd.exe /r "echo dccert-block-marker > marker.txt" && type marker.txt`, true},
+		{"joined switches quoted body in list", `cmd.exe /d/c "echo dccert-block-marker > marker.txt" && type marker.txt`, true},
+		{"quoted body contains cmd list", `cmd.exe /c "echo dccert-block-marker > marker.txt && type marker.txt"`, true},
 		{"no cmd wrapper", `Set-Content marker.txt dccert-block-marker`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -53,11 +57,11 @@ func TestOpaqueCMDWrapperArgvReductionKeepsOnlyExactOuterArguments(t *testing.T)
 			if !ok {
 				return
 			}
+			marker := slices.ContainsFunc(view.Commands, func(command CommandFact) bool {
+				return command.ArgvComplete && slices.Contains(command.Argv, "dccert-block-marker")
+			})
 			if facts.Authoritative() || !view.Authoritative() || !view.EnforcementEligible() ||
-				len(view.Commands) != 1 || !view.Commands[0].ArgvComplete ||
-				len(view.Commands[0].Operations) != 0 || len(view.Commands[0].Redirects) != 0 ||
-				len(view.Commands[0].Wrappers) != 0 || len(view.Paths) != 0 || len(view.Network) != 0 ||
-				!slices.Contains(view.Commands[0].Argv, "dccert-block-marker") {
+				len(view.Commands) == 0 || !marker {
 				t.Fatalf("view kept more than exact outer argv: %+v", view)
 			}
 		})
@@ -76,5 +80,42 @@ func TestOpaqueCMDWrapperArgvReductionPreservesExtractedCWD(t *testing.T) {
 	view, ok := OpaqueCMDWrapperArgvReduction(input, facts)
 	if !ok || view.CWD != facts.CWD || !slices.Contains(view.Commands[0].Argv, "dccert-block-marker") {
 		t.Fatalf("call-operator reduction lost the working directory: ok=%t view=%+v original=%+v", ok, view, facts)
+	}
+}
+
+// GAP-1727: a cmd.exe call read in the CMD grammar, or in the POSIX reading
+// of a Windows shell call, keeps its outer argv and the parsed quoted body
+// as a view; without /d both stay partial (AutoRun), so before the fix only
+// a PowerShell reading had the view. A POSIX home has no such view.
+func TestOpaqueCMDWrapperArgvReductionReadsCMDAndWindowsPOSIXGrammar(t *testing.T) {
+	const marker = "fc-block-marker-1727"
+	for _, tc := range []struct {
+		name, command, home string
+		hint                Dialect
+		want                bool
+	}{
+		{"CMD sole quoted body", `cmd.exe /c "echo fc-block-marker-1727 > f.txt"`, `C:\Users\Alice`, DialectCMD, true},
+		{"CMD quoted body list", `cmd.exe /c "echo fc-block-marker-1727 > x.txt && type x.txt"`, `C:\Users\Alice`, DialectCMD, true},
+		{"CMD quoted body no redirect", `cmd /c "echo fc-block-marker-1727"`, `C:\Users\Alice`, DialectCMD, true},
+		{"Windows POSIX unquoted", `cmd.exe /c echo fc-block-marker-1727 > f.txt`, `C:\Users\Alice`, "", true},
+		{"Windows POSIX d switch", `cmd.exe /d /c echo fc-block-marker-1727`, `C:\Users\Alice`, "", true},
+		{"POSIX home unquoted", `cmd.exe /c echo fc-block-marker-1727 > f.txt`, "/home/alice", "", false},
+		{"CMD keep-open switch", `cmd.exe /k "echo fc-block-marker-1727"`, `C:\Users\Alice`, DialectCMD, false},
+		{"CMD dynamic body", `cmd.exe /c "echo %MARKER% > f.txt"`, `C:\Users\Alice`, DialectCMD, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := Input{Tool: "shell_command", Command: tc.command, ActiveHome: tc.home, DialectHint: tc.hint}
+			facts := Analyze(input)
+			view, ok := OpaqueCMDWrapperArgvReduction(input, facts)
+			found := ok && slices.ContainsFunc(view.Commands, func(command CommandFact) bool {
+				return command.ArgvComplete && slices.Contains(command.Argv, marker)
+			})
+			if found != tc.want {
+				t.Fatalf("view=%t marker=%t, want %t; parse=%+v commands=%+v", ok, found, tc.want, facts.Parse, facts.Commands)
+			}
+			if ok && (facts.Authoritative() || !view.EnforcementEligible()) {
+				t.Fatalf("view is not a match-only argv view of a partial action: %+v", view)
+			}
+		})
 	}
 }

@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.cisco.com/schemas/enterprise/management/bundle-anchors-v1.json",
+  "title": "bundle-anchors.json (trust anchor file, input)",
+  "description": "The trust anchor file. A management agent passes it to `enterprise bundle anchors install --file F` (Linux, macOS) or to `enterprise windows ensure --profile standalone --trust-anchors F` (Windows); the MDM kits install it at <etc>/trust/bundle-anchors.json (internal/enterprisebundle/anchortrust.go). The device decodes it strictly (DecodeAnchors, internal/enterprisebundle/anchors.go): UTF-8 without a byte order mark, at most 64 KiB, unknown members and trailing data refused, every rule below enforced; anything else is anchor_invalid. Its presence turns bundle mode on. device_groups empty or absent means any group. A retired key verifies only the bundle already applied; a revoked key verifies nothing.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tenant_id",
+    "keys"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "tenant_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "device_groups": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+      }
+    },
+    "min_version": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "keys": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "key_id",
+          "alg",
+          "public_key",
+          "not_before",
+          "not_after",
+          "status"
+        ],
+        "properties": {
+          "key_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "description": "Unique within keys."
+          },
+          "alg": {
+            "enum": [
+              "ed25519",
+              "ecdsa-p256-sha256"
+            ]
+          },
+          "public_key": {
+            "type": "string",
+            "contentEncoding": "base64",
+            "pattern": "^[A-Za-z0-9+/]+={0,2}$",
+            "description": "DER SubjectPublicKeyInfo, standard base64 (strict); its algorithm must equal alg."
+          },
+          "not_before": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "Z$"
+          },
+          "not_after": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "Z$",
+            "description": "Must be after not_before."
+          },
+          "status": {
+            "enum": [
+              "active",
+              "retired",
+              "revoked"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema_version": 1,
+      "tenant_id": "acme",
+      "device_groups": [
+        "eng-laptops"
+      ],
+      "min_version": 1,
+      "keys": [
+        {
+          "key_id": "acme-2026a",
+          "alg": "ed25519",
+          "public_key": "MCowBQYDK2VwAyEAGb9ECWmEzf6FQbrBZ9w7lshQhqowtrbLDFw4rXAxZuE=",
+          "not_before": "2026-01-01T00:00:00Z",
+          "not_after": "2027-01-01T00:00:00Z",
+          "status": "active"
+        },
+        {
+          "key_id": "acme-2026b",
+          "alg": "ed25519",
+          "public_key": "MCowBQYDK2VwAyEAPUAXw+hDiVqStwqnTRt+vJyYLM8uxJaMwM1V8Sr0Zgw=",
+          "not_before": "2026-09-01T00:00:00Z",
+          "not_after": "2027-09-01T00:00:00Z",
+          "status": "active"
+        }
+      ]
+    }
+  ]
+}

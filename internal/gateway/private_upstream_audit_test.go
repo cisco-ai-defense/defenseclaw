@@ -23,7 +23,7 @@ type privateUpstreamRoundTripper struct {
 
 func (rt privateUpstreamRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	if trace := httptrace.ContextClientTrace(req.Context()); trace != nil && trace.GotConn != nil {
-		trace.GotConn(httptrace.GotConnInfo{Conn: privateUpstreamTestConn{remote: rt.remote}})
+		trace.GotConn(httptrace.GotConnInfo{Conn: privateUpstreamTestConn(rt)})
 	}
 	return &http.Response{
 		StatusCode: http.StatusOK,

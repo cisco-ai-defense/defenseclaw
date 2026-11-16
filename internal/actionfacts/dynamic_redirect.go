@@ -185,8 +185,13 @@ func staticAbsoluteDirectoryPrefix(part syntax.WordPart) bool {
 // plainHomeParameter reports whether part is $HOME or ${HOME} with no
 // operator.
 func plainHomeParameter(part syntax.WordPart) bool {
+	return plainNamedParameter(part, "HOME")
+}
+
+// plainNamedParameter reports $name or ${name} with no operator.
+func plainNamedParameter(part syntax.WordPart, name string) bool {
 	parameter, ok := part.(*syntax.ParamExp)
-	return ok && parameter.Param != nil && parameter.Param.Value == "HOME" &&
+	return ok && parameter.Param != nil && parameter.Param.Value == name &&
 		parameter.Flags == nil && !parameter.Excl && !parameter.Length &&
 		!parameter.Width && !parameter.IsSet && parameter.NestedParam == nil &&
 		parameter.Index == nil && len(parameter.Modifiers) == 0 &&
@@ -243,7 +248,7 @@ func DynamicRedirectTargetReduction(input Input, facts Facts) (view, twin Facts,
 	if original.Parse.Status != StatusPartial {
 		return Facts{}, Facts{}, false
 	}
-	if sequence, ok := shortCircuitListSequence(capture.source); ok {
+	if sequence, ok := shortCircuitListSequence(capture.source, false); ok {
 		_, capture = analyzeWithRedirectTargets(input, sequence)
 	}
 	twinSource, placeholders, ok := capture.twin()

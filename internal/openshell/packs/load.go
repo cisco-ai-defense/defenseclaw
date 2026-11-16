@@ -174,6 +174,36 @@ func loadTrusted(s Subject, ref, packDir string) (*Pack, error) {
 		// The managed gateway's copy of the administrator's pack.
 		return pack, nil
 	}
+	if pack := generationPack(ref, packDir); pack != nil {
+		// The pack the managed gateway's configuration generation loaded.
+		return pack, nil
+	}
+	return loadTrustedFile(s, ref, packDir)
+}
+
+// LoadGenerationPack is a trusted load of the custom required pack ref from
+// its file, never from a pack an earlier generation loaded
+// (UseGenerationPacks): the managed gateway builds each configuration
+// generation with it. A pack file this process may not even look at (a
+// standard user's `policy digest` on a managed computer) is an "unreadable"
+// *Error, which the caller can tell from a pack that does not load.
+func LoadGenerationPack(s Subject, ref, packDir string) (*Pack, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" || IsBuiltin(ref) {
+		return loadFor(s, ref, packDir, false)
+	}
+	file, err := packFilePath(ref, packDir, s.Home)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := os.Lstat(file); errors.Is(err, fs.ErrPermission) {
+		return nil, packErr(file, "", "unreadable", "this process may not read the pack")
+	}
+	return loadTrustedFile(s, ref, packDir)
+}
+
+// loadTrustedFile is loadTrusted of ref's file.
+func loadTrustedFile(s Subject, ref, packDir string) (*Pack, error) {
 	file, err := packFilePath(ref, packDir, s.Home)
 	if err != nil {
 		return nil, err

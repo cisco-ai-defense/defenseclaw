@@ -74,6 +74,12 @@ func (r *Registry) RegisterPlugin(c Connector) error {
 	if _, exists := r.builtins[c.Name()]; exists {
 		return fmt.Errorf("plugin %q collides with built-in connector name — refusing registration", c.Name())
 	}
+	// until 1.1: OpenHands and OmniGent stay reserved names: their teardown
+	// runs on upgraded hosts (removed.go), and a plugin under either name
+	// would be torn down by it.
+	if IsRemovedConnector(c.Name()) {
+		return fmt.Errorf("plugin %q uses the name of a connector DefenseClaw 1.0.4 removed — refusing registration", c.Name())
+	}
 	r.plugins[c.Name()] = c
 	return nil
 }
@@ -194,11 +200,9 @@ func newBuiltinConnectors() []Connector {
 		NewCursorConnector(),
 		NewDevinConnector(),
 		NewCopilotConnector(),
-		NewOpenHandsConnector(),
 		NewAntigravityConnector(),
 		NewOpenCodeConnector(),
 		NewAMPConnector(),
-		NewOmnigentConnector(),
 		NewKiroConnector(),
 	}
 }

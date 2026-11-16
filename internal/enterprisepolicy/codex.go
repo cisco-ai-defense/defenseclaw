@@ -16,7 +16,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 
@@ -24,6 +23,8 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // Codex requirements.toml is a single administrator file. DefenseClaw never
@@ -107,8 +108,8 @@ func tomlString(value string) string {
 }
 
 var (
-	tomlTableHeader = regexp.MustCompile(`^\s*\[\s*([^\[\]]+?)\s*\]\s*(#.*)?$`)
-	tomlArrayHeader = regexp.MustCompile(`^\s*\[\[\s*([^\[\]]+?)\s*\]\]\s*(#.*)?$`)
+	tomlTableHeader = lazyregexp.New(`^\s*\[\s*([^\[\]]+?)\s*\]\s*(#.*)?$`)
+	tomlArrayHeader = lazyregexp.New(`^\s*\[\[\s*([^\[\]]+?)\s*\]\]\s*(#.*)?$`)
 )
 
 // stripCodexOwned removes DefenseClaw's regions and marked lines, leaving
@@ -466,7 +467,7 @@ func inspectCodex(opts Options, raw []byte, policy config.ResolvedConnectorPolic
 		state.conflict("hooks.%s does not name DefenseClaw's hook directory %q", codexManagedDirKey(opts), hookBinaryDir(opts))
 	}
 	inspectCodexHigherSources(opts, policy, state)
-	state.detail("cloud-managed Codex requirements (ChatGPT Business/Enterprise) are not visible locally; `enterprise policy verify --live --connector codex --user <user>` proves the effective policy")
+	state.detail("cloud-managed Codex requirements (ChatGPT Business/Enterprise) are not visible locally; %s", liveProofNote(opts, codexConnector, "Codex", "policy"))
 	return nil
 }
 
@@ -501,7 +502,7 @@ func inspectCodexHigherSources(opts Options, policy config.ResolvedConnectorPoli
 			state.detail("%s embeds DefenseClaw's managed hooks", name)
 			continue
 		}
-		message := fmt.Sprintf("%s outranks %s and does not include DefenseClaw's managed hooks; deploy the output of `defenseclaw-gateway enterprise policy export --connector codex --format plist` through the same MDM profile", name, "/etc/codex/requirements.toml")
+		message := fmt.Sprintf("%s outranks %s and does not include DefenseClaw's managed hooks; deploy the output of %s through the same MDM profile", name, "/etc/codex/requirements.toml", policyExportCommand(opts.goos(), "--connector", "codex", "--format", "plist"))
 		if policy.HigherPrecedenceSources == config.HigherPrecedenceWarn {
 			state.detail("%s", message)
 			continue
@@ -565,7 +566,7 @@ func (codexTarget) Reconcile(opts Options) (State, error) {
 			return state, err
 		}
 		if state.OwnedEntries == 0 {
-			state.detail("missing_defenseclaw_hooks: deploy the output of `defenseclaw-gateway enterprise policy export --connector codex` through your policy tool")
+			state.detail("missing_defenseclaw_hooks: deploy the output of %s through your policy tool", policyExportCommand(opts.goos(), "--connector", "codex"))
 		}
 		state.finish()
 		return state, nil
@@ -585,6 +586,15 @@ func (codexTarget) Reconcile(opts Options) (State, error) {
 	probe := State{}
 	if err := inspectCodex(opts, rendered, policy, &probe); err != nil {
 		state.conflict("merged requirements.toml does not parse: %v; the administrator file layout is not mergeable (use ownership: verify_only)", err)
+		state.finish()
+		return state, nil
+	}
+	if missing := codexMissingHookConflicts(probe); len(missing) > 0 {
+		// GAP-1001: a document that lacks, duplicates or points elsewhere the
+		// DefenseClaw managed hook would leave Codex unguarded. It is never
+		// swapped in, whoever asked (a lifecycle run, the guardian): the file
+		// on disk stays as it is.
+		state.conflict("refusing to publish %s: the merged document would leave Codex unguarded (%s)", path, strings.Join(missing, "; "))
 		state.finish()
 		return state, nil
 	}
@@ -622,24 +632,70 @@ func (codexTarget) Verify(opts Options) (State, error) {
 		return State{}, err
 	}
 	state := newCodexState(opts, policy, path)
-	if policy.Ownership == config.MachinePolicyOwnershipOff {
+	if policy.Ownership == config.MachinePolicyOwnershipOff && opts.goos() != "windows" {
 		state.Route = RouteUnsupported
 		return state, nil
 	}
+	verifyWindowsHookExecutable(opts, "Codex", &state)
 	current, exists, err := readPolicyFile(opts, path)
 	if err != nil {
 		return state, err
 	}
 	if !exists {
-		state.conflict("%s does not exist", path)
+		if opts.goos() == "windows" {
+			state.conflict("%s does not exist: %s", path, windowsMissingMachineHookDiagnostic("Codex"))
+		} else {
+			state.conflict("%s does not exist", path)
+		}
 		state.finish()
 		return state, nil
+	}
+	if len(bytes.TrimSpace(bytes.TrimPrefix(current, utf8BOM))) == 0 {
+		// GAP-1001: a Codex requirements file with nothing in it loads no
+		// DefenseClaw hook and no policy, so nothing guards Codex. It is said
+		// once, by name, with the way out, ahead of the per-entry conflicts.
+		state.conflict("%s is empty, so Codex loads no DefenseClaw hook or policy and nothing guards Codex until the policy is published again: %s",
+			path, codexRepublishAdvice(opts))
 	}
 	if err := inspectCodex(opts, current, policy, &state); err != nil {
 		return state, codexParseError(path, current, err)
 	}
+	if missing := codexMissingHookConflicts(state); len(missing) > 0 && len(bytes.TrimSpace(bytes.TrimPrefix(current, utf8BOM))) > 0 {
+		// GAP-1001: valid TOML that lacks, duplicates or points elsewhere the
+		// DefenseClaw managed hook guards nothing for those events. Said once,
+		// by name, ahead of the per-entry conflicts, as for an empty file.
+		state.Conflicts = append([]string{fmt.Sprintf("%s does not carry the DefenseClaw managed hook for %d Codex event(s), so nothing guards Codex for them until the policy is published again: %s",
+			path, len(missing), codexRepublishAdvice(opts))}, state.Conflicts...)
+	}
 	state.finish()
 	return state, nil
+}
+
+// codexMissingHookConflicts is the per-event conflicts of an inspected
+// document whose DefenseClaw managed hook is missing, duplicated or changed
+// (a hook that points at another command counts as missing).
+func codexMissingHookConflicts(state State) []string {
+	var out []string
+	for _, conflict := range state.Conflicts {
+		if strings.Contains(conflict, "DefenseClaw managed group") {
+			out = append(out, conflict)
+		}
+	}
+	return out
+}
+
+// codexRepublishAdvice is the administrator's way to publish the Codex
+// requirements again.
+func codexRepublishAdvice(opts Options) string {
+	if opts.goos() == "windows" {
+		return "run " + managed.WindowsAdminCommand("enterprise", "windows", "repair", "--profile", "standalone") +
+			" as an administrator"
+	}
+	group := "linux"
+	if opts.goos() == "darwin" {
+		group = "macos"
+	}
+	return "run `defenseclaw-gateway enterprise " + group + " ensure` as root"
 }
 
 // codexParseError names the file and the line of a requirements.toml that

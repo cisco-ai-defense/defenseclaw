@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 	"golang.org/x/sys/windows"
 )
@@ -37,7 +38,7 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
 		return InstallResult{}, err
 	}
-	if err := requireWindowsEnterpriseAgentVersion(opts.AgentVersion); err != nil {
+	if err := requireWindowsEnterpriseAgentVersionOutsideSecureClient(opts.AgentVersion); err != nil {
 		return InstallResult{}, err
 	}
 	if !strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "claudecode") {
@@ -79,20 +80,21 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 	}
 
 	setup := connector.SetupOpts{
-		ProxyAddr:          strings.TrimSpace(opts.ProxyAddr),
-		APIAddr:            strings.TrimSpace(opts.APIAddr),
-		APIToken:           strings.TrimSpace(opts.APIToken),
-		HookAPIToken:       strings.TrimSpace(opts.APIToken),
-		HookAPITokenScoped: true,
-		OTLPPathToken:      strings.TrimSpace(opts.OTLPPathToken),
-		Interactive:        false,
-		ManagedEnterprise:  true,
-		WorkspaceDir:       strings.TrimSpace(opts.WorkspaceDir),
-		HookFailMode:       windowsEnterpriseHookFailMode("claudecode", opts.HookFailMode),
-		HILTEnabled:        opts.HILTEnabled,
-		AgentVersion:       strings.TrimSpace(opts.AgentVersion),
-		HookContractID:     strings.TrimSpace(opts.HookContractID),
-		HookExecutable:     hookExecutable,
+		ProxyAddr:                strings.TrimSpace(opts.ProxyAddr),
+		APIAddr:                  strings.TrimSpace(opts.APIAddr),
+		APIToken:                 strings.TrimSpace(opts.APIToken),
+		HookAPIToken:             strings.TrimSpace(opts.APIToken),
+		HookAPITokenScoped:       true,
+		OTLPPathToken:            strings.TrimSpace(opts.OTLPPathToken),
+		Interactive:              false,
+		ManagedEnterprise:        true,
+		WorkspaceDir:             strings.TrimSpace(opts.WorkspaceDir),
+		HookFailMode:             canonicalHookFailMode(opts.HookFailMode),
+		SecureClientHookDelivery: secureClientHookDelivery(),
+		HILTEnabled:              opts.HILTEnabled,
+		AgentVersion:             strings.TrimSpace(opts.AgentVersion),
+		HookContractID:           strings.TrimSpace(opts.HookContractID),
+		HookExecutable:           hookExecutable,
 	}
 	if err := validateWindowsEnterpriseImpersonationSetup(setup); err != nil {
 		return InstallResult{}, err
@@ -128,6 +130,9 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 		if err != nil {
 			return err
 		}
+		if err := moveWindowsTargetOwnedDataDirLinksAside(home, setup.DataDir, targetSID, opts.WindowsDeferredFirstEnrollment); err != nil {
+			return err
+		}
 		if err := prepareWindowsGenericPath(
 			home,
 			setup.DataDir,
@@ -139,14 +144,11 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 		); err != nil {
 			return err
 		}
-		if err := requireWindowsEnterpriseAgentVersion(setup.AgentVersion); err != nil {
+		if err := requireWindowsEnterpriseAgentVersionOutsideSecureClient(setup.AgentVersion); err != nil {
 			return err
 		}
-		if setup.HookContractID == "" {
-			resolution := resolveHookContract(conn.Name(), setup.AgentVersion)
-			setup.HookContractID = resolution.Contract.ContractID
-		}
-		if err := validateHookContract(opts.GuardrailMode, conn, setup); err != nil {
+		setup, err = prepareHookContract(opts.GuardrailMode, conn, setup)
+		if err != nil {
 			return err
 		}
 		// A standalone deployment renders the one machine-wide body from the
@@ -257,6 +259,15 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 				err,
 			))
 		}
+		// Take back the native exporter an earlier per-user install left in the
+		// account's own settings (GAP-0836) before hardening re-applies the
+		// managed data directory DACL the atomic edit replaced.
+		if err := connector.WithUserHomeDir(home, func() error {
+			removeWindowsManagedUserNativeOTLPAsTarget(conn.Name(), targetSID, home, setup.DataDir, setup.APIAddr, setup.ProxyAddr)
+			return nil
+		}); err != nil {
+			return fail(err)
+		}
 		if err := hardenWindowsUserRuntime(home, setup.DataDir, transaction.paths, targetSID); err != nil {
 			return fail(err)
 		}
@@ -267,6 +278,7 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 			setup.DataDir,
 			setup.APIAddr,
 			conn.Name(),
+			setup.HookFailMode,
 		); err != nil {
 			return fail(fmt.Errorf("enterprise hooks: managed hook runtime sidecars are invalid: %w", err))
 		}
@@ -295,6 +307,7 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 			lockEntry.ContractID,
 			lockUpdatedAt,
 			entryUpdatedAt,
+			setup.HookFailMode,
 		)
 		if err != nil {
 			return fail(fmt.Errorf(
@@ -376,6 +389,7 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 	}
 
 	_ = ctx
+	retireWindowsManagedRuntimePreviousGeneration(generationCommit)
 	return InstallResult{
 		Connector:                  conn.Name(),
 		UserHome:                   home,
@@ -495,12 +509,15 @@ func verifyWindowsClaudeUserRuntimeReadOnly(
 		dataDir,
 		setup.APIAddr,
 		conn.Name(),
+		setup.HookFailMode,
 	); err != nil {
 		return lock, fmt.Errorf("enterprise hooks: managed hook runtime sidecars are invalid: %w", err)
 	}
-	if err := connector.VerifyManagedSharedHookScriptDigests(
+	if err := verifyWindowsManagedSharedHookScriptsWithRepair(
+		home,
 		dataDir,
-		targetSID.String(),
+		setup.APIAddr,
+		targetSID,
 	); err != nil {
 		return lock, fmt.Errorf(
 			"enterprise hooks: managed Claude shared hook runtime is invalid: %w",
@@ -541,6 +558,16 @@ func verifyWindowsClaudeUserRuntimeReadOnly(
 	if connector.HookContractLockDrifted(lock, current) {
 		return lock, fmt.Errorf("enterprise hooks: managed Claude hook contract drift detected")
 	}
+	// A deleted or edited claude-code-hook.sh is repaired at the guardian's
+	// next pass, as the shared scripts are (GAP-2227).
+	if err := connector.VerifyManagedConnectorHookScriptDigests(
+		setup,
+		conn,
+		lock,
+		targetSID.String(),
+	); err != nil {
+		return lock, fmt.Errorf("enterprise hooks: managed Claude hook runtime is invalid: %w", err)
+	}
 	if strings.TrimSpace(lock.HookFailMode) != strings.TrimSpace(current.HookFailMode) {
 		return lock, fmt.Errorf(
 			"enterprise hooks: managed Claude fail mode %q does not match configured mode %q",
@@ -549,4 +576,33 @@ func verifyWindowsClaudeUserRuntimeReadOnly(
 		)
 	}
 	return lock, nil
+}
+
+// verifyWindowsManagedSharedHookScriptsWithRepair verifies the shared hook
+// scripts against their pinned digests. A digest mismatch (an editor, an
+// antivirus rewrite, a partial copy) is logged and repaired by republishing
+// the scripts from the embedded templates as the target user; only a second
+// failed verification is an error. Any other verification failure, such as
+// an untrusted writer or a structural problem, is returned unchanged.
+func verifyWindowsManagedSharedHookScriptsWithRepair(
+	home string,
+	dataDir string,
+	apiAddr string,
+	targetSID *windows.SID,
+) error {
+	err := connector.VerifyManagedSharedHookScriptDigests(dataDir, targetSID.String())
+	if !errors.Is(err, connector.ErrManagedSharedHookScriptDigestMismatch) {
+		return err
+	}
+	managed.EmitResilienceEvent(managed.MarkerAccept, map[string]string{
+		"path":   filepath.Join(dataDir, "hooks"),
+		"sid":    targetSID.String(),
+		"reason": "shared hook script digest drifted; republishing: " + err.Error(),
+	})
+	if repairErr := windowsEnterpriseTargetImpersonation(targetSID, home, func() error {
+		return connector.RepublishManagedSharedHookScripts(dataDir, apiAddr)
+	}); repairErr != nil {
+		return errors.Join(err, fmt.Errorf("republish shared hook scripts: %w", repairErr))
+	}
+	return connector.VerifyManagedSharedHookScriptDigests(dataDir, targetSID.String())
 }

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { fixtureBridge } from "../../../opencodebridge/testdata/fixture.mjs";
 import { unlink } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
@@ -17,8 +18,8 @@ function successfulResponse(body) {
   return {
     ok: true,
     status: 200,
-    async json() {
-      return body;
+    async text() {
+      return JSON.stringify(body);
     },
   };
 }
@@ -34,6 +35,7 @@ async function runScenario({
   response = { action: "allow", mode, would_block: false },
   failure,
   expectBlocked = false,
+  expectRequest = true,
   verify,
 }) {
   const requests = [];
@@ -53,8 +55,8 @@ async function runScenario({
       return {
         ok: true,
         status: 200,
-        async json() {
-          throw new SyntaxError("fixture malformed gateway JSON");
+        async text() {
+          return "{fixture malformed gateway JSON";
         },
       };
     }
@@ -64,7 +66,7 @@ async function runScenario({
   const moduleURL = `${pathToFileURL(pluginPath).href}?scenario=${serial++}`;
   const module = await import(moduleURL);
   if (removePluginAfterImport) await unlink(pluginPath);
-  const hooks = await module.DefenseClaw({ directory: "fixture workspace" });
+  const hooks = await fixtureBridge(module, { directory: "fixture workspace" });
   const origins = [{ spec: moduleURL }];
   if (laterPlugin) origins.push({ spec: "file:///fixture-later-plugin.mjs" });
   await hooks.config({ plugin_origins: origins, mcp });
@@ -82,6 +84,10 @@ async function runScenario({
   if (blockedError) assert.match(blockedError.message, /DefenseClaw/);
 
   const request = requests.find(({ payload }) => payload.hook_event_name === "tool.execute.before");
+  if (expectRequest === false) {
+    assert.equal(request, undefined, `${name}: unproved listener received a tool call`);
+    return;
+  }
   assert.ok(request, `${name}: authenticated gateway call was not made`);
   assert.equal(request.url, "http://127.0.0.1:18970/api/v1/opencode/hook");
   assert.equal(request.init.headers.Authorization, "Bearer " + "a".repeat(64));
@@ -149,7 +155,7 @@ try {
     name: "later-plugin-observe",
     laterPlugin: true,
     verify(payload) {
-      assert.equal(payload.arguments_authoritative, false);
+      assert.equal(payload.arguments_authoritative, true);
     },
   });
   await runScenario({
@@ -157,9 +163,9 @@ try {
     mode: "action",
     laterPlugin: true,
     response: { action: "allow", mode: "action", would_block: false },
-    expectBlocked: true,
+    expectBlocked: false,
     verify(payload) {
-      assert.equal(payload.arguments_authoritative, false);
+      assert.equal(payload.arguments_authoritative, true);
     },
   });
   await runScenario({
@@ -179,7 +185,7 @@ try {
     { name: "timeout", timeout: true },
     { name: "malformed", malformed: true },
   ]) {
-    await runScenario({ name: `${failure.name}-open`, failure });
+    await runScenario({ name: `${failure.name}-old-per-user-open`, failure, expectBlocked: true });
     await runScenario({
       name: `${failure.name}-closed`,
       pluginPath: closedPluginPath,
@@ -192,6 +198,8 @@ try {
       name: "removed-managed-plugin-empty-foreign-check",
       pluginPath: removedManagedPluginPath,
       removePluginAfterImport: true,
+      expectBlocked: true,
+      expectRequest: false,
     });
   }
 } finally {

@@ -40,11 +40,13 @@ from defenseclaw.config import (
     AIRuntimeConfig,
     enable_all_runtime_planes,
     enable_user_runtime_planes,
+    gateway_pid_path,
 )
 from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.gateway import OrchestratorClient, SandboxAPIError
 from defenseclaw.inventory import agent_discovery, ai_signatures
+from defenseclaw.inventory.claude_desktop import ClaudeDesktopInfo
 
 
 def _mapping_block(value: Any) -> Mapping[str, Any]:
@@ -378,6 +380,8 @@ def usage(
         return
 
     if payload.get("enabled") is False and not (payload.get("signals") or []):
+        if sandboxes:
+            _sandboxes_not_found(client, payload, sandboxes)
         click.echo(
             "AI discovery is disabled, so there is no AI usage to show. "
             "Enable it with: defenseclaw agent discovery enable"
@@ -623,10 +627,11 @@ def processes(
     gateway_port: int | None,
     gateway_token_env: str | None,
 ) -> None:
-    """List AI processes the sidecar currently observes (PID, user, uptime).
+    """List AI processes matched by executable name (PID, user, uptime).
 
     Only signals whose detector emitted a ``runtime`` block are
-    surfaced (i.e. the process detector). For the broader installed
+    surfaced (i.e. the process detector). Names match exactly or as
+    separated name parts. For the broader installed
     surface use ``defenseclaw agent usage`` or
     ``defenseclaw agent components``.
     """
@@ -1567,18 +1572,22 @@ def discovery_enable(
 @click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
 @pass_ctx
 def discovery_disable(app: AppContext, restart: bool, yes: bool) -> None:
-    """Disable the sidecar AI discovery service.
+    """Disable the sidecar AI discovery service and its runtime planes.
 
-    Sets ``ai_discovery.enabled = false`` in ``~/.defenseclaw/config.yaml``
-    and (when ``--restart`` is on) restarts the gateway so the sidecar
-    drops the running discovery service.
+    Sets ``ai_discovery.enabled = false`` and ``ai_discovery.runtime.enabled
+    = false`` in ``~/.defenseclaw/config.yaml`` (``enable`` turned both on;
+    the selected planes are kept for the next enable) and (when
+    ``--restart`` is on) restarts the gateway so the sidecar drops the
+    running discovery service.
     """
     from defenseclaw import ux
 
     cfg = _require_loaded_config(app)
     ad = cfg.ai_discovery
+    runtime = _discovery_runtime(ad)
+    runtime_on = bool(getattr(runtime, "enabled", False))
 
-    if not ad.enabled:
+    if not ad.enabled and not runtime_on:
         click.echo(f"  {ux.dim('AI discovery is already disabled.')}")
         return
 
@@ -1611,9 +1620,14 @@ def discovery_disable(app: AppContext, restart: bool, yes: bool) -> None:
         raise SystemExit(1)
 
     ad.enabled = False
+    if runtime_on:
+        # Turn it off undoes what enable turned on, the runtime planes too
+        # (GAP-1663).
+        runtime.enabled = False
     try:
         cfg.save()
-        ux.ok("Config saved (ai_discovery.enabled = false)", indent="  ")
+        saved = "ai_discovery.enabled = false" + (", runtime planes off" if runtime_on else "")
+        ux.ok(f"Config saved ({saved})", indent="  ")
     except OSError as exc:
         ux.err(f"Failed to save config: {exc}", indent="  ")
         ux.subhead("Re-run after fixing the underlying I/O error.", indent="    ")
@@ -3584,9 +3598,12 @@ def _resolve_connector_for_restart(cfg: Any) -> str:
     """Return the active connector name in lower-kebab form.
 
     Mirrors :func:`cmd_guardrail._resolve_active_connector` so the
-    restart helper teardowns/setups the right adapter. Falls back to
-    "openclaw" when nothing else is configured (matches Go default).
+    restart helper teardowns/setups the configured adapter. A Config that
+    explicitly reports no connector cannot fall through to a raw mode default.
     """
+    configured = getattr(cfg, "has_connector_configured", None)
+    if callable(configured) and not configured():
+        return ""
     try:
         active = cfg.active_connector()
         if active:
@@ -3603,7 +3620,7 @@ def _resolve_connector_for_restart(cfg: Any) -> str:
         mode = getattr(claw, "mode", "")
         if mode:
             return normalize_connector(str(mode))
-    return "openclaw"
+    return ""
 
 
 def _resolve_connectors_for_restart(cfg: Any) -> list[str]:
@@ -3639,7 +3656,7 @@ def _gateway_running(app: AppContext) -> bool:
     from defenseclaw.process_liveness import pid_file_alive
 
     try:
-        return pid_file_alive(os.path.join(app.cfg.data_dir, "gateway.pid"))
+        return pid_file_alive(gateway_pid_path(app.cfg.data_dir))
     except Exception:  # noqa: BLE001 - an unreadable PID file means "not running".
         return False
 
@@ -3765,17 +3782,11 @@ def signatures() -> None:
     """Manage AI discovery signature packs."""
 
 
-@signatures.command("list")
-@click.option("--json", "as_json", is_flag=True, help="Output merged signatures as JSON.")
-@click.option("--include-disabled", is_flag=True, help="Include configured disabled signatures.")
-@pass_ctx
-def signatures_list(app: AppContext, as_json: bool, include_disabled: bool) -> None:
-    """List the merged AI discovery signature catalog."""
-    cfg = _load_config_best_effort(app)
+def _signature_catalog(cfg, disabled: list[str]):
+    """Load the merged signature catalog the way ``signatures list`` shows it."""
     from defenseclaw.commands.cmd_status import _enterprise_profile
 
     secure_client = _enterprise_profile(cfg) == "secure_client"
-    disabled = [] if include_disabled else list(getattr(cfg.ai_discovery, "disabled_signature_ids", []) or [])
     pins, require_pins = ai_signatures.pack_pins(cfg)
     configured = list(cfg.ai_discovery.signature_packs)
     if secure_client:
@@ -3796,6 +3807,31 @@ def signatures_list(app: AppContext, as_json: bool, include_disabled: bool) -> N
         )
     except ai_signatures.SignaturePackError as exc:
         raise click.ClickException(str(exc)) from exc
+    return sigs, refused
+
+
+def _require_known_signature(cfg, normalized: str) -> None:
+    """Refuse a signature ID that no loaded pack defines (GAP-0557)."""
+    sigs, _ = _signature_catalog(cfg, [])
+    if normalized not in {ai_signatures.normalize_signature_id(sig.id) for sig in sigs}:
+        raise click.ClickException(
+            f"unknown AI signature ID: {normalized}. Run 'defenseclaw agent signatures list "
+            "--include-disabled' to find the ID."
+        )
+
+
+@signatures.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Output merged signatures as JSON.")
+@click.option("--include-disabled", is_flag=True, help="Include configured disabled signatures.")
+@pass_ctx
+def signatures_list(app: AppContext, as_json: bool, include_disabled: bool) -> None:
+    """List the merged AI discovery signature catalog."""
+    cfg = _load_config_best_effort(app)
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+
+    secure_client = _enterprise_profile(cfg) == "secure_client"
+    disabled = [] if include_disabled else list(getattr(cfg.ai_discovery, "disabled_signature_ids", []) or [])
+    sigs, refused = _signature_catalog(cfg, disabled)
 
     if as_json:
         payload = [asdict(sig) for sig in sigs]
@@ -3907,6 +3943,7 @@ def signatures_disable(app: AppContext, signature_id: str) -> None:
         raise click.ClickException("signature id must not be empty")
     disabled = list(getattr(cfg.ai_discovery, "disabled_signature_ids", []) or [])
     if normalized not in disabled:
+        _require_known_signature(cfg, normalized)
         disabled.append(normalized)
         cfg.ai_discovery.disabled_signature_ids = sorted(disabled)
         cfg.save()
@@ -3924,6 +3961,8 @@ def signatures_enable(app: AppContext, signature_id: str) -> None:
     if normalized in disabled:
         cfg.ai_discovery.disabled_signature_ids = [s for s in disabled if s != normalized]
         cfg.save()
+    else:
+        _require_known_signature(cfg, normalized)
     click.echo(f"Enabled AI signature: {normalized}")
 
 
@@ -4184,10 +4223,12 @@ def _resolve_gateway_target(
     # `defenseclaw agent usage` to succeed if the Go gateway has
     # written its token to the environment. Mirrors the auto-detect
     # ladder in GatewayConfig.resolved_token so the two stay in sync.
-    if not token:
-        token = os.environ.get("DEFENSECLAW_GATEWAY_TOKEN", "")
-    if not token:
-        token = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
+    # SecretRef text an earlier build saved as a token is never one (#1404).
+    from defenseclaw.connector_paths import is_secret_ref_text
+
+    for name in ("DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"):
+        if not token and not is_secret_ref_text(os.environ.get(name, "")):
+            token = os.environ.get(name, "")
 
     # The gateway bearer token authenticates to the *local* sidecar. Only
     # ever attach it to a loopback target: a non-loopback ``gw.host`` (a
@@ -4601,6 +4642,12 @@ def _format_runtime(runtime: dict[str, Any], *, live: bool = False) -> str:
     return " ".join(parts)
 
 
+def _format_claude_desktop(block: Any) -> str:
+    """The ``claude_desktop`` block of a signal as one line, or "" without one."""
+    info = ClaudeDesktopInfo.from_mapping(block)
+    return info.summary() if info else ""
+
+
 def _humanize_seconds(seconds: int) -> str:
     """Compact ``[Nd][Nh][Nm][Ns]`` formatting; uses the two largest units."""
     if seconds <= 0:
@@ -4871,6 +4918,7 @@ def _render_ai_usage_table(
             for sig in displayed
         )
         has_runtime = any(sig.get("runtime") for sig in displayed)
+        has_desktop = any(sig.get("claude_desktop") for sig in displayed)
         has_last_active = any(sig.get("last_active_at") for sig in displayed)
         # Identity / Presence columns appear only when the gateway
         # has the two-axis engine wired (v2+). Older sidecars still
@@ -4903,6 +4951,8 @@ def _render_ai_usage_table(
             table.add_column("Presence")
         if has_runtime:
             table.add_column("Runtime")
+        if has_desktop:
+            table.add_column("Claude Desktop")
         if has_last_active:
             table.add_column("Last active")
         table.add_column("Evidence")
@@ -4974,6 +5024,8 @@ def _render_ai_usage_table(
                     prev_conf_key = conf_key
             if has_runtime:
                 row.append(_format_runtime(runtime, live=sig.get("source") == "sandbox"))
+            if has_desktop:
+                row.append(_format_claude_desktop(sig.get("claude_desktop")))
             if has_last_active:
                 row.append(_format_relative_time(sig.get("last_active_at", "")))
             # Prefer the richer evidence records (basename + quality
@@ -5137,6 +5189,7 @@ def _render_ai_usage_plain(
     if detail:
         rows = signals[:limit] if limit > 0 else signals
         has_model = any(_mapping_block(sig.get("model")).get("id") for sig in rows)
+        has_desktop = any(sig.get("claude_desktop") for sig in rows)
         for sig in rows:
             comp = _mapping_block(sig.get("component"))
             model = _mapping_block(sig.get("model"))
@@ -5169,6 +5222,10 @@ def _render_ai_usage_plain(
                 _format_confidence(sig.get("identity_score"), sig.get("identity_band")),
                 _format_confidence(sig.get("presence_score"), sig.get("presence_band")),
                 _format_runtime(runtime, live=sig.get("source") == "sandbox"),
+            ])
+            if has_desktop:
+                fields.append(_format_claude_desktop(sig.get("claude_desktop")))
+            fields.extend([
                 _format_relative_time(sig.get("last_active_at", "")),
                 evidence_cell,
             ])
@@ -6082,6 +6139,85 @@ def _error_class(error: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+# LookupAccountNameW answers: the name maps to no account, or the SID buffer
+# was too small (the name exists; the size probe asks for that on purpose).
+_ERROR_NONE_MAPPED = 1332
+_ERROR_INSUFFICIENT_BUFFER = 122
+_SID_TYPE_USER = 1
+
+
+def _windows_account_known(user: str, lookup=None) -> bool | None:
+    """Whether *user* names a Windows user account, or None when unknown.
+
+    Asks LookupAccountNameW for the account type: "no mapping" is a definite
+    unknown account, any other failure (for example an unreachable domain)
+    is not an answer. *lookup* replaces the Win32 call in tests and returns
+    ``(ok, last_error, sid_use)``.
+    """
+    if lookup is None:
+        lookup = _win32_lookup_account_name
+    try:
+        ok, error, use = lookup(user)
+    except OSError:
+        return None
+    if ok:
+        return use == _SID_TYPE_USER
+    if error == _ERROR_NONE_MAPPED:
+        return False
+    return None
+
+
+def _win32_lookup_account_name(user: str) -> tuple[bool, int, int]:
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    lookup = advapi32.LookupAccountNameW
+    lookup.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+        ctypes.POINTER(ctypes.c_int),
+    ]
+    lookup.restype = wintypes.BOOL
+    sid_size, domain_size, use = wintypes.DWORD(0), wintypes.DWORD(0), ctypes.c_int(0)
+    lookup(None, user, None, ctypes.byref(sid_size), None, ctypes.byref(domain_size), ctypes.byref(use))
+    error = ctypes.get_last_error()
+    if error != _ERROR_INSUFFICIENT_BUFFER:
+        return False, error, 0
+    sid = ctypes.create_string_buffer(sid_size.value)
+    domain = ctypes.create_unicode_buffer(domain_size.value)
+    ok = bool(lookup(None, user, sid, ctypes.byref(sid_size), domain, ctypes.byref(domain_size), ctypes.byref(use)))
+    return ok, (0 if ok else ctypes.get_last_error()), use.value
+
+
+def _account_known(user: str) -> bool | None:
+    """Whether *user* is an account on this computer; None when it cannot tell.
+
+    ``agent identities --user`` refuses a name that is definitely not an
+    account (GAP-0089, GAP-0944) on Linux, macOS and Windows.
+    """
+    if os.name == "nt":
+        if user.upper().startswith("S-1-"):
+            return None  # a SID filter: the gateway matches it as given
+        return _windows_account_known(user)
+    if os.name == "posix":
+        import pwd
+
+        try:
+            if user.isdigit():
+                pwd.getpwuid(int(user))
+            else:
+                pwd.getpwnam(user)
+        except (KeyError, OverflowError):
+            return False
+        return True
+    return None
+
+
 @agent.command("identities")
 @click.option("--user", "user", default=None, help="Only this user (uid, SID or account name).")
 @click.option("--connector", "connector_name", default=None, help="Only this connector.")
@@ -6180,6 +6316,8 @@ def identities(
             except requests.RequestException as exc:
                 raise click.ClickException(f"sidecar request failed: {exc}") from exc
             label = f"--user {user}" if user else f"--connector {connector_name}"
+            if user and _account_known(user) is False:
+                raise click.UsageError(f"unknown account for --user: {user}")
             click.echo(
                 f"No agent identity matches {label} "
                 f"({existing} identities exist; run without a filter to list them)."

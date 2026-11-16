@@ -252,14 +252,16 @@ func marshalProjectedRecord(record observability.Record, payload observability.V
 	if len(metadataBytes) > MaxProjectionMetadataBytes {
 		return nil, &ProjectionError{Code: ProjectionFailureOutputLimit}
 	}
-	canonical, err := record.Bytes()
-	if err != nil {
+	// A record whose canonical encoding fails (over its size limit) is
+	// refused, as before. The members come from the record itself: decoding
+	// the canonical bytes back into a map gave the same members at the cost
+	// of a JSON decode of the whole record on every projection
+	// (rel-1-0-6 GAP-0381).
+	if _, err := record.Bytes(); err != nil {
 		return nil, &ProjectionError{Code: ProjectionFailureSerialization}
 	}
-	decoder := json.NewDecoder(bytes.NewReader(canonical))
-	decoder.UseNumber()
-	var wire map[string]any
-	if err := decoder.Decode(&wire); err != nil {
+	wire, err := record.CanonicalWire()
+	if err != nil {
 		return nil, &ProjectionError{Code: ProjectionFailureSerialization}
 	}
 	payloadObject, err := payload.Object()

@@ -25,6 +25,80 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
+func TestReadMCPServersOpenCodeV2NativeLayers(t *testing.T) {
+	entries := readMCPServersOpenCodeResolution(openCodeConfigResolution{Layers: []openCodeConfigLayer{
+		{Data: map[string]any{"mcp": map[string]any{"docs": map[string]any{"type": "remote", "url": "https://example.test/mcp", "enabled": true}}}},
+		{Data: map[string]any{"mcp": map[string]any{"servers": map[string]any{"docs": map[string]any{"disabled": true}}}}},
+	}})
+	if len(entries) != 1 || entries[0].Name != "docs" || !entries[0].Disabled || entries[0].URL != "" {
+		t.Fatalf("V2 disabled-only override must replace the lower endpoint: %+v", entries)
+	}
+}
+
+func TestReadMCPServersOpenCodeV2OptionalContainerAndV1ReservedNames(t *testing.T) {
+	for _, native := range []bool{false, true} {
+		mcp := map[string]any{
+			"servers": map[string]any{"type": "local", "command": []any{"echo", "servers"}},
+			"timeout": map[string]any{"type": "local", "command": []any{"echo", "timeout"}},
+		}
+		if native {
+			mcp = map[string]any{"timeout": map[string]any{"execution": 1000}}
+		}
+		entries := readMCPServersOpenCodeResolution(openCodeConfigResolution{Layers: []openCodeConfigLayer{
+			{Data: map[string]any{"mcp": mcp}},
+		}})
+		if native && len(entries) != 0 {
+			t.Fatalf("v2 timeout is not an MCP server: %+v", entries)
+		}
+		if !native && (len(entries) != 2 || entries[0].Name != "servers" || entries[1].Name != "timeout" || entries[0].Command != "echo" || entries[1].Command != "echo") {
+			t.Fatalf("v1 server names must remain valid: %+v", entries)
+		}
+	}
+}
+
+func TestReadMCPServersOpenCodeV2MixedEntries(t *testing.T) {
+	mcp := map[string]any{
+		"legacy":  map[string]any{"type": "local", "command": []any{"echo", "legacy"}},
+		"docs":    map[string]any{"type": "remote", "url": "https://old.example.test", "headers": map[string]any{"X-Fixture": "lower layer fixture"}},
+		"timeout": map[string]any{"execution": 1000},
+		"servers": map[string]any{
+			"docs":      map[string]any{"type": "remote", "url": "https://new.example.test"},
+			"malformed": "preserve this config value",
+		},
+	}
+	entries := readMCPServersOpenCodeResolution(openCodeConfigResolution{Layers: []openCodeConfigLayer{{Data: map[string]any{"mcp": mcp}}}})
+	if len(entries) != 2 || entries[0].Name != "docs" || entries[1].Name != "legacy" {
+		t.Fatalf("mixed native and direct servers were lost: %+v", entries)
+	}
+	if entries[0].URL != "https://new.example.test" || len(entries[0].Headers) != 0 || entries[1].Command != "echo" {
+		t.Fatalf("native entry must replace its direct namesake without inherited fields: %+v", entries)
+	}
+}
+
+func TestReadMCPServersOpenCodeV2ReplacesWholeServerAcrossLayers(t *testing.T) {
+	for _, native := range []bool{false, true} {
+		t.Run(map[bool]string{false: "compatible syntax", true: "native syntax"}[native], func(t *testing.T) {
+			upper := map[string]any{
+				"docs":  map[string]any{"type": "remote", "url": "https://project.example.test"},
+				"local": map[string]any{"type": "local", "command": []any{"project-tool"}},
+			}
+			if native {
+				upper = map[string]any{"servers": upper}
+			}
+			entries := readMCPServersOpenCodeResolution(openCodeConfigResolution{Layers: []openCodeConfigLayer{
+				{Source: "global", Data: map[string]any{"mcp": map[string]any{
+					"docs":  map[string]any{"type": "remote", "url": "https://global.example.test", "headers": map[string]any{"X-Fixture": "lower layer fixture"}},
+					"local": map[string]any{"type": "local", "command": []any{"global-tool"}, "environment": map[string]any{"LOWER_LAYER_FIXTURE": "global value"}},
+				}}},
+				{Source: "project", Data: map[string]any{"mcp": upper}},
+			}})
+			if len(entries) != 2 || len(entries[0].Headers) != 0 || len(entries[1].Env) != 0 || entries[0].URL != "https://project.example.test" || entries[1].Command != "project-tool" || entries[0].Source != "project" {
+				t.Fatalf("V2 must not carry lower-layer headers or environment into an override: %+v", entries)
+			}
+		})
+	}
+}
+
 func TestReadMCPServersOpenCodeRejectsOversizedWorkspaceLayerAcrossRescans(t *testing.T) {
 	home := t.TempDir()
 	testenv.SetHome(t, home)

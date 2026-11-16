@@ -19,6 +19,8 @@ import (
 //   - The identity store, HKLM\SOFTWARE\Microsoft\IdentityStore\Cache\<SID>\
 //     IdentityCache\<SID>, holds the UPN of a cloud sign-in (UserName) and
 //     the provider that issued it (ProviderName, "AzureAD" for Entra ID).
+//     It is the UPN of an Entra ID account only; for a hybrid AD account it
+//     says only that the account signed in to the device's tenant.
 //   - CloudDomainJoin\JoinInfo\<thumbprint> (TenantId) and TenantInfo say the
 //     device is Entra joined, and the LSA primary-domain policy says it is
 //     AD joined; both together is a hybrid join.
@@ -147,12 +149,19 @@ func resolveWindowsDirectoryFacts(
 		facts.Directory = DirectoryActiveDirectory
 		facts.Domain = strings.ToLower(domain)
 		if upn != "" && strings.EqualFold(provider, entraProviderName) {
-			// A hybrid user signed in to Entra: the identity store has the
-			// cloud UPN, which is the synced AD UPN.
-			facts.UPN = upn
+			// A hybrid user signed in to Entra: the device's tenant is theirs.
 			facts.TenantID = join.TenantID
-			facts.Source = SourceWindowsIdentityStore
-		} else if adUPN != nil && account != "" {
+		}
+		// Only the domain controller's answer (TranslateNameW) is the AD
+		// account's UPN. The identity store keeps the cloud UPN of the user's
+		// last Entra sign-in, which an AD UPN rename leaves stale, so it never
+		// stands in for it: the managed gateway's write-restricted service
+		// token gets no TranslateNameW answer, and a stand-in became the
+		// account's UPN for good, also after `enterprise identity refresh`
+		// (identity-round GAP-1238). Until the directory answers here or in the
+		// SYSTEM enumerator's identity record, the principal is the account's
+		// own (AccountPrincipal below).
+		if adUPN != nil && account != "" {
 			facts.UPN = NormalizeUPN(adUPN(sid, domain+`\`+account))
 		}
 		if join.DNSDomain != "" && strings.EqualFold(domain, join.ADDomain) {
@@ -206,22 +215,60 @@ const (
 // adUPNCache resolves a SID and DOMAIN\account to a UPN with translate, one
 // lookup per identity at a time, in the background. A reused account name
 // must not inherit the previous SID's verified UPN.
+//
+// Translations are numbered as they start. An eviction (past 4096 cached
+// identities) lets a newer translation of an identity start while an older
+// one still runs, and they can finish in any order. The entry holds the
+// answer of the newest translation that answered: a newer answer replaces
+// an older one, and an older or evicted translation never puts its answer
+// back. Only the newest translation started confirms its answer
+// (unconfirmed). The last good answer survives evictions and failures
+// while a translation of the identity runs: an entry an eviction emptied
+// gets it back, kept and unconfirmed, until a newer translation answers.
 type adUPNCache struct {
 	translate func(samName string) string
 	now       func() time.Time
 
 	mu      sync.Mutex
 	entries map[string]adUPNEntry
+	// started numbers translations in the order they start. inflight holds,
+	// per identity with a translation running, the newest translation
+	// started, the last good answer and how many run. Evictions clear
+	// entries but not inflight, so every completion knows whether a newer
+	// translation started or already answered, and the last good answer
+	// outlives the entry; the last completion deletes the key, so the map
+	// only holds identities being translated.
+	started  uint64
+	inflight map[string]adUPNFlight
+}
+
+// adUPNFlight is one identity's running translations. best is the last
+// good answer: the one the entry held when a translation started, or a
+// newer one a translation returned; bestGen is the translation that
+// returned it.
+type adUPNFlight struct {
+	newest, bestGen uint64
+	best            string
+	running         int
 }
 
 type adUPNEntry struct {
-	upn     string
-	expires time.Time
-	done    chan struct{} // open while a lookup runs
+	upn string
+	gen uint64 // the translation that returned upn
+	// kept: upn is an earlier answer that the newest translation, which
+	// failed or an eviction emptied the entry of, did not confirm.
+	// superseded: upn is the answer of a
+	// translation a newer one overtook. Only unconfirmed reads them.
+	kept, superseded bool
+	expires          time.Time
+	done             chan struct{} // open while the newest lookup runs
 }
 
 func newADUPNCache(translate func(string) string) *adUPNCache {
-	return &adUPNCache{translate: translate, now: time.Now, entries: map[string]adUPNEntry{}}
+	return &adUPNCache{
+		translate: translate, now: time.Now,
+		entries: map[string]adUPNEntry{}, inflight: map[string]adUPNFlight{},
+	}
 }
 
 // lookup returns the UPN of samName: the cached answer, or the one a lookup
@@ -236,9 +283,20 @@ func (c *adUPNCache) lookup(sid, samName string, wait time.Duration) string {
 			c.entries = map[string]adUPNEntry{}
 			entry = adUPNEntry{}
 		}
+		c.started++
+		flight := c.inflight[key]
+		flight.newest, flight.running = c.started, flight.running+1
+		if entry.upn != "" && (flight.best == "" || entry.gen >= flight.bestGen) {
+			flight.best, flight.bestGen = entry.upn, entry.gen
+		} else if flight.best != "" {
+			// An eviction emptied the entry while an older translation
+			// runs: the last good answer stays, unconfirmed.
+			entry = adUPNEntry{upn: flight.best, gen: flight.bestGen, kept: true}
+		}
+		c.inflight[key] = flight
 		entry.done = make(chan struct{})
 		c.entries[key] = entry
-		go c.run(key, samName, entry.upn, entry.done)
+		go c.run(key, samName, entry.done, c.started)
 	}
 	c.mu.Unlock()
 	if entry.done == nil || wait <= 0 {
@@ -256,15 +314,84 @@ func (c *adUPNCache) lookup(sid, samName string, wait time.Duration) string {
 	}
 }
 
-func (c *adUPNCache) run(key, samName, previous string, done chan struct{}) {
-	upn, ttl := c.translate(samName), adUPNTTL
-	if upn == "" {
-		upn, ttl = previous, adUPNFailureTTL
-	}
+// expire makes the cached answers of sid due, so its next lookup starts a
+// translation; a translation already running answers that lookup. The last
+// good answer stays until a translation replaces it.
+func (c *adUPNCache) expire(sid string) {
+	prefix := strings.ToUpper(strings.TrimSpace(sid)) + "\x00"
 	c.mu.Lock()
-	c.entries[key] = adUPNEntry{upn: upn, expires: c.now().Add(ttl)}
+	defer c.mu.Unlock()
+	for key, entry := range c.entries {
+		if strings.HasPrefix(key, prefix) && entry.done == nil {
+			entry.expires = time.Time{}
+			c.entries[key] = entry
+		}
+	}
+}
+
+// run is translation seq of one identity.
+func (c *adUPNCache) run(key, samName string, done chan struct{}, seq uint64) {
+	answer := c.translate(samName)
+	c.mu.Lock()
+	flight := c.inflight[key]
+	overtaken, answeredLater := flight.newest > seq, flight.bestGen > seq
+	if answer != "" && !answeredLater {
+		flight.best, flight.bestGen = answer, seq
+	}
+	if flight.running--; flight.running > 0 {
+		c.inflight[key] = flight
+	} else {
+		delete(c.inflight, key)
+	}
+	entry, present := c.entries[key]
+	switch {
+	case overtaken && (answer == "" || answeredLater):
+		// A newer translation started. This one's failure keeps nothing of
+		// its own, and its answer never replaces a newer one. An entry an
+		// eviction emptied or dropped gets the last good answer back,
+		// unconfirmed: it keeps the running translation's done channel, or
+		// is retried after the failure lifetime.
+		if flight.best != "" && (entry.upn == "" || entry.gen < flight.bestGen) {
+			expires := c.now().Add(adUPNFailureTTL)
+			if present {
+				expires = entry.expires
+			}
+			c.entries[key] = adUPNEntry{upn: flight.best, gen: flight.bestGen, kept: true, expires: expires, done: entry.done}
+		}
+	case overtaken:
+		// The newest answer so far, but a newer translation runs or failed:
+		// lookup gives it (GAP-0129), never confirmed. The entry keeps that
+		// translation's done channel and, after its failure, its retry time.
+		expires := c.now().Add(adUPNTTL)
+		if present {
+			expires = entry.expires
+		}
+		c.entries[key] = adUPNEntry{upn: answer, gen: seq, superseded: true, expires: expires, done: entry.done}
+	case answer != "":
+		c.entries[key] = adUPNEntry{upn: answer, gen: seq, expires: c.now().Add(adUPNTTL)}
+	default:
+		// The newest translation failed: the last good answer stays, the
+		// one an overtaken translation returned meanwhile or else the one
+		// the entry held when a translation started, also when an eviction
+		// emptied the entry since.
+		c.entries[key] = adUPNEntry{upn: flight.best, gen: flight.bestGen, kept: flight.best != "", expires: c.now().Add(adUPNFailureTTL)}
+	}
 	c.mu.Unlock()
 	close(done)
+}
+
+// unconfirmed reports whether upn, an answer lookup gave for the identity,
+// is not what its newest translation verified: the last good UPN kept
+// through a failed lookup, the answer of a translation a newer one overtook,
+// or an answer the cache no longer holds. It changes no answer lookup
+// gives; agent identity rows use it to leave such a UPN out (GAP-0129 keeps
+// it for profile matching).
+func (c *adUPNCache) unconfirmed(sid, samName, upn string) bool {
+	key := strings.ToUpper(strings.TrimSpace(sid)) + "\x00" + strings.ToLower(samName)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry := c.entries[key]
+	return entry.kept || entry.superseded || entry.upn != upn
 }
 
 // Limit Windows account lookups that remain in the OS after their caller's

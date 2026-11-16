@@ -54,6 +54,25 @@ class TestSkillEnforcer(unittest.TestCase):
         self.assertTrue(os.path.exists(dest))
         self.assertTrue(os.path.isfile(os.path.join(dest, "main.py")))
 
+    def test_quarantine_never_replaces_a_destination_made_during_the_move(self):
+        """An empty quarantine directory another process makes after the
+        existence check is never replaced: the move fails, that directory
+        is left as it was, and the skill stays where it was."""
+        skill_path = self._create_skill("raced-skill")
+        dest = self.enforcer.quarantine_path("raced-skill")
+        real_mkdir = os.mkdir
+
+        def mkdir(path, *a, **kw):
+            if os.path.abspath(path) == os.path.abspath(dest):
+                real_mkdir(dest)
+            return real_mkdir(path, *a, **kw)
+
+        with patch("defenseclaw.enforce.plugin_enforcer.os.mkdir", side_effect=mkdir):
+            self.assertIsNone(self.enforcer.quarantine("raced-skill", skill_path))
+        self.assertEqual(os.listdir(dest), [])
+        self.assertTrue(os.path.isfile(os.path.join(skill_path, "main.py")))
+        self.assertEqual([e for e in os.listdir(os.path.dirname(dest)) if ".pending-" in e], [])
+
     def test_quarantine_returns_none_for_nonexistent(self):
         dest = self.enforcer.quarantine("ghost", os.path.join(self.skills_root, "nonexistent"))
         self.assertIsNone(dest)

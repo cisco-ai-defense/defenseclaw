@@ -17,7 +17,7 @@ import (
 // protected scanner runtime. The admission record is bound to the scanner
 // executable; the installed Python resides beneath the same protected root.
 func installedPythonInterpreter() (string, error) {
-	root, err := managed.StandaloneWindowsScannerRuntimeDir()
+	root, err := windowsScannerRuntimeRoot()
 	if err != nil {
 		return "", fmt.Errorf("resolve managed policy Python runtime: %w", err)
 	}
@@ -30,5 +30,19 @@ func installedPythonInterpreter() (string, error) {
 	if err != nil || !info.Mode().IsRegular() {
 		return "", fmt.Errorf("managed policy Python interpreter unavailable at %s; repair the Enterprise Setup installation", python)
 	}
+	// The service runs it by its path: it, the runtime folder and every
+	// folder above them must be beyond a standard user's reach, or one could
+	// swap the interpreter between this check and the run (review loop
+	// round 4).
+	if err := managed.ValidateTrustedRuntimeImage(root, python, "policy Python runtime"); err != nil {
+		return "", fmt.Errorf("policy Python runtime cannot be trusted; repair the Enterprise Setup installation: %w", err)
+	}
+	if err := managed.ValidateTrustedRuntimeCodeTree(root, "policy Python runtime"); err != nil {
+		return "", fmt.Errorf("policy Python imports cannot be trusted; repair the Enterprise Setup installation: %w", err)
+	}
 	return python, nil
 }
+
+// windowsScannerRuntimeRoot resolves the scanner runtime root; a seam for
+// tests.
+var windowsScannerRuntimeRoot = managed.StandaloneWindowsScannerRuntimeDir

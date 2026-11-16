@@ -350,17 +350,22 @@ func TestWindowsDownloadExecuteLiveConnectorToolNamesRemainShadowWhenPartial(t *
 	}
 }
 
-func TestWindowsConnectorContractCompoundRegistryPersistenceRemainsShadowWhenPartial(t *testing.T) {
+func TestWindowsConnectorContractCompoundRegistryPersistencePerDialect(t *testing.T) {
 	t.Parallel()
-	const command = `reg.exe add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v DefenseClawContract /t REG_SZ /d harmless-placeholder /f; Set-Content -LiteralPath 'C:\Temp\registry-persistence.marker' -Value 'unexpected-execution'`
+	const registry = `reg.exe add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v DefenseClawContract /t REG_SZ /d harmless-placeholder /f`
+	const command = registry + `; Set-Content -LiteralPath 'C:\Temp\registry-persistence.marker' -Value 'unexpected-execution'`
 
-	assertShadow := func(t *testing.T, rawAction string, ruleIDs []string) {
+	assertParity := func(t *testing.T, evaluate func(string) (string, []string)) {
 		t.Helper()
-		if rawAction != guardrailActionAllow {
-			t.Fatalf("raw_action=%q rule_ids=%v, want allow", rawAction, ruleIDs)
+		aloneAction, aloneIDs := evaluate(registry)
+		compoundAction, compoundIDs := evaluate(command)
+		if compoundAction != aloneAction {
+			t.Fatalf("compound raw_action=%q rule_ids=%v, standalone raw_action=%q rule_ids=%v",
+				compoundAction, compoundIDs, aloneAction, aloneIDs)
 		}
-		if !containsString(ruleIDs, "CMD-WIN-REG-PERSIST") {
-			t.Fatalf("registry persistence rule missing from %v", ruleIDs)
+		if !containsString(compoundIDs, "CMD-WIN-REG-PERSIST") ||
+			!containsString(aloneIDs, "CMD-WIN-REG-PERSIST") {
+			t.Fatalf("compound rule_ids=%v, standalone rule_ids=%v", compoundIDs, aloneIDs)
 		}
 	}
 
@@ -370,12 +375,14 @@ func TestWindowsConnectorContractCompoundRegistryPersistenceRemainsShadowWhenPar
 		cfg.Guardrail.Mode = "observe"
 		cfg.Guardrail.Connector = "codex"
 		api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
-		response := api.evaluateCodexHook(t.Context(), codexHookRequest{
-			HookEventName: "PreToolUse",
-			ToolName:      "shell",
-			ToolInput:     map[string]interface{}{"command": command},
+		assertParity(t, func(command string) (string, []string) {
+			response := api.evaluateCodexHook(t.Context(), codexHookRequest{
+				HookEventName: "PreToolUse",
+				ToolName:      "shell",
+				ToolInput:     map[string]interface{}{"command": command},
+			})
+			return response.RawAction, response.RuleIDs
 		})
-		assertShadow(t, response.RawAction, response.RuleIDs)
 	})
 
 	t.Run("claudecode", func(t *testing.T) {
@@ -389,7 +396,13 @@ func TestWindowsConnectorContractCompoundRegistryPersistenceRemainsShadowWhenPar
 			ToolName:      "Bash",
 			ToolInput:     map[string]interface{}{"command": command},
 		})
-		assertShadow(t, response.RawAction, response.RuleIDs)
+		// Bash has no authoritative Windows simple-command pass. The
+		// compound text keeps its existing detection-only catalog match.
+		if response.RawAction != guardrailActionAllow ||
+			!containsString(response.RuleIDs, "CMD-WIN-REG-PERSIST") {
+			t.Fatalf("raw_action=%q rule_ids=%v, want detection only",
+				response.RawAction, response.RuleIDs)
+		}
 	})
 
 	t.Run("amp", func(t *testing.T) {
@@ -398,13 +411,15 @@ func TestWindowsConnectorContractCompoundRegistryPersistenceRemainsShadowWhenPar
 		cfg.Guardrail.Mode = "observe"
 		cfg.Guardrail.Connector = "amp"
 		api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
-		response := api.evaluateAgentHook(t.Context(), agentHookRequest{
-			ConnectorName: "amp",
-			HookEventName: "tool.call",
-			ToolName:      "shell",
-			ToolArgs:      mustJSONMarshal(map[string]interface{}{"command": command}),
+		assertParity(t, func(command string) (string, []string) {
+			response := api.evaluateAgentHook(t.Context(), agentHookRequest{
+				ConnectorName: "amp",
+				HookEventName: "tool.call",
+				ToolName:      "shell",
+				ToolArgs:      mustJSONMarshal(map[string]interface{}{"command": command}),
+			})
+			return response.RawAction, response.RuleIDs
 		})
-		assertShadow(t, response.RawAction, response.RuleIDs)
 	})
 }
 

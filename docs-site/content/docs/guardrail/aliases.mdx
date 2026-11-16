@@ -6,84 +6,40 @@ keywords:
   - defenseclaw setup claude-code
   - defenseclaw setup cursor
   - defenseclaw setup copilot
-  - defenseclaw setup openhands
   - defenseclaw setup antigravity
   - defenseclaw setup hermes
   - defenseclaw setup opencode
   - defenseclaw setup amp
-  - defenseclaw setup omnigent
   - defenseclaw setup devin
   - defenseclaw setup kiro
   - defenseclaw setup openclaw
   - defenseclaw setup zeptoclaw
 ---
 
-Each connector has a setup alias that selects the corresponding
-`setup guardrail --connector <name>` posture while exposing a smaller,
-connector-oriented flag surface. Use them for fast subsequent runs; pass the
-documented non-interactive flags in CI.
+Each connector has a setup alias that runs `setup guardrail --connector <id>` with a smaller, connector-oriented flag set. The hook aliases start in observe mode and never proxy model traffic. OpenClaw and ZeptoClaw run the guardrail proxy regardless of mode.
 
 ## Direct-to-upstream aliases (hook or policy enforcement)
 
-These connectors talk directly to their native upstream, so DefenseClaw never proxies model traffic. Observe mode records telemetry; action mode returns supported agent-native hook verdicts, Amp's synchronous pre-execution `tool.call` and model-bound `tool.result` allow/reject decisions, or OmniGent's native `ALLOW` / `ASK` / `DENY` policy decisions. Amp native confirmation is available only in the active foreground thread; background confirmation falls back to safe rejection or withholding.
-
-<Cards>
-  <Card title="Codex" href="/docs/connectors/codex" description="defenseclaw setup codex" />
-  <Card title="Claude Code" href="/docs/connectors/claudecode" description="defenseclaw setup claude-code" />
-  <Card title="Cursor" href="/docs/connectors/cursor" description="defenseclaw setup cursor" />
-  <Card title="Devin" href="/docs/connectors/devin" description="defenseclaw setup devin" />
-  <Card title="GitHub Copilot CLI" href="/docs/connectors/copilot" description="defenseclaw setup copilot" />
-  <Card title="OpenHands" href="/docs/connectors/openhands" description="defenseclaw setup openhands" />
-  <Card title="Antigravity" href="/docs/connectors/antigravity" description="defenseclaw setup antigravity" />
-  <Card title="Hermes" href="/docs/connectors/hermes" description="defenseclaw setup hermes" />
-  <Card title="OpenCode" href="/docs/connectors/opencode" description="defenseclaw setup opencode" />
-  <Card title="Amp" href="/docs/connectors/amp" description="defenseclaw setup amp — synchronous pre-execution and model-bound result policy, with foreground native confirmation" />
-  <Card title="OmniGent" href="/docs/connectors/omnigent" description="defenseclaw setup omnigent — custom policy bridge with native ALLOW / ASK / DENY" />
-  <Card title="Kiro" href="/docs/connectors/kiro" description="defenseclaw setup kiro — lifecycle hooks shared by the Kiro IDE and CLI" />
-</Cards>
-
-```bash
-defenseclaw setup claude-code
-defenseclaw setup codex --with-local-stack   # also brings up Prom/Loki/Tempo/Grafana
-defenseclaw setup cursor --no-restart        # apply config without bouncing the gateway
-```
-
-<Callout>
-These aliases are shorthand for `setup guardrail --connector <name>` with connector-specific options. On a single-connector host that connector is the active posture. On a host with another hook or policy connector already configured, setup asks whether to **Add** the new connector or **Replace** the old one. Add is the default, also under `--yes`; it keeps both connectors wired under `guardrail.connectors`. Pass `--replace` to switch instead. Only the aliases add a connector to that roster: `setup guardrail --connector <name>` tunes a connector that is on it, and refuses one that is not with `No changes made` and the alias that adds it.
-</Callout>
+| Agent | Id | Alias | Class |
+| --- | --- | --- | --- |
+| Claude Code | `claudecode` | `defenseclaw setup claude-code` | Hook |
+| Codex | `codex` | `defenseclaw setup codex` | Hook |
+| Cursor | `cursor` | `defenseclaw setup cursor` | Hook |
+| Devin | `devin` | `defenseclaw setup devin` | Hook |
+| GitHub Copilot CLI | `copilot` | `defenseclaw setup copilot` | Hook |
+| Antigravity | `antigravity` | `defenseclaw setup antigravity` | Hook |
+| Hermes | `hermes` | `defenseclaw setup hermes` | Hook |
+| OpenCode | `opencode` | `defenseclaw setup opencode` | Hook (JS bridge) |
+| Amp | `amp` | `defenseclaw setup amp` | Policy plugin |
+| Kiro | `kiro` | `defenseclaw setup kiro` | Hook |
 
 ### What a direct-to-upstream alias does
 
-<Steps>
-
-<Step>
-Selects the target connector exactly as if you had passed `defenseclaw setup guardrail --connector <name>`.
-</Step>
-
-<Step>
-Wires the connector's documented hook, Amp plugin, or OmniGent policy surface and, where supported, native OTel exporter settings. No proxy listener binds; the agent talks directly to its native upstream.
-</Step>
-
-<Step>
-Uses observe mode by default. With `--mode action`, supported lifecycle callbacks return native block/approval decisions; Amp synchronously governs pre-execution `tool.call` and every model-bound `tool.result`, with native confirmation limited to the active foreground thread, and OmniGent maps all six policy phases to `ALLOW`, `ASK`, or `DENY`.
-</Step>
-
-<Step>
-Persists `config.yaml`, updates the active connector roster, and writes the `picked_connector` hint for compatibility with flows that still need a default selection. On multi-connector hosts, use explicit `--connector <name>` whenever you mean to scope a later command to one connector.
-</Step>
-
-<Step>
-Restarts the gateway (unless `--no-restart`).
-</Step>
-
-</Steps>
+An alias selects the connector, wires its hook or plugin, writes `config.yaml`, the connector roster and the `picked_connector` hint, and restarts the gateway unless `--no-restart`.
 
 ### Common flags
 
-Every hook alias (`setup claude-code`, `setup codex`, `setup kiro`, ...) takes
-these flags; run `defenseclaw setup <connector> --help` for the exact list. The
-policy flags write a per-connector override on a multi-connector install, and
-the global value when the connector is the only one.
+Every hook alias takes these flags; run `defenseclaw setup <connector> --help` for the exact list. The policy flags write a per-connector override on a multi-connector install, and the global value when the connector is the only one.
 
 <TypeTable
   type={{
@@ -131,7 +87,7 @@ the global value when the connector is the only one.
     },
     "--fail-mode": {
       type: "open|closed",
-      description: "Hook fail mode for this connector: open allows and logs when the gateway answers with an error; closed blocks.",
+      description: "Hook fail mode for this connector during a gateway outage: open allows, warns and logs; closed blocks. Error, malformed or missing gateway answers block either way.",
     },
     "--workspace / --workspace-dir": {
       type: "path",
@@ -153,34 +109,28 @@ run `defenseclaw setup local-observability up` explicitly and follow the
 printed `defenseclaw-gateway restart` step.
 </Callout>
 
-## Full guardrail aliases (proxy connectors)
-
-OpenClaw and ZeptoClaw run the full guardrail proxy regardless of mode — there is no observability-only path because the proxy is the integration. Their aliases mirror `defenseclaw setup guardrail --connector <name>` with safer defaults.
-
-<Cards>
-  <Card title="OpenClaw" href="/docs/connectors/openclaw" description="defenseclaw setup openclaw" />
-  <Card title="ZeptoClaw" href="/docs/connectors/zeptoclaw" description="defenseclaw setup zeptoclaw" />
-</Cards>
+Examples:
 
 ```bash
-defenseclaw setup openclaw --mode observe --restart
+defenseclaw setup claude-code
+defenseclaw setup codex --with-local-stack
+defenseclaw setup cursor --no-restart
 defenseclaw setup openclaw --mode action --human-approval --rule-pack default --restart
 ```
 
+## Full guardrail aliases (proxy connectors)
+
+| Agent | Id | Alias | Class |
+| --- | --- | --- | --- |
+| OpenClaw | `openclaw` | `defenseclaw setup openclaw` | Proxy |
+| ZeptoClaw | `zeptoclaw` | `defenseclaw setup zeptoclaw` | Proxy |
+
 ## Add or reconfigure connectors
 
-Use `defenseclaw setup <connector>` to add or reconfigure that connector. On hosts that already have another connector wired, the interactive flow asks whether to add the connector alongside the existing one or replace the old wiring. Use `defenseclaw setup remove <connector>` when you want to retire a connector.
+On a host with another connector already configured, an alias asks whether to **Add** the new connector or **Replace** the old one. Add is the default, also under `--yes`. Pass `--replace` to switch. Only the aliases add a connector to the roster: `setup guardrail --connector <name>` tunes a connector already on it and refuses one that is not, with `No changes made` and the alias that adds it. `defenseclaw setup remove <connector>` retires one.
+
+For the questions setup asks and the Replace flow, see [Changing connectors](/docs/guardrail/switching-connectors).
 
 ## Why aliases at all?
 
-Operators previously walked through the full `setup guardrail` wizard just to configure one connector. The aliases expose the common observe/action path directly:
-
-```bash
-defenseclaw setup codex                         # observe by default
-defenseclaw setup claude-code --mode action    # native lifecycle verdicts
-defenseclaw setup amp --mode action            # tool execution + model-bound result enforcement
-defenseclaw setup omnigent --mode action       # native ALLOW / ASK / DENY policy
-defenseclaw setup openclaw       # full guardrail for OpenClaw
-```
-
-Both halves are really `--connector` shortcuts. That matters after setup too: `defenseclaw skill list --connector codex`, `defenseclaw mcp scan --connector cursor`, and `defenseclaw guardrail status --connector hermes` all use the same connector scope instead of relying on a single global "current connector" mental model.
+`--connector` is the scope selector after setup too: `defenseclaw skill list --connector codex`, `defenseclaw mcp scan --connector cursor` and `defenseclaw guardrail status --connector hermes` use the same scope.

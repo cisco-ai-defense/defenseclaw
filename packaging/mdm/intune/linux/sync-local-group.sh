@@ -11,9 +11,16 @@ STATE_DIR=/var/lib/defenseclaw-intune/local-groups
 [[ $GROUP_NAME =~ ^[a-z_][a-z0-9_-]*$ && $GROUP_NAME != replace-with-local-group ]] || {
   echo 'error: set GROUP_NAME to a local group name before upload' >&2; exit 2;
 }
+# A member is an existing local account. Its name may hold the dots and capitals
+# useradd accepts (john.doe); it never starts with a dot or a dash, is never all
+# digits (getent would take it for a uid), and holds no comma or colon, which
+# gpasswd and /etc/group use as separators.
 for user in "${MEMBERS[@]}"; do
-  [[ $user =~ ^[a-z_][a-z0-9_-]*$ ]] || { echo "error: invalid user name: $user" >&2; exit 2; }
-  getent -s files passwd "$user" > /dev/null || { echo "error: no local account: $user" >&2; exit 1; }
+  [[ ${#user} -le 32 && $user =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*[$]?$ && ! $user =~ ^[0-9]+$ ]] || {
+    echo "error: invalid user name: $user" >&2; exit 2;
+  }
+  entry=$(getent -s files passwd "$user") || { echo "error: no local account: $user" >&2; exit 1; }
+  [[ ${entry%%:*} == "$user" ]] || { echo "error: no local account: $user" >&2; exit 1; }
 done
 # Only manage groups created by this script. An arbitrary existing local group
 # may grant sudo, file, or service privileges even when its name looks harmless.
@@ -76,8 +83,32 @@ if [[ $current_supplementary != "$wanted_supplementary_set" ]]; then
   echo "updated: $GROUP_NAME (${#MEMBERS[@]} requested member(s))"
 fi
 if [[ ${#unwanted_primary[@]} -gt 0 ]]; then
+  # An account whose primary group is this group stays a member after it
+  # leaves MEMBERS (gpasswd changes only the supplementary list). It moves to
+  # its own group, the one named after it that useradd makes, which is created
+  # when it is missing. A same-name group that is not local, is a system group
+  # (gid below 1000: admin, sudo, wheel) or has other members is not taken.
+  left=0
   for member in "${unwanted_primary[@]}"; do
-    echo "warning: $member remains in $GROUP_NAME because its primary group must be changed" >&2
+    own=$(getent -s files group "$member" || true)
+    if [[ -z $own ]]; then
+      if getent group "$member" > /dev/null; then
+        echo "warning: $member remains in $GROUP_NAME: the group $member is not a local group; change its primary group with usermod -g" >&2
+        left=1
+        continue
+      fi
+      groupadd -- "$member"
+      own=$(getent -s files group "$member")
+    fi
+    own_gid=$(cut -d: -f3 <<< "$own")
+    own_members=$(cut -d: -f4 <<< "$own")
+    if [[ $own_gid == "$gid" || ! $own_gid =~ ^[0-9]+$ || $own_gid -lt 1000 || ( -n $own_members && $own_members != "$member" ) ]]; then
+      echo "warning: $member remains in $GROUP_NAME: the group $member is a system group or has other members; change its primary group with usermod -g" >&2
+      left=1
+      continue
+    fi
+    usermod -g "$member" -- "$member"
+    echo "moved: the primary group of $member from $GROUP_NAME to $member (sessions open now keep the old group until the next sign-in)"
   done
-  exit 1
+  [[ $left == 0 ]] || exit 1
 fi

@@ -1,6 +1,6 @@
 ---
 title: Windows standalone deployment
-description: Install the standalone DefenseClaw enterprise services on Windows x64 with the standalone Setup or the lifecycle CLI, check the result, and remove them.
+description: Install the standalone DefenseClaw enterprise services on Windows x64 with the Setup program, check the result, and remove them.
 keywords:
   - DefenseClaw Windows enterprise
   - standalone profile
@@ -9,31 +9,28 @@ keywords:
   - Windows services
 ---
 
-The standalone profile installs DefenseClaw machine-wide on Windows x64 as
-four Windows services. It does not need Cisco Secure Client. Standard users
-cannot stop the services or change the config, and the hook guardian
-restores DefenseClaw's hooks if a user removes them. For the terms used on
-this page, see [Concepts](/docs/enterprise/concepts).
+The standalone profile installs DefenseClaw machine-wide on Windows x64 as four
+Windows services. It does not need Cisco Secure Client. Standard users cannot stop
+the services or change the config, and the hook guardian restores DefenseClaw's
+hooks if a user removes them. Terms are in [Concepts](/docs/enterprise/concepts).
 
 <Callout title="Deploying with an MDM?">
-This page installs on one computer from an administrator shell. To deploy
-to many computers with Intune, Configuration Manager, Workspace ONE or
-another MDM, start with [Install with an MDM](/docs/enterprise/mdm). It uses
-the same Setup and the same config.
+This page installs on one computer from an administrator shell. For a fleet, start
+with [Install with an MDM](/docs/enterprise/mdm): it uses the same Setup and config.
 </Callout>
 
 ## Requirements
 
 | Requirement | Detail |
 | --- | --- |
-| Windows | Native Windows x64. The lifecycle refuses ARM64, including x64 emulation on ARM64, and refuses to run from a 32-bit process. It does not check the Windows version. The MDM kit's requirement rule uses Windows 10 22H2 or later. |
-| PowerShell 7 | A stable PowerShell 7 x64, installed from Microsoft's MSI. The lifecycle finds it only through `HKLM\SOFTWARE\Microsoft\PowerShellCore\InstalledVersions`, requires it under Program Files with a valid Microsoft signature, and ignores `PATH`. Without it, the run stops with `powershell7_required`. Install 7.4 or later: the lifecycle accepts any stable 7.x, but the MDM wrapper requires 7.4. |
-| Language mode | PowerShell FullLanguage mode. Under a WDAC or AppLocker script policy, allow the DefenseClaw signer, or the run stops with `powershell_constrained_language`. |
-| Execution policy | The lifecycle starts its signed scripts with `-ExecutionPolicy Bypass`, which a PowerShell execution policy set by Group Policy (the MachinePolicy or UserPolicy scope) overrides. With `AllSigned` there, add the certificate that signs DefenseClaw to the Trusted Publishers store of the computer, or the run stops with `powershell_execution_policy` and changes nothing; `status` then still reports the recorded deployment. `RemoteSigned` and `Unrestricted` need nothing. |
-| Privileges | An elevated administrator token, or SYSTEM (for example an MDM agent). |
-| Disk space | Free space on the ProgramData volume for about three copies of the Setup payload plus 256 MB to install, upgrade, repair or ensure (one copy plus 256 MB for the other actions). Setup refuses at once, before it stages anything, and names the volume, its free space and the space it needs. |
-| Other profiles | No Secure Client DefenseClaw deployment. The two profiles share service names, so the lifecycle refuses with `profile_conflict`. |
-| User sessions | Users enroll while they are signed in to the desktop, at the console or over Remote Desktop. An account that only uses SSH, scheduled tasks or `runas` is never enrolled, and under `unenrolled_users: deny` its agents stay blocked. See [Enrollment on Windows](/docs/enterprise/enrollment#windows). |
+| Windows | Native Windows x64. ARM64 (including x64 emulation) and 32-bit are refused |
+| PowerShell 7 | A stable PowerShell 7 x64 from Microsoft's MSI, found through `HKLM\SOFTWARE\Microsoft\PowerShellCore\InstalledVersions`. `PATH` is ignored. Without it the run stops with `powershell7_required` |
+| Language mode | FullLanguage. Under WDAC or AppLocker, allow the DefenseClaw signer or the run stops with `powershell_constrained_language` |
+| Execution policy | With `AllSigned` set by Group Policy, add DefenseClaw's signing certificate to Trusted Publishers or the run stops with `powershell_execution_policy` |
+| Privileges | An elevated administrator token, or SYSTEM |
+| Disk | About three copies of the Setup payload plus 256 MB free on the ProgramData volume |
+| Other profiles | No Secure Client DefenseClaw deployment (`profile_conflict`) |
+| User sessions | Users enroll while signed in at the console or over Remote Desktop. Accounts that only use SSH, scheduled tasks or `runas` are never enrolled |
 
 ## Layout
 
@@ -42,9 +39,9 @@ cannot change either tree.
 
 | Item | Path |
 | --- | --- |
-| Binaries | `C:\Program Files\Cisco\DefenseClaw\bin` (`defenseclaw.exe`, `defenseclaw-gateway.exe`, `defenseclaw-hook.exe`, `defenseclaw-acp.exe`, `defenseclaw-sensor-helper.exe`) |
-| Lifecycle scripts | `C:\Program Files\Cisco\DefenseClaw\libexec` (`install-enterprise.ps1`, `DefenseClawEnterprise.psm1`) |
-| Managed OpenCode plugin | `C:\Program Files\Cisco\DefenseClaw\share\opencode\defenseclaw.js`. Users hold read and execute plus write attributes on this one file, because OpenCode's runtime opens every module with that right; its content, owner and access list stay administrator-only. See [Managed OpenCode plugin](/docs/enterprise/machine-policy#managed-opencode-plugin). |
+| Binaries | `C:\Program Files\Cisco\DefenseClaw\bin`: `defenseclaw.exe`, `defenseclaw-gateway.exe`, `defenseclaw-hook.exe`, `defenseclaw-hook-guard.exe`, `defenseclaw-acp.exe`, `defenseclaw-sensor-helper.exe` |
+| Lifecycle scripts | `C:\Program Files\Cisco\DefenseClaw\libexec` |
+| Managed OpenCode plugin | `C:\Program Files\Cisco\DefenseClaw\share\opencode\defenseclaw.js`. Users hold read, execute and write-attributes on this one file because OpenCode opens every module with that right ([Managed OpenCode plugin](/docs/enterprise/machine-policy)) |
 | Config | `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml` |
 | Secrets | `C:\ProgramData\Cisco\DefenseClaw\secrets` |
 | Target manifest | `C:\ProgramData\Cisco\DefenseClaw\hook-guardian\targets.yaml` (the enumerator writes it) |
@@ -52,57 +49,29 @@ cannot change either tree.
 | Gateway data | `C:\ProgramData\Cisco\DefenseClaw\runtime` |
 | Authorization ledger | `C:\ProgramData\Cisco\DefenseClaw\hook-guardian-state` |
 | Service logs | `C:\ProgramData\Cisco\DefenseClaw\logs` |
-| Scanner runtime | `C:\ProgramData\Cisco\DefenseClaw-ScannerRuntime`: `defenseclaw-scanners.exe` and the Python runtime it unpacks (the skill scanner, the MCP scanner and LiteLLM). LocalSystem and Administrators have full control; the gateway service can only read and run it. The lifecycle installs it from the Setup payload and removes it on uninstall. |
-| Hook runtime | `C:\ProgramData\Cisco\DefenseClaw-HookRuntime`, readable by users. It holds, for each per-user connector, the enrollment list and runtime selector, and `machine-policy.json`, the public machine-policy summary. |
-| Lifecycle log | `%WINDIR%\Logs\DefenseClaw`: `enterprise-lifecycle.log`, `last-result.json` and, for MDM runs, `mdm-wrapper.log`. Only SYSTEM and Administrators can write these files, and only Administrators and members of Event Log Readers can read them: the results name other accounts. |
+| Scanner runtime | `C:\ProgramData\Cisco\DefenseClaw-ScannerRuntime`: `defenseclaw-scanners.exe` and the Python runtime it unpacks. The gateway can only read and run it |
+| Hook runtime | `C:\ProgramData\Cisco\DefenseClaw-HookRuntime`, readable by users: the enrollment lists, runtime selectors and `machine-policy.json` |
+| Lifecycle log | `%WINDIR%\Logs\DefenseClaw`: `enterprise-lifecycle.log`, `last-result.json` and `mdm-wrapper.log`. Only Administrators and Event Log Readers can read them |
 
 The lifecycle also registers the deployment with Windows:
 
+Before the gateway launches a scanner, it checks the access list of the bundled Python interpreter and every directory and file under `python`, including `Lib\site-packages`. Only SYSTEM and Administrators may create or change code there. A failed check blocks the scan and reports the path; an administrator restores the installed runtime with `DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1`.
+
 | Registration | Value |
 | --- | --- |
-| Deployment marker | `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, with `Profile`, `ProductVersion`, `InstallRoot`, `StateRoot`, `TrustMode`, `UpdatedAt` and `DisableSelfUpdate` |
-| Add/Remove Programs | `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\CiscoDefenseClawEnterprise`, shown as "Cisco DefenseClaw Enterprise" |
-| Event log | The `DefenseClaw` event log, source `DefenseClaw Lifecycle`, which only LocalSystem and Administrators can write. A legacy copy of each event still goes to the Application log, source `DefenseClaw Enterprise` |
-| Self-update policy | `HKLM\SOFTWARE\Policies\Cisco\DefenseClaw\DisableSelfUpdate` = `1`, written only when the value is absent. The lifecycle records that it wrote the value and removes it on uninstall only in that case, so your own Group Policy value is never changed. Set `enterprise.coexistence.disable_self_update: false` to opt out. |
+| Deployment marker | `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise` (`Profile`, `ProductVersion`, `InstallRoot`, `StateRoot`, `TrustMode`, `UpdatedAt`, `DisableSelfUpdate`). For detection only: `verify` never trusts it |
+| Add/Remove Programs | `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\CiscoDefenseClawEnterprise`, "Cisco DefenseClaw Enterprise" |
+| Event log | The `DefenseClaw` log, source `DefenseClaw Lifecycle`, writable only by LocalSystem and Administrators |
+| Self-update policy | `HKLM\SOFTWARE\Policies\Cisco\DefenseClaw\DisableSelfUpdate` = `1`, written only when absent and removed on uninstall only in that case. Set `enterprise.coexistence.disable_self_update: false` to opt out |
 
-The four services:
+The four services restart after a failure:
 
 | Service | Identity | Role |
 | --- | --- | --- |
-| `DefenseClawGateway` | LocalSystem, write-restricted by its `NT SERVICE\DefenseClawGateway` service SID, with only `SeChangeNotifyPrivilege` | Runs the policy engine and the hook API on `127.0.0.1:18970` |
-| `DefenseClawSensorHelper` | LocalSystem, with `SeChangeNotifyPrivilege` only | Answers the gateway's fixed AI Discovery requests |
-| `DefenseClawHookGuardian` | LocalSystem, with a fixed privilege list | Writes and repairs each enrolled user's hook registrations |
-| `DefenseClawHookEnumerator` | LocalSystem, with the same privilege list | Finds eligible profiles (local, domain and Microsoft Entra ID accounts) and writes the target manifest |
-
-The gateway needs no "Log on as a service" grant. Existing virtual-account
-installs move to LocalSystem on upgrade or repair; the service SID remains
-the gateway's write boundary. The gateway refuses reads and scans inside
-user profiles. Its install watcher skips profile roots for skills, plugins
-and MCP servers. `defenseclaw-gateway status --json` reports a degraded
-watcher with `health.watcher.details.profile_roots_skipped: true` when it skips
-them. The enterprise `status` and `verify` results do not report that field
-separately. For an administrator scan, copy the asset to a readable folder
-outside profiles and use the [scan commands](#scan-skills-mcp-servers-and-plugins).
-Keep shared skills outside profiles. A brokered scan as the enrolled user
-is planned for a later release.
-For skills and plugins in profiles, set
-`asset_policy.skill.runtime_detection.enabled: true` and
-`asset_policy.plugin.runtime_detection.enabled: true` so hooks apply default,
-registry and approval rules; set `asset_policy.mode: action` to block on those
-rules. Set `asset_policy.enabled: true` as well. MCP runtime detection already
-defaults to true. Hooks refuse denied names regardless of runtime detection.
-Windows `status` and `verify` do not warn when a default or registry rule
-goes unenforced; the gateway log is the only signal.
-
-Scanner children inherit the write-restricted LocalSystem token and its
-single `SeChangeNotifyPrivilege`, because the gateway lacks the privileges
-to start a child as another user. Outside profiles, caller-supplied
-paths that only administrators could read are now readable as LocalSystem;
-this extends the W-05 early-phase limitation.
-
-The Service Control Manager restarts each service after a failure.
-
-How a hook reaches the gateway:
+| `DefenseClawGateway` | LocalSystem, write-restricted by its `NT SERVICE\DefenseClawGateway` service SID, with only `SeChangeNotifyPrivilege` | Policy engine and hook API on `127.0.0.1:18970` |
+| `DefenseClawSensorHelper` | LocalSystem, `SeChangeNotifyPrivilege` only | Answers the gateway's fixed AI Discovery requests |
+| `DefenseClawHookGuardian` | LocalSystem | Writes and repairs each enrolled user's registrations and the configured machine hooks every minute, even with no enrolled users |
+| `DefenseClawHookEnumerator` | LocalSystem | Finds eligible profiles (local, domain and Microsoft Entra ID accounts) every five minutes and writes the target manifest |
 
 <Flow
   direction="TB"
@@ -123,8 +92,6 @@ How a hook reaches the gateway:
   <Edge from="hook" to="gw" label="asks over loopback TCP" />
 </Flow>
 
-How the hooks stay in place:
-
 <Flow
   direction="TB"
   caption="Windows. The enumerator lists the users to protect in hook-guardian\targets.yaml. The guardian puts back DefenseClaw's hooks in each listed user's agent config, writing under that user's own token and only while the user has an active session. It also writes the Claude Code, Cursor, Copilot and OpenCode machine policy; the lifecycle writes Codex's."
@@ -144,27 +111,23 @@ How the hooks stay in place:
   <Edge from="grd" to="ucfg" label="repairs, as the user" />
 </Flow>
 
-See [Threat model](/docs/enterprise/threat-model#trust-zones) for what each
-zone may do.
+The gateway refuses reads and scans inside user profiles. Its install watcher
+skips profile roots, and `defenseclaw-gateway status --json` reports a degraded
+watcher with `health.watcher.details.profile_roots_skipped: true`; the enterprise
+`status` and `verify` results do not report that field separately. See
+[Scan skills, MCP servers and plugins](#scan-skills-mcp-servers-and-plugins).
 
 ## Install
 
-Install in four steps: get and check the release, write the config, run
-Setup, then add the AI Defense key if you use it.
+Five steps: check the release, write the config, run Setup, then optionally add the AI Defense key and the LLM judge.
 
 ### 1. Get and check the release
 
-Download these assets from the same GitHub release:
-
-- `DefenseClawSetup-Enterprise-Standalone-x64.exe`, the standalone Setup.
-- `checksums.txt` and `checksums.txt.bundle`, the signed checksum list.
-
-`DefenseClawSetup-Enterprise-x64.exe` is the Secure Client Setup. Do not use
-it for the standalone profile.
-
-Check the checksum list's signature with
-[cosign](https://docs.sigstore.dev/cosign/system_config/installation/), then
-compare the Setup's hash with its line in the list:
+Download `DefenseClawSetup-Enterprise-Standalone-x64.exe`, `checksums.txt` and
+`checksums.txt.bundle` from one GitHub release. (`DefenseClawSetup-Enterprise-x64.exe`
+is the Secure Client Setup. Do not use it.) Verify the signature with
+[cosign](https://docs.sigstore.dev/cosign/system_config/installation/), then compare
+the Setup's hash with its line in the list. Keep the hash: MDM recipes pin it.
 
 ```powershell
 cosign verify-blob --bundle checksums.txt.bundle `
@@ -175,12 +138,9 @@ cosign verify-blob --bundle checksums.txt.bundle `
 Select-String -Path .\checksums.txt -Pattern 'DefenseClawSetup-Enterprise-Standalone-x64\.exe$'
 ```
 
-The two hashes must match. Keep the hash: MDM recipes pin it.
-
 ### 2. Write the config
 
-The config is an ordinary DefenseClaw `config.yaml` with the standalone
-profile. This example protects Codex and Claude Code in observe mode:
+This protects Codex and Claude Code in observe mode:
 
 ```yaml title="config.yaml"
 config_version: 9
@@ -198,39 +158,40 @@ guardrail:
     claudecode: {}
 ```
 
-Each key under `guardrail.connectors` turns on protection for that agent; an
-empty value (`{}`) enables it with the default settings. A config with no
-connectors protects nothing: `status` warns `no_connectors_enabled` and
-`verify` fails. Per-user agents count: a config that lists only per-user
-agents, such as OpenCode, Copilot and Hermes, is valid. See
-[Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)
-and the [settings reference](/docs/enterprise/configuration#settings-reference).
+Each key under `guardrail.connectors` turns on one agent. With none, `status` warns
+`no_connectors_enabled` and `verify` fails ([choose the agents](/docs/enterprise/configuration),
+[settings](/docs/enterprise/configuration)). Pick `gateway.api_port` before the
+first install: every user's hooks are bound to it, so changing it later means
+uninstall and install again. The file may be at most 4 MiB and 65,536 YAML nodes
+([limits](/docs/enterprise/configuration#where-the-config-lives)).
 
-Choose `gateway.api_port` before the first install. Every user's agent hooks
-and the Cursor machine hooks are bound to the installed port, so Setup
-`/ensure` refuses a config that changes it on an installed computer before
-it stops any service (exit 1639). To move the port, uninstall DefenseClaw and
-install it again with the new value.
+Setup takes the config only from an absolute local path that standard users cannot
+change. Stage it in a folder you own:
 
-Without `guardrail.rule_pack` or `policy_dir`, as here, the gateway uses
-the rule packs built into it. A rule-pack directory you name (a
-`guardrail.custom_packs` entry, or `<policy_dir>/guardrail/<preset>`) must exist, be
-writable only by administrators, and be readable by the gateway service
-account `NT SERVICE\DefenseClawGateway` and by no standard user: a pack is
-one profile's policy, and users see only their own. Grant that account read
-and execute by its SID (`S-1-5-80-1858176940-1394861675-2895326486-505287571-2610476274`,
-which Windows derives from the service name; `sc.exe showsid DefenseClawGateway`
-prints it), remove `Users`, and add no Deny entry for that account. Before the
-first install the service does not exist yet, and `icacls` cannot grant that
-SID (or the `NT SERVICE\DefenseClawGateway` name): it looks the account up and
-fails with `1332` (No mapping between account names and security IDs). Set the
-permissions with `Set-Acl` instead, as below: it writes the SID without a lookup.
-Status, verify and Setup warn `rule_pack_readable_by_users` for a pack that
-`Users`, `Authenticated Users`, `Everyone`, `INTERACTIVE` or `Domain Users`
-can read, with the `icacls` commands that fix it. Every parent folder of it needs
-Read & execute for that account too, because the gateway reads each
-parent's permissions and lists it. So do not put the rule pack inside the
-locked staging folder below; give it its own folder:
+```powershell
+$Stage = 'C:\ProgramData\DefenseClaw-Staging'
+New-Item -ItemType Directory -Path $Stage -Force | Out-Null
+icacls $Stage /setowner '*S-1-5-32-544' /T /C | Out-Null
+icacls $Stage /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+Copy-Item .\config.yaml "$Stage\config.yaml"
+```
+
+Setup checks the config with the gateway's own compiler before it changes anything
+and names the line when it cannot load it. Quote Windows paths with single quotes
+in YAML. A custom rule pack folder needs its own permissions for the gateway
+service SID (`sc.exe showsid DefenseClawGateway` prints it); see
+[Custom rule packs](#custom-rule-packs).
+
+#### Custom rule packs
+
+A pack folder (a `guardrail.custom_packs` entry) must be
+writable only by administrators and readable by the gateway service SID and by no
+standard user, because a pack is one profile's policy. Every parent folder needs
+Read and execute for that SID too, so give the packs their own folder, not the
+staging folder. The SID is derived from the service name:
+`sc.exe showsid DefenseClawGateway` prints it. Before the first install the
+service does not exist and `icacls` cannot grant it (error `1332`), so set the
+permissions with `Set-Acl`, which writes the SID without a lookup:
 
 ```powershell
 $Packs = 'C:\ProgramData\DefenseClaw-RulePacks'
@@ -248,25 +209,7 @@ Copy-Item -LiteralPath .\my-pack -Destination $Packs -Recurse -ErrorAction Stop
 icacls "$Packs\my-pack" /setowner '*S-1-5-32-544' /T /C | Out-Null
 ```
 
-The snippet is safe to run again, for example after you fix a permission:
-it replaces the access list of `$Packs` (so it also removes `Users` and any
-other entry), replaces the pack folder instead of copying into it, and every
-file of the new copy inherits the permissions of `$Packs`. The `/reset` line
-repairs a pack whose files lost their permissions before it is removed.
-Copying a folder onto one that exists nests a copy (`my-pack\my-pack`), which
-Setup refuses, naming the nested folder. The two `icacls` lines name no
-service account, so they work before the first install.
-
-The grant names the service SID, not the `Users` group, so only the gateway,
-Administrators and SYSTEM can read the pack. Setup's own `icacls` advice for a refused
-pack folder lists the `Users` entry (`*S-1-5-32-545:(OI)(CI)RX`); where packs are
-meant to stay private, use the `Set-Acl` lines above instead. Setup's advice also
-names `NT SERVICE\DefenseClawGateway`, which `icacls` resolves only once the service
-exists, so on a first install use the `Set-Acl` lines. A rule pack
-is policy, not a secret that protects anything by itself, but which pack a group
-gets tells a reader how the groups differ.
-
-Then name the pack in the config and select it:
+The snippet is safe to run again. Then name and pin the pack in the config:
 
 ```yaml title="config.yaml (excerpt)"
 guardrail:
@@ -277,71 +220,56 @@ guardrail:
       digest: 'sha256:<digest>'
 ```
 
-Quote Windows paths with single quotes. In double quotes YAML reads a
-backslash as the start of an escape, so `"C:\ProgramData\..."` does not
-load (`\P` is not an escape); write `\\` for each backslash if you use
-double quotes. Setup refuses such a file with `1639` and names the line.
+Before the first install no `defenseclaw-gateway.exe` can print the digest. Put a
+placeholder (`sha256:` and 64 zeros) in the config and run Setup: it refuses with
+`1639` and prints the pack's digest. Review the pack, put the digest in the
+config and run Setup again. Once installed,
+`& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe' rulepack validate --dir "$Packs\my-pack"` prints it as
+`custom_packs pin:`. Setup also refuses a pack folder with the wrong owner or
+permissions (`1639`, with the fix), and warns `rule_pack_readable_by_users` when
+`Users`, `Authenticated Users`, `Everyone`, `INTERACTIVE` or `Domain Users` can
+read one. A `kind: jsonl` destination needs a folder only SYSTEM, Administrators
+and the gateway SID can write. For Intune, the kit's reference rule-pack app sets
+these permissions ([Custom rule pack app](/docs/enterprise/mdm/intune-windows#custom-rule-pack-app)).
 
-The digest pins the pack's own files. Before the first install there is no
-`defenseclaw-gateway.exe` on the computer to print it, so put a placeholder
-in the config, such as `sha256:` and 64 zeros, and run Setup: it checks
-the pack before it changes anything and refuses with `1639`, printing the
-pack's digest (`digest sha256:<hex> does not match
-guardrail.custom_packs.my-pack.digest`). Review the pack, put that digest
-in the config and run Setup again. Once DefenseClaw is installed,
-`& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe' rulepack validate --dir "$Packs\my-pack"`
-prints it as `custom_packs pin:`, for example when you change the pack.
+#### Strict and permissive rule packs
 
-For an Intune fleet, deliver a custom pack before the DefenseClaw app with the
-kit's reference rule-pack app, which sets these permissions and checks them; see
-[Custom rule pack app](/docs/enterprise/mdm/intune-windows#custom-rule-pack-app).
+The Windows Setup ships only the `default` rule pack. `guardrail.rule_pack: default` (or no
+`rule_pack`) needs nothing else. `strict` and `permissive` have no files on the computer, so
+Setup refuses them with `1639` and changes nothing until you bring the pack:
 
-Setup checks these permissions before it changes anything: the pack folder,
-every file and folder in it (the manifest and the rules folder included) and
-the folders above it must be owned and writable only by Administrators and
-SYSTEM, and readable by the service account. Otherwise it stops with exit
-code `1639`, naming the account, the file or folder it can change and the
-`icacls` commands that fix it. A repair (`/repair`) checks the packs of the
-installed config the same way, digest pins included, before it stops the
-services: when the gateway would not load them, it stops with `1603` and
-changes nothing, and the running gateway keeps its last good policy. Setup checks the config with the
-gateway's own compiler, and loads every rule pack the gateway would load,
-before it changes anything. When the gateway could not load the file, Setup
-stops with exit code `1639` and names the line and the reason.
-A `kind: jsonl` destination needs a folder that only SYSTEM, Administrators
-and the gateway service SID `NT SERVICE\DefenseClawGateway` can write, and
-that the gateway can create files in (Modify); Setup refuses any other folder
-with `1639` and prints the `icacls` grant. A missing folder gets what its
-nearest existing parent passes on to new subfolders when the gateway creates
-it, so Setup refuses it the same way when that parent lets standard users
-(for example Authenticated Users) write the folders created in it.
-
-Setup accepts the config only from an absolute local path that standard
-users cannot change. Stage it in a folder that Administrators own and that
-only SYSTEM and Administrators can write:
-
-```powershell
-$Stage = 'C:\ProgramData\DefenseClaw-Staging'
-New-Item -ItemType Directory -Path $Stage -Force | Out-Null
-icacls $Stage /setowner '*S-1-5-32-544' /T /C | Out-Null
-icacls $Stage /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
-if ((Get-Acl $Stage).GetOwner([Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-32-544') {
-    throw "$Stage is not owned by Administrators"
-}
-Get-ChildItem -LiteralPath $Stage -Force   # lists only files you put there
-Copy-Item .\config.yaml "$Stage\config.yaml"
+```text
+config rule pack "strict": policy_dir is not set; the Windows Setup ships only the default rule pack, so strict has no files here. ...
 ```
 
-Take ownership as the snippets do. Any user can create a folder in
-`C:\ProgramData`, so a standard user can create `DefenseClaw-Staging` (or
-`DefenseClaw-RulePacks`) before you do and own it, and the owner of a folder
-can always change its permissions again: `icacls /grant:r` replaces the
-permissions but not the owner. If the folder holds files you did not put
-there, delete it and start again. Setup refuses a config whose file or
-folder a standard user owns or can write, with exit code `1639`, naming
-the account and the `icacls` command that fixes it; nothing checks the
-folder before LocalSystem runs a Setup file from it (see
-[Run Setup as LocalSystem](#run-setup-as-localsystem)).
+To use `strict`, take the `policies/guardrail/strict` folder from the source archive of your
+DefenseClaw release (the Windows Setup does not contain it; `permissive` is the folder next to
+it), put it at `guardrail\strict` under a folder of your own, and make that folder
+administrator-owned with read access for the gateway service SID, as for a
+[custom rule pack](#custom-rule-packs):
+
+```powershell
+$Policies = 'C:\ProgramData\DefenseClaw-Policies'
+New-Item -ItemType Directory -Path "$Policies\guardrail" -Force | Out-Null
+$Acl = Get-Acl -LiteralPath $Policies
+$Acl.SetSecurityDescriptorSddlForm('O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;S-1-5-80-1858176940-1394861675-2895326486-505287571-2610476274)', 'Owner, Access')
+Set-Acl -LiteralPath $Policies -AclObject $Acl
+if (Test-Path -LiteralPath "$Policies\guardrail\strict") { Remove-Item -LiteralPath "$Policies\guardrail\strict" -Recurse -Force }
+Copy-Item -LiteralPath .\strict -Destination "$Policies\guardrail\strict" -Recurse -ErrorAction Stop
+icacls "$Policies" /setowner '*S-1-5-32-544' /T /C | Out-Null
+```
+
+Then set `policy_dir` in the config:
+
+```yaml title="config.yaml (excerpt)"
+policy_dir: 'C:\ProgramData\DefenseClaw-Policies'
+guardrail:
+  rule_pack: strict
+```
+
+Setup refuses a `policy_dir` without the pack folder with `1639` and names both properties.
+To keep one pack under your own name and pin its digest instead, use `guardrail.custom_packs`
+as described above.
 
 ### 3. Run Setup
 
@@ -352,125 +280,77 @@ From an elevated PowerShell session:
 $LASTEXITCODE
 ```
 
-`/ensure` installs when nothing is installed, upgrades an older version,
-re-applies a changed config, repairs a deployment that fails verification,
-and otherwise does nothing. Setup unpacks its embedded payload into a
-protected folder, checks every file against its embedded manifest, and runs
-the lifecycle from there. See [Payload trust](#payload-trust) for how the
-lifecycle decides which files to trust. It also generates the target manifest from the
-profiles on the computer, so you never write `targets.yaml`.
+`/ensure` installs, upgrades, re-applies a changed config or repairs, and otherwise
+does nothing. Exit codes: `0` success or nothing to do, `1603` failed (rolled back),
+`1618` another run holds the lock (retry), `1639` invalid arguments (retrying does
+not help). All properties are in [Setup actions and properties](#setup-actions-and-properties).
 
-To turn Fleet on or off, run the signed standalone Setup so it installs or
-removes the optional policy compiler with the config change. On a host that
-uses signed policy bundles, deliver the Fleet-changing `BUNDLE=` through
-Setup; the installed CLI refuses that transition because it has no compiler
-payload. Repeating `/ensure` with Fleet off and the same config is a no-op.
+Third-party readers of managed files must open with `FILE_SHARE_DELETE` or retry
+a transient open failure during replacement.
 
-An empty `C:\Program Files\Cisco\DefenseClaw` an earlier removal left (it
-carries the default Program Files permissions, including the inherit-only
-`CREATOR OWNER` entry) is taken over: Setup replaces its owner and
-permissions with SYSTEM and Administrators and installs into it. A folder
-another account can write is still refused before any change, and the
-message names the account, its access and the `icacls` command that clears
-it.
+An agent reads its hooks when it starts. A session opened before the install runs
+without DefenseClaw until it restarts; the result names each one with
+`agent_sessions_restart_required`.
 
-An agent reads its hooks when it starts, so an agent session a user opened
-before the first install (a Claude Code or Codex window left open, for
-example) runs without DefenseClaw until it is restarted. The `/ensure`
-result, `status` and `verify` name each such user and session with the
-`agent_sessions_restart_required` warning; ask those users to restart their
-agents. The same warning names a session that started before a later config
-change enabled its connector, or enrolled its account (for example one taken
-out of `exclude_users`), in that `ensure` result and every `status` after it.
+#### Setup actions and properties
 
-On Windows, the warning also names a Hermes or other per-user agent session
-started before the hook guardian restored hooks that the user changed or
-removed. `security_complete` stays `false` until that session restarts.
-Claude Code, Codex and Cursor use machine policy hooks, so this restore case
-does not apply to them.
-
-If the hook guardian's restore record cannot be read, Windows `status` and
-`verify` report `agent_sessions_restart_required` with "restart status unknown"
-and set `security_complete` to `false`, even when no session was listed. A
-running agent with no account name is checked by its owner SID when available;
-with neither an account name nor a SID, its restart status is unknown.
-
-Windows `status`, `verify`, `ensure` and `repair` also report
-`agent_settings_not_restored` when the hook guardian puts back a missing
-Hermes `config.yaml` or Devin `config.json` from its last known good copy or
-the pristine backup, or recreates the file with hooks only when no copy is
-available. The warning tells the account to review settings that may not
-have been restored; it does not by itself change `security_complete`, the
-exit code or MDM detection.
-
-With `JSON=1`, Setup prints the lifecycle result document on standard output.
-The exit code follows Windows Installer conventions:
+Setup exits with Windows Installer codes:
 
 | Code | Meaning |
 | --- | --- |
 | `0` | Success, or nothing to do |
-| `1603` | Failure. A failed install, upgrade or repair is rolled back, and a refusal before any change leaves the computer as it was. When the rollback itself cannot finish, the transaction stays pending (see [Recover a pending transaction](#recover-a-pending-transaction)). For `status` and `verify`, `1603` means the deployment is unhealthy. |
-| `1618` | Another lifecycle run holds the lock. Retry later. |
-| `1639` | Invalid arguments: a malformed command line (such as a relative `CONFIG=` path or an unknown property), or arguments the lifecycle rejected (for example `/ensure` without `CONFIG=` on a computer with no deployment, a config the gateway cannot load, or a run that `enterprise.trust` refuses). Retrying does not help. |
-| `3010` | Reserved. The lifecycle never requests a restart. |
+| `1603` | Failure. A failed install, upgrade or repair is rolled back, and a refusal before any change leaves the computer as it was. If the rollback cannot finish, the transaction stays pending ([Recover a pending transaction](#recover-a-pending-transaction)). For `status` and `verify`, the deployment is unhealthy |
+| `1618` | Retry later: another lifecycle run holds the lock, or Setup stopped before it changed anything (`hook_calls_running`, `hook_in_use`, `codex_state_held` or `codex_requirements_held`: hook calls still run, or a program holds the installed hook or a Codex file open), or a rollback met such a program after it started, or a Codex writer that keeps its transaction open (`codex_state_unsettled`): it left that one file or state as it is, restarted the restored services and ended with the transaction still pending (`/repair` finishes it; the services run) |
+| `1639` | Invalid arguments: a malformed command line (a relative `CONFIG=` path, an unknown property), or arguments the lifecycle rejected (`/ensure` without `CONFIG=` on a computer with no deployment, a config the gateway cannot load, a run `enterprise.trust` refuses). Retrying does not help |
+| `3010` | Reserved. The lifecycle never requests a restart |
 
-Setup properties use `NAME=value`. Names are case-insensitive and ignore
-dashes, so `ALLOWEDSIGNERS=` and `allowed-signers=` are the same.
+Setup properties use `NAME=value`; names are case-insensitive and ignore dashes.
 
 | Property | Meaning |
 | --- | --- |
-| `CONFIG=<path>` | The administrator config. Required for the first install. Later runs reuse the installed config when you leave it out. |
-| `MANIFEST=<path>` | A target manifest you publish yourself. Required for `/install`, and for a first install with `enterprise.enrollment.mode: manifest`. |
-| `ATTESTCLAUDEEFFECTIVEPOLICY=1` | With `/repair`: record that Claude Code runs DefenseClaw's managed hooks on this computer. See [Verify the install](#verify-the-install). |
-| `ALLOWEDSIGNERS=<sha256>,<sha256>` | Accept only these Authenticode signer certificates (SHA-256 thumbprints). Applies to a signed Setup. |
+| `CONFIG=<path>` | The administrator config. Required for the first install; later runs reuse the installed config |
+| `MANIFEST=<path>` | A target manifest you publish. Required for `/install` and for `enterprise.enrollment.mode: manifest` |
+| `BUNDLE=<path>` | With `/ensure`: apply this signed policy bundle. With `CONFIG=` on a computer without DefenseClaw, Setup installs from `CONFIG=` with every service stopped, then applies the bundle and starts the services on it; if the bundle is not applied it removes that install and exits `1603`. On an installed computer `CONFIG=` is then ignored |
+| `TRUSTANCHORS=<path>` | With `/ensure` and `BUNDLE=`: install this administrator-only bundle trust anchor file with the bundle. Not with `CONFIG=` alone |
+| `DEVICEGROUP=<group>` | With `TRUSTANCHORS=`: install the anchors pinned to this one device group, which must be one the file lists (or the file lists none). `enterprise windows ensure --trust-anchors <file> --device-group <group>` does the same |
+| `REFUSECAPABILITYLOSS=1` | With `/ensure` and `BUNDLE=`: refuse a bundle that turns off an enforced capability |
+| `ATTESTCLAUDEEFFECTIVEPOLICY=1` | With `/repair`: record the Claude Code attestation ([Verify the install](#verify-the-install)) |
+| `ALLOWEDSIGNERS=<sha256>,<sha256>` | Accept only these Authenticode signer thumbprints |
 | `JSON=1` | Print the result document on standard output |
-| `NOSTART=1` | Install or update with the services stopped and disabled. Setup exits `0` with a `not_started` warning; a later `/repair` starts them. |
-| `PURGE=1` | With `/uninstall`, also remove each enrolled account's `%USERPROFILE%\.defenseclaw`, and the DefenseClaw files of a per-user install in `%USERPROFILE%\.local\bin` with that folder's user `Path` entry once it is empty. The result names each account |
-| `FORCE=1` | With `/uninstall`, the last resort: remove the deployment without recovering a pending transaction. See [Recover a pending transaction](#recover-a-pending-transaction) |
-| `TIMEOUTSECONDS=<n>` | Lifecycle timeout, from 60 to 7200 seconds. The default is 1800. |
+| `NOSTART=1` | Install with the services stopped and disabled (`not_started` warning); a later `/repair` starts them |
+| `PURGE=1` | With `/uninstall`: also remove each enrolled account's per-user data ([Remove](#remove)) |
+| `FORCE=1` | With `/uninstall`: remove the deployment without recovering a pending transaction |
+| `TIMEOUTSECONDS=<n>` | Lifecycle timeout, 60 to 7200, counted from when Setup starts. Default 1800. It also bounds the `ensure` Setup runs (Setup gives them what is left of the limit less a tenth, taking off at most 2 minutes), so a slow upgrade is no longer cut off at 12 minutes. A direct run of `enterprise windows ensure` with `defenseclaw.exe` keeps its 12-minute limit. A run that stops at the limit prints the retry command with the same properties and `TIMEOUTSECONDS=7200`. A standalone run stopped at the limit then recovers for up to 10 more minutes: allow `TIMEOUTSECONDS` plus 10 minutes. A run with less than about a minute of it left after the payload checks does not start the lifecycle and changes nothing, so a change (`/install`, `/ensure`, `/upgrade`, `/repair`, `/uninstall`) needs at least about 2 minutes (`120`); a lower value suits only `/verify` and `/status` |
 
-The other actions are `/install`, `/upgrade`, `/repair`, `/reconcile`,
-`/status`, `/verify` and `/uninstall`. Prefer `/ensure`: `/install` also
-requires `MANIFEST=`, a target manifest that `/ensure` generates for you.
-`/quiet` and `/norestart` are accepted and have no effect. `/?` lists the
-actions and properties; an unknown property is refused with `1639` and names
-the property.
+The other actions are `/install`, `/upgrade`, `/repair`, `/reconcile`, `/status`,
+`/verify` and `/uninstall`. Prefer `/ensure`; `/install` also needs `MANIFEST=`.
+`/?` lists the actions and properties. A property Setup does not know is refused with a hint
+that lists every property `/?` lists. A relative `CONFIG=` or `--config` path is `invalid_arguments`.
+`/repair` run from another release than the installed one is refused with `invalid_arguments`
+before it changes anything; it names the installed release, Setup `/ensure` to move to this
+release and `/upgrade` to go down. Prerelease versions order as semver does (`rc.10` is newer
+than `rc.9`), in Setup, `/ensure` and the Intune detect script.
 
 ### 4. Add the AI Defense key
 
-Without a key, the local policy engine decides alone. To add Cisco AI
-Defense, turn it on in the config. Add these keys before you run Setup, or
-run `/ensure` again with the updated config:
-
-```yaml title="config.yaml (excerpt)"
-enterprise:
-  profile: standalone
-  inspection:
-    ai_defense:
-      enabled: true
-      credential: ai-defense-api-key
-```
-
-Then store the key. The deployment must be installed first:
+Without a key the local policy engine decides alone. To add Cisco AI Defense, set
+`enterprise.inspection.ai_defense.enabled: true` and
+`credential: ai-defense-api-key` in the config, run `/ensure`, then store the key
+from an elevated prompt. The deployment must be installed first:
 
 ```powershell
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise secret set `
-  --name ai-defense-api-key --from-file 'C:\ProgramData\DefenseClaw-Staging\ai-defense.key' --json
-Remove-Item 'C:\ProgramData\DefenseClaw-Staging\ai-defense.key'
+  --name ai-defense-api-key --from-file "$Stage\ai-defense.key" --json
+Remove-Item "$Stage\ai-defense.key"
 ```
 
-The command runs only from an elevated prompt. It writes
-`C:\ProgramData\Cisco\DefenseClaw\secrets\ai-defense-api-key` and restarts the
-gateway. See [AI Defense key](/docs/enterprise/ai-defense-key) for the config
-keys and for rotation.
+Rotation is in [AI Defense key](/docs/enterprise/ai-defense-key).
 
 ### 5. Add the LLM judge
 
-The LLM judge checks prompts (and, if you turn it on, tool results) for the
-connectors you list, and the skill and MCP scanners use the same model for
-their LLM analyzers. The gateway service has no user
-environment, so it never reads `llm.api_key_env` or a `.env` key here. Name
-a protected credential for the key instead:
+The gateway service has no user environment, so it never reads `llm.api_key_env`.
+Name a protected credential in the config, run `/ensure`, and store the key the
+same way:
 
 ```yaml title="config.yaml (excerpt)"
 llm:
@@ -480,15 +360,6 @@ guardrail:
   judge:
     enabled: true
     hook_connectors: [claudecode, codex]
-  # Judge tool results too. Without this line the judge reads prompts only:
-  # the default strategy for tool results is regex_only.
-  detection_strategy_completion: regex_judge
-scanners:
-  skill_scanner:
-    policy: quiet
-    use_llm: true
-  mcp_scanner:
-    analyzers: [yara, llm]
 enterprise:
   profile: standalone
   inspection:
@@ -496,110 +367,128 @@ enterprise:
       credential: llm-judge
 ```
 
-Run `/ensure` with the updated config, then store the key the same way as
-the AI Defense key:
-
 ```powershell
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise secret set `
-  --name llm-judge --from-file 'C:\ProgramData\DefenseClaw-Staging\llm.key' --json
-Remove-Item 'C:\ProgramData\DefenseClaw-Staging\llm.key'
+  --name llm-judge --from-file "$Stage\llm.key" --json
 ```
 
-The judge and the skill, MCP and plugin scanners all take their key from
-that credential. A missing credential leaves them without a key; they never
-fall back to an environment variable. A plugin scan without the key stops with
-an error that names the judge model, so the install is blocked; that holds for
-a Bedrock judge in the default `api_key` auth mode too. The `profile` and
-`instance_role` modes sign with the AWS credential chain instead. The
-`iam_credentials` mode signs with the access key, secret key and optional
-session token in the variables that `llm.bedrock` names in `access_key_env`,
-`secret_key_env` and `session_token_env`; set them in the gateway service
-environment. The scanner runtime gets only those configured names through its
-allowlist, as `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and
-`AWS_SESSION_TOKEN`. When they are not set and the AWS credential chain has no
-keys either, the plugin scan stops with an error that names them. A plugin judge that
-fails during the scan also blocks the install instead of admitting the plugin
-with a warning. Until you store it, `status`, `verify`
-and the Setup result warn `credential_missing`, naming the credential and
-the command that stores it (the same holds for the AI Defense key). Store a new key with the same command
-to rotate it. `enterprise windows status` then prints a `Scanners:` line with
-the scanner versions, the skill scanner policy and the judge model. Without
-an `llm:` block it warns `scanner_judge_missing`: the scanners then run their
-static analyzers only. When every recent judge call fails (a rejected key,
-for example) `status` and `verify` warn `judge_failing` with the last error;
-the rule packs keep deciding. While the scanner runtime is missing or not prepared,
-watched assets that require a scan fail closed: `status` warns and `verify`
-fails with `scanner_runtime_unavailable`, and Setup `/repair` installs it
-again.
-
-The lifecycle records the SHA-256 of the `defenseclaw-scanners.exe` it
-admitted (a valid Authenticode signature, or the digest the payload manifest
-pins) in `admission.json` in the scanner runtime folder. Before `status`,
-`verify`, `repair`, `ensure` or a scan runs the executable, it checks the file
-against that record. A copy changed or replaced in place, even by an
-administrator, is not run: the `Scanners:` state is `untrusted`, `verify`
-fails and `status`, `repair` and `ensure` from the installed CLI warn with
-`scanner_runtime_unavailable` (the Intune remediation script reports
-"not repaired"). Watched assets that require a scan fail closed until Setup
-`/repair` or `/ensure` installs the admitted copy again.
+Until you store the key, `status`, `verify` and the Setup result warn
+`credential_missing`. The skill and MCP scanners use the same credential.
 
 ## Verify the install
 
-Run from an elevated PowerShell 7 session:
+From an elevated PowerShell 7 session:
 
 ```powershell
 $Cli = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe'
 & $Cli enterprise windows status --profile standalone --json
 & $Cli enterprise windows verify --profile standalone --json
+Get-Service DefenseClaw* | Format-Table Name, Status, StartType
 ```
 
-`status` reports the state. `verify` also checks every file, permission,
-service and hook, and returns a nonzero exit code when anything fails. Look
-for these fields:
+```text title="Output of Get-Service (captured on a standalone install)"
+Name                      Status  StartType
+----                      ------  ---------
+DefenseClawGateway        Running Automatic
+DefenseClawHookEnumerator Running Automatic
+DefenseClawHookGuardian   Running Automatic
+DefenseClawSensorHelper   Running Automatic
+```
+
+`status` reports the state. `verify` also checks every file, permission, service and
+hook, and returns a nonzero exit code when anything fails. Healthy values:
 
 | Field | Healthy value |
 | --- | --- |
-| `ok` | `true` |
-| `installed`, `installed_version` | `true` and the version you deployed |
+| `ok`, `errors` | `true`, empty |
+| `installed_version` | The version you deployed |
 | `readiness` | `gateway`, `guardian`, `enumerator` and `sensor_helper` all `true` |
-| `coverage_complete` | `true`: installed, the guardian is ready, and no transaction is pending |
-| `security_complete` | `true`: see below |
-| `enrollment.targets` | The number of entries (one per user and connector) in the target manifest. `0` means nobody is protected yet. |
-| `errors` | Empty |
+| `coverage_complete` | `true` |
+| `security_complete` | `false` with Codex or Claude Code enabled: the warning `hook_process_fail_open` says a stopped, killed or timed-out pre-tool hook can let a tool run ([limits](#claude-code-attestation)). `true` with only Cursor enabled. It needs Codex, Claude Code or Cursor enabled and, with Claude Code, an [attestation](#claude-code-attestation) |
+| `enrollment.targets` | One entry per user and connector. `0` means nobody is protected yet |
+| `policy` | `applied` is `true`; `effective_digest` identifies the config ([digest](/docs/enterprise/operations)) |
 
-The Setup results (`/ensure`, `/install`, `/upgrade`, `/repair`) and the
-`status` and `verify` results carry a `policy` object, as on Linux and
-macOS: `effective_digest` (the effective policy digest of the installed
-config), `config_generation`, `applied` (the gateway reports the same
-digest), `gateway_reported_digest`, and `last_reload_error` when the
-gateway rejected its last reload. `defenseclaw.exe enterprise policy show`
-prints the same as `Effective policy sha256:<12 hex>, config generation N`.
-See [Effective policy digest](/docs/enterprise/operations#effective-policy-digest-and-config-generation).
+Add/Remove Programs lists **Cisco DefenseClaw Enterprise**, and the `DefenseClaw`
+event log has one entry per lifecycle run ([event IDs](/docs/enterprise/operations)).
 
-On Windows, `security_complete` needs at least one of Codex, Claude Code or
-Cursor enabled, and no agent reported as `agent_unprotected` or
-`hook_contract_unverified`. With Claude Code enabled, it also needs an
-administrator's attestation that Claude Code runs DefenseClaw's managed
-hooks on this computer:
+### A user's own status
+
+`defenseclaw status` shows an account's own protection (its agents and Cowork) only
+in a PowerShell prompt that is not elevated. Setup puts no DefenseClaw command on
+`PATH`, so use the full path. Sign in as the standard account and run:
+
+```powershell
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' status
+```
+
+The `&` form is PowerShell's. In a Command Prompt (`cmd.exe`) quote the path with
+double quotes instead: `"C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe" status`.
+
+An elevated prompt, and every prompt of the built-in Administrator account, gets the
+administrator's commands instead. From an elevated PowerShell prompt, check the
+deployment and one account's agents:
+
+```powershell title="Elevated PowerShell prompt"
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows status --profile standalone
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy show --user <account>
+```
+
+Quote an account name that has a space or an apostrophe, as PowerShell does:
+`--user 'John Smith'`, `--user 'O''Brien'`.
+
+### What Windows shows after an install
+
+The four services run under Automatic start, and Add/Remove Programs lists
+**Cisco DefenseClaw Enterprise**. The `DefenseClaw` event log (Event Viewer >
+Applications and Services Logs > DefenseClaw) holds one entry per lifecycle run.
+An agent reads its hooks when it starts, so a session a user opened before Setup
+activated DefenseClaw runs uninspected until it restarts: the Setup result,
+`status` and `verify` name each one per user with the
+`agent_sessions_restart_required` warning. To look from an elevated prompt:
+
+```powershell title="Elevated PowerShell"
+Get-Service DefenseClaw* | Format-Table Name, Status, StartType
+Get-WinEvent -LogName DefenseClaw -MaxEvents 3 | Format-Table TimeCreated, Id, LevelDisplayName, ProviderName
+```
+
+Each message names the action and the result and ends with its record, for
+example `DefenseClaw enterprise repair (standalone) ok=true exit=0 ... record <id>`.
+The matching line of `enterprise-lifecycle.log` has the same record.
+
+An event lists only the code of each error and warning (for example
+`warning agent_unprotected (x2)`), never its text. Any account can read the event
+logs, and the text can name other accounts, their SIDs, home folders and
+guardrail profiles. The text is in the lifecycle log line with the same record.
+
+Each elevated lifecycle run appends its result to the lifecycle log. Every run
+except a healthy `status` or `verify` also writes an event to the `DefenseClaw`
+log and a copy to the Application log (source `DefenseClaw Enterprise`). The
+marker key and the Add/Remove Programs entry change only after a successful run,
+and they are for detection only. The event IDs are in
+[Operate reference](/docs/enterprise/operations). To check
+that the entries are genuine, run `enterprise windows events` ([Logs and
+events](/docs/enterprise/operations)).
+
+### Claude Code attestation
+
+On Windows, at least one of Codex, Claude Code or Cursor must be enabled, and
+no agent may be reported as `agent_unprotected` or `hook_contract_unverified`.
+With Claude Code enabled, an administrator must attest that Claude Code runs
+DefenseClaw's managed hooks:
 
 1. Install. `security_complete` is `false` at this point.
-2. Confirm that Claude Code runs DefenseClaw's hooks. In an enrolled user's
-   own session, start that user's Claude Code and have it make one tool
-   call, for example listing the current folder. Then, from an elevated
-   prompt, check that the gateway recorded the call:
+2. In an enrolled user's own session, start Claude Code and have it make one tool
+   call. From an elevated prompt, check that the gateway recorded it:
 
    ```powershell
    & $Cli audit export --connector claudecode -o "$Stage\audit-claudecode.jsonl"
    ```
 
-   `$Stage` is the administrator-only folder from
-   [Write the config](#2-write-the-config); the export can hold prompt and
-   tool content.
+   `$Stage` is the administrator-only folder from [step 2](#2-write-the-config). The export can hold
+   prompt and tool content. `enterprise policy verify --live` is not available on
+   Windows.
 
-   `enterprise policy verify --live` is not available on Windows; see
-   [Inspect machine policy](#inspect-machine-policy).
-
-3. Record the attestation from an elevated PowerShell 7 session:
+3. Record the attestation:
 
    ```powershell
    & $Cli enterprise windows repair --profile standalone --attest-claude-effective-policy --json
@@ -607,295 +496,174 @@ hooks on this computer:
 
    The Setup form is `/repair ATTESTCLAUDEEFFECTIVEPOLICY=1 JSON=1`.
 
-DefenseClaw records the attestation as you give it; step 3 does not run
-Claude Code. It is a repair, though: like every repair it re-applies the
-deployment, so it stops the four DefenseClaw services and starts them again.
-For about one and a half minutes the agents of every user are refused (fail
-closed, `enterprise_managed_gateway_not_running`), and the run takes several
-minutes more when it prepares the scanner runtime. Plan it like the upgrade
-it follows, in the same maintenance window. The record is bound to the SHA-256 of the installed Claude Code
-policy file and of the hook binary, not to the computer. Every DefenseClaw
-upgrade replaces the hook binary, and a change to the Claude Code hook
-contract the policy is rendered from changes the policy, so either makes the
-record stale: `security_complete` returns to `false` until you repeat steps 2
-and 3. Computers that run the same release and Claude Code contract have the
-same binding, so an MDM can check one reference computer and push the Setup
-form to the others; the attestation then stands for each of those computers.
+DefenseClaw records the attestation as you give it; it does not run Claude Code.
+It is a repair, so it stops the four services and starts them again: for about
+a minute and a half every user's agents are refused (fail closed,
+`enterprise_managed_gateway_not_running`). Plan it in the same maintenance window
+as the upgrade it follows. The record is bound to the SHA-256 of the installed
+Claude Code policy file and of the hook binary, so every upgrade makes it stale
+and that proof becomes stale until you repeat steps 2 and 3. Computers
+on the same release and Claude Code contract have the same binding, so an MDM can
+check one reference computer and push the Setup form to the others.
 
-The guardian writes a user's hook registrations only while that user has an
-active (connected) session. It retries until the session is active again.
+This attestation proves the installed policy path. It cannot prove that the
+user's hook process will run to completion. With Codex or Claude Code enabled,
+`status` and `verify` continue to report `security_complete: false` and
+`hook_process_fail_open` after attestation: a stopped or timed-out pre-tool hook
+can still let the tool run without a DefenseClaw decision.
 
-### What Windows shows after an install
-
-The four services run under Automatic start, Add/Remove Programs lists
-**Cisco DefenseClaw Enterprise**, and the `DefenseClaw` event log (Event
-Viewer > Applications and Services Logs > DefenseClaw) holds one entry per
-lifecycle run. An agent reads its hooks when it starts, so an agent session
-a user opened before Setup activated DefenseClaw runs uninspected until it
-restarts: the Setup result, `status` and `verify` name each one per user with
-the `agent_sessions_restart_required` warning. Captured on a standalone
-install, from an elevated prompt:
-
-```powershell title="Elevated PowerShell"
-Get-Service DefenseClaw* | Format-Table Name, Status, StartType
-Get-WinEvent -LogName DefenseClaw -MaxEvents 3 | Format-Table TimeCreated, Id, LevelDisplayName, ProviderName
-```
-
-```text title="Output"
-Name                      Status  StartType
-----                      ------  ---------
-DefenseClawGateway        Running Automatic
-DefenseClawHookEnumerator Running Automatic
-DefenseClawHookGuardian   Running Automatic
-DefenseClawSensorHelper   Running Automatic
-
-TimeCreated           Id LevelDisplayName ProviderName
------------           -- ---------------- ------------
-10/3/2026 4:03:07 AM 102 Information      DefenseClaw Lifecycle
-10/3/2026 3:58:30 AM 150 Error            DefenseClaw Lifecycle
-10/3/2026 3:58:30 AM 150 Error            DefenseClaw Lifecycle
-```
-
-Event 102 is a repair or reconcile, and 150 a refused run (here, a `status`
-with an invalid `--profile`); see
-[Logs and events](/docs/enterprise/operations#logs-and-events) for every ID.
-Each message names the action and result and ends with its record, for
-example
-`DefenseClaw enterprise repair (standalone) ok=true exit=0 version=1.0.29 installed=1.0.29 record 452e0e82c58af2aaf46a795939e582d7`.
-An event lists only the code of each error and warning (`warning agent_unprotected (x2)`),
-never its text: any account can read the event logs, and the text can name
-other accounts, their SIDs and guardrail profiles. The text is in the
-lifecycle log line with the same record.
-
-Each elevated lifecycle run appends its result to the lifecycle log. Every
-run except a healthy `status` or `verify` also writes an event (IDs 100 to
-150) to the `DefenseClaw` event log and a legacy copy of it to the
-Application log. The marker key and the Add/Remove Programs entry
-change only after a successful run, and they are for detection only:
-`verify` never trusts them. See [Detection](/docs/enterprise/mdm#detection)
-for the detection rules, [Logs and events](/docs/enterprise/operations#logs-and-events)
-for the event IDs, and
-[Status and verify](/docs/enterprise/operations#status-and-verify) for
-monitoring.
-
-Only LocalSystem and Administrators can write the `DefenseClaw` log (source
-`DefenseClaw Lifecycle`), and the accounts that can read the Application log
-can read it. Each run that writes an event registers the log and resets its
-access. A
-successful uninstall unregisters it, so the uninstall event (110) goes only
-to the Application log; forward the `DefenseClaw` log to your SIEM if you
-need its entries after uninstall. Unregistering does not delete the entries:
-Windows keeps `%WINDIR%\System32\winevt\Logs\DefenseClaw.evtx` (the Event
-Log service holds it open until it restarts), and a later install that
-registers the log again shows the old entries with the new ones.
-
-Any account can write Application-log entries under any source name,
-including `DefenseClaw Enterprise`, so the Application-log copies are
-legacy, and a later release stops writing them. Point MDM detection rules
-and SIEM forwarding at the `DefenseClaw` log (`Get-WinEvent -LogName
-DefenseClaw`) instead of the Application log's `DefenseClaw Enterprise`
-source.
-
-To check that the event-log entries are genuine, run `events` from an
-elevated prompt (or as a member of Event Log Readers, who can read the
-lifecycle log too). It exits `1` and names each entry that fails:
-
-```powershell title="Check the DefenseClaw event-log entries"
-& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows events
-& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows events --json
-# The legacy Application-log copies:
-& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows events --application
-```
-
-<Accordions>
-<Accordion title="How an entry is matched to the lifecycle log (for SIEM rules)">
-
-Each DefenseClaw event ends with `record <id>`, and the matching line of
-`enterprise-lifecycle.log`, which only administrators and LocalSystem can
-write, holds the same id under `event.record` with the event ID
-(`event.id`), the SHA-256 of the exact message (`event.sha256`) and the
-event logs that took the entry (`event.logs`).
-
-An entry is DefenseClaw's only when all of these hold:
-
-- its message ends with `record <id>` and the lifecycle log has a line with
-  that record;
-- the entry's event ID and the SHA-256 of its message (the UTF-8 bytes of the
-  event's insertion string, `$event.Properties[0].Value`) match that line;
-- it was written within two minutes of that line's `time`;
-- no earlier entry carried the same record. A later entry with the same
-  record is a copy.
-
-`events` exits 1 and names each entry that fails, and also when the newest
-lifecycle line whose event went to the checked log has no DefenseClaw entry
-there.
-Entries older than the lifecycle log's first event record, such as those an
-earlier release wrote without records, show as unverifiable. Apply the same
-rules in a SIEM: matching a record alone is not enough, because anyone can
-copy a genuine entry.
-
-</Accordion>
-</Accordions>
-
-`status` and `verify` also report agents the enumerator found installed but
-could not enroll, or accounts it could not finish scanning
-(`hook_contract_unverified`, `agent_unprotected`); see
-[Enrollment](/docs/enterprise/enrollment#agents-that-cannot-be-enrolled).
-Each warning applies to one account, so both print it as a
-`warning <code>: <message>`
-line and `--json` lists it under `warnings`: `security_complete` is `false`,
-but `verify`, and so MDM detection, still passes. `enterprise policy show`
-lists them as well.
-On Windows, `agent_unprotected` also covers a running enabled agent whose
-account SID cannot be resolved; the warning names the account when known and
-otherwise says the owner is unknown. A per-user WinGet package listing that
-reaches its entry limit or deadline is reported as "not fully scanned" for
-that account, instead of as no install found.
-Cursor's machine hooks file is published only while a user is enrolled for
-Cursor; see [Machine policy](/docs/enterprise/machine-policy#routes-by-connector).
-`include_groups` and `exclude_groups` apply on Windows as described there.
+The guardian writes a user's registrations only while that user has an active
+(connected) session. `status` and `verify` also report agents the enumerator
+found but could not enroll (`hook_contract_unverified`, `agent_unprotected`;
+[Enrollment](/docs/enterprise/enrollment)). Each
+applies to one account: `security_complete` is `false`, but `verify` and MDM
+detection still pass while the machine policy remains complete. Configured Claude
+Code, Codex and Cursor machine hooks stay installed before the first enrollment
+and after the last enrolled user is removed. Even with zero enrolled users, an
+unenrolled account's hook calls are refused
+([Machine policy](/docs/enterprise/machine-policy)).
 
 ## Review the audit log
 
-The gateway service owns the local audit database under
-`C:\ProgramData\Cisco\DefenseClaw\runtime`. Export it from an elevated
-Administrator prompt, or as LocalSystem from an MDM script:
+Export the audit database from an elevated prompt, or as LocalSystem from an MDM
+script. The output file must not exist yet and takes the permissions of its
+folder, so write it where only administrators can read it. Omit `--connector` to
+export every row. Treat it as sensitive: it can hold prompt and tool content.
 
 ```powershell title="Elevated Administrator prompt"
-$Stage = 'C:\ProgramData\DefenseClaw-Staging'   # administrator-only, from Write the config
+$Stage = 'C:\ProgramData\DefenseClaw-Staging'   # administrator-only, from step 2
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' audit export --connector claudecode -o "$Stage\audit-claudecode.jsonl"
 ```
 
-On a standalone host, `audit export` run this way reads the managed
-deployment's configuration and audit database read-only beside the running
-gateway; it needs no environment variables. Standard accounts cannot read
-the managed audit log, and the command tells them to use an elevated prompt.
-Omit `--connector` to export every row. The output file must not exist
-yet; it takes the permissions of its folder, so write it to a folder only
-administrators can read. Treat it as sensitive: it can hold prompt and tool
-content.
+Standard accounts cannot read the managed audit log. A call refused because the
+account is excluded or not enrolled yet is in the export too: a `hook_decision`
+row and a `connector-hook` row with action `block`, the account's SID and name,
+and reason `enterprise_managed_sid_unregistered` or
+`enterprise_managed_enrollment_pending`. The gateway takes the account from the
+Windows token of the refused process. Repeated refusals of one account and agent
+are one row a minute.
 
-A call refused because the account is excluded or not enrolled yet is in the
-export too: a `hook_decision` row and a `connector-hook` row with action
-`block`, the account's SID and name, the connector and event, and reason
-`enterprise_managed_sid_unregistered` (or
-`enterprise_managed_enrollment_pending`). The gateway takes the account from
-the Windows token of the refused process, not from anything the call sends.
-Repeated refusals of one account and agent are written as one row a minute;
-the `connector-hook` row names the tool and the number of attempts.
+A command `defenseclaw.exe` refuses an account is in the export as well: the
+`setup`, `upgrade`, `rollback`, `config set` and `config unset` answers, the
+`guardrail` writers, `skill`, `mcp`, `plugin` and `tool` `block`, `allow` and
+`unblock`, and a standard account's `enterprise windows` lifecycle commands and
+`enterprise secret set` or `remove`. Each is an `action` row whose target is the
+command, with `outcome=refused`, the reason (`managed_device`, or
+`elevation_required` for a command only an administrator runs), the account's
+SID and name, and the number of attempts. The gateway takes the account from the
+Windows token of the refusing process, and repeated refusals of one account and
+command are one row a minute. Arguments are never recorded.
 
 ## Review AI Discovery
 
-With `ai_discovery.enabled: true` in the deployment config, the gateway
-service scans each user profile for AI agents and apps, skills, MCP servers,
-plugins and running AI processes, and sends what it finds to your
-observability destinations. To read the inventory on the computer, run the
-read-only `discovery` view from an elevated Administrator prompt, or as
-LocalSystem from an MDM script:
+With `ai_discovery.enabled: true` in the config, the gateway scans each user
+profile for AI agents, skills, MCP servers, plugins and running AI processes and
+sends the result to your observability destinations ([AI Discovery](/docs/ai-discovery)).
+Read the inventory on the computer from an elevated prompt:
 
 ```powershell title="Elevated Administrator prompt"
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows discovery
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows discovery --user <account> --json
 ```
 
-It lists each account's signals by category (`--user` lists one account's
-signals; it takes the bare account name, `COMPUTER\name`, `.\name`,
-`DOMAIN\name` or the SID, and each form selects the same account), then the
-runtime discovery planes (`ai_discovery.runtime`) with their state, last poll
-and findings. Standard accounts cannot run it.
-
-The gateway attributes each runtime finding to the account that runs it:
-`user` is `COMPUTER\name` or `DOMAIN\name` and `user_sid` its SID, and
-`attribution` says how it was found. It reads the process owner from the
-process token or the `Win32_Process` owner (`process_owner`), else the user
-signed in to the process's Windows session (`session`), else the enrolled
-account whose profile holds the agent's configuration files
-(`enrolled_profile`). A finding none of these lookups names is labelled
-`attribution: unattributed`, with no user and an `attribution_reason`; it is
-host-wide, not any account's. `--user` lists only the findings of the account
-it selects, and lists unattributed findings apart under
-`unattributed_findings`, counted separately. The `ai_discovery.runtime` helper setting is not
-available on Windows: the deployment config has no
-`ai_discovery.runtime.acquisition` key, and a config that sets one is refused
-with `config_schema_invalid`.
-
-A config that carries `enterprise.tetragon` is accepted and ignored on
-Windows, because Tetragon has no Windows agent, and Windows `status` is
-unchanged. The setting acts only on Linux; see
-[Tetragon on a Linux fleet](/docs/enterprise/tetragon).
-
-The `discovery` view names each skill and MCP server per user, including
-the Devin servers in each user's `%APPDATA%\devin\mcp_config.json`. The
-service may read that one file, not the guardian-protected folder around it;
-a file Devin replaces is readable again after the next hook enumerator cycle
-(every 5 minutes). Install
-admission is separate: see [Scan skills, MCP servers and plugins](#scan-skills-mcp-servers-and-plugins). Your observability destinations get the
-`ai_component.discovered`, `changed` and `removed` records with the user
-(`user.id`, `defenseclaw.user.name`) but without the skill or MCP server
-name. Discovery does not emit per-entry `ai_component.observed` records;
-read the full inventory with `discovery --user <account> --json`. Skill and
-MCP names can still reach destinations through hook decision and asset-policy
-audit rows when assets are used, scanned, admitted or rejected. With
-`ai_discovery.include_user_email`
-on, one `ai_component.observed` record per account and connector carries the
-account's Claude Code or Codex address, without entry names. See
-[AI Discovery](/docs/ai-discovery#per-user-scans-in-standalone-enterprise)
-for the folders the service may read in each profile.
+`--user` takes the bare account name, `COMPUTER\name`, `.\name`, `DOMAIN\name` or
+the SID. The gateway attributes each runtime finding to the account that runs it
+(`process_owner`, `session` or `enrolled_profile`); a finding none of these names
+is `attribution: unattributed` and is host-wide. The destinations get
+`ai_component.discovered`, `changed` and `removed` records with the user but
+without the skill or MCP name; read names with `discovery --user <account> --json`.
+The `ai_discovery.runtime.acquisition` key is not available on Windows
+(`config_schema_invalid`), and `enterprise.tetragon` is accepted and ignored.
 
 ## Scan skills, MCP servers and plugins
 
-The LocalSystem gateway skips enrolled users' profile roots. The following
-install-admission behavior applies to skill, plugin and MCP server roots
-outside profiles that the gateway can watch. An asset there goes through
-the scanners in the scanner runtime and the `admission` and `scanners` keys
-of the admin config:
+The LocalSystem gateway skips enrolled users' profile roots. Install admission
+applies to skill, plugin and MCP server roots outside profiles that the gateway
+watches. Assets in profiles are judged at the hook, from their content: set
+`asset_policy.enabled: true`, `asset_policy.skill.runtime_detection.enabled: true`
+and `asset_policy.plugin.runtime_detection.enabled: true` (MCP runtime detection
+already defaults to true) and `asset_policy.mode: action`. The hook reads the
+skill folder the request selects (Claude Code, Codex and Copilot CLI, under the
+skill roots of each, for Copilot CLI including `.agents\skills`, `COPILOT_HOME`
+and `COPILOT_SKILLS_DIRS`), and the
+Claude Code plugin it belongs to (including a plugin installed from a local
+marketplace folder and the tools of its bundled server), as the user, following
+links as the agent does. The gateway scans that text with the in-process
+prompt-injection detector and refuses the call when it holds an instruction
+that overrides the role or instructions of the agent, a fake system or delimiter
+block, base64-hidden instructions or tag characters, rated HIGH or CRITICAL
+(`profile-asset-verdict`), whatever the guardrail mode is, so a skill created
+while the gateway was stopped is judged the first time it is used. A skill or
+plugin the hook found but sent no text for, or could not read in full (a file
+past 64 KiB, more than 64 files, a link that leads nowhere readable, text that
+is not UTF-8), is refused (`profile-asset-unscanned`): a verdict on part of an
+asset is not a verdict on it. So is a skill folder the hook found but could not
+read, a plugin the registry gives no folder for (missing, unreadable, or larger
+than the 4 MiB the hook reads), and a tool of a plugin's bundled server whose
+owner no plugin content names. A tool name that several installed plugins could own (plugins `p` and `p_a` for a server `p_a_b`) is judged on the text of each of them, each up to the per-file (64 KiB) and escaped-text (96 KiB) caps, so up to 23 candidates keep their whole text even when it does not shrink; only a single candidate past those caps is marked truncated and refused. Verdicts are cached by content digest. Ordinary skills and plugins are not
+refused, and nothing changes while `asset_policy.enabled` is false or the mode
+is `observe`. The text is the hook's claim and the detector is the in-process
+one: the skill-scanner and CodeGuard are not run on profile assets, and a
+profile asset still gets no install scan or quarantine. Hooks refuse denied
+names regardless.
+Windows `status` and `verify` do not warn when a default or registry rule goes
+unenforced; the gateway log is the only signal. Keep shared skills outside
+profiles. A profile asset is never admission-blocked or quarantined. Ordinary project skill
+folders inside profiles are not watched or admission-scanned and do not receive
+an "is not scanned yet" refusal. At hook time, a project skill folder reached
+through a link outside the caller's profile, or writable by another user, is
+reported as unverified. The gateway logs the folder, `/health` counts it in
+`project_skill_roots_unverified`, and enterprise status shows a
+`project_skill_root_unverified` warning. A selected skill under an unverified
+root is refused in every asset policy mode until a fresh caller inspection
+verifies that the root is ordinary. The same holds for the selected skill
+itself: when its `SKILL.md` is a link (symbolic link or junction) to a file
+outside the caller's profile or below a folder another user can write, or a
+hard link, the call that selects that skill reports the root with the
+`SKILL.md` reason and the Skill call is refused; a link to a file the caller
+holds privately in the profile is the caller's own skill and loads. A hard
+link is reported because the hook cannot tell where its other names are.
+Watcher rows for roots outside profiles carry no per-user attribution.
+The scan and scan-finding rows of a `scan skill` or `scan plugin` run of the installed `defenseclaw.exe`
+on an asset in an enrolled user's folder name that user (`user.id`,
+`defenseclaw.user.name`), and the judge model when the judge ran
+(`gen_ai.request.model`, `judge=` in the scan row details).
 
-- A verdict at a level whose `admission.<type>.actions` value is `block`
-  blocks the asset. Its folder stays where the user put it
-  (`file_action=none` in the audit row).
-- A `quarantine` action copies a skill or plugin from a watched root into
-  `C:\ProgramData\Cisco\DefenseClaw\runtime\quarantine`, verifies the copy,
-  then removes the source. The usual slot is
-  `quarantine\<type-dir>\<connector>\<name>`; if it already holds a different
-  asset, a `quarantine\per-source\<type-dir>\<connector>\<id>\<name>` slot
-  keeps the copies separate. `<type-dir>` is `skills` or `plugins`, and the
-  connector segment is omitted when none is known.
-- A scan that fails (the scanner exits, or the gateway service cannot read
-  the folder) blocks the asset and disables it at runtime, as a rejected
-  verdict does: a blocked MCP server's tool calls are refused and a blocked
-  skill does not load.
-- A quarantine that cannot finish, for example because the disk is full,
-  leaves the asset blocked and disabled in place. The copy is staged as
-  `<name>.pending-<id>` beside its quarantine slot, and the stage is removed
-  when the copy fails. The gateway admits such an asset, and one it could not
-  scan, again after 2 minutes, then 4, and so on up to every 30 minutes, until
-  admission finishes. While the folder is still there, `enterprise windows
-  status` and `verify` warn with `asset_not_scanned` or
-  `asset_not_quarantined`, naming the asset and path.
-- With `gateway.watcher.<type>.take_action: false` a rejected asset is only
-  recorded (`verdict=rejected (take_action disabled, no gateway action)`) and
-  stays usable. When an `ensure` turns `take_action` back on, the first rescan
-  admits each such asset again and blocks or quarantines it as for a new
-  install. The `watcher-block` row ends with `rejected while take_action was
-  off, enforced once it was turned on`. Until then `enterprise windows status`
-  and `verify` warn with `asset_rejected_not_enforced` for a skill or plugin
-  still in its folder.
-- With `admission.mcp.scan_on_install: false` a new MCP server is admitted
-  without a scan, and the audit row says `reason=scan-disabled`. An MCP server
-  that the watcher admits goes through admission, usually within two minutes,
-  also while a periodic rescan is running, such as the first one after an
-  upgrade.
-- The MCP scanner does not connect to loopback, private, link-local or
-  multicast addresses. An HTTP or SSE server on `localhost`, `127.0.0.1` or an
-  internal address (`10.x`, `172.16-31.x`, `192.168.x`, or a name that
-  resolves to one) is therefore never scanned: its scan fails and it is
-  blocked like any scanner failure. The `install-scan-error` row says
-  `the MCP scanner does not connect to loopback, private, link-local or
-  multicast addresses ... so the server was not scanned`, and
-  `install-blocked reason=scanner-error` follows. A stdio server (a `command`)
-  is scanned on the computer and is not affected. To admit a local or
-  internal server you trust, pin it in the admin config with its name and
-  URL (an allowed server is not scanned):
+A relative `COPILOT_SKILLS_DIRS` entry is read below the folder Copilot was
+started in. The hook reads that folder from the working folder of the Copilot
+process (Windows and Linux) and then uses it as the only root, whatever the
+event folder is, so a skill of another folder that the agent does not load never
+decides the call. When the hook cannot read it, it takes the event folder or the
+outermost repository (or home) above it, never a folder in between.
+
+- **Verdicts.** A level whose `admission.<type>.actions` is `block` blocks the
+  asset and leaves its folder in place (`file_action=none`). `quarantine` copies
+  the asset to `C:\ProgramData\Cisco\DefenseClaw\runtime\quarantine`
+  (`<type-dir>\<connector>\<name>`, or a `per-source` slot when the name is taken),
+  verifies the copy, then removes the source.
+- **Failed scans.** A skill or plugin scan that fails blocks and disables the
+  asset. For MCP servers whose scan did not finish, the balanced
+  `scanners.mcp_scanner.unverified_server: warn` setting keeps the server with a
+  warning and an audit record; `unverified_server: block` refuses and disables
+  it. A scanner refusal of an unsafe server definition still blocks. A
+  quarantine that cannot finish leaves its asset blocked in place. The gateway
+  retries after 2 minutes, then 4, up to every 30 minutes, and `status` and
+  `verify` warn `asset_not_scanned` or `asset_not_quarantined`.
+- **Signed-out owners.** When the source of a quarantine is in the profile of a
+  user who is signed out and Windows gives no S4U logon for the account, the
+  copy is in quarantine and blocked, but the hook guardian removes the original
+  folder only when that user next signs in. Until then `status` and `verify`
+  warn `asset_removal_deferred`, naming the folder and why the guardian waits
+  (a Microsoft Entra ID account, an Active Directory account whose S4U logon
+  was refused, or a local account).
+- **`take_action: false`.** A rejected asset is only recorded and stays usable
+  until `take_action` is on again; then `asset_rejected_not_enforced` warns.
+- **`admission.mcp.scan_on_install: false`** admits new MCP servers without a scan
+  (`reason=scan-disabled`).
+- **Loopback and private MCP URLs are never scanned.** The scanner does not
+  connect to loopback, private, link-local or multicast addresses, so an HTTP or
+  SSE server there is blocked (`install-scan-error`). Stdio servers are
+  unaffected. To admit a server you trust, pin it by name and URL:
 
   ```yaml title="Admin config"
   asset_policy:
@@ -906,90 +674,110 @@ of the admin config:
           reason: reviewed internal server
   ```
 
-  or admit new MCP servers without a scan with
-  `admission.mcp.scan_on_install: false`. There is no setting that lets the
-  scanner connect to these addresses. The periodic rescan does not scan such
-  a server either. A server that is already blocked because its scan failed
-  is admitted by the rescan that the config change starts: the
-  `install-allowed` row follows, the block is released and `status` stops
-  warning `asset_not_scanned` for it.
-- A stdio server started with `npx` or `uvx` is scanned only when the
-  launcher is installed for all users in a folder that only administrators
-  can change, such as Node.js in `C:\Program Files\nodejs` or uv under
-  `C:\Program Files`. A launcher in a user profile (uv installs `uvx.exe` in
-  `%USERPROFILE%\.local\bin` by default) fails the scan, and the server is
-  blocked (`MCPStdioLaunchError ... untrusted Windows path`). There is no
-  per-user trusted-paths list on a managed computer; install the launcher
-  under Program Files instead.
-- Claude Code keeps user-scope and local-scope MCP servers in `.claude.json`
-  in the profile folder, which the gateway service cannot read. The hook
-  enumerator reads that file, and the `.mcp.json` of each project inside the
-  profile, every 30 seconds and publishes their inventory to the gateway.
-  The LocalSystem watcher still skips their profile paths, so publication
-  does not start an install scan.
-  The enumerator opens each project folder and its `.mcp.json` under the
-  enrolled user's own token, so it reads only what that user can read, and it
-  never follows a project key that points to a network, mapped or substituted
-  drive or through a link. A project the user cannot access contributes
-  neither its local-scope servers nor its `.mcp.json` servers; the user's other
-  projects and user-scope servers stay published. Any other read or parse
-  failure of a project file is treated like an unreadable `.claude.json`, as
-  described next.
-  When the enumerator cannot read or parse a user's `.claude.json` (an
-  access list that leaves SYSTEM out, or broken JSON), DefenseClaw cannot
-  see that user's servers, so it fails closed: it refuses every Claude Code
-  MCP tool call of that user, and `enterprise windows status` and `verify`
-  warn with `claude_state_unreadable`, naming the account and the file,
-  until the file can be read again.
-- Kiro keeps user MCP servers in `.kiro\settings\mcp.json`. For a user
-  enrolled for Kiro, the hook guardian protects the `.kiro` folder, so the
-  gateway service cannot read that file either. The hook enumerator reads and
-  publishes it the same way, but the LocalSystem watcher skips its profile
-  path instead of scanning the server. When the enumerator cannot read or
-  parse the file, DefenseClaw refuses that user's Kiro MCP tool calls, and
-  status and `verify` warn with `kiro_mcp_unreadable`.
-- A watched folder outside profiles created after the gateway starts is
-  picked up within about 30 seconds. The gateway never creates a folder in
-  a user profile.
-- On the LocalSystem gateway, project skill folders inside profiles are
-  skipped before verification or registration, even after an agent's first
-  hook. They receive no install scan, no "is not scanned yet" refusal and no
-  `project_skill_root_unverified` warning. A project outside the profile is
-  not registered from an enrolled user's hook either. The hooks still refuse
-  denied skill names and folder reads there; default, registry and approval
-  rules apply only with `runtime_detection.enabled: true`, and block with
-  `asset_policy.mode: action` (see
-  [Where a denied skill is refused](/docs/policies/admission#where-a-denied-skill-is-refused)).
-- Claude Code runs a plugin installed from a local marketplace folder from
-  that folder, which DefenseClaw does not automatically watch or change. When
-  its cache is inside a profile, the LocalSystem watcher skips it: there is
-  no install admission or cache quarantine for that plugin in 1.0.2. A
-  matching `asset_policy.plugin.denied` rule still makes the Claude Code hook
-  refuse the plugin's skills, commands, agents and MCP tools. A hook refusal
-  gives a structured reason such as
-  `ASSET-POLICY reason_code=admin-deny source=admin-deny asset_type=plugin asset_name=<plugin>`.
-  Displayed values may instead be redacted as `<redacted len=N sha=...>`.
-- MCP servers a Claude Code plugin bundles (its `.mcp.json`, or `mcpServers`
-  in `.claude-plugin/plugin.json`) are admitted with the plugin when it is
-  in a watched root; they get no separate `install-*` row or MCP inventory
-  entry. A profile plugin receives no install scan. `asset_policy.mcp` rules
-  still apply to its bundled servers' tool calls at the hook: a rule names
-  such a server `plugin:<plugin>:<server>` (Claude Code's tool names spell it
-  `plugin_<plugin>_<server>`), and a `command`, `args_prefix` or `url` rule
-  matches its definition, so a denied server cannot be brought back inside a
-  plugin.
-- On the LocalSystem gateway, watcher `scan` and `scan-finding` rows for
-  watched roots outside profiles carry no per-user attribution. The `scan`
-  row includes `judge=<model>` when the LLM judge ran. A `quarantine` row
-  has no `user=<account>` field from a watcher owner there.
+- **Launchers.** A stdio server the gateway starts is scanned only when its `npx`
+  or `uvx` is installed for all users in a folder only administrators can change
+  (for example `C:\Program Files\nodejs`). A launcher in a profile fails the scan
+  (`MCPStdioLaunchError ... untrusted Windows path`).
+- **Claude Code, Kiro and Codex state files.** The hook enumerator reads
+  `.claude.json`, each project's `.mcp.json`, `.kiro\settings\mcp.json`, and
+  Codex `.codex\config.toml` and the `config.toml` under the user's persistent
+  `CODEX_HOME`, and publishes their servers to the gateway every 30 seconds and
+  before each MCP tool call. If it cannot read or parse the file, the user's MCP
+  tool calls are refused and `status` warns `claude_state_unreadable`,
+  `kiro_mcp_unreadable` or `codex_mcp_unreadable`.
+  A project's `.mcp.json` is opened with the enrolled user's token, from the signed-in
+  session, which can be a disconnected one. A project that user cannot open (access
+  denied) is skipped and its servers are not published; the other projects are
+  unaffected. If the enumerator cannot obtain the token, it reports the state as
+  unreadable and publishes no inventory for that user.
+- **Plugins in profiles.** A Claude Code plugin from a local marketplace runs from
+  its folder and is not watched. A matching `asset_policy.plugin.denied` rule
+  still makes the hook refuse it with `ASSET-POLICY reason_code=admin-deny
+  source=admin-deny asset_type=plugin asset_name=<plugin>`. MCP servers a plugin
+  bundles are admitted with it; `asset_policy.mcp` rules name them
+  `plugin:<plugin>:<server>`.
+- **A watcher with no folders.** When every skill and plugin folder is in a
+  profile, the watcher starts with none: its audit row reads
+  `watcher ready: dirs=0` and `defenseclaw-gateway status --json` reports it
+  degraded with `profile_roots_skipped: true`. That is expected, not a failure.
+  The watcher does not scan or quarantine a skill or plugin in a profile; the
+  start of this section says what the hook applies to profile assets. For
+  install admission of a shared folder, set `gateway.watcher.enabled: true` and
+  `gateway.watcher.skill.enabled: true` (or `gateway.watcher.plugin.enabled: true`),
+  add `take_action: true` to enforce the verdict, and list a folder outside
+  profiles in `gateway.watcher.skill.dirs` (or `gateway.watcher.plugin.dirs`).
+  Claude Code and Kiro MCP servers in profiles are admitted either way
+  ([MCP servers in user profiles](#mcp-servers-in-user-profiles)).
+
+### MCP servers in user profiles
+
+An enrolled user's Claude Code, Kiro and Codex MCP servers (Claude Code user and
+local scope and a project's `.mcp.json`, Kiro user scope, Codex user scope) get an install scan and an admission decision like any
+other server. The scanner runs in the gateway service, so the user cannot change
+its verdict. Only the server's own process runs as the user:
+
+- The hook enumerator starts it with the user's session token through the
+  Secondary Logon service (`seclogon`). The gateway never starts a user's server
+  with its own rights.
+- It starts only the definition it published, and only when the gateway is
+  scanning that one.
+- Only `npx` or `uvx` with a package argument and no code-running flag. The
+  launcher must be installed for all users under Program Files; one in the
+  profile, or an earlier same-named file on `PATH`, is refused.
+- A definition the scan refuses for its own launcher (not `npx` or `uvx`, a
+  command path, a code-running flag, no package argument) stays blocked and is
+  not scanned again until the definition, the scanner or the admission settings
+  change, or an allow rule admits it. Its tool calls are refused with that
+  reason. Any other failed scan, including a launcher refusal that comes from
+  the computer's `PATH`, is retried after 2 minutes, doubling to 30. An
+  administrator unblock of a refused definition stays until the definition
+  changes.
+- The working directory must be on a local fixed drive, inside the project or the
+  user's own profile, in no other user's profile, with no link or junction on the
+  way. Otherwise the scan fails with the reason.
+- It runs hidden in a job that ends every process after at most five minutes, in
+  session 0 on a desktop only that user and LocalSystem can open. A server that
+  needs the interactive desktop or clipboard fails its scan and stays blocked.
+
+A user who is not signed in has no session token: their servers stay blocked until
+they sign in, and are scanned again within about 30 seconds. If `seclogon` is
+disabled, set it back to Manual. MCP servers of other connectors in a profile,
+and Codex project `.codex\config.toml` files, are not published and get no
+install scan (see below for what the gateway does with a Codex project server).
+
+Codex reads one user `config.toml`: the one under `CODEX_HOME` when that is set,
+otherwise `.codex\config.toml`. The enumerator publishes only that file for the
+account, so an old definition in the unused file never replaces the one that runs
+and an unreadable unused file does not block the account. `CODEX_HOME` counts
+when it is set for the account (the user environment); one set only for a
+session is not seen by the enumerator, and the gateway refuses a call to a Codex
+server defined in that file until the same definition is published
+(`mcp-source-unpublished`). The hook sends a digest of the whole definition
+(URL, command, every argument and the environment), and the gateway compares
+that digest with the published server, so a definition that differs in an
+argument past the 32nd, in a long URL or in the environment is not taken for the
+scanned one. A Codex project `.codex\config.toml` takes precedence over the user
+file, but only for a project the user config trusts (`[projects."<path>"]
+trust_level = "trusted"`); an untrusted project file is ignored by Codex and by
+DefenseClaw. A trusted project server is not published: it is refused the same
+way when it would override a published server of that name, when asset policy
+is enabled in action mode (the mode of the connector counts) with MCP runtime
+detection on, or when its definition is too long for the hook to send and an
+`asset_policy.mcp.denied` rule that pins an endpoint may match it (the hook
+sends a digest of each value such a rule compares, so a deny pinned to another
+URL, command, arguments or transport does not refuse it; the first 2,048
+arguments are digested in full and the next 65,536 by an 8-byte digest, so only
+a deny prefix that reaches past the 67,584th argument cannot be ruled out, and it
+refuses the call); otherwise it keeps running as before. When the user config marks a folder `trusted` and a project
+below it `untrusted`, the entry nearest the project decides.
 
 ### Release a blocked or quarantined skill
 
-Standard users cannot release an asset on a managed computer, and `skill
-enable` and `skill restore` are not available there. After you review a skill
-or plugin, add an allow rule for it to `asset_policy` in the admin config,
-pinned to its watched folder outside profiles or, without
-`source_path_contains`, for every matching copy:
+Standard users cannot release an asset, and `skill enable` and `skill restore` are
+not available. After review, add an allow rule to `asset_policy` in the admin
+config, pinned to its watched folder outside profiles or, without
+`source_path_contains`, for every matching copy. This example assumes the folder
+`C:\ApprovedSkills\<account>` is listed in `gateway.watcher.skill.dirs`:
 
 ```yaml title="Admin config"
 asset_policy:
@@ -1000,41 +788,28 @@ asset_policy:
         source_path_contains: ["C:\\ApprovedSkills\\<account>\\reviewed-skill"]
 ```
 
-Replace `<account>` with the name of the folder that holds that account's
-reviewed skills, and `reviewed-skill` with the installed skill folder name in
-both fields. This example assumes the folder `C:\ApprovedSkills\<account>`
-is listed in `gateway.watcher.skill.dirs`.
-`source_path_contains` must match the reviewed copy's actual path; omit it
-only when the allow rule should cover every matching copy. A profile asset is
-never admission-blocked in 1.0.2, so there is no watcher block to release for
-it. To lift a hook refusal of a profile skill denied by name, change the
-`asset_policy.skill.denied` rule in the admin config.
+Replace `<account>` with the folder you list for that user and `reviewed-skill` with the
+skill's folder name.
 
-For a Claude Code plugin from a marketplace, use `asset_policy.plugin` with
-the name `claude plugin list` shows, `plugin@marketplace`. A denied rule also
-matches the plugin name alone and the name in its
-`.claude-plugin/plugin.json` at the hook; an allowed rule needs
-`plugin@marketplace`. A profile plugin has no watcher `install-rejected` row.
+For a Claude Code plugin from a marketplace use `asset_policy.plugin`; an allow
+rule needs `plugin@marketplace` (the name `claude plugin list` shows), and a deny
+rule also matches the bare name. To lift a hook refusal of a profile skill denied
+by name, change its `asset_policy.skill.denied` rule.
 
-- A blocked skill whose folder is still in place is released at the next
-  periodic rescan (`watch.rescan_interval_min`, 60 minutes by default), or at
-  once when it is copied into the watched folder again: admission allows it
-  (`install-allowed reason=allow-listed`) and clears the install block and
-  runtime disable that the earlier verdict recorded, with an `enable` audit
-  row that says `released by an allow rule`. The agent can then use it.
-- A quarantined skill keeps its copy in
-  `C:\ProgramData\Cisco\DefenseClaw\runtime\quarantine\skills\<connector>\<name>`
-  (or `...\quarantine\per-source\skills\<connector>\<id>\<name>` if the
-  usual slot holds a different asset of the same name). The connector
-  segment is omitted when none is known. To give it back, add the allow rule,
-  then copy the folder from there back into the watched folder from an
-  elevated prompt; it is admitted as allow-listed. To purge copies you no
-  longer need, delete their folders under `runtime\quarantine` from an
-  elevated prompt.
+- A blocked skill still in its folder is released at the next rescan
+  (`watch.rescan_interval_min`, 60 by default), or at once when it is copied into
+  the watched folder again (`install-allowed reason=allow-listed`).
+- A quarantined skill keeps its copy under `runtime\quarantine\skills`. After you
+  add the rule, copy the folder back into the watched folder from an elevated
+  prompt. To purge copies, delete their folders under `runtime\quarantine`.
 
-Standard users have no `skill`, `mcp` or `plugin` commands on a managed
-computer. An administrator scans a folder or a remote MCP server with the
-same scanners, policy and judge from an elevated prompt:
+An administrator scans a folder or remote MCP server with the same scanners,
+policy and judge. The gateway reads the folder as LocalSystem and refuses any
+folder inside a user profile, so copy what you want to scan to a folder outside
+profiles such as `C:\DefenseClawReview`. That refusal (HTTP 403) prints the
+`Copy-Item` and `scan` commands for the folder. Standard accounts cannot run
+managed scans. Variables like `SKILL_SCANNER_LLM_MODEL`
+in your shell are ignored.
 
 ```powershell title="Elevated Administrator prompt"
 $Cli = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe'
@@ -1043,247 +818,226 @@ $Cli = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe'
 & $Cli scan plugin 'C:\DefenseClawReview\my-plugin'
 ```
 
-Each command prints the verdict, the findings, the skill scanner policy (or
-the MCP analyzers) and the judge model; add `--json` for the full response.
-The gateway service reads the folder as LocalSystem and refuses any folder
-inside a user profile, including paths under `C:\Users` or another registered
-profile root. Copy what you want to scan to an administrator-created folder
-outside the profiles, such as `C:\DefenseClawReview`, that LocalSystem can read.
-Variables such as
-`SKILL_SCANNER_LLM_MODEL` in the administrator's shell are ignored: the scan
-runs in the gateway service with the admin config.
-
 ## Inspect machine policy
 
-Run the policy commands from an elevated Administrator prompt, or as
-LocalSystem from an MDM script. Like `audit export`, they read the managed
-deployment's configuration and need no environment variables:
+Run from an elevated prompt or as LocalSystem. Standard accounts are told to use
+an elevated prompt.
 
 ```powershell title="Elevated Administrator prompt"
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy show
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy verify
 ```
 
-`show` lists each connector's route, lock and coverage; `verify` exits 1
-while coverage is incomplete. With `managed_hooks_only: enforce` (the
-default) the Claude Code drop-in
-`C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json` sets
-`allowManagedHooksOnly: true`, so user and project Claude Code hooks do not
-run. Claude Code applies the files in `managed-settings.d` in name order, so a
-file that sorts after `90-defenseclaw.json` and sets `allowManagedHooksOnly`
-to `false` turns the lock off; `enterprise policy verify` and `enterprise
-windows verify` report that file. Standard accounts are told to use an
-elevated prompt.
+`show` lists each connector's route, lock and coverage. `verify` exits `1` while
+coverage is incomplete. A missing machine policy is a protection failure, even
+with zero enrolled users: stop the affected agent with application control, fix
+the reported cause, and from an elevated PowerShell prompt run one of:
 
-`enterprise policy verify --live` is not available on Windows: Windows cannot
-start the client as another account, and a standard account cannot read the
-managed configuration. Use the static `verify` above, and to see the hooks
-run, make a tool call in the client from the user's own session, then read
-its record from the elevated prompt with `audit export`, as in
-[Review the audit log](#review-the-audit-log).
+```powershell title="Elevated PowerShell prompt"
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows reconcile --profile standalone
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows repair --profile standalone
+```
+
+Then rerun `enterprise policy verify` as above. A missing hook executable is also a protection
+failure for Claude Code, Codex, Cursor and Copilot while their machine policy files
+stay installed. Stop affected agent use, repair the installation, and require the full
+`enterprise windows verify --profile standalone --json` check to pass before
+allowing agent use. With
+`managed_hooks_only: enforce` (the default) the Claude
+Code drop-in `C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json`
+sets `allowManagedHooksOnly: true`. Claude Code applies drop-ins in name order, so
+a later file that sets it to `false` turns the lock off; `policy verify` and
+`enterprise windows verify` report that file. `policy verify --live` is not
+available on Windows. To see the hooks run, make a tool call from the user's
+session and read it with `audit export`.
+
+On a managed Windows test host, a standard user could create a private DOS
+device map, but the tested map did not change a fresh read of the installed
+Codex policy. This does not establish how every agent behaves under every
+process-local view. `status` and `verify` inspect stored policy and cannot by
+themselves prove that every agent process loaded its hook; compare a native
+tool call with the gateway audit when validating this boundary ([W-63](/docs/enterprise/threat-model)).
 
 ## Recover a pending transaction
 
-A lifecycle that fails normally rolls back. If the rollback itself cannot
-finish, the transaction stays pending: the result reports
-`transaction_pending: true`, the DefenseClaw services stay stopped, and
-vendor machine policy the transaction had already published can still point
-at the stopped gateway. `status` shows the state; `verify` refuses until the
-transaction is recovered. The failed result names the command to run next.
-A run that Setup stopped at its `TIMEOUTSECONDS=` limit (error
-`lifecycle_timeout`) can leave a transaction pending too, and its result
-says so. Until the transaction is recovered, users' agents block with
-`enterprise_managed_gateway_not_running`; starting the gateway service by
-hand does not help.
+A lifecycle that fails normally rolls back. If the rollback cannot finish, the
+transaction stays pending: the result reports `transaction_pending: true` and names
+the services that stay stopped. `status` shows it and `verify` refuses until it is
+recovered. While the gateway is stopped, users' agents block with
+`enterprise_managed_gateway_not_running`, and the block asks them to have an
+administrator run `enterprise windows status`. Starting a service by hand does
+not recover it.
 
-Every lifecycle stops the DefenseClaw services before it changes anything.
-A service whose process does not answer the stop request within 30 seconds
-(a hung or suspended process) is ended the way Windows ends a stuck stop,
-and the lifecycle continues; the result names each such process in a
+A run that hits `TIMEOUTSECONDS` (`lifecycle_timeout`) is stopped, and Setup then
+runs one recovery of its own, limited to 10 minutes, that replays the pending
+transaction. The run still fails. When no lifecycle record is left, its result
+is the recovered deployment's status, with `transaction_pending: false`. When the
+recovery cannot prove that, the error names what is left (for example a purge or
+install-rollback intent), and the run below recovers it.
+
+Every lifecycle stops the DefenseClaw services before it changes anything. A
+service process that does not answer the stop request within 30 seconds (a hung
+or suspended process) is ended the way Windows ends a stuck stop, and the
+lifecycle continues. The result names each such process in a
 `service_process_terminated` warning.
 
-An uninstall that is refused or fails after it started, and rolls back,
-removes the managed-hook teardown journal it wrote
+An uninstall that is refused or fails after it started, and rolls back, removes
+the managed-hook teardown journal it wrote
 (`C:\ProgramData\Cisco\DefenseClaw\install\managed-hooks-teardown-journal.json`).
 The next uninstall removes one that an earlier build left and says so in a
-`stale_lifecycle_journal_removed` warning, so a later config change does not
-make that uninstall fail with "managed-hook teardown journal does not match
+`stale_lifecycle_journal_removed` warning. Without that, a later config change
+could make the uninstall fail with "managed-hook teardown journal does not match
 the protected deployment".
 
-A hardening script that removes `NT SERVICE\DefenseClawGateway` from
-`C:\ProgramData\Cisco\DefenseClaw\runtime` or `etc` stops the gateway from
-starting. `status` and `verify` both fail and name the folder and the
-missing entry. `repair`, Setup `/ensure` and `/uninstall`, and the recovery
-of a pending transaction, put the deployment's own permissions back on those
-folders, their files and the redaction correlation key once the services are
-stopped, before they record or restart anything. A key that another account
-can open is refused before any service is stopped, and the message names the
-path, the account and the `icacls` commands that remove it. Files whose own
-permissions shut out Administrators get the deployment's permissions back
-too. A runtime file the lifecycle cannot open at all keeps its permissions and
-is named in a `runtime_file_skipped` warning; the audit database and the
-redaction correlation key are never skipped.
-
-The rollback never deletes content in an account's `%USERPROFILE%\.defenseclaw`
-that it cannot prove DefenseClaw wrote: a file or folder it did not create,
-a file other than a DefenseClaw hook file whose owner or permissions changed,
-or a hard link. A DefenseClaw hook file whose permissions changed is removed.
-The rollback does not stay pending for the rest either, and the same holds
-when the account changed the owner or permissions of the folder itself or
-replaced it: it renames the folder to
-`%USERPROFILE%\.defenseclaw.rollback-<random>`, with that content inside, and
-finishes. Review that folder and delete it. A file or folder another program
-holds open still makes the rollback wait, because a retry can finish once the
-program closes it.
-
-The rollback of a failed first install also puts back each account's agent
-configuration and removes the machine policy the install published. It acts
-as each account, which needs LocalSystem. For a signed-out account it uses a
-service-for-user (S4U) logon: a local account always, a domain account when
-a domain controller answers. Set
-`DEFENSECLAW_WINDOWS_ROLLBACK_SIGNED_OUT_ACCOUNTS=0` to skip signed-out
-accounts. No guardian is left to clean an account later, so the result lists
-each item it could not remove as a `rollback_leftover` warning, by account
-and connector, with the command that removes it.
-
-Setup run from an elevated administrator prompt is not LocalSystem, so its
-rollback cannot act as any account. The guardian, a LocalSystem service, may
-already have registered DefenseClaw for the signed-in accounts (for example
-Copilot's `%USERPROFILE%\.copilot\hooks\defenseclaw-vscode.json`); those
-registrations stay and point at the removed hook binary, and each account is
-named with "because Setup did not run as LocalSystem". Only the failed run's
-result lists them, because a later `/status` finds no deployment, so keep
-that result. Fix the cause of the failure, then run `/ensure` and
-`/uninstall` as LocalSystem while the accounts have an active (connected)
-session (a signed-in account whose session is disconnected counts as signed
-out), as in [Run
-Setup as LocalSystem](#run-setup-as-localsystem). An empty
-`C:\Program Files\ClaudeCode\managed-settings.d` can also stay; see
-[Remove](#remove).
-
-Recover by running DefenseClaw Setup as LocalSystem (Intune install behavior
-**System**, or another MDM's system context). `/ensure` recovers the pending
-transaction and then installs or upgrades; `/uninstall` recovers it and
-removes the deployment:
+Recover by running Setup as LocalSystem (Intune install behavior **System**).
+`/ensure` recovers the transaction then installs or upgrades; `/uninstall` recovers
+it and removes the deployment:
 
 ```powershell title="As LocalSystem"
 DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=C:\ProgramData\DefenseClaw-Staging\config.yaml JSON=1
 DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1
 ```
 
-`/repair` also recovers the transaction; after a failed first install it
-then stops with "run Install", so `/ensure` is the one-step command. The
-recovery restores the release that ran before the interrupted change, and
-the result, `status`, `verify` and `deployment.json` report that release.
-When the CLI that recovered it is that older release (the installed CLI, or
-the Intune remediation), the result warns `recovered_pending_transaction`:
-the change did not finish, so run the newer Setup `/ensure` again.
+`/repair` also recovers it but then stops with "run Install" after a failed first
+install, so `/ensure` is the one-step command. The recovery restores the release
+that ran before the interrupted change; if the CLI that recovered it is that older
+release, the result warns `recovered_pending_transaction`: run the newer Setup
+`/ensure` again. If the staged gateway cannot finish the rollback, the lifecycle
+may retry once with the gateway in the running Setup's payload, and reports
+`recovery_gateway_fallback`, `recovery_gateway_not_used` or
+`recovery_activation_deferred`. Do not edit DefenseClaw files by hand.
 
-If no recovery finishes (a LocalSystem run says "running it again unchanged
-fails the same way"), first fix what its error names, if anything. As the
-last resort, remove the deployment without recovering the transaction, then
-install it again:
+The installed CLI can also refuse a cut-off upgrade outright, when it stopped
+between the installer and the module, forward or during its rollback ("module
+SHA-256 does not match the pinned payload manifest"). Run that release's Setup
+`/ensure`; see [the troubleshooting entry](/docs/enterprise/troubleshooting#after-a-cut-off-windows-upgrade-the-installed-cli-refuses-with-module-sha-256-does-not-match).
+
+If no recovery finishes, fix what its error names, then as the last resort remove
+the deployment without recovering the transaction and install again:
 
 ```powershell title="As LocalSystem, last resort"
 DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall FORCE=1 JSON=1
 DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=C:\ProgramData\DefenseClaw-Staging\config.yaml JSON=1
 ```
 
-`FORCE=1` reads nothing of the pending transaction. It stops the DefenseClaw
-services after it checks they belong to this deployment, moves
-`C:\ProgramData\Cisco\DefenseClaw` aside, removes the services,
-`C:\Program Files\Cisco\DefenseClaw` and the machine-wide hook files, and
-then deletes the moved folder. The result has a `forced_uninstall` warning, and
-`forced_state_root_kept` names the moved folder if it could not be deleted.
-If the folder cannot be moved aside, for example because a process holds a
-file in it open, or the removal after the move is refused, for example because
-a process holds a file under `C:\Program Files\Cisco\DefenseClaw` open, Setup
-fails with that error, the folder moves back and the services get back the
-startup mode and running state they had. Close that process and run it again.
-Hook registrations in each account's profile cannot be attributed without the
-deployment state, so the result lists what stays. Keep the lifecycle log
-(`C:\Windows\Logs\DefenseClaw\enterprise-lifecycle.log`) for DefenseClaw
-support. Run it from Setup, not from the installed CLI. Outside
-an MDM, a one-time scheduled task that runs as SYSTEM gives the same context
-(see [Run Setup as LocalSystem](#run-setup-as-localsystem)).
-From a payload folder (see [Run the lifecycle CLI from a payload
-folder](#advanced-run-the-lifecycle-cli-from-a-payload-folder)),
-`"$Payload\defenseclaw.exe" enterprise windows ensure` (or `repair`,
-`uninstall`) with the same `--profile`, trust and `--config` options, run as
-LocalSystem, works the same way.
+`FORCE=1` moves `C:\ProgramData\Cisco\DefenseClaw` aside, removes the services,
+`C:\Program Files\Cisco\DefenseClaw` and the machine-wide hook files, then deletes
+the moved folder, with `forced_uninstall` and, if that fails, `forced_state_root_kept`
+warnings. If a process holds a file open, Setup fails, moves everything back and
+restores the services. Per-user registrations are listed in the result. Keep
+`C:\Windows\Logs\DefenseClaw\enterprise-lifecycle.log` for support.
 
-If recovery cannot finish with the gateway the pending transaction staged,
-it can fall back to the gateway in the running Setup's payload, and it
-reports what it did in the result (`recovery_gateway_fallback`,
-`recovery_gateway_not_used` or `recovery_activation_deferred`). Do not edit
-DefenseClaw files or permissions by hand to recover.
+Other recovery notes:
 
-<Accordions>
-<Accordion title="How recovery chooses a gateway">
+- A hardening script that removes `NT SERVICE\DefenseClawGateway` from `runtime`
+  or `etc` stops the gateway from starting. `repair`, `/ensure`, `/uninstall` and
+  recovery put the deployment's permissions back. A redaction correlation key
+  another account can open is refused before any service stops.
+- A file another program holds open stops the repair of that file. Before Setup
+  puts back the access list of a recorded file (`config.yaml`, `targets.yaml`,
+  `deployment.json`, the Codex `requirements.toml` and its records), it holds
+  the file so that no other program can write or delete it, checks that it has
+  one link and judges it. If a program already holds it open with write or delete
+  access, or without sharing read access, `/repair` and `/ensure` refuse that file
+  by name and change nothing on it, not even its access list. Close the program
+  that holds it (a user's agent, an editor), then run Setup `/ensure` again.
+  A file that already has the canonical access list is not written, so a holder
+  does not matter for it. For the Codex `requirements.toml` and the Codex state
+  file of 1.0.8, Setup checks before it stops any service: a program that holds
+  either one without read sharing, `requirements.toml` without delete sharing,
+  or `requirements.toml` with write or delete access while its access list has
+  to be written, stops the run after 30 seconds
+  with `codex_requirements_held` or `codex_state_held` (exit `1618`) and the
+  program's name. Nothing is stopped or changed, and the same command succeeds
+  once the program lets go. A Codex state copy (`.defenseclaw-managed-hooks.state.<n>`)
+  that a user holds open is neither refused nor changed behind the holder. When
+  it is the current copy and the holder denies read sharing, the next Codex
+  transaction publishes a fresh copy under a new name so that the hook and the
+  guardian can read the state; the held copy stays until it is released.
+  A program that opens one of those two files after that check and does not
+  share delete access cannot be kept out of the rest of the run. If the run
+  then fails and rolls back, Setup waits 30 s for that file to be released,
+  then leaves it as it is, puts the rest back and starts the restored services,
+  and ends with the same `codex_requirements_held` or `codex_state_held`
+  (exit `1618`) naming the program and its process id, and with the failure
+  that started the rollback. The transaction stays pending, and the next
+  `/repair` as LocalSystem, after the program lets go, finishes the rollback.
+  The previous hook is handled the same way (`hook_in_use`). A file left this
+  way can be out of step with the restored release (a newer `requirements.toml`
+  beside the older state copy, or the replacement hook or the closed hook guard
+  where the previous hook belongs). A Codex agent can then be blocked until
+  `/repair` runs; that is fail closed by design. When the held file is the
+  `requirements.toml` the recovery had to republish, the result also says the
+  guardian's coverage was not proven by that rollback.
+  A recovery that restores a `requirements.toml` an administrator edited in
+  the managed policy publishes the managed policy again instead of stopping,
+  keeps your file under `install\recovered-policy` and warns
+  `codex_requirements_replaced`; `/uninstall FORCE=1` is not needed for it.
+  Programs that only read the file, such as an antivirus scan, do not stop it.
+  Setup stamps the gateway's own database and log files, which the running
+  services keep open for write, without that hold. The repair the gateway runs on
+  its database files refuses only a program that holds them with delete access or
+  without sharing read access.
+- If Setup `/repair` refuses because the running gateway's installed config
+  cannot be validated for rollback, restore an approved, gateway-valid
+  `config.yaml` and retry `/repair`. If the refusal names an administrator-selected
+  policy, rule-pack or JSONL path that Repair does not restamp, correct
+  its permissions and the gateway service account's access before retrying.
+  Repair restores ACLs on its installed config, runtime root, bundle store and
+  protected credential store;
+  it leaves those administrator-selected paths in place. When `deployment.json` is readable, Setup
+  `/ensure CONFIG=<approved config>` can replace the invalid installed config.
+  All paths are checked again after Repair restores its managed permissions.
+- A runtime file the lifecycle cannot open at all keeps its permissions and is
+  named in a `runtime_file_skipped` warning. The audit database and the redaction
+  correlation key are never skipped.
+- The rollback never deletes content in an account's `%USERPROFILE%\.defenseclaw`
+  it cannot prove DefenseClaw wrote; it renames the folder to
+  `.defenseclaw.rollback-<random>`. Review and delete that folder.
+- A signed-out account whose `.defenseclaw` or `hooks` folder has the wrong owner
+  or permissions is skipped with a `user_runtime_folder_untrusted` warning and
+  repaired at its next sign-in.
+- For a signed-out account the rollback of a failed first install uses a
+  service-for-user (S4U) logon: a local account always, a domain account when a
+  domain controller answers. Set `DEFENSECLAW_WINDOWS_ROLLBACK_SIGNED_OUT_ACCOUNTS=0`
+  to skip signed-out accounts. No guardian is left to clean an account later, so
+  the result lists each item it could not remove as a `rollback_leftover`
+  warning, by account and connector, with the command that removes it.
+- The rollback of a failed first install acts as each account, which needs
+  LocalSystem, and lists leftovers as `rollback_leftover` warnings. Setup run from
+  an elevated administrator prompt cannot act as accounts, so run `/ensure` and
+  `/uninstall` as LocalSystem while accounts have a connected session.
 
-Recovery first uses the gateway the pending transaction staged. When that
-gateway cannot restore or retire the transaction's managed-hook state, or
-cannot remove the per-user runtime roots the transaction created (the
-target-runtime rollback cleanup), for example a release whose defect caused
-the failure, the standalone lifecycle
-retries that step once with the `defenseclaw-gateway.exe` that ships in the
-running Setup's payload (or beside the staged `defenseclaw.exe`), and only
-when all of these hold:
+### Recovery gateway refusal codes
 
-- the lifecycle runs as LocalSystem;
-- that gateway passes the same checks an install applies to its payload: an
-  administrator-owned source on a local NTFS volume and the deployment's
-  trust mode (a valid Authenticode signature, limited to the allowed signers
-  when any are set, or the SHA-256 the payload manifest pins);
-- it is not the gateway that already failed, and it is not inside the
-  install root;
-- it is the same release as the gateway that failed or a newer one, read
-  from each gateway's version resource (an older Setup never recovers a
-  newer release's transaction);
-- the run is not an `--allow-unsigned` certification run.
+When the staged gateway fails a managed-hook step, recovery may rerun it with the
+gateway that ships beside the running Setup. If recovery declines, the result has
+a `recovery_gateway_not_used` warning with one of these reasons, and the staged
+gateway's error stands:
 
-The verified gateway is copied to `C:\Program Files\Cisco\DefenseClaw\bin`,
-where the hidden command must run, and the step runs again; the rollback
-then restores that file to its state before the transaction. The result and
-`enterprise-lifecycle.log` record a `recovery_gateway_fallback` warning with
-the binary, where it was copied from, its SHA-256, the trust basis, its
-release and the staged gateway's release, the account, and the staged
-gateway's failure. When recovery declines the
-fallback, a `recovery_gateway_not_used` warning gives the reason
-(`not_local_system`, `untrusted`, `same_binary`, `older_release`,
-`version_unknown`, `no_payload`, `inside_install_root`, `unsigned_scope`)
-and the staged gateway's error stands. A failure that concerns file permissions is reported in plain terms;
-the internal detail is kept in a `lifecycle_diagnostic` warning for support.
+| Reason | Meaning |
+| --- | --- |
+| `no_payload` | No gateway ships beside the running Setup |
+| `unsigned_scope` | The run is a certification run, not a production one |
+| `not_local_system` | The lifecycle does not run as LocalSystem |
+| `inside_install_root` | The candidate is the installed payload |
+| `untrusted` | The candidate fails the source or trust checks (an administrator-owned source on a local NTFS volume, and a valid signature or the pinned SHA-256) |
+| `same_binary` | The candidate is the staged gateway that already failed |
+| `version_unknown` | The release of the candidate or of the staged gateway cannot be read |
+| `older_release` | The candidate is older than the staged gateway |
 
-Recovery then restarts the restored release, and its gateway starts only
-after that release's guardian publishes full coverage. When the restored
-release is the one that cannot (for example, its guardian cannot republish a
-user's lost per-user state), every recovery would fail the same way. Under
-the same conditions as above, the standalone lifecycle instead finishes the
-recovery with the restored release stopped and disabled and records a
-`recovery_activation_deferred` warning (the restored and the Setup's
-releases, the Setup gateway's SHA-256 and trust basis, and the coverage
-failure). `/ensure` then upgrades to the running Setup's release in the same
-run; its gateway also starts only after full coverage. `/repair` stops at
-that point with the next step, because it reapplies the installed release
-that could not start. With the same release, or from an elevated
-administrator prompt, recovery keeps the coverage failure and a
-`recovery_gateway_not_used` warning gives the reason.
-
-</Accordion>
-</Accordions>
+A failure that concerns file permissions is reported in plain terms. The
+internal detail is kept in a `lifecycle_diagnostic` warning for support.
 
 ### Run Setup as LocalSystem
 
-Without an MDM, an administrator gets LocalSystem from a one-time scheduled
-task. Run Setup from the administrator-only staging folder, never from a
-folder a standard user can write, because the task runs whatever file is at
-that path as SYSTEM. From an elevated PowerShell session, with `$Stage` as
-in [Write the config](#2-write-the-config):
+Without an MDM, a one-time scheduled task gives LocalSystem. Run Setup from the
+administrator-only staging folder, never from a folder a standard user can write:
+the task runs whatever file is at that path as SYSTEM.
 
 ```powershell title="Elevated PowerShell"
 if ((Get-Acl $Stage).GetOwner([Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-32-544') {
-    throw "$Stage is not owned by Administrators; create it as in Write the config"
+    throw "$Stage is not owned by Administrators; create it as in step 2"
 }
 Copy-Item .\DefenseClawSetup-Enterprise-Standalone-x64.exe $Stage
 $Setup  = "$Stage\DefenseClawSetup-Enterprise-Standalone-x64.exe"
@@ -1307,258 +1061,256 @@ Get-Content $Result
 ```
 
 `LastTaskResult` is Setup's exit code. For `/uninstall`, replace
-`/ensure CONFIG=$Stage\config.yaml` with `/uninstall`. The loop prints
-what Setup writes to standard error as it runs, the diagnostics of a run
-that fails. After the services are back,
-Setup prepares the scanner runtime: it unpacks a new one and checks every
-file of an installed one. That takes from seconds to a few minutes, longer on
-a disk that has not been read since the computer was cloned, and at most 15
-minutes. Setup reports `[scanners]` lines meanwhile, with the time elapsed and
-the bound: on standard output without `JSON=1`, and in the run's lifecycle log
-entry (`diagnostics`) with `JSON=1`. A successful run writes nothing to
-standard error, which an MDM such as Intune reads as a failed script.
-At the bound it stops the prepare and Setup fails (`1603`) with a
-`scanner_runtime_unavailable` error that says `timed out after 15m0s` and
-names `/repair`: DefenseClaw is installed and its services run, but watched
-assets that require a scan stay blocked and `verify` fails until a `/repair`
-prepares the runtime. That run continues the unpack where the stopped
-one ended instead of starting over.
-
-The prepare is CPU work: it writes and hashes about 13,600 files (360 MB),
-the antivirus scans each new file, and Python compiles them. A computer that
-is short of CPU can reach the bound. The usual case is a burstable cloud VM
-(Azure B-series, AWS T-series) that has used up its CPU credits and is held
-at its baseline, while other work runs: install and uninstall cycles back to
-back, an agent session, a script that calls the hook every second. On a
-2-vCPU Azure `Standard_B2s_v2`, a first prepare took about 3.5 minutes with
-CPU credits, 5 minutes held at the 40 % baseline, and 13 minutes held at the
-baseline with one other busy process; with more load it did not finish. Run
-Setup `/repair JSON=1` as LocalSystem again once the computer has CPU to
-spare (on a burstable VM, after its credits build up, or on a size that is
-not burstable). A run that was stopped resumes the unpacking where it stopped; the file checks and the compile run again.
+`/ensure CONFIG=$Stage\config.yaml` with `/uninstall`. After the services are
+back, Setup prepares the scanner runtime, which takes seconds to a few minutes
+and at most 15. On timeout Setup fails with `1603` and
+`scanner_runtime_unavailable` ("timed out after 15m0s"): DefenseClaw is installed
+and running, but watched assets that require a scan stay blocked until a
+`/repair` finishes the unpack. The prepare is CPU work, so a burstable cloud VM
+(Azure B-series, AWS T-series) out of CPU credits can reach the bound; run
+`/repair JSON=1` as LocalSystem again when the computer has CPU to spare.
 
 ## Per-user installs
 
-On a computer with the standalone deployment, the per-user product refuses
-to run:
+On a computer with the standalone deployment the per-user product refuses to run:
 
 | Per-user action | What happens |
 | --- | --- |
 | `install.ps1` | Refuses when the marker key exists, or when `DisableSelfUpdate` under `HKLM\SOFTWARE\Policies\Cisco\DefenseClaw` is nonzero |
 | `defenseclaw upgrade`, `defenseclaw rollback` | Refuse when the marker key exists |
-| Per-user gateway | Refuses to start on a managed computer |
+| Per-user gateway | Refuses to start on a managed computer. `defenseclaw-gateway stop`, `start` and `restart` refuse there too; the message names `status` and the installed CLI's `enterprise windows repair --profile standalone`, each by its full path, as the way to restart the managed gateway |
 
-Nothing migrates a per-user install automatically. Before you deploy, have
-each user remove their per-user install with
-`defenseclaw uninstall --all --binaries --yes`. Setup needs `--all`: it does
-not adopt a `%USERPROFILE%\.defenseclaw` folder that a per-user install left,
-and refuses that profile until the folder is gone (move it aside to keep its
-data). A first install checks every enrolled profile before it changes
-anything and stops in seconds, naming the folder and this command, with
-nothing installed. A folder the account created itself without any per-user product (the
-refused hook of an account that was not enrolled writes one) is not such a
-folder: Setup takes it over. A per-user gateway that still runs holds the gateway API port, and
-Setup names it in its `api_port_held` error. See
-[Uninstall and preserved state](/docs/get-started/windows/install-lifecycle#uninstall-and-preserved-state).
+After the managed deployment is removed, a user can install the per-user product.
+Its first `defenseclaw init` moves the files a managed install left in
+`%USERPROFILE%\.defenseclaw` (an uninstall before 1.0.8 kept them, with the managed
+access list) to `%USERPROFILE%\.defenseclaw-managed-leftovers-<UTC time>` and says so
+in the **Managed leftovers** row. It never reads or reuses them. It moves only entries
+that still carry the managed access list (Administrators full control, the account
+Modify only), never one with the profile's own access list or one another account can
+write, and it moves nothing once the folder has a `config.yaml`, `.env` or `audit.db`. Delete that folder when it is no longer
+needed. If an entry cannot be moved, init names it: move it out of the folder, or
+have an administrator delete it, and run `defenseclaw init` again.
+
+Nothing migrates a per-user install. Before you deploy, have each user run
+`defenseclaw uninstall --all --binaries --yes`. If a user set up Claude Cowork, they also remove the DefenseClaw plugin in Claude Desktop (**Customize > Plugins**, then the **...** menu on DefenseClaw, **Remove**); until then Cowork tool calls are blocked. Setup needs `--all`: it does not
+adopt a `%USERPROFILE%\.defenseclaw` folder a per-user install left, and a first
+install checks every enrolled profile and stops in seconds, naming the folder and
+this command. A folder the account created itself without a per-user product is
+taken over. A link or junction the account made at that folder, or at its `hooks`
+folder, is moved aside when the account enrolls, without opening what it names,
+and the folder is created. Until that account signs in it stays pending, not
+protected: status names it in `enrollment_pending_account_link`, and Upgrade and
+Repair leave it pending and finish for the other accounts. A first install still
+stops before it changes anything, naming the link. Releases before 1.0.6 refuse
+that account instead, and every later Setup run on the computer stops with
+`lifecycle_error` naming the link. A link at that folder that the account does not
+own, such as one an administrator made, is never followed or moved aside: Setup
+leaves that one account out, finishes for the others, and status names it in
+`enrollment_skipped_account_link` until an administrator removes the link. In every case remove the link (`rmdir` on a
+junction removes only the link) and run Setup again. A running per-user gateway holds the API port, and Setup names it
+in `api_port_held`. See
+[Uninstall and preserved state](/docs/get-started/windows).
 
 ## Remove
 
-With Setup:
+With Setup, or with the installed CLI:
 
 ```powershell
 & .\DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1
-```
-
-Or with the installed CLI:
-
-```powershell
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows uninstall --profile standalone --json
 ```
 
-Uninstall removes DefenseClaw's hook registrations and machine-policy
-entries (for GitHub Copilot that includes the policy.d drop-in and
+Uninstall removes DefenseClaw's hook registrations and machine-policy entries
+(for GitHub Copilot, the `policy.d` drop-in and
 `enabledPlugins["defenseclaw@defenseclaw"]` in
-`%ProgramFiles%\GitHubCopilot\managed-settings.json`, also when an earlier
-build wrote it without a record, and that file and folder once nothing else
-is in them), the four services, the binaries, and the machine state under
-`C:\ProgramData\Cisco\DefenseClaw` (config, secrets, data and service logs).
-Each user keeps `%USERPROFILE%\.defenseclaw` and the per-user binaries. To
-remove those too, add `PURGE=1` to Setup or `--purge` to the CLI. After a successful
-uninstall, the marker key, the Add/Remove Programs entry and a
-`DisableSelfUpdate` value that the lifecycle wrote are gone, and so are their
-parent keys and `C:\Program Files\Cisco` when nothing else is left in them
-(after a CLI uninstall, once its cleanup finishes).
-The lifecycle log in `%WINDIR%\Logs\DefenseClaw` stays. A default uninstall
-also keeps the administrator-only
-`C:\ProgramData\Cisco\DefenseClaw-Lifecycle\lifecycle.lock`, which serializes
-lifecycle runs. Setup with `PURGE=1` removes that lock and its directory after
-cleanup; do not delete a lock while a lifecycle run is active. On a
-computer without DefenseClaw, uninstall succeeds and changes nothing.
+`%ProgramFiles%\GitHubCopilot\managed-settings.json`), the four services, the
+binaries, and the machine state under `C:\ProgramData\Cisco\DefenseClaw` (config,
+secrets, data and service logs). From each enrolled account whose registrations it
+removed it also removes the files the managed runtime wrote in
+`%USERPROFILE%\.defenseclaw` (see **Per-user runtime files** below); the account keeps
+its other files there and the per-user binaries. Add `PURGE=1` to Setup or `--purge`
+to the CLI to remove those too. The marker key, the Add/Remove Programs entry and a `DisableSelfUpdate`
+value the lifecycle wrote are removed, and the lifecycle log stays.
+Once nothing of the deployment is left, uninstall also removes the vendor folders DefenseClaw
+created, such as `C:\ProgramData\Cisco`, `C:\Program Files\Cisco`, `C:\ProgramData\Cursor`,
+`C:\ProgramData\OpenAI\Codex` and `C:\Program Files\ClaudeCode`, if they are empty. A folder
+that existed before the install, or that holds another program's files, stays, and so does every
+folder above it. Setup records each folder it creates in
+`C:\ProgramData\Cisco\DefenseClaw-Lifecycle\created-folders`. A folder is removed only while
+it is still administrator-owned and only administrators can change it or its parent; a folder that
+stays keeps its record, so the next purge tries again. The JSON result names it with the reason
+(a `created_folders_kept` warning), and so does the lifecycle log.
+If a link or junction sits at one of these vendor folders or on the path to one, for example a user made one at
+`C:\ProgramData\Cursor` after the folder was removed, or an administrator made `C:\ProgramData\OpenAI\Codex`
+a junction to another folder, the uninstall does not follow it, change it or remove it,
+and does not stop for it. Nothing behind the link is read, opened, locked, written or deleted, even a file
+that looks like DefenseClaw's own, such as a Codex `requirements.toml` or a writer lock. The link and what it points to stay as they are,
+the link is named once in a `machine_state_kept` warning (and in `created_folders_kept` when DefenseClaw
+had recorded the folder), never as a file the uninstall could not remove, and the rest of the uninstall completes. This holds when an account is enrolled for that agent too: the uninstall cannot read the enrollment behind the link, so it leaves that agent out of the checks that compare the enrolled accounts with the machine state, and out of the check that waits for the guardian to reconcile without failure (the guardian does not write through a link). A mismatch that no kept link explains still stops the uninstall. The
+machine policy folders DefenseClaw writes itself for GitHub Copilot, OpenCode and Devin under
+`C:\ProgramData` are the one difference: a link a standard user made there is removed, the link only, and
+nothing is created in its place (what it points to is untouched), while a link an administrator made stays and
+is named. Each path is decided on its own: a link at one of Devin's two folders (`Devin`, or the folder the app used before it was renamed;
+see [Renamed and removed connectors](/docs/get-started/upgrade#renamed-and-removed-connectors)) keeps that folder, and DefenseClaw's entry in the other one is still removed.
+Only the uninstall keeps a link at the Codex folder, and it reports it as kept and not verified: because
+nothing behind the link is read, a Codex requirement there may still name the DefenseClaw hook program
+that the uninstall removes, so check the policy behind a link you made. Install, ensure, repair, the reconcile that
+turns Codex off and the guardian's Codex removal stop with an error when a link sits at a vendor folder,
+except that a link a standard user made at the Copilot, OpenCode or Devin policy folder is removed first.
+A newer Setup that uninstalls a deployment from before 1.0.9 runs that deployment's own gateway, which
+does not keep a link: there a link at the Codex folder behaves as it did in that release (the uninstall stops with an error).
+Releases before 1.0.9 kept no record. On a computer installed with one of them, the first 1.0.9
+install, upgrade or repair records `C:\Program Files\Cisco` and `C:\ProgramData\Cisco` when they
+still have the permissions Setup gave them and hold only DefenseClaw folders. It records
+`C:\Program Files\ClaudeCode\managed-settings.d`, `C:\ProgramData\Cursor`,
+`C:\ProgramData\OpenAI\Codex` and `C:\ProgramData\ampcode` only when all three hold: the folder was created after
+`C:\ProgramData\Cisco\DefenseClaw`, it has exactly the permissions DefenseClaw creates it with, and
+it holds only DefenseClaw's own files (`ampcode` must be empty: 1.0.2 through 1.0.6 create it empty, and 1.0.7 and later add an ownership marker when they create it). `ClaudeCode` and `OpenAI` follow when their only child is
+recorded. Setup checks these folders once, on the first install, upgrade or repair after the
+upgrade; a folder an administrator makes later and Setup adopts is never recorded. The check counts
+as done when every folder was recorded or failed one of the three conditions; if a record cannot be
+written, the next install, upgrade or repair checks again. A rollback does not reset the check. A folder that
+fails any of these stays after a purge, and the purge names it once as
+"left in place: not provably created by DefenseClaw" when DefenseClaw had written a file or a
+folder into it. Such a record only lets a purge remove an
+empty folder; it never makes DefenseClaw treat the folder as its own. A folder that holds anything
+that looks like Secure Client is never recorded or removed. A standalone
+Setup uninstall removes the administrator-only
+`C:\ProgramData\Cisco\DefenseClaw-Lifecycle\lifecycle.lock` and its directory even
+without `PURGE=1`. A plain installed CLI uninstall leaves the lock file and its folder
+in place (without `--purge`). They are harmless and the next install reuses them; to remove them, delete
+`C:\ProgramData\Cisco\DefenseClaw-Lifecycle` from an elevated prompt once no
+DefenseClaw run is active. The Secure Client profile keeps the lock unless `PURGE=1`.
+The Claude Code settings cleanup keeps a folder in the profile of the account that runs
+it: `C:\Windows\System32\config\systemprofile\AppData\Local\DefenseClaw\claude-settings-teardown`
+for the guardian and a Setup uninstall. Once a cleanup ends, the folder holds one empty lock
+file. The guardian removes that folder, and the empty `DefenseClaw` folder above it, after each
+pass. A standalone uninstall removes the copy of the account that runs it, with or without
+purge. A folder that still holds an unfinished cleanup stays, and the result names it in a
+`machine_state_kept` warning.
+On a computer without DefenseClaw, uninstall succeeds and changes nothing, so it does
+not remove a lock an earlier uninstall left.
 
-Run the CLI uninstall with `defenseclaw.exe`. The other installed binaries,
-such as `defenseclaw-gateway.exe`, refuse it (exit 1639) without changing
-anything, because a running binary keeps its own folder in use. If an
-uninstall reports that it committed but could not finish, run Setup again as
-LocalSystem with `/uninstall JSON=1` (and `PURGE=1` if the original run was a
-purge). Setup carries its own verified gateway and can finish cleanup after
-the installed CLI has been removed.
+- A standalone uninstall first runs a read-only check of the hook teardown (guardian, enrollment
+  and runtime selectors). If the check refuses, DefenseClaw stays fully installed and the
+  result names what to repair. Repair it, then uninstall again.
+- Run the CLI uninstall with `defenseclaw.exe`; other installed binaries refuse it
+  (`1639`). If an uninstall committed but could not finish, run Setup again as
+  LocalSystem with `/uninstall JSON=1` (and `PURGE=1` if the original was a purge).
+- While a program runs a DefenseClaw executable from `bin`, `/uninstall` fails with
+  `uninstall_in_use` before it stops any service, naming the program, process and
+  account. With `PURGE=1`, a program holding a file open in
+  `C:\ProgramData\Cisco\DefenseClaw` (a SIEM forwarder reading `runtime\audit.db`,
+  for example) blocks it the same way. Close it and run again. The Intune
+  launcher's uninstall retries and then exits `1618`.
+- `privileges_required` means the uninstall needs an account that can list and remove a
+  file or folder inside DefenseClaw's own folders that only SYSTEM may open, and the
+  Administrator that ran it cannot. An elevated Administrator holds the backup and
+  restore privileges disabled, and Setup turns them on for one walk at a time, so it
+  normally just works; the error appears when the account's token does not hold them
+  at all (a policy removed them, or the account is not an Administrator). Nothing was
+  changed and the services keep running (or the message says the uninstall can be run
+  again). Run the same uninstall as SYSTEM: an MDM or Intune run already is; by hand,
+  start Setup from a scheduled task that runs as SYSTEM, or with `psexec -s`.
+- A file or folder under `C:\Program Files\Cisco\DefenseClaw` that DefenseClaw did not
+  install stops a standalone uninstall with `1603` before it changes anything, and the result
+  names that item, also inside the `lib\defenseclaw` folder that 1.0.2 installed (for example
+  `lib\defenseclaw\operator-note.txt`). Move it out of `C:\Program Files\Cisco\DefenseClaw`,
+  then run the uninstall again.
+- A junction or symbolic link inside `C:\ProgramData\Cisco\DefenseClaw` (for example at
+  `secrets`) is removed as a link before the uninstall changes that folder, and never
+  followed: the folder or file it points to keeps its content and permissions, and the log
+  names each link removed. A link at `C:\ProgramData\Cisco\DefenseClaw` itself, or one
+  Setup cannot remove, stops the uninstall with `1603` (`state_invalid`) while DefenseClaw is
+  still installed, and the result names the command that removes only the link.
+- **Per-user registrations.** Uninstall revokes every enrollment, then removes
+  DefenseClaw's own registrations and plugins (Amp, Antigravity, Devin, Hermes,
+  Kiro, OpenCode, a Copilot user hook file) from the agent config of users with an
+  active (connected) session, running as each user. Acting as a user needs LocalSystem, so an
+  uninstall from an elevated prompt or Add/Remove Programs removes none and
+  reports `user_registrations_pending`. Signed-out users, and signed-in users whose
+  session is disconnected (`query user` shows `Disc`), keep theirs and are named in
+  `user_registrations_pending`; failures report `user_registrations_failed`. An older Claude Code per-user hook in
+  `%USERPROFILE%\.claude\settings.json` is removed exactly, and a changed one is
+  kept with `claude_settings_hook_left`.
+- **Per-user runtime files.** Run as LocalSystem, an uninstall without `PURGE=1` also
+  removes, from the `%USERPROFILE%\.defenseclaw` of each enrolled account whose
+  registrations it removed, what the managed runtime wrote there: `hooks`, `logs`,
+  `hook_contract_lock.json` and its lock file, `inventory.db`, `foreign-hook-env.json`,
+  `foreign-hook-sessions`, `agent_selection.json` and the connectors' lock files, and
+  the emptied `connector_backups` folders. The folder goes when nothing else is in it.
+  The account's own files, `foreign-hooks-backup`, a backup record that stays and `acp`
+  stay, and get the owner-private access list a per-user install can manage; the
+  result names the folder in `user_state_remaining` with what stays. A link or junction
+  is left as found, and a folder that holds a per-user install (`config.yaml`,
+  `audit.db`, `.venv` or `installer`) is not changed. An account whose registrations
+  stay keeps its folder as it is. Before 1.0.8 the folder stayed whole, with the managed
+  access list, and a later per-user install of that account stopped at
+  `defenseclaw init` ("hook_contract_lock.json rollback source is not protected");
+  see [Per-user installs](#per-user-installs).
+- **`PURGE=1`** also removes each enrolled account's `%USERPROFILE%\.defenseclaw`
+  (including `foreign-hooks-backup`; copy it first if the account wants those
+  hooks back), its `.defenseclaw.rollback-<random>` copies, the DefenseClaw
+  launchers and binaries in `%USERPROFILE%\.local\bin`, the Claude Code drop-ins,
+  `machine-policy.json`, the runtime selectors and the lifecycle lock. An account
+  without an active (connected) session keeps its `.defenseclaw` for the registrations that
+  stay (`user_registrations_pending` and `per_user_state_remaining` warnings; the
+  purge exits `0`). A signed-out account's registry hive is not loaded, so it also keeps its user
+  Path entry for `%USERPROFILE%\.local\bin`; that is a warning too, and the entry runs nothing.
+  A `PURGE=1` run after a plain uninstall already finished removes the accounts' per-user data
+  as well. It needs
+  LocalSystem: otherwise it removes the machine deployment but none of these
+  folders, fails with a nonzero exit and names each account
+  (`per_user_state_remaining`). Run Setup `/ensure` and then `/uninstall PURGE=1`
+  as LocalSystem while the accounts have a connected session. If the purge already removed the
+  machine deployment that lists the accounts, a second `PURGE=1` finds none of them: the error
+  then names the folders to delete by hand. It still removes the
+  marker, so an Intune registry detection rule reports DefenseClaw as not
+  installed. The `machine_state_remaining` warning names anything it could not
+  remove.
+- Shared machine folders (`C:\Program Files\ClaudeCode\managed-settings.d`, Codex's
+  `requirements.toml`) stay while they hold anything else; Setup removes only its
+  own files. Codex's file can hold your own keys, so a purge with no deployment
+  record leaves it, and the next `/ensure` adopts it.
+- If `C:\ProgramData\Cisco\DefenseClaw` was deleted by hand, uninstall still
+  removes the services, binaries, Claude Code files and hook runtime, and with
+  `PURGE=1` names the per-user folders for you to remove.
+- What stays is inert. The OpenCode and Amp plugins stop enforcing, and the Devin,
+  Hermes, Antigravity, Kiro and Copilot hooks point at the removed
+  `defenseclaw-hook.exe`, so each call fails to start and none of those agents
+  blocks on it ([Hook process control](/docs/enterprise/threat-model)).
+- **Folder permissions stay.** While an account is enrolled, the guardian gives the
+  agent folders and files that hold DefenseClaw's registrations (for example
+  `%USERPROFILE%\.config`, `.config\amp\plugins`, `.config\opencode\plugins`, `.codex`
+  and `.claude\settings.json`) an explicit access list that does not inherit from the
+  profile. Uninstall and `PURGE=1` remove DefenseClaw's entries and the gateway's access,
+  but keep that list. The account keeps full access to its files, but cannot change the
+  permissions of those folders, new items in them do not inherit from the profile, and
+  Administrators are not on the list. To return one to the profile's permissions, run
+  `icacls "<folder or file>" /reset` as LocalSystem (a SYSTEM scheduled task, for
+  example). `(Get-Acl "<path>").AreAccessRulesProtected` is `True` for each one that
+  still has the list.
 
-### Per-user registrations at uninstall
+### 1.0.7 purge limit
 
-Uninstall revokes every per-user enrollment first. Once it has committed,
-it removes DefenseClaw's own hook registrations and plugins (Amp,
-Antigravity, Devin, Hermes, Kiro, OpenCode, and a DefenseClaw Copilot user
-hook file and plugin folder) from the agent configuration of users with an
-active, connected session, running as each user. Disconnected or signed-out
-sessions remain pending. Only DefenseClaw's entries are removed; the user's own hooks and
-settings stay. Cleanups the guardian still owed to revoked users are
-included.
-
-Acting as a user needs that user's session token, which only LocalSystem
-can obtain. An MDM uninstall runs as LocalSystem (Intune install behavior
-**System**). An uninstall run from an elevated administrator prompt, or from
-Add/Remove Programs, cannot act as other users, so it removes no per-user
-registrations. Users who are signed out during the uninstall keep theirs as
-well: no guardian is left to clean them at their next sign-in. The uninstall
-result names what stays: the `user_registrations_pending` warning lists each
-account and its connectors it could not act as, and `user_registrations_failed`
-lists removals that failed, including a registration that a connector's
-removal left in the user's agent configuration (the message names the file).
-An uninstall that did not run as LocalSystem attempts no removal, so it
-reports only `user_registrations_pending`.
-To clean every user, run the uninstall as LocalSystem while they are signed
-in (see [Run Setup as LocalSystem](#run-setup-as-localsystem)).
-
-`PURGE=1` also removes each enrolled account's `%USERPROFILE%\.defenseclaw`
-folder, including that account's per-user hook tokens, whether or not the
-account is signed in. Some of its subfolders grant only the account and
-SYSTEM, not Administrators, so this also needs the uninstall to run as
-LocalSystem. As on Linux and macOS, the whole folder goes: the hook
-scripts, and the account's own hooks that the foreign-hook policy moved
-aside (`foreign-hooks-backup`; copy it first if the account wants them
-back). A `%USERPROFILE%\.defenseclaw.rollback-<random>` copy that a
-rolled-back enrollment kept aside goes too. The purge also removes the
-allow-only `defenseclaw-hook.ps1` placeholder and its lock file, which the
-default uninstall keeps in `C:\ProgramData\Cursor` for Cursor windows that
-are still open, and the DefenseClaw launchers, binaries, the `uv`
-the per-user installer added (when unchanged) and its bookkeeping from
-`%USERPROFILE%\.local\bin`. When that leaves the folder empty, the folder
-goes, and so does its entry in the account's user `Path`; a folder other
-tools still use keeps its entry. A signed-out account's registry hive is not
-loaded, so its `Path` entry stays and the result says so. The result names
-each account whose data the purge removed. The `per_user_state_remaining` warning names each
-folder the purge could not remove and why: the uninstall did not run as
-LocalSystem, a file in it could not be removed, or the account's roaming or
-container profile is not on the computer while it is signed out. Remove
-what it names as LocalSystem. A purge that did not run as LocalSystem
-removes the machine deployment but none of these folders, so it fails
-(non-zero exit) and names each account: run Setup `/ensure` and then
-`/uninstall PURGE=1`, both as LocalSystem while the accounts have an active
-(connected) session. It still removes the
-`HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise` marker and the Add/Remove
-Programs entry with the machine deployment, so an Intune registry detection
-rule reports DefenseClaw as not installed and a required assignment
-installs it again.
-
-The agents' shared machine folders stay while they hold anything else,
-because another product can use them. Setup removes its own files from them.
-A purge also removes `C:\Program Files\ClaudeCode\managed-settings.d`, and
-then `C:\Program Files\ClaudeCode`, when nothing else is left in them.
-It also removes the folders an interrupted elevated DefenseClaw command
-left: `C:\ProgramData\DefenseClaw-PowerShell-<32 hex>`,
-`C:\ProgramData\DefenseClaw-Installer-<32 hex>`,
-`C:\Windows\Temp\DefenseClaw-Bootstrap-<32 hex>`, and the staging folder
-`C:\ProgramData\DefenseClaw-Enterprise-Setup-<32 hex>` (the whole payload,
-about 500 MB) of a Setup run that was stopped; every uninstall does this,
-not only a purge. A staging folder goes once it is 30 minutes old and no
-running Setup uses it, and Setup removes such folders on its next run too.
-A purge also removes the public policy summary
-`C:\ProgramData\Cisco\DefenseClaw-HookRuntime\machine-policy.json` and that
-folder once it is empty, the DefenseClaw Claude Code drop-ins
-(`90-defenseclaw.json`, its state and lock, `00-defenseclaw-version-floor.json`)
-and the hooks' runtime selectors that name this deployment's hook binary, even
-when the uninstall had no deployment record to tear down (for example after
-`C:\ProgramData\Cisco\DefenseClaw` was deleted), and then the lifecycle lock
-in `C:\ProgramData\Cisco\DefenseClaw-Lifecycle`. Files that name another
-deployment's hook binary stay. The `machine_state_remaining` warning names
-anything it could not remove, and why.
-
-Codex's `C:\ProgramData\OpenAI\Codex\requirements.toml` can hold your own
-keys as well, so a purge without the deployment record leaves it. The next
-Setup `/ensure` adopts it: it separates DefenseClaw's hooks (the ones that
-name this deployment's hook binary) from the rest, records the rest as the
-file to restore on uninstall, and continues. A file DefenseClaw created on
-its own is deleted again by that later uninstall, which also completes when
-you already deleted the file yourself.
-
-If `C:\ProgramData\Cisco\DefenseClaw` was deleted by hand, uninstall
-finds no recorded deployment. It still removes the four services, the
-binaries, DefenseClaw's Claude Code files in
-`C:\Program Files\ClaudeCode\managed-settings.d`, the runtime selector
-state and `C:\ProgramData\Cisco\DefenseClaw-HookRuntime`, so agents stop
-calling the removed hook. It cannot tell DefenseClaw's files in an
-account's `%USERPROFILE%\.defenseclaw` from the account's own, so with
-`PURGE=1` the `per_user_state_remaining` warning names each such folder
-for you to remove instead.
-
-While a program runs a DefenseClaw executable from
-`C:\Program Files\Cisco\DefenseClaw\bin`, `/uninstall` (with or without
-`PURGE=1`) fails with `uninstall_in_use` before it stops any service, and
-names the program, its process id, the account and the program that started
-it. Close it (or sign the account out) and run the uninstall again.
-
-With `PURGE=1`, a program that has a file in `C:\ProgramData\Cisco\DefenseClaw`
-open blocks the uninstall the same way, because the purge deletes that
-folder: for example a SIEM forwarder or a log tail that reads the audit
-database `runtime\audit.db`. `/uninstall` fails with `uninstall_in_use`
-before it stops any service and names the program, its process id, the
-account and the file it has open. Stop that program, or exclude the folder
-from it, and run the uninstall again. A program that opens a file only for
-a moment, such as an anti-virus scan, does not block it: Setup looks twice,
-two seconds apart, and after the services stop it retries the deletion for
-up to 15 seconds. If a program opens a file only after that first look and
-keeps it open, the uninstall removes everything else and fails with
-`uninstall_in_use`, naming the program and saying that only the data folder
-is left; close the program and run `/uninstall PURGE=1` again, which
-deletes the rest of the folder.
-
-The Intune launcher's uninstall (`Install-DefenseClawIntune.ps1 -Uninstall`)
-runs Setup again a few times once the named programs exit, then exits
-`1618` so that Intune retries; see
-[Intune on Windows](/docs/enterprise/mdm/intune-windows).
-
-What stays is inert. Uninstall has already revoked every enrollment. The
-OpenCode and Amp plugins stop enforcing once uninstall removes
-`C:\ProgramData\Cisco\DefenseClaw-HookRuntime` and the install marker. The
-Devin, Hermes, Antigravity and Kiro hooks point at the removed
-`defenseclaw-hook.exe`, so each hook call fails to start. None of these
-agents blocks on that: Devin blocks only on exit code 2 (a missing command
-exits 127), and Hermes and Antigravity do not enforce a nonzero hook exit. A
-DefenseClaw Copilot user hook that stays points at the removed hook binary,
-so Copilot cannot start it and does not block on it. (This is a hook that
-cannot start at all, unlike a running hook a user stops; see
-[Hook process control](/docs/enterprise/threat-model#users-can-end-or-stall-their-own-hook).)
+On some Windows hosts, new objects are owned by the administrator who created them instead of the Administrators group. After a first install is interrupted, an elevated Setup process that is not LocalSystem can refuse to purge those objects. The refusal preserves ownership checks. Run the recovery or purge as LocalSystem after reviewing the named objects.
 
 ## Payload trust
 
-The lifecycle refuses to run any payload file it cannot trust. There are two
-trust modes:
+The lifecycle refuses any payload file it cannot trust:
 
 | Mode | How a file is trusted |
 | --- | --- |
-| `authenticode` | Every binary and script carries an Authenticode signature that Windows reports as `Valid`. An allowed-signer list narrows the accepted signer certificates. |
-| `hash_pinned` | Every file that is not validly signed must match a SHA-256 digest in an administrator-owned payload manifest. The CLI checks the installer script and module against it before PowerShell starts. |
-
-The default depends on how you start the lifecycle:
+| `authenticode` | Every binary and script has a valid Authenticode signature. An allowed-signer list narrows the signers |
+| `hash_pinned` | Every file that is not validly signed matches a SHA-256 in an administrator-owned payload manifest |
 
 | Entry point | Trust used | How to change it |
 | --- | --- | --- |
-| Standalone Setup | Chosen by the build. An unsigned Setup uses `hash_pinned` with a payload manifest (`payload-trust.json`) that Setup writes itself from its embedded, verified manifest. A signed Setup uses `authenticode`. | `ALLOWEDSIGNERS=` pins the signer of a signed build. You never supply `payload-trust.json`. |
-| `defenseclaw.exe enterprise windows` | `authenticode` | `--trust-mode hash_pinned --payload-manifest <file>`. `--allowed-signer <sha256>` (repeatable) pins signers. |
-| MDM wrapper (`Invoke-DefenseClawEnterprise.ps1`) | `HashPinned`: it checks the Setup file against `-Sha256` before running it | `-TrustMode Authenticode -AllowedSigners <sha256>`. See [Install with an MDM](/docs/enterprise/mdm). |
+| Standalone Setup | Chosen by the build: an unsigned Setup uses `hash_pinned` with a manifest Setup writes from its embedded copy; a signed Setup uses `authenticode` | `ALLOWEDSIGNERS=` pins the signer of a signed build |
+| `defenseclaw.exe enterprise windows` | `authenticode` | `--trust-mode hash_pinned --payload-manifest <file>`; `--allowed-signer <sha256>` (repeatable) |
+| MDM wrapper (`Invoke-DefenseClawEnterprise.ps1`) | `HashPinned`: it checks the Setup file against `-Sha256` first | `-TrustMode Authenticode -AllowedSigners <sha256>` ([MDM](/docs/enterprise/mdm)) |
 
-Releases are Authenticode-signed only when the release pipeline has a
-code-signing certificate. Check the Setup you downloaded:
+Check a Setup's signature and print the signer thumbprint for `ALLOWEDSIGNERS=`:
 
 ```powershell
 $sig = Get-AuthenticodeSignature -LiteralPath .\DefenseClawSetup-Enterprise-Standalone-x64.exe
@@ -1569,150 +1321,155 @@ if ($sig.SignerCertificate) {
 }
 ```
 
-`Valid` means the Setup is signed, and the last line prints the signer's
-SHA-256 thumbprint for `ALLOWEDSIGNERS=`. `NotSigned` means a hash-pinned
-build: trust comes from the Setup hash you checked against `checksums.txt`.
+`Valid` means signed; `NotSigned` means a hash-pinned build, trusted by the hash you
+checked against `checksums.txt`. `enterprise.trust` in the config can only narrow
+what the entry point accepts: `mode: authenticode` refuses a hash-pinned run
+(`1639`), also over a deployment installed hash-pinned
+([Payload trust](/docs/enterprise/configuration)). Hash-pinned files
+do not satisfy WDAC or AppLocker rules that require a publisher signature.
 
-`enterprise.trust` in the config can only narrow what the entry point
-accepts. `mode: authenticode` refuses a hash-pinned run, including the
-unsigned Setup, with `1639`, and also refuses a run over a deployment that
-was installed hash-pinned, because that deployment keeps admitting its
-payload by its recorded pins. Leave the mode unset or set `hash_pinned`
-while you deploy unsigned builds; a signed Setup is still verified by its
-signature. `enterprise.trust.allowed_signers` works like `--allowed-signer`;
-when both are given they must list the same thumbprints. See
-[Payload trust](/docs/enterprise/configuration#payload-trust).
-
-The deployment marker's `TrustMode` records how the installed deployment
-was trusted. The MDM `detect.ps1` and `uninstall.ps1` scripts check the
-installed CLI's Authenticode signature only when it is `authenticode`.
-
-Hash-pinned files have no publisher, so they do not satisfy WDAC or AppLocker
-rules that require one. Sign or re-sign the payload where those rules apply.
-
-### Advanced: run the lifecycle CLI from a payload folder
-
-The lifecycle CLI can run from a folder that holds the seven payload files:
-`defenseclaw.exe`, `defenseclaw-gateway.exe`, `defenseclaw-hook.exe`,
-`defenseclaw-acp.exe`, `defenseclaw-sensor-helper.exe`,
-`install-enterprise.ps1` and `DefenseClawEnterprise.psm1`. The CLI uses
-`..\libexec\install-enterprise.ps1` if that file exists, otherwise the
-installer script next to itself. `ensure` takes the binaries from the
-installer script's folder.
-
-Releases ship these files only inside Setup, and Setup has no extract
-action. Use this path only when your own build or re-signing pipeline
-produces the files. Otherwise use Setup.
-
-```powershell
-$Payload = 'C:\ProgramData\DefenseClaw-Staging\payload'
-& "$Payload\defenseclaw.exe" enterprise windows ensure `
-  --profile standalone `
-  --config 'C:\ProgramData\DefenseClaw-Staging\config.yaml' `
-  --json
-```
-
-For unsigned files, add `--trust-mode hash_pinned --payload-manifest <file>`.
-The manifest is JSON in the form
-`{"schema_version":1,"files":{"<file name>":"<sha256>"}}`. It must pin
-`install-enterprise.ps1`, `DefenseClawEnterprise.psm1`,
-`defenseclaw-scanners.exe` and every other unsigned file; the CLI checks the
-scanner runtime against it before it installs and runs it. The
-`...payload-manifest.json` release asset uses a different format and cannot
-be passed here. Later `repair`, `verify` and `uninstall`
-runs re-trust the installed files from the digests the deployment recorded,
-so they need no manifest.
+The lifecycle CLI can also run from a folder with the payload files
+(`defenseclaw.exe`, `defenseclaw-gateway.exe`, `defenseclaw-hook.exe`,
+`defenseclaw-hook-guard.exe`, `defenseclaw-acp.exe`, `defenseclaw-sensor-helper.exe`, `install-enterprise.ps1`,
+`DefenseClawEnterprise.psm1`) for your own build or re-signing pipeline, with
+`ensure --profile standalone --config <path> --json`. A folder without
+`defenseclaw-hook-guard.exe` is refused before anything changes, and so is a direct
+`install` or `upgrade` without `--hook-guard-binary`. Unsigned files need
+`--trust-mode hash_pinned --payload-manifest <file>`, a JSON file of the form
+`{"schema_version":1,"files":{"<file name>":"<sha256>"}}` that pins every unsigned
+file including `defenseclaw-scanners.exe`. The `...payload-manifest.json` release
+asset has another format. Otherwise use Setup.
 
 ## Agent sessions in WSL
 
-An agent that runs inside a WSL 2 distribution is outside every policy
-DefenseClaw publishes on Windows. The distribution has its own
-`/etc/claude-code` and `~/.codex`, the user can open it as root
-(`wsl -u root`), and Windows endpoint sensors do not see the WSL VM. The
-standalone profile keeps these sessions off where a vendor documents a
-control, and `enterprise policy show` and `verify` report the rest in a `wsl`
-row. Set the behavior under `enterprise.machine_policy.windows_wsl` (see
-[Configuration](/docs/enterprise/configuration)).
+An agent inside a WSL 2 distribution is outside every policy DefenseClaw publishes
+on Windows: the distribution has its own `/etc/claude-code` and `~/.codex`, the
+user can open it as root, and Windows endpoint sensors do not see the WSL VM. The
+standalone profile turns these off where a vendor documents a control, and
+`enterprise policy show` and `verify` report the rest in a `wsl` row. Set the
+behavior under `enterprise.machine_policy.windows_wsl`
+([Configuration](/docs/enterprise/configuration)).
 
-| Surface | What DefenseClaw does | Vendor source |
-| --- | --- | --- |
-| Claude Desktop WSL sessions | The guardian adds `disableWslSessions` (REG_SZ `true`) to `HKLM\SOFTWARE\Policies\Claude` when the key already holds machine policy. It never changes an administrator's value: an administrator `false` or `0` turns WSL sessions on and fails `verify` unless `agent_sessions: allow` is set. | [Claude Code admin setup](https://code.claude.com/docs/en/admin-setup), [Claude Desktop MDM](https://claude.com/docs/third-party/claude-desktop/mdm) |
-| `wslInheritsWindowsSettings` | Detected, never written, in `HKLM` or `HKCU` `SOFTWARE\Policies\ClaudeCode\Settings` and the Program Files managed settings. While WSL sessions are allowed it fails `verify`: a WSL session would load DefenseClaw's Windows hook command, which cannot start inside Linux. | [Claude Code admin setup](https://code.claude.com/docs/en/admin-setup) |
-| Codex IDE extension | Every guardian pass, as each enrolled user, the guardian resets `chatgpt.runCodexInWindowsSubsystemForLinux: true` to `false` in VS Code, VS Code Insiders and Cursor user settings, profiles included, keeping every other byte. After 3 repairs for one account within an hour it only reports. `chatgpt.cliExecutable` is reported, not changed. | [Codex IDE settings](https://learn.chatgpt.com/docs/ide/settings) |
-| Codex app | Reported only. The agent environment (Windows native or WSL) is an in-app setting with no documented managed control or storage. | [Codex app on Windows](https://learn.chatgpt.com/docs/windows/windows-app) |
-| WSL itself | With `platform: disable`, the guardian sets `HKLM\SOFTWARE\Policies\WSL\AllowWSL=0`, which turns WSL off for every account. It never replaces an administrator value. | [WSL settings for enterprise](https://learn.microsoft.com/en-us/windows/wsl/intune) |
+| Surface | What DefenseClaw does |
+| --- | --- |
+| Claude Desktop WSL sessions | Adds `disableWslSessions` (REG_SZ `true`) to `HKLM\SOFTWARE\Policies\Claude` only when the key already holds machine policy, and never changes an administrator's value. An administrator `false` or `0` turns WSL sessions on and fails `verify` unless `agent_sessions: allow` is set |
+| `wslInheritsWindowsSettings` | Detected, never written. While WSL sessions are allowed it fails `verify`, because a WSL session would load a Windows hook command that cannot start inside Linux |
+| Codex IDE extension | Every guardian pass, as each enrolled user, resets `chatgpt.runCodexInWindowsSubsystemForLinux: true` to `false` in VS Code, VS Code Insiders and Cursor user settings. After 3 repairs for one account in an hour it only reports |
+| Codex app | Reported only: the environment is an in-app setting with no documented managed control |
+| WSL itself | With `platform: disable`, sets `HKLM\SOFTWARE\Policies\WSL\AllowWSL=0`, turning WSL off for every account. It never replaces an administrator value |
 
-Claude Desktop's hive rule decides where the gate may go. Any REG_SZ,
-REG_EXPAND_SZ or REG_DWORD value directly under `HKLM\SOFTWARE\Policies\Claude`
-makes Desktop ignore `HKCU\SOFTWARE\Policies\Claude` entirely, and a managed
-key other than Desktop's app-behavior keys makes Desktop ignore local
-third-party configuration in `%LOCALAPPDATA%\Claude-3p\configLibrary`. So by
-default DefenseClaw only joins machine policy that is already there. With an
-empty key, Claude Desktop's own default applies: it keeps WSL sessions off on
-devices it treats as organization-managed. The `wsl` row stays covered and
-shows a `pending` line with the step that makes the gate explicit: add the
-output of `enterprise policy export --connector wsl` (`reg`, `json` or
-`intune`) to the Claude Desktop policy you already deploy, or set
-`claude_desktop_key: create`. With `create` DefenseClaw writes the value to an
-empty key, but still not while a signed-in account has HKCU Claude Desktop
-policy or any account has local third-party configuration; then `verify`
-fails, because the requested gate is missing. It never writes the gate when
-the key grants write access to anyone other than Administrators, SYSTEM and
-TrustedInstaller, and `verify` fails, because a standard account could turn
-WSL sessions on. Uninstall removes only the values DefenseClaw wrote that are
-still unchanged.
+Any value directly under `HKLM\SOFTWARE\Policies\Claude` makes Claude Desktop
+ignore `HKCU` policy, so DefenseClaw joins machine policy only when it already
+exists. With an empty key Claude Desktop's own default applies. The `wsl` row
+stays covered with a `pending` line naming the step that makes the gate explicit:
+add the output of `enterprise policy export --connector wsl` (`reg`, `json` or
+`intune`) to the Claude Desktop policy you deploy, or set
+`claude_desktop_key: create`. Uninstall removes only the values DefenseClaw wrote
+that are unchanged.
+
+If `claude_desktop_key: create` is later removed from the config (or the
+organization removes its own values from the key), DefenseClaw keeps the
+`disableWslSessions` value it wrote, so WSL sessions stay off. The `wsl` row stays
+covered, with a detail line naming the value as DefenseClaw's own, while no account
+has `HKCU` Claude Desktop policy or local third-party configuration that the value
+overrides and the key stays closed to standard accounts; otherwise the row names
+what the value overrides as a conflict. Uninstall removes the value.
 
 Limits:
 
-- Whether REG_SZ `true` forces Claude Desktop's WSL gate off is not
-  documented; the vendor documents only `false` and `0`, which turn WSL
-  sessions on. Desktop also turns WSL sessions off by default on devices it
-  treats as managed. Check Desktop's `main.log` for `[wslPolicyGate]` lines
-  after you deploy.
-- A Claude Desktop WSL session that is already running continues. Desktop
-  checks the value at each WSL session start.
-- A user can turn the Codex extension setting back on. The window lasts until
-  the next guardian pass. The setting is window-scoped, so a trusted
-  workspace's `.vscode/settings.json` or `.code-workspace` file can also turn
-  it on; workspace settings and VS Code Remote - WSL windows are not checked.
-- Agent CLIs that a user runs inside the distribution, and editor or SSH
-  sessions into it, are not covered. Only `platform: disable` (`AllowWSL=0`)
-  closes WSL as a whole.
-- A Linux standalone install inside the distribution is refused. See
-  [Linux requirements](/docs/enterprise/linux#requirements).
+- The vendor documents only `false` and `0`; whether REG_SZ `true` forces the gate
+  off is not documented. Check Desktop's `main.log` for `[wslPolicyGate]` lines.
+- A running Claude Desktop WSL session continues; Desktop checks the value at each
+  session start.
+- A user can turn the Codex extension setting back on until the next guardian pass,
+  and workspace settings are not checked.
+- Agent CLIs a user runs inside the distribution are not covered. Only
+  `platform: disable` closes WSL as a whole.
+- A Linux standalone install inside the distribution is refused
+  ([Linux requirements](/docs/enterprise/linux#requirements)).
 
 ## Connectors on Windows
 
 | Connector | Route on Windows | Notes |
 | --- | --- | --- |
-| Codex | Machine policy | Codex requirements file. DefenseClaw always sets `allow_managed_hooks_only = true`, and an administrator value of `false` makes the run fail. |
-| Claude Code | Machine policy | Managed-settings drop-in with DefenseClaw's hooks and, under the default `managed_hooks_only: enforce`, the `allowManagedHooksOnly` vendor lock. `preserve` leaves the lock out and turns the foreign-hook guard on for Claude Code. Windows refuses a non-empty `HKLM\SOFTWARE\Policies\ClaudeCode\Settings`. |
+| Codex | Machine policy | Codex requirements file. DefenseClaw always sets `allow_managed_hooks_only = true`; an administrator value of `false` fails the run |
+| Claude Code | Machine policy | Managed-settings drop-in with DefenseClaw's hooks and, under `managed_hooks_only: enforce`, the `allowManagedHooksOnly` lock. `preserve` leaves the lock out and turns the foreign-hook guard on. A non-empty `HKLM\SOFTWARE\Policies\ClaudeCode\Settings` is refused |
 | Cursor | Machine policy | Cursor enterprise hooks |
 | GitHub Copilot | Machine policy | `%ProgramData%\GitHub\Copilot\policy.d`, plus a per-user hook runtime |
 | OpenCode | Machine policy | `%ProgramData%\opencode` loads the managed plugin, plus a per-user hook runtime. Falls back to the per-user plugin while the managed plugin is not in force |
 | Antigravity, Devin, Hermes | Per user | The guardian registers `defenseclaw-hook.exe` in each user's agent config |
-| Amp | Per user | The guardian registers an in-agent plugin that calls the gateway after the listener proves it can derive the user's credential |
-| Kiro | Per user | The guardian writes `defenseclaw-hook.exe` into each user's global `%USERPROFILE%\.kiro\hooks\defenseclaw.json` (Kiro IDE 1.0.182 and later, `kiro-cli --v3`) and the CLI 2.x `defenseclaw` agent, pinned to a reviewed Windows hook contract (kiro-cli 2.24.1 and later, Kiro IDE 1.0.182 and later). A kiro-cli that has never run is enrolled at 2.24.1 until its first run names its version. See [Kiro](/docs/connectors/kiro#enterprise-standalone-profile) |
-| OpenHands, OmniGent, OpenClaw, ZeptoClaw | Not managed | The enumerator writes no targets for them, so they are not protected. A target manifest row that names one is refused with a reason. |
+| Amp | Per user | An in-agent plugin that calls the gateway after the listener proves it can derive the user's credential |
+| Kiro | Per user | The guardian writes `defenseclaw-hook.exe` into each user's `%USERPROFILE%\.kiro\hooks\defenseclaw.json` (Kiro IDE 1.0.182 and later, `kiro-cli --v3`) and the CLI 2.x `defenseclaw` agent, pinned to a reviewed Windows hook contract (kiro-cli 2.27.1 and later, Kiro IDE 1.0.182 and later). A supported IDE is enrolled beside an older CLI, which is reported separately as unprotected. A user an earlier release enrolled at kiro-cli 2.24.1 to 2.26.x keeps being repaired at that version; status reports that CLI as uncovered and verify fails. A kiro-cli that has never run is not enrolled at an assumed version: status reports it as `hook_contract_unverified` until its first run names its version ([Kiro](/docs/connectors/kiro)) |
+| OpenClaw, ZeptoClaw | Not managed | The enumerator writes no targets for them |
 
-Windows handles machine policy differently from Linux and macOS. See
-[Machine policy](/docs/enterprise/machine-policy) and
+See [Machine policy](/docs/enterprise/machine-policy) and
 [Foreign-hook guard](/docs/enterprise/foreign-hook-guard).
+
+### Windows platform limit: a held Codex requirements file
+
+Codex reads `C:\ProgramData\OpenAI\Codex\requirements.toml` as each user, so
+every user must be able to read it. A user who can read it can also hold it
+open, and while it is held Windows does not let DefenseClaw replace it, so
+Codex policy updates wait. The enforced policy already in place stays in
+effect. Status names the process that holds the file (the warning
+`codex_requirements_held`). On a standalone deployment, if the holder lets go within 30 seconds of the
+failed attempt, the running command applies the update. Otherwise the guardian
+applies it at its next pass, about a minute later, and a failed Setup run needs
+the administrator to run it again. Secure Client keeps the earlier behavior and
+does not wait.
+
+## Claude Cowork
+
+Claude Cowork runs its agent loop on the computer, with the Claude Code engine that Claude Desktop bundles. The Claude Code drop-in (`C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json`) is meant to cover it. There is nothing to configure for Cowork itself.
+
+| Item | Windows |
+| --- | --- |
+| Measured | In the 1.0.8 tests with Claude Desktop 4.16336.0 (engine 2.1.317) using third-party inference through Amazon Bedrock, Cowork's hook calls reached the gateway with surface `cowork`, and an administrator deny rule blocked `mcp__workspace__bash`. A read of a `.env` file was not blocked: its contents reached the model, which chose not to repeat the key (DefenseClaw did not withhold it); to prevent such a read, deny the path at `PreToolUse` ([Secrets in tool results](/docs/connectors/claudecode#secrets-in-tool-results)). An account that has only Claude Desktop is enrolled. How `managed_hooks_only` treats Cowork plugin hooks on Windows has not been measured yet |
+| Engine folder | `claude-code\<version>\` in the user's Claude Desktop data folder: `%APPDATA%\Claude`, `%LOCALAPPDATA%\Claude-Data\claude_<id>` for the Microsoft Store (MSIX) app, or `%LOCALAPPDATA%\Claude-3p` for third-party inference. DefenseClaw trusts it by an Authenticode signature by `Anthropic, PBC` (or `Anthropic PBC`) on `claude.exe`, whose file version equals the folder |
+| If the engine is not identified | The Desktop surface is reported `surface_unverified`. That does not block by default |
+| Shell | Runs in the Cowork Linux VM, so the POSIX shell rules apply on Windows |
+| `status` and `verify` | Print a `cowork` line (`configured`, and how many hook calls reported themselves as Cowork since the gateway started), each enrolled account's last Cowork event, and each enrolled account's Claude Desktop data folders with the newest engine build and its Authenticode trust (for example `engine 2.1.317 trusted`; JSON `cowork.claude_desktop`). An elevated session is needed for the per-account lines |
+
+See [Claude Cowork](/docs/connectors/cowork) for the tools, `managed_hooks_only` and the limits.
 
 ## Sandboxes
 
-Sandboxes do not run on Windows. A guardrail profile can still require an
-agent to run in one: a person in that group is refused when Claude Code or Codex
-starts, with the reason `os_unsupported` and the request-access contact, or
-alerted when both the floor and the profile say `when_unavailable: alert`.
-Keep `required_for` out of the profiles of people who work on Windows if they
-must keep using these agents. See
-[Windows computers](/docs/enterprise/sandboxes#windows-computers).
+Sandboxes do not run on Windows. A guardrail profile can still require one: a
+person in that group is refused when Claude Code or Codex starts, with reason
+`os_unsupported` and the request-access contact. Keep `required_for` out of the
+profiles of people who work on Windows if they must keep using these agents
+([Windows computers](/docs/enterprise/sandboxes#windows-computers)).
 
 ## Upgrades and downgrades
 
-Run `/ensure` with the newer Setup. It upgrades in place and keeps the
-config and state. `/ensure` refuses to install an older version
-(`downgrade_refused`). See [Upgrade](/docs/enterprise/lifecycle#upgrade) and
-[Roll back](/docs/enterprise/lifecycle#roll-back). For failed runs, see
-[Lifecycle error codes](/docs/enterprise/troubleshooting#lifecycle-error-codes).
+Run `/ensure` with the newer Setup. It upgrades in place and keeps the config and
+state. It refuses an older version (`downgrade_refused`). See
+[Upgrade](/docs/enterprise/lifecycle),
+[Roll back](/docs/enterprise/lifecycle) and
+[Lifecycle error codes](/docs/enterprise/troubleshooting).
+
+### The hook during an upgrade
+
+`/repair`, `/ensure` and the hook guardian do not replace a healthy hook: a hook that matches the digest the deployment records keeps its file. An upgrade replaces it once, in one step. The new hook takes the old one's name and the old one stays under a backup name until no program runs it, so a program that starts the hook gets the old one or the new one.
+
+**Measured.** On Windows Server 2025, 20 upgrades of the 1.0.9 Setup ran with hook starts going the whole time: 10 from 1.0.8 and 10 from an earlier 1.0.9 build, 6 of them with the CPU at 100%. They made 222,039 hook starts and none failed. Before the fix, 1 of 31 upgrades failed 4 starts. The cause was not the swap. It was Setup's own check that nothing holds the hook: the check asked Windows Restart Manager, which opens the file with no sharing for a short time the first time (the length of that hold was not measured in place; the hit rate is the measure). That hit about 3% of upgrades. Setup now tests for a holder first, four times 100 ms apart, and asks Restart Manager only when every test finds a handle that does not share deletion. Before the repeat, Restart Manager still ran in 1 of 7 traced upgrades of the fixed Setup; no start failed in any of them.
+
+**Limits.** The starts were `defenseclaw-hook.exe --version` run as SYSTEM, about 65 a second, not real agent calls by a standard user. No start storm ran during `/repair` or the purge: for repair and `ensure`, the evidence is that the hook kept the same file in every run and a test of the hold check. The upgrades started from 1.0.8 and one earlier 1.0.9 build, not from 1.0.2 or 1.0.3.
+
+**A program that holds the hook open.** A program can open the hook so that no one else can open it (a handle that shares nothing, or one that writes without sharing deletion), and while that handle is open no account can start the hook. A swap cannot end that, because Windows refuses to replace a file while a handle on it does not share deletion. On a standalone install the guardian, which runs as SYSTEM, ends such a hold by closing that one handle in the process that owns it. The bounds:
+
+- It waits for the second or third check. The hook must still refuse a start, and a test open for deletion, on two checks about 5 seconds apart, with a handle of the same program on both: the same process, or the same file object (a duplicated handle keeps it). When the handle on the second check is in a different process of the same user (account and session), it waits for a third check. The hook is free again 5 to 15 seconds after the hold starts, not at once. A single read shorter than about 5 seconds is not closed. Several short reads in a row are closed only when the same program keeps the hook blocked across two checks, or the same user across three.
+- It closes only a handle on the hook's own file (same volume and file ID), with data or execute access, found without reading any name. Windows does not show the sharing mode of one handle, so the guardian tests whether any handle on the file refuses deletion, closes one handle, tests again and stops when the hook can be started. Handles that refer to the same file object are closed together, one file object at a time, the one with the fewest handles first (among objects with as many handles, the one with a handle that can write or append first), and it works on one user at a time, the user whose hold began first. Because Windows does not show one handle's sharing, if that user has other handles on the hook, in the same process or another, on the same file object or another, the guardian can close one that was not the cause (a read handle that shares deletion) before it reaches the one that was; it closes no more than it needs to start the hook, and never in a service, protected or session 0 process. It reaches a second user's handles only if that user also kept a handle on the hook across the same checks and the hook is still refused after the first user's are closed.
+- It never closes a handle in a protected process, in a process that runs as LocalSystem, LocalService, NetworkService or another service account, or in session 0. It closes handles only in the processes of a user who is signed in. Windows does not show whose handle refuses the start, but its sharing rules say which file objects can: a start asks for read and execute and shares read and delete, so a file object can refuse it only if one of its handles can write or append, or if it is the only file object open on the hook. (The guardian service does not get the address of a handle's file object on Windows Server 2025, so it counts every handle as an object of its own; two handles on one file object then look like two objects, and the audit rows and log lines say that the file object count counts handles there.) A program of one of those other kinds that has the hook open on such an object may be what refuses the start, so while it is there the guardian closes no user's handle either: it logs and audits that program, names it and says why, and waits one check for a program of that kind it has only just seen. If that program only has the hook open and a user's handle is what refuses the start, the hook stays unavailable until that program lets go, with one exception: after one user's hold has lasted about 30 seconds the guardian closes that user's handles once per streak, one file object at a time, to rule the program out, and the audit rows say so. A program of that kind that only reads, beside another file object, cannot refuse a start: the guardian names it in a row with `closed` set to `false` and still closes the user's blockers. A handle that its owner protected from being closed is named and skipped, and the user's other handles are still closed. If the program is what refuses the start, the hook stays unavailable until it lets go too.
+- Every handle it closes writes a HIGH `connector-hook-tampered` audit row: the program's full path, process id, account (SID and name), session, the access the handle had, the hook's path, and how many candidate handles, processes and file objects it chose from. A hold it did not end writes a row with the same action and `closed` set to `false`, also HIGH, because while that handle lives no hook start is allowed. The file is not changed and the process keeps running. A row waits for the gateway: it is kept in memory and in a file in the guardian's state folder (at most 256 rows) and delivered in order once the gateway answers, so a gateway that is down delays the row, never the close. A row the gateway refuses for good (HTTP 400, 413, 415 or 422, which describe a bad row) is dropped after 5 tries, with a log line, so the rows behind it still go out; a 401, 403, 404 or 405 is about the gateway, not the row, and the row stays queued. A standalone uninstall removes the guardian's whole state folder, with or without `PURGE=1`, and the file with it.
+- A close that finishes after the guardian stopped waiting for it is audited when it finishes, with a sentence that says so. The guardian waits a quarter of a second for a call, and up to 2 seconds more for a close that has begun; until then its log says the handle "may have been closed", and the next check shows whether the hook is free.
+- A holder that takes the handle again is closed again after 10 seconds, then 20, doubling to 5 minutes, with one audit row per holder until 10 minutes pass without a hold. A user who keeps re-opening the hook this way can keep it from starting for most of that time. That is a known limit of a hook image every user may start.
+- The guardian closes at most 64 handles in one check. If the hook is still refused after 64, the next 64 are closed at a later check, after the wait above, so a user who duplicates the hook handle many times slows the guardian down and keeps the hook unavailable for longer. If the processes that have the hook open hold more than about 2,000 file handles with data access between them, the guardian stops looking and closes none, and the hook stays unavailable until some of them are closed.
+- A call on a handle that does not answer within a quarter of a second is given up on, and that handle is not closed. A user who keeps 24 such calls blocked can stop the guardian from looking for as long as they stay blocked, and the hook stays unavailable.
+- It watches the files a hook start reads, not only the hook: the hook binary and the regular files in `C:\ProgramData\Cisco\DefenseClaw-HookRuntime` (exactly these names, when they exist as regular files and not as links: `machine-policy.json`, the machine policy summary; `.defenseclaw-hot-config-undo-closed`, the closure marker; and in each of the `antigravity`, `copilot`, `devin`, `hermes`, `kiro` and `opencode` folders, `enrollment.json` and `.defenseclaw-managed-runtime-selector.state`; 14 files at most). The guardian does not walk the folder. A lock file (`.defenseclaw-enrollment.lock`, `.defenseclaw-managed-runtime-selector.lock`), a `.defenseclaw-policy-*.tmp` temp file, a setup record or any other name is never watched: Setup and the command line hold those locks with no sharing for a whole transaction and the hook never opens them, so closing such a handle would break the lock or write a tamper row for DefenseClaw's own run. In each check the hook binary comes first; the guardian then works on at most 4 held runtime files, and the next check starts where this one stopped, so a user who holds many of them cannot delay the binary; the other held files are handled at most 4 per check, so with N held files a given file can wait up to ceil(N/4) checks for its pass. A hold of `machine-policy.json` fails every guarded call closed, because the hook cannot read it. Each file has its own two checks, backoff, streak and audit rows, with the same bounds and the same refused-holder rules as the binary. The hook reads these files with read access and every sharing allowed, so a hold is a handle that allows no reading and no deletion. There is no swap for a data file, only the bounded close. The audit row and the log line name the file. A file anywhere else is not watched, even if a program holds it.
+- A standard user cannot make such a hold, as measured on Windows Server 2025. A `FILE_SHARE_NONE` open by an account with no write access to the file did not keep other programs from opening it: 0 of 12 tries with the file read-only for Users, 12 of 12 with Users allowed to modify it. No file a hook start reads can be written by Users, so the holds this guardian ends come from administrator sessions, SYSTEM and service accounts. This was measured on one Windows Server 2025 host; other Windows builds were not measured, and it holds only while the shipped file permissions are unchanged.
+- Secure Client is unchanged: it never closes another program's handle.
+
+A holder that shares deletion (a handle opened with `FileShare.Delete`) is swapped around instead: the guardian swaps no more than every 10 seconds, doubling to 5 minutes, and stops while 8 backups are pending.
+
+**If Setup refuses to replace the hook.** When the installed hook does not match the digest the deployment records, and the guardian's protected copy is missing or does not match either, Setup `/ensure` and `/upgrade` of the new release stop before they stop or change anything, exit `1603`, with `refusing to replace the installed hook`: there is no copy to roll back to. The new release's `/repair` does not help; a Setup repairs only its own release (`1639`). Recover with the release that is installed, then run the new Setup again. The steps are in [Setup refuses to replace the installed hook](/docs/enterprise/troubleshooting#setup-refuses-to-replace-the-installed-hook).

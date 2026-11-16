@@ -635,6 +635,7 @@ func TestRuntimeRemovedDestinationDrainsOldGenerationAndCancellationDoesNotFanou
 	case <-time.After(5 * time.Second):
 		t.Fatal("removed destination did not drain")
 	}
+	waitRuntimeRetired(t, runtime)
 	if cleanups.Load() != 1 {
 		t.Fatalf("removed destination cleanup=%d", cleanups.Load())
 	}
@@ -891,6 +892,7 @@ func TestRuntimeReloadKeepsOldProjectedBytesWithOldQueueGeneration(t *testing.T)
 	case <-time.After(5 * time.Second):
 		t.Fatal("reload did not finish after old queue drained")
 	}
+	waitRuntimeRetired(t, runtime)
 	if cleanupCount.Load() != 1 {
 		t.Fatalf("old generation cleanup count=%d", cleanupCount.Load())
 	}

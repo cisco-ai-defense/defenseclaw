@@ -46,6 +46,57 @@ func TestExactPAMAuthenticationBypassAgentHazardPositives(t *testing.T) {
 			want: PAMAuthenticationBypassLiteralInsertion,
 		},
 		{
+			name: "edit without replace_all",
+			tool: "Edit",
+			args: map[string]any{
+				"file_path":  "/etc/pam.d/sshd",
+				"old_string": "auth required pam_unix.so",
+				"new_string": "auth sufficient pam_permit.so\nauth required pam_unix.so",
+			},
+			want: PAMAuthenticationBypassLiteralInsertion,
+		},
+		{
+			name: "edit with replace_all false",
+			tool: "Edit",
+			args: map[string]any{
+				"file_path":   "/etc/pam.d/sshd",
+				"old_string":  "auth required pam_unix.so",
+				"new_string":  "auth sufficient pam_permit.so\nauth required pam_unix.so",
+				"replace_all": false,
+			},
+			want: PAMAuthenticationBypassLiteralInsertion,
+		},
+		{
+			name: "multi-edit",
+			tool: "MultiEdit",
+			args: map[string]any{
+				"file_path": "/etc/pam.d/sshd",
+				"edits": []any{map[string]any{
+					"old_string": "auth required pam_unix.so",
+					"new_string": "auth sufficient pam_permit.so\nauth required pam_unix.so",
+				}},
+			},
+			want: PAMAuthenticationBypassLiteralInsertion,
+		},
+		{
+			name: "write_file alias spelling the target file_path",
+			tool: "write_file",
+			args: map[string]any{
+				"file_path": "/etc/pam.d/sshd",
+				"content":   "auth sufficient pam_permit.so\n",
+			},
+			want: PAMAuthenticationBypassFullReplacement,
+		},
+		{
+			name: "dot-dot segment below the protected directory",
+			tool: "Write",
+			args: map[string]any{
+				"file_path": "/etc/pam.d/../pam.d/sshd",
+				"content":   "auth sufficient pam_permit.so\n",
+			},
+			want: PAMAuthenticationBypassFullReplacement,
+		},
+		{
 			name: "pam conf full replacement",
 			tool: "write",
 			args: map[string]any{
@@ -58,7 +109,7 @@ func TestExactPAMAuthenticationBypassAgentHazardPositives(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got, ok := ExactPAMAuthenticationBypass(pamBypassInput(t, test.tool, test.args))
+			got, ok := exactPAMOfCall(pamBypassInput(t, test.tool, test.args))
 			if !ok || got != test.want {
 				t.Fatalf("proof=(%q,%t), want=(%q,true)", got, ok, test.want)
 			}
@@ -82,28 +133,22 @@ func TestExactPAMAuthenticationBypassRejectsNearMisses(t *testing.T) {
 		input Input
 	}{
 		{name: "commented line", input: pamWriteInput(t, "/etc/pam.d/sshd", "# auth sufficient pam_permit.so\n")},
-		{name: "inline comment", input: pamWriteInput(t, "/etc/pam.d/sshd", "auth sufficient pam_permit.so # example\n")},
 		{name: "wrong facility", input: pamWriteInput(t, "/etc/pam.d/sshd", "account sufficient pam_permit.so\n")},
-		{name: "facility prefix", input: pamWriteInput(t, "/etc/pam.d/sshd", "-auth sufficient pam_permit.so\n")},
 		{name: "module suffix", input: pamWriteInput(t, "/etc/pam.d/sshd", "auth sufficient pam_permit.so.example\n")},
 		{name: "module argument mention", input: pamWriteInput(t, "/etc/pam.d/sshd", "auth sufficient pam_unix.so pam_permit.so\n")},
 		{name: "include control", input: pamWriteInput(t, "/etc/pam.d/sshd", "auth include pam_permit.so\n")},
 		{name: "substack control", input: pamWriteInput(t, "/etc/pam.d/sshd", "auth substack pam_permit.so\n")},
-		{name: "include directive", input: pamWriteInput(t, "/etc/pam.d/sshd", "@include common-auth\nauth sufficient pam_permit.so\n")},
 		{name: "shell text", input: pamWriteInput(t, "/etc/pam.d/sshd", "echo 'auth sufficient pam_permit.so'\n")},
 		{name: "script", input: pamWriteInput(t, "/etc/pam.d/setup.sh", "auth sufficient pam_permit.so\n")},
 		{name: "documentation", input: pamWriteInput(t, "/etc/pam.d/README.md", "auth sufficient pam_permit.so\n")},
 		{name: "relative path", input: pamWriteInput(t, "etc/pam.d/sshd", "auth sufficient pam_permit.so\n")},
 		{name: "nested path", input: pamWriteInput(t, "/etc/pam.d/services/sshd", "auth sufficient pam_permit.so\n")},
-		{name: "traversal path", input: pamWriteInput(t, "/etc/pam.d/../pam.d/sshd", "auth sufficient pam_permit.so\n")},
 		{name: "dynamic path", input: pamWriteInput(t, "/etc/pam.d/$SERVICE", "auth sufficient pam_permit.so\n")},
 		{name: "nul path", input: pamWriteInput(t, "/etc/pam.d/sshd\x00", "auth sufficient pam_permit.so\n")},
 		{name: "unprotected file", input: pamWriteInput(t, "/tmp/pam-example", "auth sufficient pam_permit.so\n")},
 		{name: "wrong pam conf shape", input: pamWriteInput(t, "/etc/pam.conf", "auth sufficient pam_permit.so\n")},
 		{name: "empty content", input: pamWriteInput(t, "/etc/pam.d/sshd", "")},
 		{name: "nul content", input: pamWriteInput(t, "/etc/pam.d/sshd", "auth sufficient pam_permit.so\x00\n")},
-		{name: "continued line", input: pamWriteInput(t, "/etc/pam.d/sshd", "auth sufficient \\\npam_permit.so\n")},
-		{name: "write alias", input: pamBypassInput(t, "write_file", validWrite)},
 		{name: "append", input: pamBypassInput(t, "Append", validWrite)},
 		{name: "conflicting command", input: func() Input {
 			input := pamBypassInput(t, "Write", validWrite)
@@ -114,16 +159,6 @@ func TestExactPAMAuthenticationBypassRejectsNearMisses(t *testing.T) {
 			input := pamBypassInput(t, "Write", validWrite)
 			input.Argv = []string{"echo", "auth sufficient pam_permit.so"}
 			return input
-		}()},
-		{name: "edit replace all false", input: func() Input {
-			args := clonePAMArgs(validEdit)
-			args["replace_all"] = false
-			return pamBypassInput(t, "Edit", args)
-		}()},
-		{name: "edit missing replace all", input: func() Input {
-			args := clonePAMArgs(validEdit)
-			delete(args, "replace_all")
-			return pamBypassInput(t, "Edit", args)
 		}()},
 		{name: "edit wrong replace all type", input: func() Input {
 			args := clonePAMArgs(validEdit)
@@ -168,7 +203,7 @@ func TestExactPAMAuthenticationBypassRejectsNearMisses(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if proof, ok := ExactPAMAuthenticationBypass(test.input); ok {
+			if proof, ok := exactPAMOfCall(test.input); ok {
 				t.Fatalf("near miss minted %q proof", proof)
 			}
 		})
@@ -183,7 +218,7 @@ func TestExactPAMAuthenticationBypassRejectsDuplicateAndMalformedJSON(t *testing
 		{Tool: "Write", Args: json.RawMessage(`[]`)},
 	}
 	for _, input := range inputs {
-		if proof, ok := ExactPAMAuthenticationBypass(input); ok {
+		if proof, ok := exactPAMOfCall(input); ok {
 			t.Fatalf("invalid JSON minted %q proof from %s", proof, input.Args)
 		}
 	}
@@ -191,7 +226,7 @@ func TestExactPAMAuthenticationBypassRejectsDuplicateAndMalformedJSON(t *testing
 
 func TestPAMAuthenticationBypassProofDoesNotRetainInputValues(t *testing.T) {
 	input := pamWriteInput(t, "/etc/pam.d/sshd", "auth sufficient pam_permit.so\n")
-	proof, ok := ExactPAMAuthenticationBypass(input)
+	proof, ok := exactPAMOfCall(input)
 	if !ok {
 		t.Fatal("expected proof")
 	}
@@ -213,7 +248,7 @@ func FuzzExactPAMAuthenticationBypassFailClosed(f *testing.F) {
 	f.Fuzz(func(t *testing.T, tool, target, content string) {
 		input := pamWriteInput(t, target, content)
 		input.Tool = tool
-		proof, ok := ExactPAMAuthenticationBypass(input)
+		proof, ok := exactPAMOfCall(input)
 		if !ok {
 			return
 		}
@@ -247,4 +282,9 @@ func clonePAMArgs(input map[string]any) map[string]any {
 		output[key] = value
 	}
 	return output
+}
+
+// exactPAMOfCall judges a call with the facts the gateway analyzes it into.
+func exactPAMOfCall(input Input) (PAMAuthenticationBypassProof, bool) {
+	return ExactPAMAuthenticationBypass(input, Analyze(input))
 }

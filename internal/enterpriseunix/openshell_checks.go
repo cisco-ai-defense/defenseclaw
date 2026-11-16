@@ -18,13 +18,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/posixacl"
 )
 
 // The install-mode verify rows. They answer one question for the
@@ -48,6 +50,10 @@ type prereqRow struct {
 	// Code is the warning code of a missing row ("" is
 	// openshell_prerequisite_missing).
 	Code string
+	// Version is the release an OpenShell part row read from the
+	// administrator's trusted copy, also when it is not one the pin allows
+	// ("" for other rows and when it could not be read).
+	Version string
 }
 
 // checkLauncher is a row only when the launcher path holds a file the
@@ -71,11 +77,18 @@ func (l *lifecycle) currentOpenShellSettings() (openshellSettings, bool) {
 		return l.osPlan.settings, l.osPlan.settings.Enabled
 	}
 	applied := l.env.loadOpenShellState().Applied
-	if applied == nil || !applied.Enabled {
+	if applied == nil {
 		return openshellSettings{}, false
 	}
-	return openshellSettings{Enabled: true, Install: applied.Install, Driver: applied.Driver, Fallback: applied.Fallback, Version: applied.Version,
-		GatewayPort: applied.GatewayPort, E2fsprogsDir: applied.E2fsprogsDir}, true
+	s := openshellSettings{Enabled: applied.Enabled, Install: applied.Install, Driver: applied.Driver, Fallback: applied.Fallback, Version: applied.Version,
+		RaisedFrom: applied.RaisedFrom, GatewayPort: applied.GatewayPort, E2fsprogsDir: applied.E2fsprogsDir}
+	// The applied state keeps no policy: the docker group advisory reads
+	// required_for from the installed config (GAP-0554); one that does not
+	// load leaves the advisory without it (describeConnectors warns).
+	if cfg, err := l.env.InstalledConfig(); err == nil {
+		s.RequiredFor = requiredForConfigured(cfg)
+	}
+	return s, applied.Enabled
 }
 
 // describeOpenShell adds the sandbox rows to the result and warns for every
@@ -85,12 +98,19 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 	env, r := l.env, l.result
 	settings, on := l.currentOpenShellSettings()
 	state := env.loadOpenShellState()
+	if on || len(state.Pending) > 0 {
+		l.describeLegacySandboxes(ctx)
+	}
 	if !on {
+		if settings.Install == config.EnterpriseOpenShellInstallSetup && strings.TrimSpace(settings.Version) == "" {
+			r.AddWarning(codeOpenShellPrerequisite, "sandboxes remain off: enterprise.openshell.install: setup has no pin; set enterprise.openshell.version to an exact supported OpenShell release before enabling openshell.enabled")
+		}
 		for _, entry := range state.sortedPending() {
 			if entry.Kind == "stop" {
-				l.describePending(entry)
+				l.describePending(ctx, entry)
 			}
 		}
+		l.noteOpenShellCapability(ctx, settings, false, nil, nil)
 		return
 	}
 	row := func(name, state string) {
@@ -98,7 +118,12 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 	}
 	row("openshell", fmt.Sprintf("enabled, install=%s driver=%s%s gateway=127.0.0.1:%d%s", settings.Install, settings.Driver,
 		fallbackNote(settings), settings.GatewayPort, versionNote(settings.Version)))
+	if settings.RaisedFrom != "" {
+		r.AddWarning(codeOpenShellPinRaised, fmt.Sprintf("enterprise.openshell.version pins %s below the OpenShell %s floor; the effective requirement is %s. Set the pin to %s; an account with a running sandbox keeps its current runtime until that sandbox stops",
+			settings.RaisedFrom, openshell.SupportedMin, settings.Version, settings.Version))
+	}
 	primary, fallback := env.checkOpenShellDrivers(ctx, settings)
+	l.noteOpenShellCapability(ctx, settings, true, primary, fallback)
 	fallbackReady := fallback != nil && rowsReady(fallback)
 	for _, check := range primary {
 		if check.OK {
@@ -154,14 +179,86 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 		}
 	}
 	for _, entry := range state.sortedPending() {
-		l.describePending(entry)
+		l.describePending(ctx, entry)
 	}
 	l.describeMacOSAgents(ctx)
 	// The gateway reads this to say, in its own words, why a host run of a
 	// required agent cannot move into a sandbox. status and verify only read.
-	if l.opts.Action != ActionStatus && l.opts.Action != ActionVerify {
+	if l.opts.Action != ActionStatus && l.opts.Action != ActionVerify && (l.osPlan != nil || len(r.Errors) == 0) {
 		if err := env.publishPrerequisites(ctx, settings); err != nil {
-			r.AddWarning(codeState, "could not record "+openshell.PrerequisitesFile+": "+err.Error())
+			r.AddWarning(stateWriteCode(err, codeState), "could not record "+openshell.PrerequisitesFile+": "+err.Error())
+		}
+	}
+}
+
+// describeLegacySandboxes reports, for every account whose sandbox daemon
+// runs, each legacy sandbox as running unprotected (GAP-0901): a live guest
+// whose session runs the supervisor of an OpenShell release older than the
+// oldest supported one, whose network broker can let its connections bypass
+// sandbox policy and which DefenseClaw cannot contain
+// (sandboxapi.Status.Unprotected), and every sandbox that a daemon of
+// DefenseClaw 1.0.3 or older still holds. Each is a row and a warning with
+// the command its user runs to end it, since DefenseClaw stops none itself
+// and the account's daemon runs no new sandbox until it is gone; the
+// deployment is then not security-complete, and verify fails. A daemon that
+// runs but cannot answer is reported the same way: what cannot be shown
+// protected is not. A user daemon runs only under a running user manager
+// (Linux: the signed-in and lingering accounts).
+func (l *lifecycle) describeLegacySandboxes(ctx context.Context) {
+	ops := l.env.sandboxOps()
+	accounts := ops.LoggedIn(ctx)
+	if l.env.GOOS == "darwin" {
+		accounts = ops.Accounts(ctx)
+	}
+	seen := map[int]bool{}
+	for _, a := range accounts {
+		if seen[a.UID] {
+			continue
+		}
+		seen[a.UID] = true
+		st, err := ops.Status(ctx, a)
+		type unprotected struct{ state, line, why string }
+		legacy := ". Its session runs the supervisor of an OpenShell release older than " + openshell.SupportedMin +
+			", which DefenseClaw cannot verify under the current policy; DefenseClaw stops no sandbox for its user, and runs no new " +
+			"sandbox for " + a.Name + " until it is gone"
+		var lines []unprotected
+		switch {
+		case err != nil:
+			lines = []unprotected{{sandboxapi.LegacyUnprotected, "its sandbox daemon could not say whether one runs (" + err.Error() + "); as " + a.Name +
+				", `defenseclaw sandbox status` names any", legacy}}
+		case st.Legacy && st.busy() > 0:
+			held := "1 sandbox"
+			if n := st.busy(); n != 1 {
+				held = fmt.Sprintf("%d sandboxes", n)
+			}
+			lines = []unprotected{{sandboxapi.LegacyUnprotected, "the sandbox daemon of an earlier DefenseClaw holds " + held + ", which this version " +
+				"cannot show protected; as " + a.Name + ", `defenseclaw sandbox list` names them, and `defenseclaw sandbox stop NAME` ends a running one", legacy}}
+		default:
+			for _, u := range st.Unprotected {
+				line := u.Name + "; as " + a.Name + ", `" + u.Stop + "` ends it"
+				if u.Detail != "" {
+					line = u.Name + "; as " + a.Name + ": " + u.Detail
+				}
+				if u.Reason == sandboxapi.UnprotectedUnknown {
+					lines = append(lines, unprotected{sandboxapi.UnknownUnprotected, line, ". It may be a legacy or contained sandbox, and its " +
+						"gateway has not said whether it runs; DefenseClaw stops no sandbox for its user, and runs no new sandbox for " + a.Name +
+						" until its gateway says"})
+					continue
+				}
+				if u.Reason == sandboxapi.UnprotectedContained {
+					lines = append(lines, unprotected{sandboxapi.ContainedUnprotected, line, ". DefenseClaw had to stop it, but its MicroVM's disk " +
+						"could not be synced first, so it keeps running with its network withdrawn; DefenseClaw stops no sandbox for its user after a " +
+						"failed sync, and runs no new sandbox for " + a.Name + " until it is gone"})
+					continue
+				}
+				lines = append(lines, unprotected{sandboxapi.LegacyUnprotected, line, legacy})
+			}
+		}
+		for _, u := range lines {
+			l.result.Services = append(l.result.Services, enterprisestatus.Service{Name: "sandbox unprotected " + a.Name, Kind: sandboxRowKind,
+				State: u.state + ": " + u.line})
+			l.result.AddWarning(codeLegacySandbox, a.Name+": "+u.state+": "+u.line+u.why)
+			l.result.SecurityComplete = false
 		}
 	}
 }
@@ -212,15 +309,41 @@ func versionNote(version string) string {
 }
 
 // describePending reports a change that waits for an account's sandboxes.
-func (l *lifecycle) describePending(entry pending) {
-	waiting := fmt.Sprintf("%d sandboxes run", entry.Sandboxes)
+func (l *lifecycle) describePending(ctx context.Context, entry pending) {
+	waiting := fmt.Sprintf("%d sandboxes run (or are starting, stopping, or a MicroVM that OpenShell does not report stopped)", entry.Sandboxes)
 	switch {
 	case entry.Sandboxes < 0:
 		waiting = "the lifecycle could not tell whether sandboxes run"
+		if entry.Hold != "" {
+			waiting += ": " + entry.Hold
+		}
 	case entry.Sandboxes == 1:
-		waiting = "1 sandbox runs"
+		waiting = "1 sandbox runs (or is starting, stopping, or a MicroVM that OpenShell does not report stopped)"
 	case entry.Sandboxes == 0:
 		waiting = "waiting to be tried again"
+	}
+	if l.opts.Action == ActionStatus || l.opts.Action == ActionVerify {
+		// status and verify read the record the last ensure kept: the
+		// account's own sandbox command may have applied the change since
+		// (it restarts an idle daemon), so the count is that run's, not
+		// now's (GAP-0679).
+		switch {
+		case entry.Sandboxes == 1:
+			waiting = "1 sandbox ran when it was last tried"
+		case entry.Sandboxes > 1:
+			waiting = fmt.Sprintf("%d sandboxes ran when it was last tried", entry.Sandboxes)
+		}
+		if entry.Sandboxes > 0 {
+			waiting += "; a change the user's own sandbox command applied since stays listed until the next ensure"
+		}
+	}
+	// A macOS LaunchAgent reload needs the user's GUI console session; with
+	// none active the reload waits for the next login or sandbox command,
+	// whatever the last ensure counted (g-unix-console).
+	if l.env.GOOS == "darwin" && entry.Kind == "launchd" {
+		if active, err := l.env.activeMacOSConsoleSession(ctx, entry.UID); err == nil && !active {
+			waiting = "no active GUI console session; the reload is deferred until this user's next login or sandbox command"
+		}
 	}
 	l.result.Services = append(l.result.Services, enterprisestatus.Service{
 		Name: "sandbox pending " + entry.User, Kind: sandboxRowKind, State: fmt.Sprintf("%s since %s: %s", entry.Kind, entry.Since, waiting),
@@ -230,7 +353,10 @@ func (l *lifecycle) describePending(entry pending) {
 			entry.User, entry.Since, entry.reasonBase(), waiting, l.env.lifecycleCommand(ActionRepair)))
 		return
 	}
-	l.result.AddWarning(codeSandboxPending, fmt.Sprintf("pending %s for user %s since %s (%s): %s; it is applied by the first run of `%s` or the user's next `defenseclaw sandbox` command that finds no sandbox running",
+	l.result.AddWarning(codeSandboxPending, fmt.Sprintf("pending %s for user %s since %s (%s): %s; it is applied by the first run of `%s` or the user's next `defenseclaw sandbox` command that finds no sandbox running. "+
+		"Save or sync any accessible guest work first; the user's `defenseclaw sandbox stop NAME` requests a disk sync before stopping a running one (a failed sync can lose later changes); a MicroVM whose workload completed or that is in OpenShell's error state, "+
+		"which OpenShell does not stop and whose VM may still run, holds the change until OpenShell reports it stopped (the user's `defenseclaw sandbox stop NAME` says how) "+
+		"or, after saving accessible work outside the guest, the user deletes it (`defenseclaw sandbox delete NAME`)",
 		entry.Kind, entry.User, entry.Since, entry.reasonBase(), waiting, l.env.lifecycleCommand(ActionEnsure)))
 }
 
@@ -344,18 +470,22 @@ func (e *Env) openshellBinaryVersion(ctx context.Context, path string) (openshel
 	return openshell.VersionFromOutput(strings.TrimSpace(string(res.Stdout)))
 }
 
-var versionRange = regexp.MustCompile(`^>=([0-9]+\.[0-9]+\.[0-9]+)(?: <([0-9]+\.[0-9]+\.[0-9]+))?$`)
+var versionRange = lazyregexp.New(`^>=([0-9]+\.[0-9]+\.[0-9]+)(?: <([0-9]+\.[0-9]+\.[0-9]+))?$`)
 
 // versionAllowed reports whether have satisfies enterprise.openshell.version:
 // an exact release, a ">=x <y" range, or (empty) the releases DefenseClaw
 // supports.
 func versionAllowed(spec string, have openshell.Version) (bool, string) {
 	spec = strings.TrimSpace(spec)
+	if err := openshell.CheckSandboxRelease(have); err != nil {
+		// The floor applies independently of the administrator's pin.
+		return false, err.Error()
+	}
+	if err := openshell.CheckSupported(have); err != nil {
+		return false, err.Error()
+	}
 	switch {
 	case spec == "":
-		if err := openshell.CheckSupported(have); err != nil {
-			return false, err.Error()
-		}
 		return true, ""
 	case versionRange.MatchString(spec):
 		m := versionRange.FindStringSubmatch(spec)
@@ -364,7 +494,9 @@ func versionAllowed(spec string, have openshell.Version) (bool, string) {
 			return false, fmt.Sprintf("%s is older than %s", have, m[1])
 		}
 		if m[2] != "" {
-			if high, _ := openshell.ParseVersion(m[2]); have.Compare(high) >= 0 {
+			// A prerelease of the ceiling is outside the range, as the
+			// ceiling is.
+			if high, _ := openshell.ParseVersion(m[2]); have.Release().Compare(high) >= 0 {
 				return false, fmt.Sprintf("%s is %s or newer", have, m[2])
 			}
 		}
@@ -390,6 +522,11 @@ func (e *Env) checkPrerequisiteMode(ctx context.Context, s openshellSettings) []
 	var rows []prereqRow
 	installFix := e.openshellInstallFix()
 	pinFix := "install a release that satisfies enterprise.openshell.version" + versionNote(s.Version) + " (" + installFix + ")"
+	if v, err := openshell.ParseVersion(s.Version); err == nil && openshell.CheckSandboxRelease(v) != nil {
+		// No release satisfies both the pin and openshell.SupportedMin.
+		pinFix = "set enterprise.openshell.version to " + openshell.InstallerVersion + " (or a range from " + openshell.SupportedMin +
+			") and install that release (" + installFix + ")"
+	}
 	var parts []string
 	releases := map[string]openshell.Version{}
 	part := func(row, name, pkg, path string, refused []string, fix string) {
@@ -413,10 +550,10 @@ func (e *Env) checkPrerequisiteMode(ctx context.Context, s openshellSettings) []
 		}
 		parts, releases[name] = append(parts, name), version
 		if ok, why := versionAllowed(s.Version, version); !ok {
-			rows = append(rows, prereqRow{Name: row, Detail: name + ": " + why, Fix: pinFix})
+			rows = append(rows, prereqRow{Name: row, Detail: name + ": " + why, Fix: pinFix, Version: version.String()})
 			return
 		}
-		rows = append(rows, prereqRow{Name: row, OK: true, Detail: fmt.Sprintf("%s (%s)", version, how)})
+		rows = append(rows, prereqRow{Name: row, OK: true, Detail: fmt.Sprintf("%s (%s)", version, how), Version: version.String()})
 	}
 	cli, refused := e.trustedAdminFile(e.binCandidates("openshell"))
 	part("openshell cli", "openshell", "openshell", cli, refused, installFix)
@@ -498,6 +635,10 @@ func (e *Env) checkSetupMode(ctx context.Context, s openshellSettings) []prereqR
 	case versionRange.MatchString(s.Version) || openshell.TarballPins[s.Version] == nil:
 		rows = append(rows, prereqRow{Name: "openshell pin", Detail: fmt.Sprintf("%q is not a release this DefenseClaw build can install", s.Version),
 			Fix: "set enterprise.openshell.version to one of: " + strings.Join(openshell.PinnedTarballReleases(), ", ")})
+	case s.RaisedFrom != "":
+		rows = append(rows, prereqRow{Name: "openshell pin", OK: true, Detail: s.Version + " from NVIDIA's release tarballs, verified against their checksums and the digests this build pins; " +
+			"enterprise.openshell.version pins " + s.RaisedFrom + ", which runs no sandbox (OpenShell " + openshell.SupportedMin +
+			" or later is required), so each user's OpenShell moves to " + s.Version + " once none of the user's sandboxes runs; set the pin to " + s.Version})
 	default:
 		rows = append(rows, prereqRow{Name: "openshell pin", OK: true, Detail: s.Version + " from NVIDIA's release tarballs, verified against their checksums and the digests this build pins"})
 	}
@@ -535,8 +676,12 @@ type E2fsprogsCheckResult struct {
 // CheckE2fsprogsDir is checkE2fsprogs's macOS directory decision.
 func (e *Env) CheckE2fsprogsDir(dir string) E2fsprogsCheckResult {
 	if dir == "" {
-		return E2fsprogsCheckResult{Problem: "enterprise.openshell.e2fsprogs_dir is not set, so each account needs its own ~/.local/opt/e2fsprogs build",
-			Fix: "install e2fsprogs 1.43 or newer into a root-owned directory and set enterprise.openshell.e2fsprogs_dir to its install prefix or the folder that holds both mke2fs and debugfs"}
+		if info, err := os.Stat(e.P(openshell.PackageE2fsprogsDir)); err == nil && info.IsDir() {
+			dir = openshell.PackageE2fsprogsDir
+		} else {
+			return E2fsprogsCheckResult{Problem: "enterprise.openshell.e2fsprogs_dir is not set and the managed package has no e2fsprogs; each account needs its own ~/.local/opt/e2fsprogs build",
+				Fix: "install the managed package with e2fsprogs, or install e2fsprogs 1.43 or newer into a root-owned directory and set enterprise.openshell.e2fsprogs_dir"}
+		}
 	}
 	trust := e.Trust
 	if trust == nil {
@@ -545,10 +690,6 @@ func (e *Env) CheckE2fsprogsDir(dir string) E2fsprogsCheckResult {
 	if err := trust(e.P(dir), TrustRulePack); err != nil {
 		return E2fsprogsCheckResult{Problem: fmt.Sprintf("%s is not an administrator-controlled directory (%v), so it is refused", dir, err),
 			Fix: "make the directory tree root-owned and closed to other writers (chown -R root:wheel; chmod -R go-w)"}
-	}
-	if problem := openshell.AdminE2fsprogsCandidateAccessProblem(dir, func(path string) (os.FileInfo, error) { return os.Stat(e.P(path)) }); problem != "" {
-		return E2fsprogsCheckResult{Problem: problem,
-			Fix: "make the administrator's e2fsprogs directory and its ancestors traversable by sandbox accounts (chmod o+x)"}
 	}
 	// The folder the gateway's exec shim puts first on the driver's PATH,
 	// found by the same rule (GAP-0506): ensure used to accept the tools in
@@ -578,12 +719,15 @@ func (e *Env) checkKVM() prereqRow {
 	if info.Mode().Perm()&0o006 == 0o006 {
 		return prereqRow{Name: "kvm", OK: true, Detail: kvmDevice + " is readable and writable by every user"}
 	}
-	return prereqRow{Name: "kvm", OK: true, Detail: kvmDevice + " is limited to its group (users need the kvm group)"}
+	return prereqRow{Name: "kvm", OK: true, Detail: kvmDevice + " needs the kvm group or a read-write user ACL"}
 }
+
+// dockerSockets are where the Docker engine listens on Linux and macOS.
+var dockerSockets = []string{"/var/run/docker.sock", "/run/docker.sock"}
 
 func (e *Env) checkDocker() prereqRow {
 	cli := e.firstExisting(append(e.binCandidates("docker"), "/Applications/Docker.app/Contents/Resources/bin/docker"))
-	sock := e.firstExisting([]string{"/var/run/docker.sock", "/run/docker.sock"})
+	sock := e.firstExisting(dockerSockets)
 	switch {
 	case cli == "" && sock == "":
 		return prereqRow{Name: "docker", Detail: "Docker is not installed", Fix: "install Docker Engine (Docker Desktop on a Mac); the sandbox images are built and run through it"}
@@ -597,7 +741,7 @@ func (e *Env) checkDocker() prereqRow {
 // needs the docker group: the docker driver runs in Docker, and the MicroVM
 // driver (and its docker fallback) boots the agent images DefenseClaw builds
 // in Docker for each account (GAP-0511). The MicroVM driver also needs the
-// kvm group where /dev/kvm is not open to everyone. The accounts are those
+// kvm group or a named user ACL where /dev/kvm is not open to everyone. The accounts are those
 // that used sandboxes (a registration or decision record, or sandbox state of
 // their own in the home), never every enrolled one: administrators and
 // service accounts that never run a sandbox do not belong in the
@@ -611,6 +755,11 @@ func (e *Env) groupRows(ctx context.Context, s openshellSettings) (rows []prereq
 	}
 	kvm, kvmErr := os.Stat(e.P(kvmDevice))
 	needKVM := vm && kvmErr == nil && kvm.Mode().Perm()&0o006 != 0o006
+	var kvmACL posixacl.View
+	var kvmACLErr error
+	if needKVM {
+		kvmACL, kvmACLErr = posixacl.ReadAccessXattr(e.P(kvmDevice))
+	}
 	ops := e.sandboxOps()
 	var accounts []SandboxAccount
 	var enrolled, members int
@@ -628,11 +777,11 @@ func (e *Env) groupRows(ctx context.Context, s openshellSettings) (rows []prereq
 			accounts = append(accounts, a)
 		}
 	}
-	advisory = e.dockerGroupAdvisory(members, enrolled)
+	advisory = e.dockerGroupAdvisory(members, enrolled, s.RequiredFor)
 	if len(accounts) == 0 {
 		need := "docker"
 		if needKVM {
-			need = "kvm and docker"
+			need = "kvm (or a /dev/kvm user ACL) and docker"
 		}
 		return []prereqRow{{Name: "groups", OK: true, Detail: fmt.Sprintf("no account has used sandboxes yet; each account that runs them needs the %s group", need)}}, advisory
 	}
@@ -642,7 +791,13 @@ func (e *Env) groupRows(ctx context.Context, s openshellSettings) (rows []prereq
 		if !ok {
 			continue
 		}
-		if needKVM && !contains(groups, "kvm") {
+		hasKVM := contains(groups, "kvm") && kvmACLErr == nil
+		if needKVM {
+			if found, allowed := kvmACL.NamedUserAllows(a.UID, 0o6); found {
+				hasKVM = allowed
+			}
+		}
+		if needKVM && !hasKVM {
 			noKVM = append(noKVM, a.Name)
 		}
 		if !contains(groups, "docker") {
@@ -651,10 +806,10 @@ func (e *Env) groupRows(ctx context.Context, s openshellSettings) (rows []prereq
 	}
 	n := len(accounts)
 	if needKVM {
-		row := prereqRow{Name: "groups kvm", OK: true, Detail: fmt.Sprintf("every account that used sandboxes (%d) is in the kvm group", n)}
+		row := prereqRow{Name: "groups kvm", OK: true, Detail: fmt.Sprintf("every account that used sandboxes (%d) can use /dev/kvm through the kvm group or a user ACL", n)}
 		if len(noKVM) > 0 {
 			row = prereqRow{Name: "groups kvm", Fix: groupFix("kvm"),
-				Detail: fmt.Sprintf("%d of %d accounts that used sandboxes are not in the kvm group (%s), so no MicroVM starts for them", len(noKVM), n, strings.Join(noKVM, ", "))}
+				Detail: fmt.Sprintf("%d of %d accounts that used sandboxes lack /dev/kvm read-write access (%s), so no MicroVM starts for them", len(noKVM), n, strings.Join(noKVM, ", "))}
 			if s.dockerFallback() {
 				row.Detail += "; they get the docker fallback"
 			}
@@ -684,17 +839,24 @@ const codeDockerGroupMembers = "docker_group_members"
 // administrator policy, the protected credentials and the services'
 // environment included, and the rule that each person sees only their own
 // effective policy does not hold for them. References do not help against a
-// member, so the only mitigation is a small group. It counts and never names
+// member, so the only mitigation is a small group. With required set (a
+// required_for in the policy) it also says that a member can run a required
+// agent outside its sandbox policy (GAP-0554). It counts and never names
 // the accounts. "" when none is a member.
-func (e *Env) dockerGroupAdvisory(members, enrolled int) string {
+func (e *Env) dockerGroupAdvisory(members, enrolled int, required bool) string {
 	if members == 0 {
 		return ""
 	}
-	return fmt.Sprintf("%d of %d enrolled accounts are in the docker group, which is root-equivalent on this host: a member can read and "+
+	advisory := fmt.Sprintf("%d of %d enrolled accounts are in the docker group, which is root-equivalent on this host: a member can read and "+
 		"change what root can, including the administrator policy (%s), the protected credentials and the services' environment, so the "+
 		"rule that each person sees only their own effective policy does not hold for them, and references keep secrets out of the policy "+
 		"file but do not protect them from a member; sandboxes on Linux need the group, so the only mitigation is to add only the accounts "+
 		"that run sandboxes", members, enrolled, e.Layout.ConfigPath)
+	if required {
+		advisory += "; the policy sets required_for, and a member can also run a required agent in a container outside its sandbox policy, " +
+			"where DefenseClaw does not inspect it, so where required_for must hold against deliberate users, keep those accounts out of the group"
+	}
+	return advisory
 }
 
 // groupFix is the one fix of a groups row: no ready-made command per
@@ -737,7 +899,7 @@ func (e *Env) publishPrerequisites(ctx context.Context, s openshellSettings) err
 	for _, row := range primary {
 		if !row.OK {
 			record.Ready = false
-			record.Missing = append(record.Missing, openshell.PrerequisiteMissing{Item: row.Name, Detail: row.Detail, Fix: row.Fix})
+			record.Missing = append(record.Missing, openshell.PrerequisiteMissing{Item: row.Name, Detail: row.Detail, Fix: row.Fix, Version: row.Version})
 		}
 	}
 	if fallback != nil {
@@ -745,7 +907,7 @@ func (e *Env) publishPrerequisites(ctx context.Context, s openshellSettings) err
 		for _, row := range fallback {
 			if !row.OK {
 				record.Fallback.Ready = false
-				record.Fallback.Missing = append(record.Fallback.Missing, openshell.PrerequisiteMissing{Item: row.Name, Detail: row.Detail, Fix: row.Fix})
+				record.Fallback.Missing = append(record.Fallback.Missing, openshell.PrerequisiteMissing{Item: row.Name, Detail: row.Detail, Fix: row.Fix, Version: row.Version})
 			}
 		}
 	}

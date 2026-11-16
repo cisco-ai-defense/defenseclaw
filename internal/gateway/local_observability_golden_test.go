@@ -568,7 +568,7 @@ func emitGoldenLineageRelationships(
 		// fixture deliberately bypasses hook evaluation/finalization so it can
 		// isolate the generated observability signals; mirror that durable
 		// observation step here without emitting another Loki record.
-		if err := repo.RecordObservation(t.Context(), audit.CorrelationObservation{
+		if err := repo.RecordObservations(t.Context(), audit.CorrelationObservation{
 			RecordID:        "golden-lineage-record-" + child.AgentID,
 			SemanticEventID: audit.SemanticEventID(correlated.SemanticEventID),
 			Signal:          audit.CorrelationSignalLogs,

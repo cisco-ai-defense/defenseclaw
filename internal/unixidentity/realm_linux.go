@@ -78,6 +78,14 @@ var realmCache struct {
 	fetched time.Time
 }
 
+// lastListedRealms returns the realms realmd last listed, which stay known
+// after its lookups start failing.
+var lastListedRealms = func() []Realm {
+	realmCache.mu.Lock()
+	defer realmCache.mu.Unlock()
+	return append([]Realm(nil), realmCache.realms...)
+}
+
 func cachedRealms(ctx context.Context) ([]Realm, error) {
 	realmCache.mu.Lock()
 	defer realmCache.mu.Unlock()

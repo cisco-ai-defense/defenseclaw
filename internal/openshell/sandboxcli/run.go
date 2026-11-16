@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"slices"
 	"sort"
@@ -144,11 +145,34 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	if err != nil {
 		return err
 	}
+	if err := a.refuseForbiddenAccount(ctx, spec.Name); err != nil {
+		return err
+	}
 	api, err := a.api()
 	if err != nil {
 		return err
 	}
-	st, err := a.preflight(ctx, api)
+	// A managed computer whose OpenShell is not ready yet installs or starts
+	// it for this run: the run's own policy decides first, so a pack, agent
+	// or group the organization forbids installs nothing (GAP-0812).
+	st, err := a.preflight(ctx, api, sandboxapi.ReadyRequest{Harness: spec.Name, Pack: o.Pack}, func(ctx context.Context, st *sandboxapi.Status) (bool, error) {
+		ex, err := a.runPolicyRefusal(ctx, api, st, spec, project, o, true)
+		if err != nil || ex == nil || ex.Managed == nil {
+			return true, err
+		}
+		if ex.Managed.Provisional {
+			// The ready waits for the directory before it installs or
+			// starts anything, as the create does (GAP-0820): say why the
+			// run pauses (GAP-1552).
+			a.note(fmt.Sprintf("your organization's directory did not answer, so DefenseClaw waits up to %s for your sandbox policy before it starts OpenShell…",
+				sandboxrelay.ResolveIdentityWait.Round(time.Second)))
+			return true, nil
+		}
+		// An account or agent the organization does not allow in a sandbox:
+		// the ready refuses it in the organization's words and installs or
+		// starts nothing, so the run announces no install (GAP-0534).
+		return managedExplainAllowsAgent(ex.Managed, spec.Name), nil
+	})
 	if err != nil {
 		return err
 	}
@@ -167,30 +191,9 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 
 	// Policy preflight: an organization's constraints refuse the run
 	// before anything is created.
-	ex, err := api.Explain(ctx, sandboxapi.ExplainRequest{
-		Harness: spec.Name, Pack: o.Pack, Profile: o.Profile, Project: project, Copy: o.Copy, Safe: o.Safe, Unmask: o.Unmask,
-	})
+	ex, err := a.runPolicyRefusal(ctx, api, st, spec, project, o, false)
 	if err != nil {
-		if st.Managed != nil && harnessUnenrolled(err) {
-			return a.unenrolledHarnessRefusal(ctx, api, spec, project, st.Managed)
-		}
-		return apiError(err)
-	}
-	// Every refusal on its own line: a repository policy that would loosen
-	// several settings names each of them. On a managed computer the
-	// managed gateway judges the run when the create resolves it
-	// (managedRefusal).
-	var fatal []string
-	for _, v := range ex.Violations {
-		if v.Fatal {
-			fatal = append(fatal, violationMessage(&v, v.Message, v.Detail, v.Admin))
-		}
-	}
-	if len(fatal) > 0 {
-		if ex.Managed != nil {
-			return a.managedRefusal(ctx, api, spec, project, o, fatal)
-		}
-		return errors.New(strings.Join(fatal, "\n"))
+		return err
 	}
 	if ex.Managed != nil && a.managedSeen == nil {
 		// The run's refusals and warnings name this profile and contact.
@@ -303,8 +306,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 			return err
 		}
 	}
-	// A launch the harness cannot take (OmniGent with a profile that names
-	// no default model and no --model) fails before a sandbox exists.
+	// A launch the harness cannot take fails before a sandbox exists.
 	pre := harness.LaunchOptions{Mode: harness.Interactive, Yolo: !o.Safe, Args: o.Args}
 	if o.Prompt != "" {
 		pre.Mode, pre.Prompt = harness.Headless, o.Prompt
@@ -399,15 +401,12 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	// ran: the upload, the probe, or starting the harness. An error from
 	// attach means the harness never started (its exit status, a signal's
 	// included, comes back as a code); one from detach, that the
-	// background start failed.
+	// background start failed. The sandbox exists from the create on, so
+	// another terminal may have connected to it meanwhile: it is deleted
+	// only under its exclusive gate with no session attached, and kept
+	// otherwise (deleteIfAlone).
 	fail := func(err error) error {
-		a.warn("removing sandbox " + sb.Name + " after the failure")
-		ctx := context.WithoutCancel(ctx)
-		if _, derr := api.Delete(ctx, sb.Name, sandboxapi.DeleteRequest{}); derr != nil {
-			a.warn("could not delete " + sb.Name + ": " + derr.Error())
-		} else {
-			a.forgetCLIState(sb.Name)
-		}
+		a.removeFailedSandbox(context.WithoutCancel(ctx), api, sb.Name)
 		return err
 	}
 	// Copy mode: create, upload, baseline, then the probe in the workdir the
@@ -456,6 +455,43 @@ var unenrolledReasons = map[string]bool{
 func harnessUnenrolled(err error) bool {
 	var e *sandboxapi.Error
 	return errors.As(err, &e) && unenrolledReasons[strings.TrimSpace(e.Detail)]
+}
+
+// runPolicyRefusal asks the policy explain of the run and returns it, or
+// the refusal of a run the policy forbids: an organization's constraints,
+// or a repository policy that would loosen several settings, each refusal
+// on its own line. On a managed computer the managed gateway judges the
+// run when the create resolves it (managedRefusal). beforeReady is the ask
+// before a managed computer's OpenShell is readied for the run
+// (readyManaged): only a refusal stops the run there, and an explain that
+// fails for another reason is asked again after the ready, as before.
+func (a *App) runPolicyRefusal(ctx context.Context, api API, st *sandboxapi.Status, spec *harness.Spec, project string, o RunOptions,
+	beforeReady bool) (*sandboxapi.Explain, error) {
+	ex, err := api.Explain(ctx, sandboxapi.ExplainRequest{
+		Harness: spec.Name, Pack: o.Pack, Profile: o.Profile, Project: project, Copy: o.Copy, Safe: o.Safe, Unmask: o.Unmask,
+	})
+	if err != nil {
+		if st.Managed != nil && harnessUnenrolled(err) {
+			return nil, a.unenrolledHarnessRefusal(ctx, api, spec, project, st.Managed)
+		}
+		if beforeReady && !policyRefusal(err) {
+			return nil, nil
+		}
+		return nil, apiError(err)
+	}
+	var fatal []string
+	for _, v := range ex.Violations {
+		if v.Fatal {
+			fatal = append(fatal, violationMessage(&v, v.Message, v.Detail, v.Admin))
+		}
+	}
+	if len(fatal) > 0 {
+		if ex.Managed != nil {
+			return nil, a.managedRefusal(ctx, api, spec, project, o, fatal)
+		}
+		return nil, errors.New(strings.Join(fatal, "\n"))
+	}
+	return ex, nil
 }
 
 // unenrolledHarnessRefusal is the refusal of a run of spec on a managed
@@ -538,12 +574,8 @@ func printMode(spec *harness.Spec, args []string) bool {
 		return has("--no-interactive")
 	case "hermes":
 		return has("-q", "--query")
-	case "openhands":
-		return has("--headless")
 	case "antigravity":
 		return has("-p", "--print", "--prompt", "-print", "-prompt")
-	case "omnigent":
-		return has("-p", "--prompt")
 	}
 	return false
 }
@@ -564,9 +596,7 @@ func printHint(spec *harness.Spec) string {
 		return ` or -- --no-interactive "TEXT"`
 	case "hermes":
 		return ` or -- chat -q "TEXT"`
-	case "openhands":
-		return ` or -- --headless -t "TEXT"`
-	case "antigravity", "omnigent":
+	case "antigravity":
 		return ` or -- -p "TEXT"`
 	}
 	return ""
@@ -701,32 +731,39 @@ func (a *App) runNative(spec *harness.Spec, args []string) error {
 
 // preflight checks that the daemon runs with sandboxes available, after it
 // readied a managed computer's OpenShell for the run (readyManaged).
-func (a *App) preflight(ctx context.Context, api API) (*sandboxapi.Status, error) {
-	return a.checkSandboxes(ctx, api, true)
+func (a *App) preflight(ctx context.Context, api API, run sandboxapi.ReadyRequest, beforeReady readyCheck) (*sandboxapi.Status, error) {
+	return a.checkSandboxes(ctx, api, true, run, beforeReady)
 }
 
 // checkSandboxes is preflight; without ready, a managed computer's OpenShell
 // that a run readies passes as it is (`sandbox wrap` installs nothing).
-func (a *App) checkSandboxes(ctx context.Context, api API, ready bool) (*sandboxapi.Status, error) {
+// run names the agent a ready is for, and the run's pack; beforeReady (when
+// set) refuses the run before the ready installs or starts anything
+// (readyManaged).
+func (a *App) checkSandboxes(ctx context.Context, api API, ready bool, run sandboxapi.ReadyRequest,
+	beforeReady readyCheck) (*sandboxapi.Status, error) {
 	st, err := api.Status(ctx)
 	if err != nil {
 		return nil, apiError(err)
 	}
 	a.noteManaged(st)
 	if !st.Enabled {
-		return nil, errors.New(st.OffMessage())
+		return nil, &DisabledError{Message: st.OffMessage() + sandboxRuntimeMissing()}
 	}
 	if !ready && readiesAtRun(api, st) {
 		return st, nil
 	}
-	if st, err = a.readyManaged(ctx, api, st); err != nil {
+	if st, err = a.readyManaged(ctx, api, st, run, beforeReady); err != nil {
 		return nil, err
+	}
+	if !st.Available && st.Managed != nil && st.PortConflict != nil {
+		return nil, errors.New(st.PortConflict.Message())
 	}
 	if !st.Available && st.Managed != nil && st.GatewayElsewhere != "" {
 		// Another account runs sandboxes on this computer now: the daemon's
 		// one-account-at-a-time text and who to contact (GAP-0461).
 		if ready {
-			a.recordBusyRefusal(ctx, api)
+			a.recordBusyRefusal(ctx, api, run.Harness)
 		}
 		return nil, errors.New(sandboxapi.DisplayText(firstNonEmpty(st.Reason, sandboxapi.AccountBusyMessage+".")) + " " +
 			"F" + strings.TrimPrefix(busyContact(st.Managed.RequestAccess), "f") + ".")
@@ -743,14 +780,14 @@ func (a *App) checkSandboxes(ctx context.Context, api API, ready bool) (*sandbox
 // daemon answers busy at once, starting and installing nothing, and reports
 // it to the managed gateway. Its answer is not used; the run is refused with
 // the status's own text either way.
-func (a *App) recordBusyRefusal(ctx context.Context, api API) {
+func (a *App) recordBusyRefusal(ctx context.Context, api API, harnessName string) {
 	ready, ok := api.(readier)
 	if !ok {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	_, _ = ready.Ready(ctx)
+	_, _ = ready.Ready(ctx, sandboxapi.ReadyRequest{Harness: harnessName})
 }
 
 // policyRefusal reports a create the sandbox policy refused or could not
@@ -765,10 +802,51 @@ func policyRefusal(err error) bool {
 	return strings.HasPrefix(e.Detail, sandboxrelay.ReasonPolicyUnloadable)
 }
 
+// refuseForbiddenAccount refuses the run of an account whose organization
+// does not allow it sandboxes, by the managed gateway's own settled view
+// (ManagedAccountPolicy), before the run reaches the account's sandbox
+// daemon: its socket starts the daemon, which then held the sandbox ports
+// and wrote its state for an account that can run no sandbox (GAP-0534).
+// The words are the daemon's ready refusal. A view that is provisional (the
+// directory has not answered yet), that allows the account, or that the
+// gateway did not give leaves the decision to the daemon, as before; an
+// agent or pack refusal is the daemon's too.
+func (a *App) refuseForbiddenAccount(ctx context.Context, harness string) error {
+	if a.ManagedAccountPolicy == nil {
+		return nil
+	}
+	view, err := a.ManagedAccountPolicy(ctx, harness)
+	if err != nil || view == nil || view.Provisional || view.Allowed {
+		return nil
+	}
+	a.managedSeen = managedStatusOfExplain(view)
+	return apiError(&sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Status: http.StatusForbidden,
+		Message: "Your organization doesn't allow sandboxes for your account.", Detail: sandboxrelay.ReasonNotAllowed})
+}
+
+// readyCheck judges a run before its ready installs or starts anything
+// (readyManaged): an error refuses the run; announce false is a run the
+// ready itself refuses, which installs nothing and so gets no install
+// notice (GAP-0534).
+type readyCheck func(ctx context.Context, st *sandboxapi.Status) (announce bool, err error)
+
+// managedExplainAllowsAgent reports whether the caller's managed policy view
+// allows the agent conn in a sandbox: sandboxes allowed for the account, and
+// the agent on the profile's list when it has one (the daemon's ready and
+// the create judge both).
+func managedExplainAllowsAgent(me *sandboxapi.ManagedExplain, conn string) bool {
+	if !me.Allowed {
+		return false
+	}
+	return len(me.AllowedHarnesses) == 0 || slices.ContainsFunc(me.AllowedHarnesses, func(h string) bool {
+		return config.NormalizeConnectorName(h) == conn
+	})
+}
+
 // readier is a daemon client that readies a managed computer's OpenShell
 // (sandboxapi.Client.Ready).
 type readier interface {
-	Ready(ctx context.Context) (*sandboxapi.Status, error)
+	Ready(ctx context.Context, req sandboxapi.ReadyRequest) (*sandboxapi.Status, error)
 }
 
 // readyManaged asks a managed computer's sandbox daemon to ready the
@@ -776,17 +854,29 @@ type readier interface {
 // not ready yet: setup mode installs the pinned release at the first run,
 // and both modes start the account's gateway on demand. A run whose
 // preflight stopped at that status never reached the create that readied it
-// (GAP-0437, GAP-0441). Any other status is st.
-func (a *App) readyManaged(ctx context.Context, api API, st *sandboxapi.Status) (*sandboxapi.Status, error) {
+// (GAP-0437, GAP-0441). Any other status is st. beforeReady (when set)
+// refuses the run first: what the run's policy forbids installs nothing
+// (GAP-0812).
+func (a *App) readyManaged(ctx context.Context, api API, st *sandboxapi.Status, run sandboxapi.ReadyRequest,
+	beforeReady readyCheck) (*sandboxapi.Status, error) {
 	if !readiesAtRun(api, st) {
 		return st, nil
 	}
-	if a.managedInstallPending(st.Managed) {
+	announce := true
+	if beforeReady != nil {
+		var err error
+		if announce, err = beforeReady(ctx, st); err != nil {
+			return nil, err
+		}
+	}
+	switch {
+	case !announce:
+	case a.managedInstallPending(st.Managed):
 		a.note(strings.TrimSpace("Installing OpenShell "+st.Managed.OpenShellVersion) + " for your account and starting it (first run only)…")
-	} else {
+	default:
 		a.note("Starting your OpenShell gateway…")
 	}
-	ready, err := api.(readier).Ready(ctx)
+	ready, err := api.(readier).Ready(ctx, run)
 	if err != nil {
 		return nil, apiError(err)
 	}
@@ -966,7 +1056,7 @@ func driverCopyNote(d openshell.Driver) string {
 // folder: the session's end offers to bring it back (endCopy), and a run
 // that does not ask (a headless run, --yes, a skip) leaves it for pull.
 const copyBackText = "the agent works on a copy, and your folder changes only when you bring its work back: " +
-	"at the end of the session, or later with `" + CommandName + " pull`"
+	"at the end of the session, or later with `" + CommandName + " pull NAME --apply`"
 
 func nameTakenError(name string, headless bool) error {
 	resume := "`" + CommandName + " connect " + name + "`"
@@ -1264,7 +1354,7 @@ func (a *App) resolveLiveMount(ctx context.Context, api API, spec *harness.Spec,
 	}
 	switch {
 	case err == nil && key == "c":
-		a.note("working on a copy (--copy): `" + CommandName + " pull NAME` brings the changes back")
+		a.note("working on a copy (--copy): `" + CommandName + " pull NAME --apply` brings the changes back")
 		return true, true, nil
 	case err == nil && key == "d":
 		if err := a.Delete(ctx, DeleteOptions{Names: []string{holder.Name}}); err != nil {
@@ -1291,7 +1381,9 @@ func (a *App) resolveLiveMount(ctx context.Context, api API, spec *harness.Spec,
 func (a *App) offerResume(ctx context.Context, o RunOptions, sb *sandboxapi.Sandbox, copyMode, repoChanged bool) (bool, error) {
 	run := a.runLaunchOf(sb)
 	held := fmt.Sprintf("Sandbox %s (%s, %s) already holds this folder", sb.Name, sb.Phase, sb.WorkdirMode)
-	if n := a.attachedSessions(sb.Name); n > 0 {
+	if n, err := a.attachedSessions(sb.Name); err != nil {
+		a.warn("cannot count the sessions attached to " + sb.Name + ": " + err.Error())
+	} else if n > 0 {
 		// Both sessions share it: neither's end stops it under the other.
 		held += fmt.Sprintf(", and %s attached to it", plural(int64(n), "session is", "sessions are"))
 	}
@@ -1392,7 +1484,7 @@ func (a *App) needsCopyText(project string, e *sandboxapi.Error, name string) st
 	if why != "" && !strings.Contains(why, "cannot be mounted live") {
 		msg += " (" + why + ")"
 	}
-	return msg + ", so it runs on a copy: `" + CommandName + " pull " + name + "` brings the changes back"
+	return msg + ", so it runs on a copy: `" + CommandName + " pull " + name + " --apply` brings the changes back"
 }
 
 // warnSecretEnv warns about --env variables whose names say they hold a
@@ -1510,7 +1602,6 @@ func settingOf(settings []sandboxapi.Setting, key string) (sandboxapi.Setting, b
 	return sandboxapi.Setting{}, false
 }
 
-// createRequest turns the flags into the daemon's create request.
 // managedRefusal is a run on a managed computer that the preflight would
 // refuse. The managed gateway judges it: the create asks it before anything
 // is staged or created, and its refusal names the caller's profile and rule
@@ -1525,12 +1616,36 @@ func (a *App) managedRefusal(ctx context.Context, api API, spec *harness.Spec, p
 	if err != nil {
 		return apiError(err)
 	}
-	if _, err := api.Delete(context.WithoutCancel(ctx), sb.Name, sandboxapi.DeleteRequest{}); err != nil {
+	switch keep, err := a.deleteIfAlone(context.WithoutCancel(ctx), api, sb.Name); {
+	case keep != "":
+		a.warn("keeping sandbox " + sb.Name + ": " + keep)
+	case err != nil:
 		a.warn("could not delete " + sb.Name + ": " + err.Error())
+	default:
+		// The gate the delete took is CLI state too.
+		a.forgetCLIState(sb.Name)
 	}
 	return errors.New(strings.Join(fatal, "\n"))
 }
 
+// removeFailedSandbox deletes sandbox name, which a run that failed
+// created, unless another session attached to it meanwhile
+// (deleteIfAlone): then it is kept, with the way to delete it later.
+func (a *App) removeFailedSandbox(ctx context.Context, api API, name string) {
+	keep, err := a.deleteIfAlone(ctx, api, name)
+	switch {
+	case keep != "":
+		a.warn("keeping sandbox " + name + " after the failure: " + keep)
+	case err != nil:
+		a.warn("removing sandbox " + name + " after the failure")
+		a.warn("could not delete " + name + ": " + err.Error())
+	default:
+		a.warn("removing sandbox " + name + " after the failure")
+		a.forgetCLIState(name)
+	}
+}
+
+// createRequest turns the flags into the daemon's create request.
 func (a *App) createRequest(spec *harness.Spec, project string, o RunOptions, copyMode bool, env map[string]string) (sandboxapi.CreateRequest, llmChoice, error) {
 	req := sandboxapi.CreateRequest{
 		Name: strings.TrimSpace(o.Name), Harness: spec.Name, Project: project, Pack: o.Pack, Profile: o.Profile,
@@ -1794,7 +1909,7 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 	row := func(label, text string) { a.line(fmt.Sprintf("%-10s%s", label+"  ", text)) }
 	switch {
 	case sb.WorkdirMode == config.OpenShellWorkdirCopy:
-		row("Project", a.tildePath(sb.Project)+" → "+sb.Workdir+" (copy)   changes come back with `"+CommandName+" pull "+sb.Name+"`")
+		row("Project", a.tildePath(sb.Project)+" → "+sb.Workdir+" (copy)   changes come back with `"+CommandName+" pull "+sb.Name+" --apply`")
 		row("", "Not visible: everything else on this machine")
 	case sb.Workspace != nil:
 		sum := workspace.Summary{Project: sb.Workspace.Project, Hidden: sb.Workspace.Hidden, Protected: sb.Workspace.Protected,
@@ -2016,18 +2131,9 @@ var sessionKeys = map[string]string{
 	"opencode": "Esc interrupts OpenCode's turn; Ctrl-C (with an empty prompt) quits OpenCode, which ends the session",
 }
 
-// ownApprovals are the harnesses without a skip-permissions switch: their
-// approval pauses come from their own policies, DefenseClaw's among them.
-var ownApprovals = map[string]string{
-	"omnigent": "approvals from OmniGent's policies, DefenseClaw's included",
-}
-
-// permissionsText is the banner's permissions: skip-permissions on or off
-// (and why), or the harness's own policies.
+// permissionsText is the banner's permissions: skip-permissions on or off,
+// and why it is off.
 func (a *App) permissionsText(sb *sandboxapi.Sandbox) string {
-	if text, ok := ownApprovals[sb.Harness]; ok {
-		return text
-	}
 	if !sb.Launch.Yolo {
 		return "skip-permissions OFF (" + a.promptsKept(sb) + ")"
 	}
@@ -2045,8 +2151,10 @@ func (a *App) promptsKept(sb *sandboxapi.Sandbox) string {
 			return "harness prompts kept by your organization's policy"
 		}
 	}
-	if ad := packs.BaseFloor(a.Cfg); ad.AllowYolo != nil && !*ad.AllowYolo {
-		return orgOff
+	if !a.ManagedHost() && !onManagedHost() && a.managedSeen == nil {
+		if ad := packs.BaseFloor(a.Cfg); ad.AllowYolo != nil && !*ad.AllowYolo {
+			return orgOff
+		}
 	}
 	return "harness prompts kept"
 }

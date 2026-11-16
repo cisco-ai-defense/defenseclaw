@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from defenseclaw.audit_time_order import audit_time_order
 from defenseclaw.hook_metrics import connector_hook_decision
 from defenseclaw.models import ActionEntry, Event
 from defenseclaw.tui.services.event_models import parse_timestamp, timestamp_label
@@ -942,8 +943,8 @@ def _list_events_by_target(store: object | None, target: str, limit: int) -> tup
         if db is None:
             return ()
         rows = db.execute(
-            """SELECT id, timestamp, action, target, actor, details, severity, run_id
-               FROM audit_events WHERE target = ? ORDER BY timestamp DESC LIMIT ?""",
+            f"""SELECT id, timestamp, action, target, actor, details, severity, run_id
+               FROM audit_events WHERE target = ? ORDER BY {audit_time_order(db)} LIMIT ?""",
             (target, max(limit, 1)),
         ).fetchall()
         return tuple(_event_from_row(row) for row in rows)
@@ -969,8 +970,8 @@ def _list_events_by_run_id(store: object | None, run_id: str, limit: int) -> tup
         if db is None:
             return ()
         rows = db.execute(
-            """SELECT id, timestamp, action, target, actor, details, severity, run_id
-               FROM audit_events WHERE run_id = ? ORDER BY timestamp DESC LIMIT ?""",
+            f"""SELECT id, timestamp, action, target, actor, details, severity, run_id
+               FROM audit_events WHERE run_id = ? ORDER BY {audit_time_order(db)} LIMIT ?""",
             (run_id, max(limit, 1)),
         ).fetchall()
         return tuple(_event_from_row(row) for row in rows)

@@ -1,0 +1,17 @@
+{
+  "darwin": [
+    {"deployment": "1p", "base": "home", "path": "Library/Application Support/Claude"},
+    {"deployment": "3p", "base": "home", "path": "Library/Application Support/Claude-3p"}
+  ],
+  "linux": [
+    {"deployment": "1p", "base": "config", "path": "Claude"},
+    {"deployment": "3p", "base": "config", "path": "Claude-3p"}
+  ],
+  "windows": [
+    {"deployment": "1p", "base": "appdata", "path": "Claude"},
+    {"deployment": "1p", "base": "localappdata", "path": "Claude-Data/claude_*", "prefer": "Packages/Claude_*"},
+    {"deployment": "1p", "base": "localappdata", "path": "Packages/Claude_*/LocalCache/Roaming/Claude"},
+    {"deployment": "3p", "base": "localappdata", "path": "Claude-3p"},
+    {"deployment": "3p", "base": "localappdata", "path": "Packages/Claude_*/LocalCache/Local/Claude-3p"}
+  ]
+}

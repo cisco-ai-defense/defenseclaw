@@ -23,6 +23,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
 const (
@@ -107,6 +109,18 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 // bound. A non-zero exit is returned in the result, not as an error, so
 // callers can map tool-specific exit codes.
 func runTrustedCommand(ctx context.Context, path string, args []string, filters ...outputFilter) (commandResult, error) {
+	return runTrustedCommandLimit(ctx, path, args, defaultOutputLimit, filters...)
+}
+
+// runTrustedCommandLimit is runTrustedCommand with a stdout bound of limit
+// bytes, for a tool whose answer is known to be larger than the default.
+func runTrustedCommandLimit(ctx context.Context, path string, args []string, limit int, filters ...outputFilter) (commandResult, error) {
+	return runTrustedCommandInput(ctx, path, args, nil, limit, filters...)
+}
+
+// runTrustedCommandInput is runTrustedCommandLimit with stdin as the tool's
+// standard input; nil means none.
+func runTrustedCommandInput(ctx context.Context, path string, args []string, stdin []byte, limit int, filters ...outputFilter) (commandResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -115,7 +129,7 @@ func runTrustedCommand(ctx context.Context, path string, args []string, filters 
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Env = []string{"PATH=/usr/bin:/bin", "LC_ALL=C", "LANG=C"}
 	cmd.Dir = "/"
-	stdout := &limitedBuffer{limit: defaultOutputLimit}
+	stdout := &limitedBuffer{limit: limit}
 	stderr := &limitedBuffer{limit: stderrLimit}
 	var out io.Writer = stdout
 	for _, filter := range filters {
@@ -123,10 +137,16 @@ func runTrustedCommand(ctx context.Context, path string, args []string, filters 
 	}
 	cmd.Stdout = out
 	cmd.Stderr = stderr
-	cmd.Stdin = nil
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = time.Second
-	err := cmd.Run()
+	// The timeout above is this process's: a managed hook ends with os.Exit
+	// once its answer is out, and a getent its failure-row lookup started
+	// kept running for as long as NSS stalled, one more for each hook call.
+	// On Linux RunTree has the kernel kill the tool with this process.
+	err := processutil.RunTree(cmd)
 	if stdout.exceeded {
 		return commandResult{}, errOutputLimit
 	}

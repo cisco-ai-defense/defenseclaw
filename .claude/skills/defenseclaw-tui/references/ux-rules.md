@@ -76,7 +76,7 @@ letters on purpose.
 | `r` / `R` | Registries panel (many panels use `r` for refresh locally) | global shortcut |
 | `P` | Policies panel | global shortcut (being added) |
 | `t` | Pinned no-op at the app level (a test asserts it) | don't bind globally |
-| `q` | Local close (closes the drawer or overlay; otherwise a no-op, never quits) | app binding |
+| `q` | Close the drawer, overlay or detail; quit when nothing is open (never while a command runs) | app binding |
 | `ctrl+c` | Cancel the running command, or quit | app binding (priority) |
 | `:` / `ctrl+k` | Command palette | app binding |
 | `?` | Help overlay | app binding |

@@ -1,7 +1,7 @@
 # Guardrail quickstart
 
 Use the published
-[first-guardrail walkthrough](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/first-guardrail/)
+[first-guardrail walkthrough](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/quickstart/)
 and
 [guardrail setup guide](https://cisco-ai-defense.github.io/defenseclaw/docs/guardrail/).
 

@@ -29,6 +29,7 @@ what the CI gate runs.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 import textwrap
@@ -235,6 +236,20 @@ def _consumer_files(entry: EnvVar) -> str:
     return ", ".join(f"`{loc}`" for loc in seen)
 
 
+def _public_entries(category: str, registry: Registry) -> list[EnvVar]:
+    """Entries of one category that belong on the public page.
+
+    Rows whose every consumer is under packaging/cowork-vm/ are left out: the
+    VM sensor is documented in a later release. The coverage test still checks
+    them against the real files.
+    """
+    return [
+        e
+        for e in registry.by_category(category)
+        if not (e.consumers and all(c.location.startswith("packaging/cowork-vm/") for c in e.consumers))
+    ]
+
+
 def _render_table(category: str, *, mdx: bool, registry: Registry) -> str:
     """Render one category's MDX-safe table.
 
@@ -243,7 +258,7 @@ def _render_table(category: str, *, mdx: bool, registry: Registry) -> str:
     policy) and what it does (purpose, security concern, and the files that
     read it).
     """
-    entries = sorted(registry.by_category(category), key=lambda e: e.name)
+    entries = sorted(_public_entries(category, registry), key=lambda e: e.name)
     if not entries:
         return "\n*(no entries in this category)*\n"
 
@@ -291,7 +306,7 @@ def _render_block(*, mdx: bool) -> str:
         if mdx and category == CATEGORY_TEST_FIXTURE:
             # Test-only switches are listed for completeness but collapsed so
             # they don't read as operator settings.
-            count = len(registry.by_category(category))
+            count = len(_public_entries(category, registry))
             chunks.append(
                 "These variables exist for DefenseClaw's own test suites. Do not "
                 "set them on a real install."
@@ -377,7 +392,7 @@ _DEFAULT_MDX_TEMPLATE = textwrap.dedent(
     - [`cli/defenseclaw/envvars.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/envvars.py) — Python loader.
     - [`internal/envvars/registry.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/envvars/registry.go) — Go loader.
     - [Reference → Keys](/docs/reference/keys) — credential resolution order.
-    - [Observability → Redaction](/docs/observability/redaction) — v8 profiles and display-only `DEFENSECLAW_REVEAL_PII`.
+    - [Reference → Redaction](/docs/observability/redaction) — v8 profiles and display-only `DEFENSECLAW_REVEAL_PII`.
     - [Reference → Fail modes](/docs/reference/fail-modes) — `DEFENSECLAW_FAIL_MODE` / `DEFENSECLAW_STRICT_AVAILABILITY`.
     """
 )
@@ -423,7 +438,17 @@ def write_bundled_registry() -> bool:
     )
     if source_bytes != old_bundled:
         _TARGET_BUNDLED_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
-        _TARGET_BUNDLED_REGISTRY.write_bytes(source_bytes)
+        # Replace the mirror in one step: a reader (a --check, a test that
+        # loads the bundled registry) never sees it empty or half written
+        # while a `make _bundle-data` publishes it (GAP-0794).
+        staged = _TARGET_BUNDLED_REGISTRY.with_name(
+            f".{_TARGET_BUNDLED_REGISTRY.name}.{os.getpid()}.tmp"
+        )
+        try:
+            staged.write_bytes(source_bytes)
+            os.replace(staged, _TARGET_BUNDLED_REGISTRY)
+        finally:
+            staged.unlink(missing_ok=True)
         return True
     return False
 

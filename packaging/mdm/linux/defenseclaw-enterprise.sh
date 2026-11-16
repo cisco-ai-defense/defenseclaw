@@ -36,6 +36,7 @@
 #       [--allowed-team-id TEAMID]... (macOS signed)
 #       [--gpg-keyring FILE] [--signature FILE | --signature-url URL] (Linux signed)
 #       [--config-file FILE | --config-stdin]
+#       [--cowork-package FILE] [--cowork-signature FILE] (macOS ensure)
 #       [--secret-name NAME (--secret-file FILE | --secret-stdin)]
 #       [--bundle-file FILE.dcbundle] [--trust-anchor-file FILE]
 #       [--format json|jamf]
@@ -49,8 +50,11 @@
 # Signed policy bundles: --trust-anchor-file installs the trust anchor file
 # (root-only writable) and turns on bundle mode; --bundle-file applies a
 # signed bundle with `enterprise bundle apply` after the package step and the
-# credential. When the apply fails, the bundle in force keeps enforcing and
-# the trust anchor file this run replaced is put back. Script-only MDMs can
+# credential. When the installed gateway has `enterprise bundle anchors
+# install` (management_contract 1 in --version-json), the wrapper installs the
+# anchor file with it, under the lifecycle lock; with an older gateway it
+# writes the file itself. When the apply fails, the bundle in force keeps
+# enforcing and the trust anchor file this run replaced is put back. Script-only MDMs can
 # paste the anchor file and the base64 of the bundle into the settings below.
 # A bundle carries its own config. A config given with it (--config-file,
 # --config-stdin or the inline config) is the base config. Its guardrail:
@@ -87,6 +91,8 @@ DC_SIGNATURE=""             # Linux signed: detached signature (default: <source
 DC_SIGNATURE_URL=""         # Linux signed: or an https:// URL for it
 DC_PRODUCT_VERSION=""       # refuse unless the source is exactly this version
 DC_CONFIG_FILE=""           # absolute path of the administrator config
+DC_COWORK_PACKAGE=""        # local release archive; config supplies its SHA-256
+DC_COWORK_SIGNATURE=""      # optional detached signature; config supplies its SHA-256
 DC_SECRET_NAME=""           # e.g. ai-defense-api-key (value only via file or stdin)
 DC_SECRET_FILE=""
 DC_REFUSE_CAPABILITY_LOSS=0 # opt in: refuse a bundle that disables an enforced capability
@@ -140,14 +146,30 @@ DC_CHILD=""
 DC_RESULT=""
 DC_CONFIG_STAGED=""
 DC_CONFIG_ORIGIN=""
+DC_COWORK_PACKAGE_STAGED=""
+DC_COWORK_SIGNATURE_STAGED=""
 DC_PACKAGE_ACTION=""   # install | upgrade when the package manager ran
 DC_PACKAGE_PREVIOUS="" # the version it replaced
 DC_PACKAGE_VERSION=""  # the version it installed
 DC_INSTALL_ROOT=""     # the install tree whose volume the package fills
 DC_ANCHORS_PREVIOUS="" # staged copy of the trust anchor file this run replaced
 DC_ANCHORS_CHANGED=0   # 1 when this run installed a different trust anchor file
+DC_ANCHORS_COMMITTED=0 # 1 when that file stays after a successful run (dc_annotate_anchors_step)
+DC_ANCHORS_VERB=0      # 1 when the installed gateway installs it (enterprise bundle anchors install)
+DC_ANCHORS_SOURCE=""   # the private copy of the anchor file that command reads
+DC_ANCHORS_RESULT=""   # its result: installed, replaced or unchanged
 DC_DEPLOYMENT_RECORD="" # committed binary digests for same-version repair
 DC_PACKAGE_RESULT=""   # the result the package's own install scripts write
+DC_TRUST_ACL=""        # the ACL entry dc_trusted_path refused, for messages (set -u: read before any check ran)
+DC_SECRETS_DIR=""      # the deployment's credential store (dc_layout)
+DC_SECRET_ROTATED=0    # 1 while a credential stored with --bundle waits for that bundle to apply
+DC_SECRET_PREVIOUS_SET=0 # 1 when a value was stored before it, 0 when none was
+DC_SECRET_GATEWAY=""   # the gateway that stored it, which puts the old value back
+DC_SECRET_CONFIRMED="" # manifest SHA-256 of the bundle confirmed before the rotation, or none
+DC_GATEWAY_BEFORE=0    # 1 when a gateway was installed before this run delivered anything
+DC_ROTATION_LOCK_PID="" # the process that holds the rotation journal lock for this run
+DC_JOURNAL_DIR=""      # root-only credential rotation journal (dc_layout)
+DC_INSTALLED_CONFIG="" # the deployment's installed config.yaml (dc_layout)
 
 dc_platform() {
     case "$(uname -s)" in
@@ -200,6 +222,18 @@ dc_log() {
 }
 
 dc_cleanup() {
+    # A failed or interrupted run puts back the credential it rotated, with
+    # the gateway that stored it, before the stage (which may hold that
+    # gateway) goes.
+    dc_restore_secret || true
+    dc_rotation_unlock
+    [ -z "$DC_ANCHORS_SOURCE" ] || rm -f "$DC_ANCHORS_SOURCE"
+    # A failed or interrupted apply must leave the as-found trust anchors.
+    if ! dc_restore_anchors; then
+        # Keep the root-only backup for an administrator if restoration failed.
+        dc_log "kept $DC_STAGE because the previous trust anchor could not be restored"
+        return 0
+    fi
     if [ -n "$DC_STAGE" ] && [ -d "$DC_STAGE" ]; then
         rm -rf "$DC_STAGE"
     fi
@@ -209,7 +243,10 @@ dc_cleanup() {
 # so the command does not finish (or store a credential) after the run was
 # reported failed.
 dc_stop_child() {
-    [ -z "$DC_CHILD" ] || kill "$DC_CHILD" 2>/dev/null || true
+    [ -n "$DC_CHILD" ] || return 0
+    kill "$DC_CHILD" 2>/dev/null || true
+    wait "$DC_CHILD" 2>/dev/null || true
+    DC_CHILD=""
 }
 
 # dc_sweep_stages <parent>: remove the staging folders of earlier runs that
@@ -237,20 +274,34 @@ dc_sweep_stages() {
 # payload's gateway cannot run, so on Linux the default is a root-only folder
 # of its own (GAP-0752); --staging-dir names another one.
 dc_stage_parent() {
-    DC_STAGE_PARENT=$DC_STAGING_DIR
+    DC_STAGE_PARENT=$DC_STAGING_DIR DC_TRUST_ACL=""
     if [ -z "$DC_STAGE_PARENT" ]; then
         if [ "$DC_SCRIPT_OS" = darwin ]; then
-            DC_STAGE_PARENT=/var/tmp
-            return 0
+            if [ -n "$DC_COWORK_PACKAGE$DC_COWORK_SIGNATURE" ]; then
+                # Cowork sources require every ancestor to resist writes;
+                # /var/tmp is sticky but still publicly writable.
+                DC_STAGE_PARENT=/private/var/root
+            else
+                DC_STAGE_PARENT=/var/tmp
+                return 0
+            fi
+        else
+            DC_STAGE_PARENT=/var/lib/defenseclaw-mdm
         fi
-        DC_STAGE_PARENT=/var/lib/defenseclaw-mdm
-        [ -d "$DC_STAGE_PARENT" ] || mkdir -m 0700 "$DC_STAGE_PARENT" 2>/dev/null ||
+        # A concurrent first run may create it first: the folder existing
+        # is what counts, and the trust check below decides (GAP-1850).
+        [ -d "$DC_STAGE_PARENT" ] || mkdir -m 0700 "$DC_STAGE_PARENT" 2>/dev/null || [ -d "$DC_STAGE_PARENT" ] ||
             dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_untrusted "cannot create the staging folder $DC_STAGE_PARENT"
     fi
     case "$DC_STAGE_PARENT" in
         /*) ;;
         *) dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "--staging-dir must be an absolute path" ;;
     esac
+    if [ ! -e "$DC_STAGE_PARENT" ] && [ ! -L "$DC_STAGE_PARENT" ]; then
+        # The wrapper creates only its Linux default; a --staging-dir folder
+        # is the administrator's (GAP-0030: this read as a shell error).
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_untrusted "the staging folder $DC_STAGE_PARENT does not exist; create it as a root-owned directory that only root can write (mkdir -m 0700), or leave out --staging-dir"
+    fi
     if [ ! -d "$DC_STAGE_PARENT" ] || ! dc_trusted_path "$DC_STAGE_PARENT"; then
         dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_untrusted "the staging folder $DC_STAGE_PARENT is not a root-owned directory that only root can write$DC_TRUST_ACL"
     fi
@@ -419,6 +470,26 @@ dc_stage_file() {
     dc_read_bounded "$dest" "$limit" "$label" <"$src"
 }
 
+# Cowork files are untrusted inputs until the lifecycle matches config pins.
+# Copy them privately before installing anything; the lifecycle persists them
+# in its transaction, so this wrapper never writes the configured source_dir.
+dc_stage_cowork() {
+    DC_COWORK_PACKAGE_STAGED="" DC_COWORK_SIGNATURE_STAGED=""
+    if [ -n "$DC_COWORK_PACKAGE" ]; then
+        cowork_name=$(basename "$DC_COWORK_PACKAGE")
+        case "$cowork_name" in
+            defenseclaw-cowork-amd64.tar.gz | defenseclaw-cowork-arm64.tar.gz) ;;
+            *) dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "--cowork-package must name defenseclaw-cowork-amd64.tar.gz or defenseclaw-cowork-arm64.tar.gz" ;;
+        esac
+        DC_COWORK_PACKAGE_STAGED="$DC_STAGE/$cowork_name"
+        dc_stage_file "$DC_COWORK_PACKAGE" "$DC_COWORK_PACKAGE_STAGED" 536870912 "Cowork package"
+    fi
+    if [ -n "$DC_COWORK_SIGNATURE" ]; then
+        DC_COWORK_SIGNATURE_STAGED="$DC_STAGE/cowork-package.sig"
+        dc_stage_file "$DC_COWORK_SIGNATURE" "$DC_COWORK_SIGNATURE_STAGED" 1048576 "Cowork signature"
+    fi
+}
+
 # Read the raw credential before putting it in a shell variable, since command
 # substitution discards NUL bytes. The temporary copy is removed immediately.
 dc_read_secret() {
@@ -483,6 +554,8 @@ dc_parse_args() {
             --product-version) DC_PRODUCT_VERSION=${2:-}; shift 2 ;;
             --config-file) DC_CONFIG_FILE=${2:-}; shift 2 ;;
             --config-stdin) DC_CONFIG_STDIN=1; shift ;;
+            --cowork-package) DC_COWORK_PACKAGE=${2:-}; shift 2 ;;
+            --cowork-signature) DC_COWORK_SIGNATURE=${2:-}; shift 2 ;;
             --secret-name) DC_SECRET_NAME=${2:-}; shift 2 ;;
             --secret-file) DC_SECRET_FILE=${2:-}; shift 2 ;;
             --secret-stdin) DC_SECRET_STDIN=1; shift ;;
@@ -546,9 +619,16 @@ dc_validate_args() {
         dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "a secret value needs --secret-name"
     fi
     if [ "$DC_ACTION" != ensure ] &&
-        { [ -n "$DC_SOURCE$DC_SOURCE_URL$DC_CONFIG_FILE$DC_SECRET_NAME$DC_SECRET_FILE$DC_BUNDLE_FILE$DC_TRUST_ANCHOR_FILE" ] ||
+        { [ -n "$DC_SOURCE$DC_SOURCE_URL$DC_CONFIG_FILE$DC_SECRET_NAME$DC_SECRET_FILE$DC_BUNDLE_FILE$DC_TRUST_ANCHOR_FILE$DC_COWORK_PACKAGE$DC_COWORK_SIGNATURE" ] ||
             [ "$DC_CONFIG_STDIN$DC_SECRET_STDIN" != 00 ] || [ "$DC_REFUSE_CAPABILITY_LOSS" = 1 ]; }; then
         dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "--action $DC_ACTION is read-only and takes no source, config, secret, bundle or trust anchor file"
+    fi
+    if [ -n "$DC_COWORK_PACKAGE$DC_COWORK_SIGNATURE" ]; then
+        [ "$DC_SCRIPT_OS" = darwin ] ||
+            dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "Cowork VM host delivery is not supported on Linux"
+        if [ -n "$DC_BUNDLE_FILE" ] || dc_inline_bundle | grep -q '[^[:space:]]'; then
+            dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "Cowork artifact inputs cannot be combined with a policy bundle; deliver them with an administrator config"
+        fi
     fi
     if [ "$DC_REFUSE_CAPABILITY_LOSS" = 1 ] && [ -z "$DC_BUNDLE_FILE" ] && ! dc_inline_bundle | grep -q '[^[:space:]]'; then
         dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "--refuse-capability-loss requires a bundle"
@@ -601,6 +681,9 @@ dc_layout() {
         DC_INSTALL_ROOT=/opt/cisco/defenseclaw
         DC_DEPLOYMENT_RECORD=/opt/cisco/defenseclaw/lifecycle/deployment.json
         DC_ANCHORS=/opt/cisco/defenseclaw/etc/trust/bundle-anchors.json
+        DC_SECRETS_DIR=/opt/cisco/defenseclaw/etc/secrets
+        DC_INSTALLED_CONFIG=/opt/cisco/defenseclaw/etc/config.yaml
+        DC_JOURNAL_DIR=/var/db/defenseclaw-mdm/rotation
         DC_PACKAGE_RESULT=/opt/cisco/defenseclaw/lifecycle/last-package-result.json
         DC_OS_GROUP=macos
         [ -n "$DC_LOG" ] || DC_LOG=/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log
@@ -609,6 +692,9 @@ dc_layout() {
         DC_INSTALL_ROOT=/opt/defenseclaw
         DC_DEPLOYMENT_RECORD=/var/lib/defenseclaw-enterprise/deployment.json
         DC_ANCHORS=/etc/defenseclaw/trust/bundle-anchors.json
+        DC_SECRETS_DIR=/etc/defenseclaw/secrets
+        DC_INSTALLED_CONFIG=/etc/defenseclaw/config.yaml
+        DC_JOURNAL_DIR=/var/lib/defenseclaw-mdm/rotation
         DC_PACKAGE_RESULT=/var/lib/defenseclaw-enterprise/last-package-result.json
         DC_OS_GROUP=linux
         [ -n "$DC_LOG" ] || DC_LOG=/var/log/defenseclaw-enterprise-mdm.log
@@ -765,7 +851,11 @@ dc_install_package() {
             command -v rpm >/dev/null 2>&1 || dc_fail_result "$DC_EXIT_FAILURE" mdm_package_manager_missing "rpm is not installed; use the .deb or the payload archive"
             package=$(rpm -qp --qf '%{NAME}' "$file" 2>/dev/null || true)
             version=$(rpm -qp --qf '%{VERSION}-%{RELEASE}' "$file" 2>/dev/null || true)
+            arch=$(rpm -qp --qf '%{ARCH}' "$file" 2>/dev/null || true)
+            host_arch=$(rpm --eval '%{_arch}' 2>/dev/null || true)
             [ "$package" = "$DC_LINUX_PACKAGE" ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_wrong_package "the .rpm is '$package', not $DC_LINUX_PACKAGE"
+            [ -n "$host_arch" ] && [ "$arch" = "$host_arch" ] ||
+                dc_fail_result "$DC_EXIT_FAILURE" mdm_wrong_architecture "the .rpm is for $arch; this host needs $host_arch"
             dc_require_product_version "$(dc_package_release_version "$version")"
             # An interrupted upgrade can leave multiple installed versions.
             # Use the newest one for the repair decision and result metadata.
@@ -952,6 +1042,34 @@ dc_annotate_package_step() {
             /^  "noop_reason": / { next }
             /^  "warnings": \[$/ { print; print "    " warning ","; warned = 1; next }
             /^  "exit_code": / && !warned { print "  \"warnings\": [" warning "],"; warned = 1 }
+            { print }
+        ' "$DC_RESULT" >"$annotated"; then
+        DC_RESULT=$annotated
+    fi
+}
+
+# dc_annotate_anchors_step: after a successful run, make the result document
+# report the trust anchor file this run installed. The lifecycle result is
+# the ensure that ran before the anchors, or the bundle apply that found the
+# confirmed bundle again: its "noop": true ("compliant", "already_applied")
+# would tell the MDM nothing changed although the anchors did (GAP-0034). The
+# lifecycle prints the document with two-space indentation, one top-level
+# field per line.
+dc_annotate_anchors_step() {
+    { [ "$DC_ANCHORS_CHANGED" = 1 ] || [ "$DC_ANCHORS_COMMITTED" = 1 ]; } && [ -n "$DC_RESULT" ] || return 0
+    if [ -n "$DC_ANCHORS_PREVIOUS" ]; then
+        change="replaced the trust anchors in $DC_ANCHORS"
+    else
+        change="installed trust anchors in $DC_ANCHORS"
+    fi
+    annotated="$DC_STAGE/result.anchors.json"
+    if DC_AWK_CHANGE="\"$(dc_json_escape "$change")\"" \
+        awk '
+            BEGIN { change = ENVIRON["DC_AWK_CHANGE"] }
+            /^  "noop": true,$/ { print "  \"noop\": false,"; next }
+            /^  "noop_reason": / { next }
+            /^  "changes": \[$/ { print; print "    " change ","; noted = 1; next }
+            /^  "exit_code": / && !noted { print "  \"changes\": [" change "],"; noted = 1 }
             { print }
         ' "$DC_RESULT" >"$annotated"; then
         DC_RESULT=$annotated
@@ -1311,9 +1429,9 @@ dc_relabel_config_source() {
     DC_RESULT="$DC_STAGE/result-source.json"
 }
 
-# dc_put_anchors <src>: atomically replace the trust anchor file with src
-# (root-owned, 0644, in a root-owned 0755 trust folder next to the config).
-dc_put_anchors() {
+# dc_anchors_dir: create the root-owned 0755 trust folder next to the config
+# and set dir to it.
+dc_anchors_dir() {
     dir=$(dirname "$DC_ANCHORS")
     [ -d "$(dirname "$dir")" ] ||
         dc_fail_result "$DC_EXIT_FAILURE" mdm_anchor_install_failed "$(dirname "$dir") is missing; install the deployment before the trust anchor file"
@@ -1324,6 +1442,70 @@ dc_put_anchors() {
     if [ -L "$dir" ] || ! chown 0:0 "$dir" || ! chmod 0755 "$dir"; then
         dc_fail_result "$DC_EXIT_FAILURE" mdm_anchor_install_failed "cannot make $dir a root-only folder"
     fi
+}
+
+# dc_anchors_verb: succeed when the installed gateway has `enterprise bundle
+# anchors install`. The probe is the management agent contract's (section
+# 3): --version-json reports management_contract 1 or later. Builds before
+# the contract (1.0.2 and earlier) print no such member. A --help probe
+# would not do: those builds answer `enterprise bundle anchors install
+# --help` with the enterprise help and exit 0.
+dc_anchors_verb() {
+    [ -x "$DC_GATEWAY" ] && dc_trusted_path "$DC_GATEWAY" || return 1
+    probe=$("$DC_GATEWAY" --version-json </dev/null 2>/dev/null) || return 1
+    contract=$(printf '%s\n' "$probe" |
+        sed -n 's/^{.*"management_contract":[[:space:]]*\([1-9][0-9]\{0,3\}\)[[:space:]]*[,}].*$/\1/p' | head -n 1)
+    [ -n "$contract" ]
+}
+
+# dc_run_anchors_verb <src>: install src with the installed gateway's
+# `enterprise bundle anchors install`, which takes the lifecycle lock, checks
+# the file and puts the previous one back when the installed file fails its
+# check; set DC_ANCHORS_RESULT. The command reads only a file that no account
+# but root can change, with no link on its path; the macOS staging folder
+# under /var/tmp (sticky, behind the /var link) is not one, so it reads a
+# private copy in the trust folder. A refusal is mdm_anchor_install_failed
+# with the command's exit code: 1 refused, 2 invalid arguments, 75 busy
+# after the lock wait.
+dc_run_anchors_verb() {
+    dc_anchors_dir
+    DC_ANCHORS_SOURCE="$dir/.bundle-anchors.json.mdm-source-$$"
+    if ! cp "$1" "$DC_ANCHORS_SOURCE" || ! chown 0:0 "$DC_ANCHORS_SOURCE" || ! chmod 0600 "$DC_ANCHORS_SOURCE"; then
+        rm -f "$DC_ANCHORS_SOURCE"
+        DC_ANCHORS_SOURCE=""
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_anchor_install_failed "cannot write a copy of the trust anchor file in $dir"
+    fi
+    set +e
+    "$DC_GATEWAY" enterprise bundle anchors install --file "$DC_ANCHORS_SOURCE" --lock-wait 10m --json \
+        >"$DC_STAGE/anchors.json" 2>"$DC_STAGE/anchors.err" </dev/null &
+    DC_CHILD=$!
+    wait "$DC_CHILD"
+    status=$?
+    DC_CHILD=""
+    set -e
+    rm -f "$DC_ANCHORS_SOURCE"
+    DC_ANCHORS_SOURCE=""
+    document=$(tr -d '\n' <"$DC_STAGE/anchors.json")
+    [ -z "$document" ] || dc_log "anchors install $document"
+    DC_ANCHORS_RESULT=$(printf '%s\n' "$document" | sed -n 's/^[^[]*"result":[[:space:]]*"\([a-z]*\)".*$/\1/p')
+    [ "$status" != 0 ] || return 0
+    errors=""
+    case "$document" in *'"errors"'*) errors=${document##*'"errors"'} ;; esac
+    code=$(printf '%s\n' "$errors" | sed -n 's/^[^}]*"code":[[:space:]]*"\([a-z_]*\)".*$/\1/p')
+    message=$(printf '%s\n' "$errors" | sed -n 's/^[^}]*"message":[[:space:]]*"\([^"]*\)".*$/\1/p')
+    [ -n "$code$message" ] || message=$(head -c 1024 "$DC_STAGE/anchors.err" 2>/dev/null || true)
+    case "$status" in 1 | 2 | 75) ;; *) status=$DC_EXIT_FAILURE ;; esac
+    dc_fail_result "$status" mdm_anchor_install_failed "enterprise bundle anchors install did not install the trust anchor file${code:+ ($code)}: $message"
+}
+
+# dc_put_anchors <src>: atomically replace the trust anchor file with src
+# (root-owned, 0644, in a root-owned 0755 trust folder next to the config).
+# The writer for an installed gateway without `enterprise bundle anchors
+# install`; it stays while releases before the management contract (1.0.2
+# and earlier) are supported, since MDMs upload the kit apart from the
+# package and can run it against them.
+dc_put_anchors() {
+    dc_anchors_dir
     next="$dir/.bundle-anchors.json.mdm-$$"
     if ! cp "$1" "$next" || ! chown 0:0 "$next" || ! chmod 0644 "$next" || ! mv -f "$next" "$DC_ANCHORS"; then
         rm -f "$next"
@@ -1333,11 +1515,15 @@ dc_put_anchors() {
         dc_fail_result "$DC_EXIT_FAILURE" mdm_anchor_install_failed "$DC_ANCHORS or one of its folders is not root-owned or is writable by other accounts$DC_TRUST_ACL"
 }
 
-# dc_install_anchors <staged>: install the staged trust anchor file unless the
-# installed one is identical, and keep the file it replaces for
-# dc_restore_anchors.
+# dc_install_anchors <staged>: install the staged trust anchor file and keep
+# the file it replaces for dc_restore_anchors. The installed gateway's
+# command (dc_anchors_verb) reports whether the file changed; without it the
+# wrapper writes the file itself and skips an identical one.
 dc_install_anchors() {
-    if [ -f "$DC_ANCHORS" ] && [ ! -L "$DC_ANCHORS" ] &&
+    DC_ANCHORS_VERB=0
+    if dc_anchors_verb; then
+        DC_ANCHORS_VERB=1
+    elif [ -f "$DC_ANCHORS" ] && [ ! -L "$DC_ANCHORS" ] &&
         [ "$(dc_sha256 "$1")" = "$(dc_sha256 "$DC_ANCHORS" 2>/dev/null || true)" ]; then
         dc_log "trust anchor file unchanged"
         return 0
@@ -1350,6 +1536,17 @@ dc_install_anchors() {
         cp "$DC_ANCHORS" "$DC_ANCHORS_PREVIOUS" ||
             dc_fail_result "$DC_EXIT_FAILURE" mdm_anchor_install_failed "cannot keep a copy of $DC_ANCHORS"
     fi
+    if [ "$DC_ANCHORS_VERB" = 1 ]; then
+        dc_run_anchors_verb "$1"
+        if [ "$DC_ANCHORS_RESULT" = unchanged ]; then
+            DC_ANCHORS_PREVIOUS=""
+            dc_log "trust anchor file unchanged"
+            return 0
+        fi
+        DC_ANCHORS_CHANGED=1
+        dc_log "installed trust anchor file $DC_ANCHORS with enterprise bundle anchors install"
+        return 0
+    fi
     DC_ANCHORS_CHANGED=1
     dc_put_anchors "$1"
     dc_log "installed trust anchor file $DC_ANCHORS"
@@ -1357,20 +1554,34 @@ dc_install_anchors() {
 
 # dc_restore_anchors: after a failed bundle apply, put back the trust anchor
 # file this run replaced (or remove the one it added), so a bad anchor file
-# never replaces the one that verified the bundle in force.
+# never replaces the one that verified the bundle in force. It uses the
+# writer that installed the file.
 dc_restore_anchors() {
     [ "$DC_ANCHORS_CHANGED" = 1 ] || return 0
-    DC_ANCHORS_CHANGED=0
     # A subshell: a restore that fails is logged, and the apply result stays
     # the document this run prints.
     if [ -n "$DC_ANCHORS_PREVIOUS" ]; then
-        ( dc_put_anchors "$DC_ANCHORS_PREVIOUS" ) >/dev/null || {
+        writer=dc_put_anchors
+        [ "$DC_ANCHORS_VERB" = 0 ] || writer=dc_run_anchors_verb
+        ( "$writer" "$DC_ANCHORS_PREVIOUS" ) >/dev/null || {
             dc_log "could not restore the previous trust anchor file $DC_ANCHORS"
-            return 0
+            # The final trust check can fail after the previous file was put
+            # back. Otherwise invalidate the new file without removing the
+            # path: its presence keeps bundle mode on and refuses the file.
+            if [ ! -L "$DC_ANCHORS" ] &&
+                ! cmp -s "$DC_ANCHORS_PREVIOUS" "$DC_ANCHORS"; then
+                ( : >"$DC_ANCHORS" ) 2>/dev/null ||
+                    dc_log "could not invalidate the trust anchor file $DC_ANCHORS"
+            fi
+            return 1
         }
     else
-        rm -f "$DC_ANCHORS"
+        rm -f "$DC_ANCHORS" || {
+            dc_log "could not remove the newly installed trust anchor file $DC_ANCHORS"
+            return 1
+        }
     fi
+    DC_ANCHORS_CHANGED=0
     dc_log "restored the previous trust anchor file after the failed bundle apply"
 }
 
@@ -1420,6 +1631,386 @@ dc_run_lifecycle_retry() {
         sleep 10
     done
     return "$status"
+}
+
+# Read the first error message from the gateway's lifecycle JSON. The CLI
+# writes a refused --json secret set only to stdout, with no stderr text.
+dc_secret_json_error() {
+    head -c 65536 "$1" 2>/dev/null | awk '
+        { document = document $0 }
+        END {
+            if (!match(document, /"errors"[[:space:]]*:[[:space:]]*\[[[:space:]]*\{/)) exit
+            document = substr(document, RSTART + RLENGTH)
+            if (!match(document, /"message"[[:space:]]*:[[:space:]]*"/)) exit
+            document = substr(document, RSTART + RLENGTH)
+            message = ""
+            for (i = 1; i <= length(document); i++) {
+                c = substr(document, i, 1)
+                if (c == "\"") { print message; exit }
+                if (c == "\\") {
+                    i++
+                    c = substr(document, i, 1)
+                    if (c == "n" || c == "r" || c == "t") c = " "
+                    else if (c == "b" || c == "f") c = ""
+                    else if (c == "u") {
+                        hex = substr(document, i + 1, 4)
+                        if (length(hex) != 4 || hex ~ /[^[:xdigit:]]/) exit
+                        value = 0
+                        for (j = 1; j <= 4; j++) value = value * 16 + index("0123456789abcdef", tolower(substr(hex, j, 1))) - 1
+                        c = value >= 32 && value <= 126 ? sprintf("%c", value) : "\\u" hex
+                        i += 4
+                    }
+                    else if (c != "\"" && c != "\\" && c != "/") exit
+                }
+                message = message c
+            }
+        }
+    '
+}
+
+# dc_secret_set_bundle <gateway>: succeed when the gateway's `enterprise
+# secret set` takes --bundle: --version-json reports secret_set_bundle (from
+# 1.0.4). An older build binds no credential value and refuses the flag.
+dc_secret_set_bundle() {
+    probe=$("$1" --version-json </dev/null 2>/dev/null) || return 1
+    printf '%s\n' "$probe" | grep -q '"secret_set_bundle":[[:space:]]*true'
+}
+
+# dc_read_stored_secret: print credential DC_SECRET_NAME as the deployment
+# stores it. Returns 1 when none is stored and 2 when the path is a link,
+# not a regular file, or cannot be read.
+dc_read_stored_secret() {
+    dc_stored="$DC_SECRETS_DIR/$DC_SECRET_NAME"
+    if [ ! -e "$dc_stored" ] && [ ! -L "$dc_stored" ]; then return 1; fi
+    if [ -L "$dc_stored" ] || [ ! -f "$dc_stored" ]; then return 2; fi
+    head -c "$DC_MAX_SECRET_BYTES" "$dc_stored" 2>/dev/null || return 2
+}
+
+# dc_save_secret_previous <gateway>: before a credential is stored with the
+# bundle it came with (secret set --bundle), journal the value it replaces, or
+# that none was stored, on disk (dc_journal_rotation). The rotation and that bundle's
+# apply are one transaction: until the apply succeeds the confirmed bundle
+# signs only the old value, so a failed or interrupted run puts it back
+# (dc_restore_secret). A stored credential that is not a regular file is
+# not rotated.
+dc_save_secret_previous() {
+    dc_saved_status=0
+    dc_read_stored_secret >/dev/null || dc_saved_status=$?
+    case "$dc_saved_status" in
+        0) DC_SECRET_PREVIOUS_SET=1 ;;
+        1) DC_SECRET_PREVIOUS_SET=0 ;;
+        *)
+            dc_fail_result "$DC_EXIT_FAILURE" mdm_secret_failed "the stored credential $DC_SECRETS_DIR/$DC_SECRET_NAME is a link, not a regular file, or cannot be read, so it was not rotated and the config was not applied"
+            ;;
+    esac
+    # ParseSecretValue in the CLI strips one trailing LF and then one CR.
+    # Hash those exact bytes now; the put-back compares the stored file
+    # under the lifecycle lock, so a later administrator save is retained.
+    dc_rotated_value=$secret_data
+    dc_lf='
+'
+    case "$dc_rotated_value" in *"$dc_lf") dc_rotated_value=${dc_rotated_value%"$dc_lf"} ;; esac
+    dc_cr=$(printf '\r')
+    case "$dc_rotated_value" in *"$dc_cr") dc_rotated_value=${dc_rotated_value%"$dc_cr"} ;; esac
+    printf '%s' "$dc_rotated_value" >"$DC_STAGE/rotation-value"
+    DC_SECRET_ROTATED_DIGEST=$(dc_sha256 "$DC_STAGE/rotation-value") ||
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_secret_failed "cannot record the value the credential rotation will store; nothing was rotated"
+    rm -f "$DC_STAGE/rotation-value"
+    dc_rotated_value=""
+    dc_journal_rotation "$1"
+    DC_SECRET_GATEWAY=$1
+    DC_SECRET_ROTATED=1
+}
+
+# The credential rotation journal (GAP-1173, GAP-1188). The rotation and
+# its bundle apply are one transaction, so what it replaces is kept on disk,
+# not only in memory: <name>.entry names the bundle confirmed before the
+# rotation, the SHA-256 of the value it stores, whether a value was stored
+# before and the SHA-256 of the installed config then; <name>.value holds
+# that earlier value. A failed run puts the credential back from it, and a
+# run that stopped before it settled (killed) is put back at the start of
+# the next ensure. The put-back (secret set|remove --undo-rotation) runs only
+# while the bundle confirmed before the rotation still is and does not sign
+# the value stored now; a credential the rotation added is removed although
+# the installed config references it only while that very config is
+# installed (--undo-config). Only the refusal rotation_confirmed proves the
+# rotation committed, so only then does the new value stay; any other
+# refusal (credential_in_use, credential_changed, secret_ref_mismatch)
+# proves nothing: the entry stays and is logged, and no other rotation runs
+# while it does.
+
+# dc_journal_ready: the journal folder exists and only root can change it.
+dc_journal_ready() {
+    dc_journal_parent=$(dirname "$DC_JOURNAL_DIR")
+    [ -d "$dc_journal_parent" ] || mkdir -m 0700 "$dc_journal_parent" 2>/dev/null || [ -d "$dc_journal_parent" ] || return 1
+    [ -d "$DC_JOURNAL_DIR" ] || mkdir -m 0700 "$DC_JOURNAL_DIR" 2>/dev/null || [ -d "$DC_JOURNAL_DIR" ] || return 1
+    [ ! -L "$DC_JOURNAL_DIR" ] && dc_trusted_path "$DC_JOURNAL_DIR" || return 1
+    case "$(dc_stat_mode "$DC_JOURNAL_DIR")" in *00) return 0 ;; esac
+    return 1
+}
+
+# dc_rotation_lock: hold the rotation journal lock ($DC_JOURNAL_DIR/.lock)
+# until this run ends, as the Windows wrapper holds rotation.lock: a second
+# run's settle must not put back the credential a running one just rotated,
+# before that run's bundle apply (GAP-1575). macOS has no flock command, so
+# a perl process takes flock(2) and keeps it while this shell runs; it waits
+# up to 10 minutes for a run that holds it.
+dc_rotation_lock() {
+    [ -z "${DC_ROTATION_LOCK_PID:-}" ] || return 0
+    dc_lock_out="$DC_STAGE/rotation-lock"
+    : >"$dc_lock_out"
+    perl -e 'use Fcntl qw(:flock O_RDWR O_CREAT O_NOFOLLOW);
+        sysopen(my $fh, $ARGV[0], O_RDWR | O_CREAT | O_NOFOLLOW, 0600) or exit 2;
+        flock($fh, LOCK_EX) or exit 3;
+        open(my $out, ">", $ARGV[2]) or exit 4; print $out "locked\n"; close $out;
+        sleep 1 while kill(0, $ARGV[1]);' "$DC_JOURNAL_DIR/.lock" "$$" "$dc_lock_out" </dev/null >/dev/null 2>&1 &
+    DC_ROTATION_LOCK_PID=$!
+    dc_waited=0
+    while ! grep -q locked "$dc_lock_out" 2>/dev/null; do
+        if ! kill -0 "$DC_ROTATION_LOCK_PID" 2>/dev/null || [ "$dc_waited" -ge 600 ]; then
+            dc_rotation_unlock
+            dc_fail_result "$DC_EXIT_BUSY" mdm_secret_failed "another wrapper run holds the credential rotation journal lock $DC_JOURNAL_DIR/.lock; nothing was rotated or put back: run ensure again"
+        fi
+        # Say that this run waits, and then once a minute, so a wait of up
+        # to 10 minutes is not read as a hang (GAP-2098).
+        if [ "$dc_waited" -eq 2 ] || { [ "$dc_waited" -gt 2 ] && [ $((dc_waited % 60)) -eq 0 ]; }; then
+            dc_log "waiting for the credential rotation journal lock $DC_JOURNAL_DIR/.lock, which another wrapper run holds (${dc_waited}s of at most 600s)"
+        fi
+        sleep 1
+        dc_waited=$((dc_waited + 1))
+    done
+    [ "$dc_waited" -le 2 ] || dc_log "took the credential rotation journal lock $DC_JOURNAL_DIR/.lock after waiting ${dc_waited}s"
+}
+
+# dc_rotation_unlock: release the rotation journal lock this run holds.
+dc_rotation_unlock() {
+    [ -n "${DC_ROTATION_LOCK_PID:-}" ] || return 0
+    kill "$DC_ROTATION_LOCK_PID" 2>/dev/null || true
+    wait "$DC_ROTATION_LOCK_PID" 2>/dev/null || true
+    DC_ROTATION_LOCK_PID=""
+}
+
+# dc_confirmed_bundle <gateway>: print the manifest SHA-256 of the
+# confirmed policy bundle (bundle status --json), or none when no bundle is
+# confirmed or the device is not managed yet; return 1 with the reason
+# printed when status cannot tell.
+dc_confirmed_bundle() {
+    set +e
+    "$1" enterprise bundle status --json </dev/null >"$DC_STAGE/bundle-status.json" 2>/dev/null
+    dc_bundle_status=$?
+    set -e
+    dc_doc=$(head -c 1048576 "$DC_STAGE/bundle-status.json" 2>/dev/null | tr -d '\r\n')
+    if [ "$dc_bundle_status" != 0 ]; then
+        if printf '%s' "$dc_doc" | grep -Eq '"code"[[:space:]]*:[[:space:]]*"not_managed"'; then
+            echo none
+            return 0
+        fi
+        echo "bundle status failed (exit $dc_bundle_status)"
+        return 1
+    fi
+    case "$dc_doc" in *'"current"'*) ;; *) echo "bundle status did not report the confirmed bundle"; return 1 ;; esac
+    dc_after=${dc_doc#*\"current\"}
+    if printf '%s' "$dc_after" | grep -Eq '^[[:space:]]*:[[:space:]]*null'; then
+        echo none
+        return 0
+    fi
+    dc_sha=$(printf '%s' "${dc_after%%\}*}" | sed -n 's/.*"manifest_sha256"[[:space:]]*:[[:space:]]*"\([0-9a-f]*\)".*/\1/p')
+    if [ "${#dc_sha}" != 64 ]; then
+        echo "bundle status reported no valid manifest digest for the confirmed bundle"
+        return 1
+    fi
+    echo "$dc_sha"
+}
+
+# dc_journal_rotation <gateway>: journal the credential DC_SECRET_NAME
+# before secret set --bundle replaces it. Refused while an earlier rotation
+# is not settled.
+dc_journal_rotation() {
+    dc_journal_ready ||
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_secret_failed "the credential journal $DC_JOURNAL_DIR is not a folder only root can change, so nothing was rotated and the config was not applied"
+    dc_rotation_lock
+    for dc_left in "$DC_JOURNAL_DIR"/*.entry; do
+        [ -e "$dc_left" ] || [ -L "$dc_left" ] || continue
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_secret_failed "an earlier credential rotation is not settled ($dc_left): each ensure tries to settle it first and logs why it could not; no credential is rotated until it is"
+    done
+    DC_SECRET_CONFIRMED=$(dc_confirmed_bundle "$1") ||
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_secret_failed "the confirmed policy bundle is unknown ($DC_SECRET_CONFIRMED), so nothing was rotated and the config was not applied"
+    dc_config_before=none
+    if [ -f "$DC_INSTALLED_CONFIG" ] && [ ! -L "$DC_INSTALLED_CONFIG" ]; then
+        dc_config_before=$(dc_sha256 "$DC_INSTALLED_CONFIG") ||
+            dc_fail_result "$DC_EXIT_FAILURE" mdm_secret_failed "cannot read the installed config before the rotation; nothing was rotated"
+    fi
+    dc_retire_rotation "$DC_SECRET_NAME"
+    dc_entry="$DC_JOURNAL_DIR/$DC_SECRET_NAME.entry"
+    dc_value="$DC_JOURNAL_DIR/$DC_SECRET_NAME.value"
+    dc_previous="absent"
+    if [ "$DC_SECRET_PREVIOUS_SET" = 1 ]; then
+        dc_previous="set"
+        (umask 077; head -c "$DC_MAX_SECRET_BYTES" "$DC_SECRETS_DIR/$DC_SECRET_NAME" >"$dc_value") ||
+            dc_fail_result "$DC_EXIT_FAILURE" mdm_secret_failed "cannot journal credential $DC_SECRET_NAME before its rotation; nothing was rotated"
+    fi
+    (umask 077; printf 'confirmed=%s\nrotated=%s\nprevious=%s\nconfig=%s\n' "$DC_SECRET_CONFIRMED" "$DC_SECRET_ROTATED_DIGEST" "$dc_previous" "$dc_config_before" >"$dc_entry.partial") &&
+        mv -f "$dc_entry.partial" "$dc_entry" ||
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_secret_failed "cannot journal credential $DC_SECRET_NAME before its rotation; nothing was rotated"
+}
+
+# dc_retire_rotation <name>: the rotation of credential name is settled.
+dc_retire_rotation() {
+    rm -f "${DC_JOURNAL_DIR:?}/${1:?}.entry" "${DC_JOURNAL_DIR:?}/${1:?}.value" "${DC_JOURNAL_DIR:?}/${1:?}.entry.partial"
+}
+
+# dc_journal_field <entry> <key>: print one field of a journal entry.
+dc_journal_field() {
+    sed -n "s/^$2=//p" "$1" | head -n 1
+}
+
+# dc_secret_json_code <file>: the first errors[].code of a gateway result.
+dc_secret_json_code() {
+    dc_doc=$(head -c 65536 "$1" 2>/dev/null | tr -d '\r\n')
+    case "$dc_doc" in *'"errors"'*) ;; *) return 0 ;; esac
+    dc_after=${dc_doc#*\"errors\"}
+    printf '%s' "${dc_after%%\}*}" | sed -n 's/.*"code"[[:space:]]*:[[:space:]]*"\([a-z0-9_]*\)".*/\1/p'
+}
+
+# dc_settle_rotation <gateway> <name>: put credential name back as its
+# journal entry says, unless the rotation committed; return 1 when the entry
+# could not be settled and stays.
+dc_settle_rotation() {
+    dc_entry="$DC_JOURNAL_DIR/$2.entry"
+    dc_value="$DC_JOURNAL_DIR/$2.value"
+    [ -e "$dc_entry" ] || [ -L "$dc_entry" ] || return 0
+    dc_valid=1
+    [ -f "$dc_entry" ] && [ ! -L "$dc_entry" ] || dc_valid=0
+    dc_confirmed="" dc_rotated="" dc_previous="" dc_config_before=""
+    if [ "$dc_valid" = 1 ]; then
+        dc_confirmed=$(dc_journal_field "$dc_entry" confirmed)
+        dc_rotated=$(dc_journal_field "$dc_entry" rotated)
+        dc_previous=$(dc_journal_field "$dc_entry" previous)
+        dc_config_before=$(dc_journal_field "$dc_entry" config)
+    fi
+    for dc_digest in "$dc_confirmed" "$dc_config_before"; do
+        case "$dc_digest" in none) ;; *[!0-9a-f]* | "") dc_valid=0 ;; *) [ "${#dc_digest}" = 64 ] || dc_valid=0 ;; esac
+    done
+    case "$dc_rotated" in *[!0-9a-f]* | "") dc_valid=0 ;; *) [ "${#dc_rotated}" = 64 ] || dc_valid=0 ;; esac
+    case "$dc_previous" in absent) ;; set) [ -f "$dc_value" ] && [ ! -L "$dc_value" ] || dc_valid=0 ;; *) dc_valid=0 ;; esac
+    if [ "$dc_valid" != 1 ]; then
+        dc_log "the credential journal entry $dc_entry is not one this wrapper writes, so it was not used and was left as it is; check credential $2, then delete it"
+        return 1
+    fi
+    dc_stored="$DC_SECRETS_DIR/$2"
+    # The state from before the rotation is already on disk.
+    if [ "$dc_previous" = set ] && [ -f "$dc_stored" ] && [ ! -L "$dc_stored" ] && cmp -s "$dc_value" "$dc_stored"; then
+        dc_retire_rotation "$2"
+        return 0
+    fi
+    if [ "$dc_previous" = absent ] && [ ! -e "$dc_stored" ] && [ ! -L "$dc_stored" ]; then
+        dc_retire_rotation "$2"
+        return 0
+    fi
+    set +e
+    if [ "$dc_previous" = set ]; then
+        "$1" enterprise secret set --name "$2" --from-stdin --lock-wait 10m --json --undo-rotation "$dc_confirmed" --if-stored "$dc_rotated" <"$dc_value" >"$DC_STAGE/secret-restore.json" 2>"$DC_STAGE/secret-restore.err"
+    else
+        "$1" enterprise secret remove --name "$2" --lock-wait 10m --json --undo-rotation "$dc_confirmed" --undo-config "$dc_config_before" --if-stored "$dc_rotated" </dev/null >"$DC_STAGE/secret-restore.json" 2>"$DC_STAGE/secret-restore.err"
+    fi
+    dc_restore_status=$?
+    set -e
+    if [ "$dc_restore_status" = 0 ]; then
+        dc_log "put back credential $2: the bundle that signs its new value did not apply"
+        dc_retire_rotation "$2"
+        return 0
+    fi
+    dc_restore_code=$(dc_secret_json_code "$DC_STAGE/secret-restore.json" || true)
+    if [ "$dc_restore_code" = rotation_confirmed ]; then
+        dc_log "kept credential $2: the bundle that signs its new value is confirmed (rotation_confirmed)"
+        dc_retire_rotation "$2"
+        return 0
+    fi
+    dc_restore_detail=$(dc_secret_json_error "$DC_STAGE/secret-restore.json" || true)
+    [ -n "$dc_restore_detail" ] || dc_restore_detail=$(head -c 1024 "$DC_STAGE/secret-restore.err" 2>/dev/null || true)
+    dc_log "did not put back credential $2: the gateway refused the undo (exit $dc_restore_status ${dc_restore_code:-no code}): $dc_restore_detail; the stored value was left unchanged and the journal entry $dc_entry stays for the next ensure"
+    return 1
+}
+
+# dc_resume_rotation: before an ensure stores a credential or applies a
+# config, settle the rotations an earlier run left in the journal, with the
+# newest gateway this run has: the payload's when it delivers one, else the
+# installed one (a delivered package is already installed). A gateway
+# before 1.0.5 cannot remove a credential its installed config references
+# (--undo-config), so a package delivered with the ensure settles what it
+# could not. Nothing installed (no root-owned gateway) has nothing to put
+# back: an entry is retired only when no gateway was installed before this
+# run delivered one (the deployment and its credentials were removed). An
+# installed gateway that is not root-owned keeps the journal, which holds
+# the only copy of the earlier credential, and stops the ensure
+# (GAP-1614). An entry that cannot be settled stops this ensure before it
+# can install a config that adopts the unsettled credential.
+dc_resume_rotation() {
+    [ -e "$DC_JOURNAL_DIR" ] || [ -L "$DC_JOURNAL_DIR" ] || return 0
+    dc_journal_ready ||
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_secret_failed "the credential journal $DC_JOURNAL_DIR is not a folder only root can change; nothing in it was used and nothing was changed"
+    dc_rotation_lock
+    for dc_left in "$DC_JOURNAL_DIR"/*.entry; do
+        [ -e "$dc_left" ] || [ -L "$dc_left" ] || continue
+        dc_name=$(basename "$dc_left" .entry)
+        case "$dc_name" in "" | *[!a-z0-9-]*)
+            dc_fail_result "$DC_EXIT_FAILURE" mdm_secret_failed "the credential journal entry $dc_left is not one this wrapper writes; nothing was changed" ;;
+        esac
+        if [ "$DC_GATEWAY_BEFORE" != 1 ]; then
+            dc_log "retired the credential journal entry of $dc_name: no deployment was installed to put it back into"
+            dc_retire_rotation "$dc_name"
+            continue
+        fi
+        dc_trusted_path "$DC_GATEWAY" ||
+            dc_fail_result "$DC_EXIT_FAILURE" mdm_not_installed "$DC_GATEWAY is not root-owned$DC_TRUST_ACL, so the earlier credential rotation of $dc_name was not settled and its journal entry was kept; nothing was changed"
+        dc_settle_rotation "${DC_PAYLOAD_GATEWAY:-$DC_GATEWAY}" "$dc_name" ||
+            dc_fail_result "$DC_EXIT_FAILURE" mdm_secret_failed "an earlier credential rotation of $dc_name is not settled (the wrapper log says why); no credential was stored and no config applied: resolve it and run ensure again. A gateway before 1.0.5 cannot put back a credential its installed config references: deliver the package with --source and the gateway it installs settles it"
+    done
+}
+
+# dc_restore_secret: after a failed or interrupted run that stored a
+# credential with --bundle, settle its journal entry with the gateway that
+# stored it (dc_settle_rotation): the value it replaced goes back, or the one
+# it added goes, unless the gateway proves the rotation committed
+# (rotation_confirmed). An entry it cannot settle stays for the next ensure.
+dc_restore_secret() {
+    [ "$DC_SECRET_ROTATED" = 1 ] || return 0
+    DC_SECRET_ROTATED=0
+    dc_settle_rotation "$DC_SECRET_GATEWAY" "$DC_SECRET_NAME"
+}
+
+dc_store_secret() {
+    gateway=$1
+    # A credential delivered with a bundle goes with it: a value the
+    # confirmed bundle does not sign is stored only when this bundle signs it
+    # (secret set --bundle), and the value it replaces goes back unless that
+    # bundle applies (dc_save_secret_previous). A gateway before 1.0.4 takes
+    # no --bundle and stores the credential as before.
+    set --
+    if [ -n "${bundle:-}" ] && dc_secret_set_bundle "$gateway"; then
+        dc_save_secret_previous "$gateway"
+        # Only while the bundle the journal names is still confirmed.
+        set -- --bundle "$bundle" --if-confirmed "$DC_SECRET_CONFIRMED"
+    fi
+    set +e
+    printf '%s' "$secret_data" |
+        "$gateway" enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --lock-wait 10m --json "$@" >"$DC_STAGE/secret.json" 2>"$DC_STAGE/secret.err" &
+    DC_CHILD=$!
+    wait "$DC_CHILD"
+    secret_status=$?
+    DC_CHILD=""
+    set -e
+    secret_data=""
+    if [ "$secret_status" != 0 ]; then
+        detail=$(head -c 1024 "$DC_STAGE/secret.err" 2>/dev/null || true)
+        if [ -z "$detail" ]; then
+            detail=$(dc_secret_json_error "$DC_STAGE/secret.json" || true)
+        fi
+        [ -n "$detail" ] || detail="the gateway returned no error message"
+        case "$secret_status" in 1 | 2 | 75) ;; *) secret_status=$DC_EXIT_FAILURE ;; esac
+        dc_fail_result "$secret_status" mdm_secret_failed "storing credential '$DC_SECRET_NAME' failed, so the config was not applied: $detail"
+    fi
+    dc_log "stored credential $DC_SECRET_NAME"
 }
 
 dc_main() {
@@ -1506,12 +2097,20 @@ dc_main() {
         dc_read_secret
     fi
 
+    dc_stage_cowork
+
     DC_CHANNEL_FLAG=""
     DC_PAYLOAD_GATEWAY=""
+    # Whether a deployment existed before this run delivered one (the
+    # journal settle below retires entries only without one).
+    if [ -e "$DC_GATEWAY" ] || [ -L "$DC_GATEWAY" ]; then DC_GATEWAY_BEFORE=1; fi
     if [ -n "$DC_SOURCE$DC_SOURCE_URL" ]; then
         dc_stage_source
         dc_install_package
     fi
+    # Settled after the delivered package or payload, so the gateway it
+    # brings settles a rotation the installed one could not put back.
+    dc_resume_rotation
 
     # The payload channel runs the verified staged binary; every other run
     # uses the installed, root-owned gateway.
@@ -1532,21 +2131,7 @@ dc_main() {
     # that the package's postinstall or the change itself started (the
     # apply path unit) instead of failing busy.
     if [ -n "$DC_SECRET_NAME" ]; then
-        set +e
-        printf '%s' "$secret_data" |
-            "$gateway" enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --lock-wait 10m --json >"$DC_STAGE/secret.json" 2>"$DC_STAGE/secret.err" &
-        DC_CHILD=$!
-        wait "$DC_CHILD"
-        secret_status=$?
-        DC_CHILD=""
-        set -e
-        secret_data=""
-        if [ "$secret_status" != 0 ]; then
-            detail=$(head -c 1024 "$DC_STAGE/secret.err" 2>/dev/null || true)
-            case "$secret_status" in 1 | 2 | 75) ;; *) secret_status=$DC_EXIT_FAILURE ;; esac
-            dc_fail_result "$secret_status" mdm_secret_failed "storing credential '$DC_SECRET_NAME' failed, so the config was not applied: $detail"
-        fi
-        dc_log "stored credential $DC_SECRET_NAME"
+        dc_store_secret "$gateway"
     fi
 
     # A bundle apply runs the ensure transaction itself, so with a bundle
@@ -1566,6 +2151,8 @@ dc_main() {
         [ -z "$DC_CHANNEL_FLAG" ] || set -- "$@" "$DC_CHANNEL_FLAG"
         [ -z "$ensure_config" ] || set -- "$@" "--config=$ensure_config"
         [ -z "$DC_PRODUCT_VERSION" ] || set -- "$@" "--product-version=$DC_PRODUCT_VERSION"
+        [ -z "$DC_COWORK_PACKAGE_STAGED" ] || set -- "$@" "--cowork-package=$DC_COWORK_PACKAGE_STAGED"
+        [ -z "$DC_COWORK_SIGNATURE_STAGED" ] || set -- "$@" "--cowork-signature=$DC_COWORK_SIGNATURE_STAGED"
         status=0
         dc_run_lifecycle_retry "$gateway" "$@" || status=$?
         if [ "$status" != 0 ] || [ -z "$bundle$anchors" ]; then
@@ -1579,7 +2166,10 @@ dc_main() {
     fi
     [ -z "$anchors" ] || dc_install_anchors "$anchors"
     if [ -z "$bundle" ]; then
+        DC_ANCHORS_COMMITTED=$DC_ANCHORS_CHANGED
+        DC_ANCHORS_CHANGED=0
         dc_annotate_package_step
+        dc_annotate_anchors_step
         dc_emit_result
         return 0
     fi
@@ -1590,9 +2180,16 @@ dc_main() {
         dc_run_lifecycle_retry "$gateway" bundle apply --bundle "$bundle" --reason mdm --lock-wait 10m || status=$?
     fi
     if [ "$status" = 0 ]; then
+        # The applied bundle signs the credential this run stored.
+        [ "$DC_SECRET_ROTATED" != 1 ] || dc_retire_rotation "$DC_SECRET_NAME"
+        DC_SECRET_ROTATED=0
+        DC_ANCHORS_COMMITTED=$DC_ANCHORS_CHANGED
+        DC_ANCHORS_CHANGED=0
         dc_annotate_package_step
+        dc_annotate_anchors_step
     else
-        dc_restore_anchors
+        dc_restore_anchors || true
+        dc_restore_secret || true
     fi
     dc_emit_result
     return "$status"

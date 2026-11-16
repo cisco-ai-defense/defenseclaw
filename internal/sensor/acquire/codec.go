@@ -157,6 +157,19 @@ type wireEvent struct {
 	PolicyMessage  string   `json:"policy_message,omitempty"`
 	Target         string   `json:"target,omitempty"`
 	Count          int      `json:"count,omitempty"`
+	// The exec-time image identity the helper read (plane.Event); a gateway
+	// that is not root cannot read another account's image itself.
+	ImageSHA256  string `json:"image_sha256,omitempty"`
+	ImageVersion string `json:"image_version,omitempty"`
+	// ImageDigestState is plane.Event's (read, pending or failed),
+	// omitempty like the fields above: a gateway that predates it ignores
+	// it, and a helper that predates it sends none, which the host plane
+	// treats as no digest coming (cowork-1-0-8 GAP-0067).
+	ImageDigestState string `json:"image_digest_state,omitempty"`
+	// Fork is plane.Event's: an exec event that is the kernel's fork of the
+	// process. omitempty: a gateway that predates it ignores it, and from a
+	// helper that predates it every event is an exec, as before.
+	Fork bool `json:"fork,omitempty"`
 }
 
 func encodeEvent(event plane.Event) wireEvent {
@@ -173,6 +186,8 @@ func encodeEvent(event plane.Event) wireEvent {
 		PolicyOwner: event.PolicyOwner, KernelHookType: event.KernelHookType, KernelFunction: event.KernelFunction,
 		KernelAction: event.KernelAction, PolicyMode: event.PolicyMode, PolicyTags: copyStrings(event.PolicyTags),
 		PolicyMessage: event.PolicyMessage, Target: event.Target, Count: event.Count,
+		ImageSHA256: event.ImageSHA256, ImageVersion: event.ImageVersion,
+		ImageDigestState: string(event.ImageDigestState), Fork: event.Fork,
 	}
 	if !event.At.IsZero() {
 		out.AtUnixNano = event.At.UnixNano()
@@ -194,6 +209,8 @@ func decodeEvent(event wireEvent) plane.Event {
 		PolicyOwner: event.PolicyOwner, KernelHookType: event.KernelHookType, KernelFunction: event.KernelFunction,
 		KernelAction: event.KernelAction, PolicyMode: event.PolicyMode, PolicyTags: copyStrings(event.PolicyTags),
 		PolicyMessage: event.PolicyMessage, Target: event.Target, Count: event.Count,
+		ImageSHA256: event.ImageSHA256, ImageVersion: event.ImageVersion,
+		ImageDigestState: plane.DigestState(event.ImageDigestState), Fork: event.Fork,
 	}
 	if event.AtUnixNano != 0 {
 		out.At = time.Unix(0, event.AtUnixNano)
@@ -224,6 +241,12 @@ type wireCoverage struct {
 	MissingKinds []string     `json:"missing_kinds,omitempty"`
 	Limitations  []string     `json:"limitations,omitempty"`
 	Backend      *wireBackend `json:"backend,omitempty"`
+	// BufferDropped and KernelOverflows are plane.Coverage's: the helper's
+	// own buffer drops and cn_proc overflows, which the gateway carries
+	// across a reconnect with the backend's events_lost (cowork-1-0-8
+	// GAP-0080). A helper that predates them sends none.
+	BufferDropped   int64 `json:"buffer_dropped,omitempty"`
+	KernelOverflows int64 `json:"kernel_overflows,omitempty"`
 }
 
 // wireBackend is plane.Backend on the wire (omitempty, like the Tetragon
@@ -247,7 +270,10 @@ type wireBackendPolicy struct {
 }
 
 func encodeCoverage(coverage plane.Coverage) wireCoverage {
-	out := wireCoverage{Mechanism: coverage.Mechanism, Limitations: coverage.Limitations}
+	out := wireCoverage{
+		Mechanism: coverage.Mechanism, Limitations: coverage.Limitations,
+		BufferDropped: coverage.BufferDropped, KernelOverflows: coverage.KernelOverflows,
+	}
 	for _, kind := range coverage.Kinds {
 		out.Kinds = append(out.Kinds, string(kind))
 	}
@@ -268,7 +294,10 @@ func encodeCoverage(coverage plane.Coverage) wireCoverage {
 }
 
 func decodeCoverage(coverage wireCoverage) plane.Coverage {
-	out := plane.Coverage{Mechanism: coverage.Mechanism, Limitations: coverage.Limitations}
+	out := plane.Coverage{
+		Mechanism: coverage.Mechanism, Limitations: coverage.Limitations,
+		BufferDropped: coverage.BufferDropped, KernelOverflows: coverage.KernelOverflows,
+	}
 	for _, kind := range coverage.Kinds {
 		out.Kinds = append(out.Kinds, plane.Kind(kind))
 	}

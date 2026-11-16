@@ -6,10 +6,13 @@
 package managed
 
 import (
+	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
+	"unicode/utf16"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -17,9 +20,10 @@ import (
 
 // DescribeUntrustedSource explains, for the standalone profile, why an
 // administrator input such as the config was refused: the account by name,
-// the folder, and the icacls commands that fix it. A standard user who owns
-// the staging folder, or can write to it, can change what LocalSystem
-// applies (GAP-0527, GAP-0528, GAP-0562). ok is false when err is not an
+// the path, and a safe staging step. A standard user who owns the staging
+// folder, or can write to it, can change what LocalSystem applies (GAP-0527,
+// GAP-0528, GAP-0562). The source might be in an enrolled user's home, so
+// never advise changing its ACL (GAP-1112). ok is false when err is not an
 // ownership or write-access refusal.
 func DescribeUntrustedSource(label, source string, err error) (string, bool) {
 	var principal *UntrustedPrincipalError
@@ -31,7 +35,6 @@ func DescribeUntrustedSource(label, source string, err error) (string, bool) {
 		account = name + " (" + principal.SID + ")"
 	}
 	source = filepath.Clean(source)
-	folder := filepath.Dir(source)
 	failed := filepath.Clean(principal.Path)
 	what := "can write to"
 	if principal.Owner {
@@ -39,11 +42,7 @@ func DescribeUntrustedSource(label, source string, err error) (string, bool) {
 	}
 	text := fmt.Sprintf("the %s %s is not protected: %s %s %s, and only Administrators, SYSTEM and TrustedInstaller may own or write it and the folders above it",
 		label, source, account, what, failed)
-	if !strings.EqualFold(failed, source) && !strings.EqualFold(failed, folder) {
-		return text + fmt.Sprintf(". Copy the %s into a folder that only administrators can write, such as C:\\ProgramData\\DefenseClaw-Staging, and run it again (nothing was changed)", label), true
-	}
-	fix := untrustedFolderFix(folder, principal, "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F")
-	return text + ". From an elevated prompt run " + strings.Join(fix, ", then ") + ", and run it again (nothing was changed)", true
+	return text + fmt.Sprintf(". Copy the %s into a dedicated administrator-only staging folder, such as C:\\ProgramData\\DefenseClaw-Staging, writable only by Administrators and SYSTEM; run the same command with that copy. Leave the original path's ACL unchanged (nothing was changed)", label), true
 }
 
 // DescribeUntrustedRulePack explains, for the standalone profile, why an
@@ -76,8 +75,25 @@ func DescribeUntrustedRulePack(label, pack, serviceAccount string, err error) (s
 	if !inside {
 		return text + `. Copy the pack into a folder that only administrators can write, such as C:\ProgramData\DefenseClaw-RulePacks, set that path in the config, and run it again (nothing was changed)`, true
 	}
-	fix := untrustedFolderFix(pack, principal, "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", RulePackServiceReadGrant(serviceAccount))
-	return text + ". From an elevated prompt run " + strings.Join(fix, ", then ") + ", and run it again (nothing was changed)", true
+	serviceGrant := RulePackServiceReadGrant(serviceAccount)
+	fix := untrustedFolderFix(pack, principal, "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", serviceGrant)
+	return text + ". From an elevated prompt run " + strings.Join(fix, ", then ") + ", and run it again (nothing was changed)" +
+		serviceGrantLeftOutHint(pack, serviceAccount, serviceGrant), true
+}
+
+// serviceGrantLeftOutHint is the sentence after a fix whose icacls commands
+// carry the gateway service grant: icacls refuses the whole command with
+// error 1332 until the service exists (a first install), so it says to leave
+// that grant out and give it with the PowerShell form instead (GAP-0087). It is empty
+// for an account that is not an NT SERVICE name.
+func serviceGrantLeftOutHint(path, serviceAccount, serviceGrant string) string {
+	command := ServiceReadGrantPowerShell(path, serviceAccount)
+	if command == "" {
+		return ""
+	}
+	return ". Before the gateway service exists (a first install) icacls fails with error 1332: leave \"" + serviceGrant +
+		"\" out of the icacls commands and then run, from an elevated cmd or PowerShell prompt: " + command +
+		" (" + serviceReadGrantEffect(path, serviceAccount, true) + ")"
 }
 
 // DefaultGatewayServiceAccount is the standalone gateway's virtual account.
@@ -106,6 +122,74 @@ func serviceGrantPrincipal(serviceAccount string) string {
 		return "*" + WindowsServiceSIDString(name)
 	}
 	return account
+}
+
+// ServiceReadGrantPowerShell is the command that gives the gateway service
+// Read & execute on the rule-pack folder path and everything in it, by its
+// service SID. icacls refuses every SID Windows cannot map yet, also in the
+// *S-1-5-80-... form, with error 1332, and the service SID maps only once
+// the service exists; an ACL rule with a SecurityIdentifier accepts it
+// before (GAP-0087). It is empty for an account that is not an NT SERVICE
+// name.
+func ServiceReadGrantPowerShell(path, serviceAccount string) string {
+	return serviceReadGrantPowerShell(path, serviceAccount, true)
+}
+
+// serviceReadGrantPowerShell prints the grant as one powershell.exe
+// -EncodedCommand, which runs as printed from cmd, from Windows PowerShell
+// and from PowerShell 7. The -Command "..." form it replaces ran only from
+// cmd: a PowerShell prompt expanded the script's $ variables inside the
+// double quotes before powershell.exe started, and the child could not parse
+// what was left (GAP-0087). tree false is the grant on a parent folder of a
+// rule pack: that folder only, as the icacls RX example beside it, because
+// an inheritable rule there reached everything below it, such as the
+// administrator's whole profile.
+func serviceReadGrantPowerShell(path, serviceAccount string, tree bool) string {
+	script := serviceReadGrantScript(path, serviceAccount, tree)
+	if script == "" {
+		return ""
+	}
+	return "powershell -NoProfile -NonInteractive -EncodedCommand " + powerShellEncodedCommand(script)
+}
+
+// serviceReadGrantEffect says in words what the encoded grant does, so an
+// administrator can tell before running it.
+func serviceReadGrantEffect(path, serviceAccount string, tree bool) string {
+	scope := ", inherited by everything in it"
+	if !tree {
+		scope = ", on that folder only"
+	}
+	return "it adds one allow rule, Read & execute for " + strings.TrimPrefix(serviceGrantPrincipal(serviceAccount), "*") +
+		" on " + filepath.Clean(path) + scope
+}
+
+// powerShellEncodedCommand is script as -EncodedCommand takes it: base64 of
+// its UTF-16LE bytes.
+func powerShellEncodedCommand(script string) string {
+	units := utf16.Encode([]rune(script))
+	raw := make([]byte, 2*len(units))
+	for i, unit := range units {
+		binary.LittleEndian.PutUint16(raw[2*i:], unit)
+	}
+	return base64.StdEncoding.EncodeToString(raw)
+}
+
+// serviceReadGrantScript is the script of serviceReadGrantPowerShell. .NET
+// calls, not Get-Acl and Set-Acl: run from a PowerShell 7 prompt, Windows
+// PowerShell inherits a module path whose Security module it cannot load,
+// and the cmdlets are not found. A failure stops the script and exits 1.
+func serviceReadGrantScript(path, serviceAccount string, tree bool) string {
+	sid, ok := strings.CutPrefix(serviceGrantPrincipal(serviceAccount), "*")
+	if !ok {
+		return ""
+	}
+	inherit := "'ContainerInherit,ObjectInherit'"
+	if !tree {
+		inherit = "'None'"
+	}
+	return "$ErrorActionPreference = 'Stop'; $d = [IO.DirectoryInfo]::new(" + PowerShellLiteral(filepath.Clean(path)) + "); $a = $d.GetAccessControl(); " +
+		"$a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('" + sid + "'), " +
+		"'ReadAndExecute', " + inherit + ", 'None', 'Allow')); $d.SetAccessControl($a)"
 }
 
 // StandardUserReadersOf returns the SIDs of the groups every standard user is in (Users,

@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
@@ -41,14 +42,15 @@ func TestDaemonRegistrationTakesTheRematchedProfile(t *testing.T) {
 		UpdatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	if !regs.applyLive("dc-a", sandboxrelay.CurrentPolicy{V: 1, Digest: "sha256:new", Profile: "contractors"}) {
+	floor := config.OpenShellAdminConfig{}
+	if !regs.applyLive("dc-a", sandboxrelay.CurrentPolicy{V: 1, Digest: "sha256:new", Profile: "contractors", Floor: &floor}) {
 		t.Fatal("the re-matched answer changed nothing")
 	}
 	if r, _ := regs.get("dc-a"); r.Profile != "contractors" || r.Digest != "sha256:new" {
 		t.Fatalf("registration after the regroup = %+v", r)
 	}
 	// An answer without a profile (an older gateway) keeps the one it had.
-	regs.applyLive("dc-a", sandboxrelay.CurrentPolicy{V: 1, Digest: "sha256:new"})
+	regs.applyLive("dc-a", sandboxrelay.CurrentPolicy{V: 1, Digest: "sha256:new", Floor: &floor})
 	reloaded, err := loadDaemonRegistrations(path)
 	if err != nil {
 		t.Fatal(err)

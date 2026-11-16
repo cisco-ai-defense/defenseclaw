@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -415,7 +416,7 @@ func copilotManagedSettings(opts Options, state *State, write bool) error {
 	}
 	ownedNow := append(keep, add...)
 	if len(ownedNow) == 0 {
-		removeCopilotManagedSettingsDirs(opts, path, record, record == nil && len(drop) > 0)
+		removeCopilotManagedSettingsDirs(opts, path, record)
 		if record != nil {
 			return deleteRecord(opts, copilotManagedSettingsRecord)
 		}
@@ -443,19 +444,17 @@ func writeCopilotManagedSettings(opts Options, path string, doc *object) ([]stri
 }
 
 // removeCopilotManagedSettingsDirs removes, once the managed settings file
-// is gone, the folders DefenseClaw recorded creating for it, deepest first,
-// and with recordless (an older build's file DefenseClaw just emptied) the
-// file's own folder. Only an empty folder goes.
-func removeCopilotManagedSettingsDirs(opts Options, path string, record *ownershipRecord, recordless bool) {
+// is gone, the folders DefenseClaw recorded creating for it, deepest first.
+// Only an empty folder goes, and never one without a record: the file of a
+// build before 1.0.0 has none, and its folder may be the administrator's
+// (GAP-0091).
+func removeCopilotManagedSettingsDirs(opts Options, path string, record *ownershipRecord) {
 	if _, err := os.Lstat(platformPath(opts, path)); !errors.Is(err, os.ErrNotExist) {
 		return
 	}
 	var dirs []string
 	if record != nil {
 		dirs = append(dirs, record.CreatedDirs...)
-	}
-	if recordless {
-		dirs = appendUnique(dirs, dirFor(opts, path))
 	}
 	sort.SliceStable(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
 	for _, dir := range dirs {
@@ -513,7 +512,7 @@ func removeCopilotManagedSettings(opts Options, state *State) error {
 			state.detail("vscode: removed %s from %s", strings.Join(removed, ", "), path)
 		}
 	}
-	removeCopilotManagedSettingsDirs(opts, path, record, record == nil && len(removed) > 0)
+	removeCopilotManagedSettingsDirs(opts, path, record)
 	if record == nil {
 		return nil
 	}
@@ -528,6 +527,23 @@ func copilotVSCodeStatus(opts Options, state *State) {
 	for _, install := range DiscoverVSCode(opts) {
 		state.detail("vscode: found VS Code %s at %s", install.Version, install.Path)
 	}
+	for _, home := range opts.CopilotOutOfScopeHomes {
+		file, plugin := CopilotVSCodeUserState(home, opts.goos(), opts.HookBinary)
+		if file {
+			state.conflict("DefenseClaw's Copilot Local hook remains for an account outside enrollment: %s; run the guardian to remove it", CopilotVSCodeLocalHookFilePath(home))
+		}
+		if plugin {
+			state.conflict("DefenseClaw's Copilot plugin remains for an account outside enrollment: %s; run the guardian to remove it", CopilotPluginHooksPath(home))
+		}
+		if !file && !plugin {
+			left, err := CopilotVSCodeUserFilesLeft(home, opts.goos(), opts.HookBinary)
+			if err != nil {
+				state.conflict("cannot inspect Copilot Local files outside enrollment in %s: %v", home, err)
+			} else if left {
+				state.conflict("an older DefenseClaw Copilot Local hook or plugin remains outside enrollment in %s; run the guardian to remove it", home)
+			}
+		}
+	}
 	if len(opts.CopilotUserHomes) == 0 {
 		return
 	}
@@ -535,22 +551,28 @@ func copilotVSCodeStatus(opts Options, state *State) {
 	files, plugins := 0, 0
 	for _, home := range opts.CopilotUserHomes {
 		file, plugin := CopilotVSCodeUserState(home, opts.goos(), opts.HookBinary)
+		var kept []string
+		if (wantFile && !file) || (wantPlugin && !plugin) {
+			kept = copilotVSCodeUserKept(home, opts.goos(), opts.HookBinary)
+		}
 		if file {
 			files++
 		} else if wantFile {
-			state.UserFileDrift = append(state.UserFileDrift, CopilotVSCodeLocalHookFilePath(home))
+			path := CopilotVSCodeLocalHookFilePath(home)
+			if slices.Contains(kept, path) {
+				state.UserFileForeign = append(state.UserFileForeign, path)
+			} else {
+				state.UserFileDrift = append(state.UserFileDrift, path)
+			}
 		}
 		if plugin {
 			plugins++
 		} else if wantPlugin {
-			// The plugin is DefenseClaw's as well: a missing or earlier copy
-			// is rewritten on the guardian's next pass, while one holding
-			// hooks DefenseClaw did not write stays, and the foreign-hook
-			// guard denies that user's calls (GAP-1232).
-			if kept := copilotVSCodeUserKept(home, opts.goos(), opts.HookBinary); len(kept) > 0 {
-				state.UserFileForeign = append(state.UserFileForeign, kept...)
+			path := CopilotPluginHooksPath(home)
+			if slices.Contains(kept, path) {
+				state.UserFileForeign = append(state.UserFileForeign, path)
 			} else {
-				state.UserFileDrift = append(state.UserFileDrift, CopilotPluginHooksPath(home))
+				state.UserFileDrift = append(state.UserFileDrift, path)
 			}
 		}
 	}

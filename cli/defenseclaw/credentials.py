@@ -206,8 +206,9 @@ def _any_llm_component_uses_default_key(cfg: Config) -> bool:
         # Skill and plugin scan commands use their resolved model as the
         # default-on signal (use_llm is on by default, and a judge without a
         # model never runs). Surface the missing key in Setup/Keys before the
-        # operator encounters a scan-time skip warning.
-        if ss is not None:
+        # operator encounters a scan-time skip warning. use_llm false turns
+        # the skill judge off whatever model resolves (p0 GAP-1368).
+        if ss is not None and getattr(ss, "use_llm", True):
             skill_llm = cfg.resolve_llm("scanners.skill")
             if skill_llm.model and needs_key("scanners.skill"):
                 return True
@@ -233,11 +234,9 @@ _HOOK_POLICY_ONLY_CONNECTORS = frozenset(
         "cursor",
         "devin",
         "copilot",
-        "openhands",
         "antigravity",
         "opencode",
         "amp",
-        "omnigent",
         "kiro",
     }
 )
@@ -256,12 +255,8 @@ def _guardrail_proxy_uses_llm(cfg: Config) -> bool:
         if active:
             return any(name not in _HOOK_POLICY_ONLY_CONNECTORS for name in active)
 
-    connector = _connector_name(getattr(gc, "connector", "") if gc is not None else "")
-    if not connector:
-        claw = getattr(cfg, "claw", None)
-        connector = _connector_name(getattr(claw, "mode", ""))
-    # An unconfigured legacy install historically defaults to OpenClaw.
-    return not connector or connector not in _HOOK_POLICY_ONLY_CONNECTORS
+    connector = _connector_name(cfg.active_connector())
+    return bool(connector) and connector not in _HOOK_POLICY_ONLY_CONNECTORS
 
 
 def _defenseclaw_llm_key(cfg: Config) -> Requirement:
@@ -498,6 +493,16 @@ def _inspect_llm_key(cfg: Config) -> Requirement:
     return Requirement.REQUIRED
 
 
+def _decision_model_key(cfg: Config) -> Requirement:
+    """The decision model's bearer token is optional: a local System One
+    server needs none, a hosted one does. Tracked only while the decision
+    model is on."""
+    dm = getattr(cfg, "decision_model", None)
+    if dm is None or not dm.active():
+        return Requirement.NOT_USED
+    return Requirement.OPTIONAL
+
+
 # --- effective env-name overrides ---
 #
 # These mirror the predicates and answer "what env var did the operator
@@ -551,6 +556,11 @@ def _galileo_env(cfg: Config) -> str:
 
 def _inspect_llm_env(cfg: Config) -> str:
     return cfg.resolve_llm("scanners.skill").api_key_env
+
+
+def _decision_model_env(cfg: Config) -> str:
+    dm = getattr(cfg, "decision_model", None)
+    return (dm.api_key_env or "").strip() if dm is not None else ""
 
 
 # ---------------------------------------------------------------------------
@@ -635,6 +645,16 @@ CREDENTIALS: tuple[CredentialSpec, ...] = (
         ),
         required=_inspect_llm_key,
         effective_env_name=_inspect_llm_env,
+    ),
+    CredentialSpec(
+        env_name="DEFENSECLAW_DECISION_MODEL_KEY",
+        feature="decision_model",
+        description=(
+            "Bearer token for the decision model endpoint (decision_model.base_url). "
+            "Optional: a System One server on this machine needs none."
+        ),
+        required=_decision_model_key,
+        effective_env_name=_decision_model_env,
     ),
 )
 

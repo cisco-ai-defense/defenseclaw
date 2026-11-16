@@ -13,6 +13,7 @@
 package enterpriseunix
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -167,6 +168,7 @@ type TetragonUserReadiness struct {
 // Fleet phases of a user (TetragonUserReadiness.Phase).
 const (
 	phaseEnforcing   = "enforcing"
+	phaseArmed       = "armed"
 	phaseReady       = "ready"
 	phaseBurnIn      = "burn_in"
 	phaseReset       = "reset"
@@ -181,6 +183,8 @@ func userPhase(user TetragonUserReadiness, runsEnforce bool) string {
 	switch {
 	case user.State == kernelpolicy.UIDEnforcing:
 		return phaseEnforcing
+	case user.State == kernelpolicy.UIDArmed:
+		return phaseArmed
 	case user.MonitorOnly:
 		return phaseMonitorOnly
 	case user.Ready && runsEnforce:
@@ -419,13 +423,11 @@ type gatewayPlaneC struct {
 
 // planeCFromHealth reads ai_runtime.details.planes.c from a /health body.
 func planeCFromHealth(body []byte) gatewayPlaneC {
+	const notReported = "the gateway has not reported Plane C yet; it does after its first poll"
 	var document struct {
 		AIRuntime *struct {
 			Details struct {
-				Planes map[string]struct {
-					Running bool   `json:"running"`
-					Reason  string `json:"reason"`
-				} `json:"planes"`
+				Planes json.RawMessage `json:"planes"`
 			} `json:"details"`
 		} `json:"ai_runtime"`
 	}
@@ -435,9 +437,23 @@ func planeCFromHealth(body []byte) gatewayPlaneC {
 	if document.AIRuntime == nil {
 		return gatewayPlaneC{Err: "the gateway's /health has no ai_runtime section"}
 	}
-	c, ok := document.AIRuntime.Details.Planes["c"]
+	// Until its first poll a starting AI runtime publishes planes as the list
+	// of configured planes, not the per-plane map: Plane C is not reported yet,
+	// and /health is not malformed (GAP-1964: verify right after ensure).
+	raw := bytes.TrimSpace(document.AIRuntime.Details.Planes)
+	if len(raw) == 0 || raw[0] == '[' || bytes.Equal(raw, []byte("null")) {
+		return gatewayPlaneC{Err: notReported}
+	}
+	var planes map[string]struct {
+		Running bool   `json:"running"`
+		Reason  string `json:"reason"`
+	}
+	if err := json.Unmarshal(raw, &planes); err != nil {
+		return gatewayPlaneC{Err: "the gateway's /health does not parse: " + err.Error()}
+	}
+	c, ok := planes["c"]
 	if !ok {
-		return gatewayPlaneC{Err: "the gateway has not reported Plane C yet; it does after its first poll"}
+		return gatewayPlaneC{Err: notReported}
 	}
 	return gatewayPlaneC{Read: true, Running: c.Running, Reason: c.Reason}
 }
@@ -744,15 +760,22 @@ func setAgentsCheck(set func(id, status, message string, fix ...string), in tetr
 		if len(missing) > 0 {
 			detail += "; no enrolled user has a row for " + strings.Join(missing, ", ")
 		}
-		set(checkAgents, failing, "no enrolled user has an anchored command-line agent ("+detail+"); install a command-line agent for an enrolled user, or enroll a user who runs one")
+		set(checkAgents, failing, "no enrolled user has an anchored command-line agent ("+detail+"); install a command-line agent for an enrolled user, or enroll a user who runs one; "+agentInstallRule)
 		return
 	}
 	message := fmt.Sprintf("%d enrolled %s an agent (%s)", len(with), plural(len(with), "user has", "users have"), strings.Join(with, ", "))
 	if len(without) > 0 {
-		message += "; none seen yet for " + strings.Join(without, ", ")
+		message += "; none seen yet for " + strings.Join(without, ", ") + " (" + agentInstallRule + ")"
 	}
 	if len(missing) > 0 {
 		message += "; no row for " + strings.Join(missing, ", ")
+	}
+	if unconfirmed, names := observedSessions(in.State, kernelpolicy.ReasonKernelUnconfirmed); unconfirmed > 0 {
+		// GAP-0166: only a session whose start Tetragon reported is marked
+		// by the binaries anchor; the helper does not call the others denied.
+		set(checkAgents, checkWarn, message+fmt.Sprintf("; Tetragon did not report the start of %d agent %s of %s, so %s not counted as denied until restarted",
+			unconfirmed, plural(unconfirmed, "session", "sessions"), strings.Join(names, ", "), plural(unconfirmed, "it is", "they are")))
+		return
 	}
 	if predating, names := predatingSessions(in.State); predating > 0 {
 		// GAP-0053: Tetragon marks an agent's processes when the agent
@@ -768,11 +791,17 @@ func setAgentsCheck(set func(id, status, message string, fix ...string), in tetr
 // predatingSessions counts the agent sessions the helper reports as started
 // before the enforcing controls loaded, and names their users.
 func predatingSessions(state kernelpolicy.State) (int, []string) {
+	return observedSessions(state, kernelpolicy.ReasonPredatesControls)
+}
+
+// observedSessions counts the observed-only agent sessions the helper
+// reports with reason, and names their users.
+func observedSessions(state kernelpolicy.State, reason string) (int, []string) {
 	count := 0
 	seen := map[int]bool{}
 	var names []string
 	for _, observed := range state.Roots.Observed {
-		if observed.Reason != kernelpolicy.ReasonPredatesControls {
+		if observed.Reason != reason {
 			continue
 		}
 		count += observed.Count
@@ -790,13 +819,23 @@ func (t tetragonIntent) helperModeLoadsPolicies() bool {
 	return mode == config.TetragonModeObserve || mode == config.TetragonModeEnforce
 }
 
+// agentInstallRule says where the sensor helper looks for an enrolled
+// user's agent (kernelpolicy searchDirs and trustedExecutable): the user's
+// home, the machine prefixes /usr/local/bin, /usr/bin and the shared
+// Linuxbrew /home/linuxbrew/.linuxbrew/bin, and the bin
+// folder of each enterprise.enrollment.agent_prefixes prefix, outside the
+// home only on a path that only root or that user can change. A shared
+// install elsewhere (for example an npm prefix in /opt) is not seen until
+// the administrator lists its prefix (GAP-1965).
+const agentInstallRule = "an agent counts when it is installed in the user's home (for example ~/.local/bin/claude), in /usr/local/bin, /usr/bin or /home/linuxbrew/.linuxbrew/bin, or in the bin folder of a prefix listed in enterprise.enrollment.agent_prefixes, on a path only root or that user can change; a shared install anywhere else, or on a path other accounts can write, is not seen"
+
 // hasAnchoredAgent reports whether a user's agent was anchored: a live root
 // now, covered burn-in time, a hit, or enforcement.
 func hasAnchoredAgent(user kernelpolicy.UIDStatus, record *kernelpolicy.UIDRecord) bool {
 	if user.State == kernelpolicy.UIDInactive && user.Reason == kernelpolicy.ReasonNoAnchors {
 		return false
 	}
-	if user.State == kernelpolicy.UIDEnforcing || user.AnchoredRoots > 0 || user.CoveredSeconds > 0 {
+	if kernelpolicy.Enforced(user.State) || user.AnchoredRoots > 0 || user.CoveredSeconds > 0 {
 		return true
 	}
 	return record != nil && (len(record.WouldBlock) > 0 || len(record.Blocked) > 0)
@@ -905,7 +944,7 @@ func readinessUsers(in tetragonInputs, now time.Time) []TetragonUserReadiness {
 		view := TetragonUserReadiness{
 			UID: user.UID, User: user.User, State: user.State, Reason: user.Reason, CoveredHours: roundHours(p.Covered),
 			NeededHours: roundHours(p.Needed), Percent: p.Percent,
-			Ready: (p.Ready || user.State == kernelpolicy.UIDEnforcing) && !p.MonitorOnly && !noDenyAnchor(user.State, user.Reason) &&
+			Ready: (p.Ready || kernelpolicy.Enforced(user.State)) && !p.MonitorOnly && !noDenyAnchor(user.State, user.Reason) &&
 				!burnInPaused(user.Reason),
 			Reset: p.Reset, Measuring: p.Measuring, MonitorOnly: p.MonitorOnly, Hits: hitDetails(record, user.UID),
 		}
@@ -954,7 +993,7 @@ func hitDetails(record *kernelpolicy.UIDRecord, uid int) []TetragonHitDetail {
 func finishedBurnIn(users []TetragonUserReadiness) int {
 	n := 0
 	for _, user := range users {
-		if user.Ready || (user.MonitorOnly && (user.Percent == 100 || user.State == kernelpolicy.UIDEnforcing)) {
+		if user.Ready || (user.MonitorOnly && (user.Percent == 100 || kernelpolicy.Enforced(user.State))) {
 			n++
 		}
 	}
@@ -1023,15 +1062,18 @@ func readinessNext(rep *TetragonReadiness, failed []string) []string {
 // denies for them: one who finished burn-in is held in monitor by a pause or
 // an operator's change to the controls policy, and is named so (GAP-0055).
 func enforceCounts(users []TetragonUserReadiness, would bool) string {
-	ready, monitorOnly, unanchored, held := 0, 0, 0, 0
+	ready, armed, monitorOnly, unanchored, held := 0, 0, 0, 0, 0
 	limitSet, heldSet := map[string]bool{}, map[string]bool{}
 	var holders []string
 	for _, user := range users {
-		if user.State == kernelpolicy.UIDEnforcing {
+		if kernelpolicy.Enforced(user.State) {
 			holders = append(holders, userName(kernelpolicy.UIDStatus{UID: user.UID, User: user.User}))
 		}
+		if user.State == kernelpolicy.UIDArmed && !would {
+			armed++
+		}
 		switch {
-		case user.Ready && !would && user.State != kernelpolicy.UIDEnforcing:
+		case user.Ready && !would && !kernelpolicy.Enforced(user.State):
 			held++
 			heldSet[defaultStr(monitorReasonWords[user.Reason], defaultStr(user.Reason, "see tetragon status"))] = true
 		case user.Ready:
@@ -1052,8 +1094,17 @@ func enforceCounts(users []TetragonUserReadiness, would bool) string {
 	case would && ready > 1:
 		text = fmt.Sprintf("%d of %d %s finished burn-in, and enforce denies for one of them (the lowest uid with a native agent"+
 			" install; the others stay in monitor, %s)", ready, len(users), plural(len(users), "user", "users"), kernelpolicy.WarnBinaryScopeLimited)
-	case len(users) > 0 && ready == len(users):
+	case len(users) > 0 && ready == len(users) && armed == 0:
 		return fmt.Sprintf("every enrolled user (%d) %s.", len(users), strings.Replace(verb, "are", "is", 1))
+	case len(users) > 0 && ready == len(users):
+		// Enforce is loaded for every user, but an armed user has no
+		// running agent session anchored: nothing is denied for them yet,
+		// so they are not called enforced (GAP-0166).
+		text = fmt.Sprintf("enforce is loaded for every enrolled user (%d); %d %s enforced and %d %s armed with no running agent session anchored yet",
+			len(users), ready-armed, plural(ready-armed, "is", "are"), armed, plural(armed, "is", "are"))
+	case armed > 0:
+		text = fmt.Sprintf("%d of %d %s %s (%d armed with no running agent session anchored yet)", ready, len(users),
+			plural(len(users), "user", "users"), verb, armed)
 	default:
 		text = fmt.Sprintf("%d of %d %s %s", ready, len(users), plural(len(users), "user", "users"), verb)
 	}
@@ -1139,7 +1190,7 @@ func RunTetragonVerify(ctx context.Context, env *Env, readyFor string) *Tetragon
 		// The mode the config asks for: the configured one when a cap (Plane
 		// C off) holds it at off, so the check names the cap.
 		readyFor = in.Intent.helperMode()
-		if in.Intent.Reason == config.TetragonReasonPlaneCOff {
+		if in.Intent.capReason() == config.TetragonReasonPlaneCOff {
 			readyFor = in.Intent.Configured
 		}
 	}
@@ -1450,7 +1501,7 @@ func progressOf(user kernelpolicy.UIDStatus, record *kernelpolicy.UIDRecord, now
 func nextReady(in tetragonInputs, now time.Time) (time.Duration, bool) {
 	best, found := time.Duration(0), false
 	for _, user := range in.State.UIDs {
-		if user.State == kernelpolicy.UIDEnforcing {
+		if kernelpolicy.Enforced(user.State) {
 			continue
 		}
 		p := progressFor(user, in.State.BurnIn.UIDs[strconv.Itoa(user.UID)], in, now)

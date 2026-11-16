@@ -44,6 +44,322 @@ func TestExactAdministrativeSecurityRulePosture(t *testing.T) {
 			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
 		},
 		{
+			name:   "Docker insecure registry host:port",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Write", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"content":   `{"insecure-registries":["198.51.100.7:5000"]}`,
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry CIDR",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Write", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"content":   `{"insecure-registries":["10.0.0.0/8"]}`,
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry HTTPS URL",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Write", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"content":   `{"insecure-registries":["https://mirror.local"]}`,
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry with other settings",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Write", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"content":   `{"log-driver":"json-file","insecure-registries":["198.51.100.7:5000"],"debug":true}`,
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry listed twice",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Write", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"content":   `{"insecure-registries":["198.51.100.7:5000","198.51.100.7:5000"]}`,
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry upper-case scheme",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Write", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"content":   `{"insecure-registries":["HTTP://198.51.100.7:5000"]}`,
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry zero-padded port",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Write", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"content":   `{"insecure-registries":["198.51.100.7:05000"]}`,
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry through a dot-dot path",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Write", map[string]any{
+				"file_path": "/etc/docker/../docker/daemon.json",
+				"content":   `{"insecure-registries":["http://mirror.local"]}`,
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry in an Edit fragment",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Edit", map[string]any{
+				"file_path":  "/etc/docker/daemon.json",
+				"old_string": `"log-driver": "json-file"`,
+				"new_string": `"log-driver": "json-file", "insecure-registries": ["http://mirror.local:5000"]`,
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry in a MultiEdit fragment",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{map[string]any{
+					"old_string": `"debug": true`,
+					"new_string": `"debug": true, "insecure-registries": ["198.51.100.7:5000"]`,
+				}},
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry taking over in an Edit of a complete document",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Edit", map[string]any{
+				"file_path":  "/etc/docker/daemon.json",
+				"old_string": `{"insecure-registries":["198.51.100.7:5000"],"insecure-registries":[]}`,
+				"new_string": `{"insecure-registries":[],"insecure-registries":["198.51.100.7:5000"]}`,
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry taking over in a two-step MultiEdit",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{
+					map[string]any{
+						"old_string": `"insecure-registries":["198.51.100.7:5000"],"insecure-registries":[]`,
+						"new_string": `"insecure-registries":[],"insecure-registries":["198.51.100.7:5000"]`,
+					},
+					map[string]any{"old_string": `"debug":true`, "new_string": `"debug":false`},
+				},
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry taking over in a multi-line patch",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "apply_patch", map[string]any{
+				"command": "*** Begin Patch\n*** Update File: /etc/docker/daemon.json\n@@\n" +
+					"-  \"insecure-registries\":[\"198.51.100.7:5000\"],\n-  \"insecure-registries\":[],\n-  \"debug\":true\n" +
+					"+  \"insecure-registries\":[],\n+  \"insecure-registries\":[\"198.51.100.7:5000\"],\n+  \"debug\":false\n" +
+					"*** End Patch\n",
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry after an object with a repeated key in an Edit",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Edit", map[string]any{
+				"file_path":  "/etc/docker/daemon.json",
+				"old_string": `{}`,
+				"new_string": `{"debug":true,"debug":false},"insecure-registries":["198.51.100.7:5000"]`,
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry moving between two keys in a MultiEdit",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{
+					map[string]any{
+						"old_string": `"insecure-registries":["198.51.100.7:5000"],`,
+						"new_string": `"insecure-registries":[],`,
+					},
+					map[string]any{
+						"old_string": `"insecure-registries":[]}`,
+						"new_string": `"insecure-registries":["198.51.100.7:5000"]}`,
+					},
+				},
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry moving between two keys in two patch hunks",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "apply_patch", map[string]any{
+				"command": "*** Begin Patch\n*** Update File: /etc/docker/daemon.json\n@@\n" +
+					"-  \"insecure-registries\":[\"198.51.100.7:5000\"],\n+  \"insecure-registries\":[],\n" +
+					"@@\n-  \"insecure-registries\":[]\n+  \"insecure-registries\":[\"198.51.100.7:5000\"]\n" +
+					"*** End Patch\n",
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry moved past a last empty key in a three-step MultiEdit",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{
+					map[string]any{"old_string": `"insecure-registries":["198.51.100.7:5000"],`, "new_string": ``},
+					map[string]any{"old_string": `"insecure-registries":[],"debug":true`, "new_string": `"insecure-registries":[],"debug":false`},
+					map[string]any{"old_string": `"debug":false`, "new_string": `"debug":false,"insecure-registries":["198.51.100.7:5000"]`},
+				},
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry URL moved past a last empty key in a three-step MultiEdit",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{
+					map[string]any{"old_string": `"insecure-registries":["http://198.51.100.7:5000"],`, "new_string": ``},
+					map[string]any{"old_string": `"insecure-registries":[],"debug":true`, "new_string": `"insecure-registries":[],"debug":false`},
+					map[string]any{"old_string": `"debug":false`, "new_string": `"debug":false,"insecure-registries":["http://198.51.100.7:5000"]`},
+				},
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry host in a list one MultiEdit step creates empty and the next fills",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{
+					map[string]any{"old_string": `"debug":true`, "new_string": `"insecure-registries":[]`},
+					map[string]any{"old_string": `[]`, "new_string": `["198.51.100.7:5000"]`},
+				},
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry host under a key two MultiEdit steps spell between them",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{
+					map[string]any{"old_string": `"debug"`, "new_string": `"insecure-`},
+					map[string]any{"old_string": `-":true`, "new_string": `-registries":["198.51.100.7:5000"]`},
+				},
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry host in a list one MultiEdit step opens and the next continues",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{
+					map[string]any{"old_string": `"debug":true`, "new_string": `"insecure-registries":[`},
+					map[string]any{"old_string": `[]}`, "new_string": `["198.51.100.7:5000"]}`},
+				},
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry URL in a list one MultiEdit step creates empty and the next fills",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{
+					map[string]any{"old_string": `"debug":true`, "new_string": `"insecure-registries":[]`},
+					map[string]any{"old_string": `[]`, "new_string": `["http://registry.example.test:5000"]`},
+				},
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry URL under a key two MultiEdit steps spell between them",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{
+					map[string]any{"old_string": `"debug"`, "new_string": `"insecure-`},
+					map[string]any{"old_string": `-":true`, "new_string": `-registries":["http://registry.example.test:5000"]`},
+				},
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry moved past a last empty key in a two-hunk patch",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "apply_patch", map[string]any{
+				"command": "*** Begin Patch\n*** Update File: /etc/docker/daemon.json\n@@\n" +
+					"-  \"insecure-registries\":[\"198.51.100.7:5000\"],\n" +
+					"@@\n   \"insecure-registries\":[],\n-  \"debug\":true\n+  \"debug\":true,\n" +
+					"+  \"insecure-registries\":[\"198.51.100.7:5000\"]\n*** End Patch\n",
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry URL moved past a last empty key in a two-hunk patch",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "apply_patch", map[string]any{
+				"command": "*** Begin Patch\n*** Update File: /etc/docker/daemon.json\n@@\n" +
+					"-  \"insecure-registries\":[\"http://198.51.100.7:5000\"],\n" +
+					"@@\n   \"insecure-registries\":[],\n-  \"debug\":true\n+  \"debug\":true,\n" +
+					"+  \"insecure-registries\":[\"http://198.51.100.7:5000\"]\n*** End Patch\n",
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry long zero-padded port",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Write", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"content":   `{"insecure-registries":["198.51.100.7:00000000000000000005000"]}`,
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry JSON-escaped key in an Edit fragment",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Edit", map[string]any{
+				"file_path":  "/etc/docker/daemon.json",
+				"old_string": `"debug": true`,
+				"new_string": `"debug": true, "\u0069nsecure-registries": ["198.51.100.7:5000"]`,
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry JSON-escaped key in a MultiEdit fragment",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{map[string]any{
+					"old_string": `"debug": true`,
+					"new_string": `"debug": true, "\u0069nsecure-registries": ["198.51.100.7:5000"]`,
+				}},
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry JSON-escaped key in a patch hunk",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "apply_patch", map[string]any{
+				"command": "*** Begin Patch\n*** Update File: /etc/docker/daemon.json\n@@\n+  \"\\u0069nsecure-registries\": [\"198.51.100.7:5000\"]\n*** End Patch\n",
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
 			name:   "named Kubernetes Secret content read",
 			ruleID: kubernetesNamedSecretReadRuleID,
 			input: actionfacts.Input{
@@ -101,11 +417,178 @@ func TestExactAdministrativeSecurityRuleHardNegatives(t *testing.T) {
 			}),
 		},
 		{
-			name:   "Docker HTTPS registry",
+			name:   "Docker log driver only",
 			ruleID: dockerInsecureHTTPRegistryRuleID,
 			input: exactStructuredInput(t, "Write", map[string]any{
 				"file_path": "/etc/docker/daemon.json",
-				"content":   `{"insecure-registries":["https://mirror.local"]}`,
+				"content":   `{"log-driver":"json-file"}`,
+			}),
+		},
+		{
+			name:   "Docker loopback registry",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Write", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"content":   `{"insecure-registries":["127.0.0.1:5000"]}`,
+			}),
+		},
+		{
+			name:   "Docker log driver and debug settings",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Write", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"content":   `{"log-driver":"json-file","debug":true}`,
+			}),
+		},
+		{
+			name:   "Docker Edit adding a dns list",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Edit", map[string]any{
+				"file_path":  "/etc/docker/daemon.json",
+				"old_string": `"debug": true`,
+				"new_string": `"debug": true, "dns": ["8.8.8.8", "198.51.100.7"]`,
+			}),
+		},
+		{
+			name:   "Docker Edit adding a loopback registry",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Edit", map[string]any{
+				"file_path":  "/etc/docker/daemon.json",
+				"old_string": `"debug": true`,
+				"new_string": `"debug": true, "insecure-registries": ["127.0.0.1:5000"]`,
+			}),
+		},
+		{
+			name:   "Docker Edit of a complete document whose last insecure-registries key is empty",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Edit", map[string]any{
+				"file_path":  "/etc/docker/daemon.json",
+				"old_string": `{"log-driver":"json-file"}`,
+				"new_string": `{"log-driver":"json-file","insecure-registries":["198.51.100.7:5000"],"insecure-registries":[]}`,
+			}),
+		},
+		{
+			name:   "Docker two-step MultiEdit whose last insecure-registries key is empty",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{
+					map[string]any{
+						"old_string": `"debug":true`,
+						"new_string": `"insecure-registries":["198.51.100.7:5000"],"insecure-registries":[],"debug":true`,
+					},
+					map[string]any{"old_string": `"log-driver":"json-file"`, "new_string": `"log-driver":"journald"`},
+				},
+			}),
+		},
+		{
+			name:   "Docker multi-line patch whose last insecure-registries key is empty",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "apply_patch", map[string]any{
+				"command": "*** Begin Patch\n*** Update File: /etc/docker/daemon.json\n@@\n" +
+					"+  \"insecure-registries\":[\"198.51.100.7:5000\"],\n+  \"insecure-registries\":[]\n" +
+					"*** End Patch\n",
+			}),
+		},
+		{
+			name:   "Docker Edit adding a remote list followed by a last null insecure-registries key",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Edit", map[string]any{
+				"file_path":  "/etc/docker/daemon.json",
+				"old_string": `"debug":true`,
+				"new_string": `"insecure-registries":["198.51.100.7:5000"],"insecure-registries":null,"debug":true`,
+			}),
+		},
+		{
+			name:   "Docker patch adding a remote list followed by a last null insecure-registries key",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "apply_patch", map[string]any{
+				"command": "*** Begin Patch\n*** Update File: /etc/docker/daemon.json\n@@\n" +
+					"+  \"insecure-registries\":[\"198.51.100.7:5000\"],\n+  \"insecure-registries\": null\n" +
+					"*** End Patch\n",
+			}),
+		},
+		{
+			name:   "Docker Edit adding a builder block with its own insecure-registries key",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Edit", map[string]any{
+				"file_path":  "/etc/docker/daemon.json",
+				"old_string": `"debug": true`,
+				"new_string": `"debug": true, "builder": {"insecure-registries": ["198.51.100.7:5000"]}`,
+			}),
+		},
+		{
+			name:   "Docker MultiEdit that only changes the log driver and a setting",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{
+					map[string]any{"old_string": `"log-driver":"json-file"`, "new_string": `"log-driver":"journald"`},
+					map[string]any{"old_string": `"debug":true`, "new_string": `"debug":false`},
+				},
+			}),
+		},
+		{
+			name:   "Docker MultiEdit that spells the log driver name over two steps",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{
+					map[string]any{"old_string": `"debug"`, "new_string": `"log-`},
+					map[string]any{"old_string": `-":true`, "new_string": `-driver":"journald"`},
+				},
+			}),
+		},
+		{
+			name:   "Docker MultiEdit that spells the mirrors name and a URL over two steps",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{
+					map[string]any{"old_string": `"debug"`, "new_string": `"registry-`},
+					map[string]any{"old_string": `-":true`, "new_string": `-mirrors":["http://registry.example.test:5000"]`},
+				},
+			}),
+		},
+		{
+			name:   "Docker MultiEdit that creates an empty mirrors list and fills it",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{
+					map[string]any{"old_string": `"debug":true`, "new_string": `"registry-mirrors":[]`},
+					map[string]any{"old_string": `[]`, "new_string": `["http://registry.example.test:5000"]`},
+				},
+			}),
+		},
+		{
+			name:   "Docker MultiEdit that creates an empty list and fills a mirrors list that ends the same way",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{
+					map[string]any{"old_string": `"debug":true`, "new_string": `"insecure-registries":[]`},
+					map[string]any{"old_string": `[]}`, "new_string": `["https://mirror.example.test:5000"]}`},
+				},
+			}),
+		},
+		{
+			name:   "Docker MultiEdit that creates an empty list and fills a dns list that ends the same way",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{
+					map[string]any{"old_string": `"debug":true`, "new_string": `"insecure-registries":[]`},
+					map[string]any{"old_string": `[]}`, "new_string": `["8.8.8.8"]}`},
+				},
+			}),
+		},
+		{
+			name:   "Docker dot-dot path to another file",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Write", map[string]any{
+				"file_path": "/etc/docker/../daemon.json",
+				"content":   `{"insecure-registries":["198.51.100.7:5000"]}`,
 			}),
 		},
 		{

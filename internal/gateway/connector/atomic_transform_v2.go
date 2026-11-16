@@ -17,7 +17,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -52,33 +54,36 @@ type atomicTransformV2Artifact struct {
 }
 
 type atomicTransformV2Receipt struct {
-	Version              int                       `json:"version"`
-	Phase                string                    `json:"phase"`
-	TransactionID        string                    `json:"transaction_id"`
-	LogicalPath          string                    `json:"logical_path"`
-	InputPath            string                    `json:"input_path"`
-	StateDir             string                    `json:"state_dir"`
-	StateDirIdentity     string                    `json:"state_dir_identity"`
-	TargetPath           string                    `json:"target_path"`
-	TargetShortName      string                    `json:"target_short_name,omitempty"`
-	StageShortName       string                    `json:"stage_short_name,omitempty"`
-	TargetParentIdentity string                    `json:"target_parent_identity"`
-	OldExists            bool                      `json:"old_exists"`
-	Remove               bool                      `json:"remove"`
-	RequestedPrivate     bool                      `json:"requested_private,omitempty"`
-	PreserveOldOwner     bool                      `json:"preserve_old_owner,omitempty"`
-	Old                  atomicTransformV2Artifact `json:"old,omitempty"`
-	Stage                atomicTransformV2Artifact `json:"stage,omitempty"`
-	StageFinalName       string                    `json:"stage_final_name,omitempty"`
-	StageMarker          atomicTransformV2Artifact `json:"stage_marker,omitempty"`
-	FinalMarker          atomicTransformV2Artifact `json:"final_marker,omitempty"`
-	TombstoneName        string                    `json:"tombstone_name,omitempty"`
-	TerminalMarkerName   string                    `json:"terminal_marker_name"`
-	TerminalMarker       atomicTransformV2Artifact `json:"terminal_marker"`
-	StagingReceiptID     string                    `json:"staging_receipt_identity,omitempty"`
-	PreparedReceiptID    string                    `json:"prepared_receipt_identity,omitempty"`
-	TerminalReceiptID    string                    `json:"terminal_receipt_identity,omitempty"`
-	Decision             string                    `json:"decision,omitempty"`
+	Version              int    `json:"version"`
+	Phase                string `json:"phase"`
+	TransactionID        string `json:"transaction_id"`
+	LogicalPath          string `json:"logical_path"`
+	InputPath            string `json:"input_path"`
+	StateDir             string `json:"state_dir"`
+	StateDirIdentity     string `json:"state_dir_identity"`
+	TargetPath           string `json:"target_path"`
+	TargetShortName      string `json:"target_short_name,omitempty"`
+	StageShortName       string `json:"stage_short_name,omitempty"`
+	TargetParentIdentity string `json:"target_parent_identity"`
+	OldExists            bool   `json:"old_exists"`
+	Remove               bool   `json:"remove"`
+	RequestedPrivate     bool   `json:"requested_private,omitempty"`
+	PreserveOldOwner     bool   `json:"preserve_old_owner,omitempty"`
+	// Absent on older v2 receipts, whose raw preservation semantics remain
+	// unchanged. Present selects the canonical ordinary-EA composition only.
+	OldPreservedEAMetadataSHA256 string                    `json:"old_preserved_ea_metadata_sha256,omitempty"`
+	Old                          atomicTransformV2Artifact `json:"old,omitempty"`
+	Stage                        atomicTransformV2Artifact `json:"stage,omitempty"`
+	StageFinalName               string                    `json:"stage_final_name,omitempty"`
+	StageMarker                  atomicTransformV2Artifact `json:"stage_marker,omitempty"`
+	FinalMarker                  atomicTransformV2Artifact `json:"final_marker,omitempty"`
+	TombstoneName                string                    `json:"tombstone_name,omitempty"`
+	TerminalMarkerName           string                    `json:"terminal_marker_name"`
+	TerminalMarker               atomicTransformV2Artifact `json:"terminal_marker"`
+	StagingReceiptID             string                    `json:"staging_receipt_identity,omitempty"`
+	PreparedReceiptID            string                    `json:"prepared_receipt_identity,omitempty"`
+	TerminalReceiptID            string                    `json:"terminal_receipt_identity,omitempty"`
+	Decision                     string                    `json:"decision,omitempty"`
 }
 
 type atomicTransformV2PhaseReceipt struct {
@@ -120,6 +125,10 @@ type atomicTransformV2Options struct {
 	// replacement. The bound owner check repeats on every CAS attempt.
 	preserveExistingProtection bool
 	expectedOwner              *windows.SID
+	// Optional caller proof checks run against this transaction's actual
+	// snapshot, including no-ops, and its prepared publication before commit.
+	validateSnapshot func(atomicFileSnapshot) error
+	beforeCommit     func(atomicTransformV2Receipt) error
 }
 
 func (txn *atomicTransformV2Transaction) close() error {
@@ -156,7 +165,7 @@ func atomicTransformFileV2(
 		return fmt.Errorf("revalidate Windows transaction locator: %w", err)
 	}
 	return withAtomicTransformV2ProtocolLock(path, stateDir, func() error {
-		return recoverAtomicTransformV2Locked(path, stateDir)
+		return recoverAtomicTransformV2Locked(path, stateDir, options.expectedOwner)
 	}, func(target string) error {
 		// Pin the canonical physical target spelling for the complete locked
 		// operation. In particular, an existing 8.3 leaf alias can stop resolving
@@ -173,8 +182,29 @@ func atomicTransformFileV2Locked(
 	options atomicTransformV2Options,
 	transform func(current []byte, exists bool) (atomicTransformResult, error),
 ) error {
+	// A ReadOnly agent config refuses the write-open used for protection
+	// convergence and the ReplaceFileW publication with access denied. Clear
+	// the attribute for this transaction and put it back on whatever file
+	// holds the name afterwards, so the user's choice survives the update.
+	restoreReadOnly, err := clearWindowsManagedReadOnly(path)
+	if err != nil {
+		return fmt.Errorf("prepare ReadOnly config %s for update: %w", path, err)
+	}
+	defer func() {
+		if restoreErr := restoreReadOnly(); restoreErr != nil {
+			emitManagedResilience(managed.MarkerAccept, path,
+				"could not restore ReadOnly attribute after update: "+restoreErr.Error(), nil)
+		}
+	}()
+	var lastConflict error
 	for attempt := 0; attempt < atomicTransformMaxAttempts; attempt++ {
-		if err := recoverAtomicTransformV2Locked(inputPath, stateDir); err != nil {
+		if attempt > 0 && lastConflict != nil {
+			// A conflict at begin or commit is usually an editor, indexer or AV
+			// handle on the config; give it a moment instead of spending every
+			// attempt within a few milliseconds.
+			windowsManagedRetrySleep(atomicTransformV2ConflictRetry.delay(attempt - 1))
+		}
+		if err := recoverAtomicTransformV2Locked(inputPath, stateDir, options.expectedOwner); err != nil {
 			return fmt.Errorf("recover interrupted config transform for %s: %w", path, err)
 		}
 		if err := prepareAtomicTransformV2TargetParent(path); err != nil {
@@ -183,6 +213,11 @@ func atomicTransformFileV2Locked(
 		snapshot, err := readAtomicFileSnapshot(path)
 		if err != nil {
 			return err
+		}
+		if options.validateSnapshot != nil {
+			if err := options.validateSnapshot(snapshot); err != nil {
+				return err
+			}
 		}
 		if snapshot.exists && options.expectedOwner != nil {
 			if err := validateAtomicTransformV2ExpectedOwner(path, snapshot, options.expectedOwner); err != nil {
@@ -210,9 +245,9 @@ func atomicTransformFileV2Locked(
 		if !result.Remove && len(result.Data) > atomicTransformMaxConfigBytes {
 			return fmt.Errorf("transformed config exceeds %d-byte compare-and-swap limit", atomicTransformMaxConfigBytes)
 		}
-		semanticNoop := (!snapshot.exists && result.Remove) ||
+		semanticNoop := result.Keep || !result.Force && ((!snapshot.exists && result.Remove) ||
 			(snapshot.exists && !result.Remove && bytes.Equal(snapshot.data, result.Data) &&
-				(options.preserveExistingProtection || atomicTransformSnapshotSatisfiesPermissions(snapshot, writePerm)))
+				(options.preserveExistingProtection || atomicTransformSnapshotSatisfiesPermissions(snapshot, writePerm))))
 		runAtomicTransformBeforeCompareHook(path, attempt)
 		matches, err := atomicFileSnapshotStillMatches(path, snapshot)
 		if err != nil {
@@ -220,6 +255,18 @@ func atomicTransformFileV2Locked(
 		}
 		if !matches {
 			continue
+		}
+		if snapshot.exists && !result.Remove && !semanticNoop && snapshot.canonicalEAMetadataDigest == "" {
+			return fmt.Errorf("existing config contains unsupported kernel extended attributes; original config was not replaced")
+		}
+		if semanticNoop {
+			// Nothing is replaced, so nothing can inherit the existing
+			// protection: a SYSTEM cleanup that finds nothing to remove
+			// leaves the enrolled user's file and its DACL as found
+			// (GAP-2096: it turned the inherited DACL of every profile's
+			// .claude\settings.json into a protected private one, dropping
+			// the gateway's inherited inventory read).
+			return nil
 		}
 		convergeProtection := !options.preserveExistingProtection
 		if options.expectedOwner != nil && !convergeProtection {
@@ -244,17 +291,15 @@ func atomicTransformFileV2Locked(
 				continue
 			}
 		}
-		if semanticNoop {
-			return nil
-		}
 
 		txn, err := beginAtomicTransformV2(inputPath, path, stateDir, snapshot, result, writePerm, options)
 		if err != nil {
 			_ = txn.close()
-			if recoverErr := recoverAtomicTransformV2Locked(inputPath, stateDir); recoverErr != nil {
+			if recoverErr := recoverAtomicTransformV2Locked(inputPath, stateDir, options.expectedOwner); recoverErr != nil {
 				return errors.Join(err, recoverErr)
 			}
 			if errors.Is(err, errAtomicTransformConflict) {
+				lastConflict = err
 				continue
 			}
 			return err
@@ -263,7 +308,7 @@ func atomicTransformFileV2Locked(
 		matches, err = atomicFileSnapshotStillMatches(path, snapshot)
 		if err != nil || !matches {
 			_ = txn.close()
-			recoverErr := recoverAtomicTransformV2Locked(inputPath, stateDir)
+			recoverErr := recoverAtomicTransformV2BeforeCommit(inputPath, stateDir, options.expectedOwner)
 			if recoverErr != nil {
 				if err != nil {
 					return errors.Join(err, recoverErr)
@@ -276,24 +321,39 @@ func atomicTransformFileV2Locked(
 			continue
 		}
 
+		if options.beforeCommit != nil {
+			if err := options.beforeCommit(txn.receipt); err != nil {
+				_ = txn.close()
+				return errors.Join(err, recoverAtomicTransformV2Locked(inputPath, stateDir, options.expectedOwner))
+			}
+		}
 		err = commitAtomicTransformV2(path, snapshot, txn)
 		if closeErr := txn.close(); closeErr != nil && err == nil {
 			err = closeErr
 		}
 		if err != nil {
-			recoverErr := recoverAtomicTransformV2Locked(inputPath, stateDir)
+			recoverErr := recoverAtomicTransformV2Locked(inputPath, stateDir, options.expectedOwner)
 			if recoverErr != nil {
 				return errors.Join(err, recoverErr)
 			}
 			if errors.Is(err, errAtomicTransformConflict) {
+				lastConflict = err
 				continue
 			}
 			return err
 		}
-		if err := recoverAtomicTransformV2Locked(inputPath, stateDir); err != nil {
+		if err := recoverAtomicTransformV2Locked(inputPath, stateDir, options.expectedOwner); err != nil {
 			return err
 		}
 		return nil
+	}
+	if lastConflict != nil {
+		return fmt.Errorf(
+			"config %s could not be published in %d attempts; another process kept it busy or changed it (last error: %v)",
+			inputPath,
+			atomicTransformMaxAttempts,
+			lastConflict,
+		)
 	}
 	return fmt.Errorf(
 		"config %s changed during each of %d read/merge attempts; refusing to overwrite concurrent edits",
@@ -335,6 +395,14 @@ func validateAtomicTransformV2ExpectedOwner(path string, snapshot atomicFileSnap
 		return fmt.Errorf("refusing to edit Claude settings not owned by enrolled user %s", expected)
 	}
 	return nil
+}
+
+// atomicTransformV2ConflictRetry spaces out attempts after a publication
+// conflict; the budget stays near one second across all attempts.
+var atomicTransformV2ConflictRetry = managedTransientRetry{
+	Attempts: atomicTransformMaxAttempts,
+	Initial:  10 * time.Millisecond,
+	Max:      320 * time.Millisecond,
 }
 
 func withAtomicTransformV2ProtocolLock(
@@ -500,6 +568,12 @@ func beginAtomicTransformV2(
 			return failClosed(inspectErr)
 		}
 		receipt.Old = atomicTransformV2ArtifactFromState(filepath.Base(target), oldState)
+		if !result.Remove {
+			if oldState.canonicalEAMetadataDigest == "" {
+				return failClosed(fmt.Errorf("existing config contains unsupported kernel extended attributes; original config was not replaced"))
+			}
+			receipt.OldPreservedEAMetadataSHA256 = oldState.canonicalEAMetadataDigest
+		}
 		receipt.TargetShortName, err = atomicTransformV2CaptureWindowsShortName(
 			targetDir, filepath.Base(target), oldState,
 		)
@@ -593,6 +667,21 @@ func beginAtomicTransformV2(
 		)
 		if err != nil {
 			return failClosed(err)
+		}
+		if receipt.OldExists {
+			stage, openErr := openAtomicTransformBoundFilePlatform(targetDir.file, receipt.Stage.Name, true)
+			if openErr != nil {
+				return failClosed(openErr)
+			}
+			copyErr := preserveAtomicTransformV2StageEA(targetDir, receipt, stage)
+			closeErr := stage.Close()
+			if err := errors.Join(copyErr, closeErr); err != nil {
+				return failClosed(err)
+			}
+			stageInitial, err = atomicTransformBoundInspectFilePrivate(targetDir, receipt.Stage.Name, atomicTransformMaxConfigBytes)
+			if err != nil {
+				return failClosed(err)
+			}
 		}
 		receipt.Stage = atomicTransformV2ArtifactFromState(receipt.Stage.Name, stageInitial)
 		receipt.Stage.SHA256 = atomicTransformDigest(result.Data)
@@ -859,10 +948,17 @@ func atomicTransformV2PublishedTargetMatches(
 	}
 	return atomicTransformV2StageContentMatches(receipt.Stage, state) &&
 		receipt.Stage.LinkCount == 1 && state.linkCount == 1 &&
-		receipt.Old.PreservedMetadataSHA256 != "" &&
-		state.preservedMetadataDigest == receipt.Old.PreservedMetadataSHA256 &&
+		atomicTransformV2PublishedMetadataMatches(receipt, state) &&
 		ownerGroup != "" && state.ownerGroupDigest == ownerGroup &&
 		receipt.Old.CreationTime != 0 && state.creationTime == receipt.Old.CreationTime
+}
+
+func atomicTransformV2PublishedMetadataMatches(receipt atomicTransformV2Receipt, state atomicTransformArtifactState) bool {
+	if receipt.OldPreservedEAMetadataSHA256 != "" {
+		return state.canonicalEAMetadataDigest == receipt.OldPreservedEAMetadataSHA256
+	}
+	return receipt.Old.PreservedMetadataSHA256 != "" &&
+		state.preservedMetadataDigest == receipt.Old.PreservedMetadataSHA256
 }
 
 func atomicTransformV2KnownStageState(
@@ -1077,6 +1173,10 @@ func validateAtomicTransformV2Receipt(
 ) error {
 	if receipt.Version != atomicTransformV2Version {
 		return fmt.Errorf("unsupported compare-and-swap receipt version %d", receipt.Version)
+	}
+	if receipt.OldPreservedEAMetadataSHA256 != "" &&
+		(!receipt.OldExists || receipt.Remove || !atomicTransformV2ValidDigest(receipt.OldPreservedEAMetadataSHA256)) {
+		return fmt.Errorf("invalid canonical EA preservation witness in compare-and-swap receipt")
 	}
 	if receipt.Phase != atomicTransformV2Staging && receipt.Phase != atomicTransformV2Prepared &&
 		receipt.Phase != atomicTransformV2Allocation && receipt.Phase != atomicTransformV2Terminal &&
@@ -1450,29 +1550,9 @@ type atomicTransformV2CandidateGroup struct {
 	primary, gc           map[string]string
 }
 
-func loadAtomicTransformV2(path, stateDir string) (atomicTransformV2Loaded, error) {
-	logical, fallbackBase, err := atomicTransformV2BasePath(path, stateDir)
-	if err != nil {
-		return atomicTransformV2Loaded{}, err
-	}
-	loadedNone := atomicTransformV2Loaded{base: fallbackBase, logical: logical}
-	stateBound, err := bindAtomicTransformDirectory(stateDir)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return loadedNone, nil
-		}
-		return loadedNone, fmt.Errorf("bind stable compare-and-swap state directory: %w", err)
-	}
-	defer stateBound.Close()
-	if err := stateBound.validatePrivate(); err != nil {
-		return loadedNone, err
-	}
-	logical, primaryBase, err := atomicTransformV2BasePath(path, stateBound.path)
-	if err != nil {
-		return loadedNone, err
-	}
-	loadedNone = atomicTransformV2Loaded{base: primaryBase, logical: logical}
-
+// enumerateAtomicTransformV2Groups lists the receipt candidate groups in the
+// bound state directory, one per transaction base, without reading any receipt.
+func enumerateAtomicTransformV2Groups(stateBound *atomicTransformBoundDirectory) ([]atomicTransformV2CandidateGroup, error) {
 	groups := make([]atomicTransformV2CandidateGroup, 0, 4)
 	matchingEntries := 0
 	for {
@@ -1480,14 +1560,14 @@ func loadAtomicTransformV2(path, stateDir string) (atomicTransformV2Loaded, erro
 		for _, entry := range entries {
 			candidate, reserved, parseErr := parseAtomicTransformV2Candidate(entry.Name())
 			if parseErr != nil {
-				return loadedNone, parseErr
+				return nil, parseErr
 			}
 			if !reserved {
 				continue
 			}
 			matchingEntries++
 			if matchingEntries > atomicTransformMaxIntentCandidates {
-				return loadedNone, fmt.Errorf(
+				return nil, fmt.Errorf(
 					"compare-and-swap recovery receipt candidate limit exceeded in %s", stateBound.path,
 				)
 			}
@@ -1510,13 +1590,13 @@ func loadAtomicTransformV2(path, stateDir string) (atomicTransformV2Loaded, erro
 			if candidate.gc {
 				dest = group.gc
 				if group.gcTransactionID != "" && group.gcTransactionID != candidate.transactionID {
-					return loadedNone, fmt.Errorf("multiple V2 CAS GC transaction identifiers claim %s", group.base)
+					return nil, fmt.Errorf("multiple V2 CAS GC transaction identifiers claim %s", group.base)
 				}
 				group.gcTransactionID = candidate.transactionID
 			}
 			if previous := dest[candidate.phase]; previous != "" &&
 				!atomicTransformPathsEqual(previous, entry.Name()) {
-				return loadedNone, fmt.Errorf("multiple ordinal-equivalent %s V2 CAS receipts", candidate.phase)
+				return nil, fmt.Errorf("multiple ordinal-equivalent %s V2 CAS receipts", candidate.phase)
 			}
 			dest[candidate.phase] = entry.Name()
 		}
@@ -1524,8 +1604,46 @@ func loadAtomicTransformV2(path, stateDir string) (atomicTransformV2Loaded, erro
 			break
 		}
 		if readErr != nil {
-			return loadedNone, fmt.Errorf("enumerate bound stable compare-and-swap receipts: %w", readErr)
+			return nil, fmt.Errorf("enumerate bound stable compare-and-swap receipts: %w", readErr)
 		}
+	}
+	return groups, nil
+}
+
+func loadAtomicTransformV2(path, stateDir string) (atomicTransformV2Loaded, error) {
+	return loadAtomicTransformV2Phased(path, stateDir, false)
+}
+
+// loadAtomicTransformV2Phased is loadAtomicTransformV2 for a caller that knows
+// whether its own transaction has started publishing. beforeCommit means the
+// caller abandons a transaction whose commit it never began, so a live leaf
+// that is neither Old nor New is the operator own save and not an ambiguity.
+func loadAtomicTransformV2Phased(path, stateDir string, beforeCommit bool) (atomicTransformV2Loaded, error) {
+	logical, fallbackBase, err := atomicTransformV2BasePath(path, stateDir)
+	if err != nil {
+		return atomicTransformV2Loaded{}, err
+	}
+	loadedNone := atomicTransformV2Loaded{base: fallbackBase, logical: logical}
+	stateBound, err := bindAtomicTransformDirectory(stateDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return loadedNone, nil
+		}
+		return loadedNone, fmt.Errorf("bind stable compare-and-swap state directory: %w", err)
+	}
+	defer stateBound.Close()
+	if err := stateBound.validatePrivate(); err != nil {
+		return loadedNone, err
+	}
+	logical, primaryBase, err := atomicTransformV2BasePath(path, stateBound.path)
+	if err != nil {
+		return loadedNone, err
+	}
+	loadedNone = atomicTransformV2Loaded{base: primaryBase, logical: logical}
+
+	groups, err := enumerateAtomicTransformV2Groups(stateBound)
+	if err != nil {
+		return loadedNone, err
 	}
 
 	requestedInput, inputErr := canonicalAtomicTransformPath(path)
@@ -1583,7 +1701,14 @@ func loadAtomicTransformV2(path, stateDir string) (atomicTransformV2Loaded, erro
 		}
 		matched, matchedPriority = candidate, priority
 	}
-	if matched.exists && !matched.terminal.located && !matched.complete.located &&
+	// Only a prepared receipt (Rp) can have put anything at the live leaf: Ra
+	// and Rs are written before the transaction touches the target, and their
+	// abort deletes only exact transaction-owned artifacts. A leaf that is
+	// neither Old nor New under an allocation or staging receipt is therefore
+	// the operator's own save (an editor's rename-over lands in exactly that
+	// window), not an ambiguous state. Refusing it kept the transaction's own
+	// leftovers, and with them every later rollback, for good (GAP-0957).
+	if matched.exists && matched.prepared.located && !beforeCommit && !matched.terminal.located && !matched.complete.located &&
 		requestedParentIdentity == matched.receipt.TargetParentIdentity {
 		requestedParent, bindErr := bindAtomicTransformDirectory(filepath.Dir(requestedInput))
 		if bindErr != nil {
@@ -1761,11 +1886,27 @@ func recoverAtomicTransformV2(path, stateDir string) error {
 		return err
 	}
 	return withAtomicTransformV2ProtocolLock(path, stateDir, func() error {
-		return recoverAtomicTransformV2Locked(path, stateDir)
+		return recoverAtomicTransformV2Locked(path, stateDir, nil)
 	}, nil)
 }
 
-func recoverAtomicTransformV2Locked(path, stateDir string) error {
+// legacyOwner is the enrolled user a privileged uninstall transforms for
+// (atomicTransformV2Options.expectedOwner), nil for the user's own process.
+func recoverAtomicTransformV2Locked(path, stateDir string, legacyOwner *windows.SID) error {
+	return recoverAtomicTransformV2Phased(path, stateDir, legacyOwner, false)
+}
+
+// recoverAtomicTransformV2BeforeCommit abandons the caller own transaction
+// after the caller saw the target change and before it began to publish. The
+// target was never touched by the transaction, so whatever file the operator
+// saved at the live name stays exactly as saved and only the transaction own
+// receipts and side artifacts are removed (GAP-0961). A prepared receipt left
+// by a crash is not recovered this way: it cannot prove the commit never began.
+func recoverAtomicTransformV2BeforeCommit(path, stateDir string, legacyOwner *windows.SID) error {
+	return recoverAtomicTransformV2Phased(path, stateDir, legacyOwner, true)
+}
+
+func recoverAtomicTransformV2Phased(path, stateDir string, legacyOwner *windows.SID, beforeCommit bool) error {
 	// V2 terminal and complete receipts are authoritative: once either exists,
 	// no legacy recovery is allowed to mutate the live target. Inspect both
 	// namespaces before every transition and fail closed if independently valid
@@ -1773,7 +1914,7 @@ func recoverAtomicTransformV2Locked(path, stateDir string) error {
 	// recovery one transition at a time also closes the upgrade window in which
 	// V2 could appear between a monolithic V1 recovery and the next V2 load.
 	for pass := 0; pass < 24; pass++ {
-		loaded, err := loadAtomicTransformV2(path, stateDir)
+		loaded, err := loadAtomicTransformV2Phased(path, stateDir, beforeCommit)
 		if err != nil {
 			return err
 		}
@@ -1786,7 +1927,7 @@ func recoverAtomicTransformV2Locked(path, stateDir string) error {
 			trustedTargetParent = filepath.Dir(loaded.receipt.TargetPath)
 		}
 		legacyDir, legacyExists, err := loadAtomicTransformV1ForV2Migration(
-			path, stateDir, trustedTargetParent,
+			path, stateDir, trustedTargetParent, legacyOwner,
 		)
 		if err != nil {
 			return err
@@ -1809,7 +1950,7 @@ func recoverAtomicTransformV2Locked(path, stateDir string) error {
 				// mutate live state. The protected state directory and connector
 				// advisory lock exclude untrusted/conforming concurrent publishers;
 				// this second read catches an independently started V2 transaction.
-				recheck, recheckErr := loadAtomicTransformV2(path, stateDir)
+				recheck, recheckErr := loadAtomicTransformV2Phased(path, stateDir, beforeCommit)
 				if recheckErr != nil {
 					return recheckErr
 				}
@@ -1827,7 +1968,7 @@ func recoverAtomicTransformV2Locked(path, stateDir string) error {
 			// Prove the V2 namespace is still empty after legacy convergence.
 			// atomicTransformFileV2 may now start Rs; its no-replace publication
 			// remains the final arbiter against another conforming process.
-			recheck, recheckErr := loadAtomicTransformV2(path, stateDir)
+			recheck, recheckErr := loadAtomicTransformV2Phased(path, stateDir, beforeCommit)
 			if recheckErr != nil {
 				return recheckErr
 			}
@@ -1846,7 +1987,7 @@ func recoverAtomicTransformV2Locked(path, stateDir string) error {
 				return err
 			}
 		case loaded.prepared.located:
-			if err := recoverPreparedAtomicTransformV2(loaded); err != nil {
+			if err := recoverPreparedAtomicTransformV2(loaded, beforeCommit); err != nil {
 				return err
 			}
 		case loaded.staging.located:
@@ -1869,8 +2010,13 @@ func recoverAtomicTransformV2Locked(path, stateDir string) error {
 // the target-local directory used by previously shipped code. It never creates
 // the target-local directory. A valid transaction in more than one namespace
 // is ambiguous and therefore fails closed.
+//
+// A privileged uninstall for an enrolled user (legacyOwner) also accepts the
+// target-local directory as that user's private directory: the user's own
+// connector setup created it, so its owner is the user, not the caller
+// (GAP-1437). The stable directory always belongs to the caller.
 func loadAtomicTransformV1ForV2Migration(
-	path, stableStateDir, trustedTargetParent string,
+	path, stableStateDir, trustedTargetParent string, legacyOwner *windows.SID,
 ) (string, bool, error) {
 	stableStateDir, err := canonicalAtomicTransformPath(stableStateDir)
 	if err != nil {
@@ -1930,7 +2076,11 @@ func loadAtomicTransformV1ForV2Migration(
 		if bindErr != nil {
 			return "", false, fmt.Errorf("bind legacy compare-and-swap state directory %s: %w", directory, bindErr)
 		}
-		if privateErr := bound.validatePrivate(); privateErr != nil {
+		privateErr := bound.validatePrivate()
+		if privateErr != nil && legacyOwner != nil && directory != stableStateDir {
+			privateErr = bound.validatePrivateOwnedBy(legacyOwner)
+		}
+		if privateErr != nil {
 			_ = bound.Close()
 			return "", false, fmt.Errorf("validate legacy compare-and-swap state directory %s: %w", directory, privateErr)
 		}
@@ -2256,7 +2406,12 @@ func completeCommittedAtomicTransformV2(loaded atomicTransformV2Loaded) error {
 	)
 }
 
-func recoverPreparedAtomicTransformV2(loaded atomicTransformV2Loaded) error {
+// recoverPreparedAtomicTransformV2 recovers a prepared transaction. With
+// beforeCommit the caller guarantees it never began to publish: an existing
+// live file the transaction does not recognise, with the tombstone slot empty,
+// is then the operator own save and is kept (see
+// recoverAtomicTransformV2BeforeCommit).
+func recoverPreparedAtomicTransformV2(loaded atomicTransformV2Loaded, beforeCommit bool) error {
 	targetDir, stateDir, err := bindAtomicTransformV2ReceiptDirectories(loaded.receipt)
 	if err != nil {
 		return err
@@ -2462,7 +2617,8 @@ func recoverPreparedAtomicTransformV2(loaded atomicTransformV2Loaded) error {
 	if receipt.OldExists && !target.exists {
 		return fmt.Errorf("prepared abort cannot establish an authoritative live state; retaining recovery artifacts")
 	}
-	return abortAtomicTransformV2Bound(loaded, targetDir, stateDir)
+	operatorLive := beforeCommit && target.exists && !tomb.exists && !targetNew
+	return abortAtomicTransformV2Bound(loaded, targetDir, stateDir, operatorLive)
 }
 
 func abortAtomicTransformV2(loaded atomicTransformV2Loaded) error {
@@ -2472,11 +2628,16 @@ func abortAtomicTransformV2(loaded atomicTransformV2Loaded) error {
 	}
 	defer targetDir.Close()
 	defer stateDir.Close()
-	return abortAtomicTransformV2Bound(loaded, targetDir, stateDir)
+	return abortAtomicTransformV2Bound(loaded, targetDir, stateDir, false)
 }
+
+// errAtomicTransformV2StagedEAUnproven marks an allocation payload whose staged
+// extended attribute can no longer be checked against the prior config.
+var errAtomicTransformV2StagedEAUnproven = errors.New("staged extended attribute cannot be proved against the prior config")
 
 func inspectAtomicTransformV2HarmlessAllocationArtifact(
 	dir *atomicTransformBoundDirectory, name string, expected []byte,
+	allowStagedEA bool, expectedEA func() (*atomicTransformV2WindowsMetadataStream, error),
 ) (atomicTransformArtifactState, error) {
 	file, err := openAtomicTransformBoundFilePlatform(dir.file, name, false)
 	if errors.Is(err, os.ErrNotExist) {
@@ -2497,9 +2658,55 @@ func inspectAtomicTransformV2HarmlessAllocationArtifact(
 	if err != nil {
 		return atomicTransformArtifactState{}, err
 	}
+	if witness.Digest != state.metadataDigest {
+		return atomicTransformArtifactState{}, fmt.Errorf("allocation artifact changed between exact observations: %w", errAtomicTransformConflict)
+	}
 	harmlessAttributes := witness.FileAttributes &^
 		(windows.FILE_ATTRIBUTE_ARCHIVE | windows.FILE_ATTRIBUTE_NORMAL)
-	harmlessMain := len(witness.Streams) == 1 &&
+	harmlessStreams := len(witness.Streams) == 1
+	var staleEA error
+	if allowStagedEA && len(witness.Streams) > 1 && witness.EACopyability == atomicTransformEACopyable {
+		// Ra binds both the harmless marker bytes and Old's exact raw witness.
+		// EA staging may finish before Rs is durable. Only the exact ordinary
+		// EA copied from that still-authenticated Old is disposable here; any
+		// ADS, unknown EA, or changed source remains retained fail-closed.
+		rawEA, preservedEA, eaErr := atomicTransformV2WindowsPreservedEAFromOpen(file)
+		if eaErr != nil {
+			return atomicTransformArtifactState{}, eaErr
+		}
+		if !atomicTransformV2EAMatchesWitness(rawEA, witness.Streams) {
+			return atomicTransformArtifactState{}, fmt.Errorf("allocation EA changed between exact observations: %w", errAtomicTransformConflict)
+		}
+		var permitted *atomicTransformV2WindowsMetadataStream
+		if preservedEA != nil {
+			permitted, err = expectedEA()
+			if errors.Is(err, errAtomicTransformConflict) || errors.Is(err, os.ErrNotExist) {
+				// The prior config this EA was copied from is no longer live
+				// (an editor saved over it, or it was removed): the copy cannot
+				// be proved to be the transaction own, so it is not deleted. The
+				// rest of the stage must still be the harmless shape below before
+				// the caller may release its receipt.
+				staleEA = errors.Join(errAtomicTransformV2StagedEAUnproven, err)
+			} else if err != nil {
+				return atomicTransformArtifactState{}, err
+			}
+		}
+		harmlessStreams = staleEA != nil ||
+			atomicTransformV2EAMatchesWitness(permitted, atomicTransformV2EAStreamSlice(preservedEA))
+		mainCount, eaCount := 0, 0
+		for _, stream := range witness.Streams {
+			switch stream.ID {
+			case atomicTransformV2BackupData:
+				mainCount++
+			case 2:
+				eaCount++
+			default:
+				harmlessStreams = false
+			}
+		}
+		harmlessStreams = harmlessStreams && mainCount == 1 && eaCount <= 1
+	}
+	harmlessMain := harmlessStreams && len(witness.Streams) > 0 &&
 		witness.Streams[0].ID == atomicTransformV2BackupData &&
 		witness.Streams[0].Name == "" && witness.Streams[0].Size == int64(len(expected)) &&
 		witness.Streams[0].SHA256 == atomicTransformDigest(expected)
@@ -2510,6 +2717,9 @@ func inspectAtomicTransformV2HarmlessAllocationArtifact(
 			"allocation-authenticated artifact has non-harmless metadata; preserving it fail-closed: %s",
 			name,
 		)
+	}
+	if staleEA != nil {
+		return atomicTransformArtifactState{}, staleEA
 	}
 	return state, nil
 }
@@ -2542,7 +2752,17 @@ func abortAtomicTransformV2Allocation(loaded atomicTransformV2Loaded) error {
 		expected := atomicTransformV2MarkerBytes(receipt.TransactionID, artifact.label)
 		state, inspectErr := inspectAtomicTransformV2HarmlessAllocationArtifact(
 			targetDir, artifact.name, expected,
+			artifact.label == "payload" && receipt.OldPreservedEAMetadataSHA256 != "",
+			func() (*atomicTransformV2WindowsMetadataStream, error) {
+				return atomicTransformV2AllocationExpectedEA(targetDir, receipt)
+			},
 		)
+		if errors.Is(inspectErr, errAtomicTransformV2StagedEAUnproven) {
+			// Keep the EA-bearing payload (the only copy of the prior metadata
+			// once the live file was replaced) and retire the rest, so the
+			// receipt no longer blocks every later change to the config.
+			continue
+		}
 		if inspectErr != nil {
 			return inspectErr
 		}
@@ -2567,10 +2787,13 @@ func abortAtomicTransformV2Allocation(loaded atomicTransformV2Loaded) error {
 func abortAtomicTransformV2Bound(
 	loaded atomicTransformV2Loaded,
 	targetDir, stateDir *atomicTransformBoundDirectory,
+	operatorLive bool,
 ) error {
 	receipt := loaded.receipt
 	if loaded.prepared.exists && !loaded.terminal.exists {
-		if receipt.OldExists {
+		// With operatorLive the transaction never moved Old, so there is nothing
+		// to put back and the saved file at the live name stays as it is.
+		if receipt.OldExists && !operatorLive {
 			targetName := filepath.Base(receipt.TargetPath)
 			target, err := atomicTransformBoundInspect(
 				targetDir, targetName, atomicTransformMaxConfigBytes,

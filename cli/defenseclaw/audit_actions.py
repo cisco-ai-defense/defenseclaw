@@ -76,6 +76,9 @@ ACTION_TOOL_RESULT: Final[str] = "tool-result"
 # Operator mutations (v7 Activity)
 ACTION_CONFIG_UPDATE: Final[str]   = "config-update"
 ACTION_CONFIG_BUNDLE_RECEIPT: Final[str] = "config.bundle.receipt"
+ACTION_CONFIG_TRUST_ANCHORS_CHANGED: Final[str] = "config.trust_anchors.changed"
+ACTION_CONFIG_SECRET_CHANGED: Final[str] = "config.secret.changed"
+ACTION_CONFIG_SECRET_CHANGE_FAILED: Final[str] = "config.secret.change_failed"
 ACTION_POLICY_UPDATE: Final[str]   = "policy-update"
 ACTION_POLICY_RELOAD: Final[str]   = "policy-reload"
 ACTION_ACTION: Final[str]          = "action"
@@ -109,10 +112,16 @@ ACTION_ASSET_POLICY: Final[str]                = "asset-policy"
 # user manually removes it while the gateway is running.
 ACTION_CONNECTOR_HOOK_TAMPERED: Final[str]     = "connector-hook-tampered"
 ACTION_CONNECTOR_HOOK_REPAIRED: Final[str]     = "connector-hook-repaired"
+ACTION_CONNECTOR_HOOK_ACCOUNT_REMOVED: Final[str] = "connector-hook-account-removed"
+ACTION_PROTECTED_FILE_CHANGED: Final[str]      = "protected-file-changed"
 
 # A standalone enterprise hook call from an exempt_users account. Mirrors
 # internal/audit/actions.go::ActionEnterpriseExemptUser.
 ACTION_ENTERPRISE_EXEMPT_USER: Final[str]      = "enterprise-exempt-user"
+
+# One `enterprise identity refresh` run of a managed gateway (counts only).
+# Mirrors internal/audit/actions.go::ActionIdentityRefreshCompleted.
+ACTION_IDENTITY_REFRESH_COMPLETED: Final[str]  = "identity-refresh-completed"
 
 # Codex notify webhook (agent-turn-complete et al.). The notify
 # bridge POSTs codex's JSON arg to /api/v1/codex/notify; the
@@ -356,6 +365,9 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_TOOL_RESULT,
     ACTION_CONFIG_UPDATE,
     ACTION_CONFIG_BUNDLE_RECEIPT,
+    ACTION_CONFIG_TRUST_ANCHORS_CHANGED,
+    ACTION_CONFIG_SECRET_CHANGED,
+    ACTION_CONFIG_SECRET_CHANGE_FAILED,
     ACTION_POLICY_UPDATE,
     ACTION_POLICY_RELOAD,
     ACTION_ACTION,
@@ -375,7 +387,9 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_ASSET_POLICY,
     ACTION_CONNECTOR_HOOK_TAMPERED,
     ACTION_CONNECTOR_HOOK_REPAIRED,
+    ACTION_PROTECTED_FILE_CHANGED,
     ACTION_ENTERPRISE_EXEMPT_USER,
+    ACTION_IDENTITY_REFRESH_COMPLETED,
     ACTION_CODEX_NOTIFY,
     ACTION_CODEX_NOTIFY_AGENT_TURN_COMPLETE,
     ACTION_CODEX_NOTIFY_MALFORMED,

@@ -64,7 +64,7 @@ var Cursor = register(&Spec{
 	versionPattern: cursorVersionRE,
 	probe: ProbeSpec{
 		VersionArgv: []string{"/usr/local/bin/cursor-agent", "--version"},
-		VersionRE:   regexp.MustCompile(`^([0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9a-f]+)$`),
+		VersionRE:   regexp.MustCompile(`^v?([0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9a-f]+)$`),
 		// cursor-agent is a shell wrapper around the bundled node, which
 		// makes every request.
 		NetworkBinaries: `readlink -f ` + InstallRootBase + `/cursor/node`,
@@ -78,7 +78,7 @@ var Cursor = register(&Spec{
 		link := `for b in cursor-agent node index.js; do [ -e "$root/$b" ] || { echo "Cursor Agent archive lacks $b" >&2; exit 1; }; done; ` +
 			`ln -sfn "$root/cursor-agent" /usr/local/bin/cursor-agent; ln -sfn "$root/cursor-agent" /usr/local/bin/agent; ` +
 			`h="$(mktemp -d)"; got="$(HOME="$h" /usr/local/bin/cursor-agent --version 2>/dev/null | head -n 1)"; rm -rf "$h"; ` +
-			`[ "$got" = ` + shellQuote(version) + ` ] || { echo "Cursor Agent '$got' is not the pinned ` + version + `" >&2; exit 1; }`
+			pinVersionCheck("Cursor Agent", version)
 		return []InstallStep{{
 			Comment: "Install Cursor Agent " + version + " from its release archive into a root-owned prefix (sha256 checked)",
 			Run:     run + "; " + link,

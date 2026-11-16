@@ -150,6 +150,24 @@ func (h *Helper) KernelStatus(ctx context.Context) (KernelStatus, error) {
 	return status, nil
 }
 
+// ErrDiscoveryUnsupported is Discovery against a helper that does not serve
+// OpDiscovery: every managed helper, and one that predates it.
+var ErrDiscoveryUnsupported = errors.New("acquire: the sensor helper does not serve discovery reads")
+
+// Discovery asks the helper for the discovery read of the homes its own
+// configuration names and decodes the body into report
+// (inventory.BrokeredHomeReport). Like KernelStatus it does not count toward
+// the helper's reachability.
+func (h *Helper) Discovery(ctx context.Context, report any) error {
+	if err := h.roundTrip(ctx, OpDiscovery, report); err != nil {
+		if errors.Is(err, errHelperLacksOp) {
+			return ErrDiscoveryUnsupported
+		}
+		return err
+	}
+	return nil
+}
+
 func (h *Helper) note(err error) {
 	h.mu.Lock()
 	h.lastFail = err

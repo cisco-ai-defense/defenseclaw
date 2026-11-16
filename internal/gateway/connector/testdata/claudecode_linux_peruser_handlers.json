@@ -1,0 +1,68 @@
+{
+  "account": "/home/dcu-std1",
+  "api_addr": "127.0.0.1:18970",
+  "hooks": {
+    "MessageDisplay": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/dcu-std1/.local/bin/defenseclaw-hook-post",
+            "args": [
+              "guard-user-hook",
+              "/home/dcu-std1/.local/bin/defenseclaw-hook-user",
+              "hook",
+              "--connector",
+              "claudecode",
+              "--hook-home",
+              "/home/dcu-std1/.defenseclaw",
+              "--api-addr",
+              "127.0.0.1:18970"
+            ],
+            "timeout": 10,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/dcu-std1/.local/bin/defenseclaw-hook-post",
+            "args": [
+              "guard-user-hook",
+              "/home/dcu-std1/.local/bin/defenseclaw-hook-user",
+              "hook",
+              "--connector",
+              "claudecode",
+              "--hook-home",
+              "/home/dcu-std1/.defenseclaw",
+              "--api-addr",
+              "127.0.0.1:18970"
+            ],
+            "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "/home/dcu-std1/.local/bin/defenseclaw-hook-user",
+            "args": [
+              "fallback-guard-user-hook",
+              "/home/dcu-std1/.local/bin/defenseclaw-hook-post",
+              "hook",
+              "--connector",
+              "claudecode",
+              "--hook-home",
+              "/home/dcu-std1/.defenseclaw",
+              "--api-addr",
+              "127.0.0.1:18970"
+            ],
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

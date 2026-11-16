@@ -110,6 +110,10 @@ dc_handoff() {
         esac
         shift
     done
+    # An owner/name or an https:// URL; anything else would be appended to github.com (GAP-1065).
+    if ! [[ "${repo}" =~ ^https://[^[:space:]]+$ || "${repo}" =~ ^[^[:space:]/:@]+/[^[:space:]/:@]+$ ]]; then
+        dc_usage_error "DEFENSECLAW_REPO must be a GitHub owner/name or an https:// mirror URL (an http:// URL is not accepted)"; return 2
+    fi
     if [ "${version_given}" = 1 ] && ! [[ "${requested}" =~ ^[1-9][0-9]*\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
         dc_usage_error "--version must look like 1.0.0"; return 2
     fi

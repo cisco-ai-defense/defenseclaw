@@ -19,12 +19,149 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// Project names in .claude.json are controlled by the enrolled user. A UNC
-// path must be rejected before LocalSystem touches the remote filesystem.
-func TestWindowsClaudeProjectMCPRejectsUNC(t *testing.T) {
-	_, _, err := readWindowsClaudeProjectMCP(`\\server\share\project`)
-	if err == nil || !strings.Contains(err.Error(), "local drive letter") {
-		t.Fatalf("UNC project path was not rejected before filesystem access: %v", err)
+// GAP-1405: a record that cannot be updated is withdrawn, so the gateway
+// never admits the old servers as the user's current ones, and the next
+// successful update publishes the new ones.
+func TestWriteWindowsMCPSpoolWithdrawsARecordItCannotUpdate(t *testing.T) {
+	home := t.TempDir()
+	settings := filepath.Join(home, ".kiro", "settings")
+	if err := os.MkdirAll(settings, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeServers := func(name string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(settings, "mcp.json"), []byte(`{"mcpServers":{"`+name+`":{"command":"x"}}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dir := filepath.Join(t.TempDir(), KiroMCPSpoolDirName)
+	const sid = "S-1-5-21-1-1001"
+	manifest := Manifest{Targets: []ManifestTarget{{SID: sid, UserHome: home, Connector: "kiro"}}}
+	names := func() ([]string, error) {
+		servers, _, err := ReadKiroMCPSpool(dir, sid, nil)
+		var out []string
+		for _, server := range servers {
+			out = append(out, server.Name)
+		}
+		return out, err
+	}
+	writeServers("first")
+	if err := WriteWindowsKiroMCPSpool(dir, manifest, nil, t.Logf); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := names(); err != nil || strings.Join(got, ",") != "first" {
+		t.Fatalf("published %v (%v), want first", got, err)
+	}
+	writeServers("second")
+	previous := windowsMCPSpoolWrite
+	t.Cleanup(func() { windowsMCPSpoolWrite = previous })
+	windowsMCPSpoolWrite = func(string, string, string, []byte, func(string) error) error {
+		return errors.New("there is not enough space on the disk")
+	}
+	if err := WriteWindowsKiroMCPSpool(dir, manifest, nil, t.Logf); err == nil || !strings.Contains(err.Error(), "not enough space") {
+		t.Fatalf("a failed update reported %v, want the failure", err)
+	}
+	if got, err := names(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("after a failed update the gateway reads %v (%v), want no record", got, err)
+	}
+	windowsMCPSpoolWrite = previous
+	if err := WriteWindowsKiroMCPSpool(dir, manifest, nil, t.Logf); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := names(); err != nil || strings.Join(got, ",") != "second" {
+		t.Fatalf("published %v (%v), want second", got, err)
+	}
+
+	// A record the gateway holds open while the update fails is not left
+	// naming the old servers either.
+	held, err := os.Open(filepath.Join(dir, strings.ToUpper(sid)+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	writeServers("third")
+	windowsMCPSpoolWrite = func(string, string, string, []byte, func(string) error) error {
+		return errors.New("the process cannot access the file")
+	}
+	if err := WriteWindowsKiroMCPSpool(dir, manifest, nil, t.Logf); err == nil {
+		t.Fatal("a failed update was reported as published")
+	}
+	if got, err := names(); err == nil && len(got) != 0 {
+		t.Fatalf("after a failed update of a held record the gateway reads %v, want no servers", got)
+	}
+}
+
+// Project names in .claude.json are controlled by the enrolled user. Paths
+// outside a local drive are refused before any project filesystem access.
+func TestWindowsClaudeProjectMCPRejectsNonlocalPaths(t *testing.T) {
+	for _, project := range []string{
+		`\\server\share\project`,
+		`\\?\C:\project`,
+		`C:\project:stream`,
+	} {
+		t.Run(project, func(t *testing.T) {
+			_, refused, readErr := readWindowsClaudeProjectMCP(project)
+			if refused == nil || !strings.Contains(refused.Error(), "local drive letter") || readErr != nil ||
+				decideClaudeProjectRead(refused, readErr) != claudeProjectRefused {
+				t.Fatalf("project path was not refused before filesystem access: refused=%v read=%v", refused, readErr)
+			}
+		})
+	}
+}
+
+// GAP-0653: a refused project key does not hide an independent local project.
+// The network path is rejected before the enumerator can open it.
+func TestWriteWindowsClaudeMCPSpoolKeepsLocalProjectBesideUNC(t *testing.T) {
+	original := windowsClaudeProjectWithUserToken
+	windowsClaudeProjectWithUserToken = func(_ *windows.SID, _ string, fn func() error) error { return fn() }
+	t.Cleanup(func() { windowsClaudeProjectWithUserToken = original })
+	home := t.TempDir()
+	local := filepath.Join(home, "local-project")
+	if err := os.Mkdir(local, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(local, ".mcp.json"), []byte(`{"mcpServers":{"w1-local-mcp":{"command":"x"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const remote = `\\server\share\project`
+	state := func(includeRemote bool) []byte {
+		t.Helper()
+		projects := map[string]any{local: map[string]any{}}
+		if includeRemote {
+			projects[remote] = map[string]any{"mcpServers": map[string]any{"remote-local": map[string]any{"command": "x"}}}
+		}
+		data, err := json.Marshal(map[string]any{"projects": projects})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	statePath := filepath.Join(home, ".claude.json")
+	if err := os.WriteFile(statePath, state(true), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const sid = "S-1-5-21-1-1001"
+	dir := filepath.Join(t.TempDir(), ClaudeMCPSpoolDirName)
+	manifest := Manifest{Targets: []ManifestTarget{{SID: sid, UserHome: home, Connector: "claudecode"}}}
+	if err := WriteWindowsClaudeMCPSpool(dir, manifest, nil, t.Logf); err != nil {
+		t.Fatal(err)
+	}
+	servers, unreadable, err := ReadClaudeMCPSpool(dir, sid, nil)
+	if err != nil || unreadable != nil || len(servers) != 1 || servers[0].Name != "w1-local-mcp" || servers[0].Project != local {
+		t.Fatalf("spool servers=%v unreadable=%+v err=%v", servers, unreadable, err)
+	}
+	notes := ReadClaudeMCPProjectSkips(dir)
+	if len(notes) != 1 || len(notes[0].Projects) != 1 || notes[0].Projects[0].Project != remote {
+		t.Fatalf("skipped project notes = %+v", notes)
+	}
+	if err := os.WriteFile(statePath, state(false), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteWindowsClaudeMCPSpool(dir, manifest, nil, t.Logf); err != nil {
+		t.Fatal(err)
+	}
+	if notes := ReadClaudeMCPProjectSkips(dir); len(notes) != 0 {
+		t.Fatalf("stale skipped project notes = %+v", notes)
 	}
 }
 
@@ -116,14 +253,47 @@ func TestWriteWindowsClaudeMCPSpoolMarksUnreadableState(t *testing.T) {
 	}
 }
 
-// A rejected project file leaves the account unreadable instead of silently
+// GAP-0643: a user whose projects cannot be read as them because they signed
+// out gets a record that says so, which the refusals name.
+func TestWriteWindowsClaudeMCPSpoolMarksASignedOutUser(t *testing.T) {
+	const sid = "S-1-5-21-1-1001"
+	original := windowsClaudeProjectWithUserToken
+	windowsClaudeProjectWithUserToken = func(*windows.SID, string, func() error) error {
+		return &WindowsTargetSessionUnavailableError{SID: sid}
+	}
+	t.Cleanup(func() { windowsClaudeProjectWithUserToken = original })
+	home := t.TempDir()
+	raw, _ := json.Marshal(map[string]any{"projects": map[string]any{filepath.Join(home, "proj"): map[string]any{}}})
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), ClaudeMCPSpoolDirName)
+	manifest := Manifest{Targets: []ManifestTarget{{SID: sid, User: `DCLAB\dcw-std2`, UserHome: home, Connector: "claudecode"}}}
+	if err := WriteWindowsClaudeMCPSpool(dir, manifest, nil, t.Logf); err != nil {
+		t.Fatal(err)
+	}
+	_, unreadable, err := ReadClaudeMCPSpool(dir, sid, nil)
+	if err != nil || unreadable == nil || !unreadable.SignedOut ||
+		!strings.Contains(unreadable.Blocked("Claude Code"), `DCLAB\dcw-std2 is not signed in`) {
+		t.Fatalf("unreadable %+v (err %v); want the user marked signed out", unreadable, err)
+	}
+}
+
+// A malformed project file leaves the account unreadable instead of silently
 // publishing a partial server set.
-func TestWriteWindowsClaudeMCPSpoolMarksRejectedProject(t *testing.T) {
+func TestWriteWindowsClaudeMCPSpoolMarksMalformedProjectUnreadable(t *testing.T) {
 	original := windowsClaudeProjectWithUserToken
 	windowsClaudeProjectWithUserToken = func(_ *windows.SID, _ string, fn func() error) error { return fn() }
 	t.Cleanup(func() { windowsClaudeProjectWithUserToken = original })
 	home := t.TempDir()
-	project := `\\server\share\project`
+	project := filepath.Join(home, "project")
+	if err := os.Mkdir(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	projectFile := filepath.Join(project, ".mcp.json")
+	if err := os.WriteFile(projectFile, []byte(`{"mcpServers":{"project-srv":{"command":"y"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	state := map[string]any{
 		"mcpServers": map[string]any{"user-srv": map[string]any{"command": "x"}},
 		"projects":   map[string]any{project: map[string]any{}},
@@ -142,14 +312,28 @@ func TestWriteWindowsClaudeMCPSpoolMarksRejectedProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	servers, unreadable, err := ReadClaudeMCPSpool(dir, sid, nil)
-	if err != nil || len(servers) != 0 || unreadable == nil || unreadable.Path != filepath.Join(project, ".mcp.json") {
-		t.Fatalf("servers %v, unreadable %+v (err %v); want rejected project marked unreadable", servers, unreadable, err)
+	if err != nil || unreadable != nil || len(servers) != 2 {
+		t.Fatalf("initial servers %v, unreadable %+v (err %v); want user and project servers", servers, unreadable, err)
+	}
+	if err := os.WriteFile(projectFile, []byte(`{"mcpServers":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteWindowsClaudeMCPSpool(dir, manifest, nil, t.Logf); err != nil {
+		t.Fatal(err)
+	}
+	servers, unreadable, err = ReadClaudeMCPSpool(dir, sid, nil)
+	if err != nil || len(servers) != 0 || unreadable == nil || unreadable.Path != projectFile {
+		t.Fatalf("servers %v, unreadable %+v (err %v); want malformed project file marked unreadable", servers, unreadable, err)
+	}
+	if skips := ReadClaudeMCPProjectSkips(dir); len(skips) != 0 {
+		t.Fatalf("malformed project was reported as skipped: %+v", skips)
 	}
 }
 
-// GAP-1317: the enumerator check runs on the real file system: a project
-// folder is accepted under its long path, while a junction (as the cwd or as
-// the project) and a short-name alias of the project are refused.
+// GAP-1317, #1164: the enumerator check runs on the real file system: a
+// project folder is accepted under its long path, while a junction (as the
+// cwd or as the project) and a short-name alias of the project are refused.
+// A refused cwd refuses the start: the project never stands in for it.
 func TestWindowsClaudeMCPWorkDirChecksRejectJunctionAndAlias(t *testing.T) {
 	base, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -168,14 +352,18 @@ func TestWindowsClaudeMCPWorkDirChecksRejectJunctionAndAlias(t *testing.T) {
 		t.Skipf("mklink /J: %v: %s", err, out)
 	}
 	vet := func(cwd, project string) (string, string) {
-		return vetClaudeMCPWorkDir(config.MCPServerEntry{Name: "srv", Command: "npx", CWD: cwd, Project: project},
+		dir, err := vetClaudeMCPWorkDir(config.MCPServerEntry{Name: "srv", Command: "npx", CWD: cwd, Project: project},
 			home, nil, windowsClaudeMCPWorkDirChecks)
+		if err != nil {
+			return dir, err.Error()
+		}
+		return dir, ""
 	}
 	if dir, refused := vet("", project); !strings.EqualFold(dir, project) || refused != "" {
 		t.Fatalf("project: %q (%q)", dir, refused)
 	}
-	if dir, refused := vet(junction, project); !strings.EqualFold(dir, project) || !strings.Contains(refused, "link or reparse point") {
-		t.Fatalf("junction cwd: %q (%q), want the project and the junction refused", dir, refused)
+	if dir, refused := vet(junction, project); dir != "" || !strings.Contains(refused, "link or reparse point") {
+		t.Fatalf("junction cwd: %q (%q), want the start refused, not the project", dir, refused)
 	}
 	if dir, refused := vet("", junction); dir != "" || !strings.Contains(refused, "link or reparse point") {
 		t.Fatalf("junction project: %q (%q)", dir, refused)
@@ -186,7 +374,7 @@ func TestWindowsClaudeMCPWorkDirChecksRejectJunctionAndAlias(t *testing.T) {
 		// Only the last folder in its short form: the rest of the path is
 		// the home as the manifest names it.
 		if short := filepath.Join(home, filepath.Base(windows.UTF16ToString(buf[:n]))); !strings.EqualFold(short, project) {
-			if dir, refused := vet(short, project); !strings.EqualFold(dir, project) || !strings.Contains(refused, "alias") {
+			if dir, refused := vet(short, project); dir != "" || !strings.Contains(refused, "alias") {
 				t.Fatalf("short name %s: %q (%q)", short, dir, refused)
 			}
 		}
@@ -233,7 +421,7 @@ func TestWriteWindowsClaudeMCPSpoolSkipsRefusedProject(t *testing.T) {
 	}
 	windowsClaudeProjectRead = func(project string) ([]byte, error, error) {
 		if project == bob {
-			return nil, fmt.Errorf("%w: project directory: %w", errClaudeProjectAccessDenied, windows.ERROR_ACCESS_DENIED), nil
+			return nil, fmt.Errorf("project directory: %w", windows.ERROR_ACCESS_DENIED), nil
 		}
 		return originalRead(project)
 	}
@@ -246,7 +434,9 @@ func TestWriteWindowsClaudeMCPSpoolSkipsRefusedProject(t *testing.T) {
 	manifest := Manifest{Targets: []ManifestTarget{{SID: sid, UserHome: home, Connector: "claudecode"}}}
 	var warnings []string
 	if err := WriteWindowsClaudeMCPSpool(dir, manifest, nil, func(format string, args ...any) {
-		warnings = append(warnings, fmt.Sprintf(format, args...))
+		if line := fmt.Sprintf(format, args...); strings.Contains(line, "WARN") {
+			warnings = append(warnings, line)
+		}
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -263,6 +453,10 @@ func TestWriteWindowsClaudeMCPSpoolSkipsRefusedProject(t *testing.T) {
 	}
 	if len(warnings) != 1 || !strings.Contains(warnings[0], bob) {
 		t.Fatalf("refused project warnings = %v", warnings)
+	}
+	notes := ReadClaudeMCPProjectSkips(dir)
+	if len(notes) != 1 || notes[0].Key != sid || len(notes[0].Projects) != 1 || notes[0].Projects[0].Project != bob {
+		t.Fatalf("skipped project status notes = %+v", notes)
 	}
 }
 
@@ -316,6 +510,13 @@ func TestWriteWindowsClaudeMCPSpoolMarksUnavailableToken(t *testing.T) {
 // effective token used for the read. A parent denial inherited by the
 // project must refuse only that project, like a denied directory or file open.
 func TestWindowsClaudeProjectMCPChecksDirectoryAndFileACL(t *testing.T) {
+	// The reader runs under the ambient token here (the user-token stub below
+	// calls fn directly). An enabled SeBackupPrivilege, as on an elevated SSH
+	// or scheduled-task session, opens directories and files with backup
+	// semantics and bypasses the deny ACEs this test sets, so disable it (and
+	// SeRestorePrivilege) in the process token for all three cases, as the
+	// GitHub runner token has them.
+	disableWindowsProcessPrivilegesForTest(t, "SeBackupPrivilege", "SeRestorePrivilege")
 	sid := currentWindowsTestSID(t)
 	original := windowsClaudeProjectWithUserToken
 	windowsClaudeProjectWithUserToken = func(_ *windows.SID, _ string, fn func() error) error { return fn() }
@@ -389,10 +590,43 @@ func TestWindowsClaudeProjectMCPChecksDirectoryAndFileACL(t *testing.T) {
 				}
 			}
 			data, accessErr, readErr := readWindowsClaudeProjectMCP(project)
-			if len(data) != 0 || !errors.Is(accessErr, errClaudeProjectAccessDenied) ||
-				!errors.Is(accessErr, windows.ERROR_ACCESS_DENIED) || readErr != nil {
+			if len(data) != 0 || !errors.Is(accessErr, windows.ERROR_ACCESS_DENIED) || readErr != nil {
 				t.Fatalf("data=%q accessErr=%v readErr=%v; want project refused before read", data, accessErr, readErr)
 			}
 		})
+	}
+}
+
+// W2B-G-enum review loop 3: a record that cannot be updated is named in the
+// error with its account, and the other users' records are still published.
+func TestWriteWindowsMCPSpoolNamesTheRecordItCouldNotPublish(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), KiroMCPSpoolDirName)
+	var targets []ManifestTarget
+	for _, sid := range []string{"S-1-5-21-1-1001", "S-1-5-21-1-1002"} {
+		home := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(home, ".kiro", "settings"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(home, ".kiro", "settings", "mcp.json"), []byte(`{"mcpServers":{"notes":{"command":"x"}}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		targets = append(targets, ManifestTarget{SID: sid, UserHome: home, Connector: "kiro"})
+	}
+	previous := windowsMCPSpoolWrite
+	t.Cleanup(func() { windowsMCPSpoolWrite = previous })
+	windowsMCPSpoolWrite = func(dir, name, pattern string, data []byte, setOwnership func(string) error) error {
+		if strings.HasPrefix(name, "S-1-5-21-1-1001") {
+			return errors.New("there is not enough space on the disk")
+		}
+		return previous(dir, name, pattern, data, setOwnership)
+	}
+	err := WriteWindowsKiroMCPSpool(dir, Manifest{Targets: targets}, nil, t.Logf)
+	records, whole := MCPSpoolRecordFailures(err)
+	if whole || len(records) != 1 || records[0].SID != "S-1-5-21-1-1001" || records[0].Connector != "kiro" ||
+		!strings.EqualFold(records[0].Home, filepath.Clean(targets[0].UserHome)) {
+		t.Fatalf("error %v: records %+v whole %v; want the first user's record only", err, records, whole)
+	}
+	if servers, _, readErr := ReadKiroMCPSpool(dir, "S-1-5-21-1-1002", nil); readErr != nil || len(servers) != 1 {
+		t.Fatalf("the other user's record: %v (%v), want published", servers, readErr)
 	}
 }

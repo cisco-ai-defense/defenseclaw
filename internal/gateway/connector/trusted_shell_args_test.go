@@ -23,31 +23,6 @@ import (
 	"testing"
 )
 
-func TestOpenHandsProfileDecodeMapsSDKEventTypes(t *testing.T) {
-	for raw, want := range map[string]string{
-		"PreToolUse": "pre_tool_use", "PostToolUse": "post_tool_use", "UserPromptSubmit": "user_prompt_submit",
-		"Stop": "stop", "SessionStart": "session_start", "SessionEnd": "session_end",
-		" PreToolUse ": "pre_tool_use", "pre_tool_use": "", "Unknown": "",
-	} {
-		if got := openHandsProfileDecode(map[string]interface{}{"event_type": raw}).HookEventName; got != want {
-			t.Errorf("event_type %q decoded to %q, want %q", raw, got, want)
-		}
-	}
-	if got := openHandsProfileDecode(map[string]interface{}{"event_type": 3}).HookEventName; got != "" {
-		t.Errorf("non-string event_type decoded to %q", got)
-	}
-	// The contract's block events use the mapped names.
-	profile := NewOpenHandsConnector().HookProfile(SetupOpts{})
-	if profile.Decode == nil {
-		t.Fatal("openhands profile has no event decoder")
-	}
-	for _, event := range []string{"pre_tool_use", "user_prompt_submit", "stop"} {
-		if !stringSliceContains(profile.Capabilities.BlockEvents, event) {
-			t.Errorf("block events %v lack %s", profile.Capabilities.BlockEvents, event)
-		}
-	}
-}
-
 type trustedShellArgsCase struct {
 	name, tool, args string
 	ok               bool
@@ -69,25 +44,6 @@ func checkTrustedShellArgs(t *testing.T, project func(string, json.RawMessage) (
 			}
 		})
 	}
-}
-
-func TestOpenHandsTrustedShellArgs(t *testing.T) {
-	checkTrustedShellArgs(t, OpenHandsTrustedShellArgs, `{"command":"echo hi > /tmp/x"}`, []trustedShellArgsCase{
-		{"sdk-terminal-action", "terminal", `{"command":"echo hi > /tmp/x","is_input":false,"timeout":null,"reset":false,"kind":"TerminalAction"}`, true},
-		{"model-labels", "terminal", `{"command":"echo hi > /tmp/x","security_risk":"LOW","summary":"write","timeout":30}`, true},
-		{"command-only", "terminal", `{"command":"echo hi > /tmp/x"}`, true},
-		// Input to the running process is judged as a shell command.
-		{"input-to-running-process", "terminal", `{"command":"echo hi > /tmp/x","is_input":true}`, true},
-		{"reset", "terminal", `{"command":"echo hi > /tmp/x","reset":true}`, true},
-		{"input-flag-not-bool", "terminal", `{"command":"echo hi > /tmp/x","is_input":"yes"}`, false},
-		{"other-kind", "terminal", `{"command":"echo hi > /tmp/x","kind":"FileEditorAction"}`, false},
-		{"unknown-field", "terminal", `{"command":"echo hi > /tmp/x","cwd":"/"}`, false},
-		{"duplicate-command", "terminal", `{"command":"echo hi > /tmp/x","command":"ls"}`, false},
-		{"command-not-string", "terminal", `{"command":["echo","hi"]}`, false},
-		{"no-command", "terminal", `{"is_input":false}`, false},
-		{"not-an-object", "terminal", `"echo hi"`, false},
-		{"other-tool", "file_editor", `{"command":"view","path":"/x"}`, false},
-	})
 }
 
 func TestAntigravityTrustedShellArgs(t *testing.T) {
@@ -168,9 +124,13 @@ func TestTrustedShellArgs(t *testing.T) {
 		name, connector, tool, args, want, cwd string
 		ok                                     bool
 	}{
-		{"opencode-bash", "opencode", "bash", `{"command":"echo hi > /tmp/x","timeout":120000,"workdir":"/work/app/sub"}`,
+		{"opencode-shell", "opencode", "shell", `{"command":"echo hi > /tmp/x","timeout":120000,"workdir":"/work/app/sub","background":false}`,
 			`{"command":"echo hi > /tmp/x","timeout":120000}`, "/work/app/sub", true},
-		{"opencode-relative", "opencode", "bash", `{"command":"ls","workdir":"sub"}`, `{"command":"ls"}`, "sub", true},
+		{"opencode-relative", "opencode", "shell", `{"command":"ls","workdir":"sub"}`, `{"command":"ls"}`, "sub", true},
+		{"opencode-background", "opencode", "shell", `{"command":"ls","background":true}`, `{"command":"ls"}`, "", true},
+		{"opencode-directory-case-twin", "opencode", "shell", `{"command":"ls","workdir":"/w","Workdir":"/w"}`, "", "", false},
+		{"opencode-directory-case-twin-trimmed", " OpenCode ", " shell ", `{"command":"ls","workdir":"/w","Workdir":"/w"}`, "", "", false},
+		{"opencode-invalid-background", "opencode", "shell", `{"command":"ls","background":"yes"}`, "", "", false},
 		{"hermes-terminal", "hermes", "terminal", `{"command":"ls","workdir":"/tmp","background":false}`,
 			`{"command":"ls"}`, "/tmp", true},
 		{"hermes-controls", "hermes", "terminal",
@@ -203,19 +163,25 @@ func TestTrustedShellArgs(t *testing.T) {
 		{"devin-exec", "devin", "exec", `{"command":"ls","workdir":"/w"}`, `{"command":"ls"}`, "/w", true},
 		{"kiro-shell", "kiro", "shell", `{"command":"ls","working_dir":"/w"}`, `{"command":"ls"}`, "/w", true},
 		{"kiro-execute-bash", "kiro", "execute_bash", `{"command":"ls","working_dir":"/w"}`, `{"command":"ls"}`, "/w", true},
-		{"null-dir", "opencode", "bash", `{"command":"ls","workdir":null}`, `{"command":"ls"}`, "", true},
-		{"operators-kept", "opencode", "bash", `{"command":"a && b > c","workdir":"/w"}`, `{"command":"a && b > c"}`, "/w", true},
+		// rel-1-0-6:GAP-0589: kiro-cli 2.35.1 --v3 on Windows, as captured.
+		{"kiro-v3-execute-pwsh", "kiro", "execute_pwsh",
+			`{"command":"echo hi","cwd":"c:\\Users\\alice\\proj","description":null,"run_in_background":false,"timeout":null}`,
+			`{"command":"echo hi","run_in_background":false}`, `c:\Users\alice\proj`, true},
+		{"kiro-v3-execute-pwsh-unset-cwd", "kiro", "execute_pwsh",
+			`{"command":"ls","cwd":null,"description":null,"run_in_background":false,"timeout":null}`,
+			`{"command":"ls","run_in_background":false}`, "", true},
+		{"null-dir", "opencode", "shell", `{"command":"ls","workdir":null}`, `{"command":"ls"}`, "", true},
+		{"operators-kept", "opencode", "shell", `{"command":"a && b > c","workdir":"/w"}`, `{"command":"a && b > c"}`, "/w", true},
 		// Refused: the arguments are left for the parser to judge.
-		{"no-dir", "opencode", "bash", `{"command":"ls"}`, "", "", false},
-		{"dir-not-string", "opencode", "bash", `{"command":"ls","workdir":["/w"]}`, "", "", false},
-		{"duplicate-key", "opencode", "bash", `{"command":"ls","workdir":"/a","workdir":"/b"}`, "", "", false},
-		{"not-an-object", "opencode", "bash", `"ls"`, "", "", false},
+		{"no-dir", "opencode", "shell", `{"command":"ls"}`, "", "", false},
+		{"dir-not-string", "opencode", "shell", `{"command":"ls","workdir":["/w"]}`, "", "", false},
+		{"duplicate-key", "opencode", "shell", `{"command":"ls","workdir":"/a","workdir":"/b"}`, "", "", false},
+		{"not-an-object", "opencode", "shell", `"ls"`, "", "", false},
 		{"other-key", "kiro", "shell", `{"command":"ls","workdir":"/w"}`, "", "", false},
 		{"other-tool", "opencode", "read", `{"filePath":"/x","workdir":"/w"}`, "", "", false},
 		// Shell tools that name no directory are left alone.
 		{"claudecode", "claudecode", "Bash", `{"command":"ls","cwd":"/w"}`, "", "", false},
 		{"copilot", "copilot", "bash", `{"command":"ls","cwd":"/w"}`, "", "", false},
-		{"openhands", "openhands", "terminal", `{"command":"ls","cwd":"/w"}`, "", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, cwd, ok := TrustedShellArgs(tc.connector, tc.tool, json.RawMessage(tc.args))
@@ -267,33 +233,62 @@ func TestShellCommandArgs(t *testing.T) {
 	for _, tc := range []struct {
 		name, connector, tool, args, want string
 	}{
-		{"unlisted", "opencode", "bash", `{"command":"echo hi > /tmp/x","workdir":"/w","dc_unlisted_arg":"x"}`, `{"command":"echo hi > /tmp/x"}`},
+		{"unlisted", "opencode", "shell", `{"command":"echo hi > /tmp/x","workdir":"/w","dc_unlisted_arg":"x"}`, `{"command":"echo hi > /tmp/x"}`},
 		{"mistyped", "hermes", "terminal", `{"command":"ls","background":"yes"}`, `{"command":"ls"}`},
 		{"no-listed", "copilot", "bash", `{"command":"ls","dc_unlisted_arg":1}`, `{"command":"ls"}`},
 		{"exact", "devin", "exec", `{"command":"ls"}`, `{"command":"ls"}`},
 		{"argv", "codex", "Bash", `{"command":["bash","-lc","ls"],"dc_unlisted_arg":1}`, `{"command":["bash","-lc","ls"]}`},
 		{"repeated", "kiro", "shell", `{"command":"ls","command":"echo hi > /tmp/x"}`, `{"command":"echo hi > /tmp/x"}`},
 		{"agy", "antigravity", "run_command", `{"CommandLine":"a && b","Cwd":7,"dc_unlisted_arg":1}`, `{"CommandLine":"a && b"}`},
-		{"openhands", "openhands", "terminal", `{"command":"ls","kind":"Other"}`, `{"command":"ls"}`},
-		{"omnigent", "omnigent", "sys_os_shell", `{"command":"ls","dc_unlisted_arg":1}`, `{"command":"ls"}`},
 		{"claudecode", "claudecode", "Bash", `{"command":"ls","dc_unlisted_arg":1}`, `{"command":"ls"}`},
 		{"connector-case", " Cursor ", "Shell", `{"command":"ls","cwd":7}`, `{"command":"ls"}`},
 		// A case twin of the command key stays, for the conflict check.
-		{"case-twin", "opencode", "bash", `{"command":"true","Command":"rm -rf ~/","extra":"x"}`, `{"Command":"rm -rf ~/","command":"true"}`},
+		{"case-twin", "opencode", "shell", `{"command":"true","Command":"rm -rf ~/","extra":"x"}`, `{"Command":"rm -rf ~/","command":"true"}`},
 		// Refused.
-		{"blank", "opencode", "bash", `{"command":"  ","dc_unlisted_arg":1}`, ""},
-		{"null", "opencode", "bash", `{"command":null}`, ""},
-		{"not-text", "opencode", "bash", `{"command":7}`, ""},
-		{"empty-argv", "opencode", "bash", `{"command":[]}`, ""},
-		{"argv-not-text", "opencode", "bash", `{"command":["ls",1]}`, ""},
-		{"no-command", "opencode", "bash", `{"workdir":"/w"}`, ""},
-		{"case-twin-only", "opencode", "bash", `{"Command":"ls","extra":"x"}`, ""},
+		{"blank", "opencode", "shell", `{"command":"  ","dc_unlisted_arg":1}`, ""},
+		{"null", "opencode", "shell", `{"command":null}`, ""},
+		{"not-text", "opencode", "shell", `{"command":7}`, ""},
+		{"empty-argv", "opencode", "shell", `{"command":[]}`, ""},
+		{"argv-not-text", "opencode", "shell", `{"command":["ls",1]}`, ""},
+		{"no-command", "opencode", "shell", `{"workdir":"/w"}`, ""},
+		{"case-twin-only", "opencode", "shell", `{"Command":"ls","extra":"x"}`, ""},
 		{"other-key", "antigravity", "run_command", `{"command":"ls"}`, ""},
-		{"not-an-object", "opencode", "bash", `"ls"`, ""},
-		{"invalid-json", "opencode", "bash", `{"command":"ls"`, ""},
+		{"not-an-object", "opencode", "shell", `"ls"`, ""},
+		{"invalid-json", "opencode", "shell", `{"command":"ls"`, ""},
 		{"other-tool", "opencode", "read", `{"command":"ls"}`, ""},
-		{"tool-case", "cursor", "shell", `{"command":"ls"}`, ""},
-		{"other-connector", "zed", "bash", `{"command":"ls"}`, ""},
+		// A letter-case variant of a shell execution name is still a shell
+		// name to the action parser, so its command is judged alone too
+		// (rel-1-0-6:GAP-0201); a non-shell name in any case is not.
+		{"tool-case", "devin", "Exec", `{"command":"ls"}`, `{"command":"ls"}`},
+		{"tool-case-not-shell", "devin", "Read", `{"command":"ls"}`, ""},
+		// Generic shell execution names on any connector (rel-1-0-6:GAP-0201).
+		{"generic-async-shell-unknown", "amp", "async_shell_command", `{"command":"ls","zz":1}`, `{"command":"ls"}`},
+		{"generic-run-command-cmd-timeout", "opencode", "run_command", `{"cmd":"ls","timeout":5}`, `{"command":"ls"}`},
+		{"generic-terminal-both-differ", "amp", "terminal", `{"cmd":"ls","command":"date"}`, ""},
+		{"other-connector", "zed", "read", `{"command":"ls"}`, ""},
+		// Amp's Bash holds its command under cmd (also reported as bash),
+		// and any connector's bash, powershell or shell tool is read by name
+		// (GAP-0694): an extra key next to the command reached no rule.
+		{"amp-bash-cmd", "amp", "Bash", `{"cmd":"ls","timeout_ms":5000}`, `{"command":"ls"}`},
+		{"amp-bash-cmd-cwd-note", "amp", "Bash", `{"cmd":"ls","cwd":"/w","note":"x"}`, `{"command":"ls"}`},
+		{"amp-bash-lower", "amp", "bash", `{"cmd":"ls","zz":1}`, `{"command":"ls"}`},
+		{"amp-bash-command-key", "amp", "Bash", `{"command":"ls","zz":1}`, `{"command":"ls"}`},
+		{"amp-bash-both-same", "amp", "Bash", `{"cmd":"ls","command":"ls"}`, `{"command":"ls"}`},
+		{"amp-bash-argv", "amp", "Bash", `{"cmd":["ls","-la"],"zz":1}`, `{"command":["ls","-la"]}`},
+		{"amp-shell-command-cmd-key", "amp", "shell_command", `{"cmd":"ls","zz":1}`, `{"command":"ls"}`},
+		{"codex-exec-command-key", "codex", "exec_command", `{"command":"ls","zz":1}`, `{"cmd":"ls"}`},
+		{"opencode-bash", "opencode", "bash", `{"command":"ls","zz":1}`, `{"command":"ls"}`},
+		{"devin-bash", "devin", "bash", `{"command":"ls","zz":1}`, `{"command":"ls"}`},
+		{"claudecode-powershell", "claudecode", "PowerShell", `{"command":"Get-ChildItem","zz":1}`, `{"command":"Get-ChildItem"}`},
+		{"any-connector-bash", "zed", "bash", `{"command":"ls","zz":1}`, `{"command":"ls"}`},
+		// Two different commands, or a case twin the reduced shape cannot
+		// keep: refused, so the call is judged as unverified.
+		{"amp-bash-both-differ", "amp", "Bash", `{"cmd":"true","command":"ls"}`, ""},
+		{"claudecode-both-differ", "claudecode", "Bash", `{"command":"ls","cmd":"true"}`, ""},
+		{"amp-bash-cmd-twin", "amp", "Bash", `{"cmd":"true","Cmd":"ls"}`, ""},
+		{"amp-bash-command-twin", "amp", "Bash", `{"cmd":"true","Command":"ls"}`, ""},
+		{"amp-bash-no-command", "amp", "Bash", `{"cwd":"/w","zz":1}`, ""},
+		{"amp-bash-blank", "amp", "Bash", `{"cmd":" ","command":"ls"}`, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, ok := ShellCommandArgs(tc.connector, tc.tool, json.RawMessage(tc.args))
@@ -309,6 +304,33 @@ func TestShellCommandArgs(t *testing.T) {
 			if shellCommandKeys[connectorName][tool] == "" {
 				t.Errorf("%s %s names no command key", connectorName, tool)
 			}
+		}
+	}
+}
+
+// TestShellCommandCWD: a shell call whose projection is refused keeps the
+// working directory it names for the command judged on its own (GAP-0694).
+func TestShellCommandCWD(t *testing.T) {
+	for _, tc := range []struct{ name, connector, tool, args, want string }{
+		{"amp-bash", "amp", "Bash", `{"cmd":"ls","cwd":"/w","zz":1}`, "/w"},
+		{"amp-bash-lower", "amp", "bash", `{"cmd":"ls","cwd":"/w"}`, "/w"},
+		{"agy", "antigravity", "run_command", `{"CommandLine":"ls","Cwd":"/w","Extra":1}`, "/w"},
+		{"amp-shell-command", "amp", "shell_command", `{"command":"ls","workdir":"/w","timeout_ms":"x"}`, "/w"},
+		{"kiro-two-same", "kiro", "execute_bash", `{"command":"ls","working_dir":"/w","cwd":"/w"}`, "/w"},
+		{"kiro-v3-pwsh", "kiro", "execute_pwsh", `{"command":"ls","cwd":"/w","zz":1}`, "/w"},
+		{"opencode-bash", "opencode", "bash", `{"command":"ls","workdir":"/w","zz":1}`, "/w"},
+		// None: no directory, a mistyped or blank one, two different ones,
+		// a tool that names none, a tool that is no shell.
+		{"none", "amp", "Bash", `{"cmd":"ls","zz":1}`, ""},
+		{"mistyped", "amp", "Bash", `{"cmd":"ls","cwd":7}`, ""},
+		{"blank", "antigravity", "run_command", `{"CommandLine":"ls","Cwd":" "}`, ""},
+		{"kiro-two-differ", "kiro", "execute_bash", `{"command":"ls","working_dir":"/a","cwd":"/b"}`, ""},
+		{"claudecode", "claudecode", "Bash", `{"command":"ls","cwd":"/w"}`, ""},
+		{"not-shell", "amp", "Read", `{"path":"x","cwd":"/w"}`, ""},
+		{"invalid", "amp", "Bash", `{"cwd":"/w"`, ""},
+	} {
+		if got := ShellCommandCWD(tc.connector, tc.tool, json.RawMessage(tc.args)); got != tc.want {
+			t.Errorf("%s: ShellCommandCWD = %q, want %q", tc.name, got, tc.want)
 		}
 	}
 }

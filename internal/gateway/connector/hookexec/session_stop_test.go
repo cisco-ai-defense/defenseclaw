@@ -81,6 +81,7 @@ func runSessionStop(t *testing.T, cause sessionStopCause, ev sessionStopEvent, s
 		}
 		cause.mutate(o)
 		home = o.Home
+		o.FailureLogHome = userLogHome(o.Home)
 	})
 	if cause.foreign && rt.requests != 0 {
 		t.Fatalf("%s: a foreign-hook block must not contact the gateway", ev)
@@ -165,9 +166,9 @@ func TestManagedSessionStopEventsAllowWhileOtherEventsStayBlocked(t *testing.T) 
 	}
 }
 
-// Outside the standalone profile (the Secure Client profile and every other
-// managed hook) a stop event keeps its fail-closed result.
-func TestManagedFailClosedStopOutsideStandaloneIsUnchanged(t *testing.T) {
+// The Secure Client profile (a managed hook that is neither standalone
+// shape) keeps the fail-closed result of a stop event.
+func TestSecureClientFailClosedStopIsUnchanged(t *testing.T) {
 	for _, tc := range []struct {
 		sessionStopEvent
 		code   int
@@ -207,6 +208,196 @@ func TestForeignHookBlockLetsCursorOpenTheWorkspace(t *testing.T) {
 		r, _ := runSessionStop(t, cause, sessionStopEvent{connector: "cursor", payload: payload}, true)
 		if !strings.Contains(r.stdout, "/repo/.claude/settings.local.json") {
 			t.Fatalf("%s: want the block with its reason, got code=%d stdout=%q", payload, r.code, r.stdout)
+		}
+	}
+}
+
+// failClosedStopProfile is a hook profile whose failures fail closed.
+type failClosedStopProfile struct {
+	name string
+	// transportOnly: strict availability closes transport failures only;
+	// response failures follow the fail mode (open here).
+	transportOnly bool
+	mutate        func(*Options)
+}
+
+var failClosedStopProfiles = []failClosedStopProfile{
+	{name: "per-user fail mode closed", mutate: func(o *Options) { o.FailMode = "closed" }},
+	{name: "per-user strict availability", transportOnly: true, mutate: func(o *Options) { o.FailMode = "open"; o.StrictAvailability = true }},
+}
+
+// failClosedStopCauses are the per-user failures that fail closed: the
+// gateway is down, answers 5xx or 401, or answers something unusable, and
+// the hook token is missing.
+var failClosedStopCauses = []struct {
+	name     string
+	response bool
+	rt       func() *stubRT
+	mutate   func(*Options)
+}{
+	{name: "gateway down", rt: func() *stubRT {
+		return &stubRT{err: errors.New("dial tcp 127.0.0.1:8787: connect: connection refused")}
+	}},
+	{name: "gateway 502", rt: func() *stubRT { return &stubRT{status: 502, body: `{}`} }},
+	{name: "gateway 401", response: true, rt: func() *stubRT { return &stubRT{status: 401, body: `{"error":"unauthorized"}`} }},
+	{name: "unusable answer", response: true, rt: func() *stubRT { return ok("not json") }},
+	{name: "missing token", rt: func() *stubRT { return ok(`{"action":"allow"}`) }, mutate: func(o *Options) {
+		_ = os.Remove(filepath.Join(o.HookDir, ".token"))
+		o.Token = ""
+	}},
+}
+
+// #1140: a per-user hook that fails closed on a stop or session-end event
+// answers the connector's neutral allow, because a block there only keeps
+// the agent running (Codex retried a blocked Stop until the user pressed
+// Esc). The failure is still logged, as fail mode open. Prompts, tool calls
+// and session starts keep their fail-closed block.
+func TestPerUserFailClosedStopEventsAllowWhileOtherEventsStayBlocked(t *testing.T) {
+	stops := []struct {
+		sessionStopEvent
+		stdout string
+	}{
+		{sessionStopEvent{connector: "codex", event: "Stop"}, ""},
+		{sessionStopEvent{connector: "codex", event: "SubagentStop"}, ""},
+		{sessionStopEvent{connector: "claudecode", payload: `{"hook_event_name":"Stop","stop_hook_active":true}`}, ""},
+		{sessionStopEvent{connector: "claudecode", payload: `{"hook_event_name":"SessionEnd"}`}, ""},
+		{sessionStopEvent{connector: "cursor", payload: `{"hook_event_name":"stop"}`}, "{}"},
+		{sessionStopEvent{connector: "devin", payload: `{"hook_event_name":"Stop"}`}, ""},
+	}
+	blocked := []struct {
+		sessionStopEvent
+		stdout string // a substring of the block body; "" means exit 2
+	}{
+		{sessionStopEvent{connector: "codex", event: "PreToolUse"}, `"permissionDecision":"deny"`},
+		{sessionStopEvent{connector: "codex", event: "UserPromptSubmit"}, `"decision":"block"`},
+		{sessionStopEvent{connector: "codex", event: "SessionStart"}, `"continue":false`},
+		{sessionStopEvent{connector: "claudecode", payload: `{"hook_event_name":"PreToolUse","tool_name":"Bash"}`}, ""},
+		{sessionStopEvent{connector: "cursor", payload: `{"hook_event_name":"preToolUse"}`}, `"permission":"deny"`},
+		{sessionStopEvent{connector: "devin", payload: `{"hook_event_name":"PreToolUse"}`}, ""},
+		// A payload whose two event fields disagree names no event.
+		{sessionStopEvent{connector: "devin", payload: `{"hook_event_name":"Stop","event":"PreToolUse"}`}, ""},
+		// An event field that is not a string names no event (the shell
+		// hooks match, TestShellFailedStopEventMatchesTheNativeStopSet).
+		{sessionStopEvent{connector: "devin", payload: `{"hook_event_name":"Stop","event":false}`}, ""},
+		{sessionStopEvent{connector: "claudecode", payload: `{"hook_event_name":false,"event":"Stop"}`}, ""},
+	}
+	runEvent := func(profile failClosedStopProfile, cause int, ev sessionStopEvent) (runResult, string) {
+		var home string
+		r := run(t, ev.connector, failClosedStopCauses[cause].rt(), func(o *Options) {
+			o.Event = ev.event
+			if ev.payload != "" {
+				o.Stdin = strings.NewReader(ev.payload)
+			}
+			profile.mutate(o)
+			if m := failClosedStopCauses[cause].mutate; m != nil {
+				m(o)
+			}
+			home = o.Home
+			o.FailureLogHome = userLogHome(o.Home)
+		})
+		log, _ := os.ReadFile(filepath.Join(home, "logs", "hook-failures.jsonl"))
+		return r, string(log)
+	}
+	for _, profile := range failClosedStopProfiles {
+		for i, cause := range failClosedStopCauses {
+			if profile.transportOnly && cause.response {
+				continue
+			}
+			for _, tc := range stops {
+				name := profile.name + ", " + cause.name + ": " + tc.String()
+				r, log := runEvent(profile, i, tc.sessionStopEvent)
+				if r.code != 0 || strings.TrimSpace(r.stdout) != tc.stdout {
+					t.Errorf("%s: want the neutral allow %q, got code=%d stdout=%q stderr=%q", name, tc.stdout, r.code, r.stdout, r.stderr)
+					continue
+				}
+				if !strings.HasPrefix(r.stderr, "DefenseClaw is not blocking the ") || !strings.Contains(log, `"fail_mode":"open"`) {
+					t.Errorf("%s: the failure must be explained and logged as fail mode open: stderr=%q log=%s", name, r.stderr, log)
+				}
+			}
+			for _, tc := range blocked {
+				name := profile.name + ", " + cause.name + ": " + tc.String()
+				r, _ := runEvent(profile, i, tc.sessionStopEvent)
+				// A per-user Claude Code block for a down gateway is the
+				// structured deny, exit 0 (rel-1-0-2 GAP-0486, claudeBlocked).
+				claude := tc.connector == "claudecode" && tc.stdout == ""
+				if claude && !claudeBlocked(r) ||
+					!claude && (tc.stdout == "" && r.code != blockExit || tc.stdout != "" && !strings.Contains(r.stdout, tc.stdout)) {
+					t.Errorf("%s: want the fail-closed block, got code=%d stdout=%q stderr=%q", name, r.code, r.stdout, r.stderr)
+				}
+				if strings.Contains(r.stderr, "is not blocking") {
+					t.Errorf("%s: a blocked event must not claim the stop exception: %q", name, r.stderr)
+				}
+			}
+		}
+	}
+}
+
+// The fail-open per-user profile is unchanged: a stop event is allowed as
+// before, with no stop-exception line.
+func TestPerUserFailOpenStopIsUnchanged(t *testing.T) {
+	r := run(t, "codex", &stubRT{err: errors.New("connection refused")}, func(o *Options) { o.Event = "Stop" })
+	if r.code != 0 || r.stdout != "" || strings.Contains(r.stderr, "is not blocking") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", r.code, r.stdout, r.stderr)
+	}
+}
+
+// A per-user Codex Stop whose payload is over the cap, or whose
+// DefenseClaw home is unavailable under strict availability, gets the same
+// neutral allow; Codex binds its event out of band, so the event is known
+// before the payload is read. A PreToolUse stays blocked.
+func TestPerUserCodexStopBeforeThePayloadIsRead(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Options)
+	}{
+		{"oversized payload", func(o *Options) { o.FailMode = "closed"; o.MaxBody = 4 }},
+		{"home unavailable", func(o *Options) {
+			o.StrictAvailability = true
+			o.Home = filepath.Join(o.Home, "missing")
+		}},
+	} {
+		stop := run(t, "codex", ok(`{"action":"allow"}`), func(o *Options) { tc.mutate(o); o.Event = "Stop" })
+		if stop.code != 0 || stop.stdout != "" || !strings.HasPrefix(stop.stderr, "DefenseClaw is not blocking the Stop event") {
+			t.Errorf("%s Stop: code=%d stdout=%q stderr=%q", tc.name, stop.code, stop.stdout, stop.stderr)
+		}
+		tool := run(t, "codex", ok(`{"action":"allow"}`), func(o *Options) { tc.mutate(o); o.Event = "PreToolUse" })
+		if tool.code == 0 && !strings.Contains(tool.stdout, `"deny"`) && !strings.Contains(tool.stdout, `"block"`) {
+			t.Errorf("%s PreToolUse: want a block, got code=%d stdout=%q stderr=%q", tc.name, tool.code, tool.stdout, tool.stderr)
+		}
+	}
+}
+
+// The Windows standalone hook (ExplainUnenrolledAccount) gives a stop event
+// the neutral allow when its gateway service is stopped and when the account
+// is not enrolled; tool calls stay blocked with the explanation.
+func TestWindowsStandaloneStopEventsAllow(t *testing.T) {
+	for _, reason := range []string{managedGatewayNotRunningReason, managedSIDUnregisteredReason, managedEnrollmentPendingReason} {
+		for _, tc := range []struct {
+			event   string
+			allowed bool
+		}{
+			{"Stop", true}, {"SubagentStop", true}, {"PreToolUse", false}, {"UserPromptSubmit", false},
+		} {
+			rt := ok(`{"action":"allow"}`)
+			r := run(t, "codex", rt, func(o *Options) {
+				o.ManagedEnterprise = true
+				o.ExplainUnenrolledAccount = true
+				o.ManagedRuntimeFailure = reason
+				o.Event = tc.event
+			})
+			name := reason + " " + tc.event
+			if rt.requests != 0 {
+				t.Fatalf("%s: a runtime failure must not contact the gateway", name)
+			}
+			if tc.allowed {
+				if r.code != 0 || r.stdout != "" || !strings.HasPrefix(r.stderr, "DefenseClaw is not blocking the "+tc.event) {
+					t.Errorf("%s: want the neutral allow, got code=%d stdout=%q stderr=%q", name, r.code, r.stdout, r.stderr)
+				}
+				continue
+			}
+			if !strings.Contains(r.stdout, `"deny"`) && !strings.Contains(r.stdout, `"block"`) {
+				t.Errorf("%s: want a block, got code=%d stdout=%q stderr=%q", name, r.code, r.stdout, r.stderr)
+			}
 		}
 	}
 }

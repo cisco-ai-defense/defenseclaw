@@ -604,7 +604,7 @@ func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequ
 	meta.ToolName = codexToolName(req)
 	meta = applyHookEventMeta(meta, req.HookEventName, req.Payload)
 	meta = a.applyHookSpawnIntentLineage(meta, req.Payload)
-	meta = a.applyHookChildThreadLineage(a.claimCodexPendingThread(meta))
+	meta = a.applyHookChildThreadLineage(meta)
 	meta.FinishReasons = append([]string(nil), codexNotifyFinishReasons(req.Payload)...)
 	meta = a.beginHookExecution(meta)
 	meta = a.restoreHookSessionLifecycle(ctx, meta)
@@ -652,7 +652,6 @@ func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequ
 		a.emitToolInvocationEventV8(ctx, meta, "call", codexToolName(req), stringFromJSONRaw(codexToolArgs(req)), "", nil)
 		a.rememberHookSessionState(ctx, meta)
 		a.rememberHookSpawnIntent(meta, codexToolName(req), hookSpawnIntentRequested, stringFromJSONRaw(codexToolArgs(req)))
-		a.noteCodexThreadCall(meta, codexToolName(req))
 		invocationID := a.rememberHookToolInvocation(meta, codexToolName(req), stringFromJSONRaw(codexToolArgs(req)))
 		captureHookToolCall(ctx, meta, codexToolName(req), stringFromJSONRaw(codexToolArgs(req)), invocationID)
 	case "PostToolUse":
@@ -678,9 +677,9 @@ func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequ
 	}
 }
 
-// emitAgentHookLLMEvent is the LLM-event emitter for the six
-// hook-only connectors (hermes, cursor,
-// copilot, openhands). It mirrors emitClaudeCodeHookLLMEvent /
+// emitAgentHookLLMEvent is the LLM-event emitter for the generic
+// hook-only connectors (hermes, cursor, copilot, ...). It mirrors
+// emitClaudeCodeHookLLMEvent /
 // emitCodexHookLLMEvent so a "give me every prompt and tool call"
 // query against the gateway log returns the same shape regardless
 // of which framework the operator is running.
@@ -714,7 +713,7 @@ func (a *APIServer) emitAgentHookLLMEvent(ctx context.Context, req agentHookRequ
 	meta = applyHookEventMeta(meta, req.HookEventName, req.Payload)
 	meta = a.applyCursorToolEventOutcome(meta, req.HookEventName, req.Payload)
 	meta = a.applyHookSpawnIntentLineage(meta, req.Payload)
-	meta = a.applyCopilotSubagentLineage(meta, req.Payload)
+	meta = a.applyCopilotSubagentLineage(ctx, meta, req.Payload)
 	meta.FinishReasons = append([]string(nil), codexNotifyFinishReasons(req.Payload)...)
 	meta = a.beginHookExecution(meta)
 	meta = a.restoreHookSessionLifecycle(ctx, meta)
@@ -951,6 +950,14 @@ func hookLLMEventMeta(ctx context.Context, source, sessionID, turnID, model, hoo
 	rootAgentID := agentNodeID(agentIdentityID, source, sessionID, "root")
 	lineageProvenance := "inferred"
 	agentID = strings.TrimSpace(agentID)
+	// Copilot CLI hook inputs (camelCase sessionId; the VS Code Local surface
+	// sends session_id) name agents by session (GAP-0721). Secure Client keeps
+	// the lineage of main (issue #1092).
+	copilotLineage := strings.EqualFold(strings.TrimSpace(source), "copilot") && !ManagedEnterpriseActive() &&
+		firstString(payload, "sessionId") != ""
+	if copilotLineage {
+		agentID = copilotAgentNodeID(agentIdentityID, agentID)
+	}
 	if agentID == "" && (lifecycleEvent == "subagent_start" || lifecycleEvent == "subagent_stop") {
 		childIdentity := firstNonEmpty(
 			firstString(payload, "subagent_id", "subagentId", "agent_transcript_path", "agentTranscriptPath", "tool_call_id", "toolCallId"),
@@ -972,6 +979,9 @@ func hookLLMEventMeta(ctx context.Context, source, sessionID, turnID, model, hoo
 		firstString(payload, "parent_agent_id", "parentAgentId", "parent_id", "parentId"),
 		firstString(objectAt(payload, "extra"), "parent_subagent_id", "parentSubagentId", "parent_agent_id", "parentAgentId"),
 	)
+	if copilotLineage {
+		reportedParentAgentID, parentSessionID = copilotReportedParent(agentIdentityID, sessionID, agentID, reportedParentAgentID, parentSessionID)
+	}
 	parentAgentID := reportedParentAgentID
 	reportedRootAgentID := firstNonEmpty(
 		firstString(payload, "root_agent_id", "rootAgentId", "rootAgentID"),
@@ -1545,6 +1555,19 @@ func removeHookStateOrderKey(order *[]string, key string) {
 	}
 }
 
+// evictOldestHookToolInvocationLocked drops the oldest pending tool
+// invocation. The caller holds llmPromptMu and checked the order is not empty.
+func (a *APIServer) evictOldestHookToolInvocationLocked() {
+	oldest := a.hookToolInvocationOrder[0]
+	a.hookToolInvocationOrder = a.hookToolInvocationOrder[1:]
+	queue := a.hookToolInvocations[oldest]
+	if len(queue) <= 1 {
+		delete(a.hookToolInvocations, oldest)
+	} else {
+		a.hookToolInvocations[oldest] = queue[1:]
+	}
+}
+
 func (a *APIServer) evictOldestHookPhaseStateLocked() bool {
 	if len(a.hookPhaseStateOrder) == 0 {
 		return false
@@ -1637,6 +1660,58 @@ func (a *APIServer) hookPhaseSnapshot(meta llmEventMeta) (llmEventMeta, bool) {
 	return llmEventMeta{}, false
 }
 
+// hookDeliveryPhaseSnapshot returns the lifecycle transition that this hook
+// delivery itself recorded, for the decision and audit rows of the same
+// request. The per-execution cursor that hookPhaseSnapshot reads is shared by
+// every hook of the session: with concurrent tool calls it already holds the
+// next call's transition when this call's decision is written, so a decision
+// keyed by arrival order linked to another call's operation (GAP-0246). The
+// delivery's own transition is found by its lifecycle identity (the hook's
+// own tool-use id within its session and agent). Only when that record is
+// gone (evicted from the bounded cache) does it fall back to the cursor, and
+// then never takes another tool call's operation, phase or sequence.
+func (a *APIServer) hookDeliveryPhaseSnapshot(meta llmEventMeta, payload map[string]interface{}) (llmEventMeta, bool) {
+	if a == nil {
+		return llmEventMeta{}, false
+	}
+	meta = hookPhaseDefaults(meta)
+	if key := hookLifecycleCanonicalStateKey(llmEventMeta{LifecycleDedupe: hookLifecycleDedupeKey(meta, payload)}); key != "" {
+		a.llmPromptMu.Lock()
+		state, ok := a.hookPhaseStates[key]
+		a.llmPromptMu.Unlock()
+		if ok && state.canonical && hookSnapshotIsSameOperation(state.canonicalMeta, meta) {
+			return state.canonicalMeta, true
+		}
+	}
+	snapshot, ok := a.hookPhaseSnapshot(meta)
+	if !ok || hookSnapshotIsSameOperation(snapshot, meta) {
+		return snapshot, ok
+	}
+	// The cursor belongs to another tool call of this session. Keep its
+	// execution identity, but this delivery's own operation and phase, and no
+	// borrowed sequence.
+	snapshot.ToolID = meta.ToolID
+	snapshot.OperationID = hookOperationID(meta)
+	snapshot.Phase = meta.Phase
+	snapshot.PreviousPhase = ""
+	snapshot.Sequence = 0
+	return snapshot, true
+}
+
+// hookSnapshotIsSameOperation reports whether a retained lifecycle snapshot
+// describes the operation of meta: the same source and session and, for a
+// tool call, the same tool-use id.
+func hookSnapshotIsSameOperation(snapshot, meta llmEventMeta) bool {
+	if snapshot.Source != meta.Source || snapshot.SessionID != meta.SessionID {
+		return false
+	}
+	if meta.AgentID != "" && snapshot.AgentID != "" && snapshot.AgentID != meta.AgentID {
+		return false
+	}
+	toolID := strings.TrimSpace(meta.ToolID)
+	return toolID == "" || strings.TrimSpace(snapshot.ToolID) == toolID
+}
+
 // prepareHookLifecycleTransition atomically decides whether a normalized
 // lifecycle transition is first-seen before advancing its per-execution phase
 // cursor. Exact replays reuse the first transition's logical metadata while
@@ -1689,10 +1764,16 @@ func hookSessionStateKey(meta llmEventMeta) string {
 }
 
 func hookTraceEventID(ctx context.Context, meta llmEventMeta) string {
+	return hookTraceEventIDAt(ctx, meta, time.Now().UTC())
+}
+
+// A wall-clock tick can cover multiple hook deliveries, so each trace anchor
+// also needs a per-delivery value.
+func hookTraceEventIDAt(ctx context.Context, meta llmEventMeta, at time.Time) string {
 	parts := []string{
 		"trace-event", meta.Source, meta.SessionID, meta.AgentID,
 		meta.LifecycleEvent, meta.TurnID, meta.ToolID,
-		strconv.FormatInt(time.Now().UTC().UnixNano(), 10),
+		strconv.FormatInt(at.UnixNano(), 10), uuid.NewString(),
 	}
 	if spanContext := trace.SpanContextFromContext(ctx); spanContext.IsValid() {
 		parts = append(parts, spanContext.TraceID().String(), spanContext.SpanID().String())
@@ -2082,7 +2163,7 @@ func (a *APIServer) emitInferredDelegatedAgentTransitions(
 
 func connectorNeedsInferredDelegation(source string) bool {
 	switch strings.ToLower(strings.TrimSpace(source)) {
-	case "antigravity", "devin", "openhands":
+	case "antigravity", "devin":
 		return true
 	default:
 		return false
@@ -2262,14 +2343,7 @@ func (a *APIServer) rememberHookToolInvocation(meta llmEventMeta, tool, argument
 		return pending.id
 	}
 	for len(a.hookToolInvocationOrder) >= hookPromptCacheMaxEntries {
-		oldest := a.hookToolInvocationOrder[0]
-		a.hookToolInvocationOrder = a.hookToolInvocationOrder[1:]
-		queue := a.hookToolInvocations[oldest]
-		if len(queue) <= 1 {
-			delete(a.hookToolInvocations, oldest)
-		} else {
-			a.hookToolInvocations[oldest] = queue[1:]
-		}
+		a.evictOldestHookToolInvocationLocked()
 	}
 	startedAt := time.Now()
 	id := stableLLMEventID(
@@ -2518,9 +2592,7 @@ func putBoundedHookLLMSpanPrompt(
 		for len(m) >= hookPromptCacheMaxEntries && len(*order) > 0 {
 			oldest := (*order)[0]
 			*order = (*order)[1:]
-			if _, stillThere := m[oldest]; stillThere {
-				delete(m, oldest)
-			}
+			delete(m, oldest)
 		}
 		*order = append(*order, key)
 	}

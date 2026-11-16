@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -24,6 +25,19 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
+var enterpriseHookWindowsRegistrationVerifier = enterprisehooks.VerifyWindowsManagedRegistration
+
+// The guardian publishes readiness for hooks it actually installed. The
+// lifecycle's separate coverage report still refuses to certify a Hermes
+// home selected only by a later user session.
+func enterpriseHookGuardianVerify(ctx context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+	if strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "hermes") &&
+		cfg != nil && cfg.StandaloneEnterprise() && !cfg.SecureClientIntegration() {
+		return enterpriseHookWindowsRegistrationVerifier(ctx, opts)
+	}
+	return enterprisehooks.Verify(ctx, opts)
+}
+
 var enterpriseHookSIDProfilePath = windowsEnterpriseHookSIDProfilePath
 
 var enterpriseHookWindowsSystemDirectory = windows.GetSystemDirectory
@@ -32,20 +46,76 @@ var enterpriseHookWindowsTargetSessionCheck = enterprisehooks.RequireWindowsEnte
 var enterpriseHookWindowsDeferredPendingCheck = enterprisehooks.RequireWindowsEnterpriseDeferredTargetPending
 var enterpriseHookClaudePolicyIdentityVerifier = enterprisehooks.VerifyWindowsClaudeManagedPolicyIdentity
 var enterpriseHookCursorPolicyIdentityVerifier = enterprisehooks.VerifyWindowsCursorManagedPolicyIdentity
+var enterpriseHookClaudePolicyTargetsReader = enterprisehooks.ReadWindowsClaudeManagedPolicyTargets
+var enterpriseHookClaudePolicyTargetsPublisher = enterprisehooks.PublishWindowsClaudeManagedPolicyTargets
+var enterpriseHookCursorPolicyTargetsReader = enterprisehooks.ReadWindowsCursorManagedPolicyTargets
+var enterpriseHookCursorPolicyTargetsPublisher = enterprisehooks.PublishWindowsCursorManagedPolicyTargets
+var enterpriseHookCodexRequirementsLayoutResolver = resolveWindowsCodexRequirementsLayout
+var enterpriseHookCodexRuntimeRegistryReader = connector.ResolveWindowsCodexManagedRuntimeRegistry
+var enterpriseHookCodexRequirementsRemover = connector.RemoveWindowsCodexMachineRequirements
+var enterpriseHookCodexRequirementsReconciler = connector.ReconcileWindowsCodexMachineRequirements
+
+// enterpriseHookCodexFolderEnsurer recreates a missing Codex machine-policy
+// folder, and the vendor folder above it, before the reconcile validates it
+// (GAP-0856). Standalone only, and only for a configured Codex connector.
+var enterpriseHookCodexFolderEnsurer = enterprisehooks.EnsureWindowsStandaloneCodexMachineFolder
+
+// enterpriseHookCodexRequirementsUnreadable reports a requirements.toml that
+// ordinary users cannot read; tests replace it.
+var enterpriseHookCodexRequirementsUnreadable = connector.WindowsCodexRequirementsUnreadable
+var enterpriseHookCodexTargetsPublisher = connector.PublishWindowsCodexManagedRuntimeTargets
+var enterpriseHookClaudePolicyEnsurer = enterprisehooks.EnsureWindowsStandaloneClaudeManagedPolicy
+var enterpriseHookClaudePolicyRestorer = enterprisehooks.RestoreWindowsClaudeManagedPolicyDrift
+var enterpriseHookClaudePolicyDeactivator = enterprisehooks.DeactivateWindowsClaudeManagedPolicy
+var enterpriseHookCursorPolicyEnsurer = enterprisehooks.EnsureWindowsStandaloneCursorManagedPolicy
+var enterpriseHookCursorPolicyRestorer = enterprisehooks.RestoreWindowsCursorManagedAdapter
+var enterpriseHookCursorPolicyDeactivator = enterprisehooks.DeactivateWindowsCursorManagedPolicy
 
 // enterpriseHookRemovedAccountNote follows each failure status and verify
-// report as a warning for a deleted account whose profile folder was removed.
-const enterpriseHookRemovedAccountNote = " (the account was deleted and its profile folder removed; the enumerator drops its rows at its next pass)"
+// report as a warning for a deleted account or a removed profile.
+const enterpriseHookRemovedAccountNote = " (the account was deleted or its profile removed; the enumerator drops its rows at its next pass, and Setup /repair or /ensure prunes them now)"
 
 // enterpriseHookRemovedAccountRow reports, on a standalone deployment only,
 // a guardian row of a local account that was deleted: no one can sign in as
 // it, and the enumerator drops its rows at its next pass, also when its
-// profile folder could not be removed (GAP-0430). Tests replace it.
+// profile folder could not be removed (GAP-0430). A domain account whose
+// profile an administrator removed (System Properties > User Profiles, or
+// Win32_UserProfile) is the same until it signs in again and gets a new
+// profile: ProfileList no longer lists it, so the enumerator drops its rows
+// too. Status, verify and repair told the administrator to remove that
+// profile and run repair again, which could not help (GAP-1657). Tests
+// replace it.
 var enterpriseHookRemovedAccountRow = func(row enterpriseHookReconcileRow) bool {
-	if cfg == nil || !cfg.StandaloneEnterprise() || strings.TrimSpace(row.UserHome) == "" {
+	if cfg == nil || !cfg.StandaloneEnterprise() || strings.TrimSpace(row.SID) == "" {
 		return false
 	}
-	return windowsEnterpriseAccountDeleted(row.SID)
+	return windowsEnterpriseAccountDeleted(row.SID) ||
+		(strings.TrimSpace(row.UserHome) != "" && windowsEnterpriseProfileRemoved(row.SID, row.UserHome))
+}
+
+func enterpriseHookGuardianTargetRemoved(
+	_ context.Context,
+	_ enterprisehooks.ManifestTarget,
+	row enterpriseHookReconcileRow,
+	_ error,
+) bool {
+	return enterpriseHookRemovedAccountRow(row)
+}
+
+// windowsEnterpriseProfileRemoved reports a row whose recorded home is gone
+// and whose SID has no ProfileList entry: the profile was removed. A
+// ProfileList entry, a home that still exists or cannot be inspected, or a
+// registry read that fails for another reason is not proof.
+func windowsEnterpriseProfileRemoved(sid, home string) bool {
+	home = strings.TrimSpace(home)
+	if strings.TrimSpace(sid) == "" || home == "" || !filepath.IsAbs(home) {
+		return false
+	}
+	if _, err := os.Lstat(home); !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	_, err := enterpriseHookSIDProfilePath(sid)
+	return errors.Is(err, registry.ErrNotExist)
 }
 
 // enterpriseHookSignedOutAccount names, on a standalone deployment only, the
@@ -59,27 +129,23 @@ var enterpriseHookSignedOutAccount = func(row enterpriseHookReconcileRow) string
 	return enterpriseHookWindowsAccountLabel(row)
 }
 
-// enterpriseHookSessionUnavailable matches the two errors a protected
-// target records while its account has no active Windows session.
-func enterpriseHookSessionUnavailable(message string) bool {
-	return strings.Contains(message, "exact active Windows session is unavailable") ||
-		strings.Contains(message, "no active interactive session token matches")
+// enterpriseHookNoticeAccount names a guardian row's account in a notice
+// as the other Windows notices do, "user (SID)": a SID-only row would name
+// the account by SID alone (GAP-0929 review).
+func enterpriseHookNoticeAccount(row enterpriseHookReconcileRow) string {
+	return enterpriseHookWindowsAccountLabel(row)
+}
+
+// enterpriseHookTargetIssueAccount names a failing or drifted target's
+// account as "user (SID)" (GAP-2290).
+func enterpriseHookTargetIssueAccount(row enterpriseHookReconcileRow) string {
+	return enterpriseHookWindowsAccountLabel(row)
 }
 
 // enterpriseHookWindowsAccountLabel is "user (SID)", looking the account up
 // when the row carries only its SID.
 func enterpriseHookWindowsAccountLabel(row enterpriseHookReconcileRow) string {
-	user, sid := strings.TrimSpace(row.User), strings.TrimSpace(row.SID)
-	if user == "" && sid != "" {
-		if parsed, err := windows.StringToSid(sid); err == nil {
-			if account, domain, _, err := parsed.LookupAccount(""); err == nil {
-				user = account
-				if domain != "" {
-					user = domain + `\` + account
-				}
-			}
-		}
-	}
+	user, sid := enterpriseHookWindowsAccountName(row.User, row.SID), strings.TrimSpace(row.SID)
 	switch {
 	case user == "":
 		return sid
@@ -87,6 +153,26 @@ func enterpriseHookWindowsAccountLabel(row enterpriseHookReconcileRow) string {
 		return user
 	}
 	return user + " (" + sid + ")"
+}
+
+// enterpriseHookWindowsAccountName is the account name a row or manifest
+// target carries, else DOMAIN\account looked up from its SID, else "".
+func enterpriseHookWindowsAccountName(user, sid string) string {
+	if user = strings.TrimSpace(user); user != "" {
+		return user
+	}
+	parsed, err := windows.StringToSid(strings.TrimSpace(sid))
+	if err != nil {
+		return ""
+	}
+	account, domain, _, err := parsed.LookupAccount("")
+	if err != nil || account == "" {
+		return ""
+	}
+	if domain != "" {
+		return domain + `\` + account
+	}
+	return account
 }
 
 // enterpriseHookManifestCatchUpAllowed reports a standalone deployment,
@@ -111,6 +197,15 @@ func enterpriseHookTargetSessionAvailable(
 		return false, nil
 	}
 	return false, err
+}
+
+// enterpriseHookTargetClosingLogon is enterpriseHookReconcileClosingLogon.
+func enterpriseHookTargetClosingLogon(target enterprisehooks.ManifestTarget) error {
+	return enterprisehooks.RequireWindowsEnterpriseTargetLogon(
+		strings.TrimSpace(target.SID),
+		strings.TrimSpace(target.UserHome),
+		enterprisehooks.WindowsTargetLogonAnyWithS4U,
+	)
 }
 
 func enterpriseHookDeferredTargetSessionAvailable(
@@ -140,7 +235,7 @@ func enterpriseHookMachinePolicyContract(manifest enterprisehooks.Manifest) stri
 // enterpriseHookStandaloneManifestPath is the standalone guardian's
 // targets.yaml, the manifest the deployment-wide Claude contract comes from.
 var enterpriseHookStandaloneManifestPath = func() (string, error) {
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		return "", err
 	}
@@ -185,6 +280,7 @@ func stageEnterpriseHookDeferredManagedPolicies(
 		manifest,
 		pending,
 		apiAddr,
+		cfg.EffectiveHookFailModeForConnector("cursor"),
 	)
 }
 
@@ -193,10 +289,10 @@ func syncEnterpriseHookManagedEnrollments(
 	apiAddr string,
 	publishExact bool,
 ) error {
-	if cfg != nil && cfg.StandaloneEnterprise() {
-		// Standalone per-user connectors carry their own machine enrollment;
-		// revoke SIDs the manifest no longer authorizes first so they fail
-		// closed even when a later step fails.
+	if cfg != nil && (cfg.StandaloneEnterprise() || cfg.SecureClientIntegration()) {
+		// Per-user connectors (Copilot alone on Secure Client) carry their
+		// own machine enrollment; revoke SIDs the manifest no longer
+		// authorizes first so they fail closed even when a later step fails.
 		codexOpts, err := resolveWindowsCodexRequirementsLayout("reconcile")
 		if err != nil {
 			return err
@@ -208,14 +304,48 @@ func syncEnterpriseHookManagedEnrollments(
 	return syncEnterpriseHookManagedMachineEnrollments(manifest, apiAddr, publishExact)
 }
 
+// publishWindowsMachinePolicyClearingOffRoster runs publish, which puts a
+// connector's machine policy in place, after removing the connector's
+// off-roster marker: the marker is the guardian's statement that the connector
+// is off the roster, so it never stays beside a policy that is being published
+// for the connector. A marker that cannot be removed is logged and the policy
+// is published anyway: the hook allows only while the policy is absent.
+func publishWindowsMachinePolicyClearingOffRoster(name string, publish func() error) error {
+	if err := enterpriseHookWindowsOffRosterPublisher(name, false); err != nil {
+		fmt.Fprintf(os.Stderr, "defenseclaw: enterprise off-roster marker for %s: %v\n", name, err)
+	}
+	return publish()
+}
+
+// syncEnterpriseHookManagedMachineEnrollments revokes stale enrollments and
+// publishes the exact set, one connector at a time. A failure of the Claude
+// Code or Codex step (a link at its machine folder, a policy that cannot be
+// repaired) is kept and named for that connector, and the later connectors
+// still run, so the Cursor revocation of a stale enrollment is not held back
+// while a link sits at the Codex folder (GAP-0862). The failing connector stays
+// fail-closed: the pass still returns its error, and the next pass retries it.
 func syncEnterpriseHookManagedMachineEnrollments(
 	manifest enterprisehooks.Manifest,
 	apiAddr string,
 	publishExact bool,
-) error {
+) (resultErr error) {
 	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		return nil
 	}
+	// Secure Client keeps the order and the first-failure return it always had:
+	// the connector steps below collect their errors, the typing of a link
+	// failure and the continuation past a failed step are standalone only.
+	standalone := cfg.StandaloneEnterprise()
+	var claudeErr, codexErr, cursorErr, deferredCodexErr error
+	defer func() {
+		if !standalone {
+			return
+		}
+		resultErr = classifyEnterpriseHookConnectorErrors(enterpriseHookVendorFolderLink, []enterpriseHookConnectorStepError{
+			{Connector: "claudecode", Err: claudeErr}, {Connector: "codex", Err: codexErr}, {Connector: "cursor", Err: cursorErr},
+		}, resultErr)
+	}()
+	configured := windowsEnterpriseConfiguredMachinePolicies()
 	desiredClaude, desiredCodex, err := windowsEnterpriseDesiredEnrollments(manifest)
 	if err != nil {
 		return err
@@ -224,127 +354,290 @@ func syncEnterpriseHookManagedMachineEnrollments(
 	if err != nil {
 		return err
 	}
-	currentClaude, claudeActive, err := enterprisehooks.ReadWindowsClaudeManagedPolicyTargets()
-	if err != nil {
-		if publishExact || len(desiredClaude) == 0 {
-			return err
-		}
-		// The active global command remains fail-closed while protected state
-		// is incomplete. Let the narrow per-target secure Install path attempt
-		// its ownership-bound repair; final exact publication below will still
-		// reject any unrepaired damage.
-		currentClaude = nil
-		claudeActive = false
-	}
-	if publishExact {
-		if claudeActive || len(desiredClaude) > 0 {
-			if err := enterprisehooks.PublishWindowsClaudeManagedPolicyTargets(desiredClaude); err != nil {
-				return err
-			}
-		}
-	} else if claudeActive {
-		desired := make(map[string]struct{}, len(desiredClaude))
-		for _, sid := range desiredClaude {
-			desired[sid] = struct{}{}
-		}
-		retained := make([]string, 0, len(currentClaude))
-		for _, sid := range currentClaude {
-			if _, ok := desired[sid]; ok {
-				retained = append(retained, sid)
-			}
-		}
-		if err := enterprisehooks.PublishWindowsClaudeManagedPolicyTargets(retained); err != nil {
-			return err
-		}
-	}
-
-	codexOpts, err := resolveWindowsCodexRequirementsLayout("reconcile")
+	codexOpts, err := enterpriseHookCodexRequirementsLayoutResolver("reconcile")
 	if err != nil {
 		return err
 	}
-	currentCodex, err := connector.ResolveWindowsCodexManagedRuntimeRegistry(
-		codexOpts.HookBinary,
-	)
-	var deferredCodexErr error
-	if err != nil {
-		if publishExact || len(desiredCodex) == 0 {
-			deferredCodexErr = err
+	claudeErr = func() error {
+		currentClaude, claudeActive, err := enterpriseHookClaudePolicyTargetsReader()
+		var claudeRestoreErr error
+		if err != nil && cfg.StandaloneEnterprise() && configured["claudecode"] {
+			// The ownership record can outlive a changed or deleted drop-in. Put
+			// the drop-in back from that record, then read its enrollment before
+			// pre-sync can publish a smaller target set. The ensure below still
+			// tries an unrestored guard and reports both failures.
+			restored, restoreErr := enterpriseHookClaudePolicyRestorer()
+			claudeRestoreErr = restoreErr
+			if restoreErr == nil && restored {
+				currentClaude, claudeActive, err = enterpriseHookClaudePolicyTargetsReader()
+			}
 		}
-		// As above, defer only to the trusted machine-policy reconciler. The
-		// target stays unregistered/fail-closed until final exact publication,
-		// but still revoke an independent stale Cursor enrollment below.
-	} else if len(desiredCodex) == 0 {
-		if currentCodex.Active {
-			report, err := connector.RemoveWindowsCodexMachineRequirements(codexOpts)
-			if err != nil {
+		if err != nil {
+			if (!cfg.StandaloneEnterprise() || !configured["claudecode"]) &&
+				(publishExact || len(desiredClaude) == 0) {
 				return err
 			}
-			if !report.OK || !report.SafeToRemoveBinary ||
-				report.SurvivingOwnedPathReferences != 0 {
-				return fmt.Errorf("Codex machine requirements removal was not reference-clean")
+			// The active global command remains fail-closed while protected state
+			// is incomplete. Let the narrow per-target secure Install path attempt
+			// its ownership-bound repair; final exact publication below will still
+			// reject any unrepaired damage.
+			currentClaude = nil
+			claudeActive = false
+		}
+		if cfg.StandaloneEnterprise() {
+			switch {
+			case configured["claudecode"]:
+				if err := publishWindowsMachinePolicyClearingOffRoster("claudecode", func() error {
+					return enterpriseHookClaudePolicyEnsurer(connector.SetupOpts{
+						APIAddr: apiAddr, HookExecutable: codexOpts.HookBinary,
+						HookContractID: enterpriseHookMachinePolicyContract(manifest),
+					})
+				}); err != nil {
+					return fmt.Errorf("ensure configured Claude machine policy: %w", errors.Join(claudeRestoreErr, err))
+				}
+				currentClaude, claudeActive, err = enterpriseHookClaudePolicyTargetsReader()
+				if err != nil {
+					return fmt.Errorf("read ensured Claude machine policy: %w", err)
+				}
+				if !claudeActive {
+					return errors.New("configured Claude machine policy did not become active")
+				}
+			case !configured["claudecode"] && claudeActive:
+				if err := enterpriseHookClaudePolicyDeactivator(); err != nil {
+					return fmt.Errorf("deactivate removed Claude connector: %w", err)
+				}
+				currentClaude = nil
+				claudeActive = false
 			}
 		}
-	} else if publishExact {
-		if !currentCodex.Active {
-			return fmt.Errorf("Codex managed policy is absent after target runtime installation")
+		if publishExact {
+			if claudeActive || len(desiredClaude) > 0 {
+				if err := enterpriseHookClaudePolicyTargetsPublisher(desiredClaude); err != nil {
+					return err
+				}
+			}
+		} else if claudeActive {
+			desired := make(map[string]struct{}, len(desiredClaude))
+			for _, sid := range desiredClaude {
+				desired[sid] = struct{}{}
+			}
+			retained := make([]string, 0, len(currentClaude))
+			for _, sid := range currentClaude {
+				if _, ok := desired[sid]; ok {
+					retained = append(retained, sid)
+				}
+			}
+			if err := enterpriseHookClaudePolicyTargetsPublisher(retained); err != nil {
+				return err
+			}
 		}
-		if err := connector.PublishWindowsCodexManagedRuntimeTargets(codexOpts, desiredCodex); err != nil {
-			return err
+		return nil
+	}()
+	if !standalone && claudeErr != nil {
+		return claudeErr
+	}
+
+	codexErr = func() error {
+		currentCodex, err := enterpriseHookCodexRuntimeRegistryReader(
+			codexOpts.HookBinary,
+		)
+		// A requirements.toml that ordinary users cannot read is published again
+		// with the read restored by the reconcile below, and that reconcile is
+		// the only step that does it: the target publication after it verifies
+		// the read and fails on such a file, so the file has to be healed first
+		// or the guardian never recovers on its own (g582 round 11c, the r11
+		// residual: a holder that denied read sharing left the file unreadable
+		// and every later pass stopped here until an administrator granted the
+		// read by hand).
+		if cfg.StandaloneEnterprise() && configured["codex"] &&
+			(err != nil || !currentCodex.Active || enterpriseHookCodexRequirementsUnreadable(codexOpts.RequirementsPath)) {
+			// The reconcile validates the machine-policy folder and creates none of
+			// it, so a folder or vendor parent deleted after Setup made every pass
+			// fail the same way and nothing recreated it. A link on the path is
+			// named once and refused, as Install, ensure and repair refuse it.
+			ensured, folderErr := enterpriseHookCodexFolderEnsurer()
+			if folderErr != nil {
+				return fmt.Errorf("ensure configured Codex machine requirements: %w", folderErr)
+			}
+			if len(ensured.Created) != 0 {
+				fmt.Fprintf(os.Stderr, "[hook-guardian] recreated the missing Codex machine-policy folder %s (created: %s)\n",
+					ensured.Folder, strings.Join(ensured.Created, ", "))
+			}
+			codexOpts.CodexTargetEnabled = true
+			var report connector.WindowsCodexMachineRequirementsReport
+			reconcileErr := publishWindowsMachinePolicyClearingOffRoster("codex", func() error {
+				var err error
+				report, err = enterpriseHookCodexRequirementsReconciler(codexOpts)
+				return err
+			})
+			if reconcileErr != nil {
+				return fmt.Errorf("ensure configured Codex machine requirements: %w", reconcileErr)
+			}
+			if !report.OK {
+				return errors.New("configured Codex machine requirements were not published")
+			}
+			currentCodex, err = enterpriseHookCodexRuntimeRegistryReader(codexOpts.HookBinary)
+			if err == nil && !currentCodex.Active {
+				return errors.New("configured Codex machine requirements did not become active")
+			}
 		}
-	} else if currentCodex.Active {
-		desired := make(map[string]string, len(desiredCodex))
-		for _, target := range desiredCodex {
-			desired[strings.ToUpper(target.SID)] = target.DataDir
+		if err != nil {
+			if publishExact || len(desiredCodex) == 0 {
+				deferredCodexErr = err
+			}
+			// As above, defer only to the trusted machine-policy reconciler. The
+			// target stays unregistered/fail-closed until final exact publication,
+			// but still revoke an independent stale Cursor enrollment below.
+		} else if len(desiredCodex) == 0 && (!cfg.StandaloneEnterprise() || !configured["codex"]) {
+			if currentCodex.Active {
+				report, err := enterpriseHookCodexRequirementsRemover(codexOpts)
+				if err != nil {
+					return err
+				}
+				if !report.OK || !report.SafeToRemoveBinary ||
+					report.SurvivingOwnedPathReferences != 0 {
+					return enterpriseHookPolicyError("Codex machine requirements removal was not reference-clean")
+				}
+			}
+		} else if publishExact {
+			// The administrator turned DefenseClaw's managed Codex hooks off
+			// (Secure Client without the strict pin): Codex has no registry to
+			// publish, its rows report the failure, and the other agents'
+			// enrollment is still published.
+			if currentCodex.AdminConflict != "" {
+				connector.ReportWindowsCodexAdminConflict(codexOpts.RequirementsPath, currentCodex.AdminConflict)
+			} else {
+				if !currentCodex.Active {
+					return enterpriseHookPolicyError("Codex managed policy is absent after target runtime installation")
+				}
+				if err := enterpriseHookCodexTargetsPublisher(codexOpts, desiredCodex); err != nil {
+					return err
+				}
+			}
+		} else if currentCodex.Active {
+			desired := make(map[string]string, len(desiredCodex))
+			for _, target := range desiredCodex {
+				desired[strings.ToUpper(target.SID)] = target.DataDir
+			}
+			retained := make([]connector.WindowsCodexManagedRuntimeTarget, 0, len(currentCodex.Targets))
+			for _, target := range currentCodex.Targets {
+				dataDir, ok := desired[strings.ToUpper(target.SID)]
+				if ok && sameWindowsEnterprisePathCLI(dataDir, target.DataDir) {
+					retained = append(retained, target)
+				}
+			}
+			if err := enterpriseHookCodexTargetsPublisher(codexOpts, retained); err != nil {
+				return err
+			}
 		}
-		retained := make([]connector.WindowsCodexManagedRuntimeTarget, 0, len(currentCodex.Targets))
-		for _, target := range currentCodex.Targets {
-			dataDir, ok := desired[strings.ToUpper(target.SID)]
+		return nil
+	}()
+	if !standalone && codexErr != nil {
+		return codexErr
+	}
+	if standalone && codexErr == nil {
+		// A deferred Codex error (the registry could not be read) is a failure
+		// of the Codex step too; Secure Client returns it after Cursor ran.
+		codexErr = deferredCodexErr
+	}
+
+	cursorErr = func() error {
+		currentCursor, cursorActive, err := enterpriseHookCursorPolicyTargetsReader()
+		if err != nil && cfg.StandaloneEnterprise() && configured["cursor"] {
+			// The protected state can outlive a deleted or changed adapter or
+			// hooks.json. Rebuild both from that state, then read its enrollment
+			// before pre-sync can publish a smaller target set.
+			restored, restoreErr := enterpriseHookCursorPolicyRestorer(codexOpts.HookBinary)
+			if restoreErr != nil {
+				return fmt.Errorf("restore configured Cursor machine policy: %w", errors.Join(err, restoreErr))
+			}
+			if restored {
+				currentCursor, cursorActive, err = enterpriseHookCursorPolicyTargetsReader()
+			}
+		}
+		if err != nil {
+			if (!cfg.StandaloneEnterprise() || !configured["cursor"]) &&
+				(publishExact || len(desiredCursor) == 0) {
+				return err
+			}
+			currentCursor = nil
+			cursorActive = false
+		}
+		if cfg.StandaloneEnterprise() {
+			switch {
+			case configured["cursor"] && !cursorActive:
+				if err := enterpriseHookCursorPolicyEnsurer(connector.SetupOpts{
+					APIAddr: apiAddr, HookExecutable: codexOpts.HookBinary,
+				}); err != nil {
+					return fmt.Errorf("ensure configured Cursor machine policy: %w", err)
+				}
+				currentCursor, cursorActive, err = enterpriseHookCursorPolicyTargetsReader()
+				if err != nil {
+					return fmt.Errorf("read ensured Cursor machine policy: %w", err)
+				}
+				if !cursorActive {
+					return errors.New("configured Cursor machine policy did not become active")
+				}
+			case !configured["cursor"] && cursorActive:
+				if err := enterpriseHookCursorPolicyDeactivator(); err != nil {
+					return fmt.Errorf("deactivate removed Cursor connector: %w", err)
+				}
+				currentCursor = nil
+				cursorActive = false
+			}
+		}
+		if publishExact {
+			if len(desiredCursor) > 0 && !cursorActive {
+				return enterpriseHookPolicyError("Cursor enterprise policy is absent after target runtime installation")
+			}
+			if cursorActive || len(desiredCursor) == 0 {
+				if err := enterpriseHookCursorPolicyTargetsPublisher(desiredCursor); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		if !cursorActive {
+			return nil
+		}
+		desiredCursorBySID := make(map[string]string, len(desiredCursor))
+		for _, target := range desiredCursor {
+			desiredCursorBySID[strings.ToUpper(target.SID)] = target.DataDir
+		}
+		retainedCursor := make([]enterprisehooks.WindowsCursorManagedRuntimeTarget, 0, len(currentCursor))
+		for _, target := range currentCursor {
+			dataDir, ok := desiredCursorBySID[strings.ToUpper(target.SID)]
 			if ok && sameWindowsEnterprisePathCLI(dataDir, target.DataDir) {
-				retained = append(retained, target)
+				retainedCursor = append(retainedCursor, target)
 			}
 		}
-		if err := connector.PublishWindowsCodexManagedRuntimeTargets(codexOpts, retained); err != nil {
+		if err := enterpriseHookCursorPolicyTargetsPublisher(retainedCursor); err != nil {
 			return err
 		}
+		return nil
+	}()
+	if !standalone {
+		if cursorErr != nil {
+			return cursorErr
+		}
+		return deferredCodexErr
 	}
+	return nil
+}
 
-	currentCursor, cursorActive, err := enterprisehooks.ReadWindowsCursorManagedPolicyTargets()
-	if err != nil {
-		if publishExact || len(desiredCursor) == 0 {
-			return err
-		}
-		currentCursor = nil
-		cursorActive = false
-	}
-	if publishExact {
-		if len(desiredCursor) > 0 && !cursorActive {
-			return fmt.Errorf("Cursor enterprise policy is absent after target runtime installation")
-		}
-		if cursorActive || len(desiredCursor) == 0 {
-			if err := enterprisehooks.PublishWindowsCursorManagedPolicyTargets(desiredCursor); err != nil {
-				return err
-			}
-		}
-		return deferredCodexErr
-	}
-	if !cursorActive {
-		return deferredCodexErr
-	}
-	desiredCursorBySID := make(map[string]string, len(desiredCursor))
-	for _, target := range desiredCursor {
-		desiredCursorBySID[strings.ToUpper(target.SID)] = target.DataDir
-	}
-	retainedCursor := make([]enterprisehooks.WindowsCursorManagedRuntimeTarget, 0, len(currentCursor))
-	for _, target := range currentCursor {
-		dataDir, ok := desiredCursorBySID[strings.ToUpper(target.SID)]
-		if ok && sameWindowsEnterprisePathCLI(dataDir, target.DataDir) {
-			retainedCursor = append(retainedCursor, target)
-		}
-	}
-	if err := enterprisehooks.PublishWindowsCursorManagedPolicyTargets(retainedCursor); err != nil {
-		return err
-	}
-	return deferredCodexErr
+// enterpriseHookPolicyError is an error whose text is exactly text. Three
+// messages that Secure Client also returns keep their old text, product name
+// capitalised; the text goes through a variable so that the error-string lint
+// of the lines that were re-indented does not make a Secure Client message
+// differ.
+func enterpriseHookPolicyError(text string) error { return errors.New(text) }
+
+// enterpriseHookVendorFolderLink is the link that keeps the machine vendor
+// folder of a connector (Codex, Cursor, Claude Code), found now without
+// opening or following anything, "" when none. A seam for tests.
+var enterpriseHookVendorFolderLink = func(connectorName string) string {
+	link, _ := enterprisehooks.WindowsManagedConnectorFolderLink(connectorName)
+	return link
 }
 
 func windowsEnterpriseDesiredCursorEnrollments(
@@ -460,26 +753,31 @@ func verifyEnterpriseHookManagedEnrollments(
 	if err != nil {
 		return err
 	}
-	currentClaude, claudeActive, err := enterprisehooks.ReadWindowsClaudeManagedPolicyTargets()
+	currentClaude, claudeActive, err := enterpriseHookClaudePolicyTargetsReader()
 	if err != nil {
 		return err
 	}
-	if claudeActive != (len(desiredClaude) > 0) ||
+	expected := windowsEnterpriseConfiguredMachinePolicies()
+	if claudeActive != (expected["claudecode"] || len(desiredClaude) > 0) ||
 		!equalWindowsEnterpriseStringSet(currentClaude, desiredClaude) {
 		return fmt.Errorf("Claude protected SID enrollment does not match the enabled manifest")
 	}
 
-	codexOpts, err := resolveWindowsCodexRequirementsLayout("verify")
+	codexOpts, err := enterpriseHookCodexRequirementsLayoutResolver("verify")
 	if err != nil {
 		return err
 	}
-	currentCodex, err := connector.ResolveWindowsCodexManagedRuntimeRegistry(
+	currentCodex, err := enterpriseHookCodexRuntimeRegistryReader(
 		codexOpts.HookBinary,
 	)
 	if err != nil {
 		return err
 	}
-	if currentCodex.Active != (len(desiredCodex) > 0) ||
+	// An inactive registry left by the administrator's own Codex setting is
+	// not compared: Codex runs no hooks then, and its rows report it.
+	if currentCodex.AdminConflict != "" {
+		desiredCodex = nil
+	} else if currentCodex.Active != (expected["codex"] || len(desiredCodex) > 0) ||
 		len(currentCodex.Targets) != len(desiredCodex) {
 		return fmt.Errorf("Codex protected SID enrollment does not match the enabled manifest")
 	}
@@ -492,11 +790,11 @@ func verifyEnterpriseHookManagedEnrollments(
 			return fmt.Errorf("Codex protected SID enrollment does not match the enabled manifest")
 		}
 	}
-	currentCursor, cursorActive, err := enterprisehooks.ReadWindowsCursorManagedPolicyTargets()
+	currentCursor, cursorActive, err := enterpriseHookCursorPolicyTargetsReader()
 	if err != nil {
 		return err
 	}
-	if cursorActive != (len(desiredCursor) > 0) || len(currentCursor) != len(desiredCursor) {
+	if cursorActive != (expected["cursor"] || len(desiredCursor) > 0) || len(currentCursor) != len(desiredCursor) {
 		return fmt.Errorf("Cursor protected SID enrollment does not match the enabled manifest")
 	}
 	if err := verifyWindowsEnterpriseManagedPolicyIdentities(
@@ -514,6 +812,20 @@ func verifyEnterpriseHookManagedEnrollments(
 		}
 	}
 	return nil
+}
+
+func windowsEnterpriseConfiguredMachinePolicies() map[string]bool {
+	configured := map[string]bool{}
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return configured
+	}
+	for _, name := range enterprisehooks.EffectiveWindowsStandaloneHookConnectors(cfg) {
+		switch name {
+		case "claudecode", "codex", "cursor":
+			configured[name] = true
+		}
+	}
+	return configured
 }
 
 func verifyWindowsEnterpriseManagedPolicyIdentities(
@@ -608,8 +920,33 @@ func enterpriseHooksNativePersistentPreRun(cmd *cobra.Command, args []string) er
 			loaded.DeploymentMode,
 		)
 	}
+	if err := adoptWindowsEnterpriseProfilePin(loaded); err != nil {
+		return err
+	}
 	cfg = loaded
 	version.SetBinaryVersion(appVersion)
+	return nil
+}
+
+// adoptWindowsEnterpriseProfilePin gives this process the standalone profile
+// pin when the protected config it loaded resolves the standalone profile.
+// The enterprisehooks renderer, its version gates and its delivery contract
+// read the process pin; an unpinned LocalSystem or administrator run against
+// a standalone install (no DEFENSECLAW_ENTERPRISE_PROFILE in its
+// environment) otherwise took the Secure Client path: the best-effort
+// contract, open delivery for unset or unversioned agents, no agent-version
+// gate (GAP-0013). The resolved profile of the install decides, as the Unix
+// guardian's configureEnterpriseHooksStandaloneUnix does; a Secure Client
+// install never gets the pin, and a pin that contradicts the config already
+// failed the load.
+func adoptWindowsEnterpriseProfilePin(loaded *config.Config) error {
+	if loaded == nil || !loaded.StandaloneEnterprise() ||
+		managed.IsStandaloneProfile(os.Getenv(managed.EnterpriseProfileEnv)) {
+		return nil
+	}
+	if err := os.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone); err != nil {
+		return fmt.Errorf("pin the standalone enterprise profile for this process: %w", err)
+	}
 	return nil
 }
 

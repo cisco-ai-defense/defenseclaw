@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -53,7 +54,38 @@ func otlpValidatePerm(path string, _ os.FileInfo) error {
 	if err != nil {
 		return err
 	}
-	return otlpWindowsRejectUntrustedReadACEs(path, dacl)
+	if err := otlpWindowsRejectUntrustedReadACEs(path, dacl); err != nil {
+		// An extra reader (a backup agent, a helpdesk group) does not make the
+		// credential unusable: the read is accepted and logged, and the next
+		// privileged publish replaces the file with the canonical protection.
+		if !isManagedPermissionDrift(err) || managed.TrustStrictAncestors() {
+			return err
+		}
+		emitManagedResilience(managed.MarkerAccept, path,
+			"credential has an extra reader; a privileged publish restores its protection: "+err.Error(), nil)
+	}
+	return nil
+}
+
+// otlpValidateCredentialPerm is otlpValidatePerm for a credential the caller
+// is about to read (an OTLP path token, the hook API token). A reader every
+// local account holds discloses the credential to all of them: outside the
+// verified Secure Client process and state tree that is refused, and Ensure
+// rotates the token (otlpPathTokenNeedsSecureReplacement). A narrow extra
+// reader (a backup agent, a helpdesk group) is still accepted and logged.
+// Data-free locks keep otlpValidatePerm (GAP-0566).
+func otlpValidateCredentialPerm(path string, info os.FileInfo) error {
+	if err := otlpValidatePerm(path, info); err != nil {
+		return err
+	}
+	dacl, err := otlpWindowsPathSecurity(path)
+	if err != nil {
+		return err
+	}
+	if broad := otlpWindowsBroadReader(path, dacl); broad != nil && !managed.SecureClientManagedPathVerified(path) {
+		return broad
+	}
+	return nil
 }
 
 // otlpValidateOwner rejects reparse points, non-regular files, untrusted
@@ -141,25 +173,21 @@ func otlpWindowsPathSecurity(path string) (*windows.ACL, error) {
 		return nil, fmt.Errorf("inspect Windows owner for %s: %w", path, err)
 	}
 	if !hookAPIWindowsTrustedPrincipal(owner) {
-		return nil, fmt.Errorf("owner %s is not trusted for OTLP token path %s", hookAPIWindowsSIDString(owner), path)
+		return nil, managedPermissionDrift("owner %s is not trusted for OTLP token path %s", hookAPIWindowsSIDString(owner), path)
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil {
 		return nil, fmt.Errorf("inspect Windows DACL for %s: %w", path, err)
 	}
 	if dacl == nil {
-		return nil, fmt.Errorf("null Windows DACL is not trusted: %s", path)
+		return nil, managedPermissionDrift("null Windows DACL is not trusted: %s", path)
 	}
 	return dacl, nil
 }
 
+const otlpWindowsDataReadMask windows.ACCESS_MASK = windows.GENERIC_ALL | windows.GENERIC_READ | windows.FILE_READ_DATA
+
 func otlpWindowsRejectUntrustedReadACEs(path string, dacl *windows.ACL) error {
-	const (
-		accessAllowedCompoundACEType       = 0x4
-		accessAllowedObjectACEType         = 0x5
-		accessAllowedCallbackACEType       = 0x9
-		accessAllowedCallbackObjectACEType = 0xB
-	)
 	readLike := windows.ACCESS_MASK(
 		windows.GENERIC_ALL |
 			windows.GENERIC_READ |
@@ -168,6 +196,16 @@ func otlpWindowsRejectUntrustedReadACEs(path string, dacl *windows.ACL) error {
 			windows.FILE_READ_EA |
 			windows.FILE_READ_ATTRIBUTES |
 			windows.FILE_EXECUTE,
+	)
+	return otlpWindowsRejectUntrustedACEs(path, dacl, readLike)
+}
+
+func otlpWindowsRejectUntrustedACEs(path string, dacl *windows.ACL, readLike windows.ACCESS_MASK) error {
+	const (
+		accessAllowedCompoundACEType       = 0x4
+		accessAllowedObjectACEType         = 0x5
+		accessAllowedCallbackACEType       = 0x9
+		accessAllowedCallbackObjectACEType = 0xB
 	)
 	for i := uint16(0); i < dacl.AceCount; i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
@@ -188,10 +226,47 @@ func otlpWindowsRejectUntrustedReadACEs(path string, dacl *windows.ACL) error {
 		if hookAPIWindowsOwnerRightsPrincipal(sid) || hookAPIWindowsTrustedPrincipal(sid) {
 			continue
 		}
-		return fmt.Errorf(
+		return managedPermissionDrift(
 			"untrusted Windows principal %s has read-like access mask 0x%x on %s",
 			hookAPIWindowsSIDString(sid), uint32(ace.Mask), path,
 		)
+	}
+	return nil
+}
+
+// otlpWindowsBroadReader returns an ErrCredentialDisclosed error naming the
+// first principal that stands for every local account (Everyone, Users,
+// Authenticated Users, Interactive, Guests, Anonymous, Local Account) with data-read access
+// to a credential, or nil. It is not permission drift: the value may already
+// be copied, so the gateway drops its cached copy and Ensure rotates it.
+func otlpWindowsBroadReader(path string, dacl *windows.ACL) error {
+	broad := []windows.WELL_KNOWN_SID_TYPE{
+		windows.WinWorldSid,
+		windows.WinBuiltinUsersSid,
+		windows.WinAuthenticatedUserSid,
+		windows.WinInteractiveSid,
+		windows.WinBuiltinGuestsSid,
+		windows.WinAnonymousSid,
+		windows.WinLocalAccountSid,
+	}
+	for i := uint16(0); dacl != nil && i < dacl.AceCount; i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(i), &ace); err != nil {
+			return fmt.Errorf("inspect Windows ACE %d for %s: %w", i, path, err)
+		}
+		if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE ||
+			ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 || ace.Mask&otlpWindowsDataReadMask == 0 {
+			continue
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		for _, kind := range broad {
+			if sid.IsWellKnown(kind) {
+				return fmt.Errorf(
+					"every local account can read this credential: %s has read access mask 0x%x on %s: %w",
+					hookAPIWindowsSIDString(sid), uint32(ace.Mask), path, ErrCredentialDisclosed,
+				)
+			}
+		}
 	}
 	return nil
 }
@@ -297,4 +372,28 @@ func createSecureOTLPPathTokenTempFile(tokenPath string) (*os.File, string, erro
 		return file, tmpPath, nil
 	}
 	return nil, "", fmt.Errorf("create unique secure Windows OTLP token temp file")
+}
+
+// otlpPathTokenDriftNeedsRepublish reports whether a token that was readable
+// despite permission drift should be republished, with the same value, by
+// this caller. Only the installer and the LocalSystem guardian repair.
+func otlpPathTokenDriftNeedsRepublish(path string) bool {
+	if !windowsManagedCanRepair() {
+		return false
+	}
+	replace, err := otlpPathTokenNeedsSecureReplacement(path)
+	return err == nil && replace
+}
+
+// otlpPathTokenDriftDisclosedValue reports whether the drift on an existing
+// token grants an untrusted principal read access, so its value may already
+// be known and must be rotated rather than republished. Write-only and owner
+// drift keep the value.
+func otlpPathTokenDriftDisclosedValue(path string) bool {
+	dacl, err := otlpWindowsPathSecurity(path)
+	if err != nil {
+		// The descriptor cannot be judged; rotating is the safe choice.
+		return true
+	}
+	return otlpWindowsRejectUntrustedACEs(path, dacl, otlpWindowsDataReadMask) != nil
 }

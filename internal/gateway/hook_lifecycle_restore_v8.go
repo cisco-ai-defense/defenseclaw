@@ -33,6 +33,15 @@ func (a *APIServer) restoreHookSessionLifecycle(ctx context.Context, meta llmEve
 	if exists && !hookLifecycleUnresolvedSelfRoot(snapshot.meta) {
 		return meta
 	}
+	key := hookSessionStateKey(meta)
+	if exists && a.hookLifecycleHistoryWasRead(key) {
+		// The history was read once since this process holds the session:
+		// every row written after that read is this process's own, so a
+		// second read cannot repair anything. Reading it on every hook of a
+		// root agent scanned all of the session's audit rows each time and
+		// the hook path slowed as the session grew (GAP-0186).
+		return meta
+	}
 	if ManagedEnterpriseActive() {
 		// Secure Client records keep main's lineage after a restart: there
 		// the gateway runtime never served the history read (issue #1092).
@@ -45,6 +54,9 @@ func (a *APIServer) restoreHookSessionLifecycle(ctx context.Context, meta llmEve
 	projection, found, err := runtime.LatestLifecycleProjection(ctx, audit.LifecycleProjectionQuery{
 		Connector: meta.Source, SessionID: meta.SessionID, AgentID: meta.AgentID,
 	})
+	if err == nil {
+		a.markHookLifecycleHistoryRead(key)
+	}
 	if err != nil || !found {
 		return meta
 	}
@@ -52,6 +64,41 @@ func (a *APIServer) restoreHookSessionLifecycle(ctx context.Context, meta llmEve
 		return meta
 	}
 	return a.installRestoredHookSessionLifecycle(meta, projection)
+}
+
+// hookLifecycleHistoryWasRead reports whether restoreHookSessionLifecycle has
+// already read the signed history of the session key.
+func (a *APIServer) hookLifecycleHistoryWasRead(key string) bool {
+	if key == "" {
+		return false
+	}
+	a.llmPromptMu.Lock()
+	defer a.llmPromptMu.Unlock()
+	_, read := a.hookLifecycleHistoryRead[key]
+	return read
+}
+
+// markHookLifecycleHistoryRead records one history read for key. The set is
+// bounded like the session states it describes.
+func (a *APIServer) markHookLifecycleHistoryRead(key string) {
+	if key == "" {
+		return
+	}
+	a.llmPromptMu.Lock()
+	defer a.llmPromptMu.Unlock()
+	if _, read := a.hookLifecycleHistoryRead[key]; read {
+		return
+	}
+	if a.hookLifecycleHistoryRead == nil {
+		a.hookLifecycleHistoryRead = make(map[string]struct{})
+	}
+	for len(a.hookLifecycleHistoryRead) >= hookPromptCacheMaxEntries && len(a.hookLifecycleHistoryReadOrder) > 0 {
+		oldest := a.hookLifecycleHistoryReadOrder[0]
+		a.hookLifecycleHistoryReadOrder = a.hookLifecycleHistoryReadOrder[1:]
+		delete(a.hookLifecycleHistoryRead, oldest)
+	}
+	a.hookLifecycleHistoryRead[key] = struct{}{}
+	a.hookLifecycleHistoryReadOrder = append(a.hookLifecycleHistoryReadOrder, key)
 }
 
 // hookLifecycleRetainedLineageVerified admits only topology that was either

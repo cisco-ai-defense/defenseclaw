@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -55,10 +56,12 @@ func EnsureGatewayToken(dotenvPath string) (string, error) {
 	// is gated by localKeyResolutionDisabled). In enterprise/sidecar mode
 	// the gateway token is injected via ConfigMap envFrom and must be
 	// respected even when local key resolution is disabled for LLM keys.
-	if t := strings.TrimSpace(os.Getenv("DEFENSECLAW_GATEWAY_TOKEN")); t != "" {
+	// SecretRef text an earlier build saved as a token is never one (#1404).
+	usable := func(t string) bool { return t != "" && !envvars.IsSecretRefText(t) }
+	if t := strings.TrimSpace(os.Getenv("DEFENSECLAW_GATEWAY_TOKEN")); usable(t) {
 		return t, nil
 	}
-	if t := strings.TrimSpace(os.Getenv("OPENCLAW_GATEWAY_TOKEN")); t != "" {
+	if t := strings.TrimSpace(os.Getenv("OPENCLAW_GATEWAY_TOKEN")); usable(t) {
 		return t, nil
 	}
 
@@ -66,10 +69,10 @@ func EnsureGatewayToken(dotenvPath string) (string, error) {
 	// where the token lives in ~/.defenseclaw/.env).
 	if dotenvPath != "" {
 		if dotenv, err := loadDotEnv(dotenvPath); err == nil {
-			if t := strings.TrimSpace(dotenv["DEFENSECLAW_GATEWAY_TOKEN"]); t != "" {
+			if t := strings.TrimSpace(dotenv["DEFENSECLAW_GATEWAY_TOKEN"]); usable(t) {
 				return t, nil
 			}
-			if t := strings.TrimSpace(dotenv["OPENCLAW_GATEWAY_TOKEN"]); t != "" {
+			if t := strings.TrimSpace(dotenv["OPENCLAW_GATEWAY_TOKEN"]); usable(t) {
 				return t, nil
 			}
 		}
@@ -110,15 +113,12 @@ func appendEnvLine(path, key, value string) error {
 	}
 
 	var lines []string
+	var existing []byte
 	if data, err := os.ReadFile(path); err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" {
-				lines = append(lines, line)
-				continue
-			}
-			if strings.HasPrefix(trimmed, key+"=") {
-				continue // drop existing — we'll append the new value
+		existing = data
+		for _, line := range envvars.DotEnvLines(data) {
+			if strings.HasPrefix(strings.TrimSpace(line), key+"=") {
+				continue // drop existing; the new value is appended
 			}
 			lines = append(lines, line)
 		}
@@ -129,13 +129,17 @@ func appendEnvLine(path, key, value string) error {
 	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
 		lines = lines[:len(lines)-1]
 	}
-	lines = append(lines, fmt.Sprintf("%s=%s", key, value), "")
+	lines = append(lines, fmt.Sprintf("%s=%s", key, value))
+	out := envvars.SerializeDotEnv(existing, lines)
+	if err := checkDotEnvSize(path, len(out)); err != nil {
+		return fmt.Errorf("appendEnvLine: %w", err)
+	}
 
-	// Cold-start dependency (T5.7): in managed_enterprise mode the write
+	// Cold-start dependency: in managed_enterprise mode the write
 	// below goes through managed.WriteServiceRuntimeFile which requires
 	// the parent directory to already carry the Administrators-owned +
-	// service-writer-ACE trust contract. Spec 003 (deferred config)
-	// introduced a boot ordering that can invoke appendEnvLine before
+	// service-writer-ACE trust contract. Deferred config introduced
+	// a boot ordering that can invoke appendEnvLine before
 	// the installer's trust-setup step has applied those ACLs; when
 	// that happens the caller sees a wrapped "not trusted" error and
 	// firstboot fails. The proper cross-cutting fix is to gate this
@@ -146,7 +150,7 @@ func appendEnvLine(path, key, value string) error {
 		managed.PinnedDeploymentMode(),
 		path,
 		"gateway dotenv",
-		[]byte(strings.Join(lines, "\n")),
+		out,
 	); err != nil {
 		return fmt.Errorf(
 			"appendEnvLine: %w (cold-start note: on managed_enterprise the "+

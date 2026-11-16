@@ -61,7 +61,7 @@ var Devin = register(&Spec{
 	},
 	probe: ProbeSpec{
 		VersionArgv: []string{"/usr/local/bin/devin", "--version"},
-		VersionRE:   regexp.MustCompile(`^devin ([0-9]+\.[0-9]+\.[0-9]+)`),
+		VersionRE:   regexp.MustCompile(`^devin v?([0-9]+\.[0-9]+\.[0-9]+)`),
 		// One native executable makes every request.
 		NetworkBinaries: `readlink -f /usr/local/bin/devin`,
 	},
@@ -73,7 +73,7 @@ var Devin = register(&Spec{
 		}
 		link := `[ -x "$root/bin/devin" ] || { echo "Devin CLI archive lacks bin/devin" >&2; exit 1; }; ln -sfn "$root/bin/devin" /usr/local/bin/devin; ` +
 			`h="$(mktemp -d)"; got="$(HOME="$h" /usr/local/bin/devin --version 2>/dev/null | head -n 1 | cut -d' ' -f2)"; rm -rf "$h"; ` +
-			`[ "$got" = ` + shellQuote(version) + ` ] || { echo "Devin CLI '$got' is not the pinned ` + version + `" >&2; exit 1; }`
+			pinVersionCheck("Devin CLI", version)
 		return []InstallStep{{
 			Comment: "Install Devin CLI " + version + " from its release archive into a root-owned prefix (vendor sha256 checked)",
 			Run:     run + "; " + link,

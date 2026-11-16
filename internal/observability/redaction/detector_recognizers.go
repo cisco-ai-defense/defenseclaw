@@ -17,7 +17,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/productlayout"
 	"github.com/defenseclaw/defenseclaw/internal/sensitivequery"
 )
 
@@ -36,7 +38,7 @@ var (
 	emailRE         = regexp.MustCompile(`[A-Za-z0-9!#$%&'*+/=?^_` + "`" + `{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_` + "`" + `{|}~-]+)*@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+`)
 	telephoneRE     = regexp.MustCompile(`(?:\+1[ .-])?(?:\([2-9][0-9]{2}\)|[2-9][0-9]{2})[ .-][2-9][0-9]{2}[ .-][0-9]{4}`)
 	nationalIDRE    = regexp.MustCompile(`[0-9]{3}-[0-9]{2}-[0-9]{4}`)
-	uuidRE          = regexp.MustCompile(`[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}`)
+	uuidRE          = lazyregexp.New(`[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}`)
 )
 
 var eligibleURLQueryKeys = map[string]struct{}{
@@ -451,18 +453,20 @@ func recognizeConnectionStrings(input string) ([]candidate, error) {
 	result := []candidate{}
 	uriRanges := uriRE.FindAllStringIndex(input, -1)
 	for _, uri := range uriRanges {
-		uriValue := input[uri[0]:uri[1]]
-		parsed, ok := parseHierarchicalURI(uriValue)
+		uriValue, parsed, ok := parseMatchedURI(input[uri[0]:uri[1]])
 		if !ok && containsEligibleRawQuery(uriValue) {
 			return nil, detectorError(FailureValidator)
 		}
-		if !ok || !supportedConnectionScheme(parsed.scheme) {
+		if !supportedConnectionScheme(parsed.scheme) {
 			continue
 		}
 		if parsed.passwordStart >= 0 && parsed.passwordEnd > parsed.passwordStart {
 			result = append(result, candidate{start: uri[0] + parsed.passwordStart, end: uri[0] + parsed.passwordEnd, accepted: true})
 		}
-		queryMatches, err := queryCandidates(input[uri[0]:uri[1]], uri[0], parsed)
+		if !ok {
+			continue
+		}
+		queryMatches, err := queryCandidates(uriValue, uri[0], parsed)
 		if err != nil {
 			return nil, err
 		}
@@ -600,14 +604,84 @@ func recognizeHighEntropy(input string, fieldClass observability.FieldClass, pri
 	indices := entropyRE.FindAllStringIndex(input, -1)
 	result := make([]candidate, 0, len(indices))
 	for _, index := range indices {
-		value := input[index[0]:index[1]]
-		accepted := entropyBoundary(input, index[0], index[1]) && validHighEntropy(value, fieldClass)
-		if overlapsCredentialClaim(index[0], index[1], prior) {
-			accepted = false
+		boundary := entropyBoundary(input, index[0], index[1])
+		span := input[index[0]:index[1]]
+		parts, folderFound := splitAtProductFolders(span)
+		// A product folder component is neutral. A span without one is judged
+		// exactly as before. A span with one is a secret only when the detector
+		// redacts it as written AND still redacts the path that remains with the
+		// folder components taken out (the same rule applied to the whole
+		// remaining path, never to pieces of it); then every remaining range is
+		// redacted and the folder names stay readable. A span the detector leaves
+		// alone as written (a hyphenated folder name inside a slash-form path
+		// fails the alphabet check) is never newly redacted, so the result is
+		// never more than the unchanged detector gives.
+		accepted := boundary && validHighEntropy(span, fieldClass)
+		if !folderFound {
+			if overlapsCredentialClaim(index[0], index[1], prior) {
+				accepted = false
+			}
+			result = append(result, candidate{start: index[0], end: index[1], accepted: accepted})
+			continue
 		}
-		result = append(result, candidate{start: index[0], end: index[1], accepted: accepted})
+		accepted = accepted && validHighEntropy(joinRanges(span, parts), fieldClass)
+		for i, part := range parts {
+			start, end := index[0]+part[0], index[0]+part[1]
+			result = append(result, candidate{start: start, end: end, accepted: accepted && !overlapsCredentialClaim(start, end, prior), continues: i > 0})
+		}
 	}
 	return result
+}
+
+// joinRanges rebuilds span with the product folder components taken out: the
+// ranges in order, one slash where a folder stood.
+func joinRanges(span string, parts [][2]int) string {
+	var builder strings.Builder
+	for i, part := range parts {
+		if i > 0 {
+			builder.WriteByte(byte(0x2f))
+		}
+		builder.WriteString(span[part[0]:part[1]])
+	}
+	return builder.String()
+}
+
+// splitAtProductFolders returns the byte ranges of span that remain candidates
+// once product folder names are taken out. A product folder name
+// (DefenseClaw-HookRuntime, DefenseClaw, ...) is a public layout constant, not
+// key material, and the entropy alphabet includes the slash, so a POSIX-form
+// path reaches the detector as one span with the folder inside it. A folder
+// name is recognized only as a whole path component; a secret that merely
+// contains or extends one stays in the surrounding range and is judged as
+// before. A span without a product folder component is returned whole, with
+// found false.
+func splitAtProductFolders(span string) (parts [][2]int, found bool) {
+	parts = make([][2]int, 0, 1)
+	runStart, runEnd := -1, 0
+	flush := func() {
+		if runStart >= 0 && runEnd > runStart {
+			parts = append(parts, [2]int{runStart, runEnd})
+		}
+		runStart = -1
+	}
+	for componentStart := 0; componentStart <= len(span); {
+		componentEnd := componentStart + strings.IndexByte(span[componentStart:], byte(0x2f))
+		if componentEnd < componentStart {
+			componentEnd = len(span)
+		}
+		if productlayout.IsFolderName(span[componentStart:componentEnd]) {
+			found = true
+			flush()
+		} else {
+			if runStart < 0 {
+				runStart = componentStart
+			}
+			runEnd = componentEnd
+		}
+		componentStart = componentEnd + 1
+	}
+	flush()
+	return parts, found
 }
 
 func validHighEntropy(value string, fieldClass observability.FieldClass) bool {
@@ -706,10 +780,16 @@ func validBase64Alphabet(value string) bool {
 func recognizeURLQueries(input string) ([]candidate, error) {
 	result := []candidate{}
 	for _, uri := range uriRE.FindAllStringIndex(input, -1) {
-		uriValue := input[uri[0]:uri[1]]
-		parsed, ok := parseHierarchicalURI(uriValue)
+		uriValue, parsed, ok := parseMatchedURI(input[uri[0]:uri[1]])
 		if !ok && containsEligibleRawQuery(uriValue) {
 			return nil, detectorError(FailureValidator)
+		}
+		if (parsed.scheme == "http" || parsed.scheme == "https") && parsed.passwordEnd > parsed.passwordStart {
+			result = append(result, candidate{
+				start:    uri[0] + parsed.passwordStart,
+				end:      uri[0] + parsed.passwordEnd,
+				accepted: true,
+			})
 		}
 		if !ok {
 			continue
@@ -950,10 +1030,37 @@ type parsedURI struct {
 	queryStart, queryEnd       int
 }
 
+func parseMatchedURI(value string) (string, parsedURI, bool) {
+	parsed, ok := parseHierarchicalURI(value)
+	if ok {
+		return value, parsed, true
+	}
+	original := parsed
+	// The URI scanner includes sentence punctuation. Retry without a
+	// trailing punctuation run, keeping offsets relative to the original text.
+	trimmed := strings.TrimRight(value, ".,;:!?)]}`")
+	if trimmed != value {
+		parsed, ok = parseHierarchicalURI(trimmed)
+		if ok {
+			return trimmed, parsed, true
+		}
+		// An IPv6 authority can end in a structural ']' immediately before
+		// the sentence punctuation. Keep that byte in the original span.
+		if len(trimmed) < len(value) && value[len(trimmed)] == ']' {
+			withBracket := value[:len(trimmed)+1]
+			parsed, ok = parseHierarchicalURI(withBracket)
+			if ok {
+				return withBracket, parsed, true
+			}
+		}
+	}
+	return value, original, false
+}
+
 func parseHierarchicalURI(value string) (parsedURI, bool) {
 	result := parsedURI{passwordStart: -1, passwordEnd: -1, queryStart: -1, queryEnd: -1}
 	colon := strings.IndexByte(value, ':')
-	if colon <= 0 || colon+2 >= len(value) || value[colon+1:colon+3] != "//" || !allASCII(value) {
+	if colon <= 0 || colon+2 >= len(value) || value[colon+1:colon+3] != "//" {
 		return result, false
 	}
 	result.scheme = strings.ToLower(value[:colon])
@@ -977,8 +1084,10 @@ func parseHierarchicalURI(value string) (parsedURI, bool) {
 			result.passwordEnd = authorityStart + at
 		}
 	}
-	if !validURIHostPart(hostpart) {
-		return parsedURI{}, false
+	// Keep the userinfo span when the matched URI has an invalid host or a
+	// non-ASCII suffix. A malformed authority must not expose its password.
+	if !allASCII(value) || !validURIHostPart(hostpart) {
+		return result, false
 	}
 	fragment := len(value)
 	if hash := strings.IndexByte(value[authorityEnd:], '#'); hash >= 0 {
@@ -989,7 +1098,7 @@ func parseHierarchicalURI(value string) (parsedURI, bool) {
 		result.queryEnd = fragment
 	}
 	if !validPercentEscapes(value) {
-		return parsedURI{}, false
+		return result, false
 	}
 	return result, true
 }

@@ -256,6 +256,100 @@ func TestGeneratedMetricCarriesCanonicalEnvelopeWithoutHighCardinalityLabels(t *
 	}
 }
 
+// runtimeObservationCountingSink counts, at each export, the correlation
+// observations already committed for the fixture's occurrence.
+type runtimeObservationCountingSink struct {
+	runtimeCorrelationMetricSink
+	count    func() int
+	countsMu sync.Mutex
+	counts   []int
+}
+
+func (sink *runtimeObservationCountingSink) RecordMetric(ctx context.Context, metric telemetry.V8ProjectedMetric) error {
+	committed := sink.count()
+	sink.countsMu.Lock()
+	sink.counts = append(sink.counts, committed)
+	sink.countsMu.Unlock()
+	return sink.runtimeCorrelationMetricSink.RecordMetric(ctx, metric)
+}
+
+// A metric batch commits the observations of all its records in one audit
+// transaction before the provider gets the first record (B-26): the first
+// export already sees both observations, and a failed commit exports nothing.
+func TestGeneratedMetricBatchCommitsEveryObservationBeforeTheFirstExport(t *testing.T) {
+	dependencies := newRuntimeTestDependencies(t)
+	var fixture runtimeCorrelationFixture
+	sink := &runtimeObservationCountingSink{count: func() int {
+		return len(runtimeCorrelationGraph(t, dependencies, fixture.semanticEventID).Observations)
+	}}
+	options := dependencies.options()
+	options.TelemetryProviderFactory = telemetry.NewV8ProviderFactory(telemetry.V8ProviderOptions{
+		Version: "8.0.0", Environment: "test", ServiceInstanceID: "correlation-metric-batch",
+		GenerationPipelines: func(
+			context.Context, *config.ObservabilityV8Plan, uint64, telemetry.V8MetricReaderSpec,
+		) (telemetry.V8GenerationPipelines, error) {
+			return telemetry.V8GenerationPipelines{MetricPipelines: []telemetry.V8GenerationMetricPipeline{{
+				Destination: "capture", Projection: telemetry.V8MetricProjectionCanonical,
+				SelectedFamilies: []observability.EventName{generatedMetricFamily, generatedMetricBatchFamily},
+				Sink:             sink,
+			}}}, nil
+		},
+	})
+	plan := runtimeGeneratedMetricPlan(t, dependencies, observability.BucketAgentLifecycle)
+	runtime, err := New(t.Context(), runtimegraph.ConfigFromPlan(plan, false), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if closeErr := runtime.Close(ctx); closeErr != nil {
+			t.Errorf("close runtime: %v", closeErr)
+		}
+	})
+	fixture = newRuntimeCorrelationFixture(t, dependencies, audit.CorrelationRailHook)
+	items := []GeneratedMetricBatchItem{
+		{Family: generatedMetricFamily, Builder: func(snapshot EmitContext) (observability.Record, error) {
+			return runtimeGeneratedMetricRecord(t, snapshot)
+		}},
+		{Family: generatedMetricBatchFamily, Builder: func(snapshot EmitContext) (observability.Record, error) {
+			return runtimeGeneratedMetricBatchRecord(t, snapshot)
+		}},
+	}
+	results, err := runtime.RecordGeneratedMetricBatch(fixture.ctx, items)
+	if err != nil || len(results) != 2 {
+		t.Fatalf("batch results=%+v err=%v", results, err)
+	}
+	sink.countsMu.Lock()
+	counts := append([]int(nil), sink.counts...)
+	sink.countsMu.Unlock()
+	if len(counts) != 2 || counts[0] != 2 || counts[1] != 2 {
+		t.Fatalf("observations committed at each export = %v, want [2 2]", counts)
+	}
+
+	semanticEventID, err := audit.NewSemanticEventID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	connectorInstanceID, err := audit.NewConnectorInstanceID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orphan := audit.ContextWithEnvelope(t.Context(), audit.CorrelationEnvelope{
+		SemanticEventID: string(semanticEventID), LogicalEventID: string(semanticEventID),
+		ConnectorInstanceID: string(connectorInstanceID),
+	})
+	results, err = runtime.RecordGeneratedMetricBatch(orphan, items)
+	var metricErr *GeneratedMetricError
+	if !errors.As(err, &metricErr) || metricErr.Code() != GeneratedMetricRecordFailed ||
+		results[0] != (telemetry.V8MetricRecordResult{}) || results[1] != (telemetry.V8MetricRecordResult{}) {
+		t.Fatalf("orphan batch results=%+v err=%v", results, err)
+	}
+	if got := len(sink.snapshot()); got != 2 {
+		t.Fatalf("provider received %d metrics, want only the first batch's 2", got)
+	}
+}
+
 func TestGeneratedMetricDoesNotExportWhenCorrelationCommitFails(t *testing.T) {
 	dependencies := newRuntimeTestDependencies(t)
 	sink := &runtimeCorrelationMetricSink{}

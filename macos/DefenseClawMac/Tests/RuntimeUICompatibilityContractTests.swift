@@ -42,15 +42,9 @@ enum RuntimeUICompatibilityContractTests {
         expect(modelsSource.contains(#"case "amp": return "Amp""#),
                "the runtime-supported Amp connector must retain its display name")
 
-        for unsupportedSurface in [
-            "setup redaction",
-            "RedactionToggleSheet",
-            "showRedactionToggle",
-            "redactionButton",
-        ] {
-            expect(!logsSource.contains(unsupportedSurface),
-                   "the Logs UI must not expose the unsupported runtime 0.8.10 surface: \(unsupportedSurface)")
-        }
+        expect(logsSource.contains("RedactionPolicySheet"), "current runtimes expose canonical redaction controls")
+        expect(logsSource.contains(#".disabled(appState.runtimeSetupCommands?.contains("redaction") != true)"#),
+               "older runtimes without setup redaction must not execute unsupported commands")
 
         expect(logsSource.contains(".dcInspector(isPresented:"),
                "the Logs view must use the shared inline detail pane")

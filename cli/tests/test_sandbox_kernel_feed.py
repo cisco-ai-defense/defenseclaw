@@ -78,6 +78,17 @@ def test_the_helper_ships_and_is_removed_with_the_per_user_install() -> None:
     assert any(os.path.basename(target) == "defenseclaw-sensor-helper" for target in targets)
 
 
+def test_hook_post_transport_ships_and_is_removed_with_per_user_install() -> None:
+    release = yaml.safe_load((REPO_ROOT / ".goreleaser.yaml").read_text(encoding="utf-8"))
+    default = next(archive for archive in release["archives"] if archive["id"] == "default")
+    assert "defenseclaw-hook-post" in default["ids"]
+    installer = (REPO_ROOT / "scripts/install.sh").read_text(encoding="utf-8")
+    managed = re.search(r'^readonly MANAGED_BINARIES="([^"]*)"', installer, re.MULTILINE)
+    assert managed and "defenseclaw-hook-post" in managed.group(1).split()
+    _root, targets = cmd_uninstall._owned_binary_targets("linux")
+    assert any(os.path.basename(target) == "defenseclaw-hook-post" for target in targets)
+
+
 # ---------------------------------------------------------------------------
 # defenseclaw doctor: the "Sandbox kernel feed" row (spec 11.3)
 # ---------------------------------------------------------------------------

@@ -86,7 +86,8 @@ func TestSandboxDaemonStatusAgeIsThePolicyTime(t *testing.T) {
 		t.Fatal(err)
 	}
 	policyAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
-	if regs.applyLive("dc-a", sandboxrelay.CurrentPolicy{Digest: "sha256:a", UpdatedAt: policyAt}) {
+	floor := config.OpenShellAdminConfig{}
+	if regs.applyLive("dc-a", sandboxrelay.CurrentPolicy{Floor: &floor, Digest: "sha256:a", UpdatedAt: policyAt}) {
 		t.Fatal("a new policy time alone was reported as a floor change")
 	}
 	if got, _ := regs.get("dc-a"); !got.UpdatedAt.Equal(policyAt) {

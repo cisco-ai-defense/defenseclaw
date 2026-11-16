@@ -1,0 +1,60 @@
+# DefenseClaw sensor in the Claude Cowork VM: detection only.
+# install.sh renders this at every VM start; edits in the VM do not survive a restart.
+config_version: 9
+data_dir: @DATA@
+# Rule packs, root-owned and read-only for the gateway account.
+policy_dir: @POLICY_DIR@
+gateway:
+  api_port: @PORT@
+guardrail:
+  enabled: false
+  # The bundled pack by name, so it resolves under policy_dir (/opt), never
+  # data_dir; with no policies/ the gateway uses the embedded pack.
+  rule_pack: default
+ai_discovery:
+  enabled: true
+  mode: passive
+  scan_interval_min: 10
+  process_interval_s: 30
+  scan_roots:
+    - "~"
+  home_dirs: @HOMES@
+  include_shell_history: false
+  include_package_manifests: true
+  include_env_var_names: false
+  include_network_domains: true
+  include_user_email: false
+  lookup_model_provenance_online: false
+  max_files_per_scan: 1000
+  max_file_bytes: 524288
+  store_raw_local_paths: false
+  runtime:
+    enabled: true
+    planes: [a, b, c]
+    enable_host_plane: true
+    dns_capture: true
+observability:
+  resource:
+    attributes:
+      service.name: defenseclaw-cowork-vm
+      cowork.sensor_version: "@SENSOR_VERSION@"
+      cowork.tenant: "@TENANT@"
+      cowork.device_id: "@DEVICE@"
+      cowork.vm_arch: "@VM_ARCH@"
+  destinations:
+    - name: cowork-collector
+      kind: otlp
+      enabled: true
+      protocol: http/protobuf
+      endpoint: "https://@COLLECTOR@"
+      tls:
+        insecure: false
+        ca_cert: @CA_CERT@
+      timeout_ms: 10000
+      network_safety:
+        allow_private_networks: true
+        allow_cgnat: false
+      batch:
+        max_queue_size: 4096
+        max_queue_bytes: 33554432
+        scheduled_delay_ms: 2000

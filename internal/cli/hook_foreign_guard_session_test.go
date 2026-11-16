@@ -99,7 +99,7 @@ func TestForeignHookGuardDeniesWhenGatewaySessionStateIsUnavailable(t *testing.T
 	fixture := newPortableForeignGuardFixture(t, config.ForeignHooksRemove)
 	fixture.guard("claudecode")
 	fixture.process = "agent-process"
-	hookForeignGuardExchange = func(string, string, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+	hookForeignGuardExchange = func(string, string, time.Time, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
 		return enterprisepolicy.GuardDecision{}, os.ErrPermission
 	}
 	decision := fixture.runEvent(t, "claudecode", "SessionStart", "session_id", "s-1")
@@ -114,11 +114,35 @@ func TestForeignHookGuardDeniesWhenGatewaySessionStateIsUnavailable(t *testing.T
 	}
 	// GAP-0578: a stopped gateway is no foreign-hook finding; the block uses
 	// the not-running reason every managed hook uses.
-	hookForeignGuardExchange = func(string, string, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+	hookForeignGuardExchange = func(string, string, time.Time, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
 		return enterprisepolicy.GuardDecision{}, fmt.Errorf("dial hook socket: %w", hookexec.ErrManagedGatewayNotRunning)
 	}
 	if stopped := fixture.runEvent(t, "claudecode", "SessionStart", "session_id", "s-2"); stopped.ManagedRuntimeFailure != hookexec.ManagedGatewayNotRunningReason {
 		t.Fatalf("a stopped gateway must block with the not-running reason: %q", stopped.ManagedRuntimeFailure)
+	}
+	// #1278: a gateway still restarting at the end of the restart budget
+	// blocks with the restart named. The budget counts from the hook
+	// invocation, the scan before the exchange included.
+	before := time.Now()
+	var invocation, scanDeadline time.Time
+	hookForeignGuardExchange = func(_, _ string, started, deadline time.Time, _ enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+		invocation, scanDeadline = started, deadline
+		return enterprisepolicy.GuardDecision{}, fmt.Errorf("session exchange: %w", hookexec.ErrManagedGatewayRestarting)
+	}
+	restarting := fixture.runEvent(t, "claudecode", "PreToolUse", "session_id", "s-3")
+	if restarting.ManagedRuntimeFailure != hookexec.ManagedGatewayRestartingReason {
+		t.Fatalf("a restarting gateway must block with the restarting reason: %q", restarting.ManagedRuntimeFailure)
+	}
+	if invocation.Before(before) || invocation.After(time.Now()) || !restarting.StartedAt.Equal(invocation) || !scanDeadline.After(invocation) {
+		t.Fatalf("the exchange must get the invocation start: started %v, hook start %v, scan deadline %v", invocation, restarting.StartedAt, scanDeadline)
+	}
+	// B-01: a gateway that took the exchange of a tool call but gave no
+	// answer within the answer budget blocks with the no-answer reason.
+	hookForeignGuardExchange = func(string, string, time.Time, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+		return enterprisepolicy.GuardDecision{}, fmt.Errorf("session exchange: %w", hookexec.ErrManagedGatewayNoAnswer)
+	}
+	if silent := fixture.runEvent(t, "claudecode", "PreToolUse", "session_id", "s-4"); silent.ManagedRuntimeFailure != hookexec.ManagedGatewayNoAnswerReason {
+		t.Fatalf("a gateway that gives no answer must block with the no-answer reason: %q", silent.ManagedRuntimeFailure)
 	}
 }
 

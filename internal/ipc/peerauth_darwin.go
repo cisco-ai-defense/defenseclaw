@@ -15,6 +15,7 @@ package ipc
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -76,7 +77,7 @@ func init() {
 		}
 		return nil
 	}
-	readCodesignFn = readCodesignForPID
+	readCodesignFn = readCodesignForPIDCached
 }
 
 // readCodesignForPID shells out to `codesign -dv --verbose=4 +<pid>`
@@ -96,6 +97,15 @@ func init() {
 // with empty required fields when the corresponding allowlist is
 // non-empty, so a failing codesign / plutil lookup fails closed.
 func readCodesignForPID(pid int32) (teamID, signingID, bundleID, exePath string, err error) {
+	output, _ := codesignOutputWithRetry(pid)
+	teamID, signingID, bundleID, exePath = parseCodesignIdentity(output)
+	return teamID, signingID, bundleID, exePath, nil
+}
+
+// runCodesign runs one bounded codesign lookup for pid and returns its
+// metadata (written to stderr) and whether the bound expired. Overridable in
+// tests.
+var runCodesign = func(pid int32) ([]byte, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), codesignTimeout)
 	defer cancel()
 
@@ -110,10 +120,25 @@ func readCodesignForPID(pid int32) (teamID, signingID, bundleID, exePath string,
 	// still writing the fields we care about. We treat "no matches
 	// found" as an empty identity, not an error.
 	_ = cmd.Run()
+	return stderr.Bytes(), errors.Is(ctx.Err(), context.DeadlineExceeded)
+}
 
-	exePath = firstSubmatch(executableRe, stderr.Bytes())
-	teamID = firstSubmatch(teamIDRe, stderr.Bytes())
-	signingID = firstSubmatch(signingIDRe, stderr.Bytes())
+// codesignOutputWithRetry runs the lookup and, when it times out (an Endpoint
+// Security client scanning the exec, or a loaded host), runs it once more. A
+// second timeout leaves the identity empty, so the peer is still refused.
+func codesignOutputWithRetry(pid int32) ([]byte, bool) {
+	output, timedOut := runCodesign(pid)
+	if !timedOut {
+		return output, false
+	}
+	return runCodesign(pid)
+}
+
+// parseCodesignIdentity extracts the identity fields from codesign metadata.
+func parseCodesignIdentity(output []byte) (teamID, signingID, bundleID, exePath string) {
+	exePath = firstSubmatch(executableRe, output)
+	teamID = firstSubmatch(teamIDRe, output)
+	signingID = firstSubmatch(signingIDRe, output)
 
 	// codesign emits "TeamIdentifier=not set" for unsigned or
 	// ad-hoc-signed binaries. Collapse that to empty so the
@@ -124,7 +149,7 @@ func readCodesignForPID(pid int32) (teamID, signingID, bundleID, exePath string,
 	if exePath != "" {
 		bundleID = bundleIDFromExecutable(exePath)
 	}
-	return teamID, signingID, bundleID, exePath, nil
+	return teamID, signingID, bundleID, exePath
 }
 
 // bundleIDFromExecutable walks exePath upward looking for a `.app`

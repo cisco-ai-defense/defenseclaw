@@ -4,6 +4,7 @@
 package useridentity
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -59,10 +60,19 @@ func TestResolveWindowsDirectoryFacts(t *testing.T) {
 		entra.Source != SourceWindowsIdentityStore || entra.Assurance != AssuranceVerified || entra.AccountDomain != "AzureAD" {
 		t.Fatalf("entra facts = %+v", entra)
 	}
-	hybrid := resolveWindowsDirectoryFacts(reader, adSID, func(string, string) string { return "ignored@corp.example.com" }, now)
+	// A hybrid user's UPN is the domain controller's answer only; until it
+	// answers the account has its own principal and no UPN (identity-round
+	// GAP-1238), and the device's tenant.
+	hybrid := resolveWindowsDirectoryFacts(reader, adSID, func(string, string) string { return "" }, now)
 	if hybrid.Directory != DirectoryActiveDirectory || hybrid.Domain != "corp.example.com" || hybrid.Realm != "CORP.EXAMPLE.COM" ||
-		hybrid.Principal != "bob@corp.example.com" || hybrid.TenantID != tenant || hybrid.AccountDomain != "CORP" {
-		t.Fatalf("hybrid AD facts = %+v", hybrid)
+		hybrid.UPN != "" || hybrid.Principal != "bob@corp.example.com" || hybrid.TenantID != tenant || hybrid.AccountDomain != "CORP" ||
+		hybrid.Source != SourceWindowsLSA {
+		t.Fatalf("hybrid AD facts before the directory answers = %+v", hybrid)
+	}
+	renamed := resolveWindowsDirectoryFacts(reader, adSID, func(string, string) string { return "Robert@corp.example.com" }, now)
+	if renamed.UPN != "robert@corp.example.com" || renamed.Principal != "robert@corp.example.com" || renamed.TenantID != tenant ||
+		renamed.Source != SourceWindowsLSA {
+		t.Fatalf("hybrid AD facts with the directory answer = %+v; want the TranslateNameW UPN over the identity store one", renamed)
 	}
 	// The identity store may retain a cloud sign-in for a hybrid AD SID
 	// while the AD name lookup is temporarily unavailable. It cannot by
@@ -105,6 +115,47 @@ func TestResolveWindowsDirectoryFacts(t *testing.T) {
 	unresolved := resolveWindowsDirectoryFacts(reader, literalSID, nil, now)
 	if unresolved.UPN != "" || unresolved.Principal != "" {
 		t.Fatalf("untranslated @ account facts = %+v", unresolved)
+	}
+}
+
+// identity-round GAP-1238, the shape of the failed managed Windows cell: an
+// AD account whose identity store entry (ProviderName AzureAD) still holds
+// the cloud UPN from before a rename of its AD UPN. The identity store UPN
+// is never the account's: with no TranslateNameW answer (the managed
+// gateway's write-restricted service token gets none) the account has no UPN
+// and its own principal; with one, the domain controller's UPN.
+func TestWindowsADAccountNeverTakesTheIdentityStoreUPN(t *testing.T) {
+	const sid = "S-1-5-21-602989718-809138714-1982218064-4116"
+	key := identityStoreCacheKey + `\` + sid + `\IdentityCache\` + sid
+	reader := fakeWindowsReader{
+		values: map[string]string{
+			key + "|UserName":     "old.eng1@olddomain.test",
+			key + "|ProviderName": "AzureAD",
+		},
+		accounts: map[string][2]string{sid: {"dcad-r102-eng1", "DCLAB"}},
+		computer: "WS01", adDomain: "DCLAB", adDNSName: "dclab.test",
+	}
+	now := time.Unix(1_800_000_000, 0)
+	for _, tc := range []struct {
+		name, answer, wantUPN, wantPrincipal string
+	}{
+		{"no directory answer", "", "", "dcad-r102-eng1@dclab.test"},
+		{"the current AD UPN", "dcad-r102-eng1@dclab.test", "dcad-r102-eng1@dclab.test", "dcad-r102-eng1@dclab.test"},
+		{"a renamed AD UPN", "New.Eng1@dclab.test", "new.eng1@dclab.test", "new.eng1@dclab.test"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			facts := resolveWindowsDirectoryFacts(reader, sid, func(_, sam string) string {
+				if sam != `DCLAB\dcad-r102-eng1` {
+					t.Fatalf("translated name = %q", sam)
+				}
+				return tc.answer
+			}, now)
+			if facts.UPN != tc.wantUPN || facts.Principal != tc.wantPrincipal || facts.Source != SourceWindowsLSA ||
+				facts.Directory != DirectoryActiveDirectory || facts.Domain != "dclab.test" {
+				t.Fatalf("facts = %+v; want UPN %q and principal %q from the LSA, never the identity store's old.eng1@olddomain.test",
+					facts, tc.wantUPN, tc.wantPrincipal)
+			}
+		})
 	}
 }
 
@@ -168,6 +219,35 @@ func TestADUPNCacheRetranslatesBeforeDirectoryRefresh(t *testing.T) {
 	now = now.Add(15 * time.Minute)
 	if got := cache.lookup(sid, sam, time.Second); got != upn || calls != 2 {
 		t.Fatalf("UPN after directory refresh = %q after %d translations; want %q after 2", got, calls, upn)
+	}
+}
+
+// `enterprise identity refresh` expires an identity's cached UPN, so the
+// next lookup translates again inside adUPNTTL and takes a renamed UPN
+// (identity-round GAP-1238); other identities keep theirs.
+func TestADUPNCacheExpireRetranslatesOneIdentity(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	upn := "old@corp.example.com"
+	calls := 0
+	cache := newADUPNCache(func(string) string { calls++; return upn })
+	cache.now = func() time.Time { return now }
+	const sid, other = "S-1-5-21-1-2-3-1105", "S-1-5-21-1-2-3-1106"
+	const sam = `CORP\alice`
+	if got := cache.lookup(sid, sam, time.Second); got != upn {
+		t.Fatalf("initial UPN = %q", got)
+	}
+	cache.lookup(other, `CORP\bob`, time.Second)
+	upn = "new@corp.example.com"
+	now = now.Add(time.Minute)
+	if got := cache.lookup(sid, sam, time.Second); got != "old@corp.example.com" || calls != 2 {
+		t.Fatalf("UPN inside its lifetime = %q after %d translations; want the cached old one", got, calls)
+	}
+	cache.expire(strings.ToLower(sid))
+	if got := cache.lookup(sid, sam, time.Second); got != upn || calls != 3 {
+		t.Fatalf("UPN after expire = %q after %d translations; want %q after 3", got, calls, upn)
+	}
+	if got := cache.lookup(other, `CORP\bob`, time.Second); got != "old@corp.example.com" || calls != 3 {
+		t.Fatalf("another identity after expire = %q after %d translations; want its cached answer", got, calls)
 	}
 }
 

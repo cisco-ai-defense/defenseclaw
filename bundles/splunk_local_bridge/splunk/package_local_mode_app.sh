@@ -29,7 +29,14 @@ if [[ ! -d "${APP_SOURCE_DIR}" ]]; then
   exit 1
 fi
 
+if [[ -L "${BUILD_DIR}" || -L "${PACKAGE_PATH}" ]]; then
+  echo "Refusing a linked Splunk app output; remove the link and run defenseclaw setup splunk --logs again" >&2
+  exit 1
+fi
 mkdir -p "${BUILD_DIR}"
+# Only this public app directory and archive are mounted into Splunk. Keep
+# credentials private while making these assets readable under umask 077.
+chmod 755 "${BUILD_DIR}"
 rm -f "${PACKAGE_PATH}"
 
 if tar --version 2>/dev/null | grep -q 'GNU tar'; then
@@ -55,4 +62,5 @@ else
     "${APP_NAME}"
 fi
 
+chmod 644 "${PACKAGE_PATH}"
 echo "${PACKAGE_PATH}"

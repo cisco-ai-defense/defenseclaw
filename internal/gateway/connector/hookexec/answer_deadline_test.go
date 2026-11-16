@@ -1,0 +1,515 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package hookexec
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func shortAnswerBudget(t *testing.T, budget time.Duration) {
+	t.Helper()
+	previous := hookAnswerBudget
+	previousCodex := perUserCodexAnswerBudget
+	previousManagedCap := managedAnswerDeadlineCap
+	hookAnswerBudget = budget
+	perUserCodexAnswerBudget = budget
+	managedAnswerDeadlineCap = budget
+	t.Cleanup(func() {
+		hookAnswerBudget = previous
+		perUserCodexAnswerBudget = previousCodex
+		managedAnswerDeadlineCap = previousManagedCap
+	})
+}
+
+// A per-user Codex tool call can receive a gateway answer in the last half
+// second of the local answer window, within its registered host timeout.
+func TestCertfixGAP0485PerUserCodexAnswerWindow(t *testing.T) {
+	started := time.Now()
+	for _, row := range []struct {
+		name string
+		opts Options
+		want time.Duration
+	}{
+		{"per-user Codex", Options{Connector: "codex", Event: "PreToolUse"}, 4 * time.Second},
+		{"managed Codex", Options{Connector: "codex", Event: "PreToolUse", ManagedEnterprise: true}, 4 * time.Second},
+		{"per-user Claude Code", Options{Connector: "claudecode", Event: "PreToolUse"}, 3500 * time.Millisecond},
+		{"Secure Client", Options{Connector: "codex", Event: "PreToolUse", SecureClient: true}, 0},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			deadline := answerDeadline(row.opts, started)
+			if row.want == 0 {
+				if !deadline.IsZero() {
+					t.Fatalf("deadline = %s, want none", deadline)
+				}
+				return
+			}
+			if got := deadline.Sub(started); got != row.want {
+				t.Fatalf("answer window = %s, want %s", got, row.want)
+			}
+		})
+	}
+}
+
+// A healthy answer just after the previous 3.5 s cutoff must reach a
+// per-user Codex tool call. The gateway is real loopback HTTP; its decision
+// is delayed to model a loaded host, not replaced by a deadline stub.
+func TestCertfixGAP0485LatePerUserCodexAllow(t *testing.T) {
+	addr := gatewayAt(t, func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(3600 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"action":"allow"}`))
+	})
+	result, elapsed := runAgainstGateway(t, "codex", addr, func(opts *Options) {
+		opts.FailMode = "closed"
+		opts.Event = "PreToolUse"
+		opts.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"apply_patch","tool_input":{"patch":"*** Begin Patch\n*** Add File: project/notes.txt\n+ok\n*** End Patch"}}`)
+	})
+	if blocked(result) || result.code != 0 {
+		t.Fatalf("after %s code=%d stdout=%q stderr=%q, want the gateway allow", elapsed, result.code, result.stdout, result.stderr)
+	}
+}
+
+func TestManagedGatewayContactGetsAnswerBudgetWithinProcessCap(t *testing.T) {
+	started := time.Now()
+	managed := Options{Connector: "claudecode", Event: "PreToolUse", ManagedEnterprise: true}
+	for _, tc := range []struct {
+		contact time.Time
+		want    time.Time
+	}{
+		{started.Add(200 * time.Millisecond), started.Add(200*time.Millisecond + hookAnswerBudget)},
+		{started.Add(2100 * time.Millisecond), started.Add(managedAnswerDeadlineCap)},
+	} {
+		if got := gatewayAnswerDeadline(managed, started, tc.contact); !got.Equal(tc.want) {
+			t.Fatalf("contact %s: deadline %s, want %s", tc.contact.Sub(started), got.Sub(started), tc.want.Sub(started))
+		}
+	}
+	managed.SecureClient = true
+	if got := gatewayAnswerDeadline(managed, started, started); !got.IsZero() {
+		t.Fatalf("Secure Client deadline = %s, want unchanged zero", got)
+	}
+	managed.ManagedEnterprise, managed.SecureClient = false, false
+	if got := gatewayAnswerDeadline(managed, started, started.Add(time.Second)); !got.Equal(started.Add(hookAnswerBudget)) {
+		t.Fatalf("per-user deadline = %s, want invocation-based %s", got.Sub(started), hookAnswerBudget)
+	}
+}
+
+// gatewayAt serves every hook call with handle on a real loopback listener,
+// so informational responses travel as they do in production.
+func gatewayAt(t *testing.T, handle http.HandlerFunc) string {
+	t.Helper()
+	server := httptest.NewServer(handle)
+	t.Cleanup(server.Close)
+	return server.Listener.Addr().String()
+}
+
+// hungGateway accepts every call and never answers it while the test runs.
+func hungGateway(t *testing.T) string {
+	t.Helper()
+	release := make(chan struct{})
+	addr := gatewayAt(t, func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	})
+	// Cleanups run last in, first out: the handlers return before the
+	// server closes.
+	t.Cleanup(func() { close(release) })
+	return addr
+}
+
+func runAgainstGateway(t *testing.T, connector, addr string, mutate func(*Options)) (runResult, time.Duration) {
+	t.Helper()
+	started := time.Now()
+	result := run(t, connector, nil, func(opts *Options) {
+		opts.APIAddr = addr
+		opts.HTTPClient = &http.Client{}
+		opts.StartedAt = started
+		if mutate != nil {
+			mutate(opts)
+		}
+	})
+	return result, time.Since(started)
+}
+
+func blocked(result runResult) bool {
+	return result.code != 0 || strings.Contains(result.stdout, "deny") || strings.Contains(result.stdout, `"block"`)
+}
+
+// GAP-0155, GAP-0167, GAP-0139, GAP-0160: a managed gateway that accepted a
+// tool call but gives no decision (it is stopping, starting, repairing or
+// too busy) holds the call no longer than the answer budget, and the call is
+// blocked then, whatever the hook's fail mode: never allowed.
+func TestManagedToolCallFailsClosedWhenTheGatewayDoesNotAnswerInTime(t *testing.T) {
+	shortAnswerBudget(t, 300*time.Millisecond)
+	shortAnswerFloor(t)
+	for _, event := range []string{"PreToolUse", "PermissionRequest", "PostToolUse", "UserPromptSubmit"} {
+		for _, open := range []bool{false, true} {
+			if open && toolGateEvent("codex", event) {
+				continue // Existing tool-gate outage policy is tested separately.
+			}
+			t.Run(event+"/open="+strconv.FormatBool(open), func(t *testing.T) {
+				home := t.TempDir()
+				result, elapsed := runAgainstGateway(t, "codex", hungGateway(t), func(opts *Options) {
+					managedWindowsStandalone(opts)
+					opts.FailureLogHome = userLogHome(home)
+					opts.Event = event
+					if open {
+						opts.FailMode = "open"
+					}
+					opts.Stdin = strings.NewReader(`{"hook_event_name":"` + event + `","tool_name":"shell","prompt":"echo ok"}`)
+					// Keep the regression fast even when the answer budget is missing.
+					opts.HTTPClient.Timeout = 1200 * time.Millisecond
+				})
+				if elapsed > time.Second || !blocked(result) {
+					t.Errorf("after %s code=%d stdout=%q stderr=%q, want a bounded block", elapsed, result.code, result.stdout, result.stderr)
+				}
+				entry := lastHookFailure(t, home)
+				if entry["reason"] != managedGatewayNoAnswerReason || entry["hook"] != "codex-hook" ||
+					entry["category"] != "transport" || entry["fail_mode"] != "closed" || entry["outcome"] != "fail_closed" {
+					t.Errorf("failure = %v, want the event's managed no-answer refusal", entry)
+				}
+				data, err := os.ReadFile(filepath.Join(home, "logs", "hook-failures.jsonl"))
+				if err != nil || strings.Count(string(data), "\n") != 1 {
+					t.Fatalf("failure log = %q, err=%v, want exactly one row", data, err)
+				}
+			})
+		}
+	}
+}
+
+// A decision that comes after the budget is not used: the gateway's late
+// allow does not turn into an allow of the tool call.
+func TestALateAllowIsNotTakenAfterTheAnswerBudget(t *testing.T) {
+	shortAnswerBudget(t, 300*time.Millisecond)
+	addr := gatewayAt(t, func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(700 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"action":"allow"}`))
+	})
+	result, elapsed := runAgainstGateway(t, "codex", addr, managedCodex)
+	if elapsed > 650*time.Millisecond {
+		t.Fatalf("the call waited %s, want it ended at the 300ms budget", elapsed)
+	}
+	if !blocked(result) {
+		t.Fatalf("a late allow was taken: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
+	}
+}
+
+// A gateway that waits on a remote scanner (the LLM judge, Cisco AI
+// Defense) reports it with 102 Processing, and the call waits past the
+// answer budget for the scanner's answer, up to the progress ceiling
+// (TestProgressReportWaitsNoLongerThanTheCeiling).
+func TestToolCallKeepsItsBudgetWhileTheGatewayWaitsOnARemoteScanner(t *testing.T) {
+	shortAnswerBudget(t, 300*time.Millisecond)
+	var asked atomic.Bool
+	addr := gatewayAt(t, func(w http.ResponseWriter, r *http.Request) {
+		asked.Store(r.Header.Get(HookProgressHeader) == "1")
+		w.WriteHeader(HookProgressStatus)
+		time.Sleep(700 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"action":"block","reason":"judge rule"}`))
+	})
+	result, _ := runAgainstGateway(t, "codex", addr, managedCodex)
+	if !asked.Load() {
+		t.Fatal("the hook did not ask for progress reports")
+	}
+	if !strings.Contains(result.stdout+result.stderr, "judge rule") {
+		t.Fatalf("stdout=%q stderr=%q, want the scanner's decision after the budget", result.stdout, result.stderr)
+	}
+	allowed := gatewayAt(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(HookProgressStatus)
+		time.Sleep(700 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"action":"allow"}`))
+	})
+	result, _ = runAgainstGateway(t, "codex", allowed, managedCodex)
+	if result.code != 0 || strings.Contains(result.stdout, "deny") {
+		t.Fatalf("code=%d stdout=%q stderr=%q, want the scanner's allow", result.code, result.stdout, result.stderr)
+	}
+}
+
+// A gateway that gives no decision leaves a tool call closed in either mode.
+func TestPerUserToolCallWithoutGatewayDecisionStaysClosed(t *testing.T) {
+	shortAnswerBudget(t, 300*time.Millisecond)
+	closed, elapsed := runAgainstGateway(t, "codex", hungGateway(t), func(opts *Options) { opts.FailMode = "closed" })
+	if elapsed > time.Second || !blocked(closed) || !strings.Contains(closed.stderr, "did not answer in time") {
+		t.Fatalf("closed: after %s code=%d stdout=%q stderr=%q, want a block naming the slow gateway",
+			elapsed, closed.code, closed.stdout, closed.stderr)
+	}
+	open, elapsed := runAgainstGateway(t, "claudecode", hungGateway(t), func(opts *Options) { opts.FailMode = "open" })
+	if elapsed > time.Second || !blocked(open) || !strings.Contains(open.stderr, "did not answer in time") {
+		t.Fatalf("open: after %s code=%d stdout=%q stderr=%q, want a bounded closed answer", elapsed, open.code, open.stdout, open.stderr)
+	}
+}
+
+// A native hook without an installed outage-mode resolver closes a no-status
+// deadline even when its general fail mode is open.
+func TestPerUserNoAnswerWithoutModeResolverFailsClosed(t *testing.T) {
+	shortAnswerBudget(t, 300*time.Millisecond)
+	for _, mode := range []string{"open", "closed"} {
+		result, _ := runAgainstGateway(t, "claudecode", hungGateway(t), func(opts *Options) { opts.FailMode = mode })
+		if !blocked(result) || !strings.Contains(result.stderr, "(fail mode closed): this account's gateway did not answer in time") ||
+			!strings.Contains(result.stdout, "fail mode closed") {
+			t.Fatalf("fail mode %s: code=%d stdout=%q stderr=%q, want a block using the closed mode",
+				mode, result.code, result.stdout, result.stderr)
+		}
+	}
+	down := run(t, "claudecode", &stubRT{err: errors.New("connection refused")}, func(opts *Options) {
+		opts.FailMode = "closed"
+		opts.GatewayRecovery = func(context.Context, error) error { return errors.New("hook cold start skipped") }
+	})
+	if !blocked(down) || !strings.Contains(down.stderr, "(fail mode closed): ") {
+		t.Fatalf("outage: code=%d stdout=%q stderr=%q, want the fail mode closed line", down.code, down.stdout, down.stderr)
+	}
+}
+
+// Prompts, session and stop events, and Secure Client hooks, keep their
+// whole budget and send no progress request.
+func TestOnlyToolCallsOfNativeHooksHaveTheAnswerBudget(t *testing.T) {
+	shortAnswerBudget(t, 200*time.Millisecond)
+	slowAllow := func(asked *atomic.Bool) string {
+		return gatewayAt(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get(HookProgressHeader) != "" {
+				asked.Store(true)
+			}
+			time.Sleep(500 * time.Millisecond)
+			_, _ = w.Write([]byte(`{"action":"allow"}`))
+		})
+	}
+	for _, test := range []struct {
+		name      string
+		connector string
+		mutate    func(*Options)
+	}{
+		{"a prompt", "claudecode", func(opts *Options) { opts.Event = "UserPromptSubmit"; opts.FailMode = "closed" }},
+		{"a stop event", "claudecode", func(opts *Options) { opts.Event = "Stop"; opts.FailMode = "closed" }},
+		{"Secure Client", "codex", func(opts *Options) { managedCodex(opts); opts.SecureClient = true }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var asked atomic.Bool
+			result, _ := runAgainstGateway(t, test.connector, slowAllow(&asked), test.mutate)
+			if result.code != 0 || strings.Contains(result.stdout, "deny") {
+				t.Fatalf("code=%d stdout=%q stderr=%q, want the slow allow", result.code, result.stdout, result.stderr)
+			}
+			if asked.Load() {
+				t.Fatal("the hook asked for progress reports")
+			}
+		})
+	}
+}
+
+// A gateway that answers 429 (too busy) is sent the call again only while
+// a resend can still be answered within the budget (GAP-0205 kept within
+// GAP-0155): the call is blocked within the budget, not after four resends.
+func TestBusyResendsEndWithinTheAnswerBudget(t *testing.T) {
+	shortAnswerBudget(t, 1500*time.Millisecond)
+	var calls atomic.Int32
+	addr := gatewayAt(t, func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+	result, elapsed := runAgainstGateway(t, "codex", addr, managedCodex)
+	if elapsed > 2*time.Second {
+		t.Fatalf("busy resends took %s, want them ended within the 1.5s budget", elapsed)
+	}
+	if got := calls.Load(); got < 1 || got > 2 {
+		t.Fatalf("the gateway saw %d calls, want the resends that fit the budget (1 or 2)", got)
+	}
+	if !blocked(result) || !strings.Contains(result.stdout+result.stderr, managedGatewayNoAnswerReason) {
+		t.Fatalf("code=%d stdout=%q stderr=%q, want a block naming the slow gateway", result.code, result.stdout, result.stderr)
+	}
+}
+
+// GAP-0050: a busy gateway never denies a tool call before the answer
+// budget ends (owner ruling: in action or closed mode a deny only after the
+// full hook budget). A 429 for the account's own budget is sent again soon,
+// so a call whose account slot frees within the budget is answered; a full
+// gateway keeps its Retry-After, and a resend that no longer fits waits for
+// the budget to end before the call is denied.
+func TestBusyGatewayNeverDeniesBeforeTheAnswerBudget(t *testing.T) {
+	const budget = 2200 * time.Millisecond
+	busy := func(w http.ResponseWriter, reason string) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":"rate_limited","reason":"` + reason + `"}`))
+	}
+	t.Run("the account slot frees inside the budget", func(t *testing.T) {
+		shortAnswerBudget(t, budget)
+		started := time.Now()
+		var calls atomic.Int32
+		addr := gatewayAt(t, func(w http.ResponseWriter, _ *http.Request) {
+			calls.Add(1)
+			// Free after 1.4 s: a resend after the whole second of
+			// Retry-After comes before, and the next one would not fit.
+			if time.Since(started) < 1400*time.Millisecond {
+				busy(w, "enterprise_managed_rate_limited")
+				return
+			}
+			_, _ = w.Write([]byte(`{"action":"allow"}`))
+		})
+		result, elapsed := runAgainstGateway(t, "claudecode", addr, managedCodex)
+		if blocked(result) {
+			t.Fatalf("after %s and %d calls: code=%d stdout=%q stderr=%q, want the allow once the account slot freed",
+				elapsed, calls.Load(), result.code, result.stdout, result.stderr)
+		}
+	})
+	for _, reason := range []string{"enterprise_managed_rate_limited", "enterprise_managed_overloaded"} {
+		t.Run("always busy "+reason, func(t *testing.T) {
+			shortAnswerBudget(t, budget)
+			var calls atomic.Int32
+			addr := gatewayAt(t, func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				busy(w, reason)
+			})
+			result, elapsed := runAgainstGateway(t, "claudecode", addr, managedCodex)
+			if !blocked(result) || !strings.Contains(result.stdout+result.stderr, managedGatewayNoAnswerReason) {
+				t.Fatalf("code=%d stdout=%q stderr=%q, want a block naming the slow gateway", result.code, result.stdout, result.stderr)
+			}
+			if elapsed < budget-50*time.Millisecond || elapsed > budget+500*time.Millisecond {
+				t.Fatalf("the busy call was denied after %s, want at the end of the %s budget", elapsed, budget)
+			}
+			if reason == "enterprise_managed_overloaded" && calls.Load() > 2 {
+				t.Fatalf("a full gateway saw %d calls, want its Retry-After kept (at most 2)", calls.Load())
+			}
+		})
+	}
+}
+
+func TestToolGateEvents(t *testing.T) {
+	for _, test := range []struct {
+		connector, event string
+		want             bool
+	}{
+		{"claudecode", "PreToolUse", true},
+		{"claudecode", "PermissionRequest", true},
+		{"claudecode", "UserPromptSubmit", false},
+		{"claudecode", "Stop", false},
+		{"codex", "PreToolUse", true},
+		{"codex", "SessionStart", false},
+		{"copilot", "preToolUse", true},
+		{"copilot", "userPromptSubmitted", false},
+		{"cursor", "beforeShellExecution", true},
+		{"cursor", "beforeSubmitPrompt", false},
+		{"hermes", "pre_tool_call", true},
+		{"opencode", "tool.execute.before", true},
+		{"amp", "tool.call", true},
+		{"unknown", "PreToolUse", false},
+	} {
+		if got := toolGateEvent(test.connector, test.event); got != test.want {
+			t.Errorf("toolGateEvent(%q, %q) = %v, want %v", test.connector, test.event, got, test.want)
+		}
+	}
+}
+
+// The hook's budgets count from the process's creation, which comes before
+// this package's initialization.
+func TestProcessStartTimeIsTheCreationOfTheProcess(t *testing.T) {
+	now := time.Now()
+	started, ok := processStartTime(now)
+	if !ok {
+		if processStartTimeKnown {
+			t.Fatal("the system did not report the process start")
+		}
+		return
+	}
+	if started.After(hookProcessInit.Add(20 * time.Millisecond)) {
+		t.Fatalf("process start %s is after the package init %s", started, hookProcessInit)
+	}
+	if hookProcessInit.Sub(started) > 30*time.Second {
+		t.Fatalf("process start %s is %s before the package init", started, hookProcessInit.Sub(started))
+	}
+	if got := ProcessStartTime(); got.After(time.Now()) {
+		t.Fatalf("ProcessStartTime() = %s is in the future", got)
+	}
+}
+
+// GAP-0527: a managed Codex Stop hook has no answer budget, so a stalled
+// gateway ends it at the client timeout. Stop still may not block, and its
+// row names the event and the stall, not an unreachable gateway.
+func TestManagedCodexStopDuringAGatewayStallNamesTheEventAndTheStall(t *testing.T) {
+	for _, failMode := range []string{"closed", "open"} {
+		t.Run(failMode, func(t *testing.T) {
+			logHome := filepath.Join(t.TempDir(), ".defenseclaw")
+			// A managed hook writes its row only into an existing account
+			// folder; it never creates one (GAP-0593).
+			if err := os.MkdirAll(logHome, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			result, _ := runAgainstGateway(t, "codex", hungGateway(t), func(opts *Options) {
+				managedCodex(opts)
+				opts.ManagedStandalone = true
+				opts.ManagedUnixSocket = "/not-used-by-the-test-client/hook.sock"
+				opts.FailMode = failMode
+				opts.FailureLogHome = func() string { return logHome }
+				opts.HTTPClient = &http.Client{Timeout: 200 * time.Millisecond}
+				opts.Event = "Stop"
+				opts.Stdin = strings.NewReader(`{"hook_event_name":"Stop"}`)
+			})
+			if blocked(result) {
+				t.Fatalf("code=%d stdout=%q stderr=%q, want the neutral Stop allow", result.code, result.stdout, result.stderr)
+			}
+			data, err := os.ReadFile(filepath.Join(logHome, "logs", "hook-failures.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var row map[string]any
+			if err := json.Unmarshal(bytes.TrimSpace(data), &row); err != nil {
+				t.Fatalf("row %q: %v", data, err)
+			}
+			if row["event"] != "Stop" || row["reason"] != managedGatewayNoAnswerReason {
+				t.Fatalf("row %v, want event Stop and reason %s", row, managedGatewayNoAnswerReason)
+			}
+		})
+	}
+}
+
+// rel-1-0-3 GAP-0319: a managed Windows tool call whose answer budget ends
+// while the gateway service is proven stopped says the service is not
+// running, with its code, like every other call of the outage; a running
+// service that gives no answer keeps the no-answer reason. Both deny.
+func TestManagedNoAnswerOnAStoppedServiceSaysItIsNotRunning(t *testing.T) {
+	shortAnswerBudget(t, 300*time.Millisecond)
+	shortAnswerFloor(t)
+	for _, stopped := range []bool{true, false} {
+		t.Run("stopped="+strconv.FormatBool(stopped), func(t *testing.T) {
+			previous := managedGatewayServiceStopped
+			managedGatewayServiceStopped = func(name string) bool { return stopped && name == "DefenseClawGateway" }
+			t.Cleanup(func() { managedGatewayServiceStopped = previous })
+			home := t.TempDir()
+			result, _ := runAgainstGateway(t, "codex", hungGateway(t), func(opts *Options) {
+				managedWindowsStandalone(opts)
+				opts.ManagedGatewayServiceName = "DefenseClawGateway"
+				opts.FailureLogHome = userLogHome(home)
+				opts.Event = "PreToolUse"
+				opts.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"shell","prompt":"echo ok"}`)
+				opts.HTTPClient.Timeout = 1200 * time.Millisecond
+			})
+			want := managedGatewayNoAnswerReason
+			if stopped {
+				want = managedGatewayNotRunningReason
+			}
+			if !blocked(result) || !strings.Contains(result.stdout+result.stderr, want) {
+				t.Errorf("code=%d stdout=%q stderr=%q, want a block naming %s", result.code, result.stdout, result.stderr, want)
+			}
+			if stopped && !strings.Contains(result.stdout+result.stderr, "service is not running") {
+				t.Errorf("stdout=%q stderr=%q, want the not-running text", result.stdout, result.stderr)
+			}
+			entry := lastHookFailure(t, home)
+			if entry["reason"] != want || entry["fail_mode"] != "closed" || entry["outcome"] != "fail_closed" {
+				t.Errorf("failure = %v, want %s, closed", entry, want)
+			}
+		})
+	}
+}

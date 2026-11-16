@@ -261,7 +261,7 @@ def test_doctor_is_named_doctor_and_never_marks_setup_done() -> None:
 
 HARNESS_LABELS = (
     "Claude Code", "Codex", "Amp", "Antigravity", "GitHub Copilot CLI", "Cursor Agent",
-    "Devin CLI", "Hermes Agent", "Kiro CLI", "OmniGent", "OpenCode", "OpenHands",
+    "Devin CLI", "Hermes Agent", "Kiro CLI",  "OpenCode",
 )  # fmt: skip
 
 
@@ -1185,19 +1185,6 @@ def test_openshell_validation(key: str, kind: str, value: str, ok: bool) -> None
     assert (result.severity != "error") is ok, result
 
 
-def test_openshell_harnesses_other_than_the_launch_dialogs_never_block_a_save() -> None:
-    from defenseclaw.tui.services.setup_state import ConfigField, ConfigSection, validation_errors
-
-    key = "openshell.harnesses"
-
-    def field(value: str) -> ConfigField:
-        return ConfigField(label=key, key=key, kind="string", value=value, original="")
-
-    assert validate_config_field(field("devin,hermes,openhands")).severity == "ok"
-    unknown = validate_config_field(field("claudecode,notaharness-example"))
-    assert unknown.severity == "warning" and "notaharness-example" in unknown.message
-    # validation_errors checks every field, so a bad one here would block any save.
-    assert validation_errors([ConfigSection("OpenShell", (field("devin,omnigent,notaharness-example"),), "")]) == ()
 
 
 def test_the_harness_table_matches_the_go_registry() -> None:

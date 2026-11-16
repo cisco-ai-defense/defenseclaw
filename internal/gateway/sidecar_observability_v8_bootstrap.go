@@ -22,13 +22,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinations"
@@ -143,10 +143,17 @@ func (s *Sidecar) BootstrapObservabilityRuntime(
 	if alreadyBound {
 		return false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapBinding, nil)
 	}
-	s.bootConfigSourceName, s.bootConfigSource = sourceName, raw
+	// Keep the exact on-disk bytes for startup reconciliation. The CLI may
+	// boot from an unmigrated v8 file; the config watcher reads that same
+	// file, while the runtime must compile its in-memory v9 normalization.
+	normalized, _, err := normalizeRuntimeConfigSource(sourceName, raw)
+	if err != nil {
+		return false, err
+	}
+	s.bootConfigSourceName, s.bootConfigSource = sourceName, append([]byte(nil), raw...)
 	compiled, err := config.ParseCompileObservabilityV8(
 		sourceName,
-		raw,
+		normalized,
 		config.ObservabilityV8CompileOptions{DefaultDataDir: cfg.DataDir},
 	)
 	if err != nil || compiled == nil || compiled.Plan == nil {
@@ -291,7 +298,7 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 	})
 	failureBuilder, err := observability.NewRecordBuilder(
 		observability.ClockFunc(func() time.Time { return time.Now().UTC() }),
-		observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+		observability.TimeOrderedOccurrenceIDs,
 	)
 	if err != nil {
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRuntime, err)
@@ -302,9 +309,19 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 	if err != nil {
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRuntime, err)
 	}
-	retention, err := observabilityruntime.NewRetentionController(
-		reaper, observabilityruntime.RetentionControllerOptions{Reporter: sidecarV8RetentionObserver{s: s}, SecureClient: s.currentConfig().SecureClientIntegration()},
-	)
+	// The size cap is known from the start, as the age is, so a cap with
+	// retention_days 0 also waits the startup delay.
+	if err := reaper.UpdateMaxStoreMB(int64(snapshot.Local.MaxStoreMB)); err != nil {
+		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRuntime, err)
+	}
+	retentionOptions := observabilityruntime.RetentionControllerOptions{
+		Reporter: sidecarV8RetentionObserver{s: s}, SecureClient: s.currentConfig().SecureClientIntegration(),
+		Log: os.Stderr,
+	}
+	if !retentionOptions.SecureClient {
+		retentionOptions.StartupDelay = observabilityruntime.RetentionStartupDelay
+	}
+	retention, err := observabilityruntime.NewRetentionController(reaper, retentionOptions)
 	if err != nil {
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRuntime, err)
 	}
@@ -312,9 +329,10 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		s.observeObservabilityV8Delivery(transition)
 	})
 	destinationFactory, err := destinations.NewFactory(destinations.Options{
-		SecureClient:  s.currentConfig().SecureClientIntegration(),
-		ConsoleStream: destinations.ConsoleStderr,
-		Stdout:        os.Stdout, Stderr: os.Stderr,
+		SecureClient:   s.currentConfig().SecureClientIntegration(),
+		ManagedService: managed.IsManagedEnterprise(s.currentConfig().DeploymentMode),
+		ConsoleStream:  destinations.ConsoleStderr,
+		Stdout:         os.Stdout, Stderr: os.Stderr,
 		Secrets:  sidecarObservabilityV8SecretResolver{credentialsDir: s.currentConfig().ObservabilityCredentialsDir()},
 		CALoader: destinations.CAFileLoaderFunc(sidecarLoadObservabilityV8CA),
 		// Exporters check each destination, then connect through the
@@ -558,18 +576,7 @@ func (owner *sidecarOwnedObservabilityV8Runtime) EmitRuntimeV8LogBatch(
 		len(operations) > observabilityruntime.MaxLogBatchItems {
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapInvalid, nil)
 	}
-	items := make([]observabilityruntime.LogBatchItem, len(operations))
-	for index := range operations {
-		operation := operations[index]
-		items[index] = observabilityruntime.LogBatchItem{
-			Context: operation.Context(), Metadata: operation.Metadata(),
-			Builder: func(snapshot observabilityruntime.EmitContext, admission router.Admission) (observability.Record, error) {
-				return operation.Build(audit.RuntimeV8BuildContext{
-					ConfigGeneration: snapshot.Generation(), ConfigDigest: snapshot.Digest(),
-				}, admission)
-			},
-		}
-	}
+	items := runtimeV8LogItems(operations)
 	owner.lifecycleMu.RLock()
 	defer owner.lifecycleMu.RUnlock()
 	if owner.closed {
@@ -583,6 +590,45 @@ func (owner *sidecarOwnedObservabilityV8Runtime) EmitRuntimeV8LogBatch(
 		}
 	}
 	return converted, err
+}
+
+func (owner *sidecarOwnedObservabilityV8Runtime) EmitRuntimeV8AtomicLogBatch(
+	ctx context.Context,
+	operations []audit.RuntimeV8LogOperation,
+) ([]audit.RuntimeV8EmitOutcome, error) {
+	if owner == nil || owner.runtime == nil || ctx == nil || len(operations) == 0 ||
+		len(operations) > observabilityruntime.MaxLogBatchItems {
+		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapInvalid, nil)
+	}
+	owner.lifecycleMu.RLock()
+	defer owner.lifecycleMu.RUnlock()
+	if owner.closed {
+		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapClose, nil)
+	}
+	outcomes, err := owner.runtime.EmitAtomicBatch(ctx, runtimeV8LogItems(operations))
+	converted := make([]audit.RuntimeV8EmitOutcome, len(outcomes))
+	for index := range outcomes {
+		converted[index] = audit.RuntimeV8EmitOutcome{
+			Admission: outcomes[index].Admission(), LocalPersisted: outcomes[index].LocalPersisted(),
+		}
+	}
+	return converted, err
+}
+
+func runtimeV8LogItems(operations []audit.RuntimeV8LogOperation) []observabilityruntime.LogBatchItem {
+	items := make([]observabilityruntime.LogBatchItem, len(operations))
+	for index := range operations {
+		operation := operations[index]
+		items[index] = observabilityruntime.LogBatchItem{
+			Context: operation.Context(), Metadata: operation.Metadata(),
+			Builder: func(snapshot observabilityruntime.EmitContext, admission router.Admission) (observability.Record, error) {
+				return operation.Build(audit.RuntimeV8BuildContext{
+					ConfigGeneration: snapshot.Generation(), ConfigDigest: snapshot.Digest(),
+				}, admission)
+			},
+		}
+	}
+	return items
 }
 
 func (owner *sidecarOwnedObservabilityV8Runtime) EmitTraceCanary(
@@ -1092,7 +1138,7 @@ func (s *Sidecar) persistObservabilityV8DeliveryTransition(
 		}
 		builder, buildErr := observability.NewFamilyBuilder(
 			observability.ClockFunc(func() time.Time { return transition.OccurredAt.UTC() }),
-			observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+			observability.TimeOrderedOccurrenceIDs,
 		)
 		if buildErr != nil {
 			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
@@ -1186,9 +1232,7 @@ func (observer sidecarV8RetentionObserver) ReportRetentionController(
 	if observer.s == nil || observer.s.health == nil {
 		return
 	}
-	observer.s.health.setObservabilityV8Retention(
-		string(status.State), status.RetentionDays, string(status.Failure),
-	)
+	observer.s.health.setObservabilityV8Retention(status)
 }
 
 type sidecarV8EventHistoryObserver struct{ s *Sidecar }

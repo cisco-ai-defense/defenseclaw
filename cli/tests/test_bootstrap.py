@@ -41,6 +41,7 @@ from defenseclaw.config import (
 )
 
 from tests.helpers import record_test_setup_agent_selections
+from tests.os_view import os_view
 
 
 def _cfg_for(tmp: str) -> Config:
@@ -253,34 +254,20 @@ class BootstrapEnvTests(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "POSIX folder modes")
     def test_opencode_readiness_names_a_group_writable_plugin_folder_with_its_fix(self):
-        # Ubuntu's umask 002 leaves ~/.config/opencode/plugins at 0775; init
-        # ended partial and suggested `setup opencode`, which fails the same way.
+        # A shared group on this folder must still get a matching init hint.
         cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
         plugin_dir = os.path.join(self._tmp.name, ".config", "opencode", "plugins")
         os.makedirs(plugin_dir)
         os.chmod(plugin_dir, 0o775)
-        with patch.dict(os.environ, {"HOME": self._tmp.name}):
+        with patch.dict(os.environ, {"HOME": self._tmp.name}), patch(
+            "defenseclaw.file_permissions.owner_private_group", return_value=False
+        ):
             os.environ.pop("OPENCODE_CONFIG_DIR", None)
             os.environ.pop("XDG_CONFIG_HOME", None)
             result = _connector_readiness(cfg, "opencode")
 
         self.assertEqual(result.next_command, f"chmod go-w {os.path.realpath(plugin_dir)}")
 
-    def test_omnigent_readiness_honors_config_home(self):
-        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
-        config_home = os.path.join(self._tmp.name, "omnigent-config")
-        os.makedirs(config_home)
-        with open(os.path.join(config_home, "config.yaml"), "w", encoding="utf-8") as fh:
-            fh.write("policy_modules: [defenseclaw_omnigent_policy]\npolicies: {defenseclaw_guardrail: {}}\n")
-        with patch.dict(os.environ, {"OMNIGENT_CONFIG_HOME": config_home}):
-            result = _connector_readiness(cfg, "omnigent")
-
-        self.assertEqual(result.status, "warn")
-        self.assertIn("custom policy configured", result.detail)
-        self.assertIn("live action/fail-closed enforcement is unverified", result.detail)
-        self.assertIn(config_home, result.detail)
-        # The text named a fixed OmniGent release as if it were the installed one.
-        self.assertNotIn("0.7.0", result.detail)
 
     def test_kiro_readiness_finds_global_hooks(self):
         # Quickstart readiness said "unknown connector 'kiro'" while doctor passed.
@@ -298,27 +285,7 @@ class BootstrapEnvTests(unittest.TestCase):
         self.assertIn("Kiro hooks found", found.detail)
         self.assertEqual((missing.status, missing.next_command), ("warn", "defenseclaw setup kiro"))
 
-    def test_omnigent_readiness_rejects_partial_registration(self):
-        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
-        config_home = os.path.join(self._tmp.name, "partial-omnigent-config")
-        os.makedirs(config_home)
-        with open(os.path.join(config_home, "config.yaml"), "w", encoding="utf-8") as fh:
-            fh.write("policy_modules: [defenseclaw_omnigent_policy]\n")
-        with patch.dict(os.environ, {"OMNIGENT_CONFIG_HOME": config_home}):
-            result = _connector_readiness(cfg, "omnigent")
 
-        self.assertEqual(result.status, "warn")
-
-    def test_omnigent_readiness_treats_malformed_utf8_as_unconfigured(self):
-        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
-        config_home = os.path.join(self._tmp.name, "malformed-omnigent-config")
-        os.makedirs(config_home)
-        with open(os.path.join(config_home, "config.yaml"), "wb") as fh:
-            fh.write(b"\xff\xfe\x00")
-        with patch.dict(os.environ, {"OMNIGENT_CONFIG_HOME": config_home}):
-            result = _connector_readiness(cfg, "omnigent")
-
-        self.assertEqual(result.status, "warn")
 
     def test_amp_readiness_uses_global_plugin_with_or_without_workspace(self):
         plugin = Path(self._tmp.name) / "amp-home" / "plugins" / "defenseclaw.ts"
@@ -430,6 +397,21 @@ class FreshMigrationCursorTests(unittest.TestCase):
                     start_gateway=False,
                     verify=False,
                 )
+            )
+            cfg = load()
+
+        self.assertNotEqual(report.status, "needs_attention")
+        self.assertFalse(cfg.has_connector_configured())
+        self.assertEqual(cfg.active_connectors(), [])
+
+    def test_default_first_run_options_persist_no_absent_agent(self):
+        from defenseclaw.bootstrap import FirstRunOptions, run_first_run
+        from defenseclaw.config import load
+
+        data_dir = os.path.join(self._tmp_root, "default-no-agent")
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
+            report = run_first_run(
+                FirstRunOptions(skip_install=True, start_gateway=False, verify=False)
             )
             cfg = load()
 
@@ -826,7 +808,7 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
         with open(os.path.join(self.data_dir, "gateway.pid"), "w", encoding="utf-8") as fh:
             fh.write(json.dumps({"pid": os.getpid()}))
 
-    def _patch_subprocess(self, recorder: list, returncode: int = 0):
+    def _patch_subprocess(self, recorder: list, returncode: int = 0, no_connector_gateway: bool = False):
         """Return a context manager that intercepts ``subprocess.run`` and
         ``shutil.which`` calls inside ``_start_gateway_structured``.
 
@@ -862,6 +844,12 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
             patch(
                 "defenseclaw.bootstrap._pid_looks_like_gateway",
                 return_value=True,
+            )
+        )
+        stack.enter_context(
+            patch(
+                "defenseclaw.bootstrap._running_gateway_has_no_connector",
+                return_value=no_connector_gateway,
             )
         )
         return stack
@@ -946,6 +934,71 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
             [],
             "missing active_connector.json must NEVER trigger a restart; legacy 'already running' behavior wins",
         )
+
+    def test_gateway_booted_with_no_connector_is_restarted_for_the_new_one(self):
+        from defenseclaw.bootstrap import _start_gateway_structured
+
+        # GAP-2342: init chose no connector and started the gateway (no
+        # active_connector.json); quickstart --connector claudecode then said
+        # "already running" and Claude Code stayed unguarded until a restart.
+        self.cfg.guardrail.connector = "claudecode"
+        self.cfg.claw.mode = "claudecode"
+        self._write_pid_file()
+
+        recorder: list = []
+        with self._patch_subprocess(recorder, no_connector_gateway=True):
+            result = _start_gateway_structured(self.cfg)
+
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(result.detail, "restarted (was no connector, now claudecode)")
+        self.assertEqual([c[1] for c in recorder], ["restart"])
+
+    def test_no_connector_gateway_and_no_connector_configured_is_left_running(self):
+        from defenseclaw.bootstrap import _start_gateway_structured
+
+        self.cfg.guardrail.connector = ""
+        self.cfg.claw.mode = ""
+        self.cfg.guardrail.connectors = {}
+        self._write_pid_file()
+        if self.cfg.active_connectors():
+            self.skipTest("this config floors to a connector")
+
+        recorder: list = []
+        with self._patch_subprocess(recorder, no_connector_gateway=True):
+            result = _start_gateway_structured(self.cfg)
+
+        self.assertEqual((result.detail, recorder), ("already running", []))
+
+    def test_running_gateway_has_no_connector_reads_the_health_answer(self):
+        from unittest.mock import patch
+
+        from defenseclaw import bootstrap
+
+        self.cfg.gateway.api_port = 18970
+        answers = {
+            "no connector": {"guardrail": {"state": "disabled", "last_error": "no connector configured"}},
+            "guarding": {"guardrail": {"state": "running", "last_error": ""}},
+            "disabled": {"guardrail": {"state": "disabled", "last_error": "guardrail disabled"}},
+            "no guardrail": {},
+        }
+        for name, health in answers.items():
+            with (
+                patch("defenseclaw.gateway.foreign_loopback_listener", return_value=""),
+                patch("defenseclaw.gateway.OrchestratorClient.health", return_value=health),
+            ):
+                self.assertEqual(bootstrap._running_gateway_has_no_connector(self.cfg), name == "no connector", name)
+        # Another account's listener on the port never answers for this one.
+        with (
+            patch("defenseclaw.gateway.foreign_loopback_listener", return_value="uid 1001"),
+            patch("defenseclaw.gateway.OrchestratorClient.health", return_value=answers["no connector"]),
+        ):
+            self.assertFalse(bootstrap._running_gateway_has_no_connector(self.cfg))
+        # No answer keeps the no-restart rule.
+        with (
+            patch("defenseclaw.gateway.foreign_loopback_listener", return_value=""),
+            patch("defenseclaw.gateway.OrchestratorClient.health", side_effect=OSError("refused")),
+        ):
+            self.assertFalse(bootstrap._running_gateway_has_no_connector(self.cfg))
 
     def test_removed_connector_restart_names_the_dropped_connector(self):
         from defenseclaw.bootstrap import _start_gateway_structured
@@ -1032,7 +1085,7 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
             stderr="",
         )
         with (
-            patch.object(os, "name", "nt"),
+            patch("defenseclaw.bootstrap.os", os_view("nt")),
             patch(
                 "defenseclaw.bootstrap.shutil.which",
                 return_value=r"C:\Program Files\DefenseClaw\defenseclaw-gateway.exe",
@@ -1074,7 +1127,7 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
 
         self._write_pid_file()
         with (
-            patch.object(os, "name", "nt"),
+            patch("defenseclaw.bootstrap.os", os_view("nt")),
             patch(
                 "defenseclaw.process_liveness.read_pid_file",
                 return_value=os.getpid(),

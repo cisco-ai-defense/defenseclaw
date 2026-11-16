@@ -25,11 +25,33 @@ struct CatalogActionSafetyTests {
         bundledResourcesRemainInformational()
         informationalActionsRemainNonMutating()
         auditCorruptionClassifierIsExact()
+        partialMCPDiscoveryKeepsDiagnosticsAndFailsClosed()
         await malformedAuditUsesPrivateReadOnlyCatalog()
         await genericFailuresDoNotUseIsolatedCatalog()
         await binaryOverrideDoesNotCrossCatalogLoad()
         await installationRebindInvalidatesCatalogLoad()
         print("CatalogActionSafetyTests passed")
+    }
+
+    private static func partialMCPDiscoveryKeepsDiagnosticsAndFailsClosed() {
+        let json = #"[{"connector":"claudecode","mcp_servers":[]},{"connector":"codex","mcp_servers":[{"name":"fixture","connector":"codex"}]}]"#
+        let diagnostic = "error: MCP discovery source is unreadable for connector='claudecode': /fixture/settings.json"
+        for output in [json + "\n" + diagnostic, diagnostic + "\n" + json] {
+            let result = CLIResult(exitCode: 1, output: output)
+            let warning = CatalogCLI.partialMCPWarning(resource: "mcp", result: result)
+            expect(warning?.contains(diagnostic) == true, "partial MCP result retains its real diagnostic")
+            expect(warning?.contains("actions are disabled") == true, "partial results cannot appear fully actionable")
+            expect(CatalogCLI.catalogFailureDetail(result) == diagnostic, "JSON does not hide stderr diagnostic")
+            expect(CatalogCLI.partialMCPWarning(resource: "plugin", result: result) == nil, "partial contract is restricted to MCP discovery")
+        }
+        for result in [CLIResult(exitCode: 1, output: json),
+                       CLIResult(exitCode: 1, output: json + "\npermission denied"),
+                       CLIResult(exitCode: 2, output: json + "\n" + diagnostic),
+                       CLIResult(exitCode: 1, output: json + "\n" + diagnostic, cancelled: true),
+                       CLIResult(exitCode: 1, output: json + "\n" + diagnostic, outputTruncated: true),
+                       CLIResult(exitCode: 1, output: "[{\"connector\":\"codex\"}]\n" + diagnostic)] {
+            expect(CatalogCLI.partialMCPWarning(resource: "mcp", result: result) == nil, "unknown failures and incomplete output remain failures")
+        }
     }
 
     private static func scanActionsRemainOneClickButAreMutations() {

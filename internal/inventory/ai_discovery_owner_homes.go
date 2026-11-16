@@ -122,25 +122,21 @@ func (s *ContinuousDiscoveryService) excludedAccountSID(sid string) bool {
 // withoutExcludedAccounts drops the processes that run in the session of an
 // excluded account, so an excluded user's running agent is not reported as
 // a machine-wide one (GAP-1024).
-func (s *ContinuousDiscoveryService) withoutExcludedAccounts(procs []processInfo) []processInfo {
+func (s *ContinuousDiscoveryService) withoutExcludedAccounts(procs []processInfo, accounts func() map[int]ProcessAccount) []processInfo {
 	if len(s.opts.excludedOwners) == 0 {
 		return procs
 	}
-	var accounts map[int]ProcessAccount
 	out := procs[:0]
 	for _, proc := range procs {
 		if s.excludedAccountSID(proc.SessionOwnerID) || s.excludedAccountSID(proc.OwnerID) {
 			continue
 		}
 		if proc.SessionOwnerID == "" && proc.Connector != "" {
-			if accounts == nil {
-				accounts = brokeredProcessAccounts()
-			}
-			if account, ok := accounts[proc.PID]; ok &&
+			if account, ok := accounts()[proc.PID]; ok &&
 				windowsProcessBasename(account.Name) == windowsProcessBasename(proc.Comm) {
 				excluded := false
 				for _, owner := range s.opts.excludedOwners {
-					if processAccountMatchesOwner(account.User, owner, false) {
+					if processAccountProvesOwner(account.User, owner) {
 						excluded = true
 						break
 					}
@@ -180,9 +176,12 @@ func insideDiscoveryHomeOf(owners []discoveryHomeOwner, path string) bool {
 		if sameDiscoveryHome(home, path) {
 			return true
 		}
+		// A sibling that only shares the home's name as a prefix
+		// (/profiles/alice2 next to /profiles/alice) is not inside it.
 		prefix := strings.TrimRight(home, `\/`) + string(filepath.Separator)
 		candidate := filepath.Clean(path)
-		if len(candidate) > len(prefix) && sameDiscoveryHome(candidate[:len(prefix)-1], home) {
+		if len(candidate) > len(prefix) && os.IsPathSeparator(candidate[len(prefix)-1]) &&
+			sameDiscoveryHome(candidate[:len(prefix)-1], home) {
 			return true
 		}
 	}
@@ -204,7 +203,7 @@ var profilePathThroughLink = discoveryPathThroughLink
 // refused path is warned about once. The Secure Client profile and every
 // per-user scan (no profile owners) keep their reads.
 func (s *ContinuousDiscoveryService) profileLinkRefused(path string) bool {
-	if s == nil || s.opts.SecureClient || len(s.opts.homeOwners) == 0 {
+	if s == nil || s.opts.SecureClient || !s.profileOwnersScan() {
 		return false
 	}
 	root, owner, ok := s.scannedRootFor(path)
@@ -245,18 +244,32 @@ func (s *ContinuousDiscoveryService) scannedRootFor(path string) (string, string
 	return best, "", best != ""
 }
 
+// profileOwnersScan reports a service-context scan of the platform's
+// profiles: some are scanned, or every one is excluded. The second case keeps
+// the link rules too, so an ai_discovery.home_dirs folder cannot reach an
+// excluded profile once no profile is left to scan (GAP-1277).
+func (s *ContinuousDiscoveryService) profileOwnersScan() bool {
+	return len(s.opts.homeOwners) > 0 || len(s.opts.excludedOwners) > 0
+}
+
+// discoveryResolvedPath is the folder path names once every link, junction
+// and mount point is followed, or false when it cannot be resolved; tests
+// replace it.
+var discoveryResolvedPath = platformDiscoveryResolvedPath
+
 // dropLinkedExtraHomes leaves out of the scan an ai_discovery.home_dirs
-// folder that is itself a link or junction, or is reached through one below
-// the profile that holds it.
+// folder that is itself a link or junction, is reached through one below
+// the profile that holds it, or resolves into an excluded profile through a
+// link above it.
 func (s *ContinuousDiscoveryService) dropLinkedExtraHomes() {
-	if s.opts.SecureClient || len(s.opts.homeOwners) == 0 || len(s.opts.extraHomes) == 0 {
+	if s.opts.SecureClient || !s.profileOwnersScan() || len(s.opts.extraHomes) == 0 {
 		return
 	}
 	kept := make([]string, 0, len(s.opts.HomeDirs))
 	droppedHomeDir := false
 	for _, home := range s.opts.HomeDirs {
 		if _, profile := s.homeOwnerForPathExact(home); !profile && discoveryHomeListed(s.opts.extraHomes, home) &&
-			s.profileLinkRefused(home) {
+			(s.profileLinkRefused(home) || s.resolvesIntoExcludedProfile(home)) {
 			droppedHomeDir = droppedHomeDir || sameDiscoveryHome(home, s.opts.HomeDir)
 			continue
 		}
@@ -265,11 +278,29 @@ func (s *ContinuousDiscoveryService) dropLinkedExtraHomes() {
 	s.opts.HomeDirs = kept
 	if droppedHomeDir {
 		// "~" and the per-user folder variables resolve against HomeDir.
-		s.opts.HomeDir, _ = platformDiscoveryHomeDir()
+		// With no folder left there is nothing to resolve against: the
+		// gateway's own profile is not a scanned one.
+		s.opts.HomeDir = ""
 		if len(kept) > 0 {
 			s.opts.HomeDir = kept[0]
 		}
 	}
+}
+
+// resolvesIntoExcludedProfile reports an ai_discovery.home_dirs folder whose
+// resolved path lies in an excluded profile: a link or junction above it
+// (C:\work pointing at C:\Users\bob) leads the scan into an account
+// exclude_users names, which no lexical check sees.
+func (s *ContinuousDiscoveryService) resolvesIntoExcludedProfile(home string) bool {
+	if len(s.opts.excludedOwners) == 0 {
+		return false
+	}
+	resolved, ok := discoveryResolvedPath(home)
+	if !ok || !insideDiscoveryHomeOf(s.opts.excludedOwners, resolved) {
+		return false
+	}
+	fmt.Fprintf(os.Stderr, "[ai-discovery] WARN ai_discovery_link_refused: an ai_discovery.home_dirs entry leads into an excluded profile; not read\n")
+	return true
 }
 
 // homeOwnerForPathExact returns the profile owner whose home is path itself.

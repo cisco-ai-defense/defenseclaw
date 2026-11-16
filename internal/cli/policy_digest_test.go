@@ -101,10 +101,15 @@ func TestPolicyDigestReportsWhetherTheGatewayAppliedIt(t *testing.T) {
 		!strings.Contains(result.Warnings[0].Message, "records it as a hand edit") {
 		t.Fatalf("recorded hand edit: state=%+v warnings=%s", state, codes(result))
 	}
-	// No generation recorded yet is not an edit.
-	if result, state := run(false, `{"effective_digest":"`+reported+`","config_generation":0,"config_generation_recorded":false,"gateway_reported_digest":"`+reported+`"}`); state == nil ||
-		state.ConfigUnrecorded || codes(result) != "" {
+	// Windows must not report a lost generation as recorded/compliant.
+	unrecorded := `{"effective_digest":"` + reported + `","config_generation":0,"config_generation_recorded":false,"gateway_reported_digest":"` + reported + `"}`
+	if result, state := run(false, unrecorded); state == nil ||
+		!state.ConfigUnrecorded || codes(result) != "config_edited_outside_lifecycle" {
 		t.Fatalf("no generation yet: state=%+v warnings=%s", state, codes(result))
+	}
+	legacy := enterprisestatus.New("ensure", "standalone", "linux", "1.0.0")
+	if state := applyEnterprisePolicyReport(legacy, []byte(unrecorded), false); state == nil || state.ConfigUnrecorded || len(legacy.Warnings) != 0 {
+		t.Fatalf("legacy Unix generation bootstrap changed: %+v", legacy)
 	}
 	// A policy that cannot be built is a warning, not a policy block.
 	if result, state := run(false, `{"error":"rule pack \"p\": digest does not match","gateway_reported_digest":"`+reported+`"}`); state != nil ||
@@ -114,5 +119,32 @@ func TestPolicyDigestReportsWhetherTheGatewayAppliedIt(t *testing.T) {
 	// An earlier release prints nothing useful: no block and no warning.
 	if result, state := run(true, `{}`); state != nil || codes(result) != "" {
 		t.Fatalf("report without a digest: state=%+v warnings=%s", state, codes(result))
+	}
+}
+
+func TestPolicyDigestRecordedHandEditRecoveryByWindowsDeploymentMode(t *testing.T) {
+	for _, tc := range []struct {
+		name, extra, want, absent string
+	}{
+		{
+			name: "signed bundle", extra: `,"gateway_reported_bundle_id":"b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8"`,
+			want: "enterprise windows repair", absent: "/ensure CONFIG=",
+		},
+		{
+			name: "standalone config", want: "ensure with the intended config", absent: "enterprise windows repair",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := enterprisestatus.New("verify", "standalone", "windows", "1.0.9")
+			report := `{"effective_digest":"sha256:` + strings.Repeat("a", 64) +
+				`","config_generation":7,"config_generation_recorded":true,"config_recorded_as_hand_edit":true` + tc.extra + `}`
+			state := applyEnterprisePolicyReport(result, []byte(report), false)
+			if state == nil || !state.ConfigUnrecorded || len(result.Warnings) != 1 ||
+				result.Warnings[0].Code != "config_edited_outside_lifecycle" ||
+				!strings.Contains(result.Warnings[0].Message, tc.want) ||
+				strings.Contains(result.Warnings[0].Message, tc.absent) {
+				t.Fatalf("recovery guidance for %s: state=%+v warnings=%+v", tc.name, state, result.Warnings)
+			}
+		})
 	}
 }

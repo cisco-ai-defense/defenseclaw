@@ -71,7 +71,10 @@ def env(tmp_path, monkeypatch):
         rulepack_validation,
         "validate_rule_pack",
         lambda _path, **_k: rulepack_validation.RulePackValidationResult(
-            wire_version=1, kind="validation", valid=True, summary={"rule_count": 1, "digest": "c" * 64, "files_digest": "a" * 64}
+            wire_version=1,
+            kind="validation",
+            valid=True,
+            summary={"rule_count": 1, "digest": "c" * 64, "files_digest": "a" * 64},
         ),
     )
     return app, root, writes
@@ -94,7 +97,11 @@ def test_protection_enable_and_disable_write_rules_keys(env) -> None:
     app.cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig(rules=GuardrailRulesConfig(protections=[K8S]))}
     result = _run(app, "protection", "disable", K8S, "--connector", "codex")
     assert result.exit_code == 0, result.output
-    assert writes[-1][0] == [config_writer.Change("guardrail.connectors.codex.rules.protections", unset=True)]
+    # guardrail.connector already puts codex on the roster, so an entry its
+    # last override leaves empty goes too (GAP-1894).
+    assert writes[-1][0] == [
+        config_writer.Change("guardrail.connectors.codex.rules.protections", unset=True, prune_empty_to="guardrail")
+    ]
     assert "next reload" in result.output or "isn't running" in result.output
 
 
@@ -137,7 +144,7 @@ def test_rule_and_suppress_wrappers(env) -> None:
     assert _run(app, "rule", "disable", "SEC-AWS-KEY").exit_code == 0
     assert writes[-1][0] == [
         config_writer.Change("guardrail.rules.disable", ["SEC-AWS-KEY"]),
-        config_writer.Change("guardrail.rules.enable", unset=True),
+        config_writer.Change("guardrail.rules.enable", unset=True, prune_empty_to="guardrail"),
     ]
     # The newer packs spell their IDs in lower case with dots: kept as typed, one key.
     assert _run(app, "rule", "severity", "impact.cloud_s3_data_delete", "HIGH").exit_code == 0
@@ -145,7 +152,9 @@ def test_rule_and_suppress_wrappers(env) -> None:
         config_writer.Change('guardrail.rules.severity_overrides["impact.cloud_s3_data_delete"]', "HIGH")
     ]
     assert _run(app, "rule", "disable", "exec.remote_ip_download_execute_same_artifact").exit_code == 0
-    assert writes[-1][0] == [config_writer.Change("guardrail.rules.disable", ["exec.remote_ip_download_execute_same_artifact"])]
+    assert writes[-1][0] == [
+        config_writer.Change("guardrail.rules.disable", ["exec.remote_ip_download_execute_same_artifact"])
+    ]
     result = _run(app, "suppress", "add", "SUPP-BUILD", "--finding", "JUDGE-PII-IP", "--reason", "build farm")
     assert result.exit_code == 0, result.output
     assert writes[-1][0] == [
@@ -163,13 +172,34 @@ def test_rule_and_suppress_wrappers(env) -> None:
     assert writes[-1][0] == [config_writer.Change("guardrail.rules.disable", ["OTHER-RULE", "SEC-AWS-KEY"])]
 
 
+def test_suppress_add_warns_when_the_finding_is_a_rule_of_the_active_pack(env) -> None:
+    # p0-round GAP-1018: suppressions drop LLM judge findings only; a pattern that is exactly a
+    # regex or CEL rule ID of the pack used to print only the success line.
+    app, root, writes = env
+    rule_id = sorted(pc.pack_rule_defaults(str(root / "default")))[0]
+    result = _run(app, "suppress", "add", "SUPP-RULE", "--finding", rule_id.lower(), "--reason", "test")
+    assert result.exit_code == 0, result.output
+    assert len(writes) == 1  # still stored: no behaviour change
+    assert f"{rule_id} is a rule of the active pack" in result.output
+    assert "suppressions never silence a regex or CEL rule" in result.output
+    assert f"guardrail rule disable {rule_id}" in result.output
+
+    result = _run(app, "suppress", "add", "SUPP-RULE-J", "--finding", rule_id, "--reason", "test", "--json")
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True and rule_id in payload["warning"]
+
+    quiet = _run(app, "suppress", "add", "SUPP-JUDGE", "--finding", "JUDGE-PII-IP", "--reason", "test")
+    assert quiet.exit_code == 0 and "never silence" not in quiet.output
+    assert "warning" not in json.loads(_run(app, "suppress", "add", "SUPP-J2", "--finding", "JUDGE-PII-IP",
+                                           "--reason", "t", "--json").stdout)
+
+
 def test_rule_severity_default_restores_profile_config_and_digest(env, monkeypatch) -> None:
     app, _root, _writes = env
     app.cfg.guardrail.profiles = {"everyone-default": GuardrailProfile()}
     path = config_path_for_data_dir(app.cfg.data_dir)
     original = (
-        b"config_version: 9\nguardrail:\n  profiles:\n    everyone-default:\n"
-        b"      mode: action\n      block_at: HIGH\n"
+        b"config_version: 9\nguardrail:\n  profiles:\n    everyone-default:\n      mode: action\n      block_at: HIGH\n"
     )
     path.write_bytes(original)
     before_digest = hashlib.sha256(original).hexdigest()
@@ -181,12 +211,52 @@ def test_rule_severity_default_restores_profile_config_and_digest(env, monkeypat
 
     monkeypatch.setattr(config_writer, "apply", apply)
     for scope in ((), ("--connector", "codex")):
-        assert _run(app, "rule", "severity", "MARKER-RULE", "LOW", "--profile", "everyone-default", *scope).exit_code == 0
+        assert (
+            _run(app, "rule", "severity", "MARKER-RULE", "LOW", "--profile", "everyone-default", *scope).exit_code == 0
+        )
         assert path.read_bytes() != original
         result = _run(app, "rule", "severity", "MARKER-RULE", "default", "--profile", "everyone-default", *scope)
         assert result.exit_code == 0, result.output
         assert path.read_bytes() == original
         assert hashlib.sha256(path.read_bytes()).hexdigest() == before_digest
+
+
+@pytest.mark.parametrize(
+    ("add", "remove"),
+    [
+        (
+            ("suppress", "add", "SUPP-BUILD", "--finding", "JUDGE-PII-IP", "--reason", "test", "--connector", "codex"),
+            ("suppress", "remove", "SUPP-BUILD", "--connector", "codex"),
+        ),
+        (("rule", "disable", "SEC-AWS-KEY"), ("rule", "enable", "SEC-AWS-KEY")),
+        (
+            ("rule", "disable", "SEC-AWS-KEY", "--connector", "codex"),
+            ("rule", "enable", "SEC-AWS-KEY", "--connector", "codex"),
+        ),
+        (("protection", "enable", DB, "--connector", "codex"), ("protection", "disable", DB, "--connector", "codex")),
+    ],
+)
+def test_removing_last_rule_entry_restores_config_and_digest(env, monkeypatch, add, remove) -> None:
+    app, _root, _writes = env
+    app.cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig(mode="action")}
+    path = config_path_for_data_dir(app.cfg.data_dir)
+    original = b"config_version: 9\nguardrail:\n  rule_pack: default\n  connectors:\n    codex:\n      mode: action\n"
+    path.write_bytes(original)
+    before_digest = hashlib.sha256(original).hexdigest()
+
+    def apply(changes, _actor, _reason, **_kwargs):
+        candidate, changed = config_writer._patch(path.read_bytes(), changes, str(path))
+        path.write_bytes(candidate)
+        return config_writer.WriteResult(generation=1, sha256=hashlib.sha256(candidate).hexdigest(), changed=changed)
+
+    monkeypatch.setattr(config_writer, "apply", apply)
+    result = _run(app, *add)
+    assert result.exit_code == 0, result.output
+    assert path.read_bytes() != original
+    result = _run(app, *remove)
+    assert result.exit_code == 0, result.output
+    assert path.read_bytes() == original
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before_digest
 
 
 def test_rule_severity_default_keeps_empty_assigned_profile(env, monkeypatch) -> None:
@@ -211,7 +281,9 @@ def test_rule_severity_default_keeps_empty_assigned_profile(env, monkeypatch) ->
         path.write_bytes(original)
         set_result = _run(app, "rule", "severity", "CMD-PIPE-CURL", "critical", "--profile", "everyone-default", *scope)
         assert set_result.exit_code == 0, set_result.output
-        reset_result = _run(app, "rule", "severity", "CMD-PIPE-CURL", "default", "--profile", "everyone-default", *scope)
+        reset_result = _run(
+            app, "rule", "severity", "CMD-PIPE-CURL", "default", "--profile", "everyone-default", *scope
+        )
         assert reset_result.exit_code == 0, reset_result.output
         document = config_writer._parse_config_document(path.read_bytes())
         assert document["guardrail"]["profiles"]["everyone-default"] == {}
@@ -223,7 +295,7 @@ def test_rule_enable_of_a_rule_the_pack_ships_on_only_drops_its_disable_entry(en
     app, _root, writes = env
     app.cfg.guardrail.rules = GuardrailRulesConfig(disable=["SEC-AWS-KEY"])
     assert _run(app, "rule", "enable", "SEC-AWS-KEY").exit_code == 0
-    assert writes[-1][0] == [config_writer.Change("guardrail.rules.disable", unset=True)]
+    assert writes[-1][0] == [config_writer.Change("guardrail.rules.disable", unset=True, prune_empty_to="guardrail")]
     # A connector re-enabling a rule the global scope disabled still needs its own entry.
     app.cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig()}
     app.cfg.guardrail.rules = GuardrailRulesConfig(disable=["SEC-AWS-KEY"])
@@ -241,9 +313,9 @@ def test_use_pack_drops_rule_references_the_new_pack_does_not_have(env) -> None:
     assert result.exit_code == 0, result.output
     assert writes[-1][0] == [
         config_writer.Change("guardrail.rule_pack", "permissive"),
-        config_writer.Change("guardrail.rules.enable", unset=True),
+        config_writer.Change("guardrail.rules.enable", unset=True, prune_empty_to="guardrail"),
         config_writer.Change("guardrail.rules.disable", ["SEC-AWS-KEY"]),
-        config_writer.Change("guardrail.rules.severity_overrides", unset=True),
+        config_writer.Change("guardrail.rules.severity_overrides", unset=True, prune_empty_to="guardrail"),
     ]
     assert "Dropped rule references" in result.output and "guardrail.rules.enable: P0-GONE" in result.output
 

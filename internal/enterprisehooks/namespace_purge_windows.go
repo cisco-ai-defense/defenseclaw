@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -26,11 +27,14 @@ const (
 	windowsNamespacePurgeMaxDescriptorSize = 64 * 1024
 	windowsNamespacePurgeACLHeaderSize     = 8
 	windowsNamespacePurgeCertRunIDLength   = 10
+	windowsNamespacePurgeAFUnixTag         = 0x80000023
 )
 
 var (
-	windowsNamespacePurgeRootScope     = validateWindowsNamespacePurgeProductionRoot
-	windowsNamespacePurgeAncestorTrust = func(path string) error {
+	windowsNamespacePurgeRootScope        = validateWindowsNamespacePurgeProductionRoot
+	windowsNamespacePurgeStateRootScope   = validateWindowsNamespacePurgeProductionStateRoot
+	windowsNamespacePurgeInstallRootScope = validateWindowsNamespacePurgeProductionInstallRoot
+	windowsNamespacePurgeAncestorTrust    = func(path string) error {
 		return managed.ValidateTrustedDirectoryAncestor(path, "namespace cleanup parent")
 	}
 	// Tests substitute an already-pinned in-tree identity to prove that purge
@@ -43,23 +47,45 @@ var (
 	// Tests use the node-aware seam to prove the final file link-count check.
 	// Production leaves it nil.
 	windowsNamespacePurgePostValidation func(*windowsNamespacePurgeNode) error
+	// How long one purge waits, in total, for other programs to close what
+	// it must open with no sharing. A scanner, an indexer or a hash check
+	// opens a product file for a moment, and the printed FORCE uninstall
+	// failed on such a reader of defenseclaw-hook.exe with every service
+	// stopped (GAP-0848). The open still demands exclusive access, so a
+	// program that keeps the file open still refuses the purge, by its full
+	// path. Tests shorten it.
+	windowsNamespacePurgeSharingWait = 30 * time.Second
+	windowsNamespacePurgeSharingPoll = 50 * time.Millisecond
 )
 
 type windowsNamespacePurgeDescriptorSet struct {
 	directories []*windows.SECURITY_DESCRIPTOR
 	files       []*windows.SECURITY_DESCRIPTOR
-	quarantine  *windows.SECURITY_DESCRIPTOR
+	// inheritedDirectories and inheritedFiles are what an object a killed
+	// first install created under the canonical install root carries before
+	// the install gave it its own protected DACL: not protected, and only
+	// the ACEs it inherited from that root. Matched by owner (SYSTEM or
+	// Administrators, whichever ran Setup), control bits and the exact DACL;
+	// the primary group, which grants nothing in an access check, is
+	// ignored (p0-round:GAP-1587). Set for the standalone profile only, and
+	// accepted below the root only (p0-round:GAP-1365); a Secure Client
+	// purge keeps the canonical shapes alone.
+	inheritedDirectories []*windows.SECURITY_DESCRIPTOR
+	inheritedFiles       []*windows.SECURITY_DESCRIPTOR
+	quarantine           *windows.SECURITY_DESCRIPTOR
+	adminFile            *windows.SECURITY_DESCRIPTOR
 }
 
 type windowsNamespacePurgeNode struct {
-	parent    windows.Handle
-	name      string
-	label     string
-	handle    windows.Handle
-	directory bool
-	identity  string
-	names     map[string]struct{}
-	children  []*windowsNamespacePurgeNode
+	parent          windows.Handle
+	name            string
+	label           string
+	handle          windows.Handle
+	directory       bool
+	identity        string
+	allowUnixSocket bool
+	names           map[string]struct{}
+	children        []*windowsNamespacePurgeNode
 }
 
 func (node *windowsNamespacePurgeNode) close() {
@@ -77,6 +103,10 @@ func (node *windowsNamespacePurgeNode) close() {
 
 type windowsNamespacePurgeBudget struct {
 	entries int
+	// sharingDeadline ends the wait for other programs to close an entry
+	// (openWindowsNamespacePurgeExclusive). It is set at the first sharing
+	// violation, so one purge waits windowsNamespacePurgeSharingWait at most.
+	sharingDeadline time.Time
 }
 
 // PurgeWindowsNamespaceRoot validates and, when requested, removes one exact
@@ -121,8 +151,37 @@ func validateWindowsNamespacePurgeRequest(
 	if err := validateWindowsNamespacePurgeRootPath(request.Root); err != nil {
 		return nil, err
 	}
-	if err := windowsNamespacePurgeRootScope(request.Profile, request.Root); err != nil {
-		return nil, err
+	switch request.Mode {
+	case "":
+		if request.Operation != "" {
+			return nil, fmt.Errorf("enterprise hooks: canonical namespace purge does not accept an operation")
+		}
+		if err := windowsNamespacePurgeRootScope(request.Profile, request.Root); err != nil {
+			return nil, err
+		}
+	case WindowsNamespacePurgeModeUninstallStatePurge:
+		if request.Operation != "" {
+			return nil, fmt.Errorf("enterprise hooks: uninstall state purge does not accept an operation")
+		}
+		if err := windowsNamespacePurgeStateRootScope(request.Profile, request.Root); err != nil {
+			return nil, err
+		}
+		if request.ExpectedIdentity == "" {
+			return nil, fmt.Errorf("enterprise hooks: uninstall state purge requires the recorded root identity")
+		}
+	case WindowsNamespacePurgeModeUninstallInstallPurge:
+		if request.Operation != WindowsNamespacePurgeOperationSealOnly &&
+			request.Operation != WindowsNamespacePurgeOperationDelete {
+			return nil, fmt.Errorf("enterprise hooks: uninstall install purge requires seal_only or delete operation")
+		}
+		if err := windowsNamespacePurgeInstallRootScope(request.Profile, request.Root); err != nil {
+			return nil, err
+		}
+		if request.ExpectedIdentity == "" {
+			return nil, fmt.Errorf("enterprise hooks: uninstall install purge requires the recorded root identity")
+		}
+	default:
+		return nil, fmt.Errorf("enterprise hooks: unsupported Windows namespace purge mode")
 	}
 	if request.ExpectedIdentity != "" && !validWindowsManagedRuntimeIdentity(request.ExpectedIdentity) {
 		return nil, fmt.Errorf("enterprise hooks: Windows namespace purge identity is invalid")
@@ -130,7 +189,95 @@ func validateWindowsNamespacePurgeRequest(
 	if _, err := parseWindowsNamespacePurgeGatewaySID(request.GatewayServiceSID); err != nil {
 		return nil, err
 	}
-	return windowsNamespacePurgeCanonicalDescriptors(request.GatewayServiceSID)
+	descriptors, err := windowsNamespacePurgeCanonicalDescriptors(request.GatewayServiceSID)
+	if err != nil {
+		return nil, err
+	}
+	if request.Profile == winpath.EnterpriseProfileStandalone {
+		if err := addWindowsNamespacePurgeInheritedDescriptors(descriptors, request.GatewayServiceSID); err != nil {
+			return nil, err
+		}
+	}
+	return descriptors, nil
+}
+
+// addWindowsNamespacePurgeInheritedDescriptors adds the inherited shapes of
+// the standalone install root (InstallDirectory and ServiceInstallDirectory)
+// to descriptors. Their owner is a placeholder: the match takes SYSTEM or
+// Administrators (windowsNamespacePurgeInheritedMatches).
+func addWindowsNamespacePurgeInheritedDescriptors(descriptors *windowsNamespacePurgeDescriptorSet, gatewaySID string) error {
+	for _, extra := range []string{"", fmt.Sprintf("(A;OICIID;0x1200a9;;;%s)", gatewaySID)} {
+		directory, err := windows.SecurityDescriptorFromString("O:SYG:SYD:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;0x1200a9;;;BU)" + extra)
+		if err != nil {
+			return fmt.Errorf("enterprise hooks: build inherited namespace cleanup directory descriptor: %w", err)
+		}
+		file, err := windows.SecurityDescriptorFromString("O:SYG:SYD:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;0x1200a9;;;BU)" + strings.Replace(extra, "OICIID", "ID", 1))
+		if err != nil {
+			return fmt.Errorf("enterprise hooks: build inherited namespace cleanup file descriptor: %w", err)
+		}
+		descriptors.inheritedDirectories = append(descriptors.inheritedDirectories, directory)
+		descriptors.inheritedFiles = append(descriptors.inheritedFiles, file)
+	}
+	return nil
+}
+
+// windowsNamespacePurgeInheritedMatches reports whether the object behind
+// handle is owned by SYSTEM or Administrators and has the control bits and
+// exact DACL of one of allowed, whatever its primary group.
+func windowsNamespacePurgeInheritedMatches(handle windows.Handle, allowed []*windows.SECURITY_DESCRIPTOR) (bool, error) {
+	if len(allowed) == 0 {
+		return false, nil
+	}
+	actual, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false, err
+	}
+	owner, ownerDefaulted, err := actual.Owner()
+	if err != nil || owner == nil || ownerDefaulted ||
+		!(owner.IsWellKnown(windows.WinLocalSystemSid) || owner.IsWellKnown(windows.WinBuiltinAdministratorsSid)) {
+		return false, err
+	}
+	actualControl, _, err := actual.Control()
+	if err != nil {
+		return false, err
+	}
+	actualDACL, actualDefaulted, err := actual.DACL()
+	if err != nil || actualDACL == nil {
+		return false, err
+	}
+	actualBytes, err := windowsNamespacePurgeACLBytes(actualDACL)
+	if err != nil {
+		return false, err
+	}
+	for _, candidate := range allowed {
+		expectedControl, _, err := candidate.Control()
+		if err != nil {
+			return false, err
+		}
+		if actualControl&^windows.SE_DACL_AUTO_INHERITED != expectedControl&^windows.SE_DACL_AUTO_INHERITED {
+			continue
+		}
+		expectedDACL, expectedDefaulted, err := candidate.DACL()
+		if err != nil || expectedDACL == nil {
+			return false, err
+		}
+		if actualDefaulted != expectedDefaulted {
+			continue
+		}
+		expectedBytes, err := windowsNamespacePurgeACLBytes(expectedDACL)
+		if err != nil {
+			return false, err
+		}
+		equal := bytes.Equal(actualBytes, expectedBytes)
+		runtime.KeepAlive(candidate)
+		if equal {
+			runtime.KeepAlive(actual)
+			return true, nil
+		}
+	}
+	runtime.KeepAlive(actual)
+	return false, nil
 }
 
 func validateWindowsNamespacePurgeRootPath(path string) error {
@@ -190,6 +337,57 @@ func validateWindowsNamespacePurgeProductionRoot(profile, path string) error {
 		}
 	}
 	return nil
+}
+
+func validateWindowsNamespacePurgeProductionStateRoot(profile, path string) error {
+	programData, err := winpath.TrustedProgramData()
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: resolve trusted ProgramData for namespace cleanup: %w", err)
+	}
+	// Scoped uninstall of a scoped install must be able to clean the scoped
+	// state root the install created, so the certification layout is
+	// accepted as it is for the install root.
+	return validateWindowsNamespacePurgeLayoutRoot(profile, programData, path, "state root")
+}
+
+func validateWindowsNamespacePurgeProductionInstallRoot(profile, path string) error {
+	programFiles, err := winpath.TrustedProgramFiles()
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: resolve trusted Program Files for namespace cleanup: %w", err)
+	}
+	// Native uninstall cleanup must be able to retire scoped unsigned-
+	// certification install roots, or scoped tests cannot be uninstalled by
+	// the EXE that installed them.
+	return validateWindowsNamespacePurgeLayoutRoot(profile, programFiles, path, "install root")
+}
+
+// validateWindowsNamespacePurgeLayoutRoot accepts exactly the profile's
+// production root <trusted>\<vendor>\DefenseClaw or a certification root
+// <trusted>\<vendor>\DefenseClaw-Cert\<10 lowercase hex>.
+func validateWindowsNamespacePurgeLayoutRoot(profile, trusted, path, label string) error {
+	switch profile {
+	case "":
+		profile = winpath.EnterpriseProfileSecureClient
+	case winpath.EnterpriseProfileSecureClient, winpath.EnterpriseProfileStandalone:
+	default:
+		return fmt.Errorf("enterprise hooks: namespace cleanup profile %q is not supported", profile)
+	}
+	vendor := filepath.Join("Cisco", "Cisco Secure Client")
+	if profile == winpath.EnterpriseProfileStandalone {
+		vendor = "Cisco"
+	}
+	base := filepath.Join(trusted, vendor)
+	if strings.EqualFold(path, filepath.Join(base, "DefenseClaw")) {
+		return nil
+	}
+	leaf := filepath.Base(path)
+	if strings.EqualFold(filepath.Dir(path), filepath.Join(base, "DefenseClaw-Cert")) &&
+		len(leaf) == windowsNamespacePurgeCertRunIDLength &&
+		leaf == strings.ToLower(leaf) &&
+		strings.Trim(leaf, "0123456789abcdef") == "" {
+		return nil
+	}
+	return fmt.Errorf("enterprise hooks: namespace cleanup %s is outside the exact production DefenseClaw layout", label)
 }
 
 func parseWindowsNamespacePurgeGatewaySID(value string) (*windows.SID, error) {
@@ -265,6 +463,28 @@ func windowsNamespacePurgeCanonicalDescriptors(
 	if err != nil {
 		return nil, err
 	}
+	// A LocalSystem writer (transaction recovery, the hook guardian's
+	// restore) leaves an installed file owned by SYSTEM with the same
+	// protected DACL. SYSTEM is as trusted an owner as Administrators, and
+	// the forced uninstall refused such a hook binary as foreign
+	// (GAP-1902); only the owner and group may differ.
+	systemInstallFile, err := build(
+		"O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)",
+		"SystemInstallFile",
+	)
+	if err != nil {
+		return nil, err
+	}
+	systemServiceInstallFile, err := build(
+		fmt.Sprintf(
+			"O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)(A;;0x1200a9;;;%s)",
+			gatewaySID,
+		),
+		"SystemServiceInstallFile",
+	)
+	if err != nil {
+		return nil, err
+	}
 	return &windowsNamespacePurgeDescriptorSet{
 		directories: []*windows.SECURITY_DESCRIPTOR{
 			adminDirectory,
@@ -275,8 +495,11 @@ func windowsNamespacePurgeCanonicalDescriptors(
 			adminFile,
 			installFile,
 			serviceInstallFile,
+			systemInstallFile,
+			systemServiceInstallFile,
 		},
 		quarantine: adminDirectory,
+		adminFile:  adminFile,
 	}, nil
 }
 
@@ -370,6 +593,9 @@ func purgeWindowsNamespaceRootPrivileged(
 	descriptors *windowsNamespacePurgeDescriptorSet,
 	report *WindowsNamespacePurgeReport,
 ) error {
+	statePurge := request.Mode == WindowsNamespacePurgeModeUninstallStatePurge
+	installPurge := request.Mode == WindowsNamespacePurgeModeUninstallInstallPurge
+	allowACLDiff := statePurge || installPurge
 	if request.ExpectedIdentity == "" {
 		exists, err := windowsNamespacePurgeRootExists(request.Root)
 		if err != nil {
@@ -379,6 +605,16 @@ func purgeWindowsNamespaceRootPrivileged(
 			return fmt.Errorf("enterprise hooks: Windows namespace purge root appeared without an authenticated identity")
 		}
 		return nil
+	}
+	if statePurge || (installPurge && request.Operation == WindowsNamespacePurgeOperationDelete) {
+		// The protected intent can survive deletion of an uninstall root
+		// and even removal of its former vendor parent. An absent exact root requires
+		// no directory trust or destructive handle to finish recovery. Lstat
+		// reads the parent entry without requiring the root's drifted DACL;
+		// errors other than absence are handled by the privileged open below.
+		if _, err := os.Lstat(request.Root); errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
 	}
 
 	parentPath := filepath.Dir(request.Root)
@@ -399,15 +635,25 @@ func purgeWindowsNamespaceRootPrivileged(
 	rootAccess := uint32(windows.FILE_LIST_DIRECTORY | windows.FILE_READ_ATTRIBUTES |
 		windows.READ_CONTROL | windows.SYNCHRONIZE | windows.DELETE |
 		windows.FILE_WRITE_ATTRIBUTES | windows.WRITE_DAC | windows.WRITE_OWNER)
-	rootHandle, err := openWindowsNamespacePurgeChild(
+	budget := &windowsNamespacePurgeBudget{entries: 1}
+	rootHandle, err := openWindowsNamespacePurgeExclusive(
+		budget,
 		parent,
 		filepath.Base(request.Root),
+		request.Root,
 		rootAccess,
 		true,
-		0,
+		false,
 	)
 	if err != nil {
 		if windowsNamespacePurgeChildMissing(err) {
+			if statePurge || (installPurge && request.Operation == WindowsNamespacePurgeOperationDelete) {
+				// A crash after deleting a root but before retiring the
+				// protected purge intent must be safe to resume. The request
+				// still carries the historical identity, so a replacement root
+				// would fail the identity check below instead of being adopted.
+				return nil
+			}
 			return fmt.Errorf("enterprise hooks: authenticated Windows namespace purge root is absent")
 		}
 		return fmt.Errorf("enterprise hooks: open Windows namespace purge root without following: %w", err)
@@ -431,8 +677,12 @@ func purgeWindowsNamespaceRootPrivileged(
 		identity:  rootIdentity,
 	}
 	defer root.close()
-	budget := &windowsNamespacePurgeBudget{entries: 1}
-	if err := pinWindowsNamespacePurgeTree(root, 0, budget, descriptors, true); err != nil {
+	socketPath := ""
+	if installPurge {
+		socketPath = filepath.Join(request.Root, "ipc", "defenseclaw_ipc.sock")
+	}
+	sealChildren := installPurge && request.Operation == WindowsNamespacePurgeOperationSealOnly
+	if err := pinWindowsNamespacePurgeTree(root, 0, budget, descriptors, true, allowACLDiff, socketPath, sealChildren); err != nil {
 		return err
 	}
 	if windowsNamespacePurgeTreeContainsIdentity(root, executableIdentity) {
@@ -443,16 +693,22 @@ func purgeWindowsNamespaceRootPrivileged(
 			return fmt.Errorf("enterprise hooks: Windows namespace purge post-pin check: %w", err)
 		}
 	}
-	if err := revalidateWindowsNamespacePurgeTree(root, descriptors, true, false); err != nil {
+	if err := revalidateWindowsNamespacePurgeTree(root, descriptors, true, false, allowACLDiff); err != nil {
 		return fmt.Errorf("enterprise hooks: Windows namespace purge tree changed after full preflight: %w", err)
 	}
 	if request.ValidateOnly {
 		return nil
 	}
+	if installPurge && request.Operation == WindowsNamespacePurgeOperationSealOnly {
+		if err := sealWindowsNamespacePurgeTree(root, descriptors, true); err != nil {
+			return err
+		}
+		return revalidateWindowsNamespacePurgeTree(root, descriptors, true, false, false)
+	}
 	if err := applyWindowsNamespacePurgeQuarantine(root.handle, descriptors.quarantine); err != nil {
 		return err
 	}
-	if err := revalidateWindowsNamespacePurgeTree(root, descriptors, true, true); err != nil {
+	if err := revalidateWindowsNamespacePurgeTree(root, descriptors, true, true, allowACLDiff); err != nil {
 		return fmt.Errorf("enterprise hooks: Windows namespace purge tree changed after quarantine: %w", err)
 	}
 	if windowsNamespacePurgePostValidation != nil {
@@ -460,7 +716,7 @@ func purgeWindowsNamespaceRootPrivileged(
 			return fmt.Errorf("enterprise hooks: Windows namespace purge post-validation check: %w", err)
 		}
 	}
-	if err := deleteWindowsNamespacePurgeNode(root, descriptors, true, report); err != nil {
+	if err := deleteWindowsNamespacePurgeNode(root, descriptors, true, allowACLDiff, report); err != nil {
 		return err
 	}
 	report.Removed = true
@@ -582,6 +838,17 @@ func openWindowsNamespacePurgeChild(
 	directoryOnly bool,
 	share uint32,
 ) (windows.Handle, error) {
+	return openWindowsNamespacePurgeChildWithSocket(parent, name, access, directoryOnly, share, false)
+}
+
+func openWindowsNamespacePurgeChildWithSocket(
+	parent windows.Handle,
+	name string,
+	access uint32,
+	directoryOnly bool,
+	share uint32,
+	allowUnixSocket bool,
+) (windows.Handle, error) {
 	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "\\/\x00") {
 		return 0, fmt.Errorf("enterprise hooks: invalid namespace cleanup child name")
 	}
@@ -589,11 +856,21 @@ func openWindowsNamespacePurgeChild(
 	if err != nil {
 		return 0, err
 	}
+	objectFlags := uint32(windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE)
+	if allowUnixSocket {
+		// The AF_UNIX filesystem tag rejects OBJ_DONT_REPARSE even when
+		// FILE_OPEN_REPARSE_POINT requests the leaf itself. The parent is a
+		// pinned non-reparse directory handle; the leaf still opens without
+		// following, and its exact tag is checked before any action. Some
+		// Windows builds reject even this open for stale sockets; fail closed
+		// rather than trying an unpinned path deletion.
+		objectFlags = windows.OBJ_CASE_INSENSITIVE
+	}
 	attributes := windows.OBJECT_ATTRIBUTES{
 		Length:        uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
 		RootDirectory: parent,
 		ObjectName:    objectName,
-		Attributes:    windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
+		Attributes:    objectFlags,
 	}
 	options := uint32(
 		windows.FILE_OPEN_REPARSE_POINT |
@@ -621,6 +898,44 @@ func openWindowsNamespacePurgeChild(
 	return handle, err
 }
 
+// openWindowsNamespacePurgeExclusive opens one entry of a purge with no
+// sharing, as openWindowsNamespacePurgeChildWithSocket does. While another
+// program holds the entry open (a sharing violation) it tries again until
+// the purge's sharing deadline; the entries pinned so far stay pinned, so
+// nothing can change under the purge in the meantime. An entry still held at
+// the deadline refuses the purge with its full path.
+func openWindowsNamespacePurgeExclusive(
+	budget *windowsNamespacePurgeBudget,
+	parent windows.Handle,
+	name string,
+	label string,
+	access uint32,
+	directoryOnly bool,
+	allowUnixSocket bool,
+) (windows.Handle, error) {
+	for {
+		handle, err := openWindowsNamespacePurgeChildWithSocket(parent, name, access, directoryOnly, 0, allowUnixSocket)
+		if err == nil || !windowsNamespacePurgeSharingViolation(err) {
+			return handle, err
+		}
+		now := time.Now()
+		if budget.sharingDeadline.IsZero() {
+			budget.sharingDeadline = now.Add(windowsNamespacePurgeSharingWait)
+		}
+		if !now.Before(budget.sharingDeadline) {
+			return 0, fmt.Errorf(
+				"%s is held open by another program (still open after waiting %s; close or end that program and run the same command again): %w",
+				label, windowsNamespacePurgeSharingWait, err,
+			)
+		}
+		time.Sleep(windowsNamespacePurgeSharingPoll)
+	}
+}
+
+func windowsNamespacePurgeSharingViolation(err error) bool {
+	return errors.Is(err, windows.STATUS_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_SHARING_VIOLATION)
+}
+
 func windowsNamespacePurgeChildMissing(err error) bool {
 	return errors.Is(err, windows.STATUS_OBJECT_NAME_NOT_FOUND) ||
 		errors.Is(err, windows.STATUS_OBJECT_PATH_NOT_FOUND) ||
@@ -635,6 +950,9 @@ func pinWindowsNamespacePurgeTree(
 	budget *windowsNamespacePurgeBudget,
 	descriptors *windowsNamespacePurgeDescriptorSet,
 	root bool,
+	allowACLDiff bool,
+	socketPath string,
+	sealChildren bool,
 ) error {
 	if node == nil || node.handle == 0 || budget == nil {
 		return fmt.Errorf("enterprise hooks: Windows namespace purge preflight state is unavailable")
@@ -645,7 +963,7 @@ func pinWindowsNamespacePurgeTree(
 			windowsQuarantineMaxDepth,
 		)
 	}
-	if err := validateWindowsNamespacePurgeNode(node, descriptors, root, false); err != nil {
+	if err := validateWindowsNamespacePurgeNode(node, descriptors, root, false, allowACLDiff); err != nil {
 		return err
 	}
 	if !node.directory {
@@ -669,22 +987,28 @@ func pinWindowsNamespacePurgeTree(
 		access := uint32(windows.FILE_LIST_DIRECTORY | windows.FILE_READ_ATTRIBUTES |
 			windows.READ_CONTROL | windows.SYNCHRONIZE | windows.DELETE |
 			windows.FILE_WRITE_ATTRIBUTES)
-		handle, err := openWindowsNamespacePurgeChild(node.handle, name, access, false, 0)
+		if sealChildren {
+			access |= windows.WRITE_DAC | windows.WRITE_OWNER
+		}
+		label := filepath.Join(node.label, name)
+		allowUnixSocket := socketPath != "" && strings.EqualFold(label, socketPath)
+		handle, err := openWindowsNamespacePurgeExclusive(budget, node.handle, name, label, access, false, allowUnixSocket)
 		if err != nil {
 			return fmt.Errorf("enterprise hooks: pin Windows namespace purge child %q without following: %w", name, err)
 		}
-		directory, identity, err := inspectWindowsNamespacePurgeHandle(handle)
+		directory, identity, err := inspectWindowsNamespacePurgeHandle(handle, allowUnixSocket)
 		if err != nil {
 			_ = windows.CloseHandle(handle)
 			return fmt.Errorf("enterprise hooks: reject Windows namespace purge child %q: %w", name, err)
 		}
 		child := &windowsNamespacePurgeNode{
-			parent:    node.handle,
-			name:      name,
-			label:     filepath.Join(node.label, name),
-			handle:    handle,
-			directory: directory,
-			identity:  identity,
+			parent:          node.handle,
+			name:            name,
+			label:           label,
+			handle:          handle,
+			directory:       directory,
+			identity:        identity,
+			allowUnixSocket: allowUnixSocket,
 		}
 		node.children = append(node.children, child)
 		if err := pinWindowsNamespacePurgeTree(
@@ -693,6 +1017,9 @@ func pinWindowsNamespacePurgeTree(
 			budget,
 			descriptors,
 			false,
+			allowACLDiff,
+			socketPath,
+			sealChildren,
 		); err != nil {
 			return err
 		}
@@ -700,16 +1027,26 @@ func pinWindowsNamespacePurgeTree(
 	return nil
 }
 
-func inspectWindowsNamespacePurgeHandle(handle windows.Handle) (bool, string, error) {
-	attributes, err := windowsQuarantineHandleAttributes(handle)
+func inspectWindowsNamespacePurgeHandle(handle windows.Handle, allowUnixSocket bool) (bool, string, error) {
+	var info windowsFileAttributeTagInfo
+	err := windows.GetFileInformationByHandleEx(
+		handle,
+		windows.FileAttributeTagInfo,
+		(*byte)(unsafe.Pointer(&info)),
+		uint32(unsafe.Sizeof(info)),
+	)
 	if err != nil {
 		return false, "", err
 	}
-	if attributes&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DEVICE) != 0 {
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_DEVICE != 0 {
 		return false, "", fmt.Errorf("object is a reparse point or device")
 	}
-	directory := attributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
-	identity, err := windowsNamespacePurgeHandleIdentity(handle, directory, true)
+	directory := info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 &&
+		(!allowUnixSocket || directory || info.ReparseTag != windowsNamespacePurgeAFUnixTag) {
+		return false, "", fmt.Errorf("object has an unsafe reparse tag 0x%08x", info.ReparseTag)
+	}
+	identity, err := windowsNamespacePurgeHandleIdentityWithSocket(handle, directory, true, allowUnixSocket)
 	if err != nil {
 		return false, "", err
 	}
@@ -721,11 +1058,21 @@ func windowsNamespacePurgeHandleIdentity(
 	directory bool,
 	requireSingleLink bool,
 ) (string, error) {
+	return windowsNamespacePurgeHandleIdentityWithSocket(handle, directory, requireSingleLink, false)
+}
+
+func windowsNamespacePurgeHandleIdentityWithSocket(
+	handle windows.Handle,
+	directory bool,
+	requireSingleLink bool,
+	allowUnixSocket bool,
+) (string, error) {
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
 		return "", err
 	}
-	if info.FileAttributes&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DEVICE) != 0 ||
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_DEVICE != 0 ||
+		(info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 && !allowUnixSocket) ||
 		(info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0) != directory {
 		return "", fmt.Errorf("object has an unsafe type")
 	}
@@ -745,16 +1092,24 @@ func validateWindowsNamespacePurgeNode(
 	descriptors *windowsNamespacePurgeDescriptorSet,
 	root bool,
 	rootQuarantined bool,
+	allowACLDiff bool,
 ) error {
 	if node == nil || node.handle == 0 {
 		return fmt.Errorf("enterprise hooks: Windows namespace purge handle is unavailable")
 	}
-	directory, identity, err := inspectWindowsNamespacePurgeHandle(node.handle)
+	directory, identity, err := inspectWindowsNamespacePurgeHandle(node.handle, node.allowUnixSocket)
 	if err != nil {
 		return fmt.Errorf("enterprise hooks: inspect Windows namespace purge object %s: %w", node.label, err)
 	}
 	if directory != node.directory || identity != node.identity {
 		return fmt.Errorf("enterprise hooks: Windows namespace purge object identity changed: %s", node.label)
+	}
+	if allowACLDiff && (!root || !rootQuarantined) {
+		// The uninstall purges are authorized by a protected
+		// identity-bound intent, not by each child's mutable DACL. Every
+		// inode is still pinned exclusively, type-checked without following,
+		// and checked for hard links before deletion.
+		return nil
 	}
 	var allowed []*windows.SECURITY_DESCRIPTOR
 	if root && rootQuarantined {
@@ -772,6 +1127,21 @@ func validateWindowsNamespacePurgeNode(
 	matched, err := windowsNamespacePurgeHandleMatches(node.handle, allowed)
 	if err != nil {
 		return fmt.Errorf("enterprise hooks: inspect Windows namespace purge descriptor for %s: %w", node.label, err)
+	}
+	if !matched && !root {
+		// Below a root that matched its own canonical descriptor, an
+		// object of a standalone purge may carry only the ACEs it inherited
+		// from it: the shape a first install killed before it protected the
+		// object leaves (p0-round:GAP-1365, GAP-1587). Only SYSTEM and
+		// Administrators can write it, as for the canonical shapes.
+		inherited := descriptors.inheritedFiles
+		if node.directory {
+			inherited = descriptors.inheritedDirectories
+		}
+		matched, err = windowsNamespacePurgeInheritedMatches(node.handle, inherited)
+		if err != nil {
+			return fmt.Errorf("enterprise hooks: inspect Windows namespace purge descriptor for %s: %w", node.label, err)
+		}
 	}
 	if !matched {
 		return fmt.Errorf("enterprise hooks: Windows namespace purge object has a foreign descriptor: %s", node.label)
@@ -817,8 +1187,9 @@ func revalidateWindowsNamespacePurgeTree(
 	descriptors *windowsNamespacePurgeDescriptorSet,
 	root bool,
 	rootQuarantined bool,
+	allowACLDiff bool,
 ) error {
-	if err := validateWindowsNamespacePurgeNode(node, descriptors, root, rootQuarantined); err != nil {
+	if err := validateWindowsNamespacePurgeNode(node, descriptors, root, rootQuarantined, allowACLDiff); err != nil {
 		return err
 	}
 	if node.directory {
@@ -827,7 +1198,7 @@ func revalidateWindowsNamespacePurgeTree(
 		}
 	}
 	for _, child := range node.children {
-		if err := revalidateWindowsNamespacePurgeTree(child, descriptors, false, false); err != nil {
+		if err := revalidateWindowsNamespacePurgeTree(child, descriptors, false, false, allowACLDiff); err != nil {
 			return err
 		}
 	}
@@ -962,13 +1333,52 @@ func applyWindowsNamespacePurgeQuarantine(
 	return nil
 }
 
+// sealWindowsNamespacePurgeTree makes the identity-bound InstallRoot readable
+// by the elevated finalizer before its later deletion. Every name and inode
+// remains pinned by an exclusive no-follow handle throughout the operation.
+func sealWindowsNamespacePurgeTree(
+	node *windowsNamespacePurgeNode,
+	descriptors *windowsNamespacePurgeDescriptorSet,
+	root bool,
+) error {
+	if err := validateWindowsNamespacePurgeNode(node, descriptors, root, false, true); err != nil {
+		return err
+	}
+	if node.directory {
+		if err := requireWindowsNamespacePurgeNames(node.handle, node.names, node.label); err != nil {
+			return err
+		}
+	}
+	for _, child := range node.children {
+		if err := sealWindowsNamespacePurgeTree(child, descriptors, false); err != nil {
+			return err
+		}
+	}
+	desired := descriptors.adminFile
+	if node.directory {
+		desired = descriptors.quarantine
+	}
+	if err := applyWindowsNamespacePurgeQuarantine(node.handle, desired); err != nil {
+		return fmt.Errorf("enterprise hooks: seal Windows namespace object %s: %w", node.label, err)
+	}
+	matched, err := windowsNamespacePurgeHandleMatches(node.handle, []*windows.SECURITY_DESCRIPTOR{desired})
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: verify sealed Windows namespace object %s: %w", node.label, err)
+	}
+	if !matched {
+		return fmt.Errorf("enterprise hooks: Windows namespace object did not accept canonical seal: %s", node.label)
+	}
+	return nil
+}
+
 func deleteWindowsNamespacePurgeNode(
 	node *windowsNamespacePurgeNode,
 	descriptors *windowsNamespacePurgeDescriptorSet,
 	root bool,
+	allowACLDiff bool,
 	report *WindowsNamespacePurgeReport,
 ) error {
-	if err := validateWindowsNamespacePurgeNode(node, descriptors, root, root); err != nil {
+	if err := validateWindowsNamespacePurgeNode(node, descriptors, root, root, allowACLDiff); err != nil {
 		return fmt.Errorf("enterprise hooks: Windows namespace purge object changed before deletion: %w", err)
 	}
 	if node.directory {
@@ -977,7 +1387,7 @@ func deleteWindowsNamespacePurgeNode(
 		}
 	}
 	for _, child := range node.children {
-		if err := deleteWindowsNamespacePurgeNode(child, descriptors, false, report); err != nil {
+		if err := deleteWindowsNamespacePurgeNode(child, descriptors, false, allowACLDiff, report); err != nil {
 			return err
 		}
 	}
@@ -995,7 +1405,7 @@ func deleteWindowsNamespacePurgeNode(
 		return err
 	}
 	if !node.directory {
-		identity, err := windowsNamespacePurgeHandleIdentity(node.handle, false, true)
+		identity, err := windowsNamespacePurgeHandleIdentityWithSocket(node.handle, false, true, node.allowUnixSocket)
 		if err != nil || identity != node.identity {
 			if err == nil {
 				err = fmt.Errorf("file identity changed")

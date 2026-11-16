@@ -13,12 +13,15 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
@@ -152,7 +155,7 @@ func TestSandboxAuthorityRegroupStopsAnOpenedHostPort(t *testing.T) {
 
 	f.setGroups(sbxBob, "dc-sbx-contractors")
 	code, cur := f.current(sbxBob, resp.Registration.ID)
-	const want = "This sandbox was stopped: your profile no longer allows host ports. Start it again: "
+	const want = "This sandbox was stopped: your profile no longer allows host ports. Start it again without --host-port: "
 	if code != http.StatusOK || !cur.Revoked || !strings.HasPrefix(cur.RevokedReason, want) {
 		t.Fatalf("current after the regroup: %d %+v", code, cur)
 	}
@@ -170,6 +173,57 @@ func TestSandboxAuthorityRegroupStopsAnOpenedHostPort(t *testing.T) {
 	refused := f.resolve(sbxAlice, req)
 	if run, _, _ := auth.store.Run(sbxAlice.UID, refused.Registration.ID); len(run.HostPorts) != 0 {
 		t.Fatalf("host ports opened under allow_host_ports false = %v", run.HostPorts)
+	}
+}
+
+// GAP-0078: on a managed computer a --host-port the policy does not open is
+// a fatal violation (GAP-0558), so the re-match of a sandbox created with
+// one under a profile that allows host ports stopped it after a regroup to
+// a profile that does not with "no longer allows the settings this sandbox
+// was started with". The stop now names host ports and says to start again
+// without --host-port.
+func TestSandboxAuthorityManagedRegroupNamesTheHostPortStop(t *testing.T) {
+	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
+	f.cfg.DeploymentMode = string(config.DeploymentModeManagedEnterprise)
+	no := false
+	f.cfg.Guardrail.Profiles["contractors"] = config.GuardrailProfile{Description: "Contractors",
+		Sandbox: &config.OpenShellAdminConfig{AllowHostPorts: &no}}
+	f.setGroups(sbxBob, "dc-sbx-devs")
+	req := claudeResolve()
+	req.Flags = sandboxrelay.RunFlags{Pack: "open", HostPorts: []int{5432}}
+	resp := f.resolve(sbxBob, req)
+	if rec := f.bind(sbxBob, resp.Registration.ID, 1); rec.Code != http.StatusOK {
+		t.Fatalf("bind: %d %s", rec.Code, rec.Body.String())
+	}
+	f.setGroups(sbxBob, "dc-sbx-contractors")
+	code, cur := f.current(sbxBob, resp.Registration.ID)
+	const want = "This sandbox was stopped: your profile no longer allows host ports. Start it again without --host-port: "
+	if code != http.StatusOK || !cur.Revoked || !strings.HasPrefix(cur.RevokedReason, want) {
+		t.Fatalf("current after the regroup: %d %+v", code, cur)
+	}
+}
+
+// sandboxRematchStopField names host ports only when they are all a run
+// violates (GAP-0078).
+func TestSandboxRematchStopField(t *testing.T) {
+	hostPort := packs.Violation{Key: sandboxHostPortsKey, Attempted: "5432", Fatal: true}
+	yolo := packs.Violation{Key: "yolo", Attempted: "on", Fatal: true}
+	for _, tc := range []struct {
+		name         string
+		violations   []packs.Violation
+		opened, open []int
+		want         string
+	}{
+		{"nothing", nil, []int{5432}, []int{5432}, ""},
+		{"a warning only", []packs.Violation{{Key: "yolo"}}, nil, nil, ""},
+		{"an opened port closed", nil, []int{5432}, nil, sandboxStopFieldHostPorts},
+		{"a refused --host-port", []packs.Violation{hostPort}, []int{5432}, nil, sandboxStopFieldHostPorts},
+		{"a refused --host-port and another fatal one", []packs.Violation{hostPort, yolo}, []int{5432}, nil, sandboxStopFieldSettings},
+		{"another fatal one first", []packs.Violation{yolo, hostPort}, nil, nil, sandboxStopFieldSettings},
+	} {
+		if got := sandboxRematchStopField(tc.violations, tc.opened, tc.open); got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
 
@@ -488,5 +542,137 @@ func TestSandboxAuthorityStopFailsClosedWhenTheRevokeIsNotStored(t *testing.T) {
 				t.Fatalf("the revoke was not stored once the store is writable: %+v", reg)
 			}
 		})
+	}
+}
+
+// GAP-0367: a managed Mac's burst of 200 relayed PreToolUse calls from one
+// sandbox, 32 at a time, had half its calls answered after more than 5 s
+// while the gateway's own evaluation took about 50 ms: every relayed call
+// took the registration's re-match lock, so the sandbox's calls waited in
+// one line, and behind whatever a call holding it waited for. A call with
+// nothing due now never takes the lock: 32 concurrent calls are answered
+// while a re-match holds it, and their latency stays far inside the budget.
+func TestSandboxRelayedHookBurstDoesNotQueueOnTheRematchLock(t *testing.T) {
+	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
+	// The train refuses a caller whose group membership is unconfirmed.
+	f.setGroups(sbxAlice, "dc-sbx-contractors")
+	f.publishFirstGeneration()
+	resp := f.live(sbxAlice, 1)
+	if rec := f.hook(sbxAlice, resp.Registration.ID, "claudecode", nil); rec.Code != http.StatusOK {
+		t.Fatalf("first hook: %d %s", rec.Code, rec.Body.String())
+	}
+	auth, _ := f.api.sandboxAuth()
+	const held, budget = 3 * time.Second, time.Second
+	// 32 as in the cell, within what one caller may hold at once here (a
+	// quarter of the gateway's bound, which follows GOMAXPROCS).
+	workers := min(32, max(1, f.api.hookCallerLimits.globalLimit()/4))
+	unlock := auth.rematch.lock(resp.Registration.ID)
+	release := time.AfterFunc(held, unlock)
+	defer func() {
+		if release.Stop() {
+			unlock()
+		}
+	}()
+	latencies := make([]time.Duration, workers)
+	codes := make([]int, workers)
+	var wg sync.WaitGroup
+	for i := range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			began := time.Now()
+			codes[i] = f.hook(sbxAlice, resp.Registration.ID, "claudecode", nil).Code
+			latencies[i] = time.Since(began)
+		}()
+	}
+	wg.Wait()
+	slices.Sort(latencies)
+	t.Logf("%d concurrent relayed hooks while a re-match holds the lock: p50=%v max=%v", workers, latencies[workers/2], latencies[workers-1])
+	for i, code := range codes {
+		if code != http.StatusOK {
+			t.Fatalf("call %d: status %d", i, code)
+		}
+	}
+	if latencies[workers-1] >= budget {
+		t.Fatalf("slowest relayed hook took %v; a call with no re-match due waited for the lock (budget %v)", latencies[workers-1], budget)
+	}
+}
+
+// sandboxStoreWriteBetweenReads is a registration store on which a
+// concurrent re-match stores its result right after a relayed call's first
+// read: write runs once, after the first Get, Run or GetWithRun returns.
+type sandboxStoreWriteBetweenReads struct {
+	sandboxRegistrationStore
+	once  sync.Once
+	write func()
+}
+
+func (s *sandboxStoreWriteBetweenReads) Get(uid int, id string) (sandboxreg.Registration, bool, error) {
+	defer s.once.Do(s.write)
+	return s.sandboxRegistrationStore.Get(uid, id)
+}
+
+func (s *sandboxStoreWriteBetweenReads) Run(uid int, id string) (sandboxreg.Run, bool, error) {
+	defer s.once.Do(s.write)
+	return s.sandboxRegistrationStore.Run(uid, id)
+}
+
+func (s *sandboxStoreWriteBetweenReads) GetWithRun(uid int, id string) (sandboxreg.Registration, bool, sandboxreg.Run, bool, error) {
+	defer s.once.Do(s.write)
+	return s.sandboxRegistrationStore.GetWithRun(uid, id)
+}
+
+// GAP-0367 follow-up: the lock-free due check read the registration and
+// its run record in two store calls. A re-match that stored a new
+// registration and run between them paired the old registration with the
+// new policy key, so the call found nothing due and was answered under the
+// registration as it was before the re-match. Read together, the call sees
+// either the stale pair (due: it re-reads under the lock) or the new one.
+func TestSandboxRematchDueReadsTheRegistrationAndItsRunTogether(t *testing.T) {
+	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
+	// The train refuses a caller whose group membership is unconfirmed.
+	f.setGroups(sbxAlice, "dc-sbx-contractors")
+	f.publishFirstGeneration()
+	resp := f.live(sbxAlice, 1)
+	if rec := f.hook(sbxAlice, resp.Registration.ID, "claudecode", nil); rec.Code != http.StatusOK {
+		t.Fatalf("first hook: %d %s", rec.Code, rec.Body.String())
+	}
+	auth, _ := f.api.sandboxAuth()
+	ctx := context.Background()
+	id := resp.Registration.ID
+	stored, ok, run, hasRun, err := auth.store.GetWithRun(sbxAlice.UID, id)
+	if err != nil || !ok || !hasRun {
+		t.Fatalf("stored registration: %+v %v %v %v", stored, ok, hasRun, err)
+	}
+	key := f.api.sandboxPolicyKey(ctx, f.api.liveBaseConfig(ctx))
+	if key == "" {
+		t.Fatal("no policy key")
+	}
+	// The registration was last matched under an older policy: a re-match
+	// is due.
+	stale := run
+	stale.PolicyKey = "policy-before-the-change"
+	if err := auth.store.UpdateRun(sbxAlice.UID, stored, &stale); err != nil {
+		t.Fatal(err)
+	}
+	// The concurrent re-match stores the registration it matched and the
+	// current policy key in one write.
+	const rematched = "matched-by-the-concurrent-rematch"
+	next := stored
+	next.MatchedGroup = rematched
+	current := run
+	current.PolicyKey = key
+	writable := auth.store
+	auth.store = &sandboxStoreWriteBetweenReads{sandboxRegistrationStore: writable, write: func() {
+		if err := writable.UpdateRun(sbxAlice.UID, next, &current); err != nil {
+			t.Errorf("concurrent re-match write: %v", err)
+		}
+	}}
+	t.Cleanup(func() { auth.store = writable })
+
+	got := f.api.sandboxRematchIfDue(ctx, auth, sbxAlice, stored)
+	if got.MatchedGroup != rematched {
+		t.Fatalf("relayed call answered under the registration before the re-match (matched group %q), want %q",
+			got.MatchedGroup, rematched)
 	}
 }

@@ -81,13 +81,14 @@ func TestGoldenTwoUsersMixedInstalls(t *testing.T) {
 	if len(p.Binaries) != 0 {
 		t.Errorf("monitor binaries anchor overlaps live pid anchors: %v", p.Binaries)
 	}
+	// One file_open entry (GAP-0218): NoPost exemption, then the ssh,
+	// profile and autostart PID selectors.
 	hooks := selectorsOf(t, p)
-	if len(hooks) != 2 {
-		t.Fatalf("hooks = %d, want the exact-name hook and the directory hook", len(hooks))
+	if len(hooks) != 4 || p.tp.Spec.LsmHooks[0].Hook != "file_open" {
+		t.Fatalf("hooks = %d, want one file_open entry, then path_link, path_rename and path_symlink", len(hooks))
 	}
-	// hook 0: NoPost exemption, ssh and persistence PID selectors.
-	if len(hooks[0]) != 3 || len(hooks[1]) != 1 {
-		t.Fatalf("selector counts %d/%d, want 3/1", len(hooks[0]), len(hooks[1]))
+	if len(hooks[0]) != 4 {
+		t.Fatalf("%d selectors, want 4", len(hooks[0]))
 	}
 	if hooks[0][0].MatchActions[0].Action != "NoPost" {
 		t.Fatalf("the ssh exemption must come first: %+v", hooks[0][0])
@@ -126,7 +127,7 @@ func TestAutoUpdateKeepsRunningOldVersionAnchored(t *testing.T) {
 	}
 }
 
-func TestSixtyFiveRootsAnchorEightWithinMeasuredHookBudget(t *testing.T) {
+func TestSixtyFiveRootsAnchorOnePIDGroupInOneHook(t *testing.T) {
 	w := newWorld(t, baseTargets)
 	var procs []Proc
 	for i := 0; i < 65; i++ {
@@ -141,7 +142,7 @@ func TestSixtyFiveRootsAnchorEightWithinMeasuredHookBudget(t *testing.T) {
 	if len(p.PIDs) != MaxPIDs || c.OverLimit != 65-MaxPIDs {
 		t.Fatalf("anchored %d, over limit %d", len(p.PIDs), c.OverLimit)
 	}
-	if p.PIDs[len(p.PIDs)-1] != 7007 {
+	if MaxPIDs != 4 || p.PIDs[len(p.PIDs)-1] != 7003 {
 		t.Fatalf("the oldest sessions must win the budget; last pid = %d", p.PIDs[len(p.PIDs)-1])
 	}
 	if !anyContains(c.Notes, WarnRootsOverLimit) {
@@ -162,11 +163,13 @@ func TestSixtyFiveRootsAnchorEightWithinMeasuredHookBudget(t *testing.T) {
 			}
 		}
 	}
-	if seen[7004] == 0 || seen[7007] == 0 || seen[7008] != 0 {
+	if seen[7000] == 0 || seen[7003] == 0 || seen[7004] != 0 {
 		t.Fatalf("PID groups include an over-limit root or omit a covered root: %v", seen)
 	}
-	if hooks := len(p.tp.Spec.LsmHooks); hooks != 2 {
-		t.Fatalf("%d LSM hook instances for the eight-root cap, want 2", hooks)
+	// One file_open entry: Tetragon 1.7.0 runs only the last entry of a
+	// hook name (GAP-0218), so the PID group cannot spill into a second one.
+	if hooks := hookCount(p, "file_open"); hooks != 1 || len(p.tp.Spec.LsmHooks) != 4 {
+		t.Fatalf("%d file_open entries of %d hooks, want 1 of 4", hooks, len(p.tp.Spec.LsmHooks))
 	}
 }
 
@@ -373,8 +376,8 @@ func TestHostileLinksDropOnlyTheirOwnPath(t *testing.T) {
 			t.Fatalf("notes = %v, want the three hostile links reported", c.Notes)
 		}
 	}
-	if got := len(selectorsOf(t, p)[0]); got != 3 {
-		t.Fatalf("%d selectors in hook 0, want exemption and both PID controls", got)
+	if got := len(selectorsOf(t, p)[0]); got != 4 {
+		t.Fatalf("%d selectors in the hook, want the exemption and the three PID controls", got)
 	}
 }
 

@@ -31,9 +31,9 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.css.query import NoMatches
 from textual.reactive import reactive
-from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
+from defenseclaw.tui.modal import GuardedModalScreen
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 from defenseclaw.tui.widgets.list_window import rows_that_fit, window_lines
 
@@ -107,7 +107,7 @@ def filter_choices(query: str, choices: tuple[PanelChoice, ...]) -> list[PanelCh
     return [c for _, _, c in scored]
 
 
-class PanelJumperScreen(ModalScreen[str | None]):
+class PanelJumperScreen(GuardedModalScreen[str | None]):
     """Fuzzy picker over all visible panels."""
 
     CSS = f"""

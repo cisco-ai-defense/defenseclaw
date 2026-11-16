@@ -15,10 +15,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -29,11 +31,44 @@ var (
 	windowsEnterpriseAdministratorCheck = requireWindowsEnterpriseAdministrator
 	windowsEnterpriseHookExecutable     = defaultWindowsEnterpriseHookExecutable
 	windowsEnterpriseHookTrustCheck     = func(path string) error {
-		return managed.ValidateTrustedFilePath(path, "enterprise hook executable")
+		return managed.ValidateExecutableFilePath(path, "enterprise hook executable")
 	}
 	windowsEnterpriseTargetImpersonation    = withWindowsEnterpriseTargetImpersonation
 	windowsEnterpriseConnectorCertification = certifyWindowsEnterpriseConnector
+	// windowsConnectorSupportedOnHost is the native Windows certification
+	// table; tests of the generic lifecycle replace it for a fixture name.
+	windowsConnectorSupportedOnHost = connector.ConnectorSupportedOnHostOS
+	// The CLI registers the shared OpenCode service.json writer without an
+	// enterprisehooks -> enterprisepolicy import cycle.
+	windowsOpenCodeServicePortWriter func(string, int) (int, error)
 )
+
+func SetWindowsOpenCodeServicePortWriter(write func(string, int) (int, error)) {
+	windowsOpenCodeServicePortWriter = write
+}
+
+func ensureWindowsManagedOpenCodePort(connectorName, home, sid string, assigned int, required bool) error {
+	if connectorName != "opencode" {
+		return nil
+	}
+	if assigned <= 0 {
+		if required {
+			return fmt.Errorf("enterprise hooks: OpenCode service port for target SID %s is unavailable", sid)
+		}
+		return nil
+	}
+	if windowsOpenCodeServicePortWriter == nil {
+		return fmt.Errorf("enterprise hooks: OpenCode service port writer is unavailable")
+	}
+	port, err := windowsOpenCodeServicePortWriter(home, assigned)
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: OpenCode service port for target SID %s: %w", sid, err)
+	}
+	if port != assigned {
+		return fmt.Errorf("enterprise hooks: OpenCode service port for target SID %s differs from the guardian assignment", sid)
+	}
+	return nil
+}
 
 func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, bool, error) {
 	if err := requireWindowsEnterpriseManagedAgentVersion(
@@ -50,6 +85,13 @@ func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, b
 		return InstallResult{}, true, err
 	}
 	defer unlockRuntime()
+	if opts.WindowsTargetLogon != WindowsTargetLogonActive {
+		sid, err := validateWindowsEnterpriseTargetSID(opts.OwnerSID)
+		if err != nil {
+			return InstallResult{}, true, err
+		}
+		defer useWindowsEnterpriseInstallLogon(sid.String(), opts.WindowsTargetLogon)()
+	}
 	var result InstallResult
 	switch strings.ToLower(strings.TrimSpace(opts.ConnectorName)) {
 	case "claudecode":
@@ -68,22 +110,6 @@ func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, b
 		}
 	}
 	return result, true, err
-}
-
-// windowsEnterpriseHookFailMode is the authoritative managed-native hook
-// policy used by rendering, lock publication, and verification. The protected
-// Windows deployment never permits Codex or Claude hooks to inherit a
-// fail-open normal-mode setting.
-func windowsEnterpriseHookFailMode(connectorName, configured string) string {
-	name := strings.ToLower(strings.TrimSpace(connectorName))
-	switch name {
-	case "codex", "claudecode", "cursor":
-		return "closed"
-	}
-	if _, perUser := windowsStandalonePerUserConnector(name); perUser {
-		return "closed"
-	}
-	return strings.TrimSpace(configured)
 }
 
 func platformVerify(ctx context.Context, opts InstallOptions) (InstallResult, bool, error) {
@@ -151,7 +177,18 @@ func requireWindowsStandaloneAgentVersionUnchanged(opts InstallOptions, result I
 	)
 }
 
+// requireWindowsEnterpriseManagedAgentVersion gates install and verify on
+// agent-version evidence: an explicit, well-formed version at or above the
+// Windows enterprise minimum for Codex, Claude Code and Cursor. Under Secure
+// Client (#1163) it does not gate: missing, malformed or unsupported versions
+// select the reviewed best-effort contract in open delivery, while connector
+// certification, enrollment and runtime authentication stay mandatory. The
+// standalone profile's per-target floor is
+// requireWindowsEnterpriseStandaloneAgentFloor.
 func requireWindowsEnterpriseManagedAgentVersion(connectorName, raw string) error {
+	if secureClientHookDelivery() {
+		return nil
+	}
 	if err := requireWindowsEnterpriseAgentVersion(raw); err != nil {
 		return err
 	}
@@ -186,6 +223,18 @@ func requireWindowsEnterpriseManagedAgentVersion(connectorName, raw string) erro
 	return nil
 }
 
+// requireWindowsEnterpriseAgentVersionOutsideSecureClient keeps the explicit
+// agent_version requirement for every profile but Secure Client, which
+// installs without version evidence (#1163).
+func requireWindowsEnterpriseAgentVersionOutsideSecureClient(raw string) error {
+	if secureClientHookDelivery() {
+		return nil
+	}
+	return requireWindowsEnterpriseAgentVersion(raw)
+}
+
+// compareWindowsEnterpriseVersion orders dotted numeric versions; the
+// standalone floors and agent-version discovery use it.
 func compareWindowsEnterpriseVersion(left, right string) int {
 	parse := func(value string) [3]int {
 		var result [3]int
@@ -216,7 +265,7 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 	if err := windowsEnterpriseAdministratorCheck(); err != nil {
 		return InstallResult{}, err
 	}
-	if err := requireWindowsEnterpriseAgentVersion(opts.AgentVersion); err != nil {
+	if err := requireWindowsEnterpriseAgentVersionOutsideSecureClient(opts.AgentVersion); err != nil {
 		return InstallResult{}, err
 	}
 	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
@@ -265,22 +314,23 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 	}
 
 	setupOpts := connector.SetupOpts{
-		DataDir:            dataDir,
-		ProxyAddr:          strings.TrimSpace(opts.ProxyAddr),
-		APIAddr:            strings.TrimSpace(opts.APIAddr),
-		APIToken:           strings.TrimSpace(opts.APIToken),
-		HookAPIToken:       strings.TrimSpace(opts.APIToken),
-		HookAPITokenScoped: true,
-		OTLPPathToken:      strings.TrimSpace(opts.OTLPPathToken),
-		Interactive:        false,
-		ManagedEnterprise:  true,
-		WorkspaceDir:       strings.TrimSpace(opts.WorkspaceDir),
-		HookFailMode:       windowsEnterpriseHookFailMode(name, opts.HookFailMode),
-		GuardrailMode:      strings.TrimSpace(opts.GuardrailMode),
-		HILTEnabled:        opts.HILTEnabled,
-		AgentVersion:       strings.TrimSpace(opts.AgentVersion),
-		HookContractID:     strings.TrimSpace(opts.HookContractID),
-		HookExecutable:     hookExecutable,
+		DataDir:                  dataDir,
+		ProxyAddr:                strings.TrimSpace(opts.ProxyAddr),
+		APIAddr:                  strings.TrimSpace(opts.APIAddr),
+		APIToken:                 strings.TrimSpace(opts.APIToken),
+		HookAPIToken:             strings.TrimSpace(opts.APIToken),
+		HookAPITokenScoped:       true,
+		OTLPPathToken:            strings.TrimSpace(opts.OTLPPathToken),
+		Interactive:              false,
+		ManagedEnterprise:        true,
+		WorkspaceDir:             strings.TrimSpace(opts.WorkspaceDir),
+		HookFailMode:             canonicalHookFailMode(opts.HookFailMode),
+		SecureClientHookDelivery: secureClientHookDelivery(),
+		GuardrailMode:            strings.TrimSpace(opts.GuardrailMode),
+		HILTEnabled:              opts.HILTEnabled,
+		AgentVersion:             strings.TrimSpace(opts.AgentVersion),
+		HookContractID:           strings.TrimSpace(opts.HookContractID),
+		HookExecutable:           hookExecutable,
 	}
 	if err := validateWindowsEnterpriseImpersonationSetup(setupOpts); err != nil {
 		return InstallResult{}, err
@@ -291,14 +341,11 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 	if setupOpts.HookAPIToken == "" {
 		return InstallResult{}, fmt.Errorf("enterprise hooks: connector-scoped hook token is required")
 	}
-	if err := requireWindowsEnterpriseAgentVersion(setupOpts.AgentVersion); err != nil {
+	if err := requireWindowsEnterpriseAgentVersionOutsideSecureClient(setupOpts.AgentVersion); err != nil {
 		return InstallResult{}, err
 	}
-	if setupOpts.HookContractID == "" {
-		resolution := resolveHookContract(conn.Name(), setupOpts.AgentVersion)
-		setupOpts.HookContractID = resolution.Contract.ContractID
-	}
-	if err := validateHookContract(opts.GuardrailMode, conn, setupOpts); err != nil {
+	setupOpts, err = prepareHookContract(opts.GuardrailMode, conn, setupOpts)
+	if err != nil {
 		return InstallResult{}, err
 	}
 
@@ -306,12 +353,12 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 	if err != nil {
 		return InstallResult{}, err
 	}
-	policySnapshot, err := snapshotWindowsManagedFile(policyPath)
+	policySnapshot, err := snapshotWindowsManagedPolicy(policyPath)
 	if err != nil {
 		return InstallResult{}, err
 	}
 	statePath := filepath.Join(filepath.Dir(policyPath), windowsClaudeManagedStateFile)
-	stateSnapshot, err := snapshotWindowsManagedFile(statePath)
+	stateSnapshot, err := snapshotWindowsManagedState(statePath)
 	if err != nil {
 		return InstallResult{}, err
 	}
@@ -367,6 +414,10 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 	if err != nil {
 		return InstallResult{}, err
 	}
+	otlpReport, err := windowsManagedUserNativeOTLPCheck(conn.Name(), home, dataDir, targetSID, setupOpts.APIAddr, setupOpts.ProxyAddr)
+	if err != nil {
+		return InstallResult{}, err
+	}
 	lockUpdatedAt, entryUpdatedAt, err := connector.ManagedHookContractTimestamps(
 		dataDir,
 		conn.Name(),
@@ -387,6 +438,7 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 		lock.ContractID,
 		lockUpdatedAt,
 		entryUpdatedAt,
+		setupOpts.HookFailMode,
 	); err != nil {
 		return InstallResult{}, err
 	}
@@ -403,6 +455,7 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 		HookScripts:     sortedUnique(hookScripts),
 		AgentVersion:    lock.RawAgentVersion,
 		HookContractID:  lock.ContractID,
+		AgentConfig:     otlpReport,
 	}, nil
 }
 
@@ -444,7 +497,7 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 	// until its release matrix is certified. This enterprise-only lifecycle is
 	// separately gated by the concrete built-in registry and the protected
 	// machine-policy implementation below.
-	if name != "cursor" && !connector.ConnectorSupportedOnHostOS(conn.Name()) {
+	if name != "cursor" && !windowsConnectorSupportedOnHost(conn.Name()) {
 		support := connector.ConnectorSupportOnHostOS(conn.Name())
 		return windowsGenericManagedTarget{}, fmt.Errorf("enterprise hooks: connector %q is not supported on native Windows: %s", conn.Name(), support.Reason)
 	}
@@ -476,21 +529,23 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 		)
 	}
 	setup := connector.SetupOpts{
-		DataDir:            dataDir,
-		ProxyAddr:          strings.TrimSpace(opts.ProxyAddr),
-		APIAddr:            strings.TrimSpace(opts.APIAddr),
-		APIToken:           strings.TrimSpace(opts.APIToken),
-		HookAPIToken:       strings.TrimSpace(opts.APIToken),
-		HookAPITokenScoped: true,
-		OTLPPathToken:      strings.TrimSpace(opts.OTLPPathToken),
-		Interactive:        false,
-		ManagedEnterprise:  true,
-		WorkspaceDir:       strings.TrimSpace(opts.WorkspaceDir),
-		HookFailMode:       windowsEnterpriseHookFailMode(name, opts.HookFailMode),
-		HILTEnabled:        opts.HILTEnabled,
-		AgentVersion:       strings.TrimSpace(opts.AgentVersion),
-		HookContractID:     strings.TrimSpace(opts.HookContractID),
-		HookExecutable:     hookExecutable,
+		DataDir:                  dataDir,
+		ProxyAddr:                strings.TrimSpace(opts.ProxyAddr),
+		APIAddr:                  strings.TrimSpace(opts.APIAddr),
+		APIToken:                 strings.TrimSpace(opts.APIToken),
+		HookAPIToken:             strings.TrimSpace(opts.APIToken),
+		HookAPITokenScoped:       true,
+		OTLPPathToken:            strings.TrimSpace(opts.OTLPPathToken),
+		Interactive:              false,
+		ManagedEnterprise:        true,
+		WorkspaceDir:             strings.TrimSpace(opts.WorkspaceDir),
+		HookFailMode:             canonicalHookFailMode(opts.HookFailMode),
+		SecureClientHookDelivery: secureClientHookDelivery(),
+		HILTEnabled:              opts.HILTEnabled,
+		AgentVersion:             strings.TrimSpace(opts.AgentVersion),
+		HookContractID:           strings.TrimSpace(opts.HookContractID),
+		HookExecutable:           hookExecutable,
+		AcceptPriorReleaseRender: opts.AcceptPriorReleaseRender,
 	}
 	// The standalone Amp and OpenCode plugins run the administrator-owned
 	// hook binary for the foreign-hook guard. Install and verify share this
@@ -517,14 +572,11 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 	if setup.HookAPIToken == "" {
 		return windowsGenericManagedTarget{}, fmt.Errorf("enterprise hooks: connector-scoped hook token is required")
 	}
-	if err := requireWindowsEnterpriseAgentVersion(setup.AgentVersion); err != nil {
+	if err := requireWindowsEnterpriseAgentVersionOutsideSecureClient(setup.AgentVersion); err != nil {
 		return windowsGenericManagedTarget{}, err
 	}
-	if setup.HookContractID == "" {
-		resolution := resolveHookContract(conn.Name(), setup.AgentVersion)
-		setup.HookContractID = resolution.Contract.ContractID
-	}
-	if err := validateHookContract(opts.GuardrailMode, conn, setup); err != nil {
+	setup, err = prepareHookContract(opts.GuardrailMode, conn, setup)
+	if err != nil {
 		return windowsGenericManagedTarget{}, err
 	}
 	if _, perUser := windowsStandalonePerUserConnector(name); perUser && connector.ProtectedSetupSelectionConnector(name) {
@@ -628,7 +680,7 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
 		return InstallResult{}, err
 	}
-	if err := requireWindowsEnterpriseAgentVersion(opts.AgentVersion); err != nil {
+	if err := requireWindowsEnterpriseAgentVersionOutsideSecureClient(opts.AgentVersion); err != nil {
 		return InstallResult{}, err
 	}
 	target, err := resolveWindowsGenericManagedTarget(opts)
@@ -669,6 +721,9 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 			// for a user whose installed agent the enumerator discovered.
 			_, perUserStandalone := windowsStandalonePerUserConnector(target.conn.Name())
 			allowMissingConfig := opts.AllowMissingHookConfigRepair || perUserStandalone
+			if err := moveWindowsTargetOwnedDataDirLinksAside(target.home, target.dataDir, target.sid, opts.WindowsDeferredFirstEnrollment); err != nil {
+				return err
+			}
 			if err := prepareWindowsGenericFootprint(target, configPaths, footprint, allowMissingConfig); err != nil {
 				return err
 			}
@@ -686,6 +741,9 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 					}
 				}()
 			}
+			// The setup relax record goes once the folders are hardened or
+			// restored (this defer runs after the restore below, GAP-1985).
+			defer clearWindowsSetupRelaxMarkerAsService(target.conn.Name(), target.sid)
 			relaxed, err := relaxWindowsStandalonePerUserFootprintForSetupAsService(target, configPaths, footprint)
 			// Hardening below only runs when the setup succeeds. A failed setup
 			// must not leave the relaxed directories owner-private.
@@ -705,6 +763,9 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 			if err := recordWindowsManagedSetupSelection(target); err != nil {
 				return err
 			}
+			if err := ensureWindowsManagedOpenCodePort(target.conn.Name(), target.home, target.sid.String(), opts.OpenCodeServicePort, opts.OpenCodeServicePortRequired); err != nil {
+				return err
+			}
 			target.conn.SetCredentials(target.setup.APIToken, opts.MasterKey)
 			if err := target.conn.Setup(ctx, target.setup); err != nil {
 				return fmt.Errorf("enterprise hooks: connector %s setup failed under target SID %s: %w", target.conn.Name(), target.sid, err)
@@ -720,7 +781,7 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", target.conn.Name(), err))
 			}
 			if !present {
-				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: owned hook command not present", target.conn.Name()))
+				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %s", target.conn.Name(), ownedHookAbsentDetail(target.conn, target.setup)))
 			}
 			lockEntry, err := connector.NewHookContractLockEntryForMode(
 				target.setup,
@@ -743,7 +804,7 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 			if err := hardenWindowsGenericFootprint(target, configPaths, footprint); err != nil {
 				return rollback(err)
 			}
-			if err := verifyWindowsGenericManagedTarget(ctx, target, configPaths, footprint); err != nil {
+			if err := verifyWindowsGenericManagedTarget(ctx, target, configPaths, footprint, false); err != nil {
 				return rollback(err)
 			}
 			generation, generationUsed, err = prepareWindowsPerUserManagedGeneration(target, lockEntry.ContractID)
@@ -785,10 +846,34 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 }
 
 func verifyWindowsGenericManagedResult(ctx context.Context, opts InstallOptions) (InstallResult, error) {
+	return verifyWindowsGenericManagedResultWithSessionAttestation(ctx, opts, true)
+}
+
+// VerifyWindowsManagedRegistration proves the Hermes hook that Setup wrote
+// before the guardian publishes machine readiness. It does not attest a
+// session-only HERMES_HOME; public Verify keeps that coverage refusal.
+func VerifyWindowsManagedRegistration(ctx context.Context, opts InstallOptions) (InstallResult, error) {
+	if !strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "hermes") || secureClientHookDelivery() {
+		return Verify(ctx, opts)
+	}
+	if err := requireWindowsEnterpriseManagedAgentVersion(opts.ConnectorName, opts.AgentVersion); err != nil {
+		return InstallResult{}, err
+	}
+	if err := requireWindowsEnterpriseStandaloneAgentFloor(opts.ConnectorName, opts.AgentVersion); err != nil {
+		return InstallResult{}, err
+	}
+	result, err := verifyWindowsGenericManagedResultWithSessionAttestation(ctx, opts, false)
+	if err == nil {
+		err = requireWindowsStandaloneAgentVersionUnchanged(opts, result)
+	}
+	return result, err
+}
+
+func verifyWindowsGenericManagedResultWithSessionAttestation(ctx context.Context, opts InstallOptions, attestSession bool) (InstallResult, error) {
 	if err := windowsEnterpriseAdministratorCheck(); err != nil {
 		return InstallResult{}, err
 	}
-	if err := requireWindowsEnterpriseAgentVersion(opts.AgentVersion); err != nil {
+	if err := requireWindowsEnterpriseAgentVersionOutsideSecureClient(opts.AgentVersion); err != nil {
 		return InstallResult{}, err
 	}
 	target, err := resolveWindowsGenericManagedTarget(opts)
@@ -808,7 +893,7 @@ func verifyWindowsGenericManagedResult(ctx context.Context, opts InstallOptions)
 		if err := prepareWindowsGenericFootprint(target, configPaths, footprint, false); err != nil {
 			return err
 		}
-		if err := verifyWindowsGenericManagedTarget(ctx, target, configPaths, footprint); err != nil {
+		if err := verifyWindowsGenericManagedTarget(ctx, target, configPaths, footprint, attestSession); err != nil {
 			return err
 		}
 		lock, err := connector.LoadHookContractLockEntryForMode(
@@ -1047,9 +1132,11 @@ func prepareWindowsGenericPath(home, raw string, target *windows.SID, wantDir, r
 				}
 				continue
 			}
-			if !allowRepair {
-				return fmt.Errorf("enterprise hooks: %s trust check failed: %w", label, err)
-			}
+			// Repair drift on any object inside the canonical namespace, not
+			// only for a user this connector protected before: a first
+			// install, a reinstall and a second connector for the same user
+			// all meet the same shared folders. The privileged repair still
+			// refuses reparse points, hard links and foreign owners.
 			if err := repairWindowsTargetOwnedPathDACL(home, current, target, elementWantsDir); err != nil {
 				return fmt.Errorf("enterprise hooks: repair %s protection for %s: %w", label, current, err)
 			}
@@ -1075,16 +1162,173 @@ const windowsEnterpriseTokenMaxBytes int64 = 64 << 10
 
 var errWindowsManagedHardlink = errors.New("managed regular file has more than one hard link")
 
+// windowsManagedObstructionAlternateSlots bounds the alternate quarantine
+// slots next to one path, so repeated obstructions while the canonical slot is
+// held by another owner cannot accumulate slots without limit.
+const windowsManagedObstructionAlternateSlots = 4
+
+func windowsManagedObstructionAlternatePath(path string, index int) string {
+	return fmt.Sprintf("%s-%d", windowsManagedObstructionQuarantinePath(path), index)
+}
+
+// windowsManagedObstructionAlternateSlot returns a bounded alternate
+// quarantine slot next to path: the first one that is absent or owned by the
+// target (the caller purges it before reuse). A slot owned by anyone else is
+// left untouched and skipped; when every slot is, the quarantine is refused.
+func windowsManagedObstructionAlternateSlot(path string, target *windows.SID) (string, error) {
+	for index := 1; index <= windowsManagedObstructionAlternateSlots; index++ {
+		candidate := windowsManagedObstructionAlternatePath(path, index)
+		if _, err := os.Lstat(candidate); errors.Is(err, os.ErrNotExist) {
+			return candidate, nil
+		} else if err != nil {
+			continue
+		}
+		if owner, err := windowsPathOwnerNoFollow(candidate); err == nil && owner != nil && owner.Equals(target) {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf(
+		"enterprise hooks: all %d alternate quarantine slots for %s are held by another owner",
+		windowsManagedObstructionAlternateSlots, path,
+	)
+}
+
 func windowsManagedObstructionQuarantinePath(path string) string {
 	return path + windowsManagedObstructionQuarantineSuffix
 }
 
+// moveWindowsTargetOwnedDataDirLinksAside runs once per enrollment, under
+// the target's own token, before the account's DefenseClaw folder
+// (<home>\.defenseclaw) or its hooks folder is checked. Only on the first
+// enrollment of a standalone deferred account (deferredFirstEnrollment, the
+// account stayed pending while it was signed out) is a link or junction the
+// account itself made at either name moved aside (the rename moves the
+// link, never what it names), so the enrollment that follows creates and
+// protects the folder as it does for an account that has none. Any other
+// install, a repair of an account that was protected before, and every
+// Secure Client process refuse the link as before.
+// Refusing it failed that account's guardian reconcile, and that refused
+// every administrator ensure, repair and uninstall on the computer until the
+// account removed the link (GAP-0193). The quarantine slot is purged by
+// handle after the enrollment, so the link is removed as a link. Any other
+// object, a link another account or an administrator owns, and a data dir
+// that is not the canonical one are left to the checks that follow, which
+// refuse them as before.
+func moveWindowsTargetOwnedDataDirLinksAside(home, dataDir string, target *windows.SID, deferredFirstEnrollment bool) error {
+	if !deferredFirstEnrollment || !windowsEnterpriseStandaloneProcess() {
+		return nil
+	}
+	path := windowsTargetOwnedDataDirLink(home, dataDir, target)
+	if path == "" {
+		return nil
+	}
+	if err := quarantineWindowsTargetOwnedObstruction(home, path, target, false, "DefenseClaw folder"); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr,
+		"[enterprise-hooks] moved the account's own link at %s aside to %s; what it names was not opened or changed\n",
+		path, windowsManagedObstructionQuarantinePath(path))
+	return nil
+}
+
+// windowsTargetOwnedDataDirLink returns the link or junction the account
+// (target) itself made at its canonical DefenseClaw folder (<home>\.defenseclaw)
+// or at that folder's hooks folder, or "" when there is none. It only reads
+// the names and the links' owners, never what a link names. The enrollment
+// moves such a link aside (moveWindowsTargetOwnedDataDirLinksAside); while
+// the account is signed out, the guardian's pending proof and the
+// Upgrade/Repair plan leave that account pending instead of failing the
+// lifecycle for the computer (GAP-0193). A link another account or an
+// administrator owns, a link anywhere else and a data dir that is not the
+// canonical one report "".
+func windowsTargetOwnedDataDirLink(home, dataDir string, target *windows.SID) string {
+	if target == nil {
+		return ""
+	}
+	path, owner, ok := windowsDataDirLink(home, dataDir)
+	if !ok || owner == nil || !owner.Equals(target) {
+		return ""
+	}
+	return path
+}
+
+// windowsDataDirLink finds the first link or junction at the canonical
+// DefenseClaw folder (<home>\.defenseclaw) or at that folder's hooks folder
+// and returns its path and its owner (nil when the owner cannot be read).
+// ok is false when there is none, or when dataDir is not the canonical
+// folder. It only reads names, attributes and owners, never what a link
+// names. GAP-0193 (the account's own link) and GAP-0585 (a link another
+// principal owns, such as an administrator) share this one finder, so the two
+// cannot disagree about what counts as the account's folder link.
+func windowsDataDirLink(home, dataDir string) (path string, owner *windows.SID, ok bool) {
+	if !sameWindowsEnterprisePath(dataDir, filepath.Join(home, ".defenseclaw")) {
+		return "", nil, false
+	}
+	for _, candidate := range []string{filepath.Clean(dataDir), filepath.Join(filepath.Clean(dataDir), "hooks")} {
+		info, err := os.Lstat(candidate)
+		if err != nil {
+			return "", nil, false
+		}
+		ptr, err := winpath.UTF16Ptr(candidate)
+		if err != nil {
+			return "", nil, false
+		}
+		attributes, err := windows.GetFileAttributes(ptr)
+		if err != nil {
+			return "", nil, false
+		}
+		if info.Mode()&os.ModeSymlink == 0 && attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+			if !info.IsDir() {
+				return "", nil, false
+			}
+			continue
+		}
+		linkOwner, err := windowsPathOwnerNoFollow(candidate)
+		if err != nil {
+			linkOwner = nil
+		}
+		return candidate, linkOwner, true
+	}
+	return "", nil, false
+}
+
 func quarantineWindowsTargetOwnedObstruction(home, path string, target *windows.SID, recreateDirectory bool, label string) error {
 	owner, err := windowsPathOwnerNoFollow(path)
-	if err != nil || owner == nil || !owner.Equals(target) {
+	if err != nil || owner == nil {
 		return fmt.Errorf("enterprise hooks: refusing foreign-owned obstruction in %s path %s", label, path)
 	}
+	if !owner.Equals(target) {
+		// Bulldoze: trusted admin owners (SYSTEM / BUILTIN\Administrators /
+		// TrustedInstaller) from a prior scoped install's elevated token
+		// are quarantinable. A foreign user SID or non-admin group stays
+		// fatal.
+		if !windowsEnterpriseAdminIdentity(owner) {
+			return fmt.Errorf("enterprise hooks: refusing foreign-owned obstruction in %s path %s", label, path)
+		}
+		fmt.Fprintf(os.Stderr,
+			"[enterprise-hooks] admin-owned obstruction accepted for quarantine "+
+				"in %s path %s (owner=%s, target=%s)\n",
+			label, path, windowsSIDString(owner), windowsSIDString(target))
+	}
 	quarantine := windowsManagedObstructionQuarantinePath(path)
+	// The canonical slot may hold an object the target cannot delete (left
+	// by an elevated process, or owned by an account that no longer
+	// resolves). This code runs as the target, so it cannot clear that slot;
+	// trying to used to wedge the repair forever. Leave it alone and use one
+	// of a bounded set of alternate slots beside it instead.
+	if slotOwner, slotOwnerErr := windowsPathOwnerNoFollow(quarantine); slotOwnerErr == nil &&
+		slotOwner != nil && !slotOwner.Equals(target) {
+		alternate, err := windowsManagedObstructionAlternateSlot(path, target)
+		if err != nil {
+			return err
+		}
+		managed.EmitResilienceEvent(managed.MarkerAccept, map[string]string{
+			"sid":    windowsSIDString(target),
+			"path":   quarantine,
+			"reason": "quarantine_slot_reclaimed: slot owned by " + windowsSIDString(slotOwner) + " left in place; using " + filepath.Base(alternate),
+		})
+		quarantine = alternate
+	}
 	if err := removeWindowsTargetOwnedQuarantine(quarantine, target, false); err != nil {
 		return fmt.Errorf(
 			"enterprise hooks: bounded obstruction quarantine for %s is unavailable: %w",
@@ -1129,8 +1373,14 @@ func removeWindowsTargetOwnedQuarantine(path string, target *windows.SID, allowN
 	return purgeWindowsTargetOwnedQuarantine(path, target)
 }
 
+// cleanupWindowsManagedObstructionQuarantine purges the canonical slot and
+// every bounded alternate slot the target owns. A slot owned by anyone else
+// is refused by the purge and left in place.
 func cleanupWindowsManagedObstructionQuarantine(path string, target *windows.SID) {
 	_ = removeWindowsTargetOwnedQuarantine(windowsManagedObstructionQuarantinePath(path), target, true)
+	for index := 1; index <= windowsManagedObstructionAlternateSlots; index++ {
+		_ = removeWindowsTargetOwnedQuarantine(windowsManagedObstructionAlternatePath(path, index), target, true)
+	}
 }
 
 func cleanupWindowsGenericFootprintQuarantines(
@@ -1209,7 +1459,7 @@ func publishWindowsPluginScopedHookToken(target windowsGenericManagedTarget) err
 	return nil
 }
 
-func verifyWindowsGenericManagedTarget(ctx context.Context, target windowsGenericManagedTarget, configPaths []string, footprint connector.AgentPaths) error {
+func verifyWindowsGenericManagedTarget(ctx context.Context, target windowsGenericManagedTarget, configPaths []string, footprint connector.AgentPaths, attestSession bool) error {
 	if err := prepareWindowsGenericFootprint(target, configPaths, footprint, false); err != nil {
 		return err
 	}
@@ -1218,7 +1468,7 @@ func verifyWindowsGenericManagedTarget(ctx context.Context, target windowsGeneri
 		return fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", target.conn.Name(), err)
 	}
 	if !present {
-		return fmt.Errorf("enterprise hooks: connector %s hook verification failed: canonical hook matrix is absent", target.conn.Name())
+		return fmt.Errorf("enterprise hooks: connector %s hook verification failed: canonical hook matrix is absent: %s", target.conn.Name(), ownedHookAbsentDetail(target.conn, target.setup))
 	}
 	if err := verifyWindowsStandalonePluginRender(target); err != nil {
 		return err
@@ -1278,6 +1528,11 @@ func verifyWindowsGenericManagedTarget(ctx context.Context, target windowsGeneri
 	}
 	if strings.TrimSpace(lock.HookFailMode) != strings.TrimSpace(current.HookFailMode) {
 		return fmt.Errorf("enterprise hooks: connector %s fail mode %q does not match configured mode %q", target.conn.Name(), lock.HookFailMode, current.HookFailMode)
+	}
+	if attestSession {
+		if err := ManagedHermesSessionHomeAttestation("windows", target.conn.Name(), target.setup.ManagedEnterprise, target.setup.SecureClientHookDelivery); err != nil {
+			return fmt.Errorf("enterprise hooks: connector %s cannot be verified: %w", target.conn.Name(), err)
+		}
 	}
 	return nil
 }
@@ -1408,6 +1663,13 @@ func platformWatchDirs(opts InstallOptions) ([]string, bool, error) {
 				out = append(out, dir)
 			}
 		}
+		if !secureClientHookDelivery() && windowsStandaloneRuntimeOnlyInstall(name) {
+			policyPath, err := windowsRuntimeOnlyPolicyPath(name)
+			if err != nil {
+				return nil, true, err
+			}
+			out = append(out, filepath.Dir(policyPath))
+		}
 		return sortedUnique(out), true, nil
 	}
 	home, sid, err := validateWindowsEnterpriseHome(opts.UserHome, opts.OwnerSID)
@@ -1429,8 +1691,41 @@ func platformWatchDirs(opts InstallOptions) ([]string, bool, error) {
 }
 
 func platformWatchOwnedFiles(opts InstallOptions) (WatchOwnership, bool, error) {
-	if !strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "cursor") {
+	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
+	if secureClientHookDelivery() && name != "cursor" {
 		return WatchOwnership{}, false, nil
+	}
+	if name == "claudecode" {
+		home, sid, err := validateWindowsEnterpriseHome(opts.UserHome, opts.OwnerSID)
+		if err != nil {
+			return WatchOwnership{}, true, err
+		}
+		dataDir, err := resolveWindowsEnterpriseDataDir(home, opts.DataDir)
+		if err != nil {
+			return WatchOwnership{}, true, err
+		}
+		if err := validateWindowsUserPathPrefix(home, dataDir, sid, true); err != nil {
+			return WatchOwnership{}, true, err
+		}
+		policyPath, err := windowsClaudeManagedPolicyPath()
+		if err != nil {
+			return WatchOwnership{}, true, err
+		}
+		hookDir := filepath.Join(dataDir, "hooks")
+		files := []string{
+			policyPath,
+			filepath.Join(filepath.Dir(policyPath), windowsClaudeManagedStateFile),
+			filepath.Join(hookDir, ".hookcfg.claudecode"),
+			filepath.Join(hookDir, ".hook-claudecode.token"),
+			filepath.Join(hookDir, "_hardening.sh"),
+			filepath.Join(dataDir, "hook_contract_lock.json"),
+			filepath.Join(dataDir, "hook_contract_lock.json.lock"),
+		}
+		files = append(files, connector.NewClaudeCodeConnector().HookScripts(connector.SetupOpts{DataDir: dataDir})...)
+		return WatchOwnership{ExclusiveWriter: sortedUnique(files)}, true, nil
+	}
+	if name != "cursor" {
+		return windowsGenericWatchOwnedFiles(opts)
 	}
 	target, err := resolveWindowsGenericManagedTarget(opts)
 	if err != nil {
@@ -1453,6 +1748,113 @@ func platformWatchOwnedFiles(opts InstallOptions) (WatchOwnership, bool, error) 
 			filepath.Join(target.dataDir, "hook_contract_lock.json.lock"),
 		}),
 	}, true, nil
+}
+
+func windowsGenericWatchOwnedFiles(opts InstallOptions) (WatchOwnership, bool, error) {
+	target, err := resolveWindowsGenericManagedTarget(opts)
+	if err != nil {
+		return WatchOwnership{}, true, err
+	}
+	exclusive := map[string]struct{}{}
+	shared := map[string]struct{}{}
+	addExclusive := func(path string) {
+		if path = strings.TrimSpace(path); path != "" {
+			path = filepath.Clean(path)
+			exclusive[path] = struct{}{}
+			delete(shared, path)
+		}
+	}
+	addShared := func(path string) {
+		if path = strings.TrimSpace(path); path != "" {
+			path = filepath.Clean(path)
+			if _, owned := exclusive[path]; !owned {
+				shared[path] = struct{}{}
+			}
+		}
+	}
+	if target.conn.Name() == "codex" {
+		for _, path := range windowsCodexRuntimePaths(target.dataDir) {
+			switch filepath.Base(path) {
+			case ".token", ".hookcfg", ".hookcfg.lock":
+				continue
+			}
+			addExclusive(path)
+		}
+		machineOpts, err := windowsCodexRequirementsOptionsResolver(target.hookExecutable, target.setup.APIAddr)
+		if err != nil {
+			return WatchOwnership{}, true, err
+		}
+		addExclusive(machineOpts.RequirementsPath)
+		addExclusive(machineOpts.OwnershipPath)
+		addExclusive(machineOpts.ManagedStatePath)
+		return WatchOwnership{ExclusiveWriter: sortedMapKeys(exclusive)}, true, nil
+	}
+	if windowsStandaloneRuntimeOnlyInstall(target.conn.Name()) {
+		for _, path := range windowsRuntimeOnlyPaths(target.dataDir, target.conn.Name()) {
+			switch filepath.Base(path) {
+			case ".token", ".hookcfg", ".hookcfg.lock":
+				continue
+			}
+			addExclusive(path)
+		}
+		policyPath, err := windowsRuntimeOnlyPolicyPath(target.conn.Name())
+		if err != nil {
+			return WatchOwnership{}, true, err
+		}
+		addExclusive(policyPath)
+		return WatchOwnership{ExclusiveWriter: sortedMapKeys(exclusive)}, true, nil
+	}
+	err = connector.WithUserHomeDir(target.home, func() error {
+		plugins := map[string]struct{}{}
+		for _, path := range connector.ManagedPluginArtifacts(target.conn, target.setup) {
+			plugins[filepath.Clean(path)] = struct{}{}
+		}
+		addConfig := func(path string) {
+			if _, plugin := plugins[filepath.Clean(path)]; plugin {
+				addExclusive(path)
+			} else {
+				addShared(path)
+			}
+		}
+		for _, path := range connector.HookConfigPathsForConnector(target.conn, target.setup) {
+			addConfig(path)
+		}
+		if provider, ok := target.conn.(connector.AgentPathProvider); ok {
+			footprint := provider.AgentPaths(target.setup)
+			for _, path := range footprint.PatchedFiles {
+				addConfig(path)
+			}
+			for _, paths := range [][]string{footprint.BackupFiles, footprint.HookScripts, footprint.GeneratedFiles, footprint.GeneratedExecutables} {
+				for _, path := range paths {
+					addExclusive(path)
+				}
+			}
+		}
+		sidecars, sidecarErr := hookSidecarFiles(target.dataDir, target.conn.Name())
+		if sidecarErr != nil {
+			return sidecarErr
+		}
+		for _, path := range sidecars {
+			switch filepath.Base(path) {
+			case ".token", ".hookcfg":
+				continue
+			}
+			addExclusive(path)
+		}
+		for path := range plugins {
+			addExclusive(path)
+		}
+		return nil
+	})
+	if err != nil {
+		return WatchOwnership{}, true, err
+	}
+	hookDir := filepath.Join(target.dataDir, "hooks")
+	addExclusive(filepath.Join(hookDir, ".hookcfg."+target.conn.Name()))
+	contractPath := filepath.Join(target.dataDir, "hook_contract_lock.json")
+	addExclusive(contractPath)
+	addExclusive(contractPath + ".lock")
+	return WatchOwnership{ExclusiveWriter: sortedMapKeys(exclusive), SharedWriter: sortedMapKeys(shared)}, true, nil
 }
 
 func resolveWindowsEnterpriseDataDir(home, raw string) (string, error) {
@@ -1699,6 +2101,8 @@ func teardownWindowsGenericManagedTarget(
 	name := target.conn.Name()
 	_, perUser := windowsStandalonePerUserConnector(name)
 	if perUser {
+		// Runs after the restore below (GAP-1985).
+		defer clearWindowsSetupRelaxMarkerAsService(name, target.sid)
 		relaxed, err := relaxWindowsStandalonePerUserFootprintForSetupAsService(target, configPaths, footprint)
 		defer func() {
 			restore := windowsRelaxedPathsToRestoreAfterTeardown(target.dataDir, relaxed, teardownErr == nil)
@@ -1729,7 +2133,7 @@ func teardownWindowsGenericManagedTarget(
 	if len(remaining) != 0 {
 		return fmt.Errorf("enterprise hooks: connector %s teardown left DefenseClaw's registration in %s", name, strings.Join(remaining, ", "))
 	}
-	return nil
+	return returnWindowsStandalonePatchedFilesToOwner(target, configPaths, footprint)
 }
 
 // windowsRelaxedPathsToRestoreAfterTeardown returns the paths relaxed for a
@@ -1937,6 +2341,12 @@ func validateWindowsEnterpriseImpersonationSetup(setup connector.SetupOpts) erro
 	return nil
 }
 
+// requireWindowsEnterpriseAgentVersion requires explicit version evidence.
+// The runtime-only (Copilot and standalone runtime-only) install path always
+// requires it, because its machine policy is rendered per recorded agent
+// version. Codex, Claude Code, Cursor and the generic per-user runtime require
+// it outside Secure Client only; Secure Client installs without version
+// evidence (#1163).
 func requireWindowsEnterpriseAgentVersion(raw string) error {
 	if strings.TrimSpace(raw) == "" {
 		return fmt.Errorf("enterprise hooks: native Windows managed target requires explicit agent_version")
@@ -1973,7 +2383,7 @@ func validateWindowsEnterpriseHome(raw, rawSID string) (string, *windows.SID, er
 	info, err := os.Lstat(home)
 	if errors.Is(err, os.ErrNotExist) {
 		// Name the cause, not the raw Win32 lookup error (GAP-1940).
-		return "", nil, fmt.Errorf("enterprise hooks: user home %s no longer exists: the account was deleted or its profile folder removed; run Setup /ensure again (%w)", home, os.ErrNotExist)
+		return "", nil, fmt.Errorf("enterprise hooks: user home %s no longer exists: the account was deleted or its profile folder removed; Setup /repair or /ensure prunes its rows, and the hook enumerator drops them at its next pass (%w)", home, os.ErrNotExist)
 	}
 	if err != nil {
 		return "", nil, fmt.Errorf("enterprise hooks: inspect user home %s: %w", home, err)
@@ -2032,7 +2442,7 @@ func validateWindowsEnterpriseHomeAnchor(home string, target *windows.SID) error
 	if err != nil {
 		return fmt.Errorf("enterprise hooks: inspect user home anchor attributes: %w", err)
 	}
-	if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+	if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 && !windowsPathHasHarmlessReparseTag(home) {
 		return fmt.Errorf("enterprise hooks: user home anchor is a reparse point: %s", home)
 	}
 	owner, err := windowsPathOwnerNoFollow(home)
@@ -2206,8 +2616,26 @@ func validateWindowsUserPathElement(path string, target *windows.SID, wantDir, p
 		return err
 	}
 	if requireTargetOwner {
-		if owner == nil || !owner.Equals(target) {
-			return fmt.Errorf("enterprise hooks: owner SID %s does not match target SID %s on %s", windowsSIDString(owner), windowsSIDString(target), path)
+		if owner == nil {
+			return fmt.Errorf("enterprise hooks: null owner on %s", path)
+		}
+		if !owner.Equals(target) {
+			if !windowsEnterpriseAdminIdentity(owner) {
+				return fmt.Errorf("enterprise hooks: owner SID %s does not match target SID %s on %s", windowsSIDString(owner), windowsSIDString(target), path)
+			}
+			// Bulldoze: a prior unsigned certification install done under an
+			// elevated token (LocalSystem or BUILTIN\Administrators) can
+			// leave per-user runtime files owned by that admin principal
+			// instead of the target user SID. Trusted admin owners are
+			// accepted here; the subsequent DACL repair transfers
+			// ownership to the target SID. A foreign user SID (not in the
+			// trusted admin set) stays fatal above.
+			managed.EmitResilienceEvent(managed.MarkerAccept, map[string]string{
+				"path":       path,
+				"owner":      windowsSIDString(owner),
+				"target_sid": windowsSIDString(target),
+				"reason":     "admin-owned per-user runtime file accepted during trust check; subsequent DACL repair will transfer ownership",
+			})
 		}
 	} else if owner == nil || (!owner.Equals(target) && !windowsEnterpriseAdminIdentity(owner)) {
 		return fmt.Errorf("enterprise hooks: foreign owner SID %s on %s", windowsSIDString(owner), path)
@@ -2355,6 +2783,11 @@ func mapWindowsUserPathGenericMask(mask windows.ACCESS_MASK) windows.ACCESS_MASK
 	return mapped
 }
 
+// validateWindowsUserPathProtectionACL requires the canonical protected DACL
+// of a managed path. A profile's .defenseclaw folder and its hooks child may
+// also carry read-only grants of other products (windowsReadOnlyExtraACE, for
+// example Codex's sandbox group); DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1
+// refuses them too.
 func validateWindowsUserPathProtectionACL(
 	path string,
 	sd *windows.SECURITY_DESCRIPTOR,
@@ -2362,67 +2795,138 @@ func validateWindowsUserPathProtectionACL(
 	target *windows.SID,
 	directory bool,
 ) error {
+	_, err := inspectWindowsUserPathProtectionACL(
+		path, sd, dacl, target, directory,
+		windowsReadOnlyExtraACEsTolerated(path, directory),
+	)
+	return err
+}
+
+// inspectWindowsUserPathProtectionACL is validateWindowsUserPathProtectionACL
+// with an explicit read-only tolerance. It returns the principals of the
+// tolerated read-only extra grants.
+func inspectWindowsUserPathProtectionACL(
+	path string,
+	sd *windows.SECURITY_DESCRIPTOR,
+	dacl *windows.ACL,
+	target *windows.SID,
+	directory bool,
+	tolerateReadOnly bool,
+) ([]*windows.SID, error) {
 	control, _, err := sd.Control()
 	if err != nil {
-		return fmt.Errorf("enterprise hooks: inspect Windows DACL control for %s: %w", path, err)
+		return nil, fmt.Errorf("enterprise hooks: inspect Windows DACL control for %s: %w", path, err)
 	}
 	if control&windows.SE_DACL_PROTECTED == 0 {
-		return fmt.Errorf("enterprise hooks: managed Windows DACL is not protected on %s", path)
+		return nil, fmt.Errorf("enterprise hooks: managed Windows DACL is not protected on %s", path)
 	}
-	expected, err := windowsUserPathAppliedCanonicalACEs(target, directory)
+	if dacl == nil || target == nil {
+		return nil, fmt.Errorf("enterprise hooks: null Windows DACL or target on %s", path)
+	}
+	applied, err := windowsUserPathAppliedCanonicalACEs(target, directory)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	required := len(expected)
+	required := len(applied)
 	if directory && windowsGatewayReadablePluginRoot(path) {
 		// The Amp and OpenCode plugin folder may also carry the read grant
 		// of the gateway service (GAP-0958): both of its entries or neither.
 		if optional := windowsGatewayPluginRootAppliedACEs(); len(optional) > 0 && int(dacl.AceCount) == required+len(optional) {
-			expected = append(expected, optional...)
+			applied = append(applied, optional...)
 		}
 	}
-	if int(dacl.AceCount) != len(expected) {
-		return fmt.Errorf(
+	expected := make([]windowsDACLExpectedEntry, 0, len(applied))
+	for _, want := range applied {
+		expected = append(expected, windowsDACLExpectedEntry{sid: want.sid.String(), mask: uint32(want.mask), flags: want.flags})
+	}
+	entries := make([]windowsDACLEntry, 0, dacl.AceCount)
+	sids := make([]*windows.SID, 0, dacl.AceCount)
+	for index := uint16(0); index < dacl.AceCount; index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
+			return nil, fmt.Errorf("enterprise hooks: inspect Windows ACE %d for %s: %w", index, path, err)
+		}
+		if ace == nil {
+			return nil, fmt.Errorf("enterprise hooks: managed Windows DACL on %s contains non-canonical ACE type at index %d", path, index)
+		}
+		entry := windowsDACLEntry{aceType: ace.Header.AceType, flags: ace.Header.AceFlags, mask: uint32(ace.Mask)}
+		var sid *windows.SID
+		switch ace.Header.AceType {
+		case windows.ACCESS_ALLOWED_ACE_TYPE, windows.ACCESS_DENIED_ACE_TYPE:
+			// Both share the ACE_HEADER, Mask, SidStart layout, so a rejected
+			// deny entry is named like an allow entry. Extended (object,
+			// callback) types keep no SID here.
+			sid = (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+			entry.sid = sid.String()
+		}
+		entries = append(entries, entry)
+		sids = append(sids, sid)
+	}
+	result := matchWindowsCanonicalDACL(entries, expected, target.String(), tolerateReadOnly)
+	switch result.failure {
+	case windowsDACLMatched:
+	case windowsDACLCountMismatch:
+		return nil, fmt.Errorf(
 			"enterprise hooks: managed Windows DACL on %s has %d ACEs, expected %d",
 			path,
 			dacl.AceCount,
 			required,
 		)
+	case windowsDACLNonAllowedType:
+		return nil, fmt.Errorf(
+			"enterprise hooks: managed Windows DACL on %s contains non-canonical ACE type %d at index %d (principal %s)",
+			path,
+			entries[result.index].aceType,
+			result.index,
+			windowsSIDString(sids[result.index]),
+		)
+	case windowsDACLUnexpectedEntry:
+		entry := entries[result.index]
+		return nil, fmt.Errorf(
+			"enterprise hooks: managed Windows DACL on %s contains unexpected or duplicate ACE for principal %s (mask 0x%x, inheritance 0x%x)",
+			path,
+			windowsSIDString(sids[result.index]),
+			entry.mask,
+			uint32(entry.flags),
+		)
+	default:
+		return nil, fmt.Errorf(
+			"enterprise hooks: managed Windows DACL on %s has %d ACEs, expected %d (a canonical ACE is missing; %d read-only extra grants)",
+			path,
+			dacl.AceCount,
+			required,
+			len(result.extras),
+		)
 	}
-	seen := make([]bool, len(expected))
-	for index := uint16(0); index < dacl.AceCount; index++ {
-		var ace *windows.ACCESS_ALLOWED_ACE
-		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
-			return fmt.Errorf("enterprise hooks: inspect Windows ACE %d for %s: %w", index, path, err)
+	extras := make([]*windows.SID, 0, len(result.extras))
+	for _, index := range result.extras {
+		copied, err := sids[index].Copy()
+		if err != nil {
+			return nil, err
 		}
-		if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
-			return fmt.Errorf("enterprise hooks: managed Windows DACL on %s contains non-canonical ACE type at index %d", path, index)
-		}
-		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-		match := -1
-		for candidate, want := range expected {
-			if seen[candidate] {
-				continue
-			}
-			if sid.Equals(want.sid) &&
-				ace.Mask == want.mask &&
-				ace.Header.AceFlags == want.flags {
-				match = candidate
-				break
-			}
-		}
-		if match < 0 {
-			return fmt.Errorf(
-				"enterprise hooks: managed Windows DACL on %s contains unexpected or duplicate ACE for principal %s (mask 0x%x, inheritance 0x%x)",
-				path,
-				windowsSIDString(sid),
-				uint32(ace.Mask),
-				uint32(ace.Header.AceFlags),
-			)
-		}
-		seen[match] = true
+		extras = append(extras, copied)
 	}
-	return nil
+	return extras, nil
+}
+
+// windowsSIDDisplayNames names each SID as "DOMAIN\name (SID)", or the SID
+// alone when it does not resolve.
+func windowsSIDDisplayNames(sids []*windows.SID) []string {
+	names := make([]string, 0, len(sids))
+	for _, sid := range sids {
+		if sid == nil {
+			continue
+		}
+		label := sid.String()
+		if account, domain, _, err := sid.LookupAccount(""); err == nil && account != "" {
+			if domain != "" {
+				account = domain + `\` + account
+			}
+			label = account + " (" + label + ")"
+		}
+		names = append(names, label)
+	}
+	return names
 }
 
 func rejectWindowsUserRuntimeWriteACEs(path string, dacl *windows.ACL, target *windows.SID, wantDir, protectChildren bool) error {
@@ -2552,28 +3056,96 @@ func windowsPathOwnerNoFollow(path string) (*windows.SID, error) {
 }
 
 func rejectWindowsReparseChain(path string) error {
-	current, err := filepath.Abs(path)
+	link, err := windowsReparseChainProbe(path)
 	if err != nil {
 		return err
+	}
+	if link != "" {
+		return fmt.Errorf("enterprise hooks: reparse point in path: %s", link)
+	}
+	return nil
+}
+
+// findWindowsReparsePointInChain walks path and each parent without following
+// anything and returns the first element that is a reparse point (a storage-only
+// tag excepted), or "" when the chain has none. rejectWindowsReparseChain refuses
+// on it; a teardown keeps and names it instead (GAP-0758).
+func findWindowsReparsePointInChain(path string) (string, error) {
+	current, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
 	}
 	for {
 		ptr, err := winpath.UTF16Ptr(current)
 		if err != nil {
-			return err
+			return "", err
 		}
 		attributes, err := windows.GetFileAttributes(ptr)
-		if err == nil && attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-			return fmt.Errorf("enterprise hooks: reparse point in path: %s", current)
+		if err == nil && attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 &&
+			!windowsPathHasHarmlessReparseTag(current) {
+			return current, nil
 		}
 		if err != nil && err != windows.ERROR_FILE_NOT_FOUND && err != windows.ERROR_PATH_NOT_FOUND {
-			return err
+			return "", err
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
-			return nil
+			return "", nil
 		}
 		current = parent
 	}
+}
+
+var windowsHarmlessReparseLogged sync.Map
+
+// windowsPathHasHarmlessReparseTag reads the reparse tag of one path element
+// without following it and reports whether it is a storage-only tag (Compact
+// OS, deduplication, cloud placeholder). Each such path is logged once per
+// process. Any error reading the tag counts as not harmless.
+func windowsPathHasHarmlessReparseTag(path string) bool {
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return false
+	}
+	name, err := windows.UTF16PtrFromString(extended)
+	if err != nil {
+		return false
+	}
+	handle, err := windows.CreateFile(
+		name,
+		windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(handle)
+	var info windowsFileAttributeTagInfo
+	if err := windows.GetFileInformationByHandleEx(
+		handle,
+		windows.FileAttributeTagInfo,
+		(*byte)(unsafe.Pointer(&info)),
+		uint32(unsafe.Sizeof(info)),
+	); err != nil {
+		return false
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+		return true
+	}
+	if !harmlessWindowsReparseTag(info.ReparseTag) {
+		return false
+	}
+	if _, logged := windowsHarmlessReparseLogged.LoadOrStore(strings.ToLower(path), struct{}{}); !logged {
+		managed.EmitResilienceEvent(managed.MarkerAccept, map[string]string{
+			"path":   path,
+			"reason": fmt.Sprintf("storage-only reparse tag 0x%08x does not redirect the path", info.ReparseTag),
+		})
+	}
+	return true
 }
 
 func windowsSIDString(sid *windows.SID) string {
@@ -2629,7 +3201,7 @@ func snapshotWindowsRuntimeFiles(paths []string) ([]windowsRuntimeFileSnapshot, 
 		} else if parentErr == nil {
 			snapshot.parentExisted = true
 		}
-		info, err := os.Lstat(path)
+		info, err := pathidentity.LstatPinned(path)
 		if errors.Is(err, os.ErrNotExist) {
 			snapshots = append(snapshots, snapshot)
 			continue
@@ -2823,41 +3395,6 @@ func hardenWindowsUserRuntime(home, dataDir string, paths []string, target *wind
 		}
 	}
 	return nil
-}
-
-func setWindowsUserPathProtection(path string, target *windows.SID, directory bool) error {
-	if err := rejectWindowsReparseChain(path); err != nil {
-		return err
-	}
-	owner, err := windowsPathOwnerNoFollow(path)
-	if err != nil {
-		return err
-	}
-	if owner == nil || !owner.Equals(target) {
-		return fmt.Errorf(
-			"enterprise hooks: refusing to canonicalize wrong-owner path %s (owner %s, target %s)",
-			path,
-			windowsSIDString(owner),
-			windowsSIDString(target),
-		)
-	}
-	if !directory {
-		if err := validateWindowsRegularFileSingleLink(path); err != nil {
-			return err
-		}
-	}
-	if err := validateWindowsUserPathElement(path, target, directory, directory, true); err == nil {
-		return nil
-	}
-	acl, err := windowsUserPathProtectionACL(target, directory)
-	if err != nil {
-		return err
-	}
-	extended, err := winpath.Extended(path)
-	if err != nil {
-		return err
-	}
-	return windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
 }
 
 func windowsUserPathProtectionACL(target *windows.SID, directory bool) (*windows.ACL, error) {

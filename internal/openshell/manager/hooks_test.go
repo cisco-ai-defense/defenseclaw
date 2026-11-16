@@ -62,8 +62,8 @@ func TestToolCallHooksClassify(t *testing.T) {
 		{"kiro", "preToolUse", "", true, none}, {"kiro", "postToolUse", "", false, ran},
 		{"copilot", "preToolUse", "", true, none}, {"copilot", "postToolUse", "", false, ran}, {"copilot", "postToolUseFailure", "", false, failed},
 		{"devin", "PreToolUse", "", true, none}, {"devin", "PostToolUse", "", false, ran},
-		{"hermes", "pre_tool_call", "", true, none}, {"hermes", "post_tool_call", "", false, ran}, {"openhands", "PreToolUse", "", true, none},
-		{"antigravity", "PostToolUse", "", false, ran}, {"omnigent", "PreToolUse", "", true, none},
+		{"hermes", "pre_tool_call", "", true, none}, {"hermes", "post_tool_call", "", false, ran},
+		{"antigravity", "PostToolUse", "", false, ran},
 		// Exact vendor spellings of each harness only; a connector with no reviewed hooks names nothing.
 		{"", "preToolUse", "", false, none}, {"claudecode", "post_tool_use", "", false, none}, {"claudecode", "PermissionRequest", "", false, none},
 		{"claudecode", "PostToolBatch", "", false, none}, {"claudecode", "SessionStart", "", false, none}, {"codex", "PermissionDenied", "", false, none},
@@ -92,7 +92,7 @@ func TestToolCallHooksClassify(t *testing.T) {
 func TestToolCallHooksKeying(t *testing.T) {
 	want := map[string]toolCallKeying{
 		"claudecode": keyByID, "codex": keyByID, "cursor": keyByID, "opencode": keyByID, "amp": keyByID, "kiro": keyByContent,
-		"copilot": keyByContent, "devin": keyByContent, "hermes": keyNone, "openhands": keyNone, "antigravity": keyNone, "omnigent": keyNone,
+		"copilot": keyByContent, "devin": keyByContent, "hermes": keyNone, "antigravity": keyNone,
 	}
 	if len(toolCallHooksByConnector) != len(want) {
 		t.Fatalf("toolCallHooksByConnector lists %d connectors, want %d", len(toolCallHooksByConnector), len(want))
@@ -330,9 +330,7 @@ func TestHookTamperPerHarness(t *testing.T) {
 		{connector: "copilot", pre: "preToolUse", post: "postToolUse", byContent: true, paired: true},
 		{connector: "devin", pre: "PreToolUse", post: "PostToolUse", byContent: true, paired: true},
 		{connector: "hermes", pre: "pre_tool_call", post: "post_tool_call"},
-		{connector: "openhands", pre: "PreToolUse", post: "PostToolUse"},
 		{connector: "antigravity", pre: "PreToolUse", post: "PostToolUse"},
-		{connector: "omnigent", pre: "PreToolUse", post: "PostToolUse"},
 	} {
 		t.Run(tc.connector, func(t *testing.T) {
 			e, name := newEnv(t, nil), "tamper"+tc.connector
@@ -1020,6 +1018,43 @@ func TestHookSilenceResponse(t *testing.T) {
 	}
 }
 
+// GAP-1328: a MicroVM session whose hooks connect and never authenticate
+// (OpenShell reports none of its model traffic) is flagged unreachable at
+// once, and once it stays so for the pack's silence_after with no hook
+// authenticated it gets hooks.on_silence: a user-tier harness under stop is
+// stopped, as a silent harness at work is.
+func TestUnreachableHooksForSilenceAfterAreSilent(t *testing.T) {
+	r := &reachEnv{harnessEnv: newEnv(t, nil), name: "reachbox"}
+	_, r.advance = r.fakeClock(time.Now())
+	r.create(sandboxapi.CreateRequest{Name: r.name, Pack: "balanced"})
+	r.binding = r.harnessEnv.binding(r.name)
+	b := r.boxOf(r.name)
+	r.m.mu.Lock()
+	b.rec.TamperTier = "user"
+	r.m.mu.Unlock()
+	silence := func() int {
+		r.m.checkHookSilence(t.Context())
+		return len(r.tel.findingsOf(audit.SandboxFindingHookSilence)) - len(r.findings())
+	}
+	r.line(ingressLine("ALLOWED"))
+	r.advance(hookAttemptGrace + time.Second)
+	r.check()
+	if h := r.hooks(); !h.Unreachable {
+		t.Fatalf("hooks = %+v, want unreachable", h)
+	}
+	r.advance(9 * time.Minute)
+	// The harness keeps trying its hooks.
+	r.line(ingressLine("ALLOWED"))
+	if n := silence(); n != 0 || stopped(t, r.harnessEnv, r.name) {
+		t.Fatalf("before silence_after: %d hook_silence finding(s), stopped %v", n, stopped(t, r.harnessEnv, r.name))
+	}
+	r.advance(time.Minute)
+	if n := silence(); n != 1 || !stopped(t, r.harnessEnv, r.name) {
+		t.Fatalf("unreachable for silence_after: %d hook_silence finding(s), stopped %v; want one and stopped (on_silence: stop)",
+			n, stopped(t, r.harnessEnv, r.name))
+	}
+}
+
 // While a sandbox's policy is not resolved, silent hooks get the fail-closed
 // response, and its view says so: a user-tier harness under a pack that
 // alerts after 2m is stopped after the default 10m.
@@ -1616,5 +1651,70 @@ func TestHookReachNewSessionStartsOver(t *testing.T) {
 	r.line(ingressLine("DENIED"))
 	if len(r.feed(sandboxapi.ReasonHooksUnreachable)) != 2 {
 		t.Fatalf("warnings = %d, want one per session", len(r.feed(sandboxapi.ReasonHooksUnreachable)))
+	}
+}
+
+// GAP-1783: a session whose hooks were found not reaching DefenseClaw but
+// that tried no hook since (one open event cut by a policy reload, then the
+// user reads for silence_after) is idle, not silent: it keeps the warning
+// and is not stopped by the silence policy.
+func TestAnIdleSessionWithUnreachedHooksIsNotStopped(t *testing.T) {
+	r := &reachEnv{harnessEnv: newEnv(t, nil), name: "idlebox"}
+	_, r.advance = r.fakeClock(time.Now())
+	r.create(sandboxapi.CreateRequest{Name: r.name, Pack: "balanced"})
+	r.binding = r.harnessEnv.binding(r.name)
+	b := r.boxOf(r.name)
+	r.m.mu.Lock()
+	b.rec.TamperTier = "user"
+	r.m.mu.Unlock()
+	r.line(ingressLine("ALLOWED"))
+	r.advance(hookAttemptGrace + time.Second)
+	r.check()
+	if h := r.hooks(); !h.Unreachable {
+		t.Fatalf("hooks = %+v, want unreachable", h)
+	}
+	r.advance(30 * time.Minute)
+	r.m.checkHookSilence(t.Context())
+	if n := len(r.tel.findingsOf(audit.SandboxFindingHookSilence)) - len(r.findings()); n != 0 || stopped(t, r.harnessEnv, r.name) {
+		t.Fatalf("an idle session: %d hook_silence finding(s), stopped %v; want none", n, stopped(t, r.harnessEnv, r.name))
+	}
+}
+
+// GAP-0715: an automatic hook alarm stop keeps its cause in both durable
+// lifecycle transitions; an ordinary user stop has no hook alarm cause.
+func TestGAP0715HookAlarmStopRecordsCause(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		kind audit.SandboxFindingKind
+		want string
+	}{
+		{"silence", audit.SandboxFindingHookSilence, "hook_silence"},
+		{"tamper", audit.SandboxFindingHookTamper, "hook_tamper"},
+		{"ordinary stop", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t, nil)
+			e.create(sandboxapi.CreateRequest{Name: "causebox", Pack: "balanced"})
+			if tc.kind == "" {
+				e.stopBox("causebox")
+			} else {
+				e.m.stopForAlarm("causebox", e.binding("causebox").ID, tc.kind)
+			}
+			rows := where(&e.tel.mu, &e.tel.lifecycle, func(ev audit.SandboxLifecycleEvent) bool {
+				return ev.Sandbox.Name == "causebox" && ev.Trigger == audit.SandboxTriggerStop
+			})
+			if len(rows) < 2 {
+				t.Fatalf("%d stop lifecycle rows, want at least two", len(rows))
+			}
+			for _, row := range rows {
+				got := ""
+				if row.Condition != nil {
+					got = row.Condition.Reason
+				}
+				if got != tc.want {
+					t.Fatalf("%s cause = %q, want %q", row.Sandbox.Phase, got, tc.want)
+				}
+			}
+		})
 	}
 }

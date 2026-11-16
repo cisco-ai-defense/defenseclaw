@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/netip"
 	"os"
 	"slices"
 	"sort"
@@ -96,6 +97,13 @@ func (a *App) managedExplainAssumption(ctx context.Context, o PolicyOptions) str
 	note := "this is the policy of a new run of the default agent; for another agent add --harness NAME"
 	api, err := a.api()
 	if err != nil {
+		return note
+	}
+	// A disabled or unavailable managed daemon can have a kept registration
+	// whose List waits for the account gateway. On a ready daemon, let the
+	// caller's deadline govern List so a healthy, slower response is shown.
+	st, err := api.Status(ctx)
+	if err != nil || st == nil || !st.Enabled || !st.Available {
 		return note
 	}
 	list, err := api.List(ctx)
@@ -420,15 +428,31 @@ func (a *App) PolicyExplain(ctx context.Context, o PolicyOptions) error {
 	}
 	// On a managed computer the organization's constraints are the managed
 	// section above: the local configuration is not the user's to read.
-	if lines := a.adminConstraints(); len(lines) > 0 && !managedHost {
-		a.println()
-		a.line(a.bold("Organization constraints") + " (openshell.admin)")
-		for _, l := range lines {
-			a.line("  " + l)
+	if !managedHost {
+		if lines := a.adminConstraints(); len(lines) > 0 {
+			a.println()
+			a.line(a.bold("Organization constraints") + " (openshell.admin)")
+			for _, l := range lines {
+				a.line("  " + l)
+			}
 		}
 	}
 	for _, v := range ex.Violations {
 		a.warn(violationMessage(&v, v.Message, v.Detail, v.Admin))
+	}
+	if managedHost {
+		// The settings table can exceed a terminal page. Repeat only the
+		// identity of the policy being explained at the end of the output.
+		a.println()
+		a.line(a.bold("Policy at a glance"))
+		a.line("Organization profile: " + managedProfileIdentity(ex.Managed))
+		agent := "default agent (add --harness NAME for another)"
+		if o.Harness != "" {
+			agent = sandboxapi.DisplayText(o.Harness)
+		} else if o.Sandbox != "" {
+			agent = "agent in sandbox " + sandboxapi.DisplayText(o.Sandbox)
+		}
+		a.line("Agent: " + agent)
 	}
 	return nil
 }
@@ -494,6 +518,9 @@ func (a *App) adminConstraints() []string {
 
 // PolicyEdit adds hosts to openshell.egress.allow or openshell.egress.block.
 func (a *App) PolicyEdit(ctx context.Context, list string, hosts []string) error {
+	if a.ManagedHost() || onManagedHost() || a.managedSeen != nil {
+		return managedConfigRefusal()
+	}
 	if len(hosts) == 0 {
 		return errors.New("name at least one host")
 	}
@@ -523,13 +550,51 @@ func (a *App) PolicyEdit(ctx context.Context, list string, hosts []string) error
 	}
 	if len(added) == 0 {
 		a.ok("already in " + key)
+		if list == "allow" {
+			a.warnNeverReachAllow(wanted)
+		}
 		return nil
 	}
 	a.ok("added " + strings.Join(added, ", ") + " to " + key)
 	if list == "allow" {
+		a.warnNeverReachAllow(added)
 		a.note("allow entries matter in the balanced and strict profiles; open allows everything not blocked")
 	}
 	a.note("the daemon applies it to running sandboxes within a few seconds")
+	return nil
+}
+
+// A saved allow cannot override the sandbox's host-internal address guard.
+func (a *App) warnNeverReachAllow(hosts []string) {
+	for _, host := range hosts {
+		if _, err := netip.ParseAddr(host); err != nil {
+			continue
+		}
+		if _, class, err := packs.ClassifyAllowedIP(host); err == nil && class == packs.AllowedIPNever {
+			a.warn(host + " is a loopback, link-local, cloud metadata or reserved address; the sandbox egress guard always refuses it, so this allow entry cannot open it")
+		}
+	}
+}
+
+// ManagedPolicyDecision records one host decision through the caller's
+// sandbox daemon. The managed gateway owns both the decision and its floor.
+func (a *App) ManagedPolicyDecision(ctx context.Context, list string, hosts []string, sandbox string) error {
+	if len(hosts) != 1 {
+		return errors.New("name one destination host at a time")
+	}
+	host := config.NormalizeOpenShellEgressPattern(hosts[0])
+	if host == "" || strings.ContainsAny(host, "*/ \t") || config.ValidateOpenShellEgressPattern(host) != nil {
+		return errors.New("name one destination host or IP address")
+	}
+	api, err := a.api()
+	if err != nil {
+		return err
+	}
+	res, err := api.PolicyDecision(ctx, sandboxapi.PolicyDecisionRequest{Sandbox: sandbox, Host: host, Kind: list})
+	if err != nil {
+		return apiError(err)
+	}
+	a.ok(res.Kind + "ed " + res.Host + " for your sandboxes (saved by your organization's DefenseClaw gateway)")
 	return nil
 }
 

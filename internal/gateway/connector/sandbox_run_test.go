@@ -58,25 +58,25 @@ func TestClaudeCodeSandboxRunFiles(t *testing.T) {
 		{
 			name:      "yolo-block-none",
 			run:       SandboxRunConfig{},
-			files:     []string{ClaudeCodeSandboxManagedMCPPath, ClaudeCodeSandboxRunDropInPath},
+			files:     []string{ClaudeCodeSandboxManagedMCPPath, ClaudeCodeSandboxDropInPath, ClaudeCodeSandboxRunDropInPath},
 			allowlist: `[]`,
 		},
 		{
 			name:      "safe-block-servers",
 			run:       SandboxRunConfig{Safe: true, MCPServers: []SandboxMCPServer{remote, stdio}},
-			files:     []string{ClaudeCodeSandboxManagedMCPPath, ClaudeCodeSandboxRunDropInPath},
+			files:     []string{ClaudeCodeSandboxManagedMCPPath, ClaudeCodeSandboxDropInPath, ClaudeCodeSandboxRunDropInPath},
 			safe:      true,
 			allowlist: `[{"serverCommand":["npx","-y","@modelcontextprotocol/server-github"]},{"serverUrl":"https://mcp.linear.app/mcp"}]`,
 		},
 		{
 			name:  "allow-servers",
 			run:   SandboxRunConfig{AllowProjectMCPServers: true, MCPServers: []SandboxMCPServer{stdio}},
-			files: []string{ClaudeCodeSandboxRunDropInPath, ClaudeCodeSandboxRunMCPServersPath},
+			files: []string{ClaudeCodeSandboxDropInPath, ClaudeCodeSandboxRunDropInPath, ClaudeCodeSandboxRunMCPServersPath},
 		},
 		{
 			name:  "allow-none",
 			run:   SandboxRunConfig{AllowProjectMCPServers: true},
-			files: []string{ClaudeCodeSandboxRunDropInPath},
+			files: []string{ClaudeCodeSandboxDropInPath, ClaudeCodeSandboxRunDropInPath},
 		},
 	}
 	for _, tc := range cases {
@@ -112,8 +112,8 @@ func TestClaudeCodeSandboxRunFiles(t *testing.T) {
 			if _, ok := env["MY_FLAG"]; ok {
 				t.Fatal("a non-provider variable was pinned")
 			}
-			if len(env) != len(claudeCodeSandboxProviderEnv)-1 {
-				t.Fatalf("pinned %d provider variables", len(env))
+			if len(env) != len(claudeCodeSandboxProviderEnv)-1+len(claudeCodeSandboxRunShellPins()) {
+				t.Fatalf("pinned %d variables", len(env))
 			}
 			perms, _ := dropIn["permissions"].(map[string]interface{})
 			if tc.safe != (perms["disableBypassPermissionsMode"] == "disable") || tc.safe != (dropIn["skipDangerousModePermissionPrompt"] == false) {
@@ -212,7 +212,8 @@ func TestClaudeCodeSandboxRunFilesKeepImageControls(t *testing.T) {
 		t.Fatal(err)
 	}
 	source, err := stageClaudeCodeManagedSettings(map[string][]byte{
-		claudeCodeSandboxDropInName: base, claudeCodeSandboxRunDropInName: runFileMap(t, files)[ClaudeCodeSandboxRunDropInPath],
+		claudeCodeSandboxDropInName:    runFileMap(t, files)[ClaudeCodeSandboxDropInPath],
+		claudeCodeSandboxRunDropInName: runFileMap(t, files)[ClaudeCodeSandboxRunDropInPath],
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -223,12 +224,13 @@ func TestClaudeCodeSandboxRunFilesKeepImageControls(t *testing.T) {
 	if source.settings["skipDangerousModePermissionPrompt"] != false {
 		t.Fatal("safe mode kept the image's pre-accepted bypass prompt")
 	}
-	var baseDoc map[string]interface{}
+	var baseDoc, runHookDoc map[string]interface{}
 	_ = json.Unmarshal(base, &baseDoc)
+	_ = json.Unmarshal(runFileMap(t, files)[ClaudeCodeSandboxDropInPath], &runHookDoc)
 	merged, _ := json.Marshal(source.settings["hooks"])
-	image, _ := json.Marshal(baseDoc["hooks"])
-	if string(merged) != string(image) {
-		t.Fatalf("the run drop-in changed the image's hooks:\n%s\n%s", merged, image)
+	runHooks, _ := json.Marshal(runHookDoc["hooks"])
+	if string(merged) != string(runHooks) || jsonValuesEqual(baseDoc["hooks"], runHookDoc["hooks"]) {
+		t.Fatalf("the run hook replacement did not become the managed hook contract:\n%s\n%s", merged, runHooks)
 	}
 }
 
@@ -413,5 +415,48 @@ func TestCodexSandboxRunFiles(t *testing.T) {
 				t.Fatalf("the image's disabled features were lost: %v", features)
 			}
 		})
+	}
+}
+
+// rel-1-0-6:GAP-0334: the merged managed tier pins the remaining FUNCNEST
+// setting while the per-run replacement supplies the hook launch. SHELLOPTS
+// and BASHOPTS remain absent so Bash tool scripts run normally (GAP-0465).
+// The image drop-in itself keeps its original content hash.
+func TestClaudeCodeSandboxRunFilesPinHookShellEnv(t *testing.T) {
+	if got, want := claudeCodeSandboxRunShellPins(), []string{"FUNCNEST"}; !slices.Equal(got, want) {
+		t.Fatalf("run shell pins = %v, want %v", got, want)
+	}
+	for _, key := range claudeCodeSandboxRunShellPins() {
+		if _, inImage := claudeCodeSandboxPinnedEnv[key]; inImage {
+			t.Fatalf("%s is pinned by the image drop-in too", key)
+		}
+	}
+	for _, run := range []SandboxRunConfig{{}, {Safe: true}, {AllowProjectMCPServers: true}} {
+		files, err := NewClaudeCodeConnector().SandboxRunFiles(claudeRunTarget, run)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runFiles := runFileMap(t, files)
+		source, err := stageClaudeCodeManagedSettings(map[string][]byte{
+			claudeCodeSandboxDropInName:    runFiles[ClaudeCodeSandboxDropInPath],
+			claudeCodeSandboxRunDropInName: runFiles[ClaudeCodeSandboxRunDropInPath],
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		merged, _ := source.settings["env"].(map[string]interface{})
+		for _, key := range []string{"SHELLOPTS", "BASHOPTS"} {
+			if value, ok := merged[key]; ok {
+				t.Fatalf("run %+v: merged managed env sets %s = %#v", run, key, value)
+			}
+		}
+		for _, key := range HookShellEnvPins() {
+			if key == "SHELLOPTS" || key == "BASHOPTS" {
+				continue
+			}
+			if value, ok := merged[key]; !ok || value != "" {
+				t.Fatalf("run %+v: merged managed env %s = %#v (present %v), want \"\"", run, key, value, ok)
+			}
+		}
 	}
 }

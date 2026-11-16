@@ -213,8 +213,9 @@ func CompiledDispatcherConfigForProfile(
 		}
 	}
 	return delivery.Config{
-		LegacyCircuit: secureClient,
-		Destination:   destination.Name, Generation: generation, Signal: string(signal), Enabled: true,
+		LegacyCircuit:    secureClient,
+		RetryUntilClosed: destination.Kind == config.ObservabilityV8DestinationOTLP && !secureClient,
+		Destination:      destination.Name, Generation: generation, Signal: string(signal), Enabled: true,
 		MaxQueueItems: batch.MaxQueueSize, MaxQueueBytes: batch.MaxQueueBytes,
 		MaxBatchItems: maxBatchItems, MaxBatchBytes: maxBatchBytes,
 		ScheduledDelay: scheduledDelay, AttemptTimeout: attemptTimeout,
@@ -334,7 +335,12 @@ func (component *destinationDispatchComponent) reverseLifecycle(
 	return first
 }
 
-func (component *destinationDispatchComponent) Enqueue(work pipeline.ProjectedDelivery) {
+// Enqueue hands work to its destination's queue. tracker, when set, gets
+// the work's terminal outcome (observability.RemoteDelivery).
+func (component *destinationDispatchComponent) Enqueue(
+	work pipeline.ProjectedDelivery,
+	tracker *observability.RemoteDelivery,
+) {
 	if component == nil {
 		return
 	}
@@ -342,11 +348,13 @@ func (component *destinationDispatchComponent) Enqueue(work pipeline.ProjectedDe
 	entry := component.byName[route.DestinationName]
 	if entry == nil || entry.dispatcher == nil || entry.kind != route.DestinationKind {
 		component.observeBoundedFailure(route.DestinationName)
+		tracker.Fail(route.DestinationName)
 		return
 	}
 	encoded, err := work.Projection().Bytes()
 	if err != nil {
 		component.observeBoundedFailure(route.DestinationName)
+		tracker.Fail(route.DestinationName)
 		return
 	}
 	identity := work.Identity()
@@ -357,7 +365,11 @@ func (component *destinationDispatchComponent) Enqueue(work pipeline.ProjectedDe
 	})
 	if err != nil {
 		component.observeBoundedFailure(route.DestinationName)
+		tracker.Fail(route.DestinationName)
 		return
+	}
+	if tracker != nil {
+		payload = payload.WithCompletion(tracker.Track(route.DestinationName))
 	}
 	result := entry.dispatcher.Enqueue(payload)
 	if result.Disposition == delivery.EnqueueRejected {

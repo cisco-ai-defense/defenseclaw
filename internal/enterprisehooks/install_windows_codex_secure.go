@@ -59,7 +59,7 @@ func installWindowsCodexManagedResult(
 			target.conn.Name(),
 		)
 	}
-	target.setup.HookFailMode = "closed"
+	// The prepared contract carries the effective delivery policy.
 	machineOpts, err := windowsCodexRequirementsOptionsResolver(
 		target.hookExecutable,
 		target.setup.APIAddr,
@@ -105,6 +105,9 @@ func installWindowsCodexManagedResult(
 				!verifiedSID.Equals(target.sid) {
 				return errors.New("enterprise hooks: Codex target profile identity changed before runtime mutation")
 			}
+			if err := moveWindowsTargetOwnedDataDirLinksAside(transaction.home, transaction.dataDir, transaction.targetSID, opts.WindowsDeferredFirstEnrollment); err != nil {
+				return err
+			}
 			if err := prepareWindowsCodexRuntime(
 				transaction,
 				opts.AllowMissingHookConfigRepair,
@@ -136,6 +139,7 @@ func installWindowsCodexManagedResult(
 				target.setup.APIAddr,
 				"codex",
 				target.setup.HookAPIToken,
+				target.setup.HookFailMode,
 			); err != nil {
 				return fail(fmt.Errorf("enterprise hooks: write Codex managed runtime: %w", err))
 			}
@@ -151,7 +155,7 @@ func installWindowsCodexManagedResult(
 					err,
 				))
 			}
-			lockEntry.HookFailMode = "closed"
+			lockEntry.HookFailMode = target.setup.HookFailMode
 			lockEntry.HookScriptDigests = nil
 			lockEntry.Locations = connector.ConnectorLocations{
 				HookConfigPaths: []string{requirementsPath},
@@ -175,6 +179,10 @@ func installWindowsCodexManagedResult(
 					err,
 				))
 			}
+			// Take back the native exporter an earlier per-user install left in
+			// the account's own config (GAP-0836) before hardening re-applies the
+			// managed data directory DACL the atomic edit replaced.
+			removeWindowsManagedUserNativeOTLPAsTarget("codex", target.sid, target.home, target.dataDir, opts.APIAddr, opts.ProxyAddr)
 			if err := hardenWindowsUserRuntime(
 				target.home,
 				target.dataDir,
@@ -199,6 +207,7 @@ func installWindowsCodexManagedResult(
 				lockEntry.ContractID,
 				lockUpdatedAt,
 				entryUpdatedAt,
+				target.setup.HookFailMode,
 			)
 			if err != nil {
 				return fail(fmt.Errorf(
@@ -271,6 +280,7 @@ func installWindowsCodexManagedResult(
 			rollbackErr,
 		)
 	}
+	retireWindowsManagedRuntimePreviousGeneration(generationCommit)
 	return InstallResult{
 		Connector:                  "codex",
 		UserHome:                   target.home,
@@ -298,7 +308,7 @@ func verifyWindowsCodexManagedResult(
 	if err != nil {
 		return InstallResult{}, err
 	}
-	target.setup.HookFailMode = "closed"
+	// The prepared contract carries the effective delivery policy.
 	machineOpts, err := windowsCodexRequirementsOptionsResolver(
 		target.hookExecutable,
 		target.setup.APIAddr,
@@ -319,6 +329,10 @@ func verifyWindowsCodexManagedResult(
 		)
 	}
 	if err := verifyWindowsCodexUserRuntime(target, machineOpts.RequirementsPath); err != nil {
+		return InstallResult{}, err
+	}
+	otlpReport, err := windowsManagedUserNativeOTLPCheck("codex", target.home, target.dataDir, target.sid, opts.APIAddr, opts.ProxyAddr)
+	if err != nil {
 		return InstallResult{}, err
 	}
 	lock, err := connector.LoadHookContractLockEntryForMode(
@@ -352,6 +366,7 @@ func verifyWindowsCodexManagedResult(
 		lock.ContractID,
 		lockUpdatedAt,
 		entryUpdatedAt,
+		target.setup.HookFailMode,
 	); err != nil {
 		return InstallResult{}, err
 	}
@@ -363,6 +378,7 @@ func verifyWindowsCodexManagedResult(
 		CreatedDirs:     []string{target.dataDir, filepath.Join(target.dataDir, "hooks")},
 		AgentVersion:    lock.RawAgentVersion,
 		HookContractID:  lock.ContractID,
+		AgentConfig:     otlpReport,
 	}, nil
 }
 
@@ -416,6 +432,7 @@ func verifyWindowsCodexUserRuntime(
 		target.dataDir,
 		target.setup.APIAddr,
 		"codex",
+		target.setup.HookFailMode,
 	); err != nil {
 		return fmt.Errorf("enterprise hooks: Codex managed runtime is invalid: %w", err)
 	}
@@ -455,7 +472,7 @@ func verifyWindowsCodexUserRuntime(
 		len(lock.Locations.HookConfigPaths) != 1 ||
 		!sameWindowsEnterprisePath(lock.Locations.HookConfigPaths[0], requirementsPath) ||
 		len(lock.Locations.HookScriptPaths) != 0 ||
-		!strings.EqualFold(strings.TrimSpace(lock.HookFailMode), "closed") {
+		lock.HookFailMode != target.setup.HookFailMode {
 		return errors.New("enterprise hooks: Codex managed hook contract does not identify only machine requirements")
 	}
 	if err := connector.ValidateWindowsManagedHookContractGatewayServiceBinding(lock); err != nil {
@@ -540,7 +557,8 @@ func defaultWindowsCodexRequirementsOptions(
 		GatewayServiceName:              gatewayServiceName,
 		AgentApplicationControlEnforced: applicationControl,
 		CodexTargetEnabled:              true,
-		HookContractID:                  connector.WindowsCodexStandaloneHookContract(hookExecutable),
+		HookContractID:                  connector.WindowsCodexManagedHookContract(hookExecutable),
+		SecureClient:                    secureClientHookDelivery(),
 	}
 	return opts, nil
 }

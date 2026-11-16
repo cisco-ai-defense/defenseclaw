@@ -5,25 +5,25 @@
 #
 # Dot-source this file; it exports `Assert-CiscoSignature` and no side
 # effects. Used by packaging/scripts/lib/assemble.ps1 during the AVC-driven
-# Windows managed-enterprise Setup assembly step (see
-# docs/specs/002-windows-avc-packaging/requirements.md REQ-10).
+# Windows managed-enterprise Setup assembly step: signed assembly must
+# reject any inner file whose Authenticode signer CN is not exactly
+# "Cisco Systems, Inc.".
 #
 # Contract:
 #   - The file at $Path MUST carry a valid Authenticode signature
 #     (Status == Valid — WinVerifyTrust chain-of-trust check).
 #   - The signer certificate's Subject Common Name MUST be exactly
-#     "Cisco Systems, Inc." (case-sensitive per the parity plan; matches
+#     "Cisco Systems, Inc." (case-sensitive; matches
 #     the retired scripts/build-windows-enterprise-installer.ps1's
 #     Assert-CiscoSignature contract).
 #   - Any deviation throws a descriptive terminating error so the caller
 #     (assemble.ps1) exits with the "signature assertion failed" exit
-#     code (4 per design.md § Interfaces).
+#     code (4, per assemble.ps1's exit-code table).
 #
 # The bash sibling packaging/scripts/lib/assert-cisco-signature.sh uses
 # osslsigncode/openssl to enforce the same contract on Linux runners so
-# the round-trip integration test at
-# docs/specs/002-windows-avc-packaging/tasks.md task 6 can drive the
-# whole flow on ubuntu-latest.
+# the CI assemble round-trip test can drive the whole flow on
+# ubuntu-latest.
 
 #Requires -Version 7.0
 

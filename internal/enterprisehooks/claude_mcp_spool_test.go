@@ -6,6 +6,7 @@ package enterprisehooks
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,10 +15,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
-// GAP-1317: the enumerator, which can read the profile, accepts a server
-// folder only inside the project or the user's own home, on a local volume,
+// GAP-1317, #1164: the enumerator, checking as the server's user, accepts a
+// server folder only inside the project or the user's own home, on a local volume,
 // with no link on the way and no alias; anything else is refused with the
-// reason, and the server's project is the fallback for a refused cwd.
+// reason. A refused cwd is never replaced by the project: the scan would run
+// code from another folder than the agent does.
 func TestVetClaudeMCPWorkDirRefusesEscapes(t *testing.T) {
 	base := t.TempDir()
 	users := filepath.Join(base, "Users")
@@ -56,56 +58,131 @@ func TestVetClaudeMCPWorkDirRefusesEscapes(t *testing.T) {
 	}{
 		{"project", "", project, project, ""},
 		{"shared project", "", shared, shared, ""},
+		{"user scope", "", "", home, ""},
 		{"cwd in home", filepath.Join(home, "tools"), project, filepath.Join(home, "tools"), ""},
-		{"relative", "server", project, project, "not an absolute path"},
+		{"relative", "server", project, "", "not an absolute path"},
 		{"dot-dot into another profile", filepath.Join(project, "..", "..", "u2"), users, "", "another user profile"},
 		{"other enrolled home as project", "", other, "", "another user profile"},
-		{"outside", filepath.Join(base, "elsewhere"), project, project, "outside the project"},
-		{"link", filepath.Join(linked, "sub"), project, project, "link or reparse point"},
-		{"unc", unc, project, project, "local drive letter"},
-		{"short name", short, project, project, "alias"},
-		{"unreadable", denied, project, project, "permission"},
+		{"outside", filepath.Join(base, "elsewhere"), project, "", "outside the project"},
+		{"link", filepath.Join(linked, "sub"), project, "", "link or reparse point"},
+		{"unc", unc, project, "", "local drive letter"},
+		{"short name", short, project, "", "alias"},
+		{"unreadable", denied, project, "", "permission"},
 	} {
 		entry := config.MCPServerEntry{Name: "srv", Command: "npx", CWD: tc.cwd, Project: tc.project}
-		dir, refused := vetClaudeMCPWorkDir(entry, home, []string{other}, checks)
-		if !strings.EqualFold(dir, tc.want) || (tc.refused == "") != (refused == "") || !strings.Contains(refused, tc.refused) {
+		dir, err := vetClaudeMCPWorkDir(entry, home, []string{other}, checks)
+		refused := ""
+		if err != nil {
+			refused = err.Error()
+		}
+		if !strings.EqualFold(dir, tc.want) || (tc.refused == "") != (err == nil) || !strings.Contains(refused, tc.refused) {
 			t.Errorf("%s: dir %q refused %q, want %q refused containing %q", tc.name, dir, refused, tc.want, tc.refused)
 		}
 	}
-	if dir, refused := vetClaudeMCPWorkDir(config.MCPServerEntry{Name: "remote", URL: "https://x.test", Project: project}, home, nil, checks); dir != "" || refused != "" {
-		t.Fatalf("remote server got folder %q (%q)", dir, refused)
+	if dir, err := vetClaudeMCPWorkDir(config.MCPServerEntry{Name: "remote", URL: "https://x.test", Project: project}, home, nil, checks); dir != "" || err == nil {
+		t.Fatalf("remote server got folder %q (%v)", dir, err)
 	}
 }
 
-// GAP-1317: the gateway takes a verified folder only from the enumerator's
-// record, after its trust check; a record read without that check, or a
-// configuration file naming the field, sets nothing.
-func TestReadClaudeMCPSpoolTrustsWorkDirOnlyFromTrustedRecord(t *testing.T) {
+// #1164: a record a 1.0.2 enumerator wrote, with the folder it checked as
+// LocalSystem, still parses during an upgrade, and the folder is not used:
+// the enumerator checks the folder as the user when it starts the server.
+// A record that fails the trust check is not read, and no configuration
+// file can name the account a server starts as.
+func TestReadClaudeMCPSpoolIgnoresTheLegacyWorkDir(t *testing.T) {
 	dir := t.TempDir()
 	const sid = "S-1-5-21-1-1001"
 	project := filepath.Join(dir, "proj")
-	data, err := MarshalClaudeMCPSpoolRecord(sid, []config.MCPServerEntry{{
-		Name: "srv", Command: "npx", Project: project, WorkDir: project, WorkDirRefused: "x: refused",
-	}})
+	legacy, err := json.Marshal(ClaudeMCPSpoolRecord{Version: ClaudeMCPSpoolRecordVersion, Key: sid, Servers: []ClaudeMCPSpoolServer{{
+		Server: config.MCPServerEntry{Name: "srv", Command: "npx", Args: []string{"-y", "pkg"}}, Project: project,
+		WorkDir: project, WorkDirRefused: "x: refused",
+	}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, sid+".json"), data, 0o600); err != nil {
+	if !strings.Contains(string(legacy), `"work_dir"`) {
+		t.Fatalf("the legacy record has no work_dir: %s", legacy)
+	}
+	if err := os.WriteFile(filepath.Join(dir, sid+".json"), legacy, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	trusted, _, err := ReadClaudeMCPSpool(dir, sid, func(string, string) error { return nil })
-	if err != nil || len(trusted) != 1 || trusted[0].WorkDir != project || trusted[0].WorkDirRefused != "x: refused" {
-		t.Fatalf("trusted record: %+v (%v)", trusted, err)
+	servers, unreadable, err := ReadClaudeMCPSpool(dir, sid, func(string, string) error { return nil })
+	if err != nil || unreadable != nil || len(servers) != 1 || servers[0].Project != project || servers[0].Connector != "claudecode" {
+		t.Fatalf("legacy record: %+v %v (%v)", servers, unreadable, err)
 	}
-	untrusted, _, err := ReadClaudeMCPSpool(dir, sid, nil)
-	if err != nil || len(untrusted) != 1 || untrusted[0].WorkDir != "" || untrusted[0].WorkDirRefused != "" {
-		t.Fatalf("record read without trust kept the folder: %+v (%v)", untrusted, err)
+	fresh, err := MarshalClaudeMCPSpoolRecord(sid, servers)
+	if err != nil || strings.Contains(string(fresh), "work_dir") {
+		t.Fatalf("a new record still carries a folder: %s (%v)", fresh, err)
 	}
 	if _, _, err := ReadClaudeMCPSpool(dir, sid, func(string, string) error { return errors.New("not the enumerator") }); err == nil {
 		t.Fatal("a record that fails the trust check was read")
 	}
 	var forged config.MCPServerEntry
-	if err := json.Unmarshal([]byte(`{"name":"srv","command":"npx","WorkDir":"C:\\x","work_dir":"C:\\x"}`), &forged); err != nil || forged.WorkDir != "" {
-		t.Fatalf("a configuration entry set the verified folder: %+v (%v)", forged, err)
+	if err := json.Unmarshal([]byte(`{"name":"srv","command":"npx","RunAsSID":"S-1-5-18","run_as_sid":"S-1-5-18"}`), &forged); err != nil || forged.RunAsSID != "" {
+		t.Fatalf("a configuration entry named the account a server starts as: %+v (%v)", forged, err)
+	}
+}
+
+// emptyJoinedError is a joined error with no errors in it.
+type emptyJoinedError struct{}
+
+func (emptyJoinedError) Error() string   { return "nothing" }
+func (emptyJoinedError) Unwrap() []error { return nil }
+
+// W2B-G-enum review loop 3: the refresh tells the gateway which records it
+// did not publish, so a publication's error is split into its records; any
+// other failure is the whole folder's.
+func TestMCPSpoolRecordFailuresNamesTheRecordsAndTheFolder(t *testing.T) {
+	alice := &MCPSpoolRecordError{Connector: "claudecode", SID: "S-1-5-21-1-1001", Home: `C:\Users\alice`, Err: errors.New("disk full")}
+	bob := &MCPSpoolRecordError{Connector: "claudecode", SID: "S-1-5-21-1-1002", Home: `C:\Users\bob`, Err: errors.New("held open")}
+	records, whole := MCPSpoolRecordFailures(errors.Join(errors.Join(nil, alice), bob))
+	if whole || len(records) != 2 || records[0] != alice || records[1] != bob {
+		t.Fatalf("records %v, whole %v; want alice and bob only", records, whole)
+	}
+	if _, whole := MCPSpoolRecordFailures(fmt.Errorf("create claudecode mcp spool: %w", errors.New("access denied"))); !whole {
+		t.Fatal("a folder failure must be the whole connector's")
+	}
+	if records, whole := MCPSpoolRecordFailures(errors.Join(alice, errors.New("set claudecode mcp spool protection"))); !whole || len(records) != 1 {
+		t.Fatalf("records %v, whole %v; want the record and the folder failure", records, whole)
+	}
+	if _, whole := MCPSpoolRecordFailures(emptyJoinedError{}); !whole {
+		t.Fatal("an error that names no record must be the whole connector's")
+	}
+	if records, whole := MCPSpoolRecordFailures(nil); whole || len(records) != 0 {
+		t.Fatal("no error named a failure")
+	}
+	if !strings.Contains(alice.Error(), "disk full") || !errors.Is(alice, alice.Err) {
+		t.Fatal("a record error must name and wrap its cause")
+	}
+}
+
+// GAP-0643: an account whose state the enumerator could not read because it
+// signed out keeps that cause through the record, and its refusal says the
+// account is not signed in instead of asking for SYSTEM read access.
+func TestClaudeStateUnreadableOfASignedOutAccountSaysSo(t *testing.T) {
+	dir := t.TempDir()
+	const sid = "S-1-5-21-1-1001"
+	state := ClaudeStateUnreadable{User: `DCLAB\dcw-std2`, Home: `C:\Users\dcw-std2`, Path: `C:\Users\dcw-std2\.claude.json`,
+		Reason: "read Claude Code projects as enrolled user: no session", SignedOut: true}
+	record, err := MarshalClaudeMCPSpoolUnreadable(sid, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, sid+".json"), record, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, read, err := ReadClaudeMCPSpool(dir, sid, nil)
+	if err != nil || read == nil || !read.SignedOut {
+		t.Fatalf("read back %+v (%v), want the signed-out cause kept", read, err)
+	}
+	blocked := read.Blocked("Claude Code")
+	if !strings.Contains(blocked, `DCLAB\dcw-std2 is not signed in`) || !strings.Contains(blocked, "once they sign in") ||
+		strings.Contains(blocked, "SYSTEM") {
+		t.Fatalf("signed-out refusal %q", blocked)
+	}
+	state.SignedOut = false
+	if blocked := state.Blocked("Kiro"); !strings.Contains(blocked, "the Kiro MCP servers of DCLAB\\dcw-std2 are blocked: "+
+		"the hook enumerator could not read") || !strings.Contains(blocked, "give SYSTEM read access") {
+		t.Fatalf("unreadable refusal %q", blocked)
 	}
 }

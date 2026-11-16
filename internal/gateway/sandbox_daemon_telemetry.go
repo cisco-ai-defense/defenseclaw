@@ -35,10 +35,9 @@ import (
 // the fleet's Sandboxes board stayed empty for them (GAP-0003).
 //
 // daemonRelayTelemetry is the daemon manager's recorder: it relays the
-// lifecycle and egress records to the managed gateway through POST
-// sandbox/events (EventSandboxLifecycle, EventSandboxEgress), which records
-// them with its own recorder, stamped with the registration's sandbox,
-// profile and person as it verified them from the hook-socket peer
+// lifecycle, egress, opt-in process, finding and otherwise uncounted ask decisions
+// through POST sandbox/events. The gateway records them with its own recorder,
+// stamped with the registration's sandbox, profile and person as it verified them from the hook-socket peer
 // (emitSandboxTelemetryClaim). The daemon names no person: a record only
 // says which of the caller's own sandboxes it describes.
 //
@@ -79,8 +78,8 @@ const (
 	daemonTelemetryFlushEvery = 2 * time.Second
 	// daemonTelemetryMaxPending bounds the queue; the oldest go first.
 	daemonTelemetryMaxPending = 2048
-	// daemonTelemetryBatch bounds one batch, the route's telemetry batch
-	// limit, under its byte limit (a record is well under 1 KiB).
+	// daemonTelemetryBatch bounds the record count; daemonTelemetryChunkSize
+	// also enforces the route's byte limit for variable-size process records.
 	daemonTelemetryBatch = sandboxrelay.MaxTelemetryBatchRecords
 	// daemonTelemetryWaitFor is how long a record waits for its sandbox's
 	// registration.
@@ -93,9 +92,9 @@ func newDaemonRelayTelemetry(relay sandboxrelay.Client, registration func(string
 	return &daemonRelayTelemetry{relay: relay, registration: registration, logf: logf, now: time.Now, flushEvery: daemonTelemetryFlushEvery}
 }
 
-// sandboxTelemetryClaim is the payload of a sandbox_lifecycle or
-// sandbox_egress record. Every field is the daemon's claim about one of the
-// caller's own sandboxes: the managed gateway takes the sandbox, its
+// sandboxTelemetryClaim is the payload of a sandbox_lifecycle,
+// sandbox_egress, sandbox_process or sandbox_finding record. Every field is the daemon's
+// claim about one of the caller's own sandboxes: the managed gateway takes the sandbox, its
 // registration, profile, policy and person from the registration and the
 // peer, bounds the severity (sandboxClaimSeverity) and strips control
 // characters from the text (sandboxClaimPayload), and the recorder bounds
@@ -128,6 +127,8 @@ type sandboxTelemetryClaim struct {
 	ConversationID string `json:"conversation_id,omitempty"`
 	Host           string `json:"host,omitempty"`
 	Port           int    `json:"port,omitempty"`
+	ApprovalID     string `json:"approval_id,omitempty"`
+	Outcome        string `json:"outcome,omitempty"`
 	Scheme         string `json:"scheme,omitempty"`
 	Path           string `json:"path,omitempty"`
 	ResolvedIP     string `json:"resolved_ip,omitempty"`
@@ -135,6 +136,29 @@ type sandboxTelemetryClaim struct {
 	DecisionCode   string `json:"decision_code,omitempty"`
 	Reason         string `json:"reason,omitempty"`
 	PolicyOutcome  string `json:"policy_outcome,omitempty"`
+
+	// The opt-in process tree record's.
+	ProcessEvent     string   `json:"process_event,omitempty"`
+	ProcessSource    string   `json:"process_source,omitempty"`
+	ParentPID        int      `json:"parent_pid,omitempty"`
+	HostPID          int      `json:"host_pid,omitempty"`
+	ExecID           string   `json:"exec_id,omitempty"`
+	Name             string   `json:"name,omitempty"`
+	CommandLine      string   `json:"command_line,omitempty"`
+	WorkingDirectory string   `json:"working_directory,omitempty"`
+	ProcessExitCode  *int     `json:"process_exit_code,omitempty"`
+	Lineage          []string `json:"lineage,omitempty"`
+
+	// The sandbox finding record's.
+	FindingKind audit.SandboxFindingKind `json:"kind,omitempty"`
+	FindingID   string                   `json:"finding_id,omitempty"`
+	RuleID      string                   `json:"rule_id,omitempty"`
+	Title       string                   `json:"title,omitempty"`
+	Description string                   `json:"description,omitempty"`
+	Evidence    string                   `json:"evidence,omitempty"`
+	Remediation string                   `json:"remediation,omitempty"`
+	TargetRef   string                   `json:"target_ref,omitempty"`
+	Confidence  float64                  `json:"confidence,omitempty"`
 }
 
 // sandboxConditionClaim is a lifecycle record's OpenShell condition.
@@ -168,6 +192,23 @@ func egressClaim(e audit.SandboxEgressEvent) sandboxTelemetryClaim {
 	return c
 }
 
+func processClaim(e audit.SandboxProcessEvent) sandboxTelemetryClaim {
+	c := claimOf(e.Sandbox)
+	c.ProcessEvent, c.ProcessSource, c.PID, c.ParentPID = e.Event, e.Source, e.PID, e.ParentPID
+	c.HostPID, c.ExecID, c.Executable, c.Name = e.HostPID, e.ExecID, e.Executable, e.Name
+	c.CommandLine, c.WorkingDirectory, c.ProcessExitCode = e.CommandLine, e.WorkingDirectory, e.ExitCode
+	c.Lineage, c.ConversationID = e.Lineage, e.ConversationID
+	return c
+}
+
+func findingClaim(e audit.SandboxFindingEvent) sandboxTelemetryClaim {
+	c := claimOf(e.Sandbox)
+	c.FindingKind, c.FindingID, c.RuleID, c.Severity = e.Kind, e.FindingID, e.RuleID, e.Severity
+	c.Title, c.Description, c.Evidence = e.Title, e.Description, e.Evidence
+	c.Remediation, c.TargetRef, c.Confidence = e.Remediation, e.TargetRef, e.Confidence
+	return c
+}
+
 // RecordSandboxLifecycle queues a phase change for the managed gateway.
 func (t *daemonRelayTelemetry) RecordSandboxLifecycle(_ context.Context, e audit.SandboxLifecycleEvent) error {
 	t.queue(sandboxrelay.EventSandboxLifecycle, e.Timestamp, lifecycleClaim(e))
@@ -181,9 +222,22 @@ func (t *daemonRelayTelemetry) RecordSandboxEgress(_ context.Context, e audit.Sa
 	return nil
 }
 
-// The other sandbox records have no managed route yet: the managed gateway
-// records the approvals and policy records itself (sandbox.ask.decided,
-// sandbox.policy.*), and the rest stay in the daemon's activity feed.
+func (t *daemonRelayTelemetry) RecordManagedAskDecision(_ context.Context, e audit.SandboxAskDecidedEvent) error {
+	if e.Result != audit.SandboxApprovalDenied {
+		return nil
+	}
+	outcome := "rejected"
+	if e.Reason == sandboxAskReasonFloorDenied {
+		outcome = sandboxAskReasonFloorDenied
+	}
+	c := claimOf(e.Sandbox)
+	c.ApprovalID, c.Outcome, c.Host, c.Port = e.ApprovalID, outcome, e.Host, e.Port
+	t.queue(sandboxrelay.EventSandboxAskDecision, e.Timestamp, c)
+	return nil
+}
+
+// Other approvals already reach the gateway's decisions route. The remaining
+// sandbox records have no managed route and stay in the daemon's feed.
 func (*daemonRelayTelemetry) RecordSandboxApproval(context.Context, audit.SandboxApprovalEvent) error {
 	return nil
 }
@@ -193,7 +247,8 @@ func (*daemonRelayTelemetry) RecordSandboxPolicy(context.Context, audit.SandboxP
 func (*daemonRelayTelemetry) RecordSandboxHealth(context.Context, audit.SandboxHealthEvent) error {
 	return nil
 }
-func (*daemonRelayTelemetry) RecordSandboxFinding(context.Context, audit.SandboxFindingEvent) error {
+func (t *daemonRelayTelemetry) RecordSandboxFinding(_ context.Context, e audit.SandboxFindingEvent) error {
+	t.queue(sandboxrelay.EventSandboxFinding, e.Timestamp, findingClaim(e))
 	return nil
 }
 func (*daemonRelayTelemetry) RecordSandboxWorkspace(context.Context, audit.SandboxWorkspaceEvent) error {
@@ -202,7 +257,8 @@ func (*daemonRelayTelemetry) RecordSandboxWorkspace(context.Context, audit.Sandb
 func (*daemonRelayTelemetry) RecordSandboxActivity(context.Context, audit.SandboxActivityEvent) error {
 	return nil
 }
-func (*daemonRelayTelemetry) RecordSandboxProcess(context.Context, audit.SandboxProcessEvent) error {
+func (t *daemonRelayTelemetry) RecordSandboxProcess(_ context.Context, e audit.SandboxProcessEvent) error {
+	t.queue(sandboxrelay.EventSandboxProcess, e.Timestamp, processClaim(e))
 	return nil
 }
 
@@ -283,7 +339,12 @@ func (t *daemonRelayTelemetry) flush(ctx context.Context) bool {
 	for _, registration := range order {
 		list := batches[registration]
 		for len(list) > 0 && !stopped {
-			n := min(len(list), daemonTelemetryBatch)
+			n := daemonTelemetryChunkSize(registration, list)
+			if n == 0 {
+				t.drop(1)
+				list = list[1:]
+				continue
+			}
 			chunk := list[:n]
 			list = list[n:]
 			events := make([]sandboxrelay.Event, len(chunk))
@@ -322,6 +383,28 @@ func (t *daemonRelayTelemetry) flush(ctx context.Context) bool {
 		return false
 	}
 	return true
+}
+
+// daemonTelemetryChunkSize keeps each batch within the relay's byte cap as
+// well as its record cap. Process command lines and lineage can make a
+// restored queue much larger than a batch of lifecycle records.
+func daemonTelemetryChunkSize(registration string, list []daemonTelemetryRecord) int {
+	n := min(len(list), daemonTelemetryBatch)
+	for n > 0 {
+		events := make([]sandboxrelay.Event, n)
+		for i := range events {
+			events[i] = list[i].ev
+		}
+		raw, err := json.Marshal(sandboxrelay.EventBatch{V: sandboxrelay.WireVersion, Registration: registration, Events: events})
+		if err == nil && len(raw) <= sandboxrelay.MaxEventBatchBytes {
+			return n
+		}
+		if n == 1 {
+			return 0
+		}
+		n = (n + 1) / 2
+	}
+	return 0
 }
 
 // daemonTelemetryRetryable reports a post worth trying again: a gateway out

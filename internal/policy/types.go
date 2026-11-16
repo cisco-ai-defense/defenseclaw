@@ -65,6 +65,7 @@ type FindingInput struct {
 	Severity string `json:"severity"`
 	Scanner  string `json:"scanner"`
 	Title    string `json:"title"`
+	RuleID   string `json:"rule_id,omitempty"`
 }
 
 // AdmissionOutput is the structured output from the OPA admission policy.

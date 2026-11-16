@@ -118,7 +118,7 @@ func TestEvaluateRuntimeSkillAssetPolicyRespectsRuntimeDetectionDisabled(t *test
 		{SkillName: "epa-deny", ToolName: "Skill", Surface: "hook", Matched: true},
 		{TargetType: "plugin", SkillName: "epa-plug-deny", Surface: "prompt_expansion", Matched: true},
 	} {
-		decision, matched := api.runtimeSkillAssetPolicyDecision("claudecode", probe)
+		decision, matched := api.runtimeSkillAssetPolicyDecision(context.Background(), "claudecode", probe)
 		if !matched || decision.Action != "block" || decision.Source != "admin-deny" {
 			t.Fatalf("%s %s: matched=%v decision=%+v, want an admin-deny block", probe.TargetType, probe.SkillName, matched, decision)
 		}
@@ -518,8 +518,8 @@ func TestNormalizeSkillRuntimeNameDocumentsPathBehavior(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.input, func(t *testing.T) {
-			if got := normalizeSkillRuntimeName(tc.input); got != tc.want {
-				t.Errorf("normalizeSkillRuntimeName(%q) = %q, want %q", tc.input, got, tc.want)
+			if got := assetfacts.SkillRuntimeName(tc.input); got != tc.want {
+				t.Errorf("SkillRuntimeName(%q) = %q, want %q", tc.input, got, tc.want)
 			}
 		})
 	}
@@ -804,12 +804,13 @@ func TestMCPURLRuleMatchesTheCallersServer(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(state), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	call := func(ctx context.Context) bool {
+	callIn := func(ctx context.Context, session string) bool {
 		_, matched := api.claudeCodeMCPAssetDecision(ctx, claudeCodeHookRequest{
-			HookEventName: "PreToolUse", ToolName: "mcp__notes__count_words", CWD: project,
+			HookEventName: "PreToolUse", SessionID: session, ToolName: "mcp__notes__count_words", CWD: project,
 		})
 		return matched
 	}
+	call := func(ctx context.Context) bool { return callIn(ctx, "") }
 	if !call(withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: home})) {
 		t.Fatal("url deny did not match the server in the caller's home")
 	}
@@ -837,7 +838,9 @@ func TestMCPURLRuleMatchesTheCallersServer(t *testing.T) {
 	if !call(commandLine) {
 		t.Fatal("url deny did not match the server the agent's command line defines")
 	}
-	if call(peer) {
+	// A later agent process (another session) connects to what the caller's
+	// files list; it does not inherit the command-line definition.
+	if callIn(peer, "later-session") {
 		t.Fatal("url deny matched the caller's benign server")
 	}
 	unproven := context.WithValue(peer, claimedAssetFactsContextKey{}, assetfacts.Facts{MCPUnproven: "notes"})
@@ -871,6 +874,39 @@ func TestUnprovenMCPDefinitionIgnoresUnrelatedPinnedDeny(t *testing.T) {
 	})
 	if !matched || decision.Action != "block" {
 		t.Fatalf("matching endpoint deny did not fail closed: matched=%v decision=%+v", matched, decision)
+	}
+}
+
+func TestUnprovenMCPDefinitionRespectsRuntimeDetectionSwitch(t *testing.T) {
+	for _, kind := range []string{"registry", "allow", "deny"} {
+		t.Run(kind, func(t *testing.T) {
+			cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+			cfg.AssetPolicy.Enabled = true
+			cfg.AssetPolicy.Mode = config.AssetPolicyModeAction
+			cfg.AssetPolicy.MCP.RuntimeDetection.Enabled = false
+			cfg.AssetPolicy.MCP.RegistryRequired = true
+			rule := config.AssetPolicyRule{Name: "docs", URL: "https://mcp.example.invalid"}
+			switch kind {
+			case "registry":
+				cfg.AssetPolicy.MCP.Registry = []config.AssetPolicyRule{rule}
+			case "allow":
+				cfg.AssetPolicy.MCP.Allowed = []config.AssetPolicyRule{rule}
+			case "deny":
+				cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{rule}
+			}
+			api := &APIServer{scannerCfg: cfg}
+			ctx := context.WithValue(context.Background(), claimedAssetFactsContextKey{}, assetfacts.Facts{MCPUnproven: "docs"})
+			decision, matched := api.evaluateRuntimeMCPAssetPolicy(ctx, "claudecode", "PreToolUse", mcpRuntimeProbe{
+				Matched: true, Surface: "hook", ServerName: "docs",
+			})
+			if kind == "deny" {
+				if !matched || decision.Action != "block" {
+					t.Fatalf("explicit endpoint deny must still block: %+v matched=%v", decision, matched)
+				}
+			} else if matched {
+				t.Fatalf("runtime detection is off but %s blocked: %+v", kind, decision)
+			}
+		})
 	}
 }
 
@@ -1140,6 +1176,44 @@ func TestCodexReadChecksEverySameNameSkillFolder(t *testing.T) {
 	})
 	if !matched || decision.Action != "block" || decision.Source != "admin-deny" {
 		t.Fatalf("same-name folder decision = %+v, matched=%v; want denied path block", decision, matched)
+	}
+}
+
+// GAP-1302: a path with a skills/<name> pair that is neither in a skill
+// root nor holds a SKILL.md is not the skill <name>; the denied skill's own
+// folder, and a copy of it with its SKILL.md elsewhere, stay refused.
+func TestSkillFolderDenyIgnoresUnrelatedSkillsPaths(t *testing.T) {
+	home, other := t.TempDir(), t.TempDir()
+	unrelated := filepath.Join(other, "tests", "skills", "blocked")
+	copied := filepath.Join(other, "vendor", "skills", "blocked")
+	for _, dir := range []string{unrelated, copied} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(unrelated, "notes.txt"), []byte("notes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(copied, "SKILL.md"), []byte("---\nname: blocked\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "blocked"}}
+	api := &APIServer{scannerCfg: cfg}
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1002, Home: home})
+	for command, want := range map[string]bool{
+		"cat " + filepath.Join(unrelated, "notes.txt"): false,
+		"ls " + unrelated:                          false,
+		"cat " + filepath.Join(copied, "SKILL.md"): true,
+		"cat " + filepath.Join(home, ".agents", "skills", "blocked", "SKILL.md"): true,
+	} {
+		decision, matched := api.codexSkillAssetDecision(ctx, codexHookRequest{
+			HookEventName: "PreToolUse", ToolName: "Bash", CWD: other,
+			ToolInput: map[string]interface{}{"command": command},
+		})
+		if blocked := matched && decision.Action == "block"; blocked != want {
+			t.Errorf("%s: blocked=%v (decision %+v), want %v", command, blocked, decision, want)
+		}
 	}
 }
 

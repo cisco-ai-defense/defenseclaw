@@ -78,6 +78,23 @@ func TestManagedHookAuthorizerMatrix(t *testing.T) {
 		{name: "refuse denies a per-user refusal row", enrollment: config.EnterpriseEnrollmentConfig{UnverifiedVersions: "refuse"}, peer: erin, connector: "antigravity", reason: managedHookReasonSurfaceUnverified},
 		{name: "ledger failure fails closed", loader: func() (managedHookLedger, error) { return managedHookLedger{}, errors.New("untrusted") }, peer: alice, connector: "claudecode", reason: managedHookReasonLedgerUnavailable},
 	}
+	// An unenrolled caller exclude_users names by account name or uid is
+	// refused with the excluded mark; others are not marked
+	// (identity-round GAP-1181).
+	for _, excluded := range []struct {
+		entries []string
+		peer    managedHookPeer
+		want    bool
+	}{{[]string{"carol"}, carol, true}, {[]string{" 3001 "}, carol, true}, {[]string{"dave"}, carol, false}, {nil, carol, false}} {
+		authorizer := newManagedHookAuthorizer(config.EnterpriseEnrollmentConfig{ExcludeUsers: excluded.entries, UnenrolledUsers: "deny"},
+			[]string{"codex"}, load)
+		for _, connectorName := range []string{"codex", "claudecode"} {
+			decision := authorizer.decide(excluded.peer, connectorName, "")
+			if decision.Allow || decision.Reason != managedHookReasonUIDUnregistered || decision.Excluded != excluded.want {
+				t.Fatalf("exclude_users %v, %s: decision = %+v, want refused with excluded=%v", excluded.entries, connectorName, decision, excluded.want)
+			}
+		}
+	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			loader := tc.loader
@@ -227,11 +244,15 @@ func TestManagedHookSocketRecordsAStandardUsersRefusal(t *testing.T) {
 	if code := send(`{"action":"skill-block","target":"p0-test-skill","details":"type=skill"}`); code != http.StatusNoContent {
 		t.Fatalf("refusal report: status %d", code)
 	}
+	if code := send(`{"action":"action","target":"enterprise linux ensure","details":"command=enterprise linux ensure","reason":"not_root"}`); code != http.StatusNoContent {
+		t.Fatalf("not_root refusal report: status %d", code)
+	}
 	for _, body := range []string{
 		`{"action":"scan","target":"x"}`,
 		`{"action":"skill-block","target":""}`,
 		`{"action":"skill-block","target":"x","actor":"root"}`,
 		`{"action":"skill-block","target":"x","details":"type=skill outcome=applied"}`,
+		`{"action":"action","target":"x","reason":"allowed"}`,
 	} {
 		if code := send(body); code != http.StatusBadRequest {
 			t.Errorf("%s: status %d, want 400", body, code)
@@ -256,6 +277,13 @@ func TestManagedHookSocketRecordsAStandardUsersRefusal(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
+	var rootRefusal string
+	if err := database.QueryRow(`SELECT details FROM audit_events WHERE action = 'action' AND target = 'enterprise linux ensure' ORDER BY rowid DESC LIMIT 1`).Scan(&rootRefusal); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rootRefusal, "reason=not_root") || !strings.Contains(rootRefusal, "actor=uid:508") {
+		t.Fatalf("not_root row lost verified attribution: %q", rootRefusal)
+	}
 	var count int
 	var details string
 	if err := database.QueryRow(`SELECT COUNT(*), COALESCE(MAX(details), "") FROM audit_events WHERE action = "skill-block" AND target = "p0-test-skill"`).Scan(&count, &details); err != nil {

@@ -76,7 +76,7 @@ func (w *InstallWatcher) startAdmissionTraceV8(
 	}
 	operation := &watcherAdmissionTraceV8{
 		runtime: w.admissionObservabilityV8(), ctx: ctx, startedAt: time.Now().UTC(),
-		evaluationID: uuid.NewString(), targetType: targetType, targetRef: event.Name,
+		evaluationID: uuid.Must(uuid.NewV7()).String(), targetType: targetType, targetRef: event.Name,
 		policyID: policyID, connector: w.eventConnector(event),
 	}
 	if len(snapshot) > 0 {

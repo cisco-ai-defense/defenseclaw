@@ -30,6 +30,8 @@ code. Three kinds of steps exist:
   Desktop connector ID to ``devin`` and drops connectors this release does not
   ship. It has no ``config_version``: it runs whenever ``config.yaml`` still
   names such a connector.
+* Release-specific steps use the installer's ``--from-version`` when a prior
+  release wrote a value without recording whether an operator chose it.
 
 Every step is idempotent and writes through temp-file-and-rename.
 """
@@ -53,12 +55,13 @@ from typing import TYPE_CHECKING
 import click
 import yaml
 
-from defenseclaw import legacy_connector, ux
+from defenseclaw import legacy_connector, removed_connectors, ux
 from defenseclaw.file_lock import locked_file_update
 from defenseclaw.file_permissions import (
     copy_windows_dacl,
     delete_file_durable,
     replace_file_durable,
+    serialize_dotenv,
     set_file_mode,
 )
 
@@ -1375,9 +1378,13 @@ def _atomic_write_dotenv(path: str, kv: dict[str, str]) -> bool:
     operator's chosen key order. Reserved for the rare path where we
     are creating a brand-new .env from scratch.
     """
-    lines = [f"{k}={v}" for k, v in sorted(kv.items())]
-    body = "\n".join(lines) + "\n"
-    return _atomic_write_text(path, body, mode=0o600)
+    try:
+        with open(path, "rb") as f:
+            existing = f.read()
+    except OSError:
+        existing = b""
+    lines = [f"{k}={v}".encode() for k, v in sorted(kv.items())]
+    return _atomic_write_text(path, serialize_dotenv(lines, existing).decode("utf-8"), mode=0o600)
 
 
 def _dotenv_update_keys(
@@ -1440,8 +1447,8 @@ def _dotenv_update_keys_locked(
         return _atomic_write_dotenv(path, upd)
 
     try:
-        with open(path) as f:
-            raw_lines = f.readlines()
+        with open(path, "rb") as f:
+            existing = f.read()
     except OSError as exc:
         ux.warn(f"could not read {path}: {exc}", indent="    ")
         return False
@@ -1450,21 +1457,9 @@ def _dotenv_update_keys_locked(
     consumed: set[str] = set()
     changed = False
 
-    for raw in raw_lines:
-        # Preserve the original line ending style (LF vs CRLF) so a
-        # CRLF-terminated .env from a Windows operator doesn't
-        # silently flip to LF on a partial rewrite.
-        if raw.endswith("\r\n"):
-            terminator = "\r\n"
-            body = raw[:-2]
-        elif raw.endswith("\n"):
-            terminator = "\n"
-            body = raw[:-1]
-        else:
-            terminator = ""
-            body = raw
-
-        stripped = body.strip()
+    for raw_bytes in existing.splitlines():
+        raw = raw_bytes.decode("utf-8")
+        stripped = raw.strip()
         if not stripped or stripped.startswith("#"):
             out_lines.append(raw)
             continue
@@ -1479,8 +1474,7 @@ def _dotenv_update_keys_locked(
             changed = True
             continue  # drop the line entirely
         if key in upd:
-            new_value = upd[key]
-            new_line = f"{key}={new_value}{terminator}"
+            new_line = f"{key}={upd[key]}"
             if new_line != raw:
                 changed = True
             out_lines.append(new_line)
@@ -1488,15 +1482,11 @@ def _dotenv_update_keys_locked(
             continue
         out_lines.append(raw)
 
-    # Append keys that weren't already in the file. Use a final newline
-    # if the file didn't end with one, so the appended block doesn't
-    # glue itself onto the previous line.
+    # Append keys that weren't already in the file; the serializer ends every
+    # line, so the appended block never glues itself onto the previous line.
     pending = [k for k in upd if k not in consumed]
-    if pending:
-        if out_lines and not out_lines[-1].endswith(("\n", "\r\n")):
-            out_lines[-1] = out_lines[-1] + "\n"
-        for key in pending:
-            out_lines.append(f"{key}={upd[key]}\n")
+    for key in pending:
+        out_lines.append(f"{key}={upd[key]}")
         changed = True
 
     if not changed:
@@ -1508,7 +1498,8 @@ def _dotenv_update_keys_locked(
             pass
         return True
 
-    return _atomic_write_text(path, "".join(out_lines), mode=0o600)
+    body = serialize_dotenv([line.encode("utf-8") for line in out_lines], existing)
+    return _atomic_write_text(path, body.decode("utf-8"), mode=0o600)
 
 
 def _atomic_write_config(path: str, body: str, *, mode: int = 0o644) -> bool:
@@ -3020,6 +3011,62 @@ def _migrate_connector_roster(ctx: MigrationContext) -> None:
     """
     _migrate_retired_desktop_connector(ctx)
     _migrate_unshipped_connectors(ctx)
+    _persist_removed_connector_settings(ctx)
+
+
+def _removed_connector_settings_pending(raw: object) -> bool:
+    """Include retired-only telemetry even when the roster is already current."""
+    if not isinstance(raw, dict):
+        return False
+    from defenseclaw.config import _drop_retired_connector_settings
+
+    cleaned = copy.deepcopy(raw)
+    _drop_retired_connector_settings(cleaned, emit_warning=False)
+    return cleaned != raw
+
+
+def _persist_removed_connector_settings(ctx: MigrationContext) -> None:
+    """Persist the loader's restrictive retired cleanup with an exact backup."""
+    from defenseclaw.config_writer import hold_lock
+
+    path = ctx.active_config_path()
+    with hold_lock(path, timeout_s=None):
+        if not os.path.isfile(path):
+            return
+        if os.path.islink(path):
+            raise MigrationError(f"refusing removed connector cleanup through a symlink at {path}")
+        with open(path, "rb") as source:
+            original = source.read()
+        raw = yaml.safe_load(original)
+        if not _removed_connector_settings_pending(raw):
+            return
+        from defenseclaw.config import _drop_retired_connector_settings
+
+        cleaned = copy.deepcopy(raw)
+        _drop_retired_connector_settings(cleaned, emit_warning=False)
+        updated = yaml.safe_dump(cleaned, default_flow_style=False, sort_keys=False)
+        # A full YAML rewrite loses comments and formatting. Keep the exact
+        # source, including those operator edits, before replacing the file.
+        backup = f"{path}.retired-connector-{secrets.token_hex(8)}.bak"
+        try:
+            fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                set_file_mode(fd, backup, 0o600, set_owner=True)
+                with os.fdopen(fd, "wb") as saved:
+                    fd = -1
+                    saved.write(original)
+                    saved.flush()
+                    os.fsync(saved.fileno())
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+        except OSError as exc:
+            raise MigrationError(f"could not save config before removed connector cleanup: {exc}") from exc
+        if not _atomic_write_config(path, updated):
+            raise MigrationError(f"could not persist removed connector cleanup in {path}; original at {backup}")
+    ctx.changes.append(
+        f"removed retired connector settings and retired-only telemetry destinations from config.yaml; original at {backup}"
+    )
 
 
 def _connector_roster_pending(config_path: str, data_dir: str) -> bool:
@@ -3033,6 +3080,8 @@ def _connector_roster_pending(config_path: str, data_dir: str) -> bool:
     except yaml.YAMLError:
         return False
     if legacy_connector.migrated_copy(raw, config_path)[1]:
+        return True
+    if _removed_connector_settings_pending(raw):
         return True
     try:
         return bool(_unshipped_connector_names(raw, data_dir))
@@ -3213,6 +3262,175 @@ def _remove_or_replace_hint(removable: list[str], *, force: bool, can_remove: bo
     return f"remove it ({remove}) or set up another connector ({setup})"
 
 
+# DefenseClaw guards OpenCode V2 only since this release (#1373); earlier
+# releases guard V1 only. Remove both checks with the 1.0.x upgrade path.
+_OPENCODE_V2_SINCE = (1, 0, 6)
+_OPENCODE_V2_INSTALL = "npm uninstall -g opencode-ai && npm install -g @opencode/cli@2"
+
+
+def _opencode_configured(data_dir: str) -> bool:
+    """Whether this per-user install guards OpenCode (managed installs are the administrator's)."""
+    from defenseclaw import config as config_module
+
+    try:
+        cfg = config_module.load(data_dir=data_dir)
+        if config_module._is_managed_enterprise_mode(getattr(cfg, "deployment_mode", "")) or (
+            config_module._is_managed_enterprise_mode(os.environ.get(config_module.DEPLOYMENT_MODE_ENV))
+        ):
+            return False
+        return "opencode" in cfg.active_connectors()
+    except Exception:  # noqa: BLE001 - an unreadable config is reported by the other checks
+        return False
+
+
+def _installed_opencode(data_dir: str) -> tuple[str, str] | None:
+    """``(raw_version, executable)`` of the OpenCode this account runs now, or None.
+
+    The fresh discovery probe setup and the gateway's version check use
+    (rel-1-0-6 GAP-0040: the setup trusted-prefix selection alone missed an
+    npm prefix such as /opt/agents or ~/.npm-global, so the checks did
+    nothing). It never writes the discovery cache.
+    """
+    from defenseclaw.inventory import agent_discovery
+
+    try:
+        disc = agent_discovery.discover_with_probes(
+            ["opencode"], use_cache=False, refresh=True, data_dir=data_dir, persist_cache=False,
+        )
+        signal = disc.agents.get("opencode")
+    except Exception:  # noqa: BLE001 - no answer is no refusal; the gateway start still checks
+        return None
+    if signal is None or not signal.installed or not (signal.version or "").strip():
+        return None
+    return signal.version, signal.binary_path
+
+
+def _check_opencode_v2(data_dir: str, version: str) -> None:
+    """Fail ``migrate --check`` while the guarded OpenCode is V1 (rel-1-0-6 GAP-0021).
+
+    This release's gateway refuses OpenCode V1, so the upgrade would roll back
+    and leave the earlier gateway stopped: OpenCode then ran unguarded. Before
+    the swap the earlier install still runs and guards V1, so stop here.
+    """
+    if not _opencode_configured(data_dir):
+        return
+    found = _installed_opencode(data_dir)
+    if found is None:
+        return
+    from defenseclaw.connector_contracts import opencode_requires_v2_upgrade
+
+    raw, executable = found
+    if not opencode_requires_v2_upgrade(raw):
+        return
+    raise MigrationError(
+        f"OpenCode {raw.strip() or '(unknown version)'} at {executable} is OpenCode V1, and DefenseClaw {version} "
+        "guards OpenCode V2 only; nothing was changed, and the DefenseClaw you have keeps guarding it. Install "
+        f"OpenCode V2 ({_OPENCODE_V2_INSTALL}), then upgrade again. To upgrade without OpenCode instead, run "
+        "'defenseclaw setup remove opencode' first."
+    )
+
+
+def _opencode_v2_in_known_places(data_dir: str) -> tuple[str, str] | None:
+    """``(version, path)`` of an OpenCode V2 this account has outside the caller's PATH, or None.
+
+    Reads files only; nothing runs. Two sources: the binary the discovery
+    record of this install (written by setup) names, if it is still there, and
+    the ``@opencode/cli`` package metadata under the usual npm prefixes (the
+    account's home, version managers, Homebrew and the machine prefixes
+    below ``/opt``).
+    """
+    import glob
+    import json
+
+    from defenseclaw.connector_contracts import normalize_agent_version
+
+    try:
+        with open(os.path.join(data_dir, "agent_discovery.json"), encoding="utf-8") as fh:
+            recorded = json.load(fh)["agents"]["opencode"]
+        binary = str(recorded.get("binary_path") or "")
+        version = str(recorded.get("version") or "")
+        if (
+            recorded.get("installed") is True
+            and binary
+            and os.path.exists(binary)
+            and normalize_agent_version(version).split(".", 1)[0] == "2"
+        ):
+            return version, binary
+    except (OSError, ValueError, KeyError, AttributeError, TypeError):
+        pass
+    home = os.path.expanduser("~")
+    prefixes = [
+        os.path.join(home, ".npm-global"),
+        os.path.join(home, ".local"),
+        os.path.join(home, "npm"),
+        "/usr/local",
+        "/usr",
+        "/opt/homebrew",
+        "/home/linuxbrew/.linuxbrew",
+        *sorted(glob.glob(os.path.join(home, ".nvm", "versions", "node", "*")))[:16],
+        *sorted(glob.glob("/opt/*"))[:64],
+    ]
+    appdata = os.environ.get("APPDATA", "")
+    if appdata:
+        prefixes.append(os.path.join(appdata, "npm"))
+    for prefix in prefixes:
+        for modules in (os.path.join(prefix, "lib", "node_modules"), os.path.join(prefix, "node_modules")):
+            meta = os.path.join(modules, "@opencode", "cli", "package.json")
+            try:
+                with open(meta, encoding="utf-8") as fh:
+                    version = str(json.load(fh).get("version") or "")
+            except (OSError, ValueError, AttributeError):
+                continue
+            if normalize_agent_version(version).split(".", 1)[0] == "2":
+                return version, os.path.dirname(meta)
+    return None
+
+
+def check_opencode_rollback(data_dir: str, back_to: str, *, downgrade: bool = False) -> None:
+    """Refuse a move to a release that cannot guard the OpenCode V2 here (rel-1-0-6 GAP-0028).
+
+    Such a release's gateway does not start with OpenCode V2 (the rollback
+    undid itself with an unrelated message), and OpenCode V2 cannot load its
+    plugin, so it would run unguarded. *downgrade*: the move is
+    ``defenseclaw upgrade --version`` (or an installer run for an older
+    release), which keeps this install's configuration, so removing OpenCode
+    from it first is a way through (rel-1-0-6 GAP-0128).
+    """
+    if not _version_before(back_to, _OPENCODE_V2_SINCE) or not _opencode_configured(data_dir):
+        return
+    from defenseclaw.connector_contracts import normalize_agent_version
+
+    # The caller's PATH is not the agent's: a V2 in an npm prefix that this
+    # shell does not have on PATH still runs unguarded under the earlier
+    # release (rel-1-0-6 GAP-0067), so the known install places count too.
+    raw = ""
+    found = _installed_opencode(data_dir)
+    if found is not None and normalize_agent_version(found[0]).split(".", 1)[0] == "2":
+        raw = found[0]
+    else:
+        elsewhere = _opencode_v2_in_known_places(data_dir)
+        raw = elsewhere[0] if elsewhere else ""
+    if not raw:
+        return
+    reason = f"DefenseClaw {back_to} guards OpenCode V1 only and the OpenCode here is V2 ({raw.strip()})"
+    # DefenseClaw reads the OpenCode it recorded at setup; until a refresh it
+    # still sees V2 after the swap and refuses again (GAP-0154).
+    put_back = (
+        "put OpenCode V1 back first (npm uninstall -g @opencode/cli && npm install -g opencode-ai@1.18), "
+        "then run 'defenseclaw agent discover --refresh' so DefenseClaw sees it"
+    )
+    if downgrade:
+        raise MigrationError(
+            f"{reason}: OpenCode would run unguarded. To downgrade, {put_back}, or stay on "
+            "this release. To downgrade without OpenCode instead, run 'defenseclaw setup remove opencode' first."
+        )
+    raise MigrationError(
+        f"{reason}: its gateway would not start, and OpenCode would run unguarded; nothing was changed. The "
+        "rollback restores that release's own configuration, so removing OpenCode here does not help: to roll "
+        f"back, {put_back}, or stay on this release."
+    )
+
+
 def _check_connector_roster(
     config_path: str,
     data_dir: str,
@@ -3316,7 +3534,26 @@ def _drop_unshipped_connectors(ctx: MigrationContext) -> None:
         return
     ctx.changes.append(
         f"removed connector {listed} (not shipped by this release) from config.yaml; primary connector is "
-        f"{new_primary!r}. DefenseClaw did not change those agents' config files; {_REMOVED_CONNECTORS_DOC}"
+        f"{new_primary!r}. {_unshipped_agent_config_note(names)}; {_REMOVED_CONNECTORS_DOC}"
+    )
+
+
+def _unshipped_agent_config_note(names: list[str]) -> str:
+    """What happens to the agents' own config files of the connectors dropped from config.yaml.
+
+    until 1.1: the teardown of OpenHands and OmniGent (removed in 1.0.5)
+    removes the entries DefenseClaw wrote in their configs and keeps the
+    rest; any other unshipped name keeps its agent config as it is.
+    """
+    removed = [n for n in names if removed_connectors.is_removed(n)]
+    others = [n for n in names if not removed_connectors.is_removed(n)]
+    if not others:
+        return "DefenseClaw removes only the entries it wrote in those agents' config files"
+    if not removed:
+        return "DefenseClaw did not change those agents' config files"
+    return (
+        f"DefenseClaw removes only the entries it wrote for {', '.join(repr(n) for n in removed)} and did not "
+        f"change the config files of {', '.join(repr(n) for n in others)}"
     )
 
 
@@ -3451,6 +3688,11 @@ def _migrate_config_v9(ctx: MigrationContext) -> None:
         for merge in record.get("rule_file_merges") or []:
             if isinstance(merge, str) and merge.isprintable():
                 ctx.changes.append(f"rule pack {merge}")
+        # GAP-0268: 1.0 refuses a rule without tags, which 0.8.x took; the
+        # 1.0 copy of the pack gave each the tag custom.
+        for tagged in record.get("tagged_rules") or []:
+            if isinstance(tagged, str) and tagged.isprintable():
+                ctx.changes.append(f"rule pack {tagged}")
         # MCP servers already configured keep running after the upgrade; the
         # gateway records their baselines at its first start (GAP-1227). Name
         # the ones a block entry keeps blocked.
@@ -3461,6 +3703,8 @@ def _migrate_config_v9(ctx: MigrationContext) -> None:
         if blocked:
             ctx.changes.append(f"MCP servers that stay blocked (asset_policy.mcp.denied): {', '.join(blocked)}")
         _note_unscannable_mcp(ctx, config_path, set(blocked))
+    # GAP-0163: a legacy overlay that disagrees with llm_providers stays a live input.
+    _report_providers_fold(ctx, result, refusal_only=True)
 
 
 def migrated_rule_lines(record: dict) -> list[tuple[str, str]]:
@@ -3548,6 +3792,95 @@ def _note_unscannable_mcp(ctx: MigrationContext, config_path: str, blocked: set[
 
 CONFIG_MIGRATIONS: dict[int, Callable[[MigrationContext], None]] = {8: _migrate_config_v9}
 _V9_STEP_NAME = "config_version 8 → 9"
+_PROVIDERS_FOLD_STEP_NAME = "fold the legacy custom-providers.json into config.yaml"
+
+
+def _legacy_providers_overlay_pending(config_path: str, data_dir: str) -> bool:
+    """Whether a config_version 9 home still has a legacy (operator-written)
+    custom-providers.json for ``config migrate`` to fold into config.yaml
+    (GAP-0163). A managed host keeps its admin's providers, and a file that
+    sets request_overrides stays a live input, so neither is pending."""
+    text = _read_config_text(config_path) if os.path.isfile(config_path) else None
+    if text is None or _guardrail_runtime_migration_is_managed(text):
+        return False
+    try:
+        raw = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return False
+    configured = str(raw.get("data_dir") or "").strip() if isinstance(raw, dict) else ""
+    path = os.path.join(os.path.expanduser(configured) if configured else data_dir, "custom-providers.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            overlay = json.load(f)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(overlay, dict) or overlay.get("_derived_from"):
+        return False
+    providers = overlay.get("providers")
+    providers = providers if isinstance(providers, list) else []
+    if any(isinstance(p, dict) and p.get("request_overrides") for p in providers):
+        return False
+    return bool(providers or overlay.get("ollama_ports"))
+
+
+def _fold_legacy_providers_overlay(ctx: MigrationContext) -> None:
+    """Fold a legacy custom-providers.json into llm_providers of a config
+    that is already config_version 9 (GAP-0163). The one implementation is
+    Go (``defenseclaw-gateway config migrate --to 9``): the lists are unioned,
+    config.yaml keeps its values, and a field both set to different values
+    folds nothing. That refusal is a warning, not a failure: config.yaml and
+    the file stay as they are and the gateway keeps merging the file."""
+    from defenseclaw.config_inspect import ConfigInspectError, migrate_config_v9
+
+    config_path = os.path.abspath(os.path.expanduser(ctx.active_config_path()))
+    try:
+        result = migrate_config_v9(config_path=config_path)
+    except ConfigInspectError as exc:
+        raise MigrationError(f"folding the legacy custom-providers.json into config.yaml failed: {exc}") from exc
+    _report_providers_fold(ctx, result)
+
+
+def _report_providers_fold(ctx: MigrationContext, result: dict, *, refusal_only: bool = False) -> None:
+    """Report what ``config migrate`` did with a legacy custom-providers.json."""
+    fold = result.get("providers_fold")
+    if not isinstance(fold, dict):
+        return
+    refused = fold.get("refused")
+    if isinstance(refused, str) and refused and refused.isprintable():
+        ux.warn(refused, indent="    ")
+        return
+    overlay, retired = str(fold.get("overlay") or ""), str(fold.get("retired") or "")
+    # GAP-0184: headers a same-name merge dropped while the file was an input
+    # are sent once it is folded; name them (never their values).
+    sent = _provider_field_names(fold.get("headers_after_fold"))
+    if sent:
+        when = "the gateway now also sends" if retired else f"once {overlay} is removed, the gateway also sends"
+        ctx.changes.append(
+            f"{when} {sent} (before 1.0.3 a provider entry named like a built-in provider or an earlier entry "
+            "lost its extra_headers); remove any you do not want from llm_providers.custom"
+        )
+    if refusal_only:
+        return
+    folded = [name for name in fold.get("folded") or [] if isinstance(name, str) and name.isprintable()]
+    if folded:
+        line = f"moved provider(s) {', '.join(folded)} from {overlay} into config.yaml llm_providers.custom"
+        ctx.changes.append(line + (f"; the file is kept as {retired}" if retired else ""))
+    elif retired:
+        ctx.changes.append(f"{overlay} held nothing config.yaml lacked; it is kept as {retired}")
+
+
+def _provider_field_names(entries: object) -> str:
+    """``provider (field, ...); ...`` for a list of ``{"provider", "fields"}``
+    entries (names only, never values)."""
+    parts = []
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        provider = entry.get("provider")
+        fields = [f for f in entry.get("fields") or [] if isinstance(f, str) and f.isprintable()]
+        if isinstance(provider, str) and provider.isprintable() and fields:
+            parts.append(f"{provider} ({', '.join(fields)})")
+    return "; ".join(parts)
 
 
 def _preview_config_v9(config_path: str, gateway_binary: str) -> None:
@@ -3682,6 +4015,7 @@ def migrate(
         _check_connector_roster(
             config_path, data_dir, __version__, gateway_binary=gateway_binary, from_version=from_version or ""
         )
+        _check_opencode_v2(data_dir, __version__)
         # The v8 conversion reads the config as it is now, so the preflight is
         # only meaningful when no earlier 0.x step would change it first; the
         # real migration still validates and the installer rolls back on failure.
@@ -3714,28 +4048,133 @@ def migrate(
             raise MigrationError(f"{name} failed: {exc}") from exc
     for change in ctx.changes:
         ux.ok(change, indent="    ")
+    _report_legacy_cursor_open(config_path, from_version or "")
     try:
         reached = source_config_version(path=config_path)
     except ConfigVersionError as exc:
         raise MigrationError(str(exc)) from exc
     if reached != target:
         raise MigrationError(f"{config_path} is at config_version {reached} after migrating; expected {target}")
+    _restore_set_aside_keys(data_dir, config_path)
     _refresh_local_observability_bundle(data_dir, __version__)
+    _record_legacy_local_splunk_sink(data_dir, config_path)
     _refresh_guardrail_profiles(data_dir, config_path)
     _refresh_rego_policies(data_dir, config_path)
+    # An agent that updated itself since setup is selected again (GAP-2513);
+    # a 0.x import has no sealed agent, so this does nothing there.
+    reselect_updated_windows_agents(data_dir)
     # A 0.8.x release may already have written config_version 8 (GAP-1390), so
     # the writer's version decides too: no 0.x release recorded the agents.
     if version < _FIRST_V8_CONFIG_VERSION or _version_before(from_version or "", (1, 0, 0)):
         _select_windows_agents(data_dir)
-        _seal_windows_hook_credentials(data_dir)
+    # Every upgrade: 1.0.2-1.0.4 also wrote some hook credentials with an
+    # inherited DACL (GAP-2207), not only 0.x. Sealing is idempotent.
+    _seal_windows_hook_credentials(data_dir)
     return MigrateResult(version, target, names, changed=bool(names))
 
 
-def _seal_windows_hook_credentials(data_dir: str) -> None:
-    """Give the hook credentials a 0.x Windows install wrote a private DACL.
+def _record_legacy_local_splunk_sink(data_dir: str, config_path: str) -> None:
+    """Record the local Splunk sink 1.0.3 or earlier local setup created (GAP-2128).
 
-    0.8.x left ``hooks\\.hook-<scope>.token`` and ``.otlp-<scope>.token``
-    with the DACL they inherit from the folder. 1.x keeps those files, and
+    Without the record the sink counts as remote and its exporter sends the
+    HEC token to any account that listens on 127.0.0.1:8088 once the stack is
+    stopped. Only a sink its bridge contract and Docker container prove is
+    recorded. Best effort: a failure names the setup rerun that records it,
+    and the upgrade goes on.
+    """
+    if not os.path.isdir(os.path.join(data_dir, "splunk-bridge")):
+        return
+    gateway_token_env = ""
+    try:
+        root = yaml.safe_load(_read_config_text(config_path) or "") or {}
+        gateway = root.get("gateway") if isinstance(root, dict) else None
+        if isinstance(gateway, dict) and isinstance(gateway.get("token_env"), str):
+            gateway_token_env = gateway["token_env"]
+    except yaml.YAMLError:
+        pass
+    try:
+        from defenseclaw.commands.cmd_setup import record_legacy_local_splunk_sink
+
+        recorded = record_legacy_local_splunk_sink(data_dir, gateway_token_env=gateway_token_env)
+    except Exception as exc:  # noqa: BLE001 - best effort, named with its remedy
+        ux.warn(
+            f"The local Splunk sink could not be recorded ({type(exc).__name__}); until it is, its "
+            "token may go to another account's listener on its address. Run: defenseclaw setup splunk --logs"
+        )
+        return
+    if recorded:
+        ux.ok(f"Recorded the local Splunk sink {recorded} that an earlier local setup created", indent="    ")
+
+
+def _restore_set_aside_keys(data_dir: str, config_path: str) -> None:
+    """Put back the config keys a downgrade set aside (GAP-0137).
+
+    ``defenseclaw upgrade --version`` to a release older than a key takes the
+    key out of config.yaml (the older installer refuses it) and keeps it in
+    ``upgrade_shim.SET_ASIDE_FILE``. This release puts back the keys it has,
+    unless config.yaml sets one again; keys of a later release stay in the
+    file for that release. Best effort: a key that cannot be put back is
+    named with the command that sets it, and the upgrade goes on.
+    """
+
+    from defenseclaw.config_writer import ACTOR_MIGRATION, Change, apply, plain_error
+    from defenseclaw.upgrade_shim import NEWER_CONFIG_KEYS, SET_ASIDE_FILE
+
+    path = os.path.join(data_dir, SET_ASIDE_FILE)
+    try:
+        with open(path, encoding="utf-8") as stream:
+            record = json.load(stream)
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError) as exc:
+        ux.warn(f"Could not read {path} ({exc}); set the keys it lists again with 'defenseclaw config set'")
+        return
+    keys = record.get("keys") if isinstance(record, dict) else None
+    if not isinstance(keys, dict):
+        ux.warn(f"{path} lists no keys; remove it")
+        return
+    known = {key for key, _since in NEWER_CONFIG_KEYS}
+    current = yaml.safe_load(_read_config_text(config_path) or "") or {}
+    put: dict[str, object] = {}
+    for key, value in keys.items():
+        if key not in known:
+            continue
+        node: object = current
+        for part in key.split("."):
+            node = node.get(part) if isinstance(node, dict) else None
+        if node in (None, ""):
+            put[key] = value
+    if put:
+        try:
+            apply(
+                [Change(key, value) for key, value in put.items()],
+                ACTOR_MIGRATION,
+                f"put back after the downgrade to {record.get('for') or 'an older release'}",
+                path=config_path,
+            )
+        except Exception as exc:  # noqa: BLE001 - a refused value is named, the upgrade goes on
+            commands = "; ".join(f"defenseclaw config set {key} {value}" for key, value in put.items())
+            ux.warn(f"Could not put back {', '.join(put)} ({plain_error(exc)}); set it again with: {commands}")
+            return
+        ux.ok(f"Put back {', '.join(put)}, set aside by the downgrade", indent="    ")
+    later = {key: value for key, value in keys.items() if key not in known}
+    try:
+        if later:
+            from defenseclaw.upgrade_shim import _write_private_json
+
+            _write_private_json(path, {**record, "keys": later})
+        else:
+            os.remove(path)
+    except OSError as exc:
+        ux.warn(f"Could not update {path} ({exc})")
+
+
+def _seal_windows_hook_credentials(data_dir: str) -> None:
+    """Give the hook credentials an older Windows install wrote a private DACL.
+
+    0.8.x, and 1.0.2-1.0.4 for some connectors (GAP-2207), left
+    ``hooks\\.hook-<scope>.token`` and ``.otlp-<scope>.token``
+    with the DACL they inherit from the folder. Later releases keep those files, and
     ``defenseclaw setup rotate-token`` refuses a hook credential whose DACL is
     inheritable (GAP-0364). A file that only trusted principals can read gets
     the owner-only DACL 1.x writes; any other is left as it is: the gateway
@@ -3764,7 +4203,7 @@ def _seal_windows_hook_credentials(data_dir: str) -> None:
                 continue
             protect_private_file(path)
         except OSError as exc:
-            ux.warn(f"Could not make {path} private ({exc}); 'defenseclaw setup rotate-token' refuses it until it is")
+            ux.warn(f"Could not make {path} private ({exc}); 'defenseclaw setup rotate-token' refuses it until it is private")
 
 
 def _refresh_guardrail_profiles(data_dir: str, config_path: str) -> None:
@@ -3958,6 +4397,83 @@ def _select_windows_agents(data_dir: str) -> None:
         ux.warn(f"no {name} executable to select ({detail}); run 'defenseclaw setup {name}'", indent="    ")
 
 
+def _sealed_windows_agent_changed(data_dir: str, connector: str) -> bool:
+    """Whether the program setup sealed for *connector* is no longer the one on disk."""
+
+    from defenseclaw.agent_selection import stable_executable_sha256
+
+    try:
+        with open(os.path.join(data_dir, "hook_contract_lock.json"), encoding="utf-8") as handle:
+            entry = (json.load(handle).get("connectors") or {}).get(connector) or {}
+    except (OSError, ValueError, AttributeError):
+        return False
+    executable = str(entry.get("agent_executable") or "")
+    sealed = str(entry.get("agent_executable_sha256") or "").lower()
+    if (
+        entry.get("agent_executable_source") != "setup-selected"
+        or not executable
+        or not re.fullmatch(r"[0-9a-f]{64}", sealed)
+    ):
+        return False
+    if not os.path.isfile(executable):
+        return True
+    try:
+        return stable_executable_sha256(executable) != sealed
+    except OSError:
+        return False
+
+
+def reselect_updated_windows_agents(data_dir: str) -> None:
+    """Select again an agent program that updated itself since setup (GAP-2513).
+
+    On Windows the gateway runs codex.exe (and the other protected agents)
+    only while it is the file setup sealed in hook_contract_lock.json. Codex
+    updates itself (its "Update now" prompt runs npm install -g), and the next
+    upgrade then failed to start the gateway and put the old install back with
+    its gateway stopped until ``defenseclaw setup codex`` ran. Running the
+    installer is the same explicit action: the connectors whose sealed
+    program changed get the selection setup records, with the same checks,
+    and the gateway seals the new program. An unchanged connector keeps its
+    sealed lock; managed installs are left to the administrator.
+    """
+
+    if os.name != "nt":
+        return
+    from defenseclaw import config as config_module
+    from defenseclaw.agent_selection import record_setup_agent_selections, setup_agent_selection_connectors
+
+    try:
+        cfg = config_module.load(data_dir=data_dir)
+        if config_module._is_managed_enterprise_mode(getattr(cfg, "deployment_mode", "")) or (
+            config_module._is_managed_enterprise_mode(os.environ.get(config_module.DEPLOYMENT_MODE_ENV))
+        ):
+            return
+        changed = [
+            name
+            for name in setup_agent_selection_connectors(cfg.active_connectors())
+            if _sealed_windows_agent_changed(data_dir, name)
+        ]
+        if not changed:
+            return
+        selections, errors = record_setup_agent_selections(data_dir, changed)
+        if errors and selections:
+            selections, retry_errors = record_setup_agent_selections(data_dir, list(selections))
+            if retry_errors:
+                errors.update(retry_errors)
+                selections = {}
+    except Exception as exc:  # noqa: BLE001 - the gateway start reports what it needs
+        ux.warn(f"could not check the agent programs setup selected: {exc}", indent="    ")
+        return
+    for name, selection in sorted(selections.items()):
+        ux.warn(
+            f"{name} changed since DefenseClaw set it up (an agent update does this); "
+            f"selected {selection.executable} ({selection.raw_version}) for the {name} connector",
+            indent="    ",
+        )
+    for name, detail in sorted(errors.items()):
+        ux.warn(f"no {name} executable to select ({detail}); run 'defenseclaw setup {name}'", indent="    ")
+
+
 def _tighten_group_writable(ctx: MigrationContext, paths: list[str]) -> None:
     """Make config files that group or others can write private (0600).
 
@@ -4038,9 +4554,62 @@ def _pending_migration_steps(
         if step is None:
             raise MigrationError(f"no migration from config_version {number} to {number + 1}")
         steps.append((f"config_version {number} → {number + 1}", _config_version_step(step, number + 1, config_path)))
+    if not steps and current >= 9 and _legacy_providers_overlay_pending(config_path, data_dir):
+        steps.append((_PROVIDERS_FOLD_STEP_NAME, _fold_legacy_providers_overlay))
     if _connector_roster_pending(config_path, data_dir):
         steps.append(("update renamed and removed connectors", _migrate_connector_roster))
     return steps
+
+
+def _legacy_cursor_open_paths(config_path: str) -> list[str]:
+    """Find a saved ``open`` Cursor outage mode that 1.0.x setup may have written.
+
+    DefenseClaw 1.0.0-1.0.3 setup saved ``open`` for an observe-mode Cursor,
+    and ``guardrail fail-mode open`` or ``config set`` saved the same bytes;
+    those releases did not record which one did. The value is kept (a saved
+    mode wins, and 1.0.x Cursor in observe failed open in every tier) and the
+    upgrade names it, so the operator can let the policy tier decide.
+    """
+    source = _read_config_text(config_path)
+    if source is None or _guardrail_runtime_migration_is_managed(source):
+        return []
+    try:
+        root = yaml.safe_load(source) or {}
+    except yaml.YAMLError:
+        return []
+    guardrail = root.get("guardrail") if isinstance(root, dict) else None
+    if not isinstance(guardrail, dict):
+        return []
+    mode = str(guardrail.get("mode") or "observe").strip().lower()
+    paths: list[str] = []
+    connectors = guardrail.get("connectors")
+    cursor_entry = False
+    if isinstance(connectors, dict):
+        for name, entry in connectors.items():
+            if str(name).strip().lower() != "cursor" or not isinstance(entry, dict):
+                continue
+            cursor_entry = True
+            own_mode = str(entry.get("mode") or mode).strip().lower()
+            if own_mode != "action" and str(entry.get("hook_fail_mode") or "").strip().lower() == "open":
+                paths.append(f"guardrail.connectors.{name}.hook_fail_mode")
+    # Old setup wrote the global value only for a Cursor without its own entry.
+    if str(guardrail.get("connector") or "").strip().lower() == "cursor" and mode != "action" and not cursor_entry:
+        if str(guardrail.get("hook_fail_mode") or "").strip().lower() == "open":
+            paths.append("guardrail.hook_fail_mode")
+    return paths
+
+
+def _report_legacy_cursor_open(config_path: str, from_version: str) -> None:
+    """Name a kept 1.0.x Cursor ``open`` whose author is unknown (no write)."""
+    if not from_version or _version_before(from_version, (1, 0, 0)) or not _version_before(from_version, (1, 0, 4)):
+        return
+    for path in _legacy_cursor_open_paths(config_path):
+        ux.warn(
+            f"Cursor keeps its saved gateway-outage mode open ({path}). DefenseClaw {from_version} setup "
+            "also saved this value on its own in observe mode, so it may not be your choice. A saved mode "
+            "wins over the policy tier: strict does not close it. To let the policy tier decide, run: "
+            f"defenseclaw config unset {path}"
+        )
 
 
 def _config_version_step(

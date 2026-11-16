@@ -17,30 +17,62 @@ declare module 'node:os' {
   export function homedir(): string
 }
 
+declare module 'node:fs' {
+  export function lstatSync(path: string): {
+    uid: number
+    mode: number
+    size: number
+    isFile(): boolean
+    isDirectory(): boolean
+    isSymbolicLink(): boolean
+  }
+  export function readFileSync(path: string, encoding: 'utf8'): string
+}
+
 declare module 'node:fs/promises' {
   export function lstat(path: string): Promise<{
     uid: number
     mode: number
+    size: number
+    mtimeMs: number
+    isFile(): boolean
     isDirectory(): boolean
     isSocket(): boolean
   }>
+  export function stat(path: string): Promise<{ mtimeMs: number }>
+  export function mkdir(path: string, options: { recursive: true, mode: number }): Promise<string | undefined>
+  interface FileHandle {
+    appendFile(data: string): Promise<void>
+    close(): Promise<void>
+  }
+  export function open(path: string, flags: 'a', mode: number): Promise<FileHandle>
 }
 
 declare module 'node:path' {
   export function dirname(path: string): string
+  export function isAbsolute(path: string): boolean
   export function join(...paths: string[]): string
 }
 
 declare module 'node:child_process' {
+  interface ExecFileSyncOptions {
+    input?: string
+    timeout?: number
+    maxBuffer?: number
+    windowsHide?: boolean
+    env?: Record<string, string>
+    encoding?: 'utf8'
+    stdio?: readonly ('ignore' | 'pipe' | 'inherit')[]
+  }
   export function execFileSync(
     file: string,
     args: readonly string[],
-    options: {
-      timeout?: number
-      maxBuffer?: number
-      windowsHide?: boolean
-      stdio?: readonly ('ignore' | 'pipe' | 'inherit')[]
-    },
+    options: ExecFileSyncOptions & { encoding: 'utf8' },
+  ): string
+  export function execFileSync(
+    file: string,
+    args: readonly string[],
+    options: ExecFileSyncOptions,
   ): string | Uint8Array
   export function execFile(
     file: string,
@@ -66,5 +98,57 @@ declare module 'node:crypto' {
   export function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean
 }
 
-declare const Buffer: { from(value: string): Uint8Array }
-declare const process: { env: Record<string, string | undefined>, platform: string }
+declare module 'node:net' {
+  // Only compared by identity: the proven request must reuse this socket.
+  export class Socket {
+    readonly destroyed: boolean
+  }
+}
+
+declare module 'node:http' {
+  import type { Socket } from 'node:net'
+  export class Agent {
+    constructor(options: { keepAlive: boolean, maxSockets: number, maxFreeSockets: number })
+    destroy(): void
+  }
+  interface IncomingMessage {
+    statusCode?: number
+    headers: Record<string, string | string[] | undefined>
+    on(event: 'data', listener: (chunk: Buffer) => void): IncomingMessage
+    on(event: 'end', listener: () => void): IncomingMessage
+    on(event: 'error', listener: (error: Error) => void): IncomingMessage
+  }
+  interface ClientRequest {
+    on(event: 'error', listener: (error: Error) => void): ClientRequest
+    on(event: 'socket', listener: (socket: Socket) => void): ClientRequest
+    end(body?: string): ClientRequest
+    destroy(error?: Error): ClientRequest
+  }
+  export function request(
+    options: {
+      hostname: string
+      port: string
+      path: string
+      method: string
+      headers: Record<string, string>
+      agent: Agent
+      signal?: AbortSignal
+    },
+    callback: (res: IncomingMessage) => void,
+  ): ClientRequest
+}
+
+interface Buffer extends Uint8Array {
+  toString(encoding?: string): string
+}
+declare const Buffer: {
+  from(value: string, encoding?: string): Buffer
+  concat(chunks: readonly Uint8Array[]): Buffer
+}
+declare const process: {
+  env: Record<string, string | undefined>
+  platform: string
+  pid: number
+  getuid?(): number
+  kill(pid: number, signal?: number | string): boolean
+}

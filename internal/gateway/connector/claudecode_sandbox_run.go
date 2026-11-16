@@ -20,9 +20,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
-	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // Per-run Claude Code managed files (see SandboxRunConfig).
@@ -103,6 +104,9 @@ func (c *ClaudeCodeConnector) SandboxRunEnv() []string {
 // SandboxRunFiles renders the per-run Claude Code files for the image target
 // describes:
 //
+//   - 50-defenseclaw.json (always): a read-only replacement for the image's
+//     managed drop-in, preserving its settings and starting its hooks through
+//     a direct argv form; this also applies to previously built overlays;
 //   - 60-defenseclaw-run.json (always): the model-provider env pins and the
 //     model the run sets (claudeCodeSandboxModelEnv); in safe
 //     mode permissions.disableBypassPermissionsMode "disable" (Claude then
@@ -117,9 +121,9 @@ func (c *ClaudeCodeConnector) SandboxRunEnv() []string {
 //   - with project servers allowed and servers imported, the file the
 //     launcher merges into ~/.claude.json.
 //
-// The drop-in is checked against the 2.1.156 settings schema for every key
-// it sets, and merged with the image's drop-in as Claude merges them, which
-// must leave the image's hook contract and pins intact.
+// The run drop-in is checked against the 2.1.156 settings schema for every
+// key it sets. The replacement is checked against the image's drop-in, and
+// their merged managed tier must retain the image's controls.
 func (c *ClaudeCodeConnector) SandboxRunFiles(target SandboxRenderTarget, run SandboxRunConfig) ([]SandboxFile, error) {
 	rt, err := resolveSandboxTarget(c.Name(), target)
 	if err != nil {
@@ -129,6 +133,10 @@ func (c *ClaudeCodeConnector) SandboxRunFiles(target SandboxRenderTarget, run Sa
 		return nil, fmt.Errorf("claudecode run config: %w", err)
 	}
 	base, err := renderClaudeCodeSandboxDropIn(rt)
+	if err != nil {
+		return nil, err
+	}
+	hookDropIn, err := renderClaudeCodeSandboxRunHookDropIn(rt)
 	if err != nil {
 		return nil, err
 	}
@@ -145,10 +153,13 @@ func (c *ClaudeCodeConnector) SandboxRunFiles(target SandboxRenderTarget, run Sa
 	if err := validateClaudeCodeRunSettingsSchema(dropIn); err != nil {
 		return nil, fmt.Errorf("claudecode run config: %w", err)
 	}
-	if err := verifyClaudeCodeSandboxRunDropIn(base, dropIn, settings, rt); err != nil {
+	if err := verifyClaudeCodeSandboxRunDropIn(base, hookDropIn, dropIn, settings, rt); err != nil {
 		return nil, err
 	}
-	files := []SandboxFile{{Path: ClaudeCodeSandboxRunDropInPath, Mode: 0o644, Owner: SandboxOwnerRoot, Data: dropIn}}
+	files := []SandboxFile{
+		{Path: ClaudeCodeSandboxDropInPath, Mode: 0o644, Owner: SandboxOwnerRoot, Data: hookDropIn},
+		{Path: ClaudeCodeSandboxRunDropInPath, Mode: 0o644, Owner: SandboxOwnerRoot, Data: dropIn},
+	}
 	mcp, err := claudeCodeSandboxMCPConfig(servers)
 	if err != nil {
 		return nil, err
@@ -189,6 +200,9 @@ func claudeCodeSandboxRunSettings(run SandboxRunConfig, servers []SandboxMCPServ
 		}
 		env[key] = value
 	}
+	for _, key := range claudeCodeSandboxRunShellPins() {
+		env[key] = ""
+	}
 	settings := map[string]interface{}{"env": env}
 	if run.Safe {
 		settings["permissions"] = map[string]interface{}{"disableBypassPermissionsMode": "disable"}
@@ -211,6 +225,22 @@ func claudeCodeSandboxRunSettings(run SandboxRunConfig, servers []SandboxMCPServ
 		settings["allowedMcpServers"] = allowed
 	}
 	return settings, nil
+}
+
+// claudeCodeSandboxRunShellPins are the shell variables of HookShellEnvPins
+// that the image drop-in does not pin, except SHELLOPTS and BASHOPTS.
+// Inherited Bash option variables must remain absent from the managed env so
+// the Bash tool can run scripts normally (rel-1-0-6:GAP-0465). The hook's
+// direct launch form in the per-run replacement handles its startup separately.
+// FUNCNEST "" means no limit for the hook script.
+func claudeCodeSandboxRunShellPins() []string {
+	var out []string
+	for _, key := range HookShellEnvPins() {
+		if _, pinned := claudeCodeSandboxPinnedEnv[key]; !pinned && key != "SHELLOPTS" && key != "BASHOPTS" {
+			out = append(out, key)
+		}
+	}
+	return out
 }
 
 // claudeCodeSandboxMCPConfig renders {"mcpServers": {...}} in the shape of
@@ -241,7 +271,7 @@ func claudeCodeSandboxMCPConfig(servers []SandboxMCPServer) ([]byte, error) {
 }
 
 // claudeCodeServerNamePattern is the 2.1.156 allowlist serverName pattern.
-var claudeCodeServerNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+var claudeCodeServerNamePattern = lazyregexp.New(`^[a-zA-Z0-9_-]+$`)
 
 // validateClaudeCodeRunSettingsSchema checks the per-run drop-in against the
 // Claude Code 2.1.156 settings schema (zod) for every key DefenseClaw sets,
@@ -351,13 +381,28 @@ func validateClaudeCodeAllowlistEntry(raw interface{}) error {
 	return nil
 }
 
-// verifyClaudeCodeSandboxRunDropIn merges the image's drop-in and the run's
-// as Claude does and checks that the image's hook contract and pins survive
-// and that every run key reaches the merged managed tier unchanged.
-func verifyClaudeCodeSandboxRunDropIn(base, dropIn []byte, want map[string]interface{}, rt resolvedSandboxTarget) error {
+// verifyClaudeCodeSandboxRunDropIn checks that the per-run replacement changes
+// only the image hook launch, then checks the merged managed settings.
+func verifyClaudeCodeSandboxRunDropIn(base, hookDropIn, dropIn []byte, want map[string]interface{}, rt resolvedSandboxTarget) error {
 	var baseDoc map[string]interface{}
 	if err := json.Unmarshal(base, &baseDoc); err != nil {
 		return fmt.Errorf("verify Claude Code run settings: %w", err)
+	}
+	var hookDoc map[string]interface{}
+	if err := json.Unmarshal(hookDropIn, &hookDoc); err != nil {
+		return fmt.Errorf("verify Claude Code run hook settings: %w", err)
+	}
+	baseHooks, hookHooks := baseDoc["hooks"], hookDoc["hooks"]
+	delete(baseDoc, "hooks")
+	delete(hookDoc, "hooks")
+	if !jsonValuesEqual(baseDoc, hookDoc) {
+		return fmt.Errorf("verify Claude Code run hook settings: the replacement changed more than the hook launch")
+	}
+	baseDoc["hooks"], hookDoc["hooks"] = baseHooks, hookHooks
+	hookCommand, hookArgs := claudeCodeSandboxHookInvocation()
+	hooks, _ := hookHooks.(map[string]interface{})
+	if err := verifyClaudeCodeHookMatrixForSetup(hooks, hookCommand, hookArgs, SandboxHookDir, rt.opts); err != nil {
+		return fmt.Errorf("verify Claude Code run hook settings: %w", err)
 	}
 	baseEnv, _ := baseDoc["env"].(map[string]interface{})
 	for _, key := range append(ClaudeCodeSandboxProviderEnv(), claudeCodeSandboxModelEnv...) {
@@ -366,7 +411,7 @@ func verifyClaudeCodeSandboxRunDropIn(base, dropIn []byte, want map[string]inter
 		}
 	}
 	source, err := stageClaudeCodeManagedSettings(map[string][]byte{
-		claudeCodeSandboxDropInName:    base,
+		claudeCodeSandboxDropInName:    hookDropIn,
 		claudeCodeSandboxRunDropInName: dropIn,
 	})
 	if err != nil {
@@ -376,6 +421,9 @@ func verifyClaudeCodeSandboxRunDropIn(base, dropIn []byte, want map[string]inter
 		return err
 	}
 	merged := source.settings
+	if !jsonValuesEqual(merged["hooks"], hookHooks) {
+		return fmt.Errorf("verify Claude Code run settings: the managed hook contract changed in the merge")
+	}
 	env, _ := merged["env"].(map[string]interface{})
 	wantEnv, _ := want["env"].(map[string]interface{})
 	keys := make([]string, 0, len(wantEnv))

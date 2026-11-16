@@ -28,6 +28,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -308,7 +309,19 @@ func openWindowsManagedFileLockForTarget(
 		_ = parent.Close()
 		return nil, nil, err
 	}
-	if err := validateWindowsManagedFileLockHandleForTarget(handle, target); err != nil {
+	// FILE_OPEN_IF ignores the supplied descriptor for an existing lock, so a
+	// lock left by a plain create, a profile ACL reset or a helpdesk grant is
+	// repaired here instead of failing every reconcile for this user.
+	if err := ensureWindowsManagedLockProtection(windowsManagedLockRepair{
+		Label:    "managed lock",
+		Path:     path,
+		Handle:   handle,
+		Validate: func(h windows.Handle) error { return validateWindowsManagedFileLockHandleForTarget(h, target) },
+		Canonical: func() (*windows.SECURITY_DESCRIPTOR, error) {
+			return windowsManagedFileLockSecurityDescriptorForTarget(target)
+		},
+		Policy: windowsManagedTargetRuntimeDriftPolicy(target),
+	}); err != nil {
 		_ = windows.CloseHandle(handle)
 		_ = parent.Close()
 		return nil, nil, err
@@ -320,14 +333,6 @@ func openWindowsManagedFileLockForTarget(
 		return nil, nil, fmt.Errorf("wrap managed lock handle")
 	}
 	return file, parent, nil
-}
-
-func validateWindowsManagedFileLockName(
-	parent *os.File,
-	name string,
-	held *os.File,
-) error {
-	return validateWindowsManagedFileLockNameForTarget(parent, name, held, nil)
 }
 
 func validateWindowsManagedFileLockNameForTarget(
@@ -347,7 +352,7 @@ func validateWindowsManagedFileLockNameForTarget(
 	if err := validateWindowsManagedFileLockHandleForTarget(
 		windows.Handle(named.Fd()),
 		target,
-	); err != nil {
+	); err != nil && !windowsManagedLockDriftAccepted(err, windows.Handle(named.Fd()), target) {
 		return err
 	}
 	heldIdentity, err := atomicTransformOpenFileIdentity(held)
@@ -480,19 +485,32 @@ func validateWindowsManagedFileLockHandleForTarget(
 	if err != nil {
 		return err
 	}
-	if owner == nil || !owner.Equals(target) {
-		return fmt.Errorf("managed lock owner does not match effective target user")
+	if owner == nil {
+		return fmt.Errorf("managed lock has null owner")
+	}
+	if !owner.Equals(target) {
+		// A prior install under an elevated token, a profile restore or an
+		// administrator's tooling can leave the lock owned by someone other
+		// than the target. That is permission drift: the caller repairs it
+		// (installer, guardian) or accepts and logs it, never fails the user.
+		return managedPermissionDrift(
+			"managed lock owner %s does not match effective target user %s",
+			owner.String(), target.String(),
+		)
 	}
 	control, _, err := descriptor.Control()
 	if err != nil {
 		return err
 	}
 	if control&windows.SE_DACL_PROTECTED == 0 {
-		return fmt.Errorf("managed lock DACL is not protected")
+		return managedPermissionDrift("managed lock DACL is not protected")
 	}
 	dacl, _, err := descriptor.DACL()
-	if err != nil || dacl == nil {
-		return fmt.Errorf("managed lock has a null or unreadable DACL")
+	if err != nil {
+		return fmt.Errorf("managed lock has an unreadable DACL: %w", err)
+	}
+	if dacl == nil {
+		return managedPermissionDrift("managed lock has a null DACL")
 	}
 	ownerRights, err := windows.CreateWellKnownSid(windows.WinCreatorOwnerRightsSid)
 	if err != nil {
@@ -517,7 +535,7 @@ func validateWindowsManagedFileLockHandleForTarget(
 		{sid: administrators, mask: fileAllAccess},
 	}
 	if int(dacl.AceCount) != len(expected) {
-		return fmt.Errorf("managed lock DACL has %d ACEs, want %d", dacl.AceCount, len(expected))
+		return managedPermissionDrift("managed lock DACL has %d ACEs, want %d", dacl.AceCount, len(expected))
 	}
 	seen := make([]bool, len(expected))
 	for index := uint16(0); index < dacl.AceCount; index++ {
@@ -527,7 +545,7 @@ func validateWindowsManagedFileLockHandleForTarget(
 		}
 		if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE ||
 			ace.Header.AceFlags != 0 {
-			return fmt.Errorf("managed lock DACL contains a noncanonical ACE at index %d", index)
+			return managedPermissionDrift("managed lock DACL contains a noncanonical ACE at index %d", index)
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		match := -1
@@ -538,9 +556,32 @@ func validateWindowsManagedFileLockHandleForTarget(
 			}
 		}
 		if match < 0 {
-			return fmt.Errorf("managed lock DACL contains an unexpected or duplicate ACE")
+			return managedPermissionDrift("managed lock DACL contains an unexpected or duplicate ACE")
 		}
 		seen[match] = true
 	}
 	return nil
+}
+
+// windowsManagedLockDriftAccepted reports whether a re-validation failure is
+// permission drift the open path already repaired or accepted and logged.
+// Strict mode keeps every verdict fatal, and a standalone process refuses a
+// lock an untrusted principal can write (GAP-0566).
+func windowsManagedLockDriftAccepted(err error, handle windows.Handle, target *windows.SID) bool {
+	return isManagedPermissionDrift(err) && !managed.TrustStrictAncestors() &&
+		!windowsManagedLockStandaloneBoundary(handle, windowsManagedTargetRuntimeDriftPolicy(target))
+}
+
+// windowsManagedTargetRuntimeDriftPolicy is the canonical per-user runtime
+// descriptor (locks, contracts, shared hook scripts) as a neutral drift
+// policy. The target user is a trusted writer.
+func windowsManagedTargetRuntimeDriftPolicy(target *windows.SID) managedDriftPolicy {
+	targetSID := ""
+	if target != nil {
+		targetSID = target.String()
+	}
+	return managedDriftPolicy{
+		Canonical:    managedTargetRuntimeCanonicalModel(targetSID),
+		ExtraTrusted: []string{targetSID},
+	}
 }

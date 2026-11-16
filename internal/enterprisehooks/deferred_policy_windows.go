@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 type windowsDeferredPolicyTarget struct {
@@ -22,10 +23,30 @@ type windowsDeferredPolicyTarget struct {
 	dataDir  string
 }
 
+func validateWindowsDeferredPolicyTarget(target ManifestTarget) (windowsDeferredPolicyTarget, error) {
+	if err := requireWindowsEnterpriseDeferredTargetPendingPlatform(target); err != nil {
+		return windowsDeferredPolicyTarget{}, err
+	}
+	home, sid, err := validateWindowsEnterpriseHome(target.UserHome, target.SID)
+	if err != nil {
+		return windowsDeferredPolicyTarget{}, err
+	}
+	dataDir, err := resolveWindowsEnterpriseDataDir(home, target.DataDir)
+	if err != nil {
+		return windowsDeferredPolicyTarget{}, err
+	}
+	return windowsDeferredPolicyTarget{
+		manifest: target,
+		sid:      sid.String(),
+		dataDir:  dataDir,
+	}, nil
+}
+
 func stageWindowsEnterpriseDeferredPoliciesPlatform(
 	manifest Manifest,
 	pending []ManifestTarget,
 	apiAddr string,
+	hookFailMode ...string,
 ) error {
 	if len(pending) == 0 {
 		return nil
@@ -76,22 +97,24 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 			return errors.New("enterprise hooks: duplicate deferred machine-policy target")
 		}
 		seen[key] = struct{}{}
-		if err := requireWindowsEnterpriseDeferredTargetPendingPlatform(target); err != nil {
-			return err
-		}
-		home, sid, err := validateWindowsEnterpriseHome(target.UserHome, target.SID)
+		// One pending user whose profile drifted, vanished or still carries a
+		// stale selector entry is skipped; the other deferred users are
+		// still staged. The Guardian reports the skipped one as pending and
+		// retries it on its next pass.
+		validatedTarget, err := validateWindowsDeferredPolicyTarget(target)
 		if err != nil {
-			return err
+			managed.EmitResilienceEvent(managed.MarkerSkip, map[string]string{
+				"connector": strings.ToLower(strings.TrimSpace(target.Connector)),
+				"sid":       strings.TrimSpace(target.SID),
+				"path":      strings.TrimSpace(target.UserHome),
+				"reason":    "deferred_target_skipped: " + err.Error(),
+			})
+			continue
 		}
-		dataDir, err := resolveWindowsEnterpriseDataDir(home, target.DataDir)
-		if err != nil {
-			return err
-		}
-		validated = append(validated, windowsDeferredPolicyTarget{
-			manifest: target,
-			sid:      sid.String(),
-			dataDir:  dataDir,
-		})
+		validated = append(validated, validatedTarget)
+	}
+	if len(validated) == 0 {
+		return nil
 	}
 
 	registry := newWindowsEnterpriseConnectorRegistry()
@@ -170,12 +193,14 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 			return rollback(err)
 		}
 		setup := connector.SetupOpts{
-			APIAddr:           apiAddr,
-			HookFailMode:      "closed",
-			ManagedEnterprise: true,
-			HookExecutable:    hookExecutable,
-			DataDir:           target.dataDir,
-			AgentVersion:      strings.TrimSpace(target.manifest.AgentVersion),
+			APIAddr: apiAddr,
+			// Closed outside Secure Client; open under Secure Client (#1163).
+			HookFailMode:             canonicalHookFailMode(""),
+			SecureClientHookDelivery: secureClientHookDelivery(),
+			ManagedEnterprise:        true,
+			HookExecutable:           hookExecutable,
+			DataDir:                  target.dataDir,
+			AgentVersion:             strings.TrimSpace(target.manifest.AgentVersion),
 		}
 		switch name {
 		case "claudecode":
@@ -207,13 +232,27 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 			if err := provider.VerifyManagedHookPolicy(body, policySetup); err != nil {
 				return rollback(err)
 			}
-			_, undo, err := installWindowsClaudeManagedPolicy(body, setup, sid)
+			// A pending account with no known Claude version (no client
+			// installed, or a profile whose account no longer resolves)
+			// renders the version-less contract. It must not replace the
+			// body published for enrolled accounts on a newer contract,
+			// which their verification checks byte for byte; a published
+			// body that is this deployment's rendering of a known contract
+			// is kept, and only the SID is added.
+			var keep func([]byte) bool
+			if resolveHookContract(name, setup.AgentVersion).Status != connector.HookCompatibilityKnown {
+				keep = func(published []byte) bool {
+					return claudeManagedPolicyMatchesKnownContract(provider, published, policySetup)
+				}
+			}
+			_, undo, err := installWindowsClaudeManagedPolicyKeepingPublished(body, keep, setup, sid)
 			if err != nil {
 				return rollback(err)
 			}
 			rollbacks = append(rollbacks, undo)
 			existingClaude[strings.ToUpper(target.sid)] = struct{}{}
 		case "cursor":
+			setup.HookFailMode = deferredWindowsCursorFailMode(target.manifest.AgentVersion, hookFailMode...)
 			if currentDataDir, alreadyStaged := existingCursor[strings.ToUpper(target.sid)]; alreadyStaged {
 				if !sameWindowsEnterprisePath(currentDataDir, target.dataDir) {
 					return rollback(errors.New("enterprise hooks: existing deferred Cursor target has a different data directory"))
@@ -246,7 +285,12 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 				"enterprise hooks: Codex machine policy belongs to another protected gateway deployment",
 			))
 		}
-		if !registry.Active {
+		// The administrator turned DefenseClaw's managed Codex hooks off
+		// (Secure Client without the strict pin): there is nothing to stage
+		// until the setting is restored, and the Codex rows report it.
+		if registry.AdminConflict != "" {
+			connector.ReportWindowsCodexAdminConflict(machineOpts.RequirementsPath, registry.AdminConflict)
+		} else if !registry.Active {
 			report, err := windowsCodexRequirementsReconciler(machineOpts)
 			if err != nil {
 				return rollback(fmt.Errorf("enterprise hooks: stage Codex machine requirements: %w", err))
@@ -257,6 +301,24 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 		}
 	}
 	return nil
+}
+
+// deferredWindowsCursorFailMode is a pending Cursor row's delivery mode.
+// Outside Secure Client it is always closed (origin/main). Under Secure
+// Client (#1163) an unverified version selects open delivery, otherwise the
+// configured policy applies (unset is open).
+func deferredWindowsCursorFailMode(version string, configured ...string) string {
+	if !secureClientHookDelivery() {
+		return "closed"
+	}
+	mode := ""
+	if len(configured) > 0 {
+		mode = configured[0]
+	}
+	if connector.HookContractNeedsActionOverride(connector.ResolveHookContract("cursor", version)) {
+		return "open"
+	}
+	return canonicalHookFailMode(mode)
 }
 
 func windowsDeferredPolicyManifestKey(target ManifestTarget) string {

@@ -26,6 +26,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // AMPPluginPathOverride is a test seam for the user-wide plugin artifact.
@@ -125,9 +127,32 @@ func (c *AMPConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
 	// A plugin rendered before the listener proof existed would still send
 	// its credential to whoever holds the TCP port; it is repaired.
 	if managedPluginListenerProof(opts) {
+		proofCall := []byte("if (DC_LISTENER_PROOF) return provenTCPRequest(path, init, token)")
 		markers = append(markers,
 			[]byte("const DC_LISTENER_PROOF: string = \"1\"\n"),
-			[]byte("if (DC_LISTENER_PROOF) await proveListener(token, init.signal)"),
+			proofCall,
+		)
+	}
+	if !opts.ManagedEnterprise {
+		markers = append(markers,
+			[]byte("const DC_PER_USER_NATIVE_POST: string = \"1\"\n"),
+			[]byte(`execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR]`),
+			// A Windows owner/DACL check that hard-codes C:\Windows is repaired,
+			// and so is one that calls a cmdlet a planted PSModulePath module
+			// could answer for.
+			[]byte(`execFileSync(DC_WINDOWS_POWERSHELL, [`),
+			[]byte(windowsHelperACLCheckMarker),
+		)
+		// A plugin that posts through ~/.local/bin on a Setup install fails
+		// closed on every call (GAP-1847); it is repaired.
+		if gateway := perUserPluginGatewayBinary(opts); gateway != "" {
+			markers = append(markers, []byte(`const DC_GATEWAY_BINARY: string = "`+javaScriptStringContent(gateway)+"\"\n"))
+		}
+	}
+	if pluginSecureClientProfile(opts) {
+		markers = append(markers,
+			[]byte(`const DC_NATIVE_POST_BINARY = "`),
+			[]byte(`return nativePost(path, init)`),
 		)
 	}
 	for _, marker := range markers {
@@ -258,7 +283,7 @@ func readAMPSettingsDocument(path string) (map[string]interface{}, bool) {
 const ampSettingsReadLimit int64 = 2 << 20
 
 func readStableAMPSettingsFile(path string) ([]byte, bool) {
-	before, err := os.Lstat(path)
+	before, err := pathidentity.LstatPinned(path)
 	if err != nil || before.Mode()&os.ModeSymlink != 0 ||
 		!before.Mode().IsRegular() || before.Size() > ampSettingsReadLimit {
 		return nil, false
@@ -317,7 +342,7 @@ func stripAMPJSONCComments(data []byte) []byte {
 		}
 		if current == '/' && index+1 < len(data) && data[index+1] == '*' {
 			index += 2
-			for index+1 < len(data) && !(data[index] == '*' && data[index+1] == '/') {
+			for index+1 < len(data) && (data[index] != '*' || data[index+1] != '/') {
 				index++
 			}
 			if index+1 < len(data) {

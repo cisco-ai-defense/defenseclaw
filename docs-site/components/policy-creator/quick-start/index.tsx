@@ -14,7 +14,7 @@
 
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { Policy } from '../types';
 import { emit } from '../lib/emit';
 import { emitInstallScript } from '../lib/emit-script';
@@ -77,18 +77,6 @@ export function QuickStart({
   onAnswersChange,
   onOpenInPlayground,
 }: QuickStartProps) {
-  // Re-derive Policy from Answers whenever they change. We compare via
-  // a ref to avoid an infinite render loop (policy → setPolicy → re-
-  // render → re-derive → setPolicy …).
-  const lastSerialized = useRef('');
-  useEffect(() => {
-    const next = applyAnswers(answers);
-    const ser = JSON.stringify(next);
-    if (ser === lastSerialized.current) return;
-    lastSerialized.current = ser;
-    onPolicyChange(next);
-  }, [answers, onPolicyChange]);
-
   // Step index. Hydrate from localStorage on mount only — SSR returns
   // 0 to keep first paint stable.
   const [stepIdx, setStepIdx] = useState(0);
@@ -126,6 +114,7 @@ export function QuickStart({
     };
     mut(draft);
     onAnswersChange(draft);
+    onPolicyChange(applyAnswers(draft));
   }
 
   const current = STEPS[stepIdx];

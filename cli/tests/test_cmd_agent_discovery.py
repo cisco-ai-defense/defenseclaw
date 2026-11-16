@@ -434,6 +434,19 @@ class DiscoveryDisableTests(unittest.TestCase):
         self.assertNotIn("Will restart", result.output)
         self.assertNotIn("restarted", result.output)
 
+    def test_disable_also_turns_off_the_runtime_planes_enable_turned_on(self):
+        # GAP-1663: enable turned on runtime planes A and B; disable left them on.
+        runner = CliRunner()
+        app = _make_ctx(enabled=True)
+        planes = list(app.cfg.ai_discovery.runtime.planes)
+        with patch("defenseclaw.commands.cmd_setup._restart_services"):
+            result = runner.invoke(cmd_agent.discovery_disable, ["--yes"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertFalse(app.cfg.ai_discovery.enabled)
+        self.assertFalse(app.cfg.ai_discovery.runtime.enabled)
+        self.assertEqual(app.cfg.ai_discovery.runtime.planes, planes)
+        self.assertIn("runtime planes off", result.output)
+
     def test_already_disabled_short_circuits(self):
         runner = CliRunner()
         app = _make_ctx(enabled=False)

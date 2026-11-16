@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 	"golang.org/x/text/unicode/norm"
@@ -25,7 +26,14 @@ import (
 // does not show.
 func profileExplainWarnings(set *guardrailProfileSet, decision profileDecision, subject *profileSubject) []string {
 	warnings := set.assignmentWarnings(subject == nil || !subject.LookupFailed)
+	if subject != nil && subject.holderUnproven && decision.Refused == "" &&
+		slices.Contains(decision.Unproven, "account:unknown") {
+		warnings = append(warnings, "the account holder is unconfirmed; a proven assignment or the configured default applies on this OSS policy tier")
+	}
 	if note := shortNameUserNote(set, decision, subject); note != "" {
+		warnings = append(warnings, note)
+	}
+	if note := ambiguousShortNameUserNote(set, decision, subject); note != "" {
 		warnings = append(warnings, note)
 	}
 	if note := shortNameGroupNote(decision); note != "" {
@@ -34,7 +42,11 @@ func profileExplainWarnings(set *guardrailProfileSet, decision profileDecision, 
 	if note := entraShortNameNote(set, subject, runtime.GOOS); note != "" {
 		warnings = append(warnings, note)
 	}
-	if note := unnamedGroupsNote(subject); note != "" {
+	var sids *profileGroupSIDs
+	if set != nil {
+		sids = set.groupSIDs
+	}
+	if note := unnamedGroupsNote(subject, sids); note != "" {
 		warnings = append(warnings, note)
 	}
 	if subject != nil && subject.cachedFactsAge > 0 {
@@ -43,7 +55,7 @@ func profileExplainWarnings(set *guardrailProfileSet, decision profileDecision, 
 			subject.cachedFactsAge.Round(time.Second)))
 	}
 	if runtime.GOOS == "windows" && subject != nil {
-		if note := spoolRecordNote(subject.UserID, time.Now()); note != "" {
+		if note := spoolRecordNote(subject.UserID, time.Now(), decision.Assignment > 0); note != "" {
 			warnings = append(warnings, note)
 		}
 	}
@@ -77,7 +89,78 @@ func (set *guardrailProfileSet) assignmentWarningsWithWait(checkGroups bool, wai
 // restart listed no unknown group while profile-explain named it (GAP-0830).
 func (set *guardrailProfileSet) healthProfileWarnings() []string {
 	warnings := set.assignmentWarningsWithWait(true, profileGroupCheckWait)
+	if runtime.GOOS == "linux" {
+		warnings = append(warnings, shortNameAssignmentWarnings(set.assignments, profileShortNameRecords())...)
+	}
 	return append(warnings, set.inertHILTWarnings()...)
+}
+
+// profileShortNameRecords supplies verified guardian facts for the exact
+// qualified-name remedy in status, verify and doctor. Tests replace it.
+var profileShortNameRecords = func() []enterprisehooks.IdentitySpoolRecord {
+	if dir := currentIdentitySpoolDir(); dir != "" {
+		return enterprisehooks.ReadIdentitySpoolRecords(dir, validateManagedGuardianAuthorization, identityDirectoryMax)
+	}
+	return nil
+}
+
+func shortNameAssignmentWarnings(assignments []config.ProfileAssignment, records []enterprisehooks.IdentitySpoolRecord) []string {
+	var warnings []string
+	for i, assignment := range assignments {
+		for _, entry := range assignment.Match.Users {
+			entry = strings.TrimSpace(entry)
+			if entry == "" || strings.ContainsAny(entry, `@\`) || useridentity.KindForID(entry) != "" {
+				continue
+			}
+			namesakes := sssdADNamesakes(records, entry)
+			if len(namesakes) > 1 {
+				// One bare entry selects accounts of more than one trusted
+				// domain: one warning names them all (GAP-0725).
+				names := make([]string, 0, len(namesakes))
+				for _, record := range namesakes {
+					names = append(names, fmt.Sprintf("%s (uid %s)", firstNonEmpty(record.Facts.UPN, record.Facts.Principal, record.User), record.Key))
+				}
+				warnings = append(warnings, fmt.Sprintf("assignment %d uses the bare user %q, which selects the SSSD AD accounts %s of different trusted domains; "+
+					"write the qualified name or uid of each account it should select (the strict policy tier refuses this entry)", i+1, entry, strings.Join(names, " and ")))
+				continue
+			}
+			for _, record := range namesakes {
+				qualified := firstNonEmpty(record.Facts.UPN, record.Facts.Principal)
+				if qualified != "" {
+					warnings = append(warnings, fmt.Sprintf("assignment %d uses the bare user %q for %s; write %s (or uid %s) to select exactly this SSSD AD account",
+						i+1, entry, record.User, qualified, record.Key))
+				}
+			}
+		}
+	}
+	return warnings
+}
+
+// sssdADNamesakes are the guardian records of SSSD Active Directory accounts
+// whose bare name is entry.
+func sssdADNamesakes(records []enterprisehooks.IdentitySpoolRecord, entry string) []enterprisehooks.IdentitySpoolRecord {
+	var out []enterprisehooks.IdentitySpoolRecord
+	for _, record := range records {
+		facts := record.Facts
+		if facts.Directory != useridentity.DirectoryActiveDirectory ||
+			(facts.Source != useridentity.SourceSSSD && facts.Source != useridentity.SourceSSSDInfoPipe) ||
+			!useridentity.EqualFold(useridentity.BareAccountName(record.User), entry) {
+			continue
+		}
+		out = append(out, record)
+	}
+	return out
+}
+
+// standaloneProfileWarnings is what status and verify list on a standalone
+// deployment: the profile set's warnings, or, with no profiles, the inert
+// human-approval warnings of the config itself, which config validate and
+// profile-explain already gave (id.GAP-1264).
+func standaloneProfileWarnings(set *guardrailProfileSet, cfg *config.Config) []string {
+	if set != nil {
+		return set.healthProfileWarnings()
+	}
+	return ConfigHILTWarnings(cfg)
 }
 
 // inertHILTWarning uses the same resolved threshold as enforcement. Keep
@@ -286,8 +369,11 @@ func validSIDString(s string) bool {
 // only numbers. The Unix resolver keeps a group id as its number when no
 // group answers for it, which is what a directory that does not answer
 // leaves behind: the account then has too few groups for its assignments to
-// match, and nothing else in the answer shows it (GAP-0212).
-func unnamedGroupsNote(subject *profileSubject) string {
+// match, and nothing else in the answer shows it (GAP-0212). On standalone
+// Windows (sids, the SIDs of the assignment group names) an assignment
+// matches the SID of the group it names, so a group shown only by its SID
+// still matches it, and the note does not say otherwise (GAP-1141).
+func unnamedGroupsNote(subject *profileSubject, sids *profileGroupSIDs) string {
 	if subject == nil || subject.LookupFailed {
 		return ""
 	}
@@ -320,6 +406,10 @@ func unnamedGroupsNote(subject *profileSubject) string {
 	if unnamed == 0 {
 		return ""
 	}
+	if sidForm && sids != nil {
+		return fmt.Sprintf("%d of this account's %d group(s) have no name, only a SID (the guardian names at most 128 groups per account within 2 s, "+
+			"or the SID does not resolve); assignments match groups by SID, so this changes only how they are shown", unnamed, total)
+	}
 	if sidForm {
 		return fmt.Sprintf("%d of this account's %d group(s) have no name, only a SID (the guardian names at most 128 groups per account within 2 s, "+
 			"or the SID does not resolve); an assignment that names such a group as DOMAIN\\name cannot match, so name it by its SID", unnamed, total)
@@ -338,7 +428,9 @@ func unnamedGroupsNote(subject *profileSubject) string {
 // operating system's account database, and each one it answers "no such
 // group" for is a warning in explain, status, doctor and `profile list`, and
 // a line in the gateway log at start and at each reload (GAP-0135). A lookup
-// that fails or runs out of time says nothing: only a definite absence warns.
+// that fails or runs out of time proves no absence: only a definite absence
+// warns. Requests whose assignments need an unresolved group are refused and
+// name the missing fact.
 //
 // An SSSD that is offline with a cold cache does not fail: it answers "no such
 // group" for groups that exist. So nothing is warned while the directory
@@ -352,8 +444,11 @@ func unnamedGroupsNote(subject *profileSubject) string {
 // says once that it could not check that domain's groups (GAP-0255).
 
 const (
-	profileGroupCheckTTL    = time.Minute
-	profileGroupCheckBudget = 3 * time.Second
+	profileGroupCheckTTL = time.Minute
+	// profileGroupCheckRetry is how long a pass the directory did not answer
+	// in time is kept: a slow directory at gateway start or reload must not
+	// hide the warnings for the whole TTL (GAP-2434).
+	profileGroupCheckRetry = 10 * time.Second
 	// profileGroupCheckWait is how long a command waits for the first pass of
 	// a set; status and doctor give the gateway only 3 s to answer.
 	profileGroupCheckWait = 1500 * time.Millisecond
@@ -366,14 +461,21 @@ const (
 	profileQuietGroupsNamed = 8
 )
 
+// profileGroupCheckBudget bounds one pass over a set's groups; a variable so
+// tests can give a pass less time.
+var profileGroupCheckBudget = 3 * time.Second
+
 // profileGroupCheck is the last pass over a set's groups, and the pass in
 // flight.
 type profileGroupCheck struct {
 	mu        sync.Mutex
 	checked   bool
 	checkedAt time.Time
-	warnings  []string
-	running   chan struct{}
+	// keep is how long the last pass is kept: profileGroupCheckTTL, or
+	// profileGroupCheckRetry for a pass that ran out of time.
+	keep     time.Duration
+	warnings []string
+	running  chan struct{}
 }
 
 // unknownGroupWarnings returns one warning per assignment group the host
@@ -415,11 +517,12 @@ func (set *guardrailProfileSet) unknownGroupWarningsWith(exists func(context.Con
 		check.mu.Unlock()
 		return nil
 	}
-	if (!check.checked || time.Since(check.checkedAt) >= profileGroupCheckTTL) && check.running == nil {
+	if (!check.checked || time.Since(check.checkedAt) >= check.keep) && check.running == nil {
 		done := make(chan struct{})
 		check.running = done
+		budget := profileGroupCheckBudget
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), profileGroupCheckBudget)
+			ctx, cancel := context.WithTimeout(context.Background(), budget)
 			known := exists
 			if set.groupSIDs != nil {
 				known = func(ctx context.Context, name string) (bool, error) {
@@ -431,6 +534,10 @@ func (set *guardrailProfileSet) unknownGroupWarningsWith(exists func(context.Con
 			}
 			warnings := unknownAssignmentGroups(ctx, set.assignments, known, qualify, silent)
 			warnings = append(warnings, unmatchedUserEntries(ctx, set.assignments, unmatchedUser)...)
+			keep := profileGroupCheckTTL
+			if ctx.Err() != nil {
+				keep = profileGroupCheckRetry
+			}
 			cancel()
 			warnings = append(warnings, spoolUPNAssignmentWarnings(set.assignments, time.Now())...)
 			failing := health().Failing > 0
@@ -439,7 +546,7 @@ func (set *guardrailProfileSet) unknownGroupWarningsWith(exists func(context.Con
 			}
 			check.mu.Lock()
 			previous, wasChecked := check.warnings, check.checked
-			check.warnings, check.checked, check.checkedAt, check.running = warnings, !failing, time.Now(), nil
+			check.warnings, check.checked, check.checkedAt, check.keep, check.running = warnings, !failing, time.Now(), keep, nil
 			check.mu.Unlock()
 			// A group that stops resolving between start and reload (an SSSD
 			// naming switch) is logged when a later check finds it, not only
@@ -530,7 +637,8 @@ func unknownAssignmentGroupsForOS(ctx context.Context, assignments []config.Prof
 	var unknown []unknownGroup
 	var warnings []string
 	respelled := map[string]string{} // by folded name: the spelling the host lists a known qualified group under
-	skippedLimit, skippedDeadline := false, false
+	skippedLimit := false
+	var unchecked []string        // "assignment N: group ...", for the groups the deadline left unchecked
 	absent := map[string]bool{}   // by folded name; present for every group looked up
 	answered := map[string]bool{} // by folded domain: the host knows a group of it
 	for i, assignment := range assignments {
@@ -554,10 +662,25 @@ func unknownAssignmentGroupsForOS(ctx context.Context, assignments []config.Prof
 					continue
 				}
 				if ctx.Err() != nil {
-					skippedDeadline = true
+					unchecked = append(unchecked, fmt.Sprintf("assignment %d: group %q", i+1, group))
 					continue
 				}
 				known, err := exists(ctx, norm.NFC.String(group))
+				if err == nil && !known && platform != "windows" {
+					// The matcher folds case; a host whose lookup does not
+					// still knows the group by its lower-case name (GAP-0495).
+					if lower := strings.ToLower(norm.NFC.String(group)); lower != norm.NFC.String(group) {
+						if folded, ferr := exists(ctx, lower); ferr == nil && folded {
+							known = true
+						}
+					}
+				}
+				if err != nil && ctx.Err() != nil {
+					// The lookup ran out of time: not an answer, so the group
+					// is named as not checked (GAP-2434).
+					unchecked = append(unchecked, fmt.Sprintf("assignment %d: group %q", i+1, group))
+					continue
+				}
 				dead = err == nil && !known
 				absent[key] = dead
 				if known {
@@ -654,8 +777,14 @@ func unknownAssignmentGroupsForOS(ctx context.Context, assignments []config.Prof
 	if skippedLimit {
 		warnings = append(warnings, fmt.Sprintf("group warning check incomplete: only the first %d distinct groups were checked; later assignment groups were not checked", profileGroupCheckMax))
 	}
-	if skippedDeadline {
-		warnings = append(warnings, "group warning check incomplete: the directory check timed out; later assignment groups were not checked")
+	if len(unchecked) > 0 {
+		// Name the assignments and groups the check could not reach, as the
+		// other notes do (GAP-0928, GAP-2434).
+		if len(unchecked) > profileQuietGroupsNamed {
+			unchecked = append(unchecked[:profileQuietGroupsNamed:profileQuietGroupsNamed], fmt.Sprintf("%d more", len(unchecked)-profileQuietGroupsNamed))
+		}
+		warnings = append(warnings, fmt.Sprintf("group warning check incomplete: the directory did not answer in time, so %s "+
+			"were not checked and may select nobody; the check runs again within %s", strings.Join(unchecked, ", "), profileGroupCheckRetry))
 	}
 	return warnings
 }
@@ -672,10 +801,20 @@ func groupNameCheckHint(platform string) string {
 	return "check the qualified name with getent group"
 }
 
-// directoryDownHint says what to check while the directory does not answer.
+// directoryUsesWinbind reports a Linux host whose groups come from winbind
+// rather than SSSD (unixidentity.GroupDirectoryUsesWinbind on Linux and
+// macOS); false elsewhere.
+var directoryUsesWinbind = func() bool { return false }
+
+// directoryDownHint says what to check while the directory does not answer:
+// the directory service the host uses (GAP-0712: a winbind host was told to
+// check SSSD).
 func directoryDownHint(platform string) string {
 	if platform == "darwin" {
 		return "check the directory binding of this Mac (dsconfigad -show) and the domain controller; the groups are checked again once it answers"
+	}
+	if directoryUsesWinbind() {
+		return "check winbind (wbinfo --ping-dc) and the domain controller; the groups are checked again once it answers"
 	}
 	return "check SSSD (sssctl domain-status <domain>) and its server; the groups are checked again once it answers"
 }
@@ -708,6 +847,20 @@ func unmatchedUserEntries(ctx context.Context, assignments []config.ProfileAssig
 		}
 	}
 	return warnings
+}
+
+// ProfileUserEntryWarnings names the users entries of assignments that do
+// not select the account this host resolves them to, with the spelling that
+// does (unmatchedUserEntries): a bare name of a local account, which a bare
+// name never selects (GAP-0305), and a DOMAIN\user whose domain the host does
+// not confirm. The running gateway reports the same sentences to status and
+// verify (profile_assignment_unmatched); `config validate` reports them for a
+// candidate before it is applied (GAP-0197). The lookups are the host's
+// account database, bounded like the gateway's background check.
+func ProfileUserEntryWarnings(ctx context.Context, assignments []config.ProfileAssignment) []string {
+	ctx, cancel := context.WithTimeout(ctx, profileGroupCheckBudget)
+	defer cancel()
+	return unmatchedUserEntries(ctx, assignments, profileUserEntryUnmatched())
 }
 
 // userEntryNeedsAccountCheck reports a users entry that names an account by
@@ -825,12 +978,53 @@ func shortNameUserNote(set *guardrailProfileSet, decision profileDecision, subje
 	for _, entry := range set.assignments[decision.Assignment-1].Match.Users {
 		entry = strings.TrimSpace(entry)
 		if entry == "" || strings.ContainsAny(entry, `@\`) || !userEntryMatches(subject, entry) ||
-			strings.EqualFold(entry, subject.UserID) {
+			strings.EqualFold(entry, subject.UserID) || ambiguousBareUserEntry(subject, entry) {
 			continue
 		}
 		qualified := firstNonEmpty(subject.UPN, subject.Principal, subject.UserID)
 		return fmt.Sprintf("assignment %d selects this account by the short name %q, so it selects a directory account of that name "+
 			"in another domain too (never a local account); write %s (or the uid) to select only this account", decision.Assignment, entry, qualified)
+	}
+	return ""
+}
+
+func ambiguousShortNameUserNote(set *guardrailProfileSet, decision profileDecision, subject *profileSubject) string {
+	if set == nil || subject == nil {
+		return ""
+	}
+	qualified := firstNonEmpty(subject.UPN, subject.Principal)
+	if qualified == "" {
+		qualified = subject.UserID
+	}
+	refused := slices.Contains(decision.Unproven, "account:ambiguous_short_name")
+	for i, assignment := range set.assignments {
+		for _, entry := range assignment.Match.Users {
+			if !ambiguousBareUserEntry(subject, entry) {
+				continue
+			}
+			entry = strings.TrimSpace(entry)
+			// Name every account the entry selects that the guardian has a
+			// record for; the namesakes of a domain it has not seen yet are
+			// named by their domain only (GAP-0725).
+			var accounts []string
+			own := false
+			for _, record := range sssdADNamesakes(profileShortNameRecords(), entry) {
+				own = own || record.Key == subject.UserID
+				accounts = append(accounts, fmt.Sprintf("%s (uid %s)", firstNonEmpty(record.Facts.UPN, record.Facts.Principal, record.User), record.Key))
+			}
+			if !own {
+				accounts = append([]string{fmt.Sprintf("%s (uid %s)", firstNonEmpty(subject.UPN, subject.Principal, subject.UserName), subject.UserID)}, accounts...)
+			}
+			if len(accounts) == 1 {
+				accounts = append(accounts, fmt.Sprintf("the account named %s in each other trusted domain", entry))
+			}
+			if refused {
+				return fmt.Sprintf("assignment %d uses the ambiguous short name %q, which names %s; the strict policy tier refuses it: write %s (or uid %s) to select only this account",
+					i+1, entry, strings.Join(accounts, " and "), qualified, subject.UserID)
+			}
+			return fmt.Sprintf("assignment %d uses the ambiguous short name %q, which selects %s; write %s (or uid %s) to select only this account",
+				i+1, entry, strings.Join(accounts, " and "), qualified, subject.UserID)
+		}
 	}
 	return ""
 }
@@ -905,36 +1099,60 @@ var cachedDirectoryRefreshFailure = func(id string) (time.Time, string, bool) {
 	return peerDirectoryCache().refreshFailing(id)
 }
 
+// explainCacheOutcome is what live gives the account's requests, for an
+// explain warning: a refusal and its reason, or a profile and its match.
+func explainCacheOutcome(live profileDecision) string {
+	if live.Refused != "" {
+		return "are refused (" + live.Refused + ")"
+	}
+	return fmt.Sprintf("get profile %s (match %s)", firstNonEmpty(live.Name, "none"), live.Match)
+}
+
 // explainCacheView describes the cached facts of the explained account: how
 // old they are, and the profile requests currently get from them. warning is
 // non-empty when that profile differs from the explained one.
 func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decision profileDecision, connectorName, agent string, now time.Time) (view map[string]any, warning string) {
+	return explainCacheViewOf(set, explained, decision, connectorName, agent, nil, now)
+}
+
+// explainCacheViewOf is explainCacheView for the agent explain matched and
+// its 1.0.3 claim (explainAgent), so the live view decides an agent as the
+// hook does (GAP-0019).
+func explainCacheViewOf(set *guardrailProfileSet, explained *profileSubject, decision profileDecision, connectorName, agent string, legacy profileAgentLegacy, now time.Time) (view map[string]any, warning string) {
 	if set == nil || explained == nil || explained.UserID == "" || explained.LookupFailed {
 		return nil, ""
 	}
 	facts, fetchedAt, ok := cachedDirectoryFacts(explained.UserID)
 	if !ok {
 		// No facts are cached. When the gateway's own lookups for the account
-		// fail, directory-dependent assignments get default_lookup_failed
-		// whatever this fresh lookup found (GAP-0212).
+		// fail, requests whose assignments need the missing facts are refused
+		// and name them, regardless of this fresh lookup (GAP-0212).
 		since, reason, failing := cachedDirectoryFailure(explained.UserID)
 		if !failing {
 			return nil, ""
 		}
 		failed := profileSubject{UserID: explained.UserID, IDKind: explained.IDKind, UserName: explained.UserName, LookupFailed: identityLookupBlocking.Load()}
-		live := set.match(&failed, profileSubjectLookup, connectorName, agent)
-		differs := live.Name != decision.Name || live.Match != decision.Match
+		live, sandboxRefused := set.explainLiveDecision(&failed, connectorName, agent, legacy)
+		differs := live.Name != decision.Name || live.Match != decision.Match || live.Refused != decision.Refused
 		view = map[string]any{
 			"failing_since": since.UTC().Format(time.RFC3339),
 			"last_error":    reason,
 			"profile":       live.Name,
 			"match":         live.Match,
+			"refused":       live.Refused != "",
 			"differs":       differs,
 		}
+		if live.Refused != "" {
+			view["refused_reason"] = live.Refused
+		}
+		if sandboxRefused != "" {
+			view["sandbox_refused"] = true
+			view["sandbox_refused_reason"] = sandboxRefused
+		}
 		if differs {
-			warning = fmt.Sprintf("requests of this account currently get profile %s (match %s): the gateway's directory lookup for it has failed since %s (%s) "+
-				"and is retried every %s; the profile above applies once a lookup succeeds",
-				firstNonEmpty(live.Name, "none"), live.Match, since.UTC().Format("15:04:05Z"), reason, identityDirectoryRetry)
+			warning = fmt.Sprintf("requests of this account currently %s: the gateway's directory lookup for it has failed since %s (%s) "+
+				"and is retried every %s; rerun explain after a successful lookup to see the proven profile",
+				explainCacheOutcome(live), since.UTC().Format("15:04:05Z"), reason, identityDirectoryRetry)
 		}
 		return view, warning
 	}
@@ -946,19 +1164,28 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 	cached := profileSubjectFromVerified(VerifiedSubject{
 		UserID: explained.UserID, IDKind: explained.IDKind, UserName: explained.UserName, Directory: facts,
 	}, identityLookupBlocking.Load())
-	live := set.match(&cached, profileSubjectLookup, connectorName, agent)
-	differs := live.Name != decision.Name || live.Match != decision.Match || live.MatchedGroup != decision.MatchedGroup
+	live, sandboxRefused := set.explainLiveDecision(&cached, connectorName, agent, legacy)
+	differs := live.Name != decision.Name || live.Match != decision.Match || live.MatchedGroup != decision.MatchedGroup ||
+		live.Refused != decision.Refused
 	view = map[string]any{
 		"age_seconds":           int(age.Seconds()),
 		"refresh_after_seconds": int(refresh.Seconds()),
 		"profile":               live.Name,
 		"match":                 live.Match,
+		"refused":               live.Refused != "",
 		"differs":               differs,
 	}
+	if live.Refused != "" {
+		view["refused_reason"] = live.Refused
+	}
+	if sandboxRefused != "" {
+		view["sandbox_refused"] = true
+		view["sandbox_refused_reason"] = sandboxRefused
+	}
 	if differs {
-		warning = fmt.Sprintf("requests of this account still use the directory facts the gateway fetched %s ago (profile %s, match %s); "+
-			"the profile above applies from the next refresh, within %s. Restart the gateway to refresh now",
-			age, firstNonEmpty(live.Name, "none"), live.Match, refresh)
+		warning = fmt.Sprintf("requests of this account still use the directory facts the gateway fetched %s ago, so they %s; "+
+			"rerun explain after the next successful refresh to see the proven profile. The gateway refreshes within %s; restart it to refresh now",
+			age, explainCacheOutcome(live), refresh)
 	}
 	// The lookup explain started failed: the answer above, like the
 	// account's requests, comes from the facts cached before (GAP-0361). An
@@ -986,8 +1213,8 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 //
 // A directory that does not answer (a domain controller down, SSSD offline)
 // leaves no trace on the tools an administrator uses: the accounts without
-// cached facts get default_lookup_failed for directory-dependent assignments,
-// and the only sign was that match on each record. directoryHealthView reports the
+// cached facts refuse requests whose assignments need the missing facts and
+// name them; the only sign was that refusal on each record. directoryHealthView reports the
 // accounts whose lookups failed in the last cache lifetime, with the reason
 // and the age of the facts still served, to explain, status and doctor
 // (GAP-0145).
@@ -1020,8 +1247,8 @@ func directoryHealthView(h identityCacheHealth, now time.Time) (view map[string]
 	if h.Failing == 0 {
 		return nil, ""
 	}
-	message = fmt.Sprintf("directory lookups are failing for %d account(s) since %s (last error: %s); accounts without cached facts "+
-		"use the default profile for directory-dependent assignments (default_lookup_failed)", h.Failing, h.Since.UTC().Format("15:04:05Z"), h.LastError)
+	message = fmt.Sprintf("directory lookups are failing for %d account(s) since %s (last error: %s); requests whose assignments need missing facts "+
+		"are refused (default_lookup_failed), and each refusal names the missing fact", h.Failing, h.Since.UTC().Format("15:04:05Z"), h.LastError)
 	if h.Stale > 0 {
 		message += fmt.Sprintf(", and %d account(s) are served facts up to %s old, which are dropped at %s",
 			h.Stale, h.OldestAge.Round(time.Minute), identityDirectoryMaxAge)

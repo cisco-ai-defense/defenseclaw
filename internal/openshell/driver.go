@@ -81,7 +81,10 @@ type Driver struct {
 	// MicroVM's stop does not flush the guest's page cache: a file written
 	// and not synced before it comes back empty at the next start (OpenShell
 	// 0.1.1), so without it DefenseClaw runs sync in the sandbox before
-	// every stop, and a copy's unpulled work survives the stop.
+	// every stop, and a copy's unpulled work survives the stop. 0.1.5
+	// flushes the guest before a planned stop (NVIDIA/OpenShell#4195); keep
+	// the sync until LegacyMin is 0.1.5: a legacy gateway's stop, which the
+	// move off it needs, still loses what was not synced.
 	StopFlushes bool
 	// ImageCache is where the driver keeps what it prepares from each image
 	// it boots, relative to the home of the user the gateway runs as; empty
@@ -91,23 +94,12 @@ type Driver struct {
 	// `image rm` and teardown remove the disks of the image IDs they
 	// removed.
 	ImageCache string
-	// HostsFile says the workload's /etc/hosts names localhost: Docker
-	// writes one into every container. OpenShell 0.1.1's vm driver makes a
-	// MicroVM's root disk from a `docker export`, whose init layer puts an
-	// empty /etc/hosts over the image's, and its guest init writes none, so
-	// a name resolves only through the image's nsswitch.conf and the guest's
-	// loopback DNS relay, which does not answer localhost. The overlay image
-	// answers it with nss-myhostname, which a program that reads /etc/hosts
-	// itself (Go's own resolver, a static musl binary) never asks. Without
-	// it a sandbox boots only an image that passed the hook-fire probe's
-	// MicroVM scenario (image.Record.MicroVMVerified).
-	HostsFile bool
 }
 
 // drivers is the table: what each compute driver DefenseClaw drives can
 // and cannot do.
 var drivers = map[ComputeDriver]Driver{
-	DriverDocker: {Name: DriverDocker, HostMounts: true, SandboxLimits: true, StopFlushes: true, HostsFile: true},
+	DriverDocker: {Name: DriverDocker, HostMounts: true, SandboxLimits: true, StopFlushes: true},
 	DriverVM: {
 		Name: DriverVM, RunFilesInImage: true, GatewayIdentity: true,
 		ImageRepository: "defenseclaw.invalid/sandbox",

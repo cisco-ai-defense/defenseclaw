@@ -60,3 +60,52 @@ def test_existing_group_is_not_rewritten(tmp_path):
     assert result.returncode != 0
     assert "not owned by this script" in result.stderr
     assert not (tmp_path / "gpasswd-called").exists()
+
+
+def _run_with_member(tmp_path, member):
+    source = SCRIPT.read_text()
+    source = source.replace('GROUP_NAME="replace-with-local-group"', 'GROUP_NAME="dcgroup"')
+    source = source.replace(
+        'MEMBERS=() # Example: (alice bob). This script owns the complete member list.',
+        f"MEMBERS=('{member}')",
+    )
+    source = source.replace(
+        "[[ $EUID == 0 ]] || { echo 'error: run as root' >&2; exit 1; }",
+        ": # Test uses command stubs instead of root",
+    )
+    source = source.replace('STATE_DIR=/var/lib/defenseclaw-intune/local-groups', f'STATE_DIR={tmp_path / "state"}')
+    script = tmp_path / "sync-local-group.sh"
+    script.write_text(source)
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir(exist_ok=True)
+    getent = stub_dir / "getent"
+    getent.write_text('#!/usr/bin/env bash\n'
+                      '[[ $1 == -s ]] && shift 2\n'
+                      'case "$1:$2" in\n'
+                      '  passwd:john.doe) echo "john.doe:x:1001:1001::/home/john.doe:/bin/bash" ;;\n'
+                      '  passwd:1001) echo "john.doe:x:1001:1001::/home/john.doe:/bin/bash" ;;\n'
+                      '  group:dcgroup) echo "dcgroup:x:4000:" ;;\n'
+                      '  *) exit 2 ;;\n'
+                      'esac\n')
+    getent.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{stub_dir}:{env['PATH']}"
+    return subprocess.run(["bash", str(script)], env=env, text=True, capture_output=True, check=False)
+
+
+def test_dotted_local_account_name_is_accepted(tmp_path):
+    """A local account named john.doe passes the member check (GAP-1275)."""
+    result = _run_with_member(tmp_path, "john.doe")
+    assert "invalid user name" not in result.stderr
+    assert "no local account" not in result.stderr
+    # It stops later, at the existing group this test does not own.
+    assert "not owned by this script" in result.stderr
+
+
+def test_member_names_that_are_not_account_names_are_refused(tmp_path):
+    for member in ("1001", ".hidden", "-rf", "a,b", "a:b"):
+        sub = tmp_path / f"case{abs(hash(member))}"
+        sub.mkdir()
+        result = _run_with_member(sub, member)
+        assert result.returncode == 2, (member, result.stderr)
+        assert "invalid user name" in result.stderr

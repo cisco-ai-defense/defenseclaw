@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 )
 
 // TestContextHelpers_RoundTrip pins the symmetric read/write helpers
@@ -220,6 +221,9 @@ func TestCorrelationMiddleware_StampsAuditEnvelope(t *testing.T) {
 	mw := CorrelationMiddleware(reg)
 
 	t.Setenv("DEFENSECLAW_RUN_ID", "run-env-1")
+	// The env id counts only while no gateway installed its own run id in this
+	// process (rel-1-0-6 GAP-0365).
+	gatewaylog.SetProcessRunID("")
 
 	var env audit.CorrelationEnvelope
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

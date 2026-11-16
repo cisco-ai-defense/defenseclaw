@@ -27,6 +27,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -35,7 +36,11 @@ import click
 
 from defenseclaw import connector_paths, ux
 from defenseclaw.commands import compute_verdict as _compute_verdict
-from defenseclaw.commands._audit_notice import note_asset_policy_observed, saved_change_audit
+from defenseclaw.commands._audit_notice import (
+    note_asset_policy_observed,
+    release_superseded_scan_decision,
+    saved_change_audit,
+)
 from defenseclaw.commands._scan_ui import record_scan as _record_scan
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.enforce import asset_lists
@@ -44,6 +49,7 @@ from defenseclaw.inventory.plugin_directories import (
     PluginRegistryCache,
     PluginRegistryProbe,
     PluginRegistryState,
+    discover_claude_cache_copies,
     discover_plugin_directories,
     plugin_directory_entries,
     probe_claude_plugin_registry,
@@ -120,6 +126,7 @@ def plugin() -> None:
     is_flag=True,
     help="Include exact first-party DefenseClaw artifacts (excluded by default)",
 )
+@click.option("--disable-vendor-identity", is_flag=True, hidden=True)
 @click.option("--lenient", is_flag=True, help="Suppress low-confidence findings (sets min_confidence=0.5)")
 @click.option(
     "--connector",
@@ -146,6 +153,7 @@ def scan(
     llm_consensus_runs: int,
     enable_meta: bool,
     include_self: bool,
+    disable_vendor_identity: bool,
     lenient: bool,
     connector_flag: str,
 ) -> None:
@@ -193,6 +201,7 @@ def scan(
             include_self,
             lenient,
             connector_flag,
+            disable_vendor_identity=disable_vendor_identity,
         )
         return
 
@@ -208,12 +217,13 @@ def scan(
         enable_meta,
         include_self,
         lenient,
+        disable_vendor_identity,
     )
 
     # Route the unified LLM config (top-level ``llm:`` + any
     # ``scanners.plugin.llm:`` overrides) into the wrapper. The
     # wrapper layers per-call CLI flags on top before dispatching.
-    scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"))
+    scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"), data_dir=app.cfg.data_dir)
 
     matches: list[_PluginMatch] = []
     registry_cache: PluginRegistryCache = {}
@@ -346,7 +356,7 @@ def scan(
             scan_dir=scan_dir,
             connector=connector,
             as_json=as_json,
-            scan_options=scan_options,
+            scan_options=_scan_options_for_connector(app, connector, scan_options),
             policy_name=policy_name,
             use_llm=use_llm,
             llm_model=llm_model,
@@ -480,7 +490,16 @@ def _scan_one_plugin_dir(
         click.echo(f"error: scan failed: {exc}", err=True)
         raise SystemExit(1)
 
-    _record_scan(app.logger, result, connector=connector or None)
+    try:
+        audit_name = plugin_id or canonical_plugin_id(scan_dir)[0]
+    except Exception:  # noqa: BLE001 - the identity error is reported below.
+        audit_name = plugin_id or os.path.basename(scan_dir.rstrip("/\\"))
+    _record_scan(
+        app.logger, result, connector=connector or None,
+        **_scan_ui.verdict_kwargs(
+            _plugin_scan_audit_verdict(app, result, name=audit_name, path=scan_dir, connector=connector)
+        ),
+    )
 
     if as_json:
         # Preserve the ScanResult keys automation already parses, while adding
@@ -561,6 +580,24 @@ def _scan_one_plugin_dir(
     )
 
 
+def _plugin_scan_audit_verdict(
+    app: AppContext, result: Any, *, name: str, path: str, connector: str,
+) -> str:
+    """The audit verdict of a plugin scan: what its scan line and policy say (GAP-0156).
+
+    ``block`` for a plugin the policy rejects, ``clean`` for informational
+    findings only, ``warn`` otherwise. Empty for a clean scan.
+    """
+    from defenseclaw.commands import _scan_ui
+
+    if result.is_clean():
+        return ""
+    verdict, rejects = _plugin_scan_findings_verdict(app, result, name=name, path=path, connector=connector)
+    if rejects or verdict == _scan_ui.VERDICT_BLOCKED:
+        return "block"
+    return "clean" if verdict == _scan_ui.VERDICT_INFO else "warn"
+
+
 def _plugin_scan_findings_verdict(
     app: AppContext, result: Any, *, name: str, path: str, connector: str,
 ) -> tuple[str, bool]:
@@ -577,7 +614,7 @@ def _plugin_scan_findings_verdict(
     sev = str(result.max_severity()).upper()
     try:
         from defenseclaw.enforce import PolicyEngine
-        from defenseclaw.enforce.admission import evaluate_admission
+        from defenseclaw.enforce.admission import action_blocks, evaluate_admission
 
         pe = PolicyEngine(app.store, app.cfg)
         try:
@@ -594,7 +631,7 @@ def _plugin_scan_findings_verdict(
             scan_result=result,
             connector=connector,
         )
-        blocks = decision.verdict != "allowed" and decision.action.install == "block"
+        blocks = decision.verdict != "allowed" and action_blocks(decision.action)
     except Exception:  # noqa: BLE001 - an admission failure must not read as clean.
         blocks = True
     return (_scan_ui.VERDICT_INFO if sev == "INFO" else _scan_ui.VERDICT_WARN), blocks
@@ -656,7 +693,7 @@ def _active_plugin_connectors(app: AppContext) -> list[str]:
         active = cfg.active_connector()
         if active:
             return [active]
-    return ["openclaw"]
+    return []
 
 
 def _plugin_roots_for_connector(
@@ -679,7 +716,7 @@ def _plugin_roots_for_connector(
         pass
 
     if include_legacy and getattr(app.cfg, "plugin_dir", ""):
-        active = app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
+        active = app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else ""
         active_connectors = _active_plugin_connectors(app)
         if len(active_connectors) <= 1 or connector == active:
             roots.append(app.cfg.plugin_dir)
@@ -1081,6 +1118,7 @@ def _scan_all_plugins(
     include_self: bool,
     lenient: bool,
     connector_flag: str,
+    disable_vendor_identity: bool = False,
 ) -> None:
     """P-C: sweep every installed plugin across configured connectors.
 
@@ -1120,13 +1158,15 @@ def _scan_all_plugins(
         enable_meta,
         include_self,
         lenient,
+        disable_vendor_identity,
     )
-    scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"))
+    scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"), data_dir=app.cfg.data_dir)
     pack_cache: RulePackOverlayCache = {}
 
     json_groups: list[dict[str, Any]] = []
     total_targets = 0
     for connector in connectors:
+        connector_options = _scan_options_for_connector(app, connector, scan_options)
         connector_scanner = maybe_wrap(
             scanner,
             app.cfg,
@@ -1215,9 +1255,9 @@ def _scan_all_plugins(
         group_results: list[dict[str, Any]] = []
         # GAP-2643: overlap the LLM-bound scans; results keep their order.
         for (pid, scan_dir, scope, project_path), scan_result in _scan_ui.ordered_scans(
-            lambda target: connector_scanner.scan(target[1], **scan_options),
+            lambda target: connector_scanner.scan(target[1], **connector_options),
             targets,
-            workers=_scan_ui.scan_batch_workers(connector_scanner, **scan_options),
+            workers=_scan_ui.scan_batch_workers(connector_scanner, **connector_options),
         ):
             try:
                 result = scan_result()
@@ -1226,7 +1266,12 @@ def _scan_all_plugins(
                 if not as_json:
                     click.echo(f"  error: scan failed for {pid!r}: {exc}", err=True)
                 continue
-            _record_scan(app.logger, result, connector=connector or None)
+            _record_scan(
+                app.logger, result, connector=connector or None,
+                **_scan_ui.verdict_kwargs(
+                    _plugin_scan_audit_verdict(app, result, name=pid, path=scan_dir, connector=connector)
+                ),
+            )
             if as_json:
                 payload = json.loads(result.to_json())
                 payload["connector"] = connector
@@ -1300,6 +1345,7 @@ def _build_scan_options(
     enable_meta: bool,
     include_self: bool,
     lenient: bool,
+    disable_vendor_identity: bool = False,
 ) -> dict:
     """Build ``PluginScannerWrapper.scan`` kwargs from CLI flags.
 
@@ -1334,6 +1380,8 @@ def _build_scan_options(
 
     if include_self:
         opts["include_self"] = True
+    if disable_vendor_identity:
+        opts["disable_vendor_identity"] = True
 
     # A configured OpenClaw home can live outside ~/.openclaw. Pass only its
     # exact DefenseClaw leaf to the scanner's identity registry; never pass a
@@ -1351,6 +1399,36 @@ def _build_scan_options(
     return opts
 
 
+def _scan_options_for_connector(app: AppContext, connector: str, options: dict) -> dict:
+    """Use the deployment's scan identity and effective connector tier."""
+    if asset_lists.is_secure_client(app.cfg):
+        return {**options, "disable_vendor_identity": True}
+    tier = getattr(getattr(app.cfg, "guardrail", None), "hook_policy_tier", None)
+    if callable(tier) and tier(connector) == "strict":
+        return {**options, "policy": "strict", "profile": "strict"}
+    return options
+
+
+@plugin.command("manifest-entrypoints", hidden=True)
+def manifest_entrypoints() -> None:
+    """Print the entrypoints the plugin scanner reads from manifests on stdin.
+
+    Internal: the gateway watcher sends {"manifests": {path: base64 bytes}} and
+    gets {"entrypoints": [...]}, so one loader decides what a manifest declares.
+    """
+    import base64
+    import sys
+
+    from defenseclaw.scanner.plugin_scanner.scanner import declared_entrypoints
+
+    request = json.load(sys.stdin)
+    manifests = {
+        str(name): base64.b64decode(value, validate=True)
+        for name, value in request["manifests"].items()
+    }
+    click.echo(json.dumps({"entrypoints": declared_entrypoints(manifests)}))
+
+
 @plugin.command()
 @click.argument("name_or_path")
 @click.option("--force", is_flag=True, help="Force install (overwrites existing)")
@@ -1361,7 +1439,7 @@ def _build_scan_options(
     default="",
     help=(
         "Install into one configured connector's plugin directory. "
-        "Default: every configured connector that exposes a plugin directory."
+        "Default: every configured connector with a supported install directory."
     ),
 )
 @pass_ctx
@@ -1378,14 +1456,15 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
 
     After downloading, the plugin is scanned for security issues. Pass --action
     to apply the configured admission policy (quarantine, disable, block)
-    based on scan severity. Use --force to overwrite an existing plugin.
+    based on scan severity. Use --force to replace an existing plugin; it is
+    replaced only once the new copy is admitted.
 
     With no ``--connector`` the source is materialized into every configured
-    connector that exposes a plugin directory. ``--connector`` narrows both
+    connector with a supported install directory. Codex marketplace installs
+    must use Codex's own flow; copying into its cache is not an install.
+    ``--connector`` narrows both
     placement and admission/enforcement attribution to that peer.
     """
-    import tempfile
-
     from defenseclaw.commands import resolve_list_connectors
     from defenseclaw.enforce import PolicyEngine
     from defenseclaw.registry import (
@@ -1483,44 +1562,39 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
             + ", ".join(f"connector={connector}" for connector, _root in targets)
             + "..."
         )
-        try:
-            installed_by_connector = transaction.commit()
-        except (OSError, PluginIdentityError) as exc:
-            transaction.rollback()
-            click.echo(f"error: plugin install commit failed: {exc}", err=True)
-            raise SystemExit(1)
-        for connector, plugin_path in installed_by_connector.items():
-            click.echo(f"[install] installed {plugin_name!r} -> {plugin_path} (connector={connector})")
-            if app.logger:
-                saved_change_audit(app.logger).log_action(
-                    "plugin-install",
-                    plugin_name,
-                    f"source={name_or_path} connector={connector}",
-                )
-
-        scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"))
+        # One transaction (GAP-1494): each connector's new copy is decided in
+        # a staging directory this install owns. Only a copy that stands is
+        # swapped in; a refused or quarantined copy never touches the
+        # installed plugin, and a rollback puts back only what was there.
+        scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"), data_dir=app.cfg.data_dir)
         pack_cache: RulePackOverlayCache = {}
         scan_results: dict[str, Any] = {}
         try:
             for connector, _install_root in targets:
                 if pre_decisions[connector].verdict != "allowed":
-                    plugin_path = installed_by_connector[connector]
+                    staged_path = transaction.staged_path(connector)
                     connector_scanner = maybe_wrap(
                         scanner,
                         app.cfg,
                         connector,
                         pack_cache=pack_cache,
                     )
-                    scan_results[connector] = connector_scanner.scan(plugin_path)
+                    result = connector_scanner.scan(
+                        staged_path,
+                        **_scan_options_for_connector(app, connector, {}),
+                    )
+                    if getattr(result, "target", None) == staged_path:
+                        result.target = transaction.destination(connector)
+                    scan_results[connector] = result
         except Exception as exc:
             transaction.rollback()
             click.echo(f"error: scan failed for connector={connector}: {exc}", err=True)
             raise SystemExit(1)
 
-        deferred_enforcement_failure = False
+        enforcement_applied = False
         try:
             for connector, _install_root in targets:
-                plugin_path = installed_by_connector[connector]
+                plugin_path = transaction.destination(connector)
                 pre_decision = pre_decisions[connector]
                 if pre_decision.verdict == "allowed":
                     if pre_decision.source == "scan-disabled":
@@ -1538,37 +1612,69 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
                         )
                     continue
 
-                deferred_enforcement_failure = (
-                    _scan_installed_plugin_for_connector(
-                        app,
-                        pe,
-                        scanner,
-                        plugin_name,
-                        plugin_path,
-                        connector=connector,
-                        take_action=take_action,
-                        rollback=transaction.rollback,
-                        scan_result=scan_results[connector],
-                        defer_action_failure=len(targets) > 1,
-                        defer_scan_log=True,
-                    )
-                    or deferred_enforcement_failure
-                )
+                if _scan_installed_plugin_for_connector(
+                    app,
+                    pe,
+                    plugin_name,
+                    transaction.staged_path(connector),
+                    install_path=plugin_path,
+                    connector=connector,
+                    take_action=take_action,
+                    scan_result=scan_results[connector],
+                ):
+                    # The quarantine, disable or block applied: this
+                    # connector's new copy is never swapped in.
+                    transaction.refuse(connector)
+                    enforcement_applied = True
         except SystemExit:
-            # Enforcement may intentionally move the new canonical copy into
-            # quarantine.  Preserve that action, but discard replacement
-            # backups.  All other failures restore the exact prior layout.
-            if transaction.committed and any(not os.path.exists(path) for path in installed_by_connector.values()):
-                transaction.finalize()
-            else:
-                transaction.rollback()
+            # A refusal: no new copy was swapped in, so every installed
+            # plugin is as it was; only the staged copies are removed.
+            transaction.rollback()
             raise
+        except Exception as exc:
+            # A thrown error while deciding or enforcing is a refused
+            # install, never a rejected copy left in place (GAP-1483).
+            transaction.rollback()
+            ux.echo(
+                f"error: refusing to install {plugin_name!r} for connector={connector} — "
+                f"enforcement failed: {exc}; the install was rolled back",
+                err=True,
+            )
+            if app.logger:
+                saved_change_audit(app.logger).log_action(
+                    "install-rejected",
+                    plugin_name,
+                    f"connector={connector} result=refused reason=enforcement-failed failed=error",
+                )
+            raise SystemExit(1)
+
+        try:
+            installed_by_connector = transaction.commit()
+        except (OSError, PluginIdentityError) as exc:
+            transaction.rollback()
+            click.echo(f"error: plugin install commit failed: {exc}", err=True)
+            raise SystemExit(1)
+        for connector, plugin_path in installed_by_connector.items():
+            click.echo(f"[install] installed {plugin_name!r} -> {plugin_path} (connector={connector})")
+            release_superseded_scan_decision(
+                app.logger, pe, "plugin", plugin_name, connector,
+                enable_runtime=(
+                    (lambda: _enable_plugin_via_gateway(app, plugin_name))
+                    if _normalize_runtime_connector(connector) == "openclaw" else None
+                ),
+            )
+            if app.logger:
+                saved_change_audit(app.logger).log_action(
+                    "plugin-install",
+                    plugin_name,
+                    f"source={name_or_path} connector={connector}",
+                )
 
         if app.logger:
             for scanned_connector, result in scan_results.items():
                 saved_change_audit(app.logger).log_scan(result, connector=scanned_connector)
         transaction.finalize()
-        if deferred_enforcement_failure:
+        if enforcement_applied:
             raise SystemExit(1)
 
         click.echo(f"Installed plugin: {plugin_name}")
@@ -1666,11 +1772,25 @@ def _plugin_install_targets(
 ) -> list[tuple[str, str]]:
     """Return ``(connector, install_root)`` targets for plugin installs.
 
-    Antigravity is a normal filesystem-backed target: its documented global
-    plugin directory is returned by ``cfg.plugin_dirs("antigravity")`` just
-    like Claude Code, Codex, and Hermes. Keep capability decisions in the path
-    adapter instead of hard-coding connector exclusions here.
+    Codex's cache is an inventory root, not an install root: a flat copy at
+    cache/<name> is invisible to Codex and to DefenseClaw discovery. Refuse a
+    Codex-only request; a multi-connector request names the skipped peer.
     """
+    codex = [connector for connector in connectors if connector_paths.normalize(connector) == "codex"]
+    if codex:
+        cause = (
+            "Codex plugins require its marketplace install flow; a copy into "
+            "plugins/cache/<name> is not discoverable. Install with Codex, "
+            "then inspect it with 'defenseclaw plugin list --connector codex'. "
+            "No Codex copy was made."
+        )
+        if len(codex) == len(connectors):
+            click.echo(f"error: {cause}", err=True)
+            raise SystemExit(1)
+        for connector in codex:
+            click.echo(f"[install] skipping connector={connector}: {cause}")
+        connectors = [connector for connector in connectors if connector not in codex]
+
     targets: list[tuple[str, str]] = []
     skipped: list[str] = []
     for connector in connectors:
@@ -1764,13 +1884,17 @@ def _reject_linked_tree(source_path: str) -> None:
 
 
 class _PluginInstallTransaction:
-    """Stage every connector, then atomically swap with rollback backups."""
+    """One plugin install as one transaction. Each connector's new copy is
+    staged in a directory this operation owns (unique per operation, never
+    shared) and decided there; :meth:`commit` swaps in only the copies that
+    stand. A refused connector's installed copy is never touched, a rollback
+    puts back only the copy that was installed before this operation, and
+    cleanup removes only paths this operation created."""
 
     def __init__(self, source_path: str, plugin_name: str) -> None:
         self.source_path = source_path
         self.plugin_name = plugin_name
         self.plans: list[dict[str, Any]] = []
-        self.committed = False
 
     @classmethod
     def prepare(
@@ -1787,12 +1911,16 @@ class _PluginInstallTransaction:
 
         # Complete every read-only collision/path check before creating roots or
         # staging data for any connector.
+        destinations: set[str] = set()
         for connector, root in targets:
             root_real = os.path.realpath(root)
             destination = os.path.join(root, plugin_name)
             dest_real = os.path.realpath(destination)
             if dest_real == root_real or not dest_real.startswith(root_real + os.sep):
                 raise PluginIdentityError(f"canonical destination escapes connector={connector} plugin root")
+            if dest_real in destinations:
+                raise PluginIdentityError(f"connector={connector} shares the plugin install path {destination}")
+            destinations.add(dest_real)
             identities = enumerate_physical_identities(root)
             key = filesystem_identity_key(plugin_name, root)
             aliases = [item.path for item in identities if filesystem_identity_key(item.plugin_id, root) == key]
@@ -1809,51 +1937,72 @@ class _PluginInstallTransaction:
                     "root": root,
                     "destination": destination,
                     "aliases": aliases,
+                    "stage_dir": "",
                     "stage": "",
                     "backups": [],
                     "installed": False,
+                    "refused": False,
                 }
             )
 
         try:
             for plan in tx.plans:
                 os.makedirs(plan["root"], exist_ok=True)
-                stage = os.path.join(plan["root"], f".dclaw-stage-{plugin_name}-{os.getpid()}")
-                if os.path.lexists(stage):
-                    raise PluginIdentityError(f"staging path already exists: {stage}")
+                plan["stage_dir"] = tempfile.mkdtemp(
+                    prefix=f".dclaw-stage-{os.path.basename(plugin_name)}-", dir=plan["root"],
+                )
+                stage = os.path.join(plan["stage_dir"], os.path.basename(plan["destination"]))
                 shutil.copytree(source_path, stage, symlinks=True)
                 plan["stage"] = stage
                 # Preserve links during the untrusted copy so they are never
                 # dereferenced, then reject any link introduced after the
-                # source preflight before the staged tree can be committed.
+                # source preflight before the staged tree is scanned.
                 _reject_linked_tree(stage)
         except Exception:
             tx.rollback()
             raise
         return tx
 
+    def _plan(self, connector: str) -> dict[str, Any]:
+        for plan in self.plans:
+            if plan["connector"] == connector:
+                return plan
+        raise KeyError(connector)
+
+    def staged_path(self, connector: str) -> str:
+        """The new copy for ``connector``, staged and not yet installed."""
+        return self._plan(connector)["stage"]
+
+    def destination(self, connector: str) -> str:
+        return self._plan(connector)["destination"]
+
+    def refuse(self, connector: str) -> None:
+        """Never swap ``connector``'s new copy in (its quarantine, disable
+        or block applied); its installed copy stays as it is."""
+        self._plan(connector)["refused"] = True
+
     def commit(self) -> dict[str, str]:
         installed: dict[str, str] = {}
         try:
             for plan in self.plans:
+                stage = plan["stage"]
+                if plan["refused"] or not stage or not os.path.lexists(stage):
+                    continue
                 # Revalidate at the mutation boundary in case the staged tree
-                # changed after prepare() returned.
-                _reject_linked_tree(plan["stage"])
+                # changed after it was decided.
+                _reject_linked_tree(stage)
                 for index, existing in enumerate(plan["aliases"]):
-                    backup = os.path.join(
-                        plan["root"],
-                        f".dclaw-backup-{self.plugin_name}-{os.getpid()}-{index}",
-                    )
-                    if os.path.lexists(backup):
-                        raise PluginIdentityError(f"backup path already exists: {backup}")
+                    backup = os.path.join(plan["stage_dir"], f"replaced-{index}")
                     os.replace(existing, backup)
                     plan["backups"].append((existing, backup))
-                os.replace(plan["stage"], plan["destination"])
+                if os.path.lexists(plan["destination"]):
+                    # Installed by someone else while this copy was decided.
+                    raise PluginIdentityError(f"{plan['destination']} appeared during the install")
+                os.replace(stage, plan["destination"])
                 plan["stage"] = ""
                 plan["installed"] = True
                 _reject_linked_tree(plan["destination"])
                 installed[plan["connector"]] = plan["destination"]
-            self.committed = True
             return installed
         except Exception:
             self.rollback()
@@ -1866,73 +2015,54 @@ class _PluginInstallTransaction:
                 if os.path.isdir(destination) and not os.path.islink(destination):
                     shutil.rmtree(destination, ignore_errors=True)
                 plan["installed"] = False
+            kept = False
             for original, backup in reversed(plan["backups"]):
-                if os.path.exists(backup) and not os.path.exists(original):
-                    os.replace(backup, original)
+                if not os.path.lexists(backup):
+                    continue
+                if os.path.lexists(original):
+                    kept = True
+                    click.echo(f"[install] warning: the replaced plugin {original} is kept at {backup}", err=True)
+                    continue
+                os.replace(backup, original)
             plan["backups"] = []
-            stage = plan["stage"]
-            if stage and os.path.isdir(stage) and not os.path.islink(stage):
-                shutil.rmtree(stage, ignore_errors=True)
-                plan["stage"] = ""
-        self.committed = False
+            if not kept:
+                self._remove_stage(plan)
 
     def finalize(self) -> None:
         for plan in self.plans:
-            for _original, backup in plan["backups"]:
-                if os.path.isdir(backup) and not os.path.islink(backup):
-                    shutil.rmtree(backup)
             plan["backups"] = []
+            self._remove_stage(plan)
 
-
-def _rollback_plugin_install_paths(paths: list[str]) -> None:
-    seen: set[str] = set()
-    for path in paths:
-        if not path or path in seen:
-            continue
-        seen.add(path)
-        try:
-            if os.path.isdir(path) and not os.path.islink(path):
-                shutil.rmtree(path)
-        except OSError as exc:
-            click.echo(
-                f"[install] warning: could not remove partial install {path}: {exc}",
-                err=True,
-            )
+    @staticmethod
+    def _remove_stage(plan: dict[str, Any]) -> None:
+        stage_dir = plan["stage_dir"]
+        if stage_dir and os.path.isdir(stage_dir) and not os.path.islink(stage_dir):
+            shutil.rmtree(stage_dir, ignore_errors=True)
+        plan["stage_dir"] = ""
+        plan["stage"] = ""
 
 
 def _scan_installed_plugin_for_connector(
     app: AppContext,
     pe: Any,
-    scanner: Any,
     plugin_name: str,
     plugin_path: str,
     *,
+    install_path: str,
     connector: str,
     take_action: bool,
-    rollback: Any = None,
-    scan_result: Any = None,
-    defer_action_failure: bool = False,
-    defer_scan_log: bool = False,
+    scan_result: Any,
 ) -> bool:
+    """Decide one connector's staged copy at ``plugin_path``, to be installed
+    at ``install_path``. True when a quarantine, disable or block applied:
+    the caller never swaps that copy in and fails once every connector is
+    decided. A refusal with nothing applied raises SystemExit, and the
+    caller removes the staged copies."""
     from defenseclaw.enforce.admission import evaluate_admission
     from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
 
-    click.echo(f"[install] scanning {plugin_path} (connector={connector})...")
-    if scan_result is None:
-        try:
-            result = scanner.scan(plugin_path)
-        except Exception as exc:
-            if rollback:
-                rollback()
-            else:
-                _rollback_plugin_install_paths([plugin_path])
-            click.echo(
-                f"error: scan failed for connector={connector}: {exc}",
-                err=True,
-            )
-            raise SystemExit(1)
-    else:
-        result = scan_result
+    click.echo(f"[install] scanning {install_path} (connector={connector})...")
+    result = scan_result
 
     _print_install_result(plugin_name, result)
 
@@ -1941,16 +2071,13 @@ def _scan_installed_plugin_for_connector(
         config=app.cfg,
         target_type="plugin",
         name=plugin_name,
-        source_path=plugin_path,
+        source_path=install_path,
+        content_path=plugin_path,
         scan_result=result,
         connector=connector,
     )
 
     if post_decision.verdict == "blocked" and not asset_lists.is_secure_client(app.cfg):
-        if rollback:
-            rollback()
-        else:
-            _rollback_plugin_install_paths([plugin_path])
         ux.echo(f"error: plugin {plugin_name!r} blocked for connector={connector}: "
                 f"{post_decision.reason}", err=True)
         if app.logger:
@@ -1963,13 +2090,11 @@ def _scan_installed_plugin_for_connector(
     if post_decision.verdict == "allowed" and post_decision.source == "scan-allowed":
         # The admission action for the findings' severity is allow; nothing
         # is on an allow list, so this is installed like a clean plugin.
-        if app.logger and not defer_scan_log:
-            saved_change_audit(app.logger).log_scan(result, connector=connector)
         click.echo(
             f"[install] {plugin_name!r} installed: the admission policy allows its findings "
             f"({post_decision.reason}, connector={connector})"
         )
-        pe.set_source_path("plugin", plugin_name, plugin_path, connector)
+        pe.set_source_path("plugin", plugin_name, install_path, connector)
         if app.logger:
             saved_change_audit(app.logger).log_action(
                 "install-allowed",
@@ -1979,12 +2104,10 @@ def _scan_installed_plugin_for_connector(
         return False
 
     if post_decision.verdict == "allowed":
-        if app.logger and not defer_scan_log:
-            saved_change_audit(app.logger).log_scan(result, connector=connector)
         ux.echo(
             f"[install] {plugin_name!r} became allow-listed for connector={connector} — skipping post-scan enforcement"
         )
-        pe.set_source_path("plugin", plugin_name, plugin_path, connector)
+        pe.set_source_path("plugin", plugin_name, install_path, connector)
         if app.logger:
             saved_change_audit(app.logger).log_action(
                 "install-allowed",
@@ -1994,10 +2117,8 @@ def _scan_installed_plugin_for_connector(
         return False
 
     if post_decision.verdict == "clean":
-        if app.logger and not defer_scan_log:
-            saved_change_audit(app.logger).log_scan(result, connector=connector)
         click.echo(f"[install] {plugin_name!r} installed and clean (connector={connector})")
-        pe.set_source_path("plugin", plugin_name, plugin_path, connector)
+        pe.set_source_path("plugin", plugin_name, install_path, connector)
         if app.logger:
             saved_change_audit(app.logger).log_action(
                 "install-clean",
@@ -2011,11 +2132,13 @@ def _scan_installed_plugin_for_connector(
 
     if not take_action:
         sev_norm = (sev or "").strip().upper()
-        if sev_norm in {"HIGH", "CRITICAL"}:
-            if rollback:
-                rollback()
-            else:
-                _rollback_plugin_install_paths([plugin_path])
+        # A HIGH or CRITICAL finding (not a scan-judge warning), and any
+        # verdict the admission policy rejects (a quarantine or block at any
+        # severity), refuses the install without --action; it is never
+        # installed with a warning (GAP-1442). Secure Client keeps its
+        # HIGH/CRITICAL refusal.
+        rejected = post_decision.verdict == "rejected" and not asset_lists.is_secure_client(app.cfg)
+        if (sev_norm in {"HIGH", "CRITICAL"} and post_decision.source != "scan-judge-warning") or rejected:
             ux.echo(
                 f"error: refusing to install {plugin_name!r} for connector={connector} — "
                 f"{len(result.findings)} {sev_norm} findings detected and "
@@ -2028,55 +2151,96 @@ def _scan_installed_plugin_for_connector(
                 saved_change_audit(app.logger).log_action(
                     "install-rejected",
                     plugin_name,
-                    f"{detail} result=refused reason=critical-without-action",
+                    f"{detail} result=refused reason="
+                    + ("rejected-without-action" if rejected else "critical-without-action"),
                 )
             raise SystemExit(1)
         ux.echo(
             f"[install] {len(result.findings)} {sev} findings in {plugin_name!r} "
             f"(connector={connector}; no action taken — pass --action to enforce)"
         )
-        if app.logger and not defer_scan_log:
-            saved_change_audit(app.logger).log_scan(result, connector=connector)
-        pe.set_source_path("plugin", plugin_name, plugin_path, connector)
+        pe.set_source_path("plugin", plugin_name, install_path, connector)
         if app.logger:
             saved_change_audit(app.logger).log_action("install-warning", plugin_name, detail)
         return False
 
     action_cfg = post_decision.action
-    if app.logger and not defer_scan_log:
-        saved_change_audit(app.logger).log_scan(result, connector=connector)
     enforcement_reason = f"post-install scan: {len(result.findings)} findings, max={sev}"
     applied_actions: list[str] = []
+    failed_actions: list[str] = []
+    q_dest: str | None = None
 
     if action_cfg.file == "quarantine":
-        pe.set_source_path("plugin", plugin_name, plugin_path, connector)
+        pe.set_source_path("plugin", plugin_name, install_path, connector)
         se = PluginEnforcer(app.cfg.quarantine_dir)
-        q_dest = se.quarantine(plugin_name, plugin_path, connector=connector)
+        # The staged copy goes to quarantine; the installed plugin is untouched.
+        q_dest = _quarantine_new_plugin_copy(se, plugin_name, plugin_path, connector)
         if q_dest:
             applied_actions.append(f"quarantined to {q_dest}")
-            pe.quarantine_for_connector("plugin", plugin_name, connector, enforcement_reason)
+            try:
+                pe.quarantine_for_connector("plugin", plugin_name, connector, enforcement_reason)
+            except Exception as exc:
+                click.echo(
+                    f"[install] warning: {plugin_name!r} is quarantined; recording it failed: {exc}",
+                    err=True,
+                )
         else:
             click.echo("[install] quarantine failed", err=True)
+            failed_actions.append("quarantine")
 
     if action_cfg.runtime == "disable":
         target_connector = _normalize_runtime_connector(connector)
-        if target_connector == "openclaw":
-            client = _sidecar_client(app)
-            try:
-                client.disable_plugin(plugin_name)
-                applied_actions.append("disabled via gateway")
-                pe.disable_for_connector("plugin", plugin_name, connector, enforcement_reason)
-            except Exception as exc:
-                click.echo(f"[install] gateway disable failed: {exc}", err=True)
-        else:
-            applied_actions.append(f"runtime disable recorded for connector={connector}")
+        try:
+            if target_connector == "openclaw":
+                _sidecar_client(app).disable_plugin(plugin_name)
             pe.disable_for_connector("plugin", plugin_name, connector, enforcement_reason)
+            applied_actions.append(
+                "disabled via gateway"
+                if target_connector == "openclaw"
+                else f"runtime disable recorded for connector={connector}"
+            )
+        except Exception as exc:
+            label = "gateway disable" if target_connector == "openclaw" else "runtime disable record"
+            click.echo(f"[install] {label} failed: {exc}", err=True)
+            failed_actions.append("runtime disable")
 
     if action_cfg.install == "block":
-        pe.record_scan_block("plugin", plugin_name, connector, enforcement_reason)
-        applied_actions.append("install blocked by this scan")
+        try:
+            pe.record_scan_block("plugin", plugin_name, connector, enforcement_reason)
+            applied_actions.append("install blocked by this scan")
+        except Exception as exc:
+            click.echo(f"[install] install block record failed: {exc}", err=True)
+            failed_actions.append("install block")
 
-    pe.set_source_path("plugin", plugin_name, plugin_path, connector)
+    # A failed quarantine leaves the files in place, a failed install block
+    # with no quarantine leaves them installed, and a failed disable with
+    # nothing else applied leaves the asset active: either way the refusal
+    # did not take effect. A gateway that is down while the quarantine or
+    # install block applied refuses nothing less.
+    if (
+        "quarantine" in failed_actions
+        or ("install block" in failed_actions and not q_dest)
+        or (post_decision.verdict == "rejected" and not applied_actions)
+    ):
+        # A refusal whose quarantine or disable could not be applied is
+        # still a refusal: the install is rolled back and the command fails,
+        # never a warning with the plugin left in place (GAP-1457).
+        failed = ", ".join(failed_actions) or "enforcement"
+        ux.echo(
+            f"error: refusing to install {plugin_name!r} for connector={connector} — "
+            f"the admission policy rejects its {sev} findings and the {failed} failed; "
+            "the install was rolled back",
+            err=True,
+        )
+        if app.logger:
+            saved_change_audit(app.logger).log_action(
+                "install-rejected",
+                plugin_name,
+                f"{detail} result=refused reason=enforcement-failed failed={failed.replace(' ', '-')}",
+            )
+        raise SystemExit(1)
+
+    pe.set_source_path("plugin", plugin_name, install_path, connector)
 
     if applied_actions:
         actions_str = ", ".join(applied_actions)
@@ -2092,15 +2256,25 @@ def _scan_installed_plugin_for_connector(
             f"connector={connector} — actions applied: {actions_str}",
             err=True,
         )
-        if defer_action_failure:
-            return True
-        raise SystemExit(1)
+        return True
 
     click.echo(f"[install] warning: {len(result.findings)} {sev} findings in {plugin_name!r} (connector={connector})")
-    pe.set_source_path("plugin", plugin_name, plugin_path, connector)
     if app.logger:
         saved_change_audit(app.logger).log_action("install-warning", plugin_name, detail)
     return False
+
+
+def _quarantine_new_plugin_copy(se: Any, plugin_name: str, plugin_path: str, connector: str) -> str | None:
+    """Move the staged copy this install wrote into quarantine. A thrown
+    error is a failed quarantine (GAP-1483): the partial copy it left is
+    removed, and the caller refuses the install and rolls it back. The
+    enforcer stages the move in a path it owns, so a failure never touches a
+    quarantine another process made."""
+    try:
+        return se.quarantine(plugin_name, plugin_path, connector=connector)
+    except Exception as exc:
+        click.echo(f"[install] quarantine move failed: {exc}", err=True)
+        return None
 
 
 def _print_install_result(name: str, result) -> None:
@@ -2172,6 +2346,7 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
                     _build_plugin_scan_map_for_connector(app, connector),
                     _build_plugin_actions_map(app.store, connector, app.cfg),
                     connector=connector,
+                    verdict=_plugin_list_verdict_for(app, connector),
                 )
                 _report_host_plugin_list_error(connector)
                 total_plugins += len(items)
@@ -2194,6 +2369,7 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
                 _build_plugin_scan_map_for_connector(app, connectors[0]),
                 _build_plugin_actions_map(app.store, connectors[0], app.cfg),
                 connector=connectors[0],
+                verdict=_plugin_list_verdict_for(app, connectors[0]),
             )
             click.echo(json.dumps(items, indent=2, default=str))
             if _report_host_plugin_list_error(connectors[0]) and not items:
@@ -2236,7 +2412,9 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
             continue
         actions_map = _build_plugin_actions_map(app.store, connector, app.cfg)
         connector_scan_map = _build_plugin_scan_map_for_connector(app, connector)
-        _print_plugin_list_table(plugins, connector_scan_map, actions_map, connector)
+        _print_plugin_list_table(
+            plugins, connector_scan_map, actions_map, connector, verdict=_plugin_list_verdict_for(app, connector),
+        )
         shown_any = True
 
     if not shown_any:
@@ -2492,6 +2670,8 @@ def _plugin_status(p: dict[str, Any], action_entry: Any = None) -> str:
             return "blocked"
         if a.runtime == "disable":
             return "disabled"
+    if p.get("activation_unverified"):
+        return "unverified"
     if not p.get("enabled"):
         return "disabled"
     return "enabled"
@@ -2506,6 +2686,8 @@ def _plugin_status_display(p: dict[str, Any], action_entry: Any = None) -> str:
             return "\u2717 quarantined"
         if a.runtime == "disable":
             return "\u2717 disabled"
+    if p.get("activation_unverified"):
+        return "? activation unverified"
     if p.get("enabled"):
         return "\u2713 enabled"
     return "\u2717 disabled"
@@ -2524,6 +2706,7 @@ def _plugin_list_json_items(
     scan_map: dict[str, dict[str, Any]],
     actions_map: dict[str, Any],
     connector: str = "",
+    verdict: Any = None,
 ) -> list[dict[str, Any]]:
     items = []
     for p in plugins:
@@ -2540,6 +2723,9 @@ def _plugin_list_json_items(
         }
         if connector:
             item["connector"] = connector
+        if p.get("activation_unverified"):
+            item["activation_verified"] = False
+            item["activation_reason"] = p.get("activation_reason", "Plugin activation is unverified.")
         for field in (
             "scope",
             "project_path",
@@ -2553,11 +2739,11 @@ def _plugin_list_json_items(
             if value not in (None, "", False):
                 item[field] = value
         if pid in scan_map:
-            item["scan"] = scan_map[pid]
+            item["scan"] = _public_scan_entry(scan_map[pid])
         ae = _row_action(p, actions_map)
         if ae is not None and not ae.actions.is_empty():
             item["actions"] = ae.actions.to_dict()
-        verdict_label, _ = _compute_verdict(ae, scan_map.get(pid))
+        verdict_label, _ = (verdict or _compute_verdict)(ae, scan_map.get(pid))
         item["verdict"] = verdict_label
         items.append(item)
     return items
@@ -2568,6 +2754,7 @@ def _print_plugin_list_table(
     scan_map: dict[str, dict[str, Any]],
     actions_map: dict[str, Any],
     connector: str = "",
+    verdict: Any = None,
 ) -> None:
     from rich.console import Console
 
@@ -2613,7 +2800,7 @@ def _print_plugin_list_table(
             if state.file == "quarantine" or (state.install == "block" and state.runtime != "disable"):
                 verdict_action = None
 
-        verdict_label, verdict_style = _compute_verdict(
+        verdict_label, verdict_style = (verdict or _compute_verdict)(
             verdict_action,
             scan_map.get(pid),
         )
@@ -3071,11 +3258,11 @@ def _echo_claudecode_install_note(source_path: str, plugin_name: str, *, only_cl
 
     Claude Code loads only plugins it installed from a marketplace (listed in
     installed_plugins.json), so the copy in its plugin cache is scanned but
-    neither loaded nor shown by plugin list.
+    not loaded; plugin list shows it as disabled (GAP-0017).
     """
     click.secho(
         "  Claude Code loads only plugins installed from a marketplace, so it will not load "
-        "this copy and plugin list will not show it.",
+        "this copy; plugin list shows it as disabled.",
         fg="yellow",
     )
     if not os.path.isfile(os.path.join(source_path, ".claude-plugin", "plugin.json")):
@@ -3124,6 +3311,36 @@ def _list_hermes_plugins() -> list[dict[str, Any]]:
                 "host_path": source if is_path else "",
             }
         )
+    return rows
+
+
+def _claude_cache_copy_rows(dirs: list[str], claimed: PluginInstallClaims) -> list[dict[str, Any]]:
+    """Rows for plugins ``plugin install`` copied into a Claude cache (GAP-0017).
+
+    Claude Code does not load such a copy, so the row is disabled and its
+    origin says so; the scan and actions maps give it its install verdict.
+    """
+    rows: list[dict[str, Any]] = []
+    for d in dirs:
+        if os.path.basename(os.path.normpath(d)).casefold() != "cache":
+            continue
+        for copy in discover_claude_cache_copies(d):
+            if not claimed.add(copy.id, copy.path, d):
+                continue
+            row: dict[str, Any] = {
+                "id": copy.id,
+                "name": copy.name,
+                "description": copy.description,
+                "version": copy.version,
+                "origin": "copy, not loaded by Claude Code",
+                "enabled": False,
+                "source": "host:claudecode",
+                "host_path": copy.path,
+                "cached": True,
+            }
+            if copy.manifest:
+                row["manifest"] = copy.manifest
+            rows.append(row)
     return rows
 
 
@@ -3193,6 +3410,8 @@ def _list_host_plugins(
             ):
                 continue
             out.append(entry)
+    if name in ("claudecode", "claude"):
+        out.extend(_claude_cache_copy_rows(dirs, claimed))
     if name == "opencode":
         from defenseclaw.inventory.claw_inventory import _opencode_config_plugin_rows
 
@@ -3782,7 +4001,7 @@ def _resolve_plugin_quarantine_restore_scopes(
     return [("", global_entry)]
 
 
-def _quarantined_plugin_alias(pe: Any, name: str, connector: str) -> str:
+def _quarantined_plugin_alias(app: AppContext, pe: Any, name: str, connector: str) -> str:
     """Map a listed name (folder or nested id) to its quarantine key.
 
     GAP-2163: quarantine is keyed by manifest ID, but Hermes lists the folder
@@ -3792,15 +4011,55 @@ def _quarantined_plugin_alias(pe: Any, name: str, connector: str) -> str:
     wanted = os.path.normpath((name or "").strip().strip("/\\"))
     if not wanted or wanted in (".", ".."):
         return ""
+    from defenseclaw.enforce.plugin_enforcer import claude_cache_plugin_key
+
     hits = {
         entry.target_name
         for entry in pe.list_by_type("plugin")
         if entry.actions.file == "quarantine"
         and entry.source_path
         and (not connector or entry.connector == connector)
-        and (os.sep + os.path.normpath(entry.source_path)).endswith(os.sep + wanted)
+        and (
+            (os.sep + os.path.normpath(entry.source_path)).endswith(os.sep + wanted)
+            or (not asset_lists.is_secure_client(app.cfg) and entry.connector == "claudecode" and
+                claude_cache_plugin_key(entry.source_path) == entry.target_name and
+                os.path.basename(os.path.dirname(entry.source_path)) == wanted)
+        )
     }
+    if connector in {"", "claudecode"} and not asset_lists.is_secure_client(app.cfg):
+        hits.update(
+            key for key in _marketplace_plugin_keys(app, wanted, connector or None)
+            if _plugin_quarantine_copy(app, key, "claudecode")
+        )
     return next(iter(hits)) if len(hits) == 1 else ""
+
+
+def _plugin_quarantine_copies(app: AppContext, plugin_name: str, connector: str) -> list[str]:
+    """Find current and recorded copies of one connector plugin."""
+    from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
+
+    enforcer = PluginEnforcer(app.cfg.quarantine_dir)
+    current = enforcer.quarantine_path(plugin_name, connector)
+    copies = []
+    if current and os.path.exists(current):
+        copies.append(current)
+    if not connector or app.store is None or asset_lists.is_secure_client(app.cfg):
+        return copies
+    for record in app.store.list_quarantine_records("plugin", plugin_name, connector):
+        if record.state not in {"pending", "active", "restoring"}:
+            continue
+        path = enforcer.legacy_quarantine_path(
+            plugin_name, connector, record.quarantine_path, record.original_path,
+        )
+        if path and path not in copies:
+            copies.append(path)
+    return copies
+
+
+def _plugin_quarantine_copy(app: AppContext, plugin_name: str, connector: str) -> str:
+    """Find a physical quarantine copy for notices and policy checks."""
+    copies = _plugin_quarantine_copies(app, plugin_name, connector)
+    return copies[0] if copies else ""
 
 
 def _hermes_listed_id(path: str, connector: str) -> str:
@@ -3993,6 +4252,44 @@ def _plugin_only_allow_entry(app: AppContext, pe, plugin_name: str, connector: s
     return allowed and not restrictive
 
 
+def _marketplace_plugin_keys(app: AppContext, plugin_name: str, connector: str | None) -> list[str]:
+    """The ``name@marketplace`` keys that hold enforcement state for a bare plugin name.
+
+    The install watcher keys a Claude Code marketplace plugin as
+    ``<name>@<marketplace>``, while ``plugin list`` shows ``<name>``, so
+    ``plugin unblock <name>`` found nothing to clear (GAP-1911).
+    """
+    if app.store is None or "@" in plugin_name:
+        return []
+    rows = app.store.list_actions_by_type("plugin", connector)
+    keys = {
+        row.target_name for row in rows
+        if row.target_name.startswith(plugin_name + "@") and not row.actions.is_empty()
+    }
+    if not asset_lists.is_secure_client(app.cfg) and connector in {None, "", "claudecode"}:
+        from defenseclaw.enforce.plugin_enforcer import claude_cache_plugin_key
+
+        keys.update(
+            record.target_name
+            for record in app.store.list_quarantine_records("plugin")
+            if record.target_name.startswith(plugin_name + "@")
+            and "claudecode" in record.connectors
+            and record.state in {"pending", "active", "restoring"}
+            and claude_cache_plugin_key(record.original_path) == record.target_name
+            and _plugin_quarantine_copy(app, record.target_name, "claudecode")
+        )
+    return sorted(keys)
+
+
+def _unblock_marketplace_copies(app: AppContext, plugin_name: str, connector_flag: str, connector: str | None) -> bool:
+    """Unblock every ``name@marketplace`` key of a bare name (GAP-1911); False when there is none."""
+    keys = _marketplace_plugin_keys(app, plugin_name, connector)
+    ctx = click.get_current_context()
+    for key in keys:
+        ctx.invoke(unblock, name=key, connector_flag=connector_flag)
+    return bool(keys)
+
+
 def _plugin_unblock_line(plugin_name: str, connector: str, only_allow: bool) -> str:
     # GAP-2273: same wording as mcp unblock (GAP-2225).
     scope = f" ({connector})" if connector else " (every connector)"
@@ -4001,17 +4298,23 @@ def _plugin_unblock_line(plugin_name: str, connector: str, only_allow: bool) -> 
     return f"[plugin] Unblocked {plugin_name!r}{scope}."
 
 
-def _plugin_unblock_followup(plugin_name: str, connector: str, all_only_allow: bool) -> None:
+def _plugin_unblock_followup(app: AppContext, plugin_name: str, connector: str, all_only_allow: bool) -> None:
     import shlex
 
     if not all_only_allow:
         click.echo(_PLUGIN_UNBLOCK_NOTE)
-        return
-    cmd = f"defenseclaw plugin scan {shlex.quote(plugin_name)}"
-    if connector:
-        cmd += f" --connector {connector}"
-    click.echo("  Its scan verdict applies again.")
-    click.echo(f"  To scan it now, run: {cmd}")
+    else:
+        cmd = f"defenseclaw plugin scan {shlex.quote(plugin_name)}"
+        if connector:
+            cmd += f" --connector {connector}"
+        click.echo("  Its scan verdict applies again.")
+        click.echo(f"  To scan it now, run: {cmd}")
+    scopes = [connector] if connector else _active_plugin_connectors(app)
+    if any(_plugin_quarantine_copy(app, plugin_name, scope) for scope in scopes):
+        cmd = f"defenseclaw plugin restore {shlex.quote(plugin_name)}"
+        if connector:
+            cmd += f" --connector {connector}"
+        click.echo(f"  A quarantined copy remains. To restore it, run: {cmd}")
 
 
 @plugin.command()
@@ -4043,12 +4346,17 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
             or app.store.has_action("plugin", plugin_name, "runtime", "disable", connector)
         )
         if not has_state:
+            if _unblock_marketplace_copies(app, plugin_name, connector_flag, connector):
+                return
             click.echo(f"[plugin] {plugin_name!r} has no enforcement state to clear for {connector}")
+            if _plugin_quarantine_copy(app, plugin_name, connector):
+                _plugin_unblock_followup(app, plugin_name, connector, False)
             return
         only_allow = _plugin_only_allow_entry(app, pe, plugin_name, connector)
         pe.remove_action_for_connector("plugin", plugin_name, connector)
+        _unblock_marketplace_copies(app, plugin_name, connector_flag, connector)
         click.secho(_plugin_unblock_line(plugin_name, connector, only_allow), fg="green")
-        _plugin_unblock_followup(plugin_name, connector, only_allow)
+        _plugin_unblock_followup(app, plugin_name, connector, only_allow)
         if app.logger:
             saved_change_audit(app.logger).log_action(
                 "plugin-unblock",
@@ -4083,11 +4391,12 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
             pe.remove_action_for_connector("plugin", plugin_name, target_connector)
         if has_unscoped_state:
             pe.remove_action("plugin", plugin_name)
+        _unblock_marketplace_copies(app, plugin_name, connector_flag, None)
         for scope in scopes:
             click.secho(_plugin_unblock_line(plugin_name, scope, only_allow[scope]), fg="green")
         only_one = len(owners) == 1 and not has_unscoped_state
         _plugin_unblock_followup(
-            plugin_name,
+            app, plugin_name,
             owners[0] if only_one else "",
             bool(scopes) and all(only_allow.values()),
         )
@@ -4106,13 +4415,18 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
         or app.store.has_action("plugin", plugin_name, "runtime", "disable")
     )
     if not has_state:
+        if _unblock_marketplace_copies(app, plugin_name, connector_flag, None):
+            return
         click.echo(f"[plugin] {plugin_name!r} has no enforcement state to clear")
+        if any(_plugin_quarantine_copy(app, plugin_name, scope) for scope in _active_plugin_connectors(app)):
+            _plugin_unblock_followup(app, plugin_name, "", False)
         return
 
     only_allow = _plugin_only_allow_entry(app, pe, plugin_name, "")
     pe.remove_action("plugin", plugin_name)
+    _unblock_marketplace_copies(app, plugin_name, connector_flag, None)
     click.secho(_plugin_unblock_line(plugin_name, "", only_allow), fg="green")
-    _plugin_unblock_followup(plugin_name, "", only_allow)
+    _plugin_unblock_followup(app, plugin_name, "", only_allow)
     if app.logger:
         saved_change_audit(app.logger).log_action("plugin-unblock", plugin_name, "manual unblock via CLI")
 
@@ -4150,19 +4464,22 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
 
     # A quarantined copy is absent from installed directories. Allowing it now
     # would create a name-only rule and clear the journal needed by restore.
-    from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
-
-    quarantines = PluginEnforcer(app.cfg.quarantine_dir)
     scopes = [connector_scope] if connector_scope else _active_plugin_connectors(app)
     scopes = [*scopes, ""]  # Legacy/global quarantine slot.
+    quarantine_names = {plugin_name}
+    if not asset_lists.is_secure_client(app.cfg):
+        quarantine_names.update(_marketplace_plugin_keys(app, plugin_name, connector_scope or None))
     journal_quarantine = any(
-        entry.target_name == plugin_name
+        entry.target_name in quarantine_names
         and entry.actions.file == "quarantine"
         and (not connector_scope or entry.connector in ("", connector_scope))
         for entry in pe.list_by_type("plugin")
     )
     if not asset_lists.is_secure_client(app.cfg) and (
-        journal_quarantine or any(quarantines.is_quarantined(plugin_name, scope) for scope in scopes)
+        journal_quarantine or any(
+            _plugin_quarantine_copy(app, key, scope)
+            for key in quarantine_names for scope in scopes
+        )
     ):
         raise click.ClickException(
             f"{plugin_name!r} is quarantined; restore it before allowing the installed copy"
@@ -4257,7 +4574,7 @@ _PLUGIN_RUNTIME_PROBE_CONNECTORS = {"claudecode"}
 def _normalize_runtime_connector(connector: str) -> str:
     from defenseclaw import connector_paths
 
-    return connector_paths.normalize(connector or "openclaw")
+    return connector_paths.normalize(connector)
 
 
 def _plugin_runtime_probe_enforced(connector: str) -> bool:
@@ -4475,6 +4792,45 @@ def enable(app: AppContext, name: str, connector_flag: str) -> None:
         )
 
 
+def _claude_show_quarantined_disabled(plugin_name: str, quarantine_dir: str, connector: str) -> None:
+    """Claude Code lists a quarantined plugin as disabled (rel-1-0-6:GAP-0289)."""
+    if connector != "claudecode":
+        return
+    from defenseclaw.enforce import claude_plugin_enablement
+
+    try:
+        keys = claude_plugin_enablement.disable_for_quarantine(plugin_name, quarantine_dir)
+    except claude_plugin_enablement.SettingsNotChangedError as exc:
+        click.echo(
+            f"[plugin] Claude Code settings: {exc}; 'claude plugin list' may still show "
+            f"{plugin_name!r} enabled, the hook still refuses it"
+        )
+        return
+    except (OSError, claude_plugin_enablement.MCPWriteUnsupportedError) as exc:
+        ux.warn(f"could not mark {plugin_name!r} disabled in Claude Code settings: {exc}; the hook still refuses it")
+        return
+    for key in keys:
+        click.echo(f"[plugin] {key} disabled in Claude Code settings; 'plugin restore' enables it again")
+
+
+def _claude_show_restored_enabled(plugin_name: str, quarantine_dir: str, connector: str) -> None:
+    """Restore enables again what quarantine disabled in Claude Code (GAP-0289)."""
+    if connector != "claudecode":
+        return
+    from defenseclaw.enforce import claude_plugin_enablement
+
+    try:
+        keys = claude_plugin_enablement.restore_after_quarantine(plugin_name, quarantine_dir)
+    except claude_plugin_enablement.SettingsNotChangedError as exc:
+        click.echo(f"[plugin] Claude Code settings: {exc}; enable {plugin_name!r} there yourself if it shows disabled")
+        return
+    except (OSError, claude_plugin_enablement.MCPWriteUnsupportedError) as exc:
+        ux.warn(f"could not enable {plugin_name!r} again in Claude Code settings: {exc}")
+        return
+    for key in keys:
+        click.echo(f"[plugin] {key} enabled again in Claude Code settings")
+
+
 # ---------------------------------------------------------------------------
 # plugin quarantine
 # ---------------------------------------------------------------------------
@@ -4568,6 +4924,7 @@ def quarantine(app: AppContext, name: str, reason: str, connector_flag: str) -> 
             for target_connector in quarantined_connectors:
                 pe.quarantine_for_connector("plugin", plugin_name, target_connector, reason)
                 click.echo(f"[plugin] {plugin_name!r} is already quarantined (connector={target_connector})")
+                _claude_show_quarantined_disabled(plugin_name, app.cfg.quarantine_dir, target_connector)
             return
         click.echo(f"error: could not locate plugin {plugin_name!r}", err=True)
         raise SystemExit(1)
@@ -4596,6 +4953,7 @@ def quarantine(app: AppContext, name: str, reason: str, connector_flag: str) -> 
         else:
             pe.quarantine("plugin", plugin_name, reason)
             pe.set_source_path("plugin", plugin_name, plugin_path)
+        _claude_show_quarantined_disabled(plugin_name, app.cfg.quarantine_dir, target_connector)
 
         if app.logger:
             saved_change_audit(app.logger).log_action(
@@ -4633,7 +4991,7 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
     alias_scope = _resolve_connector_scope(app, connector_flag) if connector_flag else ""
     if "/" in name.strip("/\\"):
         # GAP-2464: "web/x" names the category plugin itself, not a flat "x".
-        plugin_name = _quarantined_plugin_alias(pe, name, alias_scope) or plugin_name
+        plugin_name = _quarantined_plugin_alias(app, pe, name, alias_scope) or plugin_name
     targets = _resolve_plugin_quarantine_restore_scopes(
         app,
         pe,
@@ -4650,25 +5008,34 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
 
     pe_enforcer = PluginEnforcer(app.cfg.quarantine_dir)
 
-    def quarantined_targets() -> list[tuple[str, Any, str]]:
-        """(action scope, entry, connector folder holding the copy)."""
+    def quarantined_targets() -> list[tuple[str, Any, str, str]]:
+        """(action scope, entry, connector folder, copy path)."""
         scoped = {target_connector for target_connector, _ in targets}
         found = []
         for target_connector, entry in targets:
-            slot = target_connector if pe_enforcer.is_quarantined(plugin_name, target_connector) else None
+            path = _plugin_quarantine_copy(app, plugin_name, target_connector)
+            slot = target_connector if path else None
             if slot is None and not target_connector and entry is not None and entry.source_path:
                 # GAP-2464: the gateway watcher records a global action but
                 # keeps the copy under the connector it watches for.
                 owner = _connector_for_plugin_path(app, entry.source_path)
-                if owner and owner not in scoped and pe_enforcer.is_quarantined(plugin_name, owner):
+                if owner and owner not in scoped and (path := _plugin_quarantine_copy(app, plugin_name, owner)):
                     slot = owner
+            if slot is None and not target_connector and entry is None:
+                candidates = [
+                    (owner, copy)
+                    for owner in _active_plugin_connectors(app)
+                    if (copy := _plugin_quarantine_copy(app, plugin_name, owner))
+                ]
+                if len(candidates) == 1:
+                    slot, path = candidates[0]
             if slot is not None:
-                found.append((target_connector, entry, slot))
+                found.append((target_connector or (slot if entry is None else ""), entry, slot, path))
         return found
 
     existing_targets = quarantined_targets()
     if not existing_targets:
-        alias = _quarantined_plugin_alias(pe, name, alias_scope)
+        alias = _quarantined_plugin_alias(app, pe, name, alias_scope)
         if alias and alias != plugin_name:
             plugin_name = alias
             targets = _resolve_plugin_quarantine_restore_scopes(app, pe, plugin_name, connector_flag)
@@ -4677,10 +5044,18 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
         click.echo(f"error: {plugin_name!r} is not quarantined", err=True)
         raise SystemExit(1)
 
-    for resolved_connector, entry, slot_connector in existing_targets:
+    for resolved_connector, entry, slot_connector, slot_path in existing_targets:
+        records = [
+            record for record in app.store.list_quarantine_records("plugin", plugin_name, slot_connector)
+            if record.quarantine_path == slot_path and record.state in {"pending", "active", "restoring"}
+        ] if app.store is not None else []
+        record = records[0] if len(records) == 1 and not asset_lists.is_secure_client(app.cfg) else None
         target_restore_path = restore_path
         if not target_restore_path:
-            if entry is None or not entry.source_path:
+            target_restore_path = record.original_path if record is not None else (
+                entry.source_path if entry is not None else ""
+            )
+            if not target_restore_path:
                 ux.echo(
                     f"error: no stored path for {plugin_name!r}"
                     + (f" on connector={resolved_connector}" if resolved_connector else "")
@@ -4688,7 +5063,6 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
                     err=True,
                 )
                 raise SystemExit(1)
-            target_restore_path = entry.source_path
 
         allowed_roots = (
             _plugin_roots_for_connector(app, resolved_connector) if resolved_connector else _all_active_plugin_dirs(app)
@@ -4734,6 +5108,10 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
             target_restore_path,
             allowed_roots=allowed_roots,
             connector=slot_connector,
+            quarantine_path=(
+                slot_path if slot_path != pe_enforcer.quarantine_path(plugin_name, slot_connector) else ""
+            ),
+            identity_path=record.original_path if record is not None else "",
         ):
             click.echo(
                 f"error: restore failed for {plugin_name!r}"
@@ -4749,12 +5127,17 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
         )
         click.echo(f"[plugin] {_plugin_label(listed, plugin_name)} restored to {target_restore_path}{suffix}")
 
-        if resolved_connector:
+        if record is not None:
+            app.store.complete_quarantine_restore(record.id, target_restore_path)
+        elif resolved_connector:
             pe.clear_quarantine_for_connector("plugin", plugin_name, resolved_connector)
-            pe.set_source_path("plugin", plugin_name, target_restore_path, resolved_connector)
         else:
             pe.clear_quarantine("plugin", plugin_name)
+        if resolved_connector:
+            pe.set_source_path("plugin", plugin_name, target_restore_path, resolved_connector)
+        else:
             pe.set_source_path("plugin", plugin_name, target_restore_path)
+        _claude_show_restored_enabled(plugin_name, app.cfg.quarantine_dir, slot_connector)
 
         if app.logger:
             saved_change_audit(app.logger).log_action(
@@ -4916,19 +5299,18 @@ def _plugin_info_card(
         except Exception:
             scoped_action = None
 
-    from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
-
-    pe_enforcer = PluginEnforcer(app.cfg.quarantine_dir)
-    quarantined = pe_enforcer.is_quarantined(plugin_name, connector)
+    quarantined_path = _plugin_quarantine_copy(app, plugin_name, connector)
+    quarantined = bool(quarantined_path)
     action_name = plugin_name
     display_name = plugin_name
     if info_map is None and not quarantined and connector and app.store is not None:
         from defenseclaw.enforce import PolicyEngine
 
-        alias = _quarantined_plugin_alias(PolicyEngine(app.store, app.cfg), plugin_name, connector)
-        if alias and alias != plugin_name and pe_enforcer.is_quarantined(alias, connector):
+        alias = _quarantined_plugin_alias(app, PolicyEngine(app.store, app.cfg), plugin_name, connector)
+        if alias and alias != plugin_name and (alias_path := _plugin_quarantine_copy(app, alias, connector)):
             action_name = alias
             quarantined = True
+            quarantined_path = alias_path
             if scan_entry is None:
                 scan_entry = _latest_plugin_scan_for_connector(app, alias, connector)
     if quarantined and connector:
@@ -4962,7 +5344,14 @@ def _plugin_info_card(
     if connector:
         info_map["connector"] = connector
     if scan_entry is not None:
-        info_map["scan"] = scan_entry
+        # GAP-2123: the private stored rule ids never reach the output, and
+        # the Verdict is the word plugin list shows for this scan (the
+        # GAP-1389 judge-only pre-step included); an action has its own line.
+        info_map["scan"] = _public_scan_entry(scan_entry)
+        if not scan_entry.get("clean"):
+            label, _style = _plugin_list_verdict_for(app, connector)(None, scan_entry)
+            if label != "-":
+                info_map["scan"]["verdict"] = label
     if action_name in actions_map:
         ae = actions_map[action_name]
         if not ae.actions.is_empty():
@@ -4970,9 +5359,7 @@ def _plugin_info_card(
     if action_name != info_map["name"]:
         info_map["quarantine_id"] = action_name
     if quarantined:
-        qpath = pe_enforcer._quarantine_path(action_name, connector)
-        if qpath:
-            info_map["quarantine_path"] = qpath
+        info_map["quarantine_path"] = quarantined_path
     info_map["quarantined"] = quarantined
     info_map.setdefault("installed", False)
     return info_map
@@ -5021,7 +5408,7 @@ def _print_plugin_info_card(
             click.echo("  Findings: 0 findings")
         else:
             sev = scan_data.get("max_severity", "INFO")
-            verdict, _style = _compute_verdict(None, scan_data)
+            verdict = scan_data.get("verdict") or _compute_verdict(None, scan_data)[0]
             if verdict == "-":
                 verdict = str(sev).lower()
             click.secho(f"  Verdict:  {verdict}", fg=_SCAN_SEVERITY_COLORS.get(sev))
@@ -5076,7 +5463,80 @@ def _plugin_scan_payload_from_latest(ls: dict[str, Any]) -> dict[str, Any]:
     scanned_at = _format_scan_time(ls.get("timestamp"))
     if scanned_at:
         payload["scanned_at"] = scanned_at
+    findings = _scan_rule_findings(ls.get("raw_json"))
+    if findings is not None:
+        payload["_findings"] = findings
     return payload
+
+
+def _scan_rule_findings(raw_json: Any) -> list[tuple[str, str]] | None:
+    """(rule_id, severity) of each finding of a stored scan, or None when unreadable."""
+    try:
+        data = json.loads(raw_json) if isinstance(raw_json, str) and raw_json else None
+    except (TypeError, ValueError):
+        return None
+    findings = data.get("findings") if isinstance(data, dict) else None
+    if not isinstance(findings, list):
+        return None
+    return [
+        (str(f.get("rule_id") or ""), str(f.get("severity") or ""))
+        for f in findings if isinstance(f, dict)
+    ]
+
+
+def _public_scan_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in entry.items() if not k.startswith("_")}
+
+
+def _plugin_list_verdict_for(app: AppContext, connector: str):
+    """The verdict plugin list shows (GAP-2116, the plugin form of GAP-1429).
+
+    An enforcement action wins; otherwise what admission does with the scan:
+    the plugin admission policy's action for its severity, after the GAP-1389
+    judge-only pre-step the watcher and plugin install apply. A plugin the
+    watcher admitted with a judge-only HIGH warning reads "warning", not
+    "rejected"; a severity the policy refuses still reads "rejected".
+    """
+    from datetime import datetime, timezone
+
+    from defenseclaw.enforce.admission import (
+        _judge_only_plugin_high,
+        action_blocks,
+        compile_admission,
+        effective_action_for,
+    )
+    from defenseclaw.models import Finding, ScanResult
+
+    try:
+        policy = compile_admission(app.cfg, "plugin")
+    except Exception:  # noqa: BLE001 - the list falls back to severity labels
+        policy = None
+
+    def verdict(action_entry: Any, scan_entry: dict[str, Any] | None) -> tuple[str, str]:
+        label, style = _compute_verdict(action_entry, scan_entry)
+        if policy is None or not scan_entry or (action_entry is not None and not action_entry.actions.is_empty()):
+            return label, style
+        severity = str(scan_entry.get("max_severity") or "").upper()
+        if severity not in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
+            return label, style
+        findings = scan_entry.get("_findings")
+        if severity == "HIGH" and isinstance(findings, list):
+            result = ScanResult(
+                scanner="plugin-scanner", target=str(scan_entry.get("target") or ""),
+                timestamp=datetime.now(timezone.utc),
+                findings=[Finding(id=f"f{i}", severity=sev, title=rule, scanner="plugin-scanner", rule_id=rule)
+                          for i, (rule, sev) in enumerate(findings)],
+            )
+            if _judge_only_plugin_high(app.cfg, policy, "plugin", connector, result, severity):
+                return "warning", "yellow"
+        action, allow = effective_action_for(policy, severity=severity, scanner="plugin-scanner")
+        if action_blocks(action):
+            return "rejected", "red"
+        if allow:
+            return "allowed", "green"
+        return "warning", "yellow"
+
+    return verdict
 
 
 def _format_scan_time(ts: Any) -> str:

@@ -29,38 +29,18 @@ func TestCodexPerUserWindowsSetupMovesHooksOutOfIgnoredManagedLayer(t *testing.T
 			// The earlier release's Setup ran with this data dir, so its
 			// managed-file backup is present.
 			name: "with setup backup",
-			seed: func(t *testing.T, conn *CodexConnector, _, _ string, legacy SetupOpts) {
-				if err := conn.Setup(context.Background(), legacy); err != nil {
-					t.Fatalf("seed Setup in the managed layer: %v", err)
+			seed: func(t *testing.T, _ *CodexConnector, managedPath, hooksDir string, legacy SetupOpts) {
+				if err := captureManagedFileBackup(legacy.DataDir, "codex", codexManagedConfigLogicalName, managedPath); err != nil {
+					t.Fatal(err)
 				}
+				seedWindowsIgnoredManagedHooks(t, managedPath, hooksDir)
 			},
 		},
 		{
 			// No backup survived: the owned matrix is found by its command.
 			name: "without setup backup",
 			seed: func(t *testing.T, _ *CodexConnector, managedPath, hooksDir string, _ SetupOpts) {
-				hooks := map[string]interface{}{}
-				if err := mergeOwnedCodexHooks(
-					hooks,
-					managedPath,
-					filepath.Join(hooksDir, "codex-hook.sh"),
-					hooksDir,
-					SetupOpts{},
-					true,
-					codexHookGroups,
-				); err != nil {
-					t.Fatalf("seed owned managed hooks: %v", err)
-				}
-				raw, err := toml.Marshal(map[string]interface{}{
-					"operator_policy": map[string]interface{}{"mode": "strict"},
-					"hooks":           hooks,
-				})
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(managedPath, raw, 0o600); err != nil {
-					t.Fatal(err)
-				}
+				seedWindowsIgnoredManagedHooks(t, managedPath, hooksDir)
 			},
 		},
 	} {
@@ -126,5 +106,26 @@ func TestCodexPerUserWindowsSetupMovesHooksOutOfIgnoredManagedLayer(t *testing.T
 				t.Fatalf("HookCapabilities ConfigPath = %q, want %q", got, configPath)
 			}
 		})
+	}
+}
+
+func seedWindowsIgnoredManagedHooks(t *testing.T, managedPath, hooksDir string) {
+	t.Helper()
+	hooks := map[string]interface{}{}
+	if err := mergeOwnedCodexHooks(
+		hooks, managedPath, filepath.Join(hooksDir, "codex-hook.sh"), hooksDir,
+		SetupOpts{}, true, codexHookGroups,
+	); err != nil {
+		t.Fatalf("seed owned managed hooks: %v", err)
+	}
+	raw, err := toml.Marshal(map[string]interface{}{
+		"operator_policy": map[string]interface{}{"mode": "strict"},
+		"hooks":           hooks,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(managedPath, raw, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

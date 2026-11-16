@@ -19,6 +19,13 @@ func TestStandaloneGatewayHealthWarnings(t *testing.T) {
 		!strings.Contains(result.Warnings[1].Message, "otlp: timeout") {
 		t.Fatalf("warnings = %+v", result.Warnings)
 	}
+	// Setup puts no DefenseClaw command on PATH, so the hint names the
+	// gateway by its full path, not a bare `defenseclaw-gateway status`
+	// (cowork-1-0-8 GAP-0081).
+	if hint := result.Warnings[1].Message; !strings.Contains(hint, "inspect `& 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-gateway.exe' status` or") ||
+		strings.Contains(hint, "`defenseclaw-gateway status`") {
+		t.Fatalf("optional destination hint = %q", hint)
+	}
 	// Without the gateway credential only their number shows (GAP-1268).
 	result = enterprisestatus.New("status", "standalone", "windows", "test")
 	appendStandaloneGatewayWarnings(result, []byte(`{"profile_assignment_warning_count":1,"profile_warning_count":2}`), nil)
@@ -43,5 +50,38 @@ func TestStandaloneGatewayHealthNamesFailingJudge(t *testing.T) {
 	if len(result.Warnings) != 1 || result.Warnings[0].Code != "judge_failing" ||
 		!strings.Contains(result.Warnings[0].Message, "Bedrock returned 403") {
 		t.Fatalf("warnings = %+v, want one judge_failing naming the last error", result.Warnings)
+	}
+}
+
+// F11: Windows status and verify reported ai_defense "ok" from gateway
+// readiness alone, so a key Cisco AI Defense rejected still read "ok". An
+// enabled AI Defense now starts "unknown" and the gateway's own /health
+// inspection posture replaces it, with the ai_defense_unavailable warning
+// Linux and macOS give; a deployment without AI Defense is left as it was.
+func TestStandaloneGatewayHealthReportsTheAIDefensePosture(t *testing.T) {
+	for _, test := range []struct {
+		name, before, health, want string
+		warns                      bool
+	}{
+		{"rejected key", "unknown", `{"inspection":{"local":"active","ai_defense":"unavailable:auth_failed"}}`, "unavailable:auth_failed", true},
+		{"unreachable", "unknown", `{"inspection":{"local":"active","ai_defense":"unavailable:unreachable"}}`, "unavailable:unreachable", true},
+		{"key not yet used", "unknown", `{"inspection":{"local":"active","ai_defense":"unknown"}}`, "unknown", false},
+		{"key accepted", "unknown", `{"inspection":{"local":"active","ai_defense":"ok"}}`, "ok", false},
+		{"gateway without the posture", "unknown", `{}`, "unknown", false},
+		{"ai defense not enabled", "disabled", `{"inspection":{"local":"active","ai_defense":"unavailable:auth_failed"}}`, "disabled", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result := enterprisestatus.New("status", "standalone", "windows", "test")
+			result.Inspection = enterprisestatus.Inspection{Local: "active", AIDefense: test.before}
+			appendStandaloneGatewayWarnings(result, []byte(test.health), nil)
+			if result.Inspection.AIDefense != test.want || result.Inspection.Local != "active" {
+				t.Fatalf("inspection = %+v, want ai_defense %q", result.Inspection, test.want)
+			}
+			warned := len(result.Warnings) == 1 && result.Warnings[0].Code == enterprisestatus.CodeAIDefenseUnavailable &&
+				strings.Contains(result.Warnings[0].Message, test.want)
+			if warned != test.warns || (!test.warns && len(result.Warnings) != 0) {
+				t.Fatalf("warnings = %+v, want ai_defense_unavailable: %t", result.Warnings, test.warns)
+			}
+		})
 	}
 }

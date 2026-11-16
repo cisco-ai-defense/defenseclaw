@@ -1,3 +1,11 @@
-# An operator rule pack (rule_pack_dir in 0.8.x).
+# An operator rule pack (rule_pack_dir in 0.8.x). A 1.0 pack needs a
+# category and an enabled rule in every rule file.
 version: 1
-rules: []
+category: team
+rules:
+  - id: TEAM-MARKER
+    pattern: '(?i)dc-team-marker-[0-9]+'
+    title: Team marker
+    severity: HIGH
+    confidence: 0.5
+    tags: [team]

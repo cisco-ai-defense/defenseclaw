@@ -94,20 +94,42 @@ func TestConfigManagerHotBundleAuditWaitsForWriterAndEmitsOnce(t *testing.T) {
 	<-written
 	reloaded := make(chan error, 1)
 	go func() { reloaded <- mgr.ReloadAssets(context.Background(), "api:policy_reload") }()
-	<-applied
+	select {
+	case err := <-reloaded:
+		if err == nil || !strings.Contains(err.Error(), "activation_not_signed (signature)") {
+			t.Fatalf("reload before the bundle generation receipt = %v; want missing-trust refusal", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("reload while the bundle writer is paused did not refuse")
+	}
+	select {
+	case <-applied:
+		t.Fatal("unreceipted bundle bytes became active")
+	default:
+	}
 	close(release)
 	if err := <-writer; err != nil {
 		t.Fatal(err)
 	}
-	if err := <-reloaded; err != nil {
+	if err := mgr.ReloadAssets(context.Background(), "signed bundle generation ready"); err != nil {
 		t.Fatal(err)
+	}
+	select {
+	case <-applied:
+	default:
+		t.Fatal("receipted bundle bytes were not applied")
 	}
 	if current := mgr.Current(); current.Guardrail.BlockAt != "MEDIUM" || mgr.gen.Load() != 1 {
 		t.Fatalf("synchronous policy reload = generation %d, block_at %q", mgr.gen.Load(), current.Guardrail.BlockAt)
 	}
 	check := func(want int, id string, restart bool, changedPath string) {
 		t.Helper()
-		records := capture.snapshot()
+		var records []observability.Record
+		for _, record := range capture.snapshot() {
+			if record.EventName() == observability.EventName(observability.TelemetryEventConfigChangeApplied) {
+				records = append(records, record)
+			}
+		}
 		if len(records) != want {
 			t.Fatalf("audit records = %d, want %d", len(records), want)
 		}
@@ -183,18 +205,25 @@ func TestConfigManagerHotBundleAuditWaitsForWriterAndEmitsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(3, assetID, false, configDiffAssets)
-	if err := mgr.ReloadAssets(context.Background(), "bundle asset changed"); err != nil {
-		t.Fatal(err)
+	if err := mgr.ReloadAssets(context.Background(), "asset event after the bundle was applied"); err == nil ||
+		!strings.Contains(err.Error(), "signed policy bundle") {
+		t.Fatalf("unsigned asset reload after the bundle was applied = %v; want signed-bundle refusal", err)
 	}
 	check(3, assetID, false, configDiffAssets)
 	if err := logger.LogPolicyBundleReceipt("operator:manual-r3", audit.PolicyBundle{ID: hotID, Version: 2},
 		audit.PolicyBundleReceipt{ReceiptID: hotID, State: audit.PolicyBundleConfirmed,
-			ConfigGeneration: 2, EnforcingVersion: 2, Restart: false}); err != nil {
+			ConfigGeneration: 2, EnforcingVersion: 2, Restart: false}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	records := capture.snapshot()
-	if len(records) != 4 || records[3].EventName() != observability.EventName(observability.TelemetryEventConfigBundleReceipt) {
-		t.Fatalf("receipt produced %d records, want one separate config.bundle.receipt", len(records))
+	receipts := 0
+	for _, record := range records {
+		if record.EventName() == observability.EventName(observability.TelemetryEventConfigBundleReceipt) {
+			receipts++
+		}
+	}
+	if receipts != 1 {
+		t.Fatalf("receipt produced %d config.bundle.receipt records, want one", receipts)
 	}
 }
 
@@ -226,6 +255,15 @@ func TestConfigManagerHotPolicyOnlyBundleGenerationEventAudited(t *testing.T) {
 	}
 	initial.DeploymentMode = "managed_enterprise"
 	initial.Enterprise.Profile = "standalone"
+	// The gateway boots a managed standalone computer from a file that is
+	// already managed, so its omitted paths take the standalone defaults (on
+	// Windows an omitted policy_dir is cleared: standalonePolicyDirDefault).
+	// Re-base the patched snapshot as the reload candidate is re-based, or
+	// the startup reconcile sees a policy_dir change the boot never made and
+	// refuses it as an unrecorded edit.
+	if err := config.ApplyRuntimeV8DataDirDefaultsFromBytes(initial, path, raw, initial.DataDir); err != nil {
+		t.Fatal(err)
+	}
 	_, logger := newNativeSkillRuntimeTestStore(t)
 	capture := &captureJudgeRuntimeV8Emitter{}
 	logger.SetRuntimeV8Emitter(capture)

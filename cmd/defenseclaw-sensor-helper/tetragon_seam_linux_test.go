@@ -15,6 +15,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -28,10 +29,14 @@ import (
 type recordingSink struct {
 	hits   []kernelpolicy.Hit
 	losses int
+	execs  []kernelpolicy.Exec
+	exits  []int
 }
 
-func (s *recordingSink) RecordHit(h kernelpolicy.Hit) { s.hits = append(s.hits, h) }
-func (s *recordingSink) RecordLoss()                  { s.losses++ }
+func (s *recordingSink) RecordHit(h kernelpolicy.Hit)   { s.hits = append(s.hits, h) }
+func (s *recordingSink) RecordLoss()                    { s.losses++ }
+func (s *recordingSink) RecordExec(e kernelpolicy.Exec) { s.execs = append(s.execs, e) }
+func (s *recordingSink) RecordExit(pid int, _ string)   { s.exits = append(s.exits, pid) }
 
 // The cleanup's exit code reaches the command's exit status: the lifecycle
 // tells "Tetragon did not answer" (3) from a failed cleanup (1).
@@ -113,6 +118,30 @@ func TestHitTapCountsControlsEventsAndLoss(t *testing.T) {
 	tap(plane.KernelBatch{ThrottleStop: true})
 	if sink.losses != 2 {
 		t.Fatalf("a throttle start and a drop are loss, a stop is not: %d", sink.losses)
+	}
+}
+
+// GAP-0166: the tap hands the reconciler Tetragon's own host process starts
+// and exits, which is how it tells a session Tetragon marked from one that
+// only looks right in /proc. A container's process, or an event of another
+// source, is not one.
+func TestHitTapForwardsTetragonHostStartsAndExits(t *testing.T) {
+	sink := &recordingSink{}
+	tap := hitTap(sink)
+	at := time.Now()
+	exe := "/opt/agents/bin/claude"
+	tap(plane.KernelBatch{Events: []plane.Event{
+		{Kind: plane.KindExec, Source: plane.SourceTetragon, PID: 4010, ExecID: "e1", Exe: exe, At: at},
+		{Kind: plane.KindExec, Source: plane.SourceTetragon, PID: 4011, Exe: exe, ContainerID: "c0ffee"},
+		{Kind: plane.KindExec, Source: plane.SourceFanotify, PID: 4012, Exe: exe},
+		{Kind: plane.KindExec, Source: plane.SourceTetragon, PID: 1, Exe: "/sbin/init"},
+		{Kind: plane.KindExit, Source: plane.SourceTetragon, PID: 4010, ExecID: "e1"},
+	}})
+	if len(sink.execs) != 1 || sink.execs[0] != (kernelpolicy.Exec{PID: 4010, ExecID: "e1", Exe: exe, At: at}) {
+		t.Fatalf("starts = %+v", sink.execs)
+	}
+	if fmt.Sprint(sink.exits) != "[4010]" {
+		t.Fatalf("exits = %v", sink.exits)
 	}
 }
 

@@ -15,8 +15,9 @@ DOCS = ROOT / "docs-site" / "content" / "docs"
     [
         ("0430", ("get-started/upgrade.mdx", "../../../CHANGELOG.md"), ("LOW and INFO skill findings", "review queue")),
         ("0553", ("enterprise/lifecycle.mdx",), ("mismatched pack", "restart alone")),
-        ("0559", ("enterprise/configuration.mdx", "enterprise/machine-policy.mdx"), ("claudecode.enabled: false", "machine policy")),
-        ("0564", ("enterprise/ai-defense-key.mdx",), ("/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise secret status", "/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise secret remove")),
+        ("0559", ("enterprise/machine-policy.mdx",), ("claudecode.enabled: false", "machine policy")),
+        ("0564", ("enterprise/ai-defense-key.mdx",), ("/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise secret status",)),
+        ("0564", ("enterprise/ai-defense-key.mdx",), ("/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise secret remove",)),
         ("0565", ("enterprise/mdm/jamf.mdx", "enterprise/mdm/kandji.mdx", "enterprise/mdm/intune-macos.mdx", "enterprise/mdm/workspace-one.mdx"), ("uninstall removes this log",)),
         ("0568", ("enterprise/mdm/jamf.mdx", "enterprise/mdm/kandji.mdx", "enterprise/mdm/intune-macos.mdx", "enterprise/mdm/workspace-one.mdx"), ("stage-pack", "sha256:<digest>")),
         ("0585", ("enterprise/configuration.mdx", "reference/fail-modes.mdx"), ("hook_fail_mode: open", "fail-closed")),

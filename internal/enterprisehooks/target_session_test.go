@@ -33,3 +33,16 @@ func TestIsWindowsTargetSessionUnavailableRequiresTypedCause(t *testing.T) {
 		t.Fatal("message lookalike was downgraded to deferred session absence")
 	}
 }
+
+// GAP-0217: with the target signed out, the services session 0 was still
+// tried; its token query failed and the as-user MCP scan reported a token
+// error instead of "not signed in". Session 0 is never a user's session.
+func TestWindowsTargetSessionOrderNeverTriesTheServicesSession(t *testing.T) {
+	sessions := []windowsSessionState{{ID: 0, Disconnected: true}, {ID: 2, Active: true}, {ID: 0, Active: true}}
+	if got := fmt.Sprint(windowsTargetSessionOrder(sessions, true)); got != "[2]" {
+		t.Fatalf("signed-in order = %s, want [2]", got)
+	}
+	if got := fmt.Sprint(windowsTargetSessionOrder([]windowsSessionState{{ID: 0, Disconnected: true}}, true)); got != "[]" {
+		t.Fatalf("only session 0 = %s, want none", got)
+	}
+}

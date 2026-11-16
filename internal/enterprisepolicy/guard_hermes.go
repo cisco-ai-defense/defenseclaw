@@ -14,7 +14,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -286,18 +285,5 @@ func cleanHermesYAMLSource(scan *guardScan, source hookSource, backupDir string,
 	if err != nil {
 		return err
 	}
-	if err := backupUserFile(source.path, data, backupDir); err != nil {
-		return err
-	}
-	result.BackupDir = backupDir
-	info, err := os.Lstat(source.path)
-	if err != nil {
-		return err
-	}
-	if err := rewriteUserFile(source.path, rendered, info.Mode().Perm()); err != nil {
-		return err
-	}
-	result.Removed = append(result.Removed, removed...)
-	result.FilesTouch = appendUnique(result.FilesTouch, source.path)
-	return nil
+	return rewriteUserSource(req, source, data, rendered, removed, backupDir, result)
 }

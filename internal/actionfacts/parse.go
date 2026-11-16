@@ -16,6 +16,8 @@
 
 package actionfacts
 
+import "mvdan.cc/sh/v3/syntax"
+
 type parseOutput struct {
 	status           ParseStatus
 	dialect          Dialect
@@ -29,6 +31,11 @@ type parseOutput struct {
 	curlCapabilities []CurlCapability
 	// redirectTargets is set only by a top-level POSIX parse.
 	redirectTargets redirectTargetCapture
+	// shortCircuitLists maps the head statement of a && / || list to the
+	// ID of its first command (ShortCircuitListID).
+	shortCircuitLists map[*syntax.Stmt]int64
+	// POSIX exec redirects may persist a literal descriptor for later commands.
+	posixOpenFDs map[int64]string
 }
 
 func newParseOutput(dialect Dialect, startID int64) parseOutput {
@@ -283,6 +290,10 @@ func (o parseOutput) facts(tool, cwd string) Facts {
 }
 
 func (o parseOutput) factsWithContext(tool, cwd, activeHome string) Facts {
+	return o.factsWithWindowsShellCWD(tool, cwd, activeHome, false)
+}
+
+func (o parseOutput) factsWithWindowsShellCWD(tool, cwd, activeHome string, windowsShellCWD bool) Facts {
 	status := o.status
 	if status == "" {
 		status = StatusNotApplicable
@@ -293,7 +304,7 @@ func (o parseOutput) factsWithContext(tool, cwd, activeHome string) Facts {
 	}
 	commands := cloneCommands(o.commands)
 	paths := cloneSlice(o.paths)
-	normalizePathFactsForCommands(paths, cwd, activeHome, commands)
+	normalizePathFactsForCommandsInShell(paths, cwd, activeHome, commands, windowsShellCWD)
 	reconcileNormalizedDeviceWrites(commands, paths)
 	network := cloneSlice(o.network)
 	normalizeNetworkFacts(network)

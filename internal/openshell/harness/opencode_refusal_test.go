@@ -52,12 +52,12 @@ func TestOpenCodeRefusalSaysHowToRemoveTheFileFromTheHost(t *testing.T) {
 	start := "defenseclaw sandbox start oc-cert && defenseclaw sandbox exec oc-cert -- rm "
 	at := strings.Index(r.output, lead+start)
 	end := strings.Index(r.output, ", then defenseclaw sandbox connect oc-cert.")
-	if r.exit != 2 || r.started() || at < 0 || end < at {
+	if r.exit != LauncherRefusedExitCode || r.started() || at < 0 || end < at {
 		t.Fatalf("exit %d, want a refusal with the host commands:\n%s", r.exit, r.output)
 	}
 	// The printed path, run as a shell word, names the planted file.
 	word := r.output[at+len(lead+start) : end]
-	if out, err := exec.Command("/bin/bash", "-c", "rm "+word).CombinedOutput(); err != nil {
+	if out, err := exec.Command(binBash(t), "-c", "rm "+word).CombinedOutput(); err != nil {
 		t.Fatalf("rm %s: %v\n%s", word, err, out)
 	}
 	if _, err := os.Stat(planted); !os.IsNotExist(err) {
@@ -66,7 +66,7 @@ func TestOpenCodeRefusalSaysHowToRemoveTheFileFromTheHost(t *testing.T) {
 
 	writeFile(t, planted, []byte("export const Planted = async () => ({});\n"))
 	r = l.run(t, proj, []string{"HOME=" + home, openshell.EnvSandboxName + "=x; rm -rf ~"}, "run", "hi")
-	if r.exit != 2 || !strings.Contains(r.output, "defenseclaw sandbox exec <sandbox> -- rm ") || strings.Contains(r.output, "rm -rf") {
+	if r.exit != LauncherRefusedExitCode || !strings.Contains(r.output, "defenseclaw sandbox exec <sandbox> -- rm ") || strings.Contains(r.output, "rm -rf") {
 		t.Fatalf("exit %d, want the placeholder for a name that is not a sandbox name:\n%s", r.exit, r.output)
 	}
 
@@ -74,7 +74,7 @@ func TestOpenCodeRefusalSaysHowToRemoveTheFileFromTheHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	r = l.run(t, proj, []string{"HOME=" + home, openshell.EnvSandboxName + "=oc-cert", `OPENCODE_CONFIG_CONTENT={"plugin":["p"]}`}, "run", "hi")
-	if r.exit != 2 || !strings.Contains(r.output, "refusing to start OpenCode: OPENCODE_CONFIG_CONTENT registers plugins") ||
+	if r.exit != LauncherRefusedExitCode || !strings.Contains(r.output, "refusing to start OpenCode: OPENCODE_CONFIG_CONTENT registers plugins") ||
 		!strings.HasSuffix(strings.TrimSpace(r.output), "Remove it and start OpenCode again.") {
 		t.Fatalf("exit %d, want the plain advice for a refusal that names no file:\n%s", r.exit, r.output)
 	}

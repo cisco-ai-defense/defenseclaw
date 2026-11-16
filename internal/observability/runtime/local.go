@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"sync"
 	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -163,6 +164,22 @@ type localWriteCounters struct {
 	dropped   atomic.Uint64
 }
 
+type deadlineLossReportKey struct{}
+
+// WithDeadlineLossReporting marks hook persistence attempts whose deadline
+// must count as a lost local row even when it expires before the append.
+func WithDeadlineLossReporting(ctx context.Context) context.Context {
+	return context.WithValue(ctx, deadlineLossReportKey{}, true)
+}
+
+func deadlineLossReport(ctx context.Context, err error) bool {
+	if ctx == nil || ctx.Value(deadlineLossReportKey{}) != true {
+		return false
+	}
+	var pipelineErr *pipeline.Error
+	return errors.As(err, &pipelineErr) && pipelineErr.Code() == pipeline.ErrorContextDone
+}
+
 func (counters *localWriteCounters) snapshot() delivery.Counters {
 	return delivery.Counters{
 		Accepted: counters.accepted.Load(), Delivered: counters.delivered.Load(), Dropped: counters.dropped.Load(),
@@ -189,6 +206,70 @@ func (component *localLogComponent) countWrite(outcome pipeline.LocalLogOutcome,
 	case err == nil && outcome.LocalPersisted():
 		component.writes.accepted.Add(1)
 		component.writes.delivered.Add(1)
+	}
+}
+
+// deferredLocalWrites counts the records of one Process call whose append
+// waits in a hook call's write batch (audit.CallWriteBatch). The append
+// returned nil, so they are counted only when the batch settles them:
+// delivered when committed, dropped and journalled as lost when neither the
+// shared transaction nor the retry on its own kept them (RV-ha1-1791). The
+// count runs once both the Process outcomes and the settlement are known.
+type deferredLocalWrites struct {
+	component *localLogComponent
+	mu        sync.Mutex
+	outcomes  []pipeline.LocalLogOutcome
+	returned  bool
+	settled   bool
+	err       error
+}
+
+// trackDeferred opens a report for the next append Process makes with ctx,
+// or returns ctx and nil when no hook call batch is open on it.
+func (component *localLogComponent) trackDeferred(
+	ctx context.Context,
+) (context.Context, *deferredLocalWrites, *audit.CallWriteReport) {
+	pending := &deferredLocalWrites{component: component}
+	ctx, report := audit.WithCallWriteReport(ctx, component.store, pending.settle)
+	if report == nil {
+		return ctx, nil, nil
+	}
+	return ctx, pending, report
+}
+
+func (pending *deferredLocalWrites) settle(err error) {
+	pending.mu.Lock()
+	pending.settled, pending.err = true, err
+	ready := pending.returned
+	pending.mu.Unlock()
+	if ready {
+		pending.count()
+	}
+}
+
+func (pending *deferredLocalWrites) processed(outcomes ...pipeline.LocalLogOutcome) {
+	pending.mu.Lock()
+	pending.outcomes, pending.returned = outcomes, true
+	ready := pending.settled
+	pending.mu.Unlock()
+	if ready {
+		pending.count()
+	}
+}
+
+func (pending *deferredLocalWrites) count() {
+	writes := &pending.component.writes
+	for _, outcome := range pending.outcomes {
+		if !outcome.LocalPersisted() {
+			continue
+		}
+		writes.accepted.Add(1)
+		if pending.err == nil {
+			writes.delivered.Add(1)
+			continue
+		}
+		writes.dropped.Add(1)
+		pending.component.lostWrites.add(audit.ClassifyEventHistoryWriteFailure(pending.err))
 	}
 }
 
@@ -238,9 +319,27 @@ func (component *localLogComponent) Process(
 		!component.active.Load() || component.closed.Load() {
 		return pipeline.LocalLogOutcome{}, &localFactoryError{}
 	}
+	ctx, pending, report := component.trackDeferred(ctx)
 	outcome, err := component.pipeline.Process(ctx, metadata, builder)
+	if report.Deferred() {
+		pending.processed(outcome)
+		return outcome, err
+	}
+	if deadlineLossReport(ctx, err) {
+		component.writes.accepted.Add(1)
+		component.writes.dropped.Add(1)
+		component.lostWrites.add(audit.EventHistorySQLiteDeadline)
+		return outcome, err
+	}
 	component.countWrite(outcome, err)
 	return outcome, err
+}
+
+// flushed makes the records the local store keeps survive a power loss, as
+// a record held for its local write (observability.RemoteExportAfterLocalWrite)
+// must before it leaves, and reports whether they do.
+func (component *localLogComponent) flushed(ctx context.Context) bool {
+	return component.store.SyncCommittedWrites(ctx) == nil
 }
 
 func (component *localLogComponent) ProcessAtomicBatch(
@@ -251,7 +350,12 @@ func (component *localLogComponent) ProcessAtomicBatch(
 		!component.active.Load() || component.closed.Load() {
 		return nil, &localFactoryError{}
 	}
+	ctx, pending, report := component.trackDeferred(ctx)
 	outcomes, err := component.pipeline.ProcessAtomicBatch(ctx, items)
+	if report.Deferred() {
+		pending.processed(outcomes...)
+		return outcomes, err
+	}
 	component.countBatch(outcomes, err)
 	return outcomes, err
 }
@@ -265,7 +369,12 @@ func (component *localLogComponent) ProcessLocalOnly(
 		!component.active.Load() || component.closed.Load() {
 		return pipeline.LocalLogOutcome{}, &localFactoryError{}
 	}
+	ctx, pending, report := component.trackDeferred(ctx)
 	outcome, err := component.pipeline.ProcessLocalOnly(ctx, metadata, builder)
+	if report.Deferred() {
+		pending.processed(outcome)
+		return outcome, err
+	}
 	component.countWrite(outcome, err)
 	return outcome, err
 }
@@ -281,7 +390,12 @@ func (component *localLogComponent) ProcessImported(
 		!component.active.Load() || component.closed.Load() {
 		return pipeline.LocalLogOutcome{}, &localFactoryError{}
 	}
+	ctx, pending, report := component.trackDeferred(ctx)
 	outcome, err := component.pipeline.ProcessImported(ctx, metadata, originDestination, suppressAll, builder)
+	if report.Deferred() {
+		pending.processed(outcome)
+		return outcome, err
+	}
 	component.countWrite(outcome, err)
 	return outcome, err
 }
@@ -295,7 +409,12 @@ func (component *localLogComponent) ProcessManagedLogFallback(
 		!component.active.Load() || component.closed.Load() {
 		return pipeline.LocalLogOutcome{}, &localFactoryError{}
 	}
+	ctx, pending, report := component.trackDeferred(ctx)
 	outcome, err := component.pipeline.ProcessManagedLogFallback(ctx, metadata, builder)
+	if report.Deferred() {
+		pending.processed(outcome)
+		return outcome, err
+	}
 	component.countWrite(outcome, err)
 	return outcome, err
 }

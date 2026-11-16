@@ -6,6 +6,10 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
+	osuser "os/user"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -74,6 +78,37 @@ func recordsNamed(records []observability.Record, name string) []observability.R
 		}
 	}
 	return out
+}
+
+func TestKernelDenialResolvesMissingUserNameFromUID(t *testing.T) {
+	account, err := osuser.Current()
+	if err != nil {
+		t.Skipf("current account unavailable: %v", err)
+	}
+	uid := os.Getuid()
+	if uid < 0 {
+		t.Skip("numeric UID unavailable")
+	}
+	event := kernelBlockedEvent()
+	event.UID = &uid
+	event.User = ""
+	adapter, emitter := newKernelTestAdapter(router.AdmissionOrdinary)
+	if err := adapter.EmitSnapshot(t.Context(), sensor.Snapshot{
+		KernelEvents: []sensor.KernelEvent{event}, Kernel: kernelTestStatus(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	records := recordsNamed(emitter.records, "enforcement.block.applied")
+	if len(records) != 1 {
+		t.Fatalf("got %d denial records, want 1", len(records))
+	}
+	if got := kernelRecordBody(t, records[0])["defenseclaw.user.name"]; got != account.Username {
+		t.Errorf("resolved name = %v, want %q", got, account.Username)
+	}
+	unknown := -1
+	if got := kernelBlockUserName(sensor.KernelEvent{UID: &unknown}); got != "" {
+		t.Errorf("unknown UID resolved to %q", got)
+	}
 }
 
 func TestPlaneHealthCarriesMechanismBackendLossAndContainerEvents(t *testing.T) {
@@ -223,7 +258,7 @@ func hostFinding() sensor.Finding {
 			{
 				Tactic: tactics.Persistence, Source: plane.SourceFanotify,
 				UID: intPtr(0), AUID: intPtr(1000), User: "root",
-				Outcome: plane.OutcomeWouldBlock, Control: "kernel.persistence_write",
+				Outcome: plane.OutcomeWouldBlock, Control: "kernel.persistence_write", Hits: 2,
 				Hook: &sensor.HookJoin{Seen: false},
 			},
 		},
@@ -285,6 +320,10 @@ func TestActivityAndFindingCarryIdentitySourceKernelOutcomeAndHookJoin(t *testin
 			t.Errorf("persistence %s = %v, want %v", key, got, want)
 		}
 	}
+	// Two would-block files on one tactic are two hits (GAP-1400).
+	if got := fmt.Sprint(persistence["defenseclaw.ai.runtime.kernel.count"]); got != "2" {
+		t.Errorf("persistence kernel.count = %s, want 2", got)
+	}
 	if _, present := persistence["defenseclaw.ai.runtime.hook_join"]; present {
 		t.Error("an unjoined activity carries a hook_join")
 	}
@@ -328,7 +367,7 @@ func TestRecordsWithoutHostPlaneDetailCarryNoNewFields(t *testing.T) {
 				"user.id", "defenseclaw.user.login_id", "defenseclaw.ai.runtime.event_source",
 				"defenseclaw.ai.runtime.kernel.outcome", "defenseclaw.ai.runtime.kernel.control",
 				"defenseclaw.ai.runtime.hook_seen", "defenseclaw.ai.runtime.hook_join",
-				"defenseclaw.agent.identity.id",
+				"defenseclaw.agent.identity.id", "defenseclaw.ai.runtime.kernel.count",
 			} {
 				if _, present := body[key]; present {
 					t.Errorf("%s carries %s without host-plane detail", name, key)
@@ -569,18 +608,88 @@ func TestKernelChangeCursorHandlesARestartedSequence(t *testing.T) {
 	cursor := &kernelChangeCursor{}
 	now := time.Now()
 	recent := now.Add(-time.Second).UnixNano()
-	if got := cursor.take([]acquire.KernelChange{{Seq: 40, AtUnixNano: recent, Event: "loaded"}}, now); len(got) != 1 {
+	if got := cursor.take([]acquire.KernelChange{{Seq: 40, AtUnixNano: recent, Event: "loaded"}}, 0, now); len(got) != 1 {
 		t.Fatalf("first sight returned %d, want 1", len(got))
 	}
-	if got := cursor.take([]acquire.KernelChange{{Seq: 40, AtUnixNano: recent, Event: "loaded"}}, now); len(got) != 0 {
+	if got := cursor.take([]acquire.KernelChange{{Seq: 40, AtUnixNano: recent, Event: "loaded"}}, 0, now); len(got) != 0 {
 		t.Fatalf("a repeat returned %d, want 0", len(got))
 	}
 	// The helper's state was removed and its sequence restarted below the cursor.
-	if got := cursor.take([]acquire.KernelChange{{Seq: 2, AtUnixNano: recent, Event: "loaded"}}, now); len(got) != 1 {
+	if got := cursor.take([]acquire.KernelChange{{Seq: 2, AtUnixNano: recent, Event: "loaded"}}, 0, now); len(got) != 1 {
 		t.Fatalf("a restarted sequence returned %d, want its recent change", len(got))
 	}
-	if got := cursor.take(nil, now); got != nil {
+	if got := cursor.take(nil, 0, now); got != nil {
 		t.Fatalf("no changes returned %v", got)
+	}
+}
+
+// cowork-1-0-8 GAP-0080: a restarted sequence (the helper's state file was
+// gone) that already passed the cursor lost its first changes, which only a
+// sequence below the cursor told apart. Its new epoch says so: every recent
+// change of the new sequence is reported once. The same epoch, a helper that
+// predates the epoch (0), and the first epoch seen after one, are no restart.
+func TestKernelChangeCursorTellsARestartedSequenceByItsEpoch(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	recent := now.Add(-time.Second).UnixNano()
+	changes := func(seqs ...uint64) []acquire.KernelChange {
+		out := make([]acquire.KernelChange, 0, len(seqs))
+		for _, seq := range seqs {
+			out = append(out, acquire.KernelChange{Seq: seq, AtUnixNano: recent, Event: "loaded"})
+		}
+		return out
+	}
+	seqs := func(got []acquire.KernelChange) []uint64 {
+		out := []uint64{}
+		for _, change := range got {
+			out = append(out, change.Seq)
+		}
+		return out
+	}
+	cursor := &kernelChangeCursor{}
+	for _, step := range []struct {
+		name    string
+		changes []acquire.KernelChange
+		epoch   int64
+		want    []uint64
+	}{
+		{"first sight", changes(1, 2, 3), 0, []uint64{1, 2, 3}},
+		{"the first epoch after a helper that predates it", changes(2, 3, 4), 100, []uint64{4}},
+		{"the same epoch", changes(3, 4, 5), 100, []uint64{5}},
+		{"a new sequence past the cursor", changes(1, 2, 3, 4, 5, 6, 7), 200, []uint64{1, 2, 3, 4, 5, 6, 7}},
+		{"the new sequence goes on", changes(6, 7, 8), 200, []uint64{8}},
+		{"a downgraded helper", changes(7, 8, 9), 0, []uint64{9}},
+	} {
+		if got := seqs(cursor.take(step.changes, step.epoch, now)); !reflect.DeepEqual(got, step.want) {
+			t.Fatalf("%s: reported %v, want %v", step.name, got, step.want)
+		}
+	}
+}
+
+// cowork-1-0-8 GAP-0080: a helper restart whose new count already passed
+// the old one was counted as the difference, so the delta lost what the old
+// helper counted from zero. A new epoch of its counters is a restart: the
+// growth counts from zero. Without epochs, a count that went down still is.
+func TestKernelDeltaCursorCountsARestartedHelperFromZero(t *testing.T) {
+	t.Parallel()
+	cursor := &kernelDeltaCursor{}
+	for _, step := range []struct {
+		name    string
+		blocked int64
+		since   int64
+		want    int64
+	}{
+		{"baseline", 5, 100, 0},
+		{"growth", 7, 100, 2},
+		{"a restarted helper whose count passed the old one", 9, 200, 9},
+		{"growth after the restart", 10, 200, 1},
+		{"a helper that predates the epoch, count down", 3, 0, 3},
+		{"growth without an epoch", 4, 0, 1},
+		{"the first epoch after none", 6, 300, 2},
+	} {
+		if got := cursor.deltas(map[string]int64{"blocked": step.blocked}, step.since)["blocked"]; got != step.want {
+			t.Fatalf("%s: delta %d, want %d", step.name, got, step.want)
+		}
 	}
 }
 

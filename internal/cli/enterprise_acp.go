@@ -13,14 +13,15 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/spf13/cobra"
@@ -95,7 +96,7 @@ func pinEnterpriseACPAdministratorEnv(cmd *cobra.Command) error {
 	applyManagedStandaloneAdminEnv(cmd.ErrOrStderr())
 	return pinManagedAdministratorEnvironment("enterprise acp", func() string {
 		return windowsManagedStandardUserViewAnswer("the ACP enrollments",
-			"enterprise acp "+cmd.Name()+" --user <name> --client <client> --agent <agent> --profile <profile>")
+			"enterprise", "acp", cmd.Name(), "--user", "<name>", "--client", "<client>", "--agent", "<agent>", "--profile", "<profile>")
 	})
 }
 
@@ -309,7 +310,7 @@ func resolveEnterpriseACPEnrollment(requireAuthorization bool) (enterpriseACPEnr
 
 // enterpriseACPProfileNameRE is the form of a profile name an enrollment
 // accepts when acp.profiles does not define it.
-var enterpriseACPProfileNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+var enterpriseACPProfileNameRE = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 // enterpriseACPShortName bounds a name echoed in a refusal.
 func enterpriseACPShortName(name string) string {
@@ -559,12 +560,66 @@ func enterpriseACPTargetCredentials(enrollment enterpriseACPEnrollment) enterpri
 	}
 }
 
-// enterpriseACPQuotePath formats a path for the shell shown to the user.
-func enterpriseACPQuotePath(path string, windows bool) string {
+// enterpriseACPPathFlags are the enterprise acp setup flags whose value is
+// a path.
+var enterpriseACPPathFlags = map[string]bool{"--data-dir": true, "--guard-binary": true, "--agent-binary": true}
+
+// enterpriseACPCommandLine is executable run with args as the user types it.
+// On Windows it is a PowerShell call from the managed renderer
+// (managed.WindowsCommandLine): the path and every argument that is not a
+// plain word are literals, the typographic quotes doubled too, and the text
+// that hands it on says PowerShell (enterpriseACPRunIn). This command built
+// `& '<path>' ...` by hand, with --client, --agent and --profile unquoted
+// (g072 review 2 M4). Elsewhere the executable and each path are POSIX
+// single-quoted, as before, and so is any other argument that is not a
+// plain word.
+func enterpriseACPCommandLine(windows bool, executable string, args ...string) string {
 	if windows {
-		return "'" + strings.ReplaceAll(path, "'", "''") + "'"
+		return managed.WindowsCommandLine(executable, args...)
 	}
-	return "'" + strings.ReplaceAll(path, "'", "'\\''") + "'"
+	words := []string{enterpriseACPPOSIXQuote(executable)}
+	for i, arg := range args {
+		if i > 0 && enterpriseACPPathFlags[args[i-1]] || !enterpriseACPPOSIXPlain(arg) {
+			arg = enterpriseACPPOSIXQuote(arg)
+		}
+		words = append(words, arg)
+	}
+	return strings.Join(words, " ")
+}
+
+// enterpriseACPPOSIXQuote is value as one single-quoted POSIX shell word.
+func enterpriseACPPOSIXQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
+// enterpriseACPPOSIXPlain reports an argument a POSIX shell passes as typed.
+func enterpriseACPPOSIXPlain(arg string) bool {
+	return arg != "" && strings.IndexFunc(arg, enterpriseACPPOSIXSyntaxRune) < 0
+}
+
+// enterpriseACPPOSIXSyntaxRune reports a character a POSIX shell may read
+// as syntax: anything but a letter, a digit or one of - _ . : / = + , @ %.
+func enterpriseACPPOSIXSyntaxRune(r rune) bool {
+	return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && !strings.ContainsRune("-_.:/=+,@%", r)
+}
+
+// enterpriseACPRunInstruction is "Run", or "In PowerShell, run" for a
+// command from enterpriseACPCommandLine on Windows.
+func enterpriseACPRunInstruction(windows bool) string {
+	if windows {
+		return "In PowerShell, run"
+	}
+	return "Run"
+}
+
+// enterpriseACPRunIn is where the user runs an enterpriseACPCommandLine:
+// "in PowerShell, " on Windows, where cmd.exe reads the & as a command
+// separator, and "" elsewhere.
+func enterpriseACPRunIn(windows bool) string {
+	if windows {
+		return "in PowerShell, "
+	}
+	return ""
 }
 
 // enterpriseACPCentralNote says why the central policy no longer admits an
@@ -589,6 +644,19 @@ func enterpriseACPCentralNote(client, agent, profile string) string {
 		return fmt.Sprintf("central ACP policy now binds %s/%s to profile %s, so the guard refuses this %s enrollment; "+
 			"enroll the user again with --profile %s", client, agent, resolved, profile, resolved)
 	}
+	// The gateway's next checks: the pins of the pair, then the profile's
+	// allow-lists. A binding the profile no longer allows verified green
+	// while the guard was refused (GAP-1155).
+	if refusals := cfg.ACP.ACPPairBindingRefusals(client, agent, profile); len(refusals) > 0 {
+		return fmt.Sprintf("central ACP policy no longer binds %s/%s to profile %s (%s), so the guard refuses it",
+			client, agent, profile, strings.Join(refusals, "; "))
+	}
+	if settings, ok := cfg.ACP.Profiles[profile]; ok {
+		if refusals := settings.AllowListRefusals(profile, client, agent); len(refusals) > 0 {
+			return fmt.Sprintf("central ACP policy no longer allows %s/%s in profile %s (%s), so the guard refuses it",
+				client, agent, profile, strings.Join(refusals, "; "))
+		}
+	}
 	return ""
 }
 
@@ -611,7 +679,11 @@ func enterpriseACPProfileMode(profile string) string {
 // DefenseClaw command to run (GAP-0254). Secure Client has no setup
 // subcommand and reports the step of main (issue #1092).
 func enterpriseACPSetupCommand(enrollment enterpriseACPEnrollment, tokenPath string) string {
+	windows := runtime.GOOS == "windows"
 	executable, guard := managedHostGatewayCommand(), "defenseclaw-acp"
+	if windows {
+		executable = managedWindowsAdminCLI()
+	}
 	if path, err := os.Executable(); err == nil {
 		executable = path
 		guard = filepath.Join(filepath.Dir(path), "defenseclaw-acp"+filepath.Ext(path))
@@ -626,15 +698,12 @@ func enterpriseACPSetupCommand(enrollment enterpriseACPEnrollment, tokenPath str
 			enrollment.client, enrollment.agent, enrollment.profile, activate, enrollment.dataDir, tokenPath, guard,
 		)
 	}
-	quote := func(path string) string { return enterpriseACPQuotePath(path, runtime.GOOS == "windows") }
-	invoke := quote(executable)
-	if runtime.GOOS == "windows" {
-		invoke = "& " + invoke
+	args := []string{"enterprise", "acp", "setup", "--client", enrollment.client, "--agent", enrollment.agent, "--profile", enrollment.profile}
+	if activate != "" {
+		args = append(args, "--activate")
 	}
-	return fmt.Sprintf(
-		"%s enterprise acp setup --client %s --agent %s --profile %s%s --data-dir %s --api-port %d --guard-binary %s",
-		invoke, enrollment.client, enrollment.agent, enrollment.profile, activate, quote(enrollment.dataDir), cfg.Gateway.APIPort, quote(guard),
-	)
+	args = append(args, "--data-dir", enrollment.dataDir, "--api-port", strconv.Itoa(cfg.Gateway.APIPort), "--guard-binary", guard)
+	return enterpriseACPCommandLine(windows, executable, args...)
 }
 
 func runEnterpriseACPVerify(cmd *cobra.Command, _ []string) error {
@@ -653,6 +722,7 @@ func runEnterpriseACPVerify(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return enterpriseACPResult(cmd, nil, err)
 	}
+	enterpriseACPUseRecordedDataDir(&enrollment, credential.UserDataDir)
 	if enrollment.accountGone {
 		what, selector := enterpriseACPGoneAccount(enrollment)
 		return enterpriseACPResult(cmd, nil, fmt.Errorf(
@@ -704,10 +774,11 @@ func runEnterpriseACPVerify(cmd *cobra.Command, _ []string) error {
 		payload["setup_note"] = "the user has run setup (the contract lock is present)"
 		switch {
 		case !setupDone && setupMismatch != "":
-			payload["setup_note"] = "the editor entry does not match this enrollment (" + setupMismatch + "); as that user, run: " +
-				enterpriseACPSetupCommand(enrollment, tokenPath)
+			payload["setup_note"] = "the editor entry does not match this enrollment (" + setupMismatch + "); as that user, " +
+				enterpriseACPRunIn(runtime.GOOS == "windows") + "run: " + enterpriseACPSetupCommand(enrollment, tokenPath)
 		case !setupDone:
-			payload["setup_note"] = "the user has not run setup yet; as that user, run: " + enterpriseACPSetupCommand(enrollment, tokenPath)
+			payload["setup_note"] = "the user has not run setup yet; as that user, " + enterpriseACPRunIn(runtime.GOOS == "windows") +
+				"run: " + enterpriseACPSetupCommand(enrollment, tokenPath)
 		}
 		if note := enterpriseACPCentralNote(enrollment.client, enrollment.agent, enrollment.profile); note != "" {
 			payload["central_note"] = note
@@ -738,12 +809,17 @@ func runEnterpriseACPRevoke(cmd *cobra.Command, _ []string) error {
 	}
 	// Revoke centrally first. From this point a copied or cached bearer has no
 	// authority even if user-side cleanup is interrupted.
-	found := true
+	found, recordedDataDir := true, ""
 	if err := withEnterpriseACPServiceOwner(cfg.DataDir, func() error {
 		if !cfg.SecureClientIntegration() {
 			// A revoke of an enrollment that never existed said "revoked"
 			// (GAP-0355).
 			found = enterpriseACPRecordExists(cfg.DataDir, enrollment)
+			if credential, loadErr := acp.LoadEnterpriseCredential(
+				cfg.DataDir, enrollment.principal, enrollment.client, enrollment.agent, enrollment.profile,
+			); loadErr == nil {
+				recordedDataDir = credential.UserDataDir
+			}
 		}
 		return acp.RemoveEnterpriseCredential(
 			cfg.DataDir, enrollment.principal, enrollment.client, enrollment.agent, enrollment.profile,
@@ -756,6 +832,7 @@ func runEnterpriseACPRevoke(cmd *cobra.Command, _ []string) error {
 		notFound = fmt.Sprintf("no ACP enrollment for %s %s/%s in profile %s was found; nothing was revoked",
 			enterpriseACPWho(enrollment), enrollment.client, enrollment.agent, enrollment.profile)
 	}
+	enterpriseACPUseRecordedDataDir(&enrollment, recordedDataDir)
 	if enrollment.accountGone {
 		// No account, so no home to clean.
 		what, _ := enterpriseACPGoneAccount(enrollment)
@@ -809,6 +886,28 @@ func runEnterpriseACPRevoke(cmd *cobra.Command, _ []string) error {
 		payload["note"] = note
 	}
 	return enterpriseACPResult(cmd, enterpriseACPRevokePayload(payload, notFound), err)
+}
+
+// enterpriseACPUseRecordedDataDir points an enrollment whose command named no
+// --data-dir at the user data dir its service record holds, when that dir is
+// inside the target home. Verify and revoke used <home>/.defenseclaw: verify
+// called the copy in the recorded dir missing, and revoke removed the service
+// record but left that copy and named the wrong token_file, while list already
+// read the recorded dir (GAP-2431 pod review). Secure Client keeps main.
+func enterpriseACPUseRecordedDataDir(enrollment *enterpriseACPEnrollment, recorded string) {
+	if cfg == nil || cfg.SecureClientIntegration() || strings.TrimSpace(enterpriseACPUserDataDir) != "" ||
+		recorded == "" || enrollment.target.home == "" {
+		return
+	}
+	home, err := filepath.Abs(enrollment.target.home)
+	if err != nil {
+		return
+	}
+	relative, err := filepath.Rel(home, recorded)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+		return
+	}
+	enrollment.dataDir = recorded
 }
 
 // enterpriseACPCheck is the success mark: ASCII when Windows output goes to

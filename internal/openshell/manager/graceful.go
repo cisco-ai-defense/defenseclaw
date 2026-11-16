@@ -149,25 +149,43 @@ func parseHarnessEnd(out []byte) harnessEnd {
 // detached run as it found it (State sandboxapi.RunNone: there is none, or the
 // sandbox did not answer), whose log the stop keeps next: from what the
 // script printed before an exec that failed (a slow flush cut short), or
-// else from a look at the run of its own (probeRun). Failures are logged:
-// the stop goes ahead either way.
-func (m *Manager) endHarness(ctx context.Context, gw *Gateway, b *box) harness.DetachedRun {
+// else from a look at the run of its own (probeRun). The second result is
+// why a flush that was tried was not confirmed (nil when none was tried or
+// it was). It publishes nothing: only the stop knows whether it went ahead
+// (Manager.stop), which it does without the flush and says so. A MicroVM
+// that is not ready but may still run what its guest wrote (a start or stop
+// OpenShell could not be asked about after it failed, restorePhase; a phase
+// a restarted daemon has not learned) has no harness to ask, but is flushed
+// all the same: a stop with no sync would lose that.
+func (m *Manager) endHarness(ctx context.Context, gw *Gateway, b *box) (harness.DetachedRun, error) {
 	none := harness.DetachedRun{State: sandboxapi.RunNone}
 	m.mu.Lock()
-	name, harnessName := b.rec.Name, b.rec.Harness
-	ready := b.phase == audit.SandboxPhaseReady && !b.creating && !b.deleted && !b.retained
+	name, harnessName, driver := b.rec.Name, b.rec.Harness, b.rec.Driver
+	// stop has just fetched b.sb from OpenShell. A raw OpenShell client can
+	// start or stop the guest without updating the manager's cached phase.
+	// One phase decides both: the one OpenShell reported to this stop when
+	// it has, else the recorded one (GAP-1148, GAP-0902).
+	phase := b.phase
+	if b.sb != nil {
+		phase = auditPhase(b.sb.Status.Phase)
+	}
+	ready := b.sb != nil && phase == audit.SandboxPhaseReady && !b.creating && !b.deleted && !b.retained
+	unsettled := !ready && !b.creating && !b.deleted && !b.retained && !workloadEnded(phase) && holdsCompute(phase, driver, b.rec.PhaseReason)
 	tamper := b.tamperStop
 	m.mu.Unlock()
+	flush := stopLosesWrites(driver)
 	if !ready {
-		return none
+		if unsettled && flush {
+			return none, m.flushSandbox(ctx, gw, name)
+		}
+		return none, nil
 	}
-	flush := !gw.Driver.StopFlushes
 	spec, ok := harness.Get(harnessName)
 	if !ok {
 		if flush {
-			m.flushSandbox(ctx, gw, name)
+			return none, m.flushSandbox(ctx, gw, name)
 		}
-		return none
+		return none, nil
 	}
 	script, budget, timeout := endHarnessScript, harnessExitBudget, harnessExitWait+3*time.Second
 	if flush {
@@ -198,21 +216,23 @@ func (m *Manager) endHarness(ctx context.Context, gw *Gateway, b *box) harness.D
 			// and its log kept.
 			run = m.probeRun(ctx, gw, name)
 		}
-		if flush && !end.Synced {
+		if flush {
 			// The flush matters more than the harness's goodbye: once more,
 			// on its own.
-			m.flushSandbox(ctx, gw, name)
+			return run, m.flushSandbox(ctx, gw, name)
 		}
-		return run
+		return run, nil
 	}
 	end := parseHarnessEnd(res.Stdout)
 	if end.Harness == "running" {
 		m.logf("sandbox %s: the harness did not exit within %s; stopping the sandbox under it", name, harnessExitWait)
 	}
 	if flush && !end.Synced {
-		m.flushFailed(name, fmt.Errorf("sync(1) did not finish (the sandbox answered %q)", strings.Join(strings.Fields(string(res.Stdout)), " ")))
+		err := fmt.Errorf("sync(1) did not finish (the sandbox answered %q)", strings.Join(strings.Fields(string(res.Stdout)), " "))
+		m.logf("sandbox %s: flush its disk before the stop: %v", name, err)
+		return end.Run, err
 	}
-	return end.Run
+	return end.Run, nil
 }
 
 // harnessEndOutput bounds what the exec of endHarnessScript keeps of its
@@ -249,8 +269,9 @@ func (b *headBuffer) Write(p []byte) (int, error) {
 func (b *headBuffer) Bytes() []byte { return b.buf.Bytes() }
 
 // flushSandbox runs sync(1) in a ready sandbox before a stop its driver
-// does not flush, and reports a failure.
-func (m *Manager) flushSandbox(ctx context.Context, gw *Gateway, name string) {
+// does not flush, and returns why it failed. The stop publishes the loss
+// once OpenShell takes it (flushFailed).
+func (m *Manager) flushSandbox(ctx context.Context, gw *Gateway, name string) error {
 	ctx, cancel := context.WithTimeout(ctx, flushWait+5*time.Second)
 	defer cancel()
 	res, err := m.ownExec(ctx, gw, name, []string{"/bin/sync"}, openshell.ExecOptions{Timeout: flushWait, Attempts: 1, MaxOutputBytes: 256})
@@ -258,12 +279,14 @@ func (m *Manager) flushSandbox(ctx context.Context, gw *Gateway, name string) {
 		err = fmt.Errorf("sync(1) exited with status %d", res.ExitCode)
 	}
 	if err != nil {
-		m.flushFailed(name, err)
+		m.logf("sandbox %s: flush its disk before the stop: %v", name, err)
 	}
+	return err
 }
 
 // flushFailed says a stop went ahead without the flush: what the workload
-// wrote since the last one may come back empty.
+// wrote since the last one may come back empty. Only a stop OpenShell
+// took calls it: a stop that was refused or not made lost nothing.
 func (m *Manager) flushFailed(name string, err error) {
 	msg := "sandbox " + name + ": its disk could not be flushed before the stop; files written since the last flush may come back empty"
 	m.logf("%s: %v", msg, err)

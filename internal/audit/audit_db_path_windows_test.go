@@ -399,7 +399,9 @@ func TestAuditDBWindowsRejectsUntrustedWriteACL(t *testing.T) {
 	assertAuditDBPathError(t, filepath.Join(directory, "audit.db"), "untrusted Windows principal")
 }
 
-func TestAuditDBWindowsRejectsInheritedReadAccessForSQLiteSidecars(t *testing.T) {
+// A foreign read-only entry can disclose audit content but cannot change it:
+// it is accepted and logged, and the guardian re-stamps the descriptor.
+func TestAuditDBWindowsAcceptsInheritedReadAccessForSQLiteSidecars(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "protected")
 	if err := os.Mkdir(directory, 0o700); err != nil {
 		t.Fatal(err)
@@ -408,7 +410,140 @@ func TestAuditDBWindowsRejectsInheritedReadAccessForSQLiteSidecars(t *testing.T)
 		t.Fatal(err)
 	}
 	grantEveryoneAuditDBWindowsAccess(t, directory, windows.GENERIC_READ, true)
-	assertAuditDBPathError(t, filepath.Join(directory, "audit.db"), "untrusted Windows principal")
+	db, err := openHardenedAuditSQLite(filepath.Join(directory, "audit.db"), auditDBPathHooks{})
+	if err != nil {
+		t.Fatalf("inheritable read entry on the audit directory refused: %v", err)
+	}
+	_ = db.Close()
+}
+
+// After an ACL reset the audit folder inherits C:\ProgramData's
+// container-only Users create-child entry. It cannot replace a child, so the
+// gateway keeps its audit store. The acceptance is for a verified Secure
+// Client host and a folder inside the platform installer's roots (GAP-0566):
+// the temp tree stands in for C:\ProgramData\Cisco here, and
+// TestAuditDBWindowsRefusesInheritedCreateChildOutsideInstallerRoots and
+// TestAuditDBWindowsRefusesInheritedCreateChildForOSSUnderCiscoRoot cover a
+// per-user folder.
+func TestAuditDBWindowsAcceptsInheritedContainerOnlyCreateChild(t *testing.T) {
+	users, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const createChild windows.ACCESS_MASK = 0x116
+	base := t.TempDir()
+	t.Cleanup(managed.AddTrustedMachineInstallBaseForTest(base))
+	state := filepath.Join(base, "Cisco", "Cisco Secure Client", "DefenseClaw")
+	verifySecureClientHostForAuditTest(t, true, state)
+	parent := filepath.Join(state, "parent")
+	directory := filepath.Join(parent, "audit")
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := secureAuditDBPlatformPath(parent, true); err != nil {
+		t.Fatal(err)
+	}
+	addJudgeBodyWindowsContainerOnlyGrant(t, parent, users, createChild)
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sd, err := windows.GetNamedSecurityInfo(directory, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateAuditDBWindowsSecurityDescriptor(directory, sd, true, true); err != nil {
+		t.Fatalf("inherited container-only create-child entry refused: %v", err)
+	}
+}
+
+// GAP-0566: a per-user (OSS) audit folder outside the platform installer's
+// roots, say a custom data_dir under C:\ProgramData, inherits the same entry
+// when it is created; another standard user could add a SQLite journal there,
+// so it is refused.
+func TestAuditDBWindowsRefusesInheritedCreateChildOutsideInstallerRoots(t *testing.T) {
+	users, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const createChild windows.ACCESS_MASK = 0x116
+	parent := filepath.Join(t.TempDir(), "parent")
+	directory := filepath.Join(parent, "audit")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if managed.PlatformInstallerOwnedPath(directory) {
+		t.Skip("the test temp folder is inside the platform installer roots")
+	}
+	if err := secureAuditDBPlatformPath(parent, true); err != nil {
+		t.Fatal(err)
+	}
+	addJudgeBodyWindowsContainerOnlyGrant(t, parent, users, createChild)
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sd, err := windows.GetNamedSecurityInfo(directory, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateAuditDBWindowsSecurityDescriptor(directory, sd, true, true); err == nil {
+		t.Fatal("inherited create-child entry accepted on an audit folder outside the installer roots")
+	}
+}
+
+// verifySecureClientHostForAuditTest models the installed process and its
+// state tree. internal/cli registers the production classifiers.
+func verifySecureClientHostForAuditTest(t *testing.T, verified bool, state string) {
+	t.Helper()
+	previousHost, previousPath := managed.SecureClientHostVerified, managed.SecureClientProcessPathVerified
+	t.Cleanup(func() {
+		managed.SecureClientHostVerified, managed.SecureClientProcessPathVerified = previousHost, previousPath
+	})
+	managed.SecureClientHostVerified = func() bool { return verified }
+	managed.SecureClientProcessPathVerified = func(path string) bool {
+		return strings.HasPrefix(strings.ToLower(filepath.Clean(path)), strings.ToLower(filepath.Clean(state))+string(filepath.Separator))
+	}
+}
+
+// A per-user audit folder under the Cisco ProgramData root is refused even
+// when Secure Client is installed on the same computer.
+func TestAuditDBWindowsRefusesInheritedCreateChildForOSSUnderCiscoRoot(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sid  func() (*windows.SID, error)
+	}{
+		{"Users", func() (*windows.SID, error) { return windows.CreateWellKnownSid(windows.WinBuiltinUsersSid) }},
+		{"Authenticated Users", func() (*windows.SID, error) { return windows.CreateWellKnownSid(windows.WinAuthenticatedUserSid) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			principal, err := tc.sid()
+			if err != nil {
+				t.Fatal(err)
+			}
+			base := t.TempDir()
+			t.Cleanup(managed.AddTrustedMachineInstallBaseForTest(base))
+			verifySecureClientHostForAuditTest(t, true, filepath.Join(base, "Cisco", "Cisco Secure Client", "DefenseClaw"))
+			parent := filepath.Join(base, "Cisco", "oss")
+			directory := filepath.Join(parent, "audit")
+			if err := os.MkdirAll(parent, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := secureAuditDBPlatformPath(parent, true); err != nil {
+				t.Fatal(err)
+			}
+			addJudgeBodyWindowsContainerOnlyGrant(t, parent, principal, 0x116)
+			if err := os.Mkdir(directory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			sd, err := windows.GetNamedSecurityInfo(directory, windows.SE_FILE_OBJECT,
+				windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := validateAuditDBWindowsSecurityDescriptor(directory, sd, true, true); err == nil {
+				t.Fatal("a per-user audit folder accepted an inherited create-child entry")
+			}
+		})
+	}
 }
 
 func TestAuditDBWindowsRejectsMutableAncestor(t *testing.T) {
@@ -444,7 +579,7 @@ func TestAuditDBWindowsRejectsPermissiveExistingLeaf(t *testing.T) {
 	assertAuditDBPathError(t, path, "untrusted Windows principal")
 }
 
-func TestAuditDBWindowsRejectsStaleSidecarReadACL(t *testing.T) {
+func TestAuditDBWindowsAcceptsStaleSidecarReadACLButRejectsWrite(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.db")
 	db, err := openHardenedAuditSQLite(path, auditDBPathHooks{})
 	if err != nil {
@@ -465,8 +600,17 @@ func TestAuditDBWindowsRejectsStaleSidecarReadACL(t *testing.T) {
 	if prepared != nil {
 		prepared.close()
 	}
+	if err != nil {
+		t.Fatalf("read-only entry on a stale sidecar refused: %v", err)
+	}
+	// Write authority on the sidecar stays fatal.
+	grantEveryoneAuditDBWindowsAccess(t, sidecar, windows.GENERIC_WRITE, false)
+	prepared, err = prepareAuditDatabasePath(path, auditDBPathHooks{})
+	if prepared != nil {
+		prepared.close()
+	}
 	if err == nil || !strings.Contains(err.Error(), "SQLite sidecar -journal") {
-		t.Fatalf("stale sidecar ACL error = %v", err)
+		t.Fatalf("stale sidecar write ACL error = %v", err)
 	}
 }
 

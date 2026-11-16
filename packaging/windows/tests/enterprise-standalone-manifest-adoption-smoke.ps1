@@ -49,19 +49,26 @@ try {
             return $null
         }
         function Assert-DefenseClawCanonicalPathAcl {
-            param($Path, $Expected)
+            param($Path, $Expected, [switch]$AllowSelfHeal)
         }
         $script:TestAclWrites = [Collections.Generic.List[string]]::new()
         function Set-DefenseClawPathAcl {
             param($Path, $Kind, $GatewayServiceSID)
             $script:TestAclWrites.Add("$Kind|$GatewayServiceSID")
         }
+        # The elevated metadata read repairs its ACL first; that repair has
+        # its own smoke (enterprise-uninstall-acl-recovery-smoke.ps1).
+        function Repair-DefenseClawUninstallAdminFileAcl {
+            param($Layout, $Kind)
+        }
         $script:TestGuardianReport = $null
         $script:TestGuardianProbes = 0
         $script:TestGuardianCatchUp = $null
+        $script:TestGuardianSources = [Collections.Generic.List[object]]::new()
         function Get-DefenseClawGuardianStatusReport {
-            param($Layout, $GatewayServiceName)
+            param($Layout, $GatewayServiceName, $GatewaySource, $TimeoutSeconds)
             $script:TestGuardianProbes++
+            $script:TestGuardianSources.Add($GatewaySource)
             if ($null -ne $script:TestGuardianCatchUp -and $script:TestGuardianProbes -ge 2) {
                 return $script:TestGuardianCatchUp
             }
@@ -114,7 +121,7 @@ try {
                 [IO.File]::WriteAllText($layout.ManifestPath, $Body, $utf8)
                 return (Get-TestSha256 $layout.ManifestPath)
             }
-            function Set-TestMetadata([string]$ManifestSHA256, [string]$State, [int64]$TargetCount) {
+            function Set-TestMetadata([string]$ManifestSHA256, [string]$State, [int64]$TargetCount, [string]$GatewayHash = '') {
                 $value = [ordered]@{
                     schema_version = 1
                     installed = $true
@@ -134,13 +141,16 @@ try {
                 if (-not [bool]$layout.BrokerEnabled) {
                     $value['profile'] = 'standalone'
                 }
+                if (-not [string]::IsNullOrEmpty($GatewayHash)) {
+                    $value['hashes'] = [ordered]@{ gateway = $GatewayHash }
+                }
                 [IO.File]::WriteAllText(
                     $layout.MetadataPath,
                     ($value | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 6),
                     $utf8
                 )
             }
-            function Set-TestGuardian([bool]$Ok, [string]$ManifestSHA256, [int64]$TargetCount, [int64]$Failures = 0, [string]$StateStamp = '', [switch]$NoAuthorization, [switch]$Stale, [object[]]$Results = @(), [int64]$RemovedAccountFailures = 0, [int64]$AwaitingSignInFailures = 0) {
+            function Set-TestGuardian([bool]$Ok, [string]$ManifestSHA256, [int64]$TargetCount, [int64]$Failures = 0, [string]$StateStamp = '', [switch]$NoAuthorization, [switch]$Stale, [object[]]$Results = @(), [int64]$RemovedAccountFailures = 0, [int64]$AwaitingSignInFailures = 0, [int64]$AccountLinkFailures = 0) {
                 $stamp = '2026-09-27T15:55:44Z'
                 if ([string]::IsNullOrEmpty($StateStamp)) {
                     $StateStamp = $stamp
@@ -181,6 +191,9 @@ try {
                 }
                 if ($AwaitingSignInFailures -gt 0) {
                     $report['awaiting_sign_in_failures'] = $AwaitingSignInFailures
+                }
+                if ($AccountLinkFailures -gt 0) {
+                    $report['account_link_failures'] = $AccountLinkFailures
                 }
                 $script:TestGuardianReport = [pscustomobject]$report
             }
@@ -269,6 +282,203 @@ try {
             Assert-TestSyncRefuses 'guardian still on the old manifest' 'guardian'
             Set-TestGuardian $false $republishedSHA256 2 1
             Assert-TestSyncRefuses 'guardian reconcile failed' 'marker'
+            $linkHealthy = [pscustomobject]@{ user = 'bob'; sid = 'S-1-5-21-1-2-3-1017'; connector = 'codex'; ok = $true }
+            $accountLink = [pscustomobject]@{
+                user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'claudecode'; ok = $false
+                error = 'enterprise hooks: the account''s own DefenseClaw folder link is pending repair'
+            }
+            Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $accountLink) -AccountLinkFailures 1
+            $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                -Activation $activation -InstalledManifestSHA256 $republishedSHA256
+            if (-not [bool]$adoption.ok -or [int64]$adoption.target_count -ne 2) {
+                $failures.Add("one account's folder link refused adoption: $($adoption.reason)")
+            }
+            # GAP-0585: a link another principal (an administrator) owns at the
+            # account's folder fails only that account, counted the same way.
+            $foreignLink = [pscustomobject]@{
+                user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'claudecode'; ok = $false
+                error = 'enterprise hooks: the account''s DefenseClaw folder is a link its account does not own; it was left untouched and the account is not protected until an administrator removes the link'
+            }
+            Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $foreignLink) -AccountLinkFailures 1
+            $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                -Activation $activation -InstalledManifestSHA256 $republishedSHA256
+            if (-not [bool]$adoption.ok -or [int64]$adoption.target_count -ne 2) {
+                $failures.Add("a link another principal owns refused adoption: $($adoption.reason)")
+            }
+            Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $foreignLink)
+            Assert-TestSyncRefuses 'foreign link without trusted count' 'failure-free reconcile'
+            Set-TestGuardian $false $republishedSHA256 3 2 -Results @($linkHealthy, $foreignLink, [pscustomobject]@{
+                    user = 'carol'; sid = 'S-1-5-21-1-2-3-1019'; connector = 'codex'; ok = $false
+                    error = 'enterprise hooks: write managed Claude Code hook runtime: access is denied'
+                }) -AccountLinkFailures 1
+            Assert-TestSyncRefuses 'foreign link next to another failure' 'failure-free reconcile'
+            # GAP-0773, GAP-0829: a machine vendor folder (Codex, Cursor, Claude
+            # Code, a per-user connector's) that a link replaced fails its
+            # enrolled targets' reconcile for as long as the link is there. The
+            # uninstall keeps that link, so only that refusal, only for a link
+            # that is still there under a vendor root, is explained.
+            $vendorRoot = [IO.Path]::Combine($Root, 'vendor')
+            $vendorTarget = [IO.Path]::Combine($Root, 'vendor-target')
+            [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($vendorRoot, 'OpenAI'))
+            [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($vendorRoot, 'Cisco', 'DefenseClaw'))
+            [void][IO.Directory]::CreateDirectory($vendorTarget)
+            $codexLink = [IO.Path]::Combine($vendorRoot, 'OpenAI', 'Codex')
+            $cursorLink = [IO.Path]::Combine($vendorRoot, 'Cursor')
+            $ciscoLink = [IO.Path]::Combine($vendorRoot, 'Cisco', 'DefenseClaw', 'etc')
+            $outsideRoot = [IO.Path]::Combine($Root, 'outside')
+            [void][IO.Directory]::CreateDirectory($outsideRoot)
+            $outsideLink = [IO.Path]::Combine($outsideRoot, 'Codex')
+            foreach ($link in @($codexLink, $cursorLink, $ciscoLink, $outsideLink)) {
+                & cmd.exe /c mklink /J "$link" "$vendorTarget" | Out-Null
+            }
+            $previousVendorRoots = $script:DefenseClawVendorFolderRoots
+            $script:DefenseClawVendorFolderRoots = @($vendorRoot)
+            $previousVendorExcuse = $script:DefenseClawVendorLinkExcuse
+            $script:DefenseClawVendorLinkExcuse = $true
+            try {
+                $codexRow = [pscustomobject]@{
+                    user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'codex'; ok = $false
+                    error = "enterprise hooks: reconcile Codex machine requirements: reparse points are not allowed in Codex machine path: $codexLink"
+                }
+                $cursorRow = [pscustomobject]@{
+                    user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'cursor'; ok = $false
+                    error = "enterprise hooks: prepare Cursor enterprise directory: enterprise hooks: reparse point in path: $cursorLink"
+                }
+                $otherFailure = [pscustomobject]@{
+                    user = 'carol'; sid = 'S-1-5-21-1-2-3-1019'; connector = 'codex'; ok = $false
+                    error = 'enterprise hooks: write managed Claude Code hook runtime: access is denied'
+                }
+                Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $codexRow)
+                $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                    -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                    -Activation $activation -InstalledManifestSHA256 $republishedSHA256
+                if (-not [bool]$adoption.ok -or [int64]$adoption.target_count -ne 2) {
+                    $failures.Add("a Codex folder link refused adoption: $($adoption.reason)")
+                }
+                Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $cursorRow)
+                $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                    -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                    -Activation $activation -InstalledManifestSHA256 $republishedSHA256
+                if (-not [bool]$adoption.ok) {
+                    $failures.Add("a Cursor folder link refused adoption: $($adoption.reason)")
+                }
+                # Only an uninstall keeps a link. Upgrade, Repair, Reconcile and Ensure still
+                # refuse the adoption of a manifest while a guardian row fails on a vendor-folder
+                # link: the same rows as above, with the uninstall flag off.
+                $script:DefenseClawVendorLinkExcuse = $false
+                foreach ($vendorRow in @($codexRow, $cursorRow)) {
+                    Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $vendorRow)
+                    Assert-TestSyncRefuses "vendor folder link outside an uninstall ($($vendorRow.connector))" failure-free reconcile
+                    $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                        -Layout $layout -GatewayServiceName DefenseClawGateway `
+                        -Activation $activation -InstalledManifestSHA256 $republishedSHA256
+                    if ([bool]$adoption.ok) {
+                        $failures.Add("a $($vendorRow.connector) folder link was explained outside an uninstall")
+                    }
+                }
+                $script:DefenseClawVendorLinkExcuse = $true
+                Set-TestGuardian $false $republishedSHA256 3 2 -Results @($linkHealthy, $codexRow, $otherFailure)
+                Assert-TestSyncRefuses 'machine folder link next to another failure' 'failure-free reconcile'
+                # The refusal must be the whole message. A second failure in the same row
+                # (a failure before it, a rollback failure after it, a newline from
+                # errors.Join) is not explained by the link.
+                $codexRefusal = "reparse points are not allowed in Codex machine path: $codexLink"
+                $joinedRefusals = [ordered]@{
+                    'an earlier failure in the prefix' = "write failed: access denied; $codexRefusal"
+                    'a rollback failure after the path' = "enterprise hooks: reconcile Codex machine requirements: $codexRefusal; rollback failed: access denied"
+                    'a second line after the path' = "$codexRefusal`nrollback failed: access denied"
+                    'a failure line before the refusal' = "write failed`n$codexRefusal"
+                }
+                # A tail on the same line must not become part of the path. The link is an
+                # ancestor of the path they name, so a pattern that took the tail into the path
+                # would have walked to the link and explained the row.
+                $cursorHooksPath = [IO.Path]::Combine($cursorLink, 'hooks.json')
+                $tailedRefusals = [ordered]@{
+                    'a colon tail after the path' = "enterprise hooks: reparse point in path: ${cursorHooksPath}: rollback failed: access denied"
+                    'a parenthesized tail after the path' = "enterprise hooks: reparse point in path: $cursorHooksPath (access denied)"
+                }
+                foreach ($tailed in $tailedRefusals.GetEnumerator()) {
+                    $tailedRow = [pscustomobject]@{
+                        user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'cursor'; ok = $false
+                        error = $tailed.Value
+                    }
+                    Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $tailedRow)
+                    Assert-TestSyncRefuses "machine folder link with $($tailed.Key)" 'failure-free reconcile'
+                }
+                # The same path alone, below the link, is the refusal the gate explains.
+                $belowRow = [pscustomobject]@{
+                    user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'cursor'; ok = $false
+                    error = "enterprise hooks: reparse point in path: $cursorHooksPath"
+                }
+                Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $belowRow)
+                $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                    -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                    -Activation $activation -InstalledManifestSHA256 $republishedSHA256
+                if (-not [bool]$adoption.ok) {
+                    $failures.Add("a path below the Cursor folder link refused adoption: $($adoption.reason)")
+                }
+                foreach ($joined in $joinedRefusals.GetEnumerator()) {
+                    $joinedRow = [pscustomobject]@{
+                        user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'codex'; ok = $false
+                        error = $joined.Value
+                    }
+                    Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $joinedRow)
+                    Assert-TestSyncRefuses "machine folder link with $($joined.Key)" 'failure-free reconcile'
+                }
+                # The same refusal for a path that is no link now is a stale failure.
+                & cmd.exe /c rmdir "$codexLink" | Out-Null
+                Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $codexRow)
+                Assert-TestSyncRefuses 'machine folder refusal with no link there' 'failure-free reconcile'
+                # DefenseClaw's own trees and paths outside the vendor roots are never explained by a link.
+                $ciscoRow = [pscustomobject]@{
+                    user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'codex'; ok = $false
+                    error = "enterprise hooks: reparse point in path: $ciscoLink"
+                }
+                Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $ciscoRow)
+                Assert-TestSyncRefuses 'a link in the DefenseClaw tree' 'failure-free reconcile'
+                # The first link on the path can be above the vendor root (the root itself a link, as
+                # ProgramData can be): that is no kept vendor folder, and the row stays unexplained.
+                $linkedRootTarget = [IO.Path]::Combine($Root, 'linked-root-target')
+                [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($linkedRootTarget, 'vendor', 'OpenAI'))
+                $linkedRoot = [IO.Path]::Combine($Root, 'linked-root')
+                & cmd.exe /c mklink /J "$linkedRoot" "$linkedRootTarget" | Out-Null
+                $rootLinkRow = [pscustomobject]@{
+                    user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'codex'; ok = $false
+                    error = "enterprise hooks: reparse point in path: $([IO.Path]::Combine($linkedRoot, 'vendor', 'OpenAI', 'Codex'))"
+                }
+                $script:DefenseClawVendorFolderRoots = @([IO.Path]::Combine($linkedRoot, 'vendor'))
+                try {
+                    Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $rootLinkRow)
+                    Assert-TestSyncRefuses 'a link above the vendor root' 'failure-free reconcile'
+                }
+                finally {
+                    $script:DefenseClawVendorFolderRoots = @($vendorRoot)
+                    & cmd.exe /c rmdir "$linkedRoot" | Out-Null
+                }
+                # A link that is there, but not under a vendor root (an account folder, say), is not explained.
+                $profileRow = [pscustomobject]@{
+                    user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'codex'; ok = $false
+                    error = "enterprise hooks: reparse point in path: $outsideLink"
+                }
+                Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $profileRow)
+                Assert-TestSyncRefuses 'a link outside the vendor roots' 'failure-free reconcile'
+            }
+            finally {
+                $script:DefenseClawVendorFolderRoots = $previousVendorRoots
+                $script:DefenseClawVendorLinkExcuse = $previousVendorExcuse
+                foreach ($link in @($cursorLink, $ciscoLink, $outsideLink)) {
+                    & cmd.exe /c rmdir "$link" | Out-Null
+                }
+            }
+            Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $accountLink)
+            Assert-TestSyncRefuses 'account link without trusted count' 'failure-free reconcile'
+            Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, [pscustomobject]@{
+                    user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'claudecode'; ok = $false
+                    error = 'another account failure'
+                }) -AccountLinkFailures 1
+            Assert-TestSyncRefuses 'account link count for another failure' 'account-link count does not match'
             # A failure that lasts until a signed-out account signs in names
             # that account instead of asking for a retry.
             $signedOut = [pscustomobject]@{
@@ -277,6 +487,43 @@ try {
             }
             Set-TestGuardian $false $republishedSHA256 2 1 -Results @([pscustomobject]@{ sid = 'S-1-5-21-1-2-3-1017'; connector = 'codex'; ok = $true }, $signedOut)
             Assert-TestSyncRefuses 'signed-out account' 'sign in, or remove it with its profile, then run this command again: alice (S-1-5-21-1-2-3-1018). The guardian repairs their DefenseClaw hooks only in their own Windows session)'
+            # GAP-1657: a deleted account the guardian reports through the
+            # session wait (its home no longer exists) is accepted as a
+            # removed account, not named as a signed-out one to remove again.
+            $removedRow = [pscustomobject]@{
+                user = 'gone'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'codex'; ok = $false
+                error = 'enterprise hooks: protected target requires repair but its exact active Windows session is unavailable (verification: enterprise hooks: user home C:\Users\gone no longer exists: the account was deleted or its profile folder removed; run Setup /ensure again (file does not exist))'
+            }
+            Set-TestGuardian $false $republishedSHA256 2 1 -Results @([pscustomobject]@{ sid = 'S-1-5-21-1-2-3-1017'; connector = 'codex'; ok = $true }, $removedRow)
+            $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                -Layout $layout `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -Activation $activation `
+                -InstalledManifestSHA256 $republishedSHA256
+            if (-not [bool]$adoption.ok) {
+                $failures.Add("a deleted account reported through the session wait refused the adoption: $($adoption.reason)")
+            }
+            # GAP-1657 (reopened): next to a row waiting for a signed-out
+            # account's next sign-in the gateway counts neither; both are
+            # still excused, and any other failure still refuses.
+            $waitingNextToRemoved = [pscustomobject]@{
+                user = 'dcw-std2'; sid = 'S-1-5-21-1-2-3-1019'; connector = 'hermes'; ok = $false
+                error = "enterprise hooks: protected target waits for its account's next sign-in: DefenseClaw 1.0.2 protected it, and this release's hooks install only in the account's own Windows session; its exact active Windows session is unavailable, so the guardian repairs it at the account's next sign-in (verification: drift)"
+            }
+            Set-TestGuardian $false $republishedSHA256 3 2 -Results @([pscustomobject]@{ sid = 'S-1-5-21-1-2-3-1017'; connector = 'codex'; ok = $true }, $removedRow, $waitingNextToRemoved)
+            $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                -Layout $layout `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -Activation $activation `
+                -InstalledManifestSHA256 $republishedSHA256
+            if (-not [bool]$adoption.ok -or [int64]$adoption.target_count -ne 3) {
+                $failures.Add("a removed profile next to a row waiting for its sign-in refused the adoption: $($adoption.reason)")
+            }
+            Set-TestGuardian $false $republishedSHA256 4 3 -Results @([pscustomobject]@{ sid = 'S-1-5-21-1-2-3-1017'; connector = 'codex'; ok = $true }, $removedRow, $waitingNextToRemoved, [pscustomobject]@{
+                    sid = 'S-1-5-21-1-2-3-1020'; connector = 'codex'; ok = $false
+                    error = 'enterprise hooks: write managed Claude Code hook runtime: access is denied'
+                })
+            Assert-TestSyncRefuses 'removed profile and waiting row next to another failure' 'failure-free reconcile'
             # A deleted account whose profile folder was removed fails every
             # reconcile until the enumerator's next pass drops its rows; the
             # guardian status counts exactly those failures, and the adoption
@@ -302,6 +549,83 @@ try {
             if (-not [bool]$adoption.ok -or [int64]$adoption.target_count -ne 2) {
                 $failures.Add("a row waiting for its account's next sign-in refused the adoption: $($adoption.reason)")
             }
+            # #1105, GAP-0211: the 1.0.2 -> 1.0.3 upgrade with a signed-out
+            # account whose hooks folder had one extra permission entry
+            # returned 1603 twice. Only that failure of the account's own
+            # DefenseClaw folder, while it is signed out, waits for its next
+            # sign-in: the adoption goes on and names the folder.
+            $unavailable = 'enterprise hooks: protected target requires repair but its exact active Windows session is unavailable (verification: '
+            $hookCheck = 'enterprise hooks: managed hook directory verification failed: '
+            $folderError = $unavailable + $hookCheck + 'enterprise hooks: managed Windows DACL on C:\Users\r103gb13-u1\.defenseclaw\hooks has 8 ACEs, expected 7)'
+            $healthy = [pscustomobject]@{ sid = 'S-1-5-21-1-2-3-1017'; user_home = 'C:\Users\alice'; connector = 'codex'; ok = $true }
+            $newFolderRow = {
+                param([string]$Message, [string]$UserHome = 'C:\Users\r103gb13-u1')
+                return [pscustomobject]@{
+                    user = 'DCFC\r103gb13-u1'; sid = 'S-1-5-21-1-2-3-1123'; user_home = $UserHome
+                    connector = 'claudecode'; ok = $false; error = $Message
+                }
+            }
+            $folderEntry = 'DCFC\r103gb13-u1 (S-1-5-21-1-2-3-1123): C:\Users\r103gb13-u1\.defenseclaw\hooks'
+            Set-TestGuardian $false $republishedSHA256 2 1 -Results @($healthy, (& $newFolderRow $folderError))
+            $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                -Layout $layout `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -Activation $activation `
+                -InstalledManifestSHA256 $republishedSHA256
+            if (-not [bool]$adoption.ok -or [int64]$adoption.target_count -ne 2 -or
+                @($adoption.untrusted_folders).Count -ne 1 -or
+                [string]@($adoption.untrusted_folders)[0] -cne $folderEntry) {
+                $failures.Add("a signed-out account's untrusted DefenseClaw folder refused the adoption: $($adoption.reason) [$(@($adoption.untrusted_folders) -join '; ')]")
+            }
+            # It stays excused next to a row waiting for its sign-in.
+            $waitingRow = [pscustomobject]@{
+                sid = 'S-1-5-21-1-2-3-1124'; user_home = 'C:\Users\bob'; connector = 'codex'; ok = $false
+                error = "enterprise hooks: protected target waits for its account's next sign-in: DefenseClaw 1.0.2 protected it, and this release's hooks install only in the account's own Windows session; its exact active Windows session is unavailable, so the guardian repairs it at the account's next sign-in (verification: drift)"
+            }
+            Set-TestGuardian $false $republishedSHA256 3 2 -Results @($healthy, (& $newFolderRow $folderError), $waitingRow)
+            $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                -Layout $layout `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -Activation $activation `
+                -InstalledManifestSHA256 $republishedSHA256
+            if (-not [bool]$adoption.ok -or [int64]$adoption.target_count -ne 3) {
+                $failures.Add("an untrusted folder next to a waiting row refused the adoption: $($adoption.reason)")
+            }
+            # No other failure is excused: another account's folder, a
+            # junction, a connected account, any other failed row, or a row
+            # only the gateway could excuse.
+            Set-TestGuardian $false $republishedSHA256 2 1 -Results @($healthy, (& $newFolderRow $folderError 'C:\Users\other'))
+            Assert-TestSyncRefuses 'untrusted folder of another account' 'sign in, or remove it with its profile, then run this command again: DCFC\r103gb13-u1 (S-1-5-21-1-2-3-1123)'
+            Set-TestGuardian $false $republishedSHA256 2 1 -Results @($healthy, (& $newFolderRow ($unavailable + $hookCheck + 'enterprise hooks: symlinks, junctions, and reparse points are not allowed: C:\Users\r103gb13-u1\.defenseclaw\hooks)')))
+            Assert-TestSyncRefuses 'signed-out junction' 'sign in, or remove it with its profile'
+            Set-TestGuardian $false $republishedSHA256 2 1 -Results @($healthy, (& $newFolderRow ($hookCheck + 'enterprise hooks: managed Windows DACL on C:\Users\r103gb13-u1\.defenseclaw\hooks has 8 ACEs, expected 7')))
+            Assert-TestSyncRefuses 'connected account with an untrusted folder' 'failure-free reconcile'
+            $otherRow = [pscustomobject]@{
+                sid = 'S-1-5-21-1-2-3-1124'; user_home = 'C:\Users\bob'; connector = 'codex'; ok = $false
+                error = 'enterprise hooks: write managed Claude Code hook runtime: access is denied'
+            }
+            Set-TestGuardian $false $republishedSHA256 3 2 -Results @($healthy, (& $newFolderRow $folderError), $otherRow)
+            Assert-TestSyncRefuses 'untrusted folder next to another failure' 'failure-free reconcile'
+            $removedRow = [pscustomobject]@{
+                sid = 'S-1-5-21-1-2-3-1125'; user_home = 'C:\Users\gone'; connector = 'codex'; ok = $false
+                error = 'enterprise hooks: inspect profile: the system cannot find the path specified'
+            }
+            Set-TestGuardian $false $republishedSHA256 3 2 -Results @($healthy, (& $newFolderRow $folderError), $removedRow) -RemovedAccountFailures 1
+            Assert-TestSyncRefuses 'untrusted folder next to a removed account' 'failure-free reconcile'
+            if ($canRewrite) {
+                # The rebind before a servicing transaction keeps the folder
+                # for the result (signed_out_untrusted_folders).
+                $script:DefenseClawSignedOutUntrustedFolders = @()
+                Set-TestGuardian $false $republishedSHA256 2 1 -Results @($healthy, (& $newFolderRow $folderError))
+                if (-not (Invoke-TestSync) -or
+                    @($script:DefenseClawSignedOutUntrustedFolders).Count -ne 1 -or
+                    [string]@($script:DefenseClawSignedOutUntrustedFolders)[0] -cne $folderEntry) {
+                    $failures.Add("the rebind did not keep the signed-out untrusted folder: $(@($script:DefenseClawSignedOutUntrustedFolders) -join '; ')")
+                }
+                $script:DefenseClawSignedOutUntrustedFolders = @()
+                Set-TestMetadata $activatedSHA256 'activated' 1
+            }
+
             Set-TestGuardian $true $republishedSHA256 2 0 '2026-09-27T15:50:44Z'
             Assert-TestSyncRefuses 'guardian records from two reconciles' 'state record'
             Set-TestGuardian $true $republishedSHA256 2 -NoAuthorization
@@ -323,8 +647,46 @@ try {
 
             if ($canRewrite) {
                 $script:TestAclWrites.Clear()
-                if (-not (Invoke-TestSync)) {
+                # The manifest rebind changes the metadata body and must use
+                # the same protected publication path as other metadata writes.
+                $script:TestMetadataPath = $layout.MetadataPath
+                $script:TestMetadataPublicationCalls = 0
+                $script:TestMetadataPublicationBytes = $null
+                $beforePublication = Get-TestMetadataText
+                $script:TestOriginalMetadataWriter = (
+                    Microsoft.PowerShell.Core\Get-Command `
+                        -Name Write-DefenseClawDeploymentMetadataBytes `
+                        -CommandType Function
+                ).ScriptBlock
+                $metadataWriterProbe = {
+                    param([string]$Path, [byte[]]$Bytes)
+                    if ($Path -cne $script:TestMetadataPath) {
+                        throw 'manifest rebind selected another metadata path'
+                    }
+                    $script:TestMetadataPublicationCalls++
+                    $script:TestMetadataPublicationBytes = [byte[]]$Bytes.Clone()
+                    & $script:TestOriginalMetadataWriter -Path $Path -Bytes $Bytes
+                }
+                Microsoft.PowerShell.Management\Set-Item `
+                    -Path Function:\Write-DefenseClawDeploymentMetadataBytes `
+                    -Value $metadataWriterProbe
+                try {
+                    $didRebind = Invoke-TestSync
+                }
+                finally {
+                    Microsoft.PowerShell.Management\Set-Item `
+                        -Path Function:\Write-DefenseClawDeploymentMetadataBytes `
+                        -Value $script:TestOriginalMetadataWriter
+                }
+                if (-not $didRebind) {
                     $failures.Add('guardian-activated republication was not rebound')
+                }
+                if ($script:TestMetadataPublicationCalls -ne 1 -or
+                    $null -eq $script:TestMetadataPublicationBytes -or
+                    $beforePublication -ceq (Get-TestMetadataText) -or
+                    [Text.Encoding]::UTF8.GetString($script:TestMetadataPublicationBytes) -cne
+                        (Get-TestMetadataText)) {
+                    $failures.Add('manifest rebind did not publish its changed metadata through the protected writer')
                 }
                 $rebound = Get-DefenseClawDeploymentMetadata -Layout $layout -Required
                 $record = $rebound.managed_hooks_activation
@@ -352,6 +714,64 @@ try {
                 if ((Invoke-TestSync) -or (Get-TestMetadataText) -cne $after) {
                     $failures.Add('a second rebind was not a no-op')
                 }
+            }
+
+            # GAP-1417: Repair and Upgrade install their authenticated
+            # gateway inside the transaction. Before it, a missing or
+            # replaced installed gateway cannot prove the guardian's records,
+            # so the staged replacement reads them; a recorded installed
+            # gateway still does, and a call without a replacement (Verify,
+            # Reconcile, Uninstall) keeps the installed one.
+            if ($canRewrite) {
+                $layout.GatewayPath = [IO.Path]::Combine($installRoot, 'bin', 'defenseclaw-gateway.exe')
+                [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($layout.GatewayPath))
+                $recordedGateway = [IO.Path]::Combine($Root, 'recorded-gateway.bin')
+                [IO.File]::WriteAllText($recordedGateway, 'recorded gateway', $utf8)
+                $recordedGatewayHash = Get-TestSha256 $recordedGateway
+                $replacement = @{ path = [IO.Path]::Combine($Root, 'staged-gateway.exe'); sha256 = 'staged' }
+                foreach ($case in @(
+                    @{ label = 'missing installed gateway'; bytes = $null; source = $replacement; want = 'replacement' },
+                    @{ label = 'replaced installed gateway'; bytes = 'tampered gateway'; source = $replacement; want = 'replacement' },
+                    @{ label = 'recorded installed gateway'; bytes = 'recorded gateway'; source = $replacement; want = 'installed' },
+                    @{ label = 'missing gateway without a replacement'; bytes = $null; source = $null; want = 'installed' }
+                )) {
+                    if ($null -eq $case.bytes) {
+                        if ([IO.File]::Exists($layout.GatewayPath)) {
+                            [IO.File]::Delete($layout.GatewayPath)
+                        }
+                    }
+                    else {
+                        [IO.File]::WriteAllText($layout.GatewayPath, [string]$case.bytes, $utf8)
+                    }
+                    Set-TestMetadata $activatedSHA256 'activated' 1 $recordedGatewayHash
+                    Set-TestGuardian $true $republishedSHA256 2
+                    $script:TestGuardianSources.Clear()
+                    try {
+                        if (-not (Sync-DefenseClawStandaloneManagedHooksActivationBinding `
+                                -Layout $layout `
+                                -GatewayServiceName 'DefenseClawGateway' `
+                                -GatewaySource $case.source)) {
+                            $failures.Add("$($case.label): the republished manifest was not rebound")
+                        }
+                    }
+                    catch {
+                        $failures.Add("$($case.label): the rebind refused: $($_.Exception.Message)")
+                    }
+                    $usedReplacement = $script:TestGuardianSources.Count -gt 0 -and
+                        @($script:TestGuardianSources | Microsoft.PowerShell.Core\Where-Object {
+                            -not [object]::ReferenceEquals($_, $replacement)
+                        }).Count -eq 0
+                    $usedInstalled = $script:TestGuardianSources.Count -gt 0 -and
+                        @($script:TestGuardianSources | Microsoft.PowerShell.Core\Where-Object {
+                            $null -ne $_
+                        }).Count -eq 0
+                    if (($case.want -ceq 'replacement' -and -not $usedReplacement) -or
+                        ($case.want -ceq 'installed' -and -not $usedInstalled)) {
+                        $failures.Add("$($case.label): the guardian records were not read with the $($case.want) gateway")
+                    }
+                }
+                $layout.Remove('GatewayPath')
+                Set-TestMetadata $activatedSHA256 'activated' 1
             }
 
             # Secure Client never adopts, and its message is unchanged.
@@ -389,8 +809,20 @@ try {
             if (-not $functions['Assert-DefenseClawEnterpriseDeployment'].Contains('Get-DefenseClawStandaloneManifestAdoption')) {
                 $failures.Add('the deployment assertion does not adopt a guardian-activated manifest')
             }
+            foreach ($name in @('Assert-DefenseClawEnterpriseDeployment', 'Sync-DefenseClawStandaloneManagedHooksActivationBinding')) {
+                if (-not $functions[$name].Contains('Add-DefenseClawSignedOutUntrustedFolders -Adoption $adoption')) {
+                    $failures.Add("$name does not keep the signed-out untrusted folders for the result")
+                }
+            }
+            if (-not $functions['Get-DefenseClawLifecycleStatus'].Contains("`$status['signed_out_untrusted_folders']")) {
+                $failures.Add('the result does not report the signed-out untrusted folders')
+            }
             $dispatcher = $functions['Invoke-DefenseClawEnterpriseLifecycle']
             $syncCalls = ([regex]::Matches($dispatcher, 'Sync-DefenseClawStandaloneManagedHooksActivationBinding')).Count
+            if (-not $dispatcher.Contains("`$Action -in @('Upgrade', 'Repair') -and `$sources.ContainsKey('gateway')") -or
+                -not $dispatcher.Contains('-GatewaySource $bindingGatewaySource')) {
+                $failures.Add('Upgrade and Repair do not let their replacement gateway prove the guardian records (GAP-1417)')
+            }
             if ($syncCalls -ne 2 -or
                 $dispatcher.IndexOf('Sync-DefenseClawStandaloneManagedHooksActivationBinding') -gt
                     $dispatcher.IndexOf('return Invoke-DefenseClawReconcileLifecycle') -or

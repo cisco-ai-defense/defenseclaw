@@ -74,6 +74,32 @@ rules:
     severity: CRITICAL
     confidence: 0.95
     tags: [execution, download-exec]
+  - id: CMD-WRAPPED-DOWNLOAD-EXEC
+    tool_call_only: true
+    expression: 'false'
+    pattern: 'a^'
+    title: "Download piped through a privilege wrapper to a shell"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [execution, download-exec]
+  - id: CMD-SUBST-DOWNLOAD-EXEC
+    tool_call_only: true
+    expression: 'false'
+    pattern: 'a^'
+    title: "Downloaded command substitution evaluated by a shell"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [execution, download-exec]
+  - id: CMD-PYTHON-SOCKET-CONNECT
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.program in ['python', 'python2', 'python3'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONNECT in c.operations)
+    pattern: 'a^'
+    title: "Python code connects to a nonlocal socket"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [execution, network]
   - id: CMD-PIPE-BASE64
     tool_call_only: true
     expression: >-
@@ -730,7 +756,7 @@ rules:
     expression: >-
       f.tool in ['sql_query', 'db.execute'] ||
       f.commands.exists(c, c.argv_complete &&
-      c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd'])
+      c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd', 'snowsql'])
     # Strict also stays alert-only, including for authenticated structured
     # connectors: posture alone does not prove that an exact database mutation
     # is unauthorized or targets a protected resource.
@@ -1006,8 +1032,10 @@ rules:
     tags: [authentication, privilege, linux, pam, tampering, exact-actionfacts]
   - id: tamper.docker_insecure_http_registry
     tool_call_only: true
-    # Strict blocks only an authoritative full daemon.json replacement whose
-    # sole setting enables a literal, non-loopback HTTP registry.
+    # Strict blocks an authoritative native file-tool write of daemon.json
+    # (whole file, edit or patch) that lists a non-loopback insecure registry
+    # in any spelling Docker accepts (host, host:port, IP, CIDR, http:// or
+    # https:// URL).
     pattern: 'a^'
     title: "Configure Docker to trust an insecure HTTP registry"
     severity: CRITICAL
@@ -1090,7 +1118,7 @@ rules:
   - id: impact.linux_magic_sysrq_destruction
     tool_call_only: true
     expression: >-
-      f.paths.exists(p, p.normalized == '/proc/sysrq-trigger')
+      f.paths.exists(p, p.resolved == '/proc/sysrq-trigger' || p.normalized == '/proc/sysrq-trigger')
     pattern: '(?i)(?:^|[;\r\n]\s*)echo\s+["'']?[bocei]["'']?\s*>\s*/proc/sysrq-trigger(?:\s|$)'
     title: "Trigger destructive Linux Magic SysRq action"
     severity: CRITICAL
@@ -1109,8 +1137,10 @@ rules:
   - id: tamper.posix_system_log_destruction
     tool_call_only: true
     expression: >-
-      f.paths.exists(p, p.normalized in ['/var/log/messages', '/var/log/security',
-      '/var/log/syslog', '/var/log/auth.log', '/var/log/secure', '/var/log/audit/audit.log'] &&
+      f.paths.exists(p, (p.resolved in ['/var/log/messages', '/var/log/security',
+      '/var/log/syslog', '/var/log/auth.log', '/var/log/secure', '/var/log/audit/audit.log'] ||
+      p.normalized in ['/var/log/messages', '/var/log/security',
+      '/var/log/syslog', '/var/log/auth.log', '/var/log/secure', '/var/log/audit/audit.log']) &&
       p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
       defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])
     pattern: '(?i)(?:^|[;"\r\n]\s*)(?:cat\s+/dev/(?:null|zero)\s*>\s*/var/log/(?:messages|security|syslog|auth\.log|secure|audit/audit\.log)|echo\s+(?:''''|"")\s*>\s*/var/log/(?:messages|security|syslog|auth\.log|secure|audit/audit\.log)|(?:sudo\s+)?(?:/usr/bin/)?truncate\s+(?:-s\s+0|--size=0)\s+/var/log/(?:(?:messages|security|syslog|secure|audit/audit\.log)|auth\.log(?:/current\.log)?)(?:\s+2>/dev/null)?(?:\s+\|\|\s+true)?|chattr\s+-i\s+/var/log/audit/audit\.log\.1(?:\s+2>/dev/null)?\s*;\s*(?:/usr/bin/)?truncate\s+-s\s+0\s+/var/log/audit/audit\.log\.1|(?:rm\s+-(?:rf|fr)|unlink)\s+/var/log/(?:messages|security|syslog|auth\.log|secure|audit/audit\.log)|(?:sudo\s+)?rm\s+-f\s+/var/log/journal/\*/system\.journal|(?:sudo\s+)?journalctl\s+--vacuum-time=0)(?:\s|"|$)'
@@ -1559,7 +1589,7 @@ rules:
     tool_call_only: true
     expression: >-
       f.paths.exists(p, p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE &&
-      p.normalized.startsWith('/usr/bin/python3.'))
+      (p.resolved.startsWith('/usr/bin/python3.') || p.normalized.startsWith('/usr/bin/python3.')))
     # The semantic owner requires a matching versioned interpreter backup,
     # literal four-line PYTHONPATH wrapper, exact `.real` delegation, and one
     # unconditional atomic replacement from the same /usr/bin staging path.

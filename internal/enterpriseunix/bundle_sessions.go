@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -18,8 +19,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 )
 
@@ -55,7 +58,10 @@ func (e *Env) UnprotectedSessions(parent context.Context) enterprisestatus.Sessi
 		}
 		return enterprisestatus.SessionRestartStatus{State: "unknown", Entries: []enterprisestatus.SessionEntry{}, Reason: err.Error()}
 	}
-	changed := e.bundleManagedSettingsTimes(aliases)
+	changed, err := e.bundleManagedSettingsTimes()
+	if err != nil {
+		return enterprisestatus.SessionRestartStatus{State: "unknown", Entries: []enterprisestatus.SessionEntry{}, Reason: err.Error()}
+	}
 	return enterprisestatus.ScanSessions(func() ([]enterprisestatus.SessionProcess, error) { return processes, nil }, changed, true)
 }
 
@@ -84,12 +90,30 @@ func bundleAgentName(name string, aliases map[string]string) string {
 	return aliases[strings.TrimSuffix(name, "-agent")]
 }
 
-func (e *Env) bundleManagedSettingsTimes(aliases map[string]string) map[string]time.Time {
+// bundleManagedSettingsTimes dates the managed settings of each connector
+// the installed config enables. A session of an agent DefenseClaw does not
+// manage on this device loads no DefenseClaw hook before or after a bundle,
+// so no restart brings it under enforcement: it is not counted (sidecar F04;
+// management-agent.md 4.3 counts sessions running "when a bundle enabled or
+// changed its connector").
+func (e *Env) bundleManagedSettingsTimes() (map[string]time.Time, error) {
+	raw, err := readBounded(e.P(e.Layout.ConfigPath), maxInputBytes)
+	if err != nil {
+		return nil, fmt.Errorf("read the installed config for its enabled connectors: %w", err)
+	}
+	cfg, err := e.loadConfigCandidate(raw)
+	if err == nil && cfg == nil {
+		err = errors.New("empty config")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load the installed config for its enabled connectors: %w", err)
+	}
+	enabled := enterprisehooks.EffectiveUnixHookConnectors(cfg, connector.NewDefaultRegistry())
 	changed := map[string]time.Time{}
 	opts := enterprisepolicy.LayoutOptions(e.Layout, "", "")
 	opts.Root = e.Root
-	for _, connector := range aliases {
-		target, ok := enterprisepolicy.TargetFor(connector)
+	for _, name := range enabled {
+		target, ok := enterprisepolicy.TargetFor(name)
 		if !ok {
 			continue
 		}
@@ -100,11 +124,11 @@ func (e *Env) bundleManagedSettingsTimes(aliases map[string]string) map[string]t
 		for _, path := range paths {
 			// Claude's first path is an administrator file; its second path
 			// is DefenseClaw's hook drop-in.
-			if connector == enterprisepolicy.ConnectorClaudeCode && !strings.HasSuffix(path, enterprisepolicy.DefenseClawDropInName) {
+			if name == enterprisepolicy.ConnectorClaudeCode && !strings.HasSuffix(path, enterprisepolicy.DefenseClawDropInName) {
 				continue
 			}
-			if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() && info.ModTime().After(changed[connector]) {
-				changed[connector] = info.ModTime()
+			if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() && info.ModTime().After(changed[name]) {
+				changed[name] = info.ModTime()
 			}
 		}
 	}
@@ -114,30 +138,21 @@ func (e *Env) bundleManagedSettingsTimes(aliases map[string]string) map[string]t
 		var state enterprisestatus.PolicyStateRecord
 		if json.Unmarshal(raw, &state) == nil {
 			if at, err := time.Parse(time.RFC3339Nano, state.AppliedAt); err == nil {
-				for _, connector := range aliases {
-					if changed[connector].IsZero() {
-						changed[connector] = at
+				for _, name := range enabled {
+					if changed[name].IsZero() {
+						changed[name] = at
 					}
 				}
 			}
 		}
 	}
-	return changed
+	return changed, nil
 }
 
 func (e *Env) bundleLinuxProcesses(ctx context.Context, aliases map[string]string) ([]enterprisestatus.SessionProcess, error) {
-	stat, err := readBounded(e.P("/proc/stat"), 1<<20)
+	boot, err := e.linuxBootSeconds()
 	if err != nil {
 		return nil, err
-	}
-	var boot int64
-	for _, line := range strings.Split(string(stat), "\n") {
-		if text, ok := strings.CutPrefix(line, "btime "); ok {
-			boot, _ = strconv.ParseInt(strings.TrimSpace(text), 10, 64)
-		}
-	}
-	if boot == 0 {
-		return nil, errors.New("missing Linux boot time")
 	}
 	entries, err := os.ReadDir(e.P("/proc"))
 	if err != nil {
@@ -196,43 +211,55 @@ func (e *Env) bundleLinuxProcesses(ctx context.Context, aliases map[string]strin
 		if account, err := user.LookupId(who); err == nil {
 			who = account.Username
 		}
-		out = append(out, enterprisestatus.SessionProcess{PID: pid, User: who, Agent: connector,
-			StartedAt: time.Unix(boot, 0).Add(time.Duration(ticks) * time.Second / 100)})
+		ppid, _ := strconv.Atoi(fields[1])
+		out = append(out, enterprisestatus.SessionProcess{PID: pid, PPID: ppid, User: who, Agent: connector,
+			StartedAt:  time.Unix(boot, 0).Add(time.Duration(ticks) * time.Second / 100),
+			Background: codexBackgroundProcess(argv)})
 	}
 	return out, nil
 }
 
+// bundleDarwinProcesses lists the agent processes of the bundle scan from the
+// lifecycle's own macOS process scan (darwinAgentSessionsWithError: the
+// kern.procargs2 arguments and the parent pid), so bundle status and the
+// lifecycle's agent_sessions_restart_required name one session by the same
+// pid. This scan matched the process name instead, which is node for the npm
+// Codex launcher, so it named the native codex child while the lifecycle
+// named the launcher, and enforcement_pending of an ensure, a bundle apply or
+// status counted each such session twice (rel-1-0-6 GAP-0183). A process
+// whose arguments cannot be read still counts when its name is an agent's,
+// as before.
 func (e *Env) bundleDarwinProcesses(ctx context.Context, aliases map[string]string) ([]enterprisestatus.SessionProcess, error) {
-	result, err := e.Runner.Run(ctx, "ps", "-axww", "-o", "pid=,user=,lstart=,comm=")
+	sessions, err := e.darwinAgentSessionsWithError(ctx)
+	if err == nil {
+		err = ctx.Err()
+	}
 	if err != nil {
 		return nil, err
 	}
+	if len(sessions) > bundleSessionProcessCap {
+		return nil, errors.New("process cap reached")
+	}
+	names := map[int]string{}
 	var out []enterprisestatus.SessionProcess
-	for i, line := range strings.Split(string(result.Stdout), "\n") {
-		if i > bundleSessionProcessCap {
-			return nil, errors.New("process cap reached")
-		}
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 8 {
+	for _, session := range sessions {
+		if session.Unknown && !agentCLINames[session.Agent] {
 			continue
 		}
-		pid, err := strconv.Atoi(fields[0])
-		if err != nil {
+		connector := bundleAgentName(session.Agent, aliases)
+		if connector == "" {
 			continue
 		}
-		started, err := time.ParseInLocation("Mon Jan 2 15:04:05 2006", strings.Join(fields[2:7], " "), time.Local)
-		if err != nil {
-			continue
+		who, ok := names[session.UID]
+		if !ok {
+			who = strconv.Itoa(session.UID)
+			if account, err := user.LookupId(who); err == nil {
+				who = account.Username
+			}
+			names[session.UID] = who
 		}
-		if !agentCLINames[filepath.Base(fields[7])] {
-			continue
-		}
-		if connector := bundleAgentName(fields[7], aliases); connector != "" {
-			out = append(out, enterprisestatus.SessionProcess{PID: pid, User: fields[1], Agent: connector, StartedAt: started})
-		}
+		out = append(out, enterprisestatus.SessionProcess{PID: session.PID, PPID: session.PPID, User: who, Agent: connector, StartedAt: session.Started,
+			Background: session.background()})
 	}
 	return out, nil
 }

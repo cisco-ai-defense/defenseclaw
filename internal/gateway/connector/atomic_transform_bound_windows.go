@@ -13,6 +13,8 @@ import (
 	"strings"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -136,6 +138,41 @@ func validateAtomicTransformWindowsPrivateHandle(handle windows.Handle) error {
 }
 
 func validateAtomicTransformWindowsPrivateHandleForOwner(handle windows.Handle, expectedOwner *windows.SID) error {
+	return validateAtomicTransformWindowsPrivateHandleShape(handle, expectedOwner, expectedOwner != nil)
+}
+
+// validatePrivateOwnedBy is validatePrivate for a directory the enrolled
+// user created privately in that user's own profile: owner is that user, and
+// only that user, SYSTEM and Administrators hold access. A SYSTEM uninstall
+// meets such a target-local legacy (V1) compare-and-swap namespace beside the
+// user's Claude settings; its owner is the user, never the caller
+// (GAP-1437). A folder the user made the ordinary way inherits the
+// .claude DACL instead of a protected one, including the read-only entry a
+// managed install grants its gateway service there. The owner can rewrite
+// that DACL at any time anyway, so only its effective entries are checked,
+// and the managed gateway service may hold read access (GAP-1539).
+func (dir *atomicTransformBoundDirectory) validatePrivateOwnedBy(owner *windows.SID) error {
+	if owner == nil {
+		return fmt.Errorf("bound compare-and-swap state directory has no expected owner")
+	}
+	if err := dir.validate(); err != nil {
+		return err
+	}
+	if err := validateAtomicTransformBoundDirectoryPlatform(dir.file, false); err != nil {
+		return err
+	}
+	return validateAtomicTransformWindowsPrivateHandleACL(windows.Handle(dir.file.Fd()), owner, false, true)
+}
+
+func validateAtomicTransformWindowsPrivateHandleShape(
+	handle windows.Handle, expectedOwner *windows.SID, requireAdministrators bool,
+) error {
+	return validateAtomicTransformWindowsPrivateHandleACL(handle, expectedOwner, requireAdministrators, false)
+}
+
+func validateAtomicTransformWindowsPrivateHandleACL(
+	handle windows.Handle, expectedOwner *windows.SID, requireAdministrators, enrolledUserLegacy bool,
+) error {
 	descriptor, err := windows.GetSecurityInfo(
 		handle, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
@@ -147,7 +184,7 @@ func validateAtomicTransformWindowsPrivateHandleForOwner(handle windows.Handle, 
 	if err != nil {
 		return err
 	}
-	if control&windows.SE_DACL_PROTECTED == 0 {
+	if control&windows.SE_DACL_PROTECTED == 0 && !enrolledUserLegacy {
 		return fmt.Errorf("bound private compare-and-swap object has an inheritable DACL")
 	}
 	owner, _, err := descriptor.Owner()
@@ -178,6 +215,12 @@ func validateAtomicTransformWindowsPrivateHandleForOwner(handle windows.Handle, 
 	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
 	if err != nil {
 		return err
+	}
+	var gatewayReader *windows.SID
+	if enrolledUserLegacy && managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
+		if sid, sidErr := managed.WindowsServiceAccountSID(os.Getenv(managed.WindowsServiceAccountEnv)); sidErr == nil {
+			gatewayReader = sid
+		}
 	}
 	var ownerMask, systemMask, administratorsMask windows.ACCESS_MASK
 	for index := uint16(0); index < dacl.AceCount; index++ {
@@ -218,6 +261,8 @@ func validateAtomicTransformWindowsPrivateHandleForOwner(handle windows.Handle, 
 			if !inheritOnly {
 				administratorsMask |= ace.Mask
 			}
+		case gatewayReader != nil && sid.Equals(gatewayReader) && !hookAPIWindowsWriteLikeAccess(ace.Mask, true):
+			// The managed gateway service's read-only entry on .claude.
 		default:
 			return fmt.Errorf("bound compare-and-swap state directory grants access to another principal")
 		}
@@ -236,7 +281,7 @@ func validateAtomicTransformWindowsPrivateHandleForOwner(handle windows.Handle, 
 	if ownerMask&full != full || systemMask&full != full {
 		return fmt.Errorf("bound private compare-and-swap object does not grant owner and SYSTEM full effective access")
 	}
-	if expectedOwner != nil && administratorsMask&full != full {
+	if requireAdministrators && administratorsMask&full != full {
 		return fmt.Errorf("bound private compare-and-swap object does not grant Administrators full effective access")
 	}
 	return nil
@@ -359,13 +404,16 @@ func openAtomicTransformBoundFilePlatform(parent *os.File, name string, rename b
 	return os.NewFile(uintptr(handle), name), nil
 }
 
-// atomicTransformFileRenameInformationEx is FileRenameInformationEx, which
-// x/sys/windows does not name.
-const atomicTransformFileRenameInformationEx = 65
-
 func renameAtomicTransformBoundFilePlatform(
 	parent, source *os.File, targetName string, replace bool,
 ) error {
+	if replace {
+		err := safefile.ReplaceFileInDirectory(parent, source, targetName)
+		if err != nil {
+			return err
+		}
+		return windows.FlushFileBuffers(windows.Handle(source.Fd()))
+	}
 	name, err := windows.UTF16FromString(targetName)
 	if err != nil {
 		return err
@@ -384,26 +432,7 @@ func renameAtomicTransformBoundFilePlatform(
 			windows.Handle(source.Fd()), &status, &buffer[0], uint32(len(buffer)), class,
 		)
 	}
-	if replace {
-		// A replace of a destination with FILE_ATTRIBUTE_READONLY fails with
-		// access denied. Anyone who can write the file can set that
-		// attribute, so it let a standard user keep the guardian from
-		// restoring DefenseClaw's registration in their own agent files
-		// (GAP-1439). The Ex class (same layout, Flags in place of
-		// ReplaceIfExists) replaces it; volumes without the class get the
-		// plain rename.
-		info.ReplaceIfExists = windows.FILE_RENAME_REPLACE_IF_EXISTS |
-			windows.FILE_RENAME_IGNORE_READONLY_ATTRIBUTE
-		err = rename(atomicTransformFileRenameInformationEx)
-		if errors.Is(err, windows.STATUS_INVALID_PARAMETER) ||
-			errors.Is(err, windows.STATUS_INVALID_INFO_CLASS) ||
-			errors.Is(err, windows.STATUS_NOT_SUPPORTED) {
-			info.ReplaceIfExists = 1
-			err = rename(windows.FileRenameInformation)
-		}
-	} else {
-		err = rename(windows.FileRenameInformation)
-	}
+	err = rename(windows.FileRenameInformation)
 	if err != nil {
 		if errors.Is(err, windows.STATUS_OBJECT_NAME_COLLISION) || errors.Is(err, windows.STATUS_OBJECT_NAME_EXISTS) {
 			return errAtomicTransformConflict
@@ -548,7 +577,12 @@ func withAtomicTransformBoundProtocolLock(
 	if err := validateAtomicTransformWindowsHandleType(handle, false); err != nil {
 		return err
 	}
-	if err := validateAtomicTransformBoundFilePrivatePlatform(file); err != nil {
+	// The protocol lock holds no data, so its protection is repaired in place
+	// (or rewritten by its owner) rather than failing every config transform
+	// for this data directory; drift that cannot be repaired is harmless for
+	// a mutex and is accepted and logged.
+	driftAccepted, err := ensureAtomicTransformBoundProtocolLockProtection(dir, name, handle)
+	if err != nil {
 		return err
 	}
 	info, err := file.Stat()
@@ -576,6 +610,9 @@ func withAtomicTransformBoundProtocolLock(
 	}
 	namedIdentity, identityErr := atomicTransformOpenFileIdentity(named)
 	namedPrivateErr := validateAtomicTransformBoundFilePrivatePlatform(named)
+	if driftAccepted {
+		namedPrivateErr = nil
+	}
 	namedCloseErr := named.Close()
 	if identityErr != nil || namedPrivateErr != nil || namedCloseErr != nil {
 		return errors.Join(identityErr, namedPrivateErr, namedCloseErr)
@@ -584,4 +621,31 @@ func withAtomicTransformBoundProtocolLock(
 		return fmt.Errorf("bound V2 protocol lock path does not name the held lock inode")
 	}
 	return fn()
+}
+
+func ensureAtomicTransformBoundProtocolLockProtection(
+	dir *atomicTransformBoundDirectory, name string, handle windows.Handle,
+) (bool, error) {
+	validate := func(h windows.Handle) error {
+		if err := validateAtomicTransformWindowsPrivateHandle(h); err != nil {
+			return managedDriftError{err: err}
+		}
+		return nil
+	}
+	userSID, err := windowsEffectiveUserSID()
+	if err != nil || userSID == nil {
+		return false, fmt.Errorf("resolve current user for bound V2 protocol lock: %w", err)
+	}
+	if err := ensureWindowsManagedLockProtection(windowsManagedLockRepair{
+		Label:      "bound V2 protocol lock",
+		Path:       filepath.Join(dir.path, name),
+		Handle:     handle,
+		Validate:   validate,
+		Canonical:  atomicTransformPrivateSecurityDescriptor,
+		Policy:     managedDriftPolicy{Canonical: managedPrivateCanonicalModel(userSID.String()), ExtraTrusted: []string{userSID.String()}},
+		SelfRepair: true,
+	}); err != nil {
+		return false, err
+	}
+	return validate(handle) != nil, nil
 }

@@ -22,7 +22,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-var managedScanWindowsLayout = managed.StandaloneWindowsLayout
+var managedScanWindowsLayout = windowsManagedStandaloneLayout
 
 // managedScanReadFile reads the managed gateway's config and token file; a
 // seam for tests.
@@ -101,3 +101,7 @@ func managedWindowsGatewayBase(layout managed.StandaloneLayout) (string, error) 
 	}
 	return "http://" + net.JoinHostPort(host, strconv.Itoa(port)), nil
 }
+
+// managedScanUnavailable: the managed Windows package ships the scanner
+// runtime, so every scan kind runs through the managed gateway there.
+func managedScanUnavailable(string, string) error { return nil }

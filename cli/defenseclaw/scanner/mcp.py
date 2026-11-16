@@ -33,15 +33,22 @@ import json
 import logging
 import ntpath
 import os
+import re
+import select
 import shutil
+import signal
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
+import time
+from collections import Counter
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import urlparse
 
@@ -58,6 +65,7 @@ from defenseclaw.models import Finding, ScanResult
 from defenseclaw.paths import bundled_mcp_yara_rules_dir
 from defenseclaw.registries.ssrf import (
     SSRFError,
+    SSRFUnresolvableError,
     analyzer_dns_resolution,
     pinned_async_getaddrinfo,
     pinned_getaddrinfo,
@@ -65,15 +73,94 @@ from defenseclaw.registries.ssrf import (
 )
 from defenseclaw.scanner import settings
 from defenseclaw.scanner._llm_env import (
+    drop_unsupported_litellm_params,
     inject_llm_env,
     litellm_model,
     llm_analyzer_ready,
+    model_refuses_temperature,
 )
 
 if TYPE_CHECKING:
     pass
 
 _T = TypeVar("_T")
+
+# MCP Scanner 4.8 lists a custom analyzer that ran by its name, but folds a
+# name equal to a built-in analyzer's ("YARA" == AnalyzerEnum.YARA) into the
+# built-in entry, so the GAP-0209 check could not tell that the DefenseClaw
+# rules ran. Each pack gets its own name; findings keep the "YARA" label
+# (``mcp-scanner/YARA``) that policies and telemetry use.
+_BUNDLED_YARA_ANALYZER_NAME = "DefenseClaw YARA"
+_EXTRA_YARA_ANALYZER_NAME = "DefenseClaw YARA extra"
+_DEFENSECLAW_YARA_ANALYZER_NAMES = (_BUNDLED_YARA_ANALYZER_NAME, _EXTRA_YARA_ANALYZER_NAME)
+
+
+def _named_analyzer(analyzer: object, name: str) -> object:
+    analyzer.name = name
+    return analyzer
+
+
+# MCP Scanner 4.8.7 retries the legacy initialize() handshake after a failed
+# server/discover (protocol 2026-07-28) over HTTP only for the exact
+# "Bad Request: Missing session ID" rejection. MCP TypeScript SDK servers that
+# predate 2026-07-28 (for example mcp.deepwiki.com) reject it with
+# -32600 "Bad Request: Unsupported protocol version: 2026-07-28 ..." and still
+# accept initialize(), so the scan failed where 4.3.0 scanned them (GAP-0020).
+# Accept that one rejection too, for legacy HTTP only; every other error
+# keeps its upstream meaning. Remove once a pinned scanner release includes
+# cisco-ai-defense/mcp-scanner#296.
+_LEGACY_HTTP_VERSION_REJECTION = "Bad Request: Unsupported protocol version: "
+
+
+def _accept_legacy_http_version_rejection(scanner_cls: type) -> None:
+    original = getattr(scanner_cls, "_should_fallback_to_initialize", None)
+    if not callable(original) or getattr(original, "_defenseclaw_legacy_http_version", False):
+        return
+
+    def should_fallback(error: Exception, *, legacy_stdio: bool = False, legacy_http: bool = False) -> bool:
+        if original(error, legacy_stdio=legacy_stdio, legacy_http=legacy_http):
+            return True
+        rpc_error = getattr(error, "error", None)
+        code = getattr(error, "code", None)
+        if code is None:
+            code = getattr(rpc_error, "code", None)
+        message = str(getattr(rpc_error, "message", None) or error)
+        return (
+            legacy_http
+            and code == -32600
+            and getattr(rpc_error, "data", None) in (None, "")
+            and message.startswith(_LEGACY_HTTP_VERSION_REJECTION)
+        )
+
+    should_fallback._defenseclaw_legacy_http_version = True  # type: ignore[attr-defined]
+    scanner_cls._should_fallback_to_initialize = staticmethod(should_fallback)
+
+
+# MCP Scanner 4.8.7 sets temperature=1 for every "gpt-5" model
+# (mcpscanner.utils.llm_request_params.apply_model_constraints, used by the
+# LLM and behavioral analyzers). LiteLLM's drop_params keeps a 1, and Bedrock
+# refuses the field for its OpenAI models ("This model doesn't support the
+# temperature field"), so with GPT-5.6 Luna the LLM analyzer failed with
+# BadRequestError, where 4.3.0 sent 0.1, which LiteLLM dropped (GAP-0112).
+# Leave temperature out for the models that take only their default, the
+# rule the gateway judge uses; 1 is their default, so the request does not
+# otherwise change. Remove once a pinned scanner release omits it upstream.
+def _omit_refused_temperature() -> None:
+    try:
+        from mcpscanner.utils import llm_request_params
+    except ImportError:
+        return
+    original = getattr(llm_request_params, "apply_model_constraints", None)
+    if not callable(original) or getattr(original, "_defenseclaw_omit_temperature", False):
+        return
+
+    def apply_model_constraints(model: str, params: dict) -> None:
+        original(model, params)
+        if model_refuses_temperature(model):
+            params.pop("temperature", None)
+
+    apply_model_constraints._defenseclaw_omit_temperature = True  # type: ignore[attr-defined]
+    llm_request_params.apply_model_constraints = apply_model_constraints
 
 
 def _supplemental_yara_analyzers(yara_analyzer_cls: type, yara_cfg: MCPScannerYARAConfig | None = None) -> list[object]:
@@ -92,23 +179,21 @@ def _supplemental_yara_analyzers(yara_analyzer_cls: type, yara_cfg: MCPScannerYA
 
 
 def _bundled_yara_analyzers(yara_analyzer_cls: type) -> list[object]:
+    # Every package ships these rules. Without them the scan would not run
+    # the analyzer set it reports, so it has no verdict (GAP-0209).
     rules_dir = bundled_mcp_yara_rules_dir()
     if rules_dir is None:
-        print(
-            "warning: bundled DefenseClaw MCP YARA rules are unavailable; "
-            "continuing with upstream YARA rules",
-            file=sys.stderr,
+        raise MCPScanIncompleteError(
+            "the bundled DefenseClaw MCP YARA rules are missing, so the MCP scan has no verdict; "
+            "repair the DefenseClaw installation"
         )
-        return []
     try:
-        return [yara_analyzer_cls(rules_dir=rules_dir)]
+        return [_named_analyzer(yara_analyzer_cls(rules_dir=rules_dir), _BUNDLED_YARA_ANALYZER_NAME)]
     except Exception as exc:
-        print(
-            "warning: bundled DefenseClaw MCP YARA rules could not be loaded; "
-            f"continuing with upstream YARA rules: {exc}",
-            file=sys.stderr,
-        )
-        return []
+        raise MCPScanIncompleteError(
+            "the bundled DefenseClaw MCP YARA rules could not be loaded, so the MCP scan has no verdict; "
+            f"repair the DefenseClaw installation ({type(exc).__name__})"
+        ) from exc
 
 
 def _extra_yara_analyzer(yara_analyzer_cls: type, refs: list[AssetFileRef]) -> object:
@@ -118,7 +203,7 @@ def _extra_yara_analyzer(yara_analyzer_cls: type, refs: list[AssetFileRef]) -> o
             data = settings.verified_asset_bytes(ref.path, ref.digest)
             with open(os.path.join(tmp, f"extra-{index}.yar"), "wb") as fh:
                 fh.write(data)
-        return yara_analyzer_cls(rules_dir=tmp)
+        return _named_analyzer(yara_analyzer_cls(rules_dir=tmp), _EXTRA_YARA_ANALYZER_NAME)
 
 
 # env vars whose names contain any of these
@@ -323,49 +408,50 @@ class _StdioLaunchPlan:
     env: dict[str, str]
     launcher: str
     cwd: str | None = None
+    # The gateway's as-user relay stands in for the server (#1164).
+    relay: bool = False
 
 
 class _ContainedWindowsProcess:
-    """Delegate an AnyIO/MCP process while retaining a race-free Job Object."""
+    """Delegate an AnyIO/MCP process while retaining a race-free Job Object.
+
+    The MCP SDK 2.x stdio client never enters the process as a context
+    manager. It stops the server itself (close stdin, wait, kill the tree),
+    then calls ``close_process_job`` and closes the subprocess transport,
+    which it reaches as ``process._process._transport``. The wrapped process
+    is kept as ``_inner`` so that lookup falls through ``__getattr__`` to the
+    real process; ``close_job`` is what the scoped ``close_process_job``
+    calls.
+    """
 
     def __init__(self, process: object, job: object) -> None:
-        self._process = process
+        self._inner = process
         self._job = job
 
     def __getattr__(self, name: str) -> object:
-        return getattr(self._process, name)
+        return getattr(self._inner, name)
 
     @property
     def pid(self) -> int:
-        return int(getattr(self._process, "pid"))
+        return int(getattr(self._inner, "pid"))
 
-    async def __aenter__(self) -> _ContainedWindowsProcess:
-        enter = getattr(self._process, "__aenter__")
-        await enter()
-        _trace_windows_stdio_lifecycle("process-context-entered", pid=self.pid)
-        return self
-
-    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
-        try:
-            exit_process = getattr(self._process, "__aexit__")
-            await exit_process(exc_type, exc_value, traceback)
-        finally:
-            _trace_windows_stdio_lifecycle(
-                "process-context-exited",
-                pid=self.pid,
-                returncode=getattr(self._process, "returncode", None),
-            )
-            self._job.close()
-            _trace_windows_stdio_lifecycle("job-containment-closed", pid=self.pid)
+    def close_job(self) -> None:
+        """Close the Job Object; KILL_ON_JOB_CLOSE ends surviving members."""
+        self._job.close()
+        _trace_windows_stdio_lifecycle(
+            "job-containment-closed",
+            pid=self.pid,
+            returncode=getattr(self._inner, "returncode", None),
+        )
 
     async def wait(self):
-        return await self._process.wait()
+        return await self._inner.wait()
 
     def terminate(self) -> None:
-        self._process.terminate()
+        self._inner.terminate()
 
     def kill(self) -> None:
-        self._process.kill()
+        self._inner.kill()
 
     async def terminate_tree(self, timeout_seconds: float) -> None:
         _trace_windows_stdio_lifecycle("job-cleanup-started", pid=self.pid)
@@ -377,7 +463,7 @@ class _ContainedWindowsProcess:
         _trace_windows_stdio_lifecycle(
             "job-cleanup-completed",
             pid=self.pid,
-            returncode=getattr(self._process, "returncode", None),
+            returncode=getattr(self._inner, "returncode", None),
         )
 
 
@@ -390,7 +476,8 @@ async def _create_contained_windows_process(
 ) -> _ContainedWindowsProcess:
     """Create suspended, assign to a Job Object, then resume.
 
-    MCP 1.26 creates the process running and assigns its Job Object afterward.
+    The MCP SDK (1.26 through 2.3) creates the process running and assigns
+    its Job Object afterward.
     Fast package launchers can spawn outside the job in that interval. This
     focused factory reuses DefenseClaw's established suspended-start
     ``WindowsJob`` owner, closing the launch-to-assignment race.
@@ -444,7 +531,8 @@ async def _terminate_contained_windows_process(
         return
     from mcp.os.win32.utilities import terminate_windows_process_tree
 
-    await terminate_windows_process_tree(process, timeout_seconds)
+    # MCP SDK 2.x: a hard Job Object kill with no timeout argument.
+    await terminate_windows_process_tree(process)
 
 
 @contextmanager
@@ -465,13 +553,584 @@ def _contained_mcp_windows_process_factory(started: list[object] | None = None) 
     with _MCP_WINDOWS_PROCESS_FACTORY_LOCK:
         original_create = mcp_stdio._create_platform_compatible_process
         original_terminate = mcp_stdio._terminate_process_tree
+        original_close_job = mcp_stdio.close_process_job
+
+        def close_job(process: object) -> None:
+            # The SDK's own job table does not know DefenseClaw's job, so its
+            # close_process_job would leave the job (and any server child that
+            # outlived a graceful exit) open until this process exits.
+            if isinstance(process, _ContainedWindowsProcess):
+                process.close_job()
+                return
+            original_close_job(process)
+
         mcp_stdio._create_platform_compatible_process = create
         mcp_stdio._terminate_process_tree = _terminate_contained_windows_process
+        mcp_stdio.close_process_job = close_job
         try:
             yield
         finally:
             mcp_stdio._create_platform_compatible_process = original_create
             mcp_stdio._terminate_process_tree = original_terminate
+            mcp_stdio.close_process_job = original_close_job
+
+
+_MCP_POSIX_PROCESS_FACTORY_LOCK = threading.Lock()
+_MCP_POSIX_GROUP_GRACE_SECONDS = 0.25
+_MCP_POSIX_SESSION_CLEANUP_SECONDS = 3.0
+_MCP_POSIX_SCANNER_PGID = os.getpgrp() if os.name != "nt" else -1
+_MCP_LINUX_PRCTL_SYSCALL = (
+    {"x86_64": 157, "aarch64": 167}.get(os.uname().machine)
+    if sys.platform == "linux" else None
+)
+_MCP_LINUX_PERL_WORKER = r'''
+my $prctl_syscall = shift @ARGV;
+$prctl_syscall =~ /\A(157|167)\z/ or die "child tracking unavailable\n";
+$prctl_syscall = 0 + $1;
+syscall($prctl_syscall, 36, 1, 0, 0, 0) == 0 or die "child tracking unavailable: $!\n";
+my $path = $ENV{PATH} // '/usr/bin:/bin';
+$path =~ /\A([^\0]*)\z/s or die "server path unavailable\n";
+$ENV{PATH} = $1;
+my $server = fork();
+defined $server or die "server fork failed: $!\n";
+if ($server == 0) {
+    my $command = shift @ARGV;
+    $command =~ /\A([^\0]*)\z/s or die "server command unavailable\n";
+    $command = $1;
+    @ARGV = map { /\A([^\0]*)\z/s ? $1 : die "server argument unavailable\n" } @ARGV;
+    exec { $command } $command, @ARGV;
+    die "server launch failed: $!\n";
+}
+close STDIN;
+$SIG{TERM} = sub {
+    CORE::kill 'KILL', $server if grep { $_ == $server } children();
+};
+my $status;
+while (1) {
+    my $done = waitpid($server, 0);
+    if ($done == $server) { $status = $?; last; }
+    if ($done == -1 && !$!{EINTR}) { $status = 1 << 8; last; }
+}
+sub children {
+    open my $stream, '<', "/proc/$$/task/$$/children" or return ();
+    my $line = <$stream> // '';
+    close $stream;
+    return map { /\A(\d+)\z/ && $1 > 1 ? $1 : () } split /\s+/, $line;
+}
+sub signal_child { kill $_[0], $_[1] }
+my $failed = 0;
+my $deadline = time() + 3;
+my $round = 0;
+while (1) {
+    while (waitpid(-1, 1) > 0) {}
+    my @children = children();
+    last unless @children;
+    if (time() >= $deadline) { $failed = 1; last; }
+    my $sig = $round++ == 0 ? 'TERM' : 'KILL';
+    for my $pid (@children) {
+        if (!signal_child($sig, $pid) && !$!{ESRCH}) {
+            $failed = 1;
+            CORE::kill 'KILL', $pid;
+        }
+    }
+    select undef, undef, undef, 0.02;
+}
+exit($failed ? 70 : (($status & 127) ? 128 + ($status & 127) : ($status >> 8)));
+'''
+_MCP_LINUX_WORKER_SCRIPT = r'''
+server=
+signal_server() {
+    [ -n "$server" ] || return
+    children=
+    IFS= read -r children < "/proc/$$/task/$$/children" || return
+    for pid in $children; do
+        if [ "$pid" = "$server" ]; then
+            builtin kill -KILL "$server" 2>/dev/null || :
+            return
+        fi
+    done
+}
+trap signal_server TERM
+"$@" <&0 >&1 2>&2 &
+server=$!
+exec 0<&-
+wait "$server"
+status=$?
+failed=0
+SECONDS=0
+round=0
+while :; do
+    children=
+    IFS= read -r children < "/proc/$$/task/$$/children" || :
+    [ -n "$children" ] || break
+    if (( SECONDS >= 3 )); then
+        failed=1
+        break
+    fi
+    sig=KILL
+    [ "$round" = 0 ] && sig=TERM
+    round=$((round + 1))
+    for pid in $children; do
+        if ! kill -"$sig" "$pid" 2>/dev/null; then
+            failed=1
+            builtin kill -KILL "$pid" 2>/dev/null || :
+        fi
+    done
+    sleep 0.02
+done
+[ -z "$children" ] || failed=1
+[ "$failed" = 0 ] || exit 70
+exit "$status"
+'''
+_MCP_POSIX_GUARDIAN_SCRIPT = r'''
+trap '' TERM
+printf R
+IFS= read -r -n 1 -u "$1" _ || :
+group_owned() {
+    [ "$$" -gt 1 ] && [ "$$" != "$2" ] || return 1
+    pgid=$(/bin/ps -o pgid= -p "$$") || return 1
+    pgid=${pgid//[[:space:]]/}
+    [ "$pgid" = "$$" ]
+}
+if ! group_owned; then printf 'group ownership lost before SIGTERM\n'; exit 1; fi
+if ! kill -TERM -- "-$$" 2>&1; then printf 'SIGTERM failed\n'; fi
+sleep "$3"
+if ! group_owned; then printf 'group ownership lost before SIGKILL\n'; exit 1; fi
+if ! kill -KILL -- "-$$" 2>&1; then printf 'SIGKILL failed\n'; fi
+'''
+
+
+def _mcp_posix_processes() -> dict[int, tuple[int, int, str]]:
+    """Return PID to (parent, group, birth marker) on macOS."""
+    found: dict[int, tuple[int, int, str]] = {}
+    output = subprocess.check_output(
+        ["/bin/ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "lstart="],
+        text=True, timeout=1,
+    )
+    for line in output.splitlines():
+        fields = line.split(maxsplit=3)
+        if len(fields) != 4:
+            continue
+        try:
+            found[int(fields[0])] = (int(fields[1]), int(fields[2]), fields[3])
+        except ValueError:
+            continue
+    return found
+
+
+class _MCPPosixDescendants:
+    """Remember server descendants across process-group and parent changes."""
+
+    def __init__(self, root_pid: int, group_pid: int) -> None:
+        self.root_pid = root_pid
+        self.group_pid = group_pid
+        self._known: dict[int, str] = {}
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._watch, name="mcp-stdio-descendants", daemon=True)
+        self._thread.start()
+
+    def capture(self) -> None:
+        try:
+            processes = _mcp_posix_processes()
+        except (OSError, subprocess.SubprocessError) as exc:
+            _LOGGER.warning("MCP stdio descendant inspection failed: %s", exc)
+            return
+        with self._lock:
+            parents = {self.root_pid}
+            parents.update(
+                pid for pid, birth in self._known.items()
+                if pid in processes and processes[pid][2] == birth
+            )
+            pending = set(parents)
+            while pending:
+                children = {
+                    pid for pid, (parent, _group, _birth) in processes.items()
+                    if parent in pending and pid not in parents
+                }
+                for pid in children:
+                    self._known[pid] = processes[pid][2]
+                parents.update(children)
+                pending = children
+
+    def _watch(self) -> None:
+        while not self._stop.wait(0.25):
+            self.capture()
+
+    def signal(self, sig: signal.Signals) -> None:
+        self.capture()
+        with self._lock:
+            known = dict(self._known)
+        try:
+            processes = _mcp_posix_processes()
+        except (OSError, subprocess.SubprocessError) as exc:
+            _LOGGER.warning("MCP stdio descendant inspection failed: %s", exc)
+            return
+        for pid, birth in known.items():
+            current = processes.get(pid)
+            if (current is None or current[2] != birth or current[1] == self.group_pid
+                    or pid <= 1 or pid == os.getpid()):
+                continue
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                pass
+            except OSError as exc:
+                _LOGGER.warning("MCP stdio descendant cleanup for pid %d failed: %s", pid, exc)
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=1)
+
+
+class _MCPPosixInput:
+    """Capture the server tree before the SDK closes its input stream."""
+
+    def __init__(self, stream: Any, descendants: _MCPPosixDescendants) -> None:
+        self._stream = stream
+        self._descendants = descendants
+        self._closed = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream, name)
+
+    async def send(self, item: bytes) -> None:
+        await self._stream.send(item)
+
+    async def aclose(self) -> None:
+        if not self._closed:
+            self._closed = True
+            self._descendants.capture()
+        await self._stream.aclose()
+
+
+def _signal_owned_mcp_posix_group(
+    guardian_pid: int, sig: signal.Signals, report_error: Callable[[str], None],
+) -> bool:
+    """Signal only the still-reserved guardian group."""
+    if guardian_pid <= 1 or guardian_pid == _MCP_POSIX_SCANNER_PGID:
+        return False
+    try:
+        if os.getpgid(guardian_pid) != guardian_pid:
+            report_error(f"group ownership lost before {sig.name}")
+            return False
+    except OSError as exc:
+        report_error(f"identity before {sig.name}: {exc}")
+        return False
+    try:
+        os.killpg(guardian_pid, sig)
+    except OSError as exc:
+        report_error(f"{sig.name}: {exc}")
+        return not isinstance(exc, ProcessLookupError)
+    return True
+
+
+def _reap_mcp_posix_guardian(
+    guardian: subprocess.Popen[bytes], server_name: str,
+    session_closed: threading.Event,
+    emergency: threading.Event | None = None,
+    completed: threading.Event | None = None,
+    cleanup_seconds: float = _MCP_POSIX_SESSION_CLEANUP_SECONDS,
+    descendants: list[_MCPPosixDescendants] | None = None,
+) -> None:
+    """Reap after scan closure, with a bounded fallback for cleanup faults."""
+    def reap() -> None:
+        problems: list[str] = []
+
+        try:
+            deadline: float | None = None
+            while True:
+                if emergency is not None and emergency.is_set():
+                    # The control descriptor may still be open after both a
+                    # failed write and close. Signal the reserved group here.
+                    if _signal_owned_mcp_posix_group(guardian.pid, signal.SIGTERM, problems.append):
+                        time.sleep(_MCP_POSIX_GROUP_GRACE_SECONDS)
+                        _signal_owned_mcp_posix_group(guardian.pid, signal.SIGKILL, problems.append)
+                    break
+                if session_closed.is_set():
+                    if deadline is None:
+                        deadline = time.monotonic() + cleanup_seconds
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        problems.append("guardian exceeded cleanup deadline")
+                        _signal_owned_mcp_posix_group(guardian.pid, signal.SIGKILL, problems.append)
+                        break
+                else:
+                    remaining = 0.05
+                try:
+                    guardian.wait(timeout=min(0.05, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+            try:
+                guardian.wait(timeout=1)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                problems.append(f"guardian reaping: {exc}")
+        except OSError as exc:
+            problems.append(f"guardian reaping: {exc}")
+        finally:
+            if descendants:
+                descendants[0].signal(signal.SIGKILL)
+                descendants[0].close()
+            if guardian.stdout is not None:
+                try:
+                    if select.select([guardian.stdout], [], [], 0)[0]:
+                        report = os.read(guardian.stdout.fileno(), 4096).decode(
+                            "utf-8", errors="replace",
+                        ).strip()
+                        if report:
+                            problems.append(report.replace("\n", "; "))
+                except (OSError, ValueError) as exc:
+                    problems.append(f"cleanup report: {exc}")
+                guardian.stdout.close()
+            if not problems and guardian.returncode != -signal.SIGKILL:
+                problems.append(f"guardian exited with status {guardian.returncode}")
+            if problems:
+                _LOGGER.warning(
+                    "MCP stdio cleanup for server %r may be incomplete; "
+                    "a child may still be running (%s)", server_name, "; ".join(problems),
+                )
+            if completed is not None:
+                completed.set()
+
+    try:
+        threading.Thread(target=reap, name="mcp-stdio-guardian-reaper", daemon=True).start()
+    except (OSError, RuntimeError) as exc:
+        _LOGGER.warning(
+            "MCP stdio cleanup for server %r may be incomplete; "
+            "a child may still be running (guardian reaper unavailable: %s)", server_name, exc,
+        )
+
+
+def _close_mcp_posix_control(fd: int) -> bool:
+    try:
+        os.close(fd)
+        return True
+    except OSError as exc:
+        _LOGGER.debug("MCP stdio group control pipe release failed: %s", exc)
+        return False
+
+
+def _enable_mcp_linux_subreaper() -> None:
+    # This runs only in the just-forked child, before exec. Resolve prctl in
+    # the parent so the child makes no dynamic-library lookups here.
+    if _MCP_LINUX_PRCTL(36, 1, 0, 0, 0) != 0:
+        os._exit(127)
+
+
+def _mcp_linux_perl_path_usable(path: str) -> bool:
+    """Use Perl's taint-mode worker only with directories it accepts on PATH."""
+    for directory in path.split(os.pathsep):
+        if not os.path.isabs(directory):
+            return False
+        try:
+            mode = os.stat(directory).st_mode
+        except OSError:
+            return False
+        if not stat.S_ISDIR(mode) or mode & 0o022:
+            return False
+    return True
+
+
+if sys.platform == "linux":
+    import ctypes
+
+    _MCP_LINUX_PRCTL = ctypes.CDLL(None, use_errno=True).prctl
+
+
+@contextmanager
+def _contained_mcp_linux_process_factory(server_name: str) -> Iterator[None]:
+    """Run each Linux server under its own child subreaper."""
+    import mcp.client.stdio as mcp_stdio
+    from anyio._core._eventloop import get_async_backend
+
+    started: dict[int, Any] = {}
+    original_create = mcp_stdio._create_platform_compatible_process
+    original_terminate = mcp_stdio._terminate_process_tree
+
+    async def create(
+        command: str, args: list[str], env: dict[str, str] | None = None,
+        errlog: Any = sys.stderr, cwd: Any = None,
+    ) -> Any:
+        if os.path.isabs(command) and not os.path.exists(command):
+            raise FileNotFoundError(2, os.strerror(2), command)
+        worker_env = os.environ if env is None else env
+        path = worker_env.get("PATH", os.defpath)
+        perl_path_usable = _mcp_linux_perl_path_usable(path)
+        if (_MCP_LINUX_PRCTL_SYSCALL is not None
+                and os.access("/usr/bin/perl", os.X_OK) and perl_path_usable):
+            argv = ["/usr/bin/perl", "-T", "-e", _MCP_LINUX_PERL_WORKER, "--",
+                    str(_MCP_LINUX_PRCTL_SYSCALL), command, *args]
+            setup: dict[str, Any] = {}
+        else:
+            argv = ["/bin/bash", "-p", "-c", _MCP_LINUX_WORKER_SCRIPT,
+                    "mcp-stdio-worker", command, *args]
+            setup = {"preexec_fn": _enable_mcp_linux_subreaper}
+        process = await get_async_backend().open_process(
+            argv,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errlog,
+            env=env, cwd=cwd, start_new_session=True,
+            **setup,
+        )
+        started[process.pid] = process
+        return process
+
+    async def terminate(process: Any) -> None:
+        if process.pid not in started:
+            await original_terminate(process)
+        elif process.returncode is None:
+            process.terminate()
+            try:
+                with asyncio.timeout(_MCP_POSIX_SESSION_CLEANUP_SECONDS):
+                    await process.wait()
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+                _LOGGER.warning(
+                    "MCP stdio cleanup for server %r may be incomplete; "
+                    "a child may still be running (worker exceeded cleanup deadline)", server_name,
+                )
+
+    with _MCP_POSIX_PROCESS_FACTORY_LOCK:
+        mcp_stdio._create_platform_compatible_process = create
+        mcp_stdio._terminate_process_tree = terminate
+        try:
+            yield
+        finally:
+            mcp_stdio._create_platform_compatible_process = original_create
+            mcp_stdio._terminate_process_tree = original_terminate
+            for process in started.values():
+                if process.returncode is None:
+                    process.terminate()
+                if process.returncode == 70:
+                    _LOGGER.warning(
+                        "MCP stdio cleanup for server %r may be incomplete; "
+                        "a child may still be running (cleanup signal failed)", server_name,
+                    )
+
+
+@contextmanager
+def _contained_mcp_posix_process_factory(server_name: str = "stdio server") -> Iterator[None]:
+    """Track SDK stdio launches and end their groups on every scan exit."""
+    if sys.platform == "linux":
+        with _contained_mcp_linux_process_factory(server_name):
+            yield
+        return
+    import mcp.client.stdio as mcp_stdio
+    from anyio._core._eventloop import get_async_backend
+
+    started_groups: dict[int, tuple[subprocess.Popen[bytes], int, threading.Event, _MCPPosixDescendants]] = {}
+    notified_groups: set[int] = set()
+    session_closed = threading.Event()
+
+    def notify(pid: int) -> bool:
+        group = started_groups.get(pid)
+        if group is None:
+            return False
+        if pid not in notified_groups:
+            notified_groups.add(pid)
+            group[3].signal(signal.SIGTERM)
+            written = False
+            try:
+                os.write(group[1], b"x")
+                written = True
+            except OSError as exc:
+                _LOGGER.debug("MCP stdio group notification failed: %s", exc)
+            closed = _close_mcp_posix_control(group[1])
+            if not written and not closed:
+                group[2].set()
+        return True
+
+    async def create(
+        command: str, args: list[str], env: dict[str, str] | None = None,
+        errlog: Any = sys.stderr, cwd: Any = None,
+    ) -> Any:
+        # The SDK reaps the server before this scope exits. A separate group
+        # leader stays alive until it sends TERM and KILL, so its ID cannot
+        # be recycled while either signal is pending.
+        control_read, control_write = os.pipe()
+        try:
+            guardian = subprocess.Popen(
+                [
+                    "/bin/bash", "-p", "-c", _MCP_POSIX_GUARDIAN_SCRIPT,
+                    "mcp-group-guardian", str(control_read), str(os.getpgrp()),
+                    str(_MCP_POSIX_GROUP_GRACE_SECONDS),
+                ],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, pass_fds=(control_read,), process_group=0,
+            )
+            if (guardian.stdout is None
+                    or not select.select([guardian.stdout], [], [], 1.0)[0]
+                    or os.read(guardian.stdout.fileno(), 1) != b"R"):
+                guardian.kill()
+                guardian.wait(timeout=1)
+                raise RuntimeError("MCP stdio group owner did not start")
+        except BaseException:
+            _close_mcp_posix_control(control_read)
+            _close_mcp_posix_control(control_write)
+            raise
+        _close_mcp_posix_control(control_read)
+        emergency = threading.Event()
+        completed = threading.Event()
+        tracked_descendants: list[_MCPPosixDescendants] = []
+        _reap_mcp_posix_guardian(
+            guardian, server_name, session_closed, emergency, completed,
+            descendants=tracked_descendants,
+        )
+        try:
+            # AnyIO's public open_process omits Python's process_group option;
+            # its active backend forwards it to the same asyncio subprocess.
+            process = await get_async_backend().open_process(
+                [command, *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                env=env, stderr=errlog, cwd=cwd, process_group=guardian.pid,
+            )
+        except BaseException:
+            _close_mcp_posix_control(control_write)
+            emergency.set()
+            if not completed.wait(_MCP_POSIX_SESSION_CLEANUP_SECONDS + 2):
+                _LOGGER.warning("MCP stdio guardian for server %r did not finish failed-launch cleanup", server_name)
+            raise
+        try:
+            descendants = _MCPPosixDescendants(process.pid, guardian.pid)
+            tracked_descendants.append(descendants)
+            if process.stdin is not None:
+                if not hasattr(process, "_stdin"):
+                    raise RuntimeError("MCP stdio process has no tracked input stream")
+                process._stdin = _MCPPosixInput(process.stdin, descendants)
+        except BaseException:
+            _close_mcp_posix_control(control_write)
+            emergency.set()
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            except OSError as exc:
+                _LOGGER.warning("MCP stdio process cleanup failed: %s", exc)
+            await process.wait()
+            completed.wait(_MCP_POSIX_SESSION_CLEANUP_SECONDS + 2)
+            raise
+        started_groups[process.pid] = (guardian, control_write, emergency, descendants)
+        return process
+
+    async def terminate(process: Any) -> None:
+        # The SDK assumes the server PID is its group ID. Here the guardian
+        # owns the group, so let it perform both signals before SDK reaping.
+        if not notify(process.pid):
+            await original_terminate(process)
+
+    with _MCP_POSIX_PROCESS_FACTORY_LOCK:
+        original_create = mcp_stdio._create_platform_compatible_process
+        original_terminate = mcp_stdio._terminate_process_tree
+        mcp_stdio._create_platform_compatible_process = create
+        mcp_stdio._terminate_process_tree = terminate
+        try:
+            yield
+        finally:
+            mcp_stdio._create_platform_compatible_process = original_create
+            mcp_stdio._terminate_process_tree = original_terminate
+            for pid in started_groups:
+                notify(pid)
+            session_closed.set()
 
 
 def _trusted_codex_runtime_roots() -> tuple[str, ...]:
@@ -576,8 +1235,18 @@ def _stdio_path_command_error(cmd: str) -> str:
     )
 
 
-def _stdio_scan_command_error(command: str, args: list | None) -> str | None:
-    """Return a concise refusal reason, or ``None`` for an admitted command."""
+# The way out of a refused launcher on a device whose MCP policy an
+# administrator owns: that device refuses ``defenseclaw mcp allow``.
+_MANAGED_ALLOW_STEP = (
+    "ask your administrator to allow that definition in the managed MCP policy (asset_policy.mcp.allowed)"
+)
+
+
+def _stdio_scan_command_error(command: str, args: list | None, managed: bool = False) -> str | None:
+    """Return a concise refusal reason, or ``None`` for an admitted command.
+
+    ``managed`` words the way out for a managed device (GAP-0776).
+    """
     if not isinstance(command, str):
         return "command must be a string"
     cmd = command.strip()
@@ -608,8 +1277,12 @@ def _stdio_scan_command_error(command: str, args: list | None) -> str | None:
         return (
             f"command {cmd!r} is not an allowlisted stdio launcher (allowed: npx, uvx): "
             "a scan starts only npm or PyPI packages through npx or uvx, never another program. "
-            "Start the server with npx or uvx, serve it over HTTP and use its URL, or review it "
-            "and allow that definition with 'defenseclaw mcp allow <name> --command ... --args ...'"
+            "Start the server with npx or uvx, serve it over HTTP and use its URL, or "
+            + (
+                _MANAGED_ALLOW_STEP
+                if managed
+                else "review it and allow that definition with 'defenseclaw mcp allow <name> --command ... --args ...'"
+            )
         )
 
     if not isinstance(argv, (list, tuple)):
@@ -647,18 +1320,18 @@ def is_safe_stdio_scan_command(command: str, args: list | None) -> bool:
     return _stdio_scan_command_error(command, args) is None
 
 
-def mcp_scan_refusal(entry: Any) -> str | None:
+def mcp_scan_refusal(entry: Any, managed: bool = False) -> str | None:
     """Why a scan refuses to start a configured MCP server, or None.
 
     A URL entry is scanned over the network; a local one only through the
     launcher check above. ``mcp scan``, ``mcp list``, the upgrade notice and
     doctor all ask this one function, so they name the same servers
-    (GAP-1340).
+    (GAP-1340). ``managed`` names the administrator instead of ``mcp allow``.
     """
     command = getattr(entry, "command", "") or ""
     if not command or getattr(entry, "url", ""):
         return None
-    return _stdio_scan_command_error(command, list(getattr(entry, "args", None) or []))
+    return _stdio_scan_command_error(command, list(getattr(entry, "args", None) or []), managed)
 
 
 def mcp_scannable_fix(name: str, entry: Any, connector: str = "") -> str:
@@ -930,6 +1603,35 @@ def _windows_stdio_launch_plan(entry: MCPServerEntry) -> _StdioLaunchPlan:
     )
 
 
+def _as_user_relay_plan(entry: MCPServerEntry, relay: tuple[str, ...]) -> _StdioLaunchPlan:
+    """The launch plan of an enrolled user's server on managed Windows (#1164).
+
+    The scanner keeps running as the gateway; only the server runs as its
+    user. The runtime starts the gateway's relay, which asks the hook
+    enumerator to start the definition it published for that user, in a
+    folder and with a launcher it resolves as the user. The launcher rules
+    still apply to the real definition first: mcp_scan_refusal has passed,
+    and only npx and uvx start this way.
+    """
+    command = (entry.command or "").strip()
+    launcher = _bare_stdio_launcher(command)
+    if launcher not in _SAFE_STDIO_LAUNCHERS:
+        raise MCPStdioLaunchError(
+            f"local MCP command {command!r} of an enrolled user starts only through npx or uvx"
+        )
+    if launcher == "npx":
+        _validate_windows_npx_arguments("npx", list(entry.args or []))
+    executable = relay[0] if relay else ""
+    if not executable or not os.path.isabs(executable) or not os.path.isfile(executable):
+        raise MCPStdioLaunchError("the MCP as-user relay is not an installed executable")
+    env = {
+        key: value
+        for key in ("SYSTEMROOT", "WINDIR")
+        if (value := os.environ.get(key, ""))
+    }
+    return _StdioLaunchPlan(executable, tuple(relay[1:]), env, launcher, relay=True)
+
+
 def _exception_leaves(exc: BaseException) -> Iterator[BaseException]:
     """Yield leaf exceptions without depending on ExceptionGroup on Python 3.10."""
     children = getattr(exc, "exceptions", None)
@@ -948,6 +1650,25 @@ def _protocol_error_was_logged(errors: list[tuple[str, str]]) -> bool:
         or "validation error" in message.lower()
         for _name, message in errors
     )
+
+
+def _os_error_text(leaves: list[BaseException]) -> str:
+    """The first OS error as Windows reported it: its type, code and system
+    message, never a path (GAP-0114: "startup failed" alone did not say
+    which call failed or why)."""
+    for item in leaves:
+        if not isinstance(item, OSError) or isinstance(item, ConnectionError):
+            continue
+        code = getattr(item, "winerror", None) or item.errno
+        message = (item.strerror or "").strip()
+        parts = [type(item).__name__]
+        if code:
+            parts.append(f"{'WinError' if getattr(item, 'winerror', None) else 'errno'} {code}")
+        text = " ".join(parts)
+        if message:
+            text += ": " + message[:160]
+        return f" ({text})"
+    return ""
 
 
 def _exit_code_text(code: int) -> str:
@@ -1007,10 +1728,13 @@ def _classify_windows_stdio_error(
     # first so the MCP library's canonical closed-stream exception is not
     # mislabeled as a CreateProcess/startup failure.
     if any(isinstance(item, OSError) for item in leaves):
-        stage = "Windows npx wrapper" if plan.launcher == "npx" else "launcher"
+        if plan.relay:
+            stage = "MCP as-user relay"
+        else:
+            stage = "Windows npx wrapper" if plan.launcher == "npx" else "launcher"
         return MCPStdioLaunchError(
             f"{stage} startup failed for MCP stdio launcher {plan.launcher!r}"
-            f"{stderr_note}"
+            f"{_os_error_text(leaves)}{stderr_note}"
         )
     return MCPStdioLaunchError(
         f"MCP stdio protocol failure for launcher {plan.launcher!r} during "
@@ -1055,7 +1779,7 @@ async def _scan_windows_stdio_tools(
 
     selected = analyzers
     if selected is None:
-        # Preserve scanner 4.3's stdio default exactly. Its remote
+        # Preserve the scanner's stdio default exactly (4.3 through 4.8). Its remote
         # ``DEFAULT_ANALYZERS`` omits LLM, while ``scan_stdio_server_tools``
         # explicitly defaults to API + YARA + LLM.
         from mcpscanner.core.models import AnalyzerEnum
@@ -1071,7 +1795,15 @@ async def _scan_windows_stdio_tools(
 
     stderr_size = 0
     started: list[object] = []
-    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as errlog:
+    try:
+        errlog_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
+    except OSError as exc:
+        # GAP-0114: no writable temporary folder; the server never started.
+        raise MCPStdioLaunchError(
+            "the scanner has no writable temporary folder for the MCP server's stderr, "
+            f"so the server was not started{_os_error_text([exc])}"
+        ) from exc
+    with errlog_file as errlog:
         try:
             with anyio.fail_after(timeout_seconds):
                 params = StdioServerParameters(
@@ -1291,6 +2023,11 @@ class MCPScannerWrapper:
         # scanner runtime sets it, to the folder the gateway checked
         # (GAP-1317); otherwise the server starts in this process's folder.
         self.stdio_cwd = ""
+        # Command the managed Windows scanner runtime starts in place of an
+        # enrolled user's server: the gateway's relay, which the hook
+        # enumerator answers by starting the server as that user (#1164).
+        # Empty everywhere else.
+        self.stdio_relay: tuple[str, ...] = ()
 
     def name(self) -> str:
         return "mcp-scanner"
@@ -1385,6 +2122,10 @@ class MCPScannerWrapper:
                 # resolver to it for the duration of the remote scan.
                 ip, host, port = resolve_and_pin(target, allow_private=allow_private)
                 pinned_target = (host, port, ip)
+            except SSRFUnresolvableError as exc:
+                # DNS gave no address to vet or pin. The scan has no verdict;
+                # mcp set and the watcher apply unverified_server to it.
+                raise RuntimeError(f"MCP URL {target!r} could not be scanned: {exc}") from exc
             except SSRFError as exc:
                 raise ValueError(
                     f"refusing to scan MCP URL {target!r}: {exc}"
@@ -1392,6 +2133,8 @@ class MCPScannerWrapper:
 
         if not is_local:
             self._inject_env()
+        drop_unsupported_litellm_params()
+        _omit_refused_temperature()
 
         # ``llm_model`` must be LiteLLM-shaped (``provider/model``) —
         # the mcp-scanner SDK passes it straight through to LiteLLM.
@@ -1441,6 +2184,7 @@ class MCPScannerWrapper:
                 )
             else:
                 supplemental_analyzers = _supplemental_yara_analyzers(YaraAnalyzer, getattr(self.config, "yara", None))
+        _accept_legacy_http_version_rejection(MCPSDKScanner)
         scanner = MCPSDKScanner(
             sdk_config,
             custom_analyzers=supplemental_analyzers,
@@ -1553,9 +2297,12 @@ class MCPScannerWrapper:
         """Scan local stdio with the platform-appropriate SDK adapter."""
 
         if os.name == "nt":
-            plan = _windows_stdio_launch_plan(entry)
-            if self.stdio_cwd:
-                plan = replace(plan, cwd=self.stdio_cwd)
+            if self.stdio_relay:
+                plan = _as_user_relay_plan(entry, self.stdio_relay)
+            else:
+                plan = _windows_stdio_launch_plan(entry)
+                if self.stdio_cwd:
+                    plan = replace(plan, cwd=self.stdio_cwd)
             errors: list[tuple[str, str]] = []
             try:
                 with _capture_sdk_error_logs(errors):
@@ -1580,6 +2327,13 @@ class MCPScannerWrapper:
                     _STDIO_SCAN_TIMEOUT_SECONDS,
                     getattr(exc, "_defenseclaw_exit_code", None),
                 ) from exc
+            _raise_if_analysis_incomplete(entry.name, errors, results, scanner)
+            llm_errors = [
+                m for (name, m) in errors
+                if self._is_llm_error(name, m)
+            ]
+            if llm_errors:
+                self._warn_llm_skipped(entry.name, llm_errors[0])
 
             all_findings: list[object] = []
             for tool_result in results:
@@ -1617,7 +2371,7 @@ class MCPScannerWrapper:
                 scan_kwargs["analyzers"] = analyzers
 
             errors: list[tuple[str, str]] = []
-            with _capture_sdk_error_logs(errors):
+            with _contained_mcp_posix_process_factory(entry.name), _capture_sdk_error_logs(errors):
                 results = asyncio.run(scanner.scan_mcp_config_file(**scan_kwargs))
 
             # Partition captured ERROR logs. An unreachable *LLM backend*
@@ -1627,8 +2381,8 @@ class MCPScannerWrapper:
             # connection failure — the stdio server we spawned — is fatal.
             # Pre-fix this conflated the two and turned an unreachable LLM
             # into a misleading "failed to connect to local server".
-            llm_errors = [m for (name, m) in errors if _is_llm_backend_error(name, m, self._llm)]
-            other_errors = [m for (name, m) in errors if not _is_llm_backend_error(name, m, self._llm)]
+            llm_errors = [m for (name, m) in errors if self._is_llm_error(name, m)]
+            other_errors = [m for (name, m) in errors if not self._is_llm_error(name, m)]
 
             connection_errors = [
                 e for e in other_errors
@@ -1649,6 +2403,7 @@ class MCPScannerWrapper:
                     f"scan failed for local server {entry.name!r} "
                     f"({entry.command}): {other_errors[0]}"
                 )
+            _raise_if_analysis_incomplete(entry.name, errors, list(results or []), scanner)
 
             all_findings: list[object] = []
             for tr in results:
@@ -1671,19 +2426,25 @@ class MCPScannerWrapper:
         errors: list[tuple[str, str]] = []
         with _capture_sdk_error_logs(errors):
             findings = self._scan_remote_uncaptured(scanner, target, analyzers)
-        llm_errors = [m for (name, m) in errors if _is_llm_backend_error(name, m, self._llm)]
+        _raise_if_analysis_incomplete(target, errors, [], scanner)
+        llm_errors = [m for (name, m) in errors if self._is_llm_error(name, m)]
         if llm_errors:
             self._warn_llm_skipped(target, llm_errors[0])
         return findings
+
+    def _is_llm_error(self, logger_name: str, message: str) -> bool:
+        """An LLM-lane ERROR log: a backend error or the SDK's LLM failure line."""
+        return _is_llm_backend_error(logger_name, message, self._llm) or _is_llm_failure_log(message)
 
     def _warn_llm_skipped(self, target: str, error: str) -> None:
         """Print one bounded skip line and mark the scan result partial."""
         detail = " ".join(str(error).split())
         if len(detail) > 200:
             detail = detail[:197] + "..."
-        self._llm_skipped = f"LLM analysis skipped (backend unreachable): {detail}"
+        cause = _llm_failure_cause(detail)
+        self._llm_skipped = f"LLM analysis skipped ({cause}): {detail}"
         print(
-            f"warning: LLM skipped (backend unreachable) while scanning "
+            f"warning: LLM skipped ({cause}) while scanning "
             f"{target!r}: {detail}",
             file=sys.stderr,
         )
@@ -1792,6 +2553,12 @@ class MCPScannerWrapper:
                     description = details.get("evidence", "") or details.get("reason", "")
 
             analyzer = getattr(sf, "analyzer", "")
+            if analyzer in _DEFENSECLAW_YARA_ANALYZER_NAMES:
+                analyzer = "YARA"
+            # The SDK reports UNKNOWN for a missing or unrecognized threat_type.
+            # Give that YARA finding a valid severity.
+            if analyzer == "YARA" and severity == "UNKNOWN":
+                severity = "HIGH"
             scanner_name = f"mcp-scanner/{analyzer}" if analyzer else "mcp-scanner"
 
             findings.append(Finding(
@@ -1812,6 +2579,74 @@ class MCPScannerWrapper:
             findings=findings,
             duration=timedelta(seconds=elapsed),
         )
+
+
+class MCPScanIncompleteError(RuntimeError):
+    """An analyzer did not inspect every tool, so the scan has no verdict."""
+
+
+# The upstream scanner (mcpscanner ``Scanner._analyze_tool`` and its prompt,
+# resource and instruction siblings) logs an analyzer that raised and goes
+# on: that tool then reports no findings from it, which read as clean. The
+# LLM analyzer is the exception the scan already degrades on with a warning
+# (``_warn_llm_skipped``). The labels never copy the logged text, which can
+# carry server-controlled tool names. Prefixes match case-insensitively:
+# 4.3 logs "API/YARA/Readiness analysis failed" and 'Custom analyzer "x"
+# failed'; 4.8 logs "<enum value or custom name> analysis failed", for
+# example "yara analysis failed" or "DefenseClaw YARA analysis failed".
+_ANALYZER_FAILURE_LOGS = (
+    ("api analysis failed", "the Cisco AI Defense API analyzer"),
+    ("yara analysis failed", "the YARA analyzer"),
+    ("readiness analysis failed", "the readiness analyzer"),
+    ("custom analyzer ", "the DefenseClaw YARA rules"),
+    *(
+        (f"{name.casefold()} analysis failed", "the DefenseClaw YARA rules")
+        for name in _DEFENSECLAW_YARA_ANALYZER_NAMES
+    ),
+)
+_LLM_FAILURE_LOG = "llm analysis failed"
+
+
+def _is_llm_failure_log(message: object) -> bool:
+    return str(message or "").lstrip().casefold().startswith(_LLM_FAILURE_LOG)
+
+
+def _analysis_gap(errors: list[tuple[str, str]], results: list[object], scanner: object) -> str:
+    """Why the analyzers did not inspect every tool, or "" when they did."""
+    for _logger, message in errors:
+        text = str(message or "").lstrip().casefold()
+        for prefix, label in _ANALYZER_FAILURE_LOGS:
+            if text.startswith(prefix):
+                return f"{label} failed on a tool of the server"
+    custom = getattr(scanner, "get_custom_analyzers", None)
+    expected = [getattr(a, "name", "") for a in (custom() if callable(custom) else [])]
+    expected = [name for name in expected if isinstance(name, str) and name]
+    for result in results:
+        ran = getattr(result, "analyzers", None)
+        if not isinstance(ran, list):
+            continue
+        # The SDK lists the selected analyzers (enum members) and then the
+        # name of each custom analyzer that ran; a custom analyzer may share
+        # an enum member's value ("yara"), so only plain names count.
+        ran_custom = Counter(a for a in ran if isinstance(a, str) and not isinstance(a, Enum))
+        if Counter(expected) - ran_custom:
+            return "the DefenseClaw YARA rules did not run on a tool of the server"
+    return ""
+
+
+def _raise_if_analysis_incomplete(
+    target: str, errors: list[tuple[str, str]], results: list[object], scanner: object,
+) -> None:
+    """Fail a scan whose analyzers did not inspect every tool (GAP-0209).
+
+    A clean verdict must mean every configured analyzer read every tool
+    description; an analyzer that failed silently would otherwise admit a
+    server nothing inspected. The scan fails, and the gateway blocks the
+    server as not scanned (fail closed).
+    """
+    gap = _analysis_gap(errors, results, scanner)
+    if gap:
+        raise MCPScanIncompleteError(f"the scan of MCP server {target!r} is incomplete, so it has no verdict: {gap}")
 
 
 def _extract_findings(tool_result: object) -> list[object]:
@@ -1857,6 +2692,29 @@ _LLM_ERROR_MESSAGE_SIGNALS = (
     "ollama", "vllm", "lm studio", "lmstudio",
     "apiconnectionerror", "api_base", "chat/completions", "11434",
 )
+
+
+# The SDK logs only the LiteLLM exception class ("LLM API final error:
+# BadRequestError"), never the provider text, which can carry credentials or
+# scanned input. The class still tells a refused request from an unreachable
+# backend; before, every failure read "backend unreachable" (GAP-0112).
+_LLM_FAILURE_CAUSES = (
+    (("BadRequestError", "UnsupportedParamsError", "UnprocessableEntityError",
+      "ContextWindowExceededError", "ContentPolicyViolationError"),
+     "the model refused the request; check llm.model"),
+    (("AuthenticationError", "PermissionDeniedError"), "the LLM provider refused the credentials"),
+    (("NotFoundError",), "the LLM model was not found; check llm.model"),
+    (("RateLimitError",), "the LLM provider is rate limiting"),
+)
+
+
+def _llm_failure_cause(detail: str) -> str:
+    """A short cause for an LLM-lane failure line, from its exception class."""
+    names = set(re.findall(r"[A-Za-z]+(?:Error|Exception)", detail))
+    for classes, cause in _LLM_FAILURE_CAUSES:
+        if names.intersection(classes):
+            return cause
+    return "backend unreachable"
 
 
 def _is_llm_backend_error(logger_name: str, message: str, llm: LLMConfig) -> bool:

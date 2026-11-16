@@ -370,32 +370,65 @@ func TestRuntimeConfigVersionGate(t *testing.T) {
 	}
 }
 
+// Every managed runtime loader runs the authoritative path trust check. An
+// untrusted writer is refused on Unix and accepted as a boundary finding on
+// Windows; a symlinked config is refused everywhere. Each loader gets its own
+// file because boundary findings are logged once per path.
 func TestRuntimeV8LoadersRetainManagedPathTrust(t *testing.T) {
-	directory := t.TempDir()
-	path := filepath.Join(directory, "config.yaml")
-	raw := []byte("config_version: 8\ndata_dir: " + directory + "\nobservability: {}\n")
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
-
-	loaders := map[string]func() error{
-		"file": func() error {
+	loaders := map[string]func(path string, raw []byte) error{
+		"file": func(path string, _ []byte) error {
 			_, err := LoadRuntimeV8File(path)
 			return err
 		},
-		"activation-bytes": func() error {
+		"activation-bytes": func(path string, raw []byte) error {
 			_, err := LoadRuntimeV8FromBytes(path, raw)
 			return err
 		},
-		"reload-candidate-bytes": func() error {
+		"reload-candidate-bytes": func(path string, raw []byte) error {
 			_, err := LoadRuntimeV8CandidateFromBytes(path, raw)
 			return err
 		},
 	}
 	for name, load := range loaders {
-		t.Run(name, func(t *testing.T) {
-			err := load()
+		t.Run(name+"/untrusted-writer", func(t *testing.T) {
+			isolateManagedTrustEnv(t)
+			directory := t.TempDir()
+			path := filepath.Join(directory, "config.yaml")
+			raw := []byte("config_version: 8\ndata_dir: " + directory + "\nobservability: {}\n")
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			grantUntrustedWriterForTest(t, path)
+			t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
+			boundaries := captureBoundaryPaths(t)
+			err := load(path, raw)
+			if !untrustedWriterAcceptedAsBoundary {
+				if err == nil || !strings.Contains(err.Error(), "managed_enterprise config trust check failed") {
+					t.Fatalf("managed runtime loader error = %v, want authoritative path trust refusal", err)
+				}
+				return
+			}
+			if !configTrustAccepted(err) {
+				t.Fatalf("managed runtime loader error = %v, want drifted config accepted", err)
+			}
+			if !boundaryNamesPath(boundaries(), path) {
+				t.Fatalf("boundary findings = %v, want one naming %s", boundaries(), path)
+			}
+		})
+		t.Run(name+"/symlink", func(t *testing.T) {
+			isolateManagedTrustEnv(t)
+			directory := t.TempDir()
+			target := filepath.Join(directory, "real-config.yaml")
+			raw := []byte("config_version: 8\ndata_dir: " + directory + "\nobservability: {}\n")
+			if err := os.WriteFile(target, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(directory, "config.yaml")
+			if err := os.Symlink(target, path); err != nil {
+				t.Skipf("symlink unavailable: %v", err)
+			}
+			t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
+			err := load(path, raw)
 			if err == nil || !strings.Contains(err.Error(), "managed_enterprise config trust check failed") {
 				t.Fatalf("managed runtime loader error = %v, want authoritative path trust refusal", err)
 			}
@@ -729,6 +762,41 @@ func TestSecureClientSkillScannerOmittedDefaults(t *testing.T) {
 			applySecureClientScannerDefaults(&cfg)
 			if got := cfg.Scanners.SkillScanner; got.UseLLM != source.useLLM || got.Policy != source.policy {
 				t.Fatalf("scanner defaults = use_llm:%t policy:%q, want %t %q", got.UseLLM, got.Policy, source.useLLM, source.policy)
+			}
+		})
+	}
+}
+
+// An omitted guardrail.hook_fail_mode resolves to open only under Secure
+// Client (#1163); other profiles keep the platform "closed" default, and an
+// explicit "closed" wins under Secure Client.
+func TestSecureClientHookFailModeOmittedDefault(t *testing.T) {
+	for _, source := range []struct {
+		name, yaml, profile, want string
+	}{
+		{"secure_client/omitted", "guardrail: {mode: action}", "secure_client", "open"},
+		{"secure_client/explicit_closed", "guardrail: {mode: action, hook_fail_mode: closed}", "secure_client", "closed"},
+		{"standalone/omitted", "guardrail: {mode: action}", "standalone", "closed"},
+	} {
+		t.Run(source.name, func(t *testing.T) {
+			viper.Reset()
+			t.Cleanup(viper.Reset)
+			viper.SetConfigType("yaml")
+			setDefaults(t.TempDir())
+			if err := viper.ReadConfig(strings.NewReader(source.yaml)); err != nil {
+				t.Fatal(err)
+			}
+			var cfg Config
+			if err := viper.Unmarshal(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			cfg.DeploymentMode = "managed_enterprise"
+			cfg.Enterprise.Profile = source.profile
+			applySecureClientScannerDefaults(&cfg)
+			for _, connector := range []string{"codex", "claudecode", "amp"} {
+				if got := cfg.EffectiveHookFailModeForConnector(connector); got != source.want {
+					t.Fatalf("%s hook fail mode = %q, want %q", connector, got, source.want)
+				}
 			}
 		})
 	}

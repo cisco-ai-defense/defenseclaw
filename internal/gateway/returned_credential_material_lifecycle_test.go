@@ -208,8 +208,8 @@ func TestReturnedCredentialMaterialLifecycleSupportedConnectorContracts(t *testi
 					"tool.execute.after", "returned-opencode", "opencode-call", command,
 				)
 				payload["tool_response"] = map[string]interface{}{
-					"output":   credential,
-					"metadata": map[string]interface{}{"exit": 0},
+					"opencode_v2_status": "completed",
+					"output":             map[string]interface{}{"output": credential, "exit": 0},
 				}
 				return payload
 			}(),

@@ -6,6 +6,7 @@ package audit
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -179,6 +180,14 @@ func TestOpenDaemonStorePreservesCorruptWAL(t *testing.T) {
 				!strings.Contains(warning.String(), "together with its -wal and -shm files") {
 				t.Fatalf("start warning does not name the archived sidecars: %q", warning.String())
 			}
+			// rel-1-0-2:GAP-0647: copy first, repair the header on the copy.
+			if !strings.Contains(warning.String(), ArchiveRecoveryHint(archive)) ||
+				strings.Contains(warning.String(), "sqlite3 "+archive+" .recover") {
+				t.Fatalf("start warning does not say to recover from a copy: %q", warning.String())
+			}
+			if got := strings.Join(moved[0].Sidecars, ","); got != "-wal,-shm" {
+				t.Fatalf("MovedCorruptStores sidecars = %q, want -wal,-shm", got)
+			}
 			var count int
 			if err := fresh.db.QueryRow(`SELECT count(*) FROM audit_events WHERE id = 'wal-only-marker'`).Scan(&count); err != nil || count != 0 {
 				t.Fatalf("new store marker count = %d, %v", count, err)
@@ -307,7 +316,7 @@ func TestOpenDaemonStoreProbeFailureKeepsWALSet(t *testing.T) {
 	before := auditSetBytes(t, path)
 	injected := errors.New("injected read-only probe failure")
 	original := probeExistingAuditStore
-	probeExistingAuditStore = func(string, io.Writer) ([]auditSidecarAtStart, error) { return nil, injected }
+	probeExistingAuditStore = func(string, io.Writer) (auditStoreProbe, error) { return auditStoreProbe{}, injected }
 	t.Cleanup(func() { probeExistingAuditStore = original })
 	store, err := OpenDaemonStore(path, &bytes.Buffer{})
 	if store != nil || !errors.Is(err, injected) {
@@ -327,7 +336,7 @@ func TestOpenDaemonStoreQuarantineRenameFailureKeepsWALSet(t *testing.T) {
 				if from == path+suffix {
 					return injected
 				}
-				return os.Rename(from, to)
+				return original(from, to)
 			}
 			t.Cleanup(func() { renameAuditStoreFile = original })
 			store, err := OpenDaemonStore(path, &bytes.Buffer{})
@@ -442,7 +451,7 @@ func TestOpenDaemonStoreFreshRestoreRetriesTransientRename(t *testing.T) {
 					failedOnce = true
 					return errors.New("transient restore rename refusal")
 				}
-				return os.Rename(from, to)
+				return originalRename(from, to)
 			}
 			t.Cleanup(func() {
 				newCorruptRecoveryStore, renameAuditStoreFile = originalNew, originalRename
@@ -459,6 +468,9 @@ func TestOpenDaemonStoreFreshRestoreRetriesTransientRename(t *testing.T) {
 func TestOpenDaemonStoreUnwritableWALKeepsSet(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows ACL test is covered by audit_db_path_windows_test.go")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root opens a 0400 file for writing, so the WAL is not unwritable (rel-1-0-2:GAP-0614)")
 	}
 	path := corruptWALFixture(t, "page")
 	before := auditSetBytes(t, path)
@@ -482,8 +494,8 @@ func TestOpenDaemonStoreWarnsWhenALateOpenConsumesWAL(t *testing.T) {
 		t.Fatal(err)
 	}
 	original := probeExistingAuditStore
-	probeExistingAuditStore = func(string, io.Writer) ([]auditSidecarAtStart, error) {
-		return []auditSidecarAtStart{{suffix: "-wal", size: wal.Size()}}, nil
+	probeExistingAuditStore = func(string, io.Writer) (auditStoreProbe, error) {
+		return auditStoreProbe{sidecars: []auditSidecarAtStart{{suffix: "-wal", size: wal.Size()}}}, nil
 	}
 	t.Cleanup(func() { probeExistingAuditStore = original })
 	var warning bytes.Buffer
@@ -571,7 +583,6 @@ func corruptColdJournalFixture(t *testing.T) string {
 
 func TestOpenDaemonStoreArchivesColdJournal(t *testing.T) {
 	path := corruptColdJournalFixture(t)
-	logAuditStoreBytes(t, "cold journal before", path)
 	before := map[string][]byte{}
 	for _, suffix := range []string{"", "-journal"} {
 		body, err := os.ReadFile(path + suffix)
@@ -584,7 +595,6 @@ func TestOpenDaemonStoreArchivesColdJournal(t *testing.T) {
 	if !isSQLiteCorrupt(probeErr) {
 		t.Fatalf("cold journal probe = %v; want corrupt page", probeErr)
 	}
-	logAuditStoreBytes(t, "cold journal after probe", path)
 	var warning bytes.Buffer
 	fresh, err := OpenDaemonStore(path, &warning)
 	if err != nil {
@@ -606,102 +616,92 @@ func TestOpenDaemonStoreArchivesColdJournal(t *testing.T) {
 	if !strings.Contains(warning.String(), "together with its -journal file") {
 		t.Fatalf("start warning does not name journal: %q", warning.String())
 	}
-	logAuditStoreBytes(t, "cold journal after quarantine", archive)
 }
 
-func logAuditStoreBytes(t *testing.T, stage, dbPath string) {
+// rel-1-0-2:GAP-0609: a read-only probe error that is neither corruption, a
+// busy store nor a hot journal went on to the writable open. That open failed
+// the same way and its last connection checkpointed the WAL into the main
+// file and deleted it. The start must refuse with the set untouched.
+func TestOpenDaemonStoreRefusesAnUnreadableStoreBeforeItsWALIsConsumed(t *testing.T) {
+	path := schemaFormatDamagedWALFixture(t)
+	before := auditSetBytes(t, path)
+	if len(before["-wal"]) == 0 {
+		t.Fatal("fixture WAL is empty")
+	}
+	var warning bytes.Buffer
+	store, err := OpenDaemonStore(path, &warning)
+	if store != nil {
+		_ = store.Close()
+	}
+	if store != nil || err == nil || !strings.Contains(err.Error(), "did not open it for writing") ||
+		isSQLiteCorrupt(err) {
+		t.Fatalf("OpenDaemonStore = %v, %v; want a refusal before the writable open; warning %q", store != nil, err, warning.String())
+	}
+	assertOriginalAuditSetUnchanged(t, path, before)
+	if moved := MovedCorruptStores(path); len(moved) != 0 {
+		t.Fatalf("an unreadable store that is not corrupt was moved aside: %+v", moved)
+	}
+}
+
+// schemaFormatDamagedWALFixture copies a store whose WAL holds a same-size
+// update but not page 1, then sets an unsupported schema format number in the
+// main file's header: SQLite reports SQLITE_ERROR, neither corruption nor a
+// busy store. An insert would allocate a page and put page 1 in the WAL,
+// where the main file's header is not read.
+func schemaFormatDamagedWALFixture(t *testing.T) string {
 	t.Helper()
-	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
-		body, err := os.ReadFile(dbPath + suffix)
-		if os.IsNotExist(err) {
-			t.Logf("%s %s: absent", stage, filepath.Base(dbPath)+suffix)
-			continue
-		}
+	source := filepath.Join(t.TempDir(), "audit.db")
+	store, err := NewStore(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO audit_events (id, timestamp, action, target)
+		VALUES ('same-size', CURRENT_TIMESTAMP, 'fixture', 'aaaaaaaa')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := openSQLite(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	if _, err := writer.Exec(`UPDATE audit_events SET target = 'bbbbbbbb' WHERE id = 'same-size'`); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "audit.db")
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		body, err := os.ReadFile(source + suffix)
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Logf("%s %s: size=%d sha256=%x", stage, filepath.Base(dbPath)+suffix, len(body), sha256.Sum256(body))
+		if err := os.WriteFile(path+suffix, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
-}
-
-// This diagnostic names the precise step that changes a damaged store's
-// sidecars. It exercises the same functions as OpenDaemonStore in their actual
-// order, including the read-only carry-over open of the archive.
-func TestCorruptStoreWALByteTrace(t *testing.T) {
-	for _, damage := range []string{"header", "page"} {
-		t.Run(damage, func(t *testing.T) {
-			path := corruptWALFixture(t, damage)
-			logAuditStoreBytes(t, "before start", path)
-			prepared, err := prepareAuditDatabasePath(path, auditDBPathHooks{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			prepared.close()
-			logAuditStoreBytes(t, "after pre-open sidecar handling", path)
-			_, probeErr := readOnlyAuditStoreProbe(path, &bytes.Buffer{})
-			if !isSQLiteCorrupt(probeErr) {
-				t.Fatalf("read-only probe error = %v, want corruption", probeErr)
-			}
-			logAuditStoreBytes(t, "after read-only probe", path)
-			opened, err := openCheckedStore(path, &bytes.Buffer{}, nil)
-			if opened != nil {
-				_ = opened.Close()
-			}
-			if !isSQLiteCorrupt(err) {
-				t.Fatalf("first writable open error = %v, want corruption", err)
-			}
-			logAuditStoreBytes(t, "after failed first open", path)
-			if preCutoverAuditDB(path) {
-				t.Fatal("fixture unexpectedly has a 0.x schema")
-			}
-			moved, err := quarantineCorruptAuditDB(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			logAuditStoreBytes(t, "after quarantine", moved)
-			fresh, err := NewStore(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer fresh.Close()
-			if err := fresh.Init(); err != nil {
-				t.Fatal(err)
-			}
-			logAuditStoreBytes(t, "after new store creation", moved)
-			if _, err := fresh.carryOverActions(moved); err != nil && !isSQLiteCorrupt(err) {
-				t.Logf("carry-over: %v", err)
-			}
-			logAuditStoreBytes(t, "after carryOverActions", moved)
-
-			// Repeat without the destructive writable open. This isolates H4:
-			// a populated archive WAL must survive the read-only carry-over.
-			preserved := corruptWALFixture(t, damage)
-			walBefore, err := os.ReadFile(preserved + "-wal")
-			if err != nil {
-				t.Fatal(err)
-			}
-			preservedArchive, err := quarantineCorruptAuditDB(preserved)
-			if err != nil {
-				t.Fatal(err)
-			}
-			logAuditStoreBytes(t, "preserved path after quarantine", preservedArchive)
-			preservedFresh, err := NewStore(preserved)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := preservedFresh.Init(); err != nil {
-				t.Fatal(err)
-			}
-			logAuditStoreBytes(t, "preserved path after new store creation", preservedArchive)
-			_, _ = preservedFresh.carryOverActions(preservedArchive)
-			if err := preservedFresh.Close(); err != nil {
-				t.Fatal(err)
-			}
-			logAuditStoreBytes(t, "preserved path after carryOverActions", preservedArchive)
-			walAfter, err := os.ReadFile(preservedArchive + "-wal")
-			if err != nil || !bytes.Equal(walAfter, walBefore) {
-				t.Fatalf("read-only carry-over changed preserved archive WAL: %v", err)
-			}
-		})
+	wal, err := os.ReadFile(path + "-wal")
+	if err != nil {
+		t.Fatal(err)
 	}
+	const walHeader, frameHeader = 32, 24
+	for offset := walHeader; offset+frameHeader <= len(wal); offset += frameHeader + 4096 {
+		if page := binary.BigEndian.Uint32(wal[offset:]); page == 1 {
+			t.Fatal("fixture WAL holds page 1, which hides the main file's header")
+		}
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	// The schema format number is the big-endian integer at offset 44; SQLite
+	// reads its low byte and supports formats 1 to 4.
+	if _, err := file.WriteAt([]byte{0, 0, 0, 9}, 44); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }

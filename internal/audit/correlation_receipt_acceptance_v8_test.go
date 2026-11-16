@@ -65,7 +65,7 @@ func TestExistingOccurrenceReceiptRequiresExactAcceptanceCanary(t *testing.T) {
 	if err := secondTx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.RecordObservation(t.Context(), CorrelationObservation{
+	if err := repo.RecordObservations(t.Context(), CorrelationObservation{
 		RecordID: "canonical-" + string(event.SemanticEventID), SemanticEventID: event.SemanticEventID,
 		Signal: CorrelationSignalLogs, Bucket: "model_io", EventName: event.EventName,
 		ObservedAt: now.Add(2 * time.Second), Status: CorrelationObservationExportEligible,

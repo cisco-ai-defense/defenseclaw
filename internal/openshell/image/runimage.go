@@ -28,7 +28,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -36,6 +35,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 )
@@ -80,9 +80,9 @@ const runImageSchema = 1
 const runRepositorySuffix = "-run"
 
 var (
-	imageIDRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	hashRE    = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	tagNameRE = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
+	imageIDRE = lazyregexp.New(`^sha256:[0-9a-f]{64}$`)
+	hashRE    = lazyregexp.New(`^[0-9a-f]{64}$`)
+	tagNameRE = lazyregexp.New(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
 )
 
 // RunImage is a run image, or an alias, as the Store records it.
@@ -436,7 +436,7 @@ func baseDirs(base Record) (map[string]bool, error) {
 	c, err := NewContext(BuildSpec{
 		Harness: h, HarnessVersion: base.HarnessVersion, BaseImage: base.BaseImage, UID: base.UID, GID: base.GID,
 		IngressPort: base.IngressPort, FailMode: base.FailMode, DefenseClawVersion: base.DefenseClawVersion,
-		Repository: repo, Owner: base.Owner, MicroVM: base.MicroVM,
+		Repository: repo, Owner: base.Owner, MicroVM: base.MicroVM, TrustedCAs: []byte(base.TrustedCAs),
 	})
 	if err != nil || c.ContentHash != base.ContentHash || c.Tag != base.Tag {
 		return nil, fmt.Errorf("openshell image: %s is not the image this DefenseClaw builds from its record; rebuild it (`defenseclaw sandbox image build %s --force`)",
@@ -530,14 +530,16 @@ func (d VMDisk) PreparedBy(release string) bool {
 
 // VMDisks lists the root disks under cacheDir the vm driver prepared from
 // imageID: the directories, not links, named
-// openshell.PreparedDiskPrefix...-sha256-<the ID>. An unreadable cache
-// holds none.
+// openshell.PreparedDiskPrefix... and ending in either key of the ID
+// (vmDisk). An unreadable cache holds none.
 func VMDisks(cacheDir, imageID string) []VMDisk {
 	id, ok := strings.CutPrefix(imageID, "sha256:")
 	if !ok || !hashRE.MatchString(id) || cacheDir == "" {
 		return nil
 	}
-	return listVMDisks(cacheDir, func(_ VMDisk, of string) bool { return of == id })
+	sum := sha256.Sum256([]byte(imageID))
+	hashed := hex.EncodeToString(sum[:])
+	return listVMDisks(cacheDir, func(_ VMDisk, key string) bool { return key == imageID || key == hashed })
 }
 
 // StaleVMDisks lists the root disks under cacheDir that the vm driver of
@@ -552,8 +554,8 @@ func StaleVMDisks(cacheDir, release string) []VMDisk {
 }
 
 // listVMDisks lists the root disks under cacheDir that keep takes, with the
-// image ID (hex) each was prepared from.
-func listVMDisks(cacheDir string, keep func(d VMDisk, imageID string) bool) []VMDisk {
+// key of the image each was prepared from (vmDisk).
+func listVMDisks(cacheDir string, keep func(d VMDisk, key string) bool) []VMDisk {
 	entries, err := os.ReadDir(cacheDir)
 	if err != nil {
 		return nil
@@ -573,16 +575,25 @@ func listVMDisks(cacheDir string, keep func(d VMDisk, imageID string) bool) []VM
 	return out
 }
 
-// vmDisk is the root disk in the directory name under cacheDir, and the
-// image ID (hex) it was prepared from; ok is false unless name is
-// openshell.PreparedDiskPrefix...-sha256-<an image ID>.
-func vmDisk(cacheDir, name string) (d VMDisk, imageID string, ok bool) {
-	i := strings.LastIndex(name, "-sha256-")
-	if i < 0 || !strings.HasPrefix(name, openshell.PreparedDiskPrefix) || !hashRE.MatchString(name[i+len("-sha256-"):]) {
+// vmDisk is the root disk in the directory name under cacheDir, and the key
+// of the image it was prepared from; ok is false unless name is
+// openshell.PreparedDiskPrefix... ending in a key. The vm driver of
+// OpenShell 0.1.1 to 0.1.3 ends the name with "-sha256-<the image ID>"
+// (key "sha256:<the ID>"); since 0.1.4 it ends it with "-<the hex SHA-256
+// of "sha256:<the ID>">" (NVIDIA/OpenShell#4342; key that hex).
+func vmDisk(cacheDir, name string) (d VMDisk, key string, ok bool) {
+	if !strings.HasPrefix(name, openshell.PreparedDiskPrefix) {
+		return VMDisk{}, "", false
+	}
+	var rest string
+	if i := strings.LastIndex(name, "-sha256-"); i >= 0 && hashRE.MatchString(name[i+len("-sha256-"):]) {
+		rest, key = name[:i], "sha256:"+name[i+len("-sha256-"):]
+	} else if i := strings.LastIndex(name, "-"); i >= 0 && hashRE.MatchString(name[i+1:]) {
+		rest, key = name[:i], name[i+1:]
+	} else {
 		return VMDisk{}, "", false
 	}
 	d = VMDisk{Path: filepath.Join(cacheDir, name), UID: -1, GID: -1}
-	rest := name[:i]
 	if j := strings.LastIndex(rest, "-configured-"); j >= 0 {
 		uid, gid, _ := strings.Cut(rest[j+len("-configured-"):], "-")
 		u, uerr := strconv.Atoi(uid)
@@ -594,7 +605,7 @@ func vmDisk(cacheDir, name string) (d VMDisk, imageID string, ok bool) {
 	if _, after, found := strings.Cut(rest, "-openshell-"); found {
 		d.OpenShell, _, _ = strings.Cut(after, "-")
 	}
-	return d, name[i+len("-sha256-"):], true
+	return d, key, true
 }
 
 // RemoveVMDisk removes a root disk VMDisks listed, which must still be a

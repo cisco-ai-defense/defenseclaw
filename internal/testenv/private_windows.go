@@ -27,12 +27,20 @@ func AssertPrivateDirectory(t testing.TB, path string) {
 	assertPrivateDACL(t, path)
 }
 
+// processLocalAppData is the account's real LocalAppData, read once when the
+// test binary starts. SetHome and tests that stand in for another profile
+// redirect LOCALAPPDATA to a folder that does not exist yet; a private
+// directory is still made beneath the real one.
+var processLocalAppData = os.Getenv("LOCALAPPDATA")
+
 // PrivateTempDir creates a disposable directory beneath LocalAppData rather
 // than the shared Windows Temp tree, whose inherited ACL intentionally grants
-// the test runner service account write access.
+// the test runner service account write access. It uses the LocalAppData the
+// process started with, so it works after SetHome has redirected the
+// environment.
 func PrivateTempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp(os.Getenv("LOCALAPPDATA"), "DefenseClaw-test-")
+	dir, err := os.MkdirTemp(processLocalAppData, "DefenseClaw-test-")
 	if err != nil {
 		t.Fatal(err)
 	}

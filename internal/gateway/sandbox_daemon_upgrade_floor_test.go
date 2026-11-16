@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,7 +46,7 @@ const rc1RegistrationJSON = `{"v":1,"registrations":[{
 "AllowYolo":null,"AllowMount":null,"AllowHostPorts":null,"AllowUnblock":null,"AllowLearnMode":null,
 "AllowedHarnesses":null,"EgressBlock":null,"EgressAllowOnly":null,"BlockLargeUploads":false,
 "RequireCopyFor":null,"MaxResources":{"CPU":"","Memory":""},"Locked":null,"Allowed":null,
-"RequiredFor":null,"WhenUnavailable":"","UserApprovals":"","AllowedCredentials":null,
+"RequiredFor":null,"WhenUnavailable":"","UserApprovals":"","AllowedCredentials":["*"],
 "OnSilence":"","MaxSilenceAfter":"","ProcessTree":null,"ForeignSandboxes":"",
 "AllowUpstreamTelemetry":null,"DeleteStoppedAfter":"","RequestAccess":"it-help@example.com",
 "DriverFallback":""},
@@ -57,10 +58,22 @@ var upgradeFloorPeer = managedHookPeer{UID: 94409901, Name: "test-engineer@direc
 
 func upgradeFloorFixture(t *testing.T, rc1 bool) (*sandboxDaemonFixture, *managedSandboxController, *sandboxFixture, func(bool)) {
 	t.Helper()
+	return upgradeFloorFixtureWith(t, rc1, upgradeFloorPeer, nil)
+}
+
+// upgradeFloorFixtureWith is upgradeFloorFixture for peer, with edit
+// applied to the managed gateway's configuration before the sandbox is
+// registered.
+func upgradeFloorFixtureWith(t *testing.T, rc1 bool, peer managedHookPeer, edit func(*sandboxFixture)) (*sandboxDaemonFixture, *managedSandboxController, *sandboxFixture, func(bool)) {
+	t.Helper()
 	gate := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
-	gate.setGroups(upgradeFloorPeer, "dc-sbx-devs")
+	gate.setGroups(peer, "dc-sbx-devs")
 	gate.cfg.OpenShell.Admin = closedFloorRegFloor
-	resp := gate.live(upgradeFloorPeer, 1)
+	gate.cfg.OpenShell.Admin.AllowedCredentials = []string{"none"}
+	if edit != nil {
+		edit(gate)
+	}
+	resp := gate.live(peer, 1)
 	id := resp.Registration.ID
 	var answer bool
 	created := map[string]any{"pack": "balanced", "profile": "balanced", "network_mode": "allowlist", "approvals": "triage"}
@@ -91,7 +104,9 @@ func upgradeFloorFixture(t *testing.T, rc1 bool) (*sandboxDaemonFixture, *manage
 				t.Fatal(err)
 			}
 		} else {
-			current := daemonRegistration{ID: id, Sandbox: "dc-claude-1", Profile: "engineering", Floor: closedFloorRegFloor,
+			cached := closedFloorRegFloor
+			cached.AllowedCredentials = []string{"*"}
+			current := daemonRegistration{ID: id, Sandbox: "dc-claude-1", Profile: "engineering", Floor: cached,
 				Generation: 3, Driver: "docker", DriverReason: "configured", UpdatedAt: time.Now().UTC()}
 			writer := &daemonRegistrations{path: registrationsPath, byName: map[string]daemonRegistration{}}
 			if err := writer.put(current); err != nil {
@@ -109,14 +124,14 @@ func upgradeFloorFixture(t *testing.T, rc1 bool) (*sandboxDaemonFixture, *manage
 		if !answer {
 			return sandboxrelay.CurrentPolicy{}, sandboxrelay.ErrGatewayUnreachable
 		}
-		code, cp := gate.report(upgradeFloorPeer, id, false)
+		code, cp := gate.report(peer, id, false)
 		if code != http.StatusOK {
 			return sandboxrelay.CurrentPolicy{}, &sandboxrelay.Error{Status: code}
 		}
 		return cp, nil
 	}
 	reg, ok := f.d.regs.get("dc-claude-1")
-	if !ok || reg.ID != id || reg.Confirmed || reg.Revoked || reg.Floor.MinProfile != "balanced" {
+	if !ok || reg.ID != id || reg.Confirmed || reg.Revoked || reg.Floor.MinProfile != "" {
 		t.Fatalf("loaded registration = %+v, present %v", reg, ok)
 	}
 	ctl := &managedSandboxController{Manager: f.d.rt.manager, d: f.d}
@@ -127,6 +142,9 @@ func assertUpgradeFloorView(t *testing.T, f *sandboxDaemonFixture, ctl *managedS
 	t.Helper()
 	if f.d.floorClosed() {
 		t.Fatal("the gateway confirmed the registration, but the floor stayed closed")
+	}
+	if got := f.d.config().OpenShell.Admin.AllowedCredentials; !slices.Equal(got, []string{"none"}) {
+		t.Fatalf("credentials floor came from the account cache: %v", got)
 	}
 	if got := f.relay.reported(); !slices.Contains(got, f.d.regs.list()[0].ID+"=stopped") {
 		t.Fatalf("reports = %v, want a stopped-state report", got)
@@ -302,7 +320,11 @@ func TestSandboxDaemonUpgradeFloorRevokedRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertClosedFloorDeny(t, "the revoked registration", *raw)
+	// The floor stays closed; the views show the policy the sandbox was
+	// created with, not the closed floor's strict deny (GAP-0079).
+	if slices.ContainsFunc(raw.Violations, closedFloorDeny) || raw.Profile == "strict" || raw.NetworkMode == "deny" {
+		t.Fatalf("the revoked registration's sandbox shows the closed floor: %+v %s/%s", raw.Violations, raw.Profile, raw.NetworkMode)
+	}
 	if slices.Contains(raw.Warnings, sandboxConfirmingNote) {
 		t.Fatal("a revoked registration was presented as awaiting confirmation")
 	}
@@ -324,7 +346,10 @@ func TestSandboxDaemonUpgradeFloorKeepsGatewayOrganizationDeny(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.ContainsFunc(v.Violations, closedFloorDeny) || slices.Contains(v.Warnings, sandboxConfirmingNote) {
+	// The organization's deny is the stop's words; the views keep the
+	// policy the sandbox had (GAP-0079), and the floor stays closed.
+	if !strings.Contains(v.StopReason, "no longer allows sandboxes") || slices.ContainsFunc(v.Violations, closedFloorDeny) ||
+		slices.Contains(v.Warnings, sandboxConfirmingNote) {
 		t.Fatalf("the gateway's organization deny changed: %+v", v)
 	}
 }

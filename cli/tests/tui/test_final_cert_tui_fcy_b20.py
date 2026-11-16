@@ -89,8 +89,8 @@ def test_overview_observability_header_wraps_under_its_text() -> None:
 
 
 def test_overview_runtime_notice_keeps_its_key_hint_at_80x24(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # GAP-2551: "Runtime is DEGRADED (shadow egress partially covered): 217 process…"
-    # lost "no findings; N for details" at 80x24.
+    # GAP-2551: the full action and key hint must survive at 80x24. Only the
+    # first notice line is above the fold there, so the notice is one line.
     app = snapshot_app(tmp_path)
     app.overview_model.runtime = _standard_account_runtime().overview()
     size = SimpleNamespace(width=80, height=24)
@@ -98,7 +98,13 @@ def test_overview_runtime_notice_keeps_its_key_hint_at_80x24(tmp_path, monkeypat
     console = Console(file=io.StringIO(), width=80, color_system=None)
     console.print(app._overview_renderable())  # noqa: SLF001
     lines = console.file.getvalue().splitlines()
-    notice = next(line for line in lines if "[>] Runtime is" in line)
-    assert "Runtime is DEGRADED (shadow egress" in notice and "…" in notice, notice
-    assert notice.rstrip().endswith(", no findings; N for details"), notice
-    assert len(notice) <= 80
+    start = next(i for i, line in enumerate(lines) if "[>] Runtime " in line)
+    end = next((i for i in range(start + 1, len(lines)) if not lines[i].strip()), len(lines))
+    notice_lines = lines[start:end]
+    assert len(notice_lines) == 1, notice_lines
+    message = notice_lines[0].strip().removeprefix("[>] ")
+    expected = next(n.message for n in app.overview_model.build_notices() if n.message.startswith("Runtime "))
+    assert message == expected
+    # GAP-1274: a stated coverage limit is a note, not DEGRADED.
+    assert message == "Runtime WATCHING · N for details: shadow egress partially covered"
+    assert len(notice_lines[0]) <= 80

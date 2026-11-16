@@ -26,10 +26,13 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
@@ -146,6 +149,11 @@ func enterpriseHookCheckWorkerCapabilities(status string) error {
 	return errors.New("enterprise hooks: process capabilities are unavailable")
 }
 
+// enterpriseHookFilesystemPassGroupReuse is how old a worker group list a
+// pass armed by a file change may reuse: about the default one-minute interval
+// pass, which always resolves them again.
+var enterpriseHookFilesystemPassGroupReuse = 90 * time.Second
+
 // lockEnterpriseHookReconcile takes the exclusive reconcile lock inside the
 // root-owned authorization directory so the watcher and a manual
 // reconcile never interleave ledger writes.
@@ -154,32 +162,11 @@ func lockEnterpriseHookReconcile(ctx context.Context) (func(), error) {
 	if err := ensureEnterpriseHookStandaloneAuthDir(dir); err != nil {
 		return nil, err
 	}
-	path := filepath.Join(dir, enterpriseHookReconcileLockFile)
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
+	unlock, err := enterprisehooks.LockUnixGuardianReconcile(ctx, dir, enterpriseHookReconcileLockWait)
 	if err != nil {
-		return nil, fmt.Errorf("enterprise hooks: open reconcile lock: %w", err)
+		return nil, fmt.Errorf("enterprise hooks: %w", err)
 	}
-	deadline := time.Now().Add(enterpriseHookReconcileLockWait)
-	for {
-		err = syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-		if err == nil {
-			break
-		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) || time.Now().After(deadline) {
-			_ = file.Close()
-			return nil, fmt.Errorf("enterprise hooks: another reconcile holds %s: %w", path, err)
-		}
-		select {
-		case <-ctx.Done():
-			_ = file.Close()
-			return nil, ctx.Err()
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
-	return func() {
-		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
-		_ = file.Close()
-	}, nil
+	return unlock, nil
 }
 
 // ensureEnterpriseHookStandaloneAuthDir creates or re-hardens the
@@ -349,6 +336,22 @@ type enterpriseHookTargetHomeChangedError struct {
 	name, home, directoryHome string
 }
 
+// enterpriseHookTargetNoHomeReason is the pending reason of a manifest
+// target whose account the directory now gives no home (a removed macOS
+// mobile account answers with /var/empty): no agent of that account runs
+// on this computer, so it is waiting, not a protection failure. Status and
+// verify stayed failed (guardian_target_failed) until a reinstall
+// (rel-1-0-3 GAP-0177). The row goes when the enumerator drops the account,
+// or is protected again when it gets a home. Any other error is "".
+func enterpriseHookTargetNoHomeReason(err error) string {
+	var changed *enterpriseHookTargetHomeChangedError
+	if !errors.As(err, &changed) || !enterpriseHookDirectoryNoHome(changed.directoryHome) {
+		return ""
+	}
+	return fmt.Sprintf("the directory now gives account %q no home on this computer (%s instead of %s): it looks removed here, so the enrollment waits until the account is dropped from enrollment or gets a home again",
+		changed.name, changed.directoryHome, changed.home)
+}
+
 func (e *enterpriseHookTargetHomeChangedError) Error() string {
 	return fmt.Sprintf("enterprise hooks: target %q home %s no longer matches the directory home %s", e.name, e.home, e.directoryHome)
 }
@@ -420,12 +423,25 @@ var enterpriseHookCheckHome = func(home string, uid int) enterprisehooks.HomeChe
 // ptrace it. A success must name exactly the requested connector and home
 // and stay small enough for the gateway's bounded ledger read.
 func validateEnterpriseHookWorkerResult(target enterpriseHookWorkerTarget, result enterpriseHookWorkerTargetResult) error {
+	if target.Mode == enterpriseHookWorkerModeRemove {
+		if err := validateEnterpriseHookWorkerRemoveReport(result); err != nil {
+			return err
+		}
+	} else if result.PathsReported || len(result.CleanedPaths) != 0 || result.Remaining != "" || result.Unverified != "" {
+		return errors.New("worker reported removal paths for a non-remove target")
+	}
 	if !result.OK {
 		if result.Result != nil {
 			return errors.New("worker reported a failed target with a result")
 		}
 		if len(result.Error) > enterpriseHookWorkerResultMaxBytes {
 			return errors.New("worker error message is too large")
+		}
+		return nil
+	}
+	if target.Mode == enterpriseHookWorkerModeRemove {
+		if result.Pending || result.Result != nil || strings.TrimSpace(result.Error) != "" {
+			return errors.New("worker reported an inconsistent successful removal")
 		}
 		return nil
 	}
@@ -448,13 +464,89 @@ func validateEnterpriseHookWorkerResult(target enterpriseHookWorkerTarget, resul
 	return nil
 }
 
+const (
+	enterpriseHookWorkerRemovePathMax  = 512
+	enterpriseHookWorkerRemovePathsMax = 64
+	enterpriseHookWorkerRemainingMax   = 1024
+)
+
+func validateEnterpriseHookWorkerRemoveReport(result enterpriseHookWorkerTargetResult) error {
+	if !result.PathsReported && (len(result.CleanedPaths) != 0 || result.Remaining != "") {
+		return errors.New("worker removal paths lack a report marker")
+	}
+	if result.PathsReported && result.Unverified != "" {
+		return errors.New("worker reported both removal paths and an unverified reason")
+	}
+	if len(result.Unverified) > enterpriseHookWorkerRemainingMax ||
+		!utf8.ValidString(result.Unverified) || strings.IndexFunc(result.Unverified, unicode.IsControl) >= 0 {
+		return errors.New("worker reported an invalid unverified reason")
+	}
+	if len(result.CleanedPaths) > enterpriseHookWorkerRemovePathsMax {
+		return errors.New("worker reported too many removal paths")
+	}
+	for _, path := range result.CleanedPaths {
+		if len(path) > enterpriseHookWorkerRemovePathMax || !filepath.IsAbs(path) ||
+			filepath.Clean(path) != path || strings.TrimSpace(path) != path ||
+			!utf8.ValidString(path) || strings.IndexFunc(path, unicode.IsControl) >= 0 {
+			display := path
+			if len(display) > 96 && filepath.IsAbs(display) {
+				display = shortEnterpriseHookReportPath(display)
+			} else if len(display) > 96 {
+				display = boundedString(display, 96)
+			}
+			return fmt.Errorf("worker reported an invalid removal path %q", display)
+		}
+	}
+	if len(result.Remaining) > enterpriseHookWorkerRemainingMax ||
+		!utf8.ValidString(result.Remaining) || strings.IndexFunc(result.Remaining, unicode.IsControl) >= 0 {
+		return errors.New("worker reported an invalid remaining-entry reason")
+	}
+	return nil
+}
+
+func enterpriseHookWorkerPathWithin(home, path string) bool {
+	if !filepath.IsAbs(home) || !filepath.IsAbs(path) {
+		return false
+	}
+	rel, err := filepath.Rel(filepath.Clean(home), filepath.Clean(path))
+	return err == nil && rel != "." && !filepath.IsAbs(rel) && rel != ".." &&
+		!strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// enterpriseHookRecheckTouches reports whether the running pass's trigger
+// paths name a file in one of dirs (an account's home, a target's watched
+// folders), so that account's pass gets the recheck window.
+func enterpriseHookRecheckTouches(dirs ...string) bool {
+	if enterpriseHookReconcileRecheckAll {
+		return true
+	}
+	for _, path := range enterpriseHookReconcileRecheckPaths {
+		for _, dir := range dirs {
+			if dir != "" && enterpriseHookWorkerPathWithin(filepath.Clean(dir), path) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // enterpriseHookStandaloneOutcome is one row's worker disposition.
 type enterpriseHookStandaloneOutcome struct {
-	ok       bool
-	pending  bool
+	ok      bool
+	pending bool
+	// repaired: the worker rewrote the target. The guardian own writes are
+	// told from a tamper by it, and a rewritten target is not recorded
+	// verified.
 	repaired bool
-	err      string
-	result   *enterprisehooks.InstallResult
+	// restored names the protected elements the worker put back, whether or
+	// not the target is healthy after it (GAP-0754). It alone is counted,
+	// audited and recorded as a restore.
+	restored []string
+	// restoredChanges says what happened to each restored element, in the
+	// same order (enterprisehooks.HookChange*), or "" where it is unknown.
+	restoredChanges []string
+	err             string
+	result          *enterprisehooks.InstallResult
 	// agentConfig is the worker's connector.AgentConfigStatus code.
 	agentConfig string
 }
@@ -502,14 +594,29 @@ func dispatchEnterpriseHookStandaloneJobs(
 					continue
 				}
 				if !result.OK {
-					outcomes[target.Index] = enterpriseHookStandaloneOutcome{err: firstNonEmpty(result.Error, "worker reported an unspecified failure")}
+					// repaired: the target failed, and the worker (or the files)
+					// show it put hook files back first (GAP-0754).
+					restored, changes := knownEnterpriseHookElements(result.RestoredElements, result.RestoredChanges)
+					outcomes[target.Index] = enterpriseHookStandaloneOutcome{repaired: result.Repaired, restored: restored, restoredChanges: changes, err: firstNonEmpty(result.Error, "worker reported an unspecified failure")}
 					continue
 				}
-				outcomes[target.Index] = enterpriseHookStandaloneOutcome{ok: true, repaired: result.Repaired, result: result.Result, agentConfig: result.AgentConfig}
+				restored, changes := knownEnterpriseHookElements(result.RestoredElements, result.RestoredChanges)
+				outcomes[target.Index] = enterpriseHookStandaloneOutcome{ok: true, repaired: result.Repaired, restored: restored, restoredChanges: changes, result: result.Result, agentConfig: result.AgentConfig}
 			}
 		}
 	}
 	return outcomes
+}
+
+// watchEnterpriseHookManagedCodexConfig makes a change of the account's Codex
+// user config start a pass, so a conflicting features.hooks key is removed
+// soon after the user writes it.
+func watchEnterpriseHookManagedCodexConfig(home string, watchDirs, sharedFiles map[string]struct{}) {
+	configDir := filepath.Join(home, ".codex")
+	watchDirs[home] = struct{}{}
+	watchDirs[configDir] = struct{}{}
+	sharedFiles[configDir] = struct{}{} // Creation after enrollment is a repair signal.
+	sharedFiles[filepath.Join(configDir, "config.toml")] = struct{}{}
 }
 
 // enterpriseHookStandaloneSlot tracks one dispatched manifest row.
@@ -524,6 +631,20 @@ type enterpriseHookStandaloneSlot struct {
 	// credentialID fingerprints the hook credential rendered for the
 	// target (connector.UserScopedCredentialKeyID).
 	credentialID string
+}
+
+// enterpriseHookStandaloneProductCredentialDigests are the digests of the
+// product credentials an exporter in an account's own agent configuration
+// may carry: the gateway token (replaceable in tests). The foreign cleanup
+// hands them to its as-the-user worker (GAP-2376).
+var enterpriseHookStandaloneProductCredentialDigests = func() []connector.NativeOTLPCredentialDigest {
+	if cfg == nil {
+		return nil
+	}
+	if digest, ok := connector.NativeOTLPCredentialDigestOf(cfg.Gateway.ResolvedToken()); ok {
+		return []connector.NativeOTLPCredentialDigest{digest}
+	}
+	return nil
 }
 
 // runEnterpriseHookReconcileOnceStandaloneUnix is the standalone Unix
@@ -548,15 +669,44 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	if err != nil {
 		return run, err
 	}
+	previousState, previousStateExists, previousStateErr := loadEnterpriseHookGuardianState(cfg.DataDir)
 	run.ManifestSHA256 = manifestSHA256
+	// until 1.1: the OpenHands/OmniGent rows a 1.0.2-1.0.4 enumerator wrote
+	// are not enrolled targets (GAP-2504).
+	manifest.Targets = withoutRemovedConnectorTargets(manifest.Targets)
 	apiAddr, proxyAddr := enterpriseHookListenAddrs()
 	hookSocket, serviceUID, transportErr := enterpriseHookStandaloneHookTransport()
 	resolver := enterprisehooks.StandaloneResolver()
 	if caching, ok := resolver.(*unixidentity.CachingResolver); ok {
-		caching.Reset()
+		if enterpriseHookReconcileRecheckWindow > 0 {
+			// A pass a file change armed reuses the workers' recent group
+			// lists (ResetKeepingGroupIDs); interval, startup and retry
+			// passes ask the directory for everything again.
+			caching.ResetKeepingGroupIDs(enterpriseHookFilesystemPassGroupReuse)
+		} else {
+			caching.Reset()
+		}
 	}
 	registry := newEnterpriseHooksConnectorRegistry()
 	bindings := loadEnterpriseHookUnixBindings()
+	priorUIDs := map[string][]int{}
+	if previousStateErr == nil && previousStateExists {
+		for _, prior := range previousState.Results {
+			if key := enterpriseHookProtectedTargetKey(prior); key != "" {
+				priorUIDs[key] = append(priorUIDs[key], prior.UID)
+			}
+		}
+	}
+	if authorization, exists, err := loadEnterpriseHookGuardianAuthorization(cfg.DataDir); err == nil && exists {
+		for _, prior := range authorization.ProtectedTargets {
+			if key := enterpriseHookProtectedTargetKey(prior); key != "" {
+				priorUIDs[key] = append(priorUIDs[key], prior.UID)
+			}
+		}
+	}
+	for key, binding := range bindings.Bindings {
+		priorUIDs[key] = append(priorUIDs[key], binding.UID)
+	}
 	machinePolicy := enterpriseHookStandaloneMachinePolicySet()
 	// Remove DefenseClaw's own registrations from the homes of targets the
 	// manifest no longer enrolls, as each user, before this run's state
@@ -573,10 +723,20 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	rows := make([]enterpriseHookReconcileRow, 0, len(manifest.Targets))
 	jobs := map[int]*enterpriseHookWorkerJob{}
 	slots := map[int]enterpriseHookStandaloneSlot{}
-	var machineClaudeRows []int
+	var machineWorkerRows []int
+	// codexFeatureRepair: accounts whose job already removes a conflicting
+	// user features.hooks key (a machine-policy Codex row queued it).
+	codexFeatureRepair := map[int]bool{}
 	watchDirs := map[string]struct{}{}
 	exclusiveFiles := map[string]struct{}{}
 	sharedFiles := map[string]struct{}{}
+	watchPathOwners := map[string][]string{}
+	// ownedByRow is each dispatched target's exclusive-writer files, which
+	// the pass records the fingerprints of for status (GAP-0044).
+	ownedByRow := map[int][]string{}
+	// recheckAccounts are the accounts this pass's filesystem events named
+	// (enterpriseHookRecheckTouches): only their jobs get the recheck window.
+	recheckAccounts := map[int]bool{}
 	for _, target := range manifest.Targets {
 		if !target.IsEnabled() {
 			continue
@@ -585,6 +745,10 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			User:      strings.TrimSpace(target.User),
 			UserHome:  strings.TrimSpace(target.UserHome),
 			Connector: strings.TrimSpace(target.Connector),
+		}
+		proofRow := row
+		if target.UID == nil {
+			proofRow.UID = enterpriseHookGuardianPriorUID(priorUIDs[enterpriseHookProtectedTargetKey(row)]...)
 		}
 		pendingRow := func(reason string) {
 			row.Pending = true
@@ -600,6 +764,29 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			}
 		}
 		account, pendingReason, err := resolveEnterpriseHookStandaloneAccount(target, resolver)
+		if enterpriseHookGuardianTargetRemoved(ctx, target, proofRow, err) {
+			row.Removed = true
+			row.RevokeProtection = true
+			switch {
+			case target.UID != nil && *target.UID > 0:
+				row.UID = *target.UID
+			case proofRow.UID > 0:
+				row.UID = proofRow.UID
+			case account.UID > 0:
+				row.UID = account.UID
+			default:
+				if binding, ok := bindings.Bindings[enterpriseHookProtectedTargetKey(row)]; ok {
+					row.UID = binding.UID
+				}
+			}
+			row.Error = fmt.Sprintf("enterprise hooks: target account %q does not exist: %s", row.User, errEnterpriseHookTargetNotFound)
+			rows = append(rows, row)
+			continue
+		}
+		if reason := enterpriseHookTargetNoHomeReason(err); reason != "" {
+			pendingRow(reason)
+			continue
+		}
 		if err != nil {
 			var binding *enterpriseHookUnixBinding
 			if previous, ok := bindings.Bindings[enterpriseHookProtectedTargetKey(row)]; ok {
@@ -668,21 +855,30 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 				failRow(fmt.Errorf("enterprise hooks: %s machine policy is not in place", row.Connector))
 			default:
 				index := len(rows)
-				if strings.EqualFold(row.Connector, "claudecode") {
+				if strings.EqualFold(row.Connector, "claudecode") || strings.EqualFold(row.Connector, "codex") {
 					// An older personal install can leave a second hook in
 					// settings.json. The managed hook is already published;
-					// neutralize that personal script as the target user.
+					// neutralize that personal script as the target user. Codex
+					// can also leave a disallowed user features.hooks key that
+					// breaks an unrelated project trust write; remove that key
+					// as the user while machine policy keeps hooks pinned true.
 					job, exists := jobs[account.UID]
 					if !exists {
 						job = &enterpriseHookWorkerJob{Account: account, Request: enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpApply, Standalone: true}}
 						jobs[account.UID] = job
 					}
+					mode := enterpriseHookWorkerModeBlockPersonalClaude
+					if strings.EqualFold(row.Connector, "codex") {
+						mode = enterpriseHookWorkerModeRepairManagedCodexFeature
+						watchEnterpriseHookManagedCodexConfig(account.Home, watchDirs, sharedFiles)
+						codexFeatureRepair[account.UID] = true
+					}
 					job.Request.Targets = append(job.Request.Targets, enterpriseHookWorkerTarget{Index: index,
-						Mode: enterpriseHookWorkerModeBlockPersonalClaude,
+						Mode: mode,
 						Options: enterpriseHookWorkerOptionsFrom(enterprisehooks.InstallOptions{
-							ConnectorName: "claudecode", UserHome: account.Home, OwnerUID: account.UID, OwnerGID: account.GID,
+							ConnectorName: row.Connector, UserHome: account.Home, OwnerUID: account.UID, OwnerGID: account.GID,
 						})})
-					machineClaudeRows = append(machineClaudeRows, index)
+					machineWorkerRows = append(machineWorkerRows, index)
 				} else {
 					row.OK = true
 				}
@@ -755,15 +951,20 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 				watchDirs[dir] = struct{}{}
 			}
 		}
+		var ownedExclusive []string
 		if own, filesErr := enterprisehooks.WatchOwnedFiles(opts); filesErr == nil {
+			ownedExclusive = own.ExclusiveWriter
 			for _, f := range own.ExclusiveWriter {
 				exclusiveFiles[f] = struct{}{}
+				enterpriseHookWatchAddPathOwner(watchPathOwners, f, key)
 			}
 			for _, f := range own.SharedWriter {
 				sharedFiles[f] = struct{}{}
+				enterpriseHookWatchAddPathOwner(watchPathOwners, f, key)
 			}
 		}
 		index := len(rows)
+		ownedByRow[index] = ownedExclusive
 		rows = append(rows, row)
 		slot := enterpriseHookStandaloneSlot{
 			key: key, account: account, inode: check.Inode, verifiable: previousProtection.PreviouslyProtected,
@@ -778,17 +979,128 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			job = &enterpriseHookWorkerJob{Account: account, Request: enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpApply, Standalone: true}}
 			jobs[account.UID] = job
 		}
+		if dirs, watchErr := enterprisehooks.WatchDirs(opts); watchErr == nil && enterpriseHookRecheckTouches(dirs...) {
+			recheckAccounts[account.UID] = true
+		}
 		job.Request.TightenHome = job.Request.TightenHome || tightenHome
 		job.Request.Targets = append(job.Request.Targets, enterpriseHookWorkerTarget{
 			Index:               index,
 			Mode:                enterpriseHookWorkerModeVerifyOrRepair,
 			PreviouslyProtected: previousProtection.PreviouslyProtected,
 			Options:             enterpriseHookWorkerOptionsFrom(opts),
+			PriorCredentials:    enterpriseHookPriorUserTokens(cfg.DataDir, target.Connector, identity),
 		})
 	}
 
-	outcomes := dispatchEnterpriseHookStandaloneJobs(ctx, jobs)
-	for _, index := range machineClaudeRows {
+	// Machine policy pins Codex hooks on for every user, so the enumerator
+	// need not list a Codex row for an account it enrolls for another
+	// connector (a managed macOS account enrolled only for Hermes). Its own
+	// `codex features disable hooks` still writes features.hooks=false, and
+	// Codex then refuses every project trust write. Remove that key, as the
+	// user, for every account this pass dispatches, as the Codex row does
+	// (GAP-0791). Its outcome changes no row: hooks stay pinned on either way.
+	var codexFeatureOnly []int
+	if _, published := machinePolicy["codex"]; published {
+		if covered, err := enterpriseHookStandaloneMachinePolicyCovered("codex"); err == nil && covered {
+			uids := make([]int, 0, len(jobs))
+			for uid := range jobs {
+				uids = append(uids, uid)
+			}
+			slices.Sort(uids)
+			for _, uid := range uids {
+				job := jobs[uid]
+				account := job.Account
+				if codexFeatureRepair[account.UID] {
+					continue
+				}
+				codexFeatureRepair[account.UID] = true
+				index := len(manifest.Targets) + len(codexFeatureOnly)
+				codexFeatureOnly = append(codexFeatureOnly, index)
+				watchEnterpriseHookManagedCodexConfig(account.Home, watchDirs, sharedFiles)
+				job.Request.Targets = append(job.Request.Targets, enterpriseHookWorkerTarget{Index: index,
+					Mode: enterpriseHookWorkerModeRepairManagedCodexFeature,
+					Options: enterpriseHookWorkerOptionsFrom(enterprisehooks.InstallOptions{
+						ConnectorName: "codex", UserHome: account.Home, OwnerUID: account.UID, OwnerGID: account.GID,
+					})})
+			}
+		}
+	}
+
+	// Every job of an account the events named gets the window, whichever
+	// target created it: a job a machine-policy Claude Code or Codex row
+	// created first had none, so the account's Hermes was checked once
+	// (GAP-1825 review R4-1).
+	if window := int(enterpriseHookReconcileRecheckWindow / time.Millisecond); window > 0 {
+		for uid, job := range jobs {
+			if recheckAccounts[uid] || enterpriseHookRecheckTouches(job.Account.Home) {
+				job.Request.RecheckMillis = window
+			}
+		}
+	}
+	// A filesystem pass must not spend its worker slots repeating failures
+	// from unrelated accounts before it can repair the account named by the
+	// event. Keep each omitted row failed; its own event or retry still runs
+	// its worker. A changed manifest or an overflow gets a full pass.
+	cachedFailures := map[int]enterpriseHookStandaloneOutcome{}
+	jobsToRun := make(map[int]*enterpriseHookWorkerJob, len(jobs))
+	for uid, job := range jobs {
+		jobsToRun[uid] = job
+	}
+	if prior, ok := ctx.Value(enterpriseHookWatchPriorRunKey{}).(enterpriseHookReconcileRun); ok &&
+		prior.ManifestSHA256 == manifestSHA256 && !enterpriseHookReconcileRecheckAll {
+		priorFailures := map[string]string{}
+		for _, row := range prior.Rows {
+			if !row.OK && !row.Pending && row.Error != "" {
+				priorFailures[enterpriseHookProtectedTargetKey(row)] = row.Error
+			}
+		}
+		for uid, job := range jobs {
+			if recheckAccounts[uid] || enterpriseHookRecheckTouches(job.Account.Home) {
+				continue
+			}
+			failures := map[int]enterpriseHookStandaloneOutcome{}
+			for _, target := range job.Request.Targets {
+				if target.Mode != enterpriseHookWorkerModeVerifyOrRepair || target.Index >= len(rows) {
+					failures = nil
+					break
+				}
+				err := priorFailures[enterpriseHookProtectedTargetKey(rows[target.Index])]
+				if err == "" {
+					failures = nil
+					break
+				}
+				failures[target.Index] = enterpriseHookStandaloneOutcome{err: err}
+			}
+			if len(failures) == 0 {
+				continue
+			}
+			for index, outcome := range failures {
+				cachedFailures[index] = outcome
+			}
+			delete(jobsToRun, uid)
+		}
+	}
+	outcomes := dispatchEnterpriseHookStandaloneJobs(withEnterpriseHookWorkerInterruptDrain(ctx), jobsToRun)
+	if err := ctx.Err(); err != nil {
+		// The watch loop interrupted the pass after workers that had
+		// finished put their targets back: those repairs still happened and
+		// are reported, because the next pass finds the files in order
+		// (GAP-0754). The dispatch gave each running worker the interrupt
+		// drain to answer, so a worker that restored an element is not killed
+		// before it says so.
+		run.RepairedTargets, run.Repairs = reportEnterpriseHookStandaloneInterruptedRepairs(cfg.DataDir, hookSocket, slots, rows, outcomes)
+		return run, err
+	}
+	for index, outcome := range cachedFailures {
+		outcomes[index] = outcome
+	}
+	for _, index := range codexFeatureOnly {
+		if outcome := outcomes[index]; !outcome.ok && !outcome.pending {
+			fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] warn: codex: the user features.hooks preference was not removed: %s\n",
+				firstNonEmpty(outcome.err, errEnterpriseHookWorkerNoResult.Error()))
+		}
+	}
+	for _, index := range machineWorkerRows {
 		row := rows[index]
 		outcome, ok := outcomes[index]
 		switch {
@@ -804,6 +1116,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 		rows[index] = row
 	}
 	repairs := 0
+	repairedTargets := make(map[string]bool)
 	var repaired []enterpriseHookGuardianRepair
 	var auditRepairs []enterpriseHookGuardianAuditReport
 	var notices []enterpriseHookGuardianNotice
@@ -822,17 +1135,26 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			row.Result = outcome.result
 			row.UserHome = outcome.result.UserHome
 			row.Connector = outcome.result.Connector
-			if outcome.repaired {
-				repaired = append(repaired, enterpriseHookGuardianRepair{User: row.User, Connector: row.Connector})
-				auditRepairs = append(auditRepairs, enterpriseHookGuardianAuditReport{User: row.User, UID: slot.account.UID, Connector: row.Connector})
-				repairs++
-			}
 			verified[index] = slot.verifiable && !outcome.repaired
 			if outcome.agentConfig != "" {
 				notices = append(notices, enterpriseHookGuardianNotice{User: row.User, Connector: row.Connector, AgentConfig: outcome.agentConfig})
 			}
 		default:
 			row.Error = outcome.err
+		}
+		if ok && outcome.repaired && !outcome.pending {
+			repairedTargets[slot.key] = true
+		}
+		if ok && len(outcome.restored) > 0 && !outcome.pending {
+			// A restore counts whether or not the target is healthy after it:
+			// a target the worker put back in part stays failed, and its
+			// retry must not be the only trace of the elements it restored.
+			// Only a protected element that went from not matching to
+			// matching is a restore.
+			fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] %s restored: %s\n", enterpriseHookTargetLabel(row), strings.Join(outcome.restored, ", "))
+			repaired = append(repaired, enterpriseHookGuardianRepair{User: row.User, Connector: row.Connector})
+			auditRepairs = append(auditRepairs, enterpriseHookRestoreAudits(row.User, slot.account.UID, row.Connector, outcome.restored, outcome.restoredChanges)...)
+			repairs += len(outcome.restored)
 		}
 		rows[index] = row
 		if row.OK {
@@ -862,11 +1184,24 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	writeEnterpriseHookGuardianNotices(enterpriseHookWorkerLog, cfg.DataDir, notices)
 	reportEnterpriseHookGuardianRepairs(ctx, hookSocket, auditRepairs)
 	stateErr := writeEnterpriseHookGuardianState(cfg.DataDir, enterpriseHookManifest, manifestSHA256, rows, failures, true)
+	if stateErr == nil {
+		removed := logEnterpriseHookRemovedTransitions(enterpriseHookWorkerLog, previousState.Results, rows)
+		reportEnterpriseHookGuardianRemoved(ctx, hookSocket, removed)
+	}
 	if stateErr == nil && bindingsErr != nil {
 		stateErr = fmt.Errorf("persist protected target identity bindings: %w", bindingsErr)
 	}
 	if stateErr == nil && cleanupErr != nil {
 		stateErr = fmt.Errorf("persist the per-user cleanup ledger: %w", cleanupErr)
+	}
+	uids := make(map[int]int, len(slots))
+	for index, slot := range slots {
+		uids[index] = slot.account.UID
+	}
+	if err := writeEnterpriseHookGuardianOwnedFiles(enterpriseHookWorkerLog, cfg.DataDir, rows, uids, ownedByRow); err != nil && stateErr == nil {
+		// Status would compare the files with an earlier pass: retry with
+		// the repair backoff.
+		stateErr = fmt.Errorf("record the verified hook files: %w", err)
 	}
 	if err := writeEnterpriseHookCredentialAttestation(manifestSHA256, rows, slots, verified, stateErr == nil); err != nil && stateErr == nil {
 		stateErr = fmt.Errorf("publish the guardian credential attestation: %w", err)
@@ -876,17 +1211,203 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	run.Failures = failures
 	run.Pending = pending
 	run.Repairs = repairs
+	run.RepairedTargets = repairedTargets
 	run.StateErr = stateErr
+	dropEnterpriseHookAccountHomeWatchDirs(watchDirs, manifest.Targets, jobs)
 	run.WatchDirs = sortedEnterpriseHookWatchDirs(watchDirs)
 	run.WatchExclusiveFiles = sortedEnterpriseHookWatchDirs(exclusiveFiles)
 	run.WatchSharedFiles = sortedEnterpriseHookWatchDirs(sharedFiles)
+	run.WatchPathOwners = watchPathOwners
+	if repairs > 0 {
+		requestEnterpriseHookForeignCleanupNow()
+	}
 	runEnterpriseHookStandaloneForeignCleanup(ctx, os.Stderr, time.Now(), manifest, enterpriseHookPerUserEnrolled(manifest, machinePolicy), hookSocket)
 	return run, nil
+}
+
+// reportEnterpriseHookStandaloneInterruptedRepairs accounts the targets the
+// workers of an interrupted pass restored a protected element of, exactly as a
+// pass that ran to its end does: the repairs record, the audit report to the gateway
+// (the report sender detaches from the pass context), the agent config notice the
+// worker returned and the restore entry, recorded now because the pass that
+// records them may not come soon. It returns the rewritten targets by slot key
+// (the watch loop tells the writes of the guardian from a tamper by them) and
+// the number of restores, which the caller counts as the pass repairs
+// (GAP-0754).
+func reportEnterpriseHookStandaloneInterruptedRepairs(dataDir, hookSocket string, slots map[int]enterpriseHookStandaloneSlot,
+	rows []enterpriseHookReconcileRow, outcomes map[int]enterpriseHookStandaloneOutcome) (map[string]bool, int) {
+	repairedTargets := map[string]bool{}
+	var repaired []enterpriseHookGuardianRepair
+	var audits []enterpriseHookGuardianAuditReport
+	var restored []enterpriseHookGuardianRestore
+	var notices []enterpriseHookGuardianNotice
+	count := 0
+	answered := map[string]bool{}
+	restoredAt := time.Now().UTC().Format(time.RFC3339Nano)
+	for index, slot := range slots {
+		outcome, ok := outcomes[index]
+		if !ok || outcome.pending || index >= len(rows) {
+			continue
+		}
+		if outcome.repaired {
+			repairedTargets[slot.key] = true
+		}
+		if len(outcome.restored) == 0 {
+			continue
+		}
+		user, name := rows[index].User, rows[index].Connector
+		uid := slot.account.UID
+		fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] %s restored: %s\n", enterpriseHookTargetLabel(rows[index]), strings.Join(outcome.restored, ", "))
+		repaired = append(repaired, enterpriseHookGuardianRepair{User: user, Connector: name})
+		audits = append(audits, enterpriseHookRestoreAudits(user, uid, name, outcome.restored, outcome.restoredChanges)...)
+		count += len(outcome.restored)
+		restored = append(restored, enterpriseHookGuardianRestore{UID: &uid, User: user, Connector: name, RestoredAt: restoredAt})
+		answered[user+"\x00"+strings.ToLower(name)] = true
+		if outcome.agentConfig != "" {
+			notices = append(notices, enterpriseHookGuardianNotice{User: user, Connector: name, AgentConfig: outcome.agentConfig})
+		}
+	}
+	if len(repaired) == 0 {
+		return repairedTargets, 0
+	}
+	requestEnterpriseHookForeignCleanupNow()
+	writeEnterpriseHookGuardianRepairs(dataDir, repaired)
+	// The record holds every target notice, and this pass answered only some:
+	// replace the notices of the repaired targets and keep the others.
+	merged := notices
+	for _, notice := range readEnterpriseHookGuardianNotices(dataDir) {
+		if !answered[notice.User+"\x00"+strings.ToLower(notice.Connector)] {
+			merged = append(merged, notice)
+		}
+	}
+	writeEnterpriseHookGuardianNotices(enterpriseHookWorkerLog, dataDir, merged)
+	reportEnterpriseHookGuardianRepairs(context.Background(), hookSocket, audits)
+	// A failed record is kept in memory and written by a later pass.
+	_ = recordEnterpriseHookGuardianRestores(enterpriseHookWorkerLog, dataDir, rows, restored)
+	return repairedTargets, count
+}
+
+// enterpriseHookRestoreAudits is the audit report of one restore: one record
+// per protected element that went from not matching to matching, each naming
+// its element and what happened to it (changes, in the same order), so a
+// restored script and a restored entry are two counted and audited repairs on
+// every path (GAP-0754).
+func enterpriseHookRestoreAudits(user string, uid int, connectorName string, elements, changes []string) []enterpriseHookGuardianAuditReport {
+	reports := make([]enterpriseHookGuardianAuditReport, 0, len(elements))
+	for i, element := range elements {
+		report := enterpriseHookGuardianAuditReport{User: user, UID: uid, Connector: connectorName, Element: element}
+		if i < len(changes) {
+			report.Change = changes[i]
+		}
+		reports = append(reports, report)
+	}
+	return reports
+}
+
+// knownEnterpriseHookElements keeps the protected element names the guardian
+// knows from what a worker, which runs as the user, reported, each once, with
+// the change kind reported for it when that is one the guardian knows: a name
+// it made up is no restore.
+func knownEnterpriseHookElements(names, changes []string) (known, knownChanges []string) {
+	for i, name := range names {
+		if !enterprisehooks.KnownHookElement(name) || slices.Contains(known, name) {
+			continue
+		}
+		change := ""
+		if i < len(changes) && enterprisehooks.KnownHookChange(changes[i]) {
+			change = changes[i]
+		}
+		known = append(known, name)
+		knownChanges = append(knownChanges, change)
+	}
+	return known, knownChanges
 }
 
 // enterpriseHookCredentialKeyID names the per-user credential key a
 // reconcile rendered from; a seam for tests, whose minter reads no key.
 var enterpriseHookCredentialKeyID = currentEnterpriseHookUserTokenKeyID
+
+// enterpriseHookPriorUserTokens returns a target credentials from the key
+// of the held credential rotation that this run does not render from: the
+// committed key while a prepare renders the staged one, the staged key while
+// a rollback renders the committed one. They are the credentials the target
+// held when the rotation previous step reached it, so a rewrite that only
+// replaces them is configuration, not repair. Nil without a rotation whose
+// recorded keys are both present.
+func enterpriseHookPriorUserTokens(dataDir, connectorName, identity string) *enterprisehooks.HookCredentials {
+	transaction, err := loadEnterpriseHookCredentialTransaction(dataDir)
+	if err != nil || transaction == nil {
+		return nil
+	}
+	if validateEnterpriseHookUserTokenKeyLocation(dataDir) != nil {
+		return nil
+	}
+	committed, err := connector.LoadUserScopedTokenKey(dataDir)
+	if err != nil {
+		return nil
+	}
+	next := loadEnterpriseHookRotationNextKey(dataDir, *transaction)
+	key := enterpriseHookPriorUserTokenKey(*transaction, committed, next)
+	if key == "" {
+		return nil
+	}
+	api, err := connector.UserScopedHookAPIToken(key, connectorName, identity)
+	if err != nil {
+		return nil
+	}
+	prior := &enterprisehooks.HookCredentials{APIToken: api}
+	if scope, ok := connector.OTLPPathTokenScopeForConnector(connectorName); ok {
+		if prior.OTLPPathToken, err = connector.UserScopedOTLPPathToken(key, scope, identity); err != nil {
+			return nil
+		}
+	}
+	return prior
+}
+
+// loadEnterpriseHookRotationNextKey reads the transaction next key from
+// where its phase keeps it, with the committed key location and trust
+// checks and the transaction own fingerprint: the staged file while the
+// rotation prepares, and while it rolls back the retiring file the lifecycle
+// renames the staged one to (the staged file itself until that rename).
+// It returns "" when no such key matches the transaction.
+func loadEnterpriseHookRotationNextKey(dataDir string, transaction enterprisehooks.CredentialTransaction) string {
+	type source struct {
+		path func(string) (string, error)
+		load func(string) (string, error)
+	}
+	pending := source{connector.PendingUserScopedTokenKeyPath, connector.LoadPendingUserScopedTokenKey}
+	retiring := source{connector.RetiringUserScopedTokenKeyPath, connector.LoadRetiringUserScopedTokenKey}
+	sources := []source{pending}
+	if transaction.Phase == enterprisehooks.CredentialPhaseRollback {
+		sources = []source{retiring, pending}
+	}
+	for _, src := range sources {
+		path, err := src.path(dataDir)
+		if err != nil || validateEnterpriseHookTokenPathLocation(dataDir, path, "rotation per-user credential key") != nil {
+			continue
+		}
+		if key, err := src.load(dataDir); err == nil && key != "" &&
+			connector.UserScopedTokenKeyFingerprint(key) == transaction.NextKeyID {
+			return key
+		}
+	}
+	return ""
+}
+
+// enterpriseHookPriorUserTokenKey selects the rotation key a run does not
+// render from, or "" when the committed and next keys are not the
+// transaction's two keys.
+func enterpriseHookPriorUserTokenKey(transaction enterprisehooks.CredentialTransaction, committed, staged string) string {
+	if committed == "" || staged == "" ||
+		connector.UserScopedTokenKeyFingerprint(committed) != transaction.PreviousKeyID ||
+		connector.UserScopedTokenKeyFingerprint(staged) != transaction.NextKeyID {
+		return ""
+	}
+	if transaction.RendersNext(transaction.PreviousKeyID, transaction.NextKeyID) {
+		return committed
+	}
+	return staged
+}
 
 // writeEnterpriseHookCredentialAttestation publishes what this reconcile did
 // to each enabled target (enterprisehooks.CredentialAttestation), root-only
@@ -1167,17 +1688,19 @@ func standaloneHookTransportFromDescriptor(descriptor *managed.RuntimeDescriptor
 
 // enterpriseHookStandaloneMachinePolicySet names the connectors the
 // lifecycle published through vendor machine policy, from the root-owned
-// runtime descriptor. Replaced in tests.
+// runtime descriptor. It is nil when the descriptor cannot be read (for
+// example mid-upgrade): the published set is then unknown, not empty
+// (GAP-1889). Replaced in tests.
 var enterpriseHookStandaloneMachinePolicySet = func() map[string]struct{} {
-	out := map[string]struct{}{}
 	layout, err := managed.StandaloneLayoutFor(runtime.GOOS)
 	if err != nil {
-		return out
+		return nil
 	}
 	descriptor, err := managed.LoadRuntimeDescriptor(layout.DescriptorPath)
 	if err != nil {
-		return out
+		return nil
 	}
+	out := map[string]struct{}{}
 	for _, name := range descriptor.MachinePolicyConnectors {
 		out[strings.ToLower(strings.TrimSpace(name))] = struct{}{}
 	}
@@ -1224,5 +1747,37 @@ func writeEnterpriseHookGuardianRepairs(dataDir string, repaired []enterpriseHoo
 	path := filepath.Join(dataDir, hookGuardianRepairsFile)
 	if err := writeEnterpriseHookProtectedFile(path, append(data, '\n')); err != nil {
 		fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] warn: record repaired targets: %v\n", err)
+	}
+}
+
+// enterpriseHookWatchSkipsAccountHomes says whether the guardian leaves the
+// home folder of an enrolled account itself out of its watch set. On macOS
+// fsnotify's kqueue backend opens every entry of a watched folder, and an
+// open of a privacy-protected entry of a home (~/.Trash, ~/Movies) can block
+// for good: the guardian then stopped reconciling and re-publishing its
+// ledger a minute after any restart, so verify failed (GAP-2454). The
+// folders below the home stay watched; a change of a file directly in a home
+// is taken by the interval pass. Replaceable in tests.
+var enterpriseHookWatchSkipsAccountHomes = func() bool { return runtime.GOOS == "darwin" }
+
+// dropEnterpriseHookAccountHomeWatchDirs removes the home folder of every
+// enrolled account and dispatched job from watchDirs where
+// enterpriseHookWatchSkipsAccountHomes says so.
+func dropEnterpriseHookAccountHomeWatchDirs(watchDirs map[string]struct{}, targets []enterprisehooks.ManifestTarget, jobs map[int]*enterpriseHookWorkerJob) {
+	if len(watchDirs) == 0 || !enterpriseHookWatchSkipsAccountHomes() {
+		return
+	}
+	drop := func(home string) {
+		if home = strings.TrimSpace(home); home != "" {
+			delete(watchDirs, filepath.Clean(home))
+		}
+	}
+	for _, target := range targets {
+		drop(target.UserHome)
+	}
+	for _, job := range jobs {
+		if job != nil {
+			drop(job.Account.Home)
+		}
 	}
 }

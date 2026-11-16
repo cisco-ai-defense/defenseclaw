@@ -19,6 +19,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // AssetQuarantinePlan binds one source tree to its connector-owned quarantine
@@ -31,8 +33,20 @@ type AssetQuarantinePlan struct {
 	SourceRoot     string
 	QuarantineRoot string
 	QuarantinePath string
+	QuarantineName string
 	ContentHash    string
 	OwnershipJSON  string
+}
+
+// WithPluginQuarantineName keeps a plugin's physical source name separate from
+// the name operators use to find its quarantine copy.
+func (plan AssetQuarantinePlan) WithPluginQuarantineName(name string) (AssetQuarantinePlan, error) {
+	if plan.TargetType != "plugin" || !safePathSegment(name) {
+		return AssetQuarantinePlan{}, fmt.Errorf("enforce: invalid plugin quarantine name")
+	}
+	plan.QuarantineName = name
+	plan.QuarantinePath = filepath.Join(plan.QuarantineRoot, "plugins", plan.Connector, name)
+	return plan, nil
 }
 
 // AssetRestorePlan binds a journalled quarantine copy to an allowed restore
@@ -147,15 +161,32 @@ func (plan AssetQuarantinePlan) PerSourceQuarantinePath() string {
 	if plan.Connector != "" {
 		parts = append(parts, plan.Connector)
 	}
-	if extendedTrailingNamePath(plan.SourcePath) && strings.HasSuffix(plan.TargetName, " ") {
-		return filepath.Join(append(parts, hex.EncodeToString(sum[:8]))...) + string(filepath.Separator) + plan.TargetName
+	name := plan.TargetName
+	if plan.QuarantineName != "" {
+		name = plan.QuarantineName
 	}
-	return filepath.Join(append(parts, hex.EncodeToString(sum[:8]), plan.TargetName)...)
+	if extendedTrailingNamePath(plan.SourcePath) && strings.HasSuffix(name, " ") {
+		return filepath.Join(append(parts, hex.EncodeToString(sum[:8]))...) + string(filepath.Separator) + name
+	}
+	return filepath.Join(append(parts, hex.EncodeToString(sum[:8]), name)...)
 }
+
+// ErrQuarantinePublished marks an ExecuteAssetQuarantine failure that came
+// after a verified copy was in quarantine storage: the copy stays there, and
+// the pending journal is the provenance that recovers or restores it, so the
+// caller must keep it.
+var ErrQuarantinePublished = errors.New("enforce: quarantine copy published")
+
+type quarantinePublishedError struct{ err error }
+
+func (e quarantinePublishedError) Error() string { return e.err.Error() }
+
+func (e quarantinePublishedError) Unwrap() []error { return []error{e.err, ErrQuarantinePublished} }
 
 // ExecuteAssetQuarantine performs copy, hash verification, atomic publication,
 // source re-verification, then source removal. A verified published copy is
-// retained on later failure so the pending durable journal can recover it.
+// retained on later failure so the pending durable journal can recover it;
+// such a failure matches ErrQuarantinePublished.
 func ExecuteAssetQuarantine(plan AssetQuarantinePlan, recordID string) error {
 	if err := validateQuarantinePlan(plan); err != nil {
 		return err
@@ -173,15 +204,18 @@ func ExecuteAssetQuarantine(plan AssetQuarantinePlan, recordID string) error {
 		}
 		sourceExists, sourceErr := assetPathExists(plan.SourcePath)
 		if sourceErr != nil {
-			return sourceErr
+			return quarantinePublishedError{sourceErr}
 		}
 		if !sourceExists {
 			return nil
 		}
 		if err := requireAssetHash(plan.SourcePath, plan.ContentHash); err != nil {
-			return fmt.Errorf("enforce: source changed during quarantine recovery: %w", err)
+			return quarantinePublishedError{fmt.Errorf("enforce: source changed during quarantine recovery: %w", err)}
 		}
-		return removeQuarantinedSource(plan, recordID)
+		if err := removeQuarantinedSource(plan, recordID); err != nil {
+			return quarantinePublishedError{err}
+		}
+		return nil
 	}
 	if err := requireAssetHash(plan.SourcePath, plan.ContentHash); err != nil {
 		return fmt.Errorf("enforce: source changed before quarantine: %w", err)
@@ -218,13 +252,13 @@ func ExecuteAssetQuarantine(plan AssetQuarantinePlan, recordID string) error {
 	}
 	published = true
 	if err := requireAssetHash(plan.QuarantinePath, plan.ContentHash); err != nil {
-		return fmt.Errorf("enforce: verify quarantine destination: %w", err)
+		return quarantinePublishedError{fmt.Errorf("enforce: verify quarantine destination: %w", err)}
 	}
 	if err := requireAssetHash(plan.SourcePath, plan.ContentHash); err != nil {
-		return fmt.Errorf("enforce: source changed during quarantine: %w", err)
+		return quarantinePublishedError{fmt.Errorf("enforce: source changed during quarantine: %w", err)}
 	}
 	if err := removeQuarantinedSource(plan, recordID); err != nil {
-		return fmt.Errorf("enforce: remove quarantined source: %w", err)
+		return quarantinePublishedError{fmt.Errorf("enforce: remove quarantined source: %w", err)}
 	}
 	return nil
 }
@@ -398,8 +432,15 @@ func validateQuarantinePlan(plan AssetQuarantinePlan) error {
 		!pathWithin(plan.QuarantinePath, plan.QuarantineRoot, false) {
 		return fmt.Errorf("enforce: quarantine plan escaped an allowed root")
 	}
+	quarantineName := plan.TargetName
+	if plan.QuarantineName != "" {
+		if plan.TargetType != "plugin" || !safePathSegment(plan.QuarantineName) {
+			return fmt.Errorf("enforce: invalid quarantine destination name")
+		}
+		quarantineName = plan.QuarantineName
+	}
 	if exactAssetBase(plan.SourcePath) != plan.TargetName ||
-		exactAssetBase(plan.QuarantinePath) != plan.TargetName {
+		exactAssetBase(plan.QuarantinePath) != quarantineName {
 		return fmt.Errorf("enforce: quarantine plan identity mismatch")
 	}
 	if err := validateSHA256Hex(plan.ContentHash); err != nil {
@@ -627,13 +668,19 @@ func RemoveLinkedAsset(sourceRoots []string, targetType, path string) (string, e
 	return target, nil
 }
 
+// ErrLinkedAssetContent marks a quarantine refusal because the asset, or a file
+// or folder inside it, is a link or reparse point. Quarantine copies and hashes
+// a tree without following links, so such an asset cannot be moved; the caller
+// reports it as rejected but left in place, not as a failed move (GAP-0826).
+var ErrLinkedAssetContent = errors.New("linked or reparse-point asset")
+
 func safeAssetInfo(path string) (fs.FileInfo, error) {
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if err != nil {
 		return nil, fmt.Errorf("enforce: inspect asset %s: %w", path, err)
 	}
 	if fileInfoIsLinkOrReparse(info) {
-		return nil, fmt.Errorf("enforce: refusing linked or reparse-point asset %s", path)
+		return nil, fmt.Errorf("enforce: refusing %w %s", ErrLinkedAssetContent, path)
 	}
 	if !info.IsDir() && !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("enforce: refusing non-regular asset %s", path)

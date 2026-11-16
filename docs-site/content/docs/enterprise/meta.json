@@ -22,10 +22,13 @@
     "identity-sources",
     "identity-okta",
     "identity-entra-id",
+    "trusted-connectors",
     "foreign-hook-guard",
     "ai-defense-key",
+    "account-join-key",
     "---Operate---",
     "operations",
+    "managed-commands",
     "lifecycle",
     "troubleshooting"
   ]

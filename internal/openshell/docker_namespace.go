@@ -16,10 +16,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // Per-account docker sandbox namespaces (GAP-0579). Every account's
@@ -47,7 +48,7 @@ func AccountDockerNamespace(uid int) string {
 // dockerNamespacePattern is a sandbox_label DefenseClaw writes: one plain
 // path element (the driver names a state folder after it and hashes it into
 // volume names).
-var dockerNamespacePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,62}$`)
+var dockerNamespacePattern = lazyregexp.New(`^[a-z0-9][a-z0-9_.-]{0,62}$`)
 
 func validDockerNamespace(ns string) bool { return dockerNamespacePattern.MatchString(ns) }
 
@@ -58,16 +59,24 @@ func (s *GatewayConfigState) SharesDefaultDockerNamespace() bool {
 }
 
 // UserStateHome is the state folder the account's gateway keeps its state
-// in: $XDG_STATE_HOME, else ~/.local/state.
+// in: $XDG_STATE_HOME, else ~/.local/state (DefaultStateHome).
 func UserStateHome(getenv func(string) string, home string) string {
 	if dir := strings.TrimSpace(getenv("XDG_STATE_HOME")); filepath.IsAbs(dir) {
 		return dir
 	}
+	return DefaultStateHome(home)
+}
+
+// DefaultStateHome is ~/.local/state of home: the state folder of a gateway
+// started with no XDG_STATE_HOME, as the exec shim of a managed computer
+// starts every account's gateway (HOME, no XDG_STATE_HOME), whatever
+// $XDG_STATE_HOME the account's other processes have.
+func DefaultStateHome(home string) string {
 	return filepath.Join(home, ".local", "state")
 }
 
 // DockerNamespaceInUse reports whether the account's gateway keeps a docker
-// sandbox in namespace: OpenShell's docker driver (0.1.0 to 0.1.3) keeps a
+// sandbox in namespace: OpenShell's docker driver (0.1.0 to 0.1.5) keeps a
 // folder per sandbox of a namespace, from its create to its delete, in
 // <state>/openshell/docker-sandbox-tokens/<namespace>. A folder that cannot
 // be read counts as in use, so the namespace is kept.
@@ -96,8 +105,8 @@ func (r *doctorRun) checkDockerNamespace(ctx context.Context) {
 			"on this computer share: when one of them starts, it removes the supervisors of your running sandboxes, and they stop"}
 	uid := r.Geteuid()
 	if r.sandboxesInDefaultNamespace(ctx) {
-		c.Fix = &Fix{Summary: "once no sandbox is left on your gateway (bring back their work with `defenseclaw sandbox pull NAME`, then " +
-			"`defenseclaw sandbox delete NAME`), run `" + setupCommand + "`: it gives your gateway a namespace of its own"}
+		c.Fix = &Fix{Summary: "bring back any copy-mode work with `defenseclaw sandbox pull NAME --apply` (or --branch or --patch-out FILE), " +
+			"confirm the project, branch or patch file contains it, then `defenseclaw sandbox delete NAME`; once no sandbox is left on your gateway, run `" + setupCommand + "`: it gives your gateway a namespace of its own"}
 	} else {
 		c.Fix = r.gatewayChangeFix("give your gateway a sandbox namespace of its own (sandbox_label = \""+AccountDockerNamespace(uid)+"\" in gateway.toml, with a backup)", "",
 			r.applyGateway(GatewayChanges{DockerNamespace: AccountDockerNamespace(uid)}))

@@ -16,34 +16,62 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// claudeAttestationHint names the step that verifies Claude Code's machine
-// policy on Windows. Each install and upgrade replaces the hook binary, which
-// makes an earlier attestation stale.
-const claudeAttestationHint = " (it needs an administrator's attestation, and each upgrade makes the last one stale: " +
-	"confirm that an enrolled user's Claude Code runs DefenseClaw's hooks, then run Setup /repair ATTESTCLAUDEEFFECTIVEPOLICY=1, " +
-	"or `enterprise windows repair --profile standalone --attest-claude-effective-policy`)"
+// windowsClaudeAttestationHint names the step that verifies Claude Code's
+// machine policy on Windows. Each install and upgrade replaces the hook
+// binary, which makes an earlier attestation stale. The CLI form names the
+// installed CLI: it is not on PATH (g072 review 2 M3).
+func windowsClaudeAttestationHint() string {
+	return " (it needs an administrator's attestation, and each upgrade makes the last one stale: " +
+		"confirm that an enrolled user's Claude Code runs DefenseClaw's hooks, then run " + managedWindowsCommand("enterprise", "windows", "repair", "--profile", "standalone", "--attest-claude-effective-policy") +
+		" from an elevated PowerShell prompt)"
+}
 
 // windowsEnterpriseNoAgentTargetReason is why a Windows deployment that
 // enrolled nobody for Codex, Claude Code or Cursor is not security-complete.
 // It said only that the installer gave no reason, and pointed at a guardian
 // log that names none (GAP-0223).
-const windowsEnterpriseNoAgentTargetReason = "no account is enrolled for Codex, Claude Code or Cursor " +
-	"(the target manifest has no enabled row for any of them, and security_complete needs one): " +
-	"enable at least one of them under guardrail.connectors, check that the enrollment lists include an eligible account, " +
-	"and apply the config with Setup /ensure CONFIG=<path>"
+func windowsEnterpriseNoAgentTargetReason() string {
+	return "no account is enrolled for Codex, Claude Code or Cursor " +
+		"(the target manifest has no enabled row for any of them, and security_complete needs one): " +
+		"enable at least one of them under guardrail.connectors, check that the enrollment lists include an eligible account, " +
+		"and apply the config with " + windowsEnterpriseSetupCommand("/ensure", "CONFIG=<path>") + " from an elevated PowerShell prompt (" + managed.WindowsSetupSource + ")"
+}
 
 // enterpriseInformationalWarningCodes are warnings that say what the lifecycle
-// restored by itself, a privacy note (a rule pack standard users can read,
+// restored or left by itself (old runtime copies in a per-user folder it could
+// not trust, GAP-0781, or could not collect, GAP-0211), a privacy note (a rule pack standard users can read,
 // GAP-0386) or a sandbox policy note (GAP-0536), not why security is
 // incomplete.
 var enterpriseInformationalWarningCodes = map[string]bool{
 	"cursor_adapter_restored":                  true,
 	"stale_lifecycle_journal_removed":          true,
+	"user_runtime_folder_untrusted":            true,
+	"runtime_generations_not_collected":        true,
 	"rule_pack_readable_by_users":              true,
+	"claude_project_skipped":                   true,
 	enterprisestatus.CodeSandboxDefaultProfile: true,
 	enterprisestatus.CodeSandboxAdvisory:       true,
+}
+
+// enterpriseResidualWarningCodes are warnings a Windows standalone result
+// carries on every run of a common setup, with no administrator step that
+// clears them: the agents' own hook-process residual (hook_process_fail_open,
+// GAP-1900), the session-only HERMES_HOME note while Hermes is enabled
+// (status_detail_unavailable), an account waiting for sign-in
+// (guardian_repair_pending), a signed-out account's unreadable Claude Code
+// state (claude_state_unreadable) and the missing LLM judge
+// (scanner_judge_missing). Each may explain part of security_complete, but
+// they hid the actionable reasons, such as a stale Claude attestation after
+// an upgrade, on every managed host with Hermes (GAP-2038).
+var enterpriseResidualWarningCodes = map[string]bool{
+	enterprisestatus.CodeHookProcessFailOpen: true,
+	"status_detail_unavailable":              true,
+	"guardian_repair_pending":                true,
+	"claude_state_unreadable":                true,
+	"scanner_judge_missing":                  true,
 }
 
 // addEnterpriseSecurityIncompleteReasons names why security is not complete
@@ -57,7 +85,16 @@ func addEnterpriseSecurityIncompleteReasons(result *enterprisestatus.Result, tra
 	if result == nil || result.SecurityComplete || len(result.Errors) > 0 {
 		return
 	}
+	// A residual (enterpriseResidualWarningCodes) explains part of
+	// security_complete but must not hide the actionable reasons (a stale
+	// Claude attestation after an upgrade, a pending account), which it did
+	// (GAP-1900, GAP-2038).
+	residual := false
 	for _, warning := range result.Warnings {
+		if enterpriseResidualWarningCodes[warning.Code] {
+			residual = true
+			continue
+		}
 		if !enterpriseInformationalWarningCodes[warning.Code] {
 			return
 		}
@@ -72,7 +109,7 @@ func addEnterpriseSecurityIncompleteReasons(result *enterprisestatus.Result, tra
 	// Windows lists a machine policy for each enabled Codex, Claude Code and
 	// Cursor target; security_complete needs one of them.
 	if len(result.MachinePolicy) == 0 && !transactionPending {
-		reasons = append(reasons, windowsEnterpriseNoAgentTargetReason)
+		reasons = append(reasons, windowsEnterpriseNoAgentTargetReason())
 	}
 	names := make([]string, 0, len(result.MachinePolicy))
 	for name := range result.MachinePolicy {
@@ -84,7 +121,7 @@ func addEnterpriseSecurityIncompleteReasons(result *enterprisestatus.Result, tra
 		if state.Ownership != "off" && state.Lock == "enforce" && state.EffectiveLock != "enforce" {
 			reason := fmt.Sprintf("the %s machine policy is not verified in force", name)
 			if name == "claudecode" {
-				reason += claudeAttestationHint
+				reason += windowsClaudeAttestationHint()
 			}
 			reasons = append(reasons, reason)
 		}
@@ -97,6 +134,9 @@ func addEnterpriseSecurityIncompleteReasons(result *enterprisestatus.Result, tra
 		reasons = append(reasons, fmt.Sprintf("%d per-user enrollment(s) failed", failed))
 	}
 	if len(reasons) == 0 {
+		if residual {
+			return
+		}
 		// Each input of the installer's security_complete is named above;
 		// this keeps the warning from reading empty if one is added.
 		reasons = append(reasons, "the installer named no failing check")

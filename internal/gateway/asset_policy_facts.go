@@ -20,13 +20,17 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/mcplocal"
 )
 
 type claimedAssetFactsContextKey struct{}
@@ -144,8 +148,31 @@ func (a *APIServer) skillSourcePaths(ctx context.Context, connector, cwd string,
 		return slices.ContainsFunc(claimed, func(c string) bool { return sameCleanPath(c, dir) })
 	}
 	var paths []string
+	facts := resolvedWritesFromContext(ctx)
 	for _, root := range assetfacts.SkillRoots(connector, hookActiveHome(ctx), cwd) {
 		dir := filepath.Join(root, name)
+		if reason, _ := a.projectSkills.refusal(root, time.Now()); reason != "" {
+			selected := false
+			for key, selectedName := range facts {
+				if !strings.HasPrefix(key, hookpaths.ProjectSkillSelectedPrefix) || !config.SameAssetName(selectedName, name) {
+					continue
+				}
+				selectedDir := strings.TrimPrefix(key, hookpaths.ProjectSkillSelectedPrefix)
+				if projectRootKey(filepath.Dir(selectedDir)) == projectRootKey(root) {
+					paths = append(paths, selectedDir)
+					selected = true
+				}
+			}
+			// A named folder visible to this gateway is positive evidence too.
+			// An absent folder cannot make an unrelated selection inherit the
+			// refused root's decision.
+			if !selected {
+				if info, err := os.Lstat(dir); err == nil && (info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0) {
+					paths = append(paths, dir)
+				}
+			}
+			continue
+		}
 		if gatewaySkillPathCheck(dir) != nil {
 			continue
 		}
@@ -172,7 +199,9 @@ const maxDeclaredNameScan = 4096
 // whose SKILL.md declares name. Codex selects a skill ($name, or by plain
 // words) by the name its SKILL.md declares, while admission blocks and
 // disables it under its folder name, so a skill whose quarantine failed in
-// a folder of another name still ran (GAP-1101).
+// a folder of another name still ran (GAP-1101). Past maxDeclaredNameScan
+// folders it reads no more SKILL.md files and lists every other folder: one
+// of them may declare name, so each answers for it (fail closed).
 func foldersDeclaringSkill(root, name string) []string {
 	if gatewaySkillPathCheck(root) != nil {
 		return nil
@@ -187,11 +216,12 @@ func foldersDeclaringSkill(root, name string) []string {
 		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || config.SameAssetName(entry.Name(), name) {
 			continue
 		}
-		if scanned++; scanned > maxDeclaredNameScan {
-			break
-		}
 		dir := filepath.Join(root, entry.Name())
 		if gatewaySkillPathCheck(dir) != nil {
+			continue
+		}
+		if scanned++; scanned > maxDeclaredNameScan {
+			folders = append(folders, dir)
 			continue
 		}
 		if config.SameAssetName(assetfacts.DeclaredSkillName(dir), name) {
@@ -220,13 +250,14 @@ func (a *APIServer) installedSkillFolders(ctx context.Context, connector, cwd, n
 	// profiles, so skillSourcePaths leaves those folders out and a user or
 	// project skill on asset_policy.skill.denied typed as /name ran
 	// (GAP-0665). Such a folder is one it may not check, as a 0700 home is
-	// on Linux and macOS: it counts when the hook reported it, and when the
-	// hook reported no folder it is unseen.
+	// on Linux and macOS: it counts when the hook reported it, and otherwise
+	// it is unseen. A hook that reported the folder under another spelling
+	// of the home (a redirected or aliased profile path) left it neither,
+	// and the denied skill expanded (r102 GAP-0676).
 	for _, dir := range a.profileSkillFolders(ctx, connector, cwd, name) {
-		switch {
-		case reported(dir):
+		if reported(dir) {
 			folders = append(folders, dir)
-		case len(facts.SkillDirs) == 0:
+		} else {
 			unseen = append(unseen, dir)
 		}
 	}
@@ -291,6 +322,11 @@ func (a *APIServer) profileSkillFolders(ctx context.Context, connector, cwd, nam
 // SKILL.md with a shell command and follows it, and no skill selection hook
 // sees that (GAP-0569). Only the denied list applies: reading any other skill
 // folder is not an asset load. Secure Client keeps main (issue #1092).
+//
+// A sandbox request whose binding maps no sandbox path to the host (a copy-mode
+// workdir) names paths in the sandbox, not on this host. The link walk below
+// reads the host, so it is not made for that request: the sandbox copy view
+// decides what the agent can read, and the host holds nothing the call names.
 func (a *APIServer) skillFolderAccessDecision(
 	ctx context.Context, connector, hookEvent, cwd, toolName string, toolInput map[string]interface{},
 ) (config.AssetPolicyDecision, bool) {
@@ -298,12 +334,124 @@ func (a *APIServer) skillFolderAccessDecision(
 	if cfg == nil || cfg.SecureClientIntegration() || !runtimeAssetCanEnforce(hookEvent) {
 		return config.AssetPolicyDecision{}, false
 	}
+	if view, sandboxed := sandboxHookView(ctx); sandboxed && !view.HostAccess() {
+		return config.AssetPolicyDecision{}, false
+	}
+	if decision, matched := a.skillFolderRefsDecision(ctx, cfg, connector, hookEvent, cwd, toolName, toolInput); matched {
+		return decision, true
+	}
+	return a.skillLinksUnprovenDecision(ctx, cfg, connector, hookEvent, toolName)
+}
+
+// skillLinksUnprovenDecision judges a call whose links could not all be
+// followed because a network share on a path did not answer within the wait
+// the hook call has for shares (the hook's claim, or this gateway's own walk):
+// the skill folder a link there leads to is unknown. It matters only when a
+// skill is held or denied. Then a managed deployment and the strict tier
+// refuse the call as unproven; the OSS default and permissive tiers allow it
+// with a visible alert, since an ordinary command on a slow share is not a
+// named or known protected folder. A held or denied folder the call names, directly or
+// through a link the walk followed, is refused in every tier by the check
+// before this one.
+func (a *APIServer) skillLinksUnprovenDecision(
+	ctx context.Context, cfg *config.Config, connector, hookEvent, toolName string,
+) (config.AssetPolicyDecision, bool) {
+	if !claimedAssetFactsFromContext(ctx).SkillLinksUnproven && !hookpaths.SkillLinksUnproven() {
+		return config.AssetPolicyDecision{}, false
+	}
+	if !a.skillFoldersAreGuarded(ctx, cfg) {
+		return config.AssetPolicyDecision{}, false
+	}
+	const reason = "a path of the call could not be placed (a network share did not answer in time, or a drive-relative path names a drive other than the one of the working folder), so a skill folder a link there leads to cannot be shown not to be held or denied"
+	decision := runtimeAssetDisableBlockDecision("skill", "skill-links", connector, "skill_folder", reason, "skill-links-unproven")
+	decision.RegistryStatus = "unknown"
+	probe := skillRuntimeProbe{TargetType: "skill", SkillName: "skill-links", ToolName: toolName, Surface: "skill_folder", Matched: true}
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) || a.shareBodyStrictTier(ctx, connector) {
+		a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, probe)
+		return decision, true
+	}
+	a.logAssetPolicyAudit(ctx, connector, "skill:skill-links", runtimeSkillAssetPolicyAuditDetails(
+		config.AssetPolicyDecision{Action: "allow", Source: decision.Source, RegistryStatus: decision.RegistryStatus, WouldBlock: true, Reason: reason},
+		connector, hookEvent, probe))
+	fmt.Fprintf(os.Stderr, "[gateway] warning: %s (connector=%s; the strict policy tier and a managed deployment block the call)\n", reason, connector)
+	return config.AssetPolicyDecision{}, false
+}
+
+// skillFolderRefsDecision is skillFolderAccessDecision for the skill folders
+// the call names or reaches through a link.
+func (a *APIServer) skillFolderRefsDecision(
+	ctx context.Context, cfg *config.Config, connector, hookEvent, cwd, toolName string, toolInput map[string]interface{},
+) (config.AssetPolicyDecision, bool) {
 	facts := claimedAssetFactsFromContext(ctx)
-	for _, ref := range assetfacts.SkillFolderRefs(toolInput, hookActiveHome(ctx), cwd) {
+	home := hookActiveHome(ctx)
+	// A hook that cut the links it reports says so before any link is read:
+	// the call that names that many is refused (when a skill is held or
+	// denied) without reading them again, so the answer does not wait on the
+	// reading that made the hook run out of time.
+	// Nothing the call reaches can be refused while no skill is denied or
+	// held (the loop below blocks only a denied or held folder), so the call
+	// is not read for skill folders at all: reading an 889 KB patch for them
+	// was most of the gateway's CPU for a benign call.
+	if !a.skillFoldersAreGuarded(ctx, cfg) {
+		return config.AssetPolicyDecision{}, false
+	}
+	if facts.SkillLinksTruncated {
+		return a.skillLinksCutDecision(ctx, connector, hookEvent, toolName, facts.SkillLinks), true
+	}
+	caller := ""
+	// The strict tier reads a command line that holds the name of an entry
+	// leading into a skill folder as a read of it; the others, only when the
+	// line also holds a word that reads or runs (the hook's claim is made on
+	// the second reading).
+	strict := a.shareBodyStrictTier(ctx, connector)
+	uid, gid := os.Geteuid(), os.Getegid()
+	if peer, ok := managedHookPeerFromContext(ctx); ok {
+		caller, uid, gid = peer.Name, peer.UID, peer.GID
+	}
+	refs, cut := assetfacts.SkillFolderRefsAndCut(toolName, toolInput, home, cwd, caller, uid, gid, strict)
+	if cut {
+		return a.skillLinksCutDecision(ctx, connector, hookEvent, toolName, facts.SkillLinks), true
+	}
+	roots := assetfacts.SkillRoots(connector, home, cwd)
+	// A folder a link leads to is spelled as the link resolves, which a root
+	// reached through a link itself (a home on another mount) is not.
+	skillRoots := slices.Clone(roots)
+	followsLinks := len(facts.SkillLinks) > 0 || slices.ContainsFunc(refs, func(ref assetfacts.FolderRef) bool { return ref.Linked })
+	if followsLinks {
+		for _, root := range roots {
+			if real := assetfacts.ResolveLinks(root); real != filepath.Clean(root) {
+				skillRoots = append(skillRoots, real)
+			}
+		}
+	}
+	// A link ends in a protected folder whichever connector's call follows it,
+	// so the folders a link claim names are taken from the skill root of every
+	// connector that loads skills from folders, not only this connector's.
+	linkRoots := slices.Clone(skillRoots)
+	for _, root := range assetfacts.KnownSkillRoots(home, cwd) {
+		if !slices.ContainsFunc(linkRoots, func(have string) bool { return sameCleanPath(have, root) }) {
+			linkRoots = append(linkRoots, root)
+			if real := assetfacts.ResolveLinks(root); followsLinks && real != filepath.Clean(root) {
+				linkRoots = append(linkRoots, real)
+			}
+		}
+	}
+	refs = appendReportedSkillLinks(refs, facts.SkillLinks, linkRoots)
+	if len(refs) == 0 {
+		return config.AssetPolicyDecision{}, false
+	}
+	for _, ref := range refs {
+		rootsOfRef := skillRoots
+		if ref.Linked {
+			rootsOfRef = linkRoots
+		}
+		if !skillFolderRefIsSkill(ref, rootsOfRef, len(facts.DeclaredFor(ref.Name)) > 0) {
+			continue
+		}
 		// A skill admission blocked and disabled (one whose quarantine
 		// failed stays in its folder) is refused when a tool reaches into
 		// its folder, as a denied one is (GAP-1101).
-		if decision, disabled := a.runtimeAssetDisableDecision("skill", ref.Name, connector, "skill_folder"); disabled {
+		if decision, disabled := a.runtimeAssetDisableDecision(ctx, cfg, "skill", ref.Name, connector, "skill_folder", []string{ref.Dir}); disabled {
 			a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, skillRuntimeProbe{
 				TargetType: "skill", SkillName: ref.Name, ToolName: toolName,
 				SourcePath: ref.Dir, Surface: "skill_folder", Matched: true,
@@ -313,44 +461,146 @@ func (a *APIServer) skillFolderAccessDecision(
 		if len(cfg.AssetPolicy.Skill.Denied) == 0 {
 			continue
 		}
-		declared := facts.DeclaredFor(ref.Name)
-		claimed := len(declared) > 0
-		if gatewaySkillPathCheck(ref.Dir) == nil {
-			if name := assetfacts.DeclaredSkillName(ref.Dir); name != "" {
-				declared = append(declared, name)
+		claimedNames := facts.DeclaredFor(ref.Name)
+		claimed := len(claimedNames) > 0
+		candidates := []string{ref.Dir}
+		if _, err := os.Lstat(ref.Dir); !ref.ExplicitDirectory && errors.Is(err, fs.ErrNotExist) {
+			for _, root := range roots {
+				candidate := filepath.Join(root, ref.Name)
+				if candidate != ref.Dir {
+					candidates = append(candidates, candidate)
+				}
 			}
 		}
-		input := config.AssetPolicyInput{
-			TargetType: "skill", Name: ref.Name, DeclaredNames: declared,
-			Connector: connector, SourcePath: ref.Dir, RuntimeSurface: "skill_folder",
-		}
-		if verdict, _ := cfg.AssetListDecision(input); verdict != config.AssetListDeny {
-			// The hook sends at most maxSkills name claims. A folder past
-			// them that this gateway cannot read may declare a denied
-			// name, so it is refused as unproven (fail closed, GAP-1303).
-			if facts.SkillsTruncated && !claimed && skillManifestUnreadable(ref.Dir) {
-				decision := runtimeAssetDisableBlockDecision("skill", ref.Name, connector, "skill_folder", fmt.Sprintf(
-					"skill folder %s: DefenseClaw cannot read its SKILL.md and the hook reported more skill names than it sends, "+
-						"so the folder cannot be shown not to be a denied skill; name fewer skill folders in one call", ref.Dir),
-					"skill-facts-truncated")
-				decision.RegistryStatus = "unknown"
-				a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, skillRuntimeProbe{
+		for _, dir := range candidates {
+			declared := append([]string(nil), claimedNames...)
+			if gatewaySkillPathCheck(dir) == nil {
+				if name := assetfacts.DeclaredSkillName(dir); name != "" {
+					declared = append(declared, name)
+				}
+			}
+			input := config.AssetPolicyInput{
+				TargetType: "skill", Name: ref.Name, DeclaredNames: declared,
+				Connector: connector, SourcePath: dir, RuntimeSurface: "skill_folder",
+			}
+			if verdict, _ := cfg.AssetListDecision(input); verdict == config.AssetListDeny {
+				decision := cfg.EvaluateAssetPolicy(input)
+				probe := skillRuntimeProbe{
 					TargetType: "skill", SkillName: ref.Name, ToolName: toolName,
-					SourcePath: ref.Dir, Surface: "skill_folder", Matched: true,
-				})
+					SourcePath: dir, Surface: "skill_folder", Matched: true,
+				}
+				a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, probe)
 				return decision, true
 			}
-			continue
 		}
-		decision := cfg.EvaluateAssetPolicy(input)
-		probe := skillRuntimeProbe{
-			TargetType: "skill", SkillName: ref.Name, ToolName: toolName,
-			SourcePath: ref.Dir, Surface: "skill_folder", Matched: true,
+		// The hook sends at most maxSkills name claims. A folder past
+		// them that this gateway cannot read may declare a denied
+		// name, so it is refused as unproven (fail closed, GAP-1303).
+		if facts.SkillsTruncated && !claimed && skillManifestUnreadable(ref.Dir) {
+			decision := runtimeAssetDisableBlockDecision("skill", ref.Name, connector, "skill_folder", fmt.Sprintf(
+				"skill folder %q: DefenseClaw cannot read its SKILL.md and the hook reported more skill names than it sends, "+
+					"so the folder cannot be shown not to be a denied skill; name fewer skill folders in one call", ref.Dir),
+				"skill-facts-truncated")
+			decision.RegistryStatus = "unknown"
+			a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, skillRuntimeProbe{
+				TargetType: "skill", SkillName: ref.Name, ToolName: toolName,
+				SourcePath: ref.Dir, Surface: "skill_folder", Matched: true,
+			})
+			return decision, true
 		}
-		a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, probe)
-		return decision, true
 	}
 	return config.AssetPolicyDecision{}, false
+}
+
+// skillLinksCutDecision refuses a call that reaches more skill folders through
+// links than are read (the hook's claim is cut, or this gateway stopped at the
+// bound, assetfacts.SkillFolderRefsAndCut). A protected folder among them
+// cannot be ruled out (fail closed); the callers ask only when there is a
+// protected folder: with no denied or held skill nothing the call reaches can
+// be one, and an ordinary call runs.
+func (a *APIServer) skillLinksCutDecision(
+	ctx context.Context, connector, hookEvent, toolName string, reported []string,
+) config.AssetPolicyDecision {
+	name := "skill-links"
+	if len(reported) > 0 {
+		name = filepath.Base(reported[0])
+	}
+	decision := runtimeAssetDisableBlockDecision("skill", name, connector, "skill_folder",
+		"the call reaches more skill folders through links than are read, so none of them can be shown not to be held or denied; "+
+			"name fewer skill folders in one call", "skill-links-truncated")
+	decision.RegistryStatus = "unknown"
+	a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, skillRuntimeProbe{
+		TargetType: "skill", SkillName: name, ToolName: toolName, Surface: "skill_folder", Matched: true,
+	})
+	return decision
+}
+
+// skillGuardReadWait bounds how long a hook call waits for the audit store to
+// say whether any skill is denied or held.
+const skillGuardReadWait = 250 * time.Millisecond
+
+// skillFoldersAreGuarded reports whether any skill is denied or held
+// (runtime-disabled) for any connector, so a skill folder a call reaches can
+// be one to refuse. A store that cannot be read, or that does not answer within
+// skillGuardReadWait (something else keeps its only connection), counts as
+// guarded: the call is then read for skill folders as it was before this check,
+// and a hook call never waits on the audit store for longer than that.
+func (a *APIServer) skillFoldersAreGuarded(ctx context.Context, cfg *config.Config) bool {
+	if len(cfg.AssetPolicy.Skill.Denied) > 0 {
+		return true
+	}
+	if a == nil || a.store == nil {
+		return false
+	}
+	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), skillGuardReadWait)
+	defer cancel()
+	entries, err := a.store.ListActionsByTypeContext(readCtx, "skill")
+	if err != nil {
+		return true
+	}
+	return slices.ContainsFunc(entries, func(entry audit.ActionEntry) bool { return entry.Actions.Runtime == "disable" })
+}
+
+// appendReportedSkillLinks adds the skill folders the standalone hook found
+// a path of the call to lead into through a link, which this gateway cannot
+// follow in a profile it may not read. Only a folder directly in a skill root
+// of the connector counts: the claim names where a link ends, not a new place
+// to look.
+func appendReportedSkillLinks(refs []assetfacts.FolderRef, links, roots []string) []assetfacts.FolderRef {
+	for _, dir := range links {
+		parent := filepath.Dir(dir)
+		if !slices.ContainsFunc(roots, func(root string) bool { return sameCleanPath(root, parent) }) ||
+			slices.ContainsFunc(refs, func(ref assetfacts.FolderRef) bool { return sameCleanPath(ref.Dir, dir) }) {
+			continue
+		}
+		refs = append(refs, assetfacts.FolderRef{Dir: dir, Name: filepath.Base(dir), Linked: true})
+	}
+	return refs
+}
+
+// skillFolderRefIsSkill reports whether ref, a skills/<name> path a tool
+// call names, can be the folder of the skill <name>: the call names its
+// SKILL.md, it is in a skill root of the connector, the hook reported a
+// SKILL.md name for it, or it holds a SKILL.md. A folder this gateway cannot
+// look into counts too (fail closed). Any other path with a skills/<name>
+// pair in it, such as tests/skills/blocked/notes.txt, is not that skill
+// (GAP-1302).
+func skillFolderRefIsSkill(ref assetfacts.FolderRef, roots []string, claimed bool) bool {
+	if ref.Manifest || claimed {
+		return true
+	}
+	parent := filepath.Clean(filepath.Dir(ref.Dir))
+	for _, root := range roots {
+		root = filepath.Clean(root)
+		if parent == root || (runtime.GOOS != "linux" && strings.EqualFold(parent, root)) {
+			return true
+		}
+	}
+	if gatewaySkillPathCheck(ref.Dir) != nil {
+		return true
+	}
+	_, err := os.Lstat(filepath.Join(ref.Dir, "SKILL.md"))
+	return !errors.Is(err, fs.ErrNotExist)
 }
 
 // skillManifestUnreadable reports whether this gateway cannot read the
@@ -378,6 +628,25 @@ func skillManifestUnreadable(dir string) bool {
 	return false
 }
 
+// claimedMCPEntry is the definition a hook claim states. The claim holds at
+// most the first arguments of a longer list, so the scanner verdict the hook
+// took from the complete definition travels with the entry, and the entry
+// says its arguments may be cut, so an exact allow of the complete list does
+// not match it. A claim that states no verdict and may be cut is judged only
+// as far as its arguments prove (a launcher or an execution flag), which
+// would otherwise refuse a server the scanner starts (GAP-0925).
+func claimedMCPEntry(server *assetfacts.MCPServer) config.MCPServerEntry {
+	entry := config.MCPServerEntry{
+		Name: server.Name, URL: server.URL, Command: server.Command,
+		Args: append([]string(nil), server.Args...), Transport: server.Transport,
+		LocalRefusal: server.LocalRefusal, ArgsCut: server.ArgsMayBeCut(),
+	}
+	if server.VerdictUnstatedCut() {
+		entry.LocalRefusal = mcplocal.Proven(server.Command, server.Args)
+	}
+	return entry
+}
+
 // lookupCallerMCPServer finds the MCP server name the caller's agent has
 // configured. A per-user gateway reads its own home. A service-account
 // gateway reads the caller's home and, where it may not (Linux and macOS),
@@ -388,14 +657,27 @@ func (a *APIServer) lookupCallerMCPServer(ctx context.Context, cfg *config.Confi
 	// (GAP-0954).
 	if server := claimedAssetFactsFromContext(ctx).MCP; server != nil && server.Source == assetfacts.SourceCommandLine &&
 		config.SameMCPToolServer(connector, server.Name, name) {
-		return config.MCPServerEntry{
-			Name: server.Name, URL: server.URL, Command: server.Command,
-			Args: append([]string(nil), server.Args...), Transport: server.Transport,
-		}, true
+		return claimedMCPEntry(server), true
 	}
 	home, serviceAccount := callerHomeForAssets(ctx)
 	if !serviceAccount {
 		return cfg.LookupMCPToolServerForConnector(connector, cwd, name)
+	}
+	// The config file the agent runs is the one under its CODEX_HOME, which
+	// the hook read; the default under the home is not the server it starts
+	// (GAP-0686).
+	if server := claimedAssetFactsFromContext(ctx).MCP; server != nil && (server.Relocated || server.ProjectScope) &&
+		connector == "codex" && config.SameMCPToolServer(connector, server.Name, name) {
+		// The published definition with that digest is the complete one: the
+		// bounded claim may lack arguments or a long URL.
+		if a.mcpPublished != nil && home != "" {
+			if published := a.mcpPublished(connector, name, home, cwd, server.Digest); published.Matched {
+				return published.Entry, true
+			}
+		}
+		if server.Relocated {
+			return claimedMCPEntry(server), true
+		}
 	}
 	if home != "" {
 		// Native MCP readers guard each config file; a refused file is
@@ -405,10 +687,7 @@ func (a *APIServer) lookupCallerMCPServer(ctx context.Context, cfg *config.Confi
 		}
 	}
 	if server := claimedAssetFactsFromContext(ctx).MCP; server != nil && config.SameMCPToolServer(connector, server.Name, name) {
-		return config.MCPServerEntry{
-			Name: server.Name, URL: server.URL, Command: server.Command,
-			Args: append([]string(nil), server.Args...), Transport: server.Transport,
-		}, true
+		return claimedMCPEntry(server), true
 	}
 	return config.MCPServerEntry{}, false
 }
@@ -424,15 +703,18 @@ func (a *APIServer) noteProjectSkillFolders(ctx context.Context, connector, cwd 
 	if a == nil || !a.projectSkills.isActive() || strings.TrimSpace(cwd) == "" || isSandboxHookRequest(ctx) {
 		return
 	}
-	if gatewaySkillPathCheck(cwd) != nil {
-		return
-	}
 	cfg := a.liveConfig()
 	if cfg == nil || cfg.SecureClientIntegration() {
 		return
 	}
 	home := hookActiveHome(ctx)
 	if home == "" || home == unresolvedCallerHome {
+		return
+	}
+	if watcherUsesEnrolledUserDirs(cfg) || gatewaySkillPathCheck(cwd) != nil {
+		a.noteExcludedProjectSkillFolders(ctx, connector, home, cwd)
+	}
+	if gatewaySkillPathCheck(cwd) != nil {
 		return
 	}
 	if gatewaySkillPathCheck(home) != nil {
@@ -467,6 +749,81 @@ func (a *APIServer) noteProjectSkillFolders(ctx context.Context, connector, cwd 
 		}
 		a.projectSkills.add(connector, folder)
 	}
+}
+
+// noteExcludedProjectSkillFolders records only adverse facts from the
+// calling user's hook. The managed Windows service cannot inspect profile
+// folders itself and does not add them to the install watcher. The candidate
+// list is rebuilt from the verified caller home and cwd, so a header cannot
+// name a different user's project root.
+func (a *APIServer) noteExcludedProjectSkillFolders(ctx context.Context, connector, home, cwd string) {
+	facts := resolvedWritesFromContext(ctx)
+	for _, folder := range enrolledProjectSkillCandidates(connector, home, cwd) {
+		finding := ""
+		for key, value := range facts {
+			if strings.HasPrefix(key, hookpaths.ProjectSkillRootUnverifiedPrefix) &&
+				projectRootKey(strings.TrimPrefix(key, hookpaths.ProjectSkillRootUnverifiedPrefix)) == projectRootKey(folder) {
+				finding = value
+				break
+			}
+		}
+		var reason string
+		switch finding {
+		case hookpaths.ProjectSkillRootOutsideProfile:
+			reason = "the project skill folder resolves outside the caller's profile"
+		case hookpaths.ProjectSkillRootSharedWritable:
+			reason = "another user can write the project skill folder"
+		case hookpaths.ProjectSkillManifestLinked:
+			reason = "the selected project skill's SKILL.md is a link to a file outside the caller's profile, or a hard link"
+		case hookpaths.ProjectSkillRootUnreadable:
+			reason = "the calling user could not verify the project skill folder"
+		default:
+			// A missing adverse fact cannot clear a refusal. The caller's
+			// positive inspection, or a gateway inspection where permitted,
+			// can retire a repaired root's caller finding.
+			if prior, _, callerFinding := a.projectSkills.refusalWithPolicyMode(folder, time.Now()); prior != "" && callerFinding {
+				if (callerVerifiedProjectSkillRoot(facts, folder) ||
+					gatewayVerifiedProjectSkillRoot(home, folder)) && a.projectSkills.clearCallerRefusal(folder) && a.health != nil {
+					a.health.SetWatcherDetail(projectSkillRootsUnverifiedDetail, len(a.projectSkills.unverifiedFolders()))
+				}
+			}
+			continue
+		}
+		if previous, _ := a.projectSkills.refusal(folder, time.Now()); previous == reason {
+			continue
+		}
+		a.projectSkills.refuseWithPolicyMode(folder, reason, time.Now(), true)
+		fmt.Fprintf(os.Stderr, "[watcher] project skill folder %s could not be verified and is not watched; its skills are refused: %s\n", folder, reason)
+		if a.health != nil {
+			a.health.SetWatcherDetail(projectSkillRootsUnverifiedDetail, len(a.projectSkills.unverifiedFolders()))
+		}
+	}
+}
+
+func callerVerifiedProjectSkillRoot(facts map[string]string, folder string) bool {
+	for key, value := range facts {
+		if value == "1" && strings.HasPrefix(key, hookpaths.ProjectSkillRootVerifiedPrefix) &&
+			projectRootKey(strings.TrimPrefix(key, hookpaths.ProjectSkillRootVerifiedPrefix)) == projectRootKey(folder) {
+			return true
+		}
+	}
+	return false
+}
+
+func gatewayVerifiedProjectSkillRoot(home, folder string) bool {
+	if gatewaySkillPathCheck(folder) != nil {
+		return false
+	}
+	realHome, err := hookpaths.EvalLinks(home)
+	if err != nil {
+		return false
+	}
+	realFolder, err := hookpaths.EvalLinks(folder)
+	if err != nil || !insideHome(realHome, realFolder) {
+		return false
+	}
+	info, err := os.Stat(realFolder)
+	return err == nil && info.IsDir()
 }
 
 // projectSkillLstat is os.Lstat; tests stand in for a service account that
@@ -549,21 +906,24 @@ const projectSkillRootsUnverifiedDetail = "project_skill_roots_unverified"
 // running or about to (the watcher restarts to watch the folder), so it is
 // not loaded unscanned (GAP-1063).
 func (a *APIServer) projectSkillScanPending(targetType, connector, surface string, paths []string) (config.AssetPolicyDecision, bool) {
-	if a == nil || a.store == nil || targetType != "skill" || !a.projectSkills.isActive() {
+	if a == nil || targetType != "skill" || !a.projectSkills.isActive() {
 		return config.AssetPolicyDecision{}, false
 	}
 	for _, path := range paths {
-		// A hidden folder is not enumerated by the rescan, so it never gets
-		// a baseline to wait for.
-		if strings.TrimSpace(path) == "" || strings.HasPrefix(filepath.Base(path), ".") {
+		if strings.TrimSpace(path) == "" {
 			continue
 		}
 		dir := filepath.Dir(path)
-		if reason, _ := a.projectSkills.refusal(dir, time.Now()); reason != "" {
-			name := filepath.Base(path)
-			return runtimeAssetDisableBlockDecision("skill", name, connector, surface,
-				fmt.Sprintf("skill %q in %s is refused: DefenseClaw could not verify this project skill folder (%s)", name, dir, reason),
-				"project-skill-unverified"), true
+		if decision, refused := a.projectSkillRefusalDecision(path, filepath.Base(path), connector, surface); refused {
+			return decision, true
+		}
+		// A hidden folder is not enumerated by the rescan, so it never gets
+		// a baseline to wait for. A recorded root refusal still applies.
+		if strings.HasPrefix(filepath.Base(path), ".") {
+			continue
+		}
+		if a.store == nil {
+			continue
 		}
 		if root, ok := a.projectSkills.registeredPath(dir); ok {
 			// The watcher records the skills under the folder as it was
@@ -601,4 +961,17 @@ func (a *APIServer) projectSkillScanPending(targetType, connector, surface strin
 		return runtimeAssetDisableBlockDecision("skill", name, connector, surface, reason, "project-skill-pending"), true
 	}
 	return config.AssetPolicyDecision{}, false
+}
+
+func (a *APIServer) projectSkillRefusalDecision(path, name, connector, surface string) (config.AssetPolicyDecision, bool) {
+	if a == nil || !a.projectSkills.isActive() {
+		return config.AssetPolicyDecision{}, false
+	}
+	root, reason := a.projectSkills.refusalForPath(path)
+	if reason == "" {
+		return config.AssetPolicyDecision{}, false
+	}
+	return runtimeAssetDisableBlockDecision("skill", name, connector, surface,
+		fmt.Sprintf("skill %q in %s is refused: DefenseClaw could not verify this project skill folder (%s)", name, root, reason),
+		"project-skill-unverified"), true
 }

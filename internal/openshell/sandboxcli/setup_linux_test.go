@@ -20,10 +20,62 @@ package sandboxcli
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
+
+const testStopSyncBinary = "/home/dev/.local/bin/defenseclaw-gateway"
+
+func init() { stopSyncBinary = func() (string, error) { return testStopSyncBinary, nil } }
+
+// GAP-0380: on a gateway already on MicroVMs, setup gives the service the
+// stop sync with no plan, no restart question and no restart: the user
+// manager reads it, and no sandbox stops. It is best effort: one that
+// cannot be written leaves a note and setup goes on (GAP-1930).
+func TestSetupGivesTheGatewayServiceTheStopSyncWithoutARestart(t *testing.T) {
+	ta := setupApp(t, "", "", true)
+	ta.GOOS = "linux"
+	ta.IO.TTY = false
+	ta.HostDoctor = linuxKVMReport(openshell.DriverVM, nil)
+	ta.gateway.upToDate = true
+	ta.gateway.stopSyncRes = &openshell.GatewayApplyResult{Files: []openshell.AppliedFile{{Path: "/home/dev/.config/systemd/user/openshell-gateway.service.d/zz-defenseclaw-stop-sync.conf"}}}
+	_, _ = useGateway(ta)
+	ta.ok(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}))
+	if ta.gateway.stopSyncs != 1 || ta.gateway.applied != 0 || ta.gateway.restarts != 0 {
+		t.Fatalf("stop syncs %d, applied %d, restarts %d", ta.gateway.stopSyncs, ta.gateway.applied, ta.gateway.restarts)
+	}
+	has(t, ta.output(), "✓ the openshell-gateway service now syncs each running MicroVM's disk before it stops (a systemd drop-in; no restart)")
+	lacks(t, ta.output(), "gateway configured and restarted")
+
+	tb := setupApp(t, "", "", true)
+	tb.GOOS = "linux"
+	tb.IO.TTY = false
+	tb.HostDoctor = linuxKVMReport(openshell.DriverVM, nil)
+	tb.gateway.upToDate = true
+	tb.gateway.stopSyncErr = errors.New(`openshell: "/home/a b/.local/bin/defenseclaw-gateway" cannot be a systemd ExecStop command path`)
+	_, _ = useGateway(tb)
+	tb.ok(t, tb.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}))
+	has(t, tb.output(), "gets no stop sync of its MicroVMs", "each restart DefenseClaw makes syncs them first instead")
+}
+
+// GAP-1929 (round 4 regression): a gateway whose configuration already
+// selects MicroVMs but still runs docker had the stop sync as its only plan,
+// which shadowed the restart onto MicroVMs. The stop sync is no plan now:
+// setup offers the restart, then gives the service the stop sync.
+func TestSetupRestartsAConfiguredGatewayOntoMicroVMsOnLinux(t *testing.T) {
+	ta := setupApp(t, "y\ny\n", "", true)
+	ta.GOOS = "linux"
+	ta.HostDoctor = linuxKVMReport(openshell.DriverDocker, func(r *openshell.DoctorReport) { r.ConfiguredDriver = openshell.DriverVM })
+	ta.gateway.upToDate = true
+	_, _ = useGateway(ta)
+	ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}))
+	if ta.gateway.restarts != 1 || ta.gateway.stopSyncs != 1 {
+		t.Fatalf("restarts %d, stop syncs %d", ta.gateway.restarts, ta.gateway.stopSyncs)
+	}
+	has(t, ta.output(), "the gateway configuration already selects the MicroVM driver", "✓ gateway restarted: it runs sandboxes in OpenShell MicroVMs")
+}
 
 // linuxKVMReport is a doctor report of a Linux host with KVM, e2fsprogs
 // and the MicroVM driver, whose gateway runs driver; edit adjusts it.
@@ -46,7 +98,7 @@ func linuxKVMReport(driver openshell.ComputeDriver, edit func(*openshell.DoctorR
 // noLinuxLandlock is the Landlock check of RHEL 9's 5.14 kernel.
 var noLinuxLandlock = openshell.Check{ID: openshell.CheckIDLandlock, Title: "Landlock", Status: openshell.StatusFail,
 	Detail: "the kernel has no Landlock support: landlock_create_ruleset: function not implemented",
-	Fix:    &openshell.Fix{Summary: "use a Linux kernel 6.2 or newer with Landlock (ABI 3+)", Sudo: true}}
+	Fix:    &openshell.Fix{Summary: "use a kernel with Landlock ABI 3 or newer (Linux 6.2 upstream or a distribution backport)", Sudo: true}}
 
 // TestSetupOffersMicroVMsOnALinuxHostWithKVM: the docker driver stays a
 // Linux host's default (a no, and --yes, keep it); a yes plans the vm driver
@@ -102,6 +154,10 @@ func TestSetupOffersMicroVMsOnALinuxHostWithKVM(t *testing.T) {
 			if len(p) != 1 || p[0].ComputeDriver != openshell.DriverVM || p[0].EnableBindMounts || p[0].ServiceUMask != wantUMask ||
 				p[0].VMIdentity == nil || *p[0].VMIdentity != (openshell.VMIdentity{UID: 1000, GID: 1000}) || ta.gateway.applied != 1 {
 				t.Fatalf("gateway plans = %+v, applied %d", p, ta.gateway.applied)
+			}
+			// GAP-0380: the service gets the stop sync (EnsureStopSync).
+			if ta.gateway.stopSyncs != 1 {
+				t.Fatalf("stop syncs = %d", ta.gateway.stopSyncs)
 			}
 			has(t, ta.output(), "✓ gateway configured and restarted: it runs sandboxes in OpenShell MicroVMs",
 				"every run works on a copy (the MicroVM driver mounts no host folders)")
@@ -165,7 +221,8 @@ func TestSetupStopsWhereALinuxHostCannotStartAMicroVM(t *testing.T) {
 			has(t, ta.output(), "✗ MicroVM driver: e2fsprogs (mke2fs and debugfs) is not installed",
 				"openshell-driver-vm is not installed (NVIDIA's openshell package does not ship it)",
 				"→ install e2fsprogs 1.43 or newer", "sudo dnf install e2fsprogs",
-				"→ install openshell-driver-vm from OpenShell "+openshell.InstallerTag, "→ then run `defenseclaw sandbox setup` again")
+				"→ restore the gateway connection and confirm it runs OpenShell "+openshell.InstallerVersion+" before using this pinned install command; "+
+					"install openshell-driver-vm from OpenShell "+openshell.InstallerTag, "→ then run `defenseclaw sandbox setup` again")
 			if len(ta.gateway.planned) != 0 {
 				t.Fatalf("gateway plans = %+v", ta.gateway.planned)
 			}

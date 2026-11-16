@@ -492,9 +492,10 @@ func deterministicToolResultRequest(
 		payload["tool_response"] = input.ResultContent
 	case "opencode":
 		payload["tool_response"] = map[string]interface{}{
-			"output": input.ResultContent,
-			"metadata": map[string]interface{}{
-				"exit": map[bool]int{true: 0, false: 1}[outcome == connector.ToolLifecycleOutcomeSuccess],
+			"opencode_v2_status": map[bool]string{true: "completed", false: "error"}[outcome == connector.ToolLifecycleOutcomeSuccess],
+			"output": map[string]interface{}{
+				"output": input.ResultContent,
+				"exit":   map[bool]int{true: 0, false: 1}[outcome == connector.ToolLifecycleOutcomeSuccess],
 			},
 		}
 	case "amp":

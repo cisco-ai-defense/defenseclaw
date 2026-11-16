@@ -17,12 +17,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const ownershipSchemaVersion = 1
@@ -57,7 +58,7 @@ type ownershipRecord struct {
 	RestoredAt string `json:"restored_at,omitempty"`
 }
 
-var recordNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
+var recordNamePattern = lazyregexp.New(`^[a-z][a-z0-9_-]{0,63}$`)
 
 func recordPath(opts Options, connector string) (string, error) {
 	if opts.StateDir == "" {
@@ -138,7 +139,7 @@ func deleteRecord(opts Options, connector string) error {
 
 // reservedDropIn reports whether the record names a drop-in whose file
 // name DefenseClaw reserves for itself: 90-defenseclaw.json for the Claude
-// Code hooks and the Copilot policy. Once the record says DefenseClaw
+// Code hooks. Once the record says DefenseClaw
 // published it, the file is DefenseClaw's whatever bytes it holds. A copy
 // someone edited (hook paths pointed at another folder or binary name) is
 // tamper that the next publish repairs, never the administrator's preimage,
@@ -146,9 +147,10 @@ func deleteRecord(opts Options, connector string) error {
 // commands inside, which an edit can change: an edited copy recorded as
 // administrator content was restored by uninstall --purge, so every Claude
 // Code call ran a missing hook (GAP-1099). Administrator settings belong in
-// another drop-in, which DefenseClaw never touches.
+// another drop-in, which DefenseClaw never touches. Copilot can share its
+// drop-in with independent handlers, which its surgical strip preserves.
 func reservedDropIn(connector string) bool {
-	return connector == ConnectorClaudeCode || connector == ConnectorCopilot
+	return connector == ConnectorClaudeCode
 }
 
 // publishedByRecord reports whether record says DefenseClaw published path.
@@ -205,6 +207,48 @@ func (r *ownershipRecord) capturePreimage(current []byte, exists bool, strip str
 	return nil
 }
 
+// keepCopilotPreimageThroughMalformed retains the last parseable hooks when
+// a published drop-in is damaged. Independent root values added alongside
+// the damage can still be recovered without restoring the broken hooks.
+func (r *ownershipRecord) keepCopilotPreimageThroughMalformed(current []byte) error {
+	doc, err := decodeOrderedObject(current)
+	if err != nil {
+		return nil
+	}
+	admin := newObject()
+	if r.PreimageExisted {
+		admin, err = decodeOrderedObject(r.Preimage)
+		if err != nil {
+			return nil // preserve an original malformed preimage byte for byte
+		}
+	} else {
+		admin.set("version", json.Number("1"))
+	}
+	changed := false
+	for _, key := range doc.keys {
+		if key == "version" || key == "hooks" {
+			continue
+		}
+		value, _ := doc.get(key)
+		old, present := admin.get(key)
+		if !present || !reflect.DeepEqual(old, value) {
+			admin.set(key, value)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	data, err := encodeOrdered(admin)
+	if err != nil {
+		return err
+	}
+	r.PreimageExisted = true
+	r.Preimage = data
+	r.PreimageSHA256 = sha256Hex(data)
+	return nil
+}
+
 // noteRewrite records that the owned entries were found missing from a
 // file DefenseClaw had written; it returns how many rewrites happened in
 // the flap window.
@@ -227,11 +271,17 @@ func (r *ownershipRecord) noteRewrite(now time.Time) int {
 // DefenseClaw owns. The Claude Code version floor drop-in never gets here: a
 // floor file that changed is the administrator's, and DefenseClaw does not
 // rewrite it.
-func flapConflict(state *State, connector, path string, count int) {
+func flapConflict(goos string, state *State, connector, path string, count int) {
 	if count >= flapThreshold {
-		state.conflict("another writer replaced %s %d times in 24h and removed DefenseClaw's hooks each time; if an MDM or configuration tool owns this file, set enterprise.machine_policy.connectors.%s.ownership: verify_only and deploy the output of `defenseclaw-gateway enterprise policy export --connector %s` through that tool", path, count, connector, connector)
+		state.conflict("another writer replaced %s %d times in 24h and removed DefenseClaw's hooks each time; if an MDM or configuration tool owns this file, set enterprise.machine_policy.connectors.%s.ownership: verify_only and deploy the output of %s through that tool",
+			path, count, connector, policyExportCommand(goos, "--connector", connector))
 	}
 }
+
+// errPublishedDirExposes is the error of a directory above a published file
+// that restorePublishedDirs (Unix) leaves as it is: the access users need to reach
+// DefenseClaw's file would also reach an administrator's other files there.
+var errPublishedDirExposes = errors.New("cannot restore user access to machine policy")
 
 // publishWithRecord writes rendered when it differs from current and keeps
 // the ownership record in sync. It returns whether the file changed.
@@ -260,10 +310,17 @@ func publishWithRecord(opts Options, connector, path string, current []byte, exi
 	case !exists || sha256Hex(current) != record.PostimageSHA256:
 		outside = record.PostimageSHA256 != ""
 		if record.PostimageSHA256 != "" && exists && !ownedWasPresent {
-			flapConflict(state, connector, path, record.noteRewrite(opts.now()))
+			flapConflict(opts.goos(), state, connector, path, record.noteRewrite(opts.now()))
 		}
 		// A reserved drop-in keeps the preimage of its first publish.
-		if !reservedDropIn(connector) || !publishedByRecord(record, path) {
+		// Copilot's shared drop-in follows parseable administrator edits,
+		// but broken hooks in a previously published file are damage to
+		// repair, not a new administrator preimage for removal.
+		if connector == copilotConnector && publishedByRecord(record, path) && exists && copilotPostPublicationMalformed(current) {
+			if err := record.keepCopilotPreimageThroughMalformed(current); err != nil {
+				return false, err
+			}
+		} else if !reservedDropIn(connector) || !publishedByRecord(record, path) {
 			if err := record.capturePreimage(current, exists, strip); err != nil {
 				return false, err
 			}
@@ -281,7 +338,7 @@ func publishWithRecord(opts Options, connector, path string, current []byte, exi
 		}
 	}
 	if changed {
-		created, err := writePolicyFile(opts, path, rendered)
+		created, err := writePolicyFileOver(opts, path, state.policyFileBase(opts, path, exists, current), rendered)
 		record.CreatedDirs = appendUnique(record.CreatedDirs, created...)
 		if err != nil {
 			return false, err
@@ -291,16 +348,29 @@ func publishWithRecord(opts Options, connector, path string, current []byte, exi
 		}
 	}
 	// A directory above the file that users cannot list or pass (an
-	// administrator's chmod 0700) hides the policy from every agent.
+	// administrator's chmod 0700) hides the policy from every agent; one
+	// another account can write lets it change the policy (GAP-0410).
 	dirsRestored := false
-	if problem := publishedDirProblem(opts, path); problem != "" {
+	problem, writeProblem := publishedDirProblem(opts, path), publishedDirWriteProblem(opts, path)
+	if problem != "" || writeProblem != "" {
 		restored, err := restorePublishedDirs(opts, path)
+		if errors.Is(err, errPublishedDirExposes) {
+			// The administrator restricts or moves those files; the
+			// connector is not covered until then.
+			state.conflict("%v", err)
+			err = nil
+		}
 		if err != nil {
 			return changed, err
 		}
 		if len(restored) > 0 {
 			dirsRestored = true
-			state.detail("restored user access through %s to %s (%s)", strings.Join(restored, ", "), path, problem)
+			if problem != "" {
+				state.detail("restored user access through %s to %s (%s)", strings.Join(restored, ", "), path, problem)
+			}
+			if writeProblem != "" {
+				state.detail("took write away from other accounts on %s above %s (%s)", strings.Join(restored, ", "), path, writeProblem)
+			}
 		}
 	}
 	record.PostimageSHA256 = sha256Hex(rendered)
@@ -361,13 +431,18 @@ func verifyPublishedFiles(opts Options, connector string, state *State) {
 			state.Drift = true
 			state.conflict("users cannot read %s: %s, so their agents run without DefenseClaw's machine policy there; DefenseClaw keeps the directories above the files it publishes accessible, and the hook guardian or the next lifecycle run that applies changes (ensure, repair or reconcile) restores them", record.Path, problem)
 		}
+		if problem := publishedDirWriteProblem(opts, record.Path); problem != "" && !dirsReported[problem] {
+			dirsReported[problem] = true
+			state.Drift = true
+			state.conflict("other accounts can write a directory above %s: %s, so they can add or replace machine policy there; DefenseClaw keeps the directories above the files it publishes writable by administrators only, and the hook guardian or the next lifecycle run that applies changes (ensure, repair or reconcile) takes that write away", record.Path, problem)
+		}
 	}
 	state.finish()
 }
 
 // RestorePublishedPolicyDirs gives the directories above every policy file
-// DefenseClaw publishes (ownership: merge) back the mode 0755 users need to
-// read it. The hook guardian runs it on each pass, so an administrator's
+// DefenseClaw publishes (ownership: merge) back the access users need to
+// read it, and takes the write of other accounts away (restorePublishedDirs). The hook guardian runs it on each pass, so an administrator's
 // chmod 0700 of /etc/claude-code/managed-settings.d does not leave Claude
 // Code without managed settings until the next repair (GAP-0913). It returns
 // the directories it changed.
@@ -412,10 +487,24 @@ func restoreOrStrip(opts Options, connector, path string, strip stripFunc, whole
 	if err != nil {
 		return err
 	}
+	recordedPath := path
+	if record != nil && record.Path != "" {
+		recordedPath = record.Path
+	}
+	if folder, ok := opts.unprotectedFolderOf(recordedPath); ok {
+		return restoreOrStripUnprotected(opts, connector, record, strip, folder, state)
+	}
 	current, exists, err := readPolicyFile(opts, path)
+	var untrusted *untrustedPolicyFileError
+	if errors.As(err, &untrusted) && opts.removing && opts.goos() == "windows" && reclaimRefusesContentDrift() {
+		return keepUntrustedRecordedFile(opts, connector, record, path, untrusted, state)
+	}
 	if err != nil {
 		return err
 	}
+	// Every write and removal below is of this read: a save another writer
+	// makes meanwhile is kept, and the caller renders again (GAP-0896).
+	base := policyFileBase{exists: exists, data: current, owned: reservedDropIn(connector)}
 	switch {
 	case !exists:
 	case record == nil && wholeFile:
@@ -431,7 +520,7 @@ func restoreOrStrip(opts Options, connector, path string, strip stripFunc, whole
 			}
 		}
 		if blank(admin) {
-			if err := removePolicyFile(opts, path); err != nil {
+			if err := removePolicyFileOver(opts, path, base); err != nil {
 				return err
 			}
 			if sha256Hex(current) != record.PostimageSHA256 {
@@ -440,7 +529,7 @@ func restoreOrStrip(opts Options, connector, path string, strip stripFunc, whole
 				state.detail("removed %s (it held no administrator content besides DefenseClaw's)", path)
 			}
 		} else {
-			if _, err := writePolicyFile(opts, path, admin); err != nil {
+			if _, err := writePolicyFileOver(opts, path, base, admin); err != nil {
 				return err
 			}
 			state.detail("restored the administrator content of %s", path)
@@ -463,13 +552,13 @@ func restoreOrStrip(opts Options, connector, path string, strip stripFunc, whole
 				state.detail("%s no longer holds DefenseClaw entries; left it unchanged", path)
 			}
 		case blank(admin):
-			if err := removePolicyFile(opts, path); err != nil {
+			if err := removePolicyFileOver(opts, path, base); err != nil {
 				return err
 			}
 			state.Changed = true
 			state.detail("removed %s (only DefenseClaw content remained)", path)
 		default:
-			if _, err := writePolicyFile(opts, path, admin); err != nil {
+			if _, err := writePolicyFileOver(opts, path, base, admin); err != nil {
 				return err
 			}
 			state.Changed = true
@@ -477,16 +566,140 @@ func restoreOrStrip(opts Options, connector, path string, strip stripFunc, whole
 		}
 	}
 	if record != nil {
-		// Deepest first: a directory recorded later can be the parent of
-		// one recorded earlier.
-		dirs := append([]string(nil), record.CreatedDirs...)
-		sort.SliceStable(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
-		for _, dir := range dirs {
-			if err := removeDirIfEmpty(opts, dir); err != nil {
+		removeRecordedCreatedDirs(opts, record, state, false)
+	}
+	return deleteRecord(opts, connector)
+}
+
+// removeRecordedCreatedDirs removes the folders DefenseClaw created for a
+// record that are still empty. Deepest first: a directory recorded later can
+// be the parent of one recorded earlier. With trustedParents (a vendor folder
+// that does not protect the file, restoreOrStripUnprotected) a folder whose
+// parent an untrusted account can change is left, since removal there is not
+// DefenseClaw's to do (g582 round 9 L3).
+func removeRecordedCreatedDirs(opts Options, record *ownershipRecord, state *State, trustedParents bool) {
+	dirs := append([]string(nil), record.CreatedDirs...)
+	sort.SliceStable(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
+	for _, dir := range dirs {
+		if trustedParents && !opts.SkipTrustChecks {
+			if err := validateTrustedAncestors(opts, platformPath(opts, dir)); err != nil {
 				state.detail("left %s in place: %v", dir, err)
+				continue
 			}
 		}
+		if err := removeDirIfEmpty(opts, dir); err != nil {
+			state.detail("left %s in place: %v", dir, err)
+		}
 	}
+}
+
+// keepUntrustedRecordedFile is the removal of a recorded policy file that
+// another account owns or can change (Windows standalone, GAP-0761): the
+// bytes may no longer be DefenseClaw's or the administrator's, so the
+// uninstall never writes through the file. It leaves it byte for byte, drops
+// DefenseClaw's record, removes the empty folders DefenseClaw created, and
+// warns once: the file may still hold DefenseClaw's hook entries, which now
+// name programs the uninstall removed, what the agent does with them, and how
+// to take the account's entry off the file and the hook entries out of it.
+// Failing the uninstall instead would keep DefenseClaw's services and its
+// binaries only to protect nothing it still claims.
+func keepUntrustedRecordedFile(opts Options, connector string, record *ownershipRecord, path string, untrusted *untrustedPolicyFileError, state *State) error {
+	state.detail("left %s as it is: %v", path, untrusted.err)
+	state.warn("%s was left byte for byte because another account can change it: %v. It may still hold DefenseClaw's hook entries, "+
+		"which now name programs this uninstall removed; the agent runs them at its next tool call, the program is not there, and "+
+		"depending on the agent the call fails or is blocked until they are gone. To finish: remove that account's access entry "+
+		"(the Fix command in this message), check the file, then delete the entries whose command names DefenseClaw's hook "+
+		"(defenseclaw-hook.exe), or restore the file from a backup", path, untrusted.err)
+	if record != nil {
+		removeRecordedCreatedDirs(opts, record, state, true)
+	}
+	return deleteRecord(opts, connector)
+}
+
+// restoreOrStripUnprotected is restoreOrStrip for a recorded file in a
+// vendor folder DefenseClaw did not create and that does not protect it
+// (Windows, case c; g582 review 7 S1). The removal neither takes the folder
+// over nor fails closed on it. It works only on a file it can trust: a
+// regular single-link file only SYSTEM, Administrators and TrustedInstaller
+// own and can change. Such a file that is still byte for byte what DefenseClaw
+// wrote gets the administrator's original back, or goes. One that an
+// administrator changed since has DefenseClaw's entries stripped and the
+// rest kept, as for any trusted file (g582 round 9 L4). A file it cannot trust
+// is left as it is, since its content may no longer be DefenseClaw's or the
+// administrator's, and the warning says that its DefenseClaw hook entries now
+// name binaries the uninstall removed and how to take them out. Either way
+// DefenseClaw's record goes, and one warning names the folder and the fix.
+func restoreOrStripUnprotected(opts Options, connector string, record *ownershipRecord, strip stripFunc, folder unprotectedVendorFolder, state *State) error {
+	if record == nil {
+		return nil
+	}
+	path := record.Path
+	current, exists, why := readUnprotectedRecordedFile(opts, path)
+	outcome := ""
+	// staleEntries: the file stays and may still hold DefenseClaw's entries.
+	staleEntries := false
+	switch {
+	case why != "":
+		outcome = fmt.Sprintf("left %s as it is (%s)", path, why)
+		staleEntries = true
+	case !exists:
+		outcome = fmt.Sprintf("%s is already gone", path)
+	case sha256Hex(current) != record.PostimageSHA256:
+		admin, owned, err := strip(current)
+		base := policyFileBase{exists: true, data: current}
+		switch {
+		case err != nil:
+			outcome = fmt.Sprintf("left %s as it is (it changed after DefenseClaw wrote it and cannot be read: %v)", path, err)
+			staleEntries = true
+		case !owned:
+			outcome = fmt.Sprintf("%s no longer holds DefenseClaw entries; left it unchanged", path)
+		case blank(admin):
+			if err := removePolicyFileOver(opts, path, base); err != nil {
+				return err
+			}
+			outcome = fmt.Sprintf("removed %s (only DefenseClaw content remained)", path)
+			state.Changed = true
+		default:
+			if err := atomicWriteOver(opts, platformPath(opts, path), base, admin); err != nil {
+				return err
+			}
+			outcome = fmt.Sprintf("%s changed after DefenseClaw wrote it; removed only DefenseClaw entries", path)
+			state.Changed = true
+		}
+	default:
+		var admin []byte
+		if record.PreimageExisted {
+			stripped, _, err := strip(record.Preimage)
+			if err != nil {
+				return err
+			}
+			admin = stripped
+		}
+		base := policyFileBase{exists: true, data: current}
+		if blank(admin) {
+			if err := removePolicyFileOver(opts, path, base); err != nil {
+				return err
+			}
+			outcome = fmt.Sprintf("removed %s, DefenseClaw's file", path)
+		} else {
+			if err := atomicWriteOver(opts, platformPath(opts, path), base, admin); err != nil {
+				return err
+			}
+			outcome = fmt.Sprintf("restored the administrator content of %s", path)
+		}
+		state.Changed = true
+	}
+	state.detail("%s", outcome)
+	// The folders DefenseClaw itself created above the vendor's folder go as
+	// they do for any record, when their own parents are trusted.
+	removeRecordedCreatedDirs(opts, record, state, true)
+	stale := ""
+	if staleEntries {
+		stale = fmt.Sprintf(" DefenseClaw's hook entries in %s now name binaries the uninstall removed: delete the "+
+			"entries whose command names DefenseClaw's hook (after the commands below) or restore the file from a backup.", path)
+	}
+	state.warn("%s; the uninstall %s and dropped DefenseClaw's record without taking the folder over.%s "+
+		"To protect the folder, from an elevated prompt run %s", folder.reason, outcome, stale, folder.fix)
 	return deleteRecord(opts, connector)
 }
 

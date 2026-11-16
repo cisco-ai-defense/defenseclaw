@@ -44,6 +44,8 @@ const startupErrorCode = -32603
 const startupLinger = 30 * time.Second
 
 func main() {
+	// An elevated editor's guard creates its files as its user (GAP-0063).
+	managed.UseCurrentUserAsWindowsDefaultOwner(os.Args[1:])
 	if err := run(os.Args[1:]); err != nil {
 		var startup *startupError
 		if errors.As(err, &startup) {
@@ -77,15 +79,19 @@ func (e *startupError) Unwrap() error { return e.err }
 // setupCommand is the command that writes this editor entry again: the
 // gateway's enterprise acp setup for a managed enrollment, whose host has no
 // other DefenseClaw command, or defenseclaw acp setup. managedEntry reports
-// which.
+// which. managedFlags are more arguments of the managed setup
+// (managedSetupFlags).
 func setupCommand(clientID, agentID, profile, mode, contractLock string, managedFlags ...string) (command string, managedEntry bool) {
 	activate := ""
 	if mode == string(acp.ModeAction) {
 		activate = " --activate"
 	}
-	if gateway := standaloneManagedGatewayCommand(contractLock); gateway != "" {
-		return fmt.Sprintf("%s enterprise acp setup --client %s --agent %s --profile %s%s%s",
-			gateway, clientID, agentID, profile, activate, strings.Join(managedFlags, "")), true
+	if gateway := standaloneManagedGatewayExecutable(contractLock); gateway != "" {
+		args := []string{"enterprise", "acp", "setup", "--client", clientID, "--agent", agentID, "--profile", profile}
+		if activate != "" {
+			args = append(args, "--activate")
+		}
+		return managedSetupCommandLine(runtime.GOOS == "windows", gateway, append(args, managedFlags...)), true
 	}
 	setup := fmt.Sprintf("defenseclaw acp setup --client %s --agent %s", clientID, agentID)
 	if profile != "" && profile != "default" {
@@ -94,24 +100,59 @@ func setupCommand(clientID, agentID, profile, mode, contractLock string, managed
 	return setup + activate, false
 }
 
-// managedSetupFlags are the enterprise acp setup flags this guard knows from
-// its own argv. The setup refuses to run without --api-port, and a data dir
-// other than <home>/.defenseclaw must be named, so the command the guard
+// managedSetupCommandLine is gateway run with args as the user types it. On
+// Windows it is a PowerShell call from the managed renderer
+// (managed.WindowsCommandLine): the path, the data dir and every argument
+// that is not a plain word are literals, typographic quotes included. The
+// guard built `& "<path>" ...` by hand, in double quotes, where PowerShell
+// expands a $ of the path (g072 review 2 M4); the text that hands it on says
+// PowerShell (setupRunInstruction). Elsewhere it is unchanged: the path
+// bare, the data dir single-quoted (posixSetupArguments).
+func managedSetupCommandLine(windows bool, gateway string, args []string) string {
+	if windows {
+		return managed.WindowsCommandLine(gateway, args...)
+	}
+	return gateway + " " + posixSetupArguments(args)
+}
+
+// posixSetupArguments is args for a POSIX shell: the --data-dir value is
+// single-quoted, the other arguments are the words the guard knows from its
+// own argv and the contract.
+func posixSetupArguments(args []string) string {
+	words := make([]string, len(args))
+	for i, arg := range args {
+		if i > 0 && args[i-1] == "--data-dir" {
+			arg = "'" + strings.ReplaceAll(arg, "'", "'\\''") + "'"
+		}
+		words[i] = arg
+	}
+	return strings.Join(words, " ")
+}
+
+// setupRunInstruction is "run <setup>", and on Windows, where the managed
+// setup is a PowerShell call, "in PowerShell, run <setup>" (g072 review 2
+// M4): cmd.exe reads the & as a command separator.
+func setupRunInstruction(setup string) string {
+	if runtime.GOOS == "windows" {
+		return "in PowerShell, run " + setup
+	}
+	return "run " + setup
+}
+
+// managedSetupFlags are the enterprise acp setup arguments this guard knows
+// from its own argv. The setup refuses to run without --api-port, and a data
+// dir other than <home>/.defenseclaw must be named, so the command the guard
 // printed did not run (GAP-0723).
-func managedSetupFlags(gatewayURL, tokenFile string) string {
-	flags := ""
+func managedSetupFlags(gatewayURL, tokenFile string) []string {
+	var flags []string
 	if parsed, err := url.Parse(gatewayURL); err == nil && parsed.Port() != "" {
-		flags += " --api-port " + parsed.Port()
+		flags = append(flags, "--api-port", parsed.Port())
 	}
 	if tokenFile = strings.TrimSpace(tokenFile); tokenFile != "" {
 		dataDir := filepath.Dir(filepath.Dir(filepath.Clean(tokenFile)))
 		home, err := os.UserHomeDir()
 		if err != nil || !sameGuardPath(dataDir, filepath.Join(home, ".defenseclaw")) {
-			if runtime.GOOS == "windows" {
-				flags += " --data-dir '" + strings.ReplaceAll(dataDir, "'", "''") + "'"
-			} else {
-				flags += fmt.Sprintf(" --data-dir %q", dataDir)
-			}
+			flags = append(flags, "--data-dir", dataDir)
 		}
 	}
 	return flags
@@ -131,8 +172,8 @@ func newStartupError(err error, clientID, agentID, profile, mode, contractLock s
 		// A managed host has only the gateway binary, not the Python CLI
 		// the per-user text names (GAP-0270).
 		next := fmt.Sprintf("If your administrator revoked or has not enrolled %s for you, ask them to run "+
-			"enterprise acp enroll; then run %s (the command the enrollment reports), or delete this editor entry.",
-			pair, setup)
+			"enterprise acp enroll; then %s (the command the enrollment reports), or delete this editor entry.",
+			pair, setupRunInstruction(setup))
 		var tokenCopy *tokenCopyError
 		switch {
 		case errors.Is(err, acp.ErrRuntimeContractMissing):
@@ -144,11 +185,11 @@ func newStartupError(err error, clientID, agentID, profile, mode, contractLock s
 			return &startupError{err: err, message: fmt.Sprintf(
 				"DefenseClaw ACP guard could not start for %s: your copy of its ACP credential (%s) cannot be used (%v). "+
 					"Running setup cannot restore it: ask your administrator to enroll you again (enterprise acp enroll), "+
-					"then run %s (the command the enrollment reports).", pair, tokenCopy.path, err, setup)}
+					"then %s (the command the enrollment reports).", pair, tokenCopy.path, err, setupRunInstruction(setup))}
 		}
 		return &startupError{err: err, message: fmt.Sprintf(
-			"DefenseClaw ACP guard could not start for %s: %v. Run %s to set this editor entry up again; if that does not "+
-				"help, ask your administrator to run enterprise acp enroll for you again, or delete this editor entry.", pair, err, setup)}
+			"DefenseClaw ACP guard could not start for %s: %v. To set this editor entry up again, %s; if that does not "+
+				"help, ask your administrator to run enterprise acp enroll for you again, or delete this editor entry.", pair, err, setupRunInstruction(setup))}
 	}
 	if errors.Is(err, acp.ErrRuntimeContractMissing) {
 		return &startupError{err: err, message: fmt.Sprintf(
@@ -169,18 +210,20 @@ type tokenCopyError struct {
 func (e *tokenCopyError) Error() string { return e.err.Error() }
 func (e *tokenCopyError) Unwrap() error { return e.err }
 
-// standaloneManagedGatewayCommand names the gateway of a standalone managed
+// standaloneManagedGatewayExecutable names the gateway of a standalone managed
 // deployment, or "". Secure Client keeps the startup error bytes from main,
-// including for old managed locks.
-func standaloneManagedGatewayCommand(contractLock string) string {
-	if managed.IsSecureClientProfile(os.Getenv(managed.EnterpriseProfileEnv)) {
+// including for old managed locks. The service-only
+// DEFENSECLAW_ENTERPRISE_PROFILE pin in an editor's environment does not
+// decide it (GAP-1162).
+func standaloneManagedGatewayExecutable(contractLock string) string {
+	if secureClientHost() {
 		return ""
 	}
 	layout, err := managedACPStandaloneLayout()
 	if err != nil || !standaloneManagedHost(layout) {
 		return ""
 	}
-	return managedGatewayCommand(contractLock)
+	return managedGatewayExecutable(contractLock)
 }
 
 // standaloneManagedHost reports a standalone managed deployment: its
@@ -192,7 +235,7 @@ func standaloneManagedHost(layout managed.StandaloneLayout) bool {
 	if _, err := loadACPStandaloneDescriptor(layout.DescriptorPath); err == nil {
 		return true
 	}
-	if strings.TrimSpace(layout.BinDir) == "" || acp.SecureClientHost() {
+	if strings.TrimSpace(layout.BinDir) == "" || secureClientHost() {
 		return false
 	}
 	guard, err := guardExecutable()
@@ -201,15 +244,59 @@ func standaloneManagedHost(layout managed.StandaloneLayout) bool {
 
 var loadACPStandaloneDescriptor = managed.LoadRuntimeDescriptor
 
+// secureClientHost is acp.SecureClientHost: the Secure Client install
+// itself, never a profile named in the environment. A variable for tests.
+var secureClientHost = acp.SecureClientHost
+
+// guardDeployment is where this guard's gateway runs. It comes from
+// administrator-owned evidence only: the Secure Client install, or a
+// standalone managed host (its runtime descriptor, or this guard in the
+// standalone bin folder), where no per-user gateway may run. Neither the
+// editor's environment nor the setup text decides it: an editor that
+// exported DEFENSECLAW_ENTERPRISE_PROFILE=secure_client made a standalone
+// managed guard look for a gateway in the user's own account, so every
+// initialize was refused, and the guard was not Managed, so its observe
+// frames were delivered unchecked (GAP-1162).
+type guardDeployment struct {
+	secureClient bool
+	standalone   bool
+}
+
+func currentGuardDeployment() guardDeployment {
+	if secureClientHost() {
+		return guardDeployment{secureClient: true}
+	}
+	layout, err := managedACPStandaloneLayout()
+	return guardDeployment{standalone: err == nil && standaloneManagedHost(layout)}
+}
+
+// managedGateway reports a gateway that runs as an administrator-owned
+// service, which the guard verifies before it sends the challenge.
+func (d guardDeployment) managedGateway() bool { return d.secureClient || d.standalone }
+
+// The evaluators of a per-user and of a managed gateway; variables for tests.
+var (
+	newPerUserEvaluator = acp.NewHTTPEvaluator
+	newManagedEvaluator = acp.NewManagedHTTPEvaluator
+)
+
+// evaluator is the gateway client of this deployment.
+func (d guardDeployment) evaluator(gateway, token string) (*acp.HTTPEvaluator, error) {
+	if d.managedGateway() {
+		return newManagedEvaluator(gateway, token)
+	}
+	return newPerUserEvaluator(gateway, token)
+}
+
 // guardExecutable is the path of this guard; a variable for tests.
 var guardExecutable = os.Executable
 
-// managedGatewayCommand returns the gateway command of a managed host, or
-// "" on a per-user install. A guard is managed when its contract lock
+// managedGatewayExecutable returns the gateway executable of a managed
+// host, or "" on a per-user install (setupCommand renders the command). A guard is managed when its contract lock
 // records managed custody or, with the lock gone, when it runs from an
 // administrator-owned path; either way the gateway binary must sit next to
 // it.
-func managedGatewayCommand(contractLock string) string {
+func managedGatewayExecutable(contractLock string) string {
 	guard, err := guardExecutable()
 	if err != nil {
 		return ""
@@ -222,7 +309,7 @@ func managedGatewayCommand(contractLock string) string {
 		names = []string{"defenseclaw.exe", "defenseclaw-gateway.exe"}
 	}
 	dirs := []string{filepath.Dir(guard)}
-	if !acp.SecureClientHost() && contractLockManagedCustody(contractLock) {
+	if !secureClientHost() && contractLockManagedCustody(contractLock) {
 		// A managed lock whose guard is not the installed one still belongs
 		// to a managed host: name its gateway, not the per-user commands it
 		// lacks (GAP-0391).
@@ -234,9 +321,6 @@ func managedGatewayCommand(contractLock string) string {
 		for _, name := range names {
 			path := filepath.Join(dir, name)
 			if info, statErr := os.Stat(path); statErr == nil && info.Mode().IsRegular() {
-				if runtime.GOOS == "windows" {
-					return "& \"" + path + "\""
-				}
 				return path
 			}
 		}
@@ -263,9 +347,10 @@ func contractLockManagedCustody(path string) bool {
 }
 
 // guardKeepsMainBehaviour reports a Secure Client host, whose guard keeps
-// the behaviour of main (issue #1092).
+// the behaviour of main (issue #1092). The editor's environment does not
+// decide it (GAP-1162).
 func guardKeepsMainBehaviour() bool {
-	return managed.IsSecureClientProfile(os.Getenv(managed.EnterpriseProfileEnv)) || acp.SecureClientHost()
+	return secureClientHost()
 }
 
 func stdinIsPipe() bool {
@@ -384,7 +469,7 @@ func run(args []string) error {
 
 	flagsForSetup := managedSetupFlags(*gateway, *tokenFile)
 	fail := func(err error) error {
-		return newStartupError(err, *clientID, *agentID, *profile, *mode, *contractLock, flagsForSetup)
+		return newStartupError(err, *clientID, *agentID, *profile, *mode, *contractLock, flagsForSetup...)
 	}
 	commandArgs := flags.Args()
 	command := ""
@@ -441,13 +526,14 @@ func run(args []string) error {
 	if token == "" {
 		return failToken(errors.New("token file is empty"))
 	}
-	evaluator, err := acp.NewHTTPEvaluator(*gateway, token)
+	setup, _ := setupCommand(*clientID, *agentID, *profile, *mode, *contractLock, flagsForSetup...)
+	deployment := currentGuardDeployment()
+	evaluator, err := deployment.evaluator(*gateway, token)
 	if err != nil {
 		return fail(err)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	setup, managedEntry := setupCommand(*clientID, *agentID, *profile, *mode, *contractLock, flagsForSetup)
 	stdin := io.Reader(os.Stdin)
 	var editor *editorInput
 	if *clientID == "zed" && !guardKeepsMainBehaviour() {
@@ -459,9 +545,9 @@ func run(args []string) error {
 		AgentID: *agentID, ClientID: *clientID, Profile: *profile,
 		Mode: acp.Mode(*mode), Command: command, Args: commandArgs,
 		Stdin: stdin, Stdout: os.Stdout, Stderr: os.Stderr, Evaluator: evaluator,
-		Managed: managedEntry, SetupCommand: setup,
+		Managed: deployment.standalone, SetupCommand: setup,
 		SetupCommandFor: func(profile string, mode acp.Mode) string {
-			command, _ := setupCommand(*clientID, *agentID, profile, string(mode), *contractLock, flagsForSetup)
+			command, _ := setupCommand(*clientID, *agentID, profile, string(mode), *contractLock, flagsForSetup...)
 			return command
 		},
 	})

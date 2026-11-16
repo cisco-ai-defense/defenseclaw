@@ -158,7 +158,6 @@ func TestCloudAuditControlDestructionOwnerRejectsNearMisses(t *testing.T) {
 		"aws ec2 delete-flow-logs --flow-log-ids fl-production",
 		"aws route53resolver delete-resolver-query-log-config --resolver-query-log-config-id rqlc-production",
 		`aws cloudtrail put-event-selectors --trail-name production-trail --event-selectors '[{"ReadWriteType":"ReadOnly","IncludeManagementEvents":true}]'`,
-		"aws cloudtrail delete-trail --name production-trail --region us-east-1\nwhoami",
 		"gcloud logging logs delete projects/security-prod-123/logs/application --quiet",
 		"gcloud logging logs delete projects/#{project-id}/logs/cloudaudit.googleapis.com%2Factivity --quiet",
 		"printf '%s\\n' 'aws cloudtrail delete-trail --name production-trail --region us-east-1'",
@@ -180,5 +179,22 @@ func TestCloudAuditControlDestructionOwnerRejectsNearMisses(t *testing.T) {
 		if findingWithID(findings, cloudAuditControlDestructionRuleID) != nil {
 			t.Fatalf("negative produced finding: command=%q findings=%v facts=%+v", command, FindingStrings(findings), facts)
 		}
+	}
+	// A sibling command cannot erase the exact deletion command's finding.
+	// Both forms get the same rule proof and disposition.
+	standalone := "aws cloudtrail delete-trail --name production-trail --region us-east-1"
+	compound := standalone + "\nwhoami"
+	check := func(command string) *RuleFinding {
+		return findingWithID(dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input: actionfacts.Input{Tool: "shell", Command: command, CWD: "/repo",
+				DialectHint: actionfacts.DialectPOSIX},
+			LegacyText: command, Connector: "codex", EnforcementCapable: true,
+		}), cloudAuditControlDestructionRuleID)
+	}
+	alone, together := check(standalone), check(compound)
+	if alone == nil || together == nil ||
+		alone.contributesToEnforcement() != together.contributesToEnforcement() ||
+		alone.contributesToAlertOnly() != together.contributesToAlertOnly() {
+		t.Fatalf("compound deletion finding=%+v, standalone=%+v", together, alone)
 	}
 }

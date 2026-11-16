@@ -28,6 +28,7 @@ from defenseclaw.observability.v8_status import (
     destination_health_from_gateway,
     inspect_v8_operator_status,
     operator_status_from_effective,
+    retention_cap_warning_from_gateway,
     retention_health_from_gateway,
     source_is_v8,
 )
@@ -417,6 +418,61 @@ def test_destination_health_current_transition_and_retention_are_not_inferred() 
     assert destination_health_from_gateway({"telemetry": {"state": "running", "details": {}}}) == {}
 
 
+def test_unmet_retention_cap_warns_in_status_and_doctor_then_clears() -> None:
+    from defenseclaw.commands import cmd_status
+    from defenseclaw.commands.cmd_doctor import _check_observability_v8_status, _DoctorResult
+
+    health = {"telemetry": {"state": "running", "details": {
+        "retention_state": "warning",
+        "retention_cap_used_bytes": 2 << 20,
+        "retention_cap_bytes": 1 << 20,
+        "retention_cap_reason": "active_correlation_state",
+    }}}
+    assert retention_health_from_gateway(health) == ("warning", "")
+    message = retention_cap_warning_from_gateway(health)
+    assert "cap not reached: 2.0 MiB used, cap 1.0 MiB" in message
+    assert "end unused sessions" in message
+    with patch.object(cmd_status, "_status_row") as row:
+        cmd_status._print_retention_cap_warning(health)
+    assert row.call_args.args[0] == "Audit retention"
+    assert "cap not reached" in row.call_args.args[1]
+
+    status = V8OperatorStatus(
+        source="/tmp/config.yaml", data_dir="/tmp", plan_digest="a" * 64,
+        bucket_catalog_version=1, retention_days=7, max_store_mb=1,
+        local_path="/tmp/audit.db", judge_bodies_path="", destinations=(), buckets=(), warnings=(),
+    )
+    result = _DoctorResult()
+    _check_observability_v8_status(status, result, live_health=health)
+    check = next(item for item in result.checks if item["label"] == "Retention controller")
+    assert check["status"] == "warn"
+    assert "cap not reached" in check["detail"]
+    assert result.failed == 0
+
+    health["telemetry"]["details"] = {"retention_state": "healthy"}
+    assert retention_cap_warning_from_gateway(health) == ""
+    with patch.object(cmd_status, "_status_row") as row:
+        cmd_status._print_retention_cap_warning(health)
+    row.assert_not_called()
+    result = _DoctorResult()
+    _check_observability_v8_status(status, result, live_health=health)
+    check = next(item for item in result.checks if item["label"] == "Retention controller")
+    assert check["status"] == "pass"
+
+
+def test_unmet_retention_cap_rejects_untrusted_health_fields() -> None:
+    details = {
+        "retention_state": "warning", "retention_cap_used_bytes": 2 << 20,
+        "retention_cap_bytes": 1 << 20, "retention_cap_reason": "active_correlation_state",
+    }
+    for replacement in ("file:///private/data", "unknown_reason", ""):
+        warning = retention_cap_warning_from_gateway({"telemetry": {"details": {**details, "retention_cap_reason": replacement}}})
+        assert warning == "audit store cap not reached; inspect the gateway retention health"
+    for replacement in (True, -1, "2097152"):
+        warning = retention_cap_warning_from_gateway({"telemetry": {"details": {**details, "retention_cap_used_bytes": replacement}}})
+        assert warning == "audit store cap not reached; inspect the gateway retention health"
+
+
 def test_destination_health_redacts_legacy_delivery_error_but_preserves_times() -> None:
     result = destination_health_from_gateway(
         {
@@ -520,6 +576,17 @@ def test_inspect_status_preserves_effective_judge_capture_default_and_override(t
 
         path.write_text("config_version: 8\nguardrail:\n  retain_judge_bodies: false\nobservability: {}\n")
         assert inspect_v8_operator_status(path).judge_bodies_enabled is False
+
+
+def test_inspect_status_names_the_configured_default_redaction_profile(tmp_path: Path) -> None:
+    # GAP-1394: the TUI Redaction summary reads it from here.
+    path = tmp_path / "config.yaml"
+    wire = SimpleNamespace(effective=_effective(), source=str(path), data_dir=str(tmp_path), plan_digest="a" * 64)
+    with patch("defenseclaw.observability.v8_status.inspect_v8_config", return_value=wire):
+        path.write_text("config_version: 8\nobservability: {}\n")
+        assert inspect_v8_operator_status(path).default_redaction_profile == "none"
+        path.write_text("config_version: 8\nobservability:\n  defaults:\n    redaction_profile: content\n")
+        assert inspect_v8_operator_status(path).default_redaction_profile == "content"
 
 
 def test_inspect_status_protects_snapshot_before_first_write(tmp_path: Path) -> None:
@@ -1402,3 +1469,24 @@ def test_destination_display_reason_hides_routine_healthy_codes() -> None:
     assert V8DestinationHealth(name="g", state="healthy", reason="activated").display_reason == ""
     assert V8DestinationHealth(name="g", state="degraded", reason="queue_full").display_reason == "queue_full"
     assert V8DestinationHealth(name="g", state="healthy", reason="origin_loop").display_reason == "origin_loop"
+
+
+def test_max_store_mb_is_off_by_default_and_shown_when_set() -> None:
+    """#1384: the opt-in audit.db size cap is shown next to the retention days."""
+    effective = _effective()
+    status = operator_status_from_effective(effective, source="x", data_dir="y", plan_digest="z")
+    assert status.max_store_mb == 0
+    assert status.retention_label == "90 days"
+
+    capped = copy.deepcopy(effective)
+    capped["local"]["max_store_mb"] = 2048
+    status = operator_status_from_effective(capped, source="x", data_dir="y", plan_digest="z")
+    assert status.max_store_mb == 2048
+    assert status.retention_label == "90 days, size cap 2048 MiB"
+
+    capped["local"]["retention_days"] = 0
+    status = operator_status_from_effective(capped, source="x", data_dir="y", plan_digest="z")
+    assert status.retention_label == "size cap 2048 MiB"
+    capped["local"].pop("max_store_mb")
+    status = operator_status_from_effective(capped, source="x", data_dir="y", plan_digest="z")
+    assert status.retention_label == "unbounded"

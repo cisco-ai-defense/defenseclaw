@@ -62,7 +62,7 @@ func TestSchemaViolationMetricUsesGeneratedFamilyAndExistingLabels(t *testing.T)
 
 func TestNewLoggerBindsAndDetachFailsClosed(t *testing.T) {
 	logger := newTestLogger(t)
-	if logger.store.sqliteBusyObservabilityV8() != logger {
+	if bound, ok := logger.store.sqliteBusyObservabilityV8().(storeBusyObserver); !ok || bound.inner != logger || bound.store != logger.store {
 		t.Fatal("new logger did not bind the store contention observer")
 	}
 	runtime := newSinkHealthTestRuntime(t, logger, router.AdmissionOrdinary)

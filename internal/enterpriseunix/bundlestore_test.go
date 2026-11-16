@@ -43,7 +43,7 @@ func TestLifecycleSettlesBundlesAndReportsTheBundleBlock(t *testing.T) {
 		})
 	})
 	const goodID, newID = "b-01JA0000000000000000000001", "b-01JA0000000000000000000002"
-	good, err := store.Receive(goodID, 3)
+	good, err := store.Receive(goodID, 3, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestLifecycleSettlesBundlesAndReportsTheBundleBlock(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := store.Receive(newID, 4); err != nil {
+	if _, err := store.Receive(newID, 4, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -111,7 +111,7 @@ func TestBundleReceiptPublicAndStoreChildrenPrivate(t *testing.T) {
 			h := newTestHost(t, goos)
 			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 			store := h.env.bundleStore()
-			r, err := store.Receive("b-01JA0000000000000000000001", 1)
+			r, err := store.Receive("b-01JA0000000000000000000001", 1, "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -151,7 +151,7 @@ func TestBundleReceiptPublicAndStoreChildrenPrivate(t *testing.T) {
 					t.Fatalf("%s mode = %v, %v; want %04o", path, info, err, want)
 				}
 			}
-			check(store.BundlesDir, 0o755)
+			check(store.BundlesDir, 0o711)
 			check(store.PublicReceiptPath(), 0o644)
 			check(store.PublicReceiptEventsDir(), 0o755)
 			check(publicEvent, 0o644)

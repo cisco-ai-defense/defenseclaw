@@ -42,9 +42,9 @@ package gateway
 //     which is the mode that refuses an unversioned contract;
 //   - it accepts only the image a sandbox started now would run: the record of
 //     exactly the build context this config, this host user and this release
-//     render (image.Store.Current), whose hooks were fire-verified (and, for
-//     an image built for the MicroVM driver, whose MicroVM scenario passed),
-//     whose tag Docker still resolves to the verified image ID, and whose
+//     render (image.Store.Current), whose hooks were fire-verified (an image
+//     built for the MicroVM driver also passed its resolver check before it
+//     was recorded), whose tag Docker still resolves to the verified image ID, and whose
 //     harness version resolves to a Known sandbox contract.
 //
 // Everything else keeps refusing exactly as before: an unknown host version, an
@@ -174,13 +174,19 @@ func sandboxHarnessHookContractFor(cfg *config.Config, connectorName string, hos
 	if err != nil {
 		return sandboxHarnessContract{}, false, fmt.Errorf("sandbox harness hook contract: %w", err)
 	}
+	// No image is current without the trusted CAs the configuration names
+	// (the manager refuses to build or use one).
+	trusted, err := image.TrustedCAsFor(cfg)
+	if err != nil {
+		return sandboxHarnessContract{}, false, nil
+	}
 	for _, microVM := range targets {
 		// The same BuildSpec the sandbox manager selects its image with
 		// (manager.Manager.image, sandboxcli builderImages.spec).
 		c, err := image.NewContext(image.BuildSpec{
 			Harness: spec, HarnessVersion: cfg.OpenShell.Image.HarnessVersions[spec.Name], BaseImage: cfg.OpenShell.Image.Base,
 			UID: host.UID, GID: host.GID, IngressPort: cfg.OpenShellIngressPort(), FailMode: connector.SandboxFailMode,
-			DefenseClawVersion: host.Release, Owner: owner, MicroVM: microVM,
+			DefenseClawVersion: host.Release, Owner: owner, MicroVM: microVM, TrustedCAs: trusted,
 		})
 		if err != nil {
 			// A pinned harness version without a reviewed sandbox contract, a
@@ -192,7 +198,7 @@ func sandboxHarnessHookContractFor(cfg *config.Config, connectorName string, hos
 		if err != nil {
 			return sandboxHarnessContract{}, false, fmt.Errorf("sandbox harness hook contract: %w", err)
 		}
-		if !ok || !rec.HookFireVerified || (rec.MicroVM && !rec.MicroVMVerified) {
+		if !ok || !rec.HookFireVerified {
 			continue
 		}
 		resolution := connector.ResolveSandboxHookContract(rec.Connector, strings.TrimSpace(rec.HarnessVersion))

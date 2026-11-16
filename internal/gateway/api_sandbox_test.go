@@ -42,6 +42,9 @@ type fakeSandboxController struct {
 	explain   sandboxapi.ExplainRequest
 	undo      sandboxapi.UndoRequest
 	accept    sandboxapi.AcceptRequest
+	// discarded is, for every stop, whether its user accepted the loss of
+	// what a MicroVM has not synced.
+	discarded []bool
 	lines     int
 	err       error
 	feed      chan sandboxapi.ActivityEvent
@@ -85,8 +88,8 @@ func (f *fakeSandboxController) Delete(_ context.Context, name string, _ sandbox
 	return answer(f, "delete "+name, &sandboxapi.DeleteResponse{Name: name, Deleted: true})
 }
 
-func (f *fakeSandboxController) Stop(_ context.Context, name string) (*sandboxapi.Sandbox, error) {
-	return answer(f, "stop "+name, &sandboxapi.Sandbox{Name: name, Phase: "stopped"})
+func (f *fakeSandboxController) Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, error) {
+	return answer(f, "stop "+name, &sandboxapi.Sandbox{Name: name, Phase: "stopped"}, func() { f.discarded = append(f.discarded, sandboxapi.DiscardUnsynced(ctx)) })
 }
 
 func (f *fakeSandboxController) Start(_ context.Context, name string, _ sandboxapi.StartRequest) (*sandboxapi.Sandbox, error) {
@@ -127,6 +130,11 @@ func (f *fakeSandboxController) ReportWorkspace(_ context.Context, name string, 
 	return err
 }
 
+func (f *fakeSandboxController) ReportDisk(_ context.Context, name string, _ sandboxapi.DiskReport) error {
+	_, err := answer(f, "disk "+name, struct{}{})
+	return err
+}
+
 func (f *fakeSandboxController) Discover(_ context.Context, name string) (*sandboxapi.DiscoveryResult, error) {
 	return answer(f, "discover "+name, &sandboxapi.DiscoveryResult{Name: name, Result: "ok", Signals: []sandboxapi.DiscoverySignal{}})
 }
@@ -146,6 +154,10 @@ func (f *fakeSandboxController) DecideApproval(_ context.Context, id string, d s
 
 func (f *fakeSandboxController) Unblock(_ context.Context, req sandboxapi.UnblockRequest) (*sandboxapi.UnblockResponse, error) {
 	return answer(f, "unblock", &sandboxapi.UnblockResponse{Host: req.Host, Scope: "sandbox"}, func() { f.unblock = req })
+}
+
+func (f *fakeSandboxController) PolicyDecision(_ context.Context, req sandboxapi.PolicyDecisionRequest) (*sandboxapi.PolicyDecisionResponse, error) {
+	return answer(f, "policy decision", &sandboxapi.PolicyDecisionResponse{Sandbox: req.Sandbox, Host: req.Host, Kind: req.Kind})
 }
 
 func (f *fakeSandboxController) Explain(_ context.Context, req sandboxapi.ExplainRequest) (*sandboxapi.Explain, error) {
@@ -281,6 +293,8 @@ func TestSandboxAPIRoutes(t *testing.T) {
 		{"GET", sandboxapi.PathApprovals + "?sandbox=box", "", 200, "approvals box"},
 		{"POST", sandboxapi.PathApprovals + "/ap_1", `{"decision":"approve","always":true}`, 200, "decide ap_1"},
 		{"POST", sandboxapi.PathEgressUnblock, `{"host":"webhook.site","sandbox":"box"}`, 200, "unblock"},
+		{"POST", sandboxapi.PathPolicyDecision, `{"sandbox":"box","host":"example.org","kind":"block"}`, 200, "policy decision"},
+		{"POST", sandboxapi.PathPolicyDecision, `{"sandbox":"box","host":"example.org","kind":"block","unexpected":true}`, 400, ""},
 		{"GET", sandboxapi.PathPolicyExplain + "?harness=codex&copy=true", "", 200, "explain"},
 		{"GET", sandboxapi.PathPrefix + "nope", "", 404, ""},
 		{"PUT", sandboxapi.PathSandboxes, `{}`, 404, ""},
@@ -478,6 +492,9 @@ func TestSandboxAPIClientRoundTrip(t *testing.T) {
 	if _, err := c.Explain(ctx, sandboxapi.ExplainRequest{Sandbox: "box"}); err != nil {
 		t.Fatal(err)
 	}
+	if res, err := c.PolicyDecision(ctx, sandboxapi.PolicyDecisionRequest{Sandbox: "box", Host: "example.org", Kind: "block"}); err != nil || res.Sandbox != "box" || res.Host != "example.org" || res.Kind != "block" {
+		t.Fatalf("policy decision = %+v, %v", res, err)
+	}
 	if res, err := c.PolicyTest(ctx, sandboxapi.PolicyTestRequest{Sandbox: "box", Checks: []sandboxapi.PolicyCheck{{Host: "a.example", Port: 443}}}); err != nil ||
 		res.Sandbox != "box" || len(res.Decisions) != 1 || res.Decisions[0].Host != "a.example" || res.Decisions[0].Source != "pack balanced" {
 		t.Fatalf("policy test = %+v, %v", res, err)
@@ -499,5 +516,25 @@ func eventuallyTrue(t *testing.T, cond func() bool) {
 			t.Fatal("condition not reached")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// GAP-0902: a stop goes ahead after a failed MicroVM sync only when its
+// user accepted the loss, and only the stop request's discard_unsynced says
+// so: a plain or empty stop does not, and a body with a field the route
+// does not know is refused before it reaches the controller.
+func TestSandboxAPIStopCarriesOnlyTheUsersAcceptedLoss(t *testing.T) {
+	ctl := &fakeSandboxController{}
+	_, h := sandboxTestAPI(t, ctl, true)
+	for _, body := range []string{"", `{}`, `{"discard_unsynced":false}`, `{"discard_unsynced":true}`} {
+		if w := serve(h, sandboxRequest(http.MethodPost, sandboxapi.PathSandboxes+"/box/stop", body)); w.Code != http.StatusOK {
+			t.Fatalf("stop %q = %d %s", body, w.Code, w.Body.String())
+		}
+	}
+	if w := serve(h, sandboxRequest(http.MethodPost, sandboxapi.PathSandboxes+"/box/stop", `{"discard":true}`)); w.Code != http.StatusBadRequest {
+		t.Fatalf("stop with an unknown field = %d", w.Code)
+	}
+	if want := []bool{false, false, false, true}; len(ctl.discarded) != len(want) || ctl.discarded[0] || ctl.discarded[1] || ctl.discarded[2] || !ctl.discarded[3] {
+		t.Fatalf("accepted loss per stop = %v, want %v", ctl.discarded, want)
 	}
 }

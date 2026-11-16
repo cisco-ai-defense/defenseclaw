@@ -15,6 +15,7 @@ package unixidentity
 import (
 	"strconv"
 	"sync"
+	"time"
 )
 
 // CachingResolver memoizes definitive answers (found or ErrNotFound) for
@@ -27,7 +28,12 @@ type CachingResolver struct {
 	uids  map[int]cachedAccount
 	grps  map[string]cachedGroup
 	gids  map[int]cachedGroup
-	ids   map[string][]int
+	ids   map[string]cachedGroupIDs
+}
+
+type cachedGroupIDs struct {
+	ids []int
+	at  time.Time
 }
 
 type cachedAccount struct {
@@ -55,7 +61,29 @@ func (c *CachingResolver) Reset() {
 	c.uids = map[int]cachedAccount{}
 	c.grps = map[string]cachedGroup{}
 	c.gids = map[int]cachedGroup{}
-	c.ids = map[string][]int{}
+	c.ids = map[string]cachedGroupIDs{}
+}
+
+// ResetKeepingGroupIDs drops every cached answer except the group lists
+// resolved within maxAge. A hook guardian pass that a file change armed runs
+// seconds after the last one: on macOS each account's list is confirmed with
+// one dsmemberutil run per group (GAP-0528), about 1.5 s per pass on an
+// Active Directory host, which put the repair of a rewritten Hermes hooks
+// block past its 3 s bound (r103 GAP-0045, GAP-1825). Accounts, homes and
+// uids are always asked again.
+func (c *CachingResolver) ResetKeepingGroupIDs(maxAge time.Duration) {
+	c.mu.Lock()
+	kept := map[string]cachedGroupIDs{}
+	for key, hit := range c.ids {
+		if age := time.Since(hit.at); age >= 0 && age < maxAge {
+			kept[key] = hit
+		}
+	}
+	c.mu.Unlock()
+	c.Reset()
+	c.mu.Lock()
+	c.ids = kept
+	c.mu.Unlock()
 }
 
 func cacheable(err error) bool { return err == nil || IsNotFound(err) }
@@ -143,13 +171,13 @@ func (c *CachingResolver) GroupIDs(account Account) ([]int, error) {
 	c.mu.Lock()
 	if hit, ok := c.ids[key]; ok {
 		c.mu.Unlock()
-		return append([]int{}, hit...), nil
+		return append([]int{}, hit.ids...), nil
 	}
 	c.mu.Unlock()
 	ids, err := c.inner.GroupIDs(account)
 	if err == nil {
 		c.mu.Lock()
-		c.ids[key] = append([]int{}, ids...)
+		c.ids[key] = cachedGroupIDs{ids: append([]int{}, ids...), at: time.Now()}
 		c.mu.Unlock()
 	}
 	return ids, err

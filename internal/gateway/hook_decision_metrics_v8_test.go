@@ -12,36 +12,8 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
-	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
-	"github.com/defenseclaw/defenseclaw/internal/observability/router"
-	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	oteltrace "go.opentelemetry.io/otel/trace"
 )
-
-type hookDecisionRecordCapture struct {
-	admission func(router.Metadata) router.Admission
-	records   []observability.Record
-}
-
-func (capture *hookDecisionRecordCapture) Emit(
-	_ context.Context,
-	metadata router.Metadata,
-	build observabilityruntime.EmitBuilder,
-) (pipeline.LocalLogOutcome, error) {
-	admission := router.AdmissionOrdinary
-	if capture.admission != nil {
-		admission = capture.admission(metadata)
-	}
-	if admission == router.AdmissionDrop {
-		return pipeline.LocalLogOutcome{}, nil
-	}
-	record, err := build(observabilityruntime.EmitContext{}, admission)
-	if err != nil {
-		return pipeline.LocalLogOutcome{}, err
-	}
-	capture.records = append(capture.records, record)
-	return pipeline.LocalLogOutcome{}, nil
-}
 
 func TestHookDecisionMetricsV8ExportCompleteCompatibilitySetWithoutLegacyProvider(t *testing.T) {
 	api, capture := bindHookModelV8Runtime(t, []string{"logs", "metrics"})

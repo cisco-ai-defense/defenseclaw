@@ -18,8 +18,11 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // Windows enterprise result wording that does not depend on Windows APIs,
@@ -51,15 +54,58 @@ const windowsEnterpriseActiveSessionWhen = "while the accounts have an active (c
 // LocalSystem run removes: install again, then run the given Setup action,
 // both as LocalSystem while the accounts have an active session.
 func windowsEnterpriseLocalSystemRemedy(action string) string {
-	return "run DefenseClaw Setup /ensure and then " + action + ", both as LocalSystem " + windowsEnterpriseActiveSessionWhen + " " +
+	return "run " + windowsEnterpriseSetupCommand("/ensure") + " and then " + windowsEnterpriseSetupCommand(strings.Fields(action)...) +
+		", both as LocalSystem " + windowsEnterpriseActiveSessionWhen + " " +
 		"(an MDM system context, or from an elevated prompt a one-time scheduled task that runs as SYSTEM; " +
-		"see \"Run Setup as LocalSystem\" in the Windows enterprise guide)"
+		"see \"Run Setup as LocalSystem\" in the Windows enterprise guide). " + managed.WindowsSetupSource
+}
+
+// windowsEnterpriseInstallerExitFailure names an installer engine that
+// exited without its diagnostic. One another program ended (Task Manager,
+// Stop-Process, an antivirus, a shutdown) exits 4294967295 or with the
+// console-close status, and the raw code alone said nothing an operator
+// could act on (GAP-0888).
+func windowsEnterpriseInstallerExitFailure(code int) error {
+	switch uint32(code) {
+	case 0xFFFFFFFF, 0xC000013A:
+		return fmt.Errorf("the Windows enterprise installer was ended before it reported a result (exit code %d: "+
+			"another program stopped its PowerShell process, for example Task Manager, Stop-Process, an antivirus or a shutdown). "+
+			"Check the lifecycle log (%s), then run the same command again", code, windowsEnterpriseLifecycleLogPath)
+	}
+	return fmt.Errorf("the Windows enterprise installer exited with code %d without a diagnostic; check the lifecycle log (%s)",
+		code, windowsEnterpriseLifecycleLogPath)
+}
+
+// windowsEnterpriseUserStateRemainingMessage is the per_user_state_remaining
+// error of a LocalSystem purge that could not remove every enrolled
+// account's data. It ran as LocalSystem already, so it names what usually
+// holds the files and what a missing folder means (GAP-0888). When the purge
+// already removed the target manifest that lists the enrolled accounts, a
+// second /uninstall PURGE=1 finds none of them and ends rc 0 with the folders
+// still there, so the message names the folders to delete by hand instead of
+// advising that rerun (GAP-2307).
+func windowsEnterpriseUserStateRemainingMessage(count int, accounts string, rerunFindsAccounts bool) string {
+	next := "sign the account out or close its agents, then run /uninstall PURGE=1 again as LocalSystem. "
+	if !rerunFindsAccounts {
+		next = "sign the account out or close its agents, then delete each folder named below by hand as an administrator: " +
+			"this purge already removed the machine deployment that lists the enrolled accounts, so /uninstall PURGE=1 run again no longer finds them. " +
+			"Do not delete a folder kept for the account's agent registrations (its connector_backups restore them): " +
+			"run " + windowsEnterpriseSetupCommand("/ensure") + " and then " + windowsEnterpriseSetupCommand("/uninstall", "PURGE=1") +
+			" while that account has an active session (" + managed.WindowsSetupSource + "). "
+	}
+	return fmt.Sprintf("--purge ran as LocalSystem but could not remove all DefenseClaw per-user data and binaries of %d enrolled account(s), "+
+		"which keep per-user hook tokens that nothing accepts any more. Usually an agent or editor that account runs still holds a file: "+
+		"%sAn account whose profile folder no longer exists has nothing left to remove. Accounts: %s", count, next, accounts)
 }
 
 // windowsManagedHooksPurgedBinariesMarker separates a purged account's label
 // in user_state_purged from what the purge removed from that account's
 // %USERPROFILE%\.local\bin ("none" when it held no DefenseClaw file).
 const windowsManagedHooksPurgedBinariesMarker = ` | .local\bin: `
+
+// A purge can leave account files in .defenseclaw after removing the managed
+// entries. Keep the retained names with the account's result.
+const windowsManagedHooksKeptEntriesMarker = " | kept account entries: "
 
 // windowsManagedHooksPurgedLabel appends to a purged account's label the
 // file names its binaries purge removed, so the result does not claim
@@ -91,7 +137,14 @@ func windowsManagedHooksPurgedLabel(label string, removed []string) string {
 // that did not report its binaries.
 func windowsEnterprisePurgedUserStateChange(entry string) string {
 	account, binaries, found := strings.Cut(entry, windowsManagedHooksPurgedBinariesMarker)
+	kept := ""
+	if before, after, hasKept := strings.Cut(account, windowsManagedHooksKeptEntriesMarker); hasKept {
+		account, kept = before, after
+	}
 	line := "removed all DefenseClaw per-user data of " + account + " (hook scripts and foreign-hooks-backup included)"
+	if kept != "" {
+		line = "removed DefenseClaw-owned per-user entries of " + account + "; kept account entries in .defenseclaw: " + kept
+	}
 	switch {
 	case !found:
 		return line + " and any DefenseClaw per-user binaries in %USERPROFILE%\\.local\\bin"
@@ -109,12 +162,9 @@ func windowsEnterprisePurgedUserStateChange(entry string) string {
 // --attest-claude-effective-policy the administrator's repair leaves
 // security_complete false (GAP-2011).
 func windowsEnterpriseStandardUserMutationAnswer(action string, flags ...string) string {
-	command := "enterprise windows " + action + " --profile standalone"
-	for _, flag := range flags {
-		command += " " + flag
-	}
-	return "a standard account cannot " + action + " the managed deployment. Ask your administrator, who runs it from an elevated PowerShell prompt with `& '" +
-		managedWindowsAdminCLI() + "' " + command + "`. Nothing was changed."
+	command := append([]string{"enterprise", "windows", action, "--profile", "standalone"}, flags...)
+	return "a standard account cannot " + action + " the managed deployment. Ask your administrator, who runs it from an elevated PowerShell prompt with " +
+		managedWindowsCommand(command...) + ". Nothing was changed."
 }
 
 // windowsManagedStandardUserViewAnswer answers a standard account's
@@ -123,10 +173,17 @@ func windowsEnterpriseStandardUserMutationAnswer(action string, flags ...string)
 // needs, the elevated command to ask the administrator for, and that
 // nothing changed. It ran exit 1 with a stuttered internal prefix and no
 // command (GAP-2039). The code stays out of the sentence: it is the
-// managedViewRefusal's, for --json errors[].code (GAP-2262).
-func windowsManagedStandardUserViewAnswer(what, adminArgs string) string {
+// managedViewRefusal's, for --json errors[].code (GAP-2262). Each element of
+// adminArgs is one argument of the administrator's command.
+func windowsManagedStandardUserViewAnswer(what string, adminArgs ...string) string {
+	command := managedWindowsCommand(adminArgs...)
+	if len(adminArgs) > 2 && adminArgs[0] == "enterprise" && adminArgs[1] == "windows" && adminArgs[2] == "sandbox" {
+		// Sandbox administration is a gateway command (r103 GAP-0215).
+		// Both binaries are shipped beside each other by standalone Setup.
+		command = managedWindowsGatewayCommand(adminArgs...)
+	}
 	return what + " of a managed computer can be read only from an elevated Administrator prompt or by the MDM agent. " +
-		"Ask your administrator, who runs it from an elevated PowerShell prompt with `& '" + managedWindowsAdminCLI() + "' " + adminArgs + "`. Nothing was changed."
+		"Ask your administrator, who runs it from an elevated PowerShell prompt with " + command + ". Nothing was changed."
 }
 
 // managedViewRefusal is a standard account's refusal of a managed view. It
@@ -157,7 +214,18 @@ func managedHostCurrentAccountName() string {
 // gave administrator-only advice (GAP-1720).
 func windowsEnterpriseStandardUserInspectionAnswer(action string) string {
 	return "the managed deployment's " + action + " needs an elevated prompt: a standard account cannot run the installer's own checks, " +
-		"so this says nothing about the deployment's health. Ask your administrator, who checks it from an elevated PowerShell prompt with `& '" +
-		managedWindowsAdminCLI() + "' enterprise windows " + action + " --profile standalone`, and your account's agents with `& '" +
-		managedWindowsAdminCLI() + "' enterprise policy show --user " + managedHostCurrentAccountName() + "`. Nothing was changed."
+		"so this says nothing about the deployment's health. Ask your administrator, who checks it from an elevated PowerShell prompt with " +
+		managedWindowsCommand("enterprise", "windows", action, "--profile", "standalone") + ", and your account's agents with " +
+		managedWindowsAccountAgentsCommand() + ". Nothing was changed."
+}
+
+// A host refusal has no enrollment or readiness result. An untrusted engine
+// must be repaired before repeating the health command that refused it.
+func windowsEnterpriseUncheckedHealthMessage(profile string, untrustedPowerShell bool) string {
+	next := "For the deployment's health, run "
+	if untrustedPowerShell {
+		next = "First restore a non-link PowerShell 7 installation with trusted ownership and administrator-only write access, including its parent folders, then run "
+	}
+	return "this request was refused before any health check ran, so readiness.gateway, readiness.guardian, coverage_complete, security_complete and enrollment were not checked (booleans read false and enrollment counts read zero); only the recorded deployment and the service states are reported. " + next +
+		managedWindowsCommand("enterprise", "windows", "verify", "--profile", profile, "--json") + " from an elevated PowerShell prompt"
 }

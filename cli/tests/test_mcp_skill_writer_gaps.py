@@ -227,3 +227,104 @@ class TestSharedSkillDirGlobalWatcherBlock(TestSharedSkillDirScope):
         self.assertIn("Unblocked 'review' (every connector).", unblocked.output)
         self.assertNotIn("connector=amp", unblocked.output)
         self.assertFalse(pe.is_blocked("skill", "review"))
+
+
+class TestClaudeProfileSymlinkRefusal(unittest.TestCase):
+    # GAP-1390: a Claude profile whose .claude.json is a symlink is refused for
+    # a sensitive write. The refusal is one plain line that names the file, and
+    # the success lines name the profile that was written.
+    def setUp(self):
+        self.app, self.tmp_dir, self.db_path = make_app_context()
+        self.profile = os.path.join(self.tmp_dir, "alt-profile")
+        os.makedirs(self.profile)
+        self.env = patch.dict(
+            os.environ,
+            {"HOME": self.tmp_dir, "USERPROFILE": self.tmp_dir, "CLAUDE_CONFIG_DIR": self.profile},
+        )
+        self.env.start()
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        self.app.cfg.mcp_servers = MagicMock(  # type: ignore[method-assign]
+            return_value=[MCPServerEntry(name="demo", url="https://x.invalid/mcp", transport="http")]
+        )
+
+    def tearDown(self):
+        self.env.stop()
+        cleanup_app(self.app, self.db_path, self.tmp_dir)
+
+    def invoke(self, args):
+        return CliRunner().invoke(mcp, args, obj=self.app, catch_exceptions=False)
+
+    def _link_state_file(self) -> str:
+        real = os.path.join(self.tmp_dir, "operator-state.json")
+        with open(real, "w", encoding="utf-8") as handle:
+            handle.write("{}")
+        link = os.path.join(self.profile, ".claude.json")
+        try:
+            os.symlink(real, link)
+        except OSError:
+            self.skipTest("symlink creation is unavailable")
+        return link
+
+    def _assert_one_plain_line(self, result, link):
+        self.assertEqual(result.exit_code, 1, result.output)
+        lines = [line for line in result.output.splitlines() if line.strip()]
+        self.assertEqual(len(lines), 1, result.output)
+        self.assertIn("refusing sensitive write through symlink", lines[0])
+        self.assertIn(link, lines[0])
+        self.assertNotIn("Traceback", result.output)
+
+    def test_unset_refusal_is_one_line_naming_the_file(self):
+        link = self._link_state_file()
+        self._assert_one_plain_line(self.invoke(["unset", "demo", "--connector", "claudecode"]), link)
+
+    def test_set_refusal_is_one_line_naming_the_file(self):
+        link = self._link_state_file()
+        result = self.invoke(["set", "demo2", "--url", "https://x.invalid/mcp", "--skip-scan", "--connector", "claudecode"])
+        self._assert_one_plain_line(result, link)
+
+    def test_success_lines_name_the_profile(self):
+        with patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector"), patch(
+            "defenseclaw.commands.cmd_mcp._unset_mcp_via_connector", return_value=None
+        ):
+            args = ["--url", "https://x.invalid/mcp", "--skip-scan", "--connector", "claudecode"]
+            added = self.invoke(["set", "demo2", *args])
+            removed = self.invoke(["unset", "demo", "--connector", "claudecode"])
+            self.assertIn(f"[mcp] Added 'demo2' (claudecode, profile {self.profile}).", added.output)
+            self.assertIn(f"[mcp] Removed 'demo' (claudecode, profile {self.profile}).", removed.output)
+            with patch.dict(os.environ):
+                os.environ.pop("CLAUDE_CONFIG_DIR")
+                default = self.invoke(["set", "demo3", *args])
+            self.assertIn("[mcp] Added 'demo3' (claudecode, default profile).", default.output)
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_main_prints_a_symlink_refusal_from_any_command_as_one_line(monkeypatch, capsys, wrapped):
+    # GAP-1390: skill, plugin and mcp writers share the sensitive-write check;
+    # none of them may end in a traceback. Some re-raise the refusal as a ValueError.
+    from defenseclaw.file_permissions import UnsafePathError
+
+    refusal = UnsafePathError("refusing sensitive write through symlink: /x/.claude.json")
+    raised: Exception = refusal
+    if wrapped:
+        raised = ValueError(str(refusal))
+        raised.__cause__ = refusal
+    for name in ("_keep_console_width_when_piped", "_force_utf8_io"):
+        monkeypatch.setattr(main, name, lambda: None)
+    monkeypatch.setattr(main.ux, "configure_console_output", lambda *_a: None)
+    monkeypatch.setattr(main, "_try_launch_tui", lambda: False)
+    monkeypatch.setattr(main, "cli", MagicMock(side_effect=raised))
+    with pytest.raises(SystemExit) as exited:
+        main.main()
+    assert exited.value.code == 1
+    err = capsys.readouterr().err
+    assert err.strip() == "Error: refusing sensitive write through symlink: /x/.claude.json"
+
+
+def test_an_unrelated_value_error_still_reaches_the_traceback(monkeypatch):
+    for name in ("_keep_console_width_when_piped", "_force_utf8_io"):
+        monkeypatch.setattr(main, name, lambda: None)
+    monkeypatch.setattr(main.ux, "configure_console_output", lambda *_a: None)
+    monkeypatch.setattr(main, "_try_launch_tui", lambda: False)
+    monkeypatch.setattr(main, "cli", MagicMock(side_effect=ValueError("a real bug")))
+    with pytest.raises(ValueError, match="a real bug"):
+        main.main()

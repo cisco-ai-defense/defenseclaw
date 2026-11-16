@@ -1,0 +1,147 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build linux
+
+package connector
+
+import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+)
+
+var hookPostForProgramBudget struct {
+	once sync.Once
+	path string
+	err  error
+}
+
+// GAP-0267 (issue #1130, g-flood-78): a warm registered Claude Code
+// PreToolUse call that the gateway allows runs at most eight programs: the
+// hook script, the private temporary folder (mktemp, rm), the hook event
+// parser and the answer parser (jq twice), the answer check (awk) and the
+// POST helper. The account name, the helper modes, the stdin bound and the
+// NUL check start no program of their own.
+func TestWarmRegisteredClaudeHookRunsAtMostEightPrograms(t *testing.T) {
+	strace, err := exec.LookPath("strace")
+	if err != nil {
+		t.Skip("strace unavailable")
+	}
+	if probe := exec.Command(strace, "-qq", "-e", "trace=execve", "-o", os.DevNull, "true"); probe.Run() != nil {
+		t.Skip("strace cannot trace on this host")
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq unavailable")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"action":"allow"}`))
+	}))
+	defer server.Close()
+	home := t.TempDir()
+	installNativeGatewayForHookTest(t, home)
+	hookPostForProgramBudget.once.Do(func() {
+		dir, err := os.MkdirTemp("", "defenseclaw-hook-post-budget-")
+		if err != nil {
+			hookPostForProgramBudget.err = err
+			return
+		}
+		hookPostForProgramBudget.path = filepath.Join(dir, "defenseclaw-hook-post")
+		cmd := exec.Command("go", "build", "-o", hookPostForProgramBudget.path, "./cmd/defenseclaw-hook-post")
+		cmd.Dir = filepath.Join("..", "..", "..")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			hookPostForProgramBudget.err = fmt.Errorf("build hook-post: %w: %s", err, out)
+		}
+	})
+	if hookPostForProgramBudget.err != nil {
+		t.Fatal(hookPostForProgramBudget.err)
+	}
+	if err := os.Link(hookPostForProgramBudget.path, filepath.Join(home, ".local", "bin", "defenseclaw-hook-post")); err != nil {
+		t.Fatal(err)
+	}
+	writeOutageTierConfig(t, home, outageDefaultTierConfig)
+	hookDir := filepath.Join(home, "hooks")
+	opts := SetupOpts{DataDir: home, APIAddr: strings.TrimPrefix(server.URL, "http://"), APIToken: "scoped-test-token", HookFailMode: "open"}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewClaudeCodeConnector()); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(hookDir, "claude-code-hook.sh")
+	env := append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
+	env = append(env, "KRB5CCNAME=")
+	run := func(i int, trace string) (string, bool) {
+		cmd := exec.Command(script)
+		if trace != "" {
+			cmd = exec.Command(strace, "-f", "-qq", "-e", "trace=execve", "-o", trace, script)
+		}
+		cmd.Stdin = strings.NewReader(fmt.Sprintf(`{"hook_event_name":"PreToolUse","session_id":"budget-%d","tool_name":"Bash","tool_input":{"command":"echo ok"}}`, i))
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			// A tracing failure is not a hook refusal. Require an ordinary
+			// allowed call below, then obtain a complete trace for this call.
+			if trace != "" && strings.Contains(string(out), filepath.Base(strace)+": ") {
+				return string(out), false
+			}
+			t.Fatalf("warm call %d: %v\n%s", i, err, out)
+		}
+		return string(out), true
+	}
+	for i := 0; i < 3; i++ {
+		run(i, "")
+	}
+	// The count must hold on every call, not on most: one call in 32 used to
+	// start the stale-folder sweep's find, so a single traced call ran 9 or 10
+	// programs about once in 32 runs (rel-1-0-6 GAP-0266). Tracing 40 calls
+	// makes such a random extra program fail about 72 runs in 100.
+	traces := t.TempDir()
+	for call := 3; call < 43; call++ {
+		trace := filepath.Join(traces, fmt.Sprintf("execve-%d", call))
+		var out string
+		complete := false
+		for attempt := 0; attempt < 3; attempt++ {
+			var traced bool
+			out, traced = run(call, trace)
+			if traced {
+				complete = true
+				break
+			}
+			// Keep the allow assertion even when the tracer itself fails.
+			ordinary, _ := run(call, "")
+			if strings.Contains(ordinary, "deny") || strings.Contains(ordinary, "block") {
+				t.Fatalf("the allowed call %d was blocked:\n%s", call, ordinary)
+			}
+		}
+		if !complete {
+			t.Fatalf("warm call %d: no complete program trace after 3 attempts: %s", call, out)
+		}
+		if strings.Contains(out, "deny") || strings.Contains(out, "block") {
+			t.Fatalf("the allowed call %d was blocked:\n%s", call, out)
+		}
+		raw, err := os.ReadFile(trace)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var programs []string
+		for _, line := range strings.Split(string(raw), "\n") {
+			if strings.Contains(line, "execve(") && strings.HasSuffix(strings.TrimSpace(line), "= 0") {
+				fields := strings.SplitN(line, "\"", 3)
+				if len(fields) > 1 {
+					programs = append(programs, filepath.Base(fields[1]))
+				}
+			}
+		}
+		if call == 3 {
+			t.Logf("programs of the warm call: %d %v", len(programs), programs)
+		}
+		if len(programs) > 8 {
+			t.Fatalf("warm allowed call %d ran %d programs, want at most 8 on every call: %v", call, len(programs), programs)
+		}
+	}
+}

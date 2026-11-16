@@ -7,16 +7,15 @@ import (
 	"context"
 	"encoding/json"
 	"math"
-	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/version"
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -668,7 +667,7 @@ func hookModelV8StableToken(value string) string {
 	return value
 }
 
-var hookModelV8IdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
+var hookModelV8IdentifierPattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
 
 func hookModelV8Identifier(value string) bool {
 	return value != "" && len(value) <= 256 && hookModelV8IdentifierPattern.MatchString(value)
@@ -859,7 +858,7 @@ func newHookV8MetricBatchItemForProducer(
 			}
 			builder, err := observability.NewFamilyBuilder(
 				observability.ClockFunc(func() time.Time { return observedAt }),
-				observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+				observability.TimeOrderedOccurrenceIDs,
 			)
 			if err != nil {
 				return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}

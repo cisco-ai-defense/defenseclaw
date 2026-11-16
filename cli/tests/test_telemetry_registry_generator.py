@@ -492,10 +492,16 @@ def _domain_sources() -> dict[str, dict[str, Any]]:
         "defenseclaw.inventory.mcp.metadata",
         "defenseclaw.inventory.agent.identifiers",
         "defenseclaw.inventory.agent.metadata",
+        "defenseclaw.health.reasons",
+        "defenseclaw.health.subsystems",
+        "defenseclaw.health.hooks.connectors",
+        "defenseclaw.health.hooks.failing_targets",
     ):
-        operations["attributes"].append(
-            copy.deepcopy(next(item for item in canonical_operations["attributes"] if item["id"] == attribute_id))
-        )
+        attribute = copy.deepcopy(next(item for item in canonical_operations["attributes"] if item["id"] == attribute_id))
+        # The fixture registry is version 1; every structured binding it
+        # carries must exist at that version.
+        attribute["introduced_in"] = "telemetry-registry-v1"
+        operations["attributes"].append(attribute)
     operations["attribute_extensions"].append(
         copy.deepcopy(
             next(item for item in canonical_operations["attribute_extensions"] if item["ref"] == "service.version")

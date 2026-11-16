@@ -127,25 +127,34 @@ func TestStoreReportTracksTheSandboxLifecycle(t *testing.T) {
 		t.Fatalf("stopped report: %+v %v", got, err)
 	}
 	clock.t = clock.t.Add(time.Minute)
-	if got, err := s.Report(1001, r.ID, true); err != nil || got.State != StateLive || !got.SeenAt.Equal(clock.t) {
-		t.Fatalf("running report: %+v %v", got, err)
+	// A report only moves a registration toward stopped (GAP-0673).
+	if got, err := s.Report(1001, r.ID, true); !errors.Is(err, ErrStopped) || got.State != StateStopped {
+		t.Fatalf("running report after a reported stop: %+v %v", got, err)
+	}
+	live, err = s.Restart(1001, r.ID)
+	if err != nil || live.State != StateLive || live.ID == r.ID || !live.SeenAt.Equal(clock.t) {
+		t.Fatalf("restart: %+v %v", live, err)
 	}
 	// The daemon goes silent: the lease lapses, and a restarted store agrees.
 	clock.t = clock.t.Add(LiveLease)
 	reopened := NewFileStore(s.dir)
 	reopened.Now = clock.now
-	if got, _, _ := reopened.Get(1001, r.ID); EffectiveState(got, clock.t) != StateStopped {
+	if got, _, _ := reopened.Get(1001, live.ID); EffectiveState(got, clock.t) != StateStopped {
 		t.Fatalf("a registration past its lease is %q", EffectiveState(got, clock.t))
 	}
+	// A lapsed lease is a lost connection, not a stop: it runs on.
+	if got, err := reopened.Report(1001, live.ID, true); err != nil || got.State != StateLive {
+		t.Fatalf("running report after a lapsed lease: %+v %v", got, err)
+	}
 	// A revoked registration never comes back.
-	if _, err := reopened.Report(1001, r.ID, true); err != nil {
+	if err := reopened.Revoke(1001, live.ID, ReasonPolicyChanged); err != nil {
 		t.Fatal(err)
 	}
-	if err := reopened.Revoke(1001, r.ID, ReasonPolicyChanged); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := reopened.Report(1001, r.ID, true); !errors.Is(err, ErrRevoked) {
+	if _, err := reopened.Report(1001, live.ID, true); !errors.Is(err, ErrRevoked) {
 		t.Fatalf("a revoked registration came back: %v", err)
+	}
+	if _, err := reopened.Restart(1001, live.ID); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("a revoked registration restarted: %v", err)
 	}
 }
 
@@ -244,6 +253,33 @@ func TestStoreBindRevokeAndTombstones(t *testing.T) {
 	}
 }
 
+func TestStoreBindReservesClaimedIDsAcrossAccountsAndRestart(t *testing.T) {
+	s, _, dir := newTestStore(t)
+	first := pending(t)
+	if err := s.Create(1001, first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Bind(1001, first.ID, bind(1)); err != nil {
+		t.Fatal(err)
+	}
+	second := pending(t)
+	if err := s.Create(1002, second); err != nil {
+		t.Fatal(err)
+	}
+	for _, claim := range []sandboxrelay.BindRequest{
+		{BindingID: bind(1).BindingID, SandboxID: bind(2).SandboxID, SandboxName: bind(2).SandboxName},
+		{BindingID: bind(2).BindingID, SandboxID: bind(1).SandboxID, SandboxName: bind(2).SandboxName},
+	} {
+		if _, err := s.Bind(1002, second.ID, claim); !errors.Is(err, ErrInUse) {
+			t.Fatalf("cross-account ID reuse = %v, want ErrInUse", err)
+		}
+	}
+	restarted := NewFileStore(dir)
+	if _, err := restarted.Bind(1002, second.ID, bind(1)); !errors.Is(err, ErrInUse) {
+		t.Fatalf("ID reuse after restart = %v, want ErrInUse", err)
+	}
+}
+
 // Deleted drops a pending entry, turns a live one into the user's own
 // tombstone (or a policy_changed one while a stop is pending) and drops a
 // tombstone; only the user's own tombstone frees its sandbox ids.
@@ -289,6 +325,33 @@ func TestStoreDeleted(t *testing.T) {
 	}
 	if _, err := s.Bind(1001, next.ID, bind(1)); err != nil {
 		t.Fatalf("the user's own tombstone dropped: %v", err)
+	}
+}
+
+func TestStorePolicyRevocationKeepsFinalLifecycleWindow(t *testing.T) {
+	s, clock, _ := newTestStore(t)
+	r := pending(t)
+	if err := s.Create(1001, r); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Bind(1001, r.ID, bind(1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Revoke(1001, r.ID, ReasonPolicyChanged); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Deleted(1001, r.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok, err := s.Get(1001, r.ID); err != nil || !ok || got.State != StateRevoked {
+		t.Fatalf("final lifecycle window lost: %+v %t %v", got, ok, err)
+	}
+	clock.t = clock.t.Add(RevokedTelemetryWindow + time.Second)
+	if err := s.Deleted(1001, r.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := s.Get(1001, r.ID); ok {
+		t.Fatal("expired lifecycle tombstone remained")
 	}
 }
 
@@ -643,5 +706,117 @@ func TestStoreEvictionRetiresGatewayTombstones(t *testing.T) {
 	}
 	if _, err := s.Bind(1001, open, bind(1)); !errors.Is(err, ErrTombstoned) {
 		t.Fatalf("an evicted gateway tombstone's sandbox registers again: %v", err)
+	}
+}
+
+// GAP-0367: every relayed hook call reads its registration, and the store
+// wrote a uid's file (an fsync, which on macOS flushes the whole disk cache
+// and took seconds while the audit log was busy) holding the lock those
+// reads take. A read now returns the stored records while a write is still
+// on disk, and sees the write's records once it is stored.
+func TestFileStoreReadsDoNotWaitForAWrite(t *testing.T) {
+	s, _, _ := newTestStore(t)
+	r := pending(t)
+	if err := s.Create(7, r); err != nil {
+		t.Fatal(err)
+	}
+	inWrite, finish := make(chan struct{}), make(chan struct{})
+	saved := storeFileWrite
+	t.Cleanup(func() { storeFileWrite = saved })
+	storeFileWrite = func(dir, path string, v any) error {
+		close(inWrite)
+		<-finish
+		return saved(dir, path, v)
+	}
+	revoked := make(chan error, 1)
+	go func() { revoked <- s.Revoke(7, r.ID, "test") }()
+	<-inWrite
+	read := make(chan Registration, 1)
+	go func() {
+		got, _, _ := s.Get(7, r.ID)
+		read <- got
+	}()
+	select {
+	case got := <-read:
+		if got.State != StatePending {
+			t.Fatalf("read during the write = %s, want the stored pending record", got.State)
+		}
+	case <-time.After(2 * time.Second):
+		close(finish)
+		t.Fatal("a read waited for the write to reach the disk")
+	}
+	close(finish)
+	if err := <-revoked; err != nil {
+		t.Fatal(err)
+	}
+	if got, _, _ := s.Get(7, r.ID); got.State != StateRevoked {
+		t.Fatalf("read after the write = %s, want revoked", got.State)
+	}
+}
+
+// Admission must not observe a live registration after a stop or revoke has
+// started but before its durable file replacement has completed.
+func TestFileStoreAdmissionWaitsForAuthorityWithdrawal(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		withdraw func(*FileStore, Registration) error
+		want     string
+	}{
+		{"stop report", func(s *FileStore, r Registration) error { _, err := s.Report(7, r.ID, false); return err }, StateStopped},
+		{"revoke sandbox", func(s *FileStore, r Registration) error {
+			_, err := s.RevokeSandbox(7, bind(1).SandboxID, "", "test")
+			return err
+		}, StateRevoked},
+		{"revoke registration", func(s *FileStore, r Registration) error { return s.Revoke(7, r.ID, "test") }, StateRevoked},
+		{"deleted sandbox", func(s *FileStore, r Registration) error { return s.Deleted(7, r.ID) }, StateRevoked},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _, _ := newTestStore(t)
+			r := pending(t)
+			if err := s.Create(7, r); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Bind(7, r.ID, bind(1)); err != nil {
+				t.Fatal(err)
+			}
+			entered, finish := make(chan struct{}), make(chan struct{})
+			saved := storeFileWrite
+			t.Cleanup(func() { storeFileWrite = saved })
+			storeFileWrite = func(dir, path string, v any) error {
+				close(entered)
+				<-finish
+				return saved(dir, path, v)
+			}
+			written := make(chan error, 1)
+			go func() { written <- tc.withdraw(s, r) }()
+			<-entered
+			started := make(chan struct{})
+			read := make(chan Registration, 1)
+			go func() {
+				close(started)
+				got, _, _, _, _ := s.GetWithRun(7, r.ID)
+				read <- got
+			}()
+			<-started
+			select {
+			case got := <-read:
+				close(finish)
+				<-written
+				t.Fatalf("admission saw %s while authority withdrawal was in flight", got.State)
+			case <-time.After(100 * time.Millisecond):
+			}
+			close(finish)
+			if err := <-written; err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case got := <-read:
+				if got.State != tc.want {
+					t.Fatalf("after withdrawal = %s, want %s", got.State, tc.want)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("admission remained blocked after withdrawal completed")
+			}
+		})
 	}
 }

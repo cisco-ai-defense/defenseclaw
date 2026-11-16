@@ -94,9 +94,11 @@ const (
 // Guarded by Manager.mu.
 type hookReach struct {
 	// firstWork is the session's first model call of the harness;
-	// firstAttempt the first hook connection OpenShell reported.
+	// firstAttempt the first hook connection OpenShell reported, and
+	// lastAttempt the latest.
 	firstWork    time.Time
 	firstAttempt time.Time
+	lastAttempt  time.Time
 	// modelConns says, for each host:port the session connected to under
 	// a provider rule or on the host alias, whether the harness made the
 	// last connection OpenShell allowed there: the layer-7 records on it,
@@ -171,6 +173,9 @@ func (m *Manager) observeHookConnection(ctx context.Context, b *box, outcome hoo
 	if current && b.reach.firstAttempt.IsZero() {
 		b.reach.firstAttempt = now
 	}
+	if current {
+		b.reach.lastAttempt = now
+	}
 	refused := outcome == hookConnRefused
 	switch {
 	case refused:
@@ -219,14 +224,6 @@ func (m *Manager) reloadMappingLocked(b *box, now time.Time) bool {
 func (b *box) reloadedLocked(now time.Time) bool {
 	at := b.reach.reloaded
 	return !at.IsZero() && now.Sub(at) < reloadMappingWindow
-}
-
-// reloadedRecently is reloadedLocked at the manager's clock.
-func (m *Manager) reloadedRecently(b *box) bool {
-	now := m.now()
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return b.reloadedLocked(now)
 }
 
 // confirmMappingDenialLocked turns an ingress mapping denial nothing

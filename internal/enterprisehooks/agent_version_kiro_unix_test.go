@@ -69,8 +69,8 @@ func TestKiroIDEIsDiscoveredAndHeldToItsGlobalHooksFloor(t *testing.T) {
 	if err := os.WriteFile(product, []byte(`{"nameShort":"Kiro","applicationName":"kiro","version":"1.2.4"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got, at := DiscoverUnixKiroIDEVersion(home); got != "1.2.4" || at != product {
-		t.Fatalf("Kiro IDE version = %q at %q, want 1.2.4 at %s", got, at, product)
+	if got := DiscoverUnixKiroIDEForms(home); len(got) != 1 || got[0] != (KiroForm{Kind: KiroFormUserIDE, Version: "1.2.4"}) {
+		t.Fatalf("Kiro IDE forms = %+v, want the user's 1.2.4 at %s", got, product)
 	}
 
 	versions := map[string]string{KiroIDEDiscoveryKey: "1.2.4"}

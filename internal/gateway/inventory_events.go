@@ -27,7 +27,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -36,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
@@ -55,13 +55,13 @@ const (
 )
 
 var (
-	endpointInventoryMCPHostPattern = regexp.MustCompile(
+	endpointInventoryMCPHostPattern = lazyregexp.New(
 		`^([A-Za-z0-9][A-Za-z0-9._:-]*|\[[0-9A-Fa-f:.]+\](:[0-9]+)?)$`,
 	)
-	endpointInventoryExecutableBasenamePattern = regexp.MustCompile(
+	endpointInventoryExecutableBasenamePattern = lazyregexp.New(
 		`^[A-Za-z0-9][A-Za-z0-9._+@-]*$`,
 	)
-	endpointInventoryVersionPattern = regexp.MustCompile(
+	endpointInventoryVersionPattern = lazyregexp.New(
 		`^[A-Za-z0-9][A-Za-z0-9 .,_+@():-]*$`,
 	)
 )
@@ -519,6 +519,42 @@ func inventoryIdentity(userID string) *llmEventIdentity {
 	if userID == "" || !identityFactsEnabled.Load() {
 		return nil
 	}
+	return inventoryIdentityFacts(userID)
+}
+
+// inventoryIdentityFor is inventoryIdentity for a record that names the
+// account it was found under. A POSIX uid can be handed to another account
+// once the first is removed, so a removal record for the earlier account
+// must not carry the new holder's verified directory facts (GAP-1233). The
+// facts are attached only while the account database still gives the uid
+// the full name the record was found under: the same uid and the same
+// qualified name (alice@old.example is not alice@new.example). A record
+// that names no account cannot prove it, so it gets no facts. A Windows SID
+// is never reused, so it is not checked.
+func inventoryIdentityFor(userID, userName string) *llmEventIdentity {
+	if userID == "" || !identityFactsEnabled.Load() {
+		return nil
+	}
+	if useridentity.KindForID(userID) == useridentity.KindPOSIXUID {
+		recorded, current := strings.TrimSpace(userName), strings.TrimSpace(userScopedIdentityName(userID))
+		if recorded == "" || current == "" || !useridentity.EqualFold(current, recorded) {
+			return nil
+		}
+	}
+	return inventoryIdentityFacts(userID)
+}
+
+// inventoryTelemetryUserName keeps the short POSIX display name while the
+// inventory record retains its full account spelling for holder validation.
+// Windows account names keep their existing domain-qualified display form.
+func inventoryTelemetryUserName(userID, userName string) string {
+	if useridentity.KindForID(userID) == useridentity.KindPOSIXUID {
+		return useridentity.BareAccountName(userName)
+	}
+	return userName
+}
+
+func inventoryIdentityFacts(userID string) *llmEventIdentity {
 	facts, _ := verifiedIdentityDirectory(userID, true)
 	if facts.Empty() {
 		return nil
@@ -562,7 +598,6 @@ func hasNativeMCPReader(connectorName string) bool {
 		"kiro",
 		"devin",
 		"copilot",
-		"openhands",
 		"opencode",
 		"amp",
 		"antigravity":
@@ -635,8 +670,6 @@ func readMCPServersUnderHomeForOS(connectorName, home, goos string) [][]config.M
 		}
 	case "copilot":
 		tryFile(config.ReadMCPFromDotMCPJSON, ".copilot/mcp-config.json")
-	case "openhands":
-		tryFile(config.ReadMCPFromDotMCPJSON, ".openhands/mcp.json")
 	case "zeptoclaw":
 		// zeptoclaw's own config is JSON with mcpServers at top level;
 		// mcp.json is a legacy fallback location some installs use.
@@ -653,7 +686,7 @@ func readMCPServersUnderHomeForOS(connectorName, home, goos string) [][]config.M
 		}, ".hermes/config.yaml")
 		tryFile(config.ReadMCPFromDotMCPJSON, ".hermes/mcp.json")
 	case "openclaw":
-		tryFile(config.ReadMCPFromDotMCPJSON, ".openclaw/openclaw.json")
+		tryFile(config.ReadMCPFromOpenClawConfig, ".openclaw/openclaw.json")
 	case "antigravity":
 		tryFile(config.ReadMCPFromDotMCPJSON, ".gemini/config/mcp_config.json")
 		tryFile(config.ReadMCPFromDotMCPJSON, ".agents/mcp_config.json")
@@ -1137,7 +1170,7 @@ func emitEndpointInventoryComponent(
 			DefenseClawInventoryItemDescription:             aiDiscoveryV8OptionalText(component.itemDescription),
 			UserID:                                          aiDiscoveryV8OptionalText(component.userID),
 			DefenseClawUserIDKind:                           v8UserIDKind(component.userIDKind),
-			DefenseClawUserName:                             v8UserName(component.userName, aiDiscoveryV8OptionalText),
+			DefenseClawUserName:                             v8UserName(inventoryTelemetryUserName(component.userID, component.userName), aiDiscoveryV8OptionalText),
 			DefenseClawUserEmail:                            v8UserEmail(component.userEmail),
 			DefenseClawInventoryConnectorSource:             aiDiscoveryV8OptionalText(component.connectorSource),
 			DefenseClawInventoryConnectorToolInspectionMode: aiDiscoveryV8OptionalText(component.connectorToolInspectionMode),
@@ -1160,7 +1193,7 @@ func emitEndpointInventoryComponent(
 			DefenseClawAgentDiscoveryScannedAt:              aiDiscoveryV8OptionalText(component.agentScannedAt),
 			DefenseClawAgentIdentityID:                      agentIdentityV8(inventoryAgentIdentityID(component.agentConnector, component.userID, component.userName)),
 		}
-		inventoryIdentity(component.userID).applyTo(&input)
+		inventoryIdentityFor(component.userID, component.userName).applyTo(&input)
 		return builder.BuildLogAIComponentObserved(input)
 	})
 }

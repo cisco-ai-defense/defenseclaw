@@ -5,7 +5,9 @@
 // operator CLI helper and the gateway's local-only compliance endpoint.
 package destinationtest
 
-import "regexp"
+import (
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+)
 
 const (
 	EndpointPath    = "/api/v1/observability/destination-test/activity"
@@ -13,8 +15,8 @@ const (
 )
 
 var (
-	stableName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
-	probeID    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+	stableName = lazyregexp.New(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+	probeID    = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
 )
 
 type Activity struct {

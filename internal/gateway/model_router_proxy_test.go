@@ -1296,6 +1296,7 @@ func TestSemanticRouterLongFinishReasonPreservesTerminalV8Trace(t *testing.T) {
 }
 
 func TestSemanticRouterRejectedTargetIsBlockedWithoutModelRequestTelemetry(t *testing.T) {
+	requirePrivateTargetGuard(t)
 	proxy := newTestProxy(t, &mockProvider{}, newMockInspector(), "action")
 	runtime, capture := newProxyGeneratedTraceRuntime(t)
 	proxy.SetDefaultAgentName("zeptoclaw")

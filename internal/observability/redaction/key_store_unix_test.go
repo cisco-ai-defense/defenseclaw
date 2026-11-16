@@ -23,6 +23,8 @@ import (
 	"testing"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/defenseclaw/defenseclaw/internal/runtimeowner"
 )
 
 func TestCorrelationKeyCreateAndExisting(t *testing.T) {
@@ -218,30 +220,68 @@ func TestCorrelationKeyRevalidatesExistingFileAfterInitialStat(t *testing.T) {
 func TestCorrelationKeyRejectsWrongEffectiveOwner(t *testing.T) {
 	t.Parallel()
 	if os.Geteuid() == 0 {
-		t.Skip("root is a trusted accessor of any local owner")
+		t.Skip("requires a non-root caller")
 	}
 	stat := unix.Stat_t{
 		Mode: unix.S_IFREG | 0o600,
 		Uid:  uint32(os.Geteuid() + 1),
 		Size: hashV1KeySize,
 	}
-	if err := validateCorrelationKeyStat(&stat); !IsKeyStoreError(err, KeyStoreErrorUnsafeOwner) {
+	if err := validateCorrelationKeyStatOwner(&stat, runtimeowner.Trusted); !IsKeyStoreError(err, KeyStoreErrorUnsafeOwner) {
 		t.Fatalf("error = %v, want unsafe owner", err)
 	}
 }
 
-func TestCorrelationKeyRootAcceptsForeignOwner(t *testing.T) {
-	t.Parallel()
+func TestCorrelationKeyRootRejectsUnprovenOwner(t *testing.T) {
 	if os.Geteuid() != 0 {
-		t.Skip("root accessor exception is only observable as euid 0")
+		t.Skip("requires root")
+	}
+	for _, name := range []string{"SUDO_UID", "SUDO_GID", "SUDO_USER"} {
+		t.Setenv(name, "")
 	}
 	stat := unix.Stat_t{
 		Mode: unix.S_IFREG | 0o600,
 		Uid:  65534,
 		Size: hashV1KeySize,
 	}
-	if err := validateCorrelationKeyStat(&stat); err != nil {
-		t.Fatalf("root opening a user-owned correlation key: %v", err)
+	if err := validateCorrelationKeyStatOwner(&stat, runtimeowner.Trusted); !IsKeyStoreError(err, KeyStoreErrorUnsafeOwner) {
+		t.Fatalf("root accepted an unproven key owner: %v", err)
+	}
+}
+
+func TestManagedCorrelationKeyReadNeverCreatesOrChangesCustody(t *testing.T) {
+	dir := t.TempDir()
+	uid := uint32(os.Geteuid())
+	if _, err := LoadExistingCorrelationKeyForOwner(dir, uid); !IsKeyStoreError(err, KeyStoreErrorUnavailable) {
+		t.Fatalf("missing managed key: %v", err)
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Fatalf("read-only key load created files: %v, %v", entries, err)
+	}
+	want, err := LoadOrCreateCorrelationKey(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadExistingCorrelationKeyForOwner(dir, uid)
+	if err != nil || got.ID() != want.ID() {
+		t.Fatalf("managed key read: %v, %v", got.ID(), err)
+	}
+	for _, mode := range []os.FileMode{0o620, 0o604} {
+		if err := os.Chmod(filepath.Join(dir, correlationKeyFilename), mode); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadExistingCorrelationKeyForOwner(dir, uid); !IsKeyStoreError(err, KeyStoreErrorUnsafePermissions) {
+			t.Fatalf("managed key at %04o accepted: %v", mode, err)
+		}
+	}
+	if err := os.Chmod(filepath.Join(dir, correlationKeyFilename), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o770); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadExistingCorrelationKeyForOwner(dir, uid); !IsKeyStoreError(err, KeyStoreErrorUnsafePermissions) {
+		t.Fatalf("writable managed key directory accepted: %v", err)
 	}
 }
 

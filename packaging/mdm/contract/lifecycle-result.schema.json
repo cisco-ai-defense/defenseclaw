@@ -24,7 +24,8 @@
     "product_version": { "type": "string", "description": "Version of the payload this run used; empty for read-only actions without a payload." },
     "installed_version": { "type": "string", "description": "Version installed on the host after the action; MDM detection compares this." },
     "installed": { "type": "boolean" },
-    "transaction_pending": { "type": "boolean", "description": "An interrupted transaction awaits recovery; the next mutating run repairs it first." },
+    "pending_apply": { "type": "boolean", "description": "Linux and macOS status only, present only when true: another lifecycle run is applying a change (the apply trigger applying a pushed config.yaml, secret or policy file, or an ensure, repair or upgrade holding the lifecycle lock) and was still running after status waited 5 s. That is not a failure: ok is true, the lifecycle_busy warning names the run, status reported nothing but installed and installed_version, coverage_complete and security_complete are false, and exit_code is 75 so the caller runs status again. verify in the same situation still fails with the lifecycle_busy error." },
+    "transaction_pending": { "type": "boolean", "description": "An interrupted transaction awaits recovery; the next mutating run repairs it first. Linux, macOS and Windows status also set it, with warning bundle_pending, when a policy bundle receipt is unfinished and no run holds the lock (a killed apply): ensure settles it, and the current or last good bundle enforces until then." },
     "services": { "type": "array", "items": { "$ref": "#/$defs/service" } },
     "readiness": {
       "type": "object",
@@ -43,7 +44,16 @@
       "required": ["local", "ai_defense"],
       "properties": {
         "local": { "type": "string", "enum": ["active", "disabled", "unknown", ""] },
-        "ai_defense": { "type": "string", "pattern": "^(|disabled|ok|unknown|unavailable(:[A-Za-z0-9_.-]+)?)$" }
+        "ai_defense": {
+          "type": "string",
+          "enum": [
+            "", "disabled", "ok", "unknown",
+            "unavailable:auth_failed", "unavailable:credential_unavailable", "unavailable:unreachable",
+            "unavailable:proxy_auth_required", "unavailable:proxy_config", "unavailable:not_initialized",
+            "unavailable:error", "unavailable:gateway_not_ready"
+          ],
+          "description": "Cisco AI Defense inspection, from the gateway's /health (standaloneInspectionPosture). disabled: enterprise.inspection.ai_defense is off. ok: AI Defense answered a request with the stored key. unknown: no request has been answered since the key was stored or the gateway restarted, or the gateway did not report. unavailable:auth_failed: AI Defense rejected the stored key (HTTP 401 or 403) on the last request. unavailable:credential_unavailable: the credential is missing or fails its trust check. unavailable:unreachable: no answer (connection failure or timeout). unavailable:proxy_auth_required / proxy_config: the egress proxy wants credentials (HTTP 407) or its setting is invalid. unavailable:error: another failure, for example an HTTP 5xx. unavailable:not_initialized: the client was never built. unavailable:gateway_not_ready (Windows): the gateway is not ready. Every unavailable value also adds warning ai_defense_unavailable; the local policy engine keeps deciding. The value never carries the key or the response body."
+        }
       }
     },
     "machine_policy": {
@@ -60,6 +70,8 @@
         "pending": { "type": "integer", "minimum": 0 },
         "failed": { "type": "integer", "minimum": 0 },
         "exempt": { "type": "integer", "minimum": 0 },
+        "excluded_users": { "type": "array", "items": { "type": "string" }, "description": "The installed config's enterprise.enrollment.exclude_users entries: accounts held out of enrollment by policy (Windows standalone)." },
+        "excluded_groups": { "type": "array", "items": { "type": "string" }, "description": "The installed config's enterprise.enrollment.exclude_groups entries (Windows standalone)." },
         "accounts": {
           "type": "array",
           "items": {
@@ -76,10 +88,27 @@
               }
             }
           }
+        },
+        "removed_connectors": {
+          "type": "array",
+          "description": "Windows standalone: per account, the connectors an administrator took off the roster that the account had been enrolled for. Not protected and not pending: DefenseClaw no longer governs them for the account.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["account", "connectors"],
+            "properties": {
+              "account": { "type": "string" },
+              "sid": { "type": "string" },
+              "connectors": {
+                "type": "object",
+                "additionalProperties": { "enum": ["not managed (removed from roster)"] }
+              }
+            }
+          }
         }
       }
     },
-    "coverage_complete": { "type": "boolean", "description": "True only when required services are ready and no known running agent session still needs a restart to load managed hooks." },
+    "coverage_complete": { "type": "boolean", "description": "True only when required services are ready, no installed agent runs without a verified hook contract, and no known running agent session still needs a restart to load managed hooks." },
     "security_complete": { "type": "boolean" },
     "errors": { "type": "array", "items": { "$ref": "#/$defs/message" } },
     "warnings": { "type": "array", "items": { "$ref": "#/$defs/message" } },
@@ -88,6 +117,7 @@
     "policy": { "$ref": "#/$defs/policyState", "description": "Effective policy state; omitted under the Secure Client integration." },
     "bundle": { "$ref": "#/$defs/bundleState", "description": "Last bundle receipt that reached staging and the confirmed bundle that enforces. Omitted when none reached staging and no bundle is confirmed." },
     "last_refusal": { "$ref": "#/$defs/bundleRefusal", "description": "Latest bundle delivery refused before staging; the receipt remains in the root-only history." },
+    "enforcement_pending": { "$ref": "#/$defs/enforcementPending", "description": "Running agent sessions this result names as not enforced until they restart (agent_sessions_restart_required, bundle.sessions_restart_required), as a count and connector names. Omitted when there are none." },
     "scanners": {
       "type": "object", "additionalProperties": false, "required": ["state"],
       "description": "Standalone Windows scanner runtime; omitted everywhere else.",
@@ -100,10 +130,35 @@
       }
     },
     "destinations": { "type": "array", "items": { "$ref": "#/$defs/destination" }, "description": "status only: the observability destinations the installed config.yaml compiles to (the compiler of defenseclaw observability plan), with the effective redaction profiles of each one's send routes." },
+    "audit_store": { "$ref": "#/$defs/auditStore", "description": "Linux and macOS status only: the local audit store of the installed config.yaml (observability.local retention_days and max_store_mb) and its size on disk." },
+    "connectors": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_-]*$" },
+      "additionalProperties": { "$ref": "#/$defs/connectorState" },
+      "description": "status and verify, standalone profile, management_contract 1 builds from 1.0.3 (absent before): one entry per connector id the installed config enables, or that still has guardian targets or unprotected installs. Connector ids, codes, counts and versions only; never an account. Optional: absent under Secure Client and on older builds."
+    },
+    "openshell": { "$ref": "#/$defs/openshellCapability", "description": "status and verify, standalone profile, from 1.0.3: whether users on this host can run DefenseClaw sandboxes and on which driver. Windows always reports platform_unsupported. Optional." },
+    "identity": { "$ref": "#/$defs/identityHealth", "description": "status and verify, standalone profile, from 1.0.3: the gateway's directory lookups, from its /health. Source tokens, counts and ages only. Optional." },
+    "account_join": { "$ref": "#/$defs/accountJoin", "description": "status and verify run as root or an administrator, standalone profile, from 1.0.7, only while enterprise.account_join is on: how many account join keys each generation has for the enrolled accounts the guardian saw in the last 30 days (at most 64), and reason codes. Never a key, an account name, an identifier or a secret: the keys are only in the output of enterprise account-keys. Optional." },
+    "cowork": { "$ref": "#/$defs/coworkState", "description": "status and verify run as root or an administrator, standalone profile, from 1.0.8: Claude Cowork runs the Claude Code engine Claude Desktop bundles, which loads the Claude Code machine policy. Whether DefenseClaw's Claude Code machine policy hooks are in place for it, the managed_hooks_only lock, the gateway's Cowork events since it started, and each enrolled account's last Cowork event (account names: administrator views only). Optional." },
+    "cowork_vm_sensor": { "$ref": "#/$defs/coworkVMSensor", "description": "Optional standalone host-delivery observation. host_ready checks the architecture package, detached signature, install arguments and their trust; settings_ready checks the two managed Claude Desktop settings. Neither field proves Claude accepted or ran the package inside its VM. Absent under Secure Client." },
+    "health_report": { "$ref": "#/$defs/healthReport", "description": "status on a Secure Client host: the managed gateway's last endpoint health report (<data_dir>/diagnostics/health_report_last.json). Codes, enums, counts and times only. Absent when there is no report. Never an error or a warning: ok, warnings and the exit code are those of the result without it." },
     "log_path": { "type": "string" },
     "exit_code": { "type": "integer" }
   },
   "allOf": [
+    {
+      "if": { "required": ["profile"], "properties": { "profile": { "const": "secure_client" } } },
+      "then": { "properties": { "cowork_vm_sensor": false } }
+    },
+    {
+      "if": { "required": ["platform"], "properties": { "platform": { "const": "linux" } } },
+      "then": {
+        "properties": {
+          "cowork_vm_sensor": { "properties": { "host_ready": { "const": false }, "settings_ready": { "const": false } } }
+        }
+      }
+    },
     {
       "if": { "properties": { "ok": { "const": true } } },
       "then": { "properties": { "errors": { "maxItems": 0 } } },
@@ -111,13 +166,48 @@
     },
     {
       "if": { "properties": { "platform": { "const": "windows" } } },
-      "then": { "properties": { "exit_code": { "enum": [0, 1603, 1618, 1639, 3010] } } },
+      "then": { "properties": { "exit_code": { "enum": [0, 5, 1603, 1618, 1639, 3010] } } },
       "else": { "properties": { "exit_code": { "enum": [0, 1, 2, 75] } } }
     },
     {
+      "$comment": "An ok result exits 0 (3010: reboot required), except a Linux or macOS status with pending_apply, which exits 75 so its caller asks again (GAP-0129).",
       "if": { "properties": { "ok": { "const": true } } },
-      "then": { "properties": { "exit_code": { "enum": [0, 3010] } } },
-      "else": { "properties": { "exit_code": { "not": { "enum": [0, 3010] } } } }
+      "then": {
+        "if": { "required": ["pending_apply"], "properties": { "pending_apply": { "const": true } } },
+        "then": { "properties": { "action": { "const": "status" }, "platform": { "enum": ["linux", "darwin"] }, "exit_code": { "const": 75 } } },
+        "else": { "properties": { "exit_code": { "enum": [0, 3010] } } }
+      },
+      "else": { "properties": { "exit_code": { "not": { "enum": [0, 3010] } }, "pending_apply": { "const": false } } }
+    },
+    {
+      "$comment": "On Windows every connector entry carries targets unless hooks_installed is unknown. A Windows connector counted from its machine policy before any account enrolls carries zero targets; Linux and macOS machine-policy-only connectors (managed_hook true, no per-user target) carry none.",
+      "if": { "required": ["platform"], "properties": { "platform": { "const": "windows" } } },
+      "then": {
+        "properties": {
+          "connectors": {
+            "additionalProperties": {
+              "if": { "properties": { "hooks_installed": { "const": "unknown" } } },
+              "else": { "required": ["targets"] }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "Windows has no OpenShell sandboxes: its openshell block always reports disabled, no driver and platform_unsupported (enterprisestatus.OpenShellUnsupportedCapability).",
+      "if": { "required": ["platform"], "properties": { "platform": { "const": "windows" } } },
+      "then": {
+        "properties": {
+          "openshell": {
+            "required": ["reason_code"],
+            "properties": {
+              "enabled": { "const": false },
+              "driver_available": { "const": "none" },
+              "reason_code": { "const": "platform_unsupported" }
+            }
+          }
+        }
+      }
     },
     {
       "$comment": "A not_root result (Linux, macOS) checked nothing: a standard user cannot read the root-only deployment record, so it leaves out every field that reports the deployment. Every other result has them.",
@@ -128,7 +218,8 @@
       "then": {
         "properties": {
           "installed": false, "installed_version": false, "transaction_pending": false, "services": false,
-          "readiness": false, "inspection": false, "machine_policy": false, "enrollment": false, "destinations": false
+          "readiness": false, "inspection": false, "machine_policy": false, "enrollment": false, "destinations": false, "audit_store": false,
+          "connectors": false, "openshell": false, "identity": false, "cowork_vm_sensor": false
         }
       },
       "else": {
@@ -138,6 +229,24 @@
   ],
 
   "$defs": {
+    "coworkVMSensor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "host_ready", "settings_ready"],
+      "properties": {
+        "enabled": { "type": "boolean", "description": "enterprise.cowork_vm_sensor.mode is on in the installed standalone config." },
+        "host_ready": { "type": "boolean", "description": "The configured architecture package, signature and arguments are present with their expected content and administrator-only write access." },
+        "settings_ready": { "type": "boolean", "description": "The two observed machine settings match the configured package path and vendor. Claude diagnostic acceptance is checked separately." },
+        "package_path": { "type": "string" },
+        "reason_codes": { "type": "array", "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" } }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "enabled": { "const": false } } },
+          "then": { "properties": { "host_ready": { "const": false }, "settings_ready": { "const": false } } }
+        }
+      ]
+    },
     "service": {
       "type": "object",
       "additionalProperties": false,
@@ -165,6 +274,42 @@
         "higher_precedence": { "type": "array", "items": { "type": "string" } },
         "conflicts": { "type": "array", "items": { "type": "string" } },
         "live_verified_at": { "type": "string" }
+      }
+    },
+    "healthReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stale"],
+      "properties": {
+        "status": { "type": "string", "enum": ["healthy", "degraded", "unhealthy", "starting"] },
+        "observed_at": { "type": "string", "format": "date-time", "description": "When the gateway built the report." },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "trigger": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$", "description": "startup, scheduled or config_reload." },
+        "reason_codes": { "type": "array", "maxItems": 32, "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$" }, "description": "The report's distinct reason codes, such as HOOKS_PARTIAL." },
+        "built_at": { "type": "string", "format": "date-time" },
+        "delivery": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["result"],
+          "properties": {
+            "result": { "type": "string", "enum": ["queued", "not_routed", "failed"] },
+            "at": { "type": "string", "format": "date-time" },
+            "failure_class": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$" },
+            "cloud_state": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$" }
+          }
+        },
+        "stale": { "type": "boolean", "description": "More than three report intervals have passed since observed_at." },
+        "error": { "type": "string", "enum": ["unreadable", "access_denied", "invalid"], "description": "The report file exists but could not be used; the other fields are then absent." }
+      }
+    },
+    "auditStore": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["retention_days", "max_store_mb"],
+      "properties": {
+        "retention_days": { "type": "integer", "minimum": 0, "description": "observability.local.retention_days; 0 keeps rows until the size cap, or forever without one." },
+        "max_store_mb": { "type": "integer", "minimum": 0, "description": "observability.local.max_store_mb, the audit.db size cap in MiB; 0 is no size cap." },
+        "size_bytes": { "type": "integer", "minimum": 0, "description": "Bytes of audit.db and its write-ahead log on disk; omitted when they cannot be read." }
       }
     },
     "destination": {
@@ -204,11 +349,16 @@
         "config_unrecorded": { "type": "boolean", "description": "True when config.yaml was changed outside the lifecycle: its generation is not recorded in config.generation.json, or the hook guardian recorded it there as a hand edit. Absent otherwise." }
       }
     },
+    "deliveryId": {
+      "type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+      "description": "The opaque id the caller passed to `enterprise bundle apply --delivery-id` (management_contract 1): 1 to 128 bytes of A-Z a-z 0-9 . _ : -. Caller-supplied, so it names a delivery, not who made it: an MDM wrapper, a management agent and an administrator can all pass one. Absent when the apply had no --delivery-id (Setup BUNDLE=, `enterprise windows ensure --bundle`, the inbox path unit, the MDM kits) and on builds without the flag."
+    },
     "bundleRefusal": {
       "type": "object", "additionalProperties": false,
       "required": ["receipt_id", "error_code", "time"],
       "properties": {
         "receipt_id": { "type": "string", "pattern": "^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$" },
+        "delivery_id": { "$ref": "#/$defs/deliveryId", "description": "The --delivery-id of the refused delivery." },
         "bundle_id": { "type": "string", "pattern": "^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$" },
         "version": { "type": "integer", "minimum": 0 },
         "error_code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
@@ -222,6 +372,8 @@
       "additionalProperties": false,
       "required": ["bundle_id", "version", "state"],
       "properties": {
+        "receipt_id": { "type": "string", "pattern": "^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$", "description": "The id of the receipt this block reports, the file name of <etc>/bundles/receipt-events/<receipt_id>.json (management_contract 1). Absent on older builds and when no receipt was kept (a refusal before the bundle was received). A repeated delivery of the current bundle (already_applied) writes no receipt and reports the current confirmed receipt's id." },
+        "delivery_id": { "$ref": "#/$defs/deliveryId", "description": "The --delivery-id of the delivery whose receipt this block reports. A repeated delivery of the current bundle (already_applied) reports the confirmed receipt, so this is that delivery's id (or absent), never the repeat's own." },
         "bundle_id": { "type": "string", "pattern": "^(b-[0-7][0-9A-HJKMNP-TV-Z]{25})?$", "description": "Empty only for the receipt of a bundle whose manifest could not be read: received (a run in progress or interrupted) or failed." },
         "version": { "type": "integer", "minimum": 0 },
         "state": { "type": "string", "enum": ["received", "verified", "staged", "applied", "confirmed", "failed"] },
@@ -244,6 +396,16 @@
         { "if": { "properties": { "bundle_id": { "const": "" } } }, "then": { "properties": { "state": { "enum": ["received", "failed"] } } } }
       ]
     },
+    "enforcementPending": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "connectors"],
+      "description": "Count and connector names only, never a user name or a process id. unknown names a session whose agent could not be identified.",
+      "properties": {
+        "count": { "type": "integer", "minimum": 1 },
+        "connectors": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+      }
+    },
     "sessionRestartStatus": {
       "type": "object",
       "additionalProperties": false,
@@ -265,6 +427,180 @@
             }
           }
         }
+      }
+    },
+    "versionToken": { "type": "string", "pattern": "^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$" },
+    "connectorState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "hooks_installed"],
+      "properties": {
+        "enabled": { "type": "boolean", "description": "The installed config enables the connector's hooks." },
+        "detected": { "type": "boolean", "description": "The enumerator found the agent for at least one eligible account (a manifest target or an unprotected install). Absent when the connector is not enabled, the enumerator has not run, or the connector is in vendor machine policy only and the enumerator listed no install of it (Linux and macOS: no manifest target; an unprotected install makes it true)." },
+        "versions": { "type": "array", "uniqueItems": true, "maxItems": 8, "items": { "$ref": "#/$defs/versionToken" }, "description": "Distinct agent versions of the detected installs, sorted. A version that is not a plain version token is not shown (warning status_detail_unavailable counts it)." },
+        "hooks_installed": { "enum": ["all", "partial", "none", "unknown"], "description": "From the guardian's last reconcile: all, every target protected; partial, some; none, no target protected (also no target); unknown, no readable guardian state, or one the root-only attestation does not vouch for. A connector in vendor machine policy only (Linux and macOS: no per-user target, no targets member, also when it has an unprotected install) takes it from that machine policy: all, DefenseClaw's entries in place; partial, in place with conflicts; none, not in place; unknown, not read." },
+        "targets": { "$ref": "#/$defs/connectorTargets" },
+        "effective_mode": { "enum": ["observe", "action"], "description": "The connector's default guardrail mode; a guardrail profile can change it per request. Absent when the installed config cannot be loaded." },
+        "effective_hook_fail_mode": { "enum": ["open", "closed"], "description": "The fail mode the managed hooks are rendered with: the value the hook renderer resolves, not the configured one. Absent when the installed config cannot be loaded." },
+        "managed_hook": { "type": "boolean", "description": "true: the DefenseClaw hook is in administrator-owned vendor machine policy; false: a per-user registration the guardian keeps in each home. Absent when the connector is not enabled." }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "hooks_installed": { "const": "unknown" } } },
+          "then": { "properties": { "targets": false } }
+        },
+        {
+          "if": { "anyOf": [
+            { "properties": { "hooks_installed": { "const": "unknown" } } },
+            { "required": ["managed_hook"], "properties": { "managed_hook": { "const": true } } }
+          ] },
+          "else": { "required": ["targets"] }
+        }
+      ]
+    },
+    "connectorTargets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "protected", "pending", "failed"],
+      "description": "The connector's guardian targets; total is protected + pending + failed.",
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "protected": { "type": "integer", "minimum": 0 },
+        "pending": { "type": "integer", "minimum": 0, "description": "Waiting for the account's session (Windows)." },
+        "failed": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "openshellCapability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "driver_available"],
+      "properties": {
+        "enabled": { "type": "boolean", "description": "enterprise.openshell.enabled as last applied." },
+        "install": { "enum": ["prerequisite", "setup"] },
+        "installed": { "type": "boolean", "description": "Prerequisite mode: the administrator's OpenShell CLI, gateway (and MicroVM driver when the driver wants VMs) are present and pass the root-owned trust check. Absent in setup mode and when disabled." },
+        "version": { "$ref": "#/$defs/versionToken", "description": "The one release every part reports (prerequisite) or the pinned release (setup); absent when unknown or the parts disagree." },
+        "driver": { "enum": ["vm", "docker", "auto"], "description": "The configured driver." },
+        "driver_available": { "enum": ["vm", "docker", "none"], "description": "The driver users get now: docker is the docker driver or the docker fallback of the MicroVM driver." },
+        "reason_code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "Why driver_available is not the configured driver, or is none: openshell_prerequisite_missing, openshell_launcher_conflict, openshell_driver_fallback, openshell_disabled, platform_unsupported (Windows). Absent when everything is ready." }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "enabled": { "const": false } } },
+          "then": { "required": ["reason_code"], "properties": { "install": false, "installed": false, "version": false, "driver": false, "driver_available": { "const": "none" } } },
+          "else": { "required": ["install", "driver"] }
+        }
+      ]
+    },
+    "identityHealth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state"],
+      "properties": {
+        "state": { "enum": ["ok", "failing", "idle", "unknown"], "description": "failing: failing_accounts > 0; idle: no lookup succeeded since the gateway started; unknown: reason_code says why." },
+        "sources": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/identitySource" }, "description": "The identity sources that answered a lookup since the gateway started, sorted by source." },
+        "failing_accounts": { "type": "integer", "minimum": 0 },
+        "stale_accounts": { "type": "integer", "minimum": 0 },
+        "serving_offline_cache": { "type": "boolean", "description": "stale_accounts > 0: directory facts are served past their 15-minute lifetime because their refresh fails; they are dropped at 60 minutes." },
+        "reason_code": { "enum": ["gateway_not_ready", "gateway_did_not_report"] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "state": { "const": "unknown" } } },
+          "then": { "required": ["reason_code"], "properties": { "sources": false, "failing_accounts": false, "stale_accounts": false, "serving_offline_cache": false } },
+          "else": { "required": ["failing_accounts", "stale_accounts", "serving_offline_cache"], "properties": { "reason_code": false } }
+        }
+      ]
+    },
+    "coworkState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["configured", "requests", "accounts_known"],
+      "properties": {
+        "configured": { "type": "boolean", "description": "The claudecode connector is enabled, DefenseClaw's Claude Code machine policy hooks are in place (connectors.claudecode.hooks_installed all) and the gateway does not refuse the Claude Desktop surface. It says nothing about calls: requests, last_event_at and an account's last_event_at count hook calls that reported themselves as Cowork (caller-reported attribution, not proof that the hooks ran in Cowork)." },
+        "reason": { "enum": ["claudecode_not_enabled", "claudecode_machine_policy_not_in_place", "claudecode_desktop_surface_refused"], "description": "Why configured is false. claudecode_desktop_surface_refused: enterprise.enrollment.unverified_versions is refuse and the Claude Desktop surface is not live-verified, so the gateway refuses Cowork's hook calls." },
+        "managed_hooks_only": { "enum": ["enforce", "preserve"], "description": "The claudecode machine policy managed_hooks_only. enforce (the default): only managed hooks are meant to run, so customers' own Cowork plugin hooks are meant not to, as Anthropic documents (the 1.0.8 live tests did not cover plugin hooks); preserve: they are meant to run too." },
+        "requests": { "type": "integer", "minimum": 0, "description": "Hook calls that reported themselves as Cowork (caller-reported) the gateway accepted since it started, machine-wide." },
+        "last_event_at": { "type": "string", "format": "date-time", "description": "The gateway's last hook call that reported itself as Cowork (caller-reported) since it started, machine-wide." },
+        "accounts_known": { "type": "boolean", "description": "The audit store answered the per-account lookup." },
+        "accounts": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/coworkAccount" }, "description": "The enrolled accounts and every account with a Cowork event, sorted by name. Absent when accounts_known is false." },
+        "accounts_truncated": { "type": "boolean", "description": "More accounts exist than accounts lists: over 64 accounts, or the audit lookup hit its bound of 256 accounts. Absent otherwise." },
+        "claude_desktop": { "$ref": "#/$defs/coworkDesktop", "description": "From 1.0.8: the Claude Desktop installs of every account enrollment includes (Linux and macOS: the enumerator's eligible accounts and enabled manifest rows, which have no enrollment row because Claude Code is a machine-policy connector there; Windows: the enrolled accounts), with the newest Claude Code engine build in each data folder and its trust, read from disk by status and verify (no running engine needed, the engine is never run). Absent when not run as root or as an elevated administrator. Optional." }
+      }
+    },
+    "coworkAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account"],
+      "properties": {
+        "account": { "type": "string", "minLength": 1, "description": "The account name, or its uid or SID when the name is unknown." },
+        "last_event_at": { "type": "string", "format": "date-time", "description": "The account's last Cowork hook event in the audit store; absent when it has none (never)." }
+      }
+    },
+    "coworkDesktop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["accounts_known", "trusted", "untrusted", "unsigned", "not_found"],
+      "properties": {
+        "accounts_known": { "type": "boolean", "description": "The enumerator's eligible-accounts record was read, or is absent (no cycle ran yet; only the manifest names accounts)." },
+        "accounts": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/coworkDesktopAccount" }, "description": "Every included account, sorted by name (account names: administrator views only)." },
+        "accounts_truncated": { "type": "boolean", "description": "More than 64 accounts are included; absent otherwise." },
+        "trusted": { "type": "integer", "minimum": 0, "description": "Listed installs whose newest engine build is trusted." },
+        "untrusted": { "type": "integer", "minimum": 0, "description": "Listed installs whose newest engine build is untrusted." },
+        "unsigned": { "type": "integer", "minimum": 0, "description": "Listed installs whose newest engine build is unsigned." },
+        "not_found": { "type": "integer", "minimum": 0, "description": "Listed installs with no engine build." }
+      }
+    },
+    "coworkDesktopAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account"],
+      "properties": {
+        "account": { "type": "string", "minLength": 1, "description": "The account name." },
+        "installs": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/coworkDesktopInstall" }, "description": "The account's Claude Desktop data folders that exist, one per deployment; absent: no Claude Desktop data folder, or not checked (reason)." },
+        "reason": { "type": "string", "description": "Why the account's folders were not checked, or not all of them (Windows: for example no signed-in session for a LocalSystem run, or no SID); absent when they were." }
+      }
+    },
+    "coworkDesktopInstall": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deployment", "path", "trust"],
+      "properties": {
+        "deployment": { "enum": ["1p", "3p"], "description": "1p: signed in with a Claude account (Claude); 3p: third-party inference (Claude-3p)." },
+        "path": { "type": "string", "minLength": 1, "description": "The data folder." },
+        "engine_version": { "type": "string", "minLength": 1, "description": "The newest engine build's version (its folder name); absent when trust is not_found." },
+        "engine_path": { "type": "string", "minLength": 1, "description": "The engine build checked (macOS: its claude.app; Linux: its version folder; Windows: the claude.exe that verified, or the version folder); absent when trust is not_found." },
+        "trust": { "enum": ["trusted", "untrusted", "unsigned", "not_found"], "description": "trusted: on macOS the code signature verifies as Anthropic's Claude Code (Developer ID team Q6L2SF6YDW, identifier com.anthropic.claude-code; codesign runs as the account) and its Info.plist names the folder's version; on Windows a claude.exe in the build has an Authenticode signature by Anthropic (Anthropic, PBC) whose signed file version is the folder's; untrusted: a signature that does not verify or names another signer, a version mismatch, or a check that could not run; unsigned: no signature (every Linux build); not_found: no engine build in the folder." },
+        "reason": { "type": "string", "description": "Why the build is not trusted, or a limit of a trusted one (claude_version_unverified)." }
+      }
+    },
+    "accountJoin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state"],
+      "properties": {
+        "state": { "enum": ["on", "off", "unavailable"], "description": "on: keys were computed; unavailable: on, but no generation could be reported (reason_codes say why)." },
+        "generations": { "type": "array", "maxItems": 2, "items": { "$ref": "#/$defs/accountJoinGeneration" } },
+        "accounts_without_key": { "type": "integer", "minimum": 0 },
+        "reason_codes": { "type": "array", "items": { "enum": ["feature_off", "secret_missing", "secret_malformed", "secret_unreadable", "no_directory_id", "canonicalization_failed", "next_generation_expired", "generation_invalid", "generation_rollback", "generation_state_unreadable", "secret_mismatch", "tenant_missing", "account_cap"] } }
+      }
+    },
+    "accountJoinGeneration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation", "key_count"],
+      "properties": {
+        "generation": { "type": "integer", "minimum": 1 },
+        "key_count": { "type": "integer", "minimum": 0, "maximum": 64 }
+      }
+    },
+    "identitySource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "last_ok_age_seconds"],
+      "properties": {
+        "source": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$", "description": "The defenseclaw.user.identity.source token: nss_files, sssd, sssd_infopipe, winbind, nss_ldap, windows_lsa, windows_identity_store, macos_opendirectory, macos_platform_sso, hook_reported, or a newer token." },
+        "directory": { "enum": ["local", "ldap", "active_directory", "entra_id", "okta", "other"], "description": "The directory that owns the accounts the source answered for; absent when the OS did not say." },
+        "last_ok_age_seconds": { "type": "integer", "minimum": 0, "description": "Seconds since the source last answered, on the gateway clock." }
       }
     },
     "message": {

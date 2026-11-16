@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // maxOverlayBytes bounds the operator overlay read so a runaway
@@ -169,15 +170,25 @@ type ProvidersConfig struct {
 //     rather than replaced, so an operator can add a custom domain
 //     to a built-in provider without copy-pasting the whole record.
 //   - OllamaPorts values are unioned; duplicates are collapsed.
-//   - Overlay parse errors are logged to stderr (same surface as the
-//     gateway's runtime alerts) but do not fail the load.
+//   - Overlay open/read/parse errors go to the overlay reporter (stderr,
+//     the gateway's runtime alert surface, unless SetOverlayReporter
+//     installed another sink) but do not fail the load.
 func LoadProviders() (*ProvidersConfig, error) {
+	cfg, _, err := LoadProvidersWithOverlay()
+	return cfg, err
+}
+
+// LoadProvidersWithOverlay is LoadProviders, and whether it merged a legacy
+// operator overlay. While one is a live input (its fold into config.yaml was
+// refused, or has not run yet), the gateway merges llm_providers with
+// ApplyLegacyOverlay as well, so the registry is the one releases before
+// 1.0.3 built from the same files (GAP-0184).
+func LoadProvidersWithOverlay() (*ProvidersConfig, bool, error) {
 	cfg, err := LoadEmbeddedProviders()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	mergeCustomProviders(cfg)
-	return cfg, nil
+	return cfg, mergeCustomProviders(cfg), nil
 }
 
 // LoadEmbeddedProviders returns the built-in registry without reading a
@@ -190,12 +201,55 @@ func LoadEmbeddedProviders() (*ProvidersConfig, error) {
 	return &cfg, nil
 }
 
+// overlayState holds the process-wide overlay settings: where load
+// diagnostics go and whether DEFENSECLAW_CUSTOM_PROVIDERS_PATH applies.
+var overlayState struct {
+	sync.RWMutex
+	reporter  func(string)
+	ignoreEnv bool
+}
+
+// SetOverlayReporter routes overlay load diagnostics to fn for the rest of
+// the process. A nil fn restores the default, which writes them to stderr
+// for the interactive CLI and the gateway log. A managed hook installs its
+// durable recorder here: agents surface hook stderr to the user.
+func SetOverlayReporter(fn func(msg string)) {
+	overlayState.Lock()
+	overlayState.reporter = fn
+	overlayState.Unlock()
+}
+
+// SetIgnoreCustomProvidersPathEnv makes CustomProvidersPath disregard
+// DEFENSECLAW_CUSTOM_PROVIDERS_PATH. Managed enterprise processes set it:
+// the variable can arrive from an agent or project environment, and the
+// overlay decides which hosts the guardrail treats as LLM providers.
+func SetIgnoreCustomProvidersPathEnv(ignore bool) {
+	overlayState.Lock()
+	overlayState.ignoreEnv = ignore
+	overlayState.Unlock()
+}
+
+func reportOverlay(format string, args ...any) {
+	overlayState.RLock()
+	fn := overlayState.reporter
+	overlayState.RUnlock()
+	msg := fmt.Sprintf(format, args...)
+	if fn != nil {
+		fn(msg)
+		return
+	}
+	fmt.Fprintln(os.Stderr, msg)
+}
+
 // CustomProvidersPath returns the location of the operator overlay:
-// DEFENSECLAW_CUSTOM_PROVIDERS_PATH for test / container installs, else
-// custom-providers.json in the DefenseClaw data dir: DEFENSECLAW_HOME when
-// set (a managed service's data_dir, or a per-user install relocated with
-// it, which is where the Python CLI writes the overlay), otherwise
-// ~/.defenseclaw. Empty return value means no overlay applies.
+// DEFENSECLAW_CUSTOM_PROVIDERS_PATH for test / container installs, unless
+// SetIgnoreCustomProvidersPathEnv disabled it, else custom-providers.json in
+// the DefenseClaw data dir: DEFENSECLAW_HOME when set (a managed service's
+// data_dir, or a per-user install relocated with it, which is where the
+// Python CLI writes the overlay), otherwise ~/.defenseclaw. The explicit
+// variable must name an absolute local path: a relative value or a UNC /
+// device path is reported and refused, and no overlay applies. Empty return
+// value means no overlay applies.
 func CustomProvidersPath() string {
 	path, _ := customProvidersPath()
 	return path
@@ -204,7 +258,14 @@ func CustomProvidersPath() string {
 // customProvidersPath is CustomProvidersPath, and whether the path is the
 // ~/.defenseclaw fallback rather than a location the process was pointed at.
 func customProvidersPath() (path string, fallback bool) {
-	if p := os.Getenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH"); p != "" {
+	overlayState.RLock()
+	ignoreEnv := overlayState.ignoreEnv
+	overlayState.RUnlock()
+	if p := os.Getenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH"); p != "" && !ignoreEnv {
+		if !overlayEnvPathAllowed(p) {
+			reportOverlay("[defenseclaw] custom-providers overlay path ignored: DEFENSECLAW_CUSTOM_PROVIDERS_PATH must be an absolute local path")
+			return "", false
+		}
 		return p, false
 	}
 	if dataDir := strings.TrimSpace(os.Getenv("DEFENSECLAW_HOME")); dataDir != "" {
@@ -217,12 +278,24 @@ func customProvidersPath() (path string, fallback bool) {
 	return filepath.Join(home, ".defenseclaw", "custom-providers.json"), true
 }
 
-// mergeCustomProviders applies the operator overlay in place.
+// overlayEnvPathAllowed accepts an absolute path on a local volume. UNC
+// and device paths (\\server\share, //server/share, \\?\, \\.\) are
+// refused on every platform so the overlay read can never reach a remote
+// share or a device namespace.
+func overlayEnvPathAllowed(p string) bool {
+	if len(p) >= 2 && (p[0] == '\\' || p[0] == '/') && (p[1] == '\\' || p[1] == '/') {
+		return false
+	}
+	return filepath.IsAbs(p)
+}
+
+// mergeCustomProviders applies the operator overlay in place, with the
+// header rule of ApplyLegacyOverlay, and reports whether it merged one.
 // Exported through LoadProviders; split for testability.
-func mergeCustomProviders(cfg *ProvidersConfig) {
+func mergeCustomProviders(cfg *ProvidersConfig) bool {
 	path, fallback := customProvidersPath()
 	if path == "" {
-		return
+		return false
 	}
 	f, err := os.Open(path) // #nosec G304 — path is a fixed per-user overlay, documented.
 	if err != nil {
@@ -234,9 +307,9 @@ func mergeCustomProviders(cfg *ProvidersConfig) {
 		// path) that it cannot read is logged, since its providers are then
 		// silently missing. Every error is non-fatal.
 		if !os.IsNotExist(err) && !(fallback && os.IsPermission(err)) {
-			fmt.Fprintf(os.Stderr, "[defenseclaw] custom-providers overlay open error: %v\n", err)
+			reportOverlay("[defenseclaw] custom-providers overlay open error: %v", err)
 		}
-		return
+		return false
 	}
 	defer f.Close()
 	// Read one extra byte so we can detect (and reject) oversize
@@ -245,30 +318,46 @@ func mergeCustomProviders(cfg *ProvidersConfig) {
 	// after the stat).
 	data, err := io.ReadAll(io.LimitReader(f, maxOverlayBytes+1))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[defenseclaw] custom-providers overlay read error: %v\n", err)
-		return
+		reportOverlay("[defenseclaw] custom-providers overlay read error: %v", err)
+		return false
 	}
 	if len(data) > maxOverlayBytes {
-		fmt.Fprintf(os.Stderr,
-			"[defenseclaw] custom-providers overlay rejected: exceeds %d-byte cap (got at least %d bytes)\n",
+		reportOverlay(
+			"[defenseclaw] custom-providers overlay rejected: exceeds %d-byte cap (got at least %d bytes)",
 			maxOverlayBytes, len(data))
-		return
+		return false
 	}
 	var overlay ProvidersConfig
 	if err := json.Unmarshal(data, &overlay); err != nil {
-		fmt.Fprintf(os.Stderr, "[defenseclaw] custom-providers overlay parse error: %v\n", err)
-		return
+		reportOverlay("[defenseclaw] custom-providers overlay parse error: %v", err)
+		return false
 	}
 	if overlay.DerivedFrom != "" {
-		return
+		return false
 	}
-	ApplyOverlay(cfg, overlay)
+	ApplyLegacyOverlay(cfg, overlay)
+	return true
 }
 
 // ApplyOverlay merges overlay into base with the overlay merge rules of
 // LoadProviders (same-name providers union their lists, scalars from the
-// overlay win, ollama ports union).
+// overlay win, the string maps take the overlay's keys, ollama ports union).
 func ApplyOverlay(base *ProvidersConfig, overlay ProvidersConfig) {
+	applyOverlay(base, overlay, true)
+}
+
+// ApplyLegacyOverlay is ApplyOverlay with the extra_headers rule of releases
+// before 1.0.3: a same-name merge keeps the earlier entry's headers and drops
+// the later entry's (GAP-0361). The gateway uses it while a legacy
+// custom-providers.json is a live input, so an upgrade whose fold of that
+// file was refused changes no header in use (GAP-0184). ApplyOverlay's rule
+// applies once config.yaml is the only input. Kept while the gateway reads a
+// legacy overlay (with the 0.8.x bridge, until 1.1.0).
+func ApplyLegacyOverlay(base *ProvidersConfig, overlay ProvidersConfig) {
+	applyOverlay(base, overlay, false)
+}
+
+func applyOverlay(base *ProvidersConfig, overlay ProvidersConfig, mergeHeaders bool) {
 	if base == nil {
 		return
 	}
@@ -288,13 +377,13 @@ func ApplyOverlay(base *ProvidersConfig, overlay ProvidersConfig) {
 	// Index the base by lowercase name for case-insensitive matching.
 	byName := make(map[string]int, len(base.Providers))
 	for i, p := range base.Providers {
-		byName[lower(p.Name)] = i
+		byName[strings.ToLower(p.Name)] = i
 	}
 	for _, op := range overlay.Providers {
 		if op.Name == "" {
 			continue
 		}
-		idx, ok := byName[lower(op.Name)]
+		idx, ok := byName[strings.ToLower(op.Name)]
 		if ok {
 			base.Providers[idx].Domains = unionStrings(
 				base.Providers[idx].Domains, op.Domains,
@@ -330,13 +419,19 @@ func ApplyOverlay(base *ProvidersConfig, overlay ProvidersConfig) {
 					base.Providers[idx].AvailableModels, op.AvailableModels,
 				)
 			}
-			if len(op.RequestPathOverrides) > 0 {
-				if base.Providers[idx].RequestPathOverrides == nil {
-					base.Providers[idx].RequestPathOverrides = make(map[string]string, len(op.RequestPathOverrides))
-				}
-				for k, v := range op.RequestPathOverrides {
-					base.Providers[idx].RequestPathOverrides[k] = v
-				}
+			// The string maps take the overlay's keys. A same-name entry
+			// (an llm_providers.custom provider named like a built-in, or a
+			// provider named twice) kept its path overrides but lost its
+			// extra headers (GAP-0361); the legacy rule still does. Both
+			// maps are rebuilt, so the merge never writes into a map the
+			// overlay or an earlier entry owns.
+			base.Providers[idx].RequestPathOverrides = mergeStringMaps(
+				base.Providers[idx].RequestPathOverrides, op.RequestPathOverrides,
+			)
+			if mergeHeaders {
+				base.Providers[idx].ExtraHeaders = mergeStringMaps(
+					base.Providers[idx].ExtraHeaders, op.ExtraHeaders,
+				)
 			}
 			if op.TLS != nil {
 				base.Providers[idx].TLS = op.TLS
@@ -357,7 +452,7 @@ func ApplyOverlay(base *ProvidersConfig, overlay ProvidersConfig) {
 			}
 		} else {
 			base.Providers = append(base.Providers, op)
-			byName[lower(op.Name)] = len(base.Providers) - 1
+			byName[strings.ToLower(op.Name)] = len(base.Providers) - 1
 		}
 	}
 	base.OllamaPorts = unionInts(base.OllamaPorts, overlay.OllamaPorts)
@@ -391,18 +486,20 @@ func sanitizeDomains(in []string) []string {
 	return out
 }
 
-func lower(s string) string {
-	// local lowercase — stdlib strings would add a dep to a package
-	// that currently has zero third-party imports.
-	b := make([]byte, len(s))
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c >= 'A' && c <= 'Z' {
-			c += 'a' - 'A'
-		}
-		b[i] = c
+// mergeStringMaps is a new map with the keys of a, then those of b (b wins).
+// It returns a unchanged when b adds nothing.
+func mergeStringMaps(a, b map[string]string) map[string]string {
+	if len(b) == 0 {
+		return a
 	}
-	return string(b)
+	out := make(map[string]string, len(a)+len(b))
+	for k, v := range a {
+		out[k] = v
+	}
+	for k, v := range b {
+		out[k] = v
+	}
+	return out
 }
 
 func unionStrings(a, b []string) []string {

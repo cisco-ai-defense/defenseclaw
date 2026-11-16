@@ -1,0 +1,344 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+#Requires -Version 5.1
+
+# Table test for the permission verdicts of Assert-DefenseClawPathAcl and the
+# canonical-descriptor checks it relies on. The canonical re-stamp repairs
+# Contract and Rights verdicts only: every Access verdict (a write or read
+# grant to an untrusted principal, a lost protected flag) stays fatal unless
+# the caller passed -AdvisoryUntrustedAccess, and the standalone profile never
+# gets that advisory. A DACL that is not protected after the exact ACL
+# replacement is refused (rel-1-0-3 main-sync review findings 3 and 4).
+# The verdict reader and the re-stamp are replaced inside the module, so the
+# test touches no ACL on the machine.
+
+[CmdletBinding()]
+param()
+
+Microsoft.PowerShell.Core\Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$modulePath = [IO.Path]::GetFullPath((
+    Microsoft.PowerShell.Management\Join-Path `
+        $PSScriptRoot '..\DefenseClawEnterprise.psm1'
+))
+$module = Microsoft.PowerShell.Core\Import-Module `
+    -Name $modulePath -Force -PassThru -DisableNameChecking -ErrorAction Stop `
+    -WarningAction SilentlyContinue
+
+$strictEnv = 'DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS'
+$savedStrict = [Environment]::GetEnvironmentVariable($strictEnv, 'Process')
+$fixture = [IO.Path]::Combine(
+    [IO.Path]::GetTempPath(),
+    'dc-path-acl-verdict-' + [Guid]::NewGuid().ToString('N') + '.bin'
+)
+[IO.File]::WriteAllBytes($fixture, [byte[]]@(0))
+
+$write = @{ Kind = 'Access'; Severity = 'Write'; Reason = 'untrusted principal S-1-5-21-1-2-3-1001 has write-like access to managed path: x' }
+$read = @{ Kind = 'Access'; Severity = 'Read'; Reason = 'untrusted principal S-1-5-21-1-2-3-1001 can read protected managed path: x' }
+$inherit = @{ Kind = 'Access'; Severity = 'Inheritance'; Reason = 'managed DACL inherits from an ancestor: x' }
+$owner = @{ Kind = 'Contract'; Reason = 'untrusted owner S-1-5-21-1-2-3-1001 on managed path: x' }
+$rights = @{ Kind = 'Rights'; Reason = 'managed path is missing required rights for S-1-5-18: x' }
+
+# before = first reading, after = reading after the re-stamp, stamp = what the
+# re-stamp does, heal = -SelfHealKind given, advisory = -AdvisoryUntrustedAccess.
+$cases = @(
+    @{ name = 'write survives a re-stamp that does nothing'; before = @($write); after = @($write); stamp = 'noop'; strict = ''; expect = $write.Reason }
+    @{ name = 'write survives a re-stamp that fails'; before = @($write); after = @($write); stamp = 'throw'; strict = ''; expect = $write.Reason }
+    @{ name = 'write survives, strict pin'; before = @($write); after = @($write); stamp = 'noop'; strict = '1'; expect = $write.Reason }
+    @{ name = 'write is not repaired by the re-stamp'; before = @($write); after = @(); stamp = 'noop'; strict = ''; expect = $write.Reason }
+    # The kept 1.0.3 verifier reports the first Access verdict in read-before-write order;
+    # the #1068 message-order change awaits the owner's decision. Both refuse this principal.
+    @{ name = 'read before write still refuses the untrusted principal'; before = @($read, $write); after = @($read, $write); stamp = 'noop'; strict = ''; expect = $read.Reason }
+    @{ name = 'write without a self-heal'; before = @($write); after = $null; heal = $false; strict = ''; expect = $write.Reason }
+    @{ name = 'read survives'; before = @($read); after = @($read); stamp = 'noop'; strict = ''; expect = $read.Reason }
+    @{ name = 'read survives, strict pin'; before = @($read); after = @($read); stamp = 'noop'; strict = '1'; expect = $read.Reason }
+    @{ name = 'lost protected flag survives the re-stamp'; before = @($inherit); after = @($inherit); stamp = 'throw'; strict = ''; expect = $inherit.Reason }
+    @{ name = 'lost protected flag survives, strict pin'; before = @($inherit); after = @($inherit); stamp = 'noop'; strict = '1'; expect = $inherit.Reason }
+    @{ name = 'lost protected flag without a self-heal'; before = @($inherit); after = $null; heal = $false; strict = ''; expect = $inherit.Reason }
+    @{ name = 'foreign owner survives'; before = @($owner); after = @($owner); stamp = 'noop'; strict = ''; expect = $owner.Reason }
+    @{ name = 'missing rights survive'; before = @($rights); after = @($rights); stamp = 'noop'; strict = ''; expect = $rights.Reason }
+    @{ name = 'standalone state root has no advisory'; before = @($write); after = @($write); stamp = 'noop'; strict = ''; advisory = $true; expect = $write.Reason }
+)
+
+$failures = [Collections.Generic.List[string]]::new()
+$realOwnerRows = 0
+try {
+    # g877b review S5, the real thing (before any case below replaces the verdict
+    # reader or the stamp): a file on disk that BUILTIN\Users owns, with the kind
+    # and the call shape of each lazy lock entry, is refused for its owner and its
+    # owner is not changed by the refusal. The owner is set with icacls, which
+    # needs the restore privilege an administrator token has; a token without it
+    # skips the rows and says so.
+    $ownerDirectory = [IO.Path]::Combine([IO.Path]::GetTempPath(), 'dc-lock-owner-' + [Guid]::NewGuid().ToString('N'))
+    [void][IO.Directory]::CreateDirectory($ownerDirectory)
+    try {
+        $ownerSid = 'S-1-5-32-545'
+        $lockKinds = & $module {
+            $script:DefenseClawEnterpriseProfile = 'Standalone'
+            @(Get-DefenseClawLazyLockFiles -Layout @{ ConfigDirectory = 'C:\dc-lock-layout\config'; RuntimeDirectory = 'C:\dc-lock-layout\runtime' } |
+                Microsoft.PowerShell.Core\ForEach-Object { [string]$_.Kind })
+        }
+        if (@($lockKinds).Count -ne 4) {
+            $failures.Add("real owner: the lazy lock list has $(@($lockKinds).Count) entries, want 4")
+        }
+        $lockIndex = 0
+        foreach ($kind in @($lockKinds)) {
+            $lockIndex++
+            $lockPath = [IO.Path]::Combine($ownerDirectory, "lock$lockIndex.lock")
+            [IO.File]::WriteAllBytes($lockPath, [byte[]]@())
+            $setOwner = & icacls.exe $lockPath /setowner "*$ownerSid" 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                Microsoft.PowerShell.Utility\Write-Host "enterprise-path-acl-verdict-smoke: real owner rows skipped (icacls /setowner: $setOwner)"
+                break
+            }
+            $observed = & $module {
+                param($Path, $Kind)
+                $script:DefenseClawEnterpriseProfile = 'Standalone'
+                try {
+                    Assert-DefenseClawPathAcl `
+                        -Path $Path `
+                        -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
+                        -AllowedReaderSIDs @($script:SystemSID, $script:AdministratorsSID) `
+                        -RejectUntrustedRead `
+                        -SelfHealKind $Kind `
+                        -SelfHealGatewayServiceSID 'S-1-5-80-1' `
+                        -WarningAction SilentlyContinue
+                    return 'passed'
+                }
+                catch {
+                    return [string]$_.Exception.Message
+                }
+            } $lockPath $kind
+            $stillOwned = ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $lockPath).GetOwner([Security.Principal.SecurityIdentifier])).Value -ceq $ownerSid
+            $want = "untrusted owner $ownerSid on managed path: $lockPath"
+            if ([string]$observed -cne $want) {
+                $failures.Add("real owner: $kind lock: want '$want', got '$observed'")
+            }
+            if (-not $stillOwned) {
+                $failures.Add("real owner: $kind lock: the refusal changed the owner")
+            }
+            $realOwnerRows++
+        }
+    }
+    finally {
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $ownerDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    # Canonical-descriptor check of a DACL that lost SE_DACL_PROTECTED: a
+    # validation-only caller (no -AllowSelfHeal) refuses it whatever else the
+    # descriptor holds; a protected DACL is judged ACE by ACE.
+    $user = 'S-1-5-21-1-2-3-1001'
+    $notProtected = 'managed DACL is not protected after exact ACL replacement'
+    $rawCases = @(
+        @{ name = 'protected canonical'; protected = $true; owner = ''; ace = $null; strict = ''; expect = '' }
+        @{ name = 'protected with an extra explicit ACE'; protected = $true; owner = ''; ace = @{ flags = 'None'; mask = 0x1200A9; sid = $user }; strict = ''; expect = 'managed path does not have the exact canonical DACL' }
+        @{ name = 'lost protected flag only'; protected = $false; owner = ''; ace = $null; strict = ''; expect = $notProtected }
+        @{ name = 'lost protected flag, strict pin'; protected = $false; owner = ''; ace = $null; strict = '1'; expect = $notProtected }
+        @{ name = 'lost protected flag and a user owner'; protected = $false; owner = $user; ace = $null; strict = ''; expect = $notProtected }
+        @{ name = 'lost protected flag and an inherited Users write ACE'; protected = $false; owner = ''; ace = @{ flags = 'Inherited'; mask = 0x116; sid = 'S-1-5-32-545' }; strict = ''; expect = $notProtected }
+        @{ name = 'lost protected flag and an inherited Users read ACE'; protected = $false; owner = ''; ace = @{ flags = 'Inherited'; mask = 0x1200A9; sid = 'S-1-5-32-545' }; strict = ''; expect = $notProtected }
+    )
+    foreach ($case in $rawCases) {
+        [Environment]::SetEnvironmentVariable($strictEnv, [string]$case['strict'], 'Process')
+        $observed = & $module {
+            param($Case, $Missing)
+            $script:DefenseClawEnterpriseProfile = 'Standalone'
+            $expected = New-DefenseClawCanonicalPathAcl -IsDirectory:$false -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+            $raw = [Security.AccessControl.RawSecurityDescriptor]::new($expected.GetSecurityDescriptorBinaryForm(), 0)
+            if (-not [bool]$Case['protected']) {
+                $raw.SetFlags([Security.AccessControl.ControlFlags](
+                    [int]$raw.ControlFlags -band (-bnot [int][Security.AccessControl.ControlFlags]::DiscretionaryAclProtected)
+                ))
+            }
+            if (-not [string]::IsNullOrEmpty([string]$Case['owner'])) {
+                $raw.Owner = [Security.Principal.SecurityIdentifier]::new([string]$Case['owner'])
+            }
+            $ace = $Case['ace']
+            if ($null -ne $ace) {
+                $raw.DiscretionaryAcl.InsertAce($raw.DiscretionaryAcl.Count, [Security.AccessControl.CommonAce]::new(
+                    [Security.AccessControl.AceFlags]([string]$ace['flags']),
+                    [Security.AccessControl.AceQualifier]::AccessAllowed,
+                    [int]$ace['mask'],
+                    [Security.Principal.SecurityIdentifier]::new([string]$ace['sid']),
+                    $false,
+                    $null
+                ))
+            }
+            try {
+                Assert-DefenseClawCanonicalRawPathAcl -Path $Missing -Actual $raw -Expected $expected -WarningAction SilentlyContinue
+                return ''
+            }
+            catch {
+                return [string]$_.Exception.Message
+            }
+        } $case ($fixture + '.missing')
+        $want = [string]$case['expect']
+        if (($want -eq '' -and $observed -ne '') -or
+            ($want -ne '' -and -not ([string]$observed).StartsWith($want, [StringComparison]::Ordinal))) {
+            $failures.Add("raw: $($case['name']): want '$want', got '$observed'")
+        }
+    }
+
+    # A descriptor that cannot be read is not "no drift observed": only a path
+    # that is gone may continue, and only outside the strict pin.
+    if (-not ('DcPathAclSmokeNativeSecurity' -as [type])) {
+        Microsoft.PowerShell.Utility\Add-Type -TypeDefinition @'
+public static class DcPathAclSmokeNativeSecurity
+{
+    public static int Code;
+    public static byte[] GetFileSecurityDescriptor(string path)
+    {
+        throw new System.ComponentModel.Win32Exception(Code, "open file for raw security query failed: " + path);
+    }
+}
+'@
+    }
+    $readCases = @(
+        @{ name = 'access denied'; code = 5; strict = ''; expect = 'refuse' }
+        @{ name = 'path gone'; code = 2; strict = ''; expect = '' }
+        @{ name = 'folder gone'; code = 3; strict = ''; expect = '' }
+        @{ name = 'path gone, strict pin'; code = 2; strict = '1'; expect = 'refuse' }
+    )
+    foreach ($case in $readCases) {
+        [Environment]::SetEnvironmentVariable($strictEnv, [string]$case['strict'], 'Process')
+        [DcPathAclSmokeNativeSecurity]::Code = [int]$case['code']
+        $observed = & $module {
+            param($Fixture)
+            $script:DefenseClawEnterpriseProfile = 'Standalone'
+            function script:Initialize-DefenseClawNativeSecurity { return [DcPathAclSmokeNativeSecurity] }
+            $expected = New-DefenseClawCanonicalPathAcl -IsDirectory:$false -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+            try {
+                Assert-DefenseClawCanonicalPathAcl -Path $Fixture -Expected $expected -WarningAction SilentlyContinue
+                return ''
+            }
+            catch {
+                return 'refuse'
+            }
+            finally {
+                Microsoft.PowerShell.Management\Remove-Item -LiteralPath Function:\Initialize-DefenseClawNativeSecurity -ErrorAction SilentlyContinue
+            }
+        } $fixture
+        if ([string]$observed -cne [string]$case['expect']) {
+            $failures.Add("read: $($case['name']): want '$($case['expect'])', got '$observed'")
+        }
+    }
+
+    foreach ($case in $cases) {
+        [Environment]::SetEnvironmentVariable($strictEnv, [string]$case.strict, 'Process')
+        $heal = -not $case.ContainsKey('heal') -or [bool]$case.heal
+        $advisory = $case.ContainsKey('advisory') -and [bool]$case.advisory
+        $observed = & $module {
+            param($Case, $Fixture, $Heal, $Advisory)
+            $script:DefenseClawEnterpriseProfile = 'Standalone'
+            $script:VerdictReadings = [Collections.Generic.List[object]]::new()
+            foreach ($reading in @($Case['before'], $Case['after'])) {
+                $script:VerdictReadings.Add([object[]]@(
+                    $reading | Microsoft.PowerShell.Core\ForEach-Object { [pscustomobject]$_ }
+                ))
+            }
+            $script:VerdictReads = 0
+            $script:StampMode = [string]$Case['stamp']
+            function script:Get-DefenseClawPathAclVerdicts {
+                $reading = $script:VerdictReadings[[Math]::Min($script:VerdictReads, 1)]
+                $script:VerdictReads++
+                return $reading
+            }
+            function script:Set-DefenseClawPathAcl {
+                if ($script:StampMode -ceq 'throw') { throw 'simulated: the canonical stamp lost a race' }
+            }
+            $arguments = @{
+                Path              = $Fixture
+                AllowedWriterSIDs = @($script:SystemSID, $script:AdministratorsSID)
+                AllowUsersRead    = $true
+            }
+            if ($Heal) {
+                $arguments['SelfHealKind'] = 'ServiceInstallFile'
+                $arguments['SelfHealGatewayServiceSID'] = 'S-1-5-80-1'
+            }
+            if ($Advisory) {
+                $arguments['AdvisoryUntrustedAccess'] = $true
+            }
+            try {
+                Assert-DefenseClawPathAcl @arguments -WarningAction SilentlyContinue
+                return ''
+            }
+            catch {
+                return [string]$_.Exception.Message
+            }
+        } $case $fixture $heal $advisory
+        if ([string]$observed -cne [string]$case.expect) {
+            $want = if ($case.expect) { "refusal '$($case.expect)'" } else { 'pass' }
+            $failures.Add("$($case.name): want $want, got '$observed'")
+        }
+    }
+
+    # g877b review S5 (GAP-0766): the lazily created lock files are named out of
+    # the content gate's class (StandaloneContentGateOutOfClass) because the
+    # stamp and the verify still refuse an account that is not trusted as their
+    # owner. Every real lock entry, with the kind and the call shape of the
+    # verify, refuses an untrusted owner that the re-stamp does not remove, also
+    # when the re-stamp itself fails; a trusted file passes.
+    $lockCases = @(
+        @{ name = 'untrusted owner, re-stamp does nothing'; readings = @($owner); stamp = 'noop'; expect = $owner.Reason }
+        @{ name = 'untrusted owner, re-stamp fails'; readings = @($owner); stamp = 'throw'; expect = $owner.Reason }
+        @{ name = 'trusted owner'; readings = @(); stamp = 'noop'; expect = '' }
+    )
+    $lockEntries = 0
+    foreach ($case in $lockCases) {
+        [Environment]::SetEnvironmentVariable($strictEnv, '', 'Process')
+        $observed = & $module {
+            param($Case, $Fixture)
+            $script:DefenseClawEnterpriseProfile = 'Standalone'
+            $script:LockReading = [object[]]@($Case['readings'] | Microsoft.PowerShell.Core\ForEach-Object { [pscustomobject]$_ })
+            $script:StampMode = [string]$Case['stamp']
+            function script:Get-DefenseClawPathAclVerdicts { return $script:LockReading }
+            function script:Set-DefenseClawPathAcl {
+                if ($script:StampMode -ceq 'throw') { throw 'simulated: the canonical stamp lost a race' }
+            }
+            $layout = @{ ConfigDirectory = 'C:\dc-lock-layout\config'; RuntimeDirectory = 'C:\dc-lock-layout\runtime' }
+            $entries = @(Get-DefenseClawLazyLockFiles -Layout $layout)
+            $results = [Collections.Generic.List[string]]::new()
+            foreach ($lock in $entries) {
+                try {
+                    Assert-DefenseClawPathAcl `
+                        -Path $Fixture `
+                        -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
+                        -AllowedReaderSIDs @($script:SystemSID, $script:AdministratorsSID) `
+                        -RejectUntrustedRead `
+                        -SelfHealKind $lock.Kind `
+                        -SelfHealGatewayServiceSID 'S-1-5-80-1' `
+                        -WarningAction SilentlyContinue
+                    $results.Add('')
+                }
+                catch {
+                    $results.Add([string]$_.Exception.Message)
+                }
+            }
+            return , @($entries.Count, $results.ToArray())
+        } $case $fixture
+        $lockEntries = [int]$observed[0]
+        if ($lockEntries -ne 4) {
+            $failures.Add("lock file: $($case.name): the lazy lock list has $lockEntries entries, want 4")
+        }
+        foreach ($message in @($observed[1])) {
+            if ([string]$message -cne [string]$case.expect) {
+                $want = if ($case.expect) { "refusal '$($case.expect)'" } else { 'pass' }
+                $failures.Add("lock file: $($case.name): want $want, got '$message'")
+            }
+        }
+    }
+}
+finally {
+    [Environment]::SetEnvironmentVariable($strictEnv, $savedStrict, 'Process')
+    Microsoft.PowerShell.Management\Remove-Item -LiteralPath $fixture -Force -ErrorAction SilentlyContinue
+    Microsoft.PowerShell.Core\Remove-Module -ModuleInfo $module -Force -ErrorAction SilentlyContinue
+}
+if ($failures.Count -gt 0) {
+    throw ("enterprise-path-acl-verdict-smoke: FAIL`n" + ($failures -join "`n"))
+}
+Microsoft.PowerShell.Utility\Write-Host "enterprise-path-acl-verdict-smoke: PASS ($($cases.Count + $rawCases.Count + $readCases.Count + $lockCases.Count * 4 + $realOwnerRows) cases)"
+# A case's icacls repair attempt on a missing path fails on purpose; its exit
+# code must not become this script's.
+exit 0

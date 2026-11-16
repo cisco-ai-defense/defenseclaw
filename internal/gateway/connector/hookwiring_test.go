@@ -28,6 +28,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -85,7 +86,8 @@ func windowsAwaitedHookScriptForTest(hookBinary string, arguments ...string) str
 		"$ErrorActionPreference='Stop'",
 		"$env:NoDefaultCurrentDirectoryInExePath='1'",
 		"if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { $ErrorActionPreference='Continue'; & " +
-			powershellQuoteLiteral(hookBinary) + " " + strings.Join(quoted, " ") + " | Microsoft.PowerShell.Core\\Out-Host; exit $LASTEXITCODE }",
+			powershellQuoteLiteral(hookBinary) + " " + strings.Join(quoted, " ") +
+			" | Microsoft.PowerShell.Core\\Out-Host; if ($null -eq $LASTEXITCODE) { exit 1 }; exit $LASTEXITCODE }",
 		"$hookStart=[System.Diagnostics.ProcessStartInfo]::new(" + powershellQuoteLiteral(hookBinary) + "," +
 			powershellQuoteLiteral(strings.Join(arguments, " ")) + ")",
 		"$hookStart.UseShellExecute=$false",
@@ -215,6 +217,133 @@ func TestHookConfigSidecarWriteRejectsMalformedPeerState(t *testing.T) {
 	}
 }
 
+func TestHookConfigSidecarWriteRepairsNullMapFromPeerRecords(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, hookConfigSidecarName)
+	for _, name := range []string{"codex", "claudecode"} {
+		if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", name, "open", false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(before, &state); err != nil {
+		t.Fatal(err)
+	}
+	state["fail_modes"] = nil
+	broken, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, broken, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "codex", "open", false); err != nil {
+		t.Fatalf("same-mode recovery: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var repaired hookConfigSidecar
+	if err := json.Unmarshal(after, &repaired); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"codex", "claudecode"} {
+		if repaired.FailModes[name] != "open" || repaired.FailModeSources[name] != HookFailModeSourceConfig {
+			t.Fatalf("repaired sidecar lost %s: %+v", name, repaired)
+		}
+	}
+}
+
+func TestHookConfigSidecarRefusesNullMapWithoutPeerProof(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, hookConfigSidecarName)
+	for _, name := range []string{"codex", "claudecode"} {
+		if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", name, "open", false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(before, &state); err != nil {
+		t.Fatal(err)
+	}
+	state["fail_modes"] = nil
+	broken, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, broken, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, hookConfigSidecarName+".claudecode")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "codex", "open", false); err == nil {
+		t.Fatal("unproven peer mode was silently discarded")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(broken, after) {
+		t.Fatalf("failed recovery changed shared state: %s", after)
+	}
+}
+
+func TestHookConfigSidecarNullMapDoesNotResurrectUncorroboratedOpenPeer(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, hookConfigSidecarName)
+	for _, name := range []string{"codex", "claudecode"} {
+		if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", name, "open", false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(before, &state); err != nil {
+		t.Fatal(err)
+	}
+	state["fail_modes"] = nil
+	broken, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, broken, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// This extra record has no corroborating source in the shared sidecar.
+	// It may be a stale connector that a previous setup removed.
+	if err := os.WriteFile(filepath.Join(dir, hookConfigSidecarName+".copilot"),
+		hookRuntimeFlatRecord("copilot", "open", HookFailModeSourceConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "codex", "open", false); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var repaired hookConfigSidecar
+	if err := json.Unmarshal(after, &repaired); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := repaired.FailModes["copilot"]; exists {
+		t.Fatalf("uncorroborated open mode became an allow path: %+v", repaired.FailModes)
+	}
+}
+
 // The hooks directory is writable by the target user by design, so a managed
 // sidecar has to converge on modification and not only on deletion.
 func TestManagedHookConfigSidecarConvergesOnUnreadableState(t *testing.T) {
@@ -293,6 +422,7 @@ func TestHookConfigSidecarSecondWriteFailureRollsBackBothFiles(t *testing.T) {
 		"127.0.0.1:18970",
 		"claudecode",
 		"closed",
+		HookFailModeSourceConfig,
 		false,
 		failSecond,
 	); err == nil {
@@ -322,6 +452,7 @@ func seedManagedHookRuntimeForValidation(
 		"127.0.0.1:18970",
 		connectorName,
 		"scoped-test-token",
+		"closed",
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -382,6 +513,7 @@ func TestManagedHookRuntimeWriteRejectsOversizedSparseSnapshotBeforeMutation(t *
 		"127.0.0.1:18970",
 		"codex",
 		"closed",
+		"",
 		true,
 		func(string, []byte, os.FileMode) error {
 			writes++
@@ -619,8 +751,10 @@ func TestUnmanagedHookRuntimeContractRetainsUnboundedLegacyReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A record the shared hooks read (KEY=value lines only, 1.0.4 loop
+	// round 3 of G-hooks-upg), padded past the enterprise limit.
 	flat = append(
-		[]byte("# "+strings.Repeat("x", int(hookRuntimeSidecarMaxBytes))+"\n"),
+		[]byte("PAD="+strings.Repeat("x", int(hookRuntimeSidecarMaxBytes))+"\n"),
 		flat...,
 	)
 	if err := os.WriteFile(flatPath, flat, 0o600); err != nil {
@@ -832,11 +966,15 @@ func TestCodexSetupRepairsLegacyNonWaitingPowerShellCommand(t *testing.T) {
 	const event = "PreToolUse"
 	const contractID = "codex-hooks-v4"
 	setHookBinaryOverride(t, hookBinary)
-	current := windowsNativePowerShellHookCommandForCodexEvent(event, contractID, hookBinary)
+	// GAP-1908: setup repairs every earlier form to the direct cmd.exe start.
+	current := windowsCodexHookCommandForBinaryEvent(event, contractID, hookBinary)
+	bridge := windowsNativePowerShellHookCommandForCodexEvent(event, contractID, hookBinary)
 	legacyCommands := []struct {
 		name    string
 		command string
 	}{
+		{name: "1.0.4 awaited bridge", command: bridge},
+		{name: "1.0.6 awaited bridge without the fallback exit check", command: legacyAwaitedForTest(t, bridge)},
 		{name: "non-waiting", command: legacyWindowsNativePowerShellHookCommandForBinary("codex", hookBinary)},
 		{name: "unqualified-start-process", command: legacyUnqualifiedWindowsNativePowerShellHookCommandForBinary("codex", hookBinary)},
 		{name: "start-process", command: legacyStartProcessWindowsNativePowerShellHookCommand("codex", hookBinary)},
@@ -892,9 +1030,13 @@ func TestCodexSetupRepairsLegacyNonWaitingPowerShellCommand(t *testing.T) {
 			}
 		})
 	}
-	// The repaired command awaits the launcher on the handle it started it
-	// with; $LASTEXITCODE is read only after Out-Host has awaited it.
-	decoded := decodePowerShellEncodedCommandForTest(t, current)
+	if want := windowsSystemCmdExe() + ` /d /v:off /c "` + hookBinary + `" hook --connector codex --event ` + event + ` --hook-contract ` + contractID; current != want {
+		t.Fatalf("repaired command = %q, want %q", current, want)
+	}
+	// The 1.0.4 bridge (still rendered for a path the direct form cannot
+	// carry) awaits the launcher on the handle it started it with;
+	// $LASTEXITCODE is read only after Out-Host has awaited it.
+	decoded := decodePowerShellEncodedCommandForTest(t, bridge)
 	if want := windowsAwaitedHookScriptForTest(hookBinary, "hook", "--connector", "codex", "--event", event, "--hook-contract", contractID); decoded != want {
 		t.Fatalf("repaired command = %s\nwant %s", decoded, want)
 	}
@@ -1377,7 +1519,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, "probe received invalid exit code")
 		os.Exit(7)
 	}
-	fmt.Fprintln(os.Stdout, "probe stdout "+connector)
+	if answer, ok := os.LookupEnv("DC_TEST_STDOUT"); ok {
+		fmt.Fprintln(os.Stdout, answer)
+	} else {
+		fmt.Fprintln(os.Stdout, "probe stdout "+connector)
+	}
 	fmt.Fprintln(os.Stderr, "probe stderr "+connector)
 	time.Sleep(500 * time.Millisecond)
 	os.Exit(exitCode)
@@ -1407,19 +1553,38 @@ func main() {
 		t.Fatalf("write Copilot adapter: %v", err)
 	}
 
+	// GAP-0364: the Copilot adapter forwards a crashed launcher's output only
+	// when it is one whole native deny; a partial or other answer from a
+	// launcher that exited non-zero gets the adapter's own closed denial.
+	const adapterDeny = `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}`
+	const wholeDeny = `{"permissionDecision":"deny","permissionDecisionReason":"blocked by policy \u003cr1\u003e"}`
+	str := func(s string) *string { return &s }
 	cases := []struct {
-		connector string
-		exitCode  int
+		name       string
+		connector  string
+		exitCode   int
+		stdout     *string
+		wantStdout string
 	}{
 		{connector: "codex", exitCode: 0},
 		{connector: "codex", exitCode: 1},
 		{connector: "codex", exitCode: 2},
 		{connector: "antigravity", exitCode: 2},
 		{connector: "copilot", exitCode: 0},
-		{connector: "copilot", exitCode: 2},
+		{connector: "copilot", exitCode: 2, wantStdout: adapterDeny},
+		{name: "copilot-exit-2-partial-deny", connector: "copilot", exitCode: 2,
+			stdout: str(`{"permissionDecision":"deny","permissionDecisionRea`), wantStdout: adapterDeny},
+		{name: "copilot-exit-1-whole-allow", connector: "copilot", exitCode: 1,
+			stdout: str(`{"permissionDecision":"allow"}`), wantStdout: adapterDeny},
+		{name: "copilot-exit-2-whole-deny", connector: "copilot", exitCode: 2,
+			stdout: str(wholeDeny), wantStdout: wholeDeny},
 	}
 	for _, testCase := range cases {
-		t.Run(fmt.Sprintf("%s-exit-%d", testCase.connector, testCase.exitCode), func(t *testing.T) {
+		name := testCase.name
+		if name == "" {
+			name = fmt.Sprintf("%s-exit-%d", testCase.connector, testCase.exitCode)
+		}
+		t.Run(name, func(t *testing.T) {
 			command := windowsNativePowerShellHookCommand(testCase.connector)
 			if testCase.connector == "copilot" {
 				command = copilotHookInvocationCommandForEvent(
@@ -1435,6 +1600,9 @@ func main() {
 					"DC_TEST_CONNECTOR="+testCase.connector,
 					fmt.Sprintf("DC_TEST_EXIT_CODE=%d", testCase.exitCode),
 				)
+				if testCase.stdout != nil {
+					cmd.Env = append(cmd.Env, "DC_TEST_STDOUT="+*testCase.stdout)
+				}
 				cmd.Stdin = strings.NewReader(`{"tool":"win-aud-069"}`)
 				var stdoutBuf, stderrBuf bytes.Buffer
 				cmd.Stdout = &stdoutBuf
@@ -1458,7 +1626,11 @@ func main() {
 				t.Fatalf("generated command exit = %d, want %d\ncommand: %s\nstdout: %s\nstderr: %s",
 					got, wantExitCode, command, stdout, stderr)
 			}
-			if got, want := strings.TrimSpace(stdout), "probe stdout "+testCase.connector; got != want {
+			want := testCase.wantStdout
+			if want == "" {
+				want = "probe stdout " + testCase.connector
+			}
+			if got := strings.TrimSpace(stdout); got != want {
 				t.Fatalf("generated command stdout = %q, want %q; stderr=%q", got, want, stderr)
 			}
 			if got, want := stderr, "probe stderr "+testCase.connector; !strings.Contains(got, want) {
@@ -1536,9 +1708,17 @@ func TestWindowsNativePowerShellHookCommandPreservesAntigravityFailureResponse(t
 	if got := strings.TrimSpace(stdout.String()); got != wantFailure {
 		t.Fatalf("Antigravity failure response = %q, want %s", got, wantFailure)
 	}
-	if diagnostic := strings.ToLower(stderr.String()); !strings.Contains(diagnostic, "missing gateway token") ||
-		!strings.Contains(diagnostic, "event-specific failure response") {
+	diagnostic := strings.ToLower(stderr.String())
+	if !strings.Contains(diagnostic, "event-specific failure response") {
 		t.Fatalf("Antigravity failure-response provenance was not preserved on stderr: %q", stderr.String())
+	}
+	// A tool call's hook answers within its budget counted from the first
+	// process of the call (the PowerShell bridge here). When a loaded runner
+	// spends that budget before the hook reads its token, the answer deadline
+	// blocks first with the same failure response and names the deadline
+	// instead of the token (B-01, GAP-0155).
+	if !strings.Contains(diagnostic, "missing gateway token") && !strings.Contains(diagnostic, "did not answer in time") {
+		t.Fatalf("Antigravity failure response names neither the missing token nor the answer deadline: %q", stderr.String())
 	}
 }
 
@@ -1805,7 +1985,10 @@ func TestAntigravityWindowsHookCommandBypassesUntrustedCurrentDirectory(t *testi
 	if len(argv) == 0 {
 		t.Fatalf("empty Antigravity command")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	// The two just-built probe executables may be cold-scanned by a hosted
+	// Windows runner before producing output. This test checks which path ran,
+	// not the production hook deadline.
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = untrustedDir
@@ -1931,14 +2114,15 @@ func TestBuildCodexHooksTableUsesSupportedTrustFlow(t *testing.T) {
 					windowsCommand,
 				)
 			}
-			decoded := decodePowerShellEncodedCommandForTest(t, windowsCommand)
-			if !windowsBridgeBindsArgumentForTest(decoded, "--event", group.eventType) ||
-				!windowsBridgeBindsArgumentForTest(decoded, "--hook-contract", contract.ContractID) {
+			// GAP-1908: the launcher starts through the system cmd.exe and
+			// the command binds the event and contract.
+			if !strings.HasPrefix(windowsCommand, windowsSystemCmdExe()+` /d /v:off /c "`) ||
+				!strings.HasSuffix(windowsCommand, " hook --connector codex --event "+group.eventType+" --hook-contract "+contract.ContractID) {
 				t.Errorf(
-					"event %s command did not bind event and contract %s: %s",
+					"event %s command did not bind event and contract %s through cmd.exe: %s",
 					group.eventType,
 					contract.ContractID,
-					decoded,
+					windowsCommand,
 				)
 			}
 		}
@@ -2323,7 +2507,8 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 			}
 			text := string(data)
 			connectorName := tt.conn.Name()
-			if connectorName == "cursor" {
+			switch connectorName {
+			case "cursor":
 				wantCommand := hookInvocationCommand(
 					"cursor",
 					filepath.Join(dataDir, "hooks", "cursor-hook.sh"),
@@ -2356,7 +2541,7 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 						t.Errorf("Cursor adapter missing hardening marker %q:\n%s", marker, adapter)
 					}
 				}
-			} else if connectorName == "antigravity" {
+			case "antigravity":
 				wantCommand := antigravityHookInvocationCommandForEvent(
 					"windows",
 					"PreToolUse",
@@ -2377,7 +2562,7 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 					!windowsBridgeBindsArgumentForTest(decoded, "--event", "PreToolUse") {
 					t.Errorf("Antigravity encoded command missing managed launcher path:\n%s", decoded)
 				}
-			} else if connectorName == "claudecode" {
+			case "claudecode":
 				var cfg map[string]interface{}
 				if err := json.Unmarshal(data, &cfg); err != nil {
 					t.Fatalf("parse Claude Code config: %v", err)
@@ -2406,7 +2591,7 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				if !structuredHookCommandReferences(execView(cfg), []string{nativeHookFlag + connectorName}) {
 					t.Errorf("config missing native exec-form connector command for %s:\n%s", connectorName, text)
 				}
-			} else if connectorName == "codex" {
+			case "codex":
 				var cfg map[string]interface{}
 				if err := toml.Unmarshal(data, &cfg); err != nil {
 					t.Fatalf("parse Codex config: %v", err)
@@ -2415,7 +2600,7 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				groups := hooks["PreToolUse"].([]interface{})
 				handlers := groups[0].(map[string]interface{})["hooks"].([]interface{})
 				command := handlers[0].(map[string]interface{})["command_windows"].(string)
-				wantCommand := windowsNativePowerShellHookCommandForCodexEvent(
+				wantCommand := windowsCodexHookCommandForBinaryEvent(
 					"PreToolUse",
 					"codex-hooks-v4",
 					defenseclawHookBinary(),
@@ -2423,12 +2608,10 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				if command != wantCommand {
 					t.Errorf("Codex PreToolUse command_windows = %q, want %q", command, wantCommand)
 				}
-				decoded := decodePowerShellEncodedCommandForTest(t, command)
-				if !windowsBridgeBindsArgumentForTest(decoded, "--event", "PreToolUse") ||
-					!windowsBridgeBindsArgumentForTest(decoded, "--hook-contract", "codex-hooks-v4") {
+				if !strings.HasSuffix(command, " hook --connector codex --event PreToolUse --hook-contract codex-hooks-v4") {
 					t.Errorf("config missing event-bound native command_windows for %s:\n%s", connectorName, text)
 				}
-			} else if connectorName == "copilot" {
+			case "copilot":
 				adapter, err := os.ReadFile(filepath.Join(dataDir, "hooks", "copilot-hook.ps1"))
 				if err != nil {
 					t.Fatalf("read Copilot Windows adapter: %v", err)
@@ -2464,7 +2647,7 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 						t.Fatalf("Copilot adapter must set the console input encoding before reading stdin (encoding=%d read=%d)", encodingAt, readAt)
 					}
 				}
-			} else {
+			default:
 				if !strings.Contains(text, windowsHookBinaryName) {
 					t.Errorf("config does not invoke %s:\n%s", windowsHookBinaryName, text)
 				}
@@ -2530,13 +2713,22 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 			if runtimeState.GatewayAddr != "127.0.0.1:18970" {
 				t.Errorf("hook config sidecar API address = %q, want 127.0.0.1:18970", runtimeState.GatewayAddr)
 			}
-			wantFailMode := resolveHookFailMode(opts, tt.conn)
-			if hp, ok := tt.conn.(HookCapabilityProvider); ok &&
-				wantFailMode == "closed" && !hp.HookCapabilities(opts).SupportsFailClosed {
-				wantFailMode = "open"
+			// Every per-user hook records closed, including connectors that
+			// use their native deny response for a failure DefenseClaw sees.
+			outage := OutageHookFailMode(opts, tt.conn)
+			wantFailMode := renderedHookFailMode(opts, tt.conn)
+			if wantFailMode != "closed" {
+				t.Errorf("per-user %s resolves fail mode %q, want closed", tt.conn.Name(), wantFailMode)
 			}
 			if got := runtimeState.FailModes[connectorName]; got != wantFailMode {
 				t.Errorf("hook config sidecar fail mode for %s = %q, want %q", connectorName, got, wantFailMode)
+			}
+			wantSource := ""
+			if wantFailMode == outage {
+				wantSource = HookFailModeSourceConfig
+			}
+			if got := runtimeState.FailModeSources[connectorName]; got != wantSource {
+				t.Errorf("hook config sidecar fail mode source for %s = %q, want %q", connectorName, got, wantSource)
 			}
 
 			if err := tt.conn.Teardown(context.Background(), opts); err != nil {
@@ -2548,13 +2740,84 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 			if _, err := os.Stat(configPath); !os.IsNotExist(err) {
 				t.Errorf("generated config survived teardown: %v", err)
 			}
-			// Connector teardown only unwires the agent config. Setup owns these
-			// managed sidecars until the enclosing lifecycle removes them.
-			for _, name := range []string{filepath.Base(tokenPath), hookConfigSidecarName} {
-				if _, err := os.Stat(filepath.Join(dataDir, "hooks", name)); err != nil {
-					t.Errorf("shared sidecar %s removed by connector teardown: %v", name, err)
+			// A per-user teardown revokes the connector's hook credential once
+			// VerifyClean proves the agent no longer registers it
+			// (revokePerUserHookAPIToken, 58ed56d79d); the shared hook config
+			// sidecar stays until the enclosing lifecycle removes it.
+			if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
+				t.Errorf("hook credential %s survived a per-user teardown: %v", filepath.Base(tokenPath), err)
+			}
+			if _, err := os.Stat(filepath.Join(dataDir, "hooks", hookConfigSidecarName)); err != nil {
+				t.Errorf("shared sidecar %s removed by connector teardown: %v", hookConfigSidecarName, err)
+			}
+		})
+	}
+}
+
+// legacyAwaitedForTest is command as releases up to 1.0.6 rendered it.
+func legacyAwaitedForTest(t *testing.T, command string) string {
+	t.Helper()
+	legacy, ok := legacyWindowsAwaitedHookCommand(command)
+	if !ok || legacy == command {
+		t.Fatalf("no 1.0.x form of %q", command)
+	}
+	return legacy
+}
+
+// Releases up to 1.0.6 ended the Constrained Language fallback with
+// `exit $LASTEXITCODE`, which is 0 (allow) when the launcher never started.
+// The current render exits 1 there, and the 1.0.x render of every awaited
+// bridge stays owned so setup rewrites it and teardown removes it.
+func TestWindowsAwaitedHookLegacyFallbackRenderStaysOwned(t *testing.T) {
+	hookBinary := `C:\Users\Example User\.local\bin\defenseclaw-hook.exe`
+	contract := builtinHookContracts["codex"][0]
+	bridges := map[string]string{
+		"codex bridge":       windowsNativePowerShellHookCommandForCodexEvent(contract.Events[0], contract.ContractID, hookBinary),
+		"antigravity bridge": windowsNativePowerShellHookCommandForEvent("antigravity", "PreToolUse", hookBinary),
+		"unbound bridge":     windowsNativePowerShellHookCommandForBinary("codex", hookBinary),
+		"kiro wrapper":       windowsKiroHookCommandForBinary(hookBinary, KiroHookSurfaceV3, true),
+	}
+	for name, current := range bridges {
+		t.Run(name, func(t *testing.T) {
+			decoded := decodePowerShellEncodedCommandForTest(t, current)
+			if !strings.Contains(decoded, "if ($null -eq $LASTEXITCODE) { exit 1 }; exit $LASTEXITCODE }") {
+				t.Fatalf("current render lacks the fail-closed fallback: %s", decoded)
+			}
+			legacy := legacyAwaitedForTest(t, current)
+			legacyScript := decodePowerShellEncodedCommandForTest(t, legacy)
+			if strings.Contains(legacyScript, "$null -eq $LASTEXITCODE") ||
+				!strings.Contains(legacyScript, " | Microsoft.PowerShell.Core\\Out-Host; exit $LASTEXITCODE }") {
+				t.Fatalf("1.0.x render = %s", legacyScript)
+			}
+			if back, ok := currentWindowsAwaitedHookCommand(legacy); !ok || back != current {
+				t.Fatalf("current form of the 1.0.x render = %q, %v; want %q", back, ok, current)
+			}
+			if name == "codex bridge" || name == "unbound bridge" {
+				if _, owned := nativeHookExactCommands([]string{hookBinary})[legacy]; !owned {
+					t.Fatal("1.0.x render is not an owned native hook command")
 				}
 			}
 		})
+	}
+	// A command whose fallback was edited is not rewritten into ownership.
+	edited := strings.Replace(decodePowerShellEncodedCommandForTest(t, bridges["codex bridge"]),
+		"if ($null -eq $LASTEXITCODE) { exit 1 }; ", "", 1) + "; Write-Host extra"
+	encoded := windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(edited)
+	if current, ok := currentWindowsAwaitedHookCommand(encoded); ok && current == bridges["codex bridge"] {
+		t.Fatal("an edited script was recognized as the current render")
+	}
+	// The Antigravity teardown list carries every render of every event: the
+	// current one, the one before 1.0.9 (no launcher-start answer, rel-1-0-6
+	// GAP-0676) and its 1.0.x render.
+	owned := antigravityOwnedHookCommandsForOS("windows", "antigravity-hook.sh")
+	for _, event := range antigravityLifecycleEvents {
+		current := antigravityHookInvocationCommandForEvent("windows", event, "antigravity-hook.sh")
+		before := windowsNativePowerShellHookCommandForEvent("antigravity", event, defenseclawHookBinary())
+		if (event == "PreToolUse") == (current == before) {
+			t.Fatalf("%s: the current render answers a launcher that cannot start = %v, want %v", event, current != before, event == "PreToolUse")
+		}
+		if !slices.Contains(owned, current) || !slices.Contains(owned, before) || !slices.Contains(owned, legacyAwaitedForTest(t, before)) {
+			t.Fatalf("antigravity owned commands lack a render of %s", event)
+		}
 	}
 }

@@ -323,10 +323,10 @@ func restoreKeptDir(project, keptDir, rel string, skip map[string]struct{}, m *i
 			changes = append(changes, TreeChange{Path: p, Status: "T", OldMode: bm, NewMode: am})
 			continue
 		}
-		switch {
-		case bm == "040000":
+		switch bm {
+		case "040000":
 			continue
-		case bm == modeSymlink:
+		case modeSymlink:
 			bt, _ := os.Readlink(b.abs)
 			at, _ := r.root.Readlink(p)
 			if bt != at {

@@ -107,6 +107,21 @@ def test_saved_searches_cover_every_managed_record_and_names_no_person() -> None
     assert not PERSON.search(joined)
 
 
+def test_saved_search_sandbox_fields_match_shipped_telemetry_schema() -> None:
+    searches = _sandbox_searches()
+    schema_dir = ROOT / "schemas/telemetry/v8"
+    shipped_fields = {
+        match
+        for path in schema_dir.glob("*.yaml")
+        for match in re.findall(r"(?m)^- id: (defenseclaw\.[\w.]+)$", path.read_text(encoding="utf-8"))
+    }
+    referenced_fields = {
+        match for search in searches.values() for match in re.findall(r"record\.body\.(defenseclaw\.[\w.]+)", search)
+    }
+    assert referenced_fields
+    assert referenced_fields <= shipped_fields
+
+
 def test_saved_searches_use_only_real_scheduling_keys() -> None:
     text = SAVED.read_text(encoding="utf-8")
     for dead in ("is_scheduled", "alert_type", "alert_comparator", "alert_threshold"):

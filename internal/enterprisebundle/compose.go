@@ -11,7 +11,10 @@ import (
 	"crypto/rand"
 	"errors"
 	"io"
+	"slices"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/accountjoin"
 )
 
 // ComposeInput is what bundle sign writes into a new manifest.
@@ -38,21 +41,43 @@ type ComposeInput struct {
 	ProductVersion string
 	HostPlatform   string
 	Digester       PolicyDigester
+
+	// SecretValues are the values of the credentials config.yaml
+	// references, by name: each secret_refs entry binds its value
+	// (CredentialValueSHA256). The manifest never carries a value.
+	SecretValues map[string][]byte
 }
 
 // Compose runs the full validator over the files and returns the manifest
 // and its exact bytes: the inline-secret scan, the canonical config load,
-// secret_refs from the credentials config.yaml names (all required),
-// files[], the per-platform effective digests and the reachability
-// warnings. It refuses errors; warnings never block.
+// secret_refs from the credentials config.yaml names (all required, each
+// bound to its value in SecretValues), files[], the per-platform effective
+// digests and the reachability warnings. It refuses errors; warnings never
+// block.
 func Compose(ctx context.Context, in ComposeInput) (*Manifest, []byte, error) {
 	b := &Bundle{Files: in.Bundle.Files}
 	if err := CheckInlineSecrets(b); err != nil {
 		return nil, nil, err
 	}
-	cfg, _, err := LoadConfig(b, in.Root)
+	// Judge the config by the target platforms, never by the signer's own
+	// operating system (GAP-0005): a Linux workstation signs a macOS-only
+	// key such as enterprise.openshell.e2fsprogs_dir for a darwin target,
+	// and every signer refuses it for a Linux or Windows target. The
+	// per-platform digest loads below check each remaining target.
+	platforms := canonicalPlatforms(in.Platforms)
+	cfg, _, err := LoadConfigForPlatform(b, in.Root, platforms[0])
 	if err != nil {
 		return nil, nil, err
+	}
+	if err := CheckKeyProductFloor(cfg, in.MinProductVersion); err != nil {
+		return nil, nil, err
+	}
+	if join := cfg.Enterprise.AccountJoin; join.On() && join.NextGeneration != 0 {
+		// The device bounds next_not_after by this signing time
+		// (ConfirmedAccountJoinSignedAt): sign refuses what it would.
+		if signed := in.CreatedAt.UTC().Truncate(time.Second); join.NextNotAfterTime().After(signed.Add(accountjoin.MaxNextOverlap)) {
+			return nil, nil, refuse(CodeConfigInvalid, ConfigName, "enterprise.account_join.next_not_after is more than 30 days after the signing time %s", signed.Format(time.RFC3339))
+		}
 	}
 	names, err := ConfigCredentials(b.Files[ConfigName])
 	if err != nil {
@@ -60,9 +85,36 @@ func Compose(ctx context.Context, in ComposeInput) (*Manifest, []byte, error) {
 	}
 	refs := make([]SecretRef, 0, len(names))
 	for _, name := range names {
-		refs = append(refs, SecretRef{Ref: SecretRefScheme + name, Required: true})
+		value, ok := in.SecretValues[name]
+		if !ok {
+			return nil, nil, refuse(CodeSecretRefUnbound, "secret_refs", "config.yaml references the credential %s; give its value with --secret-file %s=<file> so the bundle binds it", safePath(name), safePath(name))
+		}
+		refs = append(refs, SecretRef{Ref: SecretRefScheme + name, Required: true, ValueSHA256: CredentialValueSHA256(in.TenantID, name, value)})
 	}
-	platforms := canonicalPlatforms(in.Platforms)
+	joinNames, err := AccountJoinCredentials(b.Files[ConfigName])
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, name := range joinNames {
+		value, ok := in.SecretValues[name]
+		if !ok {
+			return nil, nil, refuse(CodeSecretRefUnbound, "secret_refs", "enterprise.account_join uses the tenant secret %s; give its value with --secret-file %s=<file> so the bundle binds it", safePath(name), safePath(name))
+		}
+		refs = append(refs, SecretRef{Ref: SecretRefScheme + name, ValueSHA256: CredentialValueSHA256(in.TenantID, name, value)})
+	}
+	for name := range in.SecretValues {
+		if !slices.Contains(names, name) && !slices.Contains(joinNames, name) {
+			return nil, nil, refuse(CodeManifestInvalid, "secret_refs", "a value is given for the credential %s, which config.yaml does not reference", safePath(name))
+		}
+	}
+	if join := cfg.Enterprise.AccountJoin; join.On() && join.NextGeneration != 0 && !slices.Contains(joinNames, accountjoin.NextSecretName) {
+		// The loaded config and AccountJoinCredentials must agree on the
+		// rotation, or the next secret would go unbound.
+		return nil, nil, refuse(CodeConfigInvalid, ConfigName, "enterprise.account_join.next_generation is not a plain decimal number")
+	}
+	if err := checkAccountJoinSecretValues(cfg.Enterprise.AccountJoin, in.SecretValues); err != nil {
+		return nil, nil, err
+	}
 	ruleWarnings, _, err := RuleNotBlockingWarnings(cfg)
 	if err != nil {
 		return nil, nil, refuse(CodeConfigInvalid, ConfigName, "custom rule pack: %s", boundedDetail(err.Error()))

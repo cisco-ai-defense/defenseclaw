@@ -10,10 +10,15 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/setuppayload"
 )
 
 func TestParseEnterpriseSetupInstallContract(t *testing.T) {
@@ -116,6 +121,27 @@ func TestParseEnterpriseSetupShorthandAcceptsModeAndConnector(t *testing.T) {
 	}
 }
 
+// The Secure Client Setup also manages GitHub Copilot (the CLI and the GitHub
+// Copilot app); the standalone shorthand keeps its three connectors.
+func TestParseEnterpriseSetupShorthandAcceptsCopilotOnSecureClient(t *testing.T) {
+	opts, help, err := parseEnterpriseSetupOptions([]string{
+		"/install",
+		"MODE=action",
+		"CONNECTOR=codex,claudecode,cursor,copilot",
+	})
+	if err != nil || help || opts.Connector != "codex,claudecode,cursor,copilot" {
+		t.Fatalf("Secure Client Copilot shorthand install: opts=%+v help=%v err=%v", opts, help, err)
+	}
+	_, _, err = parseStandaloneEnterpriseSetupOptions([]string{
+		"/install",
+		"MODE=action",
+		"CONNECTOR=codex,copilot",
+	})
+	if err == nil || !strings.Contains(err.Error(), "supported: codex, claudecode, cursor.") {
+		t.Fatalf("standalone Copilot shorthand error = %v, want the three-connector refusal", err)
+	}
+}
+
 // TestParseEnterpriseSetupShorthandRejectsBadGrammar covers the
 // mutual-exclusion and pairing invariants the shorthand enforces.
 func TestParseEnterpriseSetupShorthandRejectsBadGrammar(t *testing.T) {
@@ -145,6 +171,116 @@ func TestPlaceholderBuildFailsClosedWithoutEnterprisePayload(t *testing.T) {
 	_, err := loadEmbeddedEnterprisePayload()
 	if err == nil || !strings.Contains(err.Error(), "DefenseClawAssembler.exe") {
 		t.Fatalf("loadEmbeddedEnterprisePayload() error = %v", err)
+	}
+}
+
+// #1281: the Setup stages only the payload its own image was built with. A
+// trailer read from a different file (any flavor) is refused before
+// anything is staged, and an image with no binding takes no standalone
+// payload.
+func TestEnterprisePayloadMustMatchTheImageBinding(t *testing.T) {
+	trailer := func(t *testing.T, payloadFS fstest.MapFS) setuppayload.ReadResult {
+		t.Helper()
+		result := setuppayload.ReadResult{Manifest: payloadFS["payload/manifest.json"].Data}
+		for name, file := range payloadFS {
+			if name != "payload/manifest.json" {
+				result.Entries = append(result.Entries, setuppayload.Entry{Name: strings.TrimPrefix(name, "payload/"), Contents: file.Data})
+			}
+		}
+		return result
+	}
+	binding := func(manifest enterprisePayloadManifest) string {
+		digests := map[string]string{}
+		for _, file := range manifest.Files {
+			digests[file.Name] = file.SHA256
+		}
+		return setuppayload.PayloadBinding(setuppayload.PayloadIdentity{
+			DistributionFlavor: manifest.DistributionFlavor,
+			Version:            manifest.Version,
+			SourceCommit:       manifest.SourceCommit,
+		}, digests)
+	}
+	built, builtManifest := newEnterprisePayloadFixtureForFlavor(t, true, true)
+	stamp := binding(builtManifest)
+	if _, err := loadBoundEnterprisePayload(trailer(t, built), stamp); err != nil {
+		t.Fatalf("the image's own payload was refused: %v", err)
+	}
+	if _, err := loadBoundEnterprisePayload(trailer(t, built), strings.ToUpper(stamp)); err != nil {
+		t.Fatalf("an upper-case binding was refused: %v", err)
+	}
+
+	// A different payload: one file swapped for other bytes.
+	swapped, swappedManifest := newEnterprisePayloadFixtureForFlavor(t, true, true)
+	marker := []byte("swapped-file marker")
+	digest := sha256.Sum256(marker)
+	swapped["payload/defenseclaw.exe"] = &fstest.MapFile{Data: marker, Mode: 0o444}
+	for index, file := range swappedManifest.Files {
+		if file.Name == "defenseclaw.exe" {
+			swappedManifest.Files[index].SHA256, swappedManifest.Files[index].Size = hex.EncodeToString(digest[:]), int64(len(marker))
+		}
+	}
+	writeEnterprisePayloadManifest(t, swapped, swappedManifest)
+	if _, err := loadEnterprisePayload(swapped); err != nil {
+		t.Fatalf("fixture: the swapped payload is not otherwise valid: %v", err)
+	}
+	// The same payload bytes under another manifest identity: a replacement
+	// trailer that changes only the version (which the lifecycle compares
+	// and records) or the source commit.
+	relabeled := func(t *testing.T, change func(*enterprisePayloadManifest)) fstest.MapFS {
+		t.Helper()
+		payloadFS := fstest.MapFS{}
+		for name, file := range built {
+			payloadFS[name] = &fstest.MapFile{Data: append([]byte(nil), file.Data...), Mode: file.Mode}
+		}
+		manifest := builtManifest
+		manifest.Files = append([]enterprisePayloadManifestFile(nil), builtManifest.Files...)
+		change(&manifest)
+		writeEnterprisePayloadManifest(t, payloadFS, manifest)
+		if _, err := loadEnterprisePayload(payloadFS); err != nil {
+			t.Fatalf("fixture: the relabeled payload is not otherwise valid: %v", err)
+		}
+		return payloadFS
+	}
+	for name, other := range map[string]fstest.MapFS{
+		"swapped file": swapped,
+		"version only": relabeled(t, func(manifest *enterprisePayloadManifest) { manifest.Version = "99.0.0" }),
+		"source commit only": relabeled(t, func(manifest *enterprisePayloadManifest) {
+			manifest.SourceCommit = strings.Repeat("e", 40)
+		}),
+		"signed flavor": func() fstest.MapFS {
+			payloadFS, _ := newEnterprisePayloadFixtureForFlavor(t, false, true)
+			return payloadFS
+		}(),
+		"Secure Client": func() fstest.MapFS {
+			payloadFS, _ := newEnterprisePayloadFixtureForFlavor(t, false, false)
+			return payloadFS
+		}(),
+		"Secure Client u": func() fstest.MapFS {
+			payloadFS, _ := newEnterprisePayloadFixtureForFlavor(t, true, false)
+			return payloadFS
+		}(),
+	} {
+		if _, err := loadBoundEnterprisePayload(trailer(t, other), stamp); err == nil || !strings.Contains(err.Error(), "nothing was staged") {
+			t.Errorf("%s: a payload the image was not built with was accepted (err %v)", name, err)
+		}
+	}
+
+	// No binding: no standalone payload, the Secure Client flavors as before.
+	if _, err := loadBoundEnterprisePayload(trailer(t, built), ""); err == nil || !strings.Contains(err.Error(), "no payload binding") {
+		t.Fatalf("an unstamped image took a standalone payload (err %v)", err)
+	}
+	secureClient, _ := newEnterprisePayloadFixtureForFlavor(t, false, false)
+	if _, err := loadBoundEnterprisePayload(trailer(t, secureClient), ""); err != nil {
+		t.Fatalf("an unstamped image refused the Secure Client payload: %v", err)
+	}
+}
+
+func TestStampedSetupImageIsTheStandaloneSetup(t *testing.T) {
+	previous := standalonePayloadBinding
+	t.Cleanup(func() { standalonePayloadBinding = previous })
+	standalonePayloadBinding = strings.Repeat("ab", 32)
+	if !embeddedEnterpriseSetupStandalone() {
+		t.Fatal("a stamped image must parse its command line as the standalone Setup")
 	}
 }
 
@@ -178,10 +314,51 @@ func TestLoadEnterprisePayloadAcceptsEmitterManifestContract(t *testing.T) {
 
 func TestLoadEnterprisePayloadRejectsInvalidEmitterManifestContract(t *testing.T) {
 	tests := map[string]struct {
-		mutate func(*enterprisePayloadManifest)
-		want   string
+		// unsigned and standalone pick the fixture the mutation starts from.
+		unsigned   bool
+		standalone bool
+		mutate     func(*enterprisePayloadManifest)
+		want       string
 	}{
 		"unsigned flavor mismatch": {
+			mutate: func(manifest *enterprisePayloadManifest) {
+				manifest.Unsigned = true
+			},
+			want: "identity is invalid",
+		},
+		// The ordinary (per-user) build labels its payload "oss". The
+		// enterprise Setup must never accept such a payload as its own, in
+		// any of its four flavors.
+		"ordinary oss flavor": {
+			mutate: func(manifest *enterprisePayloadManifest) {
+				manifest.DistributionFlavor = "oss"
+			},
+			want: "identity is invalid",
+		},
+		"ordinary oss flavor, unsigned": {
+			unsigned: true,
+			mutate: func(manifest *enterprisePayloadManifest) {
+				manifest.DistributionFlavor = "oss"
+			},
+			want: "identity is invalid",
+		},
+		"ordinary oss flavor, standalone inventory": {
+			standalone: true,
+			mutate: func(manifest *enterprisePayloadManifest) {
+				manifest.DistributionFlavor = "oss"
+			},
+			want: "identity is invalid",
+		},
+		"ordinary oss flavor, unsigned standalone inventory": {
+			unsigned:   true,
+			standalone: true,
+			mutate: func(manifest *enterprisePayloadManifest) {
+				manifest.DistributionFlavor = "oss"
+			},
+			want: "identity is invalid",
+		},
+		"standalone label with the unsigned flag": {
+			standalone: true,
 			mutate: func(manifest *enterprisePayloadManifest) {
 				manifest.Unsigned = true
 			},
@@ -220,7 +397,7 @@ func TestLoadEnterprisePayloadRejectsInvalidEmitterManifestContract(t *testing.T
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
-			payloadFS, manifest := newEnterprisePayloadFixture(t, false)
+			payloadFS, manifest := newEnterprisePayloadFixtureForFlavor(t, test.unsigned, test.standalone)
 			test.mutate(&manifest)
 			writeEnterprisePayloadManifest(t, payloadFS, manifest)
 			if _, err := loadEnterprisePayload(payloadFS); err == nil || !strings.Contains(err.Error(), test.want) {
@@ -305,6 +482,25 @@ func TestParseEnterpriseSetupEnsureAndSigners(t *testing.T) {
 	}
 }
 
+// A padded file property reaches the path checks as given, so they refuse
+// it as "empty, relative, padded, or environment-expanded" (GAP-0632).
+func TestStandaloneSetupKeepsAPaddedPath(t *testing.T) {
+	opts, _, err := parseStandaloneEnterpriseSetupOptions([]string{"/ensure", `CONFIG=C:\c.yaml `, `MANIFEST=C:\t.yaml `, "JSON=1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Config != `C:\c.yaml ` || opts.Manifest != `C:\t.yaml ` {
+		t.Fatalf("config %q, manifest %q: the padding was dropped", opts.Config, opts.Manifest)
+	}
+	opts, _, err = parseStandaloneEnterpriseSetupOptions([]string{"/ensure", `BUNDLE=C:\b\v7.dcbundle `, `TRUSTANCHORS=C:\b\a.json `})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Bundle != `C:\b\v7.dcbundle ` || opts.TrustAnchors != `C:\b\a.json ` {
+		t.Fatalf("bundle %q, trust anchors %q: the padding was dropped", opts.Bundle, opts.TrustAnchors)
+	}
+}
+
 // The Secure Client Setup keeps its own action set and flags: ensure and
 // --allowed-signers are argument errors there, worded as before the
 // standalone flavor existed.
@@ -376,6 +572,37 @@ func TestStandaloneSetupUsageAndErrorsSpeakTheDocumentedSyntax(t *testing.T) {
 	runEnterpriseSetup([]string{"/ensure", "BOGUS=1", "JSON=0"}, &stdout, &stderr)
 	if got := stderr.String(); !strings.HasPrefix(got, standaloneSetupArtifactName+": unknown property BOGUS; run ") || !strings.Contains(got, " /? ") {
 		t.Fatalf("unknown property error = %q", got)
+	}
+}
+
+// GAP-2398: the unknown-property hint named 11 of the 12 properties /? lists
+// (REFUSECAPABILITYLOSS=1 was missing). It now names every one.
+func TestStandaloneSetupUnknownPropertyHintNamesEveryUsageProperty(t *testing.T) {
+	previous := enterpriseSetupStandaloneFlavor
+	t.Cleanup(func() { enterpriseSetupStandaloneFlavor = previous })
+	enterpriseSetupStandaloneFlavor = func() bool { return true }
+	var usage, stdout, stderr bytes.Buffer
+	if code := runEnterpriseSetup([]string{"/?"}, &usage, &stderr); code != 0 {
+		t.Fatalf("help exit=%d", code)
+	}
+	stderr.Reset()
+	if code := runEnterpriseSetup([]string{"/status", "BOGUS=1"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("unknown property exit=%d, want a failure", code)
+	}
+	hint := stderr.String()
+	rows := regexp.MustCompile(`(?m)^  ([A-Z]+)=`).FindAllStringSubmatch(usage.String(), -1)
+	if len(rows) < 12 {
+		t.Fatalf("usage lists %d properties:\n%s", len(rows), usage.String())
+	}
+	for _, row := range rows {
+		if !regexp.MustCompile(`[(, ]` + row[1] + `=`).MatchString(hint) {
+			t.Errorf("unknown property hint lacks %s= that /? lists: %q", row[1], hint)
+		}
+	}
+	for _, want := range []string{"CONFIG=,", "REFUSECAPABILITYLOSS=1,", "TIMEOUTSECONDS=,", "ATTESTCLAUDEEFFECTIVEPOLICY=1)"} {
+		if !strings.Contains(hint, want) {
+			t.Errorf("unknown property hint lacks %q: %q", want, hint)
+		}
 	}
 }
 
@@ -524,16 +751,15 @@ func TestStandaloneSetupForceIsAnUninstallProperty(t *testing.T) {
 	}
 }
 
-// BUNDLE= and TRUSTANCHORS= are standalone /ensure properties; the signed
-// bundle carries the config, so BUNDLE= with CONFIG= is invalid arguments,
-// and the Secure Client Setup does not know them.
+// BUNDLE= and TRUSTANCHORS= are standalone /ensure properties (BUNDLE= with
+// CONFIG= is the single-app form, first_bundle_test.go), and the Secure
+// Client Setup does not know them.
 func TestStandaloneSetupBundleIsAnEnsureProperty(t *testing.T) {
 	opts, _, err := parseEnterpriseSetupOptionsForFlavor([]string{"/ensure", `BUNDLE=C:\b\v7.dcbundle`, `TrustAnchors=C:\b\a.json`, "REFUSECAPABILITYLOSS=1", "JSON=1"}, true)
 	if err != nil || opts.Bundle != `C:\b\v7.dcbundle` || opts.TrustAnchors != `C:\b\a.json` || !opts.RefuseCapabilityLoss {
 		t.Fatalf("standalone /ensure BUNDLE=: opts %+v, err %v", opts, err)
 	}
 	for _, arguments := range [][]string{
-		{"/ensure", `BUNDLE=C:\b\v7.dcbundle`, `CONFIG=C:\c.yaml`},
 		{"/repair", `BUNDLE=C:\b\v7.dcbundle`},
 		{"/status", `TRUSTANCHORS=C:\b\a.json`},
 		{"/ensure", "REFUSECAPABILITYLOSS=1"},
@@ -544,6 +770,72 @@ func TestStandaloneSetupBundleIsAnEnsureProperty(t *testing.T) {
 	}
 	if _, _, err := parseEnterpriseSetupOptionsForFlavor([]string{"/install", "--config=a", "--manifest=b", `BUNDLE=C:\b\v7.dcbundle`}, false); err == nil {
 		t.Fatal("the Secure Client Setup accepted BUNDLE=")
+	}
+}
+
+func TestStandaloneSetupRefuseCapabilityLossNamesTheCorrectNextStep(t *testing.T) {
+	t.Run("ensure without bundle", func(t *testing.T) {
+		_, _, err := parseStandaloneEnterpriseSetupOptions([]string{"/ensure", "REFUSECAPABILITYLOSS=1"})
+		if err == nil {
+			t.Fatal("REFUSECAPABILITYLOSS=1 was accepted without BUNDLE=")
+		}
+		for _, want := range []string{"REFUSECAPABILITYLOSS=1 requires BUNDLE=", "nothing was changed", "deliver both with Setup /ensure"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("refusal %q does not name %q", err, want)
+			}
+		}
+	})
+	for _, action := range []string{"install", "upgrade", "repair"} {
+		for _, bundle := range []string{"", `BUNDLE=C:\b\v7.dcbundle`} {
+			name := action
+			arguments := []string{"/" + action, "REFUSECAPABILITYLOSS=1"}
+			if bundle != "" {
+				name += " with bundle"
+				arguments = append(arguments, bundle)
+			}
+			t.Run(name, func(t *testing.T) {
+				_, _, err := parseStandaloneEnterpriseSetupOptions(arguments)
+				if err == nil {
+					t.Fatal("REFUSECAPABILITYLOSS=1 was accepted outside /ensure")
+				}
+				for _, want := range []string{"REFUSECAPABILITYLOSS=1", "only with /ensure", "nothing was changed", "Setup /ensure"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("refusal %q does not name %q", err, want)
+					}
+				}
+				if bundle == "" {
+					if !strings.Contains(err.Error(), "requires BUNDLE=") || !strings.Contains(err.Error(), "deliver both") {
+						t.Errorf("missing bundle refusal %q does not name both inputs", err)
+					}
+				} else if strings.Contains(err.Error(), "requires BUNDLE=") || !strings.Contains(err.Error(), "deliver BUNDLE= and REFUSECAPABILITYLOSS=1") {
+					t.Errorf("supplied bundle refusal %q names the wrong cause or next step", err)
+				}
+			})
+		}
+	}
+}
+
+// #1288 refuses anchors with an unsigned CONFIG= (or the --mode shorthand,
+// which renders one) with bundle_required, exit 1639. Setup refused it over
+// the command line, so the refused anchor install had no
+// config.trust_anchors.changed row, which the defenseclaw.exe route leaves
+// (GAP-0608). Setup now hands every TRUSTANCHORS= mutation to the lifecycle,
+// which refuses it before it changes anything and records the refusal.
+func TestStandaloneSetupLeavesTrustAnchorRefusalsToTheLifecycle(t *testing.T) {
+	for _, arguments := range [][]string{
+		{"/ensure", `TRUSTANCHORS=C:\b\a.json`, `CONFIG=C:\c.yaml`},
+		{"/ensure", `CONFIG=C:\c.yaml`, `trust-anchors=C:\b\a.json`},
+		{"/ensure", `TRUSTANCHORS=C:\b\a.json`, "--mode=action", "--connector=codex"},
+		{"/ensure", `TRUSTANCHORS=C:\b\a.json`, `BUNDLE=C:\b\v7.dcbundle`, `CONFIG=C:\c.yaml`},
+		{"/ensure", `TRUSTANCHORS=C:\b\a.json`, "REFUSECAPABILITYLOSS=1"},
+		{"/repair", `TRUSTANCHORS=C:\b\a.json`},
+		{"/ensure", `BUNDLE=C:\b\v7.dcbundle`, `TRUSTANCHORS=C:\b\a.json`},
+		{"/ensure", `TRUSTANCHORS=C:\b\a.json`},
+	} {
+		opts, _, err := parseStandaloneEnterpriseSetupOptions(arguments)
+		if err != nil || opts.TrustAnchors != `C:\b\a.json` {
+			t.Errorf("standalone %v: err %v, anchors %q; want the run handed to the lifecycle", arguments, err, opts.TrustAnchors)
+		}
 	}
 }
 
@@ -625,37 +917,147 @@ func TestStandaloneSetupTimeoutNamesTheRecovery(t *testing.T) {
 	}
 }
 
-// TestWithoutPolicyCompilerKeepsTheRestOfThePayload pins DAMAGE-678 A1: an
-// untrusted outer Setup image loses only the Fleet compiler.
-func TestWithoutPolicyCompilerKeepsTheRestOfThePayload(t *testing.T) {
-	files := map[string]enterprisePayloadManifestFile{}
-	for _, name := range standalonePayloadFiles {
-		files[name] = enterprisePayloadManifestFile{Name: name, SHA256: strings.Repeat("a", 64), Size: 1}
+func TestStandaloneSetupTimeoutReportsTheRecoveredDeployment(t *testing.T) {
+	opts := enterpriseSetupOptions{Action: "ensure", JSON: true, Config: `C:\stage\config.yaml`, LifecycleTimeout: time.Minute}
+	recovered := enterprisestatus.New("recover", "standalone", "windows", "1.0.3")
+	recovered.Installed = true
+	recovered.InstalledVersion = "1.0.3"
+	recovered.TransactionPending = false
+	recovered.Services = append(recovered.Services, enterprisestatus.Service{
+		Name: "DefenseClawGateway", Kind: "gateway", State: "running", Required: true,
+	})
+	recovered.Finish("windows", enterpriseFailureExitCode)
+	var stdout, stderr bytes.Buffer
+	writeEnterpriseSetupFailureFor(&stdout, &stderr, true, standaloneSetupArtifactName, opts,
+		standaloneEnterpriseSetupTimeoutWithRecovery(opts, context.DeadlineExceeded, recovered), enterpriseFailureExitCode)
+	var result struct {
+		Action             string `json:"action"`
+		OK                 bool   `json:"ok"`
+		ExitCode           int    `json:"exit_code"`
+		Installed          bool   `json:"installed"`
+		InstalledVersion   string `json:"installed_version"`
+		TransactionPending bool   `json:"transaction_pending"`
+		Services           []struct {
+			Name  string `json:"name"`
+			State string `json:"state"`
+		} `json:"services"`
+		Errors []struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"errors"`
 	}
-	payload := enterprisePayload{
-		Manifest: enterprisePayloadManifest{DistributionFlavor: standaloneFlavor},
-		Files:    files,
-		Required: append([]string{}, standalonePayloadFiles...),
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || result.Action != "ensure" ||
+		result.OK || result.ExitCode != enterpriseFailureExitCode || !result.Installed ||
+		result.InstalledVersion != "1.0.3" || result.TransactionPending ||
+		len(result.Services) != 1 || result.Services[0].Name != "DefenseClawGateway" ||
+		result.Services[0].State != "running" || len(result.Errors) != 1 ||
+		result.Errors[0].Code != "lifecycle_timeout" || stderr.Len() != 0 {
+		t.Fatalf("timeout lost recovered deployment proof: %s (%v)", stdout.String(), err)
 	}
-	if !payload.CarriesPolicyCompiler() {
-		t.Fatal("standalone payload does not carry the Fleet compiler")
+	// GAP-1709: the recovered result names the same action with a longer
+	// limit, not a bare "retry".
+	if want := `as LocalSystem with a longer limit: /ensure CONFIG=C:\stage\config.yaml JSON=1 TIMEOUTSECONDS=7200`; !strings.Contains(result.Errors[0].Message, want) {
+		t.Fatalf("recovered timeout does not name the longer retry %q: %s", want, result.Errors[0].Message)
 	}
-	withheld := payload.withoutPolicyCompiler()
-	if withheld.CarriesPolicyCompiler() {
-		t.Fatal("withheld payload still offers the Fleet compiler")
-	}
-	if !payload.CarriesPolicyCompiler() || len(payload.Required) != len(standalonePayloadFiles) {
-		t.Fatal("withholding the compiler changed the original payload")
-	}
-	if len(withheld.Required) != len(standalonePayloadFiles)-1 || len(withheld.Files) != len(standalonePayloadFiles)-1 {
-		t.Fatalf("withheld payload = %d required, %d files; want every other file", len(withheld.Required), len(withheld.Files))
-	}
-	for _, name := range withheld.Required {
-		if name == policyCompilerPayloadName {
-			t.Fatal("withheld payload still stages the Fleet compiler")
+}
+
+// GAP-2114: the recovered-timeout retry repeats the request as it was given,
+// every property it had and none it did not, with the longest limit.
+func TestStandaloneSetupRetryRepeatsTheRequestAsGiven(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"/ensure", `CONFIG=C:\stage\config.yaml`, "JSON=1", "TIMEOUTSECONDS=60"}, `/ensure CONFIG=C:\stage\config.yaml JSON=1 TIMEOUTSECONDS=7200`},
+		{[]string{"/ensure", `BUNDLE=C:\stage\policy.dcbundle`, "REFUSECAPABILITYLOSS=1", "TIMEOUTSECONDS=60"}, `/ensure BUNDLE=C:\stage\policy.dcbundle REFUSECAPABILITYLOSS=1 TIMEOUTSECONDS=7200`},
+		{[]string{"/upgrade", "JSON=1", "TIMEOUTSECONDS=90"}, `/upgrade JSON=1 TIMEOUTSECONDS=7200`},
+		{[]string{"/upgrade", "NOSTART=1", "ALLOWEDSIGNERS=" + strings.Repeat("ab", 32), "JSON=1"}, `/upgrade NOSTART=1 ALLOWEDSIGNERS=` + strings.Repeat("ab", 32) + ` JSON=1 TIMEOUTSECONDS=7200`},
+		{[]string{"/install", `CONFIG=C:\s\config.yaml`, `MANIFEST=C:\s\targets.yaml`, "JSON=1"}, `/install CONFIG=C:\s\config.yaml MANIFEST=C:\s\targets.yaml JSON=1 TIMEOUTSECONDS=7200`},
+		{[]string{"/repair", "ATTESTCLAUDEEFFECTIVEPOLICY=1", "JSON=1"}, `/repair ATTESTCLAUDEEFFECTIVEPOLICY=1 JSON=1 TIMEOUTSECONDS=7200`},
+		{[]string{"/uninstall", "PURGE=1", "JSON=1"}, `/uninstall PURGE=1 JSON=1 TIMEOUTSECONDS=7200`},
+		{[]string{"/uninstall", "FORCE=1", "TIMEOUTSECONDS=120"}, `/uninstall FORCE=1 TIMEOUTSECONDS=7200`},
+		{[]string{"/ensure", `CONFIG=C:\Program Data\config.yaml`}, `/ensure CONFIG="C:\Program Data\config.yaml" TIMEOUTSECONDS=7200`},
+	} {
+		opts, _, err := parseStandaloneEnterpriseSetupOptions(tc.args)
+		if err != nil {
+			t.Fatalf("%v: %v", tc.args, err)
 		}
-		if _, ok := withheld.Files[name]; !ok {
-			t.Fatalf("withheld payload lost %s", name)
+		if got := standaloneSetupRetryCommand(opts, 7200); got != tc.want {
+			t.Fatalf("%v: retry = %q, want %q", tc.args, got, tc.want)
 		}
+		if strings.Contains(tc.want, `"`) {
+			continue
+		}
+		again, _, err := parseStandaloneEnterpriseSetupOptions(strings.Fields(tc.want))
+		if err != nil {
+			t.Fatalf("printed retry %q does not parse: %v", tc.want, err)
+		}
+		opts.LifecycleTimeout, again.LifecycleTimeout = 0, 0
+		if !reflect.DeepEqual(opts, again) {
+			t.Fatalf("printed retry %q is another request:\n got %+v\nwant %+v", tc.want, again, opts)
+		}
+	}
+	opts, _, err := parseStandaloneEnterpriseSetupOptions([]string{"/uninstall", "PURGE=1", "JSON=1", "TIMEOUTSECONDS=60"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered := enterprisestatus.New("recover", "standalone", "windows", "1.0.2")
+	recovered.Installed = true
+	recovered.Finish("windows", enterpriseFailureExitCode)
+	message := standaloneEnterpriseSetupTimeoutWithRecovery(opts, context.DeadlineExceeded, recovered).Error()
+	if !strings.Contains(message, "with a longer limit: /uninstall PURGE=1 JSON=1 TIMEOUTSECONDS=7200") || strings.Contains(message, "CONFIG=") {
+		t.Fatalf("recovered uninstall timeout does not repeat PURGE=1: %s", message)
+	}
+}
+
+// rel-1-0-6:GAP-0321: a refusal of Setup itself (low disk space here) on an
+// installed computer reports the recorded deployment and its services, not
+// installed=false, no version and no services.
+func TestStandaloneSetupRefusalReportsTheRecordedDeployment(t *testing.T) {
+	original := enterpriseSetupRecordedDeployment
+	t.Cleanup(func() { enterpriseSetupRecordedDeployment = original })
+	opts := enterpriseSetupOptions{Action: "ensure", JSON: true}
+	refusal := errors.New("not enough free disk space to ensure: C: has 599 MB free and about 2100 MB is needed; free some space and run Setup again")
+	decode := func(output []byte) (installed bool, version string, services int, warning string) {
+		var result struct {
+			Installed        bool   `json:"installed"`
+			InstalledVersion string `json:"installed_version"`
+			Services         []struct {
+				Name string `json:"name"`
+			} `json:"services"`
+			Warnings []struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"warnings"`
+		}
+		if err := json.Unmarshal(output, &result); err != nil {
+			t.Fatalf("result %s: %v", output, err)
+		}
+		for _, w := range result.Warnings {
+			if w.Code == "health_not_checked" {
+				warning = w.Message
+			}
+		}
+		return result.Installed, result.InstalledVersion, len(result.Services), warning
+	}
+	enterpriseSetupRecordedDeployment = func(result *enterprisestatus.Result) bool {
+		result.Installed, result.InstalledVersion = true, "1.0.7"
+		for _, name := range []string{"DefenseClawGateway", "DefenseClawHookGuardian", "DefenseClawHookEnumerator", "DefenseClawSensorHelper"} {
+			result.Services = append(result.Services, enterprisestatus.Service{Name: name, State: "running", Required: true})
+		}
+		return true
+	}
+	var stdout, stderr bytes.Buffer
+	writeEnterpriseSetupFailureFor(&stdout, &stderr, true, standaloneSetupArtifactName, opts, refusal, enterpriseFailureExitCode)
+	installed, version, services, warning := decode(stdout.Bytes())
+	if !installed || version != "1.0.7" || services != 4 || !strings.Contains(warning, "the deployment this computer records") {
+		t.Fatalf("installed computer: installed=%v version=%q services=%d warning=%q", installed, version, services, warning)
+	}
+	enterpriseSetupRecordedDeployment = func(*enterprisestatus.Result) bool { return false }
+	stdout.Reset()
+	writeEnterpriseSetupFailureFor(&stdout, &stderr, true, standaloneSetupArtifactName, opts, refusal, enterpriseFailureExitCode)
+	installed, version, services, warning = decode(stdout.Bytes())
+	if installed || version != "" || services != 0 || !strings.Contains(warning, "not evaluated") {
+		t.Fatalf("computer with no deployment: installed=%v version=%q services=%d warning=%q", installed, version, services, warning)
 	}
 }

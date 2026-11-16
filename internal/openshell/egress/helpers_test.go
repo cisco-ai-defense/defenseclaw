@@ -486,7 +486,7 @@ func closedByProxy(conn net.Conn, br *bufio.Reader, wait time.Duration) bool {
 	_ = conn.SetReadDeadline(time.Now().Add(wait))
 	_, err := br.ReadByte()
 	var ne net.Error
-	return err != nil && !(errors.As(err, &ne) && ne.Timeout())
+	return err != nil && (!(errors.As(err, &ne)) || !(ne.Timeout()))
 }
 
 // waitClosed fails unless the proxy closes the client connection.

@@ -252,8 +252,11 @@ func TestCounterPendingFlow(t *testing.T) {
 	if s := c.Destinations(); len(s) != 0 || f.down.Load() != 0 {
 		t.Fatalf("pending flow counted: %+v, down %d", s, f.down.Load())
 	}
-	if !f.open() || !f.open() {
+	if !f.open() {
 		t.Error("the first open is not reported as first contact")
+	}
+	if !f.open() {
+		t.Error("repeated open lost the binding first-contact result")
 	}
 	f.addDown(7)
 	if v := f.addUp(10, false); v.cut || v.total != 10 {

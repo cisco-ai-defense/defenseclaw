@@ -13,12 +13,15 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 const (
@@ -52,9 +55,14 @@ func (a *APIServer) safeApplyExperimentalArtifactPromotion(
 				req.HookEventName,
 				"experimental artifact promotion",
 			)
-			resp = original
+			if original.Action == guardrailActionBlock {
+				resp = original
+			} else {
+				resp = a.hookPanicResponse(ctx, req.ConnectorName, req, nil, req.Payload)
+			}
 		}
 	}()
+	hookStageForTest(ctx, "artifact")
 	if a == nil || ManagedEnterpriseActive() || req.toolChain == nil ||
 		original.Action == guardrailActionBlock ||
 		original.RawAction == guardrailActionBlock ||
@@ -86,12 +94,7 @@ func (a *APIServer) safeApplyExperimentalArtifactPromotion(
 	}
 	intent := guardrailActionAllow
 	if enforceable := enforceableRuleFindings(findings); len(enforceable) > 0 {
-		intent = guardrailActionForConnector(
-			a.decisionConfig(ctx),
-			req.ConnectorName,
-			HighestSeverity(enforceable),
-			true,
-		)
+		intent = profileMeetActionForFindings(ctx, a.decisionConfig(ctx), req.ConnectorName, enforceable, true, false)
 	}
 	resp = mergeAgentHookFindings(profile, req, resp, findings, intent)
 	if !req.SuppressCorrelationEmit {
@@ -127,8 +130,19 @@ func promotedArtifactFindings(
 	if len(candidates) == 0 {
 		return nil
 	}
-	var findings []RuleFinding
-	seenRules := make(map[string]struct{})
+	// A strictest combination of profiles judges every artifact with each
+	// member's own rules (one list of findings each); any other profile
+	// judges it with its own.
+	members := []*compiledRulePackCategories{nil}
+	generation := snapshotRulePackGenerationFor(ctx, req.ConnectorName)
+	if generation != nil && len(generation.members) > 0 {
+		members = generation.members
+	}
+	findings := make([][]RuleFinding, len(members))
+	seenRules := make([]map[string]struct{}, len(members))
+	for i := range seenRules {
+		seenRules[i] = make(map[string]struct{})
+	}
 	for _, candidate := range candidates {
 		body, dialect, ok := readPromotedArtifactBounded(
 			ctx,
@@ -151,36 +165,102 @@ func promotedArtifactFindings(
 			DialectHint:                              dialect,
 		}
 		artifactFacts := actionfacts.Analyze(input)
+		bodyFacts := promotedArtifactBodyEnforcementFacts(input, artifactFacts)
 		outerCandidateEnforceable := preExecutionBoundary &&
 			promotedArtifactCandidateEnforcementEligible(facts, candidate)
 		enforcementCapable := outerCandidateEnforceable &&
-			artifactFacts.Authoritative() &&
-			artifactFacts.EnforcementEligible() &&
-			promotedArtifactSequentialReachabilityEligible(artifactFacts)
-		matched := dispatchTrustedAction(ctx, trustedActionRequest{
-			Input:              input,
-			LegacyText:         string(body),
-			Connector:          req.ConnectorName,
-			EnforcementCapable: enforcementCapable,
-			recordTelemetry:    recordTelemetry,
-		})
-		if req.toolChain != nil {
-			req.toolChain.recordArtifactTrustedAction(
-				artifactFacts,
-				matched,
-				enforcementCapable,
-			)
+			bodyFacts.Authoritative() &&
+			bodyFacts.EnforcementEligible() &&
+			promotedArtifactSequentialReachabilityEligible(bodyFacts)
+		lists := make([][]RuleFinding, 0, len(members))
+		var observed trustedActionTelemetry
+		// The members judge one artifact within one budget, as one profile does.
+		var budget *trustedActionBudget
+		if len(members) > 1 {
+			budget = newTrustedActionBudget(true)
 		}
-		for _, finding := range matched {
-			if _, duplicate := seenRules[finding.RuleID]; duplicate {
-				continue
+		for i, member := range members {
+			matched := dispatchTrustedAction(ctx, trustedActionRequest{
+				Input:              input,
+				LegacyText:         string(body),
+				ArtifactBody:       true,
+				Connector:          req.ConnectorName,
+				EnforcementCapable: enforcementCapable,
+				recordTelemetry:    func(telemetry trustedActionTelemetry) { observed.widen(telemetry) },
+				generation:         member,
+				budget:             budget,
+			})
+			if generation != nil && i < len(generation.memberNames) {
+				for j := range matched {
+					matched[j].profile = generation.memberNames[i]
+				}
 			}
-			seenRules[finding.RuleID] = struct{}{}
-			finding.Tags = appendUniqueStrings(finding.Tags, "artifact-promotion", "experimental")
-			findings = append(findings, finding)
+			lists = append(lists, matched)
+			for _, finding := range matched {
+				if _, duplicate := seenRules[i][finding.RuleID]; duplicate {
+					continue
+				}
+				seenRules[i][finding.RuleID] = struct{}{}
+				finding.Tags = appendUniqueStrings(finding.Tags, "artifact-promotion", "experimental")
+				findings[i] = append(findings[i], finding)
+			}
+		}
+		noteMeetBudget(generation, budget)
+		if recordTelemetry != nil && !observed.empty() {
+			recordTelemetry(observed)
+		}
+		if req.toolChain != nil {
+			chainLists := lists
+			chainEnabled := true
+			if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && resolved.set != nil {
+				if meet := resolved.evaluationMeet(); meet != nil {
+					chainEnabled = false
+					chainLists = nil
+					for _, member := range meet.members {
+						chainEnabled = chainEnabled || configBlocksOn(resolved.set.profileConfig(member), req.ConnectorName, profilePathHook)
+					}
+					if generation != nil && len(generation.memberNames) == len(lists) {
+						for i, member := range generation.memberNames {
+							if configBlocksOn(resolved.set.profileConfig(member), req.ConnectorName, profilePathHook) {
+								chainLists = append(chainLists, lists[i])
+							}
+						}
+					}
+				}
+			}
+			if chainEnabled {
+				var matched []RuleFinding
+				if len(chainLists) == 1 {
+					matched = chainLists[0]
+				} else if len(chainLists) > 1 {
+					matched = strongestRuleFindings(chainLists, trustedActionFindingKey)
+				}
+				req.toolChain.recordArtifactTrustedAction(artifactFacts, matched, enforcementCapable)
+			}
 		}
 	}
-	return findings
+	var all []RuleFinding
+	for _, member := range findings {
+		all = append(all, member...)
+	}
+	return all
+}
+
+// promotedArtifactBodyEnforcementFacts returns the facts that decide whether
+// a match in a script may block: its analysis, or for a script whose simple
+// commands sit in && or || lists or other compound commands, those commands
+// read as if each runs, as the same commands in the tool call would be.
+func promotedArtifactBodyEnforcementFacts(
+	input actionfacts.Input,
+	facts actionfacts.Facts,
+) actionfacts.Facts {
+	if view, ok := actionfacts.ShortCircuitListReduction(input, facts); ok {
+		return view
+	}
+	if view, ok := actionfacts.CompoundCommandReduction(input, facts); ok {
+		return view
+	}
+	return facts
 }
 
 // promotedArtifactSequentialReachabilityEligible masks a narrow POSIX case
@@ -248,6 +328,14 @@ func promotedArtifactCandidates(facts actionfacts.Facts) []promotedArtifactCandi
 			continue
 		}
 		resolved = filepath.Clean(resolved)
+		if opened, stepsUp := promotedArtifactOpenedPath(
+			path.Value, facts.CWD, facts.ActiveHome, promotedArtifactAfterDirectoryChange(facts, command),
+		); stepsUp {
+			if opened == "" {
+				continue
+			}
+			resolved = opened
+		}
 		if !promotedArtifactPathIsLocal(resolved) {
 			continue
 		}
@@ -269,7 +357,132 @@ func promotedArtifactCandidates(facts actionfacts.Facts) []promotedArtifactCandi
 	return result
 }
 
+// promotedArtifactCandidateEnforcementEligible reports whether a match in the
+// candidate script may block. The executed script call is judged with its
+// own static argv even when a shell assignment, redirect or compound command
+// surrounds it. A block stops the whole tool call before any of it runs.
 func promotedArtifactCandidateEnforcementEligible(
+	facts actionfacts.Facts,
+	candidate promotedArtifactCandidate,
+) bool {
+	if promotedArtifactActionEnforcementEligible(facts, candidate) {
+		return true
+	}
+	alone, ok := promotedArtifactCandidateAlone(facts, candidate)
+	if !ok {
+		return false
+	}
+	for _, executing := range promotedArtifactCandidates(alone) {
+		if promotedArtifactCandidateKey(executing) ==
+			promotedArtifactCandidateKey(candidate) {
+			return promotedArtifactActionEnforcementEligible(alone, executing)
+		}
+	}
+	return false
+}
+
+// promotedArtifactCandidateAlone returns the analysis of the candidate's own
+// simple command with the action's context, as if the tool call were only that
+// command. It is unavailable for a relative script path after a command of
+// the action that may have changed the directory that path resolves against.
+func promotedArtifactCandidateAlone(
+	facts actionfacts.Facts,
+	candidate promotedArtifactCandidate,
+) (actionfacts.Facts, bool) {
+	// Only uncertainty that the other commands of a compound command, or
+	// the script itself, may explain. The candidate's own is found again
+	// when it is analysed alone. An incomparable raw command and argv source
+	// has its own issue and cannot be repaired by this standalone analysis.
+	if facts.Parse.Status != actionfacts.StatusPartial ||
+		slices.ContainsFunc(facts.Parse.Issues, func(issue actionfacts.IssueCode) bool {
+			return !promotedArtifactCompoundIssues[issue]
+		}) {
+		return actionfacts.Facts{}, false
+	}
+	index := slices.IndexFunc(facts.Commands, func(command actionfacts.CommandFact) bool {
+		return command.ID == candidate.commandID
+	})
+	if index < 0 {
+		return actionfacts.Facts{}, false
+	}
+	command := facts.Commands[index]
+	if !promotedArtifactOnlyShellWrapped(facts, command) || len(command.Argv) == 0 ||
+		len(command.Argv) != len(command.Arguments) ||
+		slices.ContainsFunc(command.Arguments, func(argument actionfacts.ArgumentFact) bool {
+			return argument.Expands
+		}) {
+		return actionfacts.Facts{}, false
+	}
+	relative := slices.ContainsFunc(facts.Paths, func(path actionfacts.PathFact) bool {
+		return path.CommandID == command.ID && !path.Absolute
+	})
+	if relative && slices.ContainsFunc(facts.Commands, func(earlier actionfacts.CommandFact) bool {
+		return earlier.ID < command.ID && actionfacts.ChangesShellDirectory(earlier)
+	}) {
+		return actionfacts.Facts{}, false
+	}
+	input := actionfacts.Input{
+		Tool:                                     facts.Tool,
+		CWD:                                      facts.CWD,
+		ActiveHome:                               facts.ActiveHome,
+		ActiveAgentFiles:                         append([]string(nil), facts.ActiveAgentFiles...),
+		ActiveAgentFilesCaseInsensitive:          append([]string(nil), facts.ActiveAgentFilesCaseInsensitive...),
+		ActiveAgentFilesCaseInsensitiveUncertain: facts.ActiveAgentFilesCaseInsensitiveUncertain,
+		ActiveAgentFilesUncertain:                facts.ActiveAgentFilesUncertain,
+		DialectHint:                              command.Dialect,
+	}
+	if command.Dialect == actionfacts.DialectPOSIX {
+		// The POSIX argv form of an action is not read as a shell command,
+		// so the command is quoted back into shell text.
+		words := make([]string, 0, len(command.Argv))
+		for _, word := range command.Argv {
+			quoted, err := syntax.Quote(word, syntax.LangBash)
+			if err != nil {
+				return actionfacts.Facts{}, false
+			}
+			words = append(words, quoted)
+		}
+		input.Command = strings.Join(words, " ")
+	} else {
+		input.Argv = append([]string(nil), command.Argv...)
+	}
+	return actionfacts.Analyze(input), true
+}
+
+// promotedArtifactOnlyShellWrapped reports whether command is a top-level
+// command, or one that runs only inside shell command strings (`bash -c
+// ". ./x"`, `sh -c "bash -c ..."`) and nothing else: every command above it
+// is such a shell, so the command alone has the verdict it has typed at the
+// top level. Any other launcher (sudo, env, find -exec, a pipeline stage)
+// keeps the match detection-only.
+func promotedArtifactOnlyShellWrapped(facts actionfacts.Facts, command actionfacts.CommandFact) bool {
+	if command.ParentCommandID == 0 {
+		return len(command.Wrappers) == 0
+	}
+	depth := 0
+	for parent := command.ParentCommandID; parent != 0; depth++ {
+		index := slices.IndexFunc(facts.Commands, func(candidate actionfacts.CommandFact) bool {
+			return candidate.ID == parent
+		})
+		if index < 0 || depth >= len(command.Wrappers) {
+			return false
+		}
+		parent = facts.Commands[index].ParentCommandID
+	}
+	return depth == len(command.Wrappers) &&
+		!slices.ContainsFunc(command.Wrappers, func(wrapper actionfacts.WrapperFact) bool {
+			return !actionfacts.IsShellCommandStringWrapper(wrapper)
+		})
+}
+
+var promotedArtifactCompoundIssues = map[actionfacts.IssueCode]bool{
+	actionfacts.IssueOpaqueArtifact:        true,
+	actionfacts.IssueUnsupportedConstruct:  true,
+	actionfacts.IssueDynamicWord:           true,
+	actionfacts.IssueUnknownOperandGrammar: true,
+}
+
+func promotedArtifactActionEnforcementEligible(
 	facts actionfacts.Facts,
 	candidate promotedArtifactCandidate,
 ) bool {
@@ -317,6 +530,58 @@ func promotedArtifactCandidateKey(candidate promotedArtifactCandidate) string {
 		key = strings.ToLower(key)
 	}
 	return key
+}
+
+// promotedArtifactOpenedPath is the file the system opens for a script
+// operand whose spelling steps up (..) after a name. The path fact cleans such
+// a spelling as text, but a folder link on the way is followed before the
+// step (link/../x.sh is the parent of the folder the link leads to), so the
+// cleaned spelling can name another file than the one that runs. stepsUp is
+// false for every other operand, which keeps the fact path; opened is empty
+// when the system opens no file for the spelling (or the spelling needs an
+// expansion that is not known here). Windows resolves .. as text before it
+// follows a link, so its fact is already the file opened.
+func promotedArtifactOpenedPath(value, cwd, home string, moved bool) (opened string, stepsUp bool) {
+	if runtime.GOOS == "windows" || !slices.Contains(strings.Split(value, "/"), "..") {
+		return "", false
+	}
+	if value == "~" || strings.HasPrefix(value, "~/") {
+		if !filepath.IsAbs(home) {
+			return "", true
+		}
+		value = strings.TrimRight(home, "/") + value[1:]
+	}
+	if strings.Contains(value, "$") {
+		return "", true
+	}
+	if !filepath.IsAbs(value) {
+		if !filepath.IsAbs(cwd) || moved {
+			return "", true
+		}
+		value = strings.TrimRight(cwd, "/") + "/" + value
+	}
+	// The system answers first: a pathname it refuses (more links than it
+	// follows in one name, a folder it cannot search) opens no script,
+	// while EvalSymlinks follows many more links than the system does.
+	if _, err := os.Stat(value); err != nil {
+		return "", true
+	}
+	physical, err := filepath.EvalSymlinks(value)
+	if err != nil {
+		return "", true
+	}
+	return physical, true
+}
+
+// promotedArtifactAfterDirectoryChange reports that command runs after a
+// command of the action that may have changed the directory a relative name
+// resolves against. The facts keep the folder the hook started in, so the
+// file such a name opens is not known here; the hook client and the gateway
+// reader of the placed statements judge it in the folder it runs in.
+func promotedArtifactAfterDirectoryChange(facts actionfacts.Facts, command actionfacts.CommandFact) bool {
+	return slices.ContainsFunc(facts.Commands, func(earlier actionfacts.CommandFact) bool {
+		return earlier.ID < command.ID && actionfacts.ChangesShellDirectory(earlier)
+	})
 }
 
 func promotedArtifactPathIsLocal(path string) bool {
@@ -433,7 +698,7 @@ func readPromotedArtifact(
 	path string,
 	dialectHint actionfacts.Dialect,
 ) ([]byte, actionfacts.Dialect, bool) {
-	before, err := os.Lstat(path)
+	before, err := pathidentity.LstatPinned(path)
 	if err != nil || !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 ||
 		before.Size() <= 0 || before.Size() > promotedArtifactMaxBytes {
 		return nil, actionfacts.DialectNone, false

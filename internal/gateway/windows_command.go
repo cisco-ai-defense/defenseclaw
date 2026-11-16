@@ -606,7 +606,7 @@ func windowsSensitivePathFindingsWithOptions(
 			return nil
 		}
 	}
-	n := strings.ToLower(strings.ReplaceAll(text, `/`, `\`))
+	n := windowsNameFold(strings.ReplaceAll(text, `/`, `\`))
 	n = strings.ReplaceAll(n, `%userprofile%`, `__userprofile__`)
 	n = strings.ReplaceAll(n, `$env:userprofile`, `__userprofile__`)
 	n = strings.ReplaceAll(n, `%appdata%`, `__appdata__`)

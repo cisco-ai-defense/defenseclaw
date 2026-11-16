@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/firewall"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // Compiler generates iptables rules for Linux.
@@ -34,7 +35,7 @@ func New() *Compiler { return &Compiler{} }
 
 func (c *Compiler) Platform() string { return "iptables" }
 
-var safeArgPattern = regexp.MustCompile(`^[a-zA-Z0-9._:/%\-]+$`)
+var safeArgPattern = lazyregexp.New(`^[a-zA-Z0-9._:/%\-]+$`)
 
 var knownFlags = map[string]bool{
 	"-A": true, "-D": true, "-I": true, "-F": true, "-P": true, "-N": true, "-X": true,

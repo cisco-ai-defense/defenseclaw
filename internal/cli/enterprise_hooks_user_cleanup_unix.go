@@ -226,7 +226,9 @@ func reconcileEnterpriseHookStandaloneUnixCleanups(
 		}
 	}
 	for _, label := range result.Pending {
-		if !known[label] {
+		if ctx.Err() != nil {
+			fmt.Fprintf(log, "[hook-guardian] %s: no longer enrolled; the pass ended before the cleanup finished, so it resumes on the next pass\n", label)
+		} else if !known[label] {
 			fmt.Fprintf(log, "[hook-guardian] %s: no longer enrolled; the home is not available, so removing DefenseClaw's registration is recorded and retried\n", label)
 		}
 	}
@@ -244,11 +246,18 @@ func reconcileEnterpriseHookStandaloneUnixCleanups(
 // Nothing was removed, and nothing is left to remove.
 var errEnterpriseHookCleanupHomeGone = errors.New("the recorded home no longer exists")
 
+// enterpriseHookCleanupAccountGone confirms, outside this long-running
+// process, that an account a lookup still found has no directory record
+// (unixidentity.AccountRecordGone). Tests replace it.
+var enterpriseHookCleanupAccountGone = unixidentity.AccountRecordGone
+
 // enterpriseHookRecordedHomeGone reports a recorded home that definitively
-// does not exist: its parent directory answers and the home itself is not
-// there. A home that does not answer in time, or whose parent is missing
-// too (an unmounted volume), is not gone. A cleanup is retired on this
-// evidence only when the directory also gives the account no home.
+// does not exist: its parent directory answers, holds other entries, and
+// the home itself is not there. A home that does not answer in time, or
+// whose parent is missing too or empty (an unmounted volume: its mount
+// point stays as an empty folder, GAP-0443), is not gone. A cleanup is
+// retired on this evidence only when the directory also gives the account
+// no home.
 var enterpriseHookRecordedHomeGone = func(home string) bool {
 	home = filepath.Clean(home)
 	if !filepath.IsAbs(home) || home == filepath.Dir(home) {
@@ -259,7 +268,55 @@ var enterpriseHookRecordedHomeGone = func(home string) bool {
 		return false
 	}
 	_, err = enterprisehooks.BoundedLstat(home, enterpriseHookHomeCheckTimeout)
-	return errors.Is(err, os.ErrNotExist)
+	if !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	others, err := enterprisehooks.BoundedDirHasEntries(filepath.Dir(home), enterpriseHookHomeCheckTimeout)
+	return err == nil && others
+}
+
+// enterpriseHookLiveHomeGone reports whether the recorded home of a live
+// account (the directory still gives it that home) is gone, so its
+// registrations went with it and the uninstall warns and goes on (#1287).
+// A home that was moved or renamed aside in its home root (mv /Users/u
+// /Users/.u-away) is not gone: a folder the account owns next to it still
+// holds its agent configs with DefenseClaw entries that call the hook
+// binary, as the guardian says ("not available yet"). That home only is not
+// available, and the uninstall refuses before anything changes, as it does
+// for the same home on the pending-cleanup path (GAP-2482).
+func enterpriseHookLiveHomeGone(home string, uid int) bool {
+	return enterpriseHookRecordedHomeGone(home) && !enterpriseHookHomeMovedAside(home, uid)
+}
+
+// enterpriseHookHomeMovedAside reports whether the home root of a missing
+// home holds another folder owned by the account. Tests replace it.
+var enterpriseHookHomeMovedAside = func(home string, uid int) bool {
+	home = filepath.Clean(home)
+	moved, err := enterprisehooks.BoundedDirHasOwnedSubdir(filepath.Dir(home), uid, filepath.Base(home), enterpriseHookHomeCheckTimeout)
+	return moved || err != nil
+}
+
+// enterpriseHookRecordedHomeMoved reports whether a re-homed account's
+// recorded home counts as moved: it is gone, or it is an empty folder (an
+// rsync, then its contents deleted). A recorded home that still holds any
+// entry, or cannot be read, is a copy: the cleanup ran in it too and found
+// it clean, and the audit line must not call it a move (rel-1-0-3
+// GAP-0257).
+func enterpriseHookRecordedHomeMoved(home string) bool {
+	if enterpriseHookRecordedHomeGone(home) {
+		return true
+	}
+	info, err := enterprisehooks.BoundedLstat(home, enterpriseHookHomeCheckTimeout)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	dir, err := os.Open(home)
+	if err != nil {
+		return false
+	}
+	defer dir.Close()
+	names, err := dir.Readdirnames(1)
+	return len(names) == 0 && errors.Is(err, io.EOF)
 }
 
 // enterpriseHookDirectoryNoHome reports a directory home that is no home:
@@ -332,6 +389,81 @@ func (e *enterpriseHookCleanupOldHomeKeptError) Error() string {
 		e.home, e.name, e.connector, e.currentHome, e.reason, e.connector, e.home)
 }
 
+// enterpriseHookCleanupUnverifiedError keeps a re-homed row when a worker's
+// report does not prove that it acted inside its assigned home, or the
+// current home still has DefenseClaw entries after one immediate retry.
+type enterpriseHookCleanupUnverifiedError struct {
+	changed    *enterpriseHookTargetHomeChangedError
+	connector  string
+	dataDir    string
+	home       string
+	path       string
+	configPath string
+	reason     string
+}
+
+func (e *enterpriseHookCleanupUnverifiedError) Unwrap() error { return e.changed }
+
+func (e *enterpriseHookCleanupUnverifiedError) Error() string {
+	location := "in the home " + e.home
+	if e.configPath != "" && e.configPath != e.home {
+		location = "at " + e.configPath
+	}
+	return fmt.Sprintf("%s: cleanup cannot be verified at %s (%s); remove DefenseClaw's entries from that agent's config %s, delete the stale copied receipt under %s if it keeps naming the other home, and rerun",
+		e.changed, e.path, e.reason, location, filepath.Join(e.dataDir, "connector_backups", e.connector)+string(filepath.Separator))
+}
+
+func newEnterpriseHookCleanupUnverifiedError(changed *enterpriseHookTargetHomeChangedError, entry enterpriseHookUserCleanup,
+	home, dataDir, path, reason string, report enterpriseHookWorkerTargetResult,
+) *enterpriseHookCleanupUnverifiedError {
+	configPath := home
+	for _, candidate := range report.CleanedPaths {
+		if enterpriseHookWorkerPathWithin(home, candidate) {
+			configPath = candidate
+			break
+		}
+	}
+	return &enterpriseHookCleanupUnverifiedError{changed: changed, connector: entry.Connector,
+		dataDir: dataDir, home: home, path: path, configPath: configPath, reason: reason}
+}
+
+// enterpriseHookCleanupReportProblem names why a worker's report does not
+// prove its home clean: no path report, a path outside that home, or a
+// DefenseClaw entry still there. Both the current and the recorded home of a
+// re-homed row must pass it, since the agent can load either (GAP-0625).
+func enterpriseHookCleanupReportProblem(report enterpriseHookWorkerTargetResult, home string) (string, string) {
+	if !report.PathsReported {
+		reason := "the worker did not report the paths it found"
+		if report.Unverified != "" {
+			reason += ": " + report.Unverified
+		}
+		return home, reason
+	}
+	for _, path := range report.CleanedPaths {
+		if !enterpriseHookWorkerPathWithin(home, path) {
+			return path, "the worker reported a path outside the home it cleaned"
+		}
+	}
+	if report.Remaining != "" {
+		path := home
+		if len(report.CleanedPaths) != 0 {
+			path = report.CleanedPaths[0]
+		}
+		return path, "DefenseClaw entries remain: " + report.Remaining
+	}
+	return "", ""
+}
+
+func enterpriseHookCleanupFailurePath(report enterpriseHookWorkerTargetResult, home string) string {
+	if path, _ := enterpriseHookCleanupReportProblem(report, home); path != "" {
+		return path
+	}
+	if len(report.CleanedPaths) != 0 {
+		return report.CleanedPaths[0]
+	}
+	return home
+}
+
 // attemptEnterpriseHookStandaloneUnixCleanup removes one registration in
 // the per-user worker, with the user's credentials. An unavailable home or
 // directory is pending. An account that no longer exists (or whose name now
@@ -347,8 +479,9 @@ func (e *enterpriseHookCleanupOldHomeKeptError) Error() string {
 // *enterpriseHookCleanupHomeKeptError, which an uninstall also only warns.
 // A live account re-homed to a trusted real path is cleaned in its current
 // home and also in its recorded home when that home still exists and is
-// trusted. An existing recorded home that cannot be trusted keeps the row
-// with a warning. An untrusted or unavailable new home keeps the row
+// trusted. An incomplete cleanup in either home keeps the row with the
+// affected path in its warning. An existing recorded home that cannot be
+// trusted also keeps the row. An untrusted or unavailable new home keeps it
 // fail-closed until the account is removed, its uid changes, or its home is
 // fixed.
 func attemptEnterpriseHookStandaloneUnixCleanup(
@@ -357,6 +490,27 @@ func attemptEnterpriseHookStandaloneUnixCleanup(
 	entry enterpriseHookUserCleanup,
 	resolver unixidentity.Resolver,
 ) (enterpriseHookUserCleanupOutcome, error) {
+	account, homeChanged, outcome, err := planEnterpriseHookStandaloneUnixCleanup(ctx, log, entry, resolver)
+	if account == nil {
+		return outcome, err
+	}
+	return runEnterpriseHookStandaloneUnixCleanupPlan(ctx, log, entry, *account, homeChanged)
+}
+
+// planEnterpriseHookStandaloneUnixCleanup is the read-only part of
+// attemptEnterpriseHookStandaloneUnixCleanup: it resolves the account and
+// checks its home without running a worker or changing anything. It returns
+// the account the worker would run as (and the re-homing, if any), or nil
+// with the outcome the cleanup already has (an unavailable home is pending,
+// an untrusted one failed, a removed account done). `enterprise hooks
+// remove-all --check` uses it so an uninstall refuses, before anything
+// changes, on a pending cleanup the real run would stop on (GAP-2377).
+func planEnterpriseHookStandaloneUnixCleanup(
+	ctx context.Context,
+	log io.Writer,
+	entry enterpriseHookUserCleanup,
+	resolver unixidentity.Resolver,
+) (*enterpriseHookWorkerAccount, *enterpriseHookTargetHomeChangedError, enterpriseHookUserCleanupOutcome, error) {
 	home := filepath.Clean(strings.TrimSpace(entry.UserHome))
 	uid := entry.UID
 	homeResolver := &enterpriseHookCleanupHomeResolver{Resolver: resolver}
@@ -382,13 +536,13 @@ func attemptEnterpriseHookStandaloneUnixCleanup(
 	switch {
 	case errors.Is(err, errEnterpriseHookTargetNotFound), errors.Is(err, errEnterpriseHookTargetUIDChanged):
 		fmt.Fprintf(log, "[hook-guardian] %s: %v; nothing to remove as that user\n", enterpriseHookUserCleanupLabel(entry), err)
-		return enterpriseHookUserCleanupDone, nil
+		return nil, nil, enterpriseHookUserCleanupDone, nil
 	case homeChanged != nil && enterpriseHookDirectoryNoHome(homeChanged.directoryHome) && recordedHomeGone:
 		fmt.Fprintf(log, "[hook-guardian] %s: home gone: the recorded home %s no longer exists and the directory gives no home (%s); the cleanup is retired, as nothing is left to remove\n",
 			enterpriseHookUserCleanupLabel(entry), homeChanged.home, homeChanged.directoryHome)
-		return enterpriseHookUserCleanupDone, errEnterpriseHookCleanupHomeGone
+		return nil, nil, enterpriseHookUserCleanupDone, errEnterpriseHookCleanupHomeGone
 	case homeChanged != nil && enterpriseHookDirectoryNoHome(homeChanged.directoryHome):
-		return enterpriseHookUserCleanupFailed, &enterpriseHookCleanupHomeKeptError{name: homeChanged.name, home: homeChanged.home, directoryHome: homeChanged.directoryHome}
+		return nil, nil, enterpriseHookUserCleanupFailed, &enterpriseHookCleanupHomeKeptError{name: homeChanged.name, home: homeChanged.home, directoryHome: homeChanged.directoryHome}
 	case homeChanged != nil:
 		// Resolve again against the directory's current home. This repeats
 		// the uid and absolute-home checks after the first lookup; a name
@@ -398,26 +552,50 @@ func attemptEnterpriseHookStandaloneUnixCleanup(
 			resolver,
 		)
 		if err != nil {
-			return enterpriseHookUserCleanupFailed, enterpriseHookRehomedCleanupError(homeChanged, err.Error())
+			return nil, nil, enterpriseHookUserCleanupFailed, enterpriseHookRehomedCleanupError(homeChanged, err.Error())
 		}
 		if pendingReason != "" {
-			return enterpriseHookUserCleanupFailed, enterpriseHookRehomedCleanupError(homeChanged, pendingReason)
+			return nil, nil, enterpriseHookUserCleanupFailed, enterpriseHookRehomedCleanupError(homeChanged, pendingReason)
 		}
 	case err != nil:
-		return enterpriseHookUserCleanupFailed, err
+		return nil, nil, enterpriseHookUserCleanupFailed, err
 	case pendingReason != "":
-		return enterpriseHookUserCleanupPending, nil
+		return nil, nil, enterpriseHookUserCleanupPending, nil
 	}
 	check := enterpriseHookCheckHome(account.Home, account.UID)
 	if homeChanged != nil && check.State != enterprisehooks.HomeAvailable {
-		return enterpriseHookUserCleanupFailed, enterpriseHookRehomedCleanupError(homeChanged, check.Reason)
+		return nil, nil, enterpriseHookUserCleanupFailed, enterpriseHookRehomedCleanupError(homeChanged, check.Reason)
 	}
 	switch check.State {
 	case enterprisehooks.HomePending:
-		return enterpriseHookUserCleanupPending, nil
+		if filepath.Clean(account.Home) == home && enterpriseHookRecordedHomeGone(home) &&
+			enterpriseHookCleanupAccountGone(ctx, account.User) {
+			// This process's lookup found the account, but a fresh directory
+			// read has no record of it and its home is gone: it was deleted,
+			// and the lookup answered from a stale per-process cache (macOS,
+			// rel-1-0-5 GAP-0029). Waiting for the home to come back would
+			// keep the cleanup open forever.
+			fmt.Fprintf(log, "[hook-guardian] %s: no such account (a fresh directory read has no record of %s, and its recorded home %s is gone); nothing to remove as that user\n",
+				enterpriseHookUserCleanupLabel(entry), account.User, home)
+			return nil, nil, enterpriseHookUserCleanupDone, nil
+		}
+		return nil, nil, enterpriseHookUserCleanupPending, nil
 	case enterprisehooks.HomeUntrusted:
-		return enterpriseHookUserCleanupFailed, errors.New("enterprise hooks: " + check.Reason)
+		return nil, nil, enterpriseHookUserCleanupFailed, errors.New("enterprise hooks: " + check.Reason)
 	}
+	return &account, homeChanged, enterpriseHookUserCleanupPending, nil
+}
+
+// runEnterpriseHookStandaloneUnixCleanupPlan runs the worker of a planned
+// cleanup, in the current home and, for a re-homed account, in the recorded
+// one.
+func runEnterpriseHookStandaloneUnixCleanupPlan(
+	ctx context.Context,
+	log io.Writer,
+	entry enterpriseHookUserCleanup,
+	account enterpriseHookWorkerAccount,
+	homeChanged *enterpriseHookTargetHomeChangedError,
+) (enterpriseHookUserCleanupOutcome, error) {
 	dataDir := strings.TrimSpace(entry.DataDir)
 	if dataDir == "" {
 		dataDir = filepath.Join(account.Home, ".defenseclaw")
@@ -429,11 +607,36 @@ func attemptEnterpriseHookStandaloneUnixCleanup(
 			dataDir = filepath.Join(account.Home, rel)
 		}
 	}
-	outcome, err := runEnterpriseHookStandaloneCleanupWorker(ctx, entry, account, dataDir)
+	outcome, report, err := runEnterpriseHookStandaloneCleanupWorker(ctx, entry, account, dataDir)
 	if outcome != enterpriseHookUserCleanupDone {
+		if err != nil && homeChanged != nil {
+			return outcome, newEnterpriseHookCleanupUnverifiedError(homeChanged, entry, account.Home, dataDir,
+				enterpriseHookCleanupFailurePath(report, account.Home), "current-home cleanup failed: "+err.Error(), report)
+		}
 		return outcome, err
 	}
 	if homeChanged != nil {
+		path, reason := enterpriseHookCleanupReportProblem(report, account.Home)
+		if reason != "" && report.PathsReported {
+			// A copied receipt may have just been consumed in the other home.
+			// The next pass must use the current home's own config path.
+			outcome, report, err = runEnterpriseHookStandaloneCleanupWorker(ctx, entry, account, dataDir)
+			if outcome != enterpriseHookUserCleanupDone {
+				if outcome == enterpriseHookUserCleanupPending {
+					return outcome, err
+				}
+				if err != nil {
+					reason = err.Error()
+				}
+				return enterpriseHookUserCleanupFailed, newEnterpriseHookCleanupUnverifiedError(homeChanged, entry,
+					account.Home, dataDir, path, reason, report)
+			}
+			path, reason = enterpriseHookCleanupReportProblem(report, account.Home)
+		}
+		if reason != "" {
+			return enterpriseHookUserCleanupFailed, newEnterpriseHookCleanupUnverifiedError(homeChanged, entry,
+				account.Home, dataDir, path, reason, report)
+		}
 		if !enterpriseHookRecordedHomeGone(homeChanged.home) {
 			oldCheck := enterpriseHookCheckHome(homeChanged.home, entry.UID)
 			if oldCheck.State != enterprisehooks.HomeAvailable {
@@ -448,20 +651,56 @@ func attemptEnterpriseHookStandaloneUnixCleanup(
 			if recordedDataDir == "" {
 				recordedDataDir = filepath.Join(recordedAccount.Home, ".defenseclaw")
 			}
-			outcome, err = runEnterpriseHookStandaloneCleanupWorker(ctx, entry, recordedAccount, recordedDataDir)
+			outcome, report, err = runEnterpriseHookStandaloneCleanupWorker(ctx, entry, recordedAccount, recordedDataDir)
 			if outcome != enterpriseHookUserCleanupDone {
+				if err != nil {
+					return outcome, newEnterpriseHookCleanupUnverifiedError(homeChanged, entry, recordedAccount.Home,
+						recordedDataDir, enterpriseHookCleanupFailurePath(report, recordedAccount.Home), "recorded-home cleanup failed: "+err.Error(), report)
+				}
 				return outcome, err
 			}
+			path, reason = enterpriseHookCleanupReportProblem(report, recordedAccount.Home)
+			if reason != "" && report.PathsReported {
+				outcome, report, err = runEnterpriseHookStandaloneCleanupWorker(ctx, entry, recordedAccount, recordedDataDir)
+				if outcome != enterpriseHookUserCleanupDone {
+					if outcome == enterpriseHookUserCleanupPending {
+						return outcome, err
+					}
+					if err != nil {
+						reason = err.Error()
+					}
+					return enterpriseHookUserCleanupFailed, newEnterpriseHookCleanupUnverifiedError(homeChanged, entry,
+						recordedAccount.Home, recordedDataDir, path, reason, report)
+				}
+				path, reason = enterpriseHookCleanupReportProblem(report, recordedAccount.Home)
+			}
+			if reason != "" {
+				return enterpriseHookUserCleanupFailed, newEnterpriseHookCleanupUnverifiedError(homeChanged, entry,
+					recordedAccount.Home, recordedDataDir, path, reason, report)
+			}
 		}
-		fmt.Fprintf(log, "[hook-guardian] %s: the account was re-homed from %s to %s; per-user cleanup ran in the current home\n",
-			enterpriseHookUserCleanupLabel(entry), homeChanged.home, account.Home)
+		if enterpriseHookRecordedHomeMoved(homeChanged.home) {
+			fmt.Fprintf(log, "[hook-guardian] %s: the account's home moved from %s to %s (the recorded home is gone or empty); per-user cleanup ran in the current home\n",
+				enterpriseHookUserCleanupLabel(entry), homeChanged.home, account.Home)
+		} else {
+			fmt.Fprintf(log, "[hook-guardian] %s: the account's home changed from %s to %s, and the recorded home still holds files, so this is a copy, not a move; per-user cleanup ran in both homes and found both clean\n",
+				enterpriseHookUserCleanupLabel(entry), homeChanged.home, account.Home)
+		}
 	}
 	return enterpriseHookUserCleanupDone, nil
 }
 
 // runEnterpriseHookStandaloneCleanupWorker sends the same remove request and
 // interprets the same response for a current or recorded home.
-func runEnterpriseHookStandaloneCleanupWorker(ctx context.Context, entry enterpriseHookUserCleanup, account enterpriseHookWorkerAccount, dataDir string) (enterpriseHookUserCleanupOutcome, error) {
+// A current-home pass of a re-homed account (account.Home is not the
+// recorded home) names the recorded home as the previous one, so receipts
+// copied from it act on this home's copies only.
+func runEnterpriseHookStandaloneCleanupWorker(ctx context.Context, entry enterpriseHookUserCleanup, account enterpriseHookWorkerAccount, dataDir string) (enterpriseHookUserCleanupOutcome, enterpriseHookWorkerTargetResult, error) {
+	holdEnterpriseHookCleanupTarget(ctx, entry, account)
+	previousHome := ""
+	if recorded := filepath.Clean(strings.TrimSpace(entry.UserHome)); filepath.IsAbs(recorded) && recorded != filepath.Clean(account.Home) {
+		previousHome = recorded
+	}
 	response, err := enterpriseHookWorkerRunner(ctx, account, enterpriseHookWorkerRequest{
 		Operation:  enterpriseHookWorkerOpApply,
 		Standalone: true,
@@ -473,29 +712,56 @@ func runEnterpriseHookStandaloneCleanupWorker(ctx context.Context, entry enterpr
 				OwnerUID:      account.UID,
 				OwnerGID:      account.GID,
 				DataDir:       dataDir,
+				PreviousHome:  previousHome,
 			},
 		}},
 	})
 	if err != nil {
-		return enterpriseHookUserCleanupFailed, err
+		return enterpriseHookUserCleanupFailed, enterpriseHookWorkerTargetResult{}, err
 	}
 	for _, result := range response.Targets {
 		if result.Index != 0 {
 			continue
 		}
+		if err := validateEnterpriseHookWorkerRemoveReport(result); err != nil {
+			return enterpriseHookUserCleanupFailed, result, err
+		}
 		switch {
 		case result.Pending:
-			return enterpriseHookUserCleanupPending, nil
+			return enterpriseHookUserCleanupPending, result, nil
 		case result.OK:
-			return enterpriseHookUserCleanupDone, nil
+			return enterpriseHookUserCleanupDone, result, nil
 		default:
-			return enterpriseHookUserCleanupFailed, errors.New(boundedString(result.Error, 256))
+			return enterpriseHookUserCleanupFailed, result, errors.New(boundedString(result.Error, 256))
 		}
 	}
 	if response.Error != "" {
-		return enterpriseHookUserCleanupFailed, errors.New(boundedString(response.Error, 256))
+		return enterpriseHookUserCleanupFailed, enterpriseHookWorkerTargetResult{}, errors.New(boundedString(response.Error, 256))
 	}
-	return enterpriseHookUserCleanupFailed, errEnterpriseHookWorkerNoResult
+	return enterpriseHookUserCleanupFailed, enterpriseHookWorkerTargetResult{}, errEnterpriseHookWorkerNoResult
+}
+
+// holdEnterpriseHookCleanupTarget tells the watch pump, for the rest of the
+// pass, that the files of the target being cleaned are written by a worker of
+// this pass. The cleanup removes files the previous run owned; without
+// this the pump reads each removal as a change by someone else and cancels
+// the pass, which kills the worker and leaves the cleanup to a later pass.
+// Nothing releases the hold: the registry lives for one pass, and the target
+// is no longer enrolled, so no change to its files needs a prompt repair.
+func holdEnterpriseHookCleanupTarget(ctx context.Context, entry enterpriseHookUserCleanup, account enterpriseHookWorkerAccount) {
+	active, _ := ctx.Value(enterpriseHookWatchActiveWorkersKey{}).(*enterpriseHookWatchActiveWorkers)
+	if active == nil {
+		return
+	}
+	connectorName := strings.ToLower(strings.TrimSpace(entry.Connector))
+	userName := firstNonEmpty(account.User, strings.TrimSpace(entry.User))
+	var keys []string
+	for _, home := range []string{entry.UserHome, account.Home} {
+		if key := active.targetKey(home, userName, connectorName); key != "" {
+			keys = append(keys, key)
+		}
+	}
+	active.start(keys)
 }
 
 func enterpriseHookRehomedCleanupError(changed *enterpriseHookTargetHomeChangedError, reason string) error {

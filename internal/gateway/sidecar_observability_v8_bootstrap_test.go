@@ -62,6 +62,13 @@ func TestBundleGenerationReloadAuditCarriesPrincipal(t *testing.T) {
 	if bound, err := fixture.sidecar.BootstrapObservabilityRuntime(t.Context(), fixture.configPath, raw); err != nil || !bound {
 		t.Fatalf("bootstrap: bound=%v err=%v", bound, err)
 	}
+	owner, ok := fixture.sidecar.observabilityV8.(*sidecarOwnedObservabilityV8Runtime)
+	if !ok || owner == nil || owner.runtime == nil {
+		t.Fatal("bootstrap did not bind an owned runtime")
+	}
+	if err := owner.runtime.FlushReports(t.Context()); err != nil {
+		t.Fatalf("flush bootstrap reports: %v", err)
+	}
 	reader, err := sql.Open("sqlite", fixture.store.DatabasePath())
 	if err != nil {
 		t.Fatal(err)
@@ -117,6 +124,7 @@ func newSidecarV8BootstrapFixtureIn(
 	t *testing.T, configVersion int, storePath, dataDir string,
 ) sidecarV8BootstrapFixture {
 	t.Helper()
+	restoreGatewayProcessPosture(t)
 	// Some self-hosted Linux runners create testing.TempDir children under a
 	// permissive process umask. The production audit store correctly rejects an
 	// immediately group-writable database directory, so make the shared success
@@ -1048,6 +1056,7 @@ func TestSidecarBootstrapObservabilityV8RejectsV7WithoutMutation(t *testing.T) {
 }
 
 func TestNewSidecarRejectsV7BeforeInitialization(t *testing.T) {
+	restoreGatewayProcessPosture(t)
 	if sidecar, err := NewSidecar(&config.Config{ConfigVersion: 7}, nil, nil); err == nil || sidecar != nil {
 		t.Fatalf("v7 constructor = sidecar:%v error:%v", sidecar, err)
 	}
@@ -1078,6 +1087,7 @@ func TestNewSidecarFailureDoesNotPublishManagedRedactionPosture(t *testing.T) {
 			candidate.DeploymentMode = test.failedNewMode
 			candidate.Gateway.DeviceKeyFile = badKey
 
+			restoreGatewayProcessPosture(t)
 			sidecar, err := NewSidecar(candidate, nil, nil)
 			if err == nil || sidecar != nil {
 				t.Fatalf("failed constructor = sidecar:%v error:%v", sidecar, err)
@@ -1152,6 +1162,48 @@ func TestSidecarOwnedObservabilityV8ReloadsGenerationAndShutsDownBeforeStore(t *
 	defer cancel()
 	if _, err := fixture.sidecar.ReloadObservabilityRuntime(ctx, fixture.configPath, reloadRaw); err == nil {
 		t.Fatal("closed runtime accepted reload")
+	}
+}
+
+// #1279, #1302: a hot reload of the observability graph returns promptly
+// while an agent's trace still holds the previous graph, and records keep
+// flowing meanwhile. It waited for that graph for the 30 s drain timeout, so
+// the policy swap behind it lagged and the lifecycle restarted the gateway.
+func TestHotReloadDoesNotWaitForAUserOfThePreviousGraph(t *testing.T) {
+	fixture := newSidecarV8BootstrapFixture(t, 8, "")
+	bound, err := fixture.sidecar.BootstrapObservabilityRuntime(t.Context(), fixture.configPath, fixture.raw)
+	if err != nil || !bound {
+		t.Fatalf("bootstrap bound=%t error=%v", bound, err)
+	}
+	fixture.sidecar.observabilityV8Mu.Lock()
+	owner := fixture.sidecar.observabilityV8.(*sidecarOwnedObservabilityV8Runtime)
+	fixture.sidecar.observabilityV8Mu.Unlock()
+	held, err := owner.BeginInboundImportBatch(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloadRaw := []byte(fmt.Sprintf(
+		"config_version: 8\ndata_dir: %q\nobservability:\n  local:\n    retention_days: 30\n",
+		fixture.dataDir,
+	))
+	started := time.Now()
+	result, reloadErr := fixture.sidecar.ReloadObservabilityRuntime(t.Context(), fixture.configPath, reloadRaw)
+	// It waited for the 30 s drain timeout; building the new graph takes well
+	// under a second, also race-enabled on a loaded runner.
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("reload took %s while the previous graph was in use", elapsed)
+	}
+	if reloadErr != nil || result.Status() != runtimegraph.ReloadApplied || owner.runtime.Active().RetentionDays() != 30 {
+		t.Fatalf("reload=%s error=%v", result.Status(), reloadErr)
+	}
+	next, err := owner.BeginInboundImportBatch(t.Context())
+	if err != nil {
+		t.Fatalf("the new graph is not usable while the old one is held: %v", err)
+	}
+	next.Close()
+	held.Close()
+	if err := fixture.sidecar.closeOwnedObservabilityV8Runtime(); err != nil {
+		t.Fatalf("shutdown after the previous graph was released: %v", err)
 	}
 }
 
@@ -1503,7 +1555,12 @@ func TestSidecarConfigManagerV8PrivateUpstreamReloadFailureIsAtomic(t *testing.T
 	}
 }
 
-func TestSidecarConfigManagerV8SamePrometheusBindingRequiresRestartBeforeReplacement(t *testing.T) {
+// GAP-2072: an edit next to a Prometheus destination that keeps its listen
+// address (here retention and the default redaction profile) reloads live;
+// before, the whole observability reload was refused as restart_required, so
+// a redaction profile the CLI reported as applied never reached the audit
+// write path until a restart.
+func TestSidecarConfigManagerV8SamePrometheusBindingReloadsLive(t *testing.T) {
 	fixture := newSidecarV8BootstrapFixture(t, 8, "")
 	probe, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -1557,22 +1614,26 @@ func TestSidecarConfigManagerV8SamePrometheusBindingRequiresRestartBeforeReplace
 	fixture.sidecar.observabilityV8Mu.Unlock()
 	oldGraph := owner.runtime.Active()
 	candidateRaw := []byte(fmt.Sprintf(
-		"config_version: 8\ndata_dir: %q\nenvironment: original\nobservability:\n  local:\n    retention_days: 30\n  destinations:\n    - name: metrics\n      kind: prometheus\n      listen: %q\n      path: /metrics\n",
+		"config_version: 8\ndata_dir: %q\nenvironment: original\nobservability:\n  defaults:\n    redaction_profile: strict\n  local:\n    retention_days: 30\n  destinations:\n    - name: metrics\n      kind: prometheus\n      listen: %q\n      path: /metrics\n",
 		fixture.dataDir, listen,
 	))
 	if err := os.WriteFile(fixture.configPath, candidateRaw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	reloadErr := mgr.Reload(t.Context(), "test")
-	if sidecarV8BootstrapCode(reloadErr) != sidecarObservabilityV8BootstrapReload {
+	if reloadErr := mgr.Reload(t.Context(), "test"); reloadErr != nil {
 		t.Fatalf("same Prometheus binding reload error = %v", reloadErr)
 	}
-	if owner.runtime.Active() != oldGraph || oldGraph.Generation() != 1 ||
-		mgr.v8PlanDigest != initialDigest || mgr.gen.Load() != 0 {
+	active := owner.runtime.Active()
+	if active == oldGraph || active.Generation() != 2 ||
+		mgr.v8PlanDigest == initialDigest || mgr.v8PlanDigest != active.Digest() || mgr.gen.Load() != 1 {
 		t.Fatalf(
-			"same-binding reload mutated graph/digest/gen = %p/%p %q/%q/%d",
-			owner.runtime.Active(), oldGraph, mgr.v8PlanDigest, initialDigest, mgr.gen.Load(),
+			"same-binding reload did not publish the successor graph/digest/gen = %p/%p %q/%q/%d",
+			active, oldGraph, mgr.v8PlanDigest, initialDigest, mgr.gen.Load(),
 		)
+	}
+	profile, err := active.Plan().ResolveLocalRedactionProfile(observability.BucketComplianceActivity)
+	if err != nil || profile != "strict" {
+		t.Fatalf("local compliance.activity profile after reload = %q err=%v, want strict", profile, err)
 	}
 	assertMetricsListenerBound()
 }
@@ -2209,7 +2270,7 @@ func TestSidecarConfigReloadRebindsDestinationRedactionProfiles(t *testing.T) {
 		if err := os.WriteFile(fixture.configPath, configFor(profile), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := mgr.reload(t.Context(), "test", false); err != nil {
+		if err := mgr.reload(t.Context(), "test", false, nil); err != nil {
 			t.Fatalf("reload to %s: %v", profile, err)
 		}
 		recordID := emit("gap-0552-" + profile)

@@ -19,9 +19,14 @@ import (
 // clientPipeAccess is all a reporting client asks for: write the one
 // message and read the server process ID. FILE_APPEND_DATA would be
 // FILE_CREATE_PIPE_INSTANCE on a pipe, so GENERIC_WRITE is never used.
-const clientPipeAccess = windows.FILE_WRITE_DATA | windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE
+const clientPipeAccess = windows.FILE_READ_DATA | windows.FILE_WRITE_DATA | windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE
+
+// clientReceiptTimeout bounds the wait for the server's receipt when ctx
+// has no earlier deadline.
+const clientReceiptTimeout = 2 * time.Second
 
 const clientRetryInterval = 25 * time.Millisecond
+const clientConnectTimeout = 2 * time.Second
 
 // Test seams: the pipe the client opens and the process that must serve it.
 var (
@@ -38,55 +43,83 @@ func Send(ctx context.Context, report Report) error {
 	if err != nil {
 		return err
 	}
-	name, err := windows.UTF16PtrFromString(clientPipeName)
+	handle, err := dial(ctx, clientPipeName)
 	if err != nil {
 		return err
 	}
+	defer windows.CloseHandle(handle)
+	// The server buffers a whole message (MaxMessageBytes), so the write
+	// completes without waiting for the server to read it.
+	written, err := overlapped(ctx, clientReceiptTimeout, handle, func(done *uint32, o *windows.Overlapped) error {
+		return windows.WriteFile(handle, message, done, o)
+	})
+	if err != nil {
+		return err
+	}
+	if int(written) != len(message) {
+		return errors.New("refusal report was not written whole")
+	}
+	// Keep this end open until the server has read the report and named
+	// its sender (Receipt). A server that writes none, a gateway from
+	// before the receipt, ends the read when it closes its end.
+	receipt := make([]byte, len(Receipt))
+	_, _ = overlapped(ctx, clientReceiptTimeout, handle, func(done *uint32, o *windows.Overlapped) error {
+		return windows.ReadFile(handle, receipt, done, o)
+	})
+	return nil
+}
+
+// dial opens pipeName for one exchange, bounded by ctx and
+// clientConnectTimeout, and keeps the handle only when the pipe server is
+// the running gateway service process.
+func dial(ctx context.Context, pipeName string) (windows.Handle, error) {
+	name, err := windows.UTF16PtrFromString(pipeName)
+	if err != nil {
+		return 0, err
+	}
+	connectCtx, cancel := context.WithTimeout(ctx, clientConnectTimeout)
+	defer cancel()
 	var handle windows.Handle
 	for {
+		if err := connectCtx.Err(); err != nil {
+			return 0, err
+		}
 		handle, err = windows.CreateFile(
 			name,
 			clientPipeAccess,
 			0,
 			nil,
 			windows.OPEN_EXISTING,
-			windows.SECURITY_SQOS_PRESENT|windows.SECURITY_IDENTIFICATION,
+			windows.SECURITY_SQOS_PRESENT|windows.SECURITY_IDENTIFICATION|windows.FILE_FLAG_OVERLAPPED,
 			0,
 		)
 		if err == nil {
 			break
 		}
-		if !errors.Is(err, windows.ERROR_PIPE_BUSY) {
-			return err
+		if !errors.Is(err, windows.ERROR_PIPE_BUSY) && !errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
+			return 0, err
 		}
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-connectCtx.Done():
+			return 0, connectCtx.Err()
 		case <-time.After(clientRetryInterval):
 		}
 	}
-	defer windows.CloseHandle(handle)
 	var serverPID uint32
 	if err := windows.GetNamedPipeServerProcessId(handle, &serverPID); err != nil {
-		return err
+		_ = windows.CloseHandle(handle)
+		return 0, err
 	}
 	expected, err := gatewayServerPID()
 	if err != nil {
-		return err
+		_ = windows.CloseHandle(handle)
+		return 0, err
 	}
 	if serverPID == 0 || serverPID != expected {
-		return fmt.Errorf("refusal pipe server pid %d is not the gateway service (pid %d)", serverPID, expected)
+		_ = windows.CloseHandle(handle)
+		return 0, fmt.Errorf("pipe %s server pid %d is not the gateway service (pid %d)", pipeName, serverPID, expected)
 	}
-	// The server buffers a whole message (MaxMessageBytes), so the write
-	// completes without waiting for the server to read it.
-	var written uint32
-	if err := windows.WriteFile(handle, message, &written, nil); err != nil {
-		return err
-	}
-	if int(written) != len(message) {
-		return errors.New("refusal report was not written whole")
-	}
-	return nil
+	return handle, nil
 }
 
 // serviceProcessID returns the process ID of a running service.

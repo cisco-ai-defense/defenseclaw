@@ -26,13 +26,18 @@
 #      installing this package fails after the services start and rolls back,
 #      and the config and the deployment record stay the previous release's
 #   b. ensure --from-package upgrades to this package: verify passes, the
-#      result reports the applied policy from a newer config generation,
-#      migration-v9.json and config.yaml.v8.bak are written for v8 sources,
-#      and the secrets and guardian ledger are unchanged
+#      result reports the applied policy, the version 9 config keeps its
+#      bytes (a version 8 config, written for a previous release older than
+#      the first that reads version 9, is migrated and keeps its backup), and
+#      the secrets and guardian ledger are unchanged; the lane
+#      stores a protected credential on the previous release (enterprise
+#      secret set) first, so the secrets check compares real bytes, not an
+#      empty store
 #
-# and then runs steps 3-6 on the upgraded deployment. It keeps the source
-# config, upgraded config and (for v8 sources) migration record in --results for
-# scripts/check_enterprise_upgrade_config.py.
+# and then runs steps 3-6 on the upgraded deployment. It keeps the source and
+# upgraded config in --results for scripts/check_enterprise_upgrade_config.py.
+# The previous release must be 1.x: no 0.x release ships a standalone
+# enterprise package.
 #
 # Every lifecycle result is saved under --results and checked with
 # scripts/check_enterprise_lifecycle_result.py. For the lifecycle commands the
@@ -55,7 +60,7 @@
 #                      the previous release's package of the same kind, already
 #                      verified against its signed checksums.txt
 #   --previous-version VERSION
-#                      the product version of --upgrade-from
+#                      the product version of --upgrade-from (1.x or later)
 
 set -euo pipefail
 
@@ -74,7 +79,7 @@ while [ "$#" -gt 0 ]; do
         --results) results=${2:?--results needs a value}; shift 2 ;;
         --upgrade-from) upgrade_from=${2:?--upgrade-from needs a value}; shift 2 ;;
         --previous-version) previous_version=${2:?--previous-version needs a value}; shift 2 ;;
-        -h | --help) sed -n '4,58p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h | --help) sed -n '4,61p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -86,6 +91,10 @@ done
     echo "--upgrade-from needs --previous-version" >&2
     exit 2
 }
+if [ -n "$upgrade_from" ] && [[ "$previous_version" =~ ^v?0[.] ]]; then
+    echo "--previous-version $previous_version: no 0.x release ships a standalone enterprise package; upgrade from 1.x" >&2
+    exit 2
+fi
 
 die() {
     echo "FAIL: $*" >&2
@@ -156,8 +165,9 @@ else
     detect="$repo/packaging/mdm/macos/detect.sh"
     launcher=/usr/local/bin/defenseclaw
     launcher_target=$install_root/bin/defenseclaw-gateway
-    sandbox_files=(/Library/LaunchAgents/com.cisco.defenseclaw.sandbox.plist
-        /Library/LaunchAgents/com.cisco.defenseclaw.openshell-gateway.plist)
+    # Each label carries the first 12 digits of the gateway's SHA-256
+    # (macos_agent_files).
+    sandbox_files=()
     openshell_config_dir=$config_dir/openshell
 fi
 gateway=$install_root/bin/defenseclaw-gateway
@@ -252,6 +262,40 @@ run_lifecycle() {
         >"$results/$name.json" 2>"$results/$name.log" || rc=$?
     echo "$rc" >"$results/$name.rc"
     echo "$action exited $rc"
+}
+
+# launchd can deliver the path event from a config replacement after the next
+# step has started. Its redundant ensure is safe, but a read-only step's fixed 5s
+# lock wait may expire while that job holds the lifecycle lock (exit 75,
+# lifecycle_busy). Retry only this expected busy result, for at most three
+# minutes on macOS.
+retry_busy() { # step-name verb
+    [ "$kind" = pkg ] || return 0
+    local deadline=$((SECONDS + 180))
+    while [ "$(cat "$results/$1.rc")" = 75 ] && [ "$SECONDS" -lt "$deadline" ]; do
+        "$python" -c 'import json,sys; r=json.load(open(sys.argv[1], encoding="utf-8-sig")); sys.exit(0 if any(e.get("code") == "lifecycle_busy" for e in r.get("errors", []) + r.get("warnings", [])) else 1)' "$results/$1.json" || break
+        sleep 2
+        lifecycle "$1" "$2"
+    done
+}
+
+# The lifecycle starts the enumerator but does not claim install coverage
+# until its first bounded scan publishes a fresh protected record. A package
+# ensure can therefore truthfully report agent_install_scan_incomplete. Wait
+# for that separate cycle before the lane's healthy verify and MDM checks.
+wait_for_install_scan() {
+    local deadline=$((SECONDS + 180))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        lifecycle 03-install-scan status
+        retry_busy 03-install-scan status
+        if "$python" -c 'import json,sys; r=json.load(open(sys.argv[1], encoding="utf-8-sig")); sys.exit(0 if r.get("coverage_complete") is True and not any(w.get("code") == "agent_install_scan_incomplete" for w in r.get("warnings", [])) else 1)' "$results/03-install-scan.json"; then
+            check "$results/03-install-scan.json" install-scan --action status --installed --ready --coverage-complete \
+                --security-incomplete --allow-warning hook_process_fail_open ${kernel_views[@]+"${kernel_views[@]}"}
+            return
+        fi
+        sleep 2
+    done
+    die "the enumerator did not publish a complete install scan within 180 seconds"
 }
 
 services_running() {
@@ -381,6 +425,7 @@ as_standard_user() {
 # Linux, the directory of the rendered OpenShell gateway.toml.
 sandbox_files_present() {
     local file root_group
+    [ "$platform" = linux ] || macos_agent_files
     root_group=0 # root:root, root:wheel
     [ -L "$launcher" ] || die "$launcher is not a symbolic link"
     [ "$(readlink "$launcher")" = "$launcher_target" ] || die "$launcher points at '$(readlink "$launcher")', want $launcher_target"
@@ -401,9 +446,23 @@ sandbox_files_present() {
     echo "sandbox launcher $launcher -> $launcher_target and ${#sandbox_files[@]} user service definitions are in place"
 }
 
-# sandbox_files_gone: an uninstall left no launcher, user unit or launch agent.
+# macos_agent_files: the launch agents of the installed gateway, whose labels
+# carry the first 12 digits of its SHA-256 (openshell.LaunchAgentLabel).
+macos_agent_files() {
+    local tag
+    tag=$(shasum -a 256 "$gateway" | cut -c1-12) || die "cannot hash $gateway"
+    sandbox_files=("/Library/LaunchAgents/com.cisco.defenseclaw.sandbox.$tag.plist"
+        "/Library/LaunchAgents/com.cisco.defenseclaw.openshell-gateway.$tag.plist")
+}
+
+# sandbox_files_gone: an uninstall left no launcher, user unit or launch agent
+# (on macOS, of any label).
 sandbox_files_gone() {
     local file
+    if [ "$platform" != linux ]; then
+        sandbox_files=(/Library/LaunchAgents/com.cisco.defenseclaw.sandbox*.plist
+            /Library/LaunchAgents/com.cisco.defenseclaw.openshell-gateway*.plist)
+    fi
     for file in "$launcher" "${sandbox_files[@]}"; do
         { [ ! -e "$file" ] && [ ! -L "$file" ]; } || die "$file remains after uninstall"
     done
@@ -411,17 +470,128 @@ sandbox_files_gone() {
     echo "no sandbox launcher or user service definition is left"
 }
 
-# launcher_offers_only_sandbox: an unprivileged account that runs the launcher
-# is told the computer is managed, and sees the sandbox tree in its help.
+# launcher_refusal_text: the sentence the launcher prints for a command it
+# does not offer on this platform. It is read from the fixture that
+# TestLauncherRefusalGoldenMatchesTheLauncher keeps equal to launcherRefusalFor
+# and that the docs gate (docs-site/scripts/test-docs-claims.ts) reads, so this
+# lane holds no copy of the wording.
+launcher_refusal_text() {
+    "$python" -c "import json, sys; sys.stdout.write(json.load(open(sys.argv[1]))[sys.argv[2]])" \
+        "$repo/internal/cli/testdata/launcher_refusal.json" "$platform"
+}
+
+# own_status_roster_check TEXT JSON CONNECTOR...: the standard user status
+# (TEXT) and status --json (JSON) show the account own protection state: an
+# account row, a Cowork row and one row per ENROLLED connector (cowork-1-0-8
+# GAP-0053, rel-1-0-9 GAP-0635). The roster is the connectors the installed
+# config enrolls, not a fixed one, so the caller names exactly that roster.
+# Fails unless the JSON roster has exactly those connectors, each with a
+# protection state that agrees with its protected flag, and the text shows
+# exactly those connectors (by label) with the same state as the JSON.
+own_status_roster_check() {
+    local text=$1 answer=$2
+    shift 2
+    if [ "$#" = 0 ]; then
+        echo "no expected connector was given"
+        return 1
+    fi
+    DC_OWN_TEXT=$text DC_OWN_JSON=$answer "$python" - "$@" <<\PYCHECK
+import json, os, re, sys
+
+text, answer = os.environ["DC_OWN_TEXT"], json.loads(os.environ["DC_OWN_JSON"])
+expected = sorted(set(sys.argv[1:]))
+problems = []
+roster = answer.get("connectors")
+if not isinstance(roster, dict):
+    roster = {}
+if sorted(roster) != expected:
+    problems.append("the JSON roster is %s, want %s" % (sorted(roster), expected))
+# The states the gateway emits for a connector row (managed_own_status.go).
+valid_states = ("protected", "not protected", "not confirmed", "excluded")
+states = {}
+for name, row in roster.items():
+    if not isinstance(row, dict) or not isinstance(row.get("protected"), bool) or not isinstance(row.get("state"), str) or not row["state"]:
+        problems.append("connector %s has no protection state in the JSON answer" % name)
+    elif row["state"] not in valid_states:
+        problems.append("connector %s has the unknown state %r in the JSON answer, want one of %s" % (name, row["state"], list(valid_states)))
+    elif (row["state"] == "protected") != row["protected"]:
+        problems.append("connector %s has protected=%s but state %r in the JSON answer" % (name, row["protected"], row["state"]))
+    elif not isinstance(row.get("reason", ""), str) or not isinstance(row.get("next_step", ""), str) or not isinstance(row.get("reason_code", ""), str):
+        problems.append("connector %s has a reason, reason_code or next_step that is not text in the JSON answer" % name)
+    elif row["protected"] != (not row.get("reason")) or (row.get("reason") and not row.get("next_step")):
+        problems.append("connector %s is %s with reason %r and next step %r in the JSON answer, want a reason and a next step exactly when it is not protected" % (name, row["state"], row.get("reason"), row.get("next_step")))
+    else:
+        # The text row is the state, then the reason and the next step (showOwnStatus).
+        shown = row["state"]
+        if row.get("reason"):
+            shown += ": " + row["reason"].strip().rstrip(". ") + ". " + row["next_step"].strip().rstrip(". ")
+        states[name] = shown
+lines = text.splitlines()
+first = next((i for i, line in enumerate(lines) if re.match(r"  Account +\S", line)), None)
+last = next((i for i, line in enumerate(lines) if re.match(r"  Cowork +\S", line)), None)
+if first is None or last is None or last < first:
+    problems.append("the text has no Account row followed by a Cowork row")
+else:
+    # A connector row is two spaces, the label padded to 13 columns, a space
+    # and the state (showOwnStatus). The label must be the exact one the CLI
+    # prints (ownConnectorLabel); Claude Code comes first, the rest by key.
+    special = {"opencode": "OpenCode", "openclaw": "OpenClaw", "claudecode": "Claude Code"}
+    labels = {special.get(key, key[:1].upper() + key[1:]): key for key in expected}
+    rows = {}
+    for line in lines[first + 1:last]:
+        if not line.strip():
+            continue
+        label, state = line[2:15].strip(), line[16:].strip()
+        if not line.startswith("  ") or line[15:16] != " " or not label or not state:
+            problems.append("the text has an unreadable connector row %r" % line)
+            continue
+        key = labels.get(label)
+        if key is None:
+            problems.append("the text shows the label %r, want one of %s" % (label, sorted(labels)))
+            continue
+        if key in rows:
+            problems.append("the text shows %s twice" % label)
+        rows[key] = state
+    if sorted(rows) != expected:
+        problems.append("the text shows connectors %s, want %s" % (sorted(rows), expected))
+    elif list(rows) != [k for k in expected if k == "claudecode"] + [k for k in expected if k != "claudecode"]:
+        problems.append("the text lists connectors in the order %s, want Claude Code first and the rest by name" % list(rows))
+    for key, state in sorted(rows.items()):
+        if key in states and states[key] != state:
+            problems.append("the text shows %s as %r, the JSON answer says %r" % (key, state, states[key]))
+if problems:
+    print("; ".join(problems))
+    sys.exit(1)
+PYCHECK
+}
+
+# launcher_offers_only_sandbox CONNECTOR...: an unprivileged account that
+# runs the launcher is told the computer is managed, sees only its own
+# protection state in `defenseclaw status` (cowork-1-0-8 GAP-0053), sees the
+# sandbox tree and that status in its help, and is refused every administrator
+# command with the sentence the launcher builds for this platform. CONNECTOR
+# names the connectors the config in force enrolls: package_default_connectors
+# before any administrator config, admin_connectors once write_admin_config has
+# applied it.
 launcher_offers_only_sandbox() {
-    local output rc=0 text="This computer is managed; only \`defenseclaw sandbox\` commands are available here."
+    local output answer check rc=0 text
+    text=$(launcher_refusal_text) || die "cannot read the launcher refusal for $platform from internal/cli/testdata/launcher_refusal.json"
     output=$(as_standard_user "$launcher" status 2>&1) || rc=$?
-    [ "$rc" = 2 ] || die "defenseclaw status exited $rc as a standard user, want 2: $output"
-    [ "$output" = "$text" ] || die "defenseclaw status printed '$output', want '$text'"
+    [ "$rc" = 0 ] || die "defenseclaw status exited $rc as a standard user, want 0 (the own status of the user): $output"
+    [ "$(head -n 1 <<<"$output")" = "This computer is managed by your organization." ] ||
+        die "defenseclaw status as a standard user does not say the computer is managed: $output"
+    answer=$(as_standard_user "$launcher" status --json 2>&1) || die "defenseclaw status --json failed as a standard user: $answer"
+    check=$(own_status_roster_check "$output" "$answer" "$@" 2>&1) ||
+        die "defenseclaw status as a standard user does not show its own protection state ($check): $output"
+    rc=0
+    output=$(as_standard_user "$launcher" setup 2>&1) || rc=$?
+    [ "$rc" = 2 ] || die "defenseclaw setup exited $rc as a standard user, want 2: $output"
+    [ "$output" = "$text" ] || die "defenseclaw setup printed '$output', want '$text'"
     output=$(as_standard_user "$launcher" --help 2>&1) || die "defenseclaw --help failed as a standard user: $output"
     grep -Fq "defenseclaw sandbox" <<<"$output" || die "the launcher help does not offer the sandbox commands: $output"
-    ! grep -Eq '^[[:space:]]+(enterprise|setup|status)[[:space:]]' <<<"$output" || die "the launcher help lists gateway commands: $output"
-    echo "defenseclaw offers only the sandbox commands to a standard user"
+    grep -Eq '^[[:space:]]+status[[:space:]]' <<<"$output" || die "the launcher help does not offer the own status of the user: $output"
+    ! grep -Eq '^[[:space:]]+(enterprise|setup)[[:space:]]' <<<"$output" || die "the launcher help lists gateway commands: $output"
+    echo "defenseclaw offers only the sandbox commands and the own status of the user to a standard user"
 }
 
 policy_entries() {
@@ -435,6 +605,20 @@ policy_entries() {
 
 detect_value() {
     sh "$detect" --format value "$@" 2>/dev/null
+}
+
+# detect.sh prints busy while a lifecycle run holds the lock, and an MDM
+# retries it later. The apply job's redundant ensure (see retry_busy) can still
+# hold the lock when the MDM checks start: retry only a busy answer, for at most
+# three minutes.
+detect_settled() {
+    local deadline=$((SECONDS + 180)) value
+    value=$(detect_value "$@" || true)
+    while [ "$value" = busy ] && [ "$SECONDS" -lt "$deadline" ]; do
+        sleep 2
+        value=$(detect_value "$@" || true)
+    done
+    printf '%s\n' "$value"
 }
 
 # install_package FILE: install (or upgrade to) a package; prints nothing and
@@ -490,11 +674,90 @@ print(json.dumps(ledger, sort_keys=True))
 PY
 }
 
+# The protected credential the upgrade lane stores on the previous release.
+# Its value is random, so only the credential this run stored can match.
+upgrade_secret_name=ci-upgrade-lane
+upgrade_secret_value=""
+
+# seed_upgrade_secret <result-name>: store upgrade_secret_value with the
+# installed gateway's `enterprise secret set` and check its bytes landed.
+seed_upgrade_secret() {
+    local rc=0
+    upgrade_secret_value="ci-upgrade-lane-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    printf '%s\n' "$upgrade_secret_value" |
+        "$gateway" enterprise secret set --name "$upgrade_secret_name" --from-stdin --lock-wait 2m --json \
+            >"$results/$1.json" 2>"$results/$1.log" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        tail -n 20 "$results/$1.log" >&2 || true
+        die "enterprise secret set exited $rc"
+    fi
+    upgrade_secret_kept || die "enterprise secret set did not store $secrets_dir/$upgrade_secret_name"
+}
+
+# upgrade_secret_kept: the stored credential holds exactly upgrade_secret_value.
+# python3 compares the bytes: cmp (diffutils) is absent from the minimal
+# UBI 9 init image the rpm-el9 lane boots (GAP-0886).
+upgrade_secret_kept() {
+    [ -n "$upgrade_secret_value" ] && [ -f "$secrets_dir/$upgrade_secret_name" ] &&
+        DC_LANE_SECRET=$upgrade_secret_value "${python:-python3}" -c \
+            'import os, sys; sys.exit(open(sys.argv[1], "rb").read() != os.environ["DC_LANE_SECRET"].encode())' \
+            "$secrets_dir/$upgrade_secret_name"
+}
+
+# release_number <version>: x.y.z (a leading v and a -rc or +build suffix are
+# ignored) as one comparable integer; 0 when it is not three numbers.
+release_number() {
+    local v=${1#v}
+    v=${v%%[-+]*}
+    if [[ "$v" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+        echo $((10#${BASH_REMATCH[1]} * 1000000 + 10#${BASH_REMATCH[2]} * 1000 + 10#${BASH_REMATCH[3]}))
+    else
+        echo 0
+    fi
+}
+
+# The first release taken to read the version 9 administrator config this lane
+# writes. The 1.0.0 builds an earlier round tested rejected it with
+# config_version_unsupported (GAP-1424); every 1.x reads version 8, so a
+# previous release below this one is given that and migrates it on upgrade.
+config_v9_first_release=1.0.1
+
+# admin_config_version <release>: the config_version the administrator config
+# for that release carries: 8 for a release older than config_v9_first_release
+# (every 1.x reads 8 and migrates it), 9 for any other, including an unparsable
+# version and this build's own.
+admin_config_version() {
+    local number
+    number=$(release_number "$1")
+    if [ "$number" -gt 0 ] && [ "$number" -lt "$(release_number "$config_v9_first_release")" ]; then
+        echo 8
+    else
+        echo 9
+    fi
+}
+
+# package_default_connectors: the roster of a package install before any
+# administrator config, which is the product default connector. A change of
+# that default turns the status check red here on purpose.
+package_default_connectors=(openclaw)
+
+# write_admin_config: stage the administrator config. It sets admin_connectors,
+# the connectors that config enrolls, in the same step that writes them, so the
+# config and the roster a standard user must see once it is applied
+# (launcher_offers_only_sandbox) come from one list that cannot be left empty.
 write_admin_config() {
+    admin_connectors=(claudecode codex)
+    local connector_lines="" connector
+    for connector in "${admin_connectors[@]}"; do
+        connector_lines+="    $connector: {enabled: true}"$'\n'
+    done
+    connector_lines=${connector_lines%$'\n'}
     local config_version=9 rule_pack='  rule_pack: default'
-    if [ -n "$upgrade_from" ] && [[ "$previous_version" =~ ^v?0[.] ]]; then
-        config_version=8
-        rule_pack='  rule_pack_dir: ""'
+    if [ -n "$upgrade_from" ]; then
+        config_version=$(admin_config_version "$previous_version")
+        # A version 8 config selects its pack by folder; leaving the key out
+        # takes the layout's default pack on every release.
+        [ "$config_version" != 8 ] || rule_pack="  # the layout's default rule pack"
     fi
     cat >"$stage/config.yaml" <<EOF
 config_version: $config_version
@@ -511,8 +774,7 @@ guardrail:
   mode: observe
 $rule_pack
   connectors:
-    claudecode: {enabled: true}
-    codex: {enabled: true}
+$connector_lines
 EOF
     chmod 0600 "$stage/config.yaml"
 }
@@ -527,12 +789,48 @@ case "$kind" in
     pkg) ! pkgutil --pkg-info "$macos_package_id" >/dev/null 2>&1 || die "$macos_package_id is already installed" ;;
 esac
 [ -z "$(policy_entries)" ] || die "DefenseClaw machine-policy entries already exist: $(policy_entries)"
+if [ "$platform" = linux ]; then
+    found_userns=$(cat /proc/sys/user/max_user_namespaces)
+    found_ptrace=$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo absent)
+    echo "kernel as found: user.max_user_namespaces=$found_userns kernel.yama.ptrace_scope=$found_ptrace"
+fi
+# Every 1.0.4 lifecycle action except uninstall reports the kernel's open
+# policy-view routes as it finds them (internal/enterpriseunix/userns.go).
+# They are facts about this runner's kernel (the container host's in a
+# container), not about the package, so each check requires exactly the
+# warnings this kernel calls for.
+kernel_views=()
+if [ "$platform" = linux ]; then
+    userns_open=1
+    [ "$found_userns" != 0 ] || userns_open=0
+    [ "$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || true)" != 0 ] || userns_open=0
+    if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || true)" = 1 ] &&
+        [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_unconfined 2>/dev/null || true)" = 1 ]; then
+        userns_open=0
+    fi
+    [ "$userns_open" = 0 ] || kernel_views+=(--require-warning unprivileged_user_namespaces)
+    case "$found_ptrace" in
+        2 | 3) ;;
+        *) kernel_views+=(--require-warning unprivileged_ptrace) ;;
+    esac
+    echo "expected policy-view warnings: ${kernel_views[*]:-none}"
+fi
+# The previous release reports what its version reports: 1.0.3 the kernel's
+# open policy-view routes on its config steps only; 1.0.4 those routes from
+# its package install on, and on its config steps the hook residual
+# (hook_process_fail_open) and a first install scan still running
+# (agent_install_scan_incomplete), as the new release's ensure does. So its
+# steps allow them; the new release's steps require the kernel views
+# (kernel_views).
+previous_views=(--allow-warning hook_process_fail_open --allow-warning agent_install_scan_incomplete)
+[ "$platform" != linux ] ||
+    previous_views+=(--allow-warning unprivileged_user_namespaces --allow-warning unprivileged_ptrace)
 echo "package: $package"
 echo "version: $version"
 
 # ---- upgrade lane: previous release ------------------------------------------
 upgrade_lane() {
-    local previous_config_sha previous_secrets_sha previous_ledger previous_generation generation_floor recorded
+    local previous_config_sha previous_secrets_sha previous_ledger previous_generation recorded config_version generation_floor
     step "install the previous release's $kind ($previous_version)"
     install_rc=0
     install_package "$upgrade_from" || install_rc=$?
@@ -542,19 +840,28 @@ upgrade_lane() {
     # A bare install of a 1.x package enables no connector, like the fresh
     # install below; the next step applies the administrator config.
     "$python" "$checker" "$results/01-previous-install.json" --label previous-install --platform "$platform" \
-        --action ensure --installed --version "$previous_version" --allow-warning no_connectors_enabled
+        --action ensure --installed --version "$previous_version" --allow-warning no_connectors_enabled \
+        ${previous_views[@]+"${previous_views[@]}"}
 
     step "apply the administrator config on the previous release"
     write_admin_config
     config_version=$(sed -n 's/^config_version: //p' "$stage/config.yaml")
-    lifecycle 02-previous-config ensure --from-package --config "$stage/config.yaml" --reason ci-upgrade-lane
+    echo "administrator config for $previous_version: config_version $config_version"
+    # On macOS the previous package's config write fires the launchd path job
+    # (ensure --reason path) right after its install, as the install lane's
+    # ensure-config step finds: wait for it instead of failing lifecycle_busy.
+    lifecycle 02-previous-config ensure --from-package --config "$stage/config.yaml" --reason ci-upgrade-lane --lock-wait 2m
     check "$results/02-previous-config.json" previous-config --action ensure --installed --version "$previous_version" --ready \
-        --allow-warning unprivileged_user_namespaces "${policy_checks[@]}"
+        "${policy_checks[@]}" ${previous_views[@]+"${previous_views[@]}"}
     cp "$stage/config.yaml" "$results/config-before.yaml"
+    step "store a protected credential on the previous release"
+    seed_upgrade_secret 02-previous-secret
     lifecycle 03-previous-verify verify
+    retry_busy 03-previous-verify verify
     check "$results/03-previous-verify.json" previous-verify --action verify --installed --version "$previous_version" --ready \
-        --allow-warning unprivileged_user_namespaces
+        ${previous_views[@]+"${previous_views[@]}"}
     lifecycle 04-previous-status status
+    retry_busy 04-previous-status status
     previous_config_sha=$(sha256_of "$config")
     previous_secrets_sha=$(tree_sha "$secrets_dir")
     previous_ledger=$(ledger_targets)
@@ -577,9 +884,17 @@ upgrade_lane() {
     # it after it saved this result.
     held=()
     [ "$platform" != linux ] || held=(--held-service defenseclaw-enterprise-apply.path)
+    # The new release reports the restored previous install truthfully
+    # (GAP-1412): its hook residual (hook_process_fail_open), a previous
+    # release's connectors without a trusted policy-view digest
+    # (machine_policy_incomplete), its first install scan after the restart
+    # (agent_install_scan_incomplete, T2 run 40440985412); the host's own
+    # policy-view sysctls are required where the host has them (kernel_views).
     "$python" "$checker" "$results/05-upgrade-fault.json" --label upgrade-fault --platform "$platform" \
         --action ensure --expect-error lifecycle_test_fault --ready ${held[@]+"${held[@]}"} \
-        --allow-warning lifecycle_test_fault --allow-warning rolled_back --allow-warning unprivileged_user_namespaces
+        --allow-warning lifecycle_test_fault --allow-warning rolled_back ${kernel_views[@]+"${kernel_views[@]}"} \
+        --allow-warning machine_policy_incomplete --allow-warning hook_process_fail_open \
+        --allow-warning agent_install_scan_incomplete
     services_running
     if [ "$platform" = linux ]; then
         systemctl is-active --quiet defenseclaw-enterprise-apply.path ||
@@ -592,14 +907,16 @@ upgrade_lane() {
 
     step "upgrade to $version (ensure --from-package)"
     lifecycle 06-upgrade ensure --from-package --reason ci-upgrade-lane
-    # A v8 config is migrated, so the upgrade applies a new config generation;
-    # a v9 one keeps its bytes and its generation.
-    generation_floor=$previous_generation
-    [ "$config_version" = 8 ] || generation_floor=$((previous_generation - 1))
-    check "$results/06-upgrade.json" upgrade --action ensure --changed --installed --version "$version" --ready --complete \
-        "${policy_checks[@]}" --policy-applied --config-generation-above "$generation_floor"
+    # A version 9 config keeps its bytes, so its generation does not drop; a
+    # version 8 one is migrated, which applies a new config generation.
+    generation_floor=$((previous_generation - 1))
+    [ "$config_version" != 8 ] || generation_floor=$previous_generation
+    check "$results/06-upgrade.json" upgrade --action ensure --changed --installed --version "$version" --ready \
+        --coverage-complete --security-incomplete --allow-warning hook_process_fail_open \
+        --allow-warning agent_install_scan_incomplete "${policy_checks[@]}" ${kernel_views[@]+"${kernel_views[@]}"} \
+        --policy-applied --config-generation-above "$generation_floor"
     sandbox_files_present
-    launcher_offers_only_sandbox
+    launcher_offers_only_sandbox "${admin_connectors[@]}"
     if [ "$config_version" = 8 ]; then
         [ -f "$config_dir/migration-v9.json" ] || die "the upgrade wrote no $config_dir/migration-v9.json"
         [ -f "$config.v8.bak" ] || die "the upgrade kept no $config.v8.bak"
@@ -608,6 +925,7 @@ upgrade_lane() {
     fi
     cp "$config" "$results/config-upgraded.yaml"
     [ "$(tree_sha "$secrets_dir")" = "$previous_secrets_sha" ] || die "the upgrade changed the secrets under $secrets_dir"
+    upgrade_secret_kept || die "the upgrade did not keep the bytes of the protected credential $upgrade_secret_name"
     [ "$(ledger_targets)" = "$previous_ledger" ] ||
         die "the upgrade changed the protected targets in the guardian ledger $guardian_ledger"
     services_running
@@ -631,9 +949,9 @@ else
     cp "$lifecycle_dir/last-package-result.json" "$results/01-package-install.json"
     # Without an administrator config the package enables no connector, so a
     # host with eligible users is honestly security-incomplete (GAP-0266); the
-    # step after this one applies the config and requires --complete.
+    # step after this one applies the config and checks the hook-process warning.
     check "$results/01-package-install.json" package-install --action ensure --changed --installed --version "$version" --ready \
-        --coverage-complete --allow-warning no_connectors_enabled
+        --allow-warning no_connectors_enabled --allow-warning agent_install_scan_incomplete ${kernel_views[@]+"${kernel_views[@]}"}
     [ "$install_rc" -eq 0 ] || die "the package manager exited $install_rc"
     [ -x "$gateway" ] || die "$gateway was not installed"
     [ -f "$config" ] || die "the lifecycle did not write $config"
@@ -653,17 +971,23 @@ else
     fi
     step "the sandbox launcher and the user service definitions are installed"
     sandbox_files_present
-    launcher_offers_only_sandbox
+    launcher_offers_only_sandbox "${package_default_connectors[@]}"
 
     # ---- reconfigure ---------------------------------------------------------------
     step "ensure with an administrator config that enables Claude Code and Codex"
     write_admin_config
-    lifecycle 02-ensure-config ensure --from-package --config "$stage/config.yaml" --reason ci-install-lane
+    # On macOS the package's config write fires the launchd path job
+    # (ensure --reason path) right after the install; it can still hold the
+    # lifecycle lock here, so wait for it instead of failing with lifecycle_busy.
+    lifecycle 02-ensure-config ensure --from-package --config "$stage/config.yaml" --reason ci-install-lane --lock-wait 2m
     check "$results/02-ensure-config.json" ensure-config --action ensure --changed --installed --version "$version" --ready \
-        --complete "${policy_checks[@]}"
+        --coverage-complete --security-incomplete --allow-warning hook_process_fail_open \
+        --allow-warning agent_install_scan_incomplete "${policy_checks[@]}" ${kernel_views[@]+"${kernel_views[@]}"}
     [ "$(cksum <"$stage/config.yaml")" = "$(cksum <"$config")" ] || die "$config is not the applied administrator config"
     [ -n "$(policy_entries)" ] || die "no DefenseClaw machine-policy entry was written under ${policy_dirs[*]}"
     echo "machine policy entries: $(policy_entries | tr '\n' ' ')"
+    # The administrator config changes the roster the user sees: the connectors it enrolls.
+    launcher_offers_only_sandbox "${admin_connectors[@]}"
 fi
 
 if [ -e "$install_root/lib/defenseclaw/policy_compiler.py" ]; then
@@ -676,40 +1000,63 @@ fi
 step "ensure again (must be a no-op)"
 lifecycle 03-ensure-noop ensure --from-package --reason ci-install-lane --lock-wait 2m
 check "$results/03-ensure-noop.json" ensure-noop --action ensure --noop --installed --version "$version" --ready \
-    --complete
+    --coverage-complete --security-incomplete --allow-warning hook_process_fail_open \
+    --allow-warning agent_install_scan_incomplete ${kernel_views[@]+"${kernel_views[@]}"}
+
+wait_for_install_scan
 
 step "verify"
 lifecycle 04-verify verify
-# launchd can deliver the path event from a config replacement after the next
-# step has started. Its redundant ensure is safe, but a read-only step's fixed 5s
-# lock wait may expire while that job holds the lifecycle lock. Retry only this
-# expected busy result, for at most two minutes on macOS.
-retry_busy() { # step-name verb
-    [ "$kind" = pkg ] || return 0
-    local deadline=$((SECONDS + 120))
-    while [ "$(cat "$results/$1.rc")" = 75 ] && [ "$SECONDS" -lt "$deadline" ]; do
-        "$python" -c 'import json,sys; r=json.load(open(sys.argv[1], encoding="utf-8-sig")); sys.exit(0 if any(e.get("code") == "lifecycle_busy" for e in r.get("errors", [])) else 1)' "$results/$1.json" || break
-        sleep 2
-        lifecycle "$1" "$2"
-    done
-}
 retry_busy 04-verify verify
-# verify reports whether unprivileged user namespaces are open, a setting of
-# the host's kernel (the runner's, or the container host's), not of the package.
+# verify reports the kernel's open policy-view routes (kernel_views), a setting
+# of the host's kernel (the runner's, or the container host's), not of the package.
 check "$results/04-verify.json" verify --action verify --installed --version "$version" --ready \
-    --complete "${policy_checks[@]}" --allow-warning unprivileged_user_namespaces
+    --coverage-complete --security-incomplete "${policy_checks[@]}" \
+    ${kernel_views[@]+"${kernel_views[@]}"} --allow-warning hook_process_fail_open
 
 step "status"
 lifecycle 05-status status
 retry_busy 05-status status
 check "$results/05-status.json" status --action status --installed --version "$version" \
-    --complete "${policy_checks[@]}"
+    --coverage-complete --security-incomplete "${policy_checks[@]}" --allow-warning hook_process_fail_open \
+    ${kernel_views[@]+"${kernel_views[@]}"}
 services_running
 
-step "MDM detection (detect.sh --require-healthy)"
-detected=$(detect_value --require-healthy --min-version "$version" || true)
+step "MDM detection (detect.sh)"
+detected=$(detect_settled --min-version "$version")
 [ "$detected" = "$version" ] || die "detect.sh printed '$detected', want '$version'"
 echo "detect.sh: $detected"
+# --require-healthy requires verify.ok, verify.coverage_complete and, when
+# security_complete is false, only host-hardening reasons in verify's
+# security_incomplete note (packaging/mdm/contract/detection.md): the
+# hook-process limit of the enabled Claude Code and Codex and open kernel
+# policy-view routes, which only --require-security-complete reports
+# unhealthy. The note is parsed here in Python, apart from detect.sh's awk.
+want_healthy=$version
+"$python" - "$results/04-verify.json" <<'PY' || want_healthy=unhealthy
+import json, sys
+r = json.load(open(sys.argv[1], encoding="utf-8-sig"))
+if r.get("ok") is not True or r.get("coverage_complete") is not True:
+    sys.exit(1)
+if r.get("security_complete") is True:
+    sys.exit(0)
+note = next((w.get("message") or "" for w in r.get("warnings") or [] if w.get("code") == "security_incomplete"), "")
+prefix = "security_complete is false because of: "
+suffix = "; coverage_complete is true; each warning above says what to do"
+if not (note.startswith(prefix) and note.endswith(suffix)):
+    sys.exit(1)
+reasons = note[len(prefix):-len(suffix)].split(", ")
+sys.exit(0 if all(reason in {"hook_process_fail_open", "unprivileged_user_namespaces", "unprivileged_ptrace"}
+                  for reason in reasons) else 1)
+PY
+detected=$(detect_settled --require-healthy --min-version "$version")
+[ "$detected" = "$want_healthy" ] || die "detect.sh --require-healthy printed '$detected', want '$want_healthy'"
+echo "detect.sh --require-healthy: $detected"
+want_secure=$want_healthy
+[ "$(json_field "$results/04-verify.json" security_complete)" = True ] || want_secure=unhealthy
+detected=$(detect_value --require-security-complete --min-version "$version" || true)
+[ "$detected" = "$want_secure" ] || die "detect.sh --require-security-complete printed '$detected', want '$want_secure'"
+echo "detect.sh --require-security-complete: $detected"
 
 # ---- uninstall ---------------------------------------------------------------
 step "uninstall (the machine config and state go too)"

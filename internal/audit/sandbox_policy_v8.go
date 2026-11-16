@@ -19,11 +19,11 @@ package audit
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -79,6 +79,9 @@ const (
 	SandboxManagedRemove            = "remove"
 	SandboxGuestRelayWithoutGuest   = "relay_without_guest"
 	SandboxGuestRunningWithoutGuest = "running_without_guest"
+	// SandboxGuestRunningAfterStop: a running report for a registration
+	// whose daemon reported its sandbox stopped, refused (GAP-0673).
+	SandboxGuestRunningAfterStop = "running_after_stop"
 )
 
 // Bounds of the managed attributes, as the registry declares them.
@@ -90,12 +93,12 @@ const (
 )
 
 var (
-	sandboxSubjectKeyPattern  = regexp.MustCompile(`^hmac-sha256:[0-9a-f]{64}$`)
-	sandboxOpenShellVersionRe = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$`)
-	sandboxProfileNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-	sandboxManagedCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
-	sandboxPolicyRulePattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
-	sandboxSettingsFieldRe    = regexp.MustCompile(`^[a-z][a-z0-9_.]{0,63}$`)
+	sandboxSubjectKeyPattern  = lazyregexp.New(`^hmac-sha256:[0-9a-f]{64}$`)
+	sandboxOpenShellVersionRe = lazyregexp.New(`^[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$`)
+	sandboxProfileNamePattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	sandboxManagedCodePattern = lazyregexp.New(`^[a-z][a-z0-9_]{0,63}$`)
+	sandboxPolicyRulePattern  = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+	sandboxSettingsFieldRe    = lazyregexp.New(`^[a-z][a-z0-9_.]{0,63}$`)
 )
 
 // SandboxManaged is what the managed gateway knows about the sandbox's
@@ -390,7 +393,11 @@ func (recorder *SandboxRecorder) RecordSandboxPolicyResolved(ctx context.Context
 			})
 		},
 	}
-	return recorder.emit(ctx, log, nil)
+	var metrics []RuntimeV8GeneratedMetric
+	if result := sandboxProvisionalResolution(identity.Managed, input.Failed); result != "" {
+		metrics = newSandboxManagedProvisionalMetric(event, sandboxManagedLabelsFor(identity, fields), result)
+	}
+	return recorder.emit(ctx, log, metrics)
 }
 
 // SandboxPolicyRematchedEvent is one re-match of a live registration
@@ -478,7 +485,15 @@ func (recorder *SandboxRecorder) RecordSandboxPolicyRematched(ctx context.Contex
 			})
 		},
 	}
-	return recorder.emit(ctx, log, nil)
+	var metrics []RuntimeV8GeneratedMetric
+	if input.Reason == SandboxRematchLookupResolved {
+		result := SandboxProvisionalResolved
+		if input.Failed {
+			result = SandboxProvisionalFailed
+		}
+		metrics = newSandboxManagedProvisionalMetric(event, sandboxManagedLabelsFor(identity, fields), result)
+	}
+	return recorder.emit(ctx, log, metrics)
 }
 
 // SandboxPolicyForeignRuleEvent is one network rule found in a managed
@@ -563,7 +578,8 @@ func (recorder *SandboxRecorder) RecordSandboxPolicyForeignRule(ctx context.Cont
 			})
 		},
 	}
-	return recorder.emit(ctx, log, nil)
+	return recorder.emit(ctx, log, newSandboxManagedForeignMetric(event, sandboxManagedLabelsFor(identity, fields),
+		SandboxForeignKindRule, input.Action))
 }
 
 // SandboxAskDecidedEvent is the managed gateway's decision on a user's ask,
@@ -681,13 +697,13 @@ func (recorder *SandboxRecorder) RecordSandboxAskDecided(ctx context.Context, in
 			})
 		},
 	}
-	return recorder.emit(ctx, log, nil)
+	return recorder.emit(ctx, log, newSandboxManagedAskMetric(event, sandboxManagedLabelsFor(identity, fields), input.Result, reason))
 }
 
 // SandboxHostRunRefusedEvent is a hook of an agent running on the host
 // that was refused because the matched profile requires a sandbox for it
 // (log.sandbox.host_run_refused). Sandbox.Connector names the agent; Reason
-// is a registered code such as required_group and Rule the required_for
+// is a registered code such as required_for and Rule the required_for
 // entry that matched (the caller's own match only). It is an enforced
 // outcome and therefore mandatory.
 type SandboxHostRunRefusedEvent struct {
@@ -751,7 +767,8 @@ func (recorder *SandboxRecorder) RecordSandboxHostRunRefused(ctx context.Context
 			})
 		},
 	}
-	return recorder.emit(ctx, log, nil)
+	return recorder.emit(ctx, log, newSandboxManagedRefusalMetric(event, sandboxManagedLabelsFor(identity, fields),
+		observability.Present(input.Reason)))
 }
 
 // SandboxHostRunUnavailableEvent is a host agent run that needs a sandbox
@@ -828,7 +845,11 @@ func (recorder *SandboxRecorder) RecordSandboxHostRunUnavailable(ctx context.Con
 			})
 		},
 	}
-	return recorder.emit(ctx, log, nil)
+	var metrics []RuntimeV8GeneratedMetric
+	if enforced {
+		metrics = newSandboxManagedRefusalMetric(event, sandboxManagedLabelsFor(identity, fields), observability.Present(input.Reason))
+	}
+	return recorder.emit(ctx, log, metrics)
 }
 
 // SandboxAccessRefusedEvent is a destination the managed policy refused to
@@ -901,7 +922,7 @@ func (recorder *SandboxRecorder) RecordSandboxAccessRefused(ctx context.Context,
 			})
 		},
 	}
-	return recorder.emit(ctx, log, nil)
+	return recorder.emit(ctx, log, newSandboxManagedRefusalMetric(event, sandboxManagedLabelsFor(identity, fields), reason))
 }
 
 // SandboxForeignSandboxEvent is a sandbox on a managed user's OpenShell
@@ -979,7 +1000,8 @@ func (recorder *SandboxRecorder) RecordSandboxForeignSandbox(ctx context.Context
 			})
 		},
 	}
-	return recorder.emit(ctx, log, nil)
+	return recorder.emit(ctx, log, newSandboxManagedForeignMetric(event, sandboxManagedLabelsFor(identity, fields),
+		SandboxForeignKindSandbox, input.Action))
 }
 
 // SandboxForeignContainerEvent is an agent container started outside
@@ -1001,7 +1023,7 @@ const maxSandboxContainerImageBytes = 256
 
 // sandboxContainerImagePattern is a plain image reference: a repository
 // with a tag or a digest, or an image ID.
-var sandboxContainerImagePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@-]*$`)
+var sandboxContainerImagePattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:/@-]*$`)
 
 // optionalSandboxContainerImage is the image reference, or absent when it
 // is not a plain one: an engine's value never costs the record.
@@ -1059,7 +1081,8 @@ func (recorder *SandboxRecorder) RecordSandboxForeignContainer(ctx context.Conte
 			})
 		},
 	}
-	return recorder.emit(ctx, log, nil)
+	return recorder.emit(ctx, log, newSandboxManagedForeignMetric(event, sandboxManagedLabelsFor(identity, fields),
+		SandboxForeignKindContainer, SandboxManagedAlert))
 }
 
 // SandboxSettingsDriftEvent is an OpenShell setting that no longer matches
@@ -1125,7 +1148,7 @@ func (recorder *SandboxRecorder) RecordSandboxSettingsDrift(ctx context.Context,
 			})
 		},
 	}
-	return recorder.emit(ctx, log, nil)
+	return recorder.emit(ctx, log, newSandboxManagedDriftMetric(event, sandboxManagedLabelsFor(identity, fields), input.Field))
 }
 
 // SandboxRegistrationWithoutGuestEvent is a watched registration used or
@@ -1151,7 +1174,7 @@ func (recorder *SandboxRecorder) RecordSandboxRegistrationWithoutGuest(ctx conte
 		return fmt.Errorf("audit: sandbox registration without guest requires a registration id")
 	}
 	switch input.Reason {
-	case SandboxGuestRelayWithoutGuest, SandboxGuestRunningWithoutGuest:
+	case SandboxGuestRelayWithoutGuest, SandboxGuestRunningWithoutGuest, SandboxGuestRunningAfterStop:
 	default:
 		return fmt.Errorf("audit: sandbox registration without guest reason %q is not registered", input.Reason)
 	}

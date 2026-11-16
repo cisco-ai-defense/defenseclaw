@@ -20,13 +20,14 @@ import (
 )
 
 // GAP-0588: Hermes and Devin keep the last known good copy of the agent
-// config and its restore notice in connector_backups\<connector>; the
+// config, its restore notice and the notice-seen marker `defenseclaw setup`
+// writes (rel-1-0-6:GAP-0333) in connector_backups\<connector>; the
 // rollback of a failed first install removes only the names it knows there
 // and refuses the whole root for any other, so it must know theirs.
 func TestManagedRuntimeCleanupKnowsTheAgentConfigCopies(t *testing.T) {
 	for _, name := range []string{"hermes", "devin"} {
 		leaves := connector.AgentConfigBackupLeaves(name)
-		if len(leaves) != 2 {
+		if len(leaves) != 3 {
 			t.Fatalf("%s: leaves = %v", name, leaves)
 		}
 		files := windowsManagedRuntimeCleanupConnectors[name]

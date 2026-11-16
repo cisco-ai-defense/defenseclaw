@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"os"
@@ -216,9 +217,11 @@ func (r *DoctorReport) GatewayUnmanaged() bool {
 // OpenShellInstallNeeded reports whether DefenseClaw's install step
 // (Installer.Install) would run NVIDIA's installer on this host: no
 // OpenShell CLI, one whose release it cannot read, or one older than
-// SupportedMin, which it upgrades. Over a supported CLI it installs
-// nothing (an older one than InstallerVersion is offered the upgrade
-// instead: OpenShellUpgradeAvailable), and one newer than supported it
+// LegacyMin, which it upgrades. Over a CLI DefenseClaw drives
+// (CheckConnects) it installs nothing (an older one than InstallerVersion
+// is offered the upgrade instead: OpenShellUpgradeAvailable, which a
+// legacy one, older than SupportedMin, takes by default), and one newer
+// than supported it
 // refuses, so there every other failing check (the gateway, its service,
 // the MicroVM driver) is its fix's, not the install's. Setup offers the
 // install only then, and the
@@ -237,23 +240,54 @@ func (r *DoctorReport) OpenShellInstallNeeded() bool {
 		return true
 	}
 	v, err := ParseVersion(r.CLIVersion)
-	return err != nil || v.Compare(mustParse(SupportedBelow)) < 0
+	return err != nil || !aboveWindow(v)
+}
+
+// OpenShellLegacy reports an OpenShell CLI DefenseClaw still drives only to
+// move it to SupportedMin (Legacy): it runs no sandbox, and the in-place
+// upgrade that setup offers (OpenShellUpgradeAvailable), and that
+// DefenseClaw's install step makes for it unasked (Installer.Install), is
+// taken by default: yes to setup's question, and --yes.
+func (r *DoctorReport) OpenShellLegacy() bool {
+	v, err := ParseVersion(r.CLIVersion)
+	return r.OpenShellUpgradeAvailable() && err == nil && Legacy(v)
 }
 
 // OpenShellUpgradeAvailable reports a supported OpenShell older than
 // InstallerVersion that DefenseClaw's install step upgrades in place
 // (Installer.Upgrade): the CLI check warns with that fix. Not for an
 // OpenShell installed another way (GatewayUnmanaged), which its user
-// upgrades. Setup offers the upgrade (no by default) only then, and the
-// TUI shows it with the install toggle off (`sandbox doctor --json`
-// reports it as openshell_upgrade).
+// upgrades. Setup offers the upgrade (no by default; setup does not finish
+// without it while the release runs no sandbox: OpenShellUpgradeNeeded)
+// only then, and the TUI shows it with the install toggle off (`sandbox
+// doctor --json` reports it as openshell_upgrade).
 func (r *DoctorReport) OpenShellUpgradeAvailable() bool {
 	cli := r.Get(CheckIDCLI)
 	if cli == nil || cli.Status != StatusWarn || r.GatewayUnmanaged() {
 		return false
 	}
 	v, err := ParseVersion(r.CLIVersion)
-	return err == nil && CheckSupported(v) == nil && v.Compare(mustParse(InstallerVersion)) < 0
+	return err == nil && CheckConnects(v) == nil && v.Compare(mustParse(InstallerVersion)) < 0
+}
+
+// OpenShellUpgradeNeeded reports a gateway, and a CLI, that DefenseClaw
+// drives but whose releases run no sandbox work (SupportedMin), the same
+// release or not: the Gateway check fails, and its fix is the in-place
+// upgrade that setup offers (OpenShellUpgradeAvailable) or, for an
+// OpenShell installed another way, its user's. Not for a CLI of a release
+// that runs sandboxes, whose older gateway still answers: the fix of that
+// is a gateway restart (gatewayVersionFix).
+func (r *DoctorReport) OpenShellUpgradeNeeded() bool {
+	gw := r.Get(CheckIDGatewayVersion)
+	if gw == nil || gw.Status != StatusFail {
+		return false
+	}
+	v, err := ParseVersion(r.GatewayVersion)
+	if err != nil || !Legacy(v) {
+		return false
+	}
+	cli, err := ParseVersion(r.CLIVersion)
+	return err == nil && Legacy(cli)
 }
 
 // Get returns the check with id, or nil.
@@ -347,6 +381,9 @@ type PortRequirement struct {
 	// ServedByDaemon means the running DefenseClaw daemon already listens
 	// there, so the port being taken is expected.
 	ServedByDaemon bool
+	// Holder is a privacy-safe class reported by the managed daemon after
+	// probing a busy port; it is empty when no holder was classified.
+	Holder string
 }
 
 // DockerDesktop are the Docker Desktop settings doctor reads.
@@ -380,6 +417,12 @@ type Doctor struct {
 	// back or not, so the caller can record the files it wrote (setup's
 	// receipt, which teardown restores them from).
 	GatewayApplied func(*GatewayApplyResult)
+	// StopSync and StopSyncOut are the default Gateway's StopSync and Out:
+	// a fix's restart gives the service the stop sync, which GatewayApplied
+	// hears of, and names each MicroVM a sync before it could not sync
+	// (GAP-1927, GAP-1928).
+	StopSync    *StopSync
+	StopSyncOut io.Writer
 	// CLI is the openshell binary (default DefaultBinary).
 	CLI string
 
@@ -388,6 +431,12 @@ type Doctor struct {
 	// DaemonUID is the DefenseClaw daemon's uid when known; the gateway
 	// must run as the same user.
 	DaemonUID *int
+	// DaemonPID is the process named in the sandbox daemon's status response.
+	// It is not port ownership proof without a matching ResponderPID.
+	DaemonPID int
+	// ResponderPID is the kernel-verified process that supplied that status
+	// response over the managed Unix socket.
+	ResponderPID int
 	// Managed limits the report to the checks of this account's own
 	// process (platform and user), for a managed computer: there the
 	// administrator's lifecycle owns OpenShell (its install, gateway
@@ -449,10 +498,6 @@ type Doctor struct {
 	Username      func() (string, error)
 	HomeDir       func() (string, error)
 	DockerDesktop func() (*DockerDesktop, error)
-	// TempDir is the parent of the files the hook-fire probe of an image
-	// build mounts into its containers (default HookFireProbeDir, the
-	// default of image.Builder, whose TempDir overrides it the same way).
-	TempDir func() string
 	// DockerGroup reports whether the user belongs to the docker group
 	// and whether this session already carries that membership.
 	DockerGroup func() (member, inSession bool, err error)
@@ -488,7 +533,8 @@ func (d *Doctor) defaults() {
 	}
 	if d.Gateway == nil {
 		d.Gateway = &GatewayConfigurator{Dir: d.Discover.ConfigDir, Runner: d.Runner, GOOS: d.GOOS, Discover: d.Discover, CLI: d.CLI, LookPath: d.LookPath,
-			ServiceDockerGroupMissing: d.ServiceDockerGroupMissing, Rendered: d.Rendered}
+			ServiceDockerGroupMissing: d.ServiceDockerGroupMissing, Rendered: d.Rendered,
+			StopSync: d.StopSync, StopSyncWritten: d.GatewayApplied, Out: d.StopSyncOut}
 		if d.Rendered != nil {
 			euid, egid := os.Geteuid(), os.Getegid()
 			if d.Geteuid != nil {
@@ -549,9 +595,6 @@ func (d *Doctor) defaults() {
 	}
 	if d.DockerDesktop == nil {
 		d.DockerDesktop = func() (*DockerDesktop, error) { return readDockerDesktop(d.GOOS, d.HomeDir) }
-	}
-	if d.TempDir == nil {
-		d.TempDir = HookFireProbeDir
 	}
 	if d.DockerGroup == nil {
 		d.DockerGroup = dockerGroupMembership
@@ -616,6 +659,9 @@ type doctorRun struct {
 	// its service is stopped (checkService); portOther when another
 	// account does (report.GatewayPortElsewhere).
 	portHeld, portOther bool
+	// noUserManager is set when this session reaches no systemd user
+	// manager (checkService): the gateway service cannot start from it.
+	noUserManager bool
 }
 
 func (r *doctorRun) add(c Check) { r.report.Checks = append(r.report.Checks, c) }
@@ -650,6 +696,7 @@ func (d *Doctor) Run(ctx context.Context) *DoctorReport {
 		// The compute driver is the administrator's: the daemon says it.
 		r.report.ConfiguredDriver, r.report.Driver, r.report.Managed = "", "", true
 		r.checkUser()
+		r.checkPorts(ctx)
 		return r.report
 	}
 	if st, err := r.Gateway.Read(); err == nil {
@@ -683,7 +730,7 @@ func (d *Doctor) Run(ctx context.Context) *DoctorReport {
 	r.unmanagedService(ctx)
 	r.stoppedServiceAnswers()
 	r.checkGatewayConfig(ctx)
-	r.checkPorts()
+	r.checkPorts(ctx)
 	r.checkDockerNamespace(ctx)
 	r.deferToGatewayOwner()
 	r.report.Driver = r.driver()
@@ -783,11 +830,11 @@ func (r *doctorRun) checkLandlock() {
 	case err != nil:
 		c.Status = StatusFail
 		c.Detail = "the kernel has no Landlock support: " + err.Error()
-		c.Fix = &Fix{Summary: fmt.Sprintf("use a Linux kernel 6.2 or newer with Landlock (ABI %d+)", MinLandlockABI), Sudo: true}
+		c.Fix = &Fix{Summary: fmt.Sprintf("use a kernel with Landlock ABI %d or newer (Linux 6.2 upstream or a distribution backport)", MinLandlockABI), Sudo: true}
 	case abi < MinLandlockABI:
 		c.Status = StatusFail
 		c.Detail = fmt.Sprintf("Landlock ABI %d; OpenShell needs ABI %d or newer", abi, MinLandlockABI)
-		c.Fix = &Fix{Summary: "upgrade to a Linux kernel 6.2 or newer", Sudo: true}
+		c.Fix = &Fix{Summary: fmt.Sprintf("use a kernel with Landlock ABI %d or newer (Linux 6.2 upstream or a distribution backport)", MinLandlockABI), Sudo: true}
 	default:
 		c.Status, c.Detail = StatusPass, fmt.Sprintf("ABI %d", abi)
 	}
@@ -1227,14 +1274,21 @@ func (r *doctorRun) checkService(ctx context.Context) {
 	st, err := r.Gateway.ServiceState(ctx)
 	if err != nil {
 		c.Status, c.Detail = StatusFail, err.Error()
-		if r.GOOS == "linux" && strings.Contains(err.Error(), "Failed to connect to bus") {
+		if r.GOOS == "linux" && noUserManager(err) {
 			// systemctl's words for a session without a user manager
 			// (GAP-0317); the fix below says what to do.
 			c.Detail = "cannot read the gateway service: this session reaches no systemd user manager"
+			r.noUserManager = true
 		}
 		switch {
 		case r.GOOS == "linux":
 			c.Fix = &Fix{Summary: "run doctor from a login session with a systemd user manager (XDG_RUNTIME_DIR set), and enable linger"}
+			if name, err := r.Username(); r.noUserManager && err == nil && name != "" {
+				// Linger starts the account's user manager now and keeps
+				// it after logout (GAP-1040).
+				c.Fix = &Fix{Summary: "give your account a systemd user manager, which starts the gateway service: enable linger, then run setup again",
+					Command: "sudo loginctl enable-linger " + shellQuote(name), Sudo: true}
+			}
 		case errors.Is(err, ErrBrewServicesTmux):
 			c.Fix = &Fix{Summary: "run the doctor outside tmux, or in a tmux started from Terminal in your desktop session"}
 		}
@@ -1400,7 +1454,7 @@ const (
 // the service, the gateway of an OpenShell installed another way is the
 // user's to replace (unmanagedFix).
 func (r *doctorRun) gatewayVersionFix(install *Fix) *Fix {
-	if r.cli == (Version{}) || CheckSupported(r.cli) != nil {
+	if r.cli == (Version{}) || CheckConnects(r.cli) != nil {
 		return install
 	}
 	release := gatewayRelease(r.gateway)
@@ -1668,7 +1722,15 @@ func (r *doctorRun) checkCLI(ctx context.Context) {
 	r.cli, r.report.CLIVersion = v, v.String()
 	if err := CheckSupported(v); err != nil {
 		c.Status, c.Detail, c.Fix = StatusFail, err.Error(), install
-		if v.Compare(mustParse(SupportedBelow)) >= 0 {
+		if Legacy(v) {
+			// A legacy release still works for the move off it: a
+			// warning, whose upgrade setup takes by default
+			// (OpenShellLegacy), as the install step does.
+			c.Status, c.Detail = StatusWarn, fmt.Sprintf("%s at %s; OpenShell %s %s", v, path, InstallerVersion, installerUpgradeReason)
+			c.Fix = r.upgradeFix()
+			return
+		}
+		if aboveWindow(v) {
 			// Installer.Install refuses a newer CLI: it does not downgrade.
 			c.Fix = &Fix{Summary: "DefenseClaw's install step does not downgrade OpenShell: remove OpenShell " + v.String() +
 				", then install OpenShell " + InstallerVersion, Command: installOpenShellCommand}
@@ -1690,14 +1752,15 @@ func (r *doctorRun) checkCLI(ctx context.Context) {
 // installer set up, whose gateway service it restarts the gateway through:
 // one installed another way (no gateway service: GatewayUnmanaged) is the
 // user's to upgrade. What the restart does depends on the configured
-// driver (PrepareUpgrade): on the MicroVM driver it would stop the running
-// sandboxes without a flush, so the upgrade waits until none runs.
+// driver (PrepareUpgrade): on the MicroVM driver it would stop the
+// sandboxes without a flush, so the upgrade is refused until OpenShell
+// reports each sandbox on the gateway stopped (HoldsGateway).
 func (r *doctorRun) upgradeFix() *Fix {
 	if r.serviceMissing() {
 		return &Fix{Summary: "upgrade OpenShell to " + InstallerVersion + " the way you installed it: DefenseClaw upgrades only the OpenShell NVIDIA's installer installs"}
 	}
 	if r.configured == DriverVM {
-		return &Fix{Summary: "upgrade OpenShell to " + InstallerVersion + " in place (this restarts the gateway; stop the running MicroVM sandboxes first with `defenseclaw sandbox stop NAME`)",
+		return &Fix{Summary: "upgrade OpenShell to " + InstallerVersion + " in place (this restarts the gateway; save or sync each MicroVM guest's work first; raw stop on OpenShell older than 0.1.5 may not flush the guest, so save its work outside the guest before it; then stop running sandboxes with `defenseclaw sandbox stop NAME` for DefenseClaw sandboxes or `openshell sandbox stop NAME` for raw OpenShell sandboxes; a failed sync can lose later changes)",
 			Command: installOpenShellCommand}
 	}
 	return &Fix{Summary: "upgrade OpenShell to " + InstallerVersion + " in place (this pulls its supervisor images from ghcr.io and restarts the gateway, " +
@@ -1782,20 +1845,36 @@ func (r *doctorRun) checkRegistration() {
 	}
 }
 
-// registrationFix registers a missing local gateway. The gateway writes
-// the client certificates a registration takes when it starts, so with its
-// service stopped the service's fix comes first: it starts the gateway and
-// registers it.
+// registrationFix registers a missing local gateway. With its service
+// stopped the service's fix comes first: it starts the gateway and
+// registers it. The client certificates a registration takes come from the
+// gateway's first start under systemd, but from the post-install step of
+// the Homebrew formula on macOS, never from a start there (GAP-0319): a
+// Homebrew install without them is told that step (GAP-2457).
 func (r *doctorRun) registrationFix() *Fix {
 	add := r.addCommandLine()
+	brewTLS := r.localRegistrationTLSDir()
 	switch {
 	case r.portHeld:
 		return &Fix{Summary: "nothing to register while this account's gateway cannot run (see Gateway service)"}
-	case r.service != nil && r.service.Installed && !r.service.Active:
+	case r.noUserManager && r.canRegisterLocal():
+		// A gateway that cannot start writes no client certificates: a
+		// registration would wait for them in vain (GAP-1040).
+		return &Fix{Summary: "start the gateway first (Gateway service): it writes the client certificates a registration takes, and this session reaches " +
+			"no systemd user manager to start it (`sudo loginctl enable-linger` gives your account one; then run these from a new login, " +
+			"or with XDG_RUNTIME_DIR=/run/user/$(id -u))", Command: r.startCommand().String() + " && " + add}
+	case r.service != nil && r.service.Installed && !r.service.Active && brewTLS == "":
 		return &Fix{Summary: "start the gateway first (Gateway service): it writes the client certificates a registration takes; " +
 			"`defenseclaw sandbox doctor --fix` starts and registers it", Command: r.startCommand().String() + " && " + add}
+	case r.service != nil && r.service.Installed && !r.service.Active && clientBundle(brewTLS):
+		return &Fix{Summary: "start the gateway first (Gateway service), then register it with the client certificates the " + GatewayFormula +
+			" formula wrote in " + brewTLS + "; `defenseclaw sandbox doctor --fix` starts and registers it", Command: r.startCommand().String() + " && " + add}
+	case r.service != nil && r.service.Installed && !r.service.Active:
+		return r.homebrewPKIFix(brewTLS, add)
 	case !r.canRegisterLocal():
 		return &Fix{Summary: "register the local gateway", Command: add}
+	case brewTLS != "" && !clientBundle(brewTLS):
+		return r.homebrewPKIFix(brewTLS, add)
 	}
 	return &Fix{Summary: "register the local gateway", Command: add, Automatic: true, Apply: func(ctx context.Context) error {
 		if _, err := Discover(r.Discover); err == nil {
@@ -1870,7 +1949,7 @@ func (r *doctorRun) checkGateway(ctx context.Context) {
 		r.client = client
 		r.gateway, err = client.Health(ctx)
 	}
-	if err != nil || !r.gateway.Healthy {
+	if err != nil || r.gateway == nil || !r.gateway.Healthy {
 		if err == nil || !credentialFailure(err) {
 			r.forgetReleaseRestart()
 		}
@@ -1906,6 +1985,29 @@ func (r *doctorRun) checkGateway(ctx context.Context) {
 	if err := r.gateway.CheckVersion(); err != nil {
 		version.Status, version.Detail = StatusFail, err.Error()
 		version.Fix = r.gatewayVersionFix(&Fix{Summary: "install OpenShell " + InstallerVersion, Command: installOpenShellCommand})
+	} else if err := CheckSandboxRelease(r.gateway.Version); err != nil {
+		// Judged before a CLI of another release is: that only warns, and
+		// setup would finish on a gateway that runs no sandbox.
+		version.Status, version.Detail = StatusFail, err.Error()
+		switch {
+		case r.cli != (Version{}) && CheckSandboxRelease(r.cli) == nil:
+			// The CLI's release runs sandboxes, and the gateway that
+			// answers is an older one (an upgrade that replaced the
+			// binaries and left the old gateway running): restart it on
+			// the CLI's.
+			version.Detail += fmt.Sprintf("; the CLI installed here is OpenShell %s", r.cli)
+			version.Fix = r.gatewayVersionFix(&Fix{Summary: "install OpenShell " + InstallerVersion, Command: installOpenShellCommand})
+		default:
+			// The CLI's release runs none either: the upgrade replaces
+			// both (OpenShellUpgradeNeeded).
+			if r.cli != (Version{}) && r.cli.Compare(r.gateway.Version) != 0 {
+				version.Detail += fmt.Sprintf("; the CLI installed here is OpenShell %s", r.cli)
+			}
+			version.Fix = r.upgradeFix()
+			if r.cli != (Version{}) {
+				r.forgetReleaseRestart()
+			}
+		}
 	} else if r.cli != (Version{}) && r.cli.Compare(r.gateway.Version) != 0 {
 		version.Status = StatusWarn
 		version.Detail = fmt.Sprintf("gateway %s but CLI %s; keep them on the same release", r.gateway.Version, r.cli)
@@ -2331,7 +2433,7 @@ func (r *doctorRun) applyGateway(ch GatewayChanges) func(context.Context) error 
 	}
 }
 
-func (r *doctorRun) checkPorts() {
+func (r *doctorRun) checkPorts(ctx context.Context) {
 	gatewayPort := 0
 	if r.reg != nil {
 		if _, p, err := net.SplitHostPort(r.reg.Target()); err == nil {
@@ -2341,6 +2443,9 @@ func (r *doctorRun) checkPorts() {
 	for _, p := range r.Ports {
 		c := Check{ID: CheckIDPortPrefix + p.Name, Title: fmt.Sprintf("Sandbox %s port", p.Name)}
 		reconfigure := &Fix{Summary: fmt.Sprintf("choose a free port with openshell.%s_port", p.Name)}
+		if r.Managed {
+			reconfigure.Summary = fmt.Sprintf("free the port, or ask your administrator to set a different openshell.%s_port", p.Name)
+		}
 		addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(p.Port))
 		switch {
 		case p.Port < 1 || p.Port > 65535:
@@ -2353,10 +2458,39 @@ func (r *doctorRun) checkPorts() {
 			case err == nil:
 				_ = ln.Close()
 				c.Status, c.Detail = StatusPass, addr+" is free"
-			case p.ServedByDaemon:
+			case p.ServedByDaemon && !r.Managed:
 				c.Status, c.Detail = StatusPass, addr+" is served by the DefenseClaw daemon"
 			default:
-				c.Status, c.Detail, c.Fix = StatusFail, addr+" is in use by another process", reconfigure
+				var found daemon.PortHolder
+				var holderErr error
+				if r.Managed {
+					found, holderErr = r.PortHolder("127.0.0.1", p.Port)
+				}
+				if r.Managed && p.Holder == "" && holderErr == nil && r.ownSandboxDaemonProcess(ctx, found) {
+					c.Status, c.Detail = StatusPass, fmt.Sprintf("%s is served by the DefenseClaw daemon (PID %d)", addr, found.PID)
+					break
+				}
+				holder := "another process"
+				if r.Managed {
+					switch p.Holder {
+					case "sandbox_daemon":
+						holder = "another account's sandbox daemon"
+					case "other_account":
+						holder = "another account's process"
+					case "own_process":
+						holder = "another process of your account"
+					default:
+						if holderErr == nil {
+							switch {
+							case found.UID == r.Geteuid():
+								holder = "another process of your account"
+							case found.UID >= 0:
+								holder = "another account's process"
+							}
+						}
+					}
+				}
+				c.Status, c.Detail, c.Fix = StatusFail, addr+" is in use by "+holder, reconfigure
 			}
 		}
 		r.add(c)

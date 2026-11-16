@@ -13,6 +13,7 @@ package cli
 import (
 	"fmt"
 	"net/url"
+	"os"
 	"slices"
 	"strings"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
+	"github.com/defenseclaw/defenseclaw/internal/posixacl"
 )
 
 // The sandbox rows of `enterprise <os> policy verify --user U`: whether the
@@ -66,7 +68,11 @@ type enterprisePolicySandboxRow struct {
 
 // enterprisePolicySandboxProfile asks the gateway which profile an account
 // gets and whether exempt_users exempts it, as its hooks are matched (the
-// same answer as profile-explain); replaceable in tests.
+// same answer as profile-explain); replaceable in tests. It sends the
+// account as root resolves it, as profile-explain does (GAP-0500): on an
+// SSSD-joined host the gateway service cannot resolve a local or bare name
+// itself, and the sandbox section said the profile "could not be resolved"
+// and showed the strictest candidate (GAP-2070).
 var enterprisePolicySandboxProfile = func(account string) (name, match, group string, exempt bool, err error) {
 	var answer struct {
 		Profile      string `json:"profile"`
@@ -77,7 +83,11 @@ var enterprisePolicySandboxProfile = func(account string) (name, match, group st
 			Exempt bool `json:"exempt"`
 		} `json:"enrollment"`
 	}
-	if _, err := enterpriseIdentityViewGet("/api/v1/guardrail/profiles/resolve?user="+url.QueryEscape(account), &answer); err != nil {
+	query := url.Values{"user": {account}}
+	if facts := enterpriseExplainCallerFacts(account); facts != "" {
+		query.Set("caller_facts", facts)
+	}
+	if _, err := enterpriseIdentityViewGet("/api/v1/guardrail/profiles/resolve?"+query.Encode(), &answer); err != nil {
 		return "", "", "", false, err
 	}
 	if answer.LookupError != "" {
@@ -89,6 +99,39 @@ var enterprisePolicySandboxProfile = func(account string) (name, match, group st
 // enterpriseAccountGroups names the groups of an account (accountGroupNames
 // of this OS); replaceable in tests.
 var enterpriseAccountGroups = accountGroupNames
+
+// enterpriseKVMDevice is the device a MicroVM opens; replaceable in tests.
+var enterpriseKVMDevice = "/dev/kvm"
+
+// enterpriseKVMACL reads the access ACL of enterpriseKVMDevice; replaceable
+// in tests.
+var enterpriseKVMACL = posixacl.ReadAccessXattr
+
+// enterpriseKVMAccess says how the account uid can read and write
+// enterpriseKVMDevice other than through the kvm group: a user ACL entry
+// grants it, or its mode opens it to every account. "" when neither does,
+// and the kvm group decides, unless denied: an ACL entry that names the
+// account and withholds read or write is the whole answer, whatever the kvm
+// group or the mode give (POSIX ACL precedence; GAP-0714, GAP-1784, as the
+// lifecycle's groups row judges it).
+func enterpriseKVMAccess(uid int) (how string, denied bool) {
+	info, err := os.Stat(enterpriseKVMDevice)
+	if err != nil {
+		return "", false
+	}
+	if acl, err := enterpriseKVMACL(enterpriseKVMDevice); err == nil {
+		if found, allowed := acl.NamedUserAllows(uid, 0o6); found {
+			if allowed {
+				return "a user ACL entry grants it", false
+			}
+			return "", true
+		}
+	}
+	if info.Mode().Perm()&0o006 == 0o006 {
+		return "it is open to every account", false
+	}
+	return "", false
+}
 
 // sandboxPolicyConfigured reports whether c carries any sandbox policy: an
 // organization key, a profile overlay, or sandboxes turned on.
@@ -190,17 +233,27 @@ func buildEnterprisePolicySandbox(c *config.Config, goos, account string, uid in
 	if goos == "linux" && uid >= 0 {
 		driver := c.Enterprise.OpenShell.SandboxDriver(goos)
 		fallback := c.Enterprise.OpenShell.SandboxDriverFallback(goos, floor)
-		// The MicroVM driver needs kvm; its docker fallback (driver vm or
-		// auto, driver_fallback docker) needs docker like the docker driver.
-		type groupNeed struct{ group, what string }
+		// The MicroVM driver needs read-write access to /dev/kvm, which the
+		// kvm group, a user ACL or an open mode gives; its agent images are
+		// built in Docker for each account, so it needs docker too, as do
+		// the docker driver and the docker fallback (GAP-0511, GAP-0714).
+		// essential: without it no sandbox of the account starts at all.
+		type groupNeed struct {
+			group, what string
+			essential   bool
+		}
 		var needs []groupNeed
 		switch driver {
 		case config.EnterpriseOpenShellDriverDocker:
-			needs = []groupNeed{{"docker", "docker driver"}}
+			needs = []groupNeed{{"docker", "docker driver", true}}
 		case config.EnterpriseOpenShellDriverVM, config.EnterpriseOpenShellDriverAuto:
-			needs = []groupNeed{{"kvm", driver + " driver"}}
+			docker := "MicroVM agent images, which are built in Docker for each account"
 			if fallback == config.EnterpriseOpenShellFallbackDocker {
-				needs = append(needs, groupNeed{"docker", "docker fallback where KVM is not available"})
+				docker += ", and the docker fallback where KVM is not available"
+			}
+			needs = []groupNeed{
+				{"kvm", driver + " driver", driver == config.EnterpriseOpenShellDriverVM || fallback != config.EnterpriseOpenShellFallbackDocker},
+				{"docker", docker, true},
 			}
 		}
 		var groups []string
@@ -209,6 +262,26 @@ func buildEnterprisePolicySandbox(c *config.Config, goos, account string, uid in
 			groups, gerr = enterpriseAccountGroups(uid)
 		}
 		for _, need := range needs {
+			if need.group == "kvm" {
+				// Access decides, not the group alone (GAP-0714).
+				how, denied := enterpriseKVMAccess(uid)
+				switch {
+				case how != "":
+					add("kvm group", "", sandboxRowOK, "the account can read and write /dev/kvm ("+how+"), so its MicroVM sandboxes can start ("+need.what+")")
+					continue
+				case denied:
+					state := sandboxRowWarn
+					if required && need.essential {
+						state = sandboxRowFail
+					}
+					detail := "a user ACL entry on /dev/kvm withholds read and write from the account, whatever its groups, so no MicroVM can start for it on the " + need.what
+					if !need.essential {
+						detail += "; it gets the docker fallback"
+					}
+					add("kvm group", "", state, detail+"; `setfacl -x u:"+account+" /dev/kvm` removes that entry")
+					continue
+				}
+			}
 			switch {
 			case gerr != nil:
 				add(need.group+" group", "", sandboxRowWarn, "the groups of the account could not be read: "+gerr.Error())
@@ -216,10 +289,17 @@ func buildEnterprisePolicySandbox(c *config.Config, goos, account string, uid in
 				add(need.group+" group", "", sandboxRowOK, "the account is in the "+need.group+" group, so its sandboxes can start ("+need.what+")")
 			default:
 				state := sandboxRowWarn
-				if required && len(needs) == 1 {
+				if required && need.essential {
 					state = sandboxRowFail
 				}
-				add(need.group+" group", "", state, "the account is not in the "+need.group+" group, so no sandbox can start for it on the "+need.what+"; `usermod -aG "+need.group+" "+account+"`, then it signs in again")
+				detail := "the account is not in the " + need.group + " group, so no sandbox can start for it on the " + need.what
+				if need.group == "kvm" {
+					detail = "the account cannot read and write /dev/kvm (it is not in the kvm group and no user ACL grants it), so no MicroVM can start for it on the " + need.what
+					if !need.essential {
+						detail += "; it gets the docker fallback"
+					}
+				}
+				add(need.group+" group", "", state, detail+"; `usermod -aG "+need.group+" "+account+"`, then it signs in again")
 			}
 		}
 	}

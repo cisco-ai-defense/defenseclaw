@@ -111,15 +111,15 @@ def _hmac_key(env_path: Path, name: str) -> str:
     return value
 
 
-def _install_fleet_compiler(data_dir: str) -> Path:
-    """Install the bundled compiler only when the operator enables Fleet."""
+def _install_fleet_compiler(data_dir: str, source_dir: Path | None = None) -> Path:
+    """Install the separately supplied compiler only when the operator enables Fleet."""
     from defenseclaw.commands.cmd_edge_install import _find_edge_connector_source
     from defenseclaw.file_permissions import make_private_directory, set_file_mode
 
-    source_root = _find_edge_connector_source()
+    source_root = _find_edge_connector_source(source_dir) if source_dir is not None else _find_edge_connector_source()
     source = source_root / "tools" / "policy_compiler.py" if source_root else None
     if source is None or source.is_symlink() or not source.is_file():
-        raise click.ClickException("This release has no Fleet policy compiler")
+        raise click.ClickException("Fleet policy compiler missing; pass --source-dir with extracted Fleet assets")
     if source.stat().st_size > 1 << 20:
         raise click.ClickException("The Fleet policy compiler is unexpectedly large")
 
@@ -224,6 +224,9 @@ iot_extensions:
     is_flag=True,
     help="Print a sample fleet policy YAML and exit.",
 )
+@click.option("--source-dir", type=click.Path(path_type=Path, exists=True, file_okay=False), default=None,
+              help=("Extract defenseclaw-fleet-assets.tar.gz and pass its directory, "
+                    "or use a source checkout (required for wheel installs)."))
 @click.option(
     "--non-interactive",
     is_flag=True,
@@ -235,6 +238,7 @@ def edge_connector(
     token: str | None,
     endpoint: str | None,
     emit_policy: bool,
+    source_dir: Path | None,
     non_interactive: bool,
 ) -> None:
     """Configure the Edge Connector fleet management API.
@@ -265,7 +269,7 @@ def edge_connector(
         ux.echo(
             "Optional Edge Connector Engine (C, Linux device):\n"
             "\n"
-            "  cd edge-connector\n"
+            "  cd /path/to/extracted-assets/edge-connector\n"
             "  mkdir build && cd build\n"
             "  cmake .. -DDCLAW_PROFILE=STANDARD -DDCLAW_DEV_MODE=OFF -DDCLAW_ALLOW_HMAC_OTA=ON\n"
             "  make -j$(nproc)\n"
@@ -317,7 +321,10 @@ def edge_connector(
     emergency_key = _hmac_key(env_path, "DCLAW_EMERGENCY_KEY")
     # Fleet remains disabled if credential provisioning fails. The compiler
     # copy is inert until the validated Fleet config is committed below.
-    _install_fleet_compiler(ctx.obj.cfg.data_dir)
+    if source_dir is None:
+        _install_fleet_compiler(ctx.obj.cfg.data_dir)
+    else:
+        _install_fleet_compiler(ctx.obj.cfg.data_dir, source_dir)
     try:
         for name, value in (
             (_TOKEN_ENV, token),
@@ -351,7 +358,7 @@ def edge_connector(
     ux.echo(
         "  1. Start (or restart) the DefenseClaw gateway that hosts Fleet.\n"
         f"     Device registration will use {endpoint}\n"
-        "     Health and policy commands use this host's gateway.\n"
+        "     Fleet CLI commands use this endpoint.\n"
         "  2. Configure the Linux devices with broker TLS and per-device keys.\n"
         "  3. Verify the fleet is running:\n"
         "\n"
@@ -370,6 +377,14 @@ def edge_connector(
         "    DCLAW_EMERGENCY_KEY    — Separate emergency-command HMAC secret\n"
         "    DCLAW_BROKER_URL       — MQTT broker URL for cloud escalation\n"
     )
+    if urlsplit(endpoint).scheme == "https":
+        ux.echo("  The CLI uses the saved HTTPS Fleet endpoint for registration and key delivery.")
+    else:
+        ux.echo(
+            "  This loopback command is for loopback-only test mode when Fleet explicitly\n"
+            "  permits HTTP key delivery. Production registration requires an HTTPS\n"
+            "  endpoint or a configured trusted TLS proxy."
+        )
 
 def _persist_svc_env_var(svc_env_path: Path, key: str, value: str) -> bool:
     """Atomically replace the root-owned service env file using sudo."""

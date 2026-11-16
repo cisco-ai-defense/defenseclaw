@@ -20,6 +20,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
+func init() { directoryUsesWinbind = unixidentity.GroupDirectoryUsesWinbind }
+
 // profileGroupExists asks the platform's account database (NSS on Linux,
 // Open Directory on macOS) whether a group named in an assignment exists.
 // An error means the answer is unknown, not that the group is absent.
@@ -180,6 +182,16 @@ func matchedGroupSource(_ *guardrailProfileSet, subject *profileSubject, group s
 			}
 			return "local"
 		}
+	}
+	// NSS retains an unnamed primary gid as a numeric group. The absence
+	// of a local group name does not establish that a directory supplied it.
+	// A local passwd account's primary gid is a local fact (r103 GAP-0149);
+	// any other account's is unknown.
+	if gid, err := strconv.Atoi(group); err == nil && gid >= 0 {
+		if subject != nil && (subject.localAccount || subject.Directory == useridentity.DirectoryLocal) {
+			return "local"
+		}
+		return ""
 	}
 	return "directory"
 }

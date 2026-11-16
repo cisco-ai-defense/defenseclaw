@@ -598,7 +598,8 @@ def mqtt_broker(app, port: int, mode: str) -> None:
         "\n"
         "  These localhost addresses work only on this host. For remote devices,\n"
         "  configure a reachable TLS listener and per-device topic ACLs, then use:\n"
-        "    defenseclaw setup edge-connector install --broker-url mqtts://<broker-host>:8883 --target <device-ip>\n"
+        "    defenseclaw setup edge-connector install --source-dir <extracted-fleet-assets> "
+        "--broker-url mqtts://<broker-host>:8883 --target <device-ip>\n"
         "\n"
         "  Test the local pipeline: defenseclaw edge-connector test\n"
     )

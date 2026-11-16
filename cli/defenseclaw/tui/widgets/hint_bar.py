@@ -39,8 +39,8 @@ DEFAULT_HINTS: tuple[str, ...] = (
     "Use scan aibom to generate a component inventory of the active connector.",
     "Press / on lists to filter. Esc clears the active filter.",
     "Press ? for the full keybinding reference.",
-    # q and Esc close a drawer or dialog, never the app (GAP-0256).
-    "Press Ctrl+C to quit DefenseClaw. q and Esc close a drawer or dialog.",
+    # q closes a drawer or detail first and quits when nothing is open (GAP-0048).
+    "Press q to quit DefenseClaw (it closes an open drawer first). Ctrl+C quits from anywhere.",
 )
 
 
@@ -57,6 +57,8 @@ class HintEngine:
         return tip
 
     def hint_for(self, state: HintState, status: StatusModel | None = None) -> str:
+        if state.palette_open:
+            return "Type a command or alias · ↑/↓ choose · Tab complete · Enter run · Esc close"
         panel = state.active_panel.strip().lower().replace("_", "-").replace(" ", "-")
         if panel == "overview":
             return self._overview_hint(state, status)
@@ -252,7 +254,8 @@ class HintEngine:
         if state.panel_view == "detail":
             return "KEYS  PgUp/PgDn scroll detail | Esc close | j/k move | h/l sub-tab | r scan."
         return (
-            "KEYS  h/l sub-tab | j/k move | Enter detail | 1-4 filter (Skills/Plugins only) | "
+            "KEYS  h/l sub-tab | j/k move Summary/rows | PgDn/End jump | Enter detail | "
+            "1-4 filter (Skills/Plugins only) | "
             "o fast scan scope | r scan."
         )
 

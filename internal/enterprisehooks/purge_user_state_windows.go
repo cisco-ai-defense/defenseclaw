@@ -17,16 +17,15 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// PurgeWindowsUserState removes one enrolled account's whole DefenseClaw
-// per-user folder (%USERPROFILE%\.defenseclaw) for the standalone Windows
-// uninstall with purge, after the uninstall committed and removed the
-// registrations it could. It runs as LocalSystem, whether or not the account
-// is signed in: some of the folder's subfolders grant only the account and
-// SYSTEM, not Administrators. Like the Unix purge it removes everything,
-// DefenseClaw's hook scripts, the per-user hook tokens and the account's own
-// hooks the foreign-hook policy moved aside included (see
-// connector.PurgeUserStateInRoot). Anything a failure leaves goes back to a
-// DACL the account can manage. A missing folder is not an error.
+// PurgeWindowsUserState removes known managed entries from one enrolled
+// account's DefenseClaw per-user folder for the standalone Windows uninstall
+// with purge, after the uninstall committed and removed the registrations it
+// could. It runs as LocalSystem, whether or not the account is signed in:
+// some subfolders grant only the account and SYSTEM, not Administrators. Like
+// the Unix purge it keeps unknown account entries and saved originals (see
+// connector.PurgeUserStateInRoot). The folder goes only when empty. Anything
+// a failure leaves goes back to a DACL the account can manage. A missing
+// folder is not an error.
 func PurgeWindowsUserState(rawHome, rawSID, rawDataDir string) error {
 	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
 		return err
@@ -39,7 +38,8 @@ func PurgeWindowsUserState(rawHome, rawSID, rawDataDir string) error {
 	if err != nil {
 		return err
 	}
-	failures := []error{purgeWindowsUserStateFolder(home, sid, dataDir)}
+	rootErr := purgeWindowsUserStateFolder(home, sid, dataDir)
+	failures := []error{rootErr}
 	// A rolled-back enrollment can keep a copy of the folder aside as
 	// .defenseclaw.rollback-<random> beside it; that is DefenseClaw per-user
 	// data too (GAP-1567).
@@ -48,8 +48,25 @@ func PurgeWindowsUserState(rawHome, rawSID, rawDataDir string) error {
 	for _, folder := range kept {
 		failures = append(failures, purgeWindowsUserStateFolder(home, sid, folder))
 	}
+	if errors.Is(rootErr, errWindowsUserStateLinkedFolder) {
+		_, joined := rootErr.(interface{ Unwrap() []error })
+		sole := !joined
+		for _, failure := range failures[1:] {
+			sole = sole && failure == nil
+		}
+		if sole {
+			return fmt.Errorf("%w: %v", ErrWindowsUserStateOnlyLink, rootErr)
+		}
+	}
 	return errors.Join(failures...)
 }
+
+// ErrWindowsUserStateOnlyLink means the canonical per-user folder was a
+// link and all other purge work succeeded. The caller checks that the link
+// itself belongs to the account before reporting the folder as left.
+var ErrWindowsUserStateOnlyLink = errors.New("enterprise hooks: per-user folder link left as found")
+
+var errWindowsUserStateLinkedFolder = errors.New("enterprise hooks: linked per-user folder")
 
 // windowsUserStateRollbackFolders lists the .defenseclaw.rollback-<random>
 // folders a rolled-back enrollment kept in home.
@@ -82,11 +99,19 @@ func windowsUserStateRollbackFolders(home string) ([]string, error) {
 // window between the check and the removal, and nothing is removed through
 // a link: the purge refuses and leaves the folder as found.
 func purgeWindowsUserStateFolder(home string, sid *windows.SID, dataDir string) error {
+	return purgeWindowsUserStateFolderAt(home, sid, dataDir, "")
+}
+
+// purgeWindowsUserStateFolderAt is purgeWindowsUserStateFolder for a folder
+// that is a managed subfolder (prefix, "acp") of the data directory rather
+// than the data directory: the ownership rules read the path from the data
+// directory.
+func purgeWindowsUserStateFolderAt(home string, sid *windows.SID, dataDir, prefix string) error {
 	rel, err := filepath.Rel(home, dataDir)
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, `..\`) {
 		return fmt.Errorf("enterprise hooks: refusing to purge %s, which is not below the profile %s", dataDir, home)
 	}
-	linked := fmt.Errorf("enterprise hooks: refusing to purge %s, which is reached through a link or junction; left as found", dataDir)
+	linked := fmt.Errorf("%w: refusing to purge %s, which is reached through a link or junction; left as found", errWindowsUserStateLinkedFolder, dataDir)
 	if err := inventoryDACLRejectLinkBelow(home, rel); errors.Is(err, errInventoryDACLLink) {
 		return linked
 	} else if err != nil {
@@ -129,9 +154,16 @@ func purgeWindowsUserStateFolder(home string, sid *windows.SID, dataDir string) 
 		if !pinned.IsDir() || pinned.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 || !os.SameFile(pinned, opened) {
 			return fmt.Errorf("enterprise hooks: refusing to purge %s, which changed while it was opened", dataDir)
 		}
-		return connector.PurgeUserStateInRoot(root, func(rel string) error {
+		if err := keptManagedBackupsError(dataDir); err != nil {
+			return err
+		}
+		removeDenied := func(rel string) error {
 			return removeWindowsUserStateDenied(windows.Handle(pin.Fd()), rel)
-		})
+		}
+		if prefix != "" {
+			return connector.PurgeUserStateInRootAt(root, prefix, removeDenied)
+		}
+		return connector.PurgeUserStateInRoot(root, removeDenied)
 	}()
 	root.Close()
 	pin.Close()
@@ -168,7 +200,7 @@ func relaxWindowsKeptUserState(home string, sid *windows.SID, dataDir string) er
 		case entry.IsDir():
 			_, err = relaxWindowsStandalonePerUserDirectory(target, path)
 		case entry.Type().IsRegular():
-			_, err = relaxWindowsStandalonePerUserTokenFile(target, path)
+			_, err = relaxWindowsStandalonePerUserFile(target, path)
 		}
 		if err != nil {
 			failures = append(failures, err)
@@ -180,10 +212,10 @@ func relaxWindowsKeptUserState(home string, sid *windows.SID, dataDir string) er
 
 // removeWindowsUserStateDenied removes rel, a path under the pinned folder
 // whose access list refuses LocalSystem: the account owns its folder and can
-// deny SYSTEM on a subfolder. SeBackupPrivilege and SeRestorePrivilege with
+// deny SYSTEM on an owned file. SeBackupPrivilege and SeRestorePrivilege with
 // backup intent grant the access that list refuses, so no owner or access
 // list has to change first. Every open is relative to a handle already held
-// and opens a reparse point itself, so a link is removed, never followed.
+// and opens a reparse point itself. Only a plain file is removed.
 func removeWindowsUserStateDenied(pin windows.Handle, rel string) error {
 	parts := strings.Split(rel, `\`)
 	return runWindowsManagedRuntimeSetupPrivilege(func() error {
@@ -224,6 +256,15 @@ func removeWindowsUserStateDenied(pin windows.Handle, rel string) error {
 		}
 		if err != nil {
 			return fmt.Errorf("enterprise hooks: open %s without following: %w", rel, err)
+		}
+		attributes, err := windowsQuarantineHandleAttributes(child)
+		if err != nil {
+			_ = windows.CloseHandle(child)
+			return fmt.Errorf("enterprise hooks: inspect per-user entry %s: %w", rel, err)
+		}
+		if attributes&(windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+			_ = windows.CloseHandle(child)
+			return fmt.Errorf("enterprise hooks: refusing to remove a non-file per-user entry: %s", rel)
 		}
 		purgeErr := purgeWindowsQuarantineHandle(child, 0, &windowsQuarantineBudget{}, openWindowsUserStateDeniedChild)
 		closeErr := windows.CloseHandle(child)
@@ -359,7 +400,7 @@ func PurgeWindowsACPUserState(rawHome, rawSID string) error {
 		return err
 	}
 	dataDir := filepath.Join(home, ".defenseclaw")
-	if err := purgeWindowsUserStateFolder(home, sid, filepath.Join(dataDir, "acp")); err != nil {
+	if err := purgeWindowsUserStateFolderAt(home, sid, filepath.Join(dataDir, "acp"), "acp"); err != nil {
 		return err
 	}
 	_ = os.Remove(dataDir)

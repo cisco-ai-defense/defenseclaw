@@ -258,6 +258,8 @@ def test_the_guide_shows_exactly_what_the_example_files_contain() -> None:
 # the phase the fleet summary counts by.
 _USERS = {
     "enforcing": {"state": "enforcing", "ready": True, "reset": False, "monitor_only": False, "phase": "enforcing"},
+    # GAP-0166: enforce is loaded, no agent session is anchored yet.
+    "armed": {"state": "armed", "ready": True, "reset": False, "monitor_only": False, "phase": "armed"},
     "ready": {"state": "monitor", "ready": True, "reset": False, "monitor_only": False, "phase": "ready"},
     "burn_in": {"state": "burn_in", "ready": False, "reset": False, "monitor_only": False, "phase": "burn_in"},
     # In observe every user is "monitor": verify still says where its burn-in is.
@@ -282,9 +284,10 @@ def _verify(ready: bool, digest: str, users: list[str], failing: tuple[str, ...]
     }
 
 
-_FLEET_USERS = ["enforcing", "ready", "burn_in", "monitor", "reset", "monitor_only", "no_agent", "held", "held"]
+_FLEET_USERS = ["enforcing", "armed", "ready", "burn_in", "monitor", "reset", "monitor_only", "no_agent", "held", "held"]
 _FLEET_COUNTS = [
     "Users enforcing: 1",
+    "Users armed (enforce loaded, no agent session anchored yet): 1",
     "Users ready for enforce: 1",
     "Users in burn-in: 2",
     "Users reset by a hit: 1",

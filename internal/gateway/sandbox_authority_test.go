@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -73,7 +74,6 @@ func newSandboxFixture(t testing.TB, enrollment config.EnterpriseEnrollmentConfi
 	cfg.Enterprise.Enrollment = enrollment
 	f.cfg = cfg
 	f.api = NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil, cfg)
-	t.Cleanup(func() { sandboxAuthorities.Delete(f.api) })
 
 	restoreFacts, restoreBlocking := identityFactsEnabled.Load(), identityLookupBlocking.Load()
 	identityFactsEnabled.Store(true)
@@ -113,6 +113,11 @@ func newSandboxFixture(t testing.TB, enrollment config.EnterpriseEnrollmentConfi
 	relay.HandleFunc("POST "+sandboxrelay.PathHookPrefix+"{connector}", func(w http.ResponseWriter, r *http.Request) {
 		ctx, reg, ok := f.api.sandboxRelayAdmit(w, r, r.PathValue("connector"))
 		if !ok {
+			return
+		}
+		if err := chargeSandboxHookBudget(ctx, false); err != nil {
+			w.Header().Set("Retry-After", "1")
+			f.api.writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": err.Error()})
 			return
 		}
 		binding := sandboxauth.Binding{ID: reg.BindingID, SandboxName: reg.SandboxName, Connector: reg.Connector}
@@ -166,6 +171,7 @@ func (f *sandboxFixture) do(peer managedHookPeer, method, path string, body any,
 	req := httptest.NewRequest(method, path, bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(sandboxrelay.ClientHeader, sandboxrelay.ClientHeaderValue)
+	req.Header.Set(sandboxrelay.DaemonContractHeader, strconv.Itoa(sandboxrelay.DaemonContract))
 	for k, v := range header {
 		if v == "" {
 			req.Header.Del(k)
@@ -307,6 +313,18 @@ func TestSandboxAuthorityTwoAccounts(t *testing.T) {
 
 // Revocation and a restarted gateway: the store persists, a tombstone
 // stays revoked, and policy/current reports it.
+// A managed sandbox route without the CSRF client header is refused like
+// every other CSRF refusal: 403 with a JSON body and Content-Type
+// application/json (GAP-2540).
+func TestSandboxAuthorityMissingClientHeaderIsAJSONRefusal(t *testing.T) {
+	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
+	rec := f.do(sbxAlice, http.MethodPost, sandboxrelay.PathPolicyResolve, claudeResolve(), map[string]string{sandboxrelay.ClientHeader: "", sandboxrelay.ConnectorHeader: "claudecode"})
+	if rec.Code != http.StatusForbidden || rec.Header().Get("Content-Type") != "application/json" ||
+		rec.Body.String() != "{\"error\":\"missing X-DefenseClaw-Client header\"}\n" {
+		t.Fatalf("missing client header: status %d Content-Type %q body %q", rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
+	}
+}
+
 func TestSandboxAuthorityRevokedAndRestart(t *testing.T) {
 	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
 	f.setGroups(sbxAlice, "dc-sbx-contractors")
@@ -403,6 +421,12 @@ func TestSandboxAuthorityRegistrationFollowsTheSandbox(t *testing.T) {
 	if rec := decide(sandboxrelay.DecisionEgressBlock, sandboxrelay.DecisionScopeAlways); rec.Code != http.StatusOK {
 		t.Fatalf("saved decision of a stopped sandbox: %d %s", rec.Code, rec.Body.String())
 	}
+	// A report only moves it toward stopped; a start registers it again
+	// (GAP-0673).
+	if code, _ := f.report(sbxBob, id, true); code != http.StatusForbidden {
+		t.Fatalf("running report after a reported stop: %d", code)
+	}
+	id = restartedRegistration(t, f, sbxBob, id)
 	if code, _ := f.report(sbxBob, id, true); code != http.StatusOK {
 		t.Fatalf("running report: %d", code)
 	}
@@ -470,47 +494,46 @@ func TestSandboxAuthorityPendingExpires(t *testing.T) {
 	}
 }
 
-// A create on a cold identity cache waits, then registers provisional on
-// the default profile; once the cache warms the registration re-matches
-// to the group's profile, its hooks keep working and its subject never
-// "changes" (GAP-0022).
-func TestSandboxAuthorityColdCacheRematch(t *testing.T) {
+// A create on a cold identity cache waits, then refuses, naming the group
+// fact its assignments need. Once the cache warms, a new registration uses the
+// proven group's profile (GAP-0022).
+func TestSandboxAuthorityColdCacheRefusesUntilIdentityConfirmed(t *testing.T) {
 	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
 	f.coldCache(sbxAlice)
 	start := time.Now()
-	resp := f.live(sbxAlice, 1)
+	rec := f.do(sbxAlice, http.MethodPost, sandboxrelay.PathPolicyResolve, claudeResolve(),
+		map[string]string{sandboxrelay.ConnectorHeader: "claudecode"})
 	if waited := time.Since(start); waited < sandboxResolveWait {
 		t.Fatalf("resolve answered after %v without waiting for the lookup", waited)
 	}
-	if !resp.Registration.Provisional || resp.Banner.Profile != "offline-floor" {
-		t.Fatalf("cold create: %+v %+v", resp.Registration, resp.Banner)
-	}
-	if rec := f.hook(sbxAlice, resp.Registration.ID, "claudecode", nil); rec.Code != http.StatusOK {
-		t.Fatalf("hook on a cold cache: %d %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusServiceUnavailable || errorReason(t, rec) != sandboxrelay.ReasonUnavailable ||
+		!strings.Contains(rec.Body.String(), "group membership is unconfirmed") {
+		t.Fatalf("cold create: %d %s; want a refusal naming the group fact its assignments need", rec.Code, rec.Body.String())
 	}
 	f.setGroups(sbxAlice, "dc-sbx-contractors")
-	rec := f.hook(sbxAlice, resp.Registration.ID, "claudecode", nil)
+	resp := f.live(sbxAlice, 1)
+	if resp.Registration.Provisional || resp.Banner.Profile != "contractors" {
+		t.Fatalf("create after identity confirmation: %+v %+v", resp.Registration, resp.Banner)
+	}
+	rec = f.hook(sbxAlice, resp.Registration.ID, "claudecode", nil)
 	if rec.Code != http.StatusOK || rec.Header().Get(sandboxrelay.ProfileHeader) != "contractors" {
-		t.Fatalf("hook after the cache warmed: %d %s %v", rec.Code, rec.Body.String(), rec.Header())
+		t.Fatalf("hook after identity confirmation: %d %s %v", rec.Code, rec.Body.String(), rec.Header())
 	}
 	auth, _ := f.api.sandboxAuth()
 	reg, _, _ := auth.store.Get(sbxAlice.UID, resp.Registration.ID)
 	if reg.Provisional || reg.Profile != "contractors" || reg.ProfileMatch != sandboxreg.MatchGroup || reg.State != sandboxreg.StateLive {
-		t.Fatalf("re-matched registration: %+v", reg)
+		t.Fatalf("registration after identity confirmation: %+v", reg)
 	}
-	f.mu.Lock()
-	rematched := strings.Join(f.rematched, ";")
-	f.mu.Unlock()
-	if !strings.Contains(rematched, resp.Registration.ID+":live:") || !strings.Contains(rematched, "provisional") {
-		t.Fatalf("re-match record: %q", rematched)
+	if code, cur := f.current(sbxAlice, resp.Registration.ID); code != http.StatusOK || cur.Provisional == nil || *cur.Provisional ||
+		cur.Profile != "contractors" {
+		t.Fatalf("current after identity confirmation: %d profile %q provisional %v", code, cur.Profile, cur.Provisional)
 	}
 }
 
 // A new run during a hard directory outage (GAP-0507): the account database
-// names no account for the uid. The name the uid last resolved to stands in
-// and the run starts, provisional under the default profile; with no last
-// name it is refused. The registration binds to the account's real subject
-// key, so the account answers for it once the directory is back.
+// names no account for the uid. A remembered name is not proof of the
+// account holder, so both a named and a nameless request refuse. Once the
+// directory answers, the run can bind to the proven account.
 func TestSandboxAuthorityResolveDuringDirectoryOutage(t *testing.T) {
 	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
 	f.coldCache(sbxAlice)
@@ -528,9 +551,16 @@ func TestSandboxAuthorityResolveDuringDirectoryOutage(t *testing.T) {
 		}
 		return ""
 	}
+	rec = f.do(nameless, http.MethodPost, sandboxrelay.PathPolicyResolve, claudeResolve(),
+		map[string]string{sandboxrelay.ConnectorHeader: "claudecode"})
+	if rec.Code != http.StatusServiceUnavailable || errorReason(t, rec) != sandboxrelay.ReasonUnavailable ||
+		!strings.Contains(rec.Body.String(), "group membership is unconfirmed") {
+		t.Fatalf("run during an outage: %d %s; want a refusal naming the group fact its assignments need", rec.Code, rec.Body.String())
+	}
+	f.setGroups(sbxAlice, "dc-sbx-contractors")
 	resp := f.resolve(nameless, claudeResolve())
-	if !resp.Registration.Provisional || resp.Banner.Profile != "offline-floor" {
-		t.Fatalf("run during an outage: %+v %+v, want provisional offline-floor", resp.Registration, resp.Banner)
+	if resp.Registration.Provisional || resp.Banner.Profile != "contractors" {
+		t.Fatalf("run after the directory recovers: %+v %+v", resp.Registration, resp.Banner)
 	}
 	auth, _ := f.api.sandboxAuth()
 	reg, ok, _ := auth.store.Get(sbxAlice.UID, resp.Registration.ID)
@@ -573,7 +603,7 @@ func TestSandboxAuthorityConfigChangeSwitchesLiveFields(t *testing.T) {
 	gen = &Generation{N: 2, Config: &next, Profiles: f.api.guardrailProfileSet()}
 	genMu.Unlock()
 	code, after := f.current(sbxAlice, resp.Registration.ID)
-	if code != http.StatusOK || len(after.Live.EgressBlock) != 1 || after.Generation == before.Generation || after.Revoked {
+	if code != http.StatusOK || after.Floor == nil || len(after.Floor.EgressBlock) != 1 || after.Generation == before.Generation || after.Revoked {
 		t.Fatalf("current after the change: %d %+v (before %+v)", code, after, before)
 	}
 	f.mu.Lock()
@@ -581,6 +611,53 @@ func TestSandboxAuthorityConfigChangeSwitchesLiveFields(t *testing.T) {
 	f.mu.Unlock()
 	if !strings.Contains(rematched, "floor") {
 		t.Fatalf("re-match record: %q", rematched)
+	}
+}
+
+// GAP-0224: once the organization raises the profile to strict, the
+// saved allow of a sandbox registered under the looser one is left out of
+// its decisions list (the store keeps the record), a user block stays, and
+// policy/current names the strict min_profile a restart takes.
+func TestSandboxAuthorityStrictFloorCapsSavedDecisions(t *testing.T) {
+	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
+	f.setGroups(sbxAlice, "dc-sbx-contractors")
+	gen := &Generation{N: 1, Config: f.cfg, Profiles: f.api.guardrailProfileSet()}
+	var genMu sync.Mutex
+	f.api.SetGenerationSource(func() *Generation { genMu.Lock(); defer genMu.Unlock(); return gen })
+	resp := f.live(sbxAlice, 1)
+	for _, kind := range []string{sandboxrelay.DecisionEgressAllow, sandboxrelay.DecisionEgressBlock} {
+		rec := f.do(sbxAlice, http.MethodPost, sandboxrelay.PathDecisions, sandboxrelay.DecisionRequest{
+			V: 1, Registration: resp.Registration.ID, Kind: kind, Host: kind + ".example.com", Scope: sandboxrelay.DecisionScopeAlways,
+		}, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("save %s: %d %s", kind, rec.Code, rec.Body.String())
+		}
+	}
+	list := func() []sandboxrelay.Decision {
+		rec := f.do(sbxAlice, http.MethodGet, sandboxrelay.PathDecisions+"?registration="+resp.Registration.ID, nil, nil)
+		var listed []sandboxrelay.Decision
+		if err := json.Unmarshal(rec.Body.Bytes(), &listed); err != nil || rec.Code != http.StatusOK {
+			t.Fatalf("decisions: %d %s", rec.Code, rec.Body.String())
+		}
+		return listed
+	}
+	if got := list(); len(got) != 2 {
+		t.Fatalf("decisions under the loose floor = %+v", got)
+	}
+	if _, cur := f.current(sbxAlice, resp.Registration.ID); cur.MinProfile == nil || *cur.MinProfile == config.OpenShellProfileStrict {
+		t.Fatalf("min_profile before the change = %v", cur.MinProfile)
+	}
+	next := *f.cfg
+	next.OpenShell.Admin.MinProfile = config.OpenShellProfileStrict
+	genMu.Lock()
+	gen = &Generation{N: 2, Config: &next, Profiles: f.api.guardrailProfileSet()}
+	genMu.Unlock()
+	code, cur := f.current(sbxAlice, resp.Registration.ID)
+	if code != http.StatusOK || cur.MinProfile == nil || *cur.MinProfile != config.OpenShellProfileStrict {
+		t.Fatalf("current after the strict change: %d min_profile %v", code, cur.MinProfile)
+	}
+	if got := list(); len(got) != 1 || got[0].Kind != sandboxrelay.DecisionEgressBlock {
+		t.Fatalf("decisions under the strict floor = %+v, want the user block only", got)
 	}
 }
 
@@ -687,7 +764,10 @@ func TestSandboxAuthorityNamesAMistakeInTheUsersOwnInput(t *testing.T) {
 // along and which it left out, so the administrator's view can list them.
 func TestSandboxAuthorityResolveKeepsTheMCPJudgment(t *testing.T) {
 	prev := sandboxFilterMCP
-	sandboxFilterMCP = func(context.Context, *APIServer, managedHookPeer, string, []sandboxrelay.MCPServerClaim) ([]string, []sandboxrelay.MCPSkip) {
+	sandboxFilterMCP = func(_ context.Context, _ *APIServer, _ managedHookPeer, _ string, claims []sandboxrelay.MCPServerClaim) ([]string, []sandboxrelay.MCPSkip) {
+		if len(claims) == 1 && claims[0].Name == "fresh-srv" {
+			return []string{"fresh-srv"}, nil
+		}
 		return []string{"ok-srv"}, []sandboxrelay.MCPSkip{{Name: "blocked-srv", Reason: sandboxrelay.MCPSkipOrganizationBlock}}
 	}
 	t.Cleanup(func() { sandboxFilterMCP = prev })
@@ -699,6 +779,16 @@ func TestSandboxAuthorityResolveKeepsTheMCPJudgment(t *testing.T) {
 	if !ok || len(reg.MCPKept) != 1 || reg.MCPKept[0] != "ok-srv" ||
 		len(reg.MCPSkipped) != 1 || reg.MCPSkipped[0].Name != "blocked-srv" || reg.MCPSkipped[0].Reason != sandboxrelay.MCPSkipOrganizationBlock {
 		t.Fatalf("registration MCP = kept %v skipped %v", reg.MCPKept, reg.MCPSkipped)
+	}
+	explain := postureExplain(t, f, sbxBob, sandboxrelay.ExplainRequest{Registration: resp.Registration.ID})
+	if !slices.Equal(explain.MCPIncluded, reg.MCPKept) || len(explain.MCPBlocked) != 1 ||
+		explain.MCPBlocked[0].Name != "blocked-srv" {
+		t.Fatalf("registered explain MCP = kept %v blocked %v", explain.MCPIncluded, explain.MCPBlocked)
+	}
+	explain = postureExplain(t, f, sbxBob, sandboxrelay.ExplainRequest{Registration: resp.Registration.ID,
+		MCP: []sandboxrelay.MCPServerClaim{{Name: "fresh-srv", Command: "npx"}}})
+	if !slices.Equal(explain.MCPIncluded, []string{"fresh-srv"}) || len(explain.MCPBlocked) != 0 {
+		t.Fatalf("registered MCP recheck = kept %v blocked %v", explain.MCPIncluded, explain.MCPBlocked)
 	}
 }
 
@@ -941,6 +1031,7 @@ func FuzzSandboxRelayHeaders(f *testing.F) {
 		req := httptest.NewRequest(http.MethodPost, sandboxrelay.PathHookPrefix+"claudecode", strings.NewReader(`{"hook_event_name":"PreToolUse"}`))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set(sandboxrelay.ClientHeader, sandboxrelay.ClientHeaderValue)
+		req.Header.Set(sandboxrelay.DaemonContractHeader, strconv.Itoa(sandboxrelay.DaemonContract))
 		req.Header.Set(sandboxrelay.RegistrationHeader, registration)
 		if files != "" {
 			req.Header.Set(sandboxrelay.FilesHeader, files)

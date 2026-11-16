@@ -35,16 +35,74 @@ type observabilityV8FileRole struct {
 	deferrable bool
 }
 
+// resolveObservabilityV8StorePaths gives the files the gateway writes
+// (observability.local.path, observability.local.judge_bodies_path and each
+// jsonl destination path) one meaning in every process. A leading ~ is the
+// account's home folder, and a relative path is under data_dir, as the
+// Python CLI reads observability.local.path. They used to resolve against
+// each process's working directory: the gateway, started in data_dir, wrote
+// ~/.defenseclaw/x.jsonl to ~/.defenseclaw/~/.defenseclaw/x.jsonl, while
+// status and doctor, run from the home folder, named ~/~/.defenseclaw/x.jsonl
+// (GAP-0005). A path with a parent segment is left as written, so the
+// validation below still refuses it.
+func resolveObservabilityV8StorePaths(source *ObservabilityV8Source, dataDir string) {
+	resolve := func(value *string) {
+		path := *value
+		if strings.TrimSpace(path) == "" || observabilityV8HasParentSegment(path) {
+			return
+		}
+		path = observabilityV8ExpandHome(path)
+		if !filepath.IsAbs(path) && dataDir != "" {
+			path = filepath.Join(dataDir, path)
+		}
+		*value = path
+	}
+	resolve(&source.Local.Path)
+	resolve(&source.Local.JudgeBodiesPath)
+	for index := range source.Destinations {
+		if source.Destinations[index].Kind == ObservabilityV8DestinationJSONL {
+			resolve(&source.Destinations[index].Path)
+		}
+	}
+}
+
+// observabilityV8ExpandHome expands a leading "~", "~/" (or "~\" on
+// Windows) to the account's home folder. Other paths, and "~user" forms, are
+// returned unchanged.
+func observabilityV8ExpandHome(path string) string {
+	rest, ok := "", path == "~"
+	for _, prefix := range []string{"~/", `~\`} {
+		if prefix == `~\` && runtime.GOOS != "windows" {
+			continue
+		}
+		if strings.HasPrefix(path, prefix) {
+			rest, ok = path[len(prefix):], true
+		}
+	}
+	if !ok {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	return filepath.Join(home, rest)
+}
+
 // validateObservabilityV8FilePaths checks that the configured file roles
 // resolve to distinct files. It returns a warning, not an error, for a jsonl
 // destination path whose folders this account is denied: that path is
 // compared by its literal name, as a path whose folders do not exist yet is.
 // deferJSONL is false for a Secure Client source, which keeps main's startup
 // refusal.
+// tolerateDenied (an offline bundle sign or verify, which checks a target
+// device's paths and may run as any account) compares every role this account
+// may not inspect by its name, without a warning; the gateway checks the
+// files when it starts as the service account.
 func validateObservabilityV8FilePaths(
 	source *ObservabilityV8Source,
 	configuredFiles []string,
-	deferJSONL bool,
+	deferJSONL, tolerateDenied bool,
 ) ([]ObservabilityV8Warning, error) {
 	if source == nil {
 		return nil, nil
@@ -90,19 +148,20 @@ func validateObservabilityV8FilePaths(
 		}
 		// Both failures below describe the filesystem, not the document, so the
 		// cause is kept rather than reported as a semantic error.
-		resolved, denied, err := observabilityV8ResolveExistingPathPrefix(absolute, role.deferrable)
+		tolerate := role.deferrable || tolerateDenied
+		resolved, denied, err := observabilityV8ResolveExistingPathPrefix(absolute, tolerate)
 		if err != nil {
 			return nil, newV8ConfigPathError(role.name, absolute, err)
 		}
 		var info os.FileInfo
 		if candidate, err := os.Stat(resolved); err == nil {
 			info = candidate
-		} else if role.deferrable && errors.Is(err, fs.ErrPermission) {
+		} else if tolerate && errors.Is(err, fs.ErrPermission) {
 			denied = err
 		} else if !os.IsNotExist(err) {
 			return nil, newV8ConfigPathError(role.name, resolved, err)
 		}
-		if denied != nil {
+		if denied != nil && role.deferrable {
 			warnings = append(warnings, ObservabilityV8Warning{
 				Code: "destination_path_inaccessible", Path: role.name,
 				Summary: fmt.Sprintf("cannot inspect %s (%v); the gateway starts without this destination "+

@@ -52,9 +52,7 @@ var refusalHarnesses = map[string]refusalHarness{
 	"devin":       {"Devin CLI", "devin"},
 	"hermes":      {"Hermes Agent", "hermes"},
 	"kiro":        {"Kiro CLI", "kiro"},
-	"omnigent":    {"OmniGent", "omnigent"},
 	"opencode":    {"OpenCode", "opencode"},
-	"openhands":   {"OpenHands", "openhands"},
 }
 
 // harnessFor names conn (a connector, or a harness command) for a message.
@@ -132,6 +130,12 @@ func adminSentence() string {
 // fallback ("your IT help desk") when the organization configured none.
 func contact(requestAccess string) string {
 	if v := refusalValue(requestAccess); v != "" {
+		if len(v) >= len("contact ") && strings.EqualFold(v[:len("contact ")], "contact ") {
+			v = strings.TrimSpace(v[len("contact "):])
+		}
+		if v == "" {
+			return strings.TrimPrefix(config.OpenShellRequestAccessFallback, "contact ")
+		}
 		return v
 	}
 	return strings.TrimPrefix(config.OpenShellRequestAccessFallback, "contact ")
@@ -294,6 +298,8 @@ var accessRuleTexts = map[string]string{
 	"allow_unblock":     "can't be unblocked under your profile",
 	"user_approvals":    "needs an approval your profile doesn't let you give",
 	"allow_host_ports":  "is a port on this computer your profile doesn't open to sandboxes",
+	"min_profile":       "can't be kept for future sandboxes under the strict profile your organization requires",
+	"required_pack":     "is not allowed by the sandbox pack your organization requires",
 }
 
 // AccessRefused is the refusal of an ask or unblock for host that the
@@ -337,13 +343,44 @@ func AccessRefusedWhy(why, rule, host, profile, sandbox, requestAccess string) s
 	return policyRefusal(why, rule, profile, requestAccess, facts...)
 }
 
+// pinnedProfileWhen and pinnedProfileNow join a sandbox's create-pinned
+// profile and the profile it is assigned now (PinnedProfileLabel).
+const (
+	pinnedProfileWhen = ", pinned when this sandbox was created"
+	pinnedProfileNow  = "; you are now assigned "
+)
+
+// PinnedProfileLabel names a sandbox's profile in its owner's views: the
+// profile current alone, or, while the sandbox's floor is still pinned to
+// the profile it was created under (pinned), that one first, "pinned when
+// this sandbox was created; you are now assigned CURRENT" (GAP-0285). A
+// refusal quotes the pinned profile, whose rule it enforces.
+func PinnedProfileLabel(pinned, current string) string {
+	pinned, current = strings.TrimSpace(pinned), strings.TrimSpace(current)
+	switch {
+	case pinned == "" || pinned == current:
+		return current
+	case current == "":
+		return pinned + pinnedProfileWhen
+	}
+	return pinned + pinnedProfileWhen + pinnedProfileNow + current
+}
+
 // policyRefusal gives access and pack refusals the same complete sentence,
 // approval limit, contact and facts to quote in an access request.
 func policyRefusal(why, rule, profile, requestAccess string, facts ...string) string {
 	var note, quote []string
+	// A create-pinned profile (PinnedProfileLabel): the note names it as
+	// pinned and the profile assigned now; the quote names the pinned one.
+	profile, now, pinned := strings.Cut(profile, pinnedProfileWhen)
+	now = strings.TrimPrefix(now, pinnedProfileNow)
 	if p := refusalValue(profile); p != "" {
 		if !strings.Contains(why, "your profile "+p+" ") {
-			note = append(note, "profile "+p)
+			if pinned {
+				note = append(note, "profile "+p+pinnedProfileWhen)
+			} else {
+				note = append(note, "profile "+p)
+			}
 		}
 		quote = append(quote, "profile "+p)
 	}
@@ -354,7 +391,11 @@ func policyRefusal(why, rule, profile, requestAccess string, facts ...string) st
 	quote = append(quote, facts...)
 	first := adminSentence() + why
 	if len(note) > 0 {
-		first += " (" + strings.Join(note, ", ") + ")"
+		first += " (" + strings.Join(note, ", ")
+		if n := refusalValue(now); pinned && n != "" {
+			first += pinnedProfileNow + n
+		}
+		first += ")"
 	}
 	first += ". You can't approve this.\nRequest access: " + contact(requestAccess) + "."
 	if len(quote) > 0 {
@@ -442,12 +483,16 @@ func PolicyUnloadable() string {
 // ProfileStop is the notice for a sandbox stopped because the caller's
 // profile no longer allows field (a phrase such as "mounts"); harness is
 // the connector or harness command to start again. When no new run of that
-// harness is allowed, the next step is to request access instead.
+// harness is allowed, the next step is to request access instead; for host
+// ports, to start it again without them (GAP-0078).
 func ProfileStop(field, harness, requestAccess string) string {
 	field = refusalValue(field)
 	text := "This sandbox was stopped: your profile no longer allows " + field + ". "
-	if field == "sandboxes" || field == "this agent in a sandbox" {
+	switch field {
+	case "sandboxes", "this agent in a sandbox":
 		return text + "Request access: " + contact(requestAccess) + "."
+	case "host ports":
+		return text + "Start it again without --host-port: " + sandboxCommand + " run " + harnessFor(harness).command
 	}
 	return text + "Start it again: " + sandboxCommand + " run " + harnessFor(harness).command
 }

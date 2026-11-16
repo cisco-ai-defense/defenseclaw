@@ -85,7 +85,7 @@ def test_copied_helpers_are_identical() -> None:
     scripts = {name: _text(MDM / "linux" / name) for name in UNIX_SCRIPTS}
     for function in ("dc_platform", "dc_stat_uid", "dc_stat_mode", "dc_acl_write_entry", "dc_trusted_path"):
         assert len({_shell_function(text, function) for text in scripts.values()}) == 1, function
-    for function in ("dc_json_escape", "dc_log", "dc_busy_output"):
+    for function in ("dc_json_escape", "dc_log", "dc_busy_output", "dc_sweep_stages"):
         wrapper = _shell_function(scripts["defenseclaw-enterprise.sh"], function)
         assert wrapper == _shell_function(scripts["uninstall.sh"], function), function
     canonical = _shared_region(_text(MDM / "windows" / "detect.ps1"))
@@ -124,6 +124,25 @@ def test_macos_trusted_path_refuses_write_acl_entries(tmp_path: Path) -> None:
     for entry in ("", " 0: group:admin allow write", " 0: user:dcuser deny write", " 0: user:dcuser allow read"):
         assert trusted("darwin", entry)[0], entry
     assert trusted("linux", write)[0]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+def test_missing_staging_folder_returns_structured_refusal(tmp_path: Path) -> None:
+    for platform in ("linux", "macos"):
+        wrapper = _text(MDM / platform / "defenseclaw-enterprise.sh")
+        stage = tmp_path / "missing"
+        functions = "\n".join(_shell_function(wrapper, name) for name in ("dc_stage_parent",))
+        script = (
+            "set -u\nDC_EXIT_FAILURE=1\n"
+            f"DC_SCRIPT_OS={platform}\nDC_STAGING_DIR='{stage}'\n"
+            "dc_trusted_path() { return 1; }\n"
+            "dc_fail_result() { printf '%s|%s|%s' \"$1\" \"$2\" \"$3\"; }\n"
+            f"{functions}\ndc_stage_parent\n"
+        )
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result.stderr
+        assert "mdm_staging_untrusted" in result.stdout
+        assert "missing" in result.stdout
 
 def test_intune_entrypoints_refuse_constrained_language_before_native_helpers() -> None:
     entrypoints = {
@@ -204,7 +223,7 @@ def test_same_version_package_reinstalls_when_a_required_binary_is_damaged(tmp_p
 
 def test_unix_wrapper_never_passes_credentials_on_the_command_line() -> None:
     text = _text(MDM / "linux" / "defenseclaw-enterprise.sh")
-    assert 'enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --lock-wait 10m --json >' in text
+    assert 'enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --lock-wait 10m --json "$@" >' in text
     # The value reaches the lifecycle through a pipe, never a staged file
     # that a killed run would leave behind (GAP-0632).
     assert "printf '%s' \"$secret_data\" |" in text
@@ -214,6 +233,1297 @@ def test_unix_wrapper_never_passes_credentials_on_the_command_line() -> None:
     # inline-secret setting.
     assert "DC_SECRET_VALUE" not in text
     assert "Never put credentials here" in text
+
+
+# GAP-0335: a signed bundle binds each credential value, and secret set
+# changes a credential the confirmed bundle signs only to a value a newer
+# signed bundle signs. The wrapper stores a credential it delivers with a
+# bundle together with that bundle (--bundle), and without one as before. A
+# gateway before 1.0.4 (no secret_set_bundle in --version-json) takes no
+# --bundle and stores the credential as before.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize("bundle", ["", "/stage/policy.dcbundle"])
+@pytest.mark.parametrize("binds", [True, False])
+def test_unix_wrapper_stores_a_credential_with_the_bundle_it_delivers(tmp_path: Path, os_dir: str, bundle: str, binds: bool) -> None:
+    wrapper = _text(MDM / os_dir / "defenseclaw-enterprise.sh")
+    functions = "\n".join(_shell_function(wrapper, name) for name in (
+        "dc_json_escape", "dc_print_result", "dc_log", "dc_fail_result",
+        "dc_secret_json_error", "dc_secret_set_bundle", "dc_store_secret",
+    ))
+    log = tmp_path / "calls.log"
+    gateway = tmp_path / "gateway"
+    member = ',"secret_set_bundle":true' if binds else ""
+    version = '{"schema_version":1,"name":"defenseclaw-gateway","version":"1.0.x","management_contract":1' + member + "}"
+    gateway.write_text(
+        "#!/bin/sh\n"
+        f"if [ \"$1\" = --version-json ]; then echo '{version}'; exit 0; fi\n"
+        f"cat >/dev/null\necho \"$*\" >>'{log}'\necho '{{\"ok\":true}}'\n",
+        encoding="utf-8",
+    )
+    gateway.chmod(0o755)
+    script = (
+        f'DC_ACTION=ensure DC_SCRIPT_OS={"darwin" if os_dir == "macos" else "linux"}\n'
+        f'DC_STAGE="{tmp_path}" DC_LOG="" DC_FORMAT=json DC_EXIT_FAILURE=1\n'
+        f"DC_SECRET_NAME=test-key secret_data=placeholder bundle='{bundle}'\n"
+        f'{functions}\n'
+        # The rotation journal (tested below) names the bundle confirmed now.
+        'dc_save_secret_previous() { DC_SECRET_CONFIRMED=none; }\n'
+        f'dc_store_secret "{gateway}"\n'
+    )
+    result = subprocess.run(["sh", "-c", script], env={"PATH": os.environ["PATH"]}, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stdout + result.stderr
+    want = "enterprise secret set --name test-key --from-stdin --lock-wait 10m --json"
+    if bundle and binds:
+        want += f" --bundle {bundle} --if-confirmed none"
+    assert log.read_text(encoding="utf-8").splitlines() == [want]
+
+
+def test_windows_wrapper_stores_a_bundled_credential_before_the_apply() -> None:
+    text = _text(MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1")
+    first = text.index("Set-WrapperSecret -Extra @('--bundle', $bundle, '--if-confirmed', $confirmedBundle, '--if-stored', $preimage)")
+    guard = text.rindex("if ($secret -and $bundle -and -not $SetupPath", 0, first)
+    # Only a CLI that reports secret_set_bundle (1.0.4 and later) gets --bundle.
+    probe = text.rindex("(Test-WrapperSecretSetBundle -Cli $installedDeployment.Cli)", guard, first)
+    assert "$document.secret_set_bundle -eq $true" in text
+    lifecycle = text.index("$arguments = @('enterprise', 'windows', $normalizedAction")
+    after = text.index("if ($exitCode -eq 0 -and $secret -and -not $secretStored)")
+    assert guard < probe < first < lifecycle < after
+
+
+# Loop round 2 review (Windows consolidation): the wrapper stores a credential
+# a new bundle signs (secret set --bundle, which restarts the gateway) before
+# the lifecycle applies that bundle. When the lifecycle failed, or the run
+# stopped first, the old bundle stayed confirmed with the new credential, so
+# its signed value no longer matched. The release branch stored the
+# credential only after a successful lifecycle. The wrapper now journals the
+# stored value first and puts it back unless the lifecycle succeeded: after a
+# failure, after a launch failure, and at the start of the next ensure after
+# an interrupted run. The CLI decides each put-back (it stores only a value
+# the confirmed bundle signs), so a bundle confirmed after all keeps its
+# value. The fake CLI below has the CLI's rules.
+_ROTATION_PROBE = r"""
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version 3.0
+$script:LogPath = $null
+$script:root = '__ROOT__'
+$SecretName = 'ai-defense-api-key'
+$secret = Join-Path $script:root 'staged-secret'
+$bundle = Join-Path $script:root 'policy.dcbundle'
+$script:DefenseClawAdminSids = @()
+function Get-WrapperProgramData { return (Join-Path $script:root 'ProgramData') }
+# The ACL reads the journal checks rely on: a link, or a path listed in
+# $script:untrusted, is not administrator-only; folders get no descriptor.
+$script:untrusted = @()
+function Test-DefenseClawAdminOnlyItem {
+    param([string]$Path)
+    $item = Get-Item -LiteralPath $Path -Force
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
+    return ($script:untrusted -notcontains [System.IO.Path]::GetFullPath($Path))
+}
+function Test-WrapperAdminOnlyAncestors { param([string]$Path) return $true }
+function New-WrapperAdminOnlyDirectory { param([string]$Path) [void][System.IO.Directory]::CreateDirectory($Path) }
+function Get-DefenseClawInstalledDeployment { return [pscustomobject]@{ Cli = 'defenseclaw.exe' } }
+function Write-WrapperLog { param([string]$Message) }
+
+# The fake CLI: the confirmed bundle signs $script:confirmed (a value, or
+# $null for "references no credential") and has manifest $script:digest
+# ('none': nothing confirmed); bundle status reports $script:statusDigest
+# when set. The delivered bundle signs $script:delivered, and the installed
+# config uses the credential when $script:inUse is set. --if-confirmed and
+# --undo-rotation follow checkSecretTransaction; an empty value is invalid.
+# remove --undo-rotation takes a credential the config uses only while
+# --undo-config is the SHA-256 of the installed config (undoRotationOnConfig).
+$script:calls = @()
+$script:failNext = ''
+$script:digestA = 'a' * 64
+$script:digestB = 'b' * 64
+$script:digest = 'none'
+$script:statusDigest = ''
+function Invoke-DefenseClawNative {
+    param([string]$FilePath, [string[]]$ArgumentList = @(), [string]$StandardInputPath = '', [int]$TimeoutSeconds = 0)
+    $line = $ArgumentList -join ' '
+    $script:calls += $line
+    $stored = Get-WrapperStoredSecretPath -Name $SecretName
+    $refuse = { param($code) [pscustomobject]@{ ExitCode = 1603; StdErr = ''; StdOut = (@{ schema_version = 1; errors = @(@{ code = $code; message = $code }) } | ConvertTo-Json -Compress -Depth 4) } }
+    if ($script:failNext) {
+        $code = $script:failNext; $script:failNext = ''
+        if ($code -eq 'throw') { throw 'the CLI could not be launched' }
+        return (& $refuse $code)
+    }
+    $flag = { param($name) $at = [array]::IndexOf($ArgumentList, $name); if ($at -ge 0) { $ArgumentList[$at + 1] } else { '' } }
+    $current = if (Test-Path -LiteralPath $stored) { [System.IO.File]::ReadAllText($stored) } else { $null }
+    if ($ArgumentList[1] -eq 'bundle' -and $ArgumentList[2] -eq 'status') {
+        $reported = if ($script:statusDigest) { $script:statusDigest } else { $script:digest }
+        $document = if ($reported -eq 'none') { '{"ok":true,"current":null}' } else { "{""ok"":true,""current"":{""manifest_sha256"":""$reported""}}" }
+        return [pscustomobject]@{ ExitCode = 0; StdErr = ''; StdOut = $document }
+    }
+    $ifConfirmed = & $flag '--if-confirmed'
+    if ($ifConfirmed -and $ifConfirmed -ne $script:digest) { return (& $refuse 'confirmed_bundle_changed') }
+    $undo = & $flag '--undo-rotation'
+    $expectedValue = & $flag '--if-stored'
+    if ($undo -and (($ArgumentList[2] -eq 'set' -and $null -ne $current -and
+        [System.IO.File]::ReadAllText($StandardInputPath) -ceq $current) -or
+        ($ArgumentList[2] -eq 'remove' -and $null -eq $current))) {
+        return [pscustomobject]@{ ExitCode = 0; StdErr = ''; StdOut = '{"ok":true}' }
+    }
+    if ($expectedValue -and (($expectedValue -eq 'none' -and $null -ne $current) -or
+        ($expectedValue -ne 'none' -and ($null -eq $current -or
+        (Get-FileHash -LiteralPath $stored -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expectedValue)))) {
+        return (& $refuse 'credential_changed')
+    }
+    if ($undo -and ($undo -ne $script:digest -or ($null -ne $current -and $null -ne $script:confirmed -and $current -eq $script:confirmed))) {
+        return (& $refuse 'rotation_confirmed')
+    }
+    if ($ArgumentList[2] -eq 'set') {
+        $value = [System.IO.File]::ReadAllText($StandardInputPath)
+        if (-not $value) { return (& $refuse 'invalid_arguments') }
+        if ($value -ne $current) {
+            $signed = $null -eq $script:confirmed -or $value -eq $script:confirmed
+            if (-not $signed -and $ArgumentList -contains '--bundle') { $signed = $value -eq $script:delivered }
+            if (-not $signed) { return (& $refuse 'secret_ref_mismatch') }
+            [void][System.IO.Directory]::CreateDirectory((Split-Path -Parent $stored))
+            [System.IO.File]::WriteAllText($stored, $value)
+        }
+        return [pscustomobject]@{ ExitCode = 0; StdErr = ''; StdOut = '{"ok":true}' }
+    }
+    if ($ArgumentList[2] -eq 'remove') {
+        $undoConfig = & $flag '--undo-config'
+        $installed = if (Test-Path -LiteralPath $script:configPath) { (Get-FileHash -LiteralPath $script:configPath -Algorithm SHA256).Hash.ToLowerInvariant() } else { 'none' }
+        if ($script:inUse -and -not ($undo -and $undoConfig -cmatch '^[0-9a-f]{64}$' -and $undoConfig -eq $installed)) { return (& $refuse 'credential_in_use') }
+        Remove-Item -LiteralPath $stored -Force -ErrorAction SilentlyContinue
+        return [pscustomobject]@{ ExitCode = 0; StdErr = ''; StdOut = '{"ok":true}' }
+    }
+    throw "unexpected call $line"
+}
+
+__FUNCTIONS__
+
+$script:configPath = Join-Path $script:root 'ProgramData/Cisco/DefenseClaw/etc/config.yaml'
+function Set-InstalledConfig($Text) {
+    [void][System.IO.Directory]::CreateDirectory((Split-Path -Parent $script:configPath))
+    [System.IO.File]::WriteAllText($script:configPath, $Text)
+}
+function Reset-Device($Stored) {
+    Remove-Item -LiteralPath (Join-Path $script:root 'ProgramData') -Recurse -Force -ErrorAction SilentlyContinue
+    $script:untrusted = @()
+    Set-InstalledConfig 'config-before'
+    if ($null -ne $Stored) {
+        $path = Get-WrapperStoredSecretPath -Name $SecretName
+        [void][System.IO.Directory]::CreateDirectory((Split-Path -Parent $path))
+        [System.IO.File]::WriteAllText($path, $Stored)
+    }
+    [System.IO.File]::WriteAllText($secret, 'new-key')
+    $script:delivered = 'new-key'
+    $script:statusDigest = ''
+    $script:calls = @()
+}
+function Get-Stored {
+    $path = Get-WrapperStoredSecretPath -Name $SecretName
+    if (Test-Path -LiteralPath $path) { return [System.IO.File]::ReadAllText($path) }
+    return '<none>'
+}
+function Get-Journal { return @(Get-ChildItem -LiteralPath (Get-WrapperRotationJournal) -Force -File -ErrorAction SilentlyContinue).Count }
+# The old bundle (manifest A) is confirmed, signing $Signs.
+function Use-OldBundle($Signs) { $script:confirmed = $Signs; $script:digest = if ($null -eq $Signs -and -not $script:inUse) { 'none' } else { $script:digestA } }
+# The lifecycle confirmed the delivered bundle (manifest B).
+function Confirm-Delivered { $script:confirmed = $script:delivered; $script:digest = $script:digestB }
+# Rotate is the wrapper's step before the lifecycle; it returns the failure.
+function Rotate($AfterJournal = $null) {
+    $confirmedBundle = Get-WrapperConfirmedBundle -Cli 'defenseclaw.exe'
+    $preimage = ''
+    Save-WrapperSecretJournal -Name $SecretName -Confirmed $confirmedBundle -Preimage ([ref]$preimage)
+    if ($null -ne $AfterJournal) {
+        $stored = Get-WrapperStoredSecretPath -Name $SecretName
+        [void][System.IO.Directory]::CreateDirectory((Split-Path -Parent $stored))
+        [System.IO.File]::WriteAllText($stored, $AfterJournal)
+    }
+    return (Set-WrapperSecret -Extra @('--bundle', $bundle, '--if-confirmed', $confirmedBundle, '--if-stored', $preimage))
+}
+$out = [ordered]@{}
+
+# 1. The lifecycle fails: the old value goes back, the journal goes.
+$script:inUse = $true; Reset-Device 'old-key'; Use-OldBundle 'old-key'
+$failure = Rotate
+$out.rotated = "$($null -eq $failure) $(Get-Stored)"
+Undo-WrapperSecretRotation -Cli 'defenseclaw.exe'
+$out.failed = "$(Get-Stored) $(Get-Journal)"
+
+# 2. The lifecycle succeeds: the new value stays, the journal goes, no put-back.
+Reset-Device 'old-key'; Use-OldBundle 'old-key'
+[void](Rotate)
+Confirm-Delivered
+[void](Complete-WrapperSecretJournal -Name $SecretName)
+$out.succeeded = "$(Get-Stored) $(Get-Journal) $(@($script:calls).Count)"
+
+# 3. The run stops after the rotation: the next ensure puts the old value back.
+Reset-Device 'old-key'; Use-OldBundle 'old-key'
+[void](Rotate)
+$problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+$out.interrupted = "$(Get-Stored) $(Get-Journal) $($problems.Count)"
+
+# 4. The run stops after the lifecycle confirmed the new bundle: the CLI
+#    refuses the put-back rotation_confirmed, and the new value stays.
+Reset-Device 'old-key'; Use-OldBundle 'old-key'
+[void](Rotate)
+Confirm-Delivered
+$problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+$out.confirmed = "$(Get-Stored) $(Get-Journal) $($problems.Count)"
+
+# 5. No credential was stored and the old config does not use it: a failed
+#    lifecycle removes it again.
+$script:inUse = $false; Reset-Device $null; Use-OldBundle $null
+[void](Rotate)
+$out.absentRotated = Get-Stored
+Undo-WrapperSecretRotation -Cli 'defenseclaw.exe'
+$out.absentFailed = "$(Get-Stored) $(Get-Journal)"
+
+# 6. ... and once the new bundle is confirmed and uses it, the next ensure keeps it.
+Reset-Device $null; Use-OldBundle $null
+[void](Rotate)
+Confirm-Delivered; $script:inUse = $true
+[void](Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+$out.absentConfirmed = "$(Get-Stored) $(Get-Journal)"
+
+# Loop round 2 (rc.7), finding 1. 6a. The old config references the
+#    credential but no value was stored: secret remove refuses
+#    credential_in_use, which proved nothing. The put-back with the old
+#    bundle's manifest removes what the failed rotation added, on the
+#    failed lifecycle and at the next ensure.
+foreach ($when in @('failed', 'resumed')) {
+    $script:inUse = $true; Reset-Device $null; Use-OldBundle 'never-stored'
+    $failure = Rotate
+    $rotated = "$($null -eq $failure) $(Get-Stored)"
+    $problems = @()
+    if ($when -eq 'failed') { Undo-WrapperSecretRotation -Cli 'defenseclaw.exe' } else {
+        $problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+    }
+    $out["inUseAbsent_$when"] = "$rotated $(Get-Stored) $(Get-Journal) $($problems.Count)"
+}
+
+# 6b. Any other refusal of the put-back proves nothing either: the entry
+#    stays and is reported (secret_ref_mismatch, credential_in_use).
+foreach ($code in @('secret_ref_mismatch', 'credential_in_use')) {
+    $script:inUse = $true; Reset-Device 'old-key'; Use-OldBundle 'old-key'
+    [void](Rotate)
+    $script:failNext = $code
+    $problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+    $out["refusedPutBack_$code"] = "$(Get-Stored) $(Get-Journal) $($problems.Count)"
+}
+
+# 6c. A redelivery of the confirmed bundle, which signs the delivered value:
+#    the confirmed bundle uses what is stored now, so a failed lifecycle keeps it.
+Reset-Device 'old-key'; Use-OldBundle 'new-key'
+[void](Rotate)
+Undo-WrapperSecretRotation -Cli 'defenseclaw.exe'
+$out.redelivered = "$(Get-Stored) $(Get-Journal)"
+
+# 6d. Another bundle was confirmed between bundle status and the rotation:
+#    the CLI refuses the rotation, nothing changed and nothing is put back.
+Reset-Device 'old-key'; Use-OldBundle 'old-key'; $script:statusDigest = 'c' * 64
+$failure = Rotate
+[void](Complete-WrapperSecretJournal -Name $SecretName)
+$out.changedUnderneath = "$($failure.Code) $(Get-Stored) $(Get-Journal)"
+
+# A separate administrator write after journaling is a pre-write refusal.
+# The wrapper may retire its unused entry without putting stale A back.
+foreach ($previous in @('old-key', '<none>')) {
+    $script:inUse = $false
+    if ($previous -eq '<none>') { Reset-Device $null; Use-OldBundle $null }
+    else { Reset-Device 'old-key'; Use-OldBundle 'old-key' }
+    $failure = Rotate 'administrator-value'
+    $beforeRetire = "$(Get-Stored) $(Get-Journal)"
+    [void](Complete-WrapperSecretJournal -Name $SecretName)
+    $out["adminBeforeForward_$previous"] = "$($failure.Code) $beforeRetire $(Get-Stored) $(Get-Journal)"
+}
+
+# Older rc entries lack B's digest. They can settle only when their
+# before-state is already present; an ambiguous current value stays.
+foreach ($kind in @('bare', 'bundle', 'absent', 'changed')) {
+    $script:inUse = $false
+    if ($kind -eq 'absent') { Reset-Device $null; Use-OldBundle $null }
+    else { Reset-Device 'old-key'; Use-OldBundle 'old-key' }
+    $confirmedBundle = Get-WrapperConfirmedBundle -Cli 'defenseclaw.exe'
+    Save-WrapperSecretJournal -Name $SecretName -Confirmed $confirmedBundle
+    $entry = @(Get-ChildItem -LiteralPath (Get-WrapperRotationJournal) -Force -File)[0]
+    $oldName = switch ($kind) {
+        'bare' { $SecretName }
+        'bundle' { "$SecretName@$confirmedBundle" }
+        'absent' { "$SecretName.absent" }
+        'changed' { $SecretName }
+    }
+    Move-Item -LiteralPath $entry.FullName -Destination (Join-Path (Get-WrapperRotationJournal) $oldName)
+    if ($kind -eq 'changed') {
+        [System.IO.File]::WriteAllText((Get-WrapperStoredSecretPath -Name $SecretName), 'administrator-value')
+    }
+    $problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+    $out["oldFormat_$kind"] = "$(Get-Stored) $(Get-Journal) $($problems.Count)"
+    if ($kind -eq 'changed') { [void](Complete-WrapperSecretJournal -Name $SecretName) }
+}
+
+# 7. A put-back the CLI cannot do now stays journaled, and the next ensure
+#    finishes it.
+Reset-Device 'old-key'; Use-OldBundle 'old-key'
+[void](Rotate)
+$script:failNext = 'lifecycle_busy'
+$problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+$out.busy = "$(Get-Stored) $(Get-Journal) $($problems.Count)"
+$problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+$out.busyRetried = "$(Get-Stored) $(Get-Journal) $($problems.Count)"
+
+# 8. Loop round 2, finding 2: a second rotation while the first is not
+#    settled is refused; the first entry still puts the old value back.
+Reset-Device 'old-key'; Use-OldBundle 'old-key'
+[void](Rotate)
+[System.IO.File]::WriteAllText($secret, 'newer-key'); $script:delivered = 'newer-key'
+$second = try { [void](Rotate); 'rotated' } catch { 'refused' }
+$storedThen = Get-Stored
+Undo-WrapperSecretRotation -Cli 'defenseclaw.exe'
+$out.twice = "$second $storedThen $(Get-Stored) $(Get-Journal)"
+
+# 9. The CLI refuses the rotation itself: nothing changed, nothing is put back.
+Reset-Device 'old-key'; Use-OldBundle 'old-key'; $script:delivered = 'other-key'
+$failure = Rotate
+[void](Complete-WrapperSecretJournal -Name $SecretName)
+$out.refused = "$($failure.Code) $(Get-Stored) $(Get-Journal) $(@($script:calls).Count)"
+
+# 10. Nothing is installed any more: the journal goes with nothing put back.
+Reset-Device 'old-key'; Use-OldBundle 'old-key'
+[void](Rotate)
+$script:calls = @()
+[void](Complete-WrapperSecretJournal -Cli '' -Restore)
+$out.uninstalled = "$(Get-Journal) $(@($script:calls).Count)"
+
+# Loop round 1 (rc.7). 11. A put-back refused secret_ref_unbound (the
+#     confirmed bundle signs only the name) proves nothing: it stays
+#     journaled and is reported.
+Reset-Device 'old-key'; Use-OldBundle 'old-key'
+[void](Rotate)
+$script:failNext = 'secret_ref_unbound'
+$problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+$out.unbound = "$(Get-Stored) $(Get-Journal) $($problems.Count)"
+
+# 12. An entry another account planted (a config-only device, so nothing
+#     binds the credential): with the journal folder, the folder above it or
+#     the entry not administrator-only, the entry is never read, put back or
+#     removed, and no rotation journals beside it.
+foreach ($case in @('folder', 'parent', 'entry')) {
+    Reset-Device 'old-key'; $script:confirmed = $null; $script:digest = 'none'
+    $journal = Get-WrapperRotationJournal
+    [void][System.IO.Directory]::CreateDirectory($journal)
+    $planted = Join-Path $journal "$SecretName@none"
+    [System.IO.File]::WriteAllText($planted, 'attacker-key')
+    $script:untrusted = @(switch ($case) {
+        'folder' { [System.IO.Path]::GetFullPath($journal) }
+        'parent' { [System.IO.Path]::GetFullPath((Split-Path -Parent $journal)) }
+        'entry' { [System.IO.Path]::GetFullPath($planted) }
+    })
+    $problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+    $journaled = try { Save-WrapperSecretJournal -Name $SecretName -Confirmed none; 'journaled' } catch { 'refused' }
+    $out["untrusted_$case"] = "$(Get-Stored) $([System.IO.File]::ReadAllText($planted)) $(@($script:calls).Count) $($problems.Count) $journaled"
+}
+
+# 13. A folder where an entry belongs is not an entry either.
+Reset-Device 'old-key'; $script:confirmed = $null; $script:digest = 'none'
+$planted = Join-Path (Get-WrapperRotationJournal) "$SecretName@none"
+[void][System.IO.Directory]::CreateDirectory($planted)
+$problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+$journaled = try { Save-WrapperSecretJournal -Name $SecretName -Confirmed none; 'journaled' } catch { 'refused' }
+$out.folderEntry = "$(Get-Stored) $(Test-Path -LiteralPath $planted -PathType Container) $(@($script:calls).Count) $($problems.Count) $journaled"
+
+# 14. Nor is a link to a file elsewhere (where this account can make one).
+Reset-Device 'old-key'; $script:confirmed = $null; $script:digest = 'none'
+$journal = Get-WrapperRotationJournal
+[void][System.IO.Directory]::CreateDirectory($journal)
+$target = Join-Path $script:root 'attacker-file'
+[System.IO.File]::WriteAllText($target, 'attacker-key')
+$link = Join-Path $journal "$SecretName@none"
+$linked = try { [void](New-Item -ItemType SymbolicLink -Path $link -Target $target -ErrorAction Stop); $true } catch { $false }
+$problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+$out.linkEntry = "$linked $(Get-Stored) $([System.IO.File]::ReadAllText($target)) $(@($script:calls).Count) $($problems.Count) $(Test-Path -LiteralPath $link)"
+
+# Loop round 2 (rc.7), finding 2. 15. A zeroed earlier name does not
+#     match the credential's before-state. It stays for administrator
+#     review and blocks another rotation.
+Reset-Device 'old-key'; Use-OldBundle 'old-key'
+$journal = Get-WrapperRotationJournal
+[void][System.IO.Directory]::CreateDirectory($journal)
+$leftover = Join-Path $journal $SecretName
+[System.IO.File]::WriteAllBytes($leftover, [byte[]]::new(7))
+$problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+$second = try { [void](Rotate); 'rotated' } catch { 'refused' }
+$out.foreignEntry = "$(Get-Stored) $((Get-Item -LiteralPath $leftover).Length) $(@($script:calls | Where-Object { $_ -match 'secret' }).Count) $($problems.Count) $second"
+
+# 16. A cleanup that stops after the retire rename (here: the delete fails)
+#     leaves only a .retired file. The next ensure deletes it without a
+#     put-back, and the next rotation journals the value stored now, so its
+#     failed lifecycle puts that value back.
+Reset-Device 'old-key'; Use-OldBundle 'old-key'
+[void](Rotate)
+Confirm-Delivered
+function Remove-Item { throw 'stopped before the delete' }
+$problems = @(Complete-WrapperSecretJournal -Name $SecretName)
+Microsoft.PowerShell.Management\Remove-Item -LiteralPath function:\Remove-Item
+$left = @(Get-ChildItem -LiteralPath (Get-WrapperRotationJournal) -Force | ForEach-Object { $_.Name + ':' + [int](([System.IO.File]::ReadAllBytes($_.FullName) | Measure-Object -Sum).Sum) })
+$out.retireStopped = "$(Get-Stored) $($left -join ',') $($problems.Count)"
+$script:calls = @()
+$problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+$out.retireResumed = "$(Get-Stored) $(Get-Journal) $(@($script:calls).Count) $($problems.Count)"
+[System.IO.File]::WriteAllText($secret, 'newer-key'); $script:delivered = 'newer-key'
+$failure = Rotate
+$rotated = Get-Stored
+Undo-WrapperSecretRotation -Cli 'defenseclaw.exe'
+$out.retireNext = "$($null -eq $failure) $rotated $(Get-Stored) $(Get-Journal)"
+
+# 16b. The same on a config-only device (no bundle signs the credential):
+#      before, the next ensure stored the zeroed entry as the credential.
+$script:inUse = $false; Reset-Device 'old-key'; Use-OldBundle $null
+[void](Rotate)
+function Remove-Item { throw 'stopped before the delete' }
+$problems = @(Complete-WrapperSecretJournal -Name $SecretName)
+Microsoft.PowerShell.Management\Remove-Item -LiteralPath function:\Remove-Item
+$script:calls = @()
+$resumed = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+$out.retireConfigOnly = "$(Get-Stored) $(Get-Journal) $(@($script:calls).Count) $($problems.Count) $($resumed.Count)"
+
+# Loop round 1 (review at b97e9ab4). 17. Nothing was stored and no bundle
+#     is confirmed; after the rotation another ensure installs a config that
+#     uses the new value; then this run's lifecycle fails, or it stops and
+#     the next ensure settles. The put-back must not remove what that config
+#     needs: the credential and the entry stay and it is reported. The same
+#     under an old bundle that does not sign the value, and a config
+#     installed since that does not use it lets the put-back remove it.
+foreach ($case in @('failed', 'resumed', 'oldBundle', 'unused')) {
+    $script:inUse = ($case -eq 'oldBundle'); Reset-Device $null
+    if ($case -eq 'oldBundle') { Use-OldBundle 'never-stored' } else { Use-OldBundle $null }
+    $failure = Rotate
+    $rotated = "$($null -eq $failure) $(Get-Stored)"
+    Set-InstalledConfig "config-installed-since-$case"
+    $script:inUse = ($case -ne 'unused')
+    if ($case -eq 'resumed') { $problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore) } else {
+        $problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Name $SecretName -Restore)
+    }
+    $out["laterConfig_$case"] = "$rotated $(Get-Stored) $(Get-Journal) $($problems.Count)"
+}
+
+# A direct administrator save after the rotation belongs to that later
+# change. Neither an immediate failure nor interrupted-run replay may put
+# the earlier value over it, even when the old bundle signs that value.
+foreach ($case in @('failed', 'resumed')) {
+    $script:inUse = $false; Reset-Device 'old-key'; Use-OldBundle 'old-key'
+    [void](Rotate)
+    $stored = Get-WrapperStoredSecretPath -Name $SecretName
+    [System.IO.File]::WriteAllText($stored, 'admin-new-key')
+    $problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+    $out["adminChanged_$case"] = "$(Get-Stored) $(Get-Journal) $($problems.Count)"
+}
+
+# 18. The .absent entry holds the SHA-256 of the config installed before the
+#     rotation ('none' with no config), and the put-back passes it.
+$script:inUse = $false; Reset-Device $null; Use-OldBundle $null
+[void](Rotate)
+$entry = @(Get-ChildItem -LiteralPath (Get-WrapperRotationJournal) -Force -File)[0]
+$expected = (Get-FileHash -LiteralPath $script:configPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$held = [System.IO.File]::ReadAllText($entry.FullName) -ceq $expected
+$script:calls = @()
+[void](Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+$out.absentEntry = "$($entry.Name) $held $(@($script:calls | Where-Object { $_ -like "*--undo-config $expected*" }).Count)"
+Reset-Device $null; Remove-Item -LiteralPath $script:configPath
+[void](Rotate)
+$entry = @(Get-ChildItem -LiteralPath (Get-WrapperRotationJournal) -Force -File)[0]
+$out.absentEntryNoConfig = [System.IO.File]::ReadAllText($entry.FullName)
+[void](Complete-WrapperSecretJournal -Name $SecretName)
+
+# A failed set, a launch exception and an interruption immediately after
+# journaling all leave the old value untouched. Replay must retire that entry
+# and allow the next rotation, for both a prior value and prior absence.
+foreach ($previous in @('old-key', '<none>')) {
+    foreach ($case in @('change_failed', 'state_invalid', 'elevation_required', 'throw', 'interrupted')) {
+        $script:inUse = $false
+        if ($previous -eq '<none>') { Reset-Device $null; Use-OldBundle $null }
+        else { Reset-Device 'old-key'; Use-OldBundle 'old-key' }
+        $confirmedBundle = Get-WrapperConfirmedBundle -Cli 'defenseclaw.exe'
+        Save-WrapperSecretJournal -Name $SecretName -Confirmed $confirmedBundle
+        if ($case -ne 'interrupted') {
+            $script:failNext = $case
+            $failure = Set-WrapperSecret -Extra @('--bundle', $bundle, '--if-confirmed', $confirmedBundle)
+            if ($case -eq 'throw' -and $failure.Code -ne '') { throw 'the launch exception was not reported' }
+            if ($case -ne 'throw' -and $failure.Code -ne $case) { throw 'the failed set was not reported' }
+        }
+        if ($case -eq 'interrupted') {
+            $problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+        } else {
+            Undo-WrapperSecretRotation -Cli 'defenseclaw.exe'
+            $problems = @()
+        }
+        $settled = "$(Get-Stored) $(Get-Journal) $($problems.Count)"
+        $next = Rotate
+        $out["beforeWrite_${previous}_$case"] = "$settled $($null -eq $next) $(Get-Stored)"
+    }
+}
+
+# 19. An .absent entry that names no config (as an earlier rc wrote it) is
+#     never put back or deleted, and it is reported.
+foreach ($content in @('', ('x' * 64), ($expected + "`n"))) {
+    $script:inUse = $true; Reset-Device $null; Use-OldBundle $null
+    $journal = Get-WrapperRotationJournal
+    [void][System.IO.Directory]::CreateDirectory($journal)
+    $planted = Join-Path $journal "$SecretName@none.absent"
+    [System.IO.File]::WriteAllText($planted, $content)
+    [System.IO.File]::WriteAllText($secret, 'new-key')
+    $stored = Get-WrapperStoredSecretPath -Name $SecretName
+    [void][System.IO.Directory]::CreateDirectory((Split-Path -Parent $stored))
+    [System.IO.File]::WriteAllText($stored, 'new-key')
+    $script:calls = @()
+    $problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+    $out["noConfigEntry_$($content.Length)"] = "$(Get-Stored) $(Test-Path -LiteralPath $planted) $(@($script:calls).Count) $($problems.Count)"
+}
+$out | ConvertTo-Json -Compress
+"""
+
+
+def _any_pwsh7() -> str | None:
+    # PowerShell 7 on Windows, or pwsh on Linux and macOS: the probes use no
+    # Windows-only API.
+    candidates = [shutil.which("pwsh.exe"), shutil.which("pwsh")]
+    program_files = os.environ.get("ProgramFiles")
+    if program_files:
+        candidates.append(str(Path(program_files) / "PowerShell" / "7" / "pwsh.exe"))
+    return next((c for c in candidates if c and Path(c).is_file()), None)
+
+
+_ROTATION_FUNCTIONS = ("Get-WrapperSecretErrorCode", "Get-WrapperSecretErrorMessage", "Set-WrapperSecret", "Get-WrapperRotationJournal",
+                       "Get-WrapperConfirmedBundle", "Get-WrapperJournalEntryName", "Get-WrapperInstalledConfigIdentity",
+                       "Get-WrapperRotatedValueDigest",
+                       "Get-WrapperStoredSecretPath", "Initialize-WrapperRotationJournal", "Test-WrapperJournalEntry",
+                       "Save-WrapperSecretJournal", "Remove-WrapperJournalEntry", "Complete-WrapperSecretJournal",
+                       "Undo-WrapperSecretRotation")
+
+
+def _rotation_functions(*names: str) -> str:
+    text = _text(MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1")
+    functions = []
+    for name in names:
+        start = text.index(f"function {name} {{")
+        functions.append(text[start : text.index("\n}\n", start) + 3])
+    return "\n".join(functions)
+
+
+def _detect_functions(*names: str) -> str:
+    text = _text(MDM / "windows" / "detect.ps1").replace("\r\n", "\n")
+    functions = []
+    for name in names:
+        start = text.find(f"function {name} {{")
+        if start >= 0:
+            functions.append(text[start : text.index("\n}\n", start) + 3])
+    return "\n".join(functions)
+
+
+@pytest.mark.skipif(_any_pwsh7() is None, reason="needs PowerShell 7")
+def test_windows_detect_orders_prereleases_by_identifier(tmp_path: Path) -> None:
+    # GAP-1987: -MinimumVersion compared prereleases as one ordinal string, so
+    # an installed rc.10 read older than a minimum rc.9 (Intune reinstall loop)
+    # and an installed rc.3 newer than a minimum rc.10.
+    cases = [
+        ("1.0.5-rc.10", "1.0.5-rc.9", True),
+        ("1.0.5-rc.9", "1.0.5-rc.10", False),
+        ("1.0.5-rc.3", "1.0.5-rc.10", False),
+        ("1.0.5-rc.10", "1.0.5-rc.2", True),
+        ("1.0.5-rc.10", "1.0.5-rc.10", True),
+        ("1.0.5", "1.0.5-rc.10", True),
+        ("1.0.5-rc.10", "1.0.5", False),
+        ("1.0.5-rc.1", "1.0.5-rc.beta", False),
+        ("1.0.5-alpha.1", "1.0.5-alpha", True),
+        ("1.0.5-beta", "1.0.5-alpha.9", True),
+        ("1.0.6-rc.1", "1.0.5", True),
+        ("1.0.4", "1.0.5-rc.1", False),
+    ]
+    probe = tmp_path / "detect-version.ps1"
+    probe.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        + _detect_functions("ConvertTo-DefenseClawComparableVersion", "Compare-DefenseClawPrerelease",
+                            "Test-DefenseClawVersionAtLeast")
+        + "\n"
+        + "".join(f"'{{0}}' -f (Test-DefenseClawVersionAtLeast -Installed '{a}' -Minimum '{b}')\n" for a, b, _ in cases),
+        encoding="utf-8",
+    )
+    result = subprocess.run([_any_pwsh7(), "-NoProfile", "-NonInteractive", "-File", str(probe)],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    got = [line.strip() == "True" for line in result.stdout.splitlines() if line.strip()]
+    assert got == [want for _, _, want in cases], list(zip(cases, got))
+
+
+@pytest.mark.skipif(_any_pwsh7() is None, reason="needs PowerShell 7")
+@pytest.mark.parametrize(("raw", "stored"), [
+    (b" \tnew-key\r\n", b"new-key"),
+    ("\u00a0new-key\u202f".encode(), b"new-key"),
+    (b"\xff \tkey \x80", b"\xff \tkey \x80"),
+    (b"\xe2\x80\x8bkey", b"\xe2\x80\x8bkey"),
+])
+def test_windows_journal_records_the_exact_cli_stored_value_digest(tmp_path: Path, raw: bytes, stored: bytes) -> None:
+    staged = tmp_path / "secret"
+    staged.write_bytes(raw)
+    probe = tmp_path / "digest.ps1"
+    quoted = str(staged).replace("'", "''")
+    probe.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        + f"$secret = '{quoted}'\n"
+        + _rotation_functions("Get-WrapperRotatedValueDigest")
+        + "\nGet-WrapperRotatedValueDigest\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run([_any_pwsh7(), "-NoProfile", "-NonInteractive", "-File", str(probe)],
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip() == hashlib.sha256(stored).hexdigest()
+
+
+@pytest.mark.skipif(_any_pwsh7() is None and os.name != "nt", reason="needs PowerShell 7")
+def test_windows_wrapper_puts_back_a_rotated_credential_unless_the_lifecycle_confirms_it(tmp_path: Path) -> None:
+    engine = _any_pwsh7()
+    assert engine, "Windows CI must provide PowerShell 7"
+    probe = tmp_path / "rotation-probe.ps1"
+    probe.write_text(
+        _ROTATION_PROBE.replace("__ROOT__", str(tmp_path).replace("'", "''"))
+        .replace("__FUNCTIONS__", _rotation_functions(*_ROTATION_FUNCTIONS)),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [engine, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(probe)],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+    a = "a" * 64
+    value = hashlib.sha256(b"new-key").hexdigest()
+    assert out == {
+        "rotated": "True new-key",
+        "failed": "old-key 0",
+        "succeeded": "new-key 0 2",
+        "interrupted": "old-key 0 0",
+        "confirmed": "new-key 0 0",
+        "absentRotated": "new-key",
+        "absentFailed": "<none> 0",
+        "absentConfirmed": "new-key 0",
+        "inUseAbsent_failed": "True new-key <none> 0 0",
+        "inUseAbsent_resumed": "True new-key <none> 0 0",
+        "refusedPutBack_secret_ref_mismatch": "new-key 1 1",
+        "refusedPutBack_credential_in_use": "new-key 1 1",
+        "redelivered": "new-key 0",
+        "changedUnderneath": "confirmed_bundle_changed old-key 0",
+        "adminBeforeForward_old-key": "credential_changed administrator-value 1 administrator-value 0",
+        "adminBeforeForward_<none>": "credential_changed administrator-value 1 administrator-value 0",
+        "busy": "new-key 1 1",
+        "busyRetried": "old-key 0 0",
+        "twice": "refused new-key old-key 0",
+        "refused": "secret_ref_mismatch old-key 0 2",
+        "uninstalled": "0 0",
+        "unbound": "new-key 1 1",
+        "untrusted_folder": "old-key attacker-key 0 1 refused",
+        "untrusted_parent": "old-key attacker-key 0 1 refused",
+        "untrusted_entry": "old-key attacker-key 0 1 refused",
+        "folderEntry": "old-key True 0 1 refused",
+        "foreignEntry": "old-key 7 1 1 refused",
+        "retireStopped": f"new-key ai-defense-api-key@{a}+{value}.retired:0 1",
+        "retireResumed": "new-key 0 0 0",
+        "retireNext": "True newer-key new-key 0",
+        "retireConfigOnly": "new-key 0 0 1 0",
+        "laterConfig_failed": "True new-key new-key 1 1",
+        "laterConfig_resumed": "True new-key new-key 1 1",
+        "laterConfig_oldBundle": "True new-key new-key 1 1",
+        "laterConfig_unused": "True new-key <none> 0 0",
+        "adminChanged_failed": "admin-new-key 1 1",
+        "adminChanged_resumed": "admin-new-key 1 1",
+        "absentEntry": f"ai-defense-api-key@none+{value}.absent True 1",
+        "absentEntryNoConfig": "none",
+        "beforeWrite_old-key_change_failed": "old-key 0 0 True new-key",
+        "beforeWrite_old-key_state_invalid": "old-key 0 0 True new-key",
+        "beforeWrite_old-key_elevation_required": "old-key 0 0 True new-key",
+        "beforeWrite_old-key_throw": "old-key 0 0 True new-key",
+        "beforeWrite_old-key_interrupted": "old-key 0 0 True new-key",
+        "beforeWrite_<none>_change_failed": "<none> 0 0 True new-key",
+        "beforeWrite_<none>_state_invalid": "<none> 0 0 True new-key",
+        "beforeWrite_<none>_elevation_required": "<none> 0 0 True new-key",
+        "beforeWrite_<none>_throw": "<none> 0 0 True new-key",
+        "beforeWrite_<none>_interrupted": "<none> 0 0 True new-key",
+        "oldFormat_bare": "old-key 0 0",
+        "oldFormat_bundle": "old-key 0 0",
+        "oldFormat_absent": "<none> 0 0",
+        "oldFormat_changed": "administrator-value 1 1",
+        "noConfigEntry_0": "new-key True 1 1",
+        "noConfigEntry_64": "new-key True 1 1",
+        "noConfigEntry_65": "new-key True 1 1",
+        "linkEntry": out["linkEntry"],
+    }, out
+    # Where this account can make a link, it is refused and left in place.
+    linked = "True old-key attacker-key 0 1 True"
+    assert out["linkEntry"] in (linked, "False old-key attacker-key 0 0 False"), out
+    assert os.name == "nt" or out["linkEntry"] == linked, out
+
+
+def test_windows_wrapper_settles_the_credential_journal_around_the_lifecycle() -> None:
+    # The order the probe above relies on: an earlier run's journal is
+    # settled before anything changes, the stored value is journaled before
+    # the rotation, and the lifecycle's outcome settles it (launch failure,
+    # failure, success).
+    text = _text(MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1")
+    main = text[text.index("$staging = New-WrapperStaging"):]
+    resume = main.index("if ($normalizedAction -eq 'ensure') { Resume-WrapperSecretJournal }")
+    lock = main.index("[void](Enter-WrapperRotationLock -Create)", resume)
+    # The bundle confirmed before the rotation is read under the lock,
+    # journaled with the old value, and guards the rotation (--if-confirmed).
+    confirmed = main.index("$confirmedBundle = Get-WrapperConfirmedBundle -Cli $installedDeployment.Cli", lock)
+    journal = main.index("Save-WrapperSecretJournal -Name $SecretName -Confirmed $confirmedBundle", confirmed)
+    rotate = main.index("$failure = Set-WrapperSecret -Extra @('--bundle', $bundle, '--if-confirmed', $confirmedBundle, '--if-stored', $preimage)")
+    armed = main.index("$script:RotationCli = $installedDeployment.Cli")
+    lifecycle = main.index("$arguments = @('enterprise', 'windows', $normalizedAction")
+    disarmed = main.index("$script:RotationCli = ''", lifecycle)
+    settle = main.index("[void](Complete-WrapperSecretJournal -Name $SecretName)", disarmed)
+    undo = main.index("Undo-WrapperSecretRotation -Cli $installedDeployment.Cli", settle)
+    assert resume < lock < confirmed < journal < rotate < armed < lifecycle < disarmed < settle < undo
+    assert "'confirmed_bundle_changed', 'credential_changed'" in main
+    body = main[main.index("function Resume-WrapperSecretJournal {"):]
+    body = body[: body.index("\n}\n")]
+    assert body.index("Enter-WrapperRotationLock") < body.index("Complete-WrapperSecretJournal -Cli $cli -Restore")
+
+
+@pytest.mark.skipif(_any_pwsh7() is None, reason="needs PowerShell 7")
+@pytest.mark.parametrize("case", ["replay_refused", "replay_throw", "deployment_unknown", "foreign_entry", "settled"])
+def test_windows_wrapper_refuses_config_only_ensure_while_a_journal_is_unsettled(
+    tmp_path: Path, case: str,
+) -> None:
+    wrapper = _text(MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1")
+    resume_call = "if ($normalizedAction -eq 'ensure') { Resume-WrapperSecretJournal }"
+    assert resume_call in wrapper
+    prefix = _ROTATION_PROBE[: _ROTATION_PROBE.index("$out = [ordered]@{}")]
+    setup = {
+        "replay_refused": "$script:failNext = 'state_invalid'",
+        "replay_throw": "$script:failNext = 'throw'",
+        "deployment_unknown": "function Get-DefenseClawInstalledDeployment { throw 'deployment marker unreadable' }",
+        "foreign_entry": "[System.IO.File]::WriteAllText((Join-Path (Get-WrapperRotationJournal) 'foreign.entry'), 'unknown')",
+        "settled": "",
+    }[case]
+    probe = tmp_path / "ensure.ps1"
+    probe.write_text(
+        (prefix + "\n"
+         + "function ConvertTo-DefenseClawResultJson { param($Action, $ExitCode, $Code, $Message) return \"{`\"code`\":`\"$Code`\"}\" }\n"
+         + "function Remove-WrapperStaging { }\n"
+         + "$script:ResultAction = 'ensure'; $script:RotationCli = ''; $script:RotationLock = $null\n"
+         + "$script:RotationLockWaitSeconds = 1; $script:ExitFailure = 1603; $script:ExitBusy = 1618\n"
+         + "$script:inUse = $true; Reset-Device 'old-key'; Use-OldBundle 'old-key'\n"
+         + "[void](Rotate)\n" + setup + "\n"
+         + "$normalizedAction = 'ensure'\n" + resume_call + "\n"
+         + "Set-InstalledConfig 'config-after'\n")
+        .replace("__ROOT__", str(tmp_path).replace("'", "''"))
+        .replace("__FUNCTIONS__", _rotation_functions(*_ROTATION_FUNCTIONS, "Enter-WrapperRotationLock",
+                                                   "Resume-WrapperSecretJournal", "Exit-Wrapper")),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [_any_pwsh7(), "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(probe)],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    if case == "settled":
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (tmp_path / "ProgramData/Cisco/DefenseClaw/etc/config.yaml").read_text() == "config-after"
+        assert not list((tmp_path / "ProgramData/Cisco/DefenseClaw-MDM/rotation").glob("*"))
+    else:
+        assert result.returncode in (1603, 1603 % 256), result.stdout + result.stderr
+        assert 'mdm_secret_failed' in result.stdout, result.stdout + result.stderr
+        assert (tmp_path / "ProgramData/Cisco/DefenseClaw/etc/config.yaml").read_text() == "config-before"
+        assert list((tmp_path / "ProgramData/Cisco/DefenseClaw-MDM/rotation").glob("*"))
+    assert (tmp_path / "ProgramData/Cisco/DefenseClaw/secrets/ai-defense-api-key").read_text() == (
+        "old-key" if case in ("foreign_entry", "settled") else "new-key"
+    )
+
+
+# Continuation 2, loop round 1 (Windows consolidation, GAP-1095): the
+# credential rotation is part of the bundle apply's transaction. Windows: an
+# exit between the rotation and the settle (mdm_not_installed after the
+# rotation, a lifecycle with no result, a launch failure) went through
+# Exit-Wrapper, which did not put the old value back, so that failed ensure
+# left the new value with the old bundle until the next ensure.
+_EXIT_PROBE_TAIL = r"""
+function ConvertTo-DefenseClawResultJson { param($Action, $ExitCode, $Code, $Message) return "{""code"":""$Code""}" }
+function Remove-WrapperStaging { }
+$script:ResultAction = 'ensure'
+$script:RotationCli = ''
+$script:inUse = $true; Reset-Device 'old-key'; Use-OldBundle 'old-key'
+[void](Rotate)
+[Console]::Error.WriteLine("ROTATED=$(Get-Stored)")
+if ('__CASE__' -eq 'armed') { $script:RotationCli = 'defenseclaw.exe' }
+if ('__CASE__' -eq 'settled') { $script:RotationCli = ''; Confirm-Delivered; [void](Complete-WrapperSecretJournal -Name $SecretName) }
+Exit-Wrapper 1603 'mdm_not_installed' 'the deployment is not installed'
+"""
+
+
+
+@pytest.mark.skipif(_any_pwsh7() is None, reason="needs PowerShell 7")
+@pytest.mark.parametrize(("case", "stored", "journal"), [("armed", "old-key", 0), ("settled", "new-key", 0)])
+def test_windows_wrapper_exit_puts_back_a_credential_rotated_before_the_lifecycle(
+    tmp_path: Path, case: str, stored: str, journal: int,
+) -> None:
+    engine = _any_pwsh7()
+    prefix = _ROTATION_PROBE[: _ROTATION_PROBE.index("$out = [ordered]@{}")]
+    probe = tmp_path / "exit-probe.ps1"
+    probe.write_text(
+        (prefix + _EXIT_PROBE_TAIL.replace("__CASE__", case))
+        .replace("__ROOT__", str(tmp_path).replace("'", "''"))
+        .replace("__FUNCTIONS__", _rotation_functions(*_ROTATION_FUNCTIONS, "Exit-Wrapper")),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [engine, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(probe)],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    # 1603, or 1603 mod 256 where exit codes are 8 bits (pwsh on Linux).
+    assert result.returncode in (1603, 1603 % 256), result.stdout + result.stderr
+    assert "ROTATED=new-key" in result.stderr, result.stderr
+    assert result.stdout.strip().splitlines()[-1] == '{"code":"mdm_not_installed"}', result.stdout
+    store = tmp_path / "ProgramData"
+    secret = next(path for path in store.rglob("*") if path.is_file() and path.name.endswith("ai-defense-api-key")
+                  and "rotation" not in str(path))
+    assert secret.read_text(encoding="utf-8") == stored
+    entries = [path for path in store.rglob("*") if path.is_file() and "rotation" in str(path)]
+    assert len(entries) == journal, entries
+
+
+# GAP-2093: the installed CLI refuses a rotation on stdout (--json) with an
+# empty stderr. The wrapper result and log name that refusal and its next
+# step, and say what is installed (not installed:false).
+@pytest.mark.skipif(_any_pwsh7() is None, reason="needs PowerShell 7")
+@pytest.mark.parametrize("setup", [False, True])
+def test_windows_wrapper_names_the_cli_refusal_and_the_installed_deployment(tmp_path: Path, setup: bool) -> None:
+    text = _text(MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1")
+    shared = text[text.index(SHARED_BEGIN): text.index(SHARED_END)]
+    refusal = {"schema_version": 1, "ok": False, "action": "set", "name": "ai-defense-api-key", "gateway_restarted": False,
+               "errors": [{"code": "secret_ref_unbound", "message": "bundle secret_ref_unbound: first apply a bundle signed with --secret-file for the value stored now"}],
+               "exit_code": 1603}
+    probe = tmp_path / "refusal-probe.ps1"
+    probe.write_text(
+        "$ErrorActionPreference = 'Stop'\n" + shared + "\n"
+        + _rotation_functions("Get-WrapperSecretErrorCode", "Get-WrapperSecretErrorMessage", "Set-WrapperSecret", "Exit-Wrapper")
+        + "\nfunction Get-DefenseClawInstalledDeployment { return [pscustomobject]@{ Cli = 'defenseclaw.exe'; Version = '1.0.5-rc.1' } }\n"
+        + "function Invoke-DefenseClawNative { param($FilePath, $StandardInputPath, $ArgumentList)\n"
+        + "    return [pscustomobject]@{ ExitCode = 1603; StdErr = ''; StdOut = '" + json.dumps(refusal).replace("'", "''") + "' } }\n"
+        + "function Write-WrapperLog { param($Message) Add-Content -LiteralPath '" + str(tmp_path / "wrapper.log").replace("'", "''") + "' -Value $Message }\n"
+        + "function Remove-WrapperStaging { }\n"
+        + "$script:ResultAction = 'ensure'; $script:RotationCli = ''; $SecretName = 'ai-defense-api-key'; $secret = 'staged'\n"
+        + ("$SetupPath = 'C:\\stage\\Setup.exe'\n" if setup else "$SetupPath = ''\n")
+        + "$failure = Set-WrapperSecret -Extra @('--bundle', 'b')\n"
+        + "Exit-Wrapper 1603 'mdm_secret_failed' $failure.Message\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run([_any_pwsh7(), "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(probe)],
+                            capture_output=True, text=True, timeout=60, check=False)
+    assert result.returncode in (1603, 1603 % 256), result.stdout + result.stderr
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+    message = out["errors"][0]["message"]
+    assert out["errors"][0]["code"] == "mdm_secret_failed", out
+    assert "secret_ref_unbound: bundle secret_ref_unbound: first apply a bundle signed with --secret-file" in message, message
+    assert out["installed"] is True and out["installed_version"] == "1.0.5-rc.1", out
+    assert out["product_version"] == ("" if setup else "1.0.5-rc.1"), out
+    assert "secret_ref_unbound" in (tmp_path / "wrapper.log").read_text(encoding="utf-8")
+
+
+# Loop round 1 (rc.7), finding 1: two wrapper runs shared the journal with
+# no lock. Run A journaled the old value; run B's resume put that value back
+# (still stored, so the CLI took it) and deleted the entry; A then stored the
+# new value, its lifecycle failed, and nothing was left to put back. Every
+# ensure now holds rotation.lock from its resume to its exit.
+_LOCK_PROBE_TAIL = r"""
+function ConvertTo-DefenseClawResultJson { param($Action, $ExitCode, $Code, $Message) return "{""code"":""$Code""}" }
+function Remove-WrapperStaging { }
+$script:ResultAction = 'ensure'
+$script:RotationCli = ''
+$script:RotationLock = $null
+$script:ExitBusy = 1618
+$script:RotationLockWaitSeconds = 1
+$script:inUse = $true; $script:confirmed = 'old-key'; $script:digest = $script:digestA; $script:delivered = 'new-key'
+if ('__ROLE__' -eq 'b') {
+    # Run B: a concurrent ensure settles what an earlier run left.
+    Resume-WrapperSecretJournal
+    [Console]::Out.WriteLine("resumed $(Get-Stored) $(Get-Journal) $(@($script:calls).Count)")
+    exit 0
+}
+# Run A journals the old value and pauses before it stores the new one.
+Reset-Device 'old-key'
+[void](Enter-WrapperRotationLock -Create)
+$confirmedBundle = Get-WrapperConfirmedBundle -Cli 'defenseclaw.exe'
+Save-WrapperSecretJournal -Name $SecretName -Confirmed $confirmedBundle
+$b = @(& '__ENGINE__' -NoLogo -NoProfile -NonInteractive -File '__CHILD__' 2>&1 | ForEach-Object { "$_" })
+"B1=$LASTEXITCODE $($b | Where-Object { $_ -match '^(\{|resumed)' } | Select-Object -Last 1) $(Get-Stored) $(Get-Journal)"
+"LOG1=$($b -join ' | ')"
+# A goes on: it stores the new value, its lifecycle fails, the put-back finds its entry.
+$failure = Set-WrapperSecret -Extra @('--bundle', $bundle, '--if-confirmed', $confirmedBundle)
+Undo-WrapperSecretRotation -Cli 'defenseclaw.exe'
+"A=$($null -eq $failure) $(Get-Stored) $(Get-Journal)"
+# A exits (its hold goes): the next ensure runs.
+$script:RotationLock.Dispose(); $script:RotationLock = $null
+$b = @(& '__ENGINE__' -NoLogo -NoProfile -NonInteractive -File '__CHILD__' 2>&1 | ForEach-Object { "$_" })
+"B2=$LASTEXITCODE $($b | Where-Object { $_ -match '^(\{|resumed)' } | Select-Object -Last 1)"
+"LOG2=$($b -join ' | ')"
+"""
+
+
+@pytest.mark.skipif(_any_pwsh7() is None, reason="needs PowerShell 7")
+def test_windows_wrapper_holds_the_credential_journal_until_its_rotation_settles(tmp_path: Path) -> None:
+    engine = _any_pwsh7()
+    assert engine
+    prefix = _ROTATION_PROBE[: _ROTATION_PROBE.index("$out = [ordered]@{}")]
+    functions = _rotation_functions(*_ROTATION_FUNCTIONS, "Exit-Wrapper", "Enter-WrapperRotationLock",
+                                    "Resume-WrapperSecretJournal")
+    child = tmp_path / "run-b.ps1"
+    parent = tmp_path / "run-a.ps1"
+    for path, role in ((child, "b"), (parent, "a")):
+        path.write_text(
+            (prefix + _LOCK_PROBE_TAIL.replace("__ROLE__", role))
+            .replace("__ROOT__", str(tmp_path).replace("'", "''"))
+            .replace("__ENGINE__", engine.replace("'", "''"))
+            .replace("__CHILD__", str(child).replace("'", "''"))
+            .replace("__FUNCTIONS__", functions),
+            encoding="utf-8",
+        )
+    result = subprocess.run(
+        [engine, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(parent)],
+        capture_output=True, text=True, timeout=180, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = {line.split("=", 1)[0]: line.split("=", 1)[1] for line in result.stdout.splitlines() if "=" in line[:3]}
+    # B waits for A's hold, then gives up busy (1618, or 1618 mod 256 on
+    # Linux) with A's entry and the stored value untouched.
+    assert lines.get("B1") in ('1618 {"code":"lifecycle_busy"} old-key 1', '82 {"code":"lifecycle_busy"} old-key 1'), result.stdout + result.stderr
+    # A's failed lifecycle still finds its entry and puts the old value back.
+    assert lines.get("A") == "True old-key 0", result.stdout + result.stderr
+    # Once A is gone, B runs: nothing is left to settle.
+    assert lines.get("B2") == "0 resumed old-key 0 0", result.stdout + result.stderr
+
+
+def test_windows_wrapper_every_exit_after_the_rotation_settles_it() -> None:
+    # Every exit between the rotation and the settle goes through
+    # Exit-Wrapper (no bare exit), and the launch failure needs no extra put
+    # back: Exit-Wrapper does it.
+    text = _text(MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1")
+    main = text[text.index("$staging = New-WrapperStaging"):]
+    armed = main.index("$script:RotationCli = $installedDeployment.Cli")
+    disarmed = main.index("$script:RotationCli = ''", armed)
+    window = main[armed:disarmed]
+    assert not re.search(r"^\s*exit\b", window, re.MULTILINE), window
+    assert "Undo-WrapperSecretRotation" not in window
+    exit_wrapper = text[text.index("function Exit-Wrapper {"):]
+    exit_wrapper = exit_wrapper[: exit_wrapper.index("\n}\n")]
+    assert exit_wrapper.index("Undo-WrapperSecretRotation -Cli $rotationCli") < exit_wrapper.index("exit $ExitCode")
+
+
+# GAP-1095: the Linux and macOS kit also stores a credential with the bundle
+# it came with (secret set --bundle) before ensure and bundle apply. A failed
+# or interrupted run left the new value with the still-confirmed bundle.
+# The kit puts the old value back (secret set, or secret remove when none was
+# stored) on every exit but a successful bundle apply; the gateway decides,
+# as on Windows. GAP-1173, GAP-1188: what the rotation replaced is journaled
+# on disk, so a killed run is put back by the next ensure, and only the
+# refusal rotation_confirmed (the bundle confirmed since signs the stored
+# value) retires the entry; any other refusal keeps it. The fake gateway has
+# its rules.
+_FAKE_SECRET_GATEWAY = r"""#!/bin/sh
+printf '%s\n' "$*" >>"$FAKE/calls"
+if [ "$1" = --version-json ]; then echo '{"secret_set_bundle":true}'; exit 0; fi
+if [ "$2 $3" = "bundle status" ]; then echo '{"schema_version":1,"ok":true,"current":null,"errors":[]}'; exit 0; fi
+store="$SECRETS/$5"
+refuse() { printf '{"schema_version":2,"ok":false,"errors":[{"code":"%s","message":"%s refused"}]}\n' "$1" "$1"; exit 1; }
+case " $* " in
+*" --undo-rotation "*)
+    [ ! -f "$FAKE/refuse_undo" ] || refuse "$(cat "$FAKE/refuse_undo")"
+    if [ -f "$store" ] && [ -f "$FAKE/confirmed" ] && [ "$(cat "$store")" = "$(cat "$FAKE/confirmed")" ]; then refuse rotation_confirmed; fi ;;
+esac
+expect="" next=0
+for arg do
+    if [ "$next" = 1 ]; then expect=$arg; break; fi
+    [ "$arg" != --if-stored ] || next=1
+done
+if [ -n "$expect" ]; then
+    [ -f "$store" ] || refuse credential_changed
+    [ "$(sha256sum "$store" | awk '{print $1}')" = "$expect" ] || refuse credential_changed
+fi
+case "$3" in
+set)
+    value=$(cat)
+    current=""
+    [ ! -f "$store" ] || current=$(cat "$store")
+    if [ ! -f "$store" ] || [ "$value" != "$current" ]; then
+        signed=0
+        if [ ! -f "$FAKE/confirmed" ] || [ "$value" = "$(cat "$FAKE/confirmed")" ]; then signed=1; fi
+        case " $* " in *" --bundle "*) [ "$value" != "$(cat "$FAKE/delivered")" ] || signed=1 ;; esac
+        [ "$signed" = 1 ] || refuse secret_ref_mismatch
+        mkdir -p "$SECRETS"
+        printf '%s' "$value" >"$store"
+    fi
+    echo '{"schema_version":2,"ok":true,"errors":[]}'
+    exit 0 ;;
+remove)
+    [ ! -f "$FAKE/in_use" ] || refuse credential_in_use
+    rm -f "$store"
+    echo '{"schema_version":2,"ok":true,"errors":[]}'
+    exit 0 ;;
+esac
+exit 2
+"""
+
+_SECRET_ROTATION_FUNCTIONS = ("dc_sha256", "dc_secret_json_error", "dc_secret_set_bundle", "dc_read_stored_secret",
+                              "dc_save_secret_previous", "dc_restore_secret", "dc_store_secret",
+                              "dc_restore_anchors", "dc_cleanup", "dc_confirmed_bundle", "dc_journal_rotation",
+                              "dc_retire_rotation", "dc_journal_field", "dc_secret_json_code", "dc_settle_rotation",
+                              "dc_resume_rotation", "dc_rotation_lock", "dc_rotation_unlock")
+
+# The journal folder of a test run is not root's: only its location is real.
+_TEST_JOURNAL_READY = 'dc_journal_ready() { mkdir -p "$DC_JOURNAL_DIR"; }\n'
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize(
+    ("case", "previous", "confirmed", "delivered", "in_use", "then", "stored", "puts_back"),
+    [
+        # The bundle apply (or the ensure before it) fails: the old value goes back.
+        ("failed", "old-key", "old-key", "new-key", False, "exit 1", "old-key", "set"),
+        # The MDM stops the run (TERM) after the rotation.
+        ("cancelled", "old-key", "old-key", "new-key", False, "kill -TERM $$; sleep 5", "old-key", "set"),
+        # The bundle apply succeeded: the new value stays, nothing is put back.
+        ("applied", "old-key", "old-key", "new-key", False, "applied", "new-key", ""),
+        # The run failed after the new bundle was confirmed: the gateway refuses the put-back
+        # (rotation_confirmed), the only proof that the rotation committed.
+        ("confirmed", "old-key", "old-key", "new-key", False, "echo new-key >\"$FAKE/confirmed\"; exit 1", "new-key", "set"),
+        # GAP-1188: a put-back refused for any other reason (secret_ref_mismatch) proves
+        # nothing: the value stays as it is and so does the journal entry.
+        ("refused-put-back", "old-key", "old-key", "new-key", False,
+         'echo secret_ref_mismatch >"$FAKE/refuse_undo"; exit 1', "new-key", "set"),
+        # An administrator's direct save after rotation must survive cleanup.
+        ("admin-changed", "old-key", "old-key", "new-key", False,
+         'printf "admin-new-key\\n" >"$DC_SECRETS_DIR/ai-key"; exit 1', "admin-new-key", "set"),
+        # No credential was stored before: a failed run removes it again ...
+        ("absent", None, None, "new-key", False, "exit 1", None, "remove"),
+        # ... unless the installed config now uses it.
+        ("absent-in-use", None, None, "new-key", True, "exit 1", "new-key", "remove"),
+        # The gateway refused the rotation: nothing changed, nothing is put back.
+        ("refused", "old-key", "old-key", "other-key", False, "exit 0", "old-key", ""),
+    ],
+)
+def test_unix_wrapper_puts_back_a_rotated_credential_unless_its_bundle_applies(
+    tmp_path: Path, os_dir: str, case: str, previous: str | None, confirmed: str | None, delivered: str,
+    in_use: bool, then: str, stored: str | None, puts_back: str,
+) -> None:
+    wrapper = _text(MDM / os_dir / "defenseclaw-enterprise.sh")
+    functions = "\n".join(_shell_function(wrapper, name) for name in _SECRET_ROTATION_FUNCTIONS)
+    fake, secrets, stage = tmp_path / "fake", tmp_path / "secrets", tmp_path / "stage"
+    for folder in (fake, secrets, stage):
+        folder.mkdir()
+    gateway = tmp_path / "gateway"
+    gateway.write_text(_FAKE_SECRET_GATEWAY, encoding="utf-8")
+    gateway.chmod(0o755)
+    if previous is not None:
+        (secrets / "ai-key").write_text(previous + "\n", encoding="utf-8")
+    if confirmed is not None:
+        (fake / "confirmed").write_text(confirmed, encoding="utf-8")
+    (fake / "delivered").write_text(delivered, encoding="utf-8")
+    if in_use:
+        (fake / "in_use").write_text("", encoding="utf-8")
+    after = ('dc_retire_rotation "$DC_SECRET_NAME"; DC_SECRET_ROTATED=0 DC_SECRET_PREVIOUS=""; exit 0'
+             if then == "applied" else then)
+    journal = tmp_path / "journal"
+    script = f"""set -eu
+DC_ACTION=ensure DC_STAGE="{stage}" DC_LOG="{tmp_path / 'kit.log'}" DC_EXIT_FAILURE=1 DC_MAX_SECRET_BYTES=16384
+DC_SCRIPT_OS={"darwin" if os_dir == "macos" else "linux"} DC_SECRETS_DIR="{secrets}" DC_SECRET_NAME=ai-key DC_SECRET_ROTATED=0 DC_SECRET_PREVIOUS="" DC_SECRET_PREVIOUS_SET=0
+DC_SECRET_GATEWAY="" DC_CHILD="" DC_ANCHORS_SOURCE="" DC_ANCHORS_CHANGED=0
+DC_JOURNAL_DIR="{journal}" DC_INSTALLED_CONFIG="{tmp_path / 'config.yaml'}" DC_SECRET_CONFIRMED=""
+DC_ROTATION_LOCK_PID="" DC_GATEWAY_BEFORE=1 DC_EXIT_BUSY=75
+dc_log() {{ printf '%s\\n' "$1" >>"$DC_LOG"; }}
+dc_fail_result() {{ echo "fail $1 $2 $3"; exit "$1"; }}
+{functions}
+{_TEST_JOURNAL_READY}
+trap dc_cleanup EXIT
+trap 'dc_fail_result 1 mdm_cancelled cancelled' HUP INT TERM
+bundle="{tmp_path / 'policy.dcbundle'}" secret_data=new-key
+dc_store_secret "{gateway}"
+echo "rotated=$(cat "$DC_SECRETS_DIR/ai-key")"
+{after}
+"""
+    result = subprocess.run(["sh", "-c", script], env={"PATH": os.environ["PATH"], "FAKE": str(fake), "SECRETS": str(secrets)},
+                            capture_output=True, text=True, timeout=30)
+    out = result.stdout + result.stderr
+    calls = (fake / "calls").read_text(encoding="utf-8").splitlines()
+    rotations = [call for call in calls if " --bundle " in call]
+    assert len(rotations) == 1, (calls, out)
+    if case == "refused":
+        assert "secret_ref_mismatch" in out and "rotated" not in out, out
+    else:
+        assert "rotated=new-key" in out, out
+    put_back = [call.split()[2] for call in calls if call.startswith("enterprise secret") and " --bundle " not in call]
+    assert put_back == ([puts_back] if puts_back else []), (calls, out)
+    secret = secrets / "ai-key"
+    assert (secret.read_text(encoding="utf-8").strip() if secret.exists() else None) == stored, out
+    assert not stage.exists(), "the stage is removed after the put-back"
+    kept = case in ("absent-in-use", "admin-changed", "refused-put-back")
+    assert (journal / "ai-key.entry").exists() == kept, (case, out)
+    if case == "refused":
+        assert rotations[0].endswith("--if-confirmed none"), rotations
+    else:
+        assert all("--undo-rotation none" in call for call in calls if call.startswith("enterprise secret") and " --bundle " not in call)
+    if case == "confirmed":
+        assert "kept credential ai-key" in (tmp_path / "kit.log").read_text(encoding="utf-8")
+    if kept:
+        log = (tmp_path / "kit.log").read_text(encoding="utf-8")
+        assert "did not put back credential ai-key" in log and "stored value was left unchanged" in log
+        assert "journal entry" in log and "stays for the next ensure" in log
+        code = {"admin-changed": "credential_changed", "absent-in-use": "credential_in_use", "refused-put-back": "secret_ref_mismatch"}[case]
+        assert code in log
+
+
+# GAP-1173: a run killed after the rotation (no EXIT trap runs) leaves the
+# journal entry; the next ensure puts the credential back before it changes
+# anything, with the value or absence the journal recorded.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize("previous", ["old-key", None])
+def test_unix_wrapper_next_ensure_puts_back_a_killed_rotation(tmp_path: Path, os_dir: str, previous: str | None) -> None:
+    wrapper = _text(MDM / os_dir / "defenseclaw-enterprise.sh")
+    functions = "\n".join(_shell_function(wrapper, name) for name in _SECRET_ROTATION_FUNCTIONS)
+    fake, secrets, journal = tmp_path / "fake", tmp_path / "secrets", tmp_path / "journal"
+    for folder in (fake, secrets):
+        folder.mkdir()
+    gateway = tmp_path / "gateway"
+    gateway.write_text(_FAKE_SECRET_GATEWAY, encoding="utf-8")
+    gateway.chmod(0o755)
+    if previous is not None:
+        (secrets / "ai-key").write_text(previous + "\n", encoding="utf-8")
+        (fake / "confirmed").write_text(previous, encoding="utf-8")
+    (fake / "delivered").write_text("new-key", encoding="utf-8")
+    common = f"""set -eu
+DC_ACTION=ensure DC_LOG="{tmp_path / 'kit.log'}" DC_EXIT_FAILURE=1 DC_MAX_SECRET_BYTES=16384
+DC_SCRIPT_OS={"darwin" if os_dir == "macos" else "linux"} DC_SECRETS_DIR="{secrets}" DC_SECRET_NAME=ai-key DC_SECRET_ROTATED=0 DC_SECRET_PREVIOUS="" DC_SECRET_PREVIOUS_SET=0
+DC_SECRET_GATEWAY="" DC_CHILD="" DC_ANCHORS_SOURCE="" DC_ANCHORS_CHANGED=0 DC_GATEWAY="{gateway}"
+DC_JOURNAL_DIR="{journal}" DC_INSTALLED_CONFIG="{tmp_path / 'config.yaml'}" DC_SECRET_CONFIRMED=""
+DC_ROTATION_LOCK_PID="" DC_GATEWAY_BEFORE=1 DC_EXIT_BUSY=75
+dc_log() {{ printf '%s\\n' "$1" >>"$DC_LOG"; }}
+dc_fail_result() {{ echo "fail $1 $2 $3"; exit "$1"; }}
+{functions}
+{_TEST_JOURNAL_READY}
+dc_trusted_path() {{ [ -x "$1" ]; }}
+"""
+    env = {"PATH": os.environ["PATH"], "FAKE": str(fake), "SECRETS": str(secrets)}
+    stage1, stage2 = tmp_path / "stage1", tmp_path / "stage2"
+    stage1.mkdir()
+    killed = subprocess.run(["sh", "-c", common + f'DC_STAGE="{stage1}"\nbundle="{tmp_path / "policy.dcbundle"}" secret_data=new-key\n'
+                             f'dc_store_secret "{gateway}"\nkill -KILL $$\n'],
+                            env=env, capture_output=True, text=True, timeout=30)
+    assert killed.returncode != 0
+    assert (secrets / "ai-key").read_text(encoding="utf-8").strip() == "new-key"
+    assert (journal / "ai-key.entry").exists(), "the killed run left no journal entry"
+    stage2.mkdir()
+    resumed = subprocess.run(["sh", "-c", common + f'DC_STAGE="{stage2}"\ndc_resume_rotation\necho resumed\n'],
+                             env=env, capture_output=True, text=True, timeout=30)
+    assert "resumed" in resumed.stdout, resumed.stdout + resumed.stderr
+    secret = secrets / "ai-key"
+    assert (secret.read_text(encoding="utf-8").strip() if secret.exists() else None) == previous
+    assert not (journal / "ai-key.entry").exists() and not (journal / "ai-key.value").exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+def test_unix_wrapper_does_not_rotate_a_credential_that_is_a_link(tmp_path: Path) -> None:
+    wrapper = _text(MDM / "linux" / "defenseclaw-enterprise.sh")
+    functions = "\n".join(_shell_function(wrapper, name) for name in _SECRET_ROTATION_FUNCTIONS)
+    fake, secrets, stage = tmp_path / "fake", tmp_path / "secrets", tmp_path / "stage"
+    for folder in (fake, secrets, stage):
+        folder.mkdir()
+    (tmp_path / "elsewhere").write_text("old-key\n", encoding="utf-8")
+    (secrets / "ai-key").symlink_to(tmp_path / "elsewhere")
+    (fake / "delivered").write_text("new-key", encoding="utf-8")
+    gateway = tmp_path / "gateway"
+    gateway.write_text(_FAKE_SECRET_GATEWAY, encoding="utf-8")
+    gateway.chmod(0o755)
+    script = f"""set -eu
+DC_ACTION=ensure DC_STAGE="{stage}" DC_LOG="" DC_EXIT_FAILURE=1 DC_MAX_SECRET_BYTES=16384
+DC_SECRETS_DIR="{secrets}" DC_SECRET_NAME=ai-key DC_SECRET_ROTATED=0 DC_SECRET_PREVIOUS="" DC_SECRET_PREVIOUS_SET=0
+DC_SECRET_GATEWAY="" DC_CHILD="" DC_ANCHORS_SOURCE="" DC_ANCHORS_CHANGED=0
+dc_log() {{ :; }}
+dc_fail_result() {{ echo "fail $1 $2 $3"; exit "$1"; }}
+{functions}
+trap dc_cleanup EXIT
+bundle="{tmp_path / 'policy.dcbundle'}" secret_data=new-key
+dc_store_secret "{gateway}"
+"""
+    result = subprocess.run(["sh", "-c", script], env={"PATH": os.environ["PATH"], "FAKE": str(fake), "SECRETS": str(secrets)},
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 1 and "fail 1 mdm_secret_failed" in result.stdout, result.stdout + result.stderr
+    assert (fake / "calls").read_text(encoding="utf-8").splitlines() == ["--version-json"]
+    assert (tmp_path / "elsewhere").read_text(encoding="utf-8") == "old-key\n"
+
+
+def test_unix_wrapper_settles_the_rotated_credential_with_the_bundle_apply() -> None:
+    # dc_main: the success branch of the bundle apply keeps the stored value
+    # (and only it), the failure branch puts it back, and every other exit
+    # does so in dc_cleanup before the stage goes.
+    for os_dir in ("linux", "macos"):
+        text = _text(MDM / os_dir / "defenseclaw-enterprise.sh")
+        main = _shell_function(text, "dc_main")
+        apply = main.index('bundle apply --bundle "$bundle" --reason mdm --lock-wait 10m')
+        success = main.index("DC_SECRET_ROTATED=0", apply)
+        failure = main.index("dc_restore_secret || true", success)
+        assert main.index('if [ "$status" = 0 ]; then', apply) < success < main.index("else", success) < failure
+        assert main.count("DC_SECRET_ROTATED=0") == 1
+        cleanup = _shell_function(text, "dc_cleanup")
+        assert cleanup.index("dc_restore_secret || true") < cleanup.index('rm -rf "$DC_STAGE"')
+        store = _shell_function(text, "dc_store_secret")
+        assert store.index('dc_save_secret_previous "$gateway"') < store.index('set -- --bundle "$bundle" --if-confirmed "$DC_SECRET_CONFIRMED"') < store.index("enterprise secret set")
+        # A killed run's rotation is settled before the ensure stores a
+        # credential or applies a config, after the package it delivers.
+        assert main.index("dc_install_package") < main.index("dc_resume_rotation") < main.index('dc_store_secret "$gateway"')
+        assert main.count("dc_resume_rotation") == 1
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    [
+        ("", 'credential is empty (check "value" < 1)'),
+        ("gateway unavailable", "gateway unavailable"),
+    ],
+)
+def test_unix_wrapper_secret_refusal_carries_gateway_reason(
+    tmp_path: Path, os_dir: str, stderr: str, expected: str
+) -> None:
+    wrapper = _text(MDM / os_dir / "defenseclaw-enterprise.sh")
+    functions = "\n".join(_shell_function(wrapper, name) for name in (
+        "dc_json_escape", "dc_print_result", "dc_log", "dc_fail_result",
+        "dc_secret_json_error", "dc_store_secret",
+    ))
+    gateway = tmp_path / "gateway"
+    gateway.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$DC_TEST_DOCUMENT"\n'
+        'if [ -n "$DC_TEST_STDERR" ]; then printf "%s\\n" "$DC_TEST_STDERR" >&2; fi\n'
+        'exit 2\n',
+        encoding="utf-8",
+    )
+    gateway.chmod(0o755)
+    document = {"errors": [{"code": "secret_value_invalid", "message": 'credential is empty (check "value" < 1)'}]}
+    script = (
+        f'DC_ACTION=ensure DC_SCRIPT_OS={"darwin" if os_dir == "macos" else "linux"}\n'
+        f'DC_STAGE="{tmp_path}" DC_LOG="" DC_FORMAT=json DC_EXIT_FAILURE=1\n'
+        'DC_SECRET_NAME=test-key secret_data=placeholder\n'
+        f'{functions}\ndc_store_secret "{gateway}"\n'
+    )
+    result = subprocess.run(
+        ["sh", "-c", script],
+        env={"PATH": os.environ["PATH"], "DC_TEST_DOCUMENT": json.dumps(document).replace("<", "\\u003c"), "DC_TEST_STDERR": stderr},
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 2, result.stderr
+    output = json.loads(result.stdout)
+    assert output["errors"] == [{
+        "code": "mdm_secret_failed",
+        "message": f"storing credential 'test-key' failed, so the config was not applied: {expected}",
+    }]
 
 
 def _run(args: list[str], stdin: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -411,7 +1721,8 @@ _PACKAGE_TOOL_STUBS = {
     "dpkg": """case "$1" in --print-architecture) echo amd64 ;; -i) echo "dpkg -i" >>"$DC_TEST_LOG" ;; esac""",
     "dpkg-query": "exit 1",
     "rpm": """case "$1" in
-    -qp) case "$3" in *NAME*) echo defenseclaw-enterprise ;; *) echo "$DC_TEST_VERSION" ;; esac ;;
+    -qp) case "$3" in *NAME*) echo defenseclaw-enterprise ;; *ARCH*) echo x86_64 ;; *) echo "$DC_TEST_VERSION" ;; esac ;;
+    --eval) echo x86_64 ;;
     -q) exit 1 ;;
     -U) echo "rpm -U" >>"$DC_TEST_LOG" ;;
 esac""",
@@ -501,7 +1812,8 @@ def test_unix_wrapper_repairs_an_rpm_left_with_two_installed_versions(tmp_path: 
     rpm.write_text(
         """#!/bin/sh
 case "$1" in
-    -qp) case "$3" in *NAME*) echo defenseclaw-enterprise ;; *) echo 1.0.4101-1 ;; esac ;;
+    -qp) case "$3" in *NAME*) echo defenseclaw-enterprise ;; *ARCH*) echo x86_64 ;; *) echo 1.0.4101-1 ;; esac ;;
+    --eval) echo x86_64 ;;
     -q) [ "$2" = --qf ] && printf '1.0.3602-1\\n1.0.4101-1\\n'; exit 0 ;;
     -U) case " $* " in *" --replacepkgs "*) echo "rpm -U --replacepkgs" >>"$DC_TEST_LOG" ;; *) echo "package is already installed" >&2; exit 1 ;; esac ;;
 esac
@@ -528,6 +1840,54 @@ echo installed-ok
     assert result.returncode == 0 and "installed-ok" in result.stdout, (result.stdout, result.stderr)
     assert "step 1.0.4101 -> 1.0.4101" in result.stdout, result.stdout
     assert log.read_text(encoding="utf-8").strip() == "rpm -U --replacepkgs"
+
+# GAP-0030: a --staging-dir folder that does not exist exited 1 with no
+# result and "DC_TRUST_ACL: unbound variable" (set -u): the check skipped
+# dc_trusted_path, which is what set the variable. Both twins run their own
+# settings and state block and the real dc_stage_parent; a stub stat makes an
+# existing folder read as another account's on either host.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize("shell", ["sh", "bash"])
+@pytest.mark.parametrize("case", ["missing", "untrusted"])
+def test_unix_wrapper_refuses_a_bad_custom_staging_dir_with_a_result(os_dir: str, shell: str, case: str, tmp_path: Path) -> None:
+    if shutil.which(shell) is None:
+        pytest.skip(f"{shell} is not installed")
+    validator = _schema_validator()
+    text = _text(MDM / os_dir / "defenseclaw-enterprise.sh")
+    header = text[text.index("set -eu\n"):text.index("dc_platform() {")]
+    functions = "\n".join(_shell_function(text, name) for name in (
+        "dc_json_escape", "dc_print_result", "dc_fail_result", "dc_log", "dc_stat_uid", "dc_stat_mode",
+        "dc_acl_write_entry", "dc_trusted_path", "dc_stage_parent"))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stat = bin_dir / "stat"
+    stat.write_text("#!/bin/sh\necho 501\n", encoding="utf-8")  # owned by another account
+    stat.chmod(0o755)
+    staging = tmp_path / "mdm-stage"
+    if case == "untrusted":
+        staging.mkdir()
+    script = f"""{header}
+PATH='{bin_dir}':$PATH
+DC_STAGING_DIR='{staging}'
+{functions}
+dc_stage_parent
+echo staged
+"""
+    result = subprocess.run([shell, "-c", script], capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"}, timeout=30)
+    assert result.returncode == 1 and result.stderr == "", (result.stdout, result.stderr)
+    documents = [line for line in result.stdout.splitlines() if line.strip()]
+    assert len(documents) == 1, result.stdout
+    document = json.loads(documents[0])
+    assert not sorted(validator.iter_errors(document), key=str), document
+    assert document["exit_code"] == 1 and document["platform"] == ("darwin" if os_dir == "macos" else "linux")
+    assert [e["code"] for e in document["errors"]] == ["mdm_staging_untrusted"], document
+    message = document["errors"][0]["message"]
+    if case == "missing":
+        assert f"the staging folder {staging} does not exist" in message and "mkdir -m 0700" in message, message
+    else:
+        assert f"the staging folder {staging} is not a root-owned directory that only root can write" in message, message
+
 
 # GAP-0752: on a CIS host (/tmp and /var/tmp noexec) the payload's gateway
 # could not run from the wrapper's /var/tmp staging folder, and the result was
@@ -784,7 +2144,9 @@ def test_linux_wrapper_layout_reads_the_result_the_postinstall_writes(os_dir: st
     # back to mdm_binaries_damaged (GAP-0108).
     postinstall = _text(ROOT / "packaging" / "linux" / "postinstall.sh")
     state = re.findall(r"^state=(\S+)$", postinstall, re.MULTILINE)
-    written = set(re.findall(r'>"\$state/([^"]+\.json)"', postinstall))
+    # The result is written to a temporary file and renamed into place
+    # (w4-unix-obs: a full disk never erases the last result).
+    written = set(re.findall(r'(?:>|mv -fT "\$result_tmp" )"\$state/([^"]+\.json)"', postinstall))
     assert len(state) == 1 and len(written) == 1, (state, written)
     expected = f"{state[0]}/{written.pop()}"
     assert expected == "/var/lib/defenseclaw-enterprise/last-package-result.json"
@@ -853,6 +2215,105 @@ echo "version=$(dc_json_field "$doc" installed_version)"
         assert result.stdout.splitlines() == ["installed", "version=1.2.3"], (shell, result.stdout)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("platform", ["linux", "macos"])
+def test_unix_detect_health_requires_coverage_not_host_hardening(tmp_path: Path, platform: str) -> None:
+    # A default Ubuntu 24.04 managed install reports verify ok and
+    # coverage_complete true with security_complete false (agent hook-process
+    # limits, open user namespace and ptrace routes). --require-healthy read it
+    # unhealthy, so an MDM gating on it reinstalled in a loop (cowork-1-0-8
+    # GAP-0021). Health keys on coverage and excuses only those host-hardening
+    # reasons, printing them as a warning; any other security_complete reason
+    # (sessions needing a restart, a pending guardian repair, an unreadable
+    # enrolled home, an unprotected agent) or a note it cannot read is
+    # unhealthy. --require-security-complete keeps the strict check.
+    gateway = tmp_path / "gateway"
+    state = tmp_path / "verify.json"
+    gateway.write_text(
+        '#!/bin/sh\ncase "$*" in\n'
+        f'  "enterprise {platform} status --json") echo \'{{"installed":true,"installed_version":"9.9.9"}}\' ;;\n'
+        f'  "enterprise {platform} verify --json") cat "{state}" ;;\n'
+        '  *) exit 9 ;;\nesac\n',
+        encoding="ascii",
+    )
+    gateway.chmod(0o755)
+    source = _text(MDM / platform / "detect.sh")
+    source = source.replace('[ "$(dc_platform)" = "$DC_SCRIPT_OS" ]', '[ 1 = 1 ]', 1)
+    source = source.replace('[ "$(id -u)" = 0 ]', '[ 1 = 1 ]', 1)
+    source = source.replace('dc_trusted_path "$gateway" ||', '[ -f "$gateway" ] ||', 1)
+    original = ("gateway=/opt/defenseclaw/bin/defenseclaw-gateway group=linux" if platform == "linux"
+                else "gateway=/opt/cisco/defenseclaw/bin/defenseclaw-gateway group=macos")
+    assert original in source
+    source = source.replace(original, f'gateway="{gateway}" group={platform}', 1)
+    detect = tmp_path / "detect.sh"
+    detect.write_text(source, encoding="ascii")
+    note = "security_complete is false because of: hook_process_fail_open, unprivileged_ptrace; coverage_complete is true"
+    stock = {"ok": True, "coverage_complete": True, "security_complete": False,
+             "warnings": [{"code": "unprivileged_ptrace", "message": "standard users can trace \"their\" processes"},
+                          {"code": "security_incomplete", "message": note + "; each warning above says what to do"}]}
+    uncovered = {"ok": True, "coverage_complete": False, "security_complete": False, "warnings": [
+        {"code": "security_incomplete", "message": "security_complete is false because of: hook_contract_unverified; "
+                                                    "coverage_complete is false because of: hook_contract_unverified"}]}
+    complete = {"ok": True, "coverage_complete": True, "security_complete": True, "warnings": []}
+    failed = {"ok": False, "coverage_complete": True, "security_complete": False, "errors": [{"code": "verify"}]}
+
+    def _note(message: str) -> dict:
+        return {"ok": True, "coverage_complete": True, "security_complete": False,
+                "warnings": [{"code": "security_incomplete", "message": message + "; each warning above says what to do"}]}
+
+    # Every host-hardening reason at once (a stock Ubuntu 24.04 host).
+    hardening_note = ("security_complete is false because of: hook_process_fail_open, unprivileged_user_namespaces, "
+                      "unprivileged_ptrace; coverage_complete is true")
+    hardening = _note(hardening_note)
+    cases = (
+        (stock, ["--require-healthy", "--format", "value"], 0, "9.9.9\n", "warning: " + note + "; run: "),
+        (stock, ["--require-healthy"], 0, "DefenseClaw Enterprise 9.9.9\n", "warning: " + note + "; run: "),
+        (stock, ["--require-security-complete", "--format", "value"], 0, "unhealthy\n", ""),
+        (stock, ["--require-security-complete"], 1, "", "incomplete security (" + note + ")"),
+        (uncovered, ["--require-healthy", "--format", "value"], 0, "unhealthy\n", ""),
+        (uncovered, ["--require-healthy"], 1, "", "incomplete coverage (security_complete is false because of: hook_contract_unverified"),
+        (failed, ["--require-healthy", "--format", "value"], 0, "unhealthy\n", ""),
+        (complete, ["--require-security-complete", "--format", "value"], 0, "9.9.9\n", None),
+        (complete, ["--require-healthy"], 0, "DefenseClaw Enterprise 9.9.9\n", None),
+        (hardening, ["--require-healthy"], 0, "DefenseClaw Enterprise 9.9.9\n", "warning: " + hardening_note + "; run: "),
+        (hardening, ["--require-healthy", "--format", "jamf"], 0, "<result>9.9.9</result>\n", "warning: " + hardening_note),
+        # No security_incomplete note: detect.sh cannot tell why, so unhealthy.
+        ({"ok": True, "coverage_complete": True, "security_complete": False},
+         ["--require-healthy", "--format", "jamf"], 0, "<result>unhealthy</result>\n", ""),
+        ({"ok": True, "coverage_complete": True, "security_complete": False},
+         ["--require-healthy"], 1, "", "beyond host hardening (security_complete is false); run: "),
+    )
+    for code_name in ("agent_sessions_restart_required", "guardian_repair_pending", "enrolled_home_unavailable",
+                      "agent_unprotected", "the sensor helper is not ready", "unprivileged_ptrace and the errors above"):
+        other = f"security_complete is false because of: hook_process_fail_open, {code_name}; coverage_complete is true"
+        document = _note(other)
+        cases += (
+            (document, ["--require-healthy"], 1, "", "incomplete security beyond host hardening (" + other + "); run: "),
+            (document, ["--require-healthy", "--format", "value"], 0, "unhealthy\n", ""),
+        )
+    for malformed in ("security_complete is false because of: ; coverage_complete is true",
+                      "security_complete is false because of: unprivileged_ptrace,, hook_process_fail_open; coverage_complete is true",
+                      "security_complete is false because of: unprivileged_ptrace",
+                      "security_complete is false because of: unprivileged_ptrace; coverage_complete is false because of: x"):
+        cases += ((_note(malformed), ["--require-healthy", "--format", "value"], 0, "unhealthy\n", ""),)
+    for document, args, code, stdout, stderr in cases:
+        state.write_text(json.dumps(document, indent=2), encoding="ascii")
+        result = subprocess.run(["sh", str(detect), *args], capture_output=True, text=True)
+        assert (result.returncode, result.stdout) == (code, stdout), (platform, args, document, result)
+        if stderr is None:
+            assert result.stderr == "", (platform, args, result.stderr)
+        else:
+            assert stderr in result.stderr and "each warning above" not in result.stderr, (platform, args, result.stderr)
+    # DC_REQUIRE_SECURITY_COMPLETE=1 in the settings block, no flag: strict.
+    strict = tmp_path / "detect-strict.sh"
+    assert "\nDC_REQUIRE_SECURITY_COMPLETE=0 " in source
+    strict.write_text(source.replace("\nDC_REQUIRE_SECURITY_COMPLETE=0 ", "\nDC_REQUIRE_SECURITY_COMPLETE=1 ", 1), encoding="ascii")
+    state.write_text(json.dumps(hardening, indent=2), encoding="ascii")
+    result = subprocess.run(["sh", str(strict)], capture_output=True, text=True)
+    assert (result.returncode, result.stdout) == (1, ""), (platform, result)
+    assert "incomplete security (" + hardening_note + ")" in result.stderr, (platform, result.stderr)
+
+
 _NOT_READY = json.dumps(
     {
         "schema_version": 1, "action": "verify", "ok": False, "exit_code": 1, "mode": "consume", "ready_for": "enforce",
@@ -912,42 +2373,339 @@ def test_unix_detect_requires_tetragon_readiness_in_each_format(tmp_path: Path) 
         assert (ready.returncode, ready.stdout) == (0, "ready\n"), shell
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
-def test_unix_wrapper_restores_the_trust_anchor_file_after_a_failed_apply(tmp_path: Path) -> None:
-    # The wrapper installs the anchor file before the bundle apply; a failed
-    # apply puts back the file it replaced (or removes the one it added), and
-    # an identical file is not rewritten.
+_ANCHORS_FUNCTIONS = ("dc_sha256", "dc_anchors_dir", "dc_anchors_verb", "dc_run_anchors_verb", "dc_put_anchors",
+                      "dc_install_anchors", "dc_restore_anchors")
+# The installed gateway, as the wrapper sees it: --version-json, and
+# `enterprise bundle anchors install` installing STUB_DEST (or printing
+# STUB_REPLY and exiting STUB_EXIT). Each call and the mode of the file
+# --file names go to STUB_LOG.
+_STUB_GATEWAY = """#!/bin/sh
+printf '%s\\n' "$*" >>"$STUB_LOG"
+if [ "$1" = --version-json ]; then
+    [ "$STUB_VERSION" != fail ] || { echo 'Error: unknown flag: --version-json' >&2; exit 1; }
+    printf '%s\\n' "$STUB_VERSION"
+    exit 0
+fi
+[ "$1 $2 $3 $4 $5" = "enterprise bundle anchors install --file" ] && [ "$7 $8 $9" = "--lock-wait 10m --json" ] || exit 2
+ls -l "$6" | cut -c1-10 >>"$STUB_LOG"
+if [ -n "${STUB_REPLY:-}" ]; then
+    cat "$STUB_REPLY"
+    echo "${STUB_STDERR:-}" >&2
+    exit "$STUB_EXIT"
+fi
+if [ -f "$STUB_DEST" ] && cmp -s "$6" "$STUB_DEST"; then
+    result=unchanged
+elif [ -f "$STUB_DEST" ]; then
+    result=replaced
+else
+    result=installed
+fi
+[ "$result" = unchanged ] || { cp "$6" "$STUB_DEST"; chmod 0644 "$STUB_DEST"; }
+printf '{\\n  "schema_version": 1,\\n  "command": "anchors install",\\n  "ok": true,\\n  "result": "%s",\\n  "anchors": "%s",\\n  "warnings": [],\\n  "errors": []\\n}\\n' "$result" "$STUB_DEST"
+"""
+_VERSION_CONTRACT = ('{"schema_version":1,"name":"defenseclaw-gateway","version":"1.0.3","commit":"0123456789",'
+                     '"built":"2026-10-30T18:00:00Z","management_contract":1}')
+# What 1.0.2 and earlier print: no management_contract member.
+_VERSION_BEFORE = '{"schema_version":1,"name":"defenseclaw-gateway","version":"1.0.2","commit":"0123456789","built":"x"}'
+
+
+def _anchors_harness(tmp_path: Path, body: str) -> tuple[Path, Path, Path, str]:
+    """The wrapper's anchor functions with a stub gateway; returns stage, anchors, log and the script."""
     text = _text(MDM / "linux" / "defenseclaw-enterprise.sh")
-    names = ("dc_sha256", "dc_put_anchors", "dc_install_anchors", "dc_restore_anchors")
-    functions = "\n".join(_shell_function(text, name) for name in names)
+    assert text.replace("DC_SCRIPT_OS=linux #", "DC_SCRIPT_OS=darwin #", 1) == _text(MDM / "macos" / "defenseclaw-enterprise.sh")
+    functions = "\n".join(_shell_function(text, name) for name in _ANCHORS_FUNCTIONS)
     (tmp_path / "etc").mkdir()
     stage = tmp_path / "stage"
     stage.mkdir()
+    gateway = tmp_path / "bin" / "defenseclaw-gateway"
+    gateway.parent.mkdir()
+    gateway.write_text(_STUB_GATEWAY, encoding="utf-8")
+    gateway.chmod(0o755)
+    anchors = tmp_path / "etc" / "trust" / "bundle-anchors.json"
+    script = f"""DC_SCRIPT_OS=linux DC_STAGE="{stage}" DC_ANCHORS="{anchors}" DC_GATEWAY="${{T_GATEWAY:-{gateway}}}"
+DC_EXIT_FAILURE=1 DC_TRUST_ACL="" DC_CHILD="" DC_ANCHORS_PREVIOUS="" DC_ANCHORS_CHANGED=0
+DC_ANCHORS_VERB=0 DC_ANCHORS_SOURCE="" DC_ANCHORS_RESULT=""
+dc_log() {{ :; }}
+dc_fail_result() {{ echo "fail $1 $2 $3"; exit "$1"; }}
+chown() {{ :; }}
+dc_trusted_path() {{ [ "${{T_UNTRUSTED:-0}}" = 0 ]; }}
+{functions}
+{body}
+"""
+    return stage, anchors, tmp_path / "gateway.log", script
+
+
+def _anchors_env(log: Path, anchors: Path, **values: str) -> dict[str, str]:
+    return dict(os.environ, STUB_LOG=str(log), STUB_DEST=str(anchors), **values)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("writer", ["command", "shell"])
+def test_unix_wrapper_restores_the_trust_anchor_file_after_a_failed_apply(tmp_path: Path, writer: str) -> None:
+    # The wrapper installs the anchor file before the bundle apply; a failed
+    # apply puts back the file it replaced (or removes the one it added), and
+    # an identical file is not rewritten. F7: an installed gateway with
+    # management_contract 1 does both with `enterprise bundle anchors
+    # install`; an older one gets the wrapper's own writer.
+    stage, anchors, log, script = _anchors_harness(tmp_path, """dc_install_anchors "$DC_STAGE/$1.json"
+echo "changed=$DC_ANCHORS_CHANGED verb=$DC_ANCHORS_VERB"
+[ "$2" = keep ] || dc_restore_anchors""")
     for name, body in (("old", '{"v": 1}'), ("new", '{"v": 2}')):
         (stage / f"{name}.json").write_text(body, encoding="utf-8")
-    anchors = tmp_path / "etc" / "trust" / "bundle-anchors.json"
-    script = f'''DC_SCRIPT_OS=linux DC_STAGE="{stage}" DC_ANCHORS="{anchors}" DC_TRUST_ACL=""
-DC_ANCHORS_PREVIOUS="" DC_ANCHORS_CHANGED=0
-dc_log() {{ :; }}
-dc_fail_result() {{ echo "fail $2"; exit "$1"; }}
-chown() {{ :; }}
-dc_trusted_path() {{ :; }}
-{functions}
-dc_install_anchors "$DC_STAGE/$1.json"
-echo "changed=$DC_ANCHORS_CHANGED"
-[ "$2" = keep ] || dc_restore_anchors
-'''
+    version = _VERSION_CONTRACT if writer == "command" else _VERSION_BEFORE
+    verb = int(writer == "command")
 
-    def run(name: str, then: str) -> str:
-        result = subprocess.run(["sh", "-c", script, "t", name, then], capture_output=True, text=True, timeout=10)
+    def run(name: str, then: str) -> tuple[str, list[str]]:
+        log.unlink(missing_ok=True)
+        result = subprocess.run(["sh", "-c", script, "t", name, then], capture_output=True, text=True, timeout=10,
+                                env=_anchors_env(log, anchors, STUB_VERSION=version))
         assert result.returncode == 0, result.stdout + result.stderr
-        return result.stdout
+        return result.stdout, log.read_text(encoding="utf-8").splitlines()
 
-    assert run("new", "restore") == "changed=1\n" and not anchors.exists()
-    assert run("old", "keep") == "changed=1\n" and anchors.read_text() == '{"v": 1}'
+    def installs(calls: list[str]) -> list[str]:
+        return [call.split(" --file ")[1] for call in calls if call.startswith("enterprise bundle anchors install")]
+
+    out, calls = run("new", "restore")
+    assert out == f"changed=1 verb={verb}\n" and not anchors.exists()
+    out, calls = run("old", "keep")
+    assert out == f"changed=1 verb={verb}\n" and anchors.read_text() == '{"v": 1}'
     assert oct(anchors.stat().st_mode & 0o777) == "0o644" and oct(anchors.parent.stat().st_mode & 0o777) == "0o755"
-    assert run("old", "restore") == "changed=0\n" and anchors.read_text() == '{"v": 1}'
-    assert run("new", "restore") == "changed=1\n" and anchors.read_text() == '{"v": 1}'
+    out, calls = run("old", "restore")
+    assert out == f"changed=0 verb={verb}\n" and anchors.read_text() == '{"v": 1}'
+    out, calls = run("new", "restore")
+    assert out == f"changed=1 verb={verb}\n" and anchors.read_text() == '{"v": 1}'
+    assert sorted(p.name for p in anchors.parent.iterdir()) == ["bundle-anchors.json"]
+    if writer == "shell":
+        assert calls == ["--version-json"]
+        return
+    # The install and the restore: a private root-only copy in the trust
+    # folder (the command refuses a source in a sticky or linked folder),
+    # with the contract's argv; the copy is gone afterwards.
+    source = f"{anchors.parent}/.bundle-anchors.json.mdm-source-"
+    assert calls[0] == "--version-json" and len(installs(calls)) == 2, calls
+    for call in installs(calls):
+        assert call.startswith(source) and call.endswith(" --lock-wait 10m --json"), call
+    assert [line for line in calls if re.fullmatch(r"-[rwx-]{9}", line)] == ["-rw-------", "-rw-------"], calls
+
+
+# A lifecycle result that changed nothing (GAP-0034 tests).
+_NOOP_ENSURE_RESULT = {
+    "schema_version": 2, "ok": True, "action": "ensure", "noop": True, "noop_reason": "already_applied",
+    "profile": "standalone", "platform": "linux", "product_version": "1.0.3", "installed_version": "1.0.3",
+    "installed": True, "transaction_pending": False, "services": [],
+    "readiness": {"gateway": True, "guardian": True, "enumerator": True, "sensor_helper": True},
+    "inspection": {"local": "active", "ai_defense": "disabled"}, "machine_policy": {},
+    "enrollment": {"targets": 0, "pending": 0, "failed": 0, "exempt": 0},
+    "coverage_complete": True, "security_complete": True, "errors": [],
+}
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("reason", ["already_applied", "compliant"])
+def test_unix_wrapper_result_reports_the_trust_anchors_it_installed(tmp_path: Path, reason: str) -> None:
+    # GAP-0034 (twin of the Windows finding): a kit run that installed other
+    # trust anchors, then found the confirmed bundle already applied (or,
+    # without a bundle, the deployment compliant), printed the lifecycle's
+    # "noop": true. It changed the device, so it is not a no-op, and changes
+    # names the anchor file. An unchanged anchor file keeps the no-op.
+    text = _text(MDM / "linux" / "defenseclaw-enterprise.sh")
+    functions = "\n".join(_shell_function(text, name) for name in ("dc_json_escape", "dc_annotate_anchors_step"))
+    anchors = tmp_path / "trust" / "bundle-anchors.json"
+    base = dict(_NOOP_ENSURE_RESULT, noop_reason=reason)
+    validator = _schema_validator()
+
+    def run(changed: str, previous: str, changes: list[str] | None = None) -> dict:
+        document = dict(base)
+        if changes is not None:
+            document["changes"] = changes
+        document["exit_code"] = 0
+        result = tmp_path / "result.json"
+        result.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        script = f"""DC_STAGE="{tmp_path}" DC_RESULT="{result}" DC_ANCHORS="{anchors}"
+DC_ANCHORS_CHANGED={changed} DC_ANCHORS_PREVIOUS="{previous}"
+{functions}
+dc_annotate_anchors_step
+cat "$DC_RESULT"
+"""
+        completed = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=10)
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        out = json.loads(completed.stdout)
+        assert not sorted(validator.iter_errors(out), key=str), out
+        return out
+
+    rotated = run("1", str(tmp_path / "previous.json"))
+    assert rotated["noop"] is False and "noop_reason" not in rotated, rotated
+    assert rotated["changes"] == [f"replaced the trust anchors in {anchors}"], rotated
+    first = run("1", "", changes=["restarted the gateway"])
+    assert first["noop"] is False and "noop_reason" not in first, first
+    assert first["changes"] == [f"installed trust anchors in {anchors}", "restarted the gateway"], first
+    unchanged = run("0", "")
+    assert unchanged["noop"] is True and unchanged["noop_reason"] == reason and "changes" not in unchanged, unchanged
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize("previous", [False, True])
+@pytest.mark.parametrize("applied", [True, False])
+def test_unix_wrapper_main_keeps_and_reports_the_anchors_of_a_confirmed_apply(
+    tmp_path: Path, os_dir: str, previous: bool, applied: bool
+) -> None:
+    # dc_main itself, in both copies, with a bundle and a trust anchor file:
+    # after the bundle apply succeeds the run commits the anchors (the EXIT
+    # trap's anchor restore must not undo them) and the result still names
+    # them although the apply found the bundle already applied (GAP-0034).
+    # A failed apply puts back the as-found file, which shows the restore is
+    # wired to the same run.
+    text = _text(MDM / os_dir / "defenseclaw-enterprise.sh").rstrip()
+    entry = '\ndc_main "$@"'
+    assert text.endswith(entry)
+    gateway = tmp_path / "bin" / "defenseclaw-gateway"
+    gateway.parent.mkdir()
+    apply_stub = (
+        'if [ "$1 $2 $3" = "enterprise bundle apply" ]; then\n'
+        '    printf \'%s\\n\' "$*" >>"$STUB_LOG"\n'
+        '    cat "$STUB_APPLY"\n'
+        '    exit "$STUB_APPLY_EXIT"\n'
+        'fi\n'
+    )
+    gateway.write_text(_STUB_GATEWAY.replace("#!/bin/sh\n", "#!/bin/sh\n" + apply_stub, 1), encoding="utf-8")
+    gateway.chmod(0o755)
+    anchors = tmp_path / "etc" / "trust" / "bundle-anchors.json"
+    staged_anchors = tmp_path / "new-anchors.json"
+    staged_anchors.write_text('{"v": 2}', encoding="utf-8")
+    bundle = tmp_path / "policy.dcbundle"
+    bundle.write_bytes(b"signed bundle stand-in")
+    stage_parent = tmp_path / "stage"
+    stage_parent.mkdir()
+    document = dict(_NOOP_ENSURE_RESULT, exit_code=0) if applied else dict(
+        _NOOP_ENSURE_RESULT, ok=False, noop=False, noop_reason=None, exit_code=1,
+        errors=[{"code": "bundle_apply_failed", "message": "the bundle did not apply"}])
+    document = {key: value for key, value in document.items() if value is not None}
+    reply = tmp_path / "apply.json"
+    reply.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    log = tmp_path / "gateway.log"
+    # Stand-ins for the root, platform and trust steps; the anchor install,
+    # the bundle apply, the annotation and the EXIT trap run as shipped.
+    overrides = f"""
+dc_layout() {{
+    DC_GATEWAY='{gateway}'
+    DC_ANCHORS='{anchors}'
+    DC_PACKAGE_RESULT='{tmp_path}/last-package-result.json'
+    DC_OS_GROUP=linux
+    DC_LOG=''
+}}
+dc_parse_args() {{ DC_BUNDLE_FILE='{bundle}'; DC_TRUST_ANCHOR_FILE='{staged_anchors}'; }}
+dc_platform() {{ echo "$DC_SCRIPT_OS"; }}
+dc_validate_args() {{ :; }}
+id() {{ echo 0; }}
+dc_stage_parent() {{ DC_STAGE_PARENT='{stage_parent}'; }}
+dc_sweep_stages() {{ :; }}
+dc_stat_uid() {{ echo 0; }}
+dc_trusted_path() {{ return 0; }}
+dc_binaries_damaged() {{ return 1; }}
+chown() {{ :; }}
+dc_main
+"""
+    script = text[: -len(entry)] + "\n" + overrides
+    env = _anchors_env(log, anchors, STUB_VERSION=_VERSION_CONTRACT, STUB_APPLY=str(reply),
+                       STUB_APPLY_EXIT="0" if applied else "1")
+    validator = _schema_validator()
+    for shell in ("sh", "bash"):
+        log.unlink(missing_ok=True)
+        shutil.rmtree(anchors.parent.parent, ignore_errors=True)
+        anchors.parent.mkdir(parents=True)
+        if previous:
+            anchors.write_text('{"v": 1}', encoding="utf-8")
+        result = subprocess.run([shell, "-c", script], env=env, capture_output=True, text=True, timeout=30)
+        out = json.loads(result.stdout)
+        assert not sorted(validator.iter_errors(out), key=str), (shell, out)
+        calls = log.read_text(encoding="utf-8").splitlines()
+        installs = [call for call in calls if call.startswith("enterprise bundle anchors install")]
+        applies = [call for call in calls if call.startswith("enterprise bundle apply")]
+        assert len(applies) == 1 and applies[0].startswith(f"enterprise bundle apply --bundle {stage_parent}/"), (shell, calls)
+        assert not list(stage_parent.iterdir()), (shell, result.stderr)
+        if not applied:
+            assert result.returncode == 1 and out["ok"] is False, (shell, result.stdout, result.stderr)
+            if previous:
+                assert anchors.read_text(encoding="utf-8") == '{"v": 1}' and len(installs) == 2, (shell, calls)
+            else:
+                assert not anchors.exists() and len(installs) == 1, (shell, calls)
+            continue
+        assert result.returncode == 0, (shell, result.stdout, result.stderr)
+        verb = "replaced the trust anchors in" if previous else "installed trust anchors in"
+        assert out["noop"] is False and "noop_reason" not in out, (shell, out)
+        assert out["changes"] == [f"{verb} {anchors}"], (shell, out)
+        # Committed: one install, no restore, and the new file in place.
+        assert len(installs) == 1, (shell, calls)
+        assert anchors.read_text(encoding="utf-8") == '{"v": 2}', shell
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize(("version", "untrusted", "missing", "expected"), [
+    (_VERSION_CONTRACT, False, False, "verb"),
+    (_VERSION_CONTRACT.replace('"management_contract":1', '"management_contract":2'), False, False, "verb"),
+    (_VERSION_CONTRACT.replace(':1}', ': 1 }'), False, False, "verb"),
+    (_VERSION_BEFORE, False, False, "shell"),
+    (_VERSION_CONTRACT.replace('"management_contract":1', '"management_contract":0'), False, False, "shell"),
+    ("fail", False, False, "shell"),
+    ("not json", False, False, "shell"),
+    (_VERSION_CONTRACT, True, False, "shell"),
+    (_VERSION_CONTRACT, False, True, "shell"),
+])
+def test_unix_wrapper_probes_the_installed_gateway_for_the_anchors_command(
+    tmp_path: Path, version: str, untrusted: bool, missing: bool, expected: str
+) -> None:
+    # The probe is --version-json (management_contract 1 or later) on the
+    # installed, root-owned gateway; a build without the member, an older
+    # build without the flag, an untrusted or missing binary get the writer.
+    _, anchors, log, script = _anchors_harness(tmp_path, "if dc_anchors_verb; then echo verb; else echo shell; fi")
+    env = _anchors_env(log, anchors, STUB_VERSION=version, T_UNTRUSTED=str(int(untrusted)))
+    if missing:
+        env["T_GATEWAY"] = str(tmp_path / "bin" / "absent")
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=10, env=env)
+    assert (result.returncode, result.stdout) == (0, expected + "\n"), result.stderr
+
+
+def _anchors_examples() -> list[dict]:
+    return json.loads(_text(MDM / "contract" / "anchors-install.schema.json"))["examples"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("case", ["anchor_invalid", "anchor_insecure", "lifecycle_busy", "no_json", "crash"])
+def test_unix_wrapper_reports_an_anchors_command_refusal(tmp_path: Path, case: str) -> None:
+    # A refusal of `enterprise bundle anchors install` is mdm_anchor_install_failed
+    # with the command's exit code (1 refused, 75 busy, anything else 1) and
+    # its errors[0].code, or its stderr when it printed no JSON. Nothing is
+    # written: the installed file stays, the private copy is removed, and the
+    # wrapper does not fall back to its own writer.
+    stage, anchors, log, script = _anchors_harness(tmp_path, 'dc_install_anchors "$DC_STAGE/new.json"; echo installed')
+    (stage / "new.json").write_text('{"v": 2}', encoding="utf-8")
+    anchors.parent.mkdir()
+    anchors.write_text('{"v": 1}', encoding="utf-8")
+    refusals = {example["errors"][0]["code"]: example for example in _anchors_examples() if not example["ok"]}
+    busy = dict(refusals["anchor_invalid"], errors=[{"code": "lifecycle_busy", "message": "another lifecycle run holds the lock"}])
+    reply, code, stderr = {
+        "anchor_invalid": (refusals["anchor_invalid"], 1, ""),
+        "anchor_insecure": (refusals["anchor_insecure"], 1, ""),
+        "lifecycle_busy": (busy, 75, ""),
+        "no_json": (None, 1, "Error: unknown flag: --lock-wait"),
+        "crash": (None, 3, "panic: boom"),
+    }[case]
+    reply_file = tmp_path / "reply.json"
+    reply_file.write_text(json.dumps(reply, indent=2) + "\n" if reply else "", encoding="utf-8")
+    env = _anchors_env(log, anchors, STUB_VERSION=_VERSION_CONTRACT, STUB_REPLY=str(reply_file),
+                       STUB_EXIT=str(code), STUB_STDERR=stderr)
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=10, env=env)
+    prefix = "enterprise bundle anchors install did not install the trust anchor file"
+    expected = {
+        "anchor_invalid": (1, f"{prefix} (anchor_invalid): {refusals['anchor_invalid']['errors'][0]['message']}"),
+        "anchor_insecure": (1, f"{prefix} (anchor_insecure): {refusals['anchor_insecure']['errors'][0]['message']}"),
+        "lifecycle_busy": (75, f"{prefix} (lifecycle_busy): another lifecycle run holds the lock"),
+        "no_json": (1, f"{prefix}: Error: unknown flag: --lock-wait"),
+        "crash": (1, f"{prefix}: panic: boom"),
+    }[case]
+    assert (result.returncode, result.stdout.strip()) == (expected[0], f"fail {expected[0]} mdm_anchor_install_failed {expected[1]}")
+    assert anchors.read_text() == '{"v": 1}'
     assert sorted(p.name for p in anchors.parent.iterdir()) == ["bundle-anchors.json"]
 
 
@@ -1336,7 +3094,7 @@ dc_trusted_path() {{ :; }}; dc_binaries_damaged() {{ return 1; }}
 dc_stage_source() {{ :; }}; dc_install_package() {{ call package; }}
 dc_run_lifecycle_retry() {{ shift; call "$@"; }}
 dc_install_anchors() {{ call anchors; }}; dc_restore_anchors() {{ call restore; }}
-dc_annotate_package_step() {{ :; }}; dc_emit_result() {{ :; }}
+dc_annotate_package_step() {{ :; }}; dc_annotate_anchors_step() {{ :; }}; dc_emit_result() {{ :; }}
 dc_fail_result() {{ call "fail $2"; exit "$1"; }}
 dc_cleanup() {{ rm -rf "$DC_STAGE"; }}; dc_stop_child() {{ :; }}
 dc_main
@@ -1482,7 +3240,8 @@ dc_report 1 1.2.3 ""
                 status = run(fmt, name, "status")
                 assert (status.returncode, status.stdout) == (0, f"{out}\n"), (shell, name, fmt)
     detect = str(MDM / _host_os_dir() / "detect.sh")
-    for args in (["--require-bundle", "b-lower"], ["--require-bundle", ""], ["--bundle-status", "--require-healthy"]):
+    for args in (["--require-bundle", "b-lower"], ["--require-bundle", ""], ["--bundle-status", "--require-healthy"],
+                 ["--bundle-status", "--require-security-complete"]):
         bad = _run([detect, *args])
         assert bad.returncode == 2 and bad.stderr, args
     if os.geteuid() != 0:
@@ -1947,6 +3706,44 @@ def test_signing_helpers_refuse_without_credentials(tmp_path: Path) -> None:
             subprocess.run(["shellcheck", "-S", "warning", str(path)], check=True)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the release jobs run the signing helpers with bash on Linux and macOS")
+@pytest.mark.skipif(shutil.which("openssl") is None, reason="needs openssl")
+def test_signing_helper_prints_the_pfx_thumbprint(tmp_path: Path) -> None:
+    # #1280: build-setup.sh takes the signer pin as --expected-signer-sha256;
+    # --thumbprint prints it from the PFX without signing anything.
+    key, cert, pfx = tmp_path / "key.pem", tmp_path / "cert.pem", tmp_path / "test.pfx"
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                    "-subj", "/CN=DefenseClaw thumbprint test", "-keyout", str(key), "-out", str(cert)],
+                   check=True, capture_output=True)
+    subprocess.run(["openssl", "pkcs12", "-export", "-inkey", str(key), "-in", str(cert), "-out", str(pfx),
+                    "-passout", "pass:"], check=True, capture_output=True)
+    der = subprocess.run(["openssl", "x509", "-in", str(cert), "-outform", "DER"], check=True, capture_output=True).stdout
+    result = subprocess.run(["bash", str(MDM / "signing" / "authenticode-sign.sh"), "--thumbprint"],
+                            capture_output=True, text=True,
+                            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "AUTHENTICODE_PFX": str(pfx)})
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == hashlib.sha256(der).hexdigest()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the release jobs run build-setup.sh with bash on Linux")
+def test_signed_standalone_build_runs_on_linux_with_osslsigncode(tmp_path: Path) -> None:
+    # #1280: the signed channels no longer need a Windows build host; on Linux
+    # and macOS they need osslsigncode, checked before any build work.
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    (tools / "uname").symlink_to(shutil.which("uname"))
+    builder = ROOT / "packaging" / "windows" / "standalone" / "build-setup.sh"
+    sign = MDM / "signing" / "authenticode-sign.sh"
+    result = subprocess.run(
+        [shutil.which("bash"), str(builder), "--version", "1.0.0", "--sign-command", str(sign),
+         "--signing-type", "DEV", "--expected-signer-sha256", "ab" * 32],
+        capture_output=True, text=True, env={"PATH": str(tools)},
+    )
+    assert result.returncode == 1, result.stderr
+    assert "need osslsigncode 2.5 or later" in result.stderr
+    assert "Windows build host" not in result.stderr
+
+
 # The macOS app job needs these five for every release (release.yaml).
 _MACOS_APP_SECRETS = {
     "MACOS_DEVELOPER_ID_P12_BASE64": "cDEy",
@@ -2056,3 +3853,489 @@ def test_standalone_installer_binds_native_output_to_the_process_deadline() -> N
     assert "native process output timed out" in native
     assert "DC_LIFECYCLE_PHASE:" in module
     assert "transaction quiesce stop services" in module
+
+
+# #1298: after a Linux MDM purge an empty root-only /var/lib/defenseclaw-mdm
+# (the wrapper's staging folder) stayed. A purge removes it when it is empty
+# and root's own directory; anything else stays.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize(
+    ("purge", "platform", "owner", "content", "removed"),
+    [
+        ("1", "linux", "0", "", True),
+        ("1", "linux", "0", "defenseclaw-mdm.abc123", False),
+        ("0", "linux", "0", "", False),
+        ("1", "darwin", "0", "", True),
+        ("1", "linux", "501", "", False),
+        ("1", "linux", "0", "symlink", False),
+    ],
+)
+def test_unix_uninstall_purge_removes_the_empty_staging_folder(
+    tmp_path: Path, purge: str, platform: str, owner: str, content: str, removed: bool
+) -> None:
+    function = _shell_function(_text(MDM / "linux" / "uninstall.sh"), "dc_remove_stage_parent")
+    parent = tmp_path / "defenseclaw-mdm"
+    if content == "symlink":
+        (tmp_path / "elsewhere").mkdir()
+        parent.symlink_to(tmp_path / "elsewhere")
+    else:
+        parent.mkdir(mode=0o700)
+        if content:
+            (parent / content).mkdir()
+    script = f"""DC_PURGE={purge}
+DC_SCRIPT_OS={platform}
+DC_KIT_STATE="{parent}"
+dc_log() {{ :; }}
+dc_stat_uid() {{ echo {owner}; }}
+{function}
+dc_remove_stage_parent
+"""
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert (not os.path.lexists(parent)) is removed
+    if content == "symlink":
+        assert (tmp_path / "elsewhere").is_dir()
+
+
+def test_unix_uninstall_removes_the_staging_folder_after_the_package_and_without_a_gateway() -> None:
+    text = _text(MDM / "linux" / "uninstall.sh")
+    assert text.count("\ndc_remove_stage_parent\n") + text.count("    dc_remove_stage_parent\n") == 2
+    # The journal goes first, so the purge finds the state folder empty.
+    assert text.count("dc_remove_rotation_journal\n    dc_remove_stage_parent\n") == 1
+    assert text.count("\ndc_remove_rotation_journal\ndc_remove_stage_parent\n") == 1
+    assert 'DC_KIT_STATE=/var/lib/defenseclaw-mdm' in text
+    assert "DC_KIT_STATE=/var/db/defenseclaw-mdm" in text
+    assert "DC_STAGE_PARENT=/var/lib/defenseclaw-mdm" in _text(MDM / "linux" / "defenseclaw-enterprise.sh")
+
+
+_OLD_GATEWAY = r"""#!/bin/sh
+printf '%s %s\n' "$(basename "$(dirname "$0")")" "$*" >>"$FAKE/calls"
+case "$*" in
+"enterprise secret remove"*)
+    if [ "$(basename "$(dirname "$0")")" = old ]; then
+        echo '{"schema_version":2,"ok":false,"errors":[{"code":"secret_change_failed","message":"the installed config still references credential ai-key"}]}'
+        exit 1
+    fi
+    rm -f "$SECRETS/ai-key"
+    echo '{"schema_version":2,"ok":true,"errors":[]}'
+    exit 0 ;;
+esac
+exit 0
+"""
+
+
+# R105 mgmt refix 1 (review R1-1): a 1.0.4 gateway ignores --undo-config on
+# Unix and refuses to remove a credential its installed config references,
+# so it cannot settle a rotation that added one. The ensure that delivers the
+# newer package or payload settles it with the gateway it brings, then goes
+# on; without a source the ensure stops and names that route.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize("channel", ["package", "payload", "none"])
+def test_unix_wrapper_settles_a_rotation_with_the_gateway_it_delivers(tmp_path: Path, os_dir: str, channel: str) -> None:
+    text = _text(MDM / os_dir / "defenseclaw-enterprise.sh").rstrip()
+    entry = '\ndc_main "$@"'
+    assert text.endswith(entry)
+    fake, secrets, journal, stage_parent = (tmp_path / name for name in ("fake", "secrets", "journal", "stage"))
+    for folder in (fake, secrets, journal, stage_parent):
+        folder.mkdir()
+    for name in ("old", "new"):
+        (tmp_path / name).mkdir()
+        gateway = tmp_path / name / "defenseclaw-gateway"
+        gateway.write_text(_OLD_GATEWAY, encoding="utf-8")
+        gateway.chmod(0o755)
+    installed = tmp_path / "bin"
+    installed.mkdir()
+    shutil.copy(tmp_path / "old" / "defenseclaw-gateway", installed / "defenseclaw-gateway")
+    # The installed gateway reports itself by folder name: "bin" is the 1.0.4 one until a package replaces it.
+    (installed / "defenseclaw-gateway").write_text(_OLD_GATEWAY.replace('"$(basename "$(dirname "$0")")"', '"$(cat "$FAKE/installed")"'), encoding="utf-8")
+    (fake / "installed").write_text("old", encoding="utf-8")
+    (secrets / "ai-key").write_text("new-key", encoding="utf-8")
+    rotated = hashlib.sha256(b"new-key").hexdigest()
+    (journal / "ai-key.entry").write_text(f"confirmed=none\nrotated={rotated}\nprevious=absent\nconfig={'c' * 64}\n", encoding="utf-8")
+    install = {
+        "package": 'printf new >"$FAKE/installed"; DC_CHANNEL_FLAG=--from-package',
+        "payload": f"DC_PAYLOAD_GATEWAY='{tmp_path / 'new' / 'defenseclaw-gateway'}'; DC_CHANNEL_FLAG=--payload='{tmp_path / 'new'}'",
+        "none": "echo unexpected; exit 9",
+    }[channel]
+    source = "" if channel == "none" else str(tmp_path / "source")
+    overrides = f"""
+dc_layout() {{
+    DC_GATEWAY='{installed / 'defenseclaw-gateway'}'
+    DC_SECRETS_DIR='{secrets}' DC_JOURNAL_DIR='{journal}' DC_INSTALLED_CONFIG='{tmp_path / 'config.yaml'}'
+    DC_ANCHORS='{tmp_path / 'anchors.json'}' DC_PACKAGE_RESULT='{tmp_path / 'package-result.json'}'
+    DC_OS_GROUP=linux DC_LOG='{tmp_path / 'kit.log'}'
+}}
+dc_parse_args() {{ DC_SOURCE='{source}'; }}
+dc_platform() {{ echo "$DC_SCRIPT_OS"; }}
+dc_validate_args() {{ :; }}
+id() {{ echo 0; }}
+dc_stage_parent() {{ DC_STAGE_PARENT='{stage_parent}'; }}
+dc_sweep_stages() {{ :; }}
+dc_stat_uid() {{ echo 0; }}
+dc_stage_source() {{ :; }}
+dc_install_package() {{ {install}; }}
+dc_trusted_path() {{ [ -x "$1" ]; }}
+dc_journal_ready() {{ [ -d "$DC_JOURNAL_DIR" ]; }}
+dc_binaries_damaged() {{ return 1; }}
+dc_run_lifecycle_retry() {{ printf 'lifecycle %s\\n' "$*" >>"$FAKE/calls"; return 0; }}
+dc_annotate_package_step() {{ :; }}
+dc_emit_result() {{ echo emitted; }}
+dc_main
+"""
+    env = {"PATH": "/usr/bin:/bin", "FAKE": str(fake), "SECRETS": str(secrets)}
+    result = subprocess.run(["sh", "-c", text[: -len(entry)] + "\n" + overrides], env=env, capture_output=True, text=True, timeout=30)
+    out = result.stdout + result.stderr
+    calls = (fake / "calls").read_text(encoding="utf-8").splitlines() if (fake / "calls").exists() else []
+    removes = [call.split()[0] for call in calls if " enterprise secret remove " in f" {call} "]
+    if channel == "none":
+        assert result.returncode == 1 and "mdm_secret_failed" in out, out
+        assert "deliver the package with --source" in out, out
+        assert removes == ["old"], calls
+        assert (journal / "ai-key.entry").exists() and (secrets / "ai-key").exists()
+        assert not any(call.startswith("lifecycle ") for call in calls), calls
+        return
+    assert result.returncode == 0 and "emitted" in out, (out, calls)
+    assert removes == ["new"], calls
+    assert not (journal / "ai-key.entry").exists() and not (secrets / "ai-key").exists(), out
+    lifecycle = [call for call in calls if call.startswith("lifecycle ")]
+    assert len(lifecycle) == 1 and " ensure " in lifecycle[0], calls
+
+
+# R105 mgmt refix 1 (review R1-2): every completed uninstall removes the
+# wrapper's credential rotation journal, overwriting each earlier credential
+# value it holds before removing it, so a purge also finds the state folder
+# empty and removes it (#1298 kept). A journal that is a link or not root's
+# own folder is left as it is.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize("case", ["journal", "link", "foreign"])
+def test_unix_uninstall_removes_the_rotation_journal(tmp_path: Path, os_dir: str, case: str) -> None:
+    text = _text(MDM / os_dir / "uninstall.sh")
+    functions = "\n".join(_shell_function(text, name) for name in ("dc_remove_rotation_journal", "dc_sweep_stages", "dc_remove_stage_parent"))
+    state = tmp_path / "defenseclaw-mdm"
+    state.mkdir(mode=0o700)
+    journal = state / "rotation"
+    target = journal if case != "link" else tmp_path / "elsewhere"
+    target.mkdir(mode=0o700)
+    if case == "link":
+        journal.symlink_to(target)
+    (target / "ai-key.value").write_text("old-secret-value\n", encoding="utf-8")
+    (target / "ai-key.entry").write_text("confirmed=none\n", encoding="utf-8")
+    copy = tmp_path / "copy-of-value"
+    os.link(target / "ai-key.value", copy)
+    owner = "501" if case == "foreign" else "0"
+    script = f"""set -eu
+DC_PURGE=1 DC_KIT_STATE="{state}" DC_LOG=""
+dc_log() {{ printf '%s\\n' "$1"; }}
+dc_stat_uid() {{ echo {owner}; }}
+{functions}
+dc_remove_rotation_journal
+dc_remove_stage_parent
+"""
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    if case == "journal":
+        assert not os.path.lexists(state), result.stdout
+        assert copy.read_bytes() == b"\0" * len("old-secret-value\n"), "the earlier credential value was not overwritten"
+    else:
+        assert "left " in result.stdout and "not a root-owned folder" in result.stdout, result.stdout
+        assert (target / "ai-key.value").read_text(encoding="utf-8") == "old-secret-value\n"
+        assert os.path.lexists(journal)
+
+
+def _resume_harness(tmp_path: Path, os_dir: str, *, installed: bool, trusted: bool, source: bool, before=None):
+    """Run dc_main as an ensure with one journal entry: a rotation that replaced old-key with new-key."""
+    text = _text(MDM / os_dir / "defenseclaw-enterprise.sh").rstrip()
+    entry = '\ndc_main "$@"'
+    assert text.endswith(entry)
+    fake, secrets, journal, stage_parent, bindir = (tmp_path / name for name in ("fake", "secrets", "journal", "stage", "bin"))
+    for folder in (fake, secrets, journal, stage_parent, bindir):
+        folder.mkdir(exist_ok=True)
+    (fake / "installed").write_text("installed", encoding="utf-8")
+    script = _OLD_GATEWAY.replace('"$(basename "$(dirname "$0")")"', '"$(cat "$FAKE/installed")"')
+    package = tmp_path / "pkg-gateway"
+    package.write_text(script, encoding="utf-8")
+    package.chmod(0o755)
+    gateway = bindir / "defenseclaw-gateway"
+    if installed:
+        shutil.copy(package, gateway)
+    (secrets / "ai-key").write_text("new-key", encoding="utf-8")
+    (journal / "ai-key.entry").write_text(
+        f"confirmed=none\nrotated={hashlib.sha256(b'new-key').hexdigest()}\nprevious=set\nconfig={'c' * 64}\n", encoding="utf-8")
+    (journal / "ai-key.value").write_text("old-key", encoding="utf-8")
+    trust = '[ -x "$1" ]' if trusted else '[ "$1" != "$DC_GATEWAY" ] && [ -x "$1" ]'
+    overrides = f"""
+dc_layout() {{
+    DC_GATEWAY='{gateway}'
+    DC_SECRETS_DIR='{secrets}' DC_JOURNAL_DIR='{journal}' DC_INSTALLED_CONFIG='{tmp_path / 'config.yaml'}'
+    DC_ANCHORS='{tmp_path / 'anchors.json'}' DC_PACKAGE_RESULT='{tmp_path / 'package-result.json'}'
+    DC_OS_GROUP=linux DC_LOG='{tmp_path / 'kit.log'}'
+}}
+dc_parse_args() {{ DC_SOURCE='{tmp_path / 'source' if source else ''}'; }}
+dc_platform() {{ echo "$DC_SCRIPT_OS"; }}
+dc_validate_args() {{ :; }}
+id() {{ echo 0; }}
+dc_stage_parent() {{ DC_STAGE_PARENT='{stage_parent}'; }}
+dc_sweep_stages() {{ :; }}
+dc_stat_uid() {{ echo 0; }}
+dc_stage_source() {{ :; }}
+dc_install_package() {{ cp '{package}' '{gateway}'; DC_CHANNEL_FLAG=--from-package; }}
+dc_trusted_path() {{ {trust}; }}
+dc_journal_ready() {{ [ -d "$DC_JOURNAL_DIR" ]; }}
+dc_binaries_damaged() {{ return 1; }}
+dc_run_lifecycle_retry() {{ printf 'lifecycle %s\\n' "$*" >>"$FAKE/calls"; return 0; }}
+dc_annotate_package_step() {{ :; }}
+dc_emit_result() {{ echo emitted; }}
+dc_main
+"""
+    if before is not None:
+        before()
+    env = {"PATH": "/usr/bin:/bin", "FAKE": str(fake), "SECRETS": str(secrets)}
+    result = subprocess.run(["sh", "-c", text[: -len(entry)] + "\n" + overrides], env=env, capture_output=True, text=True, timeout=60)
+    calls = (fake / "calls").read_text(encoding="utf-8").splitlines() if (fake / "calls").exists() else []
+    return result.stdout + result.stderr, result.returncode, calls, journal, secrets
+
+
+# GAP-1614: an installed gateway that dc_trusted_path refuses keeps the
+# journal entry and its earlier value (the only copy) and stops the ensure.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+def test_unix_wrapper_keeps_the_journal_for_an_untrusted_installed_gateway(tmp_path: Path, os_dir: str) -> None:
+    out, code, calls, journal, secrets = _resume_harness(tmp_path, os_dir, installed=True, trusted=False, source=False)
+    assert code == 1 and "mdm_not_installed" in out and "journal entry was kept" in out, out
+    assert (journal / "ai-key.entry").exists() and (journal / "ai-key.value").read_text(encoding="utf-8") == "old-key"
+    assert (secrets / "ai-key").read_text(encoding="utf-8") == "new-key"
+    assert not any(" enterprise secret " in f" {call} " or call.startswith("lifecycle ") for call in calls), calls
+
+
+# GAP-1614: only a run that found no gateway installed before it delivered
+# one (the deployment was removed outside the wrapper) retires the entry;
+# it never settles a stale entry against the fresh install.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+def test_unix_wrapper_retires_the_journal_of_a_removed_deployment(tmp_path: Path, os_dir: str) -> None:
+    out, code, calls, journal, _ = _resume_harness(tmp_path, os_dir, installed=False, trusted=True, source=True)
+    assert code == 0 and "emitted" in out, (out, calls)
+    assert not (journal / "ai-key.entry").exists() and not (journal / "ai-key.value").exists(), out
+    assert "no deployment was installed to put it back into" in (tmp_path / "kit.log").read_text(encoding="utf-8")
+    assert not any(" enterprise secret " in f" {call} " for call in calls), calls
+
+
+# GAP-1575: the settle of an earlier rotation runs only under the rotation
+# journal lock, as on Windows (rotation.lock): while another run holds it,
+# nothing is put back.
+@pytest.mark.skipif(os.name != "posix" or shutil.which("perl") is None, reason="POSIX shell scripts and perl")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+def test_unix_wrapper_settles_only_under_the_rotation_lock(tmp_path: Path, os_dir: str) -> None:
+    (tmp_path / "journal").mkdir()
+    (tmp_path / "fake").mkdir()
+    holders = []
+
+    def hold() -> None:
+        holder = subprocess.Popen(["perl", "-e",
+            'use Fcntl qw(:flock O_RDWR O_CREAT); sysopen(my $fh, $ARGV[0], O_RDWR|O_CREAT, 0600) or die; flock($fh, LOCK_EX) or die;'
+            ' $| = 1; print "held\\n"; sleep 3; open(my $o, ">>", $ARGV[1]) or die; print $o "released\\n"; close $o; flock($fh, LOCK_UN);',
+            str(tmp_path / "journal" / ".lock"), str(tmp_path / "fake" / "calls")], stdout=subprocess.PIPE, text=True)
+        assert holder.stdout is not None and holder.stdout.readline().strip() == "held"
+        holders.append(holder)
+
+    try:
+        out, code, calls, journal, secrets = _resume_harness(tmp_path, os_dir, installed=True, trusted=True, source=False, before=hold)
+    finally:
+        for holder in holders:
+            holder.wait(timeout=30)
+    assert code == 0 and "emitted" in out, (out, calls)
+    settle = [i for i, call in enumerate(calls) if " enterprise secret set " in f" {call} "]
+    assert "released" in calls and settle and settle[0] > calls.index("released"), calls
+    assert not (journal / "ai-key.entry").exists(), out
+    # GAP-2098: the run says that it waits for the lock, and for how long.
+    log = (tmp_path / "kit.log").read_text(encoding="utf-8")
+    lock = str(tmp_path / "journal" / ".lock")
+    assert f"waiting for the credential rotation journal lock {lock}, which another wrapper run holds" in log, log
+    assert f"took the credential rotation journal lock {lock} after waiting" in log, log
+
+
+# GAP-1585: a completed Windows uninstall removes the wrapper's credential
+# rotation journal, overwriting each entry first, as uninstall.sh does on
+# Linux and macOS; -Purge also removes the empty state folder.
+def test_windows_uninstall_removes_the_rotation_journal() -> None:
+    text = _text(MDM / "windows" / "uninstall.ps1")
+    body = text.split("function Remove-DefenseClawRotationJournal {", 1)[1].split("\n}\n", 1)[0]
+    assert "'Cisco\\DefenseClaw-MDM'" in body and "Join-Path $state 'rotation'" in body
+    assert body.index("Test-DefenseClawAdminOnlyItem -Path $journal") < body.index("WriteAllBytes") < body.index("Remove-Item -LiteralPath $item.FullName")
+    assert "ReparsePoint" in body and "rotation.lock" in body and "if ($Purge" in body
+    tail = text.split(SHARED_END, 1)[1]
+    run = tail.index("$code = $run.ExitCode")
+    assert run < tail.index("if (@(0, 3010) -contains $code) {") < tail.index("Remove-DefenseClawRotationJournal }", run)
+
+
+# GAP-1733: a purge removes the staging folder a killed wrapper run left
+# (its recorded run is gone) and then the empty state folder; a staging
+# folder whose run still runs stays, and so does the state folder.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize("alive", [False, True])
+def test_unix_uninstall_purge_sweeps_stale_kit_stages(tmp_path: Path, os_dir: str, alive: bool) -> None:
+    text = _text(MDM / os_dir / "uninstall.sh")
+    function = _shell_function(text, "dc_sweep_stages") + "\n" + _shell_function(text, "dc_remove_stage_parent")
+    state = tmp_path / "defenseclaw-mdm"
+    stage = state / "defenseclaw-mdm.Ab12Cd"
+    stage.mkdir(parents=True)
+    pid = os.getpid() if alive else 2147483646
+    (stage / "pid").write_text(f"{pid}\n", encoding="utf-8")
+    script = f"""set -eu
+DC_PURGE=1 DC_KIT_STATE='{state}' DC_LOG='{tmp_path / "log"}'
+dc_log() {{ printf '%s\\n' "$1" >>"$DC_LOG"; }}
+dc_stat_uid() {{ echo 0; }}
+{function}
+dc_remove_stage_parent
+"""
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert stage.exists() == alive and state.exists() == alive
+
+
+# GAP-1733 (reopened on macOS): the macOS wrapper stages in /var/tmp (or the
+# --staging-dir folder), not in its state folder, so a purge after a killed
+# kit run left that run's stage. The purge sweeps those parents too, with the
+# wrapper's rule: a stage whose run is gone goes, a live run's stage, one that
+# is not root's and a fresh one without a pid (the uninstall's own) stay. The
+# Linux copy does not touch /var/tmp.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+def test_unix_uninstall_purge_sweeps_the_macos_and_staging_dir_stages(tmp_path: Path, platform: str) -> None:
+    function = _shell_function(_text(MDM / "macos" / "uninstall.sh"), "dc_remove_stage_parent")
+    sweep = _shell_function(_text(MDM / "macos" / "uninstall.sh"), "dc_sweep_stages")
+    vartmp, custom, state = tmp_path / "vartmp", tmp_path / "custom", tmp_path / "state"
+    for folder in (vartmp, custom, state):
+        folder.mkdir(mode=0o700)
+    def stage(parent: Path, name: str, pid: int | None) -> Path:
+        path = parent / f"defenseclaw-mdm.{name}"
+        path.mkdir()
+        if pid is not None:
+            (path / "pid").write_text(f"{pid}\n", encoding="utf-8")
+        return path
+    killed, live = stage(vartmp, "Killed", 2147483646), stage(vartmp, "Live", os.getpid())
+    own, foreign = stage(vartmp, "Own", None), stage(vartmp, "Foreign", 2147483646)
+    custom_killed = stage(custom, "Killed", 2147483646)
+    script = f"""set -eu
+DC_PURGE=1 DC_SCRIPT_OS={platform} DC_KIT_STATE='{state}' DC_STAGING_DIR='{custom}'
+dc_log() {{ :; }}
+dc_stat_uid() {{ case "$1" in *Foreign) echo 501 ;; *) echo 0 ;; esac; }}
+{sweep}
+{function.replace("dc_sweep_stages /var/tmp", f"dc_sweep_stages '{vartmp}'")}
+dc_remove_stage_parent
+"""
+    assert 'if [ "${DC_SCRIPT_OS:-}" = darwin ]; then\n        dc_sweep_stages /var/tmp' in function
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert killed.exists() is (platform == "linux")
+    assert live.exists() and own.exists() and foreign.exists()
+    assert not custom_killed.exists() and custom.is_dir()
+    assert not state.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+def test_unix_uninstall_refuses_an_untrusted_or_relative_staging_dir(tmp_path: Path, os_dir: str) -> None:
+    text = _text(MDM / os_dir / "uninstall.sh")
+    assert "--staging-dir) DC_STAGING_DIR=${2:-}; shift 2 ;;" in text
+    assert "[--staging-dir DIR]" in text and "sed -n '2,32p'" in text
+    lines = text.splitlines()
+    assert lines[31].startswith("# Usage: uninstall.sh")
+    check = text.split('[ "$(id -u)" = 0 ] ||', 1)[1].split("\nfi\n", 1)[0].split("\n", 1)[1] + "\nfi\n"
+    # GAP-2453: take the top-level DC_TRUST_ACL initialization from the script
+    # itself (set -u), not from the harness, so a missing folder or a file (the
+    # [ ! -d ] branch, where dc_trusted_path never ran) still reaches dc_fail_result.
+    init = "\n".join(line for line in lines if line.startswith("DC_TRUST_ACL="))
+    (tmp_path / "file").write_text("x\n", encoding="utf-8")
+    cases = (
+        ("relative/dir", "0", 2, "mdm_invalid_arguments", "absolute path"),
+        (str(tmp_path), "1", 1, "mdm_staging_untrusted", "only root can write"),
+        (str(tmp_path / "missing"), "0", 1, "mdm_staging_untrusted", "does not exist"),
+        (str(tmp_path / "file"), "0", 1, "mdm_staging_untrusted", "only root can write"),
+    )
+    for value, trusted, rc, code, words in cases:
+        script = f"""set -eu
+DC_EXIT_INVALID=2 DC_EXIT_FAILURE=1 DC_STAGING_DIR='{value}'
+{init}
+dc_fail_result() {{ echo "$2|$3"; exit "$1"; }}
+dc_trusted_path() {{ DC_TRUST_ACL=""; return {trusted}; }}
+{check}
+echo passed
+"""
+        result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30)
+        got_code, _, message = result.stdout.strip().partition("|")
+        assert (result.returncode, got_code) == (rc, code), (value, result.stdout, result.stderr)
+        named = code == "mdm_invalid_arguments" or value in message
+        assert words in message and named and result.stderr == "", (value, result.stdout, result.stderr)
+
+
+# GAP-1850: two first kit runs at once race on creating the state folders.
+# The loser's mkdir fails because the winner made the folder; that is no
+# refusal: the folder exists and the trust check decides. A mkdir stub that
+# creates the folder and then fails models the lost race.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+def test_unix_wrapper_survives_a_lost_state_folder_mkdir_race(os_dir: str, tmp_path: Path) -> None:
+    text = _text(MDM / os_dir / "defenseclaw-enterprise.sh")
+    state = tmp_path / "defenseclaw-mdm"
+    stage_parent = _shell_function(text, "dc_stage_parent").replace("/var/lib/defenseclaw-mdm", str(state))
+    journal_ready = _shell_function(text, "dc_journal_ready")
+    script = f"""set -u
+DC_EXIT_FAILURE=1 DC_EXIT_INVALID=2 DC_SCRIPT_OS=linux DC_STAGING_DIR=""
+DC_JOURNAL_DIR='{state}/rotation'
+mkdir() {{ command mkdir "$@" 2>/dev/null; return 1; }}
+dc_trusted_path() {{ return 0; }}
+dc_stat_mode() {{ echo 700; }}
+dc_fail_result() {{ printf 'FAIL %s|%s|%s\\n' "$1" "$2" "$3"; exit 1; }}
+{stage_parent}
+{journal_ready}
+dc_stage_parent
+echo staged
+dc_journal_ready && echo journal
+"""
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert result.stdout.split() == ["staged", "journal"], result.stdout
+    assert (state / "rotation").is_dir()
+
+
+def test_windows_wrapper_runs_an_administrator_only_setup_in_place_while_it_holds_it() -> None:
+    """cowork-1-0-8 GAP-0044: every wrapper run copied the 700 MB Setup into
+    staging (about 5 s) and the antivirus scanned the fresh copy again when it
+    first ran (about 20 s on vm-dc-cowork-win11). A Setup whose file and
+    folders are administrator-only now runs where it is, held open with read
+    sharing only from before its hash and signature checks until the wrapper
+    exits; any other Setup is copied and checked as before."""
+    text = _text(MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1")
+    start = text.index("function Open-WrapperSetupInPlace {")
+    body = text[start : text.index("\nfunction ", start + 1)]
+    opened = body.index(
+        "[System.IO.File]::Open($Source, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)"
+    )
+    # The handle is taken before any check, so the checked file is the run one.
+    assert opened < body.index("Test-DefenseClawAdminOnlyItem -Path $item.FullName")
+    assert opened < body.index("Test-WrapperAdminOnlyAncestors -Path $item.FullName")
+    # Setup runs as SYSTEM from its own folder: no other account may create
+    # files there (a planted DLL or .local folder), so that folder must be
+    # administrator-only too, not only the folders above it.
+    folder_check = "Test-DefenseClawAdminOnlyItem -Path ([System.IO.Path]::GetDirectoryName($item.FullName))"
+    assert opened < body.index(folder_check) < body.index("return $stream")
+    assert "FileShare]::ReadWrite" not in body and "FileShare]::Delete" not in body
+    assert "$item.Length -gt $Limit" in body
+    assert "[System.IO.FileAttributes]::ReparsePoint" in body
+    assert body.count("$stream.Dispose()") == 2
+
+    main = text[text.index("    if ($SetupPath) {\n        $script:SetupPin") :]
+    main = main[: main.index("$exitCode = Write-LifecycleResult -Run $run -Label 'Setup'")]
+    assert "$script:SetupPin = Open-WrapperSetupInPlace -Source $SetupPath -Limit 1GB" in main
+    assert "$stagedSetup = $script:SetupPin.Name" in main
+    # Anything else keeps the copy into the administrator-only staging folder.
+    assert "Copy-WrapperInput -Source $SetupPath -Destination $stagedSetup -Limit 1GB -Label 'Setup'" in main
+    # Both run only after the same SHA-256 and signer checks.
+    assert main.index("Assert-WrapperSetup -Staged $stagedSetup") < main.index(
+        "Invoke-DefenseClawNative -FilePath $stagedSetup"
+    )
+    assert "$script:SetupPin.Dispose()" not in text

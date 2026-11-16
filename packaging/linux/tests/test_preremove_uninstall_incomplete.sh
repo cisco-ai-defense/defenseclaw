@@ -17,6 +17,7 @@ run() {
     sed -e "s#/opt/defenseclaw/bin/defenseclaw-gateway#$work/gateway#g" \
         -e "s#/var/lib/defenseclaw-enterprise#$work/state#g" \
         -e "s#/run/systemd/system#$work/systemd#g" \
+        -e "s#user_runtime=/run/user#user_runtime=$work/run-user#" \
         "$source_script" >"$work/preremove.sh"
     TMPDIR="$work" sh "$work/preremove.sh" remove >"$work/stdout" 2>"$work/stderr"
 }
@@ -25,7 +26,7 @@ if run '{"ok":false,"errors":[{"code":"uninstall_failed","message":"policy"},{"c
     exit 1
 fi
 grep -q 'uninstall_incomplete' "$work/state/last-package-result.json"
-grep -q 'package files were kept' "$work/stderr"
+grep -q 'uninstall_incomplete: the uninstall stopped before removing the binaries' "$work/stderr"
 if ! run '{"ok":false,"errors":[{"code":"uninstall_failed","message":"not uninstall_incomplete"}]}'; then
     echo "preremove refused package removal after an ordinary uninstall failure" >&2
     exit 1

@@ -68,23 +68,6 @@ func TestExecUnixAgentVersionGivesStatefulAgentsAScratchDir(t *testing.T) {
 	}
 }
 
-// OpenHands needs about 11 s to answer --version; its uv tool environment
-// names the version without running it.
-func TestDiscoverUnixAgentVersionReadsUVToolMetadata(t *testing.T) {
-	home := t.TempDir()
-	dist := filepath.Join(home, ".local", "share", "uv", "tools", "openhands", "lib", "python3.12", "site-packages", "openhands-1.16.0.dist-info")
-	if err := os.MkdirAll(dist, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	other := filepath.Join(filepath.Dir(dist), "openhands_sdk-1.21.0.dist-info")
-	if err := os.MkdirAll(other, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if got, reason := DiscoverUnixAgentVersion(context.Background(), home, "openhands", false); got != "1.16.0" {
-		t.Fatalf("version = %q (%s)", got, reason)
-	}
-}
-
 // A current Hermes refuses --version outside a committed dependency
 // environment, which left the managed enumerator without a Hermes version
 // and no hook written; the install stamp names the release without running
@@ -157,8 +140,8 @@ func TestDiscoverUnixAgentVersionFindsVersionManagerInstalls(t *testing.T) {
 	t.Cleanup(func() { machinePrefixes = origPrefixes; SetStandaloneUnix(false) })
 	home := t.TempDir()
 	// nvm: the newest Node that has the package wins.
-	writeTestPackage(t, filepath.Join(home, ".nvm", "versions", "node", "v20.1.0", "lib", "node_modules", "opencode-ai"), "opencode-ai", "0.9.0")
-	writeTestPackage(t, filepath.Join(home, ".nvm", "versions", "node", "v22.11.0", "lib", "node_modules", "opencode-ai"), "opencode-ai", "1.2.0-dev")
+	writeTestPackage(t, filepath.Join(home, ".nvm", "versions", "node", "v20.1.0", "lib", "node_modules", "@opencode", "cli"), "@opencode/cli", "0.9.0")
+	writeTestPackage(t, filepath.Join(home, ".nvm", "versions", "node", "v22.11.0", "lib", "node_modules", "@opencode", "cli"), "@opencode/cli", "1.2.0-dev")
 	// fnm, asdf and mise Node installs.
 	writeTestPackage(t, filepath.Join(home, ".local", "share", "fnm", "node-versions", "v22.0.0", "installation", "lib", "node_modules", "@github", "copilot"), "@github/copilot", "1.0.3")
 	writeTestPackage(t, filepath.Join(home, ".asdf", "installs", "nodejs", "22.3.0", "lib", "node_modules", "@ampcode", "cli"), "@ampcode/cli", "0.0.170")
@@ -224,6 +207,61 @@ func TestDiscoverUnixAgentVersionFindsVersionManagerInstalls(t *testing.T) {
 	}
 	if got, _ := DiscoverUnixAgentVersion(context.Background(), home, "opencode", false); got != "" {
 		t.Fatalf("non-standalone discovery must not search version managers: %q", got)
+	}
+}
+
+// GAP-0637: the per-user worker may find a CLI through a searched bin link
+// while its package lives under a custom npm prefix. The package still
+// identifies the installed version when the bounded live probe cannot read
+// one. A readable live version takes precedence over older metadata.
+func TestDiscoverUnixAgentVersionReadsLinkedPackageMetadata(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("the per-user worker runs with the account's credentials")
+	}
+	oldPrefixes := machinePrefixes
+	machinePrefixes = func() []string { return nil }
+	SetStandaloneUnix(true)
+	t.Cleanup(func() { machinePrefixes = oldPrefixes; SetStandaloneUnix(false) })
+	home := t.TempDir()
+	pkgDir := filepath.Join(home, ".oc2", "node_modules", "@opencode", "cli")
+	binDir := filepath.Join(home, ".local", "bin")
+	for _, dir := range []string{filepath.Join(pkgDir, "bin"), binDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "package.json"), []byte(`{"name":"@opencode/cli","version":"2.2.5","bin":{"opencode":"./bin/opencode.exe"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	program := filepath.Join(pkgDir, "bin", "opencode.exe")
+	link := filepath.Join(binDir, "opencode")
+	if err := os.Symlink(program, link); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, output, want string
+	}{
+		{"worker environment has no version", "if [ \"$CI\" = 1 ]; then exit 0; fi\necho 'opencode v2.2.5'", "2.2.5"},
+		{"live version wins", "echo 'opencode v2.2.6'", "2.2.6"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(program, []byte("#!/bin/sh\n"+tc.output+"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			got, reason := DiscoverUnixAgentVersion(context.Background(), home, "opencode", true)
+			if got != tc.want || reason != "" {
+				t.Fatalf("version = %q (%s), want %q", got, reason, tc.want)
+			}
+		})
+	}
+	if err := os.WriteFile(program, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "package.json"), []byte(`{"name":"@opencode/cli","version":"2.2.5","bin":{"other":"./bin/opencode.exe"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, reason := DiscoverUnixAgentVersion(context.Background(), home, "opencode", true); got != "" || !UnixAgentInstalledWithoutVersion(reason) {
+		t.Fatalf("unrelated package bin entry certified version %q (%s)", got, reason)
 	}
 }
 

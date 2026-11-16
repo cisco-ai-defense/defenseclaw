@@ -275,6 +275,42 @@ function ConvertTo-DefenseClawResultJson {
 }
 # endregion DefenseClaw MDM shared helpers
 
+function Remove-DefenseClawRotationJournal {
+    # After a completed uninstall (the lifecycle removed the credentials),
+    # the wrapper's credential rotation journal goes too: an entry can hold a
+    # plaintext copy of an earlier credential, which is overwritten with
+    # zeros before it is deleted, as on Linux and macOS (GAP-1585). A journal
+    # that is not administrator-only, or that holds a folder or link, is left
+    # as it is. -Purge also removes the wrapper's empty state folder.
+    $state = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'Cisco\DefenseClaw-MDM'
+    $journal = Join-Path $state 'rotation'
+    if (Test-Path -LiteralPath $journal) {
+        if (-not (Test-Path -LiteralPath $journal -PathType Container) -or -not (Test-DefenseClawAdminOnlyItem -Path $journal)) {
+            [Console]::Error.WriteLine("left $journal as it is: it is not an administrator-only folder")
+            return
+        }
+        foreach ($item in @(Get-ChildItem -LiteralPath $journal -Force)) {
+            if ($item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+                [Console]::Error.WriteLine("left $journal as it is: it holds $($item.Name), which the wrapper does not write")
+                return
+            }
+        }
+        foreach ($item in @(Get-ChildItem -LiteralPath $journal -Force)) {
+            if ($item.Length -gt 0) { [System.IO.File]::WriteAllBytes($item.FullName, [byte[]]::new($item.Length)) }
+            Remove-Item -LiteralPath $item.FullName -Force
+        }
+        Remove-Item -LiteralPath $journal -Force
+    }
+    $lock = Join-Path $state 'rotation.lock'
+    $lockItem = Get-Item -LiteralPath $lock -Force -ErrorAction SilentlyContinue
+    if ($null -ne $lockItem -and -not $lockItem.PSIsContainer -and -not ($lockItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+        Remove-Item -LiteralPath $lock -Force -ErrorAction SilentlyContinue
+    }
+    if ($Purge -and (Test-Path -LiteralPath $state -PathType Container) -and @(Get-ChildItem -LiteralPath $state -Force).Count -eq 0) {
+        Remove-Item -LiteralPath $state -Force -ErrorAction SilentlyContinue
+    }
+}
+
 try {
     $deployment = Get-DefenseClawInstalledDeployment
 } catch {
@@ -297,6 +333,9 @@ try {
 }
 $code = $run.ExitCode
 if (@(0, 1603, 1618, 1639, 3010) -notcontains $code) { $code = 1603 }
+if (@(0, 3010) -contains $code) {
+    try { Remove-DefenseClawRotationJournal } catch { [Console]::Error.WriteLine('could not remove the credential rotation journal: ' + $_.Exception.Message) }
+}
 if ($run.StdOut.Trim()) {
     [Console]::Out.WriteLine($run.StdOut.Trim())
 } else {

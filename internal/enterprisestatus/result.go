@@ -17,6 +17,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/accountjoin"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -66,7 +68,27 @@ type Readiness struct {
 // Inspection reports who decides verdicts.
 type Inspection struct {
 	Local     string `json:"local"`      // active, disabled
-	AIDefense string `json:"ai_defense"` // disabled, ok, unavailable:<code>
+	AIDefense string `json:"ai_defense"` // disabled, ok, unknown, unavailable:<code>
+}
+
+// CodeAIDefenseUnavailable warns that enabled Cisco AI Defense inspection is
+// failing, for example with a rejected key (unavailable:auth_failed).
+const CodeAIDefenseUnavailable = "ai_defense_unavailable"
+
+// AddAIDefenseWarning warns when Inspection.AIDefense is unavailable:<code>.
+// Not an error: the local policy engine keeps deciding, but the cloud
+// inspection the administrator enabled is not running.
+func (r *Result) AddAIDefenseWarning() {
+	if !strings.HasPrefix(r.Inspection.AIDefense, "unavailable") {
+		return
+	}
+	fix := "Check the enterprise.inspection.ai_defense credential and network access"
+	if r.Inspection.AIDefense == "unavailable:auth_failed" {
+		fix = "Cisco AI Defense rejected the stored API key (HTTP 401 or 403): store a valid key under the " +
+			"credential enterprise.inspection.ai_defense.credential names, with `enterprise secret set`"
+	}
+	r.AddWarning(CodeAIDefenseUnavailable, "Cisco AI Defense inspection is enabled but reports "+
+		r.Inspection.AIDefense+"; the local policy engine keeps deciding. "+fix)
 }
 
 // MachinePolicyState is the per-connector machine policy report.
@@ -81,6 +103,20 @@ type MachinePolicyState struct {
 	LiveVerifiedAt   string   `json:"live_verified_at,omitempty"`
 }
 
+// HooksInstalled is the hooks_installed value the machine policy gives a
+// connector no account row is counted for: none without a DefenseClaw
+// entry, partial with conflicts, all otherwise.
+func (s MachinePolicyState) HooksInstalled() string {
+	switch {
+	case s.OwnedEntries == 0:
+		return HooksInstalledNone
+	case len(s.Conflicts) > 0:
+		return HooksInstalledPartial
+	default:
+		return HooksInstalledAll
+	}
+}
+
 // Enrollment summarizes guardian targets.
 type Enrollment struct {
 	Targets int `json:"targets"`
@@ -90,6 +126,24 @@ type Enrollment struct {
 	// Accounts names each enrolled account and its connectors' states, where
 	// the platform reports them (Windows standalone).
 	Accounts []EnrollmentAccount `json:"accounts,omitempty"`
+	// ExcludedUsers and ExcludedGroups are the installed config's
+	// enterprise.enrollment.exclude_users and exclude_groups entries (Windows
+	// standalone), so an administrator can tell an account held out by policy
+	// from one that is not enrolled yet (GAP-1243).
+	ExcludedUsers  []string `json:"excluded_users,omitempty"`
+	ExcludedGroups []string `json:"excluded_groups,omitempty"`
+	// RemovedConnectors names, per account, the connectors an administrator
+	// took off the roster that the account had been enrolled for (Windows
+	// standalone). Each is "not managed (removed from roster)": neither
+	// protected nor pending, and its leftover hook calls are allowed.
+	RemovedConnectors []RemovedConnectorAccount `json:"removed_connectors,omitempty"`
+}
+
+// RemovedConnectorAccount is one account and its removed connectors.
+type RemovedConnectorAccount struct {
+	Account    string            `json:"account"`
+	SID        string            `json:"sid,omitempty"`
+	Connectors map[string]string `json:"connectors"`
 }
 
 // EnrollmentAccount is one enrolled account and the state of each of its
@@ -157,10 +211,19 @@ type Result struct {
 	SecurityComplete   bool                          `json:"security_complete"`
 	Errors             []Message                     `json:"errors"`
 	Warnings           []Message                     `json:"warnings,omitempty"`
+	// PendingApply marks a Linux or macOS status that found another
+	// lifecycle run applying a change (the apply trigger applying a pushed
+	// config.yaml, secret or policy file, or an ensure, repair or upgrade
+	// that holds the lifecycle lock). Such a status checked nothing but the
+	// installed version, which is not a failure: it is ok, names the run in
+	// a lifecycle_busy warning and still exits 75, so a management agent
+	// asks again (GAP-0129). Omitted otherwise.
+	PendingApply bool `json:"pending_apply,omitempty"`
 	// Changes lists, in plain words, what a Linux or macOS repair or ensure
 	// changed on a deployment that was already installed (files rewritten,
-	// services started, per-account hooks rewritten), or which key a
-	// rotate-credentials committed and whom it moved. Empty means there was
+	// services started, per-account hooks rewritten), which key a
+	// rotate-credentials committed and whom it moved, or, on every OS, which
+	// config a run migrated to config_version 9. Empty means there was
 	// nothing to repair.
 	Changes        []string     `json:"changes,omitempty"`
 	APIPortHolders []PortHolder `json:"api_port_holders,omitempty"`
@@ -172,6 +235,10 @@ type Result struct {
 	// enforces; nil (omitted) when neither exists.
 	Bundle      *BundleState   `json:"bundle,omitempty"`
 	LastRefusal *BundleRefusal `json:"last_refusal,omitempty"`
+	// EnforcementPending counts the running agent sessions this result
+	// names as not enforced until they restart, with their connector names;
+	// omitted when there are none (enforcement_pending.go).
+	EnforcementPending *EnforcementPending `json:"enforcement_pending,omitempty"`
 	// Scanners is the standalone Windows scanner runtime (skill, MCP and
 	// plugin scanners); nil (omitted) everywhere else.
 	Scanners *ScannerRuntime `json:"scanners,omitempty"`
@@ -179,8 +246,33 @@ type Result struct {
 	// installed config.yaml with their effective redaction profiles, from the
 	// compiler `defenseclaw observability plan` uses (GAP-1105).
 	Destinations []Destination `json:"destinations,omitempty"`
-	LogPath      string        `json:"log_path,omitempty"`
-	ExitCode     int           `json:"exit_code"`
+	// AuditStore is, for Linux and macOS status, the local audit store of
+	// the installed config.yaml: retention, size cap and size on disk; nil
+	// when the config does not compile (GAP-0141).
+	AuditStore *AuditStore `json:"audit_store,omitempty"`
+	// Connectors, OpenShell and Identity are the status v2 blocks of status
+	// and verify on the standalone profile (connector_block.go,
+	// openshell_block.go, identity_block.go); nil (omitted) elsewhere.
+	Connectors map[string]ConnectorState `json:"connectors,omitempty"`
+	OpenShell  *OpenShellCapability      `json:"openshell,omitempty"`
+	Identity   *IdentityHealth           `json:"identity,omitempty"`
+	// AccountJoin summarizes the account join keys (counts and reason
+	// codes, never a key) for a status or verify run as root (Linux,
+	// macOS) or an administrator (Windows) on the standalone profile with
+	// enterprise.account_join on; nil (omitted) otherwise. The keys are
+	// only in the output of `enterprise account-keys` (internal/accountjoin).
+	AccountJoin *accountjoin.Summary `json:"account_join,omitempty"`
+	// Cowork is the Claude Cowork block (cowork_block.go) of status and
+	// verify on the standalone profile, for an administrator; nil (omitted)
+	// elsewhere.
+	Cowork         *CoworkState         `json:"cowork,omitempty"`
+	CoworkVMSensor *CoworkVMSensorState `json:"cowork_vm_sensor,omitempty"`
+	// HealthReport summarizes the managed gateway's last endpoint health
+	// report (health_report.go), for status on a Secure Client host; nil
+	// (omitted) when there is no report.
+	HealthReport *HealthReportState `json:"health_report,omitempty"`
+	LogPath      string             `json:"log_path,omitempty"`
+	ExitCode     int                `json:"exit_code"`
 	// ConfigRefused marks a run that refused the submitted config before it
 	// changed anything: the policy, services and advisories it reports are
 	// the running deployment's. Text output only (GAP-0564).
@@ -188,6 +280,84 @@ type Result struct {
 	// PreserveNotRootDeploymentState retains the pre-1.0 Secure Client JSON
 	// shape for an unelevated macOS lifecycle command.
 	PreserveNotRootDeploymentState bool `json:"-"`
+
+	// securityBy and coverageBy are why security_complete and
+	// coverage_complete are false (MarkSecurityIncomplete,
+	// MarkCoverageIncomplete); Finish names them on Linux and macOS.
+	securityBy, coverageBy []string
+	// pendingSessions are the sessions NotePendingSession recorded, by
+	// process id.
+	pendingSessions map[int]string
+}
+
+// CodeSecurityIncomplete is the warning that names why security_complete
+// (and coverage_complete) is false. Windows Setup uses it when no other
+// warning explains an incomplete result; Linux and macOS status, verify and
+// the package result list the warning codes behind each field, so an upgrade
+// that turns a field false says which check did (GAP-1861, GAP-1863).
+const CodeSecurityIncomplete = "security_incomplete"
+
+// MarkSecurityIncomplete sets security_complete false for reason: the code of
+// the warning or error that says why, or a short phrase when no warning does.
+func (r *Result) MarkSecurityIncomplete(reason string) {
+	r.SecurityComplete = false
+	r.securityBy = appendReason(r.securityBy, reason)
+}
+
+// MarkCoverageIncomplete sets coverage_complete and security_complete false
+// for reason (see MarkSecurityIncomplete).
+func (r *Result) MarkCoverageIncomplete(reason string) {
+	r.CoverageComplete = false
+	r.coverageBy = appendReason(r.coverageBy, reason)
+	r.MarkSecurityIncomplete(reason)
+}
+
+// ResetCompleteness starts the completeness verdict again: both fields true,
+// no reason. The Linux and macOS describe pass computes them from scratch.
+func (r *Result) ResetCompleteness() {
+	r.CoverageComplete, r.SecurityComplete = true, true
+	r.securityBy, r.coverageBy = nil, nil
+}
+
+func appendReason(reasons []string, reason string) []string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" || slices.Contains(reasons, reason) {
+		return reasons
+	}
+	return append(reasons, reason)
+}
+
+// nameIncompleteFields replaces the security_incomplete warning with one that
+// lists why each false field is false. A field that ended true drops its
+// reasons (a later pass recomputed it); a result whose only reasons are its
+// errors gets no warning, the errors say it.
+func (r *Result) nameIncompleteFields() {
+	if r.CoverageComplete {
+		r.coverageBy = nil
+	}
+	if r.SecurityComplete {
+		r.securityBy = nil
+	}
+	warnings := make([]Message, 0, len(r.Warnings)+1)
+	for _, warning := range r.Warnings {
+		if warning.Code != CodeSecurityIncomplete {
+			warnings = append(warnings, warning)
+		}
+	}
+	r.Warnings = warnings
+	if r.SecurityComplete || len(r.securityBy) == 0 {
+		return
+	}
+	message := "security_complete is false because of: " + strings.Join(r.securityBy, ", ")
+	if len(r.Errors) > 0 {
+		message += " and the errors above"
+	}
+	if r.CoverageComplete {
+		message += "; coverage_complete is true"
+	} else if len(r.coverageBy) > 0 {
+		message += "; coverage_complete is false because of: " + strings.Join(r.coverageBy, ", ")
+	}
+	r.Warnings = append(r.Warnings, Message{Code: CodeSecurityIncomplete, Message: message + "; each warning above says what to do"})
 }
 
 // ScannerRuntime reports the scanners a standalone Windows deployment runs.
@@ -248,6 +418,15 @@ const (
 // generation of config.generation.json, not the gateway policy generation
 // that restarts at 1 with the gateway.
 type BundleState struct {
+	// ReceiptID names the receipt this block reports: the file name of its
+	// public receipt (<etc>/bundles/receipt-events/<receipt_id>.json) that a
+	// management agent forwards. A repeated delivery of the current bundle
+	// discards its own receipt, so the block names the confirmed one.
+	ReceiptID string `json:"receipt_id,omitempty"`
+	// DeliveryID is the --delivery-id of the delivery that receipt records
+	// (absent without it); a repeat names the confirmed receipt, so it is
+	// that delivery id, not the repeat one.
+	DeliveryID       string   `json:"delivery_id,omitempty"`
 	BundleID         string   `json:"bundle_id"`
 	DisabledByBundle []string `json:"disabled_by_bundle,omitempty"`
 	WarningCodes     []string `json:"warning_codes,omitempty"`
@@ -308,6 +487,28 @@ func (p *PolicyState) Line() string {
 	return line
 }
 
+// RunningDeploymentPrefix starts each warning of a run that refused the
+// submitted config before it changed anything: the warning is the running
+// deployment's, not the refused file's (GAP-0564, #1201).
+const RunningDeploymentPrefix = "running deployment (the refused config changed nothing): "
+
+// LabelRunningDeployment marks r as a run that refused the submitted config
+// (ConfigRefused) and labels each warning from index from on as the running
+// deployment's, except those whose code is in keep: they describe the
+// refused request itself. A warning already labelled stays as it is.
+func (r *Result) LabelRunningDeployment(from int, keep ...string) {
+	if r == nil {
+		return
+	}
+	r.ConfigRefused = true
+	for i := max(from, 0); i < len(r.Warnings); i++ {
+		if slices.Contains(keep, r.Warnings[i].Code) || strings.HasPrefix(r.Warnings[i].Message, RunningDeploymentPrefix) {
+			continue
+		}
+		r.Warnings[i].Message = RunningDeploymentPrefix + r.Warnings[i].Message
+	}
+}
+
 // PolicyLine is Policy.Line(), labelled as the running deployment's when the
 // run refused the submitted config (ConfigRefused); "" without a policy.
 func (r *Result) PolicyLine() string {
@@ -366,12 +567,35 @@ func (r *Result) AddWarning(code, message string) {
 // Finish sets OK from the error list and the exit code for goos, then
 // returns the code. failureCode overrides the generic failure code when a
 // more specific one applies (busy, invalid arguments).
+//
+// A result with an error is never security_complete: Windows verify
+// reported security_complete:true next to the error that the guardian could
+// not verify an enrolled target's hooks, so a script that read the flag
+// was told the host was protected (GAP-0664).
 func (r *Result) Finish(goos string, failureCode int) int {
+	var scan *SessionRestartStatus
 	if r.Bundle != nil && r.Bundle.SessionsRestartRequired != nil && r.Bundle.SessionsRestartRequired.Count > 0 {
-		r.CoverageComplete, r.SecurityComplete = false, false
+		scan = r.Bundle.SessionsRestartRequired
+		code, _ := SessionWarning(*scan)
+		r.MarkCoverageIncomplete(code)
+	}
+	// A result read back from another process keeps the summary it carried.
+	if pending := summarizePending(r.pendingSessions, scan); pending != nil {
+		r.EnforcementPending = pending
 	}
 	r.OK = len(r.Errors) == 0
+	if !r.OK {
+		r.SecurityComplete = false
+	}
+	if goos != "windows" {
+		r.nameIncompleteFields()
+	}
 	switch {
+	case r.OK && r.PendingApply:
+		// A status that found a change being applied is not a failure, but
+		// its caller asks again for the full state: 75, as before
+		// pending_apply existed.
+		r.ExitCode = BusyExitCode(goos)
 	case r.OK:
 		r.ExitCode = ExitOK
 	case failureCode != 0:
@@ -410,7 +634,7 @@ const notRootCode = "not_root"
 // as "not installed" (GAP-0279).
 var deploymentStateFields = []string{
 	"installed", "installed_version", "transaction_pending", "services", "readiness", "inspection", "machine_policy", "enrollment",
-	"destinations",
+	"destinations", "connectors", "openshell", "identity",
 }
 
 func (r Result) refusedNotRoot() bool {

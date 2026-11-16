@@ -17,5 +17,4 @@ export const connectorIconDefinitions: Record<string, ConnectorIconDefinition> =
   kiro: { source: 'kiro-color.svg', target: 'kiro.svg', accent: '#9046ff' },
   openclaw: { source: 'openclaw-color.svg', target: 'openclaw.svg', accent: '#ff4d4d' },
   opencode: { source: 'opencode.svg', target: 'opencode.svg', accent: '#52616b', monochrome: true },
-  openhands: { source: 'openhands-color.svg', target: 'openhands.svg', accent: '#16a34a' },
 };

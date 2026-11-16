@@ -459,15 +459,15 @@ class RuntimePanelModel:
         run the gateway elevated; the Runtime panel keeps the detail (GAP-2533).
         """
 
-        if self.health_state() != "degraded" or not self.snapshot.degraded_reasons:
+        if self.health_state() not in ("degraded", "partial") or not self.snapshot.degraded_reasons:
             return self.degraded_reason()
         heads = [reason.split(":", 1)[0].strip() for reason in self.snapshot.degraded_reasons]
         return ", ".join(dict.fromkeys(head for head in heads if head))
 
     def degraded_reason(self) -> str:
-        """Short cause for a DEGRADED badge; empty when not degraded."""
+        """Short cause for a DEGRADED (or WATCHING-with-a-note) badge; empty otherwise."""
 
-        if self.health_state() != "degraded":
+        if self.health_state() not in ("degraded", "partial"):
             return ""
         if self.snapshot.degraded_reasons:
             return "; ".join(self.snapshot.degraded_reasons)
@@ -479,13 +479,24 @@ class RuntimePanelModel:
         return f"partial coverage: {', '.join(gaps)}" if gaps else "partial coverage"
 
     def health_state(self) -> str:
-        """Operator-facing health: off, waiting, degraded, or healthy."""
+        """Operator-facing health: off, waiting, degraded, partial, or healthy.
+
+        ``partial`` is every selected plane running, with only a stated
+        coverage limit ("<plane> partially covered: ..."), such as shadow
+        egress seeing only this account's sockets without elevation. That is
+        the expected state of a default per-user install, so it is a note,
+        not DEGRADED (GAP-1274). A plane that is unavailable or not running
+        still makes the runtime DEGRADED.
+        """
 
         if not self.snapshot.enabled:
             return "off"
         if not self.snapshot.scanned_at:
             return "waiting"
         if self.snapshot.degraded:
+            reasons = self.snapshot.degraded_reasons
+            if reasons and all(" partially covered:" in reason for reason in reasons):
+                return "partial"
             return "degraded"
         return "healthy"
 
@@ -494,6 +505,7 @@ class RuntimePanelModel:
             "off": "OFF",
             "waiting": "STARTING",
             "degraded": "DEGRADED",
+            "partial": "WATCHING",
             "healthy": "HEALTHY",
         }[self.health_state()]
 
@@ -517,7 +529,8 @@ class RuntimePanelModel:
                 "or wait for the next interval. HEALTHY appears after every "
                 "selected plane reports up."
             )
-        if state == "degraded":
+        if state in ("degraded", "partial"):
+            lead = "DEGRADED means coverage is partial" if state == "degraded" else "Note: coverage is partial"
             up = sum(1 for plane in self.snapshot.planes if plane.badge == "up")
             partial = sum(1 for plane in self.snapshot.planes if plane.badge == "partial")
             idle = sum(
@@ -547,7 +560,7 @@ class RuntimePanelModel:
             if self.snapshot.degraded_reasons:
                 extra = " " + "; ".join(self.snapshot.degraded_reasons) + "."
             if short:
-                return f"DEGRADED means coverage is partial ({coverage}).{extra}"
+                return f"{lead} ({coverage}).{extra}"
             # The how-to-enable hint ends in a command, so it goes last: text
             # run on after it read as part of the command (GAP-2102).
             enable_hint = "".join(
@@ -555,7 +568,7 @@ class RuntimePanelModel:
                 for plane in off
             )
             return (
-                f"DEGRADED means coverage is partial ({coverage}).{extra} "
+                f"{lead} ({coverage}).{extra} "
                 "Findings below are still valid for the planes that are up. "
                 "HEALTHY means every selected plane is watching."
                 + enable_hint

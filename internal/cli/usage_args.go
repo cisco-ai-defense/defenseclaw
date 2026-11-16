@@ -301,3 +301,63 @@ func isUnknownRootCommand(root *cobra.Command, err error) bool {
 	return strings.HasPrefix(msg, "unknown command ") &&
 		strings.Contains(msg, fmt.Sprintf(" for %q", root.CommandPath()))
 }
+
+// argsSetLongFlag reports whether args, read the way pflag reads them with
+// the flags of fs, set the flag name before the "--" terminator. A token
+// that is another flag's value (--config --trust-anchors) or follows the
+// terminator does not set it. pflag stops at its first error; this keeps
+// reading, and an unknown or malformed flag takes no value (as pflag's
+// unknown-flag allow-list does for a dash token), so a flag after the bad
+// one still counts.
+func argsSetLongFlag(fs *pflag.FlagSet, args []string, name string) bool {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if len(arg) < 2 || arg[0] != '-' {
+			continue
+		}
+		if arg == "--" {
+			return false
+		}
+		if long, ok := strings.CutPrefix(arg, "--"); ok {
+			flagName, _, inline := strings.Cut(long, "=")
+			if flagName == "" || flagName[0] == '-' {
+				continue
+			}
+			flag := fs.Lookup(flagName)
+			if flag == nil {
+				continue
+			}
+			if flag.Name == name {
+				return true
+			}
+			if !inline && flag.NoOptDefVal == "" {
+				i++
+			}
+			continue
+		}
+		shorts := arg[1:]
+		if strings.HasPrefix(shorts, "test.") {
+			continue
+		}
+		for len(shorts) > 0 {
+			flag := fs.ShorthandLookup(shorts[:1])
+			if flag == nil {
+				break
+			}
+			if flag.Name == name {
+				return true
+			}
+			if len(shorts) > 2 && shorts[1] == '=' {
+				break
+			}
+			if flag.NoOptDefVal == "" {
+				if len(shorts) == 1 {
+					i++
+				}
+				break
+			}
+			shorts = shorts[1:]
+		}
+	}
+	return false
+}

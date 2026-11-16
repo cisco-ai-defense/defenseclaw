@@ -96,6 +96,49 @@ func UseAuthorityPack(floor config.OpenShellAdminConfig, pack *Pack) error {
 	return nil
 }
 
+// generationPacks are the custom required packs the managed gateway loaded
+// with its live configuration generation (UseGenerationPacks), by reference
+// and pack folder.
+var generationPacks struct {
+	mu    sync.RWMutex
+	byKey map[generationPackKey]*Pack
+}
+
+type generationPackKey struct{ ref, packDir string }
+
+// UseGenerationPacks makes loaded (packs by their required_pack reference,
+// read from packDir with LoadGenerationPack) the packs this process's
+// trusted loads of those references use, in place of every earlier set.
+// The managed gateway calls it when it publishes a configuration
+// generation, so a sandbox pack is read once per generation: an edit of
+// the file takes effect with the next generation (the restart ensure
+// makes), and an edit that does not load, which fails that generation's
+// build, never replaces the last good pack (GAP-0229).
+func UseGenerationPacks(packDir string, loaded map[string]*Pack) {
+	next := make(map[generationPackKey]*Pack, len(loaded))
+	for ref, pack := range loaded {
+		if pack != nil {
+			p := *pack
+			next[generationPackKey{ref: strings.TrimSpace(ref), packDir: packDir}] = &p
+		}
+	}
+	generationPacks.mu.Lock()
+	defer generationPacks.mu.Unlock()
+	generationPacks.byKey = next
+}
+
+// generationPack is the pack UseGenerationPacks installed for ref in
+// packDir, or nil.
+func generationPack(ref, packDir string) *Pack {
+	generationPacks.mu.RLock()
+	defer generationPacks.mu.RUnlock()
+	if p := generationPacks.byKey[generationPackKey{ref: strings.TrimSpace(ref), packDir: packDir}]; p != nil {
+		c := *p
+		return &c
+	}
+	return nil
+}
+
 // authorityPack is the pack UseAuthorityPack installed for ref, or nil.
 func authorityPack(ref string) *Pack {
 	authorityPacks.mu.RLock()

@@ -99,6 +99,12 @@ def validate_destination(dest: str) -> str:
     """The local SSRF guard can enforce only explicit public IP literals."""
     if not isinstance(dest, str):
         raise ValueError("destination allowlist entries must be strings")
+    if dest.startswith('[') and dest.endswith(']'):
+        # dclaw_policy_check_destination compares the destination host with
+        # brackets removed, so a bracketed entry would never match.
+        raise ValueError(f"Destination '{dest}': write the IPv6 literal without brackets "
+                         f"('{dest[1:-1]}'); the device compares each destination's host "
+                         "with its brackets removed")
     try:
         address = ipaddress.ip_address(dest)
     except ValueError as exc:
@@ -304,18 +310,23 @@ def extract_severity_rules(policy: dict) -> list:
     """Extract severity→action rules from skill_actions section."""
     rules = []
     skill_actions = policy.get("skill_actions", {})
+    if not isinstance(skill_actions, dict):
+        raise ValueError("skill_actions must be a mapping")
     for severity_name, actions in skill_actions.items():
-        _validate_no_null_bytes(severity_name, "severity name")
-        sev_val = SEVERITY_MAP.get(severity_name)
-        if sev_val is None:
-            continue
+        if severity_name not in SEVERITY_MAP:
+            raise ValueError(f"unknown skill_actions severity: {severity_name!r}")
+        sev_val = SEVERITY_MAP[severity_name]
+        if not isinstance(actions, dict):
+            raise ValueError(f"skill_actions.{severity_name} must be a mapping")
         runtime_action = actions.get("runtime", "enable")
         if runtime_action == "disable":
             action_val = ACTION_MAP["block"]
         elif runtime_action == "warn":
             action_val = ACTION_MAP["warn"]
-        else:
+        elif runtime_action == "enable":
             continue  # "enable" means ALLOW → no rule needed
+        else:
+            raise ValueError(f"invalid skill_actions.{severity_name}.runtime: {runtime_action!r}")
         rules.append((sev_val, action_val))
     rules.sort(key=lambda x: x[0], reverse=True)  # highest severity first
     return rules
@@ -329,25 +340,21 @@ def extract_sequence_rules(policy: dict) -> list:
     if not isinstance(sequences, list):
         raise ValueError("capability_sequences must be a list")
     for entry in sequences:
+        if not isinstance(entry, dict) or set(entry) - {"sequence", "action"}:
+            raise ValueError("capability_sequences entries support only sequence and action")
         seq = entry.get("sequence", [])
-        if not seq or len(seq) == 0:
-            raise ValueError(
-                "capability_sequences entry has empty sequence. "
-                "Empty sequences would match everything, weakening the C agent."
-            )
-        action = ACTION_MAP.get(entry.get("action", "block"), 1)
+        if not isinstance(seq, list) or not 1 <= len(seq) <= 4:
+            raise ValueError("capability sequence must be a list of one to four capabilities")
+        action_name = entry.get("action", "block")
+        if not isinstance(action_name, str) or action_name not in ACTION_MAP:
+            raise ValueError(f"unknown capability sequence action: {action_name!r}")
+        action = ACTION_MAP[action_name]
         cap_bytes = []
         for cap_name in seq:
-            _validate_no_null_bytes(str(cap_name), "capability name")
-            cap_val = CAP_MAP.get(cap_name)
-            if cap_val is None:
-                print(f"WARNING: unknown capability '{cap_name}', skipping rule",
-                      file=sys.stderr)
-                break
-            cap_bytes.append(cap_val)
-        else:
-            if len(cap_bytes) <= 4:
-                rules.append((cap_bytes, action))
+            if not isinstance(cap_name, str) or cap_name not in CAP_MAP:
+                raise ValueError(f"unknown capability: {cap_name!r}")
+            cap_bytes.append(CAP_MAP[cap_name])
+        rules.append((cap_bytes, action))
     return rules
 
 
@@ -355,6 +362,8 @@ def extract_dest_allowlist(policy: dict) -> list:
     """Extract destination allowlist from iot_extensions."""
     iot_ext = policy.get("iot_extensions", {})
     dest_list = iot_ext.get("destination_allowlist", [])
+    if not isinstance(dest_list, list):
+        raise ValueError("destination_allowlist must be a list")
     for dest in dest_list:
         _validate_no_null_bytes(str(dest), "destination allowlist entry")
     return dest_list
@@ -364,7 +373,10 @@ def extract_canary_baseline(policy: dict) -> int:
     """Extract canary baseline from iot_extensions."""
     iot_ext = policy.get("iot_extensions", {})
     canary = iot_ext.get("canary", {})
-    return canary.get("baseline_blocks_per_min", 5)
+    baseline = canary.get("baseline_blocks_per_min", 5)
+    if type(baseline) is not int or not 0 <= baseline <= 65535:
+        raise ValueError("baseline_blocks_per_min must be an integer from 0 to 65535")
+    return baseline
 
 
 def generate_c_header(policy: dict, version: int) -> str:
@@ -569,11 +581,6 @@ def generate_binary_blob(policy: dict, version: int) -> bytes:
     dest_allowlist = extract_dest_allowlist(policy)
     canary_baseline = extract_canary_baseline(policy)
 
-    if canary_baseline > 65535:
-        raise ValueError(f"Canary baseline {canary_baseline} exceeds uint16 max (65535)")
-    if canary_baseline < 0:
-        raise ValueError(f"Canary baseline {canary_baseline} must be non-negative")
-
     # Build payload
     payload = bytearray()
 
@@ -769,9 +776,15 @@ def main():
         policy = parse_policy(Path(args.input))
         if not isinstance(policy, dict):
             raise ValueError("policy root must be a YAML mapping")
+        for field in ("name", "description"):
+            if field in policy and not isinstance(policy[field], str):
+                raise ValueError(f"{field} must be a string")
         validate_policy_extensions(policy)
         c_header = generate_c_header(policy, args.version)
         blob = generate_binary_blob(policy, args.version)
+    except OSError as exc:
+        print(f"Cannot read policy input: {exc}", file=sys.stderr)
+        return 1
     except (yaml.YAMLError, ValueError, TypeError, AttributeError) as exc:
         print(f"Invalid policy: {exc}", file=sys.stderr)
         return 65  # EX_DATAERR

@@ -24,6 +24,39 @@ The bundle name is
 `defenseclaw-macos-${VERSION}-darwin-${BUNDLE_GOARCH}`. The build creates that
 directory plus a `.tar.gz` archive and a sibling `.sha256` file under `dist/`.
 
+## Managed agent-version discovery
+
+The managed hook enumerator renders each connector's discovered version into
+the hook-guardian target manifest. Codex discovery prefers the current
+`ChatGPT.app` bundle, then the legacy standalone `Codex.app` bundle, in both
+`/Applications` and the target user's `~/Applications`. It then checks
+OpenAI's standalone `~/.codex/packages/standalone/current` selection,
+Homebrew, and user/system package-manager metadata (including NVM and Bun)
+before the bounded `PATH` fallback. Claude Code applies the same NVM/Bun
+coverage in addition to its native installer and Desktop/extension layouts.
+GitHub Copilot CLI reads the `@github/copilot` package metadata (user npm,
+NVM, Bun, then `/usr/local` and `/opt/homebrew`) and the Homebrew cask
+`copilot-cli` release folders, and never runs `copilot`. A curl-script install
+leaves no metadata; the user is still enrolled once Copilot's own
+`~/.copilot/logs` or `~/.copilot/session-state` exists. The guardian creates
+`~/.copilot/hooks` as the user and Setup writes `defenseclaw.json` there.
+
+Bundle metadata is preferred when available. When a known application bundle
+only exposes an executable version probe, the enumerator runs `--version` as
+the target console user through `/usr/bin/sudo`, with bounded output and a
+bounded wall-clock duration. It never executes an app-bundled Codex binary as
+root. A missing, failed, or malformed bundle probe does not stop discovery:
+the enumerator continues through the remaining bundle executables and
+lower-priority sources, including package metadata and the bounded `PATH`
+fallback. When every applicable source fails to yield a supported version, the
+target remains unversioned. Under Secure Client the guardian installs the
+reviewed best-effort contract with fail-open delivery until later discovery
+resolves a known compatible contract; every other profile keeps the
+fail-closed contract gate, which refuses an unverified target in action mode.
+
+Reconciliation repeats discovery on every render, so an in-place agent upgrade
+updates `agent_version` without reinstalling DefenseClaw.
+
 ## Bundle contents
 
 The build script assembles:
@@ -82,6 +115,26 @@ make packaging-macos-enterprise VERSION=1.2.3
   `MACOS_INSTALLER_SIGN_IDENTITY` (Developer ID Installer, signs the product
   archive) are set; `MACOS_SIGN_KEYCHAIN` names the keychain holding them.
   Notarize a signed package separately.
+- The builder downloads the pinned e2fsprogs 1.47.4 source archive from
+  kernel.org, checks its SHA-256, builds `mke2fs`, `debugfs` and `e2fsck`
+  without non-system runtime libraries, and verifies that the built `mke2fs`
+  can populate an ext4 image with a file larger than 2 GiB. It places them under
+  `/opt/cisco/defenseclaw/share/e2fsprogs/sbin`. The package also carries
+  the upstream GPL notice and complete corresponding source under
+  `share/e2fsprogs/licenses`. The managed gateway selects these tools only
+  when `enterprise.openshell.e2fsprogs_dir` is unset and the account has no
+  build in `~/.local/opt/e2fsprogs/sbin`. An explicit administrator directory
+  remains authoritative. The Mac running the package builder needs network
+  access to kernel.org; the Mac receiving the package does not.
+- Before it runs `ensure`, the postinstall gives every program the package
+  installed (`bin/*`, the LaunchAgent gateway copy under
+  `bin/launch-agents/<sha256>/` and the e2fsprogs tools) a new file: a copy
+  in the same folder renamed over the original. macOS can keep the code
+  signature it checked with a file that is rewritten in place and kill the
+  next start for code signing (`OS_REASON_CODESIGNING`). The new gateway file
+  makes `ensure` boot out and bootstrap every account's loaded LaunchAgent;
+  `enterprise macos repair` gives the gateway a new file again before it
+  reloads a job that macOS killed for code signing.
 - `scripts/test-enterprise-unix-install.sh` installs, converges, verifies
   and removes the package on a disposable Mac; see
   [docs/TESTING.md](../../docs/TESTING.md#enterprise-install-lanes).

@@ -326,3 +326,7 @@ func readRemote(process windows.Handle, address uintptr, into unsafe.Pointer, si
 	}
 	return nil
 }
+
+// OwnerNameOfUID names no account on Windows, whose processes are owned by a
+// SID rather than a uid.
+func OwnerNameOfUID(int) string { return "" }

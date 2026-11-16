@@ -179,6 +179,16 @@ func evictOldestBifrostTenantLocked() {
 	}
 	if entry, ok := bifrostTenants[oldestKey]; ok {
 		delete(bifrostTenants, oldestKey)
+		// An entry without a client has nothing to shut down. Calling
+		// Shutdown on nil took a hardware access violation on a fresh
+		// goroutine, which recover() turned into a panic; on Windows hosts
+		// with large exception frames (AMX) the kernel writes that frame
+		// below the 8 KiB goroutine stack into the neighbouring heap, and a
+		// later GC dies on the corrupted span (golang/go#81238,
+		// rel-1-0-6:GAP-0550).
+		if entry == nil || entry.client == nil || shutdownEvictedBifrostClient == nil {
+			return
+		}
 		// Shutdown asynchronously so we don't hold the write
 		// lock across an SDK teardown that may block on
 		// in-flight streams. The SDK's Shutdown is documented
@@ -186,10 +196,14 @@ func evictOldestBifrostTenantLocked() {
 		// invocations.
 		go func(c *bifrost.Bifrost) {
 			defer func() { _ = recover() }()
-			c.Shutdown()
+			shutdownEvictedBifrostClient(c)
 		}(entry.client)
 	}
 }
+
+// shutdownEvictedBifrostClient tears down an evicted tenant client
+// (replaceable in tests).
+var shutdownEvictedBifrostClient = func(c *bifrost.Bifrost) { c.Shutdown() }
 
 // tenantAccount implements schemas.Account and is frozen at construction
 // time: it returns the same single key + config for its pinned provider and
@@ -324,6 +338,9 @@ func newTenantAccount(
 		if len(bedrock.DeploymentAliases) > 0 {
 			key.Aliases = deploymentAliasesToBifrost(bedrock.DeploymentAliases)
 		}
+	}
+	if providerKey == schemas.Bedrock {
+		key.Aliases = withBedrockConverseRoute(key.Aliases, model)
 	}
 
 	// Vertex posture → Bifrost VertexKeyConfig. Auth modes:
@@ -540,7 +557,7 @@ func getBifrostClient(
 		baseURL:  baseURL,
 		tlsID:    tls.id(),
 		subID:    subBlockID(bedrock, vertex, azure),
-		aliasID:  azureAPIVersionIdentityAliasID(providerKey, model, azure),
+		aliasID:  azureAPIVersionIdentityAliasID(providerKey, model, azure) + bedrockConverseAliasID(providerKey, model),
 		egressID: egressID,
 	}
 
@@ -584,7 +601,7 @@ func getBifrostClient(
 // misconfigurations surface early instead of at first API call.
 func mapProviderKey(provider string) (schemas.ModelProvider, error) {
 	switch strings.ToLower(provider) {
-	case "openai":
+	case "openai", "openai-compatible", "custom-openai":
 		return schemas.OpenAI, nil
 	// OpenAI-compatible providers the setup wizard offers. They are
 	// reached through their own base_url with the standard chat
@@ -642,7 +659,7 @@ func (bp *bifrostProvider) ChatCompletion(ctx context.Context, req *ChatRequest)
 	bCtx := newBifrostRequestContext(ctx, req)
 	resp, bErr := client.ChatCompletionRequest(bCtx, bReq)
 	if bErr != nil {
-		return nil, bifrostErrorToGo(bp.providerKey, bErr)
+		return nil, bifrostRequestError(bCtx, bp.providerKey, bErr)
 	}
 
 	return fromBifrostChatResponse(resp), nil
@@ -658,13 +675,13 @@ func (bp *bifrostProvider) ChatCompletionStream(ctx context.Context, req *ChatRe
 	bCtx := newBifrostRequestContext(ctx, req)
 	stream, bErr := client.ChatCompletionStreamRequest(bCtx, bReq)
 	if bErr != nil {
-		return nil, bifrostErrorToGo(bp.providerKey, bErr)
+		return nil, bifrostRequestError(bCtx, bp.providerKey, bErr)
 	}
 
 	var usage *ChatUsage
 	for chunk := range stream {
 		if chunk.BifrostError != nil {
-			return usage, bifrostErrorToGo(bp.providerKey, chunk.BifrostError)
+			return usage, bifrostRequestError(bCtx, bp.providerKey, chunk.BifrostError)
 		}
 		if chunk.BifrostChatResponse == nil {
 			continue
@@ -674,6 +691,9 @@ func (bp *bifrostProvider) ChatCompletionStream(ctx context.Context, req *ChatRe
 			usage = fromBifrostUsage(chunk.BifrostChatResponse.Usage)
 		}
 		chunkCb(sc)
+	}
+	if err := ctx.Err(); err != nil {
+		return usage, err
 	}
 
 	return usage, nil
@@ -925,6 +945,20 @@ func fromBifrostUsage(u *schemas.BifrostLLMUsage) *ChatUsage {
 		CompletionTokens: int64(u.CompletionTokens),
 		TotalTokens:      int64(u.TotalTokens),
 	}
+}
+
+// bifrostRequestError keeps the request's cancellation cause when Bifrost
+// converts a stopped transport request into a provider error. The Bifrost
+// context observes the caller deadline before the caller's Err may be set.
+// A transport timeout can also arrive just before that context marks itself done.
+func bifrostRequestError(ctx context.Context, provider schemas.ModelProvider, bErr *schemas.BifrostError) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	return bifrostErrorToGo(provider, bErr)
 }
 
 // bifrostErrorToGo turns a provider failure into an error that names the

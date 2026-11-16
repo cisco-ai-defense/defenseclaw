@@ -8,7 +8,8 @@ package enterprisebundle
 
 import (
 	"bytes"
-	"regexp"
+	"crypto/sha256"
+	"encoding/hex"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,13 +17,14 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/secretshape"
 )
 
 // envPlaceholderPattern is a ${NAME} environment placeholder. Nothing in the
 // config loader expands it, so only the name form counts as a reference: a
 // literal wrapped in ${...} is still a literal.
-var envPlaceholderPattern = regexp.MustCompile(`^\$\{[A-Za-z_][A-Za-z0-9_]{0,127}\}$`)
+var envPlaceholderPattern = lazyregexp.New(`^\$\{[A-Za-z_][A-Za-z0-9_]{0,127}\}$`)
 
 // configKey is key as the config loader reads it. The loader matches keys
 // case-insensitively and reads a dotted key as a path (llm.api_key at the top
@@ -149,10 +151,80 @@ func ConfigCredentials(raw []byte) ([]string, error) {
 	return names, nil
 }
 
-// CheckSecretRefs refuses (manifest_invalid) a bundle whose config.yaml
-// names a credential that secret_refs does not list. The device-side check
-// that every required reference exists (secret_ref_missing) is the
-// verifier's.
+// credentialBindingDomain keeps value_sha256 apart from every other digest
+// of a credential (enterprise secret status prints a prefix of the plain
+// SHA-256 of the stored file).
+const credentialBindingDomain = "defenseclaw-bundle-credential-v1"
+
+// CredentialValueSHA256 is the value_sha256 that binds value as credential
+// name of a bundle for tenant: the lower-case hex SHA-256 of the domain, the
+// tenant, the name and the value as the gateway reads it (surrounding
+// whitespace trimmed), each followed by a NUL. The tenant and the name make
+// the digest specific to one reference, so a table of digests of common
+// values does not match it.
+func CredentialValueSHA256(tenant, name string, value []byte) string {
+	h := sha256.New()
+	for _, part := range [][]byte{[]byte(credentialBindingDomain), []byte(tenant), []byte(name), bytes.TrimSpace(value)} {
+		h.Write(part)
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// CheckCredentialChange refuses storing value as credential name unless the
+// signed bundle that uses the credential binds that value. rotation is the
+// verified bundle the caller names for a new value (enterprise secret set
+// --bundle), nil for none; confirmed is the manifest of the confirmed
+// bundle, nil when none is confirmed. With rotation, it must reference name
+// and bind value. Without, a confirmed bundle that references name must bind
+// value: an entry without a digest is secret_ref_unbound, another digest
+// secret_ref_mismatch. A credential no bundle references is not checked; no
+// signed record names it.
+func CheckCredentialChange(confirmed, rotation *Manifest, name string, value []byte) error {
+	m, source := confirmed, "the confirmed policy bundle"
+	if rotation != nil {
+		m, source = rotation, "the --bundle policy bundle"
+	}
+	if m == nil {
+		return nil
+	}
+	for _, ref := range m.SecretRefs {
+		if ref.Name() != name {
+			continue
+		}
+		switch {
+		case ref.ValueSHA256 == "":
+			return refuse(CodeSecretRefUnbound, "secret_refs", "%s signs the name of credential %s but not its value; sign a bundle with --secret-file %s=<file> and pass it with --bundle", source, safePath(name), safePath(name))
+		case !ref.Binds(m.TenantID, value):
+			return refuse(CodeSecretRefMismatch, "secret_refs", "%s signs another value for credential %s; to rotate it, sign a bundle with --secret-file %s=<file> for the new value and pass it with --bundle", source, safePath(name), safePath(name))
+		}
+		return nil
+	}
+	if rotation != nil {
+		return refuse(CodeSecretRefMismatch, "secret_refs", "%s does not reference credential %s", source, safePath(name))
+	}
+	return nil
+}
+
+// SecretRefState is what bundle verify reports for one secret_refs entry on
+// a device: its credential name, whether the bundle requires it, whether the
+// device stores a value for it and whether that value is the one the bundle
+// signs. Every listed entry binds a value (CheckSecretRefs refuses one that
+// does not), so there is no separate bound flag. It never carries a value
+// or any digest.
+type SecretRefState struct {
+	Name       string `json:"name"`
+	Required   bool   `json:"required"`
+	Present    bool   `json:"present"`
+	ValueMatch bool   `json:"value_match"`
+}
+
+// CheckSecretRefs refuses a bundle whose config.yaml names a credential that
+// secret_refs does not list (manifest_invalid), also a tenant secret of
+// enterprise.account_join (AccountJoinCredentials), and a secret_refs entry that
+// binds no value (secret_ref_unbound). The device-side checks that every
+// required credential is stored (secret_ref_missing) with its signed value
+// (secret_ref_mismatch) are the verifier's.
 func CheckSecretRefs(m *Manifest, b *Bundle) error {
 	raw, ok := b.Files[ConfigName]
 	if !ok {
@@ -169,6 +241,20 @@ func CheckSecretRefs(m *Manifest, b *Bundle) error {
 	for _, name := range needed {
 		if !listed[name] {
 			return refuse(CodeManifestInvalid, "secret_refs", "config.yaml references the credential %s, which secret_refs does not list", safePath(name))
+		}
+	}
+	join, err := AccountJoinCredentials(raw)
+	if err != nil {
+		return err
+	}
+	for _, name := range join {
+		if !listed[name] {
+			return refuse(CodeManifestInvalid, "secret_refs", "enterprise.account_join uses the tenant secret %s, which secret_refs does not bind", safePath(name))
+		}
+	}
+	for _, ref := range m.SecretRefs {
+		if ref.ValueSHA256 == "" {
+			return refuse(CodeSecretRefUnbound, "secret_refs", "the bundle signs the name of credential %s but not its value; sign it again with --secret-file %s=<file>", safePath(ref.Name()), safePath(ref.Name()))
 		}
 	}
 	return nil

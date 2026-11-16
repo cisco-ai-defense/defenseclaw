@@ -133,7 +133,7 @@ func TestHermesSetupAdmissionRejectsChangedPathBytesVersionAndCustodyBeforeMutat
 			mutate: func(t *testing.T, _ *SetupOpts) {
 				t.Helper()
 				hermesAgentVersionProbe = func(context.Context, string) (string, error) {
-					return "Hermes Agent v0.19.0", nil
+					return "Hermes Agent v0.21.3 (2026.9.14)", nil
 				}
 			},
 			wantError: "fresh version probe does not match protected raw, normalized, and contract evidence",
@@ -267,4 +267,55 @@ func loadHermesReceiptDigestForTest(t *testing.T, dataDir string) string {
 		t.Fatal("protected Hermes receipt unavailable")
 	}
 	return selection.SHA256
+}
+
+func hermesAdmissionMutationTargets(opts SetupOpts, configPath string) []string {
+	return []string{
+		configPath,
+		filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName),
+		filepath.Join(opts.DataDir, activeConnectorFile),
+		filepath.Join(opts.DataDir, hookContractLockFile),
+		filepath.Join(opts.DataDir, ".hermes-lifecycle.lock"),
+		filepath.Join(opts.DataDir, "hooks", "hermes-hook.sh"),
+		filepath.Join(opts.DataDir, "hooks", hermesDirectNativeStateFileName),
+		managedFileBackupPath(opts.DataDir, "hermes", "config"),
+		managedFileBackupPath(opts.DataDir, "hermes", "config.yaml"),
+		managedFileBackupPath(opts.DataDir, "hermes", hermesAllowlistLogicalName),
+	}
+}
+
+func snapshotHermesAdmissionTargets(t *testing.T, paths []string) map[string][]byte {
+	t.Helper()
+	snapshot := make(map[string][]byte, len(paths))
+	for _, path := range paths {
+		body, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			snapshot[path] = nil
+			continue
+		}
+		if err != nil {
+			t.Fatalf("snapshot %s: %v", path, err)
+		}
+		snapshot[path] = append([]byte(nil), body...)
+	}
+	return snapshot
+}
+
+func assertHermesAdmissionTargetsUnchanged(t *testing.T, snapshot map[string][]byte) {
+	t.Helper()
+	for path, want := range snapshot {
+		got, err := os.ReadFile(path)
+		if want == nil {
+			if !os.IsNotExist(err) {
+				t.Fatalf("admission failure created %s: %v", path, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("read unchanged target %s: %v", path, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("admission failure mutated %s", path)
+		}
+	}
 }

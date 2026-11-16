@@ -82,7 +82,7 @@ var windowsConnectorSupport = map[string]PlatformSupport{
 	},
 	"opencode": {
 		Status: PlatformSupported,
-		Reason: "OpenCode native Windows setup is supported; OpenCode recommends WSL but does not require it.",
+		Reason: "OpenCode V2 and the DefenseClaw plugin are supported on native Windows x64 using the reviewed @opencode/cli contract.",
 	},
 	"amp": {
 		Status: PlatformSupported,
@@ -91,14 +91,6 @@ var windowsConnectorSupport = map[string]PlatformSupport{
 	"hermes": {
 		Status: PlatformSupported,
 		Reason: "Hermes native shell hooks use a direct DefenseClaw executable on native Windows x64; restart any open Hermes session after setup so it loads them.",
-	},
-	"openhands": {
-		Status: PlatformUnsupported,
-		Reason: "OpenHands CLI requires WSL; DefenseClaw does not implement a WSL connector path.",
-	},
-	"omnigent": {
-		Status: PlatformSupported,
-		Reason: "OmniGent is supported on native Windows in degraded mode; DefenseClaw uses its awaited in-process policy API without terminal wrapping or filesystem/network sandbox parity.",
 	},
 	"openclaw": {
 		Status: PlatformUnsupported,
@@ -129,6 +121,12 @@ func ConnectorSupportOnOS(name, goos string) PlatformSupport {
 			Status: PlatformNotCertified,
 			Reason: "This connector has not completed native Windows x64 certification.",
 		}
+	}
+	if name == "opencode" {
+		if goos == "linux" || goos == "darwin" {
+			return PlatformSupport{Status: PlatformSupported, Reason: "OpenCode V2 and the DefenseClaw plugin are supported on Linux and macOS using the reviewed @opencode/cli contract."}
+		}
+		return PlatformSupport{Status: PlatformPreview, Reason: "OpenCode V2 has not completed certification on this operating system."}
 	}
 	return PlatformSupport{
 		Status: PlatformSupported,

@@ -25,6 +25,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import click
+import pytest
 from click.testing import CliRunner
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -45,6 +47,88 @@ def test_config_set_hilt_false_names_connector_override(monkeypatch) -> None:
     )
     assert "HILT remains on for codex" in notes[0]
     assert "guardrail hilt off" in notes[0]
+
+
+def _pack_cfg(path: str, digest: str):
+    pin = SimpleNamespace(path=path, digest=digest)
+    return SimpleNamespace(guardrail=SimpleNamespace(custom_packs={"w5team": pin}))
+
+
+def _valid_pack(files_digest: str):
+    return SimpleNamespace(valid=True, error=None, summary={"files_digest": files_digest})
+
+
+def test_config_set_custom_pack_names_a_pin_that_does_not_match(monkeypatch, tmp_path) -> None:
+    # GAP-1076: the writer stored a stale pin and printed nothing; only use-pack refused it later.
+    pack = tmp_path / "w5pack"
+    pack.mkdir()
+    lf, crlf = "a" * 64, "b" * 64
+    monkeypatch.setattr(cmd_config.config_module, "load", lambda: _pack_cfg(str(pack), f"sha256:{lf}"))
+    monkeypatch.setattr("defenseclaw.rulepack_validation.validate_rule_pack", lambda _path: _valid_pack(crlf))
+    for change in (
+        SimpleNamespace(path="guardrail.custom_packs.w5team", value={"path": str(pack), "digest": f"sha256:{lf}"}),
+        SimpleNamespace(path="guardrail.custom_packs.w5team.digest", value=f"sha256:{lf}"),
+    ):
+        notes = cmd_config._custom_pack_registration_notes([change])  # noqa: SLF001 - message regression.
+        assert len(notes) == 1
+        assert "guardrail.custom_packs.w5team is registered but will not load" in notes[0]
+        assert f"sha256:{lf}" in notes[0] and f"sha256:{crlf}" in notes[0]
+        assert f"defenseclaw config set guardrail.custom_packs.w5team.digest sha256:{crlf}" in notes[0]
+
+
+def test_config_set_custom_pack_is_quiet_for_a_matching_pin_and_other_keys(monkeypatch, tmp_path) -> None:
+    pack = tmp_path / "w5pack"
+    pack.mkdir()
+    digest = "c" * 64
+    monkeypatch.setattr(cmd_config.config_module, "load", lambda: _pack_cfg(str(pack), f"sha256:{digest}"))
+    monkeypatch.setattr("defenseclaw.rulepack_validation.validate_rule_pack", lambda _path: _valid_pack(digest))
+    change = SimpleNamespace(path="guardrail.custom_packs.w5team.digest", value=f"sha256:{digest}")
+    assert cmd_config._custom_pack_registration_notes([change]) == []  # noqa: SLF001
+    other = SimpleNamespace(path="guardrail.mode", value="observe")
+    assert cmd_config._custom_pack_registration_notes([other]) == []  # noqa: SLF001
+    unset = SimpleNamespace(path="guardrail.custom_packs.w5team", value=None, unset=True)
+    assert cmd_config._custom_pack_registration_notes([unset]) == []  # noqa: SLF001
+
+
+def test_config_set_custom_pack_names_a_missing_folder_and_an_invalid_pack(monkeypatch, tmp_path) -> None:
+    change = SimpleNamespace(path="guardrail.custom_packs.w5team", value={"path": "x", "digest": "sha256:" + "d" * 64})
+    gone = str(tmp_path / "missing")
+    monkeypatch.setattr(cmd_config.config_module, "load", lambda: _pack_cfg(gone, "sha256:" + "d" * 64))
+    notes = cmd_config._custom_pack_registration_notes([change])  # noqa: SLF001
+    assert len(notes) == 1 and "is not a folder" in notes[0] and "will not load" in notes[0]
+
+    pack = tmp_path / "bad"
+    pack.mkdir()
+    monkeypatch.setattr(cmd_config.config_module, "load", lambda: _pack_cfg(str(pack), "sha256:" + "d" * 64))
+    issue = SimpleNamespace(code="inventory_unexpected", path="default/judge/injection.yaml", reason="unexpected YAML component")
+    monkeypatch.setattr(
+        "defenseclaw.rulepack_validation.validate_rule_pack",
+        lambda _path: SimpleNamespace(valid=False, error=issue, summary={}),
+    )
+    notes = cmd_config._custom_pack_registration_notes([change])  # noqa: SLF001
+    assert len(notes) == 1 and "is invalid (inventory_unexpected at default/judge/injection.yaml" in notes[0]
+    assert "defenseclaw guardrail validate-pack" in notes[0]
+
+
+def test_token_env_change_reports_broken_config_before_writer(monkeypatch) -> None:
+    app = SimpleNamespace(cfg=None, logger=None)
+    change = SimpleNamespace(path="gateway.token_env", value="NEW_TOKEN_NAME")
+    monkeypatch.setattr(cmd_config.config_module, "load", lambda: (_ for _ in ()).throw(
+        cmd_config.config_module.ConfigVersionError("config schema is invalid")
+    ))
+    with patch("defenseclaw.config_writer.apply") as writer:
+        with pytest.raises(click.ClickException, match="config.yaml was not changed: config schema is invalid"):
+            cmd_config._write_config_change(app, [change], None, "set")
+    writer.assert_not_called()
+
+
+def test_config_migrate_dry_run_ack_is_refused_before_anything_runs() -> None:
+    # --dry-run writes nothing; --ack would mark migration-v9.json read (GAP-0627).
+    with patch("defenseclaw.config_inspect.migrate_config_v9") as migrate:
+        res = CliRunner().invoke(cmd_config.config_migrate, ["--dry-run", "--ack"])
+    assert res.exit_code == 2
+    assert "use one of them" in res.output
+    migrate.assert_not_called()
 
 
 class _IsolatedHome:
@@ -205,6 +289,45 @@ class ValidateConfigTests(unittest.TestCase):
             ],
         )
 
+    def test_enum_refusal_leaves_out_the_empty_unset_value(self):
+        # GAP-0199: no "allowed values: , open, balanced, strict."
+        refusal = ConfigInspectError(
+            "candidate field=$.guardrail.profiles.p.sandbox.min_profile; reason=...",
+            field_path="$.guardrail.profiles.p.sandbox.min_profile",
+            reason='[config_schema_invalid] configuration violates the enum constraint; expected one of '
+            '["","open","balanced","strict"]; inspect the config_version 9 settings reference and correct this field',
+        )
+        with _IsolatedHome() as env:
+            env.config_path.write_text(
+                "config_version: 9\nguardrail:\n  profiles:\n    p:\n      sandbox:\n        min_profile: none\n",
+                encoding="utf-8",
+            )
+            with patch.object(cmd_config, "inspect_v8_config", side_effect=refusal):
+                res = cmd_config.validate_config()
+        self.assertEqual(
+            res.errors,
+            ['line 6: guardrail.profiles.p.sandbox.min_profile is "none"; allowed values: open, balanced, strict.'],
+        )
+
+    def test_length_refusal_names_the_fields_own_limit(self):
+        # GAP-0181: the gateway's 512, not a fixed 4096.
+        refusal = ConfigInspectError(
+            "candidate field=$.openshell.admin.request_access; reason=...",
+            field_path="$.openshell.admin.request_access",
+            reason="[config_schema_invalid] configuration violates the maxLength constraint; expected a string of "
+            "at most 512 characters (it has 513); inspect the config_version 9 settings reference and correct this field",
+        )
+        with _IsolatedHome() as env:
+            env.config_path.write_text(
+                "config_version: 9\nopenshell:\n  admin:\n    request_access: " + "a" * 513 + "\n",
+                encoding="utf-8",
+            )
+            with patch.object(cmd_config, "inspect_v8_config", side_effect=refusal):
+                res = cmd_config.validate_config()
+        self.assertEqual(len(res.errors), 1, res.errors)
+        self.assertIn("openshell.admin.request_access has 513 characters; the limit is 512.", res.errors[0])
+        self.assertNotIn("4096", res.errors[0])
+
     def test_unknown_profile_refusal_names_the_assignment_and_its_line(self):
         # GAP-0288: no "candidate field=$; reason=configuration could not be compiled safely".
         refusal = ConfigInspectError(
@@ -364,6 +487,40 @@ class UndeclaredKeyWordingTests(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("auto_sync was retired in config_version 9", result.output)
 
+    def test_config_set_refuses_retired_openshell_middleware(self):
+        for key, value in (("openshell.middleware.enabled", "true"), ("openshell.middleware", "{}")):
+            result = CliRunner().invoke(cmd_config.config_set, [key, value], obj=SimpleNamespace())
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("openshell.middleware was retired", result.output)
+            self.assertIn("config.yaml was not changed", result.output)
+
+    def test_config_set_refuses_retired_openshell_middleware_in_parent_object(self):
+        values = (
+            ('{"middleware":{"enabled":true},"token_delivery":"env"}', ["--json"]),
+            ("{middleware: {enabled: true}, token_delivery: env}", []),
+        )
+        for value, options in values:
+            with self.subTest(value=value), patch.object(cmd_config, "_write_config_change") as writer:
+                result = CliRunner().invoke(
+                    cmd_config.config_set, ["openshell", value, *options], obj=SimpleNamespace()
+                )
+                self.assertNotEqual(result.exit_code, 0)
+                self.assertIn("openshell.middleware was retired", result.output)
+                self.assertIn("config.yaml was not changed", result.output)
+                writer.assert_not_called()
+
+    def test_config_set_allows_openshell_parent_object_without_retired_field(self):
+        with patch.object(cmd_config, "_write_config_change") as writer:
+            result = CliRunner().invoke(
+                cmd_config.config_set,
+                ["openshell", '{"token_delivery":"env"}', "--json"],
+                obj=SimpleNamespace(),
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        writer.assert_called_once()
+        self.assertEqual(writer.call_args.args[1][0].path, "openshell")
+        self.assertEqual(writer.call_args.args[1][0].value, {"token_delivery": "env"})
+
     def test_config_set_control_character_is_plain(self):
         from defenseclaw.context import AppContext
 
@@ -398,6 +555,17 @@ class UndeclaredKeyWordingTests(unittest.TestCase):
             "line 2: gateway2: unknown field. All fields: defenseclaw config reference --format json-schema",
         )
 
+    def test_retired_v7_key_uses_gateway_retirement_message(self):
+        raw = b"config_version: 9\naudit_sinks: []\n"
+        reason = (
+            "[config_schema_invalid] audit_sinks was retired in config_version 8; "
+            "use observability.destinations"
+        )
+        self.assertEqual(
+            cmd_config._plain_v8_issue(raw, "$.audit_sinks", reason),
+            "line 2: audit_sinks was retired in config_version 8; use observability.destinations",
+        )
+
     def test_retired_key_names_its_replacement(self):
         v8 = b"config_version: 8\nskill_actions:\n  medium: {install: block}\n"
         self.assertEqual(
@@ -417,11 +585,20 @@ class UndeclaredKeyWordingTests(unittest.TestCase):
 
     def test_maximum_length_names_value_and_bound(self):
         raw = b"config_version: 9\nguardrail:\n  block_message: " + b"B" * 4097 + b"\n"
+        # The bound is the gateway's own for this field (GAP-0181).
+        message = cmd_config._plain_v8_issue(
+            raw,
+            "$.guardrail.block_message",
+            "[maxLength] configuration violates the maxLength constraint; expected a string of at most 4096 "
+            "characters (it has 4097)",
+        )
+        self.assertIn("4097 characters; the limit is 4096.", message)
+        # Without the gateway's bound no number is made up.
         message = cmd_config._plain_v8_issue(
             raw, "$.guardrail.block_message", "[maxLength] configuration violates the maxLength constraint"
         )
-        self.assertIn("4097 characters", message)
-        self.assertIn("4096", message)
+        self.assertIn("4097 characters; that is longer than the field allows.", message)
+        self.assertNotIn("the limit is", message)
 
     def test_empty_config_set_points_to_unset(self):
         result = CliRunner().invoke(cmd_config.config_set, ["guardrail.block_at", ""], obj=SimpleNamespace())

@@ -22,6 +22,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
 
@@ -79,6 +80,10 @@ type Generation struct {
 	activePatterns *localPatternsActivation
 	connectorRules map[string]*compiledRulePackCategories
 	judge          *LLMJudge
+	// decisionJudge answers the hook tool calls of the connectors in
+	// decision_model.hook_connectors where the LLM judge does not run
+	// (cascade 2); nil otherwise (newDecisionOnlyJudge).
+	decisionJudge *LLMJudge
 	// registeredRules are the compiled rules registered for connectors
 	// outside the configuration (connector setup, a sandbox harness) while
 	// g is live: the process-wide set when g was published plus the
@@ -86,6 +91,11 @@ type Generation struct {
 	// from the process-wide map the next generation rewrites (GAP-1466).
 	// Guarded by ruleCategoriesMu; nil for a generation never published.
 	registeredRules map[string]*compiledRulePackCategories
+	// sandboxPacks are the custom required sandbox packs the floors name,
+	// by reference, as loaded from sandboxPackDir (loadSandboxRequiredPacks);
+	// publishing the generation makes them the packs the sandbox routes use.
+	sandboxPacks   map[string]*packs.Pack
+	sandboxPackDir string
 	// opaError is why a non-strict build has no OPA ("" when it has one).
 	opaError string
 	// scannerPinError is why a non-strict build found a pinned scanner file
@@ -133,8 +143,9 @@ type scannerSettings struct {
 // generationProviders is the LLM provider registry of one generation, built
 // from the embedded providers and llm_providers.
 type generationProviders struct {
-	Providers   []configs.Provider
-	OllamaPorts []int
+	Providers      []configs.Provider
+	OllamaPorts    []int
+	OverlayApplied bool
 }
 
 // PolicyHealth is the "policy" object of /health and /status. It is omitted

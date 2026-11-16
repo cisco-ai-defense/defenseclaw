@@ -3,8 +3,7 @@
 #
 # finalize.ps1 — PowerShell mirror of packaging/scripts/lib/finalize.sh.
 # Optional post-signing helper for AVC's Windows pipeline; see the sh
-# sibling for the full rationale and docs/specs/002-windows-avc-packaging/
-# design.md § Decisions.
+# sibling for the full rationale.
 #
 # USAGE
 #   ./finalize.ps1 -SetupExe out/DefenseClawSetup-Enterprise-x64.exe `
@@ -60,7 +59,7 @@ if ($python) {
     # temp dir would be readable + potentially writable by other users
     # on a build host; a race between our write and our exec would
     # execute the attacker's code as the pipeline user. Stdin has no
-    # such surface. See CR spec-002:PRRT_kwDORuAK-s6af8jf.
+    # such surface.
     $script = @"
 import json, sys
 path, sha, size = sys.argv[1], sys.argv[2], int(sys.argv[3])
@@ -84,8 +83,7 @@ with open(path, "w", encoding="utf-8", newline="\n") as f:
     # emitter (PowerShell's JSON writer differs on integer widening,
     # null shape, and nested map ordering across .NET versions). Fail
     # loudly instead of silently emitting drift; the AVC pipeline can
-    # install python and re-run, or run the sh sibling. See CR
-    # spec-002:PRRT_kwDORuAK-s6af8jo.
+    # install python and re-run, or run the sh sibling.
     Invoke-DefenseClawDie -Code 6 -Message "finalize.ps1 requires python3 (or python) on PATH so provenance.json stays byte-identical to windows-repro-manifest's emitter output. Install python and rerun, or use finalize.sh."
 }
 

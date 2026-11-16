@@ -8,6 +8,7 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -28,6 +29,16 @@ func TestInfraSetAtomicNoisePosture(t *testing.T) {
 		{
 			name: "generic sudoers mutation", command: `printf configured > /etc/sudoers.d/opsbot`,
 			present: []string{"PATH-ETC-SUDOERS"}, strictOnly: true,
+		},
+		{
+			// The main file is the rule's own form in every profile
+			// (rel-1-0-6:GAP-0353); drop-ins above stay strict-only.
+			name: "main sudoers file mutation", command: `printf configured > /etc/sudoers`,
+			present: []string{"PATH-ETC-SUDOERS"},
+		},
+		{
+			name: "main sudoers file read", command: `cat /etc/sudoers`,
+			absent: []string{"PATH-ETC-SUDOERS"},
 		},
 		{
 			name:    "exact unrestricted sudoers grant",
@@ -271,6 +282,13 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 	const connector = "home-spelled-authorized-keys"
 	installToolCallCorpusProfileConnector(t, connector, "default")
 	const rule = "persistence.ssh_authorized_keys_command"
+	t.Setenv("PYTHONPATH", "")
+	t.Setenv("PYTHONHOME", "")
+	pythonCWD := t.TempDir()
+	shadowCWD := t.TempDir()
+	if err := os.WriteFile(filepath.Join(shadowCWD, "subprocess.py"), []byte("# local module\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	tests := []struct {
 		name, command, cwd, home string
 		write                    bool
@@ -303,6 +321,73 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		{"python open append", `python3 -c "import os; open(os.path.expanduser('~/.ssh/authorized_keys'), 'a').write('dccert-block-marker\n')"`, "", "", true},
 		{"python Path home", `python3 -c "from pathlib import Path; p = Path.home() / '.ssh' / 'authorized_keys'; p.write_text(p.read_text() + 'dccert-block-marker\n')"`, "", "", true},
 		{"python Path expanduser", `python3 -c "from pathlib import Path; Path('~/.ssh/authorized_keys').expanduser().write_text('dccert-block-marker\n')"`, "", "", true},
+		// A docstring, a comment, string text or f-string literal text that
+		// spells the write may run: a module the agent's import path supplies
+		// (PYTHONPATH, a sitecustomize, a shadowed import) can exec
+		// __main__.__doc__ or any part of sys.orig_argv, whatever the program
+		// imports, and the gateway does not see that path. The gateway's own
+		// clean environment and a clean working directory prove nothing, so
+		// every such string counts as code (GAP-1199 stays a false block).
+		{"python docstring write", `python3 -c '"""p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print("ok")'`, "", "", true},
+		{"python exec docstring write", `python3 -c 'from pathlib import Path; exec("""p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")""")'`, "", "", true},
+		// An f-string runs its fields: the write in one is not a docstring.
+		{"python f-string write", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; f"""{p.write_text("dccert-block-marker")}"""'`, "", "", true},
+		{"python f-string same quotes write", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; f"""{"""a""" + str(p.write_text("dccert-block-marker"))}"""'`, "", "", true},
+		{"python docstring write beside an f-string", `python3 -c '"""p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print(f"{1}")'`, "", "", true},
+		{"python f-string literal text write", `python3 -c "p=Path.home()/'.ssh'/'authorized_keys'; f'''p.write_text('sample')'''"`, "", "", true},
+		{"python f-string literal text write beside a pathlib import", `python3 -c "from pathlib import Path; p=Path.home()/'.ssh'/'authorized_keys'; f'''p.write_text('sample')'''"`, "", "", true},
+		{"python f-string text beside a write field", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; f"""note: {p.write_text("dccert-block-marker")}"""'`, "", "", true},
+		{"python exec comment beside a docstring write", `python3 -c '"""p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print("ok")  # no exec here'`, "", "", true},
+		{"python exec word in a docstring write", `python3 -c '"""exec this: p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print("ok")'`, "", "", true},
+		{"python getattr exec docstring write", `python3 -c 'from pathlib import Path; getattr(__builtins__, "ex" + "ec")("""p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")""")'`, "", "", true},
+		{"python child interpreter docstring write", `python3 -c 'import subprocess; subprocess.run(["python3", "-c", """from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""])'`, "", "", true},
+		{"python unused subprocess import beside a docstring write", `python3 -c 'import subprocess; """p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print("ok")'`, "", "", true},
+		{"python shadowed subprocess import beside a docstring write", `python3 -c '"""p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; import subprocess; print("ok")'`, shadowCWD, "", true},
+		{"python import path override beside a docstring write", `PYTHONPATH=` + shadowCWD + ` python3 -c '"""p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; import subprocess; print("ok")'`, pythonCWD, "", true},
+		{"python unused aliased imports beside a docstring write", `python3 -c 'import subprocess as sp, ctypes; from os import system as run, popen; """p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print("ok")'`, "", "", true},
+		{"python unused preloaded imports beside a docstring write", `python3 -c 'from os import system as run, popen; import sys; """p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print("ok")'`, "", "", true},
+		{"python shadowable module import after a docstring write", `python3 -c '"""p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; import helper'`, "", "", true},
+		{"python fullwidth exec of a string write", `python3 -c 'ｅｘｅｃ("""from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")""")'`, "", "", true},
+		{"python used json import beside a docstring write", `python3 -c '"""p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; import json; print(json.dumps(1))'`, "", "", true},
+		{"python used aliased import beside a docstring write", `python3 -c 'import subprocess as sp; """p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; sp.run(["true"])'`, "", "", true},
+		{"python star import beside a docstring write", `python3 -c 'from subprocess import *; """p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print("ok")'`, "", "", true},
+		{"python module docstring exec", `python3 -c '"""from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; exec(__doc__)'`, "", "", true},
+		{"python docstring written to a module and imported", `python3 -c 'open("m.py", "w").write("""from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""); import m'`, "", "", true},
+		{"python posix_spawn child docstring write", `python3 -c 'import os; os.posix_spawn("/usr/bin/python3", ["python3", "-c", """from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""], {})'`, "", "", true},
+		{"python timeit docstring write", `python3 -c 'import timeit; timeit.timeit("""from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")""", number=1)'`, "", "", true},
+		{"python one-line f-string text write", `python3 -c 'p = Path.home() / ".ssh" / "authorized_keys"; print(f"p.write_text(42)")'`, "", "", true},
+		{"python one-line f-string text write beside a pathlib import", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; print(f"p.write_text(42)")'`, "", "", true},
+		{"python string text write", `python3 -c 'p = Path.home() / ".ssh" / "authorized_keys"; print("p.write_text(42)")'`, "", "", true},
+		{"python string text write beside a pathlib import", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; print("p.write_text(42)")'`, "", "", true},
+		{"python string in an f-string field write", `python3 -c "p = Path.home() / '.ssh' / 'authorized_keys'; print(f'{\"p.write_text(42)\"}')"`, "", "", true},
+		{"python string in an f-string field write beside a pathlib import", `python3 -c "from pathlib import Path; p = Path.home() / '.ssh' / 'authorized_keys'; print(f'{\"p.write_text(42)\"}')"`, "", "", true},
+		{"python one-line f-string field write", `python3 -c "from pathlib import Path; p = Path.home() / '.ssh' / 'authorized_keys'; print(f'{p.write_text(\"k\")}')"`, "", "", true},
+		{"python string text expanduser write", `python3 -c "print('Path(\"~/.ssh/authorized_keys\").expanduser().write_text(\"k\")')"`, "", "", true},
+		// f"{p=}" does not bind p again.
+		{"python format spec text write", `python3 -c 'p = Path.home() / ".ssh" / "authorized_keys"; print(f"{1:p.write_text(42)}")'`, "", "", true},
+		{"python format spec text write beside a pathlib import", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; print(f"{1:p.write_text(42)}")'`, "", "", true},
+		{"python format spec field write", `python3 -c "from pathlib import Path; p = Path.home() / '.ssh' / 'authorized_keys'; print(f'{1:{p.write_text(\"k\")}}')"`, "", "", true},
+		{"python self-documenting field then write", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; print(f"{p=}"); p.write_text("k")'`, "", "", true},
+		{"python ordinary variable beside a docstring write", `python3 -c 'source = 1; """p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print(source)'`, "", "", true},
+		{"python ordinary names beside a docstring write", `python3 -c 'doc = copy_count = 1; """p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print(doc, copy_count)'`, "", "", true},
+		{"python local alias of exec docstring write", `python3 -c 'source = exec; source("""from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")""")'`, "", "", true},
+		{"python imported source beside a docstring write", `python3 -c 'from inspect import getsource as source; """p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print(source)'`, "", "", true},
+		{"python star import and a variable beside a docstring write", `python3 -c 'from os import *; source = 1; """p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print(source)'`, "", "", true},
+		{"python exec string text write", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; exec("p.write_text(42)")'`, "", "", true},
+		// A path bound again before the write is not the keys file (GAP-1299).
+		{"python reassigned path", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; p = Path("notes.txt"); p.write_text("example")'`, "", "", false},
+		{"python reassigned pathlib path", `python3 -c "import pathlib; p = pathlib.Path.home() / '.ssh' / 'authorized_keys'; p = pathlib.Path('notes.txt'); p.write_text('example')"`, "", "", false},
+		// Only a binding in code to another literal path counts: string text, a
+		// self-documenting f-string field, p = p, the keys file again or a loop
+		// target may still be the keys file.
+		{"python rebinding spelled in string text", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; print("p = Path(1)"); p.write_text("k")'`, "", "", true},
+		{"python rebinding spelled in a docstring", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; """p = Path("notes.txt")"""; p.write_text("k")'`, "", "", true},
+		{"python path bound to itself", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; p = p; p.write_text("k")'`, "", "", true},
+		{"python path bound to the keys file again", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; p = Path("~/.ssh/authorized_keys").expanduser(); p.write_text("k")'`, "", "", true},
+		{"python path bound to a keys literal", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; p = Path("/home/alice/.ssh/authorized_keys"); p.write_text("k")'`, "", "", true},
+		{"python conditional rebinding", "python3 -c 'from pathlib import Path; p = Path.home() / \".ssh\" / \"authorized_keys\";\nif False:\n    p = Path(\"notes.txt\")\np.write_text(\"k\")'", "", "", true},
+		{"python attribute rebinding", `python3 -c 'from pathlib import Path; import types; x = types.SimpleNamespace(); p = Path.home() / ".ssh" / "authorized_keys"; x.p = Path("notes.txt"); p.write_text("k")'`, "", "", true},
+		{"python loop target path", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; [p.write_text("k") for p in [p]]'`, "", "", true},
 		{"python append absolute", `python3 -c 'open("/home/alice/.ssh/authorized_keys", "a").write("dccert-block-marker")'`, "", "", true},
 		{"python home append", `python -c 'open("$HOME/.ssh/authorized_keys", "a").write("dccert-block-marker")'`, "", "", true},
 		{"perl write", `perl -e 'open(F, ">>", "$ENV{HOME}/.ssh/authorized_keys"); print F "dccert-block-marker\n"; close(F)'`, "", "", true},
@@ -310,9 +395,9 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		{"ruby append", `ruby -e 'File.open("~/.ssh/authorized_keys", "a") { |f| f.write("dccert-block-marker") }'`, "", "", true},
 		{"node append", `node -e 'require("fs").appendFileSync("/home/alice/.ssh/authorized_keys", "dccert-block-marker")'`, "", "", true},
 		{"node write target", `node -e 'require("fs").writeFileSync("/home/alice/.ssh/authorized_keys", "dccert-block-marker")'`, "", "", true},
-		{"node write data path", `node -e 'require("fs").writeFileSync("/tmp/report.txt", "~/.ssh/authorized_keys")'`, "", "", false},
-		{"node append log text", `node -e 'require("fs").appendFileSync("/tmp/log", "/home/alice/.ssh/authorized_keys")'`, "", "", false},
-		{"python open data path", `python3 -c 'open("/tmp/report.txt", "a").write("~/.ssh/authorized_keys")'`, "", "", false},
+		{"node write data path", `node -e 'require("fs").writeFileSync("/tmp/report.txt", "~/.ssh/authorized_keys")'`, "", "", true},
+		{"node append log text", `node -e 'require("fs").appendFileSync("/tmp/log", "/home/alice/.ssh/authorized_keys")'`, "", "", true},
+		{"python open data path", `python3 -c 'open("/tmp/report.txt", "a").write("~/.ssh/authorized_keys")'`, "", "", true},
 		{"find exec", `find ~/.ssh -name authorized_keys -exec sh -c 'echo dccert-block-marker >> "$1"' _ {} \;`, "", "", true},
 		{"decoded shell", `echo ZWNobyAic3NoLWVkMjU1MTkgQUFBQXVjY21hcmtlciB1Y2NAdGVzdCIgPj4gfi8uc3NoL2F1dGhvcml6ZWRfa2V5cw== | base64 -d | sh`, "", "", true},
 		{"symlink write", `ln -sf ~/.ssh/authorized_keys ./keys.link && echo dccert-block-marker >> ./keys.link`, "", "", true},
@@ -338,10 +423,12 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		{"combined append", `hostname &>> ~/.ssh/authorized_keys`, "", "", true},
 		{"append redirect", `hostname >> ~/.ssh/authorized_keys`, "", "", true},
 		{"clobber redirect", `hostname >| ~/.ssh/authorized_keys`, "", "", true},
-		{"read redirect", `hostname < ~/.ssh/authorized_keys`, "", "", false},
+		{"read redirect", `hostname < ~/.ssh/authorized_keys`, "", "", true},
 		{"error log redirect", `hostname 2> /tmp/err`, "", "", false},
 		{"known hosts redirect", `hostname > ~/.ssh/known_hosts`, "", "", false},
-		{"ssh config redirect", `hostname > ~/.ssh/config`, "", "", false},
+		// ~/.ssh/config is protected like the keys (lead ruling 10-31,
+		// rel-1-0-4:GAP-2586); other new files under ~/.ssh are not.
+		{"ssh config redirect", `hostname > ~/.ssh/config`, "", "", true},
 		{"other ssh file redirect", `hostname 2> ~/.ssh/other`, "", "", false},
 		{"other home file redirect", `hostname > /home/alice/notes.txt`, "", "", false},
 		{"structured Write", `{"file_path":"/home/alice/.ssh/authorized_keys","content":"key"}`, "", "", true},
@@ -365,27 +452,48 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		{"windows named OutFile", `"dccert-block-marker" | Out-File -Append -FilePath "$HOME\.ssh\authorized_keys"`, `C:/Users/alice/project`, `C:/Users/alice`, true},
 		{"windows Git Bash path", `echo dccert-block-marker >> /c/Users/alice/.ssh/authorized_keys`, `C:/Users/alice/project`, `C:/Users/alice`, true},
 		{"cat", `cat ~/.ssh/authorized_keys`, "", "", false},
-		{"python read", `python3 -c 'open("/home/alice/.ssh/authorized_keys", "r").read()'`, "", "", false},
-		{"python separate write", `python3 -c 'open("/home/alice/.ssh/authorized_keys", "r"); open("/tmp/other", "a")'`, "", "", false},
-		{"python printed write", `python3 -c 'print("open(\"/home/alice/.ssh/authorized_keys\", \"a\")")'`, "", "", false},
-		{"ruby read", `ruby -e 'File.open("~/.ssh/authorized_keys", "r") { |f| puts f.read }'`, "", "", false},
-		{"node read", `node -e 'require("fs").readFileSync("/home/alice/.ssh/authorized_keys")'`, "", "", false},
-		{"symlink read", `ln -s ~/.ssh/authorized_keys ./reader.link && cat ./reader.link`, "", "", false},
+		{"python read", `python3 -c 'open("/home/alice/.ssh/authorized_keys", "r").read()'`, "", "", true},
+		{"python separate write", `python3 -c 'open("/home/alice/.ssh/authorized_keys", "r"); open("/tmp/other", "a")'`, "", "", true},
+		{"python printed write", `python3 -c 'print("open(\"/home/alice/.ssh/authorized_keys\", \"a\")")'`, "", "", true},
+		{"ruby read", `ruby -e 'File.open("~/.ssh/authorized_keys", "r") { |f| puts f.read }'`, "", "", true},
+		{"node read", `node -e 'require("fs").readFileSync("/home/alice/.ssh/authorized_keys")'`, "", "", true},
+		{"symlink read", `ln -s ~/.ssh/authorized_keys ./reader.link && cat ./reader.link`, "", "", true},
+		// A plain read with no redirect, pipe into a writer or in-place flag
+		// stays allowed in action (owner decision 2, TGT-0194; GAP-2168); its
+		// write twin still blocks.
 		{"count", `grep -c ssh-ed25519 ~/.ssh/authorized_keys`, "", "", false},
+		{"count to keys file", `grep -c ssh-ed25519 marker.pub >> ~/.ssh/authorized_keys`, "", "", true},
+		{"fingerprint list", `ssh-keygen -l -f ~/.ssh/authorized_keys`, "", "", false},
+		{"fingerprint remove", `ssh-keygen -R host -f ~/.ssh/authorized_keys`, "", "", true},
 		{"metadata", `ls -l ~/.ssh/authorized_keys`, "", "", false},
-		{"diff", `diff ~/.ssh/authorized_keys marker.pub | head -5`, "", "", false},
+		{"diff", `diff ~/.ssh/authorized_keys marker.pub | head -5`, "", "", true},
 		{"line count", `wc -l ~/.ssh/authorized_keys`, "", "", false},
-		{"local copy", `cp ~/.ssh/authorized_keys /var/tmp/authorized-keys-copy.txt`, "", "", false},
-		{"mention", `echo "check ~/.ssh/authorized_keys" > notes.txt`, "", "", false},
-		{"echo path to report", `echo ~/.ssh/authorized_keys > /tmp/report.txt`, "", "", false},
+		{"line count to keys file", `wc -l marker.pub > ~/.ssh/authorized_keys2`, "", "", true},
+		{"ordinary count", `grep -c ssh-ed25519 report.txt`, "", "", false},
+		{"ordinary diff", `diff report.txt marker.pub | head -5`, "", "", false},
+		{"ordinary line count", `wc -l report.txt`, "", "", false},
+		{"local copy", `cp ~/.ssh/authorized_keys /var/tmp/authorized-keys-copy.txt`, "", "", true},
+		{"mention", `echo "check ~/.ssh/authorized_keys" > notes.txt`, "", "", true},
+		{"echo path to report", `echo ~/.ssh/authorized_keys > /tmp/report.txt`, "", "", true},
 	}
 	for _, test := range tests {
 		cwd, home := test.cwd, test.home
 		if cwd == "" {
 			cwd = "/repo"
+			if strings.HasPrefix(test.name, "python ") {
+				cwd = pythonCWD
+			}
 		}
 		if home == "" {
 			home = "/home/alice"
+			if runtime.GOOS == "windows" && test.name == "ssh config redirect" {
+				// A Windows account's home is a drive path; the
+				// authorized-keys rows also match by name, but
+				// ~/.ssh/config is judged by its resolved path, which a
+				// POSIX home does not give on Windows. The same write
+				// under the real Windows home must block (GAP-2586).
+				home = `C:\Users\alice`
+			}
 		}
 		args := []byte(`{"command":` + strconv.Quote(test.command) + `}`)
 		tool := "Bash"

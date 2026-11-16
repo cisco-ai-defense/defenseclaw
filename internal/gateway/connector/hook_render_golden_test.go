@@ -111,7 +111,7 @@ func hostHookGoldenCases() []hostHookGoldenCase {
 		}
 	})
 	add("legacy/all-scripts-no-token", func(t *testing.T, dir string) {
-		if err := WriteAllHookScripts(dir, "127.0.0.1:18999"); err != nil {
+		if err := WriteHookScriptsWithToken(dir, "127.0.0.1:18999", ""); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -184,6 +184,16 @@ func snapshotHookDir(t *testing.T, dir string) map[string]hostHookGoldenFile {
 		if err != nil {
 			return err
 		}
+		// A per-user shell hook names the data directory it was written
+		// into (HookHomeSH); the test's temporary folder stands for the
+		// golden one.
+		data = bytes.ReplaceAll(data, []byte(shellSingleQuote(filepath.Dir(dir))), []byte("'/home/golden/.defenseclaw'"))
+		// The per-user .gateway-helper record names the gateway under the
+		// home of the account that runs the test; /home/golden stands for
+		// it, so the golden does not depend on that account.
+		if home := userHomeDir(); filepath.IsAbs(home) {
+			data = bytes.ReplaceAll(data, []byte(filepath.Join(home, ".local", "bin")+"/"), []byte("/home/golden/.local/bin/"))
+		}
 		sum := sha256.Sum256(data)
 		out[filepath.ToSlash(rel)] = hostHookGoldenFile{
 			Mode:   info.Mode().Perm().String(),
@@ -254,6 +264,34 @@ func TestHostHookScriptBytesGolden(t *testing.T) {
 	t.Fatalf("host hook output drifted from %s:\n  %s", hostHookGoldenPath, strings.Join(diffs, "\n  "))
 }
 
+func TestClaudeManagedHookCarriesWriteProofOutsideSecureClient(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		managed      bool
+		secureClient bool
+		want         bool
+	}{
+		{"managed", true, false, true},
+		{"per-user", false, false, false},
+		{"secure-client", true, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := renderHookTemplate("claude-code-hook.sh", templateData{
+				Managed: tc.managed, SecureClient: tc.secureClient,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			command := bytes.Contains(body, []byte("hook resolve-writes"))
+			header := bytes.Contains(body, []byte("X-DefenseClaw-Resolved-Writes:"))
+			sent := bytes.Contains(body, []byte("RESOLVED_HEADER_ARGS[@]"))
+			if command != tc.want || header != tc.want || sent != tc.want {
+				t.Fatalf("managed write proof command=%v header=%v sent=%v, want %v", command, header, sent, tc.want)
+			}
+		})
+	}
+}
+
 // bridgeHostTemplateDir holds each plugin bridge's host template: the
 // template with its OpenShell sandbox branches resolved to the host ones
 // and the values setup renders left as placeholders. The Python plugin
@@ -267,7 +305,8 @@ const bridgeHostTemplateDir = "testdata/bridge_host"
 // bridge; the host template keeps each as its {{.Field}} placeholder.
 var bridgeHostTemplateFields = []string{
 	"APIAddr", "TokenFileJS", "FailMode", "HookSocketJS", "ServiceUID",
-	"ForeignHookGuardJS", "InstallMarkerJS", "ListenerProofJS",
+	"ForeignHookGuardJS", "InstallMarkerJS", "ListenerProofJS", "WindowsPowerShellJS",
+	"LifecycleMarkerJS", "GatewayBinaryJS",
 }
 
 // renderBridgeHostTemplate resolves a bridge template's sandbox branches to
@@ -283,7 +322,7 @@ func renderBridgeHostTemplate(asset string, managed bool) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	data := map[string]any{"Sandbox": false, "Managed": managed, "SecureClient": false}
+	data := map[string]any{"Sandbox": false, "Managed": managed, "SecureClient": false, "ManagedOutageClosed": managed}
 	for _, field := range bridgeHostTemplateFields {
 		data[field] = "{{." + field + "}}"
 	}
@@ -309,11 +348,7 @@ func renderBridgeHostTemplate(asset string, managed bool) ([]byte, error) {
 
 func TestBridgeHostTemplatesGolden(t *testing.T) {
 	for _, asset := range []string{"opencode-plugin.js", "amp-plugin.ts"} {
-		variants := []bool{false}
-		if asset == "opencode-plugin.js" {
-			variants = append(variants, true)
-		}
-		for _, managed := range variants {
+		for _, managed := range []bool{false, true} {
 			got, err := renderBridgeHostTemplate(asset, managed)
 			if err != nil {
 				t.Fatalf("render %s managed=%v: %v", asset, managed, err)
@@ -349,7 +384,7 @@ func TestManagedBridgeTemplatesCloseOpenRender(t *testing.T) {
 		for _, tc := range []struct {
 			managed, secureClient bool
 			wantClosed            bool
-		}{{true, false, true}, {false, false, false}, {true, true, false}} {
+		}{{true, false, true}, {false, false, true}, {true, true, false}} {
 			body, err := renderHookTemplate(asset, templateData{FailMode: "open", Managed: tc.managed, SecureClient: tc.secureClient})
 			if err != nil {
 				t.Fatal(err)

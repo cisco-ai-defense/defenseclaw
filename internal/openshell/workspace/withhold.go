@@ -190,7 +190,7 @@ func restoreWithheldObjects(ctx context.Context, stageRoot, base string) error {
 	for _, key := range []string{"extensions.partialClone", "pack.window"} {
 		// Exit status 5: the key was not set.
 		var ge *GitError
-		if err := g.run(ctx, "config", "--unset", key); err != nil && !(errors.As(err, &ge) && ge.ExitCode == 5) {
+		if err := g.run(ctx, "config", "--unset", key); err != nil && (!(errors.As(err, &ge)) || ge.ExitCode != 5) {
 			return err
 		}
 	}

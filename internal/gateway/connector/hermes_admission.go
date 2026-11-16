@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
@@ -57,6 +58,28 @@ func executableAdmissionRefused(err error) error {
 		return nil
 	}
 	return executableAdmissionError{err: err}
+}
+
+// ErrAgentInstallNotTrusted marks a setup refusal because the selected agent
+// executable, or a folder above it, can be written by an account other than
+// administrators and this account. Closing the agent does not change that, so
+// a refusal names the install as the fix (GAP-2479).
+var ErrAgentInstallNotTrusted = errors.New("agent install path is writable by another account")
+
+type agentInstallNotTrustedError struct{ err error }
+
+func (e agentInstallNotTrustedError) Error() string { return e.err.Error() }
+func (e agentInstallNotTrustedError) Unwrap() []error {
+	return []error{e.err, ErrAgentInstallNotTrusted}
+}
+
+// agentInstallNotTrusted marks err as ErrAgentInstallNotTrusted and keeps its
+// message and chain.
+func agentInstallNotTrusted(err error) error {
+	if err == nil {
+		return nil
+	}
+	return agentInstallNotTrustedError{err: err}
 }
 
 // ErrSetupRefusedUnchanged marks a Setup refusal raised before Setup wrote
@@ -110,16 +133,16 @@ func validateHermesWindowsSetupAdmission(ctx context.Context, opts SetupOpts) er
 	}
 	authority, err := loadHermesExecutableAuthority(opts.DataDir)
 	if err != nil {
-		return fmt.Errorf("Hermes executable admission: %w", err)
+		return fmt.Errorf("Hermes executable admission: %w", err) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if opts.AgentVersion != authority.rawVersion {
-		return errors.New("Hermes executable admission: selected raw version does not match protected evidence")
+		return errors.New("Hermes executable admission: selected raw version does not match protected evidence") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if opts.HookContractID != "" && opts.HookContractID != authority.contractID {
-		return errors.New("Hermes executable admission: selected hook contract does not match protected evidence")
+		return errors.New("Hermes executable admission: selected hook contract does not match protected evidence") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if err := validateHermesExecutableEvidence(ctx, opts.AgentExecutable, authority); err != nil {
-		return fmt.Errorf("Hermes executable admission: %w", err)
+		return fmt.Errorf("Hermes executable admission: %w", err) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	return nil
 }
@@ -137,11 +160,11 @@ func validateHermesWindowsLockPublication(
 		return nil
 	}
 	if !validSetupSelectedAgentExecutableEvidence(entry, "hermes") {
-		return errors.New("Hermes contract publication lacks valid setup-selected executable evidence")
+		return errors.New("Hermes contract publication lacks valid setup-selected executable evidence") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	authority, err := loadHermesExecutableAuthority(dataDir)
 	if err != nil {
-		return fmt.Errorf("Hermes contract publication: %w", err)
+		return fmt.Errorf("Hermes contract publication: %w", err) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if entry.RawAgentVersion != authority.rawVersion ||
 		entry.NormalizedAgentVersion != authority.normalizedVersion ||
@@ -149,10 +172,10 @@ func validateHermesWindowsLockPublication(
 		entry.CompatibilityStatus != HookCompatibilityKnown ||
 		!sameCodexExecutablePath(entry.AgentExecutable, authority.path) ||
 		!strings.EqualFold(entry.AgentExecutableSHA256, authority.digest) {
-		return errors.New("Hermes contract publication does not match protected executable evidence")
+		return errors.New("Hermes contract publication does not match protected executable evidence") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if err := validateHermesExecutableEvidence(ctx, entry.AgentExecutable, authority); err != nil {
-		return fmt.Errorf("Hermes contract publication: %w", err)
+		return fmt.Errorf("Hermes contract publication: %w", err) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	return nil
 }
@@ -207,14 +230,14 @@ func validateHermesExecutableEvidence(
 		return errors.New("selected executable is not the protected current-token updater-managed executable")
 	}
 
-	before, err := os.Lstat(selected)
+	before, err := pathidentity.LstatPinned(selected)
 	if err != nil {
 		return fmt.Errorf("inspect selected executable: %w", err)
 	}
 	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
 		return errors.New("selected executable is not a regular non-reparse file")
 	}
-	if err := hookAPIValidateDirectory(filepath.Dir(selected)); err != nil {
+	if err := hookAPIValidateAgentDirectory(filepath.Dir(selected)); err != nil {
 		return fmt.Errorf("validate selected executable directory custody: %w", err)
 	}
 	if err := hookAPIValidateOwner(selected, before); err != nil {
@@ -264,22 +287,28 @@ func validateHermesExecutableEvidence(
 	return nil
 }
 
+// hermesBoundedCommandBuffer keeps at most limit bytes of a command stream and
+// fails the write past it. The buffer is a named field, not embedded: an
+// embedded bytes.Buffer exports ReadFrom, and io.Copy (used by os/exec) then
+// reads the whole stream into it without calling Write.
 type hermesBoundedCommandBuffer struct {
-	bytes.Buffer
-	limit int64
+	buffer bytes.Buffer
+	limit  int64
 }
 
 func (b *hermesBoundedCommandBuffer) Write(p []byte) (int, error) {
-	remaining := b.limit - int64(b.Len())
+	remaining := b.limit - int64(b.buffer.Len())
 	if remaining <= 0 {
 		return 0, fmt.Errorf("command output exceeds %d bytes", b.limit)
 	}
 	if int64(len(p)) > remaining {
-		written, _ := b.Buffer.Write(p[:remaining])
+		written, _ := b.buffer.Write(p[:remaining])
 		return written, fmt.Errorf("command output exceeds %d bytes", b.limit)
 	}
-	return b.Buffer.Write(p)
+	return b.buffer.Write(p)
 }
+
+func (b *hermesBoundedCommandBuffer) String() string { return b.buffer.String() }
 
 func firstHermesVersionLine(stdout, stderr string) (string, error) {
 	output := stdout

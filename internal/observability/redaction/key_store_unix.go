@@ -47,7 +47,7 @@ func loadOrCreateCorrelationKeyPlatform(dataDir string, entropy keyEntropyReader
 	dirFD = int(dir.Fd())
 
 	for attempt := 0; attempt < keyInstallAttempts; attempt++ {
-		key, found, loadErr := loadExistingCorrelationKey(dirFD, hooks)
+		key, found, loadErr := loadExistingCorrelationKey(dirFD, hooks, runtimeowner.Trusted)
 		if loadErr != nil {
 			return CorrelationKey{}, loadErr
 		}
@@ -74,7 +74,7 @@ func loadOrCreateCorrelationKeyPlatform(dataDir string, entropy keyEntropyReader
 	return CorrelationKey{}, keyStoreError(KeyStoreErrorInstall)
 }
 
-func loadExistingCorrelationKey(dirFD int, hooks keyStoreHooks) (CorrelationKey, bool, error) {
+func loadExistingCorrelationKey(dirFD int, hooks keyStoreHooks, trusted func(uint32) bool) (CorrelationKey, bool, error) {
 	fd, err := unix.Openat(
 		dirFD,
 		correlationKeyFilename,
@@ -103,7 +103,7 @@ func loadExistingCorrelationKey(dirFD int, hooks keyStoreHooks) (CorrelationKey,
 	if err := unix.Fstat(fd, &before); err != nil {
 		return CorrelationKey{}, false, keyStoreError(KeyStoreErrorUnavailable)
 	}
-	if err := validateCorrelationKeyStat(&before); err != nil {
+	if err := validateCorrelationKeyStatOwner(&before, trusted); err != nil {
 		return CorrelationKey{}, false, err
 	}
 	if err := runAfterExistingValidation(hooks); err != nil {
@@ -123,17 +123,17 @@ func loadExistingCorrelationKey(dirFD int, hooks keyStoreHooks) (CorrelationKey,
 	if err := unix.Fstat(fd, &after); err != nil {
 		return CorrelationKey{}, false, keyStoreError(KeyStoreErrorUnavailable)
 	}
-	if err := validateCorrelationKeyStat(&after); err != nil {
+	if err := validateCorrelationKeyStatOwner(&after, trusted); err != nil {
 		return CorrelationKey{}, false, err
 	}
 	return newCorrelationKey(material), true, nil
 }
 
-func validateCorrelationKeyStat(stat *unix.Stat_t) error {
+func validateCorrelationKeyStatOwner(stat *unix.Stat_t, trusted func(uint32) bool) error {
 	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
 		return keyStoreError(KeyStoreErrorUnsafeType)
 	}
-	if !runtimeowner.Trusted(stat.Uid) {
+	if !trusted(stat.Uid) {
 		return keyStoreError(KeyStoreErrorUnsafeOwner)
 	}
 	if stat.Mode&0o077 != 0 {
@@ -143,6 +143,33 @@ func validateCorrelationKeyStat(stat *unix.Stat_t) error {
 		return keyStoreError(KeyStoreErrorInvalidLength)
 	}
 	return nil
+}
+
+func loadExistingCorrelationKeyForOwnerPlatform(dataDir string, ownerUID uint32) (CorrelationKey, error) {
+	fd, err := unix.Open(dataDir, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return CorrelationKey{}, keyStoreError(KeyStoreErrorInvalidDataDir)
+	}
+	defer func() { _ = unix.Close(fd) }()
+	trusted := func(uid uint32) bool { return uid == 0 || uid == ownerUID }
+	var info unix.Stat_t
+	if err := unix.Fstat(fd, &info); err != nil {
+		return CorrelationKey{}, keyStoreError(KeyStoreErrorUnavailable)
+	}
+	if !trusted(info.Uid) {
+		return CorrelationKey{}, keyStoreError(KeyStoreErrorUnsafeOwner)
+	}
+	if info.Mode&0o022 != 0 {
+		return CorrelationKey{}, keyStoreError(KeyStoreErrorUnsafePermissions)
+	}
+	key, found, err := loadExistingCorrelationKey(fd, keyStoreHooks{}, trusted)
+	if err != nil {
+		return CorrelationKey{}, err
+	}
+	if !found {
+		return CorrelationKey{}, keyStoreError(KeyStoreErrorUnavailable)
+	}
+	return key, nil
 }
 
 // installCorrelationKey writes and syncs a same-directory 0600 temporary file,

@@ -33,6 +33,27 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// bufferedSources are the host sensor sources Linux builds, each with the
+// buffer its Coverage counts (TestEverySourceNamesItsBufferDropsInCoverage).
+func bufferedSources() map[string]func() (Source, *Buffer) {
+	return map[string]func() (Source, *Buffer){
+		"native": func() (Source, *Buffer) {
+			source := NewSource(nil).(*linuxSource)
+			return source, source.buffer
+		},
+		"tetragon stream": func() (Source, *Buffer) {
+			stream := NewTetragonSource(nil, TetragonOptions{Mode: "consume"}).(*tetragonSource)
+			return stream, stream.buffer
+		},
+		"tetragon native process half": func() (Source, *Buffer) {
+			stream := NewTetragonSource(nil, TetragonOptions{Mode: "consume"}).(*tetragonSource)
+			half := NewSource(nil).(*linuxSource)
+			stream.proc = halfSource{linuxSource: half, cancel: func() {}}
+			return stream, half.buffer
+		},
+	}
+}
+
 // TestLinuxParsesProcNetStatSafely pins the field-offset hazard: a process can
 // name itself "a) 1 2 3 (b", and a naive split on whitespace would then read
 // ppid and the CPU counters from the wrong offsets.
@@ -138,6 +159,77 @@ func TestLinuxCredentialRootsCoverTheAgentSurfaces(t *testing.T) {
 		if underHome != (root.home == "/home/dev") {
 			t.Errorf("root %s must be tied to its home only when it lives there, got home %q", root.path, root.home)
 		}
+	}
+}
+
+func TestLinuxCredentialRootsFollowNewSessionHomes(t *testing.T) {
+	parent := t.TempDir()
+	first := filepath.Join(parent, "first")
+	second := filepath.Join(parent, "second")
+	for _, path := range []string{first, filepath.Join(first, ".aws")} {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pattern := filepath.Join(parent, "*")
+	contains := func(roots []credentialRoot, path string) bool {
+		for _, root := range roots {
+			if root.path == path {
+				return true
+			}
+		}
+		return false
+	}
+	if roots := credentialRoots([]string{pattern}); !contains(roots, filepath.Join(first, ".aws")) ||
+		contains(roots, filepath.Join(second, ".aws")) {
+		t.Fatalf("initial homes: %+v", roots)
+	}
+	if err := os.Mkdir(second, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(second, ".aws"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if roots := credentialRoots([]string{pattern}); !contains(roots, filepath.Join(second, ".aws")) {
+		t.Fatalf("new session home was not discovered: %+v", roots)
+	}
+	if roots := credentialRoots([]string{first}); !contains(roots, filepath.Join(first, ".aws")) ||
+		contains(roots, filepath.Join(second, ".aws")) {
+		t.Fatalf("explicit-home twin changed scope: %+v", roots)
+	}
+}
+
+func TestLinuxFanotifyAddsNewHomeRootsWithoutRestart(t *testing.T) {
+	parent := t.TempDir()
+	first := filepath.Join(parent, "first")
+	if err := os.Mkdir(first, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(first, ".aws"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marked := make(map[string]int)
+	source := &linuxSource{
+		homeDirs: []string{filepath.Join(parent, "*")},
+		markRoot: func(_ int, root credentialRoot) bool {
+			if _, err := os.Stat(root.path); err != nil {
+				return false
+			}
+			marked[root.path]++
+			return true
+		},
+	}
+	source.markCredentialRoots(0)
+	second := filepath.Join(parent, "second")
+	if err := os.Mkdir(second, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(second, ".aws"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source.markCredentialRoots(0)
+	if marked[filepath.Join(first, ".aws")] != 1 || marked[filepath.Join(second, ".aws")] != 1 {
+		t.Fatalf("marks after adding a home: %+v", marked)
 	}
 }
 

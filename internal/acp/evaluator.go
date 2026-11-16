@@ -14,9 +14,12 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"runtime"
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -31,6 +34,19 @@ var ErrGatewayNotReady = errors.New("ACP gateway is not ready to evaluate")
 // (HTTP 401 with no authenticated answer): it was revoked, replaced or never
 // issued. It keeps the text the guard always logged.
 var ErrCredentialRejected = errors.New("ACP gateway challenge authentication failed")
+
+// ErrResponseAuthentication is an answer of the challenge or of an
+// evaluation whose MAC does not verify: it is not known to come from the
+// gateway, so it is never read as an outage (a managed guard refuses the
+// frame and forgets an open fail mode).
+var ErrResponseAuthentication = errors.New("ACP gateway response authentication failed")
+
+// responseAuthError keeps the text the guard logged for each answer that
+// failed authentication, as an ErrResponseAuthentication.
+type responseAuthError string
+
+func (e responseAuthError) Error() string        { return string(e) }
+func (e responseAuthError) Is(target error) bool { return target == ErrResponseAuthentication }
 
 // ErrBindingRefused is an authenticated HTTP 403: the gateway refused the
 // client, agent or profile of this editor entry, for example after the
@@ -104,6 +120,36 @@ func (e acpDisabledError) Is(target error) bool {
 	return target == ErrGatewayNotReady || target == ErrACPDisabled
 }
 
+// GatewayRefusedError is an authenticated answer other than a verdict that
+// no more specific error names: the gateway was reached and refused the
+// evaluation (for example HTTP 400 with its reason). It is not an outage and
+// the editor is told what the gateway said, not that it did not answer.
+type GatewayRefusedError struct {
+	Status  int
+	Message string
+}
+
+func (e *GatewayRefusedError) Error() string {
+	if e.Message == "" {
+		return fmt.Sprintf("ACP evaluator returned HTTP %d", e.Status)
+	}
+	return fmt.Sprintf("ACP evaluator returned HTTP %d: %s", e.Status, e.Message)
+}
+
+// marshalEvaluation encodes an evaluation without HTML escaping, so a frame
+// the guard accepted reaches the gateway at its own size: escaped, a frame
+// full of "<", ">" or "&" grew up to six times and the gateway refused it as
+// larger than an ACP frame (GAP-1327).
+func marshalEvaluation(in Evaluation) ([]byte, error) {
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(in); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+}
+
 type Evaluation struct {
 	Profile   string          `json:"profile"`
 	Mode      Mode            `json:"mode"`
@@ -122,6 +168,18 @@ type Verdict struct {
 	Severity   string `json:"severity,omitempty"`
 	Reason     string `json:"reason,omitempty"`
 	WouldBlock bool   `json:"would_block,omitempty"`
+	// FailMode is the ACP profile's explicit fail_mode in the gateway's
+	// config for an observe-mode profile: "open", "closed", or empty when
+	// unset (action mode is always closed). A standalone managed guard in
+	// observe mode lets a frame it could not evaluate through only after an
+	// authenticated verdict of that session said "open"; any observe guard
+	// refuses it after one said "closed" (observeRefuses, owner decision
+	// 2026-10-20).
+	FailMode string `json:"fail_mode,omitempty"`
+	// Enforced marks a block the gateway enforces in every mode (identity
+	// uncertainty): an observe-mode guard refuses the frame too instead of
+	// passing it on as a would-block (GAP-2103).
+	Enforced bool `json:"enforced,omitempty"`
 }
 
 type Evaluator interface {
@@ -146,6 +204,16 @@ type httpGatewayChallenge struct {
 }
 
 func NewHTTPEvaluator(endpoint, token string) (*HTTPEvaluator, error) {
+	return newHTTPEvaluator(endpoint, token, false)
+}
+
+// NewManagedHTTPEvaluator is for an administrator-owned gateway service. It
+// verifies the process behind the accepted socket before sending a challenge.
+func NewManagedHTTPEvaluator(endpoint, token string) (*HTTPEvaluator, error) {
+	return newHTTPEvaluator(endpoint, token, true)
+}
+
+func newHTTPEvaluator(endpoint, token string, managed bool) (*HTTPEvaluator, error) {
 	u, err := url.Parse(strings.TrimSpace(endpoint))
 	if err != nil || u.Scheme != "http" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return nil, errors.New("ACP evaluator endpoint must be an http loopback URL")
@@ -158,22 +226,42 @@ func NewHTTPEvaluator(endpoint, token string) (*HTTPEvaluator, error) {
 	}
 	challengeURL := *u
 	challengeURL.Path = "/api/v1/acp/challenge"
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	// The scoped token must never be delegated to an environment-configured
-	// proxy, even when NO_PROXY is missing or malformed.
-	transport.Proxy = nil
+	var client *http.Client
+	if managed {
+		client, err = managedGatewayClientFactory(10*time.Second, u.Host, managedGatewayServiceName())
+		if err != nil {
+			return nil, fmt.Errorf("verify managed ACP gateway transport: %w", err)
+		}
+	} else {
+		// Authenticate the accepted socket before even the challenge's MAC
+		// or the encrypted evaluation crosses a per-user account boundary.
+		client, err = hookexec.NewPerUserGatewayHTTPClient(10*time.Second, u.Host)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return &HTTPEvaluator{
 		endpoint:          u.String(),
 		challengeEndpoint: challengeURL.String(),
 		token:             token,
-		client: &http.Client{
-			Timeout:   10 * time.Second,
-			Transport: transport,
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
+		client:            client,
 	}, nil
+}
+
+var managedGatewayClientFactory = hookexec.NewManagedEnterpriseGatewayHTTPClient
+
+func managedGatewayServiceName() string {
+	switch runtime.GOOS {
+	case "linux":
+		return "defenseclaw-gateway.service"
+	case "darwin":
+		if secureClientHost() {
+			return "com.cisco.secureclient.defenseclaw"
+		}
+		return "com.cisco.defenseclaw.gateway"
+	default:
+		return managed.StandaloneWindowsGatewaySvc
+	}
 }
 
 func (e *HTTPEvaluator) Evaluate(ctx context.Context, in Evaluation) (Verdict, error) {
@@ -182,7 +270,7 @@ func (e *HTTPEvaluator) Evaluate(ctx context.Context, in Evaluation) (Verdict, e
 	if err != nil {
 		return Verdict{}, err
 	}
-	body, err := json.Marshal(in)
+	body, err := marshalEvaluation(in)
 	if err != nil {
 		return Verdict{}, err
 	}
@@ -236,7 +324,7 @@ func (e *HTTPEvaluator) Evaluate(ctx context.Context, in Evaluation) (Verdict, e
 		return Verdict{}, errors.New("ACP evaluator response is too large")
 	}
 	if !VerifyHTTPResponseMAC(e.token, keyID, requestNonce, resp.StatusCode, payload, resp.Header.Get(AuthResponseMACHeader)) {
-		return Verdict{}, errors.New("ACP evaluator response authentication failed")
+		return Verdict{}, responseAuthError("ACP evaluator response authentication failed")
 	}
 	if resp.StatusCode == http.StatusConflict {
 		return Verdict{}, ErrModeMismatch
@@ -273,7 +361,13 @@ func (e *HTTPEvaluator) Evaluate(ctx context.Context, in Evaluation) (Verdict, e
 		}
 	}
 	if resp.StatusCode != http.StatusOK {
-		return Verdict{}, fmt.Errorf("ACP evaluator returned HTTP %d", resp.StatusCode)
+		// The gateway answered and signed it: it refused this evaluation,
+		// it did not fail to answer (GAP-1327).
+		var refusal struct {
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(payload, &refusal)
+		return Verdict{}, &GatewayRefusedError{Status: resp.StatusCode, Message: boundedBlockReason(refusal.Error)}
 	}
 	var verdict Verdict
 	decoder := json.NewDecoder(bytes.NewReader(payload))
@@ -320,7 +414,7 @@ func (e *HTTPEvaluator) authenticateGateway(ctx context.Context, keyID string) (
 			// The gateway answers a credential it does not hold unsigned.
 			return "", "", ErrCredentialRejected
 		}
-		return "", "", errors.New("ACP gateway challenge authentication failed")
+		return "", "", responseAuthError("ACP gateway challenge authentication failed")
 	}
 	if otherAccountRefusal(resp.StatusCode, payload) {
 		return "", "", ErrCredentialOtherAccount

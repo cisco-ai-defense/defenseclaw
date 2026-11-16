@@ -149,6 +149,7 @@ type watchdogHealthRequirements struct {
 	requireGuardrail bool
 	requireWatcher   bool
 	connectors       []string
+	transportConfig  *config.Config
 }
 
 func watchdogHealthRequirementsFromConfig(cfg *config.Config) watchdogHealthRequirements {
@@ -168,6 +169,7 @@ func watchdogHealthRequirementsFromConfig(cfg *config.Config) watchdogHealthRequ
 		requireGuardrail: cfg.Guardrail.Enabled,
 		requireWatcher:   cfg.Gateway.Watcher.Enabled,
 		connectors:       connectors,
+		transportConfig:  cfg,
 	}
 }
 
@@ -222,8 +224,10 @@ notifications when the sidecar is unreachable or degraded.
 Run in the foreground:  defenseclaw-gateway watchdog
 Run as background:      defenseclaw-gateway watchdog start
 Stop:                   defenseclaw-gateway watchdog stop`,
-	RunE:              runWatchdogForeground,
-	PersistentPreRunE: func(cmd *cobra.Command, args []string) error { return nil },
+	RunE: runWatchdogForeground,
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		return refuseGatewayLifecycleOnManagedHost()
+	},
 }
 
 var watchdogStartCmd = &cobra.Command{
@@ -356,10 +360,12 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 
 	var recoveryRecorder watchdogRecoveryRecorder
 	if token := strings.TrimSpace(cfg.Gateway.ResolvedToken()); token != "" {
-		recoveryRecorder = &watchdogAPIRecoveryRecorder{
-			client: &http.Client{Timeout: 5 * time.Second},
-			url:    strings.TrimSuffix(healthURL, "/health") + "/api/v1/watchdog/recovery",
-			token:  token,
+		recoveryURL := strings.TrimSuffix(healthURL, "/health") + "/api/v1/watchdog/recovery"
+		recorder, err := newWatchdogAPIRecoveryRecorder(cfg, recoveryURL, token)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[watchdog] warn: gateway peer could not be verified; recovery telemetry will not be recorded: %v\n", err)
+		} else {
+			recoveryRecorder = recorder
 		}
 	} else {
 		fmt.Fprintln(os.Stderr, "[watchdog] warn: gateway token unavailable; recovery telemetry will not be recorded")
@@ -387,7 +393,10 @@ func watchdogForegroundAcquireError(pidPath string, err error) error {
 		}
 		return fmt.Errorf("the watchdog already runs in the background. %s", next)
 	}
-	return fmt.Errorf("watchdog: another instance is already running (cannot acquire %s): %w", pidPath, err)
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("watchdog: data directory %s does not exist; initialize DefenseClaw before starting the watchdog: %w", filepath.Dir(pidPath), err)
+	}
+	return fmt.Errorf("watchdog: cannot acquire PID file %s: %w", pidPath, err)
 }
 
 func watchdogHealthURL(cfg *config.Config) string {
@@ -407,7 +416,7 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 	// unreachable" for a gateway that answered (GAP-1642).
 	degradedCount, downCount := 0, 0
 	pendingRecovery := false
-	client := &http.Client{Timeout: watchdogProbeTimeout}
+	client, peerErr := watchdogPeerClient(requirements.transportConfig, healthURL, watchdogProbeTimeout)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -417,7 +426,10 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			assessment := probeHealth(client, healthURL, requirements)
+			assessment := downWatchdogAssessment("Sidecar gateway peer is unverified")
+			if peerErr == nil && client != nil {
+				assessment = probeHealth(client, healthURL, requirements)
+			}
 
 			switch assessment.state {
 			case stateHealthy:
@@ -820,12 +832,25 @@ func (c *execCommand) start() error {
 }
 
 func runWatchdogStop(_ *cobra.Command, _ []string) error {
-	return stopWatchdogAt(config.DefaultDataPath(), os.Stdout)
+	return stopWatchdogAt(config.DefaultDataPath(), os.Stdout, true)
+}
+
+// stopWatchdogForGateway stops this account's watchdog as part of a gateway
+// stop or restart. It reports a watchdog it stops, and says nothing when none
+// runs: gateway stop checks twice, and two "Watchdog is not running" lines
+// after a stop read as a failure (GAP-0007).
+func stopWatchdogForGateway() error {
+	return stopWatchdogAt(config.DefaultDataPath(), os.Stdout, false)
 }
 
 // stopWatchdogAt stops the watchdog that runs for dataDir, writing its
-// progress to out. Not running is not an error.
-func stopWatchdogAt(dataDir string, out io.Writer) error {
+// progress to out. Not running is not an error; reportNotRunning says so.
+func stopWatchdogAt(dataDir string, out io.Writer, reportNotRunning bool) error {
+	notRunning := func(line string) {
+		if reportNotRunning {
+			fmt.Fprintln(out, Dim(line))
+		}
+	}
 	pidPath := filepath.Join(dataDir, watchdogPIDFile)
 
 	inspection := inspectWatchdogPIDOwnership(pidPath)
@@ -848,9 +873,9 @@ func stopWatchdogAt(dataDir string, out io.Writer) error {
 			return fmt.Errorf("watchdog: repair stale PID ownership: %w", cleanupErr)
 		}
 		if removed {
-			fmt.Fprintln(out, Dim("Watchdog is not running (stale or invalid PID file repaired)"))
+			notRunning("Watchdog is not running (stale or invalid PID file repaired)")
 		} else {
-			fmt.Fprintln(out, Dim("Watchdog is not running"))
+			notRunning("Watchdog is not running")
 		}
 		return nil
 	}
@@ -867,11 +892,11 @@ func stopWatchdogAt(dataDir string, out io.Writer) error {
 
 	proc, err := os.FindProcess(info.PID)
 	if err != nil {
-		fmt.Fprintln(out, Dim("Watchdog is not running"))
+		notRunning("Watchdog is not running")
 		removeWatchdogPIDIfOwned(pidPath, info)
 		return nil
 	}
-	defer proc.Release() //nolint:errcheck -- closes the retained Windows handle.
+	defer proc.Release() //nolint:errcheck // closes the retained Windows handle.
 
 	fmt.Fprintf(out, "Stopping watchdog (PID %d)... ", info.PID)
 	if err := watchdogRequestTerminate(info, proc); err != nil {

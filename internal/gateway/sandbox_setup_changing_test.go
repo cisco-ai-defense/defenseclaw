@@ -20,6 +20,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -52,5 +53,40 @@ func TestSandboxSetupSwitchIsANoticeNotAMissingSetup(t *testing.T) {
 	err = managedSettingsRefusal(sandboxrelay.DaemonSettings{Enabled: true, Unavailable: sandboxUnavailableNotSetUp})
 	if !errors.As(err, &apiErr) || apiErr.Message != sandboxapi.AdminMessage || apiErr.Detail != sandboxUnavailableNotSetUp {
 		t.Fatalf("a missing setup = %#v", err)
+	}
+}
+
+// GAP-0434: a switch whose ensure failed never rewrites the record, so the
+// switch read as under way for good, with no contact. It reads so for
+// sandboxSetupSwitchGrace from when the gateway first sees it, then as not
+// set up (the organization's contact); a record that matches again, or
+// another switch, starts over.
+func TestSandboxSetupSwitchThatDoesNotCompleteReadsAsNotSetUp(t *testing.T) {
+	docker := &config.Config{}
+	docker.Enterprise.OpenShell.Driver = config.EnterpriseOpenShellDriverDocker
+	vmRecord := sandboxPrerequisitesRecord{Version: 1, Install: config.EnterpriseOpenShellInstallPrerequisite, Driver: "vm"}
+	vmRecord.Ready = true
+	clock := &sandboxSetupSwitchClock{}
+	at := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	ask := func(record sandboxPrerequisitesRecord, now time.Time) string {
+		why := sandboxPrerequisiteWhy(docker, "linux", "docker", record, true)
+		return clock.bound(why, sandboxSetupSwitchKey(docker, "linux", record), now)
+	}
+	if got := ask(vmRecord, at); got != sandboxUnavailableSetupChanging {
+		t.Fatalf("a new switch: %q", got)
+	}
+	if got := ask(vmRecord, at.Add(sandboxSetupSwitchGrace-time.Second)); got != sandboxUnavailableSetupChanging {
+		t.Fatalf("within the grace: %q", got)
+	}
+	if got := ask(vmRecord, at.Add(sandboxSetupSwitchGrace)); got != sandboxUnavailableNotSetUp {
+		t.Fatalf("a switch that did not complete: %q", got)
+	}
+	ready := sandboxPrerequisitesRecord{Version: 1, Install: config.EnterpriseOpenShellInstallPrerequisite, Driver: "docker"}
+	ready.Ready = true
+	if got := ask(ready, at.Add(sandboxSetupSwitchGrace+time.Minute)); got != "" {
+		t.Fatalf("the switch completed: %q", got)
+	}
+	if got := ask(vmRecord, at.Add(2*sandboxSetupSwitchGrace)); got != sandboxUnavailableSetupChanging {
+		t.Fatalf("a later switch starts over: %q", got)
 	}
 }

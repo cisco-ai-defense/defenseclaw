@@ -1,0 +1,24 @@
+{
+  "providers": [
+    {
+      "name": "acme-gw",
+      "domains": [
+        "b11-acme-alt.example.test"
+      ],
+      "env_keys": [
+        "B11_ACME_LEGACY_DUMMY_KEY"
+      ],
+      "profile_id": "b11-acme-legacy-profile",
+      "base_url": "https://b11-acme-legacy.example.test/v1",
+      "request_path_overrides": {
+        "chat": "/legacy/chat",
+        "legacy": "/legacy/only"
+      },
+      "extra_headers": {
+        "X-B11-Config": "dummy-legacy-wins",
+        "X-B11-Legacy": "dummy-legacy"
+      }
+    }
+  ],
+  "ollama_ports": []
+}

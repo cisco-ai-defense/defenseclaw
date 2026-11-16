@@ -3,7 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Command defenseclaw-scanners runs the Python scanners the standalone
-// Windows enterprise payload ships: skill-scanner, the MCP scan and
+// enterprise deployments ship (on Linux and macOS the package installs the
+// runtime tree; see installed_other.go). On Windows the payload ships: skill-scanner, the MCP scan and
 // DefenseClaw's plugin scanner. The CPython runtime and the locked
 // site-packages tree (the same pins the per-user Windows install resolves)
 // are embedded in this executable, so the payload stays one signed file per
@@ -14,7 +15,8 @@
 //
 //	defenseclaw-scanners skill-scanner <skill-scanner arguments>
 //	defenseclaw-scanners mcp-scan --input-stdin <url>
-//	defenseclaw-scanners plugin-scan <plugin dir> [--policy p] [--profile p] [--connector c] [--include-self]
+//	defenseclaw-scanners plugin-scan <plugin dir> [--policy p] [--profile p] [--connector c] [--include-self] [--disable-vendor-identity]
+//	defenseclaw-scanners plugin-manifest-entrypoints   (manifests as JSON on stdin)
 //	defenseclaw-scanners versions | --version | prepare | prune
 package main
 
@@ -36,7 +38,11 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 //go:embed all:payload
@@ -45,7 +51,16 @@ var payload embed.FS
 const (
 	runtimeArchiveName  = "payload/runtime.zip"
 	runtimeManifestName = "payload/runtime.json"
-	completeMarker      = ".complete"
+	// runtimeDigestsName lists the SHA-256 of every archive entry
+	// ("<hex>  <name>" lines), written by build-scanner-runtime.sh from the
+	// bytes it put in the archive. It is embedded beside the archive, in the
+	// same admitted executable, so prepare compares each unpacked file with
+	// it instead of inflating the entry to hash it (GAP-0044).
+	runtimeDigestsName = "payload/runtime.sha256"
+	completeMarker     = ".complete"
+	// compiledMarker names, inside a published runtime folder, the archive
+	// SHA-256 whose Python files prepare byte-compiled.
+	compiledMarker = ".compiled"
 	// unpackMarker names, inside a staging folder, the archive SHA-256 the
 	// unpack in it belongs to.
 	unpackMarker = ".unpack-sha256"
@@ -64,7 +79,9 @@ type runtimeManifest struct {
 // The Python programs each tool runs. Arguments after the program reach it
 // as sys.argv[1:].
 const (
-	consoleEntryPointScript = `import importlib.metadata as m,sys; name=sys.argv[1]; sys.argv=[name,*sys.argv[2:]]; matches=[e for e in m.entry_points(group="console_scripts") if e.name==name]; sys.exit(matches[0].load()() if len(matches)==1 else 1)`
+	// skillScannerScript runs skill-scanner with the DefenseClaw fix that
+	// accepts a well-formed judge answer from any supported model (GAP-2609).
+	skillScannerScript = `import sys; from defenseclaw.scanner._skill_judge_compat import main; sys.exit(main())`
 
 	// pluginScanScript runs the plugin judge the gateway resolved for
 	// scanners.plugin, as the CLI wrapper does; a judge it cannot run stops
@@ -88,6 +105,8 @@ while i<len(a):
         i+=2
     elif x=="--include-self":
         o.include_self=True; i+=1
+    elif x=="--disable-vendor-identity":
+        o.disable_vendor_identity=True; i+=1
     elif t is None and not x.startswith("--"):
         t=x; i+=1
     else:
@@ -115,10 +134,20 @@ if o.include_self or not is_first_party_self_target(t,trusted_paths=o.trusted_se
         result["findings"].append(item)
 print(json.dumps(result))`
 
+	// pluginManifestEntrypointsScript prints the entrypoints the plugin
+	// scanner reads from the manifest bytes on stdin, so the gateway watcher
+	// asks the scanner what a manifest declares instead of parsing it again.
+	pluginManifestEntrypointsScript = `import base64,json,sys
+from defenseclaw.scanner.plugin_scanner.scanner import declared_entrypoints
+r=json.load(sys.stdin)
+print(json.dumps({"entrypoints":declared_entrypoints({str(k):base64.b64decode(v,validate=True) for k,v in r["manifests"].items()})}))`
+
 	// mcpScanScript reads the config-derived scan input from stdin. Large
 	// pinned rule sets never enter either Windows process command line.
 	// The entry's cwd is the folder the gateway checked for the server's
-	// process (GAP-1317); the runtime itself keeps the gateway's folder.
+	// process (GAP-1317); the runtime itself keeps the gateway's folder. An
+	// enrolled user's server starts through as_user_relay, which the hook
+	// enumerator answers by starting it as that user (#1164).
 	mcpScanScript = `import json,os,sys
 from types import SimpleNamespace
 from defenseclaw.config import BedrockKeyConfig, CiscoAIDefenseConfig, LLMConfig, MCPServerEntry, _merge_mcp_scanner
@@ -140,8 +169,12 @@ e=os.environ.get
 llm=LLMConfig(model=e("DEFENSECLAW_SCANNER_LLM_MODEL",""), provider=e("DEFENSECLAW_SCANNER_LLM_PROVIDER",""), api_key=e("DEFENSECLAW_SCANNER_LLM_API_KEY",""), base_url=e("DEFENSECLAW_SCANNER_LLM_BASE_URL",""), region=e("DEFENSECLAW_SCANNER_LLM_REGION",""), bedrock=BedrockKeyConfig(auth_mode=m) if (m:=e("DEFENSECLAW_SCANNER_LLM_BEDROCK_AUTH_MODE","")) else None)
 aid=CiscoAIDefenseConfig(api_key=e("DEFENSECLAW_SCANNER_AID_API_KEY",""), endpoint=e("DEFENSECLAW_SCANNER_AID_ENDPOINT","") or CiscoAIDefenseConfig().endpoint)
 s=MCPScannerWrapper(c, None, aid, llm=llm)
+relay=payload.get("as_user_relay")
+if relay is not None and (entry is None or not isinstance(relay,list) or not relay or not all(isinstance(x,str) and x for x in relay)):
+    sys.exit("mcp-scan: invalid as-user relay")
 if entry is not None:
     s.stdio_cwd=entry.cwd
+    s.stdio_relay=tuple(relay or ())
 if rp is not None:
     from defenseclaw.scanner.rulepack import RulePackOverlayScanner, _layer_of, load_rule_pack
     layers=tuple(x for x in (_layer_of(SimpleNamespace(**r)) for r in rp.get("rules") or []) if x)
@@ -157,8 +190,12 @@ func main() {
 
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: defenseclaw-scanners skill-scanner|mcp-scan|plugin-scan|versions|prepare [arguments]")
+		fmt.Fprintln(stderr, "usage: defenseclaw-scanners skill-scanner|mcp-scan|plugin-scan|plugin-manifest-entrypoints|versions|prepare [arguments]")
 		return 2
+	}
+	if runtime.GOOS != "windows" {
+		// Linux and macOS run the runtime the managed package installed.
+		return runInstalled(args, stdout, stderr)
 	}
 	manifest, err := loadManifest()
 	if err != nil {
@@ -188,10 +225,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, versionLine(manifest))
 		return 0
 	}
-	if runtime.GOOS != "windows" {
-		fmt.Fprintln(stderr, "defenseclaw-scanners: the embedded scanner runtime runs only on Windows")
-		return 1
-	}
 	var script string
 	var scriptArgs []string
 	switch args[0] {
@@ -202,8 +235,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "defenseclaw-scanners: %v\n", err)
 			return 1
 		}
-		fmt.Fprintln(stderr, "defenseclaw-scanners: compiling the Python files")
-		compileRuntime(dir, stderr)
+		compilePreparedRuntime(dir, manifest.SHA256, stderr)
 		fmt.Fprintln(stdout, dir)
 		return 0
 	case "prune":
@@ -217,18 +249,25 @@ func run(args []string, stdout, stderr io.Writer) int {
 		pruneOtherRuntimes(root, manifest.SHA256[:16])
 		return 0
 	case "skill-scanner":
-		script, scriptArgs = consoleEntryPointScript, append([]string{"skill-scanner"}, args[1:]...)
+		script, scriptArgs = skillScannerScript, args[1:]
 	case "plugin-scan":
 		script, scriptArgs = pluginScanScript, args[1:]
 	case "mcp-scan":
 		script, scriptArgs = mcpScanScript, args[1:]
+	case "plugin-manifest-entrypoints":
+		script, scriptArgs = pluginManifestEntrypointsScript, args[1:]
 	default:
 		fmt.Fprintf(stderr, "defenseclaw-scanners: unknown tool %q\n", args[0])
 		return 2
 	}
-	dir, err := ensureRuntime(manifest)
+	dir, release, err := pinnedRuntime(manifest)
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw-scanners: %v\n", err)
+		return 1
+	}
+	defer release()
+	if err := validateRuntimeCodeTree(); err != nil {
+		fmt.Fprintf(stderr, "defenseclaw-scanners: runtime code is not trusted: %v; run `%s` as LocalSystem. %s\n", err, managed.WindowsSetupCommand("/repair", "JSON=1"), managed.WindowsSetupSource)
 		return 1
 	}
 	pythonDir := filepath.Join(dir, "python")
@@ -249,16 +288,48 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// compilePreparedRuntime byte-compiles a prepared runtime once. Every Setup
+// /ensure, also a no-op one, runs prepare; its compileall found nothing to do
+// on a compiled tree but still started a Python and one worker process per
+// CPU, about 6 s of a no-op ensure on a managed Windows host (rel-1-0-4
+// GAP-2607). A tree prepare compiled carries compiledMarker; one that prepare
+// unpacked again (a changed or untrusted tree is removed first) has none and
+// is compiled. The marker is written only after compileall ran to its end,
+// so a compile that was stopped is done again by the next prepare. It
+// reports whether it compiled. The byte-compiled caches are a speed-up only:
+// the scans run python -B, and Python recompiles in memory any cache it
+// cannot use.
+func compilePreparedRuntime(dir, sha string, stderr io.Writer) bool {
+	marker := filepath.Join(dir, compiledMarker)
+	if recorded, err := os.ReadFile(marker); err == nil && strings.TrimSpace(string(recorded)) == sha {
+		fmt.Fprintln(stderr, "defenseclaw-scanners: the Python files are already compiled")
+		return false
+	}
+	fmt.Fprintln(stderr, "defenseclaw-scanners: compiling the Python files")
+	if compileRuntime(dir, stderr) {
+		if err := os.WriteFile(marker, []byte(sha), 0o644); err != nil {
+			fmt.Fprintf(stderr, "defenseclaw-scanners: record the compiled runtime: %v\n", err)
+		}
+	}
+	return true
+}
+
 // compileRuntime byte-compiles the unpacked runtime so the read-only scans
-// start fast. A file that does not compile only costs its own speed-up.
-func compileRuntime(dir string, stderr io.Writer) {
+// start fast. A file that does not compile only costs its own speed-up. It
+// reports whether compileall ran to its end: exit status 0, or 1, which
+// compileall returns when some file did not compile (the runtime always has
+// a few). A variable so a test can count the compiles.
+var compileRuntime = func(dir string, stderr io.Writer) bool {
 	pythonDir := filepath.Join(dir, "python")
 	cmd := exec.Command(filepath.Join(pythonDir, "python.exe"), "-I", "-m", "compileall", "-q", "-j", "0",
 		filepath.Join(pythonDir, "Lib", "site-packages"))
 	cmd.Env = pythonEnv(os.Environ(), pythonDir)
-	if out, err := cmd.CombinedOutput(); err != nil && len(out) > 0 {
+	out, err := cmd.CombinedOutput()
+	if err != nil && len(out) > 0 {
 		fmt.Fprintf(stderr, "defenseclaw-scanners: compile: %d bytes of warnings\n", len(out))
 	}
+	var exitErr *exec.ExitError
+	return err == nil || (errors.As(err, &exitErr) && exitErr.ExitCode() == 1)
 }
 
 func loadManifest() (runtimeManifest, error) {
@@ -425,7 +496,7 @@ func claimInterruptedUnpack(root, sha, staging string) bool {
 // embedded archive. The completion marker names a public SHA-256, so a folder
 // somebody else created could carry it: prepare, which runs elevated and
 // executes the folder's python.exe, never trusts the marker alone. A tree that
-// differs is removed and unpacked again.
+// differs or contains untrusted code paths is removed and unpacked again.
 func prepareRuntime(manifest runtimeManifest) (string, error) {
 	dir, err := ensureRuntime(manifest)
 	if err != nil {
@@ -435,19 +506,26 @@ func prepareRuntime(manifest runtimeManifest) (string, error) {
 	if err != nil {
 		return "", errors.New("this build carries no scanner runtime archive")
 	}
-	verifyErr := verifyRuntime(dir, bytes.NewReader(archive), int64(len(archive)), true)
+	digests := embeddedEntryDigests()
+	verifyErr := verifyRuntime(dir, bytes.NewReader(archive), int64(len(archive)), true, digests)
+	if verifyErr == nil {
+		verifyErr = validateRuntimeCodeTree()
+	}
 	if verifyErr == nil {
 		return dir, nil
 	}
-	fmt.Fprintf(os.Stderr, "defenseclaw-scanners: the scanner runtime at %s does not match this build (%v); unpacking it again\n", dir, verifyErr)
+	fmt.Fprintf(os.Stderr, "defenseclaw-scanners: the scanner runtime at %s is changed or untrusted (%v); unpacking it again\n", dir, verifyErr)
 	if err := clearRuntimeDir(dir); err != nil {
-		return "", fmt.Errorf("remove the scanner runtime that does not match this build: %w", err)
+		return "", fmt.Errorf("remove the changed or untrusted scanner runtime: %w", err)
 	}
 	if dir, err = ensureRuntime(manifest); err != nil {
 		return "", err
 	}
-	if err := verifyRuntime(dir, bytes.NewReader(archive), int64(len(archive)), true); err != nil {
+	if err := verifyRuntime(dir, bytes.NewReader(archive), int64(len(archive)), true, digests); err != nil {
 		return "", fmt.Errorf("the unpacked scanner runtime does not match this build: %w", err)
+	}
+	if err := validateRuntimeCodeTree(); err != nil {
+		return "", fmt.Errorf("the unpacked scanner runtime code is not trusted: %w; run `%s` as LocalSystem. %s", err, managed.WindowsSetupCommand("/repair", "JSON=1"), managed.WindowsSetupSource)
 	}
 	return dir, nil
 }
@@ -491,9 +569,13 @@ func clearRuntimeDir(dir string) error {
 
 // notPreparedError tells a standard account that cannot create the runtime
 // that an administrator prepares it, instead of a bare "Access is denied".
+// The repair is named as typed: Setup puts no DefenseClaw command on PATH,
+// and the standalone profile is the one that ships this runtime
+// (cowork-1-0-8 GAP-0076).
 func notPreparedError(err error) error {
 	if errors.Is(err, fs.ErrPermission) {
-		return fmt.Errorf("the scanner runtime is not prepared and this account cannot prepare it; an administrator prepares it with `defenseclaw enterprise windows repair`: %w", err)
+		return fmt.Errorf("the scanner runtime is not prepared and this account cannot prepare it; an administrator prepares it from an elevated PowerShell prompt with `%s`: %w",
+			managed.WindowsAdminCommand("enterprise", "windows", "repair", "--profile", "standalone"), err)
 	}
 	return err
 }
@@ -517,18 +599,46 @@ func runtimeFilesPresent(dir string) error {
 	if !ok {
 		return errors.New("the embedded scanner runtime archive cannot be read in place")
 	}
-	return verifyRuntime(dir, at, info.Size(), false)
+	return verifyRuntime(dir, at, info.Size(), false, nil)
+}
+
+// embeddedEntryDigests reads runtimeDigestsName: each archive entry's
+// SHA-256 by name. None when the build embedded no list, or one that does
+// not parse; prepare then inflates every entry to hash it.
+func embeddedEntryDigests() map[string][sha256.Size]byte {
+	raw, err := payload.ReadFile(runtimeDigestsName)
+	if err != nil {
+		return nil
+	}
+	digests := map[string][sha256.Size]byte{}
+	for _, line := range strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n") {
+		sum, name, ok := strings.Cut(line, "  ")
+		decoded, err := hex.DecodeString(sum)
+		if !ok || err != nil || len(decoded) != sha256.Size || name == "" {
+			return nil
+		}
+		digests[name] = [sha256.Size]byte(decoded)
+	}
+	return digests
 }
 
 // verifyRuntime checks that every file of archive exists under dir as a
-// regular file with the archived size and, with hashes, SHA-256. Files
+// regular file with the archived size and, with hashes, SHA-256: the one
+// digests names for the entry, else the inflated entry's. Files
 // prepare adds (the byte-compiled caches) are not in the archive and are not
-// checked. The error names the first file that differs.
-func verifyRuntime(dir string, archive io.ReaderAt, size int64, hashes bool) error {
+// checked. The error names the first file, in archive order, that differs.
+//
+// The SHA-256 pass inflates every archived entry and reads every unpacked
+// file. Done one file at a time it was most of a no-op Setup /ensure on a
+// managed Windows host (76 s of 131 s quiet, 5 min under hook load,
+// rel-1-0-4 GAP-2607), so the files are hashed by verifyRuntimeWorkers
+// goroutines; every file is still compared.
+func verifyRuntime(dir string, archive io.ReaderAt, size int64, hashes bool, digests map[string][sha256.Size]byte) error {
 	reader, err := zip.NewReader(archive, size)
 	if err != nil {
 		return err
 	}
+	var files []*zip.File
 	for _, file := range reader.File {
 		if file.FileInfo().IsDir() {
 			continue
@@ -538,15 +648,68 @@ func verifyRuntime(dir string, archive io.ReaderAt, size int64, hashes bool) err
 		if err != nil || !info.Mode().IsRegular() || uint64(info.Size()) != file.UncompressedSize64 {
 			return fmt.Errorf("%s is missing or changed", file.Name)
 		}
-		if !hashes {
-			continue
-		}
-		want, err := entrySHA256(file)
+		files = append(files, file)
+	}
+	if !hashes {
+		return nil
+	}
+	return verifyRuntimeHashes(dir, files, digests)
+}
+
+// verifyRuntimeWorkers is how many files verifyRuntime hashes at once (a
+// variable so a test can pin it).
+var verifyRuntimeWorkers = func() int { return min(max(runtime.NumCPU(), 1), 16) }
+
+// verifyRuntimeHashes compares the SHA-256 of each archived entry (from
+// digests when it names the entry) with the unpacked file. The error is that
+// of the first file in archive order that differs, whatever order the
+// workers finish in.
+func verifyRuntimeHashes(dir string, files []*zip.File, digests map[string][sha256.Size]byte) error {
+	errs := make([]error, len(files))
+	var next atomic.Int64
+	// first is the lowest failing index: files after it are not hashed,
+	// the ones before it still are, so the error is the archive-order first.
+	var first atomic.Int64
+	first.Store(int64(len(files)))
+	var wg sync.WaitGroup
+	workers := min(verifyRuntimeWorkers(), len(files))
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				index := int(next.Add(1) - 1)
+				if int64(index) >= first.Load() {
+					return
+				}
+				file := files[index]
+				want, known := digests[file.Name]
+				var err error
+				if !known {
+					want, err = entrySHA256(file)
+				}
+				if err == nil {
+					var got [sha256.Size]byte
+					if got, err = fileSHA256(filepath.Join(dir, filepath.FromSlash(file.Name))); err != nil || got != want {
+						err = fmt.Errorf("%s is missing or changed", file.Name)
+					}
+				}
+				if err != nil {
+					errs[index] = err
+					for {
+						current := first.Load()
+						if int64(index) >= current || first.CompareAndSwap(current, int64(index)) {
+							break
+						}
+					}
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	for _, err := range errs {
 		if err != nil {
 			return err
-		}
-		if got, err := fileSHA256(path); err != nil || got != want {
-			return fmt.Errorf("%s is missing or changed", file.Name)
 		}
 	}
 	return nil
@@ -561,7 +724,8 @@ func entrySHA256(file *zip.File) ([sha256.Size]byte, error) {
 	return readerSHA256(in)
 }
 
-func fileSHA256(path string) ([sha256.Size]byte, error) {
+// fileSHA256 is a variable so a test can observe the parallel hashing.
+var fileSHA256 = func(path string) ([sha256.Size]byte, error) {
 	in, err := os.Open(path)
 	if err != nil {
 		return [sha256.Size]byte{}, err
@@ -589,8 +753,40 @@ func runtimeComplete(dir, sha string) bool {
 	return err == nil && strings.TrimSpace(string(marker)) == sha
 }
 
-// pruneOtherRuntimes removes runtimes an earlier build unpacked. Failures
-// (a scan still running from one) are left for the next upgrade.
+// pinnedRuntime is ensureRuntime for a scan: it keeps the runtime's
+// completion marker open until release, so a prune by a later build cannot
+// move the folder away while the scan imports from it. A folder pruned
+// between ensureRuntime and the open is unpacked again once.
+func pinnedRuntime(manifest runtimeManifest) (string, func(), error) {
+	for attempt := 0; ; attempt++ {
+		dir, err := ensureRuntime(manifest)
+		if err != nil {
+			return "", nil, err
+		}
+		pin, err := os.Open(filepath.Join(dir, completeMarker))
+		if err == nil && runtimeComplete(dir, manifest.SHA256) {
+			return dir, func() { _ = pin.Close() }, nil
+		}
+		if pin != nil {
+			_ = pin.Close()
+		}
+		if attempt > 0 {
+			return "", nil, fmt.Errorf("the scanner runtime at %s was removed while the scan started", dir)
+		}
+	}
+}
+
+// renameRuntimeDir is os.Rename; a seam so a test can stand for a runtime
+// folder a running scan keeps open.
+var renameRuntimeDir = os.Rename
+
+// pruneOtherRuntimes removes runtimes an earlier build unpacked. Each one is
+// first renamed aside: Windows refuses to rename a folder while a process
+// holds a file in it open (a scan's python.exe, its loaded modules, the
+// completion marker pinnedRuntime holds), so a runtime in use is left whole
+// for the next prune. Removing it in place deleted the Python modules a
+// running scan had not imported yet before the locked file stopped the
+// removal (GAP-0920).
 func pruneOtherRuntimes(root, keep string) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -600,7 +796,15 @@ func pruneOtherRuntimes(root, keep string) {
 		if entry.Name() == keep || !entry.IsDir() {
 			continue
 		}
-		_ = os.RemoveAll(filepath.Join(root, entry.Name()))
+		suffix := make([]byte, 8)
+		if _, err := rand.Read(suffix); err != nil {
+			return
+		}
+		aside := filepath.Join(root, ".prune-"+hex.EncodeToString(suffix))
+		if err := renameRuntimeDir(filepath.Join(root, entry.Name()), aside); err != nil {
+			continue
+		}
+		_ = os.RemoveAll(aside)
 	}
 }
 

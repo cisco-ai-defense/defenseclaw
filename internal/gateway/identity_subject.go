@@ -65,6 +65,8 @@ const (
 	subjectSourcePeerCredentials = "peer_credentials"
 	subjectSourceUserCredential  = "user_scoped_credential"
 	subjectSourceProcessOwner    = "process_owner"
+	// subjectSourceTrustedConnector (trusted_connector_unix.go) marks the
+	// person a trusted connector acts for, on the platforms that honour one.
 )
 
 type verifiedSubjectContextKey struct{}
@@ -187,6 +189,12 @@ func requestIdentityFor(ctx context.Context, userID string) *llmEventIdentity {
 	if ctx == nil || !identityFactsEnabled.Load() {
 		return nil
 	}
+	if identity, ok := actingForRequestIdentity(ctx, userID); ok {
+		// The person a trusted connector acts for: facts the gateway
+		// resolved, at verified_by_connector; no session facts (the hook's
+		// session is the connector's).
+		return identity
+	}
 	var out llmEventIdentity
 	subject, verified := verifiedSubjectFromContext(ctx)
 	verified = verified && subject.UserID == userID
@@ -271,7 +279,8 @@ func (id *llmEventIdentity) v8() v8IdentityAttrs {
 			useridentity.SessionLocal, useridentity.SessionSSH, useridentity.SessionRDP, useridentity.SessionConsole)
 		attrs.ClientAddress = v8IdentityToken(session.ClientAddr, 256, false, true)
 	}
-	if assurance == useridentity.AssuranceVerified || assurance == useridentity.AssuranceClaimed {
+	if assurance == useridentity.AssuranceVerified || assurance == useridentity.AssuranceClaimed ||
+		assurance == useridentity.AssuranceVerifiedByConnector {
 		if attrs.Principal.IsPresent() || attrs.Domain.IsPresent() || attrs.Directory.IsPresent() ||
 			attrs.TenantID.IsPresent() || attrs.Source.IsPresent() || attrs.SessionKind.IsPresent() ||
 			attrs.ClientAddress.IsPresent() {
@@ -310,10 +319,10 @@ func v8IdentityToken(value string, limit int, lowerSource, address bool) observa
 		alnum := c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 		switch {
 		case lowerSource:
-			if !(c >= 'a' && c <= 'z' || i > 0 && (c >= '0' && c <= '9' || c == '_')) {
+			if (c < 'a' || c > 'z') && (i <= 0 || ((c < '0' || c > '9') && c != '_')) {
 				return observability.Absent[string]()
 			}
-		case i == 0 && !alnum && !(address && strings.HasPrefix(value, "::")):
+		case i == 0 && !alnum && (!(address) || !(strings.HasPrefix(value, "::"))):
 			return observability.Absent[string]()
 		case !alnum && c != '.' && c != '_' && c != '-' && c != ':' && c != '/':
 			return observability.Absent[string]()
@@ -421,11 +430,15 @@ func applyIdentityPosture(cfg *config.Config) {
 	// The gateway's service account cannot translate a sign-in UPN; the
 	// account name the SYSTEM enumerator recorded spells the account as
 	// the directory does (GAP-0382).
+	// A profile whose AppData is redirected out of it takes its IDE
+	// inventory from the enumerator's record (GAP-1249).
 	if spool != "" && runtime.GOOS == "windows" {
 		inventory.SetOwnerEmailLookup(identitySpoolConnectorEmail)
+		inventory.SetOwnerIDELookup(identitySpoolIDEInstalls)
 		useridentity.SetKnownAccountNameLookup(identitySpoolAccountName)
 	} else {
 		inventory.SetOwnerEmailLookup(nil)
+		inventory.SetOwnerIDELookup(nil)
 		useridentity.SetKnownAccountNameLookup(nil)
 	}
 	// A managed gateway keeps the last home of each uid across restarts, so
@@ -449,6 +462,9 @@ func applyIdentityPosture(cfg *config.Config) {
 		groups = nil
 	}
 	setProfileAssignmentGroups(groups)
+	// Trusted connectors resolve their accounts and may_act_for lists here
+	// and on every refresh (trusted_connector.go).
+	configureTrustedConnectors(cfg)
 }
 
 // profileAssignmentGroupNames are the groups the committed guardrail profile

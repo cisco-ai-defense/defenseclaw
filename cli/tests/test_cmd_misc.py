@@ -18,6 +18,7 @@
 
 import json
 import os
+import subprocess
 import sys
 import unittest
 from datetime import datetime, timezone
@@ -998,15 +999,19 @@ class TestSetupGuardrailUnifiedLLMSharing(unittest.TestCase):
 
     def _invoke_guardrail(self, *extra):
         from defenseclaw.commands.cmd_setup import setup
+        # The judge key wiring is the same for every connector. Codex runs on
+        # every OS; the implied OpenClaw default is refused on native Windows,
+        # and Codex's own Windows executable receipt is tested elsewhere.
         with patch(
             "defenseclaw.commands.cmd_setup.execute_guardrail_setup",
             return_value=(True, []),
-        ):
+        ), patch("defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections"):
             return self.runner.invoke(
                 setup,
                 [
                     "guardrail",
                     "--non-interactive",
+                    "--connector", "codex",
                     "--no-restart",
                     "--mode", "observe",
                     "--scanner-mode", "local",
@@ -1329,6 +1334,13 @@ class TestSetupSplunkCommand(unittest.TestCase):
         )
         self._v8_status.start()
         self.addCleanup(self._v8_status.stop)
+        # Local setup records the container it started; no Docker here.
+        self._container = patch(
+            "defenseclaw.commands.cmd_setup._local_splunk_container_id",
+            return_value="0123456789abcdef" * 4,
+        )
+        self._container.start()
+        self.addCleanup(self._container.stop)
 
     def _operator_status(self, data_dir: str) -> SimpleNamespace:
         destinations = self._v8_destinations(data_dir)
@@ -1403,7 +1415,7 @@ class TestSetupSplunkCommand(unittest.TestCase):
                 signals=None,
                 target=None,
             )
-            # As the local Splunk setup writes it (GAP-0208).
+            # A pre-1.0.4 local setup left this sink without a local_stack record.
             local_destination["network_safety"] = {"allow_private_networks": True}
             destinations.append(local_destination)
         self._write_v8_destinations(destinations)
@@ -1498,7 +1510,7 @@ class TestSetupSplunkCommand(unittest.TestCase):
 
         endpoint = "https://splunk.example.com:8088/services/collector/event"
         with patch(
-            "defenseclaw.commands.cmd_setup_observability._test_v8_destination",
+            "defenseclaw.commands.cmd_setup_observability._probe_candidate_destination",
         ) as mock_probe:
             result = self.runner.invoke(
                 setup,
@@ -1516,12 +1528,10 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Splunk Enterprise configured (HEC)", result.output)
         self.assertIn("Live HEC probe:", result.output)
-        mock_probe.assert_called_once_with(
-            self.tmp_dir,
-            "splunk-enterprise-splunk-example-com",
-            10.0,
-            write_probe=False,
-        )
+        # The probe tests the validated candidate before it is saved (GAP-1600).
+        mock_probe.assert_called_once()
+        _candidate, data_dir, name, timeout = mock_probe.call_args.args
+        self.assertEqual((data_dir, name, timeout), (self.tmp_dir, "splunk-enterprise-splunk-example-com", 10.0))
         mock_license.assert_not_called()
         mock_preflight.assert_not_called()
         mock_bootstrap.assert_not_called()
@@ -1532,17 +1542,19 @@ class TestSetupSplunkCommand(unittest.TestCase):
         )
         self.assertTrue(destination["enabled"])
         self.assertEqual(destination["endpoint"], endpoint)
-        self.assertEqual(destination["token_env"], "DEFENSECLAW_SPLUNK_HEC_TOKEN")
+        # Each remote Splunk destination keeps its credential under its own reference.
+        own_reference = "DEFENSECLAW_SPLUNK_HEC_TOKEN" + "_SPLUNK_ENTERPRISE_SPLUNK_EXAMPLE_COM"
+        self.assertEqual(destination["token_env"], own_reference)
 
         with open(os.path.join(self.tmp_dir, ".env")) as f:
             dotenv = f.read()
-        self.assertIn("DEFENSECLAW_SPLUNK_HEC_TOKEN=hec-token", dotenv)
+        self.assertIn(f"{own_reference}=hec-token", dotenv)
 
         with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
             cfg = f.read()
         self.assertIn("name: splunk-enterprise-splunk-example-com", cfg)
         self.assertIn("kind: splunk_hec", cfg)
-        self.assertIn("token_env: DEFENSECLAW_SPLUNK_HEC_TOKEN", cfg)
+        self.assertIn(f"token_env: {own_reference}", cfg)
         # production preset relies on the Go sink's secure
         # default (TLS verification ON) and must not emit any
         # insecure_skip_verify opt-out. The legacy verify_tls flag is
@@ -1551,12 +1563,50 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertNotIn("insecure_skip_verify", cfg)
         self.assertNotIn("verify_tls", cfg)
 
+    def test_setup_splunk_enterprise_failed_probe_saves_nothing(self):
+        # GAP-1600: an unreachable HEC (dns_failed, a connect error, a
+        # non-200 answer) stops setup with config.yaml and .env unchanged.
+        from defenseclaw.commands.cmd_setup import setup
+        from defenseclaw.commands.cmd_setup_observability import DestinationProbeFailed
+
+        config_path = os.path.join(self.tmp_dir, "config.yaml")
+        with open(config_path, "rb") as f:
+            config_before = f.read()
+        dotenv_path = os.path.join(self.tmp_dir, ".env")
+        dotenv_before = open(dotenv_path).read() if os.path.exists(dotenv_path) else None
+        failure = DestinationProbeFailed(
+            "destination test failed (dns_failed): the destination hostname could not be resolved"
+        )
+        with patch(
+            "defenseclaw.commands.cmd_setup_observability._probe_candidate_destination",
+            side_effect=failure,
+        ):
+            result = self.runner.invoke(
+                setup,
+                [
+                    "splunk", "--enterprise",
+                    "--hec-endpoint", "https://splunk.example.com:8088/services/collector/event",
+                    "--hec-token", "hec-token", "--index", "defenseclaw", "--non-interactive",
+                ],
+                obj=self.app,
+            )
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("dns_failed", result.output)
+        self.assertIn("Nothing was saved", result.output)
+        self.assertNotIn("Splunk Enterprise configured", result.output)
+        with open(config_path, "rb") as f:
+            self.assertEqual(f.read(), config_before)
+        dotenv_after = open(dotenv_path).read() if os.path.exists(dotenv_path) else ""
+        self.assertNotIn("hec-token", dotenv_after)
+        self.assertTrue(dotenv_before is None or dotenv_after == dotenv_before)
+
     def test_setup_splunk_enterprise_skip_test(self):
         from defenseclaw.commands.cmd_setup import setup
 
         endpoint = "https://splunk.example.com:8088/services/collector/event"
+        # GAP-1749: the probe the enterprise path runs before saving.
         with patch(
-            "defenseclaw.commands.cmd_setup_observability._test_v8_destination"
+            "defenseclaw.commands.cmd_setup_observability._probe_candidate_destination"
         ) as mock_probe:
             result = self.runner.invoke(
                 setup,
@@ -1574,35 +1624,6 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Live HEC probe skipped.", result.output)
         mock_probe.assert_not_called()
-
-    def test_setup_splunk_enterprise_probe_warning_is_best_effort(self):
-        from click import ClickException
-        from defenseclaw.commands.cmd_setup import setup
-
-        endpoint = "https://splunk.example.com:8088/services/collector/event"
-        with patch(
-            "defenseclaw.commands.cmd_setup_observability._test_v8_destination",
-            side_effect=ClickException(
-                "HTTP 401 Unauthorized check token/index permissions"
-            ),
-        ):
-            result = self.runner.invoke(
-                setup,
-                [
-                    "splunk",
-                    "--enterprise",
-                    "--hec-endpoint", endpoint,
-                    "--hec-token", "hec-token",
-                    "--non-interactive",
-                ],
-                obj=self.app,
-                catch_exceptions=False,
-            )
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn(
-            "warning: HTTP 401 Unauthorized check token/index permissions",
-            result.output,
-        )
 
     def test_setup_splunk_enterprise_requires_endpoint(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1650,6 +1671,11 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self, _mock_preflight, mock_apply_logs_config,
     ):
         from defenseclaw.commands.cmd_setup import setup
+
+        def report_free(app, **_kwargs):
+            app.local_splunk_license_group = "Free"
+
+        mock_apply_logs_config.side_effect = report_free
 
         result = self.runner.invoke(
             setup,
@@ -1700,14 +1726,91 @@ class TestSetupSplunkCommand(unittest.TestCase):
         )
         self.assertTrue(destination["enabled"])
         self.assertEqual(destination["endpoint"], "http://127.0.0.1:8088/services/collector/event")
-        self.assertEqual(destination["token_env"], "DEFENSECLAW_SPLUNK_HEC_TOKEN")
+        self.assertEqual(destination["token_env"], "DEFENSECLAW_LOCAL_SPLUNK_HEC_TOKEN")
         self.assertIn("Local Splunk is ready", result.output)
         self.assertIn("License: Free", result.output)
-        self.assertIn("Splunk Web login:", result.output)
-        self.assertIn("Username:  admin", result.output)
-        self.assertIn("Password:", result.output)
+        # GAP-1398: the Free-mode UI has no login; setup must not tell the
+        # user to log in with a password.
+        self.assertIn("Splunk Web: no login in Free mode", result.output)
         self.assertIn("Local Splunk configured (Free mode from day 1)", result.output)
-        self.assertIn("Log in with admin", result.output)
+        self.assertIn("Web authentication is disabled in Splunk Free mode", result.output)
+        self.assertNotIn("Log in with admin", result.output)
+        self.assertNotIn("use these credentials", result.output)
+
+    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    @patch("defenseclaw.commands.cmd_setup.splunk_bridge_bin", return_value="/tmp/fake-splunk-claw-bridge")
+    def test_setup_splunk_logs_ready_block_names_the_login_for_a_non_free_license(
+        self, _mock_bridge_bin, mock_run, _mock_preflight,
+    ):
+        # GAP-1750: "no login in Free mode" only when the bridge reports Free.
+        from defenseclaw.commands.cmd_setup import setup
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "splunk_web_url": "http://127.0.0.1:8000",
+                    "hec_url": "http://127.0.0.1:8088/services/collector/event",
+                    "hec_token": "bootstrap-token",
+                    "license_group": "Enterprise",
+                    "web_login_required": True,
+                    "index": "defenseclaw_local",
+                    "source": "defenseclaw",
+                    "sourcetype": "defenseclaw:json",
+                }
+            ),
+            stderr="",
+        )
+        result = self.runner.invoke(
+            setup,
+            ["splunk", "--logs", "--non-interactive", "--accept-splunk-license"],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("Splunk Web: no login in Free mode", result.output)
+        self.assertNotIn("License: Free", result.output)
+        self.assertIn("Splunk Web: log in as admin", result.output)
+        self.assertIn("defenseclaw setup splunk --show-credentials", result.output)
+
+    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    @patch("defenseclaw.commands.cmd_setup.splunk_bridge_bin", return_value="/tmp/fake-splunk-claw-bridge")
+    def test_setup_splunk_logs_summary_and_next_steps_follow_a_non_free_license(
+        self, _mock_bridge_bin, mock_run, _mock_preflight,
+    ):
+        # GAP-2422: the summary and next steps follow the bridge licence like
+        # the ready block does; a Trial bridge never reads "Free mode".
+        from defenseclaw.commands.cmd_setup import setup
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "splunk_web_url": "http://127.0.0.1:8000",
+                    "hec_url": "http://127.0.0.1:8088/services/collector/event",
+                    "hec_token": "bootstrap-token",
+                    "license_group": "Trial",
+                    "web_login_required": True,
+                    "index": "defenseclaw_local",
+                    "source": "defenseclaw",
+                    "sourcetype": "defenseclaw:json",
+                }
+            ),
+            stderr="",
+        )
+        result = self.runner.invoke(
+            setup,
+            ["splunk", "--logs", "--non-interactive", "--accept-splunk-license"],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("Free mode", result.output)
+        self.assertIn("Local Splunk configured (license: Trial)", result.output)
+        next_steps = result.output.split("Next steps:", 1)[1]
+        self.assertIn("Log in as admin; show the password with: defenseclaw setup splunk --show-credentials", next_steps)
 
     @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))
     @patch("defenseclaw.commands.cmd_setup.subprocess.run")
@@ -1874,13 +1977,31 @@ class TestSetupSplunkCommand(unittest.TestCase):
         kwargs = bridge_call.kwargs
         self.assertEqual(kwargs["capture_output"], True)
         self.assertEqual(kwargs["text"], True)
-        self.assertEqual(kwargs["timeout"], 300)
+        self.assertGreaterEqual(kwargs["timeout"], 7200)
         self.assertEqual(kwargs["env"]["S3_EXPORT_ENABLED"], "true")
         self.assertEqual(kwargs["env"]["S3_BUCKET"], "agentwatch-demo")
         self.assertEqual(kwargs["env"]["S3_PREFIX"], "agentwatch/defenseclaw")
         self.assertEqual(kwargs["env"]["AWS_REGION"], "us-west-2")
         self.assertNotIn("DEFENSECLAW_GATEWAY_TOKEN", kwargs["env"])
         self.assertNotIn("OPENCLAW_GATEWAY_TOKEN", kwargs["env"])
+
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    @patch("defenseclaw.commands.cmd_setup.splunk_bridge_bin", return_value="/tmp/fake-splunk-claw-bridge")
+    def test_bootstrap_bridge_streams_pull_progress_in_terminal(self, _mock_bridge_bin, mock_run):
+        from defenseclaw.commands.cmd_setup import _bootstrap_bridge
+
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr=None)
+        with patch(
+            "defenseclaw.commands.cmd_setup.click.get_text_stream",
+            return_value=SimpleNamespace(isatty=lambda: True),
+        ):
+            assert _bootstrap_bridge(self.tmp_dir, refresh_bundle=False) is None
+
+        kwargs = mock_run.call_args.kwargs
+        self.assertNotIn("capture_output", kwargs)
+        self.assertEqual(kwargs["stdout"], subprocess.PIPE)
+        self.assertIsNone(kwargs["stderr"])
+        self.assertGreaterEqual(kwargs["timeout"], 7200)
 
     @patch("defenseclaw.commands.cmd_setup._bootstrap_bridge", return_value=None)
     @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))
@@ -2068,7 +2189,8 @@ class TestSetupSplunkCommand(unittest.TestCase):
             setup, ["splunk"], obj=self.app,
             input=user_input, catch_exceptions=False,
         )
-        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("Docker is not installed", result.output)
         self.assertNotIn("Local Splunk configured", result.output)
         mock_preflight.assert_called_once()
 
@@ -2088,7 +2210,9 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Splunk O11y configured", result.output)
         self.assertIn("Local Splunk enablement cancelled.", result.output)
-        self.assertIn("Config saved to ~/.defenseclaw/config.yaml", result.output)
+        from defenseclaw.config import config_path_for_data_dir
+
+        self.assertIn(f"Config saved to {config_path_for_data_dir(self.app.cfg.data_dir)}", result.output)
         destinations = self._v8_destinations()
         self.assertTrue(any(value["kind"] == "otlp" for value in destinations))
         self.assertFalse(any(value["kind"] == "splunk_hec" for value in destinations))
@@ -2125,7 +2249,36 @@ class TestSetupSplunkCommand(unittest.TestCase):
             catch_exceptions=False,
         )
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("HEC): disabled", result.output)
+        self.assertIn("Local Splunk (HEC): no active recorded sink found", result.output)
+        self.assertIn("Local Splunk was not stopped", result.output)
+        self.assertTrue(self._v8_destinations()[0]["enabled"])
+
+    def test_setup_splunk_disable_logs_without_docker_on_windows(self):
+        from defenseclaw.commands.cmd_setup import setup
+        from defenseclaw.observability.local_stack import LocalStackError
+
+        self._seed_splunk_destinations(local=True)
+        destinations = self._v8_destinations()
+        destinations[0]["name"] = "local-splunk"
+        self._write_v8_destinations(destinations)
+        with (
+            # The train records the local sink; this one was recorded by local setup.
+            patch("defenseclaw.commands.cmd_setup._recorded_local_splunk_names", return_value={"local-splunk"}),
+            patch("defenseclaw.commands.cmd_setup._native_windows_local_splunk", return_value=True),
+            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
+            patch(
+                "defenseclaw.observability.local_splunk.prepare_native_local_splunk_stop",
+                side_effect=LocalStackError("Docker CLI was not found on PATH"),
+            ),
+            patch("defenseclaw.observability.local_stack.resolve_native_docker_executable", return_value=""),
+            patch("defenseclaw.commands.cmd_setup._port_in_use", return_value=False),
+        ):
+            result = self.runner.invoke(
+                setup, ["splunk", "--disable", "--logs"], obj=self.app, catch_exceptions=False,
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Local Splunk stack was not running", result.output)
+        self.assertFalse(self._v8_destinations()[0]["enabled"])
 
     def test_setup_splunk_disable_both(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -2230,6 +2383,27 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertIn("Splunk Web Credentials", result.output)
         self.assertIn("Username:  admin", result.output)
         self.assertIn("Password:  test-splunk-pass", result.output)
+
+    def test_setup_splunk_show_credentials_follows_the_bridge_license(self):
+        """GAP-2423: only a Free bridge env says Web auth is disabled; any other licence says log in."""
+        from defenseclaw.commands.cmd_setup import setup
+
+        env_dir = os.path.join(self.tmp_dir, "splunk-bridge", "env")
+        os.makedirs(env_dir)
+        env_file = os.path.join(env_dir, ".env")
+        for license_uri, free in (("Free", True), ("", False), ("/opt/splunk/etc/licenses/trial.lic", False)):
+            with open(env_file, "w") as f:
+                f.write(f"SPLUNK_LICENSE_URI={license_uri}\nSPLUNK_PASSWORD=test-splunk-pass\n")
+            result = self.runner.invoke(
+                setup, ["splunk", "--show-credentials"], obj=self.app, catch_exceptions=False,
+            )
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertIn("Username:  admin", result.output)
+            if free:
+                self.assertIn("Web auth:  disabled in Splunk Free mode", result.output)
+            else:
+                self.assertNotIn("Free mode", result.output, license_uri)
+                self.assertIn("Web auth:  required", result.output)
 
 
 # ---------------------------------------------------------------------------

@@ -18,14 +18,17 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/scanoutput"
 )
@@ -52,6 +55,16 @@ Checks for hardcoded secrets, unsafe exec calls, SQL injection, weak crypto,
 path traversal, and more across Python, JS/TS, Go, Java, Ruby, PHP, Shell,
 YAML, JSON, XML, C/C++, and Rust files.`,
 	Args: cobra.ExactArgs(1),
+	// On a managed Linux or macOS host the scan runs in process without the audit store,
+	// which the gateway service account owns: an administrator's scan
+	// failed with "untrusted owner" (GAP-0052). Elsewhere it records its
+	// result there as before.
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		if _, unix := managedHostUnixRecord(nil); unix {
+			return policyConfigOnlyPreRunE(cmd, args)
+		}
+		return rootPersistentPreRunE(cmd, args)
+	},
 	RunE: runScanCode,
 }
 
@@ -96,6 +109,9 @@ func runScanCode(cmd *cobra.Command, args []string) error {
 	}
 
 	result, err := scanner.ScanCode(context.Background(), target, rulesDir)
+	if errors.Is(err, scanner.ErrIncompleteScan) {
+		return fmt.Errorf("code scan incomplete: part of %s could not be read, so nothing was reported as clean: %w", target, err)
+	}
 	if err != nil {
 		return fmt.Errorf("code scan failed: %w", err)
 	}
@@ -106,10 +122,12 @@ func runScanCode(cmd *cobra.Command, args []string) error {
 		if cfg != nil {
 			dataDir = strings.TrimSpace(cfg.DataDir)
 		}
-		if dataDir == "" {
+		if dataDir == "" || (auditLog == nil && managedStandaloneHost()) {
+			// This administrator-only scan has no persistent result. Its local
+			// projection must not open the service account's correlation key.
 			redactor, err = scanoutput.NewEphemeralRedactor()
 		} else {
-			redactor, err = scanoutput.LoadRedactor(dataDir)
+			redactor, err = loadCodeScanRedactor(dataDir)
 		}
 		if err != nil {
 			return fmt.Errorf("initialize scan output redaction: %w", err)
@@ -148,6 +166,28 @@ func runScanCode(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func loadCodeScanRedactor(dataDir string) (*scanoutput.Redactor, error) {
+	// An administrator's in-process scan uses the service's existing key.
+	// Its owner is trusted only through the installed runtime descriptor and
+	// its fixed data directory; a per-user scan keeps the ordinary trust rule.
+	if managedHostCallerUID() == 0 {
+		layout, descriptor, err := managedStandaloneAdminDeployment()
+		if layout.DataDir != "" && filepath.Clean(dataDir) == filepath.Clean(layout.DataDir) {
+			if err != nil || descriptor == nil || descriptor.ServiceUID < 0 || uint64(descriptor.ServiceUID) > math.MaxUint32 {
+				return nil, fmt.Errorf("managed redaction key owner is unproven; run sudo %s enterprise %s repair", managedHostGatewayCommand(), managedHostPlatform())
+			}
+			// The raw spelling can traverse a symlink before a trailing "..".
+			// Open the verified layout path used by the identity comparison.
+			key, err := observabilityredaction.LoadExistingCorrelationKeyForOwner(layout.DataDir, uint32(descriptor.ServiceUID))
+			if err != nil {
+				return nil, fmt.Errorf("%w; run sudo %s enterprise %s repair", err, managedHostGatewayCommand(), managedHostPlatform())
+			}
+			return scanoutput.NewRedactor(key), nil
+		}
+	}
+	return scanoutput.LoadRedactor(dataDir)
+}
+
 func scanNeedsRedactor(persistProtectedCopy bool) bool {
 	return persistProtectedCopy || (scanOutputJSON && !scanNoRedact)
 }
@@ -157,7 +197,7 @@ func printCodeScanResults(result *scanner.ScanResult) {
 		fmt.Printf("Code scan: %s\n", result.Target)
 		fmt.Println("  No findings — clean")
 		fmt.Printf("  Duration: %s\n", result.Duration)
-		printHint("Run full audit:  defenseclaw doctor")
+		printCodeScanHint("Run full audit:  defenseclaw doctor")
 		return
 	}
 
@@ -173,5 +213,16 @@ func printCodeScanResults(result *scanner.ScanResult) {
 
 	fmt.Println()
 	fmt.Printf("  Duration: %s\n", result.Duration)
-	printHint("View alerts:  defenseclaw alerts")
+	printCodeScanHint("View alerts:  defenseclaw alerts")
+}
+
+// printCodeScanHint prints the per-user follow-up command after a code scan.
+// A managed computer has no per-user doctor or alerts: there `scan code` is
+// the administrator's check of a skill's files (GAP-1234), and the hint
+// named a command its launcher refuses.
+func printCodeScanHint(hint string) {
+	if managedStandaloneHost() {
+		return
+	}
+	printHint(hint)
 }

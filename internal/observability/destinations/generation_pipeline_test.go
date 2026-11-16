@@ -299,13 +299,15 @@ func TestGenerationPipelineFactoryRuntimeGraphFanoutRestartRequiredAndGlobalIsol
 	}
 	firstPrometheusAddress := listeners.listener(t, 0).Addr().String()
 	secondPlan := compositePipelinePlan(t, directory, "http://"+secondListener.Addr().String())
-	result, reloadErr := manager.Reload(t.Context(), runtimegraph.ConfigFromPlan(secondPlan, false))
+	// The Prometheus listener stays the same, which reloads live (GAP-2072);
+	// turning on judge-body retention is still a restart.
+	result, reloadErr := manager.Reload(t.Context(), runtimegraph.ConfigFromPlan(secondPlan, true))
 	reloadField := ""
 	if reloadErr != nil {
 		reloadField = reloadErr.FieldPath()
 	}
 	if reloadErr == nil || reloadErr.Code() != runtimegraph.ErrorRestartRequired ||
-		reloadErr.FieldPath() != "observability.destinations.prometheus.listen" ||
+		reloadErr.FieldPath() != runtimegraph.FieldRetainJudgeBodies ||
 		result.Status() != runtimegraph.ReloadRejected || result.ActiveGraph() != firstGraph ||
 		manager.Active() != firstGraph {
 		t.Fatalf("reload=%s active=%p first=%p error=%v field=%q", result.Status(), result.ActiveGraph(), firstGraph, reloadErr, reloadField)

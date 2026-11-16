@@ -24,8 +24,18 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+func init() {
+	// The Secure Client fail-open render defaults (#1163) need an
+	// authenticated Secure Client deployment, the strict host classifier
+	// (secureClientHost), not a process or config profile alone (main-sync
+	// review finding 5). Every binary that renders or runs hooks links this
+	// package.
+	connector.SecureClientDeploymentVerified = func() bool { return secureClientHost() }
+}
 
 // managedHostDescriptorPath is where a standalone managed deployment
 // publishes its runtime descriptor on this OS ("" where the check does not
@@ -48,8 +58,13 @@ func refusePerUserGatewayOnManagedHost() error {
 		return nil
 	}
 	if where, present := managedHostWindowsStandalone(); present {
+		// Name the restart route too, as the Unix refusal does: the managed
+		// gateway is a service the installed CLI's repair restarts
+		// (GAP-0718). Setup is not installed on a managed computer, so the
+		// route is the installed CLI, by its full path (GAP-0095).
 		return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so the per-user gateway is disabled; "+
-			"an administrator can check the managed deployment %s", where, managedWindowsAdminStatusHint())
+			"an administrator can check the managed deployment %s, and restart or repair the managed gateway with %s from the same prompt",
+			where, managedWindowsAdminStatusHint(), windowsEnterpriseAdminCommand("repair"))
 	}
 	path, present := managedHostUnixRecord(os.Stderr)
 	if !present {
@@ -87,38 +102,83 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 	addManagedWindowsAnswer(root, "setup", func(args []string) error {
 		return managedWindowsSetupRefusal(where, args)
 	})
+	// `tui` was a bare unknown command with the generic usage (rel-1-0-3
+	// GAP-0328): the TUI is part of the per-user CLI.
+	addManagedWindowsAnswer(root, "tui", func([]string) error {
+		return withExitCode(managedWindowsTUIAnswer(where), 3)
+	})
 	for _, verb := range []string{"set", "unset"} {
 		verb := verb
 		addManagedWindowsAnswer(configCmd, verb, func([]string) error {
-			return withExitCode(fmt.Errorf("This device is managed: change config.yaml in the admin config (MDM or management plane); config %s did not change it", verb), 3)
+			return withExitCode(managedWindowsConfigWriterRefusal("config "+verb), 3)
 		})
 	}
+	// The guardrail writers were an unknown command here, so a refused
+	// `guardrail disable` left no audit row (GAP-2639).
+	addManagedWindowsAnswer(root, "guardrail", func(args []string) error {
+		if command, ok := launcherAuditedWriter(append([]string{"guardrail"}, args...)); ok {
+			return withExitCode(managedWindowsConfigWriterRefusal(command), 3)
+		}
+		return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: the guardrail is set in the admin config (MDM or management plane). %s",
+			windowsManagedStandardUserViewAnswer("The admission policy and guardrail thresholds", "policy", "show"))), 3)
+	})
 	for _, kind := range []string{"skill", "mcp", "plugin", "tool"} {
 		kind := kind
 		addManagedWindowsAnswer(root, kind, func(args []string) error {
 			if len(args) > 0 && args[0] == "scan" && kind != "tool" {
 				// A scan changes no policy; the refusal said asset_policy
-				// was set in the admin config (GAP-0975).
-				target := "<path>"
+				// was set in the admin config (GAP-0975). The answer says
+				// who runs the scan, where and on what: a standard account
+				// is refused (managedScanAdministratorOnly), the gateway
+				// service refuses a folder inside a user profile
+				// (windowsProfileScanNextStep), and cmd.exe cannot run the
+				// `&` form (cowork-1-0-8 GAP-0076).
+				what, target, where, scanner := "a "+kind, "<path>", " (a folder outside the user profiles; copy it out first)", kind
 				if kind == "mcp" {
-					target = "<url>"
+					what, target, where, scanner = "an MCP server", "<url>", "", "MCP"
 				}
-				return withExitCode(fmt.Errorf("This device is managed: scan a %s with `defenseclaw scan %s %s`, "+
-					"which runs the gateway's %s scanner", kind, kind, target, kind), 3)
+				return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: an administrator scans %s from an elevated PowerShell prompt with %s%s, "+
+					"which runs the gateway's %s scanner", what, managedWindowsCommand("scan", kind, target), where, scanner)), 3)
 			}
+			// The refusal named no next step (GAP-0523): the compiled
+			// admission policy is the administrator's view of these rules.
+			next := windowsManagedStandardUserViewAnswer("The admission policy", "policy", "show")
 			if len(args) == 0 || (args[0] != "block" && args[0] != "allow" && args[0] != "unblock") {
-				return withExitCode(fmt.Errorf("This device is managed: asset_policy.%s is set in the admin config (MDM or management plane)", kind), 3)
+				return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: asset_policy.%s is set in the admin config (MDM or management plane). %s", kind, next)), 3)
 			}
-			return withExitCode(fmt.Errorf("This device is managed: asset_policy.%s is set in the admin config (MDM or management plane); %s %s did not change it", kind, kind, args[0]), 3)
+			return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: asset_policy.%s is set in the admin config (MDM or management plane); %s %s did not change it. %s", kind, kind, args[0], next)), 3)
 		})
 	}
+	// Every other per-user command gets the managed answer too (GAP-0795).
+	addManagedWindowsPerUserAnswers(root, where)
 }
+
+// managedWindowsConfigWriterRefusal is the one answer to a command that would
+// write config.yaml (config set and unset, the guardrail writers) on a managed
+// Windows computer: the file is the administrator's, the command changed
+// nothing, and the administrator commands that show the deployment and the
+// account's agents are named the way every other refused command names them
+// (managedWindowsPerUserCommandAnswer). The two writers had their own
+// sentence that named none (GAP-0857).
+func managedWindowsConfigWriterRefusal(command string) managedDeviceAnswer {
+	return managedDeviceAnswer(fmt.Sprintf("This device is managed: change config.yaml in the admin config (MDM or management plane); %s did not change it. "+
+		"Your administrator can check the managed deployment %s, and your account's agents with %s. Nothing was changed.",
+		command, managedWindowsAdminStatusHint(), managedWindowsAccountAgentsCommand()))
+}
+
+// managedDeviceAnswer is a managed Windows answer: a sentence that starts
+// like the per-user CLI's "This device is managed" refusal.
+type managedDeviceAnswer string
+
+func (a managedDeviceAnswer) Error() string { return string(a) }
 
 // addManagedWindowsAnswer adds a hidden root command name that only returns
 // answer, unless root already has that command. The answer needs no per-user
 // config: without the skip annotation the root pre-run tried to load
 // ~/.defenseclaw/config.yaml, which a managed computer never has, and printed
-// "failed to load config" instead.
+// "failed to load config" instead. With flag parsing off, --help reached the
+// answer too: `doctor --help` exited 1 with the refusal and no usage
+// (GAP-0536). Help prints the answer as the description and exits 0.
 func addManagedWindowsAnswer(root *cobra.Command, name string, answer func(args []string) error) {
 	for _, command := range root.Commands() {
 		if command.Name() == name {
@@ -131,10 +191,40 @@ func addManagedWindowsAnswer(root *cobra.Command, name string, answer func(args 
 		DisableFlagParsing: true,
 		SilenceUsage:       true,
 		Annotations:        map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if rest, help := managedAnswerHelpArgs(args); help {
+				cmd.Long = answer(rest).Error()
+				return cmd.Help()
+			}
+			// A refused writer is a row in the managed audit log, as on
+			// Linux and macOS (GAP-2639). The words come from the
+			// writer table, never from the arguments.
+			words := append(strings.Fields(cmd.CommandPath())[1:], args...)
+			if command, ok := launcherAuditedWriter(words); ok {
+				reportManagedCommandRefusal(command, "")
+			}
 			return answer(args)
 		},
 	})
+}
+
+// managedAnswerHelpArgs reports whether args ask for help (-h or --help
+// before a "--") and returns them without the help flags.
+func managedAnswerHelpArgs(args []string) ([]string, bool) {
+	rest := make([]string, 0, len(args))
+	help := false
+	for i, arg := range args {
+		if arg == "--" {
+			rest = append(rest, args[i:]...)
+			break
+		}
+		if arg == "-h" || arg == "--help" {
+			help = true
+			continue
+		}
+		rest = append(rest, arg)
+	}
+	return rest, help
 }
 
 // managedWindowsAdminCommandAnswer tells a user on a managed Windows computer
@@ -142,10 +232,52 @@ func addManagedWindowsAnswer(root *cobra.Command, name string, answer func(args 
 // It names the administrator's check for this account as well, because the
 // deployment status has no per-account detail.
 func managedWindowsAdminCommandAnswer(where, command string) error {
+	detail := ""
+	switch command {
+	case "doctor":
+		detail = " If Hermes is enrolled, a session-only HERMES_HOME is NOT COVERED because the managed service cannot observe a home selected only by your shell; the administrator's status and verify name this limit." +
+			managedWindowsRemovedConnectorDetail()
+	case "status":
+		// Only an elevated prompt gets this answer to status: one that is
+		// not elevated shows the account's own state (GAP-0060). The
+		// built-in Administrator's prompts are always elevated, and Setup
+		// puts no DefenseClaw command on PATH, so the user-facing status
+		// is named in full (cowork-1-0-8 GAP-0076).
+		detail = " To see an account's own protection (its agents and Cowork), sign in as that standard account and run " +
+			managedWindowsCommand("status") + " in a PowerShell prompt that is not elevated; an elevated prompt, and every prompt of the built-in Administrator account, gets this answer."
+	}
 	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so `%s` has no per-user "+
 		"deployment to check and nothing for you to do; your administrator can check the managed deployment %s, "+
-		"and your account's agents with `& '%s' enterprise policy show --user %s`. Nothing was changed.",
-		where, command, managedWindowsAdminStatusHint(), managedWindowsAdminCLI(), managedHostCurrentAccountName())
+		"and your account's agents with %s.%s Nothing was changed.",
+		where, command, managedWindowsAdminStatusHint(), managedWindowsAccountAgentsCommand(), detail)
+}
+
+// managedWindowsTUIAnswer tells a user on a managed Windows computer that
+// the DefenseClaw TUI, part of the per-user CLI, is not installed there, and
+// names the administrator's checks instead.
+func managedWindowsTUIAnswer(where string) error {
+	return managedDeviceAnswer(fmt.Sprintf("this computer's DefenseClaw is managed by your organization (%s), so the DefenseClaw TUI is not installed on this computer: "+
+		"it is part of the per-user DefenseClaw, which a managed computer does not have, and there is nothing for you to set up. "+
+		"Your administrator can check the managed deployment %s, and your account's agents with %s.%s "+
+		"Nothing was changed.",
+		where, managedWindowsAdminStatusHint(), managedWindowsAccountAgentsCommand(), managedWindowsRemovedConnectorDetail()))
+}
+
+// managedWindowsRemovedConnectorLines names the caller's own connectors the
+// administrator took off the roster, each as "<connector>: not managed
+// (removed from roster)"; the Windows build reads them from the gateway's
+// own-status pipe, and every other build has none. A seam for tests.
+var managedWindowsRemovedConnectorLines = func() []string { return nil }
+
+// managedWindowsRemovedConnectorDetail is the sentence the doctor and TUI
+// answers add for a caller who has a removed connector: it is not managed,
+// which is neither protected nor pending. Empty when there is none.
+func managedWindowsRemovedConnectorDetail() string {
+	lines := managedWindowsRemovedConnectorLines()
+	if len(lines) == 0 {
+		return ""
+	}
+	return " For your account: " + strings.Join(lines, "; ") + ". Your administrator removed it from the roster, so DefenseClaw no longer governs it for you: it is neither protected nor pending, and its hook calls are allowed without inspection."
 }
 
 // managedWindowsVersionChangeAnswer tells a user on a managed Windows
@@ -162,18 +294,51 @@ func managedWindowsVersionChangeAnswer(where, command, done string) error {
 // Windows standalone computer. Setup puts no DefenseClaw command on PATH and
 // the docs name this path, so a hint naming a bare `defenseclaw-gateway` was
 // "not recognized" (GAP-1183). A seam for tests.
-var managedWindowsAdminCLI = func() string {
-	root := strings.TrimRight(strings.TrimSpace(os.Getenv("ProgramFiles")), `\`)
-	if root == "" {
-		root = `C:\Program Files`
-	}
-	return root + `\Cisco\DefenseClaw\bin\defenseclaw.exe`
+var managedWindowsAdminCLI = managed.WindowsStandaloneAdminCLI
+
+// managedWindowsCommand is a defenseclaw.exe command as it is typed in
+// PowerShell on a managed Windows computer, in backticks: the installed CLI
+// by its full path, each element of args one argument, quoted unless it is a
+// plain word or a <placeholder> (managed.WindowsCommandLine). Setup puts no
+// DefenseClaw command on PATH, so a bare `defenseclaw ...` is "not
+// recognized" (GAP-1183, GAP-1338, cowork-1-0-8 GAP-0076). Every managed
+// Windows answer names its commands with it or managedWindowsGatewayCommand,
+// and says PowerShell: TestManagedWindowsRefusalsNameRunnableCommands checks
+// the answers, managed.TestManagedWindowsCommandsComeFromTheRenderer the
+// sources.
+func managedWindowsCommand(args ...string) string {
+	return "`" + managedWindowsCommandLine(args...) + "`"
+}
+
+// managedWindowsCommandLine is managedWindowsCommand without the backticks,
+// for help text.
+func managedWindowsCommandLine(args ...string) string {
+	return managed.WindowsCommandLine(managedWindowsAdminCLI(), args...)
+}
+
+// managedWindowsGatewayCommand is managedWindowsCommand for the
+// defenseclaw-gateway.exe beside the CLI: sandbox administration and
+// provenance are gateway commands (r103 GAP-0215).
+func managedWindowsGatewayCommand(args ...string) string {
+	return "`" + managedWindowsGatewayCommandLine(args...) + "`"
+}
+
+// managedWindowsGatewayCommandLine is managedWindowsGatewayCommand without
+// the backticks.
+func managedWindowsGatewayCommandLine(args ...string) string {
+	return managed.WindowsCommandLine(managed.WindowsGatewayBeside(managedWindowsAdminCLI()), args...)
+}
+
+// managedWindowsAccountAgentsCommand is the administrator's view of the
+// signed-in account's agents.
+func managedWindowsAccountAgentsCommand() string {
+	return managedWindowsCommand("enterprise", "policy", "show", "--user", managedHostCurrentAccountName())
 }
 
 // managedWindowsAdminStatusHint is the administrator's status check on a
 // managed Windows computer, as a PowerShell command that runs as typed.
 func managedWindowsAdminStatusHint() string {
-	return "from an elevated PowerShell prompt with `& '" + managedWindowsAdminCLI() + "' enterprise windows status --profile standalone`"
+	return "from an elevated PowerShell prompt with " + managedWindowsCommand("enterprise", "windows", "status", "--profile", "standalone")
 }
 
 // managedHostPerUserDaemonCommands are the per-user gateway commands a
@@ -217,7 +382,7 @@ func applyManagedHostHelp(root *cobra.Command) bool {
 	admin, adminLead := "", "An administrator checks the deployment with:"
 	where, present := managedHostWindowsStandalone()
 	if present {
-		admin = "& '" + managedWindowsAdminCLI() + "' enterprise windows status --profile standalone"
+		admin = managedWindowsCommandLine("enterprise", "windows", "status", "--profile", "standalone")
 		adminLead = "An administrator checks it from an elevated PowerShell prompt with:"
 	} else if where, present = managedHostUnixRecord(nil); present {
 		admin = "sudo " + managedHostGatewayCommand() + " enterprise " + managedHostPlatform() + " status"
@@ -350,9 +515,11 @@ func managedWindowsConfigLoadError(cmd *cobra.Command, err error) error {
 			return err
 		}
 		// GAP-1196: name the administrator's form of the command too, so
-		// `audit export` reads as an administrator command here.
+		// `audit export` reads as an administrator command here. Only where
+		// that form reads the managed deployment, and never to an
+		// administrator, who just ran it (GAP-1037).
 		asAdmin := ""
-		if command != "this command" {
+		if _, admin := managedStandaloneAdminCaller(nil); !admin && managedHostAdminFormWorks(command) {
 			asAdmin = fmt.Sprintf("run `sudo %s %s` or ", managedHostGatewayCommand(), command)
 		}
 		if errors.Is(err, fs.ErrPermission) {
@@ -361,22 +528,40 @@ func managedWindowsConfigLoadError(cmd *cobra.Command, err error) error {
 		}
 		return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so `%s` has no "+
 			"per-user gateway to check; an administrator can %scheck the managed deployment with "+
-			"`sudo %s enterprise %s status`. Nothing was changed.",
-			record, command, asAdmin, managedHostGatewayCommand(), managedHostPlatform())
+			"`sudo %s enterprise %s status` or `sudo %s enterprise %s verify`. Nothing was changed.",
+			record, command, asAdmin, managedHostGatewayCommand(), managedHostPlatform(), managedHostGatewayCommand(), managedHostPlatform())
 	}
 	return managedWindowsAdminCommandAnswer(where, command)
 }
 
+// managedHostAdminFormWorks reports whether an administrator's run of
+// command reads the managed deployment (applyManagedStandaloneAdminEnv):
+// status, audit, policy and the enterprise hooks and acp commands. Any
+// other command, connector verify among them, has no managed form, so the
+// answer above must not send the administrator to it.
+func managedHostAdminFormWorks(command string) bool {
+	for _, prefix := range []string{"status", "audit", "policy", "enterprise hooks", "enterprise acp"} {
+		if command == prefix || strings.HasPrefix(command, prefix+" ") {
+			return true
+		}
+	}
+	return false
+}
+
 // managedWindowsSetupRefusal is the answer to `defenseclaw setup <args>` on a
 // Windows standalone managed computer. The guardian enrolls Kiro there for
-// each listed user through hooks, so `setup kiro` says so.
+// each listed user through hooks, so `setup kiro` says so. Only `setup
+// rotate-token` gets the credential-rotation sentence: every other subcommand
+// printed it too (GAP-0551).
 func managedWindowsSetupRefusal(where string, args []string) error {
-	detail := "Rotating the credentials of a managed Windows deployment is not available yet. "
+	detail := ""
 	sub := ""
 	if len(args) > 0 {
 		sub = strings.ToLower(strings.TrimSpace(args[0]))
 	}
 	switch sub {
+	case "rotate-token":
+		detail = "Rotating the credentials of a managed Windows deployment is not available yet. "
 	case "kiro":
 		detail = "On a managed Windows computer the guardian enrolls Kiro for each user when your administrator " +
 			"lists it in the deployment (guardrail.connectors.kiro); the ACP guard stays available for editors that start Kiro over ACP. "
@@ -388,9 +573,10 @@ func managedWindowsSetupRefusal(where string, args []string) error {
 			"users in a folder that only administrators can change, such as one under Program Files (Node.js installs npx in " +
 			"C:\\Program Files\\nodejs), so an administrator installs it there. "
 	}
+	// It named no command to run next (GAP-0523).
 	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so per-user setup "+
 		"commands are not available; your administrator manages its connectors and credentials. "+
-		"%sNothing was changed.", where, detail)
+		"%sYour administrator checks your account's connectors %s. Nothing was changed.", where, detail, managedWindowsAdminStatusHint())
 }
 
 func managedHostUnixRecord(warn io.Writer) (string, bool) {
@@ -577,11 +763,7 @@ func managedHostPlatform() string {
 // secure_path does not include the install directory, so a bare
 // `defenseclaw-gateway` in a hint fails with "command not found".
 func managedHostGatewayCommand() string {
-	layout, err := managed.StandaloneLayoutFor(runtime.GOOS)
-	if err != nil {
-		return "defenseclaw-gateway"
-	}
-	return layout.BinDir + "/defenseclaw-gateway"
+	return managed.StandaloneGatewayPath(runtime.GOOS)
 }
 
 // managedRecordTrusted reports whether a managed-deployment record at path

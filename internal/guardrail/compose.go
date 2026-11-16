@@ -153,7 +153,7 @@ func (rp *RulePack) applyCustomization(layer Customization, protections Protecti
 			return &ComposeError{Field: "severity_overrides", Reason: fmt.Sprintf("unknown rule %s", id)}
 		}
 		if !validSeverity(severity) {
-			return &ComposeError{Field: "severity_overrides", Reason: fmt.Sprintf("rule %s severity must be LOW, MEDIUM, HIGH or CRITICAL", id)}
+			return &ComposeError{Field: "severity_overrides", Reason: fmt.Sprintf("rule %s severity must be CRITICAL, HIGH, MEDIUM or LOW, in any case", id)}
 		}
 		rule.Severity = severity
 	}
@@ -305,7 +305,11 @@ func (rp *RulePack) mergeSensitiveTool(override SensitiveToolOverride) {
 // their rules, suppressions, sensitive tools). Judge configurations and
 // local patterns are read-only and stay shared.
 func cloneRulePackForCompose(base *RulePack) *RulePack {
-	out := &RulePack{JudgeConfigs: base.JudgeConfigs, LocalPatterns: base.LocalPatterns, manifestDigest: base.manifestDigest}
+	out := &RulePack{
+		JudgeConfigs: base.JudgeConfigs, LocalPatterns: base.LocalPatterns,
+		manifestDigest: base.manifestDigest, manifestPosture: base.manifestPosture,
+		compilation: base.compilation,
+	}
 	if base.Suppressions != nil {
 		supps := *base.Suppressions
 		supps.PreJudgeStrips = append([]PreJudgeStrip(nil), base.Suppressions.PreJudgeStrips...)

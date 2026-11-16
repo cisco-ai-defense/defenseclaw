@@ -38,13 +38,14 @@ func TestDynamicRedirectTargetReduction(t *testing.T) {
 		// programs are the view's commands, in order.
 		programs []string
 		// homeExact is set for a lone command whose only dynamic word is a
-		// "~/" target: with an active home its analysis is complete
+		// "~/", $HOME/ or "$HOME/" target (GAP-1773): with an active home
+		// its analysis is complete
 		// (rewriteTrustedPOSIXHomeTilde), so there is nothing to reduce.
 		homeExact bool
 	}{
 		{name: "tilde target", command: "echo dc-block-marker > ~/dc-x.txt", static: "echo dc-block-marker > " + staticRedirectTarget, reduced: true, programs: []string{"echo"}, homeExact: true},
-		{name: "HOME target", command: "echo dc-block-marker > $HOME/dc-x.txt", static: "echo dc-block-marker > " + staticRedirectTarget, reduced: true, programs: []string{"echo"}},
-		{name: "quoted HOME append", command: `echo dc-block-marker >> "$HOME/dc-x.txt"`, static: "echo dc-block-marker >> " + staticRedirectTarget, reduced: true, programs: []string{"echo"}},
+		{name: "HOME target", command: "echo dc-block-marker > $HOME/dc-x.txt", static: "echo dc-block-marker > " + staticRedirectTarget, reduced: true, programs: []string{"echo"}, homeExact: true},
+		{name: "quoted HOME append", command: `echo dc-block-marker >> "$HOME/dc-x.txt"`, static: "echo dc-block-marker >> " + staticRedirectTarget, reduced: true, programs: []string{"echo"}, homeExact: true},
 		{name: "glob target", command: "echo dc-block-marker > dc-*.txt", static: "echo dc-block-marker > " + staticRedirectTarget, reduced: true, programs: []string{"echo"}},
 		{name: "static stderr kept", command: "echo dc-block-marker 2>/dev/null > ~/dc-x.txt", static: "echo dc-block-marker 2>/dev/null > " + staticRedirectTarget, reduced: true, kept: 1, programs: []string{"echo"}, homeExact: true},
 		{name: "pipeline", command: "echo dc-block-marker | cat > ~/dc-x.txt", static: "echo dc-block-marker | cat > " + staticRedirectTarget, reduced: true, programs: []string{"echo", "cat"}},

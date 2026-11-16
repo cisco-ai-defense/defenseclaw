@@ -34,7 +34,7 @@ func TestEnterpriseSecurityIncompleteNamesItsReasons(t *testing.T) {
 	}
 	message := result.Warnings[0].Message
 	if !strings.Contains(message, "claudecode machine policy") || strings.Contains(message, "codex machine policy") ||
-		!strings.Contains(message, "/repair ATTESTCLAUDEEFFECTIVEPOLICY=1") ||
+		!strings.Contains(message, "enterprise windows repair --profile standalone --attest-claude-effective-policy") ||
 		!strings.Contains(message, "4 per-user enrollment(s) are pending (waiting for an active, connected session") ||
 		!strings.Contains(message, "each pending or failed account's Account line (enrollment.accounts[].reason in --json) says why") {
 		t.Fatalf("message = %q", message)
@@ -66,6 +66,32 @@ func TestEnterpriseSecurityIncompleteNamesItsReasons(t *testing.T) {
 	}
 }
 
+// GAP-1900: hook_process_fail_open, the agents' own residual present on every
+// Windows result with Claude Code or Codex, does not hide the actionable
+// reasons (here the stale Claude attestation after an upgrade); alone, with
+// nothing actionable, it adds no empty reason.
+func TestEnterpriseSecurityIncompleteNamesActionableReasonsBesideTheHookProcessResidual(t *testing.T) {
+	result := &enterprisestatus.Result{
+		Readiness: enterprisestatus.Readiness{Guardian: true},
+		MachinePolicy: map[string]enterprisestatus.MachinePolicyState{
+			"claudecode": {Ownership: "merge", Lock: "enforce"},
+		},
+	}
+	result.AddWarning(enterprisestatus.CodeHookProcessFailOpen, "claudecode: may continue")
+	result.AddWarning(enterprisestatus.CodeHookProcessFailOpen, "codex: may continue")
+	addEnterpriseSecurityIncompleteReasons(result, false)
+	if len(result.Warnings) != 3 || result.Warnings[2].Code != "security_incomplete" ||
+		!strings.Contains(result.Warnings[2].Message, "--attest-claude-effective-policy") {
+		t.Fatalf("the residual hid the attestation reason: %+v", result.Warnings)
+	}
+	result.MachinePolicy["claudecode"] = enterprisestatus.MachinePolicyState{Ownership: "merge", Lock: "enforce", EffectiveLock: "enforce"}
+	result.Warnings = result.Warnings[:2]
+	addEnterpriseSecurityIncompleteReasons(result, false)
+	if len(result.Warnings) != 2 {
+		t.Fatalf("the residual alone got an empty reason: %+v", result.Warnings)
+	}
+}
+
 // GAP-2494: a repair that restored the Cursor adapter still names why
 // security is not complete; a warning that explains it still suppresses it.
 func TestEnterpriseSecurityIncompleteIgnoresInformationalWarnings(t *testing.T) {
@@ -79,8 +105,17 @@ func TestEnterpriseSecurityIncompleteIgnoresInformationalWarnings(t *testing.T) 
 	result.AddWarning("stale_lifecycle_journal_removed", "removed")
 	addEnterpriseSecurityIncompleteReasons(result, false)
 	if len(result.Warnings) != 3 || result.Warnings[2].Code != "security_incomplete" ||
-		!strings.Contains(result.Warnings[2].Message, "ATTESTCLAUDEEFFECTIVEPOLICY=1") {
+		!strings.Contains(result.Warnings[2].Message, "--attest-claude-effective-policy") {
 		t.Fatalf("warnings = %+v", result.Warnings)
+	}
+
+	// #1105 (GAP-0781): a per-user folder a retire skipped is a note, not
+	// why security is incomplete.
+	result.Warnings = nil
+	result.AddWarning("user_runtime_folder_untrusted", "skipped")
+	addEnterpriseSecurityIncompleteReasons(result, false)
+	if len(result.Warnings) != 2 || result.Warnings[1].Code != "security_incomplete" {
+		t.Fatalf("a skipped per-user folder suppressed the reason: %+v", result.Warnings)
 	}
 
 	// GAP-0536: the sandbox policy notes Windows now prints do not hide why
@@ -94,10 +129,46 @@ func TestEnterpriseSecurityIncompleteIgnoresInformationalWarnings(t *testing.T) 
 	}
 
 	result.Warnings = nil
+	result.AddWarning("claude_project_skipped", "one project was skipped")
+	addEnterpriseSecurityIncompleteReasons(result, false)
+	if len(result.Warnings) != 2 || result.Warnings[1].Code != "security_incomplete" {
+		t.Fatalf("a project note suppressed the reason: %+v", result.Warnings)
+	}
+
+	result.Warnings = nil
 	result.AddWarning("cursor_adapter_restored", "restored")
 	result.AddWarning("user_registrations_pending", "pending")
 	addEnterpriseSecurityIncompleteReasons(result, false)
 	if len(result.Warnings) != 2 {
+		t.Fatalf("an explaining warning did not suppress the reason: %+v", result.Warnings)
+	}
+}
+
+// GAP-2038: on a managed host with Hermes enabled, the warnings every such
+// result carries after an upgrade (Hermes session-only coverage, an account
+// waiting for sign-in, a signed-out account's unreadable Claude state, the
+// missing judge) did not let the stale Claude attestation be named; an
+// explaining warning still suppresses it.
+func TestEnterpriseSecurityIncompleteNamesTheAttestationBesideTheHermesResiduals(t *testing.T) {
+	result := &enterprisestatus.Result{
+		Readiness: enterprisestatus.Readiness{Guardian: true},
+		MachinePolicy: map[string]enterprisestatus.MachinePolicyState{
+			"claudecode": {Ownership: "merge", Lock: "enforce"},
+		},
+	}
+	for _, code := range []string{"guardian_repair_pending", "status_detail_unavailable", enterprisestatus.CodeHookProcessFailOpen,
+		"claude_state_unreadable", "scanner_judge_missing"} {
+		result.AddWarning(code, code)
+	}
+	addEnterpriseSecurityIncompleteReasons(result, false)
+	if len(result.Warnings) != 6 || result.Warnings[5].Code != "security_incomplete" ||
+		!strings.Contains(result.Warnings[5].Message, "--attest-claude-effective-policy") {
+		t.Fatalf("the Hermes residuals hid the attestation reason: %+v", result.Warnings)
+	}
+	result.Warnings = result.Warnings[:5]
+	result.AddWarning("user_registrations_pending", "pending")
+	addEnterpriseSecurityIncompleteReasons(result, false)
+	if len(result.Warnings) != 6 {
 		t.Fatalf("an explaining warning did not suppress the reason: %+v", result.Warnings)
 	}
 }

@@ -15,6 +15,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -137,11 +139,11 @@ func runEnterpriseACPSetup(cmd *cobra.Command, _ []string) error {
 	agentBinary := strings.TrimSpace(enterpriseACPAgentBinary)
 	windows := runtime.GOOS == "windows"
 	invoke := managedHostGatewayCommand()
-	if executable, execErr := os.Executable(); execErr == nil {
-		invoke = enterpriseACPQuotePath(executable, windows)
-	}
 	if windows {
-		invoke = "& " + invoke
+		invoke = managedWindowsAdminCLI()
+	}
+	if executable, execErr := os.Executable(); execErr == nil {
+		invoke = executable
 	}
 	result, err := setupEnterpriseACPUserFiles(enterpriseACPUserSetup{
 		client:      client,
@@ -153,16 +155,15 @@ func runEnterpriseACPSetup(cmd *cobra.Command, _ []string) error {
 		agentBinary: agentBinary,
 		gatewayURL:  fmt.Sprintf("http://127.0.0.1:%d/api/v1/acp/evaluate", enterpriseACPAPIPort),
 		rerun: func(profile string, mode acp.Mode) string {
-			command := fmt.Sprintf("%s enterprise acp setup --client %s --agent %s --profile %s", invoke, client, agent, profile)
+			args := []string{"enterprise", "acp", "setup", "--client", client, "--agent", agent, "--profile", profile}
 			if mode == acp.ModeAction {
-				command += " --activate"
+				args = append(args, "--activate")
 			}
-			command += fmt.Sprintf(" --data-dir %s --api-port %d --guard-binary %s", enterpriseACPQuotePath(dataDir, windows),
-				enterpriseACPAPIPort, enterpriseACPQuotePath(guard, windows))
+			args = append(args, "--data-dir", dataDir, "--api-port", strconv.Itoa(enterpriseACPAPIPort), "--guard-binary", guard)
 			if agentBinary != "" {
-				command += " --agent-binary " + enterpriseACPQuotePath(agentBinary, windows)
+				args = append(args, "--agent-binary", agentBinary)
 			}
-			return command
+			return enterpriseACPCommandLine(windows, invoke, args...)
 		},
 	})
 	if err != nil {
@@ -238,7 +239,8 @@ func setupEnterpriseACPUserFilesLocked(in enterpriseACPUserSetup) (result enterp
 			next = in.rerun(note.Profile, acp.Mode(note.Mode))
 		}
 		return result, fmt.Errorf("this setup command is for profile %s, but your administrator enrolled you for %s/%s in profile %s "+
-			"(%s), which replaced it; nothing was changed. Run: %s", in.profile, in.client, in.agent, note.Profile, note.EnrolledAt, next)
+			"(%s), which replaced it; nothing was changed. %s: %s", in.profile, in.client, in.agent, note.Profile, note.EnrolledAt,
+			enterpriseACPRunInstruction(runtime.GOOS == "windows" && in.rerun != nil), next)
 	}
 	guard, err := resolveACPExecutable(in.guard, "DefenseClaw ACP guard")
 	if err != nil {
@@ -261,6 +263,7 @@ func setupEnterpriseACPUserFilesLocked(in enterpriseACPUserSetup) (result enterp
 		return result, err
 	}
 	lockPath := acpContractLockPath(in.dataDir, in.client, in.agent)
+	recordPath := acpOwnedEntriesPath(in.dataDir)
 
 	document, prefix, err := readACPClientConfig(clientPath)
 	if err != nil {
@@ -274,7 +277,7 @@ func setupEnterpriseACPUserFilesLocked(in enterpriseACPUserSetup) (result enterp
 	if err != nil {
 		return result, err
 	}
-	touched := append([]string{clientPath, lockPath}, siblings...)
+	touched := append([]string{clientPath, lockPath, recordPath}, siblings...)
 	snapshots := make(map[string][]byte, len(touched))
 	for _, path := range touched {
 		body, readErr := os.ReadFile(path)
@@ -333,7 +336,7 @@ func setupEnterpriseACPUserFilesLocked(in enterpriseACPUserSetup) (result enterp
 	}
 	// The lock pins this entry, not the whole file the editor rewrites
 	// (GAP-0708).
-	entryDigest, err := acp.ClientEntrySHA256(clientPath, in.client, in.agent)
+	entryDigest, err := acp.ClientEntrySHA256(clientPath, in.client, in.agent, lockPath)
 	if err != nil {
 		return result, err
 	}
@@ -360,6 +363,18 @@ func setupEnterpriseACPUserFilesLocked(in enterpriseACPUserSetup) (result enterp
 		return result, err
 	}
 	if err := safefile.WritePrivate(lockPath, append(body, '\n')); err != nil {
+		return result, err
+	}
+	// The per-user CLI's verify and status trust an entry only when this
+	// runtime recorded writing it; enterprise setup wrote none, so every
+	// untouched managed entry read as foreign (GAP-2111).
+	recorded, err := acp.RecordedEntrySHA256(in.client, entry)
+	if err != nil {
+		return result, err
+	}
+	if err := recordACPOwnedEntry(in.dataDir, acpOwnedEntry{
+		Client: in.client, Agent: in.agent, ConfigPath: clientPath, Name: acpManagedEntryName(in.agent), SHA256: recorded,
+	}); err != nil {
 		return result, err
 	}
 	for _, sibling := range siblings {
@@ -462,6 +477,60 @@ func acpContractLockPath(dataDir, client, agent string) string {
 // acpManagedEntryName is the editor entry name for an agent, the one the
 // Python CLI writes and verifies.
 func acpManagedEntryName(agent string) string { return acp.ManagedEntryName(agent) }
+
+// maxACPOwnedEntriesBytes is the record size the per-user CLI reads
+// (cmd_acp._ENTRY_RECORD_LIMIT).
+const maxACPOwnedEntriesBytes = 256 << 10
+
+// acpOwnedEntry is one row of <data-dir>/acp/owned-entries.json, the record
+// of the editor entries a runtime wrote (cmd_acp._ENTRY_RECORD_FIELDS).
+type acpOwnedEntry struct {
+	Client     string `json:"client"`
+	Agent      string `json:"agent"`
+	ConfigPath string `json:"config_path"`
+	Name       string `json:"name"`
+	SHA256     string `json:"sha256"`
+}
+
+func acpOwnedEntriesPath(dataDir string) string {
+	return filepath.Join(dataDir, "acp", "owned-entries.json")
+}
+
+// recordACPOwnedEntry adds or replaces one entry in the runtime's record and
+// keeps the others. A record that is unreadable or for another runtime is
+// replaced, as the per-user CLI does.
+func recordACPOwnedEntry(dataDir string, entry acpOwnedEntry) error {
+	type document struct {
+		Version int             `json:"version"`
+		Runtime string          `json:"runtime"`
+		Entries []acpOwnedEntry `json:"entries"`
+	}
+	path := acpOwnedEntriesPath(dataDir)
+	var entries []acpOwnedEntry
+	if body, err := safefile.ReadRegularFileBounded(path, maxACPOwnedEntriesBytes); err == nil {
+		var previous document
+		if json.Unmarshal(body, &previous) == nil && previous.Version == 1 && filepath.Clean(previous.Runtime) == filepath.Clean(dataDir) {
+			for _, kept := range previous.Entries {
+				if kept.Client == entry.Client && kept.Agent == entry.Agent && kept.Name == entry.Name &&
+					filepath.Clean(kept.ConfigPath) == filepath.Clean(entry.ConfigPath) {
+					continue
+				}
+				entries = append(entries, kept)
+			}
+		}
+	}
+	entries = append(entries, entry)
+	sort.Slice(entries, func(i, j int) bool {
+		a, b := entries[i], entries[j]
+		return strings.Join([]string{a.Client, a.Agent, a.ConfigPath, a.Name}, "\x00") <
+			strings.Join([]string{b.Client, b.Agent, b.ConfigPath, b.Name}, "\x00")
+	})
+	body, err := json.MarshalIndent(document{Version: 1, Runtime: dataDir, Entries: entries}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return safefile.WritePrivate(path, append(body, '\n'))
+}
 
 // acpSiblingLockPaths finds existing locks both in the new enrollment's data
 // directory and in the managed entries of the shared editor settings file.

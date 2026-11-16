@@ -14,16 +14,16 @@ import (
 const maliciousPersistenceDownloadExecuteClass = "download_execute"
 
 var (
-	persistencePowerShellDownloadString = regexp.MustCompile(`(?is)\bpowershell(?:\.exe)?\b.{0,500}\b(?:iex|invoke-expression)\b.{0,500}\b(?:new-object\s+)?net\.webclient\b.{0,160}\.downloadstring\s*\(\s*(?:["'](https?://[^\s"'()]{1,1000})["']|[\\]{1,2}["'](https?://[^\s"'()]{1,1000})[\\]{1,2}["'])\s*\)`)
-	persistencePOSIXDownloadPipe        = regexp.MustCompile(`(?is)^\s*(?:/(?:usr/)?bin/(?:sh|bash)\s+-c\s+["'])?(?:while\s+true\s*;\s*do\s+)?(?:/(?:usr/)?bin/)?(?:curl|wget)\b(?:\s+-[A-Za-z][A-Za-z0-9-]*(?:=[^\s|;"']+)?)*\s+["']?(https?://[^\s|;"']{1,1000})["']?\s*\|\s*(?:/(?:usr/)?bin/)?(?:sh|bash)\b(?:\s+-[A-Za-z0-9-]+)*(?:\s*;\s*sleep\s+[0-9]{1,8}\s*;\s*done)?["']?\s*$`)
-	persistenceCronEntry                = regexp.MustCompile(`^\s*(?:@(?:reboot|hourly|daily|weekly|monthly)|(?:\S+\s+){4}\S+)\s+(.+)$`)
-	persistenceSystemdExecStart         = regexp.MustCompile(`(?m)^\s*ExecStart\s*=\s*(\S[^\r\n]*)$`)
-	persistencePAMExec                  = regexp.MustCompile(`(?i)^\s*(?:auth|account|password|session)\s+(?:required|requisite|sufficient|optional)\s+pam_exec\.so(?:\s+(?:debug|expose_authtok|seteuid|quiet|log=\S+))*\s+(.+?)\s*$`)
-	persistenceLiteralShellCommand      = regexp.MustCompile(`^/bin/(?:sh|bash)[ \t]+-c[ \t]+(['"])([^'"\\\r\n]{1,1000})(['"])$`)
-	persistencePowerShellSourceText     = regexp.MustCompile(`(?is)\b(?:write-output|write-host|set-content|add-content|out-file)\b.{0,400}\b(?:invoke-webrequest|downloadstring)\b`)
-	persistenceWindowsPath              = regexp.MustCompile(`(?i)^[A-Z]:\\[A-Za-z0-9_.()\\ -]{1,500}$`)
-	persistenceIWR                      = regexp.MustCompile(`(?i)\bInvoke-WebRequest\b`)
-	persistenceOutFile                  = regexp.MustCompile(`(?i)\s-OutFile\b`)
+	persistencePowerShellDownloadString = lazyMustCompile(`(?is)\bpowershell(?:\.exe)?\b.{0,500}\b(?:iex|invoke-expression)\b.{0,500}\b(?:new-object\s+)?net\.webclient\b.{0,160}\.downloadstring\s*\(\s*(?:["'](https?://[^\s"'()]{1,1000})["']|[\\]{1,2}["'](https?://[^\s"'()]{1,1000})[\\]{1,2}["'])\s*\)`)
+	persistencePOSIXDownloadPipe        = lazyMustCompile(`(?is)^\s*(?:/(?:usr/)?bin/(?:sh|bash)\s+-c\s+["'])?(?:while\s+true\s*;\s*do\s+)?(?:/(?:usr/)?bin/)?(?:curl|wget)\b(?:\s+-[A-Za-z][A-Za-z0-9-]*(?:=[^\s|;"']+)?)*\s+["']?(https?://[^\s|;"']{1,1000})["']?\s*\|\s*(?:/(?:usr/)?bin/)?(?:sh|bash)\b(?:\s+-[A-Za-z0-9-]+)*(?:\s*;\s*sleep\s+[0-9]{1,8}\s*;\s*done)?["']?\s*$`)
+	persistenceCronEntry                = lazyMustCompile(`^\s*(?:@(?:reboot|hourly|daily|weekly|monthly)|(?:\S+\s+){4}\S+)\s+(.+)$`)
+	persistenceSystemdExecStart         = lazyMustCompile(`(?m)^\s*ExecStart\s*=\s*(\S[^\r\n]*)$`)
+	persistencePAMExec                  = lazyMustCompile(`(?i)^\s*(?:auth|account|password|session)\s+(?:required|requisite|sufficient|optional)\s+pam_exec\.so(?:\s+(?:debug|expose_authtok|seteuid|quiet|log=\S+))*\s+(.+?)\s*$`)
+	persistenceLiteralShellCommand      = lazyMustCompile(`^/bin/(?:sh|bash)[ \t]+-c[ \t]+(['"])([^'"\\\r\n]{1,1000})(['"])$`)
+	persistencePowerShellSourceText     = lazyMustCompile(`(?is)\b(?:write-output|write-host|set-content|add-content|out-file)\b.{0,400}\b(?:invoke-webrequest|downloadstring)\b`)
+	persistenceWindowsPath              = lazyMustCompile(`(?i)^[A-Z]:\\[A-Za-z0-9_.()\\ -]{1,500}$`)
+	persistenceIWR                      = lazyMustCompile(`(?i)\bInvoke-WebRequest\b`)
+	persistenceOutFile                  = lazyMustCompile(`(?i)\s-OutFile\b`)
 )
 
 // ExactMaliciousPersistencePayload reports one value-free closed proof.

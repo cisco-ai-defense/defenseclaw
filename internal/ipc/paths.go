@@ -58,7 +58,7 @@ const (
 //     "ipc", SocketFileName)
 //     - windows:      filepath.Join(<TrustedProgramFiles>, "Cisco",
 //     "Cisco Secure Client", "DefenseClaw", "ipc",
-//     SocketFileName). See spec 004 REQ-02. Returns "" when
+//     SocketFileName). Returns "" when
 //     TrustedProgramFiles resolution fails; the caller's
 //     ResolveSocketPath empty-check turns that into a
 //     distinguishable "ipc: resolve socket path: empty"

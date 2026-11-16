@@ -23,6 +23,108 @@ DOCS = Path(__file__).resolve().parents[1] / "content/docs/reference"
 
 
 class ReferencePolicyDocsTest(unittest.TestCase):
+    def test_fail_modes_distinguish_managed_refusals_from_user_outages(self):
+        text = (DOCS / "fail-modes.mdx").read_text()
+        behavior = text.split("## Effective behavior", 1)[1].split("### Stop", 1)[0]
+        self.assertIn("Managed standalone `open`", behavior)
+        rows = [line for line in behavior.splitlines() if line.startswith("| ")]
+        for label in ("Gateway 5xx", "Connector authentication missing",
+                      "Gateway returns 4xx", "Hook input over"):
+            row = next(line for line in rows if line.startswith("| " + label))
+            self.assertIn("Block", row.split("|")[3])
+        # A cut-off error answer and a 429 the gateway cannot answer in time
+        # are error statuses, not outages (W6 review loop 1).
+        for label in ("Gateway 5xx", "Gateway returns 4xx"):
+            row = next(line for line in rows if line.startswith("| " + label))
+            self.assertIn("cut off", row.split("|")[1])
+        row = next(line for line in rows if line.startswith("| Gateway returns 4xx"))
+        self.assertIn("429", row.split("|")[1])
+
+
+    def test_foreign_hook_outage_scope_names_the_shared_remove_setting(self):
+        text = (DOCS / "fail-modes.mdx").read_text()
+        guard = next(line for line in text.splitlines()
+                     if "foreign-hook guard" in line and "asks the gateway for its session" in line)
+        self.assertIn("On a managed standalone host with `foreign_hooks: remove`", guard)
+        self.assertIn("GitHub Copilot CLI, Cursor, Devin, OpenCode and Amp", guard)
+        self.assertIn("Hermes on Linux and macOS", guard)
+        # GAP-0352: on Linux and macOS a clean-session note lets a later call follow the
+        # administrator's fail mode; without a current note, and on Windows, the call blocks.
+        self.assertIn("Each gateway-backed guarded call asks the gateway for its session's record", guard)
+        self.assertIn("leaves a read-only note that this agent process's session was clean", guard)
+        self.assertIn("when there is no current note for its agent process", guard)
+        self.assertIn("`open` lets it run with the outage warning, and `closed`, strict availability and the default block it", guard)
+        self.assertIn("and when the gateway is restarting or gives no answer", guard)
+        self.assertIn("On Windows a guarded call blocks during an outage in every mode", guard)
+        # The summary near the top says the same as the detailed paragraph.
+        summary = next(line for line in text.splitlines() if line.startswith("On a per-user install, an explicit saved"))
+        self.assertIn("a Linux or macOS session that has a clean-session note follows the administrator's mode", summary)
+        self.assertIn("every other guarded call blocks", summary)
+        self.assertNotIn("A guarded connector (foreign-hook guard) blocks during an outage too", text)
+        self.assertIn("Windows Amp checks its session record locally", guard)
+        effective = text.split("## Effective behavior", 1)[1].split("These outcomes apply", 1)[0]
+        self.assertIn("A gateway-backed guarded tool call runs during an outage under `open` only on Linux or macOS and only when its agent process has a current clean-session note", effective)
+        self.assertIn("A restart or a gateway that gives no answer blocks it in every mode, and so does every guarded call on Windows", effective)
+        self.assertNotIn("stays blocked if the foreign-hook session check cannot get a gateway answer", text)
+        # The per-user summary above the table and the managed-mode paragraph say the same.
+        self.assertNotIn("including an outage under an administrator's `open` choice", text)
+        self.assertIn("With the foreign-hook guard, `open` covers an outage only for a Linux or macOS session that has a clean-session note; every other guarded call blocks.", text)
+        self.assertNotIn("so an outage blocks those calls too", text)
+
+    def test_managed_open_never_allows_an_accepted_call_without_an_answer(self):
+        # oss-outage-open review (round g, loop round 2): managed open applies
+        # only to a proven outage (no gateway took the call). A gateway that
+        # accepted the call and gave no answer in time blocks (noAnswerFailMode
+        # is closed for a managed hook); the docs said open could allow it.
+        text = (DOCS / "fail-modes.mdx").read_text()
+        paragraph = next(line for line in text.splitlines()
+                         if line.startswith("On a managed standalone host `open` applies only to"))
+        self.assertNotIn("or gives no answer in time.", paragraph)
+        self.assertIn("A gateway that accepted the call and gives no answer in time blocks in `open` too", paragraph)
+        behavior = text.split("## Effective behavior", 1)[1]
+        row = next(line for line in behavior.splitlines() if line.startswith("| Gateway service not running"))
+        managed = row.split("|")[3]
+        self.assertIn("A gateway that took the call and gave no answer in time", managed)
+        self.assertIn("blocks", managed)
+        coverage = (DOCS.parent / "segmentation.mdx").read_text()
+        self.assertNotIn("stopped, restarting or gives\nno answer in time", coverage)
+
+    def test_no_doc_lets_managed_open_cover_a_restart_or_an_unanswered_call(self):
+        # oss-outage-open round h (GAP-1434 class): managed open allows a call
+        # only while the hook proves the gateway service is stopped
+        # (hookexec.ManagedOutageFailsOpen). A restart it cannot prove stopped
+        # and an accepted call without an answer in time block. No sentence
+        # anywhere in the docs may say the administrator's open allows,
+        # applies to or covers either (docs-site pages and docs/*.md).
+        import re
+
+        content = DOCS.parent
+        allow = r"(?:allow|appl|cover|let)\w*"
+        window = r"(?:restart\w*|no[- ]answer|no answer|in time|timeout|unanswered)"
+        claim = re.compile(allow + r"\b[^.;]*?\b" + window, re.I)
+        negation = re.compile(r"\b(?:block|never|not|cannot|only while|proves?)\b", re.I)
+        offenders = []
+        repo_docs = DOCS.parents[3] / "docs"
+        for page in sorted(content.rglob("*.mdx")) + sorted(repo_docs.glob("*.md")):
+            flat = re.sub(r"\s+", " ", page.read_text())
+            for sentence in re.split(r"(?<=[.;])\s+", flat):
+                if not re.search(r"administrator|admin\b|managed", sentence, re.I):
+                    continue
+                if not re.search(r"`open`|hook_fail_mode: open|outage-only", sentence):
+                    continue
+                for match in claim.finditer(sentence):
+                    if not negation.search(match.group(0)):
+                        offenders.append(f"{page.name}: {sentence[:240]}")
+        self.assertEqual(offenders, [])
+
+    def test_amp_per_user_outage_is_persisted_but_managed_and_sandbox_are_not(self):
+        text = (DOCS / "fail-modes.mdx").read_text()
+        reporting = text.split("## Reporting and diagnosis", 1)[1]
+        self.assertIn("Amp plugin writes a record only for a call an outage let run", reporting)
+        self.assertIn("managed and sandbox Amp plugins write no record", reporting)
+        self.assertIn("guardrail-degraded", reporting)
+
+
     def test_zero_consensus_uses_sdk_default_without_disabling_llm(self):
         text = (DOCS / "configuration.mdx").read_text()
         row = next(line for line in text.splitlines()
@@ -38,11 +140,12 @@ class ReferencePolicyDocsTest(unittest.TestCase):
         digest = next(line for line in text.splitlines()
                       if line.startswith("| `defenseclaw-gateway policy digest"))
         self.assertIn("Secure Client", status)
-        self.assertIn("neither the Policy line nor the JSON `policy` object", status)
+        self.assertIn("neither the Policy line", status)
+        self.assertIn("nor the `policy` object", status)
         self.assertIn("Secure Client", digest)
         self.assertIn("unknown-command error", digest)
         section = text.split("### Policy generation and digest", 1)[1].split("## ", 1)[0]
-        self.assertIn("does not apply to Secure Client", section)
+        self.assertIn("Not available on Secure Client", section)
 
 
     def test_remote_skill_scan_uses_gateway_timeout(self):

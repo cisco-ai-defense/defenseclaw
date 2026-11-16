@@ -23,11 +23,8 @@ procedures, package-local notes, generated schema references, and test fixtures.
 | Testing | [`TESTING.md`](TESTING.md), [`E2E.md`](E2E.md), [`SECURITY-TEST-SUITE.md`](SECURITY-TEST-SUITE.md) | `Makefile`, `.github/workflows/`, component tests |
 | Release engineering | [`RELEASE_RUNBOOK.md`](RELEASE_RUNBOOK.md) | `.github/workflows/release.yaml`, `scripts/install.sh`, `scripts/install.ps1` |
 | Schemas | [`../schemas/README.md`](../schemas/README.md) | `schemas/config/v8/`, `schemas/telemetry/v8/`, generators |
-| Native Windows | [`WINDOWS-NATIVE-INSTALLER.md`](WINDOWS-NATIVE-INSTALLER.md), [`WINDOWS-NATIVE-CI.md`](WINDOWS-NATIVE-CI.md) | `packaging/windows/`, Windows scripts and workflows |
-| Managed enterprise | [`ENTERPRISE-THREAT-MODEL.md`](ENTERPRISE-THREAT-MODEL.md), [`LINUX-ENTERPRISE-THREAT-MODEL.md`](LINUX-ENTERPRISE-THREAT-MODEL.md), [`MACOS-ENTERPRISE-THREAT-MODEL.md`](MACOS-ENTERPRISE-THREAT-MODEL.md), [`WINDOWS-ENTERPRISE-THREAT-MODEL.md`](WINDOWS-ENTERPRISE-THREAT-MODEL.md), [`ENTERPRISE-TEST-PLAN.md`](ENTERPRISE-TEST-PLAN.md) | `internal/managed/`, `internal/enterpriseunix/`, `internal/enterprisepolicy/`, `packaging/mdm/` |
-| Connector research | [`research/`](research/), [`development/`](development/), [`reference/CLAUDE-CODE-WINDOWS.md`](reference/CLAUDE-CODE-WINDOWS.md), [`windows-native-connector-reference-checklist.md`](windows-native-connector-reference-checklist.md) | `internal/gateway/connector/` |
-| Specs and design notes | [`specs/`](specs/README.md), [`design/`](design/), [`requirements/`](requirements/) | the code each spec names |
-| Archive | [`archive/`](archive/) | none; historical records only |
+| Native Windows | [`WINDOWS-NATIVE-CI.md`](WINDOWS-NATIVE-CI.md) | `packaging/windows/`, Windows scripts and workflows |
+| Managed enterprise | [`ENTERPRISE-THREAT-MODEL.md`](ENTERPRISE-THREAT-MODEL.md), [`LINUX-ENTERPRISE-THREAT-MODEL.md`](LINUX-ENTERPRISE-THREAT-MODEL.md), [`MACOS-ENTERPRISE-THREAT-MODEL.md`](MACOS-ENTERPRISE-THREAT-MODEL.md), [`WINDOWS-ENTERPRISE-THREAT-MODEL.md`](WINDOWS-ENTERPRISE-THREAT-MODEL.md) | `internal/managed/`, `internal/enterpriseunix/`, `internal/enterprisepolicy/`, `packaging/mdm/` |
 
 Package-local READMEs stay beside the bundle, package, example, or fixture they
 describe.

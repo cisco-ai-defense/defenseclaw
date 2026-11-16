@@ -40,11 +40,11 @@ package kernelpolicy
 
 import (
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	kernel "github.com/defenseclaw/defenseclaw/policies/kernel"
 )
 
@@ -119,11 +119,14 @@ const (
 	DefaultPauseFor = 4 * time.Hour
 	MaxPauseFor     = 7 * 24 * time.Hour
 
-	// MaxPIDs caps monitor roots at two four-PID groups. Larger renders
-	// load, but their file_open cost exceeds the measured host budget.
-	MaxPIDs = 8
+	// MaxPIDs caps the roots of a monitor controls policy at one PID group.
+	// The policy has one file_open hook (Tetragon 1.7.0 keeps only the last
+	// lsmhooks entry of a hook name, cilium/tetragon#4578), and its
+	// selectors (the SSH exemption, then the SSH key, shell profile and
+	// autostart selectors) fit MaxSelectors with one PID group only.
+	MaxPIDs = maxPIDsPerSelector
 	// Tetragon's process filter evaluates at most four matchPIDs values even
-	// when it accepts a longer list. Split the total budget across selectors.
+	// when it accepts a longer list.
 	maxPIDsPerSelector = 4
 	// MaxSelectors is Tetragon's per-hook selector budget (selector_limit.out).
 	MaxSelectors = 5
@@ -185,7 +188,7 @@ const (
 
 // policyNamePattern is the only shape of name the helper may ever delete,
 // and only when its own state also recorded it.
-var policyNamePattern = regexp.MustCompile(`^defenseclaw-(observe|connect|controls|controls-burnin)-[0-9a-f]{8}$`)
+var policyNamePattern = lazyregexp.New(`^defenseclaw-(observe|connect|controls|controls-burnin)-[0-9a-f]{8}$`)
 
 // IsDefenseClawName reports whether name has the shape of a policy this
 // package loads. Matching the shape is necessary, never sufficient, to touch
@@ -227,13 +230,20 @@ const (
 	WarnLSMUnavailable       = "kernel_lsm_unavailable"
 	WarnPauseInvalid         = "kernel_pause_file_invalid"
 	WarnConfigInvalid        = "tetragon_config_invalid"
-	ReasonNoAnchors          = "kernel_enforce_inactive: no anchors"
-	ReasonNoReadyUsers       = "kernel_enforce_inactive: no user finished burn-in"
-	ReasonIdentityUnknown    = "tetragon_identity_unknown"
-	ReasonHeuristicRoot      = "heuristic_root"
-	ReasonIDEHosted          = "ide_hosted"
-	ReasonNotEnrolled        = "not_enrolled"
-	ReasonGuardrailObserve   = "guardrail_observe"
+	// NoteExtraLinks:<path> is a protected file with more than one hard
+	// link: the other name is not matched by any path selector, so the
+	// administrator removes it.
+	NoteExtraLinks = "protected_file_extra_links"
+	// NoteDentryMount:<path> is a protected path whose link and rename
+	// selectors were left out because its home is not on the root mount.
+	NoteDentryMount        = "kernel_link_rename_not_covered"
+	ReasonNoAnchors        = "kernel_enforce_inactive: no anchors"
+	ReasonNoReadyUsers     = "kernel_enforce_inactive: no user finished burn-in"
+	ReasonIdentityUnknown  = "tetragon_identity_unknown"
+	ReasonHeuristicRoot    = "heuristic_root"
+	ReasonIDEHosted        = "ide_hosted"
+	ReasonNotEnrolled      = "not_enrolled"
+	ReasonGuardrailObserve = "guardrail_observe"
 )
 
 // The two limits of enforcement, each a warning and the reason of a user
@@ -256,6 +266,20 @@ const (
 const (
 	WarnSessionsPredateControls = "kernel_sessions_predate_controls"
 	ReasonPredatesControls      = "predates_controls"
+)
+
+// WarnSessionsUnconfirmed:<n> counts the native agent sessions that fit an
+// enforcing controls policy (its binary, started after the load) but whose
+// start Tetragon never reported on the event stream, which is where its exec
+// hook marks the session (the stream was down, or the helper restarted).
+// They are not counted as anchored, and each is an observed-only root with
+// ReasonKernelUnconfirmed (GAP-0166). A user enforce is loaded for with no
+// denied session is armed: ReasonKernelUnconfirmed when such a session
+// runs, ReasonNoAnchoredSession otherwise.
+const (
+	WarnSessionsUnconfirmed = "kernel_sessions_unconfirmed"
+	ReasonKernelUnconfirmed = "kernel_unconfirmed"
+	ReasonNoAnchoredSession = "no_anchored_session"
 )
 
 // WarnCustomerEventsCapped:<policy> is one of the host's own Tetragon
@@ -386,7 +410,7 @@ func (i Intent) CustomerEventsSetting() string {
 
 // connectorName is the shape of a connector name in the drop-in; anything
 // else is dropped (it could never match an enrolled connector anyway).
-var connectorName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+var connectorName = lazyregexp.New(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 
 // Lookup is the environment read seam (envvars.Lookup in the helper).
 type Lookup func(name string) (string, bool)

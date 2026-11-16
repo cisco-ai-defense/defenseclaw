@@ -13,61 +13,59 @@
 package enterprisehooks
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"time"
-
-	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
-// On macOS the root enumerator reads the account's Open Directory record
-// (with the Platform SSO login UPN of AltSecurityIdentities), the AD binding
-// and the device Platform SSO configuration
-// (useridentity.ParseMacOSDirectoryFacts).
+// The macOS identity facts are collected by collectMacOSIdentityRecord
+// (identity_spool_macos.go) with the root-owned tools below.
 
-const macOSIdentityToolTimeout = 10 * time.Second
+// bindIdentitySpoolUPN binds nothing on macOS: the guardian keeps no
+// InfoPipe UPN there (KeepVerifiedInfoPipeUPN needs an SSSD domain).
+func bindIdentitySpoolUPN(context.Context, int, string, string, bool) UPNBinding {
+	return UPNBindingUnknown
+}
 
 func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccount, now time.Time) (IdentitySpoolRecord, error) {
-	name := strings.TrimSpace(account.User)
-	if name == "" || strings.ContainsAny(name, "/\x00\n") || strings.HasPrefix(name, "-") {
-		return IdentitySpoolRecord{}, errors.New("account has no usable name")
-	}
-	in := useridentity.MacOSDirectoryInputs{
-		DSCL: runMacOSIdentityTool(ctx, "/usr/bin/dscl", "/Search", "-read", "/Users/"+name, "UniqueID", "AuthenticationAuthority",
-			"OriginalNodeName", "AltSecurityIdentities", "dsAttrTypeNative:userPrincipalName"),
-		DSConfigAD: runMacOSIdentityTool(ctx, "/usr/sbin/dsconfigad", "-show"),
-		AppSSO:     runMacOSIdentityTool(ctx, "/usr/bin/app-sso", "platform", "-s"),
-	}
-	if in.DSCL == "" {
-		return IdentitySpoolRecord{}, errors.New("dscl returned no record")
-	}
-	if err := checkMacOSRecordUID(in.DSCL, account.UID); err != nil {
-		return IdentitySpoolRecord{}, err
-	}
-	facts := useridentity.ParseMacOSDirectoryFacts(in, now)
-	return IdentitySpoolRecord{
-		Key:           strconv.Itoa(account.UID),
-		User:          name,
-		UpdatedAt:     now,
-		AccountDomain: facts.AccountDomain,
-		Facts:         facts,
-	}, nil
+	return collectMacOSIdentityRecord(ctx, runMacOSIdentityTool, account, now)
+}
+
+// DirectoryCachesHoldOutageAnswers: Open Directory keeps serving the answers
+// it gave while the domain controller was away, so the guardian watches for
+// them (DirectoryCachesStale).
+const DirectoryCachesHoldOutageAnswers = true
+
+// DirectoryAwayWithoutAnswer is false on a Mac: its own check cannot tell an
+// outage from a firewall in front of the LDAP port, so a domain whose
+// domain controllers never answered since the guardian started is not away.
+const DirectoryAwayWithoutAnswer = false
+
+// DirectoryAnswers reports whether a domain controller of the Active
+// Directory domain answers (DomainControllerAnswers).
+func DirectoryAnswers(ctx context.Context, domain string) bool {
+	return DomainControllerAnswers(ctx, domain)
+}
+
+// directoryReachDomain is the domain the guardian checks for an account's
+// record: its Active Directory domain.
+func directoryReachDomain(record IdentitySpoolRecord) string {
+	return activeDirectoryDomain(record)
 }
 
 // FlushDirectoryCaches empties Open Directory's caches (dscacheutil
 // -flushcache, dsmemberutil flushcache), which only root can do. The
-// guardian calls it when its pass resolves accounts again after one that
-// resolved none: once the domain controller answers again, Open Directory
-// kept answering from the caches it filled during the outage, an account
-// without its domain groups, for about 11 more minutes, and the accounts
-// stayed on the default profile until an administrator flushed them by hand
-// (GAP-0680, GAP-0517). The gateway's next lookup of an account then gets its
-// groups from the directory.
+// guardian calls it when a domain controller answers again while Open
+// Directory still lists an Active Directory account without its domain
+// groups: it kept answering from the caches it filled during the outage for
+// 11 to 19 more minutes, and the accounts stayed on the default profile until
+// an administrator flushed them by hand (#1197, GAP-0680, GAP-0517). The
+// gateway's next lookup of an account then gets its groups from the
+// directory.
 func FlushDirectoryCaches(ctx context.Context) error {
 	var errs []error
 	for _, step := range [][]string{{"/usr/bin/dscacheutil", "-flushcache"}, {"/usr/bin/dsmemberutil", "flushcache"}} {
@@ -86,38 +84,28 @@ func FlushDirectoryCaches(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-func runMacOSIdentityTool(ctx context.Context, tool string, args ...string) string {
+// runMacOSIdentityTool runs a root-owned identity tool and returns its
+// bounded stdout and stderr and its exit code: the domain node read tells
+// an account gone from the domain (eDSRecordNotFound, on stderr) from a
+// domain that does not answer (macOSNodeUnanswered).
+func runMacOSIdentityTool(ctx context.Context, timeout time.Duration, tool string, args ...string) macOSToolResult {
 	if trustedIdentityTool(tool) == "" {
-		return ""
+		return macOSToolResult{Code: -1}
 	}
-	runCtx, cancel := context.WithTimeout(ctx, macOSIdentityToolTimeout)
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(runCtx, tool, args...)
 	cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL=C"}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
-	if err != nil && len(out) == 0 {
-		return ""
-	}
-	return boundedOutput(out)
-}
-
-// trustedIdentityTool returns the first root-owned, non-writable candidate.
-func trustedIdentityTool(candidates ...string) string {
-	for _, candidate := range candidates {
-		info, err := os.Lstat(candidate)
-		if err != nil || !info.Mode().IsRegular() || !rootOwnedChain(candidate) {
-			continue
+	result := macOSToolResult{Stdout: boundedOutput(out), Stderr: boundedOutput(stderr.Bytes())}
+	if err != nil {
+		result.Code = -1
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && runCtx.Err() == nil {
+			result.Code = exit.ExitCode()
 		}
-		return candidate
 	}
-	return ""
-}
-
-// boundedOutput trims command output to a sane size.
-func boundedOutput(data []byte) string {
-	const limit = 64 << 10
-	if len(data) > limit {
-		data = data[:limit]
-	}
-	return strings.ToValidUTF8(string(data), "")
+	return result
 }

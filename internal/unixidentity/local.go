@@ -17,8 +17,11 @@ import (
 	"context"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // Local accounts and directory configuration.
@@ -38,6 +41,60 @@ func LocalAccounts(ctx context.Context) (map[string]int, error) {
 		ctx = context.Background()
 	}
 	return platformLocalAccounts(ctx)
+}
+
+// LocalDatabaseUIDs returns every uid the local account databases NSS reads
+// hold (the sources of LocalDatabaseAccounts), duplicates included: a login
+// name that appears twice, or in two sources, keeps each of its uids. Unlike
+// LocalDatabaseAccounts, a source that exists and cannot be read is an
+// error, so an answer without a uid is a fact about every source and not
+// about the ones that happened to be readable.
+func LocalDatabaseUIDs(ctx context.Context) ([]int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return platformLocalDatabaseUIDs(ctx)
+}
+
+// ErrUIDHeld is the error DirectoryShowsUIDUnused returns when a directory
+// source holds the uid: the account exists.
+var ErrUIDHeld = errors.New("unixidentity: a passwd service holds the uid")
+
+// DirectoryShowsUIDUnused returns nil only when no source beyond the local
+// files can hold uid. Linux asks every nsswitch.conf passwd service but files
+// for the uid by itself (a combined lookup can stop before a source) and also
+// needs each to show it answers (SSSD and winbind online, nslcd completing the
+// search); macOS needs the search policy to list only local nodes, or Open
+// Directory to list no node offline. A source that holds the uid is
+// ErrUIDHeld. Any other directory is an error: getent and dscl say "no such
+// account" the same way when the directory cannot be reached.
+func DirectoryShowsUIDUnused(ctx context.Context, uid int) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return platformDirectoryShowsUIDUnused(ctx, uid)
+}
+
+// UserdbRecordDirs are the systemd-userdb drop-in record directories that
+// nss-systemd reads on Linux (userdb(5)): <name>.user holds a JSON user
+// record and <uid>.user links to it. Tests replace it.
+var UserdbRecordDirs = []string{"/etc/userdb", "/run/userdb", "/usr/lib/userdb"}
+
+// AltfilesPasswdFiles are the passwd(5) files that nss-altfiles reads on
+// Linux. Tests replace it.
+var AltfilesPasswdFiles = []string{"/usr/lib/passwd", "/lib/passwd"}
+
+// LocalDatabaseAccounts returns the accounts of every local account
+// database NSS reads, by name: LocalAccounts, and on Linux also the
+// systemd-userdb drop-in records (UserdbRecordDirs) and the nss-altfiles
+// passwd files (AltfilesPasswdFiles). A name LocalAccounts lists keeps its
+// uid there. A drop-in record or file that cannot be read adds nothing.
+// Directory and dynamic accounts are not in it.
+func LocalDatabaseAccounts(ctx context.Context) (map[string]int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return platformLocalDatabaseAccounts(ctx)
 }
 
 // LocalGroups returns the groups of the local group database by name (Linux
@@ -84,6 +141,76 @@ func MobileAccounts(ctx context.Context) (map[string]string, error) {
 	return platformMobileAccounts(ctx)
 }
 
+// PlatformSSOAccounts returns the names of the accounts of the macOS local
+// directory node that are registered with Platform SSO: their
+// AltSecurityIdentities holds a PlatformSSO:<login UPN> link, as the
+// guardian reads it (useridentity.ParseMacOSDirectoryFacts). Such an account
+// is held by the local node and is no mobile copy, but it is the identity
+// provider's account, and only the guardian's record names its UPN
+// (GAP-0532). Linux has none.
+func PlatformSSOAccounts(ctx context.Context) (map[string]bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return platformSSOLinkedAccounts(ctx)
+}
+
+// parseDSCLPlatformSSOAccounts parses `dscl . -list /Users
+// AltSecurityIdentities` rows ("name  PlatformSSO:alice@corp.example ...",
+// every value of the attribute on the account's line) into the names whose
+// values hold a PlatformSSO: link with a login UPN.
+func parseDSCLPlatformSSOAccounts(output string) map[string]bool {
+	out := map[string]bool{}
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || validName(fields[0]) != nil {
+			continue
+		}
+		for _, value := range fields[1:] {
+			if rest, ok := strings.CutPrefix(value, "PlatformSSO:"); ok && useridentity.NormalizeUPN(rest) != "" {
+				out[fields[0]] = true
+				break
+			}
+		}
+	}
+	return out
+}
+
+// confirmLocalNodeAccount is ConfirmLocalAccount on macOS: name is an
+// account of the local directory node (record reads it there) that holds
+// uid, it is not a mobile account (one the node caches for a directory
+// account, which mobile lists with its node), and the account database,
+// when it names the holder of uid, names name. Any read that fails proves
+// nothing, so it is an error.
+func confirmLocalNodeAccount(r Resolver, uid int, name string, record func(string) (LocalAccountRecord, bool, error),
+	mobile func() (map[string]string, error)) error {
+	if err := validName(name); err != nil {
+		return err
+	}
+	found, ok, err := record(name)
+	switch {
+	case err != nil:
+		return fmt.Errorf("unixidentity: %q is not proven an account of the local directory node: %w", name, err)
+	case !ok || found.UID != uid:
+		return fmt.Errorf("unixidentity: the local directory node holds no account %q with uid %d", name, uid)
+	}
+	nodes, err := mobile()
+	if err != nil {
+		return fmt.Errorf("unixidentity: cannot tell whether %q is a mobile account: %w", name, err)
+	}
+	for listed, node := range nodes {
+		if useridentity.EqualFold(listed, name) {
+			return fmt.Errorf("unixidentity: %q is a mobile account of %s, not a local one", name, node)
+		}
+	}
+	if r != nil {
+		if holder, err := r.LookupUID(uid); err == nil && !useridentity.EqualFold(holder.Name, name) {
+			return fmt.Errorf("unixidentity: uid %d is held by %q, not by the local account %q", uid, holder.Name, name)
+		}
+	}
+	return nil
+}
+
 // parseDSCLOriginalNodes parses `dscl . -list /Users OriginalNodeName` rows
 // ("name   /Active Directory/CORP/corp.example.com"; the node name holds
 // spaces) into name -> node, keeping only nodes of a directory.
@@ -102,6 +229,211 @@ func parseDSCLOriginalNodes(output string) map[string]string {
 		out[name] = node
 	}
 	return out
+}
+
+// LocalAccountRecord is an account of the macOS local directory node as any
+// account may list it. RecordID is the record's GeneratedUID, which Open
+// Directory gives every account it creates: an account deleted and created
+// again under the same name and uid has a new one, so it tells the two
+// apart where the name and uid do not (GAP-0669).
+type LocalAccountRecord struct {
+	UID        int
+	RecordID   string
+	Home       string
+	PrimaryGID string
+}
+
+// LocalAccountRecords returns the accounts of the macOS local directory node
+// by name, with their record identifier, home and primary group. Other
+// platforms have none.
+func LocalAccountRecords(ctx context.Context) (map[string]LocalAccountRecord, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return platformLocalAccountRecords(ctx)
+}
+
+// LocalAccountRecordByName returns the record of the local account name as
+// LocalAccountRecords lists it, read for that account alone (macOS), and
+// false when the local node holds no such account. Other platforms have
+// none.
+func LocalAccountRecordByName(ctx context.Context, name string) (LocalAccountRecord, bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := validName(name); err != nil {
+		return LocalAccountRecord{}, false, err
+	}
+	return platformLocalAccountRecord(ctx, name)
+}
+
+// AccountRecordGone reports whether a fresh directory read, in its own
+// process, has no record of the account name. On macOS a long-running
+// process keeps answering os/user lookups of a deleted account from
+// libSystem's per-process cache (the hook guardian found a deleted local
+// account minutes after `sysadminctl -deleteUser`, rel-1-0-5 GAP-0029),
+// so a "found" from such a process is confirmed here before it keeps a
+// decision open. It is true only for Open Directory's definitive "record
+// not found" while no bound directory node is offline; any other answer,
+// and every other platform (whose lookups already run in a fresh getent
+// process), is false.
+func AccountRecordGone(ctx context.Context, name string) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if validName(name) != nil {
+		return false
+	}
+	return platformAccountRecordGone(ctx, name)
+}
+
+// AccountUIDGone reports whether a fresh directory read, in its own process,
+// shows that no account holds uid under name any more. It is
+// AccountRecordGone for the name, and also true when the name's record now
+// holds another uid (the account was deleted and its name given to a new
+// local account, or a network account of that name answers first) while a
+// fresh search across the search policy finds no record with uid: a check
+// of the name alone kept the deleted account's identity record for as long
+// as the process ran (GAP-1864). A record that still holds uid, a search
+// that finds uid under another name, a bound directory node that is
+// offline, and any failed or unclear answer say nothing, so it is false.
+// Every platform other than macOS is false, as for AccountRecordGone.
+func AccountUIDGone(ctx context.Context, name string, uid int) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if validName(name) != nil || uid <= 0 {
+		return false
+	}
+	return platformAccountUIDGone(ctx, name, uid)
+}
+
+// dsclAccountUIDGone decides AccountUIDGone from fresh dscl answers: read
+// runs `dscl /Search -read /Users/<name> UniqueID`, search runs
+// `dscl /Search -search /Users UniqueID <uid>` (asked only when the name's
+// record holds another uid), and offline reports a bound directory node
+// that is offline. It is shared so it can be tested on every platform.
+func dsclAccountUIDGone(uid int, read, search func() (commandResult, error), offline func() bool) bool {
+	result, err := read()
+	if dsclRecordNotFound(result, err) {
+		return !offline()
+	}
+	if err != nil || result.exitCode != 0 {
+		return false
+	}
+	held, ok := dsclReadUniqueID(string(result.stdout))
+	if !ok || held == uid {
+		return false
+	}
+	found, err := search()
+	if err != nil || found.exitCode != 0 || len(strings.TrimSpace(string(found.stdout))) != 0 {
+		return false
+	}
+	return !offline()
+}
+
+// dsclReadUniqueID reads the one UniqueID value of a `dscl -read ...
+// UniqueID` answer ("UniqueID: 507", or the value on the next line). No
+// value, several values or a value that is not a uid is not ok.
+func dsclReadUniqueID(output string) (int, bool) {
+	var values []string
+	pending := false
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if pending && (strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")) {
+			values = append(values, strings.Fields(trimmed)...)
+			continue
+		}
+		pending = false
+		key, value, ok := strings.Cut(trimmed, ":")
+		if !ok || key != "UniqueID" {
+			continue
+		}
+		if value = strings.TrimSpace(value); value == "" {
+			pending = true
+			continue
+		}
+		values = append(values, strings.Fields(value)...)
+	}
+	if len(values) != 1 {
+		return 0, false
+	}
+	uid, err := parseSignedDSCLID(values[0])
+	if err != nil {
+		return 0, false
+	}
+	return uid, true
+}
+
+// dsclRecordNotFoundExit is dscl's exit status for eDSRecordNotFound
+// (DS Error -14136).
+const dsclRecordNotFoundExit = 56
+
+// dsclRecordNotFound reads the result of `dscl /Search -read /Users/<name>
+// UniqueID`: only Open Directory's own "record not found" with no output
+// says the account is gone; a timeout, a run error or any other exit says
+// nothing.
+func dsclRecordNotFound(result commandResult, err error) bool {
+	return err == nil && result.exitCode == dsclRecordNotFoundExit && len(strings.TrimSpace(string(result.stdout))) == 0
+}
+
+// parseDSCLAccountRecordsPlist parses the local node's account records as
+// `dscl -plist . -readall /Users UniqueID GeneratedUID NFSHomeDirectory
+// PrimaryGroupID` prints them (an array of one dict per record, each
+// attribute an array of strings) into the accounts by name. A record is
+// named by its first RecordName, the name `dscl . -list` gives it, and the
+// values of an attribute that holds several are joined with a space, as
+// `dscl . -list` prints them: an account with several uids is not kept. An
+// account is kept when its one uid parses. Output that does not parse is an
+// error, so a broken answer never stamps the account database as empty.
+func parseDSCLAccountRecordsPlist(output []byte) (map[string]LocalAccountRecord, error) {
+	var doc struct {
+		Records []struct {
+			Nodes []struct {
+				XMLName xml.Name
+				Text    string   `xml:",chardata"`
+				Values  []string `xml:"string"`
+			} `xml:",any"`
+		} `xml:"array>dict"`
+	}
+	if err := xml.Unmarshal(output, &doc); err != nil {
+		return nil, fmt.Errorf("unixidentity: parse the dscl account records: %w", err)
+	}
+	out := make(map[string]LocalAccountRecord, len(doc.Records))
+	for _, record := range doc.Records {
+		attributes := map[string][]string{}
+		key := ""
+		for _, node := range record.Nodes {
+			switch node.XMLName.Local {
+			case "key":
+				key = strings.TrimPrefix(strings.TrimSpace(node.Text), "dsAttrTypeStandard:")
+			case "array":
+				values := make([]string, 0, len(node.Values))
+				for _, value := range node.Values {
+					if value = strings.TrimSpace(value); value != "" {
+						values = append(values, value)
+					}
+				}
+				attributes[key] = values
+				key = ""
+			}
+		}
+		names := attributes["RecordName"]
+		if len(names) == 0 || validName(names[0]) != nil {
+			continue
+		}
+		joined := func(attribute string) string { return strings.Join(attributes[attribute], " ") }
+		uid, err := parseSignedDSCLID(joined("UniqueID"))
+		if err != nil {
+			continue
+		}
+		out[names[0]] = LocalAccountRecord{UID: uid, RecordID: joined("GeneratedUID"), Home: joined("NFSHomeDirectory"),
+			PrimaryGID: joined("PrimaryGroupID")}
+	}
+	return out, nil
 }
 
 // DirectoryConfigured reports whether account lookups on this host may be

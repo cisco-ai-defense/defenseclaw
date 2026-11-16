@@ -38,6 +38,16 @@ func TestEmbeddedSetLoads(t *testing.T) {
 	if !ok || persist.RuleID != "persistence.shell_profile_write" || persist.Access != AccessWrite {
 		t.Fatalf("persistence control = %+v", persist)
 	}
+	keys, ok := set.Control(ControlSSHAuthorizedKeysWrite)
+	if !ok || keys.RuleID != "persistence.ssh_authorized_keys_write" || keys.Access != AccessWrite || !keys.Links ||
+		len(keys.Dirs) != 0 || strings.Join(keys.RenameDirs, ",") != ".ssh/" {
+		t.Fatalf("authorized keys control = %+v", keys)
+	}
+	for _, name := range keys.Files {
+		if !strings.HasPrefix(name, ".ssh/authorized_keys") {
+			t.Fatalf("authorized keys control names %q", name)
+		}
+	}
 	if len(set.Connect.ExcludeDestinations) == 0 || set.Observe.RateLimit == "" {
 		t.Fatalf("observe/connect not loaded: %+v %+v", set.Observe, set.Connect)
 	}
@@ -56,6 +66,29 @@ func TestControlsNeverNameExcludedPaths(t *testing.T) {
 					t.Fatalf("%s names excluded path %q", control.ID, p)
 				}
 			}
+		}
+	}
+}
+
+// links and rename_dirs match exact names on dentries: a control with
+// directory prefixes, or rename_dirs without links, is refused.
+func TestEmbeddedSetRefusesLinksOnPrefixes(t *testing.T) {
+	set := MustLoad()
+	for _, mutate := range []func(*Control){
+		func(c *Control) { c.Dirs = []string{".ssh/keys/"} },
+		func(c *Control) { c.Links = false },
+		func(c *Control) { c.Access = AccessOpen },
+		func(c *Control) { c.RenameDirs = []string{".ssh"} },
+	} {
+		bad := Set{Observe: set.Observe, Connect: set.Connect}
+		for _, control := range set.Controls {
+			if control.ID == ControlSSHAuthorizedKeysWrite {
+				mutate(&control)
+			}
+			bad.Controls = append(bad.Controls, control)
+		}
+		if err := validate(bad); err == nil {
+			t.Fatal("a links control with a bad shape was accepted")
 		}
 	}
 }

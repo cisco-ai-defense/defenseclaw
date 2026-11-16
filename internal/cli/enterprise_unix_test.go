@@ -98,11 +98,9 @@ func TestUnixLifecycleInvalidArgumentsExitTwo(t *testing.T) {
 }
 
 // GAP-2095: enterprise secret reports a bad flag, a malformed --lock-wait, a
-// stray argument and a missing --name the way enterprise linux|macos do.
+// stray argument and a missing --name the way enterprise linux|macos do
+// (Windows with its invalid-arguments code, 1639).
 func TestUnixEnterpriseSecretInvalidArgumentsExitTwo(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows keeps its own enterprise secret exit codes")
-	}
 	want := enterprisestatus.InvalidArgsExitCode(runtime.GOOS)
 	check := func(cmd *cobra.Command, what string, err error) {
 		t.Helper()

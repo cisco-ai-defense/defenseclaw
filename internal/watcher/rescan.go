@@ -17,6 +17,7 @@
 package watcher
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -41,6 +42,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/hermesskills"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -107,6 +110,57 @@ func (w *InstallWatcher) rescanLoop(ctx context.Context) {
 				timer.Reset(delay)
 			}
 		}
+	}
+}
+
+// rescanTracks reports whether the rescan keeps a baseline for the target at
+// path: always with periodic rescan on, and for a root watched closely
+// (GAP-0905) even with it off, so the rescan of a change there compares
+// against what admission scanned.
+func (w *InstallWatcher) rescanTracks(path string) bool {
+	return w.cfg.Watch.RescanEnabled || w.rootWarned(path)
+}
+
+// requestWarnedRescan asks for a rescan after a change under a root watched
+// closely: the whole cycle with periodic rescan on, only the skills and
+// plugins under such roots with it off.
+func (w *InstallWatcher) requestWarnedRescan() {
+	if w.cfg.Watch.RescanEnabled {
+		w.RequestRescan()
+		return
+	}
+	select {
+	case w.warnedRescanNow <- struct{}{}:
+	default:
+	}
+}
+
+// warnedRescanLoop serves requestWarnedRescan when periodic rescan is off.
+// It runs no startup or periodic cycle.
+func (w *InstallWatcher) warnedRescanLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-w.warnedRescanNow:
+			w.rescanWarnedRoots(ctx)
+		}
+	}
+}
+
+// rescanWarnedRoots rescans every skill and plugin under a root watched
+// closely, as a cycle of the periodic rescan does: a target whose content
+// and scanner are unchanged is skipped, one that changed is admitted again.
+func (w *InstallWatcher) rescanWarnedRoots(ctx context.Context) {
+	fpCache := make(map[string]string)
+	for _, evt := range w.enumerateTargets() {
+		if ctx.Err() != nil {
+			return
+		}
+		if evt.Type == InstallMCP || !w.rootWarned(evt.Path) {
+			continue
+		}
+		w.rescanTarget(ctx, evt, fpCache)
 	}
 }
 
@@ -470,20 +524,34 @@ func (w *InstallWatcher) admitsAtStartup(evt InstallEvent) bool {
 	return false
 }
 
+// admitsUnderWarnedRoot reports a skill or plugin without a baseline under a
+// root watched closely. The root was admitted through folders another account
+// of the private group may write, so what a rescan finds there is admitted
+// like a new install: a flagged skill left in place after its scan would be
+// an unenforced allow (GAP-0905).
+func (w *InstallWatcher) admitsUnderWarnedRoot(evt InstallEvent) bool {
+	return evt.Type != InstallMCP && w.rootWarned(evt.Path)
+}
+
 // hermesSkillsDiscover returns how to list dir's Hermes skills, or nil when
 // dir is not a Hermes skills root: this process's own root, or a user
 // profile's root that the managed gateway watches for every enrolled user.
 // IsRoot alone resolves only the service account's own Hermes home, so each
 // user's category folders (devops, software-development) were rescanned as
 // skills and logged a failed scan every cycle (GAP-0285). trustBundled is
-// false for a profile root: its manifest and Hermes checkout belong to that
-// account, which could mark its own skill bundled, so every skill there is
-// rescanned.
-func hermesSkillsDiscover(dir string) (discover func(string, int) ([]hermesskills.Entry, error), trustBundled bool) {
+// true only for a trusted root whose skill tree matches a digest pinned in
+// DefenseClaw. An account-controlled manifest alone does not prove a bundle.
+func hermesSkillsDiscover(dir string, trusted bool) (discover func(string, int) ([]hermesskills.Entry, error), trustBundled bool) {
 	switch {
 	case hermesskills.IsRoot(dir):
+		if trusted {
+			return hermesskills.DiscoverTrusted, true
+		}
 		return hermesskills.Discover, true
 	case hermesskills.IsProfileRoot(dir):
+		if trusted {
+			return hermesskills.DiscoverTrusted, true
+		}
 		return hermesskills.DiscoverProfileRoot, false
 	}
 	return nil, false
@@ -500,11 +568,20 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 		if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
 			continue
 		}
-		if discover, trustBundled := hermesSkillsDiscover(dir); discover != nil {
+		if !w.secureClientActive() {
+			if err := unlinkedSkillTreePath(dir, dir); err != nil {
+				w.setRootCoverage("skill", dir, err)
+				continue
+			}
+		}
+		if discover, trustBundled := hermesSkillsDiscover(dir, !w.secureClientActive()); discover != nil {
 			entries, err := discover(dir, hermesskills.DefaultDirectoryLimit)
+			if !w.secureClientActive() && errors.Is(err, hermesskills.ErrDirectoryLimit) {
+				entries, err = discover(dir, hermesskills.FullScanDirectoryLimit)
+			}
 			if err == nil {
 				for _, entry := range entries {
-					if entry.Bundled && trustBundled {
+					if (entry.Bundled && trustBundled) || w.inSkillInstallStaging(dir, entry.Path, claudeStagingGrace) {
 						continue
 					}
 					targets = append(targets, InstallEvent{
@@ -517,10 +594,32 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 				}
 				continue
 			}
-			// Discovery errors deliberately fall through to the ordinary
-			// direct-child scan. Failure to prove vendor provenance must not
-			// turn an untrusted category tree into a scanner bypass.
 			fmt.Fprintf(os.Stderr, "[rescan] enumerate Hermes skills dir %s: %v\n", dir, err)
+			if !w.secureClientActive() {
+				// A category is not the identity of skills below it. Leave
+				// discovery pending for the next cycle if the full walk fails.
+				continue
+			}
+		}
+		if _, connector, recursive := w.recursiveSkillRoot(dir); recursive && connector == "cursor" {
+			paths, err := cursorSkillFolders(dir, dir)
+			if errors.Is(err, hermesskills.ErrDirectoryLimit) {
+				paths, err = cursorSkillFoldersFull(dir, dir)
+			}
+			if err == nil {
+				for _, skill := range paths {
+					if isBundledSkillWatchPath(skill) || w.inSkillInstallStaging(dir, skill, claudeStagingGrace) {
+						continue
+					}
+					targets = append(targets, InstallEvent{
+						Type: InstallSkill, Name: w.assetEventName(skill), Path: skill,
+						Connector: "cursor", Timestamp: time.Now().UTC(),
+					})
+				}
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "[rescan] enumerate Cursor skills dir %s: %v\n", dir, err)
+			continue
 		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -544,6 +643,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 						Type:      InstallSkill,
 						Name:      w.assetEventName(skill),
 						Path:      skill,
+						Connector: w.rescanConnectorForPath(skill),
 						Timestamp: time.Now().UTC(),
 					})
 				}
@@ -560,17 +660,32 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 				Type:      InstallSkill,
 				Name:      e.Name(),
 				Path:      path,
+				Connector: w.rescanConnectorForPath(path),
 				Timestamp: time.Now().UTC(),
 			})
 		}
 	}
 
 	for _, dir := range w.pluginDirs {
+		if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if !w.secureClientActive() {
+			if err := unlinkedSkillTreePath(dir, dir); err != nil {
+				w.setRootCoverage("plugin", dir, err)
+				continue
+			}
+		}
 		// Claude Code's plugin roots, and a Codex plugin cache, whose
 		// marketplace folders hold <plugin>/<version> and are not plugins
 		// themselves (GAP-1573).
 		if connector := w.connectorForPath(dir); connector == "claudecode" ||
 			(w.cacheLayoutPlugins(dir) && strings.EqualFold(filepath.Base(filepath.Clean(dir)), "cache")) {
+			if w.secureClientActive() && strings.EqualFold(filepath.Base(filepath.Clean(dir)), "cache") {
+				if info, err := os.Lstat(dir); err == nil && info.Mode()&os.ModeSymlink != 0 {
+					continue
+				}
+			}
 			for _, plugin := range enumerateClaudeWatcherPlugins(dir) {
 				if w.isOwnPlugin(plugin) || w.inClaudePluginStaging(plugin, claudeStagingGrace) {
 					continue
@@ -620,6 +735,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 						Type:      InstallPlugin,
 						Name:      name,
 						Path:      childPath,
+						Connector: w.rescanConnectorForPath(childPath),
 						Timestamp: time.Now().UTC(),
 					})
 				}
@@ -632,6 +748,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 				Type:      InstallPlugin,
 				Name:      e.Name(),
 				Path:      path,
+				Connector: w.rescanConnectorForPath(path),
 				Timestamp: time.Now().UTC(),
 			})
 		}
@@ -661,6 +778,15 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 	return targets
 }
 
+// rescanConnectorForPath pins the registered root owner on an enumerated
+// asset. Secure Client keeps its existing event shape.
+func (w *InstallWatcher) rescanConnectorForPath(path string) string {
+	if w.secureClientActive() {
+		return ""
+	}
+	return w.connectorForPath(path)
+}
+
 // skipPluginChildDir reports whether a child of a plugin root is not a
 // plugin: a dot-dir, a Python bytecode cache or an npm dependency tree.
 // Hermes' plugins folder is a Python package, so it holds __pycache__; the
@@ -673,15 +799,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 // names them the same way (GAP-2439). The user plugin root (~/.hermes/plugins)
 // keeps category/name, as "plugin list" does.
 func (w *InstallWatcher) hermesBareCategory(dir, category string) bool {
-	if category != "platforms" || w.connectorForPath(dir) != "hermes" {
-		return false
-	}
-	dir = filepath.Clean(dir)
-	if filepath.Base(dir) == "plugins" && filepath.Base(filepath.Dir(dir)) == "hermes-agent" {
-		return true
-	}
-	bundled := strings.TrimSpace(os.Getenv("HERMES_BUNDLED_PLUGINS"))
-	return bundled != "" && filepath.Clean(bundled) == dir
+	return category == "platforms" && w.connectorForPath(dir) == "hermes" && hermesBundledPluginRoot(dir)
 }
 
 func skipPluginChildDir(name string) bool {
@@ -855,11 +973,15 @@ func enumerateClaudeWatcherPlugins(root string) []string {
 	if !strings.EqualFold(filepath.Base(root), "cache") {
 		return nil
 	}
+	walkRoot, err := trustedWalkRoot(root)
+	if err != nil {
+		return nil
+	}
 
 	var out []string
-	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+	_ = filepath.WalkDir(walkRoot, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
-			if path == root {
+			if path == walkRoot {
 				return filepath.SkipAll
 			}
 			return filepath.SkipDir
@@ -870,7 +992,7 @@ func enumerateClaudeWatcherPlugins(root string) []string {
 		if entry.Type()&os.ModeSymlink != 0 {
 			return filepath.SkipDir
 		}
-		relative, relErr := filepath.Rel(root, path)
+		relative, relErr := filepath.Rel(walkRoot, path)
 		if relErr != nil || relative == ".." ||
 			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 			return filepath.SkipDir
@@ -888,8 +1010,11 @@ func enumerateClaudeWatcherPlugins(root string) []string {
 		// <marketplace>/<plugin>/<version>; plugin.json is optional. Admit
 		// exactly that directory and never let a nested dependency manifest
 		// manufacture a second plugin identity.
-		if depth == 3 {
-			out = append(out, path)
+		if depth == 3 || depth == 1 && isCachePluginCopy(path) {
+			logical, mapErr := logicalWalkPath(root, walkRoot, path)
+			if mapErr == nil {
+				out = append(out, logical)
+			}
 			return filepath.SkipDir
 		}
 		if entry.Name() != "." && strings.HasPrefix(entry.Name(), ".") {
@@ -937,6 +1062,9 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	}
 	currentSnap, err := w.snapshotForEvent(evt)
 	if errors.Is(err, os.ErrNotExist) {
+		if evt.Type == InstallMCP {
+			fmt.Fprintf(os.Stderr, "[rescan] mcp %s is no longer listed; skipped\n", evt.Name)
+		}
 		return rescanSkipped
 	}
 	if errors.Is(err, errLinkedAssetOutsideRoots) {
@@ -954,7 +1082,12 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 		return w.rescanMCPAdmittedWithoutScan(ctx, evt, currentSnap, fingerprint)
 	}
 
-	baseline, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
+	var baseline *audit.SnapshotRow
+	if evt.Type == InstallMCP {
+		baseline, err = w.mcpSnapshotForEvent(evt)
+	} else {
+		baseline, err = w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
+	}
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			upgraded := w.configuredBeforeUpgrade(evt)
@@ -967,18 +1100,20 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 				// acted on (GAP-1096). Secure Client keeps main's baseline
 				// (issue #1092).
 				fmt.Fprintf(os.Stderr, "[rescan] mcp %s is new; running install admission\n", evt.Name)
-				res := w.runAdmission(ctx, evt)
+				res := w.runAdmission(ctx, evt.admittingSnapshot(currentSnap))
 				w.notifyAdmission(res)
 				if !res.Interrupted {
 					w.persistSnapshot(evt, currentSnap, res.ScanID, w.admissionFingerprint(res, fingerprint))
 				}
 				return rescanScanned
 			}
-			if w.admitsAtStartup(evt) {
+			if w.admitsAtStartup(evt) || w.admitsUnderWarnedRoot(evt) {
 				// Added while the gateway was stopped: admit it as the live
 				// watcher would (scan, verdict, block/quarantine; GAP-2475).
+				// The same under a root watched closely: its first scan
+				// enforces the verdict, whichever rescan found it (GAP-0905).
 				fmt.Fprintf(os.Stderr, "[rescan] %s %s is new since the last run; running install admission\n", evt.Type, evt.Name)
-				res := w.runAdmission(ctx, evt)
+				res := w.runAdmission(ctx, evt.admittingSnapshot(currentSnap))
 				w.notifyAdmission(res)
 				moved := w.movedByAdmission(evt)
 				if res.Interrupted {
@@ -994,6 +1129,9 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 				fmt.Fprintf(os.Stderr, "[rescan] mcp %s was configured before the upgrade; recording its baseline without install admission\n", evt.Name)
 				_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path, "type=mcp reason=configured-before-upgrade")
 			}
+			if w.rescanHermesVendorPlugin(evt, currentSnap, nil, fingerprint) {
+				return rescanSkipped // vendor content, decided on this read (GAP-0645)
+			}
 			// First time we've seen this target: scan once to establish a
 			// baseline that future cycles can diff against.
 			result, scanID := w.scanAndEmit(ctx, evt)
@@ -1007,8 +1145,32 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 		return rescanSkipped
 	}
 
+	// An MCP server admitted without a scan stays admitted only while the
+	// allow rule or setting that admitted it stands. Once it does not (the
+	// check above found nothing that admits it), admission runs again: a
+	// scan that fails blocks it in the tiers that fail closed. The scan below
+	// for a baseline without a scan id recorded no outcome when it failed, so
+	// the stale admission stood (GAP-0920).
+	if w.mcpBaselineLapsed(evt, baseline) {
+		return w.readmitChanged(ctx, evt, baseline, currentSnap, compareSnapshots(baseline, currentSnap), fingerprint, "rescan")
+	}
+
+	// An unfinished MCP install scan was kept under the unverified-server
+	// setting. Its first completed scan must decide admission and enforce the
+	// verdict, even though the definition has not changed since it was kept.
+	if evt.Type == InstallMCP && strings.HasSuffix(baseline.ScannerFingerprint, unverifiedMCPMark) {
+		return w.readmitChanged(ctx, evt, baseline, currentSnap, compareSnapshots(baseline, currentSnap), fingerprint, "rescan")
+	}
+
 	if strings.HasSuffix(baseline.ScannerFingerprint, interruptedAdmissionMark) && !w.secureClientActive() {
 		return w.readmitInterrupted(ctx, evt, currentSnap, fingerprint)
+	}
+
+	// The scanner refused this definition's launcher: a scan of the same
+	// definition with the same scanner and policy refuses it again, so the
+	// rescan leaves its block in place without a scan (rel-1-0-6:GAP-0258).
+	if evt.Type == InstallMCP && !w.secureClientActive() && mcpLauncherRefusalFinal(baseline, currentSnap, fingerprint) {
+		return rescanSkipped
 	}
 
 	// A rejection decided while take_action was off left the target in
@@ -1036,7 +1198,7 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	deltas := compareSnapshots(baseline, currentSnap)
 
 	scan, reason := shouldRescan(baseline, currentSnap, fingerprint, w.cfg.Watch.RescanContentGated)
-	if !scan && w.allowRuleReleases(ctx, evt) {
+	if !scan && (w.allowRuleReleases(ctx, evt) || w.policyHoldReleases(evt)) {
 		fmt.Fprintf(os.Stderr, "[rescan] %s %s is allowed by a rule and still blocked; running install admission\n", evt.Type, evt.Name)
 		w.notifyAdmission(w.runAdmission(ctx, evt))
 		return rescanScanned
@@ -1059,9 +1221,28 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 		}
 		return rescanSkipped
 	}
+	if evt.Type == InstallMCP && w.hasRecoverableMCPBlock(evt) && !w.secureClientActive() {
+		// A clean recovery scan must run admission so its completed verdict
+		// can release this watcher's earlier rejection or scanner-failure block.
+		// Drift-only scanning recorded the clean finding but left it disabled.
+		return w.readmitChanged(ctx, evt, baseline, currentSnap, deltas, fingerprint, "rescan")
+	}
 
-	if reason == "content-changed" && !w.secureClientActive() {
-		return w.readmitChanged(ctx, evt, baseline, currentSnap, deltas, fingerprint)
+	if !w.secureClientActive() && admissionPolicyChanged(baseline.ScannerFingerprint, fingerprint) {
+		// The admission actions changed since this unchanged target was
+		// admitted: its verdict is decided again and applied as for an
+		// install, so a severity tightened to quarantine or block refuses a
+		// skill, plugin or MCP server admitted with a warning. A drift-only
+		// scan recorded the finding and left it active (GAP-1458).
+		return w.readmitChanged(ctx, evt, baseline, currentSnap, deltas, fingerprint, "rescan")
+	}
+
+	if (reason == "content-changed" || w.hermesBaselineOwesAdmission(evt, baseline, currentSnap)) && !w.secureClientActive() {
+		return w.readmitChanged(ctx, evt, baseline, currentSnap, deltas, fingerprint, "rescan")
+	}
+
+	if w.rescanHermesVendorPlugin(evt, currentSnap, baseline, fingerprint) {
+		return rescanSkipped // vendor content, decided on this read (GAP-0645)
 	}
 
 	fmt.Fprintf(os.Stderr, "[rescan] scanning %s %s (%s)\n", evt.Type, evt.Name, reason)
@@ -1100,6 +1281,26 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 // fingerprint contains it.
 const admittedWithoutScanMark = "|admitted-without-scan"
 
+// unverifiedMCPMark records an MCP definition kept after an unfinished scan.
+// Its empty scan ID retries through admission until a completed verdict.
+const unverifiedMCPMark = "|mcp-unverified"
+
+// mcpScanFailedMark ends the fingerprint of an MCP server baseline whose
+// admission scan failed, so admission blocked and disabled the definition.
+// The discovery poll admits it again when its retry is due, at the delays of
+// an unfinished admission (2 minutes, doubling to 30), and every rescan
+// cycle does; a completed scan replaces the baseline (rel-1-0-6:GAP-0258).
+const mcpScanFailedMark = "|mcp-scan-failed"
+
+// mcpLauncherRefusedMark ends the fingerprint of an MCP server baseline
+// whose scan refused its local launcher (scanner.MCPLauncherRefusal): a
+// command other than the bare npx or uvx, a command path, a code-running
+// flag. The refusal is final for that definition. Nothing scans it again
+// until its definition, the scanner or the admission policy changes, or an
+// allow rule admits it; its block and runtime disable stay, and its tool
+// calls are refused with the launcher reason (rel-1-0-6:GAP-0258).
+const mcpLauncherRefusedMark = "|mcp-launcher-refused"
+
 // admitsMCPWithoutScan reports an MCP server that install admission allows
 // before any scan: an asset_policy.mcp allowed rule that matches its
 // definition, a first-party entry while allow_list_bypass_scan is on, or
@@ -1131,7 +1332,7 @@ func (w *InstallWatcher) admitsMCPWithoutScan(ctx context.Context, evt InstallEv
 // the first cycle after a start lists without a baseline only gets one, as a
 // scanned server does.
 func (w *InstallWatcher) rescanMCPAdmittedWithoutScan(ctx context.Context, evt InstallEvent, snap *TargetSnapshot, fingerprint string) rescanOutcome {
-	baseline, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
+	baseline, err := w.mcpSnapshotForEvent(evt)
 	switch {
 	case err != nil && !errors.Is(err, sql.ErrNoRows):
 		fmt.Fprintf(os.Stderr, "[rescan] get baseline %s: %v\n", evt.Path, err)
@@ -1144,7 +1345,8 @@ func (w *InstallWatcher) rescanMCPAdmittedWithoutScan(ctx context.Context, evt I
 		return rescanSkipped
 	}
 	fmt.Fprintf(os.Stderr, "[rescan] mcp %s is admitted without a scan; running install admission\n", evt.Name)
-	res := w.runAdmission(ctx, evt)
+	res := w.runAdmission(ctx, evt.admittingSnapshot(snap))
+	w.noteMCPAdmissionOutcome(evt, snap, res)
 	w.notifyAdmission(res)
 	if !res.Interrupted {
 		w.persistSnapshot(evt, snap, res.ScanID, w.admissionFingerprint(res, fingerprint))
@@ -1158,9 +1360,9 @@ func (w *InstallWatcher) rescanMCPAdmittedWithoutScan(ctx context.Context, evt I
 const unenforcedRejectionMark = "|rejected-unenforced"
 
 // admissionFingerprint is the baseline fingerprint for an admission result:
-// fingerprint, marked when the result is a rejection nothing enforced or an
-// MCP server admitted without a scan. Secure Client keeps the baseline of
-// main (issue #1092).
+// fingerprint, marked when a rejection was not enforced, an MCP server was
+// admitted without a scan, or an MCP scan was kept unverified for retry.
+// Secure Client keeps the baseline of main (issue #1092).
 func (w *InstallWatcher) admissionFingerprint(res AdmissionResult, fingerprint string) string {
 	if w.secureClientActive() {
 		return fingerprint
@@ -1168,10 +1370,34 @@ func (w *InstallWatcher) admissionFingerprint(res AdmissionResult, fingerprint s
 	if res.Unenforced {
 		return fingerprint + unenforcedRejectionMark
 	}
+	if res.Event.Type == InstallMCP && res.Verdict == VerdictScanError && keptUnscannedMCPReason(res.Reason) {
+		return fingerprint + unverifiedMCPMark
+	}
 	if res.Event.Type == InstallMCP && res.Verdict == VerdictAllowed && res.ScanID == "" {
 		return fingerprint + admittedWithoutScanMark
 	}
+	if mcpScanFailureBlocked(res) {
+		if scanner.MCPLauncherRefusal(res.Reason) {
+			return fingerprint + mcpLauncherRefusedMark
+		}
+		return fingerprint + mcpScanFailedMark
+	}
 	return fingerprint
+}
+
+// mcpScanFailureBlocked reports an MCP admission that blocked the server
+// because its scan failed (fail closed).
+func mcpScanFailureBlocked(res AdmissionResult) bool {
+	return res.Event.Type == InstallMCP && res.Verdict == VerdictBlocked && strings.HasPrefix(res.Reason, scanFailureReason)
+}
+
+// mcpLauncherRefusalFinal reports an MCP baseline that records the refusal
+// of the same definition (content hash) under the same scanner and
+// admission fingerprint: scanning it again could only refuse it again.
+func mcpLauncherRefusalFinal(baseline *audit.SnapshotRow, snap *TargetSnapshot, fingerprint string) bool {
+	return baseline != nil && snap != nil && baseline.ContentHash != "" && baseline.ContentHash == snap.ContentHash &&
+		strings.HasSuffix(baseline.ScannerFingerprint, mcpLauncherRefusedMark) &&
+		strings.TrimSuffix(baseline.ScannerFingerprint, mcpLauncherRefusedMark) == fingerprint
 }
 
 // readmitUnenforcedRejection runs admission again for a target rejected while
@@ -1182,29 +1408,36 @@ func (w *InstallWatcher) admissionFingerprint(res AdmissionResult, fingerprint s
 func (w *InstallWatcher) readmitUnenforcedRejection(ctx context.Context, evt InstallEvent, snap *TargetSnapshot, fingerprint string) rescanOutcome {
 	fmt.Fprintf(os.Stderr, "[rescan] %s %s was rejected while take_action was off; take_action is on, running install admission\n", evt.Type, evt.Name)
 	evt.readmitReason = "rejected while take_action was off, enforced once it was turned on"
-	res := w.runAdmission(ctx, evt)
+	res := w.runAdmission(ctx, evt.admittingSnapshot(snap))
 	w.notifyAdmission(res)
 	moved := w.movedByAdmission(evt)
 	if res.Interrupted || res.ScanID == "" || moved {
 		return rescanScanned
 	}
-	if _, err := os.Lstat(evt.Path); err == nil {
+	if w.targetStillPresent(evt) {
 		w.persistSnapshot(evt, snap, res.ScanID, w.admissionFingerprint(res, fingerprint))
 	}
 	return rescanScanned
 }
 
 // readmitChanged runs install admission for a target whose content changed
-// since its baseline: an installed skill, plugin or MCP server edited to
+// since its baseline, or for an MCP server recovering from this watcher's
+// earlier rejection: an installed skill, plugin or MCP server edited to
 // carry HIGH or CRITICAL content is blocked, quarantined and disabled as a
 // new install would be. The rescan used to scan it and emit drift only, so
 // the rejected verdict was never acted on and the agents kept loading it
 // (GAP-1086). The drift alerts stay. A scan that failed or was cut off
-// leaves the old baseline (F-3188), so the next cycle admits it again.
-// Secure Client keeps main's rescan (issue #1092).
-func (w *InstallWatcher) readmitChanged(ctx context.Context, evt InstallEvent, baseline *audit.SnapshotRow, snap *TargetSnapshot, deltas []DriftDelta, fingerprint string) rescanOutcome {
-	fmt.Fprintf(os.Stderr, "[rescan] %s %s changed; running install admission\n", evt.Type, evt.Name)
-	res := w.runAdmission(ctx, evt)
+// leaves the old baseline (F-3188), so the next cycle admits it again. An
+// MCP server explicitly kept unverified instead records its new definition
+// with a retry mark, so its tools do not stay behind the pending gate. An MCP
+// server whose changed definition admission allows is released from the
+// watcher's own rejection of its old one (GAP-0266). source names what saw
+// the change in gateway.log: the rescan cycle, or the watch of the MCP
+// server list. Secure Client keeps main's rescan (issue #1092).
+func (w *InstallWatcher) readmitChanged(ctx context.Context, evt InstallEvent, baseline *audit.SnapshotRow, snap *TargetSnapshot, deltas []DriftDelta, fingerprint, source string) rescanOutcome {
+	fmt.Fprintf(os.Stderr, "[%s] %s %s needs admission; scanning\n", source, evt.Type, evt.Name)
+	res := w.runAdmission(ctx, evt.admittingSnapshot(snap))
+	w.noteMCPAdmissionOutcome(evt, snap, res)
 	w.notifyAdmission(res)
 	if res.ScanID != "" {
 		if current, err := w.loadScanResult(res.ScanID); err == nil {
@@ -1217,16 +1450,41 @@ func (w *InstallWatcher) readmitChanged(ctx context.Context, evt InstallEvent, b
 	switch {
 	case res.Interrupted:
 		w.markInterruptedAdmission(evt, snap, fingerprint)
+	case res.Verdict == VerdictScanError && evt.Type == InstallMCP && keptUnscannedMCPReason(res.Reason):
+		if w.targetStillPresent(evt) {
+			w.persistSnapshot(evt, snap, "", w.admissionFingerprint(res, fingerprint))
+		}
+	case mcpScanFailureBlocked(res) && !w.secureClientActive():
+		// The new definition is blocked and disabled. Its baseline records
+		// that, with the failure's mark, so the discovery poll and the
+		// pending gate see an admitted definition: the old baseline left the
+		// server pending, and every poll (30 s) scanned, blocked and
+		// reported drift for it again while its calls got the "still
+		// scanning" refusal and never the scan's reason (rel-1-0-6:GAP-0258).
+		// A launcher refusal is final for that definition; another failure
+		// is retried with backoff (mcpScanFailedMark).
+		if w.targetStillPresent(evt) {
+			w.persistSnapshot(evt, snap, "", w.admissionFingerprint(res, fingerprint))
+		}
 	case res.Verdict == VerdictScanError || strings.HasPrefix(res.Reason, scanFailureReason) || w.movedByAdmission(evt):
 	default:
-		if _, err := os.Lstat(evt.Path); err == nil {
+		if w.targetStillPresent(evt) {
 			scanID := res.ScanID
 			if scanID == "" {
 				// Decided before a scan (a list match): keep the last
 				// scan as the finding baseline for the new content.
 				scanID = baseline.ScanID
 			}
-			w.persistSnapshot(evt, snap, scanID, w.admissionFingerprint(res, fingerprint))
+			// The earlier rejection is lifted only with the baseline that
+			// admits this definition: a baseline the writer declined (the
+			// server has another definition by now) leaves the rejection
+			// to the admission of the definition it has.
+			if w.persistSnapshot(evt, snap, scanID, w.admissionFingerprint(res, fingerprint)) {
+				switch res.Verdict {
+				case VerdictClean, VerdictAllowed, VerdictWarning:
+					w.releaseSupersededMCPRejection(evt, res.Verdict)
+				}
+			}
 		}
 	}
 	return rescanScanned
@@ -1263,12 +1521,12 @@ func (w *InstallWatcher) markInterruptedAdmission(evt InstallEvent, snap *Target
 // mark stays until an admission decides; a decided target gets its baseline.
 func (w *InstallWatcher) readmitInterrupted(ctx context.Context, evt InstallEvent, snap *TargetSnapshot, fingerprint string) rescanOutcome {
 	fmt.Fprintf(os.Stderr, "[rescan] %s %s: its admission scan was cut off; running install admission\n", evt.Type, evt.Name)
-	res := w.runAdmission(ctx, evt)
+	res := w.runAdmission(ctx, evt.admittingSnapshot(snap))
 	w.notifyAdmission(res)
 	if res.Interrupted || res.Verdict == VerdictScanError || strings.HasPrefix(res.Reason, scanFailureReason) || w.movedByAdmission(evt) {
 		return rescanScanned
 	}
-	if _, err := os.Lstat(evt.Path); err == nil {
+	if w.targetStillPresent(evt) {
 		w.persistSnapshot(evt, snap, res.ScanID, w.admissionFingerprint(res, fingerprint))
 	}
 	return rescanScanned
@@ -1336,7 +1594,7 @@ func (w *InstallWatcher) scanAndEmit(ctx context.Context, evt InstallEvent) (*sc
 	w.rescanFailureMu.Lock()
 	delete(w.rescanFailureLogged, evt.Path)
 	w.rescanFailureMu.Unlock()
-	return result, w.emitRescanResult(scanCtx, result)
+	return result, w.emitRescanResult(scanCtx, evt, result)
 }
 
 // auditRescanFailure records, once per target until it scans again, that a
@@ -1365,7 +1623,7 @@ func (w *InstallWatcher) auditRescanFailure(evt InstallEvent, scannerName string
 // so the baseline describes the content that was scanned. It returns nil
 // when periodic rescan is off or the target can't be snapshotted.
 func (w *InstallWatcher) admissionSnapshot(evt InstallEvent) *TargetSnapshot {
-	if w.store == nil || !w.cfg.Watch.RescanEnabled ||
+	if w.store == nil || !w.rescanTracks(evt.Path) ||
 		(evt.Type != InstallSkill && evt.Type != InstallPlugin) {
 		return nil
 	}
@@ -1380,10 +1638,28 @@ func (w *InstallWatcher) admissionSnapshot(evt InstallEvent) *TargetSnapshot {
 // watcher admitted with a logged scan. Without it the next gateway start
 // re-admitted the unchanged target as new, and the start after that scanned
 // it again for lack of a baseline scan: three scans and three scan-finding
-// alerts for one install (GAP-2507). A target admission moved away gets no
-// baseline.
+// alerts for one install (GAP-2507). A Hermes shipped plugin admitted as
+// vendor content has no scan; its baseline records the bytes admitted, so an
+// edit before the next rescan is an admission (GAP-0645). A target admission
+// moved away gets no baseline.
 func (w *InstallWatcher) recordAdmissionBaseline(evt InstallEvent, snap *TargetSnapshot, res AdmissionResult) {
-	if w.movedByAdmission(evt) || snap == nil || res.ScanID == "" {
+	if w.movedByAdmission(evt) || res.ScanID == "" && res.Reason != hermesVendorPluginReason {
+		return
+	}
+	if !w.rescanTracks(evt.Path) {
+		if evt.Type != InstallPlugin || w.secureClientActive() ||
+			(res.Verdict != VerdictRejected && res.Verdict != VerdictBlocked) {
+			return
+		}
+		if snap == nil {
+			var err error
+			snap, err = w.snapshotForEvent(evt)
+			if err != nil {
+				return
+			}
+		}
+	}
+	if snap == nil {
 		return
 	}
 	if _, err := os.Lstat(evt.Path); err != nil {
@@ -1393,16 +1669,27 @@ func (w *InstallWatcher) recordAdmissionBaseline(evt InstallEvent, snap *TargetS
 }
 
 // persistSnapshot upserts the baseline snapshot (content/dep/config/endpoint
-// hashes plus the scan ID and scanner fingerprint) without running a scan.
-func (w *InstallWatcher) persistSnapshot(evt InstallEvent, snap *TargetSnapshot, scanID, fingerprint string) {
+// hashes plus the scan ID and scanner fingerprint) without running a scan. It
+// reports whether the baseline was written: false for an MCP server that no
+// longer has the snapshot definition, or a store that refused the row.
+func (w *InstallWatcher) persistSnapshot(evt InstallEvent, snap *TargetSnapshot, scanID, fingerprint string) bool {
+	if evt.Type == InstallMCP && !w.secureClientActive() && !w.mcpDefinitionIsSnapshot(evt, snap) {
+		return false // the verdict is for a definition the snapshot does not name
+	}
 	depJSON, _ := json.Marshal(snap.DependencyHashes)
 	cfgJSON, _ := json.Marshal(snap.ConfigHashes)
 	epJSON, _ := json.Marshal(snap.NetworkEndpoints)
 
-	_ = w.store.SetTargetSnapshot(
+	if err := w.store.SetTargetSnapshot(
 		string(evt.Type), evt.Path, snap.ContentHash,
 		string(depJSON), string(cfgJSON), string(epJSON), scanID, fingerprint,
-	)
+	); err != nil {
+		return false
+	}
+	if evt.Type == InstallMCP {
+		w.noteMCPBaseline(evt.Path, snap.ContentHash, fingerprint)
+	}
+	return true
 }
 
 // findingDrift diffs a freshly scanned result against the baseline's previously
@@ -1524,6 +1811,8 @@ func (w *InstallWatcher) scannerFingerprint(evt InstallEvent) string {
 		parts = append(parts,
 			"binary="+bin,
 			"binver="+w.scannerBinaryVersion(bin),
+			"policy="+pluginScannerPolicy(cfg, w.eventConnector(evt)),
+			fmt.Sprintf("vendor_identity_disabled=%t", cfg.SecureClientIntegration()),
 			"llm_model="+llm.Model,
 			"llm_provider="+llm.Provider,
 			"llm_base_url="+llm.BaseURL,
@@ -1537,7 +1826,54 @@ func (w *InstallWatcher) scannerFingerprint(evt InstallEvent) string {
 	)
 
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
-	return hex.EncodeToString(sum[:])
+	return hex.EncodeToString(sum[:]) + admissionDigestSuffix(cfg, evt.Type)
+}
+
+// admissionDigestMark leads, at the end of a scanner fingerprint, the digest
+// of the compiled admission a skill, plugin or MCP server was admitted
+// under. It is kept apart from the scanner hash so a rescan can tell an
+// admission change from a scanner change.
+const admissionDigestMark = "|admission:"
+
+// admissionDigestSuffix is the admission digest part of a scanner
+// fingerprint, or "" under Secure Client, whose admission is unchanged.
+func admissionDigestSuffix(cfg *config.Config, kind InstallType) string {
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return ""
+	}
+	compiled, ok := policy.CompileAdmission(cfg)[string(kind)]
+	if !ok {
+		return ""
+	}
+	raw, err := json.Marshal(compiled)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(raw)
+	return admissionDigestMark + hex.EncodeToString(sum[:8])
+}
+
+// admissionDigest is the admission digest a fingerprint carries, or "" for
+// one without (Secure Client, or a baseline recorded before 1.0.4).
+func admissionDigest(fingerprint string) string {
+	i := strings.Index(fingerprint, admissionDigestMark)
+	if i < 0 {
+		return ""
+	}
+	rest := fingerprint[i+len(admissionDigestMark):]
+	if j := strings.IndexByte(rest, '|'); j >= 0 {
+		rest = rest[:j]
+	}
+	return rest
+}
+
+// admissionPolicyChanged reports whether the admission changed since a
+// baseline that recorded it. A baseline written before 1.0.4 has no digest:
+// the first rescan after an upgrade records one without running install
+// admission on what was already installed.
+func admissionPolicyChanged(baseline, current string) bool {
+	old := admissionDigest(baseline)
+	return old != "" && old != admissionDigest(current)
 }
 
 // scannerVersionCache retains a version only while the resolved binary's
@@ -1566,7 +1902,7 @@ func (w *InstallWatcher) scannerBinaryVersion(binary string) string {
 	if err != nil {
 		return ""
 	}
-	info, err := os.Stat(resolved)
+	info, err := pathidentity.StatPinned(resolved)
 	if err != nil {
 		return ""
 	}
@@ -1625,16 +1961,27 @@ func (w *InstallWatcher) rulePackDigest(evt InstallEvent) string {
 	return ""
 }
 
+// probeScannerBinaryVersion runs `<binary> --version` in a tree the gateway
+// owns, like every scan (processutil.RunTracked), so a helper the scanner
+// starts ends with the probe. A tree that cannot be contained, or any other
+// failure, leaves the version unknown.
 func (w *InstallWatcher) probeScannerBinaryVersion(binary string) string {
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	out, err := processutil.CommandContext(ctx, binary, "--version").CombinedOutput()
-	if err != nil {
+	var out bytes.Buffer
+	cmd := processutil.CommandContext(ctx, binary, "--version")
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	cmd.WaitDelay = time.Second
+	if w.cfg == nil || !w.cfg.SecureClientIntegration() {
+		// The scan allowlist, not the service environment (GAP-0246).
+		cmd.Env = scanner.VersionProbeEnv()
+	}
+	if err := processutil.RunTracked(cmd); err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(out))
+	return strings.TrimSpace(out.String())
 }
 
 // loadScanResult retrieves a past scan result from the audit store.
@@ -1696,6 +2043,9 @@ func compareSnapshots(baseline *audit.SnapshotRow, current *TargetSnapshot) []Dr
 		fmt.Fprintf(os.Stderr, "[rescan] corrupt baseline config_hashes for %s: %v\n", baseline.TargetPath, err)
 	}
 	for file, hash := range current.ConfigHashes {
+		if baseline.TargetType == string(InstallMCP) && file == mcpSnapshotIdentityKey {
+			continue
+		}
 		prev, exists := prevCfg[file]
 		if !exists {
 			deltas = append(deltas, DriftDelta{
@@ -1715,6 +2065,9 @@ func compareSnapshots(baseline *audit.SnapshotRow, current *TargetSnapshot) []Dr
 		}
 	}
 	for file, hash := range prevCfg {
+		if baseline.TargetType == string(InstallMCP) && file == mcpSnapshotIdentityKey {
+			continue
+		}
 		if _, exists := current.ConfigHashes[file]; !exists {
 			deltas = append(deltas, DriftDelta{
 				Type:        DriftConfigMutation,
@@ -1910,6 +2263,9 @@ func (w *InstallWatcher) emitDriftAlerts(evt InstallEvent, deltas []DriftDelta) 
 		Details:   details,
 		Severity:  maxSev,
 	}
+	if !w.secureClientActive() {
+		event.Connector = w.eventConnector(evt)
+	}
 	if err := w.logger.LogEvent(event); err != nil {
 		fmt.Fprintf(os.Stderr, "[rescan] drift alert LogEvent failed for %s: %v\n", evt.Path, err)
 	}
@@ -1956,7 +2312,23 @@ func (w *InstallWatcher) snapshotForEvent(evt InstallEvent) (*TargetSnapshot, er
 		if _, err := os.Stat(path); err != nil {
 			return nil, err
 		}
-		return SnapshotTarget(path)
+		// A Hermes shipped plugin is hashed in the legacy scope plus the
+		// folders and links the plugin scanner audits (skippedTreeHash), so
+		// a cache write is not a change; every other plugin takes the full
+		// tree.
+		_, shipped := w.hermesShippedPlugin(evt)
+		snap, err := snapshotTarget(path, evt.Type == InstallPlugin && !shipped &&
+			(w.cfg == nil || !w.cfg.SecureClientIntegration()))
+		if err != nil {
+			return nil, err
+		}
+		if shipped {
+			if extra := skippedTreeHash(path, w.manifestLoader()); extra != "" {
+				sum := sha256.Sum256([]byte(snap.ContentHash + "\n" + extra))
+				snap.ContentHash = hex.EncodeToString(sum[:])
+			}
+		}
+		return snap, nil
 	}
 }
 
@@ -1967,18 +2339,21 @@ func (w *InstallWatcher) snapshotMCPServer(evt InstallEvent) (*TargetSnapshot, e
 		return nil, err
 	}
 
-	raw, err := json.Marshal(entry)
+	hash, err := mcpDefinitionHash(*entry)
 	if err != nil {
 		return nil, fmt.Errorf("marshal mcp server %s: %w", name, err)
 	}
-	sum := sha256.Sum256(raw)
-	hash := hex.EncodeToString(sum[:])
+	identity, err := json.Marshal(mcpIdentityForServer(*entry))
+	if err != nil {
+		return nil, fmt.Errorf("marshal mcp identity %s: %w", name, err)
+	}
 
 	snap := &TargetSnapshot{
 		ContentHash:      hash,
 		DependencyHashes: map[string]string{},
 		ConfigHashes: map[string]string{
 			fmt.Sprintf("mcp.servers.%s", name): hash,
+			mcpSnapshotIdentityKey:              string(identity),
 		},
 		Timestamp: time.Now().UTC(),
 	}
@@ -1988,30 +2363,41 @@ func (w *InstallWatcher) snapshotMCPServer(evt InstallEvent) (*TargetSnapshot, e
 	return snap, nil
 }
 
-// MCPEventPath is the key of an MCP server in the watcher: its event Path
-// and target snapshot. A server a managed gateway read from a user home is
-// keyed by its name, connector and home, so a second user's server with the
-// same name has its own baseline and admission. A user-scope server a
-// connector lists is keyed by its name and connector; a server read without
-// a connector is keyed by its name.
-func MCPEventPath(server config.MCPServerEntry) string {
-	key := server.Name
-	switch {
-	case server.Home != "":
-		key += "@" + server.Connector + ":" + server.Home
-	case server.Connector != "" && server.Project == "":
-		// Claude Code and Codex each listing the server are two servers.
-		// Under one key the first copy was admitted (blocked when its scan
-		// failed) and the second got only a rescan of the first copy baseline,
-		// which recorded a failed scan and did nothing (GAP-1227).
-		key += "@" + server.Connector
+// mcpDefinitionHash is the content hash of an MCP server's baseline: every
+// field of its definition (command, arguments, folder, environment, URL,
+// headers, transport), so a verdict is for one definition, not a name. The
+// account and the project are not in the hash: they are in the baseline's
+// key (MCPEventPath), so each account's and each project's server has a
+// baseline of its own.
+func mcpDefinitionHash(entry config.MCPServerEntry) (string, error) {
+	raw, err := json.Marshal(entry)
+	if err != nil {
+		return "", err
 	}
-	// A project's server is its own: another project's server with the
-	// same name has its own baseline and admission (GAP-0405).
-	if server.Project != "" {
-		key += "@" + server.Connector + "#" + server.Project
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// MCPDefinitionHash is the digest of the complete definition of an MCP server
+// (mcpDefinitionHash): equal for the same definition, different for any edit,
+// headers and environment included.
+func MCPDefinitionHash(entry config.MCPServerEntry) string {
+	hash, _ := mcpDefinitionHash(entry)
+	return hash
+}
+
+// targetStillPresent reports whether the target of evt is still there after
+// its admission: an MCP server still listed under its key, a skill or plugin
+// still at its path. An MCP event path is a key, not a file, so the Lstat
+// the readmissions used always failed for a server: an edited server never
+// got its new baseline and was admitted again on every cycle.
+func (w *InstallWatcher) targetStillPresent(evt InstallEvent) bool {
+	if evt.Type == InstallMCP {
+		_, err := w.lookupMCPServer(evt)
+		return err == nil
 	}
-	return key
+	_, err := os.Lstat(evt.Path)
+	return err == nil
 }
 
 func (w *InstallWatcher) lookupMCPServer(evt InstallEvent) (*config.MCPServerEntry, error) {
@@ -2058,13 +2444,15 @@ func (w *InstallWatcher) scanTargetFor(evt InstallEvent) (string, error) {
 // the snapshot's baseline reference. On emission failure (writer or
 // persistence error) returns the empty string and lets the
 // snapshot store fall back to "" so callers don't see new failure modes.
-func (w *InstallWatcher) emitRescanResult(ctx context.Context, result *scanner.ScanResult) string {
+func (w *InstallWatcher) emitRescanResult(ctx context.Context, evt InstallEvent, result *scanner.ScanResult) string {
 	if w == nil || w.logger == nil || result == nil {
 		return ""
 	}
-	correlation := w.ownedScanCorrelation(watcherScanCorrelation(
-		ctx, rescanRunID(), watcherConnectorName(w.cfg),
-	), result)
+	connector := watcherConnectorName(w.cfg)
+	if !w.secureClientActive() {
+		connector = w.eventConnector(evt)
+	}
+	correlation := w.ownedScanCorrelation(watcherScanCorrelation(ctx, rescanRunID(), connector), result)
 	err := w.logger.LogScanWithCorrelation(ctx, result, result.Verdict, correlation)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[rescan] emit scan result for %s: %v\n", result.Target, err)

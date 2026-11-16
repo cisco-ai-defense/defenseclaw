@@ -27,6 +27,11 @@ func atomicTransformFileWithStateDir(
 // with "invalid cross-device link" (GAP-1447). Then the receipts stay next to
 // the target, as atomicTransformFileLegacy already does.
 func atomicTransformRenameableStateDir(path, transactionDir string) string {
+	if confineAtomicWritePath(path) != nil {
+		// Never create a state folder out of a bound account home; a
+		// change through that path is refused anyway.
+		return transactionDir
+	}
 	physical, err := canonicalAtomicTransformTargetPath(path)
 	if err != nil {
 		return transactionDir

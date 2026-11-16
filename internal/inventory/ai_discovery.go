@@ -42,6 +42,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/defenseclaw/defenseclaw/internal/claudedesktop"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/hermesskills"
@@ -79,16 +80,15 @@ const (
 	maxPersistedLocalModelAPISignals = 2 * maxLocalModelAPIItems
 )
 
-// managedEnterpriseScanInterval is the minimum full-scan cadence in
-// managed_enterprise mode. Every full-scan tick still fans out through
-// managedInventoryEmit, so this is the MAXIMUM AI Defense publish rate — not
-// the publish cadence itself. The gateway emitter change-gates the actual
-// publish on a content fingerprint (see managedInventoryPublishState in
-// internal/gateway), so a steady-state endpoint ships nothing on most ticks and
-// a complete bundle at least once every managedInventoryFullBundleInterval.
-// The value is also the floor applied to ProcessIntervalSec in the same
-// mode so the two tickers never diverge onto a faster wall-clock.
-const managedEnterpriseScanInterval = 30 * time.Minute
+// secureClientScanInterval retains the existing Secure Client fleet cadence.
+// Standalone managed discovery uses its configured interval so local inventory
+// consumers see each full scan, including IDE extensions, on that cadence.
+const secureClientScanInterval = 30 * time.Minute
+
+// SecureClientScanInterval is the Secure Client full-scan floor, which the
+// endpoint health reporter also uses as its interval while discovery is not
+// running.
+const SecureClientScanInterval = secureClientScanInterval
 
 // aiDiscoveryStateVersion is the schema version of the on-disk state file
 // (`ai_discovery_state.json`). v2 introduced per-signal `evidence_hash`,
@@ -374,11 +374,12 @@ type LocalModelProvenance struct {
 // paths, command lines, prompt text, or secret values (unless the operator
 // has explicitly opted into `StoreRawLocalPaths`).
 //
-// The `Component`, `Model`, and `Runtime` blocks are nil-omitted: only
-// detectors that actually have framework, local-model, or liveness fidelity
-// populate them (today: `package_manifest` for components, local model API /
-// artifact detectors for models, and process/model-runtime detectors for
-// runtimes).
+// The `Component`, `Model`, `Runtime` and `ClaudeDesktop` blocks are
+// nil-omitted: only detectors that actually have framework, local-model,
+// liveness or desktop-app fidelity populate them (today: `package_manifest`
+// for components, local model API / artifact detectors for models,
+// process/model-runtime detectors for runtimes, and `claude_desktop` for
+// the Claude Desktop block).
 // `LastActiveAt` is a separate timestamp from `LastSeen` so consumers
 // can distinguish "we scanned and the signature still exists on disk"
 // (`LastSeen`) from "the underlying thing was running / used since the
@@ -407,6 +408,11 @@ type AISignal struct {
 	FirstSeen          time.Time       `json:"first_seen"`
 	LastSeen           time.Time       `json:"last_seen"`
 	LastActiveAt       *time.Time      `json:"last_active_at,omitempty"`
+
+	// ClaudeDesktop is the Claude Desktop and Cowork block of a
+	// claude_desktop signal (ai_discovery_claude_desktop.go).
+	ClaudeDesktop *ClaudeDesktopInfo `json:"claude_desktop,omitempty"`
+
 	// UserID (a uid) and UserName name the account a per-user scan ran as.
 	// The gateway takes both from the guardian's spool record, never from
 	// the scan's own output.
@@ -671,6 +677,9 @@ type ContinuousDiscoveryService struct {
 	// as the home's owner, but its report lands in the managed inventory,
 	// so the IDE scan follows no link out of the home (GAP-0396).
 	userHomeScan bool
+	// binaryFallbackDirs supplies a per-user scan's fixed binary locations.
+	// Nil uses the platform default.
+	binaryFallbackDirs []string
 	// linkWarned holds the paths a managed Windows scan refused because
 	// they go through a link or junction, so each is warned about once.
 	linkWarned map[string]bool
@@ -683,6 +692,12 @@ type ContinuousDiscoveryService struct {
 	// account, when set, is the account a per-user install belongs to: the
 	// owner of every signal its scans find (perUserAccount).
 	account ideOwner
+	// ownHomeRoots, set during a scan of a per-user install with more than
+	// one folder, is the account's own home (and its resolved path). The
+	// detectors keep raw evidence paths for that scan, so a finding in the
+	// own home keeps its owner beside findings in the other folders, which
+	// get none; the paths are dropped again unless they are to be stored.
+	ownHomeRoots []string
 
 	// lastIDE is the last full scan's IDE inventory (guarded by mu);
 	// ideBaseline is its plugin set for lifecycle classification (guarded
@@ -690,6 +705,9 @@ type ContinuousDiscoveryService struct {
 	lastIDE       *IDEInventory
 	ideBaseline   map[string]IDEPlugin
 	ideRecordedAt time.Time
+	// lastFullScanAt is when the last full scan completed (guarded by mu),
+	// zero before the first one.
+	lastFullScanAt time.Time
 	// scanMu guards the per-scan privacy skip observation.
 	tccSkipped           bool
 	tccSkippedPaths      map[string]bool
@@ -889,26 +907,19 @@ func normalizeAIDiscoveryOptions(opts AIDiscoveryOptions) AIDiscoveryOptions {
 	if opts.ProcessInterval <= 0 {
 		opts.ProcessInterval = 60 * time.Second
 	}
-	// In managed_enterprise every scan tick (full or process-only) fans
-	// out through managedInventoryEmit, so a 60s process interval becomes
-	// a 60s connector/MCP snapshot push to AI Defense. Push volume, not
-	// process-detection cost, dominates the operational spend on managed
-	// installs — align the process cadence with the full-scan cadence so
-	// the two tickers produce one push per full-scan cycle instead of
-	// several. The full-scan cadence is itself lifted to 30 min in
-	// managed_enterprise; the process-interval floor tracks it so both
-	// tickers fire on the same 30-min beat. Operators can still configure
-	// a longer interval; the floor only lifts values below the managed
-	// default.
-	if opts.ManagedEnterprise && opts.ScanInterval < managedEnterpriseScanInterval {
-		opts.ScanInterval = managedEnterpriseScanInterval
+	// Secure Client keeps its fleet scan cadence. The standalone managed
+	// profile serves its IDE inventory locally, so raising its full-scan
+	// interval here would make scan_interval_min ineffective for every
+	// inventory consumer. Process-only scans do not refresh that inventory.
+	if opts.ManagedEnterprise && opts.SecureClient && opts.ScanInterval < secureClientScanInterval {
+		opts.ScanInterval = secureClientScanInterval
 	}
-	if opts.ManagedEnterprise && opts.ProcessInterval < managedEnterpriseScanInterval {
-		opts.ProcessInterval = managedEnterpriseScanInterval
+	if opts.ManagedEnterprise && opts.SecureClient && opts.ProcessInterval < secureClientScanInterval {
+		opts.ProcessInterval = secureClientScanInterval
 	}
 	// Default the fleet-wide publish jitter to 10 % of the full-scan
-	// cadence in managed_enterprise. At the 30-min managed default this
-	// is a 3-min window; each endpoint's startup scan and each scheduled
+	// cadence in managed_enterprise. At the 30-min Secure Client default
+	// this is a 3-min window; each endpoint's startup scan and each scheduled
 	// tick land at a uniformly random offset inside that window, so a
 	// synchronized fleet event (reboot, config reload, AI Defense outage
 	// recovery) does not translate into a synchronized ingest spike.
@@ -1273,6 +1284,26 @@ func (s *ContinuousDiscoveryService) ConfidenceParams() ConfidenceParams {
 	return s.confidenceParams
 }
 
+// LastFullScanAt is when the last full scan completed, zero before the
+// first one or for a nil service.
+func (s *ContinuousDiscoveryService) LastFullScanAt() time.Time {
+	if s == nil {
+		return time.Time{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lastFullScanAt
+}
+
+// FullScanInterval is the effective full-scan cadence, after the managed
+// floor; zero for a nil service.
+func (s *ContinuousDiscoveryService) FullScanInterval() time.Duration {
+	if s == nil {
+		return 0
+	}
+	return s.opts.ScanInterval
+}
+
 func (s *ContinuousDiscoveryService) LastError() error {
 	if s == nil {
 		return nil
@@ -1401,6 +1432,7 @@ func (s *ContinuousDiscoveryService) runScanOnce(ctx context.Context, full bool,
 	s.lastErr = nil
 	if full {
 		s.lastIDE = report.IDEInventory
+		s.lastFullScanAt = time.Now()
 	}
 	s.mu.Unlock()
 
@@ -1586,6 +1618,10 @@ type scanStats struct {
 	ModelFileAttempted  map[string]bool
 	ModelFileDeferred   map[string]bool
 	TCCSkipped          bool
+	// BrokeredHomesUnavailable is a sensor helper read that failed: the
+	// helper's earlier signals are carried forward, since a helper that is
+	// restarting proves nothing about the homes it reads.
+	BrokeredHomesUnavailable bool
 }
 
 func (s *ContinuousDiscoveryService) scanSignals(
@@ -1598,6 +1634,8 @@ func (s *ContinuousDiscoveryService) scanSignals(
 	stats := scanStats{DetectorErrors: map[string]string{}, DetectorDurations: map[string]int{}}
 	var signals []AISignal
 	seen := map[string]bool{}
+	s.ownHomeRoots = s.perUserOwnHomeRoots()
+	defer func() { s.ownHomeRoots = nil }()
 
 	add := func(in []AISignal) {
 		for _, sig := range in {
@@ -1610,8 +1648,11 @@ func (s *ContinuousDiscoveryService) scanSignals(
 			}
 			seen[sig.Fingerprint] = true
 			if sig.UserID == "" && s.account.id != "" &&
-				(len(s.homesToScan()) == 1 || sig.Detector == "process") {
+				(len(s.homesToScan()) == 1 || sig.Detector == "process" || s.evidenceInOwnHome(sig.Evidence)) {
 				sig.UserID, sig.UserName = s.account.id, s.account.name
+			}
+			if s.ownHomeRoots != nil && !s.opts.StoreRawLocalPaths {
+				sig.Evidence = evidenceWithoutRawPaths(sig.Evidence)
 			}
 			signals = append(signals, sig)
 		}
@@ -1659,6 +1700,9 @@ func (s *ContinuousDiscoveryService) scanSignals(
 	measure("config", func() ([]AISignal, int, error) { return s.detectConfigPaths(), 0, nil })
 	measure("binary", func() ([]AISignal, int, error) { return s.detectBinaries(), 0, nil })
 	measure("application", func() ([]AISignal, int, error) { return s.detectApplications(), 0, nil })
+	if !s.opts.SecureClient {
+		measure(claudeDesktopDetector, func() ([]AISignal, int, error) { return s.detectClaudeDesktop(), 0, nil })
+	}
 	measure("editor_extension", func() ([]AISignal, int, error) {
 		out, ide := s.detectEditorExtensions()
 		stats.ideInventory = mergeIDEInventory(stats.ideInventory, ide)
@@ -1674,6 +1718,21 @@ func (s *ContinuousDiscoveryService) scanSignals(
 	}
 	measure("rule", func() ([]AISignal, int, error) { return s.detectRules(), 0, nil })
 	measure("plugin", func() ([]AISignal, int, error) { return s.detectPlugins(), 0, nil })
+	if reader := brokeredHomeReaderSnapshot(); reader != nil && s.brokeredHomesApply() {
+		measure(brokeredHomeDetector, func() ([]AISignal, int, error) {
+			out, files, note, err := s.detectBrokeredHomes(ctx, reader)
+			if note != "" {
+				if stats.DetectorNotes == nil {
+					stats.DetectorNotes = map[string]string{}
+				}
+				stats.DetectorNotes[brokeredHomeDetector] = note
+			}
+			if err != nil {
+				stats.BrokeredHomesUnavailable = true
+			}
+			return out, files, err
+		})
+	}
 	if s.opts.IncludeNetworkDomains {
 		measure("local_endpoint", func() ([]AISignal, int, error) { return s.detectLocalEndpoints(), 0, nil })
 		measure("local_model_api", func() ([]AISignal, int, error) {
@@ -1749,7 +1808,7 @@ var sharedSurfaceDetectors = map[string]bool{"config": true, "skill": true, "rul
 // ~/.agents/skills, where DefenseClaw's own CodeGuard skill goes, or
 // ~/.claude/skills) when that product has no evidence of its own. A shell
 // history mention is not such evidence. Without this, one CodeGuard install
-// made Cursor, Devin, Amp, Antigravity, Copilot and OpenHands "seen" for a
+// made Cursor, Devin, Amp, Antigravity and Copilot "seen" for a
 // user who has none of them (GAP-1378).
 func (s *ContinuousDiscoveryService) dropUnbackedSharedSurfaceSignals(signals []AISignal) []AISignal {
 	owners := map[string]map[string]bool{}
@@ -1991,6 +2050,13 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 					budget := 1
 					carry.persist(fp, old, &budget)
 				}
+				continue
+			}
+			if stats.BrokeredHomesUnavailable && old.Source == AISourceSensorHelper {
+				// The sensor helper did not answer this scan; absence is not
+				// proof of removal (cowork-1-0-8 GAP-0008).
+				budget := 1
+				carry.persist(fp, old, &budget)
 				continue
 			}
 			if carry.handleModelAPICarryForward(fp, old, stats, &apiCarryRemaining) {
@@ -2302,11 +2368,6 @@ func declaresMCPServer(signal AISignal) bool {
 // signal so a malformed config never suppresses the "endpoint has
 // MCP configured" signal itself.
 func (s *ContinuousDiscoveryService) signalFromMCPConfigPath(sig AISignature, path string) AISignal {
-	base := AIEvidence{Type: "mcp", Basename: filepath.Base(path), PathHash: hashPath(path)}
-	if s.opts.StoreRawLocalPaths {
-		base.RawPath = path
-	}
-	evidence := []AIEvidence{base}
 	// Coverage state: two independent early-exit paths (parse failure
 	// vs. per-signal evidence cap). Both must surface as partial=true
 	// so managed remediation can distinguish "31 servers is really
@@ -2324,16 +2385,35 @@ func (s *ContinuousDiscoveryService) signalFromMCPConfigPath(sig AISignature, pa
 	} else {
 		names, parseErr = readMCPServerNamesWithErr(path, sig.SupportedConnector)
 	}
-	var partial bool
-	var coverageReason string
+	failure := ""
 	if parseErr != nil {
 		// Parse failure — the base "mcp" evidence row remains so the
 		// operator sees the endpoint has MCP configured, but no
 		// server-name rows will follow. Marking partial signals the
 		// gap.
-		partial = true
-		coverageReason = CoverageReasonParseError
+		failure = CoverageReasonParseError
 	}
+	out := s.mcpSignalFromNames(sig, path, names, failure)
+	if st, err := os.Stat(path); err == nil {
+		mt := st.ModTime().UTC()
+		out.LastActiveAt = &mt
+	}
+	return out
+}
+
+// mcpSignalFromNames builds the SignalMCPServer signal of the MCP config at
+// path from the server names it declares. failure is the coverage reason of
+// a read that could not name every server ("" when it did). The direct read
+// above and the sensor helper's brokered read (brokeredHomeSignals) share it,
+// so both give a config the same evidence and fingerprint.
+func (s *ContinuousDiscoveryService) mcpSignalFromNames(sig AISignature, path string, names []string, failure string) AISignal {
+	base := AIEvidence{Type: "mcp", Basename: filepath.Base(path), PathHash: hashPath(path)}
+	if s.keepEvidencePath() {
+		base.RawPath = path
+	}
+	evidence := []AIEvidence{base}
+	partial := failure != ""
+	coverageReason := failure
 	// Reserve one slot for the parent row (evidence[0]) by capping
 	// server-name rows at maxEvidencePerSignal - 1. Explicit constant
 	// so the intent is grep-able — the previous behaviour just fell
@@ -2363,10 +2443,6 @@ func (s *ContinuousDiscoveryService) signalFromMCPConfigPath(sig AISignature, pa
 	s.stampHomeOwner(&out, path)
 	out.Partial = partial
 	out.CoverageReason = coverageReason
-	if st, err := os.Stat(path); err == nil {
-		mt := st.ModTime().UTC()
-		out.LastActiveAt = &mt
-	}
 	return out
 }
 
@@ -2407,34 +2483,94 @@ func isBlankFile(path string) bool {
 // detector so future signature-catalog additions (new MCP config shapes) can
 // extend the switch in one place without changing the caller.
 func parseMCPConfigForNames(path, connector string) ([]config.MCPServerEntry, error) {
+	switch mcpConfigShape(path, connector) {
+	case mcpShapeAmp:
+		return config.ReadMCPFromAmpSettings(path)
+	case mcpShapeCodexTOML:
+		return config.ReadMCPFromCodexConfigTOML(path)
+	case mcpShapeHermesYAML:
+		return config.ReadMCPFromYAMLPath(path, hermesMCPKeyPaths...)
+	case mcpShapeClaudeJSON:
+		return config.ReadMCPFromClaudeJSONBothScopes(path)
+	case mcpShapeSettings:
+		return config.ReadMCPFromJSONCPaths(path, settingsMCPKeyPaths...)
+	case mcpShapeOpenCode:
+		return config.ReadMCPFromOpenCodeConfig(path)
+	case mcpShapeClaudeDesktop:
+		return config.ReadMCPFromJSONCPaths(path, []string{"mcpServers"})
+	case mcpShapeOpenClaw:
+		return config.ReadMCPFromOpenClawConfig(path)
+	case mcpShapeNestedServers:
+		return config.ReadMCPFromJSONCPaths(path, []string{"mcp", "servers"})
+	default:
+		return config.ReadMCPFromDotMCPJSON(path)
+	}
+}
+
+// The MCP config shapes AI discovery parses: which reader a file needs.
+const (
+	mcpShapeAmp           = "amp"
+	mcpShapeCodexTOML     = "codex_toml"
+	mcpShapeHermesYAML    = "hermes_yaml"
+	mcpShapeClaudeJSON    = "claude_json"
+	mcpShapeSettings      = "settings_jsonc"
+	mcpShapeOpenCode      = "opencode"
+	mcpShapeClaudeDesktop = "claude_desktop"
+	mcpShapeNestedServers = "mcp_servers_nested"
+	mcpShapeOpenClaw      = "openclaw" // openclaw.json is JSON5 (GAP-0907)
+	mcpShapeDotMCP        = "dot_mcp"
+	// mcpShapeClaudeState is ~/.claude.json read by readClaudeDiscoveryState
+	// (every profile but Secure Client).
+	mcpShapeClaudeState = "claude_state"
+)
+
+var (
+	// Hermes keeps its servers under top-level mcp_servers (GAP-1845).
+	hermesMCPKeyPaths = [][]string{{"mcp_servers"}, {"mcp", "servers"}, {"mcpServers"}}
+	// Claude Code and Qwen keep their servers under mcpServers; Amp
+	// (amp mcp add) under amp.mcpServers, in JSONC (GAP-1062).
+	settingsMCPKeyPaths = [][]string{{"mcpServers"}, {"amp.mcpServers"}}
+)
+
+// mcpConfigShape names the reader the MCP config at path needs. connector is
+// the signature's supported connector: an Amp settings file shares its name
+// with Claude Code's but keeps its servers under amp.mcpServers. Kept
+// alongside the detector so future signature-catalog additions (new MCP
+// config shapes) can extend the switch in one place.
+func mcpConfigShape(path, connector string) string {
 	lower := strings.ToLower(path)
 	base := strings.ToLower(filepath.Base(path))
 	switch {
 	case normalizeAIID(connector) == "amp" && (strings.HasSuffix(lower, ".json") || strings.HasSuffix(lower, ".jsonc")):
-		return config.ReadMCPFromAmpSettings(path)
+		return mcpShapeAmp
 	case strings.HasSuffix(lower, ".toml"):
-		return config.ReadMCPFromCodexConfigTOML(path)
+		return mcpShapeCodexTOML
 	case strings.HasSuffix(lower, ".yaml") || strings.HasSuffix(lower, ".yml"):
-		// Hermes keeps its servers under top-level mcp_servers (GAP-1845).
-		return config.ReadMCPFromYAMLPath(path, []string{"mcp_servers"}, []string{"mcp", "servers"}, []string{"mcpServers"})
+		return mcpShapeHermesYAML
 	case base == ".claude.json":
 		// ~/.claude.json holds user-scope (top-level `mcpServers`) *and*
 		// per-project local-scope (`projects.<path>.mcpServers`) entries.
 		// Prefer the union reader so we only decode the (often multi-MB)
 		// conversation-state file once and basenames covers both scopes.
-		return config.ReadMCPFromClaudeJSONBothScopes(path)
+		return mcpShapeClaudeJSON
 	case base == "settings.json" || base == "settings.local.json" || base == "settings.jsonc" ||
 		base == "managed-settings.json":
-		// Claude Code and Qwen keep their servers under mcpServers; Amp
-		// (amp mcp add) under amp.mcpServers, in JSONC (GAP-1062).
-		return config.ReadMCPFromJSONCPaths(path, []string{"mcpServers"}, []string{"amp.mcpServers"})
+		return mcpShapeSettings
 	case base == "opencode.json" || base == "opencode.jsonc":
-		return config.ReadMCPFromOpenCodeConfig(path)
-	case base == "openclaw.json" || (base == "config.json" && filepath.Base(filepath.Dir(path)) == ".zeptoclaw"):
+		return mcpShapeOpenCode
+	case base == "claude_desktop_config.json":
+		// Claude Desktop (first- and third-party) keeps its servers under
+		// mcpServers, next to preferences and, in third-party mode,
+		// deploymentMode and coworkUserFilesPath. Read as a bare map, each of
+		// those keys was listed as a server (cowork-1-0-8 GAP-0026).
+		return mcpShapeClaudeDesktop
+	case base == "openclaw.json":
+		return mcpShapeOpenClaw
+	case base == "config.json" && filepath.Base(filepath.Dir(path)) == ".zeptoclaw":
 		// Read as a bare map, every top-level key was listed as a server.
-		return config.ReadMCPFromJSONCPaths(path, []string{"mcp", "servers"})
+		return mcpShapeNestedServers
 	default:
-		return config.ReadMCPFromDotMCPJSON(path)
+		return mcpShapeDotMCP
 	}
 }
 
@@ -2547,7 +2683,7 @@ func (s *ContinuousDiscoveryService) detectPlugins() []AISignal {
 // directory with thousands of children cannot blow up payload size.
 func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature, category, detector, path string) AISignal {
 	base := AIEvidence{Type: detector, Basename: filepath.Base(path), PathHash: hashPath(path)}
-	if s.opts.StoreRawLocalPaths {
+	if s.keepEvidencePath() {
 		base.RawPath = path
 	}
 	evidence := []AIEvidence{base}
@@ -2560,6 +2696,7 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 	fi, statErr := os.Stat(path)
 	switch {
 	case statErr != nil && os.IsPermission(statErr):
+		managed.ReportInventoryScanDenial(path, statErr)
 		partial = true
 		coverageReason = CoverageReasonPermissionDenied
 	case statErr != nil && !os.IsNotExist(statErr):
@@ -2569,6 +2706,7 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 		entries, readErr := os.ReadDir(path)
 		switch {
 		case readErr != nil && os.IsPermission(readErr):
+			managed.ReportInventoryScanDenial(path, readErr)
 			partial = true
 			coverageReason = CoverageReasonPermissionDenied
 		case readErr != nil:
@@ -2619,23 +2757,7 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 					}
 					continue
 				}
-				child := filepath.Join(path, entry.Name())
-				ev := AIEvidence{
-					Type:     detector + "_entry",
-					Basename: name,
-					PathHash: hashPath(child),
-				}
-				if detector == "skill" {
-					// Explicit user origin so mutation surfaces can
-					// tell "walker classified this as user-installed"
-					// apart from "walker didn't stamp an origin"
-					// (latter must fail-safe).
-					ev.Origin = "user"
-				}
-				if s.opts.StoreRawLocalPaths {
-					ev.RawPath = child
-				}
-				evidence = append(evidence, ev)
+				evidence = append(evidence, s.directoryChildEvidence(detector, path, entry.Name(), name))
 			}
 		}
 	}
@@ -2648,6 +2770,28 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 		out.LastActiveAt = &mt
 	}
 	return out
+}
+
+// directoryChildEvidence is the evidence row of the child entry (named name
+// once sanitized) of the skills / rules / plugins folder at parent.
+func (s *ContinuousDiscoveryService) directoryChildEvidence(detector, parent, entry, name string) AIEvidence {
+	child := filepath.Join(parent, entry)
+	ev := AIEvidence{
+		Type:     detector + "_entry",
+		Basename: name,
+		PathHash: hashPath(child),
+	}
+	if detector == "skill" {
+		// Explicit user origin so mutation surfaces can
+		// tell "walker classified this as user-installed"
+		// apart from "walker didn't stamp an origin"
+		// (latter must fail-safe).
+		ev.Origin = "user"
+	}
+	if s.keepEvidencePath() {
+		ev.RawPath = child
+	}
+	return ev
 }
 
 // appendHermesSkillChildren expands Hermes's category hierarchy into actual
@@ -2689,7 +2833,7 @@ func (s *ContinuousDiscoveryService) appendHermesSkillChildren(evidence *[]AIEvi
 			Origin:   origin,
 			Bundled:  entry.Bundled,
 		}
-		if s.opts.StoreRawLocalPaths {
+		if s.keepEvidencePath() {
 			ev.RawPath = entry.Path
 		}
 		*evidence = append(*evidence, ev)
@@ -2775,7 +2919,7 @@ func (s *ContinuousDiscoveryService) appendSystemSkillChildren(evidence *[]AIEvi
 			Origin:   origin,
 			Bundled:  bundled,
 		}
-		if s.opts.StoreRawLocalPaths {
+		if s.keepEvidencePath() {
 			ev.RawPath = child
 		}
 		*evidence = append(*evidence, ev)
@@ -2883,8 +3027,9 @@ func (s *ContinuousDiscoveryService) detectProcesses() ([]AISignal, error) {
 	windowsSnapshot := procs[0].Windows
 	if windowsSnapshot {
 		classifyWindowsProcesses(procs, s.catalog)
-		s.attributeProcessOwners(procs)
-		procs = s.withoutExcludedAccounts(procs)
+		brokered := processAccountsOnce()
+		s.attributeProcessOwners(procs, brokered)
+		procs = s.withoutExcludedAccounts(procs, brokered)
 	}
 	now := time.Now().UTC()
 	var out []AISignal
@@ -3381,6 +3526,7 @@ func (s *ContinuousDiscoveryService) detectPackageManifests(ctx context.Context)
 		}
 		// dirEntries: dir path -> manifest entries inside that dir.
 		dirEntries := map[string][]pkgManifestEntry{}
+		realRoot := macOSResolvedScanRoot(root)
 		walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			// Cancellation check on every entry — large monorepo
 			// walks otherwise block shutdown for tens of seconds.
@@ -3401,7 +3547,9 @@ func (s *ContinuousDiscoveryService) detectPackageManifests(ctx context.Context)
 				// Permission errors / vanished entries are
 				// expected in long-running scans; record one bump
 				// per error so dashboards see the regression but
-				// keep going. Walking is best-effort.
+				// keep going. Walking is best-effort. A TCC denial
+				// is also reported once as a skipped root.
+				managed.ReportInventoryScanDenial(path, err)
 				walkErrs++
 				if d != nil && d.IsDir() {
 					return filepath.SkipDir
@@ -3413,7 +3561,7 @@ func (s *ContinuousDiscoveryService) detectPackageManifests(ctx context.Context)
 			}
 			if d.IsDir() {
 				if path != root && (shouldSkipDiscoveryDir(d.Name()) || modelPathInSet(path, ownDataDirs)) ||
-					s.macOSTCCSkipped(path) {
+					s.macOSTCCSkipped(path) || s.macOSTCCSkippedBelow(root, realRoot, path) {
 					return filepath.SkipDir
 				}
 				return nil
@@ -3914,7 +4062,7 @@ func (s *ContinuousDiscoveryService) detectShellHistory() ([]AISignal, int, erro
 
 func (s *ContinuousDiscoveryService) signalFromPath(sig AISignature, category, detector, path string) AISignal {
 	ev := AIEvidence{Type: detector, Basename: filepath.Base(path), PathHash: hashPath(path)}
-	if s.opts.StoreRawLocalPaths {
+	if s.keepEvidencePath() {
 		ev.RawPath = path
 	}
 	out := s.signalFromEvidence(sig, category, detector, []AIEvidence{ev})
@@ -4014,12 +4162,22 @@ func (s *ContinuousDiscoveryService) signalFromEvidenceWithComponent(sig AISigna
 	return out
 }
 
+// scanRoots lists the package-manifest walk roots. A configured root in a
+// macOS privacy-protected folder is still a chosen root: it is not walked,
+// the scan records the skip (and so reports itself partial), and it does
+// not count as "no root configured", so the walk never widens to the
+// whole home because the only roots asked for were protected.
 func (s *ContinuousDiscoveryService) scanRoots() []string {
 	var roots []string
 	seen := make(map[string]struct{})
+	privacySkipped := false
 	for _, root := range s.opts.ScanRoots {
 		for _, expanded := range s.expandCandidatePath(root) {
 			if _, ok := seen[expanded]; ok {
+				continue
+			}
+			if s.macOSPrivacyPathSkipped(expanded) {
+				privacySkipped = true
 				continue
 			}
 			if st, err := os.Stat(expanded); err == nil && st.IsDir() {
@@ -4028,7 +4186,7 @@ func (s *ContinuousDiscoveryService) scanRoots() []string {
 			}
 		}
 	}
-	if len(roots) == 0 {
+	if len(roots) == 0 && !privacySkipped {
 		for _, home := range s.homesToScan() {
 			if _, ok := seen[home]; ok {
 				continue
@@ -4041,6 +4199,34 @@ func (s *ContinuousDiscoveryService) scanRoots() []string {
 }
 
 func (s *ContinuousDiscoveryService) expandCandidatePath(candidate string) []string {
+	paths, _ := s.expandCandidatePathBounded(candidate)
+	return paths
+}
+
+// expandCandidatePathBounded is expandCandidatePath with the overflow of its
+// glob. A catalog candidate may hold one "*" (Claude Desktop's MSIX data
+// folders): each expanded pattern becomes the paths that exist, through
+// claudedesktop.Glob (bounded reads, at most claudedesktop.MaxGlobMatches
+// paths, the installed MSIX package's publisher id first). overflowed lists
+// the patterns whose matches were cut.
+func (s *ContinuousDiscoveryService) expandCandidatePathBounded(candidate string) (paths, overflowed []string) {
+	for _, pattern := range s.expandCandidatePattern(candidate) {
+		if !strings.Contains(pattern, "*") {
+			paths = append(paths, pattern)
+			continue
+		}
+		matches, overflow := claudedesktop.Glob(discoveryGOOS, pattern)
+		paths = append(paths, matches...)
+		if overflow {
+			overflowed = append(overflowed, pattern)
+		}
+	}
+	return paths, overflowed
+}
+
+// expandCandidatePattern expands a catalog candidate's variables, "~" and
+// relative form, leaving a "*" in place.
+func (s *ContinuousDiscoveryService) expandCandidatePattern(candidate string) []string {
 	candidate = strings.TrimSpace(candidate)
 	if candidate == "" {
 		return nil
@@ -4630,6 +4816,9 @@ func ValidateSanitizedAIDiscoveryReport(report AIDiscoveryReport) error {
 				return errors.New("raw paths are not allowed")
 			}
 		}
+		if err := validateClaudeDesktopInfo(sig); err != nil {
+			return err
+		}
 		if sig.Model != nil {
 			model := sig.Model
 			if strings.TrimSpace(model.ID) == "" || len(model.ID) > 512 || containsUnicodeControl(model.ID) {
@@ -4868,9 +5057,7 @@ func (s *AIStateStore) Save(state aiStateFile) error {
 
 // processCommExactlyEquals reports whether `have` is byte-for-byte
 // equal (after path-stripping and case-folding) to `want`. The
-// confidence engine uses this to distinguish "exact" matches (which
-// get full Quality=1.0) from substring matches that succeed via the
-// fall-through in processNameMatches.
+// confidence engine uses this to distinguish exact from name-part matches.
 func processCommExactlyEquals(have, want string) bool {
 	have = strings.ToLower(strings.TrimSpace(filepath.Base(have)))
 	want = strings.ToLower(strings.TrimSpace(filepath.Base(want)))
@@ -4890,11 +5077,30 @@ func processNameMatches(have, want string) bool {
 		return true
 	}
 	// Short process names such as Amazon Q's `q` are far too noisy for
-	// substring matching (`quicklook`, `qemu`, etc.). Require exact matches.
+	// name-part matching (`quicklook`, `qemu`, etc.). Require exact matches.
 	if len(want) <= 3 {
 		return false
 	}
-	return strings.Contains(have, want)
+	// Accept a distinct executable-name part (cursor-agent, helper-claude),
+	// but not an unrelated compound name such as CursorUIViewService.
+	for at := 0; at < len(have); {
+		i := strings.Index(have[at:], want)
+		if i < 0 {
+			return false
+		}
+		i += at
+		end := i + len(want)
+		if (i == 0 || isProcessNameSeparator(have[i-1])) &&
+			(end == len(have) || isProcessNameSeparator(have[end])) {
+			return true
+		}
+		at = i + 1
+	}
+	return false
+}
+
+func isProcessNameSeparator(c byte) bool {
+	return c == '-' || c == '_' || c == '.' || c == ' '
 }
 
 func installedApplicationNames(home string) []string {

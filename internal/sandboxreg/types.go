@@ -86,9 +86,20 @@ const (
 	// every policy poll, 60 s). A registration whose daemon stopped
 	// reporting counts as stopped.
 	LiveLease = 5 * time.Minute
+	// RevokedTelemetryWindow keeps a policy-revoked registration available
+	// for the daemon's final lifecycle records after it reports deletion.
+	RevokedTelemetryWindow = 10 * time.Minute
 	// MaxEntriesPerUID caps one uid's registrations; the oldest tombstones
 	// are evicted first, never a live entry.
 	MaxEntriesPerUID = 1024
+	// MaxLivePerUID caps how many of one uid's registrations are live at
+	// once (bound, and reported running within LiveLease): what an
+	// account's sandboxes count in the fleet's active-sandbox gauge, which
+	// the gateway cannot check against OpenShell. A bind, a restart or a
+	// running report that revives a lapsed lease past it is refused
+	// (ErrTooManyLive). An account runs a few sandboxes at once, not dozens;
+	// stopped, pending and deleted registrations do not count (GAP-0020).
+	MaxLivePerUID = 32
 )
 
 // Registration is one sandbox a user's daemon registered with the managed
@@ -109,10 +120,22 @@ type Registration struct {
 	// provisional). A change triggers a re-match, never a refusal.
 	FactsDigest string `json:"facts_digest"`
 	// Profile is the matched guardrail profile; "" = openshell.admin alone.
-	Profile       string `json:"profile"`
-	ProfileMatch  string `json:"profile_match"`
-	MatchedGroup  string `json:"matched_group,omitempty"`
-	ProfileDigest string `json:"profile_digest"`
+	Profile string `json:"profile"`
+	// CreateProfile is the profile the sandbox was created under (the
+	// verified match at resolve). A re-match to another profile runs the
+	// sandbox under that profile's floor tightened by this one's, so a
+	// profile-assignment change tightens a running sandbox and never
+	// loosens it (GAP-0242). Nil for a registration made before 1.0.3 or
+	// under a provisional match: the next verified re-match sets it.
+	CreateProfile *string `json:"create_profile,omitempty"`
+	// The member names make hashed meet profiles resolvable after a restart.
+	// CreateProfileMembers is pinned with CreateProfile; ProfileMembers moves
+	// with Profile on a verified re-match. Empty for a single profile.
+	CreateProfileMembers []string `json:"create_profile_members,omitempty"`
+	ProfileMembers       []string `json:"profile_members,omitempty"`
+	ProfileMatch         string   `json:"profile_match"`
+	MatchedGroup         string   `json:"matched_group,omitempty"`
+	ProfileDigest        string   `json:"profile_digest"`
 	// Generation is the host config generation at resolve (admin-only).
 	Generation uint64 `json:"generation"`
 	// EffectiveDigest is packs.Effective.Digest(), the digest users see.
@@ -180,6 +203,23 @@ type Decision struct {
 	Scope        string        `json:"scope"`
 	Actor        DecisionActor `json:"actor"`
 	CreatedAt    time.Time     `json:"created_at"`
+	// SubjectKey is the subject key of the registration the decision was
+	// made in: the account that made it. A decision applies only to that
+	// account's registrations, never to a later account given the same uid
+	// (AppliesTo, rel-1-0-6:GAP-0262). Empty for a decision saved before
+	// 1.0.7 until the first sandbox start after the upgrade stamps or drops
+	// it (FileDecisionStore.SettleAccount).
+	SubjectKey string `json:"subject_key,omitempty"`
+}
+
+// AppliesTo reports whether d may apply to reg: d was made by reg's account,
+// or it predates the subject key on decisions and was made in reg itself,
+// whose account the routes prove before they serve it. A decision without
+// the key never applies to another registration until SettleAccount gives
+// it one, so a uid that changed accounts never serves the earlier account's
+// decisions while their settling waits (rel-1-0-6:GAP-0262 review 2).
+func (d Decision) AppliesTo(reg Registration) bool {
+	return d.SubjectKey == reg.SubjectKey || (d.SubjectKey == "" && d.Registration == reg.ID)
 }
 
 // DecisionActor is the person who made a decision.

@@ -34,7 +34,7 @@ func createOpenCodePluginArtifactDestination(path string) error {
 		err = safefile.ValidatePrivateDirectoryOwnershipAllowingAdministrators(dir)
 	}
 	if err != nil {
-		return fmt.Errorf("validate plugin directory custody: %w", err)
+		return fmt.Errorf("validate plugin directory custody: %w", explainPluginArtifactRefusal(path, err))
 	}
 
 	if _, err := os.Lstat(path); os.IsNotExist(err) {
@@ -43,7 +43,7 @@ func createOpenCodePluginArtifactDestination(path string) error {
 		return fmt.Errorf("inspect OpenCode managed plugin target: %w", err)
 	}
 	if err := safefile.ValidatePrivateFileOwnership(path); err != nil {
-		return fmt.Errorf("validate OpenCode managed plugin target: %w", err)
+		return fmt.Errorf("validate OpenCode managed plugin target: %w", explainPluginArtifactRefusal(path, err))
 	}
 	return nil
 }

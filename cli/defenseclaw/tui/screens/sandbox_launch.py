@@ -24,9 +24,9 @@ from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
-from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, Input, Select, Static
 
+from defenseclaw.tui.modal import GuardedModalScreen
 from defenseclaw.tui.services.sandbox_state import SANDBOX_HARNESS_SPECS, harness_command
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
@@ -125,7 +125,7 @@ def harness_choices(configured: tuple[str, ...], allowed: tuple[str, ...] = ()) 
     return tuple((known[name], name) for name in names)
 
 
-class SandboxLaunchScreen(ModalScreen[SandboxLaunch | None]):
+class SandboxLaunchScreen(GuardedModalScreen[SandboxLaunch | None]):
     """Launch dialog returning a validated :class:`SandboxLaunch`."""
 
     CSS = f"""

@@ -51,6 +51,10 @@ const (
 	// ControlPersistenceWrite denies agent descendants write opens of the
 	// user's shell startup files and user autostart units.
 	ControlPersistenceWrite = "kernel.persistence_write"
+	// ControlSSHAuthorizedKeysWrite denies agent descendants write opens of
+	// the user's SSH authorized keys files, new hard links to them and
+	// renames onto or away from them or of the .ssh directory.
+	ControlSSHAuthorizedKeysWrite = "kernel.ssh_authorized_keys_write"
 
 	// Schema names the lowest Tetragon release the policies are rendered
 	// for. It is part of the digest: rendering for another schema is a
@@ -83,6 +87,13 @@ type Control struct {
 	// ExemptBinaries are absolute paths, resolved on the host before use,
 	// whose own opens never match the control.
 	ExemptBinaries []string `yaml:"exempt_binaries"`
+	// Links also denies a new hard link to Files or at their names
+	// (path_link) and a rename onto or away from them (path_rename).
+	Links bool `yaml:"links"`
+	// RenameDirs are home-relative directories (trailing slash) that may
+	// not be renamed away or replaced by a rename (path_rename). Only a
+	// control with Links names them.
+	RenameDirs []string `yaml:"rename_dirs"`
 }
 
 // ObserveGroup is one path group of the observe policy.
@@ -242,7 +253,7 @@ func validate(set Set) error {
 	seen := map[string]bool{}
 	for _, control := range set.Controls {
 		switch control.ID {
-		case ControlSSHPrivateKeyRead, ControlPersistenceWrite:
+		case ControlSSHPrivateKeyRead, ControlPersistenceWrite, ControlSSHAuthorizedKeysWrite:
 		default:
 			return fmt.Errorf("kernel controls: unknown control %q", control.ID)
 		}
@@ -267,14 +278,26 @@ func validate(set Set) error {
 		if err := validateRelative(control.ID, control.Files, control.Dirs); err != nil {
 			return err
 		}
+		// Link and rename selectors match exact names; a directory prefix
+		// cannot be matched on a dentry, and an open-access control has no
+		// write to protect.
+		if control.Links && (control.Access != AccessWrite || len(control.Dirs) != 0 || len(control.Files) == 0) {
+			return fmt.Errorf("kernel controls: %s links needs a write control of exact files only", control.ID)
+		}
+		if len(control.RenameDirs) != 0 && !control.Links {
+			return fmt.Errorf("kernel controls: %s rename_dirs needs links", control.ID)
+		}
+		if err := validateRelative(control.ID+" rename_dirs", nil, control.RenameDirs); err != nil {
+			return err
+		}
 		for _, binary := range control.ExemptBinaries {
 			if !path.IsAbs(binary) || path.Clean(binary) != binary {
 				return fmt.Errorf("kernel controls: %s exempt binary %q is not a clean absolute path", control.ID, binary)
 			}
 		}
 	}
-	if len(seen) != 2 {
-		return fmt.Errorf("kernel controls: want exactly the two controls, have %d", len(seen))
+	if len(seen) != 3 {
+		return fmt.Errorf("kernel controls: want exactly the three controls, have %d", len(seen))
 	}
 	for _, group := range set.Observe.Groups {
 		if group.Access != AccessOpen && group.Access != AccessWrite {

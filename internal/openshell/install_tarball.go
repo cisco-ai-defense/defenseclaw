@@ -80,8 +80,6 @@ const (
 	tarballMaxBinaryBytes = 1 << 30
 	tarballMaxChecksums   = 1 << 20
 	tarballDefaultTimeout = 20 * time.Minute
-
-	codesignPath = "/usr/bin/codesign"
 )
 
 // tarballComponent is one NVIDIA tarball and the one binary it holds.
@@ -147,9 +145,6 @@ type TarballResult struct {
 	// files are intact: nothing was downloaded.
 	Already bool
 	Files   []InstalledFile
-	// Resigned lists the macOS binaries that were signed again because their
-	// shipped signature lacked the hypervisor entitlement.
-	Resigned []string
 }
 
 // TarballInstaller installs one pinned OpenShell release from NVIDIA's
@@ -170,7 +165,7 @@ type TarballInstaller struct {
 	Proxy netguard.EgressProxy
 	// HTTPClient overrides the client built from Proxy (tests).
 	HTTPClient *http.Client
-	// Runner runs codesign (macOS) and the installed CLI's --version.
+	// Runner runs the installed CLI's --version.
 	Runner Runner
 	// Now stamps the manifest.
 	Now func() time.Time
@@ -353,15 +348,6 @@ func (t *TarballInstaller) Install(ctx context.Context) (*TarballResult, error) 
 		target := t.targetPath(d.component)
 		if err := extractSingleBinary(d.archive, d.component.Name, target); err != nil {
 			return nil, err
-		}
-		if t.GOOS == "darwin" {
-			resigned, err := t.ensureHypervisorEntitlement(ctx, target)
-			if err != nil {
-				return nil, err
-			}
-			if resigned {
-				result.Resigned = append(result.Resigned, target)
-			}
 		}
 		sum, err := fileSHA256(target)
 		if err != nil {
@@ -629,39 +615,6 @@ func writeExecutableAtomic(target string, r io.Reader, size int64) error {
 		return fmt.Errorf("openshell: install %s: %w", target, err)
 	}
 	return nil
-}
-
-// ensureHypervisorEntitlement signs a macOS binary again, ad hoc, with the
-// hypervisor entitlement the formula's post-install step grants, only when
-// its shipped signature lacks it (0.1.3 ships the driver signed).
-func (t *TarballInstaller) ensureHypervisorEntitlement(ctx context.Context, binary string) (bool, error) {
-	if filepath.Base(binary) != vmDriverBinary {
-		return false, nil
-	}
-	out, err := t.Runner.Output(ctx, Command{Name: codesignPath, Args: []string{"-d", "--entitlements", ":-", binary}})
-	if err == nil && strings.Contains(string(out), hypervisorEntitlement) {
-		return false, nil
-	}
-	plist := filepath.Join(t.Home, ".local", "share", "openshell", "openshell-driver-vm.entitlements.plist")
-	if err := os.MkdirAll(filepath.Dir(plist), 0o755); err != nil {
-		return false, fmt.Errorf("openshell: create %s: %w", filepath.Dir(plist), err)
-	}
-	const entitlements = `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>` + hypervisorEntitlement + `</key>
-	<true/>
-</dict>
-</plist>
-`
-	if err := os.WriteFile(plist, []byte(entitlements), 0o644); err != nil {
-		return false, fmt.Errorf("openshell: write %s: %w", plist, err)
-	}
-	if out, err := t.Runner.Output(ctx, Command{Name: codesignPath, Args: []string{"--entitlements", plist, "--force", "-s", "-", binary}}); err != nil {
-		return false, fmt.Errorf("openshell: sign %s for Apple's Hypervisor: %w: %s", binary, err, strings.TrimSpace(string(out)))
-	}
-	return true, nil
 }
 
 // checkInstalledVersion runs the installed CLI and checks that it reports

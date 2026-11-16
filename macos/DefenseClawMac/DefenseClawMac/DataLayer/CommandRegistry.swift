@@ -30,6 +30,39 @@ enum ShellQuoting {
     }
 }
 
+/// `keys set` secret transport. Runtime 1.0.0+ documents `--value-stdin`
+/// ("read the value from the first line of stdin; for scripts and the TUI")
+/// as the non-interactive path; without it the CLI falls into click's hidden
+/// prompt, which reads /dev/tty when the app has a controlling terminal and
+/// only falls back to the stdin pipe otherwise. The flag is appended only when
+/// the installed runtime is known to accept it, so a pre-1.0 runtime keeps
+/// the prompt-fallback path that works for it.
+enum SecretStandardInputTransport {
+    static let flag = "--value-stdin"
+
+    static func supportsValueStandardInput(runtimeVersion: String?) -> Bool {
+        guard let runtimeVersion,
+              let major = runtimeVersion.split(separator: ".").first.flatMap({ Int($0) })
+        else { return false }
+        return major >= 1
+    }
+
+    /// The argv to run for a command whose secret travels over stdin.
+    static func arguments(
+        _ arguments: [String],
+        binary: String,
+        standardInput: String?,
+        runtimeVersion: String?
+    ) -> [String] {
+        guard standardInput != nil, binary == "defenseclaw",
+              arguments.prefix(2) == ["keys", "set"],
+              !arguments.contains(flag),
+              supportsValueStandardInput(runtimeVersion: runtimeVersion)
+        else { return arguments }
+        return arguments + [flag]
+    }
+}
+
 struct CommandDefinition: Identifiable, Hashable, Sendable {
     let title: String
     let binary: String
@@ -196,7 +229,7 @@ enum CommandInvocationError: LocalizedError, Equatable {
 }
 
 enum CommandRegistry {
-    static let sourceCount = 223
+    static var sourceCount: Int { all.count }
     static let all: [CommandDefinition] = [
         CommandDefinition(id: 0, title: "init", binary: "defenseclaw", arguments: ["init"], summary: "Initialize DefenseClaw", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 1, title: "init first-run", binary: "defenseclaw", arguments: ["init", "--non-interactive", "--yes", "--verify"], summary: "Run guided first-run backend with defaults", category: "setup", requiresInput: false, usage: ""),
@@ -214,12 +247,11 @@ enum CommandRegistry {
         CommandDefinition(id: 13, title: "setup cursor", binary: "defenseclaw", arguments: ["setup", "cursor", "--yes"], summary: "Configure supported Cursor action or observe hooks", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 14, title: "setup devin", binary: "defenseclaw", arguments: ["setup", "devin", "--yes"], summary: "Configure Devin project hooks and local catalogs", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 15, title: "setup copilot", binary: "defenseclaw", arguments: ["setup", "copilot", "--yes"], summary: "Configure supported Copilot CLI hooks", category: "setup", requiresInput: false, usage: ""),
-        CommandDefinition(id: 16, title: "setup openhands", binary: "defenseclaw", arguments: ["setup", "openhands", "--yes"], summary: "Configure OpenHands observability hooks", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 17, title: "setup antigravity", binary: "defenseclaw", arguments: ["setup", "antigravity", "--yes"], summary: "Configure supported Antigravity hooks", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 18, title: "setup opencode", binary: "defenseclaw", arguments: ["setup", "opencode", "--yes"], summary: "Configure OpenCode observability hooks", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 19, title: "setup amp", binary: "defenseclaw", arguments: ["setup", "amp", "--yes"], summary: "Configure Amp synchronous policy plugin", category: "setup", requiresInput: false, usage: ""),
-        CommandDefinition(id: 20, title: "setup omnigent", binary: "defenseclaw", arguments: ["setup", "omnigent", "--yes"], summary: "Configure OmniGent ALLOW/ASK/DENY policy bridge", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 21, title: "setup kiro", binary: "defenseclaw", arguments: ["setup", "kiro", "--yes"], summary: "Configure the Kiro IDE or CLI connector", category: "setup", requiresInput: false, usage: ""),
+        CommandDefinition(id: 235, title: "setup cowork", binary: "defenseclaw", arguments: ["setup", "cowork", "--yes"], summary: "Build the Claude Cowork plugin (sets up Claude Code hooks if off)", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 22, title: "setup rotate-token", binary: "defenseclaw", arguments: ["setup", "rotate-token", "--yes"], summary: "Rotate gateway and scoped hook tokens", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 23, title: "setup gateway", binary: "defenseclaw", arguments: ["setup", "gateway"], summary: "Configure gateway connection (interactive)", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 24, title: "setup guardrail", binary: "defenseclaw", arguments: ["setup", "guardrail"], summary: "Configure LLM guardrail", category: "setup", requiresInput: false, usage: ""),
@@ -435,7 +467,7 @@ enum CommandRegistry {
             }
             guard command.arguments.count == 3,
                   command.arguments[0] == "setup",
-                  ["amp", "kiro"].contains(command.arguments[1]),
+                  ["amp", "kiro", "cowork"].contains(command.arguments[1]),
                   command.arguments[2] == "--yes" else { return true }
             return supportedSetupCommands?.contains(command.arguments[1]) == true
         }

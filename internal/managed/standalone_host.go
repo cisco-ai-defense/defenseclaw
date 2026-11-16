@@ -19,7 +19,28 @@ package managed
 import (
 	"os"
 	"runtime"
+	"sync/atomic"
 )
+
+// standaloneLifecycleProcess is set by a process that runs a standalone
+// Windows lifecycle action (Setup, which runs the lifecycle from a staged
+// copy of the CLI, or the installed CLI). Such a process carries no service
+// pin and does not sit in the install root, so StandaloneTrustScope and
+// WindowsStandaloneInstallExecutable alone judged it by the Secure Client
+// rules, and its in-place repairs (the runtime folder, the hook runtime
+// folder) restored the access list over what an untrusted account had
+// written (GAP-0651). It widens only StandaloneRefusesContentDrift.
+var standaloneLifecycleProcess atomic.Bool
+
+// MarkStandaloneLifecycleProcess records that this process runs a standalone
+// Windows lifecycle action, so it refuses an in-place repair of a managed
+// file or folder another account can write or owns, as the guardian does.
+func MarkStandaloneLifecycleProcess() { standaloneLifecycleProcess.Store(true) }
+
+// UnmarkStandaloneLifecycleProcess ends MarkStandaloneLifecycleProcess when
+// the lifecycle action returns, so a test binary that runs several actions
+// does not carry the mark into the next.
+func UnmarkStandaloneLifecycleProcess() { standaloneLifecycleProcess.Store(false) }
 
 // IsStandaloneManagedHost reports whether this computer is a standalone
 // managed deployment: the administrator-owned public runtime descriptor
@@ -34,4 +55,16 @@ func IsStandaloneManagedHost() bool {
 	}
 	_, statErr := os.Stat(layout.DescriptorPath)
 	return statErr == nil
+}
+
+// StandaloneTrustScope reports whether this process judges managed trust
+// by the standalone profile's rules: its service environment pins the
+// standalone profile, or this computer carries the standalone runtime
+// descriptor. The macOS drift handling of the Secure Client profile
+// (permission drift accepted and logged, root services repairing their own
+// objects in place, `/` and `/opt` as advisory ancestors, ACL entries for
+// root, wheel and admin) stays outside that scope, so a standalone install
+// keeps its strict verdicts.
+func StandaloneTrustScope() bool {
+	return IsStandaloneProfile(os.Getenv(EnterpriseProfileEnv)) || IsStandaloneManagedHost()
 }

@@ -339,11 +339,15 @@ func renderCatalog(catalog []rulesFile) ([]byte, error) {
 
 package gateway
 
-import "regexp"
+import (
+	"regexp"
+	"sync"
+)
 
 // defaultRuleCategories is generated from the enabled rules in
 // policies/guardrail/default/rules/*.yaml. The YAML catalog is authoritative.
-var defaultRuleCategories = []ruleCategory{
+// Compile it on first gateway use, not in every short-lived hook process.
+var defaultRuleCategories = sync.OnceValue(func() []ruleCategory { return []ruleCategory{
 `)
 	for _, file := range catalog {
 		fmt.Fprintf(&out, "\t{\n\t\tName: %s,\n\t\tRules: []PatternRule{\n", strconv.Quote(file.Category))
@@ -374,7 +378,7 @@ var defaultRuleCategories = []ruleCategory{
 		}
 		out.WriteString("\t\t},\n\t},\n")
 	}
-	out.WriteString("}\n")
+	out.WriteString("} })\n")
 
 	formatted, err := format.Source([]byte(out.String()))
 	if err != nil {

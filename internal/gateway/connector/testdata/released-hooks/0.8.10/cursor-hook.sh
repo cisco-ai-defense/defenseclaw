@@ -1,0 +1,174 @@
+#!/bin/bash
+# defenseclaw-managed-hook v8
+# DefenseClaw Cursor hook — forwards Cursor command-hook payloads to the
+# DefenseClaw gateway.
+set -euo pipefail
+# Windows: HOME may be unset when agents spawn hooks. Fall back to USERPROFILE.
+HOME="${HOME:-${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}}"
+export HOME
+
+HOOK_SOURCE="${BASH_SOURCE[0]:-$0}"
+HOOK_LINK_DEPTH=0
+while [ -L "$HOOK_SOURCE" ]; do
+  HOOK_LINK_DEPTH=$((HOOK_LINK_DEPTH + 1))
+  [ "$HOOK_LINK_DEPTH" -le 40 ] || exit 2
+  HOOK_PARENT="${HOOK_SOURCE%/*}"
+  [ "$HOOK_PARENT" != "$HOOK_SOURCE" ] || HOOK_PARENT="."
+  HOOK_BASE="$(cd -P -- "$HOOK_PARENT" 2>/dev/null && pwd)" || exit 2
+  if [ -x /usr/bin/readlink ]; then
+    HOOK_TARGET="$(/usr/bin/readlink -- "$HOOK_SOURCE")" || exit 2
+  elif [ -x /bin/readlink ]; then
+    HOOK_TARGET="$(/bin/readlink -- "$HOOK_SOURCE")" || exit 2
+  else
+    exit 2
+  fi
+  case "$HOOK_TARGET" in
+    /*) HOOK_SOURCE="$HOOK_TARGET" ;;
+    *) HOOK_SOURCE="$HOOK_BASE/$HOOK_TARGET" ;;
+  esac
+done
+HOOK_PARENT="${HOOK_SOURCE%/*}"
+[ "$HOOK_PARENT" != "$HOOK_SOURCE" ] || HOOK_PARENT="."
+HOOK_DIR="$(cd -P -- "$HOOK_PARENT" 2>/dev/null && pwd)" || exit 2
+unset HOOK_SOURCE HOOK_LINK_DEPTH HOOK_PARENT HOOK_BASE HOOK_TARGET
+
+# Cursor treats a failClosed:true hook that produces empty stdout as a
+# hook failure and blocks the tool. Every allow / observe / fail-open
+# path below therefore emits an explicit allow envelope rather than
+# exiting silently; block paths emit an explicit deny. This keeps a
+# deliberate fail-OPEN (gateway outage, missing token, disabled install)
+# from being silently inverted into a fail-closed block.
+emit_cursor_allow() { printf '{"continue":true,"permission":"allow"}\n'; }
+
+
+DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
+if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
+  # Disabling DefenseClaw (or an absent install) must fail OPEN for the
+  # agent. Cursor treats a failClosed:true hook entry that produces empty
+  # stdout as a hook failure and blocks the tool, so emit an explicit
+  # allow instead of exiting silently — otherwise dropping the .disabled
+  # marker would brick a fail-closed Cursor install with no way to
+  # self-recover.
+  emit_cursor_allow
+  exit 0
+fi
+
+
+# Plan B4 / S0.4: shell-side hook hardening — sourced BEFORE the
+# missing-token branch so the bypass goes through
+# defenseclaw_handle_missing_token and honors
+# DEFENSECLAW_STRICT_AVAILABILITY (matches claude-code-hook /
+# codex-hook).
+. "${HOOK_DIR}/_hardening.sh"
+defenseclaw_harden_resources
+defenseclaw_harden_env
+
+FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-open}"
+DEFENSECLAW_HOOK_CONNECTOR="cursor"
+DEFENSECLAW_HOOK_NAME="cursor-hook"
+export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
+
+if [ ! -f "${HOOK_DIR}/.token" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
+  MISSING_TOKEN_REASON="missing gateway token (.token absent and DEFENSECLAW_GATEWAY_TOKEN unset)"
+  defenseclaw_log_hook_failure cursor cursor-hook "$MISSING_TOKEN_REASON" transport "$FAIL_MODE"
+  if defenseclaw_should_fail_closed_on_unreachable; then
+    echo "defenseclaw: ${MISSING_TOKEN_REASON}, blocking cursor tool (DEFENSECLAW_STRICT_AVAILABILITY=1)" >&2
+    printf '{"continue":false,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}\n'
+    exit 2
+  fi
+  echo "defenseclaw: ${MISSING_TOKEN_REASON}, allowing cursor tool" >&2
+  emit_cursor_allow
+  exit 0
+fi
+
+# Read stdin under a 1MB cap so a hostile / runaway agent can't OOM
+# the hook process before the gateway sees the payload.
+PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
+  echo "defenseclaw: cursor hook refusing oversized payload" >&2
+  if [ "$FAIL_MODE" = "closed" ]; then
+    printf '{"continue":false,"permission":"deny","user_message":"DefenseClaw hook payload too large","agent_message":"DefenseClaw hook payload too large"}\n'
+    exit 2
+  fi
+  emit_cursor_allow
+  exit 0
+}
+API_ADDR="127.0.0.1:9"
+if [ "0" = "1" ]; then
+  DEFENSECLAW_GATEWAY_TOKEN=
+  if [ -f "${HOOK_DIR}/.token" ]; then
+    IFS= read -r DEFENSECLAW_GATEWAY_TOKEN < "${HOOK_DIR}/.token" || true
+  fi
+  export DEFENSECLAW_GATEWAY_TOKEN
+elif [ -f "${HOOK_DIR}/.token" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
+  # shellcheck source=/dev/null
+  . "${HOOK_DIR}/.token"
+fi
+API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
+
+fail_unreachable() {
+  defenseclaw_log_hook_failure cursor cursor-hook "$1" transport "$FAIL_MODE"
+  defenseclaw_emit_unreachable_stderr "cursor tool" "$1"
+  if defenseclaw_should_fail_closed_on_unreachable; then
+    printf '{"continue":false,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}\n'
+    exit 2
+  fi
+  emit_cursor_allow
+  exit 0
+}
+
+fail_response() {
+  defenseclaw_log_hook_failure cursor cursor-hook "$1" response "$FAIL_MODE"
+  echo "defenseclaw: cursor hook error: $1" >&2
+  if [ "$FAIL_MODE" = "open" ]; then
+    emit_cursor_allow
+    exit 0
+  fi
+  printf '{"continue":false,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}\n'
+  exit 0
+}
+
+AUTH_HEADER_ARGS=()
+if [ -n "${API_TOKEN}" ]; then
+  AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
+fi
+
+# W3C trace propagation: forward validated traceparent / tracestate.
+TRACE_HEADER_ARGS=()
+if command -v mapfile >/dev/null 2>&1; then
+  mapfile -t TRACE_HEADER_ARGS < <(defenseclaw_extract_trace_context)
+fi
+
+RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/cursor/hook" \
+  -H "Content-Type: application/json" \
+  -H "X-DefenseClaw-Client: cursor-hook/1.0" \
+  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
+  "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
+  --connect-timeout 2 \
+  --max-time 10 \
+  -d "$PAYLOAD" 2>/dev/null) || {
+  fail_unreachable "gateway unreachable"
+}
+
+HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+RESULT=$(echo "$RESPONSE" | sed '$d')
+
+if [ -z "$HTTP_CODE" ]; then
+  fail_unreachable "gateway returned no HTTP status"
+elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/null; then
+  fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
+elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
+  fail_response "gateway returned HTTP ${HTTP_CODE}"
+fi
+
+OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
+  fail_response "invalid JSON response"
+}
+if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+  echo "$OUTPUT"
+else
+  # Gateway answered but carried no hook_output (e.g. an observe-mode
+  # response with nothing to enforce). Emit an explicit allow so a
+  # failClosed:true entry never misreads the empty stdout as a failure.
+  emit_cursor_allow
+fi
+exit 0

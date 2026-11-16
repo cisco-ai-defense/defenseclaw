@@ -27,8 +27,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
@@ -61,7 +59,7 @@ func stampAuditEventEnvelope(e *Event) {
 		return
 	}
 	if e.ID == "" {
-		e.ID = uuid.New().String()
+		e.ID = observability.NewTimeOrderedID()
 	}
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now().UTC()
@@ -369,7 +367,13 @@ func (l *Logger) persistScanWithCorrelation(
 	// boundary, but all signal fanout is owned by the generated v8 runtime.
 	// Passing nil legacy collaborators prevents a second JSONL/OTel path from
 	// being revived by configuration or a concurrent reload.
-	scanID, err := scanner.EmitScanResult(ctx, l.store, result, agent)
+	// Inside a hook call the scan's summary commits with the call's other
+	// writes (callScanPersistence).
+	var persistence scanner.ScanPersistence = l.store
+	if l.store != nil && CallWritesOpen(ctx, l.store) {
+		persistence = callScanPersistence{Store: l.store, ctx: ctx}
+	}
+	scanID, err := scanner.EmitScanResult(ctx, persistence, result, agent)
 	if err != nil {
 		return "", err
 	}
@@ -942,7 +946,7 @@ func (l *Logger) logActionWithEnvelopeContextAndAssetActor(
 		actor = "defenseclaw"
 	}
 	event := Event{
-		ID:        uuid.New().String(),
+		ID:        observability.NewTimeOrderedID(),
 		Timestamp: time.Now().UTC(),
 		Action:    action,
 		Target:    target,
@@ -1039,7 +1043,7 @@ func (l *Logger) LogActionWithEnforcement(action, target, details string, enforc
 		structured[key] = value
 	}
 	event := Event{
-		ID:                uuid.New().String(),
+		ID:                observability.NewTimeOrderedID(),
 		Timestamp:         time.Now().UTC(),
 		Action:            action,
 		Target:            target,
@@ -1151,6 +1155,28 @@ type ActivityInput struct {
 	// config.bundle.receipt record (LogPolicyBundleReceipt).
 	Bundle        *PolicyBundle
 	BundleReceipt *PolicyBundleReceipt
+	// ConfigChange is set only on a trust anchor or credential change
+	// record (LogConfigChange).
+	ConfigChange *ConfigChange
+	// OccurrenceID, when set, is the audit event id of an occurrence its
+	// producer keeps in a durable spool and offers until every sink has it.
+	// A record already stored under it is not written again, so a producer
+	// that re-offers the same event after a restart records it once; every
+	// offer sends the record to the remote destinations that do not have it.
+	// The call returns nil only once the row survives a power loss.
+	OccurrenceID string
+	// Pins and PinKey, with OccurrenceID, keep the record of every offer
+	// the same: the first offer pins it (ConfigChangePin) under PinKey, the
+	// producer's spool event id, before any sink gets it.
+	Pins   *ConfigChangePins
+	PinKey string
+	// OccurredAt, with OccurrenceID, is the time of the occurrence, which
+	// its record keeps on every offer.
+	OccurredAt time.Time
+	// RemoteDelivery, with OccurrenceID, follows the record's remote
+	// destinations across offers (observability.RemoteDelivery). Nil
+	// follows this offer only.
+	RemoteDelivery *observability.RemoteDelivery
 }
 
 // ActivityDiffEntry records one canonical control-plane mutation delta.

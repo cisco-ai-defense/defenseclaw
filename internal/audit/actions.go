@@ -74,11 +74,21 @@ const (
 	// per-receipt public spool the enterprise lifecycle writes; it reports,
 	// never enforces.
 	ActionConfigBundleReceipt Action = "config.bundle.receipt"
-	ActionPolicyUpdate        Action = "policy-update"
-	ActionPolicyReload        Action = "policy-reload"
-	ActionAction              Action = "action" // generic action mutation (block/allow list update)
-	ActionAckAlerts           Action = "acknowledge-alerts"
-	ActionDismissAlerts       Action = "dismiss-alerts"
+	// ActionConfigTrustAnchorsChanged, ActionConfigSecretChanged and
+	// ActionConfigSecretChangeFailed are a trust anchor install and a
+	// protected credential set or removal on a standalone managed device
+	// (log.config.trust_anchors.changed, log.config.secret.changed and
+	// log.config.secret.change_failed). The root command writes a change
+	// record into the change spool and the gateway reports it; the records
+	// carry hashes, key ids and credential names, never a value.
+	ActionConfigTrustAnchorsChanged Action = "config.trust_anchors.changed"
+	ActionConfigSecretChanged       Action = "config.secret.changed"
+	ActionConfigSecretChangeFailed  Action = "config.secret.change_failed"
+	ActionPolicyUpdate              Action = "policy-update"
+	ActionPolicyReload              Action = "policy-reload"
+	ActionAction                    Action = "action" // generic action mutation (block/allow list update)
+	ActionAckAlerts                 Action = "acknowledge-alerts"
+	ActionDismissAlerts             Action = "dismiss-alerts"
 
 	// Webhook / notifier
 	ActionWebhookDelivered Action = "webhook-delivered"
@@ -127,12 +137,28 @@ const (
 	// records the successful re-install.
 	ActionConnectorHookTampered Action = "connector-hook-tampered"
 	ActionConnectorHookRepaired Action = "connector-hook-repaired"
+	// The managed guardian retired a target after confirming its account
+	// was removed. The enumerator may still carry the manifest row.
+	ActionConnectorHookAccountRemoved Action = "connector-hook-account-removed"
+
+	// ActionProtectedFileChanged records a change to a protected file (SSH
+	// authorized keys, shell startup files, user autostart entries) that the
+	// gateway's protected-file watch saw while an agent tool call was
+	// running for that user: HIGH, with the agent session it can name, and
+	// whether the file was restored (guardrail.protected_files.on_change).
+	ActionProtectedFileChanged Action = "protected-file-changed"
 
 	// ActionEnterpriseExemptUser records that a standalone enterprise hook
 	// call came from an account enterprise.enrollment.exempt_users lists: it
 	// is allowed and inspected but not enrolled. At most one row per account
 	// and connector each ten minutes (GAP-0832).
 	ActionEnterpriseExemptUser Action = "enterprise-exempt-user"
+
+	// ActionIdentityRefreshCompleted records one `enterprise identity
+	// refresh` run of a managed gateway: how many accounts it re-read,
+	// changed, failed or skipped, its duration and the OS cache flush.
+	// It never names an account.
+	ActionIdentityRefreshCompleted Action = "identity-refresh-completed"
 
 	// Codex notify webhook (agent-turn-complete et al.). The
 	// notify-bridge.sh shim installed by the codex connector POSTs
@@ -409,6 +435,9 @@ func AllActions() []Action {
 		ActionToolResult,
 		ActionConfigUpdate,
 		ActionConfigBundleReceipt,
+		ActionConfigTrustAnchorsChanged,
+		ActionConfigSecretChanged,
+		ActionConfigSecretChangeFailed,
 		ActionPolicyUpdate,
 		ActionPolicyReload,
 		ActionAction,
@@ -428,7 +457,10 @@ func AllActions() []Action {
 		ActionAssetPolicy,
 		ActionConnectorHookTampered,
 		ActionConnectorHookRepaired,
+		ActionConnectorHookAccountRemoved,
+		ActionProtectedFileChanged,
 		ActionEnterpriseExemptUser,
+		ActionIdentityRefreshCompleted,
 		ActionCodexNotify,
 		ActionCodexNotifyAgentTurnComplete,
 		ActionCodexNotifyMalformed,

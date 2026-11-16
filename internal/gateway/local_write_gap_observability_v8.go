@@ -15,7 +15,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
-	"github.com/google/uuid"
 )
 
 const (
@@ -34,9 +33,9 @@ const (
 // reported only once that record is stored in the local history, so a later
 // restart does not report them again. Secure Client keeps main records (#1092).
 // On the same occasions it reports the hook calls that ran fail-open while
-// this gateway was not answering (reportHookFailOpenCalls, GAP-0414).
+// this gateway was not answering (reportHookFailureCalls, GAP-0414).
 func (s *Sidecar) recordLocalWriteGapV8() {
-	s.reportHookFailOpenCalls()
+	s.reportHookFailureCalls()
 	if s == nil || ManagedEnterpriseActive() {
 		return
 	}
@@ -127,7 +126,7 @@ func emitLocalWriteGapV8(
 		}
 		builder, buildErr := observability.NewFamilyBuilder(
 			observability.ClockFunc(func() time.Time { return observedAt }),
-			observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+			observability.TimeOrderedOccurrenceIDs,
 		)
 		if buildErr != nil {
 			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}

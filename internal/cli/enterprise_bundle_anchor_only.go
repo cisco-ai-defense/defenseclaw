@@ -30,7 +30,9 @@ const anchorOnlyConfirmedClause = "; the confirmed bundle keeps enforcing until 
 // and no bundle (Setup /ensure TRUSTANCHORS= without BUNDLE=) did to the
 // installed anchor file: whether a file was there, its bytes before the run
 // (nil when there was none or it could not be read, which counts as
-// changed) and the bytes the run installed.
+// changed) and the bytes the run installed. It also records the anchors a
+// BUNDLE= TRUSTANCHORS= run committed once its bundle was confirmed or found
+// already applied (windowsBundleRun.anchorCommit).
 type anchorOnlyChange struct {
 	path      string
 	existed   bool
@@ -47,7 +49,8 @@ type anchorOnlyChange struct {
 // enforcing only when one is current (confirmedBundle). The warning that
 // names a confirmed signer the new anchors revoke or drop comes from the
 // bundle summary (bundleCurrentSignerWarning). Byte-identical anchors stay
-// a no-op.
+// a no-op. The same holds for a repeat of the confirmed bundle that commits
+// other anchors: it is not an already_applied no-op (GAP-0034).
 func settleAnchorOnlyEnsure(result *enterprisestatus.Result, change *anchorOnlyChange, confirmedBundle bool) {
 	if result == nil || change == nil || len(result.Errors) != 0 || bytes.Equal(change.previous, change.installed) {
 		return

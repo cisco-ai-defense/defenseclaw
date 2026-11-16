@@ -144,6 +144,9 @@ func TestWatchdogHealthRequirementsFromConfig(t *testing.T) {
 		cfg.Gateway.Watcher.Enabled = true
 
 		got := watchdogHealthRequirementsFromConfig(cfg)
+		if got.transportConfig != cfg {
+			t.Fatal("watchdog requirements lost the gateway transport profile")
+		}
 		if got.requireFleet {
 			t.Fatal("hook-only loopback topology must not require the fleet gateway")
 		}

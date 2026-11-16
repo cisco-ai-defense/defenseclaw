@@ -189,12 +189,13 @@ func TestRelayForwardsOnlyTheAllowlist(t *testing.T) {
 		}
 	}
 	for name := range got.Header {
-		if strings.HasPrefix(name, http.CanonicalHeaderKey(SandboxHeaderPrefix)) && name != http.CanonicalHeaderKey(RegistrationHeader) {
+		if strings.HasPrefix(name, http.CanonicalHeaderKey(SandboxHeaderPrefix)) && name != http.CanonicalHeaderKey(RegistrationHeader) &&
+			name != http.CanonicalHeaderKey(DaemonContractHeader) {
 			t.Fatalf("%s reached the gateway", name)
 		}
 	}
 	if got.Header.Get(RegistrationHeader) != "reg-own" || got.Header.Get(ClientHeader) != ClientHeaderValue ||
-		got.Header.Get(AgentSurfaceHeader) != AgentSurfaceValue {
+		got.Header.Get(AgentSurfaceHeader) != AgentSurfaceValue || got.Header.Get(DaemonContractHeader) != "2" {
 		t.Fatalf("relay-set headers: %v", got.Header)
 	}
 	if resp.Status != http.StatusOK || string(resp.Body) != `{"decision":"block"}` {
@@ -236,7 +237,7 @@ func TestRelayRefusesBadCallsBeforeSending(t *testing.T) {
 	path := relayTestServer(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { sent = true }))
 	c := newTestClient(t, path)
 	big := http.Header{}
-	big.Set("Traceparent", strings.Repeat("a", MaxForwardHeaderBytes))
+	big.Set("Content-Type", strings.Repeat("a", MaxForwardHeaderBytes))
 	for _, call := range []RelayCall{
 		{Class: RouteHook, Target: "../admin", Registration: "reg-1"},
 		{Class: RouteInspect, Target: "everything", Registration: "reg-1"},
@@ -342,14 +343,16 @@ func TestParseHookDecisionBounds(t *testing.T) {
 }
 
 // Every call the daemon makes carries the hook socket's CSRF client header,
-// GET included (the gateway refuses any sandbox route without it), and a
-// packs call names its scope in the headers the gateway reads (GAP-0211,
+// GET included (the gateway refuses any sandbox route without it), and its
+// floor contract (a managed gateway refuses a daemon below it, GAP-0182);
+// a packs call names its scope in the headers the gateway reads (GAP-0211,
 // GAP-0181).
 func TestEveryCallSendsTheClientHeader(t *testing.T) {
-	type seen struct{ method, path, client, registration, connector string }
+	type seen struct{ method, path, client, contract, registration, connector string }
 	var got []seen
 	path := relayTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got = append(got, seen{r.Method, r.URL.Path, r.Header.Get(ClientHeader), r.Header.Get(RegistrationHeader), r.Header.Get(ConnectorHeader)})
+		got = append(got, seen{r.Method, r.URL.Path, r.Header.Get(ClientHeader), r.Header.Get(DaemonContractHeader),
+			r.Header.Get(RegistrationHeader), r.Header.Get(ConnectorHeader)})
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == PathPolicyPacks || r.URL.Path == PathDecisions && r.Method == http.MethodGet:
@@ -390,6 +393,9 @@ func TestEveryCallSendsTheClientHeader(t *testing.T) {
 	for _, s := range got {
 		if s.client != ClientHeaderValue {
 			t.Fatalf("%s %s without the client header (%q)", s.method, s.path, s.client)
+		}
+		if s.contract != "2" {
+			t.Fatalf("%s %s without the floor contract (%q)", s.method, s.path, s.contract)
 		}
 	}
 	if list, one := got[7], got[8]; list.connector != "codex" || list.registration != "" || one.registration != "reg-1" || one.path != PathPolicyPacks+"/strict" {

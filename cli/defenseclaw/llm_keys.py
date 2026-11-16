@@ -58,6 +58,19 @@ def looks_like_key_shape(value: str) -> bool:
     return bool(_KEY_SHAPE_RE.match((value or "").strip()))
 
 
+# Every provider key env name detect_api_key_env can return. An OpenClaw env
+# SecretRef that names one of these is never adopted as the gateway token.
+PROVIDER_KEY_ENV_NAMES: tuple[str, ...] = (
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "ANTHROPIC_API_KEY",
+    "AZURE_OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "OPENAI_API_KEY",
+    "GOOGLE_API_KEY",
+    "LLM_API_KEY",
+)
+
+
 def detect_api_key_env(model: str) -> str:
     """Guess the API key env var from the model string.
 

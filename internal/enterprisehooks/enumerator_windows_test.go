@@ -18,6 +18,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +26,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -62,8 +64,8 @@ func TestSIDIsInteractiveUserAcceptsRealUserSIDs(t *testing.T) {
 	}
 }
 
-// TestSIDIsInteractiveUserRejectsWellKnown pins REQ-11's exclusion
-// list. Every principal listed here is a well-known SID the CLI /
+// TestSIDIsInteractiveUserRejectsWellKnown pins the interactive-user
+// filter's exclusion list. Every principal listed here is a well-known SID the CLI /
 // enumerator MUST refuse — accepting any of them would let a
 // misconfigured install rewrite the machine's SYSTEM / BUILTIN /
 // NT SERVICE hook wiring, which is nonsensical (those principals
@@ -156,7 +158,7 @@ func TestEffectiveWindowsHookConnectorsFiltersUnsupported(t *testing.T) {
 			want: []string{"codex"},
 		},
 		{
-			// CR spec-005:PRRT_kwDORuAK-s6atyfM regression:
+			// Regression:
 			// a disabled map entry MUST beat the scalar
 			// re-declaration. A config that names claudecode
 			// both as the scalar Connector AND as an explicitly
@@ -201,6 +203,73 @@ func TestEffectiveWindowsHookConnectorsFiltersUnsupported(t *testing.T) {
 	}
 }
 
+// Standalone preflight accepts Claude Code's established aliases, so the
+// enumerator must produce the canonical row for each spelling. An explicit
+// map disable still wins over a differently spelled scalar.
+func TestEffectiveWindowsStandaloneHookConnectorsCanonicalizeClaudeAliases(t *testing.T) {
+	disabled := false
+	for _, alias := range []string{"claude-code", "claude_code", "Claude-Code"} {
+		t.Run(alias, func(t *testing.T) {
+			cfg := &config.Config{Guardrail: config.GuardrailConfig{Connector: alias}}
+			if got := EffectiveWindowsStandaloneHookConnectors(cfg); len(got) != 1 || got[0] != "claudecode" {
+				t.Fatalf("%s enrollment = %v", alias, got)
+			}
+		})
+	}
+	cfg := &config.Config{Guardrail: config.GuardrailConfig{
+		Connector: "claude-code",
+		Connectors: map[string]config.PerConnectorGuardrailConfig{
+			"claudecode": {Enabled: &disabled},
+		},
+	}}
+	if got := EffectiveWindowsStandaloneHookConnectors(cfg); len(got) != 0 {
+		t.Fatalf("disabled canonical entry was re-enabled by alias: %v", got)
+	}
+}
+
+// GAP-0904: a connector named only under enterprise.machine_policy.connectors
+// was in the policy verifier's roster (enterprisepolicy.StandaloneConnectors)
+// but not in the Windows runtime roster, so with no enrolled user its machine
+// hook was never published and enterprise windows verify could still pass.
+// The standalone roster now counts it, unless guardrail.connectors turns it
+// off; a config that is not standalone does not.
+func TestEffectiveWindowsStandaloneHookConnectorsCountMachinePolicyMapConnectors(t *testing.T) {
+	disabled := false
+	standalone := func(guardrail map[string]config.PerConnectorGuardrailConfig, mapped ...string) *config.Config {
+		cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+		cfg.Enterprise.Profile = managed.ProfileStandalone
+		cfg.Guardrail.Connectors = guardrail
+		cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{}
+		for _, name := range mapped {
+			cfg.Enterprise.MachinePolicy.Connectors[name] = config.EnterpriseConnectorPolicy{}
+		}
+		return cfg
+	}
+	for _, tc := range []struct {
+		name string
+		cfg  *config.Config
+		want []string
+	}{
+		{name: "Claude Code named only in the machine-policy map", want: []string{"claudecode", "codex"},
+			cfg: standalone(map[string]config.PerConnectorGuardrailConfig{"codex": {}}, "claudecode")},
+		{name: "every machine-hook connector named only in the map", want: []string{"claudecode", "codex", "cursor"},
+			cfg: standalone(nil, "claudecode", "codex", "cursor")},
+		{name: "a map entry the guardrail turns off", want: []string{"codex"},
+			cfg: standalone(map[string]config.PerConnectorGuardrailConfig{"codex": {}, "claudecode": {Enabled: &disabled}}, "claudecode")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := EffectiveWindowsStandaloneHookConnectors(tc.cfg); strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("standalone roster = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	notStandalone := &config.Config{Guardrail: config.GuardrailConfig{Connectors: map[string]config.PerConnectorGuardrailConfig{"codex": {}}}}
+	notStandalone.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"claudecode": {}}
+	if got := EffectiveWindowsStandaloneHookConnectors(notStandalone); strings.Join(got, ",") != "codex" {
+		t.Fatalf("a config that is not standalone counted its map entries: %v", got)
+	}
+}
+
 func prepareWindowsTargetsManifestTestDirectory(t *testing.T) string {
 	t.Helper()
 	originalAncestorTrust := windowsTargetsManifestAncestorTrust
@@ -211,6 +280,35 @@ func prepareWindowsTargetsManifestTestDirectory(t *testing.T) string {
 		t.Fatalf("protect manifest test directory: %v", err)
 	}
 	return dir
+}
+
+// The trust walk keeps the named folder's verdicts fatal, so the manifest
+// folder must already be re-stamped when it runs; otherwise drift the repair
+// exists to fix would refuse the write.
+func TestWriteTargetsManifestAtomicRepairsParentBeforeTrustWalk(t *testing.T) {
+	dir := t.TempDir() // inherits the profile's descriptor: drifted
+	if validateWindowsTargetsManifestObject(dir, true) == nil {
+		t.Skip("temp folder already carries the AdminDirectory contract")
+	}
+	var canonicalAtTrust []bool
+	originalAncestorTrust := windowsTargetsManifestAncestorTrust
+	windowsTargetsManifestAncestorTrust = func(path string) error {
+		canonicalAtTrust = append(canonicalAtTrust, validateWindowsTargetsManifestObject(path, true) == nil)
+		return nil
+	}
+	t.Cleanup(func() { windowsTargetsManifestAncestorTrust = originalAncestorTrust })
+
+	if _, err := WriteTargetsManifestAtomic(filepath.Join(dir, "targets.yaml"), Manifest{Version: 1}); err != nil {
+		t.Fatalf("write manifest into a drifted folder: %v", err)
+	}
+	if len(canonicalAtTrust) == 0 {
+		t.Fatal("trust walk never ran")
+	}
+	for i, canonical := range canonicalAtTrust {
+		if !canonical {
+			t.Fatalf("trust walk %d ran before the folder was repaired", i)
+		}
+	}
 }
 
 func windowsTargetsManifestDescriptor(t *testing.T, path string) string {
@@ -307,7 +405,7 @@ func TestValidateWindowsTargetsManifestObjectRejectsGenericSplitDirectoryDACL(t 
 	}
 }
 
-// TestWriteTargetsManifestAtomicNoOpNoWrite pins spec 005 REQ-05: a
+// TestWriteTargetsManifestAtomicNoOpNoWrite pins the no-op-no-write rule: a
 // byte-identical manifest must not touch the on-disk file. This is
 // the CORE property that prevents guardian fsnotify wakes every 5-min
 // tick on a stable box. If regressions land here, the test-fixture's
@@ -511,13 +609,47 @@ func TestWriteTargetsManifestAtomicRejectsHardLinkedDestination(t *testing.T) {
 }
 
 // TestApplyPreviousRowStatePreservesAgentVersion asserts the
-// AgentVersion + Enabled + Deferred preservation invariant spec
-// 005 REQ-08's design says: a row that already exists in the file
+// AgentVersion + Enabled + Deferred preservation invariant: a row that already exists in the file
 // keeps its agent_version + enabled state across enumeration
 // cycles. A NEW row is auto-authorized at the per-user CLI's
 // discovered version (macOS parity) — or dropped entirely if no
 // per-user CLI is present.
-func TestApplyPreviousRowStatePreservesAgentVersion(t *testing.T) {
+func TestApplyPreviousRowStateRefreshesVersionAndPreservesAuthorization(t *testing.T) {
+	// Secure Client follows the discovered version (#1163).
+	useWindowsSecureClientForTest(t)
+	enabled := true
+	previous := map[string]ManifestTarget{
+		previousManifestKey("S-1-5-21-1000-2000-3000-1001", "codex"): {
+			SID:          "S-1-5-21-1000-2000-3000-1001",
+			Connector:    "codex",
+			AgentVersion: "0.145.0",
+			Enabled:      &enabled,
+			Deferred:     true,
+		},
+	}
+
+	// Match: preserve AgentVersion + Enabled + Deferred.
+	matched := ManifestTarget{
+		SID:       "s-1-5-21-1000-2000-3000-1001", // deliberate case
+		Connector: "codex",
+	}
+	if !applyPreviousRowState(&matched, previous, nil) {
+		t.Fatal("existing-row emission signal: want true, got false")
+	}
+	if matched.AgentVersion != "" {
+		t.Fatalf("stale version survived unavailable discovery: %q", matched.AgentVersion)
+	}
+	if matched.Enabled == nil || !*matched.Enabled {
+		t.Fatal("existing-row Enabled=true not preserved")
+	}
+	if !matched.Deferred {
+		t.Fatal("existing-row Deferred=true not preserved")
+	}
+}
+
+func TestApplyPreviousRowStatePreservesAgentVersionOutsideSecureClient(t *testing.T) {
+	// Outside Secure Client the recorded version is kept (origin/main).
+	setStandaloneProfileForTest(t, true)
 	enabled := true
 	previous := map[string]ManifestTarget{
 		previousManifestKey("S-1-5-21-1000-2000-3000-1001", "codex"): {
@@ -578,6 +710,62 @@ func TestApplyPreviousRowStateAutoAuthorizesNewRowWithDiscoverableCLI(t *testing
 	}
 }
 
+func TestApplyPreviousRowStateCursorHomeStateWithoutVersion(t *testing.T) {
+	// Presence-only admission is the Secure Client fallback (#1163).
+	useWindowsSecureClientForTest(t)
+	isolateWindowsCursorMachineVersion(t)
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".cursor", "extensions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The executable is outside all known installation roots. Home state is
+	// sufficient to discover a target, but must not invent a version.
+	fresh := ManifestTarget{
+		SID:       "S-1-5-21-9999-8888-7777-1001",
+		UserHome:  home,
+		Connector: "cursor",
+	}
+	if !applyPreviousRowState(&fresh, nil, nil) {
+		t.Fatal("Cursor home-state target was dropped without version metadata")
+	}
+	if fresh.AgentVersion != "" || !fresh.IsEnabled() || fresh.Deferred {
+		t.Fatalf("unexpected target disposition: version=%q enabled=%t deferred=%t", fresh.AgentVersion, fresh.IsEnabled(), fresh.Deferred)
+	}
+
+	disabled := false
+	previous := map[string]ManifestTarget{
+		previousManifestKey(fresh.SID, fresh.Connector): {
+			SID: fresh.SID, Connector: fresh.Connector,
+			AgentVersion: "3.21.16", Enabled: &disabled, Deferred: true,
+		},
+	}
+	if !applyPreviousRowState(&fresh, previous, nil) {
+		t.Fatal("existing Cursor target was dropped")
+	}
+	if fresh.AgentVersion != "" || fresh.IsEnabled() || !fresh.Deferred {
+		t.Fatal("home-state discovery changed prior authorization or retained stale version evidence")
+	}
+}
+
+// Outside Secure Client a newly discovered target without version evidence
+// is dropped even when the profile shows the agent is present.
+func TestApplyPreviousRowStateDropsCursorHomeStateWithoutVersionOutsideSecureClient(t *testing.T) {
+	setStandaloneProfileForTest(t, true)
+	isolateWindowsCursorMachineVersion(t)
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".cursor", "extensions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fresh := ManifestTarget{
+		SID:       "S-1-5-21-9999-8888-7777-1001",
+		UserHome:  home,
+		Connector: "cursor",
+	}
+	if applyPreviousRowState(&fresh, nil, nil) {
+		t.Fatalf("unversioned Cursor target was admitted outside Secure Client: %+v", fresh)
+	}
+}
+
 // TestApplyPreviousRowStateDropsNewRowWithoutDiscoverableCLI pins
 // the macOS-parity silent-skip: a newly-discovered (SID, Connector)
 // whose per-user profile has NO supported CLI is dropped entirely.
@@ -606,6 +794,34 @@ func TestLoadPreviousManifestForEnumerationHandlesMissingFile(t *testing.T) {
 	got := loadPreviousManifestForEnumeration(path, nil)
 	if got != nil {
 		t.Fatalf("missing file: got non-nil map (len=%d); want nil", len(got))
+	}
+}
+
+// An enabled row with no agent_version fails validation while the Secure
+// Client deployment check fails. The enumerator must still keep every row's
+// recorded state, so an operator-disabled row stays disabled.
+func TestLoadPreviousManifestForEnumerationKeepsStateOnValidationFailure(t *testing.T) {
+	saved := secureClientHookDeliveryHost
+	secureClientHookDeliveryHost = false
+	t.Cleanup(func() { secureClientHookDeliveryHost = saved })
+	const sid = "S-1-5-21-1111-2222-3333-1001"
+	path := filepath.Join(t.TempDir(), "targets.yaml")
+	body := "version: 1\ntargets:\n" +
+		"  - sid: " + sid + "\n    user_home: 'C:\\Users\\tester'\n    connector: codex\n    enabled: true\n" +
+		"  - sid: " + sid + "\n    user_home: 'C:\\Users\\tester'\n    connector: cursor\n    enabled: false\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadManifest(path); err == nil || !strings.Contains(err.Error(), "requires explicit agent_version") {
+		t.Fatalf("LoadManifest = %v, want the agent_version refusal this test depends on", err)
+	}
+	got := loadPreviousManifestForEnumeration(path, nil)
+	cursor, ok := got[previousManifestKey(sid, "cursor")]
+	if !ok || cursor.Enabled == nil || *cursor.Enabled {
+		t.Fatalf("cursor row = %+v (found %v), want the recorded enabled: false", cursor, ok)
+	}
+	if codex, ok := got[previousManifestKey(sid, "codex")]; !ok || codex.Enabled == nil || !*codex.Enabled {
+		t.Fatalf("codex row = %+v (found %v), want the recorded enabled: true", codex, ok)
 	}
 }
 
@@ -676,7 +892,7 @@ func TestEnumerateWindowsEmptyConnectorsReturnsEmptyManifest(t *testing.T) {
 }
 
 // TestEnumerateWindowsHonoursCancelledContext asserts the cycle-
-// timeout invariant CR spec-005:PRRT_kwDORuAK-s6atyfD asks for: a
+// timeout invariant: a
 // ctx that's already cancelled returns immediately without touching
 // the registry / filesystem. Belt-and-braces on top of the per-row
 // ctx.Err() checks; a cancelled ctx at ENTRY must never proceed.
@@ -737,7 +953,6 @@ func TestWindowsEnrollmentAccountLookupIsBounded(t *testing.T) {
 		windowsEnrollmentLookupAccountSID, windowsEnrollmentLookupTimeout, windowsEnrollmentLookupBudget = previous, previousTimeout, previousBudget
 	})
 	release := make(chan struct{})
-	defer close(release)
 	windowsEnrollmentLookupAccountSID = func(string) (string, string, error) {
 		<-release
 		return "alice", "CONTOSO", nil
@@ -753,6 +968,8 @@ func TestWindowsEnrollmentAccountLookupIsBounded(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("ten hung lookups took %s; the cycle budget must bound them", elapsed)
 	}
+	close(release)
+	waitIdentityLookupGateIdle(t, &windowsEnrollmentAccountLookupGate)
 
 	// The lookup budget counts only time spent waiting on lookups. Probing the
 	// profiles before a lookup (package manifests, executables) must not use it
@@ -1062,11 +1279,19 @@ func TestEnumerateWindowsDisabledLocalAccountIsNotReportedUnprotected(t *testing
 	for _, tc := range []struct {
 		disabled      bool
 		sessionActive bool
-		wantReported  int
+		// disconnected: the account keeps a disconnected session, which
+		// can still start its agents (GAP-1463).
+		disconnected bool
+		// running is an agent of a connector that is not enabled: it does
+		// not keep the warning (GAP-0673).
+		running      map[string]map[string]string
+		wantReported int
 	}{
 		{disabled: true, sessionActive: false, wantReported: 0},
 		{disabled: false, sessionActive: false, wantReported: 1},
 		{disabled: true, sessionActive: true, wantReported: 1},
+		{disabled: true, disconnected: true, wantReported: 1},
+		{disabled: true, running: map[string]map[string]string{testLocalUserSID: {"cursor": "cursor (pid 9)"}}, wantReported: 0},
 	} {
 		windowsLocalAccountDisabled = func(string) (bool, error) { return tc.disabled, nil }
 		sessions := map[string][]string{}
@@ -1074,15 +1299,51 @@ func TestEnumerateWindowsDisabledLocalAccountIsNotReportedUnprotected(t *testing
 			sessions[testLocalUserSID] = []string{}
 		}
 		stubActiveSessions(t, sessions)
+		if tc.disconnected {
+			stubSignedInSessions(t, testLocalUserSID)
+		}
 		var reported []UnprotectedAgent
 		if _, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("claudecode"), EnumerateOptions{
+			RunningAgents:     tc.running,
 			ReportUnprotected: func(agent UnprotectedAgent) { reported = append(reported, agent) },
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if len(reported) != tc.wantReported {
-			t.Fatalf("disabled=%v sessionActive=%v: reported %+v, want %d", tc.disabled, tc.sessionActive, reported, tc.wantReported)
+			t.Fatalf("disabled=%v sessionActive=%v disconnected=%v running=%v: reported %+v, want %d",
+				tc.disabled, tc.sessionActive, tc.disconnected, tc.running, reported, tc.wantReported)
 		}
+	}
+}
+
+// A session list that cannot be read keeps a disabled account's warning: it
+// may still have a session (GAP-1463).
+func TestEnumerateWindowsDisabledAccountKeepsItsWarningWhenSessionsAreUnreadable(t *testing.T) {
+	stubMachineWinGet(t, nil)
+	previousDomain, previousDisabled := windowsMachineAccountDomainSID, windowsLocalAccountDisabled
+	t.Cleanup(func() { windowsMachineAccountDomainSID, windowsLocalAccountDisabled = previousDomain, previousDisabled })
+	windowsMachineAccountDomainSID = func() (string, error) { return testMachineDomainSID, nil }
+	windowsLocalAccountDisabled = func(string) (bool, error) { return true, nil }
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".local", "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".local", "bin", "claude.exe"), []byte("MZ"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	injectWindowsProfileList(t, map[string]string{testLocalUserSID: home})
+	stubActiveSessions(t, map[string][]string{})
+	previousSignedIn := windowsSignedInSessionUsers
+	t.Cleanup(func() { windowsSignedInSessionUsers = previousSignedIn })
+	windowsSignedInSessionUsers = func() (map[string]bool, error) { return nil, errors.New("access denied") }
+	var reported []UnprotectedAgent
+	if _, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("claudecode"), EnumerateOptions{
+		ReportUnprotected: func(agent UnprotectedAgent) { reported = append(reported, agent) },
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(reported) != 1 {
+		t.Fatalf("reported %+v, want the disabled account's Claude Code kept", reported)
 	}
 }
 
@@ -1104,5 +1365,123 @@ func TestWindowsDeletedLocalAccountNeedsANoneMappedLocalSID(t *testing.T) {
 	}
 	if windowsDeletedLocalAccount("S-1-5-21-111-222-333-1104", noneMapped) {
 		t.Fatal("a domain account was judged deleted")
+	}
+}
+
+// stubWindowsSessionAPI replaces the session list with sessions; tokens
+// maps a session id to its user SID, and tokenErrs and userErrs to the error
+// of reading its token or the token's user. It counts the tokens closed.
+func stubWindowsSessionAPI(t *testing.T, sessions []windowsSession, tokens map[uint32]string, tokenErrs, userErrs map[uint32]error) *int {
+	t.Helper()
+	previous := windowsSessionAPI
+	t.Cleanup(func() { windowsSessionAPI = previous })
+	closed := 0
+	windowsSessionAPI.list = func() ([]windowsSession, error) { return sessions, nil }
+	windowsSessionAPI.userToken = func(id uint32) (windows.Token, error) {
+		if err := tokenErrs[id]; err != nil {
+			return 0, err
+		}
+		return windows.Token(id + 1000), nil
+	}
+	windowsSessionAPI.tokenUser = func(token windows.Token) (string, error) {
+		id := uint32(token) - 1000
+		if err := userErrs[id]; err != nil {
+			return "", err
+		}
+		return tokens[id], nil
+	}
+	windowsSessionAPI.tokenGroups = func(windows.Token) ([]string, error) { return []string{}, nil }
+	windowsSessionAPI.close = func(windows.Token) { closed++ }
+	return &closed
+}
+
+// W2B-G-enum review loop 1: a session whose user token or token user could
+// not be read was skipped without an error, so a disabled account with a
+// disconnected session counted as signed out and its agent_unprotected
+// warning was dropped. The reader now says the answer is incomplete, and the
+// account keeps its warning. Session 0 and a session nobody is signed in to
+// (ERROR_NO_TOKEN) are not users and keep the answer complete.
+func TestReadWindowsSignedInSessionUsersReportsASessionItCannotIdentify(t *testing.T) {
+	base := []windowsSession{
+		{id: 0, state: windows.WTSDisconnected},
+		{id: 1, state: windows.WTSActive},
+		{id: 2, state: windows.WTSConnected},
+		{id: 3, state: windows.WTSActive},
+	}
+	tokens := map[uint32]string{1: testLocalUserSID}
+	tokenErrs := map[uint32]error{0: windows.ERROR_ACCESS_DENIED, 2: windows.ERROR_ACCESS_DENIED, 3: windows.ERROR_NO_TOKEN}
+	closed := stubWindowsSessionAPI(t, base, tokens, tokenErrs, nil)
+	users, err := readWindowsSignedInSessionUsers()
+	if err != nil || len(users) != 1 || !users[canonicalManifestTargetSID(testLocalUserSID)] || *closed != 1 {
+		t.Fatalf("complete answer: users %v, err %v, tokens closed %d; want the one user, no error, one token closed", users, err, *closed)
+	}
+	for _, tc := range []struct {
+		name      string
+		session   windowsSession
+		tokenErr  error
+		userErr   error
+		wantClose int
+	}{
+		{name: "token unreadable", session: windowsSession{id: 4, state: windows.WTSDisconnected}, tokenErr: windows.ERROR_ACCESS_DENIED, wantClose: 1},
+		{name: "token user unreadable", session: windowsSession{id: 5, state: windows.WTSActive}, userErr: windows.ERROR_INVALID_HANDLE, wantClose: 2},
+	} {
+		tokenErrs := map[uint32]error{0: windows.ERROR_ACCESS_DENIED, 2: windows.ERROR_ACCESS_DENIED, 3: windows.ERROR_NO_TOKEN, tc.session.id: tc.tokenErr}
+		closed := stubWindowsSessionAPI(t, append(slices.Clone(base), tc.session), tokens, tokenErrs, map[uint32]error{tc.session.id: tc.userErr})
+		users, err := readWindowsSignedInSessionUsers()
+		if !errors.Is(err, errWindowsSessionsUnidentified) || !users[canonicalManifestTargetSID(testLocalUserSID)] || *closed != tc.wantClose {
+			t.Fatalf("%s: users %v, err %v, tokens closed %d; want the identified user, an incomplete-answer error and %d closed",
+				tc.name, users, err, *closed, tc.wantClose)
+		}
+		// The active-session groups keep the sessions they could read, and
+		// say when an active session's user was not identified.
+		groups, err := readWindowsActiveSessionGroups()
+		if _, ok := groups[canonicalManifestTargetSID(testLocalUserSID)]; !ok || errors.Is(err, errWindowsSessionsUnidentified) != (tc.session.state == windows.WTSActive) {
+			t.Fatalf("%s: active-session groups %v, err %v", tc.name, groups, err)
+		}
+	}
+}
+
+// The same, through the enumerator: a disabled account keeps its warning
+// while a session's user cannot be identified.
+func TestEnumerateWindowsDisabledAccountKeepsItsWarningWhenASessionIsUnidentified(t *testing.T) {
+	stubMachineWinGet(t, nil)
+	previousDomain, previousDisabled, previousSignedIn := windowsMachineAccountDomainSID, windowsLocalAccountDisabled, windowsSignedInSessionUsers
+	t.Cleanup(func() {
+		windowsMachineAccountDomainSID, windowsLocalAccountDisabled, windowsSignedInSessionUsers = previousDomain, previousDisabled, previousSignedIn
+	})
+	windowsMachineAccountDomainSID = func() (string, error) { return testMachineDomainSID, nil }
+	windowsLocalAccountDisabled = func(string) (bool, error) { return true, nil }
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".local", "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".local", "bin", "claude.exe"), []byte("MZ"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	injectWindowsProfileList(t, map[string]string{testLocalUserSID: home})
+	stubActiveSessions(t, map[string][]string{})
+	// stubActiveSessions stubs the signed-in reader too; this test reads the
+	// sessions through the real reader over the stubbed session API
+	// (GAP-0921).
+	windowsSignedInSessionUsers = readWindowsSignedInSessionUsers
+	for _, tc := range []struct {
+		name     string
+		tokenErr error
+		want     int
+	}{
+		{name: "no user signed in to the session", tokenErr: windows.ERROR_NO_TOKEN, want: 0},
+		{name: "session user unreadable", tokenErr: windows.ERROR_ACCESS_DENIED, want: 1},
+	} {
+		stubWindowsSessionAPI(t, []windowsSession{{id: 2, state: windows.WTSDisconnected}}, nil, map[uint32]error{2: tc.tokenErr}, nil)
+		var reported []UnprotectedAgent
+		if _, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("claudecode"), EnumerateOptions{
+			Logger:            func(subject, reason string) { t.Logf("%s: %s: %s", tc.name, subject, reason) },
+			ReportUnprotected: func(agent UnprotectedAgent) { reported = append(reported, agent) },
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if len(reported) != tc.want {
+			t.Fatalf("%s: reported %+v, want %d", tc.name, reported, tc.want)
+		}
 	}
 }

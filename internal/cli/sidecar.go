@@ -33,11 +33,12 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/ipc"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 // configurationPollInterval is how often the sidecar re-reads the
-// guardian's out-of-band state file. Spec 003 tolerates a lag up to
+// guardian's out-of-band state file. The health surface tolerates a lag up to
 // one interval between a guardian-side transition and the health
 // surface reflecting it; 5s is short enough for a Secure Client UI to
 // update in near-real-time without burning IO on non-managed
@@ -64,11 +65,28 @@ func init() {
 	rootCmd.Flags().IntVar(&sidecarPort, "port", 0, "Gateway port (default: from config)")
 }
 
+// sidecarScannerRuntimeStartProblem is the scanner runtime trust check made
+// before the gateway starts; a seam for tests.
+var sidecarScannerRuntimeStartProblem = scanner.StandaloneRuntimeStartProblem
+
+// sidecarRaisePriority is sidecarAnswerAtHookPriority; the package's tests
+// replace it, so a test that runs the sidecar does not raise the class of the
+// test binary, and of every test after it (GAP-0079).
+var sidecarRaisePriority = sidecarAnswerAtHookPriority
+
 func runSidecar(cmd *cobra.Command, _ []string) error {
+	// A Windows gateway answers at its hooks' priority class (GAP-0050).
+	sidecarRaisePriority()
 	// A detached gateway's gateway.log lines carry a time (GAP-1319). The
 	// root pre-run usually started the stamper already (GAP-2109).
 	startDaemonLogStamp()
 	defer stopDaemonLogStamp()
+	// Before anything starts: a standalone Windows gateway runs the scanner
+	// Python tree as its service account on every scan, so it fails closed
+	// on a tree that fails the trust check (GAP-0490).
+	if err := sidecarScannerRuntimeStartProblem(); err != nil {
+		return fmt.Errorf("sidecar: %w", err)
+	}
 	// Before any outbound client exists: a standalone gateway routes its
 	// outbound clients through enterprise.network.
 	if err := applyStandaloneEgress(cfg); err != nil {
@@ -118,8 +136,7 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("sidecar: init: %w", err)
 	}
 
-	// Spec 003 (docs/specs/003-windows-deferred-config/) health-surface
-	// wiring. Only under managed_enterprise: mark the daemon-side of
+	// Deferred-config health-surface wiring. Only under managed_enterprise: mark the daemon-side of
 	// the collapsing rule loaded (we reached this point AFTER
 	// loadGatewayConfigV8 succeeded — either directly or via the wait
 	// loop in rootPersistentPreRunE), wire the sidecar's guardian
@@ -217,7 +234,7 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 		}
 	}()
 
-	// Spec 003 periodic guardian-state poller. Only under
+	// Periodic guardian-state poller. Only under
 	// managed_enterprise (SetDaemonConfigLoaded was called only in
 	// that branch above; RefreshConfiguration is a cheap no-op when
 	// SidecarHealth's configuration pointer is still nil, so this
@@ -385,6 +402,10 @@ func watcherBannerLines(cfg *config.Config) []string {
 		return []string{"  Watcher:      disabled"}
 	case !gateway.WatcherWatchesDirs(cfg):
 		return []string{"  Watcher:      idle (no directories to watch)"}
+	case gateway.WatcherAdmitsOnlyHookReportedMCP(cfg):
+		// The service cannot read the users homes; it scans the MCP servers
+		// their hooks report (GAP-2591), so no skill folder line.
+		return []string{"  Watcher:      enabled (MCP servers the hooks report)"}
 	default:
 		lines = []string{"  Watcher:      enabled"}
 	}

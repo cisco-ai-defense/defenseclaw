@@ -92,6 +92,10 @@ type ExecOptions struct {
 	// its output open the client gives up ClientOptions.ExecGrace after
 	// the timeout instead.
 	Timeout time.Duration
+	// NoSandboxTimeout sends the executable directly. The client still
+	// bounds the RPC, but cannot stop the guest process. Use only for a
+	// command that terminates itself when the image's timeout tool is not trusted.
+	NoSandboxTimeout bool
 	// Attempts is the total number of tries (default DefaultExecAttempts,
 	// or DefaultIdempotentExecAttempts for an Idempotent command). An
 	// attempt whose stream could not be opened because the gateway was
@@ -187,7 +191,10 @@ func (c *client) Exec(ctx context.Context, sandbox string, argv []string, opts E
 		return nil, errors.New("openshell: exec needs a command")
 	}
 	opts = opts.withDefaults()
-	wrapped := SandboxTimeoutArgv(argv, opts.Timeout)
+	wrapped := argv
+	if !opts.NoSandboxTimeout {
+		wrapped = SandboxTimeoutArgv(argv, opts.Timeout)
+	}
 	delay := opts.RetryDelay
 	var lastErr error
 	for attempt := 1; attempt <= opts.Attempts; attempt++ {
@@ -293,8 +300,10 @@ func (c *client) execOnce(parent context.Context, sandbox string, argv []string,
 	if err != nil {
 		return failed(err)
 	}
-	if err := SandboxExitError(code, res.Stderr, time.Since(start), opts.Timeout); err != nil {
-		return nil, attemptStarted, err
+	if !opts.NoSandboxTimeout {
+		if err := SandboxExitError(code, res.Stderr, time.Since(start), opts.Timeout); err != nil {
+			return nil, attemptStarted, err
+		}
 	}
 	res.ExitCode = code
 	return res, attemptStarted, nil

@@ -62,7 +62,7 @@ func (a *App) acceptChanges(ctx context.Context, api API, sb *sandboxapi.Sandbox
 // start` (session false) says how to accept them with --new-snapshot
 // instead.
 func (a *App) startSandbox(ctx context.Context, api API, sb *sandboxapi.Sandbox, o StartOptions, session bool) (*sandboxapi.Sandbox, bool, error) {
-	req := sandboxapi.StartRequest{NoSnapshot: o.NoSnapshot, NewSnapshot: o.NewSnapshot, LLM: a.currentModelCredential(sb)}
+	req := sandboxapi.StartRequest{NoSnapshot: o.NoSnapshot, NewSnapshot: o.NewSnapshot, EndVM: o.EndVM, LLM: a.currentModelCredential(sb)}
 	// The session can change the copy: what it held as the sandbox stopped
 	// is not known after this (a start that fails may still have started
 	// it).
@@ -89,15 +89,17 @@ func (a *App) startSandbox(ctx context.Context, api API, sb *sandboxapi.Sandbox,
 // a copy, a harness it no longer allows) can only be deleted and run
 // again.
 func (a *App) startError(ctx context.Context, api API, sb *sandboxapi.Sandbox, err error) error {
-	msg := apiError(err).Error()
+	// Connect needs the code to distinguish another command's start race
+	// from a refusal. Keep the typed error beneath any recovery hint.
+	problem := apiError(err)
 	var e *sandboxapi.Error
 	if errors.As(err, &e) && e.Violation != nil {
 		switch e.Violation.Key {
 		case "workdir.mode", "harness", "harness.allowed":
-			return fmt.Errorf("%s; delete it (`%s delete %s`) and run it again", msg, CommandName, sb.Name)
+			return fmt.Errorf("%w; delete it (`%s delete %s`) and run it again", problem, CommandName, sb.Name)
 		}
 	}
-	return a.landlockHint(errors.New(msg), func() openshell.Driver { return statusDriver(ctx, api) })
+	return a.landlockHint(problem, func() openshell.Driver { return statusDriver(ctx, api) })
 }
 
 // keptUndoPoint reports whether a start kept the undo point it found: the

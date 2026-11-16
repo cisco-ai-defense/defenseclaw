@@ -53,8 +53,10 @@ func TestSessionsThatPredateTheEnforcingControlsAreReported(t *testing.T) {
 		observed[0] != (Observed{UID: 1001, Reason: ReasonPredatesControls, Connector: "claudecode", Count: 1}) {
 		t.Fatalf("warning %q observed %+v", warning, observed)
 	}
-	if state := userState(h, 1001); state.State != UIDEnforcing {
-		t.Fatalf("alice = %+v; new sessions are still denied", state)
+	// Her only session is not anchored, so nothing of hers is denied now:
+	// she is armed, not enforcing (GAP-0166); a new session is denied.
+	if state := userState(h, 1001); state.State != UIDArmed {
+		t.Fatalf("alice = %+v; want armed until a session is anchored", state)
 	}
 	// The old session ends, a new one starts: it is marked at its start.
 	h.procs = []Proc{nativeProc(4010, 1, 300, 1001, aliceClaudeNew), codexProc(5001, 1, 120, 1002)}

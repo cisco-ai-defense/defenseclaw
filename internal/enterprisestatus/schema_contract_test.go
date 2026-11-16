@@ -82,6 +82,8 @@ func sampleResults() map[string]*Result {
 		{Name: "local-sqlite", Kind: "local_sqlite", Enabled: true, Signals: []string{"logs"}, RedactionProfiles: []string{"none"}},
 		{Name: "galileo", Kind: "otlp", Enabled: true, Preset: "galileo", Signals: []string{"traces"}, RedactionProfiles: []string{"strict"}},
 	}
+	storeBytes := int64(3 << 20)
+	installed.AuditStore = &AuditStore{RetentionDays: 7, MaxStoreMB: 64, SizeBytes: &storeBytes}
 	installed.CoverageComplete = true
 	installed.SecurityComplete = true
 	installed.AddWarning("not_started", "installed with --no-start")
@@ -241,6 +243,9 @@ func TestLifecycleSchemaDescribesEveryField(t *testing.T) {
 		"readiness":     {reflect.TypeOf(Readiness{}), properties["readiness"].(map[string]any)},
 		"inspection":    {reflect.TypeOf(Inspection{}), properties["inspection"].(map[string]any)},
 		"enrollment":    {reflect.TypeOf(Enrollment{}), properties["enrollment"].(map[string]any)},
+		"healthReport":  {reflect.TypeOf(HealthReportState{}), defs["healthReport"].(map[string]any)},
+		"healthReportDelivery": {reflect.TypeOf(HealthReportDelivery{}),
+			defs["healthReport"].(map[string]any)["properties"].(map[string]any)["delivery"].(map[string]any)},
 	}
 	for name, object := range objects {
 		var fields, required []string

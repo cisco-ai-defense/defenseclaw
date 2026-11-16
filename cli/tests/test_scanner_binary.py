@@ -99,7 +99,7 @@ class ScannerCommandIntegrationTests(unittest.TestCase):
     def test_doctor_executes_resolved_managed_skill_launcher(self, _resolve_binary, _lexists, mock_run):
         mock_run.return_value = SimpleNamespace(
             returncode=0,
-            stdout="skill-scanner 2.2.1\n",
+            stdout="skill-scanner 2.3.2\n",
             stderr="",
         )
         cfg = SimpleNamespace(
@@ -117,7 +117,7 @@ class ScannerCommandIntegrationTests(unittest.TestCase):
             r"C:\managed\.venv\Scripts\skill-scanner.exe",
             result.checks[0]["detail"],
         )
-        self.assertIn("cisco-ai-skill-scanner 2.2.1", result.checks[0]["detail"])
+        self.assertIn("cisco-ai-skill-scanner 2.3.2", result.checks[0]["detail"])
         mock_run.assert_called_once()
         self.assertEqual(
             mock_run.call_args.args[0],
@@ -126,7 +126,7 @@ class ScannerCommandIntegrationTests(unittest.TestCase):
         # MCP scans run the SDK in this environment (defenseclaw mcp scan),
         # so doctor checks its installed version, not a mcp-scanner launcher.
         self.assertEqual(result.checks[1]["status"], "pass")
-        self.assertIn("cisco-ai-mcp-scanner 4.3.0", result.checks[1]["detail"])
+        self.assertIn("cisco-ai-mcp-scanner 4.8.7", result.checks[1]["detail"])
         # GAP-0073: the LiteLLM both scanners call has its own row.
         litellm_row = next(check for check in result.checks if check["label"] == "Scanner: litellm")
         self.assertEqual(litellm_row["status"], "pass")

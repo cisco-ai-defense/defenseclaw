@@ -80,7 +80,7 @@ func wrapWords(text string, width int, hang string) []string {
 			rest = rest[len(sep):]
 			if started && curLen+visibleLen(word) > width {
 				out = append(out, strings.TrimRight(cur, " "))
-				cur, curLen, started = hang, visibleLen(hang), false
+				cur, curLen = hang, visibleLen(hang)
 			}
 			cur += word
 			curLen += visibleLen(word)

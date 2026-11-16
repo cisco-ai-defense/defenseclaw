@@ -24,7 +24,10 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/peercred"
 )
@@ -166,7 +169,7 @@ func TestStatusAndVerifyRepeatGatewayAssignmentAndDestinationWarnings(t *testing
 	}
 	for _, action := range []string{ActionStatus, ActionVerify} {
 		result := h.run(Options{Action: action})
-		if !hasWarning(result, codeProfileAssignments) || !hasWarning(result, codeOptionalDestination) {
+		if !hasWarning(result, codeProfileAssignment) || !hasWarning(result, codeOptionalDestination) {
 			t.Fatalf("%s warnings = %+v", action, result.Warnings)
 		}
 	}
@@ -175,7 +178,7 @@ func TestStatusAndVerifyRepeatGatewayAssignmentAndDestinationWarnings(t *testing
 	h.env.HealthGet = func(context.Context) (int, []byte, error) {
 		return 200, []byte(`{"api":{"state":"running"},"profile_assignment_warning_count":2,"profile_warning_count":2}`), nil
 	}
-	if got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeProfileAssignments); !strings.Contains(got,
+	if got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeProfileAssignment); !strings.Contains(got,
 		"2 guardrail profile assignment warning(s) are not listed") || !strings.Contains(got, "profile-explain --user") {
 		t.Fatalf("withheld assignment warnings = %q", got)
 	}
@@ -347,7 +350,7 @@ func TestRefusedEnsureLabelsTheRunningDeploymentAdvisories(t *testing.T) {
 	}
 	r := h.run(Options{Action: ActionEnsure, ConfigFile: bad})
 	requireError(t, r, codeConfig)
-	got := messagesOf(r.Warnings, codeProfileAssignments)
+	got := messagesOf(r.Warnings, codeProfileAssignment)
 	if !strings.HasPrefix(got, runningDeploymentPrefix) || !strings.Contains(got, `group "dc-sbx-*"`) {
 		t.Fatalf("the active config's advisory is not labelled as the running deployment's: %q", got)
 	}
@@ -359,15 +362,15 @@ func TestRefusedEnsureLabelsTheRunningDeploymentAdvisories(t *testing.T) {
 	}
 	// A successful status of the same host keeps the plain wording.
 	status := h.run(Options{Action: ActionStatus})
-	if got := messagesOf(status.Warnings, codeProfileAssignments); strings.Contains(got, runningDeploymentPrefix) || status.ConfigRefused {
+	if got := messagesOf(status.Warnings, codeProfileAssignment); strings.Contains(got, runningDeploymentPrefix) || status.ConfigRefused {
 		t.Fatalf("status is labelled as a refused run: %q", got)
 	}
 }
 
 // Enabled AI Defense that fails (a rejected key) leaves the local engine
 // deciding, so status stays ok, but it must say so. So must directory lookups
-// that fail, which leave the accounts without cached facts on the default
-// guardrail profile (GAP-0216).
+// that fail, which refuse requests whose assignments need the missing facts
+// once the accounts have no cached facts (GAP-0216).
 func TestStatusWarnsWhenAIDefenseIsUnavailable(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
@@ -378,12 +381,15 @@ func TestStatusWarnsWhenAIDefenseIsUnavailable(t *testing.T) {
 			`"profile_warnings":["assignment 1: group \"dc-okta-ml\" is not known to this host, so it selects nobody"]}`), nil
 	}
 	status := h.run(Options{Action: ActionStatus})
-	if !status.OK || !strings.Contains(messagesOf(status.Warnings, codeAIDefenseUnavailable), "unavailable:auth_failed") {
+	if !status.OK || !strings.Contains(messagesOf(status.Warnings, enterprisestatus.CodeAIDefenseUnavailable), "unavailable:auth_failed") {
 		t.Fatalf("an unavailable AI Defense must warn without failing status: ok=%t %+v", status.OK, status.Warnings)
 	}
 	// The warning names the failing accounts (GAP-0696).
 	if got := messagesOf(status.Warnings, codeDirectoryLookups); !strings.Contains(got, "failing for 2 account(s) (uid 1001, uid 1002) since 2026-10-07T00:05:54Z") ||
-		!strings.Contains(got, "enterprise linux profile-explain --user") {
+		!strings.Contains(got, "enterprise linux profile-explain --user") ||
+		!strings.Contains(got, "requests whose assignments need missing identity facts are refused") ||
+		!strings.Contains(got, "refusal names the missing fact") ||
+		strings.Contains(got, "accounts without cached facts get the default") {
 		t.Fatalf("failing directory lookups must warn without failing status: ok=%t %+v", status.OK, status.Warnings)
 	}
 	// An assignment group the host no longer knows selects nobody (GAP-0704).
@@ -391,6 +397,52 @@ func TestStatusWarnsWhenAIDefenseIsUnavailable(t *testing.T) {
 	if got := messagesOf(status.Warnings, codeProfileAssignment); !strings.Contains(got, `group "dc-okta-ml" is not known to this host`) ||
 		strings.Count(got, "dc-okta-ml") != 1 {
 		t.Fatalf("an assignment that selects nobody must warn once: %+v", status.Warnings)
+	}
+}
+
+func TestStatusAndVerifyWarnForGuardianDirectoryOutageWithCachedFacts(t *testing.T) {
+	for _, goos := range []string{"darwin", "linux"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			h.env.HealthGet = func(context.Context) (int, []byte, error) {
+				return 200, []byte(`{"api":{"state":"running"},"directory":{"failing":0,"stale":2}}`), nil
+			}
+			dir := enterprisehooks.IdentitySpoolDir(h.env.P(h.env.Layout.GuardianAuthDir))
+			if err := os.MkdirAll(dir, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := enterprisehooks.WriteDirectoryUnreachable(dir, []string{"dclab.test"}, h.env.Now(), nil); err != nil {
+				t.Fatal(err)
+			}
+			for _, action := range []string{ActionStatus, ActionVerify} {
+				result := h.run(Options{Action: action})
+				got := messagesOf(result.Warnings, codeDirectoryLookups)
+				if !strings.Contains(got, "dclab.test") || !strings.Contains(got, "cached account facts") {
+					t.Fatalf("%s omitted guardian outage: %q", action, got)
+				}
+			}
+			// The gateway's uncached-account warning remains alongside the
+			// guardian warning when both sources report an outage.
+			h.env.HealthGet = func(context.Context) (int, []byte, error) {
+				return 200, []byte(`{"api":{"state":"running"},"directory":{"failing":1,"since":"2026-10-18T00:00:00Z","accounts":["1001"]}}`), nil
+			}
+			got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeDirectoryLookups)
+			if !strings.Contains(got, "failing for 1 account(s)") || !strings.Contains(got, "dclab.test") {
+				t.Fatalf("the uncached-account warning was lost: %q", got)
+			}
+			// A stale record cannot keep the warning up after recovery.
+			if err := enterprisehooks.WriteDirectoryUnreachable(dir, []string{"dclab.test"},
+				h.env.Now().Add(-enterprisehooks.DirectoryUnreachableMaxAge-time.Second), nil); err != nil {
+				t.Fatal(err)
+			}
+			h.env.HealthGet = func(context.Context) (int, []byte, error) {
+				return 200, []byte(`{"api":{"state":"running"},"directory":{"failing":0}}`), nil
+			}
+			if got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeDirectoryLookups); got != "" {
+				t.Fatalf("stale guardian record still warned: %q", got)
+			}
+		})
 	}
 }
 
@@ -483,9 +535,9 @@ func TestHookSocketProbesReadTheGateway(t *testing.T) {
 func TestStatusWarnsWhenTheAuditFilesystemIsNearlyFull(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
-	h.env.DiskSpace = func(string) (uint64, uint64, uint64, error) { return 4 << 20, 10 << 30, 1, nil }
+	h.env.DiskSpace = func(string) (uint64, uint64, uint64, error) { return 100 << 20, 10 << 30, 1, nil }
 	got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeDiskSpaceLow)
-	if !strings.Contains(got, h.env.Layout.DataDir+" has 4.0 MiB free") || strings.Count(got, "MiB free") != 1 {
+	if !strings.Contains(got, h.env.Layout.DataDir+" has 100.0 MiB free") || strings.Count(got, "MiB free") != 1 {
 		t.Fatalf("status does not warn once about the nearly full filesystem: %q", got)
 	}
 }

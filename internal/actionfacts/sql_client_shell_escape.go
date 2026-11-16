@@ -31,7 +31,7 @@ func validSQLClientShellEscapeFact(facts Facts, fact SQLClientShellEscapeFact) b
 			continue
 		}
 		client, ok := exactSQLClientShellEscape(command)
-		return ok && client == fact.Client && exactUnconditionalTopLevelCommand(command)
+		return ok && client == fact.Client && exactSQLClientTopLevelCommand(command)
 	}
 	return false
 }
@@ -50,7 +50,7 @@ func projectSQLClientShellEscapes(facts Facts) []SQLClientShellEscapeFact {
 		return nil
 	}
 	command := facts.Commands[0]
-	if !exactUnconditionalTopLevelCommand(command) || !command.ArgvComplete ||
+	if !exactSQLClientTopLevelCommand(command) || !command.ArgvComplete ||
 		(command.Dialect != DialectPOSIX && command.Dialect != DialectArgv) ||
 		!staticArguments(command.Arguments) {
 		return nil
@@ -64,6 +64,15 @@ func projectSQLClientShellEscapes(facts Facts) []SQLClientShellEscapeFact {
 		Client:    client,
 		Exact:     true,
 	}}
+}
+
+// A redirect changes the SQL client's streams, not its reviewed -e command.
+// The client still executes the same local shell escape when its argv and
+// destination are statically known.
+func exactSQLClientTopLevelCommand(command CommandFact) bool {
+	return !command.ControlFlowUncertain && command.ParentCommandID == 0 &&
+		command.PipelineID == 0 && command.Kind == CommandKindProcess &&
+		len(command.Wrappers) == 0 && command.Effect == EffectExecute
 }
 
 func exactSQLClientShellEscape(command CommandFact) (SQLClientShellEscapeClient, bool) {

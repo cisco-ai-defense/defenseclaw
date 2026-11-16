@@ -96,7 +96,7 @@ def _in_use(pid: int) -> dict:
 SUCCESS = _result(None, 0)
 
 
-def _content(tmp_path: Path, *, bundle: bool = False) -> Path:
+def _content(tmp_path: Path, *, bundle: bool = False, single: bool = False) -> Path:
     content = tmp_path / "content"
     content.mkdir()
     text = LAUNCHER.read_text(encoding="utf-8")
@@ -109,7 +109,7 @@ def _content(tmp_path: Path, *, bundle: bool = False) -> Path:
     pins = {
         "schema_version": 1,
         "setup_sha256": hashlib.sha256(setup.read_bytes()).hexdigest(),
-        "config_sha256": "" if bundle else hashlib.sha256(config.read_bytes()).hexdigest(),
+        "config_sha256": "" if bundle and not single else hashlib.sha256(config.read_bytes()).hexdigest(),
         "bundle_sha256": "",
         "trust_anchors_sha256": "",
         "trust_mode": "hash_pinned",
@@ -123,8 +123,8 @@ def _content(tmp_path: Path, *, bundle: bool = False) -> Path:
     return content
 
 
-def _launch(tmp_path: Path, responses: list[dict], *args: str, bundle: bool = False):
-    content = _content(tmp_path, bundle=bundle)
+def _launch(tmp_path: Path, responses: list[dict], *args: str, bundle: bool = False, single: bool = False):
+    content = _content(tmp_path, bundle=bundle or single, single=single)
     state = tmp_path / "setup.json"
     state.write_text(json.dumps({"responses": responses, "calls": [], "sleeps": 0}), encoding="utf-8")
     result = subprocess.run(
@@ -170,6 +170,24 @@ def test_launcher_waits_while_the_named_process_runs(tmp_path):
     assert setup["sleeps"] == 20
 
 
+def test_a_refusal_that_names_no_pid_backs_off_for_the_full_interval(tmp_path):
+    # GAP-0878: a SYSTEM program holding a SYSTEM-only file has no pid, so there
+    # is no process to wait for; each refused attempt sleeps once (the stub
+    # counts calls) instead of retrying at once.
+    no_pid = _result(
+        "uninstall_in_use",
+        1603,
+        "uninstall_in_use: a program has hook-guardian\\opencode-service-ports.json open (it is probably running as "
+        "SYSTEM, which this account cannot query; to find it, open Resource Monitor (resmon.exe), CPU tab, "
+        "Associated Handles, and search for the file name) in C:\\ProgramData\\Cisco\\DefenseClaw",
+    )
+    result, document, setup = _launch(tmp_path, [no_pid], "-Uninstall")
+    assert result.returncode == _exit(1618), result.stdout + result.stderr
+    assert setup["calls"] == ["/uninstall JSON=1"] * 6
+    assert setup["sleeps"] == 5
+    assert document["errors"][0]["code"] == "uninstall_in_use"
+
+
 @pytest.mark.parametrize(
     ("response", "expected"),
     [
@@ -192,6 +210,22 @@ def test_install_mode_is_unaffected_by_an_in_use_result(tmp_path):
     [call] = setup["calls"]
     assert call.startswith("/ensure JSON=1 CONFIG=") and call.endswith("config.yaml")
     assert "refused, retrying" not in result.stderr
+
+
+def test_single_app_ensures_with_both_inputs_and_uninstalls(tmp_path):
+    # The single app (config.yaml and a bundle, private #2) passes both to
+    # Setup /ensure and, unlike a bundle-only app, is the app that removes
+    # DefenseClaw.
+    ensure_dir, uninstall_dir = tmp_path / "ensure", tmp_path / "uninstall"
+    ensure_dir.mkdir()
+    uninstall_dir.mkdir()
+    result, document, setup = _launch(ensure_dir, [SUCCESS], single=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    [call] = setup["calls"]
+    assert call.startswith("/ensure JSON=1 CONFIG=") and "config.yaml BUNDLE=" in call and call.endswith("policy.dcbundle")
+    result, document, setup = _launch(uninstall_dir, [SUCCESS], "-Uninstall", single=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert setup["calls"] == ["/uninstall JSON=1"]
 
 
 @pytest.mark.parametrize(

@@ -12,8 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -24,6 +24,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -104,7 +105,7 @@ func openManagedAuditStoreReadOnly(path string) (*audit.Store, error) {
 // keeps the help of main (issue #1092, GAP-0270).
 const auditExportLongIntro = `Write one JSON object per line. Each audit row is validated against
 schemas/audit-event.json before it is written. Configuration changes and
-operator actions are audit rows too (action config-update and others).
+operator actions are audit rows too (action config.change.applied and others).
 --include-activity appends the rows of the activity_events table, which
 holds only history from releases before 1.0, validated against
 activity-event.json.
@@ -162,7 +163,7 @@ func auditExportPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 			if !auditExportCallerIsAdministrator() {
 				return withExitCode(&managedViewRefusal{
 					code:    "elevation_required",
-					message: windowsManagedStandardUserViewAnswer("the audit log", "audit export -o <file>"),
+					message: windowsManagedStandardUserViewAnswer("the audit log", "audit", "export", "-o", "<file>"),
 				}, enterprisestatus.WindowsExitAccessDenied)
 			}
 			return nil
@@ -242,6 +243,37 @@ func isKnownAuditAction(s string) bool {
 	return false
 }
 
+// checkAuditExportDB says why --db cannot be exported: a missing path, a
+// file this account may not read (another account's data directory is
+// 0700) or a path that is not a file. Each used to read "is not an audit
+// database file", which sent a user who lacked access looking for a
+// corrupt database (GAP-0008).
+func checkAuditExportDB(path string) error {
+	denied := func() error {
+		return fmt.Errorf("audit export: cannot read --db %s: permission denied; "+
+			"another account's audit database can be read only by that account or an administrator", path)
+	}
+	info, err := os.Stat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("audit export: --db %s does not exist", path)
+	case errors.Is(err, fs.ErrPermission):
+		return denied()
+	case err != nil:
+		return fmt.Errorf("audit export: cannot read --db %s: %w", path, err)
+	case !info.Mode().IsRegular():
+		return fmt.Errorf("audit export: --db %s is not an audit database file", path)
+	}
+	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrPermission) {
+		return denied()
+	}
+	if err != nil {
+		return fmt.Errorf("audit export: cannot read --db %s: %w", path, err)
+	}
+	return f.Close()
+}
+
 func runAuditExport(cmd *cobra.Command, _ []string) (err error) {
 	auditPath := auditExportDB
 	if auditPath == "" {
@@ -249,8 +281,8 @@ func runAuditExport(cmd *cobra.Command, _ []string) (err error) {
 			return fmt.Errorf("audit export: config not loaded")
 		}
 		auditPath = cfg.AuditDB
-	} else if info, statErr := os.Stat(auditPath); statErr != nil || !info.Mode().IsRegular() {
-		return fmt.Errorf("audit export: --db %s is not an audit database file", auditPath)
+	} else if err := checkAuditExportDB(auditPath); err != nil {
+		return err
 	}
 	// A bad --since/--until is a usage error (exit 2, GAP-2110), checked
 	// before the database is opened or an -o file is created.
@@ -266,46 +298,46 @@ func runAuditExport(cmd *cobra.Command, _ []string) (err error) {
 		return fmt.Errorf("audit export: open db: %w", err)
 	}
 	defer db.Close()
+	// A database without audit_events is refused before an -o file is
+	// created, so the export writes nothing (GAP-1044).
+	if ok, tableErr := tableExists(db, "audit_events"); tableErr != nil {
+		return fmt.Errorf("audit export: read db: %w", tableErr)
+	} else if !ok {
+		return fmt.Errorf("audit export: %s has no audit_events table; it is not a DefenseClaw audit database", auditPath)
+	}
 	// A reader that stops early (| head -1, | Select-Object -First 1) is
 	// not an export failure (GAP-1694).
 	defer func() { err = quietClosedOutputPipe(err) }()
 
 	out := io.Writer(os.Stdout)
 	if auditExportOut != "" && auditExportOut != "-" {
-		// ("Audit export output file is created with
-		// default-readable permissions before chmod"): os.Create uses
-		// O_CREATE|O_TRUNC with mode 0666 masked by the process umask,
-		// so on a 022 umask host the file briefly exists as 0644
-		// before the os.Chmod tightens it. A local attacker watching
-		// a shared directory (or holding an FD opened during that
-		// window) could read sensitive audit content written
-		// afterwards. Open with O_CREATE|O_EXCL|0o600 so the file is
-		// 0600 from creation and we refuse to clobber an existing
-		// file (which could be an attacker-pre-created decoy).
-		// --force removes the old file first, so the new one is still
-		// created with O_EXCL and 0600 (GAP-1398).
+		// Create exclusively, with private permissions before any content is
+		// written: 0600 on Unix and the audit store's protected DACL on
+		// Windows. --force removes the old file before this private create.
 		if auditExportForce {
 			if rmErr := os.Remove(auditExportOut); rmErr != nil && !os.IsNotExist(rmErr) {
 				return fmt.Errorf("audit export: remove existing output %s: %w", auditExportOut, rmErr)
 			}
 		}
-		f, err := os.OpenFile(
-			auditExportOut,
-			os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_TRUNC,
-			0o600,
-		)
-		if err != nil {
-			if os.IsExist(err) {
+		f, openErr := audit.CreateExportFileExclusive(auditExportOut)
+		if openErr != nil {
+			if os.IsExist(openErr) {
 				return fmt.Errorf("audit export: %s already exists; pass --force to overwrite it or choose another -o path", auditExportOut)
 			}
-			return fmt.Errorf("audit export: create output: %w", err)
+			return fmt.Errorf("audit export: create output: %w", openErr)
 		}
-		defer f.Close()
 		lc := &lineCountWriter{w: f}
 		out = lc
 		// GAP-1494: say what was written instead of finishing silently.
+		// A failed export says only why (err, the named result) and
+		// removes the file it created, so nothing claims an export that
+		// did not happen (GAP-1044).
 		defer func() {
+			if closeErr := f.Close(); err == nil && closeErr != nil {
+				err = fmt.Errorf("audit export: close output: %w", closeErr)
+			}
 			if err != nil {
+				_ = os.Remove(auditExportOut)
 				return
 			}
 			msgOut := io.Writer(os.Stderr)
@@ -325,11 +357,16 @@ func runAuditExport(cmd *cobra.Command, _ []string) (err error) {
 	if ok, _ := columnExists(db, "audit_events", "event_name"); ok {
 		eventNameCol = "event_name"
 	}
-	q := `SELECT id, timestamp, action, target, actor, details, structured_json, severity, run_id,
+	hasExactTime, _ := columnExists(db, "audit_events", "retention_timestamp_unix_nano")
+	// A native v8 row keeps its structured fields only in payload_json
+	// (GAP-0614).
+	hasPayloadJSON, _ := columnExists(db, "audit_events", "payload_json")
+	structuredCol := audit.StructuredJSONReadSQL("", hasPayloadJSON, eventNameCol != "NULL")
+	q := `SELECT id, timestamp, action, target, actor, details, ` + structuredCol + `, severity, run_id,
 session_id, trace_id, agent_id, agent_name, agent_instance_id, sidecar_instance_id,
 schema_version, content_hash, generation, binary_version,
 destination_app, tool_name, tool_id, policy_id, connector, ` + eventNameCol + `
-FROM audit_events` + where + ` ORDER BY ` + window.orderBy()
+FROM audit_events` + where + ` ORDER BY ` + window.orderBy(hasExactTime)
 	// When a connector or time filter is active the cap must apply to
 	// *matching* rows, so we filter in Go and bound the count there.
 	// Without one we push LIMIT into SQL (cheaper, unchanged behavior).
@@ -438,7 +475,7 @@ FROM audit_events` + where + ` ORDER BY ` + window.orderBy()
 // since 1.0 operator changes are audit rows in the export itself, and
 // activity_events holds only history from older databases.
 const activityHistoryNote = "note: --include-activity added no rows. Configuration changes and operator " +
-	"actions are already audit rows in this export (action config-update and others); " +
+	"actions are already audit rows in this export (action config.change.applied and others); " +
 	"activity_events holds only history from releases before 1.0."
 
 // appendActivityLines appends the activity_events rows and notes on stderr
@@ -535,11 +572,15 @@ func (w auditExportWindow) keepsNewest() bool { return w.newest && w.limit > 0 }
 
 // orderBy is the SQL order: newest first while collecting the newest rows,
 // oldest first otherwise.
-func (w auditExportWindow) orderBy() string {
-	if w.keepsNewest() {
-		return "timestamp DESC, rowid DESC"
+func (w auditExportWindow) orderBy(hasExactTime bool) string {
+	instant := "julianday(timestamp)"
+	if hasExactTime {
+		instant = "retention_timestamp_unix_nano"
 	}
-	return "timestamp ASC"
+	if w.keepsNewest() {
+		return instant + " DESC, rowid DESC"
+	}
+	return instant + " ASC, rowid ASC"
 }
 
 // sqlPredicate is a coarse, index-friendly prefilter on the timestamp
@@ -743,8 +784,9 @@ func exportAuditEventsFallback(db *sql.DB, out io.Writer, prov version.Provenanc
 
 func exportAuditEventsFallbackWindow(db *sql.DB, out io.Writer, prov version.Provenance, connFilter string, window auditExportWindow) error {
 	where, args := window.sqlPredicate()
+	hasExactTime, _ := columnExists(db, "audit_events", "retention_timestamp_unix_nano")
 	rows, err := db.Query(`SELECT id, timestamp, action, target, actor, details, severity, run_id FROM audit_events`+
-		where+` ORDER BY `+window.orderBy(), args...)
+		where+` ORDER BY `+window.orderBy(hasExactTime), args...)
 	if err != nil {
 		return fmt.Errorf("audit export: %w", err)
 	}
@@ -942,7 +984,7 @@ func normalizeSeverity(s string) string {
 
 // v8RecordActionPattern is the action shape the audit-event schema accepts
 // for v8 runtime records.
-var v8RecordActionPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
+var v8RecordActionPattern = lazyregexp.New(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 
 // isV8RecordAction reports whether a row is a v8 runtime record whose action
 // the export keeps as is. A v8 record (event_name set and not a
@@ -1001,6 +1043,13 @@ func validateAuditEventMap(ev map[string]any, v8Action bool) error {
 	return nil
 }
 
+func activityExportTimeOrder(db *sql.DB) string {
+	if exists, err := columnExists(db, "activity_events", "retention_timestamp_unix_nano"); err == nil && exists {
+		return "retention_timestamp_unix_nano ASC, rowid ASC"
+	}
+	return "julianday(timestamp) ASC, rowid ASC"
+}
+
 func exportActivityLines(db *sql.DB, out io.Writer, prov version.Provenance, window auditExportWindow) error {
 	exists, err := tableExists(db, "activity_events")
 	if err != nil || !exists {
@@ -1010,7 +1059,7 @@ func exportActivityLines(db *sql.DB, out io.Writer, prov version.Provenance, win
 	rows, err := db.Query(`
 SELECT timestamp, actor, action, target_type, target_id, reason,
        before_json, after_json, diff_json, version_from, version_to
-FROM activity_events`+where+` ORDER BY timestamp ASC`, args...)
+FROM activity_events`+where+` ORDER BY `+activityExportTimeOrder(db), args...)
 	if err != nil {
 		return fmt.Errorf("audit export: activity query: %w", err)
 	}

@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"reflect"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Clock supplies event occurrence time. Production and tests must inject it;
@@ -39,6 +41,28 @@ type OccurrenceIDGeneratorFunc func() (string, error)
 func (function OccurrenceIDGeneratorFunc) NewOccurrenceID() (string, error) {
 	return function()
 }
+
+// NewTimeOrderedID returns a new canonical UUIDv7: 48 bits of Unix
+// milliseconds, a counter that keeps the IDs of one process in order within a
+// millisecond, and 62 random bits. Use it for the ID of every record that
+// audit.db keys by ID. A random (v4) key lands on a random leaf of its
+// unique index, so each record dirtied another random page of audit.db, and
+// on Windows a checkpoint's sync writes those pages one at a time; under a hook
+// flood that sync never caught up and the WAL grew without bound (rel-1-0-3
+// GAP-0320, GAP-0325). Time-ordered keys are appended at the end of the index.
+func NewTimeOrderedID() string {
+	return uuid.Must(uuid.NewV7()).String()
+}
+
+// TimeOrderedOccurrenceIDs mints NewTimeOrderedID occurrence IDs: audit.db
+// keys correlation_observations by record ID.
+var TimeOrderedOccurrenceIDs OccurrenceIDGenerator = OccurrenceIDGeneratorFunc(func() (string, error) {
+	id, err := uuid.NewV7()
+	if err != nil {
+		return "", err
+	}
+	return id.String(), nil
+})
 
 // RecordBuilder has no mutable record state. Given deterministic injected
 // dependencies and input, BuildClassifiedLog produces deterministic output.

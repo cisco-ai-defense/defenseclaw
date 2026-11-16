@@ -29,9 +29,10 @@ func TestClaudeCodeWindowsHandlersMatchTheSharedGolden(t *testing.T) {
 		Args    []string `json:"args"`
 	}
 	var golden struct {
-		Launcher string  `json:"launcher"`
-		Guard    handler `json:"guard"`
-		Exec     handler `json:"exec"`
+		Launcher     string  `json:"launcher"`
+		Guard        handler `json:"guard"`
+		PreToolGuard handler `json:"pretool_guard"`
+		Exec         handler `json:"exec"`
 	}
 	if err := json.Unmarshal(data, &golden); err != nil {
 		t.Fatal(err)
@@ -50,13 +51,25 @@ func TestClaudeCodeWindowsHandlersMatchTheSharedGolden(t *testing.T) {
 	if !reflect.DeepEqual(golden.Exec, want) {
 		t.Errorf("golden exec handler = %+v, want %+v", golden.Exec, want)
 	}
+	if got := claudeCodePreToolGuardArgs(golden.Launcher, hookArgs); !reflect.DeepEqual(got, golden.PreToolGuard.Args) {
+		t.Errorf("PreToolUse guard args Setup writes = %q, golden has %q", got, golden.PreToolGuard.Args)
+	}
+	preTool := map[string]interface{}{"type": "command", "command": golden.PreToolGuard.Command,
+		"args": stringsToInterfaces(golden.PreToolGuard.Args)}
+	if view, ok := claudeCodeExecView(preTool).(map[string]interface{}); golden.PreToolGuard.Type != "command" || !ok ||
+		view["command"] != golden.Launcher || !codexValueMatches(view["args"], hookArgs) {
+		t.Errorf("claudeCodeExecView(golden PreToolUse guard) = %v", view)
+	}
 	if runtime.GOOS != "windows" {
 		return
 	}
 	t.Setenv("SystemRoot", `C:\Windows`)
 	opts := SetupOpts{HookExecutable: golden.Launcher}
 	command, args := claudeCodeWindowsHookInvocation(opts, golden.Launcher)
-	if command != golden.Guard.Command || !reflect.DeepEqual(args, golden.Guard.Args) {
+	// cmd.exe comes from the system directory API, whose spelling (case)
+	// can differ from the golden's.
+	if normalizeWindowsHookExecutable(command) != normalizeWindowsHookExecutable(golden.Guard.Command) ||
+		!reflect.DeepEqual(args, golden.Guard.Args) {
 		t.Errorf("per-user Windows invocation = %q %q, golden guard = %q %q", command, args, golden.Guard.Command, golden.Guard.Args)
 	}
 	guard := map[string]interface{}{"type": "command", "command": command, "args": stringsToInterfaces(args)}

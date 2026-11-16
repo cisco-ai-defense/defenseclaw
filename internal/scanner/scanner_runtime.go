@@ -86,6 +86,13 @@ func (s *MCPScanner) runtimeEnv() []string {
 	return scannerRuntimeEnv(base, derived, nil)
 }
 
+// VersionProbeEnv is the environment of a `<scanner> --version` probe: the
+// scan allowlist of the gateway environment and nothing derived from config,
+// so an ambient AI_DEFENSE_API_KEY or provider key never reaches the probe.
+func VersionProbeEnv() []string {
+	return scannerRuntimeEnv(os.Environ(), map[string]string{"NO_COLOR": "1", "TERM": "dumb"}, nil)
+}
+
 // scannerRuntimeEnv is a scanner runtime child's environment: the variables
 // of base on the scanner allowlist (skillScannerEnvPassthrough) or in keep,
 // then the values the gateway derived from config. Nothing else from the
@@ -96,6 +103,7 @@ func (s *MCPScanner) runtimeEnv() []string {
 // even with an empty value, which then leaves the variable unset.
 func scannerRuntimeEnv(base []string, derived map[string]string, keep map[string]bool) []string {
 	env := make([]string, 0, 32)
+	temp := scannerRuntimeTemp()
 	for _, kv := range base {
 		name, _, ok := strings.Cut(kv, "=")
 		if !ok || name == "" {
@@ -103,6 +111,9 @@ func scannerRuntimeEnv(base []string, derived map[string]string, keep map[string
 		}
 		upper := strings.ToUpper(name)
 		if _, set := derived[upper]; set || strings.HasPrefix(upper, "AWS_ENDPOINT_URL") {
+			continue
+		}
+		if temp != "" && (upper == "TEMP" || upper == "TMP") {
 			continue
 		}
 		if keep[upper] || skillScannerEnvPassthrough[upper] || hasAnyPrefix(upper, skillScannerEnvPassthroughPrefixes) {
@@ -114,7 +125,43 @@ func scannerRuntimeEnv(base []string, derived map[string]string, keep map[string
 			env = append(env, name+"="+value)
 		}
 	}
+	if temp != "" {
+		env = append(env, "TEMP="+temp, "TMP="+temp)
+	}
 	return env
+}
+
+// scannerRuntimeDataDir is the managed gateway's data folder (the service
+// sets DEFENSECLAW_HOME), "" off Windows, where no scanner runtime runs.
+// Tests replace it.
+var scannerRuntimeDataDir = func() string {
+	if runtime.GOOS != "windows" {
+		return ""
+	}
+	return strings.TrimSpace(os.Getenv("DEFENSECLAW_HOME"))
+}
+
+// scannerRuntimeTemp is the TEMP and TMP of a scanner runtime child: a
+// folder in the gateway's data folder (GAP-0114). The child keeps the
+// gateway's write-restricted LocalSystem token, which can write none of the
+// folders Python looks in for one (the service TEMP, the LocalSystem
+// profile, the Windows folder, the System32 working folder), so every
+// local MCP server scan failed before the server started, reported as a
+// Windows npx wrapper startup failure. The data folder's access list is the
+// gateway's own (SYSTEM, administrators, the gateway service), so a
+// server's stderr kept there while the scan runs stays private. "" keeps
+// the inherited values.
+func scannerRuntimeTemp() string {
+	home := scannerRuntimeDataDir()
+	if home == "" || !filepath.IsAbs(home) {
+		return ""
+	}
+	dir := filepath.Join(home, "scanner-tmp")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "[scan] scanner runtime temporary folder %s: %v\n", dir, err)
+		return ""
+	}
+	return dir
 }
 
 // runtimeJudgeEnv is the resolved scanner judge as the variables the

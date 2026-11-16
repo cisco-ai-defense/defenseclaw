@@ -3,7 +3,11 @@
 
 package inventory
 
-import "time"
+import (
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/agentprocess"
+)
 
 // AgentProcess is one running agent run of a connector DefenseClaw supports.
 type AgentProcess struct {
@@ -17,8 +21,15 @@ type AgentProcess struct {
 	// shows it, else the account signed in to its session. It is empty in
 	// session 0 or when the owner is unknown.
 	OwnerSID string
+	// OwnerSIDFromSession is true when OwnerSID is the session's signed-in
+	// account, not the process token's (see processInfo).
+	OwnerSIDFromSession bool
 	// StartedAt is zero when this account cannot open the process.
 	StartedAt time.Time
+	// Args are used only by the managed launch coverage scan. They must
+	// never be put in a status or audit record.
+	Args      []string
+	ArgsKnown bool
 }
 
 // RunningWindowsAgentProcesses lists the running agent runs of the supported
@@ -48,7 +59,15 @@ func RunningWindowsAgentProcesses() ([]AgentProcess, error) {
 	var out []AgentProcess
 	for _, proc := range procs {
 		if proc.Connector != "" && supported[normalizeAIID(proc.Connector)] {
-			out = append(out, AgentProcess{PID: proc.PID, Connector: proc.Connector, User: proc.User, OwnerSID: proc.SessionOwnerID, StartedAt: proc.StartedAt})
+			agent := AgentProcess{PID: proc.PID, Connector: proc.Connector, User: proc.User,
+				OwnerSID: proc.SessionOwnerID, OwnerSIDFromSession: proc.SessionOwnerFromSession, StartedAt: proc.StartedAt}
+			if proc.Connector == "opencode" || proc.Connector == "amp" || proc.Connector == "kiro" ||
+				proc.Connector == "devin" || proc.Connector == "hermes" || proc.Connector == "antigravity" {
+				if argv, err := agentprocess.CommandLineForPID(proc.PID); err == nil {
+					agent.Args, agent.ArgsKnown = argv, true
+				}
+			}
+			out = append(out, agent)
 		}
 	}
 	return out, nil

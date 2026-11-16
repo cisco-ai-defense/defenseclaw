@@ -32,9 +32,8 @@ DEFENSECLAW_HOOK_SOCKET_UID=@UID@
 defenseclaw_hook_socket_owner_trusted() {
   [ "$1" = "0" ] || { [ "$DEFENSECLAW_HOOK_SOCKET_UID" != "0" ] && [ "$1" = "$DEFENSECLAW_HOOK_SOCKET_UID" ]; }
 }
-defenseclaw_hook_socket_trusted() {
+defenseclaw_hook_socket_directory_trusted() {
   local socket_dir listing mode owner
-  { [ -S "$DEFENSECLAW_HOOK_SOCKET" ] && [ ! -L "$DEFENSECLAW_HOOK_SOCKET" ]; } || return 1
   socket_dir="${DEFENSECLAW_HOOK_SOCKET%/*}"
   [ -n "$socket_dir" ] || socket_dir=/
   socket_dir="$(cd -P -- "$socket_dir" 2>/dev/null && pwd -P)" || return 1
@@ -45,6 +44,11 @@ defenseclaw_hook_socket_trusted() {
     *) return 1 ;;
   esac
   defenseclaw_hook_socket_owner_trusted "$owner" || return 1
+}
+defenseclaw_hook_socket_trusted() {
+  local listing mode owner
+  defenseclaw_hook_socket_directory_trusted || return 1
+  { [ -S "$DEFENSECLAW_HOOK_SOCKET" ] && [ ! -L "$DEFENSECLAW_HOOK_SOCKET" ]; } || return 1
   listing="$(command ls -ln -- "$DEFENSECLAW_HOOK_SOCKET" 2>/dev/null)" || return 1
   read -r mode _ owner _ <<< "$listing" || return 1
   case "$mode" in
@@ -59,14 +63,25 @@ defenseclaw_hook_socket_trusted() {
 // immediately before it builds its bearer header, when the hook is a
 // standalone enterprise install with a unix hook socket (see
 // managedPluginHookSocket). fail_unreachable is already defined at that
-// point and fails closed for managed hooks. The rendered TCP hook contains
-// none of this.
-const shellHookSocketTransportBlock = shellHookSocketTrustFunctions + `if [ ! -e "$DEFENSECLAW_HOOK_SOCKET" ] && [ ! -L "$DEFENSECLAW_HOOK_SOCKET" ]; then
+// point; trust failures force its closed mode. The rendered TCP hook contains
+// none of this. @GUARD@ is the standalone Hermes foreign-hook guard
+// (shellHookForeignGuard), or nothing: it runs after the trust functions it
+// uses and before the socket checks. The guard's check denies a guarded
+// connector whose session the gateway cannot answer for (GAP-0354).
+// Only a verified directory with no socket proves an outage. Once a socket
+// exists, every later failure is uncertain and must refuse in every mode.
+const shellHookSocketTransportBlock = shellHookSocketTrustFunctions + `@GUARD@if ! defenseclaw_hook_socket_directory_trusted; then
+  FAIL_MODE=closed fail_unreachable "the DefenseClaw hook socket directory is not owned by root or the gateway account (enterprise_managed_gateway_peer_unverified)"
+fi
+if [ ! -e "$DEFENSECLAW_HOOK_SOCKET" ] && [ ! -L "$DEFENSECLAW_HOOK_SOCKET" ]; then
   fail_unreachable "` + shellManagedGatewayStoppedText + `"
 fi
 if ! defenseclaw_hook_socket_trusted; then
-  fail_unreachable "the DefenseClaw hook socket or its directory is not owned by root or the gateway account (enterprise_managed_gateway_peer_unverified)"
+  FAIL_MODE=closed fail_unreachable "the DefenseClaw hook socket is not a trusted gateway socket (enterprise_managed_gateway_peer_unverified)"
 fi
+# A socket that existed at the trust check does not prove that a later curl
+# failure is an outage. Keep all later failures closed, even in open mode.
+FAIL_MODE=closed
 API_TOKEN=
 @FACTS@
 `
@@ -76,9 +91,31 @@ API_TOKEN=
 // stopped), in the words the native hook uses for a stopped gateway service.
 // The socket-ownership text is only for a socket that exists with the wrong
 // owner (GAP-0581).
-const shellManagedGatewayStoppedText = "the DefenseClaw gateway service is not running on this computer. " +
+const shellManagedGatewayStoppedPrefix = "the DefenseClaw gateway service is not running on this computer. "
+const shellManagedGatewayStoppedCode = "(enterprise_managed_gateway_not_running)"
+
+const shellManagedGatewayStoppedText = shellManagedGatewayStoppedPrefix +
 	"Try again in a moment; if this continues, ask your administrator to start the DefenseClaw gateway service. " +
-	"(enterprise_managed_gateway_not_running)"
+	shellManagedGatewayStoppedCode
+
+func shellManagedGatewayStoppedReason(connectorName, goos string) string {
+	if normalizeConnectorName(connectorName) != "antigravity" {
+		return shellManagedGatewayStoppedText
+	}
+	platform := ""
+	switch goos {
+	case "linux":
+		platform = "linux"
+	case "darwin":
+		platform = "macos"
+	}
+	if platform == "" {
+		return shellManagedGatewayStoppedText
+	}
+	return shellManagedGatewayStoppedPrefix +
+		"Try again in a moment; if this continues, ask your administrator to check DefenseClaw on this computer: \\`enterprise " + platform + " status\\` names what to do. " +
+		shellManagedGatewayStoppedCode
+}
 
 // shellHookSocketTransport renders shellHookSocketTransportBlock for the
 // socket path and the gateway service uid trusted beside root. The path is
@@ -86,12 +123,18 @@ const shellManagedGatewayStoppedText = "the DefenseClaw gateway service is not r
 // the assignment. factsBinary, when set, is the administrator-owned hook
 // binary the hook runs (hook session-facts) to read the user's Kerberos
 // credential cache, which a shell cannot read; see managedSessionFactsBinary.
-func shellHookSocketTransport(socket string, serviceUID int, factsBinary string) string {
+// guard is the rendered foreign-hook guard block, or "" for every hook but
+// the standalone Hermes one; with "" the block renders as it did before the
+// guard moved into it.
+func shellHookSocketTransport(socket string, serviceUID int, factsBinary, guard, connectorName, goos string) string {
 	facts := ""
 	if factsBinary != "" {
 		facts = "DEFENSECLAW_SESSION_FACTS_BIN=" + shellSingleQuote(factsBinary) + "\nexport DEFENSECLAW_SESSION_FACTS_BIN\n"
 	}
-	return strings.Replace(renderShellHookSocket(shellHookSocketTransportBlock, socket, serviceUID), "@FACTS@", facts, 1)
+	block := shellHookSocketTransportBlock
+	block = strings.Replace(block, shellManagedGatewayStoppedText, shellManagedGatewayStoppedReason(connectorName, goos), 1)
+	block = strings.Replace(renderShellHookSocket(block, socket, serviceUID), "@FACTS@", facts, 1)
+	return strings.Replace(block, "@GUARD@", guard, 1)
 }
 
 // managedSessionFactsBinary is the administrator-owned hook binary a managed

@@ -21,8 +21,9 @@ it before running it. Running it by that path afterwards leaves a window in
 which the path can come to name a different file. Each platform closes that
 window with the primitive it has:
 
-* Linux executes the open descriptor (``/proc/<pid>/fd/N``), so the kernel
-  runs the verified inode whatever the path names by then.
+* Linux executes the open descriptor (``/proc/self/fd/N``), so the kernel
+  runs the verified inode whatever the path names by then. The child inherits
+  that descriptor for its exec, including from a private PID namespace.
 * Windows holds the file open without write or delete sharing until the
   process exists (``run_pinned_executable``: until it exits, since the gateway
   controller starts its own long-running process from the same path). NTFS
@@ -52,6 +53,8 @@ from defenseclaw.file_permissions import (
     UNSAFE_PATH_UNTRUSTED_CUSTODY,
     UnsafePathError,
     open_regular_file_no_follow,
+    tracked_host_owner_uid,
+    tracked_host_stat_channel,
 )
 
 _PathSnapshot = tuple[tuple[str, int, int, int, int, int, int], ...]
@@ -87,14 +90,12 @@ class PinnedExecutable:
         self.path = path
         self._fd = fd
         self._linux = sys.platform.startswith("linux")
-        self._script = False
         if self._linux:
-            if not os.path.exists(f"/proc/{os.getpid()}/fd/{fd}"):
+            if not os.path.exists(f"/proc/self/fd/{fd}"):
                 raise UnsafePathError(
                     "descriptor-bound launch needs /proc",
                     code=UNSAFE_PATH_INSPECTION_FAILED,
                 )
-            self._script = os.pread(fd, 2, 0) == b"#!"
         self._require_same_file()
 
     def _require_same_file(self, snapshot: _PathSnapshot | None = None) -> _PathSnapshot | None:
@@ -121,15 +122,16 @@ class PinnedExecutable:
             raise ValueError("argv[0] must be the pinned executable path")
         snapshot = None
         if self._linux:
-            if self._script:
-                # The interpreter reopens the script path after exec, so the
-                # child keeps its own copy of the descriptor.
-                kwargs["executable"] = f"/proc/self/fd/{self._fd}"
-                kwargs["pass_fds"] = (self._fd,)
-            else:
-                # This process holds the descriptor until the exec is done;
-                # the child inherits none of it.
-                kwargs["executable"] = f"/proc/{os.getpid()}/fd/{self._fd}"
+            # The interpreter may reopen a script after exec, so the child
+            # retains the descriptor through launch in either case.
+            kwargs["executable"] = f"/proc/self/fd/{self._fd}"
+            kwargs["pass_fds"] = (*kwargs.get("pass_fds", ()), self._fd)
+            channel = tracked_host_stat_channel() if os.getpid() == 1 else None
+            if channel is not None:
+                # The Go config helper checks the same host-owned files. Give
+                # it the scanner launcher's read-only ownership channel.
+                channel.close()
+                kwargs["pass_fds"] = (*kwargs["pass_fds"], 5)
         else:
             snapshot = self._require_same_file()
         process = subprocess.Popen(list(argv), **kwargs)
@@ -153,7 +155,7 @@ def pinned_executable(path: str) -> Iterator[PinnedExecutable]:
         if os.name != "nt":
             info = os.fstat(fd)
             if (
-                info.st_uid not in {0, os.geteuid()}
+                tracked_host_owner_uid(path, info) not in {0, os.geteuid()}
                 or stat.S_IMODE(info.st_mode) & 0o022
                 or not stat.S_IMODE(info.st_mode) & 0o111
             ):

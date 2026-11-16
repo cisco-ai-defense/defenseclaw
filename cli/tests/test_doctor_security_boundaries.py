@@ -12,10 +12,13 @@ from unittest.mock import Mock
 
 import pytest
 from defenseclaw import config as config_module
+from defenseclaw import file_permissions
 from defenseclaw.commands import cmd_doctor, cmd_setup, cmd_version
 from defenseclaw.doctor_gateway import PIDRecord, ProcessEvidence
 from defenseclaw.file_permissions import UnsafePathError
 from defenseclaw.pinned_exec import pinned_executable, run_pinned_executable
+
+from tests.native_programs import native_program
 
 
 def test_python_dotenv_loader_ignores_process_control_and_malformed_entries(
@@ -87,6 +90,81 @@ def test_python_dotenv_loader_ignores_process_control_and_malformed_entries(
         assert name not in os.environ
 
 
+def test_scanner_custody_channel_cannot_come_from_dotenv(monkeypatch, tmp_path) -> None:
+    """Only the tracked launcher may pass its host-owner descriptor."""
+    name = "DEFENSECLAW_TRACKED_HOST_STAT_FD"
+    monkeypatch.delenv(name, raising=False)
+    (tmp_path / ".env").write_text(f"{name}=5\n", encoding="utf-8")
+
+    config_module._load_dotenv_into_os(os.fspath(tmp_path))
+
+    assert name not in os.environ
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux user-namespace overflow UID")
+def test_overflow_owner_fails_closed_without_scanner_custody_channel(monkeypatch) -> None:
+    monkeypatch.delenv("DEFENSECLAW_TRACKED_HOST_STAT_FD", raising=False)
+    info = SimpleNamespace(st_uid=65534)
+
+    assert file_permissions.tracked_host_owner_uid("/unmapped-owner", info) == -1
+
+
+def _impostor_sockets():
+    import socket
+
+    listener = socket.create_server(("127.0.0.1", 0))
+    tcp = socket.create_connection(listener.getsockname())
+    server, _ = listener.accept()
+    listener.close()
+    udp_server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp_server.bind(("127.0.0.1", 0))
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp.connect(udp_server.getsockname())
+    yield "tcp", tcp, server
+    yield "udp", udp, udp_server
+    for name, kind in (
+        ("unix stream", socket.SOCK_STREAM),
+        ("own seqpacket pair", socket.SOCK_SEQPACKET),
+        ("unix datagram", socket.SOCK_DGRAM),
+    ):
+        mine, other = socket.socketpair(socket.AF_UNIX, kind)
+        yield name, mine, other
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux tracked-scanner channel")
+def test_overflow_owner_refuses_a_socket_that_is_not_the_launchers(monkeypatch) -> None:
+    """r104 W25: the variable names fd 5; the socket on it must prove it is the launcher's."""
+    import select
+
+    monkeypatch.setenv("DEFENSECLAW_TRACKED_HOST_STAT_FD", "5")
+    monkeypatch.setattr(file_permissions.os, "getpid", lambda: 1)
+    # As inside a scanner's PID namespace, so only the socket checks decide.
+    monkeypatch.setattr(file_permissions, "_in_child_pid_namespace", lambda: True, raising=False)
+    real = os.stat("/etc/passwd")
+    info = SimpleNamespace(st_uid=65534, st_dev=real.st_dev, st_ino=real.st_ino)
+    saved = os.dup(5) if _fd_open(5) else None
+    try:
+        for name, mine, other in _impostor_sockets():
+            with mine, other:
+                os.dup2(mine.fileno(), 5)
+                assert file_permissions.tracked_host_owner_uid("/etc/passwd", info) == -1, name
+                assert not select.select([other], [], [], 0.1)[0], f"a request was written to the {name}"
+    finally:
+        if saved is None:
+            os.close(5)
+        else:
+            os.dup2(saved, 5)
+            os.close(saved)
+
+
+def _fd_open(fd: int) -> bool:
+    try:
+        os.fstat(fd)
+    except OSError:
+        return False
+    return True
+
+
 def test_dotenv_control_keys_are_named_with_their_replacement_not_on_every_command(
     caplog: pytest.LogCaptureFixture,
     tmp_path,
@@ -123,6 +201,61 @@ def test_python_dotenv_loader_warns_when_safe_read_is_refused(
 
     assert "ignoring unreadable or unsafe dotenv" in caplog.text
     assert os.fspath(tmp_path / ".env") in caplog.text
+
+
+def test_doctor_reports_unreadable_dotenv_and_keeps_other_checks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    dotenv = tmp_path / ".env"
+    dotenv.write_bytes(b"DEFENSECLAW_GATEWAY_TOKEN=placeholder\n")
+    dotenv.chmod(0o600)
+    safe_read = cmd_doctor.read_regular_file_no_follow
+
+    def refuse_dotenv(path, *, max_bytes):
+        if os.fspath(path) == os.fspath(dotenv):
+            raise PermissionError(13, "access denied")
+        return safe_read(path, max_bytes=max_bytes)
+
+    monkeypatch.setattr(cmd_doctor, "read_regular_file_no_follow", refuse_dotenv)
+    if os.name == "nt":
+        # chmod does not define the Windows DACL; model a private file so this
+        # case tests an unreadable dotenv rather than an exposed one.
+        monkeypatch.setattr(file_permissions, "windows_acl_confidentiality_error", lambda _path: None)
+    result = cmd_doctor._DoctorResult()
+    cfg = SimpleNamespace(data_dir=os.fspath(tmp_path))
+    cmd_doctor._check_private_file_exposure(cfg, result)
+
+    assert len(result.checks) == 1
+    row = result.checks[0]
+    assert row["status"] == "warn" and row["label"] == "Private files"
+    assert os.fspath(dotenv) in row["detail"]
+    assert "restore this account's read access" in row["remediation"]
+    assert "placeholder" not in str(row)
+
+
+def test_doctor_still_fails_exposed_dotenv_when_safe_read_rejects_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    dotenv = tmp_path / ".env"
+    dotenv.write_bytes(b"x" * 10)
+    dotenv.chmod(0o644)
+    monkeypatch.setattr(
+        cmd_doctor, "read_regular_file_no_follow",
+        Mock(side_effect=UnsafePathError("sensitive file exceeds read limit")),
+    )
+    if os.name == "nt":
+        # POSIX mode bits cannot express Windows read exposure.
+        monkeypatch.setattr(
+            file_permissions,
+            "windows_acl_confidentiality_error",
+            lambda path: "another account can read" if os.fspath(path) == os.fspath(dotenv) else None,
+        )
+    result = cmd_doctor._DoctorResult()
+    cmd_doctor._check_private_file_exposure(SimpleNamespace(data_dir=os.fspath(tmp_path)), result)
+    assert result.checks[0]["status"] == "fail"
+    assert (
+        "unsafe Windows ACL" if os.name == "nt" else "mode 0644"
+    ) in result.checks[0]["detail"]
 
 
 def test_empty_data_dir_never_consumes_cwd_gateway_state(
@@ -775,7 +908,7 @@ def test_lifecycle_launch_never_runs_a_controller_swapped_in_after_verification(
         shutil.copyfile(os.path.join(os.environ["SystemRoot"], "System32", "cmd.exe"), controller)
         replacement.write_bytes(b"replacement controller")
     else:
-        shutil.copyfile("/bin/echo", controller)
+        native_program(controller, "echo")
         replacement.write_text("#!/bin/sh\necho replacement\n", encoding="utf-8")
         for path in (controller, replacement):
             path.chmod(0o755)
@@ -807,3 +940,26 @@ def test_lifecycle_launch_never_runs_a_controller_swapped_in_after_verification(
         else:
             with pytest.raises(UnsafePathError):
                 pinned.popen(argv, stdout=subprocess.PIPE)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux descriptor exec")
+@pytest.mark.parametrize("kind", ["binary", "script"])
+def test_pinned_executable_launches_with_private_pid_namespace(tmp_path, monkeypatch, kind) -> None:
+    """Descriptor exec resolves self even when the visible PID is not the host PID."""
+    controller = tmp_path / "controller"
+    if kind == "script":
+        controller.write_text("#!/bin/sh\necho \"$1\"\n", encoding="utf-8")
+    else:
+        native_program(controller, "echo")
+    controller.chmod(0o755)
+
+    with monkeypatch.context() as patched:
+        patched.setattr("defenseclaw.pinned_exec.os.getpid", lambda: 1)
+        result = run_pinned_executable(
+            [os.fspath(controller), "namespace"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    assert result.returncode == 0
+    assert result.stdout.strip() == "namespace"

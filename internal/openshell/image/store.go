@@ -18,18 +18,20 @@ package image
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -58,8 +60,15 @@ type Record struct {
 	Owner string `json:"owner"`
 	// MicroVM marks an image built for the MicroVM driver
 	// (BuildSpec.MicroVM).
-	MicroVM bool      `json:"microvm,omitempty"`
-	BuiltAt time.Time `json:"built_at"`
+	MicroVM bool `json:"microvm,omitempty"`
+	// TrustedCAs is the normalized PEM of the trusted CAs the image
+	// carries (BuildSpec.TrustedCAs), so its context renders again from
+	// the record (runimage.go baseDirs). It is kept in trustedCAsFile, not
+	// in images.json, whose records keep the fields DefenseClaw 1.0.2
+	// reads: 1.0.2 refuses a record with a field it does not know, and a
+	// downgrade then left the sandbox service down (GAP-0071, GAP-0075).
+	TrustedCAs string    `json:"-"`
+	BuiltAt    time.Time `json:"built_at"`
 	// Binaries maps the required commands to their in-image realpaths.
 	Binaries []Binary `json:"binaries"`
 	// NetworkBinaries are the realpaths LLM credential profiles pin.
@@ -71,32 +80,29 @@ type Record struct {
 	HookFireVerified bool `json:"hook_fire_verified,omitempty"`
 	// HookFireVerifiedAt is when that probe passed.
 	HookFireVerifiedAt time.Time `json:"hook_fire_verified_at,omitzero"`
-	// MicroVMVerified is set by VerifyHooks with HookFireVerified when the
-	// probe's MicroVM scenario passed as well: the harness started and its
-	// hooks fired with an OpenShell MicroVM's name resolution (no
-	// localhost in /etc/hosts). A driver without a hosts file
-	// (openshell.Driver.HostsFile) boots only an image that has it.
-	MicroVMVerified bool `json:"microvm_verified,omitempty"`
-	// MicroVMProblem says why the harness cannot work in a MicroVM: the
-	// MicroVM scenario found that it resolves names on its own
-	// (HookFireResult.MicroVMProblem). It stays until the image is checked
-	// again (`sandbox image build <harness> --force`).
-	MicroVMProblem string `json:"microvm_problem,omitempty"`
-	// MicroVMInconclusive says why the last MicroVM scenario settled
-	// nothing (HookFireResult.MicroVMInconclusive); the image stays
-	// unchecked for a MicroVM (MicroVMUnchecked).
-	MicroVMInconclusive string `json:"microvm_inconclusive,omitempty"`
 }
 
-// MicroVMUnchecked reports whether r, an image for the MicroVM driver
-// whose hooks verified, has no MicroVM verdict: the probe's MicroVM
-// scenario never passed and never found that the harness cannot resolve
-// localhost (it did not settle, MicroVMInconclusive, or never ran). Build
-// probes such a cached image again, and so does a sandbox on the MicroVM
-// driver before it boots one; a definitive MicroVMProblem is not probed
-// again unless asked (Force).
-func (r Record) MicroVMUnchecked() bool {
-	return r.MicroVM && r.HookFireVerified && !r.MicroVMVerified && r.MicroVMProblem == ""
+// UnmarshalJSON accepts the retired MicroVM verdict fields in older image
+// records. They are discarded on read and are not written to new records.
+// All other unknown fields remain errors.
+func (r *Record) UnmarshalJSON(data []byte) error {
+	type recordFields Record
+	var old struct {
+		recordFields
+		MicroVMVerified     bool   `json:"microvm_verified"`
+		MicroVMProblem      string `json:"microvm_problem"`
+		MicroVMInconclusive string `json:"microvm_inconclusive"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&old); err != nil {
+		return err
+	}
+	if err := dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("image record has trailing data")
+	}
+	*r = Record(old.recordFields)
+	return nil
 }
 
 // NetworkRealpaths lists the realpaths for profiles.Input.Binaries.
@@ -109,7 +115,8 @@ func (r Record) NetworkRealpaths() []string {
 }
 
 // Store persists records in <data_dir>/sandboxes/images.json (owner-only,
-// atomically replaced, cross-process locked).
+// atomically replaced, cross-process locked), and their trusted CAs in
+// images-trusted-cas.json beside it (trustedCAsFile).
 type Store struct {
 	path string
 	mu   sync.Mutex
@@ -132,8 +139,30 @@ type storeDoc struct {
 	RunImages []RunImage `json:"run_images,omitempty"`
 }
 
+// trustedCAsFile is the file beside images.json that holds the records'
+// TrustedCAs: each distinct bundle once, under its digest, and the digest
+// of each image tag that has one. DefenseClaw 1.0.2 does not read it. It
+// is written before images.json and is absent while no record has trusted
+// CAs. A record it names no bundle for has none, so an image built with
+// them is not current (recordMatches) and is built again; a malformed file
+// stops the store, as a malformed images.json does.
+const trustedCAsFile = "images-trusted-cas.json"
+
+type trustedCAsDoc struct {
+	Version int `json:"version"`
+	// Bundles maps "sha256:<hex>" of a normalized PEM to the PEM.
+	Bundles map[string]string `json:"bundles"`
+	// Images maps an image tag to the digest of its bundle.
+	Images map[string]string `json:"images"`
+}
+
+func pemDigest(pem string) string {
+	sum := sha256.Sum256([]byte(pem))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
 // ownerRE is the shape of a store owner.
-var ownerRE = regexp.MustCompile(`^[0-9a-f]{16}$`)
+var ownerRE = lazyregexp.New(`^[0-9a-f]{16}$`)
 
 // NewStore opens the store under dataDir.
 func NewStore(dataDir string) *Store {
@@ -193,7 +222,7 @@ func (s *Store) Get(tag string) (Record, bool, error) {
 // Current returns the image a sandbox built from want's spec must run: the
 // record of exactly want's tag and content hash, whose every recorded input
 // (connector, harness version, hook contract, base image, run-as identity,
-// ingress port, DefenseClaw version and fail mode) matches want, and whose
+// ingress port, DefenseClaw version, fail mode and trusted CAs) matches want, and whose
 // hooks were proven to fire (HookFireVerified). There is no fallback to an
 // older image: after an upgrade or a changed input the old image carries
 // stale hooks, so a missing or unverified exact match means build (or
@@ -229,7 +258,8 @@ func recordMatches(r Record, c *Context) bool {
 		r.DefenseClawVersion == c.Spec.DefenseClawVersion &&
 		r.FailMode == c.Spec.FailMode &&
 		r.Owner == c.Spec.Owner &&
-		r.MicroVM == c.Spec.MicroVM
+		r.MicroVM == c.Spec.MicroVM &&
+		r.TrustedCAs == string(c.TrustedCAs.PEM)
 }
 
 // Put inserts or replaces the record with r.Tag.
@@ -373,6 +403,81 @@ func (s *Store) locked(fn func() error) error {
 	return fn()
 }
 
+// trustedCAsPath is trustedCAsFile beside images.json.
+func (s *Store) trustedCAsPath() string {
+	return filepath.Join(filepath.Dir(s.path), trustedCAsFile)
+}
+
+// readTrustedCAs returns each tag's trusted CA PEM from trustedCAsFile
+// (none without the file).
+func (s *Store) readTrustedCAs() (map[string]string, error) {
+	path := s.trustedCAsPath()
+	data, err := safefile.ReadRegularFileBounded(path, storeMaxBytes)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("openshell image store: read %s: %w", path, err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var doc trustedCAsDoc
+	if err := dec.Decode(&doc); err != nil {
+		return nil, fmt.Errorf("openshell image store: parse %s: %w", path, err)
+	}
+	if err := dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("openshell image store: %s holds trailing data", path)
+	}
+	if doc.Version != storeVersion {
+		return nil, fmt.Errorf("openshell image store: %s has unsupported version %d", path, doc.Version)
+	}
+	for digest, pem := range doc.Bundles {
+		if pem == "" || pemDigest(pem) != digest {
+			return nil, fmt.Errorf("openshell image store: %s holds a trusted CA bundle that does not match its digest", path)
+		}
+	}
+	out := make(map[string]string, len(doc.Images))
+	for tag, digest := range doc.Images {
+		pem, ok := doc.Bundles[digest]
+		if !ok {
+			return nil, fmt.Errorf("openshell image store: %s names no bundle for %s", path, tag)
+		}
+		out[tag] = pem
+	}
+	return out, nil
+}
+
+// writeTrustedCAs replaces trustedCAsFile with the trusted CAs of images,
+// or removes it when none has any.
+func (s *Store) writeTrustedCAs(images []Record) error {
+	path := s.trustedCAsPath()
+	doc := trustedCAsDoc{Version: storeVersion, Bundles: map[string]string{}, Images: map[string]string{}}
+	for _, r := range images {
+		if r.TrustedCAs == "" {
+			continue
+		}
+		d := pemDigest(r.TrustedCAs)
+		doc.Bundles[d], doc.Images[r.Tag] = r.TrustedCAs, d
+	}
+	if len(doc.Images) == 0 {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("openshell image store: remove %s: %w", path, err)
+		}
+		return nil
+	}
+	data, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return fmt.Errorf("openshell image store: encode %s: %w", path, err)
+	}
+	if len(data)+1 > storeMaxBytes {
+		return fmt.Errorf("openshell image store: the trusted CAs of the images exceed %d bytes; prune images (`defenseclaw sandbox image prune`)", storeMaxBytes)
+	}
+	if err := safefile.WritePrivate(path, append(data, '\n')); err != nil {
+		return fmt.Errorf("openshell image store: write %s: %w", path, err)
+	}
+	return nil
+}
+
 func (s *Store) read() (storeDoc, error) {
 	data, err := safefile.ReadRegularFileBounded(s.path, storeMaxBytes)
 	if errors.Is(err, os.ErrNotExist) {
@@ -396,6 +501,13 @@ func (s *Store) read() (storeDoc, error) {
 	if doc.Owner != "" && !ownerRE.MatchString(doc.Owner) {
 		return storeDoc{}, fmt.Errorf("openshell image store: %s has a malformed owner", s.path)
 	}
+	cas, err := s.readTrustedCAs()
+	if err != nil {
+		return storeDoc{}, err
+	}
+	for i := range doc.Images {
+		doc.Images[i].TrustedCAs = cas[doc.Images[i].Tag]
+	}
 	sort.Slice(doc.Images, func(i, j int) bool { return doc.Images[i].Tag < doc.Images[j].Tag })
 	sort.Slice(doc.RunImages, func(i, j int) bool { return doc.RunImages[i].Tag < doc.RunImages[j].Tag })
 	return doc, nil
@@ -411,6 +523,11 @@ func (s *Store) write(doc storeDoc) error {
 	data, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return fmt.Errorf("openshell image store: encode: %w", err)
+	}
+	// The trusted CAs first: a record written without its CAs is only an
+	// image that is built again.
+	if err := s.writeTrustedCAs(doc.Images); err != nil {
+		return err
 	}
 	if err := safefile.WritePrivate(s.path, append(data, '\n')); err != nil {
 		return fmt.Errorf("openshell image store: write %s: %w", s.path, err)

@@ -23,9 +23,10 @@ import (
 // validated. It is a "not yet" answer, never a permanent one: the next
 // call re-attempts discovery.
 //
-// The broker reports this to the gateway as an ordinary provider error,
-// so managed inspection stays fail-closed while the library is missing
-// rather than silently allowing traffic.
+// The broker reports this to the gateway as an ordinary provider error.
+// The gateway then has no AI Defense verdict, and managed inspection treats
+// no verdict as allow (fail-open), recording each such decision so a
+// missing library is visible rather than silent.
 var ErrLibraryUnavailable = errors.New(
 	"the Cloud Management identity library is not available yet",
 )

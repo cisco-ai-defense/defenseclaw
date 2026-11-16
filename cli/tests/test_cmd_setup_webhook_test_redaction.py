@@ -79,3 +79,27 @@ class WebhookAddWithGatewayStopped(unittest.TestCase):
         self.assertIsNone(result.exception)
         self.assertIn("audit event was not recorded", result.output)
         self.assertIn("gap1399", listed.output)
+
+
+class WebhookSavedBadPort(unittest.TestCase):
+    def test_list_and_show_json_do_not_crash_or_expose_saved_url(self):
+        import yaml
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "config.yaml"), "w", encoding="utf-8") as config_file:
+                yaml.safe_dump({
+                    "config_version": 8,
+                    "webhooks": [{
+                        "name": "badport", "type": "generic", "enabled": False,
+                        "url": "https://example.com:bad/private-path?token=private-value",
+                    }],
+                }, config_file)
+            app = AppContext()
+            app.cfg = SimpleNamespace(data_dir=tmp)
+            for args in (["list"], ["list", "--json"], ["show", "badport", "--json"]):
+                with self.subTest(args=args):
+                    result = CliRunner().invoke(webhook, args, obj=app)
+                    self.assertEqual(result.exit_code, 0, result.output)
+                    self.assertIn("badport", result.output)
+                    self.assertNotIn("private-path", result.output)
+                    self.assertNotIn("private-value", result.output)

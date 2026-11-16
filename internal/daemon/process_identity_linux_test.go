@@ -20,6 +20,20 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
+func TestAuthenticatedIdentityRejectsCurrentRecordWithoutStartIdentity(t *testing.T) {
+	d := New(t.TempDir())
+	executable, err := os.Readlink("/proc/self/exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.writePIDInfo(os.Getpid(), executable, ""); err != nil {
+		t.Fatal(err)
+	}
+	if d.HasAuthenticatedMigrationProcessIdentity(os.Getpid()) {
+		t.Fatal("a current record without a kernel start identity qualified for authenticated status")
+	}
+}
+
 func TestProcessExistsRejectsUnreapedZombie(t *testing.T) {
 	if !processExists(os.Getpid()) {
 		t.Fatal("live test process was classified as stopped")

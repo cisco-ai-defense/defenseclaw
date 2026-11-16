@@ -22,6 +22,7 @@ mirroring the Cobra root command in internal/cli/root.go.
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import json
 import os
@@ -316,6 +317,15 @@ def _emit_version_json(ctx: click.Context, _param: click.Parameter | None, value
     ctx.exit()
 
 
+def _warn_failed_deferred_uninstall() -> None:
+    """Name a Windows uninstall whose deferred removal failed (p0 GAP-1095)."""
+    from defenseclaw.uninstall_result import failed_deferred_uninstall, failed_deferred_uninstall_message
+
+    found = failed_deferred_uninstall()
+    if found:
+        ux.echo(f"  ⚠ {failed_deferred_uninstall_message(found)}", err=True)
+
+
 # -h is the short form of --help on every command, as on defenseclaw-gateway
 # (GAP-2170). Child contexts inherit help_option_names from this group.
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
@@ -338,7 +348,7 @@ def cli(ctx: click.Context) -> None:
     \b
     Multi-connector:
       One gateway enforces N agent-native connectors (codex, claudecode,
-      hermes, antigravity, omnigent, and others) tracked under
+      hermes, antigravity, and others) tracked under
       guardrail.connectors. Add one with 'defenseclaw setup <connector>'
       (choose Add when prompted), remove with
       'defenseclaw setup remove <name>'. Scope policy per peer with
@@ -356,6 +366,8 @@ def cli(ctx: click.Context) -> None:
         return
     if _is_audit_export(ctx):
         return
+    if platform_support.host_os() == "windows":
+        _warn_failed_deferred_uninstall()
     if invoked == "sandbox" and platform_support.host_os() == "windows":
         # Every sandbox command refuses Windows (exit 3) before it would use
         # the configuration, so a broken config.yaml is not the first thing
@@ -430,12 +442,18 @@ def cli(ctx: click.Context) -> None:
             return
         if cfg_mod.config_path().is_file():
             # GAP-0288: the file is there and refused; `init` would not fix it.
+            unchanged = " config.yaml was not changed." if invoked == "config" else ""
             ux.echo(
                 f"Failed to load config: {exc}. Fix it in {cfg_mod.config_path()}; "
                 "'defenseclaw config validate' shows the line. "
-                "A running gateway keeps its last good configuration.",
+                f"A running gateway keeps its last good configuration.{unchanged}",
                 err=True,
             )
+            if invoked == "status":
+                # Which configuration that is, and the reload it rejected (GAP-0006).
+                from defenseclaw.commands.cmd_status import print_gateway_while_config_unloadable
+
+                print_gateway_while_config_unloadable(str(exc), as_json="--json" in sys.argv[1:])
         else:
             ux.echo(
                 f"Failed to load config — run 'defenseclaw init' first: {exc}",
@@ -473,6 +491,11 @@ def cli(ctx: click.Context) -> None:
         from defenseclaw.commands.cmd_config import validate_config
 
         result = validate_config()
+        # Not judged inside a sandbox that hides folder owners: status says
+        # so instead of calling the config invalid (GAP-1395).
+        app.config_not_checked = getattr(result, "not_checked", "")
+        if app.config_not_checked and invoked != "status":
+            ux.echo(f"Config check: not run: {app.config_not_checked}", err=True)
         if _audit_logs_can_read_with_ide_scope_typo(ctx, result):
             ux.echo(
                 "Config warning: ai_discovery.ide_inventory is invalid; log output is still available. "
@@ -523,10 +546,20 @@ def cli(ctx: click.Context) -> None:
     except Exception as exc:
         from defenseclaw.audit_capacity import audit_open_failure_notice
 
-        ux.echo(audit_open_failure_notice(app.cfg.audit_db, exc), err=True)
-        raise SystemExit(1)
+        notice = audit_open_failure_notice(app.cfg.audit_db, exc)
+        if invoked != "status":
+            ux.echo(notice, err=True)
+            raise SystemExit(1)
+        # Status is read-only and has an independently authenticated gateway
+        # health source. Do not lose that view when the local audit volume is
+        # full; carry the failure into both text and JSON output instead.
+        if app.store is not None:
+            with contextlib.suppress(Exception):  # a failed open may leave SQLite unable to close cleanly
+                app.store.close()
+        app.store = None
+        app.audit_db_error = notice
 
-    if source_is_v8 and not getattr(app, "config_problems", None):
+    if source_is_v8 and not getattr(app, "config_problems", None) and not app.audit_db_error:
         app.logger = Logger.from_config(app.cfg)
     else:
         app.logger = Logger.no_runtime()
@@ -844,8 +877,20 @@ def main() -> None:
         # a traceback (GAP-0055). The file is left as it was.
         click.echo(f"Error: config.yaml was not changed: {plain_error(exc)}", err=True)
         sys.exit(1)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         from defenseclaw.config import ConfigSaveError
+        from defenseclaw.file_permissions import UnsafePathError
+
+        # A sensitive file DefenseClaw will not write through (a symlink, a
+        # reparse point) is a refusal, not a crash: one line that names the file,
+        # whatever command hit it (GAP-1390). Some writers re-raise it as a
+        # ValueError that keeps the refusal as its cause.
+        refusal = exc if isinstance(exc, UnsafePathError) else exc.__cause__
+        if isinstance(refusal, UnsafePathError):
+            click.echo(f"Error: {refusal}", err=True)
+            sys.exit(1)
+        if not isinstance(exc, OSError):
+            raise
 
         if isinstance(exc, ConfigSaveError):
             click.echo(

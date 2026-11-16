@@ -52,12 +52,14 @@ func runHookSocketTestServerAt(t *testing.T, standalone bool, heldAddr, socket s
 	restoreAPI := inheritedAPIListener
 	restoreBudget := apiListenRetryBudget
 	restoreInterval := apiListenHeldRetryInterval
+	restoreMismatch := apiInheritedMismatchBinds
 	t.Cleanup(func() {
 		loadStandaloneRuntimeDescriptor = restoreDescriptor
 		inheritedHookListener = restoreHook
 		inheritedAPIListener = restoreAPI
 		apiListenRetryBudget = restoreBudget
 		apiListenHeldRetryInterval = restoreInterval
+		apiInheritedMismatchBinds = restoreMismatch
 	})
 	loadStandaloneRuntimeDescriptor = func(string) (*managed.RuntimeDescriptor, error) {
 		return &managed.RuntimeDescriptor{
@@ -73,6 +75,11 @@ func runHookSocketTestServerAt(t *testing.T, standalone bool, heldAddr, socket s
 	inheritedAPIListener = func() (net.Listener, bool, error) { return nil, false, nil }
 	apiListenRetryBudget = 200 * time.Millisecond
 	apiListenHeldRetryInterval = 50 * time.Millisecond
+	// These gateways model a host without socket activation, where the
+	// gateway binds the API port itself. On macOS a standalone managed
+	// gateway instead refuses to run without launchd's API socket (GAP-1086,
+	// api_listen_inherited_test.go), so that rule is off here.
+	apiInheritedMismatchBinds = false
 
 	store, logger := testStoreAndV8Logger(t)
 	cfg := &config.Config{DeploymentMode: "managed_enterprise", DataDir: dataDir}

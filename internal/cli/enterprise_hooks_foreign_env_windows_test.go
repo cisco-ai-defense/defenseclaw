@@ -115,6 +115,9 @@ func TestWindowsForeignCleanupCleansFoldersTheUserEnvironmentNames(t *testing.T)
 			}},
 		},
 	}
+	// Each removal is recorded in the guardian's ledger before the file
+	// changes (a data directory and its authorization folder).
+	useForeignHookRemovalRecords(t)
 	enterpriseHookWindowsGuardianOptions = func() (enterprisepolicy.Options, []string, bool, error) {
 		return enterprisepolicy.Options{}, connectors, true, nil
 	}

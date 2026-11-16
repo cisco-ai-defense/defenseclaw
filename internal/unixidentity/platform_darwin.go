@@ -15,6 +15,7 @@ package unixidentity
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,6 +33,10 @@ func GroupNameLookupDefinitive() bool {
 	return !OpenDirectoryOffline(ctx)
 }
 
+// GroupDirectoryUsesWinbind is false on macOS: Open Directory answers for a
+// bound Active Directory domain.
+func GroupDirectoryUsesWinbind() bool { return false }
+
 // QualifiedGroupName has nothing to offer on macOS, whose group names carry
 // no domain.
 func QualifiedGroupName(context.Context, Resolver, string) string { return "" }
@@ -39,11 +44,27 @@ func QualifiedUserName(context.Context, Resolver, string) string  { return "" }
 
 // SameNameAccounts finds no twins on macOS: Open Directory resolves a short
 // name to one account.
-func SameNameAccounts(context.Context, Resolver, Account) []Account { return nil }
+func SameNameAccounts(context.Context, Resolver, Account) ([]Account, error) { return nil, nil }
+
+// ConfirmLocalAccount reports, with nil, that name is an account of the
+// local directory node that holds uid (confirmLocalNodeAccount). os/user
+// also names the accounts of a bound Active Directory domain, from Open
+// Directory's own cache while the domain controllers do not answer, and
+// profile explain took such an account for a local one: it explained the
+// account with the groups os/user listed, which no hook uses, so its
+// spellings reported different profiles during an outage (GAP-0551).
+func ConfirmLocalAccount(r Resolver, uid int, name string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return confirmLocalNodeAccount(r, uid, name,
+		func(name string) (LocalAccountRecord, bool, error) { return platformLocalAccountRecord(ctx, name) },
+		func() (map[string]string, error) { return platformMobileAccounts(ctx) })
+}
 
 const (
 	darwinDSCL   = "/usr/bin/dscl"
 	darwinODUtil = "/usr/bin/odutil"
+	darwinPlutil = "/usr/bin/plutil"
 )
 
 // platformOpenDirectoryNodeStates runs `odutil show nodenames`, which lists
@@ -63,6 +84,13 @@ func platformOpenDirectoryNodeStates(ctx context.Context) (string, error) {
 	}
 	return string(result.stdout), nil
 }
+
+// ProcessLookupsOutliveDeletion is true on macOS: a long-running process's
+// getpwuid (os/user) keeps answering with a local account that was deleted
+// after the process first looked it up, while a new process and dscl find
+// none (GAP-1864). A found answer there is no proof that the account still
+// exists.
+const ProcessLookupsOutliveDeletion = true
 
 // DefaultUIDRange is the interactive-account uid range. macOS local
 // accounts start at 501; directory accounts often use large uids.
@@ -95,6 +123,209 @@ func platformLocalAccounts(ctx context.Context) (map[string]int, error) {
 	return parseDSCLLocalAccounts(string(result.stdout)), nil
 }
 
+// platformLocalDatabaseAccounts has no other local account database here.
+func platformLocalDatabaseAccounts(ctx context.Context) (map[string]int, error) {
+	return platformLocalAccounts(ctx)
+}
+
+// platformLocalDatabaseUIDs lists the uids of the local directory node.
+func platformLocalDatabaseUIDs(ctx context.Context) ([]int, error) {
+	if err := validateTrustedTool(darwinDSCL); err != nil {
+		return nil, err
+	}
+	result, err := runTrustedCommand(ctx, darwinDSCL, []string{".", "-list", "/Users", "UniqueID"})
+	if err != nil {
+		return nil, err
+	}
+	if result.exitCode != 0 {
+		return nil, fmt.Errorf("unixidentity: dscl exited %d", result.exitCode)
+	}
+	var uids []int
+	for _, line := range strings.Split(string(result.stdout), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || validName(fields[0]) != nil {
+			continue
+		}
+		if uid, err := parseSignedDSCLID(fields[1]); err == nil {
+			uids = append(uids, uid)
+		}
+	}
+	return uids, nil
+}
+
+// platformDirectoryShowsUIDUnused: a Mac whose search policy lists only local
+// nodes answers from its local directory. A bound Mac answers at once, without
+// an error, while a domain is out of reach, so its node list must be readable
+// and list no node offline.
+func platformDirectoryShowsUIDUnused(ctx context.Context, uid int) error {
+	if !platformDirectoryConfigured() {
+		return nil
+	}
+	out, err := openDirectoryNodeStates(ctx)
+	if err != nil {
+		return fmt.Errorf("unixidentity: cannot read the Open Directory node states, so a miss for uid %d is no proof: %w", uid, err)
+	}
+	for name, state := range ParseODUtilNodeStates(out) {
+		if state == "offline" {
+			return fmt.Errorf("unixidentity: Open Directory node %s is offline, so a miss for uid %d is no proof", name, uid)
+		}
+	}
+	return nil
+}
+
+// dsclAccountRecordsOutputLimit bounds the plist of the local node's
+// account records: about 520 bytes a record, 76 KB for the 146 records of a
+// stock macOS 15 node, so room for some 8,000.
+const dsclAccountRecordsOutputLimit = 4 << 20
+
+// platformLocalAccountRecords lists the local node's accounts with the
+// attributes that change when an account is replaced or moved: uid,
+// GeneratedUID, home and primary group, in one dscl process. Any account
+// may list them. The gateway lists them about every 2 s while hooks come in
+// (managedHookPeerListedStampInterval), and the hook that finds the last
+// listing expired waits for the next one: one `dscl . -list` per attribute,
+// four processes and four process-group watchdog shells, took about 95 ms on
+// an M1, a hook call every 2 s that was slower by that much, and 12 to 20
+// processes on every second hook call of a per-user gateway (rel-1-0-6
+// GAP-0326). One `dscl -readall` answers the same records in about 21 ms.
+func platformLocalAccountRecords(ctx context.Context) (map[string]LocalAccountRecord, error) {
+	if err := validateTrustedTool(darwinDSCL); err != nil {
+		return nil, err
+	}
+	result, err := runTrustedCommandLimit(ctx, darwinDSCL,
+		[]string{"-plist", ".", "-readall", "/Users", "UniqueID", "GeneratedUID", "NFSHomeDirectory", "PrimaryGroupID"},
+		dsclAccountRecordsOutputLimit)
+	if err != nil {
+		return nil, err
+	}
+	if result.exitCode != 0 {
+		return nil, fmt.Errorf("unixidentity: dscl exited %d", result.exitCode)
+	}
+	return parseDSCLAccountRecordsPlist(result.stdout)
+}
+
+// parseDSCLRead parses `dscl . -read /Users/<name> <attributes>` output
+// ("Attribute: value", or "Attribute:" with the value on the next,
+// indented line) into attribute -> value.
+func parseDSCLRead(output string) map[string]string {
+	out := map[string]string{}
+	pending := ""
+	for _, line := range strings.Split(output, "\n") {
+		if pending != "" && strings.HasPrefix(line, " ") {
+			out[pending] = strings.TrimSpace(line)
+			pending = ""
+			continue
+		}
+		pending = ""
+		key, value, ok := strings.Cut(line, ":")
+		if !ok || key == "" || strings.ContainsAny(key, " \t") {
+			continue
+		}
+		if value = strings.TrimSpace(value); value == "" {
+			pending = key
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
+// platformLocalAccountRecord reads one local account's record.
+func platformLocalAccountRecord(ctx context.Context, name string) (LocalAccountRecord, bool, error) {
+	if err := validateTrustedTool(darwinDSCL); err != nil {
+		return LocalAccountRecord{}, false, err
+	}
+	result, err := runTrustedCommand(ctx, darwinDSCL, []string{".", "-read", "/Users/" + name,
+		"UniqueID", "GeneratedUID", "NFSHomeDirectory", "PrimaryGroupID"})
+	if err != nil {
+		return LocalAccountRecord{}, false, err
+	}
+	if result.exitCode != 0 {
+		// Also a record the node does not hold: the uid lookup tells that.
+		return LocalAccountRecord{}, false, fmt.Errorf("unixidentity: dscl exited %d", result.exitCode)
+	}
+	read := parseDSCLRead(string(result.stdout))
+	uid, err := parseSignedDSCLID(read["UniqueID"])
+	if err != nil {
+		return LocalAccountRecord{}, false, err
+	}
+	return LocalAccountRecord{UID: uid, RecordID: read["GeneratedUID"], Home: read["NFSHomeDirectory"], PrimaryGID: read["PrimaryGroupID"]}, true, nil
+}
+
+// platformAccountRecordGone asks Open Directory in a fresh dscl process
+// for the account's record across the search policy (local and bound
+// directory nodes). Only "record not found" while no bound directory node
+// is offline counts: an offline Active Directory node does not know its
+// accounts.
+func platformAccountRecordGone(ctx context.Context, name string) bool {
+	if err := validateTrustedTool(darwinDSCL); err != nil {
+		return false
+	}
+	result, err := runTrustedCommand(ctx, darwinDSCL, []string{"/Search", "-read", "/Users/" + name, "UniqueID"})
+	return dsclRecordNotFound(result, err) && !OpenDirectoryOffline(ctx)
+}
+
+// platformAccountUIDGone asks Open Directory in fresh dscl processes, across
+// the search policy, whether name still holds uid (dsclAccountUIDGone).
+func platformAccountUIDGone(ctx context.Context, name string, uid int) bool {
+	if err := validateTrustedTool(darwinDSCL); err != nil {
+		return false
+	}
+	return dsclAccountUIDGone(uid,
+		func() (commandResult, error) {
+			return runTrustedCommand(ctx, darwinDSCL, []string{"/Search", "-read", "/Users/" + name, "UniqueID"})
+		},
+		func() (commandResult, error) {
+			return runTrustedCommand(ctx, darwinDSCL, []string{"/Search", "-search", "/Users", "UniqueID", strconv.Itoa(uid)})
+		},
+		func() bool { return OpenDirectoryOffline(ctx) })
+}
+
+// homeAccountsOutputLimit bounds the plist of every account record of the
+// search policy, which is larger than the default command bound on a Mac
+// with many directory accounts. Past it the answer is an error, not a
+// shorter list.
+const homeAccountsOutputLimit = 4 << 20
+
+// platformAccountsAtHome asks Open Directory in a fresh dscl process, across
+// the search policy, for every account record as a property list, converts it
+// to JSON with plutil and keeps those with home as a home folder.
+func platformAccountsAtHome(ctx context.Context, home string) ([]HomeAccount, error) {
+	if err := validateTrustedTool(darwinDSCL); err != nil {
+		return nil, err
+	}
+	if err := validateTrustedTool(darwinPlutil); err != nil {
+		return nil, err
+	}
+	return dsclHomeAccounts(home,
+		func() (commandResult, error) {
+			return runTrustedCommandLimit(ctx, darwinDSCL,
+				[]string{"-plist", "/Search", "-readall", "/Users", "UniqueID", "NFSHomeDirectory", "RecordName"}, homeAccountsOutputLimit)
+		},
+		func(plist []byte) (commandResult, error) {
+			// A plist is never read here: the system tool converts it, and an
+			// answer it refuses is an error.
+			return runTrustedCommandInput(ctx, darwinPlutil,
+				[]string{"-convert", "json", "-o", "-", "-"}, plist, homeAccountsOutputLimit)
+		})
+}
+
+// platformLoginShell reads the UserShell of the account through the Open
+// Directory search node, so a local, mobile or directory account answers.
+// Any user may read it.
+func platformLoginShell(ctx context.Context, runner commandRunner, name string) string {
+	if err := validateTrustedTool(darwinDSCL); err != nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	result, err := runner(ctx, darwinDSCL, []string{"/Search", "-read", "/Users/" + name, "UserShell"})
+	if err != nil || result.exitCode != 0 {
+		return ""
+	}
+	return strings.TrimSpace(parseDSCLRead(string(result.stdout))["UserShell"])
+}
+
 // platformMobileAccounts lists the local node's mobile accounts with the
 // directory node each came from.
 func platformMobileAccounts(ctx context.Context) (map[string]string, error) {
@@ -109,6 +340,22 @@ func platformMobileAccounts(ctx context.Context) (map[string]string, error) {
 		return nil, fmt.Errorf("unixidentity: dscl exited %d", result.exitCode)
 	}
 	return parseDSCLOriginalNodes(string(result.stdout)), nil
+}
+
+// platformSSOLinkedAccounts lists the local node's accounts registered with
+// Platform SSO.
+func platformSSOLinkedAccounts(ctx context.Context) (map[string]bool, error) {
+	if err := validateTrustedTool(darwinDSCL); err != nil {
+		return nil, err
+	}
+	result, err := runTrustedCommand(ctx, darwinDSCL, []string{".", "-list", "/Users", "AltSecurityIdentities"})
+	if err != nil {
+		return nil, err
+	}
+	if result.exitCode != 0 {
+		return nil, fmt.Errorf("unixidentity: dscl exited %d", result.exitCode)
+	}
+	return parseDSCLPlatformSSOAccounts(string(result.stdout)), nil
 }
 
 // platformLocalGroups lists the local directory node's groups.

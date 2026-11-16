@@ -13,6 +13,7 @@ on:
       - 'scripts/build-release-assets.sh'
       - 'scripts/install.sh'
       - 'scripts/install.ps1'
+      - 'scripts/runner-apt-install.sh'
       - '.github/workflows/edge-connector-ci.yml'
   pull_request:
     paths:
@@ -25,6 +26,7 @@ on:
       - 'scripts/build-release-assets.sh'
       - 'scripts/install.sh'
       - 'scripts/install.ps1'
+      - 'scripts/runner-apt-install.sh'
       - '.github/workflows/edge-connector-ci.yml'
 
 permissions:
@@ -44,7 +46,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake build-essential
+        run: bash scripts/runner-apt-install.sh "cmake gcc g++ make" cmake build-essential
       - name: Configure (STANDARD profile, dev mode for tests)
         run: cmake -B build -DDCLAW_PROFILE=STANDARD -DDCLAW_DEV_MODE=ON
         working-directory: edge-connector
@@ -58,7 +60,7 @@ jobs:
   build-c-production:
     name: Build C Engine (production TLS)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -71,7 +73,7 @@ jobs:
           submodules: recursive
           persist-credentials: false
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake build-essential
+        run: bash scripts/runner-apt-install.sh "cmake gcc g++ make" cmake build-essential
       - name: Build mbedTLS 3.6.5
         run: |
           cmake -S .deps/mbedtls -B .deps/mbedtls-build \
@@ -108,9 +110,8 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
+      - uses: ./.github/actions/setup-go
+        id: go
       - name: Run fleet tests with race detector
         run: go test ./internal/fleet/... -count=1 -race -timeout 15m
       - name: Run gateway and configuration tests

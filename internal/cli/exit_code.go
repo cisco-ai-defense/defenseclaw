@@ -76,6 +76,11 @@ func usageFlagError(c *cobra.Command, err error) error {
 	if c == nil || err == nil {
 		return err
 	}
+	if !c.HasParent() && versionJSONSpelledApart(secretRawArgs()) {
+		// GAP-2448: `--version --json` asks for the version document of
+		// `--version-json`; it printed a usage error and no JSON.
+		return writeMachineVersion(c.OutOrStdout())
+	}
 	fields := strings.Fields(c.CommandPath())
 	for _, f := range fields[min(1, len(fields)):] {
 		for _, exempt := range usageFlagErrorExempt {
@@ -94,4 +99,10 @@ func usageFlagError(c *cobra.Command, err error) error {
 
 func init() {
 	rootCmd.SetFlagErrorFunc(usageFlagError)
+}
+
+// versionJSONSpelledApart reports a command line of exactly --version and
+// --json, in either order.
+func versionJSONSpelledApart(args []string) bool {
+	return len(args) == 2 && ((args[0] == "--version" && args[1] == "--json") || (args[0] == "--json" && args[1] == "--version"))
 }

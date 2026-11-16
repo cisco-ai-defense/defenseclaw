@@ -27,7 +27,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -39,6 +38,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
@@ -66,13 +66,19 @@ import (
 //	trace, request ID (always minted), correlation (identity from the
 //	              binding's host user)
 //	authorize     route allowlist and connector match (404/403),
-//	              per-binding limiter with separate hook and OTLP
-//	              slots (429), in-flight tracking
+//	              per-binding limiter with separate hook, delivery
+//	              receipt and OTLP slots (429), in-flight tracking
 //	metrics, CSRF, body limit (OTLP far below the host receiver's cap)
 //	idempotency   replay of a retried hook post by key
 //	mux           hook / notify / inspect / OTLP handlers
 
 const (
+	// This fixed, unauthenticated response identifies a sandbox ingress
+	// listener to the local managed daemon when a port bind fails. It carries
+	// no account, sandbox or process state.
+	sandboxIngressIdentityPath   = "/.well-known/defenseclaw-sandbox-ingress"
+	sandboxIngressIdentityHeader = "X-DefenseClaw-Sandbox-Ingress"
+	sandboxIngressIdentityValue  = "1"
 	// SandboxHookIdempotencyHeader carries a retry-stable key on sandbox hook
 	// posts. OpenShell's relay occasionally drops a response after the
 	// gateway processed the request; the hook retries once with the same key
@@ -416,6 +422,7 @@ func (a *APIServer) RunSandboxIngressOn(ctx context.Context, ln net.Listener) er
 		_ = ln.Close()
 		return errors.New("sandbox ingress is not configured")
 	}
+	a.startPendingHookRecovery(ctx)
 	handler, err := a.SandboxIngressHandler()
 	if err != nil {
 		_ = ln.Close()
@@ -601,8 +608,15 @@ func (a *APIServer) newSandboxIngressHandler(st *sandboxIngressState) http.Handl
 	h = CorrelationMiddleware(reg)(h)
 	h = sandboxRequestIDMiddleware(h)
 	h = inboundTraceContextMiddleware(h)
-	h = a.sandboxIngressAuthenticate(st, h)
-	return h
+	authenticated := a.sandboxIngressAuthenticate(st, h)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead && r.URL.Path == sandboxIngressIdentityPath {
+			w.Header().Set(sandboxIngressIdentityHeader, sandboxIngressIdentityValue)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		authenticated.ServeHTTP(w, r)
+	})
 }
 
 // sandboxIngressMux registers the only handlers the ingress serves and
@@ -796,16 +810,42 @@ func (a *APIServer) sandboxIngressAuthorize(
 			}
 			return
 		}
-		release, err := st.limiter.Acquire(binding, route.class)
+		if st.idem.replayExisting(w, r, binding, route.class) {
+			if observed {
+				st.observeHookFailure(binding, route, sw, false)
+			}
+			return
+		}
+		// A delivery receipt confirms an answer the hook budget already
+		// admitted: it takes the receipt bucket (GAP-0490).
+		var release func()
+		var err error
+		pendingHook := route.class == sandboxauth.RouteHook && !claimsSandboxHookReceipt(r)
+		switch {
+		case route.class == sandboxauth.RouteHook && claimsSandboxHookReceipt(r):
+			release, err = st.limiter.AcquireReceipt(binding)
+		case pendingHook:
+			release, err = st.limiter.AcquirePendingHook(binding)
+		default:
+			release, err = st.limiter.Acquire(binding, route.class)
+		}
 		if err != nil {
-			w.Header().Set("Retry-After", "1")
-			writeSandboxIngressError(w, http.StatusTooManyRequests, err.Error())
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			reason, message := sandboxHookRefusal(err)
+			writeHookRateLimited(w, reason, message)
 			if observed {
 				st.observeHookFailure(binding, route, sw, false)
 			}
 			return
 		}
 		defer release()
+		if route.class == sandboxauth.RouteHook {
+			// The client can no longer use a receipt after disconnecting.
+			// Durable audit completion may continue, but it must not hold the
+			// binding's admission slot against the next hook.
+			stop := context.AfterFunc(r.Context(), release)
+			defer stop()
+		}
 		end := st.inFlight.Begin(binding.ID)
 		defer end()
 		if st.onRequest != nil {
@@ -816,6 +856,11 @@ func (a *APIServer) sandboxIngressAuthorize(
 			r.Header.Del(header)
 		}
 		ctx := withSandboxIngressRoute(r.Context(), route.class)
+		if pendingHook {
+			ctx = withSandboxHookBudgetCharge(ctx, func(receipt bool) error {
+				return st.limiter.ChargeHookBody(binding, receipt)
+			})
+		}
 		ctx, outcome := withSandboxHookOutcome(ctx)
 		switch route.class {
 		case sandboxauth.RouteHook, sandboxauth.RouteNotify:
@@ -967,7 +1012,10 @@ func (a *APIServer) observeSandboxHookDecision(ctx context.Context, req agentHoo
 	if sink != nil {
 		// The tool input stays on this gateway: the daemon pairs a
 		// content-keyed call's events by its content reference.
-		decision.CallRef = manager.ContentRef(decision.SessionID, decision.Tool, decision.ToolInput)
+		decision.CallRef = req.pendingSandboxCallRef
+		if decision.CallRef == "" {
+			decision.CallRef = manager.ContentRef(decision.SessionID, decision.Tool, decision.ToolInput)
+		}
 		decision.ToolInput = nil
 		sink.put(decision)
 		return
@@ -988,8 +1036,8 @@ func (a *APIServer) sandboxAlertsLow(ctx context.Context, connectorName string) 
 // ..." text; sandboxModelErrorClass matches the error classes its
 // StopFailure names (authentication_failed, rate_limit, ...).
 var (
-	sandboxModelStatus     = regexp.MustCompile(`API Error: ([45][0-9]{2})\b`)
-	sandboxModelErrorClass = regexp.MustCompile(`^[a-z][a-z_]{0,39}$`)
+	sandboxModelStatus     = lazyregexp.New(`API Error: ([45][0-9]{2})\b`)
+	sandboxModelErrorClass = lazyregexp.New(`^[a-z][a-z_]{0,39}$`)
 )
 
 // sandboxModelError is the model API failure a StopFailure hook reports
@@ -1149,6 +1197,9 @@ func (a *APIServer) sandboxRelayForwarder(st *sandboxIngressState) http.Handler 
 		}
 		w.WriteHeader(resp.Status)
 		_, _ = w.Write(resp.Body)
+		if resp.Decision != nil && resp.Decision.FailedClosed {
+			markSandboxHookFailedClosed(r.Context())
+		}
 		if resp.Status < 200 || resp.Status > 299 || resp.Decision == nil || st.onHookDecision == nil {
 			return
 		}

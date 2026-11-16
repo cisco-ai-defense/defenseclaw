@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // The standalone enumerator keeps two small records beside targets.yaml:
@@ -112,16 +113,30 @@ func readWindowsProtectedRecord(path string, limit int64) ([]byte, error) {
 }
 
 // ReadWindowsUnprotectedAgents reads the enumerator's unprotected-agents
-// record for manifestPath. A missing record is an empty list.
+// record for manifestPath. A missing record is an error: status and verify
+// cannot assert complete coverage before the enumerator publishes it. The
+// record is parsed before its age is checked, as on Linux and macOS: a
+// malformed record is a parse error, and a stale one returns the agents its
+// last scan found with an UnprotectedAgentsStaleError, so verify still fails
+// on a known refusal gap.
 func ReadWindowsUnprotectedAgents(manifestPath string) ([]UnprotectedAgent, error) {
-	data, err := readWindowsProtectedRecord(UnprotectedAgentsPath(manifestPath), UnprotectedAgentsMaxBytes)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
+	path := UnprotectedAgentsPath(manifestPath)
+	data, err := readWindowsProtectedRecord(path, UnprotectedAgentsMaxBytes)
 	if err != nil {
 		return nil, err
 	}
-	return ParseUnprotectedAgents(data)
+	agents, err := ParseUnprotectedAgents(data)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if now := time.Now(); UnprotectedAgentsRecordStale(info.ModTime(), now) {
+		return agents, UnprotectedAgentsStaleError{Age: UnprotectedAgentsRecordAge(info.ModTime(), now)}
+	}
+	return agents, nil
 }
 
 // WriteWindowsUnprotectedAgents publishes the unprotected-agents record for
@@ -131,7 +146,13 @@ func WriteWindowsUnprotectedAgents(manifestPath string, agents []UnprotectedAgen
 	if err != nil {
 		return false, err
 	}
-	return WriteWindowsProtectedRecordAtomic(UnprotectedAgentsPath(manifestPath), data)
+	path := UnprotectedAgentsPath(manifestPath)
+	changed, err := WriteWindowsProtectedRecordAtomic(path, data)
+	if err != nil {
+		return changed, err
+	}
+	now := time.Now()
+	return changed, os.Chtimes(path, now, now)
 }
 
 func readWindowsBoundedPlainFile(path string, limit int64) ([]byte, error) {

@@ -118,6 +118,7 @@ func TestTeardownRemovedConnectorsDropsUnregistered(t *testing.T) {
 		[]string{retiredExampleConnector, "codex"},
 		nil,
 		connector.SetupOpts{DataDir: dataDir},
+		"",
 		context.Background(),
 	)
 	if len(failed) != 0 {
@@ -202,6 +203,7 @@ func TestTeardownRemovedConnectorsRetainsNameWhenPluginDiscoveryFailed(t *testin
 		[]string{retiredExampleConnector},
 		nil,
 		connector.SetupOpts{DataDir: dataDir},
+		"",
 		context.Background(),
 	)
 	if !reflect.DeepEqual(failed, []string{retiredExampleConnector}) || len(dropped) != 0 {

@@ -152,6 +152,16 @@ func (g *telemetryGuard) RecordSandboxApproval(ctx context.Context, e audit.Sand
 	return g.done(ctx, "approval", e.Sandbox.Name, g.next.RecordSandboxApproval(ctx, e))
 }
 
+func (g *telemetryGuard) RecordManagedAskDecision(ctx context.Context, e audit.SandboxAskDecidedEvent) error {
+	next, ok := g.next.(interface {
+		RecordManagedAskDecision(context.Context, audit.SandboxAskDecidedEvent) error
+	})
+	if !ok {
+		return nil
+	}
+	return g.done(ctx, "managed ask decision", e.Sandbox.Name, next.RecordManagedAskDecision(ctx, e))
+}
+
 func (g *telemetryGuard) RecordSandboxPolicy(ctx context.Context, e audit.SandboxPolicyEvent) error {
 	return g.done(ctx, "policy", e.Sandbox.Name, g.next.RecordSandboxPolicy(ctx, e))
 }

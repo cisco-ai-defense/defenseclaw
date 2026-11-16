@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -40,7 +41,11 @@ func toolPolicyAPI(t *testing.T, mode string) (*APIServer, *audit.Store) {
 	store, logger := testStoreAndLogger(t)
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = mode
-	return NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg), store
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg)
+	// These tests check policy wiring. Like testAPIServerWithConfig, allow
+	// race-instrumented workers time to run on a loaded build host.
+	api.inspectToolScanTimeout = 5 * time.Second
+	return api, store
 }
 
 // ---------------------------------------------------------------------------
@@ -96,9 +101,9 @@ func TestInspectTool_Allow_SkipsScanGate(t *testing.T) {
 
 	// After an explicit allow, the same call bypasses the scan gate.
 	allowTool(api.scannerCfg, "shell", "", "vetted")
-	_, v = postInspect(t, api, `{"tool":"shell","args":{"command":"rm -rf /"}}`)
+	response, v := postInspect(t, api, `{"tool":"shell","args":{"command":"rm -rf /"}}`)
 	if v.Action != "allow" {
-		t.Errorf("allow-listed: action = %q, want allow (allow must skip the scan gate)", v.Action)
+		t.Errorf("allow-listed: action = %q, want allow (HTTP %d: %s)", v.Action, response.Code, response.Body.String())
 	}
 }
 

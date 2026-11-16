@@ -84,30 +84,56 @@ func stampRuntimeCorrelation(
 // for traces and metrics. It stores correlation metadata only: no trace body,
 // metric value, labels, prompt, tool arguments, or result content enters the
 // ledger. Logs use EventHistoryWriter's caller-owned transaction so their
-// canonical local projection and observation commit atomically.
+// canonical local projection and observation commit atomically. A metric
+// batch commits the observations of all its records at once
+// (recordGeneratedMetricsWithLease).
 func persistRuntimeCorrelationObservation(
 	ctx context.Context,
 	store *audit.Store,
 	record observability.Record,
 ) error {
+	observation, observed, err := runtimeCorrelationObservationFor(store, record)
+	if err != nil || !observed {
+		return err
+	}
+	return recordRuntimeCorrelationObservations(ctx, store, observation)
+}
+
+// runtimeCorrelationObservationFor returns the observation that must commit
+// before the record is exported. observed is false for a record without
+// correlation, which has nothing to commit.
+func runtimeCorrelationObservationFor(
+	store *audit.Store,
+	record observability.Record,
+) (audit.CorrelationObservation, bool, error) {
 	correlation := record.Correlation()
 	if correlation.SemanticEventID == "" && correlation.LogicalEventID == "" &&
 		correlation.ConnectorInstanceID == "" {
-		return nil
+		return audit.CorrelationObservation{}, false, nil
 	}
 	if correlation.SemanticEventID == "" || correlation.LogicalEventID == "" ||
 		correlation.ConnectorInstanceID == "" || store == nil {
-		return errRuntimeCorrelationIncomplete
+		return audit.CorrelationObservation{}, false, errRuntimeCorrelationIncomplete
 	}
+	observation, err := runtimeCorrelationObservation(record)
+	if err != nil {
+		return audit.CorrelationObservation{}, false, err
+	}
+	return observation, true, nil
+}
+
+// recordRuntimeCorrelationObservations commits the observations in one audit
+// transaction.
+func recordRuntimeCorrelationObservations(
+	ctx context.Context,
+	store *audit.Store,
+	observations ...audit.CorrelationObservation,
+) error {
 	repository, err := store.CorrelationRepository()
 	if err != nil {
 		return err
 	}
-	observation, err := runtimeCorrelationObservation(record)
-	if err != nil {
-		return err
-	}
-	return repository.RecordObservation(ctx, observation)
+	return repository.RecordObservations(ctx, observations...)
 }
 
 func runtimeCorrelationObservation(record observability.Record) (audit.CorrelationObservation, error) {

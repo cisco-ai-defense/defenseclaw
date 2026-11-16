@@ -107,8 +107,8 @@ WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
     ),
     "opencode": ConnectorPlatformSupport(
         SUPPORTED,
-        "OpenCode native Windows setup is supported; OpenCode recommends WSL but does "
-        "not require it.",
+        "OpenCode V2 and the DefenseClaw plugin are supported on native Windows x64 "
+        "using the reviewed @opencode/cli contract.",
     ),
     "amp": ConnectorPlatformSupport(
         SUPPORTED,
@@ -118,16 +118,6 @@ WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
         SUPPORTED,
         "Hermes native shell hooks use a direct DefenseClaw executable on native "
         "Windows x64; restart any open Hermes session after setup so it loads them.",
-    ),
-    "openhands": ConnectorPlatformSupport(
-        UNSUPPORTED,
-        "OpenHands CLI requires WSL; DefenseClaw does not implement a WSL connector path.",
-    ),
-    "omnigent": ConnectorPlatformSupport(
-        SUPPORTED,
-        "OmniGent is supported on native Windows in degraded mode; "
-        "DefenseClaw uses its awaited in-process policy API "
-        "without terminal wrapping or filesystem/network sandbox parity.",
     ),
     "openclaw": ConnectorPlatformSupport(
         UNSUPPORTED,
@@ -158,8 +148,6 @@ WINDOWS_UNSUPPORTED_FEATURES: frozenset[str] = frozenset(
     {
         "sandbox",
         "enterprise-hooks",
-        "openhands",
-        "omnigent-terminal-sandbox",
         "openclaw",
         "zeptoclaw",
     }
@@ -203,6 +191,17 @@ def connector_platform_support(
                 NOT_CERTIFIED,
                 "This connector has not completed native Windows x64 certification.",
             ),
+        )
+    if name == "opencode":
+        if resolved_os in {"linux", "darwin"}:
+            return ConnectorPlatformSupport(
+                SUPPORTED,
+                "OpenCode V2 and the DefenseClaw plugin are supported on Linux and macOS "
+                "using the reviewed @opencode/cli contract.",
+            )
+        return ConnectorPlatformSupport(
+            PREVIEW,
+            "OpenCode V2 has not completed certification on this operating system.",
         )
     return ConnectorPlatformSupport(
         SUPPORTED,

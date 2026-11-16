@@ -131,7 +131,7 @@ func managedStatusOfExplain(m *sandboxapi.ManagedExplain) *sandboxapi.ManagedSta
 	if m == nil {
 		return nil
 	}
-	return &sandboxapi.ManagedStatus{Profile: m.Profile, Description: m.Description, HostRunGate: m.HostRunGate, Provisional: m.Provisional,
+	return &sandboxapi.ManagedStatus{Profile: m.Profile, Description: m.Description, Allowed: m.Allowed, HostRunGate: m.HostRunGate, Provisional: m.Provisional,
 		EffectiveDigest: m.PolicyDigest, UpdatedAt: m.UpdatedAt, RequestAccess: m.RequestAccess,
 		Driver: m.Driver, DriverReason: m.DriverReason, DriverFallback: m.DriverFallback}
 }
@@ -196,7 +196,7 @@ func matchText(m *sandboxapi.ManagedExplain) string {
 	case "default_unverified":
 		return "the default (your identity could not be verified)"
 	case "default_lookup_failed":
-		return "the default (your directory couldn't be reached)"
+		return "the default (your directory couldn't be reached; no assignment needs the missing facts)"
 	case "none":
 		return "no organization profile applies; your organization's floor does"
 	}
@@ -292,6 +292,21 @@ func managedExplainRows(m *sandboxapi.ManagedExplain, now time.Time) []managedRo
 	return managedExplainRowsFor(m, nil, "", now)
 }
 
+func managedProfileIdentity(m *sandboxapi.ManagedExplain) string {
+	profile := sandboxapi.DisplayText(m.Profile)
+	if profile == "" {
+		profile = "(your organization's floor)"
+	} else {
+		// The profile the sandbox's floor is still pinned to (GAP-0285).
+		profile = sandboxapi.PinnedProfileLabel(sandboxapi.DisplayText(m.PinnedProfile), profile)
+	}
+	text := profile + "   matched: " + matchText(m)
+	if m.Provisional {
+		text += "; provisional until your directory answers"
+	}
+	return text
+}
+
 // managedExplainRowsFor is managedExplainRows with the explained run's
 // posture (ex: its pack and modes, nil when unknown) and the agent the
 // explain names ("" none).
@@ -299,15 +314,7 @@ func managedExplainRowsFor(m *sandboxapi.ManagedExplain, ex *sandboxapi.Explain,
 	var rows []managedRow
 	add := func(label, text string, keys ...string) { rows = append(rows, managedRow{label, text, keys}) }
 
-	profile := sandboxapi.DisplayText(m.Profile)
-	if profile == "" {
-		profile = "(your organization's floor)"
-	}
-	text := profile + "   matched: " + matchText(m)
-	if m.Provisional {
-		text += "; provisional until your directory answers"
-	}
-	add("Organization profile", text)
+	add("Organization profile", managedProfileIdentity(m))
 	if d := strings.TrimSpace(m.Description); d != "" {
 		add("", sandboxapi.DisplayText(d))
 	}
@@ -396,8 +403,13 @@ func managedExplainRowsFor(m *sandboxapi.ManagedExplain, ex *sandboxapi.Explain,
 		approvals += "; you can't unblock destinations"
 	}
 	add("Approvals", approvals, "user_approvals", "allow_unblock")
+	foreign := "stopped"
+	if m.ForeignSandboxes == config.OpenShellForeignSandboxesAlert {
+		foreign = "reported to your administrators"
+	}
+	add("Other sandboxes", "sandboxes outside DefenseClaw are "+foreign, "foreign_sandboxes")
 
-	if len(m.MCPIncluded) > 0 || len(m.MCPBlocked) > 0 {
+	if len(m.MCPIncluded) > 0 || len(m.MCPBlocked) > 0 || m.MCPProjectCount > 0 {
 		var org, asset int
 		for _, b := range m.MCPBlocked {
 			if b.Reason == "asset_policy" {
@@ -412,6 +424,16 @@ func managedExplainRowsFor(m *sandboxapi.ManagedExplain, ex *sandboxapi.Explain,
 		}
 		if asset > 0 {
 			text += fmt.Sprintf("; %d left out by your organization's asset policy", asset)
+		}
+		if n := m.MCPProjectCount; n > 0 {
+			verb, why := "don't start", "the pack blocks project servers"
+			if !m.MCPProjectBlocked {
+				verb, why = "start", "the pack allows project servers"
+			}
+			if n == 1 {
+				verb = map[string]string{"don't start": "doesn't start", "start": "starts"}[verb]
+			}
+			text += "; the project's " + plural(int64(n), "server", "servers") + " " + verb + " (" + why + ")"
 		}
 		add("MCP", text, "mcp_included", "mcp_blocked")
 	}
@@ -760,19 +782,28 @@ func neutralStatus(st *sandboxapi.Status) *sandboxapi.Status {
 	return &out
 }
 
+// organizationPolicyText is the "Your policy" row's value without its
+// pointer to `policy explain`: the organization profile of the caller's
+// match, whether it is provisional, and the digest of the effective policy
+// of that same match.
+func organizationPolicyText(profile string, provisional bool, digest string) string {
+	policy := firstNonEmpty(sandboxapi.DisplayText(profile), "your organization's policy")
+	if profile != "" {
+		policy = "organization profile " + policy
+	}
+	if provisional {
+		policy += " (provisional: your directory couldn't be reached; your organization's default applies)"
+	}
+	if id := shortDigest(digest); id != "" {
+		policy += " " + id + " (yours)"
+	}
+	return policy
+}
+
 // managedStatusRows are the rows `status` adds on a managed computer: the
 // caller's own policy and the daemon's OpenShell.
 func managedStatusRows(m *sandboxapi.ManagedStatus, now time.Time) [][2]string {
-	policy := firstNonEmpty(sandboxapi.DisplayText(m.Profile), "your organization's policy")
-	if m.Profile != "" {
-		policy = "organization profile " + policy
-	}
-	if m.Provisional {
-		policy += " (provisional: your directory couldn't be reached; your organization's default applies)"
-	}
-	if id := shortDigest(m.EffectiveDigest); id != "" {
-		policy += " " + id + " (yours)"
-	}
+	policy := organizationPolicyText(m.Profile, m.Provisional, m.EffectiveDigest)
 	if ago := agoText(m.UpdatedAt, now); ago != "" {
 		policy += ", updated " + ago
 	}
@@ -792,6 +823,9 @@ func managedStatusRows(m *sandboxapi.ManagedStatus, now time.Time) [][2]string {
 	}
 	if m.PendingRestart {
 		rows = append(rows, [2]string{"Pending", "an update of the sandbox service waits until your sandboxes stop"})
+	}
+	if m.RenderedConfigDrift {
+		rows = append(rows, [2]string{"Settings drift", "your organization's OpenShell gateway configuration changed outside DefenseClaw; ask IT to repair it"})
 	}
 	if text := otherGatewaysText(m.OtherGateways); text != "" {
 		rows = append(rows, [2]string{"Other gateway", text})
@@ -879,7 +913,7 @@ func firstCovering(globs []string, host string) string {
 // managedPolicyCheck is the doctor's "Organization policy" row on a managed
 // computer: the caller's own profile and policy id, never the local
 // configuration, and a warning while the directory could not be reached.
-func (a *App) managedPolicyCheck(m *sandboxapi.ManagedStatus) openshell.Check {
+func (a *App) managedPolicyCheck(ctx context.Context, m *sandboxapi.ManagedStatus) openshell.Check {
 	c := openshell.Check{ID: CheckIDAdmin, Title: "Organization policy", Status: openshell.StatusPass}
 	// Before the first sandbox the daemon knows no profile: the row then
 	// names the policy, not a "profile" without a name (GAP-0175).
@@ -893,13 +927,113 @@ func (a *App) managedPolicyCheck(m *sandboxapi.ManagedStatus) openshell.Check {
 	if ago := agoText(m.UpdatedAt, a.Now()); ago != "" {
 		c.Detail += ", updated " + ago
 	}
-	if m.Provisional {
+	allowed, denied := m.Allowed, m.DeniedHarnesses
+	if m.LegacyAllowedMissing {
+		var err error
+		allowed, denied, err = a.legacyManagedPermission(ctx)
+		if err != nil {
+			c.Status = openshell.StatusFail
+			c.Detail += ": this older sandbox service did not report authorization, and its policy explanation could not confirm it: " + sandboxapi.DisplayText(err.Error())
+			c.Fix = &openshell.Fix{Summary: sandboxapi.AccessContact(m.RequestAccess)}
+			return c
+		}
+	}
+	if !allowed && len(denied) == 0 && m.PolicyLimited {
+		// The account's request limit refused the policy read in a burst of
+		// sandbox commands: no policy verdict, and it passes on its own
+		// (GAP-2203, the GAP-1693 words).
+		c.Status = openshell.StatusWarn
+		c.Detail += ": not read just now: " + callerLimitText
+		c.Fix = &openshell.Fix{Summary: "wait a few seconds, then run " + CommandName + " doctor again"}
+		return c
+	}
+	if !allowed {
+		c.Status = openshell.StatusFail
+		switch {
+		case len(denied) > 0:
+			c.Detail += ": your organization doesn't allow sandboxes for " + strings.Join(sandboxapi.DisplayTexts(denied), ", ")
+		case strings.TrimSpace(m.PolicyUnread) != "":
+			c.Detail += ": sandbox authorization could not be confirmed for your account: " + sandboxapi.DisplayText(m.PolicyUnread)
+		default:
+			c.Detail += ": sandbox authorization could not be confirmed for your account"
+		}
+		c.Fix = &openshell.Fix{Summary: sandboxapi.AccessContact(m.RequestAccess)}
+	} else if m.Provisional {
 		c.Status = openshell.StatusWarn
 		c.Detail += ": your directory couldn't be reached, so your organization's default applies for now"
 		c.Fix = &openshell.Fix{Summary: "nothing to do on this computer; the policy updates when the directory answers. " +
 			sandboxapi.AccessContact(m.RequestAccess)}
 	}
 	return c
+}
+
+// legacyDaemonHarness names, in a denial, the agent an older sandbox
+// service judged for a doctor that named none.
+const legacyDaemonHarness = "the agent your sandbox service is configured to run"
+
+// legacyManagedPermission asks an older daemon's existing explain endpoint
+// whether sandboxes may run. Its status did not carry that verdict, so
+// absence must not mean a denial or an approval. For each harness this
+// CLI's openshell.harnesses names it asks about that harness; with none,
+// it asks once without a harness, which the daemon answers for the harness
+// its own managed configuration runs (managedConnector in
+// internal/gateway: the first of its harnesses, else Claude Code). The
+// CLI's local setup defaults never stand in for the daemon's
+// configuration. That answer cannot say which harness it judged, so a
+// profile's allowed_harnesses list is the daemon's to apply at run time.
+func (a *App) legacyManagedPermission(ctx context.Context) (bool, []string, error) {
+	api, err := a.api()
+	if err != nil {
+		return false, nil, err
+	}
+	var names []string
+	if a.Cfg != nil {
+		names = a.Cfg.OpenShell.Harnesses
+	}
+	if len(names) == 0 {
+		ex, err := api.Explain(ctx, sandboxapi.ExplainRequest{})
+		if err != nil {
+			return false, nil, err
+		}
+		if ex == nil || ex.Managed == nil {
+			return false, nil, fmt.Errorf("no managed policy for %s", legacyDaemonHarness)
+		}
+		if !ex.Managed.Allowed {
+			return false, []string{legacyDaemonHarness}, nil
+		}
+		return true, nil, nil
+	}
+	specs, err := a.harnesses(names)
+	if err != nil {
+		return false, nil, err
+	}
+	var denied []string
+	for _, spec := range specs {
+		ex, err := api.Explain(ctx, sandboxapi.ExplainRequest{Harness: spec.Name})
+		if err != nil {
+			return false, nil, err
+		}
+		if ex == nil || ex.Managed == nil {
+			return false, nil, fmt.Errorf("no managed policy for %s", spec.Name)
+		}
+		if !ex.Managed.Allowed || !managedHarnessListed(ex.Managed.AllowedHarnesses, spec.Name) {
+			denied = append(denied, spec.Name)
+		}
+	}
+	return len(denied) == 0, denied, nil
+}
+
+func managedHarnessListed(allowed []string, name string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	name = config.NormalizeConnectorName(name)
+	for _, h := range allowed {
+		if config.NormalizeConnectorName(h) == name {
+			return true
+		}
+	}
+	return false
 }
 
 // managedRuntimeCheck is the doctor's row for the daemon's OpenShell on a
@@ -924,8 +1058,9 @@ func managedRuntimeCheck(m *sandboxapi.ManagedStatus) openshell.Check {
 	switch {
 	case m.Unavailable == sandboxrelay.UnavailableSetupChanging:
 		// The organization's switch of the setup is under way: it clears
-		// by itself, and is nothing to ask IT about (#1203).
-		c.Status = openshell.StatusWarn
+		// by itself, and is nothing to ask IT about. A run refuses until
+		// it clears, so doctor must not report ready (GAP-0528).
+		c.Status = openshell.StatusFail
 		c.Detail = m.Unavailable
 		c.Fix = &openshell.Fix{Summary: "nothing to do on this computer; run the command again in a few minutes"}
 	case m.Unavailable != "":
@@ -936,6 +1071,13 @@ func managedRuntimeCheck(m *sandboxapi.ManagedStatus) openshell.Check {
 		c.Status = openshell.StatusWarn
 		c.Detail += "; an update waits until your sandboxes stop"
 		c.Fix = &openshell.Fix{Summary: "stop your sandboxes (" + CommandName + " stop NAME); the next command applies the update"}
+	}
+	if m.RenderedConfigDrift {
+		c.Detail += "; the organization's OpenShell gateway configuration changed outside DefenseClaw"
+		if c.Status == openshell.StatusPass {
+			c.Status = openshell.StatusFail
+			c.Fix = &openshell.Fix{Summary: "ask IT to repair the managed OpenShell gateway configuration"}
+		}
 	}
 	return c
 }
@@ -949,6 +1091,11 @@ func managedDriverCheck(m *sandboxapi.ManagedStatus) *openshell.Check {
 	text := managedDriverText(m.Driver, m.DriverReason, m.DriverFallback)
 	if text == "" {
 		return nil
+	}
+	if m.PendingRestart || m.Unavailable == sandboxrelay.UnavailableSetupChanging {
+		return &openshell.Check{ID: "managed-driver", Title: "Sandbox driver", Status: openshell.StatusWarn,
+			Detail: text + "; the authorized sandbox setup update is waiting to finish",
+			Fix:    &openshell.Fix{Summary: "stop your sandboxes (" + CommandName + " stop NAME), then retry; the next command applies the update"}}
 	}
 	c := openshell.Check{ID: "managed-driver", Title: "Sandbox driver", Status: openshell.StatusPass, Detail: text}
 	if openshell.IsFallbackReason(m.DriverReason) {
@@ -989,6 +1136,9 @@ var managedVMDriverGoarch = runtime.GOARCH
 // and the administrator's pinned-digest install. c is nil when the daemon
 // named no driver.
 func (a *App) withAdminVMDriver(c *openshell.Check, m *sandboxapi.ManagedStatus) *openshell.Check {
+	if m.PendingRestart || m.Unavailable == sandboxrelay.UnavailableSetupChanging {
+		return c
+	}
 	goos := a.GOOS
 	if goos == "" {
 		goos = runtime.GOOS
@@ -1036,6 +1186,9 @@ func (a *App) withAdminVMDriver(c *openshell.Check, m *sandboxapi.ManagedStatus)
 // driver_dir has gone stale; the gateway cannot use that later driver until
 // enterprise ensure refreshes the render (GAP-0573).
 func (a *App) withRenderedVMDriver(c *openshell.Check, m *sandboxapi.ManagedStatus, paths *openshell.RenderedPaths) *openshell.Check {
+	if m.PendingRestart || m.Unavailable == sandboxrelay.UnavailableSetupChanging {
+		return c
+	}
 	if c == nil || c.Status != openshell.StatusPass || m.InstallMode != config.EnterpriseOpenShellInstallPrerequisite ||
 		(m.Driver != config.EnterpriseOpenShellDriverVM && m.Driver != config.EnterpriseOpenShellDriverAuto) || openshell.IsFallbackReason(m.DriverReason) {
 		return c
@@ -1075,17 +1228,27 @@ func (a *App) withRenderedVMDriver(c *openshell.Check, m *sandboxapi.ManagedStat
 // managedDockerCheck is the doctor's Docker row on a managed Mac. The
 // MicroVM driver boots the agent images that DefenseClaw builds in the
 // account's Docker, so if Docker does not answer for the account, every
-// first run stops (GAP-0443).
-func (a *App) managedDockerCheck(ctx context.Context, m *sandboxapi.ManagedStatus) openshell.Check {
+// first run stops (GAP-0443). While another account uses this computer's
+// sandboxes (elsewhere), this account runs none whatever its Docker does,
+// and Docker Desktop answers only an account signed in to the Mac's desktop:
+// starting it or building images is no fix then, and the row says so
+// instead of failing (GAP-0515); the DefenseClaw daemon row names the wait.
+func (a *App) managedDockerCheck(ctx context.Context, m *sandboxapi.ManagedStatus, elsewhere bool) openshell.Check {
 	c := openshell.Check{ID: "managed-docker", Title: "Docker", Status: openshell.StatusPass}
 	engine, err := a.DockerEngine(ctx)
+	if err != nil && elsewhere {
+		c.Status = openshell.StatusSkip
+		c.Detail = "not needed now: another account is using sandboxes on this computer (one account at a time, see DefenseClaw daemon); " +
+			"Docker Desktop answers only the account signed in to this Mac's desktop"
+		return c
+	}
 	if err != nil {
 		c.Status, c.Detail = openshell.StatusFail, "Docker does not answer for your account, and your agent's sandbox image is built in it"
 		contact := sandboxapi.RequestAccessText(m.RequestAccess)
 		if contact != sandboxapi.RequestAccessFallback {
 			contact = "contact " + contact
 		}
-		c.Fix = &openshell.Fix{Summary: "start Docker Desktop and run this again; if you have no Docker, " + contact}
+		c.Fix = &openshell.Fix{Summary: "sign in to this Mac's desktop as yourself, start Docker Desktop and run this again; if you have no Docker, " + contact}
 		return c
 	}
 	c.Detail = firstNonEmpty(engine, "running") + "; your agent images are built in it"

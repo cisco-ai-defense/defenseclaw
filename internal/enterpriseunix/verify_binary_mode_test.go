@@ -42,3 +42,28 @@ func TestVerifyReportsAManagedBinaryThatLostItsExecuteBits(t *testing.T) {
 		})
 	}
 }
+
+// GAP-0482: the lifecycle repair docs promise to reapply files, owners and
+// modes. A byte-identical managed binary that only lost its execute bits (the
+// sensor helper, which no sealed copy backs) is made executable again by
+// repair instead of being refused as an invalid payload.
+func TestRepairRestoresTheExecuteBitsOfAManagedBinaryWithIdenticalBytes(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			writeFreshLedger(t, h)
+			for _, name := range []string{binSensorHelper, binGateway} {
+				path := h.env.P(filepath.Join(h.env.Layout.BinDir, name))
+				if err := os.Chmod(path, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				requireOK(t, h.run(Options{Action: ActionRepair}))
+				if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o755 {
+					t.Fatalf("repair left %s at %v (%v), want 0755", name, info, err)
+				}
+				requireOK(t, h.run(Options{Action: ActionVerify}))
+			}
+		})
+	}
+}

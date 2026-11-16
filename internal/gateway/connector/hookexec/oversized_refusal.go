@@ -21,6 +21,10 @@ const HookRefusalHeader = "X-DefenseClaw-Hook-Refusal"
 // hook refused because its payload is over the hook's cap.
 const HookRefusalPayloadTooLarge = "payload_too_large"
 
+// MalformedHookPayloadReason marks a gateway parser refusal. The native hook
+// closes this failure outside Secure Client, including in per-user open mode.
+const MalformedHookPayloadReason = "malformed_hook_payload"
+
 // oversizedRefusalReportTimeout bounds the report, so a slow gateway never
 // delays the refusal the agent is waiting for.
 var oversizedRefusalReportTimeout = 2 * time.Second
@@ -135,7 +139,7 @@ func refusalReportTransport(opts Options) (*http.Client, string, bool) {
 	case opts.ExplainUnenrolledAccount && opts.AuthenticatedManagedToken != nil &&
 		strings.TrimSpace(*opts.AuthenticatedManagedToken) != "":
 		if client == nil {
-			client, err = managedEnterpriseHTTPClient(oversizedRefusalReportTimeout, opts.APIAddr, opts.ManagedGatewayServiceName)
+			client, err = managedEnterpriseHTTPClientFor(oversizedRefusalReportTimeout, opts.APIAddr, opts.ManagedGatewayServiceName, opts.SecureClient)
 		}
 		return client, strings.TrimSpace(*opts.AuthenticatedManagedToken), err == nil
 	}

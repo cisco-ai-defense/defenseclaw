@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import locale
@@ -34,7 +35,7 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from io import StringIO
@@ -63,13 +64,16 @@ from defenseclaw.connector_paths import (
     connector_home,
     devin_hook_config_path,
     hermes_config_path,
-    omnigent_config_path,
 )
+from defenseclaw.file_lock import locked_file_update
 from defenseclaw.file_permissions import (
     atomic_write_private_bytes,
+    make_private_directory,
     open_regular_file_no_follow,
+    other_accounts_can_write,
     reject_reparse_path,
 )
+from defenseclaw.inventory.claude_desktop import EngineBuild, claude_desktop_engines
 
 # Sentinel error returned by ``_version_for_binary`` when a connector
 # binary resolves outside the trusted install prefixes. Callers (e.g.
@@ -79,11 +83,16 @@ from defenseclaw.file_permissions import (
 # sides — if the wording ever changes, the consumer can't silently drift.
 UNTRUSTED_PREFIX_ERROR = "binary path is not in a trusted install prefix"
 
-# Version 4 adds passive macOS application-bundle discovery. Version 3
-# separates a connector's on-disk configuration from a verified application
-# installation; older caches therefore cannot represent every current install
-# signal faithfully.
-CACHE_SCHEMA_VERSION = 6
+#: ``AgentSignal.source`` of Claude Code: the ``claude`` CLI, or the Claude
+#: Code engine Claude Desktop runs for Cowork and its Code tab (an account
+#: with Claude Desktop and no CLI, cowork-1-0-8 GAP-0036).
+SOURCE_CLI = "cli"
+SOURCE_CLAUDE_DESKTOP = "claude-desktop"
+_SOURCES = frozenset({SOURCE_CLI, SOURCE_CLAUDE_DESKTOP})
+
+# Version 7 keeps Kiro CLI and IDE versions separately; an older cache can
+# incorrectly call the whole connector supported after seeing only one binary.
+CACHE_SCHEMA_VERSION = 7
 CACHE_TTL_SECONDS = 86_400
 CACHE_FILENAME = "agent_discovery.json"
 # Node and Python CLIs take over a second for --version when idle, and
@@ -94,8 +103,10 @@ VERSION_PROBE_TIMED_OUT = "version probe timed out"
 #: The error of an agent whose CLI the current command did not run because it
 #: only sets up other connectors (GAP-0901).
 VERSION_NOT_PROBED = "version not probed: not being set up"
+VERSION_EXECUTABLE_CHANGED = "version probe: the executable could not be shown unchanged while it was being read"
 PACKAGE_MANAGER_CONFIG_TIMEOUT_SECONDS = 5.0
 _ANTIGRAVITY_BINARY_MAX_BYTES = 256 << 20
+_KIRO_IDE_PRODUCT_MAX_BYTES = 256 << 10
 _WINDOWS_LOCAL_APP_DATA_FOLDER_ID = "F1B32785-6FBA-4FCF-9D55-7B8E7F157091"
 _WINDOWS_KF_FLAG_NO_PACKAGE_REDIRECTION = 0x00010000
 
@@ -499,6 +510,15 @@ def _configured_manager_prefix_from_output(output: bytes | str | None) -> str:
     return absolute
 
 
+def _run_probe(argv: list[str], *, timeout: float, **kwargs) -> subprocess.CompletedProcess:
+    """Run one bounded probe; on Windows a timeout ends its whole process tree."""
+    if os.name != "nt":
+        return subprocess.run(argv, timeout=timeout, **kwargs)
+    from defenseclaw.tui.windows_process import run_in_job
+
+    return run_in_job(argv, timeout=timeout, **kwargs)
+
+
 def _windows_manager_probe_environment(
     executable: str,
     folders: _WindowsPackageManagerFolders,
@@ -578,7 +598,9 @@ def _probe_windows_configured_package_manager_bin_prefixes() -> tuple[str, ...]:
             if not _trusted_windows_package_manager_path(manager, executable):
                 continue
             try:
-                result = subprocess.run(
+                # npm.cmd runs node.exe under cmd.exe: run_in_job ends both on
+                # a timeout (rel-1-0-6:GAP-0059).
+                result = _run_probe(
                     [executable, *query],
                     shell=False,
                     timeout=PACKAGE_MANAGER_CONFIG_TIMEOUT_SECONDS,
@@ -710,6 +732,7 @@ def _windows_default_trusted_bin_prefixes() -> tuple[str, ...]:
                 # admission; passive Python discovery only trusts this
                 # bounded path and the existing ACL-chain checks.
                 os.path.join(codex_local_app_data, "devin", "cli", "bin"),
+                os.path.join(codex_local_app_data, "Kiro-Cli"),
                 # Hermes' official Windows updater owns this exact venv. Bind
                 # discovery to the current token's Known Folder instead of an
                 # inherited LOCALAPPDATA value or a coexisting legacy home.
@@ -789,11 +812,9 @@ DISCOVERY_PRECEDENCE: tuple[str, ...] = (
     "cursor",
     "devin",
     "copilot",
-    "openhands",
     "antigravity",
     "opencode",
     "amp",
-    "omnigent",
     "kiro",
 )
 
@@ -811,6 +832,47 @@ class AgentSignal:
     configured: bool = False
     active: bool = False
     mode: str = ""
+    # Candidates ahead of binary_path that the version probe passed over. A
+    # later scan that does not probe carries the version only while exactly
+    # these are still ahead of it, so a newly preferred binary is not
+    # reported at the old one's version.
+    skipped_binaries: tuple[str, ...] = ()
+    kiro_cli_version: str = ""
+    kiro_ide_version: str = ""
+    #: Every Kiro install the probe found (connector_contracts.assess_kiro):
+    #: ``{"kind": "cli"|"ide", "version": ..., "unread": ..., "path": ...}``.
+    #: ``version`` is empty and ``unread`` says why when the probe failed.
+    kiro_forms: list[dict[str, str]] = field(default_factory=list)
+    #: Claude Code only: SOURCE_CLI or SOURCE_CLAUDE_DESKTOP for the
+    #: installation ``binary_path`` names; "" when none was found.
+    source: str = ""
+    #: When the version above was read (RFC 3339, microseconds): after the
+    #: probe that returned it, or the time a kept version was first read.
+    #: Two scans that overlap are ordered by this, not by when each started;
+    #: "" means the scan time stands for it (GAP-0752).
+    observed_at: str = ""
+    #: Which executable ``version`` was read from (:func:`_executable_identity`,
+    #: taken before the probe and checked after it); [] when it is not known.
+    #: The cache keeps a version only while the file at ``binary_path`` is still
+    #: that executable (GAP-0752).
+    identity: list[Any] = field(default_factory=list)
+
+
+#: The most Kiro forms one signal records.
+_KIRO_FORMS_MAX = 16
+
+
+def _kiro_forms_from_cache(raw: Any) -> list[dict[str, str]]:
+    """Validated ``kiro_forms`` from a cache entry (bounded, strings only)."""
+
+    if not isinstance(raw, list):
+        return []
+    forms: list[dict[str, str]] = []
+    for item in raw[:_KIRO_FORMS_MAX]:
+        if not isinstance(item, dict) or item.get("kind") not in ("cli", "ide"):
+            continue
+        forms.append({key: str(item.get(key) or "")[:512] for key in ("kind", "version", "unread", "path")})
+    return forms
 
 
 @dataclass
@@ -869,18 +931,6 @@ _SPECS: dict[str, _AgentSpec] = {
         "copilot",
         ("--version",),
     ),
-    "openhands": _AgentSpec(
-        (
-            ".openhands/hooks.json",
-            "~/.openhands/hooks.json",
-            "~/.openhands/mcp.json",
-            "~/.openhands/settings.json",
-            "~/.openhands/agent_settings.json",
-            "~/.openhands/cli_config.json",
-        ),
-        "openhands",
-        ("--version",),
-    ),
     "antigravity": _AgentSpec(
         # The documented global hooks file is configuration evidence, but
         # configuration alone never proves an installed official client.
@@ -908,6 +958,7 @@ _SPECS: dict[str, _AgentSpec] = {
         ),
         "opencode",
         ("--version",),
+        binary_names=("opencode", "opencode2"),
     ),
     "amp": _AgentSpec(
         (
@@ -919,11 +970,6 @@ _SPECS: dict[str, _AgentSpec] = {
             ".amp/settings.jsonc",
         ),
         "amp",
-        ("--version",),
-    ),
-    "omnigent": _AgentSpec(
-        ("~/.omnigent/config.yaml",),
-        "omnigent",
         ("--version",),
     ),
     "kiro": _AgentSpec(
@@ -961,27 +1007,36 @@ def _configured_probe_names(data_dir: str | os.PathLike[str] | None) -> frozense
         guardrail = document.get("guardrail", {})
         connectors = guardrail.get("connectors", {})
         names = {
-            str(name).lower() for name, entry in connectors.items()
-            if isinstance(entry, dict) and entry.get("enabled") is not False
+            _normalize_connector(str(name)) for name, entry in connectors.items()
+            if not (isinstance(entry, dict) and entry.get("enabled") is False)
         } if isinstance(connectors, dict) else set()
-        primary = guardrail.get("connector")
-        if guardrail.get("enabled") and isinstance(primary, str) and primary:
-            names.add(primary.lower())
+        if guardrail.get("enabled"):
+            # Config.active_connector precedence: guardrail.connector, then
+            # claw.mode. A 0.8.x single-connector config names its connector
+            # only in claw.mode, and a targeted setup scan must still probe
+            # it before it replaces that peer's cached version.
+            claw = document.get("claw", {})
+            for primary in (guardrail.get("connector"), claw.get("mode") if isinstance(claw, dict) else None):
+                if isinstance(primary, str) and primary.strip():
+                    names.add(_normalize_connector(primary.strip()))
+                    break
         return frozenset(names)
     except (OSError, ValueError, TypeError, AttributeError, yaml.YAMLError):
         return frozenset()
 
 
 def restrict_probes(connectors: list[str]) -> Any:
-    """Run only the CLIs of ``connectors`` in this command's discovery scans.
+    """Limit version probes to ``connectors`` and configured peers.
 
     ``init --connector copilot`` ran every installed agent CLI as a version
     probe, and those CLIs wrote their own config and cache folders
     (~/.codex, ~/.cursor, ~/.config/opencode, ...) into the home of a user
-    who never started them (GAP-0901). The other agents are still found by
-    binary and config path; their version is the last one observed for the
-    same unchanged binary, else unknown. Returns the token for
-    :func:`end_probe_restriction`.
+    who never started them (GAP-0901). Configured active peers must also be
+    checked before a setup scan replaces the gateway's version cache; an
+    unchanged peer keeps its recent version and a changed peer is probed. Other
+    agents are still found by binary and config path; their version is the
+    last one observed for the same unchanged binary, else unknown. Returns
+    the token for :func:`end_probe_restriction`.
     """
     return _PROBE_ONLY.set(frozenset(connectors))
 
@@ -991,7 +1046,7 @@ def end_probe_restriction(token: Any) -> None:
 
 
 def discover_with_probes(connectors: list[str], **kwargs: Any) -> AgentDiscovery:
-    """Probe only connectors explicitly selected by the current setup flow."""
+    """Probe selected connectors and configured peers without reusable versions."""
     token = restrict_probes(connectors)
     try:
         return discover_agents(**kwargs)
@@ -1154,8 +1209,13 @@ def discover_agents(
     refresh: bool = False,
     data_dir: str | os.PathLike[str] | None = None,
     persist_cache: bool = True,
+    reuse_shared: bool = True,
 ) -> AgentDiscovery:
     """Return cached or freshly scanned local agent install signals.
+
+    ``reuse_shared=False`` reads the agents again even inside
+    :func:`share_fresh_scans`, and the new scan replaces the shared one: the
+    retry of a version probe that failed must not get the failed scan back.
 
     ``persist_cache=False`` is for a caller that needs a fresh, read-only
     admission decision for one connector.  The returned scan still covers the
@@ -1171,21 +1231,40 @@ def discover_agents(
             for agent_name, signal in cached.agents.items():
                 signal.config_path = _agent_config_path(agent_name, include_workspace_config=False)
                 signal.configured = bool(signal.config_path)
+            if _configured_agent_evidence_is_stale(cached, data_dir):
+                # A configured connector the cache never probed, or whose
+                # executable changed since the scan, is read again now instead
+                # of reporting the old (or no) version for up to a day. The new
+                # scan carries its own time, so this happens once per change.
+                return discover_agents(use_cache=False, refresh=True, data_dir=data_dir, persist_cache=persist_cache)
             return cached
 
     scanned_at = _format_rfc3339(_now_utc())
     require_trusted, _prefixes = _ai_discovery_trust_config(data_dir)
-    probe_only = _PROBE_ONLY.get()
-    if probe_only is None:
-        probe_only = _configured_probe_names(data_dir)
+    # A restricted scan checks every connector the config enrolls: the gateway
+    # reads each one's version from this cache when setup restarts it, so an
+    # enrolled agent that updated itself since the last scan must be probed
+    # rather than returned unversioned (GAP-0547).
+    restricted = _PROBE_ONLY.get()
+    probe_only = _configured_probe_names(data_dir) | (restricted or frozenset())
+    # A setup of one connector also re-ran the CLI of every enrolled peer (a
+    # node CLI takes about 0.3 s on macOS), so `setup claude-code` with six
+    # connectors took 1.1 s instead of 0.76 s (rel-1-0-6:GAP-0491). A peer
+    # whose binary has not changed since the last scan keeps that scan's
+    # version instead; one that changed is probed as before (GAP-0547).
+    unchanged_peers = (
+        _peers_with_unchanged_binaries(probe_only - restricted, data_dir, require_trusted)
+        if restricted is not None
+        else frozenset()
+    )
     shared = _FRESH_SCANS.get()
     shared_key = (
         str(config_path_for_data_dir(data_dir)),
         require_trusted,
         tuple(_prefixes),
-        tuple(sorted(probe_only)) if probe_only is not None else None,
+        tuple(sorted(probe_only)),
     )
-    if shared is not None and shared_key in shared:
+    if reuse_shared and shared is not None and shared_key in shared:
         reused = shared[shared_key]
         if persist_cache:
             _write_cache(reused, data_dir=data_dir)
@@ -1203,13 +1282,34 @@ def discover_agents(
                     data_dir=data_dir,
                     require_trusted_binary_paths=require_trusted,
                     include_workspace_config=False,
-                    probe=probe_only is None or name in probe_only,
+                    probe=name in probe_only and name not in unchanged_peers,
                 ),
                 DISCOVERABLE_CONNECTORS,
             )
         )
     agents = {signal.name: signal for signal in signals}
-    _keep_versions_of_slow_unchanged_agents(agents, data_dir=data_dir)
+    _keep_versions_of_slow_unchanged_agents(
+        agents, data_dir=data_dir, require_trusted_binary_paths=require_trusted
+    )
+    # A peer whose last version could not be kept after all (another binary
+    # is first on PATH now, say) is probed, so no enrolled agent ends up
+    # unversioned because it was skipped.
+    unkept = [name for name in DISCOVERABLE_CONNECTORS if name in unchanged_peers and not agents[name].version]
+    if unkept:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for signal in pool.map(
+                lambda name: _scan_agent(
+                    name,
+                    data_dir=data_dir,
+                    require_trusted_binary_paths=require_trusted,
+                    include_workspace_config=False,
+                ),
+                unkept,
+            ):
+                agents[signal.name] = signal
+        _keep_versions_of_slow_unchanged_agents(
+            agents, data_dir=data_dir, require_trusted_binary_paths=require_trusted
+        )
     discovery = AgentDiscovery(scanned_at=scanned_at, agents=agents, cache_hit=False)
     if shared is not None:
         shared[shared_key] = discovery
@@ -1218,16 +1318,65 @@ def discover_agents(
     # optional acceleration cache cannot be protected or written.
     if persist_cache:
         _write_cache(discovery, data_dir=data_dir)
+    # The caller gets what the cache got: a reading of an executable replaced
+    # since its probe is dropped here too, in place, so a shared copy agrees.
+    discovery.agents = {name: _current_signal(signal) for name, signal in discovery.agents.items()}
     return discovery
+
+
+def _configured_agent_evidence_is_stale(cached: AgentDiscovery, data_dir: str | os.PathLike[str] | None) -> bool:
+    """Whether a configured connector cached record needs a version probe.
+
+    That is an installed agent the scan never ran (``VERSION_NOT_PROBED``: it
+    was not set up when the scan ran, as on a fresh account after ``init``),
+    or one whose selection changed since the scan: the executable, a link or
+    folder on its way was written, replaced or re-linked at or after the scan
+    (:func:`_resolves_unchanged_since`), or the launch order now offers a
+    different executable ahead of it (:func:`_unchanged_candidates_ahead`).
+    Agents nobody set up are never run (GAP-0901); an agent whose probe
+    already failed for another reason is left to ``agent discover --refresh``,
+    so a broken CLI is not run on every call. Kiro, which has several forms,
+    is judged like the rest by the executable its version was read from (an
+    entry that records none is read again); only the launch-order check is
+    skipped, as the forms are not ordered candidates of one selection.
+    """
+    configured = _configured_probe_names(data_dir)
+    if not configured or _PROBE_ONLY.get() is not None:
+        return False
+    scanned = _parse_rfc3339(cached.scanned_at)
+    if scanned is None:
+        return False
+    since = scanned.timestamp()
+    for name in configured:
+        signal = cached.agents.get(name)
+        if signal is None or not signal.installed or not signal.binary_path:
+            continue
+        if not signal.version:
+            if signal.error == VERSION_NOT_PROBED:
+                return True
+            continue
+        if not os.path.isabs(signal.binary_path) or not _resolves_unchanged_since(signal.binary_path, since, data_dir):
+            return True
+        if _executable_replaced_since_read(signal.binary_path, signal.identity):
+            return True
+        if name == "kiro":
+            continue
+        recorded = {"skipped_binaries": list(signal.skipped_binaries)}
+        if _unchanged_candidates_ahead(name, signal.binary_path, recorded, since, data_dir) is None:
+            return True
+    return False
 
 
 def _keep_versions_of_slow_unchanged_agents(
     agents: dict[str, AgentSignal],
     *,
     data_dir: str | os.PathLike[str] | None = None,
+    require_trusted_binary_paths: bool = False,
 ) -> None:
     """Keep the last observed version of a CLI whose probe only timed out
-    or was not run (:func:`restrict_probes`).
+    or was not run (:func:`restrict_probes`), or whose binary this scan did
+    not find at all while the binary the last scan probed is still there,
+    unchanged (GAP-0231).
 
     Setup rescans every agent and republishes this cache, and the gateway
     reads each peer's version from it when it restarts. On a busy host one
@@ -1235,13 +1384,41 @@ def _keep_versions_of_slow_unchanged_agents(
     mode refused that peer and setup of an unrelated connector failed to
     converge (RHEL-U3-13). The old version is kept only for the same binary
     path, and only if that file has not changed since the earlier scan.
+
+    The upgrade refreshes discovery before the gateway starts. Run from an
+    environment whose PATH lacks the agents' folder (an MDM or ``sudo -u``
+    run, a service manager), the refresh found no binary and replaced the
+    versions the last scan recorded, so the upgraded gateway refused every
+    action-mode connector as "agent version not probed" (GAP-0231). A binary
+    this scan did not find keeps its version when the file the last scan
+    probed still exists, is unchanged since that scan and (when discovery
+    requires it) is under a trusted prefix; an agent that was removed has
+    no file there and is reported as not installed. Windows keeps its
+    protected selection rules.
+
+    An agent that is not probed is reported at its first binary candidate;
+    the last scan may have probed a later one (``cursor`` before ``agent``,
+    GAP-0002). That still counts as the same selection only while the
+    candidates ahead of it are exactly the ones that probe passed over and
+    are unchanged since; a new or changed one ahead could answer, so the
+    agent stays unversioned until probed. A binary outside the trusted
+    prefixes (when discovery requires them) never keeps a version. An
+    installed agent that was never probed has no version to keep; it keeps
+    its binary path, so an upgrade run without the agents on PATH does not
+    report it as not installed (rel-1-0-3 GAP-0277).
     """
+    not_found = not _is_windows_host()
     slow = [
         signal
         for signal in agents.values()
-        if signal.binary_path
-        and not signal.version
-        and (VERSION_PROBE_TIMED_OUT in (signal.error or "") or signal.error == VERSION_NOT_PROBED)
+        if not signal.version
+        and (
+            (
+                signal.binary_path
+                and (VERSION_PROBE_TIMED_OUT in (signal.error or "") or signal.error == VERSION_NOT_PROBED)
+            )
+            or (not_found and not signal.binary_path and not signal.error)
+        )
     ]
     if not slow:
         return
@@ -1250,6 +1427,9 @@ def _keep_versions_of_slow_unchanged_agents(
             payload = json.load(fh)
     except Exception:
         return
+    # Only an entry that names the executable it was read from can be kept
+    # (a cache from a release before executable identities has none, and is
+    # read again instead). A fresh scan still owns the result.
     if not isinstance(payload, dict) or payload.get("version") != CACHE_SCHEMA_VERSION:
         return
     previous_scan = _parse_rfc3339(str(payload.get("scanned_at") or ""))
@@ -1261,22 +1441,347 @@ def _keep_versions_of_slow_unchanged_agents(
         if not isinstance(previous, dict):
             continue
         version = str(previous.get("version") or "")
-        if not version or str(previous.get("binary_path") or "") != signal.binary_path:
+        previous_binary = str(previous.get("binary_path") or "")
+        if not previous_binary:
             continue
-        try:
-            changed_at = os.stat(os.path.realpath(signal.binary_path)).st_mtime
-        except OSError:
+        if require_trusted_binary_paths and not _is_trusted_binary_path(previous_binary, data_dir=data_dir):
             continue
-        if changed_at >= previous_scan.timestamp():
+        skipped = signal.skipped_binaries
+        if not signal.binary_path:
+            if not os.path.isfile(previous_binary):
+                continue
+            skipped = _recorded_skipped_binaries(previous)
+        elif previous_binary != signal.binary_path:
+            if signal.error != VERSION_NOT_PROBED:
+                continue
+            ahead = _unchanged_candidates_ahead(
+                signal.name, previous_binary, previous, previous_scan.timestamp(), data_dir
+            )
+            if ahead is None:
+                continue
+            skipped = ahead
+        if not version:
+            never_probed = previous.get("installed") is True and previous.get("error") == VERSION_NOT_PROBED
+            if not signal.binary_path and never_probed:
+                signal.binary_path = previous_binary
+                signal.error = VERSION_NOT_PROBED
+                signal.installed = True
             continue
+        # The same judgement every other reader of a cached version makes: the
+        # file must still be the one that answered, by its identity. An entry
+        # that records none (written before identities) keeps nothing, and a
+        # probe that timed out on a replaced file keeps nothing.
+        recorded_identity = _recorded_identity(previous)
+        if _executable_replaced_since_read(previous_binary, recorded_identity):
+            continue
+        signal.binary_path = previous_binary
         signal.version = version
+        signal.identity = recorded_identity
+        # The kept version was read when the last scan read it, not now.
+        signal.observed_at = str(previous.get("observed_at") or payload.get("scanned_at") or "")
+        if signal.name == "kiro":
+            signal.kiro_cli_version = str(previous.get("kiro_cli_version") or "")
+            signal.kiro_ide_version = str(previous.get("kiro_ide_version") or "")
+            # The forms of the scan whose version is kept.
+            signal.kiro_forms = _kiro_forms_from_cache(previous.get("kiro_forms"))
         signal.error = ""
         signal.installed = True
+        signal.skipped_binaries = skipped
+
+
+def _peers_with_unchanged_binaries(
+    names: frozenset[str],
+    data_dir: str | os.PathLike[str] | None,
+    require_trusted_binary_paths: bool,
+) -> frozenset[str]:
+    """Enrolled peers whose binary the last scan (within the cache TTL)
+    versioned and that has not changed since that scan.
+
+    Not on Windows (its protected selection rules always probe) and never for
+    Kiro (several CLI and IDE forms). Anything unreadable counts as changed.
+    """
+    if not names or _is_windows_host():
+        return frozenset()
+    try:
+        with open(_cache_path(data_dir=data_dir), encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except Exception:
+        return frozenset()
+    if not isinstance(payload, dict) or payload.get("version") != CACHE_SCHEMA_VERSION:
+        return frozenset()
+    previous_scan = _parse_rfc3339(str(payload.get("scanned_at") or ""))
+    previous_agents = payload.get("agents")
+    if previous_scan is None or not isinstance(previous_agents, dict):
+        return frozenset()
+    if not timedelta(0) <= _now_utc() - previous_scan <= timedelta(seconds=CACHE_TTL_SECONDS):
+        return frozenset()
+    unchanged = set()
+    for name in names - {"kiro"}:
+        previous = previous_agents.get(name)
+        if not isinstance(previous, dict) or not previous.get("version") or previous.get("error"):
+            continue
+        binary = str(previous.get("binary_path") or "")
+        if not binary or not os.path.isabs(binary):
+            continue
+        if require_trusted_binary_paths and not _is_trusted_binary_path(binary, data_dir=data_dir):
+            continue
+        if not _executable_replaced_since_read(binary, _recorded_identity(previous)):
+            unchanged.add(name)
+    return frozenset(unchanged)
+
+
+def _resolves_unchanged_since(
+    path: str,
+    since: float,
+    data_dir: str | os.PathLike[str] | None = None,
+) -> bool:
+    """Whether *path* resolves to a regular file through links and folders
+    none of which, nor the file, changed (mtime or ctime) at or after *since*.
+
+    Every link on the way counts, also a link in a parent folder: switching a
+    ``current`` link to another version folder, or installing a new version
+    over the old one, makes the agent changed. So does every folder on the
+    resolved path, not only the one holding the file: replacing a higher
+    folder with a ready-made one rebinds the whole tree below it while the
+    file and its own folder keep their old times, and the move changes that
+    folder ctime and its parent mtime. A folder that changed for another
+    reason only costs one new probe. The DefenseClaw data
+    folder and the folders above it are left out (the home folder changes
+    whenever a file is saved in it, the data folder whenever the cache is
+    written): replacing one of them replaces the cache being read as well.
+    ctime cannot be set back.
+    """
+    drive, rest = os.path.splitdrive(path.replace(os.altsep, os.sep) if os.altsep else path)
+    pending = [part for part in reversed(rest.split(os.sep)) if part]
+    resolved = drive + os.sep
+    chain = [resolved]
+    links = 0
+    while pending:
+        part = pending.pop()
+        if part == ".":
+            continue
+        if part == "..":
+            resolved = os.path.dirname(resolved)
+            chain.append(resolved)
+            continue
+        candidate = os.path.join(resolved, part)
+        try:
+            info = os.lstat(candidate)
+        except OSError:
+            return False
+        if not stat.S_ISLNK(info.st_mode):
+            resolved = candidate
+            chain.append(resolved)
+            continue
+        links += 1
+        if links > 40 or max(info.st_mtime, info.st_ctime) >= since:
+            return False
+        try:
+            target = os.readlink(candidate)
+        except OSError:
+            return False
+        target_drive, target_rest = os.path.splitdrive(target)
+        if os.path.isabs(target):
+            resolved = (target_drive or drive) + os.sep
+        pending.extend(part for part in reversed(target_rest.split(os.sep)) if part)
+    holders = _data_dir_holders(data_dir)
+    always = {resolved, os.path.dirname(resolved)}
+    for checked in dict.fromkeys(chain):
+        if checked not in always and os.path.normcase(checked) in holders:
+            continue
+        try:
+            info = os.lstat(checked)
+        except OSError:
+            return False
+        changed = _changed_at(checked, info)
+        if changed is None or max(info.st_mtime, changed) >= since:
+            return False
+    try:
+        return stat.S_ISREG(os.lstat(resolved).st_mode)
+    except OSError:
+        return False
+
+
+def _changed_at(path: str, info: os.stat_result) -> float | None:
+    """When the file or folder at *path* last changed, in Unix seconds: ``st_ctime``
+    where that is the change time. On Windows it is the creation time, which a
+    rename leaves alone, so a folder swapped for a ready-made one would look
+    untouched; the NTFS change time (:func:`_windows_change_time`) moves with the
+    rename. When Windows gives none, nothing proves the path unchanged and None
+    is returned (the creation time is no stand-in). A link is made new when it is
+    retargeted, so its creation time says."""
+    if _is_windows_host() and not stat.S_ISLNK(info.st_mode):
+        ticks = _windows_change_time(path)
+        if ticks is None:
+            return None
+        return max(info.st_ctime, (ticks - _WINDOWS_TICKS_AT_UNIX_EPOCH) / 10_000_000)
+    return info.st_ctime
+
+
+def _data_dir_holders(data_dir: str | os.PathLike[str] | None) -> frozenset[str]:
+    """The DefenseClaw data folder and the folders above it, as written and resolved."""
+    target = Path(data_dir) if data_dir else default_data_path()
+    holders: set[str] = set()
+    for form in (os.path.abspath(target), os.path.realpath(target)):
+        holders.add(os.path.normcase(form))
+        holders.update(os.path.normcase(str(parent)) for parent in Path(form).parents)
+    return frozenset(holders)
+
+
+def _executable_identity(path: str) -> list[Any]:
+    """Which file *path* is right now: where it resolves, its size, its
+    modification time, its file id and its change time; [] when it is not a
+    regular file, or when the host is Windows and gives no change time (nothing
+    then tells one write of the file from the next, so no reading is an identity).
+
+    Two readings that name the same file have the same identity, and a file
+    replaced (even by one of the same size and time), or a link moved to
+    another file, does not. The change time moves with every write to the file
+    and is not set by restoring the modification time, so a same-size update
+    that restores that time is told apart too (:func:`_change_time_ns`: on
+    Windows ``st_ctime`` is the creation time, so the NTFS change time is read
+    instead). Only the executable itself is named: nothing a probe creates is
+    part of it.
+    """
+    try:
+        real = os.path.realpath(path)
+        info = os.stat(real)
+    except (OSError, ValueError):
+        return []
+    if not stat.S_ISREG(info.st_mode):
+        return []
+    changed = _change_time_ns(real, info)
+    if changed is None:
+        return []
+    return [real, info.st_size, info.st_mtime_ns, info.st_ino, info.st_dev, changed]
+
+
+class _WindowsFileBasicInfo(ctypes.Structure):
+    """FILE_BASIC_INFO (FileBasicInfo of GetFileInformationByHandleEx)."""
+
+    _fields_ = [
+        ("creation_time", ctypes.c_longlong),
+        ("last_access_time", ctypes.c_longlong),
+        ("last_write_time", ctypes.c_longlong),
+        ("change_time", ctypes.c_longlong),
+        ("file_attributes", ctypes.c_ulong),
+    ]
+
+
+_WINDOWS_FILE_READ_ATTRIBUTES = 0x00000080
+_WINDOWS_FILE_SHARE_ALL = 0x00000007
+_WINDOWS_OPEN_EXISTING = 3
+_WINDOWS_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+_WINDOWS_FILE_BASIC_INFO_CLASS = 0
+
+
+def _windows_change_time(path: str) -> int | None:
+    """The NTFS change time of *path* in 100 ns ticks (the time of the last
+    write to the file, whatever the modification time was set back to), or None
+    when Windows does not give one."""
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        void_p = ctypes.c_void_p
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            void_p,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            void_p,
+        ]
+        create_file.restype = void_p
+        get_information = kernel32.GetFileInformationByHandleEx
+        get_information.argtypes = [void_p, ctypes.c_int, void_p, ctypes.c_ulong]
+        get_information.restype = ctypes.c_int
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [void_p]
+        close_handle.restype = ctypes.c_int
+        handle = create_file(
+            path,
+            _WINDOWS_FILE_READ_ATTRIBUTES,
+            _WINDOWS_FILE_SHARE_ALL,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )
+        if handle is None or handle == ctypes.c_void_p(-1).value:
+            return None
+        try:
+            info = _WindowsFileBasicInfo()
+            if not get_information(
+                handle, _WINDOWS_FILE_BASIC_INFO_CLASS, ctypes.byref(info), ctypes.sizeof(info)
+            ):
+                return None
+        finally:
+            close_handle(handle)
+    except (AttributeError, OSError, ValueError, ctypes.ArgumentError):
+        return None
+    return info.change_time if info.change_time > 0 else None
+
+
+#: FILETIME ticks (100 ns since 1601-01-01) at the Unix epoch.
+_WINDOWS_TICKS_AT_UNIX_EPOCH = 116_444_736_000_000_000
+
+
+def _change_time_ns(real: str, info: os.stat_result) -> int | None:
+    """When the file at *real* was last written to, in Unix nanoseconds (the
+    unit of the modification time and of a read time): the Windows change time
+    there (``st_ctime`` is the creation time on Windows, which an in-place write
+    leaves alone), ``st_ctime_ns`` elsewhere. None when Windows gives none: the
+    creation time would let a same-size rewrite pass as the same file."""
+    if _is_windows_host():
+        ticks = _windows_change_time(real)
+        if ticks is None:
+            return None
+        return (ticks - _WINDOWS_TICKS_AT_UNIX_EPOCH) * 100
+    return info.st_ctime_ns
+
+
+def _recorded_identity(raw: dict[str, Any]) -> list[Any]:
+    recorded = raw.get("identity")
+    return list(recorded) if isinstance(recorded, list) and len(recorded) == 6 else []
+
+
+def _recorded_skipped_binaries(previous: dict[str, Any]) -> tuple[str, ...]:
+    recorded = previous.get("skipped_binaries")
+    if not isinstance(recorded, list):
+        return ()
+    return tuple(str(path) for path in recorded if isinstance(path, str))
+
+
+def _unchanged_candidates_ahead(
+    name: str,
+    previous_binary: str,
+    previous: dict[str, Any],
+    previous_scan: float,
+    data_dir: str | os.PathLike[str] | None = None,
+) -> tuple[str, ...] | None:
+    """Return the candidates ahead of *previous_binary* when they are exactly
+    the ones the last probe passed over and none resolves differently since
+    (:func:`_resolves_unchanged_since`), else None."""
+    candidates = _binary_candidates_for_agent(name, _SPECS.get(name, _AgentSpec((), "", ("--version",))))
+    if previous_binary not in candidates:
+        return None
+    ahead = tuple(candidates[: candidates.index(previous_binary)])
+    if ahead != _recorded_skipped_binaries(previous):
+        return None
+    for candidate in ahead:
+        # A skipped candidate counts as changed by the same rule as the
+        # selected one: its file, its folder or any link on the way written or
+        # re-linked since the scan. A link moved to another installed version
+        # keeps that version's old mtime, so the target alone cannot show it.
+        if not _resolves_unchanged_since(candidate, previous_scan, data_dir):
+            return None
+    return ahead
 
 
 def first_installed(disc: AgentDiscovery, fallback: str = "codex") -> str:
-    """Return the preferred installed connector, or *fallback* when none match."""
-    fallback = _normalize_connector(fallback) or "codex"
+    """Return the preferred installed connector, or no connector when none match."""
+    fallback = _normalize_connector(fallback)
     preferred = disc.agents.get(fallback)
     if preferred and preferred.installed:
         return fallback
@@ -1286,7 +1791,7 @@ def first_installed(disc: AgentDiscovery, fallback: str = "codex") -> str:
         if signal and signal.installed:
             return name
 
-    return fallback if fallback in DISCOVERABLE_CONNECTORS else "codex"
+    return ""
 
 
 def apply_config_state(disc: AgentDiscovery, cfg: Any) -> AgentDiscovery:
@@ -1326,6 +1831,15 @@ def _display_version(version: str) -> str:
     return (version or "").strip().rstrip(".")
 
 
+def _display_detail(signal: AgentSignal) -> str:
+    """The Version / Error column: the version, and where a Claude Code
+    engine came from when it is Claude Desktop's (GAP-0036)."""
+    version = _display_version(signal.version)
+    if not version:
+        return _display_error(signal)
+    return f"{version} (Claude Desktop engine)" if signal.source == SOURCE_CLAUDE_DESKTOP else version
+
+
 def _display_error(signal: AgentSignal) -> str:
     """The probe error without the path the Binary column already shows.
 
@@ -1358,7 +1872,7 @@ def render_discovery_table(disc: AgentDiscovery) -> str:
 
     for name in _ordered_connector_names(disc):
         signal = disc.agents[name]
-        detail = _display_version(signal.version) or _display_error(signal)
+        detail = _display_detail(signal)
         table.add_row(
             signal.name,
             "yes" if signal.installed else "no",
@@ -1423,9 +1937,6 @@ def _agent_config_path(name: str, *, include_workspace_config: bool = True) -> s
         config_candidates = _dedup_nonempty_candidates(
             (amp_managed_settings_path(), *config_candidates)
         )
-    elif name == "omnigent":
-        config_path = omnigent_config_path()
-        config_candidates = (config_path,)
     elif name == "devin":
         workspace = os.getcwd()
         config_candidates = _dedup_nonempty_candidates(
@@ -1445,6 +1956,16 @@ def _scan_agent(
     include_workspace_config: bool = True,
     probe: bool = True,
 ) -> AgentSignal:
+    # connector_contracts loads its bundled manifest through inventory, so
+    # importing it at module load time would create a cycle for CLI startup.
+    from defenseclaw.connector_contracts import (
+        assess_kiro,
+        judge_kiro_form,
+        kiro_cli_below_hook_floor,
+        kiro_ide_below_hook_floor,
+        normalize_agent_version,
+    )
+
     spec = _SPECS.get(name, _AgentSpec((), "", ("--version",)))
     config_path = _agent_config_path(name, include_workspace_config=include_workspace_config)
     binary_candidates = _binary_candidates_for_agent(name, spec)
@@ -1458,6 +1979,7 @@ def _scan_agent(
             version="",
             error=VERSION_NOT_PROBED if binary_path else "",
             configured=bool(config_path),
+            source=_agent_source(name, binary_path),
         )
     version = ""
     error = ""
@@ -1467,38 +1989,132 @@ def _scan_agent(
         require_trusted_binary_paths = True
     probe_errors: list[str] = []
     timed_out = ""
+    skipped: tuple[str, ...] = ()
+    kiro_versions: dict[str, tuple[str, str]] = {}
+    # Every Kiro install probed, read or not (assess_kiro judges each one; a
+    # failed probe is an installed form whose version is unknown, GAP-0895).
+    kiro_forms: list[dict[str, str]] = []
+
+    # When each binary was last asked for its version. The version a signal
+    # carries was obtained then, not when the scan finishes (probe-state
+    # bookkeeping after the probes can wait on another process), so this is
+    # the time the cache orders competing writes by.
+    read_at: dict[str, datetime] = {}
+    # Which executable each answer came from, taken before the probe and kept
+    # only when the file at the path is the same one after it.
+    read_from: dict[str, list[Any]] = {}
+
+    def read_version(candidate: str) -> tuple[str, str]:
+        # A version belongs to the executable that answered. One replaced (or
+        # re-linked) while the probe ran may have answered for the file that
+        # is gone, so that answer is dropped and the path asked again; one that
+        # keeps changing is unread, never recorded at either version. Two
+        # empty identities of a file that is there (Windows gave no change
+        # time) are not the same file twice: they prove nothing, so a version
+        # read under them is dropped like one read from a changed file. Two
+        # empty identities of a path with no file, and an answer without a
+        # version, claim nothing and are returned as they are.
+        for _attempt in range(2):
+            identity = _executable_identity(candidate)
+            was_there = os.path.isfile(candidate)
+            answer = _version_for_agent_binary(
+                name,
+                candidate,
+                spec.version_args,
+                require_trusted_binary_paths=require_trusted_binary_paths,
+                data_dir=data_dir,
+            )
+            read_at[candidate] = _now_utc()
+            unproven = not identity and bool(answer[0]) and (was_there or os.path.isfile(candidate))
+            if _executable_identity(candidate) == identity and not unproven:
+                read_from[candidate] = identity
+                return answer
+        read_from[candidate] = []
+        return "", VERSION_EXECUTABLE_CHANGED
+
+    def kiro_found(surface: str, candidate: str, version_for_surface: str) -> None:
+        # Per surface the first install at or above its floor wins over an
+        # earlier one below it, so the version cached for the gateway is the
+        # one setup protects; every install stays a form for reporting.
+        below = kiro_cli_below_hook_floor if surface == "cli" else kiro_ide_below_hook_floor
+        recorded = kiro_versions.get(surface)
+        if recorded is None or (below(recorded[1]) and not below(version_for_surface)):
+            kiro_versions[surface] = (candidate, version_for_surface)
+        kiro_forms.append({"kind": surface, "version": version_for_surface, "unread": "", "path": candidate})
+
+    def kiro_unread(candidate: str, why: str) -> None:
+        kiro_forms.append(
+            {
+                "kind": "ide" if _kiro_binary_surface(candidate, "") == "ide" else "cli",
+                "version": "",
+                "unread": f"{candidate} is installed, but its version could not be read ({why})",
+                "path": candidate,
+            }
+        )
+
     missing_state = _missing_probe_state(name) if binary_candidates else ([], [])
     for candidate in binary_candidates:
-        candidate_version, candidate_error = _version_for_agent_binary(
-            name,
-            candidate,
-            spec.version_args,
-            require_trusted_binary_paths=require_trusted_binary_paths,
-            data_dir=data_dir,
-        )
+        candidate_version, candidate_error = read_version(candidate)
         if candidate_version and not candidate_error:
+            if name == "kiro":
+                surface = _kiro_binary_surface(candidate, candidate_version)
+                normalized = normalize_agent_version(candidate_version)
+                if not surface or not normalized:
+                    probe_errors.append(f"{candidate}: Kiro surface or version could not be identified")
+                    kiro_unread(candidate, "Kiro surface or version could not be identified")
+                    continue
+                kiro_found(surface, candidate, f"kiro-cli {normalized}" if surface == "cli" else normalized)
+                continue
             binary_path = candidate
             version = candidate_version
             error = ""
             version_ok = True
+            skipped = binary_candidates[: binary_candidates.index(candidate)]
             break
         if candidate_error:
             probe_errors.append(f"{candidate}: {candidate_error}")
             if candidate_error == VERSION_PROBE_TIMED_OUT and not timed_out:
                 timed_out = candidate
-    if not version_ok and timed_out:
+            elif name == "kiro":
+                kiro_unread(candidate, candidate_error)
+    timed_out_read = False
+    kiro_supported = bool(
+        (cli := kiro_versions.get("cli")) and not kiro_cli_below_hook_floor(cli[1])
+    ) or bool((ide := kiro_versions.get("ide")) and not kiro_ide_below_hook_floor(ide[1]))
+    if not version_ok and timed_out and not kiro_supported:
         # The first start of a CLI on a cold disk (a fresh host or clone) can
         # outlast the budget and answer in seconds right after, so ask once
         # more before calling it slow (GAP-0066).
-        candidate_version, candidate_error = _version_for_agent_binary(
-            name,
-            timed_out,
-            spec.version_args,
-            require_trusted_binary_paths=require_trusted_binary_paths,
-            data_dir=data_dir,
-        )
+        candidate_version, candidate_error = read_version(timed_out)
         if candidate_version and not candidate_error:
-            binary_path, version, version_ok = timed_out, candidate_version, True
+            if name == "kiro":
+                surface = _kiro_binary_surface(timed_out, candidate_version)
+                normalized = normalize_agent_version(candidate_version)
+                if surface and normalized:
+                    kiro_found(surface, timed_out, f"kiro-cli {normalized}" if surface == "cli" else normalized)
+                    timed_out_read = True
+            else:
+                binary_path, version, version_ok = timed_out, candidate_version, True
+                skipped = binary_candidates[: binary_candidates.index(timed_out)]
+    if name == "kiro" and timed_out and not timed_out_read:
+        # A supported surface skips the retry; the slow install is still a
+        # form whose version is unknown, never hidden by the supported one.
+        kiro_unread(timed_out, VERSION_PROBE_TIMED_OUT)
+    if name == "kiro" and kiro_versions:
+        # The version cached for the gateway is the form setup preflight
+        # selects (assess_kiro over the forms it records); without a protected one
+        # it is the kiro-cli's, else the IDE's, so admission refuses it.
+        protected = assess_kiro(
+            [
+                judge_kiro_form(form["kind"], form["version"], unread=form["unread"], path=form["path"])
+                for form in kiro_forms[:_KIRO_FORMS_MAX]
+            ]
+        ).selected
+        if protected is not None and protected.path:
+            binary_path, version = protected.path, protected.version
+        else:
+            binary_path, version = kiro_versions.get("cli") or kiro_versions["ide"]
+        version_ok = True
     if missing_state[0]:
         _record_probe_state(missing_state, data_dir=data_dir)
     if not version_ok and probe_errors:
@@ -1507,8 +2123,26 @@ def _scan_agent(
         # A trusted binary that is only slow is installed; its version stays
         # unknown, so action mode still refuses it until a probe answers.
         binary_path = timed_out
+        skipped = binary_candidates[: binary_candidates.index(timed_out)]
 
-    installed = bool(binary_path) and (version_ok or bool(timed_out))
+    if name == "kiro" and not version_ok and not timed_out and kiro_forms:
+        # A Kiro whose every probe failed is installed with an unknown
+        # version (GAP-0895): setup refuses action mode for it instead of
+        # treating it as not installed.
+        binary_path = kiro_forms[0]["path"]
+    path_launcher = (
+        name == "opencode"
+        and _is_windows_host()
+        and bool(binary_path)
+        and os.path.normcase(binary_on_path(name)) == os.path.normcase(binary_path)
+        and (
+            not require_trusted_binary_paths
+            or _is_trusted_binary_path(binary_path, data_dir=data_dir)
+        )
+    )
+    installed = bool(binary_path) and (
+        version_ok or bool(timed_out) or (name == "kiro" and bool(kiro_forms)) or path_launcher
+    )
     return AgentSignal(
         name=name,
         installed=installed,
@@ -1517,7 +2151,31 @@ def _scan_agent(
         version=version,
         error=error,
         configured=bool(config_path),
+        skipped_binaries=tuple(skipped),
+        kiro_cli_version=kiro_versions.get("cli", ("", ""))[1],
+        kiro_ide_version=kiro_versions.get("ide", ("", ""))[1],
+        kiro_forms=kiro_forms[:_KIRO_FORMS_MAX],
+        source=_agent_source(name, binary_path) if installed or timed_out else "",
+        observed_at=_format_rfc3339(read_at.get(binary_path) or _now_utc()),
+        identity=list(read_from.get(binary_path, ())),
     )
+
+
+def _agent_source(name: str, binary_path: str) -> str:
+    """Which Claude Code installation *binary_path* is (``AgentSignal.source``)."""
+    if name != "claudecode" or not binary_path:
+        return ""
+    return SOURCE_CLAUDE_DESKTOP if _claude_desktop_engine(binary_path) is not None else SOURCE_CLI
+
+
+def _kiro_binary_surface(path: str, version: str) -> str:
+    name = ntpath.splitext(ntpath.basename(path))[0].lower()
+    # A `kiro` shim can invoke kiro-cli. Its banner is CLI evidence, never
+    # evidence that an IDE capable of reading global hooks is installed.
+    banner = version.split(maxsplit=1)
+    if banner and banner[0].casefold() == "kiro-cli":
+        return "cli"
+    return "cli" if name == "kiro-cli" else "ide" if name == "kiro" else ""
 
 
 def _dedup_nonempty_candidates(candidates: tuple[str, ...]) -> tuple[str, ...]:
@@ -1859,28 +2517,38 @@ def _windows_acl_write_error(path: str) -> str | None:
     return None
 
 
-def _windows_acl_chain_is_safe(resolved: str, prefix: str) -> bool:
-    """Check the executable and every ancestor through its trusted prefix."""
+def _windows_acl_chain_error(resolved: str, prefix: str) -> str | None:
+    """Why the executable or an ancestor through *prefix* is not trusted, or None.
+
+    The reason names the folder or file that failed, so a refusal can say which
+    one to fix instead of reporting only that the path is not trusted.
+    """
     current = resolved
     prefix_key = _path_key(prefix)
     seen: set[str] = set()
     while current:
         key = _path_key(current)
         if key in seen:
-            return False
+            return f"{current}: the path loops back on itself"
         seen.add(key)
-        if _windows_acl_write_error(current) is not None:
-            return False
+        problem = _windows_acl_write_error(current)
+        if problem is not None:
+            return f"{current}: {problem}"
         if key == prefix_key:
-            return True
+            return None
         parent = os.path.dirname(current)
         if parent == current:
-            return False
+            return f"{resolved} is not below {prefix}"
         current = parent
-    return False
+    return f"{resolved} is not below {prefix}"
 
 
-def _trusted_prefix_dir_mode_error(st: os.stat_result) -> str | None:
+def _windows_acl_chain_is_safe(resolved: str, prefix: str) -> bool:
+    """Check the executable and every ancestor through its trusted prefix."""
+    return _windows_acl_chain_error(resolved, prefix) is None
+
+
+def _trusted_prefix_dir_mode_error(path: str, st: os.stat_result) -> str | None:
     """Return a human-readable refusal when a directory mode is unsafe to trust.
 
     Mirrors the parent-directory permission checks in ``_is_trusted_binary_path``
@@ -1896,7 +2564,7 @@ def _trusted_prefix_dir_mode_error(st: os.stat_result) -> str | None:
                 grp_name = _grp.getgrgid(st.st_gid).gr_name
             except (KeyError, OSError):
                 grp_name = ""
-        if grp_name not in ("root", "wheel", "admin"):
+        if grp_name not in ("root", "wheel", "admin") and other_accounts_can_write(path, st):
             return "directory is group-writable"
     return None
 
@@ -1939,7 +2607,7 @@ def validate_trusted_prefix(path: str) -> tuple[str, str | None]:
         return resolved, f"cannot stat path ({exc})"
     if not os.path.isdir(resolved):
         return resolved, "path is not a directory"
-    mode_err = _windows_acl_write_error(resolved) if os.name == "nt" else _trusted_prefix_dir_mode_error(st)
+    mode_err = _windows_acl_write_error(resolved) if os.name == "nt" else _trusted_prefix_dir_mode_error(resolved, st)
     if mode_err:
         return resolved, mode_err
     return resolved, None
@@ -1973,26 +2641,16 @@ def _is_trusted_binary_path(
     else:
         if not os.access(resolved, os.X_OK):
             return False
-        parent = os.path.dirname(resolved)
-        try:
-            parent_st = os.stat(parent)
-        except OSError:
-            return False
-        # World-writable parent → an attacker who can write to that dir
-        # could swap the binary at any time. Treat as untrusted.
-        if parent_st.st_mode & 0o002:
-            return False
-        # also reject group-writable parents unless the
-        # group is the system root group. A non-root user that shares a
-        # group with the parent dir can swap the binary.
-        if parent_st.st_mode & 0o020:
-            grp_name = ""
-            if _grp is not None:
-                try:
-                    grp_name = _grp.getgrgid(parent_st.st_gid).gr_name
-                except (KeyError, OSError):
-                    grp_name = ""
-            if grp_name not in ("root", "wheel", "admin"):
+        # A parent another account can write lets it swap the binary at any
+        # time. That holds for the folder of the command as named too: npm
+        # puts a link in ~/.npm-global/bin, and whoever can write that folder
+        # can point the link elsewhere (GAP-0053).
+        for parent in dict.fromkeys((os.path.dirname(resolved), os.path.dirname(os.path.abspath(binary_path)))):
+            try:
+                parent_st = os.stat(parent)
+            except OSError:
+                return False
+            if _trusted_prefix_dir_mode_error(parent, parent_st) is not None:
                 return False
         # refuse a binary whose own file is writable by
         # anyone other than the trusted system owner. The user-writable
@@ -2004,7 +2662,7 @@ def _is_trusted_binary_path(
             bin_st = os.stat(resolved)
         except OSError:
             return False
-        if bin_st.st_mode & 0o022:
+        if other_accounts_can_write(resolved, bin_st):
             return False
     prefixes = _trusted_bin_prefixes(data_dir)
     default_prefixes = _default_trusted_bin_prefixes()
@@ -2089,24 +2747,17 @@ def _version_for_binary(
     binary_name = _binary_command_name(binary_path)
     env = None
     timeout = VERSION_TIMEOUT_SECONDS
-    if binary_name in {"openhands", "hermes"}:
-        # OpenHands' --version loads the whole Python agent stack (15 s idle
-        # on Linux); Hermes' runs a synchronous update check (17.5 s on
-        # Windows), and a timeout made init drop an enrolled Hermes (GAP-1604).
+    if binary_name == "hermes":
+        # Hermes runs a synchronous update check (17.5 s on Windows), and a
+        # timeout made init drop an enrolled Hermes (GAP-1604).
         timeout = 30.0
-    elif binary_name in {"claude", "omnigent"} or (
-        os.name == "nt" and binary_name in {"amp", "agent", "copilot", "cursor-agent"}
-    ):
-        timeout = 8.0
-    elif binary_name == "opencode":
+    elif binary_name in {"opencode", "opencode2"}:
         # The official WinGet binary is a packaged Bun executable. Windows
         # Defender inspection routinely makes its otherwise trivial
         # ``--version`` probe take 6-8 seconds on first and subsequent runs.
         # Keep discovery bounded, but do not reject the authentic client at
         # the generic two-second budget before signature/version admission.
         timeout = 10.0
-    if binary_name == "openhands":
-        env = {**os.environ, "OPENHANDS_SUPPRESS_BANNER": "1"}
     if timeout_override is not None:
         timeout = max(timeout, timeout_override)
 
@@ -2117,7 +2768,7 @@ def _version_for_binary(
         # picker back to line mode (keys echoed, read only on Enter) or left
         # raw output behind (GAP-0057, GAP-0065). A new session also has no
         # controlling terminal, so /dev/tty cannot be opened either.
-        result = subprocess.run(
+        result = _run_probe(
             [binary_path, *(version_args or ("--version",))],
             shell=False,
             timeout=timeout,
@@ -2141,7 +2792,7 @@ def _version_for_binary(
         return "", f"version probe exited {result.returncode}"
     if not stdout:
         return "", "version probe returned empty stdout"
-    return _version_line_for_binary(binary_path, stdout), ""
+    return _version_line_for_binary(stdout), ""
 
 
 def _version_for_agent_binary(
@@ -2161,9 +2812,19 @@ def _version_for_agent_binary(
     """
 
     spec = _SPECS.get(name)
+    if name == "claudecode" and (engine := _claude_desktop_engine(binary_path)) is not None:
+        return _claude_desktop_engine_version(
+            engine,
+            version_args,
+            require_trusted_binary_paths=require_trusted_binary_paths,
+            data_dir=data_dir,
+            timeout_override=timeout_override,
+        )
     bundle_relatives = spec.macos_bundle_binaries if spec is not None else ()
     if bundle_relatives and _macos_app_bundle_for_binary(binary_path, bundle_relatives) is not None:
         return _macos_app_version_for_binary(binary_path, bundle_relatives)
+    if name == "kiro" and _windows_kiro_ide_root_for_binary(binary_path):
+        return _windows_kiro_ide_version_for_binary(binary_path)
 
     if name == "antigravity" and _is_windows_host():
         if not _is_canonical_antigravity_windows_binary(binary_path):
@@ -2203,6 +2864,94 @@ def _version_for_agent_binary(
     if name == "devin" and not error:
         version = _normalize_devin_cli_version_output(version)
     return version, error
+
+
+def _claude_desktop_platform() -> str:
+    """The table key of this host (behind the host helpers tests replace)."""
+    if _is_windows_host():
+        return "windows"
+    return "darwin" if _is_macos_host() else "linux"
+
+
+def _claude_desktop_engine_candidates() -> tuple[str, ...]:
+    """Claude Desktop's engine executables for this account, newest first."""
+    return tuple(build.path for build in claude_desktop_engines(_claude_desktop_platform()))
+
+
+def _claude_desktop_engine(binary_path: str) -> EngineBuild | None:
+    """The engine build *binary_path* is, when it is one of this account's."""
+    if not binary_path:
+        return None
+    key = _path_key(os.path.abspath(binary_path))
+    for build in claude_desktop_engines(_claude_desktop_platform()):
+        if _path_key(build.path) == key:
+            return build
+    return None
+
+
+def _claude_desktop_engine_metadata_problem(engine: EngineBuild) -> str:
+    """Why the engine's own metadata does not name its folder's version, or "".
+
+    The checks the Go side makes before it trusts a build, where Python can
+    make them without running anything: the bundle's Info.plist
+    (CFBundleShortVersionString) on macOS, the executable's file version on
+    Windows. Linux builds carry neither; that the folder holds an executable
+    is the evidence there, as in Go. The code signature Go checks too is not
+    checked here (setup and the gateway do not take authority from this).
+    """
+    if engine.path.endswith(os.path.join("claude.app", "Contents", "MacOS", "claude")):
+        info_path = os.path.join(os.path.dirname(os.path.dirname(engine.path)), "Info.plist")
+        try:
+            with open(info_path, "rb") as stream:
+                info = plistlib.loads(stream.read(1 << 20))
+        except (OSError, plistlib.InvalidFileException, ExpatError, ValueError) as exc:
+            return f"Claude Desktop engine metadata could not be read ({exc})"
+        named = str(info.get("CFBundleShortVersionString") or "").strip() if isinstance(info, dict) else ""
+        if named != engine.version:
+            return f"Claude Desktop engine in the {engine.version} folder: its Info.plist names {named!r}"
+    elif _is_windows_host():
+        from defenseclaw.connector_contracts import normalize_agent_version
+
+        named, error = _windows_file_version_for_binary(engine.path, require_trusted_binary_paths=False)
+        if error:
+            return f"Claude Desktop engine file version could not be read ({error})"
+        if normalize_agent_version(named) != normalize_agent_version(engine.version):
+            return f"Claude Desktop engine in the {engine.version} folder: its file version is {named!r}"
+    return ""
+
+
+def _claude_desktop_engine_version(
+    engine: EngineBuild,
+    version_args: tuple[str, ...],
+    *,
+    require_trusted_binary_paths: bool,
+    data_dir: str | os.PathLike[str] | None,
+    timeout_override: float | None,
+) -> tuple[str, str]:
+    """The version of a Claude Desktop engine build (GAP-0036).
+
+    Its metadata must name its folder's version first; then the engine is
+    asked ``--version`` exactly as a ``claude`` CLI is (same trust check,
+    same timeout), and it must answer with that version too. A build that
+    fails either check is passed over for the next one.
+    """
+    from defenseclaw.connector_contracts import normalize_agent_version
+
+    problem = _claude_desktop_engine_metadata_problem(engine)
+    if problem:
+        return "", problem
+    version, error = _version_for_binary(
+        engine.path,
+        version_args,
+        require_trusted_binary_paths=require_trusted_binary_paths,
+        data_dir=data_dir,
+        timeout_override=timeout_override,
+    )
+    if error:
+        return version, error
+    if normalize_agent_version(version) != normalize_agent_version(engine.version):
+        return "", f"Claude Desktop engine in the {engine.version} folder reports version {version!r}"
+    return version, ""
 
 
 def _normalize_devin_cli_version_output(output: str) -> str:
@@ -2395,16 +3144,9 @@ def _windows_file_version_for_binary(
         return "", f"version metadata probe failed: {exc}"
 
 
-def _version_line_for_binary(binary_path: str, stdout: str) -> str:
+def _version_line_for_binary(stdout: str) -> str:
     lines = [line.strip() for line in stdout.splitlines() if line.strip()]
-    if not lines:
-        return ""
-    binary_name = _binary_command_name(binary_path)
-    if binary_name == "openhands":
-        for line in reversed(lines):
-            if "openhands cli" in line.lower():
-                return line
-    return lines[0]
+    return lines[0] if lines else ""
 
 
 def _first_existing_file(candidates: tuple[str, ...]) -> str:
@@ -2427,11 +3169,13 @@ def _which(binary_name: str) -> str:
 
 
 def binary_on_path(connector: str) -> str:
-    """The connector's agent executable on PATH now, or "" (a lookup, no run).
+    """The connector's agent executable on this process's PATH now, or "" (a lookup, no run).
 
-    Doctor reads discovery evidence that is cached for a day and never runs
-    an agent itself, so this tells an agent installed after the last scan
-    from one that is missing (GAP-0052)."""
+    Doctor and status read discovery evidence that is cached for a day and
+    never run an agent themselves, so this names an agent that may have been
+    installed after the last scan (GAP-0052). It is a hint, never proof: the
+    caller's PATH is not the agent's, and only a refreshed scan or a hook
+    call the gateway took makes the agent count (1.0.4 review, loop round 4)."""
     spec = _SPECS.get(_normalize_connector(connector))
     if spec is None or not spec.binary_name:
         return ""
@@ -2514,12 +3258,25 @@ def _binary_candidates_for_agent(name: str, spec: _AgentSpec) -> tuple[str, ...]
                     if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
                         candidates.append(os.path.abspath(candidate))
     if not _is_windows_host():
+        if name == "claudecode":
+            # After every CLI, so a claude CLI still wins (GAP-0036).
+            candidates.extend(_claude_desktop_engine_candidates())
         return _deduplicate_paths(candidates)
 
     for binary_name in dict.fromkeys(binary_names):
         for candidate in _windows_binary_candidates(name, binary_name):
             if os.path.isfile(candidate):
                 candidates.append(os.path.abspath(candidate))
+
+    if name == "kiro":
+        for local_app_data in _windows_current_user_local_app_data_roots():
+            cli = os.path.join(local_app_data, "Kiro-Cli", "kiro-cli.exe")
+            if _windows_plain_kiro_executable(cli):
+                candidates.append(os.path.abspath(cli))
+        for root in _windows_kiro_ide_install_roots():
+            ide = os.path.join(root, "Kiro.exe")
+            if _windows_plain_kiro_executable(ide):
+                candidates.append(os.path.abspath(ide))
 
     if name == "codex":
         for local_app_data in _windows_current_user_local_app_data_roots():
@@ -2531,7 +3288,70 @@ def _binary_candidates_for_agent(name: str, spec: _AgentSpec) -> tuple[str, ...]
                 if candidate.is_file():
                     candidates.append(os.path.abspath(candidate))
 
+    if name == "claudecode":
+        candidates.extend(_claude_desktop_engine_candidates())
+
     return _deduplicate_paths(candidates)
+
+
+def _windows_plain_kiro_executable(path: str) -> bool:
+    try:
+        reject_reparse_path(path)
+    except OSError:
+        return False
+    return os.path.isfile(path)
+
+
+def _windows_kiro_ide_install_roots() -> tuple[str, ...]:
+    """Exact per-user and machine roots of the Windows Kiro IDE."""
+
+    roots = [
+        os.path.join(local, "Programs", "Kiro")
+        for local in _windows_current_user_local_app_data_roots()
+    ]
+    program_files = _windows_current_user_known_folder("6D809377-6AF0-444B-8957-A3773F02200E")
+    if program_files:
+        roots.append(os.path.join(program_files, "Kiro"))
+    return tuple(root for root in roots if os.path.isabs(root))
+
+
+def _windows_kiro_ide_root_for_binary(binary_path: str) -> str:
+    if not _is_windows_host():
+        return ""
+    for root in _windows_kiro_ide_install_roots():
+        if _path_key(binary_path) == _path_key(os.path.join(root, "Kiro.exe")):
+            return root
+    return ""
+
+
+def _windows_kiro_ide_version_for_binary(binary_path: str) -> tuple[str, str]:
+    """Read the official IDE's bounded product metadata without running its GUI."""
+
+    from defenseclaw.connector_contracts import normalize_agent_version
+
+    try:
+        reject_reparse_path(binary_path)
+        if not os.path.isfile(binary_path):
+            return "", "Kiro IDE executable is missing"
+        product_path = os.path.join(os.path.dirname(binary_path), "resources", "app", "product.json")
+        fd = open_regular_file_no_follow(product_path)
+        with os.fdopen(fd, "rb") as stream:
+            data = stream.read(_KIRO_IDE_PRODUCT_MAX_BYTES + 1)
+        if len(data) > _KIRO_IDE_PRODUCT_MAX_BYTES:
+            return "", "Kiro IDE product metadata exceeds size limit"
+        product = json.loads(data)
+    except (OSError, ValueError):
+        return "", "Kiro IDE product metadata is unavailable or invalid"
+    if (
+        not isinstance(product, dict)
+        or product.get("nameShort") != "Kiro"
+        or product.get("applicationName") != "kiro"
+    ):
+        return "", "Kiro IDE product identity is invalid"
+    version = str(product.get("version") or "").strip()
+    if not version or normalize_agent_version(version) != version:
+        return "", "Kiro IDE product version is invalid"
+    return version, ""
 
 
 def _deduplicate_paths(candidates: list[str]) -> tuple[str, ...]:
@@ -2738,6 +3558,13 @@ def _read_cache(*, data_dir: str | os.PathLike[str] | None = None) -> AgentDisco
                 version=str(raw.get("version") or ""),
                 error=str(raw.get("error") or ""),
                 configured=bool(raw.get("configured")),
+                skipped_binaries=_recorded_skipped_binaries(raw),
+                kiro_cli_version=str(raw.get("kiro_cli_version") or ""),
+                kiro_ide_version=str(raw.get("kiro_ide_version") or ""),
+                kiro_forms=_kiro_forms_from_cache(raw.get("kiro_forms")),
+                source=str(raw.get("source") or "") if raw.get("source") in _SOURCES else "",
+                observed_at=str(raw.get("observed_at") or ""),
+                identity=_recorded_identity(raw),
             )
     except Exception:
         return None
@@ -2745,25 +3572,339 @@ def _read_cache(*, data_dir: str | os.PathLike[str] | None = None) -> AgentDisco
     return AgentDiscovery(scanned_at=scanned_at, agents=agents, cache_hit=True)
 
 
+#: How long a cache update waits for another process updating the same file.
+_CACHE_LOCK_SECONDS = 5.0
+
+#: Entry key: when the entry version was read (``AgentSignal.observed_at``). An
+#: entry without it was written with the file and carries the file ``scanned_at``.
+_ENTRY_OBSERVED_AT = "observed_at"
+
+
+@contextmanager
+def _cache_update(path: Path) -> Iterator[None]:
+    """Hold the cache update lock for one read, compare and write.
+
+    Two processes can scan at the same time (a setup and a doctor run), and
+    each writes when its scan ends, so the one that ends last would otherwise
+    replace the newer facts of the other. A fresh account has no folder yet and
+    two first writers can arrive together, so the folder is created private
+    here, before the lock, and every writer takes the same lock.
+    """
+    # The folder is created (or tightened) the way the write does it, and
+    # refused when it redirects (a link): the lock file must not be created
+    # through one either.
+    make_private_directory(path.parent)
+    reject_reparse_path(path)
+    with locked_file_update(str(path), timeout_seconds=_CACHE_LOCK_SECONDS):
+        yield
+
+
+def _entry_was_read(entry: Any) -> bool:
+    """Whether a cached entry records an installed agent that a probe was
+    asked for its version: the version it answered, or the reason it did not
+    (a timeout after the executable changed). Both are readings; an entry that
+    was never probed is not."""
+    return (
+        isinstance(entry, dict)
+        and bool(entry.get("installed"))
+        and str(entry.get("error") or "") != VERSION_NOT_PROBED
+    )
+
+
+def _current_signal(signal: AgentSignal) -> AgentSignal:
+    """*signal* while the executable at its path is still the one that
+    answered; otherwise installed and not probed.
+
+    Between the probe and the moment a result is used (written to the cache,
+    or handed back to a caller) the file can be replaced, or its link moved. A
+    version read from the one that went away is not the version of the one
+    that is there now, and neither is the absence of one, so the result is
+    dropped: the next reader probes again instead of trusting (or refusing on)
+    the old answer. A signal that carries no identity (an older cache file, a
+    hand-built signal) is returned as it is.
+    """
+    if (
+        signal.identity
+        and signal.installed
+        and signal.binary_path
+        and _executable_identity(signal.binary_path) != signal.identity
+    ):
+        return replace(
+            signal,
+            version="",
+            kiro_cli_version="",
+            kiro_ide_version="",
+            kiro_forms=[],
+            skipped_binaries=(),
+            identity=[],
+            error=VERSION_NOT_PROBED,
+        )
+    return signal
+
+
+def _entry_for_cache(signal: AgentSignal, observed_at: str) -> dict[str, Any]:
+    """The cache entry for *signal*, built at the moment it is written."""
+    return {**asdict(_current_signal(signal)), _ENTRY_OBSERVED_AT: observed_at}
+
+
+def _executable_replaced_since_read(path: str, recorded: list[Any]) -> bool:
+    """Whether the version read from the executable at *path* is no longer the
+    version of the file there.
+
+    The version belongs to the file that answered, named by the identity taken
+    before it was probed (:func:`_executable_identity`), and is trusted only
+    while the file now is that one. A file that cannot be read now is changed:
+    it was removed, and whatever is installed there next is another file. A
+    reading that records no identity (a cache written before identities
+    existed) is changed too: nothing says which file it was read from, so it
+    is read again and rewritten with its identity, not judged by file times.
+    """
+    current = _executable_identity(path) if path else []
+    return not current or not recorded or recorded != current
+
+
+def _entry_executable_changed(entry: Any) -> bool:
+    """Whether the version a cached *entry* records belongs to an executable
+    that is no longer the one at its path (:func:`_executable_replaced_since_read`).
+
+    Judged from the entry alone, so a peer scan that could not read the
+    executable (a timeout, or one that kept changing so that nothing was
+    selected) is still told apart from a slow answer of an unchanged one. An
+    entry that records no identity is always changed.
+    """
+    if not isinstance(entry, dict) or not str(entry.get("version") or ""):
+        return False
+    path = str(entry.get("binary_path") or "")
+    if not path:
+        return False
+    return _executable_replaced_since_read(path, _recorded_identity(entry))
+
+
+def _entry_selected_elsewhere(entry: Any, fresh: AgentSignal) -> bool:
+    """Whether a scan selected another executable than the one the version of a
+    cached *entry* was read from (the launch order moved to a new install while
+    the old file is still on disk): that version says nothing about the file
+    the scan selected, however the scan fared reading it. A scan that selected
+    nothing (the agent is not found) does not say."""
+    if not isinstance(entry, dict) or not str(entry.get("version") or ""):
+        return False
+    recorded = _recorded_identity(entry)
+    cached_path = str(recorded[0]) if recorded else ""
+    selected_path = fresh.binary_path if fresh.installed else ""
+    selected = str(fresh.identity[0]) if fresh.identity else _resolved_path(selected_path)
+    return bool(cached_path and selected and os.path.normcase(cached_path) != os.path.normcase(selected))
+
+
+def _resolved_path(path: str) -> str:
+    try:
+        return os.path.realpath(path) if path else ""
+    except (OSError, ValueError):
+        return ""
+
+
+def _entry_observed_at(entry: dict[str, Any], payload: dict[str, Any]) -> datetime | None:
+    return _parse_rfc3339(str(entry.get(_ENTRY_OBSERVED_AT) or payload.get("scanned_at") or ""))
+
+
+def _signal_observed_at(signal: AgentSignal, disc: AgentDiscovery) -> datetime | None:
+    """When the scan read the version of *signal*; the scan time when the
+    signal does not say."""
+    return _parse_rfc3339(signal.observed_at) or _parse_rfc3339(disc.scanned_at)
+
+
+def _cached_entry_is_newer(entry: Any, payload: dict[str, Any], read_at: datetime | None) -> bool:
+    """Whether a cached entry holds a reading (a version, or a probe that
+    could not read one) taken after *read_at*, the time the scan being written
+    took its own. Such an entry is newer evidence and stays, whichever scan
+    started first or ended last: a later unread result for an executable that
+    changed is not put back to the version of the one it replaced. Equal times
+    are not proof of order, so the scan being written wins then. An entry whose
+    version belongs to an executable replaced since is no evidence at all
+    (:func:`_entry_executable_changed`): it is judged here, when it would be
+    kept, so a late writer cannot restore it."""
+    if read_at is None or not _entry_was_read(entry) or _entry_executable_changed(entry):
+        return False
+    observed = _entry_observed_at(entry, payload)
+    return observed is not None and observed > read_at
+
+
+def _read_cache_payload(path: Path) -> dict[str, Any] | None:
+    """The cache file as written by this schema, else None."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("version") != CACHE_SCHEMA_VERSION
+        or not isinstance(payload.get("agents"), dict)
+    ):
+        return None
+    return payload
+
+
 def _write_cache(
     disc: AgentDiscovery,
     *,
     data_dir: str | os.PathLike[str] | None = None,
 ) -> bool:
+    """Write one complete scan, keeping an entry a newer scan already read.
+
+    Another process can read a version later than this scan did, and publish
+    it, while this one is still writing; that version is the newer fact and is
+    replaced by nothing here.
+    """
     target_dir = Path(data_dir) if data_dir else default_data_path()
     path = _cache_path(data_dir=target_dir)
     try:
-        payload = {
-            "version": CACHE_SCHEMA_VERSION,
-            "scanned_at": disc.scanned_at,
-            "ttl_seconds": CACHE_TTL_SECONDS,
-            "agents": {name: asdict(signal) for name, signal in disc.agents.items()},
-        }
-        body = json.dumps(payload, indent=2, sort_keys=True) + "\n"
-        atomic_write_private_bytes(path, body.encode("utf-8"))
+        with _cache_update(path):
+            # Built inside the lock: a writer that waited for it must not
+            # write what was true before the wait.
+            agents = {
+                name: _entry_for_cache(signal, signal.observed_at or disc.scanned_at)
+                for name, signal in disc.agents.items()
+            }
+            existing = _read_cache_payload(path)
+            if existing is not None:
+                for name, entry in existing["agents"].items():
+                    if name in agents and _cached_entry_is_newer(
+                        entry, existing, _signal_observed_at(disc.agents[name], disc)
+                    ):
+                        observed = _format_rfc3339(_entry_observed_at(entry, existing))
+                        agents[name] = {**entry, _ENTRY_OBSERVED_AT: observed}
+            payload = {
+                "version": CACHE_SCHEMA_VERSION,
+                "scanned_at": disc.scanned_at,
+                "ttl_seconds": CACHE_TTL_SECONDS,
+                "agents": agents,
+            }
+            body = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+            atomic_write_private_bytes(path, body.encode("utf-8"))
         return True
     except (OSError, TypeError, ValueError):
         return False
+
+
+def _scan_read_version(signal: AgentSignal) -> bool:
+    """Whether a scan observed an installed agent and read a version from it."""
+    return signal.installed and bool(signal.version or signal.kiro_cli_version or signal.kiro_ide_version)
+
+
+def _publish_agent_signal(
+    disc: AgentDiscovery,
+    name: str,
+    *,
+    data_dir: str | os.PathLike[str] | None = None,
+) -> bool:
+    """Record one agent signal from a scan in the discovery cache and leave
+    every other entry as the cache holds it.
+
+    A scan made for one connector can miss an unrelated peer for a moment (a
+    slow or unreadable CLI), and the gateway reads each peer version from this
+    cache, so publishing the whole scan would erase a version a peer was
+    reviewed at. A peer the scan did read (installed, with a version) is a
+    newer fact than the cache holds and replaces it, whichever way the version
+    moved: the gateway admits a peer by the version in this file. A peer the
+    scan could not read keeps its cached entry. An entry whose version was
+    read after this scan read its own is newer still and stays (the read,
+    compare and write are one locked step, so a scan that ends late cannot put
+    back what a later reading found, however the scans overlapped). A missing or unreadable cache has nothing to keep
+    and takes the scan, and so does one past its time limit: no one reads it
+    any more, so none of its entries is evidence to keep, and the scan (which
+    reads every enrolled peer) is the refresh `agent discover --refresh` would
+    write (GAP-0752, GAP-0882). A scan that lacks a catalog entry is not a
+    cache anyone could read, so it is never written whole.
+    """
+    signal = disc.agents.get(name)
+    if signal is None:
+        return False
+    path = _cache_path(data_dir=data_dir)
+    try:
+        with _cache_update(path):
+            payload = _read_cache_payload(path)
+            if payload is not None:
+                scanned = _parse_rfc3339(str(payload.get("scanned_at") or ""))
+                if scanned is not None and _now_utc() - scanned <= timedelta(seconds=CACHE_TTL_SECONDS):
+                    for peer, fresh in disc.agents.items():
+                        cached_peer = payload["agents"].get(peer)
+                        if (
+                            peer != name
+                            and not _scan_read_version(fresh)
+                            and not _entry_executable_changed(cached_peer)
+                            and not _entry_selected_elsewhere(cached_peer, fresh)
+                        ):
+                            continue
+                        read_at = _signal_observed_at(fresh, disc)
+                        if _cached_entry_is_newer(cached_peer, payload, read_at):
+                            continue
+                        payload["agents"][peer] = _entry_for_cache(fresh, fresh.observed_at or disc.scanned_at)
+                    body = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+                    atomic_write_private_bytes(path, body.encode("utf-8"))
+                    return True
+    except (OSError, TypeError, ValueError):
+        return False
+    # Nothing current to keep: the scan is the cache (written outside the
+    # lock above, which the full write takes itself).
+    if not set(DISCOVERABLE_CONNECTORS) <= set(disc.agents):
+        return False
+    return _write_cache(disc, data_dir=data_dir)
+
+
+def publish_verified_agent(
+    name: str,
+    *,
+    binary_path: str,
+    version: str,
+    data_dir: str | os.PathLike[str] | None = None,
+) -> bool:
+    """Record the executable and version a setup verified for one connector.
+
+    Native Windows OpenCode setup selects its executable through the protected
+    selection and runs no discovery scan, so the cache doctor reads never heard
+    of the install and doctor failed a healthy fresh setup until
+    ``agent discover --refresh`` (GAP-0882). This writes that one entry the way
+    a scan would have: a readable cache keeps every other entry as it is
+    (:func:`_publish_agent_signal`); a missing, unreadable or expired one is
+    replaced by a scan of the host that carries the verified entry. Admission
+    never comes from this cache, so nothing that goes wrong here (a write, or
+    the host scan that stands in for a missing cache) may refuse a setup whose
+    executable the protected selection already verified: every failure is a
+    False return and the caller names the refresh step.
+    """
+    if not binary_path or not version:
+        return False
+    try:
+        return _publish_verified_agent(name, binary_path, version, data_dir)
+    except Exception:  # noqa: BLE001 - optional doctor evidence; see the docstring.
+        return False
+
+
+def _publish_verified_agent(
+    name: str,
+    binary_path: str,
+    version: str,
+    data_dir: str | os.PathLike[str] | None,
+) -> bool:
+    config_path = _agent_config_path(name, include_workspace_config=False)
+    verified = AgentSignal(
+        name=name,
+        installed=True,
+        config_path=config_path,
+        binary_path=binary_path,
+        version=version,
+        error="",
+        configured=bool(config_path),
+        identity=_executable_identity(binary_path),
+        observed_at=_format_rfc3339(_now_utc()),
+    )
+    if _read_cache(data_dir=data_dir) is not None:
+        solo = AgentDiscovery(scanned_at=verified.observed_at, agents={name: verified}, cache_hit=False)
+        if _publish_agent_signal(solo, name, data_dir=data_dir):
+            return True
+    scan = discover_with_probes([], use_cache=False, refresh=True, data_dir=data_dir, persist_cache=False)
+    scan.agents[name] = verified
+    return _publish_agent_signal(scan, name, data_dir=data_dir)
 
 
 def _cache_path(*, data_dir: str | os.PathLike[str] | None = None) -> Path:
@@ -2775,7 +3916,7 @@ def _now_utc() -> datetime:
 
 
 def _format_rfc3339(ts: datetime) -> str:
-    return ts.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return ts.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _parse_rfc3339(value: str) -> datetime | None:
@@ -2793,8 +3934,6 @@ def _normalize_connector(value: str | None) -> str:
     name = value.strip().lower()
     if name in {"claude-code", "claude_code", "claude"}:
         return "claudecode"
-    if name in {"open-hands", "open_hands"}:
-        return "openhands"
     return name
 
 
@@ -2827,7 +3966,7 @@ def _render_plain_table(disc: AgentDiscovery) -> str:
                     signal.mode if signal.active else "no",
                     _display_path(signal.config_path),
                     _display_path(signal.binary_path),
-                    _display_version(signal.version) or _display_error(signal),
+                    _display_detail(signal),
                 ]
             )
         )

@@ -7,11 +7,13 @@ package cli
 
 import (
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -38,6 +40,40 @@ func TestAlignEnterpriseWindowsTokenOwnerRejectsReparseChainBeforeACLWrites(t *t
 	}
 	if writes != 0 {
 		t.Fatalf("ACL writes = %d, want zero before reparse-chain rejection", writes)
+	}
+}
+
+// The token folder is the hooks directory the Guardian's data-path repair
+// keeps at the RuntimeDirectory descriptor; token publishing must ask the same
+// repair instead of stamping its own generic-rights form, or the two rewrite
+// each other on every tick.
+func TestEnterpriseWindowsTokenDirectoryUsesCanonicalRuntimeRepair(t *testing.T) {
+	original := enterpriseWindowsManagedDataPathsRepair
+	t.Cleanup(func() { enterpriseWindowsManagedDataPathsRepair = original })
+	const dir = `C:\managed\hooks`
+	for _, tc := range []struct {
+		outcome managed.CanonicalOutcome
+		want    bool
+	}{
+		{managed.CanonicalOK, true},
+		{managed.CanonicalRepaired, true},
+		{managed.CanonicalAccepted, false},
+		{managed.CanonicalBoundary, false},
+	} {
+		var got managed.ManagedDataPaths
+		enterpriseWindowsManagedDataPathsRepair = func(
+			paths managed.ManagedDataPaths,
+			_ managed.CanonicalOptions,
+		) []managed.CanonicalResult {
+			got = paths
+			return []managed.CanonicalResult{{Path: dir, Kind: managed.ObjectRuntimeDirectory, Outcome: tc.outcome}}
+		}
+		if canonical := enterpriseWindowsTokenDirectoryCanonical(dir); canonical != tc.want {
+			t.Fatalf("outcome %s: canonical = %v, want %v", tc.outcome, canonical, tc.want)
+		}
+		if got.DataDir != "" || len(got.RuntimeDirs) != 1 || got.RuntimeDirs[0] != dir {
+			t.Fatalf("outcome %s: repair asked for %+v, want only the runtime directory %s", tc.outcome, got, dir)
+		}
 	}
 }
 
@@ -70,6 +106,16 @@ func TestRepairEnterpriseHookManagedRuntimePlatformWrapsPrivilegedWrite(t *testi
 
 	driftedDir := func(t *testing.T) string {
 		t.Helper()
+		originalShared := enterpriseWindowsManagedDataPathsRepair
+		t.Cleanup(func() { enterpriseWindowsManagedDataPathsRepair = originalShared })
+		// Exercise the legacy fallback: the shared repair reports that it
+		// could not fix the directory.
+		enterpriseWindowsManagedDataPathsRepair = func(
+			paths managed.ManagedDataPaths,
+			_ managed.CanonicalOptions,
+		) []managed.CanonicalResult {
+			return []managed.CanonicalResult{{Path: paths.DataDir, Outcome: managed.CanonicalAccepted}}
+		}
 		dir := t.TempDir()
 		if err := managed.ValidateTrustedServiceRuntimeDir(dir, "managed data_dir", serviceAccount); err == nil {
 			t.Skip("temp directory already satisfies the managed runtime contract")
@@ -192,4 +238,42 @@ func TestRepairEnterpriseHookManagedRuntimePlatformWrapsPrivilegedWrite(t *testi
 			t.Fatalf("ACL writes = %d, want zero for an untrusted owner", writes)
 		}
 	})
+}
+
+// GAP-0766: the lazily created lock files are repair targets of the
+// standalone profile only; the Secure Client profile keeps the objects it
+// repaired before.
+func TestRepairEnterpriseHookGatewayDataPathsLockFilesAreStandaloneOnly(t *testing.T) {
+	original := enterpriseWindowsManagedDataPathsRepair
+	originalCfg := cfg
+	t.Cleanup(func() {
+		enterpriseWindowsManagedDataPathsRepair = original
+		cfg = originalCfg
+	})
+	dataDir := filepath.Join(t.TempDir(), "runtime")
+	cfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise, DataDir: dataDir}
+	var got managed.ManagedDataPaths
+	enterpriseWindowsManagedDataPathsRepair = func(paths managed.ManagedDataPaths, _ managed.CanonicalOptions) []managed.CanonicalResult {
+		got = paths
+		return nil
+	}
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
+	repairEnterpriseHookGatewayDataPathsPlatform()
+	var names []string
+	for _, lock := range got.LockFiles {
+		names = append(names, filepath.Base(lock))
+	}
+	want := ".enterprise-credentials.lock,.enterprise-enrollment.lock,.env.lock"
+	if strings.Join(names, ",") != want {
+		t.Fatalf("standalone lock files = %v, want %s", names, want)
+	}
+	if managed.IsStandaloneManagedHost() || managed.WindowsStandaloneInstallExecutable() {
+		t.Skip("this computer is itself a standalone install, so the Secure Client half cannot be shown here")
+	}
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileSecureClient)
+	got = managed.ManagedDataPaths{}
+	repairEnterpriseHookGatewayDataPathsPlatform()
+	if len(got.LockFiles) != 0 {
+		t.Fatalf("Secure Client lock files = %v, want none", got.LockFiles)
+	}
 }

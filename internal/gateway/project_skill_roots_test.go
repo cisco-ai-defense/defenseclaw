@@ -65,6 +65,23 @@ func TestProjectSkillIsHeldUntilItsFirstAdmission(t *testing.T) {
 	}
 }
 
+func TestGAP0613SharedProjectRootRetainsEveryConnector(t *testing.T) {
+	roots := &projectSkillRoots{}
+	roots.start(true)
+	path := filepath.Join(t.TempDir(), "project", ".claude", "skills")
+	if !roots.add("claudecode", path) || !roots.add("amp", path) {
+		t.Fatal("shared project root did not retain both connectors")
+	}
+	if roots.add("amp", path) {
+		t.Fatal("duplicate connector registration changed the project roots")
+	}
+	registered, fresh := roots.start(true)
+	if len(registered) != 2 || registered[0].Connector != "claudecode" || registered[1].Connector != "amp" ||
+		len(fresh) != 1 || fresh[0] != path {
+		t.Fatalf("shared project roots = %+v; newly watched = %v", registered, fresh)
+	}
+}
+
 // GAP-1297: a link below a managed caller's home that points at another
 // user's project is not registered, so the watcher never scans that tree.
 func TestManagedProjectSkillLinkOutsideHomeIsNotRegistered(t *testing.T) {

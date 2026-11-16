@@ -92,6 +92,16 @@ enum InventoryOutputParser {
         return nil
     }
 
+    static func firstJSONObject(in output: String) -> [String: Any]? {
+        guard output.utf8.count <= maximumInputBytes else { return nil }
+        let bytes = Array(output.utf8)
+        for candidate in candidateRanges(in: bytes) where bytes[candidate.start] == 0x7B {
+            let data = Data(bytes[candidate.start...candidate.end])
+            if let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] { return object }
+        }
+        return nil
+    }
+
     /// DefenseClaw emits one object for a single connector and an array for
     /// multiple connectors. CLI diagnostics may surround that JSON because the
     /// app combines stdout and stderr for Activity output.

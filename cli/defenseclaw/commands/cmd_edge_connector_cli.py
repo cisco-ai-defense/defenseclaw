@@ -33,6 +33,7 @@ from defenseclaw import ux
 from defenseclaw.context import AppContext, pass_ctx
 
 _TOKEN_ENV = "DCLAW_FLEET_API_TOKEN"
+_ENDPOINT_ENV = "DCLAW_FLEET_API_URL"
 _FLEET_PREFIX = "/api/v1/fleet"
 _CONN_ERR = "Cannot reach the gateway. Is it running?"
 
@@ -41,18 +42,18 @@ _CONN_ERR = "Cannot reach the gateway. Is it running?"
 # ---------------------------------------------------------------------------
 
 
-def _load_fleet_token() -> str:
-    """Read DCLAW_FLEET_API_TOKEN from env or ~/.defenseclaw/.env."""
-    token = os.environ.get(_TOKEN_ENV, "").strip()
-    if token:
-        return token
+def _load_fleet_setting(name: str) -> str:
+    """Read a Fleet setting from the process or the private setup env file."""
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
     env_path = Path(os.environ.get("DEFENSECLAW_HOME", Path.home() / ".defenseclaw")) / ".env"
     if not env_path.is_file():
         return ""
     try:
         for line in env_path.read_text().splitlines():
             s = line.strip()
-            for prefix in (f"{_TOKEN_ENV}=", f"export {_TOKEN_ENV}="):
+            for prefix in (f"{name}=", f"export {name}="):
                 if s.startswith(prefix):
                     return s.split("=", 1)[1].strip().strip("'\"")
 
@@ -80,24 +81,52 @@ class _Fleet:
 
 
 def _client(app: AppContext) -> _Fleet:
+    from defenseclaw.commands.cmd_setup_edge_connector import _validate_fleet_endpoint
     from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 
     cfg = app.cfg
     gw = getattr(cfg, "gateway", None)
     port = int(getattr(gw, "api_port", 0) or 0) if gw else 0
-    if port <= 0:
-        ux.err("Edge Connector API not available -- gateway API port is not configured.")
-        ux.echo("  Run 'defenseclaw setup edge-connector' first.")
-        raise SystemExit(1)
     resolver = getattr(gw, "resolved_token", None)
     try:
         token = resolver() if callable(resolver) else str(getattr(gw, "token", "") or "")
     except Exception:  # noqa: BLE001
         token = ""
+    fleet_token = _load_fleet_setting(_TOKEN_ENV)
+    token = (fleet_token or token or "").strip()
+
+    endpoint = _load_fleet_setting(_ENDPOINT_ENV)
+    if endpoint:
+        endpoint = _validate_fleet_endpoint(endpoint).rstrip("/")
+        parsed = urlparse(endpoint)
+        if not parsed.path.endswith(_FLEET_PREFIX):
+            raise click.ClickException(f"{_ENDPOINT_ENV} must end with {_FLEET_PREFIX}")
+        if parsed.scheme == "https":
+            if not fleet_token:
+                raise click.ClickException(f"{_TOKEN_ENV} is required for the HTTPS Fleet endpoint")
+            session = req_lib.Session()
+            # Honor TLS trust and proxy settings without allowing .netrc to
+            # replace the Fleet bearer token with unrelated host credentials.
+            session.trust_env = False
+            session.verify = os.environ.get("REQUESTS_CA_BUNDLE") or os.environ.get("CURL_CA_BUNDLE") or True
+            session.proxies = req_lib.utils.get_environ_proxies(endpoint)
+            session.headers["X-DefenseClaw-Client"] = "python-cli"
+            if token:
+                session.headers["Authorization"] = f"Bearer {token}"
+            return _Fleet(session, endpoint[:-len(_FLEET_PREFIX)], 10)
+        # Plaintext is accepted only by the literal-loopback validator above.
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or 80
+    else:
+        host = gateway_api_client_host(cfg)
+    if port <= 0:
+        ux.err("Edge Connector API not available -- gateway API port is not configured.")
+        ux.echo("  Run 'defenseclaw setup edge-connector' first.")
+        raise SystemExit(1)
     orch = OrchestratorClient(
-        host=gateway_api_client_host(cfg),
+        host=host,
         port=port,
-        token=(_load_fleet_token() or token or "").strip(),
+        token=token,
         timeout=10,
     )
     return _Fleet(orch._session, orch.base_url, orch.timeout)

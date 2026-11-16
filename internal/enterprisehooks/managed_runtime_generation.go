@@ -15,6 +15,16 @@ var ErrWindowsManagedRuntimeGenerationConflict = errors.New(
 	"enterprise hooks: Windows managed runtime generation changed concurrently",
 )
 
+// ErrWindowsManagedRuntimeGenerationDirectoryUntrusted marks an account's
+// DefenseClaw data folder, or its hooks child, whose owner or permissions
+// DefenseClaw could not verify or apply. Nothing is read, written or removed
+// in such a folder. Generation garbage collection reports the account and
+// goes on with the others, so one stale or foreign profile no longer rolls
+// back a whole lifecycle (#1105, GAP-0781).
+var ErrWindowsManagedRuntimeGenerationDirectoryUntrusted = errors.New(
+	"enterprise hooks: managed runtime generation directory is untrusted",
+)
+
 // WindowsManagedRuntimeGenerationDesired is the complete authenticated input
 // used to render one immutable per-target hook runtime generation. ScopedToken
 // is deliberately excluded from JSON if this orchestration object is ever
@@ -27,6 +37,7 @@ type WindowsManagedRuntimeGenerationDesired struct {
 	HookExecutable             string `json:"hook_executable"`
 	GatewayAddr                string `json:"gateway_addr"`
 	GatewayServiceName         string `json:"gateway_service_name"`
+	FailMode                   string `json:"fail_mode"`
 	ScopedToken                string `json:"-"`
 	HookContractID             string `json:"hook_contract_id"`
 	HookContractLockUpdatedAt  string `json:"hook_contract_lock_updated_at"`
@@ -141,15 +152,18 @@ type WindowsManagedRuntimeSelectorFullRestoreOptions struct {
 }
 
 // WindowsManagedRuntimeGenerationGCOptions authorizes bounded cleanup of
-// strict, unselected immutable bundles for one authenticated target. Preserve
-// IDs come from the protected lifecycle journal and are always unioned with
-// the currently selected generation.
+// strict, unselected immutable bundles for one authenticated target. The
+// currently selected generation is classified but never collected.
 type WindowsManagedRuntimeGenerationGCOptions struct {
-	Connector                      string
-	TargetSID                      string
-	DataDir                        string
-	HookExecutable                 string
-	ProtectedPreserveGenerationIDs []string
+	Connector      string
+	TargetSID      string
+	DataDir        string
+	HookExecutable string
+	// Retired is set by the uninstall finalize, which runs after the
+	// guardian is gone and the selectors no longer name the target: no
+	// publication can be in flight, so the bundles a recent ensure, repair
+	// or config change prepared are collected too (GAP-1986).
+	Retired bool
 }
 
 // WindowsManagedRuntimeGenerationPublication is an opaque prepared immutable
@@ -200,6 +214,13 @@ func (p WindowsManagedRuntimeGenerationPublication) String() string {
 
 func (p WindowsManagedRuntimeGenerationPublication) GoString() string { return p.String() }
 
+// WindowsManagedRuntimeRetirePreviousGenerationAllowed, when set, reports
+// whether a successful per-user install may delete the bundle it replaced.
+// The Guardian sets it to "no lifecycle transaction is pending", because a
+// pending Upgrade or Repair may still roll its selector snapshot back to that
+// bundle. Nil (the default) never retires.
+var WindowsManagedRuntimeRetirePreviousGenerationAllowed func() bool
+
 // WindowsManagedRuntimeSelectorCommit is a target-granular CAS receipt. It
 // contains no token material and can restore only the exact selector entry
 // changed by its transaction while preserving concurrent peer-SID updates.
@@ -240,6 +261,7 @@ type WindowsManagedRuntimeGenerationResolved struct {
 	HookExecutable             string `json:"hook_executable"`
 	GatewayAddr                string `json:"gateway_addr"`
 	GatewayServiceName         string `json:"gateway_service_name"`
+	FailMode                   string `json:"fail_mode"`
 	GenerationID               string `json:"generation_id"`
 	BundleSHA256               string `json:"bundle_sha256"`
 	HookContractID             string `json:"hook_contract_id"`
@@ -358,15 +380,18 @@ func ReadWindowsManagedRuntimeSelectorCAS(
 
 // RestoreWindowsManagedRuntimeSelectorCAS restores a complete connector
 // selector only when the current full-selector CAS matches the protected
-// lifecycle journal.
+// lifecycle journal. It returns the CAS of the selector it actually left in
+// place, which differs from the snapshot's when an entry whose bundle no
+// longer loads was dropped; a later compensating restore must expect it.
 func RestoreWindowsManagedRuntimeSelectorCAS(
 	opts WindowsManagedRuntimeSelectorFullRestoreOptions,
-) error {
+) (WindowsManagedRuntimeSelectorCAS, error) {
 	return restoreWindowsManagedRuntimeSelectorCASPlatform(opts)
 }
 
 // GarbageCollectWindowsManagedRuntimeGenerations deletes only strict,
-// target-owned, unselected bundles while preserving protected journal pins.
+// target-owned, unselected bundles, and only after every bundle of the target,
+// the selected one included, passed the same classification.
 func GarbageCollectWindowsManagedRuntimeGenerations(
 	opts WindowsManagedRuntimeGenerationGCOptions,
 ) (int, error) {

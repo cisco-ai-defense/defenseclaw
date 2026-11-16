@@ -17,7 +17,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -43,24 +42,23 @@ func (r fixtureEventsRelay) Events(_ context.Context, batch sandboxrelay.EventBa
 	return nil
 }
 
-// sandboxAuditRows are the managed gateway's audit rows of action, as JSON.
-func sandboxAuditRows(t *testing.T, store *audit.Store, action audit.Action) []string {
+// sandboxAuditRows are the managed gateway's audit rows of action.
+func sandboxAuditRows(t *testing.T, store *audit.Store, action audit.Action) []audit.Event {
 	t.Helper()
 	events, err := store.ListEvents(200)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var out []string
+	var out []audit.Event
 	for _, ev := range events {
 		if ev.Action == string(action) {
-			raw, _ := json.Marshal(ev)
-			out = append(out, string(raw))
+			out = append(out, ev)
 		}
 	}
 	return out
 }
 
-func waitForAuditRows(t *testing.T, store *audit.Store, action audit.Action, n int) []string {
+func waitForAuditRows(t *testing.T, store *audit.Store, action audit.Action, n int) []audit.Event {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -122,9 +120,11 @@ func TestManagedSandboxLifecycleAndEgressReachTheManagedAudit(t *testing.T) {
 	if len(lifecycle) != 1 || len(egress) != 3 {
 		t.Fatalf("managed audit: %d lifecycle and %d egress rows, want 1 and 3\nlifecycle %v\negress %v", len(lifecycle), len(egress), lifecycle, egress)
 	}
-	for _, row := range append(append([]string(nil), lifecycle...), egress...) {
-		if !strings.Contains(row, name) || strings.Contains(row, "mallory") || strings.Contains(row, "4242") || strings.Contains(row, "someone-elses") {
-			t.Fatalf("row does not carry only the registration's sandbox and person: %s", row)
+	for _, row := range append(append([]audit.Event(nil), lifecycle...), egress...) {
+		fields := row.Structured
+		if fields["defenseclaw.sandbox.name"] != name || fields["user.id"] != "94404076" ||
+			fields["defenseclaw.user.name"] != "ent-alice" {
+			t.Fatalf("row does not carry the registration's sandbox and person: %+v", fields)
 		}
 	}
 

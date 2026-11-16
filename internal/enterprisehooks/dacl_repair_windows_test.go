@@ -40,6 +40,9 @@ func TestWindowsAuthorizedRepairRecoversSelfDeniedConfigDACL(t *testing.T) {
 		)
 	})
 	setWindowsSelfDenyDACLOnHandle(t, rescue, fixture.targetSID, windows.GENERIC_READ)
+	// An enabled SeBackupPrivilege (Go opens files with backup semantics)
+	// would bypass the deny above on an elevated SSH session.
+	disableWindowsProcessPrivilegesForTest(t, "SeBackupPrivilege", "SeRestorePrivilege")
 
 	if _, err := os.ReadFile(fixture.config); !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 		t.Fatalf("self-denied config read error = %v, want access denied", err)
@@ -253,6 +256,30 @@ func TestWindowsGuardianDACLRepairRequiresExactTargetAuthorization(t *testing.T)
 	}
 	if guardianCalled {
 		t.Fatal("guardian repair ran without exact target-token authorization")
+	}
+}
+
+func setWindowsSelfDenyDACL(t *testing.T, path string, owner *windows.SID, denied windows.ACCESS_MASK) {
+	t.Helper()
+	setWindowsTestDACL(t, path, windowsSelfDenyTestACL(t, owner, denied))
+}
+
+func setWindowsTestDACL(t *testing.T, path string, acl *windows.ACL) {
+	t.Helper()
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		extended,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		acl,
+		nil,
+	); err != nil {
+		t.Fatalf("set hostile DACL on %s: %v", path, err)
 	}
 }
 

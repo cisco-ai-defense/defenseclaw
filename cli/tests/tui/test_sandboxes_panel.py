@@ -1074,7 +1074,7 @@ def test_no_asks_text_holds_for_every_pack() -> None:
         # (it needs no snapshot).
         (0, "P", "pull", ""),
         (0, "U", "undo", ""),
-        (0, "R", "hint", "P brings its work back after showing it (defenseclaw sandbox pull fix-tests)"),
+        (0, "R", "hint", "choose Apply or Branch in P to bring its work back (defenseclaw sandbox pull fix-tests --apply or --branch)"),
         (2, "U", "hint", "no snapshot to undo"),
         (2, "s", "hint", "is not running"),
         (2, "c", "connect", ""),
@@ -1269,7 +1269,7 @@ def test_harness_choices_follow_config_and_organization() -> None:
     assert everything[:2] == (("Claude Code", "claudecode"), ("Codex", "codex"))
     assert {name for _label, name in everything} == {
         "amp", "antigravity", "claudecode", "codex", "copilot", "cursor",
-        "devin", "hermes", "kiro", "omnigent", "opencode", "openhands",
+        "devin", "hermes", "kiro",  "opencode",
     }  # fmt: skip
     assert harness_choices(("codex",))[:2] == (("Codex", "codex"), ("Claude Code", "claudecode"))
     assert harness_choices((), ("codex",)) == (("Codex", "codex"),)
@@ -1811,7 +1811,7 @@ def _fake_terminal(monkeypatch, app, returncode: int = 0):
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             yield
 
-    def run(argv, cwd=None, check=False):
+    def run(argv, cwd=None, check=False, stderr=None):
         ran.append((argv, cwd))
         return SimpleNamespace(returncode=returncode)
 
@@ -2787,7 +2787,7 @@ async def test_new_run_can_delete_the_sandbox_holding_the_folder(fetch, monkeypa
     ran = _fake_terminal(monkeypatch, app)
     fake_run = sandbox_panel.subprocess.run
 
-    def run(argv, cwd=None, check=False):
+    def run(argv, cwd=None, check=False, stderr=None):
         result = fake_run(argv, cwd=cwd, check=check)
         if argv[1:3] == ["sandbox", "delete"]:  # the command line asked and deleted it
             fetch.sandboxes = [RUNNING]

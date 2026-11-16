@@ -28,10 +28,10 @@ from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
-from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
 from defenseclaw.tui.markup_safe import escape as rich_escape
+from defenseclaw.tui.modal import GuardedModalScreen
 from defenseclaw.tui.services.policy_state import PackValidation, fit
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
@@ -99,7 +99,7 @@ def option_lines(options: tuple[PackOption, ...], selected: int, current: str) -
     return lines
 
 
-class RulePackPickerScreen(ModalScreen[RulePackChoice | None]):
+class RulePackPickerScreen(GuardedModalScreen[RulePackChoice | None]):
     """Scope, then pack, then validation."""
 
     # The folder Input is hidden until "Custom folder…"; auto-focusing it

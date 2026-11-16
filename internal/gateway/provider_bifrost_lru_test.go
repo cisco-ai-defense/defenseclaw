@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
 )
 
@@ -41,11 +42,8 @@ func TestEvictOldestBifrostTenantLocked_TieBreakDeterministic(t *testing.T) {
 			baseURL:  "",
 			keyID:    fmt.Sprintf("k-%05d", i),
 		}
-		// client=nil is safe: the tie-break test never invokes
-		// the cached client; eviction only deletes map entries
-		// and (asynchronously) calls Shutdown — the goroutine
-		// guards against nil with a recover. We do NOT exercise
-		// the goroutine path here; this test isolates ordering.
+		// client=nil: the tie-break test never uses the cached
+		// client, and eviction shuts down only real clients.
 		bifrostTenants[k] = &bifrostTenantEntry{client: nil, lastUsed: fixed}
 	}
 	bifrostTenantsMu.Unlock()
@@ -113,6 +111,49 @@ func TestEvictOldestBifrostTenantLocked_OldestFirst(t *testing.T) {
 	bifrostTenantsMu.RUnlock()
 	if oldestStillThere {
 		t.Fatalf("expected oldest entry to be evicted; lexicographic key was largest but lastUsed was smallest")
+	}
+}
+
+// rel-1-0-6:GAP-0550: evicting an entry that holds no client must not call
+// Shutdown. The call on nil faulted (a hardware access violation recovered on
+// a fresh goroutine), which on Windows AMX hosts corrupts the heap below that
+// goroutine's stack (golang/go#81238).
+func TestEvictOldestBifrostTenantLockedShutsDownOnlyRealClients(t *testing.T) {
+	bifrostTenantsMu.Lock()
+	original := bifrostTenants
+	bifrostTenants = make(map[tenantKey]*bifrostTenantEntry)
+	bifrostTenantsMu.Unlock()
+	shutdowns := make(chan *bifrost.Bifrost, 4)
+	originalShutdown := shutdownEvictedBifrostClient
+	shutdownEvictedBifrostClient = func(c *bifrost.Bifrost) { shutdowns <- c }
+	t.Cleanup(func() {
+		bifrostTenantsMu.Lock()
+		bifrostTenants = original
+		bifrostTenantsMu.Unlock()
+		shutdownEvictedBifrostClient = originalShutdown
+	})
+
+	real := &bifrost.Bifrost{}
+	base := time.Date(2026, 5, 9, 22, 0, 0, 0, time.UTC)
+	bifrostTenantsMu.Lock()
+	bifrostTenants[tenantKey{provider: "openai", keyID: "no-client"}] = &bifrostTenantEntry{client: nil, lastUsed: base}
+	bifrostTenants[tenantKey{provider: "openai", keyID: "client"}] = &bifrostTenantEntry{client: real, lastUsed: base.Add(time.Second)}
+	evictOldestBifrostTenantLocked()
+	evictOldestBifrostTenantLocked()
+	bifrostTenantsMu.Unlock()
+
+	select {
+	case got := <-shutdowns:
+		if got != real {
+			t.Fatalf("Shutdown called with %p, want the evicted client %p", got, real)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the evicted client was not shut down")
+	}
+	select {
+	case got := <-shutdowns:
+		t.Fatalf("Shutdown called again (with %p); an entry without a client has nothing to shut down", got)
+	case <-time.After(200 * time.Millisecond):
 	}
 }
 

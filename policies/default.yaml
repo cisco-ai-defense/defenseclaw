@@ -1,5 +1,5 @@
 # DefenseClaw Default Policy
-# Balanced security — scans everything, blocks HIGH/CRITICAL, warns on MEDIUM/LOW
+# Balanced security — scans everything; MCP findings below CRITICAL warn
 name: default
 description: Balanced security policy for standard deployments
 
@@ -40,12 +40,16 @@ skill_actions:
 # admission.<type>.actions in config.yaml, which is what the gateway reads.
 scanner_overrides:
   mcp:
+    HIGH:
+      runtime: allow
+      file: none
+      install: none
     MEDIUM:
-      runtime: block
-      file: quarantine
-      install: block
+      runtime: allow
+      file: none
+      install: none
     LOW:
-      runtime: block
+      runtime: allow
       file: none
       install: none
   plugin:

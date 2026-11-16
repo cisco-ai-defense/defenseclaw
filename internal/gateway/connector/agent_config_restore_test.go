@@ -276,3 +276,126 @@ func TestDevinSetupPutsBackAMissingConfigWithTheAccountsSettings(t *testing.T) {
 		}
 	}
 }
+
+// rel-1-0-2 GAP-0612 (1): the copy DefenseClaw kept of a config.yaml its own
+// first setup created holds its hooks only. A later loss puts that copy back,
+// and the notice says hooks only, not "with that user's settings".
+func TestHermesPutBackHooksOnlyCopyIsReportedAsHooksOnly(t *testing.T) {
+	conn, opts, configPath := hermesRestoreFixture(t, "")
+	if status := AgentConfigStatus("hermes", opts, time.Time{}, true); status != "" {
+		t.Fatalf("status after first setup: %q", status)
+	}
+	if _, err := os.Stat(hermesSpec.copyPath(opts.DataDir)); err != nil {
+		t.Fatalf("no copy of the hooks-only file: %v", err)
+	}
+	if err := os.Remove(configPath); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("repair Setup: %v", err)
+	}
+	if status := AgentConfigStatus("hermes", opts, started, false); status != AgentConfigRecreatedHooksOnly {
+		t.Fatalf("status = %q, want %q", status, AgentConfigRecreatedHooksOnly)
+	}
+}
+
+// rel-1-0-2 GAP-0612 (1): the guardian verifies right after its repair, and
+// that verify dropped the hooks-only report, so status and verify never
+// showed it. It stays until the account has settings in the file again.
+func TestHermesHooksOnlyPutBackStaysReportedAcrossVerifies(t *testing.T) {
+	conn, opts, configPath := hermesRestoreFixture(t, "")
+	if status := AgentConfigStatus("hermes", opts, time.Time{}, true); status != "" {
+		t.Fatalf("status after first setup: %q", status)
+	}
+	if err := os.Remove(configPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("repair Setup: %v", err)
+	}
+	if got := hermesTopKeys(t, configPath); got != "hooks" {
+		t.Fatalf("put-back config.yaml keys = %s, want hooks only", got)
+	}
+	for pass := 1; pass <= 3; pass++ {
+		if status := AgentConfigStatus("hermes", opts, time.Time{}, true); status != AgentConfigRecreatedHooksOnly {
+			t.Fatalf("verify %d: status = %q, want %q", pass, status, AgentConfigRecreatedHooksOnly)
+		}
+	}
+	if _, err := os.Stat(hermesSpec.noticePath(opts.DataDir)); err != nil {
+		t.Fatalf("the hooks-only notice did not survive the verifies: %v", err)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, append([]byte(hermesAccountSettings), data...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if status := AgentConfigStatus("hermes", opts, time.Time{}, true); status != "" {
+		t.Fatalf("status with the account's settings back = %q, want none", status)
+	}
+	if _, err := os.Stat(hermesSpec.noticePath(opts.DataDir)); !os.IsNotExist(err) {
+		t.Fatalf("the notice stayed after the settings came back: %v", err)
+	}
+	if text, ok := AgentConfigNotice("hermes", "alice", AgentConfigRecreatedHooksOnly); !ok || !strings.Contains(text, "hooks only") || strings.Contains(text, "with that user's settings, and") {
+		t.Fatalf("hooks-only notice text = %q", text)
+	}
+}
+
+// rel-1-0-2 GAP-0612 (2): with the backup record gone, a copy that is there
+// but no longer reads is settings DefenseClaw saw: the file is recreated with
+// the hooks and reported as settings lost, not silently.
+func TestHermesUnreadableCopyWithoutRecordReportsSettingsLost(t *testing.T) {
+	conn, opts, configPath := hermesRestoreFixture(t, hermesAccountSettings)
+	if err := os.Remove(managedFileBackupPath(opts.DataDir, "hermes", "config.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hermesSpec.copyPath(opts.DataDir), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(configPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("repair Setup: %v", err)
+	}
+	if got := hermesTopKeys(t, configPath); got != "hooks" {
+		t.Fatalf("recreated config.yaml keys = %s", got)
+	}
+	if status := AgentConfigStatus("hermes", opts, time.Time{}, false); status != AgentConfigSettingsLost {
+		t.Fatalf("status = %q, want %q", status, AgentConfigSettingsLost)
+	}
+}
+
+// rel-1-0-6 GAP-0333: the notice setup reads says whether the copy that was
+// put back held DefenseClaw's hooks only, so the line it prints does not claim
+// the account's settings came back, and a copy with settings is not marked.
+func TestHermesPutBackNoticeMarksAHooksOnlyCopy(t *testing.T) {
+	for _, tc := range []struct {
+		name, settings string
+		wantHooksOnly  bool
+	}{
+		{"hooks-only copy", "", true},
+		{"copy with settings", hermesAccountSettings, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, opts, configPath := hermesRestoreFixture(t, tc.settings)
+			if status := AgentConfigStatus("hermes", opts, time.Time{}, true); status != "" {
+				t.Fatalf("status after first setup: %q", status)
+			}
+			for loss := 1; loss <= 2; loss++ {
+				if err := os.Remove(configPath); err != nil {
+					t.Fatal(err)
+				}
+				if err := conn.Setup(context.Background(), opts); err != nil {
+					t.Fatalf("repair Setup %d: %v", loss, err)
+				}
+				notice, ok := hermesSpec.readNotice(opts.DataDir)
+				if !ok || notice.Source != AgentConfigFromLastGood || notice.HooksOnly != tc.wantHooksOnly {
+					t.Fatalf("loss %d: notice = %+v (read %v), want last_good with hooks_only=%v", loss, notice, ok, tc.wantHooksOnly)
+				}
+			}
+		})
+	}
+}

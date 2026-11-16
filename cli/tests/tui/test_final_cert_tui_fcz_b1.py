@@ -12,8 +12,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
+from threading import Event
 from time import monotonic
 
 import pytest
@@ -120,14 +122,24 @@ async def test_idle_refresh_does_not_rescan_the_audit_history(tmp_path) -> None:
 
     path = tmp_path / "audit.db"
     create_synthetic_v8_database(path, 8)
-    trace = SQLTrace()
+    slow_read = Event()
+
+    class SlowReadTrace(SQLTrace):
+        def __call__(self, statement: str) -> None:
+            super().__call__(statement)
+            if "FROM actions" in statement:
+                slow_read.set()
+
+    trace = SlowReadTrace()
     with trace_repository_connections(read_repository, trace):
         repository = TUIReadRepository(path)
         try:
             await repository.refresh()
-            repository._slow_components_loaded_at -= 60  # noqa: SLF001
+            repository._slow_components_loaded_at = float("-inf")  # noqa: SLF001
+            repository._next_history_at = 0  # noqa: SLF001 - bypass a busy first read's backoff
             before = len(trace.statements)
             await repository.refresh()
+            assert await asyncio.to_thread(slow_read.wait, 30)
             slow_sql = trace.statements[before:]
 
             repository._next_history_at = monotonic() + 60  # noqa: SLF001 - the last read was slow

@@ -15,7 +15,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
-func TestAgentHookTrustedActionToolNormalizesOpenCodeBashOnWindows(t *testing.T) {
+func TestAgentHookTrustedActionToolUsesOpenCodeV2Tools(t *testing.T) {
 	tests := []struct {
 		name      string
 		connector string
@@ -26,16 +26,30 @@ func TestAgentHookTrustedActionToolNormalizesOpenCodeBashOnWindows(t *testing.T)
 		{
 			name:      "OpenCode native Windows terminal",
 			connector: "opencode",
-			tool:      "bash",
+			tool:      "shell",
 			platform:  "windows",
 			want:      "shell",
 		},
 		{
 			name:      "OpenCode POSIX terminal",
 			connector: "opencode",
-			tool:      "bash",
+			tool:      "shell",
 			platform:  "linux",
-			want:      "bash",
+			want:      "shell",
+		},
+		{
+			name:      "OpenCode V2 patch",
+			connector: "opencode",
+			tool:      "patch",
+			platform:  "linux",
+			want:      "apply_patch",
+		},
+		{
+			name:      "Hermes patch keeps its native schema",
+			connector: "hermes",
+			tool:      "patch",
+			platform:  "linux",
+			want:      "patch",
 		},
 		{
 			name:      "other Windows connector",
@@ -80,6 +94,10 @@ func TestKiroWindowsAuthorizedKeysPermissionCheck(t *testing.T) {
 		{"powershell wrapper", "shell", `powershell -Command "Add-Content -Path ~/.ssh/authorized_keys -Value marker"`, true},
 		{"quoted home", "execute_bash", "Add-Content -Path \"$HOME\\.ssh\\authorized_keys\" -Value marker", true},
 		{"benign", "execute_bash", `Add-Content -Path ~/project/notes.txt -Value marker`, false},
+		// kiro-cli --v3 names its Windows shell tool execute_pwsh (rel-1-0-6:GAP-0589).
+		{"v3 add tilde", "execute_pwsh", `Add-Content -Path ~/.ssh/authorized_keys -Value marker`, true},
+		{"v3 echo home", "execute_pwsh", `echo marker >> $HOME\.ssh\authorized_keys`, true},
+		{"v3 benign", "execute_pwsh", `Add-Content -Path ~/project/notes.txt -Value marker`, false},
 	}
 	for _, mode := range []string{"action", "observe"} {
 		for _, test := range tests {
@@ -135,7 +153,10 @@ func TestCursorWindowsShellPermissionChecks(t *testing.T) {
 		{"set content", `Set-Content -Path $HOME\.ssh\authorized_keys -Value marker`, true},
 		{"tee", `echo marker | tee -Append $HOME\.ssh\authorized_keys`, true},
 		{"home read", `Get-Content $HOME\.ssh\authorized_keys`, false},
+		// cmd type only reads: a plain read stays allowed in action (owner
+		// decision 2, GAP-2168); its append twin still blocks.
 		{"native read", `type C:\Users\alice\.ssh\authorized_keys`, false},
+		{"native read appended", `type marker.pub >> C:\Users\alice\.ssh\authorized_keys`, true},
 		{"cat read", `cat C:\Users\alice\.ssh\authorized_keys`, false},
 		{"other curl output", `curl.exe -o C:\Users\alice\notes.txt https://example.com`, false},
 		{"authorized curl output", `curl.exe -o C:\Users\alice\.ssh\authorized_keys https://example.com`, true},
@@ -158,7 +179,7 @@ func TestCursorWindowsShellPermissionChecks(t *testing.T) {
 			if !facts.Authoritative() || !facts.EnforcementEligible() {
 				t.Fatalf("permission facts unavailable: dialect=%q status=%q", facts.Parse.Dialect, facts.Parse.Status)
 			}
-			if test.blocked {
+			if test.blocked && test.name != "native read" {
 				write := false
 				for _, path := range facts.Paths {
 					if strings.HasSuffix(strings.ToLower(path.Resolved), "authorized_keys") &&
@@ -209,7 +230,7 @@ func TestCursorWindowsShellPermissionChecks(t *testing.T) {
 	}
 }
 
-func TestOpenCodeWindowsBashToolSelectsPowerShellActionFacts(t *testing.T) {
+func TestOpenCodeWindowsShellToolSelectsPowerShellActionFacts(t *testing.T) {
 	const command = `Remove-Item -Force C:\ -Recurse`
 	args, err := json.Marshal(map[string]any{
 		"command": command,
@@ -218,7 +239,7 @@ func TestOpenCodeWindowsBashToolSelectsPowerShellActionFacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	facts := actionfacts.Analyze(actionfacts.Input{
-		Tool: agentHookTrustedActionTool("opencode", "bash", "windows"),
+		Tool: agentHookTrustedActionTool("opencode", "shell", "windows"),
 		Args: args,
 	})
 	if facts.Parse.Dialect != actionfacts.DialectPowerShell {
@@ -244,7 +265,7 @@ func TestOpenCodeWindowsBashToolSelectsPowerShellActionFacts(t *testing.T) {
 	}
 }
 
-func TestOpenCodeWindowsBashToolKeepsProtectedSAMReadAdvisory(t *testing.T) {
+func TestOpenCodeWindowsShellToolKeepsProtectedSAMReadAdvisory(t *testing.T) {
 	const command = `Get-Content -LiteralPath 'C:\Windows\System32\config\SAM'`
 	args, err := json.Marshal(map[string]any{
 		"command": command,
@@ -253,7 +274,7 @@ func TestOpenCodeWindowsBashToolKeepsProtectedSAMReadAdvisory(t *testing.T) {
 		t.Fatal(err)
 	}
 	facts := actionfacts.Analyze(actionfacts.Input{
-		Tool: agentHookTrustedActionTool("opencode", "bash", "windows"),
+		Tool: agentHookTrustedActionTool("opencode", "shell", "windows"),
 		Args: args,
 	})
 	if facts.Parse.Dialect != actionfacts.DialectPowerShell {

@@ -57,7 +57,7 @@ def test_scanner_path_probe_is_cached_between_repaints(monkeypatch) -> None:
     import defenseclaw.tui.app as app_module
 
     calls: list[str] = []
-    monkeypatch.setattr(app_module.shutil, "which", lambda name: calls.append(name) or "/bin/x")
+    monkeypatch.setattr(app_module.shutil, "which", lambda name, path=None: calls.append(name) or "/bin/x")
     monkeypatch.setattr(app_module, "_on_path_cache", {})
 
     assert app_module._on_path("skill-scanner", now=100.0)
@@ -65,6 +65,37 @@ def test_scanner_path_probe_is_cached_between_repaints(monkeypatch) -> None:
     assert calls == ["skill-scanner"]
     app_module._on_path("skill-scanner", now=100.0 + app_module._ON_PATH_TTL_SECONDS + 1)
     assert calls == ["skill-scanner", "skill-scanner"]
+
+
+def test_scanner_probe_finds_the_scanners_installed_with_defenseclaw(tmp_path, monkeypatch) -> None:
+    """The Overview's scanner probe agrees with `defenseclaw status`: a
+    scanner in DefenseClaw's own scripts directory is installed although that
+    directory is not on PATH (a release install, `.venv/bin/python -m ...`);
+    without it, the Overview showed "skill-scanner unavailable - repair the
+    DefenseClaw installation" and the first-run notice on a working install."""
+    import os
+    import sysconfig
+
+    import defenseclaw.tui.app as app_module
+
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    for name in ("skill-scanner", "mcp-scanner"):
+        launcher = scripts / (name + (".exe" if os.name == "nt" else ""))
+        launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+        launcher.chmod(0o755)
+    real_get_path = sysconfig.get_path
+
+    def get_path(key, *args, **kwargs):
+        return str(scripts) if key == "scripts" else real_get_path(key, *args, **kwargs)
+
+    monkeypatch.setattr(sysconfig, "get_path", get_path)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    monkeypatch.setattr(app_module, "_on_path_cache", {})
+
+    assert app_module._on_path("skill-scanner", now=100.0)
+    assert app_module._on_path("mcp-scanner", now=100.0)
+    assert not app_module._on_path("not-a-scanner", now=100.0)
 
 
 async def test_service_details_read_as_words_at_80_columns(tmp_path, monkeypatch) -> None:

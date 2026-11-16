@@ -91,9 +91,6 @@ func TestConnectorLifecycle_Matrix(t *testing.T) {
 			if !connector.ConnectorSupportedOnHostOS(fx.Name) {
 				t.Skipf("[%s] has no native lifecycle on this host; platform rejection is covered by connector support tests", fx.Name)
 			}
-			if runtime.GOOS == "darwin" && fx.Name == "openhands" {
-				t.Skip("[openhands] Darwin Setup requires a private setup-selected executable receipt; protected admission and lifecycle are covered in package connector")
-			}
 
 			// Stage 2: Setup. The actual error type is implementation
 			// detail; we only care that the connector's *contract*

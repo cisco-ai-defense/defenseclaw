@@ -7,16 +7,20 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
+	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -26,20 +30,40 @@ import (
 // action and its fallback handling unchanged.
 
 var (
-	trustedPathlibAuthorizedKeysWrite    = regexp.MustCompile(`(?s)\bp\s*=\s*(?:pathlib\.)?Path\.home\(\)\s*/\s*['"]\.ssh['"]\s*/\s*['"]authorized_keys['"];.*\bp\.write_text\(`)
-	trustedPythonPathAuthorizedKeysWrite = regexp.MustCompile(`(?s)\bPath\s*\(\s*['"]~/\.ssh/authorized_keys['"]\s*\)\.expanduser\s*\(\s*\)\.write_text\s*\(`)
-	trustedPerlAuthorizedKeysWrite       = regexp.MustCompile(`^open\(F,\s*">>",\s*"\$ENV\{HOME\}/\.ssh/authorized_keys"\);\s*print F "[^"\\]*(?:\\n)?";?(?:\s*close\(F\))?$`)
-	trustedCMDInvoke                     = regexp.MustCompile(`(?is)^cmd(?:\.exe)?\s+/c\s+(.+)$`)
-	trustedOutFileAppend                 = regexp.MustCompile(`(?is)^\s*(?:"[^"\r\n]*"|'[^'\r\n]*')\s*\|\s*out-file\s+-append\s+-filepath\s+(.+?)\s*$`)
-	trustedInterpreterKeysPath           = regexp.MustCompile(`(?:~|\$HOME|\$ENV\{HOME\}|/[A-Za-z0-9_./ -]+)/\.ssh/authorized_keys(?:2)?`)
-	trustedInterpreterOpenCall           = regexp.MustCompile(`\b(?:open|File\.open|fs\.openSync)\s*\(`)
-	trustedInterpreterWriteMode          = regexp.MustCompile(`['"](?:[awx](?:[bt]?\+?|\+[bt]?)|r(?:[bt]?\+|\+[bt]?)|>>|>)['"]`)
-	trustedInterpreterWriteCall          = regexp.MustCompile(`\b(?:appendFileSync|writeFileSync|File\.write|File\.binwrite)\s*\(`)
+	trustedPathlibAuthorizedKeysWrite    = lazyregexp.New(`\bp\s*=\s*(?:pathlib\.)?Path\.home\(\)\s*/\s*['"]\.ssh['"]\s*/\s*['"]authorized_keys['"]`)
+	trustedPathlibWriteText              = lazyregexp.New(`\bp\.write_text\s*\(`)
+	trustedPathlibSafeReassignment       = lazyregexp.New(`^\s*;\s*p\s*=\s*(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*;\s*$`)
+	trustedPythonSimpleChdir             = lazyregexp.New(`^os\.chdir\s*\(\s*(?:Path\.home\(\)\s*/\s*['"]\.ssh['"]|['"][^'"\\]*['"])\s*\)$`)
+	trustedPythonPathAuthorizedKeysWrite = lazyregexp.New(`(?s)\bPath\s*\(\s*['"]~/\.ssh/authorized_keys['"]\s*\)\.expanduser\s*\(\s*\)\.write_text\s*\(`)
+	trustedPerlAuthorizedKeysWrite       = lazyregexp.New(`^open\(F,\s*">>",\s*"\$ENV\{HOME\}/\.ssh/authorized_keys"\);\s*print F "[^"\\]*(?:\\n)?";?(?:\s*close\(F\))?$`)
+	trustedCMDInvoke                     = lazyregexp.New(`(?is)^cmd(?:\.exe)?\s+(?:/d\s+)?/c\s+(.+)$`)
+	trustedSoleCMDInvoke                 = lazyregexp.New("^(?i:cmd(?:\\.exe)?)[ \t]+(?i:/d[ \t]+)?(?i:/c)[ \t]+\"[^\"$`\r\n]*\"[ \t]*$")
+	trustedOutFileAppend                 = lazyregexp.New(`(?is)^\s*(?:"[^"\r\n]*"|'[^'\r\n]*')\s*\|\s*out-file\s+-append\s+-filepath\s+(.+?)\s*$`)
+	trustedInterpreterKeysPath           = lazyregexp.New(`(?:~|\$HOME|\$ENV\{HOME\}|/[A-Za-z0-9_./ -]+)/\.ssh/authorized_keys(?:2)?`)
+	trustedInterpreterOpenCall           = lazyregexp.New(`\b(?:open|File\.open|fs\.openSync)\s*\(`)
+	trustedInterpreterWriteMode          = lazyregexp.New(`['"](?:[awx](?:[bt]?\+?|\+[bt]?)|r(?:[bt]?\+|\+[bt]?)|>>|>)['"]`)
+	trustedInterpreterWriteCall          = lazyregexp.New(`\b(?:appendFileSync|writeFileSync|File\.write|File\.binwrite)\s*\(`)
 )
+
+// soleCMDInvocation reports a PowerShell command line that is nothing but one
+// cmd /c call with one double-quoted body. PowerShell hands that body to
+// cmd.exe unchanged only when it holds no $ or backtick expansion; anything
+// after the closing quote (a statement, pipeline or redirect) is PowerShell
+// code. PowerShell also closes a double-quoted string at a typographic
+// quote, so a non-ASCII rune keeps PowerShell grammar.
+func soleCMDInvocation(command string) bool {
+	command = strings.TrimSpace(command)
+	for i := 0; i < len(command); i++ {
+		if command[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return trustedSoleCMDInvoke.MatchString(command)
+}
 
 func trustedCMDBody(input actionfacts.Input) (string, bool) {
 	if len(input.Command) > 64<<10 || input.Command == "" ||
-		!strings.Contains(input.ActiveHome, ":/") {
+		!windowsLocationAbsolute(input.ActiveHome) {
 		return "", false
 	}
 	parts := trustedCMDInvoke.FindStringSubmatch(strings.TrimSpace(input.Command))
@@ -156,32 +180,208 @@ func trustedGitBashAuthorizedKeysWrite(input actionfacts.Input) bool {
 	return parsed.EnforcementEligible() && sshAuthorizedKeysCommandPrerequisite(parsed)
 }
 
-func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
+// trustedInlineAuthorizedKeysWrite proves the write of one inline
+// interpreter program (python -c, perl/ruby/node -e).
+//
+// A python -c program is read whole, its comments, docstrings and string
+// text included. Whether a string runs depends on the modules the program
+// loads, and the interpreter imports on its own at start-up (site and
+// sitecustomize, a codec): a module that the import path of the shell running
+// the command supplies (its PYTHONPATH, PYTHONHOME or user site, a module of
+// its working directory) can run __main__.__doc__ or any string of
+// sys.orig_argv. The gateway does not see that shell's environment (an
+// export of an earlier call in a persistent shell, a profile, a function
+// standing in for python3), and its own environment is not the shell's, so
+// no string of the program is proven inert.
+func trustedInlineAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts.Facts) bool {
 	if len(facts.Commands) != 1 {
 		return false
 	}
 	command := facts.Commands[0]
-	if command.Effect != actionfacts.EffectExecute || !command.ArgvComplete ||
+	if command.Effect != actionfacts.EffectExecute ||
 		command.ParentCommandID != 0 || len(command.Argv) != 3 ||
 		len(command.Redirects) != 0 || len(command.Wrappers) != 0 {
 		return false
 	}
 	switch command.Program {
 	case "python", "python3":
-		return command.Argv[1] == "-c" && facts.ActiveHome != "" &&
-			(trustedPathlibAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
-				trustedPythonPathAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
-				trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome))
+		if command.Argv[1] != "-c" || facts.ActiveHome == "" ||
+			(!command.ArgvComplete && !trustedPythonAssignedArgv(input, command.Argv)) {
+			return false
+		}
+		return trustedPathlibAuthorizedKeysWriteProof(command.Argv[2], facts.ActiveHome, facts.CWD) ||
+			trustedPythonPathAuthorizedKeysWriteProof(command.Argv[2]) ||
+			trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome, "python")
 	case "perl":
-		return command.Argv[1] == "-e" && facts.ActiveHome != "" &&
+		return command.ArgvComplete && command.Argv[1] == "-e" && facts.ActiveHome != "" &&
 			(trustedPerlAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
-				trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome))
+				trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome, "perl"))
 	case "ruby", "node":
-		return command.Argv[1] == "-e" && facts.ActiveHome != "" &&
-			trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome)
+		return command.ArgvComplete && command.Argv[1] == "-e" && facts.ActiveHome != "" &&
+			trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome, command.Program)
 	default:
 		return false
 	}
+}
+
+// trustedPythonAssignedArgv reports whether the shell syntax of the one
+// Python invocation proves its argv when PYTHONPATH or PYTHONHOME
+// assignments prefix it (PYTHONPATH=/x python3 -c '...'). A sole such
+// assignment makes ActionFacts leave ArgvComplete false; the AST can still
+// prove the exact three arguments of the call.
+func trustedPythonAssignedArgv(input actionfacts.Input, argv []string) bool {
+	command, ok := trustedBashCommandInput(input)
+	if !ok || len(command) > 64<<10 {
+		return false
+	}
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(command), "")
+	if err != nil || len(file.Stmts) != 1 {
+		return false
+	}
+	stmt := file.Stmts[0]
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Assigns) == 0 || stmt.Negated || stmt.Background ||
+		len(stmt.Redirs) != 0 || len(call.Args) != len(argv) {
+		return false
+	}
+	for _, assignment := range call.Assigns {
+		if assignment.Name == nil ||
+			assignment.Name.Value != "PYTHONPATH" && assignment.Name.Value != "PYTHONHOME" {
+			return false
+		}
+	}
+	fields, ok := trustedBashStaticFields(call)
+	return ok && slices.Equal(fields, argv)
+}
+
+// trustedPathlibAuthorizedKeysWriteProof matches the protected Path and its
+// write_text call anywhere in the code, string text included: exec, eval, an
+// f-string field, getattr or an agent-controlled sitecustomize or import can
+// run text that the Python lexer reads as data, so string position is not a
+// proof that the write cannot run.
+func trustedPathlibAuthorizedKeysWriteProof(code, home, cwd string) bool {
+	for _, assignment := range trustedPathlibAuthorizedKeysWrite.FindAllStringIndex(code, -1) {
+		for _, write := range trustedPathlibWriteText.FindAllStringIndex(code, -1) {
+			if write[0] < assignment[1] {
+				continue
+			}
+			between := code[assignment[1]:write[0]]
+			if safe := trustedPathlibSafeReassignment.FindStringSubmatch(between); len(safe) == 2 &&
+				trustedPythonPathStablePrefix(code[:assignment[0]], filepath.IsAbs(safe[1])) &&
+				trustedOrdinaryPathReassignment(safe[1], home, cwd) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// trustedPythonPathAuthorizedKeysWriteProof also matches string text, for the
+// reason given at trustedPathlibAuthorizedKeysWriteProof.
+func trustedPythonPathAuthorizedKeysWriteProof(code string) bool {
+	return trustedPythonPathAuthorizedKeysWrite.MatchString(code)
+}
+
+// A module docstring is inert to Python itself, but an agent-controlled
+// sitecustomize or imported module can execute __main__.__doc__. Other string
+// literals are data unless a separate executable effect refers to them.
+func trustedPythonCodeOrModuleDocstring(code string, position int) bool {
+	return interpreterCodePosition(code, position, "python") ||
+		trustedPythonModuleDocstringContains(code, position)
+}
+
+func trustedPythonModuleDocstringContains(code string, position int) bool {
+	i := 0
+	for i < len(code) {
+		switch code[i] {
+		case ' ', '\t', '\r', '\n':
+			i++
+		case '#':
+			for i < len(code) && code[i] != '\n' {
+				i++
+			}
+		default:
+			goto literal
+		}
+	}
+literal:
+	if i >= len(code) {
+		return false
+	}
+	start := i
+	for i < len(code) && (code[i] == 'r' || code[i] == 'R' || code[i] == 'u' || code[i] == 'U') {
+		i++
+	}
+	if i+3 > len(code) || code[i:i+3] != `"""` && code[i:i+3] != `'''` {
+		return false
+	}
+	quote := code[i : i+3]
+	i += 3
+	for i+3 <= len(code) {
+		if code[i] == '\\' {
+			i += 2
+			continue
+		}
+		if code[i:i+3] == quote {
+			return position >= start && position < i
+		}
+		i++
+	}
+	return position >= start && position < len(code)
+}
+
+// A relative Path is resolved when write_text runs, and any Path can be
+// redirected by an in-process link or rename. Only imports may precede this
+// narrow waiver. A simple chdir is also safe for an absolute reassignment.
+func trustedPythonPathStablePrefix(prefix string, absolute bool) bool {
+	for _, statement := range strings.Split(prefix, ";") {
+		statement = strings.TrimSpace(statement)
+		if statement == "" {
+			continue
+		}
+		switch statement {
+		case "from pathlib import Path", "import pathlib", "import os", "from os import path":
+		default:
+			if !absolute || !trustedPythonSimpleChdir.MatchString(statement) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func trustedOrdinaryPathReassignment(name, home, cwd string) bool {
+	if name == "" || strings.ContainsAny(name, "\x00\r\n$`*?[") {
+		return false
+	}
+	if !filepath.IsAbs(name) {
+		if !filepath.IsAbs(cwd) {
+			return false
+		}
+		name = filepath.Join(cwd, name)
+	}
+	resolved, ok := hookpaths.ResolveWriteTarget(name)
+	if !ok {
+		return false
+	}
+	entry, entryErr := hookpaths.Stat(resolved)
+	if entryErr != nil && !hookpaths.NotExist(entryErr) {
+		return false
+	}
+	for _, protected := range hookpaths.ProtectedAuthorizedKeysPaths(home) {
+		if canonicalSemanticPath(resolved) == canonicalSemanticPath(protected) {
+			return false
+		}
+		guarded, err := hookpaths.Stat(protected)
+		if err != nil && !hookpaths.NotExist(err) {
+			return false
+		}
+		if entryErr == nil && err == nil && os.SameFile(entry, guarded) {
+			return false
+		}
+	}
+	return true
 }
 
 // A static shell redirect writes its target independently of the program's
@@ -192,7 +392,7 @@ func trustedStaticRedirectAuthorizedKeysWrite(input actionfacts.Input, facts act
 		facts.Parse.Dialect != actionfacts.DialectPOSIX {
 		return false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(input.Command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(shellparse.Reader(input.Command), "")
 	if err != nil {
 		return false
 	}
@@ -304,7 +504,7 @@ func trustedHereStringAuthorizedKeysWrite(input actionfacts.Input) bool {
 	if input.Command == "" || len(input.Command) > 64<<10 {
 		return false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(input.Command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(shellparse.Reader(input.Command), "")
 	if err != nil || len(file.Stmts) != 1 || len(file.Stmts[0].Redirs) != 2 {
 		return false
 	}
@@ -333,11 +533,14 @@ func trustedDDOutputAuthorizedKeysWrite(input actionfacts.Input) bool {
 	if input.Command == "" || len(input.Command) > 64<<10 {
 		return false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(input.Command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(input.Command), "")
 	if err != nil || len(file.Stmts) != 1 {
 		return false
 	}
-	var output string
+	// Every of= operand is read, and a brace word as the words bash makes
+	// of it: dd of=x of=keys and dd of=~/.ssh/authorized_key{x,s} write
+	// the keys file, because dd uses its last of= (GAP-0228).
+	var outputs []string
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, ok := node.(*syntax.CallExpr)
 		if !ok || len(call.Assigns) != 0 || len(call.Args) < 2 ||
@@ -349,18 +552,49 @@ func trustedDDOutputAuthorizedKeysWrite(input actionfacts.Input) bool {
 			return true
 		}
 		for _, word := range call.Args[1:] {
-			start, end := int(word.Pos().Offset()), int(word.End().Offset())
-			if start < 0 || end > len(input.Command) || end-start <= 3 {
-				continue
-			}
-			if candidate := input.Command[start:end]; strings.HasPrefix(candidate, "of=") {
-				output = candidate[3:]
-				return false
+			for _, candidate := range trustedBraceWordTexts(input.Command, word) {
+				if len(candidate) > 3 && strings.HasPrefix(candidate, "of=") {
+					outputs = append(outputs, candidate[3:])
+				}
 			}
 		}
 		return false
 	})
-	return output != "" && trustedAuthorizedKeysRedirectText(input, output)
+	for _, output := range outputs {
+		if trustedAuthorizedKeysRedirectText(input, output) {
+			return true
+		}
+	}
+	return false
+}
+
+// trustedBraceWordTexts is the source text of word, or of each word its
+// brace expansion makes, printed back with its quotes and parameters so the
+// home spelling is read as before. Past 64 words only the last is kept: a
+// repeated dd operand takes its last value.
+func trustedBraceWordTexts(command string, word *syntax.Word) []string {
+	start, end := int(word.Pos().Offset()), int(word.End().Offset())
+	if start < 0 || end > len(command) || end <= start {
+		return nil
+	}
+	split := *word
+	if !syntax.SplitBraces(&split) {
+		return []string{command[start:end]}
+	}
+	words := expand.Braces(&split)
+	if len(words) > 64 {
+		words = words[len(words)-1:]
+	}
+	printer := syntax.NewPrinter()
+	texts := make([]string, 0, len(words))
+	for _, expanded := range words {
+		var text strings.Builder
+		if err := printer.Print(&text, expanded); err != nil {
+			return nil
+		}
+		texts = append(texts, text.String())
+	}
+	return texts
 }
 
 func trustedAuthorizedKeysRedirectTarget(input actionfacts.Input, target *syntax.Word) bool {
@@ -385,13 +619,14 @@ func trustedAuthorizedKeysRedirectText(input actionfacts.Input, target string) b
 		homeResolvedTwinProves(inner, parsed, sshAuthorizedKeysCommandPrerequisite)
 }
 
-func trustedInterpreterAuthorizedKeysWrite(code, activeHome string) bool {
+func trustedInterpreterAuthorizedKeysWrite(code, activeHome, language string) bool {
 	if len(code) == 0 || len(code) > 16<<10 ||
 		!trustedAuthorizedKeysPathInText(code, activeHome) {
 		return false
 	}
 	for _, location := range trustedInterpreterOpenCall.FindAllStringIndex(code, -1) {
-		if !interpreterCodePosition(code, location[0]) {
+		if language == "python" && !trustedPythonCodeOrModuleDocstring(code, location[0]) ||
+			language != "python" && !interpreterCodePosition(code, location[0], language) {
 			continue
 		}
 		call, ok := boundedInterpreterCall(code, location[1]-1)
@@ -409,7 +644,8 @@ func trustedInterpreterAuthorizedKeysWrite(code, activeHome string) bool {
 		}
 	}
 	for _, location := range trustedInterpreterWriteCall.FindAllStringIndex(code, -1) {
-		if !interpreterCodePosition(code, location[0]) {
+		if language == "python" && !trustedPythonCodeOrModuleDocstring(code, location[0]) ||
+			language != "python" && !interpreterCodePosition(code, location[0], language) {
 			continue
 		}
 		if call, ok := boundedInterpreterCall(code, location[1]-1); ok {
@@ -436,9 +672,10 @@ func interpreterCallArgs(call string) []string {
 	for i := start; i < len(call)-1; i++ {
 		c := call[i]
 		if quote != 0 {
-			if c == '\\' {
+			switch c {
+			case '\\':
 				i++
-			} else if c == quote {
+			case quote:
 				quote = 0
 			}
 			continue
@@ -460,21 +697,53 @@ func interpreterCallArgs(call string) []string {
 	return append(args, strings.TrimSpace(call[start:len(call)-1]))
 }
 
-func interpreterCodePosition(code string, position int) bool {
+func interpreterCodePosition(code string, position int, language string) bool {
 	var quote byte
+	comment := false
+	perlHashDelimiters := 0
 	for i := 0; i < position; i++ {
 		c := code[i]
+		if comment {
+			if c == '\n' {
+				comment = false
+			}
+			continue
+		}
 		if quote != 0 {
-			if c == '\\' {
+			switch c {
+			case '\\':
 				i++
-			} else if c == quote {
+			case quote:
 				quote = 0
 			}
 		} else if c == '\'' || c == '"' {
 			quote = c
+		} else if c == '#' {
+			if language == "perl" && perlHashDelimiters > 0 {
+				perlHashDelimiters--
+			} else if language == "perl" && interpreterPerlHashRegexpStart(code, i) > 0 {
+				perlHashDelimiters = interpreterPerlHashRegexpStart(code, i)
+			} else if interpreterCommentStart(code, i, language) {
+				comment = true
+			}
 		}
 	}
-	return quote == 0
+	return quote == 0 && !comment
+}
+
+func interpreterPerlHashRegexpStart(code string, i int) int {
+	for _, operator := range []string{"s", "m", "qr", "tr", "y"} {
+		start := i - len(operator)
+		if start < 0 || code[start:i] != operator ||
+			start > 0 && !strings.ContainsRune(" \t\n;=~(", rune(code[start-1])) {
+			continue
+		}
+		if operator == "m" || operator == "qr" {
+			return 1
+		}
+		return 2
+	}
+	return 0
 }
 
 func trustedAuthorizedKeysPathInText(text, activeHome string) bool {
@@ -505,9 +774,10 @@ func boundedInterpreterCall(code string, open int) (string, bool) {
 	for i := open; i < len(code); i++ {
 		c := code[i]
 		if quote != 0 {
-			if c == '\\' {
+			switch c {
+			case '\\':
 				i++
-			} else if c == quote {
+			case quote:
 				quote = 0
 			}
 			continue
@@ -531,7 +801,7 @@ func trustedFindExecAuthorizedKeysWrite(input actionfacts.Input) bool {
 	if input.Command == "" || len(input.Command) > 64<<10 || input.ActiveHome == "" {
 		return false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(input.Command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(input.Command), "")
 	if err != nil || len(file.Stmts) != 1 || len(file.Stmts[0].Redirs) != 0 {
 		return false
 	}
@@ -570,7 +840,7 @@ func trustedFindExecAuthorizedKeysWrite(input actionfacts.Input) bool {
 	if !ok || len(quoted.Value) > 16<<10 {
 		return false
 	}
-	script, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(quoted.Value), "")
+	script, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(quoted.Value), "")
 	if err != nil || len(script.Stmts) != 1 || len(script.Stmts[0].Redirs) != 1 {
 		return false
 	}
@@ -597,11 +867,43 @@ func trustedAuthorizedKeysSymlinkWrite(input actionfacts.Input) bool {
 	if input.Command == "" || len(input.Command) > 64<<10 || input.ActiveHome == "" {
 		return false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(input.Command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(input.Command), "")
 	if err != nil {
 		return false
 	}
+	var boundWord *syntax.Word
+	boundValue := ""
+	if len(file.Stmts) == 2 {
+		assignment, assignmentOK := file.Stmts[0].Cmd.(*syntax.CallExpr)
+		second := file.Stmts[1]
+		if binary, ok := second.Cmd.(*syntax.BinaryCmd); ok && binary.Op == syntax.AndStmt {
+			second = binary.X
+		}
+		child, childOK := second.Cmd.(*syntax.CallExpr)
+		if assignmentOK && childOK && len(assignment.Args) == 0 && len(assignment.Assigns) == 1 &&
+			len(file.Stmts[0].Redirs) == 0 && len(child.Args) > 0 {
+			item := assignment.Assigns[0]
+			if item.Name != nil && item.Value != nil {
+				if value, static := hookpaths.StaticWord(item.Value, input.ActiveHome); static && value == "ln" {
+					candidate := child.Args[0]
+					start, end := int(candidate.Pos().Offset()), int(candidate.End().Offset())
+					if start >= 0 && end <= len(input.Command) && end > start {
+						for _, spelling := range []string{"$" + item.Name.Value, "${" + item.Name.Value + "}",
+							`"$` + item.Name.Value + `"`, `"${` + item.Name.Value + `}"`} {
+							if input.Command[start:end] == spelling {
+								boundWord, boundValue = candidate, value
+								break
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 	word := func(value *syntax.Word) string {
+		if value == boundWord {
+			return boundValue
+		}
 		text, ok := hookpaths.StaticWord(value, input.ActiveHome)
 		if !ok {
 			return ""
@@ -623,6 +925,9 @@ func trustedAuthorizedKeysSymlinkWrite(input actionfacts.Input) bool {
 	found := false
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if found {
+			return false
+		}
+		if _, declaration := node.(*syntax.FuncDecl); declaration {
 			return false
 		}
 		stmt, ok := node.(*syntax.Stmt)
@@ -717,12 +1022,17 @@ func trustedSymlinkName(input actionfacts.Input, name string) string {
 }
 
 func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, facts actionfacts.Facts) bool {
+	if command, ok := trustedBashCommandInput(request.Input); ok &&
+		trustedNoDereferenceTouchSafe(command, request.Input.CWD, facts.ActiveHome,
+			request.ResolvedWriteTargets, request.ProtectedHomeHook) {
+		return false
+	}
 	if facts.ActiveHome == "" || !filepath.IsAbs(facts.ActiveHome) {
 		return false
 	}
 	// One list for the path, hard-link and missing-final-file checks, the
 	// same files the direct-write rule protects (GAP-1370).
-	protectedPaths := hookpaths.ProtectedAuthorizedKeysPaths(facts.ActiveHome)
+	protectedPaths := request.targetMemo.ProtectedAuthorizedKeysPaths(facts.ActiveHome)
 	protected := make(map[string]struct{}, len(protectedPaths))
 	for _, path := range protectedPaths {
 		protected[canonicalSemanticPath(path)] = struct{}{}
@@ -731,72 +1041,351 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		_, ok := protected[canonicalSemanticPath(path)]
 		return ok
 	}
+	confirmed := func() bool {
+		if request.resolvedTarget != nil {
+			*request.resolvedTarget = true
+		}
+		return true
+	}
+	// The client's opaque-scope facts stand in only for the link-scope walk;
+	// every other check sees the map as before.
+	globFacts := clientGlobFacts(request)
+	var opaqueFacts map[string]string
+	request.ResolvedWriteTargets, opaqueFacts = hookpaths.SplitOpaqueScopeFacts(request.ResolvedWriteTargets)
+	// The operands the client described, before any connector scoping. A
+	// bounded or incomplete map omits the others; scoping below drops entries
+	// the client did describe, and does not make them omitted.
+	clientTargets := request.ResolvedWriteTargets
+	truncated := clientTargets[hookpaths.TruncatedKey] == "1"
+	// The operands the budget-bounded map left out that the client had
+	// resolved as plain (hookpaths.OmittedPlainKey): ordinary, as if listed.
+	omittedPlain := hookpaths.OmittedPlainOperands(clientTargets)
+	// A managed Claude Code or Codex hook reports its evidence the same way,
+	// so the gateway scopes both alike: an operand the client could not place
+	// (a target the call assigns inside a group) is judged by the shell
+	// reading, as the call is for a per-user gateway (rel-1-0-6:GAP-0675).
+	// Codex keeps every answer the client did place (placedByCodexClient), as
+	// it did before this scoping, so a call over the evaluation limit that
+	// the client placed in the project stays ordinary.
+	scopedClientEvidence := (request.Connector == "claudecode" || request.Connector == "codex") &&
+		request.ProtectedHomeHook
+	if scopedClientEvidence && len(request.ResolvedWriteTargets) != 0 {
+		// Keep the client's positive protected-path evidence and inspected copy
+		// sources. A directory proof is relevant once the hook observed a
+		// different logical directory or a protected starting directory.
+		// Generic ordinary or unknown write targets do not override the
+		// established shell-ordering decision. The process-cwd alias needs
+		// its own client target to be provable.
+		changedDirectory := false
+		for key := range request.ResolvedWriteTargets {
+			if strings.HasPrefix(key, hookpaths.DirectoryFactPrefix) &&
+				key != hookpaths.DirectoryFactPrefix+facts.CWD {
+				changedDirectory = true
+				break
+			}
+		}
+		home := filepath.Clean(facts.ActiveHome)
+		external := func(target string) bool {
+			return filepath.IsAbs(target) && filepath.Clean(target) != os.DevNull && target != home &&
+				!strings.HasPrefix(filepath.Clean(target), home+string(filepath.Separator))
+		}
+		// An incomplete map keeps its marker and the client's cwd, so an
+		// operand the client omitted is placed and denied.
+		var scoped map[string]string
+		// A plain move onto an existing link to a file replaces the link:
+		// the client described that entry, which decides it (GAP-2558).
+		var plainMoves map[string]bool
+		// A client that met a directory closed to the user on the way of an
+		// operand answers it empty and adds the link text it could read. This
+		// gateway cannot read the home, so its own view of that operand is a
+		// missing path and must never stand in for the client answer: both
+		// are kept wherever the operand lies. Any other empty answer is
+		// the client saying it has no proof for the command, which the
+		// link checks below decide.
+		closedDirectoryAnswer := func(operand string) bool {
+			return filepath.IsAbs(request.ResolvedWriteTargets[hookpaths.LinkTextFactPrefix+operand])
+		}
+		for operand, resolved := range request.ResolvedWriteTargets {
+			directoryFact := strings.HasPrefix(operand, hookpaths.DirectoryFactPrefix)
+			if resolved != "" && !directoryFact && request.ResolvedWriteTargets[hookpaths.ReplacedLinkFactPrefix+operand] == "1" {
+				if plainMoves == nil {
+					moveInput, moveFacts := request.Input, facts
+					if moveInput.Command == "" {
+						moveInput.Command, _ = trustedBashCommandInput(moveInput)
+					}
+					// A gateway that cannot validate the event cwd places the
+					// simple commands where the client keyed its evidence.
+					if cwd := request.ResolvedWriteTargets[hookpaths.CWDKey]; !filepath.IsAbs(moveInput.CWD) && filepath.IsAbs(cwd) {
+						moveInput.CWD = filepath.Clean(cwd)
+						moveFacts = actionfacts.Analyze(moveInput)
+					}
+					plainMoves = hookpaths.PlainMoveDestinationsWithStatements(moveInput, moveFacts)
+				}
+				if plainMoves[operand] {
+					if scoped == nil {
+						scoped = make(map[string]string)
+					}
+					scoped[operand] = resolved
+					continue
+				}
+			}
+			if strings.HasPrefix(operand, "/proc/self/cwd/") ||
+				strings.HasPrefix(operand, hookpaths.CopySourceGlobFactPrefix) ||
+				strings.HasPrefix(operand, hookpaths.GlobLoopCopyFactPrefix) ||
+				strings.HasPrefix(operand, hookpaths.SourceLinkFactPrefix) ||
+				strings.HasPrefix(operand, hookpaths.SourceLinksFactPrefix) ||
+				strings.HasPrefix(operand, hookpaths.CdEnterableFactPrefix) ||
+				strings.HasPrefix(operand, hookpaths.TarPlainFactPrefix) ||
+				directoryFact && (changedDirectory ||
+					canonicalSemanticPath(resolved) == canonicalSemanticPath(filepath.Join(facts.ActiveHome, ".ssh"))) ||
+				operand == hookpaths.CWDKey && (changedDirectory || truncated) ||
+				operand == hookpaths.LinksStableKey ||
+				operand == hookpaths.TruncatedKey ||
+				resolved == "" && (external(operand) && !truncated || closedDirectoryAnswer(operand)) ||
+				isProtected(resolved) ||
+				placedByCodexClient(request.Connector, resolved) {
+				if scoped == nil {
+					scoped = make(map[string]string)
+				}
+				scoped[operand] = resolved
+			}
+		}
+		request.ResolvedWriteTargets = scoped
+	}
 	clientCWD := facts.CWD
 	if !filepath.IsAbs(clientCWD) {
-		if cwd := request.ResolvedWriteTargets[hookpaths.CWDKey]; filepath.IsAbs(cwd) {
+		if filepath.IsAbs(request.evidenceCWD) {
+			// A simple command after a static cd, in the directory the
+			// client keyed it in (trustedSimpleCommandEvidenceCWDs).
+			clientCWD = request.evidenceCWD
+		} else if cwd := request.ResolvedWriteTargets[hookpaths.CWDKey]; filepath.IsAbs(cwd) {
 			clientCWD = filepath.Clean(cwd)
 		}
 	}
 	cannotResolveLocally := request.ProtectedHomeHook || request.SkipLocalFilesystemResolution
-	truncated := request.ResolvedWriteTargets[hookpaths.TruncatedKey] == "1"
+	if !request.ProtectedHomeHook {
+		// Only the managed hook client walks the user's home for the gateway.
+		opaqueFacts = nil
+	}
 	// The links the command creates, read as the hook reads them; set once
 	// the command is known, before the first writeTarget call.
 	var links hookpaths.Links
 	var safeRedirects []hookpaths.RedirectOccurrence
-	writeTarget := func(target string, safeRedirect, ownCopy bool) bool {
-		if !filepath.IsAbs(target) {
+	// A plain mv onto an existing link to a file replaces the link entry
+	// and writes neither file (GAP-2559); a gateway that reads the file
+	// system judges that destination by its entry. Behind ProtectHome the
+	// client map decides it (GAP-2558).
+	var movedOntoLinks map[string]bool
+	if !cannotResolveLocally {
+		movedOntoLinks = hookpaths.MovedOntoLinkEntries(facts)
+	}
+	// On Windows the same move spelled in PowerShell (Move-Item) or read by
+	// the Windows scan, whose facts may not name a move. Read once, and
+	// only for a write target that is a link on the disk.
+	var windowsMovedOntoLinks map[string]bool
+	windowsMovedRead := false
+	windowsMovedOntoLink := func(target string) bool {
+		if cannotResolveLocally || runtime.GOOS != "windows" {
 			return false
 		}
+		if info, err := hookpaths.Lstat(target); err != nil || info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
+			return false
+		}
+		if !windowsMovedRead {
+			windowsMovedRead = true
+			if command, ok := trustedBashCommandInput(request.Input); ok {
+				windowsMovedOntoLinks = hookpaths.WindowsMovedOntoLinkEntries(command, clientCWD, facts.ActiveHome)
+			}
+		}
+		return windowsMovedOntoLinks[hookpaths.WindowsMovedOntoLinkKey(target)]
+	}
+	// closedLinkText is the file the client reports the link text of an
+	// operand leads to when a directory on its way is closed to the user.
+	// patchLinkText is that file for an operand a patch or file tool writes
+	// (nativeFileToolWriteOperand): such a call runs no command that could
+	// open the directory first, so the write meets the same permission and is
+	// judged by that file. A shell command's operand has no such answer.
+	closedLinkText := func(target string) (string, bool) {
+		text := clientTargets[hookpaths.LinkTextFactPrefix+target]
+		return text, filepath.IsAbs(text)
+	}
+	patchLinkText := func(target string) (string, bool) {
+		if text, closed := closedLinkText(target); closed && nativeFileToolWriteOperand(request.Input, facts, clientCWD, target) {
+			return text, true
+		}
+		return "", false
+	}
+	writeTarget := func(target string, safeRedirect, ownCopy bool) bool {
+		if !filepath.IsAbs(target) && (target == "" || !filepath.IsAbs(clientCWD)) {
+			// No directory places this operand: the gateway cannot see the
+			// caller's cwd and the client evidence that would carry it is
+			// incomplete or was rejected as malformed. Such evidence never
+			// proves a write ordinary, so a gateway that cannot resolve the
+			// operand itself fails closed, as for an absolute operand the
+			// bounded map omits. A path fact with no name adds nothing once
+			// the shell operands are placed in a known cwd.
+			return truncated && cannotResolveLocally && !filepath.IsAbs(clientCWD)
+		}
+		// A relative path fact (the gateway could not validate the event
+		// cwd) is placed in the client's cwd, as the client keyed it.
 		target = hookpaths.OperandPath(target, clientCWD)
+		if request.patchTarget && (request.SandboxGuestCWD == "" || request.patchHostView) {
+			// A managed gateway cannot walk the user's project (ProtectHome).
+			// The managed hook walked every V4A header target as the user
+			// under the same patch-target rule and attested the complete
+			// patch; a target it found to be no link is judged by the checks
+			// below, as a write_file target is (GAP-0488). Any other target
+			// is walked here, and fails closed where it cannot be.
+			if !hermesClientPatchTarget(request, clientTargets, clientCWD, target) {
+				if _, ok := hookpaths.ResolvePatchWriteTarget(target); !ok {
+					return true
+				}
+			}
+		}
+		// Only the event cwd can interpret the process-dependent alias.
+		if hookpaths.ProcCWDWriteOperand(target) {
+			if !strings.HasPrefix(target, "/proc/self/cwd/") {
+				return true
+			}
+			if resolved, present := request.ResolvedWriteTargets[target]; present {
+				return resolved == "" || isProtected(resolved)
+			}
+			if cannotResolveLocally {
+				return true
+			}
+			mapped, ok := hookpaths.ResolveProcSelfCWDTarget(target, clientCWD)
+			if !ok {
+				return true
+			}
+			target = mapped
+		}
 		if isProtected(target) {
-			return true
+			return confirmed()
+		}
+		if moved := hookpaths.PlainMovePath(target); movedOntoLinks[moved] || windowsMovedOntoLink(moved) {
+			parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(moved))
+			return !ok || isProtected(filepath.Join(parent, filepath.Base(moved)))
 		}
 		if physicalCWD := request.ResolvedWriteTargets[hookpaths.DirectoryFactPrefix+clientCWD]; filepath.IsAbs(physicalCWD) &&
 			strings.HasPrefix(target, clientCWD+string(filepath.Separator)) {
 			relative := strings.TrimPrefix(target, clientCWD+string(filepath.Separator))
 			if isProtected(hookpaths.OperandPath(relative, physicalCWD)) {
-				return true
+				return confirmed()
 			}
 		}
 		// An unreadable link operation makes later writes at its destination
 		// unknown, including where the gateway resolves targets itself and
 		// the link does not exist yet (GAP-1522). A character device such as
 		// /dev/null is not a link the command can replace; a link to one is,
-		// so the device is read without following links.
-		if !safeRedirect && (!ownCopy && links.OpaqueTarget(target) || ownCopy && links.OpaqueTargetExceptOwnCopy(target, target)) {
-			if info, err := os.Lstat(target); err != nil || info.Mode()&os.ModeCharDevice == 0 {
+		// so the device is read without following links. A managed gateway
+		// cannot walk the user's home (ProtectHome); the hook client's walk of
+		// the same operand replaces only that missing view (GAP-0278).
+		if !safeRedirect && links.OpaqueTargetWithFacts(target, ownCopy, opaqueFacts) {
+			if info, err := hookpaths.Lstat(target); err != nil || info.Mode()&os.ModeCharDevice == 0 {
 				return true
 			}
+		}
+		// On a static reading of a call with a runtime-expanded operand
+		// word, the client answer of that reading decides an operand the
+		// call as written left unknown (GAP-2477).
+		if reading := clientTargets[hookpaths.ReadingTargetPrefix+target]; request.staticOperandReading && reading != "" {
+			if isProtected(reading) {
+				return confirmed()
+			}
+			return false
 		}
 		if request.ResolvedWriteTargets != nil {
 			resolved, present := request.ResolvedWriteTargets[target]
 			switch {
 			case present && resolved != "":
-				return isProtected(resolved)
+				if isProtected(resolved) {
+					return confirmed()
+				}
+				return false
 			case present:
 				// The user's hook could not resolve the operand (a link
 				// loop, a chain past the kernel limit or an unreadable
 				// component). Resolve it here, or fail closed.
 				if cannotResolveLocally {
-					return !windowsLocationOrdinaryWriteTarget(target)
+					// A directory on the way is closed to the user. A file
+					// tool cannot open it either, so it is judged by the file
+					// the client reports its link text leads to, as the
+					// per-user gateway walks it: a key file stays protected,
+					// an ordinary file is not a key write. A shell command may
+					// open the directory first, so its operand stays unresolved.
+					if text, closed := patchLinkText(target); closed {
+						if isProtected(text) {
+							return confirmed()
+						}
+						return false
+					}
+					unresolved := !windowsLocationOrdinaryWriteTarget(target)
+					if unresolved && request.unresolvedTarget != nil {
+						*request.unresolvedTarget = true
+					}
+					return unresolved
 				}
 			case truncated && cannotResolveLocally:
 				// The bounded map omits this operand, which may be a link
 				// into the protected home, in or outside the home. Its target
-				// is unknown, so fail closed.
-				return !windowsLocationOrdinaryWriteTarget(target)
+				// is unknown, so fail closed. An operand the client did list,
+				// which connector scoping removed, keeps the local checks.
+				if _, described := clientTargets[target]; !described {
+					// The strict tier keeps its refusal of every omitted
+					// operand: the plain ones are allowed in the others. The
+					// statement-bounded reading leaves the omitted operands
+					// to the reading judged before it (GAP-1069).
+					if request.statementBounded || omittedPlain[target] && !request.StrictPolicy {
+						return false
+					}
+					omitted := !windowsLocationOrdinaryWriteTarget(target)
+					if omitted && request.overBudgetOmission != nil && clientTargets[hookpaths.BudgetKey] == "1" {
+						*request.overBudgetOmission = true
+					}
+					return omitted
+				}
 			}
 		}
 		if request.SkipLocalFilesystemResolution {
 			return false
 		}
+		// The walk below follows the file Windows opens for a Windows
+		// spelling, not its characters (see windowsHostPath).
+		walked := target
+		if opened, ok := windowsHostPath(target); ok {
+			walked, target = windowsWalkPath(opened, target), opened
+		}
 		// A name that a link earlier in the command makes an alias of a
 		// protected file (GAP-1505).
 		if linked, ok := links.Target(target); !ok || isProtected(linked) {
+			// Behind ProtectHome the gateway cannot walk a link the command
+			// creates in the user's home. The managed hook client walked the
+			// same links as the user and keyed its answer by this operand; a
+			// resolved answer decides it, so an ordinary hard link is not a
+			// key write (GAP-1440). An empty answer stays unknown. Links unknown
+			// only inside copy scopes that cannot reach the operand are read
+			// by the client as known ones (GAP-2582).
+			if !ok && request.ProtectedHomeHook && links.KnownOutsideScopes(target, ownCopy, opaqueFacts) {
+				if resolved := clientTargets[target]; resolved != "" {
+					if isProtected(resolved) {
+						return confirmed()
+					}
+					return false
+				}
+				if resolved := clientTargets[hookpaths.ReadingTargetPrefix+target]; request.staticOperandReading && resolved != "" {
+					if isProtected(resolved) {
+						return confirmed()
+					}
+					return false
+				}
+			}
+			if ok {
+				return confirmed()
+			}
 			return true
 		}
-		info, err := os.Lstat(target)
-		if err != nil && !os.IsNotExist(err) {
+		info, err := hookpaths.Lstat(walked)
+		if err != nil && !hookpaths.NotExist(err) {
 			return false
 		}
 		if err == nil && info.Mode()&os.ModeSymlink == 0 {
@@ -805,19 +1394,44 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				return false
 			}
 			for _, path := range protectedPaths {
-				if file, err := os.Stat(path); err == nil && os.SameFile(info, file) {
-					return true
+				if file, err := hookpaths.Stat(path); err == nil && os.SameFile(info, file) {
+					return confirmed()
 				}
 			}
 			return false
 		}
 		// Resolve as the hook client does, so a link to a missing final
 		// file that the redirect would create is covered as well.
-		resolved, ok := hookpaths.ResolveWriteTarget(target)
+		resolved, ok := hookpaths.ResolveWriteTarget(walked)
+		resolved = windowsWalkResult(resolved)
+		if !ok && !cannotResolveLocally && nativeFileToolWriteOperand(request.Input, facts, clientCWD, target) {
+			// A directory on the way is closed to the user, so the physical
+			// file cannot be read. The user cannot write through it either
+			// (the kernel refuses), so a file-tool write is judged by the
+			// file the link text leads to, as the content proofs judge it: a
+			// key file stays protected, an ordinary file is not a key write.
+			// A shell command is not: it can open the directory before it
+			// writes, so its unresolved operand stays unresolved.
+			if text, reached := hookpaths.LinkTextWriteTarget(target); reached {
+				resolved, ok = text, true
+			}
+		}
+		if !ok && nativeFileToolWriteOperand(request.Input, facts, clientCWD, target) {
+			// A name that steps up out of a directory that does not exist
+			// (sub/../notes.txt) is the cleaned file: the tool creates the
+			// directory, a plain one. The cleaned name is judged like any
+			// other, so a protected file reached this way stays protected.
+			if past, found, changed := hookpaths.ResolveWriteTargetPastMissingStepUps(walked); changed {
+				resolved, ok = windowsWalkResult(past), found
+			}
+		}
 		// An existing link whose target cannot be resolved is still a
 		// possible write into the protected home. The client and gateway
 		// must both fail closed on a linked component before "..".
-		return isProtected(resolved) || !ok && !windowsLocationOrdinaryWriteTarget(target)
+		if isProtected(resolved) {
+			return confirmed()
+		}
+		return !ok && !windowsLocationOrdinaryWriteTarget(target)
 	}
 	// Partial command projections can omit a redirect PathFact. The shell AST
 	// still gives an exact write operand, which the user's hook resolved.
@@ -834,21 +1448,77 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			input.Command = args.Cmd
 		}
 	}
+	if !request.ProtectedHomeHook && trustedPOSIXShellCall(input, facts) &&
+		(request.Connector == "claudecode" || request.Connector == "codex") &&
+		hookpaths.ProvedOrdinaryVariableTargets(input.Command, input.CWD, facts.ActiveHome) {
+		return false
+	}
+	decision := request.targetMemo.ActionCommandDecisionInShell(input.Command, input.CWD, facts.ActiveHome, globFacts, trustedPOSIXShellCall(input, facts))
+	if input.DialectHint != "" {
+		decision = request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)
+	}
+	if decision != "" {
+		return confirmed()
+	}
+	if !cannotResolveLocally && trustedPOSIXShellCall(input, facts) &&
+		strings.Contains(input.Command, "for") &&
+		hookpaths.LoopCopyDestinationProtected(input.Command, input.CWD, facts.ActiveHome) {
+		// The per-user gateway can check the same fixed loop destination
+		// that a managed hook checks before ProtectHome hides the home.
+		return true
+	}
+	if request.ProtectedHomeHook && clientTargets[hookpaths.ActionDecisionKey] == hookpaths.ProtectedTargetDecision {
+		// Behind ProtectHome the walk above cannot follow the user's links;
+		// the user's hook ran the same decision on the same command and
+		// found a protected target, as a per-user gateway does (GAP-2514,
+		// GAP-2515).
+		return confirmed()
+	}
+	if hookpaths.DynamicCopyProtectedBasename(input.Command, facts.ActiveHome) {
+		return true
+	}
 	links = hookpaths.CommandLinksWithFacts(request.Input.Tool, input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
 	safeRedirects = hookpaths.SafeShellRedirectOccurrencesWithFacts(input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
 	replacedBySed := hookpaths.SedReplacedOperands(input.Command, input.CWD, facts.ActiveHome)
+	// The claudecode scoping above drops the client's reading of the
+	// starting directory unless the command changes directory. The
+	// directory walk still needs it: without it, behind ProtectHome, the
+	// walk cannot place the starting directory, and an eval or a function
+	// call that stays there (the walk marks either a possible change) made
+	// every dynamic redirect after it unknown, where Codex and a per-user
+	// gateway read the same directory (rel-1-0-6:GAP-0229). A starting
+	// directory that is or reaches ~/.ssh stays unknown in the walk.
+	directoryFacts := request.ResolvedWriteTargets
+	var startDirectoryFacts map[string]string
+	if start, present := clientTargets[hookpaths.DirectoryFactPrefix+input.CWD]; present &&
+		scopedClientEvidence && !truncated {
+		startDirectoryFacts = map[string]string{hookpaths.DirectoryFactPrefix + input.CWD: start}
+		if _, scoped := directoryFacts[hookpaths.DirectoryFactPrefix+input.CWD]; !scoped {
+			directoryFacts = maps.Clone(directoryFacts)
+			if directoryFacts == nil {
+				directoryFacts = make(map[string]string, 1)
+			}
+			directoryFacts[hookpaths.DirectoryFactPrefix+input.CWD] = start
+		}
+	}
 	var operands []string
 	if input.Command != "" {
-		var parsed, dynamic bool
-		operands, parsed, dynamic = hookpaths.ShellWriteOperands(input.Command, input.CWD, input.ActiveHome)
-		// A truncated client map is not complete, so a nonempty target in it
-		// proves only its own operand. When the gateway cannot list every
-		// redirect target either (the command does not parse, or a target is
-		// not a static word) and cannot resolve one itself, the protected-path
-		// decision is unknown: fail closed (GAP-1395). Every write redirect
-		// operator contains a greater-than sign.
-		if truncated && cannotResolveLocally && strings.Contains(input.Command, ">") && (!parsed || dynamic) {
-			return true
+		var dynamic bool
+		operands, _, dynamic = hookpaths.ShellWriteOperands(input.Command, input.CWD, input.ActiveHome)
+		if dynamic && request.Connector == "claudecode" && request.ProtectedHomeHook &&
+			request.ResolvedWriteTargets != nil {
+			// A physical-directory fact can resolve a static write after cd,
+			// but it cannot prove a dynamic redirect target is ordinary.
+			// Preserve the conservative decision from the header-free walk.
+			// Only the starting directory is read from the client, as it is
+			// for Codex: an eval or a function that never leaves it does not
+			// make a dynamic redirect unknown (rel-1-0-6:GAP-0229).
+			_, unknown := hookpaths.ShellDirectoryWriteOperands(
+				input.Command, input.CWD, input.ActiveHome, startDirectoryFacts, false, cannotResolveLocally,
+			)
+			if unknown {
+				return true
+			}
 		}
 		for i, operand := range operands {
 			safe := i < len(safeRedirects) && safeRedirects[i].Safe
@@ -856,33 +1526,119 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				return true
 			}
 		}
-		for _, operand := range hookpaths.LiteralWriteOperands(input.Command, input.CWD, input.ActiveHome) {
+		// A plain cp writes its own destination: only that write may skip the
+		// own copy scope of the cp, as the path facts below read it (GAP-2582).
+		literals, copies := hookpaths.LiteralWriteOperandsWithCopies(input.Command, input.CWD, input.ActiveHome)
+		ownCopies := make(map[string]int, len(copies))
+		for _, operand := range copies {
+			ownCopies[operand]++
+		}
+		for _, operand := range literals {
+			ownCopy := ownCopies[operand] > 0
+			if ownCopy {
+				ownCopies[operand]--
+			}
+			if writeTarget(operand, false, ownCopy) {
+				return true
+			}
+		}
+		if cannotResolveLocally && clientTargets != nil && hookpaths.AWKReadsProgramFile(input.Command) {
+			// An awk program file in the user's home this gateway cannot
+			// read: the user's hook read it and listed each print target,
+			// resolved (GAP-2178, GAP-0508). Facts keys start with NUL.
+			for operand, resolved := range clientTargets {
+				if !strings.HasPrefix(operand, "\x00") && (isProtected(operand) || isProtected(resolved)) {
+					return true
+				}
+			}
+		}
+		for _, operand := range hookpaths.AdjacentAssignedWriteOperands(input.Command, input.CWD, input.ActiveHome) {
 			if writeTarget(operand, false, false) {
 				return true
 			}
 		}
+		boundedOperands, boundedPattern := hookpaths.BoundedShellWriteOperands(input.Command, input.CWD, input.ActiveHome)
+		if boundedPattern {
+			// Bash expands the bound redirect as a pathname pattern at run
+			// time, which may select a link to the protected file. The opened
+			// file is unknown, so fail closed.
+			return true
+		}
+		for _, operand := range boundedOperands {
+			if writeTarget(operand, false, false) {
+				return true
+			}
+		}
+		for _, operand := range hookpaths.QuotedDynamicCopyDestinations(input.Command, input.CWD, input.ActiveHome) {
+			if writeTarget(operand, false, true) {
+				return true
+			}
+		}
+		for _, operand := range hookpaths.BoundedLoopCopyDestinations(input.Command, input.CWD, input.ActiveHome) {
+			if writeTarget(operand, false, true) {
+				return true
+			}
+		}
+		for _, operand := range hookpaths.CopySourceGlobDestinations(input.Command, input.CWD, input.ActiveHome, request.ResolvedWriteTargets) {
+			if writeTarget(operand, false, true) {
+				return true
+			}
+		}
+		for _, operand := range hookpaths.BoundedGlobLoopCopyDestinations(input.Command, input.CWD, input.ActiveHome, request.ResolvedWriteTargets) {
+			if writeTarget(operand, false, true) {
+				return true
+			}
+		}
 		directoryOperands, directoryUnknown := hookpaths.ShellDirectoryWriteOperands(
-			input.Command, input.CWD, input.ActiveHome, request.ResolvedWriteTargets, false, cannotResolveLocally,
+			input.Command, input.CWD, input.ActiveHome, directoryFacts, false, cannotResolveLocally,
 		)
 		if directoryUnknown {
 			return true
 		}
 		for _, operand := range directoryOperands {
-			if writeTarget(operand.Path, operand.Safe, false) {
+			if writeTarget(operand.Path, operand.Safe, operand.OwnCopy) {
 				return true
 			}
 		}
+		if cannotResolveLocally {
+			// A managed gateway cannot place a command operand or an output
+			// option in the user's home (install and dd of= destinations,
+			// find -fprint, git config -f, gawk -i inplace, uniq and sort -o
+			// outputs), so a write through an existing link to the keys
+			// file was never judged. The user's hook lists every write
+			// operand it found with the file it reaches; one that reaches a
+			// protected file is a write to it, as a per-user gateway decides
+			// from its own walk (GAP-2428). Facts keys start with NUL.
+			for operand, resolved := range clientTargets {
+				if !strings.HasPrefix(operand, "\x00") && isProtected(resolved) {
+					return true
+				}
+			}
+		}
 	}
-	for _, candidate := range facts.Paths {
+	// A native write call with a key outside its reviewed schema is judged
+	// as each of its readings by dispatchTrustedAction
+	// (unknownKeyTwinRequests), with its own facts.
+	view := facts
+	for _, candidate := range view.Paths {
 		if candidate.Access != actionfacts.PathAccessWrite &&
 			candidate.Access != actionfacts.PathAccessAppend {
 			continue
 		}
-		command, ok := integrityCommandByID(facts, candidate.CommandID)
+		// A fact for the file a link reaches is no further operand: the
+		// operand it was added for is judged here with the client's answer
+		// for it, which already names that file. The client lists no entry
+		// for the physical name, so judging it as an operand would read
+		// the missing entry as an operand the client left out (GAP-0819).
+		if candidate.Linked {
+			if isProtected(candidate.Resolved) {
+				return confirmed()
+			}
+			continue
+		}
+		command, ok := integrityCommandByID(view, candidate.CommandID)
 		if !ok || !integrityCommandMutatesPath(command, candidate) ||
-			!(integrityExplicitCommandMutator(command, candidate) ||
-				command.Program == "dd" && command.ArgvComplete ||
-				integrityStructuredFileMutator(facts, command)) {
+			((!(integrityExplicitCommandMutator(command, candidate)) && (command.Program != "dd" || !(command.ArgvComplete))) && !(integrityStructuredFileMutator(view, command))) {
 			continue
 		}
 		target := candidate.Resolved
@@ -896,18 +1652,43 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			!strings.ContainsAny(candidate.Value, "*?[]$`\\") &&
 			!strings.HasPrefix(candidate.Value, "~") &&
 			integrityCommandOwnsStaticRedirect(command, candidate) {
-			target = filepath.Join(facts.CWD, filepath.FromSlash(candidate.Normalized))
+			target = filepath.Join(view.CWD, filepath.FromSlash(candidate.Normalized))
+		}
+		// A structured write names its target from the event cwd. A
+		// gateway that could not validate that cwd (ProtectHome) has no
+		// resolved path for a relative target: place it in the client's
+		// cwd, as the hook keyed it (hookpaths.ResolveConnector), or the
+		// write through a link there was never judged.
+		if target == "" && candidate.Normalized != "" && integrityStructuredFileMutator(view, command) &&
+			!strings.ContainsAny(candidate.Normalized, "*?[]$`") && !strings.HasPrefix(candidate.Normalized, "~") {
+			target = candidate.Normalized
 		}
 		if raw, ok := hookpaths.RawDotDotOperand(candidate.Value, clientCWD); ok {
 			target = raw
 		}
-		ownCopy := (command.Program == "cp" || command.Program == "gcp") &&
-			target == hookpaths.CopyDestination(command.Argv, clientCWD)
+		// The own destination of the copy, also after a directory change
+		// that the path facts follow (GAP-2579).
+		ownCopy := hookpaths.IsCopyProgram(command.Argv) &&
+			(target == hookpaths.CopyDestination(command.Argv, clientCWD) ||
+				candidate.Value != "" && candidate.Value == hookpaths.CopyDestinationOperand(command.Argv))
 		if slices.Contains(operands, target) && integrityCommandOwnsStaticRedirect(command, candidate) {
 			continue
 		}
 		if replacedBySed[target] && !isProtected(target) {
 			continue
+		}
+		if ownCopy && !links.IsCopyDestination(target) {
+			// A copy after a directory change writes its destination where
+			// the statement walk placed the call; the path fact read in the
+			// starting directory names no write of it (GAP-2579).
+			if placed := links.PlacedCopyDestinations(candidate.Value); len(placed) > 0 {
+				for _, destination := range placed {
+					if writeTarget(destination, false, true) {
+						return true
+					}
+				}
+				continue
+			}
 		}
 		if writeTarget(target, false, ownCopy) {
 			return true
@@ -919,8 +1700,100 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	patchTargets, patchKnown := hookpaths.ApplyPatchWriteTargets(
 		request.Input.Tool, request.Input.Args, input.Command, clientCWD, facts.ActiveHome,
 	)
+	if !patchKnown && request.parentPatch != nil {
+		// A pipeline stage that reads the envelope of its parent call
+		// (@'...'@ | apply_patch). Every directive of the parent is placed in
+		// this stage's directory and judged below; an apply_patch of the
+		// parent that reads no literal envelope keeps the targets unknown.
+		parent := *request.parentPatch
+		patchTargets, patchKnown = hookpaths.ApplyPatchWriteTargets(
+			parent.Tool, parent.Args, parent.Command, clientCWD, facts.ActiveHome,
+		)
+	}
+	if !patchKnown && request.Connector == "copilot" && request.ProtectedHomeHook && input.Command == "" {
+		// A managed gateway cannot traverse the user's private project, but
+		// the native hook resolved every path before it sent the request.
+		patchTargets, patchKnown = copilotClientProvedPatchTargets(
+			request.Input.Tool, request.Input.Args, clientCWD, facts.ActiveHome, request.ResolvedWriteTargets,
+		)
+	}
+	if !patchKnown && cannotResolveLocally && clientTargets != nil {
+		// Behind ProtectHome the gateway cannot resolve an envelope's
+		// targets in the user's home; the user's hook resolved each one
+		// (GAP-1106). A target the hook did not resolve stays unknown. A target behind a directory closed
+		// to the user has no physical answer: the file its link text leads
+		// to decides it, as it does for a file-tool write (patchLinkText).
+		if lexical, parsed := hookpaths.ApplyPatchLexicalCommandTargets(
+			request.Input.Tool, request.Input.Args, input.Command, clientCWD, facts.ActiveHome,
+		); parsed && filepath.IsAbs(clientCWD) {
+			physicalOfClean := clientStepUpAnswers(input, facts, clientCWD, clientTargets)
+			for _, target := range lexical {
+				operand := hookpaths.OperandPath(target, clientCWD)
+				if physical, stepsUp := physicalOfClean[operand]; stepsUp {
+					// The header steps up a directory: the file it writes is
+					// the one the client walked for the raw spelling, not the
+					// lexical clean (which the client may not be able to
+					// open). The physical answer decides, in both directions.
+					if slices.ContainsFunc(physical, isProtected) {
+						return true
+					}
+					continue
+				}
+				if _, described := clientTargets[operand]; !described && truncated {
+					// The bounded map omits this target: the protected-name
+					// check below decides, as it did before the map was read.
+					continue
+				}
+				resolved := clientTargets[operand]
+				if !filepath.IsAbs(resolved) {
+					// The targets are the headers of the envelopes the text
+					// holds, wherever it holds them: each is a patch operand.
+					text, closed := closedLinkText(operand)
+					if !closed {
+						return true
+					}
+					if !nativeFileToolWriteOperand(request.Input, facts, clientCWD, operand) {
+						// A header the text holds in a body no call runs
+						// (the balanced tiers read none, the strict tier
+						// reads every body) writes nothing: the link text
+						// decides only the patches the call performs.
+						continue
+					}
+					resolved = text
+				}
+				if isProtected(resolved) || isProtected(target) {
+					return true
+				}
+			}
+			if !truncated {
+				return false
+			}
+		}
+	}
+	if !patchKnown && cannotResolveLocally && clientTargets != nil && !truncated &&
+		hookpaths.ApplyPatchStagedFeed(request.Input.Args, input.Command) {
+		// A staged patch file this gateway cannot read: the user's hook read
+		// it and listed each directive target, resolved (classifier refix 1).
+		for operand, resolved := range clientTargets {
+			if isProtected(operand) || isProtected(resolved) {
+				return true
+			}
+		}
+	}
 	if !patchKnown {
-		return true
+		// Unknown targets (no readable envelope, apply_patch --help, a
+		// lookup of the program) reach the rule only when the call names a
+		// protected target: no protected-named word is never blocked
+		// (TGT-0194; GAP-0781, GAP-1106, GAP-1741, GAP-1872). A staged patch
+		// file is read above; only one that cannot be read reaches here. An apply_patch
+		// tool call that reaches here with no patch text (a connector
+		// refused or bounded it) stays unknown.
+		if hookpaths.ApplyPatchToolWithoutText(request.Input.Tool, request.Input.Args) {
+			return true
+		}
+		return hookpaths.PatchCallNamesProtectedTarget(
+			request.Input.Tool, request.Input.Args, input.Command, clientCWD, facts.ActiveHome, clientTargets,
+		) || hookpaths.PatchCallNamesProtectedTarget("", nil, request.LegacyText, clientCWD, facts.ActiveHome, clientTargets)
 	}
 	for _, target := range patchTargets {
 		if writeTarget(target, false, false) {
@@ -928,6 +1801,12 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 	}
 	return false
+}
+
+// trustedPOSIXShellCall reports a call a POSIX shell runs (Bash tool,
+// POSIX dialect), which Git Bash runs on a Windows host.
+func trustedPOSIXShellCall(input actionfacts.Input, facts actionfacts.Facts) bool {
+	return input.DialectHint == actionfacts.DialectPOSIX || input.DialectHint == "" && facts.Parse.Dialect == actionfacts.DialectPOSIX
 }
 
 func trustedBase64ShellAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts.Facts) bool {
@@ -968,7 +1847,7 @@ func trustedStaticStatementAuthorizedKeysWrite(input actionfacts.Input) bool {
 	if input.Command == "" || len(input.Command) > 64<<10 {
 		return false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(input.Command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(input.Command), "")
 	if err != nil || len(file.Stmts) < 2 || len(file.Stmts) > 16 {
 		return false
 	}
@@ -1001,7 +1880,7 @@ func trustedAuthorizedKeysGlobWrite(input actionfacts.Input) bool {
 	if input.Command == "" || len(input.Command) > 64<<10 {
 		return false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(input.Command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(input.Command), "")
 	if err != nil {
 		return false
 	}
@@ -1043,7 +1922,7 @@ func trustedAssignedAuthorizedKeysWrite(input actionfacts.Input) bool {
 	if input.Command == "" || len(input.Command) > 64<<10 || input.ActiveHome == "" {
 		return false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(input.Command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(input.Command), "")
 	if err != nil || len(file.Stmts) != 2 {
 		return false
 	}
@@ -1089,7 +1968,7 @@ func trustedSedInPlaceAuthorizedKeysWrite(input actionfacts.Input) bool {
 	if input.Command == "" || len(input.Command) > 64<<10 {
 		return false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(input.Command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(input.Command), "")
 	if err != nil || len(file.Stmts) != 1 || len(file.Stmts[0].Redirs) != 0 {
 		return false
 	}
@@ -1206,7 +2085,7 @@ func trustedHomeDirectoryAuthorizedKeysWrite(input actionfacts.Input) bool {
 	if input.Command == "" || input.ActiveHome == "" || len(input.Command) > 64<<10 {
 		return false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(input.Command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(shellparse.Reader(input.Command), "")
 	if err != nil {
 		return false
 	}
@@ -1349,4 +2228,77 @@ func trustedNestedAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts
 		}
 	}
 	return false
+}
+
+func interpreterCommentStart(code string, i int, language string) bool {
+	switch language {
+	case "python", "ruby":
+		return true
+	case "perl":
+		return i == 0 || code[i-1] != '$'
+	default:
+		return false
+	}
+}
+
+// hermesClientPatchTarget reports that the managed hook proved one Hermes V4A
+// patch target: behind ProtectHome only, in a complete map the hook keyed in
+// clientCWD that attests every patch target (hookpaths.PatchCompleteKey), with
+// the target resolved to a file. The hook lists a V4A target only after its
+// own patch-target walk accepted it, and names the file the target leads to
+// (a link to an ordinary file is that file, a link to a key or state file is
+// that file), which the checks below judge as they judge a write_file target.
+// A link that changes after the hook read it is refused by the hook itself
+// (hookpaths.PatchTargetWatch, after the answer and again once it is written).
+// The strict policy tier does not trust a link it cannot read again: there
+// only a target resolved to itself is proved (request.strictPatchLinks).
+//
+// The file a listed target leads to is proved with it. The file-tool link
+// resolver (fileToolLinkTargetFacts) judges that file as a path of its own, and
+// it is the very file the hook named for the target, so it needs no second walk
+// the gateway cannot make (GAP-0797 with GAP-0488). In the strict tier a link
+// is already refused at its own name, so the file behind it is not proved there.
+func hermesClientPatchTarget(request trustedActionRequest, clientTargets map[string]string, clientCWD, target string) bool {
+	if !request.ProtectedHomeHook || !filepath.IsAbs(clientCWD) || !filepath.IsAbs(target) ||
+		clientTargets[hookpaths.CWDKey] != clientCWD ||
+		clientTargets[hookpaths.PatchCompleteKey] != "1" ||
+		clientTargets[hookpaths.TruncatedKey] != "" ||
+		clientTargets[hookpaths.UnprovenReasonKey] != "" {
+		return false
+	}
+	if clientTargets[target] != "" {
+		return !request.strictPatchLinks || clientTargets[target] == target
+	}
+	if request.strictPatchLinks {
+		return false
+	}
+	for listed, resolved := range clientTargets {
+		if resolved == target && filepath.IsAbs(listed) {
+			return true
+		}
+	}
+	return false
+}
+
+// nativeFileToolWriteOperand reports whether target is a file the call writes
+// through a patch or file tool it runs itself: a native file-tool call (no
+// command) or the apply_patch envelope of a shell here-document
+// (actionfacts.NativeCallWriteTargets). Such a call runs no code of its own
+// that could open a directory first, so the permissions it meets at the hook
+// are the ones the write meets.
+func nativeFileToolWriteOperand(input actionfacts.Input, facts actionfacts.Facts, cwd, target string) bool {
+	for _, written := range actionfacts.NativeCallWriteTargets(input, facts) {
+		if actionfacts.OperandPath(written, cwd) == target {
+			return true
+		}
+	}
+	return false
+}
+
+// placedByCodexClient reports a client answer that the scoping of a managed
+// Codex hook keeps whatever it names: the client resolved the operand, so it
+// is evidence, not a missing proof. Only the unplaced entries of its map are
+// left to the shell reading.
+func placedByCodexClient(connector, resolved string) bool {
+	return connector == "codex" && resolved != ""
 }

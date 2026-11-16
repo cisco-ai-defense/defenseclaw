@@ -32,6 +32,41 @@ func editConfigInPlace(t *testing.T, h *testHost, from, to string) string {
 	return edited
 }
 
+func TestInstalledManagedLiteralUpgradeAdvisory(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	path := h.env.P(h.env.Layout.ConfigPath)
+	raw := h.read(h.env.Layout.ConfigPath) + `
+webhooks:
+  - url: https://example.test/hook
+    type: generic
+observability:
+  destinations:
+    - name: archive
+      kind: http_jsonl
+      enabled: false
+      endpoint: https://example.test/events
+      headers:
+        Authorization: provided by administrator
+`
+	if err := os.WriteFile(path, []byte(raw), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionEnsure, Reason: "path"}))
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		report := h.run(Options{Action: action})
+		advisory := messagesOf(report.Warnings, "managed_literal_credentials")
+		for _, want := range []string{"webhooks[0].url", "observability.destinations[0].headers", "{credential: NAME}"} {
+			if !strings.Contains(advisory, want) {
+				t.Fatalf("%s advisory %q omits %q", action, advisory, want)
+			}
+		}
+		if strings.Contains(advisory, "provided by administrator") {
+			t.Fatalf("%s advisory includes a literal value", action)
+		}
+	}
+}
+
 // An MDM edits config.yaml in place and the apply trigger runs ensure. When
 // the lifecycle rejects the edit, the gateway (which follows the file) must
 // not keep running it, and a later gateway restart must not pick it up: the
@@ -127,9 +162,11 @@ func TestRejectedInPlaceConfigIsReverted(t *testing.T) {
 		if got := h.read(h.env.Layout.ConfigPath); got != edited {
 			t.Fatal("a valid in-place edit was not applied")
 		}
-		// The result says what the apply did (#1032).
+		// The result says what the apply did (#1032). The fake gateway reports
+		// the recorded policy, so the edit applies in the running gateway.
 		changes := strings.Join(r.Changes, "\n")
-		if !strings.Contains(changes, "applied the edited "+h.env.Layout.ConfigPath) || !strings.Contains(changes, "restarted "+unitGateway) {
+		if !strings.Contains(changes, "applied the edited "+h.env.Layout.ConfigPath) ||
+			!strings.Contains(changes, "applied the config change in the running "+unitGateway) {
 			t.Fatalf("the apply result does not say what it changed: %q", r.Changes)
 		}
 		if got, err := os.ReadFile(h.env.committedConfigPath()); err != nil || string(got) != edited {

@@ -10,11 +10,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/spf13/cobra"
 )
 
@@ -68,30 +68,31 @@ var scrubCodexOtelMarkers = []string{
 // connector writes into ~/.claude/settings.json. Kept in sync with
 // claudeCodeOtelEnvKeys in internal/gateway/connector/claudecode.go.
 var claudeManagedEnvKeys = map[string]struct{}{
-	"CLAUDE_CODE_ENABLE_TELEMETRY":        {},
-	"DEFENSECLAW_FAIL_MODE":               {},
-	"OTEL_METRICS_EXPORTER":               {},
-	"OTEL_LOGS_EXPORTER":                  {},
-	"OTEL_TRACES_EXPORTER":                {},
-	"OTEL_EXPORTER_OTLP_PROTOCOL":         {},
-	"OTEL_EXPORTER_OTLP_ENDPOINT":         {},
-	"OTEL_EXPORTER_OTLP_HEADERS":          {},
-	"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": {},
-	"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": {},
-	"OTEL_EXPORTER_OTLP_METRICS_HEADERS":  {},
-	"OTEL_EXPORTER_OTLP_LOGS_PROTOCOL":    {},
-	"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT":    {},
-	"OTEL_EXPORTER_OTLP_LOGS_HEADERS":     {},
-	"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL":  {},
-	"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":  {},
-	"OTEL_EXPORTER_OTLP_TRACES_HEADERS":   {},
-	"OTEL_LOG_USER_PROMPTS":               {},
-	"OTEL_LOG_ASSISTANT_RESPONSES":        {},
-	"OTEL_LOG_RAW_API_BODIES":             {},
-	"OTEL_LOG_TOOL_CONTENT":               {},
-	"OTEL_LOG_TOOL_DETAILS":               {},
-	"OTEL_RESOURCE_ATTRIBUTES":            {},
-	"OTEL_SERVICE_NAME":                   {},
+	"CLAUDE_CODE_ENABLE_TELEMETRY":                {},
+	"CLAUDE_CODE_OTEL_HEADERS_HELPER_DEBOUNCE_MS": {},
+	"DEFENSECLAW_FAIL_MODE":                       {},
+	"OTEL_METRICS_EXPORTER":                       {},
+	"OTEL_LOGS_EXPORTER":                          {},
+	"OTEL_TRACES_EXPORTER":                        {},
+	"OTEL_EXPORTER_OTLP_PROTOCOL":                 {},
+	"OTEL_EXPORTER_OTLP_ENDPOINT":                 {},
+	"OTEL_EXPORTER_OTLP_HEADERS":                  {},
+	"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL":         {},
+	"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT":         {},
+	"OTEL_EXPORTER_OTLP_METRICS_HEADERS":          {},
+	"OTEL_EXPORTER_OTLP_LOGS_PROTOCOL":            {},
+	"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT":            {},
+	"OTEL_EXPORTER_OTLP_LOGS_HEADERS":             {},
+	"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL":          {},
+	"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":          {},
+	"OTEL_EXPORTER_OTLP_TRACES_HEADERS":           {},
+	"OTEL_LOG_USER_PROMPTS":                       {},
+	"OTEL_LOG_ASSISTANT_RESPONSES":                {},
+	"OTEL_LOG_RAW_API_BODIES":                     {},
+	"OTEL_LOG_TOOL_CONTENT":                       {},
+	"OTEL_LOG_TOOL_DETAILS":                       {},
+	"OTEL_RESOURCE_ATTRIBUTES":                    {},
+	"OTEL_SERVICE_NAME":                           {},
 }
 
 var (
@@ -133,7 +134,7 @@ Exit codes:
 
 func init() {
 	enterpriseHooksScrubCmd.Flags().StringVar(&scrubConnectorFlag, "connector", "",
-		"Connector whose entries to remove: codex, claudecode, or cursor (required)")
+		"Connector whose entries to remove: codex, claudecode, cursor, or copilot (required)")
 	enterpriseHooksScrubCmd.Flags().StringVar(&scrubFileFlag, "file", "",
 		"Path to the agent config file to scrub (required)")
 	enterpriseHooksScrubCmd.Flags().StringVar(&scrubDataDirMarker, "datadir-marker", "",
@@ -199,6 +200,7 @@ func runEnterpriseHooksScrub(cmd *cobra.Command, _ []string) error {
 		"cursor":     scrubCursorFile,
 		"claudecode": scrubClaudeCodeFile,
 		"codex":      scrubCodexFile,
+		"copilot":    scrubCopilotFile,
 	}[connector]
 	if !ok {
 		return &scrubExitError{code: 3, msg: fmt.Sprintf("enterprise hooks scrub: unsupported connector: %q", scrubConnectorFlag)}
@@ -275,6 +277,14 @@ func scrubCursorFile(path string, markers []string) (bool, error) {
 		return false, fmt.Errorf("parse JSON: %w", err)
 	}
 	hooks, _ := cfg["hooks"].(map[string]any)
+	scrubFlatHookEntries(hooks, markers)
+	return writeSortedJSON(path, cfg, data)
+}
+
+// scrubFlatHookEntries drops the owned entries from a hooks map whose
+// events list their commands directly (Cursor's hooks.json, Copilot's
+// hook files), and the events left empty.
+func scrubFlatHookEntries(hooks map[string]any, markers []string) {
 	// `range` over a nil map iterates zero times, so the previous
 	// `if hooks != nil` guard was redundant (golangci-lint S1031).
 	for event, raw := range hooks {
@@ -294,7 +304,87 @@ func scrubCursorFile(path string, markers []string) (bool, error) {
 			hooks[event] = kept
 		}
 	}
+}
+
+// ---- GitHub Copilot CLI JSON (~/.copilot/hooks/defenseclaw.json) -------
+
+// copilotOwnedHookFileName is the hook file DefenseClaw writes whole in
+// Copilot's hooks folder.
+const copilotOwnedHookFileName = "defenseclaw.json"
+
+// scrubCopilotFile removes DefenseClaw's entries from a Copilot hook file
+// ({"version": 1, "hooks": {event: [{"type": "command", "bash": ...}]}}).
+// defenseclaw.json is DefenseClaw's own file, so once no hook is left in it
+// and it holds nothing but version and hooks it is removed instead of being
+// left empty. Only a scrub running as the user removes it; as root (the
+// uninstaller's retry) the emptied document is written in place, so root
+// never deletes by a path the user controls. A document that is null, or
+// whose hooks value is present but not an object (null, an array), is not
+// Copilot's shape, so the file is kept as it is; when that value still holds
+// a DefenseClaw entry the scrub fails, so the purge reports it.
+func scrubCopilotFile(path string, markers []string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return false, fmt.Errorf("parse JSON: %w", err)
+	}
+	if cfg == nil {
+		// A top-level null is not Copilot's shape: keep it.
+		return false, nil
+	}
+	rawHooks, hooksPresent := cfg["hooks"]
+	hooks, hooksIsObject := rawHooks.(map[string]any)
+	if hooksPresent && !hooksIsObject {
+		if looksOwned(rawHooks, markers) {
+			return false, fmt.Errorf("hooks is not an object but holds a DefenseClaw entry; left in place")
+		}
+		return false, nil
+	}
+	// An event whose value is not a list is not Copilot's shape: it is left
+	// as it is, and when it holds a DefenseClaw entry the scrub still removes
+	// the entries of the valid events, then fails so the purge reports it.
+	var unsupported []string
+	for event, raw := range hooks {
+		if _, isList := raw.([]any); !isList && looksOwned(raw, markers) {
+			unsupported = append(unsupported, event)
+		}
+	}
+	if len(unsupported) > 0 {
+		sort.Strings(unsupported)
+		scrubFlatHookEntries(hooks, markers)
+		changed, err := writeSortedJSON(path, cfg, data)
+		if err != nil {
+			return changed, err
+		}
+		return changed, fmt.Errorf("hooks %s not a list but holding a DefenseClaw entry; left in place", strings.Join(unsupported, ", "))
+	}
+	scrubFlatHookEntries(hooks, markers)
+	if filepath.Base(path) == copilotOwnedHookFileName && len(hooks) == 0 && copilotHookFileOnlyEnvelope(cfg) && !scrubRunsAsRoot() {
+		if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() {
+			if err := os.Remove(path); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+	}
 	return writeSortedJSON(path, cfg, data)
+}
+
+// scrubRunsAsRoot reports whether the scrub runs as root; tests replace it.
+var scrubRunsAsRoot = func() bool { return os.Geteuid() == 0 }
+
+// copilotHookFileOnlyEnvelope reports whether cfg holds no key besides
+// Copilot's version and hooks.
+func copilotHookFileOnlyEnvelope(cfg map[string]any) bool {
+	for key := range cfg {
+		if key != "version" && key != "hooks" {
+			return false
+		}
+	}
+	return true
 }
 
 // ---- Claude Code JSON (~/.claude/settings.json) ------------------------
@@ -346,6 +436,11 @@ func scrubClaudeCodeFile(path string, markers []string) (bool, error) {
 		} else {
 			hooks[event] = keptGroups
 		}
+	}
+	// The per-user otelHeadersHelper lives in the hooks folder this purge
+	// deletes (GAP-1421).
+	if helper, present := cfg["otelHeadersHelper"]; present && looksOwned(helper, markers) {
+		delete(cfg, "otelHeadersHelper")
 	}
 	if env, ok := cfg["env"].(map[string]any); ok {
 		for key, val := range env {
@@ -725,9 +820,9 @@ func writeSortedJSONValue(buf *bytes.Buffer, v any, prefix, indent string) error
 // personality, etc.).
 
 var (
-	tomlTopLevelRE   = regexp.MustCompile(`^\[([^\[\]\.\s]+)\]\s*$`)
-	tomlTableHeader  = regexp.MustCompile(`^\s*\[\[?[^\[\]]+\]\]?\s*$`)
-	codexNotifyStart = regexp.MustCompile(`^\s*notify\s*=`)
+	tomlTopLevelRE   = lazyregexp.New(`^\[([^\[\]\.\s]+)\]\s*$`)
+	tomlTableHeader  = lazyregexp.New(`^\s*\[\[?[^\[\]]+\]\]?\s*$`)
+	codexNotifyStart = lazyregexp.New(`^\s*notify\s*=`)
 	// tomlOtelSectionRE matches every table header rooted at the `otel`
 	// key: bare `[otel]`, dotted `[otel.exporter]`,
 	// `[otel.exporter.otlp-http]`, `[otel.exporter.otlp-http.headers]`,
@@ -738,14 +833,14 @@ var (
 	// that stops at the first sub-table would miss them. This regex
 	// lets the section-scan walk every `otel.*` subsection as one
 	// logical block.
-	tomlOtelSectionRE = regexp.MustCompile(`^\s*\[otel(?:\.[^\[\]]+)?\]\s*$`)
+	tomlOtelSectionRE = lazyregexp.New(`^\s*\[otel(?:\.[^\[\]]+)?\]\s*$`)
 	// tomlHooksEventRE captures the `<event>` name from a
 	// `[hooks.<event>[.sub]]` or `[[hooks.<event>[.sub]]]` header.
 	// Used to construct a per-event scan predicate so the scrubber
 	// only removes DefenseClaw-owned event subtrees and leaves any
 	// adjacent user-owned event blocks intact — see the mixed-hooks
 	// regression note on scrubCodexFile.
-	tomlHooksEventRE = regexp.MustCompile(`^\s*\[\[?hooks\.([^\[\].]+)`)
+	tomlHooksEventRE = lazyregexp.New(`^\s*\[\[?hooks\.([^\[\].]+)`)
 	// tomlHooksSectionRE matches every table header rooted at the
 	// `hooks` key, in EITHER single-bracket or double-bracket
 	// (array-of-tables) form:
@@ -773,7 +868,7 @@ var (
 	// `defenseclaw uninstall --purge`. This regex lets the section
 	// scan span every `hooks.*` subsection as one logical block, same
 	// pattern as tomlOtelSectionRE.
-	tomlHooksSectionRE = regexp.MustCompile(`^\s*\[\[?hooks(?:\.[^\[\]]+)?\]\]?\s*$`)
+	tomlHooksSectionRE = lazyregexp.New(`^\s*\[\[?hooks(?:\.[^\[\]]+)?\]\]?\s*$`)
 )
 
 func scrubCodexFile(path string, markers []string) (bool, error) {

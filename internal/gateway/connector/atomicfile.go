@@ -24,6 +24,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // atomicWriteFile writes data to a temp file in the same directory and then
@@ -38,23 +41,6 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	return atomicWriteFileWithPublisher(path, data, perm, atomicFilePublish)
 }
 
-// atomicWriteFileWithReplace preserves the injectable replacement seam used by
-// durability-failure tests. Production writes use atomicFilePublish so Windows
-// can bind private-file validation and publication to the staged file handle.
-func atomicWriteFileWithReplace(
-	path string,
-	data []byte,
-	perm os.FileMode,
-	replace func(string, string) error,
-) error {
-	return atomicWriteFileWithPublisher(
-		path, data, perm,
-		func(source, destination string, _ os.FileInfo, _ os.FileMode) error {
-			return replace(source, destination)
-		},
-	)
-}
-
 type atomicFilePublisher func(string, string, os.FileInfo, os.FileMode) error
 
 func atomicWriteFileWithPublisher(
@@ -67,22 +53,62 @@ func atomicWriteFileWithPublisher(
 	if err != nil {
 		return err
 	}
+	return atomicWriteFileAt(path, writePath, data, perm, publish, false)
+}
+
+// atomicWriteFileNoFollow is atomicWriteFile for a path that must be a regular
+// file or absent: it never writes through a link. A link or other non-regular
+// file there is an error, and the rename replaces the directory entry itself,
+// so a link put there after the check is replaced, not followed. The Hermes
+// home record (recordHermesHomeSetUp) uses it.
+func atomicWriteFileNoFollow(path string, data []byte, perm os.FileMode) error {
+	info, err := os.Lstat(path)
+	switch {
+	case err == nil && !info.Mode().IsRegular():
+		return fmt.Errorf("%s is not a regular file", path)
+	case err != nil && !errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("lstat %s: %w", path, err)
+	}
+	return atomicWriteFileAt(path, path, data, perm, atomicFilePublish, false)
+}
+
+// atomicWriteFileAt writes data to writePath, path or the file a link at path
+// leads to. A writePath that already holds data and perm is left as it is,
+// unless always is set.
+func atomicWriteFileAt(path, writePath string, data []byte, perm os.FileMode, publish atomicFilePublisher, always bool) error {
+	// In an account home bound for the enterprise per-user code, a path
+	// that leads out of the home is never changed, nor a folder created
+	// there; a write that would change nothing is still fine (rel-1-0-3
+	// GAP-0206).
+	if err := confineAtomicWritePath(path); err != nil {
+		if atomicFileAlreadyMatches(writePath, data, perm) {
+			return nil
+		}
+		return err
+	}
+
+	noteManagedSetupWrite(path, data)
 
 	dir := filepath.Dir(writePath)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := atomicMkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create dir for %s: %w", writePath, err)
 	}
 	// Avoid replacing an already-correct config. This is especially important
 	// on Windows, where a replacement is a file-identity transition and must not
 	// churn NTFS metadata. The platform helper validates the effective owner-only
 	// DACL instead of comparing Go's synthetic 0666 FileMode to 0600.
-	if atomicFileAlreadyMatches(writePath, data, perm) {
+	if !always && atomicFileAlreadyMatches(writePath, data, perm) {
 		return nil
 	}
 
 	tmp, tmpPath, err := atomicFileCreateTemp(dir, perm)
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
+	}
+	if err := atomicStageKeepOwner(tmpPath, writePath); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("keep owner of temp file: %w", err)
 	}
 	if runtime.GOOS == "windows" && perm.Perm()&0o077 == 0 {
 		// atomicFileCreateTemp creates private Windows files with their final
@@ -126,21 +152,32 @@ func atomicWriteFileWithPublisher(
 		os.Remove(tmpPath)
 		return &atomicPublishError{Path: writePath, Err: publishCause(err)}
 	}
+	// A gateway still running in a data folder `config set data_dir` moved
+	// away from writes the records uninstall removes by digest: record this
+	// write now it is published, so uninstall knows the copy as its own.
+	_ = RecordEarlierDataDirWrite(path, data)
 	// The staged file was synced before publication. POSIX rename additionally
 	// needs an explicit parent-directory fsync.
 	if runtime.GOOS != "windows" {
-		directory, err := os.Open(dir)
-		if err != nil {
-			return fmt.Errorf("open parent directory for sync: %w", err)
-		}
-		syncErr := directory.Sync()
-		closeErr := directory.Close()
-		if syncErr != nil {
-			return fmt.Errorf("sync parent directory: %w", syncErr)
-		}
-		if closeErr != nil {
-			return fmt.Errorf("close parent directory after sync: %w", closeErr)
-		}
+		return atomicFileSyncParent(dir)
+	}
+	return nil
+}
+
+// atomicFileSyncParent syncs dir after a rename into it. A failure leaves the
+// new file in place; tests replace it to prove callers handle that.
+var atomicFileSyncParent = func(dir string) error {
+	directory, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open parent directory for sync: %w", err)
+	}
+	syncErr := directory.Sync()
+	closeErr := directory.Close()
+	if syncErr != nil {
+		return fmt.Errorf("sync parent directory: %w", syncErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close parent directory after sync: %w", closeErr)
 	}
 	return nil
 }
@@ -165,15 +202,26 @@ func publishCause(err error) error {
 }
 
 func atomicFileAlreadyMatches(path string, data []byte, perm os.FileMode) bool {
-	file, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	defer file.Close()
+	var matched bool
+	_ = safefile.RetryTransientRead(func() error {
+		file, err := winpath.OpenReadShared(path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		matched, err = atomicFileMatchesOpened(file, path, data, perm)
+		return err
+	})
+	return matched
+}
 
+func atomicFileMatchesOpened(file *os.File, path string, data []byte, perm os.FileMode) (bool, error) {
 	openedInfo, err := file.Stat()
-	if err != nil || !openedInfo.Mode().IsRegular() || !atomicFileProtectionMatches(file, openedInfo, perm) {
-		return false
+	if err != nil {
+		return false, err
+	}
+	if !openedInfo.Mode().IsRegular() || !atomicFileProtectionMatches(file, openedInfo, perm) {
+		return false, nil
 	}
 	// The destination is commonly user-owned runtime state. Never size an
 	// allocation from attacker-controlled metadata: a sparse file can advertise
@@ -181,24 +229,38 @@ func atomicFileAlreadyMatches(path string, data []byte, perm os.FileMode) bool {
 	// the exact expected length, and the bounded read below closes a grow-after-
 	// stat race without changing the comparison result.
 	if openedInfo.Size() != int64(len(data)) {
-		return false
+		return false, nil
 	}
 	pathInfo, err := os.Lstat(path)
-	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(openedInfo, pathInfo) {
-		return false
+	if err != nil {
+		return false, err
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(openedInfo, pathInfo) {
+		return false, nil
 	}
 	current, err := io.ReadAll(io.LimitReader(file, int64(len(data))+1))
-	if err != nil || !bytes.Equal(current, data) {
-		return false
+	if err != nil {
+		return false, err
+	}
+	if !bytes.Equal(current, data) {
+		return false, nil
 	}
 	pathInfo, err = os.Lstat(path)
-	return err == nil && pathInfo.Mode()&os.ModeSymlink == 0 && os.SameFile(openedInfo, pathInfo)
+	if err != nil {
+		return false, err
+	}
+	return pathInfo.Mode()&os.ModeSymlink == 0 && os.SameFile(openedInfo, pathInfo), nil
 }
 
 func resolveAtomicWritePath(path string) (string, error) {
 	cur := path
 	for i := 0; i < 16; i++ {
-		info, err := os.Lstat(cur)
+		var info os.FileInfo
+		err := safefile.RetryTransientRead(func() error {
+			var lookupErr error
+			info, lookupErr = os.Lstat(cur)
+			return lookupErr
+		})
 		if err != nil {
 			if os.IsNotExist(err) {
 				return cur, nil

@@ -47,6 +47,7 @@ func crossServiceResults() map[string]commandResult {
 		"initgroups alex":               {stdout: []byte("alex 80001 5000 9500 90001\n")},
 		"-s himmelblau initgroups alex": {stdout: []byte("alex 80001 5000\n")},
 		"-s ldap initgroups alex":       {stdout: []byte("alex 90001 9500\n")},
+		"-s ldap group":                 {stdout: []byte("other-team:x:9500:\n")},
 		"group 5000 80001":              {stdout: []byte("directory-team:x:5000:\ndirectory-primary:x:80001:\n")},
 		"group 9500 90001":              {stdout: []byte("other-team:x:9500:\nother-primary:x:90001:\n")},
 		"group 5000 9500 80001 90001":   {stdout: []byte("directory-team:x:5000:\nother-team:x:9500:\ndirectory-primary:x:80001:\nother-primary:x:90001:\n")},
@@ -54,6 +55,8 @@ func crossServiceResults() map[string]commandResult {
 }
 
 func TestDirectoryGroupsBindToServiceThatOwnsUID(t *testing.T) {
+	// An nslcd that completes every search (nslcdSearchesComplete).
+	startFakeNSLCD(t, &fakeNSLCD{})
 	for _, tc := range []struct {
 		name, order, firstName string
 	}{
@@ -90,6 +93,8 @@ func TestDirectoryGroupsBindToServiceThatOwnsUID(t *testing.T) {
 }
 
 func TestDirectoryGroupsFollowEligibleNSSServices(t *testing.T) {
+	// An nslcd that completes every search (nslcdSearchesComplete).
+	startFakeNSLCD(t, &fakeNSLCD{})
 	for _, tc := range []struct {
 		name, passwdServices, initgroupsServices, localGroups string
 		extraPasswd, extraInitgroups                          commandResult
@@ -169,6 +174,8 @@ func TestDirectoryGroupsWithoutNSSConfiguration(t *testing.T) {
 }
 
 func TestSSSDSIDlessGroupConfirmationBindsToUID(t *testing.T) {
+	// An nslcd that completes every search (nslcdSearchesComplete).
+	startFakeNSLCD(t, &fakeNSLCD{})
 	for _, tc := range []struct {
 		name     string
 		ldapUser commandResult

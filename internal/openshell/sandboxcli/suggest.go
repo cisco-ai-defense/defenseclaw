@@ -24,7 +24,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -32,6 +31,7 @@ import (
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -389,7 +389,7 @@ func commentText(s string, n int) string {
 	return truncate(s, n)
 }
 
-var packNameUnsafe = regexp.MustCompile(`[^a-z0-9-]+`)
+var packNameUnsafe = lazyregexp.New(`[^a-z0-9-]+`)
 
 // suggestPackName names the suggested pack after the file it goes to
 // (<name>/pack.yaml or <name>.yaml), else after the sandbox.

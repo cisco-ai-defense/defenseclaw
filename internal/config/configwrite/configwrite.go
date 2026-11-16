@@ -121,6 +121,11 @@ type Change struct {
 
 // Options describe who writes and why.
 type Options struct {
+	// GenerationFloor is a proven prior counter recovered by the lifecycle.
+	GenerationFloor uint64
+	// RecordSHA256 binds a metadata-only generation repair to approved
+	// bytes after install returns. Empty retains the ordinary writer path.
+	RecordSHA256 string
 	// Actor is ActorMigration, ActorLifecycle or a prefixed actor such as
 	// "cli:alice".
 	Actor string
@@ -152,11 +157,14 @@ type BundleRef struct {
 	ID          string
 	Version     uint64
 	SignerKeyID string
+	// Dir is the store version directory name of the bundle, recorded as
+	// bundle_dir ("" records none). Only Bundle records it.
+	Dir string
 }
 
 func (o Options) writer() cfgtxn.Writer {
-	return cfgtxn.Writer{Actor: o.Actor, LocalActor: o.LocalActor, Reason: o.Reason,
-		BundleID: o.Bundle.ID, BundleVersion: o.Bundle.Version, SignerKeyID: o.Bundle.SignerKeyID,
+	return cfgtxn.Writer{GenerationFloor: o.GenerationFloor, Actor: o.Actor, LocalActor: o.LocalActor, Reason: o.Reason,
+		BundleID: o.Bundle.ID, BundleVersion: o.Bundle.Version, SignerKeyID: o.Bundle.SignerKeyID, BundleDir: o.Bundle.Dir,
 		TransactionActor: o.TransactionActor, TransactionBundleID: o.TransactionBundle.ID,
 		TransactionBundleVersion: o.TransactionBundle.Version,
 		TransactionSignerKeyID:   o.TransactionBundle.SignerKeyID, TransactionSummary: o.TransactionSummary}
@@ -199,6 +207,15 @@ func ReplaceDocument(ctx context.Context, path string, raw []byte, opt Options) 
 	})
 }
 
+// PublicationOccurred reports whether a failed write replaced config.yaml
+// before it returned. A gateway may have loaded those bytes even if the
+// writer restored the file itself; a prepublication error needs no undo.
+func PublicationOccurred(err error) bool { return cfgtxn.PublicationOccurred(err) }
+
+// AfterPublication preserves the phase of a failure after a caller-owned
+// config publication. ReplaceDocument marks its own postpublication errors.
+func AfterPublication(err error) error { return cfgtxn.AfterPublication(err) }
+
 // Locked runs install with config.yaml.lock held and then records the
 // bytes now at path in config.generation.json. It is for writers that
 // install the file themselves under their own transaction, such as the
@@ -213,6 +230,10 @@ func Locked(ctx context.Context, path string, opt Options, install func() (bool,
 		return Result{}, err
 	}
 	defer txn.Close()
+	before, _, beforeExists, err := txn.Read()
+	if err != nil {
+		return Result{}, err
+	}
 	changed, err := install()
 	if err != nil {
 		return Result{}, err
@@ -222,9 +243,19 @@ func Locked(ctx context.Context, path string, opt Options, install func() (bool,
 		return Result{}, err
 	}
 	sum := cfgtxn.SHA256Hex(raw)
+	if opt.RecordSHA256 != "" && !strings.EqualFold(strings.TrimPrefix(opt.RecordSHA256, "sha256:"), sum) {
+		return Result{}, ErrConflict
+	}
 	if !changed {
 		state, _ := cfgtxn.ReadGenerationState(txn.Path())
 		return Result{Generation: state.Generation, SHA256: sum}, nil
+	}
+	// Recording bytes that were already in place binds them to the bundle
+	// through the record alone, as an equal-byte ReplaceDocument does.
+	if beforeExists && bytes.Equal(before, raw) {
+		if err := refuseUnprovenBundleBinding(txn.Path(), opt); err != nil {
+			return Result{}, err
+		}
 	}
 	state, err := txn.RecordGeneration(sum, opt.writer())
 	if err != nil {
@@ -285,6 +316,26 @@ func SHA256Hex(raw []byte) string { return cfgtxn.SHA256Hex(raw) }
 func WriteFileDurable(path string, data []byte, mode os.FileMode) error {
 	return cfgtxn.WriteFileDurable(path, data, mode)
 }
+
+// WriteFileDurablePublished is WriteFileDurable with publish run on the
+// temp file before the rename (its final owner and access), so path never
+// exists with the temp file's. A publish error leaves path as it was.
+func WriteFileDurablePublished(path string, data []byte, mode os.FileMode, publish func(tmp string) error) error {
+	return cfgtxn.WriteFileDurablePublished(path, data, mode, publish)
+}
+
+// SyncDir flushes dir so a file created or removed in it is durable (fsync
+// on POSIX; a no-op on Windows, where NTFS journals the directory).
+func SyncDir(dir string) error { return cfgtxn.SyncDir(dir) }
+
+// MkdirDurable makes dir, whose parent exists, a folder whose entry
+// survives a power loss before it returns (a write-through move on
+// Windows). A folder already there is not an error.
+func MkdirDurable(dir string) error { return cfgtxn.MkdirDurable(dir) }
+
+// SyncFile flushes path, its owner and access included, after they were
+// changed on a file already written.
+func SyncFile(path string) error { return cfgtxn.SyncFile(path) }
 
 // CurrentActor returns prefix + the OS user name ("cli:alice").
 func CurrentActor(prefix string) string {
@@ -441,6 +492,49 @@ func managedRefuses(current []byte, opt Options) bool {
 	return config.StandaloneManagedSource(current)
 }
 
+// ErrUnprovenBundleBinding is returned when a bundle would be bound to
+// config bytes already in place while config.generation.json is there but
+// cannot be read: the record is the only proof of what installed those
+// bytes, and recording the bundle would replace it.
+var ErrUnprovenBundleBinding = errors.New("configwrite: cannot bind a bundle to an unreadable generation record")
+
+// RefuseUnprovenBundleBinding returns ErrUnprovenBundleBinding (wrapped,
+// with the next step) when opt binds a bundle and something is at the
+// generation record's path next to configPath that is not a readable regular
+// record: a corrupt or unreadable file, a directory, or a link or other
+// reparse point, dangling or not. Only a path that is not there at all is no
+// evidence to lose; the path is inspected without following links, since a
+// read through a dangling link reports it missing and recording the bundle
+// would then replace the link. Callers that bind installed bytes outside
+// this package (the Windows lifecycle's config step) check it before they
+// change anything.
+func RefuseUnprovenBundleBinding(configPath string, opt Options) error {
+	return refuseUnprovenBundleBinding(configPath, opt)
+}
+
+func refuseUnprovenBundleBinding(configPath string, opt Options) error {
+	if opt.Bundle.ID == "" {
+		return nil
+	}
+	path := cfgtxn.GenerationPath(configPath)
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err == nil && !info.Mode().IsRegular() {
+		err = fmt.Errorf("%s is not a regular file (%s)", path, info.Mode().Type())
+	}
+	if err == nil {
+		// Read after the check: a record that vanishes in between is not
+		// proven absent either.
+		_, err = cfgtxn.ReadGenerationState(configPath)
+	}
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %w; it was left as it was. Run `enterprise bundle status --json` and restore the protected generation record before retrying", ErrUnprovenBundleBinding, err)
+}
+
 type mutateFunc func(current []byte) (candidate []byte, changed []string, err error)
 
 func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) (Result, error) {
@@ -481,8 +575,22 @@ func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) 
 		return Result{}, err
 	}
 	if exists && bytes.Equal(candidate, current) {
-		state, _ := cfgtxn.ReadGenerationState(txn.Path())
-		return Result{Generation: state.Generation, SHA256: sum}, nil
+		if err := refuseUnprovenBundleBinding(txn.Path(), opt); err != nil {
+			return Result{}, err
+		}
+		state, stateErr := cfgtxn.ReadGenerationState(txn.Path())
+		// A first bundle (or another bundle with equal config bytes) still
+		// changes the policy's provenance and digest scope. The lifecycle
+		// must also clear that identity when undoing to the equal-byte base.
+		// Other writers retain the ordinary unchanged-document behavior.
+		bundleTransition := (opt.Lifecycle || opt.Actor == ActorLifecycle) &&
+			(opt.Bundle.ID != "" || state.BundleID != "") &&
+			(stateErr != nil || state.ConfigSHA256 != sum || state.BundleID != opt.Bundle.ID ||
+				state.BundleVersion != opt.Bundle.Version || state.SignerKeyID != opt.Bundle.SignerKeyID ||
+				(opt.Bundle.Dir != "" && state.BundleDir != opt.Bundle.Dir))
+		if !bundleTransition {
+			return Result{Generation: state.Generation, SHA256: sum}, nil
+		}
 	}
 	if err := config.ValidateCandidate(txn.Path(), candidate); err != nil {
 		return Result{}, fmt.Errorf("configwrite: the change does not validate: %w", err)
@@ -530,8 +638,9 @@ var restartKeys = []string{
 	"guardrail.host", "guardrail.port", "guardrail.enabled", "guardrail.connector",
 	"guardrail.scanner_mode", "guardrail.retain_judge_bodies",
 	"guardrail.hook_self_heal", "guardrail.hook_self_heal_debounce_ms",
+	"guardrail.protected_files",
 	"claw", "agent", "routing", "plugin_dir",
-	"deployment_mode", "enterprise.profile", "enterprise.network", "enterprise.openshell",
+	"deployment_mode", "enterprise.profile", "enterprise.network", "enterprise.openshell", "enterprise.cowork_vm_sensor",
 	"environment", "tenant_id", "workspace_id", "discovery_source",
 	// Fleet keys that require a restart (MQTT connections, signing keys).
 	// Hot-reloadable fleet keys: auto_register, allow_key_over_http,
@@ -571,13 +680,85 @@ func ManagedRestartRequired(changed []string) []string {
 // ManagedConfigRestartRequired classifies a managed config change for the
 // gateway on every platform. Callers may have additional platform-specific
 // work (such as refreshing hook targets), but use this classification for
-// the gateway's reload decision.
-func ManagedConfigRestartRequired(before, after []byte) ([]string, error) {
+// the gateway's reload decision. A setting one config omits and the other
+// spells out at the value the device resolves the omission to (defaults)
+// is no change. Bundle verify's restart_prediction and the apply both
+// classify with it, so they agree (F03).
+func ManagedConfigRestartRequired(before, after []byte, defaults ManagedDefaults) ([]string, error) {
+	// The loader folds key case; the classification reads both documents
+	// the same way (foldConfigKeys), so a key it loads as start-only is
+	// classified start-only however it is spelled.
+	before, after = foldConfigKeys(before, "before"), foldConfigKeys(after, "after")
 	changed, err := ChangedPaths(before, after)
 	if err != nil {
 		return nil, err
 	}
-	return ManagedRestartRequired(changed), nil
+	restart := ManagedRestartRequired(defaults.dropUnchanged(before, after, changed))
+	if defaults.GOOS != "linux" && defaults.GOOS != "darwin" {
+		return restart, nil
+	}
+	var installed, candidate any
+	if yaml.Unmarshal(before, &installed) != nil || yaml.Unmarshal(after, &candidate) != nil {
+		// A malformed installed document is replaced wholesale. Keep its
+		// conservative restart prediction until the lifecycle validates it.
+		return restart, nil
+	}
+	// Unix publishes vendor machine policy in the same lifecycle transaction,
+	// and the running gateway follows the updated runtime descriptor. Windows
+	// keeps these paths so its hot path refreshes the guardian targets.
+	out := restart[:0]
+	for _, path := range restart {
+		if !managedConnectorSetPath(path) {
+			out = append(out, path)
+		}
+	}
+	out = append(out, PrimaryConnectorChange(before, after)...)
+	return out, nil
+}
+
+// PrimaryConnectorChange reports a start-only change to the gateway's
+// primary connector. When guardrail.connector is omitted, the first key in
+// guardrail.connectors supplies it. A connector set can therefore be hot
+// applied only while that primary stays the same.
+func PrimaryConnectorChange(before, after []byte) []string {
+	b, errB := primaryConnector(before)
+	a, errA := primaryConnector(after)
+	if errB == nil && errA == nil && a == b {
+		return nil
+	}
+	return []string{"guardrail.connector"}
+}
+
+func primaryConnector(raw []byte) (string, error) {
+	var doc struct {
+		Guardrail struct {
+			Connector  string               `yaml:"connector"`
+			Connectors map[string]yaml.Node `yaml:"connectors"`
+		} `yaml:"guardrail"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return "", err
+	}
+	if primary := strings.ToLower(strings.TrimSpace(doc.Guardrail.Connector)); primary != "" {
+		return primary, nil
+	}
+	keys := make([]string, 0, len(doc.Guardrail.Connectors))
+	for key := range doc.Guardrail.Connectors {
+		keys = append(keys, strings.ToLower(strings.TrimSpace(key)))
+	}
+	sort.Strings(keys)
+	if len(keys) == 0 {
+		return "", nil
+	}
+	return keys[0], nil
+}
+
+// managedConnectorSetPath names membership or enabled changes only. Other
+// per-connector settings keep their own restart classification.
+func managedConnectorSetPath(path string) bool {
+	segments := restartSegments(path)
+	return len(segments) >= 2 && segments[0] == "guardrail" && segments[1] == "connectors" &&
+		(len(segments) == 2 || len(segments) == 3 || (len(segments) == 4 && segments[3] == "enabled"))
 }
 
 // RestartRequired returns the paths in changed that need a gateway restart.
@@ -623,19 +804,64 @@ func restartKeyMatches(path, key []string) bool {
 }
 
 // restartSegments splits a change path into its key segments, dropping list
-// indexes and quoting (a.b[0]["c.d"] is a, b, c.d).
+// indexes and quoting (a.b[0]["c.d"] is a, b, c.d), in lower case: the
+// config loader folds key case, so Gateway.Port is gateway.port to it and
+// must be classified as that.
 func restartSegments(path string) []string {
 	parts, err := parsePath(path)
 	if err != nil {
-		return strings.Split(path, ".")
+		return strings.Split(strings.ToLower(path), ".")
 	}
 	out := make([]string, 0, len(parts))
 	for _, part := range parts {
 		if !part.isIdx {
-			out = append(out, part.key)
+			out = append(out, strings.ToLower(part.key))
 		}
 	}
 	return out
+}
+
+// foldConfigKeys returns raw with every mapping key in lower case, as the
+// config loader reads it. Keys inside lists stay as written: a list compares
+// as a whole, so any change in one is still a change. Two keys that fold to
+// one name hold a value marked with side, which differs from the other
+// document's, so that path is always a change. raw comes back unchanged
+// when no key needs folding or it does not parse.
+func foldConfigKeys(raw []byte, side string) []byte {
+	var document any
+	if len(bytes.TrimSpace(raw)) == 0 || yaml.Unmarshal(raw, &document) != nil {
+		return raw
+	}
+	folded, changed := foldMappingKeys(document, side)
+	if !changed {
+		return raw
+	}
+	out, err := yaml.Marshal(folded)
+	if err != nil {
+		return raw
+	}
+	return out
+}
+
+func foldMappingKeys(value any, side string) (any, bool) {
+	mapping, ok := value.(map[string]any)
+	if !ok {
+		return value, false
+	}
+	out := make(map[string]any, len(mapping))
+	changed := false
+	for key, child := range mapping {
+		lower := strings.ToLower(key)
+		foldedChild, childChanged := foldMappingKeys(child, side)
+		changed = changed || childChanged || lower != key
+		if _, taken := out[lower]; taken {
+			out[lower] = "configwrite: keys that differ only in case (" + side + ")"
+			changed = true
+			continue
+		}
+		out[lower] = foldedChild
+	}
+	return out, changed
 }
 
 // pathPart is one segment of a change path: a mapping key or a list index.
@@ -651,14 +877,14 @@ func parsePath(path string) ([]pathPart, error) {
 	i := 0
 	expectKey := true
 	for i < len(path) {
-		switch c := path[i]; {
-		case c == '.':
+		switch path[i] {
+		case '.':
 			if expectKey {
 				return nil, fmt.Errorf("configwrite: empty segment in path %q", path)
 			}
 			expectKey = true
 			i++
-		case c == '[':
+		case '[':
 			end := strings.IndexByte(path[i:], ']')
 			if end < 0 {
 				return nil, fmt.Errorf("configwrite: unclosed [ in path %q", path)
@@ -710,14 +936,27 @@ var ErrMultipleDocuments = errors.New("configwrite: config.yaml holds more than 
 	"starts another); DefenseClaw reads only the first and does not rewrite the file. Merge the documents into one " +
 	"or remove the later one, then try again")
 
+// ErrInvalidDocument marks a config.yaml the writer cannot edit as it is: a
+// second YAML document (ErrMultipleDocuments), a YAML syntax error or a root
+// that is not a mapping. The operator fixes the file, not the request, so the
+// REST API answers 409 for it, not 500 (GAP-1421).
+var ErrInvalidDocument = errors.New("configwrite: config.yaml cannot be edited as it is")
+
+// invalidDocument keeps the cause's text and matches both the cause and
+// ErrInvalidDocument with errors.Is.
+type invalidDocument struct{ cause error }
+
+func (e invalidDocument) Error() string   { return e.cause.Error() }
+func (e invalidDocument) Unwrap() []error { return []error{ErrInvalidDocument, e.cause} }
+
 func parseDocument(current []byte) (*yaml.Node, error) {
 	var doc yaml.Node
 	if len(bytes.TrimSpace(current)) > 0 {
 		if err := yaml.Unmarshal(current, &doc); err != nil {
-			return nil, fmt.Errorf("configwrite: parse config.yaml: %w", err)
+			return nil, invalidDocument{fmt.Errorf("configwrite: parse config.yaml: %w", err)}
 		}
 		if err := singleDocument(current); err != nil {
-			return nil, err
+			return nil, invalidDocument{err}
 		}
 	}
 	if doc.Kind == 0 {
@@ -727,7 +966,7 @@ func parseDocument(current []byte) (*yaml.Node, error) {
 		doc.Content = []*yaml.Node{{Kind: yaml.MappingNode, Tag: "!!map"}}
 	}
 	if doc.Content[0].Kind != yaml.MappingNode {
-		return nil, errors.New("configwrite: config.yaml root must be a mapping")
+		return nil, invalidDocument{errors.New("configwrite: config.yaml root must be a mapping")}
 	}
 	return &doc, nil
 }

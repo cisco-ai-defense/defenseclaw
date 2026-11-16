@@ -17,6 +17,8 @@
 package sandboxapi
 
 import (
+	"encoding/json"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -30,13 +32,14 @@ import (
 
 // REST paths, all on the daemon's main API port.
 const (
-	PathPrefix        = "/api/v1/sandbox/"
-	PathStatus        = "/api/v1/sandbox/status"
-	PathSandboxes     = "/api/v1/sandbox/sandboxes"
-	PathApprovals     = "/api/v1/sandbox/approvals"
-	PathActivity      = "/api/v1/sandbox/activity"
-	PathEgressUnblock = "/api/v1/sandbox/egress/unblock"
-	PathPolicyExplain = "/api/v1/sandbox/policy/explain"
+	PathPrefix         = "/api/v1/sandbox/"
+	PathStatus         = "/api/v1/sandbox/status"
+	PathSandboxes      = "/api/v1/sandbox/sandboxes"
+	PathApprovals      = "/api/v1/sandbox/approvals"
+	PathActivity       = "/api/v1/sandbox/activity"
+	PathEgressUnblock  = "/api/v1/sandbox/egress/unblock"
+	PathPolicyExplain  = "/api/v1/sandbox/policy/explain"
+	PathPolicyDecision = "/api/v1/sandbox/policy/decision"
 	// PathPolicyTest is POST: what a sandbox's egress policy decides for
 	// destinations (PolicyTestRequest).
 	PathPolicyTest = "/api/v1/sandbox/policy/test"
@@ -46,6 +49,31 @@ const (
 	// the Status.
 	PathReady = "/api/v1/sandbox/ready"
 )
+
+// ReadyRequest names the agent whose policy must allow a first run before
+// the managed daemon installs or starts the account's OpenShell. A request
+// that names none (a CLI of DefenseClaw 1.0.3 or older sends an empty
+// object) is judged for the agent the daemon's managed configuration runs.
+type ReadyRequest struct {
+	Harness string `json:"harness,omitempty"`
+	// Pack is the run's --pack, which the ready's policy view judges the
+	// agent under, as the create does (GAP-1551); empty is the default pack.
+	Pack string `json:"pack,omitempty"`
+}
+
+// PolicyDecisionRequest records one managed user's lasting host decision
+// through a sandbox registration. Kind is allow or block.
+type PolicyDecisionRequest struct {
+	Sandbox string `json:"sandbox,omitempty"`
+	Host    string `json:"host"`
+	Kind    string `json:"kind"`
+}
+
+type PolicyDecisionResponse struct {
+	Sandbox string `json:"sandbox"`
+	Host    string `json:"host"`
+	Kind    string `json:"kind"`
+}
 
 // ClientHeader is the CSRF header every mutating request carries, and
 // ClientName the value the DefenseClaw CLI sends.
@@ -66,6 +94,13 @@ type Status struct {
 	// port while sandboxes are off for this account and another account's
 	// process holds it: one gateway runs on a machine (GAP-0307).
 	GatewayElsewhere string `json:"gateway_elsewhere,omitempty"`
+	// Configured sandbox ports are this account's settings. Listener addresses
+	// below name only sockets the daemon actually holds.
+	IngressPort int `json:"ingress_port,omitempty"`
+	EgressPort  int `json:"egress_port,omitempty"`
+	// PortConflict describes the first occupied sandbox port this daemon does
+	// not hold. Holder is a privacy-safe class, never another user's identity.
+	PortConflict *PortConflict `json:"port_conflict,omitempty"`
 	// Gateway describes the OpenShell gateway the daemon drives.
 	Gateway *Gateway `json:"gateway,omitempty"`
 	// IngressAddr and EgressAddr are the DefenseClaw listeners sandboxes
@@ -77,10 +112,24 @@ type Status struct {
 	Profile string      `json:"profile,omitempty"`
 	Admin   AdminStatus `json:"admin"`
 	// Sandboxes counts the DefenseClaw sandboxes; Running those Ready.
-	Sandboxes        int       `json:"sandboxes"`
-	Running          int       `json:"running"`
-	PendingApprovals int       `json:"pending_approvals"`
-	LastReconcile    time.Time `json:"last_reconcile,omitzero"`
+	Sandboxes int `json:"sandboxes"`
+	Running   int `json:"running"`
+	// Live counts those that may hold compute a stop of the OpenShell
+	// gateway would end unflushed or half started (manager.HoldsCompute):
+	// the running ones, those starting or stopping or in an unknown phase,
+	// and a MicroVM that completed or is in OpenShell's error state, which
+	// OpenShell does not stop and whose VM may still run, until OpenShell
+	// reports it stopped or deleted (openshell.HoldsGateway). Unset by a
+	// daemon before DefenseClaw 1.0.4 (Busy).
+	Live             *int `json:"live,omitempty"`
+	PendingApprovals int  `json:"pending_approvals"`
+	// ListenersProven says IngressAddr and EgressAddr name only the sandbox
+	// ports this daemon holds now (the gateway's statusListenerAddresses),
+	// so the doctor takes a named port for the daemon's own also while
+	// sandboxes are unavailable. Unset by a daemon before DefenseClaw 1.0.5,
+	// whose addresses could be the configured ones (GAP-1875).
+	ListenersProven bool      `json:"listeners_proven,omitempty"`
+	LastReconcile   time.Time `json:"last_reconcile,omitzero"`
 	// StartedAt is when the daemon's sandbox subsystem started. Nothing
 	// keeps the sandboxes' counters (HookCoverage, EgressStats) across a
 	// restart: they count from then, so a session that began earlier knows
@@ -90,6 +139,10 @@ type Status struct {
 	// it drives the user's OpenShell gateway and mounts the user's files, so
 	// the doctor checks it is the user's own.
 	DaemonUID *int `json:"daemon_uid,omitempty"`
+	// DaemonPID is the process the status response names. Doctor compares
+	// it with the kernel-verified response sender and a busy port's owner
+	// before treating that port as served by this daemon.
+	DaemonPID int `json:"daemon_pid,omitempty"`
 	// DockerGroupMissing reports that the daemon's user is in the docker
 	// group but the daemon started before that, so it cannot reach Docker
 	// until it restarts (Linux).
@@ -101,6 +154,99 @@ type Status struct {
 	// Managed is set by a managed host's per-user sandbox daemon: the
 	// caller's own policy, never another account's.
 	Managed *ManagedStatus `json:"managed,omitempty"`
+	// Unprotected names every live legacy guest (Sandbox.OldSupervisor)
+	// and every contained one (UnprotectedContained), which run unprotected
+	// until their user ends them, with the command that does, and every
+	// one that may be either whose gateway has not said whether it runs
+	// (UnprotectedUnknown): the managed lifecycle's status and verify read
+	// it. Unset by a daemon before DefenseClaw 1.0.4, whose running
+	// sandboxes all are.
+	Unprotected []UnprotectedSandbox `json:"unprotected,omitempty"`
+}
+
+// PortConflict describes a configured sandbox port held outside this daemon.
+// Holder is "sandbox_daemon", "other_account", "own_process" or "process".
+type PortConflict struct {
+	Name   string `json:"name"`
+	Port   int    `json:"port"`
+	Holder string `json:"holder"`
+}
+
+// Message is shared by status, doctor and a managed run's port refusal.
+func (c *PortConflict) Message() string {
+	if c == nil {
+		return ""
+	}
+	where := fmt.Sprintf("sandbox %s port 127.0.0.1:%d", c.Name, c.Port)
+	switch c.Holder {
+	case "sandbox_daemon":
+		return where + " is held by another account's sandbox daemon (one account at a time). Try again when that account has no sandbox running."
+	case "other_account":
+		return where + " is held by another account's process. Free the port, or ask your administrator to set a different openshell." + c.Name + "_port."
+	case "own_process":
+		return where + " is held by another process of your account. Free the port, or ask your administrator to set a different openshell." + c.Name + "_port."
+	default:
+		return where + " is held by another process. Free the port, or ask your administrator to set a different openshell." + c.Name + "_port."
+	}
+}
+
+// LegacyUnprotected opens every account of a live legacy guest
+// (Sandbox.OldSupervisor): its session runs the supervisor of an OpenShell
+// release older than the oldest supported one, whose network broker
+// DefenseClaw cannot contain.
+const LegacyUnprotected = "running unprotected: legacy sandbox"
+
+// ContainedUnprotected opens every account of a contained guest: a MicroVM
+// DefenseClaw had to stop on its own (a hook alarm, repeated foreign
+// network rules, a lost listener, a revoked registration, a start that
+// failed) but keeps running, its network withdrawn, because its disk could
+// not be synced first and a stop would lose what its guest had not written
+// (GAP-0902).
+const ContainedUnprotected = "running unprotected: contained sandbox"
+
+// UnprotectedContained is the UnprotectedSandbox.Reason of a contained
+// guest (ContainedUnprotected).
+const UnprotectedContained = "contained"
+
+// UnknownUnprotected opens every account of a guest that may be a live
+// legacy or a contained one, whose gateway has not said whether it runs:
+// one the gateway has not reported since the sandbox daemon started, or one
+// on another gateway that DefenseClaw could not read. DefenseClaw creates
+// and starts no sandbox until its gateway says.
+const UnknownUnprotected = "may be running unprotected: sandbox DefenseClaw cannot see"
+
+// UnprotectedUnknown is the UnprotectedSandbox.Reason of a guest whose
+// state DefenseClaw cannot see (UnknownUnprotected).
+const UnprotectedUnknown = "unknown"
+
+// UnprotectedSandbox is one entry of Status.Unprotected.
+type UnprotectedSandbox struct {
+	Name  string `json:"name"`
+	Phase string `json:"phase"`
+	// Stop is the command its user runs to end it.
+	Stop string `json:"stop"`
+	// Reason is why it is unprotected: "" for a live legacy guest
+	// (LegacyUnprotected), UnprotectedContained for a contained one,
+	// UnprotectedUnknown for one whose gateway has not said (with no Stop).
+	Reason string `json:"reason,omitempty"`
+	// Detail is what its user does about it when Stop alone does not say:
+	// for an unknown guest, why DefenseClaw cannot see it and what to do;
+	// for one on another gateway, that DefenseClaw connects there first.
+	Detail string `json:"detail,omitempty"`
+}
+
+// Busy is how many sandboxes may hold compute (Live, and never fewer than
+// Running): what a stop of the gateway or of the daemon, which takes the
+// gateway with it, waits for. A daemon that does not report Live does not
+// say which phases its sandboxes are in, so every one of them counts.
+func (s *Status) Busy() int {
+	if s == nil {
+		return 0
+	}
+	if s.Live == nil {
+		return max(s.Sandboxes, s.Running)
+	}
+	return max(*s.Live, s.Running)
 }
 
 // ManagedStatus is the managed part of Status: the caller's own sandbox
@@ -110,9 +256,31 @@ type ManagedStatus struct {
 	// organization's floor alone) and Description its description.
 	Profile     string `json:"profile"`
 	Description string `json:"description,omitempty"`
+	// Allowed is true only when the managed gateway allows every configured
+	// sandbox harness for this account. An unavailable policy answer leaves
+	// it false, so doctor cannot claim broad readiness without one.
+	Allowed bool `json:"allowed"`
+	// LegacyAllowedMissing is true only after decoding a status from an older
+	// daemon that did not send allowed. It is not an authorization verdict.
+	LegacyAllowedMissing bool `json:"-"`
+	// DeniedHarnesses names configured harnesses whose profile forbids a
+	// sandbox. Empty with Allowed false means the policy could not be read.
+	DeniedHarnesses []string `json:"denied_harnesses,omitempty"`
+	// PolicyUnread is why the managed gateway gave no policy answer when
+	// Allowed is false and DeniedHarnesses is empty ("" from an older
+	// daemon), and PolicyLimited says the caller's request limit refused
+	// it: that passes on its own and is not a policy verdict (GAP-2203).
+	PolicyUnread  string `json:"policy_unread,omitempty"`
+	PolicyLimited bool   `json:"policy_limited,omitempty"`
 	// HostRunGate, when present, is the caller's gateway decision carried
 	// from a managed explain into a launch banner.
 	HostRunGate string `json:"host_run_gate,omitempty"`
+	// RequiredOnHost names the configured sandbox agents the managed
+	// gateway refuses to run on this computer outside a sandbox for the
+	// caller (ManagedExplain.HostRunRefused). Doctor's Docker access row
+	// says what the docker group means for them (GAP-0554). Empty from a
+	// daemon before DefenseClaw 1.0.6.
+	RequiredOnHost []string `json:"required_on_host,omitempty"`
 	// Provisional says the directory could not be reached and the default
 	// profile applies until it can.
 	Provisional bool `json:"provisional,omitempty"`
@@ -134,9 +302,18 @@ type ManagedStatus struct {
 	// MicroVM driver can't run (docker, none or "").
 	DriverReason   string `json:"driver_reason,omitempty"`
 	DriverFallback string `json:"driver_fallback,omitempty"`
+	// NextDriver is the compute driver the managed gateway gives the
+	// caller's next sandbox start (the daemon's own probe at the start
+	// decides), whatever Driver says of the last sandbox: a stopped one may
+	// be of a driver the organization replaced since. "" when the managed
+	// gateway does not say, or from a daemon before DefenseClaw 1.0.4.
+	NextDriver string `json:"next_driver,omitempty"`
 	// PendingRestart says an upgrade or setting change waits for the
 	// caller's sandboxes to stop.
 	PendingRestart bool `json:"pending_restart,omitempty"`
+	// RenderedConfigDrift says the root-owned OpenShell gateway render no
+	// longer matches the lifecycle's independently pinned digest.
+	RenderedConfigDrift bool `json:"rendered_config_drift,omitempty"`
 	// OtherGateways are the OpenShell gateways the caller's account runs
 	// besides the one the organization's service runs, each as "pid N:
 	// command": they share the account's MicroVM state with the managed
@@ -145,6 +322,28 @@ type ManagedStatus struct {
 	// Unavailable is why sandboxes can't run for the caller ("" = they
 	// can).
 	Unavailable string `json:"unavailable,omitempty"`
+}
+
+// UnmarshalJSON preserves the difference between an older daemon omitting
+// allowed and a current daemon explicitly denying it.
+func (m *ManagedStatus) UnmarshalJSON(data []byte) error {
+	type plain ManagedStatus
+	var decoded plain
+	var wire struct {
+		*plain
+		Allowed *bool `json:"allowed"`
+	}
+	wire.plain = &decoded
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	*m = ManagedStatus(decoded)
+	if wire.Allowed == nil {
+		m.LegacyAllowedMissing = true
+	} else {
+		m.Allowed = *wire.Allowed
+	}
+	return nil
 }
 
 // Gateway is the OpenShell gateway the daemon is connected to.
@@ -358,9 +557,35 @@ type Sandbox struct {
 	// Orphaned marks an OpenShell sandbox with DefenseClaw labels but no
 	// DefenseClaw binding; its hooks cannot authenticate.
 	Orphaned bool `json:"orphaned,omitempty"`
+	// OldSupervisor marks a sandbox whose session runs the supervisor of an
+	// OpenShell release older than openshell.SupportedMin (or of one its
+	// record does not name), whose network broker can bypass sandbox policy
+	// (NVIDIA/OpenShell#4494): a ready session, or a MicroVM whose workload
+	// ended but whose VM may still run. The daemon never stops it on its
+	// own: it closes its egress proxy and withdraws its network rules, which
+	// does not contain that broker, so it reports it unprotected (Warnings,
+	// with the command that ends it) and creates and starts no sandbox
+	// while it runs. The CLI runs nothing in it.
+	OldSupervisor bool `json:"old_supervisor,omitempty"`
 	// NestedRepos are the git repositories the nested-repository guard
 	// found in a mounted project during the current session.
 	NestedRepos []NestedRepo `json:"nested_repos,omitempty"`
+	// OrganizationProfile is, on a managed computer, the guardrail profile
+	// the sandbox's registration matches now (a regroup re-matches it), and
+	// PolicyDigest the digest of its effective policy under that same match:
+	// what `sandbox policy explain` names. Pack and Profile above are the
+	// sandbox policy pack and network profile it runs under, not this
+	// profile (#1199). Provisional marks a match made while the directory
+	// could not be reached. Empty outside managed mode.
+	OrganizationProfile string `json:"organization_profile,omitempty"`
+	PolicyDigest        string `json:"policy_digest,omitempty"`
+	Provisional         bool   `json:"provisional,omitempty"`
+	// StopReason is why the organization's policy stopped the sandbox, in
+	// the managed gateway's words (the stop text of the re-match that
+	// revoked its registration, such as "your profile no longer allows host
+	// ports"), when it did; the session's end and status say it instead of
+	// "stopped from outside this session" (#1199).
+	StopReason string `json:"stop_reason,omitempty"`
 }
 
 // NestedRepo is one repository that appeared inside a mounted project while
@@ -605,8 +830,8 @@ type DestinationRow struct {
 	// the workload claims.
 	Binaries []string `json:"binaries,omitempty"`
 	PID      int      `json:"pid,omitempty"`
-	// Lineage is PID's process and its parents, from the opt-in process
-	// tree (observe.process_tree), when it knows the process.
+	// Lineage is the recorded actor and its parents, from the opt-in
+	// process tree (observe.process_tree), when it knew the process.
 	Lineage   []DestinationProcess `json:"lineage,omitempty"`
 	FirstSeen time.Time            `json:"first_seen"`
 	LastSeen  time.Time            `json:"last_seen"`
@@ -715,6 +940,17 @@ type DeleteResponse struct {
 	Warnings  []string `json:"warnings,omitempty"`
 }
 
+// StopRequest is POST /sandboxes/{name}/stop.
+type StopRequest struct {
+	// DiscardUnsynced stops a MicroVM whose disk could not be synced
+	// first, losing what it wrote since its last sync: the user said yes
+	// to that. Without it the daemon refuses such a stop with CodeUnsynced
+	// and the sandbox keeps running. Nothing in DefenseClaw sets it on its
+	// own. A daemon before 1.0.4, which holds no stop back, refuses the
+	// field (Client.StopWith sends the stop again without it).
+	DiscardUnsynced bool `json:"discard_unsynced,omitempty"`
+}
+
 // StartRequest is POST /sandboxes/{name}/start.
 type StartRequest struct {
 	// NoSnapshot keeps the previous snapshot instead of taking a fresh one
@@ -728,6 +964,13 @@ type StartRequest struct {
 	// an earlier session's changes: they are accepted, and undo no longer
 	// reverts them.
 	NewSnapshot bool `json:"new_snapshot,omitempty"`
+	// EndVM starts a MicroVM whose workload ended but whose VM may still run
+	// what it left running (openshell.LingeringVM): OpenShell's start ends
+	// that VM with no flush first, so what it has not written to its disk is
+	// lost. Without it the daemon refuses such a start with
+	// CodeConflict. A daemon before 1.0.4, which refuses no such start,
+	// refuses the field (Client.Start sends the start again without it).
+	EndVM bool `json:"end_vm,omitempty"`
 	// LLM is the model credential as the caller's environment holds it now
 	// (secret values): when it is of the profile the sandbox was created
 	// with and differs from the one its provider holds (a rotated or
@@ -841,6 +1084,21 @@ const (
 	// WorkspaceUndo is the revert of the last `pull --apply`.
 	WorkspaceUndo = "undo"
 )
+
+// DiskReport is POST /sandboxes/{name}/disk: what a session found on the
+// own disk of its running MicroVM when it warned that the disk is filling,
+// so the daemon names it in the activity feed while the agent still runs,
+// not only in the summary at the end of the session (GAP-1140).
+type DiskReport struct {
+	SizeBytes int64 `json:"size_bytes"`
+	FreeBytes int64 `json:"free_bytes"`
+	// Fast is the early warning: at the rate the free space fell, the disk
+	// fills before the session looks again.
+	Fast bool `json:"fast,omitempty"`
+}
+
+// ReasonDiskFilling is the sandbox.lifecycle reason of a DiskReport.
+const ReasonDiskFilling = "disk_filling"
 
 // WorkspaceReport is POST /sandboxes/{name}/workspace: a copy-mode
 // workspace step the CLI ran (upload, pull with apply/branch/patch, or the
@@ -1084,6 +1342,11 @@ type ManagedExplain struct {
 	// default_lookup_failed, none) and MatchedGroup the caller's group
 	// that matched.
 	Profile string `json:"profile"`
+	// PinnedProfile is, for a registered sandbox, the profile it was created
+	// under while its floor is still pinned to it
+	// (sandboxrelay.CurrentPolicy.PinnedProfile); Description is then that
+	// profile's (GAP-0285).
+	PinnedProfile string `json:"pinned_profile,omitempty"`
 	// Workspace is the copy policy of a new run, as the managed gateway
 	// resolves it with the organization's pack (nil for a registration).
 	Workspace    *WorkspacePolicy `json:"workspace,omitempty"`
@@ -1118,10 +1381,18 @@ type ManagedExplain struct {
 	// and unblocks the caller may approve.
 	UserApprovals string `json:"user_approvals,omitempty"`
 	AllowUnblock  bool   `json:"allow_unblock"`
+	// ForeignSandboxes is the action applied to sandboxes outside DefenseClaw.
+	ForeignSandboxes string `json:"foreign_sandboxes,omitempty"`
 	// MCPIncluded names the caller's MCP servers the run includes;
 	// MCPBlocked those it leaves out, with the reason.
 	MCPIncluded []string     `json:"mcp_included,omitempty"`
 	MCPBlocked  []ManagedMCP `json:"mcp_blocked,omitempty"`
+	// MCPProjectCount is how many MCP servers the project of a new run
+	// defines (.mcp.json, .codex/config.toml), and MCPProjectBlocked says
+	// the pack's mcp.project_servers keeps them from starting. The sandbox
+	// daemon reads the project as the caller; the gateway never sets them.
+	MCPProjectCount   int  `json:"mcp_project_count,omitempty"`
+	MCPProjectBlocked bool `json:"mcp_project_blocked,omitempty"`
 	// WorkdirMode is copy on managed hosts; AllowMount, AllowHostPorts and
 	// AllowYolo are the floor's.
 	WorkdirMode    string `json:"workdir_mode,omitempty"`
@@ -1408,6 +1679,17 @@ const ReasonToolHostRefused = "tool_host_refused"
 // when it goes down without DefenseClaw stopping it: its last writes may
 // be lost (no flush).
 const ReasonUnflushedStop = "unflushed_stop"
+
+// ReasonOldSupervisor is the Reason of the (HIGH) finding event a running
+// sandbox gets when its session started on an OpenShell release older than
+// openshell.SupportedMin, whose supervisor it keeps until it stops.
+const ReasonOldSupervisor = "old_supervisor"
+
+// ReasonContained is the Reason of the (HIGH) finding event of a MicroVM
+// DefenseClaw had to stop for a security alarm, or after a start that
+// failed, but keeps running contained because its disk could not be synced
+// first (ContainedUnprotected).
+const ReasonContained = "contained"
 
 // ReasonUpstreamFailed is the Reason of the (INFO) finding event the feed
 // gets the first time the egress proxy could not complete an allowed

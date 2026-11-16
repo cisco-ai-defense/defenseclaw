@@ -171,11 +171,50 @@ def legacy_request_override_providers(path: str) -> list[str]:
     ]
 
 
-def write(cfg, path: str | None = None) -> str:
+def legacy_contained(payload: dict[str, Any], legacy: dict[str, Any]) -> bool:
+    """Whether every provider, list item, map key and field of a legacy
+    overlay is already in *payload* (``render``) with the same value, so
+    replacing the file loses nothing."""
+    rendered = {
+        str(p.get("name") or "").strip().casefold(): p for p in payload.get("providers") or [] if isinstance(p, dict)
+    }
+    ports = legacy.get("ollama_ports") or []
+    if not isinstance(ports, list) or any(port not in (payload.get("ollama_ports") or []) for port in ports):
+        return False
+    providers = legacy.get("providers") or []
+    if not isinstance(providers, list):
+        return False
+    for entry in providers:
+        if not isinstance(entry, dict) or not str(entry.get("name") or "").strip():
+            continue
+        have = rendered.get(str(entry["name"]).strip().casefold())
+        if have is None:
+            return False
+        for key, value in entry.items():
+            if key == "name" or value in (None, "", [], {}):
+                continue
+            current = have.get(key)
+            if isinstance(value, list):
+                if not isinstance(current, list) or any(item not in current for item in value):
+                    return False
+            elif key in ("request_path_overrides", "extra_headers") and isinstance(value, dict):
+                if not isinstance(current, dict) or any(current.get(k) != v for k, v in value.items()):
+                    return False
+            elif _compact(current) != _compact(value):
+                return False
+    return True
+
+
+def write(cfg, path: str | None = None, *, absorbed: bool = False) -> str:
     """Render ``llm_providers`` to the overlay file (0600, atomic) and return
     its path. A legacy operator overlay is left alone while config has no
     ``llm_providers`` yet, so nothing it declares is lost, and always when it
-    sets ``request_overrides``: that file stays a live input (GAP-0500)."""
+    sets ``request_overrides``: that file stays a live input (GAP-0500). It
+    is also left alone while it holds a provider, list item, map key or field
+    that ``llm_providers`` lacks or sets to another value, unless the caller
+    seeded ``llm_providers`` from it (*absorbed*): the gateway still merges
+    it, and ``defenseclaw migrate`` folds it into config.yaml or names the
+    fields that disagree (GAP-0163)."""
     path = path or overlay_path(cfg)
     payload = render(cfg)
     current = _read(path) if os.path.exists(path) else None
@@ -183,6 +222,8 @@ def write(cfg, path: str | None = None) -> str:
         if not payload["providers"] and not payload["ollama_ports"]:
             return path
         if legacy_request_override_providers(path):
+            return path
+        if not absorbed and not legacy_contained(payload, current):
             return path
     document = {DERIVED_FROM_KEY: digest(payload), **payload}
     parent = os.path.dirname(path) or "."

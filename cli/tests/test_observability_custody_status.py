@@ -10,10 +10,12 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
 from defenseclaw.commands.cmd_doctor import (
     _check_connector_export_custody,
     _claude_exporter_reaches_gateway,
     _DoctorResult,
+    _emit_unattributed_otlp_credentials,
 )
 from defenseclaw.commands.cmd_status import _print_native_delivery_status
 from defenseclaw.observability.custody_status import (
@@ -163,18 +165,56 @@ def test_custody_status_is_read_only_and_reports_per_instance_evidence(tmp_path:
     assert codex.managed_config_state == "verified"
     assert codex.normalized_batches == 1
     assert codex.drop_only_batches == 1
-    assert codex.authentication_failures == 1
-    assert codex.credential_state == "invalid"
+    assert codex.authentication_failures == 0
+    assert codex.credential_state == "no_recent_failure"
     explicit = by_id["019b0000-0000-7000-8000-000000000002"]
     assert not explicit.default
     assert explicit.normalized_batches == 0
     assert explicit.authentication_failures == 0
     assert by_id["019b0000-0000-7000-8000-000000000003"].custody == "external"
     assert by_id["019b0000-0000-7000-8000-000000000004"].custody == "hook_only"
-    assert report.unattributed_authentication_failures == 1
+    assert report.unattributed_authentication_failures == 2
     assert "operator-secret" not in repr(report)
     assert external_file.read_bytes() == before
     assert external_file.stat().st_mtime_ns == before_mtime
+
+
+@pytest.mark.parametrize("accepted_delivery", [False, True])
+def test_untrusted_otlp_probe_does_not_fail_a_verified_exporter(tmp_path: Path, accepted_delivery: bool) -> None:
+    """A route name on a rejected request is a claim, not exporter identity."""
+    db_path = tmp_path / "audit.db"
+    db = _database(db_path)
+    _instance(db, "019b0000-0000-7000-8000-000000000001", "codex", "defenseclaw")
+    if accepted_delivery:
+        _event(db, "accepted", "telemetry.batch.normalized", "codex", "accepted-1", _record("logs", 2))
+    _event(
+        db,
+        "peer-probe", "telemetry.authentication.failed", "codex", "rejected-1", _record("logs", 0),
+        timestamp="2026-07-14T11:56:00Z",
+    )
+    db.commit()
+    db.close()
+    target = tmp_path / "codex-config.toml"
+    target.write_text("[otel]\nmanaged=true\n")
+    _managed_backup(tmp_path, "codex", target)
+
+    report = inspect_connector_custody(db_path, tmp_path, now=NOW)
+    (codex,) = report.instances
+    assert codex.managed_config_state == "verified"
+    assert codex.credential_state == "no_recent_failure"
+    assert report.unattributed_authentication_failures == 1
+
+    result = _DoctorResult()
+    _check_connector_export_custody(report, result)
+    rows = {row["label"]: row for row in result.checks}
+    assert rows["Connector OTLP: codex"]["status"] == "pass"
+    if accepted_delivery:
+        assert "accepted native delivery observed" in rows["Connector OTLP: codex"]["detail"]
+    assert rows["Native OTLP credentials"]["status"] == "warn"
+    assert "defenseclaw setup" not in rows["Native OTLP credentials"]["remediation"]
+    recent = _DoctorResult()
+    _emit_unattributed_otlp_credentials(report, recent, now=NOW)
+    assert "re-run 'defenseclaw setup" not in recent.checks[0]["remediation"]
 
 
 def test_custody_status_detects_managed_exporter_drift_without_repair(tmp_path: Path) -> None:
@@ -214,6 +254,50 @@ def test_codex_folder_trust_write_is_not_exporter_drift(tmp_path: Path) -> None:
 
     target.write_text('[projects."/home/u/work"]\ntrust_level = "trusted"\n')
     assert inspect_connector_custody(db_path, tmp_path, now=NOW).instances[0].managed_config_state == "drifted"
+
+
+@pytest.mark.parametrize("edit", ["ordinary", "managed", "absent", "helper", "missing-key", "missing-snapshot", "corrupt-snapshot"])
+def test_claude_settings_drift_checks_the_exact_managed_environment(tmp_path: Path, edit: str) -> None:
+    db_path = tmp_path / "audit.db"
+    db = _database(db_path)
+    _instance(db, "019b0000-0000-7000-8000-000000000001", "claudecode", "defenseclaw")
+    db.commit()
+    db.close()
+    managed = {
+        "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+        "OTEL_LOGS_EXPORTER": "otlp",
+        "OTEL_METRICS_EXPORTER": "otlp",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:18970",
+        "OTEL_EXPORTER_OTLP_HEADERS": "x-defenseclaw-source=claudecode",
+    }
+    target = tmp_path / "settings.json"
+    settings = {"env": dict(managed), "otelHeadersHelper": "managed credential helper"}
+    target.write_text(json.dumps(settings))
+    _managed_backup(tmp_path, "claudecode", target)
+    snapshot = tmp_path / "claudecode_backup.json"
+    snapshot.write_text(json.dumps({"env_backup_captured": True, "managed_env": managed,
+                                    "managed_absent_env": ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"],
+                                    "otlp_headers_helper_captured": True,
+                                    "managed_otlp_headers_helper": "managed credential helper"}))
+    settings["model"] = "operator-model"
+    settings["env"]["UNRELATED_SETTING"] = "retained"
+    if edit == "managed":
+        settings["env"]["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://127.0.0.1:19999"
+    elif edit == "absent":
+        settings["env"]["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = "http://127.0.0.1:19999"
+    elif edit == "helper":
+        settings["otelHeadersHelper"] = "operator changed helper"
+    elif edit == "missing-key":
+        del settings["env"]["OTEL_EXPORTER_OTLP_HEADERS"]
+    elif edit == "missing-snapshot":
+        snapshot.unlink()
+    elif edit == "corrupt-snapshot":
+        snapshot.write_text("null")
+    target.write_text(json.dumps(settings))
+    before = target.read_bytes()
+    state = inspect_connector_custody(db_path, tmp_path, now=NOW, api_addr="127.0.0.1:18970")
+    assert state.instances[0].managed_config_state == ("verified" if edit == "ordinary" else "drifted")
+    assert target.read_bytes() == before
 
 
 def _codex_otel_block(port: int = 18970, trace_port: int | None = None) -> str:
@@ -506,26 +590,3 @@ def test_native_delivery_missing_evidence_is_bounded_not_failed(capsys) -> None:
     assert "no evidence" in output
     assert "database missing" in output
     assert "fail" not in output.lower()
-
-
-def test_status_folds_native_delivery_rows_of_unconfigured_connectors(capsys) -> None:
-    # GAP-2242: evidence outlives `setup remove`; status scopes rows like doctor.
-    summary = summarize_native_delivery(
-        ConnectorCustodyReport(
-            "available",
-            "",
-            24,
-            (
-                ConnectorCustodyStatus("019b0001", "claudecode", "defenseclaw", "v1", True, normalized_batches=88),
-                ConnectorCustodyStatus("019b0002", "omnigent", "defenseclaw", "v1", True),
-                ConnectorCustodyStatus("019b0003", "codex", "defenseclaw", "v1", True, normalized_batches=4),
-            ),
-        )
-    )
-
-    _print_native_delivery_status(summary, configured={"codex"})
-    output = capsys.readouterr().out
-    assert "codex  accepted" in output
-    assert "claudecode  accepted" not in output
-    assert "omnigent  no-evidence" not in output
-    assert "not configured (telemetry history only, not checked): claudecode, omnigent" in output

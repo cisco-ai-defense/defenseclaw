@@ -14,6 +14,10 @@
 # They DO:
 #   - parse strings, render YAML, run pure file I/O against caller-owned
 #     paths (e.g. a tmpdir under /tmp/dctest-XXXX).
+#
+# The one exception is the "resilience markers and repair helpers"
+# section at the end of the file: those helpers re-stamp DefenseClaw-owned
+# paths the caller names (chflags, chmod, chown) and never anything else.
 
 # ---- connector list parsing --------------------------------------------
 
@@ -57,7 +61,7 @@ parse_connectors() {
 # is_supported_connector NAME -> exit 0 if name is auto-wireable.
 is_supported_connector() {
   case "$1" in
-    amp|codex|claudecode|cursor|opencode) return 0;;
+    amp|codex|claudecode|copilot|cursor|opencode) return 0;;
     *) return 1;;
   esac
 }
@@ -70,7 +74,7 @@ is_supported_connector() {
 # install.log can act on the right cause:
 #
 #   all-unsupported  Every requested connector is outside the auto-wire
-#                    allow-list (amp|codex|claudecode|cursor|opencode). The
+#                    allow-list (amp|codex|claudecode|copilot|cursor|opencode). The
 #                    hook-enumerator's tick will NOT fix this by itself
 #                    — the operator has to rerun with --connector picking
 #                    a supported entry.
@@ -133,8 +137,8 @@ home_perms_ok() {
 # Record layout: USER\tCONNECTOR\tREASON\tPATH\n
 #   USER      — DC_INSTALLER_TARGET_USER at the time of the failure
 #               (empty when the caller didn't scope to a user).
-#   CONNECTOR — connector token (amp / codex / claudecode / cursor /
-#               opencode).
+#   CONNECTOR — connector token (amp / codex / claudecode / copilot /
+#               cursor / opencode).
 #   REASON    — short machine-readable reason (e.g. "malformed-json").
 #   PATH      — absolute path of the metadata file that failed to
 #               parse; the operator can act on this directly.
@@ -184,13 +188,38 @@ _probe_json_version() {
 
 # discover_agent_version CONNECTOR HOME -> echoes the agent version or "".
 #
-# Prefer identified package/app metadata. The two binary fallbacks (Codex and
-# OpenCode's official standalone path) run with bounded output/time as the
-# enumerated target user, never as root; no PATH-resolved user binary runs
-# with installer privileges.
+# Version discovery prefers identified package/app metadata. The only
+# executable probes are fixed Codex application-bundle paths, OpenCode's
+# official standalone path, and the final Codex PATH fallback; all of them run
+# with bounded output/time as the enumerated target user, never as the root
+# installer/LaunchDaemon.
+
+# _run_as_target_user USER COMMAND [ARG...] -> command output/status.
+#
+# Keep the privilege boundary in one helper. The absolute sudo path prevents a
+# root LaunchDaemon from resolving an attacker-controlled PATH shim. Tests may
+# replace this shell function after sourcing the trusted installer library.
+_run_as_target_user() {
+  _run_as_target_user_via /usr/bin/sudo "$@"
+}
+
+# _run_as_target_user_via SUDO_BIN USER COMMAND [ARG...] -> command
+# output/status. The single place that actually invokes sudo. Production
+# callers go through _run_as_target_user (fixed /usr/bin/sudo); only the
+# explicit SUDO_BIN unit-test seam on _read_agent_version_as_user reaches
+# this directly with a different path.
+_run_as_target_user_via() {
+  local sudo_bin="$1"
+  local user="$2"
+  shift 2
+  [[ -n "${sudo_bin}" && -n "${user}" && $# -gt 0 ]] || return 1
+  "${sudo_bin}" -n -u "${user}" -- "$@"
+}
+
 # _read_agent_version_as_user USER BINARY [SUDO_BIN] -> echoes BINARY --version
-# output (first line, ≤512 bytes) or "". The installer omits SUDO_BIN and
-# uses Apple's fixed /usr/bin/sudo; the optional argument is a unit-test seam.
+# output (first line, <=512 bytes) or "". The installer omits SUDO_BIN and
+# crosses the privilege boundary through _run_as_target_user (Apple's fixed
+# /usr/bin/sudo); the optional argument is a unit-test seam.
 #
 # Runs `sudo -n -u USER -- BINARY --version` with a bounded wall-clock
 # limit (5 s) so a hung codex cannot stall the installer. Pure-bash
@@ -205,7 +234,7 @@ _probe_json_version() {
 _read_agent_version_as_user() {
   local user="$1"
   local binary="$2"
-  local sudo_bin="${3:-/usr/bin/sudo}"
+  local sudo_bin="${3:-}"
   local out_file rc=0
   # Fail closed on mktemp failure. The prior fallback
   # `/tmp/defenseclaw-codex-version.$$` was predictable — a
@@ -226,7 +255,11 @@ _read_agent_version_as_user() {
   # macOS the child inherits the shell's session and $$ but exec's
   # `-a` and `sudo`'s `-b` do not give us a clean PGID, so we settle
   # for killing the immediate PID plus a wait.
-  ( "${sudo_bin}" -n -u "${user}" -- "${binary}" --version 2>/dev/null | head -c 512 | head -n 1 > "${out_file}" ) &
+  if [[ -n "${sudo_bin}" ]]; then
+    ( _run_as_target_user_via "${sudo_bin}" "${user}" "${binary}" --version 2>/dev/null | head -c 512 | head -n 1 > "${out_file}" ) &
+  else
+    ( _run_as_target_user "${user}" "${binary}" --version 2>/dev/null | head -c 512 | head -n 1 > "${out_file}" ) &
+  fi
   local pid=$!
   # Poll for completion with a 5-second wall-clock budget. `wait -n`
   # would block indefinitely; a tight sleep+kill loop hits the
@@ -255,8 +288,12 @@ _read_agent_version_as_user() {
   return 0
 }
 
+# _read_codex_version_as_user USER [CODEX_BIN] -> echoes `--version` output
+# (first line, <=512 bytes) or "". CODEX_BIN defaults to PATH-resolved codex
+# for the final, unprivileged fallback; bundle callers pass a trusted absolute
+# path.
 _read_codex_version_as_user() {
-  _read_agent_version_as_user "$1" codex
+  _read_agent_version_as_user "$1" "${2:-codex}"
 }
 
 
@@ -638,20 +675,29 @@ _is_valid_opencode_version() {
   [[ "${version}" =~ ${semver_re} ]]
 }
 
-# _probe_opencode_json_version PATH -> echoes a validated opencode-ai package
+# _probe_opencode_json_version PATH -> echoes a validated @opencode/cli V2 package
 # version. The package-name check prevents a similarly placed, unrelated npm
 # package from becoming version authority. Malformed JSON and invalid version
 # strings feed the installer's existing discovery-error report.
 _probe_opencode_json_version() {
   local path="$1"
   local version
-  version="$(_probe_json_version "${path}" opencode "opencode-ai")"
+  version="$(_probe_json_version "${path}" opencode "@opencode/cli")"
   [[ -n "${version}" ]] || return 0
   if ! _is_valid_opencode_version "${version}"; then
     _record_discovery_error opencode "${path}" "invalid-version"
     return 0
   fi
   printf '%s' "${version}"
+}
+
+# _probe_cursor_app_version INFO_PLIST -> echoes CFBundleShortVersionString
+# from a Cursor.app Info.plist, or nothing when the file or key is absent.
+# PlistBuddy is an Apple system metadata reader; Cursor is never launched.
+_probe_cursor_app_version() {
+  local plist="$1"
+  [[ -f "${plist}" ]] || return 0
+  /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "${plist}" 2>/dev/null || true
 }
 
 # _probe_opencode_app_version INFO_PLIST -> echoes the version only for the
@@ -694,6 +740,41 @@ _probe_opencode_homebrew_version() {
   _is_valid_opencode_version "${version}" || return 0
   [[ -x "${opt_path}/bin/opencode" ]] || return 0
   printf '%s' "${version}"
+}
+
+# _claude_native_version_from_home HOME -> echoes the active native-install
+# Claude Code version or "".
+#
+# Anthropic's recommended native installer publishes the selected executable
+# as:
+#
+#   ~/.local/bin/claude -> ~/.local/share/claude/versions/<X.Y.Z>
+#
+# The versioned payload has no package.json sibling. Read the direct symlink
+# target's basename as metadata instead of executing the user-owned binary from
+# this root LaunchDaemon. Only accept an executable, non-symlink payload that
+# is a direct child of the expected versions directory; this prevents an
+# arbitrary ~/.local/bin/claude link from being treated as version metadata.
+_claude_native_version_from_home() {
+  local home="$1"
+  local launcher="${home}/.local/bin/claude"
+  local versions_root="${home}/.local/share/claude/versions"
+  [[ -L "${launcher}" && -d "${versions_root}" ]] || return 0
+
+  local target version
+  target="$(readlink -- "${launcher}" 2>/dev/null || true)"
+  [[ -n "${target}" ]] || return 0
+
+  # The native installer currently writes an absolute link. Reject relative
+  # and nested targets rather than canonicalizing attacker-controlled path
+  # components while running as root.
+  [[ "${target}" == /* ]] || return 0
+  [[ "$(dirname -- "${target}")" == "${versions_root}" ]] || return 0
+  [[ -f "${target}" && ! -L "${target}" && -x "${target}" ]] || return 0
+
+  version="$(basename -- "${target}")"
+  [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([._+-].*)?$ ]] || return 0
+  printf '%s\n' "${version}"
 }
 
 # _claude_desktop_embedded_version_from_home HOME -> echoes the highest
@@ -751,6 +832,7 @@ _claude_desktop_embedded_version_from_home() {
 # fixed. Bash regex + arithmetic on the fields is portable to BSD
 # userland and short enough to keep inline here rather than growing a
 # new dependency.
+
 _semver_greater() {
   local -r core_re='^([0-9]+)\.([0-9]+)\.([0-9]+)'
   local a_major=0 a_minor=0 a_patch=0
@@ -780,6 +862,171 @@ _semver_greater() {
   (( 10#${a_patch} > 10#${b_patch} ))
 }
 
+# _COPILOT_SYSTEM_PREFIXES are the system-wide prefixes whose npm global
+# package and Homebrew cask copilot discovery reads. A shell array set here,
+# not from the environment; the tests point it at fixtures.
+_COPILOT_SYSTEM_PREFIXES=(/usr/local /opt/homebrew)
+
+# _copilot_version_newer A B -> exit 0 when Copilot version A ranks above B
+# by SemVer precedence: a higher X.Y.Z core; for the same core a release
+# above its prereleases (1.0.105 over 1.0.105-rc.1), and two prereleases
+# by their dot-separated identifiers (rc.2 over rc.1, rc.10 over rc.9).
+# Build metadata (+...) is ignored.
+_copilot_version_newer() {
+  _semver_greater "$1" "$2" && return 0
+  _semver_greater "$2" "$1" && return 1
+  local a="${1%%+*}" b="${2%%+*}" ap="" bp=""
+  [[ "$a" == *-* ]] && ap="${a#*-}"
+  [[ "$b" == *-* ]] && bp="${b#*-}"
+  [[ -z "$ap" ]] && { [[ -n "$bp" ]]; return; }
+  [[ -z "$bp" ]] && return 1
+  local -a ai bi
+  IFS=. read -r -a ai <<< "$ap"
+  IFS=. read -r -a bi <<< "$bp"
+  local i x y
+  for (( i = 0; i < ${#ai[@]} || i < ${#bi[@]}; i++ )); do
+    (( i < ${#ai[@]} )) || return 1
+    (( i < ${#bi[@]} )) || return 0
+    x="${ai[i]}" y="${bi[i]}"
+    [[ "$x" == "$y" ]] && continue
+    if [[ "$x" =~ ^[0-9]+$ && "$y" =~ ^[0-9]+$ ]]; then
+      (( 10#$x > 10#$y )); return
+    fi
+    [[ "$x" =~ ^[0-9]+$ ]] && return 1
+    [[ "$y" =~ ^[0-9]+$ ]] && return 0
+    [[ "$x" > "$y" ]]; return
+  done
+  return 1
+}
+
+# _codex_app_bundle_metadata_version APP_ROOT -> echoes version or "".
+#
+# Current app releases package Codex under Resources/codex-cli/ and publish the
+# bundled CLI version in codex-package.json. Prefer that fixed-bundle metadata
+# over executing the embedded CLI. APP_ROOT is an explicit argument so tests
+# can stage a hermetic bundle without overriding production /Applications
+# paths.
+_codex_app_bundle_metadata_version() {
+  local app_root="$1"
+  local metadata="${app_root}/Contents/Resources/codex-cli/codex-package.json"
+  [[ -f "${metadata}" ]] || return 0
+
+  local version
+  version="$(_probe_json_version "${metadata}" codex)"
+  [[ -n "${version}" ]] || return 0
+  if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+    _record_discovery_error codex "${metadata}" "invalid-version"
+    return 0
+  fi
+  printf '%s\n' "${version}"
+}
+
+# _codex_app_bundle_version APP_ROOT -> echoes version or "".
+#
+# Supports both the current codex-cli package layout and the original
+# standalone Codex.app layout whose CLI is Contents/Resources/codex. The
+# caller supplies one of the fixed /Applications roots below in production;
+# the argument exists so tests can stage the same bundle-relative structure.
+# Executable probes require DC_INSTALLER_TARGET_USER and always cross the
+# privilege boundary through _run_as_target_user. A root caller never executes
+# the app-bundled CLI directly.
+_codex_app_bundle_version() {
+  local app_root="$1"
+  local version raw candidate relative
+
+  version="$(_codex_app_bundle_metadata_version "${app_root}")"
+  if [[ -n "${version}" ]]; then
+    printf '%s\n' "${version}"
+    return 0
+  fi
+
+  [[ -n "${DC_INSTALLER_TARGET_USER:-}" ]] || return 0
+
+  for relative in \
+    Contents/Resources/codex-cli/bin/codex \
+    Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex \
+    Contents/Resources/codex \
+    Contents/MacOS/codex; do
+    candidate="${app_root}/${relative}"
+    [[ -f "${candidate}" && -x "${candidate}" ]] || continue
+
+    raw="$(_read_codex_version_as_user \
+      "${DC_INSTALLER_TARGET_USER}" "${candidate}" || true)"
+    if [[ -z "${raw}" ]]; then
+      _record_discovery_error codex "${candidate}" "version-probe-failed"
+      continue
+    fi
+
+    # Codex prints "codex-cli X.Y.Z" (optionally with a prerelease/build
+    # suffix). Accept exactly one semver-shaped token and reject everything
+    # else rather than carrying untrusted command output into targets.yaml.
+    version="$(printf '%s' "${raw}" | awk '{for(i=NF;i>=1;i--) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$/) {print $i; exit}}')"
+    if [[ -z "${version}" ]]; then
+      _record_discovery_error codex "${candidate}" "invalid-version"
+      continue
+    fi
+    printf '%s\n' "${version}"
+    return 0
+  done
+}
+
+# _codex_native_version_from_home HOME -> echoes the active version selected by
+# OpenAI's standalone installer, or "".
+#
+# The installer publishes:
+#
+#   ~/.codex/packages/standalone/current -> releases/<version>-<target>
+#   ~/.local/bin/codex -> .../standalone/current/{bin/codex,codex}
+#
+# Read the selected release directory and its bounded JSON metadata instead of
+# executing a user-owned binary from the root LaunchDaemon. The current link
+# must resolve directly below the fixed releases directory and the visible
+# command must point through that exact current link. Legacy standalone
+# releases have no codex-package.json, so their validated release-directory
+# prefix is the metadata fallback.
+_codex_native_version_from_home() {
+  local home="$1"
+  local standalone_root="${home}/.codex/packages/standalone"
+  local releases_root="${standalone_root}/releases"
+  local current="${standalone_root}/current"
+  local launcher="${home}/.local/bin/codex"
+  [[ -d "${releases_root}" && -L "${current}" && -L "${launcher}" ]] || return 0
+
+  local current_target launcher_target release_dir release_leaf version
+  current_target="$(readlink -- "${current}" 2>/dev/null || true)"
+  launcher_target="$(readlink -- "${launcher}" 2>/dev/null || true)"
+  [[ -n "${current_target}" && -n "${launcher_target}" ]] || return 0
+  [[ "${current_target}" == /* ]] || return 0
+  [[ "$(dirname -- "${current_target}")" == "${releases_root}" ]] || return 0
+  case "${launcher_target}" in
+    "${current}/bin/codex"|"${current}/codex") ;;
+    *) return 0 ;;
+  esac
+
+  release_dir="${current_target}"
+  [[ -d "${release_dir}" && ! -L "${release_dir}" ]] || return 0
+  if [[ "${launcher_target}" == "${current}/bin/codex" ]]; then
+    [[ -f "${release_dir}/bin/codex" && -x "${release_dir}/bin/codex" ]] || return 0
+  else
+    [[ -f "${release_dir}/codex" && -x "${release_dir}/codex" ]] || return 0
+  fi
+
+  if [[ -f "${release_dir}/codex-package.json" ]]; then
+    version="$(_probe_json_version "${release_dir}/codex-package.json" codex)"
+    if [[ -n "${version}" && "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+      printf '%s\n' "${version}"
+      return 0
+    fi
+    _record_discovery_error codex "${release_dir}/codex-package.json" "invalid-version"
+    return 0
+  fi
+
+  release_leaf="$(basename -- "${release_dir}")"
+  version="$(printf '%s\n' "${release_leaf}" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+(-alpha(\.[0-9]+){0,2}|-beta(\.[0-9]+)?)?)-.+$/\1/')"
+  [[ "${version}" != "${release_leaf}" ]] || return 0
+  printf '%s\n' "${version}"
+}
+
 discover_agent_version() {
   local connector="$1"
   local home="$2"
@@ -803,49 +1050,38 @@ discover_agent_version() {
       done
       ;;
     codex)
-      # Codex-cli is a Rust binary that ships from three OpenAI-owned
+      # Codex-cli is a Rust binary that ships from multiple OpenAI-owned
       # channels on macOS. Probe order picks the first-party
-      # ChatGPT.app bundled copy FIRST because it is the newest
-      # distribution (auto-updated with the desktop app) and it is
-      # what customers actually have on a fresh Mac — stray old
+      # current ChatGPT.app bundle FIRST, followed by the legacy standalone
+      # Codex.app bundle. Stray old
       # `npm i -g @openai/codex` installs from an earlier engagement
       # frequently linger and would otherwise win with a stale
       # version that fails our MinAgentVersion contract gate.
       #
       # Order:
-      #   1. ChatGPT.app bundled binary       (Codex 0.145.0+ current)
-      #   2. Homebrew Caskroom                (versioned dir name)
-      #   3. npm module package.json         (user-global then system)
-      #   4. `command -v codex` last resort   (arbitrary PATH install)
+      #   1. ChatGPT.app bundled metadata/binary (current distribution)
+      #   2. Codex.app bundled metadata/binary   (legacy standalone app)
+      #   3. OpenAI standalone installer         (~/.codex/packages/...)
+      #   4. Homebrew Caskroom                   (versioned dir name)
+      #   5. npm module package.json             (user-global then system)
+      #   6. `command -v codex` last resort      (arbitrary PATH install)
       #
-      # Every probe runs as the target user via sudo -u (not root).
-      # The app bundle is Gatekeeper-signed and world-readable by
-      # design; running its --version as an unprivileged user is
-      # safe. install.sh's outer sudo already dropped privs before
-      # calling this helper, matching the security posture of the
-      # hook guardian's connector.Setup call.
-      local vraw
-
-      # 1. ChatGPT.app bundled codex — /Applications/ChatGPT.app/
-      # Contents/Resources/codex is the current stable location; the
-      # older MacOS/ path is kept as a fallback for pre-2026 builds.
-      local chatgpt_codex
-      for chatgpt_codex in \
-        /Applications/ChatGPT.app/Contents/Resources/codex \
-        /Applications/ChatGPT.app/Contents/MacOS/codex; do
-        [[ -x "${chatgpt_codex}" ]] || continue
-        if [[ -n "${DC_INSTALLER_TARGET_USER:-}" ]]; then
-          vraw="$(sudo -n -u "${DC_INSTALLER_TARGET_USER}" "${chatgpt_codex}" --version 2>/dev/null | head -1 || true)"
-        else
-          vraw="$("${chatgpt_codex}" --version 2>/dev/null | head -1 || true)"
-        fi
-        # Codex prints "codex-cli X.Y.Z" (or "codex-cli X.Y.Z-alpha.N");
-        # take the first token that looks like a version.
-        vraw="$(printf '%s' "${vraw}" | awk '{for(i=NF;i>=1;i--) if ($i ~ /^[0-9]+\.[0-9]+/) {print $i; exit}}')"
+      # Bundle metadata is read directly. Bundle executable fallbacks use the
+      # bounded target-user probe and are never executed as root.
+      local vraw app_root
+      for app_root in \
+        "${home}/Applications/ChatGPT.app" \
+        /Applications/ChatGPT.app \
+        "${home}/Applications/Codex.app" \
+        /Applications/Codex.app; do
+        vraw="$(_codex_app_bundle_version "${app_root}")"
         if [[ -n "${vraw}" ]]; then echo "${vraw}"; return; fi
       done
 
-      # 2. Homebrew cask keeps the binary under Caskroom with a
+      vraw="$(_codex_native_version_from_home "${home}")"
+      if [[ -n "${vraw}" ]]; then echo "${vraw}"; return; fi
+
+      # 4. Homebrew cask keeps the binary under Caskroom with a
       # version in the path itself:
       #   /opt/homebrew/Caskroom/codex/<version>/...
       # Glob-based version pick (avoids shellcheck SC2010 on ls|grep).
@@ -865,11 +1101,13 @@ discover_agent_version() {
         if [[ -n "${ver}" ]]; then echo "${ver}"; return; fi
       done
 
-      # 3. npm module package.json — user-global first (most likely
+      # 5. npm module package.json — user-global first (most likely
       # up to date on developer boxes), then system dirs.
       local pkg
       for pkg in \
         "${home}"/.npm-global/lib/node_modules/@openai/codex/package.json \
+        "${home}"/.nvm/versions/node/*/lib/node_modules/@openai/codex/package.json \
+        "${home}"/.bun/install/global/node_modules/@openai/codex/package.json \
         /usr/local/lib/node_modules/@openai/codex/package.json \
         /opt/homebrew/lib/node_modules/@openai/codex/package.json; do
         [[ -f "${pkg}" ]] || continue
@@ -877,7 +1115,7 @@ discover_agent_version() {
         if [[ -n "${v}" ]]; then echo "${v}"; return; fi
       done
 
-      # 4. Last resort: exec codex --version as the target user (not
+      # 6. Last resort: exec codex --version as the target user (not
       # as root). Requires TARGET_USER to be known to the caller.
       if [[ -n "${DC_INSTALLER_TARGET_USER:-}" ]] && command -v codex >/dev/null 2>&1; then
         local vraw
@@ -888,27 +1126,36 @@ discover_agent_version() {
       fi
       ;;
     claudecode)
-      # Claude Code ships both as a standalone npm CLI (has a
-      # package.json we can read) and as a Cursor / VS Code extension,
-      # AND as a per-user Claude Desktop-bundled binary.
+      # Claude Code ships through Anthropic's native installer, as a
+      # standalone npm CLI (has a package.json we can read), as a Cursor /
+      # VS Code extension, and as a per-user Claude Desktop-bundled binary.
       #
       # Probe order:
-      #   1. Claude Desktop-bundled — ~/Library/Application Support/Claude/
+      #   1. Native installer — ~/.local/bin/claude points at
+      #      ~/.local/share/claude/versions/<X.Y.Z>. This is the active CLI
+      #      selected by Anthropic's installer and must win over stale
+      #      Desktop/npm copies.
+      #   2. Claude Desktop-bundled — ~/Library/Application Support/Claude/
       #      claude-code/<X.Y.Z>/claude.app/... — the shim at
       #      ~/.local/bin/claude points here on newer Claude Desktop
       #      builds and the shim-basename walk yields "claude"/"MacOS"
       #      which fails the semver regex. Consulting the version-labelled
       #      parent directory is the only way to recover the version.
       #      Regression on customer bundle 0827_0914 (jlunde, AIFW-32990).
-      #   2. npm-global / Cursor / VS Code extension package.json
+      #   3. npm-global / Cursor / VS Code extension package.json
       #      (historical baseline).
       local v
+      v="$(_claude_native_version_from_home "${home}")"
+      if [[ -n "${v}" ]]; then echo "${v}"; return; fi
+
       v="$(_claude_desktop_embedded_version_from_home "${home}")"
       if [[ -n "${v}" ]]; then echo "${v}"; return; fi
 
       local pkg
       for pkg in \
         "${home}"/.npm-global/lib/node_modules/@anthropic-ai/claude-code/package.json \
+        "${home}"/.nvm/versions/node/*/lib/node_modules/@anthropic-ai/claude-code/package.json \
+        "${home}"/.bun/install/global/node_modules/@anthropic-ai/claude-code/package.json \
         /usr/local/lib/node_modules/@anthropic-ai/claude-code/package.json \
         /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/package.json \
         "${home}"/.cursor/extensions/anthropic.claude-code-*/package.json \
@@ -918,13 +1165,66 @@ discover_agent_version() {
         if [[ -n "${v}" ]]; then echo "${v}"; return; fi
       done
       ;;
+    copilot)
+      # GitHub Copilot CLI ships as the npm package @github/copilot and as
+      # the Homebrew cask copilot-cli. Read package metadata or the cask's
+      # versioned release folder only; never run the user-owned `copilot`
+      # from this root LaunchDaemon (its --version can start an update).
+      # A curl-script install leaves neither, so the version stays empty
+      # and connector_present_for_user decides. Of several installs (a
+      # stale npm package beside a current cask) the highest version
+      # wins, so an old one never selects the legacy contract, which has
+      # no userPromptTransformed hook.
+      local pkg v caskroom dir dname prefix best=""
+      local -a system_pkgs=() casks=()
+      for prefix in "${_COPILOT_SYSTEM_PREFIXES[@]}"; do
+        system_pkgs+=("${prefix}/lib/node_modules/@github/copilot/package.json")
+        casks+=("${prefix}/Caskroom/copilot-cli" "${prefix}/Caskroom/copilot-cli@prerelease")
+      done
+      for pkg in \
+        "${home}"/.npm-global/lib/node_modules/@github/copilot/package.json \
+        "${home}"/.nvm/versions/node/*/lib/node_modules/@github/copilot/package.json \
+        "${home}"/.bun/install/global/node_modules/@github/copilot/package.json \
+        "${system_pkgs[@]}"; do
+        [[ -f "${pkg}" ]] || continue
+        v="$(_probe_json_version "${pkg}" copilot "@github/copilot")"
+        [[ -n "${v}" ]] || continue
+        if ! _is_valid_opencode_version "${v}"; then
+          _record_discovery_error copilot "${pkg}" "invalid-version"
+          continue
+        fi
+        if [[ -z "${best}" ]] || _copilot_version_newer "${v}" "${best}"; then
+          best="${v}"
+        fi
+      done
+      for caskroom in "${casks[@]}"; do
+        [[ -d "${caskroom}" && ! -L "${caskroom}" ]] || continue
+        for dir in "${caskroom}"/*/; do
+          dir="${dir%/}"
+          [[ -d "${dir}" && ! -L "${dir}" ]] || continue
+          dname="$(basename -- "${dir}")"
+          [[ "${dname}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || continue
+          [[ -f "${dir}/copilot" && -x "${dir}/copilot" ]] || continue
+          if [[ -z "${best}" ]] || _copilot_version_newer "${dname}" "${best}"; then
+            best="${dname}"
+          fi
+        done
+      done
+      if [[ -n "${best}" ]]; then echo "${best}"; fi
+      ;;
     cursor)
       # Cursor.app is a signed macOS bundle; read the Info.plist rather
       # than exec'ing the binary. PlistBuddy is an Apple system tool.
-      if [[ -f /Applications/Cursor.app/Contents/Info.plist ]]; then
-        /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
-          /Applications/Cursor.app/Contents/Info.plist 2>/dev/null || true
-      fi
+      # A bundle whose Info.plist carries no version falls through to the
+      # next root instead of ending discovery.
+      local cursor_root cursor_version
+      for cursor_root in "${home}/Applications/Cursor.app" /Applications/Cursor.app; do
+        cursor_version="$(_probe_cursor_app_version "${cursor_root}/Contents/Info.plist")"
+        if [[ -n "${cursor_version}" ]]; then
+          echo "${cursor_version}"
+          return
+        fi
+      done
       ;;
     opencode)
       # OpenCode is distributed as an official desktop app, Homebrew formula,
@@ -947,10 +1247,10 @@ discover_agent_version() {
 
       local pkg
       for pkg in \
-        "${home}"/.npm-global/lib/node_modules/opencode-ai/package.json \
-        "${home}"/.local/lib/node_modules/opencode-ai/package.json \
-        /usr/local/lib/node_modules/opencode-ai/package.json \
-        /opt/homebrew/lib/node_modules/opencode-ai/package.json; do
+        "${home}"/.npm-global/lib/node_modules/@opencode/cli/package.json \
+        "${home}"/.local/lib/node_modules/@opencode/cli/package.json \
+        /usr/local/lib/node_modules/@opencode/cli/package.json \
+        /opt/homebrew/lib/node_modules/@opencode/cli/package.json; do
         [[ -f "${pkg}" ]] || continue
         version="$(_probe_opencode_json_version "${pkg}")"
         if [[ -n "${version}" ]]; then echo "${version}"; return; fi
@@ -1162,6 +1462,9 @@ prepare_userspace_for() {
     # creates its parent directory as the target user. Packaging must not
     # precreate a placeholder that could be mistaken for user state.
     opencode)   : ;;
+    # Copilot's hook file ~/.copilot/hooks/defenseclaw.json is DefenseClaw's
+    # own; the guardian creates its folder as the user and Setup writes it.
+    copilot)    : ;;
   esac
 }
 
@@ -1190,6 +1493,9 @@ _enumerate_users_warn() {
 # and would otherwise emit spurious warns).
 enumerate_local_users() {
   local names name uid gid home
+  # DC_INSTALLER_USERS_ROOT is a test seam: install.sh sets it only for an
+  # unprivileged fixture run so fixture homes count as local homes.
+  local users_root="${DC_INSTALLER_USERS_ROOT:-/Users}"
   names="$(dscl . -list /Users UniqueID 2>/dev/null)" || {
     _enumerate_users_warn "(all users)" "dscl . -list /Users UniqueID failed — cannot enumerate local users"
     return 0
@@ -1222,7 +1528,7 @@ enumerate_local_users() {
       _enumerate_users_warn "${name}" "NFSHomeDirectory is empty in Open Directory"
       continue
     fi
-    if [[ "${home}" != /Users/* ]]; then
+    if [[ "${home}" != "${users_root}"/* ]]; then
       _enumerate_users_warn "${name}" "home '${home}' is not under /Users/ (network / mobile / MDM account)"
       continue
     fi
@@ -1280,11 +1586,13 @@ enumerate_local_users() {
 # config surface exists on this user, emit the row with an empty
 # agent_version and let the Go guardian handle it — the sidecar's
 # ResolveHookContract has an Unversioned branch that returns the
-# connector's DefaultForUnversioned contract. In `action` mode the Go
-# guardian's validateHookContract still fail-shuts per-target (unless
-# DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1), which surfaces the failure in
-# protected_targets.json — infinitely better than a silent drop. In
-# observability / audit modes the target wires end-to-end. If the presence
+# connector's reviewed best-effort DefaultForUnversioned contract. Under
+# Secure Client the Go guardian wires that target with fail-open delivery
+# until discovery resolves a known compatible contract (#1163); policy denials
+# still enforce when the hook reaches DefenseClaw. Every other profile keeps
+# the fail-closed gate: in `action` mode validateHookContract refuses the
+# target (unless DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1), which surfaces the
+# failure in protected_targets.json instead of a silent drop. If the presence
 # signal is also absent, the row is still skipped as before.
 
 # connector_present_for_user CONNECTOR HOME -> exit 0 iff there is a
@@ -1304,6 +1612,8 @@ enumerate_local_users() {
 #   claudecode: ~/.claude, ~/.claude/settings.json
 #   codex:      ~/.codex, ~/.codex/config.toml
 #   cursor:     ~/.cursor, ~/.cursor/hooks.json
+#   copilot:    ~/.copilot, ~/.copilot/hooks, ~/.copilot/mcp-config.json,
+#               ~/.copilot/config.json
 #
 # Allowed signals below are artifacts the connector's CLI itself
 # creates on first launch — never anything prepare_userspace_for nor
@@ -1347,6 +1657,18 @@ connector_present_for_user() {
       # transiently unreadable at enumeration time.
       [[ -d "${home}/.cursor/extensions" ]] && return 0
       [[ -f "${home}/.cursor/argv.json" ]] && return 0
+      ;;
+    copilot)
+      # Copilot CLI runtime state under its default home, ~/.copilot:
+      # logs/ is created on first start, session-state/ (and the older
+      # history-session-state/) once a session runs. DefenseClaw writes
+      # only hooks/defenseclaw.json and mcp-config.json there, and
+      # config.json is a legacy DefenseClaw migration input, so none of
+      # those count. A COPILOT_HOME set in the user's shell is not visible
+      # to this root LaunchDaemon.
+      [[ -d "${home}/.copilot/logs" ]] && return 0
+      [[ -d "${home}/.copilot/session-state" ]] && return 0
+      [[ -d "${home}/.copilot/history-session-state" ]] && return 0
       ;;
   esac
   return 1
@@ -2207,5 +2529,477 @@ move_legacy_aside() {
     return 4
   fi
   printf '[install] moved legacy path aside: %s -> %s\n' "${path}" "${target}"
+  return 0
+}
+
+# ---- resilience markers and repair helpers -----------------------------
+#
+# Unlike the pure helpers above, this section acts on the filesystem.
+# install.sh and uninstall.sh use it to repair DefenseClaw-owned objects
+# instead of aborting, and to log every repair, acceptance, skip,
+# boundary, prerequisite, recovery and degraded state in the same line
+# format the Go services write, so DART triage greps one vocabulary
+# across install.log, uninstall.log and the service logs.
+#
+# Contract for every helper below:
+#   - never exits the shell and never trips `set -e` in the caller: a
+#     failure is logged with a marker and returned as a non-zero status;
+#   - never follows a symlink: a link or wrong-type object at a
+#     DefenseClaw-owned path is moved aside (the link target is never
+#     touched) and logged as defenseclaw_boundary;
+#   - bounded: transient failures are retried DC_RETRY_ATTEMPTS times.
+
+# Component name stamped into every marker (install, uninstall, ...).
+DC_MARKER_COMPONENT="${DC_MARKER_COMPONENT:-}"
+# When set, every marker and dc_warn line is also appended to this file.
+# uninstall.sh uses it because it writes its log directly rather than
+# through a tee.
+DC_MARKER_LOG_FILE="${DC_MARKER_LOG_FILE:-}"
+DC_RETRY_ATTEMPTS="${DC_RETRY_ATTEMPTS:-3}"
+DC_RETRY_SLEEP="${DC_RETRY_SLEEP:-0.5}"
+
+# dc_go_quote VALUE -> stdout: VALUE in Go strconv.Quote form.
+#
+# Backslash and double quote are escaped; \a \b \f \n \r \t \v use their
+# short escapes and every other ASCII control byte (and DEL) becomes
+# \xHH. Bytes >= 0x80 are copied through unchanged, which matches Go for
+# valid UTF-8 (the only input the callers produce: paths, user names and
+# reason tokens).
+dc_go_quote() {
+  local LC_ALL=C
+  local s="${1-}"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  case "${s}" in
+    *[[:cntrl:]]*) ;;
+    *)
+      printf '"%s"' "${s}"
+      return 0
+      ;;
+  esac
+  local out="" c code hex i n=${#s}
+  for (( i = 0; i < n; i++ )); do
+    c="${s:i:1}"
+    case "${c}" in
+      $'\a') out="${out}\\a" ;;
+      $'\b') out="${out}\\b" ;;
+      $'\f') out="${out}\\f" ;;
+      $'\n') out="${out}\\n" ;;
+      $'\r') out="${out}\\r" ;;
+      $'\t') out="${out}\\t" ;;
+      $'\v') out="${out}\\v" ;;
+      [[:cntrl:]])
+        printf -v code '%d' "'${c}"
+        printf -v hex '\\x%02x' "${code}"
+        out="${out}${hex}"
+        ;;
+      *) out="${out}${c}" ;;
+    esac
+  done
+  printf '"%s"' "${out}"
+}
+
+# dc_format_marker MARKER [key=value ...] -> stdout: one marker line.
+#
+# Same output as managed.FormatResilienceEvent: the marker, then each
+# key="value" pair in byte order of key, values Go-quoted. A repeated key
+# keeps its last value. Keys outside [A-Za-z0-9_.-] are dropped. When
+# DC_MARKER_COMPONENT is set and the caller passed no component, it is
+# added as component=<name>.
+dc_format_marker() {
+  local marker="${1:-}"
+  [[ -n "${marker}" ]] || return 1
+  shift
+  local -a keys=() vals=()
+  local arg key val i found
+  if [[ -n "${DC_MARKER_COMPONENT}" ]]; then
+    keys=("component")
+    vals=("${DC_MARKER_COMPONENT}")
+  fi
+  for arg in "$@"; do
+    case "${arg}" in
+      *=*) key="${arg%%=*}"; val="${arg#*=}" ;;
+      *)   key="${arg}"; val="" ;;
+    esac
+    [[ "${key}" =~ ^[A-Za-z0-9_.-]+$ ]] || continue
+    found=""
+    if (( ${#keys[@]} > 0 )); then
+      for (( i = 0; i < ${#keys[@]}; i++ )); do
+        if [[ "${keys[i]}" == "${key}" ]]; then
+          vals[i]="${val}"
+          found="1"
+        fi
+      done
+    fi
+    if [[ -z "${found}" ]]; then
+      keys+=("${key}")
+      vals+=("${val}")
+    fi
+  done
+  local line="${marker}" sorted
+  if (( ${#keys[@]} > 0 )); then
+    sorted="$(printf '%s\n' "${keys[@]}" | LC_ALL=C sort)"
+    while IFS= read -r key; do
+      [[ -n "${key}" ]] || continue
+      for (( i = 0; i < ${#keys[@]}; i++ )); do
+        if [[ "${keys[i]}" == "${key}" ]]; then
+          line="${line} ${key}=$(dc_go_quote "${vals[i]}")"
+          break
+        fi
+      done
+    done <<< "${sorted}"
+  fi
+  printf '%s\n' "${line}"
+}
+
+# _dc_emit LINE: write one log line to stderr and, when configured, to
+# DC_MARKER_LOG_FILE. A log sink that cannot be written never fails the
+# caller.
+_dc_emit() {
+  printf '%s\n' "$1" >&2
+  if [[ -n "${DC_MARKER_LOG_FILE}" ]]; then
+    printf '%s\n' "$1" >> "${DC_MARKER_LOG_FILE}" 2>/dev/null || true
+  fi
+  return 0
+}
+
+# dc_marker MARKER [key=value ...]: log one resilience event.
+dc_marker() {
+  local line
+  line="$(dc_format_marker "$@")" || return 0
+  _dc_emit "${line}"
+}
+
+# dc_warn MESSAGE [MARKER key=value ...]: log a human-readable warning
+# and, when a marker is given, the matching marker line. Always returns 0
+# so a caller can write `step || dc_warn ...` and carry on.
+dc_warn() {
+  local message="${1:-}"
+  shift || true
+  _dc_emit "[${DC_MARKER_COMPONENT:-defenseclaw}] WARN: ${message}"
+  if (( $# > 0 )); then
+    dc_marker "$@"
+  fi
+  return 0
+}
+
+# dc_retry CMD [ARGS ...]: run CMD up to DC_RETRY_ATTEMPTS times, pausing
+# DC_RETRY_SLEEP seconds between attempts. Returns CMD's last status.
+dc_retry() {
+  local attempt=1 rc=0
+  while :; do
+    rc=0
+    "$@" || rc=$?
+    if (( rc == 0 )); then
+      return 0
+    fi
+    if (( attempt >= DC_RETRY_ATTEMPTS )); then
+      return "${rc}"
+    fi
+    attempt=$((attempt + 1))
+    sleep "${DC_RETRY_SLEEP}" 2>/dev/null || true
+  done
+}
+
+# dc_move_aside PATH REASON: clear a symlink or wrong-type object off a
+# DefenseClaw-owned PATH and log defenseclaw_boundary. A symlink is
+# unlinked (its target is never touched); anything else is renamed to
+# PATH.defenseclaw-moved-<ts>. Returns 0 when PATH is gone afterwards.
+dc_move_aside() {
+  local path="$1" reason="$2"
+  local dest suffix="" i
+  # A user flag on the entry itself blocks unlink(2) and rename(2) even
+  # for root; -h clears it on a link without touching the target.
+  chflags -h nouchg,nouappnd "${path}" 2>/dev/null || true
+  if [[ -L "${path}" ]]; then
+    local target
+    target="$(readlink -- "${path}" 2>/dev/null || echo '?')"
+    if dc_retry /bin/rm -f -- "${path}" 2>/dev/null; then
+      dc_marker defenseclaw_boundary path="${path}" reason="${reason}" action=unlinked target="${target}"
+      return 0
+    fi
+    dc_marker defenseclaw_boundary path="${path}" reason="${reason}" action=unlink_failed target="${target}"
+    return 1
+  fi
+  dest="${path}.defenseclaw-moved-$(date +%Y%m%d%H%M%S)"
+  for (( i = 0; i < 100; i++ )); do
+    if [[ ! -e "${dest}${suffix}" && ! -L "${dest}${suffix}" ]]; then
+      break
+    fi
+    suffix=".${i}"
+  done
+  dest="${dest}${suffix}"
+  if dc_retry /bin/mv -- "${path}" "${dest}" 2>/dev/null; then
+    dc_marker defenseclaw_boundary path="${path}" reason="${reason}" action=moved_aside moved_to="${dest}"
+    return 0
+  fi
+  dc_marker defenseclaw_boundary path="${path}" reason="${reason}" action=move_aside_failed
+  return 1
+}
+
+# _dc_meta PATH -> "owner:group mode flags acl|-" for change reporting.
+_dc_meta() {
+  local meta acl="-"
+  meta="$(stat -f '%Su:%Sg %Lp %Sf' "$1" 2>/dev/null)" || meta="? ? ?"
+  if [[ -n "$(ls -lde -- "$1" 2>/dev/null | sed -n '2p')" ]]; then
+    acl="acl"
+  fi
+  printf '%s %s' "${meta}" "${acl}"
+}
+
+# _dc_mode_norm MODE -> MODE without leading zeros (0750 -> 750).
+_dc_mode_norm() {
+  local m="$1"
+  while [[ "${m}" == 0?* ]]; do
+    m="${m#0}"
+  done
+  printf '%s' "${m}"
+}
+
+# _dc_restamp_step TAG CMD...: one dc_restamp repair step, with retry. On
+# failure it adds TAG to the caller's `failed` and appends the command's
+# output to the caller's `err` (bash dynamic scope), so a later successful
+# step never erases why an earlier one failed.
+_dc_restamp_step() {
+  local tag="$1" out
+  shift
+  out="$(dc_retry "$@" 2>&1)" && return 0
+  failed="${failed},${tag}"
+  err="${err:+${err} }${out}"
+  return 0
+}
+
+# dc_restamp PATH OWNER:GROUP MODE [-R] [-d|-f] [-q]
+#
+# Re-stamp a DefenseClaw-owned PATH to its canonical form, in order:
+#   1. structure: a symlink, a wrong-type object (-d expects a directory,
+#      -f a regular file) or a file with more than one hard link is moved
+#      aside with dc_move_aside and the helper returns 0 with PATH absent,
+#      so the caller recreates it;
+#   2. clear the uchg/uappnd user flags (and schg/sappnd, which root can
+#      clear at the default securelevel);
+#   3. strip the ACL (chmod -N);
+#   4. chown OWNER:GROUP, then chmod MODE.
+# Every step acts on the entry itself (-h), never through a link. With -R
+# the flag, ACL and owner steps cover the whole tree without following
+# links, group/other write is removed from every entry except sockets,
+# and MODE applies to PATH itself; a symlink inside the tree is logged
+# and left alone.
+#
+# A changed object logs one defenseclaw_repair naming what changed (-q
+# skips that line for an object the caller has just created). A
+# step that still fails after DC_RETRY_ATTEMPTS logs defenseclaw_accept
+# (or defenseclaw_prereq for a system flag that cannot be cleared) and
+# returns 1; the caller continues. A missing PATH is a no-op.
+dc_restamp() {
+  local path="${1:-}" owner_group="${2:-}" mode="${3:-}"
+  if [[ -z "${path}" || -z "${owner_group}" || -z "${mode}" ]]; then
+    return 2
+  fi
+  shift 3
+  local recursive="false" want_type="" quiet_repair="false" opt
+  for opt in "$@"; do
+    case "${opt}" in
+      -R) recursive="true" ;;
+      -d) want_type="d" ;;
+      -f) want_type="f" ;;
+      -q) quiet_repair="true" ;;
+    esac
+  done
+
+  if [[ ! -e "${path}" && ! -L "${path}" ]]; then
+    return 0
+  fi
+  if [[ -L "${path}" ]]; then
+    dc_move_aside "${path}" symlink
+    return $?
+  fi
+  if [[ "${want_type}" == "d" && ! -d "${path}" ]] \
+     || [[ "${want_type}" == "f" && ! -f "${path}" ]]; then
+    dc_move_aside "${path}" wrong_type
+    return $?
+  fi
+  if [[ -f "${path}" ]]; then
+    local nlink
+    nlink="$(stat -f '%l' "${path}" 2>/dev/null || echo 1)"
+    if [[ "${nlink}" =~ ^[0-9]+$ ]] && (( nlink > 1 )); then
+      dc_move_aside "${path}" hard_link
+      return $?
+    fi
+  fi
+
+  local owner="${owner_group%%:*}" group="${owner_group#*:}"
+  local before after failed="" err="" reasons=""
+  before="$(_dc_meta "${path}")"
+
+  if [[ "${recursive}" == "true" ]]; then
+    # Report drift below the top entry before it is repaired; the top
+    # entry is compared through _dc_meta below.
+    if [[ -n "$(/usr/bin/find "${path}" -mindepth 1 \( -flags +uchg -o -flags +uappnd \) 2>/dev/null | head -1)" ]]; then
+      reasons="${reasons},flags"
+    fi
+    if [[ -n "$(/usr/bin/find "${path}" -mindepth 1 \( ! -user "${owner}" -o ! -group "${group}" \) 2>/dev/null | head -1)" ]]; then
+      reasons="${reasons},owner"
+    fi
+    if [[ -n "$(/usr/bin/find "${path}" -mindepth 1 ! -type l ! -type s -perm +022 2>/dev/null | head -1)" ]]; then
+      reasons="${reasons},mode"
+    fi
+    local link
+    while IFS= read -r link; do
+      [[ -n "${link}" ]] || continue
+      dc_marker defenseclaw_boundary path="${link}" reason=symlink action=not_followed
+    done < <(/usr/bin/find "${path}" -mindepth 1 -type l 2>/dev/null | head -20)
+  fi
+
+  # Flags. Root clears user flags at any securelevel and system flags at
+  # securelevel 0; anything left is an OS prerequisite, not drift.
+  local flags
+  flags="$(stat -f '%Sf' "${path}" 2>/dev/null || echo '-')"
+  if [[ "${flags}" == *uchg* || "${flags}" == *uappnd* ]]; then
+    _dc_restamp_step flags chflags -h nouchg,nouappnd "${path}"
+  fi
+  if [[ "${flags}" == *schg* || "${flags}" == *sappnd* ]]; then
+    if ! chflags -h noschg,nosappnd "${path}" 2>/dev/null; then
+      dc_marker defenseclaw_prereq check=system_immutable_flag path="${path}" \
+        remedy="reboot to securelevel 0 or into recovery and run chflags noschg on the path"
+      failed="${failed},system_flags"
+    fi
+  fi
+  if [[ "${recursive}" == "true" ]]; then
+    _dc_restamp_step flags chflags -R -P nouchg,nouappnd "${path}"
+  fi
+
+  # ACL, owner, mode.
+  _dc_restamp_step acl chmod -h -N "${path}"
+  if [[ "${recursive}" == "true" ]]; then
+    _dc_restamp_step acl chmod -R -P -N "${path}"
+    _dc_restamp_step owner chown -R -h "${owner_group}" "${path}"
+    # Sockets keep their mode: the gateway binds its IPC socket with the
+    # mode its peers need and re-applies it on every bind.
+    _dc_restamp_step mode /usr/bin/find "${path}" -mindepth 1 ! -type l ! -type s -perm +022 \
+      -exec chmod -h go-w {} +
+  else
+    _dc_restamp_step owner chown -h "${owner_group}" "${path}"
+  fi
+  _dc_restamp_step mode chmod -h "${mode}" "${path}"
+
+  after="$(_dc_meta "${path}")"
+  if [[ "${before}" != "${after}" ]]; then
+    local b_own b_mode b_flags b_acl a_own a_mode a_flags a_acl
+    read -r b_own b_mode b_flags b_acl <<< "${before}"
+    read -r a_own a_mode a_flags a_acl <<< "${after}"
+    [[ "${b_own}" == "${a_own}" ]] || reasons="${reasons},owner"
+    [[ "$(_dc_mode_norm "${b_mode}")" == "$(_dc_mode_norm "${a_mode}")" ]] || reasons="${reasons},mode"
+    [[ "${b_flags}" == "${a_flags}" ]] || reasons="${reasons},flags"
+    [[ "${b_acl}" == "${a_acl}" ]] || reasons="${reasons},acl"
+  fi
+  if [[ -n "${reasons}" && "${quiet_repair}" != "true" ]]; then
+    # De-duplicate the comma list while keeping first-seen order.
+    local r out_reasons="" seen=","
+    local IFS_SAVE="${IFS}"
+    IFS=','
+    for r in ${reasons#,}; do
+      [[ "${seen}" == *",${r},"* ]] && continue
+      seen="${seen}${r},"
+      out_reasons="${out_reasons:+${out_reasons},}${r}"
+    done
+    IFS="${IFS_SAVE}"
+    dc_marker defenseclaw_repair path="${path}" reason="${out_reasons}"
+  fi
+  if [[ -n "${failed}" ]]; then
+    err="$(printf '%s' "${err}" | tr '\n' ' ')"
+    dc_marker defenseclaw_accept path="${path}" reason=restamp_failed \
+      failed="${failed#,}" detail="${err% }"
+    return 1
+  fi
+  return 0
+}
+
+# dc_remove_path PATH: delete a DefenseClaw-owned file or tree. A symlink
+# is unlinked, never followed or recursed into. Otherwise the user (and,
+# at securelevel 0, system) immutable and append-only flags and the ACLs
+# are cleared across the tree without following links, then rm -rf runs
+# with the bounded retry (an agent writing a hook log mid-delete gives a
+# transient ENOTEMPTY). Returns 1 when PATH still exists; a system flag
+# that cannot be cleared is logged as defenseclaw_prereq. The caller logs
+# the leftover.
+dc_remove_path() {
+  local path="${1:-}"
+  [[ -n "${path}" && "${path}" != "/" ]] || return 2
+  [[ -e "${path}" || -L "${path}" ]] || return 0
+  if [[ -L "${path}" || ! -d "${path}" ]]; then
+    chflags -h nouchg,nouappnd "${path}" 2>/dev/null || true
+    chflags -h noschg,nosappnd "${path}" 2>/dev/null || true
+    dc_retry /bin/rm -f -- "${path}" 2>/dev/null || true
+  else
+    chflags -R -P nouchg,nouappnd "${path}" 2>/dev/null || true
+    chflags -R -P noschg,nosappnd "${path}" 2>/dev/null || true
+    chmod -R -P -N "${path}" 2>/dev/null || true
+    dc_retry /bin/rm -rf -- "${path}" 2>/dev/null || true
+  fi
+  if [[ -e "${path}" || -L "${path}" ]]; then
+    if [[ -n "$(/usr/bin/find "${path}" \( -flags +schg -o -flags +sappnd \) 2>/dev/null | head -1)" ]]; then
+      dc_marker defenseclaw_prereq check=system_immutable_flag path="${path}" \
+        remedy="reboot to securelevel 0 or into recovery and run chflags -R noschg on the path"
+    fi
+    return 1
+  fi
+  return 0
+}
+
+# dc_sha256_hex FILE -> stdout: FILE's SHA-256 as bare lowercase hex.
+dc_sha256_hex() {
+  local out
+  out="$(/usr/bin/shasum -a 256 -- "$1" 2>/dev/null)" || return 1
+  out="${out%% *}"
+  [[ "${out}" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s' "${out}"
+}
+
+# dc_run_prereq_checks GATEWAY_BIN INSTALL_ROOT PORTS: the installer's host
+# prerequisite checks (the gateway may execute, no uncleared system
+# immutable flag, loopback ports free, hook transport tools present, the
+# cloud-auth library loads, installed code matches its integrity
+# manifest). The gateway binary runs the same checks the hook guardian
+# repeats on every tick, so it is called after the binary is installed and
+# the services are quiesced, before bootstrap. Each finding is logged as
+# defenseclaw_prereq (or a code-integrity line) with its remedy and never
+# fails the install. A binary that cannot execute at all is itself the
+# binary_exec_allowed finding.
+dc_run_prereq_checks() {
+  local bin="${1:-}" root="${2:-}" ports="${3:-}"
+  [[ -n "${bin}" ]] || return 0
+  if [[ ! -x "${bin}" ]]; then
+    dc_marker defenseclaw_prereq check=binary_exec_allowed path="${bin}" \
+      remedy="reinstall DefenseClaw; the gateway binary is missing or not executable"
+    return 0
+  fi
+  # One run: its findings (stderr) go to the install output, its JSON-free
+  # stdout is dropped. The command always exits 0, so a non-zero status
+  # means the binary itself did not run.
+  local rc=0
+  { "${bin}" enterprise prereq-check --install-root "${root}" --ports "${ports}" --exec-probe >/dev/null; } 2>&1 || rc=$?
+  if (( rc != 0 )); then
+    dc_marker defenseclaw_prereq check=binary_exec_allowed path="${bin}" \
+      remedy="allow the DefenseClaw gateway in the endpoint security or app control policy"
+  fi
+  return 0
+}
+
+# dc_strip_quarantine PATH ...: remove com.apple.quarantine from each
+# installed regular file, so launchd can exec a binary staged from a
+# browser-downloaded bundle. Logs defenseclaw_repair per stripped file;
+# a failure is logged as defenseclaw_accept and never returned.
+dc_strip_quarantine() {
+  local path
+  for path in "$@"; do
+    [[ -f "${path}" && ! -L "${path}" ]] || continue
+    xattr -p com.apple.quarantine "${path}" >/dev/null 2>&1 || continue
+    if xattr -d com.apple.quarantine "${path}" 2>/dev/null; then
+      dc_marker defenseclaw_repair path="${path}" reason=quarantine_xattr
+    else
+      dc_marker defenseclaw_accept path="${path}" reason=quarantine_xattr_kept
+    fi
+  done
   return 0
 }

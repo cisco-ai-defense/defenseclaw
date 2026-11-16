@@ -46,4 +46,11 @@ func TestDiscoverProfileRootListsSkillsWhenParentsAreDenied(t *testing.T) {
 	if entries, err := DiscoverProfileRoot(linked, DefaultDirectoryLimit); err == nil {
 		t.Fatalf("a linked root was listed: %+v", entries)
 	}
+	linkedParent := filepath.Join(home, "linked-parent")
+	if err := os.Symlink(filepath.Dir(root), linkedParent); err != nil {
+		t.Fatal(err)
+	}
+	if entries, err := DiscoverProfileRoot(filepath.Join(linkedParent, "skills"), DefaultDirectoryLimit); err == nil {
+		t.Fatalf("a root below a linked parent was listed: %+v", entries)
+	}
 }

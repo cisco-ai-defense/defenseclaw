@@ -42,7 +42,7 @@ import (
 // fakeLineage is a ProcessLookup that knows one process.
 type fakeLineage struct{}
 
-func (fakeLineage) PIDOf(string, string, time.Time) int { return 0 }
+func (fakeLineage) LineageAt(string, string, time.Time) []ProcessRef { return nil }
 
 func (fakeLineage) Lineage(sandbox string, pid int) []ProcessRef {
 	if pid != 77 {

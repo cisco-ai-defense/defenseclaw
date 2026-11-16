@@ -33,7 +33,6 @@ Paths are repo-relative. Unless noted, Go files are under `internal/gateway/conn
   - `internal/gateway/application_protection.go`
   - `normalizeConnectorTelemetrySource` (`internal/gateway/otel_ingest.go`). This one is a closed allowlist: it also maps `agy` to `antigravity`, and anything missing becomes `unknown`.
   - `normalizeConnector` (`internal/useridentity/email.go`)
-  - `normalizeConnector` (`cmd/defenseclaw-setup/main.go`)
 - **Python:**
   - `normalize_connector` (`cli/defenseclaw/connector_contracts.py`)
   - `normalize` (`cli/defenseclaw/connector_paths.py`; empty input means `openclaw`)
@@ -131,10 +130,11 @@ Mirror every pin in the JSON `platform_overrides`.
 
 ### 3.2 JSON manifest
 
-Add `connectors.<id>` to `cli/defenseclaw/inventory/hook_contracts.json` (`schema_version` 2).
+Add `connectors.<id>` to `cli/defenseclaw/inventory/hook_contracts.json` (`schema_version` 3).
 
 - **Connector fields:** `kind` (`hook`, `proxy`, `acp-with-native-hook-defense-in-depth`), `compatibility_gate` (`hook-contract` or `not-gated`), `version_probe` (for example `copilot --version`), `contracts[]`.
-- **Contract fields:** `contract_id`, `agent_version{exact,min_inclusive,max_exclusive}`, `default_for_unversioned`, `hook_script_version`, `hook_script`, `hook_config_path_templates`, `response_field`, `events`, `aid_surfaces`, `supports_traceparent`, `native_otlp` (plus `native_otlp_auth`, `_signals` and `_endpoint_template`), `content_envelope_key`, `tool_call_lifecycle`, `capabilities{can_block,can_ask_native,ask_events,block_events,supports_fail_closed,scope}`, `platform_overrides{darwin,linux,windows}`, `notes`.
+- **Contract fields:** `contract_id`, `agent_version{exact,min_inclusive,max_exclusive}`, `default_for_unversioned`, `hook_script_version`, `hook_script`, `hook_config_path_templates`, `response_field`, `events`, `aid_surfaces`, `aid_surface_events`, `aid_wire_version`, `aid_tool_call_shapes`, `supports_traceparent`, `native_otlp` (plus `native_otlp_auth`, `_signals` and `_endpoint_template`), `content_envelope_key`, `tool_call_lifecycle`, `capabilities{can_block,can_ask_native,ask_events,block_events,supports_fail_closed,scope}`, `platform_overrides{darwin,linux,windows}`, `notes`.
+- **AID declaration:** Go derives `AIDSurfaceEvents` and `AIDWireVersion` in `init()` (`aid_surface_contract.go`) from `aid_surfaces`, `events` and the tool-call lifecycle routing, and copies `AIDToolCallShapes` from `aidToolCallShapesByContract` (the tools the goldens and live runs show reaching AID). The JSON lists all three and the parity test requires them to match. The hook lane sends a PreToolUse to AI Defense as a tool call only when the resolved contract declares `tool_call` in `chat-tool-calls-v1`. A contract built per call (sandbox-only, managed Windows Kiro) declares the first two itself.
 - **Loader:** `connector_contracts._load_contracts_from_manifest`. It rejects unknown platforms and more than one default per platform. Override keys are listed in `_PLATFORM_OVERRIDE_FIELDS`.
 - **Parity:** `TestHookContractsManifestMatchesRuntime` (`hook_contract_test.go`) compares Go and JSON on darwin, linux and windows. `cli/tests/test_connector_contracts.py::test_manifest_covers_every_connector` requires an entry for every connector in `KNOWN_CONNECTORS` plus the ACP-only connectors.
 - **Packaging:** the file ships through `pyproject.toml` package-data.
@@ -185,7 +185,7 @@ For hook-only connectors, add a case to `hookOnlyProfileRespond` (`hook_only_pro
 2. Resolve `HOOK_DIR` through symlinks (depth 40; exit 2 on failure).
 3. `{{if .Managed}}` pins `DEFENSECLAW_HOME` from the script location. Otherwise honor `.disabled` and exit 0.
 4. Source `_hardening.sh`, then call `defenseclaw_harden_resources` and the env hardening.
-5. `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"`.
+5. `FAIL_MODE="{{.FailMode}}"`. The installed policy is authoritative; never read the agent environment for fail mode.
 6. Call `defenseclaw_handle_missing_token`, then `defenseclaw_read_stdin_capped` (1 MiB).
 7. Read the scoped token into `API_TOKEN`, then `unset DEFENSECLAW_GATEWAY_TOKEN` so no child process inherits it.
 8. Define `fail_unreachable` and `fail_response`.
@@ -199,12 +199,13 @@ For hook-only connectors, add a case to `hookOnlyProfileRespond` (`hook_only_pro
 - Secure Client renders pinned copies (`secureClientPluginAssets`), and `TestSecureClientPluginTemplatesArePinned` pins them. Never edit `*-secure-client.*` when changing `opencode-plugin.js` or `amp-plugin.ts`.
 - Any bridge template edit also needs the plugin-scanner digest bump (assets.md §2, step 11).
 - The managed machine-policy OpenCode plugin is `internal/enterprisepolicy/opencode_managed_plugin.js`. It runs `defenseclaw-hook hook --connector opencode --enterprise-managed --event E`.
+- OpenCode is V2-only: default-export `id` and `setup(ctx)`, with no named factory or `server` entrypoint. All three plugin transports share `internal/opencodebridge/adapter.js`; regenerate with `python3 scripts/generate_opencode_plugins.py` and check with `make check-opencode-plugins`. `TestOpenCodeV2Contract` checks the native API; `TestOpenCodeHookRegistrationMatchesSharedGolden` regenerates POSIX/Windows registration fixtures on Linux or macOS. Legacy artifact paths are cleanup identities only.
 - In-agent plugins must also send the identity headers. They are a hand-kept list in `TestPluginTransportsReportIdentityToo`.
 
 **PowerShell adapters.**
 - `hooks/cursor-hook.ps1` turns pipeline objects into UTF-8 JSON and uses the hidden `--input-file`.
 - `hooks/copilot-hook.ps1` uses a `ProcessStartInfo` byte stream and fails open.
-- Other code checks literal lines of these adapters: the Cursor runtime check in `hook_only.go`, `cli/defenseclaw/cursor_contract.py`, the Copilot adapter check in `cli/defenseclaw/doctor_hooks.py`, `scripts/windows-native-ci.ps1` and `scripts/live-connector-e2e/run-windows.ps1`. A new adapter needs the same kind of check, and an edit to an existing one must update all of them.
+- Other code checks literal lines of these adapters: the Cursor runtime check in `hook_only.go`, `cli/defenseclaw/cursor_contract.py`, the Copilot adapter check in `cli/defenseclaw/doctor_hooks.py`, and `scripts/live-connector-e2e/run-windows-install.ps1`. A new adapter needs the same kind of check, and an edit to an existing one must update all of them.
 
 ## 5. Native hook runner (`hookexec`)
 
@@ -325,11 +326,11 @@ A new `SetupOpts` field must also be carried through the Unix worker protocol (e
 ## 8. Fail modes and exit codes
 
 **Fail mode.**
-- `resolveHookFailMode` (`subprocess.go`) decides it. Cursor is closed in action mode and open in observe mode. Otherwise the order is `HookFailMode`, then the codex/claudecode enforcement flags, then `defaultHookFailMode="closed"`.
+- `resolveHookFailMode` (`subprocess.go`) decides it. Cursor is closed in action mode and open in observe mode. Otherwise the order is `HookFailMode`, then the codex/claudecode enforcement flags, then `defaultHookFailMode="closed"`. Under Secure Client (`SetupOpts.SecureClientHookDelivery`) an unset mode renders **open** and an explicit mode beats the Cursor rule (`docs-site/content/docs/reference/fail-modes.mdx`, Secure Client).
 - It is persisted in the sidecar `hooks/.hookcfg` as `DEFENSECLAW_FAIL_MODE_<ID>`.
-- In the runner, `normalizeFailMode` treats an empty value as **open**, while rendered templates default to closed. The CLI fills the value from the flag, then the per-connector sidecar key, then the sidecar global. `DEFENSECLAW_FAIL_MODE` is honored only when the runtime is untrusted or the value tightens to closed.
+- In the runner, `normalizeFailMode` treats an empty or invalid value as **closed**, while rendered templates default to closed. The CLI fills the value from the flag, then the per-connector sidecar key, then the sidecar global. `DEFENSECLAW_FAIL_MODE` in the process environment is ignored; only authenticated Secure Client legacy delivery retains its override.
 - `StrictAvailability` forces transport failures closed.
-- `failOpenOnly` connectors (copilot, hermes) never fail closed, except managed Copilot (`managedCopilotFailClosed`).
+- Copilot and Hermes block failed tool checks when the installed mode is closed outside Secure Client. Their upstream hosts may still proceed if the hook cannot start or times out; see the fail-mode reference for that contract limit.
 - Standalone stop and session-end events always get the neutral allow (`allowManagedStandaloneStop`).
 - Enterprise-managed hooks always fail closed. Their lock and status must say so (Devin, `b4aaedb3`).
 
@@ -390,7 +391,7 @@ A new `SetupOpts` field must also be carried through the Unix worker protocol (e
 |---|---|
 | Decoding real vendor payloads | `openhands_event_decode_test.go`, `antigravity_hook_profile_test.go` |
 | Decision goldens and the fail matrix | `TestDecisionGolden`, `TestResponseFailure`, `TestUnreachable`, `TestMissingToken`, `TestOversizedPayload` (`hookexec`) |
-| Shell script exits under bash | `TestOpenHandsHookScript_BlockExitsTwo`, `cursor_hook_failopen_test.go` |
+| Shell script exits under bash | `cursor_hook_failopen_test.go` |
 | Setup, teardown and VerifyClean round trip, including an absent config | `hook_teardown_absent_config_test.go` (its Copilot leftover row) |
 | Windows shell behavior | `kiro_windows_shell_test.go`, `cursor_hook_adapter_windows_test.go` |
 | CLI flag and exit | `internal/cli/hook_kiro_test.go` |
@@ -421,8 +422,7 @@ Helpers are in `internal/gateway/connector/connectortest/connectortest.go`.
   - `hook_only.go` (Cursor runtime: `v8` on Unix, `v9` for the Windows adapter) and `cli/defenseclaw/cursor_contract.py`;
   - `amp.go` and `cli/defenseclaw/fail_mode.py` (`// defenseclaw-managed-plugin v2`);
   - `hook_config_paths.go` (OpenCode, `// defenseclaw-managed-plugin v7`);
-  - `cli/defenseclaw/doctor_hooks.py` (the Copilot adapter, `v7`);
-  - `scripts/windows-native-ci.ps1` and `scripts/live-connector-e2e/run-windows.ps1`.
+  - `cli/defenseclaw/doctor_hooks.py` (the Copilot adapter, `v7`).
 
   Find them all with `git grep -n 'defenseclaw-managed-' -- ':!internal/gateway/connector/hooks'`.
 

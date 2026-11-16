@@ -71,6 +71,13 @@ $failures = & $module {
         param([string]$Name)
         return [pscustomobject]@{ Name = $Name }
     }
+    function Assert-DefenseClawOwnedServiceOrAbsent {
+        param($Name, $ExpectedGatewayPath, $ExpectedManifestPath,
+            $ExpectedSensorHelperImage, [switch]$Guardian,
+            [switch]$SensorHelper, [switch]$Enumerator)
+        # This smoke stubs service control; ownership is exercised by the
+        # service contract smokes, independent of host SCM registrations.
+    }
     function Get-DefenseClawRecoveryGatewayAdmission {
         param([hashtable]$Layout)
         $script:TestAdmissionCalls++
@@ -241,7 +248,12 @@ $failures = & $module {
         try {
             $pendingPath = Microsoft.PowerShell.Management\Join-Path $scratch 'pending.json'
             Microsoft.PowerShell.Management\Set-Content -LiteralPath $pendingPath -Value '{"snapshot":"C:\\x\\snapshot.json"}' -Encoding ASCII
-            $recoverLayout = @{ PendingPath = $pendingPath }
+            $recoverLayout = @{
+                PendingPath = $pendingPath
+                ManagedHooksTeardownJournalPath = (
+                    Microsoft.PowerShell.Management\Join-Path $scratch 'managed-hooks-teardown-journal.json'
+                )
+            }
             $script:TestSeenDeferrable = @()
             $script:TestRestoreThrows = $false
             function Assert-DefenseClawNoReparsePath { param([string]$Path) }
@@ -261,6 +273,43 @@ $failures = & $module {
             if ([bool]$result.activation_deferred) {
                 $failures.Add('a recovery that did not opt in reported a deferred activation')
             }
+            # A cleanup failure after Complete-DefenseClawTransaction must
+            # report a warning without changing the completed recovery.
+            $savedJournalCleanup = ${function:Remove-DefenseClawRolledBackTeardownJournal}
+            try {
+                function Remove-DefenseClawRolledBackTeardownJournal { throw 'journal unreadable' }
+                $cleanupWarnings = @()
+                $result = Recover-DefenseClawPendingTransaction `
+                    -Layout $recoverLayout `
+                    -GatewayServiceName $gateway `
+                    -GuardianServiceName $guardian `
+                    -WarningVariable cleanupWarnings `
+                    -WarningAction SilentlyContinue
+                if (-not [bool]$result.recovered -or
+                    @($cleanupWarnings | Microsoft.PowerShell.Core\Where-Object {
+                        ([string]$_).Contains('journal unreadable')
+                    }).Count -ne 1) {
+                    $failures.Add('completed recovery failed or omitted the journal cleanup warning')
+                }
+                try {
+                    $result = Recover-DefenseClawPendingTransaction `
+                        -Layout $recoverLayout `
+                        -GatewayServiceName $gateway `
+                        -GuardianServiceName $guardian `
+                        -WarningAction Stop
+                    if (-not [bool]$result.recovered) {
+                        $failures.Add('completed recovery was not reported with WarningAction Stop')
+                    }
+                }
+                catch {
+                    $failures.Add("completed recovery threw with WarningAction Stop: $($_.Exception.Message)")
+                }
+            }
+            finally {
+                Microsoft.PowerShell.Management\Set-Item `
+                    -Path function:Remove-DefenseClawRolledBackTeardownJournal `
+                    -Value $savedJournalCleanup
+            }
             $script:TestRestoreThrows = $true
             try {
                 [void](Recover-DefenseClawPendingTransaction -Layout $recoverLayout -GatewayServiceName $gateway -GuardianServiceName $guardian -AllowDeferredActivation)
@@ -270,12 +319,56 @@ $failures = & $module {
             if ([bool]$script:DefenseClawRecoveryActivationDeferrable) {
                 $failures.Add('a failed restore left the deferral opt-in set')
             }
-            if ((@($script:TestSeenDeferrable) -join ',') -cne 'True,False,True') {
+            if ((@($script:TestSeenDeferrable) -join ',') -cne 'True,False,False,False,True') {
                 $failures.Add("restore saw deferrable=$(@($script:TestSeenDeferrable) -join ',')")
             }
         }
         finally {
             Microsoft.PowerShell.Management\Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        # 8. GAP-1497: the snapshot recorded a stopped gateway (an
+        #    administrator stopped DefenseClawGateway; it stays Automatic)
+        #    next to a running Enumerator. Recovery restores exactly that:
+        #    the Enumerator runs again, the gateway is not started, and
+        #    nothing refuses, so the transaction does not stay pending.
+        Reset-TestState
+        $script:DefenseClawRecoveryActivationDeferrable = $false
+        $savedCoverageWait = ${function:Wait-DefenseClawFreshGuardianReconcile}
+        try {
+            function Wait-DefenseClawFreshGuardianReconcile {
+                param($Layout, $GatewayServiceName, $GuardianServiceName)
+                $script:TestCalls.Add('wait:coverage')
+            }
+            $stoppedGatewayServices = @(
+                [pscustomobject]@{ name = $gateway; existed = $true; running = $false; start_mode = 2 },
+                [pscustomobject]@{ name = $guardian; existed = $true; running = $true; start_mode = 2 },
+                [pscustomobject]@{ name = $enumerator; existed = $true; running = $true; start_mode = 2 }
+            )
+            try {
+                Start-DefenseClawTransactionServices `
+                    -Services $stoppedGatewayServices `
+                    -Layout $layout `
+                    -ServicesQuiescedAt ([DateTime]::UtcNow.ToString('o')) `
+                    -TrustInProcessQuiescence `
+                    -GatewayServiceName $gateway `
+                    -GuardianServiceName $guardian
+                $calls = @($script:TestCalls)
+                if ($calls -notcontains "start:$enumerator") {
+                    $failures.Add("stopped-gateway recovery did not restart the recorded Enumerator: $($calls -join ', ')")
+                }
+                if ($calls -contains "start:$gateway") {
+                    $failures.Add("stopped-gateway recovery started the recorded stopped gateway: $($calls -join ', ')")
+                }
+            }
+            catch {
+                $failures.Add("stopped-gateway recovery refused: $($_.Exception.Message)")
+            }
+        }
+        finally {
+            Microsoft.PowerShell.Management\Set-Item `
+                -Path function:Wait-DefenseClawFreshGuardianReconcile `
+                -Value $savedCoverageWait
         }
 
         # 7. The production call sites opt in only for Upgrade, Repair and

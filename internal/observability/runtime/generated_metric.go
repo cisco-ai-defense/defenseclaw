@@ -108,17 +108,18 @@ func (runtime *Runtime) RecordGeneratedMetric(
 		return telemetry.V8MetricRecordResult{}, err
 	}
 	defer lease.Release()
-	return recordGeneratedMetricWithLease(
-		ctx, lease, runtime.store, family, builder,
+	results, recordErr := recordGeneratedMetricsWithLease(
+		ctx, lease, runtime.store, []GeneratedMetricBatchItem{{Family: family, Builder: builder}},
 		correlationDefaultsFromContext(ctx, correlationDefaultsGenerated),
 	)
+	return results[0], recordErr
 }
 
 // RecordGeneratedMetricBatch pins one runtime generation across a bounded
 // group of related metric observations. Each family retains its independent
 // collection gate, so a disabled family never invokes its builder. Delivery is
 // sequential and truthful: results before a failure describe already-attempted
-// occurrences, and no later builder runs after the first failure.
+// occurrences, and no later builder runs after the first build failure.
 func (runtime *Runtime) RecordGeneratedMetricBatch(
 	ctx context.Context,
 	items []GeneratedMetricBatchItem,
@@ -135,18 +136,9 @@ func (runtime *Runtime) RecordGeneratedMetricBatch(
 		return nil, err
 	}
 	defer lease.Release()
-	results := make([]telemetry.V8MetricRecordResult, len(items))
-	for index, item := range items {
-		result, recordErr := recordGeneratedMetricWithLease(
-			ctx, lease, runtime.store, item.Family, item.Builder,
-			correlationDefaultsFromContext(ctx, correlationDefaultsGenerated),
-		)
-		results[index] = result
-		if recordErr != nil {
-			return results, recordErr
-		}
-	}
-	return results, nil
+	return recordGeneratedMetricsWithLease(
+		ctx, lease, runtime.store, items, correlationDefaultsFromContext(ctx, correlationDefaultsGenerated),
+	)
 }
 
 func validateGeneratedMetricBatchItems(items []GeneratedMetricBatchItem) error {
@@ -162,60 +154,173 @@ func validateGeneratedMetricBatchItems(items []GeneratedMetricBatchItem) error {
 	return nil
 }
 
-func recordGeneratedMetricWithLease(
+// preparedGeneratedMetric is one built and checked metric record of a batch,
+// waiting for its correlation observation to commit before the provider gets
+// it. observed is false for a record without correlation, which has nothing
+// to commit.
+type preparedGeneratedMetric struct {
+	index       int
+	provider    *telemetry.Provider
+	record      observability.Record
+	observation audit.CorrelationObservation
+	observed    bool
+}
+
+// recordGeneratedMetricsWithLease records a batch on one lease, in three
+// steps. Every item is gated, built and checked in order, and no builder runs
+// after the first item that fails. Then the correlation observations of the
+// built records commit in one audit transaction. Only then does the provider
+// get the records, in order (commit before export).
+//
+// One transaction per batch instead of one per metric is the B-26 write cut:
+// a Claude Code PreToolUse records 13 generated metrics in a few batches,
+// and each metric was a commit of its own that wrote a table page
+// and the 11 index pages of correlation_observations to the audit WAL. If the
+// group commit fails, the built records are recorded one at a time as before,
+// so a failure stops at the same item, with the same results and the same
+// records exported before it; only the builders of the later items, which
+// build records and nothing else, have already run.
+func recordGeneratedMetricsWithLease(
+	ctx context.Context,
+	lease *runtimegraph.Lease,
+	store *audit.Store,
+	items []GeneratedMetricBatchItem,
+	correlationDefaults observability.Correlation,
+) ([]telemetry.V8MetricRecordResult, error) {
+	results := make([]telemetry.V8MetricRecordResult, len(items))
+	prepared := make([]preparedGeneratedMetric, 0, len(items))
+	var buildErr error
+	for index, item := range items {
+		metric, enabled, err := prepareGeneratedMetricWithLease(
+			ctx, lease, store, item.Family, item.Builder, correlationDefaults,
+		)
+		if err != nil {
+			buildErr = err
+			break
+		}
+		if enabled {
+			metric.index = index
+			prepared = append(prepared, metric)
+		}
+	}
+	observations := make([]audit.CorrelationObservation, 0, len(prepared))
+	for _, metric := range prepared {
+		if metric.observed {
+			observations = append(observations, metric.observation)
+		}
+	}
+	if len(observations) > 0 {
+		if groupErr := recordRuntimeCorrelationObservations(ctx, store, observations...); groupErr != nil {
+			for _, metric := range prepared {
+				if metric.observed {
+					if recordErr := recordRuntimeCorrelationObservations(ctx, store, metric.observation); recordErr != nil {
+						return results, &GeneratedMetricError{code: GeneratedMetricRecordFailed}
+					}
+				}
+				if exportErr := exportPreparedGeneratedMetric(ctx, metric, results); exportErr != nil {
+					return results, exportErr
+				}
+			}
+			return results, buildErr
+		}
+	}
+	if len(observations) > 0 && audit.CallWritesOpen(ctx, store) {
+		// The observations wait in the hook call's batch: the provider gets
+		// the records after the call commits them (commit before export).
+		if fork := lease.Fork(); fork != nil {
+			exportCtx := context.WithoutCancel(ctx)
+			deferred := append([]preparedGeneratedMetric(nil), prepared...)
+			if audit.DeferAfterCallWrites(ctx, store, func() {
+				defer fork.Release()
+				scratch := make([]telemetry.V8MetricRecordResult, len(items))
+				for _, metric := range deferred {
+					if exportPreparedGeneratedMetric(exportCtx, metric, scratch) != nil {
+						return
+					}
+				}
+			}) {
+				return results, buildErr
+			}
+			fork.Release()
+		}
+	}
+	for _, metric := range prepared {
+		if err := exportPreparedGeneratedMetric(ctx, metric, results); err != nil {
+			return results, err
+		}
+	}
+	return results, buildErr
+}
+
+// prepareGeneratedMetricWithLease runs the collection gate, the builder and
+// the provenance checks of one item. enabled is false for a disabled family,
+// whose builder never runs.
+func prepareGeneratedMetricWithLease(
 	ctx context.Context,
 	lease *runtimegraph.Lease,
 	store *audit.Store,
 	family observability.EventName,
 	builder GeneratedMetricBuilder,
 	correlationDefaults observability.Correlation,
-) (telemetry.V8MetricRecordResult, error) {
+) (preparedGeneratedMetric, bool, error) {
 	if ctx == nil || lease == nil || family == "" || builder == nil ||
 		!observability.IsRegisteredEventNameForSignal(observability.SignalMetrics, family) {
-		return telemetry.V8MetricRecordResult{}, &GeneratedMetricError{code: GeneratedMetricInvalidInput}
+		return preparedGeneratedMetric{}, false, &GeneratedMetricError{code: GeneratedMetricInvalidInput}
 	}
 	graph := lease.Graph()
 	provider, ok := telemetry.V8ProviderFromLease(lease)
 	if graph == nil || !ok {
-		return telemetry.V8MetricRecordResult{}, &GeneratedMetricError{code: GeneratedMetricUnavailable}
+		return preparedGeneratedMetric{}, false, &GeneratedMetricError{code: GeneratedMetricUnavailable}
 	}
 	digest, generation, bound := provider.V8PlanBinding()
 	if !bound || digest == "" || digest != graph.Digest() || generation != graph.Generation() {
-		return telemetry.V8MetricRecordResult{}, &GeneratedMetricError{code: GeneratedMetricUnavailable}
+		return preparedGeneratedMetric{}, false, &GeneratedMetricError{code: GeneratedMetricUnavailable}
 	}
 	// This check deliberately precedes the producer callback so disabled
 	// collection cannot construct labels, records, or expensive measurements.
 	if !provider.MetricFamilyEnabled(family) {
-		return telemetry.V8MetricRecordResult{}, nil
+		return preparedGeneratedMetric{}, false, nil
 	}
 	snapshot := EmitContext{plan: graph.Plan(), digest: digest, generation: generation}
 	record, buildErr := builder(snapshot)
 	if buildErr != nil {
-		return telemetry.V8MetricRecordResult{}, &GeneratedMetricError{code: GeneratedMetricBuildRejected}
+		return preparedGeneratedMetric{}, false, &GeneratedMetricError{code: GeneratedMetricBuildRejected}
 	}
 	record, buildErr = stampRuntimeCorrelation(record, correlationDefaults)
 	if buildErr != nil {
-		return telemetry.V8MetricRecordResult{}, &GeneratedMetricError{code: GeneratedMetricBuildRejected}
+		return preparedGeneratedMetric{}, false, &GeneratedMetricError{code: GeneratedMetricBuildRejected}
 	}
 	provenance := record.Provenance()
 	if record.Signal() != observability.SignalMetrics || record.EventName() != family ||
 		provenance.ConfigGeneration < 0 || uint64(provenance.ConfigGeneration) != generation ||
 		provenance.ConfigDigest != digest {
-		return telemetry.V8MetricRecordResult{}, &GeneratedMetricError{code: GeneratedMetricBuildRejected}
+		return preparedGeneratedMetric{}, false, &GeneratedMetricError{code: GeneratedMetricBuildRejected}
 	}
-	if err := persistRuntimeCorrelationObservation(ctx, store, record); err != nil {
-		return telemetry.V8MetricRecordResult{}, &GeneratedMetricError{code: GeneratedMetricRecordFailed}
+	observation, observed, err := runtimeCorrelationObservationFor(store, record)
+	if err != nil {
+		return preparedGeneratedMetric{}, false, &GeneratedMetricError{code: GeneratedMetricRecordFailed}
 	}
-	result, recordErr := provider.RecordGeneratedMetric(ctx, record)
-	if recordErr != nil {
-		return result, &GeneratedMetricError{code: GeneratedMetricRecordFailed}
-	}
-	return result, nil
+	return preparedGeneratedMetric{
+		provider: provider, record: record, observation: observation, observed: observed,
+	}, true, nil
 }
 
-// recordGeneratedMetricWithLease preserves the private runtime/batch seam for
-// imported occurrences while trace-owned siblings call the lease helper
-// directly. The runtime receiver remains the owner check at those call sites.
+func exportPreparedGeneratedMetric(
+	ctx context.Context,
+	metric preparedGeneratedMetric,
+	results []telemetry.V8MetricRecordResult,
+) error {
+	result, err := metric.provider.RecordGeneratedMetric(ctx, metric.record)
+	results[metric.index] = result
+	if err != nil {
+		return &GeneratedMetricError{code: GeneratedMetricRecordFailed}
+	}
+	return nil
+}
+
+// recordGeneratedMetricWithLease preserves the private runtime seam for
+// imported occurrences. The runtime receiver remains the owner check at that
+// call site.
 func (runtime *Runtime) recordGeneratedMetricWithLease(
 	ctx context.Context,
 	lease *runtimegraph.Lease,
@@ -226,9 +331,11 @@ func (runtime *Runtime) recordGeneratedMetricWithLease(
 	if runtime == nil {
 		return telemetry.V8MetricRecordResult{}, &GeneratedMetricError{code: GeneratedMetricInvalidInput}
 	}
-	return recordGeneratedMetricWithLease(
-		ctx, lease, runtime.store, family, builder, correlationDefaultsFromContext(ctx, defaultMode),
+	results, err := recordGeneratedMetricsWithLease(
+		ctx, lease, runtime.store, []GeneratedMetricBatchItem{{Family: family, Builder: builder}},
+		correlationDefaultsFromContext(ctx, defaultMode),
 	)
+	return results[0], err
 }
 
 var _ error = (*GeneratedMetricError)(nil)

@@ -21,8 +21,9 @@ import (
 	"errors"
 	"io"
 	"math/big"
-	"regexp"
 	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // SignatureSchemaVersion is the manifest.sig schema this build reads.
@@ -40,7 +41,7 @@ const (
 	AlgECDSAP256SHA256 = "ecdsa-p256-sha256"
 )
 
-var keyIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+var keyIDPattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
 
 // ValidKeyID reports whether id can name a signing key.
 func ValidKeyID(id string) bool { return keyIDPattern.MatchString(id) }

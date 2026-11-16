@@ -285,6 +285,9 @@ func (*recordBuildFailure) Error() string { return "canonical log record build f
 // Process evaluates collection exactly once through the router, persists the
 // required local projection, and only then creates optional destination work.
 // Optional projection failures are isolated and returned as bounded identities.
+// A failed local write still returns the remote projections (GAP-1536). An
+// occurrence marked observability.WithSkipLocalWrite is not written: only
+// its remote projections are returned.
 func (pipeline *LocalLogPipeline) Process(
 	ctx context.Context,
 	metadata router.Metadata,
@@ -410,11 +413,22 @@ func (pipeline *LocalLogPipeline) process(
 	originDestination string,
 	exportOnWriteFailure bool,
 ) (LocalLogOutcome, error) {
+	skipLocal := observability.SkipLocalWrite(ctx)
+	if skipLocal && (localOnly || originDestination != "") {
+		return LocalLogOutcome{}, &Error{code: ErrorInvalidInput}
+	}
 	prepared, outcome, admitted, err := pipeline.prepare(ctx, metadata, builder)
 	if err != nil || !admitted {
 		return outcome, err
 	}
 	sinkPolicy := legacyredaction.SinkPolicyFromContext(ctx)
+	if skipLocal {
+		// The store holds this spooled occurrence already, or cannot say
+		// (observability.WithSkipLocalWrite): hand back its remote work only.
+		outcome.localPersisted = true
+		pipeline.projectOptional(&outcome, prepared.record, prepared.optional, sinkPolicy, "")
+		return outcome, nil
+	}
 	if err := pipeline.appender.AppendContext(ctx, prepared.record.Clone(), prepared.projection); err != nil {
 		// A raw `err` value here may wrap BeginTx / commit / health strings
 		// that leak backend state past the pipeline's bounded projection.
@@ -546,6 +560,11 @@ func (pipeline *LocalLogPipeline) ProcessAtomicBatch(
 ) ([]LocalLogOutcome, error) {
 	if pipeline == nil {
 		return nil, &Error{code: ErrorInvalidDependency}
+	}
+	if observability.SkipLocalWrite(ctx) {
+		// A batch writes every item; an occurrence marked to skip the local write
+		// goes through Process.
+		return nil, &Error{code: ErrorInvalidInput}
 	}
 	outcomes := make([]LocalLogOutcome, 0, len(items))
 	batcher, ok := pipeline.appender.(LocalEventBatchAppender)

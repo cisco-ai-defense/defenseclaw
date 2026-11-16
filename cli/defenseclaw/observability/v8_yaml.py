@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
@@ -120,6 +121,7 @@ _DESTINATION_NESTED: Final = {
         }
     ),
     "network_safety": frozenset({"allow_private_networks", "allow_cgnat"}),
+    "local_stack": frozenset({"marker", "container_id"}),
 }
 _MISSING: Final = object()
 
@@ -525,6 +527,8 @@ def _validate_replacement_value(value: Any, source: str, path: YAMLPath) -> None
                 path=path,
             )
         if item is None or type(item) in {bool, int, str}:
+            return
+        if type(item) is float and math.isfinite(item):
             return
         if isinstance(item, (list, tuple)):
             identity = id(item)
@@ -1120,7 +1124,7 @@ def _supported_path(path: YAMLPath) -> bool:
     if section == "redaction_profiles":
         return _supported_profile_path(path)
     if section == "local":
-        return len(path) == 3 and path[2] in {"path", "judge_bodies_path", "retention_days"}
+        return len(path) == 3 and path[2] in {"path", "judge_bodies_path", "retention_days", "max_store_mb"}
     if section == "connectors":
         return (
             len(path) == 4

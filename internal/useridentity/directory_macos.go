@@ -4,6 +4,7 @@
 package useridentity
 
 import (
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -119,6 +120,63 @@ func ParseMacOSDirectoryFacts(in MacOSDirectoryInputs, now time.Time) DirectoryF
 		facts.Directory = DirectoryLocal
 	}
 	return facts
+}
+
+// MacOSADNode is the Active Directory node that holds the account a
+// `dscl /Search -read` (asked for OriginalNodeName and
+// AppleMetaNodeLocation) answered for: the original node of a mobile
+// account, else the node the record came from. ok is false unless exactly
+// one such node is named, under /Active Directory/, with no path tricks.
+// The account's SID is read from that node only (MacOSDirectorySID): the
+// /Search answer of a mobile account merges its local copy with the
+// domain's record, and a local account has an SMBSID of the Mac's own
+// domain (rel-1-0-6:GAP-0275).
+func MacOSADNode(searchOutput string) (string, bool) {
+	attrs := parseDSCLAttributes(searchOutput)
+	candidates := attrs["OriginalNodeName"]
+	if len(candidates) == 0 {
+		candidates = attrs["AppleMetaNodeLocation"]
+	}
+	node := ""
+	for _, value := range candidates {
+		if !strings.HasPrefix(value, "/Active Directory/") {
+			continue
+		}
+		if node != "" && node != value {
+			return "", false
+		}
+		node = value
+	}
+	parts := strings.Split(node, "/")
+	if node == "" || len(parts) != 4 || strings.ContainsAny(node, "\x00\n\r\t") {
+		return "", false
+	}
+	for _, part := range parts[2:] {
+		if part == "" || part == "." || part == ".." {
+			return "", false
+		}
+	}
+	return node, true
+}
+
+// MacOSGeneratedUIDs are the GeneratedUID values of a dscl -read.
+func MacOSGeneratedUIDs(output string) []string {
+	return parseDSCLAttributes(output)["GeneratedUID"]
+}
+
+// macOSDomainSID is a domain account SID: S-1-5-21, three sub-authorities
+// and the RID, in decimal.
+var macOSDomainSID = regexp.MustCompile(`^S-1-5-21-[0-9]{1,10}-[0-9]{1,10}-[0-9]{1,10}-[0-9]{1,10}$`)
+
+// MacOSDirectorySID is the SMBSID (the account's objectSid) of a
+// `dscl <Active Directory node> -read /Users/<name> UniqueID SMBSID`, and
+// whether the output names exactly one, in domain account form.
+func MacOSDirectorySID(nodeOutput string) (string, bool) {
+	values := parseDSCLAttributes(nodeOutput)["SMBSID"]
+	if len(values) != 1 || !macOSDomainSID.MatchString(values[0]) {
+		return "", false
+	}
+	return values[0], true
 }
 
 // MacOSDSCLRecordUID is the UniqueID in the output of a `dscl -read` that

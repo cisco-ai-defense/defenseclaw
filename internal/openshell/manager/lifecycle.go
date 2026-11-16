@@ -17,6 +17,7 @@
 package manager
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -85,6 +86,7 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 	cfg := m.config()
 	st := &sandboxapi.Status{
 		Enabled: cfg.OpenShell.Enabled, IngressAddr: m.opts.IngressAddr, EgressAddr: m.opts.EgressAddr,
+		IngressPort: m.opts.IngressPort, EgressPort: m.opts.EgressPort,
 	}
 	gw, err := m.gateway(ctx)
 	if err == nil && m.now().Sub(time.Unix(0, m.gwCheckedAt.Load())) >= driverRecheck {
@@ -102,6 +104,15 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 	if err := openshell.CheckHost(runtime.GOOS, runtime.GOARCH); err != nil {
 		st.Available, st.Reason = false, err.Error()
 	}
+	if m.opts.Listeners != nil {
+		if err := m.opts.Listeners(); err != nil {
+			// A gateway or host cause found above stays the primary reason.
+			st.Available = false
+			if st.Reason == "" {
+				st.Reason = err.Error()
+			}
+		}
+	}
 	if eff, err := m.baseEffective(cfg); err == nil {
 		st.Profile = eff.Profile
 		if eff.Pack != nil {
@@ -111,8 +122,12 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 	} else if st.Reason == "" {
 		st.Reason = err.Error()
 	}
+	// Every guest is counted at the place its record names (proveGuests).
+	m.proveGuests(ctx)
+	here := m.lastGw.Load()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	live := 0
 	for _, b := range m.boxes {
 		if b.deleted || b.retained {
 			continue
@@ -121,7 +136,28 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 		if b.phase == audit.SandboxPhaseReady {
 			st.Running++
 		}
+		if !b.missing && holdsCompute(b.phase, b.rec.Driver, b.rec.PhaseReason) {
+			live++
+		}
+		if kind, phase := unprotectedKind(b, here); kind != "" {
+			u := sandboxapi.UnprotectedSandbox{Name: b.rec.Name, Phase: string(cmp.Or(phase, audit.SandboxPhaseUnknown))}
+			switch kind {
+			case sandboxapi.UnprotectedUnknown:
+				u.Reason, u.Detail = kind, unknownWhy(b, here)
+			case sandboxapi.UnprotectedContained:
+				u.Reason = kind
+				fallthrough
+			default:
+				u.Stop = legacyStopCommand(b.rec.Name, phase)
+				if !atConnectedPlace(b, here) {
+					u.Detail = unprotectedWayOn(b, here, kind, phase)
+				}
+			}
+			st.Unprotected = append(st.Unprotected, u)
+		}
 	}
+	slices.SortFunc(st.Unprotected, func(a, b sandboxapi.UnprotectedSandbox) int { return strings.Compare(a.Name, b.Name) })
+	st.Live = &live
 	for _, a := range m.approvals {
 		if a.status == sandboxapi.ApprovalPending {
 			st.PendingApprovals++
@@ -142,7 +178,7 @@ func (m *Manager) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
 			m.mu.Lock()
 			for _, sb := range sbs {
 				if b := m.boxes[sb.Name]; b != nil && !b.creating && !b.retained && m.sameSandboxLocked(b, sb) {
-					b.sb, b.missing = sb, false
+					m.foundOnLocked(b, gw, sb)
 				}
 			}
 			m.mu.Unlock()
@@ -177,6 +213,21 @@ func (m *Manager) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
 	return out, nil
 }
 
+// KnownComputeCount counts sandboxes that may hold compute from the
+// manager's saved phases, without contacting OpenShell. It is used while
+// managed sandboxes are off and their account gateway cannot start.
+func (m *Manager) KnownComputeCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, b := range m.boxes {
+		if !b.deleted && !b.retained && holdsCompute(b.phase, b.rec.Driver, b.rec.PhaseReason) {
+			n++
+		}
+	}
+	return n
+}
+
 // Get returns one sandbox.
 func (m *Manager) Get(ctx context.Context, name string) (*sandboxapi.Sandbox, error) {
 	b, err := m.box(name)
@@ -188,16 +239,18 @@ func (m *Manager) Get(ctx context.Context, name string) (*sandboxapi.Sandbox, er
 	m.mu.Unlock()
 	live := retained
 	if gw, err := m.gateway(ctx); err == nil && !retained {
-		sb, err := gw.Client.GetSandbox(ctx, name)
+		sb, err := m.getSandbox(ctx, gw, name)
 		m.mu.Lock()
+		report := func(context.Context) {}
 		switch {
 		case err == nil && !b.creating && m.sameSandboxLocked(b, sb):
-			b.sb, b.missing = sb, false
+			m.foundOnLocked(b, gw, sb)
 		case (err == nil || openshell.IsNotFound(err)) && !b.creating:
-			// Gone, or another sandbox took the name.
-			b.missing = true
+			// Gone from gw, or another sandbox took the name there.
+			report = m.missingFromLocked(gw, b)
 		}
 		m.mu.Unlock()
+		report(ctx)
 		live = err == nil || openshell.IsNotFound(err)
 		if !live {
 			m.dropGateway(gw, err)
@@ -327,6 +380,21 @@ func (m *Manager) refuseRetained(b *box) error {
 		"sandbox %s was deleted; only its undo point is kept (undo, review or delete it)", name)
 }
 
+// stop stops the sandbox of b once its harness has exited and, on a driver
+// whose stop does not flush (the MicroVM driver), after sync(1) in the
+// guest. A flush that fails holds the stop back (unsyncedStopRefusal: the VM
+// keeps running and loses nothing), unless the caller accepted that loss
+// (sandboxapi.DiscardUnsynced), which only the user's own stop does, after
+// it asked them (GAP-0902): DefenseClaw never stops a MicroVM after a failed
+// sync on its own, for a hook alarm, a policy, a lost listener or the
+// stop-sandboxes of a sign-out alike. A stop it makes for a security alarm
+// (WithEmergencyStop) contains the VM instead (containUnsynced), and says
+// whether it could. Once OpenShell takes an accepted one,
+// the feed says what it may have lost (flushFailed), never for a stop that
+// was refused or not made. One whose main process
+// completed or failed OpenShell returns as it is: it keeps its phase, and
+// with it the OpenShell gateway (HoldsCompute), until OpenShell reports
+// another.
 func (m *Manager) stop(ctx context.Context, b *box) error {
 	gw, err := m.gateway(ctx)
 	if err != nil {
@@ -335,7 +403,11 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	ctx, cancel := context.WithTimeout(ctx, defaultOpTimeout)
 	defer cancel()
 	m.mu.Lock()
-	name, mode, reason := b.rec.Name, b.rec.WorkdirMode, b.rec.PhaseReason
+	name, reason, driver := b.rec.Name, b.rec.PhaseReason, b.rec.Driver
+	// OpenShell stops nothing of a sandbox whose workload ended: its phase
+	// stays until OpenShell reports another.
+	ended := b.phase == audit.SandboxPhaseCompleted ||
+		b.phase == audit.SandboxPhaseError && !openshell.VMGone(reason) && !openshell.ProvisioningTimedOut(reason)
 	m.mu.Unlock()
 	if err := m.checkSandbox(ctx, gw, b); err != nil {
 		return err
@@ -344,17 +416,26 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	// and its terminal ends as after /exit (graceful.go); a detached run
 	// the stop ends is marked interrupted, and once the stop is published
 	// its log is kept for `sandbox logs` of the stopped sandbox (runlog.go).
-	run := m.endHarness(ctx, gw, b)
-	m.lifecycle(ctx, b, audit.SandboxPhaseStopping, audit.SandboxTriggerStop, false, nil, nil)
+	run, flushErr := m.endHarness(ctx, gw, b)
+	if flushErr != nil && !sandboxapi.DiscardUnsynced(ctx) {
+		m.logf("sandbox %s: not stopped: its disk could not be synced first: %v", name, flushErr)
+		if why, ok := emergencyStop(ctx); ok {
+			return containedStopRefusal(name, flushErr, m.containUnsynced(ctx, b, why))
+		}
+		return unsyncedStopRefusal(name, flushErr)
+	}
+	if !ended {
+		m.lifecycle(ctx, b, audit.SandboxPhaseStopping, audit.SandboxTriggerStop, false, hookAlarmStopCondition(ctx), nil)
+	}
 	m.keepRunLog(ctx, gw, b, run)
-	_, err = gw.Client.StopSandbox(ctx, name)
+	stopped, err := gw.Client.StopSandbox(ctx, name)
 	if err != nil && transientGatewayError(err) {
 		// The connection closed under the call (the gateway restarted, or
 		// another call dropped the connection): the stop goes again on a fresh
 		// one instead of ending the session with gRPC's words (GAP-0601).
 		if cur, ok := m.reconnect(ctx, gw, err); ok {
 			gw = cur
-			if now, gerr := gw.Client.GetSandbox(ctx, name); gerr == nil && auditPhase(now.Status.Phase) == audit.SandboxPhaseStopped {
+			if now, gerr := m.getSandbox(ctx, gw, name); gerr == nil && auditPhase(now.Status.Phase) == audit.SandboxPhaseStopped {
 				err = nil
 			} else {
 				_, err = gw.Client.StopSandbox(ctx, name)
@@ -364,7 +445,7 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	if err != nil {
 		m.dropGateway(gw, err)
 		m.stopFailed(ctx, gw, b)
-		if e := errorPhaseRefusal(name, mode, reason, err); e != nil {
+		if e := m.errorPhaseRefusal(name, reason, driver, err); e != nil {
 			return e
 		}
 		if e := m.errorPhaseNow(b); e != nil {
@@ -377,6 +458,28 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 		}
 		return upstream("stop sandbox "+name, err)
 	}
+	m.forgetPending(name)
+	if ph := stoppedAsIs(stopped); ph != "" {
+		// OpenShell returns a sandbox whose workload completed, or whose
+		// main process failed, as it is: it stops nothing, and flushes
+		// nothing, of its MicroVM, which may still run what its workload
+		// left running, so it still holds the gateway
+		// (openshell.HoldsGateway; the caller says how to stop it:
+		// openshell.StopWayOn).
+		var cond *audit.SandboxCondition
+		if ph == audit.SandboxPhaseError && reason != "" {
+			cond = &audit.SandboxCondition{Reason: reason}
+		}
+		m.mu.Lock()
+		b.sb = stopped
+		m.mu.Unlock()
+		m.lifecycle(ctx, b, ph, audit.SandboxTriggerStop, false, cond, stopped.Status.ExitCode)
+		return nil
+	}
+	// OpenShell took the stop: what the flush did not confirm is lost now.
+	if flushErr != nil {
+		m.flushFailed(name, flushErr)
+	}
 	sb, err := gw.Client.WaitStopped(ctx, name)
 	if err != nil && transientGatewayError(err) {
 		if cur, ok := m.reconnect(ctx, gw, err); ok {
@@ -386,13 +489,166 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	}
 	if err != nil {
 		m.stopFailed(ctx, gw, b)
+		// OpenShell before 0.1.5 takes the stop of a MicroVM in its error
+		// state and then fails the wait ("sandbox is in error state"): the
+		// sandbox, why and the way on, not OpenShell's words alone
+		// (GAP-0871).
+		if e := m.errorPhaseNow(b); e != nil {
+			return e
+		}
 		return upstream("wait for sandbox "+name+" to stop", err)
 	}
 	m.mu.Lock()
 	b.sb = sb
 	m.mu.Unlock()
-	m.lifecycle(ctx, b, auditPhase(sb.Status.Phase), audit.SandboxTriggerStop, false, nil, sb.Status.ExitCode)
+	m.lifecycle(ctx, b, auditPhase(sb.Status.Phase), audit.SandboxTriggerStop, false, hookAlarmStopCondition(ctx), sb.Status.ExitCode)
 	return nil
+}
+
+// unsyncedStopRefusal refuses the stop of the MicroVM name whose disk could
+// not be synced first (err): its stop does not flush, so what the guest
+// wrote since its last sync would be lost. It keeps running instead, and
+// the user decides (sandboxapi.CodeUnsynced): the CLI asks, and says what is
+// lost, before it stops it with sandboxapi.StopRequest.DiscardUnsynced.
+func unsyncedStopRefusal(name string, err error) error {
+	return &sandboxapi.Error{Code: sandboxapi.CodeUnsynced,
+		Message: "sandbox " + name + " was not stopped: its MicroVM's disk could not be synced first (" + flushFailureText(err) +
+			"), so a stop now would lose what it wrote since its last sync; it keeps running",
+		Detail: "save the work you need and stop it again, or stop it anyway, losing that: `defenseclaw sandbox stop " + name +
+			" --discard-unsynced` (on a terminal, `defenseclaw sandbox stop " + name + "` asks first)"}
+}
+
+// gatewayLostErrors are gRPC's and OpenShell's words for an OpenShell gateway
+// that went away under a call (it was stopped or killed, or Docker restarted).
+// "supervisor relay failed" is the macOS MicroVM driver's form: the sandbox's
+// supervisor answers the gateway that replaced the killed one with "sandbox is
+// owned by gateway ..." (GAP-2437).
+var gatewayLostErrors = []string{"client connection is closing", "transport is closing", "error reading from server", "connection error: desc", "code = unavailable", "supervisor relay failed"}
+
+// flushFailureText is why a MicroVM's disk could not be synced (err), for
+// the person: an OpenShell gateway lost under the sync reads as the managed
+// CLI words a lost gateway, with the way on, instead of gRPC's own text
+// ("Cancelled: grpc: the client connection is closing", GAP-0186).
+func flushFailureText(err error) string {
+	lower := strings.ToLower(err.Error())
+	for _, raw := range gatewayLostErrors {
+		if strings.Contains(lower, raw) {
+			return "the connection to the OpenShell gateway closed; `defenseclaw sandbox doctor` checks it, then retry the stop"
+		}
+	}
+	if strings.Contains(lower, notReadyConflict) {
+		// OpenShell's own refusal, "Conflict: sandbox is not ready", when its
+		// gateway restarted and was still bringing the sandbox back (rel-1-0-6
+		// GAP-0340).
+		return "OpenShell was still bringing the sandbox back up; wait until `defenseclaw sandbox list` shows it Ready, then retry the stop"
+	}
+	return truncate(sandboxapi.DisplayText(err.Error()), 200)
+}
+
+// containedStopRefusal is the error of a stop DefenseClaw made for a
+// security alarm (WithEmergencyStop), or of a start's stop of a sandbox it
+// must not leave running (stopUnverified), that left the MicroVM name
+// running because its disk could not be synced first (flushErr), contained
+// instead (containUnsynced); containErr is what of the containment could
+// not be done or confirmed.
+func containedStopRefusal(name string, flushErr, containErr error) error {
+	state := "DefenseClaw contained it instead: " + containedContainment
+	if containErr != nil {
+		state = "and DefenseClaw could not confirm it contained (" + truncate(sandboxapi.DisplayText(containErr.Error()), 300) + ")"
+	}
+	return &sandboxapi.Error{Code: sandboxapi.CodeUnsynced,
+		Message: "sandbox " + name + " was not stopped: its MicroVM's disk could not be synced first (" + flushFailureText(flushErr) +
+			"), so it keeps running, " + containedUnprotected + "; " + state,
+		Detail: "save the work you need, then stop it: `defenseclaw sandbox stop " + name + "` (on a terminal it asks before it stops the VM without the sync)"}
+}
+
+// emergencyStopKey is the context key of WithEmergencyStop.
+type emergencyStopKey struct{}
+
+// WithEmergencyStop is ctx for a stop DefenseClaw makes on its own for a
+// security alarm, why in words (a hook alarm, repeated foreign network
+// rules, a lost listener, a revoked registration): one that must not leave
+// the sandbox as it is. Where that stop would lose what a MicroVM has not
+// synced, DefenseClaw never makes it (GAP-0902): it contains the VM
+// instead (containUnsynced) and the stop fails with what it did.
+func WithEmergencyStop(ctx context.Context, why string) context.Context {
+	return context.WithValue(ctx, emergencyStopKey{}, why)
+}
+
+// EmergencyStopReason is the why of a WithEmergencyStop ctx, "" for any
+// other.
+func EmergencyStopReason(ctx context.Context) string {
+	why, _ := ctx.Value(emergencyStopKey{}).(string)
+	return why
+}
+
+// emergencyStop reports a WithEmergencyStop ctx and its why.
+func emergencyStop(ctx context.Context) (string, bool) {
+	why := EmergencyStopReason(ctx)
+	return why, why != ""
+}
+
+// lockStart takes the gateway's lifecycle lock for a create or a start
+// (Options.StartLock), which it holds over OpenShell's call only: while
+// DefenseClaw restarts or upgrades the gateway (doctor --fix, setup, the
+// OpenShell upgrade), whose check of the sandboxes would not see one
+// started after it, the call is refused.
+//
+// Only lockRun takes it.
+func (m *Manager) lockStart() (func(), error) {
+	if m.opts.StartLock == nil {
+		return func() {}, nil
+	}
+	unlock, err := m.opts.StartLock()
+	switch {
+	case errors.Is(err, openshell.ErrGatewayBusy):
+		return nil, &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Message: "DefenseClaw is restarting or upgrading the OpenShell gateway",
+			Detail: "start the sandbox again once `defenseclaw sandbox doctor --fix`, `defenseclaw sandbox setup` or the OpenShell upgrade has finished"}
+	case err != nil:
+		return nil, sandboxapi.Errorf(sandboxapi.CodeInternal, "take the OpenShell gateway's lifecycle lock: %v", err)
+	}
+	return unlock, nil
+}
+
+// lockRun takes the start lock (lockStart) for the gateway call that runs
+// a new sandbox or session (CreateSandbox, StartSandbox), checks once more
+// that no guest DefenseClaw cannot show protected runs
+// (unprotectedRunRefusal; except as for legacyRunRefusal), and holds
+// runGate shared until the returned func. A guest recorded contained
+// (containUnsynced) after the create's or start's first check is so
+// refused here, and one contained while the call runs is recorded only
+// once it returned: that sandbox then ran before it, as one already
+// running does. The caller unlocks right after the call.
+func (m *Manager) lockRun(except string) (func(), error) {
+	unlockStart, err := m.lockStart()
+	if err != nil {
+		return nil, err
+	}
+	m.runGate.RLock()
+	if err := m.unprotectedRunRefusal(except); err != nil {
+		m.runGate.RUnlock()
+		unlockStart()
+		return nil, err
+	}
+	return func() {
+		m.runGate.RUnlock()
+		unlockStart()
+	}, nil
+}
+
+// stoppedAsIs is the phase of a sandbox OpenShell's stop returned as it
+// was, as OpenShell (0.1.3 and 0.1.5) does for one whose workload completed
+// or whose main process failed (the error state with an exit code); ""
+// for one it stops.
+func stoppedAsIs(sb *openshell.Sandbox) audit.SandboxPhase {
+	if sb == nil {
+		return ""
+	}
+	switch ph := auditPhase(sb.Status.Phase); {
+	case ph == audit.SandboxPhaseCompleted, ph == audit.SandboxPhaseError && sb.Status.ExitCode != nil:
+		return ph
+	}
+	return ""
 }
 
 // transientGatewayError reports a call that failed because the connection to
@@ -435,21 +691,38 @@ func (m *Manager) restorePhase(ctx context.Context, gw *Gateway, b *box, trigger
 	m.mu.Lock()
 	name := b.rec.Name
 	m.mu.Unlock()
-	sb, err := gw.Client.GetSandbox(ctx, name)
-	if err != nil || !m.sameSandbox(b, sb) {
+	sb, err := m.getSandbox(ctx, gw, name)
+	if err == nil && !m.sameSandbox(b, sb) {
 		return
 	}
-	m.mu.Lock()
-	b.sb = sb
-	m.mu.Unlock()
-	if phase := auditPhase(sb.Status.Phase); phase != pending && phase != audit.SandboxPhaseUnknown {
+	phase := audit.SandboxPhaseUnknown
+	if err == nil {
+		m.mu.Lock()
+		b.sb = sb
+		m.mu.Unlock()
+		phase = auditPhase(sb.Status.Phase)
+	}
+	if phase == audit.SandboxPhaseUnknown && pending == audit.SandboxPhaseDeleting {
+		// OpenShell refused the delete and does not say what it left: the
+		// VM may run as before. Its phase is unknown, which holds its
+		// compute, not DefenseClaw's own deleting, which does not: a stop
+		// would skip its sync, and the status would count it idle for the
+		// gateway's stop (GAP-1084).
+		m.lifecycle(ctx, b, audit.SandboxPhaseUnknown, trigger, false, nil, nil)
+		return
+	}
+	if phase != pending && phase != audit.SandboxPhaseUnknown {
 		// A failing condition explains an error phase (statusEvent), which
 		// the status then names (GAP-0297).
 		var cond *audit.SandboxCondition
 		for _, c := range sb.Status.Conditions {
 			if phase == audit.SandboxPhaseError && !strings.EqualFold(c.Status, "true") {
-				cond = &audit.SandboxCondition{Type: c.Type, Status: c.Status, Reason: c.Reason, Message: c.Message}
-				break
+				if cond == nil || strings.EqualFold(c.Type, "Ready") {
+					cond = &audit.SandboxCondition{Type: c.Type, Status: c.Status, Reason: c.Reason, Message: c.Message}
+				}
+				if strings.EqualFold(c.Type, "Ready") {
+					break
+				}
 			}
 		}
 		m.lifecycle(ctx, b, phase, trigger, false, cond, sb.Status.ExitCode)
@@ -462,18 +735,20 @@ func (m *Manager) checkSandbox(ctx context.Context, gw *Gateway, b *box) error {
 	m.mu.Lock()
 	name := b.rec.Name
 	m.mu.Unlock()
-	sb, err := gw.Client.GetSandbox(ctx, name)
+	sb, err := m.getSandbox(ctx, gw, name)
 	if err != nil {
 		m.dropGateway(gw, err)
 		return upstream("look up sandbox "+name, err)
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if !m.sameSandboxLocked(b, sb) {
-		b.missing = true
+		report := m.missingFromLocked(gw, b)
+		m.mu.Unlock()
+		report(ctx)
 		return errReplaced(name)
 	}
-	b.sb, b.missing = sb, false
+	m.foundOnLocked(b, gw, sb)
+	m.mu.Unlock()
 	return nil
 }
 
@@ -633,7 +908,7 @@ func (e *sessionRulesError) Unwrap() error { return e.err }
 // stopErr is that stop's failure: the sandbox then still runs with the
 // rules, and the refusal says so and how to end it instead. The gateway's
 // own words stay in the log.
-func sessionRulesLeft(name string, err, stopErr error) error {
+func sessionRulesLeft(name string, err, stopErr error, stopFlushes bool) error {
 	rules, these := "the network rules", "the rules"
 	what := "the network rules approved for its last session"
 	var left *sessionRulesError
@@ -658,7 +933,7 @@ func sessionRulesLeft(name string, err, stopErr error) error {
 	}
 	return &sandboxapi.Error{Code: code,
 		Message: "sandbox " + name + " did not start: " + what + " could not be removed from its policy, " +
-			"so DefenseClaw stopped it again (its work is kept)",
+			"so " + stoppedUnverifiedOutcome(stopFlushes),
 		Detail: "a new session does not keep what was approved for the last one; start it again " +
 			"(the removal is tried first), and if this repeats, `defenseclaw sandbox doctor` checks the OpenShell gateway"}
 }
@@ -670,6 +945,10 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	// The record is judged against the driver the gateway runs now.
 	gw, err := m.driverGateway(ctx)
 	if err != nil {
+		return err
+	}
+	// A new session takes the supervisor of the gateway's release.
+	if err := m.sandboxReleaseRefusal(gw); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(ctx, defaultOpTimeout)
@@ -699,6 +978,31 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if !stoppedPhase(sb.Status.Phase) {
 		return sandboxapi.Errorf(sandboxapi.CodeConflict, "sandbox %s is %s, not stopped; stop it before starting a new session",
 			rec.Name, strings.ToLower(string(sb.Status.Phase)))
+	}
+	// A MicroVM whose workload ended still runs its VM, which OpenShell's
+	// start ends with no flush: only one the user asked to end goes on.
+	if err := lingeringStartRefusal(rec.Name, gw.Driver, sb, rec.PhaseReason, req.EndVM); err != nil {
+		return err
+	}
+	// No new session while a legacy guest runs unprotected; this one's
+	// start ends it when it is an ended legacy MicroVM (--end-vm).
+	if err := m.legacyRunRefusal(ctx, rec.Name); err != nil {
+		return err
+	}
+	// Containment may have detached providers or removed rules before an
+	// OpenShell error prevented its final confirmation, and the legacy VM
+	// may have stopped since: the record said so before the first change
+	// (OldSupervisorNetworkRestore), so the create-time policy comes back
+	// even when the closed-network checkpoint was not reached. The closed
+	// and providers fields alone are what earlier 1.0.4 builds of this
+	// change recorded, until 1.0.4 ships.
+	// A contained VM (record.Contained) gets the same.
+	restoreLegacyNetwork := rec.OldSupervisorNetworkRestore || rec.OldSupervisorNetworkClosed || len(rec.OldSupervisorProviders) > 0 ||
+		rec.Contained != "" || oldSupervisorLingering(auditPhase(sb.Status.Phase), rec)
+	// A sandbox an OpenShell before 0.1.5 created keeps a Docker bootstrap
+	// that 0.1.5 cannot read (GAP-0300): it moves to 0.1.5's format first.
+	if err := m.migrateBootstrap(gw, rec.Name, sb); err != nil {
+		return err
 	}
 	m.endSessionUnblocks(b)
 	eff, violations, err := m.resolveBoxViolations(b)
@@ -834,15 +1138,27 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 			return sandboxapi.Errorf(sandboxapi.CodeInternal, "save sandbox state: %v", err)
 		}
 	}
+	// Not while DefenseClaw restarts or upgrades the gateway, nor beside a
+	// guest contained since the run check above (lockRun).
+	unlockRun, err := m.lockRun(rec.Name)
+	if err != nil {
+		return err
+	}
 	m.lifecycle(ctx, b, audit.SandboxPhaseStarting, audit.SandboxTriggerStart, false, nil, nil)
-	if _, err := gw.Client.StartSandbox(ctx, rec.Name); err != nil {
+	_, err = gw.Client.StartSandbox(ctx, rec.Name)
+	unlockRun()
+	if err != nil {
 		m.dropGateway(gw, err)
 		m.restorePhase(ctx, gw, b, audit.SandboxTriggerStart, audit.SandboxPhaseStarting)
-		if e := errorPhaseRefusal(rec.Name, rec.WorkdirMode, rec.PhaseReason, err); e != nil {
+		if e := legacyBootstrapRefusal(rec.Name, gw.Version, err); e != nil {
+			return e
+		}
+		if e := m.errorPhaseRefusal(rec.Name, rec.PhaseReason, rec.Driver, err); e != nil {
 			return e
 		}
 		return upstream("start sandbox "+rec.Name, err)
 	}
+	m.forgetPending(rec.Name)
 	sb, err = gw.Client.WaitReady(ctx, rec.Name)
 	if err != nil {
 		m.restorePhase(ctx, gw, b, audit.SandboxTriggerStart, audit.SandboxPhaseStarting)
@@ -852,13 +1168,30 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 		}
 		return vmExitFailure(runtime.GOOS, m.managedMode(), gw.Driver, upstream("wait for sandbox "+rec.Name, err))
 	}
+	if restoreLegacyNetwork {
+		// The old VM is gone now. Restore only its create-time network policy,
+		// after the new supervisor is ready: never reopen a route while the
+		// legacy supervisor can still run background work. Session approvals
+		// removed above are not brought into the new session.
+		if err := m.restoreOldSupervisorNetwork(ctx, gw, b, sb, eff); err != nil {
+			detail := "DefenseClaw stopped the new session before it could run without its network policy"
+			if stopErr := m.stopUnverified(ctx, gw, b); stopErr != nil {
+				// Not stopped (a failed sync contains it instead, GAP-0902):
+				// the start failed, and the VM still runs.
+				detail = "DefenseClaw did not stop the new session, so it is still running: " + stopErr.Error()
+			}
+			return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable,
+				Message: "sandbox " + rec.Name + " did not restore its network on the new OpenShell supervisor: " + err.Error(),
+				Detail:  detail}
+		}
+	}
 	if rulesLeft != nil {
 		if err := m.endSessionRules(ctx, gw, b, eff); err != nil {
 			// Fail closed: a sandbox must not run a new session with a rule
 			// approved for the last one.
 			m.logf("sandbox %s: the rules approved for its last session are still in its policy: %v (before the start: %v); stopping it again",
 				rec.Name, err, rulesLeft)
-			return sessionRulesLeft(rec.Name, err, m.stopUnverified(ctx, gw, b))
+			return sessionRulesLeft(rec.Name, err, m.stopUnverified(ctx, gw, b), gw.Driver.StopFlushes)
 		}
 	}
 	if err := settle(ctx, m.opts.SettleDelay); err != nil {
@@ -873,6 +1206,9 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	b.rulesAdded, b.autoApproved = 0, nil
 	m.mu.Unlock()
 	m.lifecycle(ctx, b, auditPhase(sb.Status.Phase), audit.SandboxTriggerStart, false, nil, nil)
+	if restoreLegacyNetwork {
+		m.syncCredential(b, eff)
+	}
 	m.observeNow(b)
 	m.startWatch(b)
 	m.enforceApprovedRules(ctx, gw, b, eff)
@@ -1022,7 +1358,7 @@ func (m *Manager) deleteLocked(ctx context.Context, b *box, req sandboxapi.Delet
 	created := recordDriver(b.rec)
 	m.mu.Unlock()
 	otherDriver := created != gw.Driver.Name
-	sb, err := gw.Client.GetSandbox(ctx, name)
+	sb, err := m.getSandbox(ctx, gw, name)
 	gone := openshell.IsNotFound(err)
 	switch {
 	case err != nil && !gone && !otherDriver:
@@ -1075,8 +1411,19 @@ func (m *Manager) deleteLocked(ctx context.Context, b *box, req sandboxapi.Delet
 		if err != nil && !openshell.IsNotFound(err) {
 			m.dropGateway(gw, err)
 			m.deleteFailed(ctx, gw, b)
+			if pendingDriverOp(err) {
+				// Retry first; offer the last resort only after repeated
+				// error-phase refusals in one observed episode
+				// (rel-1-0-6:GAP-0446).
+				var phase openshell.SandboxPhase
+				if sb != nil {
+					phase = sb.Status.Phase
+				}
+				return nil, m.pendingRefusal(name, phase, m.managedMode())
+			}
 			return nil, upstream("delete sandbox "+name, err)
 		}
+		m.forgetPending(name)
 		err = gw.Client.WaitDeleted(ctx, name)
 		if err != nil && transientGatewayError(err) {
 			if cur, ok := m.reconnect(ctx, gw, err); ok {
@@ -1089,6 +1436,7 @@ func (m *Manager) deleteLocked(ctx context.Context, b *box, req sandboxapi.Delet
 			return nil, upstream("wait for sandbox "+name+" deletion", err)
 		}
 	}
+	m.forgetPending(name)
 	// The workload is gone: what it left in the project stays on this
 	// machine, so the guard makes its final pass before it is released.
 	m.finishGuard(ctx, b)
@@ -1119,15 +1467,20 @@ func retainedPhase(p audit.SandboxPhase) bool {
 
 // retention is how long b may stay stopped: its floor's
 // delete_stopped_after (the sandbox's resolved policy, else
-// openshell.admin, which on a managed daemon is the person's floor); 0
+// openshell.admin, which on a managed daemon is this sandbox's floor); 0
 // keeps it.
 func (m *Manager) retention(b *box) time.Duration {
 	m.mu.Lock()
 	eff := b.eff
+	name := b.rec.Name
 	m.mu.Unlock()
 	f, ok := effectiveFloor(eff)
 	if !ok {
-		f = m.config().OpenShell.Admin
+		cfg := m.configForSandbox(name)
+		if cfg == nil {
+			return 0
+		}
+		f = cfg.OpenShell.Admin
 	}
 	if f.DeleteStoppedAfter == "" {
 		return 0
@@ -1375,6 +1728,9 @@ func (m *Manager) removeSandboxDir(name string) {
 // (unrecorded) is written too.
 func (m *Manager) retire(b *box) {
 	m.mu.Lock()
+	if m.boxes[b.rec.Name] == b {
+		m.forgetPending(b.rec.Name)
+	}
 	b.retained, b.missing, b.unrecorded = true, false, false
 	b.sb, b.eff, b.decider, b.cred = nil, nil, nil, egress.Credential{}
 	b.rec.Retained = true
@@ -1393,6 +1749,7 @@ func (m *Manager) forget(b *box) {
 	b.deleted = true
 	name, gone := b.rec.Name, m.boxes[b.rec.Name] == b
 	if gone {
+		m.forgetPending(name)
 		delete(m.boxes, name)
 	}
 	m.mu.Unlock()
@@ -1446,7 +1803,7 @@ func (m *Manager) Undo(ctx context.Context, name string, req sandboxapi.UndoRequ
 		gw, err := m.gateway(ctx)
 		switch {
 		case err == nil:
-			sb, err := gw.Client.GetSandbox(ctx, name)
+			sb, err := m.getSandbox(ctx, gw, name)
 			switch {
 			case err == nil && m.sameSandbox(b, sb):
 				m.mu.Lock()
@@ -1456,8 +1813,9 @@ func (m *Manager) Undo(ctx context.Context, name string, req sandboxapi.UndoRequ
 			case err == nil:
 				// Another sandbox took the name: this one's agent is gone.
 				m.mu.Lock()
-				b.missing = true
+				report := m.missingFromLocked(gw, b)
 				m.mu.Unlock()
+				report(ctx)
 			case !openshell.IsNotFound(err):
 				if !req.Preview {
 					return nil, upstream("look up sandbox "+name, err)
@@ -1586,6 +1944,36 @@ func (m *Manager) recordSnapshot(ctx context.Context, b *box) {
 		ev.SnapshotRef = snap.Git.Ref
 	}
 	m.tel.RecordSandboxWorkspace(ctx, ev)
+}
+
+// ReportDisk names in the activity feed the filling own disk of a running
+// MicroVM that its session found (GAP-1140): the session warned in its
+// terminal and summary only, so `sandbox activity` said nothing until the
+// disk was full and the session over. Report only: nothing is stopped.
+func (m *Manager) ReportDisk(_ context.Context, name string, r sandboxapi.DiskReport) error {
+	if _, err := m.box(name); err != nil {
+		return err
+	}
+	if r.SizeBytes <= 0 || r.FreeBytes < 0 || r.FreeBytes > r.SizeBytes {
+		return sandboxapi.Errorf(sandboxapi.CodeInvalid, "size_bytes must be positive and free_bytes between 0 and size_bytes")
+	}
+	used := (r.SizeBytes - r.FreeBytes) * 100 / r.SizeBytes
+	msg := fmt.Sprintf("its own disk is %d%% full (%s of %s free)", used, diskBytes(r.FreeBytes), diskBytes(r.SizeBytes))
+	if r.Fast {
+		msg += " and filling fast"
+	}
+	msg += ": a MicroVM stopped with its disk full cannot start again; `defenseclaw sandbox exec " + name +
+		" -- df -h /` shows it, `defenseclaw sandbox pull " + name + " --apply` brings its work back before it fills"
+	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: name, Reason: sandboxapi.ReasonDiskFilling, Message: msg})
+	return nil
+}
+
+// diskBytes is n bytes in MiB, or in GiB with one decimal from 1 GiB.
+func diskBytes(n int64) string {
+	if n >= 1<<30 {
+		return fmt.Sprintf("%.1f GiB", float64(n)/(1<<30))
+	}
+	return fmt.Sprintf("%d MiB", n>>20)
 }
 
 // ReportWorkspace records a copy-mode workspace step the CLI ran (upload,

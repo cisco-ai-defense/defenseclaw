@@ -33,6 +33,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -91,10 +92,18 @@ type ScanVerdict struct {
 	TraceContext        trace.SpanContext `json:"-"`
 	EnforcementID       string            `json:"-"`
 	FindingsEmitted     bool              `json:"-"`
+	// findingProfiles parallels Findings for a profile meet. It is retained
+	// for the audit emitter and never exposed to the caller.
+	findingProfiles   []string
+	findingSeverities []string
 	// findingSeverity is the severity of the judge that reported each
 	// finding of a verdict merged from several judges (mergeJudgeVerdicts),
 	// whose own severity is the strictest one. In-process only.
 	findingSeverity map[string]string
+	// decisionConfirm marks a decision-model confirm made without the LLM
+	// judge (cascade 2): the hook lane maps it with the ask armed
+	// (decisionModelConfirmAction). In-process only.
+	decisionConfirm bool
 }
 
 func allowVerdict(scanner string) *ScanVerdict {
@@ -344,6 +353,14 @@ func (g *GuardrailInspector) currentJudge() *LLMJudge {
 	return g.judge
 }
 
+// requestJudge is the judge a request decides with: the one of the
+// generation it pinned (judgeOf), so its verdict and its records' policy
+// stamp come from one generation (GAP-1006); the inspector's own judge
+// outside a gateway.
+func (g *GuardrailInspector) requestJudge(ctx context.Context) *LLMJudge {
+	return judgeOf(pinnedGeneration(ctx), g.currentJudge())
+}
+
 // SetCiscoInspector replaces the remote inspector after construction.
 // Used by NewGuardrailProxy in managed_enterprise mode to inject the
 // token-authenticated defense_claw client. Pass nil to disable the
@@ -530,7 +547,14 @@ func (g *GuardrailInspector) startPhaseSpan(ctx context.Context, phase string) (
 	if g.tracer == nil || g.tracer.startPhase == nil {
 		return ctx, func(string, string, time.Duration) {}
 	}
-	return g.tracer.startPhase(ctx, phase)
+	phaseCtx, end := g.tracer.startPhase(ctx, phase)
+	if phaseCtx == nil {
+		phaseCtx = ctx
+	}
+	if end == nil {
+		end = func(string, string, time.Duration) {}
+	}
+	return phaseCtx, end
 }
 
 // SetDetectionStrategy configures the multi-strategy dispatch fields.
@@ -740,6 +764,67 @@ func (g *GuardrailInspector) inspect(ctx context.Context, direction, content, ra
 
 // inspectStrategy runs the configured detection strategy on one text.
 func (g *GuardrailInspector) inspectStrategy(ctx context.Context, strategy, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict {
+	if !g.managedMode {
+		if resolved := proxyProfileFor(ctx); resolved != nil && resolved.set != nil {
+			if meet := resolved.evaluationMeet(); meet != nil {
+				var combined *ScanVerdict
+				connector := profileRequestConnector(ctx)
+				for _, member := range meet.members {
+					cfg := resolved.set.profileConfig(member)
+					memberCtx := meetMemberContext(ctx, resolved, member)
+					// Judge each member under its own settings before the observe
+					// ceiling. The outer meet applies the strongest member action.
+					verdict := g.inspectStrategySingle(memberCtx, strategy, direction, content, messages, model, "action")
+					if verdict == nil {
+						continue
+					}
+					if !configBlocksOn(cfg, connector, profilePathInspect) &&
+						(verdict.Action == guardrailActionBlock || verdict.Action == guardrailActionConfirm) {
+						verdict.Action = guardrailActionAlert
+					}
+					if combined == nil {
+						combined = &ScanVerdict{Action: guardrailActionAllow, Severity: "NONE"}
+					}
+					if strongerGuardrailAction(combined.Action, verdict.Action) != combined.Action {
+						combined.Action, combined.Reason = verdict.Action, verdict.Reason
+					}
+					if guardrailSeverityRank(verdict.Severity) > guardrailSeverityRank(combined.Severity) {
+						combined.Severity = verdict.Severity
+					}
+					if combined.Scanner == "" {
+						combined.Scanner = verdict.Scanner
+					}
+					combined.CiscoElapsedMs += verdict.CiscoElapsedMs
+					combined.JudgeFailed = combined.JudgeFailed || verdict.JudgeFailed
+					if verdict.Confidence > combined.Confidence {
+						combined.Confidence = verdict.Confidence
+					}
+					if verdict.RedactionEnabled != nil &&
+						(combined.RedactionEnabled == nil || *verdict.RedactionEnabled) {
+						combined.RedactionEnabled = verdict.RedactionEnabled
+					}
+					combined.Findings = append(combined.Findings, verdict.Findings...)
+					for _, finding := range verdict.Findings {
+						combined.findingProfiles = append(combined.findingProfiles, member)
+						severity := verdict.Severity
+						if own := verdict.findingSeverity[finding]; own != "" {
+							severity = own
+						}
+						combined.findingSeverities = append(combined.findingSeverities, severity)
+					}
+					combined.ScannerSources = appendUniqueStrings(combined.ScannerSources, verdict.ScannerSources...)
+				}
+				if combined != nil {
+					return combined
+				}
+				return allowVerdict("local-pattern")
+			}
+		}
+	}
+	return g.inspectStrategySingle(ctx, strategy, direction, content, messages, model, mode)
+}
+
+func (g *GuardrailInspector) inspectStrategySingle(ctx context.Context, strategy, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict {
 	switch {
 	case g.managedMode:
 		// managed_enterprise: Cisco AI Defense (CMID-authenticated) is
@@ -793,7 +878,7 @@ func (g *GuardrailInspector) inspectManagedAIDOnly(ctx context.Context, directio
 	}
 	t0 := time.Now()
 	ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-	v := ciscoClient.Inspect(ciscoCtx, messages)
+	v := inspectCisco(ciscoCtx, ciscoClient, messages)
 	duration := time.Since(t0)
 	elapsed := float64(duration) / float64(time.Millisecond)
 	endCisco(phaseAction(v), phaseSeverity(v), duration)
@@ -812,10 +897,32 @@ func (g *GuardrailInspector) inspectManagedAIDOnly(ctx context.Context, directio
 	return v
 }
 
+// inspectCisco sends the proxy lane's messages to AID without their tool
+// fields. A provider's tool_calls are forwarded raw (null, [], object
+// arguments, no id), and AID rejects the whole request over one malformed
+// entry, so this lane keeps sending role and content only. The hook lane is
+// what sends tool calls, in a shape it builds itself. client is the caller's
+// currentCiscoInspector snapshot.
+func inspectCisco(ctx context.Context, client Inspector, messages []ChatMessage) *ScanVerdict {
+	return client.Inspect(ctx, withoutAIDToolCalls(messages))
+}
+
+// withoutAIDToolCalls copies messages with ToolCalls cleared, leaving the
+// caller's slice untouched.
+func withoutAIDToolCalls(messages []ChatMessage) []ChatMessage {
+	out := make([]ChatMessage, len(messages))
+	copy(out, messages)
+	for i := range out {
+		out[i].ToolCalls = nil
+	}
+	return out
+}
+
 // managedAIDContentIsInspectable mirrors the text AID actually receives.
-// Both Cisco clients serialize ChatMessage.Content and ignore RawContent,
-// tool calls, and other local-only fields, so whitespace-only Content cannot
-// produce a meaningful remote decision.
+// Both Cisco clients serialize ChatMessage.Content and ignore RawContent and
+// other local-only fields, and the proxy lane drops tool calls before sending
+// (see inspectCisco), so whitespace-only Content cannot produce a meaningful
+// remote decision.
 func managedAIDContentIsInspectable(content string) bool {
 	return strings.TrimSpace(content) != ""
 }
@@ -831,8 +938,8 @@ func managedAIDMessagesHaveInspectableContent(messages []ChatMessage) bool {
 
 // managedAIDMessagesForInspection closes the gap between provider-native
 // prompt formats and the canonical message payload sent to Cisco AI Defense.
-// Passthrough routes expose top-level prompt text through content, while both
-// Cisco clients serialize only ChatMessage.Content. When no existing message
+// Passthrough routes expose top-level prompt text through content, while the
+// proxy lane sends AID only ChatMessage.Content. When no existing message
 // has serializable text, preserve the original history and append one user
 // turn carrying that prompt. Existing chat history is already authoritative
 // and must not receive a duplicate; blank prompts keep the benign no_content
@@ -1025,7 +1132,7 @@ func (g *GuardrailInspector) inspectRegexOnly(ctx context.Context, direction, co
 	if (sm == "remote" || sm == "both") && ciscoClient != nil && len(messages) > 0 {
 		t0 := time.Now()
 		ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-		ciscoResult = ciscoClient.Inspect(ciscoCtx, messages)
+		ciscoResult = inspectCisco(ciscoCtx, ciscoClient, messages)
 		ciscoElapsed := time.Since(t0)
 		ciscoElapsedMs = float64(ciscoElapsed) / float64(time.Millisecond)
 		endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), ciscoElapsed)
@@ -1088,7 +1195,7 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	runCisco := func() {
 		t0 := time.Now()
 		ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-		ciscoResult = ciscoClient.Inspect(ciscoCtx, messages)
+		ciscoResult = inspectCisco(ciscoCtx, ciscoClient, messages)
 		ciscoElapsed := time.Since(t0)
 		ciscoElapsedMs = float64(ciscoElapsed) / float64(time.Millisecond)
 		endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), ciscoElapsed)
@@ -1128,7 +1235,7 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	// signals as MEDIUM alerts so they appear in the audit log rather than
 	// being silently dropped.
 	var judgeVerdict *ScanVerdict
-	judge := g.currentJudge()
+	judge := g.requestJudge(ctx)
 	if len(review) > 0 {
 		if judge != nil {
 			judgeStart := time.Now()
@@ -1200,7 +1307,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	// fall back to an error sentinel so the parent always proceeds
 	// (judge → regex fallback, triage → empty signal set) even under
 	// a pathological policy / scanner bug.
-	if judge := g.currentJudge(); judge != nil {
+	if judge := g.requestJudge(ctx); judge != nil && judge.cfg != nil {
 		go func() {
 			defer func() {
 				if rec := recover(); rec != nil {
@@ -1265,7 +1372,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 		if (g.scannerMode == "remote" || g.scannerMode == "both") && ciscoClient != nil && len(messages) > 0 {
 			t0 := time.Now()
 			ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-			ciscoResult = ciscoClient.Inspect(ciscoCtx, messages)
+			ciscoResult = inspectCisco(ciscoCtx, ciscoClient, messages)
 			ciscoElapsed := time.Since(t0)
 			ciscoElapsedMs = float64(ciscoElapsed) / float64(time.Millisecond)
 			endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), ciscoElapsed)
@@ -1319,7 +1426,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	if (g.scannerMode == "remote" || g.scannerMode == "both") && ciscoClient != nil && len(messages) > 0 {
 		t0 := time.Now()
 		ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-		ciscoResult = ciscoClient.Inspect(ciscoCtx, messages)
+		ciscoResult = inspectCisco(ciscoCtx, ciscoClient, messages)
 		ciscoElapsed := time.Since(t0)
 		ciscoElapsedMs = float64(ciscoElapsed) / float64(time.Millisecond)
 		endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), ciscoElapsed)
@@ -1672,8 +1779,8 @@ var exfilTargetRegexes = []*regexp.Regexp{
 	regexp.MustCompile(`(?:^|[/\s'"` + "`" + `])\.aws/(?:credentials|config)\b`),
 }
 
-var exfilReadIntentRegex = regexp.MustCompile(`\b(?:cat|collect|copy|dump|extract|fetch|read|steal)\b`)
-var exfilEgressIntentRegex = regexp.MustCompile(`\b(?:exfil(?:trate|tration)?|post|send|transmit|upload)\b`)
+var exfilReadIntentRegex = lazyregexp.New(`\b(?:cat|collect|copy|dump|extract|fetch|read|steal)\b`)
+var exfilEgressIntentRegex = lazyregexp.New(`\b(?:exfil(?:trate|tration)?|post|send|transmit|upload)\b`)
 
 const exfilIntentContextBytes = 240
 
@@ -2747,14 +2854,14 @@ func containsHeartbeatProbeSignature(s string) bool {
 // Whitespace is permissive so messaging-bridge transport banners that
 // reflow whitespace do not break the bypass; the leading "\bRead\b" word
 // anchor prevents matching arbitrary tokens like "thread HEARTBEAT.md".
-var heartbeatProbeAnchorRe = regexp.MustCompile(`(?i)\bRead\s+HEARTBEAT\.md\b`)
+var heartbeatProbeAnchorRe = lazyregexp.New(`(?i)\bRead\s+HEARTBEAT\.md\b`)
 
 // heartbeatOKFooterRe matches when a message ends with the canonical
 // HEARTBEAT_OK response-token instruction, allowing for trailing
 // punctuation / whitespace. Used by isHeartbeatMessage to reject any
 // "Read HEARTBEAT.md. <injection tail>" smuggling attempt because a
 // legitimate probe ALWAYS ends by telling the LLM to reply HEARTBEAT_OK.
-var heartbeatOKFooterRe = regexp.MustCompile(`(?i)\bHEARTBEAT_OK\b[\s"'.!?)\]]*$`)
+var heartbeatOKFooterRe = lazyregexp.New(`(?i)\bHEARTBEAT_OK\b[\s"'.!?)\]]*$`)
 
 // heartbeatInjectionHintRe matches a small vocabulary of unambiguous
 // prompt-injection / exfil imperatives. If any of them appears anywhere
@@ -2768,7 +2875,7 @@ var heartbeatOKFooterRe = regexp.MustCompile(`(?i)\bHEARTBEAT_OK\b[\s"'.!?)\]]*$
 // match the legitimate probe body ("do not infer or repeat old tasks
 // from prior chats" — the probe text contains "prior" as a bare word,
 // so we only match IGNORE + PRIOR together, not PRIOR alone).
-var heartbeatInjectionHintRe = regexp.MustCompile(
+var heartbeatInjectionHintRe = lazyregexp.New(
 	`(?i)\b(?:` +
 		`IGNORE(?:\s+ALL)?\s+(?:PRIOR|PREVIOUS)|` +
 		`DISREGARD(?:\s+(?:ALL|ANY|PRIOR|PREVIOUS|THE))?\s*(?:INSTRUCTION|PROMPT|RULE|CONTEXT)|` +
@@ -2800,7 +2907,7 @@ var heartbeatInjectionHintRe = regexp.MustCompile(
 // probe go in. The canonical probes are short, imperative, and only
 // reference the in-repo files HEARTBEAT.md / BOOTSTRAP.md, so anything
 // matching here is by definition not part of either probe.
-var heartbeatScannerHintRe = regexp.MustCompile(
+var heartbeatScannerHintRe = lazyregexp.New(
 	`(?i)(?:` +
 		// home-directory secret stores and SSH artifacts
 		`~/\.(?:ssh|aws|kube|gcp|azure|terraform|netrc)\b|` +
@@ -2898,12 +3005,12 @@ const sessionStartupAnchor = "A new session was started via /new or /reset"
 // Secret redaction
 // ---------------------------------------------------------------------------
 
-var secretRedactRe = regexp.MustCompile(
+var secretRedactRe = lazyregexp.New(
 	`(?i)(?:sk-ant-|sk-proj-|sk-|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_` +
 		`|xox[bpors]-|AIza|eyJ)[A-Za-z0-9\-_+/=.]{6,}` +
 		`|AKIA[A-Z0-9]{12,}`)
 
-var kvRedactRe = regexp.MustCompile(
+var kvRedactRe = lazyregexp.New(
 	`(?i)((?:password|secret|token|api_key|apikey|aws_secret_access)[=:\s]+)\S{6,}`)
 
 func redactSecrets(text string) string {

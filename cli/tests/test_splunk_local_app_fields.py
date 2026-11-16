@@ -65,26 +65,38 @@ def _ai_runtime_query(title: str) -> str:
     return query
 
 
-def test_ai_runtime_activity_counts_distinct_findings_without_collapsing_unknown_ids() -> None:
+def test_ai_runtime_activity_counts_distinct_required_finding_ids() -> None:
     macros = _conf("macros.conf")
     fields = macros["defenseclaw_demo_ai_runtime_fields"]["definition"]
     assert re.search(r'runtime_finding_id=coalesce\([^\n]+, "\(unknown\)"\)', fields)
 
     searches = (
         ("Agent activity with no hook decision", "runtime_hook_seen", "runtime_tactic", "stats count"),
-        ("Would-block by control (monitor mode)", "runtime_kernel_outcome", "runtime_kernel_control", "timechart"),
+        # Each native hit once: a finding's rows carry its hit count (GAP-1400).
+        (
+            "Would-block by control (monitor mode)",
+            "runtime_kernel_outcome",
+            "runtime_kernel_control",
+            "timechart",
+        ),
     )
     for title, filter_field, distinct_field, aggregation in searches:
         query = _ai_runtime_query(title)
         commands = [command.strip() for command in query.split(" | ")]
         assert filter_field in commands[1], title
-        assert commands[2] == "streamstats count as runtime_event_row", title
-        assert commands[3] == (
-            'eval runtime_activity_key=if(runtime_finding_id="(unknown)" OR runtime_finding_id="", '
-            '"event:" . runtime_event_row, "finding:" . runtime_finding_id)'
-        ), title
-        assert commands[4] == f"dedup host runtime_activity_key {distinct_field}", title
-        assert commands[5].startswith(aggregation), title
+        next_command = 2
+        if aggregation == "timechart":
+            assert commands[next_command] == "sort 0 + _time", title
+            next_command += 1
+        if title == "Would-block by control (monitor mode)":
+            assert commands[next_command] == "eval runtime_kernel_hits=coalesce(runtime_kernel_count, 1)", title
+            assert commands[next_command + 1] == (
+                "eventstats max(runtime_kernel_hits) as runtime_kernel_hits by host runtime_finding_id runtime_kernel_control"
+            ), title
+            assert commands[-1] == "timechart span=10m sum(runtime_kernel_hits) by runtime_kernel_control", title
+            next_command += 2
+        assert commands[next_command] == f"dedup host runtime_finding_id {distinct_field}", title
+        assert commands[next_command + 1].startswith(aggregation), title
 
     assert _ai_runtime_query("Would-block (monitor mode)") == (
         '`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.plane_health" '

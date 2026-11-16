@@ -6,10 +6,44 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
+
+type guardianTargetLstatDecision struct {
+	missing bool
+	damage  string
+}
+
+// classifyGuardianTargetLstat never follows the target. A failed lookup is
+// unknown except for a missing name; every existing non-regular entry is damage.
+func classifyGuardianTargetLstat(info fs.FileInfo, err error) (guardianTargetLstatDecision, error) {
+	if errors.Is(err, os.ErrNotExist) {
+		return guardianTargetLstatDecision{missing: true, damage: "missing"}, nil
+	}
+	if err != nil {
+		return guardianTargetLstatDecision{}, err
+	}
+	if info == nil {
+		return guardianTargetLstatDecision{}, errors.New("lstat returned no file information")
+	}
+	mode := info.Mode()
+	if mode.IsRegular() {
+		return guardianTargetLstatDecision{}, nil
+	}
+	kind := "other file type"
+	switch {
+	case mode&os.ModeSymlink != 0:
+		kind = "symbolic link"
+	case mode&os.ModeIrregular != 0:
+		kind = "reparse point or other irregular file"
+	case mode.IsDir():
+		kind = "directory"
+	}
+	return guardianTargetLstatDecision{damage: "not a regular file (" + kind + ")"}, nil
+}
 
 // The guardian and each managed connector target use the same guarded digest
 // memo. These functions are replaceable in guardian tests.

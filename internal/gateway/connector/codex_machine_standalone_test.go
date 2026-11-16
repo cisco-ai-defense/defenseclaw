@@ -54,7 +54,7 @@ func TestWindowsCodexStandaloneRequirementsBindEventAndContract(t *testing.T) {
 	if opts.HookContractID == "" {
 		t.Fatal("no default Codex hook contract")
 	}
-	rendered, _, err := reconcileWindowsCodexRequirements(nil, opts)
+	rendered, _, err := reconcileWindowsCodexRequirements(nil, opts, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,13 @@ func TestWindowsCodexStandaloneRequirementsBindEventAndContract(t *testing.T) {
 		if command != handler["command_windows"] {
 			t.Fatalf("hooks.%s command and command_windows differ", group.eventType)
 		}
-		script := decodeTestEncodedCommand(t, command)
+		// GAP-1908: the launcher starts through the system cmd.exe.
+		if want := windowsSystemCmdExe() + ` /d /v:off /c "` + opts.HookBinary + `" hook --connector codex --enterprise-managed --event ` +
+			group.eventType + " --hook-contract " + opts.HookContractID; command != want {
+			t.Fatalf("hooks.%s command = %q, want %q", group.eventType, command, want)
+		}
+		// The 1.0.4 bridge, still rendered for a path the direct form cannot carry.
+		script := decodeTestEncodedCommand(t, bridgeWindowsCodexBoundManagedHookCommand(opts.HookBinary, group.eventType, opts.HookContractID))
 		for _, want := range []string{
 			"[System.Diagnostics.ProcessStartInfo]::new('" + opts.HookBinary + "','hook --connector codex --enterprise-managed --event " +
 				group.eventType + " --hook-contract " + opts.HookContractID + "')",
@@ -90,9 +96,9 @@ func TestWindowsCodexStandaloneRequirementsBindEventAndContract(t *testing.T) {
 		}
 	}
 
-	// The Secure Client options keep the certified unbound command.
+	// Options without a contract render the pre-1.0 unbound command.
 	secureClient := testWindowsCodexMachineOptions()
-	scRendered, _, err := reconcileWindowsCodexRequirements(nil, secureClient)
+	scRendered, _, err := reconcileWindowsCodexRequirements(nil, secureClient, true)
 	if err != nil {
 		t.Fatal(err)
 	}

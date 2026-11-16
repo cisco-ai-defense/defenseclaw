@@ -45,6 +45,11 @@ from defenseclaw.observability.local_stack import (
 
 ROOT = Path(__file__).resolve().parents[2]
 REAL_BUNDLE = ROOT / "bundles" / "local_observability_stack"
+FLEET_TEMPLATES = (
+    "docker-compose.fleet.yml",
+    "prometheus/examples/fleet.yml",
+    "grafana/dashboards/defenseclaw-fleet.json",
+)
 
 
 @pytest.fixture()
@@ -105,6 +110,38 @@ def test_untouched_baseline_refreshes_without_false_conflict(
     assert second.conflict_paths == ()
     assert destination.joinpath("README.md").read_bytes().endswith(b"new target release\n")
     assert (tmp_path / "backup-2/local-observability-stack/managed/README.md").read_bytes() == old
+
+
+@pytest.mark.parametrize("explicit_off", [False, True])
+def test_fleet_off_upgrade_removes_only_shipped_templates(
+    installed_bundle: tuple[Path, Path, Path], tmp_path: Path, explicit_off: bool,
+) -> None:
+    source, data_dir, destination = installed_bundle
+    if explicit_off:
+        (data_dir / "config.yaml").write_text("fleet:\n  enabled: false\n", encoding="utf-8")
+    for relative in FLEET_TEMPLATES:
+        (source / relative).unlink()
+    custom = destination / "grafana/dashboards/operator-fleet.json"
+    custom.write_text("operator dashboard", encoding="utf-8")
+
+    result = _upgrade(source, data_dir, tmp_path / "backup")
+
+    assert result.refreshed is True
+    assert all(not (destination / relative).exists() for relative in FLEET_TEMPLATES)
+    assert custom.read_text(encoding="utf-8") == "operator dashboard"
+
+
+def test_fleet_enabled_upgrade_keeps_optional_templates(
+    installed_bundle: tuple[Path, Path, Path], tmp_path: Path,
+) -> None:
+    source, data_dir, destination = installed_bundle
+    (data_dir / "config.yaml").write_text("fleet:\n  enabled: true\n", encoding="utf-8")
+    for relative in FLEET_TEMPLATES:
+        (source / relative).unlink()
+
+    _upgrade(source, data_dir, tmp_path / "backup")
+
+    assert all((destination / relative).is_file() for relative in FLEET_TEMPLATES)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows flush semantics")
@@ -752,6 +789,41 @@ def test_live_smoke_requires_every_readiness_probe_and_dashboard_uid() -> None:
         patch("defenseclaw.bundle_refresh._http_get_json", return_value=complete[:-1]),
     ):
         assert _live_local_observability_smoke(1) == ["grafana_dashboard_inventory_incomplete"]
+
+
+def test_upgrade_smoke_sends_no_grafana_password_to_an_unverified_connected_peer() -> None:
+    from defenseclaw import bundle_refresh
+
+    sent = []
+
+    def answer(request, *, timeout):  # noqa: ANN001, ANN202
+        sent.append(request.get_header("Authorization"))
+        accepted = MagicMock()
+        accepted.__enter__.return_value.status = 200
+        accepted.__enter__.return_value.read.return_value = b"[]"
+        return accepted
+
+    peer = MagicMock()
+    peer.getsockname.return_value = ("127.0.0.1", 51001)
+    peer.getpeername.return_value = ("127.0.0.1", 3000)
+    refused = False
+    with (
+        patch("defenseclaw.bundle_refresh.urllib.request.urlopen", side_effect=answer),
+        patch("defenseclaw.observability.local_stack.socket.create_connection", return_value=peer),
+        patch("defenseclaw.observability.local_stack.CommandRunner.run", return_value=MagicMock(returncode=1)),
+        patch("defenseclaw.gateway._managed_connected_verifier_spec", return_value=None),
+        patch("defenseclaw.gateway._per_user_connected_verifier", return_value="trusted-gateway"),
+    ):
+        try:
+            bundle_refresh._http_get_json(
+                "http://127.0.0.1:3000/api/search?type=dash-db",
+                basic_auth=("admin", "A" * 40),
+            )
+        except OSError:
+            refused = True
+    assert sent == []
+    peer.sendall.assert_not_called()
+    assert refused
 
 
 @pytest.mark.skipif(os.name == "nt", reason="symlink semantics require POSIX")

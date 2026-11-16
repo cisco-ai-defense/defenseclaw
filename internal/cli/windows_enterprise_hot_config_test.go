@@ -14,49 +14,97 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // hotConfigHost stages an installed config and a supplied one, and stubs what
 // a config-only ensure touches outside them.
 type hotConfigHost struct {
-	configPath    string
-	writes        []string
-	adopted       bool
-	digestCalls   int
-	adoptAfter    int
-	refreshes     int
+	configPath  string
+	next        string
+	writes      []string
+	adopted     bool
+	recovers    int
+	digestCalls int
+	adoptAfter  int
+	refreshes   int
+	// GAP-0779: the config bytes each approved-source refresh was asked to
+	// record, and the error it returns.
+	approved   []string
+	approveErr error
+	heals      int
+	// The targets record of a refreshing apply (GAP-0847): how often it was
+	// taken and put back, what fails, and the targets it says are dropped.
+	targetRecords    int
+	targetRestores   int
+	targetRecordErr  error
+	targetRestoreErr error
+	dropped          []enterprisehooks.ManifestTarget
+	// GAP-0905: the live proof that the dropped targets' hooks are back.
+	hookProofs    [][]enterprisehooks.ManifestTarget
+	hookProofErr  error
+	stops         int
+	closes        int
+	closureHeld   bool
+	releases      int
 	bundleID      string
 	bundleVersion uint64
 }
 
 // digest is what the installed CLI's policy digest prints: the policy the
-// installed config computes to, and the one the gateway reports.
+// installed config computes to, and the one the gateway reports. The
+// installed config computes to policy b while it holds the supplied config,
+// and to policy a otherwise (the previous config, or the one an undo put
+// back). A gateway that adopts follows config.yaml; one that does not keeps
+// enforcing policy a, the previous config's.
+// digestThenOutage proves the running policy once, for the precommit check
+// that runs before config.yaml changes, and then fails with outage: the
+// gateway goes down during the apply, after that proof.
+func (host *hotConfigHost) digestThenOutage(outage error) func(context.Context) ([]byte, error) {
+	calls := 0
+	return func(ctx context.Context) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return host.digest(ctx)
+		}
+		return nil, outage
+	}
+}
+
 func (host *hotConfigHost) digest(context.Context) ([]byte, error) {
 	host.digestCalls++
+	effective := "sha256:" + strings.Repeat("a", 64)
+	if installed, err := os.ReadFile(host.configPath); err == nil && string(installed) == host.next {
+		effective = "sha256:" + strings.Repeat("b", 64)
+	}
 	reported := "sha256:" + strings.Repeat("a", 64)
 	if host.adopted {
-		reported = "sha256:" + strings.Repeat("b", 64)
+		reported = effective
 	}
 	generation := len(host.writes) + 10
 	gatewayGeneration := generation
 	if host.adoptAfter > 0 && host.digestCalls < host.adoptAfter {
 		gatewayGeneration--
 	}
-	return []byte(`{"effective_digest":"sha256:` + strings.Repeat("b", 64) +
+	return []byte(`{"effective_digest":"` + effective +
 		`","config_generation":` + strconv.Itoa(generation) +
 		`,"config_generation_recorded":true,"gateway_reported_digest":"` + reported +
 		`","gateway_reported_config_generation":` + strconv.Itoa(gatewayGeneration) +
@@ -64,10 +112,21 @@ func (host *hotConfigHost) digest(context.Context) ([]byte, error) {
 		`","gateway_reported_bundle_version":` + strconv.FormatUint(host.bundleVersion, 10) + `}`), nil
 }
 
+// bundleRun is a signed bundle run with a verified receipt (principal, bundle
+// ID and version), the bundle the host's gateway names once it adopts the
+// config: a bundle config is adopted only with that identity.
+func (host *hotConfigHost) bundleRun() *windowsBundleRun {
+	if host.bundleID == "" {
+		host.bundleID, host.bundleVersion = "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8", 2
+	}
+	return &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{
+		BundleID: host.bundleID, Version: host.bundleVersion, Principal: "control-plane:acme/alice", SignerKeyID: "k1"}}}
+}
+
 func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *windowsEnterpriseLifecycleOptions) {
 	t.Helper()
 	dir := t.TempDir()
-	host := &hotConfigHost{configPath: filepath.Join(dir, "etc", "config.yaml")}
+	host := &hotConfigHost{configPath: filepath.Join(dir, "etc", "config.yaml"), next: next}
 	supplied := filepath.Join(dir, "supplied.yaml")
 	for path, body := range map[string]string{host.configPath: previous, supplied: next} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -83,28 +142,104 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 	validateSeam, writeSeam := windowsEnterpriseHotConfigValidate, windowsEnterpriseHotConfigWrite
 	timeoutSeam, restartTimeoutSeam, pollSeam := windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigRestartTimeout, windowsEnterpriseHotConfigPoll
 	sourceSeam, refreshSeam := windowsEnterpriseHotConfigSourceCheck, windowsEnterpriseHotConfigRefreshTargets
-	reloadSeam := windowsEnterpriseHotBundleReload
+	leafDriftSeam, manifestSourceSeam, manifestStagerSeam := windowsEnterpriseInstalledLeafDrift, windowsEnterpriseManifestSourceCheck, windowsEnterpriseApprovedManifestStager
+	runtimeCandidateSeam := windowsEnterpriseStandaloneRuntimeCandidateCheck
+	recordSeam := windowsEnterpriseHotConfigTargetsRecord
+	hookProofSeam := windowsEnterpriseHotConfigTargetHooksProven
+	publishedTargetsSeam, renderTimeoutSeam := windowsEnterpriseHotConfigPublishedTargets, windowsEnterpriseHotConfigRenderTimeout
+	reloadSeam, failClosedSeam := windowsEnterpriseHotBundleReload, windowsEnterpriseHotConfigFailClosed
+	closeHooksSeam, hooksHeldSeam, releaseHooksSeam := windowsEnterpriseHotConfigCloseHooks, windowsEnterpriseHotConfigHooksHeld, windowsEnterpriseHotConfigReleaseHooks
+	restartSeam, recoverSeam := windowsEnterpriseHotConfigRestart, windowsEnterpriseHotConfigRecover
+	approveSeam, healSeam := windowsEnterpriseHotConfigApproveSource, windowsEnterpriseHealApprovedSource
 	t.Cleanup(func() {
+		windowsEnterpriseHotConfigApproveSource, windowsEnterpriseHealApprovedSource = approveSeam, healSeam
+		windowsEnterpriseHotConfigRestart, windowsEnterpriseHotConfigRecover = restartSeam, recoverSeam
+		windowsEnterpriseHotConfigFailClosed = failClosedSeam
+		windowsEnterpriseHotConfigCloseHooks, windowsEnterpriseHotConfigHooksHeld, windowsEnterpriseHotConfigReleaseHooks = closeHooksSeam, hooksHeldSeam, releaseHooksSeam
 		windowsEnterpriseHotConfigRefreshTargets = refreshSeam
+		windowsEnterpriseHotConfigTargetsRecord = recordSeam
+		windowsEnterpriseHotConfigTargetHooksProven = hookProofSeam
+		windowsEnterpriseHotConfigPublishedTargets, windowsEnterpriseHotConfigRenderTimeout = publishedTargetsSeam, renderTimeoutSeam
 		windowsEnterpriseIsElevated = elevatedSeam
 		windowsEnterpriseHotConfigLayout, windowsEnterpriseHotConfigLock = layoutSeam, lockSeam
 		windowsEnterpriseHotConfigValidate, windowsEnterpriseHotConfigWrite = validateSeam, writeSeam
 		windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigPoll = timeoutSeam, pollSeam
 		windowsEnterpriseHotConfigRestartTimeout = restartTimeoutSeam
 		windowsEnterpriseHotConfigSourceCheck = sourceSeam
+		windowsEnterpriseInstalledLeafDrift, windowsEnterpriseManifestSourceCheck = leafDriftSeam, manifestSourceSeam
+		windowsEnterpriseApprovedManifestStager = manifestStagerSeam
+		windowsEnterpriseStandaloneRuntimeCandidateCheck = runtimeCandidateSeam
 		windowsEnterpriseHotBundleReload = reloadSeam
 	})
 	// The supplied file stands for an administrator-only staged config.
 	windowsEnterpriseHotConfigSourceCheck = func(string) error { return nil }
+	windowsEnterpriseInstalledLeafDrift = func(string, string) *managed.UntrustedPrincipalError { return nil }
+	windowsEnterpriseManifestSourceCheck = func(string) error { return nil }
+	windowsEnterpriseApprovedManifestStager = func(context.Context, enterprisehooks.EnumerationLogger, string) (string, func(), error) {
+		return "", nil, errors.New("no enumeration in this test")
+	}
+	windowsEnterpriseStandaloneRuntimeCandidateCheck = func(*config.Config) error { return nil }
 	windowsEnterpriseHotConfigLayout = func() (managed.StandaloneLayout, error) {
 		return managed.StandaloneLayout{ConfigPath: host.configPath, ConfigDir: filepath.Dir(host.configPath), DataDir: dir, ServiceUser: `NT SERVICE\DefenseClawGateway`}, nil
 	}
 	windowsEnterpriseHotConfigLock = func(string) (func(), error) { return func() {}, nil }
+	windowsEnterpriseHotConfigApproveSource = func(managed.StandaloneLayout) error {
+		installed, err := os.ReadFile(host.configPath)
+		if err != nil {
+			return err
+		}
+		host.approved = append(host.approved, string(installed))
+		return host.approveErr
+	}
+	windowsEnterpriseHealApprovedSource = func(*enterprisestatus.Result) { host.heals++ }
 	windowsEnterpriseHotConfigRefreshTargets = func(context.Context, managed.StandaloneLayout) error {
 		host.refreshes++
 		return nil
 	}
+	windowsEnterpriseHotConfigTargetsRecord = func(managed.StandaloneLayout) (windowsHotConfigPublishedTargets, error) {
+		host.targetRecords++
+		if host.targetRecordErr != nil {
+			return windowsHotConfigPublishedTargets{}, host.targetRecordErr
+		}
+		return windowsHotConfigPublishedTargets{
+			restore: func() error {
+				host.targetRestores++
+				return host.targetRestoreErr
+			},
+			dropped: func() []enterprisehooks.ManifestTarget { return host.dropped },
+		}, nil
+	}
+	windowsEnterpriseHotConfigTargetHooksProven = func(_ context.Context, _ managed.StandaloneLayout, targets []enterprisehooks.ManifestTarget, _ time.Duration) error {
+		host.hookProofs = append(host.hookProofs, append([]enterprisehooks.ManifestTarget(nil), targets...))
+		return host.hookProofErr
+	}
+	windowsEnterpriseHotConfigPublishedTargets = func(managed.StandaloneLayout) ([]enterprisehooks.ManifestTarget, error) { return nil, nil }
 	windowsEnterpriseHotBundleReload = func(context.Context, managed.StandaloneLayout) error { return nil }
+	// No test stops or starts a real gateway service: an unproven undo and
+	// a start of a stopped gateway are counted.
+	windowsEnterpriseHotConfigCloseHooks = func(managed.StandaloneLayout) error {
+		host.closes++
+		host.closureHeld = true
+		return nil
+	}
+	windowsEnterpriseHotConfigHooksHeld = func() (bool, error) { return host.closureHeld, nil }
+	windowsEnterpriseHotConfigReleaseHooks = func(managed.StandaloneLayout) error {
+		host.releases++
+		host.closureHeld = false
+		return nil
+	}
+	windowsEnterpriseHotConfigFailClosed = func() error {
+		if !host.closureHeld {
+			t.Fatal("unproven undo stopped the gateway before managed hooks were durably closed")
+		}
+		host.stops++
+		return nil
+	}
+	windowsEnterpriseHotConfigRecover = func() (bool, error) { host.recovers++; return false, nil }
+	custodySeam := windowsEnterpriseInstalledCLICustody
+	t.Cleanup(func() { windowsEnterpriseInstalledCLICustody = custodySeam })
+	// The installed CLI stands for an administrator-only image.
+	windowsEnterpriseInstalledCLICustody = func(string, string) error { return nil }
 	windowsEnterpriseHotConfigValidate = func(string, string, string, bool) (windowsServiceConfigValidation, error) {
 		return windowsServiceConfigValidation{}, nil
 	}
@@ -142,6 +277,145 @@ func runHotConfigEnsure(t *testing.T, host *hotConfigHost, opts *windowsEnterpri
 		t.Fatal(err)
 	}
 	return &result
+}
+
+func TestWindowsEnterpriseHotConfigClosureSurvivesUntilPolicyProof(t *testing.T) {
+	const config = "config_version: 9\nguardrail:\n  hook_fail_mode: open\n"
+	for _, tc := range []struct {
+		name         string
+		verified     bool
+		digestFails  bool
+		releaseFails bool
+		wantRelease  bool
+	}{
+		{name: "failed ensure leaves closure", verified: false},
+		{name: "policy readback unavailable leaves closure", verified: true, digestFails: true},
+		{name: "release failure leaves closure", verified: true, releaseFails: true},
+		{name: "proven recovery releases closure", verified: true, wantRelease: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host, _ := newHotConfigHost(t, config, config)
+			host.closureHeld = true
+			host.adopted = true
+			digest := windowsEnterprisePolicyDigest
+			t.Cleanup(func() { windowsEnterprisePolicyDigest = digest })
+			windowsEnterprisePolicyDigest = host.digest
+			if tc.digestFails {
+				windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) { return nil, errors.New("readback unavailable") }
+			}
+			if tc.releaseFails {
+				windowsEnterpriseHotConfigReleaseHooks = func(managed.StandaloneLayout) error { return errors.New("release refused") }
+			}
+			result := newWindowsEnterpriseStandaloneResult("ensure", ensureTestOptions())
+			// OK is left as Finish leaves it before it runs (false): the
+			// error list decides (GAP-1599).
+			result.Installed = true
+			if !tc.verified {
+				result.AddError("lifecycle_error", "ensure failed")
+			}
+			err := windowsEnterpriseReleaseHotConfigClosureIfProven(context.Background(), result)
+			if tc.wantRelease {
+				if err != nil || host.closureHeld || host.releases != 1 {
+					t.Fatalf("proven recovery: err=%v held=%t releases=%d", err, host.closureHeld, host.releases)
+				}
+			} else if !host.closureHeld || host.releases != 0 || (tc.verified && err == nil) {
+				t.Fatalf("unproven recovery: err=%v held=%t releases=%d", err, host.closureHeld, host.releases)
+			}
+		})
+	}
+}
+
+// GAP-1599: status names a held closure, and a clean repair or verify
+// releases it once the gateway proves the installed policy; a verify that
+// cannot release it fails.
+func TestWindowsEnterpriseHeldHookClosureIsReportedAndReleased(t *testing.T) {
+	const config = "config_version: 9\nguardrail:\n  hook_fail_mode: open\n"
+	for _, tc := range []struct {
+		action      string
+		digestFails bool
+		wantRelease bool
+		wantCode    string
+		wantError   bool
+	}{
+		{action: "status", wantCode: "hook_closure_held"},
+		{action: "verify", wantRelease: true},
+		{action: "repair", wantRelease: true},
+		{action: "verify", digestFails: true, wantCode: "hook_closure_held", wantError: true},
+	} {
+		t.Run(fmt.Sprintf("%s digestFails=%t", tc.action, tc.digestFails), func(t *testing.T) {
+			host, _ := newHotConfigHost(t, config, config)
+			host.closureHeld, host.adopted = true, true
+			digest := windowsEnterprisePolicyDigest
+			t.Cleanup(func() { windowsEnterprisePolicyDigest = digest })
+			windowsEnterprisePolicyDigest = host.digest
+			if tc.digestFails {
+				windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) { return nil, errors.New("readback unavailable") }
+			}
+			result := newWindowsEnterpriseStandaloneResult(tc.action, ensureTestOptions())
+			result.Installed = true
+			settleWindowsEnterpriseHotConfigClosure(context.Background(), result, tc.action)
+			if tc.wantRelease {
+				if host.closureHeld || host.releases != 1 || len(result.Errors) != 0 || len(result.Warnings) != 0 {
+					t.Fatalf("release: held=%t releases=%d errors=%v warnings=%v", host.closureHeld, host.releases, result.Errors, result.Warnings)
+				}
+				return
+			}
+			if !host.closureHeld || host.releases != 0 {
+				t.Fatalf("closure released: held=%t releases=%d", host.closureHeld, host.releases)
+			}
+			messages := result.Warnings
+			if tc.wantError {
+				messages = result.Errors
+			}
+			if !windowsBundleHasCode(messages, tc.wantCode) || !strings.Contains(messages[len(messages)-1].Message, windowsEnterpriseAdminCommand("repair")) {
+				t.Fatalf("held closure not named: errors=%v warnings=%v", result.Errors, result.Warnings)
+			}
+		})
+	}
+}
+
+// GAP-2087: a clean ensure releases a held closure once the gateway proves
+// the installed config, through the exit every ensure takes (its failure
+// code is nonzero even for a clean run); when the gateway proves nothing,
+// ensure fails and names the closure instead of reporting compliant.
+func TestWindowsEnterpriseEnsureSettlesAHeldHookClosure(t *testing.T) {
+	const config = "config_version: 9\nguardrail:\n  hook_fail_mode: open\n"
+	for _, digestFails := range []bool{false, true} {
+		t.Run(fmt.Sprintf("digestFails=%t", digestFails), func(t *testing.T) {
+			host, opts := newHotConfigHost(t, config, config)
+			host.closureHeld, host.adopted = true, true
+			digest := windowsEnterprisePolicyDigest
+			t.Cleanup(func() { windowsEnterprisePolicyDigest = digest })
+			opts.configPath = ""
+			stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("verify")}}
+			stub.install(t)
+			windowsEnterprisePolicyDigest = host.digest
+			if digestFails {
+				windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) { return nil, errors.New("readback unavailable") }
+			}
+			command := &cobra.Command{}
+			var stdout bytes.Buffer
+			command.SetOut(&stdout)
+			command.SetErr(&bytes.Buffer{})
+			runErr := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`)
+			var result enterprisestatus.Result
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("ensure output: %v\n%s", err, stdout.String())
+			}
+			if !digestFails {
+				if runErr != nil || host.closureHeld || host.releases != 1 || !result.OK || result.Noop {
+					t.Fatalf("clean ensure kept the closure: err=%v held=%t releases=%d ok=%t noop=%t errors=%v",
+						runErr, host.closureHeld, host.releases, result.OK, result.Noop, result.Errors)
+				}
+				return
+			}
+			if runErr == nil || !host.closureHeld || host.releases != 0 || result.OK ||
+				!windowsBundleHasCode(result.Errors, "hook_closure_held") {
+				t.Fatalf("unproven ensure: err=%v held=%t releases=%d ok=%t errors=%v",
+					runErr, host.closureHeld, host.releases, result.OK, result.Errors)
+			}
+		})
+	}
 }
 
 // GAP-0135: a change the running gateway applies as a generation swap no
@@ -213,6 +487,53 @@ func TestWindowsEnterpriseEnsureAppliesAConfigOnlyChangeInTheRunningGateway(t *t
 	if string(got) != previous || string(generation) == recorded || len(host.writes) != 2 ||
 		len(stub.calls) != 2 || stub.calls[1][1] != "Upgrade" {
 		t.Fatalf("gateway never adopted: config %q, generation %q, writes %q, installer runs %q", got, generation, host.writes, stub.calls)
+	}
+}
+
+// GAP-0779: a config-only ensure that stays in the running gateway makes the
+// config it applied the approved config source, so a later Repair never puts
+// back the config of an earlier ensure; an ensure that cannot record it puts
+// the previous config back and leaves the change to the upgrade transaction.
+func TestWindowsEnterpriseEnsureApprovesTheConfigItApplied(t *testing.T) {
+	const previous = "config_version: 9\nguardrail:\n  mode: observe\n"
+	const next = "config_version: 9\nguardrail:\n  mode: action\n"
+
+	host, opts := newHotConfigHost(t, previous, next)
+	host.adopted = true
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Verify")}}
+	runHotConfigEnsure(t, host, opts, stub)
+	if len(host.approved) != 1 || host.approved[0] != next {
+		t.Fatalf("approved config sources %q, want exactly the applied config", host.approved)
+	}
+	if host.heals != 1 {
+		t.Fatalf("a finished ensure checked the approved source %d times, want once", host.heals)
+	}
+
+	// A change the gateway never adopts is undone before anything is approved.
+	host, opts = newHotConfigHost(t, previous, next)
+	stub = &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Upgrade")}}
+	runHotConfigEnsure(t, host, opts, stub)
+	if len(host.approved) != 0 {
+		t.Fatalf("a config the gateway never adopted was approved: %q", host.approved)
+	}
+
+	// An approved source that cannot be recorded undoes the apply: the
+	// previous config is back and the upgrade transaction runs. The installed
+	// config is the one an earlier ensure recorded, so the undo records the
+	// restore as a new generation through the config writer (a hand edit
+	// would go back unrecorded, outside the writer).
+	host, opts = newHotConfigHost(t, previous, next)
+	host.adopted = true
+	host.approveErr = errors.New("deployment record is locked")
+	recorded := `{"generation":3,"config_sha256":"` + configwrite.SHA256Hex([]byte(previous)) + `"}`
+	if err := os.WriteFile(configwrite.GenerationPath(host.configPath), []byte(recorded), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stub = &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Verify"), installedStatus("Upgrade")}}
+	runHotConfigEnsure(t, host, opts, stub)
+	got, _ := os.ReadFile(host.configPath)
+	if string(got) != previous || len(host.writes) != 2 || stub.calls[len(stub.calls)-1][1] != "Upgrade" {
+		t.Fatalf("unrecordable approved source: config %q, writes %q, installer runs %q", got, host.writes, stub.calls)
 	}
 }
 
@@ -298,6 +619,447 @@ func TestWindowsEnterpriseEnsureInstallsTheSuppliedConfigOverAnUnparseableOne(t 
 	}
 }
 
+// GAP-0590 review S4: Setup wrote config.yaml new from the approved source,
+// then the lifecycle's content gate refused another file. The refusal said
+// "nothing was changed"; it now says what was rewritten and what was refused.
+// Without a rewrite, and for other errors, the message stays as it is.
+func TestWindowsEnterpriseGateRefusalNamesTheRewriteBeforeIt(t *testing.T) {
+	refusal := windowsEnterpriseGateRefusal + ` (DefenseClaw does not give a file another account owns or could change a trusted access list back in place; remove that entry): untrusted principal S-1-5-32-545 has write-like access to managed path: C:\ProgramData\Cisco\DefenseClaw\secrets\ai-defense-api-key`
+	other := "the gateway did not start"
+	result := &enterprisestatus.Result{}
+	result.AddError("lifecycle_failed", refusal)
+	result.AddError("lifecycle_failed", other)
+	noteWindowsEnterpriseRewriteBeforeRefusal(result, nil)
+	if result.Errors[0].Message != refusal {
+		t.Fatalf("no rewrite changed the refusal: %q", result.Errors[0].Message)
+	}
+	noteWindowsEnterpriseRewriteBeforeRefusal(result, []string{"config.yaml", "targets.yaml"})
+	got := result.Errors[0].Message
+	for _, want := range []string{
+		"Setup first wrote a new config.yaml and targets.yaml from the approved source (see changes)",
+		"stopped no service and changed nothing else",
+		`managed path: C:\ProgramData\Cisco\DefenseClaw\secrets\ai-defense-api-key`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("refusal %q does not say %q", got, want)
+		}
+	}
+	if strings.Contains(got, "nothing was changed") || result.Errors[1].Message != other {
+		t.Fatalf("refusal %q / other %q", got, result.Errors[1].Message)
+	}
+}
+
+// GAP-0590 review S6: a program that holds the old file open without delete
+// sharing makes the rename fail; the error names the file, the holder and the
+// way out (stop it, or restart Windows), and nothing changes. A replaced
+// object that cannot be deleted once the new file is in place is deleted at
+// the next restart, and the result says so as a change, not an error.
+func TestWriteFreshFileWithDACLNamesTheWayOutOfAHeldFile(t *testing.T) {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("setting Administrators as owner needs an elevated administrator or SYSTEM")
+	}
+	sddl := windowsBundleAdminFileSDDL()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "targets.yaml")
+	if err := os.WriteFile(path, []byte("drifted\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, err := windows.CreateFile(name, windows.GENERIC_READ, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil,
+		windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := writeFreshFileWithDACL(path, []byte("approved\n"), sddl)
+	_ = windows.CloseHandle(held)
+	if err == nil || pending != "" || !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+		t.Fatalf("write over a held file = %q, %v; want a sharing violation", pending, err)
+	}
+	for _, want := range []string{path + " is held open by ", "stop ", "or restart Windows, then run the same command again"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not say %q", err, want)
+		}
+	}
+	if got, _ := os.ReadFile(path); string(got) != "drifted\n" {
+		t.Fatalf("a refused write changed the file: %q", got)
+	}
+	if leftovers, _ := filepath.Glob(path + ".*"); len(leftovers) != 0 {
+		t.Fatalf("a refused write left %q", leftovers)
+	}
+
+	// The replaced object cannot be deleted: it is deleted at the restart.
+	remove, delay := windowsFreshFileRemove, windowsFreshFileDeleteAtRestart
+	t.Cleanup(func() { windowsFreshFileRemove, windowsFreshFileDeleteAtRestart = remove, delay })
+	var scheduled []string
+	windowsFreshFileRemove = func(string) error { return windows.ERROR_ACCESS_DENIED }
+	windowsFreshFileDeleteAtRestart = func(aside string) error { scheduled = append(scheduled, aside); return nil }
+	pending, err = writeFreshFileWithDACL(path, []byte("approved\n"), sddl)
+	if err != nil || len(scheduled) != 1 || !strings.Contains(pending, scheduled[0]) ||
+		!strings.HasSuffix(pending, "is still open in another program and is deleted at the next restart") {
+		t.Fatalf("undeletable replaced object: note %q, err %v, scheduled %q", pending, err, scheduled)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "approved\n" {
+		t.Fatalf("targets.yaml = %q, want the approved bytes in place", got)
+	}
+	_ = os.Remove(scheduled[0])
+	change := windowsEnterpriseReplacedFileChange("targets.yaml", windowsEnterpriseReplacedFile{
+		kept: filepath.Join(dir, "rejected-targets.yaml"), untrusted: &managed.UntrustedPrincipalError{SID: "S-1-5-32-545"}, pending: pending,
+	}, "repair")
+	if !strings.HasSuffix(change, "; "+pending) {
+		t.Fatalf("change %q does not carry the restart note", change)
+	}
+	// Neither works: an error that names both.
+	windowsFreshFileDeleteAtRestart = func(string) error { return windows.ERROR_ACCESS_DENIED }
+	if _, err := writeFreshFileWithDACL(path, []byte("again\n"), sddl); err == nil ||
+		!strings.Contains(err.Error(), "could not be deleted") || !strings.Contains(err.Error(), "next restart") {
+		t.Fatalf("an undeletable, unschedulable replaced object: %v", err)
+	}
+	for _, leftover := range func() []string { found, _ := filepath.Glob(path + ".*"); return found }() {
+		_ = os.Remove(leftover)
+	}
+}
+
+// GAP-0590 review S2: a file Setup writes new from the approved source is
+// owned by Administrators, whatever owner the token gives new files. Under the
+// "Object creator" default-owner policy the token's own account owned it, and
+// the gateway's standalone walk and Setup's gate refused that owner. The
+// policy is reproduced on this thread only: an impersonation token whose
+// default owner is the token's own account.
+func TestWriteFreshFileWithDACLOwnerIsAdministratorsUnderObjectCreatorPolicy(t *testing.T) {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("setting Administrators as owner needs an elevated administrator or SYSTEM")
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("drifted\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	var process windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_DUPLICATE|windows.TOKEN_QUERY, &process); err != nil {
+		t.Fatal(err)
+	}
+	defer process.Close()
+	var thread windows.Token
+	if err := windows.DuplicateTokenEx(process, windows.TOKEN_ALL_ACCESS, nil, windows.SecurityImpersonation, windows.TokenImpersonation, &thread); err != nil {
+		t.Fatal(err)
+	}
+	defer thread.Close()
+	user, err := thread.GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.User.Sid.String() == "S-1-5-32-544" {
+		t.Skip("the token's own account is Administrators")
+	}
+	tokenOwner := struct{ Owner *windows.SID }{user.User.Sid}
+	if err := windows.SetTokenInformation(thread, windows.TokenOwner, (*byte)(unsafe.Pointer(&tokenOwner)), uint32(unsafe.Sizeof(tokenOwner))); err != nil {
+		t.Fatalf("set the default owner to the token's account: %v", err)
+	}
+	if err := windows.SetThreadToken(nil, thread); err != nil {
+		t.Fatal(err)
+	}
+	_, writeErr := writeFreshFileWithDACL(path, []byte("approved\n"), windowsConfigFileSDDL(managed.WindowsServiceSIDString(managed.StandaloneWindowsGatewaySvc)))
+	if err := windows.RevertToSelf(); err != nil {
+		t.Fatal(err)
+	}
+	if writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil || owner.String() != "S-1-5-32-544" {
+		t.Fatalf("the new config.yaml is owned by %v (%v), want Administrators, not the token's account %s", owner, err, user.User.Sid)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "approved\n" {
+		t.Fatalf("config.yaml = %q", got)
+	}
+}
+
+// GAP-0590: ensure over a managed content file that another account can
+// change (an untrusted entry on the file itself, GAP-0561) writes the
+// approved source as a new file with Setup's descriptor before the repair
+// transaction, and keeps the old bytes for the administrator. Before, for
+// config.yaml the transaction refused the ACL repair after it had stopped
+// the services, its rollback refused it again, and the gateway, guardian and
+// enumerator stayed stopped with the transaction pending; for targets.yaml
+// Repair put the AdminFile descriptor back over the drifted roster in place.
+// A handle the account opened on the old file cannot change the new one.
+// The sources are CONFIG= for config.yaml, and MANIFEST= or a manifest
+// enumerated from CONFIG= for targets.yaml. Twins leave everything to the
+// transaction's refusal: drift on a folder above the file, a supplied path
+// that is the installed file, a source a standard user can write, a pending
+// transaction, and manifest enrollment mode without MANIFEST=.
+func TestWindowsEnterpriseEnsureRewritesAContentFileAnotherAccountCanChange(t *testing.T) {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("Setup's managed descriptors are administrator-only; run elevated")
+	}
+	const drifted = "config_version: 9\nguardrail:\n  mode: observe\n"
+	next := strings.Replace(
+		strings.Replace(standaloneGatewayCheckConfig, "config_version: 8\n", "config_version: 9\n", 1),
+		`  rule_pack_dir: ""`+"\n", "", 1)
+	const roster = "version: 1\ntargets: []\n"
+	const driftedRoster = "version: 1\ntargets: []\n# an edit\n"
+	const usersWrite = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)(A;;FW;;;BU)"
+	gatewaySID := managed.WindowsServiceSIDString(managed.StandaloneWindowsGatewaySvc)
+	for _, tc := range []struct {
+		name         string
+		file         string // config.yaml or targets.yaml
+		owner        bool   // the drift is an untrusted owner, not a writer
+		folderDrift  bool   // the folder above the file is drifted, not the file
+		self         bool   // the supplied source is the installed file
+		sourceDrift  bool   // the supplied source is writable by a standard user
+		pending      bool
+		manifestFlag bool   // MANIFEST= is supplied
+		manifestMode bool   // enrollment mode manifest: nothing to enumerate
+		acl          string // the drift is the access list itself: "null" or "unsupported"
+		replaced     bool
+	}{
+		{name: "config.yaml writer", file: "config.yaml", replaced: true},
+		{name: "config.yaml owner", file: "config.yaml", owner: true, replaced: true},
+		// GAP-0590 review S1: an access list that is itself untrusted.
+		{name: "config.yaml null DACL", file: "config.yaml", acl: "null", replaced: true},
+		{name: "config.yaml unsupported entry", file: "config.yaml", acl: "unsupported", replaced: true},
+		{name: "targets.yaml null DACL", file: "targets.yaml", acl: "null", replaced: true},
+		{name: "config.yaml folder drift", file: "config.yaml", folderDrift: true},
+		{name: "config.yaml self source", file: "config.yaml", self: true},
+		{name: "config.yaml untrusted source", file: "config.yaml", sourceDrift: true},
+		{name: "config.yaml pending transaction", file: "config.yaml", pending: true},
+		{name: "targets.yaml from MANIFEST=", file: "targets.yaml", manifestFlag: true, replaced: true},
+		{name: "targets.yaml enumerated from CONFIG=", file: "targets.yaml", replaced: true},
+		{name: "targets.yaml owner", file: "targets.yaml", owner: true, replaced: true},
+		{name: "targets.yaml folder drift", file: "targets.yaml", folderDrift: true},
+		{name: "targets.yaml self source", file: "targets.yaml", manifestFlag: true, self: true},
+		{name: "targets.yaml untrusted MANIFEST=", file: "targets.yaml", manifestFlag: true, sourceDrift: true},
+		{name: "targets.yaml manifest mode without MANIFEST=", file: "targets.yaml", manifestMode: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host, opts := newHotConfigHost(t, drifted, next)
+			manifestPath := filepath.Join(filepath.Dir(host.configPath), "targets.yaml")
+			if err := os.WriteFile(manifestPath, []byte(driftedRoster), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			layoutSeam := windowsEnterpriseHotConfigLayout
+			windowsEnterpriseHotConfigLayout = func() (managed.StandaloneLayout, error) {
+				layout, err := layoutSeam()
+				layout.ManifestPath = manifestPath
+				return layout, err
+			}
+			target, want, installed := host.configPath, next, drifted
+			if tc.file == "targets.yaml" {
+				target, want, installed = manifestPath, roster, driftedRoster
+				// config.yaml is the administrator's and stays as it is.
+				if err := os.WriteFile(host.configPath, []byte(next), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.manifestFlag {
+				opts.manifestPath = filepath.Join(t.TempDir(), "approved-targets.yaml")
+				if err := os.WriteFile(opts.manifestPath, []byte(roster), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.self && tc.file == "config.yaml" {
+				opts.configPath = host.configPath
+			}
+			if tc.self && tc.file == "targets.yaml" {
+				opts.manifestPath = manifestPath
+			}
+			stagedFrom := ""
+			windowsEnterpriseApprovedManifestStager = func(_ context.Context, _ enterprisehooks.EnumerationLogger, config string) (string, func(), error) {
+				if tc.manifestMode {
+					return "", nil, errWindowsEnterpriseEnsureManifestRequired
+				}
+				stagedFrom = config
+				staged := filepath.Join(t.TempDir(), "targets.yaml")
+				return staged, func() {}, os.WriteFile(staged, []byte(roster), 0o600)
+			}
+			untrustedSource := func(string) error { return errors.New("a standard user can write it") }
+			if tc.sourceDrift && tc.file == "config.yaml" {
+				windowsEnterpriseHotConfigSourceCheck = untrustedSource
+			}
+			if tc.sourceDrift && tc.file == "targets.yaml" {
+				windowsEnterpriseManifestSourceCheck = untrustedSource
+			}
+			if tc.pending {
+				// A transaction's protected recovery record, where the lifecycle keeps it.
+				pending := filepath.Join(filepath.Dir(filepath.Dir(host.configPath)), "install", "pending.json")
+				if err := os.MkdirAll(filepath.Dir(pending), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(pending, []byte("{}"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			setHotConfigTestDACL(t, target, usersWrite)
+			originalLayout, originalSource := windowsEnterpriseStandaloneLayoutForPreflight, windowsEnterpriseStandaloneConfigSource
+			t.Cleanup(func() {
+				windowsEnterpriseStandaloneLayoutForPreflight, windowsEnterpriseStandaloneConfigSource = originalLayout, originalSource
+			})
+			windowsEnterpriseStandaloneLayoutForPreflight = windowsEnterpriseHotConfigLayout
+			windowsEnterpriseStandaloneConfigSource = func(string) error { return nil }
+			// The standalone walk's verdict, read from the file's real
+			// descriptor: a BUILTIN\Users entry is the untrusted writer (or,
+			// for the owner rows, stands for an untrusted owner).
+			windowsEnterpriseInstalledLeafDrift = func(path, _ string) *managed.UntrustedPrincipalError {
+				if tc.folderDrift || !windowsEnterpriseSamePath(path, target) || !strings.Contains(hotConfigTestDACL(t, path), ";;;BU)") {
+					return nil
+				}
+				sid := map[string]string{"": "S-1-5-32-545", "null": "S-1-1-0", "unsupported": ""}[tc.acl]
+				return &managed.UntrustedPrincipalError{Path: path, SID: sid, Owner: tc.owner, ACL: tc.acl}
+			}
+			old := openHotConfigTestHandle(t, target)
+			failedVerify := installedStatus("Verify")
+			failedVerify["ok"] = false
+			failedVerify["errors"] = []string{"untrusted principal S-1-5-32-545 has write-like access to managed path: " + target}
+			stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), failedVerify, installedStatus("Repair")}}
+			stub.install(t)
+			// Nothing here reads or repairs the host's own Claude Code drop-in
+			// or Cursor migration record.
+			dropIn, cursor := windowsEnterpriseClaudeDropInDrift, windowsEnterpriseCursorMigrationRepairPending
+			t.Cleanup(func() {
+				windowsEnterpriseClaudeDropInDrift, windowsEnterpriseCursorMigrationRepairPending = dropIn, cursor
+			})
+			windowsEnterpriseClaudeDropInDrift = func() (string, bool) { return "", false }
+			windowsEnterpriseCursorMigrationRepairPending = func() (bool, error) { return false, nil }
+			command := &cobra.Command{}
+			var stdout bytes.Buffer
+			command.SetOut(&stdout)
+			command.SetErr(&bytes.Buffer{})
+			if err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`); err != nil {
+				t.Fatalf("ensure: %v\n%s", err, stdout.String())
+			}
+			var result enterprisestatus.Result
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if !tc.pending && (len(stub.calls) != 3 || stub.calls[2][1] != "Repair") {
+				t.Fatalf("installer runs %q, want status, verify and the repair", stub.calls)
+			}
+			got, _ := os.ReadFile(target)
+			rejected := filepath.Join(filepath.Dir(host.configPath), "rejected-"+tc.file)
+			kept, keptErr := os.ReadFile(rejected)
+			changes := strings.Join(result.Changes, "\n")
+			if !tc.replaced {
+				if string(got) != installed || !strings.Contains(hotConfigTestDACL(t, target), ";;;BU)") ||
+					!errors.Is(keptErr, os.ErrNotExist) || strings.Contains(changes, "kept it as") {
+					t.Fatalf("%s %q (%s), %s %v, changes %q: want nothing replaced",
+						tc.file, got, hotConfigTestDACL(t, target), rejected, keptErr, changes)
+				}
+				return
+			}
+			if string(got) != want {
+				t.Fatalf("%s = %q, want the approved source", tc.file, got)
+			}
+			// Exactly Setup's entries, protected; SetNamedSecurityInfo also
+			// marks the DACL auto-inherited (AI), which grants nothing.
+			wantACEs := "(A;;FA;;;SY)(A;;FA;;;BA)"
+			if tc.file == "config.yaml" {
+				wantACEs += "(A;;FR;;;" + gatewaySID + ")"
+			}
+			dacl := hotConfigTestDACL(t, target)
+			if control, aces, _ := strings.Cut(dacl, "("); (control != "D:P" && control != "D:PAI") || "("+aces != wantACEs {
+				t.Fatalf("%s DACL = %s, want Setup's protected descriptor D:P%s", tc.file, dacl, wantACEs)
+			}
+			if string(kept) != installed {
+				t.Fatalf("%s = %q (%v), want the replaced file's bytes", rejected, kept, keptErr)
+			}
+			// GAP-0590 review S3: the kept copy is administrator-only with
+			// Setup's own descriptor, never the drifted file's access list.
+			if control, aces, _ := strings.Cut(hotConfigTestDACL(t, rejected), "("); (control != "D:P" && control != "D:PAI") ||
+				"("+aces != "(A;;FA;;;SY)(A;;FA;;;BA)" {
+				t.Fatalf("%s DACL = %s, want administrators only", rejected, hotConfigTestDACL(t, rejected))
+			}
+			problem := "can be changed by S-1-5-32-545"
+			switch {
+			case tc.owner:
+				problem = "is owned by S-1-5-32-545"
+			case tc.acl == "null":
+				problem = "has no access list, so any account can change it"
+			case tc.acl == "unsupported":
+				problem = "has an access entry of a type DefenseClaw cannot read"
+			}
+			if !strings.Contains(changes, "the installed "+tc.file+" "+problem) || !strings.Contains(changes, rejected) {
+				t.Fatalf("changes %q do not name %s, the account and the kept file", changes, tc.file)
+			}
+			if tc.file == "targets.yaml" && !tc.manifestFlag && !windowsEnterpriseSamePath(stagedFrom, opts.configPath) {
+				t.Fatalf("manifest enumerated from %q, want the approved CONFIG= %q", stagedFrom, opts.configPath)
+			}
+			if tc.file == "targets.yaml" {
+				if config, _ := os.ReadFile(host.configPath); string(config) != next {
+					t.Fatalf("a manifest rewrite changed config.yaml: %q", config)
+				}
+			}
+			for _, warning := range result.Warnings {
+				if warning.Code == "config_reverted" {
+					t.Fatalf("an access-list replacement is not a reverted edit: %+v", warning)
+				}
+			}
+			// The account's handle points at the replaced object.
+			var written uint32
+			if err := windows.WriteFile(old, []byte("late edit\n"), &written, nil); err != nil {
+				t.Fatalf("write through the old handle: %v", err)
+			}
+			if got, _ := os.ReadFile(target); string(got) != want {
+				t.Fatalf("an old handle changed the new %s: %q", tc.file, got)
+			}
+			if leftovers, _ := filepath.Glob(target + ".*"); len(leftovers) != 0 {
+				t.Fatalf("replacement left %q next to %s", leftovers, tc.file)
+			}
+		})
+	}
+}
+
+func setHotConfigTestDACL(t *testing.T, path, sddl string) {
+	t.Helper()
+	descriptor, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func hotConfigTestDACL(t *testing.T, path string) string {
+	t.Helper()
+	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return descriptor.String()
+}
+
+// openHotConfigTestHandle opens path for writing with full sharing, as an
+// account holding a drift grant would, so a trusted rewrite can still
+// replace the name.
+func openHotConfigTestHandle(t *testing.T, path string) windows.Handle {
+	t.Helper()
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(name, windows.GENERIC_WRITE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = windows.CloseHandle(handle) })
+	return handle
+}
+
 // GAP-0994: a replacement whose YAML parses but whose rule-pack pin is
 // invalid must never become the transaction rollback snapshot.
 func TestWindowsEnterpriseRepairRefusesInvalidSuppliedConfigBeforeSnapshot(t *testing.T) {
@@ -326,7 +1088,8 @@ func TestWindowsEnterpriseRepairRefusesInvalidSuppliedConfigBeforeSnapshot(t *te
 	windowsEnterpriseStandaloneRulePackTrust = func(string, string, string) error { return nil }
 	standaloneServiceCanReadTree = func(string, string, string) error { return nil }
 
-	kept, err := installWindowsEnterpriseSuppliedConfigOverUnparseable(opts.configPath)
+	replaced, err := installWindowsEnterpriseSuppliedConfigOverRefused(opts.configPath)
+	kept := replaced.kept
 	if err == nil || !strings.Contains(err.Error(), "does not match guardrail.custom_packs.acme.digest") || kept != "" {
 		t.Fatalf("repair preflight = (%q, %v), want the bad pin refused before copying", kept, err)
 	}
@@ -541,7 +1304,7 @@ func TestWindowsBundleHotApplyRefusalNamesItsCause(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			host, opts := newHotConfigHost(t, previous, next)
-			opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{}}}
+			opts.bundle = host.bundleRun()
 			if tc.lock != nil {
 				windowsEnterpriseHotConfigLock = func(string) (func(), error) { return nil, tc.lock }
 			}
@@ -581,7 +1344,7 @@ func TestWindowsBundleConfigApplyUsesSharedRestartClassification(t *testing.T) {
 			const previous = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 500\n"
 			host, opts := newHotConfigHost(t, previous, tc.next)
 			host.adopted = true
-			opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{}}}
+			opts.bundle = host.bundleRun()
 			savedRestart, savedDigest := windowsEnterpriseHotConfigRestart, windowsEnterprisePolicyDigest
 			t.Cleanup(func() { windowsEnterpriseHotConfigRestart, windowsEnterprisePolicyDigest = savedRestart, savedDigest })
 			restarts := 0
@@ -600,6 +1363,155 @@ func TestWindowsBundleConfigApplyUsesSharedRestartClassification(t *testing.T) {
 	}
 }
 
+// A signed config that never reached a responding gateway cannot be kept as
+// an applied receipt. If the gateway remains unavailable through adoption,
+// restore the previous bytes and stop it when the restored policy cannot be
+// proven either. A later outage after adoption is covered by Finish tests.
+func TestWindowsHotBundleNeverAdoptedDuringOutageRestoresPreviousConfig(t *testing.T) {
+	const previous = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 500\n"
+	const candidate = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 600\n"
+	const enrolled = "config_version: 9\nenterprise:\n  enrollment:\n    exclude_users: [dcw-eo1]\n"
+	for _, tc := range []struct {
+		name, previous, candidate string
+	}{
+		{name: "restart setting", previous: previous, candidate: candidate},
+		{name: "enrollment", previous: enrolled, candidate: strings.Replace(enrolled, "[dcw-eo1]", "[dcw-eo1, dcw-eo5]", 1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host, opts := newHotConfigHost(t, tc.previous, tc.candidate)
+			opts.bundle = host.bundleRun()
+			savedRestart, savedDigest := windowsEnterpriseHotConfigRestart, windowsEnterprisePolicyDigest
+			t.Cleanup(func() { windowsEnterpriseHotConfigRestart, windowsEnterprisePolicyDigest = savedRestart, savedDigest })
+			windowsEnterpriseHotConfigRestart = func() (bool, error) { return true, nil }
+			windowsEnterprisePolicyDigest = host.digestThenOutage(errors.New("gateway stopped"))
+			result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+			applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
+				&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
+			installed, err := os.ReadFile(host.configPath)
+			if applied || err != nil || string(installed) != tc.previous ||
+				!windowsBundleHasCode(result.Errors, "bundle_policy_not_adopted") ||
+				!opts.hotConfigRestoreFailed || host.stops != 1 || host.refreshes != 0 {
+				t.Fatalf("unadopted bundle: applied=%t config=%q stops=%d refreshes=%d errors=%+v read=%v",
+					applied, installed, host.stops, host.refreshes, result.Errors, err)
+			}
+		})
+	}
+}
+
+// A repeated delivery has no new receipt. Its previous confirmed receipt
+// remains true, but a repair during an outage cannot claim this run adopted
+// the policy. The administrator gets the retry exit after the signed config
+// is restored.
+func TestWindowsRepeatedBundleGatewayOutageRequiresRetry(t *testing.T) {
+	const drifted = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 700\n"
+	const confirmed = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 600\n"
+	host, opts := newHotConfigHost(t, drifted, confirmed)
+	opts.bundle = host.bundleRun()
+	prepared := opts.bundle.prepared
+	prepared.Receipt, prepared.AlreadyApplied, prepared.Config = nil, true, []byte(confirmed)
+	savedConfirmed, savedRestart, savedDigest := windowsHotConfirmedBundle, windowsEnterpriseHotConfigRestart, windowsEnterprisePolicyDigest
+	t.Cleanup(func() {
+		windowsHotConfirmedBundle, windowsEnterpriseHotConfigRestart, windowsEnterprisePolicyDigest = savedConfirmed, savedRestart, savedDigest
+	})
+	windowsHotConfirmedBundle = func(_ *enterprisebundle.Driver, _ []byte) (configwrite.Options, []byte, *enterprisebundle.Ref, error) {
+		opt, _ := enterprisebundle.GenerationOptions(&enterprisebundle.Receipt{BundleID: host.bundleID, Version: host.bundleVersion,
+			Principal: "control-plane:acme/alice", SignerKeyID: "k1"})
+		return opt, []byte(confirmed), &enterprisebundle.Ref{BundleID: host.bundleID, Version: host.bundleVersion, SignerKeyID: "k1"}, nil
+	}
+	windowsEnterpriseHotConfigRestart = func() (bool, error) { return true, nil }
+	windowsEnterprisePolicyDigest = host.digestThenOutage(errors.New("gateway stopped"))
+	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+	applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
+		&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
+	installed, err := os.ReadFile(host.configPath)
+	if !applied || err != nil || string(installed) != confirmed || len(host.writes) != 1 ||
+		!windowsBundleHasCode(result.Errors, string(enterprisebundle.CodeNotConfirmed)) || result.Readiness.Gateway || result.Policy != nil {
+		t.Fatalf("repeat outage: applied=%t config=%q writes=%q readiness=%+v policy=%+v errors=%+v read=%v",
+			applied, installed, host.writes, result.Readiness, result.Policy, result.Errors, err)
+	}
+	if code := windowsEnterpriseFailureCodeFor(result); code != enterprisestatus.WindowsExitBusy {
+		t.Fatalf("repeat outage exit=%d, want retry", code)
+	}
+}
+
+// GAP-0008: the rollback of a bundle that `enterprise bundle apply` (the
+// installed CLI, no payload) could not confirm puts the last good config
+// back on the running deployment, restarting only the gateway for a key it
+// reads at start. It used to be refused for the missing payload, which left
+// the refused bundle config installed and enforcing.
+func TestWindowsBundleRollbackByTheInstalledCLIPutsTheLastGoodConfigBack(t *testing.T) {
+	const bundleConfig = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 500\n"
+	for _, tc := range []struct {
+		name, lastGood string
+		restarts       int
+	}{
+		{"policy only", "config_version: 9\nguardrail:\n  block_at: HIGH\n  hook_self_heal_debounce_ms: 500\n", 0},
+		{"start only", "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 600\n", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host, opts := newHotConfigHost(t, bundleConfig, tc.lastGood)
+			host.adopted = true
+			opts.gatewayBinary, opts.acpBinary, opts.hookBinary, opts.hookGuardBinary, opts.sensorHelperBinary, opts.policyCompiler = "", "", "", "", "", ""
+			opts.bundleRollback = true
+			savedRestart := windowsEnterpriseHotConfigRestart
+			t.Cleanup(func() { windowsEnterpriseHotConfigRestart = savedRestart })
+			restarts := 0
+			windowsEnterpriseHotConfigRestart = func() (bool, error) { restarts++; return true, nil }
+			stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Verify")}}
+			result := runHotConfigEnsure(t, host, opts, stub)
+			installed, _ := os.ReadFile(host.configPath)
+			if string(installed) != tc.lastGood || restarts != tc.restarts || len(stub.calls) != 2 || stub.calls[1][1] != "Verify" || !result.OK {
+				t.Fatalf("rollback installed %q, restarts %d, installer runs %q, ok %t errors %+v", installed, restarts, stub.calls, result.OK, result.Errors)
+			}
+		})
+	}
+
+	// The installed CLI can name a last good bundle only when its store
+	// proves the signed principal. The earlier dummy target had no current
+	// bundle and correctly failed the tightened principal check.
+	t.Run("signed last good bundle", func(t *testing.T) {
+		host := newWindowsBundleRestoreHost(t)
+		ctx := context.Background()
+		host.tamper(t, false)
+		if restore := restoreWindowsBundleConfig(ctx, ""); restore.failed() {
+			t.Fatalf("record the confirmed bundle: %+v", restore)
+		}
+		before, err := configwrite.ReadGenerationState(host.layout.ConfigPath)
+		if err != nil || before.BundleID != host.bundleID {
+			t.Fatalf("confirmed bundle generation = %+v (%v)", before, err)
+		}
+		failed := append(append([]byte(nil), host.bundleConfig...), []byte("# refused next bundle\n")...)
+		if err := windowsEnterpriseHotConfigWrite(ctx, host.layout.ConfigPath, failed, configwrite.Options{
+			Actor: configwrite.ActorLifecycle, Reason: "next bundle", ExpectSHA256: configwrite.SHA256Hex(host.bundleConfig),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		stub := host.installer(t, installedStatus("status"), installedStatus("Verify"))
+		windowsEnterpriseEnsureDriftDetector = func(*windowsEnterpriseLifecycleOptions, string) (string, error) { return "config", nil }
+		source, validate := windowsEnterpriseHotConfigSourceCheck, windowsEnterpriseHotConfigValidate
+		t.Cleanup(func() { windowsEnterpriseHotConfigSourceCheck, windowsEnterpriseHotConfigValidate = source, validate })
+		windowsEnterpriseHotConfigSourceCheck = func(string) error { return nil }
+		windowsEnterpriseHotConfigValidate = func(string, string, string, bool) (windowsServiceConfigValidation, error) {
+			return windowsServiceConfigValidation{}, nil
+		}
+		opts := windowsBundleRestoreOptions()
+		opts.gatewayBinary, opts.acpBinary, opts.hookBinary, opts.hookGuardBinary, opts.sensorHelperBinary, opts.policyCompiler = "", "", "", "", "", ""
+		opts.noStart, opts.resolvedInstaller = false, `C:\stage\install-enterprise.ps1`
+		cmd, _ := windowsBundleCommand()
+		run := &windowsBundleRun{ctx: ctx, layout: host.layout, driver: newWindowsBundleDriver(host.layout),
+			previous: host.bundleConfig, previousGeneration: before}
+		if _, ok := rollbackWindowsBundle(cmd, opts, run); !ok {
+			t.Fatal("the installed CLI did not restore the signed last good bundle")
+		}
+		installed, err := os.ReadFile(host.layout.ConfigPath)
+		state, stateErr := configwrite.ReadGenerationState(host.layout.ConfigPath)
+		if err != nil || !bytes.Equal(installed, host.bundleConfig) || stateErr != nil || state.BundleID != host.bundleID ||
+			state.BundleVersion != 5 || state.SignerKeyID != "k1" || !configwrite.IsPrincipalActor(state.Actor) || len(stub.calls) != 2 {
+			t.Fatalf("rollback config=%q read=%v generation=%+v state=%v installer calls=%q", installed, err, state, stateErr, stub.calls)
+		}
+	})
+}
+
 func TestWindowsHotConfigDoesNotApplyFleetEnablementWithoutCompilerLifecycle(t *testing.T) {
 	for _, tc := range []struct {
 		name, previous, next string
@@ -615,7 +1527,7 @@ func TestWindowsHotConfigDoesNotApplyFleetEnablementWithoutCompilerLifecycle(t *
 			t.Run(name, func(t *testing.T) {
 				host, opts := newHotConfigHost(t, tc.previous, tc.next)
 				if bundle {
-					opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{}}}
+					opts.bundle = host.bundleRun()
 				}
 				result := newWindowsEnterpriseStandaloneResult("ensure", opts)
 				applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
@@ -633,11 +1545,28 @@ func TestWindowsHotConfigDoesNotApplyFleetEnablementWithoutCompilerLifecycle(t *
 }
 
 func TestWindowsHotBundleReloadsWhenWatcherMissesConfigWrite(t *testing.T) {
+	for _, identical := range []bool{false, true} {
+		t.Run(fmt.Sprintf("identical-base=%t", identical), func(t *testing.T) {
+			testWindowsHotBundleReload(t, identical)
+		})
+	}
+}
+
+func testWindowsHotBundleReload(t *testing.T, identical bool) {
 	const previous = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n"
-	const next = "config_version: 9\nguardrail:\n  block_at: LOW\n"
+	next := "config_version: 9\nguardrail:\n  block_at: LOW\n"
+	if identical {
+		next = previous
+	}
 	host, opts := newHotConfigHost(t, previous, next)
+	// Equal bytes already have the same policy digest. The prior gateway
+	// still names the old bundle, so only adoption of the new identity after
+	// the reload can confirm this delivery.
+	host.adopted = identical
 	host.bundleID, host.bundleVersion = "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8", 2
-	opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{BundleID: host.bundleID, Version: host.bundleVersion}}}
+	opts.bundle = host.bundleRun()
+	wantBundleID, wantBundleVersion := host.bundleID, host.bundleVersion
+	host.bundleID, host.bundleVersion = "previous-bundle", 1
 	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("Verify")}}
 	stub.install(t)
 	savedDigest := windowsEnterprisePolicyDigest
@@ -647,6 +1576,7 @@ func TestWindowsHotBundleReloadsWhenWatcherMissesConfigWrite(t *testing.T) {
 	windowsEnterpriseHotBundleReload = func(context.Context, managed.StandaloneLayout) error {
 		reloads++
 		host.adopted = true
+		host.bundleID, host.bundleVersion = wantBundleID, wantBundleVersion
 		return nil
 	}
 	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
@@ -667,7 +1597,7 @@ func TestWindowsHotBundleReloadCannotConfirmWrongDigest(t *testing.T) {
 	const next = "config_version: 9\nguardrail:\n  block_at: LOW\n"
 	host, opts := newHotConfigHost(t, previous, next)
 	host.bundleID, host.bundleVersion = "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8", 2
-	opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{BundleID: host.bundleID, Version: host.bundleVersion}}}
+	opts.bundle = host.bundleRun()
 	// A managed config has a matching prior generation. Rollback records a
 	// new generation for the restored bytes through the writer seam.
 	recorded := `{"generation":10,"config_sha256":"` + configwrite.SHA256Hex([]byte(previous)) + `"}`
@@ -701,9 +1631,77 @@ func TestWindowsHotBundleWaitsForGatewayBundleIdentity(t *testing.T) {
 		}
 		return []byte(`{"effective_digest":"sha256:abc","gateway_reported_digest":"sha256:abc","config_generation":3,"config_generation_recorded":true,"gateway_reported_config_generation":3,"gateway_reported_bundle_id":"` + id + `","gateway_reported_bundle_version":2}`), nil
 	}
-	bundle := &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{BundleID: bundleID, Version: 2}}}
-	if !windowsEnterpriseHotConfigAdopted(context.Background(), time.Second, bundle) || calls < 2 {
+	if !windowsEnterpriseHotConfigAdopted(context.Background(), time.Second, configwrite.BundleRef{ID: bundleID, Version: 2}) || calls < 2 {
 		t.Fatalf("gateway bundle identity was not awaited; calls=%d", calls)
+	}
+}
+
+// Review loop round 2: a repeated delivery of the confirmed bundle over a
+// drifted restart setting restarts the gateway, then is adopted only once the
+// gateway names the confirmed bundle's ID and version. A gateway that names
+// another bundle, another version or none is undone and fails the run; a
+// store that no longer holds that confirmed bundle fails before the write.
+func TestWindowsRepeatedBundleRestartRequiresTheGatewayBundleIdentity(t *testing.T) {
+	const drifted = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 700\n"
+	const confirmed = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 600\n"
+	const bundleID, other = "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8", "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T9"
+	for _, tc := range []struct {
+		name      string
+		reportID  string
+		reportVer uint64
+		current   string
+		applied   bool
+		code      string
+		writes    int
+	}{
+		{name: "gateway names the confirmed bundle", reportID: bundleID, reportVer: 4, current: confirmed, applied: true, writes: 1},
+		// The previous config is unrecorded in this fixture, so undo restores
+		// its bytes directly rather than recording a second writer call.
+		{name: "gateway names another bundle", reportID: other, reportVer: 4, current: confirmed, code: "bundle_policy_not_adopted", writes: 1},
+		{name: "gateway names another version", reportID: bundleID, reportVer: 3, current: confirmed, code: "bundle_policy_not_adopted", writes: 1},
+		{name: "gateway names no bundle", current: confirmed, code: "bundle_policy_not_adopted", writes: 1},
+		{name: "confirmed bundle moved", reportID: bundleID, reportVer: 4, current: drifted, code: "bundle_state_invalid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host, opts := newHotConfigHost(t, drifted, confirmed)
+			host.adopted = true
+			host.bundleID, host.bundleVersion = tc.reportID, tc.reportVer
+			opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{AlreadyApplied: true,
+				Config: []byte(confirmed), ConfigSHA256: configwrite.SHA256Hex([]byte(confirmed))}}
+			savedConfirmed, savedRestart, savedDigest := windowsHotConfirmedBundle, windowsEnterpriseHotConfigRestart, windowsEnterprisePolicyDigest
+			t.Cleanup(func() {
+				windowsHotConfirmedBundle, windowsEnterpriseHotConfigRestart, windowsEnterprisePolicyDigest = savedConfirmed, savedRestart, savedDigest
+			})
+			windowsHotConfirmedBundle = func(_ *enterprisebundle.Driver, config []byte) (configwrite.Options, []byte, *enterprisebundle.Ref, error) {
+				opt, _ := enterprisebundle.GenerationOptions(&enterprisebundle.Receipt{BundleID: bundleID, Version: 4,
+					Principal: "control-plane:acme/alice", SignerKeyID: "k1"})
+				return opt, []byte(tc.current), &enterprisebundle.Ref{BundleID: bundleID, Version: 4, SignerKeyID: "k1"}, nil
+			}
+			restarts := 0
+			windowsEnterpriseHotConfigRestart = func() (bool, error) { restarts++; return true, nil }
+			stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("Verify")}}
+			stub.install(t)
+			windowsEnterprisePolicyDigest = host.digest
+			result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+			applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
+				&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
+			installed, _ := os.ReadFile(host.configPath)
+			if applied != tc.applied || len(host.writes) != tc.writes {
+				t.Fatalf("applied=%t writes=%q errors=%+v", applied, host.writes, result.Errors)
+			}
+			if tc.applied {
+				if string(installed) != confirmed || restarts != 1 || len(result.Errors) != 0 || !strings.Contains(host.writes[0], bundleID+" version 4") {
+					t.Fatalf("adopted repeat: config=%q restarts=%d writes=%q errors=%+v", installed, restarts, host.writes, result.Errors)
+				}
+				return
+			}
+			if string(installed) != drifted || !windowsBundleHasCode(result.Errors, tc.code) {
+				t.Fatalf("refused repeat: config=%q restarts=%d errors=%+v, want %s and the previous config", installed, restarts, result.Errors, tc.code)
+			}
+			if tc.code == "bundle_state_invalid" && restarts != 0 {
+				t.Fatalf("a repeat that could not name its bundle restarted the gateway %d time(s)", restarts)
+			}
+		})
 	}
 }
 
@@ -902,5 +1900,839 @@ func TestWindowsConfirmedBundleRepairsVerifiedInstallDamageWithReason(t *testing
 	}
 	if !found {
 		t.Fatalf("repair did not name the failed check: %+v", result.Warnings)
+	}
+}
+
+// GAP-0033: the lifecycle transaction owns Codex's machine policy on Windows.
+// A config that turns Codex protection on or off is not written in the
+// running gateway, so the guardian never writes Codex requirements and their
+// ownership record for a deployment record that does not attest them; the
+// upgrade transaction applies it instead, a signed bundle's included.
+func TestWindowsHotConfigRoutesCodexTargetChangeToTransaction(t *testing.T) {
+	const claudeOnly = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  connectors:\n    claudecode:\n      enabled: true\n"
+	const withCodex = "config_version: 9\nguardrail:\n  block_at: LOW\n  connectors:\n    claudecode:\n      enabled: true\n    codex:\n      enabled: true\n"
+	for _, tc := range []struct {
+		name, previous, next string
+	}{
+		{"enable", claudeOnly, withCodex},
+		{"disable", withCodex, claudeOnly},
+	} {
+		for _, bundle := range []bool{false, true} {
+			name := tc.name + " Setup"
+			if bundle {
+				name = tc.name + " bundle"
+			}
+			t.Run(name, func(t *testing.T) {
+				host, opts := newHotConfigHost(t, tc.previous, tc.next)
+				host.adopted = true
+				if bundle {
+					opts.bundle = host.bundleRun()
+				}
+				result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+				applied, keys := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
+					&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
+				installed, err := os.ReadFile(host.configPath)
+				if err != nil || applied || len(keys) != 0 || len(host.writes) != 0 || host.refreshes != 0 || string(installed) != tc.previous {
+					t.Fatalf("Codex %s applied=%t keys=%q writes=%q refreshes=%d installed=%q read=%v",
+						tc.name, applied, keys, host.writes, host.refreshes, installed, err)
+				}
+				if !opts.codexTargetTransaction || len(result.Errors) != 0 {
+					t.Fatalf("Codex %s transaction=%t errors=%v", tc.name, opts.codexTargetTransaction, result.Errors)
+				}
+			})
+		}
+	}
+
+	// A policy change that keeps Codex on stays in the running gateway, and
+	// the flag a previous attempt of the run set does not carry over.
+	host, opts := newHotConfigHost(t, withCodex, strings.Replace(withCodex, "block_at: LOW", "block_at: HIGH", 1))
+	host.adopted = true
+	opts.codexTargetTransaction = true
+	opts.bundle = host.bundleRun()
+	savedDigest := windowsEnterprisePolicyDigest
+	t.Cleanup(func() { windowsEnterprisePolicyDigest = savedDigest })
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("Verify")}}
+	stub.install(t)
+	windowsEnterprisePolicyDigest = host.digest
+	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+	applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
+		&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
+	if !applied || opts.codexTargetTransaction || len(host.writes) != 1 || len(stub.calls) != 1 {
+		t.Fatalf("Codex kept on: applied=%t transaction=%t writes=%q installerCalls=%q errors=%v",
+			applied, opts.codexTargetTransaction, host.writes, stub.calls, result.Errors)
+	}
+}
+
+// GAP-0033: an ordinary CONFIG= ensure that turns Codex on runs the upgrade
+// transaction without writing the config first, and says why.
+func TestWindowsEnterpriseEnsureUpgradesForCodexTargetChange(t *testing.T) {
+	const previous = "config_version: 9\nguardrail:\n  connectors:\n    claudecode: {}\n"
+	const next = "config_version: 9\nguardrail:\n  connectors:\n    claudecode: {}\n    codex: {}\n"
+	host, opts := newHotConfigHost(t, previous, next)
+	host.adopted = true
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Upgrade")}}
+	result := runHotConfigEnsure(t, host, opts, stub)
+	if len(stub.calls) != 2 || stub.calls[1][1] != "Upgrade" || len(host.writes) != 0 || host.refreshes != 0 {
+		t.Fatalf("Codex enable: installer runs %q, writes %q, target refreshes %d", stub.calls, host.writes, host.refreshes)
+	}
+	if !strings.Contains(fmt.Sprint(result.Warnings), "turns Codex protection on or off") {
+		t.Fatalf("Codex enable warnings = %v", result.Warnings)
+	}
+}
+
+// GAP-0033: Setup carries the payload and upgrades; the installed CLI's
+// `enterprise bundle apply` carries none, so its Codex change is a repair
+// with the bundle config, which runs the same transaction.
+func TestWindowsEnterpriseCodexTargetAction(t *testing.T) {
+	setup := ensureTestOptions()
+	if got := windowsEnterpriseCodexTargetAction(setup); got != "upgrade" {
+		t.Fatalf("Setup payload: action %q, want upgrade", got)
+	}
+	installedCLI := ensureTestOptions()
+	installedCLI.gatewayBinary, installedCLI.acpBinary, installedCLI.hookBinary, installedCLI.hookGuardBinary, installedCLI.sensorHelperBinary = "", "", "", "", ""
+	if got := windowsEnterpriseCodexTargetAction(installedCLI); got != "repair" {
+		t.Fatalf("installed CLI: action %q, want repair", got)
+	}
+}
+
+// GAP-0360: deployment metadata can lag the configured target when a vendor
+// client was discovered after installation. A payload-less first bundle
+// repairs through the lifecycle instead of asking the guardian to own it.
+func TestWindowsEnsureReconcilesRecordedCodexTarget(t *testing.T) {
+	for _, payload := range []bool{false, true} {
+		t.Run(fmt.Sprintf("payload=%t", payload), func(t *testing.T) {
+			_, opts := newHotConfigHost(t, "config_version: 9\nguardrail:\n  connectors:\n    codex: {}\n", "config_version: 9\nguardrail:\n  connectors:\n    codex: {}\n")
+			if !payload {
+				configPath := opts.configPath
+				clearWindowsEnterpriseSources(opts)
+				opts.configPath = configPath
+			}
+			saved := windowsEnterpriseEnsureDriftDetector
+			t.Cleanup(func() { windowsEnterpriseEnsureDriftDetector = saved })
+			windowsEnterpriseEnsureDriftDetector = func(*windowsEnterpriseLifecycleOptions, string) (string, error) { return "codex_target", nil }
+			status := &windowsEnterpriseInstallerReport{OK: true, Installed: true, InstalledVersion: opts.productVersion}
+			plan, err := planWindowsEnterpriseEnsure(status, opts, "installer.ps1")
+			want := "repair"
+			if payload {
+				want = "upgrade"
+			}
+			if err != nil || plan.Action != want || !opts.codexTargetTransaction {
+				t.Fatalf("plan=%+v transaction=%t error=%v", plan, opts.codexTargetTransaction, err)
+			}
+		})
+	}
+}
+
+func TestWindowsEqualBaseFirstBundleStillPlansApply(t *testing.T) {
+	const raw = "config_version: 9\nguardrail:\n  connectors:\n    claudecode: {}\n"
+	_, opts := newHotConfigHost(t, raw, raw)
+	configPath := opts.configPath
+	clearWindowsEnterpriseSources(opts)
+	opts.configPath = configPath
+	opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{}}}
+	saved := windowsEnterpriseEnsureDriftDetector
+	t.Cleanup(func() { windowsEnterpriseEnsureDriftDetector = saved })
+	windowsEnterpriseEnsureDriftDetector = func(*windowsEnterpriseLifecycleOptions, string) (string, error) { return "", nil }
+	status := &windowsEnterpriseInstallerReport{OK: true, Installed: true, InstalledVersion: opts.productVersion}
+	plan, err := planWindowsEnterpriseEnsure(status, opts, "installer.ps1")
+	if err != nil || plan.Action != "upgrade" || plan.Reason != "drift:bundle" {
+		t.Fatalf("first bundle plan=%+v, %v", plan, err)
+	}
+	opts.bundle.prepared.AlreadyApplied = true
+	plan, err = planWindowsEnterpriseEnsure(status, opts, "installer.ps1")
+	if err != nil || plan.Action != "" || plan.Reason != "compliant" {
+		t.Fatalf("confirmed repeat plan=%+v, %v", plan, err)
+	}
+}
+
+// GAP-1418: the hook guardian renders a changed hook fail mode into every
+// enrolled target's runtime sidecars on its next pass. A signed bundle that
+// takes an explicit open back to the default closed (or closed to open, or
+// changes the mode anywhere it can be set) waits for that render before its
+// post-apply verify; one that leaves every hook fail mode alone does not
+// wait, and a render that never comes fails the bundle with the previous
+// config back.
+func TestWindowsHotBundleWaitsForGuardianHookFailModeRender(t *testing.T) {
+	const base = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  connectors:\n    codex: {}\n    claudecode: {}\n"
+	const explicitOpen = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  connectors:\n    codex:\n      hook_fail_mode: open\n    claudecode:\n      hook_fail_mode: open\n"
+	targets := []enterprisehooks.ManifestTarget{
+		{SID: "S-1-5-21-1-2-3-1001", Connector: "codex"},
+		{SID: "S-1-5-21-1-2-3-1001", Connector: "claudecode"},
+		{SID: "S-1-5-21-1-2-3-1002", Connector: "codex"},
+		{SID: "S-1-5-21-1-2-3-1002", Connector: "claudecode"},
+	}
+	for _, tc := range []struct {
+		name, previous, next string
+		wantProof            bool
+		proofErr             error
+		// wantTargets is how many targets the wait names (0: all of them).
+		wantTargets int
+	}{
+		{name: "explicit open back to the default closed", previous: explicitOpen, next: base, wantProof: true},
+		{name: "default closed to explicit open", previous: base, next: explicitOpen, wantProof: true},
+		{name: "explicit open to explicit closed", previous: explicitOpen, next: strings.ReplaceAll(explicitOpen, "hook_fail_mode: open", "hook_fail_mode: Closed"), wantProof: true},
+		{name: "one connector only", previous: explicitOpen, next: strings.Replace(explicitOpen, "    claudecode:\n      hook_fail_mode: open\n", "    claudecode: {}\n", 1), wantProof: true, wantTargets: 2},
+		// Review loop 2: an explicit closed on a default-closed config, or
+		// for one connector, renders nothing new, so nothing waits.
+		{name: "explicit closed on the default closed", previous: base, next: strings.Replace(base, "  block_at: MEDIUM\n", "  block_at: MEDIUM\n  hook_fail_mode: closed\n", 1)},
+		{name: "explicit closed for one connector on the default closed", previous: base, next: strings.Replace(base, "    codex: {}\n", "    codex:\n      hook_fail_mode: closed\n", 1)},
+		{name: "global open under connector values that stay open", previous: explicitOpen, next: strings.Replace(explicitOpen, "  block_at: MEDIUM\n", "  block_at: MEDIUM\n  hook_fail_mode: open\n", 1)},
+		{name: "global hook fail mode", previous: base, next: strings.Replace(base, "  block_at: MEDIUM\n", "  block_at: MEDIUM\n  hook_fail_mode: open\n", 1), wantProof: true},
+		{name: "hook fail modes unchanged", previous: explicitOpen, next: strings.Replace(explicitOpen, "MEDIUM", "LOW", 1)},
+		{name: "the render never comes", previous: explicitOpen, next: base, wantProof: true, proofErr: errors.New("no verified DefenseClaw hook for S-1-5-21-1-2-3-1001/codex")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host, opts := newHotConfigHost(t, tc.previous, tc.next)
+			host.adopted = true
+			host.hookProofErr = tc.proofErr
+			opts.bundle = host.bundleRun()
+			windowsEnterpriseHotConfigPublishedTargets = func(managed.StandaloneLayout) ([]enterprisehooks.ManifestTarget, error) {
+				return targets, nil
+			}
+			restart := windowsEnterpriseHotConfigRestart
+			t.Cleanup(func() { windowsEnterpriseHotConfigRestart = restart })
+			windowsEnterpriseHotConfigRestart = func() (bool, error) {
+				t.Fatal("a hook fail mode change restarted the gateway")
+				return false, nil
+			}
+			stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("Verify")}}
+			stub.install(t)
+			savedDigest := windowsEnterprisePolicyDigest
+			t.Cleanup(func() { windowsEnterprisePolicyDigest = savedDigest })
+			windowsEnterprisePolicyDigest = host.digest
+			result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+			applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
+				&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
+			if !tc.wantProof {
+				if !applied || len(host.hookProofs) != 0 {
+					t.Fatalf("applied=%t hook proofs=%d errors=%v", applied, len(host.hookProofs), result.Errors)
+				}
+				return
+			}
+			wantTargets := tc.wantTargets
+			if wantTargets == 0 {
+				wantTargets = len(targets)
+			}
+			if len(host.hookProofs) != 1 || len(host.hookProofs[0]) != wantTargets {
+				t.Fatalf("the post-apply verify did not wait for the guardian to render every target: proofs %v", host.hookProofs)
+			}
+			got, _ := os.ReadFile(host.configPath)
+			if tc.proofErr == nil {
+				if !applied || string(got) != tc.next || len(stub.calls) != 1 || stub.calls[0][1] != "Verify" {
+					t.Fatalf("applied=%t config=%q installer=%q errors=%v", applied, got, stub.calls, result.Errors)
+				}
+				return
+			}
+			if applied || string(got) != tc.previous || len(stub.calls) != 0 || !windowsBundleHasCode(result.Errors, "bundle_post_verify_failed") {
+				t.Fatalf("an unrendered fail mode: applied=%t config=%q installer=%q errors=%v", applied, got, stub.calls, result.Errors)
+			}
+		})
+	}
+}
+
+// Review loop 2: the hook fail mode wait compares the effective mode of each
+// connector (unset is closed on a managed standalone host), not the keys.
+func TestWindowsHotConfigHookFailModeChanges(t *testing.T) {
+	targets := []enterprisehooks.ManifestTarget{{SID: "S-1-5-21-1-2-3-1001", Connector: "codex"}, {SID: "S-1-5-21-1-2-3-1001", Connector: "claudecode"}}
+	for _, tc := range []struct {
+		name, previous, next string
+		any                  bool
+		affected, reopened   int
+	}{
+		{name: "identical", previous: "guardrail:\n  hook_fail_mode: open\n", next: "guardrail:\n  hook_fail_mode: open\n"},
+		{name: "case and spacing", previous: "guardrail:\n  hook_fail_mode: open\n", next: "guardrail:\n  hook_fail_mode: ' OPEN '\n"},
+		{name: "explicit closed added to the default", previous: "guardrail: {}\n", next: "guardrail:\n  hook_fail_mode: closed\n"},
+		{name: "any non-open value is closed", previous: "guardrail:\n  hook_fail_mode: closed\n", next: "guardrail:\n  hook_fail_mode: strict\n"},
+		{name: "open removed", previous: "guardrail:\n  hook_fail_mode: open\n", next: "guardrail: {}\n", any: true, affected: 2},
+		{name: "open added globally", previous: "guardrail: {}\n", next: "guardrail:\n  hook_fail_mode: open\n", any: true, affected: 2, reopened: 2},
+		{name: "open added under a connector", previous: "guardrail:\n  connectors:\n    codex: {}\n", next: "guardrail:\n  connectors:\n    codex:\n      hook_fail_mode: open\n", any: true, affected: 1, reopened: 1},
+		{name: "connector key spelled differently", previous: "guardrail: {}\n", next: "guardrail:\n  connectors:\n    Claude_Code:\n      hook_fail_mode: open\n", any: true, affected: 1, reopened: 1},
+		{name: "connector open under a global open", previous: "guardrail:\n  hook_fail_mode: open\n", next: "guardrail:\n  hook_fail_mode: open\n  connectors:\n    codex:\n      hook_fail_mode: open\n"},
+		{name: "application protection override", previous: "application_protection:\n  connectors:\n    codex:\n      guardrail:\n        hook_fail_mode: open\n", next: "application_protection:\n  connectors:\n    codex:\n      guardrail:\n        hook_fail_mode: closed\n", any: true, affected: 1},
+		{name: "application protection switched on", previous: "application_protection:\n  enabled: false\n", next: "application_protection:\n  enabled: true\n", any: true, affected: 2, reopened: 2},
+		{name: "a profile mode is not attributed", previous: "guardrail:\n  profiles:\n    p:\n      hook_fail_mode: closed\n", next: "guardrail:\n  profiles:\n    p:\n      hook_fail_mode: open\n", any: true, affected: 2, reopened: 2},
+		{name: "other keys only", previous: "guardrail:\n  block_at: LOW\n", next: "guardrail:\n  block_at: HIGH\n"},
+		{name: "unparseable", previous: "guardrail:\n  hook_fail_mode: open\n", next: "guardrail: [\n", any: true, affected: 2, reopened: 2},
+		// GAP-1498: an application protection connector entry added with no
+		// hook_fail_mode of its own takes codex off the application
+		// protection guardrail (open) to the global guardrail (closed).
+		{name: "application protection entry switches the chain",
+			previous: "config_version: 9\ndeployment_mode: managed_enterprise\nguardrail:\n  hook_fail_mode: closed\napplication_protection:\n  enabled: true\n  guardrail:\n    hook_fail_mode: open\n",
+			next:     "config_version: 9\ndeployment_mode: managed_enterprise\nguardrail:\n  hook_fail_mode: closed\napplication_protection:\n  enabled: true\n  guardrail:\n    hook_fail_mode: open\n  connectors:\n    codex:\n      guardrail:\n        mode: action\n",
+			any:      true, affected: 1},
+	} {
+		change := windowsHotConfigHookFailModeChanges([]byte(tc.previous), []byte(tc.next))
+		if got := change.any(); got != tc.any {
+			t.Errorf("%s: any = %t, want %t", tc.name, got, tc.any)
+		}
+		if got := len(change.affected(targets, false)); got != tc.affected {
+			t.Errorf("%s: affected = %d, want %d", tc.name, got, tc.affected)
+		}
+		if got := len(change.affected(targets, true)); got != tc.reopened {
+			t.Errorf("%s: reopened = %d, want %d", tc.name, got, tc.reopened)
+		}
+	}
+}
+
+// Review loop 2: a target verify excuses (a signed-out account waiting for
+// its sign-in, a confirmed removed account) does not hold a hook wait open.
+func TestWindowsHotConfigUnprovenTargetsAcceptExcused(t *testing.T) {
+	targets := []enterprisehooks.ManifestTarget{
+		{SID: "S-1-5-21-1-2-3-1001", Connector: "codex"},
+		{SID: "S-1-5-21-1-2-3-1002", Connector: "codex"},
+		{SID: "S-1-5-21-1-2-3-1003", Connector: "codex"},
+	}
+	rows := []enterpriseHookReconcileRow{
+		{SID: "S-1-5-21-1-2-3-1001", Connector: "codex", OK: true},
+		{SID: "S-1-5-21-1-2-3-1002", Connector: "codex", Error: "waiting for the account to sign in"},
+		{SID: "S-1-5-21-1-2-3-1003", Connector: "codex", Error: "fail mode \"open\", want \"closed\""},
+	}
+	unproven := windowsHotConfigUnprovenTargets(targets, rows, enterpriseHookReconcileRow{SID: "s-1-5-21-1-2-3-1002", Connector: "Codex"})
+	if len(unproven) != 1 || unproven[0].SID != "S-1-5-21-1-2-3-1003" {
+		t.Fatalf("unproven = %v, want only the failed unexcused target", unproven)
+	}
+}
+
+// GAP-0933: a plain config change whose undo cannot prove the restored hook
+// fail mode goes on to the upgrade transaction with its hooks held closed;
+// it records a warning, not an error that says the previous config is back
+// over the transaction that then installs the change.
+func TestWindowsHotConfigUnprovenRestoredModeLeavesTheChangeToTheTransaction(t *testing.T) {
+	const base = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  connectors:\n    codex: {}\n"
+	const explicitOpen = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  connectors:\n    codex:\n      hook_fail_mode: open\n"
+	host, opts := newHotConfigHost(t, base, explicitOpen)
+	host.adopted = true
+	windowsEnterpriseHotConfigPublishedTargets = func(managed.StandaloneLayout) ([]enterprisehooks.ManifestTarget, error) {
+		return []enterprisehooks.ManifestTarget{{SID: "S-1-5-21-1-2-3-1001", Connector: "codex"}}, nil
+	}
+	// Neither the forward render nor the restored mode is proven.
+	windowsEnterpriseHotConfigTargetHooksProven = func(context.Context, managed.StandaloneLayout, []enterprisehooks.ManifestTarget, time.Duration) error {
+		return errors.New("no verified DefenseClaw hook for S-1-5-21-1-2-3-1001/codex")
+	}
+	savedDigest := windowsEnterprisePolicyDigest
+	t.Cleanup(func() { windowsEnterprisePolicyDigest = savedDigest })
+	windowsEnterprisePolicyDigest = host.digest
+	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+	applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
+		&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
+	if applied || opts.hotConfigRestoreFailed {
+		t.Fatalf("applied=%t restoreFailed=%t: the change must go on to the transaction", applied, opts.hotConfigRestoreFailed)
+	}
+	if windowsBundleHasCode(result.Errors, "hook_fail_mode_restore_unproven") || !windowsBundleHasCode(result.Warnings, "hook_fail_mode_restore_unproven") {
+		t.Fatalf("errors=%v warnings=%v: want the unproven restore as a warning", result.Errors, result.Warnings)
+	}
+	if !host.closureHeld || host.stops != 0 {
+		t.Fatalf("held=%t stops=%d: the hooks stay held closed and the gateway runs", host.closureHeld, host.stops)
+	}
+}
+
+// Review loop 2: an undo that takes an opened hook fail mode back to closed
+// holds every standalone hook closed until the affected targets verify with
+// the restored mode, releases its closure then, and keeps it otherwise.
+func TestWindowsHotBundleUndoHoldsHooksClosedUntilRestoredModeRenders(t *testing.T) {
+	const base = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  connectors:\n    codex: {}\n    claudecode: {}\n"
+	const explicitOpen = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  connectors:\n    codex:\n      hook_fail_mode: open\n    claudecode: {}\n"
+	targets := []enterprisehooks.ManifestTarget{
+		{SID: "S-1-5-21-1-2-3-1001", Connector: "codex"},
+		{SID: "S-1-5-21-1-2-3-1001", Connector: "claudecode"},
+	}
+	for _, tc := range []struct {
+		name, previous, next string
+		heldBefore           bool
+		undoProofErr         error
+		wantHold             bool
+	}{
+		{name: "closed restored and rendered", previous: base, next: explicitOpen, wantHold: true},
+		{name: "closed restored but never rendered", previous: base, next: explicitOpen, wantHold: true, undoProofErr: errors.New("no verified DefenseClaw hook for S-1-5-21-1-2-3-1001/codex")},
+		{name: "a closure held before stays", previous: base, next: explicitOpen, heldBefore: true, wantHold: true},
+		{name: "open restored needs no hold", previous: explicitOpen, next: base},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host, opts := newHotConfigHost(t, tc.previous, tc.next)
+			host.adopted = true
+			host.closureHeld = tc.heldBefore
+			opts.bundle = host.bundleRun()
+			windowsEnterpriseHotConfigPublishedTargets = func(managed.StandaloneLayout) ([]enterprisehooks.ManifestTarget, error) {
+				return targets, nil
+			}
+			var undoProofs [][]enterprisehooks.ManifestTarget
+			heldAtProof := false
+			windowsEnterpriseHotConfigTargetHooksProven = func(_ context.Context, _ managed.StandaloneLayout, proof []enterprisehooks.ManifestTarget, _ time.Duration) error {
+				installed, _ := os.ReadFile(host.configPath)
+				if string(installed) == tc.next {
+					return nil // the forward render wait
+				}
+				undoProofs = append(undoProofs, proof)
+				heldAtProof = host.closureHeld
+				return tc.undoProofErr
+			}
+			failed := installedStatus("Verify")
+			failed["ok"] = false
+			failed["errors"] = []string{"standalone verify failed"}
+			stub := &ensureStub{t: t, replies: []map[string]any{failed}}
+			stub.install(t)
+			savedDigest := windowsEnterprisePolicyDigest
+			t.Cleanup(func() { windowsEnterprisePolicyDigest = savedDigest })
+			windowsEnterprisePolicyDigest = host.digest
+			result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+			applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
+				&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
+			got, _ := os.ReadFile(host.configPath)
+			if applied || string(got) != tc.previous || !windowsBundleHasCode(result.Errors, "bundle_post_verify_failed") {
+				t.Fatalf("applied=%t config=%q errors=%v", applied, got, result.Errors)
+			}
+			if !tc.wantHold {
+				if host.closes != 0 || len(undoProofs) != 0 || host.closureHeld {
+					t.Fatalf("an undo that restores open held hooks: closes=%d proofs=%v held=%t", host.closes, undoProofs, host.closureHeld)
+				}
+				return
+			}
+			if len(undoProofs) != 1 || len(undoProofs[0]) != 1 || undoProofs[0][0].Connector != "codex" || !heldAtProof {
+				t.Fatalf("the undo did not prove the restored mode for the reopened target under a closure: proofs=%v held=%t", undoProofs, heldAtProof)
+			}
+			if host.stops != 0 {
+				t.Fatalf("a proven policy restore stopped the gateway: stops=%d", host.stops)
+			}
+			switch {
+			case tc.undoProofErr != nil:
+				if !host.closureHeld || host.releases != 0 || !windowsBundleHasCode(result.Errors, "hook_fail_mode_restore_unproven") {
+					t.Fatalf("an unproven restored mode released the closure: held=%t releases=%d errors=%v", host.closureHeld, host.releases, result.Errors)
+				}
+			case tc.heldBefore:
+				if !host.closureHeld || host.releases != 0 || host.closes != 0 {
+					t.Fatalf("the undo released a closure it did not take: held=%t closes=%d releases=%d", host.closureHeld, host.closes, host.releases)
+				}
+			default:
+				if host.closes != 1 || host.releases != 1 || host.closureHeld {
+					t.Fatalf("closes=%d releases=%d held=%t, want one closure released", host.closes, host.releases, host.closureHeld)
+				}
+			}
+		})
+	}
+}
+
+// GAP-1418: the hook proof's readiness run carries the guardian's
+// authorization directory and the gateway service name besides the service
+// pins; without them readiness refused before its report on every host.
+// GAP-1719: the hook proof runs enterprise hooks readiness from the
+// installed gateway image, the only one whose protected authorization check
+// passes; from defenseclaw.exe every proof failed closed.
+func TestWindowsHotConfigHookProofRunsTheInstalledGateway(t *testing.T) {
+	root := t.TempDir()
+	resolver, custody := windowsEnterpriseProgramFilesResolver, windowsEnterpriseInstalledCLICustody
+	t.Cleanup(func() {
+		windowsEnterpriseProgramFilesResolver, windowsEnterpriseInstalledCLICustody = resolver, custody
+	})
+	windowsEnterpriseProgramFilesResolver = func() (string, error) { return root, nil }
+	var checked []string
+	windowsEnterpriseInstalledCLICustody = func(path, _ string) error { checked = append(checked, path); return nil }
+	layout := managed.StandaloneLayout{ManifestPath: filepath.Join(root, "targets.yaml"), GuardianAuthDir: root}
+	err := windowsEnterpriseHotConfigTargetHooksProven(context.Background(), layout,
+		[]enterprisehooks.ManifestTarget{{SID: "S-1-5-21-1-2-3-1001", Connector: "codex"}}, 0)
+	gateway := filepath.Join(root, "Cisco", "DefenseClaw", "bin", "defenseclaw-gateway.exe")
+	if err == nil || !strings.Contains(err.Error(), "defenseclaw-gateway.exe") {
+		t.Fatalf("hook proof error = %v, want it to run %s", err, gateway)
+	}
+	if len(checked) != 1 || !strings.EqualFold(checked[0], gateway) {
+		t.Fatalf("custody checked %q, want only %s", checked, gateway)
+	}
+}
+
+func TestWindowsHotConfigReadinessCommandCarriesGuardianPins(t *testing.T) {
+	layout := managed.StandaloneLayout{
+		ConfigPath:      `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`,
+		DataDir:         `C:\ProgramData\Cisco\DefenseClaw\runtime`,
+		ManifestPath:    `C:\ProgramData\Cisco\DefenseClaw\hook-guardian\targets.yaml`,
+		GuardianAuthDir: `C:\ProgramData\Cisco\DefenseClaw\hook-guardian-state`,
+		ServiceUser:     `NT SERVICE\DefenseClawGateway`,
+	}
+	t.Setenv("DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR", `C:\Users\Public\forged`)
+	command := windowsEnterpriseHotConfigReadinessCommand(context.Background(), `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe`, layout)
+	want := map[string]string{
+		"DEFENSECLAW_CONFIG":                       layout.ConfigPath,
+		"DEFENSECLAW_DEPLOYMENT_MODE":              "managed_enterprise",
+		"DEFENSECLAW_ENTERPRISE_PROFILE":           "standalone",
+		"DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT":      layout.ServiceUser,
+		"DEFENSECLAW_HOME":                         layout.DataDir,
+		"DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR":       layout.GuardianAuthDir,
+		"DEFENSECLAW_WINDOWS_GATEWAY_SERVICE_NAME": "DefenseClawGateway",
+	}
+	got := map[string][]string{}
+	for _, entry := range command.Env {
+		name, value, _ := strings.Cut(entry, "=")
+		got[strings.ToUpper(name)] = append(got[strings.ToUpper(name)], value)
+	}
+	for name, value := range want {
+		if values := got[name]; len(values) != 1 || values[0] != value {
+			t.Errorf("readiness env %s = %q, want exactly %q", name, values, value)
+		}
+	}
+	if args := strings.Join(command.Args[1:], " "); args != "enterprise hooks readiness --manifest "+layout.ManifestPath+" --json" {
+		t.Errorf("readiness args = %q", args)
+	}
+}
+
+// GAP-0779: the check at the end of an ensure refreshes a stale approved
+// source of a deployment that records one, leaves a host without a record and
+// a signed-bundle deployment alone, and warns, not fails, on a record it
+// cannot bind (a null source record must not panic).
+func TestWindowsEnterpriseEnsureHealsAStaleApprovedConfigSource(t *testing.T) {
+	const record = `{"installed":true,"profile":"standalone","approved_policy_sources":{"config":"%s"}}`
+	stage := func(t *testing.T, recordBody string) managed.StandaloneLayout {
+		t.Helper()
+		newHotConfigHost(t, approvedSourceConfigB, approvedSourceConfigB)
+		layout, _ := windowsEnterpriseHotConfigLayout()
+		layout.LifecycleDir = t.TempDir()
+		windowsEnterpriseHotConfigLayout = func() (managed.StandaloneLayout, error) { return layout, nil }
+		if recordBody != "" {
+			for name, body := range map[string]string{managedDeploymentRecordFile: recordBody, managedApprovedConfigFile: approvedSourceConfigA} {
+				if err := os.WriteFile(filepath.Join(layout.LifecycleDir, name), []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		return layout
+	}
+	copyOf := func(layout managed.StandaloneLayout) string {
+		raw, _ := os.ReadFile(filepath.Join(layout.LifecycleDir, managedApprovedConfigFile))
+		return string(raw)
+	}
+	stale := fmt.Sprintf(record, configwrite.SHA256Hex([]byte(approvedSourceConfigA)))
+
+	layout := stage(t, stale)
+	stageConfigGeneration(t, layout.ConfigPath, approvedSourceConfigB, "lifecycle")
+	result := &enterprisestatus.Result{}
+	healWindowsStandaloneApprovedConfigSource(result)
+	if copyOf(layout) != approvedSourceConfigB || len(result.Changes) != 1 || len(result.Warnings) != 0 || len(result.Errors) != 0 {
+		t.Fatalf("stale source: copy %q, changes %q, warnings %v", copyOf(layout), result.Changes, result.Warnings)
+	}
+
+	// Twins: no deployment record, and a signed-bundle deployment.
+	stage(t, "")
+	result = &enterprisestatus.Result{}
+	healWindowsStandaloneApprovedConfigSource(result)
+	if len(result.Changes) != 0 || len(result.Warnings) != 0 {
+		t.Fatalf("a host without a deployment record: %+v", result)
+	}
+	layout = stage(t, stale)
+	if err := os.MkdirAll(filepath.Join(layout.ConfigDir, "bundles"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(layout.ConfigDir, "bundles", "v1"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result = &enterprisestatus.Result{}
+	healWindowsStandaloneApprovedConfigSource(result)
+	if copyOf(layout) != approvedSourceConfigA || len(result.Changes) != 0 {
+		t.Fatalf("a signed-bundle deployment was healed: copy %q, %+v", copyOf(layout), result)
+	}
+
+	// A record it cannot bind fails the run and never panics.
+	layout = stage(t, `{"installed":true,"profile":"standalone","approved_policy_sources":null}`)
+	result = &enterprisestatus.Result{}
+	healWindowsStandaloneApprovedConfigSource(result)
+	if copyOf(layout) != approvedSourceConfigA || len(result.Errors) != 1 || result.Errors[0].Code != "approved_config_source_stale" {
+		t.Fatalf("null source record: copy %q, errors %+v", copyOf(layout), result.Errors)
+	}
+
+	// A stale source whose config is not bound to a lifecycle generation, or
+	// whose lock another run holds, fails the run and leaves A.
+	layout = stage(t, stale)
+	result = &enterprisestatus.Result{}
+	healWindowsStandaloneApprovedConfigSource(result)
+	if copyOf(layout) != approvedSourceConfigA || len(result.Errors) != 1 || result.Errors[0].Code != "approved_config_source_stale" ||
+		windowsEnterpriseFailureCodeFor(result) != enterprisestatus.WindowsExitFailure {
+		t.Fatalf("no generation record: copy %q, errors %+v", copyOf(layout), result.Errors)
+	}
+	stageConfigGeneration(t, layout.ConfigPath, approvedSourceConfigB, "lifecycle")
+	windowsEnterpriseHotConfigLock = func(string) (func(), error) { return nil, windows.ERROR_SHARING_VIOLATION }
+	result = &enterprisestatus.Result{}
+	healWindowsStandaloneApprovedConfigSource(result)
+	if copyOf(layout) != approvedSourceConfigA || len(result.Errors) != 1 || result.Errors[0].Code != "lifecycle_busy" ||
+		windowsEnterpriseFailureCodeFor(result) != enterprisestatus.WindowsExitBusy {
+		t.Fatalf("busy lock: copy %q, errors %+v", copyOf(layout), result.Errors)
+	}
+}
+
+// stageApprovedSourceWithoutProof stages a deployment whose approved copy and
+// digest are the installed config B and whose proof of it is missing (the state
+// after a Repair, a restart ensure or a no-op ensure before GAP-0854), with the
+// install state folder apart from the lifecycle root that holds the real
+// lifecycle.lock. It returns the layout and the lifecycle root.
+func stageApprovedSourceWithoutProof(t *testing.T) (managed.StandaloneLayout, string) {
+	t.Helper()
+	const record = `{"installed":true,"profile":"standalone","approved_policy_sources":{"config":"%s"}}`
+	newHotConfigHost(t, approvedSourceConfigB, approvedSourceConfigB)
+	layout, _ := windowsEnterpriseHotConfigLayout()
+	layout.LifecycleDir = t.TempDir() // the install state folder: deployment.json, approved copy, proof
+	windowsEnterpriseHotConfigLayout = func() (managed.StandaloneLayout, error) { return layout, nil }
+	lifecycleRoot := filepath.Join(t.TempDir(), "lifecycle")
+	if err := os.MkdirAll(lifecycleRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lifecycleRoot, "lifecycle.lock"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	savedRoots := windowsManagedLayout.roots
+	t.Cleanup(func() { windowsManagedLayout.roots = savedRoots })
+	windowsManagedLayout.roots = func(string) (winpath.EnterpriseRoots, error) {
+		return winpath.EnterpriseRoots{LifecycleDir: lifecycleRoot}, nil
+	}
+	// A transaction published copy and digest for the installed B; only the
+	// proof of it is missing.
+	for name, body := range map[string]string{
+		managedDeploymentRecordFile: fmt.Sprintf(record, configwrite.SHA256Hex([]byte(approvedSourceConfigB))),
+		managedApprovedConfigFile:   approvedSourceConfigB,
+	} {
+		if err := os.WriteFile(filepath.Join(layout.LifecycleDir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stageConfigGeneration(t, layout.ConfigPath, approvedSourceConfigB, "lifecycle")
+	return layout, lifecycleRoot
+}
+
+// installStateFolderFiles reads every file of the install state folder, by name.
+func installStateFolderFiles(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{}
+	for _, entry := range entries {
+		raw, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[entry.Name()] = string(raw)
+	}
+	return files
+}
+
+// GAP-0854 review 1: the approved config source check works on the approved
+// copy, digest and proof of the production deployment. A successful ensure or
+// repair of a certification scope (its own roots or service names) has its own
+// deployment, so it writes none of them and takes no lock; a hand edit repair
+// of the production deployment stays refused. Roots and names that equal the
+// production defaults are the production run: they leave the proof.
+func TestWindowsEnterpriseApprovedSourceProofFollowsOnlyTheProductionScope(t *testing.T) {
+	productionInstall, productionState := t.TempDir(), t.TempDir()
+	cases := []struct {
+		name       string
+		opts       windowsEnterpriseLifecycleOptions
+		production bool
+	}{
+		{name: "no overrides", production: true},
+		{name: "production roots and names spelled out", opts: windowsEnterpriseLifecycleOptions{
+			installRoot: productionInstall, stateRoot: productionState,
+			gatewayServiceName: strings.ToUpper(managed.StandaloneWindowsGatewaySvc), guardianServiceName: windowsStandaloneGuardianService,
+		}, production: true},
+		{name: "certification roots", opts: windowsEnterpriseLifecycleOptions{
+			installRoot: t.TempDir(), stateRoot: t.TempDir(),
+		}},
+		{name: "certification state root only", opts: windowsEnterpriseLifecycleOptions{stateRoot: t.TempDir()}},
+		{name: "certification service name only", opts: windowsEnterpriseLifecycleOptions{gatewayServiceName: "DefenseClawCertGateway"}},
+		{name: "production install root with a certification guardian", opts: windowsEnterpriseLifecycleOptions{
+			installRoot: productionInstall, guardianServiceName: "DefenseClawCertGuardian",
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			layout, _ := stageApprovedSourceWithoutProof(t)
+			rootsSeam, healSeam, lockSeam := windowsEnterpriseProductionRoots, windowsEnterpriseHealApprovedSource, windowsEnterpriseHotConfigLock
+			t.Cleanup(func() {
+				windowsEnterpriseProductionRoots, windowsEnterpriseHealApprovedSource, windowsEnterpriseHotConfigLock = rootsSeam, healSeam, lockSeam
+			})
+			windowsEnterpriseProductionRoots = func() (string, string, error) { return productionInstall, productionState, nil }
+			windowsEnterpriseHealApprovedSource = healWindowsStandaloneApprovedConfigSource
+			locks := 0
+			windowsEnterpriseHotConfigLock = func(path string) (func(), error) {
+				locks++
+				return lockSeam(path)
+			}
+			before := installStateFolderFiles(t, layout.LifecycleDir)
+
+			opts := tc.opts
+			result := &enterprisestatus.Result{Installed: true}
+			if healWindowsEnterpriseApprovedSourceOnSuccess(result, &opts) || len(result.Errors) != 0 || len(result.Warnings) != 0 {
+				t.Fatalf("the check failed a successful run: %+v", result)
+			}
+			handEditAfter(t, layout.ConfigPath, approvedSourceConfigB)
+			err := unprovenApprovedConfigSourceForHandEdit(layout.LifecycleDir, layout.ConfigPath)
+			after := installStateFolderFiles(t, layout.LifecycleDir)
+			if tc.production {
+				if locks != 1 || reflect.DeepEqual(before, after) || err != nil {
+					t.Fatalf("production run: locks %d, proof written %v, hand edit repair: %v", locks, !reflect.DeepEqual(before, after), err)
+				}
+				return
+			}
+			if locks != 0 || !reflect.DeepEqual(before, after) {
+				t.Fatalf("certification run touched the production approved source: locks %d, before %v, after %v", locks, before, after)
+			}
+			if err == nil {
+				t.Fatal("a hand edit of the production deployment was repairable on the proof of a certification run")
+			}
+		})
+	}
+}
+
+// GAP-0854: the lock the check takes at the end of a lifecycle run is the
+// lifecycle.lock of the lifecycle root, where every other step and the
+// installer take it, not a file in the install state folder that holds the
+// approved copy. In the install state folder there is no lock file, so the
+// proof of a copy that already is the installed config was never written after
+// a Repair, a restart ensure or a no-op ensure, and the next Repair over a
+// single hand edit was refused. The lock here is the real one: it fails
+// without the file, as the computer does.
+func TestWindowsEnterpriseApprovedSourceCheckTakesTheLifecycleRootLock(t *testing.T) {
+	layout, lifecycleRoot := stageApprovedSourceWithoutProof(t)
+	var locks []string
+	windowsEnterpriseHotConfigLock = func(path string) (func(), error) {
+		locks = append(locks, path)
+		return acquireWindowsEnterpriseLifecycleLock(path)
+	}
+	result := &enterprisestatus.Result{}
+	healWindowsStandaloneApprovedConfigSource(result)
+	if len(result.Errors) != 0 || len(result.Warnings) != 0 {
+		t.Fatalf("heal: %+v", result)
+	}
+	if want := filepath.Join(lifecycleRoot, "lifecycle.lock"); len(locks) != 1 || locks[0] != want {
+		t.Fatalf("lock taken at %q, want %q", locks, want)
+	}
+	// The single hand edit after the run is repairable: the proof exists.
+	handEditAfter(t, layout.ConfigPath, approvedSourceConfigB)
+	if err := unprovenApprovedConfigSourceForHandEdit(layout.LifecycleDir, layout.ConfigPath); err != nil {
+		t.Fatalf("a single hand edit after the run is refused: %v", err)
+	}
+
+	// Twin: a lock another run holds leaves the proof to the exit of that run,
+	// without failing this one (the copy already is the installed config).
+	if err := os.WriteFile(layout.ConfigPath, []byte(approvedSourceConfigB), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stageConfigGeneration(t, layout.ConfigPath, approvedSourceConfigB, "lifecycle")
+	windowsEnterpriseHotConfigLock = func(string) (func(), error) { return nil, windows.ERROR_SHARING_VIOLATION }
+	result = &enterprisestatus.Result{}
+	healWindowsStandaloneApprovedConfigSource(result)
+	if len(result.Errors) != 0 || len(result.Warnings) != 0 {
+		t.Fatalf("a busy lock failed a run whose copy is current: %+v", result)
+	}
+}
+
+// GAP-0779 review: an approved source record the hot path cannot bind makes it
+// undo the applied config instead of keeping a config no Repair can name.
+func TestWindowsEnterpriseEnsureUndoesAHotApplyWhoseApprovedSourceRecordIsMalformed(t *testing.T) {
+	const previous = "config_version: 9\nguardrail:\n  mode: observe\n"
+	const next = "config_version: 9\nguardrail:\n  mode: action\n"
+	host, opts := newHotConfigHost(t, previous, next)
+	host.adopted = true
+	stateDir := t.TempDir()
+	record := `{"installed":true,"profile":"standalone","approved_policy_sources":null}`
+	if err := os.WriteFile(filepath.Join(stateDir, managedDeploymentRecordFile), []byte(record), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	windowsEnterpriseHotConfigApproveSource = func(managed.StandaloneLayout) error {
+		installed, err := os.ReadFile(host.configPath)
+		if err != nil {
+			return err
+		}
+		return refreshManagedApprovedConfigSource(stateDir, host.configPath, installed)
+	}
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Verify"), installedStatus("Upgrade")}}
+	runHotConfigEnsure(t, host, opts, stub)
+	got, _ := os.ReadFile(host.configPath)
+	if string(got) != previous || stub.calls[len(stub.calls)-1][1] != "Upgrade" {
+		t.Fatalf("malformed approved source record: config %q, installer runs %q", got, stub.calls)
+	}
+}
+
+// GAP-0779 review: a run that fails its closure proof, or that fails for any
+// other reason, never changes the approved config source (the check is the
+// last step of a run that otherwise succeeded); a source that stays stale
+// fails an ensure that would otherwise be compliant, so a later hand edit and
+// Repair cannot restore an older config after an apparent success.
+func TestWindowsEnterpriseEnsureChecksTheApprovedSourceLastAndFailsOnAStaleOne(t *testing.T) {
+	const config = "config_version: 9\nguardrail:\n  hook_fail_mode: open\n"
+	for _, tc := range []struct {
+		name        string
+		digestFails bool
+		healError   bool
+		wantHeals   int
+		wantOK      bool
+		wantCode    string
+	}{
+		{name: "clean ensure checks once", wantHeals: 1, wantOK: true},
+		{name: "closure proof fails, source untouched", digestFails: true, wantHeals: 0, wantCode: "hook_closure_held"},
+		{name: "stale source fails the ensure", healError: true, wantHeals: 1, wantCode: "approved_config_source_stale"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host, opts := newHotConfigHost(t, config, config)
+			host.closureHeld, host.adopted = true, true
+			digest := windowsEnterprisePolicyDigest
+			t.Cleanup(func() { windowsEnterprisePolicyDigest = digest })
+			opts.configPath = ""
+			stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("verify")}}
+			stub.install(t)
+			windowsEnterprisePolicyDigest = host.digest
+			if tc.digestFails {
+				windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) { return nil, errors.New("readback unavailable") }
+			}
+			windowsEnterpriseHealApprovedSource = func(result *enterprisestatus.Result) {
+				host.heals++
+				if tc.healError {
+					result.AddError("approved_config_source_stale", "the approved config source could not be refreshed")
+				}
+			}
+			command := &cobra.Command{}
+			var stdout bytes.Buffer
+			command.SetOut(&stdout)
+			command.SetErr(&bytes.Buffer{})
+			runErr := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`)
+			var result enterprisestatus.Result
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("ensure output: %v\n%s", err, stdout.String())
+			}
+			if host.heals != tc.wantHeals || result.OK != tc.wantOK || (runErr == nil) != tc.wantOK ||
+				(tc.wantCode != "" && !windowsBundleHasCode(result.Errors, tc.wantCode)) {
+				t.Fatalf("heals=%d ok=%t err=%v errors=%v, want heals=%d ok=%t code %q",
+					host.heals, result.OK, runErr, result.Errors, tc.wantHeals, tc.wantOK, tc.wantCode)
+			}
+		})
+	}
+}
+
+// GAP-0779 review: an explicit upgrade (no CONFIG=) or repair that ends
+// without an error checks the approved config source too, because an upgrade
+// carries the earlier digest forward and Repair would restore it; a failed
+// run does not.
+func TestWindowsEnterpriseExplicitUpgradeAndRepairCheckTheApprovedSource(t *testing.T) {
+	const config = "config_version: 9\nguardrail:\n  hook_fail_mode: open\n"
+	failed := installedStatus("upgrade")
+	failed["ok"], failed["errors"] = false, []string{"the upgrade failed"}
+	for _, tc := range []struct {
+		name      string
+		action    string
+		replies   []map[string]any
+		wantHeals int
+	}{
+		{name: "upgrade", action: "upgrade", replies: []map[string]any{installedStatus("upgrade")}, wantHeals: 1},
+		{name: "repair", action: "repair", replies: []map[string]any{installedStatus("repair")}, wantHeals: 1},
+		{name: "failed upgrade", action: "upgrade", replies: []map[string]any{failed, installedStatus("status"), installedStatus("status")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host, _ := newHotConfigHost(t, config, config)
+			stub := &ensureStub{t: t, replies: tc.replies}
+			stub.install(t)
+			opts := ensureTestOptions()
+			opts.configPath, opts.manifestPath = "", ""
+			command := &cobra.Command{}
+			command.SetOut(&bytes.Buffer{})
+			command.SetErr(&bytes.Buffer{})
+			_ = runWindowsEnterpriseStandaloneAction(context.Background(), command, tc.action, opts, `C:\x\install-enterprise.ps1`, windowsEnterprisePowerShellArgs(tc.action, opts))
+			if host.heals != tc.wantHeals {
+				t.Fatalf("%s checked the approved source %d times, want %d", tc.action, host.heals, tc.wantHeals)
+			}
+		})
 	}
 }

@@ -24,6 +24,11 @@ func init() {
 	windowsSAMNameForUPN = func(upn string) string { return useridentity.SAMNameForUPN(upn, profileExplainUPNWait) }
 }
 
+// profileExplainLocalKey is the key the OS account database is asked for the
+// explained account: the name as typed, which the LSA takes in every
+// spelling (.\name included, LookupWindowsAccount).
+func profileExplainLocalKey(name, _ string) string { return name }
+
 // LookupWindowsAccount names a user account given as a SID, DOMAIN\name,
 // bare name or UPN through the LSA (see resolveWindowsExplainAccount).
 // Entra ID accounts resolve only this way; `enterprise policy show|verify
@@ -43,14 +48,44 @@ func LookupWindowsAccount(name string) (id, userName string, err error) {
 // --user filter, could hold sid: .\name and COMPUTER\name name an account of
 // this computer, any other domain or a UPN a directory account, and the SID
 // tells which. A deleted account read by its qualified name is never its
-// twin of the other kind (GAP-0366, GAP-1221).
+// twin of the other kind (GAP-0366, GAP-1221). A directory SID is also held
+// only by the domain the filter names: the domain the LSA names for the
+// SID's domain part, or one the gateway's cached facts for it name, so
+// CORP\alice never lists a deleted OTHER\alice (GAP-1183).
 func adminViewDomainCouldHold(user, sid string) bool {
 	local := false
 	if domain, _, qualified := strings.Cut(strings.TrimSpace(user), `\`); qualified {
 		computer, _ := windows.ComputerName()
 		local = domain == "." || computer != "" && strings.EqualFold(domain, computer)
 	}
-	return enterprisehooks.WindowsLocalAccountSID(sid) == local
+	if enterprisehooks.WindowsLocalAccountSID(sid) != local {
+		return false
+	}
+	if local {
+		return true
+	}
+	_, domain := useridentity.SplitQualifiedName(user)
+	return adminViewKnownDomain(domain, sid, windowsSIDDomainName(sid))
+}
+
+// windowsSIDDomainName is the NetBIOS name the LSA gives the domain of a
+// directory account SID (the SID without its last part), which it still
+// names once the account is deleted; "" when it does not answer.
+var windowsSIDDomainName = func(sid string) string {
+	sid = strings.TrimSpace(sid)
+	cut := strings.LastIndexByte(sid, '-')
+	if cut <= 0 {
+		return ""
+	}
+	parsed, err := windows.StringToSid(sid[:cut])
+	if err != nil {
+		return ""
+	}
+	_, domain, use, err := parsed.LookupAccount("")
+	if err != nil || use != windows.SidTypeDomain {
+		return ""
+	}
+	return strings.TrimSpace(domain)
 }
 
 // profileExplainUnresolved reports an account the LSA cannot name with the
@@ -87,7 +122,7 @@ func lsaAccount(sid *windows.SID) (windowsAccount, error) {
 	// The name the hook path gives the account, not the UPN its user signed
 	// in with (GAP-0533).
 	account = useridentity.CanonicalWindowsAccountName(sid.String(), account, domain)
-	return windowsAccount{SID: sid.String(), Name: sanitizeLLMEventUser(account), User: use == windows.SidTypeUser}, nil
+	return windowsAccount{SID: sid.String(), Name: sanitizeLLMEventUser(account), Domain: strings.TrimSpace(domain), User: use == windows.SidTypeUser}, nil
 }
 
 // profileExplainUPNWait is how long explain waits for TranslateNameW: for an

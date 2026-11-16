@@ -188,9 +188,7 @@ func compileObservabilityV8DestinationCompatibility(
 		EligibleSpanFamilies: make([]ObservabilityV8EffectiveSpanFamily, len(profile.TraceFamilies)),
 	}
 	for index, family := range profile.TraceFamilies {
-		result.EligibleSpanFamilies[index] = ObservabilityV8EffectiveSpanFamily{
-			EventName: family.EventName, Bucket: family.Bucket, Availability: family.Availability,
-		}
+		result.EligibleSpanFamilies[index] = ObservabilityV8EffectiveSpanFamily(family)
 	}
 	return []ObservabilityV8EffectiveCompatibilityProfile{result}, nil
 }

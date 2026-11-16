@@ -47,7 +47,7 @@ def test_secure_client_signature_list_keeps_original_catalog_shape() -> None:
             result = CliRunner().invoke(agent, ["signatures", "list", "--json"], obj=app, catch_exceptions=False)
         assert result.exit_code == 0, result.output
         signatures = json.loads(result.output)
-        assert len(signatures) == 88
+        assert len(signatures) == 86
         assert "jetbrains-ai" not in {sig["id"] for sig in signatures}
         for sig in signatures:
             assert not {"jetbrains_plugin_ids", "zed_extension_ids", "vim_plugins"} & sig.keys()

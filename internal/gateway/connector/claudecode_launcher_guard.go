@@ -10,25 +10,33 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookguard"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
-// Claude Code on Windows spawns a hook's command directly. When the per-user
-// defenseclaw-hook.exe is gone (an antivirus quarantine, a cleanup tool) that
-// spawn fails with ENOENT, which Claude Code treats as a non-blocking error:
-// the prompt and every tool call ran unguarded even in action mode with fail
-// mode closed (GAP-1091). Per-user Setup therefore registers the launcher
-// through the system command processor, which is always present:
+// Per-user Windows Claude Code registers a stable hook chain. The system
+// cmd.exe starts each event except PreToolUse: it compares the small guard
+// with Setup's approved copy, starts that guard, and maps its answer to the
+// native hook status. The guard starts the launcher with CreateProcess, so a
+// path that exists but cannot start gets the same documented answer as a
+// missing launcher. Neutral lifecycle events get a warning and a nonblocking
+// status. A launcher that runs keeps its ordinary fail-mode decision.
 //
-//	cmd.exe /d /c if exist "<launcher>" ( "<launcher>" hook --connector claudecode )
-//	        else ( echo <guard sentence> 1>&2 & exit /b 2 )
+// PreToolUse starts the installed full hook on a packaged install, or the
+// small guard on a one-line install, directly. Cursor imports Claude Code's
+// settings but starts this handler without arguments; a cmd.exe command there
+// interrupted ordinary Cursor tool calls. The guard gives that argument-free
+// start no answer. The small guard copy is kept outside the replaceable install
+// tree and the gateway repairs the current copy during its hook audit. Managed
+// Windows hooks use the system command parent and the installed small guard;
+// Secure Client hook registrations retain their exec form.
 //
-// cmd.exe waits for the launcher, passes its stdin, stdout, stderr and exit
-// code through, and blocks with exit 2 and one sentence when the launcher is
-// missing, as the Unix hook command does. Managed installs keep the exec form
-// their guardian restores.
+// An older cmd.exe guard and a direct launcher guard remain recognizable for
+// supported upgrade, teardown and rollback. Setup requires a working small
+// guard for every Windows launcher layout.
 //
 // Hook-shape compatibility rule (GAP-1284): a hook entry that release N
 // writes must keep a shape that every earlier 1.x teardown recognises, or
@@ -44,26 +52,31 @@ import (
 
 // claudeCodeLauncherGuardWords is the guard sentence, one argument per word
 // so no argument needs quoting; it holds no cmd.exe metacharacter.
-var claudeCodeLauncherGuardWords = strings.Fields(
-	"DefenseClaw blocked this: its Claude Code hook launcher is missing. " +
-		"Run the DefenseClaw installer again to repair it.",
-)
+var claudeCodeLauncherGuardWords = strings.Fields(hookguard.MissingMessage)
 
-// claudeCodeWindowsCommandProcessor is the system cmd.exe the guard runs.
+// ClaudeCodeLauncherMissingMessage is the guard sentence on one line, which
+// the PreToolUse guard (internal/hookguard) prints.
+const ClaudeCodeLauncherMissingMessage = hookguard.MissingMessage
+
+// ClaudeCodeLauncherGuardSubcommand is the first argument of the PreToolUse
+// guard handler.
+const ClaudeCodeLauncherGuardSubcommand = hookguard.Subcommand
+
+// claudeCodeWindowsCommandProcessor is the system cmd.exe the guard runs: the
+// one in the system directory the Windows API reports (windowsSystemCmdExe),
+// never one named by SystemRoot in the environment of whoever runs Setup. The
+// writer and the recognizer (claudeCodeCmdGuardParts) use the same one, so a
+// Setup run with SystemRoot unset or changed still recognizes the guard it
+// wrote (GAP-1851).
 func claudeCodeWindowsCommandProcessor() string {
-	root := strings.TrimSpace(os.Getenv("SystemRoot"))
-	if root == "" || !filepath.IsAbs(root) {
-		root = `C:\Windows`
-	}
-	return filepath.Join(root, "System32", "cmd.exe")
+	return windowsSystemCmdExe()
 }
 
 // claudeCodeLauncherGuardable reports whether cmd.exe reads the launcher path
 // literally inside double quotes: it must not contain a quote, a variable
 // sign or a line break. Other paths keep the exec form.
 func claudeCodeLauncherGuardable(launcher string) bool {
-	return strings.TrimSpace(launcher) == launcher && launcher != "" &&
-		!strings.ContainsAny(launcher, "\"%!\r\n")
+	return hookguard.Guardable(launcher)
 }
 
 // claudeCodeLauncherGuardArgs is the cmd.exe argv that runs launcher with
@@ -77,8 +90,26 @@ func claudeCodeLauncherGuardArgs(launcher string, hookArgs []string) []string {
 }
 
 // claudeCodeLauncherGuardParts returns the launcher and hook argv of an exact
-// generated guard; any other handler, including an edited guard, is not one.
+// generated guard, the cmd.exe guard or the PreToolUse guard; any other
+// handler, including an edited guard, is not one.
 func claudeCodeLauncherGuardParts(hook map[string]interface{}) (string, []string, bool) {
+	if launcher, hookArgs, ok := claudeGuardWrapperParts(hook); ok {
+		return launcher, hookArgs, true
+	}
+	if launcher, hookArgs, ok := claudeManagedGuardWrapperParts(hook); ok {
+		return launcher, hookArgs, true
+	}
+	if launcher, hookArgs, ok := claudeCodeCmdGuardParts(hook); ok {
+		return launcher, hookArgs, true
+	}
+	return claudeCodePreToolGuardParts(hook)
+}
+
+// claudeCodeCmdGuardParts returns the launcher and hook argv of an exact
+// generated cmd.exe guard. cmd.exe is the one in the system directory the
+// Windows API reports, never one named by SystemRoot in the environment of
+// the agent or hook that asks.
+func claudeCodeCmdGuardParts(hook map[string]interface{}) (string, []string, bool) {
 	command, _ := hook["command"].(string)
 	if command == "" || normalizeWindowsHookExecutable(command) !=
 		normalizeWindowsHookExecutable(claudeCodeWindowsCommandProcessor()) {
@@ -110,6 +141,106 @@ func claudeCodeLauncherGuardParts(hook map[string]interface{}) (string, []string
 		}
 	}
 	return launcher, hookArgs, true
+}
+
+// claudeCodePreToolGuardArgs is the argv of the PreToolUse guard handler.
+func claudeCodePreToolGuardArgs(launcher string, hookArgs []string) []string {
+	return append([]string{ClaudeCodeLauncherGuardSubcommand, launcher}, hookArgs...)
+}
+
+// claudeCodeAbsoluteHookExecutable reports an absolute path whose file name is
+// defenseclaw-hook.exe.
+func claudeCodeAbsoluteHookExecutable(path string) bool {
+	return hookguard.AbsoluteHookExecutable(path)
+}
+
+// claudeCodePreToolGuardProgram reports a program that can run as the
+// PreToolUse guard: an absolute defenseclaw-hook.exe (the installed full hook
+// of a packaged install), defenseclaw-hook-guard.exe (the one-line install's
+// guard beside its launcher) or defenseclaw-gateway.exe (the one-line guard
+// of a repository build and of 1.0.5 release candidates), all of which answer
+// the launcher-guard argv.
+func claudeCodePreToolGuardProgram(path string) bool {
+	if !claudeCodeLauncherGuardable(path) || (!isWindowsAbsolutePath(path) && !filepath.IsAbs(path)) {
+		return false
+	}
+	name := path[strings.LastIndexAny(path, `\/`)+1:]
+	return strings.EqualFold(name, windowsHookBinaryName) || strings.EqualFold(name, windowsHookGuardBinaryName) ||
+		strings.EqualFold(name, windowsGatewayBinaryName)
+}
+
+// claudeCodePreToolGuardParts returns the launcher and hook argv of an exact
+// generated PreToolUse guard handler.
+func claudeCodePreToolGuardParts(hook map[string]interface{}) (string, []string, bool) {
+	command, _ := hook["command"].(string)
+	if !claudeCodePreToolGuardProgram(command) {
+		return "", nil, false
+	}
+	args, ok := claudeCodeNativeExecArguments(hook)
+	if !ok || len(args) == 0 || args[0] != hookguard.Subcommand {
+		return "", nil, false
+	}
+	launcher, hookArgs, _, wrapped, _, ok := hookguard.ParseInvocationMode(args)
+	if !ok || wrapped || normalizeWindowsHookExecutable(launcher) == normalizeWindowsHookExecutable(command) {
+		return "", nil, false
+	}
+	return launcher, hookArgs, true
+}
+
+// claudeCodePreToolGuardExecutable returns the program the PreToolUse
+// handler starts for launcher, or "" when there is none and PreToolUse runs
+// the launcher in the exec form. Tests replace it.
+var claudeCodePreToolGuardExecutable = func(launcher string) string {
+	if guard := claudeCodePreToolGuardFor(launcher, canonicalNativeWindowsHookBinary(), canonicalNativeWindowsInstalledHookBinary()); guard != "" {
+		return guard
+	}
+	return claudeCodeOneLinePreToolGuardFor(launcher)
+}
+
+// claudeCodeOneLinePreToolGuardFor returns the guard program beside launcher
+// in the one-line install's ~/.local/bin layout: defenseclaw-hook-guard.exe
+// when it is a regular file, else defenseclaw-gateway.exe when that is one (a
+// repository build ships no guard file); otherwise "". The guard file comes
+// first because it has the GUI subsystem: the console gateway got a console
+// window of its own when Claude Code started it without one (GAP-2467).
+func claudeCodeOneLinePreToolGuardFor(launcher string) string {
+	if !claudeCodeAbsoluteHookExecutable(launcher) || !claudeCodeLauncherGuardable(launcher) {
+		return ""
+	}
+	dir := launcher[:strings.LastIndexAny(launcher, `\/`)+1]
+	for _, name := range []string{windowsHookGuardBinaryName, windowsGatewayBinaryName} {
+		guard := dir + name
+		if !claudeCodePreToolGuardProgram(guard) {
+			continue
+		}
+		if info, err := os.Lstat(guard); err == nil && info.Mode().IsRegular() {
+			return guard
+		}
+	}
+	return ""
+}
+
+// claudeCodePreToolGuardFor returns installed, the installed full hook, when
+// launcher is the stable launcher of a packaged install and installed is a
+// separate regular file; otherwise "".
+func claudeCodePreToolGuardFor(launcher, stable, installed string) string {
+	if strings.TrimSpace(stable) == "" || strings.TrimSpace(installed) == "" ||
+		!pathidentity.Same(launcher, stable) || pathidentity.Same(installed, stable) ||
+		!claudeCodeAbsoluteHookExecutable(installed) || !claudeCodeLauncherGuardable(installed) {
+		return ""
+	}
+	info, err := os.Lstat(installed)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	return installed
+}
+
+// ClaudeCodeLauncherGuardTarget returns the launcher and hook argv of a
+// handler in the exact launcher-guard form per-user Setup has written since
+// 1.0.0; ok is false for any other handler, an edited guard included.
+func ClaudeCodeLauncherGuardTarget(hook map[string]interface{}) (launcher string, hookArgs []string, ok bool) {
+	return claudeCodeLauncherGuardParts(hook)
 }
 
 // claudeCodeExecView returns a guarded handler as the exec-form handler it
@@ -149,12 +280,88 @@ func claudeCodeRecordedHookCommand(command string, args []string) string {
 }
 
 // claudeCodeWindowsHookInvocation is the per-user or managed Windows argv.
+func claudeCodeUnavailableOpen(opts SetupOpts) bool {
+	return !opts.ManagedEnterprise && !opts.SecureClientHookDelivery &&
+		!strings.EqualFold(strings.TrimSpace(opts.PolicyTier), "strict")
+}
+
+func claudeCodeChainAdmission(opts SetupOpts, command string, args []string, goos string) error {
+	if goos != "windows" || opts.SecureClientHookDelivery {
+		return nil
+	}
+	if opts.ManagedEnterprise {
+		// Per-user settings of a managed Setup carry the exec form of the
+		// launcher, which no cmd.exe wraps, so there is nothing to render.
+		if slices.Equal(args, []string{"hook", "--connector", "claudecode"}) {
+			return nil
+		}
+		if len(args) != 4 || args[0] != "hook" || args[1] != "--connector" ||
+			args[2] != "claudecode" || args[3] != "--enterprise-managed" ||
+			!hookguard.AbsoluteHookExecutable(command) || !claudeWrapperSafe(command) ||
+			!claudeWrapperSafe(claudeManagedGuardPath(command)) {
+			return fmt.Errorf("the managed Claude Code hook path cannot be rendered by cmd.exe")
+		}
+		return nil
+	}
+	launcher, _, guarded := claudeCodeCmdGuardParts(map[string]interface{}{"command": command, "args": args})
+	if !guarded {
+		launcher = command
+		if !hookguard.AbsoluteHookExecutable(launcher) {
+			return nil
+		}
+	}
+	if !claudeWrapperSafe(launcher) {
+		return fmt.Errorf("the Claude Code hook launcher path cannot be rendered by cmd.exe")
+	}
+	if guard, _ := claudeChainFor(launcher); guard == "" {
+		return fmt.Errorf("the Claude Code hook guard is unavailable; run the DefenseClaw installer again")
+	}
+	return nil
+}
+
 func claudeCodeWindowsHookInvocation(opts SetupOpts, executable string) (string, []string) {
 	args := []string{"hook", "--connector", "claudecode"}
 	if !opts.ManagedEnterprise && claudeCodeLauncherGuardable(executable) {
 		return claudeCodeWindowsCommandProcessor(), claudeCodeLauncherGuardArgs(executable, args)
 	}
 	return executable, args
+}
+
+// claudeCodeHandlerInvocation binds each event to the per-user Windows
+// chain when Setup installed one. Exact older forms remain readable for
+// upgrade and teardown, but are not published again.
+func claudeCodeHandlerInvocation(eventType, command string, args []string, unavailableOpen ...bool) (string, []string) {
+	open := len(unavailableOpen) > 0 && unavailableOpen[0]
+	hook := map[string]interface{}{"command": command, "args": args}
+	launcher, hookArgs, ok := claudeCodeCmdGuardParts(hook)
+	if !ok {
+		return command, args
+	}
+	if guard, approved := claudeChainFor(launcher); guard != "" {
+		if eventType == "PreToolUse" {
+			// The installed full hook remains an independent start path on
+			// packaged installs. A lost chain copy must not weaken it.
+			if direct := claudeCodePreToolGuardExecutable(launcher); direct != "" {
+				return direct, claudeGuardEventArgs(launcher, hookArgs, eventType, false, open)
+			}
+			return guard, claudeGuardEventArgs(launcher, hookArgs, eventType, false, open)
+		}
+		return claudeCodeWindowsCommandProcessor(), claudeGuardWrapperArgs(guard, approved, launcher, eventType, hookArgs, open)
+	}
+	guard := claudeCodePreToolGuardExecutable(launcher)
+	if guard != "" {
+		guardArgs := claudeCodePreToolGuardArgs(launcher, hookArgs)
+		if eventType != "PreToolUse" || open {
+			guardArgs = claudeGuardEventArgs(launcher, hookArgs, eventType, false, open)
+		}
+		return guard, guardArgs
+	}
+	if eventType != "PreToolUse" {
+		// Setup refuses to publish an incomplete chain. An empty command is
+		// the error value for callers that render before that preflight.
+		return "", nil
+	}
+	return launcher, hookArgs
 }
 
 // claudeCodeRollbackBackupName is the copy of settings.json taken before
@@ -171,12 +378,12 @@ const claudeCodeRollbackBackupName = "claudecode-settings.before-rollback.json"
 // it changes, and returns how many handlers it rewrote.
 func (c *ClaudeCodeConnector) ConvertHooksForRollback(opts SetupOpts) (int, error) {
 	if opts.ManagedEnterprise {
-		return 0, nil // managed installs write the exec form
+		return 0, nil // managed policy is not a per-user rollback target
 	}
 	settingsPath := claudeCodeSettingsPath()
 	readPath, err := claudeCodeUserSettingsReadPath(settingsPath)
 	if err != nil {
-		return 0, fmt.Errorf("Claude Code user settings %s: %w", settingsPath, err)
+		return 0, fmt.Errorf("Claude Code user settings %s: %w", settingsPath, err) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	data, err := os.ReadFile(readPath)
 	if os.IsNotExist(err) {
@@ -185,15 +392,60 @@ func (c *ClaudeCodeConnector) ConvertHooksForRollback(opts SetupOpts) (int, erro
 	if err != nil {
 		return 0, fmt.Errorf("read Claude Code settings %s: %w", settingsPath, err)
 	}
+	convert := claudeCodeRollbackConversion(opts, settingsPath)
+	_, wanted, err := convert(data)
+	if err != nil || wanted == 0 {
+		return 0, err
+	}
+	converted := 0
+	err = withFileLock(settingsPath, func() error {
+		// A file nobody edited since setup gets its saved bytes back and needs
+		// no conversion (restoreUneditedForRollback).
+		if done, err := restoreUneditedForRollback(opts.DataDir, c.Name(), settingsPath, nil); err != nil || done {
+			if err == nil {
+				converted = wanted
+			}
+			return err
+		}
+		return transformClaudeCodeRollback(settingsPath, opts,
+			func(current []byte, exists bool) (atomicTransformResult, error) {
+				if !exists {
+					return atomicTransformResult{Remove: true}, nil
+				}
+				out, changed, err := convert(current)
+				if err != nil || changed == 0 {
+					return atomicTransformResult{Data: current}, err
+				}
+				if err := writeClaudeCodeRollbackBackup(opts.DataDir, current); err != nil {
+					return atomicTransformResult{}, fmt.Errorf("keep a copy of the settings: %w", err)
+				}
+				converted = changed
+				return atomicTransformResult{Data: out}, nil
+			})
+	})
+	if err != nil {
+		return 0, fmt.Errorf("rewrite Claude Code hooks in %s: %w", settingsPath, err)
+	}
+	return converted, nil
+}
+
+func claudeCodeRollbackConversion(opts SetupOpts, settingsPath string) func([]byte) ([]byte, int, error) {
 	launcher := strings.TrimSpace(opts.HookExecutable)
 	if launcher == "" {
 		launcher = defenseclawHookBinary()
 	}
 	owned := func(path string) bool {
+		if runtime.GOOS != "windows" {
+			for _, root := range []string{userHomeDir(), opts.DataDir} {
+				if pathidentity.Same(path, filepath.Join(root, ".local", "bin", "defenseclaw-hook-user")) {
+					return true
+				}
+			}
+		}
 		return pathidentity.Same(path, launcher) || isDefenseClawHookExecutable(path)
 	}
 	script := filepath.ToSlash(filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh"))
-	convert := func(data []byte) ([]byte, int, error) {
+	return func(data []byte) ([]byte, int, error) {
 		if len(bytes.TrimSpace(data)) == 0 {
 			return nil, 0, nil
 		}
@@ -208,35 +460,6 @@ func (c *ClaudeCodeConnector) ConvertHooksForRollback(opts SetupOpts) (int, erro
 		out, err := json.MarshalIndent(settings, "", "  ")
 		return out, changed, err
 	}
-	if _, changed, err := convert(data); err != nil || changed == 0 {
-		return 0, err
-	}
-	converted := 0
-	err = withFileLock(settingsPath, func() error {
-		return atomicTransformFileWithStateDir(settingsPath, opts.DataDir, 0o600,
-			func(current []byte, exists bool) (atomicTransformResult, error) {
-				if !exists {
-					return atomicTransformResult{Remove: true}, nil
-				}
-				out, changed, err := convert(current)
-				if err != nil || changed == 0 {
-					return atomicTransformResult{Data: current}, err
-				}
-				backupDir := filepath.Join(opts.DataDir, "backups")
-				if err := os.MkdirAll(backupDir, 0o700); err != nil {
-					return atomicTransformResult{}, fmt.Errorf("keep a copy of the settings: %w", err)
-				}
-				if err := atomicWriteFile(filepath.Join(backupDir, claudeCodeRollbackBackupName), current, 0o600); err != nil {
-					return atomicTransformResult{}, fmt.Errorf("keep a copy of the settings: %w", err)
-				}
-				converted = changed
-				return atomicTransformResult{Data: out}, nil
-			})
-	})
-	if err != nil {
-		return 0, fmt.Errorf("rewrite Claude Code hooks in %s: %w", settingsPath, err)
-	}
-	return converted, nil
 }
 
 // claudeCodeHooksInEarlierReleaseForm rewrites in place every handler under
@@ -255,12 +478,23 @@ func claudeCodeHooksInEarlierReleaseForm(
 		for _, rawGroup := range groups {
 			group, _ := rawGroup.(map[string]interface{})
 			handlers, _ := group["hooks"].([]interface{})
+			kept := handlers[:0]
 			for _, rawHandler := range handlers {
 				handler, ok := rawHandler.(map[string]interface{})
+				if ok && goos != "windows" &&
+					claudeCodePerUserFallbackTarget(handler, filepath.Dir(script)) {
+					command, _ := handler["command"].(string)
+					if owned(command) {
+						changed++
+						continue
+					}
+				}
 				if ok && claudeCodeHandlerInEarlierReleaseForm(handler, goos, script, owned) {
 					changed++
 				}
+				kept = append(kept, rawHandler)
 			}
+			group["hooks"] = kept
 		}
 	}
 	return changed
@@ -285,11 +519,38 @@ func claudeCodeHandlerInEarlierReleaseForm(
 		return true
 	}
 	// 1.0.0 matched its handlers by the unquoted script path prefix.
+	if claudeCodePerUserGuardTarget(handler, filepath.Dir(script)) {
+		native := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(script))), ".local", "bin", "defenseclaw-hook-user")
+		if owned(native) {
+			handler["command"] = script
+			delete(handler, "args")
+			return true
+		}
+	}
 	command, _ := handler["command"].(string)
+	if word, rest, ok := posixHookCommandSplit(claudeCodeUnguardedHookCommand(command)); ok &&
+		filepath.IsAbs(word) && filepath.Base(word) == "defenseclaw-hook-user" && owned(word) {
+		homeArg := " hook --connector claudecode --hook-home " +
+			posixHookCommandWord(filepath.Dir(filepath.Dir(script)))
+		if rest == homeArg ||
+			(strings.HasPrefix(rest, homeArg+" --api-addr ") &&
+				claudeCodeRollbackAPIAddr(strings.TrimPrefix(rest, homeArg+" --api-addr "))) {
+			handler["command"] = script
+			return true
+		}
+	}
 	quoted := posixHookCommandWord(script)
 	if quoted == script || claudeCodeUnguardedHookCommand(command) != quoted {
 		return false
 	}
 	handler["command"] = script
 	return true
+}
+
+// claudeCodeRollbackAPIAddr accepts only the exact shell word this release
+// renders for a local gateway address, including a quoted bracketed IPv6 word.
+func claudeCodeRollbackAPIAddr(rendered string) bool {
+	addr, rest, ok := posixHookCommandSplit(rendered)
+	return ok && rest == "" && posixHookCommandWord(addr) == rendered &&
+		claudeCodeLoopbackGatewayEndpoint("http://"+addr)
 }

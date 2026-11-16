@@ -521,6 +521,7 @@ func TestReloadPublishesOnceThenReverseDrainsOldGraph(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	waitRetired(t, manager)
 	active := result.ActiveGraph()
 	if active == old || manager.Active() != active || active.Generation() != 2 ||
 		active.RetentionDays() != 30 || active.Digest() != candidate.PlanDigest ||
@@ -615,7 +616,11 @@ func TestReloadRejectsInvalidAndRestartRequiredFieldsWithoutInitialization(t *te
 	}
 }
 
-func TestReloadRejectsSamePrometheusBindingBeforeCandidateInitialization(t *testing.T) {
+// A reload that keeps a Prometheus destination on the same listen address
+// is applied live: the successor generation joins the socket the process
+// already holds, so a redaction, bucket or destination edit next to it needs
+// no restart (GAP-2072).
+func TestReloadKeepsTheSamePrometheusBindingLive(t *testing.T) {
 	log := &lifecycleLog{}
 	factory := successfulFactory("prometheus", log)
 	initial := prometheusTestConfig(t, 90, "127.0.0.1:9464")
@@ -626,24 +631,26 @@ func TestReloadRejectsSamePrometheusBindingBeforeCandidateInitialization(t *test
 	result, reloadErr := manager.Reload(
 		t.Context(), prometheusTestConfig(t, 30, "127.0.0.1:9464"),
 	)
-	if reloadErr == nil || reloadErr.Code() != ErrorRestartRequired ||
-		reloadErr.FieldPath() != "observability.destinations.metrics.listen" ||
-		result.ActiveGraph() != old || result.Status() != ReloadRejected || manager.Active() != old {
-		t.Fatalf("same-binding reload active=%p old=%p err=%v", result.ActiveGraph(), old, reloadErr)
+	if reloadErr != nil || result.Status() != ReloadApplied ||
+		result.ActiveGraph() == old || manager.Active() != result.ActiveGraph() ||
+		manager.Active().Generation() != old.Generation()+1 {
+		t.Fatalf("same-binding reload status=%s active=%p old=%p err=%v", result.Status(), result.ActiveGraph(), old, reloadErr)
 	}
-	if events := log.snapshot(); len(events) != initialBuildEvents {
-		t.Fatalf("same-binding reload initialized candidate resources: %#v", events)
+	if events := log.snapshot(); len(events) <= initialBuildEvents {
+		t.Fatalf("same-binding reload did not build the successor generation: %#v", events)
 	}
 	flushReports(t, manager)
-	reports := reporter.snapshot()
-	if len(reports) < 3 {
-		t.Fatalf("same-binding rejection reports = %#v", reports)
-	}
-	for _, report := range reports[len(reports)-2:] {
-		if report.graph != old || report.value.Code != ReportRestartRequired ||
-			report.value.FieldPath != "observability.destinations.metrics.listen" {
-			t.Fatalf("same-binding rejection report = %#v", report)
+	applied := false
+	for _, report := range reporter.snapshot() {
+		if report.value.Code == ReportRestartRequired {
+			t.Fatalf("same-binding reload reported restart_required: %#v", report)
 		}
+		if report.graph == manager.Active() && report.value.Code == ReportReloadApplied {
+			applied = true
+		}
+	}
+	if !applied {
+		t.Fatalf("same-binding reload reports = %#v", reporter.snapshot())
 	}
 }
 
@@ -760,6 +767,7 @@ func TestQueuedProjectionRemainsOnOldGraphDuringAtomicSwap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	waitRetired(t, manager)
 	if result.ActiveGraph() == old || result.Status() != ReloadApplied {
 		t.Fatalf("queued projection reload = %#v", result)
 	}
@@ -912,21 +920,23 @@ func TestGenerationLeasePreventsEnqueueAfterOldComponentRetirement(t *testing.T)
 	if _, ok := lease.Component("exporter"); ok || lease.Graph() != nil {
 		t.Fatal("released lease still exposes runtime components")
 	}
-	select {
-	case result := <-done:
-		t.Fatalf("reload completed before fork released old generation: %+v", result)
-	default:
-	}
-	if component, ok := fork.Component("exporter"); !ok || component != oldComponent {
-		t.Fatal("fork lost access to the pinned old component")
-	}
-	fork.Release()
-
+	// The reload returned with the new graph published; the old one waits
+	// for its last user in the background.
 	outcome := <-done
 	if outcome.err != nil || outcome.result.Status() != ReloadApplied ||
 		outcome.result.ActiveGraph() != newGraph {
 		t.Fatalf("leased reload result=%#v err=%v", outcome.result, outcome.err)
 	}
+	if component, ok := fork.Component("exporter"); !ok || component != oldComponent {
+		t.Fatal("fork lost access to the pinned old component")
+	}
+	for _, event := range log.snapshot() {
+		if event == "stop:exporter-1" || event == "close:exporter-1" {
+			t.Fatalf("old component retired while a forked lease was active: %#v", log.snapshot())
+		}
+	}
+	fork.Release()
+	waitRetired(t, manager)
 	drained := oldComponent.(*fakeComponent).drainedSnapshot()
 	if len(drained) != 1 || drained[0].graphDigest != old.Digest() || drained[0].profile != "old-profile" {
 		t.Fatalf("leased old projection was not drained by its owner: %#v", drained)
@@ -1199,7 +1209,11 @@ func TestRetentionOnlyReloadSignalsStableDispatcherReuseButCreatesNewQueueCompon
 	}
 }
 
-func TestLeaseDeadlineReturnsAppliedDegradedThenCleansOldGraphAfterRelease(t *testing.T) {
+// #1302, #1278: a reload returns once the new graph is published. A user
+// still on the previous graph (an open agent trace) holds only that graph,
+// never the reload, which held the config manager for the whole drain
+// timeout.
+func TestReloadReturnsWhileTheRetiredGraphIsStillLeased(t *testing.T) {
 	log := &lifecycleLog{}
 	closed := make(chan struct{})
 	factory := successfulFactory("exporter", log)
@@ -1217,21 +1231,17 @@ func TestLeaseDeadlineReturnsAppliedDegradedThenCleansOldGraphAfterRelease(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	type outcome struct {
+	result, reloadErr := manager.Reload(t.Context(), testConfig(t, "shared", 35, true))
+	reloaded := struct {
 		result ReloadResult
 		err    *Error
-	}
-	done := make(chan outcome, 1)
-	go func() {
-		result, reloadErr := manager.Reload(t.Context(), testConfig(t, "shared", 35, true))
-		done <- outcome{result: result, err: reloadErr}
-	}()
-	waitForDeadlineCalls(deadlines, 1)
-	deadlines.expire(0)
-	reloaded := <-done
-	if reloaded.err != nil || reloaded.result.Status() != ReloadAppliedDegraded ||
+	}{result, reloadErr}
+	if reloaded.err != nil || reloaded.result.Status() != ReloadApplied ||
 		reloaded.result.ActiveGraph() != manager.Active() {
-		t.Fatalf("lease-timeout reload=%#v err=%v", reloaded.result, reloaded.err)
+		t.Fatalf("reload under a live lease=%#v err=%v", reloaded.result, reloaded.err)
+	}
+	if got := deadlines.calls(); len(got) != 0 {
+		t.Fatalf("reload waited on the retired graph: deadlines %#v", got)
 	}
 	select {
 	case <-closed:
@@ -1245,8 +1255,8 @@ func TestLeaseDeadlineReturnsAppliedDegradedThenCleansOldGraphAfterRelease(t *te
 			report.value.Outcome == "applied" {
 			canonicalApplied = true
 		}
-		if report.value.Outcome == "applied_degraded" {
-			t.Fatalf("noncanonical compliance outcome: %#v", report)
+		if report.value.Code == ReportDrainFailed {
+			t.Fatalf("a live lease was reported as a drain failure: %#v", report)
 		}
 	}
 	if !canonicalApplied {
@@ -1254,8 +1264,40 @@ func TestLeaseDeadlineReturnsAppliedDegradedThenCleansOldGraphAfterRelease(t *te
 	}
 	lease.Release()
 	<-closed
-	if len(deadlines.calls()) != 2 {
+	waitRetired(t, manager)
+	if len(deadlines.calls()) != 1 {
 		t.Fatalf("eventual cleanup did not receive its own bound: %#v", deadlines.calls())
+	}
+}
+
+// A retired graph whose teardown blocks (a destination that does not answer
+// its final flush) does not hold the reload either.
+func TestReloadDoesNotWaitForTheRetiredGraphTeardown(t *testing.T) {
+	log := &lifecycleLog{}
+	drainEnter, drainAllow := make(chan struct{}), make(chan struct{})
+	factory := successfulFactory("exporter", log)
+	factory.make = func(input BuildInput) (*fakeComponent, error) {
+		component := &fakeComponent{name: fmt.Sprintf("exporter-%d", input.Generation), log: log}
+		if input.Generation == 1 {
+			component.drainEnter, component.drainAllow = drainEnter, drainAllow
+		}
+		return component, nil
+	}
+	manager, _, _ := newTestManager(t, testConfig(t, "shared", 90, true), []ComponentFactory{factory})
+	result, err := manager.Reload(t.Context(), testConfig(t, "shared", 30, true))
+	if err != nil || result.Status() != ReloadApplied || manager.Active() != result.ActiveGraph() {
+		t.Fatalf("reload=%#v err=%v", result, err)
+	}
+	<-drainEnter
+	if lease, err := manager.Acquire(t.Context()); err != nil || lease.Graph() != result.ActiveGraph() {
+		t.Fatalf("new graph unusable while the old one drains: %v", err)
+	} else {
+		lease.Release()
+	}
+	close(drainAllow)
+	waitRetired(t, manager)
+	if countString(log.snapshot(), "close:exporter-1") != 1 {
+		t.Fatalf("retired graph was not closed: %#v", log.snapshot())
 	}
 }
 
@@ -1372,11 +1414,12 @@ func TestPostSwapDrainFailureKeepsNewGraphActiveAndReportsThroughIt(t *testing.T
 	old := manager.Active()
 	result, err := manager.Reload(t.Context(), testConfig(t, "shared", 10, true))
 	newGraph := result.ActiveGraph()
-	if err != nil || result.Status() != ReloadAppliedDegraded ||
+	if err != nil || result.Status() != ReloadApplied ||
 		manager.Active() != newGraph || newGraph == old {
 		t.Fatalf("post-swap drain active=%p new=%p old=%p status=%s err=%v",
 			manager.Active(), newGraph, old, result.Status(), err)
 	}
+	waitRetired(t, manager)
 	flushReports(t, manager)
 	reports := reporter.snapshot()
 	var health, compliance bool
@@ -1532,9 +1575,10 @@ func TestRetirementRetainsFailedChildCleanupUntilRetrySucceeds(t *testing.T) {
 		t, testConfig(t, "shared", 90, true), []ComponentFactory{factory},
 	)
 	result, err := manager.Reload(t.Context(), testConfig(t, "shared", 70, true))
-	if err != nil || result.Status() != ReloadAppliedDegraded {
+	if err != nil || result.Status() != ReloadApplied {
 		t.Fatalf("child cleanup reload=%#v err=%v", result, err)
 	}
+	waitRetired(t, manager)
 	retired := factory.generation(0)
 	if retired.children.Load() != 1 || ownershipCount(manager) != 2 || pendingCount(manager) != 1 {
 		t.Fatalf("failed child cleanup children=%d owned=%d pending=%d",
@@ -1565,9 +1609,10 @@ func TestCleanupRetryOnlyRepeatsIncompleteLifecyclePhases(t *testing.T) {
 		t, testConfig(t, "shared", 90, true), []ComponentFactory{factory},
 	)
 	result, err := manager.Reload(t.Context(), testConfig(t, "shared", 80, true))
-	if err != nil || result.Status() != ReloadAppliedDegraded {
+	if err != nil || result.Status() != ReloadApplied {
 		t.Fatalf("reload=%#v err=%v", result, err)
 	}
+	waitRetired(t, manager)
 	retries := manager.retryScheduler.(*fakeRetryScheduler)
 	waitForRetryCount(retries, 1)
 	retries.trigger(0)
@@ -1922,26 +1967,19 @@ func TestComponentOwnershipRejectsReuseFromStillRetiringGeneration(t *testing.T)
 			return first, nil // Adversarial factory attempts cross-generation reuse.
 		}
 	}
-	manager, _, deadlines := newTestManager(
+	manager, _, _ := newTestManager(
 		t, testConfig(t, "shared", 90, true), []ComponentFactory{factory},
 	)
 	lease, err := manager.Acquire(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	type outcome struct {
+	secondResult, secondErr := manager.Reload(t.Context(), testConfig(t, "shared", 80, true))
+	second := struct {
 		result ReloadResult
 		err    *Error
-	}
-	secondDone := make(chan outcome, 1)
-	go func() {
-		result, reloadErr := manager.Reload(t.Context(), testConfig(t, "shared", 80, true))
-		secondDone <- outcome{result: result, err: reloadErr}
-	}()
-	waitForDeadlineCalls(deadlines, 1)
-	deadlines.expire(0)
-	second := <-secondDone
-	if second.err != nil || second.result.Status() != ReloadAppliedDegraded {
+	}{secondResult, secondErr}
+	if second.err != nil || second.result.Status() != ReloadApplied {
 		t.Fatalf("generation two reload=%#v err=%v", second.result, second.err)
 	}
 	third, thirdErr := manager.Reload(t.Context(), testConfig(t, "shared", 70, true))
@@ -1996,6 +2034,18 @@ func equalBools(left, right []bool) bool {
 		}
 	}
 	return true
+}
+
+// waitRetired waits for the background retirements Reload started.
+func waitRetired(t *testing.T, manager *Manager) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for manager.asyncCleanup.Load() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the retired graph was not torn down")
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func waitForDeadlineCalls(deadlines *fakeDeadlines, count int) {

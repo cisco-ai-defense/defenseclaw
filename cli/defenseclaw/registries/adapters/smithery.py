@@ -43,6 +43,11 @@ from defenseclaw.registries.ssrf import Resolver, SSRFError, guard_url
 
 DEFAULT_SMITHERY_URL = "https://registry.smithery.ai/servers"
 
+# The catalog list gives a hosted (remote) server's name but not its URL;
+# the server's own record does (deploymentUrl). At most this many records
+# are fetched per sync, so a dry run stays a handful of requests.
+MAX_SMITHERY_DETAIL_FETCHES = 25
+
 
 def fetch_smithery(
     source: RegistrySource,
@@ -65,9 +70,33 @@ def fetch_smithery(
 
     servers = _extract_servers(payload)
     entries: list[ManifestEntry] = []
+    notes: list[str] = []
+    detail_fetches = 0
+    no_url = 0
+    detail_failed = 0
+    capped = 0
+    unusable = 0
     for server in servers:
         if not isinstance(server, dict):
             continue
+        if _remote_without_url(server):
+            # GAP-1640: the current catalog lists hosted servers with
+            # remote=true and no deployment; read the server's record.
+            if detail_fetches >= MAX_SMITHERY_DETAIL_FETCHES:
+                capped += 1
+                continue
+            detail_fetches += 1
+            detail = _fetch_server_detail(
+                url, server, auth_env=source.auth_env,
+                allow_private=allow_private, resolver=resolver,
+            )
+            if detail is None:
+                detail_failed += 1
+                continue
+            server = {**server, **detail}
+            if _remote_without_url(server):
+                no_url += 1
+                continue
         try:
             entry = _server_to_entry(
                 server,
@@ -78,17 +107,94 @@ def fetch_smithery(
             # Skip individual bad rows — a single malformed server
             # shouldn't break the whole sync. Operators can still see
             # what was rejected via the structured log.
+            unusable += 1
             continue
         if entry is None:
+            unusable += 1
             continue
         entries.append(entry)
 
+    if detail_failed:
+        notes.append(f"{detail_failed} hosted server record(s) could not be fetched")
+    if no_url:
+        notes.append(f"{no_url} hosted server(s) have no deployment URL in their record")
+    if capped:
+        notes.append(
+            f"{capped} more hosted server(s) were not read: at most "
+            f"{MAX_SMITHERY_DETAIL_FETCHES} server records are fetched per sync"
+        )
+    if unusable:
+        notes.append(
+            f"{unusable} server(s) were skipped: no https URL or allowed stdio command, "
+            "or a field the manifest does not accept"
+        )
     manifest = Manifest(
         schema_version=1,
         publisher="smithery",
         entries=entries,
+        notes=notes,
     )
     return manifest, raw
+
+
+def _remote_without_url(server: dict[str, Any]) -> bool:
+    """A hosted server row that names no URL to connect to."""
+    if server.get("remote") is not True:
+        return False
+    deployment = server.get("deployment")
+    if isinstance(deployment, dict) and (deployment.get("url") or deployment.get("command")):
+        return False
+    return not _deployment_url(server)
+
+
+def _deployment_url(server: dict[str, Any]) -> str:
+    """The hosted server's URL: ``deploymentUrl``, else its HTTP connection's."""
+    url = server.get("deploymentUrl")
+    if isinstance(url, str) and url:
+        return url
+    for connection in server.get("connections") or []:
+        if isinstance(connection, dict) and connection.get("type") in ("http", "streamable-http"):
+            candidate = connection.get("deploymentUrl")
+            if isinstance(candidate, str) and candidate:
+                return candidate
+    return ""
+
+
+def _fetch_server_detail(
+    list_url: str,
+    server: dict[str, Any],
+    *,
+    auth_env: str = "",
+    allow_private: bool = False,
+    resolver: Resolver | None = None,
+) -> dict[str, Any] | None:
+    """Fetch one server's record (``<list url>/<qualifiedName>``), or None."""
+    from urllib.parse import quote, urlsplit, urlunsplit
+
+    qualified = str(server.get("qualifiedName") or "").strip()
+    if not qualified:
+        return None
+    parts = urlsplit(list_url)
+    path = parts.path.rstrip("/") + "/" + quote(qualified, safe="@/")
+    detail_url = urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+    try:
+        raw = http_get(
+            detail_url,
+            auth_env=auth_env,
+            accept="application/json",
+            allow_private=allow_private,
+            resolver=resolver,
+        )
+        detail = json.loads(raw)
+    except (IngestError, SSRFError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(detail, dict):
+        return None
+    return {
+        key: detail[key]
+        for key in ("deploymentUrl", "connections", "remote")
+        if key in detail
+    }
 
 
 def _extract_servers(payload: Any) -> list[dict[str, Any]]:
@@ -132,7 +238,9 @@ def _server_to_entry(
     if not isinstance(deployment, dict):
         deployment = {}
 
-    transport = str(deployment.get("transport") or server.get("transport") or "stdio")
+    hosted_url = "" if deployment.get("url") or deployment.get("command") else _deployment_url(server)
+    default_transport = "streamable-http" if hosted_url else "stdio"
+    transport = str(deployment.get("transport") or server.get("transport") or default_transport)
     transport = transport.strip().lower()
 
     command = str(deployment.get("command") or "")
@@ -151,7 +259,7 @@ def _server_to_entry(
         env_raw = []
     env_required = [str(e) for e in env_raw[:32] if isinstance(e, str)]
 
-    url = str(deployment.get("url") or "")
+    url = str(deployment.get("url") or hosted_url or "")
     if transport == "stdio" and not command:
         return None
     if transport != "stdio":

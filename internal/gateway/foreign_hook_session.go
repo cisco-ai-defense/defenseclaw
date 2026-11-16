@@ -4,8 +4,8 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,6 +30,14 @@ type verifiedUserScopedIdentityContextKey struct{}
 // handleForeignHookSession keeps the standalone session snapshot in the
 // gateway's data directory. The namespace comes only from hook-socket peer
 // credentials or a per-user hook token authenticated by tokenAuth.
+//
+// On a standalone host an exchange holds its account's removal lock shared
+// (enterprisepolicy.LockForeignHookAccountExchange) from before it reads the
+// record key and the guardian's removals until its answer is written, and
+// answers allow only within foreignHookExchangeHold of taking it. A hook
+// removal of the account (the guardian holds the lock exclusively) therefore
+// either waits for this answer or makes this exchange deny; other accounts
+// never wait on it (GAP-0348, GAP-0414).
 func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -74,11 +83,109 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		writeManagedHookRefusal(w, http.StatusForbidden, "foreign_hook_session_scope_mismatch")
 		return
 	}
-	stateDir := foreignHookSessionStateDir(dataDir, identity)
-	removals, removalsErr := a.foreignHookRemovals.forIdentity(managed.HookGuardianAuthorizationDir(dataDir), identity)
-	// Each identity has its own store, so only that identity's exchanges
-	// are serialized; another account's exchange never waits on this one.
+	stateDir := enterprisepolicy.ForeignHookSessionStoreDir(dataDir, identity)
+	// A clean scan the store could not apply (a record read or write that
+	// failed, a lock it could not take, an allow too late for the hold) is
+	// a store race, not a finding: it is applied again, each try a whole
+	// exchange that takes the locks and reads the removals again, while the
+	// hook still waits for the answer (exchange.RetryUntil). Only the final
+	// answer is audited, so a call that ends up allowed leaves no block row
+	// (GAP-1711, GAP-1812, GAP-1813).
+	//
+	// A try that the gateway itself held up for longer than an allow's hold
+	// (a stalled disk or process: no answer for seconds on any route) is
+	// applied again at once while the hook still waits for this exchange,
+	// even after RetryUntil: its unavailable answer says nothing about the
+	// session, and the stall used the time the retry window was for
+	// (GAP-1813, D11 cold start on ewin3). The same holds for a first try
+	// that starts when RetryUntil has already passed: the gateway lost that
+	// time before the try (an auth or body read stall), so a quick busy
+	// answer is applied again too (GAP-1813 review RR3-3).
+	retryUntil := foreignHookSessionRetryUntil(exchange, time.Now())
+	for attempt := 0; ; attempt++ {
+		tried := time.Now()
+		decision, answerBy, release := a.applyForeignHookSessionOnce(r.Context(), dataDir, identity, stateDir, exchange)
+		busy := attempt < foreignHookSessionRecordRetries && foreignHookSessionRecordBusy(exchange, decision) && !exchange.RetryUntil.IsZero()
+		stalled := time.Since(tried) >= foreignHookExchangeHold || (attempt == 0 && !tried.Before(retryUntil))
+		if busy && stalled && r.Context().Err() == nil {
+			release()
+			foreignHookSessionRetryLog(connector, attempt+1, "stalled")
+			continue
+		}
+		if busy && time.Now().Add(foreignHookSessionRecordRetryDelay).Before(retryUntil) {
+			release()
+			foreignHookSessionRetryLog(connector, attempt+1, "busy")
+			timer := time.NewTimer(foreignHookSessionRecordRetryDelay)
+			select {
+			case <-r.Context().Done():
+				timer.Stop()
+			case <-timer.C:
+				continue
+			}
+		}
+		if decision.Deny {
+			// A denial cannot become an allow when the guardian commits a
+			// removal, so neither lock is held through the audit export or
+			// the response write.
+			release()
+			foreignHookSessionDenialAudit(a, r.Context(), connector, exchange, decision)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(decision)
+			return
+		}
+		if refusal := writeFencedForeignHookAllow(w, decision, answerBy); refusal != "" {
+			// The allow was not answered: its clean-session entry goes too.
+			if enterprisepolicy.ForeignHookCleanMirrorOS(runtime.GOOS) {
+				_ = dropForeignHookCleanMirrors(foreignHookCleanMirrorRoot(dataDir), identity, exchange.Key)
+			}
+			release()
+			writeManagedHookRefusal(w, http.StatusServiceUnavailable, refusal)
+		}
+		release()
+		return
+	}
+}
+
+// applyForeignHookSessionOnce applies one exchange to the session record
+// under the identity's exchange mutex and its account's removal lock, and
+// returns the decision, the deadline of an allow and the release of both
+// locks (safe to call more than once). Each identity has its own store, so
+// only that identity's exchanges are serialized; another account's exchange
+// never waits on this one.
+func (a *APIServer) applyForeignHookSessionOnce(
+	ctx context.Context,
+	dataDir, identity, stateDir string,
+	exchange enterprisepolicy.SessionExchange,
+) (enterprisepolicy.GuardDecision, time.Time, func()) {
 	unlock := a.foreignHookSessionLocks.lock(stateDir)
+	removalsDir := managed.HookGuardianAuthorizationDir(dataDir)
+	// The deadline of an allow is set before the account's lock is asked
+	// for, not once it is held. This exchange takes the gate before any
+	// removal of the account that it holds the lock against, and a removal
+	// gives up waiting for it only ForeignHookRemovalDrainWait (longer than
+	// the hold) after it took the gate: so a removal goes on past this
+	// exchange only once answerBy passed.
+	answerBy := time.Now().Add(foreignHookExchangeHold)
+	// Only a standalone gateway gets here (userScopedCredentialsRequired),
+	// so every exchange takes its account's removal lock.
+	var lockErr error
+	held := func() {}
+	lockCtx, cancel := context.WithTimeout(ctx, foreignHookExchangeWait)
+	if release, err := foreignHookAccountExchangeLock(lockCtx, dataDir, identity); err != nil {
+		lockErr = err
+	} else {
+		held = release
+	}
+	cancel()
+	release := sync.OnceFunc(func() {
+		held()
+		unlock()
+	})
+	removals, ledgerErr := a.foreignHookRemovals.forIdentity(removalsDir, identity)
+	// A removal in progress keeps its own reason through the join
+	// (ApplyForeignHookRemovals checks it first).
+	removalsErr := errors.Join(lockErr, ledgerErr)
+	now := time.Now()
 	decision := enterprisepolicy.ApplyForeignHookSession(enterprisepolicy.SessionUpdate{
 		StateDir:     stateDir,
 		Key:          exchange.Key,
@@ -86,14 +193,142 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		Decision:     exchange.Decision,
 		Removals:     removals,
 		RemovalsErr:  removalsErr,
-		Now:          time.Now(),
+		Now:          now,
 	})
-	unlock()
-	if decision.Deny {
-		a.auditForeignHookSessionDenial(r.Context(), connector, exchange, decision)
+	// The clean-session entry of an allow is written before the allow is
+	// answered, under both locks, so an allow never reaches the hook without
+	// it; a failed write leaves none and does not change the answer.
+	// Windows publishes none (enterprisepolicy.WriteForeignHookCleanMirrors).
+	// An allow already close to its hold gets none: a removal of the account
+	// may go on once the hold has passed.
+	cleanRoot := ""
+	if enterprisepolicy.ForeignHookCleanMirrorOS(runtime.GOOS) {
+		cleanRoot = foreignHookCleanMirrorRoot(dataDir)
+	}
+	if cleanRoot != "" && !decision.Deny && removalsErr == nil && time.Until(answerBy) > foreignHookFencedWriteTimeout {
+		if err := writeForeignHookCleanMirrors(cleanRoot, identity, exchange.Key, enterprisepolicy.ForeignHookStateHash(exchange.Decision.Findings), now); err != nil {
+			_ = dropForeignHookCleanMirrors(cleanRoot, identity, exchange.Key)
+		}
+	}
+	if !decision.Deny && !time.Now().Before(answerBy) {
+		// Too late to answer allow: a removal of the account may already
+		// have stopped waiting for this exchange.
+		decision = enterprisepolicy.ApplyForeignHookRemovals(decision, exchange.Key, nil, errForeignHookExchangeExpired, time.Now())
+	}
+	if decision.Deny && cleanRoot != "" {
+		// A denial of either key removes both entries.
+		_ = dropForeignHookCleanMirrors(cleanRoot, identity, exchange.Key)
+	}
+	return decision, answerBy, release
+}
+
+// foreignHookCleanMirrorRoot is the clean-session folder of the data
+// directory, and writeForeignHookCleanMirrors and dropForeignHookCleanMirrors
+// publish and remove its entries (replaceable in tests).
+var (
+	foreignHookCleanMirrorRoot   = managed.ForeignHookCleanDir
+	writeForeignHookCleanMirrors = enterprisepolicy.WriteForeignHookCleanMirrors
+	dropForeignHookCleanMirrors  = enterprisepolicy.DropForeignHookCleanMirrors
+)
+
+// A clean scan the session store could not apply is applied again at most
+// foreignHookSessionRecordRetries more times, foreignHookSessionRecordRetryDelay
+// apart, while the hook still waits (exchange.RetryUntil), and never for
+// longer than foreignHookSessionRecordRetryWindow after the exchange arrived.
+// A hook that sends no RetryUntil (one before 1.0.5) gets the first answer.
+// foreignHookSessionDenialAudit records a final denial (replaceable in
+// tests).
+var (
+	foreignHookSessionRecordRetries     = 2
+	foreignHookSessionRecordRetryDelay  = 25 * time.Millisecond
+	foreignHookSessionRecordRetryWindow = 2 * time.Second
+	foreignHookSessionDenialAudit       = (*APIServer).auditForeignHookSessionDenial
+	foreignHookSessionRetryLog          = logForeignHookSessionRetry
+)
+
+// logForeignHookSessionRetry writes one gateway log line per re-applied
+// exchange, so a retried call that ends allowed (and leaves no audit row) is
+// still visible to an operator or a verifier (GAP-1812).
+func logForeignHookSessionRetry(connector string, attempt int, why string) {
+	fmt.Fprintf(os.Stderr, "[sidecar-api] foreign-hook session exchange connector=%s applied again attempt=%d cause=%s\n", connector, attempt, why)
+}
+
+// foreignHookSessionRetryUntil is when the gateway stops applying a busy
+// clean scan again: the hook's RetryUntil, at most
+// foreignHookSessionRecordRetryWindow after now.
+func foreignHookSessionRetryUntil(exchange enterprisepolicy.SessionExchange, now time.Time) time.Time {
+	until := exchange.RetryUntil
+	if limit := now.Add(foreignHookSessionRecordRetryWindow); until.After(limit) {
+		until = limit
+	}
+	return until
+}
+
+// foreignHookSessionRecordBusy reports the store's record-unavailable
+// denial (enterprisepolicy.SessionRecordUnavailableReason) of an exchange
+// whose own scan allowed the call. A scan that found a hook, a removal in
+// progress and every other denial are answered at once.
+func foreignHookSessionRecordBusy(exchange enterprisepolicy.SessionExchange, decision enterprisepolicy.GuardDecision) bool {
+	return !exchange.Decision.Deny && decision.Deny && decision.Reason == enterprisepolicy.SessionRecordUnavailableReason
+}
+
+// errForeignHookExchangeExpired is an exchange that could not answer within
+// foreignHookExchangeHold of taking its account's removal lock.
+var errForeignHookExchangeExpired = errors.New("the exchange did not answer in time")
+
+// foreignHookExchangeWait bounds how long an exchange waits for its
+// account's removal lock (enterprisepolicy.ForeignHookExchangeWait),
+// foreignHookExchangeHold how long after taking it the exchange may answer
+// allow (enterprisepolicy.ForeignHookExchangeHold), and
+// foreignHookFencedWriteTimeout an allow's response write, so a client that
+// stops reading its response does not hold the lock for long. A response
+// that fits the socket buffer is written without the client reading; one the
+// client does not take in time is cut, and the client's hook fails closed on
+// the incomplete response. foreignHookAccountExchangeLock takes the lock
+// (replaceable in tests).
+var (
+	foreignHookExchangeWait        = enterprisepolicy.ForeignHookExchangeWait
+	foreignHookExchangeHold        = enterprisepolicy.ForeignHookExchangeHold
+	foreignHookFencedWriteTimeout  = 250 * time.Millisecond
+	foreignHookAccountExchangeLock = enterprisepolicy.LockForeignHookAccountExchange
+)
+
+// writeFencedForeignHookAllow writes an allow and flushes it to the
+// connection within foreignHookFencedWriteTimeout, and never past answerBy.
+// It returns a refusal reason, having written nothing, when the connection
+// cannot bound the write or answerBy has passed: the caller then refuses the
+// call instead of answering an allow that a removal no longer waits for.
+// A write cut at the deadline leaves the expired deadline in place, so the
+// server's own finishing writes fail at once too.
+func writeFencedForeignHookAllow(w http.ResponseWriter, decision enterprisepolicy.GuardDecision, answerBy time.Time) string {
+	var body bytes.Buffer
+	if err := json.NewEncoder(&body).Encode(decision); err != nil {
+		return "foreign_hook_response_unbounded"
+	}
+	deadline := time.Now().Add(foreignHookFencedWriteTimeout)
+	if answerBy.Before(deadline) {
+		deadline = answerBy
+	}
+	if !time.Now().Before(deadline) {
+		return "foreign_hook_removal_fence_expired"
+	}
+	controller := http.NewResponseController(w)
+	if err := controller.SetWriteDeadline(deadline); err != nil {
+		return "foreign_hook_response_unbounded"
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(decision)
+	w.Header().Set("Content-Length", strconv.Itoa(body.Len()))
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(body.Bytes()); err != nil {
+		return ""
+	}
+	if err := controller.Flush(); err != nil {
+		return ""
+	}
+	// A keep-alive connection serves the caller's next request: clear the
+	// deadline only after the whole allow has reached it.
+	_ = controller.SetWriteDeadline(time.Time{})
+	return ""
 }
 
 // foreignHookAuditReasonLimit bounds the reason an audit row repeats, and
@@ -140,19 +375,22 @@ func (a *APIServer) auditForeignHookSessionDenial(
 	if a == nil {
 		return
 	}
-	// The denial names the agent identity (agt-) of the caller like any
-	// other hook decision: the verified user and the connector derive it, no
-	// session is needed. The rows had the user but no agt- (GAP-1039). The
-	// guard keys its block on the agent process, not a session, so an
-	// OpenCode denial carries no ais-.
-	if facts := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: connectorName}); facts.ID != "" {
-		identity := AgentIdentityFromContext(ctx)
-		identity.IdentityID, identity.IdentityVerified = facts.ID, facts.Verified
-		ctx = ContextWithAgentIdentity(ctx, identity)
-	}
+	// The denial names the caller like the allow rows of the same agent: the
+	// agent identity (agt-) from the verified user and the connector
+	// (GAP-1039), and the session and session instance (ais-) of the
+	// exchange's session through the same context enrichment as every hook
+	// call, and the session's agent (its live hook snapshot, else its root
+	// agent, as the session's own rows), so a SIEM joins the block to the
+	// session and agent it stopped (GAP-1903). An exchange with no session
+	// (an OpenCode denial keyed on the agent process) still names the agt-.
+	ctx = enrichAgentHookContext(ctx, agentHookRequest{
+		ConnectorName: connectorName,
+		SessionID:     strings.TrimSpace(exchange.Key.Session),
+	})
+	ctx = a.contextWithSessionAgentV8(ctx, connectorName)
 	block := "call"
 	switch {
-	case strings.Contains(decision.Reason, "cannot verify this agent session's hook record"):
+	case decision.Reason == enterprisepolicy.SessionRecordUnavailableReason:
 		block = "session_record_unavailable"
 	case exchange.SessionStart && exchange.Decision.Deny:
 		block = "session_recorded"
@@ -304,50 +542,29 @@ func foreignHookSessionDenialTarget(exchange enterprisepolicy.SessionExchange) (
 	return "event", ""
 }
 
-// foreignHookRemovalCache holds the guardian's foreign-hook removal ledger
-// (enterprisepolicy.ForeignHookRemovalsFile), read again when the file
-// changes and at least every foreignHookRemovalRecheck.
-type foreignHookRemovalCache struct {
-	mu        sync.Mutex
-	path      string
-	modTime   time.Time
-	size      int64
-	checkedAt time.Time
-	removals  []enterprisepolicy.ForeignHookRemoval
-	err       error
-}
+// foreignHookRemovalSource reads the guardian's ledger for each call. A
+// pending cleanup denial must be visible before its file removal even when
+// the replacement ledger has the same size and timestamp as the last one.
+type foreignHookRemovalSource struct{}
 
-const foreignHookRemovalRecheck = 2 * time.Second
-
-// forIdentity returns the removals the guardian recorded for one caller
-// identity. A missing ledger records none; one that fails its trust check
-// or does not parse is an error, which denies the call.
-func (c *foreignHookRemovalCache) forIdentity(dir, identity string) ([]enterprisepolicy.ForeignHookRemoval, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+// forIdentity returns the removals the guardian recorded for one caller.
+// A missing ledger records none; one that fails its trust check or does not
+// parse is an error, which denies the call.
+func (foreignHookRemovalSource) forIdentity(dir, identity string) ([]enterprisepolicy.ForeignHookRemoval, error) {
 	path := filepath.Join(dir, enterprisepolicy.ForeignHookRemovalsFile)
-	info, err := os.Lstat(path)
+	_, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		c.path, c.removals, c.err = "", nil, nil
 		return nil, nil
-	}
-	now := time.Now()
-	// A failed read is not cached: the guardian sets the file's group only
-	// after it replaces the file, and a read in between must not deny every
-	// account's calls until the next recheck.
-	if err == nil && (c.err != nil || path != c.path || !info.ModTime().Equal(c.modTime) || info.Size() != c.size ||
-		now.Sub(c.checkedAt) >= foreignHookRemovalRecheck) {
-		c.path, c.modTime, c.size, c.checkedAt = path, info.ModTime(), info.Size(), now
-		c.removals, c.err = readForeignHookRemovals(path)
 	}
 	if err != nil {
 		return nil, err
 	}
-	if c.err != nil {
-		return nil, c.err
+	removals, err := readForeignHookRemovals(path)
+	if err != nil {
+		return nil, err
 	}
 	var out []enterprisepolicy.ForeignHookRemoval
-	for _, removal := range c.removals {
+	for _, removal := range removals {
 		if canonical, ok := connector.CanonicalUserScopedIdentity(removal.Identity); ok && canonical == identity {
 			out = append(out, removal)
 		}
@@ -355,7 +572,14 @@ func (c *foreignHookRemovalCache) forIdentity(dir, identity string) ([]enterpris
 	return out, nil
 }
 
+// readForeignHookRemovals reads the guardian's removals ledger. A read that
+// meets the guardian replacing it is tried again (readGuardianRecord), well
+// within an exchange's hold, instead of denying the call.
 func readForeignHookRemovals(path string) ([]enterprisepolicy.ForeignHookRemoval, error) {
+	return readGuardianRecord(func() ([]enterprisepolicy.ForeignHookRemoval, error) { return readForeignHookRemovalsOnce(path) })
+}
+
+func readForeignHookRemovalsOnce(path string) ([]enterprisepolicy.ForeignHookRemoval, error) {
 	if err := validateManagedGuardianAuthorization(path, "hook guardian foreign-hook removals"); err != nil {
 		return nil, err
 	}
@@ -369,10 +593,4 @@ func readForeignHookRemovals(path string) ([]enterprisepolicy.ForeignHookRemoval
 		return nil, err
 	}
 	return enterprisepolicy.ParseForeignHookRemovals(data)
-}
-
-// foreignHookSessionStateDir is the session store of one caller identity.
-func foreignHookSessionStateDir(dataDir, identity string) string {
-	digest := sha256.Sum256([]byte(identity))
-	return filepath.Join(dataDir, "foreign-hook-sessions", fmt.Sprintf("%x", digest[:20]))
 }

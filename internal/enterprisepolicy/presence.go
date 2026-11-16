@@ -48,6 +48,122 @@ func MachinePolicyPresent(opts Options, connectorName string) (bool, error) {
 	}
 }
 
+// MachinePolicyAbsent proves that no DefenseClaw hook for connectorName is
+// registered in the vendor machine policy files: they were read and hold
+// neither an owned entry nor any text that names DefenseClaw or its hook
+// binary. MachinePolicyPresent answers the other question. It recognizes only
+// an entry that matches the current registration exactly (command, arguments,
+// timeout), so a registered hook whose timeout or arguments drifted is not
+// present to it although the vendor still runs the command. False from
+// MachinePolicyPresent is therefore not absence. A source that cannot be read,
+// trusted or parsed proves nothing and is returned as an error. Connectors
+// without a machine policy target have none to register.
+func MachinePolicyAbsent(opts Options, connectorName string) (bool, error) {
+	present, err := MachinePolicyPresent(opts, connectorName)
+	if err != nil || present {
+		return false, err
+	}
+	sources, err := machinePolicySources(opts, strings.ToLower(strings.TrimSpace(connectorName)))
+	if err != nil {
+		return false, err
+	}
+	markers := []string{"defenseclaw", "--enterprise-managed", opts.HookBinary, strings.ReplaceAll(opts.HookBinary, `\`, `\\`)}
+	if opts.OpenCodePluginPath != "" {
+		markers = append(markers, openCodePluginSpec(opts))
+	}
+	for _, source := range sources {
+		text := strings.ToLower(string(source))
+		for _, marker := range markers {
+			if marker != "" && strings.Contains(text, strings.ToLower(marker)) {
+				return false, nil
+			}
+		}
+	}
+	return true, nil
+}
+
+// machinePolicySources reads the vendor files MachinePolicyPresent reads for
+// the connector, with the same trust checks. Copilot loads every effective
+// JSON drop-in of policy.d, so all of them are read, not only the DefenseClaw
+// one. A file that does not exist adds nothing.
+func machinePolicySources(opts Options, name string) ([][]byte, error) {
+	var paths []string
+	var err error
+	switch name {
+	case ConnectorCodex:
+		var path string
+		path, err = CodexRequirementsPath(opts)
+		paths = []string{path}
+	case ConnectorClaudeCode:
+		var claude []claudeSource
+		if claude, err = readClaudeFileSources(opts); err != nil {
+			return nil, err
+		}
+		out := make([][]byte, 0, len(claude))
+		for _, source := range claude {
+			encoded, encodeErr := encodeOrdered(source.doc)
+			if encodeErr != nil {
+				return nil, encodeErr
+			}
+			out = append(out, encoded)
+		}
+		return out, nil
+	case ConnectorCursor:
+		if opts.goos() == "windows" {
+			var hooksPath, adapterPath string
+			hooksPath, adapterPath, err = windowsCursorPaths(opts)
+			paths = []string{hooksPath, adapterPath}
+		} else {
+			var path string
+			path, err = CursorEnterpriseHooksPath(opts)
+			paths = []string{path}
+		}
+	case ConnectorCopilot:
+		var dir string
+		var names []string
+		if dir, names, err = copilotEffectiveDropIns(opts); err != nil {
+			return nil, err
+		}
+		out := make([][]byte, 0, len(names))
+		for _, name := range names {
+			file := joinFor(opts, dir, name)
+			raw, exists, readErr := readPolicyFile(opts, file)
+			if readErr != nil {
+				return nil, readErr
+			}
+			if !exists {
+				continue
+			}
+			if _, parseErr := decodeOrderedObject(raw); parseErr != nil {
+				return nil, fmt.Errorf("parse Copilot policy drop-in %s: %w", file, parseErr)
+			}
+			out = append(out, raw)
+		}
+		return out, nil
+	case ConnectorOpenCode:
+		if !opts.openCodeArtifactInstalled() {
+			return nil, nil
+		}
+		var path string
+		path, err = OpenCodeManagedConfigPath(opts)
+		paths = []string{path}
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out [][]byte
+	for _, path := range paths {
+		raw, exists, readErr := readPolicyFile(opts, path)
+		if readErr != nil {
+			return nil, readErr
+		}
+		if exists {
+			out = append(out, raw)
+		}
+	}
+	return out, nil
+}
+
 func codexPresent(opts Options) (bool, error) {
 	path, err := CodexRequirementsPath(opts)
 	if err != nil {
@@ -83,13 +199,9 @@ func claudePresent(opts Options) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	events := make([]string, 0, len(groups))
-	for _, group := range groups {
-		events = append(events, group.Event)
-	}
 	for _, source := range sources {
 		hooks, _ := source.doc.get("hooks")
-		if owned, _, _ := countClaudeHooks(opts, hooks, events); owned > 0 {
+		if owned, _, _ := countClaudeHooks(opts, hooks, groups); owned > 0 {
 			return true, nil
 		}
 	}
@@ -106,7 +218,10 @@ func cursorPresent(opts Options) (bool, error) {
 		if err != nil || !exists {
 			return false, err
 		}
-		return connector.VerifyWindowsCursorEnterpriseHooks(current, adapterPath, "closed") == nil, nil
+		// A pre-upgrade policy that still registers a retired event
+		// (afterAgentThought) is DefenseClaw's installed registration until
+		// the next reconcile rewrites it.
+		return connector.VerifyWindowsCursorEnterpriseHooksRegistered(current, adapterPath, "closed") == nil, nil
 	}
 	path, err := CursorEnterpriseHooksPath(opts)
 	if err != nil {
@@ -155,11 +270,13 @@ func opencodePresent(opts Options) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("parse OpenCode managed config: %w", err)
 	}
-	value, _ := doc.get("plugin")
-	list, _ := value.([]any)
-	for _, item := range list {
-		if opencodeEntryIsOwned(opts, item) {
-			return true, nil
+	for _, key := range []string{"plugin", "plugins"} {
+		value, _ := doc.get(key)
+		list, _ := value.([]any)
+		for _, item := range list {
+			if opencodeEntryIsOwned(opts, item) {
+				return true, nil
+			}
 		}
 	}
 	return false, nil

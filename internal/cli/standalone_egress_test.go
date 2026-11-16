@@ -12,6 +12,7 @@ package cli
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -73,7 +74,12 @@ func TestStandaloneGatewayRefusesAnInvalidEnterpriseProxy(t *testing.T) {
 		Profile: managed.ProfileStandalone, Network: config.EnterpriseNetworkConfig{HTTPSProxy: "http://user:secret@proxy.corp:3128"},
 	}}
 	called := false
-	if err := applyStandaloneEgressEnvironment(cfg, func(string, string) error { called = true; return nil }); err == nil || called {
+	err := applyStandaloneEgressEnvironment(cfg, func(string, string) error { called = true; return nil })
+	if err == nil || called {
 		t.Fatalf("an invalid proxy must fail before any variable is set: err=%v set=%v", err, called)
+	}
+	// What to write instead, once, and never the configured value.
+	if n := strings.Count(err.Error(), "http://host:port"); n != 1 || strings.Contains(err.Error(), "secret") {
+		t.Fatalf("refusal = %q, want the advice once and no configured value", err)
 	}
 }

@@ -102,7 +102,7 @@ See core.md §3.4. The tests:
 - **Credentials.** In `otlp_token.go`, add an `OTLPScope<X>` constant to both `OTLPPathTokenScopes()` and `OTLPPathTokenScopeForConnector`. This allowlist is closed. Tokens are 64 lowercase hex characters.
 - **Auth.** Loopback only. The header form uses the normalized `X-DefenseClaw-Source`, and the path form is `/otlp/<scope>/<token>/v1/<logs|metrics|traces>`. The standalone profile requires user-scoped credentials (`connector.UserScopedOTLPCredential`).
 - **Mapping.** Add `binding_classes` with `sources: [<slug>]` under `inbound_bindings` in `schemas/telemetry/v8/registry.yaml` (copy the Codex and Claude Code classes). Then run `make telemetry-generate`, which regenerates `internal/observability/zz_generated_telemetry_*.go` and `schemas/telemetry/runtime/*.json.gz`. `make telemetry-check` fails on drift.
-- **Status.** Add the connector's channels (hooks, otel, notify, policy-api) in `connectorModeFor` (`internal/gateway/api.go`). Whether a connector shows as proxy or hooks comes from `connectorProxyBindsByName`, not from a name list.
+- **Status.** A host install reports `telemetry: [hooks]` for every hook connector (`connectorModeFor`, `internal/gateway/api.go`): host setup registers no native OTel exporter and no Codex notify bridge. Only Secure Client keeps main's per-name list (`secureClientConnectorTelemetry`); do not add a new connector there. Whether a connector shows as proxy or hooks comes from `connectorProxyBindsByName`, not from a name list.
 - **Tests.** `native_otlp_golden_test.go`, `otlp_token_test.go`, `internal/gateway/otlp_path_token_test.go`, `user_scoped_credentials_test.go`.
 
 ### I. New attributes or event families (only for a new surface)

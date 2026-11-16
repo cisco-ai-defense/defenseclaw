@@ -17,3 +17,12 @@ func createTestDirectoryRedirect(t *testing.T, link, target string) {
 		t.Fatalf("create directory symlink fixture: %v", err)
 	}
 }
+
+// grantTestUntrustedWriter lets a principal outside the trusted set write
+// path. On Unix that is the world-write bit.
+func grantTestUntrustedWriter(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Chmod(path, 0o666); err != nil {
+		t.Fatalf("grant world write: %v", err)
+	}
+}

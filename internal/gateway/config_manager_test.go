@@ -37,12 +37,25 @@ import (
 	"github.com/fsnotify/fsnotify"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
+
+// recordStandaloneStartupGeneration models the lifecycle's installed boot
+// bytes without changing the config document used by the test.
+func recordStandaloneStartupGeneration(t *testing.T, path string) {
+	t.Helper()
+	if _, err := configwrite.Locked(t.Context(), path,
+		configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "fixture startup"},
+		func() (bool, error) { return true, nil }); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestConfigManagerReloadAppliesAndPublishesSnapshot(t *testing.T) {
 	dir := t.TempDir()
@@ -151,6 +164,58 @@ func TestConfigManagerStartupReconcileSkipsAnUnchangedSource(t *testing.T) {
 	}
 }
 
+// A hand edit made while the gateway was stopped keeps the recorded
+// generation as applied, so the next saved write is attributed to its own
+// writer instead of "generations 1-N applied together" (GAP-1338).
+func TestConfigManagerStartupAfterAStoppedHandEditKeepsTheRecordedGeneration(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	writeConfigForManagerTest(t, path, dir, "observe")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recorded uint64
+	for _, mode := range []string{"observe", "action"} {
+		next := bytes.Replace(raw, []byte("mode: observe"), []byte("mode: "+mode), 1)
+		next = append([]byte("# saved "+mode+"\n"), next...)
+		result, err := configwrite.ReplaceDocument(t.Context(), path, next, configwrite.Options{Actor: configwrite.ActorPrefixCLI + "tester", Reason: "config set"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		recorded = result.Generation
+	}
+	if recorded < 2 {
+		t.Fatalf("recorded generation = %d, want at least 2", recorded)
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handEdited := append([]byte("# edited by hand while stopped\n"), saved...)
+	if err := os.WriteFile(path, handEdited, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", nil)
+	mgr.setStartupSource(path, handEdited)
+	if !mgr.appliedGenerationKnown || mgr.appliedGeneration != recorded {
+		t.Fatalf("after a stopped hand edit: applied generation = %d (known %t), want %d",
+			mgr.appliedGeneration, mgr.appliedGenerationKnown, recorded)
+	}
+
+	// A managed install keeps the strict rule.
+	initial.DeploymentMode = "managed_enterprise"
+	managedMgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", nil)
+	managedMgr.setStartupSource(path, handEdited)
+	if managedMgr.appliedGeneration != 0 {
+		t.Fatalf("managed hand edit: applied generation = %d, want 0", managedMgr.appliedGeneration)
+	}
+}
+
 func TestConfigManagerReloadRejectsInvalidAndKeepsSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, config.DefaultConfigName)
@@ -191,6 +256,7 @@ func TestConfigManagerReloadRejectsInvalidAndKeepsSnapshot(t *testing.T) {
 }
 
 func TestConfigManagerV8ReloadCompilesAndPassesExactStableSnapshot(t *testing.T) {
+	before := version.Current().Generation
 	dir := t.TempDir()
 	path := filepath.Join(dir, config.DefaultConfigName)
 	initialRaw := []byte("config_version: 8\ndata_dir: " + dir + "\nobservability: {}\n")
@@ -236,6 +302,27 @@ func TestConfigManagerV8ReloadCompilesAndPassesExactStableSnapshot(t *testing.T)
 	}
 	if got, want := version.Current().ContentHash, configContentHashForTest(nextRaw); got != want {
 		t.Fatalf("successful reload content hash = %q, want %q", got, want)
+	}
+	// provenance show reads the running gateway's generation: a successful
+	// apply advances it by one, an unchanged or rejected reload does not
+	// (GAP-0391).
+	if got := version.Current().Generation; got != before+1 {
+		t.Fatalf("applied provenance generation = %d, want %d", got, before+1)
+	}
+	if err := mgr.Reload(context.Background(), "unchanged"); err != nil {
+		t.Fatal(err)
+	}
+	if got := version.Current().Generation; got != before+1 {
+		t.Fatalf("unchanged reload advanced provenance to %d", got)
+	}
+	if err := os.WriteFile(path, []byte("config_version: invalid\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Reload(context.Background(), "invalid"); err == nil {
+		t.Fatal("invalid reload succeeded")
+	}
+	if got := version.Current().Generation; got != before+1 {
+		t.Fatalf("rejected reload advanced provenance to %d", got)
 	}
 }
 
@@ -531,6 +618,666 @@ observability: {}
 	if got, ok := config.ObservabilityV8ManagedAIDSourceContentHash(destination); !ok ||
 		got != config.ObservabilityV8SourceContentHash(changedRaw) {
 		t.Fatalf("published exact source binding=%q/%t", got, ok)
+	}
+}
+
+func TestStandaloneConfigManagerRejectsUnbundledConfigAndAssetReload(t *testing.T) {
+	setPendingRestart(nil)
+	t.Cleanup(func() { setPendingRestart(nil) })
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	asset := filepath.Join(dir, "asset.rego")
+	if err := os.WriteFile(asset, []byte("package original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte("config_version: 8\ndata_dir: " + dir + "\nobservability: {}\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial.DeploymentMode = "managed_enterprise"
+	initial.Enterprise.Profile = "standalone"
+	if !initial.StandaloneEnterprise() {
+		t.Fatal("fixture is not standalone enterprise")
+	}
+	applied := 0
+	boot := true
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(_ context.Context, _, _ *config.Config, _ ConfigDiff, source configReloadSource) error {
+		if boot {
+			boot = false
+			return errGenerationUnchanged
+		}
+		if source.proveUnchanged {
+			contents, err := os.ReadFile(asset)
+			if err != nil {
+				return err
+			}
+			if string(contents) != "package original" {
+				return fmt.Errorf("config reload refused: referenced asset %s differs; apply a new signed policy bundle", asset)
+			}
+			return errGenerationUnchanged
+		}
+		applied++
+		return nil
+	})
+	mgr.assetFiles = func() []string { return []string{asset} }
+	loadSnapshot := mgr.loadSnapshot
+	mgr.loadSnapshot = func(source string, snapshot []byte) (*config.Config, error) {
+		candidate, loadErr := loadSnapshot(source, snapshot)
+		if loadErr == nil {
+			candidate.DeploymentMode = "managed_enterprise"
+			candidate.Enterprise.Profile = "standalone"
+		}
+		return candidate, loadErr
+	}
+	compiled, err := config.ParseCompileObservabilityV8(path, raw,
+		config.ObservabilityV8CompileOptions{DefaultDataDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr.bindInitialObservabilityV8Plan(compiled.Plan)
+	recordStandaloneStartupGeneration(t, path)
+	mgr.setStartupSource(path, raw)
+	if err := mgr.Reload(context.Background(), "startup_reconcile"); err != nil {
+		t.Fatalf("startup reconcile of boot bytes: %v", err)
+	}
+	unbundled := []byte(fmt.Sprintf("config_version: 8\ndata_dir: %q\ngateway:\n  api_port: %d\nobservability: {}\n",
+		dir, initial.Gateway.APIPort+1))
+	if err := os.WriteFile(path, unbundled, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Reload(context.Background(), "watch"); err == nil || !strings.Contains(err.Error(), "lifecycle-recorded generation") {
+		t.Fatalf("unbundled config reload = %v, want named refusal", err)
+	}
+	if pending, _ := livePendingRestart.Load().([]string); len(pending) != 0 {
+		t.Fatalf("unbundled gateway port edit advertised a pending restart: %v", pending)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.ReloadAssets(context.Background(), "asset_watch"); err != nil || mgr.rejected {
+		t.Fatalf("restored config recovery = %v, rejected=%t", err, mgr.rejected)
+	}
+	if err := mgr.ReloadAssets(context.Background(), "unchanged_asset_watch"); err != nil || mgr.rejected {
+		t.Fatalf("unchanged later asset reload = %v, rejected=%t", err, mgr.rejected)
+	}
+	if err := os.WriteFile(asset, []byte("package changed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.ReloadAssets(context.Background(), "unsigned_asset_watch"); err == nil || !strings.Contains(err.Error(), asset) {
+		t.Fatalf("unbundled changed asset reload = %v, want named refusal", err)
+	}
+	if applied != 0 {
+		t.Fatalf("unbundled reload applied %d times", applied)
+	}
+}
+
+func TestStandaloneConfigManagerAppliesOnlyRecordedNoAnchorLifecycleGenerations(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	writeConfigForManagerTest(t, path, dir, "observe")
+	initialRaw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial.DeploymentMode = "managed_enterprise"
+	initial.Enterprise.Profile = "standalone"
+	applied := 0
+	boot := true
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(context.Context, *config.Config, *config.Config, ConfigDiff, configReloadSource) error {
+		if boot {
+			boot = false
+			return errGenerationUnchanged
+		}
+		applied++
+		return nil
+	})
+	loader := mgr.loadSnapshot
+	mgr.loadSnapshot = func(source string, raw []byte) (*config.Config, error) {
+		candidate, err := loader(source, raw)
+		if err == nil {
+			candidate.DeploymentMode = "managed_enterprise"
+			candidate.Enterprise.Profile = "standalone"
+		}
+		return candidate, err
+	}
+	recordStandaloneStartupGeneration(t, path)
+	mgr.setStartupSource(path, initialRaw)
+	if err := mgr.Reload(t.Context(), "startup_reconcile"); err != nil {
+		t.Fatal(err)
+	}
+	writeLifecycle := func(raw []byte) uint64 {
+		t.Helper()
+		result, err := configwrite.ReplaceDocument(t.Context(), path, raw, configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise ensure"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result.Generation
+	}
+	commented := append([]byte("# managed comment\n"), initialRaw...)
+	commentGeneration := writeLifecycle(commented)
+	if err := mgr.Reload(t.Context(), "watch"); err != nil {
+		t.Fatalf("lifecycle comment generation rejected: %v", err)
+	}
+	if !mgr.appliedGenerationKnown || mgr.appliedGeneration != commentGeneration {
+		t.Fatalf("comment generation: applies=%d recorded=%d/%t, want %d", applied, mgr.appliedGeneration, mgr.appliedGenerationKnown, commentGeneration)
+	}
+	beforeAction := applied
+	action := bytes.Replace(commented, []byte("mode: observe"), []byte("mode: action"), 1)
+	actionGeneration := writeLifecycle(action)
+	if err := mgr.Reload(t.Context(), "watch"); err != nil {
+		t.Fatalf("lifecycle policy generation rejected: %v", err)
+	}
+	if applied != beforeAction+1 || mgr.appliedGeneration != actionGeneration || mgr.Current().Guardrail.Mode != "action" {
+		t.Fatalf("policy generation: applies=%d recorded=%d mode=%q", applied, mgr.appliedGeneration, mgr.Current().Guardrail.Mode)
+	}
+	beforeRefusal := applied
+	// Once bundle trust anchors exist, a lifecycle record without a signed
+	// bundle is no longer an authorization to reload managed policy.
+	anchorDir := filepath.Join(dir, "trust")
+	if err := os.MkdirAll(anchorDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(anchorDir, "bundle-anchors.json"), []byte("present"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeLifecycle(append([]byte("# another comment\n"), action...))
+	if err := mgr.Reload(t.Context(), "watch"); err == nil || !strings.Contains(err.Error(), "signed policy bundle") {
+		t.Fatalf("unbundled generation with anchors = %v, want signed-bundle refusal", err)
+	}
+	if applied != beforeRefusal || mgr.appliedGeneration != actionGeneration {
+		t.Fatalf("refused generation applied: applies=%d recorded=%d", applied, mgr.appliedGeneration)
+	}
+}
+
+func TestStandaloneStartupReconcilesLifecycleGenerationCommittedAfterBootRead(t *testing.T) {
+	for _, signed := range []bool{false, true} {
+		for _, commentOnly := range []bool{false, true} {
+			name := fmt.Sprintf("signed=%t/comment_only=%t", signed, commentOnly)
+			t.Run(name, func(t *testing.T) {
+				dir := t.TempDir()
+				path := filepath.Join(dir, config.DefaultConfigName)
+				writeConfigForManagerTest(t, path, dir, "observe")
+				bootRaw, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				// With trust anchors the bytes must be what a stored signed
+				// bundle renders (private #7): write stores one per generation.
+				var store *signedStore
+				if signed {
+					store = newSignedStore(t, dir)
+				}
+				write := func(raw []byte, generation uint64) ([]byte, uint64) {
+					t.Helper()
+					opt := configwrite.Options{Actor: configwrite.ActorLifecycle, Lifecycle: true, Reason: "enterprise ensure"}
+					if signed {
+						id := fmt.Sprintf("b-01J9ZZZZZZZZZZZZZZZZZZZZZ%d", generation)
+						opt.Bundle = configwrite.BundleRef{ID: id, Version: generation, SignerKeyID: "k1"}
+						raw = store.store(t, id, generation, raw)
+					}
+					result, err := configwrite.ReplaceDocument(t.Context(), path, raw, opt)
+					if err != nil {
+						t.Fatal(err)
+					}
+					return raw, result.Generation
+				}
+				bootRaw, bootGeneration := write(bootRaw, 1)
+				initial, err := config.LoadRuntimeV8File(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				initial.DeploymentMode = "managed_enterprise"
+				initial.Enterprise.Profile = "standalone"
+				matched := newConfigManagerWithSnapshot(path, initial, nil, nil, "", nil)
+				matched.setStartupSource(path, bootRaw)
+				if !matched.appliedGenerationKnown || matched.appliedGeneration != bootGeneration {
+					t.Fatalf("matching boot record: generation=%d known=%t, want %d", matched.appliedGeneration, matched.appliedGenerationKnown, bootGeneration)
+				}
+				// The gateway has captured bootRaw. Commit the next valid
+				// lifecycle generation before it reads config.generation.json.
+				nextRaw := bytes.Replace(bootRaw, []byte("mode: observe"), []byte("mode: action"), 1)
+				if commentOnly {
+					nextRaw = append([]byte("# lifecycle update\n"), bootRaw...)
+				}
+				nextRaw, nextGeneration := write(nextRaw, 2)
+				if nextGeneration <= bootGeneration {
+					t.Fatalf("next generation %d did not advance past boot generation %d", nextGeneration, bootGeneration)
+				}
+				applied := 0
+				mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(_ context.Context, _, _ *config.Config, _ ConfigDiff, source configReloadSource) error {
+					if !bytes.Equal(source.raw, nextRaw) || source.proveUnchanged {
+						return fmt.Errorf("startup applied unexpected source: %q, proof=%t", source.raw, source.proveUnchanged)
+					}
+					applied++
+					if commentOnly {
+						return errGenerationUnchanged
+					}
+					return nil
+				})
+				loader := mgr.loadSnapshot
+				mgr.loadSnapshot = func(source string, raw []byte) (*config.Config, error) {
+					candidate, err := loader(source, raw)
+					if err == nil {
+						candidate.DeploymentMode = "managed_enterprise"
+						candidate.Enterprise.Profile = "standalone"
+					}
+					return candidate, err
+				}
+				mgr.setStartupSource(path, bootRaw)
+				ctx, cancel := context.WithCancel(t.Context())
+				ready := make(chan error, 1)
+				done := make(chan error, 1)
+				go func() { done <- mgr.runWithStartupReconcile(ctx, ready) }()
+				select {
+				case err := <-ready:
+					if err != nil {
+						cancel()
+						<-done
+						t.Fatalf("valid lifecycle generation prevented startup: %v", err)
+					}
+				case <-time.After(5 * time.Second):
+					cancel()
+					<-done
+					t.Fatal("startup reconciliation did not report readiness")
+				}
+				cancel()
+				<-done
+				if applied != 1 || !bytes.Equal(mgr.appliedRaw, nextRaw) || mgr.appliedGeneration != nextGeneration || mgr.rejected {
+					t.Fatalf("startup state: applies=%d generation=%d want=%d rejected=%t", applied, mgr.appliedGeneration, nextGeneration, mgr.rejected)
+				}
+				if err := os.WriteFile(path, append([]byte("# unrecorded edit\n"), nextRaw...), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := mgr.Reload(t.Context(), "fsnotify"); err == nil ||
+					(signed && !strings.Contains(err.Error(), "activation_not_signed (config)")) ||
+					(!signed && !strings.Contains(err.Error(), "lifecycle-recorded generation")) {
+					t.Fatalf("unrecorded edit after startup = %v, want signed activation or lifecycle cause", err)
+				}
+				if applied != 1 || mgr.appliedGeneration != nextGeneration {
+					t.Fatalf("unrecorded edit applied: applies=%d generation=%d", applied, mgr.appliedGeneration)
+				}
+			})
+		}
+	}
+}
+
+// A lifecycle write may change only comments. Its rebuilt policy is unchanged,
+// but that successful proof must consume the writer's generation. Otherwise a
+// later asset edit can reuse the still-pending record (GAP-1279).
+func TestStandaloneConfigManagerNoOpGenerationCannotAuthorizeLaterAssetEdit(t *testing.T) {
+	for _, method := range []string{"watcher", "api"} {
+		t.Run(method, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, config.DefaultConfigName)
+			asset := filepath.Join(dir, "policy.rego")
+			if err := os.WriteFile(asset, []byte("package original"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			writeConfigForManagerTest(t, path, dir, "observe")
+			initialRaw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			initial, err := config.LoadRuntimeV8File(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			initial.DeploymentMode = "managed_enterprise"
+			initial.Enterprise.Profile = "standalone"
+			boot, applied := true, 0
+			mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(_ context.Context, _, _ *config.Config, _ ConfigDiff, source configReloadSource) error {
+				if boot {
+					boot = false
+					return errGenerationUnchanged
+				}
+				contents, err := os.ReadFile(asset)
+				if err != nil {
+					return err
+				}
+				if source.proveUnchanged {
+					if string(contents) != "package original" {
+						return fmt.Errorf("referenced asset %s differs from the applied generation", asset)
+					}
+					return errGenerationUnchanged
+				}
+				if bytes.HasPrefix(source.raw, []byte("# lifecycle-noop\n")) && string(contents) == "package original" {
+					return errGenerationUnchanged
+				}
+				applied++
+				return nil
+			})
+			loader := mgr.loadSnapshot
+			mgr.loadSnapshot = func(source string, raw []byte) (*config.Config, error) {
+				candidate, err := loader(source, raw)
+				if err == nil {
+					candidate.DeploymentMode = "managed_enterprise"
+					candidate.Enterprise.Profile = "standalone"
+				}
+				return candidate, err
+			}
+			recordStandaloneStartupGeneration(t, path)
+			mgr.setStartupSource(path, initialRaw)
+			if err := mgr.Reload(t.Context(), "startup_reconcile"); err != nil {
+				t.Fatal(err)
+			}
+			writeLifecycle := func(raw []byte) uint64 {
+				t.Helper()
+				result, err := configwrite.ReplaceDocument(t.Context(), path, raw, configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise ensure"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return result.Generation
+			}
+			noopRaw := append([]byte("# lifecycle-noop\n"), initialRaw...)
+			noopGeneration := writeLifecycle(noopRaw)
+			if err := mgr.Reload(t.Context(), "watch"); err != nil {
+				t.Fatalf("authorized no-op reload: %v", err)
+			}
+			if mgr.appliedGeneration != noopGeneration || !bytes.Equal(mgr.appliedRaw, noopRaw) || applied != 0 {
+				t.Fatalf("no-op proof left generation=%d bytes=%q applies=%d; want generation %d", mgr.appliedGeneration, mgr.appliedRaw, applied, noopGeneration)
+			}
+			if err := os.WriteFile(asset, []byte("package edited"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if method == "watcher" {
+				err = mgr.ReloadAssets(t.Context(), "asset_watch")
+			} else {
+				err = mgr.ReloadRecordedGeneration(t.Context(), "api:policy_reload")
+			}
+			if err == nil || !strings.Contains(err.Error(), asset) || applied != 0 || mgr.appliedGeneration != noopGeneration {
+				t.Fatalf("unrecorded asset edit: err=%v applies=%d generation=%d", err, applied, mgr.appliedGeneration)
+			}
+			// A subsequent lifecycle write can still authorize the edited asset.
+			if generation := writeLifecycle(append([]byte("# authorized asset\n"), initialRaw...)); generation <= noopGeneration {
+				t.Fatalf("subsequent lifecycle generation=%d, want newer than %d", generation, noopGeneration)
+			}
+			if err := mgr.ReloadRecordedGeneration(t.Context(), "api:policy_reload"); err != nil || applied != 1 {
+				t.Fatalf("subsequent authorized asset: err=%v applies=%d", err, applied)
+			}
+		})
+	}
+}
+
+// The Windows lifecycle asks /policy/reload to load the generation it just
+// recorded, because the watcher can miss the atomic config replacement. The
+// managed reload loads that recorded generation (unsigned before trust
+// anchors, signed after), answers nil once it is applied, and refuses a hand
+// edit or an unsigned record without touching the manager's state.
+func TestStandaloneConfigManagerAPIReloadLoadsOnlyTheRecordedGeneration(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	writeConfigForManagerTest(t, path, dir, "observe")
+	initialRaw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial.DeploymentMode = "managed_enterprise"
+	initial.Enterprise.Profile = "standalone"
+	applied, proofs := 0, 0
+	boot := true
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(_ context.Context, _ *config.Config, _ *config.Config, _ ConfigDiff, source configReloadSource) error {
+		if boot {
+			boot = false
+			return errGenerationUnchanged
+		}
+		if source.proveUnchanged {
+			proofs++
+			return errGenerationUnchanged
+		}
+		applied++
+		return nil
+	})
+	loader := mgr.loadSnapshot
+	mgr.loadSnapshot = func(source string, raw []byte) (*config.Config, error) {
+		candidate, err := loader(source, raw)
+		if err == nil {
+			candidate.DeploymentMode = "managed_enterprise"
+			candidate.Enterprise.Profile = "standalone"
+		}
+		return candidate, err
+	}
+	recordStandaloneStartupGeneration(t, path)
+	mgr.setStartupSource(path, initialRaw)
+	if err := mgr.Reload(t.Context(), "startup_reconcile"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.ReloadRecordedGeneration(t.Context(), "api:policy_reload"); err != nil || applied != 0 || proofs != 1 {
+		t.Fatalf("reload of the applied startup generation = %v (applies %d, proofs %d)", err, applied, proofs)
+	}
+	proofs = 0
+	write := func(raw []byte, opt configwrite.Options) uint64 {
+		t.Helper()
+		result, err := configwrite.ReplaceDocument(t.Context(), path, raw, opt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result.Generation
+	}
+	lifecycle := configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise ensure"}
+	// No watcher event is delivered: the API request alone loads it.
+	action := bytes.Replace(initialRaw, []byte("mode: observe"), []byte("mode: action"), 1)
+	actionGeneration := write(action, lifecycle)
+	if err := mgr.ReloadRecordedGeneration(t.Context(), "api:policy_reload"); err != nil {
+		t.Fatalf("recorded lifecycle generation refused: %v", err)
+	}
+	if applied != 1 || mgr.appliedGeneration != actionGeneration || mgr.Current().Guardrail.Mode != "action" {
+		t.Fatalf("recorded generation: applies=%d recorded=%d mode=%q", applied, mgr.appliedGeneration, mgr.Current().Guardrail.Mode)
+	}
+	// The watcher may load it first, and the lifecycle may ask twice: the
+	// repeat only proves the applied generation unchanged.
+	if err := mgr.ReloadRecordedGeneration(t.Context(), "api:policy_reload"); err != nil || applied != 1 || proofs != 1 {
+		t.Fatalf("applied generation reload = %v (applies %d, proofs %d), want nil after one proof", err, applied, proofs)
+	}
+	refused := func(label string) {
+		t.Helper()
+		err := mgr.ReloadRecordedGeneration(t.Context(), "api:policy_reload")
+		if !errors.Is(err, errNoRecordedGeneration) || applied != 1 || mgr.rejected ||
+			mgr.appliedGeneration != actionGeneration || mgr.Current().Guardrail.Mode != "action" {
+			t.Fatalf("%s: reload = %v, applies=%d rejected=%t recorded=%d mode=%q", label, err, applied, mgr.rejected,
+				mgr.appliedGeneration, mgr.Current().Guardrail.Mode)
+		}
+	}
+	if err := os.WriteFile(path, initialRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	refused("hand edit")
+	if err := mgr.ReloadRecordedGeneration(t.Context(), "api:policy_reload"); err == nil ||
+		!strings.Contains(err.Error(), "config.yaml differs from the applied generation") {
+		t.Fatalf("hand edit refusal = %v, want its cause", err)
+	}
+	if err := os.WriteFile(path, action, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := newSignedStore(t, dir)
+	write(append([]byte("# unsigned\n"), action...), lifecycle)
+	refused("unsigned record with trust anchors")
+	// A record that names a bundle the store does not hold signed (private #7).
+	write(append([]byte("# named only\n"), action...), configwrite.Options{Actor: "control-plane:t1/alice", Reason: "bundle", Lifecycle: true,
+		Bundle: configwrite.BundleRef{ID: "b-01J9ZZZZZZZZZZZZZZZZZZZZZY", Version: 6, SignerKeyID: "k1"}})
+	refused("record naming an unstored bundle")
+	if proofs != 1 {
+		t.Fatalf("refused requests rebuilt the generation: proofs=%d", proofs)
+	}
+	signed := store.store(t, "b-01J9ZZZZZZZZZZZZZZZZZZZZZZ", 7, bytes.Replace(action, []byte("mode: action"), []byte("mode: observe"), 1))
+	signedGeneration := write(signed, configwrite.Options{Actor: "control-plane:t1/alice", Reason: "bundle", Lifecycle: true,
+		Bundle: configwrite.BundleRef{ID: "b-01J9ZZZZZZZZZZZZZZZZZZZZZZ", Version: 7, SignerKeyID: "k1"}})
+	if err := mgr.ReloadRecordedGeneration(t.Context(), "api:policy_reload"); err != nil {
+		t.Fatalf("signed bundle generation refused: %v", err)
+	}
+	if applied != 2 || mgr.appliedGeneration != signedGeneration || mgr.Current().Guardrail.Mode != "observe" {
+		t.Fatalf("signed generation: applies=%d recorded=%d mode=%q", applied, mgr.appliedGeneration, mgr.Current().Guardrail.Mode)
+	}
+}
+
+// A repeat managed /policy/reload for the applied generation must not answer
+// success while a referenced policy asset differs from the live generation:
+// the edit has no lifecycle record and its watcher event may have been
+// missed. The repeat proves config.yaml and the assets unchanged, refuses
+// the edit with its cause without publishing it, and answers success again
+// once the asset is restored.
+func TestStandaloneConfigManagerAPIReloadRefusesAnUnrecordedAssetEdit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	asset := filepath.Join(dir, "policy.rego")
+	if err := os.WriteFile(asset, []byte("package original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeConfigForManagerTest(t, path, dir, "observe")
+	initialRaw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial.DeploymentMode = "managed_enterprise"
+	initial.Enterprise.Profile = "standalone"
+	live := "package original"
+	applied, proofs := 0, 0
+	// The fake sidecar: a proof compares the asset with the live generation,
+	// an apply publishes it.
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(_ context.Context, _ *config.Config, _ *config.Config, _ ConfigDiff, source configReloadSource) error {
+		contents, err := os.ReadFile(asset)
+		if err != nil {
+			return err
+		}
+		if source.proveUnchanged {
+			proofs++
+			if string(contents) != live {
+				return fmt.Errorf("config reload refused: managed config or referenced assets differ from the applied generation (asset %s); apply a new signed policy bundle", asset)
+			}
+			return errGenerationUnchanged
+		}
+		applied++
+		live = string(contents)
+		return nil
+	})
+	mgr.assetFiles = func() []string { return []string{asset} }
+	loader := mgr.loadSnapshot
+	mgr.loadSnapshot = func(source string, raw []byte) (*config.Config, error) {
+		candidate, err := loader(source, raw)
+		if err == nil {
+			candidate.DeploymentMode = "managed_enterprise"
+			candidate.Enterprise.Profile = "standalone"
+		}
+		return candidate, err
+	}
+	recordStandaloneStartupGeneration(t, path)
+	mgr.setStartupSource(path, initialRaw)
+	if err := mgr.ReloadAssets(t.Context(), "startup_reconcile"); err != nil {
+		t.Fatal(err)
+	}
+	action := bytes.Replace(initialRaw, []byte("mode: observe"), []byte("mode: action"), 1)
+	if _, err := configwrite.ReplaceDocument(t.Context(), path, action,
+		configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise ensure"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.ReloadRecordedGeneration(t.Context(), "api:policy_reload"); err != nil || applied != 1 {
+		t.Fatalf("recorded generation = %v (applies %d)", err, applied)
+	}
+	generation, appliedGeneration := mgr.gen.Load(), mgr.appliedGeneration
+	if err := mgr.ReloadRecordedGeneration(t.Context(), "api:policy_reload"); err != nil {
+		t.Fatalf("unchanged repeat = %v, want nil", err)
+	}
+	// The asset changes and no watcher event arrives.
+	if err := os.WriteFile(asset, []byte("package edited"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, attempt := range []string{"first", "repeated"} {
+		err := mgr.ReloadRecordedGeneration(t.Context(), "api:policy_reload")
+		if !errors.Is(err, errNoRecordedGeneration) || !strings.Contains(err.Error(), asset) {
+			t.Fatalf("%s reload after an unrecorded asset edit = %v, want a refusal naming %s", attempt, err, asset)
+		}
+		if applied != 1 || live != "package original" || mgr.gen.Load() != generation ||
+			mgr.appliedGeneration != appliedGeneration || mgr.Current().Guardrail.Mode != "action" || !mgr.rejected {
+			t.Fatalf("%s refusal changed state: applies=%d live=%q gen=%d recorded=%d mode=%q rejected=%t", attempt, applied,
+				live, mgr.gen.Load(), mgr.appliedGeneration, mgr.Current().Guardrail.Mode, mgr.rejected)
+		}
+	}
+	// Restoring the asset is proven unchanged and clears the rejection, even
+	// when its watcher event is missed too.
+	if err := os.WriteFile(asset, []byte("package original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.ReloadRecordedGeneration(t.Context(), "api:policy_reload"); err != nil || mgr.rejected || applied != 1 {
+		t.Fatalf("restored asset = %v (rejected %t, applies %d), want nil", err, mgr.rejected, applied)
+	}
+	if proofs != 5 {
+		t.Fatalf("proofs = %d, want 5 (startup, repeat, two refusals, restore)", proofs)
+	}
+}
+
+func TestStandaloneConfigManagerProvesStartupAssetReload(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	asset := filepath.Join(dir, "asset.rego")
+	if err := os.WriteFile(asset, []byte("package original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte("config_version: 8\ndata_dir: " + dir + "\nobservability: {}\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial.DeploymentMode = "managed_enterprise"
+	initial.Enterprise.Profile = "standalone"
+	called := 0
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(context.Context, *config.Config, *config.Config, ConfigDiff, configReloadSource) error {
+		called++
+		contents, err := os.ReadFile(asset)
+		if err != nil {
+			return err
+		}
+		if string(contents) != "package original" {
+			return fmt.Errorf("config reload refused: referenced asset %s differs; apply a new signed policy bundle", asset)
+		}
+		return errGenerationUnchanged
+	})
+	mgr.assetFiles = func() []string { return []string{asset} }
+	loadSnapshot := mgr.loadSnapshot
+	mgr.loadSnapshot = func(source string, snapshot []byte) (*config.Config, error) {
+		candidate, loadErr := loadSnapshot(source, snapshot)
+		if loadErr == nil {
+			candidate.DeploymentMode = "managed_enterprise"
+			candidate.Enterprise.Profile = "standalone"
+		}
+		return candidate, loadErr
+	}
+	recordStandaloneStartupGeneration(t, path)
+	mgr.setStartupSource(path, raw)
+	if err := mgr.ReloadAssets(context.Background(), "startup_reconcile"); err != nil {
+		t.Fatalf("unchanged startup asset reload = %v", err)
+	}
+	if called != 1 || mgr.gen.Load() != 0 || mgr.rejected {
+		t.Fatalf("startup asset proof: builds=%d gen=%d rejected=%t", called, mgr.gen.Load(), mgr.rejected)
+	}
+	if err := os.WriteFile(asset, []byte("package changed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.ReloadAssets(context.Background(), "asset_watch"); err == nil || !strings.Contains(err.Error(), asset) {
+		t.Fatalf("changed asset after startup = %v, want named refusal", err)
+	}
+	if called != 2 || mgr.gen.Load() != 0 || !mgr.rejected {
+		t.Fatalf("changed asset proof: builds=%d gen=%d rejected=%t", called, mgr.gen.Load(), mgr.rejected)
 	}
 }
 
@@ -1135,12 +1882,15 @@ func TestAPIServerHookPostureUsesPublishedRuntimeConfig(t *testing.T) {
 	}
 	for _, row := range rows {
 		name, _ := row["connector"].(string)
+		// The published explicit closed choice overrides the default tier.
 		if row["policy_mode"] != "action" || row["hook_fail_mode"] != "closed" || row["enabled"] != true {
 			t.Fatalf("%s published posture = %#v, want action/closed/enabled", name, row)
 		}
 	}
 	if boot.EffectiveGuardrailModeForConnector("codex") != "observe" ||
-		boot.EffectiveHookFailModeForConnector("codex") != "open" {
+		boot.Guardrail.HookFailMode != "open" || boot.Guardrail.Connectors["codex"].HookFailMode != "open" ||
+		boot.EffectiveHookFailModeForConnector("codex") != "closed" ||
+		boot.EffectiveHookOutageFailModeForConnector("codex") != "open" {
 		t.Fatal("API posture read mutated the immutable boot snapshot")
 	}
 }
@@ -1212,10 +1962,9 @@ func TestConnectorSetChangeIsHotOffSecureClient(t *testing.T) {
 	}
 }
 
-// The CLI no longer restarts the gateway for a hook fail mode change
-// (GAP-0184): with hook self-heal off, no hook guard rewrites the hooks, so the
-// reload re-runs the connector setup; with it on the guards do.
-func TestHookFailModeChangeReRunsSetupWithoutSelfHeal(t *testing.T) {
+// A saved per-user open-to-closed edit changes the next outage decision and
+// refreshes registration state without changing which connectors are active.
+func TestPerUserSavedOutageModeEditRefreshesConnectorSetup(t *testing.T) {
 	oldCfg := config.DefaultConfig()
 	oldCfg.Guardrail.Enabled = true
 	oldCfg.Guardrail.Connector = "codex"
@@ -1224,12 +1973,103 @@ func TestHookFailModeChangeReRunsSetupWithoutSelfHeal(t *testing.T) {
 	oldCfg.Guardrail.HookFailMode = "open"
 	newCfg := cloneConfig(oldCfg)
 	newCfg.Guardrail.HookFailMode = "closed"
-	if !hookFailModeNeedsSetup(oldCfg, newCfg) {
-		t.Fatal("hook fail mode change with self-heal off did not re-run the connector setup")
+	if oldCfg.EffectiveHookOutageFailModeForConnector("codex") != "open" ||
+		newCfg.EffectiveHookOutageFailModeForConnector("codex") != "closed" ||
+		connectorSetChanged(oldCfg, newCfg) || !hookPolicyNeedsSetup(oldCfg, newCfg) {
+		t.Fatal("saved per-user outage edit missed the call-time mode or registration refresh")
 	}
-	oldCfg.Guardrail.HookSelfHeal, newCfg.Guardrail.HookSelfHeal = true, true
-	if hookFailModeNeedsSetup(oldCfg, newCfg) {
-		t.Fatal("hook fail mode change with self-heal on re-ran the setup; the hook guards apply it")
+}
+
+func TestClaudeTierChangeWithSavedOpenRefreshesRegistration(t *testing.T) {
+	for _, tc := range []struct{ before, after string }{
+		{"default", "strict"}, {"strict", "default"},
+	} {
+		oldCfg := config.DefaultConfig()
+		oldCfg.Guardrail.Enabled = true
+		oldCfg.Guardrail.Connector = "claudecode"
+		oldCfg.Guardrail.HookSelfHeal = false
+		oldCfg.Guardrail.HookFailMode = "open"
+		oldCfg.Guardrail.RulePack = tc.before
+		newCfg := cloneConfig(oldCfg)
+		newCfg.Guardrail.RulePack = tc.after
+		if oldCfg.EffectiveHookOutageFailModeForConnector("claudecode") != "open" ||
+			newCfg.EffectiveHookOutageFailModeForConnector("claudecode") != "open" {
+			t.Fatal("fixture requires an unchanged saved outage mode")
+		}
+		if !hookRuntimePolicyChanged(oldCfg, newCfg, "claudecode") || !hookPolicyNeedsSetup(oldCfg, newCfg) {
+			t.Fatalf("%s to %s did not refresh the registration", tc.before, tc.after)
+		}
+	}
+}
+
+// A pinned custom pack whose posture changes with a new pin refreshes the
+// saved-open Claude Code registration; the same posture does not.
+func TestClaudeCustomPackPostureChangeRefreshesSavedOpenRegistration(t *testing.T) {
+	root := guardrailPoliciesRoot(t)
+	pinned := func(t *testing.T, posture string) *config.Config {
+		t.Helper()
+		dir := filepath.Join(t.TempDir(), "operator-pack")
+		if err := os.CopyFS(dir, os.DirFS(filepath.Join(root, posture))); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { packPostures.Delete(dir); pendingPackPostures.Delete(dir) })
+		pin, err := guardrail.RulePackDigest(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := config.DefaultConfig()
+		cfg.Guardrail.Enabled = true
+		cfg.Guardrail.Connector = "claudecode"
+		cfg.Guardrail.HookSelfHeal = false
+		cfg.Guardrail.HookFailMode = "open"
+		cfg.Guardrail.RulePack = "operator"
+		cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{"operator": {Path: dir, Digest: "sha256:" + pin}}
+		cfg.CheckCustomRulePacks()
+		return cfg
+	}
+	for _, tc := range []struct{ before, after string }{
+		{"default", "strict"}, {"strict", "default"}, {"default", "default"},
+	} {
+		t.Run(tc.before+"_to_"+tc.after, func(t *testing.T) {
+			old, next := pinned(t, tc.before), pinned(t, tc.after)
+			if got := old.HookPolicyTierForConnector("claudecode"); got != tc.before {
+				t.Fatalf("published tier = %q, want %q", got, tc.before)
+			}
+			if got := next.HookPolicyTierForConnector("claudecode"); got != tc.after {
+				t.Fatalf("candidate tier = %q, want %q", got, tc.after)
+			}
+			if got, want := hookPolicyNeedsSetup(old, next), tc.before != tc.after; got != want {
+				t.Fatalf("registration refresh = %t, want %t", got, want)
+			}
+		})
+	}
+}
+
+func TestHookModeAndHILTChangeReRunsSetupWithoutSelfHeal(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(*config.Config)
+	}{
+		{"mode only", func(c *config.Config) { c.Guardrail.Mode = "action" }},
+		{"HILT only", func(c *config.Config) { c.Guardrail.HILT.Enabled = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldCfg := config.DefaultConfig()
+			oldCfg.Guardrail.Enabled = true
+			oldCfg.Guardrail.Connector = "codex"
+			oldCfg.Guardrail.Mode = "observe"
+			oldCfg.Guardrail.HookFailMode = "closed"
+			oldCfg.Guardrail.HookSelfHeal = false
+			newCfg := cloneConfig(oldCfg)
+			tc.edit(newCfg)
+			if !hookPolicyNeedsSetup(oldCfg, newCfg) {
+				t.Fatal("hook policy change with self-heal off did not re-run connector setup")
+			}
+			newCfg.Guardrail.HookSelfHeal = true
+			if hookPolicyNeedsSetup(oldCfg, newCfg) {
+				t.Fatal("hook policy change with self-heal on re-ran connector setup")
+			}
+		})
 	}
 }
 
@@ -1871,4 +2711,56 @@ func TestConfigManagerWatchesAssetsBesideConfig(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+// A rejected config_version 8 candidate does not change the scanner key the
+// running generation reads: the inline key its in-memory migration moves to
+// a variable is exported only when a reload accepts it.
+func TestConfigManagerRejectedV8CandidateKeepsTheActiveScannerKey(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	t.Setenv("VIRUSTOTAL_API_KEY", "")
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	write := func(mode, key string) []byte {
+		raw := []byte("config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  mode: " + mode +
+			"\nscanners:\n  skill_scanner:\n    use_virustotal: true\n    virustotal_api_key: " + key + "\nobservability: {}\n")
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	raw := write("observe", "vt-active-key")
+	initial, err := loadRuntimeConfigCandidate(path, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := os.Getenv("VIRUSTOTAL_API_KEY"); got != "" {
+		t.Fatal("loading a candidate exported its inline key")
+	}
+	takeCandidateKeyExport(initial)()
+	if got := os.Getenv("VIRUSTOTAL_API_KEY"); got != "vt-active-key" {
+		t.Fatal("the accepted configuration's key is not exported")
+	}
+	reject := true
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(context.Context, *config.Config, *config.Config, ConfigDiff, configReloadSource) error {
+		if reject {
+			return errors.New("candidate rejected")
+		}
+		return nil
+	})
+	write("action", "vt-rejected-key")
+	if err := mgr.Reload(context.Background(), "test"); err == nil {
+		t.Fatal("the reload was not rejected")
+	}
+	if got := os.Getenv("VIRUSTOTAL_API_KEY"); got != "vt-active-key" {
+		t.Fatal("a rejected candidate replaced the scanner key the running generation reads")
+	}
+	reject = false
+	if err := mgr.Reload(context.Background(), "test"); err != nil {
+		t.Fatal(err)
+	}
+	if got := os.Getenv("VIRUSTOTAL_API_KEY"); got != "vt-rejected-key" {
+		t.Fatal("the accepted candidate's rotated key is not exported")
+	}
 }

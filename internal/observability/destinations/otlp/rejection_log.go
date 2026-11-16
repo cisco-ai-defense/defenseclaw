@@ -25,7 +25,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +32,7 @@ import (
 	collectortracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	"google.golang.org/protobuf/encoding/protowire"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
@@ -77,7 +77,7 @@ var rejectionLogLimiter = struct {
 	suppressed map[string]int
 }{last: map[string]time.Time{}, suppressed: map[string]int{}}
 
-var rejectionTokenPattern = regexp.MustCompile(`[A-Za-z0-9+/=_\-.]{32,}`)
+var rejectionTokenPattern = lazyregexp.New(`[A-Za-z0-9+/=_\-.]{32,}`)
 
 type rejectionCaptureKey struct{}
 

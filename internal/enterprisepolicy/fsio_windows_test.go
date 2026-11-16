@@ -98,12 +98,15 @@ func testWindowsTrust(t *testing.T, root string) {
 		return nil
 	}
 	previousDir, previousLeaf, previousFile, previousReclaim := validateTrustedDir, validateTrustedLeafDir, validateTrustedFile, reclaimDirHandle
+	previousItself := validateTrustedFileItself
 	validateTrustedDir = func(path string) error { return walkFrom(path, false) }
 	validateTrustedLeafDir = func(path string) error { return walkFrom(path, true) }
 	validateTrustedFile = func(path string) error { return walkFrom(path, false) }
+	validateTrustedFileItself = func(path string) error { return check(path, true) }
 	reclaimDirHandle = func(_ string, reclaim func() error) error { return reclaim() }
 	t.Cleanup(func() {
 		validateTrustedDir, validateTrustedLeafDir, validateTrustedFile, reclaimDirHandle = previousDir, previousLeaf, previousFile, previousReclaim
+		validateTrustedFileItself = previousItself
 	})
 }
 
@@ -190,6 +193,33 @@ func TestWindowsPublicDirDenyReadIsDrift(t *testing.T) {
 	drift, err = InspectWindowsPublicDir(dir)
 	if err != nil || drift.Drifted() {
 		t.Fatalf("repair must restore public read access: %+v, %v", drift, err)
+	}
+}
+
+// GAP-1327: a conditional (callback) allow that grants Modify makes the
+// public folder writable for the tokens its condition matches. It is drift,
+// and repair removes it.
+func TestWindowsPublicDirCallbackAllowIsDrift(t *testing.T) {
+	dir := filepath.Join(windowsTestOptions(t).WindowsProgramData, "public-summary-callback")
+	if err := createProtectedDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := applySDDL(dir, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)(XA;;0x1301bf;;;BU;(Member_of {SID(BU)}))"); err != nil {
+		t.Fatal(err)
+	}
+	drift, err := InspectWindowsPublicDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drift.Extra[usersSIDStr]&0x2 == 0 || !drift.Drifted() {
+		t.Fatalf("a conditional Users Modify allow must report drift: %+v", drift)
+	}
+	if err := RepairWindowsPublicDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	drift, err = InspectWindowsPublicDir(dir)
+	if err != nil || drift.Drifted() {
+		t.Fatalf("repair must remove the conditional allow: %+v, %v", drift, err)
 	}
 }
 
@@ -732,7 +762,7 @@ func TestWindowsOpenCodeMovesAsideAConfigAUserPlanted(t *testing.T) {
 				t.Fatalf("managed config path: %s %v", config, err)
 			}
 			body, err := os.ReadFile(config)
-			if err != nil || strings.Contains(string(body), "tool.js") || !strings.Contains(string(body), strings.ReplaceAll(opts.OpenCodePluginPath, `\`, `\\`)) {
+			if err != nil || strings.Contains(string(body), "tool.js") || !strings.Contains(string(body), strings.ReplaceAll(openCodePluginSpec(opts), `\`, `\\`)) {
 				t.Fatalf("the managed config must be DefenseClaw's alone: %v\n%s", err, body)
 			}
 			if err := validateTrustedFile(config); err != nil {
@@ -767,6 +797,91 @@ func TestPublishWindowsGoOwnedHoldsTheAmpMachineFolder(t *testing.T) {
 	if problems := InspectWindowsAmpMachineFolder(opts); len(problems) != 0 {
 		t.Fatalf("a held Amp machine folder must not be reported: %v", problems)
 	}
+}
+
+func TestWindowsAmpMachineFolderRemovalUsesWriterOwnership(t *testing.T) {
+	t.Run("Setup-created empty folder", func(t *testing.T) {
+		opts := windowsTestOptions(t)
+		dir := windowsAmpMachineDir(opts)
+		if _, err := reserveWindowsAmpMachineDir(opts); err != nil {
+			t.Fatal(err)
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil || len(entries) != 1 || entries[0].Name() != windowsAmpMachineFolderOwnerFile {
+			t.Fatalf("Amp writer files = %v, %v", entries, err)
+		}
+		if err := RemoveWindowsAmpMachineFolderIfCreated(opts); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("Setup-created Amp folder remained: %v", err)
+		}
+	})
+	t.Run("preexisting vendor folder", func(t *testing.T) {
+		opts := windowsTestOptions(t)
+		dir := windowsAmpMachineDir(opts)
+		if err := createProtectedDir(dir); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := reserveWindowsAmpMachineDir(opts); err != nil {
+			t.Fatal(err)
+		}
+		if err := RemoveWindowsAmpMachineFolderIfCreated(opts); err != nil {
+			t.Fatal(err)
+		}
+		if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
+			t.Fatalf("preexisting Amp folder was removed: %v", err)
+		}
+	})
+	t.Run("writer replaces a junction", func(t *testing.T) {
+		opts := windowsTestOptions(t)
+		dir := windowsAmpMachineDir(opts)
+		target := plantAsUser(t, dir, "junction")
+		if _, err := reserveWindowsAmpMachineDir(opts); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, windowsAmpMachineFolderOwnerFile)); err != nil {
+			t.Fatalf("writer ownership marker is missing: %v", err)
+		}
+		if err := RemoveWindowsAmpMachineFolderIfCreated(opts); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("writer-created Amp folder remained: %v", err)
+		}
+		if _, err := os.Lstat(filepath.Join(target, "user.json")); err != nil {
+			t.Fatalf("junction target changed: %v", err)
+		}
+	})
+	t.Run("folder with another product file", func(t *testing.T) {
+		opts := windowsTestOptions(t)
+		dir := windowsAmpMachineDir(opts)
+		if _, err := reserveWindowsAmpMachineDir(opts); err != nil {
+			t.Fatal(err)
+		}
+		foreign := filepath.Join(dir, "AGENTS.md")
+		if err := os.WriteFile(foreign, []byte("vendor content"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := RemoveWindowsAmpMachineFolderIfCreated(opts); err != nil {
+			t.Fatal(err)
+		}
+		if data, err := os.ReadFile(foreign); err != nil || string(data) != "vendor content" {
+			t.Fatalf("another product file changed: %q, %v", data, err)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, windowsAmpMachineFolderOwnerFile)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("Setup ownership marker remained: %v", err)
+		}
+		if err := os.Remove(foreign); err != nil {
+			t.Fatal(err)
+		}
+		if err := RemoveWindowsAmpMachineFolderIfCreated(opts); err != nil {
+			t.Fatal(err)
+		}
+		if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
+			t.Fatalf("a folder with another product's content was removed: %v", err)
+		}
+	})
 }
 
 // A standard user who created the Codex vendor folder first, with a
@@ -814,8 +929,8 @@ func TestWindowsCopilotRemovalTakesBackAUserCreatedPolicyDir(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "50-user.json"), []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := takeBackWindowsGoOwnedForRemoval(opts, copilotTarget{}); err != nil {
-		t.Fatalf("a user-created policy.d must not block the uninstall: %v", err)
+	if unprotected, err := takeBackWindowsGoOwnedForRemoval(opts, copilotTarget{}); err != nil || len(unprotected) != 0 {
+		t.Fatalf("a user-created policy.d must not block the uninstall: %v (unprotected %v)", err, unprotected)
 	}
 	for _, path := range []string{github, filepath.Dir(dir), dir} {
 		requireProtected(t, path)

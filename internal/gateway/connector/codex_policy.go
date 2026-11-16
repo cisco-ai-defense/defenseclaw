@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // validateCodexManagedAgentExecutable enforces the managed-executable trust
@@ -68,6 +69,9 @@ const (
 type codexEffectivePolicy struct {
 	AllowManagedHooksOnly *bool
 	Source                string
+	// SourceKind names the policy tier for reports (file, mdm-device,
+	// mdm-user, server) where it is known.
+	SourceKind string
 }
 
 // codexPolicyInspector is replaceable only by package tests. Production uses
@@ -82,6 +86,14 @@ var codexAppServerCommand = func(ctx context.Context, executable string) *exec.C
 	return newCodexAppServerCommand(ctx, executable)
 }
 
+// codexAppServerAfterStart runs once the app-server has started; tests use
+// it to let a fixture exit before the first request.
+var codexAppServerAfterStart = func() {}
+
+// codexAppServerExitWait bounds the wait, after a request could not be
+// written, for the app-server's output to close.
+const codexAppServerExitWait = 2 * time.Second
+
 // errCodexAppServerNoAnswer marks a Codex app-server that closed its output
 // before it answered: it exited at startup and said nothing about the policy.
 var errCodexAppServerNoAnswer = errors.New("the Codex app-server exited before answering")
@@ -92,10 +104,9 @@ var codexPolicyWarningOutput io.Writer = os.Stderr
 const codexPolicyNoAnswerHint = "if a Codex session is open (for example one that ran out of disk space), quit it, then run: defenseclaw-gateway restart"
 
 // enforceCodexUserHookPolicy prevents Setup from reporting success when Codex
-// will ignore the hook source DefenseClaw is about to write. Managed enterprise
-// Windows setup writes managed_config.toml, which is itself a Codex-managed
-// source and remains effective under allow_managed_hooks_only. Per-user installs
-// use config.toml and must reject that policy.
+// will ignore the hook source DefenseClaw is about to write. Connector Setup
+// uses config.toml and must reject a managed-only policy. Managed Windows
+// enrollment publishes machine requirements through the enterprise installer.
 func enforceCodexUserHookPolicy(ctx context.Context, opts SetupOpts) error {
 	policy, err := codexPolicyInspector(ctx, opts)
 	if err != nil {
@@ -108,14 +119,21 @@ func enforceCodexUserHookPolicy(ctx context.Context, opts SetupOpts) error {
 		if errors.Is(err, errCodexAppServerNoAnswer) && ctx.Err() == nil {
 			return codexPolicyAfterAppServerNoAnswer(opts, err)
 		}
+		// A Secure Client macOS machine-policy read that fails is logged and
+		// treated as absent; the user's hooks stay.
+		if opts.ManagedEnterprise && opts.SecureClientHookDelivery &&
+			agentPolicyReadTolerated("codex", "requirements", policy.Source, err) {
+			return nil
+		}
 		return fmt.Errorf("inspect effective Codex managed requirements: %w", err)
 	}
 	return refuseCodexManagedHooksOnly(opts, policy)
 }
 
 func refuseCodexManagedHooksOnly(opts SetupOpts, policy codexEffectivePolicy) error {
-	if policy.AllowManagedHooksOnly != nil && *policy.AllowManagedHooksOnly && !codexUsesManagedHookLayer(opts) {
-		return fmt.Errorf(
+	if policy.AllowManagedHooksOnly != nil && *policy.AllowManagedHooksOnly {
+		reportAgentPolicyBlocksUserHooks("codex", policy.SourceKind, "allow_managed_hooks_only", policy.Source)
+		return fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			"Codex user hooks are prohibited by allow_managed_hooks_only from %s; deploy the DefenseClaw hook through the administrator-managed Codex requirements source",
 			policy.Source,
 		)
@@ -157,6 +175,16 @@ func codexPolicyAfterAppServerNoAnswer(opts SetupOpts, cause error) error {
 
 func inspectCodexEffectivePolicy(ctx context.Context, opts SetupOpts) (codexEffectivePolicy, error) {
 	executable := strings.TrimSpace(opts.AgentExecutable)
+	if executable != "" && runtime.GOOS != "windows" {
+		// An answer the guardian obtained as the user before dropping its
+		// euid is used as is; no child is started inside that drop.
+		if policy, ok := codexPreinspectedPolicy(executable, codexHomeDir()); ok {
+			return codexAttributePolicy(policy), nil
+		}
+		if codexPolicySpawnUnsafe() {
+			executable = ""
+		}
+	}
 	if executable != "" {
 		if runtime.GOOS == "windows" {
 			validated, err := validateCodexPolicyExecutable(opts)
@@ -174,24 +202,24 @@ func inspectCodexEffectivePolicy(ctx context.Context, opts SetupOpts) (codexEffe
 			executable = filepath.Clean(executable)
 		}
 		if err := validateCodexManagedAgentExecutable(executable, opts.ManagedEnterprise); err != nil {
-			return codexEffectivePolicy{}, err
+			return codexEffectivePolicy{Source: executable}, err
 		}
 		policy, err := inspectCodexPolicyWithAppServer(ctx, executable, codexHomeDir())
 		if err != nil {
-			return codexEffectivePolicy{}, fmt.Errorf("%s configRequirements/read: %w", executable, err)
+			return codexEffectivePolicy{Source: executable}, fmt.Errorf("%s configRequirements/read: %w", executable, err)
 		}
-		return policy, nil
+		return codexAttributePolicy(policy), nil
 	}
 
 	if runtime.GOOS == "windows" && !opts.ManagedEnterprise {
 		if _, exists := loadProtectedCodexContractEntry(opts.DataDir); exists {
-			return codexEffectivePolicy{}, errors.New(
+			return codexEffectivePolicy{}, errors.New( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 				"Codex hook contract is missing valid setup-selected executable evidence; run connector repair",
 			)
 		}
 		if path := filepath.Join(opts.DataDir, agentSelectionFile); strings.TrimSpace(opts.DataDir) != "" {
 			if _, err := os.Lstat(path); err == nil || !os.IsNotExist(err) {
-				return codexEffectivePolicy{}, errors.New(
+				return codexEffectivePolicy{}, errors.New( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 					"Codex setup selection receipt is invalid or expired; rerun fresh trusted setup discovery",
 				)
 			}
@@ -202,7 +230,7 @@ func inspectCodexEffectivePolicy(ctx context.Context, opts SetupOpts) (codexEffe
 		// contract. Falling back to a generic system-requirements read here would
 		// let Setup publish a lock with no executable evidence, which the next
 		// reconcile must correctly reject. Refuse before any registration mutation.
-		return codexEffectivePolicy{}, errors.New(
+		return codexEffectivePolicy{}, errors.New( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			"Codex policy inspection requires a fresh setup-selected native executable; rerun trusted connector setup or repair",
 		)
 	}
@@ -210,7 +238,7 @@ func inspectCodexEffectivePolicy(ctx context.Context, opts SetupOpts) (codexEffe
 	// Tests, pre-provisioning, and older Codex installs may not have a runnable
 	// app-server path. In that case still honor the documented system source.
 	// This fallback deliberately does not claim to have inspected cloud policy.
-	return inspectCodexSystemRequirementsForMode(opts.ManagedEnterprise)
+	return codexPlatformManagedPolicy(inspectCodexSystemRequirementsForMode(opts.ManagedEnterprise))
 }
 
 func validateCodexPolicyExecutable(opts SetupOpts) (string, error) {
@@ -239,7 +267,7 @@ func validateCodexPolicyExecutable(opts SetupOpts) (string, error) {
 	expectedDigest := ""
 	if entry, exists := loadProtectedCodexContractEntry(opts.DataDir); exists {
 		if !validCodexAgentExecutableEvidence(entry) {
-			return "", errors.New("Codex hook contract has invalid setup-selected executable evidence")
+			return "", errors.New("Codex hook contract has invalid setup-selected executable evidence") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		expectedPath = entry.AgentExecutable
 		expectedVersion = entry.RawAgentVersion
@@ -249,13 +277,13 @@ func validateCodexPolicyExecutable(opts SetupOpts) (string, error) {
 		expectedVersion = selection.RawVersion
 		expectedDigest = selection.SHA256
 	} else {
-		return "", errors.New("Codex policy inspection requires protected setup-selected executable evidence")
+		return "", errors.New("Codex policy inspection requires protected setup-selected executable evidence") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if !sameCodexExecutablePath(executable, expectedPath) {
 		return "", fmt.Errorf("selected Codex executable does not match protected evidence: %s", executable)
 	}
 	if strings.TrimSpace(opts.AgentVersion) != strings.TrimSpace(expectedVersion) {
-		return "", errors.New("selected Codex executable evidence is bound to a different agent version")
+		return "", fmt.Errorf("selected Codex executable evidence is bound to a different agent version (%w)", ErrCodexExecutableChanged)
 	}
 
 	info, err := os.Lstat(executable)
@@ -265,21 +293,28 @@ func validateCodexPolicyExecutable(opts SetupOpts) (string, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return "", fmt.Errorf("selected Codex executable is not a regular non-link file: %s", executable)
 	}
-	if err := hookAPIValidateDirectory(filepath.Dir(executable)); err != nil {
-		return "", fmt.Errorf("validate selected Codex executable ancestry: %w", err)
+	if err := hookAPIValidateAgentDirectory(filepath.Dir(executable)); err != nil {
+		return "", agentInstallNotTrusted(fmt.Errorf("validate selected Codex executable ancestry: %w", err))
 	}
 	if err := hookAPIValidateOwner(executable, info); err != nil {
-		return "", fmt.Errorf("validate selected Codex executable ACL: %w", err)
+		return "", agentInstallNotTrusted(fmt.Errorf("validate selected Codex executable ACL: %w", err))
 	}
 	stablePath, digest, ok := setupSelectedAgentExecutableEvidence(executable)
 	if !ok || !sameCodexExecutablePath(stablePath, executable) {
 		return "", fmt.Errorf("selected Codex executable changed during validation: %s", executable)
 	}
 	if digest != expectedDigest {
-		return "", fmt.Errorf("selected Codex executable digest does not match protected evidence: %s", executable)
+		return "", fmt.Errorf("selected Codex executable digest does not match protected evidence: %s (%w)", executable, ErrCodexExecutableChanged)
 	}
 	return executable, nil
 }
+
+// ErrCodexExecutableChanged marks Codex executable evidence that no longer
+// matches the executable setup sealed: Codex updated itself (or was
+// replaced) since setup. The gateway does not run an executable it did not
+// admit, so the next step is setup again, which admits the new version; the
+// error says so instead of only "run doctor" (GAP-1884).
+var ErrCodexExecutableChanged = errors.New("the Codex executable changed since setup (a Codex update does this); run: defenseclaw setup codex --yes")
 
 func sameCodexExecutablePath(left, right string) bool {
 	left = filepath.Clean(strings.TrimSpace(left))
@@ -301,19 +336,19 @@ func inspectCodexSystemRequirementsForMode(managedEnterprise bool) (codexEffecti
 	}
 	raw, exists, err := readCodexSystemRequirements(path, managedEnterprise)
 	if err != nil {
-		return codexEffectivePolicy{}, fmt.Errorf("read %s: %w", path, err)
+		return codexEffectivePolicy{Source: path}, fmt.Errorf("read %s: %w", path, err)
 	}
 	if !exists {
 		return codexEffectivePolicy{Source: path}, nil
 	}
 	if len(raw) > codexPolicyMessageLimit {
-		return codexEffectivePolicy{}, fmt.Errorf("%s exceeds %d bytes", path, codexPolicyMessageLimit)
+		return codexEffectivePolicy{Source: path}, fmt.Errorf("%s exceeds %d bytes", path, codexPolicyMessageLimit)
 	}
 	var requirements struct {
 		AllowManagedHooksOnly *bool `toml:"allow_managed_hooks_only"`
 	}
 	if err := parseCodexTOML(raw, &requirements); err != nil {
-		return codexEffectivePolicy{}, fmt.Errorf("parse %s: %w", path, err)
+		return codexEffectivePolicy{Source: path}, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return codexEffectivePolicy{
 		AllowManagedHooksOnly: requirements.AllowManagedHooksOnly,
@@ -336,7 +371,7 @@ func readLegacyCodexSystemRequirements(path string) ([]byte, bool, error) {
 }
 
 func readBoundedCodexSystemRequirements(path string) ([]byte, bool, error) {
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, false, nil
 	}
@@ -392,10 +427,23 @@ type codexRPCEvent struct {
 }
 
 func inspectCodexPolicyWithAppServer(parent context.Context, executable, codexHome string) (policy codexEffectivePolicy, retErr error) {
+	return inspectCodexPolicyWithAppServerPrepared(parent, executable, codexHome, nil)
+}
+
+// inspectCodexPolicyWithAppServerPrepared lets the caller adjust the child
+// (its credentials and environment) before it starts.
+func inspectCodexPolicyWithAppServerPrepared(
+	parent context.Context,
+	executable, codexHome string,
+	prepare func(*exec.Cmd),
+) (policy codexEffectivePolicy, retErr error) {
 	ctx, cancel := context.WithTimeout(parent, codexPolicyInspectionTimeout)
 	defer cancel()
 
 	cmd := codexAppServerCommand(ctx, executable)
+	if prepare != nil {
+		prepare(cmd)
+	}
 	baseEnv := cmd.Env
 	if baseEnv == nil {
 		baseEnv = os.Environ()
@@ -419,9 +467,24 @@ func inspectCodexPolicyWithAppServer(parent context.Context, executable, codexHo
 		_ = stdin.Close()
 		cleanup()
 	}()
+	codexAppServerAfterStart()
 
 	events := make(chan codexRPCEvent, 3)
 	go decodeCodexRPC(stdout, events)
+
+	// A request the app-server never read (a broken pipe: it exited at
+	// startup, for example because its runtime is not on PATH) is the same
+	// as a closed response stream. It names the program and what it said,
+	// not a write error with the wrong next step (GAP-0620).
+	sendFailed := func(request string, err error) error {
+		closed, stop := context.WithTimeout(ctx, codexAppServerExitWait)
+		defer stop()
+		if _, waitErr := waitCodexRPC(closed, events, 1); errors.Is(waitErr, errCodexAppServerNoAnswer) {
+			return withCodexStderr(fmt.Errorf("%s app-server exited before it read %s: %w (%w)",
+				executable, request, err, errCodexAppServerNoAnswer), stderr.String())
+		}
+		return fmt.Errorf("send %s: %w", request, err)
+	}
 
 	encoder := json.NewEncoder(stdin)
 	if err := encoder.Encode(map[string]any{
@@ -435,20 +498,20 @@ func inspectCodexPolicyWithAppServer(parent context.Context, executable, codexHo
 			},
 		},
 	}); err != nil {
-		return policy, fmt.Errorf("send initialize: %w", err)
+		return policy, sendFailed("initialize", err)
 	}
 	if _, err := waitCodexRPC(ctx, events, 1); err != nil {
 		return policy, withCodexStderr(err, stderr.String())
 	}
 	if err := encoder.Encode(map[string]any{"method": "initialized"}); err != nil {
-		return policy, fmt.Errorf("send initialized: %w", err)
+		return policy, sendFailed("initialized", err)
 	}
 	if err := encoder.Encode(map[string]any{
 		"method": "configRequirements/read",
 		"id":     2,
 		"params": map[string]any{},
 	}); err != nil {
-		return policy, fmt.Errorf("send configRequirements/read: %w", err)
+		return policy, sendFailed("configRequirements/read", err)
 	}
 	envelope, err := waitCodexRPC(ctx, events, 2)
 	if err != nil {

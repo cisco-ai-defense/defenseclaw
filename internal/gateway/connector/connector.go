@@ -70,11 +70,14 @@ type ConnectorSignals struct {
 
 // SetupOpts is passed to Setup/Teardown during `defenseclaw setup`.
 type SetupOpts struct {
-	DataDir              string // ~/.defenseclaw/
-	CodexOtelEnvironment string // connector-local tag shared with the live sidecar
-	ProxyAddr            string // 127.0.0.1:4000 (guardrail proxy — LLM traffic)
-	APIAddr              string // 127.0.0.1:18970 (API server — inspection endpoints)
-	APIToken             string // gateway bearer token; written to the hook token file, never into a script
+	DataDir string // ~/.defenseclaw/
+	// pendingHookScriptDigests is scoped to one install read-back. It is never
+	// persisted or accepted by ordinary verification and gateway readers.
+	pendingHookScriptDigests map[string]string
+	CodexOtelEnvironment     string // connector-local tag shared with the live sidecar
+	ProxyAddr                string // 127.0.0.1:4000 (guardrail proxy — LLM traffic)
+	APIAddr                  string // 127.0.0.1:18970 (API server — inspection endpoints)
+	APIToken                 string // gateway bearer token; written to the hook token file, never into a script
 	// ConfigHome is the exact installer-validated user configuration root used
 	// by hidden native-maintenance commands. Ordinary setup leaves it empty and
 	// uses each vendor's documented discovery rules.
@@ -89,12 +92,34 @@ type SetupOpts struct {
 	// loopback /otlp/<connector>/<token>/v1/<signal> namespace. It must never
 	// be reused as a general API or hook bearer.
 	OTLPPathToken string
-	Interactive   bool
+	// GatewayToken is the install's gateway master credential. Setup never
+	// writes it into an agent config; it is known here only so that an OTLP
+	// route that carries it counts as DefenseClaw's and is removed, never kept
+	// as an operator collector (GAP-0035).
+	GatewayToken string
+	Interactive  bool
 	// ManagedEnterprise marks hook scripts installed by the privileged
 	// enterprise guardian. Managed scripts ignore user-controlled home and
 	// disable-sentinel overrides and derive their data directory from the
 	// verified script location instead.
 	ManagedEnterprise bool
+	// sandboxNativeOTLP selects the isolated OpenShell artifact renderer. It
+	// cannot be set by a host setup caller or a configuration file.
+	sandboxNativeOTLP bool
+	// knownCredentials are further product credentials the native OTLP
+	// residue check knows (UserNativeOTLPWithout recovers them from the
+	// configuration it judges by their digests). Never set by a caller.
+	knownCredentials []string
+	// ManagedMarkedOrphanExporters is set by the managed Windows native OTLP
+	// take-back and Verify only (never host setup): an exporter in the
+	// account's own agent config with the exact shape a pre-1.0.4 per-user
+	// render wrote (both x-defenseclaw markers, a loopback port
+	// ManagedServedAddrs does not name) is the product's (GAP-0836,
+	// native_otlp_marked_orphan.go).
+	ManagedMarkedOrphanExporters bool
+	// ManagedServedAddrs are the host:port addresses the managed gateway
+	// serves (API, guardrail proxy).
+	ManagedServedAddrs []string
 	// ManagedHookSocket is the standalone gateway's peer-authorized unix
 	// hook socket (from the root-owned runtime descriptor). When set on a
 	// unix host, in-agent plugins (OpenCode, Amp) and connector shell hooks
@@ -162,22 +187,34 @@ type SetupOpts struct {
 	// connectors fall back to the process working directory.
 	WorkspaceDir string
 
-	// HookFailMode is the operator-chosen hook failure mode supplied to setup
-	// and hook-writing paths. Values: "open" (allow on response or
-	// transport failures) or "closed" (block on either failure class). Runtime
-	// setup populates it from cfg.EffectiveHookFailModeForConnector(conn.Name()).
-	// Hook-writing helpers normalize an empty or invalid value to the secure
-	// "closed" fallback. Cursor pins this per mode: closed for action and open
-	// for observe.
-	// Profile-only callers may omit it; provider-specific profile defaults are
-	// separate from the hook-writing boundary.
-	// DEFENSECLAW_STRICT_AVAILABILITY remains
-	// an unconditional force-closed override in generated hooks.
+	// HookFailMode is the hook outage mode supplied to setup
+	// (cfg.EffectiveHookOutageFailModeForConnector, config.HookOutageFailMode).
+	// A managed administrator may select open for an outage, and Secure
+	// Client may default open. A per-user render records it as the mode its
+	// hooks follow while the gateway is down (open in the default and
+	// permissive tiers, closed in strict) and bakes closed for every other
+	// failure. Profile-only callers may omit it; an empty or invalid value is
+	// closed. DEFENSECLAW_STRICT_AVAILABILITY remains an unconditional
+	// force-closed override in generated hooks.
 	HookFailMode string
 
+	// PolicyTier is the connector's policy tier
+	// (cfg.HookPolicyTierForConnector: strict, default or permissive). The
+	// strict tier refuses agent settings that stop shell-form hooks from
+	// running (hook_shell_env.go); the other tiers warn. Empty is default.
+	PolicyTier string
+
+	// SecureClientHookDelivery selects the Secure Client delivery contract
+	// (#1163): an unset HookFailMode renders open and an explicit value wins
+	// for every connector, Cursor included. Callers set it from
+	// cfg.SecureClientIntegration() (the enterprise guardian from its
+	// profile). Every other install leaves it false and keeps fail-closed hooks.
+	SecureClientHookDelivery bool
+
 	// GuardrailMode is the effective connector policy mode. Cursor uses it to
-	// render a blocking, fail-closed user hook for action and a nonblocking,
-	// fail-open user hook for observe. An empty value is treated as observe.
+	// render blocking decisions in action and would-block decisions in observe.
+	// Its standalone registration closes hook-process failure in both modes;
+	// per-user hook failures stay closed.
 	GuardrailMode string
 
 	// HILTEnabled tells connectors with native approval surfaces to wire
@@ -220,6 +257,8 @@ type SetupOpts struct {
 	// empty value means no command-line settings source is part of that
 	// invocation. The passive guardian cannot infer flags for future processes;
 	// callers validating a concrete launch must pass the value explicitly.
+	// Test seam: no production caller sets it, so no product check covers
+	// a --settings source.
 	ClaudeSettingsOverride string
 
 	// HookContractID optionally pins setup/profile resolution to a specific
@@ -245,6 +284,14 @@ type SetupOpts struct {
 	// ClaudeCodeEnforcement is the parallel flag for claudecode.
 	ClaudeCodeEnforcement bool
 
+	// AcceptPriorReleaseRender makes a read-only verification accept the render
+	// an earlier release wrote of a Windows awaited hook bridge (the
+	// Constrained Language fallback end of legacyWindowsAwaitedHookCommand) as
+	// the current one, where a connector's registration is compared with its
+	// render. Only the Windows enterprise guardian sets it, to prove that a
+	// signed-out account's only difference from this release is the render of
+	// an earlier one (GAP-0980). It never reaches a write.
+	AcceptPriorReleaseRender bool
 	// ManagedTargetSID is set only by the Windows enterprise guardian when it
 	// sets up or verifies one per-user target: the target account's SID.
 	// Custody checks then trust that account the way they trust the current
@@ -380,7 +427,7 @@ type SurfaceCapability struct {
 
 // SurfaceLocations is the resolved, on-this-machine path manifest for a
 // connector surface. It is derived from SurfaceCapability and SetupOpts so
-// diagnostics can distinguish static capability ("OpenHands supports skills")
+// diagnostics can distinguish static capability ("Cursor supports skills")
 // from the concrete path being watched in this workspace.
 type SurfaceLocations struct {
 	Supported      bool     `json:"supported"`
@@ -566,9 +613,9 @@ func (e ContentEnvelope) clone() ContentEnvelope {
 //     gateway uses this to decide whether to expect a propagated trace
 //     context vs. mint a fresh root span. v6-managed hooks set this true.
 //   - NativeOTLP: optional descriptor for the connector's native OTLP
-//     emission. nil when the connector does not emit native OTLP (cursor,
-//     hermes, copilot today). Non-nil for codex (TOML),
-//     claudecode (env).
+//     emission. nil on host Codex and Claude Code installs because their
+//     native exporters cannot verify the loopback listener's owner. Their
+//     isolated sandbox renderers keep a private native receiver.
 //   - Decode: optional decoder for connector-specific event/content/tool
 //     wire shape. Identity fields returned by Decode are advisory only and
 //     MUST NOT override Correlation bindings; the gateway accepts correlation
@@ -600,10 +647,13 @@ type HookProfile struct {
 	ResponseFieldName       string
 	SupportedEvents         []string
 	AIDSurfaces             []string
-	AgentVersion            string
-	NormalizedAgentVersion  string
-	CompatibilityStatus     string
-	CompatibilityReason     string
+	// AIDWireVersion is the resolved contract's AID encoding; empty when no
+	// contract resolved or the contract sends nothing to AID.
+	AIDWireVersion         string
+	AgentVersion           string
+	NormalizedAgentVersion string
+	CompatibilityStatus    string
+	CompatibilityReason    string
 	// ToolCallLifecycle is the resolved, versioned routing and trust contract
 	// for structured tool proposals, result content, and lifecycle audit
 	// events. A zero value means the experimental stateful path is disabled.
@@ -702,14 +752,30 @@ type HookProfileRequest struct {
 	SuppressCorrelationEmit   bool
 	CWD                       string
 	ToolName                  string
-	ToolArgs                  json.RawMessage
+	// ToolNameIsLabel marks ToolName as a placeholder the decoder filled in
+	// for logs and spans because the payload named no tool.
+	ToolNameIsLabel bool
+	ToolArgs        json.RawMessage
 	// ToolArgsAuthoritative distinguishes a deliberately empty/fail-closed
 	// connector projection from a decoder that does not own tool arguments.
 	ToolArgsAuthoritative bool
-	Content               string
-	Direction             string
-	Model                 string
-	Payload               map[string]interface{}
+	// ToolCallUnparsed is set by a decoder that owns the tool call when the
+	// payload holds no tool call it can read (no name or no argument
+	// object). A tool-call event with it set is refused: an unread call
+	// cannot be shown safe (fail closed, GAP-0337).
+	ToolCallUnparsed bool
+	Content          string
+	Direction        string
+	Model            string
+	Payload          map[string]interface{}
+	// ManagedWatch is set on a managed (service-account) gateway: the watch
+	// paths of a Claude Code answer belong to the verified caller, never to
+	// the gateway service account (GAP-0066). WatchHome is that caller's
+	// home, empty when it could not be resolved (no home paths then), and
+	// WatchCWD the caller project the watch paths name.
+	ManagedWatch bool
+	WatchHome    string
+	WatchCWD     string
 }
 
 // HookVerdictInput is the mode-mapping context fed to a profile's
@@ -964,6 +1030,13 @@ type HookConfigReferenceOwner interface {
 // compatibility rule next to the Claude Code launcher guard (GAP-1284).
 type HookRollbackConverter interface {
 	ConvertHooksForRollback(opts SetupOpts) (int, error)
+}
+
+// HookRollbackRestorer reverses only an authenticated conversion when a
+// rollback aborts while this release still owns the installation. It must not
+// run Setup or change connector selection or credentials.
+type HookRollbackRestorer interface {
+	RestoreHooksAfterRollback(opts SetupOpts) (int, error)
 }
 
 // ScopedHookTokenRequirement is implemented by connector runtimes that depend

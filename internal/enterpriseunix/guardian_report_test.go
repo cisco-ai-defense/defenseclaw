@@ -129,8 +129,14 @@ func TestInstallWaitsForTheGuardianWithoutTargets(t *testing.T) {
 	})
 	r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")})
 	requireOK(t, r)
-	if !r.Readiness.Guardian || !r.CoverageComplete {
+	if !r.Readiness.Guardian {
 		t.Fatalf("install result reads the starting guardian as not ready: %+v", r.Readiness)
+	}
+	if r.CoverageComplete || !hasWarning(r, enterprisehooks.UnprotectedCodeInstallScanIncomplete) {
+		t.Fatalf("install claimed complete coverage before the first agent scan: %+v", r)
+	}
+	if status := h.run(Options{Action: ActionStatus}); !status.CoverageComplete {
+		t.Fatalf("the fake enumerator's first scan did not restore coverage: %+v", status)
 	}
 }
 
@@ -178,8 +184,14 @@ func TestInstallWaitsForTheFirstGuardianAttestation(t *testing.T) {
 	})
 	r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")})
 	requireOK(t, r)
-	if !r.Readiness.Guardian || !r.CoverageComplete {
+	if !r.Readiness.Guardian {
 		t.Fatalf("install result read the guardian before its first attestation: %+v", r.Readiness)
+	}
+	if r.CoverageComplete || !hasWarning(r, enterprisehooks.UnprotectedCodeInstallScanIncomplete) {
+		t.Fatalf("install claimed complete coverage before the first agent scan: %+v", r)
+	}
+	if status := h.run(Options{Action: ActionStatus}); !status.CoverageComplete {
+		t.Fatalf("the fake enumerator's first scan did not restore coverage: %+v", status)
 	}
 }
 

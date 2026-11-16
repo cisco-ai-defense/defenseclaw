@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import http.client
 import json
 import os
 import platform
@@ -58,12 +59,15 @@ GRAFANA_PASSWORD_ENV_NAME = "GRAFANA_ADMIN_PASSWORD"
 GRAFANA_ACCESS_MODE_FILE_NAME = ".grafana-access-mode"
 GRAFANA_ACCESS_PASSWORD = "password"
 GRAFANA_ACCESS_NO_PASSWORD = "no-password"
+# The only Grafana role an anonymous visitor ever gets: read-only.
+GRAFANA_ANONYMOUS_ROLE = "Viewer"
 GRAFANA_ACCESS_MODES = frozenset({GRAFANA_ACCESS_PASSWORD, GRAFANA_ACCESS_NO_PASSWORD})
 MAX_GRAFANA_ACCESS_MODE_BYTES = 64
 MAX_GRAFANA_PASSWORD_BYTES = 512
 GRAFANA_PASSWORD_RESET_MARKER = "Admin password changed successfully"
 GRAFANA_PASSWORD_CONTAINER_PATH = "/run/secrets/grafana_admin_password"
 GRAFANA_SECRET_NAME = "grafana_admin_password"
+GRAFANA_SEARCH_PATH = "/api/search?type=dash-db"
 
 CONTRACT: dict[str, str] = {
     "otlp_endpoint": "127.0.0.1:4317",
@@ -84,6 +88,7 @@ SERVICE_CONTAINERS: dict[str, str] = {
     "defenseclaw-grafana": "grafana",
 }
 SERVICES = frozenset(SERVICE_CONTAINERS.values())
+GRAFANA_CONTAINER = "defenseclaw-grafana"
 PROJECT_VOLUMES = frozenset({"prometheus-data", "loki-data", "tempo-data", "grafana-data"})
 
 HTTP_PROBES: tuple[tuple[str, str], ...] = (
@@ -96,6 +101,29 @@ TCP_PROBES: tuple[tuple[str, str, int], ...] = (
     ("otlp-grpc", "127.0.0.1", 4317),
     ("otlp-http", "127.0.0.1", 4318),
 )
+# The Compose service that answers each readiness probe. A listener counts as
+# ready only while this stack's own container for it runs (GAP-2073).
+PROBE_SERVICES: dict[str, str] = {
+    "otlp-grpc": "otel-collector",
+    "otlp-http": "otel-collector",
+    "grafana": "grafana",
+    "prometheus": "prometheus",
+    "tempo": "tempo",
+    "loki": "loki",
+}
+# Every loopback port docker-compose.yml publishes, with its service.
+PUBLISHED_PORTS: tuple[tuple[str, int], ...] = (
+    ("otel-collector", 4317),
+    ("otel-collector", 4318),
+    ("otel-collector", 8888),
+    ("otel-collector", 13133),
+    ("prometheus", 9090),
+    ("loki", 3100),
+    ("tempo", 3200),
+    ("tempo", 9095),
+    ("grafana", 3000),
+)
+PORT_HELD_NOTE = "not running (port held by another process)"
 
 
 class LocalStackError(RuntimeError):
@@ -104,6 +132,84 @@ class LocalStackError(RuntimeError):
 
 class GrafanaAccessPolicyError(LocalStackError):
     """Grafana is reachable in the opposite access mode."""
+
+
+def _grafana_verified_get(
+    path: str,
+    authorization: str,
+    *,
+    timeout: float = 3,
+    max_response_bytes: int | None = None,
+) -> tuple[int, bytes]:
+    """Send Grafana auth only over the accepted socket of this account or the OS.
+
+    A container-status or listener check before dialing cannot prove the
+    socket that receives the password: the port can change hands between
+    those steps. The installed gateway's local-peer verifier checks the
+    connected tuple before http.client writes the first request byte.
+    """
+
+    if not path.startswith("/") or path.startswith("//") or "\r" in path or "\n" in path:
+        raise ValueError("Grafana request path is invalid")
+
+    from defenseclaw.gateway import (
+        _connected_verifier_timeout,
+        _managed_connected_verifier_spec,
+        _per_user_connected_verifier,
+        _trusted_connected_verifier_binary,
+    )
+
+    connection = http.client.HTTPConnection("127.0.0.1", 3000, timeout=timeout)
+    sock: socket.socket | None = None
+    try:
+        sock = socket.create_connection(("127.0.0.1", 3000), timeout=timeout)
+        local, remote = sock.getsockname(), sock.getpeername()
+        if remote[:2] != ("127.0.0.1", 3000):
+            raise OSError("the connected Grafana endpoint changed; the admin credential was not sent")
+        managed = _managed_connected_verifier_spec()
+        binary = (
+            _trusted_connected_verifier_binary(managed[0], managed=True)
+            if managed
+            else _per_user_connected_verifier()
+        )
+        check = CommandRunner(output_limit=0).run(
+            [
+                binary,
+                "local-peer-verify-connected",
+                "--local",
+                f"{local[0]}:{local[1]}",
+                "--remote",
+                f"{remote[0]}:{remote[1]}",
+            ],
+            timeout=_connected_verifier_timeout(timeout),
+            env=native_command_environment(),
+        )
+        if check.returncode != 0:
+            raise OSError("the connected Grafana peer could not be verified; the admin credential was not sent")
+        connection.sock, sock = sock, None
+        connection.request(
+            "GET",
+            path,
+            headers={"Authorization": authorization},
+        )
+        response = connection.getresponse()
+        body = response.read(max_response_bytes + 1 if max_response_bytes is not None else None)
+        if max_response_bytes is not None and len(body) > max_response_bytes:
+            raise ValueError("Grafana response is too large")
+        return response.status, body
+    except LocalStackError as exc:
+        raise OSError("the connected Grafana peer could not be verified; the admin credential was not sent") from exc
+    finally:
+        connection.close()
+        if sock is not None:
+            sock.close()
+
+
+def _grafana_basic_get(password: str, *, timeout: float = 3) -> tuple[int, bytes]:
+    token = base64.b64encode(f"{GRAFANA_ADMIN_USER}:{password}".encode("ascii")).decode("ascii")
+    return _grafana_verified_get(
+        GRAFANA_SEARCH_PATH, f"Basic {token}", timeout=timeout, max_response_bytes=2 * 1024 * 1024,
+    )
 
 
 @dataclass(frozen=True)
@@ -161,6 +267,7 @@ class ProbeResult:
     label: str
     target: str
     ready: bool
+    note: str = ""
 
 
 class _BoundedCapture:
@@ -401,7 +508,6 @@ def ensure_grafana_admin_password(stack_dir: str | os.PathLike[str]) -> tuple[Pa
                 path,
                 (password + "\n").encode("ascii"),
                 protect_parent=False,
-                allow_windows_system_controllers_in_parent=True,
             )
         except OSError as exc:
             raise LocalStackError(
@@ -469,7 +575,6 @@ def persist_grafana_access_mode(
             path,
             (mode + "\n").encode("ascii"),
             protect_parent=False,
-            allow_windows_system_controllers_in_parent=True,
         )
     except OSError as exc:
         raise LocalStackError(f"could not persist the Grafana access mode at {path}: {exc}") from exc
@@ -636,7 +741,7 @@ def _validate_windows_docker_certification(
         )
 
 
-def _docker_daemon_unreachable_message(detail: str, os_name: str) -> str:
+def docker_daemon_unreachable_message(detail: str, os_name: str) -> str:
     """Say why ``docker info`` failed and what to do on this OS (GAP-1335)."""
 
     if os_name.startswith("win") or os_name == "darwin":
@@ -673,7 +778,7 @@ def validate_native_docker_preflight(
     if info_result.returncode != 0:
         detail = (info_result.stderr or info_result.stdout).strip()
         suffix = f" ({detail.splitlines()[0]})" if detail else ""
-        raise LocalStackError(_docker_daemon_unreachable_message(detail, os_name) + suffix)
+        raise LocalStackError(docker_daemon_unreachable_message(detail, os_name) + suffix)
     info = _parse_json_object(info_result.stdout.strip(), description="info")
     if str(info.get("OSType", "")).lower() != "linux":
         raise LocalStackError("Docker is using Windows containers. Switch Docker Desktop to Linux containers.")
@@ -789,10 +894,74 @@ class LocalStackController:
     def _checked(result: CommandResult, description: str) -> CommandResult:
         if result.returncode == 0:
             return result
-        detail = (result.stderr or result.stdout).strip()
-        if detail:
-            detail = ": " + detail.splitlines()[0]
+        lines = [line.strip() for line in (result.stderr or result.stdout).splitlines() if line.strip()]
+        # Compose prints progress ("Container ... Creating") before the
+        # failure itself; name the error line, not the first progress line
+        # (GAP-2074).
+        errors = [line for line in lines if "error" in line.lower()]
+        detail = ": " + (errors[-1] if errors else lines[0]) if lines else ""
         raise LocalStackError(f"{description} failed with exit code {result.returncode}{detail}")
+
+    def running_services(self) -> set[str] | None:
+        """This stack copy's Compose services with a running container, or None if unknown.
+
+        A container of another copy of the stack (same project, started from
+        another directory) is another process for this account.
+        """
+        result = self.runner.run(
+            [
+                self.docker_path,
+                "ps",
+                "--filter",
+                f"label=com.docker.compose.project={COMPOSE_PROJECT}",
+                "--filter",
+                "status=running",
+                "--filter",
+                "status=restarting",
+                "--format",
+                '{{.Names}}\t{{.Label "com.docker.compose.project.working_dir"}}',
+            ],
+            timeout=8,
+            env=self.environment,
+        )
+        if result.returncode != 0:
+            return None
+        running: set[str] = set()
+        for line in result.stdout.splitlines():
+            name, _, working_dir = line.strip().partition("\t")
+            if name in SERVICE_CONTAINERS and self._paths_equal(working_dir.strip(), self.stack_dir):
+                running.add(SERVICE_CONTAINERS[name])
+        return running
+
+    @staticmethod
+    def _port_in_use(port: int) -> bool:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as stream:
+            stream.settimeout(0.5)
+            return stream.connect_ex(("127.0.0.1", port)) == 0
+
+    def verify_ports_free(self) -> None:
+        """Refuse to start when another process holds a port of a stopped service.
+
+        Compose would create the containers and then fail with a progress line
+        only; nothing is started and no Grafana credential is sent (GAP-2074).
+        """
+        running = self.running_services()
+        if running is None:
+            return
+        held = [
+            (service, port) for service, port in PUBLISHED_PORTS if service not in running and self._port_in_use(port)
+        ]
+        if not held:
+            return
+        names = ", ".join(f"{port} ({service})" for service, port in held)
+        credential = (
+            " The Grafana admin credential was not sent." if any(service == "grafana" for service, _ in held) else ""
+        )
+        raise LocalStackError(
+            f"{'ports' if len(held) > 1 else 'port'} {names} {'are' if len(held) > 1 else 'is'} in use by another "
+            "process, so this stack cannot start; nothing was started."
+            f"{credential} Free the port, then run `defenseclaw setup local-observability up` again."
+        )
 
     def verify_container_ownership(self) -> set[str]:
         """Fail on same-name containers whose exact Compose identity is unproven."""
@@ -958,9 +1127,10 @@ class LocalStackController:
         if persisted is not None:
             return persisted
 
-        # Releases before the access-mode marker always ran Grafana as an
-        # anonymous Admin. Preserve that behavior when an owned container or
-        # named data volume proves the stack has run before. A genuinely new
+        # Releases before the access-mode marker always ran Grafana with
+        # anonymous access. Keep anonymous access (now read-only Viewer, never
+        # Admin) when an owned container or named data volume proves the
+        # stack has run before. A genuinely new
         # managed stack has neither and receives the secure password default.
         if "defenseclaw-grafana" in owned_containers or f"{COMPOSE_PROJECT}_grafana-data" in existing_volumes:
             return GRAFANA_ACCESS_NO_PASSWORD
@@ -1051,7 +1221,9 @@ class LocalStackController:
         else:
             required_environment = {
                 "GF_AUTH_ANONYMOUS_ENABLED": "true",
-                "GF_AUTH_ANONYMOUS_ORG_ROLE": "Admin",
+                # Read-only: an effective anonymous Admin or Editor (a stack
+                # file from an earlier release, a local override) is refused.
+                "GF_AUTH_ANONYMOUS_ORG_ROLE": GRAFANA_ANONYMOUS_ROLE,
                 "GF_AUTH_DISABLE_LOGIN_FORM": "true",
             }
         for key, expected in required_environment.items():
@@ -1111,9 +1283,30 @@ class LocalStackController:
         if not secure_publish:
             raise LocalStackError("effective Grafana Compose config is unsafe: loopback port 3000 publish is missing")
 
+    def _require_owned_grafana_listener(self) -> None:
+        """Refuse to send the admin credential unless this stack's Grafana runs.
+
+        GAP-0981: while this Compose project's own Grafana container runs,
+        Docker holds 127.0.0.1:3000 for it. Before that (a stopped stack, or a
+        container that is restarting) another account can listen on the port
+        and would receive the Basic credential. The check refuses to send; it
+        is a retryable LocalStackError, never a block of anything else.
+        """
+
+        if GRAFANA_CONTAINER not in self.verify_container_ownership():
+            raise LocalStackError("this stack's Grafana container does not exist; the admin credential was not sent")
+        result = self.runner.run(
+            [self.docker_path, "inspect", "--format", "{{.State.Status}}", GRAFANA_CONTAINER],
+            timeout=8,
+            env=self.environment,
+        )
+        if result.returncode != 0 or result.stdout.strip() != "running":
+            raise LocalStackError("this stack's Grafana container is not running; the admin credential was not sent")
+
     def _verify_grafana_authentication(self, password: str) -> None:
         """Prove anonymous access is denied and the managed login works."""
 
+        self._require_owned_grafana_listener()
         url = "http://127.0.0.1:3000/api/search?type=dash-db"
         anonymous = urllib.request.Request(url, method="GET")
         try:
@@ -1126,23 +1319,15 @@ class LocalStackController:
         except (OSError, urllib.error.URLError) as exc:
             raise LocalStackError("Grafana anonymous access check failed") from exc
 
-        token = base64.b64encode(f"{GRAFANA_ADMIN_USER}:{password}".encode("ascii")).decode("ascii")
-        authenticated = urllib.request.Request(
-            url,
-            headers={"Authorization": f"Basic {token}"},
-            method="GET",
-        )
         try:
-            with urllib.request.urlopen(authenticated, timeout=3) as response:
-                if not 200 <= response.status < 300:
-                    raise GrafanaAccessPolicyError("Grafana rejected the managed admin credential")
-        except urllib.error.HTTPError as exc:
-            raise GrafanaAccessPolicyError(f"Grafana rejected the managed admin credential (HTTP {exc.code})") from exc
-        except (OSError, urllib.error.URLError) as exc:
+            status, _ = _grafana_basic_get(password)
+            if not 200 <= status < 300:
+                raise GrafanaAccessPolicyError(f"Grafana rejected the managed admin credential (HTTP {status})")
+        except (OSError, ValueError, urllib.error.URLError) as exc:
             raise LocalStackError("Grafana authenticated access check failed") from exc
 
     def _verify_grafana_no_password(self) -> None:
-        """Prove the explicitly selected anonymous Admin path is reachable."""
+        """Prove the explicitly selected anonymous read-only path is reachable."""
 
         url = "http://127.0.0.1:3000/api/search?type=dash-db"
         request = urllib.request.Request(url, method="GET")
@@ -1211,6 +1396,7 @@ class LocalStackController:
         self.preflight()
         owned_containers = self.verify_container_ownership()
         existing_volumes = self._verify_volume_ownership(refusal="Grafana startup refused")
+        self.verify_ports_free()
         mode = self._resolve_grafana_access_mode(
             grafana_access_mode,
             owned_containers=owned_containers,
@@ -1322,7 +1508,8 @@ class LocalStackController:
         probes = self.probe_all()
         for probe in probes:
             state = "ready" if probe.ready else "fail"
-            lines.append(f"  {probe.label:<10} {state:<7} {probe.target}")
+            note = f"  {probe.note}" if probe.note else ""
+            lines.append(f"  {probe.label:<10} {state:<7} {probe.target}{note}")
         self.status_ready = bool(probes) and all(probe.ready for probe in probes)
         # GAP-1335: say when the containers listed belong to another copy.
         try:
@@ -1360,16 +1547,24 @@ class LocalStackController:
         raise LocalStackError(f"readiness timeout after {timeout}s: {states}")
 
     def probe_all(self, *, deadline: float | None = None) -> list[ProbeResult]:
+        running = self.running_services()
         results: list[ProbeResult] = []
         for label, host, port in TCP_PROBES:
             timeout = self._remaining_probe_timeout(deadline, 0.75)
             ready = timeout > 0 and self._tcp_probe(host, port, timeout=timeout)
-            results.append(ProbeResult(label, f"{host}:{port}", ready))
+            results.append(self._owned_probe(ProbeResult(label, f"{host}:{port}", ready), running))
         for label, url in HTTP_PROBES:
             timeout = self._remaining_probe_timeout(deadline, 1.25)
             ready = timeout > 0 and self._http_probe(url, timeout=timeout)
-            results.append(ProbeResult(label, url, ready))
+            results.append(self._owned_probe(ProbeResult(label, url, ready), running))
         return results
+
+    @staticmethod
+    def _owned_probe(probe: ProbeResult, running: set[str] | None) -> ProbeResult:
+        """A probe answered while this stack's container is stopped is another process (GAP-2073)."""
+        if running is None or PROBE_SERVICES[probe.label] in running:
+            return probe
+        return ProbeResult(probe.label, probe.target, False, PORT_HELD_NOTE if probe.ready else "not running")
 
     @staticmethod
     def _remaining_probe_timeout(deadline: float | None, maximum: float) -> float:
@@ -1420,7 +1615,7 @@ def _text_urls(
 ) -> str:
     grafana = "Grafana:    http://localhost:3000"
     if grafana_access_mode == GRAFANA_ACCESS_NO_PASSWORD:
-        grafana += "  (anonymous Admin; no password)"
+        grafana += f"  (anonymous {GRAFANA_ANONYMOUS_ROLE}, read-only; no password)"
     elif grafana_password_file is not None:
         grafana += f"  (user: {GRAFANA_ADMIN_USER}; password file: {grafana_password_file})"
     return "\n".join(
@@ -1461,7 +1656,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         dest="grafana_access_mode",
         action="store_const",
         const=GRAFANA_ACCESS_NO_PASSWORD,
-        help="Allow anonymous Grafana Admin access on managed loopback only.",
+        help="Allow anonymous read-only (Viewer) Grafana access on managed loopback only.",
     )
     parser.add_argument("--service", choices=sorted(SERVICES))
     parser.add_argument("--follow", action="store_true")
@@ -1477,7 +1672,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             if result.grafana_access_mode == GRAFANA_ACCESS_NO_PASSWORD:
                 print(
-                    "warning: Grafana is running as anonymous Admin; every local "
+                    "warning: Grafana allows anonymous read-only Viewer access; every local "
                     "process can access it without a password",
                     file=sys.stderr,
                 )

@@ -165,6 +165,9 @@ class BuildPyWithRuntimeAssets(build_py):
                         "..grafana-admin-password.*.tmp",
                         ".grafana-access-mode",
                         "..grafana-access-mode.*.tmp",
+                        "docker-compose.fleet.yml",
+                        "fleet.yml",
+                        "defenseclaw-fleet.json",
                     ]
                 )
             shutil.copytree(

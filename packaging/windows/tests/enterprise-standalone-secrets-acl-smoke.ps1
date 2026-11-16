@@ -87,9 +87,16 @@ try {
             $store = New-TestStore 'reinstall'
             $credential = [IO.Path]::Combine($store.Secrets, 'ai-defense-api-key')
             $second = [IO.Path]::Combine($store.Secrets, 'judge-key')
+            # rel-1-0-6:GAP-0301: the account join secrets get no gateway entry.
+            $joinKey = [IO.Path]::Combine($store.Secrets, 'account-join-key')
+            $joinNext = [IO.Path]::Combine($store.Secrets, 'account-join-key-next')
+            $joinSddl = 'O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)'
+            if ((Get-DefenseClawStandaloneSecretFileSddl -GatewayServiceSID $sid -Name 'account-join-key') -cne $joinSddl) {
+                $failures.Add('account join descriptor differs from enterprise_secret_windows.go')
+            }
             $temporary = [IO.Path]::Combine($store.Secrets, '.ai-defense-api-key.tmp-0011223344556677')
             $nested = [IO.Path]::Combine($store.Secrets, 'nested')
-            foreach ($path in @($credential, $second, $temporary)) {
+            foreach ($path in @($credential, $second, $temporary, $joinKey, $joinNext)) {
                 [IO.File]::WriteAllText($path, 'stand-in value')
             }
             [void][IO.Directory]::CreateDirectory($nested)
@@ -104,6 +111,8 @@ try {
             Assert-TestSddl 'store after reinstall' $store.Secrets $directoryOnDisk
             Assert-TestSddl 'credential after reinstall' $credential $fileSddl
             Assert-TestSddl 'second credential after reinstall' $second $fileSddl
+            Assert-TestSddl 'account join key after reinstall' $joinKey $joinSddl
+            Assert-TestSddl 'next account join key after reinstall' $joinNext $joinSddl
             Assert-TestSddl 'temporary file' $temporary $adminFileSddl
             Assert-TestSddl 'nested directory' $nested $adminDirectorySddl
             if ([IO.File]::ReadAllText($credential) -cne 'stand-in value') {
@@ -113,6 +122,7 @@ try {
             Set-DefenseClawStandaloneSecretsAcls -Layout @{ StateRoot = $store.StateRoot } -GatewayServiceSID $sid
             Assert-TestSddl 'store after a second pass' $store.Secrets $directoryOnDisk
             Assert-TestSddl 'credential after a second pass' $credential $fileSddl
+            Assert-TestSddl 'account join key after a second pass' $joinKey $joinSddl
 
             # No store: nothing to do.
             $empty = [IO.Path]::Combine($Root, 'empty')
@@ -144,7 +154,9 @@ try {
             # GAP-0920: a redaction key whose gateway entry a hardening script
             # removed (only trusted principals left) is recorded as found, so
             # repair can write the contract again; a key another principal can
-            # open is still refused, and Secure Client keeps the strict check.
+            # open is still refused. Secure Client takes the 26.8.4 drift rule:
+            # a key no untrusted principal can write is the canonical class and
+            # is re-stamped.
             $driftedKey = [Security.AccessControl.RawSecurityDescriptor]::new("O:$($sid)G:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)")
             $openKey = [Security.AccessControl.RawSecurityDescriptor]::new("O:$($sid)G:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)")
             if ((Get-DefenseClawRedactionKeySecurityClass -Actual $driftedKey -GatewayServiceSID $sid) -cne 'trusted_drift') {
@@ -160,7 +172,9 @@ try {
 
             # The Secure Client profile has no standalone credential store.
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
-            Test-Refused 'Secure Client drifted redaction key' { Get-DefenseClawRedactionKeySecurityClass -Actual $driftedKey -GatewayServiceSID $sid } 'unrecognized active'
+            if ((Get-DefenseClawRedactionKeySecurityClass -Actual $driftedKey -GatewayServiceSID $sid) -cne 'runtime_secret') {
+                $failures.Add('Secure Client did not record a trusted-only redaction key as runtime_secret')
+            }
             $secureClient = New-TestStore 'secure-client'
             Set-DefenseClawPreservedStateAcls -Layout @{ StateRoot = $secureClient.StateRoot } -GatewayServiceSID $sid
             Set-DefenseClawStandaloneSecretsAcls -Layout @{ StateRoot = $secureClient.StateRoot } -GatewayServiceSID $sid

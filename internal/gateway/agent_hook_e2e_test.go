@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -29,7 +30,7 @@ import (
 //   - context enrichment (session_id / agent_id propagation, F2)
 //   - safeEvaluateHook (panic recovery, H2)
 //   - hook profile-runtime dispatch
-//   - renderAgentHookResponse (wire-shape per connector)
+//   - renderAgentHookResponseForProfile (wire-shape per connector)
 //   - HTTP response (200 OK + valid JSON envelope)
 //
 // We do NOT mock the evaluator: this is the canonical test that
@@ -43,7 +44,7 @@ import (
 //   - claudecode response carries the top-level "claude_code_output"
 //     key (Claude Code reads that exact field).
 //   - codex response carries "codex_output".
-//   - Amp and OmniGent consume the canonical top-level action directly.
+//   - Amp consumes the canonical top-level action directly.
 //   - every other connector returns "hook_output".
 //   - all responses carry the canonical action/mode/severity fields.
 //
@@ -111,13 +112,6 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 			expectAction:   "block",
 		},
 		{
-			connector:      "openhands",
-			event:          "pre_tool_use",
-			toolName:       "terminal",
-			topLevelOutput: "hook_output",
-			expectAction:   "block",
-		},
-		{
 			connector:      "antigravity",
 			event:          "PreToolUse",
 			toolName:       "run_command",
@@ -163,15 +157,6 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 			connector:      "amp",
 			event:          "tool.call",
 			toolName:       "async_shell_command",
-			topLevelOutput: "",
-			expectAction:   "block",
-		},
-		{
-			connector: "omnigent",
-			event:     "PreToolUse",
-			toolName:  "bash",
-			// The Python policy consumes the canonical top-level action
-			// directly; OmniGent has no nested hook response envelope.
 			topLevelOutput: "",
 			expectAction:   "block",
 		},
@@ -526,6 +511,52 @@ func TestHandleAgentHook_AntigravityRequiresRegisteredEvent(t *testing.T) {
 	}
 }
 
+// GAP-0337: a PreToolUse payload with no readable toolCall (a flat Claude
+// Code shaped decoy, a camelCase toolName/toolInput form, a toolCall without
+// args) is refused, not judged as an empty call; the real nested shape is
+// judged, and a PostToolUse, which has no toolCall, is not refused.
+func TestHandleAgentHook_AntigravityRefusesAnUnreadableToolCall(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "antigravity"
+	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+	for _, tc := range []struct {
+		name, event, body, want string
+	}{
+		{"flat claude shape", "PreToolUse", `{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Bash","tool_input":{"command":"echo ok"},"cwd":"/tmp"}`, "block"},
+		{"camel case flat", "PreToolUse", `{"toolName":"run_command","toolInput":{"CommandLine":"echo ok"}}`, "block"},
+		{"tool call without args", "PreToolUse", `{"conversationId":"c1","toolCall":{"name":"run_command"}}`, "block"},
+		{"payload claims another event", "PreToolUse", `{"conversationId":"c1","hookEventName":"Stop","terminationReason":"done"}`, "block"},
+		{"nested benign", "PreToolUse", `{"conversationId":"c1","workspacePaths":["/tmp"],"toolCall":{"name":"run_command","args":{"CommandLine":"echo ok","Cwd":"/tmp"}}}`, "allow"},
+		// The raw decoder owns the arguments: a body it rejects is refused
+		// even when the map decode reads a tool call from it.
+		{"duplicate metadata key", "PreToolUse", `{"conversationId":"c1","conversationId":"c2","toolCall":{"name":"run_command","args":{"CommandLine":"echo ok","Cwd":"/tmp"}}}`, "block"},
+		{"duplicate metadata key file read", "PreToolUse", `{"stepIdx":1,"stepIdx":2,"toolCall":{"name":"view_file","args":{"AbsolutePath":"/home/alice/.ssh/id_rsa"}}}`, "block"},
+		{"post tool use", "PostToolUse", `{"conversationId":"c1","stepIdx":1}`, "allow"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/antigravity/hook", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-DefenseClaw-Antigravity-Event", tc.event)
+			recorder := httptest.NewRecorder()
+			api.handleAgentHook("antigravity").ServeHTTP(recorder, req)
+			var parsed struct {
+				Action   string   `json:"action"`
+				Findings []string `json:"findings"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &parsed); err != nil {
+				t.Fatalf("status=%d body=%s: %v", recorder.Code, recorder.Body.String(), err)
+			}
+			if parsed.Action != tc.want {
+				t.Fatalf("action=%q, want %q: %s", parsed.Action, tc.want, recorder.Body.String())
+			}
+			if strings.HasPrefix(tc.name, "duplicate") && !slices.Contains(parsed.Findings, "HOOK-TOOL-CALL-UNPARSED") {
+				t.Fatalf("findings=%v, want HOOK-TOOL-CALL-UNPARSED: %s", parsed.Findings, recorder.Body.String())
+			}
+		})
+	}
+}
+
 func TestHandleAgentHook_AntigravityAllowsForcedSingleFileDeletionWithoutFinding(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
@@ -657,13 +688,10 @@ func TestCopilotHookRejectsMissingOrInvalidTrustedEvent(t *testing.T) {
 	}
 }
 
-// TestHandleAgentHook_FullChain_PanicFailsOpen is the M6 panic-
-// recovery integration assertion: a panicking evaluator in the
-// unified chain MUST NOT propagate; the HTTP response must remain
-// 200 OK with action=allow + would_block=true; the panic counter
-// must increment; the wire shape must still match the connector's
-// expected top-level key.
-func TestHandleAgentHook_FullChain_PanicFailsOpen(t *testing.T) {
+// TestHandleAgentHook_FullChain_PanicFailsClosed verifies that a panicking
+// evaluator returns a valid native denial for a blockable event. The panic
+// stays contained and the HTTP response still carries the connector shape.
+func TestHandleAgentHook_FullChain_PanicFailsClosed(t *testing.T) {
 	prev := hookEvaluatorPanicHook
 	hookEvaluatorPanicHook = func() { panic("synthetic panic in unified chain") }
 	defer func() { hookEvaluatorPanicHook = prev }()
@@ -684,32 +712,20 @@ func TestHandleAgentHook_FullChain_PanicFailsOpen(t *testing.T) {
 	handler.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Fatalf("panic-path status=%d, want 200 (fail-open)", w.Code)
+		t.Fatalf("panic-path status=%d, want 200 with a closed verdict", w.Code)
 	}
 	var parsed map[string]interface{}
 	if err := json.Unmarshal(w.Body.Bytes(), &parsed); err != nil {
 		t.Fatalf("panic-path response not valid JSON: %v\nbody=%s", err, w.Body.String())
 	}
-	if action, _ := parsed["action"].(string); action != "allow" {
-		t.Errorf("panic-path action = %q, want allow", action)
+	if action, _ := parsed["action"].(string); action != "block" {
+		t.Errorf("panic-path action = %q, want block", action)
 	}
-	if wb, _ := parsed["would_block"].(bool); !wb {
-		t.Errorf("panic-path would_block = false, want true")
+	if wb, _ := parsed["would_block"].(bool); wb {
+		t.Errorf("panic-path would_block = true, want enforced block")
 	}
-	// The wire-shape key is still hook_output (devin), not a
-	// generic error stanza — the panic recovery preserves the
-	// connector contract.
-	if _, ok := parsed["hook_output"]; !ok {
-		// hook_output is conditional on resp.HookOutput being
-		// populated; the panic-path response has nil HookOutput
-		// so the field is omitempty-dropped, which is correct.
-		// We just verify NO other top-level output key was
-		// accidentally emitted.
-		for _, forbidden := range []string{"claude_code_output", "codex_output"} {
-			if _, bad := parsed[forbidden]; bad {
-				t.Errorf("panic-path leaked wrong top-level output %q (response: %+v)", forbidden, parsed)
-			}
-		}
+	if !decisionIsDenied(parsed["hook_output"]) {
+		t.Errorf("panic-path hook_output = %v, want native denial", parsed["hook_output"])
 	}
 }
 
@@ -892,5 +908,37 @@ func TestHandleAgentHookRecordsAHookSideRefusal(t *testing.T) {
 	body := w.Body.String()
 	if !strings.Contains(body, `"raw_action":"block"`) || !strings.Contains(body, hookPayloadTooLargeRuleID) {
 		t.Fatalf("refusal report = %d %s, want a recorded block", w.Code, body)
+	}
+}
+
+// GAP-1313: a hook's report of a tool call it refused as too large carries the
+// event and session fields and no tool input. The structured tool-call gate
+// that refuses an unreadable call must not take it: the decision names
+// HOOK-PAYLOAD-TOO-LARGE (the documented rule ID), not HOOK-TOOL-CALL-UNPARSED.
+func TestHandleAgentHookRecordsAHookSideToolCallRefusalAsTooLarge(t *testing.T) {
+	for _, tc := range []struct{ connector, path string }{
+		{"claudecode", "/api/v1/claude-code/hook"},
+		{"codex", "/api/v1/codex/hook"},
+	} {
+		t.Run(tc.connector, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Connector = tc.connector
+			api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+			req := httptest.NewRequest(http.MethodPost, tc.path,
+				strings.NewReader(`{"session_id":"sess-big","hook_event_name":"PreToolUse","tool_name":"Bash","cwd":"/tmp"}`))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set(hookexec.HookRefusalHeader, hookexec.HookRefusalPayloadTooLarge)
+			if tc.connector == "codex" {
+				setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
+			}
+			w := httptest.NewRecorder()
+			http.HandlerFunc(api.handleAgentHook(tc.connector)).ServeHTTP(w, req)
+			body := w.Body.String()
+			if !strings.Contains(body, `"raw_action":"block"`) || !strings.Contains(body, hookPayloadTooLargeRuleID) ||
+				strings.Contains(body, hookToolCallUnparsedRuleID) {
+				t.Fatalf("refusal report = %d %s, want a block under %s only", w.Code, body, hookPayloadTooLargeRuleID)
+			}
+		})
 	}
 }

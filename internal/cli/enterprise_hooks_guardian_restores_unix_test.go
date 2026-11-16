@@ -50,7 +50,9 @@ func TestEnterpriseHookStandaloneUnixRestoresDateThePassRepairs(t *testing.T) {
 	since := time.Now().Add(-time.Second)
 	repairedAt := since.Add(500 * time.Millisecond)
 	writeRepairs(repairedAt, "alice")
-	recordEnterpriseHookStandaloneUnixRestores(io.Discard, dataDir, since, enterpriseHookReconcileRun{Rows: rows, Repairs: 1})
+	if err := recordEnterpriseHookStandaloneUnixRestores(io.Discard, dataDir, since, enterpriseHookReconcileRun{Rows: rows, Repairs: 1}); err != nil {
+		t.Fatal(err)
+	}
 	restores := guardianRestoresForTest(t, dataDir)
 	if len(restores) != 1 || !restores[enterpriseHookGuardianRestoreUIDKey(1001, "hermes")].Equal(repairedAt.UTC()) {
 		t.Fatalf("restores = %v, want hermes of uid 1001 at %s", restores, repairedAt)
@@ -63,7 +65,9 @@ func TestEnterpriseHookStandaloneUnixRestoresDateThePassRepairs(t *testing.T) {
 	// The next pass repaired bob but could not rewrite the repair record:
 	// the earlier record is not taken for this pass.
 	later := time.Now().Add(time.Second)
-	recordEnterpriseHookStandaloneUnixRestores(io.Discard, dataDir, later, enterpriseHookReconcileRun{Rows: rows, Repairs: 1})
+	if err := recordEnterpriseHookStandaloneUnixRestores(io.Discard, dataDir, later, enterpriseHookReconcileRun{Rows: rows, Repairs: 1}); err != nil {
+		t.Fatal(err)
+	}
 	if restores := guardianRestoresForTest(t, dataDir); len(restores) != 1 {
 		t.Fatalf("restores after a pass without its own repair record = %v, want only alice's", restores)
 	}
@@ -78,7 +82,9 @@ func TestEnterpriseHookStandaloneUnixRestoresDateThePassRepairs(t *testing.T) {
 		passRows := []enterpriseHookReconcileRow{outage, outage, rows[2]}
 		passRows[0].User, passRows[0].Connector = "alice", "hermes"
 		passRows[1].User, passRows[1].Connector = "alice", "codex"
-		recordEnterpriseHookStandaloneUnixRestores(io.Discard, dataDir, later, enterpriseHookReconcileRun{Rows: passRows})
+		if err := recordEnterpriseHookStandaloneUnixRestores(io.Discard, dataDir, later, enterpriseHookReconcileRun{Rows: passRows}); err != nil {
+			t.Fatal(err)
+		}
 		restores := guardianRestoresForTest(t, dataDir)
 		if len(restores) != 1 || !restores[enterpriseHookGuardianRestoreUIDKey(1001, "hermes")].Equal(repairedAt.UTC()) {
 			t.Fatalf("restores after a pass with alice's rows %+v = %v, want hermes of uid 1001 at %s", passRows[:2], restores, repairedAt)
@@ -86,7 +92,9 @@ func TestEnterpriseHookStandaloneUnixRestoresDateThePassRepairs(t *testing.T) {
 	}
 
 	// alice left the manifest: her entry is dropped by a pass without repairs.
-	recordEnterpriseHookStandaloneUnixRestores(io.Discard, dataDir, later, enterpriseHookReconcileRun{Rows: rows[2:]})
+	if err := recordEnterpriseHookStandaloneUnixRestores(io.Discard, dataDir, later, enterpriseHookReconcileRun{Rows: rows[2:]}); err != nil {
+		t.Fatal(err)
+	}
 	if restores := guardianRestoresForTest(t, dataDir); len(restores) != 0 {
 		t.Fatalf("restores after alice left = %v, want none", restores)
 	}
@@ -95,12 +103,16 @@ func TestEnterpriseHookStandaloneUnixRestoresDateThePassRepairs(t *testing.T) {
 	// earlier protection): the old uid's entry is not kept by her name.
 	again := time.Now().Add(-time.Second)
 	writeRepairs(again.Add(500*time.Millisecond), "alice")
-	recordEnterpriseHookStandaloneUnixRestores(io.Discard, dataDir, again, enterpriseHookReconcileRun{Rows: rows, Repairs: 1})
+	if err := recordEnterpriseHookStandaloneUnixRestores(io.Discard, dataDir, again, enterpriseHookReconcileRun{Rows: rows, Repairs: 1}); err != nil {
+		t.Fatal(err)
+	}
 	if restores := guardianRestoresForTest(t, dataDir); len(restores) != 1 {
 		t.Fatalf("restores after alice's second repair = %v, want hermes of uid 1001", restores)
 	}
 	reassigned := enterpriseHookReconcileRow{User: "alice", Connector: "hermes", Error: "enterprise hooks: alice now has another uid", RevokeProtection: true}
-	recordEnterpriseHookStandaloneUnixRestores(io.Discard, dataDir, later, enterpriseHookReconcileRun{Rows: append([]enterpriseHookReconcileRow{reassigned}, rows[2:]...)})
+	if err := recordEnterpriseHookStandaloneUnixRestores(io.Discard, dataDir, later, enterpriseHookReconcileRun{Rows: append([]enterpriseHookReconcileRow{reassigned}, rows[2:]...)}); err != nil {
+		t.Fatal(err)
+	}
 	if restores := guardianRestoresForTest(t, dataDir); len(restores) != 0 {
 		t.Fatalf("restores after alice's uid was reassigned = %v, want none", restores)
 	}

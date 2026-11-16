@@ -19,11 +19,13 @@
 package actionfacts
 
 import (
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -49,16 +51,16 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 
 	parser := syntax.NewParser(syntax.Variant(syntax.LangPOSIX))
 	parsedSource := source
-	file, err := parser.Parse(strings.NewReader(source), "")
+	file, err := parser.Parse(shellparse.Reader(source), "")
 	if err != nil {
-		normalized, valid := normalizePOSIXNullAggregateRedirects(source)
+		normalized, valid := normalizePOSIXAggregateRedirects(source, true)
 		if !valid {
 			out.markInvalid(IssueInvalidSyntax)
 			return out
 		}
 		parsedSource = normalized
 		parser = syntax.NewParser(syntax.Variant(syntax.LangPOSIX))
-		file, err = parser.Parse(strings.NewReader(normalized), "")
+		file, err = parser.Parse(shellparse.Reader(normalized), "")
 		if err != nil {
 			out.markInvalid(IssueInvalidSyntax)
 			return out
@@ -120,6 +122,13 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 
 	addPOSIXStructuralFlows(&out)
 	expandStaticPOSIXWrappers(&out, wrapperDepth)
+	if posixMayRebindHome(parsedSource) {
+		for i := range out.commands {
+			for j := range out.commands[i].Arguments {
+				out.commands[i].Arguments[j].homeSpelling = ""
+			}
+		}
+	}
 	if len(out.commands) == 0 && out.status == StatusComplete {
 		out.markUnsupported(IssueUnsupportedConstruct)
 	}
@@ -179,15 +188,22 @@ func collectExactPOSIXAbsoluteCDFallback(
 		!target.Expands && strings.HasPrefix(target.Value, "/")
 }
 
-// normalizePOSIXNullAggregateRedirects recognizes the one Bash-only redirect
-// extension whose complete effect can be represented without broadening the
-// POSIX grammar: an exact, nonexpanding &>/dev/null (or append/clobber sibling).
-// It rewrites that redirect into separate stdout and stderr null redirects,
-// then the ordinary POSIX parser validates every other byte. Bash-only syntax
-// elsewhere therefore remains invalid.
-func normalizePOSIXNullAggregateRedirects(source string) (string, bool) {
+// normalizePOSIXAggregateRedirects rewrites the Bash and zsh redirects of
+// stdout and stderr to one file (&> f, &>> f, &>| f, and >& f with a file
+// word) into separate stdout and stderr redirects of the same word (> f 2> f,
+// >> f 2>> f); the rest of the source is kept byte for byte, so Bash-only
+// syntax elsewhere stays invalid.
+//
+// nullOnly is the parse of a command the POSIX grammar rejects: only an
+// exact, nonexpanding &>/dev/null (or its append/clobber sibling) is
+// represented there, so every other all-output redirect fails closed.
+// Without nullOnly (BashAggregateRedirectsAsPOSIX) any static target is
+// kept. A target with a command, process or arithmetic substitution, a >&
+// word that may be a descriptor and a >& with a descriptor number are never
+// rewritten.
+func normalizePOSIXAggregateRedirects(source string, nullOnly bool) (string, bool) {
 	parser := syntax.NewParser(syntax.Variant(syntax.LangBash))
-	file, err := parser.Parse(strings.NewReader(source), "")
+	file, err := parser.Parse(shellparse.Reader(source), "")
 	if err != nil {
 		return "", false
 	}
@@ -203,34 +219,68 @@ func normalizePOSIXNullAggregateRedirects(source string) (string, bool) {
 		if !ok {
 			return valid
 		}
-		appendMode := false
+		stderr := " 2>"
 		switch redirect.Op {
 		case syntax.RdrAll, syntax.RdrAllClob:
 		case syntax.AppAll, syntax.AppAllClob:
-			appendMode = true
+			stderr = " 2>>"
+		case syntax.DplOut:
+			// A word with a literal / names a file whatever it expands to;
+			// another expanding word may still be a descriptor number.
+			// "1>&word" is ">&word" (GAP-2143); the / may sit in quotes.
+			target := projectPOSIXWord(redirect.Word)
+			slash := false
+			syntax.Walk(redirect.Word, func(inner syntax.Node) bool {
+				switch typed := inner.(type) {
+				case *syntax.Lit:
+					slash = slash || strings.Contains(typed.Value, "/")
+				case *syntax.SglQuoted:
+					slash = slash || strings.Contains(typed.Value, "/")
+				}
+				return true
+			})
+			if nullOnly || redirect.N != nil && redirect.N.Value != "1" || target.Expands && !slash ||
+				!target.Expands && (target.Value == "-" || strings.Trim(target.Value, "0123456789") == "") {
+				return valid // a descriptor copy or close
+			}
 		default:
 			return valid
 		}
 		target := projectPOSIXWord(redirect.Word)
-		if target.Expands || target.Value != "/dev/null" {
+		if nullOnly && (target.Expands || target.Value != "/dev/null") {
 			valid = false
 			return false
 		}
+		substituted := false
+		syntax.Walk(redirect.Word, func(inner syntax.Node) bool {
+			switch inner.(type) {
+			case *syntax.CmdSubst, *syntax.ProcSubst, *syntax.ArithmExp:
+				substituted = true
+			}
+			return !substituted
+		})
 		start := int(redirect.OpPos.Offset())
+		wordStart := int(redirect.Word.Pos().Offset())
 		end := int(redirect.End().Offset())
-		if start < 0 || end <= start || end > len(source) || source[start] != '&' {
+		if substituted || start < 0 || wordStart <= start || end <= wordStart || end > len(source) {
 			valid = false
 			return false
 		}
-		segment := source[start:end]
-		stderr := " 2>/dev/null"
-		if appendMode {
-			stderr = " 2>>/dev/null"
+		operator := source[start:wordStart]
+		switch {
+		case strings.HasPrefix(operator, "&"):
+			operator = operator[1:]
+		case strings.HasPrefix(operator, ">&"):
+			operator = ">" + operator[2:]
+		default:
+			valid = false
+			return false
 		}
+		word := source[wordStart:end]
 		replacements = append(replacements, replacement{
 			start: start,
 			end:   end,
-			value: segment[1:] + stderr,
+			value: operator + word + stderr + word,
 		})
 		return valid
 	})
@@ -245,6 +295,16 @@ func normalizePOSIXNullAggregateRedirects(source string) (string, bool) {
 		result = result[:edit.start] + edit.value + result[edit.end:]
 	}
 	return result, true
+}
+
+// BashAggregateRedirectsAsPOSIX returns the command with its Bash and zsh
+// all-output redirects (&> f, &>> f, >& f) spelled as the POSIX redirects
+// of the same file (> f 2> f), and false when it has none. POSIX sh reads
+// "cmd &> f" as "cmd &" and "> f", so the facts of the command as sent do
+// not tie the write of f to it; a write owner that must judge the file a
+// Bash shell writes analyzes this spelling as well (GAP-2143).
+func BashAggregateRedirectsAsPOSIX(command string) (string, bool) {
+	return normalizePOSIXAggregateRedirects(command, false)
 }
 
 func checkPOSIXBounds(root syntax.Node, out *parseOutput) bool {
@@ -298,6 +358,28 @@ func projectPOSIXStatement(
 
 	call, ok := stmt.Cmd.(*syntax.CallExpr)
 	if !ok {
+		if stmt.Cmd == nil && len(stmt.Redirs) > 0 && posixOutputRedirectsOnly(stmt.Redirs) {
+			// A command-less redirect (`> f`, `>> f`) opens its targets and
+			// runs nothing: it is the ":" builtin with the same redirects, so
+			// its targets are write path facts like any other (GAP-2076).
+			command := CommandFact{
+				ID:                   out.nextCommandID(),
+				ParentCommandID:      parentID,
+				PipelineID:           pipelineID,
+				ControlFlowUncertain: posixControlFlowUncertain(stmt, stack),
+				ControlFlowOperator:  posixControlFlowOperator(stmt, stack),
+				Background:           stmt.Background,
+				Dialect:              DialectPOSIX,
+				Effect:               EffectExecute,
+				ArgvComplete:         true,
+				Executable:           ":",
+				Program:              ":",
+				Argv:                 []string{":"},
+				Arguments:            []ArgumentFact{{Value: ":", Quote: QuoteNone}},
+			}
+			projectPOSIXRedirects(stmt.Redirs, &command, out)
+			return command, true
+		}
 		if stmt.Cmd == nil && len(stmt.Redirs) > 0 {
 			command := CommandFact{
 				ID:              out.nextCommandID(),
@@ -335,6 +417,7 @@ func projectPOSIXStatement(
 		ControlFlowUncertain: posixControlFlowUncertain(stmt, stack),
 		ControlFlowOperator:  posixControlFlowOperator(stmt, stack),
 		Background:           stmt.Background,
+		ShortCircuitListID:   out.shortCircuitListID(stack),
 		Dialect:              DialectPOSIX,
 		Effect:               EffectExecute,
 		ArgvComplete:         true,
@@ -379,7 +462,87 @@ func projectPOSIXStatement(
 		out.markPartial(IssueDynamicWord)
 	}
 	projectPOSIXRedirects(stmt.Redirs, &command, out)
+	if command.Program == "exec" && command.ParentCommandID == 0 {
+		if len(command.Argv) != 1 || command.ControlFlowUncertain ||
+			command.PipelineID != 0 || command.Background {
+			clear(out.posixOpenFDs)
+		} else {
+			for _, redirect := range command.Redirects {
+				if redirect.FD < 3 {
+					continue
+				}
+				if !redirect.Expands && strings.HasPrefix(redirect.Target, "/dev/tcp/") {
+					if out.posixOpenFDs == nil {
+						out.posixOpenFDs = make(map[int64]string)
+					}
+					out.posixOpenFDs[redirect.FD] = redirect.Target
+				} else {
+					delete(out.posixOpenFDs, redirect.FD)
+				}
+			}
+		}
+	}
+	classifyPOSIXGitConfigEnvironmentOutput(out, &command, call.Assigns)
 	return command, true
+}
+
+// posixOutputRedirectsOnly reports redirects that only open files for
+// output (>, >>, >|); a command-less heredoc or input redirect keeps its
+// partial reading.
+func posixOutputRedirectsOnly(redirects []*syntax.Redirect) bool {
+	for _, redirect := range redirects {
+		switch redirect.Op {
+		case syntax.RdrOut, syntax.AppOut, syntax.RdrClob:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// Git uses GIT_CONFIG_GLOBAL as the output file for a command-local
+// `git config --global` mutation. Prefix assignments make the entire call
+// partial because they can also change executable lookup, but this static
+// destination remains positive evidence of a possible write.
+func classifyPOSIXGitConfigEnvironmentOutput(out *parseOutput, command *CommandFact, assignments []*syntax.Assign) {
+	if command.Program != "git" || command.Effect != EffectExecute ||
+		len(command.Argv) < 3 || command.Argv[1] != "config" ||
+		!gitConfigMutates(command.Argv[2:]) {
+		return
+	}
+	global := false
+	for _, arg := range command.Argv[2:] {
+		if arg == "--global" {
+			global = true
+		}
+		if arg == "-f" || strings.HasPrefix(arg, "-f") && len(arg) > 2 ||
+			arg == "--file" || strings.HasPrefix(arg, "--file=") {
+			// An explicit file option selects the destination instead.
+			return
+		}
+	}
+	if !global {
+		return
+	}
+	for _, argument := range command.Arguments {
+		if argument.Expands || argument.StaticGlob != "" {
+			return
+		}
+	}
+	for _, assignment := range assignments {
+		if assignment == nil || assignment.Name == nil ||
+			assignment.Name.Value != "GIT_CONFIG_GLOBAL" ||
+			assignment.Append || assignment.Naked || assignment.Index != nil ||
+			assignment.Array != nil {
+			continue
+		}
+		target := projectPOSIXWord(assignment.Value)
+		if target.Expands || target.Value == "" {
+			continue
+		}
+		addOperation(command, OperationWrite)
+		appendCommandPath(out, command, PathAccessWrite, target.Value)
+	}
 }
 
 func projectPOSIXWord(word *syntax.Word) ArgumentFact {
@@ -421,13 +584,40 @@ func projectPOSIXWord(word *syntax.Word) ArgumentFact {
 		Quote:   quote,
 		Expands: expands || unquotedExpansion,
 	}
+	if expands {
+		result.homeSpelling = posixHomeSpelling(word)
+	}
 	if result.Expands {
 		if !expands && unquotedExpansion && quote == QuoteNone {
 			result.StaticGlob = staticValue
 		}
 		result.Value = ""
+	} else {
+		result.literalTilde = strings.HasPrefix(staticValue, "~")
 	}
 	return result
+}
+
+// carryPOSIXLiteralTildes keeps the parser's quoted-tilde mark on the argv a
+// wrapper (sudo, env, command, exec) passes on: each child command whose
+// argv is a suffix of the parent's takes the mark of the aligned word.
+func carryPOSIXLiteralTildes(child *parseOutput, parent CommandFact) {
+	if len(parent.Arguments) != len(parent.Argv) {
+		return
+	}
+	for i := range child.commands {
+		command := &child.commands[i]
+		offset := len(parent.Argv) - len(command.Argv)
+		if offset <= 0 || len(command.Arguments) != len(command.Argv) ||
+			!slices.Equal(command.Argv, parent.Argv[offset:]) {
+			continue
+		}
+		for j := range command.Arguments {
+			if parent.Arguments[offset+j].literalTilde {
+				command.Arguments[j].literalTilde = true
+			}
+		}
+	}
 }
 
 func posixControlFlowUncertain(stmt *syntax.Stmt, stack []syntax.Node) bool {
@@ -654,8 +844,21 @@ func projectPOSIXRedirects(redirections []*syntax.Redirect, command *CommandFact
 				}
 				fd = parsed
 			}
+			if fd == 0 {
+				posixLiteralStdinReplaced(command, out)
+			}
 			target := projectPOSIXWord(redirection.Word)
 			targetFD, targetFDErr := strconv.ParseInt(target.Value, 10, 64)
+			if !target.Expands && targetFDErr == nil &&
+				target.Value == strconv.FormatInt(targetFD, 10) &&
+				command.ParentCommandID == 0 && !command.ControlFlowUncertain {
+				if path := out.posixOpenFDs[targetFD]; path != "" {
+					if !out.appendRedirects(command, RedirectFact{FD: fd, Access: access, Target: path}) {
+						return
+					}
+					continue
+				}
+			}
 			if redirection.Op == syntax.DplOut && !target.Expands &&
 				targetFDErr == nil &&
 				target.Value == strconv.FormatInt(targetFD, 10) &&
@@ -685,7 +888,9 @@ func projectPOSIXRedirects(redirections []*syntax.Redirect, command *CommandFact
 			}) {
 				return
 			}
-			out.markPartial(IssueUnsupportedConstruct)
+			if fd != 0 || command.Program != "apply_patch" {
+				out.markPartial(IssueUnsupportedConstruct)
+			}
 			continue
 		}
 		access, ok := posixRedirectAccess(redirection.Op)
@@ -702,13 +907,8 @@ func projectPOSIXRedirects(redirections []*syntax.Redirect, command *CommandFact
 			}
 			fd = parsed
 		}
-		if fd == 0 && command.LiteralStdinComplete {
-			// Redirect ordering could replace the heredoc as stdin. The private
-			// projection deliberately does not model that mixed form.
-			command.LiteralStdin = ""
-			command.LiteralStdinComplete = false
-			command.LiteralStdinAmbiguous = true
-			out.markPartial(IssueUnsupportedConstruct)
+		if fd == 0 {
+			posixLiteralStdinReplaced(command, out)
 		}
 		target := projectPOSIXWord(redirection.Word)
 		if !target.Expands && len(target.Value) > maxScalarBytes {
@@ -738,18 +938,42 @@ func projectPOSIXRedirects(redirections []*syntax.Redirect, command *CommandFact
 	}
 }
 
+// posixLiteralStdinReplaced drops the here-document text a command holds when a
+// later input redirect of descriptor 0 (a file, a descriptor copy, a here-string
+// or a close) takes over its stdin. The shell opens the redirects in order and
+// the last one wins, so the earlier document is no stdin of the command, in
+// whole or in the text it shows (LiteralStdinView).
+func posixLiteralStdinReplaced(command *CommandFact, out *parseOutput) {
+	if !command.LiteralStdinComplete && command.LiteralStdinView == "" {
+		return
+	}
+	command.LiteralStdin = ""
+	command.LiteralStdinView = ""
+	command.LiteralStdinComplete = false
+	command.LiteralStdinAmbiguous = true
+	if command.Program != "apply_patch" {
+		// An apply_patch call without a document reading is partial anyway
+		// (classifyPOSIXApplyPatchStdin), and a later here-document may
+		// still be its stdin, so the call is not marked partial here.
+		out.markPartial(IssueUnsupportedConstruct)
+	}
+}
+
 func projectPOSIXLiteralHeredoc(
 	redirection *syntax.Redirect,
 	command *CommandFact,
 	out *parseOutput,
 ) {
-	if redirection == nil || command == nil || redirection.Op != syntax.Hdoc ||
-		redirection.Hdoc == nil {
+	if redirection == nil || command == nil || redirection.Hdoc == nil ||
+		redirection.Op != syntax.Hdoc &&
+			(redirection.Op != syntax.DashHdoc || command.Program != "apply_patch") {
 		out.markPartial(IssueUnsupportedConstruct)
 		return
 	}
-	if command.LiteralStdinComplete || command.LiteralStdinAmbiguous {
+	patch := command.Program == "apply_patch"
+	if !patch && (command.LiteralStdinComplete || command.LiteralStdinAmbiguous) {
 		command.LiteralStdin = ""
+		command.LiteralStdinView = ""
 		command.LiteralStdinComplete = false
 		command.LiteralStdinAmbiguous = true
 		out.markPartial(IssueUnsupportedConstruct)
@@ -757,25 +981,226 @@ func projectPOSIXLiteralHeredoc(
 	}
 	if redirection.N != nil {
 		parsed, err := strconv.ParseInt(redirection.N.Value, 10, 64)
+		if err == nil && parsed != 0 && patch {
+			// A document on another descriptor is no stdin of the patch
+			// call: the stdin stays what the other redirects left.
+			return
+		}
 		if err != nil || parsed != 0 {
 			out.markPartial(IssueUnsupportedConstruct)
 			return
 		}
+	}
+	if patch {
+		// The shell opens the redirects in order and the last input redirect
+		// of descriptor 0 is the stdin: a here-document after an earlier
+		// input redirect or an earlier here-document is the stdin the
+		// command reads, and replaces whatever the earlier ones showed.
+		command.LiteralStdin = ""
+		command.LiteralStdinView = ""
+		command.LiteralStdinComplete = false
+		command.LiteralStdinAmbiguous = false
+		projectPOSIXPatchHeredoc(redirection, command, out)
+		if !command.LiteralStdinComplete && command.LiteralStdinView == "" {
+			command.LiteralStdinAmbiguous = true
+		}
+		return
 	}
 	if posixDescriptorIsRedirected(command, 0) {
 		out.markPartial(IssueUnsupportedConstruct)
 		return
 	}
 	delimiter := projectPOSIXWord(redirection.Word)
-	body := projectPOSIXWord(redirection.Hdoc)
+	if !delimiter.Expands && delimiter.Value != "" && delimiter.Quote != QuoteSingle &&
+		posixHeredocBodyRunsNothing(redirection.Hdoc) {
+		// An expanding body whose only expansions are parameters runs no
+		// command: the command and its redirect targets are as certain as
+		// with a quoted body, only the stdin text is unknown. The parse
+		// stays complete, so a proven write target (cat > /etc/sudoers
+		// <<X) is judged by the integrity owners (rel-1-0-6:GAP-0399).
+		command.LiteralStdin = ""
+		command.LiteralStdinComplete = false
+		command.LiteralStdinAmbiguous = true
+		return
+	}
+	body, exact := literalPOSIXHeredocBody(redirection.Hdoc)
 	if delimiter.Expands || delimiter.Quote != QuoteSingle ||
-		delimiter.Value == "" || body.Expands || len(body.Value) > maxScalarBytes ||
-		strings.ContainsRune(body.Value, '\x00') {
+		delimiter.Value == "" || !exact || len(body) > maxScalarBytes ||
+		strings.ContainsRune(body, '\x00') {
 		out.markPartial(IssueUnsupportedConstruct)
 		return
 	}
-	command.LiteralStdin = body.Value
+	command.LiteralStdin = body
 	command.LiteralStdinComplete = true
+}
+
+// A quoted delimiter leaves the here-document body byte-for-byte literal.
+// The generic word projection treats '*' as a pathname pattern, which is
+// correct for command operands but not for a patch's *** directive lines.
+func literalPOSIXHeredocBody(word *syntax.Word) (string, bool) {
+	if word == nil {
+		return "", false
+	}
+	var text strings.Builder
+	for _, part := range word.Parts {
+		literal, ok := part.(*syntax.Lit)
+		if !ok {
+			return "", false
+		}
+		text.WriteString(literal.Value)
+	}
+	return text.String(), true
+}
+
+// projectPOSIXPatchHeredoc reads the here-document of an apply_patch command
+// in every delimiter spelling (unquoted, double-quoted, quoted by a
+// backslash, single-quoted, each also with <<-). The spelling decides only
+// whether the shell expands the body (any quoting of the delimiter word
+// prevents it); <<- only strips the leading tabs of the lines. A body that
+// reaches the command byte for byte is the literal stdin in every spelling.
+func projectPOSIXPatchHeredoc(
+	redirection *syntax.Redirect,
+	command *CommandFact,
+	out *parseOutput,
+) {
+	delimiter := projectPOSIXWord(redirection.Word)
+	if delimiter.Expands || delimiter.Value == "" {
+		out.markPartial(IssueUnsupportedConstruct)
+		return
+	}
+	body, dynamic, readable := posixHeredocText(
+		redirection.Hdoc, posixHeredocDelimiterQuoted(redirection.Word),
+		redirection.Op == syntax.DashHdoc,
+	)
+	// Patch envelopes can contain ordinary file content beyond the scalar
+	// operand bound; the shell command itself remains bounded.
+	if !readable || len(body) > maxCommandBytes || strings.ContainsRune(body, '\x00') {
+		out.markPartial(IssueUnsupportedConstruct)
+		return
+	}
+	if !dynamic {
+		command.LiteralStdin = body
+		command.LiteralStdinComplete = true
+		return
+	}
+	// The shell expands this body, so its bytes are not known. The patch keeps
+	// the text it shows, each expansion replaced by one "$", for the readers of
+	// its envelope (applyPatchStdinText). A substitution in the body is a
+	// command of its own in the facts, judged by its own facts; the patch stays
+	// as certain as with a quoted body, only the text of the lines that hold an
+	// expansion is unknown.
+	command.LiteralStdinView = body
+	command.LiteralStdinAmbiguous = true
+}
+
+// posixHeredocDelimiterQuoted reports a here-document delimiter with any part
+// quoted, in single or double quotes or by a backslash: the shell then leaves
+// the body unexpanded.
+func posixHeredocDelimiterQuoted(word *syntax.Word) bool {
+	if word == nil {
+		return false
+	}
+	for _, part := range word.Parts {
+		switch typed := part.(type) {
+		case *syntax.SglQuoted, *syntax.DblQuoted:
+			return true
+		case *syntax.Lit:
+			if strings.Contains(typed.Value, "\\") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// posixHeredocText is the text of a here-document body as the shell hands it
+// to the command, less the expansions: for <<- the leading tabs of every line
+// are dropped. dynamic is set for a body the shell expands: a substitution or
+// parameter expansion, or a backslash before $, a backquote, another backslash
+// or a line end. The text then holds one "$" for each expansion and keeps the
+// backslashes as written. readable is false for a quoted body that is not one
+// literal.
+func posixHeredocText(
+	body *syntax.Word, quoted, stripTabs bool,
+) (text string, dynamic, readable bool) {
+	var out strings.Builder
+	lineStart := true
+	for _, part := range body.Parts {
+		literal, ok := part.(*syntax.Lit)
+		if !ok {
+			if quoted {
+				return "", false, false
+			}
+			out.WriteByte('$')
+			lineStart = false
+			dynamic = true
+			continue
+		}
+		for index := 0; index < len(literal.Value); index++ {
+			char := literal.Value[index]
+			if lineStart && stripTabs && char == '\t' {
+				continue
+			}
+			out.WriteByte(char)
+			lineStart = char == '\n'
+		}
+		if !quoted && posixHeredocLiteralEscapes(literal.Value) {
+			dynamic = true
+		}
+	}
+	return out.String(), dynamic, true
+}
+
+// posixHeredocLiteralEscapes reports text of an unquoted here-document body
+// the shell may expand: a $ or backquote the parser left in a literal, or a
+// backslash before $, a backquote, a backslash or a line end. Any other
+// backslash stays two ordinary characters.
+func posixHeredocLiteralEscapes(text string) bool {
+	for index := 0; index < len(text); index++ {
+		if text[index] == '$' || text[index] == '`' {
+			return true
+		}
+		if text[index] != '\\' {
+			continue
+		}
+		if index+1 == len(text) {
+			return true
+		}
+		switch text[index+1] {
+		case '$', '`', '\\', '\n':
+			return true
+		}
+		index++
+	}
+	return false
+}
+
+// posixHeredocBodyRunsNothing reports an unquoted heredoc body that expands
+// only parameters: no command, arithmetic or process substitution anywhere
+// in it, so reading it runs nothing.
+func posixHeredocBodyRunsNothing(body *syntax.Word) bool {
+	if body == nil {
+		return true
+	}
+	runs := false
+	// The POSIX grammar keeps the legacy $[expr] arithmetic as text (split
+	// into adjacent literals), but bash evaluates it, and a subscript in a
+	// variable value it names can run a command (rel-1-0-6:GAP-0419).
+	var text strings.Builder
+	syntax.Walk(body, func(node syntax.Node) bool {
+		switch typed := node.(type) {
+		case *syntax.CmdSubst, *syntax.ArithmExp, *syntax.ProcSubst:
+			runs = true
+		case *syntax.Lit:
+			text.WriteString(typed.Value)
+		case *syntax.Word:
+		case nil:
+		default:
+			text.WriteByte(0)
+		}
+		return !runs
+	})
+	return !runs && !strings.Contains(text.String(), "$[")
 }
 
 func posixDescriptorIsRedirected(command *CommandFact, fd int64) bool {
@@ -1013,7 +1438,7 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 				return
 			}
 			child = parseCommandAs(nested, dialect, out.nextID, wrapperDepth+1)
-		case "sudo", "exec", "env", "command", "nsenter", "chroot":
+		case "sudo", "exec", "env", "command", "builtin", "nsenter", "chroot":
 			nestedArgv, ok, uncertain := staticPOSIXWrapperArgv(command.Argv, program)
 			if uncertain {
 				out.markPartial(IssueUnsupportedConstruct)
@@ -1034,6 +1459,7 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 			// The argv was projected exactly by the surrounding POSIX parser;
 			// it does not introduce a second action dialect.
 			child.dialect = DialectPOSIX
+			carryPOSIXLiteralTildes(&child, command)
 		default:
 			continue
 		}
@@ -1166,7 +1592,7 @@ func staticPOSIXWrapperArgv(argv []string, program string) ([]string, bool, bool
 						return nil, false, true
 					}
 					if posixShellProgram(commandProgram(argv[i+1])) {
-						if terminalPOSIXShellArgv(argv[i+1:]) {
+						if sudoStdinPOSIXShellArgv(argv[i+1:]) {
 							return nil, false, false
 						}
 						if !staticPOSIXShellCommandArgv(argv[i+1:]) {
@@ -1222,7 +1648,7 @@ func staticPOSIXWrapperArgv(argv []string, program string) ([]string, bool, bool
 				return nil, false, true
 			}
 			if posixShellProgram(commandProgram(argv[i])) {
-				if terminalPOSIXShellArgv(argv[i:]) {
+				if sudoStdinPOSIXShellArgv(argv[i:]) {
 					return nil, false, false
 				}
 				if !staticPOSIXShellCommandArgv(argv[i:]) {
@@ -1246,6 +1672,20 @@ func staticPOSIXWrapperArgv(argv []string, program string) ([]string, bool, bool
 				return nil, false, false
 			}
 			if strings.HasPrefix(argv[i], "-") {
+				return nil, false, true
+			}
+			return cloneSlice(argv[i:]), true, false
+		}
+
+	case "builtin":
+		// builtin NAME runs the shell builtin NAME in the caller shell with the
+		// caller descriptors, so a redirect on it is a redirect of the NAME it
+		// runs, as for command. The shell accepts a leading --.
+		for i := 1; i < len(argv); i++ {
+			switch {
+			case argv[i] == "--":
+				continue
+			case strings.HasPrefix(argv[i], "-"):
 				return nil, false, true
 			}
 			return cloneSlice(argv[i:]), true, false
@@ -1311,6 +1751,24 @@ func posixSudoChangesExecutionRoot(arg string) bool {
 		arg == "--chdir" || arg == "--chroot" ||
 		strings.HasPrefix(arg, "--chdir=") ||
 		strings.HasPrefix(arg, "--chroot=")
+}
+
+// sudoStdinPOSIXShellArgv reports whether a shell that sudo starts reads its
+// commands from stdin and names no command of its own: a bare shell (`sudo
+// bash`) or one with an explicit stdin operand (`sudo bash -`, `sudo sh -s`).
+// Like the bare shell, it has no nested command to analyze, so the action
+// stays authoritative (rel-1-0-6 GAP-0221).
+func sudoStdinPOSIXShellArgv(argv []string) bool {
+	if terminalPOSIXShellArgv(argv) {
+		return true
+	}
+	program := commandProgram(argv[0])
+	switch program {
+	case "sh", "bash", "zsh", "dash", "ksh":
+		return exactPOSIXShellStdinArguments(program, argv)
+	default:
+		return false
+	}
 }
 
 func terminalPOSIXShellArgv(argv []string) bool {

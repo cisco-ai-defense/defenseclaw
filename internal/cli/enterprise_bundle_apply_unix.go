@@ -36,6 +36,9 @@ func runEnterpriseBundleApply(cmd *cobra.Command, opts *bundleApplyOptions) erro
 	if err := checkLockWait(cmd, opts.lockWait); err != nil {
 		return err
 	}
+	if err := checkDeliveryID(cmd, opts.deliveryID); err != nil {
+		return err
+	}
 	bundle := opts.bundle
 	if bundle != "" {
 		abs, err := filepath.Abs(bundle)
@@ -43,6 +46,22 @@ func runEnterpriseBundleApply(cmd *cobra.Command, opts *bundleApplyOptions) erro
 			return bundleUsage("--bundle: %v", err)
 		}
 		bundle = abs
+	}
+	anchors := opts.trustAnchors
+	switch {
+	case cmd.Flags().Changed("trust-anchors") && (anchors == "" || opts.inbox):
+		return bundleUsage("--trust-anchors takes an anchor file and goes with --bundle, not --inbox")
+	case cmd.Flags().Changed("device-group") && anchors == "":
+		return bundleUsage("--device-group pins the trust anchors that --trust-anchors installs; give both, or use enterprise bundle anchors install --device-group")
+	case cmd.Flags().Changed("device-group") && !enterprisebundle.ValidDeviceGroup(opts.deviceGroup):
+		return bundleUsage("--device-group: want 1-128 characters of [A-Za-z0-9._-]")
+	}
+	if anchors != "" {
+		abs, err := filepath.Abs(anchors)
+		if err != nil {
+			return bundleUsage("--trust-anchors: %v", err)
+		}
+		anchors = abs
 	}
 	env, err := newUnixLifecycleEnv(runtime.GOOS)
 	if err != nil {
@@ -52,11 +71,27 @@ func runEnterpriseBundleApply(cmd *cobra.Command, opts *bundleApplyOptions) erro
 		env.LockTimeout = opts.lockWait
 	}
 	env.RefuseCapabilityLoss = opts.refuseCapabilityLoss
-	result := enterpriseunix.Run(cmd.Context(), env, enterpriseunix.Options{
-		Action: enterpriseunix.ActionEnsure, Bundle: bundle, BundleInbox: opts.inbox, Reason: opts.reason,
-	})
+	env.DeferRestart = opts.deferRestart
+	env.AnchorsDeviceGroup = opts.deviceGroup
+	platform := "linux"
+	if runtime.GOOS == "darwin" {
+		platform = "macos"
+	}
+	applyOptions := unixBundleApplyOptions(opts, bundle)
+	applyOptions.TrustAnchors = anchors
+	var stop func()
+	applyOptions.Interrupted, stop = settleInterruptedLifecycle(cmd.ErrOrStderr(), "enterprise bundle apply", platform)
+	defer stop()
+	result := enterpriseunix.Run(cmd.Context(), env, applyOptions)
 	if err := printLifecycleResult(cmd.OutOrStdout(), result, opts.json); err != nil {
 		return err
 	}
 	return lifecycleFailure(result, opts.json, "")
+}
+
+// unixBundleApplyOptions is the ensure run of `bundle apply` for the bundle
+// at the absolute path bundle ("" with --inbox).
+func unixBundleApplyOptions(opts *bundleApplyOptions, bundle string) enterpriseunix.Options {
+	return enterpriseunix.Options{Action: enterpriseunix.ActionEnsure, Bundle: bundle, BundleInbox: opts.inbox,
+		Reason: opts.reason, DeliveryID: opts.deliveryID}
 }

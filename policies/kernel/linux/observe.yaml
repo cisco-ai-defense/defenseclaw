@@ -54,3 +54,7 @@ groups:
     scope: home
     access: write
     from_control: kernel.persistence_write
+  - name: authorized_keys
+    scope: home
+    access: write
+    from_control: kernel.ssh_authorized_keys_write

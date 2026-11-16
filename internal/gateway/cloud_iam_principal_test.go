@@ -127,7 +127,7 @@ func TestCloudIAMAdministratorAttachmentSemanticOwnershipIsClosed(t *testing.T) 
 		t.Fatalf("fallback contract=%+v ok=%t", contract, ok)
 	}
 	foundCatalog := false
-	for _, category := range defaultRuleCategories {
+	for _, category := range defaultRuleCategories() {
 		for _, rule := range category.Rules {
 			if rule.ID != cloudIAMAdministratorAttachmentRuleID {
 				continue

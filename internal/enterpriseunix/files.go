@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -144,7 +145,12 @@ func exists(path string) bool {
 
 // ensureDir creates path (and missing parents with 0755 root-style modes)
 // and forces its exact mode and owner. An existing symlink or non-directory
-// is refused rather than replaced.
+// is refused rather than replaced. On macOS a managed folder that carries an
+// immutable or append-only flag (chflags uchg, for example) refuses every
+// chmod and every file put in or taken out of it: an ensure --config then
+// stopped as apply_failed before it removed an ACL entry, and the file a
+// standard user wrote through that entry stayed (GAP-2446). The flag is
+// cleared like a wrong mode, and the run lists it among its changes.
 func (e *Env) ensureDir(path string, mode os.FileMode, owner fileOwner) error {
 	info, err := os.Lstat(path)
 	switch {
@@ -154,6 +160,9 @@ func (e *Env) ensureDir(path string, mode os.FileMode, owner fileOwner) error {
 		}
 		if !info.IsDir() {
 			return fmt.Errorf("%s exists and is not a directory", path)
+		}
+		if err := e.clearBlockingDirFlags(path); err != nil {
+			return err
 		}
 	case errors.Is(err, os.ErrNotExist):
 		if err := mkdirParents(filepath.Dir(path)); err != nil {
@@ -172,6 +181,35 @@ func (e *Env) ensureDir(path string, mode os.FileMode, owner fileOwner) error {
 		return fmt.Errorf("chown %s: %w", path, err)
 	}
 	return nil
+}
+
+// clearBlockingDirFlags clears the macOS immutable and append-only flags of
+// a managed folder (see ensureDir).
+func (e *Env) clearBlockingDirFlags(path string) error {
+	if e.GOOS != "darwin" || e.clearDirFlags == nil {
+		return nil
+	}
+	flags, err := e.clearDirFlags(path)
+	if err != nil {
+		if flags == "" {
+			return fmt.Errorf("read the file flags of %s: %w", path, err)
+		}
+		return fmt.Errorf("%s carries the macOS %s flag, which stops DefenseClaw from managing it, and clearing it failed (run chflags %s %s, then run this again): %w",
+			path, flags, noFlags(flags), path, err)
+	}
+	if flags != "" && e.dirFlagsCleared != nil {
+		e.dirFlagsCleared(path, flags)
+	}
+	return nil
+}
+
+// noFlags turns "uchg,uappnd" into the chflags argument that clears them.
+func noFlags(flags string) string {
+	names := strings.Split(flags, ",")
+	for i, name := range names {
+		names[i] = "no" + name
+	}
+	return strings.Join(names, ",")
 }
 
 // mkdirParents creates path and its missing ancestors as 0755 directories.
@@ -240,6 +278,45 @@ func (e *Env) copyFileAtomic(src, path string, mode os.FileMode, owner fileOwner
 	})
 }
 
+// refreshFile replaces a regular file with a new file (a new inode) that has
+// the same bytes, mode and owner. The copy must hash to what the file held
+// when it was opened; a file that changes meanwhile is left as it is.
+func (e *Env) refreshFile(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", path)
+	}
+	uid, gid, err := e.OwnerOf(path)
+	if err != nil {
+		return err
+	}
+	in, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	if opened, err := in.Stat(); err != nil || !os.SameFile(info, opened) {
+		return fmt.Errorf("%s changed while it was opened", path)
+	}
+	want, err := sha256File(path)
+	if err != nil {
+		return err
+	}
+	return e.installAtomic(path, info.Mode().Perm(), fileOwner{UID: uid, GID: gid}, func(w io.Writer) error {
+		sum := sha256.New()
+		if _, err := io.Copy(io.MultiWriter(w, sum), in); err != nil {
+			return err
+		}
+		if hex.EncodeToString(sum.Sum(nil)) != want {
+			return fmt.Errorf("%s changed while it was copied", path)
+		}
+		return nil
+	})
+}
+
 func (e *Env) installAtomic(path string, mode os.FileMode, owner fileOwner, fill func(io.Writer) error) error {
 	dir := filepath.Dir(path)
 	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
@@ -264,7 +341,7 @@ func (e *Env) installAtomic(path string, mode os.FileMode, owner fileOwner, fill
 	if err := fill(file); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
-	if err := file.Sync(); err != nil {
+	if err := syncFile(file); err != nil {
 		return fmt.Errorf("sync %s: %w", path, err)
 	}
 	if err := file.Close(); err != nil {
@@ -286,9 +363,16 @@ func (e *Env) installAtomic(path string, mode os.FileMode, owner fileOwner, fill
 	return nil
 }
 
+// syncFile flushes file to stable storage. Every fsync of this package goes
+// through it, so the package tests can leave it out: each one costs about
+// 5 ms on an EBS root disk, and the tests ran tens of thousands of them
+// (GAP-0281).
+var syncFile = (*os.File).Sync
+
+// syncDir flushes the directory entry of a file just renamed into dir.
 func syncDir(dir string) {
 	if handle, err := os.Open(dir); err == nil {
-		_ = handle.Sync()
+		_ = syncFile(handle)
 		_ = handle.Close()
 	}
 }
@@ -411,7 +495,7 @@ func copyPreserved(src, dst string) error {
 		_ = out.Close()
 		return err
 	}
-	if err := out.Sync(); err != nil {
+	if err := syncFile(out); err != nil {
 		_ = out.Close()
 		return err
 	}

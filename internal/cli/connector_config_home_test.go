@@ -18,10 +18,18 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
+// ownedCodexOTLPFixture is a released Codex exporter: the product markers and
+// the scoped bearer. Ownership is decided by a credential the install can
+// name, so the test writes that bearer to the scoped sidecar
+// (ownedCodexOTLPToken); markers or the token shape alone would be an
+// operator collector.
+const ownedCodexOTLPToken = "0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d"
+
 const ownedCodexOTLPFixture = `[otel.exporter.otlp-http]
 endpoint = "http://127.0.0.1:18970/v1/logs"
 
 [otel.exporter.otlp-http.headers]
+authorization = "Bearer 0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d"
 x-defenseclaw-source = "codex"
 x-defenseclaw-client = "codex-otel/1.0"
 `
@@ -146,57 +154,6 @@ func TestBindOpenCodeLifecycleConfigHomeOverridesAmbientAndRestoresIt(t *testing
 	restore()
 	if got := os.Getenv("OPENCODE_CONFIG_DIR"); got != ambient {
 		t.Fatalf("restored OPENCODE_CONFIG_DIR = %q, want %q", got, ambient)
-	}
-}
-
-func TestBindOmnigentLifecycleConfigHomeOverridesAmbientAndRestoresIt(t *testing.T) {
-	root := t.TempDir()
-	ambient := filepath.Join(root, "ambient-omnigent")
-	bound := filepath.Join(root, "bound-omnigent")
-	t.Setenv("OMNIGENT_CONFIG_HOME", ambient)
-	connectorFlagConfigHome = bound
-	t.Cleanup(func() { connectorFlagConfigHome = "" })
-
-	restore, err := bindConnectorLifecycleConfigHome("omnigent")
-	if err != nil {
-		t.Fatalf("bind OmniGent config home: %v", err)
-	}
-	if got := os.Getenv("OMNIGENT_CONFIG_HOME"); got != bound {
-		t.Fatalf("OMNIGENT_CONFIG_HOME = %q, want %q", got, bound)
-	}
-	if got := connector.NewOmnigentConnector().Capabilities(resolveConnectorOpts("")).Hooks.ConfigPath; !strings.HasPrefix(filepath.Clean(got), filepath.Clean(bound)+string(filepath.Separator)) {
-		t.Fatalf("OmniGent config path = %q, want beneath %q", got, bound)
-	}
-	restore()
-	if got := os.Getenv("OMNIGENT_CONFIG_HOME"); got != ambient {
-		t.Fatalf("restored OMNIGENT_CONFIG_HOME = %q, want %q", got, ambient)
-	}
-}
-
-func TestOmnigentVerifyAcceptsExactHiddenConfigHomeAndRestoresAmbient(t *testing.T) {
-	root := t.TempDir()
-	dataDir := testenv.PrivateTempDir(t)
-	ambient := filepath.Join(root, "ambient-omnigent")
-	bound := filepath.Join(root, "bound-omnigent")
-	if err := os.MkdirAll(bound, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("OMNIGENT_CONFIG_HOME", ambient)
-	defer withConnectorState(t, dataDir, "omnigent")()
-
-	stdout, stderr, exitCode := runConnectorCmd(
-		t,
-		"verify",
-		"--connector", "omnigent",
-		"--data-dir", dataDir,
-		"--config-home", bound,
-		"--json",
-	)
-	if exitCode != 0 || stderr != "" || !strings.Contains(stdout, `"connector":"omnigent"`) || !strings.Contains(stdout, `"clean":true`) {
-		t.Fatalf("OmniGent explicit-home verify: exit=%d stdout=%q stderr=%q", exitCode, stdout, stderr)
-	}
-	if got := os.Getenv("OMNIGENT_CONFIG_HOME"); got != ambient {
-		t.Fatalf("OMNIGENT_CONFIG_HOME after verify = %q, want %q", got, ambient)
 	}
 }
 
@@ -338,6 +295,12 @@ func TestConnectorVerifyUsesExplicitConfigHomeWithoutMutation(t *testing.T) {
 	}
 	t.Setenv("CODEX_HOME", ambient)
 	defer withConnectorState(t, dataDir, "codex")()
+	if err := os.MkdirAll(filepath.Join(dataDir, "hooks"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "hooks", ".otlp-codex.token"), []byte(ownedCodexOTLPToken+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	stdout, stderr, exitCode := runConnectorCmd(
 		t,
@@ -439,10 +402,11 @@ func TestCursorReconcileWritesOnlyExplicitConfigHome(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(hooks, []byte(`"failClosed": false`)) ||
+	if !bytes.Contains(hooks, []byte(`"failClosed": true`)) ||
 		!bytes.Contains(hooks, []byte(`"preToolUse"`)) {
 		t.Fatalf("Cursor reconcile wrote an incomplete registration: %s", hooks)
 	}
+	// The lock records the outage mode: the default tier's open.
 	if lock := connector.LoadHookContractLockEntry(dataDir, "cursor"); lock.HookFailMode != "open" {
 		t.Fatalf("Cursor observe lock fail mode = %q, want open", lock.HookFailMode)
 	}

@@ -13,10 +13,23 @@
 # package, and let an apply run that already started finish first.
 #
 # It fails the package transaction only for an administrator config this
-# package cannot read, or for a downgrade the administrator did not ask for
+# package cannot read, for a downgrade the administrator did not ask for, or
+# while a sandbox daemon of DefenseClaw 1.0.3 or older has a sandbox running
 # (below); nothing else stops it.
 
 set -u
+
+# refuse CODE MESSAGE: stop the package transaction before any file is
+# replaced. Every refusal starts with the lifecycle code the docs name for it
+# (troubleshooting, Lifecycle error codes), as Windows Setup and the macOS
+# package report it; rpm, dnf and apt print this text, and it is not written
+# to last-package-result.json, which keeps the result of the package that is
+# applied (GAP-0582).
+refuse() {
+    echo "defenseclaw-enterprise: $1: $2" >&2
+    exit 1
+}
+
 case "${1:-}" in
     install | upgrade | [1-9]*) ;;
     *) exit 0 ;;
@@ -51,8 +64,7 @@ if [ -f "$config" ]; then
             }
         }' "$config" 2>/dev/null)
     if [ -n "$found" ] && [ "$found" -gt "$max_config_version" ] 2>/dev/null; then
-        echo "defenseclaw-enterprise: $config has config_version $found, and this package reads up to $max_config_version: it was written for a newer DefenseClaw. Nothing was changed. Install a DefenseClaw release that reads it, or push a config with config_version: $max_config_version first." >&2
-        exit 1
+        refuse config_invalid "$config has config_version $found, and this package reads up to $max_config_version: it was written for a newer DefenseClaw. Nothing was changed. Install a DefenseClaw release that reads it, or push a config with config_version: $max_config_version first."
     fi
 fi
 
@@ -69,8 +81,89 @@ package_version="@DC_PKG_VERSION@"
 state=/var/lib/defenseclaw-enterprise
 record="$state/deployment.json"
 marker="$state/allow-downgrade"
+# owner_mode PATH: the owner's uid and the permission bits (octal) of PATH
+# itself, not of a symlink's target.
+owner_mode() { stat -c '%u %a' "$1" 2>/dev/null; }
 root_owned() {
-    [ -f "$1" ] && [ ! -L "$1" ] && [ "$(stat -c %u "$1" 2>/dev/null)" = 0 ]
+    [ -f "$1" ] && [ ! -L "$1" ] && ro_info=$(owner_mode "$1") && [ "${ro_info%% *}" = 0 ]
+}
+# root_only PATH: PATH itself, not a symlink's target, belongs to root, and
+# no group or other account can write it (an ACL that lets another account
+# write shows in the group bits, which are then its mask). An owner or mode
+# that cannot be read is not root's.
+root_only() {
+    t_info=$(owner_mode "$1") || return 1
+    case $t_info in
+        "0 "[0-7]*) t_mode=${t_info#0 } ;;
+        *) return 1 ;;
+    esac
+    case $t_mode in *[!0-7]*) return 1 ;; esac
+    [ $((0$t_mode & 022)) -eq 0 ]
+}
+# trusted PATH: PATH is a regular file, not a symlink, and only root can
+# change what it names. PATH is looked up one entry at a time, as the kernel
+# looks it up, following every symlink on the way (its target from / or from
+# the folder that holds it): every folder an entry is found in, and the
+# file, are root_only, and every symlink belongs to root. A check
+# of only the folders the path ends in missed the folder that holds a
+# symlink and the folders a symlink's target passes through: an account
+# that could write one could swap the symlink between the check and the
+# run. t_real is then the file PATH names, reached through folders only, and
+# the caller runs that file. A symlink that cannot be read, or more than 32
+# of them, is not trusted.
+trusted() {
+    t_real=
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    case $1 in /*) ;; *) return 1 ;; esac
+    root_only / || return 1
+    t_dir=/
+    t_rest=$1
+    t_hops=0
+    while :; do
+        case $t_rest in
+            /*) t_rest=${t_rest#/}; continue ;;
+            "") return 1 ;;
+            */*)
+                t_name=${t_rest%%/*}
+                t_rest=${t_rest#*/}
+                t_more=/
+                ;;
+            *)
+                t_name=$t_rest
+                t_rest=
+                t_more=
+                ;;
+        esac
+        case $t_name in
+            .) continue ;;
+            ..)
+                t_dir=${t_dir%/*}
+                t_dir=${t_dir:-/}
+                continue
+                ;;
+        esac
+        t_path=${t_dir%/}/$t_name
+        if [ -L "$t_path" ]; then
+            t_hops=$((t_hops + 1))
+            [ "$t_hops" -le 32 ] || return 1
+            t_info=$(owner_mode "$t_path") || return 1
+            [ "${t_info%% *}" = 0 ] || return 1
+            t_link=$(readlink "$t_path") || return 1
+            case $t_link in
+                "") return 1 ;;
+                /*) t_dir=/ ;;
+            esac
+            t_rest=$t_link$t_more$t_rest
+            continue
+        fi
+        root_only "$t_path" || return 1
+        if [ -z "$t_more" ] && [ -f "$t_path" ]; then
+            t_real=$t_path
+            return 0
+        fi
+        [ -d "$t_path" ] || return 1
+        t_dir=$t_path
+    done
 }
 # not_older A B: A is not older than B, by the lifecycle's version order
 # (enterpriseunix compareProductVersions: dotted numbers, a release above its
@@ -99,18 +192,94 @@ not_older() {
             exit 0
         }'
 }
+# A device that takes signed policy bundles must not run a release below the
+# one its confirmed bundle requires (min_product_version), even for a
+# deliberate rollback: a bundle signed with a lower floor lifts it. A gateway
+# from 1.0.4 on reads the floor, and its binary carries floor_check_marker:
+# looking for it, without running the gateway, tells a gateway that cannot
+# run from one before 1.0.4, which has no check and is not asked. When the
+# installed gateway is gone or older (uninstall --keep-state and then the
+# package removal, or an uninstall that failed after removing the binaries),
+# the root-only copy that uninstall kept in the lifecycle folder answers.
+# Only a gateway that was read and has no marker is an older one: a gateway
+# that cannot be read, and a gateway with the marker or a kept copy that is
+# not a root-owned file only root can change (trusted: another account
+# cannot change it, a folder above it, or a symlink on the way to it), or
+# whose owner or mode cannot be read, leave the floor unchecked unless the
+# other one answers, and the install is refused. A trusted checker is run
+# by the path it resolves to.
+# Only exit 0 lets the install go on: exit 3 is the refusal, and any other
+# result (application control denied the execution, the checker was killed
+# or crashed) leaves the floor unchecked, so the install is refused too.
+gateway=/opt/defenseclaw/bin/defenseclaw-gateway
+floor_check_marker=defenseclaw-package-floor-check/1
+kept="$state/floor-check"
+checker=
+unchecked=
+if [ -e "$gateway" ] || [ -L "$gateway" ]; then
+    grep -qaF "$floor_check_marker" "$gateway" 2>/dev/null
+    case $? in
+    0)
+        if trusted "$gateway"; then
+            checker=$t_real
+        else
+            unchecked="$gateway has the floor check, but it is not a root-owned file that only root can change (another account can change it, a folder above it, or a symlink on the way to it), or its owner or mode could not be read"
+        fi
+        ;;
+    1) ;; # a gateway before 1.0.4: it has no floor check
+    *) unchecked="$gateway could not be read to tell whether it has the floor check" ;;
+    esac
+fi
+if [ -z "$checker" ]; then
+    if [ ! -L "$kept" ] && trusted "$kept/defenseclaw-gateway"; then
+        checker=$t_real
+        unchecked=
+    elif [ -L "$kept" ] || [ -e "$kept/defenseclaw-gateway" ] || [ -L "$kept/defenseclaw-gateway" ]; then
+        unchecked="$kept/defenseclaw-gateway, the gateway an uninstall kept for the floor check, is not a root-owned file that only root can change, in a folder that is not a symlink (another account can change it, a folder above it, or a symlink on the way to it), or its owner or mode could not be read"
+    fi
+fi
+case "$package_version" in
+    @*@) ;;
+    *)
+        if [ -n "$checker" ]; then
+            floor_msg=$("$checker" enterprise bundle floor-check --product-version "$package_version" 2>&1 >/dev/null)
+            floor_rc=$?
+            if [ "$floor_rc" -ne 0 ]; then
+                [ "$floor_rc" -eq 3 ] || floor_msg="the release floor of the confirmed signed policy bundle could not be checked: $checker exited $floor_rc${floor_msg:+ ($floor_msg)}. Let it run (for example, trust it in the application control policy) and install again."
+                floor_msg=${floor_msg#Error: }
+                refuse product_floor_refused "refusing to install $package_version: ${floor_msg#product_floor_refused: } Nothing was changed."
+            fi
+        elif [ -n "$unchecked" ]; then
+            refuse product_floor_refused "refusing to install $package_version: the release floor of the confirmed signed policy bundle could not be checked: $unchecked. Restore it as a readable, root-owned file that only root can write, in folders only root can write, and install again. Nothing was changed."
+        fi
+        ;;
+esac
 case "$package_version" in
     @*@) ;;
     *)
         if root_owned "$record" && ! root_owned "$marker"; then
             installed=$(sed -n 's/.*"product_version": *"\([^"]*\)".*/\1/p' "$record" 2>/dev/null | head -n 1)
             if [ -n "$installed" ] && ! not_older "$package_version" "$installed"; then
-                echo "defenseclaw-enterprise: DefenseClaw $installed is deployed; refusing to downgrade to $package_version. Nothing was changed. For a deliberate rollback, create the rollback marker first (sudo touch $marker) and install this package again: it is then applied with 'enterprise linux ensure --from-package --allow-downgrade'." >&2
-                exit 1
+                refuse downgrade_refused "DefenseClaw $installed is deployed; refusing to downgrade to $package_version. Nothing was changed. For a deliberate rollback, create the rollback marker first (sudo touch $marker) and install this package again: it is then applied with 'enterprise linux ensure --from-package --allow-downgrade'."
             fi
         fi
         ;;
 esac
+
+# A sandbox daemon of DefenseClaw 1.0.3 or older stops its user's OpenShell
+# gateway once this package replaces its program, under a MicroVM whose
+# workload ended, which loses what that VM has not written (GAP-0903).
+# DefenseClaw stops no sandbox itself: refuse before any file is replaced
+# while such a daemon has a sandbox running, naming each one with the
+# command its user runs to end it, and end an idle one first. The release
+# build puts the guard in place of the next line
+# (scripts/stamp-package-script.sh).
+# @LEGACY_SANDBOX_GUARD@
+if command -v dc_legacy_sandbox_guard >/dev/null 2>&1; then
+    if ! dc_legacy_sandbox_guard linux /opt/defenseclaw/bin/defenseclaw-gateway /usr/bin/defenseclaw; then
+        refuse sandboxes_running "${dc_guard_message#defenseclaw-enterprise: }"
+    fi
+fi
 
 apply_path=defenseclaw-enterprise-apply.path
 # The postinstall starts the trigger again when this marker is present.
@@ -146,4 +315,63 @@ if [ -f "$state/lifecycle.lock" ] && command -v flock >/dev/null 2>&1; then
         echo "defenseclaw-enterprise: another DefenseClaw lifecycle run held the lock for 8 minutes; the upgrade continues, and the postinstall waits for that run before it applies the package." >&2
     fi
 fi
+# A sandbox daemon of DefenseClaw before 1.0.4 exits by itself once the
+# package replaced its program, as soon as it counts no running sandbox,
+# and its exit stops the account's OpenShell gateway: also under a MicroVM
+# that completed or whose main process failed while its VM still runs,
+# which it does not count, so that VM ends with no flush (GAP-0868). The
+# postinstall ensure replaces such a daemon without letting it exit
+# (StopKill), but the old daemon acted first, between the file swap and the
+# ensure. Hold each one (SIGSTOP) before any file is replaced; the
+# postinstall ends the held ones with SIGKILL, which runs nothing on their
+# way out, before its ensure, and systemd starts the installed daemon. Their
+# sandboxes' hooks wait meanwhile, so they are held last, after the wait for
+# the lifecycle lock (GAP-1553). If the transaction never reaches the
+# postinstall (an unpack that fails, where dpkg runs the old postinst), a
+# timer lets them go on after 10 minutes. A held daemon whose program was
+# swapped by then (a dpkg unpack whose configure comes later) would act on
+# the swap as GAP-0868 says, so the timer ends it as the postinstall would
+# (same start time, its program deleted) and systemd starts the installed
+# one (GAP-1804).
+sandbox_held=/run/defenseclaw-sandbox-daemons.held
+sandbox_recovery=defenseclaw-sandbox-daemons-recovery
+sandbox_daemon_cmd="/opt/defenseclaw/bin/defenseclaw-gateway sandbox-daemon"
+proc=/proc
+# deployed_before_1_0_4: the deployed release, as its root-owned record
+# names it, is older than 1.0.4.
+deployed_before_1_0_4() {
+    root_owned "$record" || return 1
+    d_version=$(sed -n 's/.*"product_version": *"\([^"]*\)".*/\1/p' "$record" 2>/dev/null | head -n 1)
+    [ -n "$d_version" ] && ! not_older "$d_version" 1.0.4
+}
+# sandbox_daemons prints "<pid> <start time>" of each running sandbox
+# daemon (its command line exactly the unit's ExecStart).
+sandbox_daemons() {
+    for s_dir in "$proc"/[0-9]*; do
+        s_cmd=$(tr '\0' ' ' 2>/dev/null <"$s_dir/cmdline") || continue
+        [ "$s_cmd" = "$sandbox_daemon_cmd " ] || continue
+        s_start=$(sed 's/^.*) //' "$s_dir/stat" 2>/dev/null | cut -d' ' -f20)
+        [ -n "$s_start" ] && printf '%s %s\n' "${s_dir##*/}" "$s_start"
+    done
+}
+if deployed_before_1_0_4; then
+    s_list=$(sandbox_daemons)
+    if [ -n "$s_list" ]; then
+        systemctl stop "$sandbox_recovery.timer" >/dev/null 2>&1 || true
+        # The recovery expands its own variables.
+        # shellcheck disable=SC2016
+        if printf '%s\n' "$s_list" >"$sandbox_held" 2>/dev/null &&
+            systemd-run --quiet --unit="$sandbox_recovery" --on-active=10m /bin/sh -c \
+                'f='"$sandbox_held"'; [ -e "$f" ] || exit 0; while read -r p s; do x=$(readlink "/proc/$p/exe" 2>/dev/null); n=$(sed "s/^.*) //" "/proc/$p/stat" 2>/dev/null | cut -d" " -f20); case "$x" in *" (deleted)") if [ "$n" = "$s" ]; then kill -KILL "$p" 2>/dev/null; continue; fi ;; esac; kill -CONT "$p" 2>/dev/null; done <"$f"; rm -f "$f"' \
+                >/dev/null 2>&1; then
+            printf '%s\n' "$s_list" | while read -r s_pid s_start; do
+                kill -STOP "$s_pid" 2>/dev/null || true
+            done
+        else
+            rm -f "$sandbox_held"
+            echo "defenseclaw-enterprise: could not hold the sandbox daemons of the earlier DefenseClaw; one may stop its account's OpenShell gateway during the upgrade." >&2
+        fi
+    fi
+fi
+
 exit 0

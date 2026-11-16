@@ -69,6 +69,10 @@ def _fix_script() -> str:
         ], "changes": ["applied the config change in the running gateway"]},
          "0|repaired (ensure_config_applied): applied the config change in the running gateway"),
         ({"ok": True, "noop": False, "errors": [], "warnings": [
+            {"code": "ensure_config_restart", "message": "applied a configuration change and upgraded nothing"},
+        ], "changes": ["applied the administrator config"]},
+         "0|repaired (ensure_config_restart): applied the administrator config"),
+        ({"ok": True, "noop": False, "errors": [], "warnings": [
             {"code": "scanner_runtime_unavailable", "message": "runtime missing"},
         ]}, "1603|not repaired (scanner_runtime_unavailable): runtime missing"),
         ({"ok": True, "noop": False, "errors": [], "warnings": [
@@ -80,6 +84,20 @@ def _fix_script() -> str:
         ]}, "0|still failing (hooks_drifted): hooks drifted"),
         ({"ok": False, "noop": False, "errors": [
             {"code": "lifecycle_error", "message": "verify failed"},
+        ]}, "0|still failing (lifecycle_error): verify failed"),
+        # GAP-0044 review: a failed run's repair warning (an older CLI's
+        # ensure_config_restart, or config_reverted) never names the problem.
+        ({"ok": False, "noop": False, "errors": [
+            {"code": "lifecycle_error", "message": "verify failed"},
+        ], "warnings": [
+            {"code": "ensure_config_restart", "message": "ensure applied a configuration change and upgraded nothing"},
+        ], "changes": ["applied the administrator config"]},
+         "0|still failing (lifecycle_error): verify failed; attempted repair: applied the administrator config"),
+        ({"ok": False, "noop": False, "errors": [
+            {"code": "lifecycle_error", "message": "verify failed"},
+        ], "warnings": [
+            {"code": "ensure_config_failed", "message": "the transaction did not succeed"},
+            {"code": "config_reverted", "message": "put the managed config back"},
         ]}, "0|still failing (lifecycle_error): verify failed"),
     ],
 )

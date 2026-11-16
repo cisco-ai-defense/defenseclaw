@@ -47,6 +47,18 @@ func SetProcessAccountLookup(lookup func() map[int]ProcessAccount) func() {
 	}
 }
 
+// processAccountsOnce returns a lookup that asks the broker at most once,
+// whatever it answers: one discovery scan shares it, so an unavailable
+// broker is not asked again for every process (GAP-1199).
+func processAccountsOnce() func() map[int]ProcessAccount {
+	var once sync.Once
+	var accounts map[int]ProcessAccount
+	return func() map[int]ProcessAccount {
+		once.Do(func() { accounts = brokeredProcessAccounts() })
+		return accounts
+	}
+}
+
 func brokeredProcessAccounts() map[int]ProcessAccount {
 	processAccounts.Lock()
 	lookup := processAccounts.lookup
@@ -146,6 +158,18 @@ func processAccountMatchesOwner(user string, owner discoveryHomeOwner, secureCli
 	return secureClient || domain == "" || ownerDomain == "" || strings.EqualFold(ownerDomain, domain)
 }
 
+// processAccountProvesOwner reports a brokered account that is owner's for
+// certain, as dropping a process as an excluded account's needs: a short
+// name without a domain cannot tell an excluded DOMAIN\alice from an
+// enrolled local alice, so it proves only an owner recorded without a
+// domain (GAP-1130).
+func processAccountProvesOwner(user string, owner discoveryHomeOwner) bool {
+	if !processAccountMatchesOwner(user, owner, false) {
+		return false
+	}
+	return strings.TrimSpace(owner.Domain) == "" || strings.Contains(user, `\`)
+}
+
 // discoveryHomeOwner names the account that owns one profile root of a
 // service-context scan. On managed Windows the gateway service reads every
 // enrolled user's agent folders itself (the hook enumerator grants it read
@@ -213,7 +237,7 @@ func (s *ContinuousDiscoveryService) stampHomeOwner(sig *AISignal, path string) 
 // establish the process owner or a verified directory identity. Secure Client
 // keeps origin/main's image-path attribution. Node helpers inherit only an
 // already attributed parent.
-func (s *ContinuousDiscoveryService) attributeProcessOwners(procs []processInfo) {
+func (s *ContinuousDiscoveryService) attributeProcessOwners(procs []processInfo, brokered func() map[int]ProcessAccount) {
 	if len(s.opts.homeOwners) == 0 {
 		return
 	}
@@ -231,16 +255,11 @@ func (s *ContinuousDiscoveryService) attributeProcessOwners(procs []processInfo)
 			procs[i].OwnerID, procs[i].OwnerName = owner.UserID, owner.UserName
 		}
 	}
-	var accounts map[int]ProcessAccount
-	asked := false
 	for i := range procs {
 		if procs[i].OwnerID != "" || procs[i].Connector == "" {
 			continue
 		}
-		if !asked {
-			accounts, asked = brokeredProcessAccounts(), true
-		}
-		account, ok := accounts[procs[i].PID]
+		account, ok := brokered()[procs[i].PID]
 		if !ok || windowsProcessBasename(account.Name) != windowsProcessBasename(procs[i].Comm) {
 			continue
 		}

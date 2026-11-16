@@ -38,7 +38,7 @@ func identityHookScripts(t *testing.T) []string {
 	if err != nil {
 		t.Fatalf("glob hooks: %v", err)
 	}
-	if len(scripts) < 9 {
+	if len(scripts) < 8 {
 		t.Fatalf("found only %d connector hooks (%q); the glob is no longer matching them", len(scripts), scripts)
 	}
 	return scripts
@@ -163,101 +163,78 @@ func TestIdentityHeadersSurviveTheSystemShellsReader(t *testing.T) {
 
 	// Matches the reader block each hook uses, so a hook that changes how it
 	// reads the helper is exercised here rather than silently going quiet.
+	// The hooks fill the array in the shell (defenseclaw_user_identity_header_args,
+	// issue #1130); a Secure Client render keeps the read loop it had before
+	// 1.0.7 (review of 0f2e3b002c). The loop is what bash 3.2 broke with
+	// mapfile once, so both readers run on the system shell.
 	readerPattern := regexp.MustCompile(
-		`(?s)IDENTITY_HEADER_ARGS=\(\).*?defenseclaw_user_identity_args\).*?\nfi\n`,
+		`IDENTITY_HEADER_ARGS=\(\)\n\{\{if \.SecureClient\}\}((?s:.*?))\{\{else\}\}(defenseclaw_user_identity_header_args\n)\{\{end\}\}`,
 	)
 
 	for _, script := range identityHookScripts(t) {
-		t.Run(filepath.Base(script), func(t *testing.T) {
-			body, err := hookFS.ReadFile(script)
-			if err != nil {
-				t.Fatalf("read embed: %v", err)
-			}
-			reader := readerPattern.Find(body)
-			if reader == nil {
-				t.Fatalf(
-					"%s has no identity reader block, so every event from this "+
-						"connector reaches AI Defense with no user attribution",
-					script,
-				)
-			}
+		body, err := hookFS.ReadFile(script)
+		if err != nil {
+			t.Fatalf("read embed: %v", err)
+		}
+		m := readerPattern.FindSubmatch(body)
+		if m == nil {
+			t.Fatalf(
+				"%s has no identity reader block, so every event from this "+
+					"connector reaches AI Defense with no user attribution",
+				script,
+			)
+		}
+		for _, variant := range []struct{ name, reader string }{
+			{"", "IDENTITY_HEADER_ARGS=()\n" + string(m[2])},
+			{"/secure-client", "IDENTITY_HEADER_ARGS=()\n" + string(m[1])},
+		} {
+			script, reader := script, []byte(variant.reader)
+			t.Run(filepath.Base(script)+variant.name, func(t *testing.T) {
 
-			program := `set -euo pipefail
+				program := `set -euo pipefail
 source "$1"
 ` + string(reader) + `
 printf '%s\n' "${#IDENTITY_HEADER_ARGS[@]}"
 printf '%s\n' "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}"
 `
-			command := exec.Command(shell, "-c", program, shell, helperPath)
-			// The session facts header depends on the SSH and logind
-			// variables of whoever runs the test; count only the user
-			// identity arguments.
-			command.Env = withoutSessionFactsEnv(os.Environ())
-			out, err := command.CombinedOutput()
-			if err != nil {
-				t.Fatalf("reader failed under %s: %v\n%s", shell, err, out)
-			}
-			lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-			wantArgs := strconv.Itoa(identityHeaderLineCountForHost(t))
-			if lines[0] != wantArgs {
-				t.Fatalf(
-					"%s collected %s identity arguments under %s, want %s — "+
-						"the endpoint would send no user identity at all\noutput: %q",
-					script, lines[0], shell, wantArgs, string(out),
-				)
-			}
-			if !strings.Contains(string(out), "X-DefenseClaw-User-Id: "+strconv.Itoa(os.Geteuid())) {
-				t.Fatalf("%s did not carry the caller's uid: %q", script, string(out))
-			}
-			if identityHeaderLineCountForHost(t) == identityHeaderLinesWithName {
-				wantName := "X-DefenseClaw-User-Name: " + hostAccountName(t)
-				if !strings.Contains(string(out), wantName) {
-					t.Fatalf("%s did not carry %q: %q", script, wantName, string(out))
+				command := exec.Command(shell, "-c", program, shell, helperPath)
+				// The session facts header depends on the SSH and logind
+				// variables of whoever runs the test; count only the user
+				// identity arguments.
+				command.Env = withoutSessionFactsEnv(os.Environ())
+				out, err := command.CombinedOutput()
+				if err != nil {
+					t.Fatalf("reader failed under %s: %v\n%s", shell, err, out)
 				}
-			}
-
-			// Collecting the arguments and never passing them to curl fails
-			// exactly as quietly as not collecting them.
-			if !strings.Contains(string(body), `"${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}"`) {
-				t.Fatalf(
-					"%s builds IDENTITY_HEADER_ARGS but never expands it into its request",
-					script,
-				)
-			}
-		})
-	}
-}
-
-// TestPluginTransportsReportIdentityToo covers the connectors that do not go
-// through a shell hook at all.
-//
-// amp, opencode, and omnigent POST to the gateway from inside the agent's own
-// runtime, so they bypass both _hardening.sh and hookexec. They were the other
-// half of the same gap: three connectors whose events reached AI Defense with
-// no user on them, for the same reason and with the same silence.
-func TestPluginTransportsReportIdentityToo(t *testing.T) {
-	for _, asset := range []string{
-		"hooks/amp-plugin.ts",
-		"hooks/opencode-plugin.js",
-		"hooks/omnigent-policy.py",
-	} {
-		t.Run(filepath.Base(asset), func(t *testing.T) {
-			body, err := hookFS.ReadFile(asset)
-			if err != nil {
-				t.Fatalf("read embed: %v", err)
-			}
-			for _, header := range []string{"X-DefenseClaw-User-Id", "X-DefenseClaw-User-Name"} {
-				if !strings.Contains(string(body), header) {
-					t.Errorf("%s never sets %s, so its events carry no user", asset, header)
+				lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+				wantArgs := strconv.Itoa(identityHeaderLineCountForHost(t))
+				if lines[0] != wantArgs {
+					t.Fatalf(
+						"%s collected %s identity arguments under %s, want %s — "+
+							"the endpoint would send no user identity at all\noutput: %q",
+						script, lines[0], shell, wantArgs, string(out),
+					)
 				}
-			}
-			// Each of these runs on Windows too, where there is no POSIX uid.
-			// Reporting the -1 that the runtime returns there would place a
-			// value in user.id belonging to neither identifier namespace.
-			if !strings.Contains(string(body), ">= 0") && !strings.Contains(string(body), "uid >= 0") {
-				t.Errorf("%s does not guard against a negative uid on Windows", asset)
-			}
-		})
+				if !strings.Contains(string(out), "X-DefenseClaw-User-Id: "+strconv.Itoa(os.Geteuid())) {
+					t.Fatalf("%s did not carry the caller's uid: %q", script, string(out))
+				}
+				if identityHeaderLineCountForHost(t) == identityHeaderLinesWithName {
+					wantName := "X-DefenseClaw-User-Name: " + hostAccountName(t)
+					if !strings.Contains(string(out), wantName) {
+						t.Fatalf("%s did not carry %q: %q", script, wantName, string(out))
+					}
+				}
+
+				// Collecting the arguments and never passing them to curl fails
+				// exactly as quietly as not collecting them.
+				if !strings.Contains(string(body), `"${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}"`) {
+					t.Fatalf(
+						"%s builds IDENTITY_HEADER_ARGS but never expands it into its request",
+						script,
+					)
+				}
+			})
+		}
 	}
 }
 
@@ -303,6 +280,7 @@ func withoutSessionFactsEnv(env []string) []string {
 // A Secure Client shell hook sends no session facts (GAP-0148, issue #1092);
 // a per-user hook in the same SSH session sends them.
 func TestSecureClientShellHookSendsNoSessionFacts(t *testing.T) {
+	useVerifiedSecureClientDeployment(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows hooks report identity from hookexec, not from the shell helper")
 	}
@@ -376,7 +354,7 @@ func TestManagedShellHookTakesSessionFactsFromTheAdministratorBinary(t *testing.
 
 // Every connector shell hook of a standalone install names the
 // administrator-owned hook binary for the session facts, not only the Hermes
-// and Devin hooks that run the foreign-hook guard: OpenHands, Kiro,
+// and Devin hooks that run the foreign-hook guard: Kiro,
 // Antigravity and Cursor were rendered without it, so their records lost the
 // Kerberos principal that Claude Code's carried in the same login (GAP-0194).
 // A socketless managed render (Secure Client) and a per-user render name none.
@@ -407,7 +385,7 @@ func TestStandaloneShellHooksNameTheAdministratorHookBinary(t *testing.T) {
 	secureClient.ManagedHookSocket, secureClient.ManagedHookBinary = "", ""
 	perUser.ManagedEnterprise, perUser.ManagedHookSocket, perUser.ManagedHookBinary = false, "", ""
 	for script, conn := range map[string]Connector{
-		"openhands-hook.sh": NewOpenHandsConnector(), "hermes-hook.sh": NewHermesConnector(),
+		"hermes-hook.sh": NewHermesConnector(),
 		"cursor-hook.sh": NewCursorConnector(), "antigravity-hook.sh": NewAntigravityConnector(),
 	} {
 		if !strings.Contains(render(standalone, conn, script), line) {
@@ -464,5 +442,37 @@ func TestOpenCodePluginSendsTheKerberosPrincipal(t *testing.T) {
 	defer mu.Unlock()
 	if len(facts) != 1 || facts[0] != "v1;k=ssh;ca=192.0.2.10;krb=alice@EXAMPLE.TEST" {
 		t.Fatalf("session facts sent by the plugin = %q", facts)
+	}
+}
+
+// TestPluginTransportsReportIdentityToo covers the connectors that do not go
+// through a shell hook at all.
+//
+// amp and opencode POST to the gateway from inside the agent's own
+// runtime, so they bypass both _hardening.sh and hookexec. They were the other
+// half of the same gap: connectors whose events reached AI Defense with
+// no user on them, for the same reason and with the same silence.
+func TestPluginTransportsReportIdentityToo(t *testing.T) {
+	for _, asset := range []string{
+		"hooks/amp-plugin.ts",
+		"hooks/opencode-plugin.js",
+	} {
+		t.Run(filepath.Base(asset), func(t *testing.T) {
+			body, err := hookFS.ReadFile(asset)
+			if err != nil {
+				t.Fatalf("read embed: %v", err)
+			}
+			for _, header := range []string{"X-DefenseClaw-User-Id", "X-DefenseClaw-User-Name"} {
+				if !strings.Contains(string(body), header) {
+					t.Errorf("%s never sets %s, so its events carry no user", asset, header)
+				}
+			}
+			// Each of these runs on Windows too, where there is no POSIX uid.
+			// Reporting the -1 that the runtime returns there would place a
+			// value in user.id belonging to neither identifier namespace.
+			if !strings.Contains(string(body), ">= 0") && !strings.Contains(string(body), "uid >= 0") {
+				t.Errorf("%s does not guard against a negative uid on Windows", asset)
+			}
+		})
 	}
 }

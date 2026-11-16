@@ -132,9 +132,15 @@ func TestAMPSetupWritesManagedSystemPlugin(t *testing.T) {
 	if err := conn.VerifyClean(opts); err == nil {
 		t.Fatal("VerifyClean accepted the installed managed Amp plugin")
 	}
+	if _, err := EnsureHookAPIToken(opts.DataDir, conn.Name()); err != nil {
+		t.Fatalf("issue scoped plugin credential: %v", err)
+	}
 
 	if err := conn.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
+	}
+	if token, err := LoadHookAPIToken(opts.DataDir, conn.Name()); err != nil || token != "" {
+		t.Fatalf("removed Amp plugin still authenticates: %q, %v", token, err)
 	}
 	if _, err := os.Stat(pluginPath); !os.IsNotExist(err) {
 		t.Fatalf("plugin remains after teardown: %v", err)

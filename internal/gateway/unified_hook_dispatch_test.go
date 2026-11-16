@@ -38,21 +38,20 @@ import (
 // fails CI.
 //
 // The contract we assert: an empty POST body reaches the unified handler.
-// Most connectors then produce its generic "hook event name is required"
-// error. Codex and Copilot first enforce their installer-bound event
+// Most connectors then produce the shared malformed-event refusal.
+// Codex and Copilot first enforce their installer-bound event
 // registrations inside that same unified handler, so their connector-specific
 // trust errors are pinned separately.
 func TestUnifiedHookDispatch_SingleEntryPoint(t *testing.T) {
 	api := &APIServer{}
 	connectors := map[string]string{
 		"codex":      "installer-bound Codex hook event is required",
-		"claudecode": "hook event name is required",
-		"hermes":     "hook event name is required",
-		"cursor":     "hook event name is required",
-		"devin":      "hook event name is required",
+		"claudecode": "malformed hook event: missing_event",
+		"hermes":     "malformed hook event: missing_event",
+		"cursor":     "malformed hook event: missing_event",
+		"devin":      "malformed hook event: missing_event",
 		"copilot":    "Copilot hook event registration is required",
-		"openhands":  "hook event name is required",
-		"made-up":    "hook event name is required",
+		"made-up":    "malformed hook event: missing_event",
 	}
 	for name, wantError := range connectors {
 		t.Run(name, func(t *testing.T) {
@@ -97,9 +96,7 @@ func TestHookProfileForConnector(t *testing.T) {
 		{"hermes", "hermes", "hermes", false, true, true},
 		{"cursor", "cursor", "cursor", true, true, true},
 		{"devin", "devin", "devin", true, true, true},
-		// openhands' Decode maps the CLI's PascalCase SDK event_type onto
 		// the contract's snake_case event names.
-		{"openhands", "openhands", "openhands", true, true, true},
 		{"unknown_returns_zero", "made-up", "made-up", false, false, false},
 	}
 	for _, tc := range cases {
@@ -133,11 +130,11 @@ func TestHookProfileForConnector(t *testing.T) {
 // Before the unified collector, the wire shape came from the
 // bespoke handler's connector-specific response struct
 // (claudeCodeHookResponse with `json:"claude_code_output"` tag, etc.).
-// It now comes from renderAgentHookResponse +
+// It now comes from renderAgentHookResponseForProfile +
 // hookOutputFieldName(connectorName). The two paths must stay
 // byte-identical for live agents to keep working — this test pins
 // the field-name mapping so a future refactor of
-// renderAgentHookResponse cannot silently rename a key and break
+// renderAgentHookResponseForProfile cannot silently rename a key and break
 // Claude Code / Codex hook traffic.
 func TestUnifiedDispatch_PreservesConnectorWireShape(t *testing.T) {
 	resp := agentHookResponse{
@@ -157,12 +154,11 @@ func TestUnifiedDispatch_PreservesConnectorWireShape(t *testing.T) {
 		{"cursor", "hook_output"},
 		{"devin", "hook_output"},
 		{"copilot", "hook_output"},
-		{"openhands", "hook_output"},
 		{"made-up", "hook_output"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.connector, func(t *testing.T) {
-			out := renderAgentHookResponse(tc.connector, resp)
+			out := renderAgentHookResponseForProfile(connector.HookProfile{Name: tc.connector}, resp)
 			if _, ok := out[tc.wantFieldName]; !ok {
 				t.Errorf("connector %s: expected output map under key %q, got keys=%v", tc.connector, tc.wantFieldName, jsonKeys(out))
 			}
@@ -222,7 +218,7 @@ func TestUnifiedDispatch_SurfacesEvaluationIDAndRuleIDs(t *testing.T) {
 			RuleIDs:      []string{"SEC-ANTHROPIC", "SEC-AWS-KEY"},
 		}
 		for _, connectorName := range []string{"codex", "claudecode", "hermes"} {
-			out := renderAgentHookResponse(connectorName, resp)
+			out := renderAgentHookResponseForProfile(connector.HookProfile{Name: connectorName}, resp)
 			if got, ok := out["evaluation_id"].(string); !ok || got != "eval-fixture-uuid-1234" {
 				t.Errorf("connector %s: evaluation_id = %v, want %q", connectorName, out["evaluation_id"], "eval-fixture-uuid-1234")
 			}
@@ -240,7 +236,7 @@ func TestUnifiedDispatch_SurfacesEvaluationIDAndRuleIDs(t *testing.T) {
 			Mode:       "observe",
 			WouldBlock: false,
 		}
-		out := renderAgentHookResponse("codex", resp)
+		out := renderAgentHookResponseForProfile(connector.HookProfile{Name: "codex"}, resp)
 		if _, ok := out["evaluation_id"]; ok {
 			t.Errorf("no-findings path must omit evaluation_id; got keys=%v", jsonKeys(out))
 		}

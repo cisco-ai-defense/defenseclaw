@@ -149,8 +149,8 @@ func TestApplyRefusesASecondYAMLDocument(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = Apply(context.Background(), path, []Change{{Path: "gateway.api_port", Value: 18971}}, Options{Actor: "cli:test"})
-	if !errors.Is(err, ErrMultipleDocuments) {
-		t.Fatalf("Apply error = %v, want ErrMultipleDocuments", err)
+	if !errors.Is(err, ErrMultipleDocuments) || !errors.Is(err, ErrInvalidDocument) {
+		t.Fatalf("Apply error = %v, want ErrMultipleDocuments and ErrInvalidDocument", err)
 	}
 	if after, _ := os.ReadFile(path); string(after) != string(before) {
 		t.Fatalf("a refused write changed config.yaml:\n%s", after)
@@ -299,12 +299,82 @@ func TestManagedConfigRestartRequiredClassifiesBundleChanges(t *testing.T) {
 	restart := []byte("config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 600\n")
 	for _, level := range []string{"CRITICAL", "HIGH", "LOW"} {
 		hot := []byte("config_version: 9\nguardrail:\n  block_at: " + level + "\n  hook_self_heal_debounce_ms: 500\n")
-		if keys, err := ManagedConfigRestartRequired(before, hot); err != nil || len(keys) != 0 {
+		if keys, err := ManagedConfigRestartRequired(before, hot, ManagedDefaults{}); err != nil || len(keys) != 0 {
 			t.Fatalf("MEDIUM to %s = %v, %v; want hot", level, keys, err)
 		}
 	}
-	if keys, err := ManagedConfigRestartRequired(before, restart); err != nil || strings.Join(keys, ",") != "guardrail.hook_self_heal_debounce_ms" {
+	if keys, err := ManagedConfigRestartRequired(before, restart, ManagedDefaults{}); err != nil || strings.Join(keys, ",") != "guardrail.hook_self_heal_debounce_ms" {
 		t.Fatalf("debounce change = %v, %v; want restart", keys, err)
+	}
+}
+
+// GAP-0044 review: the loader folds key case, so a start-only key spelled
+// with capitals is classified start-only, by the managed classifier and by
+// RestartRequired over raw change paths alike; a defaulted setting is
+// compared as the loader reads it; keys that differ only in case are a
+// change; a lowercase document classifies exactly as before.
+func TestRestartClassificationFoldsKeyCaseAsTheLoaderDoes(t *testing.T) {
+	before := []byte("config_version: 9\nguardrail:\n  mode: observe\n")
+	defaults := ManagedDefaults{GOOS: "windows", APIPort: 18970}
+	for _, tc := range []struct{ after, want string }{
+		{"config_version: 9\nguardrail:\n  mode: observe\nGateway:\n  api_port: 9999\n", "gateway.api_port"},
+		{"config_version: 9\nGuardrail:\n  mode: observe\n  Port: 4000\n", "guardrail.port"},
+		{"config_version: 9\nguardrail:\n  mode: observe\nEnterprise:\n  Machine_Policy:\n    Default:\n      Managed_Hooks_Only: preserve\n",
+			"enterprise.machine_policy.default.managed_hooks_only"},
+		{"config_version: 9\nGuardrail:\n  Mode: action\n", ""},
+		{"config_version: 9\nguardrail:\n  mode: observe\ngateway:\n  api_port: 18970\n", ""},
+	} {
+		keys, err := ManagedConfigRestartRequired(before, []byte(tc.after), defaults)
+		if err != nil || strings.Join(keys, ",") != tc.want {
+			t.Errorf("%q: restart = %v, %v; want %q", tc.after, keys, err, tc.want)
+		}
+	}
+	withHost := []byte("config_version: 9\nguardrail:\n  mode: observe\n  host: 127.0.0.1\n")
+	if keys, _ := ManagedConfigRestartRequired(withHost, []byte("config_version: 9\nguardrail:\n  mode: observe\n  host: 127.0.0.1\n  Host: 127.0.0.1\n"), defaults); strings.Join(keys, ",") != "guardrail.host" {
+		t.Errorf("keys that differ only in case: restart = %v, want guardrail.host", keys)
+	}
+	if got := RestartRequired([]string{"Gateway.api_port", "guardrail.Port", "Guardrail.Mode"}); strings.Join(got, ",") != "Gateway.api_port,guardrail.Port" {
+		t.Errorf("RestartRequired over raw paths = %v", got)
+	}
+	if got := RestartRequired([]string{"gateway.api_port", "guardrail.mode"}); strings.Join(got, ",") != "gateway.api_port" {
+		t.Errorf("lowercase paths = %v", got)
+	}
+}
+
+func TestManagedConnectorSetRestartClassificationByPlatform(t *testing.T) {
+	before := []byte("guardrail:\n  connectors:\n    claudecode: {}\n    opencode: {}\n")
+	for _, tc := range []struct {
+		name, after string
+	}{
+		{"disable", "guardrail:\n  connectors:\n    claudecode: {}\n    opencode: {enabled: false}\n"},
+		{"remove", "guardrail:\n  connectors:\n    claudecode: {}\n"},
+		{"add", "guardrail:\n  connectors:\n    claudecode: {}\n    opencode: {}\n    hermes: {}\n"},
+	} {
+		for _, goos := range []string{"linux", "darwin", "windows"} {
+			t.Run(tc.name+"/"+goos, func(t *testing.T) {
+				restart, err := ManagedConfigRestartRequired(before, []byte(tc.after), ManagedDefaults{GOOS: goos})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got, want := len(restart) > 0, goos == "windows"; got != want {
+					t.Fatalf("restart paths = %v, want restart=%t", restart, want)
+				}
+			})
+		}
+	}
+}
+
+func TestManagedConnectorSetRestartWhenPrimaryMoves(t *testing.T) {
+	before := []byte("guardrail:\n  connectors:\n    claudecode: {}\n")
+	after := []byte("guardrail:\n  connectors:\n    claudecode: {}\n    amp: {}\n")
+	for _, goos := range []string{"linux", "darwin"} {
+		restart, err := ManagedConfigRestartRequired(before, after, ManagedDefaults{GOOS: goos})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(restart, ","); got != "guardrail.connector" {
+			t.Fatalf("%s primary move restart paths = %q", goos, got)
+		}
 	}
 }
 
@@ -392,4 +462,31 @@ func TestChangedPathsNamesTheLeavesOfABlockAddedOrRemovedWhole(t *testing.T) {
 	if err != nil || strings.Join(got, ",") != "guardrail.connectors.cursor" {
 		t.Fatalf("empty block: ChangedPaths = %v, %v", got, err)
 	}
+}
+
+func TestLifecycleGenerationRepairKeepsTheProvenCounter(t *testing.T) {
+	path := writeTestConfig(t, "guardrail:\n  mode: observe\n")
+	if err := os.WriteFile(GenerationPath(path), []byte("broken record"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Locked(context.Background(), path, Options{Actor: ActorLifecycle, GenerationFloor: 10}, func() (bool, error) { return true, nil })
+	if err != nil || got.Generation != 11 {
+		t.Fatalf("repaired generation = %+v, %v; want 11", got, err)
+	}
+	before, err := os.ReadFile(GenerationPath(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	approved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = Locked(context.Background(), path, Options{Actor: ActorLifecycle, GenerationFloor: 11, RecordSHA256: SHA256Hex(approved)}, func() (bool, error) {
+		return true, os.WriteFile(path, append(approved, []byte("\n# concurrent edit\n")...), 0o600)
+	})
+	after, readErr := os.ReadFile(GenerationPath(path))
+	if !errors.Is(err, ErrConflict) || readErr != nil || string(before) != string(after) {
+		t.Fatalf("unapproved concurrent bytes were recorded: error=%v, record changed=%v", err, string(before) != string(after))
+	}
+
 }

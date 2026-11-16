@@ -44,13 +44,13 @@ class TestScanContextNormalization(unittest.TestCase):
         ctx = _scan_ui.ScanContext.for_plugin(connector="  Codex  ", paths=[])
         self.assertEqual(ctx.connector, "codex")
 
-    def test_empty_connector_defaults_to_openclaw(self):
+    def test_empty_connector_selects_no_agent(self):
         ctx = _scan_ui.ScanContext.for_plugin(connector="", paths=[])
-        self.assertEqual(ctx.connector, "openclaw")
+        self.assertEqual(ctx.connector, "")
 
-    def test_whitespace_connector_defaults_to_openclaw(self):
+    def test_whitespace_connector_selects_no_agent(self):
         ctx = _scan_ui.ScanContext.for_plugin(connector="   ", paths=[])
-        self.assertEqual(ctx.connector, "openclaw")
+        self.assertEqual(ctx.connector, "")
 
     def test_default_categories_per_component(self):
         for ctor, comp in (

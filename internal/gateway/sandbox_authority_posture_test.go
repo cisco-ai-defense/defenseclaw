@@ -19,6 +19,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -27,6 +28,15 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
+
+func TestSandboxRunMCPJudgeLeavesClaimsOutWhenImportIsDisabled(t *testing.T) {
+	claims := []sandboxrelay.MCPServerClaim{{Name: "server-a", Command: "npx"}, {Name: "server-b", Command: "npx"}}
+	kept, skipped := sandboxRunMCPJudge(context.Background(), nil, managedHookPeer{}, "claudecode", claims, false)
+	if len(kept) != 0 || len(skipped) != 2 || skipped[0].Name != "server-a" || skipped[1].Name != "server-b" ||
+		skipped[0].Reason != sandboxrelay.MCPSkipOrganizationBlock {
+		t.Fatalf("disabled import: kept %v skipped %v", kept, skipped)
+	}
+}
 
 // postureCarol is in no group: the default profile (offline-floor) applies.
 var postureCarol = managedHookPeer{UID: 94404099, Name: "ent-carol"}
@@ -61,6 +71,20 @@ func postureExplain(t *testing.T, f *sandboxFixture, peer managedHookPeer, req s
 		t.Fatalf("explain for %s: %d %s", peer.Name, rec.Code, rec.Body.String())
 	}
 	return out
+}
+
+func TestSandboxExplainCarriesForeignSandboxActionAndSource(t *testing.T) {
+	f := postureFixture(t)
+	f.cfg.OpenShell.Admin.ForeignSandboxes = config.OpenShellForeignSandboxesAlert
+	f.cfg.Guardrail.Profiles["contractors"].Sandbox.ForeignSandboxes = config.OpenShellForeignSandboxesStop
+	got := postureExplain(t, f, sbxAlice, sandboxrelay.ExplainRequest{Sources: true})
+	if got.ForeignSandboxes != config.OpenShellForeignSandboxesStop || got.Sources["foreign_sandboxes"] != sandboxapi.ExplainSourceProfile {
+		t.Fatalf("contractor foreign sandbox action: %q source %q", got.ForeignSandboxes, got.Sources["foreign_sandboxes"])
+	}
+	got = postureExplain(t, f, sbxBob, sandboxrelay.ExplainRequest{Sources: true})
+	if got.ForeignSandboxes != config.OpenShellForeignSandboxesAlert || got.Sources["foreign_sandboxes"] != sandboxapi.ExplainSourceOrganization {
+		t.Fatalf("base foreign sandbox action: %q source %q", got.ForeignSandboxes, got.Sources["foreign_sandboxes"])
+	}
 }
 
 // GAP-0179, GAP-0438, GAP-0487: the explain of a new run carries the

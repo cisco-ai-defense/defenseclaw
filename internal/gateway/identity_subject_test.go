@@ -146,6 +146,7 @@ func TestSecureClientIgnoresIdentityFacts(t *testing.T) {
 // facts again within the cache lifetime emit nothing, but changed facts (a
 // group added in the directory) emit at once, not up to 15 minutes later.
 func TestVerifiedSubjectEmitsIdentityObserved(t *testing.T) {
+	isolateIdentityObservedThrottle(t)
 	setIdentityFactsEnabled(true)
 	t.Cleanup(func() { setIdentityFactsEnabled(false) })
 	capture := &endpointInventoryCapture{}
@@ -185,6 +186,7 @@ func TestVerifiedSubjectEmitsIdentityObserved(t *testing.T) {
 
 // A failed local write must leave unchanged facts due for the next hook.
 func TestIdentityObservedRetriesAfterEmissionFailure(t *testing.T) {
+	isolateIdentityObservedThrottle(t)
 	subject := VerifiedSubject{
 		UserID: "identity-retry-user", IDKind: useridentity.KindPOSIXUID, UserName: "alice",
 		Directory: useridentity.DirectoryFacts{
@@ -252,6 +254,11 @@ func TestDiscoverySignalCarriesInventoryIdentity(t *testing.T) {
 		}, true
 	}
 	t.Cleanup(func() { managedHookPeerDirectory = original })
+	// The signal names the uid's own account (GAP-1233).
+	name := userScopedIdentityName(self)
+	if name == "" {
+		t.Skip("the test account has no name in the account database")
+	}
 	capture := &endpointInventoryCapture{}
 	report := inventory.AIDiscoveryReport{
 		Summary: inventory.AIDiscoverySummary{
@@ -261,6 +268,7 @@ func TestDiscoverySignalCarriesInventoryIdentity(t *testing.T) {
 		Signals: []inventory.AISignal{{
 			SignalID: "model-identity", SignatureID: "local-model", Category: inventory.SignalLocalModel,
 			Confidence: .9, State: inventory.AIStateNew, SupportedConnector: "claudecode", UserID: self,
+			UserName: name,
 		}},
 	}
 	if err := (&aiDiscoveryV8Adapter{runtime: capture}).EmitReport(t.Context(), report, nil); err != nil {
@@ -435,6 +443,9 @@ func TestVerifiedSubjectIsNamedFromTheGuardianRecordWhenItsLookupFails(t *testin
 	for uid, record := range map[string]enterprisehooks.IdentitySpoolRecord{
 		"94401115": {User: "dcad-frank@dclab.test", UpdatedAt: time.Now().UTC()},
 		"94401116": {User: "dcad-old@dclab.test", UpdatedAt: time.Now().UTC().Add(-2 * time.Hour)},
+		// GAP-1195: a fresh record of a uid the gateway last saw held by
+		// another account names the previous holder, not the caller.
+		"94401118": {User: "dcad-gone@dclab.test", UpdatedAt: time.Now().UTC()},
 	} {
 		record.Key = uid
 		data, err := enterprisehooks.MarshalIdentitySpoolRecord(record)
@@ -445,21 +456,29 @@ func TestVerifiedSubjectIsNamedFromTheGuardianRecordWhenItsLookupFails(t *testin
 			t.Fatal(err)
 		}
 	}
-	restoreValidate, restoreDirectory := validateManagedGuardianAuthorization, managedHookPeerDirectory
+	restoreValidate, restoreDirectory, restoreLast := validateManagedGuardianAuthorization, managedHookPeerDirectory, managedHookPeerLastName
 	validateManagedGuardianAuthorization = func(string, string) error { return nil }
 	managedHookPeerDirectory = func(int, bool) (useridentity.DirectoryFacts, bool) { return useridentity.DirectoryFacts{}, false }
+	managedHookPeerLastName = func(uid int) string {
+		return map[int]string{94401115: "dcad-frank@dclab.test", 94401116: "dcad-old@dclab.test", 94401118: "dcad-new@dclab.test"}[uid]
+	}
 	t.Cleanup(func() {
-		validateManagedGuardianAuthorization, managedHookPeerDirectory = restoreValidate, restoreDirectory
+		validateManagedGuardianAuthorization, managedHookPeerDirectory, managedHookPeerLastName = restoreValidate, restoreDirectory, restoreLast
 		setIdentitySpoolDir("")
 	})
 	setIdentitySpoolDir(dir)
-	for uid, want := range map[string]string{"94401115": "dcad-frank", "94401116": "", "94401117": ""} {
+	for uid, want := range map[string]string{"94401115": "dcad-frank", "94401116": "", "94401117": "", "94401118": ""} {
 		ctx := attachVerifiedSubject(context.Background(), nil, uid, "", subjectSourcePeerCredentials)
 		pid, _ := strconv.Atoi(uid)
 		caller := auditCallerIdentity(withManagedHookPeer(ctx, managedHookPeer{UID: pid}))
 		if id := AgentIdentityFromContext(ctx); id.UserID != uid || id.UserName != want || caller.ID != uid || caller.Name != want {
 			t.Errorf("uid %s: agent identity %+v, audit caller %+v, want the uid and the name %q", uid, id, caller, want)
 		}
+	}
+	// A uid the gateway never saw named keeps no name either.
+	managedHookPeerLastName = func(int) string { return "" }
+	if id := AgentIdentityFromContext(attachVerifiedSubject(context.Background(), nil, "94401115", "", subjectSourcePeerCredentials)); id.UserName != "" {
+		t.Errorf("uid never seen named was named %q from the guardian record", id.UserName)
 	}
 }
 
@@ -516,6 +535,44 @@ func TestUPNAssignmentWarnsWhenInfoPipeReportsNoUPN(t *testing.T) {
 	}
 }
 
+// GAP-0092: Open Directory kept the Active Directory node Online through an
+// hour-long domain controller outage and listed the accounts with their
+// primary group named but without their other domain groups, so they got the
+// default profile as a verified "default". While the hook guardian lists the
+// account's domain as having no domain controller that answers, the lookup
+// of an Active Directory account of that domain fails, as with the node
+// offline; another domain's accounts, and local ones, are not affected.
+func TestOpenDirectoryGroupsUnavailableWhileTheGuardianFindsNoDomainController(t *testing.T) {
+	t.Cleanup(func() { openDirectoryOfflineAt.Store(0) })
+	now := time.Unix(1_800_000_000, 0)
+	named, online := func(string) bool { return true }, func() bool { return false }
+	away := func(domain string) bool { return domain == "" || domain == "dclab.test" }
+	ad := &enterprisehooks.IdentitySpoolRecord{Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory, Domain: "DCLab.Test"}}
+	err := openDirectoryGroupsUnavailable(ad, false, "2027364327", named, online, away, now)
+	if err == nil || !strings.Contains(err.Error(), "no domain controller of dclab.test") {
+		t.Fatalf("err = %v, want the guardian's finding as a lookup failure", err)
+	}
+	other := &enterprisehooks.IdentitySpoolRecord{Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory, Domain: "emea.example.com"}}
+	if err := openDirectoryGroupsUnavailable(other, false, "2027364327", named, online, away, now); err != nil {
+		t.Fatalf("an account of a domain that answers: %v", err)
+	}
+	local := &enterprisehooks.IdentitySpoolRecord{Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal}}
+	if err := openDirectoryGroupsUnavailable(local, true, "20", named, online, away, now); err != nil {
+		t.Fatalf("local account: %v", err)
+	}
+	// Without the guardian's record (it aged out an hour into the outage) the
+	// domain is unknown: any domain listed counts, except for the local node.
+	if err := openDirectoryGroupsUnavailable(nil, false, "2027364327", named, online, away, now); err == nil {
+		t.Fatal("an AD account without a record during the outage resolved")
+	}
+	if err := openDirectoryGroupsUnavailable(nil, true, "20", named, online, away, now); err != nil {
+		t.Fatalf("local-node account without a record: %v", err)
+	}
+	if err := openDirectoryGroupsUnavailable(ad, false, "2027364327", named, online, func(string) bool { return false }, now); err != nil {
+		t.Fatalf("no domain away: %v", err)
+	}
+}
+
 // TestOpenDirectoryGroupsUnavailableIsALookupFailure: with the domain
 // controller down a bound Mac lists an Active Directory account without its
 // domain groups, its primary group only as a number. That is a failed lookup,
@@ -527,35 +584,35 @@ func TestOpenDirectoryGroupsUnavailableIsALookupFailure(t *testing.T) {
 	ad := &enterprisehooks.IdentitySpoolRecord{Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory}}
 	unnamed, named := func(string) bool { return false }, func(string) bool { return true }
 	online, offline := func() bool { return false }, func() bool { return true }
-	err := openDirectoryGroupsUnavailable(ad, true, "2027364327", unnamed, online, now)
+	err := openDirectoryGroupsUnavailable(ad, true, "2027364327", unnamed, online, nil, now)
 	if err == nil || !strings.Contains(err.Error(), "dsmemberutil flushcache") {
 		t.Fatalf("err = %v, want a lookup failure naming the flush", err)
 	}
-	if err := openDirectoryGroupsUnavailable(ad, true, "2027364327", named, online, now); err != nil {
+	if err := openDirectoryGroupsUnavailable(ad, true, "2027364327", named, online, nil, now); err != nil {
 		t.Fatalf("named primary group: %v", err)
 	}
 	local := &enterprisehooks.IdentitySpoolRecord{Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal}}
-	if err := openDirectoryGroupsUnavailable(local, true, "20", unnamed, offline, now); err != nil {
+	if err := openDirectoryGroupsUnavailable(local, true, "20", unnamed, offline, nil, now); err != nil {
 		t.Fatalf("local account: %v", err)
 	}
-	if err := openDirectoryGroupsUnavailable(nil, true, "20", unnamed, offline, now); err != nil {
+	if err := openDirectoryGroupsUnavailable(nil, true, "20", unnamed, offline, nil, now); err != nil {
 		t.Fatalf("local-node account without a record: %v", err)
 	}
 	// GAP-0496, GAP-0517: the guardian's record expires an hour after its last
 	// write, about when Open Directory's caches run out; the account's unnamed
 	// primary group is still a failed lookup then, not plain "default".
-	err = openDirectoryGroupsUnavailable(nil, false, "2027364327", unnamed, online, now)
+	err = openDirectoryGroupsUnavailable(nil, false, "2027364327", unnamed, online, nil, now)
 	if err == nil || !strings.Contains(err.Error(), "dsmemberutil flushcache") {
 		t.Fatalf("no record, unnamed primary group: err = %v, want a lookup failure", err)
 	}
-	if err := openDirectoryGroupsUnavailable(nil, false, "2027364327", named, online, now); err != nil {
+	if err := openDirectoryGroupsUnavailable(nil, false, "2027364327", named, online, nil, now); err != nil {
 		t.Fatalf("no record, named primary group: %v", err)
 	}
 	// GAP-0496: a mobile account keeps its primary group's name through the
 	// outage; the offline node is what says its groups are unknown, with or
 	// without the guardian's record.
 	for _, record := range []*enterprisehooks.IdentitySpoolRecord{ad, nil} {
-		err := openDirectoryGroupsUnavailable(record, false, "2027364327", named, offline, now)
+		err := openDirectoryGroupsUnavailable(record, false, "2027364327", named, offline, nil, now)
 		if err == nil || !strings.Contains(err.Error(), "node offline") || strings.Contains(err.Error(), "renamed") {
 			t.Fatalf("record %v: err = %v, want the offline node as a lookup failure", record != nil, err)
 		}
@@ -568,10 +625,9 @@ func TestOpenDirectoryGroupsUnavailableIsALookupFailure(t *testing.T) {
 // GAP-0496, GAP-0517: on a managed Mac whose guardian has not confirmed an
 // account for an hour (its record aged out during the outage), Open
 // Directory's answer without the account's domain groups ends the facts
-// cached from Open Directory's own caches at once: the account gets
-// default_lookup_failed (provisional sandboxes), not its group profile for
-// another hour or plain "default". With a current record the cached facts
-// are kept as before.
+// cached from Open Directory's own caches at once: requests needing its
+// missing groups are refused and name them; others use a proven or default
+// profile. With a current record the cached facts are kept as before.
 func TestMacOutageWithoutGuardianRecordDropsCachedFacts(t *testing.T) {
 	t.Cleanup(func() { openDirectoryOfflineAt.Store(0); setIdentitySpoolDir("") })
 	setIdentitySpoolDir(t.TempDir())
@@ -584,7 +640,7 @@ func TestMacOutageWithoutGuardianRecordDropsCachedFacts(t *testing.T) {
 			spool = record
 		}
 		named := func(string) bool { return !unnamed.Load() }
-		if err := openDirectoryGroupsUnavailable(spool, false, "2027364327", named, func() bool { return false }, time.Now()); err != nil {
+		if err := openDirectoryGroupsUnavailable(spool, false, "2027364327", named, func() bool { return false }, nil, time.Now()); err != nil {
 			return useridentity.DirectoryFacts{}, err
 		}
 		return useridentity.DirectoryFacts{Source: useridentity.SourceMacOSOpenDirectory, Groups: []string{`DCLAB\dc-sbx-devs`},
@@ -625,8 +681,9 @@ func TestMacOutageWithoutGuardianRecordDropsCachedFacts(t *testing.T) {
 // path's cache: while Open Directory lists the Active Directory node offline
 // the account keeps the facts cached before the outage (its group profile),
 // they are dropped an hour after the last lookup that succeeded (then
-// default_lookup_failed), and after the outage an answer that still misses
-// the account's group is refreshed after one retry cycle, not 15 minutes.
+// requests needing the missing groups refuse and name them). After the
+// outage an answer still missing the account's group is refreshed after
+// one retry cycle, not 15 minutes.
 func TestMacDirectoryOutageTimeline(t *testing.T) {
 	t.Cleanup(func() { openDirectoryOfflineAt.Store(0) })
 	start := time.Unix(1_800_000_000, 0)
@@ -637,7 +694,7 @@ func TestMacDirectoryOutageTimeline(t *testing.T) {
 	var down, stale atomic.Bool
 	record := &enterprisehooks.IdentitySpoolRecord{Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory}}
 	cache := newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
-		if err := openDirectoryGroupsUnavailable(record, true, "2027364327", func(string) bool { return true }, down.Load, now()); err != nil {
+		if err := openDirectoryGroupsUnavailable(record, true, "2027364327", func(string) bool { return true }, down.Load, nil, now()); err != nil {
 			return useridentity.DirectoryFacts{}, err
 		}
 		groups := []string{`DCLAB\Domain Users`, `DCLAB\dc-sbx-devs`}
@@ -681,7 +738,7 @@ func TestMacDirectoryOutageTimeline(t *testing.T) {
 		settle(bob, 2) // the refresh fails: the cached group facts are served
 	}
 	at(identityDirectoryMaxAge)
-	settle(bob, 0) // dropped: directory-dependent assignments use default_lookup_failed
+	settle(bob, 0) // dropped: assignments needing missing groups refuse and name the fact
 	down.Store(false)
 	at(identityDirectoryMaxAge + identityDirectoryRetry)
 	settle(bob, 1) // Open Directory answers, still without the group
@@ -703,7 +760,15 @@ func TestIDEPluginRecordsCarryTheOwnersDirectory(t *testing.T) {
 	}
 	original := managedHookPeerDirectory
 	managedHookPeerDirectory = func(uid int, _ bool) (useridentity.DirectoryFacts, bool) { return facts, uid == 1201 }
-	t.Cleanup(func() { managedHookPeerDirectory = original })
+	// The uid's account is still the one the plugin record names (GAP-1233).
+	originalName := userScopedIdentityName
+	userScopedIdentityName = func(id string) string {
+		if id == "1201" {
+			return "dcad-o4ud"
+		}
+		return ""
+	}
+	t.Cleanup(func() { managedHookPeerDirectory, userScopedIdentityName = original, originalName })
 	capture := &endpointInventoryCapture{}
 	adapter := &aiDiscoveryV8Adapter{runtime: capture}
 	report := inventory.AIDiscoveryReport{

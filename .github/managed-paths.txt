@@ -1,0 +1,166 @@
+# Managed (enterprise) path manifest.
+#
+# A pull request that changes any [managed] or [managed_impacting] path runs
+# the managed-mode CI: scripts/ci_changes.py sets its `managed` output, which
+# turns on the Enterprise Required lanes in ci.yml and the Windows enterprise
+# lanes in windows-native.yml. scripts/check_managed_paths.py (make check)
+# fails when a tracked file whose path looks managed is in no section here, so
+# new managed code cannot land outside this list.
+#
+# Pattern syntax (the same as scripts/ci_changes.py RULES): a pattern ending in
+# "/" is a directory prefix; any other pattern is an fnmatch glob over the
+# whole repo-relative path, where "*" also crosses "/".
+
+[managed]
+# Code that exists only for managed mode.
+
+# This manifest: a change to it changes what runs, so it runs everything managed.
+.github/managed-paths.txt
+
+# Go packages.
+internal/managed/
+internal/enterprisebundle/
+internal/enterprisehooks/
+internal/enterprisepolicy/
+internal/enterprisestatus/
+internal/enterpriseunix/
+internal/codesig/
+internal/coworkaudit/
+internal/unixidentity/
+internal/setuppayload/
+internal/winsession/
+internal/posixacl/
+internal/build-repro/
+internal/observability/destinations/managedaid/
+internal/gateway/agent_hook_pending.go
+internal/audit/hook_delivery_journal.go
+cmd/defenseclaw-enterprise-setup/
+cmd/defenseclaw-cmid-broker/
+cmd/windows-avc-assembler/
+cmd/windows-repro-manifest/
+cmd/defenseclaw-scanners/
+
+# Managed files inside shared Go packages (internal/cli, internal/gateway,
+# internal/config, internal/acp and others) and binaries. The name prefixes
+# are the convention: keep new managed files on them.
+internal/*enterprise*
+internal/*managed*
+internal/*standalone*
+internal/*secure_client*
+internal/*secure-client*
+# Cowork host delivery uses a shared configuration package.
+internal/config/cowork_vm_sensor*.go
+cmd/*enterprise*
+cmd/*standalone*
+
+# Secure Client gRPC contract.
+proto/defenseclaw/secureclient/
+
+# Packaging: MDM kits, the Windows standalone lifecycle, service units, the
+# Linux and macOS enterprise packages and the AVC build kit.
+packaging/mdm/
+packaging/windows/
+packaging/launchd/
+packaging/launchd-standalone/
+packaging/systemd/
+packaging/selinux/
+packaging/linux/
+packaging/macos/
+packaging/scripts/
+packaging/identity/
+
+# Enterprise build and test scripts.
+scripts/*enterprise*
+scripts/build-macos-bundle.sh
+scripts/write-macos-bundle-readme.sh
+scripts/check-assemble-parity.sh
+scripts/check-repro-flags-parity.sh
+scripts/generate-repro-fixture.sh
+scripts/check-managed-setup-payload.go
+scripts/test-managed-package-no-fleet-compiler.sh
+
+# Fixtures and the Python tests that pin managed behavior.
+testdata/enterprise-configs/
+testdata/enterprise_install_lane/
+cli/tests/*enterprise*
+cli/tests/*managed*
+cli/tests/*secure_client*
+cli/tests/test_mdm_*
+cli/tests/test_config_cowork_vm_sensor.py
+cli/tests/test_p0_mdm_docs.py
+
+[managed_impacting]
+# Shared code with managed branches inside, and the inputs managed packages
+# are built from. Add a shared file here when you add a managed branch to it.
+
+# Claude Desktop's data folder table: managed enrolment surfaces
+# (enterprisehooks), launch coverage and status (enterpriseunix) and the
+# hook surface refusal read it, as do the OSS gateway and inventory.
+internal/claudedesktop/
+
+# Python predicates that decide managed behavior.
+cli/defenseclaw/config.py
+cli/defenseclaw/config_writer.py
+cli/defenseclaw/envvars.py
+cli/defenseclaw/upgrade_shim.py
+cli/defenseclaw/windows_acl.py
+cli/defenseclaw/commands/windows_uninstall_helper.py
+# Per-user first run: moves the files a removed managed Windows install left (GAP-0045).
+cli/defenseclaw/managed_leftovers.py
+
+# The enterprise Setup and packages embed the CLI and its locked dependencies.
+pyproject.toml
+uv.lock
+.goreleaser.yaml
+
+# Go files with the most managed branches. Any Go change already runs the
+# enterprise lanes; listing these also runs the Windows enterprise smokes.
+internal/gateway/sidecar.go
+internal/gateway/api.go
+internal/gateway/config_manager.go
+internal/gateway/api_sandbox_ingress.go
+internal/gateway/sandbox_daemon_runtime.go
+internal/gateway/sandbox_authority_routes.go
+internal/gateway/sandbox_availability.go
+internal/gateway/connector/hookexec/
+internal/gateway/connector/user_state_ownership.go
+internal/gateway/connector/user_state_purge.go
+internal/gateway/connector/user_state_purge_windows.go
+internal/hookpaths/hookpaths.go
+internal/hookpaths/action_client_overwritten.go
+internal/hookpaths/action_client_loop_copy.go
+internal/config/config.go
+internal/config/migrate_v9.go
+internal/openshell/doctor.go
+internal/openshell/version.go
+internal/openshell/manager/lifecycle.go
+internal/openshell/sandboxapi/types.go
+internal/openshell/sandboxcli/doctor.go
+internal/openshell/sandboxcli/lifecycle.go
+internal/openshell/sandboxcli/run.go
+
+# The shared OpenCode adapter is embedded into the managed plugin too.
+internal/opencodebridge/
+internal/gateway/connector/hooks/opencode-plugin.js
+scripts/generate_opencode_plugins.py
+
+# Workflows that define or feed the managed lanes.
+.github/workflows/ci.yml
+.github/workflows/windows-native.yml
+.github/workflows/windows-enterprise-setup.yml
+.github/workflows/windows-deterministic-build.yml
+.github/workflows/release.yaml
+
+[excluded]
+# Paths that look managed but do not change managed behavior. The docs tests
+# that pin enterprise pages run through the classifier's name references.
+docs/
+docs-site/
+.claude/
+policies/*enterprise-data.yaml
+# The manifest's own checker; its tests run through name references.
+scripts/check_managed_paths.py
+# Renders the managed command-availability page under docs-site/ from
+# internal/cli/testdata/managed_commands.json; the Go table behind that file
+# is Go code and already runs the enterprise lanes.
+scripts/gen_managed_commands_docs.py

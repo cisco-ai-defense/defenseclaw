@@ -29,7 +29,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const configV8SchemaID = "https://schemas.defenseclaw.dev/config/v8/defenseclaw-config.schema.json"
+const configV8SchemaID = "https://schemas.defenseclaw.dev/config/v9/defenseclaw-config.schema.json"
 
 func TestDefenseClawConfigV8SchemaEmbeddedExactly(t *testing.T) {
 	t.Parallel()
@@ -339,8 +339,10 @@ func TestDefenseClawConfigV8SchemaIdentityAndClosure(t *testing.T) {
 		"routing",
 		"admission",
 		"llm_providers",
+		"decision_model",
 		"update",
 		"fleet",
+		"connectors",
 	}
 	if len(properties) != len(allowedTopLevel) {
 		t.Errorf("top-level property count = %d, want %d", len(properties), len(allowedTopLevel))
@@ -824,7 +826,6 @@ openshell:
   mcp: {import: true, host_ports: [5432]}
   upstream_telemetry: false
   token_delivery: provider
-  middleware: {enabled: false}
   admin:
     required_pack: balanced
     required_pack_digest: sha256:0000000000000000000000000000000000000000000000000000000000000000

@@ -105,6 +105,26 @@ def test_state_changing_component_repair_requires_attended_confirmation() -> Non
     assert authorize_remediation(choice, confirmed=True) == choice.argv
 
 
+def test_a_hermes_whose_tui_skips_the_hooks_warns_with_the_cause_and_points_past_it() -> None:
+    # GAP-0978: Hermes 0.19.0-0.21.0 run tools in their TUI without the shell
+    # hooks, in their classic interface with them. Doctor warns (it failed
+    # them, 1.0.4 review), names that cause and asks for a later release,
+    # never for the reviewed range that still holds 0.19.0.
+    for version in ("Hermes Agent v0.19.0 (2026.7.20)", "Hermes Agent vgit.5bba024 (2026.8.27)"):
+        discovery = SimpleNamespace(agents={"hermes": _signal(installed=True, version=version)})
+        (finding,) = assess_connector_health(("hermes",), discovery)
+        assert finding.status is HealthStatus.UNTESTED, version
+        assert finding.reason_code == "connector-version-partly-guarded"
+        assert finding.contract_id in {"hermes-hooks-v1", "hermes-hooks-v2"}, finding.contract_id
+        assert "is guarded, but" in finding.summary and "hermes --tui" in finding.summary
+        install = finding.remediations[0].summary
+        assert "not known broken" in install and "0.19.0" not in install, install
+    discovery = SimpleNamespace(agents={"hermes": _signal(installed=True, version="Hermes Agent v0.21.5 (2026.9.24)")})
+    (finding,) = assess_connector_health(("hermes",), discovery)
+    assert finding.status is HealthStatus.SUPPORTED
+    assert finding.contract_id == "hermes-hooks-v2"
+
+
 def test_connector_contract_states_and_capabilities_are_manifest_derived() -> None:
     discovery = SimpleNamespace(
         agents={
@@ -225,14 +245,9 @@ def test_discovery_absence_is_unavailable_and_unregistered_names_are_bounded() -
 
 
 def test_connector_rows_name_the_connector_and_accept_untested_newer_versions() -> None:
-    discovery = SimpleNamespace(
-        agents={
-            "kiro": _signal(installed=True, version="kiro-cli 2.22.0"),
-            "omnigent": _signal(installed=True, version="omnigent 0.15.0"),
-        }
-    )
+    discovery = SimpleNamespace(agents={"kiro": _signal(installed=True, version="kiro-cli 2.27.1")})
 
-    kiro, omnigent, custom = assess_connector_health(("kiro", "omnigent", "customagent"), discovery)
+    kiro, custom = assess_connector_health(("kiro", "customagent"), discovery)
 
     assert (kiro.connector, kiro.status, kiro.reason_code) == (
         "kiro",
@@ -240,10 +255,6 @@ def test_connector_rows_name_the_connector_and_accept_untested_newer_versions() 
         "connector-not-version-gated",
     )
     assert "proxy" not in kiro.summary
-    assert omnigent.status is HealthStatus.SUPPORTED
-    assert omnigent.reason_code == "connector-version-untested-newer"
-    assert omnigent.contract_id == "omnigent-custom-policy-v1"
-    assert "untested newer version" in omnigent.summary
     assert (custom.connector, custom.reason_code) == ("customagent", "connector-contract-unregistered")
 
 
@@ -299,3 +310,36 @@ def test_manual_choices_are_never_promoted_to_executable_repairs() -> None:
     with pytest.raises(RemediationAuthorizationError) as exc:
         authorize_remediation(choice, confirmed=True)
     assert exc.value.code == "manual-remediation-required"
+
+
+@pytest.mark.parametrize("version", ["kiro-cli 2.26.1", "kiro-cli 2.24.1"])
+def test_kiro_cli_below_the_hook_floor_is_unsupported_with_the_update_guidance(version: str) -> None:
+    # GAP-0227: before 2.27.1 a non-interactive kiro-cli --v3 run loads no
+    # hooks, so doctor reports the connector unsupported and says to update.
+    below, at_floor = assess_connector_health(
+        ("kiro",), SimpleNamespace(agents={"kiro": _signal(installed=True, version=version)})
+    ) + assess_connector_health(("kiro",), SimpleNamespace(agents={"kiro": _signal(installed=True, version="kiro-cli 2.27.1")}))
+
+    assert below.status is HealthStatus.UNSUPPORTED
+    assert below.reason_code == "connector-version-outside-contract"
+    assert below.installed_version == version.removeprefix("kiro-cli ")
+    assert "is below 2.27.1" in below.summary
+    assert "non-interactive kiro-cli --v3 run loads no hooks" in below.summary
+    assert below.remediations[0].summary == "Update Kiro CLI to 2.27.1 or later, then rerun setup"
+    assert below.remediations[0].kind is RemediationKind.MANUAL
+    assert not below.remediations[0].unattended_allowed
+
+    assert (at_floor.status, at_floor.reason_code) == (HealthStatus.SUPPORTED, "connector-not-version-gated")
+
+
+def test_kiro_doctor_reports_old_cli_separately_from_supported_ide() -> None:
+    signal = _signal(installed=True, version="1.0.182")
+    signal.kiro_cli_version = "kiro-cli 2.26.1"
+    signal.kiro_ide_version = "1.0.182"
+    findings = assess_connector_health(("kiro",), SimpleNamespace(agents={"kiro": signal}))
+
+    assert any(f.status is HealthStatus.SUPPORTED and f.installed_version == "1.0.182" for f in findings)
+    assert any(
+        f.status is HealthStatus.UNSUPPORTED and "kiro-cli 2.26.1 is below 2.27.1" in f.summary
+        for f in findings
+    )

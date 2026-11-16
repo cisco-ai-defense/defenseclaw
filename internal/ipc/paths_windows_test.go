@@ -18,8 +18,7 @@ import (
 // TestResolveManagedIPCSocketPathWindowsHonoursExplicitOverride
 // asserts cfg.Managed.SocketPath wins verbatim — same escape-hatch
 // shape as macOS. Useful for CI fixture rigs that need to move the
-// socket to a scratch dir. See docs/specs/004-windows-ui-ipc/
-// design.md § Open questions.
+// socket to a scratch dir.
 func TestResolveManagedIPCSocketPathWindowsHonoursExplicitOverride(t *testing.T) {
 	// This test drives the TOP-LEVEL ResolveSocketPath (which
 	// applies the override rule) rather than the Windows-specific
@@ -43,7 +42,7 @@ func TestResolveManagedIPCSocketPathWindowsHonoursExplicitOverride(t *testing.T)
 // path unverified. On a developer laptop the test skips
 // gracefully because the registry key may legitimately be
 // unreadable outside of a real Windows managed_enterprise
-// install. See CR spec-004:PRRT_kwDORuAK-s6ankzr.
+// install.
 func TestResolveManagedIPCSocketPathWindowsProducesProgramFilesPath(t *testing.T) {
 	cfg := &config.Config{DeploymentMode: string(config.DeploymentModeManagedEnterprise)}
 	got := ResolveSocketPath(cfg)

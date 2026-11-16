@@ -499,6 +499,32 @@ class TestHookJudgeGateRoundTrip(unittest.TestCase):
         self.assertEqual(reloaded.guardrail.judge.hook_timeout, 7.0)
         self.assertEqual(reloaded.gateway.port, 19999)
 
+    def test_agent_gateway_and_root_scope_survive_a_cli_save(self):
+        # connectors.agent_gateway and guardrail.chains (1.0.6) are gateway
+        # settings the CLI does not model: an unrelated CLI save keeps them.
+        fresh = self._fresh_config()
+        data_dir = fresh.data_dir
+        fresh.save()
+        cfg_path = os.path.join(data_dir, "config.yaml")
+        import yaml as _yaml
+
+        with open(cfg_path) as f:
+            raw = _yaml.safe_load(f)
+        raw["connectors"] = {"agent_gateway": {"enabled": True, "instance_name": "gas"}}
+        raw.setdefault("guardrail", {})["chains"] = {"root_scope": True}
+        with open(cfg_path, "w") as f:
+            _yaml.safe_dump(raw, f, sort_keys=False)
+
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
+            cfg = config_mod.load()
+            cfg.gateway.port = 19998
+            cfg.save()
+        with open(cfg_path) as f:
+            saved = _yaml.safe_load(f)
+        self.assertEqual(saved["connectors"], {"agent_gateway": {"enabled": True, "instance_name": "gas"}})
+        self.assertEqual(saved["guardrail"]["chains"], {"root_scope": True})
+        self.assertEqual(saved["gateway"]["port"], 19998)
+
     def test_dotted_literal_unknown_key_is_rejected_by_v8_schema(self):
         # v8 is closed-world: a dotted literal is not an extension escape
         # hatch and must not be confused with the modeled nested path.
@@ -653,6 +679,37 @@ class TestConfigLoadSave(unittest.TestCase):
         self.assertEqual(judge.llm.model, "judge-v4-model")
         self.assertEqual(judge.llm.api_key_env, "DC_V4_JUDGE_KEY")
         self.assertEqual(judge.llm.base_url, "https://judge-v4.example")
+
+    def test_load_records_the_generation_of_the_bytes_it_read(self):
+        # r103 GAP-0021: an install decision names the config generation it
+        # used; unknown (-1) when config.generation.json does not record the
+        # bytes load() read.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = os.path.realpath(tmpdir)
+            path = Path(data_dir, "config.yaml")
+            path.write_text(f"config_version: 8\ndata_dir: {data_dir}\n", encoding="utf-8")
+            cfg = load(data_dir=data_dir)
+            self.assertEqual(cfg._loaded_generation, -1)
+            cfg.save()
+            saved = load(data_dir=data_dir)
+            self.assertGreaterEqual(saved._loaded_generation, 1)
+            self.assertNotIn("_loaded_generation", path.read_text(encoding="utf-8"))
+            path.write_text(path.read_text(encoding="utf-8") + "# hand edit\n", encoding="utf-8")
+            self.assertEqual(load(data_dir=data_dir)._loaded_generation, -1)
+
+    def test_load_survives_a_malformed_generation_record(self):
+        # A malformed config.generation.json is ancillary: config.yaml still
+        # loads, with the generation unknown.
+        from defenseclaw import config_writer
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = os.path.realpath(tmpdir)
+            config_path = Path(data_dir, "config.yaml")
+            config_path.write_text(f"config_version: 8\ndata_dir: {data_dir}\n", encoding="utf-8")
+            record = Path(config_writer.generation_path(str(config_path)))
+            for body in ('{"generation": null}', '{"generation": [1]}', '{"generation": Infinity}'):
+                record.write_text(body, encoding="utf-8")
+                self.assertEqual(load(data_dir=data_dir)._loaded_generation, -1, body)
 
     def test_load_missing_config_returns_defaults(self):
         with patch("defenseclaw.config.default_data_path") as mock_dp:
@@ -1074,8 +1131,8 @@ class TestConfigLoadSave(unittest.TestCase):
         cfg = AssetPolicyConfig(
             enabled=True,
             connectors={
-                "open-hands": PerConnectorAssetPolicy(mode="action"),
-                "openhands": PerConnectorAssetPolicy(mode="observe"),
+                "claude-code": PerConnectorAssetPolicy(mode="action"),
+                "claude_code": PerConnectorAssetPolicy(mode="observe"),
             },
         )
         with self.assertRaises(ValueError):
@@ -1757,6 +1814,12 @@ class TestGuardrailHostField(unittest.TestCase):
             "/tmp",
         )
         self.assertEqual(gc.allow_private_upstreams, ["10.50.2.100", "172.16.0.5"])
+
+    def test_merge_guardrail_internal_domains(self):
+        gc = _merge_guardrail({"internal_domains": ["corp.example.com", " "]}, "/tmp")
+        self.assertEqual(gc.internal_domains, ["corp.example.com"])
+        self.assertEqual(_merge_guardrail({}, "/tmp").internal_domains, [])
+        self.assertEqual(_merge_guardrail({"internal_domains": "corp.example.com"}, "/tmp").internal_domains, [])
 
     def test_merge_guardrail_hilt_defaults_and_values(self):
         default_gc = _merge_guardrail({}, "/tmp")

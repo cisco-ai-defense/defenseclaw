@@ -119,7 +119,8 @@ func TestProfileStopOffersAPermittedNextStep(t *testing.T) {
 		{"sandboxes", "help@example.invalid", "Request access: help@example.invalid.", "Start it again"},
 		{"this agent in a sandbox", "", "Request access: your IT help desk.", "Start it again"},
 		{"sandboxes", "help\x1b[2J@example.invalid\n", "Request access: help", "\x1b"},
-		{"host ports", "help@example.invalid", "Start it again: defenseclaw sandbox run claude", "Request access"},
+		{"host ports", "help@example.invalid", "Start it again without --host-port: defenseclaw sandbox run claude", "Request access"},
+		{"mounts", "help@example.invalid", "Start it again: defenseclaw sandbox run claude", "--host-port"},
 	} {
 		t.Run(tc.field+tc.access, func(t *testing.T) {
 			text := sandboxapi.ProfileStop(tc.field, "claudecode", tc.access)

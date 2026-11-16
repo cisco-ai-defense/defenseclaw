@@ -109,14 +109,30 @@ func TestInspectTrustedWindowsEnterpriseDeployment(t *testing.T) {
 // to Secure Client and is not refused as a profile conflict, and a planted
 // Secure Client record does not block a standalone install.
 func TestPlantedDeploymentRecordDoesNotAffectLifecycleProfile(t *testing.T) {
+	skipIfLocalSystem(t, "LocalSystem owns its t.TempDir() tree, so the fixture cannot stand in for a file a standard account owns")
 	planted := filepath.Join(t.TempDir(), "deployment.json")
 	if err := os.WriteFile(planted, []byte(`{}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// Users can write it, as a standard account can write what it planted.
+	// The test account alone is not enough: an elevated run is an
+	// administrator account, which the record check accepts as drift.
+	plantedSD, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;BU)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plantedDACL, _, err := plantedSD.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(planted, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, plantedDACL, nil); err != nil {
+		t.Fatal(err)
+	}
 	validate := func(path string) error {
 		if strings.EqualFold(path, planted) {
-			// The real validator: the test's temporary directory is
-			// writable by the current user, exactly like a planted tree.
+			// The real validator, over a record a standard user can write.
 			return windowsEnterpriseRecordValidatorDefault(path)
 		}
 		return nil
@@ -165,13 +181,18 @@ func TestPlantedDeploymentRecordDoesNotAffectLifecycleProfile(t *testing.T) {
 			if opts.resolvedProfile != tc.want {
 				t.Fatalf("resolved %q, want %q", opts.resolvedProfile, tc.want)
 			}
-			if len(opts.ignoredDeploymentRecords) != 1 || !strings.Contains(opts.ignoredDeploymentRecords[0], planted) {
-				t.Fatalf("ignored records %q", opts.ignoredDeploymentRecords)
+			if len(opts.ignoredDeploymentRecords) != 1 || opts.ignoredDeploymentRecords[0].path != planted {
+				t.Fatalf("ignored records %+v", opts.ignoredDeploymentRecords)
 			}
 			if tc.want == "standalone" {
 				result := newWindowsEnterpriseStandaloneResult(tc.action, &opts)
 				if len(result.Warnings) != 1 || result.Warnings[0].Code != "untrusted_deployment_record" {
 					t.Fatalf("standalone warnings %+v", result.Warnings)
+				}
+				message := result.Warnings[0].Message
+				want := "ignored a deployment record an administrator did not write: " + planted + ": " + validate(planted).Error()
+				if message != want {
+					t.Fatalf("Secure Client record warning = %q, want base text %q", message, want)
 				}
 			}
 		})
@@ -180,6 +201,7 @@ func TestPlantedDeploymentRecordDoesNotAffectLifecycleProfile(t *testing.T) {
 
 // The per-user gateway guard honors only an administrator-owned marker key.
 func TestWindowsEnterpriseMarkerRequiresAdministratorKey(t *testing.T) {
+	skipIfLocalSystem(t, "the LocalSystem HKCU cannot stand in for a standard account's")
 	suffix := make([]byte, 6)
 	if _, err := rand.Read(suffix); err != nil {
 		t.Fatal(err)

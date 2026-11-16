@@ -134,6 +134,17 @@ async def test_first_run_shows_its_form_without_the_setup_bar_at_80x24(hermetic)
         assert app.query_one("#setup-controls").has_class("hidden")
         assert app.query_one("#setup-wizard-controls").has_class("hidden")
 
+        # Read the entire focused hint at 80 columns, including the fields
+        # whose long descriptions used to end mid-word at the right border.
+        for label in ("LLM Judge", "HITL", "HITL Min Severity"):
+            index = next(i for i, field in enumerate(app.first_run_model.fields) if field.label == label)
+            await pilot.press(*(["down"] * (index - app.first_run_model.cursor)))
+            await pilot.pause()
+            text = screen_text(app)
+            hint = app._setup_table()[1][index][2]
+            for line in hint.splitlines():
+                assert line in text
+
 
 async def test_a_table_painted_before_it_measures_its_columns_repaints_them() -> None:
     # Windows CI painted the config table before the DataTable's idle sized

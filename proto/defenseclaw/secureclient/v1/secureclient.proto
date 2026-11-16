@@ -41,12 +41,11 @@ message HealthSnapshot {
   string defense_claw_version = 3;
 
   // Managed-enterprise deferred-config state, plumbed through from
-  // internal/gateway/health.go's HealthSnapshot.Configuration.State
-  // (spec 003 REQ-19 / REQ-20). Present on Windows and macOS managed-
+  // internal/gateway/health.go's HealthSnapshot.Configuration.State.
+  // Present on Windows and macOS managed-
   // enterprise deployments; UNSPECIFIED on every other build (OSS,
   // SaaS, DP, CP) so a Secure Client UI can key on the value without
-  // additional deployment-mode probing. See
-  // docs/specs/004-windows-ui-ipc/design.md § Interfaces.
+  // additional deployment-mode probing.
   //
   // Semantic layering with `availability` above: `availability` reports
   // overall reachability of the DefenseClaw runtime; `configuration_state`
@@ -69,7 +68,7 @@ enum ServiceAvailability {
 }
 
 // ConfigurationState mirrors internal/gateway/health.go's
-// ConfigurationState (spec 003) on the wire. The values track the
+// ConfigurationState on the wire. The values track the
 // managed-enterprise UCB drop lifecycle:
 //   - UNSPECIFIED: non-managed-enterprise or unknown (proto3 default).
 //   - WAITING_FOR_CONFIG: gateway daemon has not yet loaded config.yaml.

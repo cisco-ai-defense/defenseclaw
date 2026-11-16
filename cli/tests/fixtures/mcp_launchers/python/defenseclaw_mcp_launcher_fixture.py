@@ -77,6 +77,17 @@ def main() -> None:
         while True:
             time.sleep(1)
 
+    linger_pid_path = os.environ.get("MCP_FIXTURE_LINGER_CHILD_PID")
+    if linger_pid_path:
+        # A child that outlives this server's graceful exit.
+        lingering = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(300)"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        Path(linger_pid_path).write_text(str(lingering.pid), encoding="ascii")
+
     for line in sys.stdin:
         try:
             request = json.loads(line)

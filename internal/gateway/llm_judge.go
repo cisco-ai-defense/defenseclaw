@@ -19,8 +19,10 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"regexp"
+	"net/netip"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -28,11 +30,14 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/maximhq/bifrost/core/schemas"
+
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
@@ -108,6 +113,19 @@ type LLMJudge struct {
 	provider     LLMProvider
 	rp           *guardrail.RulePack
 	secureClient bool
+	// decision is the decision model in front of the tool-call judge; nil
+	// when decision_model is off.
+	decision *decisionModel
+	// decisionOnly marks the hook-lane judge of cascade 2: it has no LLM and
+	// answers tool calls with the decision model alone (newDecisionOnlyJudge).
+	decisionOnly bool
+	// decisionStates holds each prepared call's decision-model state until
+	// it is judged (keepDecisionState / takeDecisionState).
+	decisionStatesMu sync.Mutex
+	decisionStates   map[string]decisionModelState
+	// calls bounds and orders the judge calls sent to the model when
+	// guardrail.judge.max_parallel is set (nil: no limit).
+	calls *judgeScheduler
 
 	toolContextMu sync.Mutex
 	toolContext   map[string]toolJudgeSessionContext
@@ -207,10 +225,73 @@ func newLLMJudgeWithReason(cfg *config.JudgeConfig, llm config.LLMConfig, dotenv
 	} else {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: judge ready (model=%s)\n", model)
 	}
+	endpoint := llm.BaseURL
+	if bp, ok := provider.(*bifrostProvider); ok {
+		endpoint = bp.baseURL
+	}
 	return &LLMJudge{
 		cfg: cfg, model: model, providerName: llm.ProviderPrefix(),
 		provider: provider, rp: rp,
+		calls: judgeSchedulerFor(firstNonEmpty(endpoint, model), judgeParallelLimit(cfg, llm, endpoint)),
 	}, ""
+}
+
+func judgeParallelLimit(cfg *config.JudgeConfig, llm config.LLMConfig, endpoint string) int {
+	if cfg.MaxParallelExplicit || cfg.MaxParallel > 0 {
+		return cfg.MaxParallel
+	}
+	if localJudgeEndpoint(endpoint) || (endpoint == "" && llm.IsLocalProvider()) {
+		return 1
+	}
+	return 0
+}
+
+func localJudgeEndpoint(endpoint string) bool {
+	if strings.HasPrefix(strings.ToLower(endpoint), "unix:") {
+		return true
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") ||
+		host == "localhost.localdomain" || strings.HasSuffix(host, ".localhost.localdomain") {
+		return true
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	addr = addr.Unmap()
+	return addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast()
+}
+
+// chat sends one judge request. With guardrail.judge.max_parallel set it
+// first waits for a call slot of the model endpoint: tool-call judging goes
+// ahead of prompt judging, so a pending tool call is not queued behind a
+// turn's prompt checks on a slow local model (#1395). The wait counts
+// against ctx, the call's own deadline.
+func (j *LLMJudge) chat(ctx context.Context, kind string, req *ChatRequest) (*ChatResponse, error) {
+	release, err := j.calls.acquire(ctx, judgeCallClassOf(kind))
+	if err != nil {
+		return nil, fmt.Errorf("judge call waited for a free slot (guardrail.judge.max_parallel) past its deadline: %w", err)
+	}
+	defer release()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if end, bounded := hookJudgeAnswerEnd(ctx); bounded && !time.Now().Before(end) {
+		return nil, context.Canceled
+	}
+	return j.provider.ChatCompletion(ctx, req)
+}
+
+func judgeFailureReason(err error) string {
+	if errors.Is(err, context.Canceled) {
+		return "cancelled"
+	}
+	return err.Error()
 }
 
 // llmJudgeAllowsEmptyAPIKey reports whether the selected provider has a
@@ -225,7 +306,7 @@ func llmJudgeAllowsEmptyAPIKey(llm config.LLMConfig, providers *configs.Provider
 		return true
 	}
 	provider := strings.ToLower(strings.TrimSpace(llm.Provider))
-	if provider == "" && strings.TrimSpace(llm.InstanceName) != "" && providers != nil {
+	if (provider == "" || provider == customProviderType) && strings.TrimSpace(llm.InstanceName) != "" && providers != nil {
 		instance := strings.ToLower(strings.TrimSpace(llm.InstanceName))
 		for i := range providers.Providers {
 			if strings.ToLower(strings.TrimSpace(providers.Providers[i].Name)) == instance {
@@ -451,7 +532,7 @@ func wrapJudgeSample(content string) string {
 // context probe (catches typos like "passsswd", space-separated "etc
 // passwd", spelled-out "etc slash passwd") without flipping the default
 // posture into over-blocking for legitimate sysadmin questions.
-var sensitiveFileContextRe = regexp.MustCompile(
+var sensitiveFileContextRe = lazyregexp.New(
 	`(?i)` +
 		`\betc[\s/\\]+(?:slash[\s]+)?(?:pas{0,8}wd|sha{0,2}dow|sudoers|hosts|hostname|resolv\.conf)\b` +
 		`|\betc%2F(?:pas{0,8}wd|sha{0,2}dow|sudoers)\b` +
@@ -571,7 +652,7 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 	defer judgeTrace.Abort()
 	start := time.Now()
 
-	resp, err := j.provider.ChatCompletion(llmCtx, j.judgeChatRequest(messages, maxTok, kind))
+	resp, err := j.chat(llmCtx, kind, j.judgeChatRequest(messages, maxTok, kind))
 	latencyMs := time.Since(start).Milliseconds()
 	rawResponse := ""
 
@@ -584,7 +665,7 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 		recordJudgeMetrics(nil, judgeTraceFailureProvider)
 		emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			err.Error(), "", JudgeEmitOpts{FailureClass: gatewaylog.JudgeFailureProvider, InputContent: content})
+			judgeFailureReason(err), "", JudgeEmitOpts{FailureClass: gatewaylog.JudgeFailureProvider, InputContent: content})
 		return errorVerdict("llm-judge-injection")
 	}
 
@@ -740,14 +821,30 @@ func judgeExtraParams(model string) map[string]any {
 }
 
 func (j *LLMJudge) judgeChatRequest(messages []ChatMessage, maxTok int, kind string) *ChatRequest {
-	temperature := 0.0
+	var temperature *float64
+	if !modelRefusesTemperature(j.model) {
+		zero := 0.0
+		temperature = &zero
+	}
+	extraParams := judgeExtraParams(j.model)
+	// Only the OpenAI adapter with an operator-supplied endpoint receives this
+	// option. Native providers and Secure Client retain their request shape.
+	if bp, ok := j.provider.(*bifrostProvider); ok && !j.secureClient &&
+		bp.providerKey == schemas.OpenAI && bp.baseURL != "" && len(j.cfg.ExtraBody) > 0 {
+		if extraParams == nil {
+			extraParams = make(map[string]any, len(j.cfg.ExtraBody))
+		}
+		for key, value := range j.cfg.ExtraBody {
+			extraParams[key] = value
+		}
+	}
 	return &ChatRequest{
 		Messages:       messages,
 		MaxTokens:      intPtr(maxTok),
-		Temperature:    &temperature,
+		Temperature:    temperature,
 		ResponseFormat: judgeResponseFormatFor(kind, judgeNeedsToolSafeSchemaKeys(j.providerName, j.model)),
 		Fallbacks:      j.cfg.Fallbacks,
-		ExtraParams:    judgeExtraParams(j.model),
+		ExtraParams:    extraParams,
 	}
 }
 
@@ -1265,7 +1362,7 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 	)
 	defer judgeTrace.Abort()
 	start := time.Now()
-	resp, err := j.provider.ChatCompletion(llmCtx, j.judgeChatRequest(messages, maxTok, kind))
+	resp, err := j.chat(llmCtx, kind, j.judgeChatRequest(messages, maxTok, kind))
 	latencyMs := time.Since(start).Milliseconds()
 	rawResponse := ""
 
@@ -1278,7 +1375,7 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 		recordJudgeMetrics(nil, judgeTraceFailureProvider)
 		emitJudge(ctx, kind, j.model, gatewaylog.Direction(direction),
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			err.Error(), "", JudgeEmitOpts{FailureClass: gatewaylog.JudgeFailureProvider, ToolName: toolName, InputContent: content})
+			judgeFailureReason(err), "", JudgeEmitOpts{FailureClass: gatewaylog.JudgeFailureProvider, ToolName: toolName, InputContent: content})
 		return errorVerdict("llm-judge-pii")
 	}
 	fmt.Fprintf(defaultLogWriter, "  [llm-judge] pii: provider returned (dir=%s, choices=%d)\n", direction, len(resp.Choices))
@@ -1330,6 +1427,14 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 		fmt.Fprintf(defaultLogWriter,
 			"  [llm-judge] pii: dropped %d hallucinated entit%s (dir=%s)\n",
 			dropped, suffix, direction)
+	}
+
+	// The OS account name in a path or an ls -l owner column is local
+	// account metadata, not a username shared as data (GAP-0111).
+	if dropped := filterAccountMetadataUsernames(parsed, content); dropped > 0 {
+		fmt.Fprintf(defaultLogWriter,
+			"  [llm-judge] pii: dropped %d account-metadata username(s) (dir=%s)\n",
+			dropped, direction)
 	}
 
 	verdict := j.piiToVerdictWith(j.suppressionPack(ctx), parsed, direction, toolName)
@@ -1524,7 +1629,7 @@ func (j *LLMJudge) piiToVerdictWith(rp *guardrail.RulePack, data map[string]inte
 // JSON parsing (handles markdown-fenced output)
 // ---------------------------------------------------------------------------
 
-var markdownFenceRe = regexp.MustCompile("(?s)```(?:json)?\\s*\n?(.*?)\\s*```")
+var markdownFenceRe = lazyregexp.New("(?s)```(?:json)?\\s*\n?(.*?)\\s*```")
 
 func truncateJudgeLog(s string, maxLen int) string {
 	s = strings.ReplaceAll(s, "\n", " ")
@@ -1759,7 +1864,7 @@ func (j *LLMJudge) runExfilJudge(ctx context.Context, content string) *ScanVerdi
 	defer judgeTrace.Abort()
 	start := time.Now()
 
-	resp, err := j.provider.ChatCompletion(llmCtx, j.judgeChatRequest(messages, maxTok, kind))
+	resp, err := j.chat(llmCtx, kind, j.judgeChatRequest(messages, maxTok, kind))
 	latencyMs := time.Since(start).Milliseconds()
 	rawResponse := ""
 
@@ -1772,7 +1877,7 @@ func (j *LLMJudge) runExfilJudge(ctx context.Context, content string) *ScanVerdi
 		recordJudgeMetrics(nil, judgeTraceFailureProvider)
 		emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			err.Error(), "", JudgeEmitOpts{FailureClass: gatewaylog.JudgeFailureProvider, InputContent: content})
+			judgeFailureReason(err), "", JudgeEmitOpts{FailureClass: gatewaylog.JudgeFailureProvider, InputContent: content})
 		return errorVerdict("llm-judge-exfil")
 	}
 
@@ -2147,6 +2252,16 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 		}
 	}
 	fmt.Fprintf(&sample, "<CURRENT_TOOL_CALL tool=%q>\n%s\n</CURRENT_TOOL_CALL>", sanitizeToolName(toolName), current)
+	if j.decision != nil {
+		state := decisionModelState{
+			SessionUserIntent: entry.userIntent,
+			CurrentToolCall:   decisionModelToolCall{Tool: sanitizeToolName(toolName), Arguments: current},
+		}
+		for _, event := range prior {
+			state.RecentToolCalls = append(state.RecentToolCalls, decisionModelToolCall{Tool: event.toolName, Arguments: event.args})
+		}
+		j.keepDecisionState(sample.String(), state)
+	}
 	return sample.String()
 }
 
@@ -2240,7 +2355,14 @@ func (j *LLMJudge) prepareToolJudgeSample(ctx context.Context, toolName, args st
 	return j.toolJudgeContextSample(ctx, toolName, args), true
 }
 
+// runToolJudgeSample judges one prepared tool call: the decision model
+// first when one is configured (decision_model.go), then the LLM judge.
 func (j *LLMJudge) runToolJudgeSample(ctx context.Context, toolName, args, sample string) *ScanVerdict {
+	return j.runToolDecision(ctx, toolName, args, sample)
+}
+
+// runToolJudgeLLM is the LLM tool-call judge.
+func (j *LLMJudge) runToolJudgeLLM(ctx context.Context, toolName, args, sample string) *ScanVerdict {
 
 	timeout := time.Duration(j.cfg.Timeout) * time.Second
 	if timeout <= 0 {
@@ -2279,7 +2401,7 @@ func (j *LLMJudge) runToolJudgeSample(ctx context.Context, toolName, args, sampl
 	)
 	defer judgeTrace.Abort()
 	start := time.Now()
-	resp, err := j.provider.ChatCompletion(llmCtx, j.judgeChatRequest(messages, maxTok, kind))
+	resp, err := j.chat(llmCtx, kind, j.judgeChatRequest(messages, maxTok, kind))
 	latencyMs := time.Since(start).Milliseconds()
 	rawResponse := ""
 
@@ -2293,7 +2415,7 @@ func (j *LLMJudge) runToolJudgeSample(ctx context.Context, toolName, args, sampl
 		recordJudgeMetrics(nil, judgeTraceFailureProvider)
 		emitJudge(ctx, kind, j.model, dir,
 			len(args), latencyMs, "error", gatewaylog.SeverityHigh,
-			err.Error(), "", JudgeEmitOpts{FailureClass: gatewaylog.JudgeFailureProvider, ToolName: toolName, InputContent: args})
+			judgeFailureReason(err), "", JudgeEmitOpts{FailureClass: gatewaylog.JudgeFailureProvider, ToolName: toolName, InputContent: args})
 		return errorVerdict("llm-judge-tool")
 	}
 
@@ -2781,7 +2903,7 @@ func (j *LLMJudge) adjudicateCategory(ctx context.Context, direction, content st
 	)
 	defer judgeTrace.Abort()
 	started := time.Now()
-	resp, err := j.provider.ChatCompletion(llmCtx, j.judgeChatRequest(messages, maxTok, kind))
+	resp, err := j.chat(llmCtx, kind, j.judgeChatRequest(messages, maxTok, kind))
 	latencyMs := time.Since(started).Milliseconds()
 	rawResponse := ""
 	recordJudgeMetrics := func(verdict *ScanVerdict, failure judgeTraceFailure) {

@@ -1,9 +1,9 @@
-# defenseclaw-derived: tetragon-policy family=observe kernel_policy=sha256:08b71155b713
+# defenseclaw-derived: tetragon-policy family=observe kernel_policy=sha256:720bcdb296c7
 # Written by defenseclaw-sensor-helper. Do not edit: the helper reconciles this policy.
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
-  name: defenseclaw-observe-ff82ab37
+  name: defenseclaw-observe-ff201114
 spec:
   lsmhooks:
     - hook: file_open
@@ -29,15 +29,6 @@ spec:
             - action: Post
               rateLimit: 1m
               rateLimitScope: process
-    - hook: file_open
-      args:
-        - index: 0
-          type: file
-        - index: 0
-          type: uint32
-          resolve: f_mode
-          label: f_mode
-      selectors:
         - matchNamespaces:
             - namespace: Pid
               operator: In
@@ -53,7 +44,7 @@ spec:
               rateLimit: 1m
               rateLimitScope: process
 ---
-# defenseclaw-derived: tetragon-policy family=connect kernel_policy=sha256:08b71155b713
+# defenseclaw-derived: tetragon-policy family=connect kernel_policy=sha256:720bcdb296c7
 # Written by defenseclaw-sensor-helper. Do not edit: the helper reconciles this policy.
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy

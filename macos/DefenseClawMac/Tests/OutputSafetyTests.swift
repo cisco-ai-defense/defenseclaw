@@ -172,8 +172,8 @@ struct OutputSafetyTests {
         )
         expect(candidates.count == 2, "selected CLI contributes a runtime interpreter candidate")
         expect(
-            candidates[1] == bin.appendingPathComponent("python").path,
-            "selected CLI symlink resolves to its sibling Python"
+            candidates[0] == bin.appendingPathComponent("python").path,
+            "selected CLI symlink outranks an unrelated old home Python"
         )
     }
 

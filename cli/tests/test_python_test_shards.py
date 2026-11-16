@@ -122,3 +122,17 @@ def test_partition_rejects_invalid_shard_counts(tmp_path: Path, count: int) -> N
 
     with pytest.raises(ValueError):
         partition_test_files(files, count)
+
+
+def test_recorded_times_outweigh_source_size_and_unrecorded_modules_still_run(tmp_path: Path) -> None:
+    slow = _write(tmp_path / "test_slow.py", 10)
+    fast = [_write(tmp_path / f"test_fast_{index}.py", 1000) for index in range(3)]
+    new = _write(tmp_path / "test_new.py", 500)
+    seconds = {slow.as_posix(): 300.0, **{path.as_posix(): 1.0 for path in fast}}
+
+    shards = partition_test_files([slow, *fast, new], 2, seconds)
+
+    flattened = [path for shard in shards for path in shard.files]
+    assert sorted(flattened) == sorted([slow, *fast, new])
+    # The small but slow module gets a shard of its own.
+    assert any(shard.files == (slow,) for shard in shards)

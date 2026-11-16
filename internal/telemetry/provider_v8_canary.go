@@ -14,7 +14,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -87,7 +86,7 @@ func (p *Provider) EmitV8GeneratedCanary(
 	}
 	builder, err := observability.NewFamilyBuilder(
 		observability.ClockFunc(func() time.Time { return time.Now().UTC() }),
-		observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+		observability.TimeOrderedOccurrenceIDs,
 	)
 	if err != nil {
 		return result, newV8ProviderError(V8ProviderErrorCanary, nil)

@@ -38,7 +38,7 @@ func TestEmitJudge_AuthoritativeStorePersistsRawBody(t *testing.T) {
 		t.Fatalf("Shutdown: %v", err)
 	}
 
-	rows, err := bodyStore.ListJudgeResponses(10)
+	rows, err := bodyStore.ListJudgeResponsesCtx(t.Context(), 10)
 	if err != nil {
 		t.Fatalf("ListJudgeResponses: %v", err)
 	}

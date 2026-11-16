@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -113,10 +114,17 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 		// keys, and invalid or not applicable when the command key is
 		// missing or holds no command string (a number, null, blank text,
 		// an object).
-		return mergeSandboxShellCommandVerdict(a.decisionConfig(ctx), connectorName, verdict,
+		return mergeSandboxShellCommandVerdict(ctx, a.decisionConfig(ctx), connectorName, verdict,
 			[]RuleFinding{unverifiedShellCommandFinding(action.EnforcementCapable)})
 	}
 	if commandTool == action.Input.Tool && bytes.Equal(command, action.Input.Args) {
+		return verdict
+	}
+	if action.EnforcementCapable && trustedCallOverStatementBudget(action.Input, primary) {
+		// The call is already refused over the statement budget, and this
+		// reading only adds to its verdict: a second, PowerShell reading
+		// of a 3000-statement Codex call cost a Windows gateway about a
+		// second (rel-1-0-2:GAP-0568).
 		return verdict
 	}
 	input := action.Input
@@ -133,12 +141,58 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 		LegacyText:                    string(command),
 		Connector:                     action.Connector,
 		EnforcementCapable:            action.EnforcementCapable,
+		ManagedHookOverflowHold:       action.ManagedHookOverflowHold,
 		DowngradeReadOnlyDataArgs:     action.DowngradeReadOnlyDataArgs,
 		SkipLocalFilesystemResolution: action.SkipLocalFilesystemResolution,
 		ResolvedWriteTargets:          action.ResolvedWriteTargets,
 		SandboxGuestCWD:               action.SandboxGuestCWD,
 	})
-	return mergeSandboxShellCommandVerdict(a.decisionConfig(ctx), connectorName, verdict, findings)
+	if plain, ok := codexPlainShellCommand(a.decisionConfig(ctx), connectorName, req, action, commandTool); ok {
+		// Codex runs the command in PowerShell here, but the text may be
+		// one that PowerShell reads no path of (touch ~/.netrc): judged as
+		// PowerShell alone, a credential write in an exec_command call,
+		// whose arguments leave the parse partial, only alerted, while the
+		// same text in the Bash shape was blocked (GAP-1076). The command
+		// alone is also judged as the call tool, in the dialect the text
+		// infers, as the Bash shape is; this reading only adds findings.
+		input := action.Input
+		input.Args = plain
+		input.DialectHint = ""
+		if runtime.GOOS == "windows" {
+			input.DialectHint = agentHookWindowsShellDialect(input)
+		}
+		// A call already in the plain shape, in the same dialect, was
+		// judged so by its first reading: judging it again repeated every
+		// reader of that text, on Windows the script and folder-link walks
+		// too, and a writer behind 63 folder links answered at the Codex
+		// hook deadline (GAP-1079).
+		if !bytes.Equal(plain, action.Input.Args) || input.DialectHint != action.Input.DialectHint {
+			findings = mergeBoundedFindings(findings, dispatchTrustedAction(ctx, trustedActionRequest{
+				Input:                         input,
+				LegacyText:                    string(plain),
+				Connector:                     action.Connector,
+				EnforcementCapable:            action.EnforcementCapable,
+				ManagedHookOverflowHold:       action.ManagedHookOverflowHold,
+				DowngradeReadOnlyDataArgs:     action.DowngradeReadOnlyDataArgs,
+				SkipLocalFilesystemResolution: action.SkipLocalFilesystemResolution,
+				ResolvedWriteTargets:          action.ResolvedWriteTargets,
+				SandboxGuestCWD:               action.SandboxGuestCWD,
+			}))
+		}
+	}
+	return mergeSandboxShellCommandVerdict(ctx, a.decisionConfig(ctx), connectorName, verdict, findings)
+}
+
+// codexPlainShellCommand is the command of a Codex shell call in the plain
+// shell shape, to judge as the call tool next to its PowerShell reading
+// (codexPowerShellCommand): for a call whose tool names no PowerShell, on a
+// host outside Secure Client.
+func codexPlainShellCommand(cfg *config.Config, connectorName string, req *ToolInspectRequest, action trustedActionRequest, commandTool string) (json.RawMessage, bool) {
+	if req == nil || commandTool != "powershell" || !strings.EqualFold(strings.TrimSpace(connectorName), "codex") ||
+		trustedPowerShellExecutionTool(action.Input.Tool) || cfg != nil && cfg.SecureClientIntegration() {
+		return nil, false
+	}
+	return connector.ShellCommandArgs("codex", req.Tool, action.Input.Args)
 }
 
 const (
@@ -174,9 +228,17 @@ func unverifiedShellCommandFinding(enforcementCapable bool) RuleFinding {
 // is stronger. The deciding findings replace the call's findings of the same
 // rules (there only candidates) and name the reason. A verdict at least as
 // strong is returned unchanged.
-func mergeSandboxShellCommandVerdict(cfg *config.Config, connectorName string, verdict *ToolInspectVerdict, findings []RuleFinding) *ToolInspectVerdict {
-	action := guardrailActionForConnectorFindings(cfg, connectorName, findings, true)
+func mergeSandboxShellCommandVerdict(ctx context.Context, cfg *config.Config, connectorName string, verdict *ToolInspectVerdict, findings []RuleFinding) *ToolInspectVerdict {
+	action := profileMeetActionForFindings(ctx, cfg, connectorName, findings, true, false)
 	if strongerGuardrailAction(verdict.Action, action) == verdict.Action {
+		if verdict.decisionConfirm && action == guardrailActionConfirm {
+			// A rule confirms the call too: the confirm is no longer the
+			// decision model's alone, so it keeps the rule mapping (a block
+			// where the agent cannot ask).
+			out := *verdict
+			out.decisionConfirm = false
+			return &out
+		}
 		return verdict
 	}
 	deciding := make([]RuleFinding, 0, len(findings))
@@ -187,6 +249,8 @@ func mergeSandboxShellCommandVerdict(cfg *config.Config, connectorName string, v
 	}
 	merged := *verdict
 	merged.Action = action
+	// The action is the rules' now (stronger than the verdict's).
+	merged.decisionConfirm = false
 	merged.DetailedFindings = append([]RuleFinding(nil), verdict.DetailedFindings...)
 	merged.Findings = append([]string(nil), verdict.Findings...)
 	reasons := make([]string, 0, minInt(len(deciding), 5))

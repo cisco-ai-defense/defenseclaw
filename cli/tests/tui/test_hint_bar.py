@@ -37,6 +37,12 @@ def test_hint_engine_returns_panel_specific_hints(panel: str, expected: str) -> 
     assert expected in hint
 
 
+def test_inventory_hint_names_summary_scrolling() -> None:
+    hint = HintEngine().hint_for(HintState(active_panel="inventory"))
+    assert "j/k move Summary/rows" in hint
+    assert "PgDn/End jump" in hint
+
+
 def test_skills_hint_surfaces_unscanned_count() -> None:
     hint = HintEngine().hint_for(HintState(active_panel="skills", unscanned_skills=3))
 

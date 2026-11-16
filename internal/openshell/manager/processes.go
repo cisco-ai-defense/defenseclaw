@@ -73,9 +73,10 @@ const (
 	// commBytes is how much of a program's name the kernel keeps as a
 	// process's comm (TASK_COMM_LEN less its NUL).
 	commBytes = 15
-	// lineageStartWindow is how long before its connection a process of the
-	// program may have started for PIDOf to credit it with the connection,
-	// and lineageClockSlack how long after: the sandbox's clock and its boot
+	// lineageStartWindow bounds attribution from a sampled process, which
+	// may have missed a short-lived copy of the same program. Kernel-fed
+	// exec and exit times instead establish whether a process was running.
+	// lineageClockSlack allows for the sandbox's clock and its boot
 	// time (whole seconds) may be off by that much (GAP-0174).
 	lineageStartWindow = 5 * time.Second
 	lineageClockSlack  = time.Second
@@ -796,25 +797,13 @@ func (m *Manager) LineageFor(sandboxName string, pid int, exe string) []ProcessR
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	var out []ProcessRef
-	seen := map[*procNode]bool{}
-	for node := t.byPIDLocked(pid, exe); node != nil && len(out) < maxLineageDepth && !seen[node]; node = t.parentLocked(node) {
-		seen[node] = true
-		out = append(out, ProcessRef{PID: node.PID, PPID: node.PPID, Comm: node.name(), Exe: node.Exe, Start: node.Start})
-	}
-	return out
+	return t.lineageLocked(t.byPIDLocked(pid, exe))
 }
 
-// PIDOf is the pid of the one process of sandbox sandboxName that runs exe
-// (runs), started at most lineageStartWindow before at (when the program was
-// seen connecting) and was not seen exiting before then, from the sandbox's
-// process tree; 0 while the tree is off, or when it holds no such process or
-// several. A program shorter than a sample interval (a quick curl, a
-// `sandbox exec`) is not in the tree, so a copy of it that started earlier
-// and still runs (a slow download) cannot be told from it and is not taken
-// (GAP-0174); a program that connects long after it started has no lineage
-// either. It implements ProcessLookup.
-func (m *Manager) PIDOf(sandboxName, exe string, at time.Time) int {
+// LineageAt resolves a pid-less destination against the process image that
+// was running when it connected. The candidate and its ancestry are read
+// under one tree lock; callers keep the result with the destination record.
+func (m *Manager) LineageAt(sandboxName, exe string, at time.Time) []ProcessRef {
 	m.mu.Lock()
 	b := m.boxes[sandboxName]
 	var t *procTree
@@ -823,30 +812,54 @@ func (m *Manager) PIDOf(sandboxName, exe string, at time.Time) int {
 	}
 	m.mu.Unlock()
 	if t == nil || exe == "" || at.IsZero() {
-		return 0
+		return nil
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	startOf := func(n *procNode) time.Time {
-		if n.Start.IsZero() {
-			// Only OpenShell's launch record named it so far.
-			return n.FirstSeen
-		}
-		return n.Start
+	candidates := t.candidatesAtLocked(exe, at)
+	if len(candidates) != 1 {
+		return nil
 	}
+	return t.lineageLocked(candidates[0])
+}
+
+func (t *procTree) lineageLocked(node *procNode) []ProcessRef {
+	var out []ProcessRef
+	seen := map[*procNode]bool{}
+	for ; node != nil && len(out) < maxLineageDepth && !seen[node]; node = t.parentLocked(node) {
+		seen[node] = true
+		out = append(out, ProcessRef{PID: node.PID, PPID: node.PPID, Comm: node.name(), Exe: node.Exe, Start: node.Start})
+	}
+	return out
+}
+
+// candidatesAtLocked returns only images that could have made a connection.
+// An interpreter symlink is an alias only for a kernel-fed image; the feed
+// establishes its lifetime and ambiguity still leaves the row unattributed.
+func (t *procTree) candidatesAtLocked(exe string, at time.Time) []*procNode {
 	var candidates []*procNode
-	for _, nodes := range [][]*procNode{slices.Collect(maps.Values(t.live)), t.exited} {
+	// PID-less feed images live only in byExec until they exit. Exited images
+	// are read from exited to avoid counting one image twice.
+	var pidless []*procNode
+	for _, n := range t.byExec {
+		if n.PID <= 0 && n.ExitedAt.IsZero() {
+			pidless = append(pidless, n)
+		}
+	}
+	for _, nodes := range [][]*procNode{slices.Collect(maps.Values(t.live)), pidless, t.exited} {
 		for _, n := range nodes {
-			start := startOf(n)
-			if !n.runs(exe) || n.PID <= 0 || start.Before(at.Add(-lineageStartWindow)) || start.After(at.Add(lineageClockSlack)) ||
+			start := n.startedAt()
+			matches := n.runs(exe) || n.ExecID != "" && pythonInterpreterAlias(n.Exe, exe)
+			if !matches || (n.PID <= 0 && n.ExecID == "") ||
+				(n.ExecID == "" && start.Before(at.Add(-lineageStartWindow))) || start.After(at.Add(lineageClockSlack)) ||
 				(!n.ExitedAt.IsZero() && n.ExitedAt.Before(at)) {
 				continue
 			}
 			candidates = append(candidates, n)
 		}
 	}
-	if pid := onePID(candidates); pid != 0 || len(candidates) == 0 {
-		return pid
+	if len(candidates) < 2 {
+		return candidates
 	}
 	// Several copies. The slack allows for a sample's coarse start, so a
 	// copy that started just after the connection is a candidate too. The
@@ -857,27 +870,39 @@ func (m *Manager) PIDOf(sandboxName, exe string, at time.Time) int {
 	var running []*procNode
 	for _, n := range candidates {
 		if n.ExecID == "" {
-			return 0
+			return candidates
 		}
-		if !startOf(n).After(at) {
+		if !n.startedAt().After(at) {
 			running = append(running, n)
 		}
 	}
-	return onePID(running)
+	return running
 }
 
-// onePID is the pid the nodes share, or 0 for none or several.
-func onePID(nodes []*procNode) int {
-	pid := 0
-	for _, n := range nodes {
-		switch {
-		case pid == 0:
-			pid = n.PID
-		case n.PID != pid:
-			return 0
-		}
+func (n *procNode) startedAt() time.Time {
+	if n.Start.IsZero() {
+		return n.FirstSeen
 	}
-	return pid
+	return n.Start
+}
+
+// pythonInterpreterAlias covers a venv's python/python3 exec path and the
+// corresponding versioned interpreter path reported by the proxy. It is
+// display attribution only, never an executable identity for policy.
+func pythonInterpreterAlias(processExe, recordExe string) bool {
+	pythonVersion := func(name string) (string, bool) {
+		if name == "python" || name == "python3" {
+			return "", true
+		}
+		version, ok := strings.CutPrefix(name, "python3.")
+		return version, ok && version != "" && strings.IndexFunc(version, func(r rune) bool { return r < '0' || r > '9' }) == -1
+	}
+	if processExe == "" || recordExe == "" || processExe == recordExe {
+		return false
+	}
+	processVersion, processOK := pythonVersion(path.Base(processExe))
+	recordVersion, recordOK := pythonVersion(path.Base(recordExe))
+	return processOK && recordOK && (processVersion == "" || recordVersion == "" || processVersion == recordVersion)
 }
 
 // runs reports whether the process runs program exe. A sample seldom has a

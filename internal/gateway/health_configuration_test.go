@@ -14,7 +14,7 @@ import (
 // TestConfigurationSnapshotDefaultOmitted asserts a health snapshot
 // from a SidecarHealth on which SetDaemonConfigLoaded was NEVER called
 // omits the top-level "configuration" block entirely — the deployment
-// is OSS / SaaS / DP / CP, spec 003 doesn't apply, and downstream
+// is OSS / SaaS / DP / CP, deferred config doesn't apply, and downstream
 // consumers must NOT be given a spurious field to reason about.
 func TestConfigurationSnapshotDefaultOmitted(t *testing.T) {
 	h := NewSidecarHealth()
@@ -70,8 +70,8 @@ func TestConfigurationCollapseReady(t *testing.T) {
 	}
 }
 
-// TestConfigurationCollapseGuardianUnknownIsSafeDefault — spec 003
-// design.md § Tradeoffs safe-default rule: an unreachable state file
+// TestConfigurationCollapseGuardianUnknownIsSafeDefault — safe-default
+// rule: an unreachable state file
 // must never surface as ready.
 func TestConfigurationCollapseGuardianUnknownIsSafeDefault(t *testing.T) {
 	h := NewSidecarHealth()
@@ -85,7 +85,7 @@ func TestConfigurationCollapseGuardianUnknownIsSafeDefault(t *testing.T) {
 }
 
 // TestConfigurationSkipsWaitingForTargetsWhenTargetsArriveFirst —
-// spec 003 AC-12: if the guardian is already Ready by the time the
+// if the guardian is already Ready by the time the
 // daemon completes config load, the state jumps directly from
 // waiting_for_config to ready without a spurious waiting_for_targets
 // tick. The `since` timestamp must also update on the transition.
@@ -112,8 +112,8 @@ func TestConfigurationSkipsWaitingForTargetsWhenTargetsArriveFirst(t *testing.T)
 	}
 }
 
-// TestConfigurationSinceStableWhileStateUnchanged — spec 003 AC-08.
-// Repeated snapshots taken while the daemon sits in
+// TestConfigurationSinceStableWhileStateUnchanged —
+// repeated snapshots taken while the daemon sits in
 // waiting_for_config MUST return the same Since; only a state
 // transition advances it.
 func TestConfigurationSinceStableWhileStateUnchanged(t *testing.T) {
@@ -160,9 +160,9 @@ func TestConfigurationRefreshPicksUpGuardianTransition(t *testing.T) {
 }
 
 // TestConfigurationReaderReplacementIsAppliedAtomically pins the
-// concurrent-reader-swap invariant from CR spec-003:PRRT_kwDORuAK-s6al7aV.
+// concurrent-reader-swap invariant.
 //
-// The race the CR flagged: SetDaemonConfigLoaded samples the OLD
+// The race: SetDaemonConfigLoaded samples the OLD
 // reader outside the write lock, a concurrent SetGuardianStateReader
 // with a NEW ready-returning reader wins the write-lock race, and
 // then the FIRST goroutine acquires the lock and applies its stale
@@ -214,8 +214,7 @@ func TestConfigurationReaderReplacementIsAppliedAtomically(t *testing.T) {
 	// the guardian reader call back INSIDE h.mu would deadlock
 	// SetGuardianStateReader against the blocked goroutine, and
 	// unbounded receives would then hang until the go-test binary
-	// timeout with a confusing "test timed out" report. CR
-	// spec-003:PRRT_kwDORuAK-s6amXYh.
+	// timeout with a confusing "test timed out" report.
 	const waitCap = 5 * time.Second
 
 	// Wait for the goroutine to reach the blocking point inside

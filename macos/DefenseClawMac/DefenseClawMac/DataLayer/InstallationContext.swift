@@ -346,6 +346,22 @@ struct InstallationContext: Sendable, Equatable {
             ? URL(fileURLWithPath: managedLogDirectoryPath, isDirectory: true)
             : dataDirectory
 
+        // A source install publishes ~/.local/bin/defenseclaw as a symlink
+        // into its venv. A leftover packaged venv must not silently shadow it.
+        // Explicit selections and administrator-managed installations stay pinned.
+        if source == .userDefault, environmentVenv == nil, !managed, invalidReason == nil {
+            let launcher = userHome.appendingPathComponent(".local/bin/defenseclaw")
+            let resolved = launcher.resolvingSymlinksInPath()
+            let bin = resolved.deletingLastPathComponent()
+            let runtime = bin.deletingLastPathComponent()
+            if resolved != launcher.standardizedFileURL,
+               resolved.lastPathComponent == "defenseclaw", bin.lastPathComponent == "bin",
+               fileExists(resolved.path), fileExists(bin.appendingPathComponent("python").path),
+               fileExists(runtime.appendingPathComponent("pyvenv.cfg").path) {
+                venvURL = runtime
+            }
+        }
+
         return InstallationContext(
             source: source,
             accessMode: accessMode,

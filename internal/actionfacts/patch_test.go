@@ -83,6 +83,42 @@ func TestAnalyzeApplyPatchEnvelopeProjectsExactChanges(t *testing.T) {
 	}
 }
 
+func TestShellHeredocApplyPatchProjectsNativePathFacts(t *testing.T) {
+	patch := "*** Begin Patch\n" +
+		"*** Add File: src/new.go\n+package src\n" +
+		"*** Update File: ../.zshrc\n@@\n-old\n+new\n" +
+		"*** Update File: src/old.go\n*** Move to: src/moved.go\n@@\n-old\n+new\n" +
+		"*** Delete File: /etc/sudoers\n*** End Patch\n"
+	nativeArgs, err := json.Marshal(map[string]any{"command": patch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	native := Analyze(Input{Tool: "apply_patch", Args: nativeArgs, CWD: "/home/alice/proj"})
+	for _, tool := range []string{"exec_command", "Bash"} {
+		shellArgs, err := json.Marshal(map[string]any{"command": "apply_patch <<'PATCH'\n" + patch + "PATCH"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		shell := Analyze(Input{Tool: tool, Args: shellArgs, CWD: "/home/alice/proj"})
+		if !shell.Authoritative() || !shell.EnforcementEligible() {
+			t.Fatalf("%s parse=%#v commands=%#v", tool, shell.Parse, shell.Commands)
+		}
+		if len(shell.Paths) != len(native.Paths) {
+			t.Fatalf("%s paths=%#v, native=%#v", tool, shell.Paths, native.Paths)
+		}
+		for _, want := range native.Paths {
+			if !patchFactsHavePath(shell, want.Value, want.Resolved, want.Access) {
+				t.Fatalf("%s missing native path %#v in %#v", tool, want, shell.Paths)
+			}
+		}
+		for _, op := range []OperationKind{OperationWrite, OperationDelete, OperationMove} {
+			if !factsHaveOperation(shell, op) {
+				t.Fatalf("%s missing %s in %#v", tool, op, shell.Commands)
+			}
+		}
+	}
+}
+
 func TestAnalyzeApplyPatchRejectsUncertainEnvelopes(t *testing.T) {
 	valid := "*** Begin Patch\n*** Add File: safe.go\n+safe\n*** End Patch"
 	many := strings.Builder{}
@@ -111,13 +147,10 @@ func TestAnalyzeApplyPatchRejectsUncertainEnvelopes(t *testing.T) {
 		{name: "move without update", fields: map[string]any{"patch": "*** Begin Patch\n*** Move to: b.go\n*** End Patch"}, status: StatusInvalid},
 		{name: "eof outside update", fields: map[string]any{"patch": "*** Begin Patch\n*** End of File\n*** Delete File: a.go\n*** End Patch"}, status: StatusInvalid},
 		{name: "content after eof", fields: map[string]any{"patch": "*** Begin Patch\n*** Update File: a.go\n@@\n-old\n+new\n*** End of File\n+late\n*** End Patch"}, status: StatusInvalid},
-		{name: "duplicate path", fields: map[string]any{"patch": "*** Begin Patch\n*** Add File: a.go\n+x\n*** Delete File: a.go\n*** End Patch"}, status: StatusAmbiguous},
-		{name: "normalized duplicate path aliases", fields: map[string]any{"patch": "*** Begin Patch\n*** Add File: dir/../a.go\n+x\n*** Delete File: a.go\n*** End Patch"}, status: StatusAmbiguous},
-		{name: "mixed separator duplicate path aliases", fields: map[string]any{"patch": "*** Begin Patch\n*** Add File: dir\\..\\a.go\n+x\n*** Delete File: a.go\n*** End Patch"}, status: StatusAmbiguous},
 		{name: "duplicate aliases", fields: map[string]any{"command": valid, "patch": valid}, status: StatusAmbiguous},
 		{name: "explicit path conflict", fields: map[string]any{"patch": valid, "path": "other.go"}, status: StatusAmbiguous},
-		{name: "POSIX absolute path", fields: map[string]any{"patch": "*** Begin Patch\n*** Delete File: /etc/hosts\n*** End Patch"}, status: StatusInvalid},
-		{name: "drive absolute path", fields: map[string]any{"patch": "*** Begin Patch\n*** Delete File: C:\\Windows\\win.ini\n*** End Patch"}, status: StatusInvalid},
+		{name: "home path", fields: map[string]any{"patch": "*** Begin Patch\n*** Delete File: ~/.zshrc\n*** End Patch"}, status: StatusInvalid},
+		{name: "drive-relative path", fields: map[string]any{"patch": "*** Begin Patch\n*** Delete File: C:win.ini\n*** End Patch"}, status: StatusInvalid},
 		{name: "UNC absolute path", fields: map[string]any{"patch": "*** Begin Patch\n*** Delete File: \\\\server\\share\\file.txt\n*** End Patch"}, status: StatusInvalid},
 		{name: "nul path", fields: map[string]any{"patch": "*** Begin Patch\n*** Add File: a\x00.go\n+x\n*** End Patch"}, status: StatusInvalid},
 		{name: "path limit", fields: map[string]any{"patch": "*** Begin Patch\n*** Add File: " + strings.Repeat("a", maxScalarBytes+1) + "\n+x\n*** End Patch"}, status: StatusLimitExceeded},
@@ -157,6 +190,76 @@ func TestAnalyzeApplyPatchResolvesRelativeWindowsPath(t *testing.T) {
 	}
 }
 
+// An absolute target is a write fact like a relative one: Codex and the
+// Copilot CLI apply it as given, so the path rules judge it
+// (rel-1-0-6:GAP-0361).
+func TestAnalyzeApplyPatchProjectsAbsoluteTargets(t *testing.T) {
+	for _, test := range []struct {
+		name, cwd, patch string
+		dialect          Dialect
+		want             []struct {
+			value, resolved string
+			access          PathAccess
+		}
+	}{
+		{name: "POSIX update and delete", cwd: "/workspace",
+			patch: "*** Begin Patch\n*** Update File: /etc/sudoers\n@@\n a\n+b\n*** Delete File: /etc/hosts\n*** End Patch",
+			want: []struct {
+				value, resolved string
+				access          PathAccess
+			}{{"/etc/sudoers", "/etc/sudoers", PathAccessWrite}, {"/etc/hosts", "/etc/hosts", PathAccessDelete}}},
+		{name: "POSIX dot segments", cwd: "/workspace",
+			patch: "*** Begin Patch\n*** Add File: /home/alice/./.zshrc\n+x\n*** End Patch",
+			want: []struct {
+				value, resolved string
+				access          PathAccess
+			}{{"/home/alice/./.zshrc", "/home/alice/.zshrc", PathAccessWrite}}},
+		{name: "drive path", cwd: `C:\workspace`, dialect: DialectPowerShell,
+			patch: "*** Begin Patch\n*** Delete File: C:\\Windows\\win.ini\n*** End Patch",
+			want: []struct {
+				value, resolved string
+				access          PathAccess
+			}{{`C:\Windows\win.ini`, "C:/Windows/win.ini", PathAccessDelete}}},
+		// A root-relative target is rooted on the working directory drive,
+		// with either separator (rel-1-0-6:GAP-0398).
+		{name: "Windows root-relative backslash", cwd: `C:\workspace`, dialect: DialectPowerShell,
+			patch: "*** Begin Patch\n*** Delete File: \\Users\\alice\\.ssh\\authorized_keys\n*** End Patch",
+			want: []struct {
+				value, resolved string
+				access          PathAccess
+			}{{`\Users\alice\.ssh\authorized_keys`, "C:/Users/alice/.ssh/authorized_keys", PathAccessDelete}}},
+		{name: "Windows root-relative slash", cwd: `C:\workspace`, dialect: DialectPowerShell,
+			patch: "*** Begin Patch\n*** Delete File: /Users/alice/.ssh/authorized_keys\n*** End Patch",
+			want: []struct {
+				value, resolved string
+				access          PathAccess
+			}{{"/Users/alice/.ssh/authorized_keys", "C:/Users/alice/.ssh/authorized_keys", PathAccessDelete}}},
+		// On POSIX a backslash is part of the file name.
+		{name: "POSIX backslash name", cwd: "/repo",
+			patch: "*** Begin Patch\n*** Delete File: \\etc\\sudoers\n*** End Patch",
+			want: []struct {
+				value, resolved string
+				access          PathAccess
+			}{{`\etc\sudoers`, `/repo/\etc\sudoers`, PathAccessDelete}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			args, err := json.Marshal(map[string]string{"command": test.patch})
+			if err != nil {
+				t.Fatal(err)
+			}
+			facts := Analyze(Input{Tool: "apply_patch", Args: args, CWD: test.cwd, DialectHint: test.dialect})
+			if !facts.Authoritative() || len(facts.Paths) != len(test.want) {
+				t.Fatalf("facts = %#v", facts)
+			}
+			for _, want := range test.want {
+				if !patchFactsHavePath(facts, want.value, want.resolved, want.access) {
+					t.Fatalf("missing path %#v in %#v", want, facts.Paths)
+				}
+			}
+		})
+	}
+}
+
 func TestAnalyzePatchFieldRequiresExactToolAndField(t *testing.T) {
 	patch := "*** Begin Patch\n*** Add File: safe.go\n+safe\n*** End Patch"
 	for _, test := range []struct {
@@ -192,4 +295,39 @@ func patchFactsHavePath(
 		}
 	}
 	return false
+}
+
+// GAP-2180: an apply_patch call whose "input" is a patch envelope is that
+// patch (Codex and Copilot CLI form); another "input" value keeps the nested
+// reading.
+func TestAnalyzeApplyPatchInputFieldIsTheEnvelope(t *testing.T) {
+	patch := "*** Begin Patch\n*** Add File: notes.txt\n+benign\n*** End Patch\n"
+	args, err := json.Marshal(map[string]string{"input": patch, "cwd": "/workspace"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts := Analyze(Input{Tool: "apply_patch", Args: args})
+	if !facts.Authoritative() || !facts.EnforcementEligible() || len(facts.Paths) != 1 ||
+		!patchFactsHavePath(facts, "notes.txt", "/workspace/notes.txt", PathAccessWrite) {
+		t.Fatalf("facts = %#v", facts)
+	}
+	for _, other := range []string{"echo hi", " *** Begin Patch\n*** End Patch"} {
+		args, err := json.Marshal(map[string]string{"input": other})
+		if err != nil {
+			t.Fatal(err)
+		}
+		facts := Analyze(Input{Tool: "apply_patch", Args: args})
+		if patchFactsHavePath(facts, "notes.txt", "/workspace/notes.txt", PathAccessWrite) {
+			t.Fatalf("%q read as a patch: %#v", other, facts)
+		}
+	}
+	// The field is only the patch for a patch tool.
+	args, err = json.Marshal(map[string]string{"input": patch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if facts := Analyze(Input{Tool: "shell", Args: args}); len(facts.Paths) != 0 &&
+		patchFactsHavePath(facts, "notes.txt", "notes.txt", PathAccessWrite) {
+		t.Fatalf("shell input read as a patch: %#v", facts)
+	}
 }

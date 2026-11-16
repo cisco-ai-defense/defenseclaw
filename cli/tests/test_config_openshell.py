@@ -66,6 +66,7 @@ _FULL_SECTION = {
     "yolo": False,
     "llm": "bedrock",
     "keep_headless": True,
+    "trusted_ca_bundle": "/etc/defenseclaw/corp-root-ca.pem",
     "workdir": {
         "mode": "copy",
         "masks": [".env*"],
@@ -92,7 +93,6 @@ _FULL_SECTION = {
     "mcp": {"import": False, "host_ports": [5432]},
     "upstream_telemetry": True,
     "token_delivery": "env",
-    "middleware": {"enabled": True},
     "admin": {
         "required_pack": "strict",
         "required_pack_digest": "sha256:" + "0f" * 32,
@@ -164,6 +164,7 @@ class TestOpenShellMerge(unittest.TestCase):
         self.assertIs(oc.yolo, False)
         self.assertEqual(oc.llm, "bedrock")
         self.assertTrue(oc.keep_headless)
+        self.assertEqual(oc.trusted_ca_bundle, "/etc/defenseclaw/corp-root-ca.pem")
         self.assertEqual(oc.workdir.mode, "copy")
         self.assertEqual(oc.workdir.masks, [".env*"])
         self.assertEqual(oc.workdir.on_exit, "keep")
@@ -181,7 +182,6 @@ class TestOpenShellMerge(unittest.TestCase):
         self.assertEqual(oc.mcp.host_ports, [5432])
         self.assertTrue(oc.upstream_telemetry)
         self.assertEqual(oc.token_delivery, "env")
-        self.assertTrue(oc.middleware.enabled)
         self.assertEqual(oc.admin.required_pack, "strict")
         self.assertEqual(oc.admin.required_pack_digest, "sha256:" + "0f" * 32)
         self.assertIs(oc.admin.allow_yolo, False)
@@ -291,6 +291,13 @@ class TestOpenShellValidation(unittest.TestCase):
             self.assertFalse(valid_binary(binary), binary)
         self.assertEqual(openshell_error({"openshell": {"binary": "bin/openshell"}})[0], "openshell.binary")
 
+    def test_trusted_ca_bundle_paths(self):
+        for path in ("", "~/certs/corp.pem", "/etc/defenseclaw/corp.pem"):
+            load_validate_v8({"config_version": 8, "openshell": {"trusted_ca_bundle": path}})
+        for path in ("corp.pem", "./corp.pem", "~alice/corp.pem", "~", " /etc/corp.pem", "C:/corp.pem"):
+            with self.assertRaises(V8ConfigError, msg=path):
+                load_validate_v8({"config_version": 8, "openshell": {"trusted_ca_bundle": path}})
+
     def test_pack_dir_paths(self):
         # The schema checks the spelling (TestDefenseClawConfigV8OpenShellValues).
         for pack_dir in ("", "~", "~/packs", "/etc/packs", "C:/packs", "D:\\packs", "\\\\server\\share\\packs"):
@@ -364,13 +371,16 @@ class TestOpenShellValidation(unittest.TestCase):
             ({"guardrail": {"block_at": 12}}, "$.guardrail.block_at",
              "use one of CRITICAL, HIGH, MEDIUM, LOW in any case (empty inherits)"),
             ({"guardrail": {"mode": 5}}, "$.guardrail.mode", "use one of observe, action"),
+            # GAP-0760: hilt.min_severity takes the block_at words in any case.
             ({"guardrail": {"hilt": {"min_severity": "bogus"}}}, "$.guardrail.hilt.min_severity",
-             "use one of LOW, MEDIUM, HIGH, CRITICAL (empty inherits)"),
+             "use one of CRITICAL, HIGH, MEDIUM, LOW in any case (empty inherits)"),
         ):
             with self.assertRaises(V8ConfigError) as caught:
                 load_validate_v8({"config_version": 9, **document})
             self.assertEqual(caught.exception.path, path)
             self.assertEqual(caught.exception.corrective_action, want)
+        # The lower case block_at takes is accepted for hilt.min_severity too.
+        load_validate_v8({"config_version": 9, "guardrail": {"hilt": {"min_severity": "high"}}})
 
 
 class TestPolicyConnectors(unittest.TestCase):
@@ -390,6 +400,25 @@ class TestOpenShellSave(unittest.TestCase):
         with patch("defenseclaw.config.default_data_path") as mock_dp:
             mock_dp.return_value = Path(tmpdir)
             return load()
+
+    def test_retired_middleware_is_ignored_and_removed_on_save(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "config.yaml")
+            with open(path, "w") as f:
+                yaml.safe_dump(
+                    {"config_version": 9, "data_dir": tmpdir,
+                     "openshell": {"middleware": {"enabled": True}, "token_delivery": "env"}},
+                    f,
+                )
+            load_validate_v8(Path(path).read_bytes(), source_name=path)
+            cfg = self._load(tmpdir)
+            self.assertFalse(hasattr(cfg.openshell, "middleware"))
+            self.assertEqual(cfg.openshell.token_delivery, "env")
+            cfg.save()
+            with open(path) as f:
+                section = yaml.safe_load(f)["openshell"]
+            self.assertNotIn("middleware", section)
+            self.assertEqual(section["token_delivery"], "env")
 
     def test_untouched_section_is_not_written(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -457,6 +486,7 @@ class TestOpenShellSave(unittest.TestCase):
             "shorthand IPv4 unblock": lambda oc: setattr(oc.egress, "unblocked", ["127.1"]),
             "relative binary": lambda oc: setattr(oc, "binary", "bin/openshell"),
             "relative pack dir": lambda oc: setattr(oc, "pack_dir", "packs"),
+            "relative trusted CA bundle": lambda oc: setattr(oc, "trusted_ca_bundle", "corp-root-ca.pem"),
             "zero cpu": lambda oc: setattr(oc.resources, "cpu", "0"),
             "equal explicit ports": lambda oc: (setattr(oc, "ingress_port", 19001), setattr(oc, "egress_port", 19001)),
             "derived port collision": lambda oc: (setattr(oc, "enabled", True), setattr(oc, "ingress_port", 18972)),

@@ -120,6 +120,12 @@ type Fake struct {
 	// (WithholdProviderCredentials).
 	withholdCreds bool
 
+	// unsynced are, per "workspace/name", the writes a process the
+	// workload left running made in a MicroVM that are not on its disk yet
+	// (LeaveWriter); lost are those a start ended unflushed (LostWrites).
+	unsynced map[string][]string
+	lost     []string
+
 	now func() time.Time
 }
 
@@ -150,7 +156,7 @@ type sandboxState struct {
 type Option func(*Fake)
 
 // WithHealth sets the health answer (default healthy, version
-// openshell.SupportedMin).
+// openshell.LegacyMin).
 func WithHealth(healthy bool, version string) Option {
 	return func(f *Fake) { f.health = types.HealthResult{Healthy: healthy, Version: version} }
 }
@@ -172,7 +178,7 @@ func WithDriver(d openshell.ComputeDriver) Option {
 
 // driverInfo is the compute driver d as a live 0.1.1 gateway reports it.
 func driverInfo(d openshell.ComputeDriver) types.ComputeDriverInfo {
-	info := types.ComputeDriverInfo{Name: string(d), DriverName: string(d), DriverVersion: openshell.SupportedMin}
+	info := types.ComputeDriverInfo{Name: string(d), DriverName: string(d), DriverVersion: openshell.LegacyMin}
 	if d == openshell.DriverVM {
 		info.DriverName = "openshell-driver-vm"
 	}
@@ -193,15 +199,15 @@ func New(opts ...Option) *Fake {
 		sdk:            fake.NewClient(),
 		failures:       map[string][]error{},
 		calls:          map[string]int{},
-		health:         types.HealthResult{Healthy: true, Version: openshell.SupportedMin},
+		health:         types.HealthResult{Healthy: true, Version: openshell.LegacyMin},
 		states:         map[string]*sandboxState{},
 		globalSettings: map[string]types.SettingValue{},
 		profiles:       map[string]*types.ProviderProfile{},
 		now:            time.Now,
 		gatewayInfo: types.GatewayInfo{
 			Status:         types.ServiceStatusHealthy,
-			Version:        openshell.SupportedMin,
-			ComputeDrivers: []types.ComputeDriverInfo{{Name: "docker", DriverName: "docker", DriverVersion: openshell.SupportedMin}},
+			Version:        openshell.LegacyMin,
+			ComputeDrivers: []types.ComputeDriverInfo{{Name: "docker", DriverName: "docker", DriverVersion: openshell.LegacyMin}},
 		},
 	}
 	f.sandboxes = &sandboxClient{f: f, inner: f.sdk.Sandboxes()}
@@ -315,7 +321,7 @@ func (f *Fake) SetHealth(healthy bool, version string) {
 
 // SetRelease makes the gateway answer as another release from now on, in
 // its health and its gateway info, as a restart after an in-place upgrade
-// does (the default is openshell.SupportedMin). Sandboxes already made
+// does (the default is openshell.LegacyMin). Sandboxes already made
 // stay.
 func (f *Fake) SetRelease(version string) {
 	f.mu.Lock()
@@ -524,4 +530,26 @@ func policyHash(p *types.SandboxPolicy) string {
 	data, _ := json.Marshal(p)
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+// LeaveWriter models a process the workload of the MicroVM name left
+// running after its main process ended, whose last writes are not on the
+// VM's disk yet. Like OpenShell (0.1.3 and 0.1.5), the start of a MicroVM
+// that completed, or whose main process failed, ends the VM that still
+// runs with no flush first: those writes are lost (LostWrites). Nothing
+// else in the fake flushes them.
+func (f *Fake) LeaveWriter(workspace, name string, writes ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.unsynced == nil {
+		f.unsynced = map[string][]string{}
+	}
+	f.unsynced[key(workspace, name)] = append(f.unsynced[key(workspace, name)], writes...)
+}
+
+// LostWrites are the writes LeaveWriter left that a start ended unflushed.
+func (f *Fake) LostWrites() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.lost...)
 }

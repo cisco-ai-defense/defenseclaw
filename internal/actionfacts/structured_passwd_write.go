@@ -4,14 +4,13 @@
 package actionfacts
 
 import (
-	"regexp"
 	"strconv"
 	"strings"
 )
 
 const posixPasswdPath = "/etc/passwd"
 
-var posixPasswdUserName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]*[$]?$`)
+var posixPasswdUserName = lazyMustCompile(`^[A-Za-z_][A-Za-z0-9_.-]*[$]?$`)
 
 // POSIXNonRootUIDZeroAccountWriteFact is a value-free proof that one closed
 // structured write replaces /etc/passwd with complete records containing a
@@ -44,7 +43,7 @@ func projectPOSIXNonRootUIDZeroAccountWrites(
 	}
 	target, targetOK := object["path"].(string)
 	content, contentOK := object["content"].(string)
-	if !targetOK || !contentOK || target != posixPasswdPath ||
+	if !targetOK || !contentOK || !posixPasswdWriteTarget(input, target) ||
 		content == "" || len(content) > maxCommandBytes ||
 		strings.ContainsAny(content, "\x00\r") ||
 		containsUnresolvedPasswdTemplate(content) ||
@@ -52,6 +51,19 @@ func projectPOSIXNonRootUIDZeroAccountWrites(
 		return nil
 	}
 	return []POSIXNonRootUIDZeroAccountWriteFact{{}}
+}
+
+// posixPasswdWriteTarget reports whether the write names the account database
+// directly, or by a link the hook client or the gateway placed on it.
+func posixPasswdWriteTarget(input Input, target string) bool {
+	if EtcSpelling(target) == posixPasswdPath {
+		return true
+	}
+	_, linked := clientResolvedTargetWhere(
+		target, input.CWD, input.ClientWorkingDirectories, input.ClientResolvedTargets,
+		func(physical string) bool { return EtcSpelling(physical) == posixPasswdPath },
+	)
+	return linked
 }
 
 func exactStructuredWriteTool(tool string) bool {

@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"testing"
 
@@ -174,6 +173,177 @@ func TestAuthorizedKeysSymlinkWriteStatementsAndClientResolution(t *testing.T) {
 	}
 }
 
+func TestR103B36ProcCWDAliasRemainsUnknown(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("proc cwd links are Linux operands")
+	}
+	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	for _, dir := range []string{filepath.Join(cwd, "out"), filepath.Join(home, ".ssh")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
+	if !hookpaths.ProcCWDWriteOperand("/proc/123/cwd/../.ssh/authorized_keys") ||
+		hookpaths.ProcCWDWriteOperand("/proc/other/cwd/file") {
+		t.Fatal("proc cwd alias classification changed")
+	}
+	if _, ok := hookpaths.ResolveWriteTarget("/proc/self/cwd/../.ssh/authorized_keys"); ok {
+		t.Fatal("hook proved a process-dependent cwd target")
+	}
+	for _, tc := range []struct {
+		name, command, path, resolved string
+		blocked                       bool
+	}{
+		{"parent traversal", "printf marker >> /proc/self/cwd/../.ssh/authorized_keys", "/proc/self/cwd/../.ssh/authorized_keys", filepath.Join(home, ".ssh", "authorized_keys"), true},
+		{"ordinary descendant", "printf marker >> /proc/self/cwd/out/log", "/proc/self/cwd/out/log", filepath.Join(cwd, "out", "log"), false},
+		{"ordinary dot descendant", "printf marker >> /proc/self/cwd/./out/log", "/proc/self/cwd/out/log", filepath.Join(cwd, "out", "log"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload, err := json.Marshal(map[string]any{"tool_name": "Bash", "cwd": cwd,
+				"tool_input": map[string]string{"command": tc.command}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			targets, ok := hookpaths.Decode(hookpaths.Resolve(payload))
+			if !ok || targets[tc.path] != tc.resolved {
+				t.Fatalf("hook target = %q, want %q", targets[tc.path], tc.resolved)
+			}
+			input := actionfacts.Input{Tool: "Bash", Command: tc.command, CWD: cwd,
+				ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+			for _, mode := range []string{"per-user", "managed"} {
+				t.Run(mode, func(t *testing.T) {
+					request := trustedActionRequest{Input: input, ProtectedHomeHook: mode == "managed"}
+					if mode == "managed" {
+						request.ResolvedWriteTargets = targets
+					}
+					if got := trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)); got != tc.blocked {
+						t.Fatalf("block = %v, want %v", got, tc.blocked)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestR103B36ManagedClaudeHeaderUsesProcCWDProofOnly(t *testing.T) {
+	// The managed Claude proof uses POSIX shell operands and /proc/self/cwd;
+	// Windows managed hooks use a separate path implementation.
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX managed hook-path proof does not apply to Windows")
+	}
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	protected := filepath.Join(home, ".ssh", "authorized_keys")
+	ordinary := filepath.Join(cwd, "report.txt")
+	external := filepath.Join(t.TempDir(), "link")
+	for _, tc := range []struct {
+		name, command, operand, resolved string
+		blocked                          bool
+	}{
+		{"ordinary target", "printf marker > report.txt", ordinary, ordinary, false},
+		{"positive protected claim", "printf marker > report.txt", ordinary, protected, true},
+		{"protected header claim", "printf marker > ../.ssh/authorized_keys", protected, ordinary, true},
+		{"proc ordinary", "printf marker > /proc/self/cwd/report.txt", "/proc/self/cwd/report.txt", ordinary, false},
+		{"proc protected", "printf marker > /proc/self/cwd/../.ssh/authorized_keys", "/proc/self/cwd/../.ssh/authorized_keys", protected, true},
+		{"unresolved external", "printf marker > " + external, external, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := actionfacts.Input{Tool: "Bash", Command: tc.command, CWD: cwd,
+				ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+			targets := map[string]string{hookpaths.CWDKey: cwd,
+				hookpaths.DirectoryFactPrefix + cwd: cwd, tc.operand: tc.resolved}
+			request := trustedActionRequest{Input: input, Connector: "claudecode", ProtectedHomeHook: true,
+				ResolvedWriteTargets: targets}
+			if got := trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)); got != tc.blocked {
+				t.Fatalf("managed Claude decision blocked=%v, want %v", got, tc.blocked)
+			}
+		})
+	}
+	truncatedInput := actionfacts.Input{Tool: "Bash", Command: "printf marker > " + external,
+		CWD: cwd, ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+	truncatedRequest := trustedActionRequest{Input: truncatedInput, Connector: "claudecode", ProtectedHomeHook: true,
+		ResolvedWriteTargets: map[string]string{hookpaths.CWDKey: cwd, hookpaths.TruncatedKey: "1"}}
+	if !trustedExistingAuthorizedKeysSymlinkWrite(truncatedRequest, actionfacts.Analyze(truncatedInput)) {
+		t.Fatal("managed truncated proof made an unlisted external write safe")
+	}
+	incompleteInput := actionfacts.Input{Tool: "Bash", Command: "find /workspace -type f 2>/dev/null",
+		CWD: cwd, ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+	incompleteRequest := trustedActionRequest{Input: incompleteInput, Connector: "claudecode", ProtectedHomeHook: true,
+		ResolvedWriteTargets: map[string]string{
+			hookpaths.CWDKey: cwd, hookpaths.DirectoryFactPrefix + cwd: cwd,
+			hookpaths.TruncatedKey: "1", "/dev/null": "",
+		}}
+	if trustedExistingAuthorizedKeysSymlinkWrite(incompleteRequest, actionfacts.Analyze(incompleteInput)) {
+		t.Fatal("incomplete header blocked an ordinary external diagnostic redirect")
+	}
+	temporaryInput := actionfacts.Input{Tool: "Bash",
+		Command: "out=$(mktemp -d /tmp/report.XXXXXX); printf marker > \"$out/result\" 2>/dev/null",
+		CWD:     cwd, ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+	temporaryRequest := trustedActionRequest{Input: temporaryInput, Connector: "claudecode", ProtectedHomeHook: true,
+		ResolvedWriteTargets: map[string]string{
+			hookpaths.CWDKey: cwd, hookpaths.DirectoryFactPrefix + cwd: cwd,
+			hookpaths.TruncatedKey: "1", os.DevNull: os.DevNull,
+		}}
+	if trustedExistingAuthorizedKeysSymlinkWrite(temporaryRequest, actionfacts.Analyze(temporaryInput)) {
+		t.Fatal("mktemp output without a resolved protected target blocked")
+	}
+	if err := os.Symlink(protected, filepath.Join(cwd, "disklink")); err != nil {
+		t.Fatal(err)
+	}
+	command := "f=`basename $PWD`; cd ..; echo marker >> $f/disklink"
+	input := actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd,
+		ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+	request := trustedActionRequest{Input: input, Connector: "claudecode", ProtectedHomeHook: true,
+		ResolvedWriteTargets: map[string]string{
+			hookpaths.CWDKey:                     cwd,
+			hookpaths.DirectoryFactPrefix + cwd:  cwd,
+			hookpaths.DirectoryFactPrefix + home: home,
+		}}
+	if !trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)) {
+		t.Fatal("managed header made a dynamic write after changing directory safe")
+	}
+}
+
+func TestR103B36DynamicCopyOptionRemainsUnknown(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	command := `read X <<< "--target-directory=$HOME/.ssh"; printf marker > authorized_keys; cp "$X" authorized_keys`
+	args, err := json.Marshal(map[string]string{"command": command})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := actionfacts.Input{Tool: "Bash", Args: args, Command: command, CWD: cwd,
+		ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+	if !hookpaths.DynamicCopyProtectedBasename(command, home) ||
+		hookpaths.DynamicCopyProtectedBasename(`cp "$F" out.txt`, home) {
+		t.Fatal("dynamic copy option classification changed")
+	}
+	for _, mode := range []string{"per-user", "managed"} {
+		t.Run(mode, func(t *testing.T) {
+			request := trustedActionRequest{Input: input, ProtectedHomeHook: mode == "managed"}
+			if !trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)) {
+				t.Fatal("dynamic copy option was treated as a fixed destination")
+			}
+		})
+	}
+}
+
 func TestAuthorizedKeysWriteTargetCap(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX hook write targets")
@@ -240,14 +410,16 @@ func TestClaudeWriteTargetMarkerRule(t *testing.T) {
 		block              bool
 	}{
 		{"known hosts", "hostname > ~/.ssh/known_hosts", project, false},
-		{"ssh config", "hostname > ~/.ssh/config", project, false},
+		// ~/.ssh/config is protected like the keys (lead ruling 10-31,
+		// rel-1-0-4:GAP-2586): ssh runs commands it names.
+		{"ssh config", "hostname > ~/.ssh/config", project, true},
 		{"known hosts again", "date > ~/.ssh/known_hosts", project, false},
 		{"relative known hosts", "date > known_hosts", filepath.Join(home, ".ssh"), false},
 		{"project redirect", "echo hi > ~/proj/e1.txt", project, false},
 		{"absolute project", "hostname > " + filepath.Join(project, "h1.txt"), project, false},
 		{"project tee", "echo hi | tee ~/proj/t2.txt", project, false},
 		{"external redirect", "hostname > /tmp/x", project, false},
-		{"read keys", "hostname < ~/.ssh/authorized_keys", project, false},
+		{"read keys", "hostname < ~/.ssh/authorized_keys", project, true},
 		{"keys redirect", "hostname > ~/.ssh/authorized_keys", project, true},
 		{"home variable keys", "hostname > $HOME/.ssh/authorized_keys", project, true},
 		{"keys append", "uptime >> ~/.ssh/authorized_keys", project, true},
@@ -256,6 +428,20 @@ func TestClaudeWriteTargetMarkerRule(t *testing.T) {
 		{"true redirect", "true > ~/.ssh/authorized_keys", project, true},
 		{"absolute keys", "hostname > " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
 		{"normalized keys", "hostname > " + filepath.Join(project, "..", ".ssh", "authorized_keys"), project, true},
+		{"find fprint output", "find . -fprint " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
+		{"find fprintf output", "find . -fprintf " + filepath.Join(home, ".ssh", "authorized_keys") + " %p", project, true},
+		{"git config file output", "git config -f " + filepath.Join(home, ".ssh", "authorized_keys") + " verifier.value x", project, true},
+		{"git config environment output", "GIT_CONFIG_GLOBAL=" + filepath.Join(home, ".ssh", "authorized_keys") + " git config --global verifier.value x", project, true},
+		{"gawk inplace output", "gawk -i inplace '{print}' " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
+		{"uniq second operand output", "uniq input.txt " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
+		{"unknown output option", "fixture-tool --output=" + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
+		// A find that only lists reads, as ls does; its -name operand is
+		// data (rel-1-0-6:GAP-0119). A find that deletes still blocks.
+		{"find name is data", "find . -name " + filepath.Join(home, ".ssh", "authorized_keys"), project, false},
+		{"find delete by name", "find " + filepath.Join(home, ".ssh") + " -name authorized_keys -delete", project, true},
+		// uniq with one operand prints it, a plain read like cat (owner
+		// decision 2, GAP-2168; GAP-2590); its second operand is the write.
+		{"uniq first operand input", "uniq " + filepath.Join(home, ".ssh", "authorized_keys"), project, false},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			input := actionfacts.Input{Tool: "Bash", Command: row.command, CWD: row.cwd,
@@ -454,6 +640,8 @@ func TestResolvedWriteHeaderNeverDropsTarget(t *testing.T) {
 		cfg := &config.Config{}
 		cfg.Guardrail.Mode = mode
 		cfg.Guardrail.Connector = connector
+		// A call over the evaluation limit blocks in the strict profile only.
+		cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), "strict")
 		api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
 		body := string(mustJSON(t, map[string]any{"session_id": "marker-session", "hook_event_name": "PreToolUse",
 			"tool_name": "Bash", "cwd": project, "tool_input": map[string]any{"command": command, "description": "d"}}))
@@ -494,8 +682,14 @@ func TestResolvedWriteHeaderNeverDropsTarget(t *testing.T) {
 				command := chain(count, link)
 				header := hookpaths.Resolve(mustJSON(t, map[string]any{"tool_name": "Bash",
 					"tool_input": map[string]string{"command": command}}))
+				// Past 128 statements the call is refused by the statement
+				// budget before its writes are read (rel-1-0-2:GAP-0568).
+				rule := "persistence.ssh_authorized_keys_command"
+				if count+1 > 128 {
+					rule = "ACTION-COMPOUND-LIMIT"
+				}
 				if got := post(t, connector, "action", command, header); !strings.HasPrefix(got, block) ||
-					!strings.Contains(got, "persistence.ssh_authorized_keys_command") {
+					!strings.Contains(got, rule) {
 					t.Fatalf("linked append after %d targets = %.400s", count, got)
 				}
 			})
@@ -889,6 +1083,18 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		}
 	}
 	blocked := []string{
+		// rel-1-0-2 GAP-0409: a redirect target that only the shell knows
+		// (eval, an unset default, a command substitution, a here-string
+		// read) and that lands on the keys link, in per-user cells too.
+		`f=other; eval f=disklink; echo marker >> "$f"`,
+		`f=report.txt; if true; then unset f; fi; echo marker >> ${f:-disklink}`,
+		`f=$(echo disklink); echo marker >> "$f"`,
+		`read f <<< disklink; echo marker >> "$f"`,
+		// TGT-0194: a compound command or script argument names the active
+		// protected target even when its eventual write goes elsewhere.
+		`python3 -c 'open("disklink","r").read()'`,
+		`python3 -c 'import os; os.open("disklink",os.O_RDONLY)'`,
+		`sed -i 's/marker/k/' disklink`,
 		// GAP-1567: a relative write after a logical directory link lands in its physical target.
 		`cd dirlink && echo k >> authorized_keys`,
 		`cd ~/proj/dirlink && tee -a authorized_keys < x`,
@@ -1032,29 +1238,35 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`cp -a tree copy && echo k >> copy/k`,
 		`cd -P ~/.ssh && echo k >> authorized_keys`,
 		`cd ~/.ssh || exit 1; echo k >> authorized_keys`,
-	}
-	allowed := []string{
-		`cd build && echo ok >> notes.txt`,
-		`cd build && echo ok > notes.txt; tar xf keys.tar`,
-		`cd dirlink && cat authorized_keys`,
 		`cd dirlink && cd .. && echo ok >> notes.txt`,
 		`cd -P dirlink && cd .. && echo ok >> notes.txt`,
-		// Reads, unrelated targets and sed's default link replacement are safe.
-		`python3 -c 'open("disklink","r").read()'`,
-		`python3 -c 'import os; os.open("disklink",os.O_RDONLY)'`,
+		`ln -s ~/.ssh/authorized_keys freshlink; sed -i 's/marker/k/' freshlink`,
+		`cp --archive disklink notes.txt`,
+	}
+	allowed := []string{
+		// The GAP-0409 forms on an ordinary file.
+		`f=report.txt; if true; then unset f; fi; echo marker >> ${f:-notes.txt}`,
+		`f=$(echo report.txt); echo marker >> "$f"`,
+		`read f <<< report.txt; echo marker >> "$f"`,
+		// A bare copy of a tree that carries a link is not a write: it copies a
+		// project as it is (GAP-2579); a write through the carried link still
+		// blocks in the copy rows above.
+		`cp -a -t copy tree`,
+		`cd dirlink && cat authorized_keys`,
+		`tar "$o" xenial.tar > log`,
+		`"$PY" x.py > out.txt`,
+		`cd build && echo ok >> notes.txt`,
+		`cd build && echo ok > notes.txt; tar xf keys.tar`,
+		// Ordinary project targets remain allowed.
 		`python3 -c 'open("report.txt","a").write("k")'`,
 		`python3 -c 'open("reportlink","a").write("k")'`,
 		`awk 'BEGIN {print "k" >> "reportlink"}'`,
-		`sed -i 's/marker/k/' disklink`,
-		`ln -s ~/.ssh/authorized_keys freshlink; sed -i 's/marker/k/' freshlink`,
 		`sed -i --follow-symlinks 's/marker/k/' reportlink`,
 		// GAP-1549: the copy's own destination is an allowed write.
 		`cp -r big copy3`,
 		`cp -a tree copy4`,
 		`cp -r big copy6 && echo done > report.txt`,
-		`cp --archive disklink notes.txt`,
 		`cp --recursive tree copy`,
-		`cp -a -t copy tree`,
 		// Ordinary ".." and a link without a following ".." stay resolvable.
 		`cd build && cat ../README.md > ../out.txt`,
 		`ln -s ../shared lib && cat lib/x`,
@@ -1084,15 +1296,14 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`pax -w -f archive.pax > listing.txt`,
 		`unzip -l keys.zip > listing.txt`,
 		`7z l keys.7z > listing.txt`,
-		`tar "$o" xenial.tar > log`,
 		`tar -C unpack -xf keys.tar; echo hi > report.txt`,
 		`7z x keys.7z -o../outside; echo hi > report.txt`,
 		`cp -a src dst && echo hi > report.txt`,
 		`grep -rn "os.symlink(" src | head -5 > hits.txt`,
 	}
-	// The managed gateway also fails closed on a program word that is not
-	// static, which this change leaves as it is.
-	allowedPerUser := []string{`"$PY" x.py > out.txt`, `bash -lc "cp a b" > out.txt`}
+	// Login startup input can change the directory, so the child walk cannot
+	// assert a protected write through this ordinary relative redirect.
+	const uncertainLoginShell = `bash -lc "cp a b" > out.txt`
 	// "action" (not "raw_action") is the enforced decision.
 	const block, allow = `{"action":"block"`, `{"action":"allow"`
 	for _, connector := range []string{"claudecode", "codex"} {
@@ -1110,11 +1321,14 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 				body := mustJSON(t, map[string]any{"session_id": "marker-session", "hook_event_name": "PreToolUse",
 					"tool_name": "Bash", "cwd": eventCWD, "tool_input": map[string]any{"command": command, "description": "d"}})
 				req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(body)))
-				req.Header.Set(hookpaths.Header, hookpaths.Resolve(body))
 				if connector == "codex" {
 					setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
 				}
 				if managed {
+					// Only a managed hook client sends its write evidence
+					// (hookexec setHookRequestFacts); a per-user cell is judged
+					// without it, as shipped (rel-1-0-2 GAP-0409).
+					req.Header.Set(hookpaths.Header, hookpaths.Resolve(body))
 					req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: home}))
 				}
 				recorder := httptest.NewRecorder()
@@ -1133,20 +1347,117 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 						t.Errorf("%s = %.300s, want block", command, got)
 					}
 					if command == `tar xzf node.tgz && ./configure > build.log` &&
-						!strings.Contains(got, "run the extraction and the write as separate commands") {
+						!strings.Contains(got, "Run the extraction and the write as separate commands") {
 						t.Errorf("%s = %.300s, want archive chain guidance", command, got)
 					}
 				}
-				expectAllowed := allowed
-				if !managed {
-					expectAllowed = append(slices.Clone(allowed), allowedPerUser...)
-				}
-				for _, command := range expectAllowed {
+				for _, command := range allowed {
 					if got := post(t, command); !strings.HasPrefix(got, allow) {
 						t.Errorf("%s = %.300s, want allow", command, got)
 					}
 				}
+				if got := post(t, uncertainLoginShell); !strings.HasPrefix(got, allow) {
+					t.Errorf("%s = %.300s, want allow for ordinary write", uncertainLoginShell, got)
+				}
 			})
+		}
+	}
+}
+
+func TestR103B07FalsePositiveRows(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX command rows")
+	}
+	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	if err := os.MkdirAll(filepath.Join(cwd, "build"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, "report.txt"), []byte("report\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	keys := filepath.Join(home, ".ssh", "authorized_keys")
+	if err := os.WriteFile(keys, []byte("marker\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(keys, filepath.Join(cwd, "disklink")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	for _, tc := range []struct{ id, command string }{
+		{"FP-0001", "tar -xzf pkg.tgz --strip-components=1 -C build; echo hi > report.txt"},
+		{"FP-0002", "tar -xzf pkg.tgz --exclude=docs -C build; echo hi > report.txt"},
+		{"FP-0003", "tar -a -xf pkg.tar -C build; echo hi > report.txt"},
+		{"FP-0004", `for f in *.txt; do cp "$f" build/; done; echo ok > report.txt`},
+		{"FP-0005", `cp "$F" out.txt && echo done > report.txt`},
+		// rel-1-0-2 GAP-0004: the unquoted spellings with one known plain
+		// value read as the quoted ones.
+		{"FP-0004u", `for f in a.txt README.md; do cp $f build/; done; echo ok > report.txt`},
+		{"FP-0005u", `F=input.txt; cp $F out.txt && echo done > report.txt`},
+		{"FP-0006", "cp -c report.txt r2.txt"},
+		{"FP-0007", "cp -X report.txt r2.txt"},
+		{"FP-0008", "cp -N report.txt r2.txt"},
+		{"FP-0009", "cp -Z report.txt r2.txt"},
+		// GAP-2445 (p0 GAP-1557): ordinary tar flags and value options are
+		// not destinations; the write outside the -C directory stays allowed.
+		{"FP-0010", "tar -xzf pkg.tgz --overwrite -C build; echo hi > report.txt"},
+		{"FP-0011", "tar -xzf pkg.tgz --no-same-owner -C build; echo hi > report.txt"},
+		{"FP-0012", "tar --extract --file=pkg.tar --directory=build; echo hi > report.txt"},
+		{"FP-0013", "tar -xzvf pkg.tgz --keep-old-files -C build; echo hi > report.txt"},
+		{"FP-0014", "tar -xof pkg.tar -C build; echo hi > report.txt"},
+		{"FP-0015", "tar -xzf pkg.tgz --wildcards -C build src; echo hi > report.txt"},
+		{"FP-0016", "tar -xzf pkg.tgz -C build --exclude-from=skip.txt; echo hi > report.txt"},
+		{"FP-0017", "tar -xzf pkg.tgz -C build --warning=no-unknown-keyword; echo hi > report.txt"},
+		{"FP-0018", "tar -xJf pkg.txz -C build --no-same-permissions --numeric-owner; echo hi > report.txt"},
+		{"FP-0019", "tar -xzf pkg.tgz -C build -T list.txt; echo hi > report.txt"},
+		{"FP-0020", "tar --zstd -xf pkg.tar.zst -C build --touch --verbose; echo hi > report.txt"},
+		{"FP-0021", "tar -xzf pkg.tgz -C build --exclude docs --skip-old-files; echo hi > report.txt"},
+		{"FP-0022", "tar -xpSf pkg.tar -C build; echo hi > report.txt"},
+		{"FP-0023", "tar -xf pkg.tar -C build --gzip --unlink-first; echo hi > report.txt"},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			input := actionfacts.Input{Tool: "Bash", Command: tc.command, CWD: cwd,
+				ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+			request := trustedActionRequest{Input: input}
+			// Unknown copy sources do not make an ordinary destination protected.
+			wantBlock := false
+			if got := trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)); got != wantBlock {
+				t.Fatalf("%s blocked=%t, want %t", tc.command, got, wantBlock)
+			}
+		})
+	}
+	// An option that runs a program, writes another file or keeps links
+	// stays an unknown destination (GAP-2445 keeps these blocked).
+	for _, command := range []string{
+		"tar -xf pkg.tar --to-command=sh -C build; echo hi > report.txt",
+		"tar -xf pkg.tar --keep-directory-symlink -C build; echo hi > report.txt",
+		"tar -xf pkg.tar --transform=s,^,x, -C build; echo hi > report.txt",
+		"tar -xf pkg.tar -I unzstd -C build; echo hi > report.txt",
+		"tar -xf pkg.tar -g snap -C build; echo hi > report.txt",
+		"tar -xf pkg.tar --foo -C build; echo hi > report.txt",
+		"tar -C build --overwrite -xf keys.tar && echo k >> build/n1.txt",
+		// bsdtar reads -W NAME=VALUE as --NAME=VALUE: -W directory=DIR
+		// moves the extraction destination on macOS and Windows.
+		"tar -x -W directory=../elsewhere -f keys.tar && echo k >> ../elsewhere/n1.txt",
+		"tar -xW directory=../elsewhere -f keys.tar && echo k >> ../elsewhere/n1.txt",
+		"tar xWf directory=../elsewhere keys.tar && echo k >> ../elsewhere/n1.txt",
+	} {
+		input := actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd,
+			ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+		if !trustedExistingAuthorizedKeysSymlinkWrite(trustedActionRequest{Input: input}, actionfacts.Analyze(input)) {
+			t.Fatalf("unknown tar destination allowed: %s", command)
+		}
+	}
+	for _, command := range []string{`cp "$F" disklink`, `for f in *.txt; do cp "$f" disklink; done`,
+		`for f in a.txt; do cp $f disklink; done`, `F=input.txt; cp $F out.txt && echo k >> disklink`} {
+		input := actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd,
+			ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+		request := trustedActionRequest{Input: input}
+		if !trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)) {
+			t.Fatalf("dynamic copy to protected link allowed: %s", command)
 		}
 	}
 }

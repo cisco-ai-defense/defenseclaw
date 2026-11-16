@@ -22,7 +22,9 @@ Mirrors internal/enforce/plugin_enforcer.go.
 from __future__ import annotations
 
 import os
+import re
 import shutil
+import uuid
 
 from defenseclaw.inventory.plugin_identity import (
     PluginIdentityError,
@@ -36,10 +38,86 @@ from defenseclaw.inventory.plugin_identity import (
 PLUGIN_CATEGORY_QUARANTINE_DIR = "plugin-categories"
 
 
+def claude_cache_plugin_key(path: str) -> str:
+    """Return the listed identity of a Claude cache version path."""
+    if not path:
+        return ""
+    version_dir = os.path.abspath(path)
+    plugin_dir = os.path.dirname(version_dir)
+    market_dir = os.path.dirname(plugin_dir)
+    cache_dir = os.path.dirname(market_dir)
+    if os.path.basename(cache_dir).casefold() != "cache":
+        return ""
+    try:
+        plugin = validate_plugin_id(os.path.basename(plugin_dir))
+        market = validate_plugin_id(os.path.basename(market_dir))
+        validate_plugin_id(os.path.basename(version_dir))
+        return validate_plugin_id(f"{plugin}@{market}")
+    except PluginIdentityError:
+        return ""
+
+
+def _remove_owned(path: str) -> None:
+    """Remove a staging path this enforcer created (best effort)."""
+    try:
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path)
+        elif os.path.lexists(path):
+            os.unlink(path)
+    except OSError:
+        pass
+
+
+def move_into_place_no_replace(stage: str, dest: str) -> None:
+    """Move ``stage`` (a staging path the caller owns, next to ``dest``) to
+    ``dest`` without ever replacing what is there. A directory claims
+    ``dest`` with an atomic ``mkdir`` (it fails on any existing path, also
+    an empty directory another process just made) and then takes the staged
+    entries; a file is hard-linked (never replaces) and then unlinked. On
+    failure the staged entries are back in ``stage`` and nothing at ``dest``
+    that this call did not create is touched."""
+    if os.path.isdir(stage) and not os.path.islink(stage):
+        os.mkdir(dest)
+        moved: list[str] = []
+        try:
+            for name in sorted(os.listdir(stage)):
+                os.rename(os.path.join(stage, name), os.path.join(dest, name))
+                moved.append(name)
+            shutil.copystat(stage, dest, follow_symlinks=False)
+            os.rmdir(stage)
+        except BaseException:
+            for name in reversed(moved):
+                try:
+                    os.rename(os.path.join(dest, name), os.path.join(stage, name))
+                except OSError:
+                    pass
+            try:
+                os.rmdir(dest)
+            except OSError:
+                pass
+            raise
+        return
+    os.link(stage, dest)
+    os.unlink(stage)
+
+
+def _move_back(stage: str, original: str) -> None:
+    """Put a staged copy back where it was so the caller's rollback finds it."""
+    try:
+        if os.path.lexists(stage) and not os.path.lexists(original):
+            shutil.move(stage, original)
+    except OSError:
+        pass
+
+
 class PluginEnforcer:
     def __init__(self, quarantine_dir: str) -> None:
         self.quarantine_dir = os.path.join(quarantine_dir, "plugins")
-        os.makedirs(self.quarantine_dir, exist_ok=True)
+        try:
+            os.makedirs(self.quarantine_dir, exist_ok=True)
+        except OSError:
+            # The quarantine move reports an unwritable folder (GAP-1740).
+            pass
 
     @staticmethod
     def _safe_segment(value: str) -> str | None:
@@ -47,6 +125,10 @@ class PluginEnforcer:
         if not safe or safe != value or safe in (".", ".."):
             return None
         return safe
+
+    def quarantine_path(self, plugin_name: str, connector: str = "") -> str | None:
+        """Return the validated quarantine location for an identity."""
+        return self._quarantine_path(plugin_name, connector)
 
     def _quarantine_path(self, plugin_name: str, connector: str = "") -> str | None:
         # GAP-2464: a Hermes plugin in a category folder is quarantined by the
@@ -72,6 +154,56 @@ class PluginEnforcer:
         if not os.path.realpath(dest).startswith(os.path.realpath(base) + os.sep):
             return None
         return dest
+
+    def _matches_identity(self, source: str, plugin_name: str, connector: str, original_path: str = "") -> bool:
+        try:
+            actual = (
+                validate_plugin_id(os.path.basename(source))
+                if os.path.isfile(source)
+                else canonical_plugin_id(source)[0]
+            )
+            expected = validate_plugin_id(plugin_name)
+        except PluginIdentityError:
+            return False
+        root = os.path.dirname(source)
+        if filesystem_identity_key(actual, root) == filesystem_identity_key(expected, root):
+            return True
+        if connector != "claudecode" or claude_cache_plugin_key(original_path) != expected:
+            return False
+        storage_name = os.path.basename(os.path.dirname(original_path))
+        return filesystem_identity_key(actual, root) == filesystem_identity_key(storage_name, root)
+
+    def legacy_quarantine_path(
+        self, plugin_name: str, connector: str, path: str, original_path: str = "",
+    ) -> str | None:
+        """Validate a recorded copy outside the current identity slot."""
+        if not connector or self._quarantine_path(plugin_name, connector) is None:
+            return None
+        source = os.path.abspath(path)
+        direct_parent = os.path.abspath(os.path.join(self.quarantine_dir, connector))
+        fallback_parent = os.path.abspath(os.path.join(
+            os.path.dirname(self.quarantine_dir), "per-source", "plugins", connector,
+        ))
+        parent = os.path.dirname(source)
+        direct = parent == direct_parent
+        fallback = (os.path.dirname(parent) == fallback_parent and
+                    re.fullmatch(r"[0-9a-f]{16}", os.path.basename(parent)) is not None)
+        if not (direct or fallback) or not os.path.exists(source):
+            return None
+        if fallback and os.path.basename(source) != plugin_name:
+            return None
+        root = os.path.abspath(os.path.dirname(self.quarantine_dir))
+        current = source
+        while current != root:
+            if is_link_or_reparse(current):
+                return None
+            next_parent = os.path.dirname(current)
+            if next_parent == current:
+                return None
+            current = next_parent
+        if not os.path.realpath(source).startswith(os.path.realpath(root) + os.sep):
+            return None
+        return source if self._matches_identity(source, plugin_name, connector, original_path) else None
 
     def quarantine(
         self,
@@ -109,7 +241,25 @@ class PluginEnforcer:
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         if os.path.lexists(dest):
             return None
-        shutil.move(real_path, dest)
+        # Move into a staging path only this call owns, then put it in place
+        # without replacing anything: a failed move cleans up only its own
+        # staging path, never a quarantine another process made at ``dest``.
+        stage = f"{dest}.pending-{uuid.uuid4().hex}"
+        try:
+            shutil.move(real_path, stage)
+        except BaseException:
+            if os.path.lexists(real_path):
+                _remove_owned(stage)
+            else:
+                _move_back(stage, real_path)
+            raise
+        try:
+            if os.path.lexists(dest):
+                raise FileExistsError(f"quarantine destination appeared: {dest}")
+            move_into_place_no_replace(stage, dest)
+        except BaseException:
+            _move_back(stage, real_path)
+            raise
         return dest
 
     def restore(
@@ -118,9 +268,14 @@ class PluginEnforcer:
         restore_path: str,
         allowed_roots: list[str] | None = None,
         connector: str = "",
+        quarantine_path: str = "",
+        identity_path: str = "",
     ) -> bool:
         """Restore a quarantined plugin to its original location."""
-        src = self._quarantine_path(plugin_name, connector)
+        src = (
+            self.legacy_quarantine_path(plugin_name, connector, quarantine_path, identity_path)
+            if quarantine_path else self._quarantine_path(plugin_name, connector)
+        )
         if src is None:
             return False
         if is_link_or_reparse(src) or not os.path.exists(src):
@@ -132,16 +287,7 @@ class PluginEnforcer:
                 for part in plugin_name.split("/"):
                     validate_plugin_id(part)
             else:
-                # GAP-2164: a single-file OpenCode/Amp plugin is quarantined as
-                # a file named by its ID; it has no manifest directory to read.
-                source_id = (
-                    validate_plugin_id(os.path.basename(src))
-                    if os.path.isfile(src)
-                    else canonical_plugin_id(src)[0]
-                )
-                if filesystem_identity_key(source_id, os.path.dirname(src)) != filesystem_identity_key(
-                    validate_plugin_id(plugin_name), os.path.dirname(src)
-                ):
+                if not self._matches_identity(src, plugin_name, connector, identity_path):
                     return False
         except PluginIdentityError:
             return False

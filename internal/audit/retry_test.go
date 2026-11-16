@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -29,13 +30,24 @@ import (
 var fakeBusyErr = errors.New("database is locked (synthetic)")
 var fakeOtherErr = errors.New("constraint failed: NOT NULL")
 
+// sqliteBusyObserverCapture is locked: a BUSY inside an open transaction is
+// reported in the background (reportSQLiteBusyDetached).
 type sqliteBusyObserverCapture struct {
+	mu         sync.Mutex
 	operations []string
 }
 
 func (capture *sqliteBusyObserverCapture) RecordSQLiteBusyMetric(_ context.Context, operation string) error {
+	capture.mu.Lock()
+	defer capture.mu.Unlock()
 	capture.operations = append(capture.operations, operation)
 	return nil
+}
+
+func (capture *sqliteBusyObserverCapture) observed() []string {
+	capture.mu.Lock()
+	defer capture.mu.Unlock()
+	return append([]string(nil), capture.operations...)
 }
 
 // TestRetryBusy_RetriesOnBusy: the wrapper must keep retrying while
@@ -78,8 +90,8 @@ func TestRetryBusyObservedUsesCanonicalObserverForEveryRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fmt.Sprint(capture.operations) != "[audit_insert audit_insert]" {
-		t.Fatalf("observed operations = %v", capture.operations)
+	if fmt.Sprint(capture.observed()) != "[audit_insert audit_insert]" {
+		t.Fatalf("observed operations = %v", capture.observed())
 	}
 }
 
@@ -194,6 +206,7 @@ func TestIsSQLiteBusy_CodedDetection(t *testing.T) {
 		want bool
 	}{
 		{"sqlite_busy_typed", &codedErr{code: sqliteCodeBusy, msg: "busy"}, true},
+		{"sqlite_busy_snapshot_typed", &codedErr{code: sqliteCodeBusy | 2<<8, msg: "snapshot"}, true},
 		{"sqlite_locked_typed", &codedErr{code: sqliteCodeLocked, msg: "locked"}, true},
 		{"sqlite_constraint_typed", &codedErr{code: 19, msg: "constraint"}, false},
 		{"wrapped_typed_busy", fmt.Errorf("audit: %w", &codedErr{code: sqliteCodeBusy, msg: "busy"}), true},

@@ -12,6 +12,9 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -46,5 +49,43 @@ func TestConfigValidateCommandReportsTheProfile(t *testing.T) {
 	var wire configV8WireResponse
 	if err := json.Unmarshal([]byte(out.String()), &wire); err != nil || wire.Valid == nil || !*wire.Valid {
 		t.Fatalf("config validate --json = %q (%v)", out.String(), err)
+	}
+}
+
+// Owner decision 2026-10-20: a managed computer's fail mode is the
+// administrator's choice, so config validate accepts an explicit open on the
+// standalone profile and names no ignored setting (the fail_open_ignored
+// warning of rel-1-0-3 GAP-0091 is gone with the override it reported).
+func TestConfigValidateAcceptsManagedFailOpenSettings(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	source := fmt.Sprintf("config_version: 9\ndata_dir: %s\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n"+
+		"guardrail:\n  mode: observe\n  hook_fail_mode: open\n  connectors:\n    hermes:\n      hook_fail_mode: open\n", dir)
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := &strings.Builder{}
+	configValidateCmd.SetOut(out)
+	t.Cleanup(func() { configValidateCmd.SetOut(nil); configValidateJSON, configValidateDataDir = false, "" })
+	configValidateDataDir = dir
+	if err := configValidateCmd.RunE(configValidateCmd, []string{path}); err != nil {
+		t.Fatalf("config validate refused the managed config: %v", err)
+	}
+	if strings.Contains(out.String(), "fail_open_ignored") || strings.Contains(out.String(), "open is ignored") {
+		t.Fatalf("config validate text = %q, want no ignored fail-open warning", out.String())
+	}
+	configValidateJSON = true
+	out.Reset()
+	if err := configValidateCmd.RunE(configValidateCmd, []string{path}); err != nil {
+		t.Fatal(err)
+	}
+	var wire configV8WireResponse
+	if err := json.Unmarshal([]byte(out.String()), &wire); err != nil || wire.Valid == nil || !*wire.Valid {
+		t.Fatalf("config validate --json = %q (%v)", out.String(), err)
+	}
+	for _, warning := range wire.Warnings {
+		if strings.Contains(warning, "fail_open_ignored") || strings.Contains(warning, "open is ignored") {
+			t.Fatalf("config validate --json warnings = %q, want no ignored fail-open warning", wire.Warnings)
+		}
 	}
 }

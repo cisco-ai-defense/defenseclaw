@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -29,6 +30,7 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
@@ -45,12 +47,27 @@ import (
 // access boundary. Windows has no launcher: its defenseclaw.exe is the
 // administrator command.
 
-const (
-	launcherCommand = "defenseclaw"
+const launcherCommand = "defenseclaw"
 
-	// launcherRefusal answers every command the launcher does not offer.
-	launcherRefusal = "This computer is managed; only `defenseclaw sandbox` commands are available here."
-)
+// launcherRefusal answers every command the launcher does not offer.
+var launcherRefusal = launcherRefusalFor(runtime.GOOS)
+
+func launcherRefusalFor(goos string) string {
+	message := "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy."
+	layout, err := managed.StandaloneLayoutFor(goos)
+	if err != nil {
+		return message
+	}
+	platform := goos
+	if platform == "darwin" {
+		platform = "macos"
+	}
+	// The layout is the target OS's POSIX layout, so join with path, not the
+	// host separator: the text must be the same when a Windows host evaluates
+	// the Linux or macOS refusal (the docs fixture).
+	gateway := path.Join(layout.BinDir, "defenseclaw-gateway")
+	return message + fmt.Sprintf(" For administrator views, run `sudo %s enterprise %s status`, `sudo %s enterprise %s verify`, or `sudo %s audit export --since 2h`. The managed launcher does not offer doctor, alerts, or tui.", gateway, platform, gateway, platform, gateway)
+}
 
 // launcherArgv0 is the name the process was started under; a seam for tests.
 var launcherArgv0 = func() string {
@@ -81,32 +98,6 @@ func launcherActive() bool {
 	return managedHost
 }
 
-// launcherOffers reports whether the launcher runs args at all. The bare
-// command and the help and version requests show the launcher's own text.
-func launcherOffers(args []string) bool {
-	if len(args) == 0 {
-		return true
-	}
-	switch args[0] {
-	case "sandbox", "-h", "--help", "--version":
-		return true
-	case "help":
-		// `help` explains the sandbox tree; cobra would answer `help status`
-		// with the root help, as if status existed. `help --help` is the
-		// help command's own usage: the root help lists `help`, so asking
-		// about it must answer (GAP-0471).
-		if len(args) == 1 {
-			return true
-		}
-		switch args[1] {
-		case "sandbox", "-h", "--help":
-			return true
-		}
-		return false
-	}
-	return false
-}
-
 // prepareLauncherRoot cuts root down to the sandbox tree: the other commands
 // are removed, the gateway's daemon bootstrap and the sidecar run are
 // replaced by the launcher's help, and the help describes the launcher.
@@ -118,15 +109,26 @@ func prepareLauncherRoot(root *cobra.Command) {
 		}
 	}
 	root.RemoveCommand(others...)
+	if guardrail := newLauncherGuardrailCommand(); guardrail != nil {
+		root.AddCommand(guardrail)
+	}
+	if status := newLauncherStatusCommand(); status != nil {
+		root.AddCommand(status)
+	}
 	root.Use = launcherCommand
 	root.Short = "Run coding agents in sandboxes on this managed computer"
 	root.Long = `Your organization manages DefenseClaw on this computer. Here defenseclaw runs
 your coding agents in sandboxes under the policy your organization set for you:
 
+  defenseclaw status                 Show whether DefenseClaw protects your Claude Code and Cowork sessions and other managed connectors
   defenseclaw sandbox run claude     run Claude Code in a sandbox
+  defenseclaw sandbox status         show your sandbox and managed policy state
   defenseclaw sandbox policy explain show the policy that applies to you
 
-Every other DefenseClaw command is for administrators.`
+"defenseclaw guardrail profile explain" shows the guardrail profile that
+applies to your agents. Administrator status, verify and audit export use the
+installed defenseclaw-gateway binary; doctor, alerts and tui are not offered
+by this managed launcher.`
 	root.CompletionOptions.DisableDefaultCmd = true
 	// The gateway's own flags (--host, --port, --version-json, ...) belong to
 	// the commands removed above; the launcher refuses them, so its help does
@@ -173,11 +175,11 @@ Every other DefenseClaw command is for administrators.`
 const launcherRunLong = `Runs the harness in a new sandbox on a copy of the current folder: your
 organization manages sandboxes on this computer, so every run works on a copy,
 with secret files held back, that you bring the changes back from after a review.
-The harness is claude, codex, copilot, opencode, kiro, hermes, openhands, omnigent
+The harness is claude, codex, copilot, opencode, kiro, hermes
 or antigravity, as far as your organization allows it for you ("defenseclaw sandbox
 policy explain" lists them). The harness gets your terminal; when it exits you get a
 summary, a review of the changed files, and the choice to bring the changes back or
-leave them in the sandbox for pull. Arguments after -- go to the harness.
+leave them in the sandbox for later pull --apply, --branch or --patch-out FILE. Arguments after -- go to the harness.
 
 A headless run in the foreground (--prompt, or the harness's own print flag after --)
 deletes its sandbox when it ends and nothing is left in it to bring back, as --rm
@@ -210,7 +212,7 @@ var launcherClient *sandboxapi.Client
 // host. The policy comes from the user's own sandbox daemon, which the
 // managed gateway feeds, so a per-user config.yaml is never read; the daemon
 // is started when it is not running.
-func launcherSandboxPreRun(cmd *cobra.Command, _ []string) error {
+func launcherSandboxPreRun(cmd *cobra.Command, args []string) error {
 	cleanup := cmd.Annotations[sandboxConfigOptional] == "true"
 	if err := sandboxHostRefusal(runtime.GOOS, runtime.GOARCH, cleanup); err != nil {
 		return withExitCode(err, 3)
@@ -225,7 +227,9 @@ func launcherSandboxPreRun(cmd *cobra.Command, _ []string) error {
 		return withExitCode(err, 3)
 	}
 	launcherClient = client
-	if !cleanup {
+	// A run the organization does not allow the account at all starts no
+	// sandbox daemon: the run refuses it in the daemon's words (GAP-0534).
+	if !cleanup && !launcherRunForbidden(cmd, args) {
 		status, err := launcherEnsureDaemon(cmd.Context(), client, runtime.GOOS, os.Getuid(), cmd.ErrOrStderr())
 		if err != nil {
 			// The command that follows reports the unreachable daemon in its
@@ -237,6 +241,33 @@ func launcherSandboxPreRun(cmd *cobra.Command, _ []string) error {
 		cfg = launcherManagedConfig(cfg, status)
 	}
 	return nil
+}
+
+// launcherAccountPolicy is the managed gateway's own policy view of the
+// caller's new run of a harness, asked without the account's sandbox daemon
+// (sandboxManagedAccountPolicy); a seam for tests.
+var launcherAccountPolicy = sandboxManagedAccountPolicy
+
+// launcherRunForbidden reports a `sandbox run` (args: its harness first) of
+// an account whose organization does not allow it sandboxes, by the managed
+// gateway's settled view: probing the daemon's socket would start it, which
+// then stayed running and wrote its state for an account that can run no
+// sandbox (GAP-0534). A provisional view, an allowed one and a gateway that
+// does not answer leave it to the daemon, as before.
+func launcherRunForbidden(cmd *cobra.Command, args []string) bool {
+	if cmd == nil || cmd.Name() != "run" || cmd.Parent() == nil || cmd.Parent().Name() != "sandbox" || len(args) == 0 {
+		return false
+	}
+	spec, err := sandboxcli.ResolveHarness(args[0])
+	if err != nil {
+		return false
+	}
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	view, err := launcherAccountPolicy(ctx, spec.Name)
+	return err == nil && view != nil && !view.Provisional && !view.Allowed
 }
 
 // launcherManagedConfig overlays the settings the user's sandbox daemon runs
@@ -302,10 +333,69 @@ func withLauncherClient(newApp func(*cobra.Command) *sandboxcli.App) func(*cobra
 	}
 }
 
+// launcherWriters are the commands that change policy or configuration: a
+// refusal of one is a row in the managed audit store, as it was when the
+// per-user CLI refused it (mp0.GAP-0002). Reads and other commands record
+// nothing. The words come from this table, never from the arguments.
+var launcherWriters = map[string]map[string]bool{
+	"config": {"set": true, "unset": true},
+	"guardrail": {
+		"alert-at": true, "allow-private-upstream": true, "block-at": true, "block-message": true, "disable": true,
+		"enable": true, "fail-mode": true, "hilt": true, "judge": true, "mode": true, "protection": true,
+		"rule": true, "suppress": true, "use-pack": true,
+	},
+	"policy": {"activate": true, "create": true, "delete": true, "edit": true},
+	"skill":  {"allow": true, "block": true, "unblock": true},
+	"mcp":    {"allow": true, "block": true, "unblock": true},
+	"plugin": {"allow": true, "block": true, "unblock": true},
+	"tool":   {"allow": true, "block": true, "unblock": true},
+}
+
+// launcherSingleWordWriters are the writers named by one word: they change
+// the installation or its connectors.
+var launcherSingleWordWriters = map[string]bool{"uninstall": true, "setup": true, "upgrade": true, "rollback": true}
+
+// launcherAuditedWriter returns the command words of a refused writer.
+func launcherAuditedWriter(args []string) (string, bool) {
+	if len(args) == 0 {
+		return "", false
+	}
+	if launcherSingleWordWriters[args[0]] {
+		return args[0], true
+	}
+	if len(args) > 1 && launcherWriters[args[0]][args[1]] {
+		if args[0] == "guardrail" && args[1] == "protection" && len(args) > 2 && args[2] == "list" {
+			return "", false
+		}
+		return args[0] + " " + args[1], true
+	}
+	return "", false
+}
+
+// launcherAsksHelp reports whether args carry -h or --help before a "--".
+func launcherAsksHelp(args []string) bool {
+	for _, arg := range args {
+		if arg == "--" {
+			return false
+		}
+		if arg == "-h" || arg == "--help" {
+			return true
+		}
+	}
+	return false
+}
+
 // executeLauncher runs the launcher over root with args and returns the exit
 // code.
 func executeLauncher(ctx context.Context, root *cobra.Command, args []string) int {
 	if !launcherOffers(args) {
+		// A help request changes nothing, so it is not a refused write. Its
+		// audit report was a socket round trip on a path that is otherwise
+		// instant: `upgrade --help` took 13 ms longer than on 1.0.5
+		// (rel-1-0-6 GAP-0104).
+		if command, ok := launcherAuditedWriter(args); ok && !launcherAsksHelp(args) {
+			reportManagedCommandRefusal(command, "")
+		}
 		fmt.Fprintln(root.ErrOrStderr(), launcherRefusal)
 		return 2
 	}

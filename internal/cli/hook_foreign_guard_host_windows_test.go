@@ -27,6 +27,7 @@ import (
 // the summary name, is rejected by the real summary loader and must still
 // leave the hook unchanged through the real directory check.
 func TestHostForeignHookGuardIgnoresUserCreatedSummaryOnWindows(t *testing.T) {
+	skipIfLocalSystem(t, "LocalSystem owns its t.TempDir() tree, so the fixture cannot stand in for a file a standard account owns")
 	for _, plant := range []string{"file", "folder"} {
 		runtimeDir := filepath.Join(t.TempDir(), "Cisco", "DefenseClaw-HookRuntime")
 		summary := filepath.Join(runtimeDir, enterprisepolicy.PublicPolicyFileName)

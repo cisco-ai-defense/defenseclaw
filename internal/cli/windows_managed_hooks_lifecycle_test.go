@@ -7,6 +7,7 @@ package cli
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -17,6 +18,60 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"golang.org/x/sys/windows"
 )
+
+func TestWindowsManagedHooksActivationBindingNamesInvalidField(t *testing.T) {
+	valid := windowsManagedHooksActivationRecord{
+		SchemaVersion: 1, DeploymentGenerationID: strings.Repeat("a", 32),
+		State: "activated", ManifestSHA256: strings.Repeat("b", 64), TargetCount: 2,
+	}
+	if err := validateWindowsManagedHooksLifecycleActivationBinding(&valid, 2); err != nil {
+		t.Fatalf("valid activation binding: %v", err)
+	}
+	valid.State = "never_activated"
+	if err := validateWindowsManagedHooksLifecycleActivationBinding(&valid, 2); err != nil {
+		t.Fatalf("valid inactive binding: %v", err)
+	}
+	valid.State = "activated"
+	// The standalone profile has no Setup on the computer: the installed CLI's
+	// command is named (cowork-1-0-8 GAP-0095); Secure Client keeps its text.
+	t.Run("standalone names the installed CLI", func(t *testing.T) {
+		previous := windowsManagedHooksStandaloneProcess
+		t.Cleanup(func() { windowsManagedHooksStandaloneProcess = previous })
+		windowsManagedHooksStandaloneProcess = func() bool { return true }
+		changed := valid
+		changed.SchemaVersion = 0
+		err := validateWindowsManagedHooksLifecycleActivationBinding(&changed, 2)
+		if err == nil || !strings.Contains(err.Error(), "run "+windowsEnterpriseAdminCommand("repair")+" from an elevated PowerShell prompt") ||
+			strings.Contains(err.Error(), "Setup /repair") {
+			t.Fatalf("standalone: %v", err)
+		}
+		changed = valid
+		changed.TargetCount = 1
+		err = validateWindowsManagedHooksLifecycleActivationBinding(&changed, 2)
+		if err == nil || !strings.Contains(err.Error(), "run "+windowsEnterpriseAdminCommand("ensure")+" from an elevated PowerShell prompt again to reconcile the target roster") {
+			t.Fatalf("standalone target count: %v", err)
+		}
+	})
+	for _, tc := range []struct {
+		name, field, step string
+		change            func(*windowsManagedHooksActivationRecord)
+	}{
+		{"schema", "schema_version", "Setup /repair", func(a *windowsManagedHooksActivationRecord) { a.SchemaVersion = 0 }},
+		{"generation", "deployment_generation_id", "Setup /repair", func(a *windowsManagedHooksActivationRecord) { a.DeploymentGenerationID = "" }},
+		{"state", "state", "Setup /repair", func(a *windowsManagedHooksActivationRecord) { a.State = "unknown" }},
+		{"manifest hash", "manifest_sha256", "Setup /repair", func(a *windowsManagedHooksActivationRecord) { a.ManifestSHA256 = "" }},
+		{"target count", "target_count", "Setup /ensure", func(a *windowsManagedHooksActivationRecord) { a.TargetCount = 1 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			changed := valid
+			tc.change(&changed)
+			err := validateWindowsManagedHooksLifecycleActivationBinding(&changed, 2)
+			if err == nil || !strings.Contains(err.Error(), tc.field) || !strings.Contains(err.Error(), tc.step) {
+				t.Fatalf("invalid %s: %v", tc.field, err)
+			}
+		})
+	}
+}
 
 func TestRestoreWindowsManagedHooksLifecycleCompositeCompensatesClaude(t *testing.T) {
 	claudeErr := errors.New("Claude restore failed")
@@ -99,7 +154,8 @@ func TestWindowsManagedHooksLifecycleCommandIsHiddenAndBounded(t *testing.T) {
 		actions = append(actions, child.Name())
 	}
 	if !slices.Equal(actions, []string{
-		"capture", "classify-activation", "restore", "retire", "retire-committed",
+		"capture", "classify-activation", "collect", "prune-orphaned-selectors",
+		"restore", "retire", "retire-committed",
 	}) {
 		t.Fatalf("actions = %v", actions)
 	}
@@ -245,6 +301,170 @@ func TestValidateWindowsManagedHooksLifecycleJournalRequiresExactTransaction(t *
 	}
 }
 
+func TestWindowsManagedHooksLifecycleAcceptsGuardWithNoEnrolledAccounts(t *testing.T) {
+	identity, journal, _ := windowsManagedHooksLifecycleJournalTestIdentity(t)
+	journal.PriorClaudeTargetSIDs = []string{}
+	journal.PriorCursorTargets = []enterprisehooks.WindowsCursorManagedRuntimeTarget{}
+	journal.Cursor.PolicyActive = true
+	journal.Cursor.HooksExisted = true
+	journal.Cursor.AdapterExisted = true
+	journal.Cursor.StateExisted = true
+	journal.Cursor.ReceiptExisted = true
+	journal.Cursor.HooksSecurityDescriptor = "protected"
+	journal.Cursor.AdapterSecurityDescriptor = "protected"
+	journal.Cursor.StateSecurityDescriptor = "protected"
+	journal.Cursor.ReceiptSecurityDescriptor = "protected"
+	journal.Cursor.HooksAttributes = 1
+	journal.Cursor.AdapterAttributes = 1
+	journal.Cursor.StateAttributes = 1
+	journal.Cursor.ReceiptAttributes = 1
+	if err := validateWindowsManagedHooksLifecycleJournal(journal, identity); err != nil {
+		t.Fatalf("active zero-target policies rejected during upgrade: %v", err)
+	}
+	if _, err := windowsManagedHooksPartialClaudeTargets(nil, nil, true); err != nil {
+		t.Fatalf("active empty Claude policy rejected during capture: %v", err)
+	}
+	if _, err := windowsManagedHooksPartialCursorTargets(nil, nil, true); err != nil {
+		t.Fatalf("active empty Cursor policy rejected during capture: %v", err)
+	}
+	journal.Claude.PolicyExisted = false
+	journal.Claude.StateExisted = false
+	journal.Claude.Policy = nil
+	journal.Claude.State = nil
+	journal.Cursor = enterprisehooks.WindowsCursorManagedPolicyTeardownSnapshot{}
+	if err := validateWindowsManagedHooksLifecycleJournal(journal, identity); err != nil {
+		t.Fatalf("legacy inactive zero-target policies rejected during upgrade: %v", err)
+	}
+}
+
+func TestLegacyWindowsManagedHooksPreactivationAcceptsOnlyConfiguredEmptyGuards(t *testing.T) {
+	originalClaudeAbsent := windowsManagedHooksLifecycleClaudePreactivation
+	originalClaudeTargets := windowsManagedHooksLifecycleClaudeTargets
+	originalClaudeIdentity := windowsManagedHooksLifecycleClaudeIdentity
+	originalCursorTargets := windowsManagedHooksPreactivationCursorTargets
+	originalCursorIdentity := windowsManagedHooksLifecycleCursorIdentity
+	t.Cleanup(func() {
+		windowsManagedHooksLifecycleClaudePreactivation = originalClaudeAbsent
+		windowsManagedHooksLifecycleClaudeTargets = originalClaudeTargets
+		windowsManagedHooksLifecycleClaudeIdentity = originalClaudeIdentity
+		windowsManagedHooksPreactivationCursorTargets = originalCursorTargets
+		windowsManagedHooksLifecycleCursorIdentity = originalCursorIdentity
+	})
+
+	const sid = "S-1-5-21-111-222-333-1001"
+	for _, test := range []struct {
+		name               string
+		secureClient       bool
+		claudeConfigured   bool
+		cursorConfigured   bool
+		claudeActive       bool
+		cursorActive       bool
+		claudeTargets      []string
+		cursorTargets      []enterprisehooks.WindowsCursorManagedRuntimeTarget
+		manifestClaude     bool
+		manifestCursor     bool
+		claudeReadErr      bool
+		cursorReadErr      bool
+		claudeIdentityErr  bool
+		cursorIdentityErr  bool
+		claudeOrphan       bool
+		wantAccepted       bool
+		wantClaudeIdentity bool
+		wantCursorIdentity bool
+	}{
+		{name: "legacy absent guards", wantAccepted: true},
+		{name: "configured empty Claude guard", claudeConfigured: true, claudeActive: true,
+			wantAccepted: true, wantClaudeIdentity: true},
+		{name: "configured empty Cursor guard", cursorConfigured: true, cursorActive: true,
+			wantAccepted: true, wantCursorIdentity: true},
+		{name: "both configured empty guards", claudeConfigured: true, cursorConfigured: true,
+			claudeActive: true, cursorActive: true, wantAccepted: true,
+			wantClaudeIdentity: true, wantCursorIdentity: true},
+		{name: "unconfigured Claude guard", claudeActive: true},
+		{name: "unconfigured Cursor guard", cursorActive: true},
+		{name: "Secure Client Claude guard keeps prior classification", secureClient: true,
+			claudeConfigured: true, claudeActive: true},
+		{name: "Secure Client Cursor guard keeps prior classification", secureClient: true,
+			cursorConfigured: true, cursorActive: true},
+		{name: "enrolled Claude policy", claudeConfigured: true, claudeActive: true,
+			claudeTargets: []string{sid}},
+		{name: "enrolled Cursor policy", cursorConfigured: true, cursorActive: true,
+			cursorTargets: []enterprisehooks.WindowsCursorManagedRuntimeTarget{{SID: sid}}},
+		{name: "Claude manifest enrollment", claudeConfigured: true, claudeActive: true,
+			manifestClaude: true},
+		{name: "Cursor manifest enrollment", cursorConfigured: true, cursorActive: true,
+			manifestCursor: true},
+		{name: "unowned Claude policy", claudeConfigured: true, claudeReadErr: true},
+		{name: "unowned Cursor policy", cursorConfigured: true, cursorReadErr: true},
+		{name: "foreign Claude guard", claudeConfigured: true, claudeActive: true,
+			claudeIdentityErr: true, wantClaudeIdentity: true},
+		{name: "foreign Cursor guard", cursorConfigured: true, cursorActive: true,
+			cursorIdentityErr: true, wantCursorIdentity: true},
+		{name: "orphan Claude policy", claudeOrphan: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := windowsManagedHooksLifecycleContext{}
+			ctx.opts.HookBinary = `C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe`
+			ctx.opts.GatewayAddr = "127.0.0.1:18970"
+			ctx.opts.GatewayServiceName = "DefenseClawGateway"
+			ctx.opts.SecureClient = test.secureClient
+			ctx.opts.ClaudeTargetEnabled = test.claudeConfigured
+			ctx.opts.CursorTargetEnabled = test.cursorConfigured
+			if test.manifestClaude {
+				ctx.claudeTargets = []string{sid}
+			}
+			if test.manifestCursor {
+				ctx.cursorTargets = []enterprisehooks.WindowsCursorManagedRuntimeTarget{{SID: sid}}
+			}
+			windowsManagedHooksLifecycleClaudePreactivation = func() error {
+				if test.claudeActive || test.claudeOrphan {
+					return errors.New("Claude policy files are present")
+				}
+				return nil
+			}
+			windowsManagedHooksLifecycleClaudeTargets = func() ([]string, bool, error) {
+				if test.claudeReadErr {
+					return nil, false, errors.New("Claude ownership is invalid")
+				}
+				return test.claudeTargets, test.claudeActive, nil
+			}
+			windowsManagedHooksPreactivationCursorTargets = func() (
+				[]enterprisehooks.WindowsCursorManagedRuntimeTarget, bool, error,
+			) {
+				if test.cursorReadErr {
+					return nil, false, errors.New("Cursor ownership is invalid")
+				}
+				return test.cursorTargets, test.cursorActive, nil
+			}
+			claudeIdentity, cursorIdentity := false, false
+			windowsManagedHooksLifecycleClaudeIdentity = func(hook, addr, service string) error {
+				claudeIdentity = true
+				if hook != ctx.opts.HookBinary || addr != ctx.opts.GatewayAddr ||
+					service != ctx.opts.GatewayServiceName || test.claudeIdentityErr {
+					return errors.New("Claude guard belongs to another deployment")
+				}
+				return nil
+			}
+			windowsManagedHooksLifecycleCursorIdentity = func(hook, addr, service string) error {
+				cursorIdentity = true
+				if hook != ctx.opts.HookBinary || addr != ctx.opts.GatewayAddr ||
+					service != ctx.opts.GatewayServiceName || test.cursorIdentityErr {
+					return errors.New("Cursor guard belongs to another deployment")
+				}
+				return nil
+			}
+			err := validateLegacyWindowsManagedHooksMachinePolicyPreactivation(ctx)
+			if (err == nil) != test.wantAccepted {
+				t.Fatalf("preactivation error = %v, accepted = %t", err, test.wantAccepted)
+			}
+			if claudeIdentity != test.wantClaudeIdentity || cursorIdentity != test.wantCursorIdentity {
+				t.Fatalf("identity checks: Claude=%t Cursor=%t, want Claude=%t Cursor=%t",
+					claudeIdentity, cursorIdentity, test.wantClaudeIdentity, test.wantCursorIdentity)
+			}
+		})
+	}
+}
+
 func TestValidateWindowsManagedHooksLifecycleRecoveryBindingIsExact(t *testing.T) {
 	transactionID := strings.Repeat("a", 32)
 	directory := `C:\ProgramData\DefenseClaw\install\transactions\` + transactionID
@@ -326,7 +546,7 @@ func TestFinalizeRetireCommittedWindowsManagedHooksLifecycleCollectsBeforeRename
 		steps = append(steps, "gc")
 		return 0, nil
 	}
-	err := finalizeRetireCommittedWindowsManagedHooksLifecycle(
+	_, err := finalizeRetireCommittedWindowsManagedHooksLifecycle(
 		journal,
 		ctx,
 		true,
@@ -350,7 +570,7 @@ func TestFinalizeRetireCommittedWindowsManagedHooksLifecycleCollectsBeforeRename
 		steps = append(steps, "gc")
 		return 0, gcErr
 	}
-	err = finalizeRetireCommittedWindowsManagedHooksLifecycle(
+	_, err = finalizeRetireCommittedWindowsManagedHooksLifecycle(
 		journal,
 		ctx,
 		true,
@@ -373,7 +593,7 @@ func TestFinalizeRetireCommittedWindowsManagedHooksLifecycleCollectsBeforeRename
 		steps = append(steps, "gc")
 		return 0, nil
 	}
-	err = finalizeRetireCommittedWindowsManagedHooksLifecycle(
+	_, err = finalizeRetireCommittedWindowsManagedHooksLifecycle(
 		journal,
 		ctx,
 		false,
@@ -387,6 +607,218 @@ func TestFinalizeRetireCommittedWindowsManagedHooksLifecycleCollectsBeforeRename
 	}
 	if !slices.Equal(steps, []string{"gc"}) {
 		t.Fatalf("steps = %v, adopted crash prefix must re-run GC without rename", steps)
+	}
+}
+
+// #1105 (GAP-0781): an account whose DefenseClaw folder has permissions
+// DefenseClaw cannot verify or apply is reported and skipped, and every other
+// account is still collected, so a stale or foreign profile no longer fails
+// the retire and rolls back the upgrade. Any other GC failure still fails it,
+// and so does the adoption path's finalize.
+func TestWindowsManagedHooksLifecycleGenerationGCSkipsUntrustedFolders(t *testing.T) {
+	originalGC := windowsManagedHooksLifecycleGenerationGC
+	t.Cleanup(func() { windowsManagedHooksLifecycleGenerationGC = originalGC })
+
+	const stale, healthy = "S-1-5-21-111-222-333-1103", "S-1-5-21-111-222-333-1001"
+	journal := windowsManagedHooksLifecycleJournal{
+		Targets: []windowsManagedHooksTeardownTarget{
+			{Connector: "claudecode", SID: stale, DataDir: `C:\Users\stale\.defenseclaw`},
+			{Connector: "codex", SID: healthy, DataDir: `C:\Users\alice\.defenseclaw`},
+		},
+		HookBinary: `C:\Program Files\DefenseClaw\bin\old-hook.exe`,
+	}
+	untrusted := fmt.Errorf("%w: %s: access denied",
+		enterprisehooks.ErrWindowsManagedRuntimeGenerationDirectoryUntrusted, `C:\Users\stale\.defenseclaw\hooks`)
+	var collected []string
+	windowsManagedHooksLifecycleGenerationGC = func(
+		opts enterprisehooks.WindowsManagedRuntimeGenerationGCOptions,
+	) (int, error) {
+		collected = append(collected, opts.TargetSID)
+		if opts.TargetSID == stale {
+			return 0, untrusted
+		}
+		return 1, nil
+	}
+	skipped, removed, err := garbageCollectWindowsManagedHooksLifecycleGenerations(journal, windowsManagedHooksLifecycleContext{})
+	if err != nil || removed != 1 {
+		t.Fatalf("an untrusted per-user folder failed the retire: removed=%d err=%v", removed, err)
+	}
+	if len(collected) != 2 {
+		t.Fatalf("collected %v, want both accounts", collected)
+	}
+	if len(skipped) != 1 || !strings.Contains(skipped[0], "claudecode generations of SID "+stale) ||
+		!strings.Contains(skipped[0], "generation directory is untrusted") ||
+		!strings.Contains(skipped[0], `C:\Users\stale\.defenseclaw\hooks`) {
+		t.Fatalf("skipped = %q, want the stale account, its folder and the reason", skipped)
+	}
+
+	renamed := false
+	skipped, err = finalizeRetireCommittedWindowsManagedHooksLifecycle(
+		journal, windowsManagedHooksLifecycleContext{}, true,
+		func() error { renamed = true; return nil },
+	)
+	if err != nil || !renamed || len(skipped) != 1 {
+		t.Fatalf("adoption finalize: skipped=%q renamed=%v err=%v", skipped, renamed, err)
+	}
+
+	other := errors.New("selector snapshot mismatch")
+	windowsManagedHooksLifecycleGenerationGC = func(
+		opts enterprisehooks.WindowsManagedRuntimeGenerationGCOptions,
+	) (int, error) {
+		if opts.TargetSID == stale {
+			return 0, other
+		}
+		return 0, nil
+	}
+	if skipped, _, err := garbageCollectWindowsManagedHooksLifecycleGenerations(journal, windowsManagedHooksLifecycleContext{}); !errors.Is(err, other) || skipped != nil {
+		t.Fatalf("another GC failure: skipped=%q err=%v, want the failure", skipped, err)
+	}
+}
+
+// GAP-0211: the collect a compliant ensure runs collects the old generations
+// of every account the manifest names with this deployment's hook binary,
+// reports an account whose folder is still untrusted, and counts what it
+// removed. It refuses, without collecting anything, while a transaction is
+// pending or a committed journal waits for its retire.
+func TestWindowsManagedHooksLifecycleCollectOutsideATransaction(t *testing.T) {
+	originalGC := windowsManagedHooksLifecycleGenerationGC
+	t.Cleanup(func() { windowsManagedHooksLifecycleGenerationGC = originalGC })
+
+	const stale, healthy = "S-1-5-21-111-222-333-1103", "S-1-5-21-111-222-333-1001"
+	ctx := windowsManagedHooksLifecycleContext{
+		journalPath: filepath.Join(t.TempDir(), windowsManagedHooksLifecycleJournalFile),
+		targets: []windowsManagedHooksTeardownTarget{
+			{Connector: "claudecode", SID: stale, DataDir: `C:\Users\stale\.defenseclaw`},
+			{Connector: "claudecode", SID: healthy, DataDir: `C:\Users\alice\.defenseclaw`},
+		},
+	}
+	ctx.opts.HookBinary = `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
+	untrusted := fmt.Errorf("%w: managed Windows DACL on %s has 8 ACEs, expected 7",
+		enterprisehooks.ErrWindowsManagedRuntimeGenerationDirectoryUntrusted, `C:\Users\stale\.defenseclaw\hooks`)
+	var calls []enterprisehooks.WindowsManagedRuntimeGenerationGCOptions
+	windowsManagedHooksLifecycleGenerationGC = func(
+		opts enterprisehooks.WindowsManagedRuntimeGenerationGCOptions,
+	) (int, error) {
+		calls = append(calls, opts)
+		if opts.TargetSID == stale {
+			return 0, untrusted
+		}
+		return 2, nil
+	}
+
+	skipped, collected, err := collectWindowsManagedHooksLifecycleGenerations(ctx, false)
+	if err != nil || collected != 2 {
+		t.Fatalf("collect: collected=%d err=%v, want 2 and no failure", collected, err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("collect ran for %d accounts, want both", len(calls))
+	}
+	for _, call := range calls {
+		if call.HookExecutable != ctx.opts.HookBinary {
+			t.Fatalf("collect used hook binary %q, want this deployment's %q", call.HookExecutable, ctx.opts.HookBinary)
+		}
+	}
+	if len(skipped) != 1 || !strings.Contains(skipped[0], "claudecode generations of SID "+stale) ||
+		!strings.Contains(skipped[0], windowsEnterpriseUntrustedUserFolderText) {
+		t.Fatalf("skipped = %q, want the still-untrusted account", skipped)
+	}
+
+	calls = nil
+	if _, _, err := collectWindowsManagedHooksLifecycleGenerations(ctx, true); err == nil ||
+		!strings.Contains(err.Error(), "transaction is pending") || len(calls) != 0 {
+		t.Fatalf("collect during a pending transaction: err=%v calls=%d", err, len(calls))
+	}
+	if err := os.WriteFile(ctx.journalPath, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := collectWindowsManagedHooksLifecycleGenerations(ctx, false); err == nil ||
+		!strings.Contains(err.Error(), "committed lifecycle journal") || len(calls) != 0 {
+		t.Fatalf("collect with a committed journal: err=%v calls=%d", err, len(calls))
+	}
+}
+
+// GAP-0822: an upgrade with no committed journal ran the replacement
+// gateway's generation classification only after its commit, so a bundle it
+// refuses (malformed JSON) failed the upgrade after it committed, with a
+// journal left and 1603. The staged retire Setup now runs before the
+// transaction classifies the current targets the same way and fails there,
+// with nothing deleted. It changes nothing, so it neither collects nor asks
+// for LocalSystem: an elevated administrator's Setup /ensure or /repair runs
+// it too (refix round 1). A folder the retire would first repair is left to
+// that retire. The installed gateway's retire with no journal does nothing.
+func TestWindowsManagedHooksStagedRetireWithNoJournalClassifiesBeforeTheTransaction(t *testing.T) {
+	originalGC := windowsManagedHooksLifecycleGenerationGC
+	originalClassify := windowsManagedHooksLifecycleGenerationClassify
+	originalIdentity := windowsStagedRetireMutationIdentityPreflight
+	t.Cleanup(func() {
+		windowsManagedHooksLifecycleGenerationGC = originalGC
+		windowsManagedHooksLifecycleGenerationClassify = originalClassify
+		windowsStagedRetireMutationIdentityPreflight = originalIdentity
+	})
+
+	const sid = "S-1-5-21-111-222-333-1017"
+	ctx := windowsManagedHooksLifecycleContext{
+		journalPath: filepath.Join(t.TempDir(), windowsManagedHooksLifecycleJournalFile),
+		targets: []windowsManagedHooksTeardownTarget{
+			{Connector: "opencode", SID: sid, DataDir: `C:\Users\std1\.defenseclaw`},
+		},
+	}
+	ctx.opts.HookBinary = `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
+	gcCalls, identityCalls := 0, 0
+	windowsManagedHooksLifecycleGenerationGC = func(
+		opts enterprisehooks.WindowsManagedRuntimeGenerationGCOptions,
+	) (int, error) {
+		gcCalls++
+		return 1, nil
+	}
+	windowsStagedRetireMutationIdentityPreflight = func() error {
+		identityCalls++
+		return errors.New("managed enterprise hook mutations require the LocalSystem guardian on native Windows")
+	}
+	classifyErr := errors.Join(enterprisehooks.ErrWindowsManagedRuntimeBundleRefused,
+		errors.New("enterprise hooks: decode managed runtime bundle: unexpected EOF"))
+	var classified []enterprisehooks.WindowsManagedRuntimeGenerationGCOptions
+	windowsManagedHooksLifecycleGenerationClassify = func(
+		opts enterprisehooks.WindowsManagedRuntimeGenerationGCOptions,
+	) error {
+		classified = append(classified, opts)
+		return classifyErr
+	}
+	if _, _, err := retireAbsentWindowsManagedHooksLifecycleJournal(ctx, false, false); err != nil || len(classified) != 0 {
+		t.Fatalf("installed retire with no journal: err=%v classify calls=%d, want nothing done", err, len(classified))
+	}
+	_, _, err := retireAbsentWindowsManagedHooksLifecycleJournal(ctx, false, true)
+	if err == nil || len(classified) != 1 ||
+		!strings.HasPrefix(err.Error(), "classify opencode managed runtime generations for SID "+sid) ||
+		!strings.Contains(err.Error(), "decode managed runtime bundle") {
+		t.Fatalf("staged retire with no journal: err=%v classify calls=%d, want the bundle refusal before the transaction", err, len(classified))
+	}
+	if got := classified[0]; got.Connector != "opencode" || got.TargetSID != sid ||
+		got.DataDir != ctx.targets[0].DataDir || got.HookExecutable != ctx.opts.HookBinary {
+		t.Fatalf("classified options = %+v", got)
+	}
+
+	// GAP-1910: an error of the same loop that is not a bundle refusal (a
+	// deleted hooks folder, a busy selector lock) carries no classify
+	// prefix, so Setup warns and continues instead of naming a damaged bundle.
+	classifyErr = errors.New("enterprise hooks: selected managed runtime generation directory is absent: file does not exist")
+	if _, _, err := retireAbsentWindowsManagedHooksLifecycleJournal(ctx, false, true); err == nil ||
+		strings.HasPrefix(err.Error(), "classify ") || !strings.Contains(err.Error(), sid) {
+		t.Fatalf("staged retire over a deleted hooks folder: err=%v, want an unprefixed error naming the SID", err)
+	}
+
+	classifyErr = fmt.Errorf("%w: access denied", enterprisehooks.ErrWindowsManagedRuntimeGenerationDirectoryUntrusted)
+	skipped, collected, err := retireAbsentWindowsManagedHooksLifecycleJournal(ctx, false, true)
+	if err != nil || collected != 0 || len(skipped) != 1 || !strings.Contains(skipped[0], sid) {
+		t.Fatalf("staged retire over a folder the retire repairs: skipped=%v collected=%d err=%v, want it left to that retire", skipped, collected, err)
+	}
+
+	classifyErr = nil
+	if skipped, collected, err := retireAbsentWindowsManagedHooksLifecycleJournal(ctx, false, true); err != nil || collected != 0 || len(skipped) != 0 {
+		t.Fatalf("staged retire over healthy bundles: skipped=%v collected=%d err=%v", skipped, collected, err)
+	}
+	if gcCalls != 0 || identityCalls != 0 {
+		t.Fatalf("staged retire with no journal deleted (gc calls=%d) or asked for LocalSystem (identity calls=%d)", gcCalls, identityCalls)
 	}
 }
 
@@ -562,8 +994,8 @@ func TestValidateLegacyWindowsManagedHooksGuardianActivationIsExact(t *testing.T
 	}
 
 	for name, mutate := range map[string]func(*enterpriseHookGuardianActivation, *enterpriseHookGuardianAuthorization, *enterpriseHookGuardianState){
-		"manifest digest": func(value *enterpriseHookGuardianActivation, _ *enterpriseHookGuardianAuthorization, _ *enterpriseHookGuardianState) {
-			value.ManifestSHA256 = strings.Repeat("b", 64)
+		"malformed manifest digest": func(value *enterpriseHookGuardianActivation, _ *enterpriseHookGuardianAuthorization, _ *enterpriseHookGuardianState) {
+			value.ManifestSHA256 = "not-a-digest"
 		},
 		"stale target": func(value *enterpriseHookGuardianActivation, _ *enterpriseHookGuardianAuthorization, _ *enterpriseHookGuardianState) {
 			value.ProtectedTargets[0].SID = "S-1-5-21-111-222-333-1099"
@@ -670,7 +1102,7 @@ func TestValidateWindowsManagedHooksGuardianActivationBindsDeferredPendingSubset
 		PendingCount: 1,
 		Results:      []enterpriseHookReconcileRow{active, pending},
 	}
-	pendingTargets, err := validateWindowsManagedHooksGuardianActivation(
+	pendingTargets, failedTargets, err := validateWindowsManagedHooksGuardianActivation(
 		activation,
 		authorization,
 		state,
@@ -683,11 +1115,14 @@ func TestValidateWindowsManagedHooksGuardianActivationBindsDeferredPendingSubset
 	if len(pendingTargets) != 1 || pendingTargets[0] != ctx.targets[1] {
 		t.Fatalf("pending targets = %+v", pendingTargets)
 	}
+	if len(failedTargets) != 0 {
+		t.Fatalf("failed targets = %+v, want none for a healthy Guardian", failedTargets)
+	}
 
 	unauthorized := ctx
 	unauthorized.targets = append([]windowsManagedHooksTeardownTarget(nil), ctx.targets...)
 	unauthorized.targets[1].Deferred = false
-	if _, err := validateWindowsManagedHooksGuardianActivation(
+	if _, _, err := validateWindowsManagedHooksGuardianActivation(
 		activation,
 		authorization,
 		state,
@@ -707,7 +1142,7 @@ func TestValidateWindowsManagedHooksGuardianActivationBindsDeferredPendingSubset
 		SID:       pending.SID,
 		OK:        true,
 	})
-	if _, err := validateWindowsManagedHooksGuardianActivation(
+	if _, _, err := validateWindowsManagedHooksGuardianActivation(
 		tamperedActivation,
 		authorization,
 		state,
@@ -724,7 +1159,7 @@ func TestValidateWindowsManagedHooksGuardianActivationBindsDeferredPendingSubset
 		UserHome:  `C:\Users\bob`,
 		DataDir:   ctx.targets[1].DataDir,
 	}
-	if _, err := validateWindowsManagedHooksGuardianActivation(
+	if _, _, err := validateWindowsManagedHooksGuardianActivation(
 		activation,
 		authorization,
 		tamperedState,
@@ -848,23 +1283,86 @@ func TestRestoreWindowsManagedHooksLifecycleSelectorsCompensatesPartialRestore(t
 	originalRestore := windowsManagedHooksLifecycleSelectorRestore
 	t.Cleanup(func() { windowsManagedHooksLifecycleSelectorRestore = originalRestore })
 	var calls []string
+	var expected []enterprisehooks.WindowsManagedRuntimeSelectorCAS
 	injected := errors.New("injected Cursor selector restore failure")
+	// Each successful restore reports a published CAS that differs from its
+	// snapshot, as when an entry with an unloadable bundle was dropped.
+	reducedCAS := func(connectorName string) enterprisehooks.WindowsManagedRuntimeSelectorCAS {
+		return enterprisehooks.WindowsManagedRuntimeSelectorCAS{
+			Exists: true,
+			SHA256: "sha256:reduced-" + connectorName,
+		}
+	}
 	windowsManagedHooksLifecycleSelectorRestore = func(
 		opts enterprisehooks.WindowsManagedRuntimeSelectorFullRestoreOptions,
-	) error {
+	) (enterprisehooks.WindowsManagedRuntimeSelectorCAS, error) {
 		calls = append(calls, opts.Snapshot.Connector)
+		expected = append(expected, opts.ExpectedCurrent)
 		if len(calls) == 3 {
-			return injected
+			return enterprisehooks.WindowsManagedRuntimeSelectorCAS{}, injected
 		}
-		return nil
+		return reducedCAS(opts.Snapshot.Connector), nil
 	}
-	err := restoreWindowsManagedHooksLifecycleSelectors(prior, current)
+	_, err := restoreWindowsManagedHooksLifecycleSelectors(prior, current)
 	if !errors.Is(err, injected) {
 		t.Fatalf("selector restore error = %v, want injected failure", err)
 	}
 	wantCalls := []string{"claudecode", "codex", "cursor", "codex", "claudecode"}
 	if !slices.Equal(calls, wantCalls) {
 		t.Fatalf("selector restore calls = %v, want %v", calls, wantCalls)
+	}
+	// The compensating restores expect what was actually published.
+	if expected[3] != reducedCAS("codex") || expected[4] != reducedCAS("claudecode") {
+		t.Fatalf("compensating restores expected %+v, want the published reduced CAS", expected[3:])
+	}
+}
+
+func TestRestoreWindowsManagedHooksLifecycleSelectorsReturnsPublishedCAS(t *testing.T) {
+	prior := make([]enterprisehooks.WindowsManagedRuntimeSelectorSnapshot, 0, 3)
+	current := make([]enterprisehooks.WindowsManagedRuntimeSelectorSnapshot, 0, 3)
+	for _, connectorName := range windowsManagedHooksLifecycleSelectorConnectors {
+		prior = append(prior, enterprisehooks.WindowsManagedRuntimeSelectorSnapshot{
+			SchemaVersion:  1,
+			Connector:      connectorName,
+			Existed:        true,
+			Selector:       []byte("prior-" + connectorName),
+			SelectorSHA256: "sha256:prior-" + connectorName,
+			CAS: enterprisehooks.WindowsManagedRuntimeSelectorCAS{
+				Exists: true,
+				SHA256: "sha256:prior-" + connectorName,
+			},
+		})
+		current = append(current, enterprisehooks.WindowsManagedRuntimeSelectorSnapshot{
+			SchemaVersion: 1,
+			Connector:     connectorName,
+		})
+	}
+	originalRestore := windowsManagedHooksLifecycleSelectorRestore
+	t.Cleanup(func() { windowsManagedHooksLifecycleSelectorRestore = originalRestore })
+	var expected []enterprisehooks.WindowsManagedRuntimeSelectorCAS
+	windowsManagedHooksLifecycleSelectorRestore = func(
+		opts enterprisehooks.WindowsManagedRuntimeSelectorFullRestoreOptions,
+	) (enterprisehooks.WindowsManagedRuntimeSelectorCAS, error) {
+		expected = append(expected, opts.ExpectedCurrent)
+		return enterprisehooks.WindowsManagedRuntimeSelectorCAS{
+			Exists: true,
+			SHA256: "sha256:reduced-" + opts.Snapshot.Connector,
+		}, nil
+	}
+	published, err := restoreWindowsManagedHooksLifecycleSelectors(prior, current)
+	if err != nil {
+		t.Fatalf("restore selectors: %v", err)
+	}
+	// A compensating restore of current over the published selectors must
+	// expect the published CAS, not the prior snapshot's.
+	expected = nil
+	if _, err := restoreWindowsManagedHooksLifecycleSelectorsExpecting(current, prior, published); err != nil {
+		t.Fatalf("compensating restore: %v", err)
+	}
+	for index, connectorName := range windowsManagedHooksLifecycleSelectorConnectors {
+		if expected[index].SHA256 != "sha256:reduced-"+connectorName {
+			t.Fatalf("compensating restore of %s expected %+v, want the published CAS", connectorName, expected[index])
+		}
 	}
 }
 
@@ -1003,5 +1501,295 @@ func TestReadWindowsManagedHooksLifecycleCursorTargetsRestoresAChangedAdapter(t 
 				t.Fatalf("targets=%v active=%t err=%v", targets, active, err)
 			}
 		})
+	}
+}
+
+// GAP-0571: a failed, non-waiting guardian row (here the Codex runtime
+// selector the guardian could not read) is still refused, and the refusal
+// names the row and the guardian's own error so the operator knows what to
+// repair before the uninstall commits.
+func TestWindowsManagedHooksGuardianFailedRowIsAcceptedAndAnAmbiguousOneNamed(t *testing.T) {
+	manifestSHA256 := strings.Repeat("a", 64)
+	ctx := windowsManagedHooksLifecycleContext{
+		manifestPath: `C:\ProgramData\DefenseClaw\hook-guardian\targets.yaml`,
+		targets: []windowsManagedHooksTeardownTarget{
+			{Connector: "claudecode", SID: "S-1-5-21-111-222-333-1001"},
+			{Connector: "codex", SID: "S-1-5-21-111-222-333-1001"},
+		},
+	}
+	protected := []enterpriseHookReconcileRow{
+		{Connector: "claudecode", SID: "S-1-5-21-111-222-333-1001", OK: true},
+	}
+	results := []enterpriseHookReconcileRow{
+		protected[0],
+		{
+			Connector: "codex",
+			SID:       "S-1-5-21-111-222-333-1001",
+			Error:     "codex runtime selector: enterprise hooks: managed runtime selector targets are not strictly sorted",
+		},
+	}
+	activation := enterpriseHookGuardianActivation{
+		Version:          enterpriseHookGuardianActivationVersion,
+		UpdatedAt:        "2026-08-24T00:00:00Z",
+		ReconcileID:      strings.Repeat("f", 32),
+		Manifest:         ctx.manifestPath,
+		ManifestSHA256:   manifestSHA256,
+		TargetCount:      2,
+		SuccessCount:     1,
+		FailureCount:     1,
+		ProtectedTargets: protected,
+	}
+	authorization := enterpriseHookGuardianAuthorization{
+		Version:          1,
+		UpdatedAt:        activation.UpdatedAt,
+		TargetCount:      2,
+		SuccessCount:     1,
+		FailureCount:     1,
+		ProtectedTargets: protected,
+	}
+	state := enterpriseHookGuardianState{
+		Version:      1,
+		UpdatedAt:    activation.UpdatedAt,
+		Manifest:     ctx.manifestPath,
+		TargetCount:  2,
+		SuccessCount: 1,
+		FailureCount: 1,
+		Results:      results,
+	}
+	// A failed row with its reconcile error is a valid disposition: teardown
+	// records it as possibly wired instead of refusing.
+	_, failed, err := validateWindowsManagedHooksGuardianActivation(activation, authorization, state, ctx, manifestSHA256)
+	if err != nil {
+		t.Fatalf("a failed guardian row with its error was refused: %v", err)
+	}
+	if len(failed) != 1 || failed[0].Connector != "codex" || failed[0].SID != "S-1-5-21-111-222-333-1001" {
+		t.Fatalf("failed targets = %+v, want the codex row", failed)
+	}
+
+	// A failed row with no error is ambiguous, and the refusal names it.
+	state.Results[1].Error = ""
+	_, _, err = validateWindowsManagedHooksGuardianActivation(activation, authorization, state, ctx, manifestSHA256)
+	if err == nil {
+		t.Fatal("a failed guardian row with no error was accepted for teardown")
+	}
+	for _, want := range []string{
+		"ambiguous target disposition",
+		"codex target S-1-5-21-111-222-333-1001",
+		"no error recorded",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal %q does not name %q", err, want)
+		}
+	}
+}
+
+// rel-1-0-6:GAP-0319: an enrolled local account deleted after the last
+// enumerator pass is not something to repair: the refusal says the next
+// pass revokes its rows, and the lifecycle module can recognize it.
+func TestWindowsManagedHooksGuardianRefusalNamesADeletedLocalAccount(t *testing.T) {
+	original := windowsManagedHooksLifecycleDeletedLocalAccount
+	t.Cleanup(func() { windowsManagedHooksLifecycleDeletedLocalAccount = original })
+	windowsManagedHooksLifecycleDeletedLocalAccount = func(sid string) bool { return sid == "S-1-5-21-111-222-333-1001" }
+	manifestSHA256 := strings.Repeat("a", 64)
+	ctx := windowsManagedHooksLifecycleContext{
+		manifestPath: `C:\ProgramData\DefenseClaw\hook-guardian\targets.yaml`,
+		targets: []windowsManagedHooksTeardownTarget{
+			{Connector: "claudecode", SID: "S-1-5-21-111-222-333-1001"},
+			{Connector: "codex", SID: "S-1-5-21-111-222-333-1001"},
+		},
+	}
+	protected := []enterpriseHookReconcileRow{
+		{Connector: "claudecode", SID: "S-1-5-21-111-222-333-1001", OK: true},
+	}
+	results := []enterpriseHookReconcileRow{
+		protected[0],
+		{
+			Connector: "codex",
+			SID:       "S-1-5-21-111-222-333-1001",
+			Error:     "codex runtime selector: enterprise hooks: managed runtime selector targets are not strictly sorted",
+		},
+	}
+	activation := enterpriseHookGuardianActivation{
+		Version:          enterpriseHookGuardianActivationVersion,
+		UpdatedAt:        "2026-08-24T00:00:00Z",
+		ReconcileID:      strings.Repeat("f", 32),
+		Manifest:         ctx.manifestPath,
+		ManifestSHA256:   manifestSHA256,
+		TargetCount:      2,
+		SuccessCount:     1,
+		FailureCount:     1,
+		ProtectedTargets: protected,
+	}
+	authorization := enterpriseHookGuardianAuthorization{
+		Version:          1,
+		UpdatedAt:        activation.UpdatedAt,
+		TargetCount:      2,
+		SuccessCount:     1,
+		FailureCount:     1,
+		ProtectedTargets: protected,
+	}
+	state := enterpriseHookGuardianState{
+		Version:      1,
+		UpdatedAt:    activation.UpdatedAt,
+		Manifest:     ctx.manifestPath,
+		TargetCount:  2,
+		SuccessCount: 1,
+		FailureCount: 1,
+		Results:      results,
+	}
+	_, _, err := validateWindowsManagedHooksGuardianActivation(activation, authorization, state, ctx, manifestSHA256)
+	if !errors.Is(err, errWindowsManagedHooksDeletedLocalAccount) || strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("deleted account refusal = %v", err)
+	}
+	for _, want := range []string{
+		"no longer exists",
+		"next pass",
+		"codex target S-1-5-21-111-222-333-1001",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal %q does not name %q", err, want)
+		}
+	}
+}
+
+func TestWindowsManagedHooksCaptureRefusesALinkAtAVendorFolderByName(t *testing.T) {
+	previousStandalone := windowsManagedHooksStandaloneProcess
+	previousLink := enterpriseHookVendorFolderLink
+	t.Cleanup(func() {
+		windowsManagedHooksStandaloneProcess = previousStandalone
+		enterpriseHookVendorFolderLink = previousLink
+	})
+	links := map[string]string{}
+	enterpriseHookVendorFolderLink = func(connectorName string) string { return links[connectorName] }
+	run := func(standalone bool) error {
+		windowsManagedHooksStandaloneProcess = func() bool { return standalone }
+		return windowsManagedHooksRefuseLinkedVendorFolders()
+	}
+	if err := run(true); err != nil {
+		t.Fatalf("no link: %v", err)
+	}
+	for _, tc := range []struct{ connector, label, link string }{
+		{"codex", "Codex", `C:\ProgramData\OpenAI\Codex`},
+		{"cursor", "Cursor", `C:\ProgramData\Cursor`},
+		{"claudecode", "Claude Code", `C:\Program Files\ClaudeCode`},
+	} {
+		t.Run(tc.connector, func(t *testing.T) {
+			links[tc.connector] = tc.link
+			t.Cleanup(func() { delete(links, tc.connector) })
+			err := run(true)
+			if err == nil {
+				t.Fatalf("a link at the %s folder was not refused", tc.label)
+			}
+			for _, want := range []string{tc.label + ": " + tc.link, `cmd /c rmdir "` + tc.link + `"`, "remove only the link"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("error %q does not contain %q", err, want)
+				}
+			}
+			// Secure Client keeps its behaviour: the snapshot reads the folder and fails (or not) as before.
+			if err := run(false); err != nil {
+				t.Fatalf("Secure Client was refused: %v", err)
+			}
+		})
+	}
+	links["cursor"] = `C:\ProgramData\Cursor`
+	links["claudecode"] = `C:\Program Files\ClaudeCode`
+	err := run(true)
+	if err == nil || !strings.Contains(err.Error(), "Cursor: C:\\ProgramData\\Cursor") || !strings.Contains(err.Error(), "Claude Code: C:\\Program Files\\ClaudeCode") {
+		t.Fatalf("two links were not both named: %v", err)
+	}
+}
+
+func TestWindowsManagedHooksRestoreReadsAndWritesNothingThroughAKeptLink(t *testing.T) {
+	journaled := make([]enterprisehooks.WindowsManagedRuntimeSelectorSnapshot, 0, 3)
+	current := make([]enterprisehooks.WindowsManagedRuntimeSelectorSnapshot, 0, 3)
+	for _, connectorName := range windowsManagedHooksLifecycleSelectorConnectors {
+		journaled = append(journaled, enterprisehooks.WindowsManagedRuntimeSelectorSnapshot{
+			SchemaVersion: 1, Connector: connectorName,
+			CAS: enterprisehooks.WindowsManagedRuntimeSelectorCAS{Exists: false},
+		})
+		current = append(current, enterprisehooks.WindowsManagedRuntimeSelectorSnapshot{
+			SchemaVersion: 1, Connector: connectorName, Existed: true,
+			Selector: []byte("current-" + connectorName), SelectorSHA256: "sha256:current-" + connectorName,
+			CAS: enterprisehooks.WindowsManagedRuntimeSelectorCAS{Exists: true, SHA256: "sha256:current-" + connectorName},
+		})
+	}
+	originalCapture := windowsManagedHooksLifecycleSelectorCapture
+	originalRestore := windowsManagedHooksLifecycleSelectorRestore
+	t.Cleanup(func() {
+		windowsManagedHooksLifecycleSelectorCapture = originalCapture
+		windowsManagedHooksLifecycleSelectorRestore = originalRestore
+	})
+	var captured, restored []string
+	windowsManagedHooksLifecycleSelectorCapture = func(connectorName string) (enterprisehooks.WindowsManagedRuntimeSelectorSnapshot, error) {
+		captured = append(captured, connectorName)
+		return current[slices.Index(windowsManagedHooksLifecycleSelectorConnectors[:], connectorName)], nil
+	}
+	windowsManagedHooksLifecycleSelectorRestore = func(
+		opts enterprisehooks.WindowsManagedRuntimeSelectorFullRestoreOptions,
+	) (enterprisehooks.WindowsManagedRuntimeSelectorCAS, error) {
+		restored = append(restored, opts.Snapshot.Connector)
+		return opts.Snapshot.CAS, nil
+	}
+
+	kept := map[string]string{"cursor": `C:\ProgramData\Cursor`, "claudecode": `C:\Program Files\ClaudeCode`}
+	snapshots, err := captureWindowsManagedHooksLifecycleSelectorsKeeping(kept, journaled)
+	if err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+	if !slices.Equal(captured, []string{"codex"}) {
+		t.Fatalf("a kept connector was read: captured %v, want only codex", captured)
+	}
+	if snapshots[0].Connector != "claudecode" || snapshots[2].Connector != "cursor" || snapshots[2].Existed {
+		t.Fatalf("a kept connector is not stood in for by its journaled snapshot: %+v", snapshots)
+	}
+	if _, err := restoreWindowsManagedHooksLifecycleSelectorsKept(journaled, snapshots, kept); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if !slices.Equal(restored, []string{"codex"}) {
+		t.Fatalf("a kept connector was written: restored %v, want only codex", restored)
+	}
+
+	// A failure on a connector that is not kept compensates only the connectors that were restored.
+	restored = nil
+	injected := errors.New("injected Codex selector restore failure")
+	windowsManagedHooksLifecycleSelectorRestore = func(
+		opts enterprisehooks.WindowsManagedRuntimeSelectorFullRestoreOptions,
+	) (enterprisehooks.WindowsManagedRuntimeSelectorCAS, error) {
+		restored = append(restored, opts.Snapshot.Connector)
+		if opts.Snapshot.Connector == "codex" {
+			return enterprisehooks.WindowsManagedRuntimeSelectorCAS{}, injected
+		}
+		return opts.Snapshot.CAS, nil
+	}
+	if _, err := restoreWindowsManagedHooksLifecycleSelectorsKept(journaled, snapshots, map[string]string{"claudecode": `C:\Program Files\ClaudeCode`}); !errors.Is(err, injected) {
+		t.Fatalf("restore error = %v, want the injected failure", err)
+	}
+	if slices.Contains(restored, "claudecode") {
+		t.Fatalf("the kept connector was touched while compensating: %v", restored)
+	}
+
+	// Nothing kept, or not standalone: the keeping variants read everything, as before.
+	captured = nil
+	if _, err := captureWindowsManagedHooksLifecycleSelectorsKeeping(nil, journaled); err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+	if len(captured) != 3 {
+		t.Fatalf("with no kept link %v was read, want all three", captured)
+	}
+	previousStandalone := windowsManagedHooksStandaloneProcess
+	previousLink := enterpriseHookVendorFolderLink
+	t.Cleanup(func() {
+		windowsManagedHooksStandaloneProcess = previousStandalone
+		enterpriseHookVendorFolderLink = previousLink
+	})
+	enterpriseHookVendorFolderLink = func(connectorName string) string { return `C:\ProgramData\` + connectorName }
+	windowsManagedHooksStandaloneProcess = func() bool { return false }
+	if got := windowsManagedHooksKeptVendorFolderLinks(); len(got) != 0 {
+		t.Fatalf("Secure Client kept links: %v", got)
+	}
+	windowsManagedHooksStandaloneProcess = func() bool { return true }
+	got := windowsManagedHooksKeptVendorFolderLinks()
+	if len(got) != 3 || len(windowsManagedHooksKeptLinkList(got)) != 3 {
+		t.Fatalf("standalone kept links = %v", got)
 	}
 }

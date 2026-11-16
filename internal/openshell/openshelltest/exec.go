@@ -22,6 +22,7 @@ import (
 	"io"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
@@ -69,12 +70,27 @@ type ExecResponse struct {
 // first reads the stream.
 type ExecHandler func(ctx context.Context, call ExecCall) ExecResponse
 
-// HandleExec installs the exec handler. Without one every command exits 0
-// with no output.
+// HandleExec installs the exec handler. Without one every command answers
+// DefaultExec.
 func (f *Fake) HandleExec(h ExecHandler) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.execHandler = h
+}
+
+// syncTrap opens a script whose end syncs the sandbox's disk and says so:
+// the manager's flush before a MicroVM's stop.
+const syncTrap = "trap '/bin/sync && echo synced' EXIT"
+
+// DefaultExec is how a sandbox answers call when no handler decides: it
+// exits 0 with no output, except that a `/bin/sh -c` script that opens with
+// syncTrap prints "synced" as it ends, as a sandbox's shell runs that trap.
+// A handler that wants a failed sync answers the script itself.
+func DefaultExec(call ExecCall) ExecResponse {
+	if len(call.Command) > 2 && call.Command[0] == "/bin/sh" && call.Command[1] == "-c" && strings.HasPrefix(call.Command[2], syncTrap) {
+		return ExecResponse{Stdout: []byte("synced\n")}
+	}
+	return ExecResponse{}
 }
 
 // ExecCalls returns the commands run so far.
@@ -96,7 +112,8 @@ func (e *execClient) Stream(ctx context.Context, workspace, sandboxName string, 
 		return nil, statusErr(types.ErrorInvalidArgument, "sandbox name must not be empty")
 	}
 	// Like the SDK, resolve the sandbox before opening the stream.
-	if _, err := e.f.sdk.Sandboxes().Get(ctx, workspace, sandboxName); err != nil {
+	sb, err := e.f.sdk.Sandboxes().Get(ctx, workspace, sandboxName)
+	if err != nil {
 		return nil, err
 	}
 	call := ExecCall{Workspace: workspace, Sandbox: sandboxName, Argv: slices.Clone(command)}
@@ -111,6 +128,13 @@ func (e *execClient) Stream(ctx context.Context, workspace, sandboxName string, 
 	e.f.execCalls = append(e.f.execCalls, call)
 	handler := e.f.execHandler
 	e.f.mu.Unlock()
+	// Like OpenShell (0.1.3 and 0.1.5: ExecSandbox's require_ready_sandbox),
+	// run a command only in a ready sandbox: one whose workload completed
+	// or failed, starting or stopping, answers FailedPrecondition. The call
+	// is recorded all the same, so a test sees that it was tried.
+	if sb.Status.Phase != types.SandboxReady {
+		return nil, statusErr(types.ErrorConflict, "sandbox is not ready")
+	}
 	return &execStream{ctx: ctx, call: call, handler: handler}, nil
 }
 
@@ -163,6 +187,8 @@ func (s *execStream) start() {
 	s.started = true
 	if s.handler != nil {
 		s.resp = s.handler(s.ctx, s.call)
+	} else {
+		s.resp = DefaultExec(s.call)
 	}
 	if s.resp.Duration > 0 {
 		run, stopped := s.resp.Duration, false

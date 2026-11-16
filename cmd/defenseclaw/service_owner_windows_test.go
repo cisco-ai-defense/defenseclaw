@@ -10,15 +10,16 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/windows/svc"
 )
 
-// The LocalSystem gateway must own its files as its service SID before it
-// creates the first one (the service log), and must not start when it
-// cannot: its write-restricted token could not then secure its own audit
-// database.
+// The LocalSystem gateway sets its file owner to its service SID before it
+// creates the first file (the service log). When it cannot, it still starts
+// and reports the degraded owner (26.8.4): the process never exits before
+// SCM sees it.
 func TestRunWindowsServiceAdoptsGatewayFileOwnerBeforeItsFirstFile(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "gateway.log")
 	t.Setenv(windowsServiceNameEnv, defaultGatewayServiceName)
@@ -30,8 +31,9 @@ func TestRunWindowsServiceAdoptsGatewayFileOwnerBeforeItsFirstFile(t *testing.T)
 		os.Stdout, os.Stderr = originalStdout, originalStderr
 	})
 	isWindowsService = func() (bool, error) { return true, nil }
+	ran := 0
 	runSCMService = func(string, svc.Handler) error {
-		t.Error("the service ran after its file owner could not be set")
+		ran++
 		return nil
 	}
 	adopted := 0
@@ -43,17 +45,18 @@ func TestRunWindowsServiceAdoptsGatewayFileOwnerBeforeItsFirstFile(t *testing.T)
 		return errors.New("owner refused")
 	}
 
-	handled, code := runWindowsService(func(context.Context) int {
-		t.Error("the executor ran after its file owner could not be set")
-		return 0
-	})
-	if !handled || code != 1 {
-		t.Fatalf("result handled=%v code=%d, want handled failure", handled, code)
+	handled, code := runWindowsService(func(context.Context) int { return 0 })
+	if !handled || code != 0 {
+		t.Fatalf("result handled=%v code=%d, want the service to run", handled, code)
 	}
-	if adopted != 1 {
-		t.Fatalf("file owner set %d times, want 1", adopted)
+	if adopted != 1 || ran != 1 {
+		t.Fatalf("file owner set %d times and service ran %d times, want 1 and 1", adopted, ran)
 	}
-	if _, err := os.Stat(logPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("service log created after the file owner change failed: %v", err)
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("service log: %v", err)
+	}
+	if !strings.Contains(string(raw), "default-owner") {
+		t.Fatalf("service log does not report the degraded owner:\n%s", raw)
 	}
 }

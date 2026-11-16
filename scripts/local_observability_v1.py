@@ -26,6 +26,11 @@ except ModuleNotFoundError:  # direct ``python scripts/local_observability_v1.py
 ROOT = Path(__file__).resolve().parents[1]
 BUNDLE = ROOT / "bundles/local_observability_stack"
 PACKAGED = ROOT / "cli/defenseclaw/_data/local_observability_stack"
+OPTIONAL_FLEET_FILES = {
+    Path("docker-compose.fleet.yml"),
+    Path("prometheus/examples/fleet.yml"),
+    Path("grafana/dashboards/defenseclaw-fleet.json"),
+}
 METRIC_MANIFEST = "schemas/telemetry/generated/compatibility/local-observability-v1.json"
 METRIC_EMITTER = ROOT / "internal/telemetry/metrics.go"
 FLEET_METRIC_EMITTER = ROOT / "internal/fleet/metrics.go"
@@ -118,6 +123,9 @@ EXPECTED_RESOURCE_ATTRIBUTE_ACTIONS = [
 # Loki filters on structured metadata without parsing the line, so the sandbox
 # name (which the canonical record keeps only inside its JSON body) is copied
 # onto the log record as an attribute. Nothing else about the record changes.
+# Loki indexes resource attributes only; the sandbox name moves onto the
+# resource of the records that carry it, so the Sandbox box can list it.
+EXPECTED_SANDBOX_GROUPING_PROCESSOR = {"keys": ["defenseclaw.sandbox.name"]}
 EXPECTED_SANDBOX_IDENTITY_PROCESSOR = {
     "error_mode": "ignore",
     "log_statements": [
@@ -171,12 +179,13 @@ LOKI_BUILTIN_FIELDS = {
     # `defenseclaw.event.name` as structured metadata. Loki normalizes dots
     # to underscores, so it is queryable before `| json` under this spelling.
     "defenseclaw_event_name",
-    # The local Collector adds the sandbox name of every record that names
-    # one as structured metadata (processors.transform/sandbox-identity).
+    # The local Collector lifts the sandbox name of every record that names
+    # one onto its resource (processors.transform/sandbox-identity, then
+    # groupbyattrs/sandbox-identity), and Loki indexes it (loki.yaml).
     "defenseclaw_sandbox_name",
-    # OTLP resource attributes: Loki indexes deployment.environment.name as a
-    # stream label and keeps host.name as structured metadata (the Sandboxes
-    # board's Environment and Host boxes).
+    # OTLP resource attributes that the shipped Loki indexes (loki.yaml
+    # otlp_config), so the Sandboxes board's Environment, Host and OS boxes
+    # can list them.
     "deployment_environment_name",
     # OTLP host.name is exposed by Loki as the normalized resource field.
     "host_name",
@@ -636,6 +645,7 @@ def _bundle_parity_errors() -> list[str]:
         for path in BUNDLE.rglob("*")
         if path.is_file()
         and not _is_runtime_source_file(relative := path.relative_to(BUNDLE))
+        and relative not in OPTIONAL_FLEET_FILES
     }
     packaged_files = {path.relative_to(PACKAGED) for path in PACKAGED.rglob("*") if path.is_file()}
     if source_files != packaged_files:
@@ -648,6 +658,39 @@ def _bundle_parity_errors() -> list[str]:
         if (BUNDLE / relative).read_bytes() != (PACKAGED / relative).read_bytes():
             errors.append(f"local-observability packaged file differs: {relative}")
     return errors
+
+
+MANAGED_SANDBOX_METRIC_CONDITION = 'IsMatch(metric.name, "^defenseclaw[.]sandbox[.]managed[.]")'
+EXPECTED_MANAGED_SANDBOX_OUT_FILTER = {
+    "error_mode": "ignore",
+    "metric_conditions": [MANAGED_SANDBOX_METRIC_CONDITION],
+}
+EXPECTED_MANAGED_SANDBOX_ONLY_FILTER = {
+    "error_mode": "ignore",
+    "metric_conditions": ["not " + MANAGED_SANDBOX_METRIC_CONDITION],
+}
+# The resource attributes the managed sandbox counters keep in Prometheus.
+MANAGED_SANDBOX_RESOURCE_ATTRIBUTES = (
+    "service.name",
+    "service.namespace",
+    "service.version",
+    "service.instance.id",
+    "deployment.environment.name",
+    "os.type",
+)
+EXPECTED_MANAGED_SANDBOX_RESOURCE_PROCESSOR = {
+    "error_mode": "ignore",
+    "metric_statements": [
+        {
+            "context": "resource",
+            "statements": [
+                "keep_keys(resource.attributes, ["
+                + ", ".join(f'"{key}"' for key in MANAGED_SANDBOX_RESOURCE_ATTRIBUTES)
+                + "])",
+            ],
+        },
+    ],
+}
 
 
 def _collector_errors() -> list[str]:
@@ -667,12 +710,23 @@ def _collector_errors() -> list[str]:
         },
         "metrics": {
             "receivers": ["otlp", "spanmetrics/agent360"],
-            "processors": ["resource", "deltatocumulative", "batch"],
+            "processors": ["resource", "filter/managed-sandbox-out", "deltatocumulative", "batch"],
+            "exporters": ["prometheusremotewrite/prometheus", "debug"],
+        },
+        "metrics/managed-sandbox": {
+            "receivers": ["otlp"],
+            "processors": [
+                "resource",
+                "filter/managed-sandbox-only",
+                "transform/managed-sandbox-resource",
+                "deltatocumulative",
+                "batch",
+            ],
             "exporters": ["prometheusremotewrite/prometheus", "debug"],
         },
         "logs": {
             "receivers": ["otlp"],
-            "processors": ["resource", "transform/sandbox-identity", "batch"],
+            "processors": ["resource", "transform/sandbox-identity", "groupbyattrs/sandbox-identity", "batch"],
             "exporters": ["otlphttp/loki", "debug"],
         },
     }
@@ -700,6 +754,23 @@ def _collector_errors() -> list[str]:
         errors.append(
             "transform/sandbox-identity must only copy the sandbox name from the record body onto the "
             "defenseclaw.sandbox.name log attribute (Loki structured metadata), never change the body",
+        )
+    if collector.get("processors", {}).get("groupbyattrs/sandbox-identity") != EXPECTED_SANDBOX_GROUPING_PROCESSOR:
+        errors.append(
+            "groupbyattrs/sandbox-identity must move only defenseclaw.sandbox.name onto the log resource",
+        )
+    processors = collector.get("processors", {})
+    if (
+        processors.get("filter/managed-sandbox-out") != EXPECTED_MANAGED_SANDBOX_OUT_FILTER
+        or processors.get("filter/managed-sandbox-only") != EXPECTED_MANAGED_SANDBOX_ONLY_FILTER
+    ):
+        errors.append(
+            "the managed sandbox counters must leave the metrics pipeline and take metrics/managed-sandbox only",
+        )
+    if processors.get("transform/managed-sandbox-resource") != EXPECTED_MANAGED_SANDBOX_RESOURCE_PROCESSOR:
+        errors.append(
+            "transform/managed-sandbox-resource must keep only the service, environment and OS resource "
+            "attributes: the managed sandbox counters carry no host or account label",
         )
     resource_actions = collector.get("processors", {}).get("resource", {}).get("attributes")
     if resource_actions != EXPECTED_RESOURCE_ATTRIBUTE_ACTIONS:

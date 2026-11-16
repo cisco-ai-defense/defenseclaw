@@ -23,13 +23,16 @@ import Charts
 struct OverviewView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.openSettings) private var openSettings
-    @AppStorage("gatewayAdministratorMode") private var gatewayAdministratorMode = false
     @State private var summary: (blockedSkills: Int, allowedSkills: Int, blockedMCPs: Int, allowedMCPs: Int, totalScans: Int, activeAlerts: Int) = (0, 0, 0, 0, 0, 0)
     @State private var hourly: [HourlyPoint] = []
     @State private var doctorRunning = false
     @State private var doctorOutput = ""
     @State private var showDoctorSheet = false
     @State private var configurationExpanded = false
+    @State private var appliedPolicy: [String: String] = [:]
+    @State private var appliedPolicyError: String?
+    @State private var appliedPolicyCacheKey = ""
+    @State private var appliedPolicyFetchedAt: Date?
 
     struct HourlyPoint: Identifiable {
         let hour: Date
@@ -65,6 +68,20 @@ struct OverviewView: View {
                 quickActionsCard
                 SandboxOverviewCard()
                 configurationCard
+                if !admissionOverrides.isEmpty {
+                    DCCard("Admission overrides", systemImage: "checklist") {
+                        KeyValueGrid(pairs: admissionOverrides)
+                    }
+                }
+                if !appliedPolicy.isEmpty || appliedPolicyError != nil {
+                    DCCard("Effective policy\(scopeSuffix)", systemImage: "person.badge.shield.checkmark") {
+                        if let appliedPolicyError {
+                            Text(appliedPolicyError).font(.caption).foregroundStyle(Cisco.orange)
+                        } else {
+                            KeyValueGrid(pairs: appliedPolicy.keys.sorted().map { ($0, appliedPolicy[$0] ?? "") })
+                        }
+                    }
+                }
                 if !overviewConnectorRows.isEmpty { connectorCard }
                 observabilityCard
                 activityCard
@@ -104,6 +121,7 @@ struct OverviewView: View {
             // the ENFORCEMENT box renders with a connector selected —
             // `initial: true` covers a filter set before Overview mounted.
             if !newValue.isEmpty { appState.requestEnforcementInventory() }
+            Task { await loadAppliedPolicy() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .dcRefreshPanel)) { _ in refresh() }
         .onReceive(NotificationCenter.default.publisher(for: .dcRunHealthCheck)) { _ in runDoctor() }
@@ -243,28 +261,6 @@ struct OverviewView: View {
                 }
                 .controlSize(.small)
 
-                VStack(alignment: .leading, spacing: 5) {
-                    HStack {
-                        Toggle("Run gateway as administrator", isOn: $gatewayAdministratorMode)
-                            .toggleStyle(.switch)
-                            .controlSize(.small)
-                            .fixedSize()
-                            .disabled(!appState.installationMutationsAllowed)
-                        Spacer()
-                        Button("Gateway Permissions…") {
-                            appState.selectedSettingsTab = .connection
-                            openSettings()
-                        }
-                        .controlSize(.small)
-                    }
-                    Text(gatewayAdministratorMode
-                         ? "Uses your installed gateway with macOS authorization. Runtime agent actions also require Full Disk Access."
-                         : "Enable administrator mode for Runtime monitoring across the machine, then start or restart the gateway.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
                 if let reason = appState.installationReadOnlyReason {
                     Divider()
                     HStack(spacing: 12) {
@@ -355,7 +351,7 @@ struct OverviewView: View {
     /// (the exact colors SwiftUI's Table paints in the Connectors box), so the
     /// rows read black/grey over the blue card rather than blue-on-blue.
     private var configurationCard: some View {
-        DCCard("Configuration\(scopeSuffix)", systemImage: "slider.horizontal.3") {
+        DCCard("Base configuration\(scopeSuffix)", systemImage: "slider.horizontal.3") {
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(appState.configurationRows
                     .prefix(configurationExpanded ? appState.configurationRows.count : 4)
@@ -424,7 +420,7 @@ struct OverviewView: View {
                         .fontWeight(isScoped(c.name) ? .semibold : .regular)
                         .foregroundStyle(isScoped(c.name) ? Cisco.blue : .primary)
                 }
-                TableColumn("Mode", value: \.mode)
+                TableColumn("Configured mode", value: \.mode)
                 TableColumn("Rule Pack", value: \.rulePack)
                 TableColumn("Last Activity") { c in Text(DCDates.relative(c.lastActivity)) }
                 TableColumn("Calls") { c in Text("\(c.calls)") }
@@ -1071,13 +1067,62 @@ struct OverviewView: View {
     /// AppState.overviewEnforcementMetrics so they reconcile with the menu bar.
     private func loadData() async {
         let installationGeneration = appState.installationGeneration
-        let freshSummary = await appState.audit.enforcementSummary()
+        // read_repository.py: get_enforcement_counts(cfg=config) — the
+        // operator block/allow decisions live in config.yaml asset_policy on
+        // runtime 1.0.x; the journal alone shows 0 after every decision.
+        let operatorLists = OperatorAssetLists.read(raw: appState.config.raw)
+        let freshSummary = await appState.audit.enforcementSummary(operatorLists: operatorLists)
         guard installationGeneration == appState.installationGeneration else { return }
         let freshHourly = await appState.audit.hourlyEnforcement24h()
             .map { HourlyPoint(hour: $0.hour, klass: $0.action, count: $0.count) }
         guard installationGeneration == appState.installationGeneration else { return }
         summary = freshSummary
         hourly = freshHourly
+        await loadAppliedPolicy()
+    }
+
+    private var admissionOverrides: [(String, String)] {
+        var rows: [(String, String)] = []
+        for asset in ["defaults", "skill", "mcp", "plugin"] {
+            let actions = appState.config.raw["admission.\(asset).actions"]?.mapping ?? [:]
+            for severity in actions.keys.sorted() {
+                guard let node = actions[severity] else { continue }
+                if let value = node.string { rows.append(("\(asset) · \(severity)", value)) }
+                else if let surfaces = node.mapping {
+                    let value = ["install", "file", "runtime", "verdict"].compactMap { key in
+                        surfaces[key]?.string.map { "\(key)=\($0)" }
+                    }.joined(separator: ", ")
+                    if !value.isEmpty { rows.append(("\(asset) · \(severity)", value)) }
+                }
+            }
+        }
+        return rows
+    }
+
+    private func loadAppliedPolicy() async {
+        let generation = appState.installationGeneration
+        let connector = scopeConnector
+        guard appState.gatewayReachable else {
+            appliedPolicy = [:]
+            appliedPolicyError = nil
+            appliedPolicyFetchedAt = nil
+            return
+        }
+        let cacheKey = "\(generation):\(connector)"
+        if appliedPolicyCacheKey == cacheKey, let date = appliedPolicyFetchedAt, Date().timeIntervalSince(date) < 60 { return }
+        appliedPolicyCacheKey = cacheKey
+        appliedPolicyFetchedAt = Date()
+        do {
+            let fields = try await appState.gateway.appliedPolicy(user: NSUserName(), connector: connector,
+                resolveProfile: !(appState.config.raw["guardrail.profiles"]?.mapping?.isEmpty ?? true))
+            guard generation == appState.installationGeneration, connector == scopeConnector else { return }
+            appliedPolicy = fields
+            appliedPolicyError = nil
+        } catch {
+            guard generation == appState.installationGeneration, connector == scopeConnector else { return }
+            appliedPolicy = [:]
+            appliedPolicyError = "Effective policy unavailable: \(error.localizedDescription)"
+        }
     }
 
     private func runDoctor() {
@@ -1105,7 +1150,7 @@ struct OverviewView: View {
     }
 
     private func gatewayActionTitle(_ action: String) -> String {
-        gatewayAdministratorMode ? "\(action) Gateway as Administrator" : "\(action) Gateway"
+        "\(action) Gateway"
     }
 
     private func runGatewayLifecycle(_ action: String) {

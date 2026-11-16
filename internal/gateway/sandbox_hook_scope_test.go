@@ -166,55 +166,6 @@ func TestSandboxHooksEnforceInObserveMode(t *testing.T) {
 	}
 }
 
-func TestHookProfileForRequestUsesBindingContract(t *testing.T) {
-	dataDir := t.TempDir()
-	// The host has its own, different Codex install recorded.
-	if err := connector.SaveHookContractLockEntry(dataDir, connector.HookContractLockEntry{
-		Connector: "codex", RawAgentVersion: "0.130.0", ContractID: "codex-hooks-v2",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	api := &APIServer{scannerCfg: &config.Config{DataDir: dataDir}}
-	if got := api.hookProfileForConnector("codex").ContractID; got != "codex-hooks-v2" {
-		t.Fatalf("host profile contract = %q, want the host lock", got)
-	}
-	ctx := sandboxauth.WithRequest(context.Background(), sessionScopeBinding("sb_00000000000000000000000000000003", "codex"), nil)
-	profile := api.hookProfileForRequest(ctx, "codex")
-	if profile.ContractID != "codex-hooks-v1" || profile.AgentVersion != "0.128.0" {
-		t.Fatalf("sandbox profile = %q/%q, want the binding's contract", profile.ContractID, profile.AgentVersion)
-	}
-	if !slices.Contains(profile.SupportedEvents, "SessionStart") {
-		t.Fatalf("sandbox profile events = %v", profile.SupportedEvents)
-	}
-	if other := api.hookProfileForRequest(ctx, "claudecode"); other.ContractID != "" || len(other.SupportedEvents) != 0 {
-		t.Fatalf("foreign connector profile = %+v, want empty", other)
-	}
-	// Host requests are unchanged.
-	if got := api.hookProfileForRequest(context.Background(), "codex").ContractID; got != "codex-hooks-v2" {
-		t.Fatalf("host request contract = %q", got)
-	}
-	if _, err := api.correlationSpecForRequestV8(ctx, "codex"); err != nil {
-		t.Fatalf("sandbox correlation spec: %v", err)
-	}
-	if _, err := api.correlationSpecForRequestV8(ctx, "claudecode"); err == nil {
-		t.Fatal("sandbox resolved another connector's correlation spec")
-	}
-
-	// The sandbox runs Linux whatever the host is: the macOS-only OpenHands
-	// native OTLP lane and the Windows compatibility band never apply.
-	openhands := sessionScopeBinding("sb_00000000000000000000000000000004", "openhands")
-	openhands.HookContractID = "openhands-hooks-v1"
-	for version, want := range map[string]string{
-		"OpenHands 1.12.0": connector.HookCompatibilityKnown, "OpenHands 1.11.99": connector.HookCompatibilityUnknown,
-	} {
-		openhands.AgentVersion = version
-		got := api.hookProfileForRequest(sandboxauth.WithRequest(context.Background(), openhands, nil), "openhands")
-		if got.NativeOTLP != nil || got.CompatibilityStatus != want {
-			t.Fatalf("sandbox %s profile = %q native_otlp=%v", version, got.CompatibilityStatus, got.NativeOTLP != nil)
-		}
-	}
-}
-
 func TestHookCWDForContext(t *testing.T) {
 	p := newSandboxProject(t)
 	p.write(t, "src/main.go", "package main\n", 0o644)
@@ -1110,16 +1061,14 @@ func TestSandboxDefaultPackFlagsHomeCredentialReads(t *testing.T) {
 	}
 }
 
-// TestClaudeCodeCredentialReadAlertsWithoutBlocking pins GAP-1516: a plain
-// local read of a credential path is MEDIUM advisory evidence ("alert, do not
-// block"). It used to be detection-only, which also kept it out of
-// 'defenseclaw alerts', so the default pack's SSH key rule left no trace.
-func TestClaudeCodeCredentialReadAlertsWithoutBlocking(t *testing.T) {
+// An inactive home's credential path remains an advisory. A resolved read of
+// the active home's private key is protected by the action-mode path rule.
+func TestClaudeCodeCredentialReadOutsideActiveHomeAlerts(t *testing.T) {
 	installDefaultProfileConnector(t, "claudecode")
 	p := newSandboxProject(t)
 	api := activeClaudeCodeTestAPI()
 	ctx := withAuthenticatedHookConnector(context.Background(), "claudecode")
-	for _, command := range []string{"head -c 0 ~/.ssh/id_ed25519", "cat /home/u/.ssh/id_rsa"} {
+	for _, command := range []string{"cat /home/u/.ssh/id_rsa"} {
 		resp := api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
 			HookEventName: "PreToolUse", SessionID: "credential-read", CWD: p.root, ToolName: "Bash",
 			ToolInput: map[string]interface{}{"command": command},
@@ -1130,5 +1079,48 @@ func TestClaudeCodeCredentialReadAlertsWithoutBlocking(t *testing.T) {
 			t.Errorf("%q: action=%s severity=%s would_block=%t findings=%v, want a MEDIUM PATH-SSH-KEY alert",
 				command, resp.Action, resp.Severity, resp.WouldBlock, resp.Findings)
 		}
+	}
+	resp := api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+		HookEventName: "PreToolUse", SessionID: "credential-read", CWD: p.root, ToolName: "Bash",
+		ToolInput: map[string]interface{}{"command": "head -c 0 ~/.ssh/id_ed25519"},
+		Payload:   map[string]interface{}{"tool_name": "Bash"},
+	})
+	if resp.Action != "block" || !strings.Contains(strings.Join(resp.Findings, ","), "PATH-SSH-KEY:") {
+		t.Errorf("active private-key read: action=%s findings=%v, want a PATH-SSH-KEY block", resp.Action, resp.Findings)
+	}
+}
+
+func TestHookProfileForRequestUsesBindingContract(t *testing.T) {
+	dataDir := t.TempDir()
+	// The host has its own, different Codex install recorded.
+	if err := connector.SaveHookContractLockEntry(dataDir, connector.HookContractLockEntry{
+		Connector: "codex", RawAgentVersion: "0.130.0", ContractID: "codex-hooks-v2",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	api := &APIServer{scannerCfg: &config.Config{DataDir: dataDir}}
+	if got := api.hookProfileForConnector("codex").ContractID; got != "codex-hooks-v2" {
+		t.Fatalf("host profile contract = %q, want the host lock", got)
+	}
+	ctx := sandboxauth.WithRequest(context.Background(), sessionScopeBinding("sb_00000000000000000000000000000003", "codex"), nil)
+	profile := api.hookProfileForRequest(ctx, "codex")
+	if profile.ContractID != "codex-hooks-v1" || profile.AgentVersion != "0.128.0" {
+		t.Fatalf("sandbox profile = %q/%q, want the binding's contract", profile.ContractID, profile.AgentVersion)
+	}
+	if !slices.Contains(profile.SupportedEvents, "SessionStart") {
+		t.Fatalf("sandbox profile events = %v", profile.SupportedEvents)
+	}
+	if other := api.hookProfileForRequest(ctx, "claudecode"); other.ContractID != "" || len(other.SupportedEvents) != 0 {
+		t.Fatalf("foreign connector profile = %+v, want empty", other)
+	}
+	// Host requests are unchanged.
+	if got := api.hookProfileForRequest(context.Background(), "codex").ContractID; got != "codex-hooks-v2" {
+		t.Fatalf("host request contract = %q", got)
+	}
+	if _, err := api.correlationSpecForRequestV8(ctx, "codex"); err != nil {
+		t.Fatalf("sandbox correlation spec: %v", err)
+	}
+	if _, err := api.correlationSpecForRequestV8(ctx, "claudecode"); err == nil {
+		t.Fatal("sandbox resolved another connector's correlation spec")
 	}
 }

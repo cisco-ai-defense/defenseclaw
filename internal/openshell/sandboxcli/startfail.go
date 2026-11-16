@@ -29,12 +29,9 @@ import (
 
 // A harness that exits at once, before any of its hooks reached
 // DefenseClaw, failed to start: the summary says so instead of blaming the
-// hooks. When localhost is why (an OpenShell MicroVM's /etc/hosts is
-// empty, and a sandbox made from an image older than DefenseClaw's answer
-// for it cannot resolve localhost at all), the summary names it and what
-// to do. A headless harness's output is kept for that; a terminal
-// session's goes to the terminal only, so there one exec in the sandbox
-// asks whether localhost resolves.
+// hooks. When localhost does not resolve, the summary names it. A headless
+// harness's output is kept for that; a terminal session's goes to the
+// terminal only, so there one exec in the sandbox checks name resolution.
 
 // harnessOutputBytes is how much of a headless harness's output a session
 // keeps.
@@ -76,21 +73,19 @@ func (s *session) failedAtStart(after *sandboxapi.Sandbox, endedElsewhere bool) 
 }
 
 // localhostCheckScript reports whether localhost resolves through the
-// sandbox's system resolver and whether its /etc/hosts names it.
-const localhostCheckScript = `if /usr/bin/getent hosts localhost >/dev/null 2>&1; then r=resolves; else r=unresolved; fi; ` +
-	`if /usr/bin/grep -qsw localhost /etc/hosts; then h=listed; else h=unlisted; fi; echo "::localhost=$r $h"`
+// sandbox's system resolver.
+const localhostCheckScript = `if /usr/bin/getent hosts localhost >/dev/null 2>&1; then echo ::localhost=resolves; else echo ::localhost=unresolved; fi`
 
-// localhostState asks the running sandbox whether localhost resolves there
-// and whether its /etc/hosts names it; known is false when it could not
-// tell.
-func (s *session) localhostState(ctx context.Context) (resolves, listed, known bool) {
+// localhostState asks the running sandbox whether localhost resolves there;
+// known is false when it could not tell.
+func (s *session) localhostState(ctx context.Context) (resolves, known bool) {
 	inv, err := s.cli.Exec(s.sb.Name, []string{"/bin/sh", "-c", localhostCheckScript}, openshell.CLIExecOptions{Timeout: probeTimeout})
 	if err != nil {
-		return false, false, false
+		return false, false
 	}
 	var out bytes.Buffer
 	if code, err := s.app.Streamer.Stream(ctx, inv, &out, &out); err != nil || code != 0 {
-		return false, false, false
+		return false, false
 	}
 	for _, line := range strings.Split(out.String(), "\n") {
 		state, ok := strings.CutPrefix(strings.TrimSpace(line), "::localhost=")
@@ -98,17 +93,13 @@ func (s *session) localhostState(ctx context.Context) (resolves, listed, known b
 			continue
 		}
 		switch state {
-		case "resolves listed":
-			return true, true, true
-		case "resolves unlisted":
-			return true, false, true
-		case "unresolved listed":
-			return false, true, true
-		case "unresolved unlisted":
-			return false, false, true
+		case "resolves":
+			return true, true
+		case "unresolved":
+			return false, true
 		}
 	}
-	return false, false, false
+	return false, false
 }
 
 // diagnoseStart explains, for the summary (printHookReach), a harness that
@@ -121,8 +112,8 @@ func (s *session) diagnoseStart(ctx context.Context, after *sandboxapi.Sandbox, 
 		return
 	}
 	line, printed := openshell.LocalhostLookupFailure(s.harnessOutput)
-	resolves, listed, known := s.localhostState(ctx)
-	name, h := s.sb.Name, s.harnessName()
+	resolves, known := s.localhostState(ctx)
+	name := s.sb.Name
 	said := "it could not resolve localhost (" + strconv.Quote(line) + ")"
 	switch {
 	case known && !resolves:
@@ -130,23 +121,7 @@ func (s *session) diagnoseStart(ctx context.Context, after *sandboxapi.Sandbox, 
 		if printed {
 			s.startWhy = said + ", which does not resolve in " + name
 		}
-		if listed {
-			return
-		}
-		s.startWhy += ": its /etc/hosts is empty, as OpenShell's MicroVM driver leaves it, and its image was built before DefenseClaw's images " +
-			"answered localhost themselves"
-		s.startDo = "a new sandbox boots a rebuilt image: "
-		if !s.rm {
-			s.startDo += "delete this one (`" + CommandName + " delete " + name + "`) and "
-		}
-		s.startDo += "run it again"
-		if s.spec != nil {
-			s.startDo += " (`" + CommandName + " run " + s.spec.Name + "`)"
-		}
-	case printed && known && !listed:
-		s.startWhy = said + ". This sandbox's /etc/hosts is empty, as OpenShell's MicroVM driver leaves it, and " + h +
-			" does not use the system resolver, which answers localhost here"
-		s.startDo = h + " cannot start in an OpenShell MicroVM until OpenShell writes /etc/hosts; a gateway on the docker driver (Linux) runs it"
+		s.startDo = "run `" + CommandName + " doctor` and check the sandbox's name resolution"
 	case printed:
 		s.startWhy = said
 	}

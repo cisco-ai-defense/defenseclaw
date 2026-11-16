@@ -17,6 +17,8 @@
 package harness
 
 import (
+	_ "embed"
+
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
@@ -57,10 +59,16 @@ const (
 	// SandboxEnvPath is the root-owned command wrapper that
 	// `defenseclaw-gateway sandbox exec` starts every command through.
 	SandboxEnvPath = LauncherDir + "/sandbox-env"
+	// SandboxLocalProxyPath routes requests to local services within the
+	// sandbox namespace before other requests reach the host egress proxy.
+	SandboxLocalProxyPath = LauncherDir + "/local_proxy.py"
 	// ShimDir holds the root-owned shim that starts the harness command
 	// through its launcher.
 	ShimDir = connector.SandboxLibDir + "/shims"
 )
+
+//go:embed local_proxy.py
+var localProxyScript []byte
 
 // egressEnvScript exports the egress proxy settings from
 // openshell.EnvEgressURL and openshell.EnvEgressBypass. It is POSIX sh (the
@@ -69,7 +77,7 @@ const (
 // carries, so every process started through it goes through the DefenseClaw
 // proxy; without one (the strict profile), or with a URL carrying anything
 // but URL characters, the caller's environment is left alone. NO_PROXY
-// defaults to the ingress host, which hooks reach directly.
+// defaults to the ingress host and local service addresses.
 //
 // With NODE_USE_ENV_PROXY=1, Node 22 (the base image's node, which runs
 // Codex's wrapper, Copilot's npm launcher and every node or npm command the
@@ -90,11 +98,90 @@ case "${` + openshell.EnvEgressURL + `:-}" in
   http://?*)
     HTTPS_PROXY="$` + openshell.EnvEgressURL + `"; HTTP_PROXY="$` + openshell.EnvEgressURL + `"
     https_proxy="$` + openshell.EnvEgressURL + `"; http_proxy="$` + openshell.EnvEgressURL + `"
+    if [ -r ` + SandboxLocalProxyPath + ` ] && [ -x /usr/bin/python3 ]; then
+      dc_local_proxy="$(/usr/bin/python3 -I ` + SandboxLocalProxyPath + ` --ensure)" || true
+      case "$dc_local_proxy" in
+        http://127.0.0.1:[0-9]*)
+          HTTPS_PROXY="$dc_local_proxy"; HTTP_PROXY="$dc_local_proxy"
+          https_proxy="$dc_local_proxy"; http_proxy="$dc_local_proxy" ;;
+      esac
+      unset dc_local_proxy
+    fi
     NODE_USE_ENV_PROXY=1; NODE_NO_WARNINGS="${NODE_NO_WARNINGS:-1}"
-    NO_PROXY="${` + openshell.EnvEgressBypass + `:-` + connector.SandboxIngressHost + `}"; no_proxy="$NO_PROXY"
+    NO_PROXY="${` + openshell.EnvEgressBypass + `:-` + connector.SandboxIngressHost + `,` + sandboxLoopbackNoProxy + `}"; no_proxy="$NO_PROXY"
     export HTTPS_PROXY HTTP_PROXY https_proxy http_proxy NODE_USE_ENV_PROXY NODE_NO_WARNINGS NO_PROXY no_proxy
     ;;
 esac
+`
+
+// trustedCAScript gives every runtime in a sandbox the trusted CAs of
+// openshell.trusted_ca_bundle, in an image that has them
+// (openshell.SandboxTrustedCADir exists only there). They are in the
+// image's system store, but OpenShell's supervisor makes the bundle it sets
+// SSL_CERT_FILE, REQUESTS_CA_BUNDLE, CURL_CA_BUNDLE and GIT_SSL_CAINFO to
+// from its own store (and NODE_EXTRA_CA_CERTS and DENO_CERT to its own CA),
+// so Node (Claude Code, Copilot, npm), Rust (Codex, which reads
+// SSL_CERT_FILE alone), Go, Bun and Deno failed a TLS-inspecting proxy's
+// certificates, and only programs that also read the hashed /etc/ssl/certs
+// directory (OpenSSL's Python and curl) passed (#1296, GAP-0065, GAP-0066,
+// GAP-0074). The script writes OpenShell's bundle plus the trusted CAs to
+// ca-bundle.pem in an owner-only directory under /tmp
+// (openshell.SandboxTrustedCARunDir), again at every start because
+// OpenShell's CA can change with each sandbox start, and points each of
+// those six variables at it when it is unset or names OpenShell's own files
+// (in the directory of OpenShell's bundle); a variable the caller set
+// elsewhere is kept.
+//
+// OpenShell's bundle is what SSL_CERT_FILE names when the first shell or
+// launcher of a process tree starts (OpenShell starts each of those). That
+// one records it in openshell.EnvTrustedCABase, so a shell started below
+// it reads OpenShell's bundle from there, not from SSL_CERT_FILE: a
+// SSL_CERT_FILE the caller set before starting a nested login shell
+// (env SSL_CERT_FILE=... sh -l) is the caller's and is kept (GAP-0127).
+// Without SSL_CERT_FILE the image's system bundle, which holds the CAs,
+// fills the unset variables. When the file cannot be written, OpenShell's
+// variables are left as they are, so an intercepted connection still fails
+// rather than verifying with less. An image without trusted CAs is left
+// alone. POSIX sh, like egressEnvScript.
+const trustedCAScript = `# The trusted CAs of ` + openshell.TrustedCAKey + ` are in this image's system store, but
+# OpenShell's sandbox bundle is made from its supervisor's own store: every runtime
+# gets OpenShell's bundle plus them. The first shell records OpenShell's bundle,
+# so a SSL_CERT_FILE set before a nested shell starts is the caller's own.
+if [ -d ` + openshell.SandboxTrustedCADir + ` ]; then
+  dc_ca_base="${` + openshell.EnvTrustedCABase + `:-${SSL_CERT_FILE:-}}"; dc_ca_out=""
+  case "$dc_ca_base" in
+    ` + openshell.SandboxTrustedCARunDir + `-*/*) ;;
+    "") dc_ca_out=` + openshell.SandboxSystemCABundle + ` ;;
+    *)
+      dc_ca_run="` + openshell.SandboxTrustedCARunDir + `-$(id -u)"
+      if [ -f "$dc_ca_base" ] && [ -r "$dc_ca_base" ] && (umask 077; mkdir -p "$dc_ca_run") 2>/dev/null &&
+        [ -d "$dc_ca_run" ] && [ ! -h "$dc_ca_run" ] && [ -O "$dc_ca_run" ]; then
+        dc_ca_tmp="$dc_ca_run/.ca-bundle.$$"
+        if (umask 077; { cat "$dc_ca_base" && echo && cat ` + openshell.SandboxTrustedCADir + `/*.crt; } >"$dc_ca_tmp") 2>/dev/null &&
+          mv -f "$dc_ca_tmp" "$dc_ca_run/ca-bundle.pem" 2>/dev/null; then
+          dc_ca_out="$dc_ca_run/ca-bundle.pem"
+          ` + openshell.EnvTrustedCABase + `="$dc_ca_base"; export ` + openshell.EnvTrustedCABase + `
+        else
+          rm -f "$dc_ca_tmp" 2>/dev/null
+        fi
+      fi
+      ;;
+  esac
+  if [ -n "$dc_ca_out" ]; then
+    for dc_var in SSL_CERT_FILE REQUESTS_CA_BUNDLE CURL_CA_BUNDLE GIT_SSL_CAINFO NODE_EXTRA_CA_CERTS DENO_CERT; do
+      eval "dc_val=\${$dc_var:-}"
+      if [ -n "$dc_val" ]; then
+        [ -n "$dc_ca_base" ] || continue
+        case "$dc_val" in
+          "$dc_ca_base"|"${dc_ca_base%/*}"/*) ;;
+          *) continue ;;
+        esac
+      fi
+      eval "$dc_var=\$dc_ca_out; export $dc_var"
+    done
+  fi
+  unset dc_ca_base dc_ca_out dc_ca_run dc_ca_tmp dc_var dc_val
+fi
 `
 
 // timeZoneScript exports TZ from openshell.EnvHostTimeZone, the zone of
@@ -132,10 +219,10 @@ esac
 func (s *Spec) profile() string {
 	return `# defenseclaw-sandbox-profile v1
 # DefenseClaw sandbox shell environment (OpenShell sandbox images,
-# root-owned). Login shells get the egress proxy settings and the time zone
-# every harness launcher exports, and the harness command starts its
-# launcher.
-` + egressEnvScript + timeZoneScript + shimPathScript + `if [ -n "${BASH_VERSION:-}" ] && ! shopt -oq posix 2>/dev/null; then
+# root-owned). Login shells get the egress proxy settings, the trusted CA
+# bundle and the time zone every harness launcher exports, and the harness
+# command starts its launcher.
+` + egressEnvScript + trustedCAScript + timeZoneScript + shimPathScript + `if [ -n "${BASH_VERSION:-}" ] && ! shopt -oq posix 2>/dev/null; then
   eval '` + s.Command + `() { ` + s.ShimPath() + ` "$@"; }; export -f ` + s.Command + `' 2>/dev/null || true
 fi
 `
@@ -702,6 +789,7 @@ func (s *Spec) ShellFiles() []connector.SandboxFile {
 	return []connector.SandboxFile{
 		{Path: SandboxProfilePath, Mode: 0o644, Owner: connector.SandboxOwnerRoot, Data: []byte(s.profile())},
 		{Path: SandboxEnvPath, Mode: 0o755, Owner: connector.SandboxOwnerRoot, Data: []byte(sandboxEnvLauncher)},
+		{Path: SandboxLocalProxyPath, Mode: 0o644, Owner: connector.SandboxOwnerRoot, Data: localProxyScript},
 		{Path: s.ShimPath(), Mode: 0o755, Owner: connector.SandboxOwnerRoot, Data: []byte(s.shim())},
 		{Path: SupervisorPath, Mode: 0o755, Owner: connector.SandboxOwnerRoot, Data: []byte(supervisorScript)},
 	}

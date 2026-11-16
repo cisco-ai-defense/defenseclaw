@@ -46,6 +46,7 @@ const (
 // captures the process stdout, so it fails if anything other than the single
 // JSON document reaches it.
 func TestScanCodeJSONCommandValidatesCanonicalSchema(t *testing.T) {
+	skipIfLocalSystem(t, "the per-user redaction key store does not run as LocalSystem (the gateway service names its service SID)")
 	canonical, err := os.ReadFile(filepath.Join("..", "..", "schemas", "scan-result.json"))
 	if err != nil {
 		t.Fatalf("read canonical scan-result schema: %v", err)

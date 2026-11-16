@@ -345,15 +345,45 @@ function ConvertTo-DefenseClawComparableVersion {
     }
 }
 
+function Compare-DefenseClawPrerelease {
+    # Orders two prereleases like Setup does (semver): dot-separated
+    # identifiers, numeric ones as numbers and below alphanumeric ones, others
+    # by ordinal text, then the shorter list first. As one ordinal string
+    # rc.10 read older than rc.9, so an installed rc.10 was not detected
+    # against a minimum rc.9 (GAP-1987). Returns -1, 0 or 1.
+    param([string]$Left, [string]$Right)
+    $leftParts = $Left.Split([char]'.')
+    $rightParts = $Right.Split([char]'.')
+    $shared = [Math]::Min($leftParts.Count, $rightParts.Count)
+    for ($index = 0; $index -lt $shared; $index++) {
+        $leftNumber = [uint64]0
+        $rightNumber = [uint64]0
+        $leftNumeric = [uint64]::TryParse($leftParts[$index], [Globalization.NumberStyles]::None,
+            [Globalization.CultureInfo]::InvariantCulture, [ref]$leftNumber)
+        $rightNumeric = [uint64]::TryParse($rightParts[$index], [Globalization.NumberStyles]::None,
+            [Globalization.CultureInfo]::InvariantCulture, [ref]$rightNumber)
+        if ($leftNumeric -and $rightNumeric) {
+            if ($leftNumber -lt $rightNumber) { return -1 }
+            if ($leftNumber -gt $rightNumber) { return 1 }
+            continue
+        }
+        if ($leftNumeric) { return -1 }
+        if ($rightNumeric) { return 1 }
+        $order = [Math]::Sign([string]::CompareOrdinal($leftParts[$index], $rightParts[$index]))
+        if ($order -ne 0) { return $order }
+    }
+    return [Math]::Sign($leftParts.Count - $rightParts.Count)
+}
+
 function Test-DefenseClawVersionAtLeast {
     param([string]$Installed, [string]$Minimum)
     $a = ConvertTo-DefenseClawComparableVersion -Value $Installed
     $b = ConvertTo-DefenseClawComparableVersion -Value $Minimum
     if ($a.Version -ne $b.Version) { return ($a.Version -gt $b.Version) }
-    if ($a.Prerelease -eq $b.Prerelease) { return $true }
+    if ($a.Prerelease -ceq $b.Prerelease) { return $true }
     if (-not $a.Prerelease) { return $true }
     if (-not $b.Prerelease) { return $false }
-    return ([string]::CompareOrdinal($a.Prerelease, $b.Prerelease) -ge 0)
+    return ((Compare-DefenseClawPrerelease -Left $a.Prerelease -Right $b.Prerelease) -ge 0)
 }
 
 function Exit-NotDetected {

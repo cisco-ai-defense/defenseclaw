@@ -23,13 +23,17 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
 
-const windowsGatewayProfileRefusal = "the managed gateway runs as LocalSystem and does not read inside user profiles; scan the folder as the signed-in user (defenseclaw ... from the user session) or move it outside the profile"
+// windowsGatewayProfileRefusal says only why: it told a standard account to
+// scan as itself, which managed scans refuse (GAP-0526). The scan routes add
+// the administrator's next step (gateway windowsProfileScanNextStep).
+const windowsGatewayProfileRefusal = "the managed gateway runs as LocalSystem and does not read inside user profiles"
 
 var (
 	windowsGatewayPathIsService = WindowsCurrentProcessIsGatewayService
@@ -118,17 +122,12 @@ func readWindowsGatewayProfileRoots() ([]string, error) {
 		roots = append(roots, root)
 	}
 	// Compare both configured names and destinations of redirected roots.
-	physical := make([]string, 0, len(roots)*2)
-	for _, root := range roots {
-		physical = append(physical, root)
-		resolved, resolveErr := resolveWindowsGatewayPath(root)
-		if resolveErr != nil {
-			return nil, resolveErr
-		}
-		physical = append(physical, resolved)
-	}
-	return physical, nil
+	return windowsGatewayProfileRootResolution.resolve(roots, time.Now(), resolveWindowsGatewayPath)
 }
+
+// windowsGatewayProfileRootResolution keeps the gateway process's last
+// resolution of its profile roots (profileRootResolution).
+var windowsGatewayProfileRootResolution profileRootResolution
 
 func expandWindowsGatewayProfilePath(raw, systemDrive, windowsDir string) (string, error) {
 	path := strings.TrimSpace(strings.ReplaceAll(raw, "/", `\`))

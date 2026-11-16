@@ -315,8 +315,8 @@ func TestInventoryStoreMigratesV3ToV6(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if v, _ := st.SchemaVersion(); v != 6 {
-		t.Fatalf("schema version = %d, want 6", v)
+	if v, _ := st.SchemaVersion(); v != len(inventoryMigrations) {
+		t.Fatalf("schema version = %d, want %d", v, len(inventoryMigrations))
 	}
 	var sessionLastSeen string
 	if err := st.db.QueryRow(`SELECT last_seen FROM agent_identity_sessions WHERE agent_id = 'agt-old'`).Scan(&sessionLastSeen); err != nil || sessionLastSeen != now.Format(agentIdentityTimeLayout) {

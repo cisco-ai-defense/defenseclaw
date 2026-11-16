@@ -46,7 +46,26 @@ func (s *shellDirectoryState) merge(branch shellDirectoryState) {
 // bodies. A branch or subshell gets its own directory state. unknown reports a
 // write that may name authorized_keys after an unresolved directory change.
 func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[string]string, record, strict bool) (operands []RedirectOccurrence, unknown bool) {
-	file, parsed := parseShell(command)
+	return shellDirectoryWriteOperandsWithParse(command, cwd, home, directoryFacts, record, strict, nil)
+}
+
+// shellDirectoryWriteOperandsWithParse also reports whether the shared
+// shell parser accepted the command, so a client describing the same call
+// can reuse that result when the command has no output redirect.
+func shellDirectoryWriteOperandsWithParse(command, cwd, home string, directoryFacts map[string]string, record, strict bool, parsedOut *bool) (operands []RedirectOccurrence, unknown bool) {
+	return shellDirectoryWriteOperandsWithFile(command, cwd, home, directoryFacts, record, strict, parsedOut, nil)
+}
+
+// shellDirectoryWriteOperandsWithFile reuses a previously parsed command
+// while preserving the same directory and literal-writer walk.
+func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFacts map[string]string, record, strict bool, parsedOut *bool, file *syntax.File) (operands []RedirectOccurrence, unknown bool) {
+	parsed := file != nil
+	if !parsed {
+		file, parsed = parseShell(command)
+	}
+	if parsedOut != nil {
+		*parsedOut = parsed
+	}
 	if !parsed || !filepath.IsAbs(cwd) {
 		return nil, false
 	}
@@ -73,16 +92,14 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 		}
 		return value, ok
 	}
+	// directory is expanded: StaticWord already read an unquoted ~ or ~/
+	// from home, so a ~ left here was quoted and names a directory called ~
+	// (RV-c7-1); env --chdir=~/x does not expand it either.
 	setDirectory := func(s *shellDirectoryState, directory string, physicalMode bool) {
-		absolute := directory == "~" || strings.HasPrefix(directory, "~/") || filepath.IsAbs(directory)
-		switch {
-		case directory == "~":
-			s.logical = home
-		case strings.HasPrefix(directory, "~/"):
-			s.logical = filepath.Join(home, directory[2:])
-		case filepath.IsAbs(directory):
+		absolute := filepath.IsAbs(directory)
+		if absolute {
 			s.logical = filepath.Clean(directory)
-		default:
+		} else {
 			s.logical = filepath.Join(s.logical, directory)
 		}
 		wasKnown := s.known
@@ -95,11 +112,27 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 	}
 	state := shellDirectoryState{logical: filepath.Clean(cwd)}
 	state.physical, state.known = physical(state.logical)
-	safety := SafeShellRedirectOccurrencesWithFacts(command, cwd, home, directoryFacts)
+	var safety []RedirectOccurrence
+	if strings.Contains(command, ">") {
+		// This list is consulted only for output redirects. Literal writers
+		// still need the directory walk when the command has no redirect.
+		safety = SafeShellRedirectOccurrencesWithFacts(command, cwd, home, directoryFacts)
+	}
 	redirectIndex := 0
+	functions := map[string]*syntax.Stmt{}
+	// Function calls are expanded at each call site with the caller's
+	// directory. The depth and the statements read inside bodies are bounded,
+	// so nested fan-out stays linear; past either bound a body that may write
+	// or change directory is unknown.
+	functionDepth, functionStatements := 0, 0
 	var walkList func([]*syntax.Stmt, *shellDirectoryState)
 	var walk func(*syntax.Stmt, *shellDirectoryState)
 	write := func(stmt *syntax.Stmt, s *shellDirectoryState) {
+		if !s.changed && len(stmt.Redirs) == 0 {
+			// Before a directory change, this walk can contribute only
+			// output redirects to the later safety index.
+			return
+		}
 		// The command substitution of a word runs in another shell. Only the
 		// statement's own redirects belong to this directory state.
 		var rendered bytes.Buffer
@@ -109,6 +142,8 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 		}
 		statement := rendered.String()
 		redirects := make([]string, 0, len(stmt.Redirs))
+		// The redirect safety list is keyed in the starting directory.
+		keys := make([]string, 0, len(stmt.Redirs))
 		for _, redirect := range stmt.Redirs {
 			switch redirect.Op {
 			case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
@@ -127,33 +162,73 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 				unknown = true
 			}
 			redirects = append(redirects, OperandPath(name, s.logical))
+			keys = append(keys, OperandPath(name, cwd))
 		}
 		if !s.changed {
 			redirectIndex += len(redirects)
 			return
 		}
-		literals := LiteralWriteOperands(statement, s.logical, home)
+		literals, literalCopies := LiteralWriteOperandsWithCopies(statement, s.logical, home)
+		ownCopies := make(map[string]int, len(literalCopies))
+		for _, literal := range literalCopies {
+			ownCopies[literal]++
+		}
 		inner := actionfacts.Input{Tool: "Bash", Command: statement, CWD: s.logical, ActiveHome: home}
 		facts := actionfacts.Analyze(inner)
 		writes := make([]RedirectOccurrence, 0, len(redirects)+len(literals))
-		for _, redirect := range redirects {
+		for i, redirect := range redirects {
 			occurrence := RedirectOccurrence{Path: redirect}
-			if redirectIndex < len(safety) {
+			// A function body or eval text can list a redirect the plain
+			// walk does not; only the same operand inherits its safety.
+			if redirectIndex < len(safety) && safety[redirectIndex].Path == keys[i] {
 				occurrence.Safe = safety[redirectIndex].Safe
 			}
 			redirectIndex++
 			writes = append(writes, occurrence)
 		}
 		for _, literal := range literals {
-			writes = append(writes, RedirectOccurrence{Path: literal})
+			own := ownCopies[literal] > 0
+			if own {
+				ownCopies[literal]--
+			}
+			writes = append(writes, RedirectOccurrence{Path: literal, OwnCopy: own})
+		}
+		// A plain mv onto an existing link to a file replaces the link entry
+		// and writes neither file, as without the directory change: judge
+		// that destination by its entry (GAP-2559, actionPlainMoveOntoLink).
+		// The hook client (record) still lists it: its map describes the
+		// entry for a gateway that cannot read the link (GAP-2558).
+		var movedOntoLinks map[string]bool
+		if s.known && !record {
+			movedOntoLinks = movedOntoLinkEntries(facts)
 		}
 		for _, candidate := range facts.Paths {
 			if candidate.Access != actionfacts.PathAccessWrite && candidate.Access != actionfacts.PathAccessAppend {
 				continue
 			}
+			if directoryCreationFact(facts, candidate) {
+				// mkdir makes a directory entry: it writes no file and
+				// follows no link at its operand to one, and the same call
+				// without a directory change is no write operand
+				// (rel-1-0-6:GAP-0260).
+				continue
+			}
 			target := candidate.Resolved
 			if target == "" {
 				target = candidate.Normalized
+			}
+			// The facts spell a Windows path with slashes (C:/...), the file
+			// system and the gateway with backslashes: a copy destination
+			// after a directory change listed as C:\h/proj-bak never matched
+			// the link list of the copy and blocked (rel-1-0-4:GAP-2579).
+			target = filepath.FromSlash(target)
+			// The facts spell a Windows path with slashes (and Git Bash a
+			// drive /c/...); the entry list keys the file system name.
+			if moved := PlainMovePath(target); movedOntoLinks[moved] {
+				if parent, ok := ResolveWriteTarget(filepath.Dir(moved)); ok &&
+					!protectedEntry(filepath.Join(parent, filepath.Base(moved)), newProtectedFiles(home), filepath.Join(home, ".ssh")) {
+					continue
+				}
 			}
 			if raw, ok := RawDotDotOperand(candidate.Value, s.logical); ok {
 				target = raw
@@ -167,7 +242,19 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 				if slices.Contains(redirects, target) && pathFactIsRedirect(candidate, facts.Commands) {
 					continue
 				}
-				writes = append(writes, RedirectOccurrence{Path: target})
+				// A copy call writing its own destination, as the gateway reads
+				// the path facts of the whole command (GAP-2579). The facts
+				// spell a Windows drive path with slashes, the destination
+				// with backslashes (rel-1-0-4:GAP-2579 Windows leg).
+				own := false
+				for _, command := range facts.Commands {
+					if command.ID == candidate.CommandID {
+						own = IsCopyProgram(command.Argv) &&
+							linksDrivePath(target) == linksDrivePath(CopyDestination(command.Argv, s.logical))
+						break
+					}
+				}
+				writes = append(writes, RedirectOccurrence{Path: target, OwnCopy: own})
 			}
 		}
 		if s.known {
@@ -360,6 +447,9 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 		if stmt == nil {
 			return
 		}
+		if functionDepth > 0 {
+			functionStatements++
+		}
 		if stmt.Background {
 			child := s.clone()
 			copyStmt := *stmt
@@ -409,7 +499,33 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 			}
 		case *syntax.TimeClause:
 			walk(cmd.Stmt, s)
+		case *syntax.CoprocClause:
+			child := s.clone()
+			walk(cmd.Stmt, &child)
+		case *syntax.FuncDecl:
+			if cmd.Name != nil && cmd.Body != nil {
+				functions[cmd.Name.Value] = cmd.Body
+			}
 		case *syntax.CallExpr:
+			// Resolve the invoked word before unwrapping builtin or command:
+			// either name may itself be a shell function, while a real
+			// wrapper does not invoke a function of its wrapped name.
+			name, static := "", false
+			if len(cmd.Args) > 0 {
+				name, static = staticProgramWord(cmd.Args[0], home)
+			}
+			if static && functions[name] != nil {
+				if functionDepth < 8 && functionStatements < maxFunctionStatements {
+					functionDepth++
+					walk(functions[name], s)
+					functionDepth--
+				} else if !recursiveSelfCallsOnly(functions[name], name, home) {
+					s.known, s.changed = false, true
+					unknown = true
+				}
+				write(stmt, s)
+				break
+			}
 			if change(cmd, s) {
 				break
 			}
@@ -428,22 +544,32 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 				} else if tail != nil {
 					walk(&syntax.Stmt{Cmd: tail}, &child)
 				}
+			} else if body := literalShellCallBody(cmd, home); body != "" {
+				// A literal sh -c body runs in a subshell: its directory
+				// changes end with it and its writes are read in the
+				// directories it stands in (GAP-2602).
+				if file, ok := parseShell(body); ok {
+					child := s.clone()
+					walkList(file.Stmts, &child)
+				}
 			}
 			write(stmt, s)
 		default:
 			// An unmodeled command, such as a function definition, may change
 			// the directory later. Its redirects are still inspected using the
 			// state at this point.
-			syntax.Walk(cmd, func(node syntax.Node) bool {
-				if call, ok := node.(*syntax.CallExpr); ok {
-					if program, _, static := shellCommandWord(call, home); !static ||
-						program == "cd" || program == "pushd" || program == "popd" ||
-						program == "eval" || program == "source" || program == "." {
-						s.known, s.changed, s.stack = false, true, nil
+			if cmd != nil {
+				syntax.Walk(cmd, func(node syntax.Node) bool {
+					if call, ok := node.(*syntax.CallExpr); ok {
+						if program, _, static := shellCommandWord(call, home); !static ||
+							program == "cd" || program == "pushd" || program == "popd" ||
+							program == "eval" || program == "source" || program == "." {
+							s.known, s.changed, s.stack = false, true, nil
+						}
 					}
-				}
-				return true
-			})
+					return true
+				})
+			}
 			write(stmt, s)
 		}
 	}
@@ -451,12 +577,39 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 	return operands, unknown
 }
 
+// maxFunctionStatements bounds the statements read inside function bodies
+// for one command.
+const maxFunctionStatements = 4096
+
+// A body made only of calls to itself cannot produce a file write or change
+// the working directory when the bounded walk reaches its limit.
+func recursiveSelfCallsOnly(body *syntax.Stmt, name, home string) bool {
+	if body == nil {
+		return false
+	}
+	safe := true
+	syntax.Walk(body, func(node syntax.Node) bool {
+		if !safe {
+			return false
+		}
+		switch item := node.(type) {
+		case *syntax.CallExpr:
+			program, _, static := shellCommandWord(item, home)
+			safe = static && program == name && len(item.Assigns) == 0
+		case *syntax.Redirect, *syntax.CmdSubst, *syntax.ProcSubst, *syntax.FuncDecl:
+			safe = false
+		}
+		return safe
+	})
+	return safe
+}
+
 // shellCommandWord returns the program a call runs in this shell after builtin
 // and command prefixes, and the index of its first argument. ok is false when
 // the program word is not static. command -v and -V only describe a program.
 func shellCommandWord(call *syntax.CallExpr, home string) (program string, arg int, ok bool) {
 	for arg < len(call.Args) {
-		program, ok = StaticWord(call.Args[arg], home)
+		program, ok = staticProgramWord(call.Args[arg], home)
 		if !ok {
 			return "", arg, false
 		}
@@ -479,6 +632,20 @@ func shellCommandWord(call *syntax.CallExpr, home string) (program string, arg i
 		}
 	}
 	return program, arg, ok
+}
+
+// literalShellCallBody is the literal command body of a static sh -c call
+// (bash -lc BODY too), or "" for any other call.
+func literalShellCallBody(call *syntax.CallExpr, home string) string {
+	words := make([]string, len(call.Args))
+	static := make([]bool, len(call.Args))
+	for i, arg := range call.Args {
+		words[i], static[i] = StaticWord(arg, home)
+	}
+	if len(words) == 0 || !static[0] {
+		return ""
+	}
+	return literalShellBody(programBase(words[0]), words, static)
 }
 
 func shellAuthorizedKeysBase(name string) bool {
@@ -558,6 +725,16 @@ func directoryFactRequired(directory, home string) bool {
 	for _, root := range []string{home, "/home", "/tmp", "/var/tmp"} {
 		if root != "" && (directory == root || strings.HasPrefix(directory, root+string(filepath.Separator))) {
 			return true
+		}
+	}
+	return false
+}
+
+// directoryCreationFact reports a path fact of a POSIX mkdir call.
+func directoryCreationFact(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+	for _, command := range facts.Commands {
+		if command.ID == candidate.CommandID {
+			return command.Program == "mkdir" && command.Dialect == actionfacts.DialectPOSIX
 		}
 	}
 	return false

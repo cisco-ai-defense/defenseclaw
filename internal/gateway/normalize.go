@@ -182,6 +182,7 @@ func activeRulePackRuleID(ruleID string) bool {
 	if ruleID == "" {
 		return false
 	}
+	ensureDefaultRuleGeneration()
 	ruleCategoriesMu.RLock()
 	defer ruleCategoriesMu.RUnlock()
 	if allRuleGeneration != nil {
@@ -206,9 +207,12 @@ func activeLocalPatternRuleIdentity(ruleID, title string) bool {
 	if ruleID == "" || title == "" {
 		return false
 	}
+	ensureDefaultRuleGeneration()
 	ruleCategoriesMu.RLock()
-	titles := allRuleGeneration.ruleIdentityTitles[ruleID]
-	_, present := titles[title]
+	present := false
+	if allRuleGeneration != nil {
+		_, present = allRuleGeneration.ruleIdentityTitles[ruleID][title]
+	}
 	ruleCategoriesMu.RUnlock()
 	return present
 }

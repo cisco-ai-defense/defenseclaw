@@ -229,7 +229,7 @@ func TestBifrostProvider_AzureDeploymentAliasesCarryAPIVersion(t *testing.T) {
 	if alias.ModelID != "gpt-4o-prod" {
 		t.Errorf("azure alias ModelID = %q, want gpt-4o-prod", alias.ModelID)
 	}
-	if alias.AzureAliasCfg == nil || alias.AzureAliasCfg.APIVersion == nil || *alias.AzureAliasCfg.APIVersion != "2024-08-01-preview" {
+	if alias.AzureAliasCfg == nil || alias.APIVersion == nil || *alias.APIVersion != "2024-08-01-preview" {
 		t.Fatalf("azure alias api_version not propagated: %+v", alias.AzureAliasCfg)
 	}
 }
@@ -259,7 +259,7 @@ func TestBifrostProvider_AzureAPIVersionSeedsIdentityAlias(t *testing.T) {
 	if alias.ModelID != "gpt-4o" {
 		t.Errorf("identity alias ModelID = %q, want gpt-4o", alias.ModelID)
 	}
-	if alias.AzureAliasCfg == nil || alias.AzureAliasCfg.APIVersion == nil || *alias.AzureAliasCfg.APIVersion != "2024-08-01-preview" {
+	if alias.AzureAliasCfg == nil || alias.APIVersion == nil || *alias.APIVersion != "2024-08-01-preview" {
 		t.Fatalf("identity alias api_version not propagated: %+v", alias.AzureAliasCfg)
 	}
 }

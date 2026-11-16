@@ -37,6 +37,12 @@ const (
 	// refuse. The standalone Unix enumerator writes it with the ledger's
 	// ownership and mode; the gateway refuses those hook calls.
 	HookGuardianRefusedSurfacesFile = "refused-surfaces.json"
+	// HookGuardianUnprotectedAgentsFile, next to the ledger, is the gateway's
+	// copy of the enumerator's root-only unprotected-agents record: the same
+	// agents from the same scan, so the caller's own status says what the
+	// administrator's status says. The standalone Unix enumerator writes it
+	// with the ledger's ownership and mode.
+	HookGuardianUnprotectedAgentsFile = "unprotected-agents.json"
 	// HookGuardianCredentialTransactionFile, next to the ledger, is the
 	// root-only record of the per-user credential rotation in progress
 	// (enterprisehooks.CredentialTransaction). The standalone Unix guardian
@@ -73,6 +79,23 @@ func HookGuardianAuthorizationDir(dataDir string) string {
 		return filepath.Clean(configured)
 	}
 	return filepath.Clean(strings.TrimSpace(dataDir)) + "-hook-guardian"
+}
+
+// ForeignHookCleanDirSuffix names the folder next to the data directory in
+// which the Linux and macOS standalone gateway publishes, read-only, the
+// agent processes its last foreign-hook session exchange answered allow for
+// (enterprisepolicy.WriteForeignHookCleanMirrors). The lifecycle creates it
+// 0711 for the service account.
+const ForeignHookCleanDirSuffix = "-foreign-hook-clean"
+
+// ForeignHookCleanDir is that folder for dataDir, or "" when dataDir is not
+// an absolute path.
+func ForeignHookCleanDir(dataDir string) string {
+	dataDir = strings.TrimSpace(dataDir)
+	if !filepath.IsAbs(dataDir) {
+		return ""
+	}
+	return filepath.Clean(dataDir) + ForeignHookCleanDirSuffix
 }
 
 func HookGuardianAuthorizationPath(dataDir string) string {

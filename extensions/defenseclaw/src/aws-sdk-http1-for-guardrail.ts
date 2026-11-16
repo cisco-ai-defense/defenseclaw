@@ -22,7 +22,7 @@
  * OpenClaw config references Amazon Bedrock (see `bedrock-config-detect.ts`).
  *
  * **Overrides**
- * - `plugins.entries.defenseclaw.awsHttp1Shim`: `"on"` | `"off"` | `"auto"`
+ * - `plugins.entries.defenseclaw.config.awsHttp1Shim`: `"on"` | `"off"` | `"auto"`
  * - `DEFENSECLAW_FORCE_AWS_HTTP1_SHIM=1` — always patch (escape hatch)
  * - `DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM=1` — never patch
  * - `DEFENSECLAW_OPENCLAW_MAIN` — absolute path to `openclaw.mjs` (or any file under the
@@ -59,7 +59,7 @@ export type AwsHttp1ShimMode = "auto" | "on" | "off";
 export interface PatchAwsSdkHttp1ForGuardrailOptions {
   /** Full OpenClaw gateway config (`api.config`). */
   openclawConfig?: unknown;
-  /** Validated `plugins.entries.defenseclaw` slice (`api.pluginConfig`). */
+  /** Validated `plugins.entries.defenseclaw.config` slice (`api.pluginConfig`). */
   pluginConfig?: { awsHttp1Shim?: AwsHttp1ShimMode };
 }
 
@@ -282,7 +282,7 @@ export function patchAwsSdkHttp1ForGuardrail(
 
   if (mode === "off") {
     logInfo(
-      "[defenseclaw] AWS HTTP/1 shim disabled (plugins.entries.defenseclaw.awsHttp1Shim=off)",
+      "[defenseclaw] AWS HTTP/1 shim disabled (plugins.entries.defenseclaw.config.awsHttp1Shim=off)",
     );
     return;
   }
@@ -295,7 +295,7 @@ export function patchAwsSdkHttp1ForGuardrail(
   // auto
   if (!openClawConfigUsesAmazonBedrock(opts?.openclawConfig)) {
     logInfo(
-      "[defenseclaw] AWS HTTP/1 shim skipped (no Amazon Bedrock in model config). Set plugins.entries.defenseclaw.awsHttp1Shim to \"on\" or DEFENSECLAW_FORCE_AWS_HTTP1_SHIM=1 if your setup needs it.",
+      "[defenseclaw] AWS HTTP/1 shim skipped (no Amazon Bedrock in model config). Set plugins.entries.defenseclaw.config.awsHttp1Shim to \"on\" or DEFENSECLAW_FORCE_AWS_HTTP1_SHIM=1 if your setup needs it.",
     );
     return;
   }

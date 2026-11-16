@@ -667,6 +667,64 @@ func TestHookAPITokenWindowsAllowsCreateChildOnSharedAncestor(t *testing.T) {
 	}
 }
 
+func TestHookAPITokenWindowsRefusesPerUserInheritedCreateChildOnSecureClientHost(t *testing.T) {
+	t.Setenv(managed.TrustStrictAncestorsEnv, "")
+	previousHost, previousPath := managed.SecureClientHostVerified, managed.SecureClientProcessPathVerified
+	t.Cleanup(func() {
+		managed.SecureClientHostVerified, managed.SecureClientProcessPathVerified = previousHost, previousPath
+	})
+	managed.SecureClientHostVerified = func() bool { return true }
+	base := t.TempDir()
+	state := filepath.Join(base, "Cisco", "Cisco Secure Client", "DefenseClaw")
+	managedDir := filepath.Join(state, "hook-token")
+	ossDir := filepath.Join(base, "Cisco", "oss", "hook-token")
+	for _, dir := range []string{managedDir, ossDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	managed.SecureClientProcessPathVerified = func(path string) bool {
+		return strings.HasPrefix(strings.ToLower(filepath.Clean(path)), strings.ToLower(state)+string(filepath.Separator))
+	}
+	for _, tc := range []struct {
+		name string
+		sid  func() (*windows.SID, error)
+	}{
+		{"Users", func() (*windows.SID, error) { return windows.CreateWellKnownSid(windows.WinBuiltinUsersSid) }},
+		{"Authenticated Users", func() (*windows.SID, error) { return windows.CreateWellKnownSid(windows.WinAuthenticatedUserSid) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			principal, err := tc.sid()
+			if err != nil {
+				t.Fatal(err)
+			}
+			acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+				AccessPermissions: 0x1201bf,
+				AccessMode:        windows.GRANT_ACCESS,
+				Trustee: windows.TRUSTEE{
+					TrusteeForm:  windows.TRUSTEE_IS_SID,
+					TrusteeType:  windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
+					TrusteeValue: windows.TrusteeValueFromSID(principal),
+				},
+			}}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var ace *windows.ACCESS_ALLOWED_ACE
+			if err := windows.GetAce(acl, 0, &ace); err != nil {
+				t.Fatal(err)
+			}
+			ace.Header.AceFlags = windows.INHERITED_ACE | windows.CONTAINER_INHERIT_ACE
+			if err := hookAPIRejectUntrustedWindowsWriteACEs(ossDir, acl, true, true, false); err == nil {
+				t.Fatal("a per-user hook-token folder accepted an inherited create-child entry")
+			}
+			if err := hookAPIRejectUntrustedWindowsWriteACEs(managedDir, acl, true, true, false); err != nil {
+				t.Fatalf("the managed hook-token folder refused the inherited entry: %v", err)
+			}
+		})
+	}
+}
+
 func TestHookAPITokenWindowsRejectsOrdinaryWriteOnSharedAncestor(t *testing.T) {
 	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
 	if err != nil {
@@ -701,7 +759,10 @@ func TestHookAPITokenWindowsRejectsOrdinaryWriteOnSharedAncestor(t *testing.T) {
 	}
 }
 
-func TestHookAPITokenWindowsRejectsWritableAncestorThroughPublicOperations(t *testing.T) {
+// A write grant on a folder above the data directory that the user owns is
+// drift on a folder DefenseClaw doesn't own: every public operation accepts it
+// and logs it instead of failing hooks for that user.
+func TestHookAPITokenWindowsAcceptsWritableAncestorThroughPublicOperations(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		mask windows.ACCESS_MASK
@@ -709,6 +770,50 @@ func TestHookAPITokenWindowsRejectsWritableAncestorThroughPublicOperations(t *te
 		{name: "generic_write", mask: windows.GENERIC_WRITE},
 		{name: "write_extended_attributes", mask: windows.FILE_WRITE_EA},
 		{name: "write_attributes", mask: windows.FILE_WRITE_ATTRIBUTES},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := testenv.PrivateTempDir(t)
+			ancestor := filepath.Join(root, "ancestor")
+			dataDir := filepath.Join(ancestor, "data")
+			if err := os.MkdirAll(dataDir, 0o700); err != nil {
+				t.Fatalf("create token data path: %v", err)
+			}
+			seeded, err := EnsureHookAPIToken(dataDir, "codex")
+			if err != nil {
+				t.Fatalf("seed token: %v", err)
+			}
+			setHookAPITokenWindowsUserOwner(t, ancestor)
+			setHookAPITokenWindowsUntrustedDACL(t, ancestor, tc.mask)
+			if token, err := EnsureHookAPIToken(dataDir, "codex"); err != nil || token != seeded {
+				t.Fatalf("ensure = %q, %v; want the seeded token", token, err)
+			}
+			if token, err := LoadHookAPIToken(dataDir, "codex"); err != nil || token != seeded {
+				t.Fatalf("load = %q, %v; want the seeded token", token, err)
+			}
+			path, err := HookAPITokenFilePath(dataDir, "codex")
+			if err != nil {
+				t.Fatalf("token path: %v", err)
+			}
+			if token, err := readSecureHookAPITokenFile(dataDir, path); err != nil || token != seeded {
+				t.Fatalf("read = %q, %v; want the seeded token", token, err)
+			}
+		})
+	}
+}
+
+// A grant that lets an untrusted principal rename, delete or re-ACL a
+// user-owned folder above the data directory lets it swap the token tree for
+// one it controls, so owner-based drift acceptance does not cover it.
+func TestHookAPITokenWindowsRejectsReplaceGrantOnUserOwnedAncestor(t *testing.T) {
+	const fileDeleteChild windows.ACCESS_MASK = 0x00000040
+	for _, tc := range []struct {
+		name string
+		mask windows.ACCESS_MASK
+	}{
+		{name: "delete_child", mask: fileDeleteChild},
+		{name: "delete", mask: windows.DELETE},
+		{name: "write_dac", mask: windows.WRITE_DAC},
+		{name: "generic_all", mask: windows.GENERIC_ALL},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assertHookAPITokenRejectedByEnsureAndLoad(t, "untrusted Windows principal", func(t *testing.T) string {
@@ -721,6 +826,7 @@ func TestHookAPITokenWindowsRejectsWritableAncestorThroughPublicOperations(t *te
 				if _, err := EnsureHookAPIToken(dataDir, "codex"); err != nil {
 					t.Fatalf("seed token: %v", err)
 				}
+				setHookAPITokenWindowsUserOwner(t, ancestor)
 				setHookAPITokenWindowsUntrustedDACL(t, ancestor, tc.mask)
 				return dataDir
 			})
@@ -792,6 +898,29 @@ func TestHookAPITokenWindowsRejectsReparsePointDirectory(t *testing.T) {
 	})
 }
 
+// setHookAPITokenWindowsUserOwner makes the current user the owner of path.
+// A folder an elevated test creates may be owned by Administrators instead
+// (PrivateTempDir re-owns only its own root), and the drift rule these tests
+// exercise is the one for a folder the user owns.
+func setHookAPITokenWindowsUserOwner(t *testing.T, path string) {
+	t.Helper()
+	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatalf("current token user: %v", err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION,
+		currentUser.User.Sid,
+		nil,
+		nil,
+		nil,
+	); err != nil {
+		t.Fatalf("own ancestor: %v", err)
+	}
+}
+
 func setHookAPITokenWindowsUntrustedDACL(t *testing.T, path string, mask windows.ACCESS_MASK) {
 	t.Helper()
 	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
@@ -836,5 +965,41 @@ func setHookAPITokenWindowsUntrustedDACL(t *testing.T, path string, mask windows
 		nil,
 	); err != nil {
 		t.Fatalf("set untrusted ancestor DACL: %v", err)
+	}
+}
+
+// A token the gateway or `defenseclaw setup` mints (first setup, a re-added
+// connector, a damaged credential replaced) is private on its own: a protected
+// DACL, not entries inherited from the hooks folder. `defenseclaw setup
+// rotate-token` refuses an inheritable credential (GAP-2207).
+func TestEnsureHookAPITokenWindowsMintsAProtectedDACL(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	if _, err := EnsureHookAPIToken(dataDir, "opencode"); err != nil {
+		t.Fatalf("EnsureHookAPIToken: %v", err)
+	}
+	tokenPath, err := HookAPITokenFilePath(dataDir, "opencode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := windows.GetNamedSecurityInfo(
+		tokenPath,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		t.Fatalf("read minted hook token security descriptor: %v", err)
+	}
+	control, _, err := descriptor.Control()
+	if err != nil {
+		t.Fatalf("read minted hook token DACL control: %v", err)
+	}
+	if control&windows.SE_DACL_PROTECTED == 0 {
+		t.Fatalf("minted hook token DACL is inheritable: %s", descriptor.String())
+	}
+	if _, err := os.Lstat(tokenPath + ".tmp"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("mint left a stage behind: %v", err)
+	}
+	if loaded, err := LoadHookAPIToken(dataDir, "opencode"); err != nil || loaded == "" {
+		t.Fatalf("LoadHookAPIToken after mint = %q, %v", loaded, err)
 	}
 }

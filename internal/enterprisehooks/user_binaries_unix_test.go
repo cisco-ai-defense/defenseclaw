@@ -26,9 +26,13 @@ import (
 )
 
 // uninstall --purge kept the per-user install's binaries and the launcher
-// links into ~/.defenseclaw, which the purge left dangling. The purge
-// removes all of ~/.defenseclaw and every DefenseClaw entry in
-// ~/.local/bin, and leaves no dangling link; the account's own tools stay.
+// links into ~/.defenseclaw, which the purge left dangling. For a folder
+// that holds no own install (its .venv and installer state are gone), the
+// purge removes managed entries and every DefenseClaw entry in ~/.local/bin,
+// keeps saved account originals, and leaves no dangling link;
+// the account's own tools stay. A folder with the install's .venv is the
+// account's own install and is kept (rel-1-0-6 GAP-0484,
+// purge_fresh_own_install_unix_test.go).
 func TestPurgeUserStateRemovesPerUserBinariesAndLinks(t *testing.T) {
 	skipIfRoot(t)
 	home := newTestHome(t)
@@ -54,17 +58,20 @@ func TestPurgeUserStateRemovesPerUserBinariesAndLinks(t *testing.T) {
 		return hex.EncodeToString(sum[:])
 	}
 
-	// ~/.defenseclaw as the per-user install leaves it.
-	for _, name := range []string{"defenseclaw", "skill-scanner", "mcp-scanner"} {
-		write(filepath.Join(dataDir, ".venv", "bin", name), "#!/bin/sh\n", 0o700)
-	}
-	write(filepath.Join(dataDir, "config.yaml"), "gateway: {}\n", 0o600)
+	// ~/.defenseclaw as the enrollment leaves it, after the per-user install
+	// that put the binaries below went: no config.yaml, .env, audit.db,
+	// previous/, .venv or installer/, which mean an install the account made
+	// of its own and keep the folder as it is (GAP-0727, GAP-0484).
 	write(filepath.Join(dataDir, "hooks", "claude-code-hook.sh"), "#!/bin/bash\n# defenseclaw-managed-hook v5\n", 0o700)
 	write(filepath.Join(dataDir, "foreign-hooks-backup", "cursor", "hooks.json"), "{}", 0o600)
 
 	// ~/.local/bin as install.sh leaves it, plus the account's own tools.
 	write(filepath.Join(binDir, "defenseclaw-gateway"), "gateway", 0o755)
 	write(filepath.Join(binDir, "defenseclaw-acp"), "acp", 0o755)
+	// GAP-0571: the hook helpers and the Linux sensor helper go too.
+	for _, name := range []string{"defenseclaw-hook-post", "defenseclaw-hook-user", "defenseclaw-sensor-helper"} {
+		write(filepath.Join(binDir, name), name, 0o755)
+	}
 	link(filepath.Join(dataDir, ".venv", "bin", "defenseclaw"), filepath.Join(binDir, "defenseclaw"))
 	link(filepath.Join(dataDir, ".venv", "bin", "skill-scanner"), filepath.Join(binDir, "skill-scanner"))
 	link("../../.defenseclaw/.venv/bin/mcp-scanner", filepath.Join(binDir, "mcp-scanner"))
@@ -87,11 +94,11 @@ func TestPurgeUserStateRemovesPerUserBinariesAndLinks(t *testing.T) {
 		OwnerGID: os.Getgid(),
 		Registry: connector.NewDefaultRegistry(),
 	}
-	if err := PurgeUserState(context.Background(), opts); err != nil {
+	if _, err := PurgeUserState(context.Background(), opts); err != nil {
 		t.Fatalf("PurgeUserState: %v", err)
 	}
-	if _, err := os.Lstat(dataDir); !os.IsNotExist(err) {
-		t.Fatalf("~/.defenseclaw stayed: %v", err)
+	if got, err := os.ReadFile(filepath.Join(dataDir, "foreign-hooks-backup", "cursor", "hooks.json")); err != nil || string(got) != "{}" {
+		t.Fatalf("the saved account hook changed: %q, %v", got, err)
 	}
 	if _, err := os.Lstat(filepath.Join(home, ".defenseclaw-install-custody")); !os.IsNotExist(err) {
 		t.Fatalf("the legacy custody folder stayed: %v", err)
@@ -117,7 +124,7 @@ func TestPurgeUserStateRemovesPerUserBinariesAndLinks(t *testing.T) {
 	// could not reach, and a missing ~/.local/bin is not an error.
 	write(filepath.Join(binDir, "defenseclaw-gateway"), "gateway", 0o755)
 	link(filepath.Join(dataDir, ".venv", "bin", "defenseclaw"), filepath.Join(binDir, "defenseclaw"))
-	if err := PurgeUserState(context.Background(), opts); err != nil {
+	if _, err := PurgeUserState(context.Background(), opts); err != nil {
 		t.Fatalf("rerun PurgeUserState: %v", err)
 	}
 	for _, name := range []string{"defenseclaw-gateway", "defenseclaw"} {
@@ -128,7 +135,7 @@ func TestPurgeUserStateRemovesPerUserBinariesAndLinks(t *testing.T) {
 	if err := os.RemoveAll(filepath.Join(home, ".local")); err != nil {
 		t.Fatal(err)
 	}
-	if err := PurgeUserState(context.Background(), opts); err != nil {
+	if _, err := PurgeUserState(context.Background(), opts); err != nil {
 		t.Fatalf("PurgeUserState without ~/.local/bin: %v", err)
 	}
 }

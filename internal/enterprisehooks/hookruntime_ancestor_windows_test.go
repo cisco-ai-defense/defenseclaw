@@ -21,48 +21,81 @@ package enterprisehooks
 import (
 	"os"
 	"path/filepath"
-	"strings"
+	"reflect"
 	"testing"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-func TestEnsureWindowsDirectoryUsersReadableAddsOnlyUsersRead(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "Cisco")
-	if err := os.Mkdir(dir, 0o700); err != nil {
+// The explicit Users entries on dir, in DACL order, as mask/flags pairs.
+func windowsTestUsersEntries(t *testing.T, dir string) (string, [][2]uint32) {
+	t.Helper()
+	sd, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
 		t.Fatal(err)
 	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entries [][2]uint32
+	for index := uint32(0); index < uint32(dacl.AceCount); index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, index, &ace); err != nil {
+			t.Fatal(err)
+		}
+		if (*windows.SID)(unsafe.Pointer(&ace.SidStart)).IsWellKnown(windows.WinBuiltinUsersSid) {
+			entries = append(entries, [2]uint32{uint32(ace.Mask), uint32(ace.Header.AceFlags)})
+		}
+	}
+	return sd.String(), entries
+}
+
+// GAP-0578 adds the Users check rights to an Administrators-only vendor
+// directory; GAP-0867 never widens a Users entry it finds there.
+func TestEnsureWindowsDirectoryUsersReadable(t *testing.T) {
 	administrators, _ := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
-	adminOnly, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
-	if err != nil {
-		t.Fatal(err)
-	}
-	dacl, _, _ := adminOnly.DACL()
-	if err := windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT,
-		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		administrators, nil, dacl, nil); err != nil {
-		t.Skipf("cannot set an Administrators owner in this test context: %v", err)
-	}
-	if err := ensureWindowsDirectoryUsersReadable(dir); err != nil {
-		t.Fatalf("grant users read: %v", err)
-	}
-	after, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := after.String()
-	if !strings.HasPrefix(got, "D:P") || !strings.Contains(got, "(A;OICI;FA;;;SY)") ||
-		!strings.Contains(got, "(A;OICI;FA;;;BA)") || !strings.Contains(got, ";;;BU)") {
-		t.Fatalf("DACL after grant = %s, want protected SY/BA plus a Users entry", got)
-	}
-	if strings.Contains(got, "CI;0x1200a9;;;BU)") || strings.Contains(got, "OI;0x1200a9;;;BU)") {
-		t.Fatalf("users entry must not be inheritable: %s", got)
-	}
-	if err := ensureWindowsDirectoryUsersReadable(dir); err != nil {
-		t.Fatalf("second grant: %v", err)
-	}
-	again, _ := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
-	if strings.Count(again.String(), ";;;BU)") != 1 {
-		t.Fatalf("grant is not idempotent: %s", again.String())
+	for _, tc := range []struct {
+		name, sddl string
+		want       [][2]uint32 // nil: DACL must stay byte-identical
+	}{
+		{"admin-only", "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", [][2]uint32{{0x1200a0, 0}}},
+		{"users-fx-as-found", "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;FX;;;BU)", nil},
+		{"users-0x1200a8-as-found", "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a8;;;BU)", nil},
+		{"users-narrow", "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x120000;;;BU)", [][2]uint32{{0x120000, 0}, {0xa0, 0}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "Cisco")
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			sd, err := windows.SecurityDescriptorFromString(tc.sddl)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dacl, _, _ := sd.DACL()
+			if err := windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT,
+				windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+				administrators, nil, dacl, nil); err != nil {
+				t.Skipf("cannot set an Administrators owner in this test context: %v", err)
+			}
+			before, _ := windowsTestUsersEntries(t, dir)
+			for pass := 0; pass < 2; pass++ {
+				if err := ensureWindowsDirectoryUsersReadable(dir); err != nil {
+					t.Fatalf("pass %d: %v", pass, err)
+				}
+			}
+			after, entries := windowsTestUsersEntries(t, dir)
+			if tc.want == nil {
+				if after != before {
+					t.Fatalf("a Users entry that already grants the rights changed:\n before %s\n after  %s", before, after)
+				}
+				return
+			}
+			if !reflect.DeepEqual(entries, tc.want) {
+				t.Fatalf("Users entries = %#x, want %#x (DACL %s)", entries, tc.want, after)
+			}
+		})
 	}
 }

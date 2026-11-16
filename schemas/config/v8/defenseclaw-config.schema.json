@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.defenseclaw.dev/config/v8/defenseclaw-config.schema.json",
-  "title": "DefenseClaw configuration v8",
-  "description": "Canonical source schema for DefenseClaw config_version 8. Every defined configuration object is closed; extensible maps declare the schema of their values explicitly.",
+  "$id": "https://schemas.defenseclaw.dev/config/v9/defenseclaw-config.schema.json",
+  "title": "DefenseClaw configuration v9",
+  "description": "Canonical source schema for DefenseClaw config_version 9, the current version written by this build; config_version 8 sources remain accepted as migration input. Every defined configuration object is closed; extensible maps declare the schema of their values explicitly.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -18,6 +18,19 @@
   ],
   "x-defenseclaw-coverage": "closed",
   "allOf": [
+    {
+      "if": {
+        "required": ["enterprise"],
+        "properties": { "enterprise": { "$ref": "#/$defs/enterprise", "required": ["cowork_vm_sensor"] } }
+      },
+      "then": {
+        "required": ["deployment_mode"],
+        "properties": {
+          "deployment_mode": { "const": "managed_enterprise" },
+          "enterprise": { "required": ["profile"], "properties": { "profile": { "const": "standalone" } } }
+        }
+      }
+    },
     {
       "if": {
         "properties": {
@@ -58,6 +71,9 @@
     },
     "llm_providers": {
       "$ref": "#/$defs/llmProviders"
+    },
+    "decision_model": {
+      "$ref": "#/$defs/decisionModel"
     },
     "data_dir": {
       "$ref": "#/$defs/pathString"
@@ -214,6 +230,9 @@
     },
     "fleet": {
       "$ref": "#/$defs/fleet"
+    },
+    "connectors": {
+      "$ref": "#/$defs/connectors"
     }
   },
   "$defs": {
@@ -418,6 +437,72 @@
         },
         "extra_headers": {
           "$ref": "#/$defs/stringMap"
+        }
+      }
+    },
+    "decisionModel": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Unified decision model (System One protocol): a fast first pass in front of the LLM judge on tool calls, or on its own for the connectors in hook_connectors where the judge does not run, and the skill scanner's advisory score. Off by default.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "model": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "base_url": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "api_key_env": {
+          "$ref": "#/$defs/envNameOrEmpty"
+        },
+        "credential": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "timeout": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 30,
+          "default": 1
+        },
+        "allow_threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.3
+        },
+        "block_threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.75
+        },
+        "on_confident_block": {
+          "type": "string",
+          "enum": [
+            "",
+            "escalate",
+            "decide"
+          ],
+          "default": "escalate"
+        },
+        "hook_connectors": {
+          "type": "array",
+          "maxItems": 256,
+          "description": "Connectors whose hook-lane tool calls the decision model answers on its own where the LLM judge does not run; * = all. Empty = only in front of the judge. Releases before 1.0.7 refuse this key.",
+          "items": {
+            "anyOf": [
+              {
+                "const": "*"
+              },
+              {
+                "$ref": "#/$defs/connectorName"
+              }
+            ]
+          }
         }
       }
     },
@@ -725,6 +810,14 @@
         "scan_instructions": {
           "type": "boolean"
         },
+        "unverified_server": {
+          "type": "string",
+          "enum": [
+            "warn",
+            "block"
+          ],
+          "description": "What defenseclaw mcp set and the gateway's install admission do with a server they could not verify (its scan did not finish, including DNS failure, or an OpenCode command outside the trusted install prefixes): warn adds or keeps it with a warning and an audit record, block refuses it (the strict setting). Unset is warn on managed standalone and per-user hosts; Secure Client uses separate closed admission."
+        },
         "judge_source": {
           "$ref": "#/$defs/scannerJudgeSource"
         },
@@ -776,6 +869,9 @@
         },
         "pack_dir": {
           "$ref": "#/$defs/openShellPackDir"
+        },
+        "trusted_ca_bundle": {
+          "$ref": "#/$defs/openShellTrustedCABundle"
         },
         "profile": {
           "$ref": "#/$defs/openShellProfileOrInherit"
@@ -842,6 +938,8 @@
           "default": "provider"
         },
         "middleware": {
+          "deprecated": true,
+          "description": "Legacy 1.0.x config only. This field has no effect; remove it. Accepted through 1.0.x for in-place upgrades and scheduled for removal in 1.1.0.",
           "type": "object",
           "additionalProperties": false,
           "properties": {
@@ -947,6 +1045,12 @@
       "type": "string",
       "maxLength": 4096,
       "pattern": "^(|~|~/.*|[/\\\\].*|[A-Za-z]:[/\\\\].*)$"
+    },
+    "openShellTrustedCABundle": {
+      "description": "A PEM file of CA certificates sandboxes trust besides the image's public roots, such as the root of a TLS-inspecting proxy: an absolute path or one starting with \"~/\" (absolute, administrator-owned, in a managed configuration). Every sandbox image built while it is set carries them. Empty: none.",
+      "type": "string",
+      "maxLength": 4096,
+      "pattern": "^(|~/.+|/.+)$"
     },
     "openShellHarnessVersionKey": {
       "description": "A harness name keying image.harness_versions. No \".\": the gateway's config loader reads a dotted key as a key path.",
@@ -1441,15 +1545,26 @@
         },
         "min_severity": {
           "type": "string",
-          "enum": [
-            "",
-            "LOW",
-            "MEDIUM",
-            "HIGH",
-            "CRITICAL"
-          ]
+          "pattern": "^(|[Cc][Rr][Ii][Tt][Ii][Cc][Aa][Ll]|[Hh][Ii][Gg][Hh]|[Mm][Ee][Dd][Ii][Uu][Mm]|[Ll][Oo][Ww])$",
+          "description": "Lowest finding severity that asks for approval: CRITICAL, HIGH, MEDIUM or LOW, in any case, as block_at takes them. Empty inherits (HIGH when nothing sets it)."
         }
       }
+    },
+    "judgeExtraValue": {
+      "anyOf": [
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        {
+          "type": "array",
+          "items": { "$ref": "#/$defs/judgeExtraValue" }
+        },
+        {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/judgeExtraValue" }
+        }
+      ]
     },
     "judge": {
       "type": "object",
@@ -1500,6 +1615,19 @@
           "type": "number",
           "minimum": 0,
           "maximum": 86400
+        },
+        "max_parallel": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 256,
+          "default": 0,
+          "description": "Most LLM judge calls sent to the judge model at once; 0 = no limit. With a limit, tool-call judging goes first and keeps one slot, so a slow local model does not queue it behind prompt checks. Releases before 1.0.6 refuse this key."
+        },
+        "extra_body": {
+          "type": "object",
+          "maxProperties": 32,
+          "additionalProperties": { "$ref": "#/$defs/judgeExtraValue" },
+          "description": "Additional top-level fields for OpenAI-compatible judge chat requests. Judge-owned and authentication keys are refused at load."
         },
         "llm": {
           "$ref": "#/$defs/llm"
@@ -1835,6 +1963,18 @@
           ],
           "default": "full"
         },
+        "internal_domains": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 254,
+            "pattern": "^\\.?([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)*[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.?$"
+          },
+          "description": "The organization's own domains. A download from a host equal to or under one does not start the download-then-execute alert."
+        },
         "detection_strategy": {
           "$ref": "#/$defs/detectionStrategy"
         },
@@ -1875,6 +2015,7 @@
         },
         "hook_fail_mode": {
           "type": "string",
+          "description": "Hook delivery failure mode. Unset resolves to closed for OSS and every managed install outside Secure Client; under the Secure Client profile an unset value resolves to open. An explicit closed always wins, and a managed install outside Secure Client ignores open.",
           "enum": [
             "open",
             "closed"
@@ -1918,13 +2059,51 @@
           "items": {
             "$ref": "#/$defs/guardrailProfileAssignment"
           },
-          "description": "Ordered profile assignments; the first match wins."
+          "description": "Profile assignments; when several profiles may apply, the one that enforces at least what each of the others does applies, otherwise their strictest combination."
         },
         "default_profile": {
           "type": "string",
           "pattern": "^(|[a-z0-9][a-z0-9_-]{0,63})$",
           "default": "",
           "description": "Profile for subjects no assignment selects. Empty keeps the guardrail.* configuration."
+        },
+        "protected_files": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Protected-file watch. Unset alerts on a change to an SSH authorized keys file, shell startup file or user autostart entry made while an agent tool call ran for that user; restore also puts back the last accepted content (opt-in, strict); off turns the watch off.",
+          "properties": {
+            "on_change": {
+              "type": "string",
+              "enum": [
+                "",
+                "alert",
+                "restore",
+                "off"
+              ],
+              "default": "alert"
+            },
+            "paths": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            }
+          }
+        },
+        "chains": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Tool-call chain evaluation settings.",
+          "properties": {
+            "root_scope": {
+              "type": "boolean",
+              "default": false,
+              "description": "Managed only, off by default: also evaluate chains across the sessions of one root_session_id a trusted connector sends. Honoured only from a signed bundle. Requires min_product_version 1.0.6 in a bundle."
+            }
+          }
         }
       }
     },
@@ -3409,7 +3588,14 @@
           "minimum": 0,
           "maximum": 106751,
           "default": 7,
-          "description": "Positive values reap eligible local event, evidence, judge-body, and correlation history older than the UTC cutoff after startup readiness and every six hours. The same window bounds AI discovery scan history in <data_dir>/inventory.db, which the gateway prunes about hourly (always keeping the latest scan) and compacts. Zero retains history forever and requires a persistent capacity warning. SQLite can reuse freed pages, but the audit database file does not shrink automatically. The maximum is the largest whole-day period representable as a Go time.Duration."
+          "description": "Positive values reap eligible local event, evidence, judge-body, and correlation history older than the UTC cutoff a minute after startup readiness and every six hours. The same window bounds AI discovery scan history in <data_dir>/inventory.db, which the gateway prunes about hourly (always keeping the latest scan) and compacts. Zero retains history forever and requires a persistent capacity warning. SQLite can reuse freed pages, but the audit database file does not shrink automatically. The maximum is the largest whole-day period representable as a Go time.Duration."
+        },
+        "max_store_mb": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1048576,
+          "default": 0,
+          "description": "Opt-in size cap for the audit database in MiB. 0 (the default) keeps retention by days only. A value from 64 to 1048576 (1 to 63 are refused) makes each retention run also delete the oldest history, through the same path as retention_days, until the used pages of the audit database are under the cap; the newest hour is always kept. Releases before 1.0.6 refuse this key: remove it before going back with defenseclaw upgrade --version (defenseclaw rollback restores the previous configuration)."
         }
       },
       "x-defenseclaw-semantic-constraint": "The two database paths must be distinct from each other and every other configured file after lexical, real-path, symlink, hard-link, and inode checks."
@@ -3623,6 +3809,25 @@
         },
         "routes": {
           "$ref": "#/$defs/logRoutes"
+        },
+        "local_stack": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Written only by local Splunk setup: the record that DefenseClaw started the local Splunk container this destination sends to. Every Splunk destination without it is remote.",
+          "required": [
+            "marker",
+            "container_id"
+          ],
+          "properties": {
+            "marker": {
+              "const": "defenseclaw-local-splunk"
+            },
+            "container_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "description": "Full ID of the Splunk container local setup started."
+            }
+          }
         }
       },
       "allOf": [
@@ -5199,8 +5404,126 @@
               "maxLength": 4096
             }
           }
+        },
+        "cowork_vm_sensor": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Standalone macOS/Windows host delivery for the Cowork VM sensor. Off when absent. The source directory contains the release-matched architecture archive and detached OpenPGP signature.",
+          "properties": {
+            "mode": { "type": "string", "enum": ["off", "on"], "default": "off" },
+            "tenant": { "type": "string", "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+            "device": { "type": "string", "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$", "description": "Optional override. When unset each host derives its own ID (macOS IOPlatformUUID, Windows MachineGuid), so one fleet-wide config or signed bundle gives every host a distinct device." },
+            "collector": { "type": "string", "maxLength": 253, "pattern": "^[A-Za-z0-9][A-Za-z0-9.-]*:[0-9]{1,5}$" },
+            "vendor": { "type": "string", "maxLength": 64, "pattern": "^[a-z][a-z0-9_-]*$" },
+            "source_dir": { "type": "string", "maxLength": 4096 },
+            "package_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "SHA-256 of this machine architecture's archive from the approved release." },
+            "signature_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "SHA-256 of the detached signature; required by delivery when the .sig file is present. Omit while the signing key is pending." }
+          },
+          "allOf": [{
+            "if": { "properties": { "mode": { "const": "on" } }, "required": ["mode"] },
+            "then": { "required": ["tenant", "collector", "vendor", "source_dir", "package_sha256"], "properties": { "source_dir": { "minLength": 1 } } }
+          }]
+        },
+        "account_join": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Standalone only. The account join key in the root-only status: off when absent. The tenant secrets are the protected credentials account-join-key and account-join-key-next. Requires min_product_version 1.0.7 in a bundle.",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["on", "off"]
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2147483647
+            },
+            "next_generation": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2147483647
+            },
+            "secret_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "next_secret_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "next_not_after": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        },
+        "identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Standalone only. Trusted connectors: service accounts that may name the person they act for on the agent-gateway route. Empty by default (off); honoured only when the live configuration is a signed bundle. Requires min_product_version 1.0.6 in a bundle.",
+          "properties": {
+            "trusted_connectors": {
+              "type": "array",
+              "maxItems": 16,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name",
+                  "account",
+                  "may_act_for"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+                  },
+                  "account": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "route": {
+                    "type": "string",
+                    "enum": [
+                      "agent-gateway"
+                    ]
+                  },
+                  "may_act_for": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "groups": {
+                        "type": "array",
+                        "maxItems": 256,
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256
+                        }
+                      },
+                      "users": {
+                        "type": "array",
+                        "maxItems": 256,
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       }
+    },
+    "ruleSeverity": {
+      "type": "string",
+      "pattern": "^([Cc][Rr][Ii][Tt][Ii][Cc][Aa][Ll]|[Hh][Ii][Gg][Hh]|[Mm][Ee][Dd][Ii][Uu][Mm]|[Ll][Oo][Ww])$",
+      "description": "A rule severity: CRITICAL, HIGH, MEDIUM or LOW, in any case, as block_at takes them. Rules have no INFO severity."
     },
     "severityName": {
       "type": "string",
@@ -5465,7 +5788,7 @@
             "$ref": "#/$defs/ruleId"
           },
           "additionalProperties": {
-            "$ref": "#/$defs/severityName"
+            "$ref": "#/$defs/ruleSeverity"
           }
         },
         "suppressions": {
@@ -5899,6 +6222,29 @@
         "policy_compiler_path": {
           "type": "string",
           "maxLength": 4096
+        }
+      }
+    },
+    "connectors": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Connectors that install nothing into an agent. Off by default.",
+      "properties": {
+        "agent_gateway": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The agent-gateway hook route (/api/v1/agent-gateway/hook) for gateways that call DefenseClaw for an agent. Off by default; on a managed device only the lifecycle or a signed bundle sets it. Requires min_product_version 1.0.6 in a bundle.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "instance_name": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_-]{0,31}$",
+              "description": "Label of the calling gateway in audit on a per-user install."
+            }
+          }
         }
       }
     }

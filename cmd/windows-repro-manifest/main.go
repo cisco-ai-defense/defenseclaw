@@ -12,8 +12,7 @@
 // ordering, whitespace, and escaping — this binary removes that
 // variance.
 //
-// Design lives in docs/specs/001-windows-deterministic-build/design.md.
-// The three subcommands each build a JSON object as a map (so
+// The emit-* subcommands each build a JSON object as a map (so
 // encoding/json sorts keys) and write it with LF line endings,
 // two-space indent, and a final trailing LF.
 //
@@ -37,11 +36,12 @@ Subcommands:
   emit-manifest           Emit manifest.json for a signed payload directory.
   emit-payload-metadata   Emit payload-metadata.json for the build kit.
   emit-provenance         Emit provenance.json for a built outer Setup EXE.
+  payload-binding         Print the payload binding a standalone Setup is linked with.
 
 Run any subcommand with -h for its flags.
 
-See docs/specs/001-windows-deterministic-build/ for the reproducibility
-contract this tool implements.
+Output is byte-stable: sorted keys, two-space indent, LF line endings and
+a trailing LF, so bash and PowerShell build hosts emit identical bytes.
 `
 
 func main() {
@@ -71,6 +71,10 @@ func main() {
 	case "emit-provenance":
 		if err := runEmitProvenance(args); err != nil {
 			exitSubcommand("emit-provenance", err)
+		}
+	case "payload-binding":
+		if err := runPayloadBinding(args, os.Stdout); err != nil {
+			exitSubcommand("payload-binding", err)
 		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n\n", sub)

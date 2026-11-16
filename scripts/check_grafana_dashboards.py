@@ -36,6 +36,7 @@ except ModuleNotFoundError:  # Imported as scripts.check_grafana_dashboards in t
     from local_observability_v1 import compatibility_errors
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "cli"))
 SOURCE_DIR = ROOT / "bundles/local_observability_stack/grafana/dashboards"
 PACKAGED_DIR = ROOT / "cli/defenseclaw/_data/local_observability_stack/grafana/dashboards"
 SOURCE_DATASOURCES = ROOT / "bundles/local_observability_stack/grafana/provisioning/datasources/datasources.yml"
@@ -59,6 +60,23 @@ COMMON_PROMETHEUS_RESOURCE_LABELS = {
     "service_name",
     "service_namespace",
     "service_version",
+}
+# The managed sandbox counters keep only these resource labels: the bundled
+# collector drops the host, account and device attributes from them
+# (transform/managed-sandbox-resource), so a host_name filter matches nothing.
+MANAGED_SANDBOX_RESOURCE_LABELS = {
+    "deployment_environment_name",
+    "instance",
+    "job",
+    "os_type",
+    "otel_scope_name",
+    "service_name",
+    "service_namespace",
+    "service_version",
+}
+PROMETHEUS_RESOURCE_LABELS_BY_METRIC = {
+    f"defenseclaw_sandbox_managed_{name}_total": MANAGED_SANDBOX_RESOURCE_LABELS
+    for name in ("refusals", "asks", "foreign_items", "provisional", "drift")
 }
 PROMETHEUS_METRIC_LABELS = {
     "defenseclaw_approval_count_total": {"result", "auto", "dangerous"},
@@ -84,6 +102,11 @@ PROMETHEUS_METRIC_LABELS = {
         "guardrail_scanner",
     },
     "defenseclaw_schema_violations_total": {"code", "event_type"},
+    "defenseclaw_sandbox_managed_refusals_total": {"reason", "profile", "driver", "connector"},
+    "defenseclaw_sandbox_managed_asks_total": {"result", "reason", "profile", "driver", "connector"},
+    "defenseclaw_sandbox_managed_foreign_items_total": {"kind", "action", "profile", "driver", "connector"},
+    "defenseclaw_sandbox_managed_provisional_total": {"result", "profile", "driver", "connector"},
+    "defenseclaw_sandbox_managed_drift_total": {"field", "profile", "driver", "connector"},
     "defenseclaw_stream_bytes_sent_bucket": {"le", "outcome"},
     "defenseclaw_stream_duration_ms_milliseconds_bucket": {"le", "outcome"},
     "defenseclaw_stream_lifecycle_total": {"outcome", "transition"},
@@ -669,10 +692,12 @@ def static_audit(
                             f"{uid}/{title}: first-sample-aware token rates must divide by $__rate_interval_ms / 1000",
                         )
                 if datasource == "loki" and expression:
-                    if 'body_$scope_label=~"$agent"' in expression and '|= "$agent" | json' not in expression:
+                    # $agent is a regex text box; Loki runs a regex that is
+                    # one literal ID as a plain substring filter.
+                    if 'body_$scope_label=~"$agent"' in expression and '|~ "$agent" | json' not in expression:
                         errors.append(
-                            f"{uid}/{title}: agent-scoped Loki queries must prefilter the literal "
-                            'agent ID before JSON parsing with `|= "$agent" | json`',
+                            f"{uid}/{title}: agent-scoped Loki queries must prefilter the "
+                            'agent ID before JSON parsing with `|~ "$agent" | json`',
                         )
                     legacy_fields = {
                         field for field in LEGACY_FLAT_LOKI_FIELDS if re.search(rf"\b{re.escape(field)}\b", expression)
@@ -696,7 +721,11 @@ def static_audit(
                             selector,
                         )
                         if metric_name in PROMETHEUS_METRIC_LABELS:
-                            allowed_labels = PROMETHEUS_METRIC_LABELS[metric_name] | COMMON_PROMETHEUS_RESOURCE_LABELS
+                            resource_labels = PROMETHEUS_RESOURCE_LABELS_BY_METRIC.get(
+                                metric_name,
+                                COMMON_PROMETHEUS_RESOURCE_LABELS,
+                            )
+                            allowed_labels = PROMETHEUS_METRIC_LABELS[metric_name] | resource_labels
                             unknown_labels = {label for label, _operator, _value in selector_pairs} - allowed_labels
                             if unknown_labels:
                                 errors.append(
@@ -832,9 +861,10 @@ def static_audit(
         if "scope_label" in variable_positions and "agent" in variable_positions:
             if variable_positions["scope_label"] > variable_positions["agent"]:
                 errors.append(f"{uid}: scope_label must be defined before the dependent agent variable")
-            agent_variable = variables[variable_positions["agent"]]
-            if "$scope_label" not in json.dumps(agent_variable):
-                errors.append(f"{uid}: the agent variable must enumerate the selected scope_label")
+            # Loki cannot list a record-body field (GAP-0241), so the agent
+            # box is a regex text box the directory links fill in.
+            if variables[variable_positions["agent"]].get("type") != "textbox":
+                errors.append(f"{uid}: the agent variable must be a regex text box")
 
         for link in dashboard_links(dashboard):
             match = re.match(r"/d/([^/?]+)", link)
@@ -845,7 +875,9 @@ def static_audit(
         errors.append(f"CLI packaged Grafana dashboard directory is missing: {PACKAGED_DIR}")
     elif PACKAGED_DIR.is_dir():
         packaged = load_dashboards(PACKAGED_DIR)
-        source_by_name = {path.name: dashboard for path, dashboard in dashboards}
+        source_by_name = {
+            path.name: dashboard for path, dashboard in dashboards if path.name != "defenseclaw-fleet.json"
+        }
         packaged_by_name = {path.name: dashboard for path, dashboard in packaged}
         if source_by_name != packaged_by_name:
             errors.append("CLI packaged Grafana dashboards do not match bundle sources")
@@ -873,15 +905,29 @@ def request_json(
 ) -> dict[str, Any]:
     if params:
         url = f"{url}?{urllib.parse.urlencode(params)}"
-    request: str | urllib.request.Request = url
     if _GRAFANA_AUTHORIZATION is not None and url.startswith("http://127.0.0.1:3000/"):
-        request = urllib.request.Request(
-            url,
-            headers={"Authorization": _GRAFANA_AUTHORIZATION},
-            method="GET",
-        )
+        # This live audit shares the held-socket verifier used by Grafana
+        # startup. A container check cannot prove who accepted this request.
+        try:
+            from defenseclaw.observability.local_stack import _grafana_verified_get
+        except ImportError as exc:
+            raise AuditError("trusted Grafana connected-peer verifier is unavailable") from exc
+        parsed = urllib.parse.urlsplit(url)
+        path = parsed.path + ("?" + parsed.query if parsed.query else "")
+        try:
+            status, body = _grafana_verified_get(
+                path, _GRAFANA_AUTHORIZATION, timeout=timeout_seconds,
+                max_response_bytes=16 * 1024 * 1024,
+            )
+            if 300 <= status < 400:
+                raise AuditError(f"{url}: Grafana redirect refused (HTTP {status})")
+            if not 200 <= status < 300:
+                raise AuditError(f"{url}: HTTP {status}: {body[:400].decode('utf-8', 'replace')}")
+            return json.loads(body)
+        except (OSError, ValueError) as exc:
+            raise AuditError(f"{url}: {exc}") from exc
     try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        with urllib.request.urlopen(url, timeout=timeout_seconds) as response:
             return json.load(response)
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", "replace")
@@ -1244,7 +1290,10 @@ def live_audit(
                             raise AuditError(str(result))
                     elif datasource == "loki" and expression:
                         query = interpolate(expression).replace("[1h]", "[5m]").replace("[24h]", "[5m]")
-                        if panel.get("type") == "logs":
+                        # Loki serves log lines only through query_range: a logs panel,
+                        # or a table that lists log lines (maxLines), is not an
+                        # instant query (GAP-1028).
+                        if panel.get("type") == "logs" or "maxLines" in target:
                             params = {
                                 "query": query,
                                 "start": str(start_ns),

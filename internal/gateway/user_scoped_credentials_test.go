@@ -264,47 +264,6 @@ func TestUserScopedInspectCredentialIsBoundToItsUser(t *testing.T) {
 	}
 }
 
-// Per-user OTLP credentials cover the header form (Codex, Claude Code,
-// OpenHands) and the path form (Omnigent here).
-func TestUserScopedOTLPCredentialIsBoundToItsUser(t *testing.T) {
-	ledger := &userScopedTestLedger{}
-	ledger.set(
-		managedHookLedgerTarget{User: "alice", UID: userScopedTestUID(1001), Connector: "codex", OK: true},
-		managedHookLedgerTarget{User: "alice", UID: userScopedTestUID(1001), Connector: "omnigent", OK: true},
-	)
-	api, handler, observed := newUserScopedTestServer(t, true, ledger, map[string]string{"1001": "alice"})
-	codex := userScopedTestToken(t, connector.UserScopedOTLPCredential, "codex", "1001")
-	source := map[string]string{otelSourceHeader: "codex"}
-	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/v1/logs", codex, source); code != http.StatusOK || observed.userID != "1001" || observed.source != "codex" {
-		t.Fatalf("header-form OTLP: status %d %+v", code, *observed)
-	}
-	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/v1/logs", codex, map[string]string{otelSourceHeader: "codex", "X-User-Id": "1002"}); code != http.StatusForbidden || observed.called {
-		t.Fatalf("header-form OTLP naming another user: status %d called=%v", code, observed.called)
-	}
-	wide, err := connector.EnsureOTLPPathToken(api.configDataDir(), connector.OTLPScopeCodex)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/v1/logs", wide, source); code != http.StatusUnauthorized || observed.called {
-		t.Fatalf("connector-wide OTLP credential: status %d called=%v", code, observed.called)
-	}
-	wideOmnigent, err := connector.EnsureOTLPPathToken(api.configDataDir(), connector.OTLPScopeOmnigent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	omnigent := userScopedTestToken(t, connector.UserScopedOTLPCredential, "omnigent", "1001")
-	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/otlp/omnigent/"+omnigent+"/v1/logs", "", nil); code != http.StatusOK || observed.userID != "1001" {
-		t.Fatalf("path-form OTLP: status %d %+v", code, *observed)
-	}
-	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/otlp/omnigent/"+wideOmnigent+"/v1/logs", "", nil); code != http.StatusUnauthorized || observed.called {
-		t.Fatalf("connector-wide path credential: status %d called=%v", code, observed.called)
-	}
-	// Codex's credential does not open Omnigent's source.
-	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/otlp/omnigent/"+codex+"/v1/logs", "", nil); code != http.StatusUnauthorized || observed.called {
-		t.Fatalf("another source's credential: status %d called=%v", code, observed.called)
-	}
-}
-
 // Windows rows bind credentials to the SID; account names compare
 // case-insensitively.
 func TestUserScopedCredentialBindsWindowsSID(t *testing.T) {
@@ -464,4 +423,84 @@ func TestUserScopedCredentialsFollowAKeyRotation(t *testing.T) {
 	retiring = ""
 	committed = stagedKey
 	check("committed", false, true, stagedKey)
+}
+
+// Per-user OTLP credentials cover the header form (Codex here) and the
+// path form (Claude Code here).
+func TestUserScopedOTLPCredentialIsBoundToItsUser(t *testing.T) {
+	ledger := &userScopedTestLedger{}
+	ledger.set(
+		managedHookLedgerTarget{User: "alice", UID: userScopedTestUID(1001), Connector: "codex", OK: true},
+		managedHookLedgerTarget{User: "alice", UID: userScopedTestUID(1001), Connector: "claudecode", OK: true},
+	)
+	api, handler, observed := newUserScopedTestServer(t, true, ledger, map[string]string{"1001": "alice"})
+	codex := userScopedTestToken(t, connector.UserScopedOTLPCredential, "codex", "1001")
+	source := map[string]string{otelSourceHeader: "codex"}
+	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/v1/logs", codex, source); code != http.StatusOK || observed.userID != "1001" || observed.source != "codex" {
+		t.Fatalf("header-form OTLP: status %d %+v", code, *observed)
+	}
+	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/v1/logs", codex, map[string]string{otelSourceHeader: "codex", "X-User-Id": "1002"}); code != http.StatusForbidden || observed.called {
+		t.Fatalf("header-form OTLP naming another user: status %d called=%v", code, observed.called)
+	}
+	wide, err := connector.EnsureOTLPPathToken(api.configDataDir(), connector.OTLPScopeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/v1/logs", wide, source); code != http.StatusUnauthorized || observed.called {
+		t.Fatalf("connector-wide OTLP credential: status %d called=%v", code, observed.called)
+	}
+	wideClaude, err := connector.EnsureOTLPPathToken(api.configDataDir(), connector.OTLPScopeClaude)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claude := userScopedTestToken(t, connector.UserScopedOTLPCredential, "claudecode", "1001")
+	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/otlp/claudecode/"+claude+"/v1/logs", "", nil); code != http.StatusOK || observed.userID != "1001" {
+		t.Fatalf("path-form OTLP: status %d %+v", code, *observed)
+	}
+	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/otlp/claudecode/"+wideClaude+"/v1/logs", "", nil); code != http.StatusUnauthorized || observed.called {
+		t.Fatalf("connector-wide path credential: status %d called=%v", code, observed.called)
+	}
+	// Codex's credential does not open Claude Code's source.
+	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/otlp/claudecode/"+codex+"/v1/logs", "", nil); code != http.StatusUnauthorized || observed.called {
+		t.Fatalf("another source's credential: status %d called=%v", code, observed.called)
+	}
+}
+
+// GAP-0916: once the guardian ledger no longer lists a connector for an
+// account (the connector was removed from the roster, so its row was revoked
+// in the same pass), the account's leftover hook credential is refused before
+// any handler runs, with no wait for a cache; a failed row is refused too.
+func TestUserScopedLeftoverCredentialIsRefusedAfterARosterRemoval(t *testing.T) {
+	identity := "1001"
+	target := func(name string, ok bool) managedHookLedgerTarget {
+		return managedHookLedgerTarget{User: "alice", UID: userScopedTestUID(1001), Connector: name, OK: ok}
+	}
+	if runtime.GOOS == "windows" {
+		identity = "S-1-5-21-1111-2222-3333-1001"
+		target = func(name string, ok bool) managedHookLedgerTarget {
+			return managedHookLedgerTarget{User: "alice", SID: identity, Connector: name, OK: ok}
+		}
+	}
+	ledger := &userScopedTestLedger{}
+	ledger.set(target("cursor", true), target("codex", true))
+	_, handler, observed := newUserScopedTestServer(t, true, ledger, map[string]string{identity: "alice"})
+	cursor := userScopedTestToken(t, connector.UserScopedHookCredential, "cursor", identity)
+	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/api/v1/cursor/hook", cursor, nil); code != http.StatusOK || !observed.called {
+		t.Fatalf("enrolled cursor credential: status %d called=%v", code, observed.called)
+	}
+	// The row is revoked (absent from the ledger): the leftover token is a 401.
+	ledger.set(target("codex", true))
+	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/api/v1/cursor/hook", cursor, nil); code != http.StatusUnauthorized || observed.called {
+		t.Fatalf("leftover cursor credential after the removal: status %d called=%v", code, observed.called)
+	}
+	// A row that is present but not OK never authenticates either.
+	ledger.set(target("cursor", false), target("codex", true))
+	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/api/v1/cursor/hook", cursor, nil); code != http.StatusUnauthorized || observed.called {
+		t.Fatalf("leftover cursor credential with a failed row: status %d called=%v", code, observed.called)
+	}
+	// The connector that stayed on the roster is unaffected.
+	codex := userScopedTestToken(t, connector.UserScopedHookCredential, "codex", identity)
+	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/api/v1/codex/hook", codex, nil); code != http.StatusOK || !observed.called {
+		t.Fatalf("the connector that stayed: status %d called=%v", code, observed.called)
+	}
 }

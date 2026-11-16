@@ -37,16 +37,24 @@ import os
 import sys
 import unittest
 from enum import Enum
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.config import LLMConfig, MCPScannerConfig, MCPServerEntry  # noqa: E402
-from defenseclaw.scanner import _llm_env  # noqa: E402
+from defenseclaw.scanner import (
+    _llm_env,  # noqa: E402
+    mcp,  # noqa: E402
+)
 from defenseclaw.scanner.mcp import (  # noqa: E402
     MCPScannerWrapper,
     _is_llm_backend_error,
 )
+
+from tests.os_view import os_view  # noqa: E402
+
+_NATIVE_OS_NAME = os.name
 
 
 class _FakeAnalyzerEnum(Enum):
@@ -217,9 +225,17 @@ class ScanLocalGracefulDegradeTests(unittest.TestCase):
         # These fakes exercise the legacy scanner config-file/log-degrade path,
         # which remains the macOS/Linux implementation. Native Windows uses
         # DefenseClaw's same-task stdio adapter and never calls this fake API.
-        platform = patch("defenseclaw.scanner.mcp.os.name", "posix")
+        platform = patch.object(mcp, "os", os_view("posix"))
         platform.start()
         self.addCleanup(platform.stop)
+
+    def test_local_scan_uses_private_platform_view(self):
+        self.assertIsNot(mcp.os, os)
+        self.assertEqual(mcp.os.name, "posix")
+        self.assertEqual(os.name, _NATIVE_OS_NAME)
+
+    def test_native_pathlib_remains_available(self):
+        self.assertEqual(Path.cwd().__class__, Path(".").__class__)
 
     def _run(self, scanner):
         captured = io.StringIO()

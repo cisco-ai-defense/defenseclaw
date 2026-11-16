@@ -192,10 +192,9 @@ func TestSandboxRelayForwarding(t *testing.T) {
 	if seen.Header.Get(sandboxrelay.FilesHeader) != "" || seen.Header.Get(sandboxrelay.RegistrationHeader) != "reg-claude-app" {
 		t.Fatalf("sandbox headers: files %q registration %q", seen.Header.Get(sandboxrelay.FilesHeader), seen.Header.Get(sandboxrelay.RegistrationHeader))
 	}
-	if seen.Header.Get("Traceparent") == "" || seen.Header.Get("X-Defenseclaw-Hook-Event") != "PreToolUse" {
-		t.Fatalf("allowlisted headers missing: %v", seen.Header)
+	if seen.Header.Get("X-Defenseclaw-Hook-Event") != "PreToolUse" {
+		t.Fatalf("hook event header missing: %v", seen.Header)
 	}
-	mode = "plain"
 	mu.Unlock()
 	decisions, failures := obs.take()
 	if len(decisions) != 1 || len(failures) != 0 {
@@ -217,6 +216,19 @@ func TestSandboxRelayForwarding(t *testing.T) {
 	if of := generationOf.Load(); generation.Load() != 7 || of == nil || *of != "reg-"+strings.TrimPrefix(f.claude.SandboxName, "dc-") {
 		t.Fatalf("generation = %d of %v", generation.Load(), of)
 	}
+
+	// A 200 block caused by failed evaluation also counts as a hook failure.
+	mu.Lock()
+	decision.FailedClosed = true
+	mu.Unlock()
+	rec = f.do(t, http.MethodPost, path, f.claudeTok, body)
+	if decisions, failures := obs.take(); rec.Code != http.StatusOK || len(decisions) != 1 || len(failures) != 1 || failures[0].Status != http.StatusInternalServerError {
+		t.Fatalf("failed-closed relay: status %d decisions %v failures %v", rec.Code, decisions, failures)
+	}
+	mu.Lock()
+	decision.FailedClosed = false
+	mode = "plain"
+	mu.Unlock()
 
 	// A 2xx without a trailer records nothing.
 	rec = f.do(t, http.MethodPost, path, f.claudeTok, `{"hook_event_name":"Stop"}`)
@@ -269,12 +281,26 @@ func TestSandboxIngressForwardingNeedsRegistrations(t *testing.T) {
 // fakeRelay is a sandboxrelay.Client whose calls the test sets.
 type fakeRelay struct {
 	settings func() (sandboxrelay.DaemonSettings, error)
-	resolve  func(sandboxrelay.ResolveRequest) (sandboxrelay.ResolveResponse, error)
-	current  func(string) (sandboxrelay.CurrentPolicy, error)
-	explain  func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error)
-	test     func(sandboxrelay.PolicyTestRequest) (sandboxapi.PolicyTestResult, error)
-	packs    func(registration, connector, name string) ([]sandboxrelay.PackView, error)
-	deleted  atomic.Int64
+	// unchanged answers Settings when settings is nil: the managed
+	// gateway's settings as the daemon holds them (a create reads them).
+	unchanged func() sandboxrelay.DaemonSettings
+	resolve   func(sandboxrelay.ResolveRequest) (sandboxrelay.ResolveResponse, error)
+	current   func(string) (sandboxrelay.CurrentPolicy, error)
+	// currentCtx, when set, answers Current and Report with the caller's
+	// context: a gateway that takes the call and never answers.
+	currentCtx func(context.Context, string) (sandboxrelay.CurrentPolicy, error)
+	// rawCurrent lets a test exercise an incomplete wire answer. Ordinary
+	// fake answers model the complete floor sent by the current gateway.
+	rawCurrent bool
+	explain    func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error)
+	// explainCtx, when set, answers Explain with the caller's context, so
+	// a test can hold a view until the caller gives up on it.
+	explainCtx func(context.Context, sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error)
+	test       func(sandboxrelay.PolicyTestRequest) (sandboxapi.PolicyTestResult, error)
+	packs      func(registration, connector, name string) ([]sandboxrelay.PackView, error)
+	// decisions answers the saved-decisions list of a registration.
+	decisions func(registration string) ([]sandboxrelay.Decision, error)
+	deleted   atomic.Int64
 
 	eventsMu sync.Mutex
 	events   []sandboxrelay.EventBatch
@@ -282,6 +308,21 @@ type fakeRelay struct {
 	eventsFail atomic.Int64
 	// reports are the state reports, "id=running" or "id=stopped".
 	reports []string
+	// restart answers registrations/{id}/restart; nil answers like a
+	// managed gateway without the route (404, no reason).
+	restart func(id string) (sandboxrelay.RegistrationView, error)
+	// restarts are the registrations a restart was asked for.
+	restarts []string
+}
+
+func (f *fakeRelay) Restart(_ context.Context, id string) (sandboxrelay.RegistrationView, error) {
+	f.eventsMu.Lock()
+	f.restarts = append(f.restarts, id)
+	f.eventsMu.Unlock()
+	if f.restart != nil {
+		return f.restart(id)
+	}
+	return sandboxrelay.RegistrationView{}, &sandboxrelay.Error{Status: http.StatusNotFound}
 }
 
 var _ sandboxrelay.Client = (*fakeRelay)(nil)
@@ -289,6 +330,9 @@ var _ sandboxrelay.Client = (*fakeRelay)(nil)
 func (f *fakeRelay) Settings(context.Context) (sandboxrelay.DaemonSettings, error) {
 	if f.settings != nil {
 		return f.settings()
+	}
+	if f.unchanged != nil {
+		return f.unchanged(), nil
 	}
 	return sandboxrelay.DaemonSettings{}, errors.New("no settings")
 }
@@ -302,11 +346,38 @@ func (f *fakeRelay) Bind(context.Context, string, sandboxrelay.BindRequest) (san
 	return sandboxrelay.RegistrationView{}, nil
 }
 func (f *fakeRelay) Deleted(context.Context, string) error { f.deleted.Add(1); return nil }
-func (f *fakeRelay) Current(_ context.Context, id string) (sandboxrelay.CurrentPolicy, error) {
-	if f.current != nil {
-		return f.current(id)
+func (f *fakeRelay) Current(ctx context.Context, id string) (sandboxrelay.CurrentPolicy, error) {
+	if f.currentCtx != nil {
+		return f.currentCtx(ctx, id)
 	}
-	return sandboxrelay.CurrentPolicy{}, nil
+	var cp sandboxrelay.CurrentPolicy
+	var err error
+	if f.current != nil {
+		cp, err = f.current(id)
+	}
+	if err == nil && !cp.Revoked && cp.Floor == nil && !f.rawCurrent {
+		cp.Floor = &config.OpenShellAdminConfig{}
+	}
+	return cp, err
+}
+
+func TestSandboxDaemonRefusesIncompletePolicyAnswer(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	r := daemonRegistration{ID: "reg-1", Sandbox: "dc-a"}
+	if err := f.d.regs.put(r); err != nil {
+		t.Fatal(err)
+	}
+	f.relay.rawCurrent = true
+	f.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
+		return sandboxrelay.CurrentPolicy{V: sandboxrelay.WireVersion}, nil
+	}
+	ans := f.d.askPolicy(context.Background(), r, false, false)
+	if ans.err == nil {
+		t.Fatal("incomplete policy answer was accepted")
+	}
+	if got, _ := f.d.regs.get(r.Sandbox); got.Confirmed {
+		t.Fatal("incomplete policy answer confirmed a cached floor")
+	}
 }
 
 // Report records the state report and answers like Current.
@@ -326,7 +397,10 @@ func (f *fakeRelay) reported() []string {
 	defer f.eventsMu.Unlock()
 	return slices.Clone(f.reports)
 }
-func (f *fakeRelay) Explain(_ context.Context, r sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+func (f *fakeRelay) Explain(ctx context.Context, r sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+	if f.explainCtx != nil {
+		return f.explainCtx(ctx, r)
+	}
 	if f.explain != nil {
 		return f.explain(r)
 	}
@@ -357,7 +431,10 @@ func (f *fakeRelay) Pack(_ context.Context, registration, connector, name string
 func (f *fakeRelay) Decide(context.Context, sandboxrelay.DecisionRequest) (sandboxrelay.DecisionResult, error) {
 	return sandboxrelay.DecisionResult{}, nil
 }
-func (f *fakeRelay) Decisions(context.Context, string) ([]sandboxrelay.Decision, error) {
+func (f *fakeRelay) Decisions(_ context.Context, registration string) ([]sandboxrelay.Decision, error) {
+	if f.decisions != nil {
+		return f.decisions(registration)
+	}
 	return nil, nil
 }
 func (f *fakeRelay) Events(_ context.Context, batch sandboxrelay.EventBatch) error {
@@ -374,11 +451,12 @@ func (f *fakeRelay) Events(_ context.Context, batch sandboxrelay.EventBatch) err
 // fakeOpenShell is a daemonOpenShell whose answers the test sets; the zero
 // value finds nothing to do.
 type fakeOpenShell struct {
-	drift    []openshell.SettingDrift
-	driftErr error
-	prepare  func(sandboxrelay.DaemonSettings) (bool, error)
-	prepared atomic.Int64
-	stopped  atomic.Int64
+	drift         []openshell.SettingDrift
+	driftErr      error
+	renderedDrift bool
+	prepare       func(sandboxrelay.DaemonSettings) (bool, error)
+	prepared      atomic.Int64
+	stopped       atomic.Int64
 	// holder is the gateway port's listener: 0 free, else the uid.
 	holder atomic.Int64
 }
@@ -394,6 +472,9 @@ func (f *fakeOpenShell) OtherGateways(context.Context, sandboxrelay.DaemonSettin
 
 func (f *fakeOpenShell) Drift(sandboxrelay.DaemonSettings) ([]openshell.SettingDrift, error) {
 	return f.drift, f.driftErr
+}
+func (f *fakeOpenShell) RenderedConfigDrift(sandboxrelay.DaemonSettings) bool {
+	return f.renderedDrift
 }
 func (f *fakeOpenShell) Prepare(_ context.Context, s sandboxrelay.DaemonSettings) (bool, error) {
 	f.prepared.Add(1)
@@ -420,6 +501,32 @@ type sandboxDaemonFixture struct {
 	socket  string
 	running atomic.Int64
 	exe     string
+	// counted closes on the daemon's first count of its running sandboxes:
+	// its pass at start, under the lifecycle (settle). exited closes when
+	// Run returns, so a daemon that never reached the pass does not hold
+	// the test for the minute.
+	counted     chan struct{}
+	countedOnce sync.Once
+	exited      chan struct{}
+}
+
+// settle waits until the daemon's pass at start (Run's look at the
+// listeners of sandboxes left running, which holds the lifecycle) is over:
+// a supervision pass the test makes meanwhile finds the lifecycle taken and
+// does nothing (GAP-1062). run calls it, so a test never races that pass.
+func (f *sandboxDaemonFixture) settle(t *testing.T) {
+	t.Helper()
+	select {
+	case <-f.counted:
+	case <-f.exited:
+		return
+	case <-time.After(time.Minute):
+		t.Fatal("the daemon made no pass at start")
+	}
+	if err := f.d.lockLifecycle(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	f.d.unlockLifecycle()
 }
 
 func newSandboxDaemonFixture(t *testing.T, mutate ...func(*SandboxDaemonOptions)) *sandboxDaemonFixture {
@@ -437,7 +544,8 @@ func newSandboxDaemonFixture(t *testing.T, mutate ...func(*SandboxDaemonOptions)
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &sandboxDaemonFixture{relay: &fakeRelay{}, os: &fakeOpenShell{}, socket: socket, exe: filepath.Join(dir, "defenseclaw-gateway")}
+	f := &sandboxDaemonFixture{relay: &fakeRelay{}, os: &fakeOpenShell{}, socket: socket, exe: filepath.Join(dir, "defenseclaw-gateway"),
+		counted: make(chan struct{}), exited: make(chan struct{})}
 	if err := os.WriteFile(f.exe, []byte("v1"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -469,15 +577,30 @@ func newSandboxDaemonFixture(t *testing.T, mutate ...func(*SandboxDaemonOptions)
 		t.Fatal(err)
 	}
 	f.d = d
+	f.relay.unchanged = d.currentSettings
 	return f
 }
 
 // run runs the daemon until the test ends and returns its result channel.
+// It returns once the daemon's pass at start is over (settle): the
+// supervision passes a test makes with check would otherwise find the
+// lifecycle taken by that pass and do nothing, which a loaded runner turned
+// into an idle exit that did not happen (GAP-0864).
 func (f *sandboxDaemonFixture) run(t *testing.T) <-chan error {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- f.d.Run(ctx) }()
+	// The count the test installed (or the fixture's) signals the first
+	// pass; the daemon is not running yet, so this write is unshared.
+	count := f.d.opts.countRunning
+	f.d.opts.countRunning = func(c context.Context) (int, error) {
+		f.countedOnce.Do(func() { close(f.counted) })
+		return count(c)
+	}
+	go func() {
+		done <- f.d.Run(ctx)
+		close(f.exited)
+	}()
 	t.Cleanup(func() {
 		cancel()
 		select {
@@ -492,6 +615,7 @@ func (f *sandboxDaemonFixture) run(t *testing.T) <-chan error {
 		started := f.d.runCtx != nil
 		f.d.listenMu.Unlock()
 		if started || time.Now().After(deadline) {
+			f.settle(t)
 			return done
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -505,6 +629,29 @@ func portFree(addr string) bool {
 	}
 	_ = ln.Close()
 	return true
+}
+
+// A failed startup List does not mean that the listeners are lost. Once
+// OpenShell answers again, the daemon can bind free ports for the sandbox
+// that survived its restart without stopping it.
+func TestSandboxDaemonStartupListRetryBindsListenersWithoutStopping(t *testing.T) {
+	var lists atomic.Int32
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		o.countRunning = func(context.Context) (int, error) {
+			if lists.Add(1) == 1 {
+				return 0, errors.New("OpenShell List temporarily unavailable")
+			}
+			return 1, nil
+		}
+	})
+	fleet := &fakeSandboxFleet{phases: map[string]string{"vm": "ready"}}
+	f.d.rt.fleet = fleet
+	f.d.rt.recheck = 5 * time.Millisecond
+	f.run(t)
+	eventuallyTrue(t, func() bool { return lists.Load() >= 2 && f.d.listening() })
+	if stopped := fleet.stops(); len(stopped) != 0 {
+		t.Fatalf("stopped a healthy sandbox after transient List failure: %v", stopped)
+	}
 }
 
 // The CLI socket is 0600 in a 0700 directory, a stale socket is replaced,
@@ -580,8 +727,8 @@ func (s *statusOnly) Write(p []byte) (int, error) { return len(p), nil }
 func (s *statusOnly) WriteHeader(code int)        { s.status = code }
 
 // The ports are bound at the first create and released when no sandbox
-// runs; a port another account holds refuses with the neutral text.
-func TestSandboxDaemonLazyPortsAndAccountBusy(t *testing.T) {
+// runs; an ordinary listener on a port gets the process-conflict text.
+func TestSandboxDaemonLazyPortsAndProcessConflict(t *testing.T) {
 	f := newSandboxDaemonFixture(t)
 	f.run(t)
 	ingress, egressAddr := f.d.api.SandboxIngressAddr(), f.d.rt.egressAddr
@@ -593,6 +740,9 @@ func TestSandboxDaemonLazyPortsAndAccountBusy(t *testing.T) {
 	}
 	if !f.d.listening() || portFree(ingress) || portFree(egressAddr) || f.d.rt.listenersReady() != nil {
 		t.Fatal("the ports are not held after ensureListeners")
+	}
+	if c := f.d.idlePortConflict(); c != nil {
+		t.Fatalf("daemon called its own listeners a port conflict: %+v", c)
 	}
 	f.running.Store(1)
 	if stop, _ := f.d.check(context.Background()); stop || !f.d.listening() {
@@ -613,7 +763,7 @@ func TestSandboxDaemonLazyPortsAndAccountBusy(t *testing.T) {
 	defer squatter.Close()
 	err = f.d.ensureListeners()
 	var apiErr *sandboxapi.Error
-	if !errors.As(err, &apiErr) || apiErr.Detail != SandboxAccountBusyReason || apiErr.Message != sandboxAccountBusyMessage {
+	if !errors.As(err, &apiErr) || apiErr.Detail != SandboxPortBusyReason || !strings.Contains(apiErr.Message, "another process") {
 		t.Fatalf("busy port: %v", err)
 	}
 	if strings.Contains(apiErr.Message, "uid") || f.d.listening() || !portFree(egressAddr) {
@@ -778,6 +928,27 @@ func TestSandboxDaemonPollReportsTheSandboxState(t *testing.T) {
 	}
 }
 
+func TestSandboxDaemonConfirmationReplacesUserCachedFloor(t *testing.T) {
+	regs := &daemonRegistrations{path: filepath.Join(t.TempDir(), "registrations.json"),
+		byName: map[string]daemonRegistration{"sandbox": {
+			ID: "reg-one", Sandbox: "sandbox",
+			Floor: config.OpenShellAdminConfig{MinProfile: "open"},
+		}}}
+	if regs.applyLive("sandbox", sandboxrelay.CurrentPolicy{V: 1}) {
+		t.Fatal("an answer without a full floor confirmed a user cached floor")
+	}
+	if got, _ := regs.get("sandbox"); got.Confirmed {
+		t.Fatal("a partial answer marked a registration confirmed")
+	}
+	strict := config.OpenShellAdminConfig{MinProfile: "strict"}
+	if !regs.applyLive("sandbox", sandboxrelay.CurrentPolicy{V: 1, Floor: &strict}) {
+		t.Fatal("a complete answer did not confirm the registration")
+	}
+	if got, _ := regs.get("sandbox"); !got.Confirmed || got.Floor.MinProfile != "strict" {
+		t.Fatalf("confirmed floor = %+v", got)
+	}
+}
+
 // GAP-0693: the policy poll never adopts the floor of a stopped sandbox's
 // registration. Its live fields follow each configuration change, so the
 // poll saw it changed and put the daemon, and a sandbox created since under
@@ -795,7 +966,7 @@ func TestSandboxDaemonPollAdoptsOnlyARunningSandboxFloor(t *testing.T) {
 	f.d.floorMu.Unlock()
 	f.d.reloadConfig()
 	f.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
-		return sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:new", Live: sandboxrelay.LiveFields{DeleteStoppedAfter: "14d"}}, nil
+		return sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:new", Floor: &config.OpenShellAdminConfig{DeleteStoppedAfter: "14d"}}, nil
 	}
 	f.d.pollOnce(context.Background())
 	if r, _ := f.d.regs.get("dc-old"); r.Digest != "sha256:new" || r.Floor.DeleteStoppedAfter != "14d" {
@@ -804,7 +975,7 @@ func TestSandboxDaemonPollAdoptsOnlyARunningSandboxFloor(t *testing.T) {
 	if admin := f.d.config().OpenShell.Admin; admin.RequiredPack != "" || admin.MinProfile != "balanced" {
 		t.Fatalf("the poll adopted the stopped sandbox's floor: %+v", admin)
 	}
-	if floor := f.d.regs.newestFloor(func(name string) bool { return name == "dc-old" }); floor == nil || floor.RequiredPack != stale.RequiredPack {
+	if floor := f.d.regs.newestFloor(func(name string) bool { return name == "dc-old" }); floor == nil || floor.DeleteStoppedAfter != "14d" || floor.RequiredPack != "" {
 		t.Fatalf("a running sandbox's floor = %+v", floor)
 	}
 	if floor := f.d.regs.newestFloor(func(string) bool { return false }); floor != nil {
@@ -863,14 +1034,61 @@ func TestSandboxDaemonConfigIsCopyOnlyAndClosed(t *testing.T) {
 	}
 }
 
-// TestFloorConflictMessageNamesTheProvisionalPolicy pins GAP-0496: a run
-// refused because the directory did not answer (a provisional floor that
-// differs from the running sandboxes') says so, not that the policy changed.
-func TestFloorConflictMessageNamesTheProvisionalPolicy(t *testing.T) {
-	if got := floorConflictMessage(true); !strings.Contains(got, "directory couldn't be reached") || !strings.Contains(got, "provisional") {
-		t.Fatalf("provisional refusal = %q", got)
+// Two concurrent managed sandboxes keep their own confirmed floors. A
+// missing registration cannot inherit whichever floor was adopted last.
+func TestSandboxDaemonConfigForEachConfirmedSandbox(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	for _, tc := range []struct{ name, profile string }{{"dc-claude", "balanced"}, {"dc-codex", "strict"}} {
+		if err := f.d.regs.put(daemonRegistration{ID: "reg-" + tc.name, Sandbox: tc.name,
+			Floor: config.OpenShellAdminConfig{MinProfile: tc.profile}, Confirmed: true, UpdatedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if got := floorConflictMessage(false); strings.Contains(got, "provisional") || !strings.Contains(got, "differs from the policy") {
-		t.Fatalf("changed-policy refusal = %q", got)
+	for _, tc := range []struct{ name, profile string }{{"dc-claude", "balanced"}, {"dc-codex", "strict"}} {
+		cfg := f.d.configForSandbox(tc.name)
+		if cfg == nil || cfg.OpenShell.Admin.MinProfile != tc.profile {
+			t.Fatalf("%s floor = %+v", tc.name, cfg)
+		}
+	}
+	closed := f.d.configForSandbox("unregistered").OpenShell.Admin
+	if closed.MinProfile != "strict" || closed.Allowed == nil || *closed.Allowed {
+		t.Fatalf("unregistered sandbox did not receive the closed floor: %+v", closed)
+	}
+	if err := f.d.regs.put(daemonRegistration{ID: "reg-pending", Sandbox: "dc-pending",
+		Floor: config.OpenShellAdminConfig{MinProfile: "open"}, UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"dc-pending", "dc-claude"} {
+		if name == "dc-claude" {
+			f.d.regs.markRevoked(name, "profile removed")
+		}
+		cfg := f.d.configForSandbox(name)
+		if cfg.OpenShell.Admin.Allowed == nil || *cfg.OpenShell.Admin.Allowed {
+			t.Fatalf("%s borrowed a floor: %+v", name, cfg.OpenShell.Admin)
+		}
+	}
+}
+
+// #1195 (GAP-0123): on a managed computer the supported way to run agents on
+// an image of the organization's own is openshell.image.base in the
+// administrator config: every run of the daemon, a new one and an existing
+// sandbox resolved under its registration's floor alike, builds its agent
+// image on that base in the person's own Docker engine (docker build
+// --pull=false). No run takes an image of the person's choosing.
+func TestSandboxDaemonRunsOnTheAdministratorsBaseImage(t *testing.T) {
+	const base = "corp-sandbox-base:1"
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		o.Settings.Operational.Image.Base = base
+	})
+	if got := f.d.config().OpenShell.Image.Base; got != base {
+		t.Fatalf("a new run builds on %q, want %q", got, base)
+	}
+	if err := f.d.regs.put(daemonRegistration{ID: "reg-1", Sandbox: "dc-a", UpdatedAt: time.Now(), Confirmed: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"dc-a", "dc-unregistered"} {
+		if got := f.d.configForSandbox(name).OpenShell.Image.Base; got != base {
+			t.Fatalf("sandbox %s builds on %q, want %q", name, got, base)
+		}
 	}
 }

@@ -235,21 +235,29 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	// entry points at this data directory's token copy and lock.
 	doneLock := acpContractLockPath(userData, "zed", "kiro")
 	editorFile := filepath.Join(userHome, ".config", "zed", "settings.json")
-	guardPath := filepath.Join(userHome, "defenseclaw-acp")
+	agentBinary, agentSHA, guardPath, guardSHA := testACPExecutables(t, userHome)
 	if err := os.MkdirAll(filepath.Dir(editorFile), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	entry, _ := json.Marshal(map[string]any{"agent_servers": map[string]any{
 		acpManagedEntryName("kiro"): map[string]any{"command": guardPath,
-			"args": []string{"--token-file", tokenPath, "--contract-lock", doneLock}},
+			"args": []string{"--token-file", tokenPath, "--contract-lock", doneLock, "--", agentBinary, "acp"}},
 	}})
 	if err := os.WriteFile(editorFile, entry, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The lock pins the entry as setup does; the guard refuses a lock that
+	// pins nothing, so list cannot call it done (GAP-1154).
+	entryDigest, err := acp.ClientEntrySHA256(editorFile, "zed", "kiro", doneLock)
+	if err != nil {
+		t.Fatal(err)
+	}
 	writeLock := func(profile, mode string) {
 		t.Helper()
-		lock, _ := json.Marshal(map[string]any{"version": 1, "client": map[string]any{"id": "zed", "config_path": editorFile},
-			"guard": map[string]any{"path": guardPath}, "profile": profile, "mode": mode})
+		lock, _ := json.Marshal(map[string]any{"version": 1, "client": map[string]any{"id": "zed", "config_path": editorFile,
+			"config_sha256": acp.EntryDigestPrefix + entryDigest},
+			"agent": map[string]any{"id": "kiro", "path": agentBinary, "sha256": agentSHA},
+			"guard": map[string]any{"path": guardPath, "sha256": guardSHA}, "profile": profile, "mode": mode})
 		if err := os.WriteFile(doneLock, lock, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -278,6 +286,23 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 		t.Fatalf("a moved pair is not flagged: list %v, verify %v", row, verified)
 	}
 	cfg.ACP.Clients["zed"], cfg.ACP.Agents["kiro"] = config.ACPBinding{Enabled: true, Profile: "locked"}, config.ACPBinding{Enabled: true, Profile: "locked"}
+	// A profile whose allow-list no longer names the client, while the
+	// binding stays, is refused by the gateway; verify and list say so with
+	// the gateway's rule (GAP-1155).
+	allowed := cfg.ACP.Profiles["locked"]
+	narrowed := allowed
+	narrowed.AllowedClients = []string{"vscode"}
+	cfg.ACP.Profiles["locked"] = narrowed
+	listed, _ = run(runEnterpriseACPList)["enrollments"].([]any)
+	verified = run(runEnterpriseACPVerify)
+	if row, _ := listed[0].(map[string]any); !strings.Contains(fmt.Sprint(row["note"]), "acp.profiles.locked.allowed_clients does not name zed") ||
+		!strings.Contains(fmt.Sprint(verified["central_note"]), "no longer allows zed/kiro in profile locked") {
+		t.Fatalf("a pair outside the profile allow-list is not flagged: list %v, verify %v", row, verified)
+	}
+	cfg.ACP.Profiles["locked"] = allowed
+	if verified = run(runEnterpriseACPVerify); verified["central_note"] != nil {
+		t.Fatalf("verify flags an allowed pair: %v", verified)
+	}
 	// After an account rename the recorded data directory names the old
 	// home; list reads the default one of the new home (GAP-0869).
 	renamedHome := t.TempDir()
@@ -289,6 +314,7 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	}
 	listed, _ = run(runEnterpriseACPList)["enrollments"].([]any)
 	if row, _ := listed[0].(map[string]any); row["token_copy"] != "present" || row["setup"] != "not run" ||
+		row["user_data_dir"] != filepath.Join(renamedHome, ".defenseclaw") ||
 		!strings.Contains(fmt.Sprint(row["note"]), "outside the home") {
 		t.Fatalf("list row after a rename = %v, want the copy found in the new home and a note", row)
 	}
@@ -312,7 +338,7 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := acp.MatchEnterpriseCredential(serviceData, credential.Token); !ok {
+	if _, _, ok := acp.MatchEnterpriseCredentialKeyID(serviceData, acp.HTTPAuthKeyID(credential.Token)); !ok {
 		t.Fatal("enrolled token did not authenticate")
 	}
 	if err := os.Remove(tokenPath); err != nil {
@@ -322,7 +348,7 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	failEnroll("the user token path is a directory")
-	if _, ok := acp.MatchEnterpriseCredential(serviceData, credential.Token); !ok {
+	if _, _, ok := acp.MatchEnterpriseCredentialKeyID(serviceData, acp.HTTPAuthKeyID(credential.Token)); !ok {
 		t.Fatal("a failed re-enrollment removed the working credential")
 	}
 	if err := os.Remove(tokenPath); err != nil {
@@ -333,7 +359,7 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	// after central policy has already been disabled.
 	cfg.ACP.Enabled = false
 	run(runEnterpriseACPRevoke)
-	if _, ok := acp.MatchEnterpriseCredential(serviceData, credential.Token); ok {
+	if _, _, ok := acp.MatchEnterpriseCredentialKeyID(serviceData, acp.HTTPAuthKeyID(credential.Token)); ok {
 		t.Fatal("revoked token still authenticated")
 	}
 	if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
@@ -450,6 +476,62 @@ func TestEnterpriseACPEnrollReplacesTheOtherProfile(t *testing.T) {
 	}
 }
 
+// An enrollment made with --data-dir records that dir; verify and revoke
+// without --data-dir act on the recorded copy, as list does: verify called it
+// missing and revoke left it behind and named <home>/.defenseclaw (GAP-2431).
+func TestEnterpriseACPVerifyAndRevokeUseTheRecordedDataDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("enrolls the current Unix user")
+	}
+	previousCfg := cfg
+	previous := []string{enterpriseACPClient, enterpriseACPAgent, enterpriseACPProfile, enterpriseACPUser, enterpriseACPUserHome, enterpriseACPSID, enterpriseACPUserDataDir}
+	previousJSON, previousUID, previousGID := enterpriseACPJSON, enterpriseACPUID, enterpriseACPGID
+	t.Cleanup(func() {
+		cfg = previousCfg
+		enterpriseACPClient, enterpriseACPAgent, enterpriseACPProfile = previous[0], previous[1], previous[2]
+		enterpriseACPUser, enterpriseACPUserHome, enterpriseACPSID, enterpriseACPUserDataDir = previous[3], previous[4], previous[5], previous[6]
+		enterpriseACPJSON, enterpriseACPUID, enterpriseACPGID = previousJSON, previousUID, previousGID
+	})
+	cfg = &config.Config{DataDir: t.TempDir(), DeploymentMode: "managed_enterprise", ACP: config.ACPConfig{
+		Enabled: true, DefaultProfile: "obs",
+		Clients:  map[string]config.ACPBinding{"zed": {Enabled: true, Profile: "obs"}},
+		Agents:   map[string]config.ACPBinding{"hermes": {Enabled: true, Profile: "obs"}},
+		Profiles: map[string]config.ACPProfile{"obs": {Mode: "observe", AllowedClients: []string{"zed"}, AllowedAgents: []string{"hermes"}}},
+	}}
+	cfg.Enterprise.Profile = "standalone"
+	userHome := t.TempDir()
+	recorded := filepath.Join(userHome, "custom-acp")
+	enterpriseACPClient, enterpriseACPAgent, enterpriseACPProfile = "zed", "hermes", "obs"
+	enterpriseACPUser, enterpriseACPUserHome, enterpriseACPSID, enterpriseACPUserDataDir = "", userHome, "", recorded
+	enterpriseACPJSON, enterpriseACPUID, enterpriseACPGID = true, -1, -1
+	run := func(step func(*cobra.Command, []string) error) (map[string]any, error) {
+		t.Helper()
+		var output bytes.Buffer
+		command := &cobra.Command{}
+		command.SetOut(&output)
+		err := step(command, nil)
+		var payload map[string]any
+		_ = json.Unmarshal(output.Bytes(), &payload)
+		return payload, err
+	}
+	if _, err := run(runEnterpriseACPEnroll); err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	tokenPath, _ := acp.EnterpriseUserTokenPath(recorded, "zed", "hermes")
+	enterpriseACPUserDataDir = ""
+	verified, err := run(runEnterpriseACPVerify)
+	if err != nil || verified["ok"] != true || verified["token_file"] != tokenPath {
+		t.Fatalf("verify without --data-dir = %v, %v; want ok with token_file %s", verified, err, tokenPath)
+	}
+	revoked, err := run(runEnterpriseACPRevoke)
+	if err != nil || revoked["token_file"] != tokenPath || revoked["centrally_revoked"] != true {
+		t.Fatalf("revoke without --data-dir = %v, %v; want token_file %s", revoked, err, tokenPath)
+	}
+	if _, err := os.Lstat(tokenPath); !os.IsNotExist(err) {
+		t.Fatalf("recorded copy after revoke: %v; want it removed", err)
+	}
+}
+
 // The Windows refusals named hook mutation and gave no next step; they now
 // name the ACP enrollment, LocalSystem and --user/--sid (GAP-0261).
 func TestEnterpriseACPWindowsRefusalsSayHowToEnroll(t *testing.T) {
@@ -545,10 +627,22 @@ func TestEnterpriseACPResultMarkIsASCIIWhenRedirected(t *testing.T) {
 	}
 }
 
+// g072 review 2 M4: on Windows the setup an enrollment reports is a
+// PowerShell call from the managed renderer: the path, each path flag and
+// any argument that is not a plain word are literals, the typographic quotes
+// doubled (a profile path of O’Brien ended the literal early).
 func TestEnterpriseACPSetupPathQuotesForPowerShell(t *testing.T) {
-	got := enterpriseACPQuotePath(`C:\Program Files\DefenseClaw\bin\gateway.exe`, true)
-	if got != `'C:\Program Files\DefenseClaw\bin\gateway.exe'` {
-		t.Fatalf("PowerShell path = %q", got)
+	got := enterpriseACPCommandLine(true, `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe`,
+		"enterprise", "acp", "setup", "--client", "zed", "--agent", "kiro", "--profile", "team a", "--activate",
+		"--data-dir", "C:\\Users\\O\u2019Brien\\.defenseclaw", "--api-port", "18970", "--guard-binary", `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-acp.exe`)
+	want := `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise acp setup --client zed --agent kiro --profile 'team a' --activate ` +
+		"--data-dir 'C:\\Users\\O\u2019\u2019Brien\\.defenseclaw' --api-port 18970 --guard-binary 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-acp.exe'"
+	if got != want {
+		t.Fatalf("PowerShell setup = %s, want %s", got, want)
+	}
+	if enterpriseACPRunIn(true) != "in PowerShell, " || enterpriseACPRunIn(false) != "" ||
+		enterpriseACPRunInstruction(true) != "In PowerShell, run" || enterpriseACPRunInstruction(false) != "Run" {
+		t.Fatal("the PowerShell setup is not handed on as a PowerShell command")
 	}
 }
 
@@ -559,12 +653,19 @@ func TestEnterpriseACPSetupPathQuotesForUnixShell(t *testing.T) {
 		t.Skip("requires a POSIX shell")
 	}
 	path := "/home/person$group/O'Brien data/.defenseclaw"
-	quoted := enterpriseACPQuotePath(path, false)
-	output, err := exec.Command("sh", "-c", "set -- "+quoted+"; printf %s \"$1\"").Output()
+	line := enterpriseACPCommandLine(false, "/opt/defenseclaw/bin/defenseclaw-gateway", "enterprise", "acp", "setup", "--client", "zed",
+		"--profile", "team a", "--data-dir", path, "--api-port", "18970")
+	output, err := exec.Command("sh", "-c", "set -- "+line+"; printf '%s\\n' \"$@\"").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(output) != path {
-		t.Fatalf("shell parsed %q as %q, want %q", quoted, output, path)
+	if want := "/opt/defenseclaw/bin/defenseclaw-gateway\nenterprise\nacp\nsetup\n--client\nzed\n--profile\nteam a\n--data-dir\n" + path + "\n--api-port\n18970\n"; string(output) != want {
+		t.Fatalf("shell parsed %q as %q, want %q", line, output, want)
+	}
+	// A plain path keeps its single quotes, and a plain word stays bare: the
+	// command keeps its shape.
+	if got, want := enterpriseACPCommandLine(false, "/opt/x/gw", "--client", "zed", "--data-dir", "/home/a/.defenseclaw"),
+		"'/opt/x/gw' --client zed --data-dir '/home/a/.defenseclaw'"; got != want {
+		t.Fatalf("plain POSIX setup = %s, want %s", got, want)
 	}
 }

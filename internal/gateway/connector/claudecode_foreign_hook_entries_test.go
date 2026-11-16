@@ -280,6 +280,9 @@ func TestClaudeCodeRollbackLeavesHooksEarlierReleasesRemove(t *testing.T) {
 	settingsPath := filepath.Join(dir, ".claude", "settings.json")
 	ClaudeCodeSettingsPathOverride = settingsPath
 	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+	// A packaged install's PreToolUse handler is the guard, which no earlier
+	// release owns.
+	pinClaudeCodePreToolGuard(t, filepath.Join(dir, "Programs", "DefenseClaw", "bin", "defenseclaw-hook.exe"))
 
 	// The 1.0.0 (06b1c9e68) ownership test for a per-user handler.
 	ownedBy100 := func(handler map[string]interface{}) bool {

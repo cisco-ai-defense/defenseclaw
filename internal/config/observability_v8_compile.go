@@ -17,13 +17,13 @@ import (
 	"net/netip"
 	"net/url"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"golang.org/x/text/unicode/norm"
 )
@@ -49,11 +49,11 @@ const (
 )
 
 var (
-	observabilityV8StableNamePattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
-	observabilityV8EnvNamePattern     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,255}$`)
-	observabilityV8SelectorPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`)
-	observabilityV8ResourceKeyPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.-]{0,127}$`)
-	observabilityV8HostnamePattern    = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
+	observabilityV8StableNamePattern  = lazyregexp.New(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+	observabilityV8EnvNamePattern     = lazyregexp.New(`^[A-Za-z_][A-Za-z0-9_]{0,255}$`)
+	observabilityV8SelectorPattern    = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`)
+	observabilityV8ResourceKeyPattern = lazyregexp.New(`^[A-Za-z][A-Za-z0-9_.-]{0,127}$`)
+	observabilityV8HostnamePattern    = lazyregexp.New(`^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
 	observabilityV8ReservedPrefixes   = []netip.Prefix{
 		netip.MustParsePrefix("0.0.0.0/8"),
 		netip.MustParsePrefix("192.0.0.0/24"),
@@ -248,7 +248,20 @@ func compileObservabilityV8Local(source ObservabilityV8LocalSource) (Observabili
 			ObservabilityV8MaxRetentionDays,
 		)
 	}
-	return ObservabilityV8EffectiveLocal{Path: source.Path, JudgeBodiesPath: source.JudgeBodiesPath, RetentionDays: retentionDays}, nil
+	maxStoreMB := 0
+	if source.MaxStoreMB != nil {
+		maxStoreMB = *source.MaxStoreMB
+	}
+	if maxStoreMB != 0 && (maxStoreMB < ObservabilityV8MinStoreMB || maxStoreMB > ObservabilityV8MaxStoreMB) {
+		return ObservabilityV8EffectiveLocal{}, fmt.Errorf(
+			"observability.local.max_store_mb: got %d, want 0 (no size cap) or %d to %d",
+			maxStoreMB, ObservabilityV8MinStoreMB, ObservabilityV8MaxStoreMB,
+		)
+	}
+	return ObservabilityV8EffectiveLocal{
+		Path: source.Path, JudgeBodiesPath: source.JudgeBodiesPath, RetentionDays: retentionDays,
+		MaxStoreMB: maxStoreMB,
+	}, nil
 }
 
 func compileObservabilityV8TracePolicy(
@@ -434,14 +447,9 @@ func compileObservabilityV8Destination(
 			Policy: ObservabilityV8LiveReloadable, Transport: ObservabilityV8LiveReloadable,
 		},
 	}
-	// A Prometheus destination owns an in-process listener. The current runtime
-	// cannot prepare a replacement generation on the same binding while the
-	// active generation is still serving, so neither its listener policy nor
-	// transport may be represented as generally live-reloadable.
-	if source.Kind == ObservabilityV8DestinationPrometheus {
-		result.ReloadApplicability.Policy = ObservabilityV8RestartRequired
-		result.ReloadApplicability.Transport = ObservabilityV8RestartRequired
-	}
+	// A Prometheus destination is live-reloadable too: a replacement generation
+	// on the same listen address joins the socket the active generation holds
+	// (GAP-2072).
 	if source.Preset == "galileo" {
 		result.PresetProfile = galileoCompatibilityProfile
 	}
@@ -477,6 +485,7 @@ func compileObservabilityV8Destination(
 		return ObservabilityV8EffectiveDestination{}, 0, err
 	}
 	result.Transport = transport
+	result.localStack = source.Kind == ObservabilityV8DestinationSplunkHEC && source.LocalStack != nil
 	if err := validateObservabilityV8SignalOverrides(result.Transport.SignalOverrides, result.SelectedSignals, path+".signal_overrides"); err != nil {
 		return ObservabilityV8EffectiveDestination{}, 0, err
 	}
@@ -864,6 +873,9 @@ func compileObservabilityV8Transport(
 		if !ValidEnterpriseCredentialName(credential.name) {
 			return ObservabilityV8TransportPlan{}, fmt.Errorf("%s.%s: invalid protected credential name (lowercase letters, digits and dashes)", path, credential.field)
 		}
+		if refusal := gatewayCredentialRefusal(path+"."+credential.field, credential.name); refusal != "" {
+			return ObservabilityV8TransportPlan{}, fmt.Errorf("%s", refusal)
+		}
 		if credential.env != "" {
 			return ObservabilityV8TransportPlan{}, fmt.Errorf("%s.%s: set either %s or %s, not both", path, credential.field, credential.envField, credential.field)
 		}
@@ -962,12 +974,13 @@ func validateObservabilityV8KindSpecificFields(source ObservabilityV8Destination
 		"tls": observabilityV8TLSConfigured(source.TLS), "batch": observabilityV8BatchConfigured(source.Batch),
 		"network_safety":   observabilityV8NetworkSafetyConfigured(source.NetworkSafety),
 		"signal_overrides": source.SignalOverrides != nil,
+		"local_stack":      source.LocalStack != nil,
 	}
 	allowed := map[ObservabilityV8DestinationKind]map[string]struct{}{
 		ObservabilityV8DestinationJSONL:      setObservabilityV8Fields("path", "rotation", "batch"),
 		ObservabilityV8DestinationConsole:    setObservabilityV8Fields("batch"),
 		ObservabilityV8DestinationPrometheus: setObservabilityV8Fields("listen", "path"),
-		ObservabilityV8DestinationSplunkHEC:  setObservabilityV8Fields("endpoint", "token_env", "token_credential", "index", "source", "sourcetype", "sourcetype_overrides", "timeout_ms", "tls", "batch", "network_safety"),
+		ObservabilityV8DestinationSplunkHEC:  setObservabilityV8Fields("endpoint", "token_env", "token_credential", "index", "source", "sourcetype", "sourcetype_overrides", "timeout_ms", "tls", "batch", "network_safety", "local_stack"),
 		ObservabilityV8DestinationHTTPJSONL:  setObservabilityV8Fields("endpoint", "method", "headers", "bearer_env", "bearer_credential", "timeout_ms", "tls", "batch", "network_safety"),
 		ObservabilityV8DestinationOTLP:       setObservabilityV8Fields("preset", "endpoint", "protocol", "headers", "logger_name", "timeout_ms", "tls", "batch", "network_safety", "signal_overrides"),
 	}
@@ -978,7 +991,7 @@ func validateObservabilityV8KindSpecificFields(source ObservabilityV8Destination
 	order := []string{
 		"preset", "path", "rotation", "listen", "endpoint", "protocol", "method", "headers",
 		"token_env", "token_credential", "bearer_env", "bearer_credential", "index", "source", "sourcetype", "sourcetype_overrides", "logger_name", "timeout_ms", "tls", "batch",
-		"network_safety", "signal_overrides",
+		"network_safety", "signal_overrides", "local_stack",
 	}
 	for _, field := range order {
 		if !configured[field] {
@@ -1441,6 +1454,9 @@ func validateObservabilityV8Headers(
 			if !ValidEnterpriseCredentialName(value.Secret.Credential) {
 				return fmt.Errorf("%s.%s.credential: invalid protected credential name (lowercase letters, digits and dashes)", path, name)
 			}
+			if refusal := gatewayCredentialRefusal(path+"."+name+".credential", value.Secret.Credential); refusal != "" {
+				return fmt.Errorf("%s", refusal)
+			}
 		} else if value.Secret != nil && strings.TrimSpace(value.Secret.Env) == "" {
 			return fmt.Errorf("%s.%s.env: must not be empty", path, name)
 		} else if value.Secret != nil && !observabilityV8EnvNamePattern.MatchString(value.Secret.Env) {
@@ -1475,10 +1491,7 @@ func observabilityV8ValidHeaderName(value string) bool {
 	}
 	for index := 0; index < len(value); index++ {
 		character := value[index]
-		if !((character >= 'a' && character <= 'z') ||
-			(character >= 'A' && character <= 'Z') ||
-			(character >= '0' && character <= '9') ||
-			strings.ContainsRune("!#$%&'*+-.^_`|~", rune(character))) {
+		if (((character < 'a' || character > 'z') && (character < 'A' || character > 'Z')) && (character < '0' || character > '9')) && !(strings.ContainsRune("!#$%&'*+-.^_`|~", rune(character))) {
 			return false
 		}
 	}
@@ -1498,8 +1511,7 @@ func observabilityV8ForbiddenTransportHeader(normalized string) bool {
 func observabilityV8ValidGRPCMetadataName(normalized string) bool {
 	for index := 0; index < len(normalized); index++ {
 		character := normalized[index]
-		if !((character >= 'a' && character <= 'z') ||
-			(character >= '0' && character <= '9') || character == '-' || character == '_' || character == '.') {
+		if ((((character < 'a' || character > 'z') && (character < '0' || character > '9')) && character != '-') && character != '_') && character != '.' {
 			return false
 		}
 	}
@@ -1747,11 +1759,22 @@ func compileObservabilityV8Warnings(
 				}
 			}
 		}
-		if destination.Transport.TLS != nil && (destination.Transport.TLS.Insecure || destination.Transport.TLS.InsecureSkipVerify) {
+		if destination.Transport.TLS != nil && (destination.Transport.TLS.Insecure || destination.Transport.TLS.InsecureSkipVerify) &&
+			!strings.HasPrefix(strings.ToLower(strings.TrimSpace(destination.Transport.Endpoint)), "http://") {
 			warnings = append(warnings, ObservabilityV8Warning{
 				Code: "tls_verification_disabled", Path: base + ".tls",
 				Summary: "destination transport uses an explicitly unsafe TLS mode",
 			})
+		}
+		if endpoint, err := url.Parse(destination.Transport.Endpoint); err == nil && endpoint.Scheme == "http" {
+			host := endpoint.Hostname()
+			ip := net.ParseIP(host)
+			if !strings.EqualFold(host, "localhost") && (ip == nil || !ip.IsLoopback()) {
+				warnings = append(warnings, ObservabilityV8Warning{
+					Code: "plaintext_transport", Path: base + ".endpoint",
+					Summary: "destination sends telemetry over plaintext HTTP to a non-loopback endpoint",
+				})
+			}
 		}
 		if destination.Transport.NetworkSafety != nil && destination.Transport.NetworkSafety.AllowPrivateNetworks {
 			warnings = append(warnings, ObservabilityV8Warning{
@@ -1796,6 +1819,11 @@ func compileObservabilityV8Provenance(
 		ObservabilityV8Provenance{Path: "observability.local.judge_bodies_path", Origin: originObservabilityV8Path(source.Local.JudgeBodiesPath, source.judgePathDefaulted)},
 		ObservabilityV8Provenance{Path: "observability.local.retention_days", Origin: originObservabilityV8Pointer(source.Local.RetentionDays)},
 	)
+	if source.Local.MaxStoreMB != nil {
+		result = append(result, ObservabilityV8Provenance{
+			Path: "observability.local.max_store_mb", Origin: originObservabilityV8Pointer(source.Local.MaxStoreMB),
+		})
+	}
 	resourceNames := make([]string, 0, len(source.Resource.Attributes))
 	for name := range source.Resource.Attributes {
 		resourceNames = append(resourceNames, name)

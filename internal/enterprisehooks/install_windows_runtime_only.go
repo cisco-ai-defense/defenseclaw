@@ -37,7 +37,8 @@ var windowsOpenCodeMachinePolicy struct {
 // VS Code Local hook file and Copilot plugin in a Copilot row's home, as
 // the target user. enterprisepolicy owns the files and the CLI resolves
 // what the administrator's config wants, so the CLI installs it with
-// SetWindowsCopilotVSCodeUser. Unset, Copilot rows leave the home alone.
+// SetWindowsCopilotVSCodeUser. Unset, Copilot user operations fail rather
+// than silently leaving a managed hook file behind.
 var windowsCopilotVSCodeUser struct {
 	sync.Mutex
 	apply func(home string, verify, remove bool) error
@@ -50,6 +51,38 @@ func SetWindowsCopilotVSCodeUser(apply func(home string, verify, remove bool) er
 	windowsCopilotVSCodeUser.apply = apply
 }
 
+// windowsCopilotVSCodeUserPriorRender checks, read-only, that the user's Local
+// hook file and plugin hooks are current or exactly the render releases up to
+// 1.0.6 wrote (GAP-0980). The CLI installs it with
+// SetWindowsCopilotVSCodeUserPriorRender; unset, it refuses.
+var windowsCopilotVSCodeUserPriorRender struct {
+	sync.Mutex
+	check func(home string) error
+}
+
+// SetWindowsCopilotVSCodeUserPriorRender installs the prior-render check.
+func SetWindowsCopilotVSCodeUserPriorRender(check func(home string) error) {
+	windowsCopilotVSCodeUserPriorRender.Lock()
+	defer windowsCopilotVSCodeUserPriorRender.Unlock()
+	windowsCopilotVSCodeUserPriorRender.check = check
+}
+
+func applyWindowsCopilotVSCodeUserPriorRender(connectorName, home string) error {
+	if connectorName != "copilot" {
+		return nil
+	}
+	windowsCopilotVSCodeUserPriorRender.Lock()
+	check := windowsCopilotVSCodeUserPriorRender.check
+	windowsCopilotVSCodeUserPriorRender.Unlock()
+	if check == nil {
+		return errors.New("enterprise hooks: copilot VS Code Local prior-render check is not registered")
+	}
+	if err := check(home); err != nil {
+		return fmt.Errorf("enterprise hooks: copilot VS Code Local hooks: %w", err)
+	}
+	return nil
+}
+
 func applyWindowsCopilotVSCodeUser(connectorName, home string, verify, remove bool) error {
 	if connectorName != "copilot" {
 		return nil
@@ -58,7 +91,7 @@ func applyWindowsCopilotVSCodeUser(connectorName, home string, verify, remove bo
 	apply := windowsCopilotVSCodeUser.apply
 	windowsCopilotVSCodeUser.Unlock()
 	if apply == nil {
-		return nil
+		return errors.New("enterprise hooks: copilot VS Code Local user-file callback is not registered")
 	}
 	if err := apply(home, verify, remove); err != nil {
 		return fmt.Errorf("enterprise hooks: copilot VS Code Local hooks: %w", err)
@@ -156,7 +189,9 @@ func resolveWindowsRuntimeOnlyTarget(opts InstallOptions) (windowsGenericManaged
 	if !windowsStandaloneRuntimeOnlyInstall(name) {
 		return target, "", fmt.Errorf("enterprise hooks: connector %q is not a Windows machine policy runtime connector", name)
 	}
-	target.setup.HookFailMode = "closed"
+	// The administrator's configured delivery mode: explicit open or closed;
+	// unset is closed, and open under Secure Client (#1163).
+	target.setup.HookFailMode = canonicalHookFailMode(target.setup.HookFailMode)
 	policyPath, err := windowsRuntimeOnlyPolicyPath(name)
 	if err != nil {
 		return target, "", err
@@ -178,7 +213,7 @@ func installWindowsRuntimeOnlyManagedResult(
 	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
 		return InstallResult{}, err
 	}
-	if err := requireWindowsEnterpriseAgentVersion(opts.AgentVersion); err != nil {
+	if err := requireWindowsEnterpriseAgentVersionOutsideSecureClient(opts.AgentVersion); err != nil {
 		return InstallResult{}, err
 	}
 	target, policyPath, err := resolveWindowsRuntimeOnlyTarget(opts)
@@ -199,8 +234,12 @@ func installWindowsRuntimeOnlyManagedResult(
 	var lockEntry connector.HookContractLockEntry
 	var lockUpdatedAt, entryUpdatedAt string
 	var generation WindowsManagedRuntimeGenerationPublication
-	if err := ensureWindowsStandaloneHookRuntimeAncestorReadable(); err != nil {
-		return InstallResult{}, err
+	if windowsPerUserRuntimeStandalone() {
+		// Secure Client keeps the enrollment in Copilot's machine folder,
+		// whose ancestors the policy.d drop-in already needs user-readable.
+		if err := ensureWindowsStandaloneHookRuntimeAncestorReadable(); err != nil {
+			return InstallResult{}, err
+		}
 	}
 	err = connector.WithUserHomeDir(target.home, func() error {
 		return windowsEnterpriseTargetImpersonation(target.sid, target.home, func() error {
@@ -210,6 +249,9 @@ func installWindowsRuntimeOnlyManagedResult(
 			}
 			if !sameWindowsEnterprisePath(verifiedHome, target.home) || !verifiedSID.Equals(target.sid) {
 				return fmt.Errorf("enterprise hooks: %s target profile identity changed before runtime mutation", name)
+			}
+			if err := moveWindowsTargetOwnedDataDirLinksAside(transaction.home, transaction.dataDir, transaction.targetSID, opts.WindowsDeferredFirstEnrollment); err != nil {
+				return err
 			}
 			if err := prepareWindowsCodexRuntime(transaction, opts.AllowMissingHookConfigRepair); err != nil {
 				return err
@@ -238,7 +280,7 @@ func installWindowsRuntimeOnlyManagedResult(
 				return fail(fmt.Errorf("enterprise hooks: create %s managed runtime: %w", name, createErr))
 			}
 			if err := connector.ReconcileManagedNativeHookRuntime(
-				target.dataDir, target.setup.APIAddr, name, target.setup.HookAPIToken,
+				target.dataDir, target.setup.APIAddr, name, target.setup.HookAPIToken, target.setup.HookFailMode,
 			); err != nil {
 				return fail(fmt.Errorf("enterprise hooks: write %s managed runtime: %w", name, err))
 			}
@@ -255,7 +297,7 @@ func installWindowsRuntimeOnlyManagedResult(
 			if err != nil {
 				return fail(fmt.Errorf("enterprise hooks: digest %s managed runtime: %w", name, err))
 			}
-			lockEntry.HookFailMode = "closed"
+			lockEntry.HookFailMode = target.setup.HookFailMode
 			lockEntry.HookScriptDigests = nil
 			lockEntry.Locations = connector.ConnectorLocations{HookConfigPaths: []string{policyPath}}
 			if err := connector.SaveRecoveredHookContractLockEntryForMode(
@@ -315,7 +357,7 @@ func verifyWindowsRuntimeOnlyManagedResult(
 	if err := windowsEnterpriseAdministratorCheck(); err != nil {
 		return InstallResult{}, err
 	}
-	if err := requireWindowsEnterpriseAgentVersion(opts.AgentVersion); err != nil {
+	if err := requireWindowsEnterpriseAgentVersionOutsideSecureClient(opts.AgentVersion); err != nil {
 		return InstallResult{}, err
 	}
 	target, policyPath, err := resolveWindowsRuntimeOnlyTarget(opts)
@@ -338,7 +380,11 @@ func verifyWindowsRuntimeOnlyManagedResult(
 	}
 	// A missing or stale Local hook file or plugin fails verify, so the
 	// guardian repairs the row.
-	if err := applyWindowsCopilotVSCodeUser(name, target.home, true, false); err != nil {
+	if opts.AcceptPriorReleaseRender {
+		if err := applyWindowsCopilotVSCodeUserPriorRender(name, target.home); err != nil {
+			return InstallResult{}, err
+		}
+	} else if err := applyWindowsCopilotVSCodeUser(name, target.home, true, false); err != nil {
 		return InstallResult{}, err
 	}
 	return InstallResult{
@@ -356,7 +402,7 @@ func verifyWindowsRuntimeOnlyUserRuntime(target windowsGenericManagedTarget, pol
 	if err := verifyWindowsUserRuntime(windowsRuntimeOnlyPaths(target.dataDir, name), target.sid); err != nil {
 		return err
 	}
-	if err := connector.ValidateManagedNativeHookRuntime(target.dataDir, target.setup.APIAddr, name); err != nil {
+	if err := connector.ValidateManagedNativeHookRuntime(target.dataDir, target.setup.APIAddr, name, target.setup.HookFailMode); err != nil {
 		return fmt.Errorf("enterprise hooks: %s managed runtime is invalid: %w", name, err)
 	}
 	tokenPath, err := connector.HookTokenFilePath(filepath.Join(target.dataDir, "hooks"), name)
@@ -377,7 +423,7 @@ func verifyWindowsRuntimeOnlyUserRuntime(target windowsGenericManagedTarget, pol
 	if lock.Connector != name || len(lock.Locations.HookConfigPaths) != 1 ||
 		!sameWindowsEnterprisePath(lock.Locations.HookConfigPaths[0], policyPath) ||
 		len(lock.Locations.HookScriptPaths) != 0 ||
-		!strings.EqualFold(strings.TrimSpace(lock.HookFailMode), "closed") {
+		!strings.EqualFold(strings.TrimSpace(lock.HookFailMode), target.setup.HookFailMode) {
 		return fmt.Errorf("enterprise hooks: %s managed hook contract does not identify only its machine policy", name)
 	}
 	return nil

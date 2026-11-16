@@ -99,9 +99,7 @@ func TestDecodeProjectedTraceHTTPResponseFailsClosed(t *testing.T) {
 // carries the collector's reason.
 func TestProjectedTraceAllRejectedPartialSuccessNamesTheReason(t *testing.T) {
 	var out bytes.Buffer
-	previous := rejectionLogWriter
-	rejectionLogWriter = &out
-	t.Cleanup(func() { rejectionLogWriter = previous })
+	setRejectionLogTestWriter(t, &out)
 
 	adapter := &ProjectedTraceAdapter{destination: "galileo-gap2532"}
 	result := adapter.classifyTraceResponse(&collectortracepb.ExportTraceServiceResponse{

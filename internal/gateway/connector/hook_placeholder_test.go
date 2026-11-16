@@ -34,3 +34,30 @@ defenseclaw_response_failure_reason "$2"`
 		}
 	}
 }
+
+// GAP-0556: on a standalone hook socket root's refusal under enrollment.root:
+// deny read as a stopped gateway or token drift. It names the policy, as the
+// unenrolled-account refusal does.
+func TestStandaloneHookFailureReasonNamesTheRefusalPolicy(t *testing.T) {
+	script := `DEFENSECLAW_BAKED_HOOK_PATH=/usr/bin:/bin; . "$1"; RESULT="$3"; DEFENSECLAW_HOOK_SOCKET=/run/defenseclaw/hook.sock
+defenseclaw_response_failure_reason "$2"`
+	for _, c := range []struct{ reason, want string }{
+		{"enterprise_managed_root_denied", "does not allow agents to run as root on this computer"},
+		{"enterprise_managed_uid_unregistered", "not enrolled in DefenseClaw on this computer yet"},
+	} {
+		body := `{"error":"forbidden","reason":"` + c.reason + `"}`
+		out, err := exec.Command("/bin/bash", "-c", script, "bash", filepath.Join("hooks", "_hardening.sh"), "gateway returned HTTP 403", body).CombinedOutput()
+		if err != nil || !strings.Contains(string(out), c.want) || !strings.HasSuffix(string(out), "("+c.reason+")") ||
+			strings.Contains(string(out), "token drift") || strings.Contains(string(out), "not running") {
+			t.Errorf("%s: %v, %q; want %q", c.reason, err, out, c.want)
+		}
+	}
+	// An excluded account is told the policy excludes it, not to wait
+	// (identity-round GAP-1181).
+	body := `{"enrollment":"excluded","error":"forbidden","reason":"enterprise_managed_uid_unregistered"}`
+	out, err := exec.Command("/bin/bash", "-c", script, "bash", filepath.Join("hooks", "_hardening.sh"), "gateway returned HTTP 403", body).CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "policy excludes this account on this computer") ||
+		strings.Contains(string(out), "within about five minutes") || !strings.HasSuffix(string(out), "(enterprise_managed_uid_unregistered)") {
+		t.Errorf("excluded: %v, %q", err, out)
+	}
+}

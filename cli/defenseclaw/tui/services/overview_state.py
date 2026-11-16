@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
@@ -23,6 +24,13 @@ from defenseclaw.connector_paths import (
     connector_home,
     hermes_config_path,
     hermes_home,
+)
+from defenseclaw.connector_paths import normalize as normalize_connector
+from defenseclaw.enforce.admission_overrides import (  # re-exported for the TUI
+    admission_action_overrides as admission_action_overrides,
+)
+from defenseclaw.enforce.admission_overrides import (
+    format_scanner_overrides_summary as format_scanner_overrides_summary,
 )
 from defenseclaw.observability.custody_status import (
     NativeDeliveryStatus,
@@ -43,6 +51,18 @@ NoticeLevel = Literal["info", "warn", "error"]
 STALENESS_WINDOW = timedelta(minutes=15)
 DOCTOR_CLOCK_SKEW_TOLERANCE = timedelta(minutes=5)
 MAX_AI_DISCOVERY_OVERVIEW_ROWS = 8
+# Text width of one Overview notice line in an 80-column terminal: the body is
+# 72 wide and the icon column takes 5. At 80x24 only the first line of a
+# notice is above the fold, so a notice whose key must stay visible fits here.
+OVERVIEW_NOTICE_WIDTH = 67
+# Shorter words for the degraded-cause heads, used only when the heads do not
+# fit on one notice line; the Runtime panel (N) keeps the full reasons.
+# "partial coverage: " heads the plane-badge fallback; DEGRADED already says it.
+_RUNTIME_HEAD_SHORT = (
+    (" available but not running", " not running"),
+    (" partially covered", " partial"),
+    ("partial coverage: ", ""),
+)
 # Cursor merges hooks Enterprise > Team > Project > User and has no API to
 # detect a higher-priority file, so DefenseClaw infers none. Plain words, not
 # the old "priority-conflict-detection=unavailable" token (GAP-2561).
@@ -76,6 +96,31 @@ class ConnectorHealth:
     tool_inspections: int = 0
     tool_blocks: int = 0
     subprocess_blocks: int = 0
+    # Claude Cowork is a surface of claudecode: /health counts its hook
+    # events under connectors[claudecode].surfaces.cowork, machine-wide,
+    # since the gateway started.
+    cowork_requests: int = 0
+    cowork_last_activity_at: str = ""
+
+
+def cowork_line(health: HealthSnapshot | None) -> str:
+    """The Cowork row of the Claude Code connector, from ``/health``.
+
+    Claude Cowork runs Claude Desktop's bundled Claude Code engine, which
+    runs the Claude Code hooks DefenseClaw installed, so its events reach the
+    claudecode connector. Returns "" when the gateway reports no claudecode
+    connector.
+    """
+    if health is None:
+        return ""
+    for connector in health.connectors:
+        if connector.name.strip().lower() != "claudecode":
+            continue
+        if connector.cowork_requests <= 0:
+            return "no Cowork event since the gateway started"
+        last = connector.cowork_last_activity_at or "unknown"
+        return f"{connector.cowork_requests} event(s) since the gateway started, last {last}"
+    return ""
 
 
 @dataclass(frozen=True)
@@ -100,6 +145,51 @@ class ConnectorOverviewRow:
     last_activity_at: datetime | None = None
 
 
+def cowork_overview_rows(status: Any | None, *, home: str = "") -> tuple[tuple[str, str], ...]:
+    """The Overview's Cowork rows from the ``defenseclaw status`` Cowork row.
+
+    *status* is a ``cowork.CoworkStatus`` (protected, detail, step,
+    last_event_at), None when Cowork plays no part on this account. The first
+    row says protected or not and when the last Cowork event arrived (a clock
+    time: the Overview redraws only when its content changes); a second row
+    names the missing step. *home* is shortened to "~" in the step.
+    """
+
+    if status is None:
+        return ()
+    protected = bool(getattr(status, "protected", False))
+    detail = str(getattr(status, "detail", "") or "").strip()
+    state = re.split(r"[:,(]", detail, maxsplit=1)[0].strip() if detail else ""
+    if not state:
+        state = "protected" if protected else "not protected"
+    last = _clock_text(str(getattr(status, "last_event_at", "") or ""))
+    value = f"{state}, last event {last}" if last else f"{state}, no Cowork event yet"
+    rows = [("Cowork", value)]
+    step = str(getattr(status, "step", "") or "").strip()
+    if step and not protected:
+        if home and home not in {"/", "~"}:
+            step = step.replace(home.rstrip("/\\"), "~")
+        rows.append(("Cowork next", step))
+    return tuple(rows)
+
+
+def _clock_text(raw: str) -> str:
+    """A clock time: "14:02:11" today, "Oct 02 14:02" earlier, "" when unparseable."""
+
+    try:
+        stamp = datetime.fromisoformat(raw.strip().replace("Z", "+00:00")) if raw.strip() else None
+    except ValueError:
+        return ""
+    if stamp is None:
+        return ""
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    local = stamp.astimezone()
+    if local.date() == datetime.now(local.tzinfo).date():
+        return local.strftime("%H:%M:%S")
+    return local.strftime("%b %d %H:%M")
+
+
 @dataclass(frozen=True)
 class HealthSnapshot:
     started_at: str = ""
@@ -121,8 +211,9 @@ class HealthSnapshot:
     # to the config-derived roster.
     connector: ConnectorHealth | None = None
     connectors: tuple[ConnectorHealth, ...] = ()
-    # The effective policy the gateway applied (/status ``policy``): its
-    # applied generation and effective_policy_digest ("" when not reported).
+    # The effective policy the gateway applied (/status ``policy``): the
+    # config generation it was built from (0 when not reported) and its
+    # effective_policy_digest ("" when not reported).
     policy_generation: int = 0
     policy_digest: str = ""
 
@@ -131,6 +222,8 @@ class HealthSnapshot:
         digest = self.policy_digest.removeprefix("sha256:")
         if not digest:
             return ""
+        if not self.policy_generation:
+            return digest[:digest_chars]
         return f"gen {self.policy_generation} · {digest[:digest_chars]}"
 
 
@@ -152,11 +245,9 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
         "cursor",
         "devin",
         "copilot",
-        "openhands",
         "antigravity",
         "opencode",
         "amp",
-        "omnigent",
         "kiro",
     }
 )
@@ -167,7 +258,7 @@ class OverviewConfig:
     data_dir: str = ""
     environment: str = ""
     policy_dir: str = ""
-    claw_mode: str = "openclaw"
+    claw_mode: str = ""
     guardrail_enabled: bool = False
     guardrail_connector: str = ""
     guardrail_mode: str = "observe"
@@ -447,9 +538,6 @@ class EnforcementCounts:
 class OverviewNotice:
     level: NoticeLevel
     message: str
-    # The end of ``message`` that a one-row render must keep, such as the
-    # key hint ("; N for details"); the cut goes before it (GAP-2551).
-    keep_tail: str = ""
 
 
 @dataclass(frozen=True)
@@ -629,6 +717,12 @@ class OverviewPanelModel:
         # True until the first audit-history read finishes; a large audit.db
         # can take a minute, and the counts read 0 until then (GAP-1240).
         self.history_loading = False
+        # The Cowork row of ``defenseclaw status`` (cowork.cowork_status),
+        # loaded with the health poll; None when Cowork plays no part.
+        self.cowork_status: Any | None = None
+
+    def set_cowork_status(self, status: Any | None) -> None:
+        self.cowork_status = status
 
     def set_cfg(self, cfg: OverviewConfig | None) -> None:
         """Hot-swap the cached config snapshot (e.g. after ``setup``).
@@ -653,11 +747,14 @@ class OverviewPanelModel:
             self.guardrail_profile = result
             # The unscoped gateway response also names connector assignments.
             # Keep only connector-wide entries: an agent assignment must not
-            # change the posture shown for every call on that connector.
+            # change the posture shown for every call on that connector. A
+            # failed account lookup holds for those entries too.
+            lookup_error = (result or {}).get("lookup_error")
             self.connector_guardrail_profiles = {
                 str(item["connector"]).strip().lower(): {
                     "profile": item["profile"],
                     "effective": {"mode": item.get("mode", "")},
+                    **({"lookup_error": lookup_error} if lookup_error else {}),
                 }
                 for item in (result or {}).get("overrides", [])
                 if isinstance(item, dict)
@@ -666,15 +763,29 @@ class OverviewPanelModel:
                 and item.get("profile")
             }
 
-    def _applied_profile(self, connector: str = "") -> tuple[str, dict[str, Any]] | None:
-        """(name, effective settings) of the profile that decides for you."""
-
-        result = (
+    def _profile_result(self, connector: str = "") -> dict[str, Any]:
+        return (
             self.connector_guardrail_profiles.get(connector.strip().lower(), self.guardrail_profile)
             if connector else self.guardrail_profile
         ) or {}
+
+    def profile_lookup_error(self, connector: str = "") -> str:
+        """Why the gateway could not look up your account ("" when it could).
+
+        The profile it then names is a fallback, not the one your account
+        and groups select.
+        """
+
+        return " ".join(str(self._profile_result(connector).get("lookup_error") or "").split())
+
+    def _applied_profile(self, connector: str = "") -> tuple[str, dict[str, Any]] | None:
+        """(name, effective settings) of the profile that decides for you."""
+
+        result = self._profile_result(connector)
         name = str(result.get("profile") or "")
-        if not name or result.get("error"):
+        # A failed identity lookup named a fallback profile, which read as
+        # the one chosen for you (GAP-1271).
+        if not name or result.get("error") or result.get("lookup_error"):
             return None
         effective = result.get("effective")
         return name, effective if isinstance(effective, dict) else {}
@@ -769,7 +880,9 @@ class OverviewPanelModel:
                 return OverviewCommandIntent(label=label, args=args)
         return None
 
-    def build_notices(self, *, now: datetime | None = None) -> tuple[OverviewNotice, ...]:
+    def build_notices(self, *, now: datetime | None = None, connector: str = "") -> tuple[OverviewNotice, ...]:
+        """Overview notices; ``connector`` is the connector filter in effect ("" = All)."""
+
         now = now or datetime.now(timezone.utc)
         notices: list[OverviewNotice] = []
         gateway_availability = self.gateway_availability()
@@ -782,7 +895,7 @@ class OverviewPanelModel:
             notices.append(
                 OverviewNotice(
                     "info",
-                    "Loading the audit history - alert and hook counts show 0 until it finishes",
+                    "Loading the audit history - counts show 0 while loading",
                 )
             )
         if self.not_configured:
@@ -791,8 +904,7 @@ class OverviewPanelModel:
             notices.append(
                 OverviewNotice(
                     "warn",
-                    "DefenseClaw is not set up yet (no config.yaml). "
-                    "Press 0 for Setup, or run: defenseclaw init",
+                    "DefenseClaw is not set up yet - press 0 or run: defenseclaw init",
                 )
             )
         elif gateway_broken and guardrail_off and not self.skill_scanner_available:
@@ -814,7 +926,7 @@ class OverviewPanelModel:
                 notices.append(
                     OverviewNotice(
                         "error",
-                        'Gateway is not running - press : and run "start" (or run defenseclaw-gateway start)',
+                        "Gateway is not running. Run: defenseclaw-gateway start",
                     )
                 )
         elif gateway_state in {"starting", "reconnecting"}:
@@ -842,6 +954,16 @@ class OverviewPanelModel:
                 )
             else:
                 notices.append(OverviewNotice("warn", "LLM guardrail not configured - press [g] to set up"))
+        if lookup_error := self.profile_lookup_error(connector):
+            if len(lookup_error) > 80:
+                lookup_error = lookup_error[:79].rstrip() + "…"
+            notices.append(
+                OverviewNotice(
+                    "warn",
+                    f"Couldn't look up your account, so your guardrail profile is unknown ({lookup_error}) - "
+                    "check it with: defenseclaw guardrail profile explain",
+                )
+            )
         if not self.skill_scanner_available:
             notices.append(
                 OverviewNotice(
@@ -867,6 +989,10 @@ class OverviewPanelModel:
                 )
             )
 
+        # A notice with a remedy fits one line at 80 columns (67 cells), or
+        # puts its remedy first: at 80x24 only the first line of a notice is
+        # above the fold, so a wrapped "press [d] to refresh" was cut off
+        # (GAP-0566, as GAP-1775).
         if self.doctor is not None and not self.doctor.is_empty():
             contradicted = tuple(check for check in self.doctor.checks if self.doctor_check_stale_reason(check))
             removed = tuple(check for check in contradicted if self._doctor_destination_removed(check))
@@ -876,7 +1002,7 @@ class OverviewPanelModel:
                 notices.append(
                     OverviewNotice(
                         "error",
-                        f"Doctor found {effective_failed} failure(s) - see the DOCTOR panel or run: defenseclaw doctor",
+                        f"Doctor found {effective_failed} failure(s) · run: defenseclaw doctor",
                     )
                 )
             elif contradicted and len(removed) == len(contradicted):
@@ -885,16 +1011,14 @@ class OverviewPanelModel:
                 notices.append(
                     OverviewNotice(
                         "info",
-                        f"The last doctor run ({format_age(self.doctor.age(now=now))}) checked "
-                        f"{len(removed)} telemetry destination(s) that no longer exist - press [d] to refresh",
+                        f"Doctor checked {len(removed)} removed destination(s) - press [d] to refresh",
                     )
                 )
             elif contradicted:
                 notices.append(
                     OverviewNotice(
                         "info",
-                        f"Doctor cache shows {len(contradicted)} stale failure(s) that /health disagrees with - "
-                        "press [d] to refresh",
+                        f"{len(contradicted)} stale failure(s): /health disagrees - press [d] to refresh",
                     )
                 )
             elif self.doctor.is_stale(now=now):
@@ -911,8 +1035,7 @@ class OverviewPanelModel:
                 notices.append(
                     OverviewNotice(
                         "error",
-                        f"Doctor repairs need attention ({', '.join(parts)}) - "
-                        "see the DOCTOR panel or rerun the selected repair",
+                        f"Doctor repairs: {', '.join(parts)} - see the DOCTOR panel",
                     )
                 )
             elif (
@@ -926,8 +1049,7 @@ class OverviewPanelModel:
                 notices.append(
                     OverviewNotice(
                         "error",
-                        "The last Doctor run ended with a failed outcome - "
-                        "see the DOCTOR panel or rerun: defenseclaw doctor",
+                        "The last Doctor run ended with a failed outcome - see DOCTOR panel",
                     )
                 )
             elif self.doctor.outcome_state(now=now) == "warning" and self.doctor.warned == 0:
@@ -944,22 +1066,24 @@ class OverviewPanelModel:
                 notices.append(
                     OverviewNotice(
                         "error",
-                        "Missing required API key(s): "
-                        f"{', '.join(preview)}{keys_overflow_suffix(len(missing), len(preview))} "
-                        "- run: defenseclaw keys fill-missing",
+                        "Missing required API key(s) · run: defenseclaw keys fill-missing · "
+                        f"{', '.join(preview)}{keys_overflow_suffix(len(missing), len(preview))}",
                     )
                 )
 
         # A stopped gateway leaves its last /health payload behind; notices
         # read from it ("since the gateway started 3m ago") would be stale.
+        idle_notice: OverviewNotice | None = None
         live_health = self.health is not None and not self.gateway_down()
         if live_health and self.health.connector is not None and self.cfg is not None:
-            live = self.health.connector.name.strip()
-            configured = self.cfg.claw_mode.strip()
-            roster = {c.strip().lower() for c, _m in self.cfg.connector_modes if c}
+            live = normalize_connector(self.health.connector.name)
+            # The gateway folds an alias of claw.mode (claude-code, Codex) to
+            # its registry name; compare the same names (GAP-2079).
+            configured = normalize_connector(self.cfg.claw_mode)
+            roster = {normalize_connector(c) for c, _m in self.cfg.connector_modes if c}
             # In a multi-connector install the gateway's primary connector can
             # be any rostered one; that is not drift (GAP-1220).
-            if live and configured and live != configured and live.lower() not in roster:
+            if live and configured and live != configured and live not in roster:
                 notices.append(
                     OverviewNotice(
                         "warn",
@@ -969,12 +1093,15 @@ class OverviewPanelModel:
                     )
                 )
             uptime = timedelta(milliseconds=self.health.uptime_ms)
+            # The idle-connector notice is informational and only true until
+            # the first hook event, so it goes last: at 80x24 it pushed the
+            # Runtime notice and its N key below the fold (GAP-2104).
             if uptime > timedelta(minutes=1):
                 if self._is_multi_connector() and self.health.connectors:
                     # One idle connector out of several is normal; only say
                     # something when none of them has seen a hook event.
                     if not any(_connector_saw_traffic(conn) for conn in self.health.connectors):
-                        notices.append(
+                        idle_notice = (
                             OverviewNotice(
                                 "info",
                                 # One line at 80 columns: the wrapped rest fell
@@ -984,7 +1111,7 @@ class OverviewPanelModel:
                             )
                         )
                 elif not _connector_saw_traffic(self.health.connector):
-                    notices.append(OverviewNotice("info", zero_connector_requests_notice(live, uptime)))
+                    idle_notice = OverviewNotice("info", zero_connector_requests_notice(live, uptime))
 
         probe_detail = gateway_availability.last_error.strip().lower()
         if not gateway_broken and "elevated sidecar" in probe_detail:
@@ -1000,24 +1127,23 @@ class OverviewPanelModel:
             notices.append(
                 OverviewNotice(
                     "info",
-                    f"{runtime.unobserved} runtime finding(s) are inventory-unobserved. "
-                    "Open AI Discovery and press Scan now so Runtime can correlate them.",
+                    f"{runtime.unobserved} runtime finding(s) unobserved - press Scan now in AI Discovery",
                 )
             )
         elif runtime.scanned and runtime.findings == 0 and runtime.processes and not self.gateway_down():
-            # One short line like the other notices; the Runtime panel (N)
-            # carries the full reason and what to do about it (GAP-2533).
-            why, tail = "", "no findings above the reporting floor"
+            # The Runtime panel (N) carries the full reason, the counts and
+            # what to do about it (GAP-2533).
+            title = runtime.health_title or "watching"
             if runtime.degraded_reason:
-                why, tail = f" ({runtime.degraded_reason})", "no findings; N for details"
-            notices.append(
-                OverviewNotice(
-                    "info",
-                    f"Runtime is {runtime.health_title or 'watching'}{why}: {runtime.processes} processes, "
-                    f"{runtime.connections} connections, {tail}",
-                    keep_tail=f", {tail}" if why else "",
+                message = runtime_degraded_notice(title, runtime.degraded_reason)
+            else:
+                message = (
+                    f"Runtime is {title}: {runtime.processes} processes, "
+                    f"{runtime.connections} connections, no findings above the reporting floor"
                 )
-            )
+            notices.append(OverviewNotice("info", message))
+        if idle_notice is not None:
+            notices.append(idle_notice)
 
         return tuple(notices)
 
@@ -1371,11 +1497,10 @@ class OverviewPanelModel:
         ``"openclaw"`` for an empty / hook-only state. Precedence: explicit
         singular override (``guardrail.connector``) → the active *set*'s
         primary (``connector_modes`` — the multi-connector roster that the
-        singular ``config.active_connector()`` ignores, which is why a
-        ``[codex, openclaw]`` map used to surface a phantom ``openclaw``) →
-        the singular ``claw.mode`` → ``""`` (none configured). The Go-parity
-        ``config.active_connector()`` contract is deliberately left untouched;
-        this distinguishes "none configured" at the display layer only.
+        singular selection can omit, which is why a ``[codex, openclaw]`` map
+        used to surface a phantom ``openclaw``) →
+        the singular ``claw.mode`` → ``""`` (none configured). The config
+        resolver also returns ``""`` for an unconfigured install.
         Callers treat ``""`` as "no connector present" (e.g. the app's
         ``connector_present`` gate / merged-catalog fallback).
 
@@ -1386,13 +1511,11 @@ class OverviewPanelModel:
         if self.cfg is None:
             return ""
         if self.cfg.guardrail_connector.strip():
-            return self.cfg.guardrail_connector.strip().lower()
+            return normalize_connector(self.cfg.guardrail_connector)
         primary = connector_filter.active_connector_name(self.cfg.connector_modes)
         if primary:
-            return primary.strip().lower()
-        if self.cfg.claw_mode.strip():
-            return self.cfg.claw_mode.strip().lower()
-        return ""
+            return normalize_connector(primary)
+        return normalize_connector(self.cfg.claw_mode)
 
     def scanner_overrides_summary(self) -> str:
         """One-line summary of the admission actions config.yaml overrides,
@@ -1617,6 +1740,10 @@ class OverviewPanelModel:
                 count = details[key]
                 # "1 plugin dir", not "1 plugin dirs" (GAP-2526).
                 parts.append(f"{count} {noun}" if str(count).strip() == "1" else f"{count} {noun}s")
+        if details.get("watch_roots_unavailable"):
+            names = details.get("admission_scanning_off")
+            connectors = ", ".join(name for name in names if isinstance(name, str)) if isinstance(names, list) else ""
+            parts.append(f"admission scanning off for {connectors or 'configured connectors'}")
         return ", ".join(parts)
 
     def guardrail_mode_label(self, connector: str = "") -> str:
@@ -1635,6 +1762,8 @@ class OverviewPanelModel:
             roster = [self.active_connector_name()]
         if not connector and len(roster) == 1:
             connector = roster[0]
+        if self.profile_lookup_error(connector):
+            return f"{base}, profile unknown (user lookup failed)" if base else "profile unknown (user lookup failed)"
         if not connector and len(roster) > 1 and self.guardrail_profile:
             resolved = [self._applied_profile(name) for name in roster]
             if all(resolved):
@@ -1668,12 +1797,34 @@ class OverviewPanelModel:
         others = [f"{counts[mode]} {mode}" for mode in sorted(counts) if mode != main]
         return ", ".join([main, *others])
 
+    def judge_fallbacks(self) -> int:
+        """Hook checks the rules decided without a judge verdict (0 when unknown)."""
+
+        details = self.health.guardrail.details if self.health else {}
+        fallbacks = details.get("judge_fallbacks", 0)
+        if isinstance(fallbacks, int) and not isinstance(fallbacks, bool) and fallbacks > 0:
+            return fallbacks
+        return 0
+
     def guardrail_detail(self) -> str:
         if self.cfg is None or not self.cfg.guardrail_enabled:
             return ""
         parts: list[str] = []
         if mode := self.guardrail_mode_label():
             parts.append(mode)
+        # The fallback count (short), then the judge's state, come right
+        # after the mode: the SERVICES column wraps the row at 24 cells and
+        # the box shows two of its lines at 120x40, so a trailing count was
+        # cut (GAP-0180). Hook checks the rules decided without a judge
+        # verdict (#1395); recent judge calls that failed (GAP-1288).
+        details = self.health.guardrail.details if self.health else {}
+        if fallbacks := self.judge_fallbacks():
+            parts.append(f"fallbacks {fallbacks}")
+        judge_state = str(details.get("judge_state") or "")
+        if judge_state in ("failing", "degraded"):
+            failed = details.get("judge_failed_calls", 0)
+            total = details.get("judge_recent_calls", 0)
+            parts.append(f"judge {judge_state}: {failed}/{total} calls failed")
         if self.cfg.guardrail_port and self.cfg.uses_guardrail_proxy_port():
             parts.append(f"port {self.cfg.guardrail_port}")
         roster = [name for name, _ in self.cfg.connector_modes if name and not self.cfg.connector_is_disabled(name)]
@@ -1684,13 +1835,6 @@ class OverviewPanelModel:
             parts.append(f"{pack} pack")
         if self.cfg.guardrail_judge_enabled and self.cfg.guardrail_judge_model:
             parts.append(f"judge:{self.cfg.guardrail_judge_model}")
-        # Recent judge calls that failed (gateway judge_* details, GAP-1288).
-        details = self.health.guardrail.details if self.health else {}
-        judge_state = str(details.get("judge_state") or "")
-        if judge_state in ("failing", "degraded"):
-            failed = details.get("judge_failed_calls", 0)
-            total = details.get("judge_recent_calls", 0)
-            parts.append(f"judge {judge_state}: {failed}/{total} calls failed")
         return ", ".join(parts)
 
     def ai_discovery_detail(self) -> str:
@@ -1818,7 +1962,7 @@ class OverviewPanelModel:
             health_state, health_failure = retention_health_from_gateway(
                 {"details": self.health.telemetry.details} if self.health is not None else None
             )
-        retention = "unbounded" if status.unbounded_retention else f"{status.retention_days} days"
+        retention = status.retention_label
         return ObservabilityStorageStatus(
             retention=retention,
             judge_capture="enabled" if status.judge_bodies_enabled else "disabled",
@@ -1925,7 +2069,33 @@ def _connector_saw_traffic(connector: ConnectorHealth) -> bool:
         or connector.tool_inspections
         or connector.tool_blocks
         or connector.subprocess_blocks
+        # A Cowork hook call is a Claude Code hook call (GAP-0046).
+        or connector.cowork_requests
     )
+
+
+def runtime_degraded_notice(title: str, summary: str, width: int = OVERVIEW_NOTICE_WIDTH) -> str:
+    """One Overview line for a degraded Runtime: the N key first, then the cause.
+
+    At 80x24 only a notice's first line is above the fold, so the line fits
+    ``width``: the cause heads in full when they fit, else in shorter words,
+    else the first head and how many more, else the first head and "…". The
+    cause is never dropped.
+    """
+
+    lead = f"Runtime {title} · N for details: "
+    heads = [head.strip() for head in summary.split(", ") if head.strip()] or [summary.strip()]
+    short = list(heads)
+    for long_words, short_words in _RUNTIME_HEAD_SHORT:
+        short = [head.replace(long_words, short_words) for head in short]
+    candidates = [", ".join(heads), ", ".join(short)]
+    if len(short) > 1:
+        candidates.append(f"{short[0]} +{len(short) - 1} more")
+    room = max(width - len(lead), 2)
+    for cause in candidates:
+        if len(cause) <= room:
+            return lead + cause
+    return lead + short[0][: room - 1].rstrip() + "…"
 
 
 def zero_connector_requests_notice(connector_name: str, uptime: timedelta) -> str:
@@ -1941,14 +2111,9 @@ def zero_connector_requests_notice(connector_name: str, uptime: timedelta) -> st
         case "claudecode":
             return (
                 f"{name} connector has seen 0 hook events since the gateway started {formatted} ago - "
-                "normal until Claude Code emits a hook event; verify Claude Code hooks if this persists"
+                "normal until Claude Code or Claude Cowork emits a hook event; verify Claude Code hooks if this persists"
             )
-        case "omnigent":
-            return (
-                f"{name} connector has seen 0 policy events since the gateway started {formatted} ago - "
-                "normal until OmniGent emits a supported policy callback; verify OmniGent policy setup if this persists"
-            )
-        case "hermes" | "cursor" | "devin" | "copilot" | "openhands" | "antigravity" | "opencode" | "amp":
+        case "hermes" | "cursor" | "devin" | "copilot" | "antigravity" | "opencode" | "amp":
             return (
                 f"{name} connector has seen 0 hook events since the gateway started {formatted} ago - "
                 "normal until the agent emits a supported hook; verify connector hook setup if this persists"
@@ -1978,16 +2143,12 @@ def friendly_connector_name(connector: str) -> str:
             return "Devin"
         case "copilot":
             return "GitHub Copilot CLI"
-        case "openhands":
-            return "OpenHands"
         case "antigravity":
             return "Antigravity"
         case "opencode":
             return "OpenCode"
         case "amp":
             return "Amp"
-        case "omnigent":
-            return "OmniGent"
         case "kiro":
             return "Kiro"
         case value:
@@ -2043,7 +2204,6 @@ def connector_source_label(connector: str, category: str) -> str:
             "./.agents/skills",
         ),
         ("copilot", "skills"): ("./.github/skills", "./.agents/skills", "~/.copilot/skills"),
-        ("openhands", "skills"): ("~/.openhands/skills", "~/.openhands/microagents", "~/.agents/skills"),
         ("antigravity", "skills"): (
             "~/.gemini/config/skills/<skill>/SKILL.md",
             "<workspace>/.agents/skills/<skill>/SKILL.md",
@@ -2062,7 +2222,6 @@ def connector_source_label(connector: str, category: str) -> str:
             "<workspace>/.agents/skills",
             "~/.claude/plugins/cache/.../skills (unless Claude-compatible skills are disabled)",
         ),
-        ("omnigent", "skills"): ("unsupported by the OmniGent connector",),
         ("openclaw", "mcps"): ("openclaw config get mcp.servers", "openclaw.json (mcp.servers)"),
         ("claudecode", "mcps"): (f"{claude_config} (mcpServers)", "./.mcp.json"),
         ("codex", "mcps"): (
@@ -2079,7 +2238,6 @@ def connector_source_label(connector: str, category: str) -> str:
             "./.devin/config*.json (legacy read-only compatibility)",
         ),
         ("copilot", "mcps"): ("~/.copilot/mcp-config.json", "./.github/mcp.json", "./.mcp.json"),
-        ("openhands", "mcps"): ("~/.openhands/mcp.json",),
         ("antigravity", "mcps"): (
             "~/.gemini/config/mcp_config.json",
             "<workspace>/.agents/mcp_config.json",
@@ -2091,7 +2249,6 @@ def connector_source_label(connector: str, category: str) -> str:
             "<workspace>/.amp/settings.json or settings.jsonc (amp.mcpServers; read-only)",
             "<skill>/mcp.json",
         ),
-        ("omnigent", "mcps"): ("unsupported/unverified by the OmniGent connector",),
         ("openclaw", "plugins"): ("~/.openclaw/extensions",),
         ("claudecode", "plugins"): (os.path.join(claude_root, "plugins"),),
         ("codex", "plugins"): (
@@ -2108,7 +2265,6 @@ def connector_source_label(connector: str, category: str) -> str:
         ("cursor", "plugins"): ("unsupported",),
         ("devin", "plugins"): ("unsupported (closed beta; no general plugin claim)",),
         ("copilot", "plugins"): ("copilot plugin list --json",),
-        ("openhands", "plugins"): ("unsupported",),
         ("antigravity", "plugins"): (
             "~/.gemini/config/plugins/<plugin>/ (read/write)",
             "~/.gemini/antigravity-cli/plugins/<plugin>/ (discovery-only)",
@@ -2136,7 +2292,6 @@ def connector_source_label(connector: str, category: str) -> str:
             "~/.config/amp/plugins/defenseclaw.ts (DefenseClaw policy plugin)",
             "<workspace>/.amp/plugins",
         ),
-        ("omnigent", "plugins"): ("unsupported by the OmniGent connector",),
         ("openclaw", "config"): ("~/.openclaw/openclaw.json",),
         ("claudecode", "config"): (claude_config,),
         ("codex", "config"): (codex_config,),
@@ -2148,7 +2303,6 @@ def connector_source_label(connector: str, category: str) -> str:
             "./.devin/hooks.v1.json",
         ),
         ("copilot", "config"): ("./.github/hooks/*.json",),
-        ("openhands", "config"): ("~/.openhands/hooks.json",),
         ("antigravity", "config"): ("~/.gemini/config/hooks.json",),
         ("opencode", "config"): (
             f"{opencode_plugin} (managed bridge; lifecycle custody only)",
@@ -2159,7 +2313,6 @@ def connector_source_label(connector: str, category: str) -> str:
             "~/.config/amp/settings.json or settings.jsonc",
             "<workspace>/.amp/settings.json or settings.jsonc",
         ),
-        ("omnigent", "config"): ("$OMNIGENT_CONFIG, $OMNIGENT_CONFIG_HOME/config.yaml, or ~/.omnigent/config.yaml; CLI server requires --config",),
     }
     return ", ".join(sources.get((connector, category), ()))
 
@@ -2170,86 +2323,6 @@ def active_connector_name(health: HealthSnapshot | None, mode: str) -> str:
     if mode.strip():
         return mode.strip()
     return ""
-
-
-def admission_action_overrides(
-    config: object | None,
-) -> tuple[tuple[str, str, str, str], ...]:
-    """Effective explicit admission actions that differ from built-in policy.
-
-    Per-type actions win over scanner-derived skill actions, which win over
-    admission.defaults.actions. Only effective differences are shown to the
-    Overview and status views.
-    """
-
-    admission = getattr(config, "admission", None)
-    if admission is None:
-        return ()
-    try:
-        from defenseclaw.enforce.admission import (  # noqa: PLC0415
-            _builtin_admission,
-            _compile_action_map,
-            _derived_scanner_gate,
-        )
-    except Exception:  # noqa: BLE001 - the override summary is purely informational.
-        return ()
-    defaults = _compile_action_map(getattr(getattr(admission, "defaults", None), "actions", None))
-    flat: list[tuple[str, str, str, str]] = []
-    for target_type in ("skill", "mcp", "plugin"):
-        own = _compile_action_map(getattr(getattr(admission, target_type, None), "actions", None))
-        derived = {}
-        if target_type == "skill":
-            scanner = getattr(getattr(config, "scanners", None), "skill_scanner", None)
-            derived = _derived_scanner_gate(
-                getattr(scanner, "fail_on_severity", ""), getattr(scanner, "review_queue_min", "")
-            )
-        builtin = _builtin_admission(target_type).actions
-        for severity in dict.fromkeys((*own, *defaults)):
-            if severity in own:
-                compiled = own[severity]
-            elif severity in derived:
-                continue
-            else:
-                compiled = defaults[severity]
-            if compiled == builtin.get(severity):
-                continue
-            action, allowed = compiled
-            for surface in ("install", "file", "runtime"):
-                flat.append((target_type, severity, surface, str(getattr(action, surface))))
-            if allowed:
-                flat.append((target_type, severity, "verdict", "allow"))
-    return tuple(flat)
-
-
-def format_scanner_overrides_summary(
-    overrides: tuple[tuple[str, str, str, str], ...],
-) -> str:
-    """One-line summary of active-policy scanner action overrides (N3).
-
-    ``overrides`` is the flattened ``(asset_type, severity, surface, action)``
-    view of :func:`admission_action_overrides`. Returns ``""`` when empty, so the Overview / ``defenseclaw status`` render nothing for the
-    common default config. Groups by scanner then severity, e.g.::
-
-        secrets: HIGH file=block, install=warn | pii: MEDIUM runtime=allow
-
-    Malformed entries (not 4 fields, or missing scanner/surface) are skipped so
-    a bad adapter payload degrades to a partial line rather than raising.
-    """
-    grouped: dict[str, dict[str, list[str]]] = {}
-    for entry in overrides:
-        if len(entry) != 4:
-            continue
-        scanner, severity, surface, action = (str(part).strip() for part in entry)
-        if not scanner or not surface:
-            continue
-        grouped.setdefault(scanner, {}).setdefault(severity.upper(), []).append(f"{surface}={action}")
-    parts: list[str] = []
-    for scanner, sevs in grouped.items():
-        sev_parts = [
-            f"{severity + ' ' if severity else ''}{', '.join(surfaces)}" for severity, surfaces in sevs.items()
-        ]
-        parts.append(f"{scanner}: {'; '.join(sev_parts)}")
-    return " | ".join(parts)
 
 
 def sort_ai_discovery_signals_for_overview(signals: tuple[AIUsageSignal, ...]) -> tuple[AIUsageSignal, ...]:
@@ -2432,6 +2505,7 @@ __all__ = [
     "sort_ai_discovery_signals_for_overview",
     "string_detail",
     "zero_connector_requests_notice",
+    "cowork_overview_rows",
 ]
 
 

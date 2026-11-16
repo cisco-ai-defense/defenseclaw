@@ -210,11 +210,7 @@ func TestRuntimeTraceCanaryPinsGenerationThroughReloadFlushAndAcknowledgement(t 
 	if first.closed.Load() != 0 {
 		t.Fatal("generation one retired before its canary acknowledgement lease was released")
 	}
-	select {
-	case outcome := <-reloadDone:
-		t.Fatalf("reload returned before generation-one lease release: %+v", outcome)
-	default:
-	}
+	// The reload returned once generation two was published (#1302).
 
 	close(first.unblock)
 	canary := <-canaryDone
@@ -225,6 +221,7 @@ func TestRuntimeTraceCanaryPinsGenerationThroughReloadFlushAndAcknowledgement(t 
 	if reload.err != nil || reload.result.Status() != runtimegraph.ReloadApplied {
 		t.Fatalf("reload=%s error=%v", reload.result.Status(), reload.err)
 	}
+	waitRuntimeRetired(t, runtime)
 	if first.closed.Load() == 0 {
 		t.Fatal("generation one was not retired after acknowledgement and lease release")
 	}

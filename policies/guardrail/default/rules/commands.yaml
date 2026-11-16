@@ -56,10 +56,16 @@ rules:
     tags: [execution, reverse-shell]
   - id: CMD-PIPE-CURL
     tool_call_only: true
-    expression: 'false'
-    # Candidate discovery covers POSIX curl pipelines and PowerShell web-cmdlet
-    # aliases. The exact fallback contract proves stdout-to-interpreter flow.
-    pattern: 'a^'
+    # Alert-only in every pack (semantic owner alertOnly): HIGH here, so the
+    # balanced default records an alert and the call runs (rel-1-0-6
+    # GAP-0081, #1125); strict raises CRITICAL. POSIX curl only: PowerShell
+    # web-cmdlet pipelines keep their own CMD-WIN-IWR-IEX rule in this pack.
+    expression: >-
+      f.commands.exists(c, c.argv_complete && c.program in ['curl', 'curl.exe'] &&
+      (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations ||
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))
+    # The exact fallback contract proves stdout-to-interpreter flow.
+    pattern: '(?i)\bcurl\b\s+[^|;\r\n]*\|\s*(?:[/\w.-]+/)?(?:(?:bash|zsh|sh|dash|ksh)\b|python(?:[0-9.]*)?\s+-(?:\s|$)|(?:perl|ruby)\b)'
     title: "curl piped to shell"
     severity: HIGH
     confidence: 0.95
@@ -76,6 +82,32 @@ rules:
     severity: HIGH
     confidence: 0.95
     tags: [execution, download-exec]
+  - id: CMD-WRAPPED-DOWNLOAD-EXEC
+    tool_call_only: true
+    expression: 'false'
+    pattern: 'a^'
+    title: "Download piped through a privilege wrapper to a shell"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [execution, download-exec]
+  - id: CMD-SUBST-DOWNLOAD-EXEC
+    tool_call_only: true
+    expression: 'false'
+    pattern: 'a^'
+    title: "Downloaded command substitution evaluated by a shell"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [execution, download-exec]
+  - id: CMD-PYTHON-SOCKET-CONNECT
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.program in ['python', 'python2', 'python3'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONNECT in c.operations)
+    pattern: 'a^'
+    title: "Python code connects to a nonlocal socket"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [execution, network]
   - id: CMD-PIPE-BASE64
     tool_call_only: true
     expression: >-
@@ -702,7 +734,7 @@ rules:
     expression: >-
       f.tool in ['sql_query', 'db.execute'] ||
       f.commands.exists(c, c.argv_complete &&
-      c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd'])
+      c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd', 'snowsql'])
     # Exact ActionFacts owner only. This detects a closed unbounded DELETE,
     # TRUNCATE, DROP TABLE, DROP SCHEMA, or DROP DATABASE operation from a
     # reviewed CLI or authenticated structured connector. It remains alert-only
@@ -966,13 +998,13 @@ rules:
     tags: [authentication, privilege, linux, pam, tampering, exact-actionfacts]
   - id: tamper.docker_insecure_http_registry
     tool_call_only: true
-    # Code-owned proof accepts only an authoritative full daemon.json write
-    # whose sole setting names a literal, non-loopback HTTP registry.
+    # Code-owned proof accepts only an authoritative native file-tool write of
+    # daemon.json that lists a non-loopback insecure registry (see below).
     pattern: 'a^'
     title: "Configure Docker to trust an insecure HTTP registry"
-    # Adopts the strict-profile posture in default: the proof requires a full
-    # daemon.json write whose sole setting names a literal non-loopback HTTP
-    # registry, which opens the image supply chain to on-path substitution.
+    # Adopts the strict-profile posture in default: the registry may be spelled
+    # any way Docker accepts, in a whole-file write or in the text an edit or
+    # patch adds, and opens the image supply chain to on-path substitution.
     severity: CRITICAL
     confidence: 0.99
     tags: [container, supply-chain, docker, tampering, exact-actionfacts]
@@ -1057,7 +1089,7 @@ rules:
   - id: impact.linux_magic_sysrq_destruction
     tool_call_only: true
     expression: >-
-      f.paths.exists(p, p.normalized == '/proc/sysrq-trigger')
+      f.paths.exists(p, p.resolved == '/proc/sysrq-trigger' || p.normalized == '/proc/sysrq-trigger')
     # Candidate only. The exact owner requires one literal destructive key and
     # one exact stdout overwrite redirect to the kernel SysRq trigger.
     pattern: '(?i)(?:^|[;\r\n]\s*)echo\s+["'']?[bocei]["'']?\s*>\s*/proc/sysrq-trigger(?:\s|$)'
@@ -1080,8 +1112,10 @@ rules:
   - id: tamper.posix_system_log_destruction
     tool_call_only: true
     expression: >-
-      f.paths.exists(p, p.normalized in ['/var/log/messages', '/var/log/security',
-      '/var/log/syslog', '/var/log/auth.log', '/var/log/secure', '/var/log/audit/audit.log'] &&
+      f.paths.exists(p, (p.resolved in ['/var/log/messages', '/var/log/security',
+      '/var/log/syslog', '/var/log/auth.log', '/var/log/secure', '/var/log/audit/audit.log'] ||
+      p.normalized in ['/var/log/messages', '/var/log/security',
+      '/var/log/syslog', '/var/log/auth.log', '/var/log/secure', '/var/log/audit/audit.log']) &&
       p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
       defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])
     # Candidate only. The exact owner accepts a closed destructive grammar and
@@ -1482,7 +1516,7 @@ rules:
     tool_call_only: true
     expression: >-
       f.paths.exists(p, p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE &&
-      p.normalized.startsWith('/usr/bin/python3.'))
+      (p.resolved.startsWith('/usr/bin/python3.') || p.normalized.startsWith('/usr/bin/python3.')))
     # The semantic owner requires a matching versioned interpreter backup,
     # literal four-line PYTHONPATH wrapper, exact `.real` delegation, and one
     # unconditional atomic replacement from the same /usr/bin staging path.

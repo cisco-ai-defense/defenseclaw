@@ -67,9 +67,9 @@ func recordDirsNowPresent(dataDir string, missing []string) {
 			created = append(created, dir)
 		}
 	}
-	if len(created) > 0 {
-		_ = recordCreatedDirs(filepath.Join(dataDir, watcherCreatedDirsFile), created)
-	}
+	// Refresh the record even when this setup created no folders: an older
+	// workspace can have been removed since another connector last wrote it.
+	_ = recordCreatedDirs(filepath.Join(dataDir, watcherCreatedDirsFile), created)
 }
 
 // prepareOpenCodePluginArtifactDestination creates the plugin folder of
@@ -121,10 +121,8 @@ func openCodePluginDirHoldsOnlyDefenseClaw(path string) bool {
 // target. The agent config folders below the home that fn itself created
 // and left empty go again (removing Codex's hooks made an empty ~/.codex in
 // an account where Codex never ran, and the purge then left it). When the
-// data directory did not exist, what fn put there (the disabled hook
-// scripts and locks a teardown writes so an agent's cached registration
-// stays harmless; none can be cached, as no hook script was ever there)
-// goes too.
+// data directory did not exist, the known managed hook scripts and locks
+// fn put there go too. An account file created during fn stays.
 func RemovalLeavingNoNewDirs(conn Connector, opts SetupOpts, fn func() error) error {
 	dataDir := filepath.Clean(strings.TrimSpace(opts.DataDir))
 	_, statErr := os.Lstat(dataDir)
@@ -133,7 +131,16 @@ func RemovalLeavingNoNewDirs(conn Connector, opts SetupOpts, fn func() error) er
 	err := fn()
 	if dataDirMissing {
 		if info, statErr := os.Lstat(dataDir); statErr == nil && info.IsDir() {
-			if removeErr := os.RemoveAll(dataDir); removeErr != nil && err == nil {
+			var managed []string
+			if owner, ok := conn.(HookScriptOwner); ok {
+				for _, name := range owner.HookScriptNames(opts) {
+					if name != "" && name != "." && filepath.Base(name) == name {
+						managed = append(managed, filepath.ToSlash(filepath.Join("hooks", name)))
+					}
+				}
+			}
+			_, removeErr := purgeUserStateWithManagedFiles(dataDir, managed)
+			if removeErr != nil && err == nil {
 				err = removeErr
 			}
 		}
@@ -201,10 +208,25 @@ func belowDir(root, path string) bool {
 // recordCreatedDirs adds dirs to the created-folder list at path.
 func recordCreatedDirs(path string, dirs []string) error {
 	record := readWatcherCreatedDirs(path)
+	if len(record.Dirs) == 0 && len(dirs) == 0 {
+		return nil
+	}
 	known := make(map[string]struct{}, len(record.Dirs)+len(dirs))
+	kept := record.Dirs[:0]
+	changed := false
 	for _, dir := range record.Dirs {
+		// A removed or replaced folder is no longer one DefenseClaw can
+		// later clean up. Keep entries whose state cannot be read so a
+		// transient error does not lose the cleanup record.
+		info, err := os.Lstat(dir)
+		if errors.Is(err, os.ErrNotExist) || (err == nil && info.Mode().Type() != fs.ModeDir) {
+			changed = true
+			continue
+		}
+		kept = append(kept, dir)
 		known[dir] = struct{}{}
 	}
+	record.Dirs = kept
 	for _, dir := range dirs {
 		dir = filepath.Clean(dir)
 		if _, seen := known[dir]; seen || !filepath.IsAbs(dir) {
@@ -212,6 +234,16 @@ func recordCreatedDirs(path string, dirs []string) error {
 		}
 		known[dir] = struct{}{}
 		record.Dirs = append(record.Dirs, dir)
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	if len(record.Dirs) == 0 {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
 	}
 	return writeWatcherCreatedDirs(path, record.Dirs)
 }
@@ -300,4 +332,70 @@ func writeWatcherCreatedDirs(path string, dirs []string) error {
 		return err
 	}
 	return safefile.Write(path, append(data, '\n'))
+}
+
+// RemoveCreatedDirsOf removes, once conn's registration is gone, the folders
+// below the home that DefenseClaw recorded as created for conn's agent
+// files (watcher-created-dirs.json: ~/.config/amp/plugins for Amp, say) and
+// that are still empty, deepest first, and conn's connector_backups folder
+// when it is empty. An administrator who removes a connector then gets each
+// enrolled home back as it was before the connector was added (rel-1-0-6
+// GAP-0207). A folder with anything in it, one reached through a link, and
+// every other recorded folder stay; only removed folders leave the list.
+func RemoveCreatedDirsOf(conn Connector, opts SetupOpts) {
+	home := strings.TrimSpace(userHomeDir())
+	dataDir := strings.TrimSpace(opts.DataDir)
+	if conn == nil || home == "" || dataDir == "" || !filepath.IsAbs(home) {
+		return
+	}
+	home, dataDir = filepath.Clean(home), filepath.Clean(dataDir)
+	paths := HookConfigPathsForConnector(conn, opts)
+	if provider, ok := conn.(AgentPathProvider); ok {
+		paths = append(paths, provider.AgentPaths(opts).PatchedFiles...)
+	}
+	paths = append(paths, ManagedPluginArtifacts(conn, opts)...)
+	recordPath := filepath.Join(dataDir, watcherCreatedDirsFile)
+	record := readWatcherCreatedDirs(recordPath)
+	var candidates []string
+	for _, dir := range record.Dirs {
+		dir = filepath.Clean(dir)
+		if !belowDir(home, dir) || (dir == dataDir || belowDir(dataDir, dir)) {
+			continue
+		}
+		for _, path := range paths {
+			if filepath.IsAbs(path) && belowDir(dir, filepath.Clean(path)) {
+				candidates = append(candidates, dir)
+				break
+			}
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool { return len(candidates[i]) > len(candidates[j]) })
+	removed := map[string]bool{}
+	for _, dir := range candidates {
+		if !realDirectoryChain(home, dir) {
+			continue
+		}
+		if err := os.Remove(dir); err == nil {
+			removed[dir] = true
+		}
+	}
+	if len(removed) > 0 {
+		var kept []string
+		for _, dir := range record.Dirs {
+			if !removed[filepath.Clean(dir)] {
+				kept = append(kept, dir)
+			}
+		}
+		if len(kept) == 0 {
+			_ = os.Remove(recordPath)
+		} else {
+			_ = writeWatcherCreatedDirs(recordPath, kept)
+		}
+	}
+	if name := strings.TrimSpace(conn.Name()); name != "" && !strings.ContainsAny(name, `/\`) {
+		backups := filepath.Join(dataDir, "connector_backups", name)
+		if info, err := os.Lstat(backups); err == nil && info.Mode().Type() == fs.ModeDir {
+			_ = os.Remove(backups) // only when empty
+		}
+	}
 }

@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/exec"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -88,11 +90,18 @@ func otherDriverSandboxes(list []sandboxapi.Sandbox, live string) []sandboxapi.S
 	}
 	var out []sandboxapi.Sandbox
 	for _, sb := range list {
-		if sb.Phase != "deleted" && createdDriver(sb) != live {
+		if sb.Phase != "deleted" && !beingCreated(sb) && createdDriver(sb) != live {
 			out = append(out, sb)
 		}
 	}
 	return out
+}
+
+// beingCreated reports a sandbox whose create is still under way and has
+// recorded no driver yet: it is being made on the driver the gateway runs
+// now, never an old record of the docker driver (GAP-1431).
+func beingCreated(sb sandboxapi.Sandbox) bool {
+	return sb.Driver == "" && (sb.Phase == "creating" || sb.Phase == "provisioning" || sb.Phase == "pending")
 }
 
 // otherDriverNote says which sandboxes belong to a driver the gateway no
@@ -198,7 +207,7 @@ func (a *App) Status(ctx context.Context, name string, format OutputFormat) erro
 		a.printStatus(st)
 		return nil
 	}
-	sb, err := api.Get(ctx, name)
+	sb, err := api.GetConfirmed(ctx, name)
 	if err != nil {
 		return apiError(err)
 	}
@@ -241,7 +250,7 @@ func (a *App) printDetachedRun(ctx context.Context, sb *sandboxapi.Sandbox) {
 			exit = " (exit status " + run.Exit + ")"
 		}
 		a.note("its detached run" + a.startedText(run.Started) + " finished" + exit + "; " + logs + " shows it. " + sb.Name +
-			" keeps running until you stop it: `" + CommandName + " stop " + sb.Name + "` (or delete it)")
+			" keeps running until you stop it: `" + CommandName + " stop " + sb.Name + "` (or delete it). A detached run may leave no conversation to continue; connect normally to start a new one")
 	}
 }
 
@@ -262,6 +271,8 @@ func (a *App) printStatus(st *sandboxapi.Status) {
 	if st.Enabled {
 		if st.Available {
 			row("OpenShell", "connected")
+		} else if st.Managed != nil && st.PortConflict != nil {
+			row("OpenShell", "unavailable: "+st.PortConflict.Message())
 		} else if st.Managed != nil && st.GatewayElsewhere != "" {
 			row("OpenShell", managedAccountBusyText)
 		} else if st.Managed != nil && st.Managed.Unavailable == "" {
@@ -302,6 +313,44 @@ func (a *App) printStatus(st *sandboxapi.Status) {
 		row("Telemetry", a.style(fmt.Sprintf("%s refused since the daemon started; last: %s",
 			plural(st.TelemetryFailures, "record", "records"), truncate(sandboxapi.DisplayText(st.TelemetryError), 200)), ansiRed))
 	}
+	for _, u := range st.Unprotected {
+		// A live legacy guest (GAP-0901), a contained one (GAP-0902) or one
+		// that may be either whose gateway has not said (GAP-1085,
+		// GAP-1089), in the daemon's words for each: no new sandbox runs
+		// until it is gone, and DefenseClaw does not stop it for the user.
+		row("Unprotected", a.style(u.Name+": "+unprotectedWords(u)+"; "+unprotectedWay(u), ansiRed))
+	}
+}
+
+// unprotectedWords names the state of the unprotected guest u: a live
+// legacy one (no reason: what a daemon of the first 1.0.4 builds sends too)
+// or a contained one, and the daemon's own reason for any other.
+func unprotectedWords(u sandboxapi.UnprotectedSandbox) string {
+	switch u.Reason {
+	case "":
+		return sandboxapi.LegacyUnprotected
+	case sandboxapi.UnprotectedContained:
+		return sandboxapi.ContainedUnprotected
+	case sandboxapi.UnprotectedUnknown:
+		return sandboxapi.UnknownUnprotected
+	}
+	return "running unprotected: " + u.Reason
+}
+
+// unprotectedWay is what the user of the unprotected guest u does: the
+// daemon's detail, and the command that ends it.
+func unprotectedWay(u sandboxapi.UnprotectedSandbox) string {
+	way := "no new sandbox runs until it is gone"
+	if u.Reason == sandboxapi.UnprotectedUnknown {
+		way = "no new sandbox runs until its gateway says"
+	}
+	if u.Detail != "" {
+		way += ": " + u.Detail
+	}
+	if u.Stop != "" {
+		way += ": `" + u.Stop + "`"
+	}
+	return way
 }
 
 func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
@@ -323,10 +372,7 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 	}
 	row("Project", a.tildePath(sb.Project)+" → "+sb.Workdir+" ("+sb.WorkdirMode+")")
 	yolo := "skip-permissions on"
-	switch text, own := ownApprovals[sb.Harness]; {
-	case own:
-		yolo = text
-	case !sb.Launch.Yolo:
+	if !sb.Launch.Yolo {
 		yolo = "skip-permissions off (harness prompts kept)"
 	}
 	row("Permissions", yolo)
@@ -335,11 +381,27 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 		// The floor refuses every ask, whatever triage's mode (GAP-0468).
 		approvals = "refused (your profile doesn't let you approve asks)"
 	}
-	if sandboxPolicyPending(*sb) {
+	switch {
+	case sandboxPolicyPending(*sb):
 		row("Policy", "pending (resolving policy)")
-	} else {
+	case sb.StopReason != "":
+		// The organization's gateway ended the registration (the Stopped
+		// row says why): the policy shown is the one the sandbox was
+		// created with, which is not in force; it can't start under it
+		// (GAP-0606). The list keeps naming it (GAP-0079).
+		row("Policy", fmt.Sprintf("pack %s, network %s, approvals %s: the policy it was created with, not in force; it can't start under it (see Stopped)",
+			joinNonEmpty(" ", firstNonEmpty(sb.Pack, "open"), shortDigest(sb.PackDigest)), networkLabel(sb), sb.Approvals))
+	default:
 		row("Policy", fmt.Sprintf("pack %s, network %s, approvals %s", joinNonEmpty(" ", firstNonEmpty(sb.Pack, "open"), shortDigest(sb.PackDigest)), networkLabel(sb), approvals))
 	}
+	// On a managed computer: the organization profile the sandbox's
+	// registration matches now, with the digest of the same match, so a
+	// regroup shows here as in `policy explain` (#1199); and the
+	// organization's words for a stop its policy made.
+	if sb.OrganizationProfile != "" {
+		row("Your policy", organizationPolicyText(sb.OrganizationProfile, sb.Provisional, sb.PolicyDigest)+" — "+CommandName+" policy explain")
+	}
+	row("Stopped", sb.StopReason)
 	// What it was created with beyond the policy, which a resume keeps.
 	for _, c := range grantTexts(sb.Credentials) {
 		row("Secret", c)
@@ -519,6 +581,13 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 	if err != nil {
 		return apiError(err)
 	}
+	if sb.Phase == "ready" && sb.OldSupervisor {
+		// Its session runs a supervisor whose network broker can let its
+		// connections bypass its policy. DefenseClaw stops no such sandbox
+		// on its own, a connect included: only the user's own stop, once
+		// they saved their work, ends it.
+		return oldSupervisorRefusal(sb)
+	}
 	spec, err := ResolveHarness(sb.Harness)
 	if err != nil {
 		return err
@@ -541,28 +610,64 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 	args := o.Args
 	shown := RunOptions{Args: args, Prompt: o.Prompt}
 	if run != nil {
+		shownArgs := sessionArgs(run.Args, o.Args)
 		if !o.Shell {
-			args = sessionArgs(run.Args, o.Args)
+			args = shownArgs
 		}
-		shown = RunOptions{Args: args, Prompt: o.Prompt, Credentials: run.Credentials, GitHubWrite: run.GitHubWrite, HostPorts: run.HostPorts}
+		// A companion shell still shows the saved model, but receives no
+		// harness options itself.
+		shown = RunOptions{Args: shownArgs, Prompt: o.Prompt, Credentials: run.Credentials, GitHubWrite: run.GitHubWrite, HostPorts: run.HostPorts}
 	}
 	started, kept := false, sb.Phase == "ready"
 	if sb.Phase != "ready" {
 		a.note("starting " + sb.Name + "…")
-		if sb, kept, err = a.startSandbox(ctx, api, sb, StartOptions{}, true); err != nil {
-			return err
+		before := sb
+		startedSandbox, retained, startErr := a.startSandbox(ctx, api, before, StartOptions{}, true)
+		if startErr != nil {
+			// A pull may have started this stopped copy after our first get.
+			// Attach to the now-ready sandbox; this connect did not start it.
+			if !sandboxapi.IsCode(startErr, sandboxapi.CodeConflict) {
+				return startErr
+			}
+			if sb, err = api.Get(ctx, before.Name); err != nil {
+				return startErr
+			}
+			sb = a.settledSandbox(ctx, api, sb)
+			if sb.Phase != "ready" {
+				return startErr
+			}
+			a.note(before.Name + " is running now; attaching…")
+		} else {
+			sb, kept, started = startedSandbox, retained, true
 		}
-		started = true
+	}
+	continueAfterDetached := false
+	if spec.Name == "claudecode" && slices.Contains(o.Args, "--continue") {
+		if prior, priorErr := a.detachedRun(ctx, cli, sb); priorErr == nil && prior.State == sandboxapi.RunExited {
+			continueAfterDetached = true
+		}
 	}
 	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm, yes: o.Yes, started: started, headless: headless, shell: o.Shell,
-		passArgs: len(o.Args) > 0}
+		continueAfterDetached: continueAfterDetached,
+		passArgs:              len(o.Args) > 0}
 	// fail stops the sandbox this command started for a session that never
 	// began: the probe, the refresh or the harness's start failed.
 	fail := func(err error) error {
+		var missing *openShellClientMissingError
+		if errors.As(err, &missing) {
+			// The sandbox runs; only this command cannot reach it. Stopping it
+			// would end what it runs for a client binary that the account's
+			// sandbox service installs again (GAP-0196).
+			return a.openShellClientMissingText(ctx, missing, started)
+		}
 		if started {
-			a.warn("stopping " + sb.Name + " after the failure")
-			if _, serr := api.Stop(context.WithoutCancel(ctx), sb.Name); serr != nil {
-				a.warn("could not stop " + sb.Name + ": " + apiError(serr).Error())
+			switch keep, serr := a.stopIfAlone(context.WithoutCancel(ctx), api, sb.Name, nil); {
+			case keep != "":
+				a.warn(sb.Name + " keeps running after the failure: " + keep)
+			case serr != nil:
+				a.warn("could not stop " + sb.Name + " after the failure: " + apiError(serr).Error())
+			default:
+				a.warn("stopped " + sb.Name + " after the failure")
 			}
 		}
 		return err
@@ -614,6 +719,26 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 	return s.exit(code)
 }
 
+// oldSupervisorRefusal refuses an exec or a connect of the ready sandbox
+// sb, whose session runs the supervisor of an OpenShell release older than
+// openshell.SupportedMin (sandboxapi.Sandbox.OldSupervisor): its network
+// broker can let its connections bypass its policy (NVIDIA/OpenShell#4494),
+// and DefenseClaw cannot contain it. DefenseClaw stops it for nobody: the
+// refusal names the user's own stop, which on a MicroVM syncs its disk
+// first because that release's stop does not.
+func oldSupervisorRefusal(sb *sandboxapi.Sandbox) error {
+	name := sb.Name
+	stop := "save the work you need, then run `" + CommandName + " stop " + name + "`"
+	if d, ok := openshell.LookupDriver(sb.Driver); !ok || !d.StopFlushes {
+		stop += ", which syncs the VM's disk first (that release's stop does not flush it, so what the guest writes after the sync may be lost) " +
+			"and, when that sync fails, asks before it stops the VM"
+	}
+	return fmt.Errorf("%s: "+sandboxapi.LegacyUnprotected+": its session runs the supervisor of an OpenShell release older than %s, "+
+		"whose network broker can let the sandbox's connections bypass its policy (NVIDIA/OpenShell#4494), so DefenseClaw runs nothing in it and does not stop it for you: "+
+		"%s; then `%s start %s` (or `connect`) runs it on the gateway's own supervisor",
+		name, openshell.SupportedMin, stop, CommandName, name)
+}
+
 // refreshCopy re-stages a copy-mode sandbox's project and uploads it.
 func (a *App) refreshCopy(ctx context.Context, s *session) error {
 	// The sandbox's own policy decides what is held back, as at its run,
@@ -647,10 +772,10 @@ func (a *App) refreshCopy(ctx context.Context, s *session) error {
 		case errors.Is(err, workspace.ErrUnpulledChanges):
 			// One sentence: connect and run take no flag that discards it.
 			return &wsError{msg: s.sb.Name + " has work that was not pulled: bring it back with `" + CommandName + " pull " + s.sb.Name +
-				" --apply` (or --branch, or --patch-out FILE), or connect without --refresh to go on with the copy as it is", err: err}
+				" --apply` (or --branch, or --patch-out FILE) and confirm the project, branch or patch file contains it before refreshing, or connect without --refresh to go on with the copy as it is", err: err}
 		case errors.Is(err, workspace.ErrUnappliedPull):
 			hint = "bring the work back first (`" + CommandName + " pull " + s.sb.Name + " --apply`, --branch or --patch-out FILE), " +
-				"or connect without --refresh to go on with the copy as it is"
+				"confirm the project, branch or patch file contains it before refreshing, or connect without --refresh to go on with the copy as it is"
 		}
 		return workspaceFailure("refresh the copy", err, hint)
 	}
@@ -684,6 +809,9 @@ func (a *App) Exec(ctx context.Context, o ExecOptions) error {
 	if err != nil {
 		return apiError(err)
 	}
+	if sb.Phase == "ready" && sb.OldSupervisor {
+		return oldSupervisorRefusal(sb)
+	}
 	if sb.Phase != "ready" {
 		return fmt.Errorf("%s is %s; start it with `%s start %s`", sb.Name, sb.Phase, CommandName, sb.Name)
 	}
@@ -706,17 +834,22 @@ func (a *App) Exec(ctx context.Context, o ExecOptions) error {
 		return err
 	}
 	// The command can change a copy: what it held as the sandbox last
-	// stopped is no longer known.
+	// stopped is no longer known, and a look at it made before is not
+	// recorded at its stop (copyBase; best effort: exec holds no lease).
 	a.forgetStoppedCopy(sb.Name)
+	_ = a.bumpAttachStamp(sb.Name)
 	// The command outlives a client that is ended (execreap.go): one told
 	// to end stops what the command left running before it exits.
 	runCtx, stop := untilTerminated(ctx, tty)
 	var code int
+	var gatewayFilter *gatewayLostFilter
 	if tty {
 		code, err = a.Terminal.Run(runCtx, inv)
 	} else {
-		code, err = a.Streamer.Stream(runCtx, inv, a.IO.Out, a.IO.Err)
+		gatewayFilter = newGatewayLostFilter(a.IO.Err)
+		code, err = a.Streamer.Stream(runCtx, inv, a.IO.Out, gatewayFilter)
 	}
+	gatewayLost := gatewayFilter != nil && gatewayFilter.finish(code)
 	ended := runCtx.Err() != nil
 	sig := stop()
 	if ended {
@@ -727,7 +860,13 @@ func (a *App) Exec(ctx context.Context, o ExecOptions) error {
 		return ctx.Err()
 	}
 	if err != nil {
-		return err
+		return a.clientMissingOr(ctx, sb.Name, err)
+	}
+	if code != 0 && gatewayLost {
+		// The OpenShell command could not connect to its gateway (it was
+		// killed or is restarting): said in DefenseClaw's words (GAP-0340).
+		a.warn(a.gatewayLostExecText(ctx, sb.Name))
+		return &ExitError{Code: code}
 	}
 	if code != 0 {
 		// OpenShell's own line ("exec relay closed before the command
@@ -767,6 +906,11 @@ type StopOptions struct {
 	// whose own disk could not be looked at, without asking. A copy-mode
 	// MicroVM whose disk is full keeps running even so (fullDiskStop).
 	Yes bool
+	// DiscardUnsynced stops a MicroVM whose disk could not be synced first,
+	// losing what it wrote since its last sync. Yes does not: without it
+	// such a stop is asked on a terminal, and refused without one
+	// (askDiscardUnsynced).
+	DiscardUnsynced bool
 }
 
 // ExitStopKept is the exit status of a `sandbox stop` that kept the
@@ -793,10 +937,13 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 		return apiError(err)
 	}
 	var copyAt *workspace.CopyStatus
+	var base copyBase
+	asked := 0
 	if sb.Phase == "ready" {
 		if gateway, err := a.gatewayName(ctx); err == nil {
 			cli := a.cli(gateway)
-			ok, idle, err := a.beforeStop(ctx, cli, sb, o.Yes)
+			ok, idle, attached, err := a.beforeStop(ctx, cli, sb, o.Yes)
+			asked = attached
 			if err != nil {
 				return err
 			}
@@ -806,8 +953,15 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 			}
 			// A detached run or a session still going can change the copy
 			// between the look and the stop.
-			if sb.WorkdirMode == config.OpenShellWorkdirCopy && idle && a.attachedSessions(sb.Name) == 0 {
-				copyAt = a.copyAtStop(ctx, cli, sb)
+			if sb.WorkdirMode == config.OpenShellWorkdirCopy && idle {
+				base = a.copyBaseOf(sb)
+				n, err := a.attachedSessions(sb.Name)
+				if err != nil {
+					return attachedUnknown(sb.Name, err)
+				}
+				if n == 0 {
+					copyAt = a.copyAtStop(ctx, cli, sb)
+				}
 			}
 			if ok, err := a.fullDiskStop(ctx, cli, sb, copyAt, o.Yes); err != nil || !ok {
 				if err == nil {
@@ -817,16 +971,131 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 			}
 		}
 	}
-	stopped, err := api.Stop(ctx, o.Name)
-	if err != nil {
-		return apiError(err)
+	// The stop is decided under the sandbox's exclusive gate: a session that
+	// attached since the question above is named and asked about again
+	// (with no lock held while the question is open), and none attaches
+	// between the last count and OpenShell's stop. What the look found is
+	// recorded under the gate too, unless something ran in the copy after
+	// it: a session that attached since (also one that has ended) or a hook
+	// request (copyBase).
+	var stopped *sandboxapi.Sandbox
+	var stopErr error
+	stopGated := func(discard bool) error {
+		return a.endAsked(ctx, o.Name, asked, func(others int) (bool, error) {
+			copyAt = nil
+			return a.confirmEnding(attachedText(o.Name, others)+" now; stopping the sandbox ends "+them(others), "Stop anyway?", o.Yes)
+		}, func() {
+			stopped, stopErr = api.StopWith(ctx, o.Name, sandboxapi.StopRequest{DiscardUnsynced: discard})
+			if stopErr == nil && copyAt != nil && base.unchanged(a, o.Name, stopped) {
+				a.markStoppedCopy(sb, copyAt.Work == workspace.CopyWorkNone, copyAt.Pulled)
+			}
+		})
 	}
-	// A hook request since the look is something that ran in it after all.
-	if copyAt != nil && !stopped.Hooks.LastHookAt.After(sb.Hooks.LastHookAt) {
-		a.markStoppedCopy(sb, copyAt.Work == workspace.CopyWorkNone, copyAt.Pulled)
+	err = stopGated(o.DiscardUnsynced)
+	if err == nil && stopErr != nil && !o.DiscardUnsynced && sandboxapi.IsCode(stopErr, sandboxapi.CodeUnsynced) {
+		// The question is asked with no gate held; a yes stops under the gate
+		// again (GAP-0902).
+		discard, aerr := a.askDiscardUnsynced(o.Name, stopErr)
+		if aerr != nil || !discard {
+			return aerr
+		}
+		err = stopGated(true)
+	}
+	switch {
+	case errors.Is(err, errKept):
+		a.note(o.Name + " keeps running")
+		return nil
+	case err != nil:
+		return err
+	case stopErr != nil:
+		return stopFailure(ctx, api, o.Name, stopErr)
+	}
+	if note := notStoppedNote(ctx, api, stopped); note != "" {
+		a.warn(note)
+		return nil
 	}
 	a.ok(stopped.Name + " is " + stopped.Phase)
 	return nil
+}
+
+// askDiscardUnsynced answers the daemon's refusal (err) to stop a MicroVM
+// whose disk it could not sync first (sandboxapi.CodeUnsynced, GAP-0902): on
+// a terminal the user is told what is lost and asked, and only a yes stops
+// it, accepting the loss (sandboxapi.StopRequest.DiscardUnsynced);
+// --discard-unsynced accepts it up front. --yes does not, since the TUI, the
+// macOS app and scripts pass it for the question about a detached run.
+// Without a terminal the sandbox keeps running (ExitStopKept). A no keeps
+// it running too, and returns false and no error.
+func (a *App) askDiscardUnsynced(name string, err error) (bool, error) {
+	a.warn(sandboxapi.AsError(err).Message)
+	if !a.IO.TTY {
+		a.note("to stop it anyway, losing that: `" + CommandName + " stop " + name + " --discard-unsynced`")
+		return false, &ExitError{Code: ExitStopKept, Err: &Silent{Err: errors.New(name + " keeps running: its disk could not be synced")}}
+	}
+	ok, aerr := a.ask("Stop "+name+" anyway and lose what it wrote since its last sync?", false, false)
+	if aerr != nil {
+		return false, aerr
+	}
+	if !ok {
+		a.note(name + " keeps running; save the work you need, then stop it again")
+	}
+	return ok, nil
+}
+
+// stopFailure is the error of the stop of the sandbox name that the daemon
+// refused (err). A daemon before DefenseClaw 1.0.4 (one an upgrade left
+// running) answers the stop of a MicroVM in OpenShell's error state with
+// OpenShell's words alone ("sandbox ... is in error state"), which name no
+// way on (GAP-0871): when its error has no detail and the sandbox is such a
+// MicroVM, the error goes on with the sandbox, why OpenShell holds it and
+// the command that ends it (notStoppedNote), as the 1.0.4 daemon's does.
+func stopFailure(ctx context.Context, api API, name string, err error) error {
+	var e *sandboxapi.Error
+	if !errors.As(err, &e) || e.Detail != "" || e.Code == sandboxapi.CodeNotFound || daemonUnreachable(e) {
+		return apiError(err)
+	}
+	sb, gerr := api.Get(ctx, name)
+	if gerr != nil {
+		return apiError(err)
+	}
+	note := notStoppedNote(ctx, api, sb)
+	if note == "" {
+		return apiError(err)
+	}
+	return fmt.Errorf("%w; %s", apiError(err), note)
+}
+
+// notStoppedNote is what a stop that OpenShell returned as it was leaves
+// the user to do, "" when sb stopped or holds nothing: OpenShell does not
+// stop a MicroVM whose main process completed or failed, which may still
+// run, and DefenseClaw stops, restarts or upgrades no OpenShell gateway,
+// and moves no account to another OpenShell setup, while one does
+// (openshell.HoldsGateway). It names how to bring it to stopped
+// (openshell.StopWayOn) on the release the daemon's gateway reports.
+func notStoppedNote(ctx context.Context, api API, sb *sandboxapi.Sandbox) string {
+	var phase openshell.SandboxPhase
+	is := "completed"
+	switch sb.Phase {
+	case "completed":
+		phase = openshell.PhaseCompleted
+	case "error":
+		phase, is = openshell.PhaseError, "in OpenShell's error state"
+		if sb.PhaseReason != "" {
+			is += " (" + sb.PhaseReason + ")"
+		}
+	default:
+		return ""
+	}
+	if d, ok := openshell.LookupDriver(sb.Driver); ok && d.StopFlushes || !openshell.HoldsGateway(phase, sb.PhaseReason, false) {
+		return ""
+	}
+	release := ""
+	if st, err := api.Status(ctx); err == nil && st.Gateway != nil {
+		release = st.Gateway.Version
+	}
+	return sb.Name + " is " + is + ": OpenShell does not stop it, so its MicroVM may still run, and DefenseClaw stops, restarts and upgrades " +
+		"no OpenShell gateway under it, nor moves this account to another OpenShell setup, until OpenShell reports it stopped: " +
+		openshell.StopWayOn(sb.Name, phase, sb.PhaseReason, release)
 }
 
 // copyAtStop looks at the copy of sb, which is about to stop, within a
@@ -918,6 +1187,17 @@ func (d overlayDisk) filling() bool {
 	return d.known && (d.full() || d.percent() >= overlayDiskWarnPercent)
 }
 
+// fillsWithin reports whether d, at the rate its free space fell since the
+// look before (prev, elapsed ago), runs out of room within horizon.
+func (d overlayDisk) fillsWithin(prev overlayDisk, elapsed, horizon time.Duration) bool {
+	if !d.known || !prev.known || prev.size != d.size || elapsed <= 0 || d.avail >= prev.avail {
+		return false
+	}
+	perSecond := float64(prev.avail-d.avail) / elapsed.Seconds()
+	left := float64(d.avail - lowDiskBytes)
+	return left <= 0 || left/perSecond <= horizon.Seconds()
+}
+
 // overlayDiskOf looks at the own disk of the running MicroVM name with
 // `df -Pk /` in it, within overlayDiskLook.
 func (a *App) overlayDiskOf(ctx context.Context, cli openshell.CLI, name string) overlayDisk {
@@ -962,7 +1242,7 @@ func overlayDiskFillingText(name string, d overlayDisk, copyMode bool) string {
 	text := fmt.Sprintf("%s's own disk is %d%% full (%s of %s free): a MicroVM stopped with its disk full cannot start again → `%s exec %s -- df -h /` shows it",
 		name, d.percent(), humanBytes(d.avail), humanBytes(d.size), CommandName, name)
 	if copyMode {
-		text += "; `" + CommandName + " pull " + name + "` brings its work back before it fills"
+		text += "; `" + CommandName + " pull " + name + " --apply` brings its work back before it fills"
 	}
 	return text
 }
@@ -988,6 +1268,10 @@ type StartOptions struct {
 	// when the folder still holds an earlier session's changes.
 	NoSnapshot  bool
 	NewSnapshot bool
+	// EndVM starts a MicroVM whose workload ended though its VM may still
+	// run, which OpenShell's start ends with no flush
+	// (sandboxapi.StartRequest.EndVM).
+	EndVM bool
 }
 
 // Start is `sandbox start`.
@@ -1003,6 +1287,7 @@ func (a *App) Start(ctx context.Context, name string, o StartOptions) error {
 	if err != nil {
 		return apiError(err)
 	}
+	sb = a.settledSandbox(ctx, api, sb)
 	if sb.Phase == "ready" {
 		a.ok(sb.Name + " is already running → attach with `" + CommandName + " connect " + sb.Name + "`")
 		return nil
@@ -1019,6 +1304,37 @@ func (a *App) Start(ctx context.Context, name string, o StartOptions) error {
 	return nil
 }
 
+// sandboxSettlePolls and sandboxSettleInterval bound how long a start or a
+// pull waits for a sandbox OpenShell is still starting on its own.
+const (
+	sandboxSettlePolls    = 90
+	sandboxSettleInterval = time.Second
+)
+
+// settledSandbox waits while OpenShell is still starting sb on its own: a
+// gateway that restarts resumes a sandbox it kept, and a `start` or `pull`
+// right then failed with "is starting, not stopped; stop it before starting
+// a new session", which a stop could not do either (rel-1-0-3 BR-04 pass
+// point A). It returns the sandbox as it settled, or as last seen when it
+// did not settle in time or could not be read.
+func (a *App) settledSandbox(ctx context.Context, api API, sb *sandboxapi.Sandbox) *sandboxapi.Sandbox {
+	a.defaults()
+	for poll := 0; poll < sandboxSettlePolls && (sb.Phase == "starting" || sb.Phase == "provisioning"); poll++ {
+		if poll == 0 {
+			a.note(sb.Name + " is " + sb.Phase + " (OpenShell is starting it); waiting for it…")
+		}
+		if err := a.Sleep(ctx, sandboxSettleInterval); err != nil {
+			return sb
+		}
+		now, err := api.Get(ctx, sb.Name)
+		if err != nil {
+			return sb
+		}
+		sb = now
+	}
+	return sb
+}
+
 // DeleteOptions are the `sandbox delete` flags.
 type DeleteOptions struct {
 	Names        []string
@@ -1031,6 +1347,17 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 	api, err := a.api()
 	if err != nil {
 		return err
+	}
+	if len(o.Names) > 0 && (a.ManagedHost() || onManagedHost()) {
+		st, statusErr := api.Status(ctx)
+		if statusErr != nil {
+			return apiError(statusErr)
+		}
+		if st != nil && !st.Enabled {
+			// Concatenated, so the hint scan reads the suggested command
+			// (TestSandboxHintsNameCommandsThatExist).
+			return errors.New("the administrator has turned sandboxes off (openshell.enabled); kept sandboxes cannot be deleted until the account gateway runs. Ask the administrator to turn sandboxes on temporarily, then run `" + CommandName + " delete " + strings.Join(o.Names, " ") + "` again")
+		}
 	}
 	var errs []error
 	for _, name := range o.Names {
@@ -1049,7 +1376,12 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 				a.note(name + "'s work was last " + a.handoverText(h) + "; nothing newer is left in it")
 			}
 		}
-		if n := a.attachedSessions(name); n > 0 {
+		n, err := a.attachedSessions(name)
+		if err != nil {
+			errs = append(errs, attachedUnknown(name, err))
+			continue
+		}
+		if n > 0 {
 			// Its sessions in other terminals end with it (GAP-0285).
 			what := attachedText(name, n) + "; deleting it ends " + them(n)
 			question = what + ". " + question
@@ -1064,7 +1396,10 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 		if !yes {
 			continue
 		}
-		res, err := api.Delete(ctx, name, sandboxapi.DeleteRequest{KeepSnapshot: o.KeepSnapshot})
+		res, err := a.deleteAsked(ctx, api, name, n, o)
+		if errors.Is(err, errKept) {
+			continue
+		}
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", name, apiError(err)))
 			continue
@@ -1076,6 +1411,100 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// errKept is a stop or a delete the user declined once asked again.
+var errKept = errors.New("kept")
+
+// deleteAsked deletes sandbox name, whose deletion the user confirmed with
+// asked sessions attached to it, under the sandbox's exclusive gate: one
+// that attached since is named and asked about again (errKept when the
+// answer is no), and none attaches between the last count and OpenShell's
+// delete (endAsked).
+func (a *App) deleteAsked(ctx context.Context, api API, name string, asked int, o DeleteOptions) (*sandboxapi.DeleteResponse, error) {
+	var res *sandboxapi.DeleteResponse
+	var deleteErr error
+	err := a.endAsked(ctx, name, asked, func(others int) (bool, error) {
+		ok, err := a.confirmEnding(attachedText(name, others)+" now; deleting it ends "+them(others), "Delete anyway?", o.Yes)
+		if err == nil && !ok {
+			a.note(name + " is kept")
+		}
+		return ok, err
+	}, func() { res, deleteErr = api.Delete(ctx, name, sandboxapi.DeleteRequest{KeepSnapshot: o.KeepSnapshot}) })
+	if err != nil {
+		return nil, err
+	}
+	return res, deleteErr
+}
+
+// endAsked runs end, a stop or a delete of sandbox name that the user
+// confirmed with asked sessions attached, under the sandbox's exclusive
+// gate (lockForStop), once a count under it finds no more sessions than the
+// answer covered. When it finds more, it lets the gate and the account's
+// lifecycle lock go before it asks about them (ask; an open question must
+// not hold up an attach, a gateway restart, Apply, Rollback, an upgrade or
+// a managed drain of the account), then takes the gate and counts again.
+// errKept when the answer is no; a count that cannot be made leaves the
+// sandbox as it is (attachedUnknown).
+func (a *App) endAsked(ctx context.Context, name string, asked int, ask func(others int) (bool, error), end func()) error {
+	for {
+		others, release, err := a.lockForStop(ctx, name)
+		if err != nil {
+			return attachedUnknown(name, err)
+		}
+		if others <= asked {
+			end()
+			release()
+			return nil
+		}
+		release()
+		ok, err := ask(others)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errKept
+		}
+		asked = others
+	}
+}
+
+// deleteIfAlone deletes sandbox name, which this command created, unless a
+// session is attached to it, deciding under the sandbox's exclusive gate
+// (lockForStop): keep says why it was kept (sessions attached, or a count
+// that could not be made), "" when OpenShell was asked to delete it.
+func (a *App) deleteIfAlone(ctx context.Context, api API, name string) (keep string, err error) {
+	others, release, err := a.lockForStop(ctx, name)
+	if err != nil {
+		return attachedUnknown(name, err).Error(), nil
+	}
+	defer release()
+	if others > 0 {
+		return attachedText(name, others) + " → delete it once " + map[bool]string{true: "it ends", false: "they end"}[others == 1] + ": " + CommandName + " delete " + name, nil
+	}
+	_, err = api.Delete(ctx, name, sandboxapi.DeleteRequest{})
+	return "", err
+}
+
+// stopIfAlone stops sandbox name, which this command started, unless a
+// session is attached to it, deciding under the sandbox's exclusive gate
+// (lockForStop): keep says why it was left running (sessions attached, or
+// a count that could not be made), "" when OpenShell was asked to stop it.
+// then, when set, runs under the gate once the stop succeeded.
+func (a *App) stopIfAlone(ctx context.Context, api API, name string, then func(stopped *sandboxapi.Sandbox)) (keep string, err error) {
+	others, release, err := a.lockForStop(ctx, name)
+	if err != nil {
+		return attachedUnknown(name, err).Error(), nil
+	}
+	defer release()
+	if others > 0 {
+		return attachedText(name, others) + " → stop it once " + map[bool]string{true: "it ends", false: "they end"}[others == 1] + ": " + CommandName + " stop " + name, nil
+	}
+	stopped, err := api.Stop(ctx, name)
+	if err == nil && then != nil {
+		then(stopped)
+	}
+	return "", err
 }
 
 // unhandedWork says what work a copy-mode sandbox holds that never came
@@ -1100,7 +1529,9 @@ func (a *App) unhandedWork(ctx context.Context, sb *sandboxapi.Sandbox) string {
 		// run since.
 		return ""
 	}
-	pull := "`" + CommandName + " pull " + sb.Name + " --apply|--branch|--patch-out FILE`"
+	pull := "`" + CommandName + " pull " + sb.Name + " --apply`, `" + CommandName + " pull " + sb.Name +
+		" --branch`, or `" + CommandName + " pull " + sb.Name + " --patch-out FILE`"
+	check := "; inspect the project, branch or patch file before deleting the sandbox"
 	last := ""
 	if h := a.lastHandover(sb); h != nil {
 		last = "its work was last " + a.handoverText(h)
@@ -1119,13 +1550,13 @@ func (a *App) unhandedWork(ctx context.Context, sb *sandboxapi.Sandbox) string {
 	}
 	switch {
 	case err != nil:
-		return "may hold work that was never pulled back" + why("it could not be checked: "+truncate(err.Error(), 120)) + "; " + pull + " brings it back"
+		return "may hold work that was never pulled back" + why("it could not be checked: "+truncate(gatewayTransportText(err.Error()), 120)) + "; use " + pull + " to save it if needed" + check
 	case work == workspace.CopyWorkUnpulled:
-		return "holds work that was never pulled back" + why() + "; " + pull + " brings it back"
+		return "holds work that was never pulled back" + why() + "; use " + pull + " to save it if needed" + check
 	case work == workspace.CopyWorkUnapplied:
-		return "holds a pull that was never applied" + why() + "; " + pull + " applies it"
+		return "holds a pull that was never applied" + why() + "; use " + pull + " to save it" + check
 	case work == workspace.CopyWorkUnknown:
-		return "may hold work that was never pulled back" + why("it is not running, so it was not checked") + "; " + pull + " looks"
+		return "may hold work that was never pulled back" + why("it is not running, so it was not checked") + "; use " + pull + " to save it if needed" + check
 	}
 	return ""
 }
@@ -1197,7 +1628,7 @@ func (a *App) Logs(ctx context.Context, o LogsOptions) error {
 		}
 	}
 	if err != nil {
-		return err
+		return a.clientMissingOr(ctx, sb.Name, err)
 	}
 	switch code {
 	case 0:
@@ -1294,4 +1725,34 @@ func (a *App) stoppedUnderFollower(ctx context.Context, api API, sb *sandboxapi.
 	a.note(fmt.Sprintf("%s is %s (%s); DefenseClaw kept the log of its detached run (`%s logs %s` shows it)",
 		sb.Name, sb.Phase, a.clock(kept.KeptAt), CommandName, sb.Name))
 	a.keptRunState(kept)
+}
+
+// clientMissingOr is err, except that a command which could not run the
+// OpenShell command at all (exec's "executable file not found") says in plain
+// words what is missing and what to do, as connect does, instead of Go's text
+// (GAP-0196: sandbox exec and logs printed the raw error).
+func (a *App) clientMissingOr(ctx context.Context, sandbox string, err error) error {
+	if errors.Is(err, exec.ErrNotFound) {
+		return a.openShellClientMissingText(ctx, &openShellClientMissingError{sandbox: sandbox, err: err}, false)
+	}
+	return err
+}
+
+// openShellClientMissingText is the refusal of a command that could not run
+// the OpenShell command (openShellClientMissingError), with the next step: on
+// a managed computer the account's sandbox service puts its copy back, so
+// the command is run again, and the organization's contact if it lasts.
+func (a *App) openShellClientMissingText(ctx context.Context, e *openShellClientMissingError, started bool) error {
+	state := e.sandbox + " keeps running"
+	if !started {
+		state = e.sandbox + " is not changed"
+	}
+	facts := a.managedFacts(ctx)
+	if a.ManagedHost() || onManagedHost() || a.managedSeen != nil {
+		return fmt.Errorf("%s; %s. This happens for a short while after your organization changed the sandbox setup on this computer, "+
+			"until your sandbox service installs the command again: run the command again in a minute, and `%s doctor` shows what is missing. %s",
+			e.Error(), state, CommandName, accountOutageContact(facts.RequestAccess))
+	}
+	return fmt.Errorf("%s; %s. Install OpenShell again with `%s setup`, and `%s doctor` shows what is missing",
+		e.Error(), state, CommandName, CommandName)
 }

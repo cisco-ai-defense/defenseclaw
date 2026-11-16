@@ -18,11 +18,12 @@ package connector
 
 import (
 	"fmt"
-	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const (
@@ -67,9 +68,19 @@ type HookContract struct {
 	ResponseFieldName       string
 	Events                  []string
 	AIDSurfaces             []string
-	Capabilities            HookCapability
-	SupportsTraceparent     bool
-	NativeOTLP              bool
+	// AIDSurfaceEvents names, per AID surface, the connector's own hook events
+	// that reach Cisco AI Defense. AIDWireVersion names the encoding they are
+	// sent in, and the send path carries a tool call only for the version it
+	// implements. Both are mirrored in the manifest, so a change to either fails
+	// the parity test until it is declared.
+	AIDSurfaceEvents map[string][]string
+	AIDWireVersion   string
+	// AIDToolCallShapes records the tools the contract's goldens show reaching
+	// AID as a tool call. See AIDToolCallShape.
+	AIDToolCallShapes   []AIDToolCallShape
+	Capabilities        HookCapability
+	SupportsTraceparent bool
+	NativeOTLP          bool
 	// ToolCallLifecycle declares which hook events are safe inputs to the
 	// structured, stateful tool-call path. Its nested version is independent
 	// of this vendor hook contract's version.
@@ -98,6 +109,10 @@ type HookContractResolution struct {
 	// contract applies. NewestTestedVersion names the bound it passed.
 	UntestedVersion     bool
 	NewestTestedVersion string
+	// Warning is the reason and issue link of the WarnOnly known-broken
+	// entry a Known version falls in: the version keeps its contract, and
+	// Setup says what its hooks do not guard.
+	Warning string
 }
 
 // UntestedNewerVersionReasonPrefix starts the Reason of an untested newer
@@ -106,21 +121,52 @@ type HookContractResolution struct {
 const UntestedNewerVersionReasonPrefix = "untested newer version"
 
 // KnownBrokenAgentVersion is one agent version (Exact) or half-open range
-// [Min, Max) that DefenseClaw refuses even when it is newer than every
-// tested range. Reason and Issue are required so the refusal explains
-// itself.
+// [Min, Max) that DefenseClaw refuses, inside a contract's range or newer
+// than every tested one. Reason and Issue are required so the refusal
+// explains itself. A HostOnly entry applies to the agent on the host, not to
+// the pinned build an OpenShell sandbox image runs. A WarnOnly entry is not
+// refused: its hooks still guard the agent's main interface, so the version
+// keeps its contract and the resolution's Warning names what they miss.
 type KnownBrokenAgentVersion struct {
-	Exact  string
-	Min    string
-	Max    string
-	Reason string
-	Issue  string
+	Exact    string
+	Min      string
+	Max      string
+	Reason   string
+	Issue    string
+	HostOnly bool
+	WarnOnly bool
 }
+
+// hermesTUIWithoutShellHooks is the warning for Hermes before 0.21.1: its
+// TUI (hermes --tui, a separate tui_gateway process) and dashboard chat
+// build their agent without registering the config.yaml shell hooks, so a
+// terminal call ran with no pre_tool_call and was neither blocked nor
+// audited (GAP-0978). Hermes 0.21.1 (v2026.9.7) registers them where every
+// agent is built. The classic interface, cron, ACP and the messaging gateway
+// run them in every release, so these releases are set up with this warning:
+// refusing them left those sessions unguarded as well.
+const hermesTUIWithoutShellHooks = "its TUI (hermes --tui) and dashboard chat run tools without the shell hooks DefenseClaw registers; " +
+	"Hermes 0.21.1 (v2026.9.7) is the first release that runs them there, so update Hermes (hermes update)"
+
+const hermesTUIShellHooksFix = "https://github.com/NousResearch/hermes-agent/commit/3094cde5138bd2bc28134d060345081ab5099d25"
 
 // knownBrokenAgentVersions lists agent versions whose hook surface is known
 // not to work with DefenseClaw. It must match the known_broken_versions
-// lists in cli/defenseclaw/inventory/hook_contracts.json.
-var knownBrokenAgentVersions = map[string][]KnownBrokenAgentVersion{}
+// lists in cli/defenseclaw/inventory/hook_contracts.json. A version is
+// release-style (0.19.0) or a release date (2026.7.20, what a Hermes git
+// install reports); each scheme needs its own range.
+var knownBrokenAgentVersions = map[string][]KnownBrokenAgentVersion{
+	// The OpenShell image pins Hermes 0.19.0 (the newest on PyPI); its
+	// launcher and a root-owned shim refuse that TUI instead (GAP-1036).
+	"hermes": {
+		{Min: "0.19.0", Max: "0.21.1", Reason: hermesTUIWithoutShellHooks, Issue: hermesTUIShellHooksFix, HostOnly: true, WarnOnly: true},
+		{Min: "2026.7.20", Max: "2026.9.7", Reason: hermesTUIWithoutShellHooks, Issue: hermesTUIShellHooksFix, HostOnly: true, WarnOnly: true},
+	},
+}
+
+// gitBuildReleaseDateRE reads the release date a source build prints after
+// its commit ("Hermes Agent vgit.5bba024 (2026.9.24)").
+var gitBuildReleaseDateRE = lazyregexp.New(`\(([0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2})(?:\.[0-9]+)?\)`)
 
 // strictHookContractResolution restores exact-range matching: a version
 // outside every tested range stays unknown. The Secure Client profile sets
@@ -142,13 +188,14 @@ func StrictHookContractResolution() bool {
 
 // gitBuildVersionRE matches source-build version strings such as Hermes
 // "Hermes Agent vgit.5bba024 (2026.9.24)".
-var gitBuildVersionRE = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])v?git[.+-]?[0-9a-f]{7,40}(?:[^a-z0-9]|$)`)
+var gitBuildVersionRE = lazyregexp.New(`(?i)(?:^|[^a-z0-9])v?git[.+-]?[0-9a-f]{7,40}(?:[^a-z0-9]|$)`)
 
 // gitBuildCompareVersion stands in for a git build when it is compared
 // with release-style (non-date) tested bounds.
 const gitBuildCompareVersion = "999.999.999"
 
-var versionNumberRE = regexp.MustCompile(`(?i)(?:^|[^0-9])v?([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?`)
+var versionNumberRE = lazyregexp.New(`(?i)(?:^|[^0-9])v?([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?`)
+var hermesGitReleaseRE = lazyregexp.New(`^Hermes Agent vunknown \(([0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2})\)$`)
 
 var proxyConnectorsWithoutHookGate = map[string]bool{
 	"openclaw":  true,
@@ -565,12 +612,22 @@ var builtinHookContracts = map[string][]HookContract{
 			"Claude Code PreToolUse supports native HITL via permissionDecision=ask.",
 			"PostToolUse and PostToolBatch findings are advisory because their payloads are returned bytes, not typed action requests; command/path enforcement stays on PreToolUse.",
 			"ConfigChange is blockable except when source=policy_settings, where Claude Code ignores blocking decisions.",
+			"Claude Desktop's bundled Claude Code engine is a hook host too: Claude Cowork runs the Claude Code hooks of managed settings and of account plugins as children of that engine. The DefenseClaw Cowork plugin registers ten of this contract's events (CoworkPluginHookEvents: SessionStart, UserPromptSubmit, PreToolUse, PermissionRequest, PostToolUse, PostToolUseFailure, SubagentStart, SubagentStop, Stop, SessionEnd), measured on Claude Desktop 4.4212.0 (engine 2.1.309) and 4.16336.0 (engine 2.1.317).",
 		},
 	}},
 	"hermes": {
+		// A Hermes git install prints no release, only the date of the
+		// release it is on ("Hermes Agent vunknown (2026.9.24)"), and
+		// discovery reads that date. Each pin is the date tag of an
+		// official release in this range (v2026.7.20 is 0.19.0, v2026.8.27
+		// is 0.20.6, read from pyproject.toml at each tag). A date below
+		// the first pin, or between the two contracts' pins, has no
+		// contract; a date after the newest pin of v2 is an untested
+		// newer version (GAP-0151).
 		{
 			Connector:               "hermes",
 			ContractID:              "hermes-hooks-v1",
+			ExactAgentVersions:      []string{"2026.7.20", "2026.7.30", "2026.8.3", "2026.8.13", "2026.8.16", "2026.8.16.2", "2026.8.18", "2026.8.19", "2026.8.27"},
 			MinAgentVersion:         "0.19.0",
 			MaxAgentVersion:         "0.21.0",
 			DefaultForUnversioned:   false,
@@ -635,9 +692,12 @@ var builtinHookContracts = map[string][]HookContract{
 				"The v1 connector covers only the resolved default HERMES_HOME profile. Named-profile homes and multiplex gateways are unsupported. Default-profile inventory includes skills.external_dirs, SOUL.md, built-in memory plus memory.provider provenance, and bundled/Nix, user, and pip plugins; named-profile and project-conditional sources remain explicitly unverified.",
 			},
 		},
+		// Release-date pins (see hermes-hooks-v1): v2026.8.31 is 0.21.0
+		// and v2026.9.24 is 0.21.5.
 		{
 			Connector:               "hermes",
 			ContractID:              "hermes-hooks-v2",
+			ExactAgentVersions:      []string{"2026.8.31", "2026.9.7", "2026.9.11", "2026.9.14", "2026.9.21", "2026.9.24"},
 			MinAgentVersion:         "0.21.0",
 			MaxAgentVersion:         "0.22.0",
 			DefaultForUnversioned:   true,
@@ -682,7 +742,7 @@ var builtinHookContracts = map[string][]HookContract{
 			ContentEnvelope:     hermesContentEnvelope(),
 			Notes: []string{
 				"Same 23 claimed shell-hook events as hermes-hooks-v1. Official Hermes 0.21.x, rechecked at v0.21.3 (v2026.9.14, commit 345cd2b057a452236de401d3534b8502a7465e8d), added observer-only VALID_HOOKS that DefenseClaw does not register or claim. The payload shape is unchanged: the prompt, tool result and model response are under extra (verified on v0.21.5).",
-				"pre_tool_call remains the only blockable event: Hermes accepts both {\"action\":\"block\",\"message\"} (canonical) and {\"decision\":\"block\",\"reason\"} (Claude-Code style) and normalizes internally. Exit code 2 now blocks pre_tool_call. Timeouts and spawn errors still fail open unless the hook spec sets fail_closed, so SupportsFailClosed stays false. Bounded to >=0.21.0,<0.22.0.",
+				"pre_tool_call remains the only blockable event: Hermes accepts both {\"action\":\"block\",\"message\"} (canonical) and {\"decision\":\"block\",\"reason\"} (Claude-Code style) and normalizes internally. Setup sets fail_closed on the pre_tool_call entry, so a spawn error, timeout or unparseable nonempty stdout blocks in the reviewed >=0.21.0,<0.22.0 range. A killed hook can still fail open because Hermes treats its non-2 exit and empty stdout as no decision, so SupportsFailClosed remains false. Secure Client keeps its existing registration. Other events cannot block.",
 				"Setup preserves the operator's hooks_auto_accept value and owns only the exact DefenseClaw (event, command) approvals in shell-hooks-allowlist.json. Running Hermes processes cache callbacks, so registration and revocation remain live=false/pending-reload until every affected CLI, gateway, desktop, or service host is reloaded or restarted; Windows teardown leaves an exact direct-native disabled tombstone for stale callbacks.",
 				"The v2 connector covers only the resolved default HERMES_HOME profile. Named-profile homes and multiplex gateways are unsupported. Default-profile inventory includes skills.external_dirs, SOUL.md, built-in memory plus memory.provider provenance, and bundled/Nix, user, and pip plugins; named-profile and project-conditional sources remain explicitly unverified.",
 			},
@@ -784,8 +844,7 @@ var builtinHookContracts = map[string][]HookContract{
 			AIDSurfaces:             []string{"prompt", "tool_call", "tool_result"},
 			Capabilities: HookCapability{
 				CanBlock:     true,
-				CanAskNative: true,
-				AskEvents:    []string{"preToolUse"},
+				CanAskNative: false,
 				BlockEvents: []string{
 					"preToolUse",
 					"permissionRequest",
@@ -799,7 +858,7 @@ var builtinHookContracts = map[string][]HookContract{
 			ToolCallLifecycle:   copilotToolCallLifecycle(),
 			Notes: []string{
 				"GitHub Copilot CLI shipped preToolUse earlier, but the full DefenseClaw contract also needs postToolUseFailure, permissionRequest, and notification hooks; notification landed in 1.0.18.",
-				"Copilot CLI native ask is limited to preToolUse / PreToolUse hooks.",
+				"Copilot CLI can ask on preToolUse, but its hook input does not prove prompt availability; DefenseClaw denies confirms there until the vendor exposes it.",
 				"postToolUseFailure is advisory-only and can provide recovery additionalContext; it cannot block the failed tool.",
 			},
 		},
@@ -815,8 +874,7 @@ var builtinHookContracts = map[string][]HookContract{
 			AIDSurfaces:             []string{"prompt", "tool_call", "tool_result"},
 			Capabilities: HookCapability{
 				CanBlock:     true,
-				CanAskNative: true,
-				AskEvents:    []string{"preToolUse"},
+				CanAskNative: false,
 				BlockEvents: []string{
 					"preToolUse",
 					"permissionRequest",
@@ -829,9 +887,9 @@ var builtinHookContracts = map[string][]HookContract{
 			SupportsTraceparent: true,
 			ToolCallLifecycle:   copilotToolCallLifecycle(),
 			Notes: []string{
-				"Current GitHub Copilot CLI documentation includes the mutation-only userPromptTransformed event; DefenseClaw returns no modification.",
+				"Current GitHub Copilot CLI documentation includes the mutation-only userPromptTransformed event; DefenseClaw returns no modification, except that the Secure Client profile on Windows and macOS replaces a prompt the guardrail blocks.",
 				"GitHub Copilot CLI 1.0.76 is the conservative reviewed floor for this current 14-event contract.",
-				"Copilot CLI native ask is limited to preToolUse / PreToolUse hooks.",
+				"Copilot CLI can ask on preToolUse, but its hook input does not prove prompt availability; DefenseClaw denies confirms there until the vendor exposes it.",
 				"postToolUseFailure is advisory-only and can provide recovery additionalContext; it cannot block the failed tool.",
 				"Copilot documents optional native OpenTelemetry metrics and traces on POSIX hosts. DefenseClaw records that upstream surface but does not configure, launch, or certify the exporter; every DefenseClaw contract remains hook-only.",
 			},
@@ -877,62 +935,20 @@ var builtinHookContracts = map[string][]HookContract{
 			"Setup writes only ~/.gemini/config/hooks.json. Antigravity also discovers <workspace>/.agents/hooks.json.",
 		},
 	}},
-	"openhands": {{
-		Connector:               "openhands",
-		ContractID:              "openhands-hooks-v1",
-		MinAgentVersion:         "1.12.0",
-		DefaultForUnversioned:   true,
-		HookScriptVersion:       "v6",
-		HookConfigPathTemplates: []string{"~/.openhands/hooks.json", "<workspace>/.openhands/hooks.json"},
-		ResponseFieldName:       "hook_output",
-		Events: []string{
-			"pre_tool_use",
-			"post_tool_use",
-			"user_prompt_submit",
-			"stop",
-			"session_start",
-			"session_end",
-		},
-		AIDSurfaces: []string{"prompt", "tool_call", "tool_result", "event_content"},
-		Capabilities: HookCapability{
-			CanBlock:     true,
-			CanAskNative: false,
-			BlockEvents: []string{
-				"pre_tool_use",
-				"user_prompt_submit",
-				"stop",
-			},
-			SupportsFailClosed: true,
-			Scope:              "user,workspace",
-		},
-		SupportsTraceparent: true,
-		NativeOTLP:          false,
-		ToolCallLifecycle:   openHandsToolCallLifecycle(),
-		Notes: []string{
-			"OpenHands hooks use native snake_case event keys and install to ~/.openhands/hooks.json by default, with repo-local .openhands/hooks.json when a workspace is pinned.",
-			"OpenHands CLI 1.12.0 is the POSIX minimum because it first loads user-global ~/.openhands/hooks.json; source-reviewed against CLI 1.16.0 with no maximum. Windows retains its established unversioned hook contract. macOS remains uncertified until a durable green latest-version live run is recorded.",
-			"OpenHands blocks by exit code 2 and optional decision=deny JSON; no native ask surface is documented. Confirm becomes additionalContext only for user_prompt_submit; pre_tool_use and stop downgrades are audit-only.",
-			"Standalone OpenHands SDK 1.39.1 preserves a trace-only process-environment OTLP exporter; DefenseClaw integrates it only through the protected connector launch command on the reviewed macOS lane and does not persist launch variables.",
-		},
-	}},
 	"opencode": {{
 		Connector:               "opencode",
-		ContractID:              "opencode-hooks-v1",
-		MinAgentVersion:         "1.18.10",
-		MaxAgentVersion:         "1.19.0",
+		ContractID:              openCodeV2ContractID,
+		MinAgentVersion:         "2.0.0",
+		MaxAgentVersion:         "2.3.0",
 		DefaultForUnversioned:   false,
 		HookScriptVersion:       "v7",
 		HookConfigPathTemplates: []string{"~/.config/opencode/plugins/defenseclaw.js"},
 		ResponseFieldName:       "hook_output",
-		// opencode exposes plugin hooks (not shell hooks). DefenseClaw's
-		// bridge plugin wires tool.execute.before (block) and
-		// tool.execute.after (observe). OpenCode v1.18.10-v1.18.33 also exposes
-		// permission.ask and chat/context mutation hooks; this focused bridge
-		// intentionally does not implement those surfaces.
+		// V2 awaits the before hook; after hooks and sessions are telemetry.
 		Events: []string{
 			"defenseclaw.plugin.loaded",
-			"session.created", "session.updated", "session.status", "session.idle",
-			"session.compacted", "session.error", "session.deleted",
+			"session.created", "session.status", "session.idle",
+			"session.error", "session.deleted",
 			"tool.execute.before", "tool.execute.after",
 		},
 		AIDSurfaces: []string{"tool_call", "tool_result"},
@@ -951,9 +967,12 @@ var builtinHookContracts = map[string][]HookContract{
 		SupportsTraceparent: false,
 		ToolCallLifecycle:   openCodeToolCallLifecycle(),
 		Notes: []string{
-			"opencode (https://opencode.ai) auto-loads JS/TS plugins from ~/.config/opencode/plugins/ — there is no command-hook config file to patch. DefenseClaw writes a dependency-free bridge plugin (defenseclaw.js) whose tool.execute.before POSTs to /api/v1/opencode/hook and throws new Error(reason) on a block decision, aborting the tool.",
-			"DefenseClaw intentionally implements block plus observe-only tool/lifecycle telemetry. OpenCode v1.18.10-v1.18.33 exposes permission.ask and chat/context mutation hooks, but this connector does not implement or claim them. The bridge honors fail-closed by throwing when the gateway is unreachable and FAIL_MODE=closed.",
-			"Source-reviewed range is >=1.18.10,<1.19.0 with current pin 1.18.33. The v1.18.33 Hooks entries used by this contract (config, event, tool.execute.before, tool.execute.after) match the v1.18.19 signatures; a thrown Error from tool.execute.before remains the block surface. The bridge refuses ambiguous MCP identity and action-mode allow claims when a later plugin can mutate args.",
+			"OpenCode v2 uses a default plugin definition with id and setup(ctx); ctx.tool.hook registers awaited execute.before and execute.after callbacks. Only the V2 API is exported; V1 implementations are not shipped.",
+			"Source reviewed at v2.0.0 (63f7ceecbed2d7d9a627518d935dd963b9d4ac9f) and dev/2.1.4 (f669c46c9604ea3d70b8a7ed1f0c10f3a5ac1f61): packages/plugin/src/promise/tool.ts and packages/core/src/tool.ts. https://opencode.ai/v2/docs/build/plugins/migrate-v1",
+			"2.2.3 (the npm @opencode/cli@2 release when 1.0.6 was cut) was checked live on Linux: the default plugin loads, execute.before rejects a blocked call before it runs, and execute.after results carry content parts (rel-1-0-6).",
+			"Before awaiting a verdict, the bridge detaches and deeply freezes the inspected arguments and freezes the event. Later hooks cannot substitute an uninspected tool or input. Context and MCP identity are resolved through the local plugin API with a bounded timeout.",
+			"The v2 result status, content and structured output are forwarded without inventing v1 output strings. After-hook and lifecycle events are observe-only. No native approval or model-traffic interception is claimed.",
+			"Configured local plugins are directories in v2. Managed installs register a directory with an index.js entrypoint. Every delivery mode uses this V2 entrypoint.",
 		},
 	}},
 	"amp": {{
@@ -994,45 +1013,6 @@ var builtinHookContracts = map[string][]HookContract{
 			"0.0.1785334225 is DefenseClaw's certification floor pinned to the current @ampcode/cli package build used for this contract snapshot; it is not an upstream-declared minimum plugin version.",
 		},
 	}},
-	"omnigent": {{
-		Connector:               "omnigent",
-		ContractID:              "omnigent-custom-policy-v1",
-		MinAgentVersion:         "0.7.0",
-		MaxAgentVersion:         "0.14.0",
-		DefaultForUnversioned:   true,
-		HookScriptVersion:       "v1",
-		HookConfigPathTemplates: []string{"$OMNIGENT_CONFIG", "$OMNIGENT_CONFIG_HOME/config.yaml", "~/.omnigent/config.yaml"},
-		ResponseFieldName:       "",
-		Events: []string{
-			"UserPromptSubmit",
-			"PreToolUse",
-			"PostToolUse",
-			"AfterAgentResponse",
-			"BeforeModel",
-			"AfterModel",
-		},
-		AIDSurfaces: []string{"prompt", "tool_call", "tool_result", "event_content"},
-		Capabilities: HookCapability{
-			CanBlock:           true,
-			CanAskNative:       true,
-			AskEvents:          []string{"UserPromptSubmit", "PreToolUse", "BeforeModel"},
-			BlockEvents:        []string{"UserPromptSubmit", "PreToolUse", "PostToolUse", "AfterAgentResponse", "BeforeModel", "AfterModel"},
-			SupportsFailClosed: true,
-			Scope:              "user",
-		},
-		SupportsTraceparent: true,
-		NativeOTLP:          true,
-		ToolCallLifecycle:   omniGentToolCallLifecycle(),
-		Notes: []string{
-			"OmniGent invokes DefenseClaw through its documented custom Python policy API; the installed callable translates DefenseClaw allow, confirm, and block verdicts to ALLOW, ASK, and DENY.",
-			"The bridge covers request, tool_call, tool_result, response, llm_request, and llm_response phases exposed by OmniGent's PolicyEvent schema.",
-			"DENY is authoritative on all six phases. Pre-action DENY prevents the action; post-phase DENY uses OmniGent's denial/sentinel behavior to suppress or replace onward-visible content but cannot roll back completed tool or model work. The bridge does not return custom replacement data.",
-			"ASK is native only for OmniGent's pre-action request, tool_call, and llm_request phases; post-phase confirm findings remain attributed audit and continue without an approval pause.",
-			"The in-process Python bridge forwards an active OpenTelemetry W3C trace context when present; otherwise DefenseClaw starts a new trace.",
-			"Optional native OTLP is inactive until the OmniGent launch process exports OMNIGENT_TELEMETRY_ENABLED=true and the standard OTLP variables; content capture remains disabled.",
-			"The v0.7-v0.13 PolicyEvent context exposes bounded usage, cost, model, harness, actor, and labels but no session identifier; v0.13 adds optional subtree_usage. The bridge marks that correlation gap and marks partial label projections.",
-		},
-	}},
 }
 
 func KnownHookContracts(connectorName string) []HookContract {
@@ -1048,27 +1028,14 @@ func hookContractsForOS(connectorName, goos string) []HookContract {
 		contract.HookConfigPathTemplates = append([]string(nil), contract.HookConfigPathTemplates...)
 		contract.Events = append([]string(nil), contract.Events...)
 		contract.AIDSurfaces = append([]string(nil), contract.AIDSurfaces...)
+		contract.AIDSurfaceEvents = copyAIDSurfaceEvents(contract.AIDSurfaceEvents)
+		contract.AIDToolCallShapes = append([]AIDToolCallShape(nil), contract.AIDToolCallShapes...)
 		contract.Notes = append([]string(nil), contract.Notes...)
 
-		// OpenHands exposes a trace-only standard-OTEL process environment on
-		// the reviewed macOS lane. DefenseClaw supplies scoped header auth only
-		// through its protected connector launch boundary and does not persist
-		// the launch environment.
 		// Windows and macOS stay on the Devin build they were reviewed
 		// against; the extra pin covers Linux only.
 		if (goos == "windows" || goos == "darwin") && contract.ContractID == "devin-hooks-v1" {
 			contract.ExactAgentVersions = []string{"3000.4.25"}
-		}
-		if contract.Connector == "openhands" && contract.ContractID == "openhands-hooks-v1" {
-			switch goos {
-			case "darwin":
-				contract.NativeOTLP = true
-			case "windows":
-				// Windows preserves the pre-POSIX compatibility band and has no
-				// DefenseClaw-managed native exporter.
-				contract.MinAgentVersion = "0.0.0"
-				contract.NativeOTLP = false
-			}
 		}
 		out[i] = contract
 	}
@@ -1126,6 +1093,12 @@ func resolveHookContractForOS(connectorName, rawVersion, goos string) HookContra
 }
 
 func resolveHookContractForOSMode(connectorName, rawVersion, goos string, strict bool) HookContractResolution {
+	return resolveHookContractForOSModeIn(connectorName, rawVersion, goos, strict, false)
+}
+
+// resolveHookContractForOSModeIn is resolveHookContractForOSMode for the agent
+// on the host (sandbox false) or the pinned build of an OpenShell image.
+func resolveHookContractForOSModeIn(connectorName, rawVersion, goos string, strict, sandbox bool) HookContractResolution {
 	name := normalizeConnectorName(connectorName)
 	if proxyConnectorsWithoutHookGate[name] {
 		raw := strings.TrimSpace(rawVersion)
@@ -1147,7 +1120,9 @@ func resolveHookContractForOSMode(connectorName, rawVersion, goos string, strict
 			Reason:            "connector has no hook contract gate",
 		}
 	}
-	resolution := resolveHookContractAgainst(name, rawVersion, hookContractsForOS(name, goos))
+	contracts := hookContractsForOS(name, goos)
+
+	resolution := resolveHookContractAgainstIn(name, rawVersion, contracts, sandbox)
 	if strict {
 		return strictHookContractResolutionOf(resolution)
 	}
@@ -1165,6 +1140,7 @@ func strictHookContractResolutionOf(resolution HookContractResolution) HookContr
 	resolution.Contract = HookContract{}
 	resolution.UntestedVersion = false
 	resolution.NewestTestedVersion = ""
+	resolution.Warning = ""
 	return resolution
 }
 
@@ -1175,6 +1151,22 @@ func strictHookContractResolutionOf(resolution HookContractResolution) HookContr
 // exact pins of one contract; versions below a floor, between ranges or next
 // to an exact pin of the same build stay unknown.
 func resolveHookContractAgainst(name, rawVersion string, contracts []HookContract) HookContractResolution {
+	return resolveHookContractAgainstIn(name, rawVersion, contracts, false)
+}
+
+// resolveHookContractAgainstIn is resolveHookContractAgainst for the agent on
+// the host (sandbox false) or in an OpenShell image, which skips the
+// HostOnly known-broken entries. A Known version carries the Warning of the
+// WarnOnly entry it falls in.
+func resolveHookContractAgainstIn(name, rawVersion string, contracts []HookContract, sandbox bool) HookContractResolution {
+	resolution := resolveHookContractMatch(name, rawVersion, contracts, sandbox)
+	if resolution.Status == HookCompatibilityKnown {
+		resolution.Warning = knownVersionWarning(name, strings.TrimSpace(rawVersion), sandbox)
+	}
+	return resolution
+}
+
+func resolveHookContractMatch(name, rawVersion string, contracts []HookContract, sandbox bool) HookContractResolution {
 	if len(contracts) == 0 {
 		return HookContractResolution{
 			Connector:  name,
@@ -1192,13 +1184,32 @@ func resolveHookContractAgainst(name, rawVersion string, contracts []HookContrac
 			NormalizedVersion: "",
 			Status:            HookCompatibilityUnversioned,
 			Reason:            "agent version not probed; using connector default hook contract",
-			Contract:          defaultHookContract(contracts),
+			Contract:          bestEffortHookContract(contracts),
 		}
 	}
 	if gitBuildVersionRE.MatchString(raw) {
+		if name == "opencode" {
+			return HookContractResolution{
+				Connector: name, RawVersion: raw, Status: HookCompatibilityUnknown,
+				Reason: "OpenCode git build has no release version; install a versioned OpenCode V2 release",
+			}
+		}
 		// A source build (Hermes "vgit.5bba024 (2026.9.24)") has no release
 		// version: its digits are a commit hash or a date. Treat it as newer
-		// than every tested range instead of reading a version out of the hash.
+		// than every tested range instead of reading a version out of the hash,
+		// unless the release date it prints is known broken.
+		if match := gitBuildReleaseDateRE.FindStringSubmatch(raw); match != nil {
+			date := NormalizeAgentVersion(name, match[1])
+			if broken, ok := knownBrokenAgentVersion(name, raw, date, sandbox); ok {
+				return HookContractResolution{
+					Connector:         name,
+					RawVersion:        raw,
+					NormalizedVersion: date,
+					Status:            HookCompatibilityUnknown,
+					Reason:            fmt.Sprintf("agent version %s is known broken: %s (%s)", date, broken.Reason, broken.Issue),
+				}
+			}
+		}
 		if contract, newest, ok := newestContractBelow(contracts, gitBuildCompareVersion); ok {
 			return HookContractResolution{
 				Connector:           name,
@@ -1220,7 +1231,7 @@ func resolveHookContractAgainst(name, rawVersion string, contracts []HookContrac
 			Reason:            "could not normalize agent version",
 		}
 	}
-	if broken, ok := knownBrokenAgentVersion(name, raw, normalized); ok {
+	if broken, ok := knownBrokenAgentVersion(name, raw, normalized, sandbox); ok {
 		return HookContractResolution{
 			Connector:         name,
 			RawVersion:        raw,
@@ -1228,6 +1239,9 @@ func resolveHookContractAgainst(name, rawVersion string, contracts []HookContrac
 			Status:            HookCompatibilityUnknown,
 			Reason:            fmt.Sprintf("agent version %s is known broken: %s (%s)", normalized, broken.Reason, broken.Issue),
 		}
+	}
+	if name == "opencode" {
+		contracts = openCodeContractsForVersion(contracts, normalized)
 	}
 	for _, contract := range contracts {
 		if contractMatchesAgentVersion(contract, raw, normalized) {
@@ -1327,10 +1341,36 @@ func newestContractBelow(contracts []HookContract, normalized string) (HookContr
 	return best, label, true
 }
 
-func knownBrokenAgentVersion(name, raw, normalized string) (KnownBrokenAgentVersion, bool) {
+// knownBrokenAgentVersion is the refusing (not WarnOnly) entry a version
+// falls in.
+func knownBrokenAgentVersion(name, raw, normalized string, sandbox bool) (KnownBrokenAgentVersion, bool) {
+	return matchKnownBrokenAgentVersion(name, raw, normalized, sandbox, false)
+}
+
+// knownVersionWarning is the reason and issue of the WarnOnly entry a
+// version falls in, matched like a refusing one: a git build by the release
+// date it prints.
+func knownVersionWarning(name, raw string, sandbox bool) string {
+	normalized := NormalizeAgentVersion(name, raw)
+	if gitBuildVersionRE.MatchString(raw) {
+		normalized = ""
+		if match := gitBuildReleaseDateRE.FindStringSubmatch(raw); match != nil {
+			normalized = NormalizeAgentVersion(name, match[1])
+		}
+	}
+	if entry, ok := matchKnownBrokenAgentVersion(name, raw, normalized, sandbox, true); ok {
+		return fmt.Sprintf("%s (%s)", entry.Reason, entry.Issue)
+	}
+	return ""
+}
+
+func matchKnownBrokenAgentVersion(name, raw, normalized string, sandbox, warnOnly bool) (KnownBrokenAgentVersion, bool) {
 	for _, entry := range knownBrokenAgentVersions[name] {
+		if entry.WarnOnly != warnOnly || (sandbox && entry.HostOnly) {
+			continue
+		}
 		if entry.Exact != "" {
-			if exactAgentVersionMatch(raw, []string{entry.Exact}) {
+			if exactAgentVersionMatch(name, raw, []string{entry.Exact}) {
 				return entry, true
 			}
 			continue
@@ -1342,14 +1382,8 @@ func knownBrokenAgentVersion(name, raw, normalized string) (KnownBrokenAgentVers
 	return KnownBrokenAgentVersion{}, false
 }
 
-// KnownBrokenAgentVersions returns the known-broken agent versions of a
-// connector.
-func KnownBrokenAgentVersions(connectorName string) []KnownBrokenAgentVersion {
-	return append([]KnownBrokenAgentVersion(nil), knownBrokenAgentVersions[normalizeConnectorName(connectorName)]...)
-}
-
 func contractMatchesAgentVersion(contract HookContract, raw, normalized string) bool {
-	if len(contract.ExactAgentVersions) != 0 && exactAgentVersionMatch(raw, contract.ExactAgentVersions) {
+	if len(contract.ExactAgentVersions) != 0 && exactAgentVersionMatch(contract.Connector, raw, contract.ExactAgentVersions) {
 		return true
 	}
 	// Empty min/max would otherwise accept any normalized version.
@@ -1359,7 +1393,12 @@ func contractMatchesAgentVersion(contract HookContract, raw, normalized string) 
 	return false
 }
 
-func exactAgentVersionMatch(raw string, expected []string) bool {
+func exactAgentVersionMatch(connector, raw string, expected []string) bool {
+	// Hermes git installs print a release date in this exact vendor form.
+	// Accept only a pinned date, never an arbitrary version substring.
+	if match := hermesGitReleaseRE.FindStringSubmatch(strings.TrimSpace(raw)); connector == "hermes" && match != nil {
+		raw = match[1]
+	}
 	fields := strings.Fields(strings.TrimSpace(raw))
 	if len(fields) == 0 || len(fields) > 2 {
 		return false
@@ -1382,6 +1421,19 @@ func exactAgentVersionMatch(raw string, expected []string) bool {
 	return false
 }
 
+// BestEffortHookContract returns the reviewed contract DefenseClaw may wire
+// when version evidence is unavailable or unsupported. Runtime and response
+// semantics come from the connector's default_for_unversioned contract, while
+// its event list is the stable union of every registered contract.
+// The compatibility status remains unchanged: callers must not describe this
+// fallback as version-verified.
+func BestEffortHookContract(resolution HookContractResolution) HookContract {
+	if resolution.Status == HookCompatibilityKnown && resolution.Contract.ContractID != "" {
+		return resolution.Contract
+	}
+	return bestEffortHookContract(KnownHookContracts(resolution.Connector))
+}
+
 func defaultHookContract(contracts []HookContract) HookContract {
 	for _, contract := range contracts {
 		if contract.DefaultForUnversioned {
@@ -1389,6 +1441,64 @@ func defaultHookContract(contracts []HookContract) HookContract {
 		}
 	}
 	return contracts[0]
+}
+
+func bestEffortHookContract(contracts []HookContract) HookContract {
+	if len(contracts) == 0 {
+		return HookContract{}
+	}
+	fallback := defaultHookContract(contracts)
+	// Union only contracts the default may stand in for: those not gated
+	// entirely above the default's tested range. A newer contract's events
+	// (Claude Code v2's DirectoryAdded) are unknown to the agents the default
+	// describes, and the union keeps the default's ContractID, so including
+	// them would render a matrix that a pin of that ID rejects (the managed
+	// policy runtime verifier and the v1 guardian expect the v1 event set).
+	eligible := make([]HookContract, 0, len(contracts))
+	for _, contract := range contracts {
+		if !hookContractGatedAbove(contract, fallback) {
+			eligible = append(eligible, contract)
+		}
+	}
+	fallback.Events = unionHookContractStrings(fallback.Events, eligible, func(contract HookContract) []string {
+		return contract.Events
+	})
+	return fallback
+}
+
+// hookContractGatedAbove reports whether contract applies only to agent
+// versions at or above base's exclusive upper bound.
+func hookContractGatedAbove(contract, base HookContract) bool {
+	upper := strings.TrimSpace(base.MaxAgentVersion)
+	lower := strings.TrimSpace(contract.MinAgentVersion)
+	return upper != "" && lower != "" && compareVersion(lower, upper) >= 0
+}
+
+func unionHookContractStrings(
+	preferred []string,
+	contracts []HookContract,
+	values func(HookContract) []string,
+) []string {
+	out := make([]string, 0, len(preferred))
+	seen := make(map[string]struct{}, len(preferred))
+	appendUnique := func(items []string) {
+		for _, item := range items {
+			item = strings.TrimSpace(item)
+			if item == "" {
+				continue
+			}
+			if _, exists := seen[item]; exists {
+				continue
+			}
+			seen[item] = struct{}{}
+			out = append(out, item)
+		}
+	}
+	appendUnique(preferred)
+	for _, contract := range contracts {
+		appendUnique(values(contract))
+	}
+	return out
 }
 
 func NormalizeAgentVersion(_ string, raw string) string {
@@ -1426,6 +1536,9 @@ func resolveHookContractForOptions(
 	} else {
 		resolution = resolveHookContractForOS(connectorName, opts.AgentVersion, goos)
 	}
+	if connectorName == "opencode" && pluginSecureClientProfile(opts) {
+		resolution = resolveHookContractForOSMode(connectorName, opts.AgentVersion, goos, true)
+	}
 	if pinnedID != "" {
 		pinned, ok := hookContractByIDForOS(connectorName, pinnedID, goos)
 		switch {
@@ -1440,6 +1553,9 @@ func resolveHookContractForOptions(
 		default:
 			resolution.Contract = pinned
 		}
+	}
+	if resolution.Status != HookCompatibilityKnown && resolution.Contract.DefaultForUnversioned {
+		resolution.Contract = BestEffortHookContract(resolution)
 	}
 	return resolution
 }
@@ -1469,6 +1585,7 @@ func ApplyHookContract(profile HookProfile, opts SetupOpts) HookProfile {
 	profile.HookConfigPathTemplates = append([]string(nil), contract.HookConfigPathTemplates...)
 	profile.SupportedEvents = append([]string(nil), contract.Events...)
 	profile.AIDSurfaces = append([]string(nil), contract.AIDSurfaces...)
+	profile.AIDWireVersion = contract.AIDWireVersion
 	profile.SupportsTraceparent = contract.SupportsTraceparent
 	profile.ResponseFieldName = contract.ResponseFieldName
 	profile.ContentEnvelope = contract.ContentEnvelope.clone()
@@ -1505,13 +1622,19 @@ func HookProfileAIDSurfaceEnabled(profile HookProfile, surface string) bool {
 	return false
 }
 
+// HookProfileCarriesAIDToolCall reports whether the resolved contract declares
+// the tool_call surface in the encoding the send path implements. Anything
+// else, including no resolved contract, is sent to AID as text alone.
+func HookProfileCarriesAIDToolCall(profile HookProfile) bool {
+	return profile.AIDWireVersion == AIDWireVersionChatToolCalls &&
+		HookProfileAIDSurfaceEnabled(profile, AIDSurfaceToolCall)
+}
+
 func normalizeConnectorName(name string) string {
 	name = strings.TrimSpace(strings.ToLower(name))
 	switch name {
 	case "claude", "claude-code", "claude_code":
 		return "claudecode"
-	case "open-hands", "open_hands":
-		return "openhands"
 	default:
 		return name
 	}

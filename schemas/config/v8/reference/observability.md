@@ -1,7 +1,8 @@
-# DefenseClaw v8 observability configuration reference
+# DefenseClaw v9 observability configuration reference
 
 <!-- GENERATED FILE. DO NOT EDIT. -->
 
+Current source files declare `config_version: 9`.
 This reference is generated from `schemas/config/v8/defenseclaw-config.schema.json`.
 The JSON Schema is the source of truth; this document and the adjacent exhaustive
 YAML are presentation artifacts checked for drift in CI.
@@ -22,7 +23,7 @@ or ordered `routes` for selector-specific policy. Collection gates run first.
 | `jsonl` | logs | `name`, `kind`, `enabled`, `path`, `rotation`, `batch`, `send`, `routes` |
 | `console` | logs | `name`, `kind`, `enabled`, `batch`, `send`, `routes` |
 | `prometheus` | metrics | `name`, `kind`, `enabled`, `listen`, `path`, `send`, `routes` |
-| `splunk_hec` | logs | `name`, `kind`, `enabled`, `endpoint`, `token_env`, `token_credential`, `index`, `source`, `sourcetype`, `sourcetype_overrides`, `tls`, `timeout_ms`, `network_safety`, `batch`, `send`, `routes` |
+| `splunk_hec` | logs | `name`, `kind`, `enabled`, `endpoint`, `token_env`, `token_credential`, `index`, `source`, `sourcetype`, `sourcetype_overrides`, `tls`, `timeout_ms`, `network_safety`, `batch`, `send`, `routes`, `local_stack` |
 | `http_jsonl` | logs | `name`, `kind`, `enabled`, `endpoint`, `method`, `bearer_env`, `bearer_credential`, `headers`, `tls`, `timeout_ms`, `network_safety`, `batch`, `send`, `routes` |
 | `otlp` | logs, traces, metrics (Galileo preset: traces) | `name`, `kind`, `preset`, `enabled`, `protocol`, `endpoint`, `headers`, `logger_name`, `tls`, `timeout_ms`, `network_safety`, `signal_overrides`, `batch`, `send`, `routes` |
 
@@ -95,7 +96,8 @@ Constraints that span fields are enforced by the compiler in addition to JSON Sc
 | `observability.local` | object |  |  |  |
 | `observability.local.path` | string |  |  | Defaults dynamically to <data_dir>/audit.db. |
 | `observability.local.judge_bodies_path` | string |  |  | Defaults dynamically to <data_dir>/judge_bodies.db. |
-| `observability.local.retention_days` | integer | `7` |  | Positive values reap eligible local event, evidence, judge-body, and correlation history older than the UTC cutoff after startup readiness and every six hours. The same window bounds AI discovery scan history in <data_dir>/inventory.db, which the gateway prunes about hourly (always keeping the latest scan) and compacts. Zero retains history forever and requires a persistent capacity warning. SQLite can reuse freed pages, but the audit database file does not shrink automatically. The maximum is the largest whole-day period representable as a Go time.Duration. |
+| `observability.local.retention_days` | integer | `7` |  | Positive values reap eligible local event, evidence, judge-body, and correlation history older than the UTC cutoff a minute after startup readiness and every six hours. The same window bounds AI discovery scan history in <data_dir>/inventory.db, which the gateway prunes about hourly (always keeping the latest scan) and compacts. Zero retains history forever and requires a persistent capacity warning. SQLite can reuse freed pages, but the audit database file does not shrink automatically. The maximum is the largest whole-day period representable as a Go time.Duration. |
+| `observability.local.max_store_mb` | integer | `0` |  | Opt-in size cap for the audit database in MiB. 0 (the default) keeps retention by days only. A value from 64 to 1048576 (1 to 63 are refused) makes each retention run also delete the oldest history, through the same path as retention_days, until the used pages of the audit database are under the cap; the newest hour is always kept. Releases before 1.0.6 refuse this key: remove it before going back with defenseclaw upgrade --version (defenseclaw rollback restores the previous configuration). |
 | `observability.destinations` | array |  |  |  |
 | `observability.destinations[].name` | constraint |  |  | Required. |
 | `observability.destinations[].kind` | constant |  | `"jsonl"` | Required. |
@@ -144,6 +146,9 @@ Constraints that span fields are enforced by the compiler in addition to JSON Sc
 | `observability.destinations[].batch.max_export_batch_size` | integer | `512` |  | Maximum records in one outbound request. |
 | `observability.destinations[].batch.max_export_batch_bytes` | integer | `8388608` |  | Hard ceiling for one fully encoded outbound request. |
 | `observability.destinations[].batch.scheduled_delay_ms` | integer | `5000` |  | Maximum normal batching delay in milliseconds. |
+| `observability.destinations[].local_stack` | object |  |  | Written only by local Splunk setup: the record that DefenseClaw started the local Splunk container this destination sends to. Every Splunk destination without it is remote. |
+| `observability.destinations[].local_stack.marker` | constant |  | `"defenseclaw-local-splunk"` | Required. |
+| `observability.destinations[].local_stack.container_id` | string |  |  | Required. Full ID of the Splunk container local setup started. |
 | `observability.destinations[].method` | string | `"POST"` | `POST, PUT, PATCH` |  |
 | `observability.destinations[].bearer_env` | string |  |  |  |
 | `observability.destinations[].bearer_credential` | string |  |  | Protected credential of a standalone enterprise deployment, stored with enterprise secret set. It resolves only in that profile. |

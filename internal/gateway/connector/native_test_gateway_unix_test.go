@@ -1,0 +1,165 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build !windows
+
+package connector
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sync"
+	"testing"
+)
+
+var nativeGatewayForHookTests struct {
+	sync.Once
+	dir  string
+	path string
+	// accountHome is the account home the binary was linked to read
+	// (cli.outageAccountHomeBake): an empty folder of the test run.
+	accountHome string
+	err         error
+}
+
+// hookPostBuild is a hook-post binary built once per test run.
+type hookPostBuild struct {
+	sync.Once
+	dir  string
+	path string
+	err  error
+}
+
+var nativeHookPostForHookTests hookPostBuild
+
+func installNativeHookPostForHookTest(t *testing.T, home string) {
+	t.Helper()
+	installHookPostBuild(t, home, &nativeHookPostForHookTests)
+}
+
+func installHookPostBuild(t *testing.T, home string, build *hookPostBuild, buildFlags ...string) {
+	t.Helper()
+	build.Do(func() {
+		var err error
+		build.dir, err = os.MkdirTemp("", "defenseclaw-hook-post-test-")
+		if err != nil {
+			build.err = err
+			return
+		}
+		build.path = filepath.Join(build.dir, "defenseclaw-hook-post")
+		args := append([]string{"build"}, buildFlags...)
+		cmd := exec.Command("go", append(args, "-o", build.path, "./cmd/defenseclaw-hook-post")...)
+		cmd.Dir = filepath.Join("..", "..", "..")
+		if output, buildErr := cmd.CombinedOutput(); buildErr != nil {
+			build.err = fmt.Errorf("build hook-post for test: %w: %s", buildErr, output)
+		}
+	})
+	if build.err != nil {
+		t.Fatal(build.err)
+	}
+	binDir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(build.path, filepath.Join(binDir, "defenseclaw-hook-post")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// installNativeGatewayForHookTest runs the same account-bound hook-post
+// command as a shipped per-user shell hook. A curl stub bypasses that command
+// and cannot exercise the connected listener proof.
+func installNativeGatewayForHookTest(t *testing.T, home string, hookDirs ...string) {
+	t.Helper()
+	nativeGatewayForHookTests.Do(func() {
+		var err error
+		nativeGatewayForHookTests.dir, err = os.MkdirTemp("", "defenseclaw-hook-native-test-")
+		if err != nil {
+			nativeGatewayForHookTests.err = err
+			return
+		}
+		nativeGatewayForHookTests.path = filepath.Join(nativeGatewayForHookTests.dir, "defenseclaw-gateway")
+		if prebuilt := os.Getenv("DC_TEST_NATIVE_GATEWAY"); filepath.IsAbs(prebuilt) {
+			// CI links the prebuilt binary to the account-home folder beside it.
+			nativeGatewayForHookTests.accountHome = filepath.Join(filepath.Dir(prebuilt), "account-home")
+			body, readErr := os.ReadFile(prebuilt)
+			if readErr == nil {
+				readErr = os.WriteFile(nativeGatewayForHookTests.path, body, 0o700)
+			}
+			nativeGatewayForHookTests.err = readErr
+			return
+		}
+		// The account home the binary reads for install locks and its
+		// fallback config is an empty folder of this test process, never the
+		// build account's real ~/.defenseclaw, which other tests and builds
+		// on the same computer write (rel-1-0-6:GAP-0345).
+		accountHome := filepath.Join(nativeGatewayForHookTests.dir, "account-home")
+		if err := os.Mkdir(accountHome, 0o700); err != nil {
+			nativeGatewayForHookTests.err = err
+			return
+		}
+		nativeGatewayForHookTests.accountHome = accountHome
+		cmd := exec.Command("go", "build", "-ldflags",
+			"-X github.com/defenseclaw/defenseclaw/internal/cli.outageAccountHomeBake="+accountHome,
+			"-o", nativeGatewayForHookTests.path, "./cmd/defenseclaw")
+		cmd.Dir = filepath.Join("..", "..", "..")
+		if output, buildErr := cmd.CombinedOutput(); buildErr != nil {
+			nativeGatewayForHookTests.err = fmt.Errorf("build native gateway for hook test: %w: %s", buildErr, output)
+		}
+	})
+	if nativeGatewayForHookTests.err != nil {
+		t.Fatal(nativeGatewayForHookTests.err)
+	}
+	binDir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(nativeGatewayForHookTests.path, filepath.Join(binDir, "defenseclaw-gateway")); err != nil {
+		t.Fatal(err)
+	}
+	for _, hookDir := range hookDirs {
+		linkGatewayBinaryToHookDirForTest(t, hookDir, nativeGatewayForHookTests.path)
+	}
+}
+
+// A rendered hook selects its POST helper from its physical data directory.
+// Tests with a separate HOME must place their fixture binary there as well;
+// inherited HOME must never select the helper that receives a bearer.
+func linkGatewayBinaryToHookDirForTest(t *testing.T, hookDir, binary string) {
+	t.Helper()
+	dataDir := filepath.Dir(hookDir)
+	trustedHome := dataDir
+	if filepath.Base(dataDir) == ".defenseclaw" {
+		trustedHome = filepath.Dir(dataDir)
+	}
+	binDir := filepath.Join(trustedHome, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(binDir, "defenseclaw-gateway")
+	if err := os.Link(binary, target); err != nil {
+		if !os.IsExist(err) {
+			t.Fatal(err)
+		}
+		installed, installedErr := os.Stat(target)
+		source, sourceErr := os.Stat(binary)
+		if installedErr != nil || sourceErr != nil {
+			t.Fatalf("inspect hook helper %s and fixture %s: %v, %v", target, binary, installedErr, sourceErr)
+		}
+		if !os.SameFile(installed, source) {
+			// A test may render another hook beside this one with a different
+			// stub. Each call is sequential; replace the previous fixture.
+			if err := os.Remove(target); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Link(binary, target); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := os.WriteFile(filepath.Join(hookDir, ".gateway-helper"), []byte(target+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}

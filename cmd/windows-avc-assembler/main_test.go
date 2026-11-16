@@ -132,7 +132,7 @@ func TestAssembleHappyPath(t *testing.T) {
 	}
 }
 
-// TestReproducibilityByteIdentical is the spec 001 REQ-07 gate at the
+// TestReproducibilityByteIdentical is the reproducible-build gate at the
 // full-assembler level: two runs against byte-identical inputs must
 // produce a byte-identical output EXE.
 func TestReproducibilityByteIdentical(t *testing.T) {
@@ -283,25 +283,80 @@ func TestDoubleAppendRefused(t *testing.T) {
 
 func TestSignatureVerifySkippedOnAllowUnsigned(t *testing.T) {
 	// The happy-path test already runs with AllowUnsigned=true — this
-	// case pins the inverse: WITHOUT AllowUnsigned, on non-Windows,
-	// verify must fail with an ioError (the environment can't run
-	// signtool). A signature rejection is a payload-side fault; a
-	// missing runtime is an environment fault. Exit-code 4 is
+	// case pins the inverse: WITHOUT AllowUnsigned, on a Linux or macOS
+	// host with no osslsigncode, verify must fail with an ioError (the
+	// environment can't verify). A signature rejection is a payload-side
+	// fault; a missing tool is an environment fault. Exit-code 4 is
 	// reserved for the former, so this path returns ioError.
 	//
 	// runtime.GOOS is the correct host check — os.Getenv("GOOS") reads
 	// only an env var that is unset by default, so a Windows CI runner
-	// would fall through and try to run signtool on an unsigned test
-	// fixture, tripping a signatureError that the assertion here would
-	// misreport.
+	// would fall through and verify with PowerShell instead.
 	if runtime.GOOS == "windows" {
-		t.Skip("Windows host: signtool likely available; test asserts non-Windows behavior")
+		t.Skip("Windows host verifies with PowerShell; test asserts the Linux and macOS behavior")
 	}
+	t.Setenv("PATH", t.TempDir())
 	opts := baseOpts(t)
 	opts.AllowUnsigned = false
 	err := assemble(opts, &bytes.Buffer{})
-	if _, ok := err.(*ioError); !ok {
-		t.Fatalf("expected *ioError on non-Windows without -AllowUnsigned, got %T: %v", err, err)
+	if _, ok := err.(*ioError); !ok || !strings.Contains(err.Error(), "osslsigncode") {
+		t.Fatalf("expected *ioError naming osslsigncode without -AllowUnsigned, got %T: %v", err, err)
+	}
+}
+
+// TestStandaloneTrailerProducesTheLinkedPayloadBinding pins the build-time
+// and run-time halves of #1281 together: the binding build-setup.sh links
+// into the outer Setup (from the payload directory, its flavor and the
+// version and source commit it hands the assembler) is the binding the
+// Setup computes from the trailer manifest this assembler writes for the
+// same directory.
+func TestStandaloneTrailerProducesTheLinkedPayloadBinding(t *testing.T) {
+	opts := baseOpts(t)
+	opts.Flavor = flavorStandalone
+	opts.PayloadDir = t.TempDir()
+	built := map[string]string{}
+	for index, name := range requiredStandalonePayloadFiles {
+		body := []byte("standalone payload " + name + string(rune('a'+index)))
+		if err := os.WriteFile(filepath.Join(opts.PayloadDir, name), body, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256(body)
+		built[name] = hex.EncodeToString(digest[:])
+	}
+	if err := assemble(opts, &bytes.Buffer{}); err != nil {
+		t.Fatalf("assemble: %v", err)
+	}
+	result, err := setuppayload.ReadFile(filepath.Join(opts.Out, artifactNameStandalone))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest struct {
+		DistributionFlavor string `json:"distribution_flavor"`
+		Version            string `json:"version"`
+		SourceCommit       string `json:"source_commit"`
+		Files              []struct {
+			Name   string `json:"name"`
+			SHA256 string `json:"sha256"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(result.Manifest, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	fromTrailer := map[string]string{}
+	for _, file := range manifest.Files {
+		fromTrailer[file.Name] = file.SHA256
+	}
+	// build-setup.sh passes FLAVOR=standalone-unsigned for an -AllowUnsigned build.
+	fromManifest := setuppayload.PayloadIdentity{
+		DistributionFlavor: manifest.DistributionFlavor, Version: manifest.Version, SourceCommit: manifest.SourceCommit,
+	}
+	atBuild := setuppayload.PayloadIdentity{
+		DistributionFlavor: "standalone-unsigned", Version: opts.Version, SourceCommit: opts.SourceCommit,
+	}
+	if manifest.DistributionFlavor != "standalone-unsigned" ||
+		setuppayload.PayloadBinding(fromManifest, fromTrailer) != setuppayload.PayloadBinding(atBuild, built) {
+		t.Fatalf("the trailer (flavor %q, version %q) does not reproduce the build-time payload binding",
+			manifest.DistributionFlavor, manifest.Version)
 	}
 }
 

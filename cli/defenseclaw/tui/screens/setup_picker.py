@@ -26,10 +26,10 @@ from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
-from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
 from defenseclaw.tui.markup_safe import escape as rich_escape
+from defenseclaw.tui.modal import GuardedModalScreen
 from defenseclaw.tui.panels.setup_catalog import PickerRow
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
@@ -70,7 +70,7 @@ def visible_window(total: int, selected: int | None, height: int) -> tuple[int, 
     return (start, start + height)
 
 
-class SetupPickerScreen(ModalScreen[str | None]):
+class SetupPickerScreen(GuardedModalScreen[str | None]):
     """Pick one row; with ``filterable`` a text box narrows the rows."""
 
     CSS = f"""
@@ -192,18 +192,22 @@ class SetupPickerScreen(ModalScreen[str | None]):
         self.selected = move_selection(self.rows, self.selected, delta)
         self._refresh_list()
 
+    def _close(self, result: str | None) -> None:
+        # GuardedModalScreen ignores a second dismiss (GAP-0021, GAP-0479).
+        self.dismiss(result)
+
     def action_choose(self) -> None:
         if self.selected is None or not (0 <= self.selected < len(self.rows)):
             return
-        self.dismiss(self.rows[self.selected].row_id)
+        self._close(self.rows[self.selected].row_id)
 
     def action_cancel(self) -> None:
-        self.dismiss(None)
+        self._close(None)
 
     def on_click(self, event: events.Click) -> None:
         if event.widget is self:
             event.stop()
-            self.dismiss(None)
+            self._close(None)
             return
         try:
             target = self.query_one("#setup-picker-list", Static)

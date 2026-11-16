@@ -24,10 +24,10 @@ from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
-from textual.screen import ModalScreen
 from textual.widgets import Static
 
 from defenseclaw.tui.markup_safe import escape as rich_escape
+from defenseclaw.tui.modal import GuardedModalScreen
 from defenseclaw.tui.services.policy_state import (
     fit,
     policy_comparison,
@@ -86,7 +86,7 @@ def preview_text(active: Any | None, candidate: Any | None) -> str:
     return "\n".join(lines + notes)
 
 
-class PolicyPickerScreen(ModalScreen[str | None]):
+class PolicyPickerScreen(GuardedModalScreen[str | None]):
     """List of named policies with an active → highlighted preview."""
 
     CSS = f"""

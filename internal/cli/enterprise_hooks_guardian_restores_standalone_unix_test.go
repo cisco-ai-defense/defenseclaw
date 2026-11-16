@@ -35,6 +35,7 @@ func TestStandaloneReconcileRecordsTheTargetItRestored(t *testing.T) {
 		response, err := previousRunner(ctx, account, request)
 		for i := range response.Targets {
 			response.Targets[i].Repaired = repair
+			response.Targets[i].RestoredElements = restoredElementsIf(repair)
 		}
 		return response, err
 	}

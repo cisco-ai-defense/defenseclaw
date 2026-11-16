@@ -21,6 +21,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -30,6 +31,37 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
+
+// The managed daemon probes before it starts its first gateway. In setup
+// mode, the planned gateway's sibling is a valid fallback after driver_dir.
+func TestDaemonVMProbeUsesPlannedGatewayBeforeFirstStart(t *testing.T) {
+	home := t.TempDir()
+	binDir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	driver := filepath.Join(binDir, "openshell-driver-vm")
+	if err := os.WriteFile(driver, []byte("driver"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	missingDir := filepath.Join(home, "configured")
+	rendered := openshell.RenderedGateway{BindAddress: "127.0.0.1:17670", ComputeDriver: openshell.DriverVM,
+		DriverDir: missingDir, VMSandboxUID: 1000, VMSandboxGID: 1000}
+	data, err := rendered.TOML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(home, "gateway.toml")
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	settings := sandboxrelay.DaemonSettings{Enterprise: sandboxrelay.EnterpriseOpenShell{
+		Install: "setup", GatewayConfigPath: configPath}}
+	dirs := daemonVMDriverDirs(settings, home, "")
+	if got := openshell.FindVMDriverIn(dirs); got != driver {
+		t.Fatalf("pre-start driver directories %v selected %q, want planned gateway sibling %q", dirs, got, driver)
+	}
+}
 
 // The daemon picks a create's driver at sandbox start from its own probe,
 // sends it in the resolve, and shows it in status; under driver_fallback:
@@ -65,6 +97,7 @@ func TestSandboxDaemonSelectsTheDriverAtStart(t *testing.T) {
 	if err != nil || choice != (openshell.DriverChoice{Driver: openshell.DriverDocker, Reason: openshell.DriverReasonKVMMissing}) {
 		t.Fatalf("auto without KVM: %+v %v", choice, err)
 	}
+	d.settings.SelectedDriver, d.settings.DriverReason = string(choice.Driver), choice.Reason
 	st := d.managedStatus(context.Background())
 	if st.Driver != "docker" || st.DriverReason != "kvm_missing" || st.DriverFallback != "docker" {
 		t.Fatalf("status after a fallback start: %+v", st)
@@ -116,5 +149,68 @@ func TestSandboxDaemonSelectsTheDriverAtStart(t *testing.T) {
 	d.settings = settings("vm", "")
 	if choice, err := d.selectDriver(d.settings); err != nil || choice.Driver != openshell.DriverVM || probes != before {
 		t.Fatalf("macOS: %+v %v (probed %d)", choice, err, probes-before)
+	}
+}
+
+// A completed MicroVM run must not pin the doctor's driver after the
+// account loses KVM access. Status re-reads the managed gateway's current
+// decision when its settings age out, without restarting the daemon.
+func TestSandboxDaemonIdleDriverFollowsRefreshedAvailability(t *testing.T) {
+	regs, err := loadDaemonRegistrations(filepath.Join(t.TempDir(), "registrations.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	vm := openshell.DriverChoice{Driver: openshell.DriverVM, Reason: openshell.DriverReasonKVMAvailable}
+	next := sandboxrelay.DaemonSettings{
+		Enabled: true, Available: true, SelectedDriver: "docker", DriverReason: openshell.DriverReasonKVMAccess,
+		Enterprise: sandboxrelay.EnterpriseOpenShell{Driver: "vm", DriverFallback: "docker"},
+	}
+	reads := 0
+	relay := &fakeRelay{settings: func() (sandboxrelay.DaemonSettings, error) {
+		reads++
+		return next, nil
+	}}
+	d := &SandboxDaemon{regs: regs, relay: relay, logf: t.Logf}
+	d.lastDriver.Store(&vm)
+	d.settings = next
+	d.settings.SelectedDriver, d.settings.DriverReason = "vm", openshell.DriverReasonKVMAvailable
+	d.settingsAt.Store(time.Now().UnixNano())
+	if st := d.managedStatus(context.Background()); st.Driver != "vm" || reads != 0 {
+		t.Fatalf("fresh decision: %+v; settings reads %d", st, reads)
+	}
+	d.settingsAt.Store(time.Now().Add(-sandboxDaemonSettingsTTL - time.Second).UnixNano())
+	if st := d.managedStatus(context.Background()); st.Driver != "docker" || st.DriverReason != openshell.DriverReasonKVMAccess || reads != 1 {
+		t.Fatalf("driver after availability changed: %+v; settings reads %d", st, reads)
+	}
+	if st := d.managedStatus(context.Background()); st.Driver != "docker" || reads != 1 {
+		t.Fatalf("fresh fallback decision: %+v; settings reads %d", st, reads)
+	} else {
+		// The connected gateway may still report the completed VM run.
+		// With no registration, it cannot override the next-run choice.
+		d.driverInForce(st, "vm")
+		if st.Driver != "docker" || st.DriverReason != openshell.DriverReasonKVMAccess {
+			t.Fatalf("idle gateway overrode the refreshed choice: %+v", st)
+		}
+	}
+}
+
+// A stopped MicroVM sandbox stays the newest registration after the
+// organization moved to docker: Driver keeps naming its driver, and
+// NextDriver the managed gateway's choice for the next start, which image
+// build and prune follow while no gateway runs.
+func TestSandboxDaemonStatusNamesTheNextStartsDriver(t *testing.T) {
+	regs, err := loadDaemonRegistrations(filepath.Join(t.TempDir(), "registrations.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := regs.put(daemonRegistration{ID: "reg-vm", Sandbox: "stopped-vm", Driver: "vm", Confirmed: true, UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	d := &SandboxDaemon{regs: regs, relay: &fakeRelay{}, logf: t.Logf}
+	d.settings = sandboxrelay.DaemonSettings{Enabled: true, Available: true, SelectedDriver: "docker",
+		Enterprise: sandboxrelay.EnterpriseOpenShell{Driver: "docker"}}
+	d.settingsAt.Store(time.Now().UnixNano())
+	if st := d.managedStatus(context.Background()); st.Driver != "vm" || st.NextDriver != "docker" {
+		t.Fatalf("status = driver %q, next %q; want vm (the stopped sandbox) and docker (the next start)", st.Driver, st.NextDriver)
 	}
 }

@@ -136,6 +136,60 @@ func TestDestinationLineageFromKernelFeedProcesses(t *testing.T) {
 	}
 }
 
+func TestPidlessKernelProcessKeepsDestinationUndecided(t *testing.T) {
+	var sample atomic.Pointer[string]
+	e, b, id := kernelBox(t, "pidlessbox", &sample)
+	ctx := context.Background()
+	at := time.Now()
+	e.m.observeKernelFrame(ctx, b, execFrame(id, "slow", "", 9310, 42, "/usr/bin/curl", "/usr/bin/curl", at.Add(-time.Minute)))
+	e.m.observeKernelFrame(ctx, b, execFrame(id, "quick", "", 9311, 0, "/usr/bin/curl", "/usr/bin/curl", at.Add(-time.Second)))
+	e.ocsf("pidlessbox", "NET:OPEN [MED] DENIED /usr/bin/curl(0) -> pastebin.com:443/tcp [policy:- engine:opa] [reason:transparent_tcp_policy_denied]", at)
+	if got := destinationKinds(t, e, "pidlessbox")["pastebin.com"].Lineage; len(got) != 0 {
+		t.Fatalf("two running copies gave lineage %+v", got)
+	}
+	e.m.observeKernelFrame(ctx, b, exitFrame(id, "quick", 9311, 0, at.Add(time.Second)))
+	if got := destinationKinds(t, e, "pidlessbox")["pastebin.com"].Lineage; len(got) != 0 {
+		t.Fatalf("an exit changed undecided lineage %+v", got)
+	}
+}
+
+func TestPidlessKernelProcessCanNameItsParent(t *testing.T) {
+	var sample atomic.Pointer[string]
+	e, b, id := kernelBox(t, "pidlessparent", &sample)
+	ctx := context.Background()
+	at := time.Now()
+	e.m.observeKernelFrame(ctx, b, execFrame(id, "bash", "", 9330, 40, "/bin/bash", "/bin/bash", at.Add(-time.Minute)))
+	e.m.observeKernelFrame(ctx, b, execFrame(id, "quick", "bash", 9331, 0, "/usr/bin/curl", "/usr/bin/curl", at.Add(-time.Second)))
+	e.ocsf("pidlessparent", "NET:OPEN [MED] DENIED /usr/bin/curl(0) -> example.org:443/tcp [policy:- engine:opa] [reason:transparent_tcp_policy_denied]", at)
+	got := destinationKinds(t, e, "pidlessparent")["example.org"].Lineage
+	if len(got) != 2 || got[0].PID != 0 || got[0].Exe != "/usr/bin/curl" || got[1].PID != 40 {
+		t.Fatalf("pid-less lineage = %+v", got)
+	}
+}
+
+func TestEvictedKernelProcessDoesNotReattributeDestination(t *testing.T) {
+	var sample atomic.Pointer[string]
+	e, b, id := kernelBox(t, "evictedbox", &sample)
+	ctx := context.Background()
+	at := time.Now()
+	e.m.observeKernelFrame(ctx, b, execFrame(id, "slow", "", 9320, 42, "/usr/bin/curl", "/usr/bin/curl", at.Add(-time.Minute)))
+	e.m.observeKernelFrame(ctx, b, execFrame(id, "quick", "", 9321, 50, "/usr/bin/curl", "/usr/bin/curl", at.Add(-time.Second)))
+	e.ocsf("evictedbox", "NET:OPEN [MED] DENIED /usr/bin/curl(0) -> pastebin.com:443/tcp [policy:- engine:opa] [reason:transparent_tcp_policy_denied]", at)
+	if got := destinationKinds(t, e, "evictedbox")["pastebin.com"].Lineage; len(got) != 0 {
+		t.Fatalf("initially ambiguous lineage %+v", got)
+	}
+	e.m.observeKernelFrame(ctx, b, exitFrame(id, "quick", 9321, 0, at.Add(time.Second)))
+	for i := range procTreeMaxExited + 1 {
+		exec := fmt.Sprintf("ended-%d", i)
+		when := at.Add(time.Duration(i+2) * time.Second)
+		e.m.observeKernelFrame(ctx, b, execFrame(id, exec, "", 9400+i, 100+i, "/bin/true", "/bin/true", when))
+		e.m.observeKernelFrame(ctx, b, exitFrame(id, exec, 9400+i, 0, when.Add(time.Millisecond)))
+	}
+	if got := destinationKinds(t, e, "evictedbox")["pastebin.com"].Lineage; len(got) != 0 {
+		t.Fatalf("eviction changed undecided lineage %+v", got)
+	}
+}
+
 // Every exec and exit the feed reports joins the tree with Tetragon's ids:
 // a process with its in-sandbox pid among the live ones, one without by its
 // exec id and host pid only, recorded either way; DefenseClaw's own

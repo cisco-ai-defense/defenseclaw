@@ -26,6 +26,9 @@ type Install struct {
 	// Claude Code, a Rust Codex). They are safe to put in a binaries
 	// anchor: no other program shares them.
 	Native []string
+	// NativeLaunches are trusted executable names used at exec. Tetragon
+	// may match this name rather than the resolved ELF on older kernels.
+	NativeLaunches []string
 	// Entries are the resolved entry files of script-hosted installs (an
 	// npm Codex's wrapper, an uv-installed Python CLI). The process that
 	// runs them is a shared interpreter, so they are recognized by what the
@@ -73,10 +76,14 @@ func resolveInstall(fsys FS, row Enrolled, probe cliProbe, opts ResolveOptions) 
 	if real, err := fsys.EvalSymlinks(home); err == nil {
 		home = real
 	}
-	native, entries := map[string]bool{}, map[string]bool{}
-	add := func(resolved string) {
+	native, launches, entries := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	add := func(candidate, resolved string) {
 		if fsys.IsELF(resolved) {
 			native[resolved] = true
+			launches[resolved] = true
+			if validBinary(candidate) {
+				launches[candidate] = true
+			}
 		} else {
 			entries[resolved] = true
 		}
@@ -89,7 +96,7 @@ func resolveInstall(fsys FS, row Enrolled, probe cliProbe, opts ResolveOptions) 
 			}
 			resolved, ok := trustedExecutable(fsys, home, candidate, row.UID)
 			if ok {
-				add(resolved)
+				add(candidate, resolved)
 			}
 		}
 	}
@@ -106,10 +113,12 @@ func resolveInstall(fsys FS, row Enrolled, probe cliProbe, opts ResolveOptions) 
 			resolved, ok := trustedExecutable(fsys, home, candidate, row.UID)
 			if ok && fsys.IsELF(resolved) {
 				native[resolved] = true
+				launches[resolved] = true
 			}
 		}
 	}
 	install.Native = sortedKeys(native)
+	install.NativeLaunches = sortedKeys(launches)
 	install.Entries = sortedKeys(entries)
 	return install
 }

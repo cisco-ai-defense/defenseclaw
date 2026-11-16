@@ -64,8 +64,8 @@ func ValidateServiceCanReadTree(root, label, serviceAccount string) error {
 		if !serviceHasAccess(parent, sids, serviceParentAccess) {
 			return fmt.Errorf(
 				"%s %s: the gateway service account %s cannot list or read the permissions of the parent folder %s; "+
-					"grant it Read & execute on that folder, for example: icacls \"%s\" /grant \"%s:RX\", or move the rule pack out of %s to a folder whose parents it can read",
-				label, root, serviceAccount, parent, parent, serviceGrantPrincipal(serviceAccount), parent)
+					"grant it Read & execute on that folder, for example: icacls \"%s\" /grant \"%s:RX\"%s, or move the rule pack out of %s to a folder whose parents it can read",
+				label, root, serviceAccount, parent, parent, serviceGrantPrincipal(serviceAccount), beforeServiceExistsParentHint(parent, serviceAccount), parent)
 		}
 	}
 	entries := 0
@@ -89,8 +89,8 @@ func ValidateServiceCanReadTree(root, label, serviceAccount string) error {
 		// folder, then let everything in it inherit again.
 		return fmt.Errorf(
 			"%s %s: the gateway service account %s cannot read %s; grant it Read & execute on the folder and let everything in it inherit that, "+
-				"for example: icacls \"%s\" /grant \"%s\" and then icacls \"%s\\*\" /reset /T /C",
-			label, root, serviceAccount, path, root, RulePackServiceReadGrant(serviceAccount), root)
+				"for example: icacls \"%s\" /grant \"%s\"%s and then icacls \"%s\\*\" /reset /T /C",
+			label, root, serviceAccount, path, root, RulePackServiceReadGrant(serviceAccount), beforeServiceExistsHint(root, serviceAccount), root)
 	})
 }
 
@@ -214,6 +214,43 @@ func ValidateServiceCanWriteFile(path, serviceAccount string) error {
 	return nil
 }
 
+// ValidateServiceCanReadRotatedFile reports a JSONL destination whose rotated
+// files the gateway NT SERVICE virtual account could not read back.
+// Compression reopens each rotated file for reading, so an existing file
+// that let the service append to, rotate and prune it but not read it passed
+// ValidateServiceCanWriteFile, and the first compressed rotation then failed
+// (GAP-1432). A file the gateway creates itself, the destination file when
+// it is missing and every file after a rotation, gets a protected DACL that
+// gives the service full access (secureOpenAppend), so the folder's
+// inheritable entries never decide it: only an existing file is checked.
+// Call it only for a destination that compresses its rotated files.
+func ValidateServiceCanReadRotatedFile(path, serviceAccount string) error {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return nil // created by the gateway, or named by ValidateServiceCanWriteFile
+	}
+	serviceSID, err := windowsVirtualServiceSID(serviceAccount)
+	if err != nil {
+		return &serviceAccountUnresolvedError{err: err}
+	}
+	if serviceSID == nil {
+		return nil
+	}
+	if runs, err := WindowsCurrentProcessRunsAsService(serviceSID); err == nil && runs {
+		return nil
+	}
+	sids, err := serviceTokenSIDs(serviceSID)
+	if err != nil {
+		return err
+	}
+	if !serviceHasAccess(path, sids, serviceFileReadBackAccess) {
+		return fmt.Errorf("the gateway service account %s cannot read back %s to compress it when it rotates; "+
+			"let the file inherit the folder permissions, for example: icacls \"%s\" /reset, or turn off rotation compress",
+			serviceAccount, path, path)
+	}
+	return nil
+}
+
 // serviceTokenSIDs is serviceSID with the groups every NT SERVICE virtual
 // account token carries.
 func serviceTokenSIDs(serviceSID *windows.SID) ([]*windows.SID, error) {
@@ -278,6 +315,10 @@ const (
 	// serviceFileAppendAccess is what the gateway opens an existing
 	// destination file with (FILE_APPEND_DATA).
 	serviceFileAppendAccess = windows.ACCESS_MASK(0x0004|0x0080) | windows.READ_CONTROL
+	// serviceFileReadBackAccess is GENERIC_READ on a file, which compression
+	// opens a rotated file with: read data, extended attributes and
+	// attributes, READ_CONTROL and SYNCHRONIZE.
+	serviceFileReadBackAccess = windows.ACCESS_MASK(0x120089)
 )
 
 // serviceFileGenericMapping maps generic rights to file rights.
@@ -352,4 +393,29 @@ func serviceDACLGrants(path string, sids []*windows.SID, want windows.ACCESS_MAS
 		}
 	}
 	return allowed&want == want
+}
+
+// beforeServiceExistsHint is the sentence that follows an icacls example for
+// the gateway service SID on a rule-pack folder: icacls fails with error
+// 1332 until the service exists, so a first install is given the PowerShell
+// form that does not (GAP-0087). It is empty for an account that is not an
+// NT SERVICE name.
+func beforeServiceExistsHint(path, serviceAccount string) string {
+	return serviceExistsHint(path, serviceAccount, true)
+}
+
+// beforeServiceExistsParentHint is beforeServiceExistsHint for a parent
+// folder of a rule pack: the grant is on that folder only, as its icacls RX
+// example.
+func beforeServiceExistsParentHint(path, serviceAccount string) string {
+	return serviceExistsHint(path, serviceAccount, false)
+}
+
+func serviceExistsHint(path, serviceAccount string, tree bool) string {
+	command := serviceReadGrantPowerShell(path, serviceAccount, tree)
+	if command == "" {
+		return ""
+	}
+	return " (icacls fails with error 1332 until the service exists; before that run, from an elevated cmd or PowerShell prompt: " +
+		command + "; " + serviceReadGrantEffect(path, serviceAccount, tree) + ")"
 }

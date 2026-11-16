@@ -61,13 +61,20 @@ func (c *ampExecutableDriftAfterSetupConnector) Teardown(ctx context.Context, op
 }
 
 func prepareAmpGatewayAuthorityFixture(t *testing.T, dataDir string) ampGatewayAuthorityFixture {
+	return prepareAmpGatewayAuthorityFixtureAtPath(t, dataDir, "")
+}
+
+func prepareAmpGatewayAuthorityFixtureAtPath(t *testing.T, dataDir, executablePath string) ampGatewayAuthorityFixture {
 	t.Helper()
 	if err := safefile.ProtectDirectory(dataDir); err != nil {
 		t.Fatalf("protect Amp fixture data directory: %v", err)
 	}
 
-	executableRoot := testenv.PrivateTempDir(t)
-	executablePath := filepath.Join(executableRoot, "amp.exe")
+	if executablePath == "" {
+		executablePath = filepath.Join(testenv.PrivateTempDir(t), "amp.exe")
+	} else if err := os.MkdirAll(filepath.Dir(executablePath), 0o700); err != nil {
+		t.Fatalf("create Amp fixture executable directory: %v", err)
+	}
 	executableBody := []byte("MZ native Amp gateway fixture")
 	if err := os.WriteFile(executablePath, executableBody, 0o700); err != nil {
 		t.Fatalf("write Amp fixture executable: %v", err)
@@ -172,15 +179,15 @@ func TestSetupConnectorsIsolated_AmpLatePublicationFailureRestoresPreviouslyActi
 		"tok", "127.0.0.1:4000", "127.0.0.1:18971", "master",
 		guardrail.NewRulePackCache(),
 	)
-	if err != nil {
-		t.Fatalf("isolated Amp late-publication handling: %v", err)
+	if err == nil {
+		t.Fatal("a failed active Amp refresh must fail startup")
 	}
 	if len(got) != 0 {
 		t.Fatalf("succeeded = %v, want Amp skipped after late publication rejection", got)
 	}
-	if failed.setupCalls != 1 || !failed.drifted || failed.teardownCalls != 1 {
+	if failed.setupCalls != 1 || !failed.drifted || failed.teardownCalls != 0 {
 		t.Fatalf(
-			"Amp lifecycle setup=%d drifted=%t teardown=%d, want completed Setup, injected drift, and rollback teardown",
+			"Amp lifecycle setup=%d drifted=%t teardown=%d, want completed Setup, injected drift, and direct snapshot restoration",
 			failed.setupCalls, failed.drifted, failed.teardownCalls,
 		)
 	}

@@ -23,6 +23,12 @@ import type { CorrelationContext } from "./types.js";
 export const HEADER_HTTP_CONTENT_TYPE = "Content-Type";
 export const HEADER_DEFENSECLAW_RUN_ID = "X-DefenseClaw-Run-Id";
 export const HEADER_DEFENSECLAW_SESSION_ID = "X-DefenseClaw-Session-Id";
+/**
+ * Set to "1" on the one model request that follows a tool call: the request
+ * whose session header the plugin has just observed. The gateway shows a tool
+ * block notice only to such a request (GAP-0644).
+ */
+export const HEADER_DEFENSECLAW_SESSION_BOUND = "X-DefenseClaw-Session-Bound";
 export const HEADER_DEFENSECLAW_TRACE_ID = "X-DefenseClaw-Trace-Id";
 export const HEADER_DEFENSECLAW_AGENT_ID = "X-DefenseClaw-Agent-Id";
 export const HEADER_DEFENSECLAW_AGENT_INSTANCE_ID = "X-DefenseClaw-Agent-Instance-Id";

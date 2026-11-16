@@ -22,6 +22,7 @@
 package agentchain
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -369,6 +370,54 @@ func TestAnEarlyStageSightingDoesNotHoldBackALaterChain(t *testing.T) {
 		"agent_kill_chain because an earlier packaging sighting came first: %+v", signals)
 }
 
+// TestExpiringTheFirstSightingKeepsAMiddleOneThatCompletesAChain is GAP-1427:
+// a credential read seen at minutes 0, 3 and 11, a principal minted at 4 and
+// data packaged at 5. Expiring minute 0 must keep the minute-3 read, which
+// with 4 and 5 is an in-order chain inside the ten-minute window.
+func TestExpiringTheFirstSightingKeepsAMiddleOneThatCompletesAChain(t *testing.T) {
+	t.Parallel()
+	base := time.Unix(1_760_000_000, 0)
+	session := NewSession(1, "claude", base)
+	read := Observation{Tactic: tactics.CredentialAccess, SignalID: "agent_credential_access",
+		Detail: "/.aws/credentials", Confidence: 1}
+	for _, minute := range []int{0, 3, 11} {
+		read.At = base.Add(time.Duration(minute) * time.Minute)
+		session.Record(read)
+	}
+	session.Record(Observation{Tactic: tactics.IdentityCreation, SignalID: "agent_identity_creation",
+		Detail: "AWS IAM principal created", Confidence: 1, At: base.Add(4 * time.Minute)})
+	session.Record(Observation{Tactic: tactics.Exfiltration, SignalID: "agent_encoded_payload",
+		Detail: "base64 encoding", Confidence: 1, At: base.Add(5 * time.Minute)})
+	session.Expire(base.Add(2 * time.Minute))
+	if !session.Progressed(scoring.KillChainMinStages) {
+		t.Fatalf("the minute-3 credential read was dropped with minute 0: observations %+v", session.Observations())
+	}
+	for _, observation := range session.Observations() {
+		if observation.SignalID == "agent_credential_access" &&
+			(!observation.At.Equal(base.Add(3*time.Minute)) || !observation.LastAt.Equal(base.Add(11*time.Minute))) {
+			t.Fatalf("credential read sightings at %v..%v, want minutes 3..11", observation.At, observation.LastAt)
+		}
+	}
+}
+
+// TestSightingsPerKeyAreBounded pins that a repeated read keeps a bounded set
+// of sightings, its first and its latest among them.
+func TestSightingsPerKeyAreBounded(t *testing.T) {
+	t.Parallel()
+	base := time.Unix(1_760_000_000, 0)
+	session := NewSession(1, "claude", base)
+	read := Observation{Tactic: tactics.CredentialAccess, SignalID: "agent_credential_access", Detail: "a", Confidence: 1}
+	for second := range 1000 {
+		read.At = base.Add(time.Duration(second) * time.Second)
+		session.Record(read)
+	}
+	observation := session.Observations()[0]
+	if times := observation.sightings(); len(times) != maxSightingsPerKey ||
+		!times[0].Equal(base) || !times[len(times)-1].Equal(base.Add(999*time.Second)) {
+		t.Fatalf("kept %d sightings %v..%v", len(times), times[0], times[len(times)-1])
+	}
+}
+
 // TestExpireBoundsTheChainToItsWindow pins that a chain is a chain within a
 // window rather than over the lifetime of a long-running agent.
 func TestExpireBoundsTheChainToItsWindow(t *testing.T) {
@@ -680,5 +729,33 @@ func TestProcessPollKeepsTheExecResponsiblePid(t *testing.T) {
 	}
 	if got := tracker.records[other].responsiblePID; got != agent {
 		t.Fatalf("an unnamed responsible pid was not filled from the ppid: got %d", got)
+	}
+}
+
+// GAP-1534: alice's agent was running when the sensor started, so a poll
+// found its pid first. It exits with no exit event and Windows hands the pid
+// to bob's process. bob's creation event names another account, so it starts
+// a new instance; a late creation event of alice's own process does not.
+func TestACreationNamingAnotherAccountOnAPolledPidIsANewInstance(t *testing.T) {
+	const aliceSID, bobSID = "S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-1002"
+	base := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name, sid string
+		fresh     bool
+	}{
+		{"another account", bobSID, true},
+		{"the same account, any case", strings.ToLower(aliceSID), false},
+		{"no account", "", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tracker := NewTracker()
+			tracker.ObserveProcessTable([]ProcessRow{{PID: 300, PPID: 1, Name: "claude.exe", Start: base, UserSID: aliceSID}})
+			before := tracker.InstanceOf(300)
+			tracker.ObserveExec(300, 1, 1, "claude.exe", "claude", Creation{At: base.Add(time.Minute), SID: test.sid})
+			after := tracker.InstanceOf(300)
+			if before.ID == 0 || (after.ID != before.ID) != test.fresh {
+				t.Fatalf("instance %d -> %d, want a new instance %v", before.ID, after.ID, test.fresh)
+			}
+		})
 	}
 }

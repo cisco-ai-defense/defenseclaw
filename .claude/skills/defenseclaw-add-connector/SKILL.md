@@ -117,7 +117,7 @@ Enterprise (per OS):
 8. **Stop events:** put the vendor's stop and session-end events in `foreignHookStopEvent`. Otherwise a fail-closed standalone session loops on the stop hook.
 9. **Teardown:** teardown must recognize every command form ever rendered (legacy Windows forms, script versus admin binary). Keep old forms as teardown identities.
 10. **Enterprise guard:** a guarded connector must run the admin-owned `defenseclaw-hook ... --enterprise-managed` (or call `--foreign-hook-check`), never a user-writable script (Devin, `0f728f8b`).
-11. **Secure Client:** the Secure Client profile must stay byte-identical. Never edit `*-secure-client.*` templates, `secureClientPluginAssets`, the three-connector Windows certified set, or the macOS allow-list.
+11. **Secure Client:** the Secure Client profile must stay byte-identical. Do not change frozen Secure Client assets without an explicitly requested scope. The requested OpenCode V1 removal ports its Secure Client plugin to the shared V2-only adapter; its account/service verification remains unchanged. Other `*-secure-client.*` templates, the three-connector Windows certified set and the macOS allow-list stay frozen.
 12. **Hygiene:** don't hand-edit generated `openwiki/` pages. Don't spell retired connector names; `cli/tests/test_retired_connector_names.py` scans every tracked file. Keep host names, accounts and local paths out of the repository.
 
 ## End-to-end order
@@ -144,7 +144,7 @@ Work in this order. Each step links to the reference section with the file- and 
 5. **Gateway and guardrails.** Add the route; Decode and DecodeToolArgs; event classifiers; shell-tool normalization; the MCP and skill identity; verdict mapping and the response. See [guardrails.md](reference/guardrails.md).
 6. **Assets.** Add capabilities and `ComponentTargets`; the Go `claw.go` resolvers; managed MCP inventory; Python `connector_paths.py`; the AIBOM; plugin manifests; self-exemption for bridges. See [assets.md](reference/assets.md).
 7. **Discovery and observability.** Add AI signatures (Go and Python copies byte-identical); agent discovery specs; endpoint inventory; schema enums; telemetry normalizers; correlation; native OTLP; audit identity; health and status names; dashboards. See [discovery-observability.md](reference/discovery-observability.md).
-8. **CLI, TUI and installers.** Add setup tables and branches; onboarding; doctor, status and fail mode; uninstall and migration; TUI pickers and labels; the Go CLI; env vars; `install.sh`, `install.ps1` and the Windows native Setup lists; the macOS app's connector lists. See [cli-tui.md](reference/cli-tui.md).
+8. **CLI, TUI and installers.** Add setup tables and branches; onboarding; doctor, status and fail mode; uninstall and migration; TUI pickers and labels; the Go CLI; env vars; `install.sh` and `install.ps1` lists; the macOS app's connector lists. See [cli-tui.md](reference/cli-tui.md).
 9. **Enterprise managed mode.** Add the route per OS; the machine-policy target or per-user enrollment; the guard; the version probe and floor; every hard-coded Windows per-user list; ACP; threat-model rows. See [enterprise.md](reference/enterprise.md).
 10. **Docs.** Add the connector page; `meta.json`; the index and compatibility rows; the capability matrix; the icon; the pages that list every connector; enterprise docs; CHANGELOG. See [docs-tests-ci.md §1–3](reference/docs-tests-ci.md#1-docs).
 11. **Tests and CI.** Update the hard-coded lists in tests; the registry-driven parity tests; per-connector tests; the e2e matrix row and golden; the live E2E harness; CI matrices and the tests that pin them. See [docs-tests-ci.md §4–6](reference/docs-tests-ci.md#4-tests).
@@ -157,7 +157,7 @@ No single registry drives everything. The reliable way to find every touch point
 ```bash
 # closest sibling: copilot (per-event command hook + machine policy), devin (per-user hook),
 # amp/opencode (plugin), kiro (ACP + hooks), omnigent (policy bridge), openclaw (proxy)
-git grep -n -i -w '<sibling>' -- ':!openwiki' ':!docs/research' ':!CHANGELOG.md' | wc -l
+git grep -n -i -w '<sibling>' -- ':!openwiki' ':!CHANGELOG.md' | wc -l
 git grep -l -i -w '<sibling>' -- ':!openwiki' | awk -F/ '{print $1"/"$2}' | sort | uniq -c | sort -rn
 # then, per directory, review each hit
 git grep -n -i -w '<sibling>' -- internal/enterprisehooks
@@ -174,7 +174,7 @@ Also grep for lists that hold several connectors but not your sibling, for examp
 | [reference/enterprise.md](reference/enterprise.md) | routes, machine-policy targets, foreign-hook guard, Unix guardian and worker, Windows standalone lists, floors, ACP, Secure Client invariants, threat model |
 | [reference/assets.md](reference/assets.md) | skills, MCP servers, plugins, rules and agents: capabilities, watcher, config resolvers, inventory, AIBOM, bridge self-exemption |
 | [reference/discovery-observability.md](reference/discovery-observability.md) | AI signatures, agent discovery, endpoint inventory, schemas, telemetry normalizers, correlation, native OTLP, audit, health, dashboards |
-| [reference/cli-tui.md](reference/cli-tui.md) | Python setup, onboarding, doctor, status, fail mode, uninstall, migration, TUI, Go CLI, env vars, installers, Windows native Setup |
+| [reference/cli-tui.md](reference/cli-tui.md) | Python setup, onboarding, doctor, status, fail mode, uninstall, migration, TUI, Go CLI, env vars, installers |
 | [reference/docs-tests-ci.md](reference/docs-tests-ci.md) | docs pages and data, hard-coded test lists, registry-driven parity tests, e2e matrix, live E2E harness, CI workflows, validation commands |
 | [reference/worked-example.md](reference/worked-example.md) | GitHub Copilot CLI traced through every layer, file by file in order |
 | [reference/checklist.md](reference/checklist.md) | copyable checklist, one line per touch point, with the verifying test or command |

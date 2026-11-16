@@ -36,13 +36,18 @@ type ManagedHookGroup struct {
 // policy route are supported.
 func ManagedHookGroupsForOS(connectorName, agentVersion, goos string) ([]ManagedHookGroup, error) {
 	name := normalizeConnectorName(connectorName)
-	if name == "codex" && strings.TrimSpace(agentVersion) == "" {
+	if name == "codex" && strings.TrimSpace(agentVersion) == "" && goos == "windows" {
 		// A machine-wide requirements file serves every client version on
-		// the host. Without a pinned version, publish the exact ten-group
-		// matrix the Windows machine-requirements installer certifies,
-		// which every supported Codex release accepts.
-		out := make([]ManagedHookGroup, 0, len(codexHookGroups))
-		for _, group := range codexHookGroups {
+		// the host. Without a pinned version, Windows publishes the exact
+		// ten-group matrix its machine-requirements installer writes and
+		// verifies for the contract its commands bind, SessionStart with
+		// compact included (windowsCodexMachineGroups). Linux and macOS
+		// publish the matrix of that default contract (codex-hooks-v4:
+		// SessionStart with compact and SessionEnd), as per-user setup does
+		// (GAP-0008).
+		groups := windowsCodexMachineGroups(resolveHookContractForOS(name, "", goos).Contract.ContractID)
+		out := make([]ManagedHookGroup, 0, len(groups))
+		for _, group := range groups {
 			out = append(out, ManagedHookGroup{Event: group.eventType, Matcher: group.matcher, Timeout: group.timeout})
 		}
 		return out, nil
@@ -65,11 +70,8 @@ func ManagedHookGroupsForOS(connectorName, agentVersion, goos string) ([]Managed
 			if !ok {
 				return nil, fmt.Errorf("codex hook contract %s contains unregistered event %s", contract.ContractID, event)
 			}
-			if event == "SessionStart" &&
-				(contract.ContractID == "codex-hooks-v3" ||
-					contract.ContractID == "codex-hooks-v3-generic" ||
-					contract.ContractID == "codex-hooks-v4") {
-				group.matcher = "startup|resume|clear|compact"
+			if event == "SessionStart" && codexContractCertifiesCompactSessionStart(contract.ContractID) {
+				group.matcher = codexCompactSessionStartMatcher
 			}
 			out = append(out, ManagedHookGroup{Event: group.eventType, Matcher: group.matcher, Timeout: group.timeout})
 		}
@@ -89,8 +91,14 @@ func ManagedHookGroupsForOS(connectorName, agentVersion, goos string) ([]Managed
 		}
 		return out, nil
 	case "cursor":
-		out := make([]ManagedHookGroup, 0, len(cursorHookEvents))
-		for _, event := range cursorHookEvents {
+		// The Windows machine policy omits the events listed in
+		// cursorEnterpriseRetiredHookEvents (afterAgentThought); see there.
+		events := cursorHookEvents
+		if goos == "windows" {
+			events = cursorEnterpriseHookEvents
+		}
+		out := make([]ManagedHookGroup, 0, len(events))
+		for _, event := range events {
 			out = append(out, ManagedHookGroup{Event: event, Timeout: windowsCursorEnterpriseHookTimeoutSeconds})
 		}
 		return out, nil
@@ -112,10 +120,10 @@ func ManagedHookGroupsForOS(connectorName, agentVersion, goos string) ([]Managed
 	}
 }
 
-// WindowsCodexManagedHookCommand renders the exact Codex machine-requirements
-// command the Windows Secure Client installer certifies for hookBinary. The
-// standalone profile reuses it so both profiles launch the GUI-subsystem
-// hook through the same exit-code-preserving PowerShell boundary.
+// WindowsCodexManagedHookCommand renders the pre-1.0 unbound Codex
+// machine-requirements command for hookBinary. Neither profile publishes it
+// any more (both bind a contract, WindowsCodexManagedHookContract); it
+// stays so callers can recognize a command an earlier release wrote.
 func WindowsCodexManagedHookCommand(hookBinary string) string {
 	return windowsCodexManagedHookCommand(hookBinary)
 }
@@ -155,11 +163,34 @@ func CopilotVSCodeLocalManagedHookCommand(goos, hookBinary, event string) string
 // it while 1.0.0 is a supported upgrade source.
 func CopilotVSCodeLocalPriorReleaseHookCommand(goos, hookBinary, event string) string {
 	if goos == "windows" {
-		return windowsNativePowerShellHookCommandForBoundEvent("copilot", event, "", hookBinary,
+		command := windowsNativePowerShellHookCommandForBoundEvent("copilot", event, "", hookBinary,
 			"--enterprise-managed", "--hook-surface", CopilotHookSurfaceVSCodeLocal)
+		// 1.0.0 ended the Constrained Language fallback without the
+		// fail-closed exit (legacyWindowsAwaitedHookCommand).
+		if legacy, ok := legacyWindowsAwaitedHookCommand(command); ok {
+			return legacy
+		}
+		return command
 	}
 	return shellSingleQuote(hookBinary) + " hook --connector copilot --enterprise-managed --event " +
 		shellSingleQuote(event) + " --hook-surface " + CopilotHookSurfaceVSCodeLocal
+}
+
+// CopilotVSCodeLocalGuardedPriorReleaseHookCommand is
+// CopilotVSCodeLocalManagedHookCommand as releases 1.0.1 to 1.0.6 rendered it
+// on Windows: their Constrained Language fallback exited 0 when the launcher
+// never started (legacyWindowsAwaitedHookCommand). Each enrolled user of an
+// upgraded install holds it until the guardian rewrites the files, so it
+// stays DefenseClaw's own, as CopilotVSCodeLocalPriorReleaseHookCommand does.
+// Elsewhere it is the current command.
+func CopilotVSCodeLocalGuardedPriorReleaseHookCommand(goos, hookBinary, event string) string {
+	command := CopilotVSCodeLocalManagedHookCommand(goos, hookBinary, event)
+	if goos == "windows" {
+		if legacy, ok := legacyWindowsAwaitedHookCommand(command); ok {
+			return legacy
+		}
+	}
+	return command
 }
 
 // managedDeploymentMarker is the file whose presence says the managed
@@ -257,12 +288,19 @@ func perUserOwnedHookCommands(connectorName, dataDir, hookBinary string) []strin
 			resolve := func() string { return binary }
 			if owner, ok := conn.(HookScriptOwner); ok {
 				for _, script := range owner.HookScriptNames(opts) {
-					commands = append(commands, hookInvocationCommandWith("windows", name, filepath.Join(dataDir, "hooks", script), resolve))
+					// A pre-1.0.9 render of a typographic-quote profile is
+					// ours too, not a foreign hook (g072 review 4 M1).
+					commands = appendWithPreTypographicQuoteForm(commands, hookInvocationCommandWith("windows", name, filepath.Join(dataDir, "hooks", script), resolve))
 				}
 			}
 			if name == "antigravity" {
 				for _, event := range antigravityLifecycleEvents {
-					commands = append(commands, windowsNativePowerShellHookCommandForEvent(name, event, binary))
+					command := windowsNativePowerShellHookCommandForEvent(name, event, binary)
+					commands = appendWithPreTypographicQuoteForm(commands, command)
+					// The 1.0.x render stays DefenseClaw's own.
+					if legacy, ok := legacyWindowsAwaitedHookCommand(command); ok {
+						commands = appendWithPreTypographicQuoteForm(commands, legacy)
+					}
 				}
 			}
 			commands = append(commands, binary)

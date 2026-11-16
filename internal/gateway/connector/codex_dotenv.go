@@ -126,7 +126,7 @@ func splitCodexDotEnv(raw []byte, exists bool) (codexDotEnvState, error) {
 	}
 	state.pristine = []byte(before + after)
 	state.hasBlock = true
-	state.existed = !(strings.Contains(header, codexDotEnvCreatedFlag) && len(state.pristine) == 0)
+	state.existed = (!(strings.Contains(header, codexDotEnvCreatedFlag)) || len(state.pristine) != 0)
 	return state, nil
 }
 

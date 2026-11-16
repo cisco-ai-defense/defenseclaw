@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -119,8 +120,26 @@ func TestWriteEnterpriseHookGuardianState(t *testing.T) {
 	if err != nil || !exists {
 		t.Fatalf("load second Guardian state: exists=%t err=%v", exists, err)
 	}
-	if second.ReconcileID == firstReconcileID {
-		t.Fatalf("two reconciles reused identity %q", second.ReconcileID)
+	if second.ReconcileID != firstReconcileID || second.UpdatedAt != activation.UpdatedAt {
+		t.Fatalf("an unchanged pass republished the generation: %+v, want %+v", second, activation)
+	}
+	changed := []enterpriseHookReconcileRow{rows[0], {User: "bob", Connector: "claudecode", OK: true}}
+	if err := writeEnterpriseHookGuardianState(
+		dir,
+		"/etc/defenseclaw/hook-guardian/targets.yaml",
+		testEnterpriseHookManifestSHA256,
+		changed,
+		0,
+		true,
+	); err != nil {
+		t.Fatalf("write changed Guardian state: %v", err)
+	}
+	third, exists, err := loadEnterpriseHookGuardianActivation(dir)
+	if err != nil || !exists {
+		t.Fatalf("load changed Guardian state: exists=%t err=%v", exists, err)
+	}
+	if third.ReconcileID == firstReconcileID || !third.OK || third.UpdatedAt == activation.UpdatedAt {
+		t.Fatalf("a changed outcome kept the old generation: %+v", third)
 	}
 }
 
@@ -389,6 +408,10 @@ func TestEnterpriseHookGuardianFailureIssuesExposeTargetCause(t *testing.T) {
 	want := []string{
 		"last guardian reconcile failed for claudecode@S-1-5-21-111-222-333-1001: publish managed policy: access denied",
 		"last guardian reconcile failed for codex@bob: no target error was recorded",
+	}
+	if runtime.GOOS == "windows" {
+		// GAP-2290: Windows names the account of a SID row as "user (SID)".
+		want[0] = "last guardian reconcile failed for claudecode@alice (S-1-5-21-111-222-333-1001): publish managed policy: access denied"
 	}
 	if !reflect.DeepEqual(issues, want) {
 		t.Fatalf("issues = %#v, want %#v", issues, want)
@@ -1100,7 +1123,12 @@ func TestCompareEnterpriseHookGuardianRecordsRejectsExtraStaleProtectedTarget(t 
 		ProtectedTargets: []enterpriseHookReconcileRow{alice},
 	}
 	issues := compareEnterpriseHookGuardianRecords(state, authorization, activation, "", "")
-	if got := strings.Join(issues, "\n"); !strings.Contains(got, "extra or stale target codex@"+bob.SID) {
+	staleBob := "extra or stale target codex@" + bob.SID
+	if runtime.GOOS == "windows" {
+		// GAP-2290: Windows names the account of a SID row as "user (SID)".
+		staleBob = "extra or stale target codex@bob (" + bob.SID + ")"
+	}
+	if got := strings.Join(issues, "\n"); !strings.Contains(got, staleBob) {
 		t.Fatalf("issues = %v, want stale protected-target rejection", issues)
 	}
 }
@@ -1509,6 +1537,48 @@ func TestEnterpriseHookReconcileLogReportsRepairAsChange(t *testing.T) {
 	}
 }
 
+// A changed reconcile names each failing target and its reason; an unchanged
+// one stays a single summary line.
+func TestEnterpriseHookReconcileLogNamesFailingTargets(t *testing.T) {
+	run := enterpriseHookReconcileRun{
+		Rows: []enterpriseHookReconcileRow{
+			{Connector: "cursor", User: "alice", OK: true},
+			{Connector: "codex", User: "alice", Error: "enterprise hooks: connector codex hook verification failed:\n  owned hook command not present: SessionEnd trust state is not trusted"},
+			{Connector: "claudecode", UserHome: "/Users/bob", Pending: true},
+		},
+		Failures: 1,
+		Pending:  1,
+	}
+	var changed bytes.Buffer
+	writeEnterpriseHookReconcileLog(&changed, "fsnotify", "attention", run, 7, true, "")
+	const want = "[hook-guardian] target codex@alice failed: enterprise hooks: connector codex hook verification failed: owned hook command not present: SessionEnd trust state is not trusted\n"
+	if got := changed.String(); !strings.Contains(got, want) {
+		t.Fatalf("changed log = %q, want %q", got, want)
+	}
+	if got := changed.String(); strings.Contains(got, "target cursor@alice") || strings.Contains(got, "target claudecode@") {
+		t.Fatalf("changed log names a healthy or pending target: %q", got)
+	}
+	var unchanged bytes.Buffer
+	writeEnterpriseHookReconcileLog(&unchanged, "interval", "attention", run, 7, false, "")
+	if got := unchanged.String(); strings.Count(got, "\n") != 1 || strings.Contains(got, "target ") {
+		t.Fatalf("unchanged log = %q, want one summary line", got)
+	}
+	var hostile bytes.Buffer
+	writeEnterpriseHookReconcileLog(&hostile, "fsnotify", "attention", enterpriseHookReconcileRun{
+		Rows:     []enterpriseHookReconcileRow{{Connector: "codex", UserHome: "/Users/a\n[hook-guardian] reconcile status=ok\x1b[2J", Error: "bad\x00\x1b[31mred\rline"}},
+		Failures: 1,
+	}, 7, true, "")
+	if got := hostile.String(); strings.Count(got, "\n") != 2 || strings.ContainsAny(got, "\x00\x1b\r") {
+		t.Fatalf("control characters reached the log: %q", got)
+	}
+	if got := enterpriseHookReconcileRowLabel(enterpriseHookReconcileRow{Connector: "codex", SID: "S-1-5-21-1-2-3-1001"}); got != "codex@S-1-5-21-1-2-3-1001" {
+		t.Fatalf("SID-only row label = %q, want the SID", got)
+	}
+	if got := enterpriseHookReconcileLogDetail(strings.Repeat("x", 3000)); len([]rune(got)) != enterpriseHookReconcileLogMaxDetail+1 {
+		t.Fatalf("detail not bounded: %d runes", len([]rune(got)))
+	}
+}
+
 func TestEnterpriseHookWatchEventInSettleWindow(t *testing.T) {
 	base := time.Date(2026, 7, 17, 15, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
@@ -1677,7 +1747,59 @@ func TestEnterpriseHookReconcileRowsHash(t *testing.T) {
 	}
 }
 
-func TestEnterpriseHooksReconcileManagedRejectsUntrustedManifest(t *testing.T) {
+// runManagedReconcileAgainstManifestForTest runs one managed reconcile
+// against manifest with the LocalSystem mutation gate stubbed, so only the
+// manifest trust gate and what follows it are exercised. The manifest ACL
+// repair is replaced by a recorder that changes nothing, which keeps the
+// result independent of the runner's privileges.
+func runManagedReconcileAgainstManifestForTest(t *testing.T, dataDir, manifest string) ([]string, error) {
+	t.Helper()
+	origCfg := cfg
+	origManifest := enterpriseHookManifest
+	origJSON := enterpriseHookJSON
+	origAPIAddr := enterpriseHookAPIAddr
+	origProxyAddr := enterpriseHookProxyAddr
+	origMutationPreflight := enterpriseHooksMutationIdentityPreflight
+	origRepair := enterpriseHookManifestACLRepair
+	t.Cleanup(func() {
+		cfg = origCfg
+		enterpriseHookManifest = origManifest
+		enterpriseHookJSON = origJSON
+		enterpriseHookAPIAddr = origAPIAddr
+		enterpriseHookProxyAddr = origProxyAddr
+		enterpriseHooksMutationIdentityPreflight = origMutationPreflight
+		enterpriseHookManifestACLRepair = origRepair
+	})
+	t.Setenv(managed.TrustStrictAncestorsEnv, "")
+
+	cfg = &config.Config{DataDir: dataDir, DeploymentMode: "managed_enterprise"}
+	cfg.Gateway.Token = "tok"
+	cfg.Gateway.APIPort = 18970
+	cfg.Guardrail.Port = 4000
+	enterpriseHookManifest = manifest
+	enterpriseHookJSON = false
+	enterpriseHookAPIAddr = ""
+	enterpriseHookProxyAddr = ""
+	// Production performs the LocalSystem mutation gate first, before reading
+	// any manifest bytes.
+	enterpriseHooksMutationIdentityPreflight = func() error { return nil }
+	var repaired []string
+	enterpriseHookManifestACLRepair = func(path string) error {
+		repaired = append(repaired, path)
+		return nil
+	}
+
+	err := runEnterpriseHooksReconcile(&cobra.Command{}, nil)
+	return repaired, err
+}
+
+// An untrusted writer on targets.yaml is permission drift. Unix refuses it at
+// the manifest gate. Windows first asks the privileged repair to re-stamp the
+// manifest, re-checks it (the stubbed repair changed nothing, so it still
+// fails), then accepts it and logs a boundary finding naming it, and the
+// reconcile moves past the manifest gate.
+func TestEnterpriseHooksReconcileManagedUntrustedWriterOnManifest(t *testing.T) {
+	skipIfLocalSystem(t, "LocalSystem owns its t.TempDir() tree, so the fixture cannot stand in for a file a standard account owns")
 	dir := t.TempDir()
 	manifest := filepath.Join(dir, "targets.yaml")
 	if err := os.WriteFile(manifest, []byte("version: 1\ntargets: []\n"), 0o666); err != nil {
@@ -1686,42 +1808,73 @@ func TestEnterpriseHooksReconcileManagedRejectsUntrustedManifest(t *testing.T) {
 	if err := os.Chmod(manifest, 0o666); err != nil {
 		t.Fatalf("chmod manifest: %v", err)
 	}
+	grantUntrustedWriterForTest(t, manifest)
 
-	origCfg := cfg
-	origManifest := enterpriseHookManifest
-	origJSON := enterpriseHookJSON
-	origAPIAddr := enterpriseHookAPIAddr
-	origProxyAddr := enterpriseHookProxyAddr
-	origMutationPreflight := enterpriseHooksMutationIdentityPreflight
-	t.Cleanup(func() {
-		cfg = origCfg
-		enterpriseHookManifest = origManifest
-		enterpriseHookJSON = origJSON
-		enterpriseHookAPIAddr = origAPIAddr
-		enterpriseHookProxyAddr = origProxyAddr
-		enterpriseHooksMutationIdentityPreflight = origMutationPreflight
-	})
+	var mu sync.Mutex
+	var boundaries []string
+	originalSink := managed.ReportResilienceEvent
+	t.Cleanup(func() { managed.ReportResilienceEvent = originalSink })
+	managed.ReportResilienceEvent = func(marker string, fields map[string]string) {
+		if marker != managed.MarkerBoundary {
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		boundaries = append(boundaries, fields["path"])
+	}
 
-	cfg = &config.Config{DataDir: dir, DeploymentMode: "managed_enterprise"}
-	cfg.Gateway.Token = "tok"
-	cfg.Gateway.APIPort = 18970
-	cfg.Guardrail.Port = 4000
-	enterpriseHookManifest = manifest
-	enterpriseHookJSON = false
-	enterpriseHookAPIAddr = ""
-	enterpriseHookProxyAddr = ""
-	// This unit isolates manifest trust. Production intentionally performs
-	// the LocalSystem mutation gate first, before reading any manifest bytes.
-	enterpriseHooksMutationIdentityPreflight = func() error { return nil }
+	repaired, err := runManagedReconcileAgainstManifestForTest(t, dir, manifest)
+	if !untrustedWriterAcceptedAsBoundary {
+		if err == nil || !strings.Contains(err.Error(), "manifest trust check failed") {
+			t.Fatalf("runEnterpriseHooksReconcile error = %v, want manifest trust check failure", err)
+		}
+		return
+	}
+	// The fixture provisions no guardian runtime, so the reconcile still stops
+	// at a later gate; only the manifest gate is under test here.
+	if err != nil && strings.Contains(err.Error(), "manifest trust check failed") {
+		t.Fatalf("runEnterpriseHooksReconcile error = %v, want the drifted manifest accepted", err)
+	}
+	if len(repaired) == 0 || repaired[0] != manifest {
+		t.Fatalf("manifest repair calls = %v, want the first for %s", repaired, manifest)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	named := false
+	for _, boundary := range boundaries {
+		if strings.EqualFold(filepath.Clean(boundary), filepath.Clean(manifest)) {
+			named = true
+		}
+	}
+	if !named {
+		t.Fatalf("boundary findings = %v, want one naming %s", boundaries, manifest)
+	}
+}
 
-	cmd := &cobra.Command{}
-	err := runEnterpriseHooksReconcile(cmd, nil)
+// Structure stays fatal on every platform: a targets.yaml reached through a
+// symlink is refused at the manifest gate.
+func TestEnterpriseHooksReconcileManagedRejectsSymlinkedManifest(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real-targets.yaml")
+	if err := os.WriteFile(target, []byte("version: 1\ntargets: []\n"), 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	manifest := filepath.Join(dir, "targets.yaml")
+	if err := os.Symlink(target, manifest); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	_, err := runManagedReconcileAgainstManifestForTest(t, dir, manifest)
 	if err == nil || !strings.Contains(err.Error(), "manifest trust check failed") {
-		t.Fatalf("runEnterpriseHooksReconcile error = %v, want trust check failure", err)
+		t.Fatalf("runEnterpriseHooksReconcile error = %v, want manifest trust check failure", err)
+	}
+	if runtime.GOOS == "windows" && !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("runEnterpriseHooksReconcile error = %v, want a symlink refusal", err)
 	}
 }
 
 func TestEnterpriseHookManagedRuntimeRejectsUserOwnedDataDir(t *testing.T) {
+	skipIfLocalSystem(t, "LocalSystem owns its t.TempDir() tree, so the fixture cannot stand in for a file a standard account owns")
 	if os.Geteuid() == 0 {
 		t.Skip("root-owned temp dirs are valid managed runtime dirs")
 	}
@@ -1734,6 +1887,9 @@ func TestEnterpriseHookManagedRuntimeRejectsUserOwnedDataDir(t *testing.T) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatalf("chmod data dir: %v", err)
 	}
+	// The process user can be an administrator principal, which the trust
+	// walk accepts as drift; give a standard-user principal write instead.
+	grantUntrustedWriterForTest(t, dir)
 	cfg = &config.Config{DataDir: dir, DeploymentMode: "managed_enterprise"}
 
 	err := validateEnterpriseHookManagedRuntime()
@@ -1859,5 +2015,37 @@ func TestEnterpriseHooksClaudeEffectivePolicyVerified(t *testing.T) {
 				t.Fatalf("enterpriseHooksClaudeEffectivePolicyVerified() = %t, want %t", got, tc.want)
 			}
 		})
+	}
+}
+
+// A SID-only target whose profile no longer resolves has no home. Its ledger
+// row must still be found by SID, so the target keeps its protection.
+func TestPreviousEnterpriseHookSuccessMatchesSIDWithUnresolvedHome(t *testing.T) {
+	originalOwnershipSetter := enterpriseHookAuthorizationOwnershipSetter
+	enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
+	t.Cleanup(func() { enterpriseHookAuthorizationOwnershipSetter = originalOwnershipSetter })
+	stubEnterpriseHookAuthorizationTrustForTempDir(t)
+	dir := t.TempDir()
+	t.Setenv(hookGuardianAuthorizationDirEnv, t.TempDir())
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("chmod state dir: %v", err)
+	}
+	const sid = "S-1-5-21-111-222-333-1001"
+	rows := []enterpriseHookReconcileRow{{
+		SID:       sid,
+		UserHome:  "/home/alice",
+		Connector: "codex",
+		OK:        true,
+		Result:    &enterprisehooks.InstallResult{Connector: "codex", UserHome: "/home/alice"},
+	}}
+	if err := writeEnterpriseHookGuardianState(dir, "manifest.yaml", testEnterpriseHookManifestSHA256, rows, 0, true); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	protected, err := previousEnterpriseHookSuccess(dir, "", "", sid, "codex")
+	if err != nil {
+		t.Fatalf("previousEnterpriseHookSuccess: %v", err)
+	}
+	if !protected {
+		t.Fatal("SID-only target with an unresolved home lost its protection")
 	}
 }

@@ -645,10 +645,15 @@ def merge_operator_entries(entries: list[Any], cfg: Any, target_type: str) -> li
                 if _same_name(entry.target_name, name, target_type) and (
                     _connector_key(entry.connector) == _connector_key(connector)
                 ):
+                    # A quarantine that failed keeps its journal reason, so
+                    # list and info say so (GAP-0133).
+                    failed = decision == "block" and str(entry.reason or "").startswith(
+                        ("quarantine failed", "link removed")
+                    )
                     out[i] = dataclasses.replace(
                         entry,
                         actions=dataclasses.replace(entry.actions, install=decision),
-                        reason=rule.reason or entry.reason,
+                        reason=entry.reason if failed else (rule.reason or entry.reason),
                     )
                     break
             else:

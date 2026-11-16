@@ -182,7 +182,7 @@ func renderCodexSandboxManagedConfig(rt resolvedSandboxTarget, environment strin
 	// launcher adds it per session in OTEL_EXPORTER_OTLP_{LOGS,TRACES,
 	// METRICS}_HEADERS, which Codex's exporters merge over the headers set
 	// here (never on a command line every process could read).
-	spec := (&CodexConnector{}).HookProfile(SetupOpts{APIAddr: rt.ingressAddr}).NativeOTLP
+	spec := (&CodexConnector{}).HookProfile(SetupOpts{APIAddr: rt.ingressAddr, sandboxNativeOTLP: true}).NativeOTLP
 	if spec == nil {
 		return nil, fmt.Errorf("codex: nil NativeOTLPSpec")
 	}

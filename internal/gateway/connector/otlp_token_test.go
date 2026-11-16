@@ -19,88 +19,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
-// TestIsValidOTLPScope_NegativeCases protects the lazy-reload path
-// in api.go's lookupOTLPPathToken: every disk-touching code path is
-// gated by IsValidOTLPScope, so a regression that accepts arbitrary
-// strings here would turn the OTLP auth check into a per-request
-// disk syscall stampede primitive — exactly the M1 risk we are
-// closing.
-//
-// The cases below cover the four shape classes we expect attackers
-// to probe with: path traversal, case mismatches, control characters,
-// and length / Unicode tricks. Anything that returns true must be in
-// OTLPPathTokenScopes() and pass the on-disk regex; every other shape
-// must return false.
-func TestIsValidOTLPScope_NegativeCases(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name  string
-		scope OTLPPathTokenScope
-		want  bool
-	}{
-		{"empty", "", false},
-		{"validCodex", OTLPScopeCodex, true},
-		{"validOmnigent", OTLPScopeOmnigent, true},
-		{"validCodex", OTLPScopeCodex, true},
-		{"validClaude", OTLPScopeClaude, true},
-		{"validOpenHands", OTLPScopeOpenHands, true},
-		{"upper", "OMNIGENT", false},
-		{"trailingSpace", "omnigent ", false},
-		{"leadingSpace", " omnigent", false},
-		{"pathTraversal", "../etc/passwd", false},
-		{"forwardSlash", "omnigent/extra", false},
-		{"newline", "omnigent\nclaude", false},
-		{"nul", "\x00", false},
-		{"nulSuffix", "omnigent\x00", false},
-		{"unicodeHomoglyph", "omnіgent", false}, // contains Cyrillic 'і' (U+0456)
-		{"plus", "omni+gent", false},
-		{"unknownVendor", "openai", false},
-		{"length128", OTLPPathTokenScope(repeat('a', 128)), false},
-		{"underscore", "open_hands", false}, // underscore not in scope list
-		{"dotPrefix", ".omnigent", false},
-		{"dashOnly", "-", false},
-		{"singleChar", "g", false},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := IsValidOTLPScope(tc.scope)
-			if got != tc.want {
-				t.Errorf("IsValidOTLPScope(%q) = %v, want %v", string(tc.scope), got, tc.want)
-			}
-		})
-	}
-}
-
-func TestEnsureOTLPPathToken_IsolatesConnectorScopes(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	codex, err := EnsureOTLPPathToken(dir, OTLPScopeCodex)
-	if err != nil {
-		t.Fatalf("EnsureOTLPPathToken(codex): %v", err)
-	}
-	omnigent, err := EnsureOTLPPathToken(dir, OTLPScopeOmnigent)
-	if err != nil {
-		t.Fatalf("EnsureOTLPPathToken(omnigent): %v", err)
-	}
-	if codex == "" || omnigent == "" || codex == omnigent {
-		t.Fatal("connector OTLP scopes did not receive distinct non-empty credentials")
-	}
-	for _, scope := range []OTLPPathTokenScope{OTLPScopeCodex, OTLPScopeOmnigent} {
-		path, err := OTLPPathTokenFilePath(dir, scope)
-		if err != nil {
-			t.Fatalf("OTLPPathTokenFilePath(%s): %v", scope, err)
-		}
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatalf("stat scoped token %s: %v", scope, err)
-		}
-		if got := info.Mode().Perm(); runtime.GOOS != "windows" && got != 0o600 {
-			t.Errorf("scoped token %s mode=%#o want 0600", scope, got)
-		}
-	}
-}
-
 func TestRemoveOTLPPathToken_RevokesAndNextEnsureRotates(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -403,6 +321,201 @@ func repeat(b byte, n int) string {
 	return string(buf)
 }
 
+func TestRemoveOTLPPathTokenRevokesAndIsIdempotent(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	first, err := EnsureOTLPPathToken(dir, OTLPScopeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := OTLPPathTokenFilePath(dir, OTLPScopeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := safefile.WritePrivate(path+".tmp", []byte(strings.Repeat("d", 64)+"\n")); err != nil {
+		t.Fatal(err)
+	}
+	currentTemp := filepath.Join(filepath.Dir(path), otlpPathTokenTempPrefix(path)+"abc123")
+	priorTemp := filepath.Join(filepath.Dir(path), "."+otlpPathTokenTempPrefix(path)+strings.Repeat("a", 32))
+	foreignLookalike := filepath.Join(filepath.Dir(path), otlpPathTokenTempPrefix(path)+"not.owned")
+	for _, artifact := range []string{currentTemp, priorTemp, foreignLookalike} {
+		if err := safefile.WritePrivate(artifact, []byte(strings.Repeat("e", 64)+"\n")); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := RemoveOTLPPathToken(dir, OTLPScopeCodex); err != nil {
+		t.Fatalf("RemoveOTLPPathToken: %v", err)
+	}
+	for _, artifact := range []string{path, path + ".tmp", currentTemp, priorTemp} {
+		if _, err := os.Lstat(artifact); !os.IsNotExist(err) {
+			t.Fatalf("token artifact survived removal: %s (err=%v)", artifact, err)
+		}
+	}
+	if _, err := os.Lstat(foreignLookalike); err != nil {
+		t.Fatalf("non-owned token temp lookalike was removed: %v", err)
+	}
+	if got, err := LoadOTLPPathToken(dir, OTLPScopeCodex); err != nil || got != "" {
+		t.Fatalf("LoadOTLPPathToken after removal = %q, %v", got, err)
+	}
+	if err := RemoveOTLPPathToken(dir, OTLPScopeCodex); err != nil {
+		t.Fatalf("idempotent RemoveOTLPPathToken: %v", err)
+	}
+	second, err := EnsureOTLPPathToken(dir, OTLPScopeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second == first {
+		t.Fatal("token was reused after revocation")
+	}
+}
+
+func TestOTLPPathTokenScopeForConnector(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		scope OTLPPathTokenScope
+		ok    bool
+	}{
+		{name: "codex", scope: OTLPScopeCodex, ok: true},
+		{name: " ClaudeCode ", scope: OTLPScopeClaude, ok: true},
+		{name: "cursor", ok: false},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := OTLPPathTokenScopeForConnector(tc.name)
+			if got != tc.scope || ok != tc.ok {
+				t.Fatalf("OTLPPathTokenScopeForConnector(%q) = %q, %v; want %q, %v", tc.name, got, ok, tc.scope, tc.ok)
+			}
+		})
+	}
+}
+
+func TestResolveSetupOTLPPathTokenUsesSuppliedTokenWithoutLocalSidecar(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	want := strings.Repeat("c", 64)
+	got, err := resolveSetupOTLPPathToken(dir, OTLPScopeCodex, "  "+want+"\n")
+	if err != nil {
+		t.Fatalf("resolveSetupOTLPPathToken: %v", err)
+	}
+	if got != want {
+		t.Fatalf("token = %q, want supplied token", got)
+	}
+	path, err := OTLPPathTokenFilePath(dir, OTLPScopeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("per-user token sidecar exists after supplied token: %v", err)
+	}
+}
+
+func TestResolveSetupOTLPPathTokenRejectsInvalidSuppliedToken(t *testing.T) {
+	t.Parallel()
+	if _, err := resolveSetupOTLPPathToken(t.TempDir(), OTLPScopeClaude, "not-a-token"); err == nil {
+		t.Fatal("resolveSetupOTLPPathToken accepted an invalid supplied token")
+	}
+}
+
+func TestEnsureOTLPPathToken_IsolatesConnectorScopes(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	codex, err := EnsureOTLPPathToken(dir, OTLPScopeCodex)
+	if err != nil {
+		t.Fatalf("EnsureOTLPPathToken(codex): %v", err)
+	}
+	claude, err := EnsureOTLPPathToken(dir, OTLPScopeClaude)
+	if err != nil {
+		t.Fatalf("EnsureOTLPPathToken(claudecode): %v", err)
+	}
+	if codex == "" || claude == "" || codex == claude {
+		t.Fatal("connector OTLP scopes did not receive distinct non-empty credentials")
+	}
+	for _, scope := range []OTLPPathTokenScope{OTLPScopeCodex, OTLPScopeClaude} {
+		path, err := OTLPPathTokenFilePath(dir, scope)
+		if err != nil {
+			t.Fatalf("OTLPPathTokenFilePath(%s): %v", scope, err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat scoped token %s: %v", scope, err)
+		}
+		if got := info.Mode().Perm(); runtime.GOOS != "windows" && got != 0o600 {
+			t.Errorf("scoped token %s mode=%#o want 0600", scope, got)
+		}
+	}
+}
+
+// TestIsValidOTLPScope_NegativeCases protects the lazy-reload path in
+// api.go's lookupOTLPPathToken: every disk-touching code path is gated by
+// IsValidOTLPScope, so a regression that accepts arbitrary strings here
+// would turn the OTLP auth check into a per-request disk syscall stampede
+// primitive. It covers path traversal, case mismatches, control
+// characters, length and Unicode tricks, and the scopes of removed
+// connectors. Anything that returns true must be in OTLPPathTokenScopes().
+func TestIsValidOTLPScope_NegativeCases(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		scope OTLPPathTokenScope
+		want  bool
+	}{
+		{"empty", "", false},
+		{"validCodex", OTLPScopeCodex, true},
+		{"validClaude", OTLPScopeClaude, true},
+		{"removedOpenHands", "openhands", false},
+		{"removedOmnigent", "omnigent", false},
+		{"upper", "CODEX", false},
+		{"trailingSpace", "codex ", false},
+		{"leadingSpace", " codex", false},
+		{"pathTraversal", "../etc/passwd", false},
+		{"forwardSlash", "codex/extra", false},
+		{"newline", "codex\nclaude", false},
+		{"nul", "\x00", false},
+		{"nulSuffix", "codex\x00", false},
+		{"unicodeHomoglyph", "cоdex", false}, // contains Cyrillic 'о' (U+043E)
+		{"plus", "co+dex", false},
+		{"unknownVendor", "openai", false},
+		{"length128", OTLPPathTokenScope(repeat('a', 128)), false},
+		{"underscore", "claude_code", false},
+		{"dotPrefix", ".codex", false},
+		{"dashOnly", "-", false},
+		{"singleChar", "g", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsValidOTLPScope(tc.scope); got != tc.want {
+				t.Errorf("IsValidOTLPScope(%q) = %v, want %v", string(tc.scope), got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadOTLPPathToken_AcceptsStrictTokenFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path, err := OTLPPathTokenFilePath(dir, OTLPScopeClaude)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Repeat("b", 64)
+	if err := os.WriteFile(path, []byte(want+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadOTLPPathToken(dir, OTLPScopeClaude)
+	if err != nil {
+		t.Fatalf("LoadOTLPPathToken: %v", err)
+	}
+	if got != want {
+		t.Fatalf("token = %q, want %q", got, want)
+	}
+}
+
 func TestLoadOTLPPathToken_RejectsUnsafeFiles(t *testing.T) {
 	t.Parallel()
 	token := strings.Repeat("a", 64) + "\n"
@@ -475,11 +588,10 @@ func TestLoadOTLPPathToken_RejectsUnsafeFiles(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
-			hooks := filepath.Join(dir, "hooks")
-			if err := os.MkdirAll(hooks, 0o700); err != nil {
+			if err := os.MkdirAll(filepath.Join(dir, "hooks"), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			path, err := OTLPPathTokenFilePath(dir, OTLPScopeOmnigent)
+			path, err := OTLPPathTokenFilePath(dir, OTLPScopeClaude)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -488,10 +600,10 @@ func TestLoadOTLPPathToken_RejectsUnsafeFiles(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read unsafe token before provisioning attempt: %v", err)
 			}
-			if got, err := LoadOTLPPathToken(dir, OTLPScopeOmnigent); err == nil {
+			if got, err := LoadOTLPPathToken(dir, OTLPScopeClaude); err == nil {
 				t.Fatalf("LoadOTLPPathToken succeeded with token %q, want error", got)
 			}
-			if got, err := EnsureOTLPPathToken(dir, OTLPScopeOmnigent); err == nil {
+			if got, err := EnsureOTLPPathToken(dir, OTLPScopeClaude); err == nil {
 				t.Fatalf("EnsureOTLPPathToken succeeded with token %q, want error", got)
 			}
 			after, err := os.ReadFile(path)
@@ -502,128 +614,5 @@ func TestLoadOTLPPathToken_RejectsUnsafeFiles(t *testing.T) {
 				t.Fatal("rejected provisioning modified the existing unsafe token")
 			}
 		})
-	}
-}
-
-func TestLoadOTLPPathToken_AcceptsStrictTokenFile(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path, err := OTLPPathTokenFilePath(dir, OTLPScopeOmnigent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	want := strings.Repeat("b", 64)
-	if err := os.WriteFile(path, []byte(want+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	got, err := LoadOTLPPathToken(dir, OTLPScopeOmnigent)
-	if err != nil {
-		t.Fatalf("LoadOTLPPathToken: %v", err)
-	}
-	if got != want {
-		t.Fatalf("token = %q, want %q", got, want)
-	}
-}
-
-func TestRemoveOTLPPathTokenRevokesAndIsIdempotent(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	first, err := EnsureOTLPPathToken(dir, OTLPScopeCodex)
-	if err != nil {
-		t.Fatal(err)
-	}
-	path, err := OTLPPathTokenFilePath(dir, OTLPScopeCodex)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := safefile.WritePrivate(path+".tmp", []byte(strings.Repeat("d", 64)+"\n")); err != nil {
-		t.Fatal(err)
-	}
-	currentTemp := filepath.Join(filepath.Dir(path), otlpPathTokenTempPrefix(path)+"abc123")
-	priorTemp := filepath.Join(filepath.Dir(path), "."+otlpPathTokenTempPrefix(path)+strings.Repeat("a", 32))
-	foreignLookalike := filepath.Join(filepath.Dir(path), otlpPathTokenTempPrefix(path)+"not.owned")
-	for _, artifact := range []string{currentTemp, priorTemp, foreignLookalike} {
-		if err := safefile.WritePrivate(artifact, []byte(strings.Repeat("e", 64)+"\n")); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	if err := RemoveOTLPPathToken(dir, OTLPScopeCodex); err != nil {
-		t.Fatalf("RemoveOTLPPathToken: %v", err)
-	}
-	for _, artifact := range []string{path, path + ".tmp", currentTemp, priorTemp} {
-		if _, err := os.Lstat(artifact); !os.IsNotExist(err) {
-			t.Fatalf("token artifact survived removal: %s (err=%v)", artifact, err)
-		}
-	}
-	if _, err := os.Lstat(foreignLookalike); err != nil {
-		t.Fatalf("non-owned token temp lookalike was removed: %v", err)
-	}
-	if got, err := LoadOTLPPathToken(dir, OTLPScopeCodex); err != nil || got != "" {
-		t.Fatalf("LoadOTLPPathToken after removal = %q, %v", got, err)
-	}
-	if err := RemoveOTLPPathToken(dir, OTLPScopeCodex); err != nil {
-		t.Fatalf("idempotent RemoveOTLPPathToken: %v", err)
-	}
-	second, err := EnsureOTLPPathToken(dir, OTLPScopeCodex)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if second == first {
-		t.Fatal("token was reused after revocation")
-	}
-}
-
-func TestOTLPPathTokenScopeForConnector(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name  string
-		scope OTLPPathTokenScope
-		ok    bool
-	}{
-		{name: "codex", scope: OTLPScopeCodex, ok: true},
-		{name: " ClaudeCode ", scope: OTLPScopeClaude, ok: true},
-		{name: "omnigent", scope: OTLPScopeOmnigent, ok: true},
-		{name: "openhands", scope: OTLPScopeOpenHands, ok: true},
-		{name: "cursor", ok: false},
-	} {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got, ok := OTLPPathTokenScopeForConnector(tc.name)
-			if got != tc.scope || ok != tc.ok {
-				t.Fatalf("OTLPPathTokenScopeForConnector(%q) = %q, %v; want %q, %v", tc.name, got, ok, tc.scope, tc.ok)
-			}
-		})
-	}
-}
-
-func TestResolveSetupOTLPPathTokenUsesSuppliedTokenWithoutLocalSidecar(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	want := strings.Repeat("c", 64)
-	got, err := resolveSetupOTLPPathToken(dir, OTLPScopeCodex, "  "+want+"\n")
-	if err != nil {
-		t.Fatalf("resolveSetupOTLPPathToken: %v", err)
-	}
-	if got != want {
-		t.Fatalf("token = %q, want supplied token", got)
-	}
-	path, err := OTLPPathTokenFilePath(dir, OTLPScopeCodex)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Lstat(path); !os.IsNotExist(err) {
-		t.Fatalf("per-user token sidecar exists after supplied token: %v", err)
-	}
-}
-
-func TestResolveSetupOTLPPathTokenRejectsInvalidSuppliedToken(t *testing.T) {
-	t.Parallel()
-	if _, err := resolveSetupOTLPPathToken(t.TempDir(), OTLPScopeClaude, "not-a-token"); err == nil {
-		t.Fatal("resolveSetupOTLPPathToken accepted an invalid supplied token")
 	}
 }

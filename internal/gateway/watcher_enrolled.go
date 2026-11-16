@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -58,10 +59,19 @@ func serviceHomeDir() string {
 type enrolledWatchSet struct {
 	skillDirs  []string
 	pluginDirs []string
-	// skippedProfiles counts enrolled homes omitted from LocalSystem watching.
+	// skippedProfiles counts the enrolled skill and plugin folders inside
+	// user profiles, which the LocalSystem gateway does not watch, and the
+	// local MCP servers of an enrolled row without an account SID, which
+	// cannot start as their user.
 	skippedProfiles int
 	// roots maps each watched folder to the connector that owns it.
 	roots map[string]string
+	// consumers lists every enrolled connector that loads each root, even
+	// when several connectors share one watched folder.
+	consumers []watcher.RootConsumer
+	// connectors names each enrolled connector, once, even when it has no
+	// folder to watch: it still depends on any explicit gateway.watcher dir.
+	connectors []string
 	// mcp is every enrolled user's MCP servers, tagged with the connector
 	// and the user home.
 	mcp []config.MCPServerEntry
@@ -78,6 +88,16 @@ type enrolledWatchSet struct {
 	// Claude Code state (GAP-0829) or Kiro mcp.json (GAP-1468) the hook
 	// enumerator could not read.
 	mcpUnreadable map[string]enterprisehooks.ClaudeStateUnreadable
+}
+
+// scanAssetOwners names the account of each enrolled home of the watch set
+// the gateway resolved last, so the scan API's rows name the user whose
+// folder held a scanned asset, as the watcher's do (GAP-0575).
+var scanAssetOwners atomic.Pointer[[]watcher.AssetOwner]
+
+func publishScanAssetOwners(owners []watcher.AssetOwner) {
+	copied := append([]watcher.AssetOwner(nil), owners...)
+	scanAssetOwners.Store(&copied)
 }
 
 // mcpUnreadableKey is the key of a connector and an enrolled home.
@@ -136,12 +156,15 @@ func (m *enrolledMCPServers) set(entries []config.MCPServerEntry) {
 }
 
 func (e enrolledWatchSet) dirsKey() string {
-	parts := make([]string, 0, len(e.roots)+len(e.skillDirs)+len(e.pluginDirs))
+	parts := make([]string, 0, len(e.roots)+len(e.skillDirs)+len(e.pluginDirs)+len(e.consumers))
 	if e.skippedProfiles > 0 {
 		parts = append(parts, fmt.Sprintf("skipped:%d", e.skippedProfiles))
 	}
 	for root, name := range e.roots {
 		parts = append(parts, strings.ToLower(root)+"="+name)
+	}
+	for _, consumer := range e.consumers {
+		parts = append(parts, consumer.Kind+":"+strings.ToLower(consumer.Path)+"="+consumer.Connector)
 	}
 	for _, dir := range e.skillDirs {
 		parts = append(parts, "s:"+strings.ToLower(dir))
@@ -213,7 +236,14 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 	seenSkill := map[string]bool{}
 	seenPlugin := map[string]bool{}
 	seenMCP := map[string]bool{}
-	type userConnector struct{ home, connector, sid string }
+	type userConnector struct {
+		home, connector, sid string
+		// inProfile marks a home inside a user profile: the LocalSystem
+		// gateway reads nothing there. Its skill and plugin folders are not
+		// watched; its MCP servers come from the enumerator record and are
+		// scanned as the user (#1164).
+		inProfile bool
+	}
 	var targets []userConnector
 	ownedHomes := map[string]bool{}
 	for _, target := range authorization.ProtectedTargets {
@@ -225,11 +255,8 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 		if !target.OK || home == "" || name == "" || !filepath.IsAbs(home) {
 			continue
 		}
-		if managed.RequireWindowsGatewayPathOutsideUserProfiles(home) != nil {
-			set.skippedProfiles++
-			continue
-		}
-		targets = append(targets, userConnector{filepath.Clean(home), name, strings.TrimSpace(target.SID)})
+		inProfile := managed.RequireWindowsGatewayPathOutsideUserProfiles(home) != nil
+		targets = append(targets, userConnector{filepath.Clean(home), name, strings.TrimSpace(target.SID), inProfile})
 		if key := strings.ToLower(filepath.Clean(home)); !ownedHomes[key] {
 			ownedHomes[key] = true
 			owner := watcher.AssetOwner{Home: filepath.Clean(home), Name: strings.TrimSpace(target.User)}
@@ -257,8 +284,11 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 		if !ok {
 			continue
 		}
+		if !slices.Contains(set.connectors, target.connector) {
+			set.connectors = append(set.connectors, target.connector)
+		}
 		skillDirs, pluginDirs := connector.ComponentDirsForHome(conn, serviceHome, target.home)
-		add := func(dirs []string, seen map[string]bool, out *[]string) {
+		add := func(dirs []string, seen map[string]bool, out *[]string, kind string) {
 			for _, userDir := range dirs {
 				if managed.RequireWindowsGatewayPathOutsideUserProfiles(userDir) != nil {
 					set.skippedProfiles++
@@ -266,6 +296,7 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 				}
 				key := strings.ToLower(userDir)
 				if seen[key] {
+					set.consumers = append(set.consumers, watcher.RootConsumer{Kind: kind, Path: userDir, Connector: target.connector})
 					continue
 				}
 				info, err := stat(userDir)
@@ -278,20 +309,24 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 				}
 				seen[key] = true
 				*out = append(*out, userDir)
+				set.consumers = append(set.consumers, watcher.RootConsumer{Kind: kind, Path: userDir, Connector: target.connector})
 				if _, owned := set.roots[userDir]; !owned {
 					set.roots[userDir] = target.connector
 				}
 			}
 		}
 		if wcfg.Skill.Enabled {
-			add(skillDirs, seenSkill, &set.skillDirs)
+			add(skillDirs, seenSkill, &set.skillDirs, "skill")
 		}
 		if wcfg.Plugin.Enabled {
-			add(pluginDirs, seenPlugin, &set.pluginDirs)
+			add(pluginDirs, seenPlugin, &set.pluginDirs, "plugin")
 		}
 		// A server is the user's and the connector's: another user's (or
 		// connector's) server with the same name is admitted on its own.
-		entries := config.ReadUserMCPServersForHome(target.connector, target.home)
+		var entries []config.MCPServerEntry
+		if !target.inProfile {
+			entries = config.ReadUserMCPServersForHome(target.connector, target.home)
+		}
 		// The service cannot read these files of an enrolled user; the
 		// enumerator publishes their servers (GAP-0424, GAP-1468). A record
 		// it could not write or a file it could not read is recorded, not
@@ -306,9 +341,20 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 		}
 		for _, entry := range entries {
 			entry.Home = target.home
-			if !gatewayMCPEntryOutsideProfiles(entry) {
-				set.skippedProfiles++
-				continue
+			// An enrolled user's server never runs with the gateway's
+			// rights: a local one starts as the user through the hook
+			// enumerator, which starts only what it published, so any
+			// other is refused there and blocked (#1164).
+			entry.RunAsSID = target.sid
+			if target.sid == "" {
+				if entry.Command != "" && entry.URL == "" {
+					set.skippedProfiles++
+					continue
+				}
+				if !gatewayMCPEntryOutsideProfiles(entry) {
+					set.skippedProfiles++
+					continue
+				}
 			}
 			key := watcher.MCPEventPath(entry)
 			if entry.Name == "" || entry.Bundled || seenMCP[key] {
@@ -325,7 +371,7 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 // watcher MCP entry to the scanner child. URLs and bare command names are
 // not filesystem paths.
 func gatewayMCPEntryOutsideProfiles(entry config.MCPServerEntry) bool {
-	for _, path := range []string{entry.Home, entry.Project, entry.WorkDir, entry.Source, entry.Command} {
+	for _, path := range []string{entry.Home, entry.Project, entry.Source, entry.Command} {
 		if filepath.IsAbs(path) && managed.RequireWindowsGatewayPathOutsideUserProfiles(path) != nil {
 			return false
 		}
@@ -344,20 +390,14 @@ func gatewayMCPEntryOutsideProfiles(entry config.MCPServerEntry) bool {
 }
 
 // enrolledMCPSpoolDir is the folder where the enumerator publishes the MCP
-// servers of the connector's enrolled users, or "" for a connector whose
-// files the service reads itself. The service account cannot read
-// ~/.claude.json in the profile root, which holds the Claude Code user-scope
-// and local-scope servers (GAP-0424), nor ~/.kiro/settings/mcp.json, which
-// the guardian protects for a user enrolled for Kiro (GAP-1468).
+// servers of the connector enrolled users, or "" for a connector it does not
+// publish (mcpasuser.PublishedConnectors). The service account reads nothing
+// in a profile: ~/.claude.json holds the Claude Code user-scope and
+// local-scope servers (GAP-0424), the guardian protects
+// ~/.kiro/settings/mcp.json (GAP-1468), and Codex keeps its servers in
+// config.toml under ~/.codex or CODEX_HOME (GAP-0686).
 func enrolledMCPSpoolDir(cfg *config.Config, connectorName string) string {
-	authorizationDir := managed.HookGuardianAuthorizationDir(cfg.DataDir)
-	switch connectorName {
-	case "claudecode":
-		return enterprisehooks.ClaudeMCPSpoolDir(authorizationDir)
-	case "kiro":
-		return enterprisehooks.KiroMCPSpoolDir(authorizationDir)
-	}
-	return ""
+	return enterprisehooks.MCPSpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir), connectorName)
 }
 
 // enrolledSpoolMCPServers are the MCP servers the enumerator published in
@@ -367,11 +407,7 @@ func enrolledMCPSpoolDir(cfg *config.Config, connectorName string) string {
 // has no file, so a missing record is unreadable state too: the publication
 // failed and the gateway does not know that user's servers (GAP-1298).
 func enrolledSpoolMCPServers(dir, connectorName, sid string) ([]config.MCPServerEntry, *enterprisehooks.ClaudeStateUnreadable) {
-	read := enterprisehooks.ReadClaudeMCPSpool
-	if connectorName == "kiro" {
-		read = enterprisehooks.ReadKiroMCPSpool
-	}
-	servers, unreadable, err := read(dir, sid, validateManagedGuardianAuthorization)
+	servers, unreadable, err := enterprisehooks.ReadMCPSpool(dir, sid, connectorName, validateManagedGuardianAuthorization)
 	if err != nil {
 		reason := err.Error()
 		if errors.Is(err, os.ErrNotExist) {
@@ -383,12 +419,6 @@ func enrolledSpoolMCPServers(dir, connectorName, sid string) ([]config.MCPServer
 		}
 	}
 	return servers, unreadable
-}
-
-// enrolledClaudeMCPServers are the Claude Code MCP servers the enumerator
-// published for the account sid (enrolledSpoolMCPServers).
-func enrolledClaudeMCPServers(cfg *config.Config, sid string) ([]config.MCPServerEntry, *enterprisehooks.ClaudeStateUnreadable) {
-	return enrolledSpoolMCPServers(enrolledMCPSpoolDir(cfg, "claudecode"), "claudecode", sid)
 }
 
 // EnrolledWatchRoot is a skill or plugin folder a managed Windows gateway
@@ -517,10 +547,13 @@ func enrolledRootPrecedence(connectorName string) int {
 // set's roots, each owned by the connector that reported it.
 func (e *enrolledWatchSet) addProjectRoots(roots []projectSkillRoot) {
 	for _, root := range roots {
+		e.consumers = append(e.consumers, watcher.RootConsumer{Kind: "skill", Path: root.Path, Connector: root.Connector})
 		if e.roots == nil {
 			e.roots = map[string]string{}
 		}
-		e.roots[root.Path] = root.Connector
+		if _, owned := e.roots[root.Path]; !owned {
+			e.roots[root.Path] = root.Connector
+		}
 	}
 }
 

@@ -179,9 +179,15 @@ func TestHandleGuardrailEvaluateEmitsOneRichCorrelatedV8Evaluation(t *testing.T)
 // A decision event must carry the profile named on its parent span.
 func TestGuardrailDecisionEventCarriesProfileName(t *testing.T) {
 	api, capture := newGuardrailEventV8TestAPI(t)
+	// Telemetry reads the profile set pinned on the request, not this API's
+	// live holder. Pin a fixture generation so another test's process-wide
+	// profile set cannot replace this decision on later -count runs.
+	set := &guardrailProfileSet{}
 	correlated, _ := platformHealthCorrelatedContext(t)
+	correlated = withPinnedGeneration(correlated, &Generation{N: 1, Profiles: set})
 	ctx := context.WithValue(correlated, resolvedGuardrailProfileKey{}, &resolvedGuardrailProfile{
 		decision: profileDecision{Name: "contractors", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Match: profileMatchGroup},
+		set:      set,
 	})
 	body, err := json.Marshal(guardrailEvaluateRequest{
 		EvaluationID: "eval-profile-event", Direction: "prompt", Mode: "action",

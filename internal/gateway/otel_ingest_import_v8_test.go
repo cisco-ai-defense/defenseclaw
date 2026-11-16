@@ -488,6 +488,21 @@ func inboundStoredProjectedRecord(t *testing.T, path, connector, eventName strin
 	if err := json.Unmarshal([]byte(encoded), &record); err != nil {
 		t.Fatal(err)
 	}
+	// A standalone store keeps the field classes once per set (#1384).
+	if reference, ok := record["field_classes"].(map[string]any); ok {
+		if digest, named := reference["$set"].(string); named {
+			var classes string
+			if err := database.QueryRow(`SELECT classes_json FROM audit_field_class_sets WHERE digest = ?`,
+				digest).Scan(&classes); err != nil {
+				t.Fatal(err)
+			}
+			var expanded map[string]any
+			if err := json.Unmarshal([]byte(classes), &expanded); err != nil {
+				t.Fatal(err)
+			}
+			record["field_classes"] = expanded
+		}
+	}
 	return record
 }
 

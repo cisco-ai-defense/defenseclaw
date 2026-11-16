@@ -46,10 +46,22 @@ func OrphanedHookConfigPaths(conn Connector, opts SetupOpts) ([]string, error) {
 	}
 	exact := ownedHookCommandNeedles(opts, conn)
 	scripts := ownedHookScriptPaths(conn, opts)
-	if len(exact) == 0 && len(scripts) == 0 {
+	var registrationPrefixes []string
+	if owner, ok := conn.(interface{ orphanedRegistrationKeyPrefixes() []string }); ok {
+		registrationPrefixes = owner.orphanedRegistrationKeyPrefixes()
+	}
+	if len(exact) == 0 && len(scripts) == 0 && len(registrationPrefixes) == 0 {
 		return found, nil
 	}
-	for _, path := range HookConfigPathsForConnector(conn, opts) {
+	paths := HookConfigPathsForConnector(conn, opts)
+	if hermes, ok := conn.(*hookOnlyConnector); ok && hermes.name == "hermes" {
+		other, err := hermes.orphanedOtherHermesHomes(opts)
+		if err != nil {
+			return nil, err
+		}
+		found = append(found, other...)
+	}
+	for _, path := range paths {
 		if slices.Contains(found, path) {
 			continue
 		}
@@ -60,11 +72,30 @@ func OrphanedHookConfigPaths(conn Connector, opts SetupOpts) ([]string, error) {
 		if decoded == nil {
 			continue
 		}
-		if structuredHookCommandReferences(decoded, exact) || hookCommandRunsScript(decoded, scripts) {
+		if structuredHookCommandReferences(decoded, exact) || hookCommandRunsScript(decoded, scripts) ||
+			ownedRegistrationKeyPresent(decoded, registrationPrefixes) {
 			found = append(found, path)
 		}
 	}
 	return found, nil
+}
+
+// ownedRegistrationKeyPresent checks only the host's registration namespace.
+// Commands below those keys can change across releases without losing the
+// ownership signal used by rollback cleanup.
+func ownedRegistrationKeyPresent(decoded interface{}, prefixes []string) bool {
+	config, ok := decoded.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	for key := range config {
+		for _, prefix := range prefixes {
+			if prefix != "" && strings.HasPrefix(key, prefix) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // maxOrphanedPluginBytes bounds the read of a managed plugin, as Teardown's.
@@ -192,4 +223,34 @@ func commandNamesScript(command string, scripts []string) bool {
 		}
 	}
 	return false
+}
+
+// orphanedOtherHermesHomes returns the Hermes configs besides the resolved
+// one (otherHermesHomes: an earlier Setup's home, the profile default) that
+// hold this data directory's hooks or approvals.
+func (c *hookOnlyConnector) orphanedOtherHermesHomes(opts SetupOpts) ([]string, error) {
+	configPath := hermesConfigPath(opts)
+	if validateHermesWindowsConfigPath(configPath) != nil {
+		return nil, nil
+	}
+	bound, profileDefault, err := otherHermesHomes(opts, configPath)
+	if err != nil {
+		return nil, err
+	}
+	hookScript := c.hookCommand(opts)
+	command := hermesConfiguredHookCommand(hookScript, opts.HookExecutable)
+	var found []string
+	for _, other := range []string{bound, profileDefault} {
+		if other == "" {
+			continue
+		}
+		hooks, approvals, err := hermesHomeHoldsOwnedEntries(other, hookScript, command)
+		if err != nil {
+			return nil, err
+		}
+		if hooks || approvals {
+			found = append(found, other)
+		}
+	}
+	return found, nil
 }

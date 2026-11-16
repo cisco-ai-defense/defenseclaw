@@ -160,7 +160,12 @@ func adminVMDriverArchive(goos, goarch string) string {
 // against a checksum file fetched from the same release (#1224). The
 // openshell package ships no MicroVM driver.
 func AdminVMDriverFix(goos, goarch string) *Fix {
-	dir := AdminVMDriverDirs(goos)[0]
+	return adminVMDriverFixIn(goos, goarch, AdminVMDriverDirs(goos)[0])
+}
+
+// adminVMDriverFixIn installs into the directory the gateway actually uses.
+// A stale driver in a later administrator directory must be replaced there.
+func adminVMDriverFixIn(goos, goarch, dir string) *Fix {
 	archive := adminVMDriverArchive(goos, goarch)
 	if archive == "" {
 		return &Fix{Summary: "OpenShell publishes its MicroVM driver for Linux on amd64 and arm64 and for Apple-silicon Macs only"}
@@ -174,14 +179,15 @@ func AdminVMDriverFix(goos, goarch string) *Fix {
 	if goos == "darwin" {
 		check, group = "shasum -a 256 -c -", "wheel"
 	}
+	commandDir := shellQuote(dir)
+	commandTarget := shellQuote(filepath.Join(dir, vmDriverBinary))
 	return &Fix{
 		Summary: "install " + vmDriverBinary + " of OpenShell " + InstallerTag + " root-owned into " + dir +
 			", after checking the archive against the SHA-256 this DefenseClaw build pins for it (the openshell package ships no MicroVM driver)",
-		Command: "d=$(mktemp -d) && cd \"$d\" && curl -fsSLO " + TarballBaseURL + InstallerTag + "/" + archive +
+		Command: "d=$(mktemp -d) && (trap 'rm -rf \"$d\"' EXIT; cd \"$d\" && curl -fsSLO " + TarballBaseURL + InstallerTag + "/" + archive +
 			" && echo '" + digest + "  " + archive + "' | " + check + " && tar -xzf " + archive + " " + vmDriverBinary +
-			" && sudo install -d -m 0755 -o root -g " + group + " " + dir +
-			" && sudo install -m 0755 -o root -g " + group + " " + vmDriverBinary + " " + dir + "/" + vmDriverBinary +
-			"; cd - >/dev/null; rm -rf \"$d\"",
+			" && sudo install -d -m 0755 -o root -g " + group + " " + commandDir +
+			" && sudo install -m 0755 -o root -g " + group + " " + vmDriverBinary + " " + commandTarget + ")",
 		Sudo: true,
 	}
 }

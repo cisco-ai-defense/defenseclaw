@@ -49,6 +49,8 @@ require (
 	mvdan.cc/sh/v3 v3.13.1
 )
 
+replace github.com/maximhq/bifrost/core => ./third_party/bifrost-core
+
 require (
 	cel.dev/expr v0.25.2 // indirect
 	cloud.google.com/go v0.123.0 // indirect

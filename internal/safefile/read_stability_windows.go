@@ -42,3 +42,6 @@ func readStabilitySnapshot(file *os.File) (readStability, error) {
 		attributes: basic.fileAttributes,
 	}, nil
 }
+
+// A metadata difference during a read keeps failing the read here.
+const readStabilityRetriesMetadataChange = false

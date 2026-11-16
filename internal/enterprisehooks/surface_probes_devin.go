@@ -12,8 +12,8 @@ package enterprisehooks
 
 import (
 	"path/filepath"
-	"regexp"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 )
 
@@ -43,7 +43,7 @@ func devinDesktopManPage(appRoot string) string {
 }
 
 // devinManPageVersion matches the man page header of the Devin CLI.
-var devinManPageVersion = regexp.MustCompile(`(?m)^\.TH devin 1\s+"devin ([0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6})[ "]`)
+var devinManPageVersion = lazyregexp.New(`(?m)^\.TH devin 1\s+"devin ([0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6})[ "]`)
 
 // parseDevinManPageVersion returns the Devin CLI version a man page's .TH
 // header names, or "".

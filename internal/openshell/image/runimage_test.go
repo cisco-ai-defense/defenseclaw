@@ -244,7 +244,7 @@ func runBaseFor(t *testing.T, spec BuildSpec) (*Builder, *layerDaemon, Record) {
 	c := mustContext(t, spec)
 	base := recordFor(c, time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), true)
 	if spec.MicroVM {
-		base.MicroVM, base.MicroVMVerified = true, true
+		base.MicroVM = true
 	}
 	daemon := newLayerDaemon(t)
 	labels := maps.Clone(c.Labels)
@@ -661,7 +661,7 @@ func TestPruneOnAMicroVMGatewaySupersedesTheDockerDriversImages(t *testing.T) {
 		spec.MicroVM = true
 		c := mustContext(t, spec)
 		vmRec := recordFor(c, dockerRec.BuiltAt.Add(time.Hour), true)
-		vmRec.ImageID, vmRec.MicroVM, vmRec.MicroVMVerified = "sha256:"+strings.Repeat("2", 64), true, true
+		vmRec.ImageID, vmRec.MicroVM = "sha256:"+strings.Repeat("2", 64), true
 		daemon.addBase(vmRec, c.Labels)
 		daemon.images[vmRec.ImageID] = fakeImage{layers: []string{"sha256:l1", "sha256:l2", "sha256:vm"}, labels: daemon.images[vmRec.ImageID].labels}
 		if err := b.Store.Put(vmRec); err != nil {
@@ -827,6 +827,46 @@ func TestVMStaging(t *testing.T) {
 	}
 	if left := VMStaging(cache); len(left) != 1 || left[0].Path != staging[1].Path {
 		t.Fatalf("left = %+v", left)
+	}
+}
+
+// From OpenShell 0.1.4 the vm driver names a prepared disk by the SHA-256
+// of the image ID (NVIDIA/OpenShell#4342): those are found by image ID too,
+// with their identity and release, so image rm, prune and teardown still
+// remove them, and the 0.1.3 ones left by an upgrade are stale.
+func TestVMDisksHashedNames(t *testing.T) {
+	cache := t.TempDir()
+	id := "sha256:" + strings.Repeat("ab", 32)
+	sum := sha256.Sum256([]byte(id))
+	key := hex.EncodeToString(sum[:])
+	names := []string{
+		"sandbox-prepared-rootfs-ext4-umoci-v4-openshell-0.1.5-configured-1000-1000-" + key,
+		"sandbox-prepared-rootfs-ext4-umoci-v4-openshell-0.1.5-image-account-" + strings.Repeat("cd", 32),
+		"sandbox-prepared-rootfs-ext4-umoci-v3-openshell-0.1.3-configured-1000-1000-sha256-" + strings.Repeat("ab", 32),
+		"sandbox-prepared-rootfs-ext4-umoci-v4-openshell-0.1.5-configured-1000-1000-" + key + ".staging-1761000000-1",
+		"sandbox-prepared-rootfs-ext4-umoci-v4-openshell-0.1.5-configured-1000-1000-nothex",
+	}
+	for _, name := range names {
+		if err := os.MkdirAll(filepath.Join(cache, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	disks := VMDisks(cache, id)
+	if len(disks) != 2 || disks[0].Path != filepath.Join(cache, names[2]) || disks[1].Path != filepath.Join(cache, names[0]) ||
+		disks[1].UID != 1000 || disks[1].GID != 1000 || disks[1].OpenShell != "0.1.5" || disks[0].OpenShell != "0.1.3" {
+		t.Fatalf("disks = %+v", disks)
+	}
+	if stale := StaleVMDisks(cache, "0.1.5"); len(stale) != 1 || stale[0].Path != filepath.Join(cache, names[2]) {
+		t.Fatalf("stale on 0.1.5 = %+v", stale)
+	}
+	if staging := VMStaging(cache); len(staging) != 1 || staging[0].Path != filepath.Join(cache, names[3]) {
+		t.Fatalf("staging = %+v", staging)
+	}
+	if err := RemoveVMDisk(disks[1]); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveVMDisk(VMDisk{Path: filepath.Join(cache, names[4])}); err == nil {
+		t.Fatal("removed a directory that is not a prepared disk")
 	}
 }
 

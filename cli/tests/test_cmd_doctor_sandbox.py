@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -95,6 +96,103 @@ def test_disabled_sandboxes_are_one_skip_row_without_running_the_gateway(monkeyp
     assert "defenseclaw sandbox setup" in result.checks[0]["detail"]
 
 
+def test_prefetched_sandbox_probe_overlaps_earlier_checks_but_keeps_row_order(monkeypatch) -> None:
+    started, release = threading.Event(), threading.Event()
+    calls = []
+
+    def probe(binary):
+        calls.append(binary)
+        started.set()
+        assert release.wait(2)
+        return REPORT, ""
+
+    monkeypatch.setattr("defenseclaw.gateway.resolve_gateway_binary", lambda: "/fake/gateway")
+    monkeypatch.setattr(cmd_doctor, "sandbox_doctor_report", probe)
+    monkeypatch.setattr(cmd_doctor, "_json_mode", True)
+    pool, prefetched = cmd_doctor._prefetch_sandbox_report(_cfg(True))
+    assert pool is not None and prefetched is not None
+    try:
+        assert started.wait(2)
+        result = _DoctorResult()
+        result.set_section("scanners")
+        cmd_doctor._emit("pass", "Scanner", "ready", r=result)
+        assert [row["section"] for row in result.checks] == ["scanners"]
+        release.set()
+        result.set_section("sandbox")
+        _check_sandbox(_cfg(True), result, prefetched=prefetched)
+    finally:
+        release.set()
+        pool.shutdown(wait=True)
+
+    assert calls == ["/fake/gateway"]
+    assert [row["label"] for row in result.checks] == [
+        "Scanner",
+        "Platform",
+        "OpenShell CLI",
+        "Harness images",
+        "Shell wrappers",
+        "Odd",
+    ]
+
+
+def test_prefetched_sandbox_probe_rechecks_state_changed_before_sandbox_section(monkeypatch) -> None:
+    state = {"reachable": True}
+    sampled = threading.Event()
+    calls = []
+    state_reads = []
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            self._session = SimpleNamespace(close=lambda: None)
+
+        def sandbox_status(self):
+            state_reads.append(state["reachable"])
+            return {"available": state["reachable"]}
+
+        def list_sandboxes(self):
+            return [{"hooks_reachable": state["reachable"]}]
+
+    def probe(binary):
+        calls.append(binary)
+        reachable = state["reachable"]
+        sampled.set()
+        return ({"ok": reachable, "checks": [{
+            "id": "sandbox-hooks", "title": "Sandbox hooks",
+            "status": "pass" if reachable else "fail",
+            "detail": "hooks reachable" if reachable else "hooks unreachable",
+        }]}, "")
+
+    monkeypatch.setattr("defenseclaw.gateway.resolve_gateway_binary", lambda: "/fake/gateway")
+    monkeypatch.setattr("defenseclaw.gateway.OrchestratorClient", FakeClient)
+    monkeypatch.setattr(cmd_doctor, "sandbox_doctor_report", probe)
+    monkeypatch.setattr(cmd_doctor, "_gateway_api_host", lambda _cfg: "127.0.0.1")
+    monkeypatch.setattr(cmd_doctor, "_json_mode", True)
+    cfg = _cfg(True)
+    cfg.gateway = SimpleNamespace(api_port=18970, resolved_token=lambda: "token")
+    pool, prefetched = cmd_doctor._prefetch_sandbox_report(cfg)
+    assert pool is not None and prefetched is not None
+    try:
+        assert sampled.wait(2)
+        state["reachable"] = False  # An earlier configuration check sees the change.
+        result = _DoctorResult()
+        result.set_section("sandbox")
+        _check_sandbox(cfg, result, prefetched=prefetched)
+    finally:
+        pool.shutdown(wait=True)
+
+    assert calls == ["/fake/gateway", "/fake/gateway"]
+    assert state_reads == [True, False]
+    assert _rows(result) == [("fail", "Sandbox hooks", "doctor.sandbox.sandbox-hooks")]
+
+
+def test_prefetch_has_no_off_path_work(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "defenseclaw.gateway.resolve_gateway_binary",
+        lambda: pytest.fail("gateway resolved"),
+    )
+    assert cmd_doctor._prefetch_sandbox_report(_cfg(False)) == (None, None)
+
+
 def test_a_stand_in_config_never_reads_as_enabled(monkeypatch) -> None:
     from unittest.mock import MagicMock
 
@@ -114,12 +212,15 @@ def test_windows_reports_the_platform_limit(monkeypatch) -> None:
                                                "openshell.enabled has no effect here")
 
 
-def test_a_missing_gateway_fails_with_the_upgrade_hint(monkeypatch) -> None:
+def test_a_missing_gateway_fails_with_a_repair_that_reinstalls_at_the_current_version(monkeypatch) -> None:
     monkeypatch.setattr("defenseclaw.gateway.resolve_gateway_binary", lambda: None)
     result = _DoctorResult()
     _check_sandbox(_cfg(True), result)
     assert result.failed == 1
-    assert "defenseclaw upgrade" in result.checks[0]["remediation"]
+    remediation = result.checks[0]["remediation"]
+    # `defenseclaw upgrade` changes nothing when the install is already current.
+    assert "defenseclaw upgrade" not in remediation
+    assert "defenseclaw-upgrade.sh --yes" in remediation or "install command again" in remediation
 
 
 def test_each_go_check_becomes_one_row(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -233,6 +334,39 @@ def test_a_stopped_gateway_is_one_root_cause_and_unused_sandboxes_only_warn(tmp_
     }
     assert result.checks[4]["detail"].startswith("depends on: OpenShell gateway")
     assert result.failed == 0
+
+
+def test_the_upgrade_names_the_openshell_floor_and_doctor_still_fails(tmp_path: Path, monkeypatch) -> None:
+    # GAP-0059: an upgrade over OpenShell 0.1.3 with sandboxes on says what
+    # doctor's Gateway FAIL means and how to clear it.
+    refused = (
+        "OpenShell 0.1.3 runs no DefenseClaw sandbox: before 0.1.5 its network broker let a sandbox's "
+        "connections bypass the sandbox policy when it could not inspect them (NVIDIA/OpenShell#4494); "
+        "upgrade OpenShell to 0.1.5 in place"
+    )
+    fix = {"summary": "upgrade OpenShell to 0.1.5 in place", "command": "defenseclaw sandbox setup --install-openshell"}
+    binary = _gateway(tmp_path, json.dumps({"checks": [
+        {"id": "gateway-version", "title": "Gateway", "status": "fail", "detail": refused, "fix": fix},
+    ]}))
+    monkeypatch.setattr("defenseclaw.gateway.resolve_gateway_binary", lambda: binary)
+    assert cmd_doctor.openshell_floor_upgrade_notice(_cfg(True)) == (
+        f"Sandboxes: {refused}. Until then DefenseClaw starts no sandbox and `defenseclaw doctor` fails its "
+        "Gateway check. Stop running sandboxes first, then run: defenseclaw sandbox setup --install-openshell"
+    )
+    result = _DoctorResult()
+    _check_sandbox(_cfg(True), result)
+    assert [row["status"] for row in result.checks] == ["fail"]
+    assert cmd_doctor.openshell_floor_upgrade_notice(_cfg(False)) == ""
+
+    _gateway(tmp_path, json.dumps({"checks": [
+        {"id": "gateway-version", "title": "Gateway", "status": "fail", "detail": "the gateway is not answering: refused"},
+    ]}))
+    assert cmd_doctor.openshell_floor_upgrade_notice(_cfg(True)) == ""
+
+    install_sh = (Path(__file__).resolve().parents[2] / "scripts" / "install.sh").read_text(encoding="utf-8")
+    upgraded = install_sh.split('if [[ -n "${PREV_VERSION}" && "${REPAIR}" != true ]]; then', 1)[1].split("\nfi\n", 1)[0]
+    assert 'FLOOR_NOTICE="$(openshell_floor_notice)"' in upgraded
+    assert "openshell_floor_upgrade_notice as notice" in install_sh
 
 
 def test_local_policy_digest_refuses_untrusted_gateway(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -16,108 +16,25 @@ import pytest
 from defenseclaw import agent_selection
 from defenseclaw.commands import cmd_setup
 
-
-def test_openhands_protected_selection_roster_is_darwin_only(monkeypatch) -> None:
-    connectors = ("codex", "openhands", "amp")
-    monkeypatch.setattr(agent_selection.sys, "platform", "linux")
-    assert agent_selection.setup_agent_selection_connectors(connectors) == ("codex", "amp")
-    monkeypatch.setattr(agent_selection.sys, "platform", "darwin")
-    assert agent_selection.setup_agent_selection_connectors(connectors) == (
-        "codex",
-        "openhands",
-        "amp",
-    )
+from tests.os_view import os_view
 
 
-def test_darwin_setup_records_only_openhands_from_native_roster(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    selected = agent_selection.SetupAgentSelection(
-        connector="openhands",
-        executable="/usr/local/bin/openhands",
-        raw_version="OpenHands CLI 1.16.0",
-        normalized_version="1.16.0",
-        sha256="a" * 64,
-    )
-    captured: list[tuple[str, ...]] = []
-    monkeypatch.setattr(cmd_setup.platform_support, "host_os", lambda: "darwin")
-    monkeypatch.setattr(agent_selection.sys, "platform", "darwin")
+def test_codex_setup_rejects_versions_without_required_app_server_flag() -> None:
+    # Upstream rust-v0.135.0 has only --listen stdio://; rust-v0.136.0
+    # introduces the --stdio alias used by this connector's setup.
+    assert "0.136.0" in agent_selection.codex_setup_version_problem("codex-cli 0.124.0")
+    assert "0.136.0" in agent_selection.codex_setup_version_problem("codex-cli 0.135.0")
+    assert agent_selection.codex_setup_version_problem("codex-cli 0.136.0") == ""
 
-    def record(_data_dir, connectors):
-        captured.append(tuple(connectors))
-        return {"openhands": selected}, {}
 
-    sentinel = object()
-    monkeypatch.setattr(agent_selection, "record_setup_agent_selections", record)
-    monkeypatch.setattr(cmd_setup, "_validate_setup_agent_selection_receipt", lambda *_args, **_kwargs: sentinel)
 
-    result = cmd_setup._record_windows_setup_agent_selections(
-        tmp_path,
-        ("codex", "openhands", "amp"),
-    )
 
-    assert result is sentinel
-    assert captured == [("openhands",)]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Darwin POSIX executable custody")
-def test_darwin_openhands_selection_binds_stable_executable_and_full_chain(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    trusted = tmp_path / "trusted"
-    trusted.mkdir(mode=0o700)
-    executable = trusted / "openhands"
-    executable.write_text("#!/bin/sh\necho OpenHands CLI 1.16.0\n", encoding="utf-8")
-    executable.chmod(0o700)
-    monkeypatch.setattr(agent_selection.sys, "platform", "darwin")
-    monkeypatch.setattr(agent_selection, "_builtin_setup_trusted_prefixes", lambda: (str(trusted),))
-    monkeypatch.setattr(
-        agent_selection.agent_discovery,
-        "_ai_discovery_trust_config",
-        lambda _data_dir: (True, ()),
-    )
-    monkeypatch.setattr(agent_selection.agent_discovery, "_expand_bin_prefixes", lambda roots: tuple(roots))
-    monkeypatch.setattr(
-        agent_selection.agent_discovery,
-        "_binary_candidates_for_agent",
-        lambda *_args: (str(executable),),
-    )
-    monkeypatch.setattr(
-        agent_selection.agent_discovery,
-        "_version_for_agent_binary",
-        lambda *_args, **_kwargs: ("OpenHands CLI 1.16.0", ""),
-    )
-
-    selected = agent_selection._select_agent_executable(str(tmp_path / "state"), "openhands")
-
-    assert selected.executable == str(executable)
-    assert selected.sha256 == hashlib.sha256(executable.read_bytes()).hexdigest()
-    trusted.chmod(0o777)
-    assert not agent_selection.is_setup_trusted_binary(
-        str(executable),
-        str(tmp_path / "state"),
-        connector="openhands",
-    )
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Darwin POSIX executable custody")
-def test_darwin_openhands_uv_tool_symlink_refusal_names_trusted_paths_add(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    tool_bin = tmp_path / "uv" / "tools" / "openhands" / "bin"
-    tool_bin.mkdir(parents=True, mode=0o700)
-    (tool_bin / "openhands").write_text("#!/bin/sh\n", encoding="utf-8")
-    link = tmp_path / "bin" / "openhands"
-    link.parent.mkdir()
-    link.symlink_to(tool_bin / "openhands")
-    monkeypatch.setattr(agent_selection.sys, "platform", "darwin")
-    monkeypatch.setattr(agent_selection, "_setup_agent_candidates", lambda *_args: (str(link),))
-
-    with pytest.raises(OSError, match=r"trusted-paths add .*uv/tools/openhands/bin"):
-        agent_selection._select_agent_executable(str(tmp_path / "state"), "openhands")
 
 
 def test_selection_probe_gets_load_tolerant_budget_and_plain_timeout(tmp_path: Path, monkeypatch) -> None:
@@ -145,7 +62,7 @@ def test_selection_probe_gets_load_tolerant_budget_and_plain_timeout(tmp_path: P
         budgets.append(timeout)
         return subprocess.CompletedProcess([], 0, b"amp 1.0\n", b"")
 
-    monkeypatch.setattr(agent_selection.agent_discovery.subprocess, "run", fake_run)
+    monkeypatch.setattr(agent_selection.agent_discovery, "_run_probe", fake_run)
     agent_selection.agent_discovery._version_for_binary(str(executable), (), require_trusted_binary_paths=False)
     agent_selection.agent_discovery._version_for_binary(
         str(executable), (), require_trusted_binary_paths=False, timeout_override=90.0
@@ -161,7 +78,10 @@ def test_windows_cmd_shim_refusal_names_native_install_not_trusted_paths(tmp_pat
     shim.write_text("@echo off\n", encoding="utf-8")
     monkeypatch.setattr(agent_selection, "_setup_agent_candidates", lambda *_args: (str(shim),))
     monkeypatch.setattr(agent_selection, "is_setup_trusted_binary", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(agent_selection.os, "name", "nt")
+    monkeypatch.setattr(
+        agent_selection, "setup_binary_trust_problem", lambda *_args, **_kwargs: "it is a script wrapper, not a native .exe"
+    )
+    monkeypatch.setattr(agent_selection, "os", os_view("nt"))
 
     with pytest.raises(OSError, match="claude.cmd is a script wrapper") as raised:
         agent_selection._select_agent_executable(str(tmp_path / "state"), "claudecode")
@@ -170,32 +90,6 @@ def test_windows_cmd_shim_refusal_names_native_install_not_trusted_paths(tmp_pat
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Darwin POSIX executable custody")
-def test_darwin_openhands_selection_rejects_identity_change_during_hash(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    trusted = tmp_path / "trusted"
-    trusted.mkdir(mode=0o700)
-    executable = trusted / "openhands"
-    executable.write_text("#!/bin/sh\n", encoding="utf-8")
-    executable.chmod(0o700)
-    monkeypatch.setattr(agent_selection.sys, "platform", "darwin")
-    monkeypatch.setattr(agent_selection, "_setup_agent_candidates", lambda *_args: (str(executable),))
-    monkeypatch.setattr(agent_selection, "is_setup_trusted_binary", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(
-        agent_selection.agent_discovery,
-        "_version_for_agent_binary",
-        lambda *_args, **_kwargs: ("OpenHands CLI 1.16.0", ""),
-    )
-
-    def replace_during_hash(path: str) -> str:
-        Path(path).write_text("#!/bin/sh\necho replaced\n", encoding="utf-8")
-        return "b" * 64
-
-    monkeypatch.setattr(agent_selection, "stable_executable_sha256", replace_during_hash)
-
-    with pytest.raises(OSError, match="changed while hashing"):
-        agent_selection._select_agent_executable(str(tmp_path / "state"), "openhands")
 
 
 def test_record_setup_agent_selection_writes_short_lived_protected_receipt(
@@ -235,29 +129,6 @@ def test_record_setup_agent_selection_writes_short_lived_protected_receipt(
     assert expires_at - selected_at == agent_selection.SELECTION_LIFETIME
 
 
-def test_record_setup_agent_selection_accepts_omnigent(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    executable = tmp_path / "trusted" / "omnigent.exe"
-    executable.parent.mkdir()
-    executable.write_bytes(b"omnigent")
-    selected = agent_selection.SetupAgentSelection(
-        connector="omnigent",
-        executable=str(executable),
-        raw_version="omnigent 0.7.0",
-        normalized_version="0.7.0",
-        sha256=hashlib.sha256(b"omnigent").hexdigest(),
-    )
-    monkeypatch.setattr(agent_selection, "_select_agent_executable", lambda *_args: selected)
-
-    selections, errors = agent_selection.record_setup_agent_selections(
-        tmp_path / "state",
-        ["omnigent"],
-    )
-
-    assert selections == {"omnigent": selected}
-    assert errors == {}
 
 
 def test_record_setup_agent_selection_accepts_opencode(
@@ -556,13 +427,11 @@ def test_windows_opencode_exact_image_rejects_lookalike_reparse_and_unsafe_acl(
 @pytest.mark.parametrize(
     ("reported", "accepted"),
     [
-        ("opencode 1.18.10", True),
-        ("opencode 1.18.11", True),
-        ("opencode 1.18.19", True),
-        ("opencode 1.18.9", False),
-        ("opencode 1.18.20", True),
-        ("opencode 1.18.31", True),
-        ("opencode 1.19.0", True),
+        ("opencode 1.18.33", False),
+        ("opencode 2.0.0", True),
+        ("opencode 2.1.4", True),
+        ("opencode 2.2.0", True),
+        ("opencode 3.0.0", False),
     ],
 )
 def test_windows_opencode_selection_enforces_validated_version_floor(
@@ -681,59 +550,6 @@ def test_missing_exact_windows_opencode_image_preserves_receipt_and_skips_discov
     assert selections == {}
     assert "opencode" in errors
     assert receipt.read_bytes() == prior
-
-
-@pytest.mark.skipif(os.name == "nt", reason="POSIX executable fixture; Windows aliases are enumerated separately")
-@pytest.mark.parametrize("alias", ["omnigent.exe", "omni.exe"])
-def test_omnigent_official_alias_selection_records_real_version_and_digest(
-    tmp_path: Path,
-    monkeypatch,
-    alias: str,
-) -> None:
-    trusted = tmp_path / "trusted"
-    trusted.mkdir()
-    executable = trusted / alias
-    executable.write_text("#!/bin/sh\nprintf 'omnigent 0.7.0\\n'\n", encoding="utf-8")
-    executable.chmod(0o700)
-    monkeypatch.setattr(agent_selection, "_builtin_setup_trusted_prefixes", lambda: (str(trusted),))
-    monkeypatch.setattr(
-        agent_selection.agent_discovery,
-        "_binary_candidates_for_agent",
-        lambda *_args: (),
-    )
-
-    selected = agent_selection._select_agent_executable(str(tmp_path / "state"), "omnigent")
-
-    assert selected.executable == str(executable.resolve())
-    assert selected.raw_version == "omnigent 0.7.0"
-    assert selected.normalized_version == "0.7.0"
-    assert selected.sha256 == hashlib.sha256(executable.read_bytes()).hexdigest()
-
-
-def test_omnigent_candidate_aliases_do_not_raise_or_accept_unlisted_names(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    trusted = tmp_path / "trusted"
-    trusted.mkdir()
-    expected = {str(trusted / "omnigent.exe"), str(trusted / "omni.exe")}
-    for candidate in expected:
-        Path(candidate).write_bytes(b"MZ")
-    (trusted / "omnigent.cmd").write_text("@echo off\r\n", encoding="utf-8")
-    monkeypatch.setattr(agent_selection, "_builtin_setup_trusted_prefixes", lambda: (str(trusted),))
-    monkeypatch.setattr(
-        agent_selection.agent_discovery,
-        "_binary_candidates_for_agent",
-        lambda *_args: (),
-    )
-
-    candidates = agent_selection._setup_agent_candidates(
-        "omnigent",
-        agent_selection.agent_discovery._SPECS["omnigent"],
-        str(tmp_path / "state"),
-    )
-
-    assert set(candidates) == expected
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows updater-managed Hermes authority")
@@ -1320,17 +1136,68 @@ def test_windows_hermes_managed_executable_matches_the_gateway_order(tmp_path: P
     assert pick(str(local)) == str(venv)
 
 
-def test_windows_opencode_npm_image_needs_the_opencode_ai_package(tmp_path: Path, monkeypatch) -> None:
+def test_windows_opencode_npm_image_needs_the_v2_package(tmp_path: Path, monkeypatch) -> None:
     # npm OpenCode is admitted like the gateway admits it: the exact native
     # image under the user's npm root, whose package.json names opencode-ai.
     roaming = tmp_path / "Roaming"
     monkeypatch.setattr(agent_selection, "_windows_known_folder", lambda _identifier: str(roaming))
     image = Path(agent_selection._windows_opencode_npm_executable())
-    assert image == roaming / "npm" / "node_modules" / "opencode-ai" / "bin" / "opencode.exe"
+    assert image == roaming / "npm" / "node_modules" / "@opencode" / "cli" / "bin" / "opencode.exe"
     image.parent.mkdir(parents=True)
     image.write_bytes(b"native")
     manifest = image.parent.parent / "package.json"
     manifest.write_text('{"name": "opencode-lookalike"}', encoding="utf-8")
     assert not agent_selection._opencode_npm_package_identity_verified(str(image))
-    manifest.write_text('{"name": "opencode-ai"}', encoding="utf-8")
+    manifest.write_text('{"name": "@opencode/cli"}', encoding="utf-8")
     assert agent_selection._opencode_npm_package_identity_verified(str(image))
+
+
+def test_windows_opencode_v2_npm_image_needs_scoped_package_identity(tmp_path: Path, monkeypatch) -> None:
+    roaming = tmp_path / "Roaming"
+    monkeypatch.setattr(agent_selection, "_windows_known_folder", lambda _identifier: str(roaming))
+    image = Path(agent_selection._windows_opencode_npm_executable())
+    assert image == roaming / "npm" / "node_modules" / "@opencode" / "cli" / "bin" / "opencode.exe"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"native")
+    manifest = image.parent.parent / "package.json"
+    for name, allowed in [("opencode-ai", False), ("@opencode/lookalike", False), ("@opencode/cli", True)]:
+        manifest.write_text(json.dumps({"name": name}))
+        assert agent_selection._opencode_npm_package_identity_verified(str(image)) is allowed
+
+
+def test_agent_that_ran_and_failed_its_probe_gets_the_runtime_on_path_step(tmp_path: Path, monkeypatch) -> None:
+    # GAP-2479: a found codex.exe whose version probe exited 2 was called
+    # "not installed" by setup, and selection stopped at the bare exit code.
+    executable = tmp_path / "codex.exe"
+    executable.write_text("", encoding="utf-8")
+    monkeypatch.setattr(agent_selection, "_setup_agent_candidates", lambda *_args: (str(executable),))
+    monkeypatch.setattr(agent_selection, "is_setup_trusted_binary", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        agent_selection.agent_discovery, "_version_for_agent_binary", lambda *_args, **_kwargs: ("", "version probe exited 2")
+    )
+    with pytest.raises(OSError, match=r"version probe exited 2; the agent did not run: .*putting its runtime on PATH"):
+        agent_selection._select_agent_executable(str(tmp_path / "state"), "codex")
+
+    warnings: list[str] = []
+    errors: list[str] = []
+    monkeypatch.setattr(cmd_setup.ux, "warn", warnings.append)
+    monkeypatch.setattr(cmd_setup.ux, "err", errors.append)
+    signal = SimpleNamespace(version="", installed=False, error=f"{executable}: version probe exited 2", binary_path="")
+    discovery = SimpleNamespace(agents={"codex": signal})
+    assert cmd_setup._check_connector_version_supported_for_setup(
+        "codex", mode="observe", emit=True, data_dir=str(tmp_path), _discovery=discovery
+    )
+    assert any("did not run when setup read its version" in w and "runtime on PATH" in w for w in warnings), warnings
+    assert not any("not installed" in w for w in warnings), warnings
+    cmd_setup._check_connector_version_supported_for_setup(
+        "codex", mode="action", emit=True, data_dir=str(tmp_path), _discovery=discovery
+    )
+    assert not any("not detected locally" in e for e in errors), errors
+
+    # An agent discovery did not find at all keeps the not-installed line.
+    warnings.clear()
+    missing = SimpleNamespace(agents={"codex": SimpleNamespace(version="", installed=False, error="", binary_path="")})
+    assert cmd_setup._check_connector_version_supported_for_setup(
+        "codex", mode="observe", emit=True, data_dir=str(tmp_path), _discovery=missing
+    )
+    assert any("agent is not installed" in w for w in warnings), warnings

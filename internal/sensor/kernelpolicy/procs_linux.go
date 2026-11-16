@@ -14,7 +14,9 @@ package kernelpolicy
 
 import (
 	"bytes"
+	"encoding/binary"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -70,6 +72,7 @@ func ScanProcs(procRoot string, enrolled func(uid int) bool) ([]Proc, error) {
 		if exe, err := os.Readlink(filepath.Join(dir, "exe")); err == nil {
 			p.Exe = strings.TrimSuffix(exe, " (deleted)")
 		}
+		p.Launch = readExecPath(dir)
 		if cwd, err := os.Readlink(filepath.Join(dir, "cwd")); err == nil {
 			p.Cwd = cwd
 		}
@@ -84,6 +87,45 @@ func ScanProcs(procRoot string, enrolled func(uid int) bool) ([]Proc, error) {
 		out = append(out, p)
 	}
 	return out, nil
+}
+
+// readExecPath reads AT_EXECFN, which the kernel places in the process's
+// auxiliary vector at exec. argv[0] can differ from the executable name and
+// cannot establish whether a matchBinaries selector marked the process.
+func readExecPath(dir string) string {
+	auxv, ok := readSmall(filepath.Join(dir, "auxv"), 4096)
+	if !ok {
+		return ""
+	}
+	word := strconv.IntSize / 8
+	for i := 0; i+2*word <= len(auxv); i += 2 * word {
+		var tag, ptr uint64
+		if word == 8 {
+			tag = binary.NativeEndian.Uint64(auxv[i:])
+			ptr = binary.NativeEndian.Uint64(auxv[i+word:])
+		} else {
+			tag = uint64(binary.NativeEndian.Uint32(auxv[i:]))
+			ptr = uint64(binary.NativeEndian.Uint32(auxv[i+word:]))
+		}
+		if tag == 0 {
+			break
+		}
+		if tag != 31 || ptr == 0 || ptr > math.MaxInt64 {
+			continue
+		}
+		mem, err := os.Open(filepath.Join(dir, "mem"))
+		if err != nil {
+			return ""
+		}
+		buf := make([]byte, maxBinaryLen+1)
+		n, _ := mem.ReadAt(buf, int64(ptr))
+		_ = mem.Close()
+		if end := bytes.IndexByte(buf[:n], 0); end > 0 {
+			return string(buf[:end])
+		}
+		return ""
+	}
+	return ""
 }
 
 func readSmall(path string, limit int64) ([]byte, bool) {

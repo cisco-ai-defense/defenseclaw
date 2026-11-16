@@ -8,7 +8,6 @@ package posixacl
 import (
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 )
 
@@ -28,71 +27,22 @@ type View struct {
 	Groups  []Entry
 }
 
-type Reader interface {
-	Read(path string, mode os.FileMode) (View, error)
+// NamedUserAllows reports the effective permission of a named user entry.
+// Such an entry takes precedence over the owning group and other classes.
+func (v View) NamedUserAllows(uid int, want uint16) (found, allowed bool) {
+	if !v.Present {
+		return false, false
+	}
+	for _, entry := range v.Users {
+		if entry.ID == uid {
+			return true, entry.Perm&v.Mask&want == want
+		}
+	}
+	return false, false
 }
 
-// ParseGetfacl parses the numeric, comment-free output of getfacl -cpn.
-func ParseGetfacl(output string) (View, error) {
-	v := View{Present: true, Mask: 7}
-	seen := map[string]bool{}
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(strings.SplitN(line, "#", 2)[0])
-		if line == "" {
-			continue
-		}
-		if strings.HasPrefix(line, "default:") {
-			continue
-		}
-		parts := strings.Split(line, ":")
-		if len(parts) != 3 || len(parts[2]) != 3 {
-			return View{}, fmt.Errorf("invalid getfacl entry %q", line)
-		}
-		var perm uint16
-		for i, c := range parts[2] {
-			if c == rune("rwx"[i]) {
-				perm |= 4 >> i
-			} else if c != '-' {
-				return View{}, fmt.Errorf("invalid getfacl permission %q", line)
-			}
-		}
-		if parts[1] == "" {
-			if seen[parts[0]] {
-				return View{}, fmt.Errorf("duplicate getfacl entry %q", line)
-			}
-			seen[parts[0]] = true
-			switch parts[0] {
-			case "user":
-				v.Owner = perm
-			case "group":
-				v.Group = perm
-			case "other":
-				v.Other = perm
-			case "mask":
-				v.Mask = perm
-			default:
-				return View{}, fmt.Errorf("invalid getfacl entry %q", line)
-			}
-			continue
-		}
-		id, err := strconv.Atoi(parts[1])
-		if err != nil || id < 0 {
-			return View{}, fmt.Errorf("invalid getfacl identity %q", line)
-		}
-		e := Entry{Kind: parts[0], ID: id, Perm: perm}
-		switch parts[0] {
-		case "user":
-			v.Users = append(v.Users, e)
-		case "group":
-			v.Groups = append(v.Groups, e)
-		default:
-			return View{}, fmt.Errorf("invalid getfacl entry %q", line)
-		}
-	}
-	if !seen["user"] || !seen["group"] || !seen["other"] {
-		return View{}, fmt.Errorf("incomplete getfacl output")
-	}
-	return v, nil
+type Reader interface {
+	Read(path string, mode os.FileMode) (View, error)
 }
 
 // Allows follows the POSIX ACL precedence: owner, named user, all matching
@@ -141,17 +91,18 @@ func (v View) Denied(want uint16) string {
 	}
 	var denied []string
 	if v.Group&v.Mask&want != want {
-		denied = append(denied, "group::"+rwx(v.Group&v.Mask))
+		denied = append(denied, "group::"+RWX(v.Group&v.Mask))
 	}
 	for _, e := range append(append([]Entry(nil), v.Users...), v.Groups...) {
 		if e.Perm&v.Mask&want != want {
-			denied = append(denied, fmt.Sprintf("%s:%d:%s", e.Kind, e.ID, rwx(e.Perm&v.Mask)))
+			denied = append(denied, fmt.Sprintf("%s:%d:%s", e.Kind, e.ID, RWX(e.Perm&v.Mask)))
 		}
 	}
 	return strings.Join(denied, ", ")
 }
 
-func rwx(perm uint16) string {
+// RWX spells perm the way getfacl does (r-x).
+func RWX(perm uint16) string {
 	out := []byte("---")
 	for i, c := range "rwx" {
 		if perm&(4>>i) != 0 {

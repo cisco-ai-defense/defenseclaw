@@ -92,6 +92,7 @@ type AssetTypePolicy struct {
 
 const (
 	registryEmptyActionDeny  = "deny"
+	registryEmptyActionWarn  = "warn"
 	registryEmptyActionAllow = "allow"
 )
 
@@ -141,6 +142,10 @@ type AssetPolicyInput struct {
 	Transport      string
 	RuntimeSurface string
 
+	// ArgsCut says Args is the start of a longer list: an allow that names
+	// the complete argument list cannot match it.
+	ArgsCut bool
+
 	// DeclaredNames are other names the asset gives itself, such as the
 	// name in a skill's SKILL.md frontmatter. A denied rule matches Name
 	// or any of them, so a copy of a denied skill in a folder with another
@@ -158,11 +163,19 @@ type AssetPolicyInput struct {
 }
 
 type AssetPolicyDecision struct {
-	Enabled            bool
-	Mode               string
-	Action             string // allow | block
-	RawAction          string // allow | block
-	WouldBlock         bool
+	Enabled           bool
+	Mode              string
+	Action            string // allow | block
+	RawAction         string // allow | block
+	WouldBlock        bool
+	RetryAfterSeconds int // bounded admission retry guidance, zero for other decisions
+	// ScanIssue says why a server whose admission scan failed cannot be
+	// scanned (launcher | address), "" when the definition does not show it.
+	ScanIssue string
+	// ScanNextStep says how the user can use such a server: the CLI allow
+	// command, the administrator's policy (a managed device refuses the
+	// command), or only where to read the cause. See MCPAdmissionNextStep.
+	ScanNextStep       string
 	Reason             string
 	Source             string
 	RegistryStatus     string // registered | unregistered | unknown
@@ -295,8 +308,16 @@ func (c *Config) EvaluateAssetPolicy(in AssetPolicyInput) AssetPolicyDecision {
 		// Registry is required but empty. Fail closed by default so that
 		// the absence of approved assets does not silently downgrade to
 		// allow-all. Operators can opt out via registry_empty_action="allow".
-		if normalizeRegistryEmptyAction(p.RegistryEmptyAction) == registryEmptyActionDeny {
+		// warn lets the asset through to the type default but, unlike
+		// allow, leaves a would-block decision that names the empty
+		// registry, so the call has an audit row (p0 GAP-0941).
+		switch normalizeRegistryEmptyAction(p.RegistryEmptyAction) {
+		case registryEmptyActionDeny:
 			return assetPolicyViolation(out, mode, fmt.Sprintf("%s %q is blocked because asset policy requires a registry but none is configured", targetType, name), "registry-required-empty")
+		case registryEmptyActionWarn:
+			if normalizeAssetDefault(p.Default) != "deny" {
+				return assetPolicyViolation(out, AssetPolicyModeObserve, fmt.Sprintf("%s %q is allowed with a warning: asset policy requires a registry but none is configured (registry_empty_action: warn)", targetType, name), "registry-required-empty-warn")
+			}
 		}
 	}
 	if normalizeAssetDefault(p.Default) == "deny" {
@@ -511,17 +532,98 @@ func (c *Config) UnenforcedAssetPolicyRules(watched func(targetType string) bool
 	return out
 }
 
+// EmptyRequiredAssetRegistries describes, per asset type the host enforces
+// (see UnenforcedAssetPolicyRules for watched), a registry_required whose
+// registry is empty with registry_empty_action deny: in action mode every
+// asset of the type the allowed list does not admit is refused until a
+// registry sync fills the catalog; in observe mode each is admitted and
+// logged as a would-block. An administrator who pushed the requirement
+// before the catalog saw only the refusals; ensure, status, verify and the
+// gateway log say so (p0 GAP-0940). Secure Client keeps main (issue #1092).
+func (c *Config) EmptyRequiredAssetRegistries(watched func(targetType string) bool) []string {
+	if c == nil || !c.AssetPolicy.Enabled || c.SecureClientIntegration() {
+		return nil
+	}
+	connectors := []string{""}
+	for name := range c.AssetPolicy.Connectors {
+		connectors = append(connectors, name)
+	}
+	sort.Strings(connectors[1:])
+	var out []string
+	for _, targetType := range []string{"skill", "plugin", "mcp"} {
+		detection, ok := c.AssetRuntimeDetectionFor(targetType)
+		if !ok || (!detection.Enabled && (watched == nil || !watched(targetType))) {
+			continue
+		}
+		refusesAll := func(connector string) bool {
+			p, ok := c.assetPolicyFor(connector, targetType)
+			return ok && p.RegistryRequired && !assetRegistryConfigured(p.Registry) &&
+				normalizeRegistryEmptyAction(p.RegistryEmptyAction) == registryEmptyActionDeny
+		}
+		mode := func(connector string) string {
+			return normalizeAssetMode(c.EffectiveAssetPolicyModeForConnector(connector))
+		}
+		// One line per mode: the global scope (every connector but those
+		// that differ) and the connectors whose own policy refuses.
+		var modes []string
+		scoped := map[string][]string{}
+		everyone := refusesAll("")
+		if everyone {
+			modes = append(modes, mode(""))
+		}
+		var exempt []string
+		for _, connector := range connectors[1:] {
+			refuses, m := refusesAll(connector), mode(connector)
+			switch {
+			case everyone && refuses && m == mode(""):
+			case refuses:
+				if everyone {
+					exempt = append(exempt, connector)
+				}
+				if _, seen := scoped[m]; !seen {
+					modes = append(modes, m)
+				}
+				scoped[m] = append(scoped[m], connector)
+			case everyone:
+				exempt = append(exempt, connector)
+			}
+		}
+		except := ""
+		if p, ok := c.assetPolicyFor("", targetType); ok && len(p.Allowed) > 0 {
+			except = fmt.Sprintf(" not on asset_policy.%s.allowed", targetType)
+		}
+		for i, m := range modes {
+			who := ""
+			if everyone && i == 0 {
+				if len(exempt) > 0 {
+					who = " (connector " + strings.Join(exempt, ", ") + " aside)"
+				}
+			} else {
+				who = " for connector " + strings.Join(scoped[m], ", ")
+			}
+			effect := "refused"
+			if m != AssetPolicyModeAction {
+				effect = "admitted but logged as a would-block (observe mode)"
+			}
+			out = append(out, fmt.Sprintf("asset_policy.%[1]s.registry is empty and registry_required is on, so every %[1]s%[2]s is "+
+				"%[3]s%[4]s until a registry sync fills it; run `defenseclaw registry sync`, or set "+
+				"asset_policy.%[1]s.registry_empty_action: warn to allow them with a warning meanwhile", targetType, except, effect, who))
+		}
+	}
+	return out
+}
+
 func (p AssetTypePolicy) withDefaults(runtime bool) AssetTypePolicy {
 	if strings.TrimSpace(p.Default) == "" {
 		p.Default = "allow"
 	}
-	if runtime {
-		if p.RuntimeDetection.UnknownTerminalMCP == "" {
-			p.RuntimeDetection.UnknownTerminalMCP = AssetPolicyModeObserve
-		}
-		// Keep zero-value compatibility: when the operator did not specify
-		// runtime_detection, the intended v1 default is enabled.
-		if !p.RuntimeDetection.Enabled && !p.RuntimeDetection.TerminalCommands && p.RuntimeDetection.UnknownTerminalMCP == AssetPolicyModeObserve {
+	if runtime && p.RuntimeDetection.UnknownTerminalMCP == "" {
+		// A zero-value struct that never went through config load (the
+		// loader always fills unknown_terminal_mcp): the default is on. A
+		// loaded config that sets enabled and terminal_commands to false is
+		// the operator's off switch and is kept (GAP-0947).
+		p.RuntimeDetection.UnknownTerminalMCP = AssetPolicyModeObserve
+		if !p.RuntimeDetection.Enabled && !p.RuntimeDetection.TerminalCommands {
 			p.RuntimeDetection.Enabled = true
 			p.RuntimeDetection.TerminalCommands = true
 		}
@@ -562,12 +664,45 @@ func registryStatus(rules []AssetPolicyRule, in AssetPolicyInput) string {
 	return "unregistered"
 }
 
-// canonicalMCPTransport folds the names of one transport together, so a
+// AssetRegistryPinsUnknown lists what a registry rule naming in.Name pins
+// (connector, url, command, args, transport) that in leaves empty. A dry run
+// given a name only cannot tell whether that rule admits the asset: the
+// runtime matches the asset's own definition (registry sync pins MCP servers
+// to it).
+func (c *Config) AssetRegistryPinsUnknown(in AssetPolicyInput) []string {
+	if c == nil {
+		return nil
+	}
+	p, ok := c.assetPolicyFor(in.Connector, in.TargetType)
+	if !ok {
+		return nil
+	}
+	var out []string
+	add := func(field string, unknown bool) {
+		if unknown && !slices.Contains(out, field) {
+			out = append(out, field)
+		}
+	}
+	shapeless := strings.TrimSpace(in.URL) == "" && strings.TrimSpace(in.Command) == ""
+	for _, rule := range p.Registry {
+		if rule.Name == "" || !sameRuleName(rule.Name, in.Name, !c.SecureClientIntegration()) {
+			continue
+		}
+		add("connector", rule.Connector != "" && strings.TrimSpace(in.Connector) == "")
+		add("url", rule.URL != "" && strings.TrimSpace(in.URL) == "")
+		add("command", rule.Command != "" && strings.TrimSpace(in.Command) == "")
+		add("args", len(rule.ArgsPrefix) > 0 && len(in.Args) == 0)
+		add("transport", rule.Transport != "" && strings.TrimSpace(in.Transport) == "" && shapeless)
+	}
+	return out
+}
+
+// CanonicalMCPTransport folds the names of one transport together, so a
 // registry rule pinned to streamable-http admits the same URL server added as
 // http or with no transport at all (GAP-2122). An empty transport takes the one
 // the server's shape implies: http for a URL, stdio for a command. sse and the
 // other transports stay distinct.
-func canonicalMCPTransport(transport, url, command string) string {
+func CanonicalMCPTransport(transport, url, command string) string {
 	t := strings.ToLower(strings.TrimSpace(transport))
 	switch t {
 	case "http", "streamable-http", "streamable_http", "streamablehttp":
@@ -603,7 +738,13 @@ func assetRuleMatches(rule AssetPolicyRule, in AssetPolicyInput) bool {
 	}
 	if rule.URL != "" {
 		hasConstraint = true
-		if strings.TrimSpace(rule.URL) != strings.TrimSpace(in.URL) {
+		ruleURL, inURL := strings.TrimSpace(rule.URL), strings.TrimSpace(in.URL)
+		if !in.legacyConnectorMatch {
+			// The address the URL names, not its spelling (CanonicalMCPURL).
+			// Secure Client keeps the exact text.
+			ruleURL, inURL = CanonicalMCPURL(ruleURL), CanonicalMCPURL(inURL)
+		}
+		if ruleURL != inURL {
 			return false
 		}
 	}
@@ -626,7 +767,7 @@ func assetRuleMatches(rule AssetPolicyRule, in AssetPolicyInput) bool {
 	}
 	if rule.Transport != "" {
 		hasConstraint = true
-		if canonicalMCPTransport(rule.Transport, "", "") != canonicalMCPTransport(in.Transport, in.URL, in.Command) {
+		if CanonicalMCPTransport(rule.Transport, "", "") != CanonicalMCPTransport(in.Transport, in.URL, in.Command) {
 			return false
 		}
 	}
@@ -683,15 +824,16 @@ func normalizeAssetDefault(value string) string {
 // approved" rather than silently relaxing the requirement. Operators
 // must explicitly opt into "allow" to get fall-through-to-default.
 //
-// "warn" resolves to allow (fall-through-to-default), matching the Python
-// admission preview (cli/defenseclaw/enforce/admission.py
-// _normalize_registry_empty_action). This closes the prior Python↔Go
-// divergence where the gateway collapsed "warn" into "deny" — both sides now
-// treat "warn" as "log-but-don't-block at the empty-registry gate".
+// "warn" does not block at the empty-registry gate either, but leaves a
+// would-block decision (EvaluateAssetPolicy), as the Python admission preview
+// (cli/defenseclaw/enforce/admission.py _normalize_registry_empty_action)
+// does.
 func normalizeRegistryEmptyAction(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "allow", "warn":
+	case "allow":
 		return registryEmptyActionAllow
+	case "warn":
+		return registryEmptyActionWarn
 	case "deny", "block", "":
 		return registryEmptyActionDeny
 	default:

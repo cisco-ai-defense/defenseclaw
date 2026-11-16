@@ -22,8 +22,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -33,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	publicschemas "github.com/defenseclaw/defenseclaw/schemas"
 )
 
@@ -58,6 +61,9 @@ type configV8WireFailure struct {
 	ConfigVersion int    `json:"config_version"`
 	Path          string `json:"path"`
 	Reason        string `json:"reason"`
+	// Message is the refusal in plain words on a standalone managed host,
+	// as `config validate` prints it there.
+	Message string `json:"message,omitempty"`
 }
 
 // config-v8 is a machine-facing bridge for the Python operator CLI. Keeping
@@ -98,8 +104,9 @@ var configV8ValidateCmd = &cobra.Command{
 			PlanDigest:        loaded.compiled.Plan.Digest(),
 			NetworkValidation: "offline_syntax_and_literal_policy_only",
 			Valid:             &valid,
-			Warnings:          gateway.ConfigHILTWarnings(loaded.runtime),
 		}
+		result.Warnings = append(gateway.ConfigHILTWarnings(loaded.runtime), configV8InstalledAdvisories(loaded)...)
+		result.Warnings = append(result.Warnings, configValidateManagedStandaloneWarnings(loaded)...)
 		encoder := json.NewEncoder(cmd.OutOrStdout())
 		encoder.SetEscapeHTML(false)
 		return encoder.Encode(result)
@@ -111,18 +118,80 @@ var configV8ValidateCmd = &cobra.Command{
 // references load as the gateway's reload needs, and every jsonl destination
 // is a file the gateway may write (GAP-0890). It changes nothing.
 func checkConfigV8Candidate(path, dataDir string) (*loadedConfigV8File, error) {
-	loaded, err := loadConfigV8File(path, dataDir)
+	loaded, err := loadConfigV8FileWithCredentials(path, dataDir, configValidateCredentialsDir(path))
 	if err != nil {
 		return nil, err
+	}
+	if loaded.runtime.StandaloneEnterprise() {
+		if err := config.ValidateManagedGuardrailProxyBind(loaded.runtime); err != nil {
+			return nil, &configV8SourceError{version: loaded.runtime.ConfigVersion, err: &config.V8SemanticError{
+				Path: "$.guardrail.host", Summary: "managed guardrail proxy must bind to loopback",
+				Expected: "localhost or a literal loopback address",
+				Action:   "set guardrail.host to 127.0.0.1",
+			}}
+		}
 	}
 	err = config.CheckCandidateAssets(loaded.runtime)
 	if err == nil {
 		err = checkJSONLDestinationPaths(loaded.compiled, "")
 	}
+	if err == nil && !configV8IsInstalledConfig(loaded.source) {
+		// The managed lifecycle refuses these literals in a new candidate
+		// (ensure --config, Setup, bundle apply); validate must agree, or an
+		// administrator is told a file is valid that ensure then refuses
+		// (GAP-0138). The installed config keeps loading for the upgrade
+		// path; configV8InstalledAdvisories reports it instead.
+		err = config.ValidateManagedStandaloneLiteralCandidate(loaded.runtime, loaded.raw)
+	}
+	if err == nil {
+		err = configValidateManagedStandaloneLayout(loaded)
+	}
 	if err != nil {
 		return nil, &configV8SourceError{version: loaded.runtime.ConfigVersion, err: err}
 	}
 	return loaded, nil
+}
+
+// configV8IsInstalledConfig reports whether source is the config.yaml this
+// host runs: the per-user default or the standalone enterprise layout's.
+func configV8IsInstalledConfig(source string) bool {
+	candidates := []string{config.ConfigPath()}
+	if layout, err := managed.StandaloneLayoutFor(runtime.GOOS); err == nil && layout.ConfigPath != "" {
+		candidates = append(candidates, layout.ConfigPath)
+	}
+	resolved := configV8ResolvedPath(source)
+	for _, candidate := range candidates {
+		if resolved != "" && resolved == configV8ResolvedPath(candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func configV8ResolvedPath(path string) string {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return ""
+	}
+	if real, err := filepath.EvalSymlinks(absolute); err == nil {
+		return real
+	}
+	return filepath.Clean(absolute)
+}
+
+// configV8InstalledAdvisories names the literals an installed managed
+// standalone config still carries from 1.0.2, the same advisory enterprise
+// status and verify print. It never names a value.
+func configV8InstalledAdvisories(loaded *loadedConfigV8File) []string {
+	if loaded == nil || !configV8IsInstalledConfig(loaded.source) {
+		return nil
+	}
+	paths := config.ManagedStandaloneUpgradeAdvisories(loaded.runtime, loaded.raw)
+	if len(paths) == 0 {
+		return nil
+	}
+	return []string{"managed_literal_credentials: installed config uses literals at " + strings.Join(paths, ", ") +
+		"; use {credential: NAME} or {env: NAME} where supported; webhook URLs remain supported"}
 }
 
 func configV8ValidationFailure(err error) configV8WireFailure {
@@ -139,11 +208,25 @@ func configV8ValidationFailure(err error) configV8WireFailure {
 	var secretError *config.V8SecretReferenceError
 	var profileError *config.UnknownGuardrailProfileError
 	var settingError *config.SettingError
+	var pathError *config.V8ConfigPathError
 	var sourceError *configV8SourceError
+	var readError *configV8ReadError
 	if errors.As(err, &sourceError) && sourceError.version >= config.ObservabilityV8ConfigVersion {
 		result.ConfigVersion = sourceError.version
 	}
 	switch {
+	case errors.As(err, &readError):
+		result.Reason = readError.reason()
+	case errors.As(err, &pathError):
+		result.Path = configV8DiagnosticPath("$." + pathError.Path)
+		if errors.Is(err, fs.ErrPermission) {
+			result.Reason = configV8DiagnosticReason("config_path_inspection_denied",
+				"the account running validation cannot inspect this configured path", "",
+				"run config validate as an administrator on a managed host, or as an account with access to the path")
+		} else {
+			result.Reason = configV8DiagnosticReason("config_path_inspection_failed",
+				"cannot inspect configured path", "", "check the path and its filesystem access")
+		}
 	case errors.As(err, &settingError):
 		// A runtime-loader refusal of a profile, its sandbox section or the
 		// openshell section: name the setting and the rule, so the fix is to
@@ -169,6 +252,9 @@ func configV8ValidationFailure(err error) configV8WireFailure {
 			)
 		}
 	case errors.As(err, &yamlError):
+		if sourceError == nil && yamlError.ConfigVersion >= config.ObservabilityV8ConfigVersion {
+			result.ConfigVersion = yamlError.ConfigVersion
+		}
 		result.Path = configV8DiagnosticPath(yamlError.Path)
 		result.Reason = configV8DiagnosticReason(string(yamlError.Code), yamlError.Summary, "", yamlError.Action)
 	case errors.As(err, &schemaError):
@@ -176,6 +262,10 @@ func configV8ValidationFailure(err error) configV8WireFailure {
 			result.ConfigVersion = schemaError.Version
 		}
 		result.Path = configV8DiagnosticPath(schemaError.Path)
+		if retired, ok := schemaError.RetiredKeyMessage(); ok {
+			result.Reason = configV8DiagnosticReason("config_schema_invalid", retired, "", "")
+			break
+		}
 		detail := schemaError.Expected
 		if schemaError.Suggestion != "" {
 			if detail != "" {
@@ -205,6 +295,41 @@ type configV8SourceError struct {
 
 func (e *configV8SourceError) Error() string { return e.err.Error() }
 func (e *configV8SourceError) Unwrap() error { return e.err }
+
+// configV8ReadError is a config file that could not be read at all: not a
+// file that failed to compile, so validate names the read problem and the
+// path instead of "could not be compiled safely" (GAP-0605).
+type configV8ReadError struct {
+	path string
+	err  error
+}
+
+func (e *configV8ReadError) Error() string { return fmt.Sprintf("read config %s: %v", e.path, e.err) }
+func (e *configV8ReadError) Unwrap() error { return e.err }
+
+// diagnostic is the read failure's code, what happened and the next step.
+func (e *configV8ReadError) diagnostic() (code, summary, action string) {
+	switch {
+	case errors.Is(e.err, fs.ErrNotExist):
+		return "config_not_found", "no file exists at this path", "check the path, or pass the config.yaml to check"
+	case errors.Is(e.err, fs.ErrPermission):
+		return "config_unreadable", "this account may not read the file",
+			"run the command as an account that can read it, such as an administrator"
+	}
+	return "config_unreadable", "the file could not be read", "check that the path names a readable file"
+}
+
+// reason is the bounded diagnostic of the read failure.
+func (e *configV8ReadError) reason() string {
+	code, summary, action := e.diagnostic()
+	return configV8DiagnosticReason(code, summary, "", action)
+}
+
+// sentence is the read failure in plain words, naming the file as shown.
+func (e *configV8ReadError) sentence(shown string) string {
+	_, summary, action := e.diagnostic()
+	return "cannot read " + shown + ": " + summary + "; " + action
+}
 
 // configV8SourceVersion is the config_version a parsed document declares, or
 // the compiler's own when it declares none that reads as an integer.
@@ -431,6 +556,7 @@ type loadedConfigV8File struct {
 	document       *config.V8YAMLDocument
 	runtime        *config.Config
 	source         string
+	sourceRaw      []byte
 	raw            []byte
 	gatewayAPIPort int
 }
@@ -443,7 +569,16 @@ func loadConfigV8File(path, defaultDataDir string) (*loadedConfigV8File, error) 
 // credential references from credentialsDir; empty derives it from a
 // standalone source's own path.
 func loadConfigV8FileWithCredentials(path, defaultDataDir, credentialsDir string) (*loadedConfigV8File, error) {
-	return loadConfigV8Source(path, defaultDataDir, credentialsDir, false)
+	return loadConfigV8SourceView(path, defaultDataDir, credentialsDir, false, nil)
+}
+
+// loadManagedCandidateV8File is loadConfigV8FileWithCredentials for a
+// managed config candidate: a config_version 8 file is checked through
+// config.V8ManagedChecksView, as the Linux and macOS lifecycle checks it, so
+// the top-level update_check the 1.0.x CLI wrote, which the migration moves to
+// update.check, is not refused as an unknown setting (rel-1-0-2 GAP-0145).
+func loadManagedCandidateV8File(path, defaultDataDir, credentialsDir string) (*loadedConfigV8File, error) {
+	return loadConfigV8SourceView(path, defaultDataDir, credentialsDir, false, config.V8ManagedChecksView)
 }
 
 // loadConfigV8Source loads and strict-parses the file. With migrate, a
@@ -460,6 +595,12 @@ func loadConfigV8FileWithCredentials(path, defaultDataDir, credentialsDir string
 // the caller would decode again. Each decode is a full pass over every
 // guardrail profile (GAP-0276).
 func loadConfigV8Source(path, defaultDataDir, credentialsDir string, migrate bool) (loaded *loadedConfigV8File, err error) {
+	return loadConfigV8SourceView(path, defaultDataDir, credentialsDir, migrate, nil)
+}
+
+// loadConfigV8SourceView is loadConfigV8Source with the bytes it checks read
+// through view (nil: as read).
+func loadConfigV8SourceView(path, defaultDataDir, credentialsDir string, migrate bool, view func([]byte) []byte) (loaded *loadedConfigV8File, err error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		path = config.ConfigPath()
@@ -472,6 +613,10 @@ func loadConfigV8Source(path, defaultDataDir, credentialsDir string, migrate boo
 	if err != nil {
 		return nil, err
 	}
+	if view != nil {
+		raw = view(raw)
+	}
+	sourceRaw := append([]byte(nil), raw...)
 	legacyV8 := migrate && config.NeedsMigrationV9(raw)
 	if migrate {
 		if raw, err = config.MigrateV8InMemory(absPath, raw, guardrail.RulePackDigest); err != nil {
@@ -553,6 +698,7 @@ func loadConfigV8Source(path, defaultDataDir, credentialsDir string, migrate boo
 		document:       document,
 		runtime:        runtimeCandidate,
 		source:         absPath,
+		sourceRaw:      sourceRaw,
 		raw:            append([]byte(nil), raw...),
 		gatewayAPIPort: gatewayAPIPort,
 	}, nil
@@ -577,6 +723,13 @@ func validateRuntimeV8ConnectorRoster(document *config.V8YAMLDocument, candidate
 	}
 	names := make([]string, 0, len(configured))
 	for name := range configured {
+		// until 1.1: the runtime loader drops a connector 1.0.4 removed
+		// (OpenHands, OmniGent) so the gateway can start and tear it down;
+		// expecting it to survive refused every published config that set it
+		// up before cleanup could run (GAP-0290).
+		if config.IsRetiredConnector(name) {
+			continue
+		}
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -624,13 +777,13 @@ func validateRuntimeV8ConnectorRoster(document *config.V8YAMLDocument, candidate
 func readConfigV8Source(path string) ([]byte, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("read config %s: %w", path, err)
+		return nil, &configV8ReadError{path: path, err: err}
 	}
 	defer file.Close()
 	limit := int64(config.ObservabilityV8MaxSourceBytes) + 1
 	raw, err := io.ReadAll(io.LimitReader(file, limit))
 	if err != nil {
-		return nil, fmt.Errorf("read config %s: %w", path, err)
+		return nil, &configV8ReadError{path: path, err: err}
 	}
 	if len(raw) > config.ObservabilityV8MaxSourceBytes {
 		// Feed a bounded over-limit value to the canonical parser so callers get

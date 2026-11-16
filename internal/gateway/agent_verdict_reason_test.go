@@ -149,6 +149,63 @@ func TestObserveNoticeNamesTheRuleLikeTheBlock(t *testing.T) {
 	}
 }
 
+// The observe-mode notice for an MCP server its install admission rejected
+// names the server and the verdict kind as the action-mode block does, not a
+// row of "<redacted len=N sha=...>" spans (rel-1-0-6:GAP-0198). The scanner
+// error inside the reason stays out of the agent's view in both modes.
+func TestObserveNoticeNamesTheRejectedMCPServerLikeTheBlock(t *testing.T) {
+	source := `mcp server "fcpend" is disabled because its install admission rejected it (scanner failure (fail-closed): scanner: mcp-scanner exited 1: ValueError: refusing to scan local MCP server 'fcpend': command 'node' is not an allowlisted stdio launcher (allowed: npx, uvx)); asset_policy.mode does not apply to admission verdicts`
+	// A launcher refusal names the bare launcher, its cause and fix in fixed
+	// words (rel-1-0-6:GAP-0258); the rest of the scanner text stays out.
+	subject := "MCP server fcpend is disabled because its install admission rejected it (the launcher node " + mcpLauncherRefusalCause + ")"
+	req := claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "mcp__fcpend__ping"}
+	for _, standalone := range []bool{true, false} {
+		useAgentVerdictProfile(t, standalone, false)
+		resp := claudeCodeResponseFor(req, "allow", "block", "HIGH", source, nil, "observe", true)
+		want := "DefenseClaw would block this in action mode: HIGH Claude Code hook finding: " + subject
+		if resp.AdditionalContext != want {
+			t.Fatalf("standalone=%v observe notice = %q\nwant %q", standalone, resp.AdditionalContext, want)
+		}
+		block := claudeCodeResponseFor(req, "block", "block", "HIGH", source, nil, "action", true)
+		if !strings.Contains(block.Reason, "("+subject+")") {
+			t.Fatalf("standalone=%v action block = %q, want it to name %q", standalone, block.Reason, subject)
+		}
+		codex := codexResponseFor("PreToolUse", "allow", "block", "HIGH", source, nil, "observe", true)
+		if !strings.HasSuffix(codex.AdditionalContext, ": "+subject) {
+			t.Fatalf("standalone=%v codex observe notice = %q", standalone, codex.AdditionalContext)
+		}
+		generic := agentHookResponseForProfile(connector.HookProfile{Name: "hermes"}, agentHookRequest{ConnectorName: "hermes", HookEventName: "pre_tool_call"},
+			"allow", "block", "HIGH", source, nil, "observe", true, connector.HookCapability{})
+		if !strings.HasSuffix(generic.AdditionalContext, ": "+subject) {
+			t.Fatalf("standalone=%v generic observe notice = %q", standalone, generic.AdditionalContext)
+		}
+		for _, notice := range []string{resp.AdditionalContext, codex.AdditionalContext, generic.AdditionalContext} {
+			if strings.Contains(notice, redactedTokenPrefix) || strings.Contains(notice, "allowlisted") {
+				t.Fatalf("standalone=%v notice kept redacted or scanner text: %q", standalone, notice)
+			}
+		}
+	}
+	// An asset-policy reason is worded in the notice the same way.
+	useAgentVerdictProfile(t, true, false)
+	asset := "ASSET-POLICY reason_code=admin-deny asset_type=mcp asset_name=fcdeny connector=claudecode surface=hook"
+	resp := claudeCodeResponseFor(req, "allow", "block", "HIGH", asset, nil, "observe", true)
+	if want := "DefenseClaw would block this in action mode: HIGH Claude Code hook finding: MCP server fcdeny is denied by asset policy"; resp.AdditionalContext != want {
+		t.Fatalf("asset-policy observe notice = %q\nwant %q", resp.AdditionalContext, want)
+	}
+	// A reason outside the known shapes keeps the redaction.
+	odd := `mcp server "fcpend" is disabled because its install admission rejected it (something else); asset_policy.mode does not apply to admission verdicts`
+	resp = claudeCodeResponseFor(req, "allow", "block", "HIGH", odd, nil, "observe", true)
+	if !strings.Contains(resp.AdditionalContext, redactedTokenPrefix) {
+		t.Fatalf("unknown admission verdict reached the notice: %q", resp.AdditionalContext)
+	}
+	// Secure Client keeps its pinned (redacted) wording.
+	useAgentVerdictProfile(t, false, true)
+	resp = claudeCodeResponseFor(req, "allow", "block", "HIGH", source, nil, "observe", true)
+	if !strings.Contains(resp.AdditionalContext, redactedTokenPrefix) {
+		t.Fatalf("Secure Client observe notice = %q, want the redacted reason", resp.AdditionalContext)
+	}
+}
+
 func applyMarkerRulePack(t *testing.T, connectorName string) {
 	t.Helper()
 	pack := mustLoadRulePack(t, filepath.Join(guardrailPoliciesRoot(t), "default"))
@@ -201,7 +258,7 @@ func TestAgentVerdictReasonKeepsSecureClientWording(t *testing.T) {
 func TestAgentMatchedRulesNamesRulesByID(t *testing.T) {
 	var builtIn string
 	var builtInID, builtInTitle string
-	for _, category := range defaultRuleCategories {
+	for _, category := range defaultRuleCategories() {
 		for _, rule := range category.Rules {
 			if rule.ID != "" && rule.Title != "" && agentRuleIDPattern.MatchString(rule.ID) && !strings.Contains(rule.Title, ", ") {
 				builtInID, builtInTitle = rule.ID, rule.Title
@@ -283,18 +340,17 @@ func TestHookResponsesCarryTheDefenseClawPolicyWording(t *testing.T) {
 	}
 }
 
-// On Hermes and OpenHands a confirmation became an alert and the tool call
-// ran with nothing on screen, since neither hook can ask or show a notice.
+// On Hermes a confirmation became an alert and the tool call ran with
+// nothing on screen, since its hook can neither ask nor show a notice.
 // The standalone enterprise profile blocks it and says the rule wanted the
 // user's confirmation; per-user installs keep the alert.
-func TestStandaloneBlocksAConfirmationHermesAndOpenHandsCannotAsk(t *testing.T) {
+func TestStandaloneBlocksAConfirmationHermesCannotAsk(t *testing.T) {
 	opts := connector.SetupOpts{APIAddr: "127.0.0.1:18970"}
 	for _, c := range []struct {
 		profile      connector.HookProfile
 		event, agent string
 	}{
 		{connector.NewHermesConnector().HookProfile(opts), "pre_tool_call", "Hermes"},
-		{connector.NewOpenHandsConnector().HookProfile(opts), "PreToolUse", "OpenHands"},
 	} {
 		useAgentVerdictProfile(t, false, false)
 		if action, _ := mapHookActionForProfile("confirm", "action", c.event, c.profile.Capabilities, c.profile, nil); action != "alert" {
@@ -314,5 +370,71 @@ func TestStandaloneBlocksAConfirmationHermesAndOpenHandsCannotAsk(t *testing.T) 
 		if want := "needs your confirmation for it (rule TEST-MARKER-BLOCK), and " + c.agent + " cannot ask for it."; !strings.Contains(string(data), want) {
 			t.Fatalf("%s hook output %s\nwant %q", c.agent, data, want)
 		}
+	}
+}
+
+// rel-1-0-6:GAP-0258: the tool call of an MCP server whose scan refused its
+// bare node launcher is refused for that cause, with the fix, and as a block
+// not to retry: the agent saw only "still scanning, try again in a minute".
+// The scanner text (the server's command and arguments) stays out, a long
+// reason (a folder note before it) still matches, and a scan that could not
+// finish keeps the bare failure kind.
+func TestAgentBlockNamesTheRefusedMCPLauncherAndItsFix(t *testing.T) {
+	refusal := "scanner: mcp-scanner exited 1: the server was not started in its folder C:\\Users\\dcw-vs7ba\\gb1\\" + strings.Repeat("deep\\", 20) +
+		"; it ran in the scanner folder instead: ValueError: refusing to scan local MCP server 'vs7time': command 'node' is not an allowlisted stdio launcher (allowed: npx, uvx): " +
+		"a scan starts only npm or PyPI packages through npx or uvx, never another program. Start the server with npx or uvx, serve it over HTTP and use its URL, " +
+		"or review it and allow that definition with 'defenseclaw mcp allow <name> --command ... --args ...'"
+	source := `mcp server "vs7time" is disabled because its install admission rejected it (scanner failure (fail-closed): ` + refusal + `); asset_policy.mode does not apply to admission verdicts`
+	if len(source) <= 512 {
+		t.Fatalf("the reason (%d bytes) does not exercise the old 512-byte bound", len(source))
+	}
+	req := claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "mcp__vs7time__get_current_time"}
+	for _, standalone := range []bool{true, false} {
+		useAgentVerdictProfile(t, standalone, false)
+		block := claudeCodeResponseFor(req, "block", "block", "HIGH", source, nil, "action", true)
+		for _, want := range []string{"MCP server vs7time is disabled", "the launcher node is refused because", "only as a package through the bare npx or uvx",
+			"start it with npx or uvx, or serve it over HTTP", agentBlockNoRetry} {
+			if !strings.Contains(block.Reason, want) {
+				t.Fatalf("standalone=%v block = %q, want it to say %q", standalone, block.Reason, want)
+			}
+		}
+		for _, leaked := range []string{"dcw-vs7ba", "allowlisted", "still scanning", "try the same call again", redactedTokenPrefix} {
+			if strings.Contains(block.Reason, leaked) {
+				t.Fatalf("standalone=%v block = %q, must not contain %q", standalone, block.Reason, leaked)
+			}
+		}
+	}
+	// rel-1-0-6:GAP-0258 sweep 9: the per-user gateway's reason, where the
+	// refusal came from the JSON error on stdout, longer than the old 1000
+	// bound with a folder note; and a command path, which is not named.
+	for name, tc := range map[string]struct{ refusal, want string }{
+		"per-user json error": {
+			refusal: "scanner mcp-scanner exited 1 (the server was not started in its folder /Users/r107vs9m/" + strings.Repeat("deep/", 120) +
+				"; it ran in the scanner folder instead: scan failed: refusing to scan local MCP server 'vs9time': command 'node' is not an allowlisted stdio launcher (allowed: npx, uvx): " +
+				"a scan starts only npm or PyPI packages through npx or uvx, never another program; stderr=)",
+			want: "(MCP server vs9time is disabled because its install admission rejected it (the launcher node " + mcpLauncherRefusalCause + ")). " + agentBlockNoRetry,
+		},
+		"command path": {
+			refusal: "scanner mcp-scanner exited 1 (scan failed: refusing to scan local MCP server 'vs9time': command '/Users/r107vs9m/bin/node' is a path, and paths are never an allowlisted stdio launcher: the scanner starts only the bare names npx or uvx from PATH; use the bare name npx or uvx, or a URL; stderr=)",
+			want:    "(MCP server vs9time is disabled because its install admission rejected it (the launcher " + mcpLauncherRefusalCause + ")). " + agentBlockNoRetry,
+		},
+	} {
+		source := `mcp server "vs9time" is disabled because its install admission rejected it (scanner failure (fail-closed): ` + tc.refusal + `); asset_policy.mode does not apply to admission verdicts`
+		if name == "per-user json error" && len(source) <= 1000 {
+			t.Fatalf("the reason (%d bytes) does not exercise the old 1000-byte bound", len(source))
+		}
+		for _, standalone := range []bool{true, false} {
+			useAgentVerdictProfile(t, standalone, false)
+			block := claudeCodeResponseFor(req, "block", "block", "HIGH", source, nil, "action", true)
+			if !strings.Contains(block.Reason, tc.want) || strings.Contains(block.Reason, "r107vs9m") || strings.Contains(block.Reason, redactedTokenPrefix) {
+				t.Fatalf("%s standalone=%v block = %q\nwant it to say %q, with no path or redacted span", name, standalone, block.Reason, tc.want)
+			}
+		}
+	}
+	useAgentVerdictProfile(t, true, false)
+	timeout := `mcp server "vs7time" is disabled because its install admission rejected it (scanner failure (fail-closed): scanner: mcp-scanner exited 1: TimeoutError: no answer); asset_policy.mode does not apply to admission verdicts`
+	block := claudeCodeResponseFor(req, "block", "block", "HIGH", timeout, nil, "action", true)
+	if !strings.Contains(block.Reason, "(MCP server vs7time is disabled because its install admission rejected it (scanner failure (fail-closed)))") {
+		t.Fatalf("a scan that did not finish = %q, want the bare failure kind", block.Reason)
 	}
 }

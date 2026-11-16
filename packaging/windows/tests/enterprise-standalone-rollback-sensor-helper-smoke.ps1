@@ -3,11 +3,12 @@
 
 #Requires -Version 5.1
 
-# Function-level regression for the standalone sensor helper around uninstall.
+# Function-level regression for the sensor helper around uninstall, which
+# both profiles register.
 # Uninstall quiesces it for the servicing boundary (it failed every uninstall
 # of a running deployment with "startup mode drift: 2, expected 4"), and the
 # managed-hook rollback restart brings it back.
-# Restore-DefenseClawTransaction quiesces the standalone sensor helper, which
+# Restore-DefenseClawTransaction quiesces the sensor helper, which
 # transaction snapshots do not record. When the managed-hook teardown had to
 # be rolled back, Restore-DefenseClawTransactionWithManagedHooksRollback
 # restarted the restored services without it; the gateway depends on the
@@ -78,7 +79,7 @@ $failures = & $module {
 
         Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
         $script:TestServices[$helper] = $true
-        $started = Start-DefenseClawRestoredStandaloneSensorHelper -Snapshot $snapshot -Layout $layout
+        $started = Start-DefenseClawRestoredSensorHelper -Snapshot $snapshot -Layout $layout
         Set-DefenseClawRestoredStandaloneSensorHelperBootPolicy -Snapshot $snapshot -Name $started
         $expected = @("owned:$helper", "mode:$helper=3", "start:$helper", "mode:$helper=2")
         if ($started -cne $helper -or (@($script:TestCalls) -join '|') -cne ($expected -join '|')) {
@@ -92,7 +93,7 @@ $failures = & $module {
             guardian_service = 'DefenseClawHookGuardian'
             services = @([pscustomobject]@{ name = 'DefenseClawGateway'; existed = $false; running = $false; start_mode = 0 })
         }
-        $started = Start-DefenseClawRestoredStandaloneSensorHelper -Snapshot $fresh -Layout $layout
+        $started = Start-DefenseClawRestoredSensorHelper -Snapshot $fresh -Layout $layout
         Set-DefenseClawRestoredStandaloneSensorHelperBootPolicy -Snapshot $fresh -Name $started
         if (-not [string]::IsNullOrEmpty($started) -or $script:TestCalls.Count -ne 0) {
             $failures.Add('a fresh-install rollback touched the sensor helper')
@@ -101,21 +102,23 @@ $failures = & $module {
         # No helper service registered: nothing to start.
         $script:TestCalls.Clear()
         $script:TestServices.Clear()
-        $started = Start-DefenseClawRestoredStandaloneSensorHelper -Snapshot $snapshot -Layout $layout
+        $started = Start-DefenseClawRestoredSensorHelper -Snapshot $snapshot -Layout $layout
         if (-not [string]::IsNullOrEmpty($started) -or $script:TestCalls.Count -ne 0) {
             $failures.Add('a missing sensor helper was touched')
         }
 
-        # Secure Client has no standalone sensor helper to restore.
+        # Secure Client registers the helper too; its gateway depends on it
+        # the same way, so the rollback brings it back.
         Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
         $script:TestServices[$helper] = $true
         $script:TestCalls.Clear()
-        $started = Start-DefenseClawRestoredStandaloneSensorHelper -Snapshot $snapshot -Layout $layout
-        if (-not [string]::IsNullOrEmpty($started) -or $script:TestCalls.Count -ne 0) {
-            $failures.Add('Secure Client rollback touched the standalone sensor helper')
+        $started = Start-DefenseClawRestoredSensorHelper -Snapshot $snapshot -Layout $layout
+        $expected = @("owned:$helper", "mode:$helper=3", "start:$helper")
+        if ($started -cne $helper -or (@($script:TestCalls) -join '|') -cne ($expected -join '|')) {
+            $failures.Add("Secure Client restored gateway: expected $($expected -join ', '), got $(@($script:TestCalls) -join ', ')")
         }
 
-        # Uninstall quiesces the helper for the servicing boundary (standalone only).
+        # Uninstall quiesces the helper for the servicing boundary (both profiles).
         $layout['SensorHelperServiceName'] = $helper
         $script:TestServices[$helper] = $true
         $script:TestCalls.Clear()
@@ -124,14 +127,20 @@ $failures = & $module {
             param([string]$Name)
             $script:TestCalls.Add("stop:$Name")
         }
-        if (-not (Suspend-DefenseClawStandaloneSensorHelperForServicing -Layout $layout) -or
+        if (-not (Suspend-DefenseClawSensorHelperForServicing -Layout $layout) -or
             (@($script:TestCalls) -join '|') -cne ("owned:$helper|mode:$helper=4|stop:$helper")) {
             $failures.Add("uninstall quiesce: got $(@($script:TestCalls) -join ', ')")
         }
         Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
         $script:TestCalls.Clear()
-        if ((Suspend-DefenseClawStandaloneSensorHelperForServicing -Layout $layout) -or $script:TestCalls.Count -ne 0) {
-            $failures.Add('Secure Client uninstall quiesced the standalone sensor helper')
+        if (-not (Suspend-DefenseClawSensorHelperForServicing -Layout $layout) -or
+            (@($script:TestCalls) -join '|') -cne ("owned:$helper|mode:$helper=4|stop:$helper")) {
+            $failures.Add("Secure Client uninstall quiesce: got $(@($script:TestCalls) -join ', ')")
+        }
+        # A layout without the helper has nothing to quiesce.
+        $script:TestCalls.Clear()
+        if ((Suspend-DefenseClawSensorHelperForServicing -Layout @{}) -or $script:TestCalls.Count -ne 0) {
+            $failures.Add('uninstall quiesced a sensor helper the layout does not name')
         }
         $uninstall = $ast.Find({
             param($node)
@@ -139,12 +148,70 @@ $failures = & $module {
                 $node.Name -ceq 'Invoke-DefenseClawUninstallLifecycle'
         }, $true).Body.Extent.Text
         $open = $uninstall.IndexOf('$snapshot = New-DefenseClawTransaction')
-        $suspend = $uninstall.IndexOf('Suspend-DefenseClawStandaloneSensorHelperForServicing')
+        $suspend = $uninstall.IndexOf('Suspend-DefenseClawSensorHelperForServicing')
         $servicing = $uninstall.IndexOf('-ServicingTransaction')
         if ($open -lt 0 -or $suspend -lt 0 -or $servicing -lt 0 -or
             -not ($open -lt $suspend -and $suspend -lt $servicing)) {
             $failures.Add('uninstall does not quiesce the sensor helper between transaction open and the servicing assertion')
         }
+
+        # A failed Install over a non-purge retained StateRoot rolled back
+        # every service it created except the sensor helper, so the
+        # retained-state ACL restore refused ("while service exists") and
+        # left deployment.json with the installing admin's group.
+        function Remove-DefenseClawService {
+            param([string]$Name)
+            $script:TestCalls.Add("remove:$Name")
+            [void]$script:TestServices.Remove($Name)
+        }
+        function Initialize-DefenseClawNativeSecurity {
+            throw 'reached retained-state ACL restore'
+        }
+        $retained = [pscustomobject][ordered]@{
+            gateway_service = 'DefenseClawGateway'
+            guardian_service = 'DefenseClawHookGuardian'
+            state_root = 'C:\RetainedState\DefenseClaw'
+            state_root_created = $false
+            state_root_identity = '0123abcd:0123456789abcdef'
+            prior_deployment_active = $false
+            services = @([pscustomobject]@{ name = 'DefenseClawGateway'; existed = $false; running = $false; start_mode = 0 })
+        }
+        $retainedLayout = @{ StateRoot = 'C:\RetainedState\DefenseClaw' }
+        foreach ($case in @(
+                @{ name = 'owned'; helper = $true; foreign = $false; calls = "owned:$helper|remove:$helper"; error = 'reached retained-state ACL restore' },
+                @{ name = 'foreign'; helper = $true; foreign = $true; calls = "owned:$helper"; error = "refusing to manage foreign service $helper" },
+                @{ name = 'absent'; helper = $false; foreign = $false; calls = ''; error = 'reached retained-state ACL restore' }
+            )) {
+            foreach ($profileName in 'Standalone', 'SecureClient') {
+                Set-DefenseClawEnterpriseProfile -EnterpriseProfile $profileName
+                $script:TestServices.Clear()
+                if ($case.helper) { $script:TestServices[$helper] = $true }
+                $script:TestForeignHelper = $case.foreign
+                function Assert-DefenseClawStandaloneSensorHelperOwned {
+                    param($Name, $Layout)
+                    $script:TestCalls.Add("owned:$Name")
+                    if ($script:TestForeignHelper) { throw "refusing to manage foreign service $Name" }
+                }
+                $script:TestCalls.Clear()
+                $threw = ''
+                try {
+                    Restore-DefenseClawRetainedStateAclsFromTransaction -Snapshot $retained -Layout $retainedLayout
+                }
+                catch {
+                    $threw = $_.Exception.Message
+                }
+                if ($threw -cne $case.error -or (@($script:TestCalls) -join '|') -cne $case.calls) {
+                    $failures.Add("$profileName retained-state rollback with $($case.name) sensor helper: threw '$threw', calls $(@($script:TestCalls) -join ', ')")
+                }
+            }
+        }
+        function Assert-DefenseClawStandaloneSensorHelperOwned {
+            param($Name, $Layout)
+            $script:TestCalls.Add("owned:$Name")
+        }
+        Remove-Item -LiteralPath Function:\Initialize-DefenseClawNativeSecurity
+        Remove-Item -LiteralPath Function:\Remove-DefenseClawService
+        $script:TestServices.Clear()
 
         # GAP-1438: FORCE=1 stopped and disabled the services, and a StateRoot
         # move refused by an open file left them so. Put them back as they were.
@@ -333,18 +400,19 @@ $failures = & $module {
             }
         }
 
-        # A committed standalone uninstall retires bin with the ACP bridge and
-        # the sensor helper still present; Secure Client keeps its allowlist.
+        # A committed uninstall retires bin with the ACP bridge and the sensor
+        # helper still present, on both profiles; only the standalone policy
+        # compiler and the standalone Claude Code hook guard are
+        # standalone-only.
         $retired = 'C:\\RetiredRoot'
         Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
         $standaloneAllowlist = Get-DefenseClawRetiredInstallTreeAllowlist -Layout $layout -RetiredRoot $retired
         $standaloneFiles = @($standaloneAllowlist.files)
         $standaloneOnly = @(
-            'bin\defenseclaw-acp.exe',
-            'bin\defenseclaw-sensor-helper.exe',
-            'lib\defenseclaw\policy_compiler.py'
+            'lib\defenseclaw\policy_compiler.py',
+            'bin\defenseclaw-hook-guard.exe'
         ) | ForEach-Object { [IO.Path]::GetFullPath((Join-Path $retired $_)) }
-        foreach ($leaf in @('bin\defenseclaw-acp.exe', 'bin\defenseclaw-sensor-helper.exe', 'bin\defenseclaw-gateway.exe', 'lib\defenseclaw\policy_compiler.py')) {
+        foreach ($leaf in @('bin\defenseclaw-acp.exe', 'bin\defenseclaw-sensor-helper.exe', 'bin\defenseclaw-gateway.exe', 'bin\defenseclaw-hook-guard.exe', 'lib\defenseclaw\policy_compiler.py')) {
             if ([IO.Path]::GetFullPath((Join-Path $retired $leaf)) -notin $standaloneFiles) {
                 $failures.Add("standalone retired-tree allowlist lacks $leaf")
             }
@@ -356,6 +424,16 @@ $failures = & $module {
         if ($secureClientFiles.Count -ne $expectedSecureClientFiles.Count -or
             (@($secureClientFiles | Sort-Object) -join '|') -cne ($expectedSecureClientFiles -join '|')) {
             $failures.Add('Secure Client retired-tree allowlist changed')
+        }
+        foreach ($leaf in @('bin\defenseclaw-acp.exe', 'bin\defenseclaw-sensor-helper.exe')) {
+            if ([IO.Path]::GetFullPath((Join-Path $retired $leaf)) -notin $secureClientFiles) {
+                $failures.Add("Secure Client retired-tree allowlist lacks $leaf")
+            }
+        }
+        # Secure Client has no hook guard: a file of that name in its retired
+        # tree stays an unexpected file, as before the guard shipped.
+        if ([IO.Path]::GetFullPath((Join-Path $retired 'bin\defenseclaw-hook-guard.exe')) -in $secureClientFiles) {
+            $failures.Add('Secure Client retired-tree allowlist admits the standalone hook guard')
         }
         $standaloneOnlyDirectories = @(
             [IO.Path]::GetFullPath((Join-Path $retired 'lib')).TrimEnd('\'),
@@ -374,12 +452,33 @@ $failures = & $module {
                 $node.Name -ceq 'Restore-DefenseClawTransactionWithManagedHooksRollback'
         }, $true)
         $body = $definition.Body.Extent.Text
-        $start = $body.IndexOf('Start-DefenseClawRestoredStandaloneSensorHelper')
+        $start = $body.IndexOf('Start-DefenseClawRestoredSensorHelper')
         $services = $body.LastIndexOf('Start-DefenseClawTransactionServices')
         $policy = $body.IndexOf('Set-DefenseClawRestoredStandaloneSensorHelperBootPolicy')
         if ($start -lt 0 -or $services -lt 0 -or $policy -lt 0 -or
             -not ($start -lt $services -and $services -lt $policy)) {
             $failures.Add('the deferred managed-hook rollback restart does not bring back the sensor helper around the service restart')
+        }
+
+        # A standalone Install or Upgrade without the hook guard source is
+        # refused before any source is read: the managed Claude Code hooks
+        # start through the guard and refuse ordinary calls without it.
+        Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+        foreach ($action in @('Install', 'Upgrade')) {
+            $message = ''
+            try {
+                [void](Get-DefenseClawLifecycleSources -Action $action `
+                    -GatewayBinary 'C:\p\g.exe' -ACPBinary 'C:\p\a.exe' `
+                    -HookBinary 'C:\p\h.exe' -SensorHelperBinary 'C:\p\s.exe' `
+                    -Config 'C:\p\c.yaml' -Manifest 'C:\p\m.yaml' `
+                    -InstallerSource 'C:\p\i.ps1' -ModuleSource 'C:\p\m.psm1')
+            }
+            catch {
+                $message = $_.Exception.Message
+            }
+            if ($message -notmatch 'requires .*-HookGuardBinary') {
+                $failures.Add("standalone $action without the hook guard source was not refused: $message")
+            }
         }
     }
     finally {

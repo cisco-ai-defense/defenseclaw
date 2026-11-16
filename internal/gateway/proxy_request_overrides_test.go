@@ -70,7 +70,7 @@ func TestApplyProviderRequestOverridesForCustomVLLMProvider(t *testing.T) {
 	  }
 	}`)
 
-	got := applyProviderRequestOverrides(body, "http://192.168.160.113:30080/v1/chat/completions")
+	got := applyProviderRequestOverrides(body, "http://192.168.160.113:30080/v1/chat/completions", nil)
 
 	var parsed map[string]interface{}
 	if err := json.Unmarshal(got, &parsed); err != nil {
@@ -129,7 +129,7 @@ func TestApplyProviderRequestOverridesIgnoresUnmatchedProvider(t *testing.T) {
 	  "messages": [{"role": "user", "content": "Reply with only OK."}]
 	}`)
 
-	got := applyProviderRequestOverrides(body, "https://api.openai.com/v1/chat/completions")
+	got := applyProviderRequestOverrides(body, "https://api.openai.com/v1/chat/completions", nil)
 
 	var parsed map[string]interface{}
 	if err := json.Unmarshal(got, &parsed); err != nil {

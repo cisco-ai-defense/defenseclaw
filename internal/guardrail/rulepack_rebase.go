@@ -189,10 +189,6 @@ type RulePackRebase struct {
 	// ones that still have none and only record a tool call's match, and
 	// Disabled the built-in rules the copy had removed.
 	Carried, Expressed, AlertOnly, Disabled []string
-	// WholeArgument names the Expressed rules that match only a command
-	// argument equal to their literal: the full form of the others did not
-	// fit the pack's semantic cost budget (semantic_catalog_cost_limit).
-	WholeArgument []string
 	// Renamed names each built-in rule the operator gave a pattern of their
 	// own and the ID it has in the 1.0 copy ("CMD-RM-RF -> CUSTOM-CMD-RM-RF"):
 	// the built-in ID keeps the shipped rule, whose semantic checks would
@@ -207,6 +203,10 @@ type RulePackRebase struct {
 	// -> shared/custom.yaml"): 1.0 refuses a link in a pack, so the copy
 	// holds the file it points to in its place (GAP-1346).
 	Linked []string
+	// Tagged names each rule that had no tags, which 0.8.x took and 1.0
+	// refuses (rule N tags must not be empty): its 1.0 copy has the tag
+	// custom (defaultRuleTag) and is otherwise the operator's (GAP-0268).
+	Tagged []string
 	// mergedAway holds the files Merged folded into another.
 	mergedAway map[string]bool
 	// literals counts the literal rules met so far, in order; from the
@@ -225,7 +225,7 @@ func PlanRulePackRebase(dir string) (*RulePackRebase, error) {
 	}
 	// The full literal forms do not fit the pack's semantic cost budget:
 	// give it to as many literal rules as fit, in the order they are met,
-	// and the others the whole-argument form (named in WholeArgument).
+	// and the others the whole-argument form.
 	// Fewer full forms cost less, so the most that fit is bisected.
 	narrow, err := planRulePackRebase(dir, 0)
 	if err != nil {
@@ -301,6 +301,18 @@ func planRulePackRebase(dir string, fullLiterals int) (*RulePackRebase, error) {
 			return nil, fmt.Errorf("rebase %s: %w", rel, err)
 		}
 		if data != nil {
+			files[rel] = data
+			changed = true
+		}
+	}
+	// After the merges and rebuilt files: a carried rule keeps its fields.
+	for _, rel := range slices.Sorted(maps.Keys(files)) {
+		if !isRuleFile(rel) {
+			continue
+		}
+		if data, err := tagUntaggedRules(files[rel], plan); err != nil {
+			return nil, fmt.Errorf("rebase %s: %w", rel, err)
+		} else if data != nil {
 			files[rel] = data
 			changed = true
 		}
@@ -766,15 +778,76 @@ func expressOwnRule(item *yaml.Node, plan *RulePackRebase) bool {
 	if literal, before, after := literalPattern(yamlScalarField(item, "pattern")); literal != "" {
 		plan.literals++
 		full := plan.wholeArgumentFrom == 0 || plan.literals < plan.wholeArgumentFrom
-		if !full {
-			plan.WholeArgument = append(plan.WholeArgument, id)
-		}
 		setYAMLScalarField(item, "expression", literalRuleExpression(literal, before, after, full), "!!str")
+		setYAMLScalarField(item, "migrated_literal", "true", "!!bool")
 		plan.Expressed = append(plan.Expressed, id)
 		return true
 	}
 	plan.AlertOnly = append(plan.AlertOnly, id)
 	return false
+}
+
+// defaultRuleTag is the tag the 1.0 copy of a 0.8.x pack gives a rule that
+// has none. A rule's tags only label its findings; custom is no data-axis
+// label (axesFromTags), so the rule matches, blocks and alerts as before.
+const defaultRuleTag = "custom"
+
+// tagUntaggedRules gives each rule of a rule file whose tags are missing,
+// null or empty, or hold only blank or repeated entries, the tags 1.0 takes:
+// its distinct non-blank tags, or defaultRuleTag when it has none. 0.8.x
+// took such a rule and 1.0 refuses the whole pack, so the 1.0 upgrade
+// stopped with nothing changed (GAP-0268). It returns nil when no rule
+// changed, so the file is kept byte for byte.
+func tagUntaggedRules(data []byte, plan *RulePackRebase) ([]byte, error) {
+	var document yaml.Node
+	if yaml.Unmarshal(data, &document) != nil {
+		return nil, nil // LoadRulePack reports it
+	}
+	rules := yamlRulesSequence(&document)
+	if rules == nil {
+		return nil, nil
+	}
+	changed := false
+	for _, item := range rules.Content {
+		if item.Kind != yaml.MappingNode {
+			continue
+		}
+		tags, ok := yamlField(item, "tags")
+		var kept []string
+		switch {
+		case !ok || tags.Kind == yaml.ScalarNode && tags.Tag == "!!null":
+		case tags.Kind == yaml.SequenceNode:
+			scalars := true
+			for _, tag := range tags.Content {
+				if tag.Kind != yaml.ScalarNode {
+					scalars = false
+					break
+				}
+				if value := strings.TrimSpace(tag.Value); value != "" && !slices.Contains(kept, value) {
+					kept = append(kept, value)
+				}
+			}
+			if !scalars || len(kept) > 0 && len(kept) == len(tags.Content) {
+				continue // LoadRulePack reports a nested tag; distinct tags load
+			}
+		default:
+			continue // LoadRulePack reports it
+		}
+		if len(kept) == 0 {
+			kept = []string{defaultRuleTag}
+		}
+		value := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Style: yaml.FlowStyle}
+		for _, tag := range kept {
+			value.Content = append(value.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: tag})
+		}
+		setYAMLField(item, "tags", value)
+		plan.Tagged = append(plan.Tagged, yamlScalarField(item, "id"))
+		changed = true
+	}
+	if !changed {
+		return nil, nil
+	}
+	return encodeRuleFile(&document)
 }
 
 // operatorRuleID is the ID of a built-in rule the operator gave a pattern of
@@ -980,15 +1053,65 @@ func literalRuleExpression(literal string, before, after, full bool) string {
 	return argument + " || f.paths.exists(p, p.value.matches(" + word + ")) || f.network.exists(n, n.host.matches(" + word + "))"
 }
 
-// MigratedLiteralRule reports whether expression is one of the forms the
-// 0.8.x rebase derives from pattern, a literal (literalRuleExpression). The
-// gateway then also blocks a tool call whose text pattern matches, as 0.8.x
-// did (GAP-1469, GAP-1478). A rule with any other expression or pattern is
-// not one.
-func MigratedLiteralRule(pattern, expression string) bool {
+// MigratedLiteralRule reports whether a rule is one the 0.8.x rebase made:
+// marked (migrated_literal) and with one of the expressions it derives from
+// pattern, a literal (literalRuleExpression). The gateway then also blocks a
+// tool call whose text pattern matches, as 0.8.x did (GAP-1469, GAP-1478).
+// A rule written for 1.0 with the same expression is not marked and keeps
+// its expression's meaning (GAP-1512).
+func MigratedLiteralRule(pattern, expression string, marked bool) bool {
+	if !marked {
+		return false
+	}
 	literal, before, after := literalPattern(pattern)
 	return literal != "" && (expression == literalRuleExpression(literal, before, after, true) ||
 		expression == literalRuleExpression(literal, before, after, false))
+}
+
+// MarkMigratedLiteralRules returns pack with the rules ids name marked as
+// migrated literal rules, when they have an expression the rebase derives.
+// A pack the 0.8.x upgrade of 1.0.0 to 1.0.3 rebased has no marks; the
+// migration record names its expressed rules (config.ExpressedRulePackRules).
+// Kept while the 0.8.x upgrade path is supported. pack is not changed.
+func MarkMigratedLiteralRules(pack *RulePack, ids []string) *RulePack {
+	if pack == nil || len(ids) == 0 {
+		return pack
+	}
+	want := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		want[strings.TrimSpace(id)] = true
+	}
+	var files []*RulesFileYAML
+	for index, file := range pack.RuleFiles {
+		if file == nil {
+			continue
+		}
+		var marked *RulesFileYAML
+		for ruleIndex, rule := range file.Rules {
+			if rule.MigratedLiteral || !want[strings.TrimSpace(rule.ID)] ||
+				!MigratedLiteralRule(rule.Pattern, rule.Expression, true) {
+				continue
+			}
+			if marked == nil {
+				copied := *file
+				copied.Rules = slices.Clone(file.Rules)
+				marked = &copied
+			}
+			marked.Rules[ruleIndex].MigratedLiteral = true
+		}
+		if marked != nil {
+			if files == nil {
+				files = slices.Clone(pack.RuleFiles)
+			}
+			files[index] = marked
+		}
+	}
+	if files == nil {
+		return pack
+	}
+	out := *pack
+	out.RuleFiles = files
+	return &out
 }
 
 func yamlRulesSequence(document *yaml.Node) *yaml.Node {

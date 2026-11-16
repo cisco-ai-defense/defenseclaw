@@ -34,7 +34,6 @@ import (
 	"fmt"
 	"os"
 	"os/user"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,6 +44,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
@@ -111,6 +111,10 @@ type Options struct {
 	Owner string
 	// Config returns the current configuration snapshot. Required.
 	Config func() *config.Config
+	// ConfigForSandbox returns the policy snapshot for an existing sandbox.
+	// Managed daemons use its confirmed registration's floor. A nil result
+	// fails closed instead of applying another sandbox's floor.
+	ConfigForSandbox func(name string) *config.Config
 	// Connect opens the OpenShell gateway connection. Required.
 	Connect Connector
 	// Bindings is the ingress binding store. Required.
@@ -133,6 +137,14 @@ type Options struct {
 	// a decision that must see the user's latest write (the reload watcher
 	// follows the file a second or so later); nil decides on the snapshot.
 	SyncConfig func(context.Context) error
+	// ConfirmPolicy brings an existing sandbox's policy up to date before a
+	// decision its person makes for it is judged (an unblock, an answer to
+	// an ask): a managed daemon confirms the sandbox's registration with the
+	// managed gateway, as its egress proxy does before a new connection, so
+	// the decision and `sandbox policy explain` name the same profile after
+	// an administrator's change (GAP-0132). nil decides on the policy in
+	// force.
+	ConfirmPolicy func(ctx context.Context, sandbox string)
 	// Quiesce is the ingress in-flight tracker approvals wait on.
 	Quiesce triage.Quiescer
 	// ForgetBinding drops the ingress's per-binding state after a revoke.
@@ -210,6 +222,18 @@ type Options struct {
 	// join the process trees of docker sandboxes (kernelfeed.go). Nil uses
 	// DefaultKernelFeedDialer: the feed's socket on Linux, none elsewhere.
 	KernelFeed KernelFeedDialer
+	// StartLock takes the gateway's lifecycle lock that a create or a start
+	// holds, shared, over OpenShell's call, and that DefenseClaw's restarts
+	// and upgrades of the gateway hold exclusively
+	// (openshell.LockSandboxStart): it fails with openshell.ErrGatewayBusy
+	// while one of them runs. Nil holds none.
+	StartLock func() (unlock func(), err error)
+	// MigrateBootstrap moves the Docker bootstrap that an OpenShell before
+	// 0.1.5 left for the sandbox of an OpenShell id to the format 0.1.5
+	// reads (openshell.MigrateDockerBootstrap), and names the files it
+	// rewrote. A start on a docker gateway runs it first (GAP-0300). Nil
+	// moves none.
+	MigrateBootstrap func(sandboxID string) ([]string, error)
 	// ManagedAccount marks a managed computer's per-user sandbox daemon: a
 	// user service the organization installs, which starts at login. What a
 	// failure tells the user to do names signing in again, never a command
@@ -220,6 +244,12 @@ type Options struct {
 	// or reports what they run as foreign sandboxes (GAP-0678). The caller
 	// closes each. nil connects to none.
 	OtherGateways func(ctx context.Context, managed *Gateway) []*Gateway
+	// GatewayAt connects to the account's gateway registration name in
+	// workspace (RegistrationGateway), which a record names as the place
+	// its sandbox lives when that is not the connected gateway: the guest
+	// inventory reads the sandbox there (proveGuests). The caller closes
+	// it. nil connects to none, and such a guest is not proven.
+	GatewayAt func(ctx context.Context, name, workspace string) (*Gateway, error)
 }
 
 // Manager implements the gateway's SandboxController.
@@ -252,7 +282,8 @@ type Manager struct {
 	toolCalls *hookTamperTracker
 	// signatures is the AI signature catalog of the sandbox discoveries.
 	signatures discoveryCatalog
-	// tamperStops tracks the stops hook tamper started.
+	// tamperStops tracks the stops DefenseClaw starts on its own: for a hook
+	// alarm, and of a session on an old supervisor.
 	tamperStops sync.WaitGroup
 
 	runMu  sync.Mutex
@@ -267,6 +298,10 @@ type Manager struct {
 	// gwErrAt paces reconnects: requests arriving within connectBackoff of
 	// a failed attempt get its error instead of dialing again.
 	gwErrAt time.Time
+	// pendingSeen records the first and last delete refusals in one observed
+	// error-phase episode. A gap or recovery starts a new episode.
+	pendingMu   sync.Mutex
+	pendingSeen map[string]pendingEpisode
 	// gwStopped is set while the caller stopped the gateway on purpose
 	// (GatewayStopped): the failed dials until it runs again are no
 	// degraded health.
@@ -279,6 +314,20 @@ type Manager struct {
 	// gwCheckedAt is when the connected gateway last said which driver it
 	// runs (UnixNano; recheckDriver).
 	gwCheckedAt atomic.Int64
+	// lastGw is the gateway DefenseClaw is connected to, or was last (nil
+	// before any): the place the guest inventory counts a box at when its
+	// record names it (unprotectedKind). proveMu serializes the reads of
+	// guests' places (proveGuests).
+	lastGw  atomic.Pointer[Gateway]
+	proveMu sync.Mutex
+	// runGate orders the last run check of a create or a start and its
+	// gateway call (lockRun, shared) against a guest recorded contained
+	// (containUnsynced, exclusive). Taken after the start lock, before mu.
+	runGate sync.RWMutex
+	// refreshMu orders overlapping policy refreshes (refreshEgress): a
+	// configuration check and an explicit adoption that arrive together
+	// re-register the proxy credentials and the default decider in order.
+	refreshMu sync.Mutex
 
 	mu    sync.Mutex
 	boxes map[string]*box
@@ -430,6 +479,7 @@ func New(opts Options) (*Manager, error) {
 	if err := m.loadRecords(); err != nil {
 		return nil, err
 	}
+	m.publishUnsyncedStops()
 	return m, nil
 }
 
@@ -635,11 +685,14 @@ func (m *Manager) connection(ctx context.Context) (*Gateway, <-chan struct{}, er
 	} else {
 		m.health(ctx, audit.SandboxHealthReady, "", "")
 	}
+	// A new connection may be recovering an earlier error-phase sandbox.
+	m.forgetAllPending()
 	m.gw, m.gwGone, m.gwErr, m.gwStopped = gw, make(chan struct{}), nil, false
 	if m.opts.OnGateway != nil {
 		m.opts.OnGateway(nil)
 	}
 	m.gwPort.Store(int64(gw.Port))
+	m.lastGw.Store(gw)
 	driver := gw.Driver
 	m.gwDriver.Store(&driver)
 	m.gwCheckedAt.Store(m.now().UnixNano())
@@ -769,6 +822,7 @@ func (m *Manager) closeGateway() {
 // goneLocked tells the work living on the connection that was just
 // dropped or closed that it is gone. Callers hold gwMu.
 func (m *Manager) goneLocked() {
+	m.forgetAllPending()
 	if m.gwGone != nil {
 		close(m.gwGone)
 		m.gwGone = nil
@@ -811,7 +865,7 @@ func gatewayUnavailableError(err error) error {
 
 // dialAddress is the address a gRPC "Error while dialing: dial tcp ADDR:"
 // failure names.
-var dialAddress = regexp.MustCompile(`dial tcp ([^\s"]+?):\s`)
+var dialAddress = lazyregexp.New(`dial tcp ([^\s"]+?):\s`)
 
 // gatewayUnavailableText says in words why the OpenShell gateway does not
 // answer; known is false for a failure it cannot name.
@@ -888,6 +942,42 @@ func (m *Manager) config() *config.Config {
 		cfg = &config.Config{}
 	}
 	return cfg
+}
+
+// configForSandbox keeps fallback policy checks under the same floor as
+// normal resolution. A managed sandbox without a confirmed policy has no
+// configuration to borrow from another sandbox. A sandbox a managed create
+// made resolves under the configuration that create pinned until the
+// daemon keeps its registration (box.createCfg). Callers must not hold
+// Manager.mu.
+func (m *Manager) configForSandbox(name string) *config.Config {
+	m.mu.Lock()
+	var pinned *config.Config
+	if b := m.boxes[name]; b != nil {
+		pinned = b.createCfg
+	}
+	m.mu.Unlock()
+	if pinned != nil {
+		return pinned
+	}
+	if m.opts.ConfigForSandbox != nil {
+		return m.opts.ConfigForSandbox(name)
+	}
+	return m.config()
+}
+
+// EndCreate tells the manager the daemon is done with the managed create
+// of the sandbox name (OpenShell id), whether it kept the registration or
+// not: the sandbox's policy follows its registration from now on
+// (ConfigForSandbox; the closed floor without one), and every sandbox's
+// policy is resolved again (RefreshPolicies).
+func (m *Manager) EndCreate(name, id string) {
+	m.mu.Lock()
+	if b := m.boxes[name]; b != nil && b.rec.ID == id {
+		b.createCfg = nil
+	}
+	m.mu.Unlock()
+	m.RefreshPolicies()
 }
 
 // keepIgnored is what a mounted project's undo point keeps a copy of

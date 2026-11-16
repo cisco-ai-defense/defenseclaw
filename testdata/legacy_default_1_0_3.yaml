@@ -1,0 +1,193 @@
+# DefenseClaw Default Policy
+# Balanced security — scans everything, blocks HIGH/CRITICAL, warns on MEDIUM/LOW
+name: default
+description: Balanced security policy for standard deployments
+
+admission:
+  scan_on_install: true
+  allow_list_bypass_scan: true
+
+skill_actions:
+  critical:
+    file: quarantine
+    runtime: disable
+    install: block
+  high:
+    file: quarantine
+    runtime: disable
+    install: block
+  medium:
+    file: none
+    runtime: enable
+    install: none
+  low:
+    file: none
+    runtime: enable
+    install: none
+  info:
+    file: none
+    runtime: enable
+    install: none
+
+# Scanner-specific severity overrides. Each top-level key is a scanner
+# type (mcp, plugin, skill, …); each second-level key is a severity tier
+# (LOW/MEDIUM/HIGH/CRITICAL); each leaf is the {runtime, file, install}
+# action triple to apply when *that* scanner emits *that* severity. The
+# active enforcement matrix is the union of these overrides with the
+# skill_actions defaults above.
+#
+# `defenseclaw policy activate` writes these entries into
+# admission.<type>.actions in config.yaml, which is what the gateway reads.
+scanner_overrides:
+  mcp:
+    MEDIUM:
+      runtime: block
+      file: quarantine
+      install: block
+    LOW:
+      runtime: block
+      file: none
+      install: none
+  plugin:
+    HIGH:
+      runtime: block
+      file: quarantine
+      install: block
+    MEDIUM:
+      runtime: allow
+      file: none
+      install: none
+
+first_party_allow_list:
+  # See policies/strict.yaml for the rationale behind the per-connector
+  # paths — same set, kept in sync across all three default policies.
+  # F-0541: markers pin the asset's own leaf directory, not a broad parent
+  # (e.g. ".defenseclaw" / ".openclaw/extensions" / ".codex-plugin") that any
+  # sibling plugin/skill could be dropped into to spoof first-party status.
+  #
+  # F-0902: every marker MUST be anchored to a DefenseClaw/agent-framework
+  # *home* the operator owns (".openclaw", ".zeptoclaw", ".claude", ".codex",
+  # or Amp's exact managed bridge file under ".config/amp/plugins").
+  # A bare relative marker such as "extensions/defenseclaw" or "skills/codeguard"
+  # matches the same component sequence under ANY parent, so an attacker who
+  # drops "<untrusted-home>/extensions/defenseclaw" inherits the first-party
+  # allow. The unanchored entries are removed; only home-anchored markers remain.
+  - target_type: plugin
+    target_name: defenseclaw
+    reason: first-party DefenseClaw plugin
+    source_path_contains:
+      - ".openclaw/extensions/defenseclaw"
+      - ".zeptoclaw/extensions/defenseclaw"
+      - ".claude/extensions/defenseclaw"
+      - ".codex/extensions/defenseclaw"
+      - ".config/amp/plugins/defenseclaw.ts"
+  - target_type: skill
+    target_name: codeguard
+    reason: first-party DefenseClaw skill
+    source_path_contains:
+      - ".openclaw/workspace/skills/codeguard"
+      - ".openclaw/skills/codeguard"
+      - ".zeptoclaw/skills/codeguard"
+      - ".claude/skills/codeguard"
+
+guardrail:
+  block_threshold: 4
+  alert_threshold: 2
+  hilt:
+    enabled: false
+    min_severity: HIGH
+  cisco_trust_level: full
+  patterns:
+    injection:
+      - "ignore previous"
+      - "ignore all instructions"
+      - "ignore above"
+      - "disregard previous"
+      - "disregard all"
+      - "you are now"
+      - "act as"
+      - "pretend you are"
+      - "bypass"
+      - "jailbreak"
+      - "do anything now"
+      - "dan mode"
+    secrets:
+      - "sk-"
+      - "sk-ant-"
+      - "sk-proj-"
+      - "api_key="
+      - "apikey="
+      - "-----begin rsa"
+      - "-----begin private"
+      - "-----begin openssh"
+      - "aws_access_key"
+      - "aws_secret_access"
+      - "password="
+      - "token:"
+      - "bearer "
+      - "ghp_"
+      - "gho_"
+      - "github_pat_"
+    exfiltration:
+      - "/etc/passwd"
+      - "/etc/shadow"
+      - "base64 -d"
+      - "base64 --decode"
+      - "exfiltrate"
+      - "send to my server"
+      - "curl http"
+  severity_mappings:
+    injection: HIGH
+    secrets: MEDIUM
+    exfiltration: HIGH
+
+firewall:
+  default_action: deny
+  blocked_destinations:
+    - "169.254.169.254"
+    - "fd00:ec2::254"
+  allowed_domains:
+    - "api.anthropic.com"
+    - "api.github.com"
+    - "github.com"
+    - "objects.githubusercontent.com"
+    - "proxy.golang.org"
+    - "sum.golang.org"
+    - "registry.npmjs.org"
+    - "pypi.org"
+    - "files.pythonhosted.org"
+  allowed_ports:
+    - 443
+    - 80
+
+# Periodic rescan / drift detection settings.  This does NOT enable
+# filesystem watching of policy files — use `POST /policy/reload` or
+# `defenseclaw policy reload` to pick up Rego policy changes.
+watch:
+  rescan_enabled: true
+  rescan_interval_min: 60
+
+# Outbound webhook notifications. Valid event categories:
+#   block     - skill/plugin/MCP blocked or quarantined
+#   guardrail - prompt/completion guardrail actions
+#   drift     - rescan drift detection
+#   scan      - scan results
+#   health    - gateway-down, guardrail-degraded, gateway-recovered
+#
+# webhooks:
+#   - url: https://hooks.slack.com/services/T.../B.../xxx
+#     type: slack              # slack | pagerduty | webex | generic
+#     enabled: true
+#     min_severity: MEDIUM     # INFO | LOW | MEDIUM | HIGH | CRITICAL
+#     events: [block, health]  # empty = all categories
+#     cooldown_seconds: 300    # dedup window (seconds); omit for default (300s); 0 to disable
+#     secret_env: SLACK_WEBHOOK_SECRET
+webhooks: []
+
+enforcement:
+  max_enforcement_delay_seconds: 2
+
+audit:
+  log_all_actions: true
+  log_scan_results: true
+  retention_days: 90

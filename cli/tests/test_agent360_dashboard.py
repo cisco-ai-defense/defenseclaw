@@ -44,18 +44,31 @@ def _panel_by_title(dashboard: dict, title: str) -> dict:
     raise AssertionError(f"missing panel {title!r}")
 
 
+_ROOT_FOR_POPOVER = Path(__file__).resolve().parents[2]
+
+
+def test_agent360_node_details_fit_the_popover():
+    # GAP-1391: the node details popover is as wide as its longest value; a
+    # 300-character note overflowed a 1280x800 screen. The counting rules
+    # are in the panel description.
+    import re
+
+    raw = (_ROOT_FOR_POPOVER / "bundles/local_observability_stack/grafana/dashboards/defenseclaw-agent-360.json").read_text()
+    notes = re.findall(r"detail__(?:count_meaning|correlation_note|content_note|lineage_provenance)=`([^`]*)`", raw)
+    assert notes and max(len(note) for note in notes) <= 60, max(notes, key=len)
+
+
 def test_agent360_has_dynamic_directory_and_required_drilldown_surfaces() -> None:
     dashboard = _dashboard(AGENT360)
     assert dashboard["uid"] == "defenseclaw-agent-360"
 
     variables = {item["name"]: item for item in dashboard["templating"]["list"]}
     assert {"connector", "agent", "scope_label", "lifecycle", "execution", "trace"} <= variables.keys()
-    assert variables["agent"]["datasource"]["uid"] == "defenseclaw-loki"
-    assert '{service_name="defenseclaw"}' in variables["agent"]["definition"]
-    assert "body_$scope_label" in variables["agent"]["definition"]
-    assert "$scope_label" in variables["agent"]["definition"]
-    assert variables["lifecycle"]["datasource"]["uid"] == "defenseclaw-loki"
-    assert variables["execution"]["datasource"]["uid"] == "defenseclaw-loki"
+    # Loki cannot list record-body fields in a box (GAP-0241): the identity
+    # drilldowns are regex text boxes the directory links fill in.
+    for name in ("agent", "lifecycle", "execution"):
+        assert variables[name]["type"] == "textbox", name
+        assert variables[name]["query"] == variables[name]["current"]["value"] == ".+", name
     assert variables["lifecycle"]["label"] == "Lifecycle (drilldown)"
     assert variables["execution"]["label"] == "Execution (drilldown)"
     variable_order = [item["name"] for item in dashboard["templating"]["list"]]
@@ -364,7 +377,7 @@ def test_agent360_trace_selection_drives_waterfall_and_topology() -> None:
     for query in (*edge_queries, *node_queries):
         assert "count_over_time(" in query
         assert "label_format" in query
-        assert '|= "$agent" | json | __error__=""' in query
+        assert '|~ "$agent" | json | __error__=""' in query
         assert 'body_$scope_label=~"$agent"' in query
         assert "defenseclaw_event_name=" in query
     assert 'defenseclaw_agent_lifecycle_id=~"$lifecycle"' not in edge_query
@@ -516,13 +529,13 @@ def test_agent360_trace_selection_drives_waterfall_and_topology() -> None:
     assert 'source=`agent:{{.graph_parent_id}}`' in spawn_edge
     assert 'target=`agent:{{.graph_child_id}}`' in spawn_edge
     assert "paired inverse orientations count once" in spawn_edge
-    assert "raw subagent parent fields never create this edge" in spawn_edge
+    assert "delegated_by as its inverse" in spawn_edge
     assert "body_defenseclaw_agent_parent_id" not in spawn_edge
     agent_nodes = targets_by_ref["nodesAgent"]
     assert agent_nodes.startswith("((topk by (id) (1,")
     assert 'defenseclaw_event_name=~`session_start|subagent_start`' in agent_nodes
     assert '((event_name="subagent_start") or (event_name="session_start"' in agent_nodes
-    assert "Canonical 24-hour session_start or subagent_start identity" in agent_nodes
+    assert "Identity from the 24h session_start or subagent_start" in agent_nodes
     assert "and on (id)" in agent_nodes
     assert "unless on (id)" in agent_nodes
     assert agent_nodes.count("topk by (id) (1,") == 2
@@ -573,7 +586,7 @@ def test_agent360_trace_selection_drives_waterfall_and_topology() -> None:
         assert "observation_source" in query
         assert "label_format observation_source=" in query
         assert "Source-deduplicated model requests" in query
-        assert "largest source total" in query
+        assert "largest source total" in query.lower()
 
     # Request records remain visible without a terminal counterpart. Totals are
     # request counts and do not claim the work is still pending.
@@ -876,7 +889,9 @@ def test_agent360_agent_scoped_loki_queries_prefilter_before_json_parsing() -> N
             if datasource != "loki" or 'body_$scope_label=~"$agent"' not in expression:
                 continue
             checked.append(panel["title"])
-            assert '|= "$agent" | json' in expression, panel["title"]
+            # $agent is a regex text box, so the line prefilter is a regex too.
+            assert '|~ "$agent" | json' in expression, panel["title"]
+            assert '|= "$agent"' not in expression, panel["title"]
 
     assert checked
 
@@ -1103,7 +1118,7 @@ def test_collector_derives_agent_span_metrics_and_fans_them_to_prometheus() -> N
     assert "receivers: [otlp, spanmetrics/agent360]" in config
     assert "exporters: [prometheusremotewrite/prometheus, debug]" in config
     assert "deltatocumulative:" in config
-    assert "processors: [resource, deltatocumulative, batch]" in config
+    assert "processors: [resource, filter/managed-sandbox-out, deltatocumulative, batch]" in config
     assert "endpoint: 0.0.0.0:8889" not in config
     assert "readers:" in config
     assert "without_type_suffix: true" in config

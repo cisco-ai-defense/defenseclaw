@@ -27,6 +27,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -103,6 +104,26 @@ func TestLauncherNeedsTheDefenseclawNameAndATrustedManagedRecord(t *testing.T) {
 	}
 }
 
+// executeLauncherInTest runs executeLauncher over a test root and puts back
+// the package state it changes: installUsageArgChecks installs once per
+// process, so a launcher test that ran first left rootCmd without its usage
+// checks (TestStrayArgumentsAreUsageErrors,
+// TestMistypedSubcommandSuggestsAndShowsUsage and
+// TestEnterpriseLeavesRejectAStrayArgumentAsUnexpected failed in a shuffled
+// run), and a rootCmd test that ran first left the launcher root without
+// them; and the sandbox app factory, which each run wraps again (GAP-0079).
+func executeLauncherInTest(t *testing.T, root *cobra.Command, args []string) int {
+	t.Helper()
+	installed, app := usageArgChecksInstalled, newSandboxApp
+	t.Cleanup(func() { usageArgChecksInstalled, newSandboxApp = installed, app })
+	usageArgChecksInstalled = false
+	if args == nil {
+		// nil makes cobra read the test binary's own command line.
+		args = []string{}
+	}
+	return executeLauncher(context.Background(), root, args)
+}
+
 // launcherTestRoot is a stand-in for the gateway's command tree.
 func launcherTestRoot(ran *[]string) *cobra.Command {
 	root := &cobra.Command{
@@ -135,7 +156,7 @@ func launcherTestRoot(ran *[]string) *cobra.Command {
 
 func TestLauncherRefusesEveryCommandThatIsNotSandbox(t *testing.T) {
 	for _, args := range [][]string{
-		{"status"}, {"setup", "gateway"}, {"enterprise", "linux", "status"}, {"start"},
+		{"policy", "explain"}, {"setup", "gateway"}, {"enterprise", "linux", "status"}, {"start"},
 		{"sandboxes"}, {"--bogus"}, {"-v"}, {"--version-json"}, {"unknown-command"},
 	} {
 		var ran []string
@@ -143,7 +164,7 @@ func TestLauncherRefusesEveryCommandThatIsNotSandbox(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		root.SetOut(&stdout)
 		root.SetErr(&stderr)
-		if code := executeLauncher(context.Background(), root, args); code != 2 {
+		if code := executeLauncherInTest(t, root, args); code != 2 {
 			t.Errorf("%v: exit %d, want 2", args, code)
 		}
 		if got := strings.TrimSpace(stderr.String()); got != launcherRefusal {
@@ -153,30 +174,91 @@ func TestLauncherRefusesEveryCommandThatIsNotSandbox(t *testing.T) {
 			t.Errorf("%v: ran %v and printed %q before refusing", args, ran, stdout.String())
 		}
 	}
-	const want = "This computer is managed; only `defenseclaw sandbox` commands are available here."
+	want := "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy."
+	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+		platform, gateway := "linux", "/opt/defenseclaw/bin/defenseclaw-gateway"
+		if runtime.GOOS == "darwin" {
+			platform, gateway = "macos", "/opt/cisco/defenseclaw/bin/defenseclaw-gateway"
+		}
+		want += " For administrator views, run `sudo " + gateway + " enterprise " + platform + " status`, `sudo " + gateway + " enterprise " + platform + " verify`, or `sudo " + gateway + " audit export --since 2h`. The managed launcher does not offer doctor, alerts, or tui."
+	}
 	if launcherRefusal != want {
 		t.Fatalf("refusal text = %q, want %q", launcherRefusal, want)
 	}
 }
 
-func TestLauncherHelpShowsOnlySandbox(t *testing.T) {
-	for _, args := range [][]string{nil, {"--help"}, {"help"}} {
+func TestLauncherTUIPointsToTheManagedDailyView(t *testing.T) {
+	for _, name := range []string{"tui"} {
+		t.Run(name, func(t *testing.T) {
+			var ran []string
+			root := launcherTestRoot(&ran)
+			var stdout, stderr bytes.Buffer
+			root.SetOut(&stdout)
+			root.SetErr(&stderr)
+			if code := executeLauncherInTest(t, root, []string{name}); code != 2 {
+				t.Fatalf("%s exit %d, want a bounded launcher refusal", name, code)
+			}
+			message := stderr.String()
+			if !strings.Contains(message, "This computer is managed") ||
+				!strings.Contains(message, "defenseclaw sandbox status") ||
+				!strings.Contains(message, "defenseclaw sandbox policy explain") ||
+				stdout.Len() != 0 || len(ran) != 0 {
+				t.Fatalf("%s did not give the caller a read-only route: stderr=%q stdout=%q ran=%v", name, message, stdout.String(), ran)
+			}
+		})
+	}
+}
+
+func TestLauncherRefusalNamesAdministratorViews(t *testing.T) {
+	// Windows has no managed launcher: launcherRefusalFor("windows") is the
+	// shared sentence only (the administrator command is defenseclaw.exe).
+	if runtime.GOOS == "windows" {
+		t.Skip("no managed launcher on Windows")
+	}
+	for _, args := range [][]string{{"doctor"}, {"alerts"}, {"tui"}} {
 		var ran []string
 		root := launcherTestRoot(&ran)
 		var stdout, stderr bytes.Buffer
 		root.SetOut(&stdout)
 		root.SetErr(&stderr)
-		if code := executeLauncher(context.Background(), root, args); code != 0 {
+		if code := executeLauncherInTest(t, root, args); code != 2 || stdout.Len() != 0 || len(ran) != 0 {
+			t.Fatalf("%v: exit %d, stdout %q, ran %v", args, code, stdout.String(), ran)
+		}
+		for _, command := range []string{"defenseclaw-gateway enterprise", " status", " verify", "defenseclaw-gateway audit export"} {
+			if !strings.Contains(stderr.String(), command) {
+				t.Errorf("%v: refusal lacks %q: %s", args, command, stderr.String())
+			}
+		}
+	}
+}
+
+func TestLauncherHelpShowsOnlySandbox(t *testing.T) {
+	// No arguments is an empty list: a nil list makes cobra read the test
+	// binary's own command line (GAP-0079).
+	for _, args := range [][]string{{}, {"--help"}, {"help"}} {
+		var ran []string
+		root := launcherTestRoot(&ran)
+		var stdout, stderr bytes.Buffer
+		root.SetOut(&stdout)
+		root.SetErr(&stderr)
+		if code := executeLauncherInTest(t, root, args); code != 0 {
 			t.Fatalf("%v: exit %d, stderr %q", args, code, stderr.String())
 		}
 		out := stdout.String()
-		if !strings.Contains(out, "defenseclaw sandbox run claude") || !strings.Contains(out, "sandbox") {
+		if !strings.Contains(out, "defenseclaw sandbox run claude") || !strings.Contains(out, "defenseclaw sandbox status") || !strings.Contains(out, "sandbox") {
 			t.Errorf("%v: help does not offer the sandbox tree:\n%s", args, out)
 		}
-		for _, hidden := range []string{"status", "setup", "enterprise", "completion", "sidecar"} {
+		for _, hidden := range []string{"setup", "enterprise", "completion", "sidecar"} {
 			if strings.Contains(out, hidden) {
 				t.Errorf("%v: help mentions %q:\n%s", args, hidden, out)
 			}
+		}
+		// `status` is the user's own protection state (cowork-1-0-8
+		// GAP-0053), not the administrator's status. Windows has no
+		// launcher, so it has no launcher status command
+		// (own_status_windows.go).
+		if runtime.GOOS != "windows" && (!strings.Contains(out, "  defenseclaw status ") || !strings.Contains(out, "Show whether DefenseClaw protects your Claude Code and Cowork sessions")) {
+			t.Errorf("%v: help does not offer the user's own status:\n%s", args, out)
 		}
 		if len(ran) != 0 {
 			t.Errorf("%v: ran %v", args, ran)
@@ -190,10 +272,19 @@ func TestPrepareLauncherRootKeepsOnlyTheSandboxTree(t *testing.T) {
 	prepareLauncherRoot(root)
 	var names []string
 	for _, command := range root.Commands() {
-		names = append(names, command.Name())
+		// The hidden guardrail tree holds only the user's own profile
+		// explain (GAP-0431, GAP-0422).
+		if !command.Hidden {
+			names = append(names, command.Name())
+		}
 	}
-	if !reflect.DeepEqual(names, []string{"sandbox"}) {
-		t.Fatalf("commands = %v, want [sandbox]", names)
+	want := []string{"sandbox", "status"}
+	if runtime.GOOS == "windows" {
+		// Windows has no launcher and no launcher status command.
+		want = []string{"sandbox"}
+	}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("commands = %v, want %v", names, want)
 	}
 	if root.Use != "defenseclaw" {
 		t.Fatalf("Use = %q", root.Use)
@@ -235,7 +326,7 @@ func TestLauncherRunsSandboxCommandsWithoutTheGatewayBootstrap(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	root.SetOut(&stdout)
 	root.SetErr(&stderr)
-	if code := executeLauncher(context.Background(), root, []string{"sandbox", "list"}); code != 0 {
+	if code := executeLauncherInTest(t, root, []string{"sandbox", "list"}); code != 0 {
 		t.Fatalf("exit %d, stderr %q", code, stderr.String())
 	}
 	if !reflect.DeepEqual(ran, []string{"sandbox list"}) {
@@ -316,6 +407,13 @@ func TestLauncherEnsureDaemon(t *testing.T) {
 	pending := func(running int) *sandboxapi.Status {
 		return &sandboxapi.Status{Running: running, Managed: &sandboxapi.ManagedStatus{PendingRestart: true}}
 	}
+	// pendingLive: no sandbox is ready, but live may still hold compute (a
+	// MicroVM in OpenShell's error state); a daemon before 1.0.4 reports
+	// no live count, only how many sandboxes it has.
+	pendingLive := func(live *int, sandboxes int) *sandboxapi.Status {
+		return &sandboxapi.Status{Sandboxes: sandboxes, Live: live, Managed: &sandboxapi.ManagedStatus{PendingRestart: true}}
+	}
+	one := 1
 	for _, test := range []struct {
 		name    string
 		goos    string
@@ -355,13 +453,23 @@ func TestLauncherEnsureDaemon(t *testing.T) {
 			answers: []*sandboxapi.Status{pending(2)},
 		},
 		{
+			// The restart takes the account's OpenShell gateway with it.
+			name: "a daemon with a sandbox that may still hold compute keeps its restart pending", goos: "linux",
+			answers: []*sandboxapi.Status{pendingLive(&one, 1)},
+		},
+		{
+			name: "a daemon before the live count keeps its restart pending while it has sandboxes", goos: "linux",
+			answers: []*sandboxapi.Status{pendingLive(nil, 2)},
+		},
+		{
 			name: "macos registers and starts the agent in the graphical session", goos: "darwin",
 			answers: []*sandboxapi.Status{nil, up},
 			fail:    map[string]string{"print gui/501/com.cisco.defenseclaw.sandbox": "Could not find service"},
 			calls: []string{
 				"/bin/launchctl print gui/501",
+				"/bin/launchctl print user/501",
 				"/bin/launchctl print gui/501/com.cisco.defenseclaw.sandbox",
-				"/bin/launchctl bootstrap gui/501 /Library/LaunchAgents/com.cisco.defenseclaw.sandbox.plist",
+				"/bin/launchctl bootstrap gui/501 " + launcherAgentPlist,
 				"/bin/launchctl print gui/501/com.cisco.defenseclaw.openshell-gateway",
 				"/bin/launchctl kickstart gui/501/com.cisco.defenseclaw.sandbox",
 			},
@@ -375,8 +483,9 @@ func TestLauncherEnsureDaemon(t *testing.T) {
 			},
 			calls: []string{
 				"/bin/launchctl print gui/501",
+				"/bin/launchctl print user/501",
 				"/bin/launchctl print user/501/com.cisco.defenseclaw.sandbox",
-				"/bin/launchctl bootstrap user/501 /Library/LaunchAgents/com.cisco.defenseclaw.sandbox.plist",
+				"/bin/launchctl bootstrap user/501 " + launcherAgentPlist,
 				"/bin/launchctl print user/501/com.cisco.defenseclaw.openshell-gateway",
 				"/bin/launchctl kickstart user/501/com.cisco.defenseclaw.sandbox",
 			},
@@ -386,6 +495,7 @@ func TestLauncherEnsureDaemon(t *testing.T) {
 			answers: []*sandboxapi.Status{nil, up},
 			calls: []string{
 				"/bin/launchctl print gui/501",
+				"/bin/launchctl print user/501",
 				"/bin/launchctl print gui/501/com.cisco.defenseclaw.sandbox",
 				"/bin/launchctl print gui/501/com.cisco.defenseclaw.openshell-gateway",
 				"/bin/launchctl kickstart gui/501/com.cisco.defenseclaw.sandbox",
@@ -396,6 +506,7 @@ func TestLauncherEnsureDaemon(t *testing.T) {
 			answers: []*sandboxapi.Status{pending(0), up},
 			calls: []string{
 				"/bin/launchctl print gui/501",
+				"/bin/launchctl print user/501",
 				"/bin/launchctl print gui/501/com.cisco.defenseclaw.sandbox",
 				"/bin/launchctl print gui/501/com.cisco.defenseclaw.openshell-gateway",
 				"/bin/launchctl kickstart -k gui/501/com.cisco.defenseclaw.sandbox",
@@ -432,5 +543,104 @@ func TestLauncherServiceEnvGivesSystemctlTheRuntimeDirectory(t *testing.T) {
 	// one adds nothing.
 	if env := launcherServiceEnv([]string{"A=1"}, 4000000); len(env) != 1 {
 		t.Fatalf("env = %v, want it unchanged for an account without a runtime dir", env)
+	}
+}
+
+func TestLauncherReportsOnlyNamedManagedRefusals(t *testing.T) {
+	previous := reportManagedCommandRefusal
+	var reported []string
+	reportManagedCommandRefusal = func(command, reason string) {
+		reported = append(reported, command+":"+reason)
+	}
+	t.Cleanup(func() { reportManagedCommandRefusal = previous })
+	// mp0.GAP-0002: the config, guardrail and policy writers are audited
+	// too, by their command words only, never an argument.
+	for _, args := range [][]string{
+		{"guardrail", "disable"}, {"uninstall", "--all"},
+		{"guardrail", "status"}, {"config", "set", "token=untrusted"},
+		{"config", "show"}, {"guardrail", "protection", "list"}, {"guardrail", "block-at", "LOW"},
+		{"policy", "edit", "x"}, {"policy", "show"}, {"config"},
+		// rel-1-0-6 GAP-0104: a help request is no refused write and costs no report.
+		{"upgrade", "--help"}, {"setup", "-h"}, {"guardrail", "disable", "--help"},
+		{"upgrade"}, {"rollback"},
+	} {
+		root := &cobra.Command{Use: "defenseclaw"}
+		root.SetErr(&bytes.Buffer{})
+		if code := executeLauncherInTest(t, root, args); code != 2 {
+			t.Fatalf("%v: exit %d, want refusal", args, code)
+		}
+	}
+	if got, want := strings.Join(reported, ","), "guardrail disable:,uninstall:,config set:,guardrail block-at:,policy edit:,upgrade:,rollback:"; got != want {
+		t.Fatalf("reported %q, want %q", got, want)
+	}
+}
+
+// GAP-0534: on a managed computer the sandbox pre-run probes the account's
+// daemon socket, which starts the daemon. For a `sandbox run` of an account
+// the organization does not allow sandboxes (the managed gateway's settled
+// view) it probes nothing, and the run refuses in the daemon's ready words;
+// an allowed, provisional or unanswered view probes the daemon as before.
+func TestLauncherStartsNoSandboxDaemonForAForbiddenRun(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("the launcher is a Linux and macOS command")
+	}
+	var probes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		probes.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"enabled":true,"available":true}`))
+	}))
+	t.Cleanup(server.Close)
+	client := sandboxapi.NewClient(server.URL, "")
+	restoreClient, restorePolicy, restoreRun, restoreCfg := launcherManagedClient, launcherAccountPolicy, launcherRun, cfg
+	launcherManagedClient = func(string) (*sandboxapi.Client, error) { return client, nil }
+	launcherRun = func(context.Context, string, ...string) (string, error) {
+		t.Error("the sandbox daemon was started")
+		return "", nil
+	}
+	t.Cleanup(func() {
+		launcherManagedClient, launcherAccountPolicy, launcherRun, launcherClient, cfg = restoreClient, restorePolicy, restoreRun, nil, restoreCfg
+	})
+	run := &cobra.Command{Use: "run"}
+	(&cobra.Command{Use: "sandbox"}).AddCommand(run)
+	for _, tc := range []struct {
+		name   string
+		view   *sandboxapi.ManagedExplain
+		err    error
+		probed bool
+	}{
+		{"forbidden", &sandboxapi.ManagedExplain{Profile: "prep-runtime-off", Allowed: false}, nil, false},
+		{"allowed", &sandboxapi.ManagedExplain{Profile: "fx", Allowed: true}, nil, true},
+		{"provisional", &sandboxapi.ManagedExplain{Profile: "fx", Allowed: false, Provisional: true}, nil, true},
+		{"gateway does not answer", nil, errors.New("hook socket refused"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var asked []string
+			launcherAccountPolicy = func(_ context.Context, harness string) (*sandboxapi.ManagedExplain, error) {
+				asked = append(asked, harness)
+				return tc.view, tc.err
+			}
+			before := probes.Load()
+			if err := launcherSandboxPreRun(run, []string{"claude"}); err != nil {
+				t.Fatal(err)
+			}
+			if got := probes.Load() > before; got != tc.probed {
+				t.Fatalf("daemon probed = %v, want %v", got, tc.probed)
+			}
+			if len(asked) != 1 || asked[0] != "claudecode" {
+				t.Fatalf("policy asked for %q", asked)
+			}
+		})
+	}
+	// Other sandbox commands probe the daemon without asking.
+	launcherAccountPolicy = func(context.Context, string) (*sandboxapi.ManagedExplain, error) {
+		t.Error("a list asked the account policy")
+		return nil, nil
+	}
+	list := &cobra.Command{Use: "list"}
+	(&cobra.Command{Use: "sandbox"}).AddCommand(list)
+	before := probes.Load()
+	if err := launcherSandboxPreRun(list, nil); err != nil || probes.Load() == before {
+		t.Fatalf("list pre-run = %v, probed %v", err, probes.Load() > before)
 	}
 }

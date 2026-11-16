@@ -71,7 +71,7 @@ func TestRoundTrip(t *testing.T) {
 	}
 }
 
-// TestReproducibilityByteIdentical is the spec 001 REQ-07 gate at the
+// TestReproducibilityByteIdentical is the reproducible-build gate at the
 // trailer level. Two writes against the same inputs must produce byte-
 // identical outputs regardless of input entry order.
 func TestReproducibilityByteIdentical(t *testing.T) {

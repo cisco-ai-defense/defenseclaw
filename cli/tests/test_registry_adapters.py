@@ -230,12 +230,32 @@ class TestClawhubAdapter(unittest.TestCase):
             manifest, _ = fetch_clawhub(self._src(), resolver=_stub_resolver())
         self.assertEqual([e.name for e in manifest.entries], ["ok-name"])
 
-    def test_missing_plugins_map_yields_empty_manifest(self):
-        # An openclaw package without a plugins map is a valid (if
-        # unusual) state — it means "no skills published". We surface
-        # that as an empty manifest rather than an error so a
-        # mid-bootstrap registry doesn't permanently fail sync.
-        body = b'{"name":"openclaw"}'
+    def test_missing_plugins_map_raises(self):
+        # GAP-0131: package metadata with no plugins map (the public
+        # openclaw package today) is not a catalog; sync reported ok with 0
+        # fetched. It fails with the missing-map error instead.
+        for body in (b'{"name":"openclaw"}', b'{"openclaw":{"version":"1"}}', b'{"openclaw":"x"}'):
+            with patch.object(
+                adapter_base.requests, "get",
+                _MockTransport(responses=[_FakeResp(body)]),
+            ), self.assertRaises(IngestError) as cm:
+                fetch_clawhub(self._src(), resolver=_stub_resolver())
+            self.assertIn("missing the plugins map", str(cm.exception))
+
+    def test_empty_nested_plugins_map_keeps_the_top_level_catalog(self):
+        # An empty openclaw.plugins must not hide a populated top-level
+        # plugins map: the zero-entry sync would promote an empty catalog and
+        # remove the source's registry rules.
+        body = b'{"openclaw":{"plugins":{}},"plugins":{"ok-name":{"version":"1.0.0"}}}'
+        with patch.object(
+            adapter_base.requests, "get",
+            _MockTransport(responses=[_FakeResp(body)]),
+        ):
+            manifest, _ = fetch_clawhub(self._src(), resolver=_stub_resolver())
+        self.assertEqual([e.name for e in manifest.entries], ["ok-name"])
+
+    def test_empty_plugins_map_yields_empty_manifest(self):
+        body = b'{"openclaw":{"plugins":{}}}'
         with patch.object(
             adapter_base.requests, "get",
             _MockTransport(responses=[_FakeResp(body)]),
@@ -364,6 +384,52 @@ class TestSmitheryAdapter(unittest.TestCase):
         ]).encode("utf-8")
         manifest, _, _ = self._post(body)
         self.assertEqual([e.name for e in manifest.entries], ["bare-array-form"])
+
+    def test_current_catalog_shape_reads_hosted_server_urls(self):
+        # GAP-1640: today's catalog rows carry qualifiedName and remote=true
+        # but no deployment block, so every row was dropped and the dry run
+        # said "Entries: 0 ... successful". A hosted server's URL is in its
+        # own record (deploymentUrl), which the adapter now reads.
+        listing = json.dumps({
+            "servers": [
+                {"qualifiedName": "brave", "remote": True, "isDeployed": True, "displayName": "Brave Search"},
+                {"qualifiedName": "@acme/notes", "remote": True, "isDeployed": True},
+            ],
+            "pagination": {"currentPage": 1, "pageSize": 2, "totalPages": 1},
+        }).encode("utf-8")
+        routes = {
+            "https://registry.smithery.ai/servers": _FakeResp(listing),
+            "https://registry.smithery.ai/servers/brave": _FakeResp(json.dumps({
+                "qualifiedName": "brave", "remote": True,
+                "deploymentUrl": "https://server.example.com/brave",
+                "connections": [{"type": "http", "deploymentUrl": "https://server.example.com/brave"}],
+            }).encode("utf-8")),
+            "https://registry.smithery.ai/servers/@acme/notes": _FakeResp(json.dumps({
+                "qualifiedName": "@acme/notes", "remote": True,
+                "connections": [{"type": "http", "deploymentUrl": "https://server.example.com/notes"}],
+            }).encode("utf-8")),
+        }
+        transport = _MockTransport(routes=routes)
+        with patch.object(adapter_base.requests, "get", transport):
+            manifest, _ = fetch_smithery(self._src(), resolver=_stub_resolver())
+        self.assertEqual(
+            [(e.name, e.transport, e.url) for e in manifest.entries],
+            [("brave", "streamable-http", "https://server.example.com/brave"),
+             ("acme-notes", "streamable-http", "https://server.example.com/notes")],
+        )
+        self.assertEqual(manifest.notes, [])
+
+    def test_zero_usable_rows_say_why(self):
+        listing = json.dumps({"servers": [{"qualifiedName": "ghost", "remote": True}]}).encode("utf-8")
+        routes = {
+            "https://registry.smithery.ai/servers": _FakeResp(listing),
+            "https://registry.smithery.ai/servers/ghost": _FakeResp(b'{"qualifiedName": "ghost", "remote": true}'),
+        }
+        transport = _MockTransport(routes=routes)
+        with patch.object(adapter_base.requests, "get", transport):
+            manifest, _ = fetch_smithery(self._src(), resolver=_stub_resolver())
+        self.assertEqual(manifest.entries, [])
+        self.assertEqual(manifest.notes, ["1 hosted server(s) have no deployment URL in their record"])
 
     def test_unknown_envelope_raises(self):
         body = b'{"foo":"bar"}'

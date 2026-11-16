@@ -177,18 +177,20 @@ func TestSandboxDriverClaim(t *testing.T) {
 		"no claim takes ours":     {cfg: host("auto", ""), goos: "linux", wantDriver: "docker", wantReason: "kvm_missing"},
 		"fallback none":           {cfg: host("vm", "none"), goos: "linux", driver: "docker", reason: "kvm_missing", wantRefusal: "requires MicroVM sandboxes"},
 		"profile none":            {cfg: host("auto", ""), goos: "linux", floor: config.OpenShellAdminConfig{DriverFallback: "none"}, driver: "docker", reason: "kvm_missing", wantRefusal: "requires MicroVM sandboxes"},
-		"docker without a reason": {cfg: host("auto", ""), goos: "linux", driver: "docker", reason: "configured", wantRefusal: "malformed"},
+		"stale configured docker": {cfg: host("auto", ""), goos: "linux", driver: "docker", reason: "configured", wantRefusal: "configuration selects auto"},
+		"unknown docker reason":   {cfg: host("auto", ""), goos: "linux", driver: "docker", reason: "unknown", wantRefusal: "malformed"},
+		"docker on a vm host":     {cfg: host("vm", "none"), goos: "linux", driver: "docker", reason: "configured", wantRefusal: "configuration selects vm"},
 		"docker host":             {cfg: host("docker", ""), goos: "linux", driver: "docker", reason: "configured", wantDriver: "docker", wantReason: "configured"},
-		"vm on a docker host":     {cfg: host("docker", ""), goos: "linux", driver: "vm", reason: "configured", wantRefusal: "on the docker driver"},
-		"mac is MicroVM only":     {cfg: host("auto", ""), goos: "darwin", driver: "docker", reason: "kvm_missing", wantRefusal: "on the vm driver"},
+		"vm on a docker host":     {cfg: host("docker", ""), goos: "linux", driver: "vm", reason: "configured", wantRefusal: "configuration selects docker"},
+		"mac is MicroVM only":     {cfg: host("auto", ""), goos: "darwin", driver: "docker", reason: "kvm_missing", wantRefusal: "configuration selects vm"},
 		"mac vm":                  {cfg: host("", ""), goos: "darwin", driver: "vm", reason: "configured", wantDriver: "vm", wantReason: "configured"},
 	} {
 		driver, reason, refusal := sandboxDriverClaim(tc.cfg, tc.goos, tc.floor, tc.driver, tc.reason, gw)
 		switch {
-		case tc.wantRefusal != "" && !strings.Contains(refusal, tc.wantRefusal):
-			t.Errorf("%s: refusal %q, want %q", name, refusal, tc.wantRefusal)
-		case tc.wantRefusal == "" && (refusal != "" || driver != tc.wantDriver || reason != tc.wantReason):
-			t.Errorf("%s: %q %q %q, want %q %q", name, driver, reason, refusal, tc.wantDriver, tc.wantReason)
+		case tc.wantRefusal != "" && (refusal == nil || !strings.Contains(refusal.Message, tc.wantRefusal)):
+			t.Errorf("%s: refusal %+v, want %q", name, refusal, tc.wantRefusal)
+		case tc.wantRefusal == "" && (refusal != nil || driver != tc.wantDriver || reason != tc.wantReason):
+			t.Errorf("%s: %q %q %+v, want %q %q", name, driver, reason, refusal, tc.wantDriver, tc.wantReason)
 		}
 	}
 }

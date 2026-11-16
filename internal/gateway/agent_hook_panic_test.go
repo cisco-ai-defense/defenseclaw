@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -28,7 +30,7 @@ import (
 )
 
 // TestSafeEvaluateHook_ObserveRecovery exercises safeEvaluateHook directly:
-// a recovered evaluation error keeps observe mode and its audit fields.
+// a recovered evaluation error denies a blockable event even in observe mode.
 func TestSafeEvaluateHook_ObserveRecovery(t *testing.T) {
 	runtime, capture := newProxyGeneratedTraceRuntime(t)
 	api := &APIServer{}
@@ -43,8 +45,8 @@ func TestSafeEvaluateHook_ObserveRecovery(t *testing.T) {
 	if !panicked {
 		t.Fatal("safeEvaluateHook panicked=false, want true")
 	}
-	if evalResp.Action != "allow" || evalResp.Mode != "observe" || !evalResp.WouldBlock {
-		t.Fatalf("safeEvaluateHook panic response = %+v, want observe allow + would_block", evalResp)
+	if evalResp.Action != "block" || evalResp.Mode != "action" || evalResp.WouldBlock {
+		t.Fatalf("safeEvaluateHook panic response = %+v, want fail-closed block", evalResp)
 	}
 
 	resp := safeHookPanicResponse("codex", "PreToolUse")
@@ -96,20 +98,26 @@ func TestSafeEvaluateHookManagedStandalonePanicReturnsNativeDeny(t *testing.T) {
 		if _, ok := resp.HookOutput[tc.nativeField]; !ok {
 			t.Errorf("%s: native output = %+v, missing %s", tc.connector, resp.HookOutput, tc.nativeField)
 		}
-		for _, event := range hookexec.NeutralLifecycleEvents(tc.connector) {
+		for _, event := range hookexec.LifecycleEvents(tc.connector) {
 			stop := api.hookPanicResponse(context.Background(), tc.connector,
 				agentHookRequest{HookEventName: event}, nil, nil)
-			if stop.Action != "allow" {
-				t.Errorf("%s %s: lifecycle panic action = %q, want allow", tc.connector, event, stop.Action)
+			if stop.Action != "allow" || !stop.WouldBlock || lifecycleAnswerRepeats(stop.HookOutput) {
+				t.Errorf("%s %s: lifecycle panic response = %+v, want a non-repeating neutral allow", tc.connector, event, stop)
 			}
 		}
 	}
-	for _, connectorName := range []string{"claudecode", "codex"} {
-		for _, event := range hookexec.NeutralLifecycleEvents(connectorName) {
+	for _, connectorName := range []string{"claudecode", "codex", "antigravity"} {
+		for _, event := range hookexec.LifecycleEvents(connectorName) {
 			resp := api.hookPanicResponse(context.Background(), connectorName,
 				agentHookRequest{HookEventName: event}, nil, nil)
-			if resp.Action != "allow" {
-				t.Errorf("%s %s: lifecycle panic action = %q, want allow", connectorName, event, resp.Action)
+			if terminalLifecycleEvent(connectorName, event) {
+				if resp.Action != "block" || resp.Mode != "action" || resp.HookOutput["continue"] != false {
+					t.Errorf("%s %s: lifecycle panic response = %+v, want the terminal closed answer", connectorName, event, resp)
+				}
+				continue
+			}
+			if resp.Action != "allow" || !resp.WouldBlock || lifecycleAnswerRepeats(resp.HookOutput) {
+				t.Errorf("%s %s: lifecycle panic response = %+v, want a non-repeating neutral allow", connectorName, event, resp)
 			}
 		}
 	}
@@ -117,6 +125,39 @@ func TestSafeEvaluateHookManagedStandalonePanicReturnsNativeDeny(t *testing.T) {
 		agentHookRequest{HookEventName: "UserPromptSubmit"}, nil, nil)
 	if kiro.Action != "block" || kiro.WouldBlock {
 		t.Errorf("Kiro UserPromptSubmit panic = %+v, want native block", kiro)
+	}
+}
+
+func TestManagedClaudeSessionStartFailureWatchesOnlyTheVerifiedCallerHome(t *testing.T) {
+	serviceHome, callerHome := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", serviceHome)
+	t.Setenv("USERPROFILE", serviceHome)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(serviceHome, ".claude"))
+	cfg := config.DefaultConfig()
+	cfg.DeploymentMode, cfg.Enterprise.Profile = managed.DeploymentModeManagedEnterprise, managed.ProfileStandalone
+	api := &APIServer{scannerCfg: cfg}
+	for _, home := range []string{callerHome, ""} {
+		ctx := withManagedHookPeer(withServiceAccountGateway(context.Background()), managedHookPeer{UID: 1001, Home: home})
+		req := agentHookRequest{ConnectorName: "claudecode", HookEventName: "SessionStart"}
+		resp, panicked := api.safeEvaluateHook(ctx, "claudecode", req,
+			[]byte(`{"hook_event_name":"SessionStart"}`), map[string]interface{}{}, hookProfileRuntime{
+				Evaluate: func(*APIServer, context.Context, agentHookRequest, []byte, map[string]interface{}) agentHookResponse {
+					panic("managed SessionStart evaluation failure")
+				},
+			})
+		if !panicked {
+			t.Fatal("evaluation did not fail")
+		}
+		output, _ := resp.HookOutput["hookSpecificOutput"].(map[string]interface{})
+		paths, _ := output["watchPaths"].([]string)
+		if home != "" && !slices.Contains(paths, filepath.Join(home, ".claude", "settings.json")) {
+			t.Fatalf("failure watch list omitted the verified caller: %v", paths)
+		}
+		for _, path := range paths {
+			if strings.HasPrefix(path, serviceHome+string(filepath.Separator)) {
+				t.Fatalf("failure watch list included the service home: %v", paths)
+			}
+		}
 	}
 }
 
@@ -160,14 +201,14 @@ func TestHandleAgentHook_PanicReturnsSafeResponse(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &parsed); err != nil {
 		t.Fatalf("response body is not valid JSON after panic: %v body=%s", err, w.Body.String())
 	}
-	if got, _ := parsed["action"].(string); got != "allow" {
-		t.Errorf("response action = %q, want observe allow", got)
+	if got, _ := parsed["action"].(string); got != "block" {
+		t.Errorf("response action = %q, want closed block", got)
 	}
-	if got, _ := parsed["mode"].(string); got != "observe" {
-		t.Errorf("response mode = %q, want observe", got)
+	if got, _ := parsed["mode"].(string); got != "action" {
+		t.Errorf("response mode = %q, want action", got)
 	}
-	if got, _ := parsed["would_block"].(bool); !got {
-		t.Errorf("response would_block = false, want true (panic carries guardrail intent)")
+	if got, _ := parsed["would_block"].(bool); got {
+		t.Errorf("response would_block = true, want enforced block")
 	}
 	if reason, _ := parsed["reason"].(string); !strings.Contains(reason, "internal evaluator error") {
 		t.Errorf("response reason = %q, want 'internal evaluator error' substring", reason)
@@ -206,14 +247,14 @@ func TestHandleAgentHook_EmitPanicReturnsSafeResponse(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &parsed); err != nil {
 		t.Fatalf("response body is not valid JSON after emit panic: %v body=%s", err, w.Body.String())
 	}
-	if got, _ := parsed["action"].(string); got != "allow" {
-		t.Errorf("response action = %q, want observe allow", got)
+	if got, _ := parsed["action"].(string); got != "block" {
+		t.Errorf("response action = %q, want closed block", got)
 	}
-	if got, _ := parsed["mode"].(string); got != "observe" {
-		t.Errorf("response mode = %q, want observe", got)
+	if got, _ := parsed["mode"].(string); got != "action" {
+		t.Errorf("response mode = %q, want action", got)
 	}
-	if got, _ := parsed["would_block"].(bool); !got {
-		t.Errorf("response would_block = false, want true")
+	if got, _ := parsed["would_block"].(bool); got {
+		t.Errorf("response would_block = true, want enforced block")
 	}
 }
 
@@ -531,12 +572,14 @@ func TestHandleAgentHook_RecoveredEvaluationUsesFailMode(t *testing.T) {
 		{"claudecode", "PreToolUse", "action", "closed", "block"},
 		{"codex", "PreToolUse", "action", "closed", "block"},
 		{"hermes", "pre_tool_call", "action", "closed", "block"},
-		{"claudecode", "PreToolUse", "action", "open", "allow"},
-		{"codex", "PreToolUse", "action", "open", "allow"},
-		{"hermes", "pre_tool_call", "action", "open", "allow"},
-		{"claudecode", "PreToolUse", "observe", "closed", "allow"},
-		{"codex", "PreToolUse", "observe", "closed", "allow"},
-		{"hermes", "pre_tool_call", "observe", "closed", "allow"},
+		{"claudecode", "PreToolUse", "action", "open", "block"},
+		{"codex", "PreToolUse", "action", "open", "block"},
+		{"hermes", "pre_tool_call", "action", "open", "block"},
+		{"claudecode", "PreToolUse", "observe", "closed", "block"},
+		{"codex", "PreToolUse", "observe", "closed", "block"},
+		{"hermes", "pre_tool_call", "observe", "closed", "block"},
+		// PostToolUse is advisory in Claude Code's contract: its native
+		// answer cannot refuse the completed call.
 		{"claudecode", "PostToolUse", "action", "closed", "allow"},
 	} {
 		t.Run(strings.Join([]string{tc.connector, tc.event, tc.mode, tc.failMode}, "/"), func(t *testing.T) {
@@ -563,8 +606,12 @@ func TestHandleAgentHook_RecoveredEvaluationUsesFailMode(t *testing.T) {
 			api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
 			response := postDecisionForTest(t, api, tc.connector, tc.event, "echo done")
 			wantWouldBlock := tc.wantAction != "block"
-			if response["action"] != tc.wantAction || response["raw_action"] != "block" || response["mode"] != tc.mode || response["would_block"] != wantWouldBlock {
-				t.Fatalf("response=%v, want %s/%s/would_block=%v", response, tc.wantAction, tc.mode, wantWouldBlock)
+			wantMode := tc.mode
+			if tc.wantAction == "block" {
+				wantMode = "action"
+			}
+			if response["action"] != tc.wantAction || response["raw_action"] != "block" || response["mode"] != wantMode || response["would_block"] != wantWouldBlock {
+				t.Fatalf("response=%v, want %s/%s/would_block=%v", response, tc.wantAction, wantMode, wantWouldBlock)
 			}
 			if tc.wantAction == "block" && tc.event == "PreToolUse" {
 				field := "hook_output"
@@ -582,10 +629,8 @@ func TestHandleAgentHook_RecoveredEvaluationUsesFailMode(t *testing.T) {
 			if row.Structured["result"] != "panic" || row.Structured["action"] != tc.wantAction || row.Structured["would_block"] != wantWouldBlock {
 				t.Fatalf("audit=%v, want panic/%s/would_block=%v", row.Structured, tc.wantAction, wantWouldBlock)
 			}
-			if tc.event == "PostToolUse" {
-				if decisionIsDenied(response["claude_code_output"]) {
-					t.Fatalf("post-tool output=%v, want a nonblocking advisory", response["claude_code_output"])
-				}
+			if tc.event == "PostToolUse" && (decisionIsDenied(response["claude_code_output"]) || row.Enforced) {
+				t.Fatalf("post-tool output=%v enforced=%v, want the advisory answer", response["claude_code_output"], row.Enforced)
 			}
 			extra, _ := row.Structured["extra"].(map[string]any)
 			if extra["panic"] != "true" {
@@ -595,17 +640,26 @@ func TestHandleAgentHook_RecoveredEvaluationUsesFailMode(t *testing.T) {
 	}
 }
 
-func TestHookPanicResponse_ActionProfileRequiresExplicitOpen(t *testing.T) {
+func TestHookPanicResponse_PerUserOpenStillCloses(t *testing.T) {
 	for _, tc := range []struct {
 		name, connectorFail, globalFail, want string
+		managedStandalone                     bool
 	}{
-		{"observe connector default", "", "", "block"},
-		{"global open", "", "open", "allow"},
-		{"connector open", "open", "", "allow"},
-		{"connector closed over global open", "closed", "open", "block"},
+		{"observe connector default", "", "", "block", false},
+		{"per-user global open", "", "open", "block", false},
+		{"per-user connector open", "open", "", "block", false},
+		{"connector closed over global open", "closed", "open", "block", false},
+		// An evaluator panic is no gateway outage: the administrator's
+		// outage-open does not let the call through.
+		{"managed administrator global open", "", "open", "block", true},
+		{"managed administrator connector open", "open", "", "block", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &config.Config{}
+			if tc.managedStandalone {
+				cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+				cfg.Enterprise.Profile = managed.ProfileStandalone
+			}
 			cfg.Guardrail.Mode = "observe"
 			cfg.Codex.Mode = "action"
 			cfg.Guardrail.HookFailMode = tc.globalFail
@@ -636,17 +690,69 @@ func TestHandleAgentHookSynthetic_RecoveredEvaluationUsesFailMode(t *testing.T) 
 	cfg.Guardrail.Connector = "codex"
 	api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
 	req := agentHookRequest{
-		ConnectorName: "codex", HookEventName: "Stop", SessionID: "synthetic-panic",
-		Payload: map[string]interface{}{"hook_event_name": "Stop"},
+		ConnectorName: "codex", HookEventName: "PreToolUse", SessionID: "synthetic-panic",
+		Payload: map[string]interface{}{"hook_event_name": "PreToolUse"},
 	}
 	resp := api.handleAgentHookSynthetic(t.Context(), "codex", req, nil)
 	if resp.Action != "block" || resp.RawAction != "block" || resp.Mode != "action" || resp.WouldBlock {
-		t.Fatalf("synthetic response=%+v, want block/action", resp)
+		t.Fatalf("synthetic response=%+v, want closed block/action", resp)
 	}
 	row := soleHookDecisionForTest(t, store)
 	if row.Structured["result"] != "panic" || row.Structured["action"] != "block" {
 		t.Fatalf("synthetic audit=%v, want panic/block", row.Structured)
 	}
+}
+
+// A synthetic Codex Stop that panics on every call must not block: Codex would
+// continue the turn and run the failing Stop hook again (#1140).
+func TestHandleAgentHookSynthetic_RecoveredStopDoesNotRepeat(t *testing.T) {
+	previous := hookEvaluatorPanicHook
+	hookEvaluatorPanicHook = func() { panic("injected synthetic error") }
+	defer func() { hookEvaluatorPanicHook = previous }()
+
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.HookFailMode = "closed"
+	cfg.Guardrail.Connector = "codex"
+	for attempt := 0; attempt < 3; attempt++ {
+		store, logger := testStoreAndLogger(t)
+		api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+		req := agentHookRequest{
+			ConnectorName: "codex", HookEventName: "Stop", SessionID: "synthetic-panic",
+			Payload: map[string]interface{}{"hook_event_name": "Stop", "stop_hook_active": attempt > 0},
+		}
+		resp := api.handleAgentHookSynthetic(t.Context(), "codex", req, nil)
+		if resp.Action != "allow" || resp.RawAction != "block" || !resp.WouldBlock || lifecycleAnswerRepeats(resp.HookOutput) {
+			t.Fatalf("attempt %d: synthetic Stop response=%+v, want a non-repeating allow", attempt, resp)
+		}
+		row := soleHookDecisionForTest(t, store)
+		if row.Structured["result"] != "panic" || row.Structured["action"] != "allow" || row.Enforced {
+			t.Fatalf("attempt %d: synthetic Stop audit=%+v, want an unenforced panic row", attempt, row)
+		}
+	}
+}
+
+// lifecycleAnswerRepeats reports a native answer that keeps an agent running
+// on a stop, session-end or idle event: a denial or block decision, a veto
+// ("continue"), a follow-up prompt or a terminal continue:false.
+func lifecycleAnswerRepeats(output map[string]interface{}) bool {
+	if panicWireDenies(output) {
+		return true
+	}
+	for key, value := range output {
+		switch key {
+		case "followup_message", "followupMessage":
+			return true
+		case "decision":
+			if value != "allow" && value != "approve" {
+				return true
+			}
+		}
+		if nested, ok := value.(map[string]interface{}); ok && lifecycleAnswerRepeats(nested) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestHandleAgentHook_PostEvaluationRecoveryUsesFailMode(t *testing.T) {
@@ -687,11 +793,12 @@ func TestHandleAgentHook_PostEvaluationRecoveryUsesFailMode(t *testing.T) {
 
 // TestHookPanicResponseFailModeMatrix pins the recovered-evaluation verdict
 // for every registered connector that can block, in every guardrail mode and
-// for each place hook_fail_mode: open can come from. A standalone managed
-// device fails closed for every tool and prompt event whatever the mode or
-// fail mode says, and answers a stop or session-end event neutrally.
-// Per-user installs and the Secure Client profile keep their fail-mode
-// verdict.
+// for each place hook_fail_mode: open can come from. Closed installs, per-user
+// and standalone managed alike, deny failed blockable checks even in observe
+// mode and answer a stop or session-end event neutrally. Saved per-user open
+// and managed outage-open do not apply to local evaluation failures. Secure
+// Client's unset default and explicit open retain their failure behavior;
+// an explicit closed denies under Secure Client too.
 func TestHookPanicResponseFailModeMatrix(t *testing.T) {
 	type deployment int
 	const (
@@ -731,11 +838,20 @@ func TestHookPanicResponseFailModeMatrix(t *testing.T) {
 
 	covered := map[string]bool{}
 	for _, connectorName := range sharedDefaultRegistry().Names() {
-		profile := (&APIServer{scannerCfg: config.DefaultConfig()}).hookProfileForConnector(connectorName)
+		// Resolve the same unversioned contract the per-case temporary
+		// deployment uses. A cached agent version in the developer's home
+		// can select a different contract and make this matrix depend on
+		// whatever agent happened to run on the test host.
+		profileConfig := config.DefaultConfig()
+		profileConfig.DataDir = t.TempDir()
+		profile := (&APIServer{scannerCfg: profileConfig}).hookProfileForConnector(connectorName)
 		if !profile.Capabilities.CanBlock {
 			continue
 		}
 		var blocking []string
+		if connectorName == "claudecode" {
+			blocking = append(blocking, "PostToolBatch")
+		}
 		for _, event := range profile.Capabilities.BlockEvents {
 			action, _ := mapHookActionForProfile("block", "action", event, profile.Capabilities, profile, nil)
 			if action == "block" && !hookexec.NeutralLifecycleEvent(connectorName, event) {
@@ -746,15 +862,16 @@ func TestHookPanicResponseFailModeMatrix(t *testing.T) {
 			continue
 		}
 		covered[connectorName] = true
-		lifecycle := hookexec.NeutralLifecycleEvents(connectorName)
+		lifecycle := hookexec.LifecycleEvents(connectorName)
 		for d, dName := range deployments {
 			for _, mode := range []string{"observe", "action"} {
 				for _, failSource := range failSources {
 					cfg := newConfig(t, d, mode, failSource, connectorName)
 					api := &APIServer{scannerCfg: cfg}
-					// Cursor fails closed in action mode off Secure Client
-					// whatever hook_fail_mode says.
-					open := d == secureClient || (failSource != "closed" && connectorName != "cursor")
+					// Only Secure Client can open a local evaluation failure.
+					// The managed administrator's open choice is for a verified
+					// gateway connection outage, which this panic is not.
+					open := failSource != "closed" && d == secureClient
 					for _, event := range append(append([]string{}, blocking...), lifecycle...) {
 						name := strings.Join([]string{dName, connectorName, event, mode, failSource}, "/")
 						req := agentHookRequest{ConnectorName: connectorName, HookEventName: event}
@@ -763,22 +880,34 @@ func TestHookPanicResponseFailModeMatrix(t *testing.T) {
 							t.Errorf("%s: panicked=%v response=%+v", name, panicked, resp)
 							continue
 						}
-						isLifecycle := hookexec.NeutralLifecycleEvent(connectorName, event)
-						capable, _ := mapHookActionForProfile("block", "action", event, profile.Capabilities, profile, nil)
+						// Each fixture uses its own data directory. Its cached agent
+						// contract may differ from the host profile that supplied the
+						// candidate event list (notably Claude PostToolBatch).
+						effectiveProfile := api.hookProfileForRequest(t.Context(), connectorName)
+						capable, _ := mapHookActionForProfile("block", "action", event,
+							effectiveProfile.Capabilities, effectiveProfile, nil)
 						wantAction, wantMode := "allow", mode
-						switch {
-						case d == standalone && !isLifecycle:
+						neutral := hookexec.LifecycleEvent(connectorName, event) && !terminalLifecycleEvent(connectorName, event)
+						if !open && !neutral {
 							wantAction, wantMode = "block", "action"
-						case d == standalone, mode != "action":
-						case open:
-						case capable == "block":
-							wantAction = "block"
+						}
+						if neutral && lifecycleAnswerRepeats(resp.HookOutput) {
+							t.Errorf("%s: lifecycle answer repeats the hook: %v", name, resp.HookOutput)
 						}
 						if resp.Action != wantAction || resp.Mode != wantMode || resp.WouldBlock != (wantAction != "block") {
 							t.Errorf("%s: action=%q mode=%q would_block=%v, want %s/%s", name, resp.Action, resp.Mode, resp.WouldBlock, wantAction, wantMode)
 						}
-						// Amp and Omnigent plugins read the action field itself.
-						if wantAction == "block" && len(resp.HookOutput) == 0 && connectorName != "amp" && connectorName != "omnigent" {
+						// The Amp plugin reads the action field itself.
+						// An ordinary Claude Code denial that uses exit 2 has
+						// no output to render. A recovered TeammateIdle panic
+						// instead ends the teammate with continue:false.
+						exitTwoDenial := connectorName == "claudecode" &&
+							!terminalLifecycleEvent(connectorName, event) &&
+							claudeCodeOutput(claudeCodeHookRequest{HookEventName: event}, "block", "block", "", "") == nil
+						if wantAction == "block" && exitTwoDenial && len(resp.HookOutput) != 0 {
+							t.Errorf("%s: an exit-2 denial rendered output %v", name, resp.HookOutput)
+						}
+						if wantAction == "block" && capable == "block" && len(resp.HookOutput) == 0 && !exitTwoDenial && connectorName != "amp" {
 							t.Errorf("%s: block without the connector's native output: %+v", name, resp)
 						}
 					}
@@ -786,9 +915,234 @@ func TestHookPanicResponseFailModeMatrix(t *testing.T) {
 			}
 		}
 	}
-	for _, name := range []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "omnigent", "openhands", "opencode"} {
+	for _, name := range []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode"} {
 		if !covered[name] {
 			t.Errorf("connector %s has no blockable panic event in the matrix (covered: %v)", name, covered)
+		}
+	}
+}
+
+// One recovered-panic rule holds for every registered connector and event,
+// per-user and standalone managed, in observe and action mode, under closed
+// fail mode: an enforcement event blocks, even when ordinary policy cannot
+// block it or a versioned contract is absent; a lifecycle event never gets an
+// answer that keeps the agent running and repeats the hook. Claude Code's
+// Stop, SubagentStop and TeammateIdle end the turn with continue:false.
+func TestHookEvaluatorPanicRuleForEveryRegisteredEvent(t *testing.T) {
+	api := &APIServer{}
+	profiles := panicTestProfiles(t, api)
+	panicking := hookProfileRuntime{Evaluate: func(*APIServer, context.Context, agentHookRequest, []byte, map[string]interface{}) agentHookResponse {
+		panic("injected evaluator error")
+	}}
+	lifecycleCovered := map[string]bool{}
+	for connectorName, profile := range profiles {
+		for _, event := range profile.SupportedEvents {
+			lifecycle := hookexec.LifecycleEvent(connectorName, event)
+			if lifecycle {
+				lifecycleCovered[connectorName] = true
+			}
+			for _, deployment := range []struct{ name, mode, profile string }{
+				{"per-user", "", ""},
+				{"standalone", managed.DeploymentModeManagedEnterprise, managed.ProfileStandalone},
+			} {
+				for _, mode := range []string{"observe", "action"} {
+					t.Run(connectorName+"/"+event+"/"+deployment.name+"/"+mode, func(t *testing.T) {
+						cfg := config.DefaultConfig()
+						cfg.DeploymentMode, cfg.Enterprise.Profile = deployment.mode, deployment.profile
+						cfg.Guardrail.Mode = mode
+						cfg.Guardrail.HookFailMode = "closed"
+						server := &APIServer{scannerCfg: cfg}
+						req := agentHookRequest{ConnectorName: connectorName, HookEventName: event}
+						resp, panicked := server.safeEvaluateHook(t.Context(), connectorName, req, nil, nil, panicking)
+						if !panicked || resp.RawAction != "block" {
+							t.Fatalf("panic response=%+v, panicked=%v", resp, panicked)
+						}
+						switch {
+						case terminalLifecycleEvent(connectorName, event):
+							if resp.Action != "block" || resp.Mode != "action" || resp.WouldBlock ||
+								resp.HookOutput["continue"] != false || resp.HookOutput["stopReason"] == "" || len(resp.HookOutput) != 2 {
+								t.Fatalf("panic response=%+v, want the terminal continue:false answer", resp)
+							}
+						case lifecycle:
+							if resp.Action != "allow" || !resp.WouldBlock || lifecycleAnswerRepeats(resp.HookOutput) {
+								t.Fatalf("panic response=%+v, want a neutral allow that does not repeat the hook", resp)
+							}
+						default:
+							// A certified block event blocks; an advisory event keeps
+							// the allow with would_block its native hook can carry
+							// (TestHookEvaluatorPanicActionFollowsNativeControl).
+							if want := panicNativeActionOracle(connectorName, event, profile); resp.Action != want || resp.Mode != "action" || resp.WouldBlock != (want == "allow") {
+								t.Fatalf("panic response=%+v, want %s in action mode", resp, want)
+							}
+						}
+					})
+				}
+			}
+		}
+	}
+	for _, name := range []string{"antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "kiro", "opencode"} {
+		if !lifecycleCovered[name] {
+			t.Errorf("%s: no registered lifecycle event reached the rule", name)
+		}
+	}
+}
+
+// The audit row of a lifecycle panic agrees with what the agent does: the
+// neutral allow is an unenforced panic row with would_block, the Claude Code
+// terminal answer an enforced block. Covers every connector's lifecycle
+// events through the HTTP handler, per-user and standalone managed.
+func TestLifecycleEvaluatorPanicAuditMatchesNativeAnswer(t *testing.T) {
+	profiles := panicTestProfiles(t, &APIServer{})
+	for _, name := range []string{"antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "kiro", "opencode"} {
+		for _, event := range hookexec.LifecycleEvents(name) {
+			if !eventIn(event, profiles[name].SupportedEvents) ||
+				(name == "copilot" && strings.ToLower(event[:1]) != event[:1]) {
+				// The VS Code Local spellings of Copilot's stop events do not
+				// reach the CLI hook route; the safeEvaluateHook matrix
+				// covers them.
+				continue
+			}
+			for _, deployment := range []struct{ name, mode, profile string }{
+				{"per-user", "", ""},
+				{"standalone", managed.DeploymentModeManagedEnterprise, managed.ProfileStandalone},
+			} {
+				t.Run(name+"/"+event+"/"+deployment.name, func(t *testing.T) {
+					injectPanicForProfile(t, name)
+					store, logger := testStoreAndLogger(t)
+					cfg := config.DefaultConfig()
+					cfg.DataDir = t.TempDir()
+					cfg.DeploymentMode, cfg.Enterprise.Profile = deployment.mode, deployment.profile
+					cfg.Guardrail.Mode, cfg.Guardrail.HookFailMode, cfg.Guardrail.Connector = "action", "closed", name
+					server := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+					response, _ := postPanicTestHook(t, server, name, event)
+					output, _ := panicTestOutput(name, response).(map[string]interface{})
+					row := soleHookDecisionForTest(t, store)
+					if row.Structured["result"] != "panic" {
+						t.Fatalf("audit=%+v, want a panic row", row)
+					}
+					if terminalLifecycleEvent(name, event) {
+						if response["action"] != "block" || output["continue"] != false || row.Structured["action"] != "block" || !row.Enforced {
+							t.Fatalf("response=%v audit=%+v, want an enforced terminal answer", response, row)
+						}
+						return
+					}
+					if response["action"] != "allow" || response["would_block"] != true || lifecycleAnswerRepeats(output) {
+						t.Fatalf("response=%v, want a neutral allow that does not repeat the hook", response)
+					}
+					if row.Structured["action"] != "allow" || row.Structured["would_block"] != true || row.Enforced {
+						t.Fatalf("audit=%+v, want an unenforced allow with would_block", row)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestClaudeStopPersistentEvaluatorPanicTerminatesTurn(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Guardrail.HookFailMode = "closed"
+	api := &APIServer{scannerCfg: cfg}
+	panicking := hookProfileRuntime{Evaluate: func(*APIServer, context.Context, agentHookRequest, []byte, map[string]interface{}) agentHookResponse {
+		panic("persistent Stop evaluator error")
+	}}
+	for _, event := range []string{"Stop", "SubagentStop", "TeammateIdle"} {
+		for attempt := 0; attempt < 3; attempt++ {
+			req := agentHookRequest{
+				ConnectorName: "claudecode", HookEventName: event, SessionID: "persistent-panic",
+				Payload: map[string]interface{}{"stop_hook_active": attempt > 0},
+			}
+			resp, panicked := api.safeEvaluateHook(t.Context(), "claudecode", req, nil, nil, panicking)
+			if !panicked || resp.Action != "block" || resp.Mode != "action" {
+				t.Fatalf("%s attempt %d: panic response=%+v, panicked=%v", event, attempt, resp, panicked)
+			}
+			if resp.HookOutput["continue"] != false || resp.HookOutput["stopReason"] == "" {
+				t.Fatalf("%s attempt %d: native output=%v, want terminal closed failure", event, attempt, resp.HookOutput)
+			}
+		}
+	}
+}
+
+// Antigravity's only Stop veto ("continue") re-enters the agent loop, so a
+// recovered panic allows termination, and the audit says so.
+func TestAntigravityStopEvaluatorPanicAllowsTermination(t *testing.T) {
+	injectPanicForProfile(t, "antigravity")
+	for _, deployment := range []struct{ name, mode, profile string }{
+		{"per-user", "", ""},
+		{"standalone", managed.DeploymentModeManagedEnterprise, managed.ProfileStandalone},
+	} {
+		t.Run(deployment.name, func(t *testing.T) {
+			store, logger := testStoreAndLogger(t)
+			cfg := config.DefaultConfig()
+			cfg.DataDir = t.TempDir()
+			cfg.DeploymentMode, cfg.Enterprise.Profile = deployment.mode, deployment.profile
+			cfg.Guardrail.HookFailMode = "closed"
+			api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+			for attempt := 0; attempt < 3; attempt++ {
+				response, _ := postPanicTestHook(t, api, "antigravity", "Stop")
+				output, _ := response["hook_output"].(map[string]interface{})
+				if response["action"] != "allow" || response["would_block"] != true || output["decision"] != "allow" {
+					t.Fatalf("attempt %d: Stop panic response=%v, want the native allow of termination", attempt, response)
+				}
+			}
+			rows, err := store.ListEvents(100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			hookRows := 0
+			for _, row := range rows {
+				if row.Action != string(audit.ActionConnectorHook) {
+					continue
+				}
+				hookRows++
+				if row.Structured["result"] != "panic" || row.Structured["action"] != "allow" || row.Structured["would_block"] != true || row.Enforced {
+					t.Fatalf("Stop panic audit=%+v, want an unenforced panic allow", row)
+				}
+			}
+			if hookRows != 3 {
+				t.Fatalf("hook audit rows=%d, want 3", hookRows)
+			}
+		})
+	}
+}
+
+func TestClaudePostToolBatchEvaluatorPanicStopsContinuation(t *testing.T) {
+	// This regression needs the unversioned Claude Code contract. Keep the
+	// process home and the DefenseClaw version cache out of the operator's
+	// installed Claude Code state on every OS.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("DEFENSECLAW_HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	for _, deployment := range []struct{ name, mode, profile string }{
+		{"per-user", "", ""},
+		{"standalone", managed.DeploymentModeManagedEnterprise, managed.ProfileStandalone},
+		{"secure-client", managed.DeploymentModeManagedEnterprise, managed.ProfileSecureClient},
+	} {
+		for _, mode := range []string{"observe", "action"} {
+			t.Run(deployment.name+"/"+mode, func(t *testing.T) {
+				injectPanicForProfile(t, "claudecode")
+				store, logger := testStoreAndLogger(t)
+				cfg := config.DefaultConfig()
+				cfg.DataDir = t.TempDir()
+				cfg.DeploymentMode, cfg.Enterprise.Profile = deployment.mode, deployment.profile
+				cfg.Guardrail.Mode, cfg.Guardrail.HookFailMode = mode, "closed"
+				if version := connector.LoadCachedAgentVersion(cfg.DataDir, "claudecode"); version != "" {
+					t.Fatalf("PostToolBatch test requires no Claude Code version cache; got %q", version)
+				}
+				server := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+				response, _ := postPanicTestHook(t, server, "claudecode", "PostToolBatch")
+				if response["action"] != "block" || response["raw_action"] != "block" || response["mode"] != "action" || response["would_block"] != false {
+					t.Fatalf("PostToolBatch panic response=%v, want closed block/action", response)
+				}
+				if !panicWireDenies(response["claude_code_output"]) {
+					t.Fatalf("PostToolBatch panic has no native denial: %v", response)
+				}
+				row := soleHookDecisionForTest(t, store)
+				if row.Structured["result"] != "panic" || row.Structured["action"] != "block" {
+					t.Fatalf("PostToolBatch audit=%v, want panic/block", row.Structured)
+				}
+			})
 		}
 	}
 }

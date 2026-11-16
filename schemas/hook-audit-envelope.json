@@ -4,7 +4,14 @@
   "title": "DefenseClaw Hook Audit Envelope",
   "description": "Machine-readable payload stored on audit_events.structured_json for connector hook outcomes. The legacy audit details string may also carry this same object as details_json during migration.",
   "type": "object",
-  "required": ["schema", "timestamp", "connector", "event", "result", "would_block"],
+  "required": [
+    "schema",
+    "timestamp",
+    "connector",
+    "event",
+    "result",
+    "would_block"
+  ],
   "properties": {
     "schema": {
       "type": "string",
@@ -19,7 +26,7 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 64,
-      "description": "DefenseClaw connector/profile name, for example codex, claudecode, cursor, devin, or openhands."
+      "description": "DefenseClaw connector/profile name, for example codex, claudecode, cursor, or devin."
     },
     "event": {
       "type": "string",
@@ -29,7 +36,12 @@
     },
     "result": {
       "type": "string",
-      "enum": ["ok", "panic", "rejected", "encode_error"],
+      "enum": [
+        "ok",
+        "panic",
+        "rejected",
+        "encode_error"
+      ],
       "description": "Outcome of the hook collector invocation."
     },
     "action": {
@@ -44,7 +56,16 @@
     },
     "severity": {
       "type": "string",
-      "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "WARN", "ERROR", "NONE"]
+      "enum": [
+        "CRITICAL",
+        "HIGH",
+        "MEDIUM",
+        "LOW",
+        "INFO",
+        "WARN",
+        "ERROR",
+        "NONE"
+      ]
     },
     "mode": {
       "type": "string",

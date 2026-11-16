@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
@@ -67,8 +68,8 @@ func TestEnforceCodexUserHookPolicy(t *testing.T) {
 		t.Fatalf("blocked user-hook policy error = %v", err)
 	}
 	if runtime.GOOS == "windows" {
-		if err := enforceCodexUserHookPolicy(context.Background(), SetupOpts{ManagedEnterprise: true}); err != nil {
-			t.Fatalf("managed-only policy rejected the managed enterprise registration: %v", err)
+		if err := enforceCodexUserHookPolicy(context.Background(), SetupOpts{ManagedEnterprise: true}); err == nil {
+			t.Fatal("direct managed Setup accepted a policy that ignores config.toml hooks")
 		}
 	}
 
@@ -179,21 +180,79 @@ func TestReadBoundedCodexSystemRequirementsRejectsReplacementBeforeOpen(t *testi
 	}
 }
 
-func TestInspectManagedCodexSystemRequirementsRejectsUserWritableSource(t *testing.T) {
+// An untrusted writer on the managed Codex requirements source is permission
+// drift. Unix refuses it; Windows reads the source and logs a boundary finding
+// naming it.
+func TestInspectManagedCodexSystemRequirementsUserWritableSource(t *testing.T) {
 	original := codexSystemRequirementsPathForInspection
 	t.Cleanup(func() { codexSystemRequirementsPathForInspection = original })
+	t.Setenv(managed.TrustStrictAncestorsEnv, "")
 	path := filepath.Join(t.TempDir(), "requirements.toml")
 	if err := os.WriteFile(path, []byte("allow_managed_hooks_only = false\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(path, 0o666); err != nil {
+	grantTestUntrustedWriter(t, path)
+	codexSystemRequirementsPathForInspection = func() (string, error) { return path, nil }
+
+	var mu sync.Mutex
+	var boundaries []string
+	originalSink := managed.ReportResilienceEvent
+	t.Cleanup(func() { managed.ReportResilienceEvent = originalSink })
+	managed.ReportResilienceEvent = func(marker string, fields map[string]string) {
+		if marker != managed.MarkerBoundary {
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		boundaries = append(boundaries, fields["path"])
+	}
+
+	policy, err := inspectCodexSystemRequirementsForMode(true)
+	// Windows and macOS read the vendor file anyway and log a boundary.
+	if runtime.GOOS != "windows" && runtime.GOOS != "darwin" {
+		if err == nil || !strings.Contains(strings.ToLower(err.Error()), "untrusted") {
+			t.Fatalf("managed user-writable requirements error = %v, want untrusted refusal", err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("managed user-writable requirements error = %v, want drifted source accepted", err)
+	}
+	if policy.Source != path || policy.AllowManagedHooksOnly == nil || *policy.AllowManagedHooksOnly {
+		t.Fatalf("managed user-writable requirements policy = %+v, want the source's allow_managed_hooks_only=false", policy)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	named := false
+	for _, boundary := range boundaries {
+		if strings.EqualFold(filepath.Clean(boundary), filepath.Clean(path)) {
+			named = true
+		}
+	}
+	if !named {
+		t.Fatalf("boundary findings = %v, want one naming %s", boundaries, path)
+	}
+}
+
+// Structure stays fatal: a managed requirements source reached through a
+// symlink is refused on every platform.
+func TestInspectManagedCodexSystemRequirementsRejectsSymlinkedSource(t *testing.T) {
+	original := codexSystemRequirementsPathForInspection
+	t.Cleanup(func() { codexSystemRequirementsPathForInspection = original })
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real-requirements.toml")
+	if err := os.WriteFile(target, []byte("allow_managed_hooks_only = true\n"), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "requirements.toml")
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
 	}
 	codexSystemRequirementsPathForInspection = func() (string, error) { return path, nil }
 
 	if _, err := inspectCodexSystemRequirementsForMode(true); err == nil ||
-		!strings.Contains(strings.ToLower(err.Error()), "untrusted") {
-		t.Fatalf("managed user-writable requirements error = %v", err)
+		!strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("managed symlinked requirements error = %v, want not-a-regular-file refusal", err)
 	}
 }
 
@@ -280,6 +339,34 @@ func TestInspectCodexPolicyWithAppServer(t *testing.T) {
 	}
 	if !strings.Contains(policy.Source, "effective requirements") {
 		t.Fatalf("source = %q", policy.Source)
+	}
+}
+
+// GAP-0620: Codex whose runtime is not on PATH exits before it reads the
+// first request. The write then failed with a broken pipe, which Setup
+// reported as "send initialize: write |1: broken pipe" with an unrelated next
+// step. It is the app-server exiting before it answered, named with the
+// program and what it said, so the no-answer handling applies.
+func TestInspectCodexPolicyAppServerThatExitsBeforeReadingNamesItsOutput(t *testing.T) {
+	original, originalAfter := codexAppServerCommand, codexAppServerAfterStart
+	t.Cleanup(func() { codexAppServerCommand, codexAppServerAfterStart = original, originalAfter })
+	codexAppServerCommand = func(ctx context.Context, _ string) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestCodexPolicyAppServerHelper$", "--")
+		cmd.Env = append(os.Environ(), "DEFENSECLAW_CODEX_POLICY_HELPER=exit-at-start")
+		return cmd
+	}
+	// Let the fixture exit before the first request, as a missing runtime does.
+	codexAppServerAfterStart = func() { time.Sleep(time.Second) }
+
+	executable := filepath.Join(t.TempDir(), "codex")
+	_, err := inspectCodexPolicyWithAppServer(context.Background(), executable, t.TempDir())
+	if !errors.Is(err, errCodexAppServerNoAnswer) {
+		t.Fatalf("err = %v, want errCodexAppServerNoAnswer", err)
+	}
+	for _, want := range []string{executable, "'node': No such file or directory"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("err = %v, want it to name %q", err, want)
+		}
 	}
 }
 
@@ -376,6 +463,71 @@ func TestValidateCodexPolicyExecutableRejectsReplacement(t *testing.T) {
 	if _, err := validateCodexPolicyExecutable(opts); err == nil || !strings.Contains(err.Error(), "digest") {
 		t.Fatalf("replacement error = %v, want digest refusal", err)
 	}
+	// GAP-1884: a Codex self-update changes the sealed executable; the
+	// refusal names the step that admits the new one.
+	_, err = validateCodexPolicyExecutable(opts)
+	if !errors.Is(err, ErrCodexExecutableChanged) || !strings.Contains(err.Error(), "run: defenseclaw setup codex --yes") {
+		t.Fatalf("replacement error = %v, want ErrCodexExecutableChanged with the setup step", err)
+	}
+	opts.AgentVersion = "codex 0.164.0"
+	if _, err := validateCodexPolicyExecutable(opts); !errors.Is(err, ErrCodexExecutableChanged) {
+		t.Fatalf("version change error = %v, want ErrCodexExecutableChanged", err)
+	}
+}
+
+// A Codex executable in a folder another account can write is refused as an
+// untrusted install, so the refusal names the install as the fix and never
+// closing the agent (GAP-2479).
+func TestValidateCodexPolicyExecutableMarksAWritableInstallFolderUntrusted(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits; the Windows ACL leg is the live cell")
+	}
+	dir := testenv.PrivateTempDir(t)
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	executable := filepath.Join(bin, "codex.exe")
+	if err := atomicWriteFile(executable, []byte("original-codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, digest, ok := setupSelectedAgentExecutableEvidence(executable)
+	if !ok {
+		t.Fatal("cannot hash fixture executable")
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	body, err := json.Marshal(agentSelectionReceipt{
+		SchemaVersion: agentSelectionSchemaVersion,
+		UpdatedAt:     now.Format(time.RFC3339),
+		Selections: map[string]agentSelectionEvidence{"codex": {
+			Connector: "codex", Source: "setup-selected", Executable: executable,
+			RawVersion: "codex 0.144.3", NormalizedVersion: "0.144.3", SHA256: digest,
+			SelectedAt: now.Format(time.RFC3339), ExpiresAt: now.Add(agentSelectionMaxLifetime).Format(time.RFC3339),
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(filepath.Join(dir, agentSelectionFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts := SetupOpts{DataDir: dir, AgentVersion: "codex 0.144.3", AgentExecutable: executable}
+	if _, err := validateCodexPolicyExecutable(opts); err != nil {
+		t.Fatalf("valid protected executable rejected: %v", err)
+	}
+	if err := os.Chmod(bin, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	_, err = validateCodexPolicyExecutable(opts)
+	if err == nil || !strings.Contains(err.Error(), "validate selected Codex executable ancestry") {
+		t.Fatalf("writable install folder error = %v, want the ancestry refusal", err)
+	}
+	if !errors.Is(err, ErrAgentInstallNotTrusted) {
+		t.Fatalf("writable install folder error = %v, want ErrAgentInstallNotTrusted", err)
+	}
+	if strings.Contains(err.Error(), ErrAgentInstallNotTrusted.Error()) {
+		t.Fatalf("error = %q, the marker must not change the message", err)
+	}
 }
 
 func TestInspectCodexPolicyPreservesRPCErrorDuringCleanup(t *testing.T) {
@@ -403,6 +555,10 @@ func TestCodexPolicyAppServerHelper(t *testing.T) {
 	}
 	if mode == "stderr-flood" {
 		_, _ = os.Stderr.WriteString(strings.Repeat("diagnostic-flood", 16*1024))
+	}
+	if mode == "exit-at-start" {
+		_, _ = os.Stderr.WriteString("/usr/bin/env: 'node': No such file or directory\n")
+		os.Exit(127)
 	}
 	reader := bufio.NewScanner(os.Stdin)
 	encoder := json.NewEncoder(os.Stdout)

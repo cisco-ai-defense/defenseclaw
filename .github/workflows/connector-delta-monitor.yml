@@ -25,6 +25,7 @@ jobs:
   test:
     if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -33,7 +34,7 @@ jobs:
   monitor:
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && vars.CONNECTOR_DELTA_MONITOR_ENABLED == 'true')) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     permissions:
       contents: read
       actions: read
@@ -107,6 +108,7 @@ jobs:
     needs: monitor
     if: ${{ always() && !cancelled() && github.ref == 'refs/heads/main' && needs.monitor.outputs.ready == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
       actions: read

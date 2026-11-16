@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -37,17 +38,25 @@ import (
 // package arrived has not started it, so the launcher starts it on demand,
 // and applies a daemon update the lifecycle deferred while sandboxes ran.
 const (
-	launcherSocketUnit    = "defenseclaw-sandbox.socket"
-	launcherServiceUnit   = "defenseclaw-sandbox.service"
-	launcherAgentLabel    = "com.cisco.defenseclaw.sandbox"
-	launcherAgentPlist    = "/Library/LaunchAgents/com.cisco.defenseclaw.sandbox.plist"
-	launcherGatewayLabel  = "com.cisco.defenseclaw.openshell-gateway"
-	launcherGatewayPlist  = "/Library/LaunchAgents/com.cisco.defenseclaw.openshell-gateway.plist"
-	launcherRepairCommand = "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair"
+	launcherSocketUnit  = "defenseclaw-sandbox.socket"
+	launcherServiceUnit = "defenseclaw-sandbox.service"
 
 	launcherSystemctl = "/usr/bin/systemctl"
 	launcherLaunchctl = "/bin/launchctl"
 )
+
+// launcherRepairCommand is the administrator's repair of a managed Mac, with
+// the gateway by its absolute path: it is not on the PATH.
+var launcherRepairCommand = "sudo " + managed.StandaloneGatewayPath("darwin") + " enterprise macos repair"
+
+// launcherAgentsDir holds the LaunchAgent plists; a var for tests.
+var launcherAgentsDir = openshell.LaunchAgentsDir
+
+// launcherAgent is the installed sandbox daemon job: its label carries the
+// gateway program's tag (openshell.LaunchAgentLabel).
+func launcherAgent() (label, plist string) {
+	return openshell.FindLaunchAgent(launcherAgentsDir, openshell.SandboxAgentBase)
+}
 
 // Waits for the daemon; vars so tests run at speed.
 var (
@@ -97,6 +106,15 @@ func launcherEnsureDaemon(ctx context.Context, client launcherStatusClient, goos
 		ctx = context.Background()
 	}
 	status, err := launcherProbe(ctx, client, launcherProbeTimeout)
+	if launcherDaemonAnswered(err) {
+		// The daemon runs and answered why it cannot serve now (the managed
+		// gateway did not answer its settings read, say). Starting it again
+		// and polling for launcherStartWait kept it serving that answer, and
+		// the command waited 15 s more for the same refusal, under a line
+		// that said the service does not answer (GAP-0608). The command
+		// that follows shows the daemon's answer.
+		return nil, nil
+	}
 	if err != nil {
 		if startErr := launcherStartDaemon(ctx, goos, uid); startErr != nil {
 			return nil, fmt.Errorf("your sandbox service is not running and could not be started: %v", startErr)
@@ -109,7 +127,10 @@ func launcherEnsureDaemon(ctx context.Context, client launcherStatusClient, goos
 			return nil, &launcherDaemonError{msg: "your sandbox service was started but does not answer; `defenseclaw sandbox doctor` shows why", err: err}
 		}
 	}
-	if status.Managed != nil && status.Managed.PendingRestart && status.Running == 0 {
+	// Busy, not Running: the restart takes the account's OpenShell gateway
+	// with it, which a MicroVM in OpenShell's error state, or a sandbox
+	// that starts, may still run on (sandboxapi.Status.Live).
+	if status.Managed != nil && status.Managed.PendingRestart && status.Busy() == 0 {
 		fmt.Fprintln(stderr, "defenseclaw: restarting your sandbox service to apply an update (no sandbox of yours is running)")
 		if err := launcherRestartDaemon(ctx, goos, uid); err != nil {
 			return status, fmt.Errorf("your sandbox service waits for a restart that failed: %v", err)
@@ -139,6 +160,14 @@ type launcherDaemonError struct {
 
 func (e *launcherDaemonError) Error() string { return e.msg }
 func (e *launcherDaemonError) Unwrap() error { return e.err }
+
+// launcherDaemonAnswered reports a status request the daemon answered with
+// an error status: it runs. A transport failure (no daemon, no answer in
+// time) carries no status.
+func launcherDaemonAnswered(err error) bool {
+	var refused *sandboxapi.Error
+	return errors.As(err, &refused) && refused.Status >= 400
+}
 
 // launcherProbe asks the daemon for its status within timeout.
 func launcherProbe(ctx context.Context, client launcherStatusClient, timeout time.Duration) (*sandboxapi.Status, error) {
@@ -175,12 +204,12 @@ func launcherStartDaemon(ctx context.Context, goos string, uid int) error {
 		// the service.
 		return launcherRunChecked(ctx, launcherSystemctl, "--user", "start", launcherSocketUnit)
 	case "darwin":
-		domain := launcherLaunchDomain(ctx, uid)
-		target := domain + "/" + launcherAgentLabel
-		if _, err := launcherInspectAndReload(ctx, domain, true); err != nil {
+		domain, listing := launcherLaunchDomain(ctx, uid)
+		label, _ := launcherAgent()
+		if _, err := launcherInspectAndReload(ctx, domain, listing, true, false); err != nil {
 			return err
 		}
-		return launcherRunChecked(ctx, launcherLaunchctl, "kickstart", target)
+		return launcherRunChecked(ctx, launcherLaunchctl, "kickstart", domain+"/"+label)
 	}
 	return fmt.Errorf("sandboxes run on Linux and macOS only")
 }
@@ -191,11 +220,12 @@ func launcherRestartDaemon(ctx context.Context, goos string, uid int) error {
 	case "linux":
 		return launcherRunChecked(ctx, launcherSystemctl, "--user", "restart", launcherServiceUnit)
 	case "darwin":
-		domain := launcherLaunchDomain(ctx, uid)
-		if _, err := launcherInspectAndReload(ctx, domain, false); err != nil {
+		domain, listing := launcherLaunchDomain(ctx, uid)
+		label, _ := launcherAgent()
+		if _, err := launcherInspectAndReload(ctx, domain, listing, false, true); err != nil {
 			return err
 		}
-		return launcherRunChecked(ctx, launcherLaunchctl, "kickstart", "-k", domain+"/"+launcherAgentLabel)
+		return launcherRunChecked(ctx, launcherLaunchctl, "kickstart", "-k", domain+"/"+label)
 	}
 	return fmt.Errorf("sandboxes run on Linux and macOS only")
 }
@@ -203,17 +233,49 @@ func launcherRestartDaemon(ctx context.Context, goos string, uid int) error {
 // launcherInspectAndReload refreshes only loaded failed DefenseClaw jobs in
 // the caller's selected launchd domain. A missing sandbox job is bootstrapped
 // on first start, as before; a missing gateway job is left to its daemon.
-func launcherInspectAndReload(ctx context.Context, domain string, bootstrapSandbox bool) (bool, error) {
+// A job of an earlier label that does not run is booted out first: its
+// plist is gone, and the sandbox job of the current label is bootstrapped in
+// its place (GAP-0206). One that runs is left to the lifecycle, which stops
+// it when its sandboxes have stopped. listing is `launchctl print domain`.
+//
+// With restart (the daemon waits for a restart and no sandbox of the
+// account runs: launcherEnsureDaemon), a sandbox job of an earlier label
+// that runs is the daemon to restart when the installed label is not
+// loaded: a package upgrade renamed the job while that daemon ran a
+// sandbox, and a kickstart of the installed label found no job ("Could not
+// find service", GAP-0049). It is booted out and the installed label is
+// bootstrapped in its place, as its own exit and the next start would.
+func launcherInspectAndReload(ctx context.Context, domain, listing string, bootstrapSandbox, restart bool) (bool, error) {
 	reloaded := false
-	for _, job := range []struct{ label, plist string }{
-		{launcherAgentLabel, launcherAgentPlist},
-		{launcherGatewayLabel, launcherGatewayPlist},
-	} {
-		target := domain + "/" + job.label
+	for _, base := range openshell.LaunchAgentBases {
+		label, plist := openshell.FindLaunchAgent(launcherAgentsDir, base)
+		sandbox := base == openshell.SandboxAgentBase
+		var runningOld []string
+		for _, old := range openshell.LaunchAgentLabelsIn([]byte(listing), base) {
+			if old == label {
+				continue
+			}
+			out, err := launcherRun(ctx, launcherLaunchctl, "print", domain+"/"+old)
+			if err != nil {
+				continue
+			}
+			if openshell.ParseLaunchAgentState([]byte(out)).State == "running" {
+				runningOld = append(runningOld, old)
+				continue
+			}
+			_, _ = launcherRun(ctx, launcherLaunchctl, "bootout", domain+"/"+old)
+			bootstrapSandbox = bootstrapSandbox || sandbox
+		}
+		target := domain + "/" + label
 		out, err := launcherRun(ctx, launcherLaunchctl, "print", target)
 		if err != nil {
-			if bootstrapSandbox && job.label == launcherAgentLabel {
-				if err := launcherRunChecked(ctx, launcherLaunchctl, "bootstrap", domain, job.plist); err != nil {
+			if restart && sandbox {
+				for _, old := range runningOld {
+					_, _ = launcherRun(ctx, launcherLaunchctl, "bootout", domain+"/"+old)
+				}
+			}
+			if (bootstrapSandbox || restart) && sandbox {
+				if err := launcherRunChecked(ctx, launcherLaunchctl, "bootstrap", domain, plist); err != nil {
 					return false, err
 				}
 			}
@@ -225,7 +287,7 @@ func launcherInspectAndReload(ctx context.Context, domain string, bootstrapSandb
 		// A failed bootout may mean the job has already exited. Bootstrap
 		// decides whether the account can recover it.
 		_, _ = launcherRun(ctx, launcherLaunchctl, "bootout", target)
-		if err := launcherRunChecked(ctx, launcherLaunchctl, "bootstrap", domain, job.plist); err != nil {
+		if err := launcherRunChecked(ctx, launcherLaunchctl, "bootstrap", domain, plist); err != nil {
 			return false, &launcherDaemonError{msg: "your DefenseClaw LaunchAgent could not be reloaded; run `" + launcherRepairCommand + "`", err: err}
 		}
 		reloaded = true
@@ -240,29 +302,32 @@ func launcherAwaitWithRecovery(ctx context.Context, client launcherStatusClient,
 	if awaitErr == nil || goos != "darwin" {
 		return status, awaitErr
 	}
-	domain := launcherLaunchDomain(ctx, uid)
-	reloaded, err := launcherInspectAndReload(ctx, domain, false)
+	domain, listing := launcherLaunchDomain(ctx, uid)
+	reloaded, err := launcherInspectAndReload(ctx, domain, listing, false, false)
 	if err != nil {
 		return nil, err
 	}
 	if !reloaded {
 		return nil, awaitErr
 	}
-	if err := launcherRunChecked(ctx, launcherLaunchctl, "kickstart", domain+"/"+launcherAgentLabel); err != nil {
+	label, _ := launcherAgent()
+	if err := launcherRunChecked(ctx, launcherLaunchctl, "kickstart", domain+"/"+label); err != nil {
 		return nil, err
 	}
 	return launcherAwait(ctx, client)
 }
 
-// launcherLaunchDomain is the launchd domain of the caller's sandbox agent:
-// the graphical session when the caller has one (the agent allows Aqua and
-// Background sessions), else the background session of an ssh login.
-func launcherLaunchDomain(ctx context.Context, uid int) string {
-	gui := "gui/" + strconv.Itoa(uid)
-	if _, err := launcherRun(ctx, launcherLaunchctl, "print", gui); err == nil {
-		return gui
-	}
-	return "user/" + strconv.Itoa(uid)
+// launcherLaunchDomain is the launchd domain of the caller's sandbox agent
+// (openshell.LaunchDomain): the one its job is loaded in, else the
+// graphical session when the caller has one (the agent allows Aqua and
+// Background sessions), else the background session of an ssh login. It
+// also returns what `launchctl print` said of the domain, which lists the
+// jobs loaded there.
+func launcherLaunchDomain(ctx context.Context, uid int) (domain, listing string) {
+	label, _ := launcherAgent()
+	return openshell.LaunchDomain(uid, openshell.SandboxAgentBase, label, func(domain string) (string, error) {
+		return launcherRun(ctx, launcherLaunchctl, "print", domain)
+	})
 }
 
 // launcherRunChecked runs a service-manager command and folds its output

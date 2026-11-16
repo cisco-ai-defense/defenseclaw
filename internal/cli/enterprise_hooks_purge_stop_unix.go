@@ -49,7 +49,7 @@ func stopPerUserGatewayProcesses(opts enterprisehooks.InstallOptions) (stopped b
 		return false, nil
 	}
 	// The watchdog first: it would restart the gateway.
-	if err := stopWatchdogAt(dataDir, io.Discard); err != nil {
+	if err := stopWatchdogAt(dataDir, io.Discard, false); err != nil {
 		return false, fmt.Errorf("its per-user watchdog could not be stopped: %w", err)
 	}
 	gateway := daemon.New(dataDir)

@@ -366,6 +366,16 @@ func (r *EventRouter) policyGeneration() *Generation {
 	return r.generationSource()
 }
 
+// promptContentAction maps a session prompt's severity with the levels of
+// g, the generation the scan selected its rules and judge from; a router
+// outside a gateway (no published generation) uses its guardrail block.
+func (r *EventRouter) promptContentAction(g *Generation, severity string) string {
+	if g.published() && g.Config != nil {
+		return guardrailContentActionForGeneration(g, r.connectorName(), severity)
+	}
+	return guardrailContentActionForGuardrail(r.guardrailConfig(), r.connectorName(), severity)
+}
+
 // rulePack is the active rule pack of the generation events read.
 func (r *EventRouter) rulePack() *guardrail.RulePack {
 	if g := r.policyGeneration(); g != nil {
@@ -830,7 +840,7 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 		return
 	}
 
-	verdict.Action = guardrailContentActionForGuardrail(r.guardrailConfig(), r.connectorName(), verdict.Severity)
+	verdict.Action = r.promptContentAction(g, verdict.Severity)
 	// Mirror the proxy/inspector clamp on this independent prompt-scan
 	// path so the session-message surface obeys the same contract:
 	// prompts get audited as alerts; tool-call gate handles enforcement.
@@ -1741,10 +1751,7 @@ func serializeArgvForLegacyScan(argv []string) string {
 	serialized := make([]string, 0, len(argv))
 	for _, argument := range argv {
 		if argument != "" && strings.IndexFunc(argument, func(character rune) bool {
-			return !((character >= 'a' && character <= 'z') ||
-				(character >= 'A' && character <= 'Z') ||
-				(character >= '0' && character <= '9') ||
-				strings.ContainsRune("_-./:=@%+,", character))
+			return ((((character < 'a' || character > 'z') && (character < 'A' || character > 'Z')) && (character < '0' || character > '9')) && !(strings.ContainsRune("_-./:=@%+,", character)))
 		}) == -1 {
 			serialized = append(serialized, argument)
 			continue

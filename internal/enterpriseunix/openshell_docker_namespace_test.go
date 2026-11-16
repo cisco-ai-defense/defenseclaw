@@ -38,7 +38,7 @@ func TestRenderedDockerConfigurationsUseTheManagedNamespace(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		h.runner.replies = map[string]fakeReply{"rpm -q --qf %{VERSION} openshell": {result: CommandResult{Stdout: []byte("0.1.3")}}}
+		h.runner.replies = map[string]fakeReply{"rpm -q --qf %{VERSION} openshell": {result: CommandResult{Stdout: []byte("0.1.5")}}}
 		return h
 	}
 	label := "sandbox_label = '" + openshell.ManagedDockerNamespace + "'"

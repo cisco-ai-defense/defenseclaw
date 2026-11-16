@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -648,12 +649,14 @@ func TestInstallWindowsClaudeManagedPolicySurvivesManagedOnlyHooks(t *testing.T)
 	}
 	entry := preTool[0].(map[string]interface{})
 	handler := entry["hooks"].([]interface{})[0].(map[string]interface{})
-	if handler["command"] != fixture.hookExe {
-		t.Fatalf("managed command = %q, want %q", handler["command"], fixture.hookExe)
+	command, _ := handler["command"].(string)
+	if !strings.EqualFold(filepath.Base(command), "cmd.exe") {
+		t.Fatalf("managed command = %q, want the system command parent", command)
 	}
-	args := handler["args"].([]interface{})
-	if len(args) != 4 || args[0] != "hook" || args[1] != "--connector" || args[2] != "claudecode" || args[3] != "--enterprise-managed" {
-		t.Fatalf("managed exec args = %#v", args)
+	launcher, args, owned := connector.ClaudeCodeLauncherGuardTarget(handler)
+	if !owned || launcher != fixture.hookExe || len(args) != 4 ||
+		args[0] != "hook" || args[1] != "--connector" || args[2] != "claudecode" || args[3] != "--enterprise-managed" {
+		t.Fatalf("managed command does not carry the expected native hook: %q %#v", launcher, args)
 	}
 	tokenPath := filepath.Join(fixture.home, ".defenseclaw", "hooks", ".hook-claudecode.token")
 	if token, err := os.ReadFile(tokenPath); err != nil || strings.TrimSpace(string(token)) != opts.APIToken {
@@ -703,14 +706,15 @@ func TestInstallWindowsClaudeManagedPolicySurvivesManagedOnlyHooks(t *testing.T)
 	}
 }
 
-func TestInstallWindowsClaudeNormalizesManagedFailModeClosed(t *testing.T) {
+func TestInstallWindowsClaudeHonorsManagedFailModeOpen(t *testing.T) {
+	// Secure Client (#1163).
+	setStandaloneProfileForTest(t, false)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{
 		"allowManagedHooksOnly": true,
 	})
 	opts := windowsManagedInstallOptions(fixture)
-	// Observe-mode and legacy protected configurations may resolve to open.
-	// Windows enterprise native hooks must still publish and verify one
-	// authoritative fail-closed contract.
+	// Windows enterprise native hooks must publish and verify the configured
+	// open-mode contract as authoritative, including the protected lock record.
 	opts.HookFailMode = "open"
 	if _, err := Install(context.Background(), opts); err != nil {
 		t.Fatalf("Install with configured fail-open mode: %v", err)
@@ -719,8 +723,8 @@ func TestInstallWindowsClaudeNormalizesManagedFailModeClosed(t *testing.T) {
 		filepath.Join(fixture.home, ".defenseclaw"),
 		"claudecode",
 	)
-	if lock.HookFailMode != "closed" {
-		t.Fatalf("managed Claude lock fail mode = %q, want closed", lock.HookFailMode)
+	if lock.HookFailMode != "open" {
+		t.Fatalf("managed Claude lock fail mode = %q, want open", lock.HookFailMode)
 	}
 	if _, err := Verify(context.Background(), opts); err != nil {
 		t.Fatalf("Verify with the same configured fail-open input: %v", err)
@@ -1042,6 +1046,52 @@ func TestInstallWindowsClaudeAutoHealsDeletedManagedPolicyFromExactState(t *test
 		expectedPolicy,
 	); err != nil {
 		t.Fatalf("verify auto-healed policy: %v", err)
+	}
+}
+
+func TestEnsureWindowsClaudeRestoresDeletedPolicyForEnrolledTargets(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(
+		t,
+		map[string]interface{}{"allowManagedHooksOnly": true},
+	)
+	previousStandalone := windowsEnterpriseStandaloneProcess
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
+	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previousStandalone })
+	if _, err := Install(context.Background(), windowsManagedInstallOptions(fixture)); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(filepath.Dir(fixture.policyPath), windowsClaudeManagedStateFile)
+	expectedPolicy, err := os.ReadFile(fixture.policyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedState, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(fixture.policyPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ReadWindowsClaudeManagedPolicyTargets(); err == nil {
+		t.Fatal("missing policy with enrolled ownership state was accepted as inactive")
+	}
+	if err := EnsureWindowsStandaloneClaudeManagedPolicy(connector.SetupOpts{
+		APIAddr:        "127.0.0.1:18970",
+		HookExecutable: fixture.hookExe,
+	}); err != nil {
+		t.Fatalf("restore configured policy with enrolled targets: %v", err)
+	}
+	policy, err := os.ReadFile(fixture.policyPath)
+	if err != nil || !bytes.Equal(policy, expectedPolicy) {
+		t.Fatalf("restored policy differs: read error = %v", err)
+	}
+	state, err := os.ReadFile(statePath)
+	if err != nil || !bytes.Equal(state, expectedState) {
+		t.Fatalf("restored enrollment changed: read error = %v", err)
+	}
+	targets, active, err := ReadWindowsClaudeManagedPolicyTargets()
+	if err != nil || !active || len(targets) != 1 || targets[0] != fixture.targetSID.String() {
+		t.Fatalf("restored targets = %v, active = %t, error = %v", targets, active, err)
 	}
 }
 
@@ -1419,7 +1469,9 @@ func TestWindowsGenericCodexInstallVerifyAndUninstallLifecycle(t *testing.T) {
 	}
 }
 
-func TestInstallWindowsGenericRejectsEmptyAgentVersionBeforeCachedFallback(t *testing.T) {
+func TestInstallWindowsGenericUsesUnionInsteadOfUserVersionCache(t *testing.T) {
+	// Secure Client (#1163).
+	useWindowsSecureClientForTest(t)
 	fixture := newWindowsGenericCodexFixture(t)
 	dataDir := filepath.Join(fixture.home, ".defenseclaw")
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
@@ -1438,9 +1490,18 @@ func TestInstallWindowsGenericRejectsEmptyAgentVersionBeforeCachedFallback(t *te
 	}
 	opts := fixture.opts
 	opts.AgentVersion = " \t "
-	_, err := Install(context.Background(), opts)
-	if err == nil || !strings.Contains(err.Error(), "requires explicit agent_version") {
-		t.Fatalf("Install error = %v, want explicit version refusal before user cache fallback", err)
+	// This fixture models the generic per-user runtime, not Codex's protected
+	// machine requirements. Use the same entry point as its lifecycle test.
+	_, err := installWindowsGenericManagedResult(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Install error = %v, want unversioned union fallback", err)
+	}
+	lock := connector.LoadHookContractLockEntry(dataDir, "codex")
+	if lock.CompatibilityStatus != connector.HookCompatibilityUnversioned || lock.HookFailMode != "open" {
+		t.Fatalf("fallback lock = %+v, want unversioned/open without user cache promotion", lock)
+	}
+	if _, err := verifyWindowsGenericManagedResult(context.Background(), opts); err != nil {
+		t.Fatalf("Verify unversioned union fallback: %v", err)
 	}
 }
 
@@ -1954,9 +2015,16 @@ func TestVerifyWindowsClaudeRejectsAndInstallRepairsTamperedSharedHook(t *testin
 		t.Fatalf("tamper shared hook: %v", err)
 	}
 
-	if _, err := Verify(context.Background(), opts); err == nil ||
-		!strings.Contains(err.Error(), "shared hook script digest mismatch") {
-		t.Fatalf("Verify after shared-hook tamper = %v, want digest rejection", err)
+	// A digest mismatch is repaired by republishing the generated scripts,
+	// then verified again; it no longer fails the user.
+	if _, err := Verify(context.Background(), opts); err != nil {
+		t.Fatalf("Verify after shared-hook tamper = %v, want republish and success", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("Verify did not republish the tampered shared hook: err=%v", err)
+	}
+	if err := os.WriteFile(path, []byte("tampered shared hook\n"), 0o600); err != nil {
+		t.Fatalf("tamper shared hook again: %v", err)
 	}
 
 	opts.AllowMissingHookConfigRepair = true
@@ -2020,9 +2088,11 @@ func TestVerifyWindowsClaudeRepairsAtomicSharedHookReplacementWithoutAdvancingCo
 		t.Fatalf("atomically replace managed hook: %v", err)
 	}
 
-	if _, err := Verify(context.Background(), opts); err == nil ||
-		!strings.Contains(err.Error(), "shared hook script digest mismatch") {
-		t.Fatalf("Verify after atomic replacement = %v, want digest rejection", err)
+	if _, err := Verify(context.Background(), opts); err != nil {
+		t.Fatalf("Verify after atomic replacement = %v, want republish and success", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("Verify did not republish the replaced shared hook: err=%v", err)
 	}
 	opts.AllowMissingHookConfigRepair = true
 	if _, err := Install(context.Background(), opts); err != nil {
@@ -2050,7 +2120,10 @@ func TestVerifyWindowsClaudeRepairsAtomicSharedHookReplacementWithoutAdvancingCo
 	}
 }
 
-func TestVerifyWindowsClaudeRejectsNoncanonicalSharedHookProtection(t *testing.T) {
+// Shared-hook descriptor drift (here an Everyone write grant) is repaired by
+// an elevated verifier and accepted with a log by an unprivileged one; the
+// script bytes stay bound by the contract digest either way.
+func TestVerifyWindowsClaudeRepairsNoncanonicalSharedHookProtection(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)
 	if _, err := Install(context.Background(), opts); err != nil {
@@ -2059,13 +2132,38 @@ func TestVerifyWindowsClaudeRejectsNoncanonicalSharedHookProtection(t *testing.T
 	path := filepath.Join(fixture.home, ".defenseclaw", "hooks", "inspect-tool.sh")
 	setWindowsTestUntrustedWriteDACL(t, path, fixture.targetSID)
 
-	if _, err := Verify(context.Background(), opts); err == nil ||
-		!strings.Contains(err.Error(), "shared hook protection is noncanonical") {
-		t.Fatalf("Verify with noncanonical shared-hook DACL = %v, want protection rejection", err)
+	if _, err := Verify(context.Background(), opts); err != nil {
+		t.Fatalf("Verify with noncanonical shared-hook DACL = %v, want repair or accepted drift", err)
 	}
 }
 
-func TestManagedSharedHookVerifierRejectsNoncanonicalContractLockProtection(t *testing.T) {
+// Structure is still reported: a hard-linked shared hook is never adopted,
+// whatever its descriptor.
+func TestVerifyWindowsClaudeRejectsHardLinkedSharedHook(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+	opts := windowsManagedInstallOptions(fixture)
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("initial Install: %v", err)
+	}
+	path := filepath.Join(fixture.home, ".defenseclaw", "hooks", "inspect-tool.sh")
+	if err := os.Link(path, filepath.Join(fixture.home, "inspect-tool-alias.sh")); err != nil {
+		t.Fatalf("hard-link shared hook: %v", err)
+	}
+	_, err := Verify(context.Background(), opts)
+	if err == nil {
+		t.Fatal("Verify accepted a hard-linked shared hook")
+	}
+	if errors.Is(err, connector.ErrManagedSharedHookScriptDigestMismatch) {
+		t.Fatalf("hard-linked shared hook reported as a digest mismatch: %v", err)
+	}
+}
+
+// Contract-lock descriptor drift (here an Everyone write grant) is permission
+// drift: an elevated verifier re-stamps the canonical protection on the held
+// file and an unprivileged one accepts and logs it. The contract bytes stay
+// bound by their digests either way; a hard-linked shared hook is still
+// refused (TestVerifyWindowsClaudeRejectsHardLinkedSharedHook).
+func TestManagedSharedHookVerifierRepairsNoncanonicalContractLockProtection(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)
 	if _, err := Install(context.Background(), opts); err != nil {
@@ -2078,8 +2176,18 @@ func TestManagedSharedHookVerifierRejectsNoncanonicalContractLockProtection(t *t
 	if err := connector.VerifyManagedSharedHookScriptDigests(
 		dataDir,
 		fixture.targetSID.String(),
-	); err == nil || !strings.Contains(err.Error(), "protection is noncanonical") {
-		t.Fatalf("shared-hook verifier with noncanonical contract-lock DACL = %v, want protection rejection", err)
+	); err != nil {
+		t.Fatalf("shared-hook verifier with noncanonical contract-lock DACL = %v, want repair or accepted drift", err)
+	}
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		return
+	}
+	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if windowsTestDACLGrants(lockPath, everyone, windows.FILE_WRITE_DATA) {
+		t.Fatal("elevated verifier left the Everyone write grant on the contract lock")
 	}
 }
 
@@ -2466,7 +2574,44 @@ func TestValidateWindowsManagedPolicyDirectoryProtectionRejectsUnprotectedLeaf(t
 	}
 }
 
-func TestWindowsClaudeManagedPolicyTransactionRejectsHostilePrecreatedLock(t *testing.T) {
+// An administrator-owned lock whose DACL drifted (here an Everyone write
+// grant) is re-stamped before the transaction opens it.
+func TestWindowsClaudeManagedPolicyTransactionRepairsDriftedLock(t *testing.T) {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("repairing an Administrators-owned lock needs an elevated token")
+	}
+	fixture := newWindowsManagedInstallFixture(t, nil)
+	lockPath := filepath.Join(filepath.Dir(fixture.policyPath), windowsClaudeManagedLockFile)
+	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := setWindowsManagedPolicyProtection(lockPath, false, false); err != nil {
+		t.Fatal(err)
+	}
+	setWindowsTestUntrustedWriteDACL(t, lockPath, fixture.targetSID)
+	// Own the lock by BUILTIN\Administrators, not the fixture's canonical
+	// owner, so the repair's owner admission is exercised for a real
+	// administrator owner whatever account runs the test.
+	if err := setWindowsAdministratorsOwnerForTest(lockPath); err != nil {
+		t.Skipf("set Administrators owner: %v", err)
+	}
+	called := false
+	if err := withWindowsClaudeManagedPolicyTransaction(func() error {
+		called = true
+		return nil
+	}); err != nil {
+		t.Fatalf("transaction with drifted lock: %v", err)
+	}
+	if !called {
+		t.Fatal("transaction callback did not run after the lock was repaired")
+	}
+	if err := windowsManagedPolicyFileTrustCheck(lockPath); err != nil {
+		t.Fatalf("lock still untrusted after repair: %v", err)
+	}
+}
+
+// Structure stays fatal: a hard-linked lock is never adopted.
+func TestWindowsClaudeManagedPolicyTransactionRejectsHardLinkedLock(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, nil)
 	lockPath := filepath.Join(filepath.Dir(fixture.policyPath), windowsClaudeManagedLockFile)
 	if err := os.WriteFile(lockPath, []byte("hostile"), 0o600); err != nil {
@@ -2476,16 +2621,59 @@ func TestWindowsClaudeManagedPolicyTransactionRejectsHostilePrecreatedLock(t *te
 		t.Fatal(err)
 	}
 	setWindowsTestUntrustedWriteDACL(t, lockPath, fixture.targetSID)
+	if err := os.Link(lockPath, filepath.Join(fixture.home, "lock-alias")); err != nil {
+		t.Fatal(err)
+	}
 	called := false
 	err := withWindowsClaudeManagedPolicyTransaction(func() error {
 		called = true
 		return nil
 	})
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "lock is untrusted") {
-		t.Fatalf("transaction error = %v, want hostile lock refusal", err)
+		t.Fatalf("transaction error = %v, want hard-linked lock refusal", err)
 	}
 	if called {
-		t.Fatal("transaction callback ran with hostile precreated lock")
+		t.Fatal("transaction callback ran with a hard-linked lock")
+	}
+}
+
+// setWindowsAdministratorsOwnerForTest makes BUILTIN\Administrators the
+// owner, leaving the drifted DACL in place.
+func setWindowsAdministratorsOwnerForTest(path string) error {
+	owner, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return err
+	}
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return err
+	}
+	return windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, owner, nil, nil, nil)
+}
+
+func TestWindowsClaudeManagedPolicyLockOpensReadOnlyLockFile(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), windowsClaudeManagedLockFile)
+	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pointer, err := windows.UTF16PtrFromString(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetFileAttributes(pointer, windows.FILE_ATTRIBUTE_READONLY); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = windows.SetFileAttributes(pointer, windows.FILE_ATTRIBUTE_NORMAL) })
+	held, err := openWindowsClaudeManagedPolicyLockFile(lockPath)
+	if err != nil {
+		t.Fatalf("open ReadOnly lock file: %v", err)
+	}
+	defer windows.CloseHandle(held)
+	if second, err := openWindowsClaudeManagedPolicyLockFile(lockPath); err == nil {
+		_ = windows.CloseHandle(second)
+		t.Fatal("second open of a held lock succeeded, want a sharing violation")
+	} else if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+		t.Fatalf("second open error = %v, want a sharing violation", err)
 	}
 }
 
@@ -2634,6 +2822,60 @@ func TestRemoveWindowsClaudeManagedPolicyRemovesLastOwnedTarget(t *testing.T) {
 	}
 }
 
+func TestWindowsStandaloneClaudeEmptyEnrollmentKeepsMachinePolicy(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+	previousStandalone := windowsEnterpriseStandaloneProcess
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
+	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previousStandalone })
+	if _, err := Install(context.Background(), windowsManagedInstallOptions(fixture)); err != nil {
+		t.Fatal(err)
+	}
+	if err := PublishWindowsClaudeManagedPolicyTargets(nil); err != nil {
+		t.Fatal(err)
+	}
+	targets, active, err := ReadWindowsClaudeManagedPolicyTargets()
+	if err != nil || !active || len(targets) != 0 {
+		t.Fatalf("zero-target Claude policy: active=%t targets=%v err=%v", active, targets, err)
+	}
+	if _, err := os.Stat(fixture.policyPath); err != nil {
+		t.Fatalf("configured Claude hook disappeared with its final enrollment: %v", err)
+	}
+	runtime, err := ResolveWindowsManagedHookRuntime(fixture.hookExe, "claudecode")
+	if err == nil || !strings.Contains(err.Error(), WindowsManagedSIDUnregisteredReason) ||
+		!runtime.PolicyActive || runtime.Registered {
+		t.Fatalf("unenrolled Claude account: runtime=%+v err=%v", runtime, err)
+	}
+	if err := DeactivateWindowsClaudeManagedPolicy(); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureWindowsStandaloneClaudeManagedPolicy(connector.SetupOpts{
+		APIAddr:        "127.0.0.1:18970",
+		HookExecutable: fixture.hookExe,
+	}); err != nil {
+		t.Fatalf("restore an older release's missing Claude machine guard: %v", err)
+	}
+	targets, active, err = ReadWindowsClaudeManagedPolicyTargets()
+	if err != nil || !active || len(targets) != 0 {
+		t.Fatalf("restored Claude policy: active=%t targets=%v err=%v", active, targets, err)
+	}
+}
+
+func TestWindowsClaudeClosedRegistrationRequiresActiveHookExecutable(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+	if _, err := Install(context.Background(), windowsManagedInstallOptions(fixture)); err != nil {
+		t.Fatal(err)
+	}
+	registered, err := windowsMachinePolicyRegisteredSIDs("claudecode", fixture.hookExe)
+	if err != nil || !registered[strings.ToUpper(fixture.targetSID.String())] {
+		t.Fatalf("matching policy registration: registered=%v err=%v", registered, err)
+	}
+	missingHook := filepath.Join(t.TempDir(), "missing-hook.exe")
+	registered, err = windowsMachinePolicyRegisteredSIDs("claudecode", missingHook)
+	if err == nil || len(registered) != 0 {
+		t.Fatalf("mismatched policy registration: registered=%v err=%v", registered, err)
+	}
+}
+
 func TestRemoveWindowsClaudeManagedPolicyRefusesTamperedPolicy(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)
@@ -2720,6 +2962,24 @@ func TestRemoveWindowsClaudeManagedPolicyKeepsPolicyForOtherTargets(t *testing.T
 }
 
 func currentWindowsTestSID(t *testing.T) *windows.SID {
+	t.Helper()
+	// These fixtures target the account running the test, and production
+	// refuses LocalSystem as a target (the refusal has its own tests). Run
+	// as LocalSystem there is no interactive account to target.
+	if windowsTestRunsAsLocalSystem(t) {
+		t.Skip("skipped as LocalSystem: the fixture targets the running account, and enterprise hooks refuse LocalSystem as a target; run the package as an interactive administrator")
+	}
+	return windowsTestTokenUser(t)
+}
+
+// windowsTestRunsAsLocalSystem reports whether the test runs as LocalSystem,
+// as the managed lifecycle does.
+func windowsTestRunsAsLocalSystem(t *testing.T) bool {
+	t.Helper()
+	return windowsTestTokenUser(t).IsWellKnown(windows.WinLocalSystemSid)
+}
+
+func windowsTestTokenUser(t *testing.T) *windows.SID {
 	t.Helper()
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil || user == nil || user.User.Sid == nil {
@@ -2993,7 +3253,46 @@ func removeExactWindowsManagedRuntimeGenerationSnapshot(
 	}
 }
 
+// TestWindowsEnterpriseManagedAgentVersionIsNotAnInstallPrerequisite is the
+// Secure Client contract (#1163): no agent-version gate.
+func TestWindowsEnterpriseManagedAgentVersionIsNotAnInstallPrerequisite(t *testing.T) {
+	useWindowsSecureClientForTest(t)
+	for _, tc := range []struct {
+		name      string
+		connector string
+		version   string
+		wantErr   bool
+	}{
+		{name: "codex below", connector: "codex", version: "0.130.0"},
+		{name: "codex minimum", connector: "codex", version: "0.131.0"},
+		{name: "codex malformed", connector: "codex", version: "not-a-version"},
+		{name: "codex missing", connector: "codex"},
+		{name: "claude missing", connector: "claudecode"},
+		{name: "cursor missing", connector: "cursor"},
+		{name: "claude below", connector: "claudecode", version: "2.1.151"},
+		{name: "claude minimum", connector: "claudecode", version: "2.1.152"},
+		{name: "cursor below", connector: "cursor", version: "1.6.9"},
+		{name: "cursor minimum", connector: "cursor", version: "1.7.0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := requireWindowsEnterpriseManagedAgentVersion(tc.connector, tc.version)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf(
+					"requireWindowsEnterpriseManagedAgentVersion(%q, %q) error = %v, wantErr=%t",
+					tc.connector,
+					tc.version,
+					err,
+					tc.wantErr,
+				)
+			}
+		})
+	}
+}
+
+// TestWindowsEnterpriseManagedAgentVersionMinimums keeps origin/main's
+// version gate for every profile but Secure Client.
 func TestWindowsEnterpriseManagedAgentVersionMinimums(t *testing.T) {
+	setStandaloneProfileForTest(t, true)
 	for _, tc := range []struct {
 		name      string
 		connector string
@@ -3003,6 +3302,7 @@ func TestWindowsEnterpriseManagedAgentVersionMinimums(t *testing.T) {
 		{name: "codex below", connector: "codex", version: "0.130.0", wantErr: true},
 		{name: "codex minimum", connector: "codex", version: "0.131.0"},
 		{name: "codex malformed", connector: "codex", version: "not-a-version", wantErr: true},
+		{name: "codex missing", connector: "codex", wantErr: true},
 		{name: "claude below", connector: "claudecode", version: "2.1.151", wantErr: true},
 		{name: "claude minimum", connector: "claudecode", version: "2.1.152"},
 		{name: "cursor below", connector: "cursor", version: "1.6.9", wantErr: true},
@@ -3021,6 +3321,38 @@ func TestWindowsEnterpriseManagedAgentVersionMinimums(t *testing.T) {
 			}
 		})
 	}
+	if err := requireWindowsEnterpriseAgentVersionOutsideSecureClient(" \t "); err == nil ||
+		!strings.Contains(err.Error(), "requires explicit agent_version") {
+		t.Fatalf("empty agent_version outside Secure Client = %v, want the explicit version refusal", err)
+	}
+}
+
+// TestWindowsEnterpriseHookFailModeFollowsTheAdministrator pins the owner
+// decision of 2026-10-20 for the Windows managed renders: the administrator's
+// explicit open or closed wins on the standalone profile too, an unset mode
+// is closed there, and under Secure Client (#1163) an unset mode is open.
+func TestWindowsEnterpriseHookFailModeFollowsTheAdministrator(t *testing.T) {
+	setStandaloneProfileForTest(t, true)
+	for configured, want := range map[string]string{"": "closed", "open": "open", "Open": "open", "closed": "closed", "bogus": "closed"} {
+		if got := canonicalHookFailMode(configured); got != want {
+			t.Fatalf("standalone configured %q = %q, want %q", configured, got, want)
+		}
+		if got := windowsManagedGenerationFailMode([]string{configured}); got != want {
+			t.Fatalf("standalone generation for %q = %q, want %q", configured, got, want)
+		}
+	}
+	if got := windowsManagedGenerationFailMode(nil); got != "closed" {
+		t.Fatalf("standalone generation without a mode = %q, want closed", got)
+	}
+	useWindowsSecureClientForTest(t)
+	for configured, want := range map[string]string{"": "open", "open": "open", "Open": "open", "closed": "closed", "bogus": "closed"} {
+		if got := canonicalHookFailMode(configured); got != want {
+			t.Fatalf("secure client configured %q = %q, want %q", configured, got, want)
+		}
+	}
+	if got := windowsManagedGenerationFailMode(nil); got != "open" {
+		t.Fatalf("secure client generation without a mode = %q, want open", got)
+	}
 }
 
 // GAP-1940: an account deleted with its profile during Setup is named as
@@ -3033,4 +3365,167 @@ func TestValidateWindowsEnterpriseHomeNamesAVanishedProfile(t *testing.T) {
 		strings.Contains(err.Error(), "GetFileAttributesEx") {
 		t.Fatalf("vanished profile error = %v", err)
 	}
+}
+
+// DefenseClaw's Claude Code drop-in is the guard's only owned artifact; its
+// ownership record keeps the enrollment. Repair rebuilds a missing or changed
+// drop-in from that record, for an empty enrollment as for an enrolled one,
+// and leaves the record and its targets as they were.
+func TestWindowsClaudeMachineGuardArtifactRepairTable(t *testing.T) {
+	damages := []struct {
+		name  string
+		apply func(path string, original []byte) error
+	}{
+		{name: "drop-in missing", apply: func(path string, _ []byte) error { return os.Remove(path) }},
+		{name: "drop-in hook changed", apply: func(path string, original []byte) error {
+			return os.WriteFile(path, bytes.Replace(original, []byte("defenseclaw-hook.exe"), []byte("other-hook.exe"), 1), 0o600)
+		}},
+		{name: "drop-in replaced", apply: func(path string, _ []byte) error {
+			return os.WriteFile(path, []byte(`{"permissions":{"allow":["Bash"]}}`), 0o600)
+		}},
+		{name: "drop-in not JSON", apply: func(path string, _ []byte) error {
+			return os.WriteFile(path, []byte("{ not json"), 0o600)
+		}},
+		{name: "drop-in turns hooks off", apply: func(path string, _ []byte) error {
+			return os.WriteFile(path, []byte(`{"disableAllHooks":true}`), 0o600)
+		}},
+	}
+	for _, enrolled := range []bool{false, true} {
+		for _, damage := range damages {
+			t.Run(map[bool]string{false: "empty", true: "Alice"}[enrolled]+"/"+damage.name, func(t *testing.T) {
+				fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+				previousStandalone := windowsEnterpriseStandaloneProcess
+				windowsEnterpriseStandaloneProcess = func() bool { return true }
+				t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previousStandalone })
+				if _, err := Install(context.Background(), windowsManagedInstallOptions(fixture)); err != nil {
+					t.Fatal(err)
+				}
+				if !enrolled {
+					if err := PublishWindowsClaudeManagedPolicyTargets(nil); err != nil {
+						t.Fatal(err)
+					}
+				}
+				targetsBefore, active, err := ReadWindowsClaudeManagedPolicyTargets()
+				if err != nil || !active || (len(targetsBefore) == 1) != enrolled {
+					t.Fatalf("fixture guard: active=%t targets=%v err=%v", active, targetsBefore, err)
+				}
+				statePath := filepath.Join(filepath.Dir(fixture.policyPath), windowsClaudeManagedStateFile)
+				original, err := os.ReadFile(fixture.policyPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				stateBefore, err := os.ReadFile(statePath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := damage.apply(fixture.policyPath, original); err != nil {
+					t.Fatal(err)
+				}
+				if _, _, err := ReadWindowsClaudeManagedPolicyTargets(); err == nil {
+					t.Fatal("the damaged drop-in appeared healthy")
+				}
+				if restored, err := RestoreWindowsClaudeManagedPolicyDrift(); err != nil || !restored {
+					t.Fatalf("rebuild: restored=%t err=%v", restored, err)
+				}
+				if policy, err := os.ReadFile(fixture.policyPath); err != nil || !bytes.Equal(policy, original) {
+					t.Fatalf("the rebuilt drop-in differs from the one DefenseClaw wrote: %v", err)
+				}
+				if state, err := os.ReadFile(statePath); err != nil || !bytes.Equal(state, stateBefore) {
+					t.Fatalf("the rebuild changed the ownership record: %v", err)
+				}
+				targets, active, err := ReadWindowsClaudeManagedPolicyTargets()
+				if err != nil || !active || !slices.Equal(targets, targetsBefore) {
+					t.Fatalf("rebuilt guard: active=%t targets=%v (want %v) err=%v", active, targets, targetsBefore, err)
+				}
+				if again, err := RestoreWindowsClaudeManagedPolicyDrift(); err != nil || again {
+					t.Fatalf("second repair of a healthy drop-in: restored=%t err=%v", again, err)
+				}
+			})
+		}
+	}
+}
+
+// Alternate quarantine slots are bounded: an absent or target-owned slot is
+// used, a slot held by another owner is skipped and left alone, and when every
+// slot is held the quarantine is refused instead of creating another one.
+func TestWindowsManagedObstructionAlternateSlotIsBounded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "obstruction")
+	current, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	self := current.User.Sid
+	if got, err := windowsManagedObstructionAlternateSlot(path, self); err != nil ||
+		got != windowsManagedObstructionAlternatePath(path, 1) {
+		t.Fatalf("first slot = %q, %v; want slot 1", got, err)
+	}
+	for index := 1; index <= windowsManagedObstructionAlternateSlots; index++ {
+		if err := os.WriteFile(windowsManagedObstructionAlternatePath(path, index), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Slots this process created are reusable for their owner as target (the
+	// test user, or Administrators on an elevated token).
+	fileOwner, err := windowsPathOwnerNoFollow(windowsManagedObstructionAlternatePath(path, 1))
+	if err != nil || fileOwner == nil {
+		t.Fatalf("slot owner: %v", err)
+	}
+	if got, err := windowsManagedObstructionAlternateSlot(path, fileOwner); err != nil ||
+		got != windowsManagedObstructionAlternatePath(path, 1) {
+		t.Fatalf("target-owned slot = %q, %v; want slot 1 reused", got, err)
+	}
+	// For any other target every slot is held by another owner.
+	other, err := windows.CreateWellKnownSid(windows.WinLocalServiceSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := windowsManagedObstructionAlternateSlot(path, other); err == nil {
+		t.Fatalf("slot = %q with every slot held by another owner, want refusal", got)
+	}
+	if err := os.Remove(windowsManagedObstructionAlternatePath(path, 3)); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := windowsManagedObstructionAlternateSlot(path, other); err != nil ||
+		got != windowsManagedObstructionAlternatePath(path, 3) {
+		t.Fatalf("freed slot = %q, %v; want slot 3", got, err)
+	}
+}
+
+// setWindowsUserPathProtection gives a fixture path the canonical per-user
+// DACL for target, refusing a path target does not own. Only the tests call
+// it; it moved here from install_windows.go, where it had no caller
+// (GAP-0684).
+func setWindowsUserPathProtection(path string, target *windows.SID, directory bool) error {
+	if err := rejectWindowsReparseChain(path); err != nil {
+		return err
+	}
+	owner, err := windowsPathOwnerNoFollow(path)
+	if err != nil {
+		return err
+	}
+	if owner == nil || !owner.Equals(target) {
+		return fmt.Errorf(
+			"enterprise hooks: refusing to canonicalize wrong-owner path %s (owner %s, target %s)",
+			path,
+			windowsSIDString(owner),
+			windowsSIDString(target),
+		)
+	}
+	if !directory {
+		if err := validateWindowsRegularFileSingleLink(path); err != nil {
+			return err
+		}
+	}
+	if err := validateWindowsUserPathElement(path, target, directory, directory, true); err == nil {
+		return nil
+	}
+	acl, err := windowsUserPathProtectionACL(target, directory)
+	if err != nil {
+		return err
+	}
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return err
+	}
+	return windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
 }

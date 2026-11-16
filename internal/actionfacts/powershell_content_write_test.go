@@ -18,6 +18,34 @@ package actionfacts
 
 import "testing"
 
+func TestPowerShellAbbreviatedContentParametersBindData(t *testing.T) {
+	const protected = `C:\Users\Alice\.ssh\authorized_keys`
+	for _, tc := range []struct {
+		name, command string
+		argv          []string
+		destination   string
+		access        PathAccess
+	}{
+		{"add value as data", `Add-Content -Va ` + protected + ` report.txt`, []string{"Add-Content", "-Va", protected, "report.txt"}, "report.txt", PathAccessAppend},
+		{"set value as data", `Set-Content -Val ` + protected + ` report.txt`, []string{"Set-Content", "-Val", protected, "report.txt"}, "report.txt", PathAccessWrite},
+		{"out file input as data", `Out-File -Inp ` + protected + ` -FilePath report.txt`, []string{"Out-File", "-Inp", protected, "-FilePath", "report.txt"}, "report.txt", PathAccessWrite},
+		{"add value with protected destination", `Add-Content -Va marker ` + protected, []string{"Add-Content", "-Va", "marker", protected}, protected, PathAccessAppend},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for name, input := range map[string]Input{
+				"raw":        {Tool: "powershell", Command: tc.command},
+				"structured": {Argv: tc.argv, DialectHint: DialectPowerShell},
+			} {
+				facts := Analyze(input)
+				if !facts.Authoritative() || !factsHavePath(facts, tc.access, tc.destination) ||
+					(tc.destination != protected && factsHavePath(facts, tc.access, protected)) {
+					t.Errorf("%s: wrong PowerShell destination: status=%s paths=%#v", name, facts.Parse.Status, facts.Paths)
+				}
+			}
+		})
+	}
+}
+
 // GAP-0175: the file writes an agent produces on Windows carry -NoNewline,
 // -InputObject or -Append. Raw PowerShell left them partial while the
 // structured binder bound them, so CEL block rules fell back to

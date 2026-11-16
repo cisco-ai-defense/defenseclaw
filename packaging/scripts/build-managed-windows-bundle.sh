@@ -13,9 +13,8 @@
 #
 # Primary output: ${DIST_DIR}/windows-enterprise-buildkit-${VERSION}/.
 #
-# Also emits the release-shaped defenseclaw-${VERSION}-windows-amd64.zip +
-# gateway-source-commit.txt that scripts/build-windows-installer.ps1
-# consumes.
+# Also emits the release-shaped defenseclaw-${VERSION}-windows-amd64.zip and
+# a gateway-source-commit.txt sidecar that names the commit it was built from.
 #
 # What the script does:
 #   1. Clone github.com/cisco-aispg/ai-common at ${REF} (SSH first, HTTPS
@@ -59,16 +58,16 @@
 #   --version <v>         defenseclaw release version (required)
 #   --dist-dir <p>        output directory for the gateway zip (default: dist)
 #   --script-host <s>     bash|pwsh — which assemble.* to ship in the kit
-#                         (spec 002 REQ-08; default: bash)
+#                         (the kit ships exactly one; default: bash)
 #   --allow-unsigned      developer-only mode: build kit AND run
 #                         assemble.sh --allow-unsigned inline, landing a
 #                         runnable but unsigned Setup EXE under
 #                         dist/windows-enterprise-buildkit-<v>-unsigned/out/
-#                         (spec 002 REQ-14; refuses non-disposable scopes
+#                         (separate output dir; refuses non-disposable scopes
 #                         at runtime via cmd/defenseclaw-enterprise-setup)
 #   -h|--help             show this header and exit
 #
-# AVC-facing kit (spec 002 §2.3.A1): every invocation also emits
+# AVC-facing kit: every invocation also emits
 #     ${DIST_DIR}/windows-enterprise-buildkit-${VERSION}/
 # whose contents match docs/WINDOWS-AVC-PACKAGING-HANDOFF.md. AVC signs
 # the eight inner files under payload/, runs the shipped
@@ -91,7 +90,7 @@ SCRIPT_HOST="bash"
 # --script-host, so the deprecation warning below can fire on any
 # explicit value — including `bash` (previously the default) and `pwsh`
 # (the case CI is most likely still passing to pick up the PowerShell
-# shell assembler that spec 003 retired).
+# shell assembler that the Go assembler replaced).
 SCRIPT_HOST_EXPLICIT="false"
 ALLOW_UNSIGNED="false"
 
@@ -342,6 +341,37 @@ echo "==> stamping defenseclaw-sensor-helper.exe VERSIONINFO / icon"
     -target windows_amd64 -executable "${SENSOR_HELPER_EXE}" \
     -component sensor-helper -version "${VERSION}" -icon "${ICON_PATH}" )
 
+# ---- verify the cmid overlay actually linked into each binary ---------
+#
+# If the overlay cp (line 265) silently no-op'd, the overlay source was
+# itself a stub, or `go build` picked up a stale cache without the
+# Register() init, the resulting binary ships with `cloudreg.Registered()`
+# returning false. On AVC CI the broker then exits with service-specific
+# error 1 ("Incorrect function"), the install fails, and the only
+# diagnostic is a `stage=provider-registration success=false` line in the
+# broker log. The 06102026 handoff kit shipped exactly this failure mode.
+#
+# The real overlay imports github.com/cisco-aispg/ai-common/cmid; Go
+# embeds that module path in the binary (reflection / panic traces) even
+# with -trimpath. Zero occurrences = overlay did not link, which fails
+# fast here instead of surviving to AVC's signing pipeline.
+for binary_path in "${GATEWAY_EXE}" "${HOOK_EXE}" "${BROKER_EXE}"; do
+    # grep -ao returns exit 1 on zero matches, which under `set -euo
+    # pipefail` kills the script before the diagnostic branch below
+    # runs. Wrap the matcher in `|| true` so pipefail sees success and
+    # wc -l still reports 0 for a stub-linked binary - the ensuing
+    # `if ... -eq 0` is what emits the useful "cmid overlay did not
+    # link" message. Keeps the hard-fail intent; just surfaces WHY.
+    overlay_hits="$({ grep -ao 'cisco-aispg' "${binary_path}" 2>/dev/null || true; } | wc -l | tr -d ' ')"
+    if [[ "${overlay_hits}" -eq 0 ]]; then
+        echo "build-managed-windows-bundle: ${binary_path} has 0 cisco-aispg symbols; cmid overlay did not link" >&2
+        echo "    expected the private overlay from ${OVERLAY_PATH} to compile in via -tags cmid" >&2
+        echo "    a stub-linked broker fails on AVC CI with provider-registration success=false" >&2
+        exit 1
+    fi
+    echo "==> ${binary_path}: ${overlay_hits} cisco-aispg symbols (cmid overlay linked)"
+done
+
 # ---- cross-build the prebuilt outer Setup EXE + assembler EXE ----------
 #
 # DefenseClaw prebuilds BOTH the unsigned outer Setup EXE (with NO
@@ -420,7 +450,7 @@ echo "==> staging kit payload"
 # what we tell emit-payload-metadata (--expected-filenames arg) and
 # it is the same set of names we stage under payload/. Keeping the
 # list in one variable prevents drift between the staged payload and
-# the audit trail in payload-metadata.json (CR spec-002:PRRT_kwDORuAK-s6af8iw).
+# the audit trail in payload-metadata.json.
 # The runtime's requiredPayloadFiles in cmd/defenseclaw-enterprise-setup/main.go
 # and the assemble.{sh,ps1} EXPECTED_PAYLOAD arrays must all agree —
 # scripts/check-assemble-parity.sh enforces the two assembler ends.

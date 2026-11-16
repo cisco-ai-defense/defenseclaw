@@ -20,12 +20,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -40,11 +40,11 @@ const (
 
 var (
 	windowsEnterpriseDeploymentInspector = inspectTrustedWindowsEnterpriseDeployment
-	windowsEnterpriseSHA256Pattern       = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	windowsEnterprisePayloadLeafPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	windowsEnterpriseSHA256Pattern       = lazyregexp.New(`^[0-9a-f]{64}$`)
+	windowsEnterprisePayloadLeafPattern  = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 	// Seams for inspectTrustedWindowsEnterpriseDeployment.
-	windowsEnterpriseRecordRoots     = winpath.TrustedEnterpriseRoots
+	windowsEnterpriseRecordRoots     = windowsManagedRoots
 	windowsEnterpriseRecordInspector = winpath.InspectEnterpriseDeployment
 	windowsEnterpriseRecordValidator = windowsEnterpriseRecordValidatorDefault
 )
@@ -125,22 +125,53 @@ func resolveWindowsEnterpriseLifecycleProfile(action string, opts *windowsEnterp
 		return windowsEnterpriseInvalidArguments("--profile must be %s or %s", managed.ProfileSecureClient, managed.ProfileStandalone)
 	}
 	if path := strings.TrimSpace(opts.configPath); path != "" {
+		// A relative --config is the caller's mistake, refused as invalid
+		// arguments before anything opens it, as on Linux; it was a 1603
+		// preflight failure for a file looked up in the current folder
+		// (GAP-1674). Secure Client keeps its arguments.
+		if !filepath.IsAbs(path) && (requested == managed.ProfileStandalone ||
+			(requested == "" && windowsEnterpriseStandaloneRecordedOnly(opts))) {
+			return windowsEnterpriseInvalidArguments("--config must be an absolute path, got %s", path)
+		}
 		configured, err := readWindowsEnterpriseConfigProfile(path)
-		if err != nil {
-			var content windowsEnterpriseConfigContentError
-			if requested == managed.ProfileStandalone && errors.As(err, &content) {
-				// A file that does not parse (a tab-indented line, GAP-0607),
-				// is not UTF-8 or is too large is the administrator's to fix: refuse it as invalid
-				// arguments (1639) with the gateway compiler's explanation,
-				// as every other config refusal (GAP-0562, GAP-0571).
-				if compiled := windowsEnterpriseStandaloneConfigPreflight(path); compiled != nil {
-					err = compiled
-				}
+		var content windowsEnterpriseConfigContentError
+		var unreadable windowsEnterpriseConfigReadError
+		if err != nil && (errors.As(err, &content) || errors.As(err, &unreadable)) && requested == "" && windowsEnterpriseStandaloneRecordedOnly(opts) {
+			// The file cannot name its profile, but this host runs only the
+			// standalone profile, where no Secure Client config applies: it
+			// is the standalone profile's refusal, not a Secure Client
+			// preflight failure (GAP-0103, GAP-0537).
+			requested = managed.ProfileStandalone
+		}
+		if err != nil && requested == managed.ProfileStandalone && errors.As(err, &unreadable) &&
+			windowsEnterpriseSuppliedConfigRefusalAction(action) {
+			// A file that is missing or cannot be read is refused as a
+			// preflight failure (1603), but once the installer is trusted,
+			// so the refusal reports the running deployment, its advisories
+			// and enrollment, as a refused config that does not parse
+			// (GAP-0537, GAP-0103).
+			opts.suppliedConfigRefusal = err
+			opts.suppliedConfigUnreadable = true
+		} else if err != nil {
+			if requested != managed.ProfileStandalone || !errors.As(err, &content) {
+				return err
+			}
+			// A file that does not parse (a tab-indented line, GAP-0607),
+			// is not UTF-8 or is too large is the administrator's to fix: refuse it as invalid
+			// arguments (1639) with the gateway compiler's explanation,
+			// as every other config refusal (GAP-0562, GAP-0571).
+			if compiled := windowsEnterpriseStandaloneConfigPreflight(path); compiled != nil {
+				err = compiled
+			}
+			if !windowsEnterpriseSuppliedConfigRefusalAction(action) {
 				return fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, err)
 			}
-			return err
-		}
-		if configured != "" {
+			// The lifecycle refuses it once the installer is found and
+			// trusted, so the refusal reports the running deployment, its
+			// advisories and policy labelled, not only the recorded
+			// deployment (GAP-0103).
+			opts.suppliedConfigRefusal = err
+		} else if configured != "" {
 			if requested != "" && requested != configured {
 				return windowsEnterpriseInvalidArguments("--profile %s conflicts with enterprise.profile %s in %s", requested, configured, path)
 			}
@@ -163,7 +194,11 @@ func resolveWindowsEnterpriseLifecycleProfile(action string, opts *windowsEnterp
 			}
 			if deployment.Untrusted != "" {
 				opts.ignoredDeploymentRecords = append(opts.ignoredDeploymentRecords,
-					deployment.MetadataPath+": "+deployment.Untrusted)
+					windowsEnterpriseIgnoredDeploymentRecord{
+						profile: candidate,
+						path:    deployment.MetadataPath,
+						reason:  deployment.Untrusted,
+					})
 			}
 			switch deployment.State {
 			case winpath.EnterpriseDeploymentInstalled, winpath.EnterpriseDeploymentUnknown:
@@ -256,7 +291,7 @@ type windowsEnterpriseConfiguredTrust struct {
 // windowsEnterpriseInstalledConfigPath is the installed standalone config;
 // tests replace it.
 var windowsEnterpriseInstalledConfigPath = func() (string, error) {
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		return "", err
 	}
@@ -370,6 +405,12 @@ func windowsEnterpriseRequestedAttestations(opts *windowsEnterpriseLifecycleOpti
 
 func readWindowsEnterpriseConfiguredTrust(action string, opts *windowsEnterpriseLifecycleOptions) (windowsEnterpriseConfiguredTrust, error) {
 	path := strings.TrimSpace(opts.configPath)
+	if opts.suppliedConfigRefusal != nil {
+		// The supplied config does not parse, and the run is refused before
+		// it changes anything; until then the installed config's trust
+		// applies, as for a run without one.
+		path = ""
+	}
 	supplied := path != ""
 	if !supplied {
 		// Read-only actions and uninstall bring no payload, so the installed
@@ -396,24 +437,36 @@ func readWindowsEnterpriseConfiguredTrust(action string, opts *windowsEnterprise
 		}
 		return windowsEnterpriseConfiguredTrust{}, fmt.Errorf("read enterprise.trust from %s: %w", path, err)
 	}
-	var document struct {
-		Enterprise struct {
-			Trust struct {
-				Mode           string   `yaml:"mode"`
-				AllowedSigners []string `yaml:"allowed_signers"`
-			} `yaml:"trust"`
-		} `yaml:"enterprise"`
-	}
+	var document windowsEnterpriseTrustDocument
 	if err := yaml.Unmarshal(trimWindowsJSONBOM(body), &document); err != nil {
 		if !supplied {
 			// A run that keeps the installed config cannot heal it; one given
 			// the config to install keeps this file aside (GAP-0948).
 			return windowsEnterpriseConfiguredTrust{}, fmt.Errorf(
-				"the installed config.yaml (%s) does not parse %s, so a run that keeps it cannot heal it: run %s /ensure CONFIG=<config.yaml> JSON=1 (or /repair CONFIG=) first, with the config to install, which keeps this file as rejected-config.yaml",
-				path, windowsEnterpriseYAMLProblem(err), windowsEnterpriseStandaloneSetupName)
+				"the installed config.yaml (%s) does not parse %s, so a run that keeps it cannot heal it: run %s (or /repair with CONFIG=) first, with the config to install, which keeps this file as rejected-config.yaml.%s",
+				path, windowsEnterpriseYAMLProblem(err), windowsEnterpriseSetupCommand("/ensure", "CONFIG=<config.yaml>", "JSON=1"), windowsEnterpriseSetupSourceNote)
 		}
 		return windowsEnterpriseConfiguredTrust{}, fmt.Errorf("the config %s does not parse %s; fix it and run again", path, windowsEnterpriseYAMLProblem(err))
 	}
+	return windowsEnterpriseTrustFromDocument(path, document)
+}
+
+// windowsEnterpriseTrustDocument is the enterprise.trust part of a config.
+// It stays an unnamed struct type (an alias), so a YAML type error names the
+// destination "struct" and windowsEnterpriseYAMLProblem says "a mapping of
+// keys is expected".
+type windowsEnterpriseTrustDocument = struct {
+	Enterprise struct {
+		Trust struct {
+			Mode           string   `yaml:"mode"`
+			AllowedSigners []string `yaml:"allowed_signers"`
+		} `yaml:"trust"`
+	} `yaml:"enterprise"`
+}
+
+// windowsEnterpriseTrustFromDocument validates the enterprise.trust the
+// config at path carries.
+func windowsEnterpriseTrustFromDocument(path string, document windowsEnterpriseTrustDocument) (windowsEnterpriseConfiguredTrust, error) {
 	configured := windowsEnterpriseConfiguredTrust{path: path}
 	switch mode := strings.ToLower(strings.TrimSpace(document.Enterprise.Trust.Mode)); mode {
 	case "", windowsEnterpriseTrustAuthenticode, windowsEnterpriseTrustHashPinned:
@@ -436,8 +489,8 @@ func readWindowsEnterpriseConfiguredTrust(action string, opts *windowsEnterprise
 }
 
 var (
-	windowsEnterpriseYAMLTypeEntry = regexp.MustCompile(`^line ([0-9]+): cannot unmarshal (!![a-z]+)`)
-	windowsEnterpriseYAMLLineEntry = regexp.MustCompile(`^(?:yaml: )?line ([0-9]+): (.+)$`)
+	windowsEnterpriseYAMLTypeEntry = lazyregexp.New(`^line ([0-9]+): cannot unmarshal (!![a-z]+)`)
+	windowsEnterpriseYAMLLineEntry = lazyregexp.New(`^(?:yaml: )?line ([0-9]+): (.+)$`)
 )
 
 // windowsEnterpriseYAMLProblem says in plain words where a config does not
@@ -510,18 +563,24 @@ type windowsEnterpriseConfigContentError struct{ error }
 
 func (err windowsEnterpriseConfigContentError) Unwrap() error { return err.error }
 
+// windowsEnterpriseConfigReadError is an administrator config that could not
+// be opened or read (it does not exist, or access is denied).
+type windowsEnterpriseConfigReadError struct{ error }
+
+func (err windowsEnterpriseConfigReadError) Unwrap() error { return err.error }
+
 // readWindowsEnterpriseConfigProfile reads enterprise.profile from an
 // administrator-supplied config. The lifecycle validates the whole file
 // later; this only chooses which lifecycle validates it.
 func readWindowsEnterpriseConfigProfile(path string) (string, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return "", fmt.Errorf("open managed config %s: %w", path, err)
+		return "", windowsEnterpriseConfigReadError{fmt.Errorf("open managed config %s: %w", path, err)}
 	}
 	defer file.Close()
 	body, err := io.ReadAll(io.LimitReader(file, windowsEnterpriseConfigProfileLimit+1))
 	if err != nil {
-		return "", fmt.Errorf("read managed config %s: %w", path, err)
+		return "", windowsEnterpriseConfigReadError{fmt.Errorf("read managed config %s: %w", path, err)}
 	}
 	if len(body) > windowsEnterpriseConfigProfileLimit {
 		return "", windowsEnterpriseConfigContentError{fmt.Errorf("managed config %s exceeds %d bytes", path, windowsEnterpriseConfigProfileLimit)}
@@ -539,6 +598,37 @@ func readWindowsEnterpriseConfigProfile(path string) (string, error) {
 		return "", windowsEnterpriseInvalidArguments("enterprise.profile %q in %s is not %s or %s", document.Enterprise.Profile, path, managed.ProfileSecureClient, managed.ProfileStandalone)
 	}
 	return profile, nil
+}
+
+// windowsEnterpriseSuppliedConfigRefusalAction reports an action the
+// lifecycle refuses for a supplied config the gateway cannot load
+// (refuseWindowsEnterpriseStandaloneSuppliedConfig): every action that
+// applies a --config.
+func windowsEnterpriseSuppliedConfigRefusalAction(action string) bool {
+	return windowsEnterpriseMutationAction(action)
+}
+
+// windowsEnterpriseStandaloneRecordedOnly reports a production host whose
+// recorded deployment is the standalone profile's and not Secure Client's,
+// as profile detection reads them.
+func windowsEnterpriseStandaloneRecordedOnly(opts *windowsEnterpriseLifecycleOptions) bool {
+	if windowsEnterpriseCertificationScope(opts) {
+		return false
+	}
+	live := func(profile string) (bool, error) {
+		deployment, err := windowsEnterpriseDeploymentInspector(profile)
+		if err != nil {
+			return false, err
+		}
+		return deployment.State == winpath.EnterpriseDeploymentInstalled ||
+			deployment.State == winpath.EnterpriseDeploymentUnknown, nil
+	}
+	standalone, err := live(managed.ProfileStandalone)
+	if err != nil || !standalone {
+		return false
+	}
+	secureClient, err := live(managed.ProfileSecureClient)
+	return err == nil && !secureClient
 }
 
 // windowsEnterpriseStandalonePowerShellArgs are the installer arguments only

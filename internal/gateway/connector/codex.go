@@ -23,13 +23,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
+	"slices"
 	"strings"
 	"sync"
 
@@ -41,11 +41,14 @@ import (
 // CodexConnector is the hook-only security surface for OpenAI Codex.
 // It does not interpose on chat traffic; codex-cli talks directly to
 // its native upstream (api.openai.com or the ChatGPT backend). The
-// connector wires three telemetry/inspection channels into
+// connector wires hooks and agent-turn notifications into
 // ~/.codex/config.toml:
 //   - codex-hook.sh under [hooks] for tool-call inspection
-//   - [otel.exporter.otlp-http] for native OTLP telemetry
 //   - notify-bridge.sh wired to `notify` for agent-turn events
+//
+// Host installs do not configure native OTLP: Codex cannot prove who owns a
+// replaced loopback listener before exporting. Isolated sandbox rendering
+// keeps its own receiver within the sandbox boundary.
 //
 // Implements ComponentScanner, StopScanner.
 type CodexConnector struct {
@@ -112,7 +115,7 @@ func withCodexLifecycleTransaction(opts SetupOpts, fn func() error) error {
 
 	codexLifecycleMu.Lock()
 	defer codexLifecycleMu.Unlock()
-	return withOwnedFileLock(filepath.Join(lockDir, ".codex-lifecycle.lock"), fn)
+	return withOwnedFileLock(filepath.Join(lockDir, codexLifecycleLockName), fn)
 }
 
 type codexSetupRuntimeSnapshot struct {
@@ -136,7 +139,7 @@ func snapshotCodexSetupRuntime(opts SetupOpts, connector *CodexConnector) (codex
 	snapshot.hookDir = hookDir
 	if info, err := os.Lstat(hookDir); err == nil {
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			return snapshot, fmt.Errorf("Codex hook runtime path is not an ordinary directory: %s", hookDir)
+			return snapshot, fmt.Errorf("Codex hook runtime path is not an ordinary directory: %s", hookDir) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		snapshot.hookDirExisted = true
 	} else if !os.IsNotExist(err) {
@@ -152,6 +155,9 @@ func snapshotCodexSetupRuntime(opts SetupOpts, connector *CodexConnector) (codex
 	}
 	for _, path := range []string{
 		filepath.Join(hookDir, ".token"),
+		// The per-user hook writer records the gateway helper path here; a
+		// failed Setup puts it back as found like every other runtime file.
+		filepath.Join(hookDir, ".gateway-helper"),
 		filepath.Join(hookDir, hookConfigSidecarName),
 		filepath.Join(hookDir, hookConfigSidecarName+".lock"),
 		filepath.Join(hookDir, hookConfigSidecarName+".codex"),
@@ -200,11 +206,11 @@ func snapshotCodexSetupRuntime(opts SetupOpts, connector *CodexConnector) (codex
 			return snapshot, fmt.Errorf("inspect Codex setup runtime artifact %s: %w", path, err)
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return snapshot, fmt.Errorf("Codex setup runtime artifact is not a regular file: %s", path)
+			return snapshot, fmt.Errorf("Codex setup runtime artifact is not a regular file: %s", path) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		data, ok := readStableNativeWindowsFile(path, nativeCodeGuardFileMaxBytes)
 		if !ok {
-			return snapshot, fmt.Errorf("Codex setup runtime artifact is unsafe or changing: %s", path)
+			return snapshot, fmt.Errorf("Codex setup runtime artifact is unsafe or changing: %s", path) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		fileSnapshot.existed = true
 		fileSnapshot.data = data
@@ -328,7 +334,13 @@ func (c *CodexConnector) ToolInspectionMode() ToolInspectionMode { return ToolMo
 func (c *CodexConnector) SubprocessPolicy() SubprocessPolicy     { return SubprocessNone }
 
 func (c *CodexConnector) Setup(ctx context.Context, opts SetupOpts) error {
+	if runtime.GOOS == "windows" && opts.ManagedEnterprise {
+		return errors.New("managed Windows Codex hooks require the administrator-owned machine requirements installer")
+	}
 	return withCodexLifecycleTransaction(opts, func() error {
+		if err := c.checkAgentSettings(opts); err != nil {
+			return err
+		}
 		if previous, err := codexPreviousSetupRoot(opts.DataDir); err != nil {
 			return err
 		} else if previous != "" {
@@ -356,6 +368,68 @@ func (c *CodexConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		}
 		return c.setupLocked(ctx, opts)
 	})
+}
+
+// checkAgentSettings refuses, before Setup changes anything, a per-user
+// config.toml that Setup must not rewrite: one that turns Codex hooks off
+// (the user's choice, GAP-1094) or that does not parse. The earlier hooks and
+// the user's setting stay as they are, and a gateway start keeps the other
+// connectors (GAP-0578). Managed installs keep their hooks in protected
+// requirements, so their patch decides.
+func (c *CodexConnector) checkAgentSettings(opts SetupOpts) error {
+	if opts.ManagedEnterprise {
+		return nil
+	}
+	path := codexConfigPath()
+	// The config writer refuses a Codex home through a link on Windows; say so
+	// before Setup moves the hooks from an earlier home (GAP-2339).
+	if err := codexHomeLinkRefusal(filepath.Dir(path)); err != nil {
+		return err
+	}
+	// Match the writer's boundary: an OSS account may keep its dotfiles on a
+	// user-owned volume, while an enterprise per-user home binding is confined.
+	if home := activeUserHomeOverride(); home != "" && runtime.GOOS != "windows" {
+		target, outside, err := AgentConfigOutsideHome(home, path)
+		if err != nil {
+			return refuseForAgentConfig(fmt.Errorf("inspect Codex config %s: %w; fix the link, then run: defenseclaw-gateway restart", path, err)) //nolint:staticcheck // Preserve the product name in this operator diagnostic.
+		}
+		if outside {
+			return refuseForAgentConfig(&AgentConfigOutsideHomeError{Path: path, Target: target})
+		}
+	}
+	if _, err := userOwnedSettingsReadPath(path); err != nil {
+		return refuseForAgentConfig(fmt.Errorf("inspect Codex config %s: %w; fix the link, then run: defenseclaw-gateway restart", path, err)) //nolint:staticcheck // Preserve the product name in this operator diagnostic.
+	}
+	_, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil // only an absent config can be created by Setup
+	}
+	if err != nil {
+		return refuseForAgentConfig(fmt.Errorf("inspect Codex config %s: %w; fix the file, then run: defenseclaw-gateway restart", path, err)) //nolint:staticcheck // Preserve the product name in this operator diagnostic.
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return refuseForAgentConfig(fmt.Errorf("Codex config %s cannot be read: %w; fix the file, then run: defenseclaw-gateway restart", path, err)) //nolint:staticcheck // Preserve the product name in this operator diagnostic.
+	}
+	cfg := map[string]interface{}{}
+	if err := parseCodexTOML(data, &cfg); err != nil {
+		return refuseForAgentConfig(fmt.Errorf("Codex config %s does not parse (%v); fix the file, then run: defenseclaw-gateway restart", codexTOMLErrorLocation(path, err), err)) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+	}
+	if raw, exists := cfg["hooks"]; exists {
+		if _, ok := raw.(map[string]interface{}); !ok {
+			return refuseForAgentConfig(fmt.Errorf("Codex hooks configuration in %s has unsupported type %T; refusing to replace it; fix the file, then run: defenseclaw-gateway restart", path, raw)) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+		}
+	}
+	features, _ := cfg["features"].(map[string]interface{})
+	for _, key := range []string{"hooks", "codex_hooks"} {
+		if enabled, ok := features[key].(bool); ok && !enabled {
+			return refuseForAgentConfig(fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+				"Codex hooks are turned off in %s ([features] %s = false), so Codex runs no DefenseClaw hook; turn them back on with: codex features enable hooks, then run: defenseclaw-gateway restart",
+				path, key,
+			))
+		}
+	}
+	return nil
 }
 
 func codexPreviousSetupRoot(dataDir string) (string, error) {
@@ -402,19 +476,17 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 	// notify bridge without rewriting provider URLs or exporting a
 	// global OPENAI_BASE_URL. The legacy LLM-proxy surface has been
 	// removed — Codex talks directly to its native upstream and
-	// DefenseClaw only observes via hooks + OTel.
+	// DefenseClaw observes host sessions through hooks.
 
-	otlpToken, err := resolveSetupOTLPPathToken(opts.DataDir, OTLPScopeCodex, opts.OTLPPathToken)
-	if err != nil {
-		return c.rollbackSetupAfterSnapshot(
-			opts,
-			runtimeSnapshot,
-			fmt.Errorf("codex scoped OTLP token: %w", err),
-			false,
-			false,
-		)
+	if opts.sandboxNativeOTLP {
+		otlpToken, tokenErr := resolveSetupOTLPPathToken(opts.DataDir, OTLPScopeCodex, opts.OTLPPathToken)
+		if tokenErr != nil {
+			return c.rollbackSetupAfterSnapshot(
+				opts, runtimeSnapshot, fmt.Errorf("codex scoped OTLP token: %w", tokenErr), false, false,
+			)
+		}
+		opts.OTLPPathToken = otlpToken
 	}
-	opts.OTLPPathToken = otlpToken
 
 	hookDir := filepath.Join(opts.DataDir, "hooks")
 	// Plan C2: HookScriptOwner-driven. codex_hook.sh ships from the
@@ -431,19 +503,7 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 	}
 
 	hookScript := filepath.Join(hookDir, "codex-hook.sh")
-	if codexUsesManagedHookLayer(opts) {
-		// Managed enterprise installs keep the matrix in Codex's legacy
-		// managed configuration layer, where hooks are source-trusted.
-		if err := c.patchCodexManagedHooks(opts, hookScript); err != nil {
-			return c.rollbackSetupAfterSnapshot(
-				opts,
-				runtimeSnapshot,
-				fmt.Errorf("codex managed_config.toml hook patch: %w", err),
-				false,
-				false,
-			)
-		}
-	} else if runtime.GOOS == "windows" {
+	if runtime.GOOS == "windows" {
 		// Current Codex ignores CODEX_HOME/managed_config.toml on Windows, so a
 		// per-user install registers its matrix in config.toml (below) and
 		// removes the one an earlier release left in the ignored layer.
@@ -457,25 +517,35 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 			)
 		}
 	}
+	// A config.toml that went missing after DefenseClaw managed it gets the
+	// account's settings back before the hooks go in (GAP-0581). The
+	// runtime snapshot was taken before, so a rollback removes it again.
+	if err := seedMissingPerUserSettings(c.Name(), opts); err != nil {
+		return c.rollbackSetupAfterSnapshot(
+			opts, runtimeSnapshot, fmt.Errorf("codex config.toml put back: %w", err), false, false,
+		)
+	}
 	if err := c.patchCodexConfig(opts, hookScript); err != nil {
 		return c.rollbackSetupAfterSnapshot(
 			opts,
 			runtimeSnapshot,
 			fmt.Errorf("codex config.toml patch: %w", err),
 			false,
-			codexUsesManagedHookLayer(opts),
+			false,
 		)
 	}
-	// GAP-1550: keep Codex's native OTLP exports to the loopback gateway
-	// (and their bearer) off HTTP(S)_PROXY; see codex_dotenv.go.
-	if err := ensureCodexDotEnvProxyBypass(opts); err != nil {
-		return c.rollbackSetupAfterSnapshot(
-			opts,
-			runtimeSnapshot,
-			fmt.Errorf("codex .env loopback NO_PROXY: %w", err),
-			true,
-			codexUsesManagedHookLayer(opts),
-		)
+	if !opts.sandboxNativeOTLP {
+		if err := RemoveOTLPPathToken(opts.DataDir, OTLPScopeCodex); err != nil {
+			return fmt.Errorf("revoke obsolete Codex native OTLP credential: %w", err)
+		}
+	}
+	if opts.ManagedEnterprise {
+		// Keep native exports and their bearer off HTTP(S)_PROXY.
+		if err := ensureCodexDotEnvProxyBypass(opts); err != nil {
+			return c.rollbackSetupAfterSnapshot(
+				opts, runtimeSnapshot, fmt.Errorf("codex .env loopback NO_PROXY: %w", err), true, false,
+			)
+		}
 	}
 
 	if opts.InstallCodeGuard {
@@ -485,10 +555,12 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 				runtimeSnapshot,
 				fmt.Errorf("codex CodeGuard skill install: %w", err),
 				true,
-				codexUsesManagedHookLayer(opts),
+				false,
 			)
 		}
 	}
+	// The file as it is now is the last known good copy.
+	recordPerUserSettingsCopy(c.Name(), opts)
 
 	return nil
 }
@@ -532,8 +604,14 @@ func (c *CodexConnector) teardownLocked(ctx context.Context, opts SetupOpts) err
 	if err := c.VerifyClean(opts); err != nil {
 		return fmt.Errorf("codex teardown: verify clean before token revocation: %w", err)
 	}
+	if err := revokePerUserHookAPIToken(opts, c.Name()); err != nil {
+		return fmt.Errorf("codex teardown: %w", err)
+	}
 	if err := RemoveOTLPPathToken(opts.DataDir, OTLPScopeCodex); err != nil {
 		return fmt.Errorf("codex teardown: revoke scoped OTLP token: %w", err)
+	}
+	if err := removePerUserSettingsCopies(c.Name(), opts.DataDir); err != nil {
+		return fmt.Errorf("codex teardown: remove the config copy: %w", err)
 	}
 	return nil
 }
@@ -829,7 +907,7 @@ func (c *CodexConnector) HookCapabilities(opts SetupOpts) HookCapability {
 		},
 		SupportsFailClosed: true,
 		Scope:              "user",
-		ConfigPath:         codexHookConfigPathForOptions(opts),
+		ConfigPath:         codexConfigPath(),
 	}
 }
 
@@ -858,6 +936,16 @@ func (c *CodexConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 	telemetryEndpoint := ""
 	if profile.NativeOTLP != nil {
 		telemetryEndpoint = profile.NativeOTLP.Endpoint
+	}
+	nativeSignals := []string(nil)
+	sourceModes := []string{"hook"}
+	telemetryAuth := ""
+	telemetryNote := "Host Codex telemetry uses hooks; native export to an unverified loopback listener is disabled."
+	if profile.NativeOTLP != nil {
+		nativeSignals = []string{"logs", "metrics", "traces"}
+		sourceModes = []string{"native", "hook"}
+		telemetryAuth = "header-token"
+		telemetryNote = "Isolated sandbox Codex native OTLP uses a connector-scoped Authorization header; hooks are a separate channel."
 	}
 
 	return ConnectorCapabilities{
@@ -928,15 +1016,13 @@ func (c *CodexConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 		},
 		Telemetry: TelemetryCapability{
 			NativeOTLP:       profile.NativeOTLP != nil,
-			NativeSignals:    []string{"logs", "metrics", "traces"},
+			NativeSignals:    nativeSignals,
 			HookSignals:      []string{"logs", "metrics", "traces"},
 			ConfigPaths:      []string{codexConfigPath()},
-			AuthMode:         "header-token",
+			AuthMode:         telemetryAuth,
 			EndpointTemplate: telemetryEndpoint,
-			SourceModes:      []string{"native", "hook"},
-			Notes: []string{
-				"Codex emits native OTLP directly to the loopback gateway with a connector-scoped Authorization header; hook and agent-turn-complete notify records are independent channels.",
-			},
+			SourceModes:      sourceModes,
+			Notes:            []string{telemetryNote},
 		},
 	}
 }
@@ -948,7 +1034,9 @@ func (c *CodexConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 //   - the setup-only Codex OTLP renderer for ~/.codex/config.toml; and
 //   - operator-visible doctor reports.
 //
-// Endpoint is the gateway's standard loopback OTLP receiver. Codex supports
+// The native spec exists only for isolated sandbox artifact rendering. Host
+// installs have no direct native destination. When present,
+// its endpoint is the gateway's standard loopback OTLP receiver. Codex supports
 // arbitrary exporter headers, so its connector-scoped credential is carried
 // as an Authorization bearer instead of appearing in the URL. The gateway
 // binds that bearer to x-defenseclaw-source=codex; it cannot authenticate the
@@ -960,22 +1048,25 @@ func (c *CodexConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 // auth_mode, etc.) on every span/metric. See the inline comment in
 // the returned spec for the full rationale and links.
 //
-// LogUserPrompts is always enabled at the source. Observability v8 keeps the
+// Sandbox native LogUserPrompts is enabled at the source. Observability v8 keeps the
 // canonical record immutable and applies redaction independently for every
 // destination, so suppressing prompt content here would make an unredacted
 // route impossible and would make two destinations disagree about one source
 // occurrence.
 func (c *CodexConnector) HookProfile(opts SetupOpts) HookProfile {
-	otlpToken := strings.TrimSpace(opts.OTLPPathToken)
-	if otlpToken == "" && opts.DataDir != "" {
-		otlpToken, _ = LoadOTLPPathToken(opts.DataDir, OTLPScopeCodex)
-	}
-	headers := map[string]string{
-		"x-defenseclaw-source": "codex",
-		"x-defenseclaw-client": "codex-otel/1.0",
-	}
-	if otlpToken != "" {
-		headers["authorization"] = "Bearer " + otlpToken
+	var headers map[string]string
+	if opts.sandboxNativeOTLP {
+		otlpToken := strings.TrimSpace(opts.OTLPPathToken)
+		if otlpToken == "" && opts.DataDir != "" {
+			otlpToken, _ = LoadOTLPPathToken(opts.DataDir, OTLPScopeCodex)
+		}
+		headers = map[string]string{
+			"x-defenseclaw-source": "codex",
+			"x-defenseclaw-client": "codex-otel/1.0",
+		}
+		if otlpToken != "" {
+			headers["authorization"] = "Bearer " + otlpToken
+		}
 	}
 	// Intentionally NOT setting ServiceName / ResourceAttributes
 	// on codex's NativeOTLPSpec — see F1 rationale below.
@@ -1005,17 +1096,21 @@ func (c *CodexConnector) HookProfile(opts SetupOpts) HookProfile {
 	// native exporters that already self-identify (codex),
 	// the upstream tags are richer than anything we could
 	// synthesize from the outside.
-	profile := HookProfile{
-		Name:                "codex",
-		Capabilities:        c.HookCapabilities(opts),
-		SupportsTraceparent: true,
-		NativeOTLP: &NativeOTLPSpec{
+	var nativeOTLP *NativeOTLPSpec
+	if opts.sandboxNativeOTLP {
+		nativeOTLP = &NativeOTLPSpec{
 			Kind:           NativeOTLPTOMLBlock,
 			Endpoint:       "http://" + opts.APIAddr,
 			Protocol:       "json",
 			Headers:        headers,
 			LogUserPrompts: true,
-		},
+		}
+	}
+	profile := HookProfile{
+		Name:                "codex",
+		Capabilities:        c.HookCapabilities(opts),
+		SupportsTraceparent: true,
+		NativeOTLP:          nativeOTLP,
 		// Profile-driven callbacks are the canonical shape for
 		// codex hook decode / verdict mapping / response. The
 		// gateway profile-runtime registry uses these pure callbacks
@@ -1304,126 +1399,138 @@ func codexManagedConfigPath() string {
 	return filepath.Join(filepath.Dir(codexConfigPath()), codexManagedConfigLogicalName)
 }
 
-// codexUsesManagedHookLayer reports whether Setup registers the hook matrix in
-// CODEX_HOME/managed_config.toml. Only managed enterprise Windows installs do:
-// current Codex releases ignore that file on Windows for per-user installs and
-// warn "CODEX_HOME/managed_config.toml is no longer supported on Windows", so a
-// per-user registration there would never run. Per-user installs on every
-// platform use config.toml with position-aware trust state.
-func codexUsesManagedHookLayer(opts SetupOpts) bool {
-	return runtime.GOOS == "windows" && opts.ManagedEnterprise
-}
-
-func codexHookConfigPathForOptions(opts SetupOpts) string {
-	if codexUsesManagedHookLayer(opts) {
-		return codexManagedConfigPath()
-	}
-	return codexConfigPath()
-}
-
 // ownedHookContractPresent performs the Codex-specific runtime guardian check.
 // A command substring is insufficient: Codex only executes a handler when its
 // complete event shape is valid and its source is trusted. In the managed
-// enterprise layer that source is managed_config.toml; user-scoped
-// registrations additionally require position-aware trust state. Reuse Setup's authoritative verifier so
+// user-scoped registrations require position-aware trust state. Reuse Setup's authoritative verifier so
 // guardian repair cannot mistake a partial, moved, disabled, asynchronous, or
 // untrusted matrix for active protection.
 func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
+	present, _, err := c.checkOwnedHookContract(opts)
+	return present, err
+}
+
+// ownedHookContractAbsentReason explains a (false, nil) result from
+// ownedHookContractPresent. The check stays (false, nil) for an absent or
+// rejected matrix so hook guards keep healing it by Setup; the reason is only
+// for the messages that report it.
+func (c *CodexConnector) ownedHookContractAbsentReason(opts SetupOpts) string {
+	_, reason, _ := c.checkOwnedHookContract(opts)
+	return reason
+}
+
+func (c *CodexConnector) checkOwnedHookContract(opts SetupOpts) (bool, string, error) {
+	if runtime.GOOS == "windows" && opts.ManagedEnterprise {
+		return false, "managed Windows Codex registrations are not verified from the user config.toml", nil
+	}
 	resolution := resolveHookContractForOptions("codex", opts)
 	if resolution.Contract.ContractID == "" {
-		return false, nil
+		return false, "no Codex hook contract resolves: " + resolution.Reason, nil
 	}
 	userConfigPath := codexConfigPath()
 	var userCfg map[string]interface{}
 	data, err := os.ReadFile(userConfigPath)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			return false, err
+			return false, "", err
 		}
 	} else {
 		cfg := map[string]interface{}{}
 		if err := parseCodexTOML(data, &cfg); err != nil {
-			return false, fmt.Errorf("parse Codex config for hook guardian: %w", err)
+			return false, "", fmt.Errorf("parse Codex config for hook guardian: %w", err)
 		}
 		userCfg = cfg
 		if rawFeatures, exists := cfg["features"]; exists {
 			features, ok := rawFeatures.(map[string]interface{})
 			if !ok {
-				return false, nil
+				return false, "[features] in " + userConfigPath + " is not a table", nil
 			}
 			for _, key := range []string{"hooks", "codex_hooks"} {
 				if rawEnabled, exists := features[key]; exists {
 					enabled, ok := rawEnabled.(bool)
-					if ok && !enabled && !opts.ManagedEnterprise && !codexUsesManagedHookLayer(opts) {
+					if ok && !enabled && !opts.ManagedEnterprise {
 						// The user turned Codex hooks off. Setup must not override
 						// that, so say it at once instead of attempting a repair
 						// that can only fail (GAP-1094).
-						return false, fmt.Errorf(
+						return false, "", fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 							"Codex hooks are turned off in %s ([features] %s = false), so Codex runs no DefenseClaw hook; turn them back on with: codex features enable hooks",
 							userConfigPath, key,
 						)
 					}
 					if !ok || !enabled {
-						return false, nil
+						return false, "[features]." + key + " in " + userConfigPath + " is not true", nil
 					}
 				}
 			}
 		}
 	}
 
-	configPath := codexHookConfigPathForOptions(opts)
+	configPath := codexConfigPath()
 	data, err = os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return false, nil
+			return false, "Codex hook config " + configPath + " does not exist", nil
 		}
-		return false, err
+		return false, "", err
 	}
 	cfg := map[string]interface{}{}
 	if err := parseCodexTOML(data, &cfg); err != nil {
-		return false, fmt.Errorf("parse Codex hook config for guardian: %w", err)
+		return false, "", fmt.Errorf("parse Codex hook config for guardian: %w", err)
 	}
-	if rawFeatures, exists := cfg["features"]; exists {
-		features, ok := rawFeatures.(map[string]interface{})
-		if !ok {
-			return false, nil
-		}
-		for _, key := range []string{"hooks", "codex_hooks"} {
-			if rawEnabled, exists := features[key]; exists {
-				enabled, ok := rawEnabled.(bool)
-				if !ok || !enabled {
-					return false, nil
-				}
-			}
-		}
+	if reason := codexHooksFeatureDisabled(cfg, configPath); reason != "" {
+		return false, reason, nil
 	}
 	hooks, ok := cfg["hooks"].(map[string]interface{})
 	if !ok {
-		return false, nil
+		return false, "Codex hook config " + configPath + " has no [hooks] table", nil
 	}
-	if !opts.ManagedEnterprise && !codexUsesManagedHookLayer(opts) && codexHasCommandlessHandlers(hooks) {
+	if !opts.ManagedEnterprise && codexHasCommandlessHandlers(hooks) {
 		// Codex refuses to load a config.toml with a hook entry that has no
 		// command, so nothing is guarded until Setup removes it (GAP-1102).
-		return false, nil
+		return false, "Codex hook config " + configPath + " has a hook entry with no command", nil
 	}
-	var verifyErr error
-	if codexUsesManagedHookLayer(opts) {
-		verifyErr = verifyManagedCodexHookMatrix(hooks, configPath, filepath.Join(opts.DataDir, "hooks"), opts)
-	} else {
-		verifyErr = verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(opts.DataDir, "hooks"), opts)
+	if err := verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(opts.DataDir, "hooks"), opts); err != nil {
+		return false, fmt.Sprintf("Codex hook matrix in %s (%s): %v", configPath, resolution.Contract.ContractID, err), nil
 	}
-	if verifyErr != nil {
-		return false, nil
+	// The Secure Client profile writes the top-level notify entry into
+	// config.toml: a missing or edited entry leaves Codex launching a program
+	// that is not DefenseClaw's (or does not exist) on every completed turn
+	// (GAP-1248). Every other install registers no notifier, so a DefenseClaw
+	// notifier there was left by an older Setup. Either way report the
+	// contract as broken and let the guard re-run Setup.
+	if userCfg != nil {
+		if codexRegistersNotify(opts) {
+			if !codexNotifyIsCurrent(userCfg["notify"], opts) {
+				return false, "the notify entry in " + userConfigPath + " is missing or not DefenseClaw's", nil
+			}
+		} else if codexNotifyLooksManaged(userCfg["notify"], opts) {
+			return false, "the notify entry in " + userConfigPath + " is a DefenseClaw notifier this profile does not register (left by an older Setup)", nil
+		}
 	}
-	// Setup always writes the top-level notify entry into config.toml. A missing
-	// or edited entry leaves Codex launching a program that is not DefenseClaw's
-	// (or does not exist) on every completed turn, so report the contract as
-	// broken and let the guard re-run Setup (GAP-1248). A managed Windows install
-	// whose user config.toml is absent keeps relying on managed_config.toml.
-	if userCfg != nil && !codexNotifyIsCurrent(userCfg["notify"], opts) {
-		return false, nil
+	noteCodexTrustVerification(opts, resolution)
+	return true, "", nil
+}
+
+// codexHooksFeatureDisabled names the [features] flag that turns Codex hooks
+// off, "" when hooks are enabled or the table does not mention them.
+func codexHooksFeatureDisabled(cfg map[string]interface{}, path string) string {
+	rawFeatures, exists := cfg["features"]
+	if !exists {
+		return ""
 	}
-	return true, nil
+	features, ok := rawFeatures.(map[string]interface{})
+	if !ok {
+		return "[features] in " + path + " is not a table"
+	}
+	for _, key := range []string{"hooks", "codex_hooks"} {
+		if rawEnabled, exists := features[key]; exists {
+			enabled, ok := rawEnabled.(bool)
+			if !ok || !enabled {
+				return "[features]." + key + " in " + path + " is not true"
+			}
+		}
+	}
+	return ""
 }
 
 // codexConfigBackup captures the pre-DefenseClaw shape of the three
@@ -1454,6 +1561,12 @@ type codexConfigBackup struct {
 	// [otel] block.
 	HadOtelBlock bool            `json:"had_otel_block"`
 	OriginalOtel json.RawMessage `json:"original_otel,omitempty"`
+	// OperatorOtel records the [otel] entries the last per-user Setup left,
+	// all of them the operator values once its own entries are gone. A
+	// rollback starts an older release that writes its whole [otel] table
+	// over them; the roll forward takes that render out and puts these back
+	// (GAP-2461).
+	OperatorOtel json.RawMessage `json:"operator_otel,omitempty"`
 	// HadNotify / OriginalNotify back up the operator's pristine
 	// notify = [...] entry.
 	HadNotify      bool            `json:"had_notify"`
@@ -1500,10 +1613,33 @@ var codexHookGroups = []codexHookGroup{
 	{"Stop", "", 90},
 }
 
-// SessionEnd first appears in the official 0.145.0 v4 schema and remains
-// advisory. The client caps this teardown hook at three seconds, so emitting a
-// larger value is misleading even though the client would clamp it at load.
-var codexSessionEndHookGroup = codexHookGroup{"SessionEnd", "", 3}
+// codexSessionEndMaxTimeoutSeconds mirrors Codex's SESSION_END_MAX_TIMEOUT_SEC
+// (codex-rs/hooks/src/engine/discovery.rs, normalize_command_hook). Codex caps
+// the SessionEnd and Interrupt timeouts at three seconds and defaults them to
+// one, and it hashes the capped value when it records trust, so registering
+// more than three only draws a clamp warning and a trust hash no other value
+// reproduces.
+const (
+	codexSessionEndMaxTimeoutSeconds     = 3
+	codexSessionEndDefaultTimeoutSeconds = 1
+)
+
+var codexSessionEndHookGroup = codexHookGroup{"SessionEnd", "", codexSessionEndMaxTimeoutSeconds}
+
+// codexCompactSessionStartMatcher is the SessionStart matcher of the
+// contracts that certify the compact source. The shared registry keeps the
+// narrower legacy matcher so v1/v2 rendering is not broadened.
+const codexCompactSessionStartMatcher = "startup|resume|clear|compact"
+
+// codexContractCertifiesCompactSessionStart reports whether contractID is a
+// 0.133+ v3/v4 contract, whose SessionStart matcher includes compact.
+func codexContractCertifiesCompactSessionStart(contractID string) bool {
+	switch contractID {
+	case "codex-hooks-v3", "codex-hooks-v3-generic", "codex-hooks-v4":
+		return true
+	}
+	return false
+}
 
 func codexHookContractForSetup(opts SetupOpts) (HookContract, error) {
 	var contract HookContract
@@ -1517,7 +1653,7 @@ func codexHookContractForSetup(opts SetupOpts) (HookContract, error) {
 		resolution := ResolveHookContract("codex", opts.AgentVersion)
 		contract = resolution.Contract
 		if contract.ContractID == "" {
-			return HookContract{}, fmt.Errorf(
+			return HookContract{}, fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 				"Codex version %q does not resolve to a supported hook contract",
 				strings.TrimSpace(opts.AgentVersion),
 			)
@@ -1540,19 +1676,15 @@ func codexHookGroupsForSetup(opts SetupOpts) ([]codexHookGroup, error) {
 	for _, eventType := range contract.Events {
 		group, ok := registry[eventType]
 		if !ok {
-			return nil, fmt.Errorf(
+			return nil, fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 				"Codex hook contract %s contains unregistered event %s",
 				contract.ContractID,
 				eventType,
 			)
 		}
-		if eventType == "SessionStart" &&
-			(contract.ContractID == "codex-hooks-v3" ||
-				contract.ContractID == "codex-hooks-v3-generic" ||
-				contract.ContractID == "codex-hooks-v4") {
-			// The compact SessionStart matcher is certified only for the
-			// 0.133+ v3/v4 contracts. Do not backfill it into legacy tiers.
-			group.matcher = "startup|resume|clear|compact"
+		if eventType == "SessionStart" && codexContractCertifiesCompactSessionStart(contract.ContractID) {
+			// Do not backfill the compact matcher into legacy tiers.
+			group.matcher = codexCompactSessionStartMatcher
 		}
 		groups = append(groups, group)
 	}
@@ -1610,7 +1742,10 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 	var transformed []byte
 	var backupToSave codexConfigBackup
 	adoptedNotify := false
+	otelRecordChanged := false
+	userDisabledHooks := false
 	render := func(raw []byte) error {
+		userDisabledHooks = false
 		cfg := map[string]interface{}{}
 		if len(raw) > 0 {
 			if err := parseCodexTOML(raw, &cfg); err != nil {
@@ -1654,7 +1789,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 				}
 				backup.OriginalOtel = raw
 			}
-			if existing, ok := cfg["notify"]; ok {
+			if existing, ok := codexOriginalNotifyValue(cfg, opts); ok {
 				backup.HadNotify = true
 				raw, err := json.Marshal(existing)
 				if err != nil {
@@ -1663,7 +1798,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 				backup.OriginalNotify = raw
 			}
 			backupToSave = backup
-		} else if existing, ok := cfg["notify"]; ok && !codexNotifyLooksManaged(existing, opts) {
+		} else if existing, ok := cfg["notify"]; ok && codexRegistersNotify(opts) && !codexNotifyLooksManaged(existing, opts) {
 			// The operator replaced the notifier after Setup. Keep it as the
 			// chained original that Teardown restores instead of dropping it when
 			// Setup (or the hook guard) writes DefenseClaw's notifier back.
@@ -1672,6 +1807,9 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 				if err != nil {
 					return fmt.Errorf("load original Codex notifier: %w", err)
 				}
+				// A wrapper around our notifier keeps chaining the original
+				// ours displaced, not ours.
+				argv, _ = codexUnwrapSelfNotify(argv, codexOriginalNotifyCommand(loaded, opts), opts)
 				raw, err := json.Marshal(argv)
 				if err != nil {
 					return fmt.Errorf("capture replaced Codex notify config: %w", err)
@@ -1695,69 +1833,117 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		// subprocess sandbox policy.
 		hooks, hooksExist := cfg["hooks"].(map[string]interface{})
 		if _, exists := cfg["hooks"]; exists && !hooksExist {
-			return fmt.Errorf("Codex hooks configuration has unsupported type %T; refusing to replace it", cfg["hooks"])
+			return fmt.Errorf("Codex hooks configuration has unsupported type %T; refusing to replace it", cfg["hooks"]) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
-		if codexUsesManagedHookLayer(opts) {
-			// Remove only provably owned user-scoped handlers and trust records;
-			// the managed enterprise matrix lives in managed_config.toml and is
-			// trusted by source.
-			if hooksExist {
-				if _, err := removeOwnedCodexHooksAndState(hooks, configPath, hooksDir); err != nil {
-					return fmt.Errorf("remove legacy DefenseClaw Codex hooks: %w", err)
-				}
-				if len(hooks) == 0 {
-					delete(cfg, "hooks")
-				} else {
-					cfg["hooks"] = hooks
-				}
-			}
-		} else {
-			if !hooksExist {
-				hooks = map[string]interface{}{}
-			}
-			if err := mergeOwnedCodexHooks(
-				hooks, configPath, hookScript, hooksDir, opts, true,
-				hookGroups,
-			); err != nil {
-				return err
-			}
-			cfg["hooks"] = hooks
+		if !hooksExist {
+			hooks = map[string]interface{}{}
 		}
+		if err := mergeOwnedCodexHooks(
+			hooks, configPath, hookScript, hooksDir, opts, true,
+			hookGroups,
+		); err != nil {
+			return err
+		}
+		cfg["hooks"] = hooks
 
 		features, _ := cfg["features"].(map[string]interface{})
 		if features == nil {
 			features = map[string]interface{}{}
 		}
+		repairManagedPreference := opts.ManagedEnterprise && !opts.SecureClientHookDelivery
+		if userDisabledHooksRepairEnabled(opts) {
+			// A managed install turns the user's own hooks switch back on; no
+			// other feature flag is touched.
+			if enabled, explicitlySet := features["hooks"].(bool); explicitlySet && !enabled {
+				features["hooks"] = true
+				userDisabledHooks = true
+			}
+			if enabled, explicitlySet := features["codex_hooks"].(bool); explicitlySet && !enabled {
+				delete(features, "codex_hooks")
+				userDisabledHooks = true
+			}
+		}
 		if enabled, explicitlySet := features["hooks"].(bool); explicitlySet && !enabled {
-			return fmt.Errorf("Codex hooks are disabled in config.toml; enable [features].hooks before installing the Codex connector")
+			if !repairManagedPreference {
+				return fmt.Errorf("Codex hooks are disabled in config.toml; enable [features].hooks before installing the Codex connector") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+			}
 		}
 		if enabled, explicitlySet := features["codex_hooks"].(bool); explicitlySet && !enabled {
-			return fmt.Errorf("Codex hooks are disabled by deprecated [features].codex_hooks; enable hooks before installing the Codex connector")
+			if !repairManagedPreference {
+				return fmt.Errorf("Codex hooks are disabled by deprecated [features].codex_hooks; enable hooks before installing the Codex connector") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+			}
 		}
 		// Remove the retired alias when it is enabled. Current Codex accepts the
 		// [features].hooks key (and enables hooks by default) and warns on the old
 		// name.
 		delete(features, "codex_hooks")
-
-		// Native OTel exporter — runs on every install regardless of
-		// enforcement mode. Codex's [otel] block produces structured
-		// logs (raw API request/response, model + token counts) and
-		// metrics that complement the hook-based event stream. The
-		// /v1/logs and /v1/metrics endpoints on the gateway's API port
-		// receive the OTLP-HTTP payload and normalize into
-		// gateway.jsonl with source="codex_otel".
-		otelBlock, err := buildCodexOtelBlockWithPathToken(opts, opts.OTLPPathToken)
-		if err != nil {
-			return fmt.Errorf("render scoped Codex OTLP config: %w", err)
+		if enabled, present := features["hooks"].(bool); repairManagedPreference && present && !enabled {
+			// Codex accepts `codex features disable hooks` even when an admin
+			// requirement pins hooks on. It writes hooks=false into the user
+			// config, then project-trust saves fail validation. A managed
+			// reconciliation owns this one conflicting preference and restores
+			// it while preserving the user's unrelated settings.
+			features["hooks"] = true
+			cfg["features"] = features
 		}
-		cfg["otel"] = otelBlock
 
-		// agent-turn-complete bridge: Codex appends one JSON payload argument to
-		// this argv array. Windows invokes the installed no-console hook launcher;
-		// Unix keeps the existing Bash bridge. The native form is an
-		// argv array rather than a command string, so paths containing spaces need
-		// no shell quoting and no Bash/jq/curl dependency is introduced.
-		if runtime.GOOS == "windows" {
+		if opts.sandboxNativeOTLP {
+			otelBlock, err := buildCodexOtelBlockWithPathToken(opts, opts.OTLPPathToken)
+			if err != nil {
+				return fmt.Errorf("render scoped Codex OTLP config: %w", err)
+			}
+			cfg["otel"] = otelBlock
+		} else {
+			// A native exporter cannot check who accepted a TCP connection.
+			// Remove the block an earlier per-user setup wrote, restoring the
+			// operator's original OTel entries when the backup proves them.
+			original := backup
+			if backupExists {
+				original, err = c.loadConfigBackup(opts.DataDir)
+				if err != nil {
+					return fmt.Errorf("load original Codex OTel config: %w", err)
+				}
+			}
+			// An older release that a rollback started wrote its whole [otel]
+			// table, with its own exporter, over the operator entries (GAP-2461).
+			earlierReleaseTable := codexOtelBlockLooksManaged(cfg["otel"], opts)
+			restoreCodexOtelEntries(cfg, original, opts)
+			if earlierReleaseTable {
+				putBackCodexOperatorOtel(cfg, original.OperatorOtel, opts)
+			}
+			otelRecordChanged = false
+			if record, changed := codexOperatorOtelRecord(cfg, original.OperatorOtel, opts); changed {
+				if backupExists && !adoptedNotify {
+					backupToSave = original
+				}
+				backupToSave.OperatorOtel = record
+				otelRecordChanged = true
+			}
+		}
+
+		// Codex hands its notify program the turn record (prompt, reply and
+		// working directory) as a command-line argument, which other accounts
+		// on the computer can read. The UserPromptSubmit and Stop hooks deliver
+		// the same turn over a private channel, so Setup registers no notifier
+		// and removes the one an older Setup wrote, putting the account's own
+		// notifier back. Only the Secure Client profile keeps the bridge.
+		//
+		// The bridge: Codex appends one JSON payload argument to this argv
+		// array. Windows invokes the installed no-console hook launcher; Unix
+		// keeps the Bash bridge.
+		if !codexRegistersNotify(opts) {
+			original := backupToSave
+			if backupExists {
+				original, err = c.loadConfigBackup(opts.DataDir)
+				if err != nil {
+					return fmt.Errorf("load original Codex notifier: %w", err)
+				}
+			}
+			if err := restoreCodexNotify(cfg, original, opts); err != nil {
+				return err
+			}
+			_ = os.Remove(filepath.Join(opts.DataDir, "notify-bridge.sh"))
+		} else if runtime.GOOS == "windows" {
 			cfg["notify"] = codexNativeNotifyCommand()
 			// Heal a bridge left by an older Windows setup. It is no longer
 			// referenced and contains a baked gateway token.
@@ -1788,16 +1974,12 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		if err := parseCodexTOML(out, &rendered); err != nil {
 			return fmt.Errorf("verify rendered codex config: %w", err)
 		}
-		if !codexUsesManagedHookLayer(opts) {
-			renderedHooks, ok := rendered["hooks"].(map[string]interface{})
-			if !ok {
-				return fmt.Errorf("verify rendered codex config: hooks has unsupported type %T", rendered["hooks"])
-			}
-			if err := verifyTrustedCodexHookMatrix(renderedHooks, configPath, hooksDir, opts); err != nil {
-				return fmt.Errorf("verify trusted DefenseClaw Codex hooks: %w", err)
-			}
-		} else if err := verifyNoOwnedCodexHooks(rendered, hooksDir); err != nil {
-			return fmt.Errorf("verify legacy Codex user hook cleanup: %w", err)
+		renderedHooks, ok := rendered["hooks"].(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("verify rendered codex config: hooks has unsupported type %T", rendered["hooks"])
+		}
+		if err := verifyTrustedCodexHookMatrix(renderedHooks, configPath, hooksDir, opts); err != nil {
+			return fmt.Errorf("verify trusted DefenseClaw Codex hooks: %w", err)
 		}
 		transformed = out
 		return nil
@@ -1865,6 +2047,9 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 			}
 			return err
 		}
+		if userDisabledHooks {
+			reportUserDisabledHooksRepair(c.Name(), configPath)
+		}
 
 		persisted, err := os.ReadFile(configPath)
 		if err != nil {
@@ -1874,18 +2059,14 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		if err := parseCodexTOML(persisted, &persistedConfig); err != nil {
 			return fmt.Errorf("parse persisted codex config for trust verification: %w", err)
 		}
-		if !codexUsesManagedHookLayer(opts) {
-			persistedHooks, ok := persistedConfig["hooks"].(map[string]interface{})
-			if !ok {
-				return fmt.Errorf("verify persisted codex config: hooks has unsupported type %T", persistedConfig["hooks"])
-			}
-			if err := verifyTrustedCodexHookMatrix(persistedHooks, configPath, hooksDir, opts); err != nil {
-				return fmt.Errorf("verify persisted trusted DefenseClaw Codex hooks: %w", err)
-			}
-		} else if err := verifyNoOwnedCodexHooks(persistedConfig, hooksDir); err != nil {
-			return fmt.Errorf("verify persisted legacy Codex user hook cleanup: %w", err)
+		persistedHooks, ok := persistedConfig["hooks"].(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("verify persisted codex config: hooks has unsupported type %T", persistedConfig["hooks"])
 		}
-		if !backupExists || adoptedNotify {
+		if err := verifyTrustedCodexHookMatrix(persistedHooks, configPath, hooksDir, opts); err != nil {
+			return fmt.Errorf("verify persisted trusted DefenseClaw Codex hooks: %w", err)
+		}
+		if !backupExists || adoptedNotify || otelRecordChanged {
 			if err := c.saveConfigBackup(opts.DataDir, backupToSave); err != nil {
 				return fmt.Errorf("save codex config backup: %w", err)
 			}
@@ -2013,7 +2194,7 @@ func windowsCodexHookCommand() string {
 }
 
 func windowsCodexHookCommandForEvent(event, contractID string) string {
-	return windowsNativePowerShellHookCommandForCodexEvent(event, contractID, defenseclawHookBinary())
+	return windowsCodexHookCommandForBinaryEvent(event, contractID, defenseclawHookBinary())
 }
 
 func codexHookCommandForPlatform(
@@ -2133,8 +2314,9 @@ func codexCommandHookHash(eventKey, matcher, command string, timeout int) string
 
 // codexCommandHookHashForPlatform mirrors openai/codex hook discovery. Codex
 // first selects commandWindows on Windows (falling back to command), clamps the
-// timeout to at least one second, and then hashes a normalized handler with no
-// commandWindows override. Codex converts the identity through toml::Value
+// timeout to at least one second (SessionEnd and Interrupt: default one, at
+// most three), and then hashes a normalized handler with no commandWindows
+// override. Codex converts the identity through toml::Value
 // before canonical JSON, so absent Option fields (matcher, commandWindows, and
 // statusMessage) are omitted rather than serialized as JSON null.
 func codexCommandHookHashForPlatform(
@@ -2162,7 +2344,11 @@ func codexCommandHookHashForPlatform(
 		return "", fmt.Errorf("selected command is empty")
 	}
 
+	cappedEvent := eventKey == "session_end" || eventKey == "interrupt"
 	timeout := 600
+	if cappedEvent {
+		timeout = codexSessionEndDefaultTimeoutSeconds
+	}
 	if rawTimeout, exists := handler["timeout"]; exists {
 		parsed, ok := codexInteger(rawTimeout)
 		if !ok {
@@ -2175,6 +2361,9 @@ func codexCommandHookHashForPlatform(
 	}
 	if timeout < 1 {
 		timeout = 1
+	}
+	if cappedEvent && timeout > codexSessionEndMaxTimeoutSeconds {
+		timeout = codexSessionEndMaxTimeoutSeconds
 	}
 
 	async := false
@@ -2359,6 +2548,9 @@ func codexCanonicalJSON(v interface{}) []byte {
 // traffic. Keeping it in Authorization prevents credential leakage through
 // endpoint URLs, diagnostics, and proxy logs.
 func buildCodexOtelBlockWithPathToken(opts SetupOpts, pathToken string) (map[string]interface{}, error) {
+	// This renderer also constructs historical host blocks for cleanup and
+	// migration tests. Only the isolated sandbox setup installs its result.
+	opts.sandboxNativeOTLP = true
 	// Spec-driven OTLP wiring. The connector's HookProfile carries
 	// the declarative NativeOTLPSpec; this helper just asks it for
 	// the TOML rendering. spec.TOMLBlock() validates Endpoint /
@@ -2388,6 +2580,13 @@ func codexOtelEnvironment(opts SetupOpts) string {
 		return environment
 	}
 	return "dev"
+}
+
+// codexRegistersNotify reports whether Setup registers DefenseClaw's Codex
+// notifier: only on the Secure Client profile, whose gateway folds the notify
+// record into its hook collector.
+func codexRegistersNotify(opts SetupOpts) bool {
+	return shellHookSecureClientProfile(opts)
 }
 
 func codexNativeNotifyCommand() []string {
@@ -2432,45 +2631,184 @@ func codexNotifyIsCurrent(v interface{}, opts SetupOpts) bool {
 	return argv[0] == "bash" && pathidentity.Same(argv[1], filepath.Join(opts.DataDir, "notify-bridge.sh"))
 }
 
-// codexNotifyLooksManaged recognizes both the current platform command and the
-// legacy Bash bridge. Native matching is strict on argv shape and DefenseClaw
-// executable basename so teardown never removes an unrelated user notifier
-// that happens to contain the word "notify".
+// codexNotifyLooksManaged recognizes the legacy Bash bridge and every notify
+// entry that runs one of DefenseClaw's own launchers (codexNotifyRunsDefenseClaw).
+// Matching is strict on the program and its notify subcommand, so teardown
+// never removes an unrelated user notifier that happens to contain the word
+// "notify".
 func codexNotifyLooksManaged(v interface{}, opts SetupOpts) bool {
 	if codexValueMatches(v, codexShellNotifyCommand(opts)) {
 		return true
 	}
 	argv, ok := codexNotifyArgv(v)
-	if !ok || len(argv) != 2 {
+	if !ok {
 		return false
 	}
-	if argv[0] == "bash" {
-		// Older Windows releases serialized this path with either slash style.
-		// Treat lexical spellings of the same bound data-root bridge alike, and a
-		// notify-bridge* script edited in place inside the data root, but never
-		// claim a script elsewhere merely because its basename matches.
-		if pathidentity.Same(argv[1], filepath.Join(opts.DataDir, "notify-bridge.sh")) {
-			return true
-		}
-		return strings.TrimSpace(opts.DataDir) != "" &&
-			strings.HasPrefix(strings.ToLower(filepath.Base(argv[1])), "notify-bridge") &&
-			pathidentity.Same(filepath.Dir(argv[1]), opts.DataDir)
+	if codexNotifyRunsDefenseClaw(argv) {
+		return true
 	}
-	// A launcher name edited in place next to DefenseClaw's own launcher keeps
-	// our exact argv, so teardown removes it instead of leaving Codex pointing at
-	// a program that does not exist (GAP-1248).
-	return argv[1] == "notify" &&
-		(isDefenseClawHookExecutable(argv[0]) || isRenamedDefenseClawHookExecutable(argv[0]))
+	if len(argv) != 2 || argv[0] != "bash" {
+		return false
+	}
+	// Older Windows releases serialized this path with either slash style.
+	// Treat lexical spellings of the same bound data-root bridge alike, and a
+	// notify-bridge* script edited in place inside the data root, but never
+	// claim a script elsewhere merely because its basename matches.
+	if pathidentity.Same(argv[1], filepath.Join(opts.DataDir, "notify-bridge.sh")) {
+		return true
+	}
+	return strings.TrimSpace(opts.DataDir) != "" &&
+		strings.HasPrefix(strings.ToLower(filepath.Base(argv[1])), "notify-bridge") &&
+		pathidentity.Same(filepath.Dir(argv[1]), opts.DataDir)
+}
+
+// codexNotifySubcommands are the subcommands a DefenseClaw launcher was given
+// in Codex's notify: "notify" for the hook launcher, and "codex-notify" for
+// the gateway executable that Windows pre-publish installs named (GAP-0376).
+var codexNotifySubcommands = map[string]bool{"notify": true, "codex-notify": true}
+
+// codexNotifyRunsDefenseClaw reports whether a notify argv runs DefenseClaw's
+// own hook launcher or gateway with a DefenseClaw notify subcommand, with or
+// without more arguments after it, in any spelling of the program: absolute
+// path with either slash style, the bare executable name, one pair of
+// surrounding double quotes, or a launcher renamed in place next to ours
+// (GAP-1248). An uninstall removes that program, so teardown removes the
+// entry rather than leave Codex calling a program that is gone (GAP-0376).
+func codexNotifyRunsDefenseClaw(argv []string) bool {
+	if len(argv) < 2 || !codexNotifySubcommands[strings.TrimSpace(argv[1])] {
+		return false
+	}
+	program := strings.TrimSpace(argv[0])
+	if len(program) >= 2 && program[0] == '"' && program[len(program)-1] == '"' {
+		program = strings.TrimSpace(program[1 : len(program)-1])
+	}
+	return isDefenseClawHookExecutable(program) || isRenamedDefenseClawHookExecutable(program)
+}
+
+// codexOriginalNotifyValue returns the notify value to back up, with any
+// DefenseClaw notifier self-reference removed (see stripCodexSelfNotify).
+func codexOriginalNotifyValue(cfg map[string]interface{}, opts SetupOpts) (interface{}, bool) {
+	existing, ok := cfg["notify"]
+	if !ok {
+		return nil, false
+	}
+	argv, isArgv := codexNotifyArgv(existing)
+	if !isArgv {
+		return existing, true
+	}
+	argv = stripCodexSelfNotify(argv, nil, opts)
+	return argv, len(argv) > 0
+}
+
+// codexPreviousNotifyFlag is the argument Codex computer-use puts before the
+// JSON argv of the notifier it wraps.
+const codexPreviousNotifyFlag = "--previous-notify"
+
+// codexNotifyNestLimit bounds how many wrappers stripCodexSelfNotify looks
+// through. A deeper chain is cut there: its innermost notifier is dropped
+// rather than run, so a hostile config cannot make a chain we never inspect.
+const codexNotifyNestLimit = 8
+
+// stripCodexSelfNotify removes DefenseClaw's own notifier from argv so the
+// chained original never calls back into us. Codex computer-use wraps the
+// current notifier as `--previous-notify <json argv>` (or
+// `--previous-notify=<json argv>`), and a wrapper can itself be wrapped; when
+// the innermost one is ours, it is replaced by previous (the notifier ours was
+// chaining) or dropped. An argv that is ours outright becomes previous. An
+// argument that is not DefenseClaw's is kept as it was written.
+func stripCodexSelfNotify(argv, previous []string, opts SetupOpts) []string {
+	return stripCodexSelfNotifyAt(argv, previous, opts, 0)
+}
+
+func stripCodexSelfNotifyAt(argv, previous []string, opts SetupOpts, depth int) []string {
+	if codexNotifyLooksManaged(argv, opts) {
+		return previous
+	}
+	out := make([]string, 0, len(argv))
+	for i := 0; i < len(argv); i++ {
+		arg := argv[i]
+		value, inline := "", false
+		switch {
+		case arg == codexPreviousNotifyFlag && i+1 < len(argv):
+			value = argv[i+1]
+		case strings.HasPrefix(arg, codexPreviousNotifyFlag+"="):
+			value, inline = strings.TrimPrefix(arg, codexPreviousNotifyFlag+"="), true
+		default:
+			out = append(out, arg)
+			continue
+		}
+		var nested []string
+		if json.Unmarshal([]byte(value), &nested) != nil || len(nested) == 0 {
+			out = append(out, arg)
+			continue
+		}
+		if !inline {
+			i++
+		}
+		kept := previous
+		if depth < codexNotifyNestLimit {
+			kept = stripCodexSelfNotifyAt(nested, previous, opts, depth+1)
+		}
+		if slices.Equal(kept, nested) {
+			if inline {
+				out = append(out, arg)
+			} else {
+				out = append(out, arg, value)
+			}
+			continue
+		}
+		raw, err := json.Marshal(kept)
+		if err != nil || len(kept) == 0 {
+			continue
+		}
+		if inline {
+			out = append(out, codexPreviousNotifyFlag+"="+string(raw))
+		} else {
+			out = append(out, codexPreviousNotifyFlag, string(raw))
+		}
+	}
+	return out
+}
+
+// codexUnwrapSelfNotify takes DefenseClaw's notifier out of a wrapper that
+// chains it and reports whether it found one. The notifier ours chained
+// (previous) takes its place, unless previous is that same wrapper: a first
+// setup under a wrapper saves the wrapper itself as the original, and chaining
+// it from inside itself would run it twice each turn.
+func codexUnwrapSelfNotify(argv, previous []string, opts SetupOpts) ([]string, bool) {
+	bare := stripCodexSelfNotify(argv, nil, opts)
+	if slices.Equal(bare, argv) {
+		return argv, false
+	}
+	if slices.Equal(previous, bare) {
+		previous = nil
+	}
+	return stripCodexSelfNotify(argv, previous, opts), true
 }
 
 func restoreCodexNotify(cfg map[string]interface{}, backup codexConfigBackup, opts SetupOpts) error {
 	if !codexNotifyLooksManaged(cfg["notify"], opts) {
+		// Another program's notifier (Codex computer-use) may still chain the
+		// notifier an older Setup wrote. Take ours out of it, so Codex does not
+		// call DefenseClaw back on every turn, or a program uninstall removes.
+		if argv, ok := codexNotifyArgv(cfg["notify"]); ok && len(argv) > 0 {
+			if healed, changed := codexUnwrapSelfNotify(argv, codexOriginalNotifyCommand(backup, opts), opts); changed && len(healed) > 0 {
+				cfg["notify"] = healed
+			}
+		}
 		return nil
 	}
 	if backup.HadNotify && len(backup.OriginalNotify) > 0 {
 		var original interface{}
 		if err := json.Unmarshal(backup.OriginalNotify, &original); err != nil {
 			return fmt.Errorf("restore original Codex notify config: %w", err)
+		}
+		// A backup an earlier release saved may hold a wrapper that chains
+		// our notifier: put the wrapper back without it.
+		if argv, ok := codexNotifyArgv(original); ok && len(argv) > 0 {
+			if stripped := stripCodexSelfNotify(argv, nil, opts); len(stripped) > 0 && !slices.Equal(stripped, argv) {
+				original = stripped
+			}
 		}
 		if !codexNotifyLooksManaged(original, opts) {
 			cfg["notify"] = original
@@ -2514,10 +2852,28 @@ func codexOriginalNotifyCommand(backup codexConfigBackup, opts SetupOpts) []stri
 	}
 	var command []string
 	if err := json.Unmarshal(backup.OriginalNotify, &command); err != nil || len(command) == 0 ||
-		strings.TrimSpace(command[0]) == "" || codexNotifyLooksManaged(command, opts) {
+		strings.TrimSpace(command[0]) == "" {
+		return nil
+	}
+	// Backups written before self-references were stripped may still hold one.
+	if command = stripCodexSelfNotify(command, nil, opts); len(command) == 0 {
 		return nil
 	}
 	return command
+}
+
+// CodexOriginalNotify returns the operator notifier the native Windows
+// notifier chains to, read from the Codex config backup in dataDir, or nil.
+func CodexOriginalNotify(dataDir string) []string {
+	data, err := os.ReadFile(filepath.Join(dataDir, "codex_config_backup.json"))
+	if err != nil || len(data) > 1<<20 {
+		return nil
+	}
+	var backup codexConfigBackup
+	if json.Unmarshal(data, &backup) != nil {
+		return nil
+	}
+	return codexOriginalNotifyCommand(backup, SetupOpts{DataDir: dataDir})
 }
 
 func writeCodexNotifyBridge(opts SetupOpts, chained ...[]string) error {
@@ -2827,7 +3183,9 @@ func restoreOwnedCodexConfigFromTOML(
 		return atomicTransformResult{}, fmt.Errorf("snapshot restored codex config shape: %w", err)
 	}
 	if bytes.Equal(originalShape, restoredShape) {
-		return atomicTransformResult{Data: append([]byte(nil), raw...)}, nil
+		// Nothing of DefenseClaw's was in the file: keep its bytes and mode
+		// (GAP-0650).
+		return atomicTransformResult{Data: append([]byte(nil), raw...), Keep: true}, nil
 	}
 	if len(cfg) == 0 {
 		return atomicTransformResult{Remove: true}, nil
@@ -2997,11 +3355,10 @@ func removeOwnedCodexHooksAndState(hooks map[string]interface{}, configPath, hoo
 // original bytes are returned unchanged when there is nothing to remove so an
 // exact backup restore remains byte-for-byte exact for operator-only files.
 //
-// Setup intentionally strips legacy user-scoped registrations while moving the
-// active matrix to managed_config.toml on Windows. A pristine backup captured
-// before that migration may therefore contain an older DefenseClaw matrix. Any
-// exact restore must apply this ownership filter before publishing the restored
-// bytes or uninstall would resurrect a dangling hook.
+// Earlier setups used this filter when moving registrations between Codex
+// config layers. A pristine backup may contain an older DefenseClaw matrix,
+// so exact restore must apply it before publishing the restored bytes or
+// uninstall would resurrect a dangling hook.
 func removeOwnedCodexHooksFromTOML(raw []byte, configPath, hooksDir string) ([]byte, bool, error) {
 	cfg := map[string]interface{}{}
 	if len(raw) > 0 {
@@ -3117,10 +3474,23 @@ func mergeOwnedCodexHooks(
 	if err != nil {
 		return fmt.Errorf("inspect predecessor DefenseClaw Codex hooks: %w", err)
 	}
+	var copiedHomeCommands map[string]struct{}
+	if versioned {
+		copiedHomeCommands, err = codexCopiedHomeNativeCommands(opts.DataDir, configPath)
+		if err != nil {
+			return fmt.Errorf("inspect copied-home Codex hooks: %w", err)
+		}
+	}
 	isInferredManaged := func(rawHook interface{}) bool {
 		handler, ok := rawHook.(map[string]interface{})
 		if !ok {
 			return false
+		}
+		for _, key := range []string{"command", "command_windows", "commandWindows"} {
+			command, _ := handler[key].(string)
+			if _, ok := copiedHomeCommands[command]; ok {
+				return true
+			}
 		}
 		command, _ := handler["command"].(string)
 		_, ok = managedCommands[command]
@@ -3153,7 +3523,7 @@ func mergeOwnedCodexHooks(
 			continue
 		}
 		if _, ok := value.([]interface{}); !ok {
-			return fmt.Errorf("Codex hooks.%s has unsupported type %T; refusing to replace it", eventType, value)
+			return fmt.Errorf("Codex hooks.%s has unsupported type %T; refusing to replace it", eventType, value) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		if _, generated := generatedHooks[eventType]; generated {
 			continue
@@ -3326,7 +3696,7 @@ func codexShippedManagedHookProfiles() [][]codexHookGroup {
 	// The v3 and v4 contracts have always emitted compact as a reviewed
 	// SessionStart matcher. The shared registry keeps the narrower legacy
 	// matcher so v1/v2 rendering is not broadened.
-	tenEvents[0].matcher = "startup|resume|clear|compact"
+	tenEvents[0].matcher = codexCompactSessionStartMatcher
 	elevenEvents := append([]codexHookGroup(nil), tenEvents...)
 	elevenEvents = append(elevenEvents, codexSessionEndHookGroup)
 	preClampElevenEvents := append([]codexHookGroup(nil), tenEvents...)
@@ -3629,30 +3999,6 @@ func isCodexManagedScriptCandidate(command string) bool {
 		}
 	}
 	return false
-}
-
-func verifyNoOwnedCodexHooks(document map[string]interface{}, hooksDir string) error {
-	rawHooks, exists := document["hooks"]
-	if !exists {
-		return nil
-	}
-	hooks, ok := rawHooks.(map[string]interface{})
-	if !ok {
-		return fmt.Errorf("hooks has unsupported type %T", rawHooks)
-	}
-	for eventType, rawGroups := range hooks {
-		if eventType == "state" {
-			continue
-		}
-		locations, err := ownedCodexHookLocations(runtime.GOOS, codexHookEventKeyLabel(eventType), rawGroups, hooksDir)
-		if err != nil {
-			return fmt.Errorf("hooks.%s: %w", eventType, err)
-		}
-		if len(locations) > 0 {
-			return fmt.Errorf("hooks.%s still contains %d DefenseClaw handlers", eventType, len(locations))
-		}
-	}
-	return nil
 }
 
 // removeOwnedCodexHookState removes only a trust record whose positional key
@@ -4056,9 +4402,9 @@ func verifyTrustedCodexHookMatrixForGroups(
 }
 
 // verifyManagedCodexHookMatrix verifies the same complete synchronous matrix
-// without private hooks.state data. Codex trusts handlers from
-// managed_config.toml by source, including when allow_managed_hooks_only is
-// enabled, so no per-user approval record is either needed or supported.
+// without private hooks.state data. It is used for administrator-owned
+// requirements and legacy managed-file fixtures, which need no per-user
+// approval record.
 func verifyManagedCodexHookMatrix(hooks map[string]interface{}, configPath, hooksDir string, opts SetupOpts) error {
 	return verifyCodexHookMatrix(hooks, configPath, hooksDir, opts, false)
 }
@@ -4295,26 +4641,16 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 			saved, hadSaved = original[key]
 		}
 		if !codexExporterLooksManaged(value, opts) {
-			// Endpoint drift can make an exporter operator-owned while leaving the
-			// exact pair of DefenseClaw header markers Setup wrote. In that case,
-			// preserve the endpoint, protocol, and unrelated headers, and restore or
-			// remove only the three header entries proven by the paired markers.
-			// A single marker is deliberately not mutation authority; VerifyClean
-			// reports it as residue so uninstall remains fail-closed.
-			if codexExporterHasManagedHeaderPair(value) {
-				restoreCodexOwnedExporterHeaders(value, saved, hadSaved)
-			}
+			// No DefenseClaw credential: the operator's exporter keeps its
+			// bytes on any host or port, stale marker headers included.
 			continue
 		}
 		if original != nil {
 			if hadSaved {
 				// Field-level backups from older releases may themselves be
-				// contaminated by a prior managed setup. Product-namespaced header
-				// keys remain residue even when a predecessor wrote an obsolete
-				// endpoint or marker value that no longer satisfies the full
-				// current ownership predicate.
-				if !codexExporterLooksManaged(saved, opts) &&
-					!codexExporterHasManagedHeaderResidue(saved) {
+				// contaminated by a prior managed setup; a saved exporter that
+				// carries a DefenseClaw credential never comes back.
+				if !codexExporterLooksManaged(saved, opts) {
 					current[key] = saved
 					continue
 				}
@@ -4322,6 +4658,13 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 		}
 		delete(current, key)
 	}
+
+	// Any other [otel] value that carries a DefenseClaw credential
+	// (otel.environment, a resource or other table, a string exporter) is the
+	// product's too. It is removed; a saved operator value comes back below
+	// only when it carries none.
+	known := otlpKnownProductTokens(opts, OTLPScopeCodex)
+	dropCodexOtelCredentials(current, known)
 
 	// Setup owns otel.environment only while it retains the exact value Setup
 	// wrote and either the current table still carries a managed exporter or a
@@ -4346,14 +4689,14 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 	}
 	if _, exists := current["environment"]; !exists && original != nil {
 		if saved, hadSaved := original["environment"]; hadSaved &&
-			!(originalLooksManaged && saved == managedEnvironment) {
+			(!(originalLooksManaged) || saved != managedEnvironment) {
 			current["environment"] = saved
 		}
 	}
 
-	// Setup owns log_user_prompt only while it retains the value Setup wrote.
-	// A current false/non-boolean value is an operator edit and must survive.
-	if value, exists := current["log_user_prompt"]; exists && value == true {
+	// A bare prompt-capture preference has no product ownership marker.
+	// Only a marked exporter proves Setup wrote the adjacent true value.
+	if value, exists := current["log_user_prompt"]; exists && value == true && currentLooksManaged {
 		if original != nil {
 			if saved, hadSaved := original["log_user_prompt"]; hadSaved {
 				// A stale managed snapshot cannot prove that Setup's true value
@@ -4381,11 +4724,84 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 			current[key] = saved
 		}
 	}
+	dropCodexOtelCredentials(current, known)
 
 	if len(current) == 0 {
 		delete(cfg, "otel")
 	} else {
 		cfg["otel"] = current
+	}
+}
+
+// putBackCodexOperatorOtel puts the recorded operator [otel] entries back
+// after restoreCodexOtelEntries took the render of an older release out of the
+// table. A recorded entry the table no longer has comes back; an entry it
+// still has (an operator value, also one set while the older release ran)
+// stays as it is, and a recorded entry that carries a product credential
+// never comes back.
+func putBackCodexOperatorOtel(cfg map[string]interface{}, record json.RawMessage, opts SetupOpts) {
+	if len(record) == 0 {
+		return
+	}
+	var saved map[string]interface{}
+	if err := json.Unmarshal(record, &saved); err != nil || len(saved) == 0 {
+		return
+	}
+	dropCodexOtelCredentials(saved, otlpKnownProductTokens(opts, OTLPScopeCodex))
+	current, ok := cfg["otel"].(map[string]interface{})
+	if _, exists := cfg["otel"]; exists && !ok {
+		return
+	}
+	if current == nil {
+		current = map[string]interface{}{}
+	}
+	for key, value := range saved {
+		if _, exists := current[key]; !exists {
+			current[key] = value
+		}
+	}
+	if len(current) > 0 {
+		cfg["otel"] = current
+	}
+}
+
+// codexOperatorOtelRecord returns the record of the [otel] entries cfg holds
+// after Setup removed its own, and whether it differs from stored. No [otel]
+// table records nothing, so an operator who removes the table later does not
+// get it back.
+func codexOperatorOtelRecord(cfg map[string]interface{}, stored json.RawMessage, opts SetupOpts) (json.RawMessage, bool) {
+	var kept map[string]interface{}
+	if current, ok := cfg["otel"].(map[string]interface{}); ok && len(current) > 0 {
+		kept = maps.Clone(current)
+		dropCodexOtelCredentials(kept, otlpKnownProductTokens(opts, OTLPScopeCodex))
+	}
+	var previous map[string]interface{}
+	if len(stored) > 0 && json.Unmarshal(stored, &previous) != nil {
+		previous = nil
+	}
+	if len(kept) == 0 && len(previous) == 0 {
+		return nil, len(stored) > 0
+	}
+	if len(kept) > 0 && len(previous) > 0 && codexValueMatches(kept, previous) {
+		return stored, false
+	}
+	if len(kept) == 0 {
+		return nil, true
+	}
+	raw, err := json.Marshal(kept)
+	if err != nil {
+		return stored, false
+	}
+	return raw, true
+}
+
+// dropCodexOtelCredentials deletes every [otel] entry whose value carries a
+// DefenseClaw credential (otlpCarriesProductCredential).
+func dropCodexOtelCredentials(otel map[string]interface{}, known []string) {
+	for key, value := range otel {
+		if otlpCarriesProductCredential(value, known) {
+			delete(otel, key)
+		}
 	}
 }
 
@@ -4445,20 +4861,17 @@ func codexOtelResidueFields(v interface{}, opts SetupOpts) []string {
 	}
 	var residual []string
 	for _, key := range codexOtelExporterKeys {
-		exporter := otel[key]
-		if codexExporterLooksManaged(exporter, opts) {
-			residual = append(residual, fmt.Sprintf("config.toml otel.%s.otlp-http.endpoint retains DefenseClaw exporter", key))
+		if codexExporterLooksManaged(otel[key], opts) {
+			residual = append(residual, fmt.Sprintf("config.toml otel.%s retains a DefenseClaw exporter credential", key))
 		}
-		if !codexExporterHasManagedHeaderResidue(exporter) {
+	}
+	known := otlpKnownProductTokens(opts, OTLPScopeCodex)
+	for _, key := range slices.Sorted(maps.Keys(otel)) {
+		if codexOtelExporterKey(key) && codexExporterLooksManaged(otel[key], opts) ||
+			!otlpCarriesProductCredential(otel[key], known) {
 			continue
 		}
-		headers := codexExporterHeaders(exporter)
-		if _, exists := headers["x-defenseclaw-source"]; exists {
-			residual = append(residual, fmt.Sprintf("config.toml otel.%s.otlp-http.headers.x-defenseclaw-source retains DefenseClaw marker", key))
-		}
-		if _, exists := headers["x-defenseclaw-client"]; exists {
-			residual = append(residual, fmt.Sprintf("config.toml otel.%s.otlp-http.headers.x-defenseclaw-client retains DefenseClaw marker", key))
-		}
+		residual = append(residual, fmt.Sprintf("config.toml otel.%s retains a DefenseClaw credential", key))
 	}
 	if len(residual) > 0 {
 		residual = append([]string{"config.toml [otel] still contains DefenseClaw-owned fields"}, residual...)
@@ -4479,139 +4892,15 @@ func codexExporterHeaders(v interface{}) map[string]interface{} {
 	return headers
 }
 
-func codexExporterHasManagedHeaderResidue(v interface{}) bool {
-	headers := codexExporterHeaders(v)
-	if headers == nil {
-		return false
-	}
-	_, hasSource := headers["x-defenseclaw-source"]
-	_, hasClient := headers["x-defenseclaw-client"]
-	return hasSource || hasClient
-}
-
-func codexExporterHasManagedHeaderPair(v interface{}) bool {
-	headers := codexExporterHeaders(v)
-	if headers == nil {
-		return false
-	}
-	_, hasSource := headers["x-defenseclaw-source"]
-	_, hasClient := headers["x-defenseclaw-client"]
-	return hasSource && hasClient
-}
-
-func restoreCodexOwnedExporterHeaders(current, saved interface{}, hadSaved bool) {
-	headers := codexExporterHeaders(current)
-	if headers == nil || !codexExporterHasManagedHeaderPair(current) {
-		return
-	}
-	delete(headers, "x-defenseclaw-source")
-	delete(headers, "x-defenseclaw-client")
-
-	// The product-namespaced pair above is ownership authority and must never
-	// survive cleanup. Authorization is generic, so restore it only from a
-	// saved exporter that was not itself a stale managed snapshot.
-	savedHeaders := map[string]interface{}(nil)
-	if hadSaved && !codexExporterHasManagedHeaderResidue(saved) {
-		savedHeaders = codexExporterHeaders(saved)
-	}
-	if value, exists := savedHeaders["authorization"]; exists {
-		headers["authorization"] = value
-	} else {
-		delete(headers, "authorization")
-	}
-	exporter := current.(map[string]interface{})
-	otlpHTTP := exporter["otlp-http"].(map[string]interface{})
-	if len(headers) == 0 {
-		delete(otlpHTTP, "headers")
-	} else {
-		otlpHTTP["headers"] = headers
-	}
-}
-
+// codexExporterLooksManaged reports an exporter DefenseClaw owns: its
+// endpoint or one of its headers carries a DefenseClaw credential
+// (otlpCarriesProductCredential), under any header-name, scheme, host or port
+// spelling. Every released exporter carried the scoped bearer.
 func codexExporterLooksManaged(v interface{}, opts SetupOpts) bool {
-	exporter, ok := v.(map[string]interface{})
-	if !ok {
+	if _, ok := v.(map[string]interface{}); !ok {
 		return false
 	}
-	otlpHTTP, ok := exporter["otlp-http"].(map[string]interface{})
-	if !ok {
-		return false
-	}
-	endpoint, _ := otlpHTTP["endpoint"].(string)
-	if codexScopedOTLPEndpointLooksManaged(endpoint) {
-		return true
-	}
-	headers, _ := otlpHTTP["headers"].(map[string]interface{})
-	if headers == nil {
-		return false
-	}
-	sourceMarker := headers["x-defenseclaw-source"] == "codex"
-	clientMarker := headers["x-defenseclaw-client"] == "codex-otel/1.0"
-	directBase := "http://" + strings.TrimSpace(opts.APIAddr) + "/v1/"
-	if endpoint == directBase+"logs" || endpoint == directBase+"traces" || endpoint == directBase+"metrics" {
-		return sourceMarker || clientMarker
-	}
-	// Older releases used the unscoped /v1/<signal> receiver. A later
-	// operator change to gateway.api_port must not strand that registration,
-	// but port-independent ownership is deliberately stronger: require the
-	// exact pair of product markers and a strict loopback OTLP URL.
-	return sourceMarker && clientMarker && codexLegacyDirectOTLPEndpointLooksManaged(endpoint)
-}
-
-func codexScopedOTLPEndpointLooksManaged(endpoint string) bool {
-	parsed, err := url.Parse(strings.TrimSpace(endpoint))
-	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawPath != "" {
-		return false
-	}
-	// The random connector-scoped path and the loopback-only authority are the
-	// durable ownership boundary. The API port is mutable configuration, so it
-	// cannot be part of teardown identity. Requiring an explicit port avoids
-	// claiming a generic local HTTP path that the product never emits.
-	if !codexLoopbackOTLPAuthorityLooksManaged(parsed) {
-		return false
-	}
-	parts := strings.Split(strings.TrimPrefix(parsed.Path, "/"), "/")
-	if len(parts) != 5 || parts[0] != "otlp" || parts[1] != "codex" || parts[3] != "v1" || !otlpTokenHexRE.MatchString(parts[2]) {
-		return false
-	}
-	switch parts[4] {
-	case "logs", "metrics", "traces":
-		return true
-	default:
-		return false
-	}
-}
-
-func codexLegacyDirectOTLPEndpointLooksManaged(endpoint string) bool {
-	parsed, err := url.Parse(strings.TrimSpace(endpoint))
-	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawPath != "" {
-		return false
-	}
-	if !codexLoopbackOTLPAuthorityLooksManaged(parsed) {
-		return false
-	}
-	switch parsed.Path {
-	case "/v1/logs", "/v1/metrics", "/v1/traces":
-		return true
-	default:
-		return false
-	}
-}
-
-func codexLoopbackOTLPAuthorityLooksManaged(parsed *url.URL) bool {
-	if parsed == nil || !codexLoopbackHost(parsed.Hostname()) {
-		return false
-	}
-	port, err := strconv.Atoi(parsed.Port())
-	return err == nil && port > 0 && port <= 65535
-}
-
-func codexLoopbackHost(host string) bool {
-	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return otlpCarriesProductCredential(v, otlpKnownProductTokens(opts, OTLPScopeCodex))
 }
 
 func codexConfigHasManagedOTLPEndpoint(configPath string, opts SetupOpts) (bool, error) {

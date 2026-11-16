@@ -31,7 +31,7 @@ func TestRootPromotedBundleAndInstalledConfigReadableByGateway(t *testing.T) {
 	}
 	s := enterprisebundle.NewStore(filepath.Join(base, "etc", "bundles"), filepath.Join(base, "lifecycle"))
 	s.SealVersion = func(root string) error { return enterprisebundle.SealVersionForGroup(root, serviceID, os.Lchown) }
-	r, err := s.Receive("b-01JA0000000000000000000001", 1)
+	r, err := s.Receive("b-01JA0000000000000000000001", 1, "")
 	if err != nil {
 		t.Fatal(err)
 	}

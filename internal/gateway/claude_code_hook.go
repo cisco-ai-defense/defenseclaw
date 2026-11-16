@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/claudecodepath"
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
@@ -36,6 +38,10 @@ import (
 )
 
 type claudeCodeHookRequest struct {
+	watchHome            string
+	managedWatch         bool
+	reportedCWD          string                 // cwd as sent, before hookCWDForContext; names watch paths only (GAP-0066)
+	reportedNewCWD       string                 // new_cwd as sent, same use
 	HookEventName        string                 `json:"hook_event_name"`
 	SessionID            string                 `json:"session_id,omitempty"`
 	TurnID               string                 `json:"turn_id,omitempty"`
@@ -86,6 +92,9 @@ type claudeCodeHookRequest struct {
 	// guestCWD is a sandbox request's working directory in the guest's
 	// namespace (sandboxHookGuestCWD); CWD is its host mount.
 	guestCWD string
+	// aidToolCallDeclared comes from the hook contract the dispatcher
+	// resolved for this request, never from the body.
+	aidToolCallDeclared bool
 }
 
 type claudeCodeHookResponse struct {
@@ -108,7 +117,7 @@ type claudeCodeHookResponse struct {
 	RuleIDs []string `json:"rule_ids,omitempty"`
 	// RedactionEnabled carries the cloud-controlled per-inspection
 	// redaction directive back through the unified dispatch so
-	// finalizeAgentHook can honor it on the hook_decision event +
+	// finalizeAgentHookAnswer can honor it on the hook_decision event +
 	// audit row. Never serialized on the hook response wire.
 	RedactionEnabled     *bool  `json:"-"`
 	SourceReason         string `json:"-"`
@@ -133,9 +142,12 @@ type claudeCodeHookResponse struct {
 // value so downstream tooling and the audit envelope receive them.
 
 func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHookRequest) claudeCodeHookResponse {
+	req = req.withWatchHome(ctx)
 	// Keep authenticated lifecycle state current even while inspection is
 	// disabled so a live same-session re-enable cannot lose active-file authority.
 	activeAgentContext := a.applyClaudeCodeActiveAgentContext(ctx, req)
+	ctx = a.withInstructionStartup(ctx, "claudecode", req.SessionID, activeAgentContext)
+	a.mcpSessionStarted(ctx, "claudecode", req.SessionID, req.HookEventName, req.Source)
 	mode := sandboxHookMode(ctx, "claudecode", a.claudeCodeMode(ctx))
 	// Sandbox hooks are always judged, and enforced (see evaluateAgentHook).
 	if a.scannerCfg != nil && !sandboxHookForConnector(ctx, "claudecode") && !a.claudeCodeEnabled() {
@@ -163,6 +175,17 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			}
 		}
 	case "UserPromptSubmit", "UserPromptExpansion":
+		// The user's typed prompt is the task the tool judge weighs later
+		// tool calls against (SESSION_USER_INTENT). Only the turn-start
+		// event seeds it, as on the generic and Codex paths: an expansion
+		// carries command text the user did not type, so it must not
+		// replace the task. Secure Client keeps the judge input of main.
+		if isToolJudgeIntentEvent(req.HookEventName) && !a.managedAIDOnly() && (cfg == nil || !cfg.SecureClientIntegration()) {
+			for _, judge := range a.hookSessionJudges(ctx) {
+				judge.ObserveSessionPrompt(ctx, req.Prompt)
+			}
+			a.observeUserDownloadRequest(ctx, req.Prompt)
+		}
 		verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(
 			claudeCodePromptContent(req), "prompt",
 		))
@@ -182,31 +205,73 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			Direction:     "tool_call",
 			Connector:     "claudecode",
 			MCPServerName: req.MCPServerName,
+			callerCWD:     req.CWD,
+			toolUseID:     req.ToolUseID,
+
+			aidToolCallDeclared: req.aidToolCallDeclared,
+			toolNameIsLabel:     strings.TrimSpace(req.ToolName) == "",
+			toolArgsAbsent:      req.ToolInput == nil,
+			hookEvent:           req.HookEventName,
 		}
-		command, commandTool := sandboxShellCommand(ctx, "claudecode", req.HookEventName, toolName, actionTool, toolArgs)
-		verdict = a.inspectSandboxShellToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
-			Input: actionfacts.Input{
-				Tool:                                     actionTool,
-				Args:                                     toolArgs,
-				CWD:                                      req.CWD,
-				ActiveHome:                               hookActiveHome(ctx),
-				ToolResourceIdentity:                     resourceIdentity,
-				CredentialLineageHMACKey:                 activeToolValueLineageProcessKey.material,
-				ActiveAgentFiles:                         activeAgentContext.files,
-				ActiveAgentFilesCaseInsensitive:          activeAgentContext.caseInsensitiveFiles,
-				ActiveAgentFilesCaseInsensitiveUncertain: activeAgentContext.caseInsensitiveUncertain,
-				ActiveAgentFilesUncertain:                activeAgentContext.uncertain,
-			},
-			LegacyText:                    string(toolArgs),
-			Connector:                     "claudecode",
-			EnforcementCapable:            true,
-			SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
-			ResolvedWriteTargets:          resolvedWritesFromContext(ctx),
-			SandboxGuestCWD:               req.guestCWD,
-			record:                        toolChainRecorderFromContext(ctx),
-		}, command, commandTool)
-		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
-			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
+		// Cowork's VM shell, web fetch and browser navigation are judged as
+		// Bash, WebFetch and a WebFetch URL (claudeCodeCoworkInspectionFor).
+		// Secure Client keeps the request of main (coworkInspected).
+		actionArgs, shellTool := toolArgs, toolName
+		var coworkDialect actionfacts.Dialect
+		var coworkDeny *ToolInspectVerdict
+		if cowork, ok := claudeCodeCoworkInspectionUnder(cfg, toolName, toolArgs, req.Payload); ok {
+			actionTool, actionArgs, shellTool, coworkDialect = cowork.actionTool, cowork.args, cowork.actionTool, cowork.dialect
+			if cowork.requestTool != "" {
+				toolRequest.Tool, resourceIdentity = cowork.requestTool, ""
+				// The native name and its server keep their static denies
+				// and MCP server blocks: a deny of either wins.
+				coworkDeny = a.claudeCodeCoworkNativeDeny(ctx, strings.TrimSpace(toolName), req.CWD)
+			}
+		}
+		command, commandTool := sandboxShellCommand(ctx, "claudecode", req.HookEventName, shellTool, actionTool, actionArgs)
+		actionInput := actionfacts.Input{
+			Tool:                                     actionTool,
+			Args:                                     actionArgs,
+			CWD:                                      req.CWD,
+			ActiveHome:                               hookActiveHome(ctx),
+			CurrentWindowsDrive:                      reportedWindowsDrive(req.reportedCWD),
+			ToolResourceIdentity:                     resourceIdentity,
+			CredentialLineageHMACKey:                 activeToolValueLineageProcessKey.material,
+			ActiveAgentFiles:                         activeAgentContext.files,
+			ActiveAgentFilesCaseInsensitive:          activeAgentContext.caseInsensitiveFiles,
+			ActiveAgentFilesCaseInsensitiveUncertain: activeAgentContext.caseInsensitiveUncertain,
+			ActiveAgentFilesUncertain:                activeAgentContext.uncertain,
+		}
+		if a.agentHookWindowsDialectHint(ctx) {
+			actionInput.DialectHint = claudeCodeWindowsShellDialect(actionInput)
+		}
+		if coworkDialect != "" {
+			// The Cowork shell runs in a Linux VM on every host.
+			actionInput.DialectHint = coworkDialect
+		}
+		if coworkDeny != nil {
+			verdict = coworkDeny
+		} else {
+			verdict = a.inspectSandboxShellToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
+				Input:                         actionInput,
+				LegacyText:                    string(toolArgs),
+				Connector:                     "claudecode",
+				EnforcementCapable:            true,
+				ManagedHookOverflowHold:       managedWindowsHookOverflowHold(ctx, a.scannerCfg, "claudecode", runtime.GOOS),
+				SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
+				ResolvedWriteTargets:          commandHookResolvedWrites(ctx, cfg, actionfacts.Input{Tool: actionTool, Args: actionArgs}),
+				ActiveAgentFileIdentities:     activeAgentContext.identities,
+				SandboxGuestCWD:               req.guestCWD,
+				record:                        toolChainRecorderFromContext(ctx),
+			}, command, commandTool)
+		}
+		verdict = mergeCoworkPageContentVerdict(verdict, a.inspectClaudeCodeCoworkPageContent(ctx, req))
+		// Cowork's own workspace shell and fetch are no MCP server the user
+		// configured: no MCP admission or server policy applies to them.
+		if !coworkInspected(cfg) || !claudeCodeCoworkNativeTool(req) {
+			if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
+				assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
+			}
 		}
 		if decision, matched := a.claudeCodeSkillAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
@@ -216,8 +281,12 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		}
 	case "PostToolUse", "PostToolUseFailure", "PermissionDenied", "PostToolBatch":
 		verdict = a.inspectClaudeCodeToolResult(ctx, req, mode)
-		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
-			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
+		// Cowork's own workspace shell and fetch are no MCP server the user
+		// configured: no MCP admission or server policy applies to them.
+		if !coworkInspected(cfg) || !claudeCodeCoworkNativeTool(req) {
+			if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
+				assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
+			}
 		}
 		if decision, matched := a.claudeCodeSkillAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
@@ -239,9 +308,13 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	case "InstructionsLoaded", "ConfigChange", "FileChanged":
 		verdict = a.scanClaudeCodeEventFile(ctx, req)
 		if verdict == nil {
-			verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(
-				claudeCodeEventContent(req), "prompt",
-			))
+			inspectReq := claudeCodeContentInspectRequest(claudeCodeEventContent(req), "prompt")
+			// A FileChanged note on a state or settings file Claude Code keeps
+			// for itself is housekeeping: the path is the only text, the event
+			// cannot block, and the judge read it as sensitive file access
+			// (GAP-2623). Rules and AID still scan it; the event is recorded.
+			inspectReq.skipJudge = req.HookEventName == "FileChanged" && claudeCodeOwnStateFile(req.FilePath)
+			verdict = a.inspectMessageContent(ctx, inspectReq)
 		}
 	case "SubagentStart", "CwdChanged", "DirectoryAdded", "WorktreeRemove",
 		"TaskCreated", "TaskCompleted", "TeammateIdle",
@@ -259,11 +332,12 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
 	action := rawAction
-	wouldBlock := rawAction == "block" && mode != "action"
+	stateMutation := a.provenHookActionMustEnforce(ctx, verdict) && claudeCodeCanEnforce(req)
+	wouldBlock := rawAction == "block" && mode != "action" && !stateMutation
 	if rawAction == "block" && !claudeCodeCanEnforce(req) {
 		action = "allow"
 		wouldBlock = true
-	} else if mode != "action" && rawAction == "block" {
+	} else if mode != "action" && rawAction == "block" && !stateMutation {
 		action = "allow"
 	}
 	if mode != "action" && (rawAction == "alert" || rawAction == "confirm") {
@@ -302,7 +376,23 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		reason, policy = resolveHookBlockReasonForConfig(a.decisionConfig(ctx), "claudecode", req.HookEventName, action, reason,
 			evalCtx.RuleIDs, policy)
 	}
+	// Claude Code shows the native ask only in its default (Manual) mode; in
+	// any other mode the ask would run the call or be refused without the
+	// reason, so the confirmation blocks with the next step (GAP-0371). The
+	// reason was resolved as a confirmation, so no block message replaces it.
+	if action == "confirm" && req.HookEventName == "PreToolUse" && !gatewayconnector.ClaudeCodeModeCanAsk(req.PermissionMode) {
+		action = decisionConfirmWithoutAsk(verdict, "block")
+	}
 	resp := claudeCodeResponseFor(req, action, rawAction, verdict.Severity, reason, verdict.Findings, mode, wouldBlock, policy)
+	// The alert-only SQL rule says so in the chat, as on the Codex and generic
+	// hook paths, so block_at is not read as a way to turn it into a block
+	// (GAP-0914). Secure Client keeps the plain finding line.
+	if action == "alert" && hasAlertOnlySQLFinding(verdict.Findings) {
+		if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+			resp.AdditionalContext = strings.TrimSpace(resp.AdditionalContext + sqlAlertOnlyHookNotice)
+			resp.ClaudeCodeOutput = claudeCodeOutput(req, resp.Action, resp.RawAction, resp.Reason, resp.AdditionalContext)
+		}
+	}
 	resp.SourceReason = verdict.Reason
 	// Stamp the unified-pipeline correlation keys so the agent-hook
 	// dispatch wrapper (claudeCodeResponseToAgentHookResponse) and
@@ -315,6 +405,46 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	resp.aiDefenseEnforced = aiDefenseEnforced && resp.Action == "block"
 	resp.laneVerdict = verdict.laneVerdict
 	return resp
+}
+
+func (req claudeCodeHookRequest) withWatchHome(ctx context.Context) claudeCodeHookRequest {
+	if managedCallerWatchContext(ctx) {
+		req.watchHome = trustedActiveHome(ctx)
+		req.managedWatch = true
+	}
+	return req
+}
+
+// managedWatchRoot is the project a managed caller's Claude Code watches when
+// the gateway service account cannot resolve it (sanitizeHookCWD returns ""
+// for a directory in another user's home on Linux and macOS). The reported
+// directory is kept lexically only inside the verified caller's home, as the
+// unified pipeline's managedWatchCWD does. It names watch paths only; policy
+// reads still use the resolved CWD (GAP-0066).
+func (req claudeCodeHookRequest) managedWatchRoot() string {
+	if !req.managedWatch || req.sandboxView != nil || req.watchHome == "" || req.watchHome == unresolvedCallerHome {
+		return ""
+	}
+	cwd := req.reportedNewCWD
+	if cwd == "" {
+		cwd = req.reportedCWD
+	}
+	if !insideHome(req.watchHome, cwd) {
+		return ""
+	}
+	return filepath.Clean(cwd)
+}
+
+// managedCallerWatchContext reports a request served on behalf of another
+// account: a call on the managed hook socket (the verified peer; that
+// server's base context carries no service-account mark) or a call to a
+// service-account gateway's TCP API. Its watch paths come from the verified
+// caller, never from the gateway's own environment (GAP-0066).
+func managedCallerWatchContext(ctx context.Context) bool {
+	if _, ok := managedHookPeerFromContext(ctx); ok {
+		return true
+	}
+	return serviceAccountGatewayFromContext(ctx)
 }
 
 // dispatchClaudeCodeHookNotification fires a user-session OS toast
@@ -407,7 +537,7 @@ func (a *APIServer) claudeCodeEnabled() bool {
 	// for re-enable). Defense-in-depth alongside the boot-loop teardown.
 	// EffectiveEnabled defaults to true ⇒ no-op for single-connector
 	// installs and any connector never explicitly disabled.
-	if cfg.ManualConnectorConfigured("claudecode") && !cfg.Guardrail.EffectiveEnabled("claudecode") {
+	if cfg.ConnectorDisabled("claudecode") {
 		return false
 	}
 	hookCfg := cfg.ConnectorHookConfig("claudecode")
@@ -422,13 +552,13 @@ func (a *APIServer) claudeCodeEnabled() bool {
 	if cfg.Guardrail.HasConnector("claudecode") {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(cfg.Guardrail.Connector), "claudecode")
+	return cfg.Guardrail.NamesConnector("claudecode")
 }
 
 func (a *APIServer) claudeCodeMode(ctx context.Context) string {
 	// The request's guardrail profile, when one applies, replaces the live
 	// configuration (see guardrail_profile.go).
-	return hookModeForConfig(a.decisionConfigFrom(ctx, a.runtimeConfigSnapshot()), "claudecode")
+	return a.decisionConfigFrom(ctx, a.runtimeConfigSnapshot()).HookModeForConnector("claudecode")
 }
 
 func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool, policy ...redaction.SinkPolicy) claudeCodeHookResponse {
@@ -441,9 +571,19 @@ func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severit
 	if rawAction == "" {
 		rawAction = action
 	}
+	// A confirmation blocked because the permission mode cannot ask keeps the
+	// confirmation wording and adds the next step (GAP-0371).
+	noAsk := req.HookEventName == "PreToolUse" && action == "block" && strings.EqualFold(rawAction, "confirm")
+	reasonAction := action
+	if noAsk {
+		reasonAction = "confirm"
+	}
 	safeReason := agentDisplayReason(reason, notificationSinkPolicy(policy))
-	safeReason = agentVerdictReason(action, reason, safeReason, notificationSinkPolicy(policy))
-	safeReason = agentObservedReason(action, reason, safeReason, notificationSinkPolicy(policy))
+	safeReason = agentVerdictReason(reasonAction, reason, safeReason, notificationSinkPolicy(policy))
+	safeReason = agentObservedReason(reasonAction, reason, safeReason, notificationSinkPolicy(policy))
+	if noAsk {
+		safeReason = gatewayconnector.ClaudeCodeNoAskReason(safeReason, req.PermissionMode)
+	}
 	// wouldBlock remains a shadow-telemetry signal for post-result events, but
 	// the connector cannot enforce those events. Do not describe an advisory
 	// result as something Claude would block in action mode.
@@ -492,6 +632,9 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 			"permissionDecisionReason": reasonOrDefaultClaudeCode(reason),
 		}}
 	}
+	if action == "block" && event == "PreToolUse" && strings.EqualFold(rawAction, "confirm") {
+		reason = gatewayconnector.ClaudeCodeNoAskReason(reason, req.PermissionMode)
+	}
 	if action == "block" {
 		switch event {
 		case "PreToolUse":
@@ -508,10 +651,11 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 					"message":  reasonOrDefaultClaudeCode(reason),
 				},
 			}}
-		case "TaskCreated", "TaskCompleted", "TeammateIdle":
+		case "SessionStart", "TaskCreated", "TaskCompleted", "TeammateIdle":
 			// These team/task events use exit 2 + stderr as event-specific
-			// feedback. Top-level continue:false stops the teammate entirely,
-			// which is not the documented denial behavior for these events.
+			// feedback. SessionStart also uses exit 2 + stderr: a JSON
+			// decision:block is not a native SessionStart block and caused
+			// hookexec to replace the identity refusal with a generic error.
 			return nil
 		case "Elicitation":
 			return map[string]interface{}{"hookSpecificOutput": map[string]interface{}{
@@ -530,8 +674,13 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 		}
 	}
 	watchRoot := strings.TrimSpace(req.NewCWD)
-	if watchRoot == "" {
+	// A managed caller's new_cwd the service cannot resolve still names
+	// the new project; it does not fall back to the old one (GAP-0066).
+	if watchRoot == "" && (!req.managedWatch || req.reportedNewCWD == "") {
 		watchRoot = req.CWD
+	}
+	if watchRoot == "" {
+		watchRoot = req.managedWatchRoot()
 	}
 	if event == "SessionStart" {
 		output := map[string]interface{}{
@@ -544,7 +693,12 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 		return map[string]interface{}{"hookSpecificOutput": output}
 	}
 	if event == "CwdChanged" || event == "FileChanged" {
-		out := map[string]interface{}{"watchPaths": claudeCodeWatchPathsForRequest(req, watchRoot)}
+		// Claude Code reads watchPaths of these events only inside
+		// hookSpecificOutput; a top-level key is ignored (GAP-2288).
+		out := map[string]interface{}{"hookSpecificOutput": map[string]interface{}{
+			"hookEventName": event,
+			"watchPaths":    claudeCodeWatchPathsForRequest(req, watchRoot),
+		}}
 		if additional != "" {
 			out["systemMessage"] = additional
 		}
@@ -560,8 +714,6 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 			"hookEventName":     event,
 			"additionalContext": additional,
 		}}
-	case "CwdChanged":
-		return map[string]interface{}{"watchPaths": []string{}}
 	default:
 		return map[string]interface{}{"systemMessage": additional}
 	}
@@ -570,6 +722,11 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 func claudeCodeAdditionalContext(rawAction, severity, reason string, wouldBlock bool) string {
 	if rawAction == "allow" || rawAction == "" {
 		return ""
+	}
+	if strings.HasPrefix(reason, "DefenseClaw is still scanning MCP server ") ||
+		strings.HasPrefix(reason, "DefenseClaw could not read admission for MCP server ") ||
+		strings.HasPrefix(reason, mcpAdmissionAllowedLead) {
+		return reason
 	}
 	lead := "DefenseClaw observed"
 	finding := fmt.Sprintf("a %s Claude Code hook finding", severity)
@@ -593,15 +750,17 @@ func reasonOrDefaultClaudeCode(reason string) string {
 
 // claudeCodeOmniGentShellTool is OmniGent's shell tool as Claude Code names
 // it when OmniGent's claude harness runs Claude Code: the MCP tool
-// sys_os_shell of the "omnigent" server, {"command": "..."}.
+// sys_os_shell of the "omnigent" server, {"command": "..."}. DefenseClaw no
+// longer ships an OmniGent connector (#1182), but OmniGent itself still runs
+// Claude Code with this server, so the Claude Code connector keeps the alias.
 const claudeCodeOmniGentShellTool = "mcp__omnigent__sys_os_shell"
 
 // claudeCodeTrustedActionTool names the tool the trusted-action parser sees.
 // OmniGent's MCP shell tool is the same shell shape under another name;
 // unmapped, its commands parsed to no command facts, so a CRITICAL command
 // rule stayed an unproven candidate and the nested Claude Code PreToolUse
-// allowed the call (GAP-1055; only OmniGent's own hook blocked it). This is a
-// name alias like agentHookTrustedActionTool's, not a capability grant.
+// allowed the call (GAP-1055). This is a name alias like
+// agentHookTrustedActionTool's, not a capability grant.
 func claudeCodeTrustedActionTool(toolName, actionTool string) string {
 	if strings.TrimSpace(toolName) == claudeCodeOmniGentShellTool {
 		return "shell"
@@ -822,6 +981,27 @@ func claudeCodePromptContent(req claudeCodeHookRequest) string {
 func claudeCodeToolOutput(req claudeCodeHookRequest) string {
 	parts := []string{claudeCodeString(req.ToolResponse), claudeCodeString(req.ToolCalls), req.Error, req.ErrorDetails}
 	return strings.Join(nonEmptyStrings(parts...), "\n")
+}
+
+// claudeCodeOwnStateFile reports whether path is a file Claude Code keeps
+// for itself: ~/.claude.json (and its backups) or a file under a .claude
+// folder (settings, sessions, todos). It looks at the name only; nothing
+// here trusts the file contents.
+func claudeCodeOwnStateFile(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+	clean := filepath.ToSlash(filepath.Clean(path))
+	if strings.HasPrefix(strings.ToLower(filepath.Base(clean)), ".claude.json") {
+		return true
+	}
+	for _, part := range strings.Split(filepath.ToSlash(filepath.Dir(clean)), "/") {
+		if strings.EqualFold(part, ".claude") {
+			return true
+		}
+	}
+	return false
 }
 
 func claudeCodeEventContent(req claudeCodeHookRequest) string {
@@ -1279,4 +1459,28 @@ func (a *APIServer) scanClaudeCodeComponent(ctx context.Context, component, targ
 		_ = a.logger.LogScanWithCorrelation(ctx, result, "", ScanCorrelationFromContext(ctx))
 	}
 	return true
+}
+
+// claudeCodeWindowsShellDialect is the shell Claude Code runs a Windows tool
+// call in, where the call leaves no doubt (GAP-0147, GAP-1717): its
+// PowerShell tool runs PowerShell, and its Bash tool runs Git Bash, so a Bash
+// call whose text the POSIX grammar reads alone (no Windows or PowerShell
+// spelling, hookpaths.GitBashReadsAlone) is read as POSIX. Any other Bash
+// call keeps no hint and every reading counts, as before: PowerShell or cmd
+// text sent to the Bash tool, an MSYS drive path
+// (TestWindowsConnectorContractCompoundRegistryPersistencePerDialect,
+// TestR105GAP0768WindowsGitBashWriteToLoadedClaudeMD).
+func claudeCodeWindowsShellDialect(input actionfacts.Input) actionfacts.Dialect {
+	switch input.Tool {
+	case "PowerShell":
+		return actionfacts.DialectPowerShell
+	case "Bash":
+		var args struct {
+			Command string `json:"command"`
+		}
+		if json.Unmarshal(input.Args, &args) == nil && hookpaths.GitBashReadsAlone(args.Command, input.ActiveHome) {
+			return actionfacts.DialectPOSIX
+		}
+	}
+	return ""
 }

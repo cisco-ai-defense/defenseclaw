@@ -27,6 +27,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // Keep this identical to Doctor's managed-settings read boundary so the
@@ -40,6 +42,50 @@ type claudeCodeSettingsSource struct {
 	// origins names, for the merged file-based tier, the file whose value
 	// of each top-level key Claude Code applies (the last one to set it).
 	origins map[string]string
+	// kind names the policy tier for reports (server, file, mdm-device);
+	// tierOrigins overrides it per key when one source merges several
+	// tiers (the device and per-user MDM plists).
+	kind        string
+	tierOrigins map[string]string
+}
+
+// sourceKind names the tier that delivered key, for reports.
+func (s *claudeCodeSettingsSource) sourceKind(key string) string {
+	if s == nil {
+		return ""
+	}
+	if origin := s.tierOrigins[key]; origin != "" {
+		return origin
+	}
+	if s.kind != "" {
+		return s.kind
+	}
+	return s.name
+}
+
+// reportBlock reports that key in this managed source makes Claude ignore
+// user-scope hooks.
+func (s *claudeCodeSettingsSource) reportBlock(key string) {
+	if s != nil {
+		reportAgentPolicyBlocksUserHooks("claudecode", s.sourceKind(key), key, s.path)
+	}
+}
+
+// readOptionalClaudeCodeManagedSettings reads one machine-policy tier. A
+// file rewritten during the read is read again; where a failed policy read
+// must not fail the reconcile, it is logged and the tier treated as absent.
+func readOptionalClaudeCodeManagedSettings(name, kind, path string) (*claudeCodeSettingsSource, error) {
+	source, err := readOptionalClaudeCodeSettings(name, path)
+	for attempt := 0; attempt < 2 && agentPolicyReadRetryable(err); attempt++ {
+		source, err = readOptionalClaudeCodeSettings(name, path)
+	}
+	if err != nil && agentPolicyReadTolerated("claudecode", kind, path, err) {
+		return nil, nil
+	}
+	if source != nil {
+		source.kind = kind
+	}
+	return source, err
 }
 
 func (s *claudeCodeSettingsSource) active() bool {
@@ -81,7 +127,8 @@ func claudeCodeEffectiveHookContract(opts SetupOpts) (bool, error) {
 		return false, err
 	}
 	if helper := claudeCodePolicyHelperSource(managed); helper != nil {
-		return false, fmt.Errorf(
+		helper.reportBlock("policyHelper")
+		return false, fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			"Claude Code policyHelper from %s is dynamic and cannot be passively verified; include the DefenseClaw managed hook matrix in the helper output",
 			helper.label(),
 		)
@@ -90,7 +137,12 @@ func claudeCodeEffectiveHookContract(opts SetupOpts) (bool, error) {
 	activeManaged := managed.active()
 	// Unix guardian installs harden per-user hook scripts. Only the native
 	// enterprise path pins an administrator-owned executable in managed policy.
-	managedPolicy := opts.ManagedEnterprise && strings.TrimSpace(opts.HookExecutable) != ""
+	// A macOS Secure Client install names the Secure Client gateway as its
+	// HookExecutable (the listener proof, GAP-0810) but registers the per-user
+	// shell hook in the user's settings (claudeCodeHookInvocation), so that is
+	// the source to verify.
+	managedPolicy := opts.ManagedEnterprise && strings.TrimSpace(opts.HookExecutable) != "" &&
+		(runtime.GOOS == "windows" || !shellHookSecureClientProfile(opts))
 	if managedPolicy && activeManaged == managed.userFallback {
 		// HKCU is a user-writable convenience tier. Restoring the higher file
 		// drop-in supersedes it, so even a disabling fallback remains ordinary,
@@ -122,7 +174,10 @@ func claudeCodeEffectiveHookContract(opts SetupOpts) (bool, error) {
 	if disabled, source, err := effectiveClaudeCodeUserHooksDisabled(sources); err != nil {
 		return false, err
 	} else if disabled {
-		return false, fmt.Errorf("Claude Code %s sets disableAllHooks=true, so the user-scoped DefenseClaw hooks are inactive", source.label())
+		return false, fmt.Errorf("Claude Code %s sets disableAllHooks=true, so the user-scoped DefenseClaw hooks are inactive", source.label()) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+	}
+	if err := claudeCodeHookShellEnvRefusal(opts, sources); err != nil {
+		return false, err
 	}
 	user := sources.user
 	if user == nil {
@@ -153,7 +208,7 @@ func (s claudeCodeManagedSourceSet) active() *claudeCodeSettingsSource {
 func inspectClaudeCodeManagedSources() (claudeCodeManagedSourceSet, error) {
 	var result claudeCodeManagedSourceSet
 	remotePath := claudeCodeRemoteSettingsPath()
-	remote, err := readOptionalClaudeCodeSettings("remote/server-managed settings", remotePath)
+	remote, err := readOptionalClaudeCodeManagedSettings("remote/server-managed settings", "server", remotePath)
 	if err != nil {
 		return result, err
 	}
@@ -186,19 +241,19 @@ func validateClaudeCodeManagedFileDestination() error {
 		return err
 	}
 	if helper := claudeCodePolicyHelperSource(managed); helper != nil {
-		return fmt.Errorf(
+		return fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			"Claude Code policyHelper from %s supersedes file-based managed hooks; add the DefenseClaw hook matrix to the helper output",
 			helper.label(),
 		)
 	}
 	if managed.remote.active() {
-		return fmt.Errorf(
+		return fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			"Claude Code %s has higher precedence than file-based managed hooks; deploy the DefenseClaw hook matrix through that source",
 			managed.remote.label(),
 		)
 	}
 	if managed.osAdmin.active() {
-		return fmt.Errorf(
+		return fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			"Claude Code %s has higher precedence than file-based managed hooks; deploy the DefenseClaw hook matrix through that source",
 			managed.osAdmin.label(),
 		)
@@ -234,17 +289,18 @@ func validateClaudeCodeManagedHookControls(source *claudeCodeSettingsSource, man
 	if raw, exists := source.settings["disableAllHooks"]; exists {
 		disabled, ok := raw.(bool)
 		if !ok {
-			return fmt.Errorf("Claude Code disableAllHooks from %s has unsupported type %T", source.label(), raw)
+			return fmt.Errorf("Claude Code disableAllHooks from %s has unsupported type %T", source.label(), raw) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		if disabled {
-			return fmt.Errorf("Claude Code %s sets disableAllHooks=true", source.label())
+			source.reportBlock("disableAllHooks")
+			return fmt.Errorf("Claude Code %s sets disableAllHooks=true", source.label()) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 	}
 	allowManagedOnly := false
 	if raw, exists := source.settings["allowManagedHooksOnly"]; exists {
 		value, ok := raw.(bool)
 		if !ok {
-			return fmt.Errorf("Claude Code allowManagedHooksOnly from %s has unsupported type %T", source.label(), raw)
+			return fmt.Errorf("Claude Code allowManagedHooksOnly from %s has unsupported type %T", source.label(), raw) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		allowManagedOnly = value
 	}
@@ -257,21 +313,23 @@ func validateClaudeCodeManagedHookControls(source *claudeCodeSettingsSource, man
 			for _, item := range value {
 				name, ok := item.(string)
 				if !ok {
-					return fmt.Errorf("Claude Code strictPluginOnlyCustomization from %s contains unsupported value %T", source.label(), item)
+					return fmt.Errorf("Claude Code strictPluginOnlyCustomization from %s contains unsupported value %T", source.label(), item) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 				}
 				if name == "hooks" {
 					strictHooks = true
 				}
 			}
 		default:
-			return fmt.Errorf("Claude Code strictPluginOnlyCustomization from %s has unsupported type %T", source.label(), raw)
+			return fmt.Errorf("Claude Code strictPluginOnlyCustomization from %s has unsupported type %T", source.label(), raw) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 	}
 	if !managedHook && allowManagedOnly {
-		return fmt.Errorf("Claude Code %s sets allowManagedHooksOnly=true, so the user-scoped DefenseClaw hooks are ignored", source.label())
+		source.reportBlock("allowManagedHooksOnly")
+		return fmt.Errorf("Claude Code %s sets allowManagedHooksOnly=true, so the user-scoped DefenseClaw hooks are ignored", source.label()) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if !managedHook && strictHooks {
-		return fmt.Errorf("Claude Code %s restricts hooks to plugins or managed settings, so the user-scoped DefenseClaw hooks are ignored", source.label())
+		source.reportBlock("strictPluginOnlyCustomization")
+		return fmt.Errorf("Claude Code %s restricts hooks to plugins or managed settings, so the user-scoped DefenseClaw hooks are ignored", source.label()) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	return nil
 }
@@ -283,13 +341,13 @@ func claudeCodeSourceHasHookContract(source *claudeCodeSettingsSource, opts Setu
 	rawHooks, exists := source.settings["hooks"]
 	if !exists {
 		if diagnoseMissing {
-			return false, fmt.Errorf("Claude Code %s has no hooks table containing the DefenseClaw contract", source.label())
+			return false, fmt.Errorf("Claude Code %s has no hooks table containing the DefenseClaw contract", source.label()) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		return false, nil
 	}
 	hooks, ok := rawHooks.(map[string]interface{})
 	if !ok {
-		return false, fmt.Errorf("Claude Code hooks from %s have unsupported type %T", source.label(), rawHooks)
+		return false, fmt.Errorf("Claude Code hooks from %s have unsupported type %T", source.label(), rawHooks) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	groups, err := claudeCodeHookGroupsForSetup(opts)
 	if err != nil {
@@ -301,7 +359,7 @@ func claudeCodeSourceHasHookContract(source *claudeCodeSettingsSource, opts Setu
 		entries, ok := hooks[group.eventType].([]interface{})
 		if !ok || !claudeCodeEventHasEnforcingHook(entries, group.eventType, group.matcher, group.async, opts) {
 			if diagnoseMissing {
-				return false, fmt.Errorf("Claude Code %s does not contain the enforcing DefenseClaw %s hook", source.label(), group.eventType)
+				return false, fmt.Errorf("Claude Code %s does not contain the enforcing DefenseClaw %s hook", source.label(), group.eventType) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			}
 			return false, nil
 		}
@@ -315,7 +373,7 @@ func claudeCodeSourceHasHookContract(source *claudeCodeSettingsSource, opts Setu
 			continue
 		}
 		if diagnoseMissing {
-			return false, fmt.Errorf(
+			return false, fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 				"Claude Code %s contains an unexpected DefenseClaw %s hook outside the selected contract",
 				source.label(),
 				eventType,
@@ -389,13 +447,13 @@ func effectiveClaudeCodeUserHooksDisabled(sources claudeCodeUserSourceSet) (bool
 		}
 		if rawHooks, exists := source.settings["hooks"]; exists {
 			if _, ok := rawHooks.(map[string]interface{}); !ok {
-				return false, source, fmt.Errorf("Claude Code hooks from %s have unsupported type %T", source.label(), rawHooks)
+				return false, source, fmt.Errorf("Claude Code hooks from %s have unsupported type %T", source.label(), rawHooks) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			}
 		}
 		if raw, exists := source.settings["disableAllHooks"]; exists {
 			disabled, ok := raw.(bool)
 			if !ok {
-				return false, source, fmt.Errorf("Claude Code disableAllHooks from %s has unsupported type %T", source.label(), raw)
+				return false, source, fmt.Errorf("Claude Code disableAllHooks from %s has unsupported type %T", source.label(), raw) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			}
 			return disabled, source, nil
 		}
@@ -474,7 +532,7 @@ func readClaudeCodeManagedFileSettingsAt(root string) (*claudeCodeSettingsSource
 	paths := []string{filepath.Join(root, "managed-settings.json")}
 	dropin := filepath.Join(root, "managed-settings.d")
 	entries, err := os.ReadDir(dropin)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err != nil && !errors.Is(err, os.ErrNotExist) && !agentPolicyReadTolerated("claudecode", "file", dropin, err) {
 		return nil, fmt.Errorf("inspect Claude Code managed settings drop-ins %s: %w", dropin, err)
 	}
 	var names []string
@@ -494,7 +552,7 @@ func readClaudeCodeManagedFileSettingsAt(root string) (*claudeCodeSettingsSource
 	origins := map[string]string{}
 	var loaded []string
 	for _, path := range paths {
-		source, err := readOptionalClaudeCodeSettings("file-based managed settings", path)
+		source, err := readOptionalClaudeCodeManagedSettings("file-based managed settings", "file", path)
 		if err != nil {
 			return nil, err
 		}
@@ -515,6 +573,7 @@ func readClaudeCodeManagedFileSettingsAt(root string) (*claudeCodeSettingsSource
 		path:     strings.Join(loaded, ", "),
 		settings: merged,
 		origins:  origins,
+		kind:     "file",
 	}, nil
 }
 
@@ -549,7 +608,7 @@ func claudeCodeManagedHooksOnlyOverride(source *claudeCodeSettingsSource, ownDro
 	if err != nil {
 		shown = []byte(fmt.Sprintf("%v", value))
 	}
-	return fmt.Errorf(
+	return fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		"Claude Code managed settings %s set allowManagedHooksOnly to %s after DefenseClaw's drop-in %s, so user and project hooks can rewrite tool input after inspection; remove the setting from that file, or set managed_hooks_only: preserve for claudecode",
 		from, shown, filepath.Base(ownDropIn),
 	)
@@ -617,33 +676,27 @@ func jsonValuesEqual(left, right interface{}) bool {
 }
 
 // claudeCodeUserSettingsReadPath is the file to read for the per-user
-// ~/.claude/settings.json. A dotfiles layout makes it a symlink; Setup
-// writes through the link, so the inspection follows it too when it ends at
-// a regular file in the user's home that the user owns. Refusing every link
-// left the gateway unable to start while the hooks were already installed,
-// so every Claude Code prompt was blocked (GAP-1062). Windows keeps
-// refusing links.
+// ~/.claude/settings.json. An OSS account may link either this file or its
+// parent directory to user-owned dotfiles outside the home. Windows keeps
+// its native path handling and refuses a settings file that is a link.
 func claudeCodeUserSettingsReadPath(path string) (string, error) {
-	info, err := os.Lstat(path)
-	if err != nil || info.Mode()&os.ModeSymlink == 0 || runtime.GOOS == "windows" {
+	if runtime.GOOS == "windows" {
+		if err := windowsSettingsFileLinkRefusal(path); err != nil {
+			return "", err
+		}
 		return path, nil
 	}
-	target, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return "", fmt.Errorf("settings source is a link that cannot be followed: %w", err)
+	// The enterprise per-user writer confines linked files and parents.
+	if home := activeUserHomeOverride(); home != "" {
+		target, outside, err := AgentConfigOutsideHome(home, path)
+		if err != nil {
+			return "", fmt.Errorf("inspect settings source %s: %w", path, err)
+		}
+		if outside {
+			return "", fmt.Errorf("settings source %s leads outside your home folder, to %s; move it into your home folder or replace the link", path, target)
+		}
 	}
-	home := filepath.Clean(userHomeDir())
-	if resolved, err := filepath.EvalSymlinks(home); err == nil {
-		home = resolved
-	}
-	if rel, err := filepath.Rel(home, target); err != nil || rel == "." || rel == ".." ||
-		strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", fmt.Errorf("settings source is a link to %s, outside your home folder; link it to a file in your home folder or replace the link with the file", target)
-	}
-	if err := validatePluginOwner(target); err != nil {
-		return "", fmt.Errorf("settings source is a link to a file another account owns: %w", err)
-	}
-	return target, nil
+	return userOwnedSettingsReadPath(path)
 }
 
 func readOptionalClaudeCodeSettings(name, path string) (*claudeCodeSettingsSource, error) {
@@ -667,7 +720,7 @@ func readRequiredClaudeCodeSettings(name, path string) (*claudeCodeSettingsSourc
 		return nil, err
 	}
 	if source == nil {
-		return nil, fmt.Errorf("Claude Code %s file is missing: %s", name, path)
+		return nil, fmt.Errorf("Claude Code %s file is missing: %s", name, path) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	return source, nil
 }
@@ -690,7 +743,7 @@ func decodeClaudeCodeSettings(data []byte, source string) (map[string]interface{
 }
 
 func readStableClaudeCodeSettingsFile(path string) ([]byte, bool, error) {
-	before, err := os.Lstat(path)
+	before, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, false, nil
 	}

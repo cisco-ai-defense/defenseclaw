@@ -4,11 +4,11 @@
 package cli
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -68,6 +68,13 @@ func gatewayLogSize(path string) int64 {
 
 // gatewayLogExitReason returns the last "Error: " line the gateway wrote to
 // gateway.log after offset (the error it exited on), or "".
+// The line the gateway logs for a destination that refused the start: its
+// name, path and rule (destinations factory, GAP-0890).
+const (
+	gatewayLogDestinationRefusal = "defenseclaw: observability destination "
+	gatewayLogDestinationRemedy  = "fix the path or remove the destination"
+)
+
 func gatewayLogExitReason(path string, offset int64) string {
 	file, err := os.Open(path)
 	if err != nil {
@@ -88,16 +95,51 @@ func gatewayLogExitReason(path string, offset int64) string {
 	if _, err := file.ReadAt(tail, offset); err != nil && !errors.Is(err, io.EOF) {
 		return ""
 	}
-	reason := ""
+	reason, destination := "", ""
 	for _, line := range strings.Split(string(tail), "\n") {
-		if line = strings.TrimSpace(line); strings.HasPrefix(line, "Error: ") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "Error: "):
 			reason = strings.TrimSpace(strings.TrimPrefix(line, "Error: "))
+		case strings.HasPrefix(line, gatewayLogDestinationRefusal) && strings.HasSuffix(line, gatewayLogDestinationRemedy):
+			destination = strings.TrimPrefix(line, "defenseclaw: ")
 		}
 	}
-	if len(reason) > 400 {
+	if destination != "" {
+		// The destination, its path and the rule it breaks, which the
+		// gateway logs before it exits on runtime_unavailable (GAP-0097).
+		if reason == "" {
+			reason = destination
+		} else {
+			reason = destination + " (" + reason + ")"
+		}
+	}
+	// A cause that ends with its repair names the folder and the command that
+	// fixes it. The folder appears twice and the second copy is shell quoted (an
+	// apostrophe becomes four bytes), so the length depends on the path. It is
+	// never cut: the log read above already bounds it, and a cut would drop the
+	// folder or the command the operator needs. Other causes keep 400 bytes.
+	if len(reason) > 400 && !gatewayRepairStepEnding.MatchString(reason) {
 		reason = strings.ToValidUTF8(reason[:400], "") + "..."
 	}
 	return reason
+}
+
+// gatewayRepairStepEnding matches a cause that already ends with the step to
+// run after the repair (for example an audit-folder refusal: "...chmod go-w
+// <folder>, then run: defenseclaw-gateway restart").
+var gatewayRepairStepEnding = regexp.MustCompile(`then run: defenseclaw-gateway (start|restart)$`)
+
+// gatewayReadinessFailure is the error of a start or restart that did not reach
+// readiness. A cause that ends with its own repair step stays the last words of
+// the message; every other cause is followed by the gateway-log pointer and, on a
+// full disk, the disk note (GAP-0825).
+func gatewayReadinessFailure(prefix string, err error, logFile string) error {
+	if gatewayRepairStepEnding.MatchString(err.Error()) {
+		return fmt.Errorf("%s: %w", prefix, err)
+	}
+	return fmt.Errorf("%s: %w (check %s for errors)%s", prefix, err, logFile,
+		gatewayStartFailureDiskNote(config.DefaultDataPath()))
 }
 
 // gatewayExitedBeforeReadinessError names the error the gateway exited on
@@ -142,6 +184,9 @@ func configSchemaProblem(err error) (string, bool) {
 	}
 	field := strings.TrimPrefix(schemaErr.Path, "$.")
 	if schemaErr.Keyword == "additionalProperties" && field != "" && field != "$" {
+		if retired, ok := schemaErr.RetiredKeyMessage(); ok {
+			return fmt.Sprintf("%s: %s", where, retired), true
+		}
 		// A typo'd or undeclared key (GAP-2173).
 		hint := ""
 		if schemaErr.Suggestion != "" {
@@ -159,16 +204,9 @@ func configSchemaProblem(err error) (string, bool) {
 	if schemaErr.Keyword == "pattern" && (strings.HasSuffix(field, ".block_at") || strings.HasSuffix(field, ".alert_at")) {
 		return fmt.Sprintf("%s: %s must be one of CRITICAL, HIGH, MEDIUM, LOW", where, field), true
 	}
-	if schemaErr.Keyword != "enum" || !strings.HasPrefix(schemaErr.Expected, "one of ") {
+	names, ok := schemaErr.EnumChoices()
+	if !ok {
 		return "", false
-	}
-	var choices []any
-	if json.Unmarshal([]byte(strings.TrimPrefix(schemaErr.Expected, "one of ")), &choices) != nil || len(choices) == 0 {
-		return "", false
-	}
-	names := make([]string, len(choices))
-	for i, choice := range choices {
-		names[i] = fmt.Sprint(choice)
 	}
 	is := "is not an allowed value"
 	if schemaErr.Value != "" {

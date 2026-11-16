@@ -7,24 +7,23 @@ import (
 	"context"
 	"errors"
 	"math"
-	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/version"
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 )
 
 const judgeV8Producer = "gateway.llm_judge"
 
-var judgeV8IdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
+var judgeV8IdentifierPattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
 
 type judgeTraceV8Runtime interface {
 	StartJudgeTrace(context.Context, observability.SpanGuardrailJudgeInput) (context.Context, *observabilityruntime.JudgeTrace, error)
@@ -410,7 +409,7 @@ func (operation *judgeTraceOperation) metricItem(
 			}
 			builder, err := observability.NewFamilyBuilder(
 				observability.ClockFunc(func() time.Time { return endedAt }),
-				observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+				observability.TimeOrderedOccurrenceIDs,
 			)
 			if err != nil {
 				return observability.Record{}, err

@@ -12,6 +12,8 @@ package managed
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,8 +55,21 @@ type RuntimeDescriptor struct {
 	// published through vendor machine policy, so every local user of that
 	// agent is inspected without a per-user registration.
 	MachinePolicyConnectors []string `json:"machine_policy_connectors"`
-	DisableSelfUpdate       bool     `json:"disable_self_update"`
-	InstalledAt             string   `json:"installed_at"`
+	// PolicyViewDigests pin the vendor policy bytes the lifecycle published.
+	// Unix hooks compare their own policy view with this trusted descriptor.
+	PolicyViewDigests map[string]string `json:"policy_view_digests,omitempty"`
+	// PolicyViewUserSources are the SHA-256 digests of root-read macOS
+	// per-account preferences, keyed by connector and account. A hook checks
+	// only its own account's preference, by content.
+	PolicyViewUserSources map[string]map[string]string `json:"policy_view_user_sources,omitempty"`
+	// OpenHookConnectors lists connectors whose hook fail mode the
+	// administrator's config resolves open: the `--enterprise-managed` hook
+	// runtime lets a call it cannot get a verdict for through, instead of
+	// blocking it. Every other connector fails closed. Omitted when none is
+	// open, so a closed deployment's descriptor is unchanged.
+	OpenHookConnectors []string `json:"open_hook_connectors,omitempty"`
+	DisableSelfUpdate  bool     `json:"disable_self_update"`
+	InstalledAt        string   `json:"installed_at"`
 }
 
 // ErrNoRuntimeDescriptor reports that the host has no standalone managed
@@ -81,17 +96,58 @@ func (d *RuntimeDescriptor) Validate() error {
 	if d.HookSocket != "" && !filepath.IsAbs(d.HookSocket) {
 		return fmt.Errorf("managed runtime descriptor hook_socket %q is not absolute", d.HookSocket)
 	}
-	seen := make(map[string]bool, len(d.MachinePolicyConnectors))
-	for _, name := range d.MachinePolicyConnectors {
-		if name == "" || name != strings.ToLower(strings.TrimSpace(name)) {
-			return fmt.Errorf("managed runtime descriptor connector %q is not a canonical name", name)
+	for _, list := range [][]string{d.MachinePolicyConnectors, d.OpenHookConnectors} {
+		seen := make(map[string]bool, len(list))
+		for _, name := range list {
+			if name == "" || name != strings.ToLower(strings.TrimSpace(name)) {
+				return fmt.Errorf("managed runtime descriptor connector %q is not a canonical name", name)
+			}
+			if seen[name] {
+				return fmt.Errorf("managed runtime descriptor lists connector %q twice", name)
+			}
+			seen[name] = true
 		}
-		if seen[name] {
-			return fmt.Errorf("managed runtime descriptor lists connector %q twice", name)
+	}
+	for name, digest := range d.PolicyViewDigests {
+		if !d.HasMachinePolicyConnector(name) {
+			return fmt.Errorf("managed runtime descriptor has a policy-view digest for unlisted connector %q", name)
 		}
-		seen[name] = true
+		if !validSHA256(digest) {
+			return fmt.Errorf("managed runtime descriptor has an invalid policy-view digest for %s", name)
+		}
+	}
+	for connector, accounts := range d.PolicyViewUserSources {
+		if !d.HasMachinePolicyConnector(connector) || connector != "codex" && connector != "claudecode" || len(accounts) > 128 {
+			return fmt.Errorf("managed runtime descriptor has invalid policy-view accounts for %q", connector)
+		}
+		for account, pin := range accounts {
+			if account == "" || account == "." || account == ".." || len(account) > 255 ||
+				strings.ContainsAny(account, "/\\\x00") || !validSHA256(pin) {
+				return fmt.Errorf("managed runtime descriptor has invalid %s policy-view source for account %q", connector, account)
+			}
+		}
 	}
 	return nil
+}
+
+func validSHA256(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size && strings.ToLower(value) == value
+}
+
+// HookFailMode is the hook fail mode the descriptor records for connector:
+// "open" when it is one of OpenHookConnectors, "closed" otherwise.
+func (d *RuntimeDescriptor) HookFailMode(connector string) string {
+	if d == nil {
+		return "closed"
+	}
+	connector = strings.ToLower(strings.TrimSpace(connector))
+	for _, name := range d.OpenHookConnectors {
+		if name == connector {
+			return "open"
+		}
+	}
+	return "closed"
 }
 
 // HasMachinePolicyConnector reports whether connector is published through
@@ -119,9 +175,16 @@ func MarshalRuntimeDescriptor(d *RuntimeDescriptor) ([]byte, error) {
 	canonical := *d
 	canonical.MachinePolicyConnectors = append([]string{}, d.MachinePolicyConnectors...)
 	sort.Strings(canonical.MachinePolicyConnectors)
+	if len(d.OpenHookConnectors) > 0 {
+		canonical.OpenHookConnectors = append([]string{}, d.OpenHookConnectors...)
+		sort.Strings(canonical.OpenHookConnectors)
+	}
 	data, err := json.MarshalIndent(&canonical, "", "  ")
 	if err != nil {
 		return nil, err
+	}
+	if len(data)+1 > runtimeDescriptorLimit {
+		return nil, fmt.Errorf("managed runtime descriptor exceeds %d bytes", runtimeDescriptorLimit)
 	}
 	return append(data, '\n'), nil
 }

@@ -27,6 +27,7 @@ type Proc struct {
 	UID        int
 	EUID       int
 	Exe        string // /proc/<pid>/exe, " (deleted)" removed
+	Launch     string // kernel AT_EXECFN path, when readable
 	Cwd        string
 	Cmdline    []string
 	Comm       string
@@ -50,6 +51,11 @@ type Root struct {
 	StartTicks uint64
 	Connector  string
 	Exe        string
+	// Launch is the trusted executable name observed for this session.
+	Launch string
+	// execName is the AT_EXECFN read when the root was found, trusted or
+	// not, so a later exec under another name drops the root once.
+	execName string
 	// Native roots contribute their exe path to the binaries anchor;
 	// script-hosted roots never do (that path is a shared interpreter).
 	Native bool
@@ -168,6 +174,7 @@ func (t *Tracker) Update(fsys FS, procs []Proc, installs []Install, enrollment E
 		p, ok := live[key]
 		if !ok || !p.Host || p.UID != root.UID || p.EUID != root.UID ||
 			p.Exe != root.Exe || !contains(enrollment.Connectors(root.UID), root.Connector) ||
+			(root.Native && p.Launch != root.execName) ||
 			(!root.Native && root.argvHash != commandHash(p.Cmdline)) {
 			delete(t.known, key)
 		}
@@ -187,6 +194,14 @@ func (t *Tracker) Update(fsys FS, procs []Proc, installs []Install, enrollment E
 			}
 			root := Root{UID: p.UID, PID: p.PID, StartTicks: p.StartTicks,
 				Connector: install.Connector, Exe: p.Exe, Native: native}
+			if native {
+				root.execName = p.Launch
+			}
+			if native && contains(install.NativeLaunches, p.Launch) {
+				if resolved, err := fsys.EvalSymlinks(p.Launch); err == nil && resolved == p.Exe {
+					root.Launch = p.Launch
+				}
+			}
 			if !native {
 				root.argvHash = commandHash(p.Cmdline)
 			}

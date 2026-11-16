@@ -22,3 +22,6 @@ func readStabilitySnapshot(file *os.File) (readStability, error) {
 		changed:  status.Ctim.Sec*1_000_000_000 + status.Ctim.Nsec,
 	}, nil
 }
+
+// A change-time difference during a read keeps failing the read here.
+const readStabilityRetriesMetadataChange = false

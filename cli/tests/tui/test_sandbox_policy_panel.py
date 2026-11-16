@@ -114,6 +114,14 @@ def test_the_policy_line_replaces_the_local_organization_line() -> None:
     assert SandboxesPanelModel().policy_line() == ""
 
 
+def test_provisional_default_match_names_the_directory_outage() -> None:
+    profile = dict(managed_policy_pairs({"profile": "offline-floor", "match": "default_lookup_failed"}, NOW))["Profile"]
+    assert profile == (
+        "offline-floor   matched: the default (your directory couldn't be reached; "
+        "no assignment needs the missing facts)"
+    )
+
+
 def test_policy_pairs_follow_the_plan() -> None:
     pairs = dict(managed_policy_pairs(EXPLAIN, NOW))
     assert pairs["Profile"] == "contractors   matched: your group CORP\\Contractors"
@@ -216,6 +224,12 @@ def test_off_and_busy_states_are_neutral_on_a_managed_computer() -> None:
     assert "your organization manages this setting" in off and "Setup" not in off
     gone = _model({**STATUS, "available": False, "managed": {**MANAGED, "unavailable": "OpenShell is not installed"}}).headline()
     assert gone.startswith("Sandboxes aren't available on this computer: OpenShell is not installed.")
+    # GAP-0187: the temporary setup-change notice says to retry, with no contact-IT line.
+    changing = _model(
+        {**STATUS, "available": False, "managed": {**MANAGED, "unavailable": sandbox_state.SETUP_CHANGING_NOTICE}}
+    ).headline()
+    assert changing == f"Sandboxes aren't available on this computer: {sandbox_state.SETUP_CHANGING_NOTICE}."
+    assert "exception" not in changing and "it-security@example.com" not in changing
     # Unmanaged computers keep their own advice.
     plain = SandboxesPanelModel()
     plain.set_snapshot({"enabled": False}, [], [], now=NOW)

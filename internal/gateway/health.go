@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -58,12 +59,17 @@ type observabilityV8EventHistoryObservation struct {
 	active             bool
 	lastFailureClass   string
 	lastFailurePrimary uint8
+	lastFailureAt      time.Time
 }
 
 type observabilityV8EventHistorySnapshot struct {
 	activeCode         string
 	lastFailureClass   string
 	lastFailurePrimary uint8
+	// lastFailureAt is when the last write failure happened (the recovery
+	// time of a failure episode that has ended), so a reader can tell a
+	// recent one from one long recovered (GAP-1627, GAP-1752).
+	lastFailureAt time.Time
 }
 
 type SubsystemState string
@@ -89,12 +95,12 @@ type SubsystemHealth struct {
 }
 
 // ConfigurationState is the overall daemon+guardian readiness state
-// spec 003 (docs/specs/003-windows-deferred-config/) exposes on the
+// a deferred-config managed-enterprise install exposes on the
 // health snapshot. This is distinct from the per-subsystem
 // SubsystemState above: SubsystemState reports each component's own
 // health, ConfigurationState reports the CROSS-subsystem "is the
 // managed-enterprise Windows deployment ready to accept traffic yet"
-// question that Cisco Secure Client (Workstream C) and downstream
+// question that Cisco Secure Client and downstream
 // dashboards read.
 type ConfigurationState string
 
@@ -115,8 +121,8 @@ const (
 // ConfigurationHealth is the value published under
 // HealthSnapshot.Configuration. Since tracks the moment the current
 // State value was entered — a bounded-wait indicator downstream
-// consumers can page on without needing to inspect service uptime.
-// See spec 003 REQ-19, REQ-20, REQ-21.
+// consumers can page on without needing to inspect service uptime;
+// it changes only when State changes.
 type ConfigurationHealth struct {
 	State ConfigurationState `json:"state"`
 	Since time.Time          `json:"since"`
@@ -137,6 +143,24 @@ type ConnectorHealth struct {
 	ToolInspections     int64                        `json:"tool_inspections"`
 	ToolBlocks          int64                        `json:"tool_blocks"`
 	SubprocessBlocks    int64                        `json:"subprocess_blocks"`
+	// Surfaces are the connector's product surfaces with their own live
+	// counters, keyed by surface ("cowork" on claudecode: Claude Cowork,
+	// which runs Claude Desktop's bundled Claude Code). Absent until one
+	// sends a hook event. The surface is caller-reported (the hook's
+	// X-DefenseClaw-Cowork header): these counters are attribution, never
+	// proof of coverage.
+	Surfaces map[string]ConnectorSurfaceHealth `json:"surfaces,omitempty"`
+}
+
+// ConnectorSurfaceHealth is one product surface of a connector.
+type ConnectorSurfaceHealth struct {
+	Requests       int64      `json:"requests"`
+	LastActivityAt *time.Time `json:"last_activity_at,omitempty"`
+	// LastSessionStartAt is the last SessionStart that reported the
+	// surface. Cowork runs each turn as its own short Claude Code session;
+	// like every surface counter it is caller-reported attribution, not
+	// proof that the hooks load in Cowork.
+	LastSessionStartAt *time.Time `json:"last_session_start_at,omitempty"`
 }
 
 type HealthSnapshot struct {
@@ -155,7 +179,7 @@ type HealthSnapshot struct {
 	Sandbox               *SubsystemHealth `json:"sandbox,omitempty"`
 	// Configuration is the overall daemon+guardian readiness state,
 	// distinct from the per-subsystem Config/Gateway fields above.
-	// Populated only in managed_enterprise deployments (spec 003);
+	// Populated only in managed_enterprise deployments;
 	// omitted from the payload for OSS / SaaS / DP / CP hosts so
 	// downstream consumers don't have to reason about the field for
 	// deployments where it never has meaning.
@@ -165,7 +189,7 @@ type HealthSnapshot struct {
 	// server has been started (managed_enterprise or managed.enabled).
 	Managed *SubsystemHealth `json:"managed,omitempty"`
 	// Enumerator reports the DefenseClawHookEnumerator SCM service's
-	// interval-loop state (spec 005 Workstream D). Present only on
+	// interval-loop state. Present only on
 	// Windows managed_enterprise where the enumerator service runs.
 	// The three-state signal (`starting` / `running` / `error`) lets
 	// operators see whether new user profiles will actually get
@@ -223,27 +247,39 @@ const (
 )
 
 type SidecarHealth struct {
-	mu                                    sync.RWMutex
-	gateway                               SubsystemHealth
-	watcher                               SubsystemHealth
-	config                                SubsystemHealth
-	api                                   SubsystemHealth
-	guardrail                             SubsystemHealth
-	routing                               SubsystemHealth
-	telemetry                             SubsystemHealth
-	aiDiscovery                           SubsystemHealth
-	aiRuntime                             SubsystemHealth
-	applicationProtection                 SubsystemHealth
-	sandbox                               *SubsystemHealth
-	startedAt                             time.Time
-	observabilityV8Source                 observabilityV8HealthSource
-	observabilityV8ActiveGeneration       uint64
-	observabilityV8Failures               map[string]observabilityV8FailureObservation
-	observabilityV8RetentionState         string
-	observabilityV8RetentionFailure       string
-	observabilityV8RetentionDays          int64
-	observabilityV8EventHistoryGeneration uint64
-	observabilityV8EventHistory           map[string]observabilityV8EventHistoryObservation
+	mu sync.RWMutex
+	// skippedAtStart blocks retained hook registrations until a restart can
+	// finish connector setup and publish its own policy.
+	skippedAtStart map[string]string
+	// Setup state keeps retained registrations tied to the connector's
+	// configured outage mode until setup succeeds. An absent-agent skip
+	// remains denied until this process restarts.
+	connectorSetupPending                  map[string]struct{}
+	connectorSetupFailed                   map[string]struct{}
+	gateway                                SubsystemHealth
+	watcher                                SubsystemHealth
+	config                                 SubsystemHealth
+	api                                    SubsystemHealth
+	guardrail                              SubsystemHealth
+	routing                                SubsystemHealth
+	telemetry                              SubsystemHealth
+	aiDiscovery                            SubsystemHealth
+	aiRuntime                              SubsystemHealth
+	applicationProtection                  SubsystemHealth
+	sandbox                                *SubsystemHealth
+	startedAt                              time.Time
+	observabilityV8Source                  observabilityV8HealthSource
+	observabilityV8ActiveGeneration        uint64
+	observabilityV8Failures                map[string]observabilityV8FailureObservation
+	observabilityV8RetentionState          string
+	observabilityV8RetentionFailure        string
+	observabilityV8RetentionDays           int64
+	observabilityV8RetentionMaxStoreMB     int64
+	observabilityV8RetentionStoreSizeBytes int64
+	observabilityV8RetentionStoreCapBytes  int64
+	observabilityV8RetentionCapReason      audit.RetentionCapReason
+	observabilityV8EventHistoryGeneration  uint64
+	observabilityV8EventHistory            map[string]observabilityV8EventHistoryObservation
 	// observabilityV8LastChange is when the latest event-history or
 	// destination health change happened. telemetryShownState and
 	// telemetryShownSince remember the telemetry state the last snapshot
@@ -252,14 +288,14 @@ type SidecarHealth struct {
 	telemetryShownState       SubsystemState
 	telemetryShownSince       time.Time
 	managed                   *SubsystemHealth
-	// enumerator tracks the DefenseClawHookEnumerator SCM service
-	// (spec 005 Workstream D). Nil until SetEnumerator is called at
+	// enumerator tracks the DefenseClawHookEnumerator SCM service.
+	// Nil until SetEnumerator is called at
 	// least once — a nil pointer omits the "enumerator" block from
 	// the snapshot, which is the correct behaviour for every
 	// deployment mode other than managed_enterprise on Windows.
 	enumerator *SubsystemHealth
 
-	// configuration is the collapsed daemon+guardian state (spec 003).
+	// configuration is the collapsed daemon+guardian state.
 	// Nil until SetDaemonConfigLoaded is called at least once — a
 	// nil pointer omits the top-level "configuration" block from the
 	// snapshot, which is the correct behaviour for every deployment
@@ -269,7 +305,7 @@ type SidecarHealth struct {
 	// deferred-config mode).
 	configuration *ConfigurationHealth
 	// daemonConfigLoaded is the daemon-side half of the collapsing
-	// rule (spec 003 § Data flow). SetDaemonConfigLoaded flips this
+	// rule. SetDaemonConfigLoaded flips this
 	// true when v8 config parses; it never goes false again.
 	daemonConfigLoaded bool
 	// guardianStateReader is best-effort probe wired by the daemon
@@ -285,7 +321,7 @@ type SidecarHealth struct {
 	// outside the lock if a concurrent installer has raced ahead of
 	// them. Prevents a stale StateUnknown sample from a pre-install
 	// snapshot from clobbering a fresh StateReady sample the
-	// installer already applied (CR spec-003:PRRT_kwDORuAK-s6al7aV).
+	// installer already applied.
 	guardianStateReaderEpoch uint64
 
 	interceptionReported     bool
@@ -342,6 +378,12 @@ type connectorStats struct {
 	toolInspections     atomic.Int64
 	toolBlocks          atomic.Int64
 	subprocessBlocks    atomic.Int64
+
+	// The Cowork surface of claudecode (RecordConnectorSurfaceRequestFor).
+	// One fixed surface keeps the hot path lock-free and the map bounded.
+	coworkRequests           atomic.Int64
+	coworkLastActivityAt     atomic.Int64
+	coworkLastSessionStartAt atomic.Int64
 }
 
 func (s *connectorStats) snapshot() ConnectorHealth {
@@ -373,7 +415,26 @@ func (s *connectorStats) snapshot() ConnectorHealth {
 		ToolInspections:     s.toolInspections.Load(),
 		ToolBlocks:          s.toolBlocks.Load(),
 		SubprocessBlocks:    s.subprocessBlocks.Load(),
+		Surfaces:            s.surfaceSnapshot(),
 	}
+}
+
+func (s *connectorStats) surfaceSnapshot() map[string]ConnectorSurfaceHealth {
+	// Requests before the timestamp, as in snapshot.
+	requests := s.coworkRequests.Load()
+	if requests == 0 {
+		return nil
+	}
+	surface := ConnectorSurfaceHealth{Requests: requests}
+	if unixNanos := s.coworkLastActivityAt.Load(); unixNanos > 0 {
+		at := time.Unix(0, unixNanos).UTC()
+		surface.LastActivityAt = &at
+	}
+	if unixNanos := s.coworkLastSessionStartAt.Load(); unixNanos > 0 {
+		at := time.Unix(0, unixNanos).UTC()
+		surface.LastSessionStartAt = &at
+	}
+	return map[string]ConnectorSurfaceHealth{connector.CoworkSurface: surface}
 }
 
 func (s *connectorStats) recordActivity(at time.Time) {
@@ -439,7 +500,7 @@ func (h *SidecarHealth) SetConfig(state SubsystemState, lastErr string, details 
 	h.notifySubscribers()
 }
 
-// SetDaemonConfigLoaded is the daemon-side half of the spec 003
+// SetDaemonConfigLoaded is the daemon-side half of the
 // deferred-config collapsing rule. Call once with `false` right after
 // the sidecar is constructed if the daemon is entering a
 // waiting-for-config loop, then again with `true` once v8 config
@@ -454,9 +515,9 @@ func (h *SidecarHealth) SetConfig(state SubsystemState, lastErr string, details 
 // the snapshot omits the block entirely.
 func (h *SidecarHealth) SetDaemonConfigLoaded(loaded bool) {
 	// updateConfiguration handles:
-	//   - I/O-outside-lock discipline (CR spec-003:PRRT_kwDORuAK-s6alksL)
-	//   - notify-only-on-transition (CR spec-003:PRRT_kwDORuAK-s6alksD)
-	//   - epoch CAS retry (CR spec-003:PRRT_kwDORuAK-s6al7aV)
+	//   - I/O-outside-lock discipline
+	//   - notify-only-on-transition
+	//   - epoch CAS retry
 	//
 	// The mutate callback runs under the write lock exactly once
 	// per successful attempt. Its own I/O footprint is zero: just
@@ -499,8 +560,7 @@ func (h *SidecarHealth) SetGuardianStateReader(fn func() string) {
 	h.guardianStateReader = fn
 	// Bump the epoch so ANY in-flight sampler that captured a
 	// stale reader is forced to re-sample instead of clobbering
-	// the fresh state we're applying below (CR
-	// spec-003:PRRT_kwDORuAK-s6al7aV).
+	// the fresh state we're applying below.
 	h.guardianStateReaderEpoch++
 	var changed bool
 	if h.configuration != nil {
@@ -522,10 +582,9 @@ func (h *SidecarHealth) SetGuardianStateReader(fn func() string) {
 // call is a no-op.
 func (h *SidecarHealth) RefreshConfiguration() {
 	// updateConfiguration handles the whole discipline:
-	// outside-lock guardian I/O (CR PRRT_kwDORuAK-s6alksL),
-	// notify-only-on-change (CR PRRT_kwDORuAK-s6alksD), and the
+	// outside-lock guardian I/O, notify-only-on-change, and the
 	// epoch CAS retry that catches a concurrent SetGuardianStateReader
-	// racing ahead of our sample (CR PRRT_kwDORuAK-s6al7aV).
+	// racing ahead of our sample.
 	//
 	// mutate is nil for RefreshConfiguration — the periodic tick
 	// carries no state change of its own; it only asks the collapsing
@@ -571,8 +630,7 @@ func snapshotGuardianStateFrom(reader func() string) string {
 // use the CALLER-supplied reader (which it hasn't installed yet) to
 // sample, rather than the currently-installed one.
 //
-// The compare-and-apply retry catches the race the CR flagged
-// (spec-003:PRRT_kwDORuAK-s6al7aV):
+// The compare-and-apply retry catches this race:
 //
 //	Goroutine A:                        Goroutine B:
 //	  samples reader (epoch E1) → SA
@@ -605,7 +663,7 @@ func snapshotGuardianStateFrom(reader func() string) string {
 // and this function is the opposite: it acquires h.mu itself. sync
 // mutexes aren't reentrant, so a maintainer following the file's
 // convention would deadlock on a call from an already-lock-holding
-// site. See CR spec-003:PRRT_kwDORuAK-s6amXY8.
+// site.
 func (h *SidecarHealth) updateConfiguration(mutate func()) {
 	// Fast path: if there's no configuration tracking active AND the
 	// caller has no state change to apply, skip the guardian file
@@ -614,7 +672,6 @@ func (h *SidecarHealth) updateConfiguration(mutate func()) {
 	// ticker still runs — without this bail-out, every tick would
 	// pointlessly open + read the guardian .state file (or return
 	// StateUnknown from a nil reader) and then discard the result.
-	// See CR spec-003:PRRT_kwDORuAK-s6amXYx.
 	if mutate == nil {
 		h.mu.RLock()
 		inactive := h.configuration == nil
@@ -662,13 +719,13 @@ func (h *SidecarHealth) updateConfiguration(mutate func()) {
 
 // recomputeConfigurationLocked applies the collapsing rule; caller
 // holds h.mu (write lock) and passes the already-read guardian state
-// so the recompute never performs I/O under the lock (CR
-// spec-003:PRRT_kwDORuAK-s6alksL).
+// so the recompute never performs I/O under the lock.
 //
-// Order (spec 003 § Data flow):
+// Order:
 //  1. Daemon not loaded ⇒ waiting_for_config, regardless of guardian.
-//     This lets AC-12 pass: if UCB drops targets.yaml first, the
-//     daemon still says waiting_for_config until config.yaml lands.
+//     If UCB drops targets.yaml first, the daemon still says
+//     waiting_for_config until config.yaml lands, then goes straight
+//     to ready.
 //  2. Daemon loaded, guardian state = StateReady ⇒ ready.
 //  3. Daemon loaded, guardian state = StateWaitingForTargets or
 //     StateUnknown (missing / unreadable / malformed file, OR no
@@ -677,10 +734,10 @@ func (h *SidecarHealth) updateConfiguration(mutate func()) {
 //
 // Since only advances when the collapsed state actually changes,
 // so a snapshot taken 30s into a wait returns the SAME Since as
-// one taken at the wait's start (spec 003 AC-08).
+// one taken at the wait's start.
 //
 // The switch below compares against `guardianstate` package
-// constants (CR spec-003:PRRT_kwDORuAK-s6alksT) so a rename or
+// constants so a rename or
 // reshaping of the state vocabulary is caught by the compiler,
 // not by a silent fall-through to the default branch.
 func (h *SidecarHealth) recomputeConfigurationLocked(guardianState string) {
@@ -792,6 +849,93 @@ func (h *SidecarHealth) SetGuardrail(state SubsystemState, lastErr string, detai
 	}
 	h.mu.Unlock()
 	h.notifySubscribers()
+}
+
+func (h *SidecarHealth) markConnectorSkippedAtStart(name, reason string) {
+	h.mu.Lock()
+	if h.skippedAtStart == nil {
+		h.skippedAtStart = make(map[string]string)
+	}
+	h.skippedAtStart[connName(name)] = reason
+	h.mu.Unlock()
+}
+
+func (h *SidecarHealth) connectorSkippedAtStartReason(name string) string {
+	if h == nil {
+		return ""
+	}
+	h.mu.RLock()
+	reason := h.skippedAtStart[connName(name)]
+	h.mu.RUnlock()
+	return reason
+}
+
+func (h *SidecarHealth) beginConnectorSetup(names []string) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.connectorSetupPending == nil {
+		h.connectorSetupPending = make(map[string]struct{}, len(names))
+	}
+	for _, name := range names {
+		if key := connName(name); key != "" {
+			h.connectorSetupPending[key] = struct{}{}
+			delete(h.connectorSetupFailed, key)
+		}
+	}
+	h.mu.Unlock()
+}
+
+func (h *SidecarHealth) finishConnectorSetup(succeeded, failed []string) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	for _, name := range succeeded {
+		delete(h.connectorSetupPending, connName(name))
+		delete(h.connectorSetupFailed, connName(name))
+	}
+	if h.connectorSetupFailed == nil {
+		h.connectorSetupFailed = make(map[string]struct{}, len(failed))
+	}
+	for _, name := range failed {
+		key := connName(name)
+		delete(h.connectorSetupPending, key)
+		h.connectorSetupFailed[key] = struct{}{}
+	}
+	h.mu.Unlock()
+}
+
+type connectorHookAdmissionState uint8
+
+const (
+	connectorHookReady connectorHookAdmissionState = iota
+	connectorHookPending
+	connectorHookFailed
+	connectorHookSkipped
+)
+
+func (h *SidecarHealth) connectorHookAdmission(name string) (string, connectorHookAdmissionState) {
+	if h == nil {
+		return "", connectorHookReady
+	}
+	key := connName(name)
+	h.mu.RLock()
+	skipped := h.skippedAtStart[key] != ""
+	_, pending := h.connectorSetupPending[key]
+	_, failed := h.connectorSetupFailed[key]
+	h.mu.RUnlock()
+	if skipped {
+		return fmt.Sprintf("the %s agent is not installed for this account; reinstall it and run defenseclaw-gateway restart, or run defenseclaw setup remove %s", key, key), connectorHookSkipped
+	}
+	if pending {
+		return fmt.Sprintf("%s connector setup is pending; wait for the gateway to finish or run defenseclaw-gateway restart", key), connectorHookPending
+	}
+	if failed {
+		return fmt.Sprintf("%s connector setup did not finish; check defenseclaw-gateway status and restart after correcting it", key), connectorHookFailed
+	}
+	return "", connectorHookReady
 }
 
 // RecordInterceptionResult stores the plugin's sentinel self-test.
@@ -996,17 +1140,34 @@ func validObservabilityV8FailureCode(code string) bool {
 	}
 }
 
-func (h *SidecarHealth) setObservabilityV8Retention(state string, days int64, failure string) {
-	if h == nil || days < 0 || !validObservabilityV8RetentionState(state) ||
-		!validObservabilityV8RetentionFailure(failure) {
+func (h *SidecarHealth) setObservabilityV8Retention(status observabilityruntime.RetentionControllerStatus) {
+	state, failure := string(status.State), string(status.Failure)
+	if h == nil || status.RetentionDays < 0 || status.MaxStoreMB < 0 ||
+		status.MaxStoreMB > audit.RetentionMaxStoreMB ||
+		!validObservabilityV8RetentionState(state) || !validObservabilityV8RetentionFailure(failure) {
 		return
 	}
 	h.mu.Lock()
 	h.observabilityV8RetentionState = state
-	h.observabilityV8RetentionDays = days
+	h.observabilityV8RetentionDays = status.RetentionDays
 	h.observabilityV8RetentionFailure = failure
+	h.observabilityV8RetentionMaxStoreMB = status.MaxStoreMB
+	h.observabilityV8RetentionStoreSizeBytes = 0
+	h.observabilityV8RetentionStoreCapBytes = 0
+	h.observabilityV8RetentionCapReason = ""
+	if state == "warning" && status.StoreCapBytes == status.MaxStoreMB<<20 &&
+		status.StoreSizeBytes > status.StoreCapBytes && status.StoreCapBytes > 0 &&
+		validObservabilityV8RetentionCapReason(status.CapReason) {
+		h.observabilityV8RetentionStoreSizeBytes = status.StoreSizeBytes
+		h.observabilityV8RetentionStoreCapBytes = status.StoreCapBytes
+		h.observabilityV8RetentionCapReason = status.CapReason
+	}
 	h.mu.Unlock()
 	h.notifySubscribers()
+}
+
+func validObservabilityV8RetentionCapReason(reason audit.RetentionCapReason) bool {
+	return reason == audit.RetentionCapActiveCorrelation || reason == audit.RetentionCapRetainedHistory
 }
 
 func validObservabilityV8RetentionFailure(failure string) bool {
@@ -1046,10 +1207,17 @@ func (h *SidecarHealth) observeObservabilityV8EventHistory(
 		generation: transition.Generation, sequence: transition.Sequence,
 		active:           transition.State == audit.EventHistoryHealthFailed,
 		lastFailureClass: current.lastFailureClass, lastFailurePrimary: current.lastFailurePrimary,
+		lastFailureAt: current.lastFailureAt,
 	}
 	if observation.active && transition.Code == audit.EventHistoryHealthWriteFailed {
 		observation.lastFailureClass = string(transition.SQLiteClass)
 		observation.lastFailurePrimary = transition.SQLitePrimaryCode
+		observation.lastFailureAt = transition.OccurredAt
+	} else if current.active && transition.Code == audit.EventHistoryHealthWriteFailed {
+		// The audit store reports one failed transition per episode, so the
+		// writes kept failing until this recovery: the last failed write was
+		// just before it, not at the start of the episode (GAP-1752).
+		observation.lastFailureAt = transition.OccurredAt
 	}
 	h.observabilityV8EventHistory[code] = observation
 	h.noteObservabilityV8ChangeLocked(transition.OccurredAt)
@@ -1109,6 +1277,7 @@ func snapshotObservabilityV8EventHistory(
 	if write.generation != 0 && write.generation <= generation {
 		result.lastFailureClass = write.lastFailureClass
 		result.lastFailurePrimary = write.lastFailurePrimary
+		result.lastFailureAt = write.lastFailureAt
 	}
 	for code, observation := range observations {
 		if observation.generation == 0 || observation.generation > generation || !observation.active ||
@@ -1138,7 +1307,7 @@ func validObservabilityV8EventHistoryFailure(code string) bool {
 
 func validObservabilityV8RetentionState(state string) bool {
 	switch state {
-	case "waiting_for_readiness", "healthy", "degraded", "disabled", "stopped":
+	case "waiting_for_readiness", "healthy", "warning", "degraded", "disabled", "stopped":
 		return true
 	default:
 		return false
@@ -1218,8 +1387,7 @@ func (h *SidecarHealth) SetManaged(state SubsystemState, lastErr string, details
 }
 
 // SetEnumerator records the current state of the
-// DefenseClawHookEnumerator SCM service's interval loop (spec 005
-// Workstream D). Called from the enumerator CLI subcommand as it
+// DefenseClawHookEnumerator SCM service's interval loop. Called from the enumerator CLI subcommand as it
 // moves through:
 //
 //   - Starting: service just booted, initial-cycle-delay running.
@@ -1231,11 +1399,11 @@ func (h *SidecarHealth) SetManaged(state SubsystemState, lastErr string, details
 //     reason. The interval loop keeps ticking; the state flips back
 //     to Running on the next successful cycle.
 //
-// T5.1 wiring status: the enumerator CLI and the sidecar live in
+// Wiring status: the enumerator CLI and the sidecar live in
 // separate processes, so SetEnumerator cannot be called across that
 // boundary directly. The follow-up work is to (1) have the enumerator
 // CLI atomically publish `.enumerator-state` alongside every cycle
-// (mirroring spec 003's guardianstate JSON), and (2) plumb a
+// (mirroring the guardianstate JSON), and (2) plumb a
 // SetEnumeratorStateReader callback on SidecarHealth that the daemon
 // wires to a file-watching poller which translates the on-disk record
 // into SetEnumerator invocations. Both halves belong in a coordinated
@@ -1257,7 +1425,7 @@ func (h *SidecarHealth) SetManaged(state SubsystemState, lastErr string, details
 // reference to the input map cannot mutate the stored subsystem
 // health after the call returns — Snapshot() then serves an equally
 // independent copy so a JSON marshal path and a live setter cannot
-// race on the same map. See CR spec-005:PRRT_kwDORuAK-s6atyfQ.
+// race on the same map.
 func (h *SidecarHealth) SetEnumerator(state SubsystemState, lastErr string, details map[string]interface{}) {
 	if h == nil {
 		return
@@ -1275,13 +1443,11 @@ func (h *SidecarHealth) SetEnumerator(state SubsystemState, lastErr string, deta
 
 // cloneSubsystemDetails deep-copies the top-level map, every nested
 // map[string]interface{}, and the common slice / typed-map values that
-// health-detail callers actually emit today (spec 005 D1 introduced
-// []string / []int for cycle-counter and per-target flavor fields
-// alongside the flat primitives + nested map[string]interface{} shapes
-// the prior generation carried). A shallow copy of these types would
-// let a Snapshot() consumer mutate the internal slice header and
-// race against a subsequent Set* call — the T5.4 finding was that
-// spec-005's CR round 1 fix stopped short of handling those.
+// health-detail callers actually emit today ([]string / []int for
+// cycle-counter and per-target flavor fields alongside the flat
+// primitives + nested map[string]interface{} shapes). A shallow copy
+// of these types would let a Snapshot() consumer mutate the internal
+// slice header and race against a subsequent Set* call.
 //
 // Types not covered here fall through to a value-copy of the interface
 // header; the invariant callers must respect is: any type passed as a
@@ -1562,6 +1728,22 @@ func (h *SidecarHealth) RecordConnectorRequestFor(name string) {
 	stats.requests.Add(1)
 }
 
+// RecordConnectorSurfaceRequestFor records one accepted hook event (by its
+// native name) of a connector's product surface. Only the Cowork surface is
+// counted; any other value is ignored.
+func (h *SidecarHealth) RecordConnectorSurfaceRequestFor(name, surface, event string) {
+	if surface != connector.CoworkSurface {
+		return
+	}
+	stats := h.statsFor(name)
+	now := time.Now()
+	if event == "SessionStart" {
+		recordLatestTimestamp(&stats.coworkLastSessionStartAt, now)
+	}
+	recordLatestTimestamp(&stats.coworkLastActivityAt, now)
+	stats.coworkRequests.Add(1)
+}
+
 // RecordConnectorLoadHeartbeatFor records proof that a connector's managed
 // bridge actually loaded. File presence alone cannot distinguish a live
 // OpenCode plugin from --pure/external-plugin-disabled operation.
@@ -1610,7 +1792,7 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 		Managed:               h.managed,
 		// Enumerator is deep-cloned so a caller mutating the returned
 		// pointer's Details map cannot race with a concurrent
-		// SetEnumerator. See CR spec-005:PRRT_kwDORuAK-s6atyfQ.
+		// SetEnumerator.
 		Enumerator: cloneSubsystemHealth(h.enumerator),
 	}
 	// Deep-copy the configuration pointer under the read lock so a
@@ -1630,6 +1812,10 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 	retentionState := h.observabilityV8RetentionState
 	retentionFailure := h.observabilityV8RetentionFailure
 	retentionDays := h.observabilityV8RetentionDays
+	retentionMaxStoreMB := h.observabilityV8RetentionMaxStoreMB
+	retentionStoreSizeBytes := h.observabilityV8RetentionStoreSizeBytes
+	retentionStoreCapBytes := h.observabilityV8RetentionStoreCapBytes
+	retentionCapReason := h.observabilityV8RetentionCapReason
 	eventHistoryGeneration := h.observabilityV8EventHistoryGeneration
 	eventHistoryObservations := make(
 		map[string]observabilityV8EventHistoryObservation,
@@ -1709,6 +1895,17 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 				snap.Telemetry.Since,
 				retentionState, retentionFailure, retentionDays, eventHistory,
 			)
+		}
+		if _, reported := snap.Telemetry.Details["retention_days"]; reported && retentionMaxStoreMB > 0 {
+			// The size cap goes with the retention it bounds (GAP-0141).
+			snap.Telemetry.Details["retention_max_store_mb"] = retentionMaxStoreMB
+		}
+		if retentionState == "warning" && retentionStoreCapBytes == retentionMaxStoreMB<<20 &&
+			retentionStoreSizeBytes > retentionStoreCapBytes && retentionStoreCapBytes > 0 &&
+			validObservabilityV8RetentionCapReason(retentionCapReason) {
+			snap.Telemetry.Details["retention_cap_used_bytes"] = retentionStoreSizeBytes
+			snap.Telemetry.Details["retention_cap_bytes"] = retentionStoreCapBytes
+			snap.Telemetry.Details["retention_cap_reason"] = string(retentionCapReason)
 		}
 		snap.Telemetry.Since = h.telemetrySince(snap.Telemetry.State, snap.Telemetry.Since)
 	}
@@ -1838,6 +2035,9 @@ func renderObservabilityV8Health(
 			row["queue"] = renderObservabilityV8Queue(*destination.Queue, destination.Counters)
 		}
 		row["counters"] = renderObservabilityV8Counters(destination.Counters)
+		if destination.MetricExportsScoped {
+			row["counters_scope"] = "log and trace records; metric export attempts are counted only in signal_health"
+		}
 		queueRows := make([]map[string]interface{}, 0, len(destination.Sources))
 		signalRows := make([]map[string]interface{}, 0, len(destination.Sources))
 		for _, source := range destination.Sources {
@@ -2028,6 +2228,9 @@ func appendObservabilityV8EventHistoryDetails(
 		details["event_history_last_sqlite_class"] = eventHistory.lastFailureClass
 		if eventHistory.lastFailurePrimary != 0 {
 			details["event_history_last_sqlite_primary_code"] = eventHistory.lastFailurePrimary
+		}
+		if !eventHistory.lastFailureAt.IsZero() {
+			details["event_history_last_failure_at"] = eventHistory.lastFailureAt.UTC().Format(time.RFC3339Nano)
 		}
 	}
 }

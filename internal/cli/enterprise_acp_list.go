@@ -126,6 +126,9 @@ func describeEnterpriseACPEnrollment(enrollment acp.EnterpriseEnrollment) enterp
 	row.Created = row.Created.Truncate(time.Second)
 	row.Note = enterpriseACPCentralNote(enrollment.ClientID, enrollment.AgentID, enrollment.Profile)
 	account, err := enterpriseACPDescribePrincipal(enrollment.Principal)
+	if err != nil && strings.HasPrefix(enrollment.Principal, "home:") {
+		account, err = enterpriseACPDescribeHomePrincipal(enrollment.Principal, enrollment.UserDataDir)
+	}
 	switch {
 	case err != nil:
 		return row
@@ -154,6 +157,9 @@ func describeEnterpriseACPEnrollment(enrollment acp.EnterpriseEnrollment) enterp
 		// the user ran setup there (GAP-0869).
 		movedFrom, dataDir = dataDir, filepath.Join(home, ".defenseclaw")
 	}
+	// Report the directory whose setup state this row actually inspects.
+	// The protected enrollment still retains the original path until re-enroll.
+	row.UserDataDir = dataDir
 	tokenPath, err := acp.EnterpriseUserTokenPath(dataDir, enrollment.ClientID, enrollment.AgentID)
 	if err != nil {
 		return row
@@ -178,9 +184,13 @@ func describeEnterpriseACPEnrollment(enrollment acp.EnterpriseEnrollment) enterp
 		}
 		return nil
 	})
-	if movedFrom != "" && (row.TokenCopy != "present" || row.Setup != "done") && row.Note == "" {
-		row.Note = fmt.Sprintf("the enrolled data directory %s is outside the home %s (was the account renamed?); "+
-			"have the user run setup in %s, or enroll the user again", movedFrom, account.home, dataDir)
+	if movedFrom != "" {
+		message := fmt.Sprintf("the enrolled data directory %s is outside the home %s (was the account renamed?); "+
+			"inspected %s instead", movedFrom, account.home, dataDir)
+		if row.Setup != "done" || row.TokenCopy != "present" {
+			message += "; have the user run setup there, or enroll the user again"
+		}
+		row.Note = strings.TrimSpace(row.Note + " " + message)
 	}
 	return row
 }

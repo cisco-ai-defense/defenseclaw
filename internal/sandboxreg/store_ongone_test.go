@@ -81,7 +81,8 @@ func TestFileStoreOnGoneSeesEveryWayARegistrationGoes(t *testing.T) {
 	expect("revoke a foreign sandbox", ids[2])
 
 	// Two tombstones (ids[0], ids[2]) and one more pending entry: a fourth
-	// entry evicts the oldest tombstone.
+	// entry evicts the foreign tombstone. The policy tombstone keeps its
+	// final telemetry window even though it is older.
 	if err := s.Create(1001, pending(t)); err != nil {
 		t.Fatal(err)
 	}
@@ -89,5 +90,8 @@ func TestFileStoreOnGoneSeesEveryWayARegistrationGoes(t *testing.T) {
 	if err := s.Create(1001, pending(t)); err != nil {
 		t.Fatal(err)
 	}
-	expect("create evicting a tombstone", ids[0])
+	expect("create evicting a tombstone", ids[2])
+	if reg, ok, err := s.Get(1001, ids[0]); err != nil || !ok || reg.State != StateRevoked {
+		t.Fatalf("the policy tombstone lost its final window: %+v %v %v", reg, ok, err)
+	}
 }

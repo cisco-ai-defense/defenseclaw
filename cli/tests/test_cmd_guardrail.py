@@ -20,8 +20,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -52,6 +55,10 @@ def make_ctx(*, enabled: bool = True, connector: str = "openclaw",
         model=model,
         hook_fail_mode=hook_fail_mode,
     )
+    guardrail_cfg.effective_hook_outage_fail_mode = lambda connector="": guardrail_cfg.hook_fail_mode
+    guardrail_cfg._managed_outage_install = lambda: False
+    guardrail_cfg.hook_fail_mode_resolution = lambda connector="": (guardrail_cfg.hook_fail_mode, "config:guardrail.hook_fail_mode")
+    guardrail_cfg.hook_policy_tier = lambda connector="": "default"
     cfg = SimpleNamespace(
         guardrail=guardrail_cfg,
         data_dir="/tmp/dc",
@@ -108,23 +115,32 @@ class ResolveActiveConnectorTests(unittest.TestCase):
         cfg.active_connector = lambda: (_ for _ in ()).throw(RuntimeError("x"))
         self.assertEqual(cmd_guardrail._resolve_active_connector(cfg), "zeptoclaw")
 
-    def test_none_cfg_defaults_to_openclaw(self):
-        self.assertEqual(cmd_guardrail._resolve_active_connector(None), "openclaw")
+    def test_none_cfg_has_no_connector(self):
+        self.assertEqual(cmd_guardrail._resolve_active_connector(None), "")
 
     def test_resolve_member_connector_accepts_aliases(self):
         app = make_ctx(enabled=True, connector="codex")
         app.cfg.guardrail.connectors = {
             "claudecode": SimpleNamespace(),
-            "openhands": SimpleNamespace(),
         }
         self.assertEqual(
             cmd_guardrail._resolve_member_connector(app, "claude-code"),
             "claudecode",
         )
-        self.assertEqual(
-            cmd_guardrail._resolve_member_connector(app, "open-hands"),
-            "openhands",
-        )
+
+
+def _native_deny_state(connector: str, runtime: str):
+    from defenseclaw.fail_mode import ConnectorFailModeState, upstream_hook_limit
+
+    return ConnectorFailModeState(
+        connector=connector,
+        desired="closed",
+        configured="closed",
+        runtime=runtime,
+        sources=(("config", "closed"), ("hook-script", runtime)),
+        drift=() if runtime == "closed" else (f"hook-script-{runtime}",),
+        limit=upstream_hook_limit(connector),
+    )
 
 
 class StatusCommandTests(unittest.TestCase):
@@ -147,6 +163,9 @@ class StatusCommandTests(unittest.TestCase):
         self.assertIn("Codex", result.output)
         self.assertIn("codex", result.output)
         self.assertIn("Enable with", result.output)
+        as_json = runner.invoke(cmd_guardrail.status_cmd, ["--json"], obj=app)
+        self.assertEqual(as_json.exit_code, 0, as_json.output)
+        self.assertIsNone(json.loads(as_json.output)["connectors"][0]["fail_mode"])
 
     def test_status_surfaces_hook_fail_mode(self):
         runner = CliRunner()
@@ -160,9 +179,11 @@ class StatusCommandTests(unittest.TestCase):
         self.assertIn("Fail", result.output)
         self.assertIn("closed", result.output)
 
-    def test_status_hermes_reports_upstream_fail_open_not_configured_closed(self):
+    def test_status_secure_client_hermes_reports_upstream_fail_open_not_configured_closed(self):
+        # Under Secure Client the Hermes hook fails open whatever is configured.
         runner = CliRunner()
         app = make_ctx(enabled=True, connector="hermes", hook_fail_mode="closed")
+        app.cfg.deployment_mode = "managed_enterprise"
         result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("Hermes", result.output)
@@ -170,18 +191,40 @@ class StatusCommandTests(unittest.TestCase):
         self.assertIn("upstream-enforced fail-open", result.output)
         self.assertIn("configured provenance: closed", result.output)
 
-    def test_status_copilot_reports_upstream_fail_open_in_text_and_json(self):
-        # GAP-1246: guardrail status said "closed" while status said open.
+    def test_status_hermes_reports_the_configured_mode_on_every_os(self):
+        # GAP-0150 (Linux, macOS) and GAP-0269 (Windows): the per-user Hermes
+        # hook blocks in fail mode closed.
+        for windows in (False, True):
+            runner = CliRunner()
+            app = make_ctx(enabled=True, connector="hermes", hook_fail_mode="closed")
+            with patch("defenseclaw.fail_mode._is_windows", return_value=windows):
+                result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertNotIn("upstream-enforced fail-open", result.output)
+            self.assertIn("closed", result.output)
+
+    def test_status_copilot_reports_its_rendered_mode_in_text_and_json(self):
+        # A per-user Copilot hook follows its fail mode; text and JSON agree
+        # (GAP-1246) and name the vendor limit of a closed hook. Under Secure
+        # Client it stays upstream fail-open.
         runner = CliRunner()
+        with patch("defenseclaw.commands.cmd_guardrail.resolve_connector_fail_mode",
+                   return_value=_native_deny_state("copilot", "closed")):
+            app = make_ctx(enabled=True, connector="copilot", hook_fail_mode="closed")
+            result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertNotIn("upstream-enforced fail-open", result.output)
+            self.assertIn("Copilot itself lets a call run when the hook times out or cannot start", result.output)
+            app = make_ctx(enabled=True, connector="copilot", hook_fail_mode="closed")
+            result = runner.invoke(cmd_guardrail.status_cmd, ["--json"], obj=app)
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertIn('"fail_mode": "closed"', result.output)
+            self.assertNotIn('"fail_mode": "open"', result.output)
         app = make_ctx(enabled=True, connector="copilot", hook_fail_mode="closed")
+        app.cfg.deployment_mode = "managed_enterprise"
         result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("upstream-enforced fail-open", result.output)
-        app = make_ctx(enabled=True, connector="copilot", hook_fail_mode="closed")
-        result = runner.invoke(cmd_guardrail.status_cmd, ["--json"], obj=app)
-        self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn('"fail_mode": "open"', result.output)
-        self.assertNotIn('"fail_mode": "closed"', result.output)
 
     def test_secure_client_status_keeps_main_enabled_and_warnings(self):
         from defenseclaw.commands import cmd_status
@@ -212,7 +255,85 @@ class StatusCommandTests(unittest.TestCase):
         result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("action mode with fail mode open", result.output)
+        # The open is saved, and a saved mode wins over the strict policy
+        # (GAP-0039): the hint names fail-mode closed.
         self.assertIn("defenseclaw guardrail fail-mode closed", result.output)
+        self.assertNotIn("use-pack strict", result.output)
+
+    def test_status_shows_a_proxy_connector_by_its_outage_behaviour(self):
+        # GAP-1646, GAP-0824: ZeptoClaw model requests are refused while the gateway is down; OpenClaw
+        # follows the outage mode (here a saved open). Neither warns that "its hooks allow calls".
+        for connector, want in (("zeptoclaw", "closed"), ("openclaw", "open")):
+            app = make_ctx(enabled=True, connector=connector, hook_fail_mode="open")
+            app.cfg.guardrail.mode = "action"
+            result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertNotIn("with fail mode open", result.output)
+            self.assertNotIn("hooks allow calls", result.output)
+            result = CliRunner().invoke(cmd_guardrail.status_cmd, ["--json"], obj=app)
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertIn(f'"fail_mode": "{want}"', result.output)
+            other = "open" if want == "closed" else "closed"
+            self.assertNotIn(f'"fail_mode": "{other}"', result.output)
+
+    def test_status_flags_fail_open_connector_an_action_profile_enforces(self):
+        # GAP-1282: base mode observe, a guardrail profile puts the connector
+        # in action mode for its accounts, fail mode open.
+        from defenseclaw.config import GuardrailProfile, PerConnectorGuardrailConfig
+
+        for profile in (
+            GuardrailProfile(mode="action"),
+            GuardrailProfile(connectors={"kiro": PerConnectorGuardrailConfig(mode="action")}),
+        ):
+            app = make_ctx(enabled=True, connector="kiro", hook_fail_mode="open")
+            app.cfg.guardrail.mode = "observe"
+            app.cfg.guardrail.profiles = {"engineering": profile}
+            with patch("defenseclaw.gateway.current_user_guardrail_profile", return_value=None):
+                result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertIn("action mode for guardrail profile(s) engineering with fail mode open", result.output)
+            self.assertIn("defenseclaw guardrail fail-mode closed", result.output)  # saved open (GAP-0039)
+        # A profile that keeps observe (or sets action for another connector)
+        # adds no warning.
+        app = make_ctx(enabled=True, connector="kiro", hook_fail_mode="open")
+        app.cfg.guardrail.profiles = {
+            "ops": GuardrailProfile(mode="action", connectors={"kiro": PerConnectorGuardrailConfig(mode="observe")}),
+            "dev": GuardrailProfile(connectors={"codex": PerConnectorGuardrailConfig(mode="action")}),
+        }
+        with patch("defenseclaw.gateway.current_user_guardrail_profile", return_value=None):
+            result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertNotIn("with fail mode open", result.output)
+
+    def test_fail_mode_view_reports_antigravity_and_copilot_rendered_mode(self):
+        # The view says what their hooks render: closed with the vendor
+        # limit, or the drift when a hook still renders open. Under Secure
+        # Client they stay upstream fail-open (GAP-0336).
+        for connector, label in (("antigravity", "Antigravity"), ("copilot", "Copilot")):
+            app = make_ctx(enabled=True, connector=connector, hook_fail_mode="closed")
+            # The strict tier, whose outage mode is closed (oss-outage-open).
+            app.cfg.guardrail.hook_policy_tier = lambda _name: "strict"
+            app.cfg.guardrail.effective_hook_fail_mode = lambda _name: "closed"
+            with patch("defenseclaw.commands.cmd_guardrail.resolve_connector_fail_mode",
+                       return_value=_native_deny_state(connector, "closed")):
+                result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            row = next(line for line in result.output.splitlines() if f"({connector}):" in line)
+            self.assertIn(
+                f"closed (strict tier; DefenseClaw failures block; {label} itself lets a call run when the hook "
+                "times out or cannot start)", row)
+            self.assertNotIn("remains fail-open", result.output)
+            with patch("defenseclaw.commands.cmd_guardrail.resolve_connector_fail_mode",
+                       return_value=_native_deny_state(connector, "open")):
+                result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
+            row = next(line for line in result.output.splitlines() if f"({connector}):" in line)
+            self.assertIn("(installed open; drift: hook-script-open)", row)
+            del app.cfg.guardrail.hook_policy_tier
+            del app.cfg.guardrail.effective_hook_fail_mode
+            app.cfg.deployment_mode = "managed_enterprise"
+            result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
+            row = next(line for line in result.output.splitlines() if f"({connector}):" in line)
+            self.assertIn("upstream; configured provenance: closed", row)
+            self.assertIn("remains fail-open", result.output)
 
     def test_status_single_connector_uses_uniform_per_connector_block(self):
         # A single-connector install renders the SAME per-connector block
@@ -301,6 +422,8 @@ class FailModeCommandTests(unittest.TestCase):
     def test_show_current_value_open(self):
         runner = CliRunner()
         app = make_ctx(enabled=True, hook_fail_mode="open")
+        app.cfg.deployment_mode = "managed_enterprise"
+        app.cfg.managed_outside_secure_client = lambda: True
         result = runner.invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("guardrail.hook_fail_mode: open", result.output)
@@ -315,12 +438,15 @@ class FailModeCommandTests(unittest.TestCase):
         app = make_ctx(enabled=True, hook_fail_mode="closed")
         result = runner.invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("guardrail.hook_fail_mode: closed", result.output)
-        self.assertIn("BLOCK", result.output)
+        # The status explains both explicit choices and the unset tier rule.
+        self.assertIn("gateway outage: saved choice or policy tier", result.output)
+        self.assertIn("strict blocks it", " ".join(result.output.split()))
+        self.assertIn("defenseclaw guardrail fail-mode closed", result.output)
 
-    def test_single_connector_observe_mode_names_the_mode_switch(self):
-        # GAP-1341: --connector is refused on a single-connector install, and
-        # observe mode is what keeps the hooks fail-open.
+    def test_single_connector_observe_mode_outside_secure_client_names_the_fail_mode_fix(self):
+        # B-01 (owner rule): outside Secure Client observe mode never keeps a
+        # hook fail-open; an open hook is closed with fail-mode, not a mode
+        # switch.
         runner = CliRunner()
         app = make_ctx(enabled=True, connector="claudecode", hook_fail_mode="closed")
         app.cfg.guardrail.connectors = {}
@@ -330,18 +456,22 @@ class FailModeCommandTests(unittest.TestCase):
         with patch("defenseclaw.commands.cmd_guardrail.resolve_connector_fail_mode", return_value=state):
             result = runner.invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("observe mode keeps hooks fail-open", result.output)
-        self.assertIn("defenseclaw guardrail mode action", result.output)
-        self.assertNotIn("--connector <name>", result.output)
+        self.assertNotIn("observe mode keeps hooks fail-open", result.output)
+        # The default tier's open is the rule, not drift to close.
+        self.assertIn("Claude Code (claudecode): open (default tier)", result.output)
+        self.assertNotIn("Still fail-open", result.output)
 
-    def test_show_hermes_closed_provenance_reports_effective_open(self):
-        runner = CliRunner()
-        app = make_ctx(enabled=True, connector="hermes", hook_fail_mode="closed")
-        result = runner.invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
-        self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("guardrail.hook_fail_mode: closed", result.output)
-        self.assertIn("Hermes (hermes): open (Hermes upstream", result.output)
-        self.assertIn("Hermes remains fail-open", result.output)
+    def test_show_hermes_closed_is_closed_on_every_os(self):
+        # GAP-0150 (Linux, macOS) and GAP-0269 (Windows): no upstream
+        # fail-open claim, the hook blocks.
+        for windows in (False, True):
+            runner = CliRunner()
+            app = make_ctx(enabled=True, connector="hermes", hook_fail_mode="closed")
+            with patch("defenseclaw.fail_mode._is_windows", return_value=windows):
+                result = runner.invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertNotIn("Hermes upstream", result.output)
+            self.assertNotIn("Hermes remains fail-open", result.output)
 
     def test_closed_view_omits_hermes_when_not_configured(self):
         # GAP-2116: the Hermes sentence only shows when Hermes is configured.
@@ -349,7 +479,7 @@ class FailModeCommandTests(unittest.TestCase):
         app = make_ctx(enabled=True, connector="codex", hook_fail_mode="closed")
         result = runner.invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("that are closed above.", result.output)
+        self.assertIn("follows the policy tier", result.output)
         self.assertNotIn("Hermes", result.output)
 
     def test_set_closed_omits_hermes_when_not_configured(self):
@@ -358,7 +488,7 @@ class FailModeCommandTests(unittest.TestCase):
         with patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"):
             result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("native fail-closed surface.", result.output)
+        self.assertIn("A gateway outage will now BLOCK supported calls.", result.output)
         self.assertNotIn("Hermes", result.output)
 
     def test_set_open_to_closed_persists_and_restarts(self):
@@ -566,14 +696,21 @@ class EnableCommandTests(unittest.TestCase):
         self.assertEqual(kwargs.get("connector"), "codex")
 
     def test_enable_aborts_when_no_model_configured(self):
-        runner = CliRunner()
-        app = make_ctx(enabled=False, connector="openclaw", model="", llm_model="")
-        result = runner.invoke(cmd_guardrail.enable_cmd, ["--yes"], obj=app)
-        self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("guardrail.model is not set", result.output)
-        # Must NOT silently flip enabled to True.
-        self.assertFalse(app.cfg.guardrail.enabled)
-        app.cfg.save.assert_not_called()
+        docs = Path(__file__).resolve().parents[2] / "docs-site/content/docs/connectors"
+        for connector in ("openclaw", "zeptoclaw"):
+            runner = CliRunner()
+            app = make_ctx(enabled=False, connector=connector, model="", llm_model="")
+            result = runner.invoke(cmd_guardrail.enable_cmd, ["--yes"], obj=app)
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("Cannot enable: guardrail.model is not set.", result.output)
+            # Must NOT silently flip enabled to True.
+            self.assertFalse(app.cfg.guardrail.enabled)
+            app.cfg.save.assert_not_called()
+            # The page turns it back on with what works (GAP-0667).
+            page = " ".join((docs / f"{connector}.mdx").read_text(encoding="utf-8").split())
+            self.assertNotIn("Turn it back on with `defenseclaw guardrail enable`", page)
+            self.assertIn(f"Turn it back on by running the Set up command again, for example `defenseclaw setup {connector} ", page)
+            self.assertIn("`Cannot enable: guardrail.model is not set.`", page)
 
     def test_enable_hook_connector_without_model(self):
         # GAP-1562: hook connectors were enabled by init without a model,
@@ -636,6 +773,64 @@ def make_multi_ctx(connectors, *, enabled: bool = True):
     return app
 
 
+def test_amp_open_preview_and_help_scope_failure_rows_to_per_user_outages() -> None:
+    """An eligible per-user Amp outage is recorded; managed and sandbox calls are not."""
+    app = make_multi_ctx({"amp": None, "codex": None})
+    app.cfg.guardrail.hook_fail_mode = "closed"
+    state = SimpleNamespace(
+        desired="closed", current=True, runtime="closed", effective="closed", drift=(), limit=None,
+    )
+    with (
+        patch.object(cmd_guardrail, "resolve_connector_fail_mode", return_value=state),
+        patch.object(cmd_guardrail, "_apply_scoped_fail_mode_transaction"),
+        patch.object(cmd_guardrail, "_apply_global_fail_mode_transaction"),
+        patch.object(cmd_guardrail, "_log_guardrail_action"),
+    ):
+        scoped = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["open", "--connector", "amp", "--yes"], obj=app)
+        global_result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["open", "--yes"], obj=app)
+    for result in (scoped, global_result):
+        assert result.exit_code == 0, result.output
+        assert "Amp" in result.output
+        assert "per-user" in result.output and "hook-failures.jsonl" in result.output
+        assert "guardrail-degraded" in result.output
+    help_result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["--help"])
+    assert help_result.exit_code == 0, help_result.output
+    assert "Amp" in help_result.output and "per-user" in help_result.output
+    assert "hook-failures.jsonl" in help_result.output
+    page = (Path(__file__).resolve().parents[2] / "docs-site/content/docs/reference/fail-modes.mdx")
+    page_text = page.read_text(encoding="utf-8")
+    reporting = page_text.split("## Reporting and diagnosis", 1)[1]
+    assert "Amp plugin writes a record only for a call an outage let run" in reporting
+    assert "guardrail-degraded" in reporting
+    assert "managed and sandbox Amp plugins write no record" in reporting
+    for prefix in (
+        # fix/r104-oss-outage-open wording: an explicit saved mode wins, else the tier.
+        "On a per-user install, an explicit saved `guardrail.hook_fail_mode` selects the outage mode",
+        "| `default` (balanced",
+        "| Gateway service not running",
+    ):
+        line = next(line for line in page_text.splitlines() if line.startswith(prefix))
+        assert "hook-failures.jsonl" in line, line
+        assert "except for Amp" not in line and "Amp has no such writer" not in line, line
+    stop_events = page_text.split("### Stop and session-end events", 1)[1].split("### ", 1)[0]
+    assert "[gateway outage table](/docs/connectors/capability-matrix#gateway-outage)" in stop_events
+
+
+def test_per_user_amp_outage_open_template_records_an_actionable_call() -> None:
+    source = (Path(__file__).resolve().parents[2] / "internal/gateway/connector/hooks/amp-plugin.ts").read_text(
+        encoding="utf-8"
+    )
+    branch = source.split("if (await perUserOutageOpen(error)) {", 1)[1].split("\n\t\t\t\t}", 1)[0]
+    # logFailOpen takes the call's payload (session and call ids) (fix/r104-oss-outage-open signature).
+    assert branch.index('if (actionable) await logFailOpen("gateway unreachable", payload)') < branch.index(
+        'return { action: "allow"'
+    )
+    writer = source.split("async function logFailOpen(", 1)[1].split("async function perUserGatewayDownText", 1)[0]
+    # A call the plugin blocks is recorded closed (GAP-1236); an outage call is open.
+    for field in ('"hook-failures.jsonl"', 'connector: "amp"', 'fail_mode: closed ? "closed" : "open"', 'outcome: closed ? "fail_closed" : "fail_open"'):
+        assert field in writer
+
+
 class PerConnectorToggleTests(unittest.TestCase):
     """`guardrail {enable,disable} --connector X` — scoped per-connector."""
 
@@ -656,6 +851,33 @@ class PerConnectorToggleTests(unittest.TestCase):
         restart_mock.assert_called_once()
         self.assertEqual(restart_mock.call_args.kwargs.get("connector"), "codex")
 
+    def test_enable_one_connector_after_global_disable_says_run_enable(self):
+        # GAP-0550: after `setup guardrail --disable` this said "Connector
+        # Codex is already enabled." and left every agent off.
+        runner = CliRunner()
+        for own in (None, False):
+            app = make_multi_ctx({"codex": own, "claudecode": None}, enabled=False)
+            with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock:
+                result = runner.invoke(
+                    cmd_guardrail.enable_cmd, ["--connector", "codex", "--yes"], obj=app
+                )
+            self.assertEqual(result.exit_code, 1, msg=result.output)
+            self.assertNotIn("already enabled", result.output)
+            out = " ".join(result.output.split())
+            # The global enable keeps a connector disabled on its own off, so
+            # that case names both steps in order.
+            steps = (
+                "'defenseclaw guardrail enable', then 'defenseclaw guardrail enable --connector codex'"
+                if own is False
+                else "'defenseclaw guardrail enable' to turn it back on"
+            )
+            self.assertIn(f"Run {steps}", out)
+            self.assertIn("nothing was changed", out)
+            self.assertFalse(app.cfg.guardrail.enabled)
+            self.assertEqual(app.cfg.guardrail.connectors["codex"].enabled, own)
+            app.cfg.save.assert_not_called()
+            restart_mock.assert_not_called()
+
     def test_enable_one_connector_flips_back(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": False, "claudecode": None})
@@ -666,6 +888,46 @@ class PerConnectorToggleTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertTrue(app.cfg.guardrail.effective_enabled("codex"))
         app.cfg.save.assert_called_once()
+
+    def test_enable_one_connector_that_the_gateway_cannot_set_up_stays_disabled(self):
+        """GAP-1534: a readiness failure left the flag enabled with the hooks torn
+        down, and the retry said 'already enabled'. The flag goes back to
+        disabled, and the retry runs the setup again."""
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": False, "claudecode": None})
+        failure = click.ClickException("gateway restart/readiness failed for: connector runtime readiness")
+        with patch("defenseclaw.commands.cmd_setup._restart_services", side_effect=failure):
+            result = runner.invoke(cmd_guardrail.enable_cmd, ["--connector", "codex", "--yes"], obj=app)
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertFalse(app.cfg.guardrail.effective_enabled("codex"))
+        self.assertIn("stays disabled", " ".join(result.output.split()))
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart:
+            result = runner.invoke(cmd_guardrail.enable_cmd, ["--connector", "codex", "--yes"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertNotIn("already enabled", result.output)
+        restart.assert_called_once()
+        self.assertTrue(app.cfg.guardrail.effective_enabled("codex"))
+
+    def test_enable_one_connector_refuses_a_malformed_shared_hook_sidecar(self):
+        """GAP-1816: enable saved the flag and returned 0 over a malformed
+        hooks/.hookcfg; it now runs setup's check first and changes nothing."""
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": False, "claudecode": None})
+        refusal = "Codex: the shared hook config is malformed. Nothing was changed"
+        with (
+            patch("defenseclaw.commands.cmd_setup._agent_settings_refusal", return_value=refusal) as check,
+            patch("defenseclaw.commands.cmd_setup._restart_services") as restart,
+        ):
+            result = runner.invoke(
+                cmd_guardrail.enable_cmd, ["--connector", "codex", "--yes", "--no-restart"], obj=app
+            )
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertIn("malformed", result.output)
+        self.assertFalse(app.cfg.guardrail.effective_enabled("codex"))
+        app.cfg.save.assert_not_called()
+        restart.assert_not_called()
+        self.assertEqual(check.call_args.args[1], "codex")
+        self.assertFalse(check.call_args.kwargs["will_restart"])
 
     def test_enable_one_connector_verifies_its_agent_first_and_waits_for_the_gateway(self):
         """Windows refuses a connector it holds no verified agent executable for, and
@@ -912,9 +1174,10 @@ class PerConnectorToggleTests(unittest.TestCase):
         app.cfg.guardrail.connectors["codex"].hilt = dcconfig.HILTConfig(
             enabled=True, min_severity="LOW"
         )
-        app.cfg.guardrail.custom_packs["protected-copilot"] = dcconfig.CustomRulePack(
-            path="/packs/protected-copilot/default"
-        )
+        pack_dir = os.path.join(tempfile.mkdtemp(), "protected-copilot", "default")
+        os.makedirs(pack_dir)
+        self.addCleanup(shutil.rmtree, os.path.dirname(os.path.dirname(pack_dir)), ignore_errors=True)
+        app.cfg.guardrail.custom_packs["protected-copilot"] = dcconfig.CustomRulePack(path=pack_dir)
         app.cfg.guardrail.connectors["copilot"].rule_pack = "protected-copilot"
         app.cfg.guardrail.block_at = "HIGH"
         with patch("defenseclaw.commands.cmd_guardrail._terminal_width", return_value=200):  # the table layout
@@ -970,9 +1233,10 @@ class CursorModePostureTests(unittest.TestCase):
                 cmd_guardrail.mode_cmd, ["action", "--connector", "cursor"], obj=app
             )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("cursor"), "closed")
-        self.assertEqual(app.cfg.guardrail.connectors["cursor"].hook_fail_mode, "closed")
-        restart.assert_called_once()
+        # The guardrail mode no longer pins Cursor's fail mode: its outage
+        # mode follows the policy tier (here the saved open's default tier).
+        self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("cursor"), "open")
+        self.assertEqual(app.cfg.guardrail.connectors["cursor"].hook_fail_mode, "open")
 
 
 class PerConnectorFailModeTests(unittest.TestCase):
@@ -984,6 +1248,37 @@ class PerConnectorFailModeTests(unittest.TestCase):
         patcher = patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=True)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # Transaction snapshots include agent config. Never snapshot or restore
+        # a developer's real ~/.codex or ~/.claude during rollback tests.
+        import tempfile
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        environment = patch.dict(os.environ, {"HOME": directory.name, "USERPROFILE": directory.name})
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def test_per_user_explicit_choice_overrides_the_tier(self):
+        # Both global and connector-scoped user choices win over the tier.
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        app.cfg.guardrail.hook_fail_mode = "closed"
+        runner = CliRunner()
+        result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["open", "--yes", "--no-restart"], obj=app)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("claudecode"), "open")
+        scoped = make_multi_ctx({"codex": None, "claudecode": None})
+        scoped.cfg.guardrail.hook_fail_mode = "closed"
+        scoped.cfg.guardrail.connectors["codex"].rule_pack = "strict"
+        result = runner.invoke(
+            cmd_guardrail.fail_mode_cmd,
+            ["open", "--connector", "codex", "--yes", "--no-restart"], obj=scoped,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(scoped.cfg.guardrail.effective_hook_fail_mode("codex"), "open")
+        self.assertEqual(scoped.cfg.guardrail.effective_hook_fail_mode("claudecode"), "closed")
+        self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("claudecode"), "open")
+        app.cfg.save.assert_called_once()
+        scoped.cfg.save.assert_called_once()
 
     def test_set_one_connector_closed_persists_and_restarts_only_it(self):
         runner = CliRunner()
@@ -998,7 +1293,8 @@ class PerConnectorFailModeTests(unittest.TestCase):
                 obj=app,
             )
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        # Only codex gets the override; claudecode keeps the global default.
+        # Only codex gets the override; claudecode keeps the global default
+        # (open, the default tier).
         self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("codex"), "closed")
         self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("claudecode"), "open")
         # Global default is untouched.
@@ -1015,7 +1311,14 @@ class PerConnectorFailModeTests(unittest.TestCase):
             cmd_guardrail.fail_mode_cmd, ["--connector", "codex"], obj=app
         )
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("unknown", result.output)
+        if os.name == "nt":
+            # The native Windows hook reads its mode from hooks/.hookcfg alone
+            # and fails closed without it (readHookSidecar), so that is the
+            # installed mode, reported with the missing sidecar as drift.
+            self.assertIn("hook_fail_mode: closed", result.output)
+            self.assertIn("windows-sidecar-missing", result.output)
+        else:
+            self.assertIn("unknown", result.output)
         self.assertIn("desired closed", result.output)
         self.assertIn("override", result.output)
         app.cfg.save.assert_not_called()
@@ -1030,20 +1333,26 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertIn("inherited", result.output)
         app.cfg.save.assert_not_called()
 
-    def test_show_hermes_value_reports_upstream_fail_open(self):
+    def test_show_secure_client_hermes_value_reports_upstream_fail_open(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "hermes": None})
+        app.cfg.deployment_mode = "managed_enterprise"
         app.cfg.guardrail.connectors["hermes"].hook_fail_mode = "closed"
         result = runner.invoke(
             cmd_guardrail.fail_mode_cmd, ["--connector", "hermes"], obj=app
         )
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("open (Hermes upstream; failures cannot be made fail-closed)", result.output)
+        self.assertIn(
+            "open (Hermes upstream; failures cannot be made fail-closed; configured provenance: closed)",
+            result.output,
+        )
         self.assertIn("per-connector override", result.output)
 
-    def test_set_hermes_closed_warns_that_runtime_remains_open(self):
+    def test_set_secure_client_hermes_closed_warns_that_runtime_remains_open(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "hermes": None})
+        app.cfg.deployment_mode = "managed_enterprise"
+        app.cfg.guardrail._secure_client = True
         with patch(
             "defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"
         ):
@@ -1057,16 +1366,149 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertIn("Hermes will remain fail-open", result.output)
         self.assertNotIn("will now BLOCK Hermes", result.output)
 
-    def test_connector_flag_rejected_on_single_connector_install(self):
+    def test_set_hermes_closed_on_linux_and_macos_blocks_gateway_failures(self):
+        # GAP-0150: closed applies to the Linux and macOS Hermes hook.
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "hermes": None})
+        with patch(
+            "defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"
+        ), patch("defenseclaw.fail_mode._is_windows", return_value=False):
+            result = runner.invoke(
+                cmd_guardrail.fail_mode_cmd,
+                ["closed", "--connector", "hermes", "--yes"],
+                obj=app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertNotIn("Hermes will remain fail-open", result.output)
+        self.assertIn("will now BLOCK supported Hermes calls", result.output)
+        self.assertIn("hook times out", result.output)
+
+    def test_set_native_deny_connector_closed_names_its_native_deny(self):
+        # Review round 3: closed Copilot and Antigravity hooks block with the
+        # agent's own deny and exit 0; the guidance said they exit 2.
+        expected = {
+            "copilot": "Copilot's own deny for preToolUse and permissionRequest",
+            "antigravity": "Antigravity's PreToolUse deny ({\"decision\":\"deny\"})",
+            "codex": "will exit 2 from this connector's hooks",
+        }
+        for connector, signal in expected.items():
+            with self.subTest(connector=connector):
+                app = make_multi_ctx({"claudecode": None, connector: None})
+                with patch(
+                    "defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"
+                ), patch("defenseclaw.fail_mode._is_windows", return_value=False):
+                    result = CliRunner().invoke(
+                        cmd_guardrail.fail_mode_cmd,
+                        ["closed", "--connector", connector, "--yes"],
+                        obj=app,
+                    )
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+                output = " ".join(result.output.split())
+                self.assertIn(signal, output)
+                if connector != "codex":
+                    self.assertNotIn("exit 2", output)
+                    self.assertIn("exits 0", output)
+                    self.assertIn("hook times out", output)
+
+    def test_per_connector_closed_for_copilot_and_antigravity_is_provenance_not_a_block(self):
+        # 1.0.4 review (loop round 2): under Secure Client their hooks render
+        # open under closed, so the setter must not promise a block or an
+        # exit 2, and the view must say upstream fail-open, as the unscoped
+        # view, status and doctor do (GAP-0336). Per-user hooks follow the
+        # closed mode (w3-g3-hooks), see the per-user test below.
+        for connector, label in (("copilot", "GitHub Copilot CLI"), ("antigravity", "Antigravity")):
+            with self.subTest(connector=connector):
+                runner = CliRunner()
+                app = make_multi_ctx({"codex": None, connector: None})
+                app.cfg.deployment_mode = "managed_enterprise"
+                app.cfg.managed_outside_secure_client = lambda: False
+                with patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"):
+                    result = runner.invoke(
+                        cmd_guardrail.fail_mode_cmd,
+                        ["closed", "--connector", connector, "--yes"],
+                        obj=app,
+                    )
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+                self.assertEqual(app.cfg.guardrail.connectors[connector].hook_fail_mode, "closed")
+                self.assertIn(f"{label} will remain fail-open", result.output)
+                self.assertIn("stored only as requested policy provenance", result.output)
+                self.assertIn(f"{label} has no fail-closed hook contract", result.output)
+                self.assertNotIn("BLOCK", result.output)
+                self.assertNotIn("exit 2", result.output)
+
+                result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["--connector", connector], obj=app)
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+                self.assertIn(
+                    f"open ({label} upstream; failures cannot be made fail-closed; configured provenance: closed)",
+                    result.output,
+                )
+
+    def test_per_connector_closed_for_a_managed_standalone_copilot_still_blocks(self):
+        # Outside Secure Client a managed Copilot blocks through its native
+        # deny, so it is not upstream fail-open there and the block warning
+        # stays.
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "copilot": None})
+        app.cfg.managed_outside_secure_client = lambda: True
+        with patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"):
+            result = runner.invoke(
+                cmd_guardrail.fail_mode_cmd,
+                ["closed", "--connector", "copilot", "--yes"],
+                obj=app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("will now BLOCK supported GitHub Copilot CLI calls", result.output)
+        self.assertNotIn("will remain fail-open", result.output)
+
+    def test_bare_closed_names_every_upstream_fail_open_connector(self):
+        # The unscoped setter named only Hermes; under Secure Client Copilot
+        # and Antigravity stay fail-open too.
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "copilot": None, "antigravity": None})
+        app.cfg.deployment_mode = "managed_enterprise"
+        app.cfg.managed_outside_secure_client = lambda: False
+        with (
+            patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=False),
+            patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"),
+        ):
+            result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("BLOCK supported connectors", result.output)
+        self.assertIn("Antigravity, GitHub Copilot CLI remain fail-open.", result.output)
+
+    def test_bare_closed_per_user_names_no_upstream_fail_open_connector(self):
+        # Per user, Copilot and Antigravity follow the closed mode
+        # (w3-g3-hooks), so the unscoped setter names none of them as
+        # remaining fail-open (hooks-upg loop 2 with the T3 train).
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "copilot": None, "antigravity": None})
+        with patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"):
+            result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("BLOCK supported calls", result.output)
+        self.assertNotIn("remain fail-open", result.output)
+
+    def test_bare_closed_on_a_copilot_only_install_is_provenance_not_a_block(self):
+        runner = CliRunner()
+        app = make_ctx(enabled=True, connector="copilot", hook_fail_mode="open")
+        app.cfg.deployment_mode = "managed_enterprise"
+        app.cfg.managed_outside_secure_client = lambda: False
+        result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes", "--no-restart"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("GitHub Copilot CLI will remain fail-open; closed is stored only", result.output)
+        self.assertNotIn("BLOCK", result.output)
+
+    def test_other_connector_flag_rejected_on_single_connector_install(self):
         runner = CliRunner()
         app = make_ctx(enabled=True, connector="codex")
         result = runner.invoke(
             cmd_guardrail.fail_mode_cmd,
-            ["closed", "--connector", "codex", "--yes"],
+            ["closed", "--connector", "kiro", "--yes"],
             obj=app,
         )
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("multi-connector", result.output)
+        self.assertIn("Installed connector: codex", result.output)
 
     def test_unknown_connector_errors(self):
         runner = CliRunner()
@@ -1101,6 +1543,8 @@ class PerConnectorFailModeTests(unittest.TestCase):
     def test_bare_set_open_reconciles_closed_connector_override(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "cursor": None})
+        app.cfg.deployment_mode = "managed_enterprise"
+        app.cfg.guardrail._secure_client = True
         app.cfg.guardrail.hook_fail_mode = "open"
         app.cfg.guardrail.connectors["cursor"].hook_fail_mode = "closed"
         state = SimpleNamespace(current=True, drift=())
@@ -1126,10 +1570,7 @@ class PerConnectorFailModeTests(unittest.TestCase):
             {"codex", "cursor"},
         )
 
-    def test_bare_set_open_keeps_cursor_action_fail_closed(self):
-        # GAP-1432: Cursor's action mode pins its hooks fail-closed (as
-        # `setup cursor` writes them). Storing open left doctor failing
-        # "inconsistent Cursor posture" until `setup cursor --yes --restart`.
+    def test_bare_set_open_is_saved_on_per_user_action_cursor(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "cursor": None})
         app.cfg.guardrail.hook_fail_mode = "closed"
@@ -1144,14 +1585,13 @@ class PerConnectorFailModeTests(unittest.TestCase):
             result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["open", "--yes"], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertEqual(app.cfg.guardrail.connectors["codex"].hook_fail_mode, "open")
-        self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("cursor"), "closed")
-        self.assertIn("stays closed", result.output)
-        self.assertIn("1 connector overrides = open; Cursor stays closed)", result.output)
-
-        result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["open", "--connector", "cursor", "--yes"], obj=app)
-        self.assertEqual(result.exit_code, 1, msg=result.output)
-        self.assertIn("guardrail mode observe --connector cursor", result.output)
-        self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("cursor"), "closed")
+        self.assertEqual(app.cfg.guardrail.connectors["cursor"].hook_fail_mode, "open")
+        self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("cursor"), "open")
+        output = " ".join(result.output.split())
+        self.assertIn("A gateway outage will now ALLOW", output)
+        # Rounds g and h: open never covers an accepted call without an answer
+        # (test_fail_mode_open_wording.py has the full wording).
+        self.assertIn("a gateway that takes the call but does not answer in time still block", output)
 
     def test_confirm_refuses_when_output_is_piped(self):
         # GAP-1432: `fail-mode open 2>&1 | tail` hid the prompt in the pipe
@@ -1160,6 +1600,8 @@ class PerConnectorFailModeTests(unittest.TestCase):
 
         runner = CliRunner()
         app = make_multi_ctx({"codex": None})
+        app.cfg.deployment_mode = "managed_enterprise"
+        app.cfg.managed_outside_secure_client = lambda: True
         app.cfg.guardrail.hook_fail_mode = "closed"
         app.cfg.guardrail.connectors["codex"].hook_fail_mode = "closed"
         state = SimpleNamespace(current=True, drift=(), desired="closed")
@@ -1176,10 +1618,13 @@ class PerConnectorFailModeTests(unittest.TestCase):
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "cursor": None})
         app.cfg.guardrail.hook_fail_mode = "open"
-        with patch(
-            "defenseclaw.commands.cmd_setup._restart_services",
-            side_effect=[OSError("reload failed"), None],
-        ) as restart_mock:
+        with (
+            patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"),
+            patch(
+                "defenseclaw.commands.cmd_setup._restart_services",
+                side_effect=[OSError("reload failed"), None],
+            ) as restart_mock,
+        ):
             result = runner.invoke(
                 cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app
             )
@@ -1193,6 +1638,8 @@ class PerConnectorFailModeTests(unittest.TestCase):
     def test_connector_open_clears_dormant_closed_override_in_observe_mode(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "claudecode": None})
+        app.cfg.deployment_mode = "managed_enterprise"
+        app.cfg.guardrail._secure_client = True
         app.cfg.guardrail.connectors["codex"].hook_fail_mode = "closed"
         with patch(
             "defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"
@@ -1227,8 +1674,213 @@ class PerConnectorFailModeTests(unittest.TestCase):
         app.cfg.save.assert_not_called()
 
 
+def _fake_hilt_preview(base_mode: str, profiles: dict | None = None, calls: list | None = None):
+    """A stand-in for the gateway's connector hilt-preview answer.
+
+    *profiles* maps a profile name to ``(mode, own_hilt)``, where *own_hilt*
+    is ``None`` when the profile follows the connector's HILT block, else the
+    ``(enabled, min_severity)`` of its own.
+    """
+    from defenseclaw.config_inspect import ConnectorHILTPreview, HILTPreviewScope
+
+    def fake(connector, *, enabled, min_severity, config_path, gateway_binary=None):
+        if calls is not None:
+            calls.append((connector, enabled, min_severity, config_path))
+        scopes = []
+        for name, (mode, own_hilt) in sorted((profiles or {}).items()):
+            own_enabled, own_min = own_hilt if own_hilt is not None else (enabled, min_severity)
+            scopes.append(HILTPreviewScope(name, mode, own_enabled, own_min, own_hilt is None))
+        base = HILTPreviewScope("", base_mode, enabled, min_severity, True)
+        return ConnectorHILTPreview(connector, base, tuple(scopes))
+
+    return fake
+
+
 class HILTCommandTests(unittest.TestCase):
     """`guardrail hilt [on|off] [--min-severity X] [--connector Y]`."""
+
+    def setUp(self):
+        # The per-connector preview asks the gateway binary; no test reaches
+        # an installed one.
+        from defenseclaw.config_inspect import ConfigInspectError
+
+        patcher = patch(
+            "defenseclaw.config_inspect.connector_hilt_preview",
+            side_effect=ConfigInspectError("defenseclaw-gateway is not installed; run defenseclaw upgrade"),
+        )
+        self.hilt_preview = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_connector_preview_explains_effective_observe_mode(self):
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        app.cfg.guardrail.mode = "action"
+        app.cfg.guardrail.connectors["claudecode"].mode = "observe"
+        self.hilt_preview.side_effect = _fake_hilt_preview("observe")
+        result = CliRunner().invoke(
+            cmd_guardrail.hilt_cmd, ["on", "--connector", "claudecode"], obj=app, input="n\n",
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("observe mode", result.output)
+        self.assertIn("does not pause actions for approval", result.output)
+        self.assertNotIn("will prompt for approval", result.output)
+        app.cfg.save.assert_not_called()
+
+        app.cfg.guardrail.connectors["claudecode"].mode = "action"
+        self.hilt_preview.side_effect = _fake_hilt_preview("action")
+        result = CliRunner().invoke(
+            cmd_guardrail.hilt_cmd, ["on", "--connector", "claudecode"], obj=app, input="n\n",
+        )
+        self.assertIn("will prompt for approval", result.output)
+
+    def test_connector_preview_uses_the_gateway_hook_mode(self):
+        """A legacy claude_code.mode: action wins over an observe guardrail mode (gateway precedence)."""
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        app.cfg.guardrail.mode = "observe"
+        app.cfg.guardrail.connectors["claudecode"].mode = "observe"
+        calls: list = []
+        # What the gateway resolves for this config.yaml plus claude_code.mode: action.
+        self.hilt_preview.side_effect = _fake_hilt_preview("action", calls=calls)
+        result = CliRunner().invoke(
+            cmd_guardrail.hilt_cmd,
+            ["on", "--min-severity", "medium", "--connector", "Claude-Code"],
+            obj=app,
+            input="n\n",
+        )
+        out = " ".join(result.output.split())
+        self.assertIn("Claude Code will prompt for approval on supported confirmable actions at/above MEDIUM", out)
+        self.assertNotIn("does not pause", out)
+        # The command passes the normalized path (backslashes on Windows).
+        config_path = os.path.normpath(os.path.join("/tmp/dc", "config.yaml"))
+        self.assertEqual(calls, [("claudecode", True, "MEDIUM", config_path)])
+        app.cfg.save.assert_not_called()
+
+        self.hilt_preview.side_effect = _fake_hilt_preview("action")
+        result = CliRunner().invoke(
+            cmd_guardrail.hilt_cmd, ["off", "--connector", "claudecode"], obj=app, input="n\n",
+        )
+        self.assertIn("Claude Code will NOT prompt", result.output)
+
+    def test_connector_preview_promises_nothing_without_the_gateway(self):
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        app.cfg.guardrail.connectors["claudecode"].mode = "action"
+        result = CliRunner().invoke(
+            cmd_guardrail.hilt_cmd, ["on", "--connector", "claudecode"], obj=app, input="n\n",
+        )
+        out = " ".join(result.output.split())
+        self.assertIn("Could not resolve Claude Code's hook mode with the gateway", out)
+        self.assertIn("defenseclaw guardrail profile explain --user <name> --connector claudecode", out)
+        self.assertNotIn("will prompt for approval", out)
+        self.assertNotIn("does not pause", out)
+        app.cfg.save.assert_not_called()
+
+    def test_connector_preview_names_action_mode_profiles(self):
+        """An observe connector still prompts accounts a profile puts in action mode."""
+        from defenseclaw.config import GuardrailProfile, HILTConfig, PerConnectorGuardrailConfig
+
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        gc = app.cfg.guardrail
+        gc.profiles = {
+            "ops": GuardrailProfile(mode="action"),
+            "dev": GuardrailProfile(connectors={"claude-code": PerConnectorGuardrailConfig(mode="action")}),
+            "own": GuardrailProfile(mode="action", hilt=HILTConfig(enabled=False)),
+            "own-conn": GuardrailProfile(
+                connectors={"claudecode": PerConnectorGuardrailConfig(mode="action", hilt=HILTConfig())}
+            ),
+            "codex-only": GuardrailProfile(connectors={"codex": PerConnectorGuardrailConfig(mode="action")}),
+            "quiet": GuardrailProfile(mode="action", connectors={"claudecode": PerConnectorGuardrailConfig(mode="observe")}),
+        }
+        # The gateway's answer for those profiles.
+        self.hilt_preview.side_effect = _fake_hilt_preview(
+            "observe",
+            {
+                "ops": ("action", None),
+                "dev": ("action", None),
+                "own": ("action", (False, "HIGH")),
+                "own-conn": ("action", (False, "")),
+                "codex-only": ("observe", None),
+                "quiet": ("observe", None),
+            },
+        )
+        result = CliRunner().invoke(
+            cmd_guardrail.hilt_cmd,
+            ["on", "--min-severity", "MEDIUM", "--connector", "claudecode"],
+            obj=app,
+            input="n\n",
+        )
+        out = " ".join(result.output.split())
+        self.assertIn("does not pause actions for approval", out)
+        self.assertIn(
+            "Guardrail profile(s) dev, ops put Claude Code in action mode: their accounts will be prompted "
+            "for approval on confirmable actions at/above MEDIUM",
+            out,
+        )
+        self.assertIn("Guardrail profile(s) own, own-conn set their own HILT policy", out)
+        self.assertNotIn("codex-only", out)
+        self.assertNotIn("quiet", out)
+        app.cfg.save.assert_not_called()
+
+        result = CliRunner().invoke(
+            cmd_guardrail.hilt_cmd, ["off", "--connector", "claudecode"], obj=app, input="n\n",
+        )
+        out = " ".join(result.output.split())
+        self.assertIn("Guardrail profile(s) dev, ops put Claude Code in action mode: their accounts will NOT be prompted", out)
+
+    def test_connector_preview_names_observe_mode_profiles(self):
+        """An action connector does not prompt accounts a profile puts in observe mode."""
+        from defenseclaw.config import GuardrailProfile
+
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        gc = app.cfg.guardrail
+        gc.connectors["claudecode"].mode = "action"
+        gc.profiles = {
+            "audit": GuardrailProfile(mode="observe"),
+            "same": GuardrailProfile(mode="action"),
+            "plain": GuardrailProfile(block_at="HIGH"),
+        }
+        self.hilt_preview.side_effect = _fake_hilt_preview(
+            "action", {"audit": ("observe", None), "same": ("action", None), "plain": ("action", None)}
+        )
+        result = CliRunner().invoke(
+            cmd_guardrail.hilt_cmd, ["on", "--connector", "claudecode"], obj=app, input="n\n",
+        )
+        out = " ".join(result.output.split())
+        self.assertIn("Claude Code will prompt for approval", out)
+        self.assertIn(
+            "Guardrail profile(s) audit put Claude Code in observe mode: their accounts are not paused for approval.",
+            out,
+        )
+        self.assertNotIn("same", out)
+        self.assertNotIn("plain", out)
+        self.assertNotIn("in action mode:", out)
+
+    def test_copilot_enable_notice_matches_effective_mode(self):
+        runner = CliRunner()
+        for global_mode, copilot_mode, secure_client, expected in (
+            ("observe", "action", False, "denied and audited as block (raw_action=confirm)"),
+            ("action", "observe", False, "observe mode"),
+            ("observe", "action", True, "Secure Client will prompt for approval"),
+        ):
+            with self.subTest(global_mode=global_mode, copilot_mode=copilot_mode, secure_client=secure_client):
+                app = make_multi_ctx({"copilot": None, "codex": None})
+                app.cfg.guardrail.mode = global_mode
+                app.cfg.guardrail.connectors["copilot"].mode = copilot_mode
+                # The train's preview reads the hook mode from the gateway.
+                self.hilt_preview.side_effect = _fake_hilt_preview(copilot_mode)
+                with (
+                    patch.object(cmd_guardrail, "_report_hot_hilt"),
+                    patch.object(cmd_guardrail.asset_lists, "is_secure_client", return_value=secure_client),
+                    patch("defenseclaw.commands.cmd_setup._restart_services"),
+                ):
+                    result = runner.invoke(
+                        cmd_guardrail.hilt_cmd,
+                        ["on", "--min-severity", "HIGH", "--connector", "copilot", "--yes"],
+                        obj=app,
+                    )
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+                self.assertIn(expected, result.output)
+                if copilot_mode == "action" and not secure_client:
+                    self.assertNotIn("produce alerts", result.output)
+                app.cfg.save.assert_called_once()
 
     def test_show_global_when_no_args(self):
         runner = CliRunner()
@@ -1409,6 +2061,45 @@ class HILTCommandTests(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("not configured", result.output)
         app.cfg.save.assert_not_called()
+
+
+    def test_documented_default_reset_turns_human_approval_off(self):
+        # GAP-0544: reference/policy/defaults.mdx "go back to the defaults"
+        # must also clear a per-connector override from `setup guardrail
+        # --connector X --human-approval`.
+        import re
+        from pathlib import Path
+
+        from defenseclaw import config as dcconfig
+        from defenseclaw.commands import cmd_setup
+
+        page = Path(__file__).resolve().parents[2] / "docs-site/content/docs/policies/defaults.mdx"
+        block = re.search(r"go back to the defaults:\n\n```bash\n(.*?)```", page.read_text(), re.S)
+        self.assertIsNotNone(block)
+        app = make_multi_ctx({"claudecode": None})
+        gc = app.cfg.guardrail
+        gc.hilt = dcconfig.HILTConfig(enabled=True, min_severity="HIGH")
+        gc.connectors["claudecode"].hilt = dcconfig.HILTConfig(enabled=True, min_severity="HIGH")
+        for line in block[1].splitlines():
+            args = line.split()[1:]
+            if args[:2] == ["setup", "guardrail"]:
+                self.assertNotIn("--connector", args)
+                approval = {"--human-approval": True, "--no-human-approval": False}
+                cmd_setup._apply_guardrail_extra_options(
+                    gc,
+                    rule_pack=None,
+                    human_approval=next((approval[a] for a in args if a in approval), None),
+                    hilt_min_severity=None,
+                )
+            elif args[:2] == ["guardrail", "hilt"]:
+                result = CliRunner().invoke(cmd_guardrail.hilt_cmd, args[2:], obj=app, input="")
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+            else:
+                # `policy activate` does not copy a preset's hilt section.
+                self.assertEqual(args[:2], ["policy", "activate"], msg=line)
+        self.assertFalse(gc.effective_hilt("claudecode").enabled)
+        flag_doc = page.parents[1] / "guardrail/index.mdx"
+        self.assertIn("Without --connector it changes only the global guardrail.hilt", flag_doc.read_text())
 
 
 class BlockMessageCommandTests(unittest.TestCase):

@@ -218,3 +218,48 @@ func TestInFlightWaitQuiescent(t *testing.T) {
 		t.Fatalf("cancelled wait = %v", err)
 	}
 }
+
+// A delivery receipt confirms an answer the hook bucket already admitted, so
+// it has a bucket and concurrency slots of its own, the hook bucket's size
+// (rel-1-0-6 GAP-0490).
+func TestLimiterReceiptsHaveTheirOwnBudget(t *testing.T) {
+	clock := newTestClock()
+	l := NewLimiter(LimiterConfig{HookRPS: 1, HookBurst: 2, MaxInFlight: 1, Now: clock.Now})
+	a := Binding{ID: "sb_a"}
+	receipt := func() error {
+		release, err := l.AcquireReceipt(a)
+		if err == nil {
+			release()
+		}
+		return err
+	}
+	admit(t, l, a, RouteHook)
+	admit(t, l, a, RouteHook)
+	refuse(t, l, a, RouteHook, ErrRateLimited)
+	for i := 0; i < 2; i++ {
+		if err := receipt(); err != nil {
+			t.Fatalf("receipt %d after the hook burst: %v", i, err)
+		}
+	}
+	if err := receipt(); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("receipt past its burst = %v, want ErrRateLimited", err)
+	}
+	refuse(t, l, a, RouteHook, ErrRateLimited)
+	clock.Advance(2 * time.Second)
+	hook, err := l.Acquire(a, RouteHook)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, err := l.AcquireReceipt(a)
+	if err != nil {
+		t.Fatalf("a hook in flight took the receipt slot: %v", err)
+	}
+	if err := receipt(); !errors.Is(err, ErrTooManyInFlight) {
+		t.Fatalf("receipt past the in-flight cap = %v, want ErrTooManyInFlight", err)
+	}
+	held()
+	hook()
+	if err := receipt(); err != nil {
+		t.Fatalf("receipt after release: %v", err)
+	}
+}

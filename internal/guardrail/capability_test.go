@@ -24,11 +24,16 @@ func TestClassifyToolName(t *testing.T) {
 		want ToolCapabilityClass
 	}{
 		{"read_file", CapReadFS},
+		{"read", CapReadFS},
 		{"fs.read_file", CapReadFS},
 		{"write_file", CapWriteFS},
 		{"apply_patch", CapWriteFS},
+		{"patch", CapWriteFS},
+		{"write", CapWriteFS},
+		{"edit", CapWriteFS},
 		{"run_shell", CapExecShell},
 		{"bash", CapExecShell},
+		{"shell", CapExecShell},
 		{"shell.run", CapExecShell},
 		{"execute_command", CapExecShell},
 		{"my_tool_shell", CapExecShell},

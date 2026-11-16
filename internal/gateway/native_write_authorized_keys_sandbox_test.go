@@ -21,7 +21,7 @@ import (
 func TestNativeWriteToolsOfAuthorizedKeysAreBlockedInASandbox(t *testing.T) {
 	f := newSandboxIngressFixture(t)
 	versions := map[string][3]string{
-		"opencode":   {"1.18.10", "opencode-hooks-v1", "/api/v1/opencode/hook"},
+		"opencode":   {"2.1.4", "opencode-hooks-v2", "/api/v1/opencode/hook"},
 		"claudecode": {"2.1.156", "claudecode-hooks-v1", "/api/v1/claude-code/hook"},
 		"codex":      {"0.128.0", "codex-hooks-v1", "/api/v1/codex/hook"},
 		"copilot":    {"1.0.40", "copilot-hooks-v1", "/api/v1/copilot/hook"},
@@ -38,9 +38,6 @@ func TestNativeWriteToolsOfAuthorizedKeysAreBlockedInASandbox(t *testing.T) {
 		}
 		for target, want := range map[string]bool{keys: true, "/work/app/notes.txt": false} {
 			t.Run(fmt.Sprintf("%s/block=%t", call.name(i), want), func(t *testing.T) {
-				if !want && call.benignGap() != "" {
-					t.Skip(call.benignGap())
-				}
 				_, token := f.mint(t, fmt.Sprintf("dc-%s-%t", call.name(i), want), call.connector, v[0], v[1], f.project)
 				resp := f.hook(t, v[2], token, call.body(t, "/work/app", target), headers...)
 				raw, _ := json.Marshal(resp)

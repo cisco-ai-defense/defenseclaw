@@ -21,6 +21,7 @@ package sandboxcli
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -71,15 +72,26 @@ type fakeDaemon struct {
 	managed bool
 	// errors maps "METHOD path" to the error the fake answers with.
 	errors map[string]*sandboxapi.Error
+	// unsynced names the MicroVMs whose disk the daemon cannot sync: it
+	// refuses their stop (CodeUnsynced) unless the request accepts the loss.
+	unsynced map[string]bool
 	// onGet runs before a sandbox is returned (hook counters move during
 	// a session).
 	onGet func(sb *sandboxapi.Sandbox)
+	// onStart can model another command starting the sandbox between a get
+	// and this command's start.
+	onStart func(sb *sandboxapi.Sandbox) *sandboxapi.Error
 	// toolCalls is how many tool calls a harness the fakes ran makes
 	// (hookTraffic): a session with a turn.
 	toolCalls int64
 	// onStatus runs before the status is returned (the daemon notices a
 	// change).
 	onStatus func(st *sandboxapi.Status)
+	// statusWithoutAllowed models a managed daemon from before Status gained
+	// the aggregate managed.allowed field.
+	statusWithoutAllowed bool
+	// onList can model a managed daemon waiting for a stopped account gateway.
+	onList func(context.Context)
 	// onExplain, when set, edits the explain answer to a request.
 	onExplain func(req sandboxapi.ExplainRequest, ex *sandboxapi.Explain)
 	// createMCP and createWarnings are what create reports.
@@ -116,6 +128,9 @@ type fakeDaemon struct {
 	// onReady is what POST /ready does to the status (a managed daemon
 	// readies OpenShell).
 	onReady func(st *sandboxapi.Status)
+	// strictReady models a managed daemon of DefenseClaw 1.0.3 or older,
+	// whose POST /ready decodes an empty object and refuses any field.
+	strictReady bool
 	// explainErr, when set, may refuse an explain request.
 	explainErr func(req sandboxapi.ExplainRequest) *sandboxapi.Error
 }
@@ -243,7 +258,18 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 		if d.onStatus != nil {
 			d.onStatus(&d.status)
 		}
-		reply(d.status)
+		if d.statusWithoutAllowed {
+			raw, _ := json.Marshal(d.status)
+			var status map[string]json.RawMessage
+			_ = json.Unmarshal(raw, &status)
+			var managed map[string]json.RawMessage
+			_ = json.Unmarshal(status["managed"], &managed)
+			delete(managed, "allowed")
+			status["managed"], _ = json.Marshal(managed)
+			reply(status)
+		} else {
+			reply(d.status)
+		}
 	case path == sandboxapi.PathPolicyExplain && d.explainErr != nil && d.explainErr(sandboxapi.ParseExplainQuery(r.URL.Query())) != nil:
 		e := d.explainErr(sandboxapi.ParseExplainQuery(r.URL.Query()))
 		w.Header().Set("Content-Type", "application/json")
@@ -256,6 +282,15 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		reply(ex)
 	case path == sandboxapi.PathReady && r.Method == http.MethodPost:
+		if d.strictReady {
+			dec := json.NewDecoder(bytes.NewReader(body))
+			dec.DisallowUnknownFields()
+			var none struct{}
+			if err := dec.Decode(&none); err != nil && !errors.Is(err, io.EOF) {
+				fail(sandboxapi.CodeInvalid, "invalid JSON body: "+err.Error())
+				return
+			}
+		}
 		if d.onReady != nil {
 			d.onReady(&d.status)
 		}
@@ -295,6 +330,27 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 			msg = "unblocked " + req.Host + " for every sandbox of yours (kept by your organization's DefenseClaw gateway)"
 		}
 		reply(sandboxapi.UnblockResponse{Host: req.Host, Sandbox: req.Sandbox, Scope: scope, Message: msg})
+	case path == sandboxapi.PathPolicyDecision:
+		var req sandboxapi.PolicyDecisionRequest
+		_ = json.Unmarshal(body, &req)
+		if !d.managed {
+			fail(sandboxapi.CodeInvalid, "this command is for a managed computer")
+			return
+		}
+		if req.Sandbox == "" {
+			for name := range d.sandboxes {
+				if req.Sandbox != "" {
+					fail(sandboxapi.CodeInvalid, "name one sandbox with --sandbox NAME")
+					return
+				}
+				req.Sandbox = name
+			}
+		}
+		if req.Sandbox == "" {
+			fail(sandboxapi.CodeInvalid, "start a sandbox first")
+			return
+		}
+		reply(sandboxapi.PolicyDecisionResponse(req))
 	case path == sandboxapi.PathActivity:
 		var out []sandboxapi.ActivityEvent
 		events := d.events
@@ -330,6 +386,9 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		reply(map[string]any{"events": out})
 	case path == sandboxapi.PathSandboxes && r.Method == http.MethodGet:
+		if d.onList != nil {
+			d.onList(r.Context())
+		}
 		list := []sandboxapi.Sandbox{}
 		for _, sb := range d.sandboxes {
 			list = append(list, *sb)
@@ -418,20 +477,42 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 			delete(d.runLogs, name)
 			reply(sandboxapi.DeleteResponse{Name: name, Deleted: true})
 		case verb == "stop":
+			if d.unsynced[name] && !strings.Contains(string(body), `"discard_unsynced":true`) {
+				e := &sandboxapi.Error{Code: sandboxapi.CodeUnsynced,
+					Message: "sandbox " + name + " was not stopped: its MicroVM's disk could not be synced first (sync(1) did not finish), so a stop now would lose what it wrote since its last sync; it keeps running",
+					Detail:  "save the work you need and stop it again, or stop it anyway, losing that: `defenseclaw sandbox stop " + name + " --discard-unsynced`"}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(e.HTTPStatus())
+				_ = json.NewEncoder(w).Encode(e)
+				return
+			}
 			if kept, ok := d.stopRunLogs[name]; ok && sb.Phase == "ready" {
 				log := *kept
 				log.Name, log.KeptAt = name, time.Now()
 				d.runLogs[name] = &log
 			}
-			sb.Phase = "stopped"
+			// OpenShell returns the stop of a MicroVM whose main process
+			// completed or failed as it is.
+			if sb.Driver != "vm" || sb.Phase != "completed" && (sb.Phase != "error" || !strings.Contains(sb.PhaseReason, "MainProcessFailed")) {
+				sb.Phase = "stopped"
+			}
 			reply(sb)
 		case verb == "start":
+			if d.onStart != nil {
+				if e := d.onStart(sb); e != nil {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(e.HTTPStatus())
+					_ = json.NewEncoder(w).Encode(e)
+					return
+				}
+			}
 			var req sandboxapi.StartRequest
 			_ = json.Unmarshal(body, &req)
 			if sb.Phase != "ready" {
 				sb.Session++
 			}
-			sb.Phase = "ready"
+			// The session runs the gateway's own supervisor.
+			sb.Phase, sb.OldSupervisor = "ready", false
 			if sb.WorkdirMode == "mount" && sb.Snapshot != nil {
 				// Like the manager: a start takes a new snapshot unless
 				// changes nobody undid or accepted sit on the undo point, and
@@ -489,7 +570,7 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 				u.Summary = "1 file restored"
 			}
 			reply(u)
-		case verb == "workspace":
+		case verb == "workspace", verb == "disk":
 			reply(map[string]string{"status": "recorded"})
 		default:
 			fail(sandboxapi.CodeNotFound, "unknown verb")
@@ -639,10 +720,6 @@ type fakeImages struct {
 	// answer.
 	pruned      []image.PruneOptions
 	pruneReport *image.PruneReport
-	// microVMProblem, by harness, is why a built image fails the probe's
-	// MicroVM scenario, and microVMInconclusive why that scenario settled
-	// nothing (neither: it passes).
-	microVMProblem, microVMInconclusive map[string]string
 	// buildOutput is what Build writes to the build log; buildErr, when
 	// set, fails it.
 	buildOutput string
@@ -672,9 +749,8 @@ func (f *fakeImages) Build(_ context.Context, spec *harness.Spec, microVM, _ boo
 	if f.buildErr != nil {
 		return image.Record{}, true, f.buildErr
 	}
-	rec := image.Record{Tag: "defenseclaw/sandbox:" + spec.Name, Connector: spec.Name, HarnessVersion: spec.DefaultVersion, HookFireVerified: true,
-		MicroVM: microVM, MicroVMVerified: microVM && f.microVMProblem[spec.Name] == "" && f.microVMInconclusive[spec.Name] == "",
-		MicroVMProblem: f.microVMProblem[spec.Name], MicroVMInconclusive: f.microVMInconclusive[spec.Name]}
+	rec := image.Record{Tag: "defenseclaw/sandbox:" + spec.Name, Connector: spec.Name, HarnessVersion: spec.DefaultVersion,
+		HookFireVerified: true, MicroVM: microVM}
 	f.built = append(f.built, spec.Name)
 	f.recs = append(f.recs, rec)
 	return rec, true, nil
@@ -784,6 +860,11 @@ type fakeCopy struct {
 	pulled    []workspace.PullOptions
 	// refreshErr is what Refresh fails with.
 	refreshErr error
+	// onApply runs while an applied pull owns the command.
+	onApply func()
+	// onPull runs as a Pull (not a reuse) reads the copy; onPending as
+	// PendingWork looks at it.
+	onPull, onPending func()
 	// diff is what Diff answers.
 	diff string
 }
@@ -805,6 +886,9 @@ func (f *fakeCopy) Discard(_, name string) error {
 }
 
 func (f *fakeCopy) PendingWork(_ context.Context, _, name string, ex workspace.Execer) (workspace.CopyStatus, error) {
+	if f.onPending != nil {
+		f.onPending()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if ex == nil {
@@ -878,6 +962,9 @@ func (f *fakeCopy) Pull(_ context.Context, o workspace.PullOptions) (*workspace.
 		return &r, nil
 	}
 	f.step("pull " + o.Name)
+	if f.onPull != nil {
+		f.onPull()
+	}
 	if f.pull != nil {
 		return f.pull, nil
 	}
@@ -887,6 +974,9 @@ func (f *fakeCopy) Pull(_ context.Context, o workspace.PullOptions) (*workspace.
 
 func (f *fakeCopy) Apply(_ context.Context, o workspace.ApplyOptions) (*workspace.ApplyResult, error) {
 	f.step("apply " + string(o.Mode))
+	if f.onApply != nil {
+		f.onApply()
+	}
 	f.mu.Lock()
 	f.apply = append(f.apply, o)
 	applied, err := f.applied, f.applyErr
@@ -917,6 +1007,16 @@ type fakeGateway struct {
 	// upToDate has Plan find nothing to change, as it does for a gateway
 	// whose configuration already says what a change would write.
 	upToDate bool
+	// stopSyncs counts StopSync calls; stopSyncRes and stopSyncErr are
+	// their answer.
+	stopSyncs   int
+	stopSyncRes *openshell.GatewayApplyResult
+	stopSyncErr error
+}
+
+func (f *fakeGateway) StopSync(context.Context) (*openshell.GatewayApplyResult, error) {
+	f.stopSyncs++
+	return f.stopSyncRes, f.stopSyncErr
 }
 
 func (f *fakeGateway) Restart(context.Context) error { f.restarts++; return nil }
@@ -1018,7 +1118,7 @@ func newTestApp(t *testing.T, input string, sandboxes ...sandboxapi.Sandbox) *te
 	cfg.Gateway.APIPort = 18970
 	cfg.OpenShell.Enabled = true
 	ta.App = &App{
-		Cfg: cfg, ConfigPath: filepath.Join(root, "data", "config.yaml"), API: ta.daemon.client(),
+		Cfg: cfg, ConfigPath: filepath.Join(root, "data", "config.yaml"), API: ta.daemon.client(), LifecycleDir: filepath.Join(root, "openshell"),
 		IO:       IO{In: ta.in, Out: ta.out, Err: ta.err, TTY: true},
 		Terminal: ta.term, Streamer: ta.stream, Images: ta.images, Workspace: ta.copy, Gateway: ta.gateway,
 		ExecProcess: func(path string, argv, _ []string) error {
@@ -1049,6 +1149,8 @@ func newTestApp(t *testing.T, input string, sandboxes ...sandboxapi.Sandbox) *te
 		},
 		// Never the developer's own git identity.
 		GitConfig: func(_ context.Context, _, key string) string { return ta.gitConfig[key] },
+		// Never the network: the Sandbox TLS trust row is skipped.
+		TLSTrust: TLSTrust{Chain: func(context.Context, string) ([]*x509.Certificate, error) { return nil, errors.New("offline") }},
 	}
 	for _, sb := range sandboxes {
 		ta.daemon.add(sb)

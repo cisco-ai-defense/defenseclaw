@@ -17,6 +17,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -101,7 +102,7 @@ func TestEnterpriseHookWorkerPurgeStopsThePerUserGatewayFirst(t *testing.T) {
 	}
 	// The worker reports only what it found: here the data folder, but no
 	// running gateway and no per-user binaries (GAP-1444).
-	if got := response.Targets[0].Purged; got == nil || *got != (enterpriseHookPurgeDetail{Data: true}) {
+	if got := response.Targets[0].Purged; got == nil || !reflect.DeepEqual(*got, enterpriseHookPurgeDetail{Data: true}) {
 		t.Fatalf("purge detail %+v", got)
 	}
 	want := "stop " + filepath.Join(home, ".defenseclaw") + ",purge " + filepath.Join(home, ".defenseclaw")
@@ -123,12 +124,14 @@ func TestEnterpriseHookWorkerPurgeStopsThePerUserGatewayFirst(t *testing.T) {
 // Every enrolled account the purge leaves alone is named, with the reason,
 // so the administrator knows whose data stays.
 func TestAddEnterpriseHookStatePurgesListsAccountsItCannotPurge(t *testing.T) {
-	previousCheck := enterpriseHookCheckHome
+	previousCheck, previousGone := enterpriseHookCheckHome, enterpriseHookRecordedHomeGone
 	t.Cleanup(func() {
-		enterpriseHookCheckHome = previousCheck
+		enterpriseHookCheckHome, enterpriseHookRecordedHomeGone = previousCheck, previousGone
 		enterprisehooks.SetStandaloneResolver(nil)
 	})
 	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{})
+	// carol's home is not available yet, not gone.
+	enterpriseHookRecordedHomeGone = func(string) bool { return false }
 	enterpriseHookCheckHome = func(home string, _ int) enterprisehooks.HomeCheck {
 		switch home {
 		case "/home/carol", "/home/gina":

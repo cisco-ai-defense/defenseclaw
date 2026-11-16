@@ -17,11 +17,16 @@
 package sandboxcli
 
 import (
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
 // GAP-1918: before the gateway is set up there is no gateway token. The
@@ -47,5 +52,84 @@ func TestAPIBeforeGatewaySetupNamesNextStep(t *testing.T) {
 	}
 	if strings.Contains(disabled.Message, "sandboxapi") || strings.Contains(disabled.Message, "daemon") {
 		t.Fatalf("message %q uses internal terms", disabled.Message)
+	}
+}
+
+func TestAPIErrorKeepsUnreachableTransportCause(t *testing.T) {
+	previous := onManagedHost
+	t.Cleanup(func() { onManagedHost = previous })
+	transport := &sandboxapi.Error{Code: sandboxapi.CodeUnavailable,
+		Message: "the DefenseClaw daemon is not reachable",
+		Detail:  "connected gateway socket belongs to another account"}
+	for _, managed := range []bool{false, true} {
+		onManagedHost = func() bool { return managed }
+		got := apiError(transport).Error()
+		if !strings.Contains(got, transport.Detail) {
+			t.Errorf("managed=%t: lost transport cause: %q", managed, got)
+		}
+		if strings.Contains(got, "daemon is not running") {
+			t.Errorf("managed=%t: guessed a stopped daemon despite peer error: %q", managed, got)
+		}
+		if managed && strings.Contains(got, "defenseclaw-gateway start") {
+			t.Errorf("managed host offered a per-user gateway command: %q", got)
+		}
+	}
+}
+
+// GAP-1693: a sandbox command the gateway's caller limit refused (429) says
+// so in its own words: a limit on this account's requests in a short time,
+// to retry in a few seconds, never the hook-request words of the limiter.
+func TestAPIErrorWordsTheCallerLimitForTheCLI(t *testing.T) {
+	// The body the caller limiter writes (hook_caller_limits.go), read by
+	// the sandbox client as a direct call reads it (review R3-2).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "rate_limited", "reason": "enterprise_managed_rate_limited",
+			"message": "DefenseClaw is limiting the hook requests of this account; retry shortly", "retry_after_seconds": "1"})
+	}))
+	t.Cleanup(srv.Close)
+	_, limited := sandboxapi.NewClient(srv.URL, "token").List(t.Context())
+	if limited == nil {
+		t.Fatal("the limited call succeeded")
+	}
+	got := apiError(limited).Error()
+	if strings.Contains(got, "hook") || !strings.Contains(got, "a burst of sandbox commands") || !strings.Contains(got, "in a few seconds") {
+		t.Fatalf("limited sandbox command = %q", got)
+	}
+	// As the managed daemon relays it: the limiter's word is the reason.
+	relayed := &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Status: http.StatusTooManyRequests,
+		Message: "DefenseClaw is limiting the hook requests of this account; retry shortly", Detail: "rate_limited"}
+	if got := apiError(relayed).Error(); strings.Contains(got, "hook") || !strings.Contains(got, "a burst of sandbox commands") {
+		t.Fatalf("relayed caller limit = %q", got)
+	}
+	// GAP-1808: the daemon's own 429 keeps its words, which name the cause.
+	streams := &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Status: http.StatusTooManyRequests, Message: "too many activity streams are open"}
+	if got := apiError(streams).Error(); !strings.Contains(got, "too many activity streams are open") || strings.Contains(got, "a burst of sandbox commands") {
+		t.Fatalf("too many activity streams = %q", got)
+	}
+}
+
+// r103 GAP-0332: on a Linux computer without Docker or KVM, `sandbox run`
+// said only that sandboxes are off and to run setup; the doctor alone named
+// the missing Docker. The refusal names it too.
+func TestDisabledRefusalNamesAMissingSandboxRuntime(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the hint is for Linux computers")
+	}
+	prevManaged, prevRuntime := onManagedHost, hostHasSandboxRuntime
+	t.Cleanup(func() { onManagedHost, hostHasSandboxRuntime = prevManaged, prevRuntime })
+	onManagedHost = func() bool { return false }
+	off := &sandboxapi.Error{Code: sandboxapi.CodeDisabled, Message: sandboxapi.DisabledMessage}
+	for _, has := range []bool{false, true} {
+		hostHasSandboxRuntime = func() bool { return has }
+		var disabled *DisabledError
+		if err := apiError(off); !errors.As(err, &disabled) {
+			t.Fatalf("apiError = %v, want a DisabledError", err)
+		}
+		named := strings.Contains(disabled.Message, "lacks Docker") && strings.Contains(disabled.Message, "sandbox doctor")
+		if !strings.HasPrefix(disabled.Message, sandboxapi.DisabledMessage) || named == has {
+			t.Fatalf("runtime present %t: message %q", has, disabled.Message)
+		}
 	}
 }

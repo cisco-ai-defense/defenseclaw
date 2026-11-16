@@ -1,0 +1,8 @@
+_www                     /Library/WebServer
+_wwwproxy                /var/empty
+daemon                   /var/root
+nobody                   /var/empty
+root                     /var/root
+alice                    /var/empty/alice home é & <x>
+dave                    /var/empty/d1 /var/empty/d 2
+josé                   /var/empty/é

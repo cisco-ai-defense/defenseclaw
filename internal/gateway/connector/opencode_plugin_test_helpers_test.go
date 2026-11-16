@@ -6,7 +6,6 @@ package connector
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -91,11 +91,10 @@ func openCodePluginTestData(t *testing.T, server *httptest.Server) templateData 
 	}
 }
 
-// nodeHarnessTimeout bounds one node run of a plugin harness, and each step
-// after the start of an interactive harness session. It covers node's start,
-// which on a busy Windows runner can take many seconds when it is the job's
-// first node process, and a request, which waits on the plugin's own 10s
-// gateway timeout.
+// nodeHarnessTimeout bounds the work of one node run of a plugin harness once
+// node has started, and each step after the start of an interactive harness
+// session. It covers a request, which waits on the plugin's own 10s gateway
+// timeout; node's start has its own bound (nodeHarnessStartTimeout).
 const nodeHarnessTimeout = 60 * time.Second
 
 // nodeForTest returns the node binary, or skips the test when there is none.
@@ -108,21 +107,102 @@ func nodeForTest(t *testing.T) string {
 	return node
 }
 
+// nodeHarnessStarted is the line runNodeHarness has node print before the
+// harness's own code runs: node is up and its built-in modules are loaded.
+const nodeHarnessStarted = "defenseclaw-node-harness-started"
+
 // runNodeHarness runs an ES module harness with node and returns its output
-// lines. The test fails if node fails.
+// lines. The test fails if node fails. Node's start is bounded like an
+// interactive harness's (nodeHarnessStartTimeout): the first node processes of
+// a Windows CI job have taken over a minute each to start (60 s killed, 60 s
+// killed, 41 s, then 3.6 s in gw1 at e5c04823b6, no output at all), and that
+// wait is the operating system's. The harness's own work, from the start line
+// to node's exit, keeps nodeHarnessTimeout.
+// nodeHarnessEnv is the test's environment for a plugin harness, with HOME
+// moved to a folder of the test when the test left it at the build account's
+// own home. The plugins look for an installer's lock in ~/.defenseclaw (from
+// HOME), and other tests and builds on a shared computer write the build
+// account's real one: an install lock there turned an outage denial into
+// "being installed" at random (rel-1-0-6:GAP-0345, as the gateway binary's
+// account home). A test that set HOME keeps it.
+func nodeHarnessEnv(t *testing.T) []string {
+	t.Helper()
+	env := os.Environ()
+	account, err := user.Current()
+	if err != nil || account.HomeDir == "" || filepath.Clean(os.Getenv("HOME")) != filepath.Clean(account.HomeDir) {
+		return env
+	}
+	home := t.TempDir()
+	out := env[:0:0]
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, "HOME=") {
+			out = append(out, kv)
+		}
+	}
+	return append(out, "HOME="+home)
+}
+
 func runNodeHarness(t *testing.T, harness string, args ...string) []string {
 	t.Helper()
+	harness = "process.stdout.write(" + strconv.Quote(nodeHarnessStarted+"\n") + ");\n" + withOpenCodeV2Fixture(t, harness)
 	node := nodeForTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), nodeHarnessTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, node, append([]string{"--input-type=module", "-e", harness}, args...)...)
+	cmd := exec.Command(node, append([]string{"--input-type=module", "-e", harness}, args...)...)
+	cmd.Env = nodeHarnessEnv(t)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
-	out, err := cmd.Output()
+	pipe, err := cmd.StdoutPipe()
 	if err != nil {
+		t.Fatal(err)
+	}
+	launched := time.Now()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan string, 1)
+	rest := make(chan string, 1)
+	go func() {
+		reader := bufio.NewReader(pipe)
+		first, _ := reader.ReadString('\n')
+		started <- first
+		remaining, _ := io.ReadAll(reader)
+		rest <- string(remaining)
+	}()
+	fail := func(step string) {
+		t.Helper()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("node %s %s after launch (%v)\nstderr=%s", step, time.Since(launched).Round(time.Millisecond), cmd.ProcessState, stderr.String())
+	}
+	select {
+	case first := <-started:
+		if strings.TrimSpace(first) != nodeHarnessStarted {
+			fail(fmt.Sprintf("ended or printed %q before the harness ran:", first))
+		}
+	case <-time.After(nodeHarnessStartTimeout(t)):
+		fail("did not start:")
+	}
+	var out string
+	select {
+	case out = <-rest:
+	case <-time.After(nodeHarnessTimeout):
+		fail(fmt.Sprintf("started, then did not finish within %s:", nodeHarnessTimeout))
+	}
+	if err := cmd.Wait(); err != nil {
 		t.Fatalf("node: %v\nstdout=%s\nstderr=%s", err, out, stderr.String())
 	}
-	return strings.Split(strings.TrimSpace(string(out)), "\n")
+	return strings.Split(strings.TrimSpace(out), "\n")
+}
+
+func withOpenCodeV2Fixture(t *testing.T, harness string) string {
+	t.Helper()
+	if !strings.Contains(harness, "fixtureBridge(") {
+		return harness
+	}
+	fixture, err := os.ReadFile("../../opencodebridge/testdata/fixture.mjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(fixture) + "\n" + harness
 }
 
 // nodeHarnessReady is the line an interactive harness prints once its
@@ -164,6 +244,7 @@ func nodeHarnessStartTimeout(t *testing.T) time.Duration {
 // for its ready line.
 func startNodeHarnessSession(t *testing.T, harness string, args ...string) *nodeHarnessSession {
 	t.Helper()
+	harness = withOpenCodeV2Fixture(t, harness)
 	node := nodeForTest(t)
 	s := &nodeHarnessSession{
 		t:      t,
@@ -274,10 +355,21 @@ func (s *nodeHarnessSession) wait() (report string, ok bool) {
 func writeRenderedPlugin(t *testing.T, asset, name string, data templateData) string {
 	t.Helper()
 	path := filepath.Join(testenv.PrivateTempDir(t), name)
-	if err := os.WriteFile(path, []byte(renderPluginAssetForTest(t, asset, data)), 0o600); err != nil {
+	body := withoutPeerCheckForTest(renderPluginAssetForTest(t, asset, data))
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func withoutPeerCheckForTest(body string) string {
+	// Verdict tests use an in-process fake gateway. Replace the per-user
+	// transport with a test-only fetch; account-guard tests render the exact
+	// installed asset and exercise the native helper or listener proof.
+	body = strings.ReplaceAll(body, `const DC_PER_USER_NATIVE_POST: string = "1"`, `const DC_PER_USER_NATIVE_POST: string = ""`)
+	body = strings.ReplaceAll(body, `const DC_PER_USER_NATIVE_POST = "1";`, `const DC_PER_USER_NATIVE_POST = "";`)
+	body = strings.ReplaceAll(body, `throw peerError("the DefenseClaw gateway listener has no account proof")`, `return fetch("http://" + DC_API_ADDR + path, init)`)
+	return strings.ReplaceAll(body, `throw defenseclawPeerError("the DefenseClaw gateway listener has no account proof");`, `return fetch("http://" + DC_API_ADDR + path, init);`)
 }
 
 // openCodePluginHarness loads a rendered OpenCode plugin with a stub TUI
@@ -285,11 +377,11 @@ func writeRenderedPlugin(t *testing.T, asset, name string, data templateData) st
 // prints one verdict per call, then the toasts it showed.
 const openCodePluginHarness = `
 import { pathToFileURL } from "node:url";
-const toasts = [];
-const client = { tui: { showToast: async (arg) => { toasts.push(arg && arg.body ? arg.body : arg); return true; } } };
+const notices = [];
+console.warn = (message) => notices.push(String(message));
 const href = pathToFileURL(process.argv[1]).href;
 const loaded = await import(href);
-const plugin = await loaded.DefenseClaw({ directory: "", client });
+const plugin = await fixtureBridge(loaded, { directory: "/work/repo" });
 await plugin.config({ plugin_origins: [{ spec: href }], mcp: {} });
 for (let i = 0; i < Number(process.argv[2]); i++) {
   try {
@@ -300,7 +392,7 @@ for (let i = 0; i < Number(process.argv[2]); i++) {
   }
 }
 await new Promise((resolve) => setTimeout(resolve, 50));
-console.log("toasts:" + JSON.stringify(toasts));
+console.log("notices:" + JSON.stringify(notices));
 `
 
 func runOpenCodePluginHarness(t *testing.T, data templateData, calls int) []string {

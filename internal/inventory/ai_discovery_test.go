@@ -38,6 +38,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 func cleanupPreparedDiscoveryService(t *testing.T, svc *ContinuousDiscoveryService) {
@@ -157,7 +158,7 @@ func TestLoadAISignatures_ContainsRequiredSurfaces(t *testing.T) {
 	for _, sig := range sigs {
 		seen[sig.ID] = true
 	}
-	for _, id := range []string{"codex", "claudecode", "hermes", "cursor", "devin", "copilot", "openhands", "antigravity", "opencode", "omnigent", "ai-sdks", "lemonade"} {
+	for _, id := range []string{"codex", "claudecode", "hermes", "cursor", "devin", "copilot", "antigravity", "opencode", "ai-sdks", "lemonade"} {
 		if !seen[id] {
 			t.Fatalf("signature %q missing", id)
 		}
@@ -292,26 +293,6 @@ func TestHermesSignatureIncludesNativeWindowsPaths(t *testing.T) {
 	}
 }
 
-func TestOmnigentSignatureIncludesExplicitServerConfig(t *testing.T) {
-	sigs, err := LoadAISignatures()
-	if err != nil {
-		t.Fatalf("LoadAISignatures: %v", err)
-	}
-	for _, signature := range sigs {
-		if signature.ID != "omnigent" {
-			continue
-		}
-		if !stringSliceContains(signature.ConfigPaths, "$OMNIGENT_CONFIG") {
-			t.Errorf("OmniGent config paths omit OMNIGENT_CONFIG: %v", signature.ConfigPaths)
-		}
-		if !stringSliceContains(signature.EnvVarNames, "OMNIGENT_CONFIG") {
-			t.Errorf("OmniGent environment variables omit OMNIGENT_CONFIG: %v", signature.EnvVarNames)
-		}
-		return
-	}
-	t.Fatal("OmniGent signature missing")
-}
-
 func stringSliceContains(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
@@ -319,37 +300,6 @@ func stringSliceContains(values []string, want string) bool {
 		}
 	}
 	return false
-}
-
-func TestExpandCandidatePath_ExpandsConfiguredEnvironment(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("OMNIGENT_CONFIG_HOME", root)
-	service := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{HomeDir: t.TempDir()}}
-
-	got := service.expandCandidatePath("$OMNIGENT_CONFIG_HOME/config.yaml")
-	want := filepath.Join(root, "config.yaml")
-	if len(got) != 1 || got[0] != want {
-		t.Fatalf("expanded paths = %v, want [%s]", got, want)
-	}
-}
-
-func TestExpandCandidatePath_SkipsUnsetEnvironment(t *testing.T) {
-	previous, wasSet := os.LookupEnv("OMNIGENT_CONFIG_HOME")
-	if err := os.Unsetenv("OMNIGENT_CONFIG_HOME"); err != nil {
-		t.Fatalf("unset OMNIGENT_CONFIG_HOME: %v", err)
-	}
-	t.Cleanup(func() {
-		if wasSet {
-			_ = os.Setenv("OMNIGENT_CONFIG_HOME", previous)
-		} else {
-			_ = os.Unsetenv("OMNIGENT_CONFIG_HOME")
-		}
-	})
-	service := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{HomeDir: t.TempDir()}}
-
-	if got := service.expandCandidatePath("$OMNIGENT_CONFIG_HOME/config.yaml"); got != nil {
-		t.Fatalf("expanded paths = %v, want nil for unset environment", got)
-	}
 }
 
 func TestAmpSignatureIncludesNativeConfigAndAssetPaths(t *testing.T) {
@@ -1201,7 +1151,7 @@ func TestDetectLocalEndpoints_SkipsPathsOutsideAllowList(t *testing.T) {
 	}
 }
 
-func TestProcessNameMatchesShortNamesExactly(t *testing.T) {
+func TestProcessNameMatchesDistinctExecutableParts(t *testing.T) {
 	if processNameMatches("quicklookd", "q") {
 		t.Fatal("short process name matched by substring")
 	}
@@ -1209,7 +1159,116 @@ func TestProcessNameMatchesShortNamesExactly(t *testing.T) {
 		t.Fatal("short process name did not match exactly")
 	}
 	if !processNameMatches("helper-claude", "claude") {
-		t.Fatal("long process name should allow substring matching")
+		t.Fatal("delimited process name part did not match")
+	}
+	for _, name := range []string{"CursorUIViewService", "precursor", "cursorhelper"} {
+		if processNameMatches(name, "cursor") {
+			t.Errorf("unrelated process %q matched Cursor", name)
+		}
+	}
+	for _, name := range []string{"cursor-agent", "Cursor Helper", "cursor.app"} {
+		if !processNameMatches(name, "cursor") {
+			t.Errorf("Cursor process %q was missed", name)
+		}
+	}
+}
+
+func TestMacOSDiscoveryBinaryFallback(t *testing.T) {
+	home := t.TempDir()
+	dirs := macOSDiscoveryBinaryDirs(home)
+	for _, want := range []string{"/usr/local/bin", "/opt/homebrew/bin", "/opt/local/bin", "/opt/dc-agents/bin", filepath.Join(home, ".local", "bin")} {
+		if !slices.Contains(dirs, want) {
+			t.Fatalf("macOS binary directories %v omit %q", dirs, want)
+		}
+	}
+	if runtime.GOOS == "windows" {
+		return // Windows LookPath uses PATHEXT, unlike the Unix fallback.
+	}
+	first := filepath.Join(home, "first")
+	second := filepath.Join(home, "second")
+	if err := os.MkdirAll(second, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(second, "cursor-agent")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := lookPathInDirs("cursor-agent", []string{first, second}); err != nil || got != bin {
+		t.Fatalf("lookPathInDirs = %q, %v; want %q", got, err, bin)
+	}
+	for _, name := range []string{"missing", "../cursor-agent", "."} {
+		if got, err := lookPathInDirs(name, []string{second}); err == nil || got != "" {
+			t.Errorf("lookPathInDirs(%q) = %q, %v; want not found", name, got, err)
+		}
+	}
+}
+
+func TestScanUserHomeKeepsFixedSystemBinaryOutsideHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the managed per-user scan runs on Unix")
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	systemBin := filepath.Join(root, "system-bin")
+	otherBin := filepath.Join(root, "other-bin")
+	for _, dir := range []string{home, systemBin, otherBin} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, path := range []string{
+		filepath.Join(systemBin, "cursor-agent"),
+		filepath.Join(otherBin, "cursor-agent"),
+		filepath.Join(otherBin, "other-cli"),
+	} {
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", otherBin)
+	stubProcessSnapshotSource(t, func() ([]processInfo, error) { return nil, nil })
+	catalog := []AISignature{
+		{ID: "cursor", Name: "Cursor", Category: SignalAICLI, BinaryNames: []string{"cursor-agent"}},
+		{ID: "other", Name: "Other", Category: SignalAICLI, BinaryNames: []string{"other-cli"}},
+	}
+	for _, keepRaw := range []bool{false, true} {
+		report := scanUserHomeWithSystemBinaryDirs(context.Background(), home, "alice", os.Getuid(),
+			UserScanOptions{StoreRawLocalPaths: keepRaw}, catalog, []string{systemBin})
+		if err := SanitizeUserScanReport(&report, catalog, keepRaw, false); err != nil {
+			t.Fatalf("keepRaw=%t: sanitize: %v", keepRaw, err)
+		}
+		var binaries []AISignal
+		for _, sig := range report.Signals {
+			if sig.Detector == "binary" {
+				binaries = append(binaries, sig)
+			}
+		}
+		if len(binaries) != 1 || binaries[0].SignatureID != "cursor" || binaries[0].Category != SignalAICLI {
+			t.Fatalf("keepRaw=%t: binary signals = %+v, want only fixed system CLI", keepRaw, binaries)
+		}
+		if got, want := binaries[0].Evidence[0].RawPath, filepath.Join(systemBin, "cursor-agent"); (keepRaw && got != want) || (!keepRaw && got != "") {
+			t.Fatalf("keepRaw=%t: evidence path = %q", keepRaw, got)
+		}
+	}
+}
+
+func TestDetectProcessesIgnoresCursorUIViewService(t *testing.T) {
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		DataDir: t.TempDir(), HomeDir: t.TempDir(),
+	}, []AISignature{{ID: "cursor", Name: "Cursor", Category: "supported_connector", ProcessNames: []string{"cursor"}}})
+	cleanupPreparedDiscoveryService(t, svc)
+	stubProcessSnapshotSource(t, func() ([]processInfo, error) {
+		return []processInfo{
+			{PID: 1, Comm: "CursorUIViewService"},
+			{PID: 2, Comm: "cursor-agent"},
+		}, nil
+	})
+	signals, err := svc.detectProcesses()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(signals) != 1 || signals[0].Runtime == nil || signals[0].Runtime.Comm != "cursor-agent" {
+		t.Fatalf("process signals = %+v; want only cursor-agent", signals)
 	}
 }
 
@@ -1288,8 +1347,8 @@ func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
 		t.Fatalf("worker IDE inventory = %+v, want one plugin with no account", report.IDEInventory)
 	}
 	spool := filepath.Join(tmp, "spool")
-	// The guardian names an SSSD account as NSS does; its records carry the
-	// bare name, as its hook records do (GAP-0447).
+	// The guardian names an SSSD account as NSS does. Inventory retains the
+	// qualified name for the gateway's current-holder check.
 	for uid, user := range map[int]string{1001: "alice@corp.example.com", 1002: "bob"} {
 		userReport := report
 		if uid == 1002 {
@@ -1322,13 +1381,13 @@ func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
 		if sig.Source != AISourceUserScan {
 			t.Fatalf("the gateway's own scan reported %+v", sig)
 		}
-		want := map[string]string{"1001": "alice", "1002": "bob"}[sig.UserID]
+		want := map[string]string{"1001": "alice@corp.example.com", "1002": "bob"}[sig.UserID]
 		if want == "" || sig.UserName != want {
 			t.Fatalf("signal attributed to %q/%q, want the record's account: %+v", sig.UserID, sig.UserName, sig)
 		}
 		if sig.Runtime != nil {
 			processes++
-			if sig.Runtime.PID != 10 || sig.Runtime.User != want {
+			if sig.Runtime.PID != 10 || sig.Runtime.User != useridentity.BareAccountName(want) {
 				t.Fatalf("process signal %+v, want alice's own process attributed to %s", sig.Runtime, want)
 			}
 		}
@@ -1341,7 +1400,7 @@ func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
 		t.Fatalf("signals = %+v, want a config, a process, an editor extension and a model file signal per user", got.Signals)
 	}
 	ide := svc.IDEInventory()
-	if ide == nil || len(ide.Plugins) != 1 || ide.Plugins[0].UserID != "1001" || ide.Plugins[0].UserName != "alice" ||
+	if ide == nil || len(ide.Plugins) != 1 || ide.Plugins[0].UserID != "1001" || ide.Plugins[0].UserName != "alice@corp.example.com" ||
 		ide.Plugins[0].Enabled != "client_side_unknown" || !ide.Plugins[0].IsAI {
 		t.Fatalf("IDE inventory = %+v, want alice's remote-server plugin", ide)
 	}
@@ -2819,19 +2878,22 @@ func TestAIStoredSignalModelProvenanceHubResolvedAtJSON(t *testing.T) {
 
 func TestNormalizeAIDiscoveryOptionsProcessIntervalManagedFloor(t *testing.T) {
 	cases := []struct {
-		name    string
-		managed bool
-		input   time.Duration
-		want    time.Duration
+		name         string
+		managed      bool
+		secureClient bool
+		input        time.Duration
+		want         time.Duration
 	}{
-		{"unmanaged_default_stays_60s", false, 60 * time.Second, 60 * time.Second},
-		{"unmanaged_zero_falls_back_to_60s", false, 0, 60 * time.Second},
-		{"managed_default_60s_promoted_to_30m", true, 60 * time.Second, 30 * time.Minute},
-		{"managed_zero_promoted_to_30m", true, 0, 30 * time.Minute},
-		{"managed_below_floor_promoted", true, 90 * time.Second, 30 * time.Minute},
-		{"managed_previous_5m_floor_promoted", true, 5 * time.Minute, 30 * time.Minute},
-		{"managed_at_floor_preserved", true, 30 * time.Minute, 30 * time.Minute},
-		{"managed_above_floor_preserved", true, 45 * time.Minute, 45 * time.Minute},
+		{"unmanaged_default_stays_60s", false, false, 60 * time.Second, 60 * time.Second},
+		{"unmanaged_zero_falls_back_to_60s", false, false, 0, 60 * time.Second},
+		{"standalone_default_stays_60s", true, false, 60 * time.Second, 60 * time.Second},
+		{"standalone_configured_stays_90s", true, false, 90 * time.Second, 90 * time.Second},
+		{"secure_client_default_60s_promoted_to_30m", true, true, 60 * time.Second, 30 * time.Minute},
+		{"secure_client_zero_promoted_to_30m", true, true, 0, 30 * time.Minute},
+		{"secure_client_below_floor_promoted", true, true, 90 * time.Second, 30 * time.Minute},
+		{"secure_client_previous_5m_floor_promoted", true, true, 5 * time.Minute, 30 * time.Minute},
+		{"secure_client_at_floor_preserved", true, true, 30 * time.Minute, 30 * time.Minute},
+		{"secure_client_above_floor_preserved", true, true, 45 * time.Minute, 45 * time.Minute},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2840,6 +2902,7 @@ func TestNormalizeAIDiscoveryOptionsProcessIntervalManagedFloor(t *testing.T) {
 				HomeDir:           t.TempDir(),
 				ProcessInterval:   tc.input,
 				ManagedEnterprise: tc.managed,
+				SecureClient:      tc.secureClient,
 			})
 			if opts.ProcessInterval != tc.want {
 				t.Fatalf("ProcessInterval = %s, want %s (managed=%t, input=%s)",
@@ -2849,25 +2912,26 @@ func TestNormalizeAIDiscoveryOptionsProcessIntervalManagedFloor(t *testing.T) {
 	}
 }
 
-// TestNormalizeAIDiscoveryOptionsScanIntervalManagedFloor pins the 30 min
-// managed_enterprise floor on the FULL-scan cadence — the field that
-// gates every AI Defense publish through fanoutReport. Non-managed
-// installs preserve the historical 5-min default so local dev / OSS
-// behavior does not shift.
+// TestNormalizeAIDiscoveryOptionsScanIntervalManagedFloor pins the Secure
+// Client fleet floor and the configured cadence of standalone managed and
+// non-managed inventory consumers.
 func TestNormalizeAIDiscoveryOptionsScanIntervalManagedFloor(t *testing.T) {
 	cases := []struct {
-		name    string
-		managed bool
-		input   time.Duration
-		want    time.Duration
+		name         string
+		managed      bool
+		secureClient bool
+		input        time.Duration
+		want         time.Duration
 	}{
-		{"unmanaged_default_zero_falls_back_to_5m", false, 0, 5 * time.Minute},
-		{"unmanaged_configured_preserved", false, 5 * time.Minute, 5 * time.Minute},
-		{"managed_zero_promoted_to_30m", true, 0, 30 * time.Minute},
-		{"managed_previous_5m_default_promoted", true, 5 * time.Minute, 30 * time.Minute},
-		{"managed_below_floor_promoted", true, 15 * time.Minute, 30 * time.Minute},
-		{"managed_at_floor_preserved", true, 30 * time.Minute, 30 * time.Minute},
-		{"managed_above_floor_preserved", true, 60 * time.Minute, 60 * time.Minute},
+		{"unmanaged_default_zero_falls_back_to_5m", false, false, 0, 5 * time.Minute},
+		{"unmanaged_configured_preserved", false, false, 5 * time.Minute, 5 * time.Minute},
+		{"standalone_default_zero_falls_back_to_5m", true, false, 0, 5 * time.Minute},
+		{"standalone_configured_preserved", true, false, 5 * time.Minute, 5 * time.Minute},
+		{"secure_client_zero_promoted_to_30m", true, true, 0, 30 * time.Minute},
+		{"secure_client_previous_5m_default_promoted", true, true, 5 * time.Minute, 30 * time.Minute},
+		{"secure_client_below_floor_promoted", true, true, 15 * time.Minute, 30 * time.Minute},
+		{"secure_client_at_floor_preserved", true, true, 30 * time.Minute, 30 * time.Minute},
+		{"secure_client_above_floor_preserved", true, true, 60 * time.Minute, 60 * time.Minute},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2876,6 +2940,7 @@ func TestNormalizeAIDiscoveryOptionsScanIntervalManagedFloor(t *testing.T) {
 				HomeDir:           t.TempDir(),
 				ScanInterval:      tc.input,
 				ManagedEnterprise: tc.managed,
+				SecureClient:      tc.secureClient,
 			})
 			if opts.ScanInterval != tc.want {
 				t.Fatalf("ScanInterval = %s, want %s (managed=%t, input=%s)",
@@ -2892,19 +2957,21 @@ func TestNormalizeAIDiscoveryOptionsScanIntervalManagedFloor(t *testing.T) {
 // Non-managed installs get zero jitter and keep the fixed-cadence tick.
 func TestNormalizeAIDiscoveryOptionsPublishJitter(t *testing.T) {
 	cases := []struct {
-		name    string
-		managed bool
-		scan    time.Duration
-		input   time.Duration
-		want    time.Duration
+		name         string
+		managed      bool
+		secureClient bool
+		scan         time.Duration
+		input        time.Duration
+		want         time.Duration
 	}{
-		{"unmanaged_default_zero", false, 5 * time.Minute, 0, 0},
-		{"unmanaged_configured_preserved", false, 5 * time.Minute, 15 * time.Second, 15 * time.Second},
-		{"unmanaged_negative_clamped_to_zero", false, 5 * time.Minute, -1 * time.Second, 0},
-		{"managed_default_ten_percent_of_scan", true, 30 * time.Minute, 0, 3 * time.Minute},
-		{"managed_default_tracks_promoted_scan", true, 5 * time.Minute, 0, 3 * time.Minute},
-		{"managed_configured_preserved", true, 30 * time.Minute, 45 * time.Second, 45 * time.Second},
-		{"managed_negative_falls_back_to_default", true, 30 * time.Minute, -5 * time.Second, 3 * time.Minute},
+		{"unmanaged_default_zero", false, false, 5 * time.Minute, 0, 0},
+		{"unmanaged_configured_preserved", false, false, 5 * time.Minute, 15 * time.Second, 15 * time.Second},
+		{"unmanaged_negative_clamped_to_zero", false, false, 5 * time.Minute, -1 * time.Second, 0},
+		{"standalone_default_tracks_configured_scan", true, false, 5 * time.Minute, 0, 30 * time.Second},
+		{"managed_default_ten_percent_of_scan", true, true, 30 * time.Minute, 0, 3 * time.Minute},
+		{"secure_client_default_tracks_promoted_scan", true, true, 5 * time.Minute, 0, 3 * time.Minute},
+		{"managed_configured_preserved", true, true, 30 * time.Minute, 45 * time.Second, 45 * time.Second},
+		{"managed_negative_falls_back_to_default", true, true, 30 * time.Minute, -5 * time.Second, 3 * time.Minute},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2914,6 +2981,7 @@ func TestNormalizeAIDiscoveryOptionsPublishJitter(t *testing.T) {
 				ScanInterval:      tc.scan,
 				PublishJitter:     tc.input,
 				ManagedEnterprise: tc.managed,
+				SecureClient:      tc.secureClient,
 			})
 			if opts.PublishJitter != tc.want {
 				t.Fatalf("PublishJitter = %s, want %s (managed=%t, scan=%s, input=%s)",
@@ -3160,5 +3228,36 @@ func TestSecureClientPackageManifestFollowsSymlink(t *testing.T) {
 	}
 	if scan(false) {
 		t.Fatal("standalone scan followed a package manifest symlink")
+	}
+}
+
+func TestExpandCandidatePath_ExpandsConfiguredEnvironment(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CODEX_HOME", root)
+	service := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{HomeDir: t.TempDir()}}
+
+	got := service.expandCandidatePath("$CODEX_HOME/config.toml")
+	want := filepath.Join(root, "config.toml")
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("expanded paths = %v, want [%s]", got, want)
+	}
+}
+
+func TestExpandCandidatePath_SkipsUnsetEnvironment(t *testing.T) {
+	previous, wasSet := os.LookupEnv("CODEX_HOME")
+	if err := os.Unsetenv("CODEX_HOME"); err != nil {
+		t.Fatalf("unset CODEX_HOME: %v", err)
+	}
+	t.Cleanup(func() {
+		if wasSet {
+			_ = os.Setenv("CODEX_HOME", previous)
+		} else {
+			_ = os.Unsetenv("CODEX_HOME")
+		}
+	})
+	service := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{HomeDir: t.TempDir()}}
+
+	if got := service.expandCandidatePath("$CODEX_HOME/config.toml"); got != nil {
+		t.Fatalf("expanded paths = %v, want nil for unset environment", got)
 	}
 }

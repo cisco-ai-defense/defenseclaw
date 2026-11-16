@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
@@ -50,6 +51,64 @@ func checkCandidateAssets(cfg *config.Config) error {
 	return checkCandidateWebhooks(cfg)
 }
 
+// UnselectedCustomPackProblems names each guardrail.custom_packs entry that
+// no setting selects and that the gateway would refuse once a setting did:
+// its folder is missing, the pack fails validation, or its digest pin does
+// not match the pack's files. CheckRulePacks loads only the selected packs,
+// so a managed lifecycle applied such an entry with no notice, while config
+// set says it is registered but will not load (GAP-1076). The digest check
+// is unchanged: these entries are reported, not loaded.
+func UnselectedCustomPackProblems(cfg *config.Config) []string {
+	if cfg == nil || cfg.SecureClientIntegration() || len(cfg.Guardrail.CustomPacks) == 0 {
+		return nil
+	}
+	configs := []*config.Config{cfg}
+	if cfg.Guardrail.HasProfiles() {
+		if derived, err := cfg.DeriveGuardrailProfiles(); err == nil {
+			for _, profile := range derived {
+				configs = append(configs, profile.Config)
+			}
+		}
+	}
+	selected := map[string]bool{}
+	tuned := profileConnectorNames(cfg)
+	for _, c := range configs {
+		for _, scope := range profileRulePackScopes(c, tuned) {
+			if scope.ref.Name != "" {
+				selected[scope.ref.Name] = true
+			}
+		}
+	}
+	names := make([]string, 0, len(cfg.Guardrail.CustomPacks))
+	for name := range cfg.Guardrail.CustomPacks {
+		if !selected[name] {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	cache := guardrail.NewRulePackCache()
+	var problems []string
+	for _, name := range names {
+		pack := cfg.Guardrail.CustomPacks[name]
+		head := fmt.Sprintf("guardrail.custom_packs.%s is registered but will not load", name)
+		dir := strings.TrimSpace(pack.Path)
+		if err := cfg.CustomRulePackError(name); err != nil {
+			problems = append(problems, fmt.Sprintf("%s: %v", head, err))
+			continue
+		}
+		loaded, err := loadValidatedRulePack(cache, dir, "guardrail.custom_packs."+name)
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("%s: %v", head, err))
+			continue
+		}
+		if got := "sha256:" + loaded.FilesDigest(); !strings.EqualFold(strings.TrimSpace(pack.Digest), got) {
+			problems = append(problems, fmt.Sprintf("%s: the files at %s have digest %s, which does not match guardrail.custom_packs.%s.digest; "+
+				"review the pack, then pin that digest in the key", head, dir, got, name))
+		}
+	}
+	return problems
+}
+
 // CheckRulePacks builds every rule pack cfg selects (globally, per connector
 // and per guardrail profile) as the generation build at gateway start does,
 // custom_packs digest pins included. The Windows standalone lifecycle runs it
@@ -60,24 +119,9 @@ func CheckRulePacks(cfg *config.Config) error {
 	if cfg == nil || cfg.SecureClientIntegration() {
 		return nil
 	}
-	type scoped struct {
-		cfg   *config.Config
-		label string
-	}
-	configs := []scoped{{cfg, "config"}}
-	if cfg.Guardrail.HasProfiles() {
-		derived, err := cfg.DeriveGuardrailProfiles()
-		if err != nil {
-			return err
-		}
-		names := make([]string, 0, len(derived))
-		for name := range derived {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			configs = append(configs, scoped{derived[name].Config, "guardrail profile " + name})
-		}
+	configs, err := rulePackConfigs(cfg)
+	if err != nil {
+		return err
 	}
 	cache := guardrail.NewRulePackCache()
 	tuned := profileConnectorNames(cfg)
@@ -89,10 +133,72 @@ func CheckRulePacks(cfg *config.Config) error {
 				return fmt.Errorf("%s rule pack directory %q is not an absolute path; the gateway does not expand ~ "+
 					"or a relative path, so write the full path", c.label, scope.dir)
 			}
+			if err := scope.customEntryError(c.cfg, c.label); err != nil {
+				return err
+			}
 			if builtinPackNotSeeded(scope) {
 				continue
 			}
 			if _, err := loadScopedRulePack(cache, c.cfg, scope, c.label); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// scopedConfig is a configuration the rule packs are built for: the base
+// configuration and each derived guardrail profile.
+type scopedConfig struct {
+	cfg   *config.Config
+	label string
+}
+
+func rulePackConfigs(cfg *config.Config) ([]scopedConfig, error) {
+	configs := []scopedConfig{{cfg, "config"}}
+	if cfg.Guardrail.HasProfiles() {
+		derived, err := cfg.DeriveGuardrailProfiles()
+		if err != nil {
+			return nil, err
+		}
+		names := make([]string, 0, len(derived))
+		for name := range derived {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			configs = append(configs, scopedConfig{derived[name].Config, "guardrail profile " + name})
+		}
+	}
+	return configs, nil
+}
+
+// customEntryError is the config error of the custom_packs entry the scope
+// selects. The gateway runs a broken entry's built-in fallback; a writer or an
+// install check refuses the entry itself.
+func (s rulePackScope) customEntryError(cfg *config.Config, label string) error {
+	if err := cfg.CustomRulePackError(s.ref.Name); err != nil {
+		return fmt.Errorf("%s rule pack %q: %w", label, s.ref.Name, err)
+	}
+	return nil
+}
+
+// CheckSelectedCustomRulePacks is the part of CheckRulePacks that refuses a
+// custom_packs entry some scope selects when it has a config error (a stale
+// pin, an empty or unreadable folder, a pack that does not load), before any
+// pack is read. An entry nothing selects is not checked.
+func CheckSelectedCustomRulePacks(cfg *config.Config) error {
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return nil
+	}
+	configs, err := rulePackConfigs(cfg)
+	if err != nil {
+		return err
+	}
+	tuned := profileConnectorNames(cfg)
+	for _, c := range configs {
+		for _, scope := range profileRulePackScopes(c.cfg, tuned) {
+			if err := scope.customEntryError(c.cfg, c.label); err != nil {
 				return err
 			}
 		}

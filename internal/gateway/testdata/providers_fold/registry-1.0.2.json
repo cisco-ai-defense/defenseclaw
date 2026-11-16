@@ -1,0 +1,51 @@
+[
+  {
+    "name": "openai",
+    "domains": [
+      "api.openai.com",
+      "b11-openai.example.test",
+      "b11-openai-alt.example.test"
+    ],
+    "profile_id": "b11-profile",
+    "env_keys": [
+      "OPENAI_API_KEY",
+      "B11_OPENAI_DUMMY_KEY"
+    ],
+    "base_provider_type": "openai",
+    "base_url": "https://b11-openai.example.test/v1",
+    "allowed_requests": [
+      "chat",
+      "responses"
+    ],
+    "available_models": [
+      "b11-dummy-model"
+    ],
+    "request_path_overrides": {
+      "chat": "/v1/chat/completions",
+      "responses": "/v1/responses"
+    }
+  },
+  {
+    "name": "acme-gw",
+    "domains": [
+      "b11-acme-alt.example.test",
+      "b11-acme.example.test"
+    ],
+    "profile_id": "b11-acme-profile",
+    "env_keys": [
+      "B11_ACME_LEGACY_DUMMY_KEY",
+      "B11_ACME_DUMMY_KEY"
+    ],
+    "base_provider_type": "openai",
+    "base_url": "https://b11-acme.example.test/v1",
+    "request_path_overrides": {
+      "chat": "/acme/chat",
+      "legacy": "/legacy/only",
+      "responses": "/acme/responses"
+    },
+    "extra_headers": {
+      "X-B11-Config": "dummy-legacy-wins",
+      "X-B11-Legacy": "dummy-legacy"
+    }
+  }
+]

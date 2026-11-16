@@ -17,9 +17,10 @@
 package openshell
 
 import (
-	"regexp"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // localhostLookupRE matches a program's report that it could not resolve
@@ -27,7 +28,7 @@ import (
 // 127.0.0.53:53: server misbehaving" and "lookup localhost: no such host",
 // Node's "getaddrinfo EAI_AGAIN localhost" and curl's "Could not resolve
 // host: localhost".
-var localhostLookupRE = regexp.MustCompile(`(?i)(\blookup ([a-z0-9_-]+\.)*localhost(\.localdomain)?(:| on )` +
+var localhostLookupRE = lazyregexp.New(`(?i)(\blookup ([a-z0-9_-]+\.)*localhost(\.localdomain)?(:| on )` +
 	`|\bgetaddrinfo E[A-Z_]+ ([a-z0-9_-]+\.)*localhost\b` +
 	`|\bcould not resolve host:? '?([a-z0-9_-]+\.)*localhost\b)`)
 
@@ -36,9 +37,7 @@ const maxLookupLine = 240
 
 // LocalhostLookupFailure returns the first line of output that reports a
 // failed lookup of localhost, trimmed and cut to a few hundred bytes, and
-// whether output has one. A harness that exits at once with such a line
-// could not resolve localhost in its sandbox: a MicroVM's /etc/hosts is
-// empty (Driver.HostsFile).
+// whether output has one.
 func LocalhostLookupFailure(output string) (string, bool) {
 	for _, line := range strings.Split(output, "\n") {
 		if !localhostLookupRE.MatchString(line) {

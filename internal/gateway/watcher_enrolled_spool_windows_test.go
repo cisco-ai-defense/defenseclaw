@@ -118,6 +118,10 @@ func TestEnrolledKiroMCPServersReachAdmissionThroughSpool(t *testing.T) {
 	if len(servers) != 1 || servers[0].Name != "kiro-notes" || servers[0].Connector != "kiro" || servers[0].Home != alice {
 		t.Fatalf("enrolled Kiro MCP servers = %+v; want alice's kiro-notes", servers)
 	}
+	// #1164: an enrolled user's server starts as that user for its scan.
+	if servers[0].RunAsSID != aliceSID {
+		t.Fatalf("alice's server starts as %q; want her SID", servers[0].RunAsSID)
+	}
 	if _, unknown := set.mcpUnreadable[mcpUnreadableKey("kiro", bob)]; !unknown {
 		t.Fatalf("bob's missing Kiro record was not recorded: %v", set.mcpUnreadable)
 	}
@@ -128,4 +132,10 @@ func TestEnrolledKiroMCPServersReachAdmissionThroughSpool(t *testing.T) {
 	if !refused || decision.Action != "block" || !strings.Contains(decision.Reason, "Kiro MCP servers of") {
 		t.Fatalf("bob: refused=%v decision %+v; want his Kiro MCP tool call refused", refused, decision)
 	}
+}
+
+// enrolledClaudeMCPServers are the Claude Code MCP servers the enumerator
+// published for the account sid (enrolledSpoolMCPServers).
+func enrolledClaudeMCPServers(cfg *config.Config, sid string) ([]config.MCPServerEntry, *enterprisehooks.ClaudeStateUnreadable) {
+	return enrolledSpoolMCPServers(enrolledMCPSpoolDir(cfg, "claudecode"), "claudecode", sid)
 }

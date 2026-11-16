@@ -13,15 +13,19 @@
 package enterprisehooks
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -29,6 +33,28 @@ import (
 type IdentitySpoolAccount struct {
 	UID  int
 	User string
+	// Left marks an account the enrollment settings leave out (excluded,
+	// exempt, out of the manifest): it is not resolved, and its record
+	// goes at once.
+	Left bool
+	// Peer marks an account listed only because the gateway served it (a
+	// machine-policy host, GAP-0422) while a 1.0.4 gateway may have served
+	// its uid. Its record does not write the first migration map: 1.0.4
+	// wrote no record of it, so the account that holds the uid at the
+	// upgrade to this release may not be the one 1.0.3 saw (GAP-1865). It
+	// may still join an existing map under the rollback rule. A served
+	// account on a host that came from a build before 1.0.4 directly is no
+	// Peer: its holder at the first pass is the one 1.0.3 saw, as for an
+	// enrolled account.
+	Peer bool
+	// PreTokenHolder marks a served account that the gateway's homes file
+	// shows a build before 1.0.4 saw hold its uid, with no 1.0.4 gateway
+	// serving the uid since and a home not younger than that sighting (it
+	// is then no Peer). Its record joins an existing migration map too: a
+	// 1.0.4 guardian wrote that map at its first pass with the accounts it
+	// enrolled only, so a 1.0.3 holder that 1.0.4 never served was left out
+	// and its 1.0.3 agents entry refused it for good (GAP-2085, GAP-1976).
+	PreTokenHolder bool
 }
 
 // checkMacOSRecordUID refuses the Open Directory record dscl returned for an
@@ -64,38 +90,85 @@ const identitySpoolLookupTimeout = 10 * time.Second
 // every listed account resolved: the account left the enrollment (excluded,
 // out of the manifest) or was deleted, nothing refreshes its record again,
 // and status and verify warned identity_records_stale about it 30 minutes
-// later (GAP-1113, GAP-1103). A directory account's record stays until it is
-// older than IdentitySpoolMaxAge, when the gateway ignores it anyway, unless
-// the pass resolved an account in that same directory. An outage can remove
-// accounts from one directory's enumeration while another still answers;
-// removing those records would lose their UPN facts (GAP-0145, GAP-1228).
-// A failed pass removes nothing young.
+// later (GAP-1113, GAP-1103). Every pass that does not list a young
+// directory account's record checks it against the directory
+// (identitySpoolDirectoryDeparture): it goes at once when its uid now names
+// another account, the same name in another domain or directory, or a local
+// account, since its verified identity (UPN, domain) is then another
+// account's. Otherwise it stays until it is older than IdentitySpoolMaxAge,
+// when the gateway ignores it anyway, unless two successive passes resolved
+// an account in that same directory, listed it in neither, and each found
+// its uid unresolved; a check that finds the uid still naming the account
+// clears the first answer. An outage can remove accounts from one
+// directory's enumeration while another still answers, a listing can be
+// partial, and one lookup can miss an account its directory still holds;
+// removing those records would lose their UPN facts, and a profile assigned
+// by UPN would fall to the default (GAP-0145, GAP-1228, GAP-1236). An account
+// marked Left goes at once, and so does the young record of an unlisted
+// account withdraw takes (when it is set): every record in dir is checked,
+// so a spool of any size leaves none out. A failed pass removes nothing else
+// young. The checks end with ctx: a record whose check did not finish stays,
+// with its mark, for the next pass.
 //
-// It returns how many accounts the privileged lookup resolved: a pass that
-// lists accounts and resolves none is a directory the guardian cannot reach,
-// which the caller watches for (FlushDirectoryCaches).
+// Where the uid now names another identity than its record (a reassigned
+// uid, a departure to another account, a failed lookup whose facts name
+// another directory identity), the pass also withdraws the record's
+// identity explicitly (IdentitySpoolWithdrawalSuffix): the gateway does not
+// take a missing record as a withdrawal, since a record is also missing
+// before the guardian first writes it.
 func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoolAccount, setOwnership func(string) error,
-	logf func(string, ...any)) (int, error) {
-	resolved := 0
+	logf func(string, ...any), withdraw IdentitySpoolWithdraw) error {
 	if dir == "" {
-		return 0, nil
+		return nil
 	}
 	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return 0, fmt.Errorf("create identity spool: %w", err)
+		return fmt.Errorf("create identity spool: %w", err)
 	}
 	if err := os.Chmod(dir, 0o750); err != nil {
-		return 0, fmt.Errorf("harden identity spool: %w", err)
+		return fmt.Errorf("harden identity spool: %w", err)
 	}
 	if setOwnership != nil {
 		if err := setOwnership(dir); err != nil {
-			return 0, fmt.Errorf("set identity spool ownership: %w", err)
+			return fmt.Errorf("set identity spool ownership: %w", err)
 		}
 	}
-	keep := map[string]bool{}
+	invalidMap, err := moveLegacyAgentOwners(dir)
+	if err != nil {
+		return fmt.Errorf("move agent identity migration map out of rollback records: %w", err)
+	}
+	if invalidMap && logf != nil {
+		logf("[hook-guardian] invalid previous agent identity migration map; quarantined it outside the rollback JSON records and continuing the identity pass")
+	}
+	keep, left := map[string]bool{}, map[string]bool{}
+	owners := map[int]LegacyAgentOwner{}
+	// Until the migration map is recorded, every listed account must be in
+	// it by name (unnamedLegacyAgentOwners).
+	ownersUnrecorded := !LegacyAgentOwnersRecorded(dir)
+	ownerOfRecord := legacyAgentOwnerOfRecord(dir)
+	var unnamed []int
+	// joiners are the owners of PreTokenHolder accounts, which join an
+	// existing migration map (writeLegacyAgentOwnersOnce, GAP-2085).
+	joiners := map[int]LegacyAgentOwner{}
+	// Records this pass rewrites with a fact only a release with the
+	// migration map writes (the account incarnation, Linux, or the owner
+	// token of the record extension, Linux and macOS), and those of them the
+	// previous pass wrote with neither: a release without the map (1.0.3,
+	// which drops the extension when it rewrites a record) wrote that
+	// previous pass (writeLegacyAgentOwnersOnce, GAP-0709, GAP-1787).
+	mapRecords, preMapRecords := 0, 0
+	// Read before any account is collected: a change of the account
+	// database during the pass leaves the records with the earlier stamp,
+	// which the gateway then no longer takes as current.
+	accountsStamp := LocalAccountsStamp()
 	var passErr error
 	answeredDirectories := map[string]bool{}
 	for _, account := range accounts {
-		if account.UID <= 0 || keep[strconv.Itoa(account.UID)+".json"] {
+		if account.UID > 0 && account.Left {
+			left[strconv.Itoa(account.UID)+".json"] = true
+		}
+	}
+	for _, account := range accounts {
+		if account.UID <= 0 || account.Left || keep[strconv.Itoa(account.UID)+".json"] {
 			continue
 		}
 		name := strconv.Itoa(account.UID) + ".json"
@@ -105,21 +178,50 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 				// A UID assigned to a different account must not retain its
 				// previous owner's privileged facts if this lookup fails.
 				if err := os.Remove(filepath.Join(dir, name)); err != nil {
-					return resolved, fmt.Errorf("remove reassigned identity spool record: %w", err)
+					return fmt.Errorf("remove reassigned identity spool record: %w", err)
+				}
+				if err := writeIdentitySpoolWithdrawal(dir, strconv.Itoa(account.UID), setOwnership); err != nil {
+					passErr = errors.Join(passErr, fmt.Errorf("uid %d: withdraw the reassigned identity: %w", account.UID, err))
 				}
 			}
 		}
 		keep[name] = true
+		// The name the guardian's record of the uid gave before this pass:
+		// the account that held it before the upgrade, when the listing and
+		// the lookup below give none.
+		holderBefore := ""
+		if ownersUnrecorded && account.User == "" {
+			holderBefore = legacyAgentHolderOfRecord(dir, account.UID)
+		}
 		lookupCtx, cancel := context.WithTimeout(ctx, identitySpoolLookupTimeout)
-		record, err := collectIdentitySpoolRecord(lookupCtx, account, time.Now().UTC())
+		record, err := identitySpoolCollect(lookupCtx, account, time.Now().UTC())
 		cancel()
 		if err == nil {
-			resolved++
+			previousRecorded, previousMapless := false, false
 			if previous, readErr := ReadIdentitySpoolRecord(dir, strconv.Itoa(account.UID), nil); readErr == nil {
+				previousRecorded = true
+				previousMapless = previous.AccountIncarnation == "" && previous.LegacyOwnerToken == ""
+				record = carryMacOSAccountSID(record, previous)
+				binding := UPNBindingUnknown
+				bind := func(upn string) UPNBinding {
+					// Without a SID on the record it would be checked against,
+					// a not-found answer shows only that the directory cannot
+					// find the account by UPN (an LDAP directory without a UPN
+					// search): it binds nothing either way.
+					binding = identitySpoolBindUPN(ctx, account.UID, record.SSSDDomain, upn, record.AccountSID != "")
+					return binding
+				}
 				var kept bool
-				record, kept = KeepVerifiedInfoPipeUPN(record, previous)
+				record, kept = KeepVerifiedInfoPipeUPN(record, previous, bind)
 				switch {
 				case logf == nil:
+				case kept && binding == UPNBindingUnknown && record.AccountSID == "" && previous.AccountSID == "" && previous.Facts.UPN != "":
+					logf("[hook-guardian] identity facts for uid %d: SSSD InfoPipe answered without userPrincipalName, and the directory did not "+
+						"answer which account holds the UPN reported before; keeping it, for at most %s, and asking again at the next pass. "+
+						"Check that user_attributes in the [ifp] section of sssd.conf lists +userPrincipalName", account.UID, IdentitySpoolKeptUPNMaxAge)
+				case !kept && binding == UPNBindingOther:
+					logf("[hook-guardian] identity facts for uid %d: SSSD InfoPipe answered without userPrincipalName, and the directory gives "+
+						"the UPN reported before to another account or to none; no longer keeping it", account.UID)
 				case kept && previous.UPNSource != UPNSourceInfoPipeKept:
 					logf("[hook-guardian] identity facts for uid %d: SSSD InfoPipe answered without userPrincipalName; keeping the UPN "+
 						"it reported before for at most %s. Check that user_attributes in the [ifp] section of sssd.conf lists +userPrincipalName",
@@ -129,7 +231,27 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 						"no longer keeping the UPN it reported before", account.UID, IdentitySpoolKeptUPNMaxAge)
 				}
 			}
+			if record.User != "" {
+				uid, user := account.UID, record.User
+				record.LegacyOwnerToken = LegacyAgentOwnerTokenFor(record.AccountIncarnation, identitySpoolAccountHome(uid),
+					func() (string, time.Time) { return ownerOfRecord(uid, user) })
+				if record.LegacyOwnerToken != "" {
+					record.AccountsStamp = accountsStamp
+				}
+			}
+			if previousRecorded && (record.AccountIncarnation != "" || record.LegacyOwnerToken != "") {
+				mapRecords++
+				if previousMapless {
+					preMapRecords++
+				}
+			}
 			err = writeIdentitySpoolFile(dir, name, record, setOwnership)
+			if err == nil && record.LegacyOwnerToken != "" && (!account.Peer || LegacyAgentOwnersRecorded(dir)) {
+				owners[account.UID] = LegacyAgentOwner{User: record.User, Token: record.LegacyOwnerToken}
+			}
+			if err == nil && record.LegacyOwnerToken != "" && account.PreTokenHolder {
+				joiners[account.UID] = LegacyAgentOwner{User: record.User, Token: record.LegacyOwnerToken}
+			}
 			if err == nil && identitySpoolDirectoryRecord(record) {
 				if key := identitySpoolDirectoryKey(record); key != "" {
 					answeredDirectories[key] = true
@@ -137,9 +259,19 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 			}
 		} else if record.Key != "" {
 			// Keep a previous verified UPN through a transient lookup
-			// failure. For a newly enrolled account, still provide its
-			// basic NSS facts while the privileged lookup is retried.
-			if _, statErr := os.Stat(filepath.Join(dir, name)); errors.Is(statErr, os.ErrNotExist) {
+			// failure, but only while the facts the lookup did get name the
+			// same directory identity: a uid reused by the same name in
+			// another domain must not keep the other account's UPN. For a
+			// newly enrolled account, still provide its basic NSS facts
+			// while the privileged lookup is retried.
+			if previous, readErr := ReadIdentitySpoolRecord(dir, strconv.Itoa(account.UID), nil); readErr == nil &&
+				identitySpoolSameIdentity(previous, record, false) == identitySpoolDepartureOther {
+				// The basic facts name another identity, and need not
+				// contradict the gateway's cached ones (they have no UPN):
+				// the old identity is withdrawn as well.
+				err = errors.Join(err, writeIdentitySpoolFile(dir, name, record, setOwnership),
+					writeIdentitySpoolWithdrawal(dir, strconv.Itoa(account.UID), setOwnership))
+			} else if _, statErr := os.Stat(filepath.Join(dir, name)); errors.Is(statErr, os.ErrNotExist) {
 				err = errors.Join(err, writeIdentitySpoolFile(dir, name, record, setOwnership))
 			} else if statErr != nil {
 				err = errors.Join(err, statErr)
@@ -151,38 +283,386 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 				logf("[hook-guardian] identity facts for uid %d: %v", account.UID, err)
 			}
 		}
+		// A peer (GAP-1865) is not in the first map, as owner or as pending.
+		if _, proven := owners[account.UID]; !proven && (!account.Peer || !ownersUnrecorded) {
+			if user := cmp.Or(record.User, account.User, holderBefore); user != "" {
+				// No owner proof on this pass (the lookup failed, or the
+				// home is not there now, as an automounted one can be): the
+				// map lists the account as pending, under the name the host
+				// gives it, and a later pass that proves the account under
+				// that name adds its owner (WriteLegacyAgentOwners).
+				owners[account.UID] = LegacyAgentOwner{User: user}
+			} else if ownersUnrecorded {
+				unnamed = append(unnamed, account.UID)
+			}
+		}
+	}
+	complete := passErr == nil
+	if !ownersUnrecorded || unnamedLegacyAgentOwners(ctx, dir, owners, unnamed, logf) {
+		if _, err := WriteLegacyAgentOwners(dir, owners, time.Now(), setOwnership); err != nil {
+			passErr = errors.Join(passErr, fmt.Errorf("record the agent identity migration map: %w", err))
+		}
+	}
+	if !ownersUnrecorded {
+		rolledBack := mapRecords > 0 && preMapRecords == mapRecords
+		if err := addLegacyAgentOwnersToRecordedMap(dir, owners, joiners, complete, rolledBack, setOwnership); err != nil {
+			passErr = errors.Join(passErr, err)
+		}
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return resolved, errors.Join(passErr, fmt.Errorf("read identity spool: %w", err))
+		return errors.Join(passErr, fmt.Errorf("read identity spool: %w", err))
 	}
+	// The marks are read and stored under the lock; the departure lookups
+	// run without it. A stored mark map is never changed afterwards.
+	identitySpoolUnresolved.Lock()
+	unresolvedBefore := identitySpoolUnresolved.byDir[dir]
+	identitySpoolUnresolved.Unlock()
+	unresolved := map[string]bool{}
+	var withdrawErr error
 	for _, entry := range entries {
-		if keep[entry.Name()] {
+		// The migration map, its shards and a quarantined map are kept for
+		// good.
+		if keep[entry.Name()] || isLegacyAgentOwnersFile(entry.Name()) {
 			continue
 		}
-		if info, err := entry.Info(); err == nil && time.Since(info.ModTime()) < IdentitySpoolMaxAge &&
-			(passErr != nil || !identitySpoolRecordLeft(dir, entry, answeredDirectories)) {
-			continue
+		if info, err := entry.Info(); err == nil && time.Since(info.ModTime()) < IdentitySpoolMaxAge && !left[entry.Name()] &&
+			!identitySpoolWithdrawn(dir, entry, withdraw) {
+			gone, directory := identitySpoolRecordLeft(dir, entry, answeredDirectories)
+			if directory {
+				departure := identitySpoolDirectoryDeparture(ctx, dir, entry.Name())
+				switch {
+				case departure == identitySpoolDepartureOther:
+					// The uid now names another account, or the same name in
+					// another domain or directory: the record's verified
+					// identity is no longer this uid's, whatever the pass or
+					// the record's own directory says. It goes now, and is
+					// withdrawn.
+					key, _ := strings.CutSuffix(entry.Name(), ".json")
+					if err := writeIdentitySpoolWithdrawal(dir, key, setOwnership); err != nil {
+						withdrawErr = errors.Join(withdrawErr, fmt.Errorf("uid %s: withdraw the departed identity: %w", key, err))
+					}
+				case departure == identitySpoolDepartureStays:
+					// The uid still names the record's account: the listing
+					// merely omitted it, and an earlier not-found answer was a
+					// miss. Its mark goes, also on a failed pass.
+					continue
+				case passErr != nil:
+					unresolved[entry.Name()] = unresolvedBefore[entry.Name()]
+					continue
+				case !gone:
+					continue
+				case departure != identitySpoolDepartureNotFound:
+					// A check that did not finish shows nothing either way:
+					// the mark stays as it was.
+					unresolved[entry.Name()] = unresolvedBefore[entry.Name()]
+					continue
+				case !unresolvedBefore[entry.Name()]:
+					// The first not-found answer marks the record; it goes at
+					// the next pass that omits it only when that one's check
+					// finds the uid unresolved too. One lookup can miss an
+					// account its directory still holds. Until then the record
+					// ages out (GAP-1236).
+					unresolved[entry.Name()] = true
+					continue
+				}
+			} else if passErr != nil || !gone {
+				continue
+			}
 		}
 		_ = os.RemoveAll(filepath.Join(dir, entry.Name()))
 	}
-	return resolved, passErr
+	identitySpoolUnresolved.Lock()
+	defer identitySpoolUnresolved.Unlock()
+	for name, marked := range unresolved {
+		if !marked {
+			delete(unresolved, name)
+		}
+	}
+	if len(unresolved) == 0 {
+		delete(identitySpoolUnresolved.byDir, dir)
+	} else {
+		identitySpoolUnresolved.byDir[dir] = unresolved
+	}
+	return errors.Join(passErr, withdrawErr)
 }
 
-// identitySpoolRecordLeft reports whether a young unlisted record can be
-// removed. Directory records leave only after their own directory answered;
-// a record without a usable directory key stays until it ages out.
-func identitySpoolRecordLeft(dir string, entry os.DirEntry, answeredDirectories map[string]bool) bool {
+// writeIdentitySpoolWithdrawal withdraws the identity the guardian
+// published for the uid key, as of now (IdentitySpoolWithdrawalSuffix). A
+// young withdrawal stays through the cleanup of later passes (its name is
+// no record's), and goes once it is IdentitySpoolMaxAge old.
+func writeIdentitySpoolWithdrawal(dir, key string, setOwnership func(string) error) error {
+	return writeIdentitySpoolFile(dir, key+IdentitySpoolWithdrawalSuffix, IdentitySpoolRecord{Key: key, UpdatedAt: time.Now().UTC()}, setOwnership)
+}
+
+// IdentitySpoolWithdraw reports whether the record of an account a pass does
+// not list goes at once: the account left the enrollment, and nothing still
+// calls with its identity.
+type IdentitySpoolWithdraw func(uid int, record IdentitySpoolRecord) bool
+
+// identitySpoolWithdrawn reports whether withdraw takes the unlisted record
+// of entry.
+func identitySpoolWithdrawn(dir string, entry os.DirEntry, withdraw IdentitySpoolWithdraw) bool {
+	if withdraw == nil {
+		return false
+	}
 	key, ok := strings.CutSuffix(entry.Name(), ".json")
-	if !ok || !entry.Type().IsRegular() || !validIdentitySpoolKey(key) {
+	if !ok || !entry.Type().IsRegular() {
+		return false
+	}
+	uid, err := strconv.Atoi(key)
+	if err != nil || uid <= 0 {
 		return false
 	}
 	record, err := ReadIdentitySpoolRecord(dir, key, nil)
-	if err != nil || !identitySpoolDirectoryRecord(record) {
-		return true
+	return err == nil && withdraw(uid, record)
+}
+
+// identitySpoolAccountHome is the home directory the account database gives
+// uid, "" when it gives none; tests replace it.
+var identitySpoolAccountHome = func(uid int) string {
+	account, err := StandaloneResolver().LookupUID(uid)
+	if err != nil || account.UID != uid {
+		return ""
 	}
-	directory := identitySpoolDirectoryKey(record)
-	return directory != "" && answeredDirectories[directory]
+	return account.Home
+}
+
+// legacyAgentOwnersPassLimit is how many passes after a rollback window with
+// a failed account the guardian keeps adding the accounts it collects
+// (legacyAgentOwnersRollbackPass).
+const legacyAgentOwnersPassLimit = 3
+
+// addLegacyAgentOwnersToRecordedMap adds accounts to dir's recorded
+// migration map (AddLegacyAgentOwners). rolledBack says the previous pass
+// was a release's without the map (every record it wrote lacks the account
+// incarnation and owner token this pass found): the accounts that release
+// served are added to the map as the first upgrade recorded its own
+// (GAP-0709, GAP-1787), also at the passes after it until one collects every
+// account (legacyAgentOwnersRollbackPass, GAP-1788). joiners, the 1.0.3
+// holders the homes file proves no 1.0.4 gateway served
+// (IdentitySpoolAccount.PreTokenHolder), join an existing map at any pass:
+// the map a 1.0.4 guardian wrote names only the accounts it enrolled
+// (GAP-2085). Recorded and pending uids keep their entries. The first map
+// is WriteLegacyAgentOwners's (a map an older release removed is written
+// anew, as at the first upgrade).
+func addLegacyAgentOwnersToRecordedMap(dir string, owners, joiners map[int]LegacyAgentOwner, complete, rolledBack bool, setOwnership func(string) error) error {
+	if len(owners) == 0 {
+		return nil
+	}
+	if !legacyAgentOwnersRollbackPass(dir, rolledBack, complete) {
+		if len(joiners) == 0 {
+			return nil
+		}
+		if _, err := AddLegacyAgentOwners(dir, joiners, setOwnership); err != nil {
+			return fmt.Errorf("add the 1.0.3 holders 1.0.4 never served to the agent identity migration map: %w", err)
+		}
+		return nil
+	}
+	if _, err := AddLegacyAgentOwners(dir, owners, setOwnership); err != nil {
+		return fmt.Errorf("add the accounts of the rollback to the agent identity migration map: %w", err)
+	}
+	return nil
+}
+
+// legacyAgentOwnersRollbackPending counts, per spool directory, the passes
+// since the first pass after an upgrade back from a rollback window that did
+// not collect every account (GAP-1788). An account whose lookup failed at
+// that pass kept the record the release without the map wrote, and the next
+// pass no longer finds the rollback (the other records carry the map's
+// facts again), so the accounts later passes collect are still added, up to
+// the first complete pass or legacyAgentOwnersPassLimit passes, as the first
+// map waits for them.
+var legacyAgentOwnersRollbackPending = struct {
+	sync.Mutex
+	byDir map[string]int
+}{byDir: map[string]int{}}
+
+// legacyAgentOwnersRollbackPass reports whether this pass adds the accounts
+// it collected to dir's existing migration map: a pass that finds the
+// rollback window, or one of the passes after it while accounts failed.
+func legacyAgentOwnersRollbackPass(dir string, rolledBack, complete bool) bool {
+	legacyAgentOwnersRollbackPending.Lock()
+	defer legacyAgentOwnersRollbackPending.Unlock()
+	passes, pending := legacyAgentOwnersRollbackPending.byDir[dir]
+	if !rolledBack && !pending {
+		return false
+	}
+	if passes++; complete || passes >= legacyAgentOwnersPassLimit {
+		delete(legacyAgentOwnersRollbackPending.byDir, dir)
+	} else {
+		legacyAgentOwnersRollbackPending.byDir[dir] = passes
+	}
+	return true
+}
+
+// identitySpoolCollect is collectIdentitySpoolRecord; tests replace it.
+var identitySpoolCollect = collectIdentitySpoolRecord
+
+// identitySpoolBindUPN asks the directory whether it gives upn to the
+// account with uid in its SSSD domain sssdDomain (KeepVerifiedInfoPipeUPN);
+// notFoundIsOther says a not-found answer means the UPN is no longer this
+// account's. Tests replace it.
+var identitySpoolBindUPN = bindIdentitySpoolUPN
+
+// identitySpoolDeparture is what the directory shows about the account of a
+// young directory record that a pass did not list.
+type identitySpoolDeparture int
+
+const (
+	// identitySpoolDepartureUnknown: a lookup failed, timed out or was cut
+	// short by the pass, or nothing could be compared. It shows nothing: an
+	// error is never a deletion.
+	identitySpoolDepartureUnknown identitySpoolDeparture = iota
+	// identitySpoolDepartureStays: the uid still names the record's account
+	// in the record's directory.
+	identitySpoolDepartureStays
+	// identitySpoolDepartureNotFound: the uid does not resolve. One answer
+	// can miss an account its directory still holds (GAP-1236).
+	identitySpoolDepartureNotFound
+	// identitySpoolDepartureOther: the uid names another account, the same
+	// name in another domain or directory, or a local account.
+	identitySpoolDepartureOther
+)
+
+// identitySpoolDirectoryDeparture looks up the uid of the record name and,
+// when it still names the record's account, that account's directory facts,
+// and compares them with the record's. The name alone does not bind the
+// record: a uid can be reused by the same short name in another domain, and
+// the gateway, which checks only the name, would then select a profile by
+// the other domain's UPN. The lookups end with ctx and after
+// identitySpoolLookupTimeout.
+func identitySpoolDirectoryDeparture(ctx context.Context, dir, name string) identitySpoolDeparture {
+	key, _ := strings.CutSuffix(name, ".json")
+	uid, err := strconv.Atoi(key)
+	if err != nil || uid <= 0 || ctx.Err() != nil {
+		return identitySpoolDepartureUnknown
+	}
+	record, err := ReadIdentitySpoolRecord(dir, key, nil)
+	if err != nil {
+		return identitySpoolDepartureUnknown
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, identitySpoolLookupTimeout)
+	defer cancel()
+	account, err := identityLookupGated(lookupCtx, &identitySpoolDepartureGate, key, func(ctx context.Context) (unixidentity.Account, error) {
+		return identitySpoolLookupUID(ctx, uid)
+	})
+	switch {
+	case err != nil && lookupCtx.Err() == nil && unixidentity.IsNotFound(err):
+		return identitySpoolDepartureNotFound
+	case err != nil:
+		return identitySpoolDepartureUnknown
+	case account.UID != uid || (record.User != "" && !strings.EqualFold(account.Name, record.User)):
+		return identitySpoolDepartureOther
+	}
+	fresh, err := identityLookupGated(lookupCtx, &identitySpoolDepartureGate, key, func(ctx context.Context) (IdentitySpoolRecord, error) {
+		return identitySpoolCollect(ctx, IdentitySpoolAccount{UID: uid, User: account.Name}, time.Now().UTC())
+	})
+	if lookupCtx.Err() != nil || (err != nil && fresh.Key == "") {
+		return identitySpoolDepartureUnknown
+	}
+	return identitySpoolSameIdentity(record, fresh, err == nil)
+}
+
+// identitySpoolMissingSIDIsAnotherIdentity: on Linux SSSD keeps an
+// account's SID through an outage, so a record without one predates the
+// SID (1.0.3 and older) and cannot be bound to the account the lookup now
+// resolves. On macOS a record of 1.0.6 or older has none either, and one
+// written while the domain was away before any pass reached it: there the
+// SID is compared only when both have one (rel-1-0-6:GAP-0275 review).
+var identitySpoolMissingSIDIsAnotherIdentity = runtime.GOOS != "darwin"
+
+// identitySpoolSameIdentity compares a record's directory identity with
+// fresh, what the directory answers for its uid now; complete says every
+// lookup of fresh succeeded. Each fact both name must agree, the account's
+// SID first: an account recreated under the same uid, name and domain has
+// another SID. A complete
+// answer that is no directory account's (the uid is a local account now)
+// is another identity; an incomplete one that names nothing to compare
+// shows nothing.
+func identitySpoolSameIdentity(record, fresh IdentitySpoolRecord, complete bool) identitySpoolDeparture {
+	if !identitySpoolDirectoryRecord(record) {
+		return identitySpoolDepartureUnknown
+	}
+	if !identitySpoolDirectoryRecord(fresh) {
+		if complete {
+			return identitySpoolDepartureOther
+		}
+		return identitySpoolDepartureUnknown
+	}
+	if fresh.AccountSID != "" && record.AccountSID == "" && identitySpoolMissingSIDIsAnotherIdentity {
+		// Older spool records may lack the account's immutable SID. A
+		// matching uid, name and domain cannot bind their UPN to the
+		// account whose SID the current lookup resolved.
+		return identitySpoolDepartureOther
+	}
+	compared := false
+	for _, pair := range [][2]string{
+		{record.AccountSID, fresh.AccountSID},
+		{record.SSSDDomain, fresh.SSSDDomain},
+		{record.AccountDomain, fresh.AccountDomain},
+		{record.Facts.Domain, fresh.Facts.Domain},
+		{record.Facts.Realm, fresh.Facts.Realm},
+		{string(record.Facts.Directory), string(fresh.Facts.Directory)},
+		{record.Facts.UPN, fresh.Facts.UPN},
+		{record.Facts.TenantID, fresh.Facts.TenantID},
+	} {
+		if pair[0] == "" || pair[1] == "" {
+			continue
+		}
+		if !strings.EqualFold(pair[0], pair[1]) {
+			return identitySpoolDepartureOther
+		}
+		compared = true
+	}
+	if !compared {
+		return identitySpoolDepartureUnknown
+	}
+	return identitySpoolDepartureStays
+}
+
+// identitySpoolLookupUID is the guardian's account lookup by uid, bounded by
+// ctx; tests replace it.
+var identitySpoolLookupUID = func(ctx context.Context, uid int) (unixidentity.Account, error) {
+	return unixidentity.Default(ctx).LookupUID(uid)
+}
+
+// identitySpoolDepartureGate holds the departure lookups of the passes, by
+// uid: a lookup that does not stop with its deadline (an Open Directory or
+// NSS call) is left to finish on its own, and until it returns only its own
+// account's check is skipped (identityLookupGated).
+var identitySpoolDepartureGate identityLookupGate
+
+// identitySpoolUnresolved holds, per spool directory, the young directory
+// records whose uid the departure check of the last pass that omitted them
+// found unresolved (identitySpoolDepartureNotFound) while their directory
+// answered. A listing's omission alone shows nothing, since partial listings
+// omit accounts that still exist, and one not-found answer does not show
+// that the account left: a lookup can miss it once (GAP-1236). The record
+// goes at a second not-found answer in a row; a check that finds the uid
+// naming the account again clears the mark. The guardian is one
+// long-running process; after a restart the first pass only marks.
+var identitySpoolUnresolved = struct {
+	sync.Mutex
+	byDir map[string]map[string]bool
+}{byDir: map[string]map[string]bool{}}
+
+// identitySpoolRecordLeft reports whether a young unlisted record can be
+// removed, and whether it is a directory record, which goes only when a
+// second pass confirms its account's departure. Directory records leave
+// only after their own directory answered; a record without a usable
+// directory key stays until it ages out.
+func identitySpoolRecordLeft(dir string, entry os.DirEntry, answeredDirectories map[string]bool) (left, directory bool) {
+	key, ok := strings.CutSuffix(entry.Name(), ".json")
+	if !ok || !entry.Type().IsRegular() || !validIdentitySpoolKey(key) {
+		return false, false
+	}
+	record, err := ReadIdentitySpoolRecord(dir, key, nil)
+	if err != nil || !identitySpoolDirectoryRecord(record) {
+		return true, false
+	}
+	name := identitySpoolDirectoryKey(record)
+	return name != "" && answeredDirectories[name], true
 }
 
 // identitySpoolDirectoryKey uses the SSSD domain that actually held the uid
@@ -209,4 +689,25 @@ func identitySpoolDirectoryRecord(record IdentitySpoolRecord) bool {
 		return facts.Directory != useridentity.DirectoryLocal
 	}
 	return record.SSSDDomain != "" || facts.Realm != "" || facts.Domain != "" || facts.UPN != ""
+}
+
+// trustedIdentityTool returns the first root-owned, non-writable candidate.
+func trustedIdentityTool(candidates ...string) string {
+	for _, candidate := range candidates {
+		info, err := os.Lstat(candidate)
+		if err != nil || !info.Mode().IsRegular() || !rootOwnedChain(candidate) {
+			continue
+		}
+		return candidate
+	}
+	return ""
+}
+
+// boundedOutput trims command output to a sane size.
+func boundedOutput(data []byte) string {
+	const limit = 64 << 10
+	if len(data) > limit {
+		data = data[:limit]
+	}
+	return strings.ToValidUTF8(string(data), "")
 }

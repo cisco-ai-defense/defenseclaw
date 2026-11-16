@@ -19,6 +19,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"github.com/spf13/cobra"
 )
@@ -30,9 +31,14 @@ var (
 	windowsCodexRequirementsVerifier       = connector.VerifyWindowsCodexMachineRequirements
 	windowsCodexRequirementsRemover        = connector.RemoveWindowsCodexMachineRequirements
 	windowsCodexRequirementsExecutable     = os.Executable
-	windowsCodexRequirementsManifestTrust  = managed.ValidateTrustedFilePath
+	windowsCodexRequirementsManifestTrust  = managed.ValidateTrustedPolicyFilePath
 	windowsCodexRequirementsManifestLoader = enterprisehooks.LoadManifest
 )
+
+// windowsCodexRequirementsTeardownRemover is the uninstall's removal (remove
+// --uninstall): the only one that keeps a link at the Codex machine-policy
+// folder (GAP-0773).
+var windowsCodexRequirementsTeardownRemover = connector.RemoveWindowsCodexMachineRequirementsForTeardown
 
 type windowsCodexDeploymentMetadata struct {
 	SchemaVersion          int                                  `json:"schema_version"`
@@ -59,7 +65,8 @@ func newWindowsCodexRequirementsCommand() *cobra.Command {
 	}
 	for _, action := range []string{"inspect", "reconcile", "verify", "remove"} {
 		action := action
-		var jsonOutput bool
+		var jsonOutput, uninstall bool
+		var baseFile string
 		child := &cobra.Command{
 			Use:          action,
 			Short:        action + " protected Codex requirements",
@@ -67,19 +74,27 @@ func newWindowsCodexRequirementsCommand() *cobra.Command {
 			Args:         cobra.NoArgs,
 			SilenceUsage: true,
 			RunE: func(cmd *cobra.Command, _ []string) error {
-				return runWindowsCodexRequirementsAction(cmd, action, jsonOutput)
+				return runWindowsCodexRequirementsAction(cmd, action, jsonOutput, uninstall, baseFile)
 			},
 		}
 		child.Flags().BoolVar(&jsonOutput, "json", false, "emit machine-readable JSON")
+		if action == "remove" {
+			child.Flags().BoolVar(&uninstall, "uninstall", false,
+				"the uninstall's removal: keep, and do not read, a link at the Codex machine-policy folder")
+		}
+		if action == "reconcile" {
+			child.Flags().StringVar(&baseFile, "base-file", "",
+				"render the managed policy into this document (under the install state's recovered-policy folder) instead of the requirements file on disk")
+		}
 		command.AddCommand(child)
 	}
 	return command
 }
 
-func runWindowsCodexRequirementsAction(cmd *cobra.Command, action string, jsonOutput bool) error {
+func runWindowsCodexRequirementsAction(cmd *cobra.Command, action string, jsonOutput, uninstall bool, baseFile string) error {
 	// Identity authorization intentionally precedes layout/config reads. A
 	// standard user cannot use this hidden parser as a protected-file oracle.
-	if err := enterpriseHooksNativePlatformPreflight(); err != nil {
+	if err := enterpriseHooksPlatformPreflight(); err != nil {
 		return writeWindowsCodexRequirementsFailure(cmd, action, jsonOutput, err)
 	}
 	opts, err := windowsCodexRequirementsLayoutResolver(action)
@@ -92,14 +107,26 @@ func runWindowsCodexRequirementsAction(cmd *cobra.Command, action string, jsonOu
 	case "inspect":
 		report, err = windowsCodexRequirementsInspector(opts)
 	case "reconcile":
+		if baseFile != "" {
+			base, baseErr := readWindowsCodexRequirementsBaseFile(baseFile, opts.OwnershipPath)
+			if baseErr != nil {
+				return writeWindowsCodexRequirementsFailure(cmd, action, jsonOutput, baseErr)
+			}
+			opts.RenderBase, opts.RenderBaseSet = base, true
+		}
 		report, err = windowsCodexRequirementsReconciler(opts)
 	case "verify":
 		report, err = windowsCodexRequirementsVerifier(opts)
 	case "remove":
-		report, err = windowsCodexRequirementsRemover(opts)
+		if uninstall {
+			report, err = windowsCodexRequirementsTeardownRemover(opts)
+		} else {
+			report, err = windowsCodexRequirementsRemover(opts)
+		}
 	default:
 		err = fmt.Errorf("unsupported Codex requirements action %q", action)
 	}
+	annotateWindowsCodexRequirementsFailure(&report, err)
 	if jsonOutput {
 		if encodeErr := json.NewEncoder(cmd.OutOrStdout()).Encode(report); encodeErr != nil && err == nil {
 			err = encodeErr
@@ -159,14 +186,22 @@ func resolveWindowsCodexRequirementsLayout(
 		return opts, fmt.Errorf("resolve running gateway path: %w", err)
 	}
 	executable = filepath.Clean(executable)
-	if !strings.EqualFold(filepath.Base(executable), "defenseclaw-gateway.exe") ||
-		!strings.EqualFold(filepath.Base(filepath.Dir(executable)), "bin") {
-		return opts, fmt.Errorf(
-			"Codex requirements command must run from exact installed gateway <InstallRoot>\\bin\\defenseclaw-gateway.exe, got %s",
-			executable,
-		)
+	installRoot := ""
+	if action == "lifecycle-staged-retire" {
+		installRoot, err = resolveWindowsStagedRetireInstallRoot(executable)
+		if err != nil {
+			return opts, err
+		}
+	} else {
+		if !strings.EqualFold(filepath.Base(executable), "defenseclaw-gateway.exe") ||
+			!strings.EqualFold(filepath.Base(filepath.Dir(executable)), "bin") {
+			return opts, fmt.Errorf(
+				"codex requirements command must run from exact installed gateway <InstallRoot>\\bin\\defenseclaw-gateway.exe, got %s",
+				executable,
+			)
+		}
+		installRoot = filepath.Dir(filepath.Dir(executable))
 	}
-	installRoot := filepath.Dir(filepath.Dir(executable))
 
 	runtimeDir, err := exactWindowsCodexLayoutEnv("DEFENSECLAW_HOME")
 	if err != nil {
@@ -214,7 +249,7 @@ func resolveWindowsCodexRequirementsLayout(
 		return opts, err
 	}
 	loadConfig := config.LoadFromFile
-	if action == "lifecycle" || action == "remove" {
+	if action == "lifecycle" || action == "lifecycle-staged-retire" || action == "remove" {
 		// Only the API port is read here, also while a rollback restores
 		// the previous deployment under a new config the services could
 		// not load (GAP-1291).
@@ -223,6 +258,9 @@ func resolveWindowsCodexRequirementsLayout(
 	protectedConfig, err := loadConfig(configPath)
 	if err != nil {
 		return opts, fmt.Errorf("load protected Windows enterprise config: %w", err)
+	}
+	if action == "lifecycle-staged-retire" && protectedConfig.SecureClientIntegration() {
+		return opts, errors.New("staged managed-hook retirement refuses Secure Client integration")
 	}
 	gatewayAddr, err := connector.NormalizeWindowsManagedGatewayAddr(
 		fmt.Sprintf("127.0.0.1:%d", protectedConfig.Gateway.APIPort),
@@ -246,11 +284,18 @@ func resolveWindowsCodexRequirementsLayout(
 		GatewayServiceName:              gatewayServiceName,
 		AgentApplicationControlEnforced: applicationControl,
 		ClaudeEffectivePolicyVerified:   claudeEffectivePolicy,
-		HookContractID: connector.WindowsCodexStandaloneHookContract(
+		HookContractID: connector.WindowsCodexManagedHookContract(
 			filepath.Join(installRoot, "bin", "defenseclaw-hook.exe"),
 		),
+		SecureClient: protectedConfig.SecureClientIntegration(),
 	}
-	if err := enableWindowsCodexManifestTargets(stateRoot, &opts); err != nil {
+	if protectedConfig.StandaloneEnterprise() {
+		// Machine policy follows the administrator's connector configuration,
+		// even before the enumerator enrolls anyone for that connector.
+		for _, name := range enterprisehooks.EffectiveWindowsStandaloneHookConnectors(protectedConfig) {
+			opts.EnableManifestTarget(name)
+		}
+	} else if err := enableWindowsCodexManifestTargets(stateRoot, &opts); err != nil {
 		return connector.WindowsCodexMachineRequirementsOptions{}, err
 	}
 
@@ -283,6 +328,79 @@ func resolveWindowsCodexRequirementsLayout(
 		)
 	}
 	return opts, nil
+}
+
+// A committed journal left by an older gateway must be retired with this
+// release's GC before Setup commits. The installed deployment record supplies
+// the layout that an installed gateway derives from its path. This exception
+// is limited to standalone, LocalSystem and retire.
+func resolveWindowsStagedRetireInstallRoot(executable string) (string, error) {
+	if err := validateWindowsStagedRetireGatewayImage(executable); err != nil {
+		return "", err
+	}
+	if !enterprisehooks.WindowsStandaloneProcess() {
+		return "", errors.New("staged managed-hook retirement requires the standalone profile")
+	}
+	// The LocalSystem check of a staged retire that retires a committed
+	// journal runs in that retire. With no journal the staged retire only
+	// classifies, which an elevated administrator's Setup /ensure or /repair
+	// runs too (GAP-0822).
+	runtimeDir, err := exactWindowsCodexLayoutEnv("DEFENSECLAW_HOME")
+	if err != nil {
+		return "", err
+	}
+	if !strings.EqualFold(filepath.Base(runtimeDir), "runtime") {
+		return "", errors.New("staged managed-hook retirement requires the exact managed StateRoot\\runtime directory")
+	}
+	stateRoot := filepath.Dir(runtimeDir)
+	metadata, exists, err := readWindowsCodexDeploymentMetadata(filepath.Join(stateRoot, "install", "deployment.json"))
+	if err != nil {
+		return "", err
+	}
+	if !exists {
+		return "", errors.New("staged managed-hook retirement requires protected installed deployment metadata")
+	}
+	roots, err := windowsManagedLayout.roots(winpath.EnterpriseProfileStandalone)
+	if err != nil {
+		return "", err
+	}
+	return validateWindowsStagedRetireGatewayLayout(executable, stateRoot, metadata, roots)
+}
+
+// validateWindowsStagedRetireGatewayImage admits the replacement gateway from
+// every folder a documented install path runs it from: the Setup stage
+// %ProgramData%\DefenseClaw-Enterprise-Setup-<hex> that Setup, the MDM
+// wrapper and Intune use, or the payload folder (flat, or with a libexec
+// folder) an administrator runs the lifecycle CLI from. The file and every
+// folder above it must be owned and writable only by SYSTEM, Administrators
+// or TrustedInstaller, which outside the shared Cisco folders is the rule
+// Setup's source descriptor applies to it just before it starts this process.
+func validateWindowsStagedRetireGatewayImage(executable string) error {
+	if !strings.EqualFold(filepath.Base(executable), "defenseclaw-gateway.exe") ||
+		!filepath.IsAbs(executable) || filepath.Clean(executable) != executable {
+		return fmt.Errorf("staged managed-hook retirement requires an exact replacement gateway path, got %s", executable)
+	}
+	return managed.ValidateTrustedFilePathStrictAncestors(executable, "staged managed-hook retirement gateway")
+}
+
+func validateWindowsStagedRetireGatewayLayout(
+	executable, stateRoot string,
+	metadata windowsCodexDeploymentMetadata,
+	roots winpath.EnterpriseRoots,
+) (string, error) {
+	if metadata.SchemaVersion != 1 ||
+		!managed.IsManagedEnterprise(metadata.DeploymentMode) ||
+		!sameWindowsEnterprisePathCLI(metadata.StateRoot, stateRoot) ||
+		(metadata.Installed != nil && !*metadata.Installed) {
+		return "", errors.New("staged managed-hook retirement requires matching installed deployment metadata")
+	}
+	if err := winpath.ValidateEnterpriseInstallRoot(roots, metadata.InstallRoot); err != nil {
+		return "", err
+	}
+	if sameWindowsEnterprisePathCLI(executable, filepath.Join(metadata.InstallRoot, "bin", "defenseclaw-gateway.exe")) {
+		return "", errors.New("staged managed-hook retirement requires a replacement gateway, not the installed gateway")
+	}
+	return filepath.Clean(metadata.InstallRoot), nil
 }
 
 // enableWindowsCodexManifestTargets records in opts each target connector
@@ -334,7 +452,7 @@ func readWindowsCodexDeploymentMetadata(
 	path string,
 ) (windowsCodexDeploymentMetadata, bool, error) {
 	var metadata windowsCodexDeploymentMetadata
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return metadata, false, nil
 	}
@@ -344,7 +462,7 @@ func readWindowsCodexDeploymentMetadata(
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > 128<<10 {
 		return metadata, false, errors.New("protected deployment metadata is not a bounded regular file")
 	}
-	if err := managed.ValidateTrustedFilePath(path, "Windows enterprise deployment metadata"); err != nil {
+	if err := managed.ValidateTrustedPolicyFilePath(path, "Windows enterprise deployment metadata"); err != nil {
 		return metadata, false, err
 	}
 	file, err := os.Open(path)

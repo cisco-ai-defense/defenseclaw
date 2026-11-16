@@ -27,7 +27,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -41,6 +40,15 @@ import (
 const executableExitMarker = "__DEFENSECLAW_LASTEXITCODE__="
 
 func TestNativeWindowsExecutableForeignCollisionAndRecovery(t *testing.T) {
+	// The built gateway is a separate process that reads this computer's
+	// own machine marker (isolateTestHost cannot reach it): on a managed
+	// computer it refuses every per-user start by design (GAP-2572).
+	if where, managed := managedHostStandaloneMarker(); managed {
+		t.Skip("skipped on a managed computer: the per-user gateway this test builds refuses to start here (" + where + ")")
+	}
+	if where, managed := managedHostStandaloneRecord(); managed {
+		t.Skip("skipped on a managed computer: the per-user gateway this test builds refuses to start here (" + where + ")")
+	}
 	binary := buildGatewayExecutable(t)
 	home := t.TempDir()
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -121,6 +129,12 @@ observability: {}
 	}
 	if !strings.Contains(startOutput, "OK (PID") || strings.Contains(startOutput, "STARTING") {
 		t.Fatalf("successful start did not render READY-only completion:\n%s", startOutput)
+	}
+	// The start claimed its API port in the test home's ProgramData, not the
+	// computer's (PR #1427 stress, GAP-0079 follow-up).
+	claim := filepath.Join(executableTestProgramData(home), gatewayPortClaimPrefix+strconv.Itoa(port))
+	if got, own := gatewayPortClaimSID(claim), currentAccountSID(); own == "" || got != own {
+		t.Fatalf("the start's port claim %s names %q, want this account %q", claim, got, own)
 	}
 
 	running, managedPID := d.IsRunning()
@@ -395,11 +409,7 @@ func reserveExecutableTestPort(t *testing.T) int {
 
 func executableTestRepoRoot(t *testing.T) string {
 	t.Helper()
-	_, sourceFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("locate test source")
-	}
-	return filepath.Clean(filepath.Join(filepath.Dir(sourceFile), "..", ".."))
+	return cliTestRepoRoot(t)
 }
 
 // seedExecutableTestRulePack installs the shipped default rule pack where an
@@ -417,6 +427,21 @@ func seedExecutableTestRulePack(t *testing.T, home string) {
 func buildGatewayExecutable(t *testing.T) string {
 	t.Helper()
 	repoRoot := executableTestRepoRoot(t)
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("needs a Go toolchain to build the gateway: " + err.Error())
+	}
+	// LocalSystem has its own, usually empty, module cache; on a lane host
+	// with no module proxy in reach the build only downloads until the
+	// deadline (GAP-2572). Build from the cache or say why not.
+	if testRunsAsLocalSystem() {
+		probe := exec.Command("go", "list", "-deps", "./cmd/defenseclaw")
+		probe.Dir = repoRoot
+		probe.Env = append(os.Environ(), "GOPROXY=off")
+		if output, err := probe.CombinedOutput(); err != nil {
+			line, _, _ := strings.Cut(strings.TrimSpace(string(output)), "\n")
+			t.Skip("skipped as LocalSystem: this account's Go module cache cannot build the gateway without a module download (GOPROXY=off): " + line)
+		}
+	}
 	binary := filepath.Join(t.TempDir(), "defenseclaw-gateway.exe")
 	// A cold -trimpath build of the gateway takes 80-145 s on a hosted
 	// Windows runner and has passed 180 s under load, so allow 6 minutes.
@@ -455,6 +480,9 @@ $code = $LASTEXITCODE
 [Console]::Out.Write($output)
 [Console]::Out.WriteLine("` + executableExitMarker + `$code")
 exit 0`
+	if err := os.MkdirAll(executableTestProgramData(home), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script)
 	cmd.Env = executableTestEnv(home, binary, command)
 	outputBytes, err := cmd.CombinedOutput()
@@ -478,8 +506,9 @@ func executableTestEnv(home, binary, command string) []string {
 	removed := []string{
 		"DEFENSECLAW_HOME", "DEFENSECLAW_CONFIG", "DEFENSECLAW_TEST_EXE", "DEFENSECLAW_TEST_COMMAND",
 		"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "CODEX_HOME", "PSModuleAnalysisCachePath",
+		"ProgramData",
 	}
-	env := make([]string, 0, len(os.Environ())+9)
+	env := make([]string, 0, len(os.Environ())+10)
 	for _, entry := range os.Environ() {
 		key, _, ok := strings.Cut(entry, "=")
 		if !ok {
@@ -506,9 +535,18 @@ func executableTestEnv(home, binary, command string) []string {
 		"APPDATA="+filepath.Join(home, "AppData", "Roaming"),
 		"LOCALAPPDATA="+filepath.Join(home, "AppData", "Local"),
 		"CODEX_HOME="+filepath.Join(home, ".codex"),
+		// The built gateway claims its API port in %ProgramData%
+		// (claimGatewayAPIPort): keep the claim in the test home, as
+		// isolateTestHost does in this process (PR #1427 stress, GAP-0079
+		// follow-up).
+		"ProgramData="+executableTestProgramData(home),
 		"PSModuleAnalysisCachePath="+filepath.Join(home, "AppData", "Local", "Microsoft", "Windows", "PowerShell", "ModuleAnalysisCache"),
 	)
 }
+
+// executableTestProgramData is the built gateway's %ProgramData% in its
+// test home.
+func executableTestProgramData(home string) string { return filepath.Join(home, "ProgramData") }
 
 func assertExecutableTestListenerOwner(t *testing.T, port, wantPID int) {
 	t.Helper()

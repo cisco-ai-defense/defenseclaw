@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"reflect"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -54,12 +55,16 @@ func OpenCodeManagedPlugin() []byte {
 	return append([]byte(nil), openCodeManagedPlugin...)
 }
 
-// openCodeManagedPluginVendorLimit is the OpenCode behavior no machine file
-// can override (observed with OpenCode 1.18.32): pure mode drops managed
-// config plugins too, and a variable release builds honor replaces the
-// managed config directory. Such a session never calls DefenseClaw, so
-// status can report the entry in place while that session runs without it.
-const openCodeManagedPluginVendorLimit = "OpenCode skips the managed plugin in pure mode (--pure or OPENCODE_PURE=1) and when OPENCODE_TEST_MANAGED_CONFIG_DIR points at another directory; a session started that way runs without DefenseClaw's hooks on either route"
+// openCodeManagedPluginVendorLimit says what an OpenCode launch can do to the
+// managed plugin. OpenCode V1 (1.18.32) skipped it in pure mode and when
+// OPENCODE_TEST_MANAGED_CONFIG_DIR moved the managed folder. OpenCode 2.2.5,
+// the supported release, has no --pure flag and reads neither variable
+// (checked in its Linux and Windows binaries, GAP-0053). Its managed folder
+// is /etc/opencode on Linux and /Library/Application Support/opencode on
+// macOS; on Windows it is ProgramData\opencode taken from the process
+// environment, so a launch with another ProgramData skips it. The launch
+// scan reports that (enterprisestatus opencode_managed_config_relocated).
+const openCodeManagedPluginVendorLimit = "OpenCode 2.2.5 has no pure mode (no --pure flag) and does not read OPENCODE_PURE or OPENCODE_TEST_MANAGED_CONFIG_DIR, which made OpenCode V1 skip the managed plugin. It loads the plugin from /etc/opencode on Linux and /Library/Application Support/opencode on macOS; on Windows from %ProgramData%\\opencode as the process environment names it, so a session started with another ProgramData runs without DefenseClaw's hooks. Status and verify report a running OpenCode whose ProgramData was moved or that was started with those variables"
 
 // OpenCodeManagedPluginPath is where a standalone install places the
 // administrator-owned managed OpenCode plugin. StandaloneOptions always
@@ -67,9 +72,9 @@ const openCodeManagedPluginVendorLimit = "OpenCode skips the managed plugin in p
 // only while a trusted file is installed there.
 func OpenCodeManagedPluginPath(layout managed.StandaloneLayout) string {
 	if layout.GOOS == "windows" {
-		return strings.TrimRight(layout.InstallRoot, `\`) + `\share\opencode\defenseclaw.js`
+		return strings.TrimRight(layout.InstallRoot, `\`) + `\share\opencode\index.js`
 	}
-	return path.Join(layout.InstallRoot, "share", "opencode", "defenseclaw.js")
+	return path.Join(layout.InstallRoot, "share", "opencode", "index.js")
 }
 
 // OpenCodeManagedConfigPath returns the managed config file, preferring an
@@ -199,12 +204,28 @@ func (opencodeTarget) Paths(opts Options) ([]string, error) {
 	return []string{path}, nil
 }
 
+// openCodePluginSpec names the V2 directory entrypoint containing index.js.
+// Retain the old defenseclaw.js ownership alias through DefenseClaw 1.x for
+// the supported 0.8.x-to-1.x upgrade/teardown path; remove it with that path
+// before DefenseClaw 2.0. It never activates a V1 runtime.
+func openCodePluginSpec(opts Options) string {
+	return dirFor(opts, opts.OpenCodePluginPath)
+}
+
 func opencodeEntryIsOwned(opts Options, raw any) bool {
+	if object, ok := raw.(map[string]any); ok {
+		raw = object["package"]
+	}
+	if object, ok := raw.(*object); ok {
+		raw, _ = object.get("package")
+	}
 	value, ok := raw.(string)
 	if !ok || opts.OpenCodePluginPath == "" {
 		return false
 	}
-	return value == opts.OpenCodePluginPath || value == "file://"+opts.OpenCodePluginPath
+	value = strings.TrimPrefix(value, "file://")
+	directory := openCodePluginSpec(opts)
+	return value == opts.OpenCodePluginPath || value == directory || value == joinFor(opts, directory, "defenseclaw.js")
 }
 
 func mergeOpenCodeConfig(opts Options, current []byte) ([]byte, bool, error) {
@@ -212,54 +233,68 @@ func mergeOpenCodeConfig(opts Options, current []byte) ([]byte, bool, error) {
 	if err != nil {
 		return nil, false, fmt.Errorf("parse OpenCode managed config (comments in .jsonc cannot be merged): %w", err)
 	}
-	value, _ := doc.get("plugin")
-	list, _ := value.([]any)
-	if value != nil && list == nil {
-		return nil, false, fmt.Errorf("OpenCode managed config plugin has unsupported type %T", value)
+	// Preserve the operator's config dialect. V2 also migrates the v1 key.
+	key := "plugin"
+	if _, native := doc.get("plugins"); native {
+		key = "plugins"
 	}
-	kept := make([]any, 0, len(list)+1)
-	owned := 0
-	for _, item := range list {
-		if opencodeEntryIsOwned(opts, item) {
-			owned++
-			if owned > 1 {
-				continue
+	changed := false
+	for _, field := range []string{"plugin", "plugins"} {
+		value, exists := doc.get(field)
+		list, ok := value.([]any)
+		if exists && !ok {
+			return nil, false, fmt.Errorf("OpenCode managed config %s has unsupported type %T", field, value)
+		}
+		kept := make([]any, 0, len(list)+1)
+		for _, item := range list {
+			if !opencodeEntryIsOwned(opts, item) {
+				kept = append(kept, item)
 			}
 		}
-		kept = append(kept, item)
+		if field == key {
+			kept = append(kept, openCodePluginSpec(opts))
+		}
+		if (exists || field == key) && !reflect.DeepEqual(list, kept) {
+			changed = true
+		}
+		if len(kept) > 0 {
+			doc.set(field, kept)
+		} else {
+			doc.delete(field)
+		}
 	}
-	exact := owned == 1
-	if owned == 0 {
-		kept = append(kept, opts.OpenCodePluginPath)
-	}
-	doc.set("plugin", kept)
 	rendered, err := encodeOrdered(doc)
-	return rendered, exact && len(kept) == len(list), err
+	return rendered, !changed, err
 }
 
-// stripOpenCodeConfig is the ownership stripFunc for the managed OpenCode
-// config.
+// stripOpenCodeConfig removes only owned entries in either vendor dialect.
 func stripOpenCodeConfig(opts Options, current []byte) ([]byte, bool, error) {
 	doc, err := decodeOrderedObject(current)
 	if err != nil {
 		return nil, false, err
 	}
-	value, _ := doc.get("plugin")
-	list, _ := value.([]any)
-	kept := make([]any, 0, len(list))
-	for _, item := range list {
-		if !opencodeEntryIsOwned(opts, item) {
-			kept = append(kept, item)
+	changed := false
+	for _, field := range []string{"plugin", "plugins"} {
+		value, _ := doc.get(field)
+		list, _ := value.([]any)
+		kept := make([]any, 0, len(list))
+		for _, item := range list {
+			if !opencodeEntryIsOwned(opts, item) {
+				kept = append(kept, item)
+			}
+		}
+		if len(kept) == len(list) {
+			continue
+		}
+		changed = true
+		if len(kept) == 0 {
+			doc.delete(field)
+		} else {
+			doc.set(field, kept)
 		}
 	}
-	if len(kept) == len(list) {
-		// Nothing of ours: leave the administrator's bytes alone.
+	if !changed {
 		return current, false, nil
-	}
-	if len(kept) == 0 {
-		doc.delete("plugin")
-	} else {
-		doc.set("plugin", kept)
 	}
 	if doc.len() == 0 {
 		return nil, true, nil
@@ -273,13 +308,18 @@ func inspectOpenCode(opts Options, current []byte, state *State) error {
 	if err != nil {
 		return err
 	}
-	value, _ := doc.get("plugin")
-	list, _ := value.([]any)
-	for _, item := range list {
-		if opencodeEntryIsOwned(opts, item) {
-			state.OwnedEntries++
-		} else {
-			state.ForeignEntries++
+	for _, key := range []string{"plugin", "plugins"} {
+		value, _ := doc.get(key)
+		list, _ := value.([]any)
+		for _, item := range list {
+			if opencodeEntryIsOwned(opts, item) {
+				state.OwnedEntries++
+				if item != openCodePluginSpec(opts) {
+					state.conflict("OpenCode managed plugin must reference its directory for v2 compatibility")
+				}
+			} else {
+				state.ForeignEntries++
+			}
 		}
 	}
 	if state.OwnedEntries != 1 {
@@ -345,7 +385,7 @@ func (t opencodeTarget) Reconcile(opts Options) (State, error) {
 	}
 	var created []string
 	if policy.Ownership == config.MachinePolicyOwnershipMerge {
-		if created, err = takeBackPolicyPath(opts, path, &state); err != nil {
+		if created, _, err = takeBackPolicyPathFor(opts, path, opencodeFolderUse, &state); err != nil {
 			return state, err
 		}
 		// A config an unprivileged user planted in the folder before
@@ -404,6 +444,9 @@ func (t opencodeTarget) Verify(opts Options) (State, error) {
 	state := newOpenCodeState(opts, policy, path)
 	if openCodePerUserFallback(opts, policy, &state) {
 		return state, nil
+	}
+	if err := validatePolicyLeafDir(opts, platformPath(opts, dirFor(opts, path))); err != nil {
+		state.conflict("%v; unprivileged users can add an opencode.json or opencode.jsonc there, which OpenCode loads for every user", err)
 	}
 	current, exists, err := readPolicyFile(opts, path)
 	if err != nil {

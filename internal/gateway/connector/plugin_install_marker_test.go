@@ -32,11 +32,10 @@ func TestManagedPluginInstallMarkerRequiresAManagedAbsolutePath(t *testing.T) {
 }
 
 // After an uninstall the OpenCode plugin stays in a signed-out user's profile
-// with a closed fail mode. Once the gateway is unreachable or the credential
-// is gone AND the administrator-owned install marker is gone, it must allow
-// instead of blocking every tool call, at the gateway call and at the
-// foreign-hook guard; while the marker exists it still fails closed, and a
-// render without a marker never relaxes.
+// with a closed fail mode. A removed marker alone cannot authorize a post to
+// an unproved TCP listener. The existing uninstall path permits the stale
+// plugin to stop blocking only when its credential is gone too; while the
+// marker exists it still fails closed, and a render without one never relaxes.
 func TestOpenCodePluginStopsFailingClosedOnceTheDeploymentIsRemoved(t *testing.T) {
 	nodeForTest(t)
 	root := testenv.PrivateTempDir(t)
@@ -91,7 +90,7 @@ import { createInterface } from "node:readline";
 const plugins = [];
 for (const path of process.argv.slice(1)) {
   const loaded = await import(pathToFileURL(path).href);
-  plugins.push(await loaded.DefenseClaw({ directory: "" }));
+  plugins.push(await fixtureBridge(loaded, { directory: "" }));
 }
 console.log("` + nodeHarnessReady + `");
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
@@ -120,8 +119,8 @@ for await (const line of lines) {
 	if err := os.Remove(marker); err != nil {
 		t.Fatal(err)
 	}
-	if got := evaluate("uninstalled, gateway gone", 0); got != "allow" {
-		t.Fatalf("uninstalled deployment = %q, want allow", got)
+	if got := evaluate("uninstalled, gateway gone", 0); !strings.Contains(got, "listener has no account proof") {
+		t.Fatalf("uninstalled deployment with a credential = %q, want unproved-listener block", got)
 	}
 	if got := evaluate("no marker rendered", 1); !strings.HasPrefix(got, "block:DefenseClaw hook failed closed") {
 		t.Fatalf("plugin without a marker = %q, want an unconditional fail-closed block", got)

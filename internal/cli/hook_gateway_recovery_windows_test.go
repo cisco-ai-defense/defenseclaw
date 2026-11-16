@@ -583,4 +583,17 @@ func TestPowerShellPerUserHookStartsItsGateway(t *testing.T) {
 	if len(started) != 2 || !sameWindowsHookPath(started[0], gateway) || !sameWindowsHookPath(started[1], dataRoot) {
 		t.Fatalf("started %q, want %s for %s", started, gateway, dataRoot)
 	}
+
+	// GAP-0196: while install.ps1 holds .install.lock (it stops the gateway
+	// with the stop marker), the recovery starts nothing and reports no
+	// error, so the hook keeps retrying within the restart budget instead of
+	// failing at once with the operator-stop refusal.
+	started = nil
+	if err := os.Mkdir(filepath.Join(dataRoot, ".install.lock"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	markGatewayStopped(dataRoot)
+	if err := opts.GatewayRecovery(context.Background(), syscall.ECONNREFUSED); err != nil || len(started) != 0 {
+		t.Fatalf("recovery during an install = %v, started %q; want no start and no error", err, started)
+	}
 }

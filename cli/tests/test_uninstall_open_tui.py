@@ -82,7 +82,6 @@ def test_lock_left_by_a_closed_tui_does_not_block(tmp_path: Path) -> None:
 def test_dry_run_warns_that_the_real_run_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     data = _data_dir(tmp_path)
     plan = cmd_uninstall.UninstallPlan(data_dir=str(data), remove_data_dir=True)
-    monkeypatch.setattr(cmd_uninstall, "_dispatch_native_windows_uninstall", lambda **_kwargs: False)
     monkeypatch.setattr(cmd_uninstall, "_build_plan", lambda **_kwargs: plan)
     monkeypatch.setattr(cmd_uninstall, "_render_plan", lambda *_args, **_kwargs: None)
     warnings: list[str] = []

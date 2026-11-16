@@ -27,22 +27,27 @@ import (
 )
 
 // The lifecycle test fault lets the CI upgrade gate prove that a failed
-// upgrade rolls back. A file named testFaultFileName in the root-only
-// lifecycle state directory, owned by root, with no group or other access
-// and the content testFaultAfterServices, makes an apply fail right after
-// its services started, so the transaction rolls back. Only root can create
-// it there; any other file of that name is ignored with a warning. This
-// lifecycle runs only the standalone profile; Secure Client never reads it.
+// upgrade rolls back, and a bundle cell prove that a failure after the
+// commit leaves the receipt, the bundle state and the enforced policy in
+// agreement. A file named testFaultFileName in the root-only lifecycle state
+// directory, owned by root, with no group or other access, names the stage:
+// testFaultAfterServices makes an apply fail right after its services
+// started, so the transaction rolls back; testFaultAfterCommit makes it
+// report an error once its deployment committed, as a later step that fails
+// does (GAP-0271). Only root can create it there; any other file of that
+// name is ignored with a warning. This lifecycle runs only the standalone
+// profile; Secure Client never reads it.
 const (
 	testFaultFileName      = ".test-fault"
 	testFaultAfterServices = "after_services"
+	testFaultAfterCommit   = "after_commit"
 	codeLifecycleTestFault = "lifecycle_test_fault"
 )
 
-// testFaultAfterServicesRequested reports whether the test fault file asks
-// this run to fail after its services start. Whenever the file exists the
-// result says what the lifecycle did with it.
-func (l *lifecycle) testFaultAfterServicesRequested() bool {
+// testFaultRequested reports whether the test fault file asks this run to
+// fail at stage. Whenever the file exists, the check of the first stage
+// (after_services) says in the result what the lifecycle did with it.
+func (l *lifecycle) testFaultRequested(stage string) bool {
 	env := l.env
 	path := env.P(filepath.Join(env.Layout.LifecycleDir, testFaultFileName))
 	info, err := os.Lstat(path)
@@ -50,7 +55,9 @@ func (l *lifecycle) testFaultAfterServicesRequested() bool {
 		return false
 	}
 	ignore := func(reason string) bool {
-		l.result.AddWarning(codeLifecycleTestFault, fmt.Sprintf("ignored the lifecycle test fault file %s: %s", path, reason))
+		if stage == testFaultAfterServices {
+			l.result.AddWarning(codeLifecycleTestFault, fmt.Sprintf("ignored the lifecycle test fault file %s: %s", path, reason))
+		}
 		return false
 	}
 	if err != nil {
@@ -69,9 +76,17 @@ func (l *lifecycle) testFaultAfterServicesRequested() bool {
 	if err != nil {
 		return ignore(err.Error())
 	}
-	if stage := strings.TrimSpace(string(data)); stage != testFaultAfterServices {
-		return ignore(fmt.Sprintf("it names the stage %q; the only stage is %q", stage, testFaultAfterServices))
+	named := strings.TrimSpace(string(data))
+	if named != testFaultAfterServices && named != testFaultAfterCommit {
+		return ignore(fmt.Sprintf("it names the stage %q; the stages are %q and %q", named, testFaultAfterServices, testFaultAfterCommit))
 	}
-	l.result.AddWarning(codeLifecycleTestFault, fmt.Sprintf("the lifecycle test fault file %s failed this run after its services started", path))
+	if named != stage {
+		return false
+	}
+	when := "after its services started"
+	if stage == testFaultAfterCommit {
+		when = "after its deployment committed"
+	}
+	l.result.AddWarning(codeLifecycleTestFault, fmt.Sprintf("the lifecycle test fault file %s failed this run %s", path, when))
 	return true
 }

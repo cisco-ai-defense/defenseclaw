@@ -72,7 +72,8 @@ const (
 // (under /sandbox) would otherwise answer for itself. The shell reads the
 // hostname, the capabilities, the processors and the memory (in kB) itself.
 // The arguments are the files to check; a "mount" line names each that is a
-// mount point, with its options.
+// mount point, with its options. Only the vm check name adds the localhost
+// resolver result; the docker check retains its original work and output.
 const verifyScript = `printf 'uid %s\n' "$(/usr/bin/id -u)"
 printf 'gid %s\n' "$(/usr/bin/id -g)"
 host=
@@ -90,6 +91,25 @@ printf 'cpus %s\n' "$cpus"
 while read -r key value rest; do
   [ "$key" = MemTotal: ] && printf 'memtotal %s\n' "$value"
 done < /proc/meminfo
+if [ "$0" = defenseclaw-verify-vm ]; then
+  trusted_resolver() {
+    for d in / /usr /usr/local /usr/local/lib /usr/local/lib/defenseclaw; do
+      [ ! -L "$d" ] && [ -d "$d" ] && [ "$(/usr/bin/stat -c %u "$d")" = 0 ] || return 1
+      mode=$(/usr/bin/stat -c %a "$d") || return 1
+      [ $((0$mode & 022)) -eq 0 ] || return 1
+    done
+    f=/usr/local/lib/defenseclaw/localhost-resolver
+    [ -f "$f" ] && [ ! -L "$f" ] && [ "$(/usr/bin/stat -c %u "$f")" = 0 ] || return 1
+    mode=$(/usr/bin/stat -c %a "$f") || return 1
+    [ $((0$mode & 022)) -eq 0 ]
+  }
+  if trusted_resolver && localhost=$(/usr/local/lib/defenseclaw/localhost-resolver 2>/dev/null); then
+    printf '%s\n' "$localhost" | while IFS= read -r answer; do printf 'localhost %s\n' "$answer"; done
+    echo localhost-ok
+  else
+    echo localhost-failed
+  fi
+fi
 if [ "$#" -gt 0 ]; then
   /usr/bin/sha256sum -- "$@" | while read -r sum file; do printf 'sha256 %s %s\n' "$sum" "$file"; done
   /usr/bin/stat -c 'stat %u %g %a %n' -- "$@"
@@ -99,10 +119,19 @@ if [ "$#" -gt 0 ]; then
 fi
 echo end`
 
-// verifyArgv is the workload check's command for the files of want.
-func verifyArgv(want verifyRecord) []string {
+// localhostResolverPath is the pinned caller every DefenseClaw MicroVM image
+// carries (image.microVMResolverPath).
+const localhostResolverPath = "/usr/local/lib/defenseclaw/localhost-resolver"
+
+// verifyArgv is the workload check's command for the files of want;
+// resolver adds the MicroVM localhost result.
+func verifyArgv(want verifyRecord, resolver bool) []string {
+	checkName := "defenseclaw-verify"
+	if resolver {
+		checkName += "-vm"
+	}
 	argv := []string{"/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "HOME=" + connector.SandboxHomeDir,
-		"/bin/sh", "-c", verifyScript, "defenseclaw-verify"}
+		"/bin/sh", "-c", verifyScript, checkName}
 	for _, f := range want.Files {
 		argv = append(argv, f.Path)
 	}
@@ -138,9 +167,20 @@ type workloadFacts struct {
 	// CPUs are the processors the workload sees, and MemTotalKB the
 	// memory (/proc/meminfo MemTotal, in kB; a little under what the
 	// MicroVM was given, the kernel keeps some).
-	CPUs       int
-	MemTotalKB int64
-	Files      map[string]*fileFacts
+	CPUs              int
+	MemTotalKB        int64
+	Files             map[string]*fileFacts
+	LocalhostAnswers  []string
+	LocalhostOK       bool
+	LocalhostReported bool
+	// DirectResolverOK is set only by a separate exec of the pinned caller,
+	// and DirectResolverRefusal to the reason that caller refused with.
+	DirectResolverOK      bool
+	DirectResolverRefusal string
+	// ResolverExempt marks a MicroVM whose record is from before the guest
+	// resolver check (verifyRecord.LocalhostResolver): its create passed
+	// the hook-fire MicroVM verdict of DefenseClaw 1.0.7 and earlier.
+	ResolverExempt bool
 	// seen holds the tags of the single-valued lines read.
 	seen map[string]bool
 	// End is set when the answer was complete.
@@ -233,6 +273,19 @@ func parseWorkloadFacts(out []byte) (workloadFacts, error) {
 			}
 			f := file(path)
 			f.MountPoint, f.MountOptions = true, opts
+		case "localhost":
+			if facts.LocalhostReported || len(rest) > 512 || strings.ContainsAny(rest, "\x00\r") || len(facts.LocalhostAnswers) >= 64 {
+				err = fmt.Errorf("a malformed localhost answer")
+				break
+			}
+			facts.LocalhostAnswers = append(facts.LocalhostAnswers, rest)
+		case "localhost-ok", "localhost-failed":
+			if rest != "" || facts.LocalhostReported {
+				err = fmt.Errorf("a malformed localhost result")
+				break
+			}
+			facts.LocalhostReported = true
+			facts.LocalhostOK = tag == "localhost-ok"
 		case "end":
 			facts.End = true
 		default:
@@ -293,6 +346,35 @@ func sharedLimitProblems(got workloadFacts, d openshell.Driver, limits workloadL
 	return out
 }
 
+// cutShortProblem is what the workload check says when its answer ends
+// before "end".
+const cutShortProblem = "the check's answer was cut short"
+
+// shellStartEnv are the variables a shell reads on start-up and obeys
+// before it runs a script: SHELLOPTS=noexec makes the workload check's
+// shell read its script and run none of it, so the answer is empty. A
+// sandbox created with one of them in --env can be refused for that alone.
+// BASH_ENV and ENV are not here: the create refuses them by name already
+// (reservedEnv).
+var shellStartEnv = []string{"BASHOPTS", "SHELLOPTS"}
+
+// cutShortWithEnv is the refusal of a check whose answer was cut short in a
+// sandbox created with the environment env: when env sets a shell start-up
+// variable it names the setting and says what to do, in one sentence.
+// Without one it is the plain cutShortProblem.
+func cutShortWithEnv(env map[string]string) string {
+	var names []string
+	for _, n := range shellStartEnv {
+		if _, ok := env[n]; ok {
+			names = append(names, n)
+		}
+	}
+	if len(names) == 0 {
+		return cutShortProblem
+	}
+	return cutShortProblem + ", most likely by the shell setting " + strings.Join(names, ", ") + " passed with --env; run the sandbox again without it"
+}
+
 // workloadProblems lists how the sandbox differs from want, as the user
 // reads it; none means it runs as DefenseClaw prepared it. d is the
 // sandbox's compute driver, which says where a wrong identity comes from,
@@ -301,7 +383,7 @@ func sharedLimitProblems(got workloadFacts, d openshell.Driver, limits workloadL
 func workloadProblems(want verifyRecord, got workloadFacts, d openshell.Driver, limits workloadLimits) []string {
 	var out []string
 	if !got.End {
-		return []string{"the check's answer was cut short"}
+		return []string{cutShortProblem}
 	}
 	for _, tag := range []string{"uid", "gid", "hostname", "home", "capeff"} {
 		if !got.seen[tag] {
@@ -329,6 +411,14 @@ func workloadProblems(want verifyRecord, got workloadFacts, d openshell.Driver, 
 	}
 	if !d.SandboxLimits {
 		out = append(out, sharedLimitProblems(got, d, limits)...)
+	}
+	if d.Name == openshell.DriverVM && !got.ResolverExempt {
+		if problem := microVMResolverProblem(got); problem != "" {
+			out = append(out, problem)
+		}
+		if !got.DirectResolverOK {
+			out = append(out, directResolverProblem(got.DirectResolverRefusal))
+		}
 	}
 	for _, w := range want.Files {
 		f := got.Files[w.Path]
@@ -358,13 +448,92 @@ func workloadProblems(want verifyRecord, got workloadFacts, d openshell.Driver, 
 	return out
 }
 
+// microVMResolverProblem judges what the pinned caller printed when the
+// image's shell ran it. The shell is the image's, so this result alone
+// admits nothing; the direct exec (directResolverOK) must pass too.
+func microVMResolverProblem(got workloadFacts) string {
+	if !got.LocalhostReported || !got.LocalhostOK || len(got.LocalhostAnswers) == 0 {
+		return "the MicroVM could not resolve localhost to its loopback ingress"
+	}
+	if !resolverAnswerOK(got.LocalhostAnswers) {
+		return "the MicroVM resolver did not return only its loopback ingress for localhost"
+	}
+	return ""
+}
+
+// resolverAnswerOK judges the lines of the pinned caller
+// (image/testdata/localhost-resolver.c): one line per distinct answer of
+// the unspec, inet and inet6 queries in that order, each 127.0.0.1 or ::1,
+// at least one unspec answer, and "loopback-only" last.
+func resolverAnswerOK(lines []string) bool {
+	if len(lines) < 2 || lines[len(lines)-1] != "loopback-only" {
+		return false
+	}
+	rank := map[string]int{"unspec 127.0.0.1": 0, "unspec ::1": 0, "inet 127.0.0.1": 1, "inet6 ::1": 2}
+	seen := map[string]bool{}
+	last, unspec := 0, false
+	for _, line := range lines[:len(lines)-1] {
+		r, ok := rank[line]
+		if !ok || seen[line] || r < last {
+			return false
+		}
+		seen[line], last = true, r
+		unspec = unspec || r == 0
+	}
+	return unspec
+}
+
+// directResolverOK judges the output of the pinned caller invoked directly
+// as the sandbox workload (resolverAnswerOK, newline-terminated).
+func directResolverOK(out []byte) bool {
+	if len(out) == 0 || len(out) > 4096 || out[len(out)-1] != '\n' {
+		return false
+	}
+	return resolverAnswerOK(strings.Split(strings.TrimSuffix(string(out), "\n"), "\n"))
+}
+
+// directResolverRefusal is the reason the pinned caller refused with
+// ("refused <reason>" last), or "".
+func directResolverRefusal(out []byte) string {
+	lines := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+	reason, ok := strings.CutPrefix(lines[len(lines)-1], "refused ")
+	if !ok || len(out) > 4096 {
+		return ""
+	}
+	switch reason {
+	case "preload", "nss", "nonloopback", "noanswer", "family":
+		return reason
+	}
+	return ""
+}
+
+// directResolverProblem says why the direct resolver check failed.
+func directResolverProblem(refusal string) string {
+	switch refusal {
+	case "preload":
+		return "the MicroVM image loads code into every program ahead of libc (/etc/ld.so.preload), so DefenseClaw cannot verify what its programs resolve localhost to"
+	case "nss":
+		return "the MicroVM image's /etc/nsswitch.conf lets an NSS module or DNS answer localhost besides /etc/hosts, so DefenseClaw cannot verify what its programs resolve localhost to; set `hosts: files dns` in the image"
+	case "nonloopback", "family":
+		return "the MicroVM resolver did not return only its loopback ingress for localhost"
+	case "noanswer":
+		return "the MicroVM could not resolve localhost to its loopback ingress"
+	}
+	return "the MicroVM could not verify localhost with its resolver caller"
+}
+
 // verifyWorkload runs the workload check in sandbox name and returns what
 // it found. A sandbox that does not run as want expects, or that cannot be
 // checked, is refused with CodePolicyRejected: the caller deletes or stops
 // it, so one not as prepared never keeps running, and outcome (what the
-// caller does with it, "it was deleted") ends the refusal's message.
-func (m *Manager) verifyWorkload(ctx context.Context, gw *Gateway, name string, want verifyRecord, eff *packs.Effective, outcome string) (workloadFacts, error) {
-	res, err := m.ownExec(ctx, gw, name, verifyArgv(want), openshell.ExecOptions{
+// caller does with it, "it was deleted") ends the refusal's message. env is
+// the extra environment the create passed (nil at a start); a check cut
+// short names the shell setting in it that most likely did that.
+func (m *Manager) verifyWorkload(ctx context.Context, gw *Gateway, name string, want verifyRecord, eff *packs.Effective, outcome string, env map[string]string) (workloadFacts, error) {
+	// A MicroVM record from before the guest resolver check keeps the check
+	// it was created under (verifyRecord.LocalhostResolver).
+	resolverCheck := gw.Driver.Name == openshell.DriverVM && want.LocalhostResolver
+	res, err := m.ownExec(ctx, gw, name, verifyArgv(want, resolverCheck), openshell.ExecOptions{
 		Timeout: verifyTimeout, Idempotent: true, MaxOutputBytes: verifyMaxOutput,
 	})
 	if err != nil {
@@ -381,7 +550,27 @@ func (m *Manager) verifyWorkload(ctx context.Context, gw *Gateway, name string, 
 	case res.ExitCode != 0:
 		problems = []string{fmt.Sprintf("the check exited with status %d", res.ExitCode)}
 	default:
+		facts.ResolverExempt = gw.Driver.Name == openshell.DriverVM && !resolverCheck
+		if resolverCheck {
+			// Execute the pinned caller directly. The image's env and shell can
+			// alter their own output, so their localhost lines are insufficient.
+			resolver, resolverErr := m.ownExec(ctx, gw, name,
+				[]string{localhostResolverPath}, openshell.ExecOptions{
+					Timeout: verifyTimeout, Attempts: 1, MaxOutputBytes: 4096, NoSandboxTimeout: true,
+				})
+			if resolverErr != nil {
+				m.dropGateway(gw, resolverErr)
+				return workloadFacts{}, upstream("check the resolver of sandbox "+name, resolverErr)
+			}
+			facts.DirectResolverOK = !resolver.Truncated && resolver.ExitCode == 0 && directResolverOK(resolver.Stdout)
+			if !resolver.Truncated {
+				facts.DirectResolverRefusal = directResolverRefusal(resolver.Stdout)
+			}
+		}
 		problems = workloadProblems(want, facts, gw.Driver, adminLimits(eff.MaxResources()))
+		if len(problems) == 1 && problems[0] == cutShortProblem {
+			problems[0] = cutShortWithEnv(env)
+		}
 	}
 	if len(problems) == 0 {
 		return facts, nil
@@ -399,12 +588,12 @@ func (m *Manager) verifyWorkload(ctx context.Context, gw *Gateway, name string, 
 // what the check expects (create.go); a record without it cannot be
 // checked, and is refused the same way.
 func (m *Manager) verifyStarted(ctx context.Context, gw *Gateway, b *box, rec record) error {
-	const outcome = "DefenseClaw stopped it again (its work is kept)"
+	outcome := stoppedUnverifiedOutcome(gw.Driver.StopFlushes)
 	if rec.Verify == nil {
 		m.logf("%s: sandbox %s has no workload check in its record; stopping it again", gatewaylog.ErrCodeOpenShellPolicyRejected, rec.Name)
 		refusal := &sandboxapi.Error{Code: sandboxapi.CodePolicyRejected,
 			Message: "sandbox " + rec.Name + " does not run as DefenseClaw prepared it; " + outcome,
-			Detail:  "its record does not say what its create delivered, so it cannot be checked: pull its work, delete it and run it again"}
+			Detail:  "its record does not say what its create delivered, so it cannot be checked: before deleting it, try `defenseclaw sandbox pull " + rec.Name + " --apply` (or --branch or --patch-out FILE) and confirm the work was saved; a fresh pull of this stopped copy may be refused because it must start again. If so, keep the sandbox while you assess recovery; delete it only after saving the work you need, then run it again"}
 		if m.stopUnverified(ctx, gw, b) != nil {
 			return stillRunning(rec.Name, refusal, outcome)
 		}
@@ -413,7 +602,7 @@ func (m *Manager) verifyStarted(ctx context.Context, gw *Gateway, b *box, rec re
 	m.mu.Lock()
 	eff := b.eff
 	m.mu.Unlock()
-	facts, err := m.verifyWorkload(ctx, gw, rec.Name, *rec.Verify, eff, outcome)
+	facts, err := m.verifyWorkload(ctx, gw, rec.Name, *rec.Verify, eff, outcome, nil)
 	if err != nil {
 		if m.stopUnverified(ctx, gw, b) != nil {
 			return stillRunning(rec.Name, err, outcome)
@@ -434,13 +623,24 @@ func (m *Manager) verifyStarted(ctx context.Context, gw *Gateway, b *box, rec re
 	return nil
 }
 
+// stoppedUnverifiedOutcome keeps Docker's work claim while qualifying a
+// MicroVM stop: a failed guest sync cannot preserve its later writes.
+func stoppedUnverifiedOutcome(stopFlushes bool) string {
+	if !stopFlushes {
+		return "DefenseClaw stopped it again (only work through the last successful disk sync is kept)"
+	}
+	return "DefenseClaw stopped it again (its work is kept)"
+}
+
 // stopUnverified stops again a sandbox a start must not leave running (it
-// failed the workload check, or still has a rule of its last session),
-// flushing its disk first where the driver's stop does not (the last
-// session's work stays for pull), and records the phase OpenShell reports
-// then. It returns why the stop failed: the sandbox then still runs, and
-// the start's refusal must say so rather than that it was stopped
-// (GAP-0014).
+// failed the workload check, still has a rule of its last session, or did
+// not get its network back on a new supervisor), flushing its disk first
+// where the driver's stop does not (the last session's work stays for
+// pull), and records the phase OpenShell reports then. A flush that fails
+// holds the stop back (GAP-0902): the VM keeps running, contained
+// (containUnsynced). It returns why the sandbox was not stopped: it then
+// still runs, and the start's refusal must say so rather than that it was
+// stopped (GAP-0014).
 func (m *Manager) stopUnverified(ctx context.Context, gw *Gateway, b *box) error {
 	ctx, cancel := detached(ctx, rollbackTimeout)
 	defer cancel()
@@ -448,7 +648,12 @@ func (m *Manager) stopUnverified(ctx context.Context, gw *Gateway, b *box) error
 	name := b.rec.Name
 	m.mu.Unlock()
 	if !gw.Driver.StopFlushes {
-		m.flushSandbox(ctx, gw, name)
+		if flushErr := m.flushSandbox(ctx, gw, name); flushErr != nil {
+			m.restorePhase(ctx, gw, b, audit.SandboxTriggerStart, audit.SandboxPhaseStarting)
+			err := containedStopRefusal(name, flushErr, m.containUnsynced(ctx, b, "its start failed"))
+			m.logf("%s: sandbox %s must not keep running after its start: %v", gatewaylog.ErrCodeOpenShellSandboxFailed, name, err)
+			return err
+		}
 	}
 	_, err := gw.Client.StopSandbox(ctx, name)
 	if err == nil {

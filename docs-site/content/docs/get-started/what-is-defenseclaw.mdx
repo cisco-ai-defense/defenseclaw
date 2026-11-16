@@ -8,37 +8,27 @@ keywords:
   - AI agent observability
 ---
 
-DefenseClaw is the **enforcement and evidence layer** for AI coding agents. It sits between your agent (Claude Code, Codex, GitHub Copilot CLI, Cursor and others) and the rest of the world, and answers three questions for you, by default:
-
-1. **What is this agent allowed to do?** Skills, MCP servers, plugins, and generated code are scanned before they run.
-2. **What is the agent doing right now?** Prompts, completions, and tool calls are inspected at runtime.
-3. **What did the agent do?** Every decision lands in an SQLite audit DB and your existing telemetry sinks (OTLP, Splunk, webhooks).
+DefenseClaw sits between your coding agent and what it can do. It answers three questions: what is the agent allowed to install, what is it doing right now, and what did it do. Skills, MCP servers and plugins are scanned before they run. Prompts and tool calls are checked as they happen, for the events each connector sends; coverage differs by agent (see the [capability matrix](/docs/connectors/capability-matrix)). Every decision goes to a local audit database and to the destinations you configure.
 
 ## Three modes, one command
 
-`defenseclaw guardrail mode observe` or `action` switches all agents, or one
-with `--connector`. HITL is an extra setting on top of action mode, turned on
-with `defenseclaw setup guardrail --human-approval`.
-
-| Mode | What it does |
-| --- | --- |
-| **Observe** | Logs everything and blocks nothing. Use it for the first week. |
-| **Action** | Blocks findings at or above the block level. The shipped default blocks CRITICAL and alerts on HIGH and MEDIUM; `defenseclaw guardrail block-at` changes the level, for every path at once ([Thresholds](/docs/policies/thresholds)). |
-| **HITL** | Action mode plus human approval: a risky call pauses and the agent asks you, on agents with a native approval prompt. On other agents the call takes the connector's fallback right away, and the audit log records that approval was asked for. |
-
-## Why a separate sidecar?
-
-Inserting an inspection step inside the agent process means every agent has to grow its own copy. DefenseClaw moves the inspection out of the agent and into a single Go sidecar (`defenseclaw-gateway`), so:
-
-- The agent does not need to be modified — connectors are written *for* the agent (Claude Code's hooks, the hooks in Codex's `config.toml`, Cursor's `hooks.json`, OpenCode's plugin).
-- One audit log covers every agent the operator runs.
-- One config file serves every connector — there is exactly one `~/.defenseclaw/config.yaml`, and it is the only place a decision lives: the hook scripts and provider files are derived from it, and the running gateway applies a change to it without a restart. See [Configuration: one source of truth](/docs/reference/source-of-truth). The admission policy is **shared** across all connectors, while guardrail *posture* (mode, fail mode, HITL, block message, rule pack, thresholds) can optionally be set **per connector** when one gateway serves several hook connectors at once. See [Multi-connector](/docs/guardrail/multi-connector).
+- **Observe** records policy findings without enforcing them. Hook fail mode and proxy availability still apply. Start here.
+- **Action** blocks findings at or above the block level. The shipped default blocks CRITICAL and alerts on HIGH and MEDIUM. Change it with `defenseclaw guardrail block-at`.
+- **Action with human approval (HITL)** pauses a risky call and asks you, on agents with a native approval prompt. Other agents take the connector's fallback right away.
 
 ## Where DefenseClaw sits
 
+DefenseClaw has three parts:
+
+- **The CLI** (`defenseclaw`) sets everything up and shows you what happened. It also has a terminal UI (`defenseclaw tui`).
+- **The gateway** (`defenseclaw-gateway`) is a background process that decides and records. It listens on loopback, port 18970 by default.
+- **A connector** per agent: the hooks or plugin that send the agent's prompts and tool calls to the gateway. Some connectors send model traffic through a guardrail proxy instead.
+
+Every decision you make lives in one file, `~/.defenseclaw/config.yaml`. The running gateway applies policy changes without a restart. A few startup settings, such as listener and storage, wait for a restart ([which ones](/docs/reference/source-of-truth)).
+
 <Flow
   direction="TB"
-  caption="You drive the Python defenseclaw CLI (and its TUI), which writes ~/.defenseclaw/config.yaml and starts the Go defenseclaw-gateway. Your agent reaches the same gateway through its connector: the agent's hooks, a plugin the agent loads, or the guardrail proxy. On connectors that support human approval (HITL), the approval prompt appears in the agent itself."
+  caption="You run the CLI, which writes config.yaml and starts the gateway. The agent reaches the gateway through its connector. The gateway answers allow or block, writes the audit log and exports to your destinations."
 >
   <Node id="op" kind="operator">You</Node>
   <Node id="agent" kind="agent">{`Your AI agent\nsuch as Claude Code`}</Node>
@@ -55,28 +45,32 @@ Inserting an inspection step inside the agent process means every agent has to g
   <Edge from="gateway" to="audit" label="records" />
 </Flow>
 
-## Sandboxed agents
-
-DefenseClaw judges what an agent does; on its own it does not isolate the
-agent. On the host, the agent keeps your user's access to files and the
-network. To isolate it, run it in an NVIDIA OpenShell 0.1 sandbox with
-`defenseclaw sandbox run <command>`, for example `defenseclaw sandbox run
-claude`: OpenShell supplies the isolation boundary, and DefenseClaw keeps
-checking every tool call through its hook ingress and filters web traffic
-through its egress proxy. Sandboxes are a preview on Linux and Apple-silicon
-Macs. The [capability matrix](/docs/connectors/capability-matrix#i-want-to-run-the-agent-in-an-openshell-sandbox)
-lists the agents verified end to end in a sandbox, and the
-[sandbox guide](/docs/sandboxes/guide) covers setup, runs, undo and review.
-
 ## What DefenseClaw is not
 
 <Callout type="warn">
-DefenseClaw does not prove an agent's behaviour is safe. It improves safety by combining static scanner results, runtime inspection, policy decisions, and audit trails. High-risk deployments should pair it with human review, least-privilege credentials, sandboxing, CI gates, and production monitoring.
+DefenseClaw does not prove an agent is safe, and it does not isolate the agent on its own. For isolation, run the agent in an OpenShell sandbox with `defenseclaw sandbox run`. Pair DefenseClaw with least-privilege credentials, human review and CI gates.
 </Callout>
+
+## Features
+
+Each feature page says what the feature does, when to use it and where the step-by-step guides and reference live.
+
+<Cards>
+  <Card title="Guardrail" href="/docs/guardrail" description="How DefenseClaw checks an agent's prompts and tool calls, and decides to allow, alert, ask you, or block." />
+  <Card title="Policies" href="/docs/policies" description="How DefenseClaw decides whether to allow, alert, ask or block - rule packs, the optional LLM judge, suppressions, the session correlator and admission." />
+  <Card title="Scanning and admission" href="/docs/scanning" description="DefenseClaw scans skills, MCP servers and plugins when they appear, then allows, warns about or blocks them by severity." />
+  <Card title="AI Discovery" href="/docs/ai-discovery" description="Find the AI agents, models, MCP servers, skills and IDE plugins on a machine, and see which of them actually ran." />
+  <Card title="Sandboxes" href="/docs/sandboxes" description="Run Claude Code, Codex and other coding agents in skip-permissions mode inside NVIDIA OpenShell sandboxes, with DefenseClaw judging every tool call and every site." />
+  <Card title="ACP guard" href="/docs/acp-guard" description="Put DefenseClaw between an ACP editor and its coding agent so every prompt, output, permission, file and terminal message is checked." />
+  <Card title="Observability" href="/docs/observability" description="DefenseClaw records every event once, keeps local history, and sends redacted copies to the destinations you choose." />
+  <Card title="Terminal UI" href="/docs/tui" description="The DefenseClaw terminal UI is a keyboard-driven dashboard for gateway status, alerts, inventory, policies, sandboxes and setup." />
+  <Card title="macOS app" href="/docs/macos-app" description="The DefenseClaw menu-bar app for Apple-silicon Macs: install, panels, notifications and the sandboxes view." />
+  <Card title="Edge Connector" href="/docs/edge-connector" description="A C enforcement engine for Linux edge devices that checks tool calls locally and can ask a DefenseClaw Fleet gateway over MQTT when it cannot decide." />
+</Cards>
 
 ## Next
 
 <Cards>
-  <Card title="Install" href="/docs/get-started/install" description="One command on macOS, Linux or Windows." />
-  <Card title="Quickstart" href="/docs/get-started/quickstart" description="Zero-prompt first-run setup." />
+  <Card title="Install" href="/docs/get-started/download" description="One command on macOS, Linux or Windows." />
+  <Card title="Quickstart" href="/docs/get-started/quickstart" description="Block your first tool call in five minutes." />
 </Cards>

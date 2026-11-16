@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -133,6 +134,13 @@ func (e *Env) stateTrees(account Account) []stateTree {
 					return stateMode{mode: 0o755, owner: rootOwner()}
 				}
 				return stateMode{mode: 0o644, owner: rootOwner()}
+			case name == enterprisestatus.ChangeEventsDirName:
+				// Trust anchor and credential change events: root writes
+				// them, the gateway reads them, nobody else does.
+				if dir {
+					return stateMode{mode: 0o750, owner: rootService}
+				}
+				return stateMode{mode: 0o640, owner: rootService}
 			case name == bundleInboxDirName || strings.HasPrefix(name, ".staging-"):
 				if dir {
 					return stateMode{mode: 0o700, owner: rootOwner()}
@@ -153,12 +161,21 @@ func (e *Env) stateTrees(account Account) []stateTree {
 			switch {
 			case dir:
 				return stateMode{mode: 0o700, owner: service}
+			case rel == retainedMarkerName:
+				// The marker a non-purge uninstall left (retained.go) proves
+				// the folder is the one it kept only while it is root's. A
+				// fresh ensure that rolled back gave it to the service account,
+				// and the retry refused the kept folder as an unmanaged layout
+				// until --adopt-existing (GAP-0631). The commit removes it.
+				return stateMode{mode: 0o600, owner: rootOwner()}
 			case rel == guardianStateFile:
 				return stateMode{mode: 0o640, owner: rootService} // the gateway reads it
-			case rel == guardianRepairsFile, rel == guardianRestoresFile, rel == guardianNoticesFile:
+			case rel == guardianRepairsFile, rel == guardianRestoresFile, rel == guardianNoticesFile,
+				rel == enterprisehooks.GuardianOwnedFilesFile:
 				// Root-only guardian records: verify failed on the restore record after
 				// the first restore, and ensure gave it to the service account
-				// (GAP-0499).
+				// (GAP-0499). The verified hook files record (GAP-0044) holds
+				// digests of hook tokens.
 				return stateMode{mode: 0o600, owner: rootService}
 			case rel == gatewayOpenClawConfig:
 				// The gateway writes it 0644 inside the 0700 data folder, so no
@@ -183,7 +200,10 @@ func (e *Env) stateTrees(account Account) []stateTree {
 			case dir:
 				return stateMode{mode: 0o750, owner: rootService, mask: true}
 			case rel == manifest:
-				return stateMode{mode: 0o640, owner: rootService}
+				// As the enumerator publishes it (WriteUnixTargetsManifestAtomic):
+				// root:root, read only by root. Held to the service group, every
+				// repair after a publish "restored" it (GAP-0658).
+				return stateMode{mode: 0o640, owner: rootOwner()}
 			case rel == enterprisehooks.UnixEligibleAccountsFileName, rel == enterprisehooks.UnprotectedAgentsFileName,
 				rel == enterprisehooks.UnixCopilotVSCodeAccountsFileName:
 				// The guardian refuses either one when another account can read it.
@@ -197,7 +217,8 @@ func (e *Env) stateTrees(account Account) []stateTree {
 				return stateMode{mode: 0o750, owner: rootService}
 			case rel == managed.HookGuardianCredentialAttestationFile, rel == managed.HookGuardianCredentialTransactionFile,
 				rel == managed.HookGuardianReconcileLockFile, rel == enterprisehooks.UnixCopilotVSCodeAccountsFileName,
-				rel == "unix_target_bindings.json":
+				rel == enterprisehooks.UnixOpenCodeServicePortsFileName,
+				rel == "unix_target_bindings.json", rel == retainedMarkerName:
 				return stateMode{mode: 0o600, owner: rootService} // root-only guardian records
 			case rel == managed.HookGuardianAuthorizationFile:
 				// The gateway reads the authorization ledger through its group:
@@ -206,6 +227,22 @@ func (e *Env) stateTrees(account Account) []stateTree {
 				return stateMode{mode: 0o640, owner: rootService, need: 0o040}
 			}
 			return stateMode{mode: 0o640, owner: rootService, mask: true}
+		}},
+		// The gateway's clean-session entries (enterprisepolicy.
+		// WriteForeignHookCleanMirrors): a 0711 folder per account uid and
+		// 0644 entries, all the service account's. An account opens its own
+		// entry by name; a looser folder lets it list or change them, and an
+		// entry it cannot read keeps its calls blocked in an outage.
+		{dir: managed.ForeignHookCleanDir(e.Layout.DataDir), rule: func(rel string, dir bool) stateMode {
+			switch {
+			case dir:
+				return stateMode{mode: 0o711, owner: service}
+			case strings.HasPrefix(filepath.Base(rel), enterprisepolicy.ForeignHookCleanMirrorTempPrefix):
+				// An entry the gateway is still writing: created 0600, then
+				// given 0644 before the rename. No bit is added to it.
+				return stateMode{mode: 0o644, owner: service, mask: true}
+			}
+			return stateMode{mode: 0o644, owner: service}
 		}},
 	}
 }
@@ -459,6 +496,9 @@ func (e *Env) closePrivateDirs(ctx context.Context) {
 	private := map[string]bool{
 		e.Layout.DataDir: true, e.Layout.SecretsDir: true, filepath.Dir(e.Layout.ManifestPath): true,
 		e.Layout.GuardianAuthDir: true, e.Layout.LifecycleDir: true,
+		// 0711: listable after chmod -R a+rX, which names every account
+		// with a clean session.
+		managed.ForeignHookCleanDir(e.Layout.DataDir): true,
 	}
 	for _, dir := range e.managedDirs(Account{}, loadCredential) {
 		if private[dir.Path] {

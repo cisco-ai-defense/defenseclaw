@@ -284,7 +284,7 @@ func TestEvaluateCodexHookCurlQueryAndMultipartEgress(t *testing.T) {
 func TestTrustedActionCurlMultipartNullDeviceRequiresPOSIX(t *testing.T) {
 	t.Parallel()
 
-	generation := mustCompileRulePackGeneration(defaultRuleCategories)
+	generation := mustCompileRulePackGeneration(defaultRuleCategories())
 	finding := trustedActionDispositionTestFinding(t, generation, "SEC-OPENAI")
 	disposition := func(facts actionfacts.Facts) []RuleFinding {
 		got := applyTrustedActionContextDisposition(

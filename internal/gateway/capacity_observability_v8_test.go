@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
@@ -51,33 +52,35 @@ func runCapacityMetricsUseCompleteGeneratedV8Families(t *testing.T) error {
 			len(recorded), len(items), failedFamily, capture.closed.Load(), err,
 		)
 	}
-	if len(items) != 11 || len(results) != len(items) {
+	if len(items) != 15 || len(results) != len(items) {
 		t.Fatalf("capacity batch items/results=%d/%d", len(items), len(results))
 	}
 
-	want := map[string]bool{
-		observability.TelemetryInstrumentDefenseClawRuntimeGoroutines:        false,
-		observability.TelemetryInstrumentDefenseClawRuntimeHeapAlloc:         false,
-		observability.TelemetryInstrumentDefenseClawRuntimeHeapObjects:       false,
-		observability.TelemetryInstrumentDefenseClawRuntimeFdInUse:           false,
-		observability.TelemetryInstrumentDefenseClawRuntimeGcPause:           false,
-		observability.TelemetryInstrumentDefenseClawProcessUptimeSeconds:     false,
-		observability.TelemetryInstrumentDefenseClawSqliteDBBytes:            false,
-		observability.TelemetryInstrumentDefenseClawSqliteWalBytes:           false,
-		observability.TelemetryInstrumentDefenseClawSqlitePageCount:          false,
-		observability.TelemetryInstrumentDefenseClawSqliteFreelistCount:      false,
-		observability.TelemetryInstrumentDefenseClawSqliteCheckpointDuration: false,
+	want := map[string]int{
+		observability.TelemetryInstrumentDefenseClawRuntimeGoroutines:        1,
+		observability.TelemetryInstrumentDefenseClawRuntimeHeapAlloc:         1,
+		observability.TelemetryInstrumentDefenseClawRuntimeHeapObjects:       1,
+		observability.TelemetryInstrumentDefenseClawRuntimeFdInUse:           1,
+		observability.TelemetryInstrumentDefenseClawRuntimeGcPause:           1,
+		observability.TelemetryInstrumentDefenseClawProcessUptimeSeconds:     1,
+		observability.TelemetryInstrumentDefenseClawSqliteDBBytes:            1,
+		observability.TelemetryInstrumentDefenseClawSqliteWalBytes:           1,
+		observability.TelemetryInstrumentDefenseClawSqlitePageCount:          1,
+		observability.TelemetryInstrumentDefenseClawSqliteFreelistCount:      1,
+		observability.TelemetryInstrumentDefenseClawSqliteCheckpointDuration: 1,
+		observability.TelemetryInstrumentDefenseClawQueueDepth:               2,
+		observability.TelemetryInstrumentDefenseClawQueueOldestAge:           2,
 	}
 	metrics := capture.metricSnapshot()
-	if len(metrics) != len(want) {
-		t.Fatalf("capacity metrics=%d want=%d", len(metrics), len(want))
+	if len(metrics) != len(items) {
+		t.Fatalf("capacity metrics=%d want=%d", len(metrics), len(items))
 	}
 	for _, metric := range metrics {
 		name := metric.Descriptor().Name
-		if _, ok := want[name]; !ok {
+		if want[name] == 0 {
 			t.Fatalf("unexpected capacity family %q", name)
 		}
-		want[name] = true
+		want[name]--
 		record := metric.CanonicalRecord()
 		if record.Bucket() != observability.BucketPlatformHealth ||
 			record.Source() != observability.SourceSystem ||
@@ -92,9 +95,27 @@ func runCapacityMetricsUseCompleteGeneratedV8Families(t *testing.T) error {
 			t.Fatalf("capacity metric %q negative double=%f", name, value)
 		}
 	}
-	for name, seen := range want {
-		if !seen {
-			t.Errorf("capacity family %q not recorded", name)
+	for name, remaining := range want {
+		if remaining != 0 {
+			t.Errorf("capacity family %q missing %d observations", name, remaining)
+		}
+	}
+	for _, family := range []string{
+		observability.TelemetryInstrumentDefenseClawQueueDepth,
+		observability.TelemetryInstrumentDefenseClawQueueOldestAge,
+	} {
+		queues := map[string]bool{callWriteQueueName: false, observationQueueName: false}
+		for _, metric := range generatedMetricByName(metrics, family) {
+			queue, _ := metric.Attributes()["defenseclaw.metric.queue"].(string)
+			if _, ok := queues[queue]; !ok || queues[queue] {
+				t.Fatalf("capacity queue gauge %s has unexpected queue %q", family, queue)
+			}
+			queues[queue] = true
+		}
+		for queue, seen := range queues {
+			if !seen {
+				t.Errorf("capacity queue gauge %s missing %s", family, queue)
+			}
 		}
 	}
 	return nil
@@ -121,6 +142,28 @@ func TestCapacityCollectionDisabledSkipsAllSnapshotWork(t *testing.T) {
 	}
 	if len(results) != len(items) || len(capture.metricSnapshot()) != 0 {
 		t.Fatalf("disabled capacity results/exported=%d/%d", len(results), len(capture.metricSnapshot()))
+	}
+}
+
+func TestR109PerfWALSecureClientCapacityMetricsUnchanged(t *testing.T) {
+	runtime, capture := newProxyGeneratedMetricRuntime(t)
+	cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	cfg.Enterprise.Profile = managed.ProfileSecureClient
+	sidecar := &Sidecar{cfg: cfg, startedAt: time.Now().Add(-time.Minute), store: capture.store}
+	items := sidecar.capacityMetricBatch(t.Context(), time.Now().UTC())
+	if len(items) != 11 {
+		t.Fatalf("Secure Client capacity items=%d want 11", len(items))
+	}
+	if _, err := runtime.RecordGeneratedMetricBatch(t.Context(), items); err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range []string{
+		observability.TelemetryInstrumentDefenseClawQueueDepth,
+		observability.TelemetryInstrumentDefenseClawQueueOldestAge,
+	} {
+		if metrics := generatedMetricByName(capture.metricSnapshot(), family); len(metrics) != 0 {
+			t.Fatalf("Secure Client capacity emitted %d %s metrics", len(metrics), family)
+		}
 	}
 }
 

@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"fmt"
+	"reflect"
 	"testing"
 )
 
@@ -30,7 +31,7 @@ func TestProfileMatchMemoisationAgreesWithTheWalk(t *testing.T) {
 					for _, agent := range []string{"", "agt-0123456789abcdef"} {
 						got := set.match(subject, source, connectorName, agent)
 						want := set.matchUncached(subject, source, connectorName, agent)
-						if got != want {
+						if !reflect.DeepEqual(got, want) {
 							t.Fatalf("round %d match(%+v,%q,%q,%q) = %+v, walk says %+v", round, subject, source, connectorName, agent, got, want)
 						}
 					}

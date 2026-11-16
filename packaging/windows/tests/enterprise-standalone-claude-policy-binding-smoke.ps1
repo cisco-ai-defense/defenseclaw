@@ -46,7 +46,9 @@ try {
                 $AllowedReaderSIDs,
                 $RequiredRights,
                 [switch]$AllowInheritance,
-                [switch]$RejectUntrustedRead
+                [switch]$RejectUntrustedRead,
+                [string]$SelfHealKind,
+                [string]$SelfHealGatewayServiceSID
             )
         }
         function New-DefenseClawDirectory {

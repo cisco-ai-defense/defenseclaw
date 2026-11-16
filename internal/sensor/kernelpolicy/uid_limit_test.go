@@ -65,14 +65,17 @@ func TestControlsLoadWithMoreThanFourUsers(t *testing.T) {
 			family = FamilyBurnin
 		}
 		p := policyOf(t, c, family)
-		if len(p.UIDs) != 7 || len(p.PIDs) != 7 {
-			t.Fatalf("%s: uids %v pids %v, want all seven", name, p.UIDs, p.PIDs)
+		// All seven users are in the uid filter; one PID group of the
+		// sessions fits the policy's one file_open hook (GAP-0218), and the
+		// rest are over the limit.
+		if len(p.UIDs) != 7 || len(p.PIDs) != MaxPIDs || c.OverLimit != 7-MaxPIDs {
+			t.Fatalf("%s: uids %v pids %v over %d, want seven uids and %d pids", name, p.UIDs, p.PIDs, c.OverLimit, MaxPIDs)
 		}
 		pidSelectors := 0
 		seenPIDs := map[int]bool{}
 		for _, hook := range p.tp.Spec.LsmHooks {
 			for _, sel := range hook.Selectors {
-				if len(sel.MatchPIDs) == 0 {
+				if len(sel.MatchPIDs) == 0 || hook.Hook != "file_open" {
 					continue
 				}
 				pidSelectors++
@@ -88,8 +91,9 @@ func TestControlsLoadWithMoreThanFourUsers(t *testing.T) {
 				}
 			}
 		}
-		if pidSelectors != 6 || len(seenPIDs) != 7 {
-			t.Fatalf("%s: %d pid selectors covering %d roots, want six selectors covering all seven", name, pidSelectors, len(seenPIDs))
+		if hookCount(p, "file_open") != 1 || pidSelectors != 3 || len(seenPIDs) != MaxPIDs {
+			t.Fatalf("%s: %d hooks, %d pid selectors covering %d roots, want one hook with three selectors covering %d",
+				name, len(p.tp.Spec.LsmHooks), pidSelectors, len(seenPIDs), MaxPIDs)
 		}
 		// No policy of the set carries a numeric list Tetragon would refuse.
 		for _, policy := range c.Policies {

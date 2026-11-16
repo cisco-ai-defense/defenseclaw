@@ -10,7 +10,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/netip"
-	"regexp"
 	"strings"
 	"unicode/utf8"
 )
@@ -18,10 +17,10 @@ import (
 const credentialRemoteExecutionDigestDomain = "defenseclaw/actionfacts/credential-remote-execution/v1"
 
 var (
-	credentialRemoteHostnamePattern = regexp.MustCompile(
+	credentialRemoteHostnamePattern = lazyMustCompile(
 		`(?i)^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.?$`,
 	)
-	credentialRemotePrincipalPattern = regexp.MustCompile(
+	credentialRemotePrincipalPattern = lazyMustCompile(
 		`(?i)^(?:[a-z0-9][a-z0-9._-]{0,63}\\)?[a-z0-9][a-z0-9._@$-]{0,127}$|^[a-z0-9][a-z0-9._$-]{0,63}@[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$`,
 	)
 )

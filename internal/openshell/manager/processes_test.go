@@ -215,8 +215,12 @@ func TestDestinationLineageByProgram(t *testing.T) {
 	if _, ok := e.m.sampleProcesses(context.Background(), e.boxOf("linbox")); !ok {
 		t.Fatal("no sample")
 	}
+	if d, _ = e.m.Destinations(context.Background(), "linbox"); len(d.Destinations[0].Lineage) != 4 {
+		t.Fatalf("a later process changed the recorded lineage: %+v", d.Destinations[0].Lineage)
+	}
+	e.ocsf("linbox", "NET:OPEN [INFO] ALLOWED /usr/bin/curl(0) -> pypi.org:443/tcp [policy:allow_pypi engine:opa]", time.Now())
 	if d, _ = e.m.Destinations(context.Background(), "linbox"); len(d.Destinations[0].Lineage) != 0 {
-		t.Fatalf("two copies of the program ran: lineage %+v", d.Destinations[0].Lineage)
+		t.Fatalf("two copies at the new connection gave lineage %+v", d.Destinations[0].Lineage)
 	}
 }
 
@@ -264,6 +268,71 @@ func TestDestinationLineageNeedsARecentStart(t *testing.T) {
 	}
 	if l := rows["example.org"].Lineage; len(l) != 4 || l[0].PID != 530 || l[1].Comm != "bash" {
 		t.Fatalf("example.org lineage %+v, want curl 530's", l)
+	}
+}
+
+// GAP-0119: the proxy reports the resolved interpreter while the feed saw
+// the venv or uv exec path. A retry can connect well after the exec.
+func TestKernelDestinationLineageForPythonAliasesAndLateRefusal(t *testing.T) {
+	const resolved = "/sandbox/.uv/python/cpython-3.14.3-linux-x86_64-gnu/bin/python3.14"
+	for _, tc := range []struct {
+		name, execPath, parent string
+	}{
+		{"venv", "/sandbox/.venv/bin/python3", "bash"},
+		{"uv", "/sandbox/.cache/uv/builds-v0/.tmp123/bin/python", "uv"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var sample atomic.Pointer[string]
+			e, b, id := kernelBox(t, "aliasbox", &sample)
+			ctx := context.Background()
+			start := time.Now().Add(-30 * time.Second)
+			e.m.observeKernelFrame(ctx, b, execFrame(id, "claude", "", 9700, 40, "/usr/bin/claude", "/usr/bin/claude", start))
+			e.m.observeKernelFrame(ctx, b, execFrame(id, "bash", "claude", 9701, 41, "/bin/bash", "/bin/bash", start.Add(time.Second)))
+			if tc.parent == "uv" {
+				e.m.observeKernelFrame(ctx, b, execFrame(id, "uv", "bash", 9702, 42, "/usr/bin/uv", "/usr/bin/uv run query.py", start.Add(2*time.Second)))
+			}
+			e.m.observeKernelFrame(ctx, b, execFrame(id, "python", tc.parent, 9703, 43, tc.execPath, tc.execPath+" query.py", start.Add(3*time.Second)))
+			at := time.Now()
+			e.ocsf("aliasbox", "NET:OPEN [MED] DENIED "+resolved+"(0) -> dynamodb.us-east-1.amazonaws.com:443/tcp [policy:- engine:opa] [reason:transparent_tcp_policy_denied]", at)
+			row := destinationKinds(t, e, "aliasbox")["dynamodb.us-east-1.amazonaws.com"]
+			if len(row.Lineage) < 3 || row.Lineage[0].PID != 43 || row.Lineage[1].Comm != tc.parent || row.Lineage[len(row.Lineage)-1].Comm != "claude" {
+				t.Fatalf("late refused destination lineage = %+v", row.Lineage)
+			}
+			// Another possible interpreter does not change the recorded row.
+			e.m.observeKernelFrame(ctx, b, execFrame(id, "other-python", "bash", 9704, 44, "/sandbox/other/bin/python3", "/sandbox/other/bin/python3 other.py", start.Add(4*time.Second)))
+			if got := destinationKinds(t, e, "aliasbox")["dynamodb.us-east-1.amazonaws.com"].Lineage; len(got) < 3 {
+				t.Fatalf("later interpreter changed recorded lineage = %+v", got)
+			}
+			e.ocsf("aliasbox", "NET:OPEN [MED] DENIED "+resolved+"(0) -> dynamodb.us-east-1.amazonaws.com:443/tcp [policy:- engine:opa] [reason:transparent_tcp_policy_denied]", at.Add(time.Second))
+			if got := destinationKinds(t, e, "aliasbox")["dynamodb.us-east-1.amazonaws.com"].Lineage; len(got) != 0 {
+				t.Fatalf("ambiguous new connection lineage = %+v", got)
+			}
+			e.m.observeKernelFrame(ctx, b, exitFrame(id, "other-python", 9704, 0, at.Add(-time.Second)))
+			if got := destinationKinds(t, e, "aliasbox")["dynamodb.us-east-1.amazonaws.com"].Lineage; len(got) != 0 {
+				t.Fatalf("later exit changed undecided lineage = %+v", got)
+			}
+			e.ocsf("aliasbox", "NET:OPEN [MED] DENIED "+resolved+"(0) -> dynamodb.us-east-1.amazonaws.com:443/tcp [policy:- engine:opa] [reason:transparent_tcp_policy_denied]", at.Add(2*time.Second))
+			if got := destinationKinds(t, e, "aliasbox")["dynamodb.us-east-1.amazonaws.com"].Lineage; len(got) < 3 {
+				t.Fatalf("unambiguous new connection lineage = %+v", got)
+			}
+		})
+	}
+}
+
+func TestPythonInterpreterAliasKeepsDifferentVersionsApart(t *testing.T) {
+	for _, tc := range []struct {
+		process, record string
+		want            bool
+	}{
+		{"/venv/bin/python", "/runtime/bin/python3.14", true},
+		{"/venv/bin/python3", "/runtime/bin/python3.14", true},
+		{"/venv/bin/python3.11", "/runtime/bin/python3.14", false},
+		{"/venv/bin/python3.14", "/runtime/bin/python3.14", true},
+		{"/venv/bin/notpython3", "/runtime/bin/python3.14", false},
+	} {
+		if got := pythonInterpreterAlias(tc.process, tc.record); got != tc.want {
+			t.Errorf("alias(%q, %q) = %t, want %t", tc.process, tc.record, got, tc.want)
+		}
 	}
 }
 

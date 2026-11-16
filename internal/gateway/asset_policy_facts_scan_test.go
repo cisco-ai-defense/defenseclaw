@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -45,5 +46,28 @@ func TestFoldersDeclaringSkillReadsPastTheOldEntryCap(t *testing.T) {
 	got := foldersDeclaringSkill(root, "disabled-one")
 	if len(got) != 1 || got[0] != renamed {
 		t.Fatalf("foldersDeclaringSkill = %v, want [%s]", got, renamed)
+	}
+}
+
+// GAP-1197: past the folders it reads, every other folder of the root
+// answers for the name, so the folder that declares it still gets the
+// runtime disable (fail closed).
+func TestFoldersDeclaringSkillFailsClosedPastTheScanCap(t *testing.T) {
+	root := t.TempDir()
+	for i := range maxDeclaredNameScan + 1 {
+		if err := os.Mkdir(filepath.Join(root, fmt.Sprintf("b-skill-%05d", i)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	renamed := filepath.Join(root, "zz-renamed")
+	if err := os.Mkdir(renamed, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(renamed, "SKILL.md"), []byte("---\nname: disabled-one\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := foldersDeclaringSkill(root, "disabled-one")
+	if !slices.Contains(got, renamed) {
+		t.Fatalf("foldersDeclaringSkill misses %s past the scan cap (%d folders listed)", renamed, len(got))
 	}
 }

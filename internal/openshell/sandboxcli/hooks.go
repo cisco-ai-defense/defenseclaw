@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -320,6 +321,14 @@ func (s *session) printHookReach(after *sandboxapi.Sandbox, endedElsewhere bool)
 	}
 	if code := s.harnessCode; code != 0 && !after.Hooks.Unreachable {
 		if !endedElsewhere && code != exitInterrupted {
+			if s.continueAfterDetached {
+				a.println(a.style("✗ Claude Code could not continue the detached run; connect without --continue to start a new conversation", ansiRed, ansiBold))
+				return
+			}
+			if s.spec != nil && s.spec.Name == "opencode" && code == harness.LauncherRefusedExitCode {
+				a.println(a.style("✗ DefenseClaw refused to start OpenCode; see the launcher message above", ansiRed, ansiBold))
+				return
+			}
 			why := "the harness itself failed (its output is above)"
 			if s.startWhy != "" {
 				why = s.startWhy

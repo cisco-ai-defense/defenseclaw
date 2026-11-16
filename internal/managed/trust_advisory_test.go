@@ -238,3 +238,88 @@ func TestReportTrustAdvisoryEmbedderHookBypassesDedupe(t *testing.T) {
 		t.Fatalf("embedder hook saw %d advisories, want 5 (hook path must NOT be deduped)", len(*advisories))
 	}
 }
+
+// Drift advisories share the default-log dedupe, keyed apart from ancestor
+// advisories so the same tuple under both markers is emitted once each.
+func TestReportTrustDriftDedupesOnDefaultLog(t *testing.T) {
+	prevDrift, prevAdvisory := ReportTrustDrift, ReportTrustAdvisory
+	ReportTrustDrift, ReportTrustAdvisory = nil, nil
+	t.Cleanup(func() { ReportTrustDrift, ReportTrustAdvisory = prevDrift, prevAdvisory })
+	advisoryLogDedupe.reset()
+	t.Cleanup(func() { advisoryLogDedupe.reset() })
+
+	var buf bytes.Buffer
+	prevWriter, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(prevWriter)
+		log.SetFlags(prevFlags)
+	})
+
+	for i := 0; i < 3; i++ {
+		EmitTrustDriftAdvisory("/opt/cisco/key", "broker authentication key", "DACL is not protected")
+	}
+	reportTrustAdvisory("/opt/cisco/key", "broker authentication key", "DACL is not protected")
+	if got := strings.Count(buf.String(), TrustDriftAdvisoryMarker); got != 1 {
+		t.Fatalf("drift marker emitted %d times, want 1: %q", got, buf.String())
+	}
+	if got := strings.Count(buf.String(), TrustAdvisoryMarker); got != 1 {
+		t.Fatalf("ancestor marker emitted %d times, want 1: %q", got, buf.String())
+	}
+	if !strings.Contains(buf.String(), "does not match its expected permissions, continuing") {
+		t.Fatalf("drift log line = %q, want the documented message", buf.String())
+	}
+}
+
+func TestEmitTrustDriftAdvisoryUsesEmbedderHook(t *testing.T) {
+	var got []string
+	prev := ReportTrustDrift
+	ReportTrustDrift = func(path, label, reason string) {
+		got = append(got, path+"|"+label+"|"+reason)
+	}
+	t.Cleanup(func() { ReportTrustDrift = prev })
+	EmitTrustDriftAdvisory("p", "l", "r")
+	EmitTrustDriftAdvisory("p", "l", "r")
+	if len(got) != 2 || got[0] != "p|l|r" {
+		t.Fatalf("hook calls = %v, want two undeduped calls", got)
+	}
+}
+
+// GAP-0925: the advisory reports the reason in the form the describer gives
+// (on Windows standalone: the account named and the icacls fix), on the
+// default log and to an embedder hook alike.
+func TestTrustAdvisoryReportsTheDescribedReason(t *testing.T) {
+	advisoryLogDedupe.reset()
+	t.Cleanup(advisoryLogDedupe.reset)
+	originalDescribe, originalHook := DescribeTrustAdvisoryReason, ReportTrustAdvisory
+	t.Cleanup(func() { DescribeTrustAdvisoryReason, ReportTrustAdvisory = originalDescribe, originalHook })
+	t.Setenv(TrustStrictAncestorsEnv, "")
+	raw := `C:\ProgramData\Cisco\DefenseClaw\etc: untrusted Windows principal S-1-5-32-545 has write-like access mask 0x1301bf`
+	described := `C:\ProgramData\Cisco\DefenseClaw\etc: BUILTIN\Users (S-1-5-32-545) has write access (modify (0x1301bf)). Fix: icacls`
+	DescribeTrustAdvisoryReason = func(reason string) string {
+		if reason != raw {
+			t.Fatalf("describer got %q", reason)
+		}
+		return described
+	}
+	var buf bytes.Buffer
+	originalOutput, originalFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(originalOutput); log.SetFlags(originalFlags) })
+	if err := relaxAncestorTrustVerdict(true, `C:\ProgramData\Cisco\DefenseClaw\etc`, "managed config", errors.New(raw)); err != nil {
+		t.Fatalf("ancestor verdict was fatal: %v", err)
+	}
+	if got := buf.String(); !strings.Contains(got, described) || strings.Contains(got, "untrusted Windows principal") {
+		t.Fatalf("default log line does not carry the described reason: %q", got)
+	}
+	var hooked string
+	ReportTrustAdvisory = func(_, _, reason string) { hooked = reason }
+	if err := relaxAncestorTrustVerdict(true, `C:\ProgramData\Cisco\DefenseClaw\etc`, "managed config", errors.New(raw)); err != nil {
+		t.Fatalf("ancestor verdict was fatal: %v", err)
+	}
+	if hooked != described {
+		t.Fatalf("embedder hook got %q, want %q", hooked, described)
+	}
+}

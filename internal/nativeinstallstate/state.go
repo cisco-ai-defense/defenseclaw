@@ -39,7 +39,6 @@ type State struct {
 	DevinExecutable      string `json:"devin_executable,omitempty"`
 	AntigravityConfigDir string `json:"antigravity_config_dir,omitempty"`
 	OpenCodeConfigDir    string `json:"opencode_config_dir,omitempty"`
-	OmnigentConfigHome   string `json:"omnigent_config_home,omitempty"`
 	HermesHome           string `json:"hermes_home,omitempty"`
 }
 
@@ -57,7 +56,6 @@ func (state State) Environment(base []string) []string {
 		"DEFENSECLAW_DEVIN_CONFIG_HOME":       true,
 		"DEFENSECLAW_DEVIN_EXECUTABLE":        true,
 		"OPENCODE_CONFIG_DIR":                 true,
-		"OMNIGENT_CONFIG_HOME":                true,
 		"HERMES_HOME":                         true,
 		"ANTIGRAVITY_CONFIG_DIR":              true,
 		"DEFENSECLAW_ANTIGRAVITY_CONFIG_HOME": true,
@@ -94,9 +92,6 @@ func (state State) Environment(base []string) []string {
 	}
 	if state.OpenCodeConfigDir != "" {
 		result = append(result, "OPENCODE_CONFIG_DIR="+state.OpenCodeConfigDir)
-	}
-	if state.OmnigentConfigHome != "" {
-		result = append(result, "OMNIGENT_CONFIG_HOME="+state.OmnigentConfigHome)
 	}
 	if state.HermesHome != "" {
 		result = append(result, "HERMES_HOME="+state.HermesHome)
@@ -187,7 +182,6 @@ func loadAt(executable, installRoot string) (State, error) {
 		state.DevinExecutable,
 		state.AntigravityConfigDir,
 		state.OpenCodeConfigDir,
-		state.OmnigentConfigHome,
 		state.HermesHome,
 	} {
 		if value != "" && !absoluteCleanPath(value) {

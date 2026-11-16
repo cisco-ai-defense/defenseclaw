@@ -109,27 +109,22 @@
       },
       {
         "name": "session",
-        "label": "Root session",
-        "type": "query",
-        "datasource": {
-          "type": "loki",
-          "uid": "defenseclaw-loki"
-        },
-        "definition": "label_values({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | body_defenseclaw_session_root_id!=\"\", body_defenseclaw_session_root_id)",
-        "query": {
-          "query": "label_values({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | body_defenseclaw_session_root_id!=\"\", body_defenseclaw_session_root_id)",
-          "refId": "LokiVariableQueryEditor-VariableQuery"
-        },
-        "refresh": 2,
-        "sort": 1,
-        "multi": false,
-        "includeAll": true,
-        "allValue": ".+",
+        "label": "Root session ID regex",
+        "description": "Regex over defenseclaw.session.root.id. .+ shows every root session. The session tree links fill it in.",
+        "type": "textbox",
+        "query": ".+",
         "current": {
-          "text": "All",
-          "value": "$__all",
+          "text": ".+",
+          "value": ".+",
           "selected": true
         },
+        "options": [
+          {
+            "text": ".+",
+            "value": ".+",
+            "selected": true
+          }
+        ],
         "hide": 0
       },
       {

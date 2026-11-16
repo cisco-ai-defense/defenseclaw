@@ -5,12 +5,13 @@ package config
 
 import (
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
-var acpStableNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+var acpStableNamePattern = lazyregexp.New(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 
 const (
 	maxACPBindings      = 128
@@ -78,15 +79,10 @@ func (a *ACPConfig) Validate() error {
 		if effectiveMode == "" {
 			effectiveMode = "observe"
 		}
-		expectedFailureMode := "open"
-		if effectiveMode == "action" {
-			expectedFailureMode = "closed"
-		}
-		if failMode != "" && failMode != expectedFailureMode {
-			return fmt.Errorf(
-				"profiles[%q].fail_mode must be %q when mode is %q",
-				name, expectedFailureMode, effectiveMode,
-			)
+		// Action mode always fails closed. Observe mode takes either: an
+		// explicit closed refuses a frame the guard could not evaluate.
+		if failMode == "open" && effectiveMode == "action" {
+			return fmt.Errorf("profiles[%q].fail_mode must be %q when mode is %q", name, "closed", effectiveMode)
 		}
 		if err := validateACPNameList(name, "allowed_clients", profile.AllowedClients); err != nil {
 			return err

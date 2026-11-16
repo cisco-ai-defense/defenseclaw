@@ -31,8 +31,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from defenseclaw.fail_mode import _UPSTREAM_FAIL_OPEN_CONNECTORS
-from defenseclaw.tui.panels.setup import WIZARD_NAMES, SetupWizard
+from defenseclaw.fail_mode import upstream_fail_open
+from defenseclaw.tui.panels.setup import WIZARD_NAMES, SetupWizard, connector_turned_off
 from defenseclaw.tui.services.setup_state import (
     ConfigSection,
     ReadinessCheck,
@@ -321,8 +321,9 @@ def _destinations(observability: Any) -> list[Any] | None:
 def _fail_mode_text(cfg: Any) -> str:
     """What the active connectors' hooks do when the guardrail can't answer.
 
-    The effective value per connector (observe mode and agents that fail open
-    upstream stay open, as in ``defenseclaw status``), not the raw global
+    The effective value per connector (agents that fail open upstream, and
+    an unset value under Secure Client, stay open, as in ``defenseclaw
+    status``), not the raw global
     ``guardrail.hook_fail_mode`` (GAP-0152). A mixed set reads "fail closed,
     1 open".
     """
@@ -334,7 +335,7 @@ def _fail_mode_text(cfg: Any) -> str:
     for name in active_connector_names(cfg):
         if callable(enabled) and not enabled(name):
             continue
-        if name.lower() in _UPSTREAM_FAIL_OPEN_CONNECTORS:
+        if upstream_fail_open(cfg, name):
             modes.append("open")
         elif callable(resolver):
             try:
@@ -355,7 +356,14 @@ def _connector_status(cfg: Any, owned: bool) -> TaskStatus:
     names = active_connector_names(cfg)
     if not names:
         return TaskStatus("attention" if owned else "off", "no agent yet")
-    return TaskStatus("ok", names[0] if len(names) == 1 else _plural(len(names), "agent"))
+    # A connector turned off is not protected: count only the others, and
+    # say how many are off (GAP-0854).
+    on = [name for name in names if not connector_turned_off(cfg, name)]
+    off = len(names) - len(on)
+    if not on:
+        return TaskStatus("attention", f"{_plural(off, 'agent')} off")
+    label = on[0] if len(on) == 1 else _plural(len(on), "agent")
+    return TaskStatus("ok", f"{label}, {off} off" if off else label)
 
 
 def _credentials_status(credentials: Any, problems: Sequence[TaskProblem]) -> TaskStatus:
@@ -617,8 +625,10 @@ SECTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "Protection",
         (
             "Guardrail",
+            "Decision Model",
             "Scanners",
             "Asset Policy",
+            "Admission Defaults",
             "Skill Admission",
             "MCP Admission",
             "Plugin Admission",

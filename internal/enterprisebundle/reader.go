@@ -18,6 +18,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // maxTrailingZeros bounds the zero padding archivers add after the end of a
@@ -249,7 +251,7 @@ func (c *collector) walk(root, rel string) *Error {
 			name = rel + "/" + name
 		}
 		full := filepath.Join(root, filepath.FromSlash(name))
-		info, err := os.Lstat(full)
+		info, err := pathidentity.LstatPinned(full)
 		if err != nil {
 			return refuse(CodeArchiveInvalid, name, "unreadable entry")
 		}

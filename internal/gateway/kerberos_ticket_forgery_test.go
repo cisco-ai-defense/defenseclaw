@@ -26,20 +26,22 @@ func TestKerberosTicketForgeryProfilePosture(t *testing.T) {
 		t.Run(test.profile, func(t *testing.T) {
 			const connector = "codex"
 			installToolCallCorpusProfileConnector(t, connector, test.profile)
-			input := actionfacts.Input{
-				Tool: "shell", Command: command, DialectHint: actionfacts.DialectPOSIX,
-			}
-			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
-				Input: input, LegacyText: command, Connector: connector,
-				EnforcementCapable: true,
-			})
-			finding := findingWithID(findings, kerberosTicketForgeryRuleID)
-			if finding == nil || finding.Severity != test.severity || finding.Evidence != "" ||
-				!finding.contributesToEnforcement() {
-				t.Fatalf("finding=%+v all=%v", finding, FindingStrings(findings))
-			}
-			if action := guardrailFallbackActionForProfile(finding.Severity, test.profile); action != test.action {
-				t.Fatalf("action=%s want=%s", action, test.action)
+			for _, candidate := range []string{command, command + " | tee ticket.log", command + " 2>&1"} {
+				input := actionfacts.Input{
+					Tool: "shell", Command: candidate, DialectHint: actionfacts.DialectPOSIX,
+				}
+				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+					Input: input, LegacyText: candidate, Connector: connector,
+					EnforcementCapable: true,
+				})
+				finding := findingWithID(findings, kerberosTicketForgeryRuleID)
+				if finding == nil || finding.Severity != test.severity || finding.Evidence != "" ||
+					!finding.contributesToEnforcement() {
+					t.Fatalf("%q: finding=%+v all=%v", candidate, finding, FindingStrings(findings))
+				}
+				if action := guardrailFallbackActionForProfile(finding.Severity, test.profile); action != test.action {
+					t.Fatalf("%q: action=%s want=%s", candidate, action, test.action)
+				}
 			}
 		})
 	}
@@ -54,8 +56,6 @@ func TestKerberosTicketForgeryHardNegatives(t *testing.T) {
 		strings.Replace(base, " -domain", " -aesKey "+strings.Repeat("b2", 32)+" -domain", 1),
 		base + " -domain other.example",
 		"sudo " + base,
-		base + " | tee ticket.log",
-		base + " 2>&1",
 	} {
 		for _, profile := range []string{"default", "permissive", "strict"} {
 			const connector = "codex"

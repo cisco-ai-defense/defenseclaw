@@ -84,7 +84,7 @@ type HookAuditEnvelope struct {
 	// EvaluationID + RuleIDs are the unified-pipeline correlation
 	// keys this hook emission was attributed to. The hook
 	// evaluator stamps them on agentHookResponse via
-	// emitHookRuleFindings; finalizeAgentHook copies them onto the
+	// emitHookRuleFindings; finalizeAgentHookAnswer copies them onto the
 	// envelope so audit sinks see the same join key SIEM
 	// dashboards pivot on (matches ScanPayload.evaluation_id /
 	// ScanFindingPayload.evaluation_id / VerdictPayload.
@@ -110,6 +110,11 @@ type HookAuditEnvelope struct {
 	StepIdx     int    `json:"step_idx,omitempty"`
 	Enforced    bool   `json:"enforced,omitempty"`
 	RulePackDir string `json:"-"`
+	// WorkspaceHostPaths are the folders a Claude Cowork session connected
+	// (hookexec.CoworkContext). Like RulePackDir they are filesystem paths,
+	// so they travel in their own path-class field, never in the envelope
+	// text.
+	WorkspaceHostPaths []string `json:"-"`
 	// SecureClientRulePackDir is RulePackDir inside the envelope text, where
 	// the Secure Client profile keeps it as on main (issue #1092).
 	SecureClientRulePackDir string `json:"rule_pack_dir,omitempty"`
@@ -137,6 +142,13 @@ type HookAuditEnvelope struct {
 	// JSON): the Secure Client synthetic Codex notify path writes its row
 	// under ActionConnectorHookSynthetic (issue #1092).
 	AuditActionOverride string `json:"-"`
+
+	occurrenceID string
+	// configGeneration and configHash, when set, are the configuration
+	// the audit row names in place of the current one (a journaled call,
+	// pendingHookProvenance).
+	configGeneration uint64
+	configHash       string
 }
 
 // renderHookAuditEnvelope serializes the envelope as a compact JSON

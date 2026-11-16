@@ -77,7 +77,7 @@ var Copilot = register(&Spec{
 		// Through the launcher, so the probe uses the pre-extracted package
 		// the sandbox runs (the bare binary would extract a fresh copy).
 		VersionArgv: []string{CopilotLauncherPath, "--version"},
-		VersionRE:   regexp.MustCompile(`^GitHub Copilot CLI ([0-9]+\.[0-9]+\.[0-9]+)`),
+		VersionRE:   regexp.MustCompile(`^GitHub Copilot CLI v?([0-9]+\.[0-9]+\.[0-9]+)`),
 		// npm-loader.js (node) only spawns the native executable, which makes
 		// every model request; its runtime helper ships in the package cache.
 		NetworkBinaries: `find ` + InstallRootBase + `/copilot/lib -type f -path '*/@github/copilot-linux-*/copilot' -exec readlink -f {} \;
@@ -91,7 +91,7 @@ find ` + CopilotPackageCache + ` -type f -path '*/prebuilds/*/copilot-runtime' -
 		}
 		extract := `cache=` + shellQuote(CopilotPackageCache) + `; h="$(mktemp -d)"; ` +
 			`got="$(HOME="$h" COPILOT_AUTO_UPDATE=false COPILOT_PKG_CACHE_HOME="$cache" /usr/local/bin/copilot --version 2>/dev/null | head -n 1)"; rm -rf "$h"; ` +
-			`[ "$got" = ` + shellQuote("GitHub Copilot CLI "+version+".") + ` ] || { echo "Copilot '$got' is not the pinned ` + version + `" >&2; exit 1; }; ` +
+			`got="${got#GitHub Copilot CLI }"; got="${got%.}"; ` + pinVersionCheck("Copilot", version) + `; ` +
 			`[ -n "$(find "$cache/pkg" -mindepth 3 -maxdepth 3 -name .extraction-complete -path '*/` + version + `/*')" ] || { echo "Copilot package was not extracted into $cache" >&2; exit 1; }; ` +
 			`chown -R root:root "$cache"; chmod -R go-w "$cache"`
 		return []InstallStep{{

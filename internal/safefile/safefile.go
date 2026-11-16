@@ -33,6 +33,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // ErrSymlinkRefused is returned when the target path is a symlink.
@@ -65,10 +67,11 @@ func Write(path string, data []byte) error {
 }
 
 // ReplaceFile performs a replacement-style rename from source to destination.
-// On Windows an existing destination is published with ReplaceFileW so its
-// DACL, EFS/compression state, creation metadata, and non-conflicting named
-// streams survive. It retries transient access, sharing, and lock violations
-// commonly caused by antivirus scanners briefly opening a newly written file.
+// On Windows an existing destination's metadata is merged into the staged
+// file before the staged file is published with a POSIX-semantics rename.
+// This preserves its DACL, EFS/compression state, creation metadata, and
+// non-conflicting named streams. Transient access, sharing, and lock
+// violations are retried within a bounded budget.
 // Callers remain responsible for validating both paths and cleaning up source
 // on failure.
 func ReplaceFile(source, destination string) error {
@@ -302,7 +305,26 @@ func ReadRegularFileBounded(path string, maxBytes int64) ([]byte, error) {
 	return readRegularFileBounded(path, maxBytes, nil)
 }
 
+// readStabilityMetadataRetries bounds how often a read is repeated when only
+// the file's change time moved during it (a chmod, chown, ACL or xattr update
+// by a repair or a scanner), on platforms where that is retried.
+const readStabilityMetadataRetries = 3
+
+var errReadMetadataChanged = errors.New("safefile: file metadata changed while reading")
+
 func readRegularFileBounded(path string, maxBytes int64, afterRead func()) ([]byte, error) {
+	for attempt := 1; ; attempt++ {
+		data, err := readRegularFileBoundedOnce(path, maxBytes, afterRead)
+		if !errors.Is(err, errReadMetadataChanged) {
+			return data, err
+		}
+		if !readStabilityRetriesMetadataChange || attempt >= readStabilityMetadataRetries {
+			return nil, fmt.Errorf("safefile: file changed while reading: %s", path)
+		}
+	}
+}
+
+func readRegularFileBoundedOnce(path string, maxBytes int64, afterRead func()) ([]byte, error) {
 	if maxBytes <= 0 {
 		return nil, errors.New("safefile: read limit must be positive")
 	}
@@ -347,6 +369,11 @@ func readRegularFileBounded(path string, maxBytes int64, afterRead func()) ([]by
 		return nil, fmt.Errorf("safefile: snapshot file after reading %s: %w", path, err)
 	}
 	if before != after || int64(len(data)) != before.size {
+		metadataOnly := int64(len(data)) == before.size && before.size == after.size &&
+			before.modified == after.modified && before.attributes == after.attributes
+		if metadataOnly {
+			return nil, errReadMetadataChanged
+		}
 		return nil, fmt.Errorf("safefile: file changed while reading: %s", path)
 	}
 	current, err := validateRegularFilePath(path)
@@ -370,7 +397,7 @@ func validateRegularFilePath(path string) (os.FileInfo, error) {
 	if err := rejectReparsePath(path); err != nil {
 		return nil, err
 	}
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if err != nil {
 		return nil, err
 	}

@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -588,6 +589,88 @@ func TestStandaloneLayoutImplicitRulePackExists(t *testing.T) {
 	}
 }
 
+// GAP-1694: an unreferenced, world-writable rule pack folder under
+// <policy_dir>/guardrail loads nothing and is not checked; a referenced pack
+// below it, the Rego and every other policy_dir file still are.
+func TestPolicyTreeChecksOnlyReferencedRulePacks(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{"rego", "guardrail/default", "guardrail/x", "guardrail/used/rules"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, file := range []string{"rego/guardrail.rego", "guardrail/x/rules.yaml", "guardrail/used/rules/a.yaml", "data.json"} {
+		if err := os.WriteFile(filepath.Join(root, file), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var checked []string
+	untrusted := map[string]bool{}
+	fake := func(path, _, _ string) error {
+		rel, _ := filepath.Rel(root, path)
+		checked = append(checked, rel)
+		if untrusted[filepath.ToSlash(rel)] {
+			return fmt.Errorf("%s: group/other writable permissions 0777 are not trusted", path)
+		}
+		return nil
+	}
+	checks := policyTreeChecks{dir: fake, tree: fake, file: fake}
+	used := []string{filepath.Join(root, "guardrail", "used")}
+	untrusted["guardrail/x"] = true
+	if err := validatePolicyTree(root, "policy_dir", "", used, checks); err != nil {
+		t.Fatalf("an unreferenced writable pack folder was refused: %v", err)
+	}
+	for _, rel := range checked {
+		if strings.HasPrefix(filepath.ToSlash(rel), "guardrail/x") || strings.HasPrefix(filepath.ToSlash(rel), "guardrail/default") {
+			t.Fatalf("the unreferenced pack %s was checked: %v", rel, checked)
+		}
+	}
+	for _, want := range []string{".", "rego", "guardrail", "guardrail/used", "data.json"} {
+		if !slices.Contains(checked, filepath.FromSlash(want)) {
+			t.Fatalf("%s was not checked: %v", want, checked)
+		}
+	}
+	for _, bad := range []string{"guardrail/used", "rego", "data.json"} {
+		untrusted = map[string]bool{bad: true}
+		if err := validatePolicyTree(root, "policy_dir", "", used, checks); err == nil {
+			t.Fatalf("a writable %s was accepted", bad)
+		}
+	}
+}
+
+// GAP-1003: with guardrail.rule_pack naming the pack, the implicit
+// rule_pack_dir loads nothing, so it must not depend on whether the account
+// can stat the root-only policy_dir pack: root (absent) and a standard user
+// (permission denied) resolve the same value, and so the same digest.
+func TestStandaloneRulePackDefaultIgnoresAccountAccessWhenAPackIsNamed(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		layout, err := managed.StandaloneLayoutFor(goos)
+		if err != nil {
+			t.Fatal(err)
+		}
+		vendor := layout.VendorPolicyDir + "/guardrail/default"
+		got := map[string]string{}
+		for name, probe := range map[string]error{"root": fs.ErrNotExist, "standard user": fs.ErrPermission, "present": nil} {
+			cfg := Config{
+				DeploymentMode: "managed_enterprise",
+				ConfigFilePath: layout.ConfigPath,
+				DataDir:        layout.DataDir,
+				PolicyDir:      layout.PolicyDir,
+				Enterprise:     EnterpriseConfig{Profile: managed.ProfileStandalone},
+			}
+			cfg.Guardrail.RulePack = "custom"
+			cfg.Guardrail.RulePackDir = layout.DataDir + "/policies/guardrail/default"
+			standaloneRulePackDefaultWithExists(&cfg, layout.DataDir, goos, func(string) (bool, error) { return probe == nil, probe })
+			got[name] = cfg.Guardrail.RulePackDir
+		}
+		for name, dir := range got {
+			if dir != vendor {
+				t.Fatalf("%s %s: rule_pack_dir = %q, want %q for every caller (all: %v)", goos, name, dir, vendor, got)
+			}
+		}
+	}
+}
+
 // agent_prefixes applies to Linux and macOS, but one standalone config may
 // be shared with Windows hosts, so every OS validates it the same way (Unix
 // path semantics) whatever OS runs the check.
@@ -717,6 +800,17 @@ func TestWindowsWSLPolicyValidation(t *testing.T) {
 	}
 }
 
+func TestLinuxHostKernelOptInIsRetired(t *testing.T) {
+	const doc = "config_version: 8\nenterprise:\n  machine_policy:\n    linux:\n      namespaces_and_ptrace: restrict\n"
+	parsed, err := ParseV8YAML("retired.yaml", []byte(doc))
+	if err == nil {
+		err = validateV8Schema("retired.yaml", parsed)
+	}
+	if err == nil {
+		t.Fatal("retired host-wide kernel opt-in was accepted")
+	}
+}
+
 func TestClaudeVersionFloorValidation(t *testing.T) {
 	managedConfig := func(m EnterpriseMachinePolicyConfig) Config {
 		return Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{MachinePolicy: m}}
@@ -840,6 +934,38 @@ func TestLoadManagedFileForLifecycleRecoverySkipsPolicyInputChecks(t *testing.T)
 	}
 }
 
+// GAP-0647: the snapshot restore of a rollback, and the /ensure that
+// recovers it, read the protected config while it still held an api_bind
+// the gateway refuses; the refusal kept the transaction pending.
+func TestLoadManagedFileForLifecycleRecoverySkipsListenerBindCheck(t *testing.T) {
+	if runtime.GOOS != "linux" || os.Geteuid() != 0 {
+		t.Skip("needs root on Linux: a managed config must sit on a root-owned path")
+	}
+	root, err := os.MkdirTemp("/var/lib", "dc-config-recovery-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := os.Chmod(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "config.yaml")
+	body := fmt.Sprintf("config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\ndata_dir: %s\ngateway:\n  api_bind: 0.0.0.0\n  api_port: 18971\n", root)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFromFile(path); err == nil || !strings.Contains(err.Error(), "0.0.0.0") {
+		t.Fatalf("strict load of api_bind 0.0.0.0: err = %v, want the listener refusal", err)
+	}
+	cfg, err := LoadManagedFileForLifecycleRecovery(path)
+	if err != nil {
+		t.Fatalf("lifecycle recovery load: %v", err)
+	}
+	if cfg.Gateway.APIPort != 18971 {
+		t.Fatalf("lifecycle recovery load API port = %d, want 18971", cfg.Gateway.APIPort)
+	}
+}
+
 // GAP-1193: a connector that inherits the global rule pack is not checked
 // again, so a refusal names guardrail.rule_pack_dir, or guardrail.rule_pack
 // when the global pack is selected by name (GAP-0039).
@@ -894,5 +1020,119 @@ func TestValidateCandidateRejectsManagedJudgeInlineKey(t *testing.T) {
 	err := ValidateCandidate(filepath.Join(t.TempDir(), DefaultConfigName), raw)
 	if err == nil || !strings.Contains(err.Error(), "guardrail.judge.llm.api_key") {
 		t.Fatalf("ValidateCandidate() error = %v, want guardrail.judge.llm.api_key refusal", err)
+	}
+}
+
+func TestManagedStandaloneCandidateLiteralPaths(t *testing.T) {
+	base := Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone"}}
+	for _, tc := range []struct {
+		name string
+		set  func(*Config)
+		path string
+	}{
+		{"legacy inspect key", func(c *Config) { c.InspectLLM.APIKey = "example-sensitive-value" }, "inspect_llm.api_key"},
+		{"provider authorization", func(c *Config) { c.LLM.ExtraHeaders = map[string]string{"Authorization": "example-sensitive-value"} }, "llm.extra_headers"},
+		{"provider bearer", func(c *Config) { c.LLM.ExtraHeaders = map[string]string{"X-Route": "Bearer example-sensitive-value"} }, "llm.extra_headers"},
+		{"judge authorization", func(c *Config) {
+			c.Guardrail.Judge.LLM.ExtraHeaders = map[string]string{"Authorization": "example-sensitive-value"}
+		}, "guardrail.judge.llm.extra_headers"},
+		{"scanner bearer", func(c *Config) {
+			c.Scanners.MCPScanner.LLM.ExtraHeaders = map[string]string{"X-Route": "Bearer example-sensitive-value"}
+		}, "scanners.mcp_scanner.llm.extra_headers"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base
+			tc.set(&cfg)
+			err := ValidateManagedStandaloneLiteralCandidate(&cfg, nil)
+			if err == nil || !strings.Contains(err.Error(), tc.path) ||
+				strings.Contains(err.Error(), "example-sensitive-value") || strings.Contains(err.Error(), "https://example.test/hook") ||
+				!strings.Contains(err.Error(), "{credential: NAME}") {
+				t.Fatalf("validation = %v, want redacted %s refusal with credential guidance", err, tc.path)
+			}
+		})
+	}
+	base.LLM.ExtraHeaders = map[string]string{"X-Route": "region-west"}
+	base.Webhooks = []WebhookConfig{{URL: "https://example.test/hook"}}
+	if err := ValidateManagedStandaloneLiteralCandidate(&base, nil); err != nil {
+		t.Fatalf("benign headers and supported webhook refused: %v", err)
+	}
+}
+
+func TestManagedStandaloneRefusesLiteralDestinationCredentialHeader(t *testing.T) {
+	for _, header := range []string{"Authorization: example-sensitive-value", "X-Route: Bearer example-sensitive-value", `X-Route: "Basic\texample-sensitive-value"`} {
+		raw := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n" +
+			"observability:\n  destinations:\n  - name: archive\n    kind: http_jsonl\n    enabled: true\n" +
+			"    endpoint: https://example.test/events\n    headers:\n      " + header + "\n")
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		_, err := ParseCompileObservabilityV8(path, raw, ObservabilityV8CompileOptions{DefaultDataDir: t.TempDir()})
+		if err != nil {
+			t.Fatalf("installed header stopped compiling: %v", err)
+		}
+		err = ValidateCandidate(path, raw)
+		if err == nil || !strings.Contains(err.Error(), "observability.destinations[0].headers") ||
+			strings.Contains(err.Error(), "example-sensitive-value") || !strings.Contains(err.Error(), "{credential: NAME}") {
+			t.Fatalf("header %q: validation = %v", header, err)
+		}
+	}
+}
+
+func TestInstalledManagedV102LiteralsStillLoadAndCompile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), DefaultConfigName)
+	raw := []byte(`config_version: 9
+deployment_mode: managed_enterprise
+enterprise:
+  profile: standalone
+webhooks:
+  - url: https://example.test/hook
+    type: generic
+observability:
+  destinations:
+    - name: archive
+      kind: http_jsonl
+      enabled: false
+      endpoint: https://example.test/events
+      headers:
+        Authorization: provided by administrator
+`)
+	loaded, err := LoadRuntimeV8InspectionCandidateFromBytes(path, raw)
+	if err != nil {
+		t.Fatalf("installed config failed to load: %v", err)
+	}
+	if _, err := ParseCompileObservabilityV8(path, raw, ObservabilityV8CompileOptions{DefaultDataDir: t.TempDir()}); err != nil {
+		t.Fatalf("installed config failed to compile: %v", err)
+	}
+	paths := strings.Join(ManagedStandaloneUpgradeAdvisories(loaded, raw), ",")
+	for _, want := range []string{"webhooks[0].url", "observability.destinations[0].headers"} {
+		if !strings.Contains(paths, want) {
+			t.Fatalf("advisories %q omit %q", paths, want)
+		}
+	}
+	if strings.Contains(paths, "provided by administrator") {
+		t.Fatal("advisory exposed a literal value")
+	}
+	if err := ValidateCandidate(path, raw); err == nil || !strings.Contains(err.Error(), "observability.destinations[0].headers") {
+		t.Fatalf("new candidate was not refused at destination header: %v", err)
+	}
+}
+
+func TestManagedStandaloneAcceptsDestinationHeaderReference(t *testing.T) {
+	raw := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n" +
+		"observability:\n  destinations:\n  - name: archive\n    kind: http_jsonl\n    enabled: true\n" +
+		"    endpoint: https://example.test/events\n    headers:\n      Authorization: {env: TEST_DESTINATION_AUTH}\n")
+	_, err := ParseCompileObservabilityV8(filepath.Join(t.TempDir(), "config.yaml"), raw,
+		ObservabilityV8CompileOptions{DefaultDataDir: t.TempDir(), Secrets: ObservabilityV8SecretResolverFunc(func(name string) (string, bool) {
+			return "provided by secret store", name == "TEST_DESTINATION_AUTH"
+		})})
+	if err != nil {
+		t.Fatalf("managed header reference refused: %v", err)
+	}
+}
+
+func TestPerUserLiteralHeadersKeepTheirExistingValidation(t *testing.T) {
+	raw := []byte("config_version: 9\nllm:\n  extra_headers:\n    Authorization: example-sensitive-value\n" +
+		"observability:\n  destinations:\n  - name: archive\n    kind: http_jsonl\n    enabled: false\n" +
+		"    endpoint: https://example.test/events\n    headers:\n      Authorization: example-sensitive-value\n")
+	if err := ValidateCandidate(filepath.Join(t.TempDir(), "config.yaml"), raw); err != nil {
+		t.Fatalf("per-user validation changed: %v", err)
 	}
 }

@@ -46,36 +46,6 @@ func TestObservability_EffectiveWebhooks_TriState(t *testing.T) {
 	}
 }
 
-func TestObservability_ConnectorLookup_AliasInsensitive(t *testing.T) {
-	obs := ObservabilityConfig{
-		Connectors: map[string]PerConnectorObservability{
-			"open-hands": {Webhooks: webhookPtr(WebhookConfig{Name: "oh"})},
-		},
-	}
-	// Registry-canonical "openhands" must resolve the "open-hands" alias key.
-	got := obs.EffectiveWebhooks("openhands", nil)
-	if len(got) != 1 || got[0].Name != "oh" {
-		t.Fatalf("openhands effective = %+v, want [oh] via alias", got)
-	}
-}
-
-func TestObservability_Validate_RejectsDuplicateAlias(t *testing.T) {
-	obs := ObservabilityConfig{
-		Connectors: map[string]PerConnectorObservability{
-			"open-hands": {},
-			"openhands":  {},
-		},
-	}
-	if err := obs.Validate(); err == nil {
-		t.Fatal("expected Validate to reject open-hands/openhands alias collision")
-	}
-	// A single canonical entry validates clean.
-	ok := ObservabilityConfig{Connectors: map[string]PerConnectorObservability{"codex": {}}}
-	if err := ok.Validate(); err != nil {
-		t.Fatalf("unexpected Validate error: %v", err)
-	}
-}
-
 // TestObservability_LoadRoundTrip pins the per-connector webhook overrides
 // through the loader: an override and an explicit empty list (suppress), and
 // that a load-save cycle keeps that shape.
@@ -132,5 +102,35 @@ observability:
 	}
 	if pc := reparsed.Observability.Connectors["codex"]; pc.Webhooks == nil || len(*pc.Webhooks) != 1 {
 		t.Fatalf("codex override did not survive Save round-trip: %v", pc.Webhooks)
+	}
+}
+
+func TestObservability_ConnectorLookup_AliasInsensitive(t *testing.T) {
+	obs := ObservabilityConfig{
+		Connectors: map[string]PerConnectorObservability{
+			"claude-code": {Webhooks: webhookPtr(WebhookConfig{Name: "cc"})},
+		},
+	}
+	// Registry-canonical "claudecode" must resolve the "claude-code" alias key.
+	got := obs.EffectiveWebhooks("claudecode", nil)
+	if len(got) != 1 || got[0].Name != "cc" {
+		t.Fatalf("claudecode effective = %+v, want [cc] via alias", got)
+	}
+}
+
+func TestObservability_Validate_RejectsDuplicateAlias(t *testing.T) {
+	obs := ObservabilityConfig{
+		Connectors: map[string]PerConnectorObservability{
+			"claude-code": {},
+			"claudecode":  {},
+		},
+	}
+	if err := obs.Validate(); err == nil {
+		t.Fatal("expected Validate to reject claude-code/claudecode alias collision")
+	}
+	// A single canonical entry validates clean.
+	ok := ObservabilityConfig{Connectors: map[string]PerConnectorObservability{"codex": {}}}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("unexpected Validate error: %v", err)
 	}
 }

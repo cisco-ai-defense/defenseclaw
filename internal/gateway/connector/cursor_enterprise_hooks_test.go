@@ -69,14 +69,14 @@ func TestRenderWindowsCursorEnterpriseAdapterUsesSharedLauncherStdinAndClosedMod
 	}
 }
 
-func TestRenderCursorAdapterFailsOpenOnlyWhenExplicitlyConfigured(t *testing.T) {
+func TestRenderCursorAdapterClosesLocalFailureWithOpenOutageMode(t *testing.T) {
 	openAdapter, err := renderWindowsCursorAdapter(testWindowsHookBinary, "open", false, 1_000)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(openAdapter, []byte(`{"continue":true}`)) ||
-		bytes.Contains(openAdapter, []byte(`{"continue":false,"permission":"deny"`)) {
-		t.Fatalf("explicit-open adapter has wrong fallback:\n%s", openAdapter)
+	if bytes.Contains(openAdapter, []byte(`{"continue":true}`)) ||
+		!bytes.Contains(openAdapter, []byte(`{"continue":false,"permission":"deny"`)) {
+		t.Fatalf("explicit-open outage mode weakened local adapter failure:\n%s", openAdapter)
 	}
 	if bytes.Contains(openAdapter, []byte("--enterprise-managed")) {
 		t.Fatalf("unmanaged adapter contains enterprise flag:\n%s", openAdapter)
@@ -91,8 +91,8 @@ func TestRenderCursorAdapterFailsOpenOnlyWhenExplicitlyConfigured(t *testing.T) 
 		t.Fatalf("invalid fail mode did not collapse closed:\n%s", closedAdapter)
 	}
 
-	if _, err := RenderWindowsCursorEnterpriseAdapter(testWindowsHookBinary, "open"); err == nil {
-		t.Fatal("enterprise adapter accepted fail-open mode")
+	if adapter, err := RenderWindowsCursorEnterpriseAdapter(testWindowsHookBinary, "open"); err != nil || bytes.Contains(adapter, []byte(`{"continue":true}`)) {
+		t.Fatalf("enterprise adapter left local failure open: %v", err)
 	}
 }
 
@@ -153,6 +153,8 @@ func TestWindowsCursorEnterpriseHookCommandIsShellNeutral(t *testing.T) {
 		wantScript := "$reader=[IO.StreamReader]::new([Console]::OpenStandardInput()," +
 			"[Text.UTF8Encoding]::new($false,$true),$false);" +
 			"try{$payload=$reader.ReadToEnd()}finally{$reader.Dispose()};" +
+			"if($payload.StartsWith([string][char]0xFEFF)){$payload=$payload.Substring(1)};" +
+			"if($payload.TrimStart().StartsWith([string][char]0x22)){$payload=([string][char]0x7B)+$payload};" +
 			"$payload | & " + powershellQuoteLiteral(adapterPath)
 		if decoded := decodePowerShellEncodedCommandForTest(t, command); decoded != wantScript {
 			t.Fatalf("decoded Cursor enterprise command = %q, want %q", decoded, wantScript)
@@ -171,9 +173,15 @@ func TestWindowsCursorEnterpriseHookCommandPreservesUTF8Stdin(t *testing.T) {
 	root := t.TempDir()
 	adapterPath := filepath.Join(root, "cursor-hook.ps1")
 	adapter := strings.Join([]string{
+		`[CmdletBinding()]`,
+		`param([Parameter(ValueFromPipeline = $true)][AllowNull()][object]$InputObject)`,
+		`begin { $parts = [System.Collections.Generic.List[string]]::new() }`,
+		`process { if ($null -ne $InputObject) { [void]$parts.Add([string]$InputObject) } }`,
+		`end {`,
 		`$ErrorActionPreference = 'Stop'`,
-		`$payload = (@($input | ForEach-Object { [string]$_ }) -join [Environment]::NewLine)`,
+		`$payload = $parts -join [Environment]::NewLine`,
 		`[IO.File]::WriteAllText($env:DC_CURSOR_UTF8_OUTPUT, $payload, [Text.UTF8Encoding]::new($false))`,
+		`}`,
 	}, "\r\n")
 	if err := os.WriteFile(adapterPath, []byte(adapter), 0o600); err != nil {
 		t.Fatalf("write Cursor UTF-8 probe adapter: %v", err)
@@ -183,8 +191,17 @@ func TestWindowsCursorEnterpriseHookCommandPreservesUTF8Stdin(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload := `{"path":"C:\\用户\\résumé.txt","prompt":"東京 – café 🚀"}`
+	testCases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "PlainUTF8", input: payload, want: payload},
+		{name: "LeadingBOM", input: "\uFEFF" + payload, want: payload},
+		{name: "EmbeddedBOM", input: `{"prompt":"left` + "\uFEFF" + `right"}`, want: `{"prompt":"left` + "\uFEFF" + `right"}`},
+	}
 
-	run := func(t *testing.T, commandForHost func(context.Context) *exec.Cmd) {
+	run := func(t *testing.T, commandForHost func(context.Context) *exec.Cmd, input, want string) {
 		t.Helper()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -194,7 +211,7 @@ func TestWindowsCursorEnterpriseHookCommandPreservesUTF8Stdin(t *testing.T) {
 			"DC_CURSOR_UTF8_OUTPUT="+outputPath,
 			"PSModuleAnalysisCachePath="+filepath.Join(t.TempDir(), "module-analysis-cache"),
 		)
-		cmd.Stdin = strings.NewReader(payload)
+		cmd.Stdin = strings.NewReader(input)
 		if output, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("run Cursor enterprise command: %v\ncommand: %s\noutput: %s", err, command, output)
 		}
@@ -205,32 +222,43 @@ func TestWindowsCursorEnterpriseHookCommandPreservesUTF8Stdin(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read Cursor UTF-8 probe output: %v", err)
 		}
-		if string(got) != payload {
-			t.Fatalf("Cursor enterprise payload = %q, want %q", got, payload)
+		if string(got) != want {
+			t.Fatalf("Cursor enterprise payload = %q, want %q", got, want)
 		}
 	}
 
 	t.Run("PowerShell", func(t *testing.T) {
-		run(t, func(ctx context.Context) *exec.Cmd {
-			return exec.CommandContext(
-				ctx,
-				"powershell.exe",
-				"-NoLogo",
-				"-NoProfile",
-				"-NonInteractive",
-				"-Command",
-				command,
-			)
-		})
+		// The engine's one-time first start is outside each case's 30 s
+		// budget (rel-1-0-6:GAP-0250).
+		warmPowerShell(t, "powershell.exe")
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				run(t, func(ctx context.Context) *exec.Cmd {
+					return exec.CommandContext(
+						ctx,
+						"powershell.exe",
+						"-NoLogo",
+						"-NoProfile",
+						"-NonInteractive",
+						"-Command",
+						command,
+					)
+				}, tc.input, tc.want)
+			})
+		}
 	})
 	t.Run("GitBash", func(t *testing.T) {
 		bash, err := exec.LookPath("bash")
 		if err != nil {
 			t.Skip("Git Bash is not installed")
 		}
-		run(t, func(ctx context.Context) *exec.Cmd {
-			return exec.CommandContext(ctx, bash, "--noprofile", "--norc", "-lc", command)
-		})
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				run(t, func(ctx context.Context) *exec.Cmd {
+					return exec.CommandContext(ctx, bash, "--noprofile", "--norc", "-lc", command)
+				}, tc.input, tc.want)
+			})
+		}
 	})
 }
 
@@ -349,8 +377,8 @@ func TestWindowsCursorEnterpriseHooksRejectMalformedOrDriftedContracts(t *testin
 			}
 		})
 	}
-	if _, err := MergeWindowsCursorEnterpriseHooks(nil, testWindowsCursorAdapter, "open"); err == nil {
-		t.Fatal("enterprise hook merge accepted fail-open mode")
+	if hooks, err := MergeWindowsCursorEnterpriseHooks(nil, testWindowsCursorAdapter, "open"); err != nil || VerifyWindowsCursorEnterpriseHooks(hooks, testWindowsCursorAdapter, "open") != nil {
+		t.Fatalf("enterprise hook merge did not support fail-open mode: %v", err)
 	}
 	if _, err := MergeWindowsCursorEnterpriseHooks(
 		bytes.Repeat([]byte(" "), windowsCursorEnterpriseHooksJSONMax+1),
@@ -454,6 +482,87 @@ func TestIsBuiltinCursorConnector(t *testing.T) {
 	}
 	if IsBuiltinCursorConnector(NewDevinConnector()) || IsBuiltinCursorConnector(nil) {
 		t.Fatal("non-Cursor connector was recognized as built-in Cursor")
+	}
+}
+
+// Cursor's host flag covers a hook process that never answers. It follows
+// the delivery mode the caller passes: closed outside Secure Client, the
+// administrator's mode under it (open by default, as on 26.8.4).
+func TestWindowsCursorHostFlagFollowsTheDeliveryMode(t *testing.T) {
+	for mode, want := range map[string]bool{"open": false, "closed": true, "": true} {
+		body, err := MergeWindowsCursorEnterpriseHooks(nil, testWindowsCursorAdapter, mode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := decodeCursorHooksJSON(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hooks, err := cursorHooksObject(cfg, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range cursorEnterpriseHookEvents {
+			entries, ok := cursorHookEntryList(hooks[event])
+			if !ok || len(entries) != 1 {
+				t.Fatalf("Cursor %s entries = %#v", event, hooks[event])
+			}
+			entry, ok := entries[0].(map[string]interface{})
+			if !ok || entry["failClosed"] != want {
+				t.Fatalf("mode %q: Cursor %s entry = %#v, want failClosed %v", mode, event, entries[0], want)
+			}
+		}
+		if err := VerifyWindowsCursorEnterpriseHooks(body, testWindowsCursorAdapter, mode); err != nil {
+			t.Fatalf("mode %q: rendered policy is not current: %v", mode, err)
+		}
+	}
+}
+
+// 1.0.4 wrote failClosed true for every mode. An open policy reads it for an
+// upgrade, refuses it as current, and reconciles it to the mode.
+func TestWindowsCursorUpgradeRepairsTheAlwaysClosedHostFlag(t *testing.T) {
+	current, err := MergeWindowsCursorEnterpriseHooks(nil, testWindowsCursorAdapter, "open")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := decodeCursorHooksJSON(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks, err := cursorHooksObject(cfg, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range cursorEnterpriseHookEvents {
+		entries, _ := cursorHookEntryList(hooks[event])
+		entries[0].(map[string]interface{})["failClosed"] = true
+	}
+	previous, err := encodeCursorHooksJSON(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyWindowsCursorEnterpriseHooksForMigration(previous, testWindowsCursorAdapter, "open"); err != nil {
+		t.Fatalf("1.0.4 policy must remain upgrade-readable: %v", err)
+	}
+	if err := VerifyWindowsCursorEnterpriseHooksRegistered(previous, testWindowsCursorAdapter, "open"); err != nil {
+		t.Fatalf("1.0.4 policy is still DefenseClaw's registration: %v", err)
+	}
+	if err := VerifyWindowsCursorEnterpriseHooks(previous, testWindowsCursorAdapter, "open"); err == nil {
+		t.Fatal("current verify accepted the 1.0.4 always-closed host flag for an open policy")
+	}
+	// A closed policy does not take a flag turned off as its registration.
+	if err := VerifyWindowsCursorEnterpriseHooksForMigration(current, testWindowsCursorAdapter, "closed"); err == nil {
+		t.Fatal("migration read accepted failClosed false for a closed policy")
+	}
+	if err := VerifyWindowsCursorEnterpriseHooksRegistered(current, testWindowsCursorAdapter, "closed"); err == nil {
+		t.Fatal("presence read accepted failClosed false for a closed policy")
+	}
+	repaired, err := MergeWindowsCursorEnterpriseHooks(previous, testWindowsCursorAdapter, "open")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyWindowsCursorEnterpriseHooks(repaired, testWindowsCursorAdapter, "open"); err != nil {
+		t.Fatalf("reconciled policy is not current: %v", err)
 	}
 }
 

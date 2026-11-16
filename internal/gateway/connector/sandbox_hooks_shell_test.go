@@ -61,6 +61,7 @@ line="$(sed -n "${n}p" "$dir/responses")"
 case "$line" in
   exit:*) exit "${line#exit:}" ;;
   '') exit 7 ;;
+  b64:*) printf '%s' "${line#b64:}" | base64 -d ;;
   *) printf '%s\n%s' "${line#*|}" "${line%%|*}" ;;
 esac
 `
@@ -126,11 +127,15 @@ func newSandboxHookHarnessFiles(t *testing.T, files []SandboxFile, systemPATH st
 		data := file.Data
 		switch filepath.Base(file.Path) {
 		case "_hardening.sh":
+			data = bytes.ReplaceAll(data, []byte(SandboxHookLogDir), []byte(h.path(SandboxHookLogDir)))
 			data = bytes.Replace(data, []byte(`DEFENSECLAW_BAKED_HOOK_PATH="`+SandboxHookPATH+`"`),
 				[]byte(`DEFENSECLAW_BAKED_HOOK_PATH="`+stubPath+`"`), 1)
 		case codexSandboxNotifyScript:
 			data = bytes.Replace(data, []byte("PATH="+SandboxHookPATH+"\n"), []byte("PATH="+stubPath+"\n"), 1)
 		}
+		// The hooks bake the image's hook folder: point it at this copy.
+		data = bytes.ReplaceAll(data, []byte("HOOK_DIR="+shellSingleQuote(SandboxHookDir)+"\n"),
+			[]byte("HOOK_DIR="+shellSingleQuote(h.path(SandboxHookDir))+"\n"))
 		dest := filepath.Join(h.root, filepath.FromSlash(file.Path))
 		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 			t.Fatal(err)
@@ -244,7 +249,6 @@ const (
 	kiroPreToolUse        = `{"hook_event_name":"preToolUse","cwd":"/work/proj","session_id":"s1","tool_name":"shell","tool_input":{"command":"ls"}}`
 	devinPreToolUse       = `{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"/work/proj","tool_name":"exec","tool_input":{"command":"ls"}}`
 	hermesPreToolCall     = `{"hook_event_name":"pre_tool_call","tool_name":"terminal","tool_input":{"command":"ls"},"session_id":"s1","cwd":"/work/p","extra":{}}`
-	openHandsPreToolUse   = `{"event_type":"PreToolUse","tool_name":"terminal","tool_input":{"command":"ls"},"session_id":"s1","working_dir":"/work/p","metadata":{}}`
 	antigravityPreToolUse = `{"toolName":"run_command","toolInput":{"CommandLine":"ls"}}`
 	allowResponse         = `200|{"action":"allow"}`
 )
@@ -253,6 +257,116 @@ var (
 	codexPreToolUseArgs   = []string{"--event", "PreToolUse", "--hook-contract", "codex-hooks-v4"}
 	copilotPreToolUseArgs = []string{"--event", "preToolUse"}
 )
+
+// GAP-0875: Claude and Codex sandbox hooks acknowledge an offered managed
+// verdict over a second buffered relay call. The token remains descriptor
+// backed and a failed acknowledgement closes the tool call.
+func TestSandboxClaudeAndCodexAcknowledgeTheirRelayedToolAnswer(t *testing.T) {
+	const receiptID = "01234567-89ab-4cde-8f01-23456789abcd"
+	for _, tc := range sandboxHookCases() {
+		if tc.connector != "claudecode" && tc.connector != "codex" || !tc.lifecycle {
+			continue
+		}
+		h := newSandboxHookHarness(t, tc.provider, tc.version)
+		env := map[string]string{SandboxTokenEnv: "sandbox-token", "CLAUDE_TOOL_NAME": "Bash"}
+		t.Run(tc.connector+"/confirmed", func(t *testing.T) {
+			run := h.run(t, SandboxHookDir+"/"+tc.script, tc.args, tc.stdin, env,
+				[]string{`200|{"action":"allow","delivery_receipt":"` + receiptID + `"}`, `200|{"received":true}`})
+			if run.exitCode != 0 || tc.blocked(run) || len(run.calls) != 2 {
+				t.Fatalf("confirmed exit=%d calls=%d stdout=%q stderr=%q", run.exitCode, len(run.calls), run.stdout, run.stderr)
+			}
+			if run.calls[0].body != tc.stdin || run.calls[1].url() != run.calls[0].url() ||
+				run.calls[1].headers["authorization"] != "Bearer sandbox-token" ||
+				run.calls[0].headers["x-defenseclaw-hook-receipt"] != "" ||
+				run.calls[1].headers["x-defenseclaw-hook-receipt"] != "1" ||
+				run.calls[0].headers["x-defenseclaw-client"] == "" ||
+				run.calls[1].headers["x-defenseclaw-client"] == "" {
+				t.Fatalf("receipt crossed the wrong binding or route: %+v", run.calls)
+			}
+			for i, call := range run.calls {
+				argv := strings.Join(call.argv, "\n")
+				if strings.Contains(argv, "sandbox-token") || strings.Contains(strings.ToLower(argv), "authorization") {
+					t.Fatalf("call %d exposed the bearer on argv: %s", i, argv)
+				}
+			}
+			if maxTime, err := strconv.Atoi(run.calls[1].flagValue("--max-time")); err != nil || maxTime <= 3 {
+				t.Fatalf("receipt first attempt wait = %q, want the shared remaining hook time", run.calls[1].flagValue("--max-time"))
+			}
+			var ack map[string]string
+			if err := json.Unmarshal([]byte(run.calls[1].body), &ack); err != nil ||
+				ack["delivery_receipt"] != receiptID || ack["result"] != "ack" {
+				t.Fatalf("receipt body = %q: %v", run.calls[1].body, err)
+			}
+		})
+		t.Run(tc.connector+"/legacy_no_receipt_after_time", func(t *testing.T) {
+			// An older gateway has no receipt to confirm, even if the first
+			// response used the rest of the hook envelope.
+			cmd := exec.Command("/bin/bash", "-p", "-c", `_dc_jq() { jq "$@"; }
+source "$SANDBOX_HELPER"
+SECONDS=30
+defenseclaw_sandbox_confirm_receipt /hook '{"action":"allow"}'`)
+			cmd.Env = []string{
+				"HOME=" + t.TempDir(), "PATH=/usr/bin:/bin",
+				"DEFENSECLAW_BAKED_HOOK_PATH=" + h.bakedPATH,
+				"DEFENSECLAW_SANDBOX_TOKEN=sandbox-token",
+				"SANDBOX_HELPER=" + h.path(SandboxHookDir+"/_sandbox.sh"),
+			}
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("legacy answer refused: %v: %s", err, out)
+			}
+		})
+		t.Run(tc.connector+"/receipt_failure", func(t *testing.T) {
+			run := h.run(t, SandboxHookDir+"/"+tc.script, tc.args, tc.stdin, env,
+				[]string{`200|{"action":"allow","delivery_receipt":"` + receiptID + `"}`, `503|{}`, `503|{}`})
+			if !tc.blocked(run) || len(run.calls) != 3 {
+				t.Fatalf("failed receipt exit=%d calls=%d stdout=%q stderr=%q", run.exitCode, len(run.calls), run.stdout, run.stderr)
+			}
+			if !strings.Contains(run.stderr, "status 503") {
+				t.Fatalf("failed receipt did not report the response status: %q", run.stderr)
+			}
+		})
+		// A call the gateway refused 429 is blocked with the gateway's message,
+		// which names the limit that refused it, and says it is not an outage:
+		// the hook never reports the answer as "gateway unreachable" or the
+		// receipt as "not acknowledged", and never names the account budget
+		// for a refusal that came from another limit (rel-1-0-6 GAP-0490).
+		const (
+			accountBody  = `{"error":"rate_limited","reason":"enterprise_managed_rate_limited","message":"DefenseClaw allows the sandboxes of one user 40 tool calls a second together (a burst of 100); this call is over that budget and did not run, so retry in a few seconds","retry_after_seconds":"1"}`
+			bindingBody  = `{"error":"rate_limited","reason":"sandbox_rate_limited","message":"DefenseClaw is limiting how fast this one sandbox may send requests (tool calls: 25 a second, a burst of 100); this request did not run, so retry in a few seconds","retry_after_seconds":"1"}`
+			overloadBody = `{"error":"rate_limited","reason":"enterprise_managed_overloaded","message":"DefenseClaw is handling as many hook requests as it can; retry shortly","retry_after_seconds":"1"}`
+			legacyBody   = `{"error":"sandboxauth: too many concurrent sandbox requests"}`
+			allowReceipt = `200|{"action":"allow","delivery_receipt":"` + receiptID + `"}`
+		)
+		for _, refused := range []struct {
+			name      string
+			responses []string
+			calls     int
+			want      string
+			notWant   string
+		}{
+			{"account_budget_refused_proposal", []string{"429|" + accountBody}, 1, "40 tool calls a second together (a burst of 100)", ""},
+			{"account_budget_refused_receipt", []string{allowReceipt, "429|" + accountBody}, 2, "40 tool calls a second together (a burst of 100)", ""},
+			{"binding_rate_refused_proposal", []string{"429|" + bindingBody}, 1, "this one sandbox may send requests", "40 tool calls"},
+			{"binding_rate_refused_receipt", []string{allowReceipt, "429|" + bindingBody}, 2, "this one sandbox may send requests", "40 tool calls"},
+			{"overload_refused_receipt", []string{allowReceipt, "429|" + overloadBody}, 2, "handling as many hook requests as it can", "budget"},
+			{"legacy_body_refused_receipt", []string{allowReceipt, "429|" + legacyBody}, 2, "too many concurrent sandbox requests", "budget"},
+			{"empty_body_refused_receipt", []string{allowReceipt, "429|"}, 2, "HTTP 429 (too many requests", "budget"},
+		} {
+			t.Run(tc.connector+"/"+refused.name, func(t *testing.T) {
+				run := h.run(t, SandboxHookDir+"/"+tc.script, tc.args, tc.stdin, env, refused.responses)
+				if !tc.blocked(run) || len(run.calls) != refused.calls {
+					t.Fatalf("refused call exit=%d calls=%d stdout=%q stderr=%q", run.exitCode, len(run.calls), run.stdout, run.stderr)
+				}
+				text := run.stdout + run.stderr
+				if !strings.Contains(text, refused.want) || !strings.Contains(text, "not an outage") ||
+					strings.Contains(text, "not acknowledged") || strings.Contains(text, "does not answer") ||
+					strings.Contains(text, "unreachable") || (refused.notWant != "" && strings.Contains(text, refused.notWant)) {
+					t.Fatalf("refusal did not name its limit as a refusal: stdout=%q stderr=%q", run.stdout, run.stderr)
+				}
+			})
+		}
+	}
+}
 
 // sandboxHookCase is one sandbox hook script run on a PreToolUse event.
 type sandboxHookCase struct {
@@ -315,7 +429,6 @@ func sandboxHookCases() []sandboxHookCase {
 				d := lastJSON(run)
 				return d["action"] == "block" || d["decision"] == "block"
 			}},
-		{"openhands", NewOpenHandsConnector(), "1.16.0", "openhands-hook.sh", nil, openHandsPreToolUse, "/api/v1/openhands/hook", nil, false, true, exit2},
 		{"antigravity", NewAntigravityConnector(), "1.2.12", "antigravity-hook.sh", []string{"PreToolUse"}, antigravityPreToolUse, "/api/v1/antigravity/hook",
 			map[string]string{"x-defenseclaw-antigravity-event": "PreToolUse"}, false, true,
 			func(run sandboxHookRun) bool { return run.exitCode == 0 && lastJSON(run)["decision"] == "deny" }},
@@ -643,8 +756,6 @@ func TestSandboxHooksRenderVerdicts(t *testing.T) {
 		{"devin context", "devin", `{"hook_event_name":"PostToolUse","tool_name":"exec"}`, nil, `{"action":"alert","hook_output":` + devinContext + `}`, 0, devinContext, ""},
 		{"hermes block verdict", "hermes", "", nil, `{"action":"block","reason":"rule X","hook_output":{"decision":"block","reason":"rule X"}}`, -1, any, "rule X"},
 		{"hermes bare block", "hermes", "", nil, `{"action":"block","reason":"rule Y"}`, -1, any, "rule Y"},
-		{"openhands block verdict", "openhands", "", nil, `{"action":"block","reason":"rule X","hook_output":{"decision":"deny","reason":"rule X"}}`, -1, any, "rule X"},
-		{"openhands bare block", "openhands", "", nil, `{"action":"block","reason":"rule Y"}`, -1, any, "rule Y"},
 		{"antigravity block verdict", "antigravity", "", nil, `{"action":"block","reason":"rule X","hook_output":{"decision":"deny","reason":"rule X"}}`, -1, any, "rule X"},
 		{"antigravity bare block", "antigravity", "", nil, `{"action":"block","reason":"rule Y"}`, -1, any, "rule Y"},
 		{"claude alert", "claudecode", "", nil, alertVerdict, 0, alertNotice, ""},

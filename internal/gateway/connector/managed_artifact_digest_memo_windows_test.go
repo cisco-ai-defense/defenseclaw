@@ -8,6 +8,7 @@ package connector
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -364,5 +365,50 @@ func TestWindowsManagedHookBinaryAPIsShareTargetAndDoNotExpireCopy(t *testing.T)
 	}
 	if *ends != 3 {
 		t.Fatalf("after target backstop, epochs %d, want three", *ends)
+	}
+}
+
+// GAP-0256: another process's full read writes a close record for the shared
+// hook binary (FSCTL_WRITE_USN_CLOSE_RECORD) while the guardian reads it under
+// its deny-write handle. The guardian's digest still answers, confirmed by a
+// second pass, and is not remembered.
+func TestWindowsManagedArtifactDigestSurvivesAnotherReaderEndingTheEpoch(t *testing.T) {
+	useWindowsManagedArtifactDigestSeams(t)
+	path := filepath.Join(t.TempDir(), "defenseclaw-hook.exe")
+	clean := writeManagedArtifactFixture(t, path, 1)
+	if _, ok := windowsManagedArtifactStampOfPath(t, path); !ok {
+		t.Skip("the test volume keeps no change journal; the memo is off there")
+	}
+	saved := managedArtifactDigestRead
+	t.Cleanup(func() { managedArtifactDigestRead = saved })
+	moved := false
+	calls := 0
+	managedArtifactDigestRead = func(dst io.Writer, file *os.File, maxBytes int64) (int64, error) {
+		count, err := saved(dst, file, maxBytes)
+		calls++
+		if calls == 1 {
+			other, openErr := os.Open(path)
+			if openErr != nil {
+				t.Fatalf("open a second reader: %v", openErr)
+			}
+			before, _ := windowsManagedArtifactStamp(other)
+			if endErr := endWindowsManagedArtifactChangeEpoch(other); endErr != nil {
+				t.Fatalf("second reader close record: %v", endErr)
+			}
+			after, _ := windowsManagedArtifactStamp(other)
+			moved = after.USN != before.USN
+			_ = other.Close()
+		}
+		return count, err
+	}
+	got, exists, err := stableManagedArtifactDigestWith(path, "managed hook runtime artifact", 4<<20, "", true)
+	if !moved {
+		t.Skip("the close record of a second reader did not move the journal number on this volume")
+	}
+	if err != nil || !exists || got != clean {
+		t.Fatalf("digest %q, exists %v, err %v; want %s", got, exists, err, clean)
+	}
+	if calls != 2 || managedArtifactDigestRemembered(path) {
+		t.Fatalf("data passes %d, remembered %v; want 2 passes and no memo", calls, managedArtifactDigestRemembered(path))
 	}
 }

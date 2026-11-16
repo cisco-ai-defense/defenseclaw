@@ -40,7 +40,7 @@ const (
 	// / hermes)
 	styleHookEcho
 	// styleHookEchoDecision: echo hook_output, then exit 2 if its
-	// `decision` is deny/block. (openhands-hook.sh)
+	// `decision` is deny/block. (devin-hook.sh)
 	styleHookEchoDecision
 	// styleActionStderr: no stdout echo; on action=block write reason to
 	// stderr + exit 2. (amp-plugin)
@@ -197,17 +197,22 @@ var specs = map[string]spec{
 		unreachableStrict: failResult{exit: blockExit},
 		responseClosed:    failResult{exit: blockExit},
 	},
-	"openhands": {
-		connector: "openhands", hookName: "openhands-hook", errLabel: "openhands",
-		subject: "openhands hook", endpoint: "/api/v1/openhands/hook",
-		outputField: "hook_output", style: styleHookEchoDecision,
-		oversizedClosed:   failResult{body: `{"decision":"deny","reason":"` + tooLarge + `"}`, exit: blockExit},
-		unreachableStrict: failResult{body: `{"decision":"deny","reason":"` + failedClosed + `"}`, exit: blockExit},
-		responseClosed:    failResult{body: `{"decision":"deny","reason":"` + failedClosed + `"}`, exit: blockExit},
-	},
 }
 
 // openCodeDenyBody is the managed OpenCode plugin's block answer.
+// openCodeFailOpenBody is the managed OpenCode plugin's answer for a call a
+// failure lets through in fail mode open: an explicit allow that carries the
+// notice the plugin shows (GAP-0351). The plugin treats an empty or
+// unparseable answer as closed, so the hook never answers this with nothing.
+func openCodeFailOpenBody(notice string) string {
+	return `{"action":"allow","hook_output":{"decision":"allow"},"fail_open":true,"notice":` + mustJSONString(notice) + `}`
+}
+
+// openCodeFailOpenNotice is the notice of that answer.
+func openCodeFailOpenNotice(reason string) string {
+	return "DefenseClaw could not check this tool call, and the fail mode is open, so it runs without a check (" + strings.TrimSpace(reason) + ")."
+}
+
 func openCodeDenyBody(reason string) string {
 	return `{"hook_output":{"decision":"deny","reason":` + mustJSONString(reason) + `}}`
 }
@@ -217,6 +222,42 @@ func cursorFallbackOutput(event string, closed bool, reason string) string {
 		return cursorActionOutput(event, "block", reason)
 	}
 	return cursorActionOutput(event, "allow", reason)
+}
+
+// cursorClosedOutput is a Cursor hook's closed answer. A strict failure
+// before the event could be decoded (an unreadable payload) may be any event,
+// a tool call included, so outside Secure Client it denies in the fields of
+// every Cursor event, as the Windows adapter's own closed answer does:
+// cursor-agent 2026.10.22 ran the call on "{}" with exit 2, so a decoy whose
+// payload the hook could not read was not blocked (GAP-2449). A decoded event
+// and a Secure Client hook keep cursorFallbackOutput.
+func cursorClosedOutput(opts Options, reason string) string {
+	if strings.TrimSpace(opts.Event) != "" || opts.SecureClient || secureClientHook(opts) {
+		return cursorFallbackOutput(opts.Event, true, reason)
+	}
+	message := mustJSONString(reason)
+	return `{"continue":false,"permission":"deny","user_message":` + message + `,"agent_message":` + message + `}`
+}
+
+// cursorEventUnread matches the events registered by Cursor's hook contract.
+// An event outside this roster has no event-specific block response.
+func cursorEventUnread(event string) bool {
+	switch strings.TrimSpace(event) {
+	case "sessionStart", "sessionEnd", "preToolUse", "postToolUse", "postToolUseFailure",
+		"subagentStart", "subagentStop", "beforeShellExecution", "beforeMCPExecution",
+		"afterShellExecution", "afterMCPExecution", "beforeReadFile", "beforeTabFileRead",
+		"afterFileEdit", "afterTabFileEdit", "beforeSubmitPrompt", "afterAgentResponse",
+		"afterAgentThought", "stop", "preCompact", "workspaceOpen":
+		return false
+	}
+	return true
+}
+
+func cursorClosedExit(opts Options, exit int) int {
+	if !opts.SecureClient && !secureClientHook(opts) && cursorEventUnread(opts.Event) {
+		return blockExit
+	}
+	return exit
 }
 
 func cursorActionOutput(event, action, reason string) string {

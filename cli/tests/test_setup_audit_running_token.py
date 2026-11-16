@@ -77,6 +77,9 @@ class SetupAuditUsesTheRunningGatewayTokenTests(unittest.TestCase):
         self.app.cfg.save = lambda: atomic_write_private_bytes(self.cfg_path, b"x\n")  # type: ignore[assignment]
         self.app.cfg.gateway.token = ""
         self.app.cfg.gateway.token_env = ""
+        # The handoff is bound to a real gateway.pid, not a liveness mock.
+        with open(os.path.join(self.app.cfg.data_dir, "gateway.pid"), "w", encoding="utf-8") as handle:
+            handle.write(str(os.getpid()))
         openclaw = os.path.join(self.tmp_dir, "openclaw.json")
         with open(openclaw, "w", encoding="utf-8") as handle:
             json.dump({"gateway": {"auth": {"token": _OPENCLAW}}}, handle)
@@ -91,7 +94,7 @@ class SetupAuditUsesTheRunningGatewayTokenTests(unittest.TestCase):
 
     def _adopt_and_audit(self, gateway: _Gateway, *, alive: bool = True) -> None:
         with (
-            patch("defenseclaw.process_liveness.pid_file_alive", return_value=alive),
+            patch("defenseclaw.process_liveness.pid_alive", return_value=alive),
             patch("defenseclaw.logger.OrchestratorClient", side_effect=gateway.client),
             click.Context(click.Command("openclaw")),
         ):
@@ -123,7 +126,7 @@ class SetupAuditUsesTheRunningGatewayTokenTests(unittest.TestCase):
         gateway = _Gateway(_RUNNING)
         self.app.logger = Logger.from_config(self.app.cfg)
         with (
-            patch("defenseclaw.process_liveness.pid_file_alive", return_value=True),
+            patch("defenseclaw.process_liveness.pid_alive", return_value=True),
             patch.object(cmd_setup, "_restart_defense_gateway", return_value=True),
             patch.object(cmd_setup, "_restart_services", return_value=None),
             patch("defenseclaw.logger.OrchestratorClient", side_effect=gateway.client),

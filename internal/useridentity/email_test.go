@@ -225,11 +225,26 @@ func TestMalformedAndHostileFilesResolveNothing(t *testing.T) {
 func TestOversizeCredentialFileIsRefused(t *testing.T) {
 	home := t.TempDir()
 	padding := strings.Repeat("p", maxCredentialFileBytes)
-	writeFile(t, filepath.Join(home, ".claude.json"),
-		`{"pad":"`+padding+`","oauthAccount":{"emailAddress":"alice@example.com"}}`)
+	writeFile(t, filepath.Join(home, ".codex", "auth.json"), `{"pad":"`+padding+`","tokens":{"id_token":"x.y.z"}}`)
 
-	if got, err := EmailForConnector("claude-code", home, nil); got != "" || !errors.Is(err, ErrNoEmail) {
+	if got, err := EmailForConnector("codex", home, nil); got != "" || !errors.Is(err, ErrNoEmail) {
 		t.Fatalf("EmailForConnector = (%q, %v), want ErrNoEmail for an oversize file", got, err)
+	}
+}
+
+// Claude Code's .claude.json holds its whole state and outgrows the
+// credential-file limit; a valid larger one still gives its signed-in
+// address, to the per-user reader and to managed discovery (GAP-1276).
+func TestLargeClaudeCodeConfigKeepsItsEmail(t *testing.T) {
+	home := t.TempDir()
+	padding := strings.Repeat("p", 2*maxCredentialFileBytes)
+	writeFile(t, filepath.Join(home, ".claude.json"),
+		`{"projects":{"/work/p":{"history":"`+padding+`"}},"oauthAccount":{"emailAddress":"alice@example.com"}}`)
+	if got, err := EmailForConnector("claude-code", home, nil); got != "alice@example.com" || err != nil {
+		t.Fatalf("EmailForConnector = (%q, %v), want alice's address", got, err)
+	}
+	if got, err := ProfileEmailForConnector("claudecode", home); got != "alice@example.com" || err != nil {
+		t.Fatalf("ProfileEmailForConnector = (%q, %v), want alice's address", got, err)
 	}
 }
 

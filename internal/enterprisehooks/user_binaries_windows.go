@@ -80,10 +80,13 @@ func PurgeWindowsUserBinaries(rawHome, rawSID string) ([]string, error) {
 	if !emptied {
 		return removed, nil
 	}
-	if err := os.Remove(binDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+	// A folder that never existed is not reported as removed: the purge
+	// result would name an emptied folder the account never had (GAP-2231).
+	if err := os.Remove(binDir); err == nil {
+		removed = append(removed, binDir)
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return removed, fmt.Errorf("enterprise hooks: remove the empty %s: %w", binDir, err)
 	}
-	removed = append(removed, binDir)
 	changed, err := removeWindowsUserPathEntry(sid.String(), home, binDir)
 	if err != nil {
 		return removed, fmt.Errorf("enterprise hooks: the user Path entry %s stays: %w; remove it from that account's Path", binDir, err)

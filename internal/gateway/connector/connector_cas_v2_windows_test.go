@@ -100,7 +100,7 @@ func TestAtomicTransformV2MigrationDiscoveryAllowsMissingTargetParent(t *testing
 					t.Fatal(err)
 				}
 			}
-			_, exists, err := loadAtomicTransformV1ForV2Migration(path, stateDir, "")
+			_, exists, err := loadAtomicTransformV1ForV2Migration(path, stateDir, "", nil)
 			if malformedStableReceipt {
 				if err == nil {
 					t.Fatalf("missing target parent bypassed malformed stable V1 receipt: exists=%t", exists)

@@ -45,8 +45,7 @@ func TestCiscoInspectFailureDiagnosticsFollowLateStderrRedirect(t *testing.T) {
 	})
 
 	const privateResponseMarker = "private-tenant-response-marker"
-	var verdict *ScanVerdict
-	verdict = doInspectHTTP(t.Context(), nil, inspectCall{
+	verdict := doInspectHTTP(t.Context(), nil, inspectCall{
 		client: &http.Client{Transport: ciscoRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 			return &http.Response{
 				StatusCode: http.StatusForbidden,

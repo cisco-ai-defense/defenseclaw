@@ -12,6 +12,7 @@ package config
 
 import (
 	"fmt"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -299,6 +300,36 @@ func (c *Config) ManualConnectorConfigured(connector string) bool {
 	return c.manualConnectorConfigured(connector)
 }
 
+// ConnectorDisabled reports whether the manual setup control plane names
+// connector and guardrail.connectors.<name>.enabled: false turns it off. The
+// hook gates answer such a connector allow without a scan, the standalone
+// lifecycle removes its hooks and machine policy, and the managed hook
+// socket lets a call of it through to that answer instead of refusing it as
+// an unenrolled account (rel-1-0-6:GAP-0325).
+func (c *Config) ConnectorDisabled(connector string) bool {
+	return c != nil && c.manualConnectorConfigured(connector) && !c.Guardrail.EffectiveEnabled(connector)
+}
+
+// DisabledConnectors lists the guardrail.connectors entries that enabled:
+// false turns off, by their canonical names, sorted.
+func (g *GuardrailConfig) DisabledConnectors() []string {
+	if g == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	out := []string{}
+	for name, pc := range g.Connectors {
+		key := normalizeConnectorKey(name)
+		if key == "" || seen[key] || pc.Enabled == nil || *pc.Enabled {
+			continue
+		}
+		seen[key] = true
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func (c *Config) appProtectionGuardrailOverride(connector string) (PerConnectorGuardrailConfig, bool) {
 	if c == nil || !c.ApplicationProtection.Enabled || c.manualConnectorConfigured(connector) {
 		return PerConnectorGuardrailConfig{}, false
@@ -376,50 +407,66 @@ func (c *Config) EffectiveActionHookFailModeForConnector(connector string) strin
 	return c.effectiveHookFailModeForConnector(connector, true)
 }
 
-func (c *Config) effectiveHookFailModeForConnector(connector string, actionDecision bool) string {
+// effectiveHookFailModeForConnector is the hook fail-mode resolver for every
+// failure that is not a gateway outage. A managed host may use an
+// administrator's explicit open during an outage; Secure Client also
+// defaults to open. A per-user install is closed here, including values
+// retained from an older config: its outage mode follows its policy tier
+// (EffectiveHookOutageFailModeForConnector, HookOutageFailMode).
+func (c *Config) effectiveHookFailModeForConnector(connector string, _ bool) string {
 	if c == nil {
 		return "closed"
 	}
-	if normalizeConnectorKey(connector) == "cursor" && !c.SecureClientIntegration() {
-		if actionDecision || strings.EqualFold(strings.TrimSpace(c.EffectiveGuardrailModeForConnector(connector)), "action") {
-			return "closed"
+	if managed.IsManagedEnterprise(c.DeploymentMode) {
+		if mode := c.configuredHookFailModeForConnector(connector); mode != "" {
+			return mode
 		}
-		return "open"
-	}
-	configured := ""
-	if pc, ok := c.appProtectionGuardrailOverride(connector); ok {
-		if strings.TrimSpace(pc.HookFailMode) != "" {
-			if strings.EqualFold(strings.TrimSpace(pc.HookFailMode), "open") {
-				configured = "open"
-			} else {
-				configured = "closed"
-			}
+		if c.secureClientHookFailModes() {
+			return "open"
 		}
-	}
-	if configured == "" {
-		if actionDecision {
-			configured = c.Guardrail.effectiveHookFailModeForMode(connector, "action")
-		} else {
-			configured = c.Guardrail.EffectiveHookFailModeFor(connector)
-		}
-	}
-	return effectiveManagedEnterpriseHookFailMode(c.DeploymentMode, connector, configured, c.StandaloneEnterprise())
-}
-
-// effectiveManagedEnterpriseHookFailMode keeps the protected deployment
-// contract and every runtime consumer on the same fail-closed value. Native
-// Codex and Claude hooks are enforcement boundaries in managed enterprise
-// deployments; an observe-mode or legacy fail-open source config must not be
-// allowed to weaken their delivery/response behavior after installation. In
-// the standalone profile Devin runs the administrator-owned
-// `defenseclaw-hook --enterprise-managed`, which always fails closed, so the
-// config, the hook-contract lock and status report the same value.
-func effectiveManagedEnterpriseHookFailMode(deploymentMode, connector, configured string, standalone bool) string {
-	name := normalizeConnectorKey(connector)
-	if managed.IsManagedEnterprise(deploymentMode) && (name == "codex" || name == "claudecode" || (standalone && name == "devin")) {
 		return "closed"
 	}
-	if strings.EqualFold(strings.TrimSpace(configured), "open") {
+	return "closed"
+}
+
+// secureClientHookFailModes reports whether the Secure Client hook fail-mode
+// contract (#1163: unset is open) applies: the config resolved the Secure
+// Client profile (SecureClientIntegration, from the protected config and its
+// pins, never from a process flag alone). A managed Config whose profile the
+// loader never resolved (a struct literal) reports Secure Client elsewhere
+// (EnterpriseProfile), but not for hook fail modes on Linux, where Secure
+// Client does not exist and the loader resolves standalone: an unresolved
+// profile can never open hooks there (GAP-0002).
+func (c *Config) secureClientHookFailModes() bool {
+	return c.SecureClientIntegration() &&
+		(runtime.GOOS != "linux" || managed.NormalizeEnterpriseProfile(c.Enterprise.Profile) != "")
+}
+
+// configuredHookFailModeForConnector is the explicit hook fail mode the
+// config sets for connector, canonicalized (explicitHookFailMode): the
+// automatic-protection overlay first, then the connector's own value, then
+// the global one. It is "" when none is set.
+func (c *Config) configuredHookFailModeForConnector(connector string) string {
+	if pc, ok := c.appProtectionGuardrailOverride(connector); ok {
+		if mode := strings.TrimSpace(pc.HookFailMode); mode != "" {
+			return explicitHookFailMode(mode)
+		}
+	}
+	if pc, ok := c.Guardrail.connectorOverride(connector); ok {
+		if mode := strings.TrimSpace(pc.HookFailMode); mode != "" {
+			return explicitHookFailMode(mode)
+		}
+	}
+	if mode := strings.TrimSpace(c.Guardrail.HookFailMode); mode != "" {
+		return explicitHookFailMode(mode)
+	}
+	return ""
+}
+
+// explicitHookFailMode canonicalizes a non-empty configured fail mode: the
+// "open" sentinel (any case) is open and every other value is closed.
+func explicitHookFailMode(mode string) string {
+	if strings.EqualFold(strings.TrimSpace(mode), "open") {
 		return "open"
 	}
 	return "closed"

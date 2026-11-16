@@ -40,3 +40,14 @@ const (
 	maxWindowsTokenBytes      = maxScalarBytes
 	maxClassificationSteps    = 4096
 )
+
+// MaxArgvItems is the most argv words one command keeps path facts for. A
+// longer command (a touch of 300 files) has no complete facts for its
+// operands; the hook client then reads it with the whole-command decision
+// (GAP-0151).
+const MaxArgvItems = maxArgvItems
+
+// CommandTextOverLimit reports a command text over the string limit of the
+// analysis: it has no path facts, and the hook client reads it with the
+// whole-command decision.
+func CommandTextOverLimit(text string) bool { return len(text) > maxCommandBytes }

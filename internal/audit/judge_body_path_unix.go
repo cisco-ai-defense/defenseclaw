@@ -46,7 +46,13 @@ func validateJudgeBodyPlatformTrust(path string, info os.FileInfo, directory, st
 	}
 	owner := int(stat.Uid)
 	if !runtimeowner.Trusted(stat.Uid) {
-		return errors.New("judge_body: database path has an untrusted owner")
+		verdict := errors.New("judge_body: database path has an untrusted owner")
+		if !auditDBAncestorOwnerAdvisory(path, directory, strict) {
+			return verdict
+		}
+		if err := managed.RelaxAncestorTrustVerdict(true, path, "judge body database directory", verdict); err != nil {
+			return err
+		}
 	}
 	if info.Mode().Perm()&0o022 != 0 {
 		// Root-owned sticky directories such as /tmp are safe ancestors: the
@@ -59,19 +65,21 @@ func validateJudgeBodyPlatformTrust(path string, info os.FileInfo, directory, st
 			kind = "directory"
 		}
 		verdict := managed.NewTrustVerdict("judge_body: database %s is group- or other-writable", kind)
-		advisory := !strict && managed.PlatformInstallerOwnedPath(path)
+		advisory := !strict && managed.AdvisoryAncestorPath(path)
 		label := fmt.Sprintf("judge body database %s", kind)
 		return managed.RelaxAncestorTrustVerdict(advisory, path, label, verdict)
 	}
 	return nil
 }
 
+// trustedJudgeBodySystemDirectoryAlias is trustedAuditDBSystemDirectoryAlias
+// for the judge body store (GAP-2078).
 func trustedJudgeBodySystemDirectoryAlias(path string, info os.FileInfo) bool {
-	if filepath.Dir(path) != string(os.PathSeparator) {
-		return false
-	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != 0 {
+		return false
+	}
+	if parent := filepath.Dir(path); parent != string(os.PathSeparator) && !rootOnlyDirectory(parent) {
 		return false
 	}
 	resolved, err := filepath.EvalSymlinks(path)

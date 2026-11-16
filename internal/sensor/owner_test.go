@@ -130,6 +130,26 @@ func TestOwnerResolverFallsBackFromTokenToSessionToEnrolledProfile(t *testing.T)
 	}
 }
 
+// p0-round GAP-1447: an unattributed finding whose agent wrote configuration
+// into two enrolled profiles says the configuration spans more than one
+// profile (ambiguous), not that no enrolled profile holds it.
+func TestUnattributedFindingSpanningTwoProfilesSaysItIsAmbiguous(t *testing.T) {
+	t.Parallel()
+	at := time.Unix(1_760_000_000, 0)
+	resolver := resolverFor(ownerTestLookups(), nil, at)
+	exited := []procRef{{PID: 99, At: at, Name: "claude.exe"}}
+	two := []string{`C:\Users\alice\.claude\settings.json`, `C:\Users\bob\.claude\settings.json`}
+	got := resolver.resolve(exited, two)
+	if got.Attribution != AttributionUnattributed || !strings.Contains(got.Reason, "more than one enrolled profile") ||
+		!strings.Contains(got.Reason, "ambiguous") || strings.Contains(got.Reason, "no enrolled profile holds") {
+		t.Fatalf("two profiles: %+v, want an ambiguous-profiles reason", got)
+	}
+	if got := resolver.resolve(exited, nil); !strings.Contains(got.Reason, "no enrolled profile holds") ||
+		strings.Contains(got.Reason, "ambiguous") {
+		t.Fatalf("no profile: %+v, want the no-profile reason", got)
+	}
+}
+
 // resolverFor is the owner resolver after one poll saw processes at at.
 func resolverFor(lookups OwnerLookups, processes []procprobe.Process, at time.Time) *ownerResolver {
 	book := newOwnerBook(lookups, time.Hour)
@@ -191,6 +211,78 @@ func TestOwnerOfARecycledPIDStaysWithTheProcessTheFindingSaw(t *testing.T) {
 		}
 		if test.attribution == AttributionUnattributed && !strings.Contains(got.Reason, "other processes") {
 			t.Errorf("%s: reason %q does not say the pid was reused", test.name, got.Reason)
+		}
+	}
+}
+
+// GAP-1401: a session's owner comes from its root process. When no poll read
+// the root's owner, a child that runs as another account does not lend the
+// session its owner: the finding is unattributed.
+func TestASessionChildNeverNamesTheSessionOwner(t *testing.T) {
+	t.Parallel()
+	base := time.Unix(1_760_000_000, 0)
+	book := newOwnerBook(OwnerLookups{}, time.Hour)
+	child := procprobe.Process{PID: 4200, Name: "sudo", User: "root", StartedAt: base.Add(time.Second)}
+	book.observe([]procprobe.Process{child}, base.Add(2*time.Second))
+	root := procRef{PID: 4100, Start: base, Name: "claude", At: base.Add(2 * time.Second)}
+	processes, _ := sessionOwnerEvidence(root, []agentchain.Observation{{
+		PID: child.PID, Start: child.StartedAt, Name: child.Name, At: base.Add(2 * time.Second),
+	}})
+	got := book.resolver().resolve(processes, nil)
+	if got.Attribution != AttributionUnattributed || got.User != "" {
+		t.Fatalf("resolve = %+v, want unattributed rather than the child's account", got)
+	}
+	// The same process as the finding's own process still names its owner.
+	if got := book.resolver().resolve([]procRef{{PID: child.PID, Start: child.StartedAt, Name: child.Name,
+		At: base.Add(2 * time.Second)}}, nil); got.User != "root" || got.Attribution != AttributionProcessOwner {
+		t.Fatalf("own process resolve = %+v, want root (%s)", got, AttributionProcessOwner)
+	}
+}
+
+// GAP-1401: on Windows the session root's own reference carries no SID while
+// a runas child's creation event names another account. The child's SID
+// does not become the session owner; the root's own SID still does.
+func TestASessionChildSIDNeverNamesTheSessionOwner(t *testing.T) {
+	t.Parallel()
+	base := time.Unix(1_760_000_000, 0)
+	root := procRef{PID: 4100, Start: base, Name: "claude.exe", At: base.Add(2 * time.Second)}
+	child := agentchain.Observation{
+		PID: 4200, Start: base.Add(time.Second), Name: "cmd.exe", At: base.Add(2 * time.Second),
+		User: `DCFC-WIN2-RS1\bob`, SID: bobSID,
+	}
+	processes, _ := sessionOwnerEvidence(root, []agentchain.Observation{child})
+	got := resolverFor(ownerTestLookups(), nil, base).resolve(processes, nil)
+	if got.SID == bobSID || got.Attribution == AttributionProcessOwner {
+		t.Fatalf("resolve = %+v, want the child's account kept off the session", got)
+	}
+	rootEvent := agentchain.Observation{PID: root.PID, Start: root.Start, Name: root.Name, At: root.At,
+		User: `DCLAB\alice`, SID: aliceSID}
+	processes, _ = sessionOwnerEvidence(root, []agentchain.Observation{child, rootEvent})
+	if got := resolverFor(ownerTestLookups(), nil, base).resolve(processes, nil); got.SID != aliceSID ||
+		got.Attribution != AttributionProcessOwner {
+		t.Fatalf("resolve = %+v, want the root's own account %s", got, aliceSID)
+	}
+}
+
+// GAP-1465: a POSIX shell the polls saw as alice's execs an agent in place
+// and exits before the next poll. The exec names alice, so the book keeps
+// her as the owner; an exec that names another account still hands the pid on.
+func TestAPOSIXExecUnderTheSameAccountKeepsTheOwner(t *testing.T) {
+	t.Parallel()
+	base := time.Unix(1_760_000_000, 0)
+	for _, test := range []struct {
+		execUser, wantUser, attribution string
+	}{
+		{"alice", "alice", AttributionProcessOwner},
+		{"bob", "", AttributionUnattributed},
+		{"", "", AttributionUnattributed},
+	} {
+		book := newOwnerBook(OwnerLookups{}, time.Hour)
+		book.observe([]procprobe.Process{{PID: 5100, Name: "bash", User: "alice", StartedAt: base}}, base.Add(time.Second))
+		book.heard(pidEvents{ByPID: map[int][]pidEvent{5100: {{At: base.Add(2 * time.Second), User: test.execUser}}}})
+		got := book.resolver().resolve([]procRef{{PID: 5100, Start: base, Name: "claude", At: base.Add(3 * time.Second)}}, nil)
+		if got.User != test.wantUser || got.Attribution != test.attribution {
+			t.Errorf("exec as %q: resolve = %+v, want %q (%s)", test.execUser, got, test.wantUser, test.attribution)
 		}
 	}
 }

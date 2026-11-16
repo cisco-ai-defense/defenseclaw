@@ -152,6 +152,7 @@ func TestRepoPolicyBlocksSayWhose(t *testing.T) {
 		t.Fatalf("feed = %+v", got)
 	}
 	// So does the audit record, an alert (GAP-0136).
+	e.m.sink.flushProxyAudit(t.Context(), e.m.now().Add(proxyOpenWindow), false)
 	recs := where(&e.tel.mu, &e.tel.egress, func(r audit.SandboxEgressEvent) bool { return r.Host == "example.org" })
 	if len(recs) != 1 || recs[0].DecisionCode != "SANDBOX_EGRESS_REPO_POLICY_BLOCK" || !strings.Contains(recs[0].Reason, packs.RepoPolicyPath) {
 		t.Fatalf("audited %+v", recs)

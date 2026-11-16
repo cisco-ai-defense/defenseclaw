@@ -1,0 +1,33 @@
+[otel]
+environment = 'fixture-os'
+log_user_prompt = true
+
+[otel.exporter]
+[otel.exporter.otlp-http]
+endpoint = 'http://127.0.0.1:19081/v1/logs'
+protocol = 'json'
+
+[otel.exporter.otlp-http.headers]
+authorization = 'Bearer f00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeed'
+x-defenseclaw-client = 'codex-otel/1.0'
+x-defenseclaw-source = 'codex'
+
+[otel.metrics_exporter]
+[otel.metrics_exporter.otlp-http]
+endpoint = 'http://127.0.0.1:19081/v1/metrics'
+protocol = 'json'
+
+[otel.metrics_exporter.otlp-http.headers]
+authorization = 'Bearer f00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeed'
+x-defenseclaw-client = 'codex-otel/1.0'
+x-defenseclaw-source = 'codex'
+
+[otel.trace_exporter]
+[otel.trace_exporter.otlp-http]
+endpoint = 'http://127.0.0.1:19081/v1/traces'
+protocol = 'json'
+
+[otel.trace_exporter.otlp-http.headers]
+authorization = 'Bearer f00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeed'
+x-defenseclaw-client = 'codex-otel/1.0'
+x-defenseclaw-source = 'codex'

@@ -614,7 +614,7 @@ func TestReviewKeepsAHostileFileNameOnOneLine(t *testing.T) {
 	ta := newTestApp(t, "", copySandbox("plainbox"))
 	ta.copy.pull = &workspace.PullResult{Name: "plainbox", Kind: workspace.CopyPlain, Changes: []workspace.TreeChange{
 		{Path: "edge/line\n  A forged.txt", Status: "A", Added: 1}, {Path: "edge/esc\x1b]2;title\a", Status: "A"},
-		{Path: "edge/rtl‮txt.sh", Status: "A"}, {Path: long, Status: "A"},
+		{Path: "edge/rtl\u202etxt.sh", Status: "A"}, {Path: long, Status: "A"},
 	}, Review: workspace.ReviewReport{FilesChanged: 4, Insertions: 1}}
 	ta.ok(t, ta.Review(bg, ReviewOptions{Name: "plainbox"}))
 	has(t, ta.output(), `  A edge/line\n  A forged.txt`, `  A edge/esc\x1b]2;title\a`, "  A edge/rtl�txt.sh",
@@ -675,8 +675,10 @@ func TestDeleteNamesUnpulledCopyWork(t *testing.T) {
 	ta.daemon.add(sb)
 	ta.copy.pending = map[string]workspace.CopyWork{"fix-tests": workspace.CopyWorkUnpulled}
 	ta.ok(t, ta.Delete(bg, DeleteOptions{Names: []string{"fix-tests"}}))
-	has(t, ta.output(), "Sandbox fix-tests holds work that was never pulled back; `defenseclaw sandbox pull fix-tests --apply|--branch|--patch-out FILE` "+
-		"brings it back. Delete it and discard that work? [y/N]")
+	has(t, ta.output(), "Sandbox fix-tests holds work that was never pulled back; use `defenseclaw sandbox pull fix-tests --apply`, "+
+		"`defenseclaw sandbox pull fix-tests --branch`, or `defenseclaw sandbox pull fix-tests --patch-out FILE` to save it if needed; "+
+		"inspect the project, branch or patch file before deleting the sandbox. Delete it and discard that work? [y/N]")
+	lacks(t, ta.output(), "--apply|--branch|--patch-out FILE")
 	if ta.calls("DELETE", "fix-tests") != 0 {
 		t.Fatal("the default deleted the work")
 	}
@@ -697,7 +699,8 @@ func TestDeleteNamesUnpulledCopyWork(t *testing.T) {
 	ta = newTestApp(t, "", copySandbox("fix-tests"))
 	ta.copy.pendingStopped = map[string]workspace.CopyWork{"fix-tests": workspace.CopyWorkUnknown}
 	ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
-	has(t, ta.output(), "sandbox fix-tests may hold work that was never pulled back (it is not running, so it was not checked)", "teardown deletes it")
+	has(t, ta.output(), "sandbox fix-tests may hold work that was never pulled back (it is not running, so it was not checked)",
+		"inspect the project, branch or patch file before deleting the sandbox", "teardown deletes it")
 }
 
 // TestExecStopsItsCommandWhenTheClientEnds pins that a `sandbox exec`
@@ -1147,7 +1150,7 @@ func TestPullCtrlCAtTheSensitiveQuestionSaysNothingWasApplied(t *testing.T) {
 	t.Cleanup(func() { _ = pw.Close() })
 	ta.IO.In, ta.IO.TTY = pr, true
 	sig := make(chan os.Signal, 1)
-	ta.App.interrupts = func() (<-chan os.Signal, func()) {
+	ta.interrupts = func() (<-chan os.Signal, func()) {
 		sig <- os.Interrupt
 		return sig, func() {}
 	}
@@ -1257,6 +1260,23 @@ func TestStartSendsTheModelKeyTheEnvironmentHoldsNow(t *testing.T) {
 	ta.ok(t, ta.Start(bg, "nokey", StartOptions{}))
 	if bodies := ta.bodies("POST", "nokey/start"); len(bodies) != 1 || strings.Contains(bodies[0], "llm") {
 		t.Fatalf("a sandbox created without a model key got one: %v", bodies)
+	}
+}
+
+// TestStartEndVMAsksTheDaemonToEndTheVM: only `start --end-vm` tells the
+// daemon to start a MicroVM whose VM still runs, which OpenShell's start
+// ends with no flush (sandboxapi.StartRequest.EndVM); a plain start, and
+// the starts connect and pull make, never do.
+func TestStartEndVMAsksTheDaemonToEndTheVM(t *testing.T) {
+	ta := newTestApp(t, "", copySandbox("donebox"), copySandbox("other"))
+	ta.ok(t, ta.Start(bg, "donebox", StartOptions{EndVM: true}))
+	ta.ok(t, ta.Start(bg, "other", StartOptions{}))
+	var req sandboxapi.StartRequest
+	if bodies := ta.bodies("POST", "donebox/start"); len(bodies) != 1 || json.Unmarshal([]byte(bodies[0]), &req) != nil || !req.EndVM {
+		t.Fatalf("start --end-vm request = %v", bodies)
+	}
+	if bodies := ta.bodies("POST", "other/start"); len(bodies) != 1 || strings.Contains(bodies[0], "end_vm") {
+		t.Fatalf("a plain start asked to end the VM: %v", bodies)
 	}
 }
 
@@ -1546,6 +1566,29 @@ func TestPolicyEdit(t *testing.T) {
 	if c := ta.adminCheck(); c.Status != openshell.StatusPass || strings.Contains(c.Detail, "subdomains") {
 		t.Fatalf("doctor check = %+v", c)
 	}
+}
+
+func TestPolicyAllowWarnsWhenTheGuardAlwaysRefusesAnAddress(t *testing.T) {
+	ta := newTestApp(t, "")
+	writeConfig(t, ta, "")
+	ta.ok(t, ta.PolicyEdit(bg, "allow", []string{"169.254.169.254", "registry.npmjs.org"}))
+	has(t, ta.output(), "169.254.169.254 is a loopback, link-local, cloud metadata or reserved address", "this allow entry cannot open it")
+	lacks(t, ta.output(), "registry.npmjs.org is a loopback")
+	if got := loadConfig(t, ta).OpenShell.Egress.Allow; !slices.Equal(got, []string{"169.254.169.254", "registry.npmjs.org"}) {
+		t.Fatalf("saved allow entries = %v", got)
+	}
+}
+
+func TestManagedPolicyDecisionUsesDaemon(t *testing.T) {
+	ta := newTestApp(t, "", sampleSandbox("onebox"))
+	ta.daemon.managed = true
+	ta.ok(t, ta.ManagedPolicyDecision(bg, "block", []string{"Example.ORG"}, "onebox"))
+	has(t, ta.output(), "blocked example.org for your sandboxes")
+	ta.out.Reset()
+	ta.ok(t, ta.ManagedPolicyDecision(bg, "allow", []string{"api.example.org"}, ""))
+	has(t, ta.output(), "allowed api.example.org for your sandboxes")
+	wantErr(t, ta.ManagedPolicyDecision(bg, "allow", []string{"*.example.org"}, ""), "name one destination host")
+	wantErr(t, ta.ManagedPolicyDecision(bg, "block", []string{"one.example", "two.example"}, ""), "one destination host at a time")
 }
 
 // The daemon saves its "always" decisions to the same egress lists while a
@@ -1954,13 +1997,9 @@ func TestDetectLLM(t *testing.T) {
 		{"hermes openai", hermes, map[string]string{"OPENAI_API_KEY": "k", "ANTHROPIC_API_KEY": "a"}, "", "", profiles.OpenAIID, "OPENAI_API_KEY", false},
 		{"hermes anthropic", hermes, map[string]string{"ANTHROPIC_API_KEY": "a"}, "", "", profiles.AnthropicID, "ANTHROPIC_API_KEY", false},
 		{"hermes bedrock", hermes, map[string]string{EnvBedrockToken: "b"}, "", "bedrock", profiles.BedrockMantleOpenAIID, EnvBedrockToken, false},
-		{"openhands bedrock", get("openhands"), map[string]string{EnvBedrockToken: "b"}, "", "bedrock", profiles.BedrockMantleOpenAIID, EnvBedrockToken, false},
-		{"openhands openai", get("openhands"), map[string]string{"OPENAI_API_KEY": "k"}, "", "openai", profiles.OpenAIID, "OPENAI_API_KEY", false},
 		{"antigravity gemini", get("antigravity"), map[string]string{"GEMINI_API_KEY": "g"}, "", "", profiles.GeminiID, "GEMINI_API_KEY", false},
 		{"antigravity has no openai", get("antigravity"), map[string]string{"OPENAI_API_KEY": "k"}, "", "openai", "", "", true},
 		{"antigravity signs in inside", get("antigravity"), nil, "", "", "", "", false},
-		{"omnigent bedrock", get("omnigent"), map[string]string{EnvBedrockToken: "b"}, "", "bedrock", profiles.BedrockMantleOpenAIID, EnvBedrockToken, false},
-		{"omnigent openai", get("omnigent"), map[string]string{"OPENAI_API_KEY": "k"}, "", "", profiles.OpenAIID, "OPENAI_API_KEY", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -2066,7 +2105,7 @@ func TestPrintModeEveryHarness(t *testing.T) {
 	for name, args := range map[string][]string{
 		"claudecode": {"-p", "x"}, "codex": {"exec", "x"}, "opencode": {"run", "x"}, "copilot": {"--prompt=x"},
 		"amp": {"-x", "x"}, "cursor": {"--print", "x"}, "kiro": {"--no-interactive", "x"}, "devin": {"-p", "x"},
-		"hermes": {"chat", "-q", "x"}, "openhands": {"--headless", "-t", "x"}, "antigravity": {"-p", "x"}, "omnigent": {"--prompt=x"},
+		"hermes": {"chat", "-q", "x"}, "antigravity": {"-p", "x"},
 	} {
 		if spec := harnessSpec(t, name); !printMode(spec, args) || printMode(spec, []string{"--model", "m"}) {
 			t.Errorf("%s: printMode(%q) is wrong", name, args)

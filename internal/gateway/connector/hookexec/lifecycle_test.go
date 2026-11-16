@@ -53,6 +53,40 @@ func TestNeutralLifecycleEventsExactSets(t *testing.T) {
 	}
 }
 
+// LifecycleEvent adds the looping stop events to the neutral set and nothing
+// else: Antigravity's Stop veto re-enters the agent loop, its tool events stay
+// enforcement events.
+func TestLifecycleEventAddsLoopingStopEvents(t *testing.T) {
+	if !reflect.DeepEqual(loopingStopEvents, map[string][]string{"antigravity": {"Stop"}}) {
+		t.Fatalf("looping stop events = %v", loopingStopEvents)
+	}
+	for connector, events := range neutralLifecycleSets {
+		if got := LifecycleEvents(connector); !reflect.DeepEqual(got, events) {
+			t.Errorf("%s lifecycle events = %v, want the neutral set %v", connector, got, events)
+		}
+		for _, event := range events {
+			if !LifecycleEvent(connector, event) {
+				t.Errorf("%s/%s missing from LifecycleEvent", connector, event)
+			}
+		}
+	}
+	if got := LifecycleEvents("antigravity"); !reflect.DeepEqual(got, []string{"Stop"}) {
+		t.Errorf("antigravity lifecycle events = %v", got)
+	}
+	if !LifecycleEvent("antigravity", "Stop") || NeutralLifecycleEvent("antigravity", "Stop") {
+		t.Error("antigravity Stop must be a lifecycle event outside the neutral runner set")
+	}
+	for _, tc := range []struct{ connector, event string }{
+		{"antigravity", "PreToolUse"}, {"antigravity", "PostToolUse"}, {"antigravity", "stop"},
+		{"claudecode", "PostToolBatch"}, {"claudecode", "PreToolUse"}, {"codex", "PreToolUse"},
+		{"amp", "agent.end"}, {"hermes", "on_session_end"},
+	} {
+		if LifecycleEvent(tc.connector, tc.event) {
+			t.Errorf("%s/%s unexpectedly a lifecycle event", tc.connector, tc.event)
+		}
+	}
+}
+
 // TestInvalidActionOnLifecycleEventsAllowsBothStandaloneShapes covers every
 // lifecycle event, Claude Code and Codex included, on the Unix standalone and
 // the Windows standalone shapes: a missing or unknown action is a neutral
@@ -91,13 +125,10 @@ func TestInvalidActionOnLifecycleEventsAllowsBothStandaloneShapes(t *testing.T) 
 	}
 }
 
-// TestInvalidActionOnLifecycleEventsKeepsPerUserAndSecureClientBytes pins the
-// per-user (fail_mode closed and open) and Secure Client results of a missing
-// or unknown gateway action on every lifecycle event to commit 6210dbcee, the
-// last commit before the managed standalone lifecycle change. Only the managed
-// standalone profiles keep these events neutral. The golden file is the output
-// of a decide() probe run on a git-archive copy of 6210dbcee; regenerate it
-// only from that commit, never from the current code.
+// The Secure Client bytes remain pinned to the historical golden, except
+// that a Secure Client failure writes only ManagedHookBlockMessage to stderr
+// (writeFailureDiagnostic). Other profiles keep lifecycle events neutral
+// when a gateway action is unusable.
 func TestInvalidActionOnLifecycleEventsKeepsPerUserAndSecureClientBytes(t *testing.T) {
 	f, err := os.Open("testdata/lifecycle_invalid_action_6210dbcee.jsonl")
 	if err != nil {
@@ -132,10 +163,23 @@ func TestInvalidActionOnLifecycleEventsKeepsPerUserAndSecureClientBytes(t *testi
 			t.Fatalf("unknown golden profile %q", want.Profile)
 		}
 		code := sp.decide(opts, []byte(want.Body))
-		if code != want.Code || stdout.String() != want.Stdout || stderr.String() != want.Stderr {
+		if want.Profile != "secure-client" {
+			if code != 0 || strings.Contains(stdout.String(), `"deny"`) || strings.Contains(stdout.String(), `"block"`) {
+				t.Errorf("%s/%s %s body=%s: lifecycle event not neutral: code=%d stdout=%q stderr=%q",
+					want.Connector, want.Event, want.Profile, want.Body, code, stdout.String(), stderr.String())
+			}
+			covered[[3]string{want.Connector, want.Event, want.Profile}]++
+			continue
+		}
+		gotStderr := stderr.String()
+		if strings.HasPrefix(want.Stderr, "defenseclaw: ") {
+			// The golden predates the quiet Secure Client failure stderr.
+			want.Stderr = ManagedHookBlockMessage + "\n"
+		}
+		if code != want.Code || stdout.String() != want.Stdout || gotStderr != want.Stderr {
 			t.Errorf("%s/%s %s body=%s:\n got code=%d stdout=%q stderr=%q\nwant code=%d stdout=%q stderr=%q",
 				want.Connector, want.Event, want.Profile, want.Body,
-				code, stdout.String(), stderr.String(), want.Code, want.Stdout, want.Stderr)
+				code, stdout.String(), gotStderr, want.Code, want.Stdout, want.Stderr)
 		}
 		covered[[3]string{want.Connector, want.Event, want.Profile}]++
 	}

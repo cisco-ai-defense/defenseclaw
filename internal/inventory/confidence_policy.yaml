@@ -97,6 +97,11 @@ detectors:
   application:
     identity_lr: 10
     presence_lr: 6
+  # Claude Desktop's data folder in a user's home (claude_desktop): the
+  # app has run for this user. Weighted like an installed application.
+  claude_desktop:
+    identity_lr: 10
+    presence_lr: 6
   # Environment variable *name* present in the user's shell. Heuristic.
   env:
     identity_lr: 3

@@ -49,6 +49,88 @@ class DeferredInterpreterRemovalCommandTests(unittest.TestCase):
             command,
         )
 
+    def test_after_exit_retries_the_renamed_folder_while_a_deleted_file_is_held(self) -> None:
+        # GAP-2233: one rd /s of .uv.dc-removed-<id> left seven empty folders
+        # under its uv cache (a deleted file still held open keeps its parents),
+        # and the result said "could not remove ...; remove it by hand".
+        from unittest.mock import patch
+
+        from defenseclaw.commands import windows_uninstall_helper
+
+        uv = r"C:\Users\u\.defenseclaw\.uv"
+        with (
+            patch.object(windows_uninstall_helper.subprocess, "Popen") as popen,
+            patch.object(windows_uninstall_helper.os, "path", ntpath),
+        ):
+            windows_uninstall_helper._remove_after_exit([uv], [])  # noqa: SLF001
+
+        command = popen.call_args.args[0]
+        tombstone = ntpath.join(
+            ntpath.dirname(uv), re.search(r'"(\.uv\.dc-removed-[0-9a-f]{8})"', command).group(1)
+        )
+        tries = windows_uninstall_helper._TREE_RD_TRIES  # noqa: SLF001
+        self.assertGreater(tries, 1)
+        self.assertIn(
+            f'(for /l %i in (1,1,{tries}) do if exist "{tombstone}" (rd /s /q "{tombstone}" 2>nul & '
+            f'if exist "{tombstone}" ping -n 3 127.0.0.1 >nul))',
+            command,
+        )
+        # The rename is retried as long as the folder is held, too.
+        self.assertIn(
+            f'(for /l %i in (1,1,{tries}) do if not exist "{tombstone}" if exist "{uv}" '
+            f'(ren "{uv}" "{ntpath.basename(tombstone)}" 2>nul || ping -n 3 127.0.0.1 >nul))',
+            command,
+        )
+        # The folder itself (the rename failed) is still removed only once.
+        self.assertIn(f'else (rd /s /q "{uv}"))', command)
+        self.assertNotIn(f'if exist "{uv}" (rd /s /q "{uv}"', command)
+
+    @unittest.skipUnless(sys.platform == "win32", "runs cmd.exe")
+    def test_after_exit_command_waits_out_a_held_folder_on_windows(self) -> None:
+        # GAP-2233 on Windows: a folder deep in the uv cache held open without
+        # delete sharing (as a scanner or a process's current folder holds it)
+        # blocks the rename and rd until it is closed.
+        import ctypes
+        import threading
+        from ctypes import wintypes
+        from unittest.mock import patch
+
+        from defenseclaw.commands import windows_uninstall_helper
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            uv = data_dir / ".uv"
+            deep = uv / "cache" / "archive-v0" / "x" / "litellm" / "llms" / "openai" / "responses"
+            deep.mkdir(parents=True)
+            (deep / "transformation.py").write_bytes(b"x")
+            status = Path(tmp) / "result.json"
+            # FILE_LIST_DIRECTORY, FILE_SHARE_READ|WRITE (no delete), OPEN_EXISTING, BACKUP_SEMANTICS
+            handle = kernel32.CreateFileW(str(deep), 0x1, 0x3, None, 3, 0x02000000, None)
+            self.assertNotEqual(handle, wintypes.HANDLE(-1).value)
+            closer = threading.Timer(12.0, kernel32.CloseHandle, args=(handle,))
+            closer.start()
+            try:
+                with patch.object(windows_uninstall_helper.subprocess, "Popen") as popen:
+                    windows_uninstall_helper._remove_after_exit(  # noqa: SLF001
+                        [str(uv)], [str(data_dir)], status_path=str(status), gone=[str(data_dir)]
+                    )
+                subprocess.run(popen.call_args.args[0], timeout=180, check=False)
+            finally:
+                closer.join()
+            self.assertFalse(data_dir.exists(), list(Path(tmp).rglob("*")))
+            self.assertEqual(json.loads(status.read_text(encoding="utf-8")), {"status": "succeeded"})
+
     def test_after_exit_writes_the_result_after_the_removal(self) -> None:
         # GAP-1960: the result file said succeeded before cmd.exe removed .uv
         # and the data folder, so it could not report that step.
@@ -140,7 +222,11 @@ class DeferredHelperResultFileTests(unittest.TestCase):
         (managed_venv / "Scripts").mkdir(parents=True)
         install_root.mkdir()
         shim = install_root / "defenseclaw.cmd"
-        shim.write_text(f'@echo off\r\n"{managed_venv / "Scripts" / "defenseclaw.exe"}" %*\r\n', encoding="utf-8")
+        # newline="": the exact CRLF bytes install.ps1 writes. Text mode on
+        # Windows would turn each \r\n into \r\r\n, which is not the shim.
+        shim.write_text(
+            f'@echo off\r\n"{managed_venv / "Scripts" / "defenseclaw.exe"}" %*\r\n', encoding="utf-8", newline=""
+        )
         (data_dir / ".env").write_text("KEY=x", encoding="utf-8")
         (data_dir / "config.yaml").write_text("{}", encoding="utf-8")
         temp = tmp / "temp"
@@ -255,6 +341,69 @@ class DeferredHelperResultFileTests(unittest.TestCase):
         self.assertEqual(result, {"status": "succeeded"})
 
 
+class DeferredLauncherAncestryTests(unittest.TestCase):
+    def test_direct_cmd_uninstall_waits_for_shell_after_native_launcher(self) -> None:
+        from unittest.mock import patch
+
+        from defenseclaw.commands import windows_uninstall_helper as helper
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scripts = root / "data" / ".venv" / "Scripts"
+            native = root / "bin" / "defenseclaw.exe"
+            images = {
+                2: str(scripts / "python.exe"),
+                3: str(native),
+                4: str(root / "system" / "cmd.exe"),
+                5: str(root / "system" / "powershell.exe"),
+            }
+
+            class Kernel:
+                def __init__(self) -> None:
+                    self.closed: list[int] = []
+
+                def OpenProcess(self, _rights: int, _inherit: bool, pid: int) -> int:
+                    return pid
+
+                def QueryFullProcessImageNameW(self, handle: int, _flags: int, image, _size) -> bool:
+                    image.value = images[handle]
+                    return True
+
+                def CloseHandle(self, handle: int) -> None:
+                    self.closed.append(handle)
+
+            kernel = Kernel()
+            plan = {"parent_pid": 1, "managed_venv": str(scripts.parent), "install_root": str(native.parent)}
+            with patch.object(helper, "_kernel32", return_value=kernel):
+                for parents, want in (
+                    ({1: 2, 2: 3, 3: 4, 4: 5}, [(2, 15.0), (3, 15.0), (4, 5.0)]),
+                    ({1: 2, 2: 4, 4: 5}, [(2, 15.0), (4, 5.0)]),
+                    ({1: 3, 3: 5}, [(3, 15.0)]),
+                ):
+                    with self.subTest(parents=parents), patch.object(helper, "_parent_pids", return_value=parents):
+                        self.assertEqual(helper._open_launchers(plan), want)
+
+    def test_cmd_resume_window_starts_after_launchers_exit(self) -> None:
+        from unittest.mock import patch
+
+        from defenseclaw.commands import windows_uninstall_helper as helper
+
+        clock = [0.0]
+        waits: list[tuple[int, int]] = []
+
+        class Kernel:
+            def WaitForSingleObject(self, handle: int, timeout: int) -> None:
+                waits.append((handle, timeout))
+                if handle == 2:
+                    clock[0] += 10.0
+                elif handle == 3:
+                    clock[0] += 7.0
+
+        with patch.object(helper.time, "monotonic", side_effect=lambda: clock[0]):
+            helper._wait_launchers(Kernel(), [(2, 15.0), (3, 15.0), (4, 5.0)])
+        self.assertEqual(waits, [(2, 15000), (3, 5000), (4, 5000)])
+
+
 @unittest.skipUnless(sys.platform == "win32", "Windows file locking regression")
 class WindowsManagedVenvResetTests(unittest.TestCase):
     def test_windows_process_access_mask_constants_preserve_required_rights(self) -> None:
@@ -315,6 +464,7 @@ class WindowsManagedVenvResetTests(unittest.TestCase):
             (install_root / "defenseclaw.cmd").write_text(
                 f'@echo off\r\n"{managed_venv / "Scripts" / "defenseclaw.exe"}" %*\r\n',
                 encoding="utf-8",
+                newline="",
             )
             plan = {
                 "install_root": str(install_root),
@@ -530,7 +680,7 @@ class WindowsManagedVenvResetTests(unittest.TestCase):
             output = (uninstall.stdout + uninstall.stderr).decode("utf-8")
             self.assertEqual(uninstall.returncode, 0, output)
             self.assertIn("deferred cleanup: scheduled", output)
-            match = re.search(r"result: ([^)]+\.json)", output)
+            match = re.search(r"the result is written to (.+?\.json), kept for you to read", output)
             self.assertIsNotNone(match, output)
             status_path = Path(match.group(1))
 

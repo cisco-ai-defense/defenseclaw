@@ -15,11 +15,16 @@
     same .intunewin, then launches the native x64
     DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure with absolute paths (Setup
     refuses relative or environment-expanded paths). Setup then launches the
-    trusted PowerShell 7 engine itself. A bundle requires an installed base deployment.
+    trusted PowerShell 7 engine itself. A package with both config.yaml and a
+    bundle is the single app: on a new device Setup stages the install from
+    config.yaml with the services stopped and starts them on the signed
+    bundle; on an installed device it applies the bundle only. A package with
+    a bundle and no config.yaml (a bundle-only app) needs an installed base
+    deployment.
 
     -Uninstall runs Setup /uninstall JSON=1 instead (-Purge adds PURGE=1)
-    after the same Setup pin checks. A bundle app is not uninstalled this way:
-    its uninstall command is a no-op.
+    after the same Setup pin checks. A bundle-only app is not uninstalled this
+    way: its uninstall command is a no-op.
 
     Exit codes are Setup's: 0 success or no-op, 1603 failure (rolled back),
     1618 another lifecycle run is active (Intune retries), 1639 invalid
@@ -358,13 +363,10 @@ if ($actualSetup -ne ([string]$pins.setup_sha256).ToLowerInvariant()) {
 }
 $bundlePin = Get-LauncherPin -Pins $pins -Name 'bundle_sha256'
 $anchorPin = Get-LauncherPin -Pins $pins -Name 'trust_anchors_sha256'
-if ($pins.config_sha256 -and $bundlePin) {
-    Exit-Launcher 1639 'mdm_invalid_arguments' 'the package pins both config.yaml and a policy bundle; rebuild it with New-DefenseClawIntunePackage.ps1 (a signed bundle carries its config, so a package carries one or the other)'
-}
 if ($anchorPin -and -not $bundlePin) {
     Exit-Launcher 1639 'mdm_invalid_arguments' 'the package pins trust anchors without a policy bundle; rebuild it with -BundlePath'
 }
-if ($Uninstall -and $bundlePin) {
+if ($Uninstall -and $bundlePin -and -not $pins.config_sha256) {
     Exit-Launcher 1639 'mdm_invalid_arguments' 'a policy bundle app is not uninstalled: its uninstall command is cmd.exe /c exit 0; remove DefenseClaw with the base app''s uninstall'
 }
 $bundle = Join-Path $root 'policy.dcbundle'
@@ -437,7 +439,12 @@ while ($true) {
     }
     [Console]::Error.WriteLine("DefenseClaw uninstall attempt $attempt of $($script:UninstallAttempts) refused, retrying: $inUse")
     $blockers = @([regex]::Matches($inUse, '\(pid (\d+)') | ForEach-Object { [int]$_.Groups[1].Value })
-    for ($second = 0; $second -lt $script:UninstallRetrySeconds; $second++) {
+    if ($blockers.Count -eq 0) {
+        # The refusal names no pid (a SYSTEM program holding a SYSTEM-only file, GAP-0878): there is no process
+        # to wait for, so back off for the full interval instead of retrying at once.
+        Start-Sleep -Seconds $script:UninstallRetrySeconds
+    }
+    for ($second = 0; $second -lt $script:UninstallRetrySeconds -and $blockers.Count -gt 0; $second++) {
         if (@($blockers | Where-Object { $null -ne (Get-Process -Id $_ -ErrorAction SilentlyContinue) }).Count -eq 0) { break }
         Start-Sleep -Seconds 1
     }

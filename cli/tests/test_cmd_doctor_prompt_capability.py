@@ -34,7 +34,7 @@ from defenseclaw.connector_contracts import HOOK_CONTRACT_MANIFEST
 from defenseclaw.rulepack_validation import RulePackValidationResult
 
 # Every connector the manifest knows, by the class its prompt hook falls in.
-PROMPT_BLOCKING = ("claudecode", "codex", "cursor", "devin", "openhands", "omnigent")
+PROMPT_BLOCKING = ("claudecode", "codex", "cursor", "devin",  )
 PROXY = ("openclaw", "zeptoclaw")
 NO_PROMPT_HOOK = ("opencode", "copilot", "hermes", "amp", "antigravity")
 # Block events resolved per request from the hook surface (no versioned

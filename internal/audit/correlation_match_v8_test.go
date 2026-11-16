@@ -279,3 +279,49 @@ func TestMatchOccurrenceNeverChoosesAmbiguousPendingOrNativeGroups(t *testing.T)
 		t.Fatalf("ambiguous pending result=%+v err=%v", result, err)
 	}
 }
+
+// The identifier match reads only the earliest match and one match from
+// another logical group (GAP-0186). A shared identifier stays an unambiguous
+// candidate while every match is in one logical group, and becomes ambiguous
+// when any later match is in another group, not only the second one.
+func TestMatchOccurrenceGroupingIsAmbiguousWhenAnyMatchHasAnotherLogicalGroup(t *testing.T) {
+	_, repo := newCorrelationTestStore(t)
+	instance := mustCorrelationInstance(t, repo, "cursor", ConnectorCustodyHookOnly)
+	now := time.Now().UTC()
+	digest := correlationDigest("shared-session-turn")
+	identify := func(tx *CorrelationTx, event CorrelationEvent) {
+		if _, err := tx.PutIdentifier(t.Context(), CorrelationIdentifier{
+			SemanticEventID: event.SemanticEventID, ConnectorInstanceID: instance.ConnectorInstanceID,
+			Namespace: "cursor", Kind: CorrelationIdentifierTurn, ValueDigest: digest,
+			NormalizedValue: "shared-session-turn", SourceField: "generation_id", Origin: CorrelationOriginReported,
+			ProfileVersion: instance.ProfileVersion, ObservedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	match := func() CorrelationMatchResult {
+		t.Helper()
+		result, err := repo.MatchOccurrence(t.Context(), CorrelationMatchInput{
+			ConnectorInstanceID: instance.ConnectorInstanceID,
+			Identifiers:         []CorrelationMatchIdentifier{{Namespace: "cursor", Kind: CorrelationIdentifierTurn, ValueDigest: digest}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	first, _ := seedCorrelationEvent(t, repo, instance, correlationSeedOptions{receivedAt: now, mutate: identify})
+	for index := 1; index <= 3; index++ {
+		seedCorrelationEvent(t, repo, instance, correlationSeedOptions{
+			receivedAt: now.Add(time.Duration(index) * time.Nanosecond), logical: first.LogicalEventID, mutate: identify,
+		})
+	}
+	if result := match(); result.Ambiguous || result.MatchedSemanticEventID != first.SemanticEventID ||
+		result.MergeAllowed || result.LogicalEventID != "" {
+		t.Fatalf("one logical group result=%+v, want the earliest event as a candidate", result)
+	}
+	seedCorrelationEvent(t, repo, instance, correlationSeedOptions{receivedAt: now.Add(10 * time.Nanosecond), mutate: identify})
+	if result := match(); !result.Ambiguous || result.MatchedSemanticEventID != "" || result.LogicalEventID != "" {
+		t.Fatalf("a later match in another logical group result=%+v, want ambiguous", result)
+	}
+}

@@ -16,7 +16,10 @@ import (
 )
 
 const (
-	moduleEntryPointScript  = `import os,runpy,sys; cwd=sys.argv[1]; sys.argv=["defenseclaw",*sys.argv[2:]]; os.chdir(cwd) if cwd else None; runpy.run_module("defenseclaw.main",run_name="__main__")`
+	moduleEntryPointScript = `import os,runpy,sys; cwd=sys.argv[1]; sys.argv=["defenseclaw",*sys.argv[2:]]; os.chdir(cwd) if cwd else None; runpy.run_module("defenseclaw.main",run_name="__main__")`
+	// skillScannerScript runs skill-scanner with the DefenseClaw fix that
+	// accepts a well-formed judge answer from any supported model (GAP-2609).
+	skillScannerScript      = `import os,sys; cwd=sys.argv[1]; sys.argv=["skill-scanner",*sys.argv[2:]]; os.chdir(cwd) if cwd else None; from defenseclaw.scanner._skill_judge_compat import main; sys.exit(main())`
 	consoleEntryPointScript = `import importlib.metadata as m,os,sys; name=sys.argv[1]; cwd=sys.argv[2]; sys.argv=[name,*sys.argv[3:]]; os.chdir(cwd) if cwd else None; matches=[e for e in m.entry_points(group="console_scripts") if e.name==name]; sys.exit(matches[0].load()() if len(matches)==1 else 1)`
 )
 
@@ -75,8 +78,10 @@ func launcherArgs(executable, workingDirectory string, userArgs []string) ([]str
 	if name == "defenseclaw" {
 		return append([]string{"-I", "-c", moduleEntryPointScript, workingDirectory}, userArgs...), nil
 	}
+	if name == "skill-scanner" {
+		return append([]string{"-I", "-c", skillScannerScript, workingDirectory}, userArgs...), nil
+	}
 	entryPoints := map[string]string{
-		"skill-scanner":             "skill-scanner",
 		"mcp-scanner":               "mcp-scanner",
 		"defenseclaw-observability": "defenseclaw-observability",
 	}

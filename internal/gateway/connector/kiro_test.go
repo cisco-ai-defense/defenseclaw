@@ -101,7 +101,7 @@ func TestKiroSetupWritesV3AndDefaultAgentHooks(t *testing.T) {
 	if !strings.Contains(string(body), "/api/v1/kiro/hook") {
 		t.Fatalf("hook script does not POST to the Kiro endpoint")
 	}
-	if !strings.Contains(string(body), "defenseclaw_user_identity_args") {
+	if !strings.Contains(string(body), "defenseclaw_user_identity_header_args") {
 		t.Fatalf("hook script is missing the identity reader")
 	}
 

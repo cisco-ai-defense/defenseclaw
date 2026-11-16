@@ -6,6 +6,7 @@ package audit
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -224,7 +225,7 @@ func TestCorrelationReceiptReplayConflictAndRollback(t *testing.T) {
 	if err := repo.MarkOccurrenceCanonicalPersisted(t.Context(), *firstResult.Receipt, now.Add(time.Millisecond)); !errors.Is(err, ErrCorrelationNotFound) {
 		t.Fatalf("receipt accepted without canonical observation: %v", err)
 	}
-	if err := repo.RecordObservation(t.Context(), CorrelationObservation{
+	if err := repo.RecordObservations(t.Context(), CorrelationObservation{
 		RecordID: "receipt-canonical-record", SemanticEventID: first.SemanticEventID,
 		Signal: CorrelationSignalLogs, Bucket: "model_io", EventName: first.EventName,
 		ObservedAt: now, Status: CorrelationObservationExportEligible,
@@ -513,6 +514,54 @@ func TestConnectorCustodyHotPathIsMonotonicAndExplicitUpdatesRemainPossible(t *t
 	instances, err := repo.ListConnectorInstances(t.Context())
 	if err != nil || len(instances) != 1 || !instances[0].Default {
 		t.Fatalf("instances=%+v err=%v", instances, err)
+	}
+}
+
+func TestUnchangedConnectorResolutionDoesNotNeedSQLiteWriter(t *testing.T) {
+	store, repo := newCorrelationTestStore(t)
+	connectors := []string{"claudecode", "codex", "opencode", "hermes", "kiro"}
+	for _, connector := range connectors {
+		mustCorrelationInstance(t, repo, connector, ConnectorCustodyDefenseClaw)
+	}
+	scopedID, err := NewConnectorInstanceID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.ResolveScopedConnectorInstance(t.Context(), scopedID, "codex", "codex-profile-v1", ConnectorCustodyDefenseClaw); err != nil {
+		t.Fatal(err)
+	}
+
+	// A different audit writer may be committing an event while the next hook
+	// resolves its existing connector. WAL permits the read, but an UPDATE of
+	// an unchanged row would fail with SQLITE_BUSY at this point.
+	writer, err := sql.Open("sqlite", store.DatabasePath()+"?_pragma=busy_timeout(0)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	conn, err := writer.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(t.Context(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer conn.ExecContext(context.Background(), "ROLLBACK") //nolint:errcheck
+
+	for _, connector := range connectors {
+		for i := 0; i < 10; i++ {
+			instance, err := repo.ResolveConnectorInstance(t.Context(), connector, connector+"-profile-v1", ConnectorCustodyDefenseClaw)
+			if err != nil {
+				t.Fatalf("unchanged %s resolution %d under another writer: %v", connector, i, err)
+			}
+			if instance.Connector != connector || instance.ProfileVersion != connector+"-profile-v1" {
+				t.Fatalf("unexpected resolved instance: %+v", instance)
+			}
+		}
+	}
+	if _, err := repo.ResolveScopedConnectorInstance(t.Context(), scopedID, "codex", "codex-profile-v1", ConnectorCustodyDefenseClaw); err != nil {
+		t.Fatalf("unchanged scoped resolution under another writer: %v", err)
 	}
 }
 
@@ -1196,7 +1245,7 @@ func TestCorrelationMigrationIsAdditiveForPreviousReader(t *testing.T) {
 func TestRecordObservationRequiresExistingEventAndCommitsMetadataOnly(t *testing.T) {
 	store, repo := newCorrelationTestStore(t)
 	missing, _ := NewSemanticEventID()
-	err := repo.RecordObservation(t.Context(), CorrelationObservation{
+	err := repo.RecordObservations(t.Context(), CorrelationObservation{
 		RecordID: "missing", SemanticEventID: missing, Signal: CorrelationSignalTraces,
 		Bucket: "agent", EventName: "missing", ObservedAt: time.Now().UTC(),
 		Status: CorrelationObservationExportEligible,
@@ -1206,7 +1255,7 @@ func TestRecordObservationRequiresExistingEventAndCommitsMetadataOnly(t *testing
 	}
 	instance := mustCorrelationInstance(t, repo, "codex", ConnectorCustodyExternal)
 	event, _ := seedCorrelationEvent(t, repo, instance, correlationSeedOptions{})
-	if err := repo.RecordObservation(t.Context(), CorrelationObservation{
+	if err := repo.RecordObservations(t.Context(), CorrelationObservation{
 		RecordID: "trace-record", SemanticEventID: event.SemanticEventID,
 		Signal: CorrelationSignalTraces, Bucket: "agent", EventName: event.EventName,
 		ObservedAt: time.Now().UTC(), TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1220,6 +1269,49 @@ func TestRecordObservationRequiresExistingEventAndCommitsMetadataOnly(t *testing
 	}
 	if signal != "traces" || trace != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
 		t.Fatalf("signal=%q trace=%q", signal, trace)
+	}
+}
+
+// A metric batch commits the observations of all its records in one
+// transaction (B-26): all of them commit, or none does, so a failed group
+// leaves nothing behind for the one-at-a-time retry to duplicate.
+func TestRecordObservationsCommitsAGroupInOneTransaction(t *testing.T) {
+	store, repo := newCorrelationTestStore(t)
+	instance := mustCorrelationInstance(t, repo, "codex", ConnectorCustodyExternal)
+	event, _ := seedCorrelationEvent(t, repo, instance, correlationSeedOptions{})
+	observation := func(recordID string, semantic SemanticEventID) CorrelationObservation {
+		return CorrelationObservation{
+			RecordID: recordID, SemanticEventID: semantic, Signal: CorrelationSignalMetrics,
+			Bucket: "agent", EventName: "defenseclaw.connector.hook.latency", ObservedAt: time.Now().UTC(),
+			Status: CorrelationObservationExportEligible,
+		}
+	}
+	count := func(prefix string) int {
+		var rows int
+		if err := store.db.QueryRow(`SELECT COUNT(*) FROM correlation_observations WHERE record_id LIKE ?`,
+			prefix+"%").Scan(&rows); err != nil {
+			t.Fatal(err)
+		}
+		return rows
+	}
+	if err := repo.RecordObservations(t.Context()); err != nil {
+		t.Fatalf("empty group: %v", err)
+	}
+	if err := repo.RecordObservations(t.Context(),
+		observation("group-1", event.SemanticEventID), observation("group-2", event.SemanticEventID),
+		observation("group-3", event.SemanticEventID)); err != nil {
+		t.Fatal(err)
+	}
+	if got := count("group-"); got != 3 {
+		t.Fatalf("group rows = %d, want 3", got)
+	}
+	missing, _ := NewSemanticEventID()
+	if err := repo.RecordObservations(t.Context(),
+		observation("partial-1", event.SemanticEventID), observation("partial-2", missing)); err == nil {
+		t.Fatal("a group with an observation of no accepted event succeeded")
+	}
+	if got := count("partial-"); got != 0 {
+		t.Fatalf("a failed group left %d rows", got)
 	}
 }
 

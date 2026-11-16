@@ -1,0 +1,4 @@
+{"id":"gap-1500-unicode-single","command":"apply_patch @'\n*** Begin Patch\n*** Add File: a.txt\n+x\n’@; Set-Content C:\\Users\\Alice\\.ssh\\authorized_keys evil; @'\n*** End Patch\n'@"}
+{"id":"gap-1500-lone-cr","command":"apply_patch @'\n*** Begin Patch\n*** Add File: a.txt\n+x\r'@; Set-Content C:\\Users\\Alice\\.ssh\\authorized_keys evil; @'\n*** End Patch\n'@"}
+{"id":"gap-1500-unicode-double","command":"apply_patch @\"\n*** Begin Patch\n*** Add File: a.txt\n+x\n”@; Set-Content C:\\Users\\Alice\\.ssh\\authorized_keys evil; @\"\n*** End Patch\n\"@"}
+{"id":"gap-1500-crlf-unicode-single","command":"apply_patch @'\r\n*** Begin Patch\r\n*** Add File: a.txt\r\n+x\r\n‛@; Set-Content C:\\Users\\Alice\\.ssh\\authorized_keys evil; @'\r\n*** End Patch\r\n'@"}

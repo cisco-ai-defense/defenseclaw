@@ -38,7 +38,9 @@ import (
 // procNetTables are the connection tables /proc exposes. Both address families
 // are read: an IPv6 socket to a provider is the same finding as an IPv4 one,
 // and a detector that read only tcp would miss every dual-stack host.
-var procNetTables = []string{"/proc/net/tcp", "/proc/net/tcp6"}
+// They are read from /proc/self/net: /proc/net is a link to it that a /proc
+// mounted with subset=pid does not have (GAP-1909).
+var procNetTables = []string{"/proc/self/net/tcp", "/proc/self/net/tcp6"}
 
 // tcpStateEstablished and tcpStateListen are the two hex state codes in
 // /proc/net/tcp worth distinguishing.

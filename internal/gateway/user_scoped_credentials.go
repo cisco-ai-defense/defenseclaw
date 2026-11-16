@@ -14,6 +14,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -61,6 +62,18 @@ import (
 // are revalidated on the request path.
 const userScopedCredentialRefreshInterval = time.Second
 
+// userScopedCredentialBusyGrace bounds how long a ledger read that stays
+// busy (the guardian still replacing the record past the read's retries)
+// keeps the index built from the last good read: a revocation in the
+// ledger waits at most this long for a busy reader (GAP-1711 review RR3-1).
+const userScopedCredentialBusyGrace = 3 * time.Second
+
+// userScopedCredentialDropLog writes the line for a dropped index
+// (replaceable in tests).
+var userScopedCredentialDropLog = func(cause string, err error) {
+	fmt.Fprintf(os.Stderr, "[sidecar-api] per-user credential index dropped: %s: %v\n", cause, err)
+}
+
 const (
 	userScopedIdentityMismatchReason        = "user_scoped_identity_mismatch"
 	userScopedCallerAccountMismatchReason   = "user_scoped_caller_account_mismatch"
@@ -99,6 +112,8 @@ type userScopedCredentialStore struct {
 	generation uint64
 	built      bool
 	index      map[[sha256.Size]byte]userScopedCredential
+	// ledgerReadAt is when the ledger was last read without an error.
+	ledgerReadAt time.Time
 }
 
 func newUserScopedCredentialStore(dataDir func() string) *userScopedCredentialStore {
@@ -134,19 +149,19 @@ func (s *userScopedCredentialStore) lookup(kind, scope, presented string) (strin
 	return credential.identity, true
 }
 
-// hookCredentialForKeyID returns the per-user hook credential for scope
-// whose key ID (connector.UserScopedCredentialKeyID) is keyID, re-derived
-// from the key, for answering a listener proof. The index is keyed by that
-// same digest, so the credential is found without the caller presenting it.
-func (s *userScopedCredentialStore) hookCredentialForKeyID(scope, keyID string) (string, bool) {
+// hookCredentialForKeyID returns the per-user hook credential and its OS
+// identity for scope whose key ID (connector.UserScopedCredentialKeyID) is
+// keyID, re-derived from the key for answering a listener proof. The index
+// is keyed by that digest, so the credential is found without presenting it.
+func (s *userScopedCredentialStore) hookCredentialForKeyID(scope, keyID string) (string, string, bool) {
 	scope = strings.ToLower(strings.TrimSpace(scope))
 	keyID = strings.TrimSpace(keyID)
 	if s == nil || scope == "" || len(keyID) != 2*sha256.Size || strings.ToLower(keyID) != keyID {
-		return "", false
+		return "", "", false
 	}
 	raw, err := hex.DecodeString(keyID)
 	if err != nil {
-		return "", false
+		return "", "", false
 	}
 	var digest [sha256.Size]byte
 	copy(digest[:], raw)
@@ -155,16 +170,16 @@ func (s *userScopedCredentialStore) hookCredentialForKeyID(scope, keyID string) 
 	s.refreshLocked()
 	credential, ok := s.index[digest]
 	if !ok || credential.kind != connector.UserScopedHookCredential || credential.scope != scope {
-		return "", false
+		return "", "", false
 	}
 	if credential.key < 0 || credential.key >= len(s.keys) {
-		return "", false
+		return "", "", false
 	}
 	token, err := connector.UserScopedHookAPIToken(s.keys[credential.key], scope, credential.identity)
 	if err != nil || sha256.Sum256([]byte(token)) != digest {
-		return "", false
+		return "", "", false
 	}
-	return token, true
+	return token, credential.identity, true
 }
 
 func (s *userScopedCredentialStore) refreshLocked() {
@@ -182,18 +197,28 @@ func (s *userScopedCredentialStore) refreshLocked() {
 			s.ledger = s.newLedger(managed.HookGuardianAuthorizationPath(dir))
 		}
 	}
-	fail := func() {
+	// fail drops the index. Dropping a built index refuses every per-user
+	// credential of every account, so it writes one log line with the cause
+	// (GAP-1711 review RR3-2); the error names a path and an errno, never
+	// key material.
+	fail := func(cause string, err error) {
+		if s.built {
+			userScopedCredentialDropLog(cause, err)
+		}
 		s.index, s.keys, s.built = nil, nil, false
 	}
 	if dir == "" || s.ledger == nil {
-		fail()
+		fail("no data directory", errors.New("data directory not set"))
 		return
 	}
 	key, err := s.loadKey(dir)
 	if err != nil || key == "" {
 		// No key, or one that fails its trust checks: no per-user
 		// credential authenticates.
-		fail()
+		if err == nil {
+			err = errors.New("empty key")
+		}
+		fail("token key unavailable", err)
 		return
 	}
 	keys := []string{key}
@@ -209,9 +234,17 @@ func (s *userScopedCredentialStore) refreshLocked() {
 	}
 	ledger, generation, err := s.ledger()
 	if err != nil {
-		fail()
+		// A read that stayed busy keeps the last good index for a moment,
+		// but only for the same keys: a key change drops it at once, so a
+		// retired key never outlives its rotation (GAP-2091). Every other
+		// error drops it at once.
+		if s.built && guardianRecordReadBusy(err) && slices.Equal(keys, s.keys) && now.Sub(s.ledgerReadAt) <= userScopedCredentialBusyGrace {
+			return
+		}
+		fail("authorization ledger unreadable", err)
 		return
 	}
+	s.ledgerReadAt = now
 	if s.built && slices.Equal(keys, s.keys) && generation == s.generation {
 		return
 	}
@@ -446,6 +479,9 @@ func (a *APIServer) serveUserScoped(
 	}
 	r, release := a.admitHookCaller(w, r, identity, route)
 	if release == nil {
+		if hookCallerLeft(r) || hookCallerShed(r) {
+			a.recordUserScopedCallerGone(w, r, identity, mark)
+		}
 		return
 	}
 	defer release()

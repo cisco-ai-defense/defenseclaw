@@ -38,10 +38,10 @@ SOURCE_PLUGIN_INSTALL_TARGET = $(if $(filter openclaw,$(CONNECTOR)),plugin-insta
 GO_TEST_TIMEOUT ?= 60m
 # Race-enabled, the gateway and audit packages each take well over an hour as
 # one test binary. gateway-test and go-test-cov run them as this many parallel
-# shards (the CI split, scripts/go_test_shards.py); each shard keeps
+# shards (scripts/go_test_shards.py, balanced on the recorded test times like CI); each shard keeps
 # GO_TEST_TIMEOUT.
 GO_TEST_SHARDS ?= 8
-GO_SHARD_RUN = $(HOST_PYTHON) scripts/go_test_shards.py --shard-count $(GO_TEST_SHARDS)
+GO_SHARD_RUN = $(HOST_PYTHON) scripts/go_test_shards.py --timings scripts/test-timings/go-linux.json --shard-count $(GO_TEST_SHARDS)
 # -race also turns on checkptr in every package. In the transpiled SQLite
 # (modernc.org) that every audit store runs, checkptr alone doubles the cost
 # of the race suites; race detection stays on everywhere. CI uses the same flags.
@@ -99,15 +99,16 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
 .PHONY: help all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install amp-plugin-typecheck maybe-openclaw-plugin-install extensions test cli-test cli-test-cov tui-test gateway-test go-test-cov \
-        packaging-macos-test packaging-macos-bundle packaging-linux-enterprise packaging-macos-enterprise packaging-windows-managed-gateway-zip packaging-windows-enterprise-installer packaging-windows-avc-buildkit packaging-managed-windows-bundle packaging-windows-managed-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
+        packaging-macos-test packaging-macos-bundle packaging-linux-enterprise packaging-macos-enterprise packaging-windows-managed-gateway-zip packaging-windows-enterprise-installer packaging-windows-avc-buildkit packaging-managed-windows-bundle packaging-windows-managed-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-test-scripts macos-app-release macos-app-release-verify \
         security-suite-test security-suite-eval contextual-judge-test \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint go-lint-analyzers go-mod-no-toolchain check-quiet-startup repro-flags-parity assemble-parity ts-test rego-test clean \
-        check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check generate-guardrail-catalog check-guardrail-catalog skill-check check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-llm-catalog-live check-version-sync \
+        check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check generate-guardrail-catalog check-guardrail-catalog check-opencode-plugins skill-check check-managed-paths check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-llm-catalog-live check-version-sync \
         set-version \
         _bundle-data _stage-extension-fingerprint _checkout-write-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install source-migrate source-acp-refresh source-restart-gateway \
         proto proto-check proto-tools \
-        dist dist-cli dist-gateway dist-installers dist-requirements dist-test dist-checksums dist-clean
+        dist dist-cli dist-fleet-assets dist-gateway dist-installers dist-requirements dist-test dist-checksums dist-clean \
+        cowork-vm-packages cowork-vm-test
 
 # ---------------------------------------------------------------------------
 # Developer workflow help
@@ -527,10 +528,16 @@ proto-check: proto
 gateway: _checkout-write-preflight sync-openclaw-extension
 	go build $(GO_BUILD_FLAGS) -o $(GATEWAY)$(EXE) ./cmd/defenseclaw
 	go build $(GO_BUILD_FLAGS) -o $(ACP_GUARD)$(EXE) ./cmd/defenseclaw-acp
+ifneq ($(OS),Windows_NT)
+	go build $(GO_BUILD_FLAGS) -o defenseclaw-hook-post ./cmd/defenseclaw-hook-post
+endif
 	$(if $(filter Windows_NT,$(OS)),go run ./internal/tools/windowsresources -target windows_amd64 -executable $(GATEWAY)$(EXE) -component gateway -version $(VERSION) -icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png",)
 	$(if $(filter Windows_NT,$(OS)),go run ./internal/tools/windowsresources -target windows_amd64 -executable $(ACP_GUARD)$(EXE) -component acp-guard -version $(VERSION) -icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png",)
 	@echo "Built $(GATEWAY)$(EXE)"
 	@echo "Built $(ACP_GUARD)$(EXE)"
+ifneq ($(OS),Windows_NT)
+	@echo "Built defenseclaw-hook-post"
+endif
 	@echo "  Run with: ./$(GATEWAY)$(EXE)"
 	@echo "  Check status: ./$(GATEWAY)$(EXE) status"
 ifeq ($(OS),Windows_NT)
@@ -729,6 +736,11 @@ endif
 	@./scripts/source-install-preflight.sh dev-publish-acp \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+ifneq ($(OS),Windows_NT)
+	@./scripts/source-install-preflight.sh dev-publish-hook-post \
+		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
+		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+endif
 ifeq ($(OS),Windows_NT)
 	@./scripts/source-install-preflight.sh dev-publish-hook \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
@@ -743,6 +755,9 @@ endif
 	@echo "  • Python CLI   → $(VENV_BIN)/defenseclaw$(EXE)  (activate with: source $(VENV_BIN)/activate)"
 	@echo "  • Go gateway   → $(INSTALL_DIR)/$(GATEWAY)$(EXE)"
 	@echo "  • ACP guard    → $(INSTALL_DIR)/$(ACP_GUARD)$(EXE)"
+ifneq ($(OS),Windows_NT)
+	@echo "  • Hook transport → $(INSTALL_DIR)/defenseclaw-hook-post"
+endif
 	$(if $(filter Windows_NT,$(OS)),@echo "  • Hook launcher → $(INSTALL_DIR)/$(HOOK_LAUNCHER).exe",)
 	@if [ "$${CONNECTOR:-}" = "openclaw" ]; then \
 		echo "  • OpenClaw plugin → ~/.defenseclaw/extensions/defenseclaw/"; \
@@ -797,6 +812,11 @@ gateway-install: _source-install-preflight cli-install
 	@./scripts/source-install-preflight.sh publish-acp \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+ifneq ($(OS),Windows_NT)
+	@./scripts/source-install-preflight.sh publish-hook-post \
+		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
+		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+endif
 ifeq ($(OS),Windows_NT)
 	@./scripts/source-install-preflight.sh publish-hook \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
@@ -990,8 +1010,7 @@ packaging-managed-windows-bundle: packaging-windows-managed-gateway-zip
 
 # packaging-windows-enterprise-installer:
 #   Local self-serve unsigned developer build. Under the AVC-approved
-#   Windows managed_enterprise handoff (spec 002:
-#   docs/specs/002-windows-avc-packaging), a signed Setup EXE is
+#   Windows managed_enterprise handoff, a signed Setup EXE is
 #   produced only by AVC's pipeline consuming a build kit; DefenseClaw-
 #   side runs are always unsigned. This target invokes the extended
 #   bundler with --allow-unsigned, which emits the kit AND runs
@@ -1027,13 +1046,13 @@ packaging-windows-enterprise-installer:
 #   ("build the AVC kit") find a matching target. Hand the kit to AVC
 #   per docs/WINDOWS-AVC-PACKAGING-HANDOFF.md; AVC signs the inner
 #   payload, runs the shipped assemble.sh, and signs the outer Setup
-#   EXE. See CR spec-002:PRRT_kwDORuAK-s6af8ii.
+#   EXE.
 packaging-windows-avc-buildkit: packaging-windows-managed-gateway-zip
 
 # Deprecated alias — remove once release runbooks are updated to use
 # `packaging-windows-avc-buildkit` (the AVC-facing kit target) or
 # `packaging-windows-enterprise-installer` (the local unsigned dev
-# build). See CR spec-002:PRRT_kwDORuAK-s6af8ie.
+# build).
 packaging-windows-managed-bundle: packaging-windows-avc-buildkit
 	@echo 'note: `packaging-windows-managed-bundle` is deprecated; use `packaging-windows-avc-buildkit` (for the AVC kit) or `packaging-windows-enterprise-installer` (for a local unsigned dev build).'
 
@@ -1059,7 +1078,7 @@ macos-app-build: macos-app-license-check
 	    CODE_SIGNING_ALLOWED=NO \
 	    build
 
-macos-app-test:
+macos-app-test-scripts:
 	macos/DefenseClawMac/script/test_connector_onboarding.sh
 	macos/DefenseClawMac/script/test_first_run_connector_selection.sh
 	macos/DefenseClawMac/script/test_ai_discovery_models.sh
@@ -1074,6 +1093,7 @@ macos-app-test:
 	macos/DefenseClawMac/script/test_installation_context.sh
 	macos/DefenseClawMac/script/test_local_model_discovery.sh
 	macos/DefenseClawMac/script/test_setup_definitions_parity.sh
+	macos/DefenseClawMac/script/test_cowork_status.sh
 	macos/DefenseClawMac/script/test_gateway_auto_start.sh
 	macos/DefenseClawMac/script/test_gateway_administrator.sh
 	macos/DefenseClawMac/script/test_gateway_admin_helper.sh
@@ -1081,6 +1101,8 @@ macos-app-test:
 	macos/DefenseClawMac/script/test_connector_inventory_compatibility.sh
 	macos/DefenseClawMac/script/test_inspector_layout_policy.sh
 	macos/DefenseClawMac/script/test_main_window_lifecycle_contract.sh
+
+macos-app-test: macos-app-test-scripts
 	$(MAKE) macos-app-build
 
 macos-app-release: macos-app-license-check
@@ -1120,16 +1142,44 @@ go-test-cov: sync-openclaw-extension
 	$(HOST_PYTHON) scripts/merge_go_coverage.py --output coverage.out coverage-go-*.out
 	@rm -f coverage-go-*.out
 
-connector-matrix-test: go-connector-matrix-test py-connector-matrix-test
+CONNECTOR_MATRIX_RUN := Connector|Hook|CodeGuard|Telemetry|OTLP|AgentHook|Mode|Setup|Teardown|Capability|Matrix
+# The connector package alone runs about 24 minutes of the matrix on a hosted
+# runner, so CI splits it to stay inside the 20-minute job budget:
+# CONNECTOR_MATRIX_PART= packages runs the other packages and the Python
+# matrix, and 0 .. N-1 run that part of the matrix tests of the connector
+# package (N = CONNECTOR_MATRIX_CONNECTOR_PARTS). The parts are balanced on
+# go-linux-connector-matrix.json, the times of this run (no -race). go-linux.json
+# holds the -race times of the remaining-package shards; the shell-hook tests
+# wait on the scripts they spawn, so without -race they are most of the run,
+# and balanced on those times one part ran more than twice as long as the
+# others (GAP-0834). The default, all, runs everything in one go test.
+CONNECTOR_MATRIX_PART ?= all
+CONNECTOR_MATRIX_CONNECTOR_PARTS ?= 4
+
+connector-matrix-test: go-connector-matrix-test $(if $(filter all packages,$(CONNECTOR_MATRIX_PART)),py-connector-matrix-test)
 
 go-connector-matrix-test: sync-openclaw-extension
+ifeq ($(CONNECTOR_MATRIX_PART),all)
 	go test -count=1 -timeout $(GO_TEST_TIMEOUT) \
 		./internal/cli \
 		./internal/config \
 		./internal/gateway \
 		./internal/gateway/connector \
 		./test/e2e \
-		-run 'Connector|Hook|CodeGuard|Telemetry|OTLP|AgentHook|Mode|Setup|Teardown|Capability|Matrix'
+		-run '$(CONNECTOR_MATRIX_RUN)'
+else ifeq ($(CONNECTOR_MATRIX_PART),packages)
+	go test -count=1 -timeout $(GO_TEST_TIMEOUT) \
+		./internal/cli \
+		./internal/config \
+		./internal/gateway \
+		./test/e2e \
+		-run '$(CONNECTOR_MATRIX_RUN)'
+else
+	run="$$($(HOST_PYTHON) scripts/go_test_shards.py --package-dir internal/gateway/connector \
+		--match '$(CONNECTOR_MATRIX_RUN)' --timings scripts/test-timings/go-linux-connector-matrix.json \
+		--shard-count $(CONNECTOR_MATRIX_CONNECTOR_PARTS) --shard-index $(CONNECTOR_MATRIX_PART))" && \
+		go test -count=1 -timeout $(GO_TEST_TIMEOUT) ./internal/gateway/connector -run "$$run"
+endif
 
 py-connector-matrix-test: pycli
 	$(VENV_BIN)/python$(EXE) -m pytest -q \
@@ -1169,7 +1219,11 @@ test-file: pycli
 # too and will fail the build on drift.
 # ---------------------------------------------------------------------------
 
-check: check-v7 check-observability-v8-hard-cut check-grafana-dashboards check-provider-coverage check-llm-catalog check-guardrail-catalog skill-check
+check: check-v7 check-observability-v8-hard-cut check-grafana-dashboards check-provider-coverage check-llm-catalog check-guardrail-catalog check-opencode-plugins skill-check check-managed-paths
+
+# The dependency-free v2 adapter is inlined into both shipped bridges.
+check-opencode-plugins:
+	$(HOST_PYTHON) scripts/generate_opencode_plugins.py --check
 
 check-v7: check-audit-actions check-audit-no-raw-literals check-error-codes check-schemas
 	@echo "check-v7: all parity gates passed."
@@ -1204,6 +1258,12 @@ check-guardrail-catalog:
 # network.
 skill-check: pycli
 	@$(VENV_BIN)/python$(EXE) .claude/skills/defenseclaw-develop/scripts/check_skill_fresh.py
+
+# check-managed-paths verifies that .github/managed-paths.txt (the paths whose
+# change runs the managed-mode CI) has no stale entry and covers
+# every tracked path that looks managed. Standard-library Python and git only.
+check-managed-paths: pycli
+	@$(VENV_BIN)/python$(EXE) scripts/check_managed_paths.py
 
 # Semantic hard-cut gate: v7 may remain only inside the explicit
 # upgrade/recovery boundaries. It checks forbidden ownership paths and
@@ -1260,7 +1320,7 @@ lint: py-lint go-lint go-mod-no-toolchain repro-flags-parity assemble-parity
 # go-mod-no-toolchain refuses a `toolchain` directive in go.mod so the
 # managed-enterprise / AVC reproducibility pin (GOTOOLCHAIN in
 # packaging/scripts/lib/repro-flags.{sh,ps1}) cannot silently leak into
-# OSS builds. See docs/specs/001-windows-deterministic-build/design.md.
+# OSS builds.
 go-mod-no-toolchain:
 	@scripts/check-go-mod-no-toolchain.sh
 
@@ -1294,7 +1354,7 @@ check-quiet-startup:
 # repro-flags-parity refuses drift between the bash and pwsh copies of
 # repro-flags.* — both files must ship the same fixed env exports and
 # the same required-env list, or the byte-identical outer Setup EXE
-# contract that Workstream A depends on quietly breaks.
+# contract that the AVC handoff depends on quietly breaks.
 repro-flags-parity:
 	@scripts/check-repro-flags-parity.sh
 
@@ -1302,7 +1362,6 @@ repro-flags-parity:
 # assemble.* — both files must ship the same stage sequence, expected
 # payload filenames, and emitter subcommand set, or a kit built with
 # --script-host pwsh could silently diverge from --script-host bash.
-# See docs/specs/002-windows-avc-packaging/design.md § Risks.
 assemble-parity:
 	@scripts/check-assemble-parity.sh
 
@@ -1364,11 +1423,19 @@ _stage-extension-fingerprint: plugin
 		--source $(PLUGIN_DIR) \
 		--output $(EXTENSION_FINGERPRINT)
 
-dist-cli: _bundle-data _stage-extension-fingerprint
+dist-cli: _bundle-data _stage-extension-fingerprint dist-fleet-assets
 	@mkdir -p $(DIST_DIR)
 	@rm -rf build cli/*.egg-info
 	@find cli/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	uv build --wheel --out-dir $(DIST_DIR)
+
+dist-fleet-assets:
+	@mkdir -p $(DIST_DIR)
+	tar -czf "$(DIST_DIR)/defenseclaw-fleet-assets.tar.gz" -C . \
+		edge-connector docs-site/content/docs/edge-connector/policies.mdx \
+		bundles/local_observability_stack/docker-compose.fleet.yml \
+		bundles/local_observability_stack/prometheus/examples/fleet.yml \
+		bundles/local_observability_stack/grafana/dashboards/defenseclaw-fleet.json
 
 _bundle-data: _checkout-write-preflight
 	@rm -rf cli/defenseclaw/_data/policies/rego
@@ -1376,12 +1443,8 @@ _bundle-data: _checkout-write-preflight
 	@mkdir -p cli/defenseclaw/_data/policies/guardrail
 	@mkdir -p cli/defenseclaw/_data/envvars
 	@mkdir -p cli/defenseclaw/_data/skills
+	@# Fleet sources are a separate opt-in release asset, never wheel data.
 	@rm -rf cli/defenseclaw/_data/edge-connector
-	@mkdir -p cli/defenseclaw/_data/edge-connector
-	cp edge-connector/CMakeLists.txt cli/defenseclaw/_data/edge-connector/
-	cp -R edge-connector/src edge-connector/include edge-connector/generated \
-		edge-connector/third_party edge-connector/tools edge-connector/policies \
-		edge-connector/packaging cli/defenseclaw/_data/edge-connector/
 	@mkdir -p cli/defenseclaw/_data/splunk_local_bridge
 	@mkdir -p cli/defenseclaw/_data/local_observability_stack
 	@mkdir -p cli/defenseclaw/_data/llm
@@ -1457,7 +1520,10 @@ _bundle-data: _checkout-write-preflight
 	    rm -rf "cli/defenseclaw/_data/$$d/.grafana-admin-password" \
 	      "cli/defenseclaw/_data/$$d"/..grafana-admin-password.*.tmp \
 	      "cli/defenseclaw/_data/$$d/.grafana-access-mode" \
-	      "cli/defenseclaw/_data/$$d"/..grafana-access-mode.*.tmp; \
+	      "cli/defenseclaw/_data/$$d"/..grafana-access-mode.*.tmp \
+	      "cli/defenseclaw/_data/$$d/docker-compose.fleet.yml" \
+	      "cli/defenseclaw/_data/$$d/prometheus/examples/fleet.yml" \
+	      "cli/defenseclaw/_data/$$d/grafana/dashboards/defenseclaw-fleet.json"; \
 	  fi; \
 	done
 	cp -r bundles/splunk_o11y_dashboards cli/defenseclaw/_data/
@@ -1479,9 +1545,17 @@ dist-gateway: _checkout-write-preflight sync-openclaw-extension
 			-o "$$stage/defenseclaw-gateway$$exe" ./cmd/defenseclaw; \
 		CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "-s -w -X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)" \
 			-o "$$stage/defenseclaw-acp$$exe" ./cmd/defenseclaw-acp; \
+		if [ "$$goos" != windows ]; then \
+			CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "-s -w -X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)" \
+				-o "$$stage/defenseclaw-hook-user" ./cmd/defenseclaw-hook-user; \
+			CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" \
+				-o "$$stage/defenseclaw-hook-post" ./cmd/defenseclaw-hook-post; \
+		fi; \
 		if [ "$$goos" = windows ]; then \
 			CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)" \
 				-o "$$stage/defenseclaw-hook.exe" ./cmd/defenseclaw-hook; \
+			CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)" \
+				-o "$$stage/defenseclaw-hook-guard.exe" ./cmd/defenseclaw-hook-guard; \
 			rm -f "$$out/defenseclaw-$(VERSION)-$$goos-$$goarch.zip"; \
 			(cd "$$stage" && zip -q "$$out/defenseclaw-$(VERSION)-$$goos-$$goarch.zip" ./*); \
 		else \
@@ -1489,6 +1563,32 @@ dist-gateway: _checkout-write-preflight sync-openclaw-extension
 		fi; \
 		rm -rf "$$stage"; \
 	done
+
+# Claude Cowork VM sensor packages (packaging/cowork-vm): the linux gateway
+# and sensor helper, then defenseclaw-cowork-<arch>.tar.gz per VM architecture
+# in COWORK_VM_OUT. Signing is a separate step (packaging/cowork-vm/sign.sh;
+# the release workflow's cowork-vm job). The rule packs ship until the gateway
+# starts without them with guardrails off (R108-COWORK-4): set
+# COWORK_VM_POLICIES= to leave them out. COWORK_VM_CA adds a collector CA.
+COWORK_VM_OUT ?= dist/cowork-vm
+COWORK_VM_POLICIES ?= policies
+COWORK_VM_CA ?=
+cowork-vm-packages: _checkout-write-preflight sync-openclaw-extension
+	@set -e; for arch in amd64 arm64; do \
+		bin="$(COWORK_VM_OUT)/bin/$$arch"; mkdir -p "$$bin"; \
+		echo "Building the Cowork VM sensor for linux/$$arch..."; \
+		CGO_ENABLED=0 GOOS=linux GOARCH=$$arch go build -trimpath -buildvcs=false \
+			-ldflags "-s -w -X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)" -o "$$bin/defenseclaw-gateway" ./cmd/defenseclaw; \
+		CGO_ENABLED=0 GOOS=linux GOARCH=$$arch go build -trimpath -buildvcs=false \
+			-ldflags "-s -w -X main.version=$(VERSION) -X main.commit=$(GIT_COMMIT)" -o "$$bin/defenseclaw-sensor-helper" ./cmd/defenseclaw-sensor-helper; \
+		packaging/cowork-vm/build.sh --arch $$arch --version $(VERSION) --gateway "$$bin/defenseclaw-gateway" \
+			--helper "$$bin/defenseclaw-sensor-helper" --out-dir $(COWORK_VM_OUT) \
+			$(if $(COWORK_VM_POLICIES),--policies $(COWORK_VM_POLICIES)) $(if $(COWORK_VM_CA),--collector-ca $(COWORK_VM_CA)); \
+	done
+
+# The package, signature and install.sh refusal contract (no Go build).
+cowork-vm-test:
+	packaging/cowork-vm/test-package.sh
 
 # The installers and the 0.8.x handoff, stamped with this version.
 dist-installers:
@@ -1523,7 +1623,7 @@ dist-clean: _checkout-write-preflight
 	rm -rf cli/defenseclaw/_data
 
 clean:
-	rm -f $(GATEWAY) $(GATEWAY)$(EXE) $(ACP_GUARD) $(ACP_GUARD)$(EXE) $(HOOK_LAUNCHER).exe $(BINARY)-linux-* $(BINARY)-darwin-* $(ACP_GUARD)-linux-* $(ACP_GUARD)-darwin-* $(ACP_GUARD)-windows-*.exe $(HOOK_LAUNCHER)-windows-*.exe
+	rm -f $(GATEWAY) $(GATEWAY)$(EXE) $(ACP_GUARD) $(ACP_GUARD)$(EXE) defenseclaw-hook-post $(HOOK_LAUNCHER).exe $(BINARY)-linux-* $(BINARY)-darwin-* $(ACP_GUARD)-linux-* $(ACP_GUARD)-darwin-* $(ACP_GUARD)-windows-*.exe $(HOOK_LAUNCHER)-windows-*.exe
 	rm -rf $(VENV) cli/*.egg-info
 	rm -rf $(PLUGIN_DIR)/dist $(PLUGIN_DIR)/node_modules
 	rm -f coverage.out coverage-py.xml

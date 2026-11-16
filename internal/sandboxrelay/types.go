@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -42,7 +43,7 @@ const (
 	PathPrefix          = "/api/v1/sandbox/"
 	PathSettings        = "/api/v1/sandbox/settings"
 	PathPolicyResolve   = "/api/v1/sandbox/policy/resolve"
-	PathRegistrations   = "/api/v1/sandbox/registrations/" // + {id}/bind, {id}/state, {id}/deleted
+	PathRegistrations   = "/api/v1/sandbox/registrations/" // + {id}/bind, {id}/state, {id}/restart, {id}/deleted
 	PathPolicyCurrent   = "/api/v1/sandbox/policy/current" // ?registration=ID
 	PathPolicyExplain   = "/api/v1/sandbox/policy/explain"
 	PathPolicyTest      = "/api/v1/sandbox/policy/test"
@@ -58,7 +59,12 @@ const (
 	// RegistrationStateSub is POST registrations/{id}/state: a StateReport
 	// answered with the CurrentPolicy policy/current gives.
 	RegistrationStateSub = "/state"
-	RegistrationQuery    = "registration"
+	// RegistrationRestartSub is POST registrations/{id}/restart: the
+	// stopped sandbox of a bound registration starts again under a new
+	// registration, answered with its RegistrationView. A state report
+	// never revives a registration whose sandbox was reported stopped.
+	RegistrationRestartSub = "/restart"
+	RegistrationQuery      = "registration"
 )
 
 // Header names and the values the relay sets.
@@ -70,6 +76,11 @@ const (
 	// sends ClientHeaderValue.
 	ClientHeader      = "X-DefenseClaw-Client"
 	ClientHeaderValue = "sandbox-relay"
+	// HookReceiptHeader marks the second post that acknowledges an offered
+	// hook answer. Both admission layers select its budget before reading
+	// the body; the gateway validates the marker and receipt body together.
+	HookReceiptHeader      = "X-Defenseclaw-Hook-Receipt"
+	HookReceiptHeaderValue = "1"
 	// AgentSurfaceHeader is set by the relay to AgentSurfaceValue; the
 	// sandbox's own value is dropped.
 	AgentSurfaceHeader = "X-DefenseClaw-Agent-Surface"
@@ -91,7 +102,20 @@ const (
 	// SandboxHeaderPrefix: every header the sandbox sends with this prefix
 	// is dropped by the relay.
 	SandboxHeaderPrefix = "X-DefenseClaw-Sandbox-"
+	// DaemonContractHeader carries the DaemonContract of the daemon on
+	// every call it makes, relayed calls included (the sandbox's own value
+	// is dropped with the rest of SandboxHeaderPrefix).
+	DaemonContractHeader = "X-DefenseClaw-Sandbox-Daemon-Contract"
 )
+
+// DaemonContract is what the daemon does with a CurrentPolicy, as
+// DaemonContractHeader states it. A daemon that sends no header (1.0.2 and
+// earlier) adopts only the live fields of the floor and marks the
+// registration confirmed; contract 2 adopts the complete Floor and
+// RequiredPack and refuses an answer without them. The managed gateway
+// refuses new sandboxes, renewals and policy confirmations to a daemon
+// below this contract with ReasonDaemonOutdated (GAP-0182).
+const DaemonContract = 2
 
 // ForwardHeaders is the allowlist of request headers the relay copies from
 // the sandbox's request to the gateway (canonical MIME form). Nothing else
@@ -99,10 +123,9 @@ const (
 // AgentSurfaceHeader itself.
 var ForwardHeaders = [...]string{
 	"Content-Type",
-	"Traceparent",
-	"Tracestate",
 	"Idempotency-Key",
 	"X-Defenseclaw-Hook-Event",
+	"X-Defenseclaw-Hook-Receipt",
 	"X-Defenseclaw-Hook-Contract",
 	"X-Defenseclaw-Antigravity-Event",
 	"X-Defenseclaw-Copilot-Event",
@@ -117,6 +140,8 @@ var ForwardHeaders = [...]string{
 // them; the list exists so tests can assert each one, together with every
 // header under SandboxHeaderPrefix.
 var DroppedHeaders = [...]string{
+	"Traceparent",
+	"Tracestate",
 	"Authorization",
 	"X-Defenseclaw-Token",
 	"X-Dc-Auth",
@@ -384,10 +409,15 @@ type OperationalSettings struct {
 	Harnesses         []string          `json:"harnesses,omitempty"`
 	Wrappers          []string          `json:"wrappers,omitempty"`
 	TokenDelivery     string            `json:"token_delivery,omitempty"`
-	Middleware        bool              `json:"middleware,omitempty"`
 	LLM               string            `json:"llm,omitempty"`
 	KeepHeadless      bool              `json:"keep_headless,omitempty"`
 	UpstreamTelemetry bool              `json:"upstream_telemetry,omitempty"`
+	// TrustedCAs is the normalized PEM of the administrator's
+	// openshell.trusted_ca_bundle, read by the managed gateway (the
+	// account cannot name a CA of its own); TrustedCAError says why the
+	// gateway could not use the file, and the daemon then builds no image.
+	TrustedCAs     string `json:"trusted_cas,omitempty"`
+	TrustedCAError string `json:"trusted_ca_error,omitempty"`
 }
 
 // ImageSettings mirrors openshell.image.
@@ -431,6 +461,10 @@ type DaemonSettings struct {
 	// decides. Not part of Enterprise: a change never restarts a daemon.
 	SelectedDriver string `json:"selected_driver,omitempty"`
 	DriverReason   string `json:"driver_reason,omitempty"`
+	// ForeignSandboxes is the caller's own foreign_sandboxes (alert or
+	// stop), which the daemon applies to sandboxes DefenseClaw did not start
+	// while none of the caller's registrations names a floor yet (GAP-0058).
+	ForeignSandboxes string `json:"foreign_sandboxes,omitempty"`
 }
 
 // EnterpriseOpenShell is enterprise.openshell plus the rendered OpenShell
@@ -467,7 +501,9 @@ type HookDecision struct {
 	// Action is allow, block, alert or confirm.
 	Action     string `json:"action"`
 	WouldBlock bool   `json:"would_block,omitempty"`
-	Severity   string `json:"severity,omitempty"`
+	// FailedClosed reports a block caused by a hook evaluation failure.
+	FailedClosed bool   `json:"failed_closed,omitempty"`
+	Severity     string `json:"severity,omitempty"`
 	// Reason is rule metadata only, as SandboxHookDecision.Reason.
 	Reason      string `json:"reason,omitempty"`
 	ModelError  string `json:"model_error,omitempty"`
@@ -501,40 +537,47 @@ type BindRequest struct {
 	Driver string `json:"driver,omitempty"`
 }
 
-// CurrentPolicy answers GET policy/current: the registration's live fields
-// now.
+// CurrentPolicy answers GET policy/current: the registration's complete
+// policy floor now.
 type CurrentPolicy struct {
-	V             int        `json:"v"`
-	Generation    uint64     `json:"generation"`
-	Revoked       bool       `json:"revoked,omitempty"`
-	RevokedReason string     `json:"revoked_reason,omitempty"`
-	Live          LiveFields `json:"live"`
+	V             int    `json:"v"`
+	Generation    uint64 `json:"generation"`
+	Revoked       bool   `json:"revoked,omitempty"`
+	RevokedReason string `json:"revoked_reason,omitempty"`
+	// Floor is the complete gateway-owned policy floor. A managed daemon
+	// adopts it after confirmation instead of its user-writable cache.
+	Floor *config.OpenShellAdminConfig `json:"floor,omitempty"`
+	// RequiredPack is the gateway-owned content of Floor.RequiredPack when
+	// that pack is custom. A daemon must never install its user-owned cache.
+	RequiredPack json.RawMessage `json:"required_pack,omitempty"`
 	// Digest is the caller's effective sandbox policy digest.
 	Digest string `json:"digest"`
 	// Profile is the guardrail profile of the same match as Digest: after
 	// a regroup re-matched the registration, status and refusals name it,
 	// not the profile the sandbox was created under (#1199).
 	Profile string `json:"profile,omitempty"`
+	// PinnedProfile is the profile the sandbox was created under while its
+	// floor is still pinned to it: a profile-assignment change moved the
+	// registration to Profile, and the created profile's floor still
+	// tightens it. Status and refusals name both, so a quoted rule points at
+	// the profile it comes from (GAP-0285). "" when Profile's floor alone
+	// applies, or from a gateway that does not say.
+	PinnedProfile string `json:"pinned_profile,omitempty"`
+	// MinProfile is the min_profile of the caller's floor now. It is not a
+	// live field: a running sandbox keeps the profile it started with, and
+	// a sandbox that starts again takes this one, never the looser one it
+	// registered under (GAP-0224). nil is an answer without it.
+	MinProfile *string `json:"min_profile,omitempty"`
+	// Provisional is whether the same match is provisional (the directory
+	// could not be asked, so the organization's default applies). Status
+	// shows it next to Profile and Digest, so a sandbox created during an
+	// outage stops saying the default applies once a re-match verified its
+	// groups, and says so again if a later match is provisional (#1199). Nil,
+	// from a gateway that does not say, leaves the daemon's flag as it is.
+	Provisional *bool `json:"provisional,omitempty"`
 	// UpdatedAt is when the registration's policy last changed
 	// (sandboxreg.PolicyUpdatedAt), the age the daemon's status shows.
 	UpdatedAt time.Time `json:"updated_at,omitzero"`
-}
-
-// LiveFields are the floor fields that switch on a running sandbox at once
-// (plan §5.2 "live").
-type LiveFields struct {
-	EgressBlock        []string `json:"egress_block,omitempty"`
-	EgressAllowOnly    []string `json:"egress_allow_only,omitempty"`
-	BlockLargeUploads  bool     `json:"block_large_uploads,omitempty"`
-	AllowUnblock       *bool    `json:"allow_unblock,omitempty"`
-	AllowLearnMode     *bool    `json:"allow_learn_mode,omitempty"`
-	UserApprovals      string   `json:"user_approvals,omitempty"`
-	OnSilence          string   `json:"on_silence,omitempty"`
-	MaxSilenceAfter    string   `json:"max_silence_after,omitempty"`
-	ProcessTree        *bool    `json:"process_tree,omitempty"`
-	ForeignSandboxes   string   `json:"foreign_sandboxes,omitempty"`
-	DeleteStoppedAfter string   `json:"delete_stopped_after,omitempty"`
-	RequestAccess      string   `json:"request_access,omitempty"`
 }
 
 // Decision kinds and scopes (DecisionRequest).
@@ -593,22 +636,31 @@ const (
 	// refusal comes before any registration exists, and the payload names no
 	// other account (GAP-0598).
 	EventAccountBusy = "account_busy"
-	// EventSandboxLifecycle and EventSandboxEgress carry the daemon's
-	// sandbox telemetry: a phase change of one of the caller's sandboxes
-	// (log.sandbox.lifecycle) and an egress decision or the end of an
-	// allowed connection (log.egress.*). The daemon has no telemetry
+	// EventSandboxLifecycle, EventSandboxEgress, EventSandboxProcess and
+	// EventSandboxFinding carry
+	// the daemon's sandbox telemetry: a phase change of one of the caller's
+	// sandboxes (log.sandbox.lifecycle), an egress decision or connection end
+	// (log.egress.*), an opt-in process tree event
+	// (log.sandbox.process_tree), or a finding (log.finding.observed).
+	// The daemon has no telemetry
 	// destination of its own, so the managed gateway records them, stamped
 	// with the registration's sandbox and the verified peer (GAP-0003).
 	EventSandboxLifecycle = "sandbox_lifecycle"
 	EventSandboxEgress    = "sandbox_egress"
+	EventSandboxProcess   = "sandbox_process"
+	EventSandboxFinding   = "sandbox_finding"
+	// EventSandboxAskDecision carries only decisions the manager resolves
+	// without calling the gateway's decisions route: a rejection or a
+	// policy-bounded approval attempt.
+	EventSandboxAskDecision = "sandbox_ask_decision"
 )
 
 // EventTelemetry reports a kind that carries the daemon's sandbox
-// telemetry (EventSandboxLifecycle, EventSandboxEgress). Such a record may
+// telemetry. Such a record may
 // describe a sandbox whose registration the daemon already reported
 // deleted: the deleting and deleted phases are recorded just before.
 func EventTelemetry(kind string) bool {
-	return kind == EventSandboxLifecycle || kind == EventSandboxEgress
+	return kind == EventSandboxLifecycle || kind == EventSandboxEgress || kind == EventSandboxProcess || kind == EventSandboxFinding
 }
 
 // EventWithoutRegistration reports a kind a batch may carry without a

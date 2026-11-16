@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
@@ -83,7 +84,7 @@ func TestEnumerateUnixReportsInstalledAgentsItCannotEnroll(t *testing.T) {
 		t.Fatalf("unprotected = %+v, want the installed opencode only", report.Unprotected)
 	}
 	got := report.Unprotected[0]
-	if got.User != "alice" || got.Connector != "opencode" || got.Code != UnprotectedCodeAgentUnprotected ||
+	if got.User != "alice" || got.Connector != "opencode" || got.Code != UnprotectedCodeHookContractUnverified ||
 		got.UID == nil || *got.UID != uid || !strings.Contains(got.Reason, "runs without DefenseClaw hooks") {
 		t.Fatalf("unprotected entry = %+v", got)
 	}
@@ -127,12 +128,124 @@ func TestUnixUnprotectedAgentsRecordRoundTrip(t *testing.T) {
 	if len(got) != 2 || got[0].User != "alice" || got[1].Code != UnprotectedCodeHookContractUnverified || strings.ContainsAny(got[0].Reason, "\n") {
 		t.Fatalf("round trip = %+v", got)
 	}
-	// An unchanged set leaves the file alone.
+	// An unchanged set keeps its inode but refreshes evidence that a scan ran.
 	before, _ := os.Stat(path)
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
 	if err := WriteUnixUnprotectedAgents(path, agents); err != nil {
 		t.Fatal(err)
 	}
-	if after, _ := os.Stat(path); !os.SameFile(before, after) {
-		t.Fatal("an identical record was rewritten")
+	if after, _ := os.Stat(path); !os.SameFile(before, after) || !after.ModTime().After(old) {
+		t.Fatal("an identical record was rewritten or its scan time was not refreshed")
+	}
+}
+
+func TestKiroCLIAndIDESurfaceGapsBothSurviveTheStatusRecord(t *testing.T) {
+	data, err := MarshalUnprotectedAgents([]UnprotectedAgent{
+		{User: "alice", Connector: "kiro", Version: "2.24.1", Code: "kiro_cli_below_hook_floor",
+			Reason: "kiro-cli 2.24.1 is below 2.27.1 and sends no headless hooks"},
+		{User: "alice", Connector: "kiro", Version: "1.0.181", Code: UnprotectedCodeKiroIDEBelowGlobalHooksFloor,
+			Reason: "Kiro IDE 1.0.181 cannot read global hooks"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ParseUnprotectedAgents(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Code == got[1].Code {
+		t.Fatalf("status lost a Kiro product's uncovered surface: %+v", got)
+	}
+}
+
+func TestKiroFloorReasonsGetSurfaceSpecificCodes(t *testing.T) {
+	for _, tc := range []struct{ reason, want string }{
+		{"kiro-cli 2.24.1 is below 2.27.1; no headless hooks", UnprotectedCodeKiroCLIBelowHookFloor},
+		{"Kiro IDE version 1.0.181 is below the certified minimum 1.0.182", UnprotectedCodeKiroIDEBelowGlobalHooksFloor},
+	} {
+		if got := UnprotectedCodeForReason(tc.reason); got != tc.want {
+			t.Fatalf("%q classified as %q, want %q", tc.reason, got, tc.want)
+		}
+	}
+}
+
+// GAP-0782: the enumerator announces a scan of a new config before it runs
+// it. The announcement carries the previous agents and is never a result.
+func TestScanStartedRecordKeepsThePreviousAgentsAndIsMarked(t *testing.T) {
+	previous := []UnprotectedAgent{{User: "alice", Connector: "codex", Code: UnprotectedCodeAgentUnprotected, Reason: "no hook contract"}}
+	data, err := MarshalUnprotectedAgentsScanStarted(previous, 7, "abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !UnprotectedAgentsRecordScanInProgress(data) || UnprotectedAgentsRecordConfigGeneration(data) != 7 ||
+		UnprotectedAgentsRecordConfigSHA256(data) != "abc" || UnprotectedAgentsRecordGeneration(data) != UnprotectedAgentsGeneration() {
+		t.Fatalf("scan-started record %s lacks its marker or stamp", data)
+	}
+	agents, err := ParseUnprotectedAgents(data)
+	if err != nil || len(agents) != 1 || agents[0].Connector != "codex" {
+		t.Fatalf("agents=%+v err=%v, want the previous agents kept", agents, err)
+	}
+	done, err := MarshalUnprotectedAgentsForConfig(previous, 7, "abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if UnprotectedAgentsRecordScanInProgress(done) {
+		t.Fatalf("a completed scan record %s carries the scan-in-progress marker", done)
+	}
+}
+
+// The announcement is written only when the record on disk does not already
+// name this build and config, so the cycles of an unchanged config never turn
+// a complete record pending, and keeps what the old record reported.
+func TestScanStartedRecordIsDueOnlyWhenTheRecordNamesAnotherConfig(t *testing.T) {
+	agents := []UnprotectedAgent{{User: "alice", Connector: "codex", Code: UnprotectedCodeAgentUnprotected, Reason: "no hook contract"}}
+	completed, err := MarshalUnprotectedAgentsForConfig(agents, 7, "abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	announced, err := MarshalUnprotectedAgentsScanStarted(agents, 7, "abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name    string
+		current []byte
+		gen     uint64
+		sha     string
+		want    bool
+	}{
+		{"no record", nil, 7, "abc", true},
+		{"record of the previous generation", completed, 8, "def", true},
+		{"same number, other digest", completed, 7, "def", true},
+		{"unreadable record", []byte("{"), 7, "abc", true},
+		{"completed scan of this config", completed, 7, "abc", false},
+		{"announcement of this config", announced, 7, "abc", false},
+		{"config without a generation", completed, 0, "", false},
+		{"config without a digest", completed, 8, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := unprotectedScanStartedRecord(tc.current, tc.gen, tc.sha)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (data != nil) != tc.want {
+				t.Fatalf("announcement due=%v, want %v", data != nil, tc.want)
+			}
+			if data == nil {
+				return
+			}
+			if !UnprotectedAgentsRecordScanInProgress(data) || UnprotectedAgentsRecordConfigGeneration(data) != tc.gen {
+				t.Fatalf("announcement %s is not marked or not stamped with %d", data, tc.gen)
+			}
+			if tc.current != nil && string(tc.current) == string(completed) {
+				kept, err := ParseUnprotectedAgents(data)
+				if err != nil || len(kept) != 1 {
+					t.Fatalf("kept agents %+v err=%v, want the previous agents", kept, err)
+				}
+			}
+		})
 	}
 }

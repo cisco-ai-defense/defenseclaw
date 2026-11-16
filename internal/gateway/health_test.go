@@ -335,7 +335,9 @@ func TestObservabilityV8HealthRendersBoundedGenerationSnapshot(t *testing.T) {
 	}}
 	health := NewSidecarHealth()
 	health.bindObservabilityV8HealthSource(source)
-	health.setObservabilityV8Retention("healthy", 90, "")
+	health.setObservabilityV8Retention(observabilityruntime.RetentionControllerStatus{
+		State: observabilityruntime.RetentionStateHealthy, RetentionDays: 90, MaxStoreMB: 64,
+	})
 	health.observeObservabilityV8Failure("all-signals", 3, "stale_failure", now.Add(time.Hour))
 
 	snapshot := health.Snapshot()
@@ -345,6 +347,7 @@ func TestObservabilityV8HealthRendersBoundedGenerationSnapshot(t *testing.T) {
 	details := snapshot.Telemetry.Details
 	if details["generation"] != uint64(4) || details["destination_count"] != 3 ||
 		details["retention_state"] != "healthy" || details["retention_days"] != int64(90) ||
+		details["retention_max_store_mb"] != int64(64) ||
 		details["optional_destination_state"] != "degraded" ||
 		details["optional_destination_failure_count"] != 1 ||
 		details["optional_destination_failure_summary"] != "all-signals:degraded:http_authentication" {
@@ -465,6 +468,37 @@ func TestObservabilityV8HealthOnlyExposesValidRetentionFailures(t *testing.T) {
 				t.Fatalf("retention_failure = %v, want %q", failure, test.wantFailure)
 			}
 		})
+	}
+}
+
+func TestObservabilityV8HealthReportsUnmetRetentionCapWithoutReadinessError(t *testing.T) {
+	health := NewSidecarHealth()
+	health.bindObservabilityV8HealthSource(&fakeObservabilityV8HealthSource{
+		snapshot: observabilityruntime.DestinationHealthSnapshot{Generation: 1},
+	})
+	health.setObservabilityV8Retention(observabilityruntime.RetentionControllerStatus{
+		State: observabilityruntime.RetentionStateWarning, RetentionDays: 7, MaxStoreMB: 1,
+		StoreSizeBytes: 2 << 20, StoreCapBytes: 1 << 20,
+		CapReason: audit.RetentionCapActiveCorrelation,
+	})
+	telemetry := health.Snapshot().Telemetry
+	if telemetry.State != StateRunning || telemetry.Details["retention_state"] != "warning" ||
+		telemetry.Details["retention_cap_used_bytes"] != int64(2<<20) ||
+		telemetry.Details["retention_cap_bytes"] != int64(1<<20) ||
+		telemetry.Details["retention_cap_reason"] != string(audit.RetentionCapActiveCorrelation) {
+		t.Fatalf("cap warning telemetry = %+v", telemetry)
+	}
+	health.setObservabilityV8Retention(observabilityruntime.RetentionControllerStatus{
+		State: observabilityruntime.RetentionStateHealthy, RetentionDays: 7, MaxStoreMB: 1,
+	})
+	telemetry = health.Snapshot().Telemetry
+	if telemetry.State != StateRunning || telemetry.Details["retention_state"] != "healthy" {
+		t.Fatalf("met-cap telemetry = %+v", telemetry)
+	}
+	for _, key := range []string{"retention_cap_used_bytes", "retention_cap_bytes", "retention_cap_reason"} {
+		if _, ok := telemetry.Details[key]; ok {
+			t.Fatalf("stale %s after cap met: %+v", key, telemetry.Details)
+		}
 	}
 }
 
@@ -863,7 +897,10 @@ func TestObservabilityV8HealthSnapshotFailureIsBoundedAndFailClosed(t *testing.T
 		t.Run(test.name, func(t *testing.T) {
 			health := NewSidecarHealth()
 			health.bindObservabilityV8HealthSource(test.source)
-			health.setObservabilityV8Retention("degraded", 30, "scheduler_failed")
+			health.setObservabilityV8Retention(observabilityruntime.RetentionControllerStatus{
+				State: observabilityruntime.RetentionStateDegraded, RetentionDays: 30,
+				Failure: observabilityruntime.RetentionFailureScheduler,
+			})
 			health.observeObservabilityV8EventHistory(audit.EventHistoryHealthTransition{
 				Generation: 1, Sequence: 1, State: audit.EventHistoryHealthFailed,
 				Code: audit.EventHistoryHealthWriteFailed, OccurredAt: time.Now().UTC(),
@@ -916,8 +953,8 @@ func stringContains(value, fragment string) bool {
 	return false
 }
 
-// TestSetEnumeratorPublishesSubsystem pins the wire contract spec 005
-// Workstream D introduces: SidecarHealth.Enumerator is nil until
+// TestSetEnumeratorPublishesSubsystem pins the wire contract:
+// SidecarHealth.Enumerator is nil until
 // SetEnumerator is called, then holds the last-published state +
 // LastError + Details verbatim. Snapshot() must surface the field
 // in the JSON payload so a Cisco Secure Client IPC consumer can
@@ -1009,8 +1046,8 @@ func TestSetEnumeratorJSONShape(t *testing.T) {
 	}
 }
 
-// TestSetEnumeratorDeepCopiesDetails is the regression pin CR
-// spec-005:PRRT_kwDORuAK-s6atyfQ asks for: mutating the caller's
+// TestSetEnumeratorDeepCopiesDetails is the regression pin for
+// boundary copies: mutating the caller's
 // input map after SetEnumerator MUST NOT mutate the stored
 // subsystem health; mutating the Snapshot()-returned pointer's
 // Details map MUST NOT mutate the stored subsystem health either.

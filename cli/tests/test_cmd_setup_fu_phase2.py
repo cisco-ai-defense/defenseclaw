@@ -139,6 +139,35 @@ def _click_result_reaches_marker(result, marker: str) -> bool:
 
 
 @pytest.mark.parametrize(
+    ("connector", "host_os", "expected_hook", "other_hook"),
+    (
+        ("copilot", "windows", "hooks/copilot-hook.ps1 (the hook Copilot runs on Windows)", "on non-Windows"),
+        ("copilot", "linux", "hooks/copilot-hook.sh", "copilot-hook.ps1"),
+        ("copilot", "darwin", "hooks/copilot-hook.sh", "copilot-hook.ps1"),
+        ("cursor", "windows", "hooks/cursor-hook.ps1 (the hook Cursor runs on Windows)", "on non-Windows"),
+        ("cursor", "linux", "hooks/cursor-hook.sh", "cursor-hook.ps1"),
+    ),
+)
+def test_mutation_notice_names_the_hook_file_this_os_registers(
+    connector: str,
+    host_os: str,
+    expected_hook: str,
+    other_hook: str,
+) -> None:
+    """GAP-2280: setup copilot on native Windows named only copilot-hook.sh, not the .ps1 Copilot runs there."""
+    runner = CliRunner()
+    with (
+        patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value=host_os),
+        runner.isolation() as (stdout, _stderr, _input),
+    ):
+        cmd_setup._print_connector_mutation_notice(connector)
+
+    notice = stdout.getvalue().decode()
+    assert expected_hook in notice
+    assert other_hook not in notice
+
+
+@pytest.mark.parametrize(
     ("host_os", "expected_hook", "other_hook"),
     (
         ("windows", "protected native defenseclaw-hook.exe boundary on Windows", "devin-hook.sh"),
@@ -298,6 +327,9 @@ def _guardrail_judge_secret_wizard(
 class _BaseSetup(unittest.TestCase):
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
+        preflight = patch("defenseclaw.commands.cmd_setup._preflight_opencode_plugin_folder")
+        preflight.start()
+        self.addCleanup(preflight.stop)
         self.cfg_path = os.path.join(self.tmp_dir, "config.yaml")
         # Lightweight save shim: tests assert on the in-memory config object.
         self.app.cfg.save = lambda: atomic_write_private_bytes(  # type: ignore[assignment]
@@ -318,6 +350,190 @@ class _BaseSetup(unittest.TestCase):
 # B3 / E4d — per-connector guardrail write-surface
 # ---------------------------------------------------------------------------
 class TestPerConnectorWriteSurface(_BaseSetup):
+    # An explicit guardrail target must already be set up. The OpenCode
+    # selection fixtures below include it in the configured roster.
+    def test_guardrail_secret_size_refusal_in_the_interactive_wizard(self):
+        from defenseclaw.file_permissions import MAX_DOTENV_BYTES
+
+        self._seed_map("codex")
+        gc = self.app.cfg.guardrail
+        gc.enabled = True
+        gc.mode = "action"
+        gc.judge.enabled = False
+        env_name = "DISPOSABLE_JUDGE_ENV"
+        secret_value = "disposable-value"
+        path = Path(self.tmp_dir, ".env")
+        added_line = f"{env_name}={secret_value}\n".encode()
+        original = b"#" + b"x" * (MAX_DOTENV_BYTES + 1 - len(added_line) - 2) + b"\n"
+        atomic_write_private_bytes(str(path), original)
+        config_path = Path(self.cfg_path)
+        atomic_write_private_bytes(str(config_path), b"prior-config-marker\n")
+        before = (path.stat().st_ino, path.stat().st_mtime_ns, config_path.stat().st_mtime_ns)
+
+        with (
+            patch.dict(os.environ, {}, clear=False),
+            _guardrail_judge_secret_wizard(Path(self.tmp_dir, "hook_contract_lock.json"), env_name, secret_value),
+            patch.object(cmd_setup.platform_support, "host_os", return_value="linux"),
+            patch.object(cmd_setup, "_refuse_guardrail_for_connector_not_set_up"),
+            patch.object(cmd_setup, "_check_guardrail_setup_connector_versions", side_effect=AssertionError("late validation")),
+            patch.object(cmd_setup, "execute_guardrail_setup", side_effect=AssertionError("late setup")),
+            patch.object(cmd_setup, "_restart_services", side_effect=AssertionError("late restart")),
+        ):
+            os.environ.pop(env_name, None)
+            result = _invoke(["guardrail", "--connector", "codex", "--no-restart"], self.app, catch=True)
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn(f"over the {MAX_DOTENV_BYTES}-byte limit", result.output)
+        self.assertNotIn(secret_value, _click_result_exception_diagnostics(result))
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(
+            (path.stat().st_ino, path.stat().st_mtime_ns, config_path.stat().st_mtime_ns),
+            before,
+        )
+
+    def test_windows_opencode_guardrail_checks_complete_dotenv_before_selection(self):
+        from defenseclaw.file_permissions import MAX_DOTENV_BYTES
+
+        pristine = copy.deepcopy(self.app.cfg)
+        env_name = "DISPOSABLE_JUDGE_ENV"
+        secret_value = "disposable-value"
+        added_line = f"{env_name}={secret_value}\n".encode()
+        for extra_byte in (1, 0):
+            with self.subTest(extra_byte=extra_byte):
+                self.app.cfg = copy.deepcopy(pristine)
+                self._seed_map("opencode")
+                gc = self.app.cfg.guardrail
+                gc.enabled = True
+                gc.mode = "action"
+                gc.judge.enabled = False
+                dotenv = Path(self.tmp_dir, ".env")
+                config = Path(self.cfg_path)
+                receipt = Path(self.tmp_dir, "agent_selection.json")
+                lock = Path(self.tmp_dir, "hook_contract_lock.json")
+                unverified = Path(self.tmp_dir, "agent_selection_unverified.json")
+                original = b"#" + b"x" * (MAX_DOTENV_BYTES + extra_byte - len(added_line) - 2) + b"\n"
+                atomic_write_private_bytes(str(dotenv), original)
+                atomic_write_private_bytes(str(config), b"prior-config-marker\n")
+                records, errors = record_test_setup_agent_selections(self.tmp_dir, ("opencode",))
+                self.assertTrue(records)
+                self.assertFalse(errors)
+                atomic_write_private_bytes(str(lock), b'{"version":2,"connectors":{}}\n')
+                atomic_write_private_bytes(
+                    str(unverified),
+                    b'{"unverified":{"opencode":{"detail":"prior probe","at":"2026-01-01T00:00:00Z"}}}\n',
+                )
+                paths = (dotenv, config, receipt, lock, unverified)
+                before = {
+                    path: (path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns)
+                    for path in paths
+                }
+                late = AssertionError("size refusal must precede setup and lifecycle")
+                with (
+                    patch.dict(os.environ, {}, clear=False),
+                    _guardrail_judge_secret_wizard(lock, env_name, secret_value) as selected,
+                    patch.object(cmd_setup, "_refuse_guardrail_for_connector_not_set_up"),
+                    patch.object(
+                        cmd_setup,
+                        "_check_guardrail_setup_connector_versions",
+                        side_effect=late if extra_byte else None,
+                        return_value=True,
+                    ),
+                    patch.object(
+                        cmd_setup,
+                        "execute_guardrail_setup",
+                        side_effect=late if extra_byte else None,
+                        return_value=(True, []),
+                    ),
+                    patch.object(cmd_setup, "_restart_services", side_effect=late),
+                ):
+                    os.environ.pop(env_name, None)
+                    result = _invoke(["guardrail", "--connector", "opencode", "--no-restart"], self.app, catch=True)
+
+                if extra_byte:
+                    self.assertNotEqual(result.exit_code, 0)
+                    self.assertIn(f"over the {MAX_DOTENV_BYTES}-byte limit", result.output)
+                    self.assertNotIn(secret_value, _click_result_exception_diagnostics(result))
+                    selected.assert_not_called()
+                    self.assertEqual(
+                        {
+                            path: (path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns)
+                            for path in paths
+                        },
+                        before,
+                    )
+                else:
+                    self.assertEqual(result.exit_code, 0, msg=result.output)
+                    selected.assert_called_once()
+                    self.assertEqual(len(dotenv.read_bytes()), MAX_DOTENV_BYTES)
+
+    def test_interactive_secret_preflight_holds_dotenv_lock_through_publication(self):
+        from defenseclaw.file_permissions import MAX_DOTENV_BYTES
+
+        self._seed_map("opencode")
+        gc = self.app.cfg.guardrail
+        gc.enabled = True
+        gc.mode = "action"
+        gc.judge.enabled = False
+        env_name = "DISPOSABLE_JUDGE_ENV"
+        secret_value = "disposable-value"
+        dotenv = Path(self.tmp_dir, ".env")
+        added_line = f"{env_name}={secret_value}\n".encode()
+        original = b"#" + b"x" * (MAX_DOTENV_BYTES - len(added_line) - 2) + b"\n"
+        atomic_write_private_bytes(str(dotenv), original)
+        original_preflight = cmd_setup._preflight_pending_guardrail_secret_size
+        writer_attempted = threading.Event()
+        writer_finished = threading.Event()
+        writer_errors: list[BaseException] = []
+
+        def competing_writer():
+            writer_attempted.set()
+            try:
+                # This update fits before the pending secret, but not after it.
+                cmd_setup._save_secret_to_dotenv("A", "b", self.tmp_dir)
+            except BaseException as error:
+                writer_errors.append(error)
+            finally:
+                writer_finished.set()
+
+        writer = threading.Thread(target=competing_writer, daemon=True)
+
+        def preflight_then_start_writer(*args, **kwargs):
+            original_preflight(*args, **kwargs)
+            writer.start()
+            self.assertTrue(writer_attempted.wait(5))
+            # With no held lock, the competing update completes before
+            # selection; with one lock, it waits for secret publication.
+            writer_finished.wait(2)
+
+        late = AssertionError("publication must precede setup and lifecycle")
+        with (
+            patch.dict(os.environ, {}, clear=False),
+            _guardrail_judge_secret_wizard(Path(self.tmp_dir, "hook_contract_lock.json"), env_name, secret_value)
+            as selected,
+            patch.object(
+                cmd_setup,
+                "_preflight_pending_guardrail_secret_size",
+                side_effect=preflight_then_start_writer,
+            ),
+            patch.object(cmd_setup, "_refuse_guardrail_for_connector_not_set_up"),
+            patch.object(cmd_setup, "_check_guardrail_setup_connector_versions", return_value=True),
+            patch.object(cmd_setup, "execute_guardrail_setup", return_value=(True, [])),
+            patch.object(cmd_setup, "_restart_services", side_effect=late),
+        ):
+            os.environ.pop(env_name, None)
+            result = _invoke(["guardrail", "--connector", "opencode", "--no-restart"], self.app, catch=True)
+
+        writer.join(5)
+        self.assertFalse(writer.is_alive())
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        selected.assert_called_once()
+        self.assertTrue(writer_finished.is_set())
+        self.assertEqual(len(writer_errors), 1)
+        self.assertIsInstance(writer_errors[0], cmd_setup._DotenvSizeError)
+        self.assertEqual(len(dotenv.read_bytes()), MAX_DOTENV_BYTES)
+        self.assertIn(added_line, dotenv.read_bytes())
+        self.assertNotIn(b"A=b\n", dotenv.read_bytes())
+
     def test_forged_name_set_cannot_bypass_exact_opencode_selection(self):
         receipt = os.path.join(self.tmp_dir, "agent_selection.json")
         prior = b'{"prior":"receipt"}\n'
@@ -421,11 +637,25 @@ class TestPerConnectorWriteSurface(_BaseSetup):
 
     def test_additive_setup_selects_complete_roster_before_first_gateway_start(self):
         self._seed_map("amp", "claudecode", "codex", "cursor")
+        atomic_write_private_bytes(os.path.join(self.tmp_dir, "defenseclaw-hook.exe"), b"installed fixture")
+        launcher_identity = json.dumps({
+            "schema_version": 1,
+            "name": "defenseclaw-hook-launcher",
+            "version": "1.0.8",
+            "commit": "fixture",
+        }).encode()
 
         with (
             patch(
                 "defenseclaw.commands.cmd_setup.platform_support.host_os",
                 return_value="windows",
+            ),
+            patch("defenseclaw.commands.cmd_setup.subprocess.run", return_value=SimpleNamespace(
+                returncode=0, stdout=launcher_identity,
+            )) as launcher_probe,
+            patch(
+                "defenseclaw.gateway.canonical_install_path",
+                return_value=os.path.join(self.tmp_dir, "defenseclaw-gateway.exe"),
             ),
             patch(
                 "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
@@ -449,6 +679,11 @@ class TestPerConnectorWriteSurface(_BaseSetup):
             )
 
         selected.assert_called_once()
+        launcher_probe.assert_called_once()
+        self.assertEqual(
+            launcher_probe.call_args.args[0],
+            [os.path.join(self.tmp_dir, "defenseclaw-hook.exe"), "--version-json"],
+        )
         self.assertEqual(
             selected.call_args.args[1],
             ("amp", "claudecode", "codex", "cursor"),
@@ -575,29 +810,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         self.assertEqual(hermes.rule_pack, "")
         self.assertIsNone(hermes.hilt)
 
-    def test_setup_guardrail_unscoped_mode_updates_all_active_overrides(self):
-        self._seed_map("claudecode", "hermes", "opencode", "openhands")
-        gc = self.app.cfg.guardrail
-        gc.mode = "action"
-        for connector in gc.connectors:
-            gc.connectors[connector].mode = "action"
-
-        with _stub_side_effects():
-            res = _invoke(
-                [
-                    "guardrail",
-                    "--yes",
-                    "--no-restart",
-                    "--mode",
-                    "observe",
-                ],
-                self.app,
-            )
-        self.assertEqual(res.exit_code, 0, msg=res.output)
-        self.assertEqual(gc.mode, "observe")
-        for connector in ("claudecode", "hermes", "opencode", "openhands"):
-            self.assertEqual(gc.connectors[connector].mode, "observe")
-            self.assertEqual(gc.effective_mode(connector), "observe")
 
     def test_setup_guardrail_unscoped_block_message_updates_all_active_overrides(self):
         self._seed_map("codex", "hermes")
@@ -708,7 +920,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         self.assertNotIn("hermes", gc.judge.hook_connectors)
         self.assertIn("codex", gc.judge.hook_connectors)
 
-    def test_direct_action_missing_connector_falls_back_to_observe(self):
+    def test_direct_action_missing_connector_refuses_without_saving(self):
         signal = SimpleNamespace(version="", installed=False, error="", binary_path="")
         disc = SimpleNamespace(agents={"copilot": signal})
         gc = self.app.cfg.guardrail
@@ -716,6 +928,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         gc.judge.hook_connectors = ["copilot"]
         gc.detection_strategy = "regex_judge"
         gc.detection_strategy_completion = "regex_judge"
+        before = copy.deepcopy(gc)
         saved_judge_states: list[tuple[bool, list[str], str]] = []
 
         def capture_save():
@@ -741,16 +954,14 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                 self.app,
             )
 
-        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertEqual(res.exit_code, 1, msg=res.output)
         self.assertIn("GitHub Copilot CLI: connector was not detected locally", res.output)
-        self.assertIn("GitHub Copilot CLI: requested action mode was refused", res.output)
-        self.assertEqual(self.app.cfg.guardrail.connector, "copilot")
-        self.assertEqual(self.app.cfg.guardrail.mode, "observe")
-        self.assertEqual(saved_judge_states[-1], (False, [], "regex_only"))
-        self.assertFalse(gc.judge.enabled)
-        self.assertEqual(gc.judge.hook_connectors, [])
+        self.assertIn("defenseclaw setup copilot --yes --mode action", res.output)
+        self.assertEqual(saved_judge_states, [])
+        self.assertEqual(gc, before)
 
-    def test_direct_hermes_unsupported_version_downgrades_after_one_discovery(self):
+    def test_direct_hermes_unsupported_version_refuses_after_one_discovery(self):
+        before = copy.deepcopy(self.app.cfg.guardrail)
         signal = SimpleNamespace(
             version="Hermes Agent v0.17.0",
             installed=True,
@@ -771,7 +982,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                 self.app,
             )
 
-        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertEqual(res.exit_code, 1, msg=res.output)
         discover.assert_called_once_with(
             use_cache=False,
             refresh=True,
@@ -780,49 +991,43 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         )
         self.assertEqual(res.output.count("detected-but-unsupported-version"), 1)
         self.assertIn("installed version Hermes Agent v0.17.0", res.output)
-        self.assertIn("hermes-hooks-v1 requires >=0.19.0", res.output)
-        self.assertIn("requested action mode was refused; configuring observe mode instead", res.output)
+        # GAP-0049: the whole supported range, then the nearest contract.
+        self.assertIn("DefenseClaw supports Hermes >=0.19.0 and <0.22.0; hermes-hooks-v1 covers >=0.19.0", res.output)
+        self.assertIn("defenseclaw setup hermes --yes --mode action", res.output)
         self.assertNotIn("connector was not detected locally", res.output)
-        self.assertEqual(self.app.cfg.guardrail.connector, "hermes")
-        self.assertEqual(self.app.cfg.guardrail.mode, "observe")
+        self.assertEqual(self.app.cfg.guardrail, before)
 
-    def test_windows_omnigent_admission_scan_does_not_publish_unrelated_discovery(self):
+
+    def test_direct_hermes_whose_tui_skips_shell_hooks_is_set_up_with_a_warning(self):
+        # GAP-0978: Hermes 0.19.0 (the newest on PyPI) through 0.21.0 run
+        # tools in their TUI and dashboard chat without the shell hooks setup
+        # registers, and in their classic interface with them. Setup accepts
+        # them in observe and action mode and warns about the TUI; it refused
+        # them before, which left the classic sessions unguarded too (1.0.4
+        # review).
         signal = SimpleNamespace(
-            version="omnigent 0.7.0",
+            version="Hermes Agent v0.19.0 (2026.7.20)",
             installed=True,
             error="",
-            binary_path=r"C:\Users\tester\.local\bin\omnigent.exe",
+            binary_path="/home/tester/.local/bin/hermes",
         )
-        disc = SimpleNamespace(agents={"omnigent": signal})
-
-        with (
-            patch(
-                "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
-                return_value=disc,
-            ) as discover,
-            patch(
-                "defenseclaw.commands.cmd_setup.platform_support.host_os",
-                return_value="windows",
-            ),
-        ):
-            accepted = cmd_setup._check_connector_version_supported_for_setup(
-                "omnigent",
-                mode="action",
-                emit=False,
-                data_dir=self.app.cfg.data_dir,
-            )
-
-        self.assertTrue(accepted)
-        discover.assert_called_once_with(
-            use_cache=False,
-            refresh=True,
-            data_dir=self.app.cfg.data_dir,
-            persist_cache=False,
-        )
+        disc = SimpleNamespace(agents={"hermes": signal})
+        for mode in ("observe", "action"):
+            with self.subTest(mode=mode), patch("defenseclaw.commands.cmd_setup.ux.warn") as warn:
+                accepted = cmd_setup._check_connector_version_supported_for_setup(
+                    "hermes",
+                    mode=mode,
+                    data_dir=self.app.cfg.data_dir,
+                    _discovery=disc,
+                )
+                self.assertTrue(accepted)
+                warned = " ".join(str(call.args[0]) for call in warn.call_args_list)
+                self.assertIn("hermes --tui", warned)
+                self.assertIn("Hermes 0.21.1 (v2026.9.7)", warned)
 
     def test_windows_opencode_admission_scan_preserves_prior_connector_discovery(self):
         signal = SimpleNamespace(
-            version="opencode 1.18.11",
+            version="opencode 2.1.4",
             installed=True,
             error="",
             binary_path=(
@@ -841,6 +1046,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                 "defenseclaw.commands.cmd_setup.platform_support.host_os",
                 return_value="windows",
             ),
+            patch("defenseclaw.commands.cmd_setup.agent_discovery._publish_agent_signal") as publish,
         ):
             accepted = cmd_setup._check_connector_version_supported_for_setup(
                 "opencode",
@@ -856,6 +1062,8 @@ class TestPerConnectorWriteSurface(_BaseSetup):
             data_dir=self.app.cfg.data_dir,
             persist_cache=False,
         )
+        # Only this connector entry is published; the scan itself rewrote nothing (GAP-0882).
+        publish.assert_called_once_with(disc, "opencode", data_dir=self.app.cfg.data_dir)
 
     def test_windows_opencode_single_setup_selects_exact_image_before_state_and_generic(self):
         original_save = self.app.cfg.save
@@ -922,7 +1130,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
             patch(
                 "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
                 side_effect=click.ClickException(
-                    "exact SST OpenCode 1.18.20 is outside the validated contract; PATH 1.18.19 is irrelevant"
+                    "exact SST OpenCode 1.18.20 is outside the validated contract; PATH 2.1.4 is irrelevant"
                 ),
             ),
             patch(
@@ -1212,7 +1420,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                 with self.subTest(cancellation=cancellation, prior_exists=prior_exists):
                     self.app.cfg = copy.deepcopy(pristine)
                     gc = self.app.cfg.guardrail
-                    gc.connector = "amp"
+                    gc.connector = "opencode"
                     gc.enabled = True
                     gc.mode = "observe"
                     prior_gc = copy.deepcopy(gc)
@@ -1278,7 +1486,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                         )
 
                     self.assertEqual(result.exit_code, 0 if cancellation == "decline" else 1)
-                    selected.assert_called_once()
+                    selected.assert_not_called()
                     secret_write.assert_not_called()
                     generic.assert_not_called()
                     self.assertEqual(self.app.cfg.guardrail, prior_gc)
@@ -1302,7 +1510,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                 with self.subTest(abort_at=abort_at, prior_exists=prior_exists):
                     self.app.cfg = copy.deepcopy(pristine)
                     gc = self.app.cfg.guardrail
-                    gc.connector = "amp"
+                    gc.connector = "opencode"
                     gc.enabled = True
                     gc.mode = "action"
                     gc.judge.enabled = False
@@ -1374,7 +1582,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                             )
 
                         self.assertEqual(result.exit_code, 1)
-                        selected.assert_called_once()
+                        selected.assert_not_called()
                         secret_writer.assert_not_called()
                         save.assert_not_called()
                         log_action.assert_not_called()
@@ -1399,7 +1607,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         secret_value = "disposable judge marker value"
         other_env_value = "disposable unrelated process marker"
         gc = self.app.cfg.guardrail
-        gc.connector = "amp"
+        gc.connector = "opencode"
         gc.enabled = True
         gc.mode = "action"
         gc.judge.enabled = False
@@ -1494,7 +1702,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                 ):
                     self.app.cfg = copy.deepcopy(pristine)
                     gc = self.app.cfg.guardrail
-                    gc.connector = "amp"
+                    gc.connector = "opencode"
                     gc.enabled = True
                     gc.mode = "action"
                     gc.judge.enabled = False
@@ -1939,7 +2147,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
             with self.subTest(setup_rollback_fails=setup_rollback_fails):
                 self.app.cfg = copy.deepcopy(pristine)
                 gc = self.app.cfg.guardrail
-                gc.connector = "amp"
+                gc.connector = "opencode"
                 gc.enabled = True
                 gc.mode = "action"
                 gc.judge.enabled = False
@@ -1962,7 +2170,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                 def fail_post_snapshots(path):
                     nonlocal snapshot_calls
                     snapshot_calls += 1
-                    if snapshot_calls > 1:
+                    if snapshot_calls > 2:
                         raise RuntimeError(secret_value)
                     return original_snapshot(path)
 
@@ -2024,7 +2232,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     secret_writer.assert_called_once()
                     setup_restore.assert_called_once()
                     log_action.assert_not_called()
-                    self.assertEqual(snapshot_calls, 3)
+                    self.assertEqual(snapshot_calls, 4)
                     self.assertEqual(self.app.cfg.guardrail, prior_gc)
                     for path, body in prior_files.items():
                         self.assertEqual(path.read_bytes(), body)
@@ -2235,7 +2443,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
             with self.subTest(failure_phase=failure_phase):
                 self.app.cfg = copy.deepcopy(pristine)
                 gc = self.app.cfg.guardrail
-                gc.connector = "amp"
+                gc.connector = "opencode"
                 gc.enabled = True
                 gc.mode = "action"
                 gc.judge.enabled = False
@@ -2358,7 +2566,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
             with self.subTest(failure_phase=failure_phase):
                 self.app.cfg = copy.deepcopy(pristine)
                 gc = self.app.cfg.guardrail
-                gc.connector = "amp"
+                gc.connector = "opencode"
                 gc.enabled = True
                 gc.mode = "action"
                 gc.judge.enabled = False
@@ -2494,7 +2702,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
     def test_windows_opencode_guardrail_selection_observes_pristine_explicit_state(self):
         gc = self.app.cfg.guardrail
         gc.enabled = True
-        gc.connector = "amp"
+        gc.connector = "opencode"
         gc.mode = "observe"
         gc.scanner_mode = "both"
         gc.hilt.enabled = False
@@ -2565,8 +2773,15 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     self.app.cfg = copy.deepcopy(original_cfg)
                     gc = self.app.cfg.guardrail
                     gc.enabled = True
-                    # A guarded OpenClaw refuses --connector opencode first (GAP-2452).
+                    # An older install may have saved OpenClaw before the
+                    # operator picked an installed OpenCode connector.
                     gc.connector = {"configured": "opencode", "explicit": "codex"}.get(target_case, "openclaw")
+                    if target_case == "explicit":
+                        # Both connectors are registered; explicit selection
+                        # still exercises the exact OpenCode admission path.
+                        gc.connectors = {
+                            name: PerConnectorGuardrailConfig() for name in ("codex", "opencode")
+                        }
                     gc.mode = "observe"
                     gc.scanner_mode = "both"
                     gc.hilt.enabled = False
@@ -2620,6 +2835,10 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                             return_value="windows",
                         ),
                         patch(
+                            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+                            return_value=["opencode"],
+                        ),
+                        patch(
                             "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
                             side_effect=refuse,
                         ) as selected,
@@ -2649,7 +2868,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     for path, body in prior_files.items():
                         self.assertEqual(path.read_bytes(), body)
 
-    def test_windows_opencode_interactive_refusal_precedes_judge_secret_path(self):
+    def test_windows_opencode_interactive_refusal_precedes_secret_publication(self):
         gc = self.app.cfg.guardrail
         gc.enabled = False
         gc.connector = "openclaw"
@@ -2670,11 +2889,23 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         }
         for path, body in prior_files.items():
             atomic_write_private_bytes(str(path), body)
-        forbidden = AssertionError("exact selection refusal must precede interactive policy prompts")
+        forbidden = AssertionError("exact selection refusal must precede file and lifecycle changes")
+
+        def choose(label, *_args, **_kwargs):
+            if "Select mode" in label or "Select engine" in label:
+                return "1"
+            raise forbidden
+
+        def confirm_choice(label, *_args, **_kwargs):
+            if "Enable guardrail?" in label:
+                return True
+            if "Configure advanced options?" in label:
+                return False
+            raise forbidden
 
         def refuse(_data_dir, connectors, **_kwargs):
             self.assertEqual(tuple(connectors), ("opencode",))
-            self.assertEqual(gc, prior_gc)
+            self.assertEqual(gc.connector, "opencode")
             self.assertEqual(config_path.read_bytes(), prior_files[config_path])
             self.assertEqual(secret_path.read_bytes(), prior_files[secret_path])
             atomic_write_private_bytes(str(receipt_path), b"partial receipt\n")
@@ -2683,23 +2914,23 @@ class TestPerConnectorWriteSurface(_BaseSetup):
 
         with (
             patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
-            patch(
-                "defenseclaw.commands.cmd_setup._select_connector_interactive",
-                return_value="opencode",
-            ) as connector_choice,
+            patch("defenseclaw.commands.cmd_setup._select_connector_interactive", return_value="opencode") as connector_choice,
+            patch("defenseclaw.commands.cmd_setup._prompt_hook_fail_mode"),
+            patch("defenseclaw.commands.cmd_setup._prompt_guardrail_judge_enablement"),
+            patch("defenseclaw.commands.cmd_setup.click.prompt", side_effect=choose) as prompt,
+            patch("defenseclaw.commands.cmd_setup.click.confirm", side_effect=confirm_choice) as confirmed,
             patch(
                 "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
                 side_effect=refuse,
             ) as selected,
-            patch("defenseclaw.commands.cmd_setup.click.confirm", side_effect=forbidden) as confirm,
             patch(
-                "defenseclaw.commands.cmd_setup._prompt_judge_model_config",
-                side_effect=forbidden,
-            ) as judge_config,
-            patch(
-                "defenseclaw.commands.cmd_setup._prompt_and_save_secret",
+                "defenseclaw.commands.cmd_setup._publish_pending_guardrail_secrets",
                 side_effect=forbidden,
             ) as secret_write,
+            patch(
+                "defenseclaw.commands.cmd_setup.execute_guardrail_setup",
+                side_effect=forbidden,
+            ) as execute,
         ):
             result = _invoke(
                 ["guardrail", "--no-restart"],
@@ -2710,10 +2941,11 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("interactive exact SST selection refused", result.output)
         connector_choice.assert_called_once()
+        self.assertEqual(prompt.call_count, 2)
+        self.assertEqual(confirmed.call_count, 2)
         selected.assert_called_once()
-        confirm.assert_not_called()
-        judge_config.assert_not_called()
         secret_write.assert_not_called()
+        execute.assert_not_called()
         self.assertEqual(self.app.cfg.guardrail, prior_gc)
         for path, body in prior_files.items():
             self.assertEqual(path.read_bytes(), body)
@@ -2908,6 +3140,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                 "defenseclaw.commands.cmd_setup.platform_support.host_os",
                 return_value="windows",
             ),
+            patch("defenseclaw.commands.cmd_setup.agent_discovery._publish_agent_signal") as publish,
         ):
             accepted = cmd_setup._check_connector_version_supported_for_setup(
                 "amp",
@@ -2923,8 +3156,10 @@ class TestPerConnectorWriteSurface(_BaseSetup):
             data_dir=self.app.cfg.data_dir,
             persist_cache=False,
         )
+        # Only this connector entry is published; the scan itself rewrote nothing (GAP-0882).
+        publish.assert_called_once_with(disc, "amp", data_dir=self.app.cfg.data_dir)
 
-    def test_guardrail_action_fallback_prunes_only_refused_connector_from_judge(self):
+    def test_guardrail_action_refusal_preserves_modes_and_judge(self):
         self._seed_map("codex", "hermes")
         gc = self.app.cfg.guardrail
         gc.enabled = True
@@ -2934,6 +3169,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         gc.judge.hook_connectors = ["codex", "hermes"]
         gc.detection_strategy = "regex_judge"
         gc.detection_strategy_completion = "regex_judge"
+        before = copy.deepcopy(gc)
 
         def version_gate(connector, **_kwargs):
             return connector != "hermes"
@@ -2949,11 +3185,8 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                 allow_prompt=False,
             )
 
-        self.assertTrue(ok)
-        self.assertEqual(gc.effective_mode("codex"), "action")
-        self.assertEqual(gc.effective_mode("hermes"), "observe")
-        self.assertTrue(gc.judge.enabled)
-        self.assertEqual(gc.judge.hook_connectors, ["codex"])
+        self.assertFalse(ok)
+        self.assertEqual(self.app.cfg.guardrail, before)
 
 
 # ---------------------------------------------------------------------------
@@ -3082,7 +3315,7 @@ class TestInteractiveModeJudgePrompts(_BaseSetup):
         self.assertEqual(gc.detection_strategy, "regex_only")
 
     def test_scoped_guardrail_setup_preserves_unscoped_judge_gate(self):
-        targets = ["antigravity", "claudecode", "hermes", "openhands"]
+        targets = ["antigravity", "claudecode", "hermes", ]
         self._seed_map(*targets)
         gc = self.app.cfg.guardrail
         gc.enabled = True
@@ -3188,7 +3421,7 @@ class TestInteractiveModeJudgePrompts(_BaseSetup):
         self.assertEqual(gc.effective_mode("claudecode"), "action")
 
     def test_multi_guardrail_setup_action_defaults_ignore_stale_global_mode(self):
-        targets = ["antigravity", "claudecode", "devin", "hermes", "opencode", "openhands"]
+        targets = ["antigravity", "claudecode", "devin", "hermes", "opencode", ]
         self._seed_map(*targets)
         gc = self.app.cfg.guardrail
         gc.enabled = True
@@ -3196,7 +3429,7 @@ class TestInteractiveModeJudgePrompts(_BaseSetup):
         for connector in targets:
             gc.connectors[connector].mode = "observe"
         gc.judge.enabled = True
-        gc.judge.hook_connectors = ["antigravity", "claudecode", "hermes", "openhands"]
+        gc.judge.hook_connectors = ["antigravity", "claudecode", "hermes", ]
         gc.detection_strategy = "regex_judge"
         gc.detection_strategy_completion = "regex_judge"
 
@@ -3378,6 +3611,30 @@ class TestHelpParity(unittest.TestCase):
         self.assertIn("SessionEnd", out)
         self.assertNotIn("ten on 0.133+", out)
 
+    def test_hook_connector_help_names_only_the_channels_a_host_setup_registers(self):
+        # GAP-2205: host setup wires only the hooks (the preview says so since
+        # GAP-0295); the help still listed a Notify bridge and native OTel.
+        for connector in ("codex", "claude-code"):
+            out = " ".join(self._help([connector, "--help"]).split())
+            self.assertIn("Hooks", out)
+            self.assertNotIn("Notify —", out)
+            self.assertNotIn("OTel —", out)
+            self.assertNotIn("telemetry channels", out)
+            self.assertIn("registers no native OTel exporter", out)
+            self.assertIn("OpenShell sandbox", out)
+            self.assertIn("needed so the connector's hooks are wired", out)
+
+    def test_hook_connector_help_names_who_adds_native_otel_and_notify(self):
+        # GAP-2270: only the OpenShell sandbox renderer writes a native OTel
+        # exporter (sandboxNativeOTLP); Secure Client adds only Codex's notify
+        # bridge (codexRegistersNotify). The help said Secure Client adds OTel.
+        claude = " ".join(self._help(["claude-code", "--help"]).split())
+        self.assertIn("Only an OpenShell sandbox adds it.", claude)
+        self.assertNotIn("Secure Client", claude)
+        codex = " ".join(self._help(["codex", "--help"]).split())
+        self.assertIn("An OpenShell sandbox adds both; Secure Client adds only the notify bridge.", codex)
+        self.assertNotIn("Only Secure Client and OpenShell sandboxes add them", codex)
+
 
 # ---------------------------------------------------------------------------
 # SU-11 — bare `setup` picker + scripting flags
@@ -3474,29 +3731,6 @@ class TestBareSetupBatch(_BaseSetup):
         self.assertEqual(gc.connector, "hermes")
         self.assertEqual(self.app.cfg.claw.mode, "hermes")
 
-    def test_add_detected_skips_unverifiable_newcomer_and_adds_the_rest(self):
-        # GAP-1148: on macOS a uv-tool OpenHands outside the trusted prefixes
-        # failed `setup --add-detected` (and `make all`) for every connector.
-        self._seed_map("hermes")
-        gc = self.app.cfg.guardrail
-        refusal = "not in a built-in or operator-approved trusted prefix"
-
-        with _stub_side_effects(), patch(
-            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
-            return_value=["codex", "openhands"],
-        ), patch("defenseclaw.platform_support.host_os", return_value="darwin"), patch(
-            "defenseclaw.agent_selection.setup_agent_selection_connectors",
-            side_effect=lambda names: tuple(n for n in names if n == "openhands"),
-        ), patch(
-            "defenseclaw.agent_selection.record_setup_agent_selections",
-            return_value=({}, {"openhands": refusal}),
-        ):
-            res = _invoke(["--add-detected", "--yes", "--no-restart"], self.app)
-
-        self.assertEqual(res.exit_code, 0, msg=res.output)
-        self.assertEqual(set(gc.connectors), {"codex", "hermes"})
-        self.assertIn("skipping openhands", res.output)
-        self.assertIn("re-run: defenseclaw setup openhands", res.output)
 
     def test_add_detected_restarting_batch_audits_after_gateway_is_ready(self):
         self._seed_map("codex")
@@ -3620,6 +3854,26 @@ class TestBareSetupBatch(_BaseSetup):
 
 
 class TestGatewayOfflineStaging(_BaseSetup):
+    def test_port_change_with_missing_gateway_pid_reports_offline_note(self):
+        from defenseclaw import config
+        from defenseclaw.commands.cmd_doctor import _GatewayTrust
+        from defenseclaw.logger import Logger
+
+        self.app.logger = Logger.from_config(self.app.cfg)
+        self._seed_map("codex")
+        with patch.dict(os.environ, {"DEFENSECLAW_GATEWAY_TOKEN": "t" * 64}), patch.object(
+            config, "load", return_value=self.app.cfg
+        ), patch(
+            "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+            return_value=_GatewayTrust("missing", "the gateway is not running (PID file is missing)"),
+        ), patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=False):
+            result = _invoke(["gateway", "--api-port", "19092", "--non-interactive"], self.app)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(self.app.cfg.gateway.api_port, 19092)
+        self.assertIn("the gateway isn't running, so this change takes effect when it starts", result.output)
+        self.assertNotIn("did not accept its setup audit event", result.output)
+
     def test_no_verify_saves_and_warns_when_canonical_runtime_is_offline(self):
         self.app.logger = MagicMock()
         self.app.logger.log_action.side_effect = CanonicalObservabilityUnavailableError(
@@ -3668,14 +3922,20 @@ class TestGatewayOfflineStaging(_BaseSetup):
         openclaw_check.assert_not_called()
 
     def test_new_api_port_with_a_running_gateway_says_it_applies_on_restart(self):
+        import socket
+
         self.app.logger = MagicMock()
         self.app.logger.log_action.side_effect = CanonicalObservabilityUnavailableError("connection refused")
         self._seed_map("codex")
 
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            free_port = probe.getsockname()[1]
+
         with patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=True), patch(
             "defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True
         ):
-            result = _invoke(["gateway", "--api-port", "19095", "--non-interactive"], self.app)
+            result = _invoke(["gateway", "--api-port", str(free_port), "--non-interactive"], self.app)
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("nothing listens on the new API port until the gateway restarts", result.output)
@@ -3793,16 +4053,42 @@ class TestGatewayOfflineStaging(_BaseSetup):
         self.assertIn("The change was saved", result.output)
         self.assertNotIsInstance(result.exception, CanonicalObservabilityError)
 
+    def test_out_of_range_gateway_ports_are_refused_with_the_range(self):
+        # GAP-1650: --api-port 99999 reached the free-port probe and printed an
+        # OverflowError traceback; every port flag now names the range.
+        self.app.logger = MagicMock()
+        before = open(self.cfg_path, encoding="utf-8").read() if os.path.isfile(self.cfg_path) else None
+        for flag, value in (("--api-port", "99999"), ("--api-port", "0"), ("--port", "70000"), ("--api-port", "x")):
+            result = _invoke(["gateway", flag, value, "--non-interactive"], self.app)
+            self.assertEqual(result.exit_code, 2, result.output)
+            self.assertIn("use a number between 1 and 65535", result.output)
+            self.assertNotIn("Traceback", result.output)
+            self.assertNotIsInstance(result.exception, OverflowError)
+        after = open(self.cfg_path, encoding="utf-8").read() if os.path.isfile(self.cfg_path) else None
+        self.assertEqual(after, before)
+        self.app.logger.log_action.assert_not_called()
+
     def test_new_api_port_held_by_another_listener_is_refused_before_saving(self):
         # GAP-1345: --api-port saved a port another account's gateway held.
+        import random
         import socket
 
         self.app.logger = MagicMock()
         before = open(self.cfg_path, encoding="utf-8").read() if os.path.isfile(self.cfg_path) else None
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as holder:
-            holder.bind(("127.0.0.1", 0))
+            # An operating-system pick can land at the top of the range (Windows
+            # hands out 49152..65535), where --api-port is refused for lack of
+            # room for the two sandbox ports before the busy-port check runs.
+            for _ in range(100):
+                port = random.randint(20000, 60000)
+                try:
+                    holder.bind(("127.0.0.1", port))
+                except OSError:
+                    continue
+                break
+            else:
+                self.fail("no free port in 20000..60000 to hold")
             holder.listen(1)
-            port = holder.getsockname()[1]
             result = _invoke(["gateway", "--api-port", str(port), "--non-interactive"], self.app)
 
         self.assertEqual(result.exit_code, 1, result.output)
@@ -3922,6 +4208,7 @@ class TestGatewayOfflineStaging(_BaseSetup):
                     return_value={"hermes": "action"},
                 ), \
                 patch.object(cmd_setup.agent_discovery, "discover_agents", return_value=disc), \
+                patch.object(cmd_setup.agent_discovery, "_write_cache", return_value=True), \
                 patch("defenseclaw.commands.cmd_setup._add_trusted_bin_prefix") as add_mock, \
                 patch("defenseclaw.commands.cmd_setup.click.confirm", return_value=True), \
                 patch(
@@ -3932,7 +4219,9 @@ class TestGatewayOfflineStaging(_BaseSetup):
         self.assertEqual(res.exit_code, 0, msg=res.output)
         add_mock.assert_called_once()
 
-    def test_batch_action_refusal_downgrades_saved_mode_to_observe(self):
+    def test_batch_action_refusal_preserves_the_prior_roster(self):
+        before = copy.deepcopy(self.app.cfg.guardrail)
+
         def version_gate(connector, *, mode="observe", **_kwargs):
             return (mode or "").strip().lower() != "action"
 
@@ -3966,14 +4255,9 @@ class TestGatewayOfflineStaging(_BaseSetup):
                 self.app,
             )
 
-        self.assertEqual(res.exit_code, 0, msg=res.output)
-        self.assertIn("GitHub Copilot CLI: requested action mode was refused", res.output)
-        self.assertIn("Devin: requested action mode was refused", res.output)
-        gc = self.app.cfg.guardrail
-        self.assertEqual(gc.effective_mode("copilot"), "observe")
-        self.assertEqual(gc.effective_mode("devin"), "observe")
-        self.assertEqual(gc.connectors["copilot"].mode, "observe")
-        self.assertEqual(gc.connectors["devin"].mode, "observe")
+        self.assertEqual(res.exit_code, 1, msg=res.output)
+        self.assertIn("did not pass setup preflight", res.output)
+        self.assertEqual(self.app.cfg.guardrail, before)
 
     def test_interactive_batch_selects_judge_connectors_without_strategy_prompt(self):
         gc = self.app.cfg.guardrail
@@ -4049,7 +4333,7 @@ class TestGatewayOfflineStaging(_BaseSetup):
         self.assertNotIn("codex", gc.judge.hook_connectors)
 
     def test_scoped_judge_selection_preserves_outside_existing_gate(self):
-        targets = ["antigravity", "claudecode", "hermes", "openhands"]
+        targets = ["antigravity", "claudecode", "hermes", ]
         self._seed_map(*targets)
         gc = self.app.cfg.guardrail
         gc.judge.enabled = True
@@ -4070,7 +4354,7 @@ class TestGatewayOfflineStaging(_BaseSetup):
         self.assertEqual(gc.detection_strategy_completion, "regex_judge")
 
     def test_scoped_judge_selection_removes_only_unchecked_target(self):
-        targets = ["antigravity", "claudecode", "hermes", "openhands"]
+        targets = ["antigravity", "claudecode", "hermes", ]
         self._seed_map(*targets)
         gc = self.app.cfg.guardrail
         gc.judge.enabled = True
@@ -4086,24 +4370,10 @@ class TestGatewayOfflineStaging(_BaseSetup):
         )
 
         self.assertTrue(gc.judge.enabled)
-        self.assertEqual(gc.judge.hook_connectors, ["antigravity", "claudecode", "openhands"])
+        self.assertEqual(gc.judge.hook_connectors, ["antigravity", "claudecode", ])
         self.assertEqual(gc.detection_strategy, "regex_judge")
         self.assertEqual(gc.detection_strategy_completion, "regex_judge")
 
-    def test_scoped_judge_selection_preserves_wildcard_when_target_checked(self):
-        self._seed_map("antigravity", "claudecode", "hermes", "openhands")
-        gc = self.app.cfg.guardrail
-        gc.judge.enabled = True
-        gc.judge.hook_connectors = ["*"]
-
-        cmd_setup._merge_batch_judge_selection(
-            gc,
-            ["hermes"],
-            {"hermes"},
-            preserve_outside_targets=True,
-        )
-
-        self.assertEqual(gc.judge.hook_connectors, ["*"])
 
     def test_batch_setup_reconciles_active_connectors_to_selected_set(self):
         self._seed_map("codex", "hermes")

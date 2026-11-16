@@ -16,8 +16,10 @@ import pytest
 from defenseclaw.tui.screens.mode_picker import (
     MODE_PICKER_CHOICES,
     ModePickerScreen,
+    _choice_action,
     choice_for_hotkey,
     choice_for_wire,
+    normalize_connector,
     preview_for_switch,
 )
 from textual.app import App, ComposeResult
@@ -41,34 +43,11 @@ class ModePickerHarness(App[str | None]):
         self.result = result
 
 
-def test_mode_picker_choices_cover_go_connectors() -> None:
-    assert [choice.wire for choice in MODE_PICKER_CHOICES] == [
-        "openclaw",
-        "zeptoclaw",
-        "claudecode",
-        "codex",
-        "hermes",
-        "cursor",
-        "devin",
-        "copilot",
-        "openhands",
-        "antigravity",
-        "opencode",
-        "amp",
-        "omnigent",
-        "kiro",
-    ]
-    assert choice_for_wire("claude-code").wire == "claudecode"
-    assert choice_for_hotkey("c").wire == "codex"
-    assert choice_for_hotkey("i").wire == "amp"
-    assert choice_for_hotkey("m").wire == "omnigent"
-    assert "refresh hooks" in preview_for_switch("codex", "codex")
-    assert "synchronous TypeScript policy plugin" in preview_for_switch("openclaw", "amp")
-    assert "ALLOW/ASK/DENY" in preview_for_switch("openclaw", "omnigent")
-    assert "Python policy runtime" in preview_for_switch("omnigent", "omnigent")
-    cursor = choice_for_wire("cursor")
-    assert "event-scoped deny" in cursor.tagline
-    assert "no native human approval" in cursor.tagline
+def test_copilot_mode_picker_names_its_delivered_confirmation():
+    copilot = next(choice for choice in MODE_PICKER_CHOICES if choice.wire == "copilot")
+    assert "confirmations block" in copilot.tagline
+
+
 
 
 def test_mode_picker_hint_is_built_from_visible_rows() -> None:
@@ -99,15 +78,19 @@ def test_mode_picker_hotkey_resolves_against_visible_rows_only() -> None:
 
 
 def test_mode_picker_default_never_fabricates_hidden_connector() -> None:
-    # Empty / unknown current wire lands on the first *visible* row, not the
-    # hardcoded openclaw sentinel.
-    assert ModePickerScreen("", os_name="darwin").current_wire == MODE_PICKER_CHOICES[0].wire
-    assert ModePickerScreen("garbage-connector").current_wire == ModePickerScreen().choices[0].wire
-    # On Windows openclaw is hidden, so even an explicit "openclaw" falls back
-    # to the first visible row rather than selecting an unrunnable connector.
+    # An empty or unknown current connector is no active agent. The menu may
+    # show a first row for navigation but must not claim that row is active.
+    assert normalize_connector("") == ""
+    assert ModePickerScreen("", os_name="darwin").current_wire == ""
+    assert ModePickerScreen("garbage-connector").current_wire == ""
+    assert "(active)" not in _choice_action(MODE_PICKER_CHOICES[0], current_wire="").label
+    # On Windows OpenClaw is hidden, so an old OpenClaw current value cannot
+    # become an active first visible connector either.
     win = ModePickerScreen("openclaw", os_name="windows")
-    assert win.current_wire != "openclaw"
-    assert win.current_wire == win.choices[0].wire
+    assert win.current_wire == ""
+    assert "Choose a connector" in preview_for_switch("", "")
+    with pytest.raises(ValueError, match="unknown connector"):
+        choice_for_wire("")
 
 
 @pytest.mark.asyncio
@@ -121,5 +104,33 @@ async def test_mode_picker_windows_hidden_hotkey_is_noop() -> None:
         assert isinstance(app.screen, ModePickerScreen)  # still open
 
         await pilot.press("c")  # codex is supported -> dismisses
+        await pilot.pause()
+        assert app.result == "codex"
+
+
+@pytest.mark.asyncio
+async def test_empty_mode_picker_requires_a_connector_choice_before_enter() -> None:
+    app = ModePickerHarness("", os_name="darwin")
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        preview = str(app.screen.query_one("#mode-picker-preview", Static).render())
+        assert "Choose a connector" in preview
+        assert "OpenClaw" not in preview
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.result is None
+        assert isinstance(app.screen, ModePickerScreen)
+
+        await pilot.press("down", "enter")
+        await pilot.pause()
+        assert app.result == "openclaw"
+
+
+@pytest.mark.asyncio
+async def test_empty_mode_picker_mouse_click_is_an_explicit_choice() -> None:
+    app = ModePickerHarness("", os_name="darwin")
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.click("#action-menu-row-3")
         await pilot.pause()
         assert app.result == "codex"

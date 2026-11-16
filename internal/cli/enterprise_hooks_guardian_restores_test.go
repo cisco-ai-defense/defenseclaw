@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 )
 
 // guardianRestoresForTest reads the restores of dataDir and fails the test
@@ -48,7 +50,7 @@ func enableEnterpriseHookGuardianRestores(t *testing.T, enabled bool) {
 
 func readGuardianRestoreRecordForTest(t *testing.T, dataDir string) enterpriseHookGuardianRestoreRecord {
 	t.Helper()
-	record, err := readEnterpriseHookGuardianRestoreRecord(filepath.Join(dataDir, hookGuardianRestoresFile))
+	record, err := enterprisehooks.ReadGuardianRestoreRecord(filepath.Join(dataDir, hookGuardianRestoresFile))
 	if err != nil {
 		t.Fatalf("read restore record: %v", err)
 	}
@@ -60,7 +62,7 @@ func resetGuardianRestorePendingForTest(t *testing.T, dataDir string) {
 	path := filepath.Join(dataDir, hookGuardianRestoresFile)
 	t.Cleanup(func() {
 		enterpriseHookGuardianRestorePending.Lock()
-		delete(enterpriseHookGuardianRestorePending.byPath, path)
+		delete(enterpriseHookGuardianRestorePending.byPath, enterpriseHookGuardianRestorePendingKey(path))
 		enterpriseHookGuardianRestorePending.Unlock()
 	})
 }
@@ -69,7 +71,7 @@ func guardianRestorePendingCountForTest(dataDir string) int {
 	path := filepath.Join(dataDir, hookGuardianRestoresFile)
 	enterpriseHookGuardianRestorePending.Lock()
 	defer enterpriseHookGuardianRestorePending.Unlock()
-	return len(enterpriseHookGuardianRestorePending.byPath[path])
+	return len(enterpriseHookGuardianRestorePending.byPath[enterpriseHookGuardianRestorePendingKey(path)])
 }
 
 // GAP-0440: the guardian dates each target it put back, keeps the entries of
@@ -285,9 +287,9 @@ func TestEnterpriseHookGuardianRestoresPreservesRecordAfterReadFailure(t *testin
 		t.Fatalf("later readable record = %v, want all three restores including the newer re-restore", restores)
 	}
 	if got := warning.String(); !strings.Contains(got, path) || !strings.Contains(got, "left unchanged") ||
-		!strings.Contains(got, "kept in memory") || !strings.Contains(got, "Windows status reports restart status unknown") ||
+		!strings.Contains(got, "kept in memory") || !strings.Contains(got, "status reports restart status unknown") ||
 		strings.Count(got, "\n") != 1 {
-		t.Fatalf("warning = %q, want one line naming the path, unchanged record, pending restores, and Windows status", got)
+		t.Fatalf("warning = %q, want one line naming the path, unchanged record, pending restores, and status", got)
 	}
 	if count := guardianRestorePendingCountForTest(dataDir); count != 0 {
 		t.Fatalf("pending entries after successful write = %d, want none", count)
@@ -394,7 +396,7 @@ func TestEnterpriseHookGuardianRestoresReplacesInvalidContentWithoutRetry(t *tes
 	calls := 0
 	enterpriseHookGuardianRestoreRecordReader = func(path string) (enterpriseHookGuardianRestoreRecord, error) {
 		calls++
-		return readEnterpriseHookGuardianRestoreRecord(path)
+		return enterprisehooks.ReadGuardianRestoreRecord(path)
 	}
 	for name, body := range map[string]string{
 		"json":     "not json",
@@ -483,5 +485,64 @@ func TestEnterpriseHookGuardianRestoresWriterKeepsTheRecordWithinTheBound(t *tes
 	}
 	if !strings.Contains(log.String(), "dropped its") {
 		t.Fatalf("log %q, want the dropped entries named", log.String())
+	}
+}
+
+// GAP-0626: an invalid record may have held restores of any enrolled target.
+// Replacing it with an empty pass turned the unknown restart status that
+// status reported into a clean one, so the replacement dates every enrolled
+// target at the pass; a row whose account identity changed keeps nothing.
+func TestEnterpriseHookGuardianRestoresDatesEnrolledTargetsWhenReplacingAnInvalidRecord(t *testing.T) {
+	enableEnterpriseHookGuardianRestores(t, true)
+	shortenGuardianRestoreBackoff(t)
+	dataDir := t.TempDir()
+	resetGuardianRestorePendingForTest(t, dataDir)
+	path := filepath.Join(dataDir, hookGuardianRestoresFile)
+	now := time.Date(2026, 10, 17, 9, 0, 0, 0, time.UTC)
+	previousNow := enterpriseHookGuardianRestoreNow
+	t.Cleanup(func() { enterpriseHookGuardianRestoreNow = previousNow })
+	enterpriseHookGuardianRestoreNow = func() time.Time { return now }
+	const sid = "S-1-5-21-1-2-3-1001"
+	rows := []enterpriseHookReconcileRow{
+		{SID: strings.ToLower(sid), Connector: "Hermes", OK: true},
+		{SID: sid, Connector: "copilot", OK: true},
+		{User: "u", UID: 1001, Connector: "hermes", OK: true},
+		{User: "moved", UID: 1002, Connector: "hermes", RevokeProtection: true},
+		{User: "pending", Connector: "hermes"},
+	}
+	if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var warning bytes.Buffer
+	if err := recordEnterpriseHookGuardianRestores(&warning, dataDir, rows, nil); err != nil {
+		t.Fatalf("replace the invalid record: %v", err)
+	}
+	if got := warning.String(); !strings.Contains(got, "could not be parsed") || !strings.Contains(got, "every enrolled target is dated at this pass") {
+		t.Fatalf("warning = %q", got)
+	}
+	restores := guardianRestoresForTest(t, dataDir)
+	want := []string{
+		enterpriseHookGuardianRestoreKey(sid, "hermes"),
+		enterpriseHookGuardianRestoreKey(sid, "copilot"),
+		enterpriseHookGuardianRestoreUIDKey(1001, "hermes"),
+	}
+	if len(restores) != len(want) {
+		t.Fatalf("restores = %v, want exactly %v", restores, want)
+	}
+	for _, key := range want {
+		if !restores[key].Equal(now) {
+			t.Fatalf("restores = %v, want %q dated %s", restores, key, now)
+		}
+	}
+	// The next pass reads a valid record: nothing more is dated.
+	later := now.Add(time.Hour)
+	enterpriseHookGuardianRestoreNow = func() time.Time { return later }
+	if err := recordEnterpriseHookGuardianRestores(io.Discard, dataDir, rows, nil); err != nil {
+		t.Fatal(err)
+	}
+	for key, at := range guardianRestoresForTest(t, dataDir) {
+		if !at.Equal(now) {
+			t.Fatalf("a pass after the replacement moved %s to %s", key, at)
+		}
 	}
 }

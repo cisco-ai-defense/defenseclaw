@@ -254,6 +254,7 @@ export default function PolicyCreator() {
   function handleRestartQuickStart() {
     if (!confirmRestart(answers)) return;
     setAnswers(defaultAnswers());
+    setPolicy(policyFromPreset('default'));
     setArrivedFromQuickStart(false);
     setTab('quick-start');
     if (typeof window !== 'undefined') {

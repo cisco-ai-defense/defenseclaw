@@ -28,8 +28,8 @@ const (
 )
 
 // Delegate synchronously invokes the exact installed full hook selected by
-// trusted active state. Any state or target failure is an intentional success
-// no-op, preserving cached hook behavior after disable or uninstall.
+// trusted active state. Disabled or removed state remains a no-op; an active
+// state's missing or unstartable full hook answers the invocation closed.
 func Delegate(
 	executable string,
 	args []string,
@@ -44,6 +44,9 @@ func Delegate(
 	return delegateAt(paths, executable, args, stdin, stdout, stderr)
 }
 
+// lockVerifiedHook is LockVerifiedHook; tests observe when it runs.
+var lockVerifiedHook = LockVerifiedHook
+
 func delegateAt(
 	paths Paths,
 	executable string,
@@ -53,6 +56,30 @@ func delegateAt(
 	stderr io.Writer,
 ) int {
 	var command *exec.Cmd
+	var unavailable string
+	// GAP-1211: every tool call verified the full hook (a SHA-256 of the
+	// whole binary, about 160 ms on an idle Windows Server 2025 host) while
+	// it held the account's gateway start mutex, so concurrent calls (Codex
+	// runs tools in parallel, beside Copilot) queued behind each other's
+	// hash and spent the hook's answer budget before the gateway was asked.
+	// The hash now runs before the mutex, on a handle that denies writes and
+	// deletes, so the verified bytes stay pinned. Under the mutex the state
+	// is read again: only the same generation launches with that handle; a
+	// changed one is verified there as before, and a disabled one is not
+	// launched.
+	var verified *os.File
+	var verifiedState State
+	if state, recognized, readErr := readTrustedAt(paths, executable); readErr == nil && recognized &&
+		state.Active() && state.DelegationCapable() {
+		if locked, lockErr := lockVerifiedHook(state); lockErr == nil {
+			verified, verifiedState = locked, state
+		}
+	}
+	defer func() {
+		if verified != nil {
+			_ = verified.Close()
+		}
+	}()
 	ctx, cancel := context.WithTimeout(context.Background(), delegationLockTimeout)
 	defer cancel()
 	err := WithGatewayStartLock(ctx, func() error {
@@ -62,11 +89,14 @@ func delegateAt(
 		if readErr != nil || !recognized || !state.Active() || !state.DelegationCapable() {
 			return nil
 		}
-		locked, lockErr := LockVerifiedHook(state)
-		if lockErr != nil {
-			return nil
+		if verified == nil || state != verifiedState {
+			locked, lockErr := lockVerifiedHook(state)
+			if lockErr != nil {
+				unavailable = "installed full hook could not be verified: " + lockErr.Error()
+				return nil
+			}
+			defer locked.Close()
 		}
-		defer locked.Close()
 		candidate := exec.Command(state.HookPath, args...)
 		candidate.Stdin = stdin
 		candidate.Stdout = stdout
@@ -84,12 +114,19 @@ func delegateAt(
 		// parent-owned generation marker, which is replaced with the exact state
 		// whose full-hook handle remains locked through CreateProcess.
 		if startErr := candidate.Start(); startErr != nil {
+			unavailable = "installed full hook could not be started: " + startErr.Error()
 			return nil
 		}
 		command = candidate
 		return nil
 	})
-	if err != nil || command == nil {
+	if err != nil {
+		unavailable = "stable hook lifecycle lock unavailable: " + err.Error()
+	}
+	if unavailable != "" {
+		return answerUnavailableDelegation(args, stdin, stdout, stderr, unavailable)
+	}
+	if command == nil {
 		return 0
 	}
 	if err := command.Wait(); err != nil {

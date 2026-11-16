@@ -3,11 +3,12 @@
 
 #Requires -Version 5.1
 
-# GAP-0401: Setup waits for the first reconcile of the standalone guardian it
-# started. Past the usual wait it keeps waiting, up to the hard limit, while
-# that guardian process is alive and its startup record shows the reconcile
-# still moving; a stopped, replaced, stalled or finished guardian, a guardian
-# without the record and Secure Client keep the usual limit. The error names
+# GAP-0401: Setup waits for the first reconcile of the guardian it started.
+# Past the usual wait it keeps waiting, up to the hard limit, while that
+# guardian process is alive and its startup record shows the reconcile still
+# moving; a stopped, replaced, stalled or finished guardian and a guardian
+# without the record keep the usual limit. Secure Client extends the same way
+# outside strict mode; strict Secure Client keeps the usual limit. The error names
 # the cause and the guardian log. Runs in a disposable scratch directory with
 # the service and status calls replaced.
 
@@ -79,8 +80,10 @@ try {
                 Write-SmokeStartupRecord -State $script:SmokeRecordState -UpdatedAt $script:SmokeStart -ProcessId $script:SmokeRecordPid
             }
         }
+        $script:SmokeProbeTimeouts = [Collections.Generic.List[object]]::new()
         function script:Get-DefenseClawGuardianStatusReport {
-            param($Layout, $GatewayServiceName)
+            param($Layout, $GatewayServiceName, $TimeoutSeconds)
+            $script:SmokeProbeTimeouts.Add($TimeoutSeconds)
             return $null
         }
         function script:Get-DefenseClawGuardianStateIdentity { param($Layout) return $null }
@@ -177,8 +180,16 @@ try {
             & $expect $result 2.5 7.0 @()
 
             # One still running at the hard limit names the cause and the log.
+            $script:SmokeProbeTimeouts.Clear()
             $result = & $run -Name 'hard limit'
             & $expect $result 11.5 15.5 @("first reconcile is still running after", '3 of 10 targets done', $log, 'last_status=hook guardian has not completed a reconcile')
+            # Each status command is bounded by the time left to the hard
+            # limit plus a 30 s floor, not the command's 300 s default
+            # (rel-1-0-2:GAP-0535).
+            $unbounded = @($script:SmokeProbeTimeouts | Where-Object { $null -eq $_ -or [int]$_ -lt 30 -or [int]$_ -gt 43 })
+            if ($script:SmokeProbeTimeouts.Count -eq 0 -or $unbounded.Count -gt 0) {
+                $failures.Add("hard limit: status command timeouts '$(@($script:SmokeProbeTimeouts) -join ',')', want each 30-43 s")
+            }
 
             # A guardian that stops fails at the usual time, well before the limit
             # (the bounds leave room for a busy host).
@@ -223,10 +234,24 @@ try {
                 $failures.Add('record reader: an oversized record was accepted')
             }
 
-            # Secure Client keeps its wait and its error.
-            Set-DefenseClawEnterpriseProfile -EnterpriseProfile 'SecureClient'
-            $result = & $run -Name 'Secure Client'
-            & $expect $result 0.9 5.0 @('did not publish fresh required coverage within 1 seconds; last_status=') @($log)
+            # Secure Client extends the wait the same way: a slow Secure Client
+            # laptop rolled a healthy install back at the usual limit.
+            $strictName = 'DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS'
+            $originalStrict = [Environment]::GetEnvironmentVariable($strictName, 'Process')
+            try {
+                Set-DefenseClawEnterpriseProfile -EnterpriseProfile 'SecureClient'
+                [Environment]::SetEnvironmentVariable($strictName, $null, 'Process')
+                $result = & $run -Name 'Secure Client'
+                & $expect $result 11.5 15.5 @("first reconcile is still running after", '3 of 10 targets done', $log)
+
+                # Strict Secure Client keeps its usual wait and its error.
+                [Environment]::SetEnvironmentVariable($strictName, '1', 'Process')
+                $result = & $run -Name 'strict Secure Client'
+                & $expect $result 0.9 5.0 @('did not publish fresh required coverage within 1 seconds; last_status=') @($log)
+            }
+            finally {
+                [Environment]::SetEnvironmentVariable($strictName, $originalStrict, 'Process')
+            }
         }
         finally {
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile $originalProfile

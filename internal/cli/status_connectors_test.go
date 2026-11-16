@@ -374,7 +374,7 @@ func TestPrintConnectorModes_SingleEntry(t *testing.T) {
 
 // Every connector the Python status names gets the same display name.
 func TestFriendlyConnectorNameMatchesThePythonStatus(t *testing.T) {
-	for name, want := range map[string]string{"amp": "Amp", "opencode": "OpenCode", "kiro": "Kiro", "omnigent": "OmniGent"} {
+	for name, want := range map[string]string{"amp": "Amp", "opencode": "OpenCode", "kiro": "Kiro"} {
 		if got := friendlyConnectorName(name); got != want {
 			t.Errorf("friendlyConnectorName(%q) = %q, want %q", name, got, want)
 		}
@@ -403,24 +403,6 @@ func TestPrintConnectorModes_AmpUsesHookPolicyWithoutProxy(t *testing.T) {
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("Amp Connector Mode output missing %q:\n%s", want, out)
-		}
-	}
-}
-
-func TestPrintConnectorModes_OmnigentPolicySurface(t *testing.T) {
-	modes := []connectorModeSummary{{
-		Connector:          "omnigent",
-		Mode:               "observability",
-		PolicyMode:         "action",
-		EnforcementSurface: "omnigent_policy_api",
-		Telemetry:          []string{"policy-api"},
-	}}
-
-	out := captureStdout(t, func() { printConnectorModes(modes) })
-
-	for _, want := range []string{"Data path:", "direct-to-upstream", "Policy mode:", "action", "omnigent policy api", "policy-api"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("OmniGent status missing %q:\n%s", want, out)
 		}
 	}
 }
@@ -478,45 +460,6 @@ func TestFetchConnectorModesNormalizesWildcardBind(t *testing.T) {
 	}
 }
 
-// A connector the config disables is not shown as enforced: status used to
-// list OmniGent with "Policy mode: action / Hook enforcement: yes" although
-// guardrail.connectors.omnigent.enabled was false.
-func TestPrintConnectorModesMarksADisabledConnectorAsNotEnforced(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, `{"connector_modes":[`+
-			`{"connector":"codex","mode":"observability","policy_mode":"action","enforcement_surface":"agent_lifecycle_hooks",`+
-			`"telemetry":["hooks"],"proxy_intercept":false,"guardrail_mode":"action","hook_enforcement":true,"enabled":true},`+
-			`{"connector":"omnigent","mode":"observability","policy_mode":"action","enforcement_surface":"omnigent_policy_api",`+
-			`"telemetry":["policy-api"],"proxy_intercept":false,"guardrail_mode":"action","hook_enforcement":true,"enabled":false}]}`)
-	}))
-	defer srv.Close()
-	bind, port := splitHostPort(t, srv.URL)
-	cfg := config.DefaultConfig()
-	cfg.Gateway.APIBind = bind
-	cfg.Gateway.APIPort = port
-	modes := fetchConnectorModes(srv.Client(), cfg)
-	if len(modes) != 2 {
-		t.Fatalf("want 2 modes, got %v", modes)
-	}
-
-	out := captureStdout(t, func() { printConnectorModes(modes) })
-	codex, omnigent, found := strings.Cut(out, "OmniGent (omnigent)")
-	if !found {
-		t.Fatalf("OmniGent is missing from the roster:\n%s", out)
-	}
-	if !strings.Contains(omnigent, "disabled, not enforced") {
-		t.Errorf("disabled OmniGent is not marked as not enforced:\n%s", out)
-	}
-	for _, unwanted := range []string{"Hook enforcement:", "Policy mode:", "Enforcement:"} {
-		if strings.Contains(omnigent, unwanted) {
-			t.Errorf("disabled OmniGent still shows %q:\n%s", unwanted, out)
-		}
-	}
-	if !strings.Contains(codex, "Hook enforcement: yes") || strings.Contains(codex, "disabled") {
-		t.Errorf("enabled Codex lost its enforcement lines:\n%s", out)
-	}
-}
-
 // GAP-1386: with no connector configured the Connector Mode block names
 // "none" instead of a blank value and an "unconfigured" data path.
 func TestPrintConnectorModesNoConnectorSaysNone(t *testing.T) {
@@ -541,7 +484,7 @@ func TestPrintSubsystemsHidesUnusedFleetUplink(t *testing.T) {
 		Guardrail:  gateway.SubsystemHealth{State: gateway.StateRunning, Since: now},
 		Connectors: []gateway.ConnectorHealth{{Name: "claudecode", State: gateway.StateRunning, Since: now}},
 	}
-	out := captureStdout(t, func() { printSubsystems(snap) })
+	out := captureStdout(t, func() { printSubsystems(snap, 0) })
 	if strings.Contains(out, "Gateway:") || strings.Contains(out, "OpenClaw") {
 		t.Fatalf("hook-only roster shows the unused fleet uplink:\n%s", out)
 	}
@@ -549,7 +492,7 @@ func TestPrintSubsystemsHidesUnusedFleetUplink(t *testing.T) {
 		t.Fatalf("label runs into the state:\n%s", out)
 	}
 	snap.Connectors = []gateway.ConnectorHealth{{Name: "openclaw", State: gateway.StateRunning, Since: now}}
-	if out := captureStdout(t, func() { printSubsystems(snap) }); !strings.Contains(out, "Gateway:") {
+	if out := captureStdout(t, func() { printSubsystems(snap, 0) }); !strings.Contains(out, "Gateway:") {
 		t.Fatalf("OpenClaw roster must still show the fleet uplink:\n%s", out)
 	}
 }
@@ -563,12 +506,54 @@ func TestPrintSubsystemExplainsAuditWriteFailure(t *testing.T) {
 		"event_history_last_sqlite_primary_code": float64(13),
 		"generation":                             float64(2),
 	}}
-	out := captureStdout(t, func() { printSubsystem("Telemetry", h) })
+	out := captureStdout(t, func() { printSubsystem("Telemetry", h, 0) })
 	if !strings.Contains(out, "disk holding the audit database is full") || strings.Contains(out, "event_history_") {
 		t.Fatalf("audit write failure not in plain words:\n%s", out)
 	}
 	if !strings.Contains(out, "generation:") {
 		t.Fatalf("other details dropped:\n%s", out)
+	}
+}
+
+// The gateway status names the audit store size cap with the retention, in
+// the words of the per-user status: on a managed computer that status is
+// refused and the gateway status showed only retention_days (GAP-0141).
+func TestPrintSubsystemShowsTheAuditStoreSizeCap(t *testing.T) {
+	h := gateway.SubsystemHealth{State: gateway.StateRunning, Details: map[string]interface{}{
+		"retention_days": float64(7), "retention_state": "healthy", "retention_max_store_mb": float64(64),
+	}}
+	if out := captureStdout(t, func() { printSubsystem("Telemetry", h, 0) }); !strings.Contains(out, "retention: 7 days, size cap 64 MiB") {
+		t.Fatalf("no size cap in the telemetry lines:\n%s", out)
+	}
+	delete(h.Details, "retention_max_store_mb")
+	if out := captureStdout(t, func() { printSubsystem("Telemetry", h, 0) }); !strings.Contains(out, "retention: 7 days\n") {
+		t.Fatalf("retention without a cap:\n%s", out)
+	}
+}
+
+func TestPrintSubsystemWarnsWhenRetentionCapIsNotReached(t *testing.T) {
+	h := gateway.SubsystemHealth{State: gateway.StateRunning, Details: map[string]interface{}{
+		"retention_state": "warning", "retention_days": float64(7),
+		"retention_max_store_mb": float64(1), "retention_cap_used_bytes": float64(2 << 20),
+		"retention_cap_bytes":  float64(1 << 20),
+		"retention_cap_reason": "active_correlation_state",
+	}}
+	out := captureStdout(t, func() { printSubsystem("Telemetry", h, 0) })
+	if !strings.Contains(out, "warning:") || !strings.Contains(out, "cap not reached: 2.0 MiB used, cap 1.0 MiB") ||
+		!strings.Contains(out, "end unused sessions") || strings.Contains(out, "retention_state: healthy") {
+		t.Fatalf("cap warning absent: %s", out)
+	}
+	h.Details["retention_cap_reason"] = "private/path"
+	if out := captureStdout(t, func() { printSubsystem("Telemetry", h, 0) }); !strings.Contains(out, "cap not reached; inspect the gateway retention health") ||
+		strings.Contains(out, "private/path") {
+		t.Fatalf("unbounded cap reason rendered: %s", out)
+	}
+	h.Details["retention_state"] = "healthy"
+	delete(h.Details, "retention_cap_used_bytes")
+	delete(h.Details, "retention_cap_bytes")
+	delete(h.Details, "retention_cap_reason")
+	if out := captureStdout(t, func() { printSubsystem("Telemetry", h, 0) }); strings.Contains(out, "cap not reached") {
+		t.Fatalf("cap warning after a met pass: %s", out)
 	}
 }
 
@@ -582,7 +567,7 @@ func TestPrintSubsystemExplainsFailingJudge(t *testing.T) {
 		"judge_last_error":   "failed to retrieve aws credentials",
 		"mode":               "action",
 	}}
-	out := captureStdout(t, func() { printSubsystem("Guardrail", h) })
+	out := captureStdout(t, func() { printSubsystem("Guardrail", h, 0) })
 	if !strings.Contains(out, "the LLM judge failed all of its last 10 calls") ||
 		!strings.Contains(out, "failed to retrieve aws credentials") || strings.Contains(out, "judge_state") {
 		t.Fatalf("judge failure not in plain words:\n%s", out)
@@ -664,5 +649,97 @@ func TestPrintConnectors_OpenCodeMatchesCLIStatus(t *testing.T) {
 		if !strings.Contains(out, "Codex (codex) - RUNNING") {
 			t.Errorf("codex row changed:\n%s", out)
 		}
+	}
+}
+
+// A connector the config disables is not shown as enforced: status used to
+// list a connector with "Policy mode: action / Hook enforcement: yes" although
+// its guardrail.connectors.<name>.enabled was false.
+func TestPrintConnectorModesMarksADisabledConnectorAsNotEnforced(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"connector_modes":[`+
+			`{"connector":"codex","mode":"observability","policy_mode":"action","enforcement_surface":"agent_lifecycle_hooks",`+
+			`"telemetry":["hooks"],"proxy_intercept":false,"guardrail_mode":"action","hook_enforcement":true,"enabled":true},`+
+			`{"connector":"cursor","mode":"observability","policy_mode":"action","enforcement_surface":"agent_lifecycle_hooks",`+
+			`"telemetry":["hooks"],"proxy_intercept":false,"guardrail_mode":"action","hook_enforcement":true,"enabled":false}]}`)
+	}))
+	defer srv.Close()
+	bind, port := splitHostPort(t, srv.URL)
+	cfg := config.DefaultConfig()
+	cfg.Gateway.APIBind = bind
+	cfg.Gateway.APIPort = port
+	modes := fetchConnectorModes(srv.Client(), cfg)
+	if len(modes) != 2 {
+		t.Fatalf("want 2 modes, got %v", modes)
+	}
+
+	out := captureStdout(t, func() { printConnectorModes(modes) })
+	codex, cursor, found := strings.Cut(out, "Cursor (cursor)")
+	if !found {
+		t.Fatalf("Cursor is missing from the roster:\n%s", out)
+	}
+	if !strings.Contains(cursor, "disabled, not enforced") {
+		t.Errorf("disabled Cursor is not marked as not enforced:\n%s", out)
+	}
+	for _, unwanted := range []string{"Hook enforcement:", "Policy mode:", "Enforcement:"} {
+		if strings.Contains(cursor, unwanted) {
+			t.Errorf("disabled Cursor still shows %q:\n%s", unwanted, out)
+		}
+	}
+	if !strings.Contains(codex, "Hook enforcement: yes") || strings.Contains(codex, "disabled") {
+		t.Errorf("enabled Codex lost its enforcement lines:\n%s", out)
+	}
+}
+
+// GAP-0578: a connector whose agent's own settings refused the hooks is
+// shown with the gateway's reason, which names the fix, instead of a setup
+// rerun that cannot help. Both status and the start result say so.
+func TestNotStartedConnectorRefusedByAgentSettingsNamesTheFix(t *testing.T) {
+	reason := "Codex hooks are turned off in /home/u/.codex/config.toml ([features] hooks = false), so Codex runs no DefenseClaw hook; turn them back on with: codex features enable hooks"
+	for _, refused := range []interface{}{map[string]string{"codex": reason}, map[string]interface{}{"codex": reason}} {
+		snap := &gateway.HealthSnapshot{
+			Connectors: []gateway.ConnectorHealth{{Name: "claudecode", State: "running"}},
+			Guardrail: gateway.SubsystemHealth{Details: map[string]interface{}{
+				"connectors_not_started":               []interface{}{"codex"},
+				"connectors_refused_by_agent_settings": refused,
+			}},
+		}
+		for label, out := range map[string]string{
+			"status": captureStdout(t, func() { printConnectors(snap) }),
+			"start":  captureStdout(t, func() { printConnectorsNotStarted(*snap) }),
+		} {
+			if !strings.Contains(out, "codex features enable hooks") || !strings.Contains(out, "not enforced") {
+				t.Errorf("%s %T: output %q does not name the fix", label, refused, out)
+			}
+			if strings.Contains(out, "defenseclaw setup codex") {
+				t.Errorf("%s %T: output %q points at a setup rerun that cannot help", label, refused, out)
+			}
+		}
+	}
+}
+
+// TestJudgeFallbackNoteSuggestsMaxParallelOnlyWhenOff pins GAP-0088: the
+// max_parallel hint is for a judge with no bound (0), not one that has it set.
+func TestJudgeFallbackNoteSuggestsMaxParallelOnlyWhenOff(t *testing.T) {
+	details := map[string]interface{}{
+		"judge_fallbacks":              float64(3),
+		"judge_fallbacks_by_connector": map[string]interface{}{"codex": float64(3)},
+	}
+	off := judgeFallbackNote(details, 0)
+	if !strings.Contains(off, "3 hook check(s)") || !strings.Contains(off, "set guardrail.judge.max_parallel") {
+		t.Fatalf("max_parallel 0 should carry the hint:\n%s", off)
+	}
+	for _, limit := range []int{1, 2} {
+		on := judgeFallbackNote(details, limit)
+		if !strings.Contains(on, "3 hook check(s)") || strings.Contains(on, "max_parallel") {
+			t.Fatalf("max_parallel %d should report without the hint:\n%s", limit, on)
+		}
+	}
+	h := gateway.SubsystemHealth{State: gateway.StateRunning, Details: details}
+	if out := captureStdout(t, func() { printSubsystem("Guardrail", h, 1) }); strings.Contains(out, "max_parallel") {
+		t.Fatalf("gateway status still hints with max_parallel 1:\n%s", out)
+	}
+	if out := captureStdout(t, func() { printSubsystem("Guardrail", h, 0) }); !strings.Contains(out, "set guardrail.judge.max_parallel") {
+		t.Fatalf("gateway status lost the hint with max_parallel 0:\n%s", out)
 	}
 }

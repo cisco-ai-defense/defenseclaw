@@ -16,6 +16,7 @@ import (
 	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // scannerRuntimePath is the installed scanner runtime, or "" when this host
@@ -69,7 +70,7 @@ func installedScannerRuntime() (string, error) {
 		return "", fmt.Errorf("scanner runtime folder %s is unavailable: %w", root, err)
 	}
 	path := filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName)
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if err != nil {
 		return "", fmt.Errorf("%s is missing", path)
 	}
@@ -77,8 +78,13 @@ func installedScannerRuntime() (string, error) {
 		return "", fmt.Errorf("%s is not a regular file", path)
 	}
 	// Only an administrator-owned runtime that no standard user can
-	// replace is run.
-	if err := managed.ValidateTrustedFilePath(path, "scanner runtime"); err != nil {
+	// replace is run: not the folder, not a file beside the executable,
+	// and not through a folder above them, ProgramData\Cisco included
+	// (review loop round 4).
+	if err := managed.ValidateTrustedRuntimeImage(root, path, "scanner runtime"); err != nil {
+		return "", err
+	}
+	if err := managed.ValidateTrustedRuntimeCodeTree(root, "scanner Python runtime"); err != nil {
 		return "", err
 	}
 	// And only the executable the lifecycle admitted by the payload trust
@@ -165,7 +171,8 @@ func scannerRuntimePreflight(binary string, defaults ...string) error {
 		// ErrScannerRuntimeUnavailable lets the rescan loop retry soon: Setup
 		// starts the gateway before it has prepared the runtime (GAP-0975).
 		return fmt.Errorf("scanner: %w: it cannot be run (%v); scans run again once Setup has prepared it, "+
-			"and the DefenseClaw Setup with /repair prepares it again", ErrScannerRuntimeUnavailable, problem)
+			"and `%s`, run from an elevated PowerShell prompt, prepares it again", ErrScannerRuntimeUnavailable, problem,
+			managed.WindowsAdminCommand("enterprise", "windows", "repair", "--profile", "standalone"))
 	}
 	return nil
 }

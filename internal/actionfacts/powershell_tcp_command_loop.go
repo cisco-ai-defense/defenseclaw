@@ -5,7 +5,6 @@ package actionfacts
 
 import (
 	"net"
-	"regexp"
 	"strconv"
 	"strings"
 )
@@ -13,14 +12,14 @@ import (
 const maxPowerShellTCPCommandLoopBytes = 8 * 1024
 
 var (
-	powerShellTCPConstructor = regexp.MustCompile(`(?is)^\s*(\$[a-z_][a-z0-9_]*)\s*=\s*New-Object\s+(?:System\.)?Net\.Sockets\.TCPClient\s*\(\s*["']((?:[a-z0-9-]+\.)+[a-z0-9-]+|(?:\d{1,3}\.){3}\d{1,3})["']\s*,\s*(\d{1,5})\s*\)\s*;`)
-	powerShellTCPGetStream   = regexp.MustCompile(`(?is)(\$[a-z_][a-z0-9_]*)\s*=\s*(\$[a-z_][a-z0-9_]*)\.GetStream\s*\(\s*\)\s*;`)
-	powerShellTCPReadLoop    = regexp.MustCompile(`(?is)\bwhile\s*\(\s*\(\s*(\$[a-z_][a-z0-9_]*)\s*=\s*(\$[a-z_][a-z0-9_]*)\.Read\s*\(\s*(\$[a-z_][a-z0-9_]*)\s*,\s*0\s*,\s*(\$[a-z_][a-z0-9_]*)\.Length\s*\)\s*\)\s*-ne\s*0\s*\)\s*\{`)
-	powerShellTCPDecode      = regexp.MustCompile(`(?is)(\$[a-z_][a-z0-9_]*)\s*=\s*(?:(?:\(\s*New-Object\s+Text\.(?:ASCII|UTF8)Encoding\s*\))|(?:\(\s*\[Text\.Encoding\]::(?:ASCII|UTF8)\s*\)))\.GetString\s*\(\s*(\$[a-z_][a-z0-9_]*)\s*,\s*0\s*,\s*(\$[a-z_][a-z0-9_]*)\s*\)\s*;`)
-	powerShellTCPExecute     = regexp.MustCompile(`(?is)(\$[a-z_][a-z0-9_]*)\s*=\s*\(\s*(?:iex|Invoke-Expression)\s+(\$[a-z_][a-z0-9_]*)\b[^;{}\r\n]{0,256}\)\s*;`)
-	powerShellTCPEncode      = regexp.MustCompile(`(?is)(\$[a-z_][a-z0-9_]*)\s*=\s*\(\s*\[Text\.Encoding\]::(?:ASCII|UTF8)\s*\)\.GetBytes\s*\(\s*(\$[a-z_][a-z0-9_]*)\s*\)\s*;`)
-	powerShellTCPWrite       = regexp.MustCompile(`(?is)(\$[a-z_][a-z0-9_]*)\.Write\s*\(\s*(\$[a-z_][a-z0-9_]*)\s*,\s*0\s*,\s*(\$[a-z_][a-z0-9_]*)\.Length\s*\)`)
-	powerShellTCPLoopClose   = regexp.MustCompile(`(?is)^[^{}]{0,256}\}`)
+	powerShellTCPConstructor = lazyMustCompile(`(?is)^\s*(\$[a-z_][a-z0-9_]*)\s*=\s*New-Object\s+(?:System\.)?Net\.Sockets\.TCPClient\s*\(\s*["']((?:[a-z0-9-]+\.)+[a-z0-9-]+|(?:\d{1,3}\.){3}\d{1,3})["']\s*,\s*(\d{1,5})\s*\)\s*;`)
+	powerShellTCPGetStream   = lazyMustCompile(`(?is)(\$[a-z_][a-z0-9_]*)\s*=\s*(\$[a-z_][a-z0-9_]*)\.GetStream\s*\(\s*\)\s*;`)
+	powerShellTCPReadLoop    = lazyMustCompile(`(?is)\bwhile\s*\(\s*\(\s*(\$[a-z_][a-z0-9_]*)\s*=\s*(\$[a-z_][a-z0-9_]*)\.Read\s*\(\s*(\$[a-z_][a-z0-9_]*)\s*,\s*0\s*,\s*(\$[a-z_][a-z0-9_]*)\.Length\s*\)\s*\)\s*-ne\s*0\s*\)\s*\{`)
+	powerShellTCPDecode      = lazyMustCompile(`(?is)(\$[a-z_][a-z0-9_]*)\s*=\s*(?:(?:\(\s*New-Object\s+Text\.(?:ASCII|UTF8)Encoding\s*\))|(?:\(\s*\[Text\.Encoding\]::(?:ASCII|UTF8)\s*\)))\.GetString\s*\(\s*(\$[a-z_][a-z0-9_]*)\s*,\s*0\s*,\s*(\$[a-z_][a-z0-9_]*)\s*\)\s*;`)
+	powerShellTCPExecute     = lazyMustCompile(`(?is)(\$[a-z_][a-z0-9_]*)\s*=\s*\(\s*(?:iex|Invoke-Expression)\s+(\$[a-z_][a-z0-9_]*)\b[^;{}\r\n]{0,256}\)\s*;`)
+	powerShellTCPEncode      = lazyMustCompile(`(?is)(\$[a-z_][a-z0-9_]*)\s*=\s*\(\s*\[Text\.Encoding\]::(?:ASCII|UTF8)\s*\)\.GetBytes\s*\(\s*(\$[a-z_][a-z0-9_]*)\s*\)\s*;`)
+	powerShellTCPWrite       = lazyMustCompile(`(?is)(\$[a-z_][a-z0-9_]*)\.Write\s*\(\s*(\$[a-z_][a-z0-9_]*)\s*,\s*0\s*,\s*(\$[a-z_][a-z0-9_]*)\.Length\s*\)`)
+	powerShellTCPLoopClose   = lazyMustCompile(`(?is)^[^{}]{0,256}\}`)
 )
 
 // ExactPowerShellTCPCommandLoop reports whether a value-free closed grammar

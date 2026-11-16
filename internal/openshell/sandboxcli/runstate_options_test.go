@@ -45,7 +45,8 @@ func TestLaunchOptionsUseTheHarnessesOptionArity(t *testing.T) {
 		{"claudecode", []string{"--model", "--", "x"}, []string{"--model"}},
 		{"codex", []string{"-m", "glm 5.3", "-c", "model_reasoning_effort=high"}, []string{"-m", "glm 5.3", "-c", "model_reasoning_effort=high"}},
 		{"codex", []string{"--full-auto", "fixit"}, []string{"--full-auto"}},
-		{"opencode", []string{"--agent", "plan mode", "-c", "fixit"}, []string{"--agent", "plan mode", "-c"}},
+		{"opencode", []string{"--session", "session with space", "-c", "fixit"}, []string{"--session", "session with space", "-c"}},
+		{"opencode", []string{"--standalone", "fixit"}, []string{"--standalone"}},
 		{"copilot", []string{"--model", "claude sonnet", "--allow-all-paths", "fixit"}, []string{"--model", "claude sonnet", "--allow-all-paths"}},
 		{"hermes", []string{"chat", "--provider", "defenseclaw", "-m", "gpt 5 mini", "--yolo", "fixit"},
 			[]string{"chat", "--provider", "defenseclaw", "-m", "gpt 5 mini", "--yolo"}},
@@ -71,9 +72,9 @@ func TestLaunchOptionsLeaveOutAPromptOption(t *testing.T) {
 	}{
 		{"opencode", []string{"--prompt", "delete the build dir and push"}, nil},
 		{"opencode", []string{"--prompt", "fixit"}, nil},
-		{"opencode", []string{"--prompt=delete the build dir", "--agent", "plan"}, []string{"--agent", "plan"}},
-		{"opencode", []string{"-m", "amazon-bedrock/claude", "--prompt", "delete the build dir and push", "-c"},
-			[]string{"-m", "amazon-bedrock/claude", "-c"}},
+		{"opencode", []string{"--prompt=delete the build dir", "--continue"}, []string{"--continue"}},
+		{"opencode", []string{"--session", "ses_test", "--prompt", "delete the build dir and push", "-c"},
+			[]string{"--session", "ses_test", "-c"}},
 		{"opencode", []string{"./app", "--prompt", "fix it", "--auto"}, []string{"./app", "--auto"}},
 		// A prompt option at the end, then `--`, leaves no word out.
 		{"opencode", []string{"--prompt", "--", "x"}, nil},
@@ -109,7 +110,7 @@ func TestConnectDoesNotReplayARunsPromptOption(t *testing.T) {
 	ta := newTestApp(t, "")
 	noChanges(ta)
 	const task = "delete the build dir and push"
-	ta.ok(t, ta.Run(bg, RunOptions{Harness: "opencode", Name: "op1", Args: []string{"--prompt", task, "--agent", "plan"}}))
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "opencode", Name: "op1", Args: []string{"--prompt", task, "--session", "ses_plan"}}))
 	lacks(t, ta.output(), "followed by a word with a space", "without the last word")
 	ta.out.Reset()
 	ta.term.runs = nil
@@ -121,9 +122,9 @@ func TestConnectDoesNotReplayARunsPromptOption(t *testing.T) {
 	if slices.Contains(argv, task) || slices.Contains(argv, "--prompt") {
 		t.Fatalf("connect argv = %q: the run's --prompt task is replayed", argv)
 	}
-	at := slices.Index(argv, "--agent")
-	if at < 0 || at+1 >= len(argv) || argv[at+1] != "plan" {
-		t.Fatalf("connect argv = %q, want the run's --agent plan", argv)
+	at := slices.Index(argv, "--session")
+	if at < 0 || at+1 >= len(argv) || argv[at+1] != "ses_plan" {
+		t.Fatalf("connect argv = %q, want the run's --session ses_plan", argv)
 	}
 }
 

@@ -17,10 +17,12 @@
 package gateway
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
 
 // mcpServerRuntimeBlock decides whether a runtime tool call must be denied
@@ -97,4 +99,55 @@ func mcpServerDenied(pe *enforce.PolicyEngine, server, connector string) (bool, 
 		return blocked, err
 	}
 	return pe.IsDisabledForConnector("mcp", server, connector)
+}
+
+// mcpAccountRuntimeBlock refuses the tool call of an enrolled account's MCP
+// server that its own admission rejected or could not scan. A managed
+// gateway journals such a server under its account key
+// (watcher.MCPJournalName: name, connector, account home and project) and its
+// own target type (watcher.AccountMCPJournalType), not under the bare name of
+// the "mcp" type, so the verdict of one account's server never refuses
+// another account's server of the same name, and the rescan of one never
+// releases the other (GAP-0216). The caller's home and working folder pick
+// the rows; a caller whose home is not known is matched against every
+// account's row of that name, and a lookup error refuses (fail closed). The
+// bare-name rows, operator blocks included, stay with mcpServerRuntimeBlock.
+// Secure Client has no enrolled accounts and keeps main (issue #1092).
+func (a *APIServer) mcpAccountRuntimeBlock(ctx context.Context, pe *enforce.PolicyEngine, req *ToolInspectRequest) (bool, string) {
+	if a == nil || a.store == nil || pe == nil || req == nil || pe.SecureClient() {
+		return false, ""
+	}
+	server := strings.TrimSpace(req.MCPServerName)
+	if server == "" {
+		server = serverFromMCPToolName(req.Tool)
+	}
+	if server == "" {
+		return false, ""
+	}
+	rows, err := a.store.ListActionsByType(watcher.AccountMCPJournalType)
+	if err != nil {
+		return true, fmt.Sprintf("mcp server %q block check failed — failing closed: %v", server, err)
+	}
+	home, _ := callerHomeForAssets(ctx)
+	for _, row := range rows {
+		if !watcher.MCPAccountRuntimeDisabled(row) {
+			continue
+		}
+		connector := strings.ToLower(strings.TrimSpace(req.Connector))
+		if connector == "" {
+			connector = row.Connector // no connector named: every connector's row applies
+		} else if row.Connector != "" && !strings.EqualFold(row.Connector, connector) {
+			continue
+		}
+		query := watcher.MCPAdmissionQuery{Connector: connector, Server: server, Home: home, CWD: req.callerCWD}
+		if !watcher.MCPAccountJournalServes(row.TargetName, query) {
+			continue
+		}
+		note := fmt.Sprintf("mcp server %q is disabled because its install admission rejected it", server)
+		if reason := strings.TrimSpace(row.Reason); reason != "" {
+			note += " (" + reason + ")"
+		}
+		return true, note + "; asset_policy.mode does not apply to admission verdicts"
+	}
+	return false, ""
 }

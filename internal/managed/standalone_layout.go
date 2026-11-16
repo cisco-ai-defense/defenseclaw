@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"path"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/productlayout"
 )
 
 // Standalone service identities. The gateway never runs as root or
@@ -52,6 +54,16 @@ type StandaloneLayout struct {
 	ManifestPath    string // guardian target manifest (enumerator output)
 	DescriptorPath  string // public, non-secret runtime descriptor for hooks
 	LifecycleDir    string // transaction state, snapshots, preimages, persistent lock
+	// LifecycleMarkerPath (Linux and macOS) exists while a lifecycle run
+	// holds the lifecycle lock, so from before the run can stop or restart
+	// the gateway until the gateway it started is ready. It is in the
+	// root-only /run (/var/run on macOS): no account can make or remove it,
+	// and every account can see it. A managed hook answers a gateway it
+	// cannot reach closed while it exists, whatever the administrator chose
+	// for an outage (GAP-1074). Windows has none: there the gateway
+	// service's start type is the marker (it is automatic only outside a
+	// lifecycle transaction).
+	LifecycleMarkerPath string
 
 	// Service-owned runtime state.
 	DataDir         string // gateway state (audit DB, runtime tokens)
@@ -78,6 +90,41 @@ type StandaloneLayout struct {
 // StandaloneLayoutFor returns the unix standalone layout for goos
 // ("linux" or "darwin"). Use StandaloneWindowsLayout for Windows, which
 // resolves the protected machine roots at runtime.
+// The sandbox state a non-purge uninstall of a Linux or macOS deployment
+// keeps while an account keeps sandboxes: the gateway's sandbox registration
+// store and its correlation key below DataDir, and the lifecycle's root-only
+// record of the sandbox setup below LifecycleDir.
+const (
+	StandaloneSandboxStoreDirName    = "sandbox"
+	StandaloneCorrelationKeyFileName = "redaction-correlation.key"
+	StandaloneKeptOpenShellStateFile = "openshell-state.kept.json"
+)
+
+// KeptSandboxStatePaths are the paths of that state in a Linux or macOS
+// layout.
+func (l StandaloneLayout) KeptSandboxStatePaths() (store, key, record string) {
+	return path.Join(l.DataDir, StandaloneSandboxStoreDirName),
+		path.Join(l.DataDir, StandaloneCorrelationKeyFileName),
+		path.Join(l.LifecycleDir, StandaloneKeptOpenShellStateFile)
+}
+
+// StandaloneGatewayBinary is the file name of the standalone gateway in a
+// layout's BinDir.
+const StandaloneGatewayBinary = "defenseclaw-gateway"
+
+// StandaloneGatewayPath is the gateway of a Linux or macOS standalone install
+// by its absolute path, as an administrator types it. It is not on the PATH,
+// and sudo's secure_path leaves out the install directory, so a hint that
+// names it bare ends in "command not found" (cowork-1-0-8 GAP-0081). For any
+// other goos, which has no Unix layout, it is the bare name.
+func StandaloneGatewayPath(goos string) string {
+	layout, err := StandaloneLayoutFor(goos)
+	if err != nil {
+		return StandaloneGatewayBinary
+	}
+	return layout.BinDir + "/" + StandaloneGatewayBinary
+}
+
 func StandaloneLayoutFor(goos string) (StandaloneLayout, error) {
 	switch goos {
 	case "linux":
@@ -102,6 +149,8 @@ func StandaloneLayoutFor(goos string) (StandaloneLayout, error) {
 			ServiceUser:     StandaloneLinuxServiceUser,
 			ServiceGroup:    StandaloneLinuxServiceUser,
 			APIAddr:         StandaloneAPIAddr,
+
+			LifecycleMarkerPath: "/run/defenseclaw-lifecycle.active",
 		}, nil
 	case "darwin":
 		const root = "/opt/cisco/defenseclaw"
@@ -129,6 +178,8 @@ func StandaloneLayoutFor(goos string) (StandaloneLayout, error) {
 			ServiceUser:     StandaloneDarwinServiceUser,
 			ServiceGroup:    StandaloneDarwinServiceUser,
 			APIAddr:         StandaloneAPIAddr,
+
+			LifecycleMarkerPath: "/var/run/defenseclaw-lifecycle.active",
 		}, nil
 	default:
 		return StandaloneLayout{}, fmt.Errorf("no unix standalone layout for %q", goos)
@@ -165,7 +216,7 @@ func StandaloneWindowsLayoutForRoots(programFiles, programData string) (Standalo
 		LogDir:          state + `\logs`,
 		HookSocketDir:   install + `\ipc`,
 		HookSocketPath:  "",
-		HookRuntimeDir:  programData + `\Cisco\DefenseClaw-HookRuntime`,
+		HookRuntimeDir:  programData + `\Cisco\` + StandaloneWindowsHookRuntimeDirName,
 		SensorSocketDir: install + `\ipc`,
 		ServiceUser:     `NT SERVICE\` + StandaloneWindowsGatewaySvc,
 		ServiceGroup:    "",
@@ -180,8 +231,11 @@ func StandaloneWindowsLayoutForRoots(programFiles, programData string) (Standalo
 // never walk its thousands of files. Only LocalSystem and Administrators
 // write it; the gateway service reads and runs it.
 func StandaloneWindowsScannerRuntimeDirForRoot(programData string) string {
-	return strings.TrimRight(strings.TrimSpace(programData), `\`) + `\Cisco\DefenseClaw-ScannerRuntime`
+	return strings.TrimRight(strings.TrimSpace(programData), `\`) + `\Cisco\` + productlayout.WindowsScannerRuntimeFolder
 }
+
+// StandaloneWindowsHookRuntimeDirName is the Windows HookRuntimeDir folder name.
+const StandaloneWindowsHookRuntimeDirName = productlayout.WindowsHookRuntimeFolder
 
 // StandaloneWindowsScannerRuntimeName is the scanner runtime executable.
 const StandaloneWindowsScannerRuntimeName = "defenseclaw-scanners.exe"

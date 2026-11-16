@@ -8,8 +8,10 @@ package redaction
 import (
 	"crypto/sha256"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	legacyredaction "github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -105,13 +107,13 @@ func isPersonalIdentifierPointer(pointer string) bool {
 
 // BuiltInProfile resolves one immutable built-in profile.
 func BuiltInProfile(name ProfileName) (Profile, bool) {
-	profile, ok := builtInProfiles()[name]
+	profile, ok := builtInProfileTable()[name]
 	return profile, ok
 }
 
 // BuiltInProfiles returns independent immutable values in stable order.
 func BuiltInProfiles() []Profile {
-	definitions := builtInProfiles()
+	definitions := builtInProfileTable()
 	return []Profile{
 		definitions[ProfileNone],
 		definitions[ProfileSensitive],
@@ -155,7 +157,7 @@ func NewCustomProfile(
 	if err := validateProfileName(name); err != nil {
 		return Profile{}, err
 	}
-	if _, reserved := builtInProfiles()[name]; reserved {
+	if _, reserved := builtInProfileTable()[name]; reserved {
 		return Profile{}, fmt.Errorf("custom redaction profile name is reserved")
 	}
 	if base != ProfileSensitive && base != ProfileContent && base != ProfileStrict {
@@ -237,7 +239,20 @@ func (catalog ProfileCatalog) Names() []ProfileName {
 	return names
 }
 
+// builtInProfileTable is the four built-in profiles, resolved once. validProfile
+// runs for every projection and rebuilt all four with their SHA-256
+// fingerprints on each call (34 allocations, about 2.4 us; r106 perf audit).
+// Profile is a value of fixed-size arrays, so a lookup returns an independent
+// copy; nothing may write to the shared map: builtInProfiles hands out a copy.
+var builtInProfileTable = sync.OnceValue(resolveBuiltInProfiles)
+
+// builtInProfiles returns a new map of the built-in profiles, which the caller
+// may extend (NewProfileCatalog adds the custom profiles to it).
 func builtInProfiles() map[ProfileName]Profile {
+	return maps.Clone(builtInProfileTable())
+}
+
+func resolveBuiltInProfiles() map[ProfileName]Profile {
 	none := resolvedBuiltIn(ProfileNone, [fieldClassCount]TransformationMode{
 		ModePreserve, ModePreserve, ModePreserve, ModePreserve,
 		ModePreserve, ModePreserve, ModePreserve, ModePreserve,
@@ -336,21 +351,25 @@ func detectorGroupIndex(group DetectorGroup) (int, bool) {
 	return 0, false
 }
 
+// profileFingerprint hashes the profile's name, base, modes and detector
+// groups. validProfile computes it for every projection, so the bytes are
+// built in a stack buffer (a strings.Builder and its []byte copy cost four
+// allocations per call); the hashed bytes are unchanged.
 func profileFingerprint(profile Profile) [32]byte {
-	var builder strings.Builder
-	builder.WriteString(string(profile.name))
-	builder.WriteByte(0)
-	builder.WriteString(string(profile.base))
+	buffer := make([]byte, 0, 160)
+	buffer = append(buffer, profile.name...)
+	buffer = append(buffer, 0)
+	buffer = append(buffer, profile.base...)
 	for _, mode := range profile.modes {
-		builder.WriteByte(0)
-		builder.WriteString(string(mode))
+		buffer = append(buffer, 0)
+		buffer = append(buffer, mode...)
 	}
 	for _, enabled := range profile.groups {
 		if enabled {
-			builder.WriteByte(1)
+			buffer = append(buffer, 1)
 		} else {
-			builder.WriteByte(0)
+			buffer = append(buffer, 0)
 		}
 	}
-	return sha256.Sum256([]byte(builder.String()))
+	return sha256.Sum256(buffer)
 }

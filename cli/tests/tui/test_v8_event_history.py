@@ -510,3 +510,40 @@ def test_alert_reader_prioritizes_actionable_findings_before_bounded_limit() -> 
     _history, shared_alerts = reader.load_views(500, 500)
     assert len(shared_alerts) == 500
     assert "older-important" in {row.id for row in shared_alerts}
+
+
+def test_reader_orders_activity_alerts_and_mutations_by_exact_instant() -> None:
+    store = _store()
+    db = store.db
+    db.execute("ALTER TABLE audit_events ADD COLUMN retention_timestamp_unix_nano INTEGER")
+    db.execute("UPDATE audit_events SET retention_timestamp_unix_nano = 0")
+    for suffix, stamp, instant in (
+        ("short", "2026-10-13T12:00:00.12345Z", 1),
+        ("long", "2026-10-13T12:00:00.123451Z", 2),
+        ("tie-first", "2026-10-13T12:00:01Z", 3),
+        ("tie-second", "2026-10-13T12:00:01Z", 3),
+        ("offset", "2026-10-13T14:00:02+02:00", 4),
+    ):
+        for prefix, bucket, event_name, action, severity in (
+            ("activity", "compliance.activity", "config.change.applied", "config.change", "INFO"),
+            ("alert", "security.finding", "finding.observed", "finding.observed", "HIGH"),
+        ):
+            db.execute(
+                """INSERT INTO audit_events
+                   (id, timestamp, retention_timestamp_unix_nano, bucket, event_name,
+                    source, signal, severity, action, actor, details, redaction_profile,
+                    payload_json, projected_record_json)
+                   VALUES (?, ?, ?, ?, ?, 'gateway', 'logs', ?, ?, 'operator',
+                           'test', 'none', ?, '{}')""",
+                (f"{prefix}-{suffix}", stamp, instant, bucket, event_name,
+                 severity, action, json.dumps({"defenseclaw.finding.rule_id": "RULE"})),
+            )
+    db.commit()
+    reader = V8EventHistoryReader(store)
+    expected = ["offset", "tie-second", "tie-first", "long", "short"]
+    assert [row.id for row in reader.load_mutations(5)] == [f"activity-{item}" for item in expected]
+    assert [row.id for row in reader.load_alerts(5)] == [f"alert-{item}" for item in expected]
+    history, alerts, mutations = reader.load_views_and_mutations(10, 5, 5)
+    assert [row.id for row in alerts] == [f"alert-{item}" for item in expected]
+    assert [row.id for row in mutations] == [f"activity-{item}" for item in expected]
+    assert history[0].id in {"activity-offset", "alert-offset"}

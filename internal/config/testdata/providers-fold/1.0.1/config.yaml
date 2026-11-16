@@ -1,0 +1,53 @@
+# config.yaml as DefenseClaw 1.0.1 wrote it: `defenseclaw init`, then
+# `defenseclaw config set llm_providers.custom` (lane G-B-11-AU-03, the
+# credential variable names restored). The operator then replaced the derived
+# custom-providers.json with a legacy one that names acme-gw again.
+cisco_ai_defense:
+  api_key_env: CISCO_AI_DEFENSE_API_KEY
+claw:
+  mode: ''
+gateway:
+  api_port: 19000
+  token_env: DEFENSECLAW_GATEWAY_TOKEN
+guardrail:
+  port: 4030
+  scanner_mode: local
+llm:
+  api_key_env: DEFENSECLAW_LLM_KEY
+config_version: 9
+observability: {}
+llm_providers:
+  custom:
+    - name: openai
+      domains:
+        - b11-openai.example.test
+        - b11-openai-alt.example.test
+      profile_id: b11-profile
+      env_keys:
+        - B11_OPENAI_DUMMY_KEY
+      base_provider_type: openai
+      base_url: https://b11-openai.example.test/v1
+      allowed_requests:
+        - chat
+        - responses
+      available_models:
+        - b11-dummy-model
+      request_path_overrides:
+        chat: /v1/chat/completions
+        responses: /v1/responses
+      extra_headers:
+        X-B11-A: dummy-a
+        X-B11-B: dummy-b
+    - name: acme-gw
+      domains:
+        - b11-acme.example.test
+      profile_id: b11-acme-profile
+      env_keys:
+        - B11_ACME_DUMMY_KEY
+      base_provider_type: openai
+      base_url: https://b11-acme.example.test/v1
+      request_path_overrides:
+        chat: /acme/chat
+        responses: /acme/responses
+      extra_headers:
+        X-B11-Config: dummy-config

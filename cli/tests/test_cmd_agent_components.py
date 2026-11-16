@@ -515,6 +515,11 @@ class ComponentsListingTests(unittest.TestCase):
                 response.status_code = 503
                 raise requests.HTTPError(response=response)
 
+            def get_sandbox(self, name):
+                # The named sandbox exists: only an unknown name is refused
+                # while discovery is off (GAP-0003).
+                return {"name": name}
+
         runner = CliRunner()
         for command, args in (
             (cmd_agent.usage, ["--refresh"]),

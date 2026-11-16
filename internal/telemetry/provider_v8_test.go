@@ -584,6 +584,9 @@ func TestV8ProviderRuntimeGraphLifecycleIsGenerationOwned(t *testing.T) {
 	if reloadErr != nil || result.Status() != runtimegraph.ReloadApplied {
 		t.Fatalf("reload=%s err=%v", result.Status(), reloadErr)
 	}
+	if err := manager.WaitCleanup(t.Context()); err != nil {
+		t.Fatalf("retired graph cleanup: %v", err)
+	}
 	if firstProvider.Enabled() {
 		t.Fatal("retired provider still accepts intake")
 	}

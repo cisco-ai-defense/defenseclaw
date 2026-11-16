@@ -107,10 +107,10 @@ func allowedMaskForSID(t *testing.T, path string, want *windows.SID) windows.ACC
 }
 
 // TestBaselineIPCACEsShapeDirectory asserts the four-ACE table
-// applyBaselineIPCACL writes for a DIRECTORY object matches spec 004
-// REQ-03 + REQ-04, with the Authenticated Users mask constrained to
-// traverse+list+metadata/security read (CR spec-004:PRRT_kwDORuAK-s6ankzk —
-// refuses FILE_ADD_FILE / FILE_ADD_SUBDIRECTORY leakage). AVC needs the
+// applyBaselineIPCACL writes for a DIRECTORY object: four non-inherited
+// ACEs, with the Authenticated Users mask constrained to
+// traverse+list+metadata/security read (refuses FILE_ADD_FILE /
+// FILE_ADD_SUBDIRECTORY leakage). AVC needs the
 // metadata rights to validate the endpoint after the gateway recreates it.
 //
 // The ACL-shape test supplies a syntactically valid NT SERVICE SID directly so
@@ -171,7 +171,7 @@ func assertBaselineIPCACEs(t *testing.T, class aclObjectClass, wantAuthUsersMask
 		t.Fatalf("baselineIPCACEs(%v): %v", class, err)
 	}
 	if got, want := len(entries), 4; got != want {
-		t.Fatalf("ACE count = %d, want %d — spec 004 REQ-03 fixes this at four ACEs", got, want)
+		t.Fatalf("ACE count = %d, want %d — the baseline DACL is fixed at four ACEs", got, want)
 	}
 
 	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
@@ -187,7 +187,7 @@ func assertBaselineIPCACEs(t *testing.T, class aclObjectClass, wantAuthUsersMask
 		t.Fatalf("resolve Authenticated Users SID: %v", err)
 	}
 	if !sidIsNTService(gatewaySID) {
-		t.Fatalf("gateway SID does not live under NT SERVICE authority — spec 004 refuses this in the DACL")
+		t.Fatalf("gateway SID does not live under NT SERVICE authority — the DACL refuses this")
 	}
 
 	// Slot order is deterministic:
@@ -215,7 +215,7 @@ func assertBaselineIPCACEs(t *testing.T, class aclObjectClass, wantAuthUsersMask
 			t.Errorf("entry %d (%s): AccessPermissions = %#x, want %#x", i, tc.name, got.AccessPermissions, tc.wantMask)
 		}
 		if got.Inheritance != windows.NO_INHERITANCE {
-			t.Errorf("entry %d (%s): Inheritance = %v, want NO_INHERITANCE (spec 004: DACL is self-contained per object)", i, tc.name, got.Inheritance)
+			t.Errorf("entry %d (%s): Inheritance = %v, want NO_INHERITANCE (DACL is self-contained per object)", i, tc.name, got.Inheritance)
 		}
 		if got.Trustee.TrusteeForm != windows.TRUSTEE_IS_SID {
 			t.Errorf("entry %d (%s): TrusteeForm = %v, want TRUSTEE_IS_SID", i, tc.name, got.Trustee.TrusteeForm)
@@ -306,8 +306,7 @@ func assertExplicitAccessTrusteeSID(
 // TestSIDIsNTServiceRejectsNonServicePrincipals directly exercises
 // sidIsNTService against the SIDs an adversary might plant in
 // managed.WindowsServiceAccountEnv. All of these must be rejected —
-// the DACL construction is fail-closed on its own (CR
-// spec-004:PRRT_kwDORuAK-s6ankzl).
+// the DACL construction is fail-closed on its own.
 func TestSIDIsNTServiceRejectsNonServicePrincipals(t *testing.T) {
 	cases := []struct {
 		name    string

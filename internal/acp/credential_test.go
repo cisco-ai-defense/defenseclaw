@@ -27,18 +27,18 @@ func TestEnterpriseCredentialIsStableScopedAndRevocable(t *testing.T) {
 	if first != second || len(first.Token) != 64 {
 		t.Fatalf("credential was not stable: first=%+v second=%+v", first, second)
 	}
-	matched, ok := MatchEnterpriseCredential(dataDir, first.Token)
+	matched, ok := matchEnterpriseCredentialToken(dataDir, first.Token)
 	if !ok || matched.Principal != "uid:501" || matched.ClientID != "zed" ||
 		matched.AgentID != "kiro" || matched.Profile != "locked" {
 		t.Fatalf("matched credential = %+v, %v", matched, ok)
 	}
-	if _, ok := MatchEnterpriseCredential(dataDir, "not-a-token"); ok {
+	if _, ok := matchEnterpriseCredentialToken(dataDir, "not-a-token"); ok {
 		t.Fatal("malformed credential matched")
 	}
 	if err := RemoveEnterpriseCredential(dataDir, "uid:501", "zed", "kiro", "locked"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := MatchEnterpriseCredential(dataDir, first.Token); ok {
+	if _, ok := matchEnterpriseCredentialToken(dataDir, first.Token); ok {
 		t.Fatal("revoked credential still matched")
 	}
 	reissued, err := EnsureEnterpriseCredential(dataDir, "uid:501", "zed", "kiro", "locked")
@@ -48,7 +48,7 @@ func TestEnterpriseCredentialIsStableScopedAndRevocable(t *testing.T) {
 	if reissued.Token == first.Token {
 		t.Fatal("re-enrollment reused a revoked credential")
 	}
-	if matched, ok := MatchEnterpriseCredential(dataDir, reissued.Token); !ok || matched != reissued {
+	if matched, ok := matchEnterpriseCredentialToken(dataDir, reissued.Token); !ok || matched != reissued {
 		t.Fatalf("reissued credential did not match: %+v, %v", matched, ok)
 	}
 	if err := RemoveEnterpriseCredential(dataDir, "uid:501", "zed", "kiro", "locked"); err != nil {
@@ -137,7 +137,7 @@ func TestEnterpriseCredentialRevocationTombstoneFailsInventoryClosed(t *testing.
 	if err := os.Rename(path, path+".revoked"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := MatchEnterpriseCredential(dataDir, credential.Token); ok {
+	if _, ok := matchEnterpriseCredentialToken(dataDir, credential.Token); ok {
 		t.Fatal("credential matched while revocation tombstone was present")
 	}
 	if EnterpriseCredentialsReady(dataDir, false) {
@@ -167,7 +167,7 @@ func TestEnterpriseCredentialRevocationResumesIndexTombstoneCleanup(t *testing.T
 			t.Fatalf("revocation residue survived at %s: %v", path, err)
 		}
 	}
-	if _, ok := MatchEnterpriseCredential(dataDir, credential.Token); ok {
+	if _, ok := matchEnterpriseCredentialToken(dataDir, credential.Token); ok {
 		t.Fatal("revoked token authenticated after cleanup retry")
 	}
 }
@@ -192,7 +192,7 @@ func TestEnterpriseCredentialRevocationResumesRecordTombstoneCleanup(t *testing.
 	if _, err := os.Lstat(recordPath + ".revoked"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("record tombstone remains after resumed cleanup: %v", err)
 	}
-	if _, ok := MatchEnterpriseCredential(dataDir, credential.Token); ok {
+	if _, ok := matchEnterpriseCredentialToken(dataDir, credential.Token); ok {
 		t.Fatal("interrupted record revocation left credential authoritative")
 	}
 }
@@ -220,10 +220,10 @@ func TestEnterpriseCredentialMissingIndexRotatesInsteadOfResurrecting(t *testing
 	if reissued.Token == first.Token {
 		t.Fatal("re-enrollment resurrected a credential whose index was revoked")
 	}
-	if _, ok := MatchEnterpriseCredential(dataDir, first.Token); ok {
+	if _, ok := matchEnterpriseCredentialToken(dataDir, first.Token); ok {
 		t.Fatal("interrupted revocation token regained authority")
 	}
-	if matched, ok := MatchEnterpriseCredential(dataDir, reissued.Token); !ok || matched != reissued {
+	if matched, ok := matchEnterpriseCredentialToken(dataDir, reissued.Token); !ok || matched != reissued {
 		t.Fatalf("rotated credential did not match: %+v, %v", matched, ok)
 	}
 }
@@ -252,7 +252,7 @@ func TestEnterpriseCredentialRejectsRecordScopeTamper(t *testing.T) {
 	if err := os.WriteFile(path, body, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := MatchEnterpriseCredential(dataDir, credential.Token); ok {
+	if _, ok := matchEnterpriseCredentialToken(dataDir, credential.Token); ok {
 		t.Fatal("scope-tampered record matched")
 	}
 }
@@ -284,4 +284,11 @@ func TestPublishEnterpriseUserTokenUsesPerBindingPrivatePath(t *testing.T) {
 			t.Fatalf("token mode = %o", info.Mode().Perm())
 		}
 	}
+}
+
+// matchEnterpriseCredentialToken resolves a bearer the way the signed
+// transport does: through the key ID of the token.
+func matchEnterpriseCredentialToken(dataDir, token string) (EnterpriseCredential, bool) {
+	credential, _, ok := MatchEnterpriseCredentialKeyID(dataDir, HTTPAuthKeyID(token))
+	return credential, ok
 }

@@ -33,13 +33,23 @@ from defenseclaw.scanner.mcp import (
     _run_with_pinned_dns,
     _scope_network_analyzer_dns,
 )
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
 pytestmark = pytest.mark.skipif(
     sys.version_info < (3, 11),
     reason="cisco-ai-mcp-scanner requires Python 3.11 or newer",
 )
+
+
+def test_remote_dns_failure_is_an_unfinished_scan(monkeypatch):
+    """An unresolved name has no IP to pin, so admission gets no verdict."""
+    from defenseclaw.registries import ssrf
+
+    monkeypatch.setattr(ssrf, "_default_resolver", lambda _host: [])
+    wrapper = MCPScannerWrapper(MCPScannerConfig(analyzers="api"))
+    with pytest.raises(RuntimeError, match="could not resolve host"):
+        wrapper.scan("https://docs.example.invalid/mcp")
 
 
 def test_pinned_dns_enters_before_scan_coroutine_is_created():
@@ -260,13 +270,7 @@ def _serve_mcp(transport: str):
     listener.listen()
     port = listener.getsockname()[1]
 
-    app = FastMCP(
-        "dns-pin-test",
-        log_level="ERROR",
-        transport_security=TransportSecuritySettings(
-            enable_dns_rebinding_protection=False,
-        ),
-    )
+    app = MCPServer("dns-pin-test", log_level="ERROR")
 
     @app.tool()
     def ping() -> str:
@@ -276,7 +280,11 @@ def _serve_mcp(transport: str):
     def status() -> str:
         return "ready"
 
-    asgi = app.sse_app() if transport == "sse" else app.streamable_http_app()
+    security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    if transport == "sse":
+        asgi = app.sse_app(transport_security=security)
+    else:
+        asgi = app.streamable_http_app(transport_security=security)
     server = uvicorn.Server(
         uvicorn.Config(
             asgi,

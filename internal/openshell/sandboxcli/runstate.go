@@ -246,6 +246,38 @@ func (a *App) markStoppedCopy(sb *sandboxapi.Sandbox, clean bool, pulled string)
 	})
 }
 
+// copyBase is what a look at a copy-mode sandbox's copy (a pull, `sandbox
+// stop`'s look) was made after: the sandbox's attach stamp, read before a
+// count found no session attached (ok is false otherwise, or when it could
+// not be read), and its last hook request. What the look found is recorded
+// as the copy's state at the stop (markStoppedCopy) only when nothing could
+// have changed the copy since: no session attached, not even one that has
+// ended since, and no hook came (unchanged).
+type copyBase struct {
+	stamp  string
+	ok     bool
+	hookAt time.Time
+}
+
+// copyBaseOf reads sb's copy base before a look; the caller counts the
+// sessions attached after it, and a count that finds any clears ok.
+func (a *App) copyBaseOf(sb *sandboxapi.Sandbox) copyBase {
+	stamp, ok := a.attachStamp(sb.Name)
+	return copyBase{stamp: stamp, ok: ok, hookAt: sb.Hooks.LastHookAt}
+}
+
+// unchanged reports that nothing changed sandbox name's copy since b was
+// read: stopped is what OpenShell's stop returned (its last hook). The
+// caller holds the sandbox's exclusive gate (lockForStop), so no session
+// attaches between this check and the mark.
+func (b copyBase) unchanged(a *App, name string, stopped *sandboxapi.Sandbox) bool {
+	if !b.ok || stopped != nil && stopped.Hooks.LastHookAt.After(b.hookAt) {
+		return false
+	}
+	stamp, ok := a.attachStamp(name)
+	return ok && stamp == b.stamp
+}
+
 // stoppedCopyOf is what sb's copy held as it last stopped, when sb has not
 // run since: it is not running, and nothing dropped the mark (every start
 // goes through this CLI, which drops it, and so do a session and a `sandbox
@@ -355,7 +387,7 @@ const (
 
 // harnessOptions are, per harness, the interactive options a run passes
 // and whether each takes a value, from the pinned harness's --help (Claude
-// Code 2.1, Codex 0.146, OpenCode 1.18, Copilot CLI 1.0, Hermes 0.19): the
+// Code 2.1, Codex 0.146, OpenCode 2.1, Copilot CLI 1.0, Hermes 0.19): the
 // values, the switches, then the options that carry the first prompt. An
 // option with an optional value (Claude Code's --resume [id]) is left out:
 // only the shape of the next word can tell, as for any other option the
@@ -377,8 +409,8 @@ var harnessOptions = map[string]map[string]arity{
 		[]string{"-i", "--image"}),
 	// --prompt: "prompt to use", the TUI's first prompt.
 	"opencode": optionTable(
-		[]string{"-m", "--model", "-s", "--session", "--agent", "--port", "--hostname", "--log-level"},
-		[]string{"-c", "--continue", "--print-logs", "--auto"},
+		[]string{"-s", "--session", "--server", "--log-level", "--completions"},
+		[]string{"-c", "--continue", "--print-logs", "--auto", "--standalone", "--wizard"},
 		[]string{"--prompt"}),
 	// -i/--interactive: "start interactive mode and automatically execute
 	// this prompt"; --attachment: a file "attached to the initial prompt".
@@ -442,9 +474,6 @@ func launchOptionsSplit(spec *harness.Spec, args []string) (kept []string, unkep
 	if len(args) == 0 || printMode(spec, args) {
 		return nil, "", nil
 	}
-	if keepsEveryArg(spec) {
-		return slices.Clone(args), "", nil
-	}
 	var out []string
 	operand := false
 	for i := 0; i < len(args); i++ {
@@ -501,14 +530,6 @@ func launchOptionsSplit(spec *harness.Spec, args []string) (kept []string, unkep
 		i++
 	}
 	return out, "", nil
-}
-
-// keepsEveryArg reports whether every word of spec's interactive command
-// line is a launch setting: `omnigent run [AGENT]` takes the agent (a YAML
-// file or directory) as its one operand, with options before or after it,
-// and a first message only through -p, a one-prompt run.
-func keepsEveryArg(spec *harness.Spec) bool {
-	return spec.Name == "omnigent"
 }
 
 // launchOperand reports whether word, a harness argument that is not an

@@ -26,7 +26,8 @@ import (
 // path never enters the script literal.
 const payloadPathEnvVar = "DEFENSECLAW_ASSEMBLER_PAYLOAD_PATH"
 
-// psVerifyTimeout bounds each Get-AuthenticodeSignature invocation.
+// psVerifyTimeout bounds each Get-AuthenticodeSignature invocation (and
+// each osslsigncode verify run on Linux and macOS).
 // Chain building may include revocation lookups that stall indefinitely
 // when a network policy blackholes CRL/OCSP endpoints; the assembler
 // processes six payload files in series so an unbounded hang on any one
@@ -123,24 +124,21 @@ type psSignatureRecord struct {
 	CertEChainingMatch bool `json:"CertEChainingMatch"`
 }
 
-// verifyAuthenticode is the fingerprint-based verify entry point.
-// Invokes PowerShell to gather a signed record about the file, then
-// applies the trust matrix in classifyVerify to decide accept vs.
-// reject. See docs/specs/003-windows-avc-standalone-assembler/ for
-// the design contract (AVC handoff, revision 2026-09-03).
+// verifyAuthenticode is the fingerprint-based verify entry point. On
+// Windows it invokes PowerShell to gather a signed record about the file
+// and applies the trust matrix in classifyVerify; on Linux and macOS (the
+// release job's ubuntu runner) it verifies with osslsigncode under the
+// same chain policy and signer pin (verifyAuthenticodeWithOsslsigncode).
 //
 // Errors are classified by cause so main.go's exit-code map does the
 // right thing:
 //   - signatureError — payload-side fault (unsigned, tampered, wrong
 //     signer, chain not trusted in the mode). Exit 4.
-//   - ioError — runner-side fault (non-Windows, powershell.exe not on
-//     PATH, exec launch failure, timeout). Exit 6.
+//   - ioError — runner-side fault (powershell.exe or osslsigncode not
+//     on PATH, exec launch failure, timeout). Exit 6.
 func verifyAuthenticode(path string, sigType signingType, expectedThumbprint string) error {
 	if runtime.GOOS != "windows" {
-		return &ioError{msg: fmt.Sprintf(
-			"Authenticode verify requires Windows (running on %s); pass -AllowUnsigned to skip",
-			runtime.GOOS,
-		)}
+		return verifyAuthenticodeWithOsslsigncode(path, sigType, expectedThumbprint)
 	}
 	rec, err := runPowerShellVerify(path)
 	if err != nil {

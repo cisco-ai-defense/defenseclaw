@@ -281,6 +281,25 @@ def test_inventory_mixed_failure_and_limitations_remain_independent() -> None:
     assert panel.message == ""
 
 
+def test_inventory_summary_keyboard_reaches_agents_at_80x24() -> None:
+    panel = InventoryPanelModel()
+    panel.apply_json(json.dumps(_inventory_payload()))
+    panel.set_size(80, 24)
+    rows = panel.data_table_rows()
+    agents = next(index for index, row in enumerate(rows) if row[0] == "Agents")
+
+    assert panel.current_list_len() == len(rows)
+    assert panel.handle_key("end").handled
+    assert panel.cursor_at() == len(rows) - 1
+    assert panel.handle_key("home").handled
+    for _ in range(agents):
+        assert panel.handle_key("j").handled
+    assert panel.cursor_at() == agents
+    assert rows[panel.cursor_at()][0] == "Agents"
+    assert panel.handle_key("pagedown").handled
+    assert panel.cursor_at() > agents
+
+
 def test_inventory_skill_and_plugin_filters_clamp_cursor_and_detail() -> None:
     panel = InventoryPanelModel()
     panel.apply_loaded(_inventory())

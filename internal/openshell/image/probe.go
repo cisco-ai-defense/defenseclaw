@@ -28,6 +28,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // probeSchema is the first line every probe prints.
@@ -77,8 +78,8 @@ type ProbeResult struct {
 var workloadWritableRoots = []string{connector.SandboxHomeDir, "/tmp", "/var/tmp", "/dev/shm", "/work", "/home", "/run", "/proc"}
 
 var (
-	probeSHARE  = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	probePathRE = regexp.MustCompile(`^/[A-Za-z0-9._@+/-]*$`)
+	probeSHARE  = lazyregexp.New(`^[0-9a-f]{64}$`)
+	probePathRE = lazyregexp.New(`^/[A-Za-z0-9._@+/-]*$`)
 )
 
 // probeScript returns the POSIX sh program the probe runs inside the image.

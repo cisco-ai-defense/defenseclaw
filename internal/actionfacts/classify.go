@@ -22,6 +22,7 @@ import (
 	"net/netip"
 	"net/url"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -55,6 +56,12 @@ func FilesystemFormatterProgram(program string) bool {
 }
 
 func classifyOutput(out *parseOutput) {
+	classifyOutputAt(out, 0)
+}
+
+// classifyOutputAt classifies out; wrapperDepth bounds the programs of a
+// find or xargs that classifyEmbeddedPrograms reads on their own.
+func classifyOutputAt(out *parseOutput, wrapperDepth int) {
 	if out == nil {
 		return
 	}
@@ -80,6 +87,8 @@ func classifyOutput(out *parseOutput) {
 			return
 		}
 	}
+	markPOSIXStdinCodeBehindWrapper(out)
+	classifyEmbeddedPrograms(out, wrapperDepth)
 
 	allowPreview := out.status == StatusComplete
 	requiredPreviewPaths := 0
@@ -323,6 +332,8 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 	case "cat":
 		addOperation(command, OperationRead)
 		addPathOperands(out, command, PathAccessRead, optionValues())
+	case "apply_patch":
+		classifyPOSIXApplyPatchStdin(out, command)
 	case "head", "tail":
 		addOperation(command, OperationRead)
 		addPathOperands(out, command, PathAccessRead, optionValues(
@@ -375,6 +386,14 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 	case "grep", "rg", "ripgrep", "find", "fd":
 		addOperation(command, OperationSearch)
 		classifySearchPaths(out, command, program)
+	case "gawk", "awk", "mawk", "nawk":
+		if !classifyPOSIXAwkRead(out, command) {
+			classifyAwkOutputOperands(out, command, program)
+		}
+	case "uniq":
+		classifyUniqOutputOperand(out, command)
+	case "xxd":
+		classifyXxdOperands(out, command)
 	case "getcap":
 		classifyGetcap(out, command)
 	case "where", "where.exe":
@@ -475,7 +494,7 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		}
 	case "tee":
 		classifyTee(out, command)
-	case "sed":
+	case "sed", "gsed":
 		classifyPOSIXSed(out, command)
 		classifyPOSIXLoggingHardeningControl(out, command)
 	case "add-content":
@@ -565,8 +584,12 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		}
 	case "chmod", "chown", "chgrp":
 		classifyPOSIXPermissionChange(out, command, program)
+	case "ln":
+		classifyPOSIXLink(out, command)
 	case "install":
 		classifyPOSIXInstall(out, command)
+	case "rsync":
+		classifyRsync(out, command)
 	case "setfacl":
 		classifySetfacl(out, command)
 	case "setcap":
@@ -737,6 +760,9 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		classifyShellInvocation(out, command)
 	case "python", "python2", "python3", "perl", "ruby":
 		classifyPOSIXStdinScriptInterpreter(out, command)
+		if exactPythonExternalSocketCommand(*command) {
+			addOperation(command, OperationConnect)
+		}
 	case "history":
 		classifyPOSIXHistory(out, command)
 	case "unset":
@@ -745,14 +771,22 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		classifySourceInvocation(out, command)
 	case "powershell", "powershell.exe", "pwsh", "pwsh.exe":
 		classifyPowerShellArtifactInvocation(out, command)
+	case ":":
+		// ":" runs nothing: its redirects are its only effect (`: > f`,
+		// GAP-2076). A ': <<EOF' comment block, or any other stdin, keeps
+		// the parse partial, so text in it is never enforced.
+		if command.LiteralStdin != "" || command.LiteralStdinAmbiguous || posixDescriptorIsRedirected(command, 0) {
+			out.markPartial(IssueUnknownOperandGrammar)
+		}
 	case "cmd", "cmd.exe",
 		"echo", "printf", "pwd", "cd", "true", "false", "sleep", "date",
 		"whoami", "id", "uname", "test", "[", "expr", "read", "export",
-		"setenv", "which", "command", "exec", "eval",
+		"setenv", "which", "command", "builtin", "exec", "eval",
 		"write-output", "write-host":
 		// Known command grammar; the parser or wrapper analysis owns any nested
 		// command source.
 	default:
+		classifyUnknownOutputOperand(out, command)
 		if posixVersionedPythonProgram(program) {
 			classifyPOSIXStdinScriptInterpreter(out, command)
 			break
@@ -904,6 +938,10 @@ func commandProgram(executable string) string {
 	}
 	if strings.Contains(executable, "/") && !trustedExecutablePath(executable) {
 		return ""
+	}
+	if executable == "." {
+		// The dot builtin reads a file into the current shell like source.
+		return "."
 	}
 	executable = path.Base(executable)
 	if executable == "." || executable == "/" {
@@ -1212,6 +1250,24 @@ func canonicalPowerShellPathMutatorParameter(program, key string) string {
 		return "-recurse"
 	case "-fo":
 		return "-force"
+	default:
+		return key
+	}
+}
+
+// These content parameters have unambiguous prefixes for the three file
+// writers. Binding them as data prevents a value from becoming a write path.
+func canonicalPowerShellContentParameter(program, key string) string {
+	switch program {
+	case "set-content", "add-content", "out-file":
+	default:
+		return key
+	}
+	switch {
+	case len(key) >= 3 && strings.HasPrefix("-value", key):
+		return "-value"
+	case len(key) >= 4 && strings.HasPrefix("-inputobject", key):
+		return "-inputobject"
 	default:
 		return key
 	}
@@ -2039,7 +2095,7 @@ func classifyStructuredPowerShellPathMutator(
 			continue
 		}
 		key, joinedValue, joined := powerShellParameter(arg)
-		key = canonicalPowerShellPathMutatorParameter(program, key)
+		key = canonicalPowerShellContentParameter(program, canonicalPowerShellPathMutatorParameter(program, key))
 		consume := func() (string, bool) {
 			if _, duplicate := seen[key]; duplicate {
 				return "", false
@@ -2843,19 +2899,60 @@ func classifySearchPaths(out *parseOutput, command *CommandFact, program string)
 		}
 	case "find":
 		startingPaths := findStartingPaths(command.Argv)
+		if len(startingPaths) == 0 && findSearchesDefaultStart(command.Argv) ||
+			findFirstWordIsGNUPrimary(command.Argv) {
+			// GNU find and bfs search '.' when no starting point is
+			// given (GAP-2267); BSD find refuses to run. A first word
+			// such as -follow is a GNU primary and a BSD -f path.
+			startingPaths = append(startingPaths, ".")
+		}
 		for _, operand := range startingPaths {
 			appendPath(out, command.ID, PathAccessRead, operand)
 		}
-		if hasAnyArgument(command.Argv, "-delete") {
-			addOperation(command, OperationDelete)
+		// An embedded rm, unlink, rmdir or shred given only the found
+		// entry removes it, as -delete does, and mv {} DEST moves it away
+		// (GAP-2122). Only such exact embedded commands (and true/false)
+		// are read; any other keeps the find partial.
+		embedded := findExactEmbeddedCommands(command.Argv)
+		if hasAnyArgument(command.Argv, "-delete") || embedded.deletes || len(embedded.moveTo) != 0 {
+			if len(embedded.moveTo) != 0 {
+				addOperation(command, OperationMove)
+			}
+			if hasAnyArgument(command.Argv, "-delete") || embedded.deletes {
+				addOperation(command, OperationDelete)
+			}
 			for _, operand := range startingPaths {
 				appendPath(out, command.ID, PathAccessDelete, operand)
+			}
+			for _, destination := range embedded.moveTo {
+				appendPath(out, command.ID, PathAccessWrite, destination)
 			}
 		}
 		if findHasEmbeddedCommand(command.Argv) {
 			addOperation(command, OperationExecute)
-			out.markPartial(IssueUnsupportedConstruct)
+			if !embedded.exact {
+				out.markPartial(IssueUnsupportedConstruct)
+				// Any other embedded program but a reader or a mode or
+				// owner change (sh -c, sudo/env wrappers, truncate, cp,
+				// sed -i, ...) is handed the found entries and may write
+				// or remove them, so the starting points are written
+				// paths with no proven operation (GAP-2122): owners that
+				// guard a tree can judge them; the find stays partial.
+				// A copy-out (cp/rsync to a destination, tar -c or zip
+				// into an archive, json.tool into a file) only reads the
+				// found entries and writes its output (pod check8).
+				handed := FindHandedEntries(command.Argv)
+				if handed.MayChange {
+					for _, operand := range startingPaths {
+						appendPath(out, command.ID, PathAccessWrite, operand)
+					}
+				}
+				for _, output := range handed.Outputs {
+					appendPath(out, command.ID, PathAccessWrite, output)
+				}
+			}
 		}
+		classifyFindOutputOperands(out, command)
 	case "fd":
 		operands := pathOperands(command.Argv, optionValues(
 			"-c", "-e", "-j", "-d", "-o", "-s", "-t", "-x",
@@ -3024,9 +3121,36 @@ func searchPatternOptions(argv []string) (bool, []string) {
 	return false, files
 }
 
+// findSearchesDefaultStart reports a find argv that, with no starting
+// point, searches the working directory: anything but --help and
+// --version.
+func findSearchesDefaultStart(argv []string) bool {
+	for _, argument := range argv[1:] {
+		switch argument {
+		case "--help", "-help", "--version", "-version":
+			return false
+		}
+	}
+	return true
+}
+
+// findFirstWordIsGNUPrimary reports a find whose first argument is a GNU
+// primary that BSD getopt reads as an attached -f path (`find -follow
+// -delete`: GNU searches '.', BSD searches "ollow").
+func findFirstWordIsGNUPrimary(argv []string) bool {
+	if len(argv) < 2 {
+		return false
+	}
+	switch argv[1] {
+	case "-follow", "-false", "-fls", "-fprint", "-fprint0", "-fprintf", "-fstype":
+		return true
+	}
+	return false
+}
+
 func findStartingPaths(argv []string) []string {
 	var paths []string
-	options := true
+	options, operands := true, false
 	for i := 1; i < len(argv); i++ {
 		arg := argv[i]
 		if options && arg == "--" {
@@ -3036,18 +3160,130 @@ func findStartingPaths(argv []string) []string {
 		if findExpressionStart(arg) {
 			break
 		}
-		if options {
-			switch arg {
-			case "-H", "-L", "-P":
-				continue
-			}
-			if strings.HasPrefix(arg, "-") {
+		if options && strings.HasPrefix(arg, "-") {
+			if operands {
 				break
 			}
+			skip, start, ok := findLeadingOption(argv, i)
+			if !ok {
+				break
+			}
+			if start != "" {
+				paths = append(paths, start)
+			}
+			i += skip
+			continue
 		}
+		operands = true
 		paths = append(paths, arg)
 	}
 	return paths
+}
+
+// findLeadingOption reads the option word argv[i] before find's starting
+// points (GAP-2135): GNU -H, -L, -P, -D debugopts and -Olevel, and the BSD
+// option letters E, H, L, P, X, d, s and x, which getopt lets one word
+// combine, ending in an optional f whose path argument (the rest of the
+// word, or the next word) is a starting point.
+// skip is the number of argument words it takes; ok is false for a word
+// that is not one of them.
+func findLeadingOption(argv []string, i int) (skip int, start string, ok bool) {
+	arg := argv[i]
+	switch {
+	case arg == "-D":
+		if i+1 >= len(argv) {
+			return 0, "", false
+		}
+		return 1, "", true
+	case strings.HasPrefix(arg, "-O") && len(arg) > 2:
+		return 0, "", true
+	}
+	letters := arg[1:]
+	if letters == "" {
+		return 0, "", false
+	}
+	for index, letter := range letters {
+		switch {
+		case strings.ContainsRune("EHLPXdsx", letter):
+		case letter == 'f':
+			// getopt takes the rest of the word as the -f path
+			// (`-f/path`, `-xf/path`), else the next word.
+			if rest := letters[index+1:]; rest != "" {
+				return 0, rest, true
+			}
+			if i+1 >= len(argv) {
+				return 0, "", false
+			}
+			return 1, argv[i+1], true
+		default:
+			return 0, "", false
+		}
+	}
+	return 0, "", true
+}
+
+// findEmbeddedCommandFacts is what the -exec, -execdir, -ok and -okdir
+// commands of a find do when every one is exact (GAP-2122): rm, unlink,
+// rmdir or shred with only options and the found entry {}, mv with only
+// options, {} and one literal destination, or a bare true or false.
+type findEmbeddedCommandFacts struct {
+	exact   bool
+	deletes bool
+	moveTo  []string
+}
+
+func findExactEmbeddedCommands(argv []string) findEmbeddedCommandFacts {
+	result := findEmbeddedCommandFacts{exact: true}
+	for i := 1; i < len(argv); i++ {
+		switch argv[i] {
+		case "-exec", "-execdir", "-ok", "-okdir":
+		default:
+			continue
+		}
+		end := i + 1
+		for end < len(argv) && argv[end] != ";" && argv[end] != "+" {
+			end++
+		}
+		if end >= len(argv) || end == i+1 {
+			return findEmbeddedCommandFacts{}
+		}
+		program := argv[i+1]
+		program = strings.ToLower(program[strings.LastIndex(program, "/")+1:])
+		var found, others []string
+		for _, word := range argv[i+2 : end] {
+			switch {
+			case word == "{}":
+				found = append(found, word)
+			case strings.HasPrefix(word, "-"):
+				if program == "mv" && (strings.HasPrefix(word, "-t") || strings.HasPrefix(word, "--target")) {
+					return findEmbeddedCommandFacts{}
+				}
+			default:
+				others = append(others, word)
+			}
+		}
+		switch program {
+		case "true", "false":
+			if end != i+2 {
+				return findEmbeddedCommandFacts{}
+			}
+		case "rm", "unlink", "rmdir", "shred":
+			if len(found) != 1 || len(others) != 0 {
+				return findEmbeddedCommandFacts{}
+			}
+			result.deletes = true
+		case "mv":
+			if len(found) != 1 || len(others) != 1 || argv[end-1] != others[0] ||
+				strings.ContainsAny(others[0], "{}$`*?[") {
+				return findEmbeddedCommandFacts{}
+			}
+			result.moveTo = append(result.moveTo, others[0])
+		default:
+			return findEmbeddedCommandFacts{}
+		}
+		i = end
+	}
+	return result
 }
 
 func findExpressionStart(value string) bool {
@@ -3240,6 +3476,35 @@ func ApplyStaticPOSIXSedInPlaceLiteralMutation(
 	}
 }
 
+// classifyPOSIXAwkRead accepts a bounded read-only AWK program and its fixed
+// file operands. An unrecognized program or option does not acquire a
+// complete file-read proof.
+func classifyPOSIXAwkRead(out *parseOutput, command *CommandFact) bool {
+	if command.Dialect != DialectPOSIX || !command.ArgvComplete || len(command.Argv) < 2 {
+		return false
+	}
+	program := command.Argv[1]
+	if program != "NR==1 {print}" && program != "{print}" && program != "{print $0}" {
+		return false
+	}
+	for _, operand := range command.Argv[2:] {
+		if operand == "-" {
+			continue
+		}
+		if operand == "" || strings.HasPrefix(operand, "-") || strings.Contains(operand, "=") {
+			return false
+		}
+	}
+	addOperation(command, OperationRead)
+	for _, operand := range command.Argv[2:] {
+		if operand == "-" {
+			continue
+		}
+		appendCommandPath(out, command, PathAccessRead, operand)
+	}
+	return true
+}
+
 func classifyPOSIXSed(out *parseOutput, command *CommandFact) {
 	_, target, ok := StaticPOSIXSedInPlaceLiteralMutation(*command)
 	if ok {
@@ -3308,8 +3573,8 @@ func staticPOSIXSedNumericPrintTargets(command CommandFact) ([]string, bool) {
 	if (command.Dialect != DialectPOSIX && command.Dialect != DialectArgv) ||
 		!command.ArgvComplete || len(command.Argv) < 4 ||
 		len(command.Arguments) != len(command.Argv) ||
-		command.Program != "sed" ||
-		!exactCaseSensitivePOSIXProgram(&command, "sed") ||
+		(command.Program != "sed" && command.Program != "gsed") ||
+		!exactCaseSensitivePOSIXProgram(&command, command.Program) ||
 		(command.Argv[1] != "-n" && command.Argv[1] != "--quiet" &&
 			command.Argv[1] != "--silent") {
 		return nil, false
@@ -3390,16 +3655,16 @@ func classifyPOSIXPermissionChange(
 		"-c", "--changes", "-f", "--silent", "--quiet", "-v", "--verbose",
 		"--no-preserve-root", "--preserve-root", "-R", "--recursive",
 	)
-	switch program {
-	case "chown":
+	// -H -L -P -h choose how symlinks are followed; chmod has them on
+	// BSD/macOS (and GNU coreutils 9.x), chown and chgrp everywhere
+	// (GAP-2077: `chmod -h 777 ~/.defenseclaw/hooks` lost its target).
+	if program == "chown" {
 		values["--from"] = struct{}{}
-		fallthrough
-	case "chgrp":
-		for option := range exactOptionSet(
-			"-H", "-L", "-P", "-h", "--dereference", "--no-dereference",
-		) {
-			flags[option] = struct{}{}
-		}
+	}
+	for option := range exactOptionSet(
+		"-H", "-L", "-P", "-h", "--dereference", "--no-dereference",
+	) {
+		flags[option] = struct{}{}
 	}
 
 	parsed := parseOwnedPOSIXOptions(
@@ -3480,6 +3745,84 @@ func classifyPOSIXInstall(out *parseOutput, command *CommandFact) {
 		addOperation(command, OperationPermissionChange)
 		appendCommandPath(out, command, PathAccessMetadata, destination)
 	}
+}
+
+// classifyRsync records the local destination of rsync (the last operand)
+// as a write and each local source as a read (GAP-2496: rsync a.txt
+// ~/.defenseclaw/hooks/x.sh tied no path to the call). A remote operand
+// (host:path, rsync://) is not a local path. --remove-source-files also
+// deletes the sources; a dry run or a listing writes nothing.
+func classifyRsync(out *parseOutput, command *CommandFact) {
+	if !requireCommandDialect(out, command, DialectPOSIX, DialectArgv) {
+		return
+	}
+	parsed := parseOwnedPOSIXOptions(
+		command.Argv,
+		exactOptionSet(
+			"-e", "--rsh", "-f", "--filter", "-T", "--temp-dir", "-B", "--block-size",
+			"--rsync-path", "--exclude", "--include", "--exclude-from", "--include-from",
+			"--files-from", "--compare-dest", "--copy-dest", "--link-dest", "--backup-dir",
+			"--suffix", "--chmod", "--chown", "--log-file", "--password-file",
+			"--partial-dir", "--max-size", "--min-size", "--bwlimit", "--timeout",
+			"--port", "--out-format", "--info", "--debug", "--max-delete",
+			"--modify-window", "--compress-level", "--skip-compress", "--usermap",
+			"--groupmap", "--iconv", "--contimeout", "--address",
+		),
+		exactOptionSet(
+			"-a", "-v", "-z", "-r", "-l", "-p", "-t", "-g", "-o", "-D", "-h", "-P",
+			"-u", "-c", "-x", "-H", "-A", "-X", "-S", "-W", "-q", "-i", "-R", "-L",
+			"-k", "-K", "-E", "-m", "-C", "-b", "-I", "-O", "-J", "-U", "-N", "-d",
+			"--archive", "--verbose", "--compress", "--recursive", "--progress",
+			"--partial", "--delete", "--delete-after", "--delete-before",
+			"--delete-during", "--delete-delay", "--delete-excluded", "--human-readable",
+			"--update", "--checksum", "--links", "--perms", "--times", "--group",
+			"--owner", "--devices", "--specials", "--hard-links", "--acls", "--xattrs",
+			"--sparse", "--whole-file", "--quiet", "--itemize-changes", "--relative",
+			"--copy-links", "--stats", "--mkpath", "--inplace", "--append",
+			"--append-verify", "--existing", "--ignore-existing",
+			"--remove-source-files", "--force", "--prune-empty-dirs", "--no-motd",
+			"--safe-links", "--numeric-ids", "--omit-dir-times", "--size-only",
+			"--ignore-times", "--one-file-system", "--backup", "--dirs",
+			"--keep-dirlinks", "--copy-dirlinks", "--executability", "--cvs-exclude",
+		),
+		exactOptionSet("--help", "--version", "-n", "--dry-run", "--list-only"),
+	)
+	if parsed.preview {
+		command.Effect = EffectPreview
+		return
+	}
+	if !parsed.complete {
+		out.markPartial(IssueUnknownOperandGrammar)
+	}
+	if len(parsed.positionals) < 2 {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	_, removeSources := parsed.seen["--remove-source-files"]
+	addOperation(command, OperationCopy)
+	for _, source := range parsed.positionals[:len(parsed.positionals)-1] {
+		if rsyncRemoteOperand(source) {
+			continue
+		}
+		appendCommandPath(out, command, PathAccessRead, source)
+		if removeSources {
+			addOperation(command, OperationDelete)
+			appendCommandPath(out, command, PathAccessDelete, source)
+		}
+	}
+	if destination := parsed.positionals[len(parsed.positionals)-1]; !rsyncRemoteOperand(destination) {
+		appendCommandPath(out, command, PathAccessWrite, destination)
+	}
+}
+
+// rsyncRemoteOperand reports host:path, host::module and rsync:// operands.
+// A Windows drive path (C:\dir, C:/dir) is local on a Windows host.
+func rsyncRemoteOperand(operand string) bool {
+	if strings.HasPrefix(operand, "rsync://") {
+		return true
+	}
+	colon := strings.IndexByte(operand, ':')
+	return colon > 0 && !strings.Contains(operand[:colon], "/") && filepath.VolumeName(operand) == ""
 }
 
 func dangerousInstallMode(mode string) bool {
@@ -4221,7 +4564,7 @@ func copyMoveShortFlags(flags string, move bool) bool {
 	if flags == "" {
 		return false
 	}
-	allowed := "abdfHilnprRuvx"
+	allowed := "abdfHilnprRsuvx"
 	if move {
 		allowed = "bfinTuv"
 	}
@@ -9985,6 +10328,12 @@ func classifyGit(out *parseOutput, command *CommandFact) {
 		}
 		if gitConfigMutates(command.Argv[index+1:]) {
 			addOperation(command, OperationConfigChange)
+			for _, key := range []string{"-f", "--file"} {
+				if target := parsed.values[key]; target != "" {
+					addOperation(command, OperationWrite)
+					appendCommandPath(out, command, PathAccessWrite, target)
+				}
+			}
 		}
 	case "show", "log", "diff", "whatchanged":
 		classifyGitReadOutput(out, command, index)
@@ -12836,4 +13185,228 @@ func deduplicate[T any](values []T, key func(T) string) []T {
 		out = append(out, value)
 	}
 	return out
+}
+
+// markPOSIXStdinCodeBehindWrapper keeps the parse partial when a command
+// that runs its standard input as code is given one: a heredoc, a stdin
+// redirect or the output of an earlier pipeline stage. A shell started by
+// sudo, doas or pkexec (sudo sh, sudo -s, sudo -u root bash), su without -c,
+// at or batch without -f, and crontab reading - or no file run that input,
+// which ActionFacts does not read; direct shells already stay partial
+// (rel-1-0-6:GAP-0419).
+func markPOSIXStdinCodeBehindWrapper(out *parseOutput) {
+	// A pipeline counts when an earlier stage reads a heredoc (cat <<X |
+	// sudo sh); a download piped into a shell keeps its own modeled flow.
+	heredocPipeline := make(map[int64]bool, len(out.commands))
+	for index := range out.commands {
+		command := &out.commands[index]
+		piped := command.PipelineID != 0 && heredocPipeline[command.PipelineID]
+		if command.PipelineID != 0 && (command.LiteralStdinComplete || command.LiteralStdinAmbiguous) {
+			heredocPipeline[command.PipelineID] = true
+		}
+		if command.Dialect != DialectPOSIX {
+			continue
+		}
+		fed := piped || command.LiteralStdinComplete || command.LiteralStdinAmbiguous
+		for _, redirect := range command.Redirects {
+			if redirect.FD == 0 {
+				fed = true
+			}
+		}
+		if fed && posixWrapperRunsStdinAsCode(command.Argv) {
+			out.markPartial(IssueUnsupportedConstruct)
+		}
+	}
+}
+
+// posixWrapperRunsStdinAsCode reports an argv that reads its standard input
+// as commands through a privilege wrapper or a scheduler. A direct shell is
+// not one: its stdin mode is modeled where it is classified.
+func posixWrapperRunsStdinAsCode(argv []string) bool {
+	argv = posixStdinCodeUnwrap(argv)
+	if len(argv) == 0 {
+		return false
+	}
+	switch commandProgram(argv[0]) {
+	case "sudo", "doas", "pkexec":
+		rest := argv[1:]
+		shell := false
+		for len(rest) > 0 && strings.HasPrefix(rest[0], "-") && rest[0] != "-" {
+			option := rest[0]
+			rest = rest[1:]
+			if option == "--" {
+				break
+			}
+			switch option {
+			case "-s", "--shell", "-i", "--login":
+				shell = true
+			case "-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T", "-R",
+				"--user", "--group", "--host", "--prompt", "--role", "--type",
+				"--other-user", "--close-from", "--command-timeout", "--chdir", "--chroot":
+				if len(rest) > 0 {
+					rest = rest[1:]
+				}
+			default:
+				// A cluster of short options (-iu root, -Eu root sh): a
+				// value option takes the rest of the word, or the next
+				// word when it ends the cluster.
+				if strings.HasPrefix(option, "--") {
+					continue
+				}
+				for index := 1; index < len(option); index++ {
+					letter := option[index]
+					if letter == 's' || letter == 'i' {
+						shell = true
+						continue
+					}
+					if strings.IndexByte(privilegeWrapperValueOptions, letter) >= 0 {
+						if index == len(option)-1 && len(rest) > 0 {
+							rest = rest[1:]
+						}
+						break
+					}
+				}
+			}
+		}
+		if len(rest) == 0 {
+			return shell
+		}
+		return posixStdinCodeTarget(rest)
+	case "su":
+		for _, argument := range argv[1:] {
+			if argument == "-c" || argument == "--command" || strings.HasPrefix(argument, "--command=") {
+				return false
+			}
+		}
+		return true
+	case "at", "batch":
+		for _, argument := range argv[1:] {
+			switch argument {
+			case "-f", "-l", "-r", "-d", "-c", "-V":
+				return false
+			}
+		}
+		return true
+	case "crontab":
+		// crontab [-u USER] with no file, or with -, installs its stdin.
+		operands := 0
+		for index := 1; index < len(argv); index++ {
+			switch argument := argv[index]; {
+			case argument == "-u":
+				index++
+			case strings.HasPrefix(argument, "-u"):
+				// -uUSER: the user is attached to the option.
+			case argument == "-":
+				return true
+			case strings.HasPrefix(argument, "-"):
+				return false
+			default:
+				operands++
+			}
+		}
+		return operands == 0
+	default:
+		return false
+	}
+}
+
+// privilegeWrapperValueOptions are the short options of sudo, doas and
+// pkexec that take a value.
+const privilegeWrapperValueOptions = "aCDghpRrTtUu"
+
+// posixStdinCodeUnwrap drops a leading env (its options, --, and its
+// NAME=VALUE assignments) or command (-p, --), which start the next word
+// with the same stdin.
+func posixStdinCodeUnwrap(argv []string) []string {
+	for len(argv) > 0 {
+		switch commandProgram(argv[0]) {
+		case "env":
+			argv = posixEnvCommand(argv[1:])
+		case "command":
+			argv = argv[1:]
+			for len(argv) > 0 && (argv[0] == "-p" || argv[0] == "--") {
+				argv = argv[1:]
+			}
+		default:
+			return argv
+		}
+	}
+	return argv
+}
+
+// posixEnvCommand is the command env runs, given env's arguments: it skips
+// the flags (-i, -, -0, -v and their long forms), the options that take a
+// value (-u NAME, -C DIR, -P PATH, attached or as the next word, and
+// --name=value), the end-of-options marker and the assignments. -S splits
+// its value into the words of the command. An unknown option is returned
+// as it is, so nothing past it counts as the command.
+func posixEnvCommand(argv []string) []string {
+	for len(argv) > 0 {
+		option := argv[0]
+		switch {
+		case option == "--":
+			argv = argv[1:]
+			for len(argv) > 0 && posixEnvAssignment(argv[0]) {
+				argv = argv[1:]
+			}
+			return argv
+		case option == "-" || option == "-i" || option == "-0" || option == "-v",
+			option == "--ignore-environment" || option == "--null" || option == "--debug",
+			option == "--block-signal" || option == "--default-signal" || option == "--ignore-signal",
+			strings.HasPrefix(option, "--") && strings.Contains(option, "=") &&
+				!strings.HasPrefix(option, "--split-string="):
+			argv = argv[1:]
+		case option == "-u" || option == "-C" || option == "-P" ||
+			option == "--unset" || option == "--chdir":
+			if len(argv) < 2 {
+				return nil
+			}
+			argv = argv[2:]
+		case option == "-S" || option == "--split-string":
+			if len(argv) < 2 {
+				return nil
+			}
+			return append(strings.Fields(argv[1]), argv[2:]...)
+		case strings.HasPrefix(option, "--split-string="):
+			return append(strings.Fields(strings.TrimPrefix(option, "--split-string=")), argv[1:]...)
+		case len(option) > 2 && option[0] == '-' && option[1] == 'S':
+			return append(strings.Fields(option[2:]), argv[1:]...)
+		case len(option) > 2 && option[0] == '-' && strings.IndexByte("uCP", option[1]) >= 0:
+			argv = argv[1:]
+		case posixEnvAssignment(option):
+			argv = argv[1:]
+		default:
+			return argv
+		}
+	}
+	return argv
+}
+
+func posixEnvAssignment(word string) bool {
+	return strings.Contains(word, "=") && !strings.HasPrefix(word, "-")
+}
+
+// posixStdinCodeTarget reports the program a privilege wrapper starts when
+// it runs its standard input as code: a shell without -c (also behind env
+// or command), or another wrapper or scheduler that does.
+func posixStdinCodeTarget(argv []string) bool {
+	argv = posixStdinCodeUnwrap(argv)
+	if len(argv) == 0 {
+		return false
+	}
+	if posixShellProgram(commandProgram(argv[0])) {
+		for _, argument := range argv[1:] {
+			if argument == "-c" {
+				return false
+			}
+		}
+		return true
+	}
+	return posixWrapperRunsStdinAsCode(argv)
+}
+
+// POSIXExecWrapperTarget is argv without a leading env or command wrapper
+// (their options and assignments): the command they start.
+func POSIXExecWrapperTarget(argv []string) []string {
+	return posixStdinCodeUnwrap(argv)
 }

@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
 
 // ensure accepts an e2fsprogs_dir only by the rule the gateway's exec shim
@@ -45,6 +47,18 @@ func TestCheckE2fsprogsFollowsTheGatewayRule(t *testing.T) {
 	}
 	if row := check(""); row.OK || !strings.Contains(row.Detail, "~/.local/opt/e2fsprogs") || strings.Contains(row.Detail, "trusted Homebrew keg") {
 		t.Errorf("unset administrator directory: %+v", row)
+	}
+	for _, name := range openshell.AdminE2fsprogsTools {
+		p := h.env.P(filepath.Join(openshell.PackageE2fsprogsDir, "sbin", name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if row := check(""); !row.OK || row.Detail != openshell.PackageE2fsprogsDir+"/sbin" {
+		t.Errorf("package fallback: %+v", row)
 	}
 	prefix := write("sbin/mke2fs", "sbin/debugfs")
 	if row := check(prefix); !row.OK || row.Detail != prefix+"/sbin" {
@@ -86,5 +100,15 @@ func TestCheckE2fsprogsFollowsTheGatewayRule(t *testing.T) {
 	}
 	if row := check(dirTool); row.OK {
 		t.Errorf("a folder named mke2fs passes: %+v", row)
+	}
+}
+
+func TestDockerDriverDoesNotRequireE2fsprogs(t *testing.T) {
+	h := newOSHost(t, "darwin")
+	rows := h.env.checkDriver(context.Background(), openshellSettings{Driver: "docker", E2fsprogsDir: "/missing/e2fsprogs"})
+	for _, row := range rows {
+		if row.Name == "e2fsprogs" {
+			t.Fatalf("Docker driver has MicroVM prerequisite: %+v", row)
+		}
 	}
 }

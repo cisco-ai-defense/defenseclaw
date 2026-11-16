@@ -26,11 +26,13 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
@@ -49,6 +51,10 @@ var unixNologinShells = map[string]struct{}{
 	"/bin/false": {}, "/usr/bin/false": {}, "/sbin/false": {},
 }
 
+// unixLoginShell gives the login shell of an account whose resolver left
+// Account.Shell empty (macOS os/user, GAP-2483). Tests replace it.
+var unixLoginShell = unixidentity.LoginShell
+
 // UnixEnumeratorState is persisted between cycles (root-only) so revocation
 // needs several definitive misses.
 type UnixEnumeratorState struct {
@@ -64,6 +70,38 @@ type UnixEnumeratorState struct {
 	// managed ACP enrollments, keyed by principal (uid:N).
 	ACPMisses  map[string]int    `json:"acp_misses,omitempty"`
 	ACPSources map[string]string `json:"acp_sources,omitempty"`
+	// DiscoveryDeferred names the accounts the last cycle did not inspect:
+	// "budget" when the cycle's discovery budget ran out before them,
+	// "failed" when their discovery failed or timed out. The next cycle
+	// inspects the "budget" accounts first and the "failed" ones last, so
+	// accounts that stall cannot keep the same later accounts uninspected
+	// cycle after cycle (GAP-1586).
+	DiscoveryDeferred map[string]string `json:"discovery_deferred,omitempty"`
+	// VerifiedAgents is, per (user, connector), the last version read that
+	// worked and the stamp of the CLI it came from. A later failed read of
+	// the same unchanged CLI keeps that version for a few cycles instead of
+	// reporting the account unprotected (see carryVerifiedAgentVersions).
+	VerifiedAgents map[string]UnixVerifiedAgent `json:"verified_agents,omitempty"`
+}
+
+const (
+	unixDiscoveryDeferredBudget = "budget"
+	unixDiscoveryDeferredFailed = "failed"
+)
+
+// unixDiscoveryRank orders an account for discovery from the last cycle's
+// DiscoveryDeferred: not reached first, then the rest, then failed.
+func unixDiscoveryRank(state *UnixEnumeratorState, name string) int {
+	if state == nil {
+		return 1
+	}
+	switch state.DiscoveryDeferred[name] {
+	case unixDiscoveryDeferredBudget:
+		return 0
+	case unixDiscoveryDeferredFailed:
+		return 2
+	}
+	return 1
 }
 
 const (
@@ -82,7 +120,12 @@ type UnixDiscoverFunc func(ctx context.Context, account unixidentity.Account, co
 type UnixDiscovery struct {
 	Versions map[string]string
 	Reasons  map[string]string
-	Surfaces map[string][]connector.AgentSurface
+	// VersionSources names, per connector, the CLI whose live run supplied
+	// its version. A version with no entry here came from package metadata
+	// or a stamp and is bound to no executable.
+	VersionSources  map[string]string
+	Surfaces        map[string][]connector.AgentSurface
+	PrivateInstalls []PrivateAgentInstall
 }
 
 // UnixDiscoverSurfacesFunc is UnixDiscoverFunc plus the app and extension
@@ -138,6 +181,14 @@ type UnixEnumerateOptions struct {
 	// likewise replaces DiscoverStatic.
 	DiscoverSurfaces       UnixDiscoverSurfacesFunc
 	DiscoverStaticSurfaces UnixDiscoverSurfacesFunc
+	// DiscoveryBudget, when positive, bounds the time one cycle spends in
+	// the discovery functions above, all accounts together, so the cycle
+	// publishes its records within their freshness window
+	// (UnprotectedAgentsMaxAge) however many workers stall. A discovery
+	// still running when the budget ends is stopped, and an account not
+	// reached by then is reported as not inspected this cycle, as for a
+	// failed discovery.
+	DiscoveryBudget time.Duration
 	// MachineVersion reads root-owned machine-scoped metadata.
 	MachineVersion func(connector string) string
 	// OutsideDiscovery finds a connector's CLI in an administrator prefix
@@ -201,8 +252,7 @@ type UnixEligibleAccount struct {
 }
 
 type unixCandidate struct {
-	account  unixidentity.Account
-	included bool
+	account unixidentity.Account
 }
 
 // DefaultUnixHomeRoots are the home parents the guardian units allow.
@@ -275,6 +325,13 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 	if opts.State.Sources == nil {
 		opts.State.Sources = map[string]string{}
 	}
+	if opts.DiscoveryBudget > 0 {
+		deadline := time.Now().Add(opts.DiscoveryBudget)
+		opts.Discover = budgetedUnixDiscover(opts.Discover, deadline)
+		opts.DiscoverStatic = budgetedUnixDiscover(opts.DiscoverStatic, deadline)
+		opts.DiscoverSurfaces = budgetedUnixDiscoverSurfaces(opts.DiscoverSurfaces, deadline)
+		opts.DiscoverStaticSurfaces = budgetedUnixDiscoverSurfaces(opts.DiscoverStaticSurfaces, deadline)
+	}
 	enrollment := cfg.Enterprise.Enrollment
 	connectors := EffectiveUnixHookConnectors(cfg, registry)
 	machinePolicy := map[string]struct{}{}
@@ -314,12 +371,15 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 	// discovered, so the gateway can refuse a user whose only installs are
 	// refused surfaces.
 	var surfaceOnly []string
+	var machineInspect []string
 	for _, name := range connectors {
 		if _, off := ownershipOff[name]; off || connectorListed(perUser, name) {
 			continue
 		}
 		if _, isMachine := machinePolicy[name]; isMachine && enrollment.UnverifiedVersionsFor(name) == config.EnterpriseUnverifiedRefuse {
 			surfaceOnly = append(surfaceOnly, name)
+		} else if isMachine {
+			machineInspect = append(machineInspect, name)
 		}
 	}
 
@@ -366,6 +426,10 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 	// row is only dropped by a filter decision or repeated definitive
 	// "no such user" answers — never by an incomplete listing.
 	keep := map[string]struct{}{}
+	// inspected names the accounts this cycle inspected (or found nothing to
+	// inspect for); notInspected why an enrolled account was not.
+	inspected := map[string]bool{}
+	notInspected := map[string]string{}
 	missing := map[string]struct{}{}
 	listed := map[string]struct{}{}
 	previousUsers := map[string]struct{}{}
@@ -414,10 +478,22 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			missing[userName] = struct{}{}
 		default:
 			keep[userName] = struct{}{}
+			notInspected[userName] = "its account lookup failed"
 			logfSafely(opts.Logger, userName, fmt.Sprintf("directory lookup failed; keeping known rows unchanged: %v", err))
 		}
 	}
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].account.Name < candidates[j].account.Name })
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return unixDiscoveryRank(opts.State, candidates[i].account.Name) < unixDiscoveryRank(opts.State, candidates[j].account.Name)
+	})
+	deferred := map[string]string{}
+	noteDiscoveryError := func(name string, err error) {
+		if errors.Is(err, errUnixDiscoveryBudgetSpent) {
+			deferred[name] = unixDiscoveryDeferredBudget
+		} else {
+			deferred[name] = unixDiscoveryDeferredFailed
+		}
+	}
 	report.Candidates = len(candidates)
 	// A directory account that resolved this cycle shows the directory is
 	// answering, which is what makes another directory account's "no such
@@ -441,6 +517,12 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 	exclude := stringSet(enrollment.ExcludeUsers)
 	exempt := stringSet(enrollment.ExemptUsers)
 	addQualifiedSpellings(ctx, opts.Resolver, exempt)
+	// Under enrollment.mode: manifest the administrator's enabled targets
+	// are the enrollment, whatever the automatic filters say: their agent
+	// launches count toward managed coverage, so they are the accounts
+	// whose installs are inspected, and no one else is (GAP-0906).
+	manifestMode := strings.EqualFold(strings.TrimSpace(enrollment.Mode), config.EnterpriseEnrollmentManifest)
+	authored := unixEnrolledSubjects(previous)
 
 	var targets []ManifestTarget
 	emitted := map[string]struct{}{}
@@ -476,7 +558,15 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			skip("nobody is never a guardian target")
 			continue
 		}
-		if !explicitlyIncluded {
+		authoredTarget := false
+		if manifestMode {
+			if !authored.names(name, account.UID) {
+				skip("not an enabled target of the administrator's manifest (enterprise.enrollment.mode: manifest)")
+				continue
+			}
+			authoredTarget = true
+		}
+		if !explicitlyIncluded && !authoredTarget {
 			if reason := unixReservedUID(account.UID); reason != "" {
 				skip(reason)
 				continue
@@ -490,28 +580,38 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 				continue
 			}
 		}
-		if _, nologin := unixNologinShells[filepath.Clean(account.Shell)]; nologin && !explicitlyIncluded {
-			skip("non-interactive login shell " + account.Shell)
-			continue
-		}
-		if ok, transientErr, counted, reason := groupFilterAllows(opts.Resolver, account, enrollment); !ok {
-			if transientErr {
-				keep[name] = struct{}{}
-			} else if _, enrolled := previousUsers[name]; enrolled && counted {
-				// A missing include-group membership can be a partial
-				// answer from a degraded directory: revoke only after
-				// repeated answers, like a missing account.
-				filtered[name] = struct{}{}
+		if !explicitlyIncluded && !authoredTarget {
+			shell := strings.TrimSpace(account.Shell)
+			if shell == "" {
+				shell = unixLoginShell(ctx, name)
 			}
-			skip(reason)
-			continue
+			if _, nologin := unixNologinShells[filepath.Clean(shell)]; nologin && shell != "" {
+				skip("non-interactive login shell " + shell)
+				continue
+			}
+		}
+		if !authoredTarget {
+			if ok, transientErr, counted, reason := groupFilterAllows(opts.Resolver, account, enrollment); !ok {
+				if transientErr {
+					keep[name] = struct{}{}
+					notInspected[name] = "its group membership could not be read: " + reason
+				} else if _, enrolled := previousUsers[name]; enrolled && counted {
+					// A missing include-group membership can be a partial
+					// answer from a degraded directory: revoke only after
+					// repeated answers, like a missing account.
+					filtered[name] = struct{}{}
+				}
+				skip(reason)
+				continue
+			}
 		}
 		home := filepath.Clean(account.Home)
-		if !homeUnderRoots(home, homeRoots) {
+		if !homeUnderRoots(home, homeRoots) && !authoredTarget {
 			skip(fmt.Sprintf("home %s is outside the guardian-writable home roots %v", home, homeRoots))
 			continue
 		}
 		check := checkHome(home, account.UID)
+		inspected[name] = true
 		if check.State == HomeUntrusted {
 			// The mode of a home is the user's to change: it must not
 			// change the identity, and so the profile, the gateway gives
@@ -524,6 +624,8 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 				// own home's mode: keep the rows so the guardian reports
 				// the trust failure instead of silently dropping them.
 				keep[name] = struct{}{}
+				delete(inspected, name)
+				notInspected[name] = check.Reason
 				skip(check.Reason + "; keeping the existing enrollment")
 				continue
 			}
@@ -549,21 +651,77 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 				User: name, UID: account.UID, GID: account.GID, Home: home, HomeInode: check.Inode,
 			})
 		}
-		var versions, reasons map[string]string
+		var versions, reasons, sources map[string]string
 		var surfaces map[string][]connector.AgentSurface
+		var privateInstalls []PrivateAgentInstall
+		discoveryFailed := false
 		surfacesKnown := false
 		if check.State == HomeAvailable && opts.DiscoverSurfaces != nil {
-			found, err := opts.DiscoverSurfaces(ctx, account, append(append([]string{}, perUser...), surfaceOnly...))
+			all := append(append(append([]string{}, perUser...), surfaceOnly...), machineInspect...)
+			found, err := opts.DiscoverSurfaces(ctx, account, all)
 			if err != nil {
+				discoveryFailed = true
+				noteDiscoveryError(name, err)
 				logfSafely(opts.Logger, name, fmt.Sprintf("version discovery failed; keeping known rows: %v", err))
 			}
-			versions, reasons, surfaces = found.Versions, found.Reasons, found.Surfaces
+			versions, reasons, sources, surfaces = found.Versions, found.Reasons, found.VersionSources, found.Surfaces
+			privateInstalls = found.PrivateInstalls
 			surfacesKnown = err == nil
 		} else if check.State == HomeAvailable && opts.Discover != nil {
 			var err error
-			versions, reasons, err = opts.Discover(ctx, account, perUser)
+			all := append(append(append([]string{}, perUser...), surfaceOnly...), machineInspect...)
+			versions, reasons, err = opts.Discover(ctx, account, all)
 			if err != nil {
+				discoveryFailed = true
+				noteDiscoveryError(name, err)
 				logfSafely(opts.Logger, name, fmt.Sprintf("version discovery failed; keeping known rows: %v", err))
+			}
+		}
+		if check.State == HomeAvailable && !discoveryFailed && (opts.DiscoverSurfaces != nil || opts.Discover != nil) {
+			versions = carryVerifiedAgentVersions(opts.State, name, home, UnixAgentOwner{UID: account.UID, Home: home, HomeInode: check.Inode},
+				append(append(append([]string{}, perUser...), surfaceOnly...), machineInspect...), versions, reasons, sources, opts.Logger)
+		}
+		if discoveryFailed {
+			// The worker also owns the private-install scan for per-user
+			// connectors. A failed worker cannot prove any of its agents absent.
+			for _, conn := range append(append(append([]string{}, machineInspect...), surfaceOnly...), perUser...) {
+				report.Unprotected = append(report.Unprotected, UnprotectedAgent{User: name, UID: intPointer(account.UID), Connector: conn,
+					Code:   UnprotectedCodeInstallScanIncomplete,
+					Reason: "the account's agent versions and private installs could not be inspected this cycle"})
+			}
+		}
+		for _, conn := range machineInspect {
+			if version := versions[conn]; version != "" {
+				if refused := unixNewRowVersionRefused(conn, version); refused != "" {
+					report.Unprotected = append(report.Unprotected, UnprotectedAgent{User: name, UID: intPointer(account.UID), Connector: conn,
+						Version: version, Code: UnprotectedCodeHookContractUnverified,
+						Reason: refused + "; this installed copy may ignore managed hooks and the version floor, so its tool calls are not protected"})
+				}
+			} else if reason := reasons[conn]; UnixAgentInstalledWithoutVersion(reason) {
+				report.Unprotected = append(report.Unprotected, UnprotectedAgent{User: name, UID: intPointer(account.UID), Connector: conn,
+					Code: UnprotectedCodeHookContractUnverified, Reason: reason + UnixAgentUnversionedContractSuffix})
+			}
+			// An editor extension or desktop app runs its own engine: one
+			// below the hook contract may ignore the managed hooks as an
+			// old CLI does (GAP-1076).
+			// It is judged as the CLI is; an engine whose version cannot be
+			// read is left to the surface checks, as before.
+			for _, surface := range surfaces[conn] {
+				if surface.Surface == "" || surface.Surface == connector.HostSurfaceCLI || surface.EngineVersion == "" {
+					continue
+				}
+				if refused := unixNewRowVersionRefused(conn, surface.EngineVersion); refused != "" {
+					report.Unprotected = append(report.Unprotected, UnprotectedAgent{User: name, UID: intPointer(account.UID), Connector: conn,
+						Version: surface.EngineVersion, Surface: surface.Surface, Host: surface.Host, HostVersion: surface.HostVersion,
+						Code:   UnprotectedCodeHookContractUnverified,
+						Reason: refused + "; this " + surface.Surface + " runs its own engine, which may ignore managed hooks and the version floor, so its tool calls are not protected"})
+				}
+			}
+		}
+		for _, install := range privateInstalls {
+			if agent, ok := privateInstallUnprotected(install); ok {
+				agent.User, agent.UID = name, intPointer(account.UID)
+				report.Unprotected = append(report.Unprotected, agent)
 			}
 		}
 		report.Unprotected = append(report.Unprotected, applyKiroIDESurface(name, account.UID, versions, reasons)...)
@@ -592,6 +750,8 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 		if check.State == HomeAvailable {
 			currentInode = check.Inode
 		}
+		rowsBefore := len(targets)
+		var notInstalled []string
 		for _, conn := range perUser {
 			key := unixRowKey(name, conn)
 			_, isMachine := machinePolicy[conn]
@@ -688,11 +848,13 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 				if check.State != HomeAvailable {
 					reason = check.Reason
 				} else if UnixAgentInstalledWithoutVersion(reason) {
+					// Without a version no hook contract can be selected, so
+					// the agent has no DefenseClaw hook (GAP-0151).
 					report.Unprotected = append(report.Unprotected, UnprotectedAgent{
 						User:      name,
 						UID:       intPointer(account.UID),
 						Connector: conn,
-						Code:      UnprotectedCodeAgentUnprotected,
+						Code:      UnprotectedCodeHookContractUnverified,
 						Reason:    reason + "; DefenseClaw cannot select a hook contract without a version, so " + consequence,
 					})
 				} else if binary, prefix := outsideDiscovery(conn); binary != "" {
@@ -704,8 +866,29 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 						Reason: fmt.Sprintf("installed at %s, a prefix DefenseClaw does not search for agents; add %s to enterprise.enrollment.agent_prefixes. Until then %s",
 							binary, prefix, consequence),
 					})
+				} else if !discoveryFailed {
+					// A failed or budget-spent worker inspected nothing: the
+					// account is reported as install_scan_incomplete, not as
+					// having no agent installed.
+					notInstalled = append(notInstalled, conn)
 				}
 				logfSafely(opts.Logger, name, fmt.Sprintf("new (%s, %s) row skipped: %s", name, conn, reason))
+				continue
+			}
+			if refused := unixNewRowVersionRefused(conn, version); refused != "" {
+				consequence := "DefenseClaw installs no hooks for it, so it runs without DefenseClaw hooks"
+				if isMachine {
+					consequence = "it is not enrolled, so the gateway refuses its tool calls (enrollment.unenrolled_users: deny)"
+				}
+				report.Unprotected = append(report.Unprotected, UnprotectedAgent{
+					User:      name,
+					UID:       intPointer(account.UID),
+					Connector: conn,
+					Version:   version,
+					Code:      UnprotectedCodeForReason(refused),
+					Reason:    refused + "; " + consequence,
+				})
+				logfSafely(opts.Logger, name, fmt.Sprintf("new (%s, %s) row skipped: %s", name, conn, refused))
 				continue
 			}
 			enabled := true
@@ -718,6 +901,30 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			report.New++
 			targets = append(targets, row)
 			emitted[key] = struct{}{}
+		}
+		if explicitlyIncluded && len(targets) == rowsBefore && len(notInstalled) > 0 {
+			// include_users makes an account a candidate and skips its uid
+			// and shell checks, but rows are per installed agent: an
+			// administrator who names an account with none must be told why
+			// it is not enrolled (rel-1-0-6:GAP-0290), on macOS (local and
+			// mobile accounts alike) as on Linux.
+			// A machine-policy connector the account has installed covers
+			// it without a row (Claude Desktop with Claude Code on macOS):
+			// naming only the missing per-user connectors read as if the
+			// account were not covered at all (cowork-1-0-8 GAP-0031).
+			var covered []string
+			for _, conn := range machineInspect {
+				if versions[conn] != "" || len(surfaces[conn]) > 0 {
+					covered = append(covered, conn)
+				}
+			}
+			if len(covered) > 0 {
+				skip(fmt.Sprintf("named in enterprise.enrollment.include_users: no per-user connector install (no %s found); covered by machine policy (%s), which needs no per-user row",
+					strings.Join(notInstalled, ", "), strings.Join(covered, ", ")))
+			} else {
+				skip(fmt.Sprintf("named in enterprise.enrollment.include_users but not enrolled: no installation of %s found for this account; it is enrolled on the next cycle after one is installed in it",
+					strings.Join(notInstalled, ", ")))
+			}
 		}
 	}
 
@@ -748,6 +955,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			// for any account while sssd, nslcd or ypbind cannot reach the
 			// directory; nothing shows the directory answering this cycle.
 			logfSafely(opts.Logger, userName, fmt.Sprintf("account not found, but the directory could not be confirmed reachable; keeping (%s, %s) unchanged", userName, prev.Connector))
+			notInspected[userName] = "it was not found, and the directory could not be confirmed reachable"
 			targets = append(targets, prev)
 			continue
 		}
@@ -759,6 +967,10 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			opts.State.Misses[key]++
 			if opts.State.Misses[key] < UnixRevokeAfterMisses {
 				logfSafely(opts.Logger, userName, fmt.Sprintf("%s (%d/%d); keeping (%s, %s) for now", what, opts.State.Misses[key], UnixRevokeAfterMisses, userName, prev.Connector))
+				if filteredOut {
+					// Its kept rows still enroll an account that exists.
+					notInspected[userName] = "it " + what + ", but its rows are kept until that is confirmed"
+				}
 				targets = append(targets, prev)
 				continue
 			}
@@ -767,9 +979,38 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 		delete(opts.State.Misses, key)
 		report.Revoked++
 	}
+	opts.State.DiscoveryDeferred = nil
+	if len(deferred) > 0 {
+		opts.State.DiscoveryDeferred = deferred
+	}
 	for key := range opts.State.Misses {
 		if _, known := previous[key]; !known {
 			delete(opts.State.Misses, key)
+		}
+	}
+	// An enrolled account whose installs this cycle could not inspect is
+	// incomplete, never silently clean: under manifest enrollment every
+	// enabled target (an unresolved or renumbered account included),
+	// otherwise a known account kept through a failed lookup or an
+	// untrusted home.
+	for _, user := range authored.users() {
+		if inspected[user] || hasKey(exclude, user) || hasKey(exempt, user) || authored.excludedByUID(exclude, exempt, user) {
+			continue
+		}
+		why, kept := notInspected[user]
+		if _, gone := missing[user]; gone && !kept {
+			continue // confirmed gone: nothing it could run
+		}
+		if !manifestMode && !kept {
+			continue
+		}
+		if why == "" {
+			why = "the account does not resolve to the uid the manifest names"
+		}
+		for _, conn := range authored.connectors(user) {
+			report.Unprotected = append(report.Unprotected, UnprotectedAgent{User: user, UID: authored.uid(user), Connector: conn,
+				Code:   UnprotectedCodeInstallScanIncomplete,
+				Reason: "this enrolled account's agent installs could not be inspected this cycle (" + why + "), so an unsupported copy it runs would go unreported"})
 		}
 	}
 	withRows := map[string]struct{}{}
@@ -784,6 +1025,40 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 	for user := range withRows {
 		if source := resolvedSource[user]; source != "" {
 			opts.State.Sources[user] = source
+		}
+	}
+	// Earlier releases enrolled Kiro below both hook floors. Keep CLI rows so
+	// their interactive hooks remain installed across upgrade, but report an
+	// uncovered product even when current version evidence is unavailable.
+	for _, target := range targets {
+		if !target.IsEnabled() || target.Connector != "kiro" {
+			continue
+		}
+		reason := standaloneAgentFloorRefusal(resolveHookContract("kiro", target.AgentVersion))
+		if reason == "" {
+			continue
+		}
+		code := UnprotectedCodeForReason(reason)
+		consequence := "an earlier enrollment keeps its interactive hooks installed, but this CLI's non-interactive runs do not load them"
+		if code == UnprotectedCodeKiroIDEBelowGlobalHooksFloor {
+			consequence = "this IDE cannot read the global hooks file, even if an earlier enrollment left it installed"
+		}
+		if code != UnprotectedCodeKiroCLIBelowHookFloor && code != UnprotectedCodeKiroIDEBelowGlobalHooksFloor {
+			continue
+		}
+		alreadyReported := false
+		for _, agent := range report.Unprotected {
+			if agent.User == target.User && agent.Connector == "kiro" && agent.Code == code {
+				alreadyReported = true
+				break
+			}
+		}
+		if !alreadyReported {
+			report.Unprotected = append(report.Unprotected, UnprotectedAgent{
+				User: target.User, UID: target.UID, Connector: "kiro", Version: target.AgentVersion,
+				Code:   code,
+				Reason: reason + "; " + consequence,
+			})
 		}
 	}
 
@@ -1021,16 +1296,14 @@ func RevokeGoneUnixTargets(ctx context.Context, opts UnixRevokeGoneOptions) (Man
 func collectUnixCandidates(ctx context.Context, opts UnixEnumerateOptions, enrollment config.EnterpriseEnrollmentConfig, homeRoots []string) ([]unixCandidate, bool) {
 	byName := map[string]*unixCandidate{}
 	transient := false
-	add := func(account unixidentity.Account, included bool) {
-		if existing, ok := byName[account.Name]; ok {
-			existing.included = existing.included || included
-			return
+	add := func(account unixidentity.Account) {
+		if _, ok := byName[account.Name]; !ok {
+			byName[account.Name] = &unixCandidate{account: account}
 		}
-		byName[account.Name] = &unixCandidate{account: account, included: included}
 	}
 	if accounts, _, err := opts.Resolver.ListUsers(); err == nil {
 		for _, account := range accounts {
-			add(account, false)
+			add(account)
 		}
 	} else {
 		transient = true
@@ -1045,7 +1318,7 @@ func collectUnixCandidates(ctx context.Context, opts UnixEnumerateOptions, enrol
 			logfSafely(opts.Logger, strconv.Itoa(uid), fmt.Sprintf("%s uid did not resolve: %v", source, err))
 			return
 		}
-		add(account, false)
+		add(account)
 	}
 	if opts.SessionUIDs != nil {
 		for _, uid := range opts.SessionUIDs() {
@@ -1088,7 +1361,7 @@ func collectUnixCandidates(ctx context.Context, opts UnixEnumerateOptions, enrol
 			logfSafely(opts.Logger, name, fmt.Sprintf("included user did not resolve: %v", err))
 			continue
 		}
-		add(account, true)
+		add(account)
 	}
 	out := make([]unixCandidate, 0, len(byName))
 	for _, candidate := range byName {
@@ -1129,18 +1402,43 @@ func unixKnownRowVersionRefused(connectorName, from, to string) string {
 	return fmt.Sprintf("version %s is not verified against a known hook contract", strings.TrimSpace(to))
 }
 
+// unixNewRowVersionRefused explains why a new row must not be enrolled at
+// version: it resolves to no verified hook contract (below every contract's
+// floor, between contracts, known broken, or not a version DefenseClaw can
+// read). Enrolling it rendered the connector's hooks with no contract, and
+// status and verify then reported the agent as covered (GAP-0151). On the
+// standalone profile a version newer than every tested range resolves to the
+// newest contract (an untested newer version) and is enrolled. A connector
+// with a standalone floor instead of a contract (Kiro) must pass that floor
+// here too: the guardian cannot install a newly published row below it.
+// Empty when the row is enrolled.
+func unixNewRowVersionRefused(connectorName, version string) string {
+	if standaloneNotGatedAgentFloor(connectorName) != "" {
+		_, reason := standaloneNotGatedVersionAdmitted(resolveHookContract(connectorName, version))
+		return reason
+	}
+	resolution := resolveHookContract(connectorName, version)
+	switch resolution.Status {
+	case connector.HookCompatibilityKnown, connector.HookCompatibilityNotGated:
+		return ""
+	}
+	return fmt.Sprintf("version %s is not verified against a known hook contract (%s)", strings.TrimSpace(version), resolution.Reason)
+}
+
 // unixRejectedSurfaces reports the surfaces of one (user, connector) that
 // were not admitted. With a row (enrolled) a surface the report policy did
 // not admit still runs the hooks rendered for the row, so it is reported
-// only when it is refused: the gateway refuses the hook calls that name it
-// (surfaceRefusalConsequence).
+// when it is refused or its explicit engine version predates every known
+// hook contract. The latter is a report without a new refusal.
 func unixRejectedSurfaces(account unixidentity.Account, conn string, isMachine, enrolled bool, admission surfaceAdmission) []UnprotectedAgent {
 	var out []UnprotectedAgent
 	for _, rejected := range admission.rejected {
 		consequence, refusal := "it runs without DefenseClaw hooks", RefusalMissing
 		switch {
-		case enrolled && !rejected.refused:
+		case enrolled && !rejected.refused && !rejected.belowMinimum:
 			continue
+		case enrolled && !rejected.refused:
+			consequence = "its engine is below the first known hook contract, so the enrolled CLI's hooks cannot be assumed to protect it"
 		case enrolled:
 			consequence, refusal = surfaceRefusalConsequence(conn, rejected)
 		case isMachine:
@@ -1203,6 +1501,40 @@ func unixSurfaceOnlyRefusals(account unixidentity.Account, conn, cliVersion stri
 		out = append(out, rejected.unprotected(account.Name, "", intPointer(account.UID), conn, consequence, refusal))
 	}
 	return out, !admittedInstall
+}
+
+// errUnixDiscoveryBudgetSpent is the discovery error of an account a cycle
+// did not reach within UnixEnumerateOptions.DiscoveryBudget.
+var errUnixDiscoveryBudgetSpent = errors.New("not inspected this cycle: the cycle's discovery time ran out on earlier accounts")
+
+// budgetedUnixDiscoverSurfaces runs discover only before deadline, and stops
+// it at deadline.
+func budgetedUnixDiscoverSurfaces(discover UnixDiscoverSurfacesFunc, deadline time.Time) UnixDiscoverSurfacesFunc {
+	if discover == nil {
+		return nil
+	}
+	return func(ctx context.Context, account unixidentity.Account, connectors []string) (UnixDiscovery, error) {
+		if !time.Now().Before(deadline) {
+			return UnixDiscovery{}, errUnixDiscoveryBudgetSpent
+		}
+		ctx, cancel := context.WithDeadline(ctx, deadline)
+		defer cancel()
+		return discover(ctx, account, connectors)
+	}
+}
+
+func budgetedUnixDiscover(discover UnixDiscoverFunc, deadline time.Time) UnixDiscoverFunc {
+	if discover == nil {
+		return nil
+	}
+	surfaces := budgetedUnixDiscoverSurfaces(func(ctx context.Context, account unixidentity.Account, connectors []string) (UnixDiscovery, error) {
+		versions, reasons, err := discover(ctx, account, connectors)
+		return UnixDiscovery{Versions: versions, Reasons: reasons}, err
+	}, deadline)
+	return func(ctx context.Context, account unixidentity.Account, connectors []string) (map[string]string, map[string]string, error) {
+		found, err := surfaces(ctx, account, connectors)
+		return found.Versions, found.Reasons, err
+	}
 }
 
 // unixUntrustedHomeAgents reports the agents an eligible user without rows
@@ -1300,7 +1632,37 @@ func groupFilterAllows(resolver unixidentity.Resolver, account unixidentity.Acco
 			return true, false, false, ""
 		}
 	}
+	// An include_groups name that does not resolve to a group here (a
+	// short AD name on an SSSD host that wants the qualified one, a typo,
+	// a directory that cannot answer) says nothing about membership: the
+	// account stays pending, as on Windows, so existing rows and hooks are
+	// kept and no new row is added until it resolves (GAP-2619).
+	if unresolved := unresolvedIncludeGroups(resolver, enrollment.IncludeGroups); len(unresolved) > 0 {
+		return false, true, false, fmt.Sprintf("enterprise.enrollment.include_groups %s does not resolve to a group on this host, so membership of it is unknown; pending until it resolves: existing rows kept, no new rows (name the group as getent group prints it)", strings.Join(unresolved, ", "))
+	}
 	return false, false, true, "not a member of any enterprise.enrollment.include_groups group"
+}
+
+// unresolvedIncludeGroups lists, quoted, the include_groups entries the
+// resolver cannot find by name or, for a numeric entry, by gid.
+func unresolvedIncludeGroups(resolver unixidentity.Resolver, include []string) []string {
+	var out []string
+	for _, raw := range include {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		var err error
+		if gid, convErr := strconv.Atoi(name); convErr == nil {
+			_, err = resolver.LookupGroupID(gid)
+		} else {
+			_, err = resolver.LookupGroup(name)
+		}
+		if err != nil {
+			out = append(out, strconv.Quote(name))
+		}
+	}
+	return out
 }
 
 // unixReservedUID explains why uid can never be an interactive user:
@@ -1556,9 +1918,13 @@ func WriteUnixTargetsManifestAtomic(path string, m Manifest) (bool, error) {
 }
 
 // validateRootOwnedDirChain requires dir and every ancestor to be a real
-// directory owned by root and not group/other writable.
+// directory owned by root and not group/other writable. A group/other
+// writable ancestor inside the platform installer's tree (/opt/cisco belongs
+// to Cisco Secure Client and is 0775) is an advisory, as in every managed
+// trust walk (AIFW-34262); dir itself stays fatal.
 func validateRootOwnedDirChain(dir string) error {
-	for current := filepath.Clean(dir); ; current = filepath.Dir(current) {
+	leaf := filepath.Clean(dir)
+	for current := leaf; ; current = filepath.Dir(current) {
 		info, err := os.Lstat(current)
 		if err != nil {
 			return fmt.Errorf("enterprise hooks: inspect manifest directory %s: %w", current, err)
@@ -1567,7 +1933,11 @@ func validateRootOwnedDirChain(dir string) error {
 			return fmt.Errorf("enterprise hooks: manifest directory element %s is not a real directory", current)
 		}
 		if info.Mode().Perm()&0o022 != 0 {
-			return fmt.Errorf("enterprise hooks: manifest directory element %s is group/other writable", current)
+			advisory := current != leaf && managed.PlatformInstallerOwnedPath(current)
+			if err := managed.RelaxAncestorTrustVerdict(advisory, current, "hook guardian manifest",
+				fmt.Errorf("enterprise hooks: manifest directory element %s is group/other writable", current)); err != nil {
+				return err
+			}
 		}
 		st, ok := info.Sys().(*syscall.Stat_t)
 		if !ok || (st.Uid != 0 && !unixManifestTestOwnerAllowed(st.Uid)) {
@@ -1640,6 +2010,22 @@ func LoadUnixEnumeratorState(path string) *UnixEnumeratorState {
 			state.ACPSources[principal] = source
 		}
 	}
+	for key, verified := range parsed.VerifiedAgents {
+		if key != "" && verified.valid() && len(state.VerifiedAgents) < unixVerifiedAgentsMax {
+			if state.VerifiedAgents == nil {
+				state.VerifiedAgents = map[string]UnixVerifiedAgent{}
+			}
+			state.VerifiedAgents[key] = verified
+		}
+	}
+	for user, why := range parsed.DiscoveryDeferred {
+		if user != "" && (why == unixDiscoveryDeferredBudget || why == unixDiscoveryDeferredFailed) {
+			if state.DiscoveryDeferred == nil {
+				state.DiscoveryDeferred = map[string]string{}
+			}
+			state.DiscoveryDeferred[user] = why
+		}
+	}
 	return state
 }
 
@@ -1672,4 +2058,89 @@ func SaveUnixEnumeratorState(path string, state *UnixEnumeratorState) error {
 		return err
 	}
 	return os.Rename(tmpPath, path)
+}
+
+// unixEnrolledSubjectSet holds the accounts a manifest enrolls: the users of
+// its enabled rows, with the uid each row names and its connectors.
+type unixEnrolledSubjectSet map[string]*unixEnrolledSubject
+
+type unixEnrolledSubject struct {
+	uids       map[int]bool
+	connectors []string
+}
+
+func unixEnrolledSubjects(previous map[string]ManifestTarget) unixEnrolledSubjectSet {
+	out := unixEnrolledSubjectSet{}
+	for _, target := range previous {
+		user := strings.TrimSpace(target.User)
+		if user == "" || !target.IsEnabled() {
+			continue
+		}
+		subject := out[user]
+		if subject == nil {
+			subject = &unixEnrolledSubject{uids: map[int]bool{}}
+			out[user] = subject
+		}
+		if target.UID != nil {
+			subject.uids[*target.UID] = true
+		}
+		if conn := strings.ToLower(strings.TrimSpace(target.Connector)); conn != "" && !connectorListed(subject.connectors, conn) {
+			subject.connectors = append(subject.connectors, conn)
+		}
+	}
+	for _, subject := range out {
+		sort.Strings(subject.connectors)
+	}
+	return out
+}
+
+// names reports whether an enabled row enrolls account name with uid. A
+// row that names no uid enrolls the name.
+func (s unixEnrolledSubjectSet) names(name string, uid int) bool {
+	subject := s[name]
+	return subject != nil && (len(subject.uids) == 0 || subject.uids[uid])
+}
+
+func (s unixEnrolledSubjectSet) users() []string {
+	out := make([]string, 0, len(s))
+	for user := range s {
+		out = append(out, user)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (s unixEnrolledSubjectSet) connectors(user string) []string {
+	if subject := s[user]; subject != nil {
+		return subject.connectors
+	}
+	return nil
+}
+
+// uid is the uid the rows of user name when they all name the same one.
+func (s unixEnrolledSubjectSet) uid(user string) *int {
+	subject := s[user]
+	if subject == nil || len(subject.uids) != 1 {
+		return nil
+	}
+	for uid := range subject.uids {
+		return intPointer(uid)
+	}
+	return nil
+}
+
+// excludedByUID reports whether exclude_users or exempt_users names a uid
+// the rows of user enroll.
+func (s unixEnrolledSubjectSet) excludedByUID(exclude, exempt map[string]struct{}, user string) bool {
+	subject := s[user]
+	if subject == nil {
+		return false
+	}
+	for uid := range subject.uids {
+		text := strconv.Itoa(uid)
+		if hasKey(exclude, text) || hasKey(exempt, text) {
+			return true
+		}
+	}
+	return false
 }

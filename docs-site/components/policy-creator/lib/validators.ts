@@ -370,14 +370,25 @@ export function validatePolicy(policy: Policy): ValidationFinding[] {
     }
   }
 
+  // A blanket strip can erase all input before a judge sees it, just as a
+  // blanket finding or tool suppression can hide every result it covers.
+  const blanketPattern = (pattern: string) =>
+    !pattern || ['.*', '.+', '^.*$', '^.+$'].includes(pattern.trim());
+  for (const strip of policy.suppressions.pre_judge_strips) {
+    if (blanketPattern(strip.pattern)) {
+      findings.push({
+        level: 'warning',
+        code: 'SUPP_OVER_BROAD',
+        message: `Pre-judge strip "${strip.id || '(unnamed)'}" matches every input for its selected judges.`,
+        location: `suppressions.pre_judge.${strip.id}`,
+        fix: 'Scope the pattern to the exact sender label or fixture text the judge should skip.',
+      });
+    }
+  }
+
   // Suppressions: warn on overly broad finding patterns.
   for (const supp of policy.suppressions.finding_suppressions) {
-    if (
-      !supp.finding_pattern ||
-      supp.finding_pattern === '.*' ||
-      supp.finding_pattern === '.+' ||
-      supp.finding_pattern === '^.*$'
-    ) {
+    if (blanketPattern(supp.finding_pattern)) {
       findings.push({
         level: 'warning',
         code: 'SUPP_OVER_BROAD',
@@ -388,12 +399,7 @@ export function validatePolicy(policy: Policy): ValidationFinding[] {
     }
   }
   for (const tool of policy.suppressions.tool_suppressions) {
-    if (
-      !tool.tool_pattern ||
-      tool.tool_pattern === '.*' ||
-      tool.tool_pattern === '.+' ||
-      tool.tool_pattern === '^.*$'
-    ) {
+    if (blanketPattern(tool.tool_pattern)) {
       findings.push({
         level: 'warning',
         code: 'SUPP_OVER_BROAD',

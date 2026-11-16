@@ -30,6 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
@@ -262,7 +263,10 @@ var sandboxPrerequisitesPath = func(goos string) string {
 type sandboxPrerequisiteItems struct {
 	Ready   bool `json:"ready"`
 	Missing []struct {
-		Item string `json:"item"`
+		Item   string `json:"item"`
+		Detail string `json:"detail"`
+		// Version is the refused release of an installed OpenShell part.
+		Version string `json:"version"`
 	} `json:"missing"`
 }
 
@@ -286,8 +290,73 @@ type sandboxPrerequisitesRecord struct {
 // the host's (install mode, driver, version, binaries, devices); the
 // account's own access to the driver's devices is judged by the probe.
 var sandboxOpenShellPrerequisite = func(cfg *config.Config, _ int, driver string) string {
+	if cfg != nil && strings.Contains(cfg.Enterprise.OpenShell.Version, "<") {
+		if _, _, possible := openshell.ManagedVersionPin(cfg.Enterprise.OpenShell.Version); !possible {
+			return "enterprise.openshell.version has no release at or above the OpenShell " + openshell.SupportedMin + " floor; ask your administrator to set a supported range"
+		}
+	}
 	record, ok := readSandboxPrerequisites(sandboxPrerequisitesPath(runtime.GOOS))
-	return sandboxPrerequisiteWhy(cfg, runtime.GOOS, driver, record, ok)
+	why := sandboxPrerequisiteWhy(cfg, runtime.GOOS, driver, record, ok)
+	return sandboxSetupSwitches.bound(why, sandboxSetupSwitchKey(cfg, runtime.GOOS, record), time.Now())
+}
+
+// sandboxSetupSwitchGrace is how long a switch of the sandbox setup (the
+// record names another driver or install mode than the configuration) reads
+// as under way. A switch whose ensure failed never rewrites the record, and
+// "still setting that up, try again in a few minutes" then stood for good,
+// with no contact (GAP-0434); past the grace it reads as not set up, which
+// names the organization's contact.
+const sandboxSetupSwitchGrace = 30 * time.Minute
+
+// sandboxSetupSwitchClock times the switch under way: since when this
+// gateway has seen the record differ from the configuration in one way
+// (key). Any other answer ends it.
+type sandboxSetupSwitchClock struct {
+	mu    sync.Mutex
+	key   string
+	since time.Time
+}
+
+// sandboxSetupSwitches is the gateway's clock of the switch under way.
+var sandboxSetupSwitches = &sandboxSetupSwitchClock{}
+
+// bound is why, unless it is the switch under way for longer than
+// sandboxSetupSwitchGrace: then the setup is not set up.
+func (c *sandboxSetupSwitchClock) bound(why, key string, now time.Time) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if why != sandboxUnavailableSetupChanging {
+		c.key, c.since = "", time.Time{}
+		return why
+	}
+	if c.key != key || c.since.IsZero() {
+		c.key, c.since = key, now
+		return why
+	}
+	if now.Sub(c.since) >= sandboxSetupSwitchGrace {
+		return sandboxUnavailableNotSetUp
+	}
+	return why
+}
+
+// sandboxSetupSwitchKey names a switch: the setup the record names and the
+// one configured.
+func sandboxSetupSwitchKey(cfg *config.Config, goos string, record sandboxPrerequisitesRecord) string {
+	install, want := sandboxConfiguredSetup(cfg, goos)
+	return strings.ToLower(strings.TrimSpace(record.Install)) + "/" + strings.ToLower(strings.TrimSpace(record.Driver)) + "->" + install + "/" + want
+}
+
+// sandboxConfiguredSetup is the configured OpenShell install mode and
+// driver on goos.
+func sandboxConfiguredSetup(cfg *config.Config, goos string) (install, driver string) {
+	if cfg == nil {
+		return "", ""
+	}
+	install = strings.ToLower(strings.TrimSpace(cfg.Enterprise.OpenShell.Install))
+	if install == "" {
+		install = config.EnterpriseOpenShellInstallPrerequisite
+	}
+	return install, cfg.Enterprise.OpenShell.SandboxDriver(goos)
 }
 
 // readSandboxPrerequisites reads the lifecycle's record at path. ok is
@@ -298,7 +367,7 @@ func readSandboxPrerequisites(path string) (record sandboxPrerequisitesRecord, o
 	if path == "" {
 		return record, false
 	}
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if err != nil || !info.Mode().IsRegular() || !sandboxRecordTrusted(info) {
 		return record, false
 	}
@@ -330,16 +399,13 @@ func sandboxPrerequisiteWhy(cfg *config.Config, goos, driver string, record sand
 	if !ok || cfg == nil {
 		return sandboxUnavailableNotSetUp
 	}
-	install := strings.ToLower(strings.TrimSpace(cfg.Enterprise.OpenShell.Install))
-	if install == "" {
-		install = config.EnterpriseOpenShellInstallPrerequisite
-	}
-	want := cfg.Enterprise.OpenShell.SandboxDriver(goos)
+	install, want := sandboxConfiguredSetup(cfg, goos)
 	if !strings.EqualFold(strings.TrimSpace(record.Install), install) ||
 		!strings.EqualFold(strings.TrimSpace(record.Driver), want) {
 		// The lifecycle prepared another setup than the one configured now:
 		// the organization switched it, and the switch is under way. Not a
-		// missing setup to ask IT about (#1203).
+		// missing setup to ask IT about (#1203), for as long as a switch
+		// takes (sandboxSetupSwitchGrace, GAP-0434).
 		return sandboxUnavailableSetupChanging
 	}
 	items := record.sandboxPrerequisiteItems
@@ -355,13 +421,65 @@ func sandboxPrerequisiteWhy(cfg *config.Config, goos, driver string, record sand
 	why := sandboxUnavailablePrerequisiteOther
 	for _, missing := range items.Missing {
 		switch strings.ToLower(strings.TrimSpace(missing.Item)) {
-		case "openshell cli", "openshell gateway", "microvm driver", "openshell pin", "openshell platform":
+		case "openshell cli", "openshell gateway", "microvm driver":
+			// The trusted lifecycle record distinguishes a missing binary from
+			// one it found but refused for its release. Keep that distinction
+			// in the user's doctor/run refusal without changing availability.
+			if detail := installedOpenShellPrerequisite(missing.Detail); detail != "" {
+				return detail
+			}
+			if why := sandboxOpenShellRefused(missing.Version); why != "" {
+				return why
+			}
+			return sandboxUnavailableNoOpenShell
+		case "openshell pin", "openshell platform":
+			if detail := installedOpenShellPrerequisite(missing.Detail); detail != "" {
+				return detail
+			}
 			return sandboxUnavailableNoOpenShell
 		case "docker":
 			why = sandboxUnavailableDockerMissing
 		}
 	}
 	return why
+}
+
+func installedOpenShellPrerequisite(detail string) string {
+	detail = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(detail), "openshell: "))
+	switch {
+	case strings.HasPrefix(detail, "OpenShell ") &&
+		(strings.Contains(detail, " runs no DefenseClaw sandbox") || strings.Contains(detail, " is not supported")):
+		return detail + "; ask your administrator to upgrade OpenShell"
+	case strings.Contains(detail, " is installed, enterprise.openshell.version pins "):
+		if _, pin, ok := strings.Cut(detail, " is installed, enterprise.openshell.version pins "); ok {
+			if fields := strings.Fields(pin); len(fields) > 0 {
+				if _, raised, _ := openshell.ManagedVersionPin(fields[0]); raised {
+					return "OpenShell " + detail + "; enterprise.openshell.version is below the OpenShell " + openshell.SupportedMin +
+						" floor; ask your administrator to set the pin to " + openshell.InstallerVersion + " or later"
+				}
+			}
+		}
+		return "OpenShell " + detail + "; ask your administrator to install the pinned release"
+	}
+	return ""
+}
+
+// sandboxOpenShellRefused is the reason for an OpenShell part the
+// administrator installed in a release the host runs no sandbox on (the
+// record's version): an installed release is never "not installed"
+// (GAP-0266). One outside the supported window is unsupported; a
+// supported one the pin does not allow is not the organization's release.
+// "" when version cannot be read.
+func sandboxOpenShellRefused(version string) string {
+	v, err := openshell.ParseVersion(version)
+	if err != nil {
+		return ""
+	}
+	if openshell.CheckSupported(v) != nil {
+		return "OpenShell " + v.String() + " is installed, but that release is unsupported: sandboxes need OpenShell " +
+			openshell.SupportedMin + " or later, below " + openshell.SupportedBelow
+	}
+	return "OpenShell " + v.String() + " is installed, but it is not the release your organization requires"
 }
 
 // sandboxDriverFor is the compute driver managed sandboxes want on goos:

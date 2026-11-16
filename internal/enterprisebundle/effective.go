@@ -172,7 +172,7 @@ func loadConfigAtPath(b *Bundle, root, configPath, dataDir, platform string) (*c
 		return nil, nil, refuse(CodeConfigInvalid, ConfigName, "%s", boundedDetail(message))
 	}
 	if _, err := config.ParseCompileObservabilityV8(configPath, rendered, config.ObservabilityV8CompileOptions{
-		DefaultDataDir: dataDir, Secrets: bundleSecretProbe{},
+		DefaultDataDir: dataDir, Secrets: bundleSecretProbe{}, TolerateDeniedPaths: true,
 	}); err != nil {
 		return nil, nil, refuse(CodeConfigInvalid, ConfigName, "%s", boundedDetail(err.Error()))
 	}
@@ -185,12 +185,16 @@ func loadConfigAtPath(b *Bundle, root, configPath, dataDir, platform string) (*c
 	if err != nil {
 		return nil, nil, refuse(CodeConfigInvalid, ConfigName, "%s", boundedDetail(err.Error()))
 	}
+	if err := config.ValidateManagedStandaloneLiteralCandidate(cfg, rendered); err != nil {
+		return nil, nil, refuse(CodeConfigInvalid, ConfigName, "%s", boundedDetail(err.Error()))
+	}
 	return cfg, rendered, nil
 }
 
 // bundleSecretProbe lets the canonical observability compiler check a bundle
 // before the target device's protected credentials are available. Verify's
-// secret_refs check confirms their presence on the device.
+// secret_refs check reads them on the device and compares each value with
+// the value_sha256 the bundle signs.
 type bundleSecretProbe struct{}
 
 func (bundleSecretProbe) ResolveObservabilitySecret(string) (string, bool) { return "probe", true }
@@ -234,7 +238,7 @@ func validateTargetConfig(b *Bundle, cfg *config.Config, rendered []byte, platfo
 			return refuse(CodeConfigInvalid, ConfigName, "%s", boundedDetail(err.Error()))
 		}
 		compiled, err := config.ParseCompileObservabilityV8(cfg.ConfigFilePath, rendered, config.ObservabilityV8CompileOptions{
-			DefaultDataDir: layout.DataDir, Secrets: bundleSecretProbe{},
+			DefaultDataDir: layout.DataDir, Secrets: bundleSecretProbe{}, TolerateDeniedPaths: true,
 		})
 		if err != nil {
 			return refuse(CodeConfigInvalid, ConfigName, "%s: %s", platform, boundedDetail(err.Error()))

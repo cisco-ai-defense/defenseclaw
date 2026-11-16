@@ -57,6 +57,8 @@ func runPreremove(t *testing.T, result *enterprisestatus.Result) (int, string, s
 		"/opt/defenseclaw/bin/defenseclaw-gateway", gateway,
 		"/var/lib/defenseclaw-enterprise", state,
 		"/run/systemd/system", systemd,
+		// The user managers' runtime directories: never the host's own.
+		"user_runtime=/run/user", "user_runtime="+filepath.Join(work, "run-user"),
 	).Replace(string(script))
 	cmd := exec.Command("sh", "-c", text, "preremove.sh", "remove")
 	cmd.Env = append(os.Environ(), "TMPDIR="+work)

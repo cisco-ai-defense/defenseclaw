@@ -27,11 +27,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
+	"github.com/defenseclaw/defenseclaw/internal/managed/mcpasuser"
+	"github.com/defenseclaw/defenseclaw/internal/mcplocal"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
@@ -65,6 +70,93 @@ func mcpScanTargetNotScanned(target, why string) error {
 		"(an allowed server is not scanned) or sets admission.mcp.scan_on_install: false", target, why)
 }
 
+// mcpScanLookupIP resolves an MCP scan URL's host; a seam for tests.
+var mcpScanLookupIP = net.LookupIP
+
+// MCPTargetRefusal names why the scanner refuses an MCP URL from the URL
+// text alone, before any name is resolved.
+type MCPTargetRefusal string
+
+const (
+	// MCPTargetRefusalNone: the URL is not refused from its text.
+	MCPTargetRefusalNone MCPTargetRefusal = ""
+	// MCPTargetRefusalCredentials: the URL carries inline credentials.
+	MCPTargetRefusalCredentials MCPTargetRefusal = "credentials"
+	// MCPTargetRefusalAddress: the host is a loopback alias, the metadata host,
+	// or a literal loopback, private, link-local, multicast, unspecified or
+	// metadata address.
+	MCPTargetRefusalAddress MCPTargetRefusal = "address"
+	// MCPTargetRefusalMalformed: the URL does not parse or names no host.
+	MCPTargetRefusalMalformed MCPTargetRefusal = "malformed"
+)
+
+// mcpScanTargetTextRefusal is every refusal of an MCP scan URL that needs no
+// name resolved. validateMCPScanTargetURL applies it and MCPScanTargetRefusal
+// reports it to the watcher, so the managed gateway holds exactly the
+// definitions the scanner refuses from their text. literal says the host is an
+// address, which needs no resolving either.
+func mcpScanTargetTextRefusal(target string) (kind MCPTargetRefusal, literal bool, host string, err error) {
+	u, perr := url.Parse(target)
+	if perr != nil {
+		return MCPTargetRefusalMalformed, false, "", fmt.Errorf("invalid MCP scan target URL: %w", perr)
+	}
+	if u.User != nil {
+		return MCPTargetRefusalCredentials, false, "", errors.New("MCP scan target URL must not contain inline credentials")
+	}
+	host = u.Hostname()
+	if host == "" {
+		return MCPTargetRefusalMalformed, false, "", errors.New("MCP scan target URL has empty host")
+	}
+	lowerHost := strings.ToLower(host)
+	if lowerHost == "localhost" ||
+		lowerHost == "ip6-localhost" ||
+		lowerHost == "ip6-loopback" ||
+		strings.HasSuffix(lowerHost, ".localhost") {
+		return MCPTargetRefusalAddress, false, host, mcpScanTargetNotScanned(target, fmt.Sprintf("names the loopback host %s", host))
+	}
+	if lowerHost == "metadata.google.internal" {
+		return MCPTargetRefusalAddress, false, host, fmt.Errorf("MCP scan target %q points at cloud metadata host", host)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		// An address the resolvers read from a shorthand (127.1, 0,
+		// 2130706433, 0x7f000001, 0177.0.0.1) is the address it names.
+		if addr, ok := config.LegacyIPv4Host(host); ok {
+			ip = net.IP(addr.AsSlice())
+		}
+	}
+	if ip != nil {
+		if ip.IsLoopback() ||
+			ip.IsPrivate() ||
+			ip.IsLinkLocalUnicast() ||
+			ip.IsLinkLocalMulticast() ||
+			ip.IsUnspecified() ||
+			ip.IsMulticast() {
+			return MCPTargetRefusalAddress, true, host, mcpScanTargetNotScanned(target, fmt.Sprintf("is on %s, %s", ip, mcpScanAddressClass(ip)))
+		}
+		// AWS / Oracle / DO IMDS literals.
+		if ip.String() == "169.254.169.254" || ip.String() == "fd00:ec2::254" {
+			return MCPTargetRefusalAddress, true, host, fmt.Errorf("MCP scan target %s is a cloud metadata endpoint", ip)
+		}
+		return MCPTargetRefusalNone, true, host, nil
+	}
+	return MCPTargetRefusalNone, false, host, nil
+}
+
+// MCPScanTargetRefusal reports why the scanner refuses an MCP server URL from
+// its text alone (inline credentials, no host, a loopback alias, the metadata
+// host, or a literal local address), whatever the process environment says. A host the
+// scanner refuses only after resolving its name is not named here: the scan
+// decides that one.
+func MCPScanTargetRefusal(target string) MCPTargetRefusal {
+	target = strings.TrimSpace(target)
+	if !mcpScanTargetLooksLikeURL(target) {
+		return MCPTargetRefusalNone
+	}
+	kind, _, _, _ := mcpScanTargetTextRefusal(target)
+	return kind
+}
+
 // validateMCPScanTargetURL refuses MCP scan URLs that point at
 // loopback / private / link-local / cloud metadata destinations, or
 // that embed inline credentials. The check is opt-out via
@@ -73,48 +165,18 @@ func validateMCPScanTargetURL(target string) error {
 	if envvars.Getenv("DEFENSECLAW_ALLOW_LOCAL_MCP_TARGETS") == "1" {
 		return nil
 	}
-	u, err := url.Parse(target)
+	_, literal, host, err := mcpScanTargetTextRefusal(target)
+	if err != nil || literal {
+		return err
+	}
+	addrs, err := mcpScanLookupIP(host)
 	if err != nil {
-		return fmt.Errorf("invalid MCP scan target URL: %w", err)
-	}
-	if u.User != nil {
-		return errors.New("MCP scan target URL must not contain inline credentials")
-	}
-	host := u.Hostname()
-	if host == "" {
-		return errors.New("MCP scan target URL has empty host")
-	}
-	lowerHost := strings.ToLower(host)
-	if lowerHost == "localhost" ||
-		lowerHost == "ip6-localhost" ||
-		lowerHost == "ip6-loopback" ||
-		strings.HasSuffix(lowerHost, ".localhost") {
-		return mcpScanTargetNotScanned(target, fmt.Sprintf("names the loopback host %s", host))
-	}
-	if lowerHost == "metadata.google.internal" {
-		return fmt.Errorf("MCP scan target %q points at cloud metadata host", host)
-	}
-	if literal := net.ParseIP(host); literal != nil {
-		if literal.IsLoopback() ||
-			literal.IsPrivate() ||
-			literal.IsLinkLocalUnicast() ||
-			literal.IsLinkLocalMulticast() ||
-			literal.IsUnspecified() ||
-			literal.IsMulticast() {
-			return mcpScanTargetNotScanned(target, fmt.Sprintf("is on %s, %s", literal, mcpScanAddressClass(literal)))
-		}
-		// AWS / Oracle / DO IMDS literals.
-		if literal.String() == "169.254.169.254" || literal.String() == "fd00:ec2::254" {
-			return fmt.Errorf("MCP scan target %s is a cloud metadata endpoint", literal)
-		}
-		return nil
-	}
-	addrs, err := net.LookupIP(host)
-	if err != nil {
-		// DNS failure is treated as fatal here: an unresolvable host
-		// would be revalidated at dial time and we cannot rely on the
-		// downstream scanner to do that.
-		return fmt.Errorf("MCP scan target %q does not resolve: %w", host, err)
+		// No address, so nothing is dialed and the server was not scanned.
+		// That is a scan that did not finish, not a refusal of the definition
+		// of the server: unverified_server decides, as mcp set does
+		// (GAP-1277). An address that resolves later is checked by the next
+		// scan.
+		return fmt.Errorf("MCP scan target %q does not resolve: %w: %w", host, errMCPScanTargetUnresolved, err)
 	}
 	for _, ip := range addrs {
 		if ip.IsLoopback() ||
@@ -232,6 +294,9 @@ func (s *MCPScanner) runtimeInput() ([]byte, error) {
 		Settings    json.RawMessage `json:"settings"`
 		RulePack    json.RawMessage `json:"rule_pack,omitempty"`
 		ServerEntry json.RawMessage `json:"server_entry,omitempty"`
+		// AsUserRelay is the command the runtime starts in place of the
+		// server, which then runs as its user (#1164).
+		AsUserRelay []string `json:"as_user_relay,omitempty"`
 	}{Settings: json.RawMessage(settings)}
 	if s.RulePack.Dir != "" {
 		pack, err := s.RulePack.runtimeArg()
@@ -246,6 +311,13 @@ func (s *MCPScanner) runtimeInput() ([]byte, error) {
 			return nil, fmt.Errorf("scanner: encode MCP server entry: %w", err)
 		}
 		input.ServerEntry = entry
+		if s.asUser() {
+			relay, err := s.asUserRelay()
+			if err != nil {
+				return nil, err
+			}
+			input.AsUserRelay = relay
+		}
 	}
 	return json.Marshal(input)
 }
@@ -292,7 +364,59 @@ func (s *MCPScanner) runtimeServerEntry() ([]byte, error) {
 		Args    []string          `json:"args"`
 		Env     map[string]string `json:"env"`
 		CWD     string            `json:"cwd"`
-	}{entry.Name, entry.Command, entry.Args, entry.Env, s.serverWorkDir()})
+	}{entry.Name, entry.Command, entry.Args, entry.Env, s.runtimeServerCWD()})
+}
+
+// runtimeServerCWD is the folder the runtime starts the server in: none for
+// a server that starts as its user, whose folder the hook enumerator checks
+// as that user.
+func (s *MCPScanner) runtimeServerCWD() string {
+	if s.asUser() {
+		s.workDirRefused = ""
+		return ""
+	}
+	return s.serverWorkDir()
+}
+
+// asUser reports a local server the managed Windows hook enumerator
+// published for an enrolled user. The gateway runs as LocalSystem and must
+// neither read that user's profile nor run the user's server with its own
+// rights, so the scanner runtime starts a relay instead and the enumerator
+// starts the server as the user (#1164).
+func (s *MCPScanner) asUser() bool {
+	entry := s.ServerEntry
+	return entry != nil && entry.RunAsSID != "" && entry.Command != "" && entry.URL == ""
+}
+
+// mcpAsUserRelayExecutable is the executable that hosts the relay: the
+// gateway itself. Tests replace it.
+var mcpAsUserRelayExecutable = os.Executable
+
+// asUserRelay is the relay command line: the gateway executable, which asks
+// the hook enumerator to start the server the request names. It carries no
+// command, only the account, connector, name, project and definition digest.
+func (s *MCPScanner) asUserRelay() ([]string, error) {
+	entry := s.ServerEntry
+	if !mcpasuser.PublishedConnector(entry.Connector) {
+		return nil, fmt.Errorf("scanner: MCP server %q of %s: its connector has no published servers to start as their user", entry.Name, entry.Connector)
+	}
+	service := strings.TrimSpace(os.Getenv(mcpasuser.GatewayServiceEnv))
+	if service == "" {
+		return nil, fmt.Errorf("scanner: MCP server %q cannot be started as its user: %s is not set", entry.Name, mcpasuser.GatewayServiceEnv)
+	}
+	executable, err := mcpAsUserRelayExecutable()
+	if err != nil {
+		return nil, fmt.Errorf("scanner: MCP server %q cannot be started as its user: %w", entry.Name, err)
+	}
+	request, err := mcpasuser.NewRequest(service, entry.RunAsSID, *entry)
+	if err != nil {
+		return nil, fmt.Errorf("scanner: MCP server %q cannot be started as its user: %w", entry.Name, err)
+	}
+	arg, err := mcpasuser.EncodeRequestArg(request)
+	if err != nil {
+		return nil, fmt.Errorf("scanner: MCP server %q cannot be started as its user: %w", entry.Name, err)
+	}
+	return append([]string{executable}, mcpasuser.RelayArgs(arg)...), nil
 }
 
 // serverWorkDir is the folder the Windows scanner runtime starts a local
@@ -301,11 +425,9 @@ func (s *MCPScanner) runtimeServerEntry() ([]byte, error) {
 // folder; only the server's process starts here. A folder is used only when
 // it is absolute, inside the project or the user's home, and no folder on the
 // way down from there is a link or reparse point; otherwise the scan keeps
-// the scanner's folder, as before, and says so.
-//
-// On managed Windows the enumerator's spool record carries its checked
-// folder (entry.WorkDir, entry.WorkDirRefused). The LocalSystem gateway path
-// guard refuses a profile folder before a scanner child can start there.
+// the scanner's folder, as before, and says so. A server of an enrolled user
+// starts as that user instead (asUser), in a folder the hook enumerator
+// checks as the user.
 func (s *MCPScanner) serverWorkDir() string {
 	s.workDirRefused = ""
 	entry := s.ServerEntry
@@ -322,21 +444,6 @@ func (s *MCPScanner) serverWorkDir() string {
 			roots = append(roots, filepath.Clean(root))
 		}
 	}
-	if entry.WorkDir != "" || entry.WorkDirRefused != "" {
-		if entry.WorkDirRefused != "" {
-			fmt.Fprintf(os.Stderr, "[scan] MCP server %q: not starting it in %s\n", entry.Name, entry.WorkDirRefused)
-			s.workDirRefused = entry.WorkDirRefused
-		}
-		if entry.WorkDir == "" {
-			return ""
-		}
-		if err := verifiedWorkDir(entry.WorkDir, roots); err != nil {
-			refuse(entry.WorkDir, err)
-			return ""
-		}
-		s.workDirRefused = ""
-		return filepath.Clean(entry.WorkDir)
-	}
 	for _, dir := range []string{entry.CWD, entry.Project} {
 		if dir == "" {
 			continue
@@ -351,40 +458,8 @@ func (s *MCPScanner) serverWorkDir() string {
 	return ""
 }
 
-// verifiedWorkDir checks a folder the enumerator verified: its form, that it
-// is still inside the project or the home the gateway resolved, and that the
-// gateway can open it, since the server's process runs as the gateway.
-func verifiedWorkDir(dir string, roots []string) error {
-	if !filepath.IsAbs(dir) || strings.ContainsRune(dir, 0) || strings.HasPrefix(dir, `\\`) || strings.HasPrefix(dir, "//") {
-		return errors.New("the verified folder is not a local absolute path")
-	}
-	dir = filepath.Clean(dir)
-	inside := false
-	for _, root := range roots {
-		if rel, err := filepath.Rel(root, dir); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			inside = true
-			break
-		}
-	}
-	if !inside {
-		return errors.New("the verified folder is outside the project and the user's home folder")
-	}
-	folder, err := workDirOpen(dir)
-	if err != nil {
-		if errors.Is(err, os.ErrPermission) {
-			return errors.New("the DefenseClaw gateway service cannot read this folder")
-		}
-		return err
-	}
-	return folder.Close()
-}
-
-// workDirOpen and workDirLstat are test seams for the gateway's access to a
-// server's folder.
-var (
-	workDirOpen  = os.Open
-	workDirLstat = os.Lstat
-)
+// workDirLstat is a test seam for the gateway's access to a server's folder.
+var workDirLstat = os.Lstat
 
 // containedWorkDir checks a folder for serverWorkDir.
 func containedWorkDir(dir string, roots []string) error {
@@ -431,22 +506,153 @@ func (s *MCPScanner) workDirNote() string {
 	return "the server was not started in its folder " + s.workDirRefused + "; it ran in the scanner folder instead: "
 }
 
+// errMCPScanTargetUnresolved marks an MCP URL whose host had no address: the
+// scan did not finish, it was not refused (GAP-1277).
+var errMCPScanTargetUnresolved = errors.New("no DNS answer")
+
+// ErrMCPScanRefused marks an MCP scan refused for the server's own
+// definition: a URL on a local, private or metadata address, a path the
+// scanner does not read, a server that must start as its user, or a local
+// launcher other than npx and uvx. It is a verdict about the definition, not
+// a scan that could not finish, so unverified_server warn does not keep such
+// a server.
+var ErrMCPScanRefused = errors.New("the MCP scanner refused the server definition")
+
+// mcpScanRefusal keeps the refusal's own message and wraps ErrMCPScanRefused.
+type mcpScanRefusal struct{ error }
+
+func (r mcpScanRefusal) Unwrap() []error { return []error{r.error, ErrMCPScanRefused} }
+
+// mcpScanRefusalWords are how the scanner's children word a server they
+// refuse to start or dial: the Python scanner (defenseclaw/scanner/mcp.py:
+// "refusing to scan local MCP server", "refusing to scan MCP URL") and the
+// managed as-user launch (enterprisehooks: "MCP server %q is not started in
+// <folder>", "... is not started: <launcher>"). Output that contains one can
+// only make a failed scan a refusal, which blocks as before.
+var mcpScanRefusalWords = []string{"refusing to scan ", " is not started in ", " is not started: "}
+
+// refusedMCPScan wraps err as a refusal, or when one of output carries a
+// child's refusal.
+func refusedMCPScan(err error, output ...string) error {
+	if len(output) == 0 || slices.ContainsFunc(output, mentionsMCPScanRefusal) {
+		return mcpScanRefusal{err}
+	}
+	return err
+}
+
+func mentionsMCPScanRefusal(text string) bool {
+	return slices.ContainsFunc(mcpScanRefusalWords, func(words string) bool { return strings.Contains(text, words) })
+}
+
+// MCPScanRefused reports a failed MCP scan that refused the server's
+// definition (ErrMCPScanRefused, or a child's refusal in the error text)
+// rather than one that could not finish.
+func MCPScanRefused(err error) bool {
+	return err != nil && (errors.Is(err, ErrMCPScanRefused) || mentionsMCPScanRefusal(err.Error()))
+}
+
+// mcpQuoted is a quoted value as Python repr and Go %q write it.
+const mcpQuoted = `(?:'(?:[^'\\\r\n]|\\.){0,512}'|"(?:[^"\\\r\n]|\\.){0,512}")`
+
+// mcpLauncherRefusalPattern is the scanner's own refusal of a local
+// server's launcher, at the start of the scanner's message: the Python
+// scanner (cli/defenseclaw/scanner/mcp.py _stdio_scan_command_error, as
+// `mcp scan --json` reports it on stdout or the managed runtime's ValueError
+// on stderr) and the managed as-user launch (enterprisehooks
+// checkMCPAsUserDefinition, as the hook enumerator answers the relay). It
+// names a launcher other than the bare npx or uvx, a command path, a
+// code-running flag, no package argument, or a cmd.exe metacharacter in an
+// npx argument: each is about the definition alone. A refusal from the host
+// (the npx.cmd path the user's PATH resolves holding a metacharacter, a
+// launcher not on PATH or not trusted, a folder) is not one; it is retried
+// with backoff. The match is anchored: text that only quotes a refusal (an
+// exception message, a server's stderr) is not the scanner's refusal
+// (rel-1-0-6:GAP-0364). Group 1 is the quoted launcher.
+var mcpLauncherRefusalPattern = regexp.MustCompile(`^(?:(?:scan failed|ValueError): refusing to scan local MCP server ` + mcpQuoted + `: ` +
+	`|(?:\[[A-Za-z0-9._-]{1,64} stderr\] mcp as-user scan: the hook enumerator did not start the server: )?MCP server ` + mcpQuoted + ` is not started: )` +
+	`(?:(?:command|launcher) (` + mcpQuoted + `) (?:is not an allowlisted stdio launcher|is a path, and paths are never an allowlisted stdio launcher` +
+	`|is a path; a scan starts only the bare names npx or uvx|uses forbidden execution flag |requires a package/server argument)` +
+	`|an npx argument contains a Windows command metacharacter)`)
+
+// mcpScanErrorLeadPattern is what the gateway puts before the scanner's
+// message: the fail-closed block reason and the error Scan builds.
+var mcpScanErrorLeadPattern = regexp.MustCompile(`^(?:scanner failure \(fail-closed\): )?(?:scanner: mcp-scanner exited -?[0-9]{1,10}: |scanner mcp-scanner exited -?[0-9]{1,10} \()?`)
+
+// mcpBareLauncherPattern is a launcher the agent text may name.
+var mcpBareLauncherPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$`)
+
+// mcpScannerMessage is text with the gateway's lead and the work-folder
+// note (workDirNote) taken off: where the scanner's own message starts.
+func mcpScannerMessage(text string) string {
+	text = text[len(mcpScanErrorLeadPattern.FindString(text)):]
+	if rest, ok := strings.CutPrefix(text, "the server was not started in its folder "); ok {
+		if _, after, found := strings.Cut(rest, "; it ran in the scanner folder instead: "); found {
+			text = after
+		}
+	}
+	return text
+}
+
+// MCPRefusedLauncher reports a failed MCP scan whose scanner refused the
+// server's local launcher (rel-1-0-6:GAP-0258), and the launcher it names
+// when that is a bare program name ("" for a path or none). That refusal is
+// a pure function of the definition: the same command and arguments are
+// refused again on every try, so a retry of an unchanged definition can only
+// repeat it. Nothing else (a URL refusal, a folder the scan may not use, a
+// scanner that could not finish, text that only quotes a refusal) is one.
+func MCPRefusedLauncher(text string) (launcher string, refused bool) {
+	m := mcpLauncherRefusalPattern.FindStringSubmatch(mcpScannerMessage(text))
+	if m == nil {
+		return "", false
+	}
+	if len(m[1]) >= 2 && mcpBareLauncherPattern.MatchString(m[1][1:len(m[1])-1]) {
+		launcher = m[1][1 : len(m[1])-1]
+	}
+	return launcher, true
+}
+
+// MCPLauncherRefusal reports a failed MCP scan whose scanner refused the
+// server's local launcher (MCPRefusedLauncher).
+func MCPLauncherRefusal(text string) bool {
+	_, refused := MCPRefusedLauncher(text)
+	return refused
+}
+
 // runMCPScannerCommand owns the runtime process and its Python descendants.
-var runMCPScannerCommand = processutil.RunTree
+var runMCPScannerCommand = processutil.RunTreeIsolated
 
 func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
 	// URLs and server names are scanner inputs, not filesystem paths. The
 	// project directory is a separate path handed to the scanner child.
 	if s.Project != "" {
 		if err := requireScannerTargetPath(s.Project); err != nil {
-			return nil, err
+			return nil, refusedMCPScan(err)
 		}
 	}
-	if entry := s.ServerEntry; entry != nil {
-		for _, path := range []string{entry.Home, entry.Project, entry.WorkDir, entry.Source, entry.Command} {
+	if s.asUser() && !usesScannerRuntime(s.Config.Binary) {
+		// Only the managed Windows scanner runtime can start a server as
+		// its user; nothing else may start it with the gateway's rights.
+		return nil, refusedMCPScan(fmt.Errorf("scanner: MCP server %q of an enrolled user starts only as that user, through the managed Windows scanner runtime", s.ServerEntry.Name))
+	}
+	if entry := s.ServerEntry; entry != nil && entry.Home != "" && entry.RunAsSID == "" && entry.URL == "" {
+		// A local server of an enrolled account that a gateway lists without
+		// a way to start it as its user (managed Linux and macOS, GAP-0925):
+		// the definition is refused as it stands, and nothing starts,
+		// where the name lookup of the scanner CLI would read the service
+		// account's files, not the user's.
+		if class, reason := mcplocal.Judge(entry.Command, entry.Args, entry.LocalRefusal); class != mcplocal.None {
+			return nil, refusedMCPScan(fmt.Errorf("scan failed: refusing to scan local MCP server %q: %s", entry.Name, reason))
+		}
+	}
+	if entry := s.ServerEntry; entry != nil && entry.RunAsSID == "" {
+		// The gateway neither reads nor starts anything at the paths of an
+		// enrolled user's server: a local one starts as the user, in a
+		// folder the hook enumerator checks as the user, and a URL one is
+		// scanned over the network.
+		for _, path := range []string{entry.Home, entry.Project, entry.Source, entry.Command} {
 			if filepath.IsAbs(path) {
 				if err := requireScannerTargetPath(path); err != nil {
-					return nil, err
+					return nil, refusedMCPScan(err)
 				}
 			}
 		}
@@ -462,14 +668,14 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 		}
 		if cwd != "" {
 			if err := requireScannerTargetPath(cwd); err != nil {
-				return nil, err
+				return nil, refusedMCPScan(err)
 			}
 		}
 	}
 	if !mcpScanTargetLooksLikeURL(target) &&
 		(filepath.IsAbs(target) || strings.ContainsAny(target, `/\`) || strings.HasSuffix(strings.ToLower(target), ".json")) {
 		if err := requireScannerTargetPath(target); err != nil {
-			return nil, err
+			return nil, refusedMCPScan(err)
 		}
 	}
 	start := time.Now()
@@ -498,6 +704,9 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 				ExitCode:   -1,
 			}
 			scanErr = err
+			if !errors.Is(err, errMCPScanTargetUnresolved) {
+				scanErr = refusedMCPScan(err)
+			}
 			return result, scanErr
 		}
 	}
@@ -533,7 +742,7 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := runMCPScannerCommand(cmd)
+	err := runMCPScannerCommand(ctx, cmd)
 	duration := time.Since(start)
 	stderrStr := stderr.String()
 
@@ -554,15 +763,24 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 			scanErr = scannerNotFound(s.Name(), s.Config.Binary, "MCP scanning requires a Python 3.11+ runtime with cisco-ai-mcp-scanner; on 3.11+ repair the managed installation, or run uv sync in a source checkout")
 			return nil, scanErr
 		}
+		if !errors.As(err, &exitErr) {
+			result.ExitCode = -1
+			result.ScanError = err.Error()
+			return result, fmt.Errorf("scanner: %s could not complete: %w", s.Name(), err)
+		}
 		if stdout.Len() == 0 {
-			scanErr = fmt.Errorf("scanner: %s exited %d: %s%s", s.Name(), exitCode, s.workDirNote(), scannerFailureText(stderrStr))
+			scanErr = refusedMCPScan(fmt.Errorf("scanner: %s exited %d: %s%s", s.Name(), exitCode, s.workDirNote(), scannerFailureText(stderrStr)), stderrStr)
 			return nil, scanErr
 		}
 	}
 
 	result.ExitCode = exitCode
+	outputError := ""
 	if exitCode != 0 {
 		result.ScanError = stderrStr
+		if outputError = mcpOutputError(stdout.Bytes()); outputError != "" && strings.TrimSpace(stderrStr) == "" {
+			result.ScanError = outputError
+		}
 	}
 
 	if stdout.Len() > 0 {
@@ -573,6 +791,7 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 		}
 		result.Findings = findings
 	}
+	result.Warnings = mcpAnalyzerWarnings(stderrStr)
 
 	// hardening (S2.scanners): fail closed on any non-zero
 	// scanner exit, even when stdout was parseable. Previously a
@@ -584,11 +803,55 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 	// watcher and REST scan handlers. See finding "Non-zero MCP
 	// scanner exits can be treated as successful scans".
 	if exitCode != 0 {
-		scanErr = fmt.Errorf("scanner %s exited %d (%sstderr=%s)", s.Name(), exitCode, s.workDirNote(), scannerFailureText(stderrStr))
+		if outputError != "" {
+			outputError += "; "
+		}
+		scanErr = refusedMCPScan(fmt.Errorf("scanner %s exited %d (%s%sstderr=%s)", s.Name(), exitCode, s.workDirNote(), outputError, scannerFailureText(stderrStr)), stderrStr, stdout.String())
 		return result, scanErr
 	}
 
 	return result, nil
+}
+
+// maxMCPOutputErrorBytes bounds the stdout error a failed scan reports.
+const maxMCPOutputErrorBytes = 1000
+
+// mcpOutputError is the error `defenseclaw mcp scan --json` prints on stdout
+// for a scan it did not run (cmd_mcp.py _mcp_scan_error_json_payload), such
+// as its refusal of a launcher other than the bare npx or uvx; stderr is then
+// empty. The error read only stderr, so on the per-user gateways of every OS
+// the refusal read "exited 1 (stderr=)": it was retried with backoff instead
+// of final, and the agent never got the launcher reason
+// (rel-1-0-6:GAP-0258). The managed Windows scanner runtime reports its
+// refusal on stderr. One printable line: a traceback cut as
+// scannerFailureText cuts stderr, control and format characters (ESC, BEL,
+// NUL, bidi overrides) dropped before the cap (rel-1-0-6:GAP-0366), at most
+// maxMCPOutputErrorBytes; "" when stdout holds no error.
+// Secure Client keeps the error of main (issue #1092).
+func mcpOutputError(stdout []byte) string {
+	if keepFullFailureText.Load() {
+		return ""
+	}
+	var out struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(extractJSON(ansiRe.ReplaceAll(stdout, nil)), &out) != nil {
+		return ""
+	}
+	text := strings.Map(func(r rune) rune {
+		switch {
+		case unicode.IsSpace(r):
+			return ' '
+		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r):
+			return -1
+		}
+		return r
+	}, scannerFailureText(out.Error))
+	text = strings.Join(strings.Fields(text), " ")
+	if len(text) > maxMCPOutputErrorBytes {
+		text = strings.ToValidUTF8(text[:maxMCPOutputErrorBytes], "") + "..."
+	}
+	return text
 }
 
 // mcpScanResult matches the JSON emitted by the Python CLI
@@ -618,6 +881,30 @@ type mcpFinding struct {
 	Remediation string   `json:"remediation"`
 	Tags        []string `json:"tags"`
 	Suppressed  bool     `json:"suppressed"`
+}
+
+// mcpAnalyzerWarnings returns the "warning: LLM ... skipped" lines the
+// Python scanner prints on stderr when the LLM judge did not run (no key, or
+// the backend failed), so the gateway scan response carries the skip the
+// per-user scan prints (GAP-2621). At most four lines of 300 bytes.
+func mcpAnalyzerWarnings(stderr string) []string {
+	var out []string
+	for _, line := range strings.Split(ansiRe.ReplaceAllString(stderr, ""), "\n") {
+		line = strings.TrimSpace(line)
+		lower := strings.ToLower(line)
+		if !strings.HasPrefix(lower, "warning: llm") || !strings.Contains(lower, "skipped") {
+			continue
+		}
+		line = strings.TrimSpace(line[len("warning:"):])
+		if len(line) > 300 {
+			line = line[:297] + "..."
+		}
+		out = append(out, line)
+		if len(out) == 4 {
+			break
+		}
+	}
+	return out
 }
 
 func parseMCPOutput(data []byte) ([]Finding, error) {

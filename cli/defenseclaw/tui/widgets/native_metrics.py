@@ -16,13 +16,13 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from rich.text import Text
+from rich.text import Span, Text
 from textual import events
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.renderables.digits import DIGITS
-from textual.widgets import Digits, ProgressBar, Sparkline, Static
+from textual.widgets import Digits, Sparkline, Static
 
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
@@ -59,8 +59,11 @@ def fit_metric_detail(detail: str, width: int) -> str | Text:
     The line is "item · item · item". Items that don't fit are dropped whole
     and " …" marks that more were left out, so a count is never cut into a
     different number ("UserPromptSubmit x1…" for x11, "claudecode 3…" for
-    380, GAP-2430). When even the first item doesn't fit, its label is
-    shortened and its number kept ("claudeco… 380", GAP-2443).
+    380, GAP-2430). When even the first item doesn't fit, its label stays
+    whole (GAP-0341): a count of 1000 or more is written short ("12k"), and
+    if the item still doesn't fit the count gives way ("claudecode …"); the
+    tile's big digits and the panels keep every number. A phrase keeps its
+    whole leading words ("skill+mcp …").
     """
 
     if width <= 0 or not detail:
@@ -80,20 +83,72 @@ def fit_metric_detail(detail: str, width: int) -> str | Text:
             kept.append(_MORE, style=TOKENS.text_muted)
             return kept
     first = text[: ends[0]] if ends else text
+    if ends and first.cell_len <= width:
+        # No room for the " …" marker beside the first item: keep that item
+        # whole ("claudecode 59") rather than cutting its label (GAP-0341).
+        return first
+    more = bool(ends)
+    for tenths in (True, False):
+        short = _with_short_counts(first, tenths=tenths)
+        if short is not None and short.cell_len <= width:
+            if more and short.cell_len + len(_MORE) <= width:
+                short.append(_MORE, style=TOKENS.text_muted)
+            return short
     count = _TRAILING_COUNT.search(first.plain)
     if count is not None and count.start() > 0:
-        number = first[count.start() :]
-        room = width - number.cell_len - 2
-        if room >= 2:
-            label = first[:room]
-            label.rstrip()
-            label.append("… ")
-            label.append_text(number)
+        label = first[: count.start()]
+        label.rstrip()
+        if label.cell_len + len(_MORE) <= width:
+            label.append(_MORE, style=TOKENS.text_muted)
             return label
-        if number.cell_len <= width:
-            return number
+        if label.cell_len <= width:
+            return label
+    # A phrase ("skill+mcp scans", "gateway status pending") keeps whole
+    # words; only a single word wider than the tile is cut.
+    words = [index for index, char in enumerate(first.plain) if char == " "]
+    for index in reversed(words):
+        head = first[:index]
+        head.rstrip()
+        for marker in (_MORE, "\u2026"):
+            if head.plain and head.cell_len + len(marker) <= width:
+                head.append(marker, style=TOKENS.text_muted)
+                return head
     first.truncate(width, overflow="ellipsis")
     return first
+
+
+_COUNT_WORD = re.compile(r"(?<!\S)(\D*?)(\d{4,})(?!\S)")
+
+
+def _short_count(value: int, *, tenths: bool = True) -> str:
+    """1234 -> "1.2k" ("1k" without tenths), 12345 -> "12k", 1234567 -> "1.2M" (rounded down)."""
+
+    for unit, size in (("M", 1_000_000), ("k", 1_000)):
+        if value >= size:
+            whole, rest = divmod(value, size)
+            tenth = rest * 10 // size
+            return f"{whole}.{tenth}{unit}" if tenths and whole < 10 and tenth else f"{whole}{unit}"
+    return str(value)
+
+
+def _with_short_counts(item: Text, *, tenths: bool = True) -> Text | None:
+    """``item`` with every count of 1000 or more written short; None if it has none."""
+
+    plain = item.plain
+    matches = list(_COUNT_WORD.finditer(plain))
+    if not matches:
+        return None
+    out = Text()
+    last = 0
+    for match in matches:
+        start, end = match.start(2), match.end(2)
+        out.append_text(item[last:start])
+        short = _short_count(int(match.group(2)), tenths=tenths)
+        # Keep the number's colour (the spans of its slice cover it whole).
+        out.append_text(Text(short, spans=[Span(0, len(short), span.style) for span in item[start:end].spans]))
+        last = end
+    out.append_text(item[last:])
+    return out
 
 
 @dataclass(frozen=True)
@@ -188,15 +243,7 @@ class MetricTile(Vertical):
     }}
 
     /* The tile is 8 rows: border (2) + title, digits (3), sparkline and
-       detail. The progress bar used to take the detail's row, so the
-       severity breakdown / guardrail mode line was always clipped. It
-       stays mounted (and updated) but is not drawn. */
-    MetricTile .metric-progress {{
-        display: none;
-        height: 1;
-        margin-top: 0;
-    }}
-
+       detail. */
     MetricTile .metric-sparkline {{
         height: 1;
         color: {TOKENS.accent_violet};
@@ -207,6 +254,12 @@ class MetricTile(Vertical):
         color: {TOKENS.text_secondary};
         text-wrap: nowrap;
         text-overflow: ellipsis;
+    }}
+
+    /* Short terminals: border, "title value" and the detail, so the
+       Overview body under the cards gets the rows (GAP-0048). */
+    MetricTile.-compact {{
+        height: 4;
     }}
     """
 
@@ -220,12 +273,6 @@ class MetricTile(Vertical):
         # as "ON" / "OFF" came out as a jumble of glyph fragments, so words
         # are shown as plain bold text of the same height instead.
         self._word = Static("", classes="metric-word", markup=False)
-        self._progress = ProgressBar(
-            total=100,
-            show_eta=False,
-            show_percentage=False,
-            classes="metric-progress",
-        )
         self._sparkline = Sparkline(metric.trend or (0,), classes="metric-sparkline")
         self._detail = Static(metric.detail, classes="metric-detail", markup=True)
 
@@ -233,9 +280,27 @@ class MetricTile(Vertical):
         yield self._title
         yield self._digits
         yield self._word
-        yield self._progress
         yield self._sparkline
         yield self._detail
+
+    def set_compact(self, compact: bool) -> None:
+        """Show the 4-row layout (the value beside the title) or the full tile."""
+
+        if self.has_class("-compact") == compact:
+            return
+        self.set_class(compact, "-compact")
+        if not compact:
+            self._title.update(fit_metric_title(self.metric.label, self.content_size.width))
+        self._sync_layout()
+
+    def _sync_layout(self) -> None:
+        compact = self.has_class("-compact")
+        as_word = not self.digits_renderable(self._digits_text(self.metric))
+        self._digits.display = not compact and not as_word
+        self._word.display = not compact and as_word
+        self._sparkline.display = not compact
+        if compact:
+            self._title.update(compact_metric_title(self.metric.label, self._digits_text(self.metric), self.content_size.width))
 
     def on_mount(self) -> None:
         self.refresh_metric(self.metric)
@@ -253,17 +318,10 @@ class MetricTile(Vertical):
 
         digits_text = self._digits_text(metric)
         if previous is None or self._digits_text(previous) != digits_text:
-            as_word = not self.digits_renderable(digits_text)
-            self._digits.display = not as_word
-            self._word.display = as_word
-            if as_word:
-                self._word.update(digits_text)
-            else:
+            if self.digits_renderable(digits_text):
                 self._digits.update(digits_text)
-
-        progress = _clamp(metric.progress)
-        if previous is None or _clamp(previous.progress) != progress:
-            self._progress.update(total=100, progress=progress)
+            else:
+                self._word.update(digits_text)
 
         trend = metric.trend or (0,)
         if previous is None or (previous.trend or (0,)) != trend:
@@ -271,6 +329,7 @@ class MetricTile(Vertical):
 
         if previous is None or previous.detail != metric.detail:
             self._detail.update(fit_metric_detail(metric.detail, self.content_size.width))
+        self._sync_layout()
 
         class_map = self._class_map(metric)
         if previous is None or self._class_map(previous) != class_map:
@@ -285,8 +344,11 @@ class MetricTile(Vertical):
     def on_resize(self, _event: events.Resize) -> None:
         # The title and detail are fitted to the tile width (GAP-2430).
         width = self.content_size.width
-        self._title.update(fit_metric_title(self.metric.label, width))
         self._detail.update(fit_metric_detail(self.metric.detail, width))
+        if self.has_class("-compact"):
+            self._sync_layout()
+        else:
+            self._title.update(fit_metric_title(self.metric.label, width))
 
     def _apply_class_map(self, classes: dict[str, bool]) -> None:
         """Apply a class map atomically using the Textual 8 API."""
@@ -340,6 +402,10 @@ class OverviewMetrics(Horizontal):
     OverviewMetrics.hidden {{
         display: none;
     }}
+
+    OverviewMetrics.compact {{
+        height: 4;
+    }}
     """
 
     def __init__(self, metrics: Sequence[MetricDatum] = (), **kwargs: object) -> None:
@@ -352,6 +418,13 @@ class OverviewMetrics(Horizontal):
             tile = MetricTile(metric)
             self._tiles[metric.key] = tile
             yield tile
+
+    def set_compact(self, compact: bool) -> None:
+        """Use the 4-row tiles (short terminals) or the full 8-row tiles."""
+
+        self.set_class(compact, "compact")
+        for tile in self._tiles.values():
+            tile.set_compact(compact)
 
     def refresh_metrics(self, metrics: Sequence[MetricDatum]) -> None:
         """Refresh an already-mounted metric row."""
@@ -367,5 +440,13 @@ class OverviewMetrics(Horizontal):
         self.metrics = incoming
 
 
-def _clamp(value: float) -> float:
-    return max(0.0, min(100.0, value))
+def compact_metric_title(label: str, value: str, width: int) -> Text:
+    """The title row of a compact tile: the title fitted to the room left, then the value in bold."""
+
+    room = width - len(value) - 1 if width > 0 else 0
+    title = Text(fit_metric_title(label, room) if room > 0 else label, style=f"bold {TOKENS.accent_cyan}")
+    if width > 0 and room > 0:
+        title.truncate(room, overflow="ellipsis")
+    title.append(" ")
+    title.append(value, style=f"bold {TOKENS.text_primary}")
+    return title

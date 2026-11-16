@@ -171,8 +171,9 @@ func TestEvaluateClaudeCodeHook_HILTPreToolUseAsks(t *testing.T) {
 
 	api := &APIServer{scannerCfg: cfg}
 	resp := api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
-		HookEventName: "PreToolUse",
-		ToolName:      "Bash",
+		HookEventName:  "PreToolUse",
+		PermissionMode: "default",
+		ToolName:       "Bash",
 		ToolInput: map[string]interface{}{
 			"command": "dd if=/dev/zero of=/dev/sda bs=1M",
 		},
@@ -267,6 +268,72 @@ func TestEvaluateClaudeCodeHook_BlockedPluginRefusesItsToolsSkillsAndCommands(t 
 	cfg.AssetPolicy.Plugin.Denied = []config.AssetPolicyRule{{Name: "usm-kit-ok@usm-mkt"}}
 	if resp := (&APIServer{scannerCfg: cfg}).evaluateClaudeCodeHook(context.Background(), other); resp.Action != "block" {
 		t.Fatalf("denied plugin MCP tool: action=%q, want block", resp.Action)
+	}
+}
+
+// GAP-0270: `plugin quarantine` moves only the cache copy of a plugin
+// installed from a local marketplace folder; Claude Code still ran its
+// /plugin:command (and its skills and MCP tools) from that folder, and the
+// hook allowed it. A quarantine journal entry, by name or plugin@marketplace,
+// for the connector or every connector, refuses them as a disable does, and
+// `plugin restore` (clearing the file action) lets them run again, each round.
+func TestEvaluateClaudeCodeHook_QuarantinedPluginRefusesItsCommandsUntilRestored(t *testing.T) {
+	calls := []claudeCodeHookRequest{
+		{HookEventName: "UserPromptExpansion", ExpansionType: "slash_command", CommandSource: "plugin",
+			CommandName: "usm-kit:hello", Prompt: "/usm-kit:hello"},
+		{HookEventName: "PreToolUse", ToolName: "Skill", ToolInput: map[string]interface{}{"skill": "usm-kit:usm-kit-notes"}},
+		{HookEventName: "PreToolUse", ToolName: "mcp__plugin_usm-kit_kit-time__get_current_time", ToolInput: map[string]interface{}{}},
+	}
+	neighbour := claudeCodeHookRequest{HookEventName: "UserPromptExpansion", ExpansionType: "slash_command",
+		CommandSource: "plugin", CommandName: "usm-kit-ok:hello", Prompt: "/usm-kit-ok:hello"}
+	for _, tc := range []struct{ name, target, connector string }{
+		{name: "plugin id, connector scope", target: "usm-kit", connector: "claudecode"},
+		{name: "plugin@marketplace, connector scope", target: "usm-kit@vs7mp", connector: "claudecode"},
+		{name: "plugin id, every connector", target: "usm-kit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Connector = "claudecode"
+			store, err := audit.NewStore(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { store.Close() })
+			if err := store.Init(); err != nil {
+				t.Fatal(err)
+			}
+			api := &APIServer{scannerCfg: cfg, store: store}
+			for round := 1; round <= 2; round++ {
+				if err := store.SetActionFieldForConnector("plugin", tc.target, tc.connector, "file", "quarantine",
+					"manual quarantine via CLI"); err != nil {
+					t.Fatal(err)
+				}
+				for _, req := range calls {
+					resp := api.evaluateClaudeCodeHook(context.Background(), req)
+					if resp.Action != "block" {
+						t.Fatalf("round %d %s %s%s: action=%q, want the quarantined plugin refused",
+							round, req.HookEventName, req.ToolName, req.CommandName, resp.Action)
+					}
+				}
+				resp := api.evaluateClaudeCodeHook(context.Background(), calls[0])
+				if !strings.Contains(resp.Reason+resp.SourceReason, "usm-kit") {
+					t.Fatalf("round %d: reason %q / %q does not name the plugin", round, resp.Reason, resp.SourceReason)
+				}
+				if resp := api.evaluateClaudeCodeHook(context.Background(), neighbour); resp.Action == "block" {
+					t.Fatalf("round %d another plugin: action=%q, want it allowed", round, resp.Action)
+				}
+				if err := store.ClearActionFieldForConnector("plugin", tc.target, tc.connector, "file"); err != nil {
+					t.Fatal(err)
+				}
+				for _, req := range calls {
+					if resp := api.evaluateClaudeCodeHook(context.Background(), req); resp.Action == "block" {
+						t.Fatalf("round %d restored %s %s%s: action=%q, want it allowed again",
+							round, req.HookEventName, req.ToolName, req.CommandName, resp.Action)
+					}
+				}
+			}
+		})
 	}
 }
 
@@ -999,9 +1066,14 @@ func TestClaudeCodeOutput_LegacyMirrorReturnsDynamicWatchPaths(t *testing.T) {
 				CWD:           workspace,
 				NewCWD:        workspace,
 			}, "allow", "allow", "", "")
-			if event == "SessionStart" {
-				output = output["hookSpecificOutput"].(map[string]interface{})
+			specific, ok := output["hookSpecificOutput"].(map[string]interface{})
+			if !ok || specific["hookEventName"] != event {
+				t.Fatalf("%s answer = %#v, want watchPaths in hookSpecificOutput (GAP-2288)", event, output)
 			}
+			if _, top := output["watchPaths"]; top {
+				t.Fatalf("%s answer has a top-level watchPaths, which Claude Code ignores: %#v", event, output)
+			}
+			output = specific
 			watchPaths, ok := output["watchPaths"].([]string)
 			if !ok {
 				t.Fatalf("watchPaths = %#v, want []string", output["watchPaths"])
@@ -1016,6 +1088,91 @@ func TestClaudeCodeOutput_LegacyMirrorReturnsDynamicWatchPaths(t *testing.T) {
 				if !containsString(watchPaths, want) {
 					t.Errorf("watchPaths = %v, missing %q", watchPaths, want)
 				}
+			}
+		})
+	}
+}
+
+func TestManagedClaudeCodeWatchPathsUseVerifiedCallerHome(t *testing.T) {
+	callerHome := t.TempDir()
+	project := filepath.Join(callerHome, "project")
+	command := filepath.Join(project, ".claude", "commands", "review.md")
+	if err := os.MkdirAll(filepath.Dir(command), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(command, []byte("# review\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	serviceHome := t.TempDir()
+	t.Setenv("HOME", serviceHome)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(serviceHome, ".claude"))
+	known := withManagedHookPeer(withServiceAccountGateway(t.Context()), managedHookPeer{UID: 1001, Home: callerHome})
+	unresolvedPeer := withManagedHookPeer(withServiceAccountGateway(t.Context()), managedHookPeer{UID: 1001})
+	unknownIdentity := context.WithValue(withServiceAccountGateway(t.Context()), verifiedUserScopedIdentityContextKey{}, "4102")
+	projectEntries := []string{
+		filepath.Join(project, ".mcp.json"),
+		filepath.Join(project, ".claude", "settings.json"),
+		filepath.Join(project, ".claude", "settings.local.json"),
+		filepath.Join(project, "CLAUDE.md"),
+		command,
+	}
+	for _, tc := range []struct {
+		name string
+		req  claudeCodeHookRequest
+		home bool
+	}{
+		{"known caller", (claudeCodeHookRequest{HookEventName: "SessionStart", CWD: project}).withWatchHome(known), true},
+		{"unresolved caller", (claudeCodeHookRequest{HookEventName: "SessionStart", CWD: project}).withWatchHome(unresolvedPeer), false},
+		{"unknown user-scoped identity", (claudeCodeHookRequest{HookEventName: "SessionStart", CWD: project}).withWatchHome(unknownIdentity), false},
+		{"panic recovery shape", claudeCodeHookRequest{HookEventName: "SessionStart", CWD: project, managedWatch: true, watchHome: unresolvedCallerHome}, false},
+		{"cwd change, unresolved caller", (claudeCodeHookRequest{HookEventName: "CwdChanged", CWD: project}).withWatchHome(unresolvedPeer), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := claudeCodeOutput(tc.req, "allow", "allow", "", "")
+			specific, _ := out["hookSpecificOutput"].(map[string]interface{})
+			paths, _ := specific["watchPaths"].([]string)
+			for _, want := range projectEntries {
+				if !containsString(paths, want) {
+					t.Fatalf("project watch path %s missing: %v", want, paths)
+				}
+			}
+			if got := containsString(paths, filepath.Join(callerHome, ".claude", "settings.json")); got != tc.home {
+				t.Fatalf("caller home watch path present=%v, want %v: %v", got, tc.home, paths)
+			}
+			for _, path := range paths {
+				if strings.HasPrefix(path, serviceHome+string(filepath.Separator)) ||
+					strings.HasPrefix(path, unresolvedCallerHome) ||
+					(!tc.home && !strings.HasPrefix(path, project+string(filepath.Separator))) {
+					t.Fatalf("unverified watch path %s: %v", path, paths)
+				}
+			}
+		})
+	}
+}
+
+func TestManagedClaudeCodeSessionStartWatchesTheAuthenticatedCaller(t *testing.T) {
+	callerHome := t.TempDir()
+	serviceHome := t.TempDir()
+	project := filepath.Join(callerHome, "work")
+	t.Setenv("HOME", serviceHome)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(serviceHome, ".claude"))
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	api := &APIServer{scannerCfg: cfg}
+	for _, tc := range []struct {
+		name string
+		home string
+	}{{"known caller", callerHome}, {"unresolved caller", ""}} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := withManagedHookPeer(withServiceAccountGateway(t.Context()), managedHookPeer{UID: 1001, Home: tc.home})
+			response := api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{HookEventName: "SessionStart", CWD: project})
+			paths := response.ClaudeCodeOutput["hookSpecificOutput"].(map[string]interface{})["watchPaths"].([]string)
+			if containsString(paths, filepath.Join(callerHome, ".claude", "settings.json")) != (tc.home != "") ||
+				!containsString(paths, filepath.Join(project, ".mcp.json")) ||
+				!containsString(paths, filepath.Join(project, ".claude", "settings.local.json")) ||
+				containsString(paths, filepath.Join(serviceHome, ".claude", "settings.json")) {
+				t.Fatalf("managed SessionStart watch paths = %v", paths)
 			}
 		})
 	}
@@ -1062,7 +1219,7 @@ func TestClaudeCodeOutput_SubagentStopUsesAdditionalContext(t *testing.T) {
 }
 
 func TestClaudeCodeOutput_TaskAndTeamBlocksUseExitTwoFeedback(t *testing.T) {
-	for _, event := range []string{"TaskCreated", "TaskCompleted", "TeammateIdle"} {
+	for _, event := range []string{"SessionStart", "TaskCreated", "TaskCompleted", "TeammateIdle"} {
 		t.Run(event, func(t *testing.T) {
 			output := claudeCodeOutput(
 				claudeCodeHookRequest{HookEventName: event},

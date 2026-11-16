@@ -79,7 +79,7 @@ func TestUnpackResumesAnInterruptedStaging(t *testing.T) {
 	if err := unpack(buf.Bytes(), staging); err != nil {
 		t.Fatalf("resume the unpack: %v", err)
 	}
-	if err := verifyRuntime(staging, bytes.NewReader(buf.Bytes()), int64(buf.Len()), true); err != nil {
+	if err := verifyRuntime(staging, bytes.NewReader(buf.Bytes()), int64(buf.Len()), true, nil); err != nil {
 		t.Fatalf("resumed tree: %v", err)
 	}
 	if info, err := os.Stat(filepath.Join(staging, "python", "python.exe")); err != nil || !info.ModTime().Equal(old) {
@@ -100,13 +100,13 @@ func TestVerifyRuntimeRejectsAChangedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	archive := bytes.NewReader(buf.Bytes())
-	if err := verifyRuntime(dir, archive, archive.Size(), true); err != nil {
+	if err := verifyRuntime(dir, archive, archive.Size(), true, nil); err != nil {
 		t.Fatalf("verify an untouched tree: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "python", "python.exe"), []byte("planted!"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyRuntime(dir, archive, archive.Size(), true); err == nil {
+	if err := verifyRuntime(dir, archive, archive.Size(), true, nil); err == nil {
 		t.Fatal("a changed python.exe verified")
 	}
 	// GAP-1409: the quick check versions runs (status, verify, repair) names
@@ -114,7 +114,7 @@ func TestVerifyRuntimeRejectsAChangedFile(t *testing.T) {
 	if err := os.Remove(filepath.Join(dir, "python", "python.exe")); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyRuntime(dir, archive, archive.Size(), false); err == nil || !strings.Contains(err.Error(), "python/python.exe") {
+	if err := verifyRuntime(dir, archive, archive.Size(), false, nil); err == nil || !strings.Contains(err.Error(), "python/python.exe") {
 		t.Fatalf("a removed python.exe passed the quick check: %v", err)
 	}
 	// runtimeFilesPresent reads the embedded archive in place.

@@ -30,7 +30,8 @@ import (
 // connector: on the machine policy route its managed plugin runs the hook
 // binary for every event, so every OpenCode row publishes a generation.
 //
-// The Secure Client profile never manages these connectors.
+// The Secure Client profile manages only the connectors in
+// windowsSecureClientPerUserConnectors.
 var windowsStandalonePerUserConnectors = map[string]bool{
 	"copilot":     true,
 	"antigravity": true,
@@ -73,8 +74,6 @@ func windowsStandaloneRuntimeOnlyConnector(name string) bool {
 // enterprise management refuses outright, with the reason shown to the
 // administrator.
 var windowsEnterpriseRefusedConnectors = map[string]string{
-	"openhands": "OpenHands CLI requires WSL on Windows; DefenseClaw has no WSL connector path",
-	"omnigent":  "OmniGent enforces through an in-process policy API with no hook boundary a standard user cannot remove; it is not managed on Windows",
 	"openclaw":  "OpenClaw requires the guardrail proxy, which the Windows enterprise profile does not host",
 	"zeptoclaw": "ZeptoClaw requires the guardrail proxy, which the Windows enterprise profile does not host",
 }

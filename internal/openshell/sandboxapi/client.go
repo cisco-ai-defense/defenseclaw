@@ -36,8 +36,11 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+var sandboxPeerClientFactory = hookexec.NewPerUserGatewayHTTPClient
 
 // Client is a typed client of the daemon's sandbox API.
 type Client struct {
@@ -50,6 +53,10 @@ type Client struct {
 	HTTP *http.Client
 	// UserAgent defaults to ClientName.
 	UserAgent string
+	// Only per-user CLI reads retry a transient verified connection failure.
+	retryReadTransport bool
+	// unixSocketPath is set only for the managed per-user daemon client.
+	unixSocketPath string
 }
 
 // NewClient returns a client for baseURL authenticated with token.
@@ -79,8 +86,28 @@ func ClientForConfig(cfg *config.Config) (*Client, error) {
 	if port <= 0 {
 		port = config.DefaultGatewayAPIPort
 	}
-	host := config.APIBindHost(cfg)
-	return NewClient("http://"+net.JoinHostPort(host, strconv.Itoa(port)), token), nil
+	host := strings.Trim(config.APIBindHost(cfg), "[]")
+	if host == "" || host == "*" {
+		host = "127.0.0.1"
+	} else if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+		if ip.To4() != nil {
+			host = "127.0.0.1"
+		} else {
+			host = "::1"
+		}
+	}
+	address := net.JoinHostPort(host, strconv.Itoa(port))
+	// The sandbox CLI carries the gateway master token and may send a full
+	// sandbox request body. Prove the connected peer before sending either.
+	// A zero client timeout preserves context-bound image and create calls.
+	httpClient, err := sandboxPeerClientFactory(0, address)
+	if err != nil {
+		return nil, fmt.Errorf("sandboxapi: verify per-user gateway target: %w", err)
+	}
+	client := NewClient("http://"+address, token)
+	client.HTTP = httpClient
+	client.retryReadTransport = true
+	return client, nil
 }
 
 // ErrNotManagedHost is returned by ClientForHost on a computer without a
@@ -153,16 +180,20 @@ func ManagedStateDir(goos, home string) string {
 func NewUnixClient(path string) *Client {
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			if err := checkDaemonSocket(path); err != nil {
-				return nil, err
-			}
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", path)
+			return dialDaemonSocket(ctx, path)
 		},
 		MaxIdleConnsPerHost: 2,
 		IdleConnTimeout:     30 * time.Second,
 	}
-	return &Client{BaseURL: managedDaemonBaseURL, HTTP: &http.Client{Transport: transport}}
+	return &Client{BaseURL: managedDaemonBaseURL, HTTP: &http.Client{Transport: transport}, unixSocketPath: path}
+}
+
+func dialDaemonSocket(ctx context.Context, path string) (net.Conn, error) {
+	if err := checkDaemonSocket(path); err != nil {
+		return nil, err
+	}
+	var d net.Dialer
+	return d.DialContext(ctx, "unix", path)
 }
 
 // ClientForHost returns the client of the caller's own sandbox daemon when
@@ -205,25 +236,84 @@ func (c *Client) httpClient() *http.Client {
 	return http.DefaultClient
 }
 
-// do sends one JSON request and decodes a JSON answer into out (nil skips).
+// transportAttempts bounds the tries of one request whose connection fails
+// (do): 100 ms apart.
+const transportAttempts = 3
+
+// requestNotSent reports a transport failure from before any of the request
+// went out: the connection was refused or could not be made.
+func requestNotSent(err error) bool {
+	var op *net.OpError
+	return errors.As(err, &op) && op.Op == "dial"
+}
+
+// unreachableError is the error of a request that reached no daemon, with
+// its cause in plain words: the client's own text named a loopback address
+// and Go's transport words, which GAP-0336 and #1202 took out of the CLI's
+// messages (GAP-1549).
+func unreachableError(err error) *Error {
+	return &Error{Code: CodeUnavailable, Message: "the DefenseClaw daemon is not reachable", Detail: transportCause(err)}
+}
+
+// transportCause says in plain words why a request reached no daemon.
+func transportCause(err error) string {
+	var netErr net.Error
+	lower := strings.ToLower(err.Error())
+	switch {
+	case errors.Is(err, context.DeadlineExceeded) || errors.As(err, &netErr) && netErr.Timeout():
+		return "it did not answer in time"
+	case strings.Contains(lower, "unverified") || strings.Contains(lower, "another account") || strings.Contains(lower, "belongs to"):
+		return "the program on its port could not be proven to be this account's DefenseClaw daemon"
+	case requestNotSent(err):
+		return "nothing accepted the connection on its port"
+	}
+	return "the connection failed before it answered"
+}
+
+// do sends a JSON request and decodes its answer into out (nil skips).
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, body, out any) error {
-	var rdr io.Reader
+	var payload []byte
 	if body != nil {
 		buf, err := json.Marshal(body)
 		if err != nil {
 			return fmt.Errorf("sandboxapi: encode request: %w", err)
 		}
-		rdr = bytes.NewReader(buf)
+		payload = buf
 	} else if method != http.MethodGet {
-		rdr = strings.NewReader("{}")
+		payload = []byte("{}")
 	}
-	req, err := c.newRequest(ctx, method, path, query, rdr)
-	if err != nil {
-		return err
-	}
-	resp, err := c.httpClient().Do(req)
-	if err != nil {
-		return &Error{Code: CodeUnavailable, Message: "the DefenseClaw daemon is not reachable", Detail: err.Error()}
+	var resp *http.Response
+	for attempt := 0; ; attempt++ {
+		var rdr io.Reader
+		if payload != nil {
+			rdr = bytes.NewReader(payload)
+		}
+		req, err := c.newRequest(ctx, method, path, query, rdr)
+		if err != nil {
+			return err
+		}
+		resp, err = c.httpClient().Do(req)
+		if err == nil {
+			break
+		}
+		// A read goes again after any transport failure; any other request
+		// only when none of it went out, its connection refused or never
+		// made, so a create is never made twice. One failed connection is
+		// no stopped daemon: the run after a ready setup was refused once
+		// while the daemon kept its listener (GAP-1299, GAP-1549, GAP-1139).
+		retry := c.retryReadTransport && attempt < transportAttempts-1 && (method == http.MethodGet || requestNotSent(err))
+		if !retry || ctx.Err() != nil {
+			return unreachableError(err)
+		}
+		// The verified transport checks the connected peer again on every
+		// attempt. A response is never retried here.
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
@@ -320,13 +410,39 @@ func (c *Client) Status(ctx context.Context) (*Status, error) {
 }
 
 // Ready asks a managed computer's sandbox daemon to ready the account's
-// OpenShell for a run and returns the status after it (PathReady).
-func (c *Client) Ready(ctx context.Context) (*Status, error) {
+// OpenShell for a run and returns the status after it (PathReady). A daemon
+// of DefenseClaw 1.0.3 or older, whose decoder refuses any field it does
+// not know, refuses ReadyRequest.Harness: the request then goes again as
+// the empty object that daemon takes, which judges no agent there (the
+// run's create still does). Kept while a managed computer can run a 1.0.3
+// daemon under a 1.0.4 CLI, through the 1.0.4 upgrade window.
+func (c *Client) Ready(ctx context.Context, req ReadyRequest) (*Status, error) {
 	var out Status
-	if err := c.do(ctx, http.MethodPost, PathReady, nil, struct{}{}, &out); err != nil {
+	err := c.do(ctx, http.MethodPost, PathReady, nil, req, &out)
+	if err != nil && req.Pack != "" && unknownFieldRefused(err, "pack") {
+		// A daemon of DefenseClaw 1.0.4 judges no pack at a ready (its
+		// create does): it gets the agent alone.
+		out = Status{}
+		req.Pack = ""
+		err = c.do(ctx, http.MethodPost, PathReady, nil, req, &out)
+	}
+	if err != nil && req.Harness != "" && unknownFieldRefused(err, "harness") {
+		out = Status{}
+		err = c.do(ctx, http.MethodPost, PathReady, nil, struct{}{}, &out)
+	}
+	if err != nil {
 		return nil, err
 	}
 	return &out, nil
+}
+
+// unknownFieldRefused reports an older daemon's refusal of a request field
+// its strict decoder does not know (field, as JSON names it): a daemon of
+// DefenseClaw 1.0.3 or older answers "invalid JSON body: json: unknown
+// field" for every field 1.0.4 added.
+func unknownFieldRefused(err error, field string) bool {
+	e := AsError(err)
+	return e.Code == CodeInvalid && strings.Contains(e.Message, `unknown field "`+field+`"`)
 }
 
 // List returns every DefenseClaw sandbox.
@@ -342,8 +458,30 @@ func (c *Client) List(ctx context.Context) ([]Sandbox, error) {
 
 // Get returns one sandbox.
 func (c *Client) Get(ctx context.Context, name string) (*Sandbox, error) {
+	return c.get(ctx, name, nil)
+}
+
+// QueryConfirm, with the value ConfirmPolicy, asks a managed computer's
+// sandbox daemon to confirm a running sandbox's policy with the
+// organization's gateway before it answers a Get (GetConfirmed). Other
+// daemons ignore it.
+const (
+	QueryConfirm  = "confirm"
+	ConfirmPolicy = "policy"
+)
+
+// GetConfirmed is Get for `sandbox status NAME`: on a managed computer the
+// daemon first asks the organization's gateway for the running sandbox's
+// current policy, so the status names the profile a regroup moved it to
+// as `sandbox policy explain` does, or shows the stop the new profile asked
+// for (GAP-0080). The daemon's 60 s poll otherwise decides when it learns.
+func (c *Client) GetConfirmed(ctx context.Context, name string) (*Sandbox, error) {
+	return c.get(ctx, name, url.Values{QueryConfirm: {ConfirmPolicy}})
+}
+
+func (c *Client) get(ctx context.Context, name string, query url.Values) (*Sandbox, error) {
 	var out Sandbox
-	if err := c.do(ctx, http.MethodGet, sandboxPath(name), nil, nil, &out); err != nil {
+	if err := c.do(ctx, http.MethodGet, sandboxPath(name), query, nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -367,19 +505,61 @@ func (c *Client) Delete(ctx context.Context, name string, req DeleteRequest) (*D
 	return &out, nil
 }
 
-// Stop stops a sandbox and keeps it for a later start.
+// Stop stops a sandbox and keeps it for a later start. A MicroVM whose
+// disk could not be synced first is not stopped (CodeUnsynced).
 func (c *Client) Stop(ctx context.Context, name string) (*Sandbox, error) {
+	return c.StopWith(ctx, name, StopRequest{})
+}
+
+// StopWith is Stop with req. A daemon of DefenseClaw 1.0.3 or older refuses
+// StopRequest.DiscardUnsynced, a field its strict decoder does not know; it
+// holds no stop back for a failed sync either, so the stop the user accepted
+// goes again without the field. Kept, like Start's, through the 1.0.4
+// upgrade window.
+func (c *Client) StopWith(ctx context.Context, name string, req StopRequest) (*Sandbox, error) {
 	var out Sandbox
-	if err := c.do(ctx, http.MethodPost, sandboxPath(name, "stop"), nil, struct{}{}, &out); err != nil {
+	err := c.do(ctx, http.MethodPost, sandboxPath(name, "stop"), nil, req, &out)
+	if err != nil && req.DiscardUnsynced && unknownFieldRefused(err, "discard_unsynced") {
+		out = Sandbox{}
+		err = c.do(ctx, http.MethodPost, sandboxPath(name, "stop"), nil, StopRequest{}, &out)
+	}
+	if err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
+// discardUnsyncedKey marks the context of a stop whose user accepted the
+// loss of what a MicroVM has not synced (StopRequest.DiscardUnsynced).
+type discardUnsyncedKey struct{}
+
+// WithDiscardUnsynced is ctx for a stop the user accepted that loss for:
+// the API's stop route sets it from StopRequest.DiscardUnsynced.
+func WithDiscardUnsynced(ctx context.Context) context.Context {
+	return context.WithValue(ctx, discardUnsyncedKey{}, true)
+}
+
+// DiscardUnsynced reports a stop whose user accepted that loss
+// (WithDiscardUnsynced).
+func DiscardUnsynced(ctx context.Context) bool {
+	v, _ := ctx.Value(discardUnsyncedKey{}).(bool)
+	return v
+}
+
 // Start starts a stopped sandbox with a freshly rotated binding.
+// A daemon of DefenseClaw 1.0.3 or older refuses StartRequest.EndVM, a
+// field its strict decoder does not know; it refuses no start of an ended
+// MicroVM either, so the start the user asked to end the VM goes again
+// without the field. Kept, like Ready's, through the 1.0.4 upgrade window.
 func (c *Client) Start(ctx context.Context, name string, req StartRequest) (*Sandbox, error) {
 	var out Sandbox
-	if err := c.do(ctx, http.MethodPost, sandboxPath(name, "start"), nil, req, &out); err != nil {
+	err := c.do(ctx, http.MethodPost, sandboxPath(name, "start"), nil, req, &out)
+	if err != nil && req.EndVM && unknownFieldRefused(err, "end_vm") {
+		req.EndVM = false
+		out = Sandbox{}
+		err = c.do(ctx, http.MethodPost, sandboxPath(name, "start"), nil, req, &out)
+	}
+	if err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -456,6 +636,11 @@ func (c *Client) ReportWorkspace(ctx context.Context, name string, r WorkspaceRe
 	return c.do(ctx, http.MethodPost, sandboxPath(name, "workspace"), nil, r, nil)
 }
 
+// ReportDisk names a filling MicroVM disk in the activity feed.
+func (c *Client) ReportDisk(ctx context.Context, name string, r DiskReport) error {
+	return c.do(ctx, http.MethodPost, sandboxPath(name, "disk"), nil, r, nil)
+}
+
 // Approvals lists pending asks, optionally for one sandbox.
 func (c *Client) Approvals(ctx context.Context, sandbox string) ([]Approval, error) {
 	q := url.Values{}
@@ -484,6 +669,15 @@ func (c *Client) Decide(ctx context.Context, id string, d ApprovalDecision) (*Ap
 func (c *Client) Unblock(ctx context.Context, req UnblockRequest) (*UnblockResponse, error) {
 	var out UnblockResponse
 	if err := c.do(ctx, http.MethodPost, PathEgressUnblock, nil, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// PolicyDecision records an allow or block in the managed decisions store.
+func (c *Client) PolicyDecision(ctx context.Context, req PolicyDecisionRequest) (*PolicyDecisionResponse, error) {
+	var out PolicyDecisionResponse
+	if err := c.do(ctx, http.MethodPost, PathPolicyDecision, nil, req, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -645,7 +839,7 @@ func (c *Client) Activity(ctx context.Context, q ActivityQuery, fn func(Activity
 	req.Header.Set("Accept", "text/event-stream")
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		return &Error{Code: CodeUnavailable, Message: "the DefenseClaw daemon is not reachable", Detail: err.Error()}
+		return unreachableError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

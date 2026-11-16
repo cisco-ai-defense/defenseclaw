@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"io"
 	"path"
-	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -25,7 +24,7 @@ const (
 	kubernetesPodDomain         = "defenseclaw/actionfacts/kubernetes-pod/v1"
 )
 
-var kubernetesDNSNamePattern = regexp.MustCompile(
+var kubernetesDNSNamePattern = lazyMustCompile(
 	`^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$`,
 )
 

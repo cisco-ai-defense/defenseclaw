@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -18,6 +20,7 @@ from defenseclaw.commands.cmd_setup_galileo import (
     galileo,
 )
 from defenseclaw.context import AppContext
+from defenseclaw.gateway import GatewayListenerNotOwnedError
 from defenseclaw.observability.trace_canary import TraceCanaryError, TraceCanaryResult
 from defenseclaw.observability.v8_status import V8DestinationStatus
 
@@ -57,6 +60,43 @@ def _status(*, configured: bool = False, enabled: bool = True):
             ),
         )
     return SimpleNamespace(destinations=destinations)
+
+
+def test_health_snapshot_does_not_contact_an_unverified_gateway(tmp_path, monkeypatch) -> None:
+    from defenseclaw.commands.cmd_setup_galileo import _gateway_health_snapshot
+
+    app = _app(tmp_path, monkeypatch)
+    received = []
+
+    class Peer(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            received.append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"telemetry":{"details":{"destinations":[]}}}')
+
+        def log_message(self, _format, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Peer)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    app.cfg.gateway.api_port = server.server_port
+    try:
+        with (
+            patch("defenseclaw.gateway._unproven_per_user_gateway_target", return_value=""),
+            patch(
+                "defenseclaw.gateway._verify_connected_gateway_socket",
+                side_effect=GatewayListenerNotOwnedError("foreign listener"),
+            ),
+        ):
+            assert _gateway_health_snapshot(app) == {}
+        assert received == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 def test_v8_setup_writes_trace_destination_and_secret_outside_yaml(tmp_path, monkeypatch) -> None:

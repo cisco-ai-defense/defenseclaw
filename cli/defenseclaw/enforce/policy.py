@@ -66,6 +66,15 @@ def tool_rule_entries(cfg: Any | None, store: Store | None) -> list[ActionEntry]
     return _tool_policy_entries(asset_lists.tool_policy_on_disk(cfg))
 
 
+# The reasons a CLI scan writes on the records it decides (install --action,
+# scan --action). Operator commands write their own reasons.
+CLI_SCAN_REASON_PREFIXES = ("post-install scan:", "post-scan:")
+
+# The reasons the gateway install watcher writes on its own records
+# (internal/watcher/watcher.go autoBlockReasonPrefix, scanFailureReason).
+WATCHER_REASON_PREFIXES = ("auto-block: watch detected ", "scanner failure (fail-closed): ")
+
+
 class PolicyEngine:
     def __init__(self, store: Store | None, cfg: Any | None = None) -> None:
         self.store = store
@@ -304,6 +313,60 @@ class PolicyEngine:
     def enable_for_connector(self, target_type: str, name: str, connector: str = "") -> None:
         if self.store:
             self.store.clear_action_field(target_type, name, "runtime", connector)
+
+    def scan_decision(self, target_type: str, name: str, connector: str = "") -> ActionEntry | None:
+        """The record a CLI scan of this asset decided for exactly this
+        connector (its reason starts with a CLI scan prefix), or None.
+        Secure Client rows are never a CLI scan decision to release."""
+        if not self.store or asset_lists.is_secure_client(self.cfg):
+            return None
+        entry = self.store.get_action(target_type, name, connector)
+        if entry is None or not entry.reason.startswith(CLI_SCAN_REASON_PREFIXES):
+            return None
+        return entry
+
+    def unscoped_runtime_disable(self, target_type: str, name: str) -> ActionEntry | None:
+        """The connector-less row of this asset when it holds a runtime
+        disable (it applies to every connector), or None."""
+        if not self.store:
+            return None
+        entry = self.store.get_action(target_type, name, "")
+        if entry is None or entry.actions.runtime != "disable":
+            return None
+        return entry
+
+    def is_openclaw_watcher_record(self, entry: ActionEntry) -> bool:
+        """Whether a connector-less row is the install watcher's own record
+        for OpenClaw: the watcher journals OpenClaw assets without a
+        connector (watcher.go journalScope), so that row is OpenClaw's.
+        Secure Client journals every connector there and keeps its rows."""
+        return (
+            not entry.connector
+            and not asset_lists.is_secure_client(self.cfg)
+            and entry.reason.startswith(WATCHER_REASON_PREFIXES)
+        )
+
+    def release_scan_decision(
+        self, target_type: str, name: str, connector: str = "", *, keep: tuple[str, ...] = (),
+    ) -> list[str]:
+        """Lift the runtime disable and install block that a CLI scan of this
+        asset recorded for exactly this connector (``skill install --action``,
+        ``plugin install --action``, ``skill scan --action``), once an install
+        of it stands. The record was for the copy that scan refused; the
+        admitted install replaces it, as the watcher lifts its own superseded
+        rejection (GAP-1911, GAP-0021). An operator disable or block carries
+        its own reason and stays, a quarantine keeps its provenance, and
+        Secure Client keeps every row. A field in *keep* stays (the agent
+        still holds that disable, GAP-0023). Returns the cleared fields."""
+        entry = self.scan_decision(target_type, name, connector)
+        if entry is None:
+            return []
+        cleared: list[str] = []
+        for field_name, value in (("runtime", entry.actions.runtime), ("install", entry.actions.install)):
+            if value in ("disable", "block") and field_name not in keep:
+                self.store.clear_action_field(target_type, name, field_name, connector)
+                cleared.append(f"{field_name}={value}")
+        return cleared
 
     def set_source_path(self, target_type: str, name: str, path: str, connector: str = "") -> None:
         if self.store:

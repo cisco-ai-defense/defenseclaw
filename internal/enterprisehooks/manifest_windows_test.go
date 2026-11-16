@@ -10,7 +10,59 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
+
+func TestLoadManifestRetriesFirstWindowsNameLookup(t *testing.T) {
+	body := []byte("version: 1\ntargets:\n  - user: checked\n    connector: codex\n    enabled: false\n")
+	for _, delayed := range []bool{false, true} {
+		name := "present"
+		if delayed {
+			name = "appears during read"
+		}
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "targets.yaml")
+			var created bool
+			var writeErr error
+			if delayed {
+				t.Cleanup(safefile.SetTransientRetrySleepForTest(func(time.Duration) {
+					if !created {
+						created = true
+						writeErr = os.WriteFile(path, body, 0o600)
+					}
+				}))
+			} else if err := os.WriteFile(path, body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			manifest, _, err := LoadManifestWithSHA256(path)
+			if delayed && (!created || writeErr != nil) {
+				t.Fatalf("retry did not publish the fixture: created = %v, err = %v", created, writeErr)
+			}
+			if err != nil || len(manifest.Targets) != 1 || manifest.Targets[0].User != "checked" {
+				t.Fatalf("manifest = %+v, err = %v", manifest, err)
+			}
+		})
+	}
+}
+
+func TestLoadManifestRetriesPublishedNameBeyondFixedAttempts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "targets.yaml")
+	body := []byte("version: 1\ntargets: []\n")
+	waits := 0
+	var publishErr error
+	t.Cleanup(safefile.SetTransientRetrySleepForTest(func(time.Duration) {
+		waits++
+		if waits == 64 {
+			publishErr = os.WriteFile(path, body, 0o600)
+		}
+	}))
+	manifest, _, err := LoadManifestWithSHA256(path)
+	if publishErr != nil || err != nil || waits < 64 || manifest.Version != 1 || len(manifest.Targets) != 0 {
+		t.Fatalf("manifest=%+v waits=%d publication=%v err=%v", manifest, waits, publishErr, err)
+	}
+}
 
 func TestLoadManifestWindowsRejectsNameOnlyTarget(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "targets.yaml")
@@ -121,7 +173,29 @@ targets:
 	}
 }
 
-func TestLoadManifestWindowsRejectsMissingAgentVersion(t *testing.T) {
+// TestLoadManifestWindowsAcceptsMissingAgentVersion is the Secure Client
+// version fallback (#1163).
+func TestLoadManifestWindowsAcceptsMissingAgentVersion(t *testing.T) {
+	useWindowsSecureClientForTest(t)
+	path := filepath.Join(t.TempDir(), "targets.yaml")
+	if err := os.WriteFile(path, []byte(`
+version: 1
+targets:
+  - user_home: 'C:\Users\alice'
+    sid: S-1-5-21-1-2-3-1001
+    connector: codex
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadManifest(path)
+	if err != nil {
+		t.Fatalf("LoadManifest error = %v, want version fallback", err)
+	}
+}
+
+// Outside Secure Client a target still needs explicit version evidence.
+func TestLoadManifestWindowsRejectsMissingAgentVersionOutsideSecureClient(t *testing.T) {
+	setStandaloneProfileForTest(t, true)
 	path := filepath.Join(t.TempDir(), "targets.yaml")
 	if err := os.WriteFile(path, []byte(`
 version: 1

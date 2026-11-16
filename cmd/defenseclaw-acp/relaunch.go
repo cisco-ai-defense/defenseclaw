@@ -242,6 +242,10 @@ func serveAfterSessionEnd(editor io.Reader, out io.Writer, initialize []byte, me
 // initialize request, hands it first and then joins it to the editor. done
 // is false, with the reason, when the guard did not initialize.
 func spliceRelaunchedGuard(command *exec.Cmd, editor io.Reader, out io.Writer, initialize, first []byte) (done bool, err error) {
+	initMsg, err := acp.ParseMessage(initialize)
+	if err != nil || !initMsg.IsRequest() {
+		return false, errors.New("the editor's initialize request is not ACP JSON-RPC")
+	}
 	stdin, err := command.StdinPipe()
 	if err != nil {
 		return false, err
@@ -255,27 +259,16 @@ func spliceRelaunchedGuard(command *exec.Cmd, editor io.Reader, out io.Writer, i
 		return false, err
 	}
 	answers := bufio.NewReaderSize(stdout, 64<<10)
+	// The handshake ends at the response to the editor's initialize request
+	// (same id). An agent may write notifications or its own requests first;
+	// those are kept, in order, and handed to the editor after the handshake.
+	// A notification is not the initialize answer: taking it for one
+	// forwarded the real initialize result to an editor whose initialize was
+	// answered long ago (GAP-1259).
+	var early [][]byte
 	answered := make(chan error, 1)
 	go func() {
-		line, readErr := answers.ReadBytes('\n')
-		if readErr != nil {
-			answered <- errors.New("it exited before it answered")
-			return
-		}
-		var response struct {
-			Error *struct {
-				Message string `json:"message"`
-			} `json:"error"`
-		}
-		if json.Unmarshal(bytes.TrimSpace(line), &response) != nil {
-			answered <- errors.New("its answer was not ACP JSON-RPC")
-			return
-		}
-		if response.Error != nil {
-			answered <- errors.New(response.Error.Message)
-			return
-		}
-		answered <- nil
+		answered <- awaitRelaunchInitialize(answers, initMsg.IDKey(), &early)
 	}()
 	_, writeErr := stdin.Write(append(append([]byte(nil), initialize...), '\n'))
 	if writeErr == nil {
@@ -292,6 +285,13 @@ func spliceRelaunchedGuard(command *exec.Cmd, editor io.Reader, out io.Writer, i
 		_ = command.Wait()
 		return false, writeErr
 	}
+	for _, frame := range early {
+		if _, err := out.Write(append(frame, '\n')); err != nil {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+			return false, err
+		}
+	}
 	if _, err := stdin.Write(append(append([]byte(nil), first...), '\n')); err != nil {
 		_ = command.Process.Kill()
 		_ = command.Wait()
@@ -307,4 +307,50 @@ func spliceRelaunchedGuard(command *exec.Cmd, editor io.Reader, out io.Writer, i
 		return true, waitErr
 	}
 	return true, copyErr
+}
+
+// relaunchEarlyFrames bounds how many frames a relaunched guard may write
+// before it answers initialize.
+const relaunchEarlyFrames = 256
+
+// awaitRelaunchInitialize reads the relaunched guard's output until the
+// response whose id is initializeID. Notifications and the agent's own
+// requests before it go to early; a response to anything else is dropped
+// (nothing else was sent). An error response fails the handshake.
+func awaitRelaunchInitialize(answers *bufio.Reader, initializeID string, early *[][]byte) error {
+	for {
+		line, readErr := answers.ReadBytes('\n')
+		frame := bytes.TrimSpace(line)
+		if len(frame) > 0 {
+			if len(frame) > acp.MaxFrameBytes {
+				return errors.New("its answer was larger than an ACP frame")
+			}
+			msg, err := acp.ParseMessageAllowingNullIDErrors(frame)
+			if err != nil {
+				return errors.New("its answer was not ACP JSON-RPC")
+			}
+			switch {
+			case msg.Method != "":
+				if len(*early) >= relaunchEarlyFrames {
+					return fmt.Errorf("it wrote more than %d messages before it answered initialize", relaunchEarlyFrames)
+				}
+				*early = append(*early, append([]byte(nil), frame...))
+			case msg.IDKey() == initializeID || msg.IsNullIDError():
+				if len(msg.Error) > 0 {
+					var failure struct {
+						Message string `json:"message"`
+					}
+					_ = json.Unmarshal(msg.Error, &failure)
+					if failure.Message == "" {
+						failure.Message = "it refused initialize"
+					}
+					return errors.New(failure.Message)
+				}
+				return nil
+			}
+		}
+		if readErr != nil {
+			return errors.New("it exited before it answered")
+		}
+	}
 }

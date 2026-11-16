@@ -549,13 +549,16 @@ try {
         $null -ne $_ -and [string]$_.code -and [string]$_.code -ne 'lifecycle_error'
     } | Select-Object -First 1)
     # These Windows ensure warnings describe a repair; other warnings are
-    # informational and must not be named as the repaired problem.
+    # informational and must not be named as the repaired problem. A run
+    # that failed repaired nothing, so only its errors name the problem
+    # (GAP-0044: "still failing (ensure_config_restart): ensure applied a
+    # configuration change" was false).
     $repairWarnings = @($warnings | Where-Object {
-        $null -ne $_ -and @('config_reverted', 'ensure_config_applied') -contains [string]$_.code
+        $null -ne $_ -and @('config_reverted', 'ensure_config_applied', 'ensure_config_restart') -contains [string]$_.code
     } | Select-Object -First 1)
     $specificProblem = $null
     if ($specificErrors.Count -gt 0) { $specificProblem = $specificErrors[0] }
-    elseif ($repairWarnings.Count -gt 0) { $specificProblem = $repairWarnings[0] }
+    elseif ($ok -and $repairWarnings.Count -gt 0) { $specificProblem = $repairWarnings[0] }
     $repairChanges = @($changes | Where-Object { [string]$_ })
     if ($ok -and $runtime.Count -gt 0) {
         $summary = "not repaired (scanner_runtime_unavailable): $($runtime[0].message)"

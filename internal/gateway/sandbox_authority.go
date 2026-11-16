@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -80,6 +81,9 @@ const (
 	sandboxTextUnloadable        = "Your organization's sandbox policy can't be loaded right now. Try again later or contact your IT help desk."
 	sandboxTextUnavailable       = "Sandboxes aren't available on this computer."
 	sandboxTextBadRequest        = "The sandbox request is malformed."
+	sandboxTextDaemonOutdated    = "Your sandbox service runs an older DefenseClaw version than this computer and can't apply " +
+		"your organization's complete sandbox policy, so it can't start sandboxes or take policy updates. " +
+		"Stop your running sandboxes with defenseclaw sandbox stop so it restarts on the new version, or sign out and back in."
 	sandboxTextAccountUnknown    = sandboxapi.AccountUnknownText
 	sandboxRequestAccessFallback = "contact your IT help desk"
 )
@@ -105,6 +109,7 @@ type sandboxAuthority struct {
 	// records is each account's sandbox telemetry records budget, and
 	// eventRecords the budget of the records of its daemon's other events.
 	records, eventRecords sandboxRecordBudget
+	eventReplay           sandboxEventReplay
 	guestSignals          sandboxGuestSignals
 }
 
@@ -114,12 +119,21 @@ type sandboxRegistrationStore interface {
 	sandboxreg.GuestStore
 	CreateRun(uid int, r sandboxreg.Registration, run *sandboxreg.Run) error
 	Run(uid int, id string) (sandboxreg.Run, bool, error)
+	// GetWithRun reads a registration and its run record as one write
+	// stored them.
+	GetWithRun(uid int, id string) (sandboxreg.Registration, bool, sandboxreg.Run, bool, error)
 	UpdateRun(uid int, r sandboxreg.Registration, run *sandboxreg.Run) error
 	// Report records whether the daemon sees the registration's sandbox
 	// running; RevokeSandbox revokes the registrations bound to a sandbox
 	// the daemon reported foreign.
 	Report(uid int, id string, running bool) (sandboxreg.Registration, error)
 	RevokeSandbox(uid int, sandboxID, sandboxName, reason string) ([]sandboxreg.Registration, error)
+	// Restart runs a bound registration's sandbox again under a new
+	// registration (GAP-0673).
+	Restart(uid int, id string) (sandboxreg.Registration, error)
+	// ForgetOtherAccounts removes the uid's registrations of another
+	// account than subjectKey's (rel-1-0-6:GAP-0262).
+	ForgetOtherAccounts(uid int, subjectKey string) ([]sandboxreg.Registration, error)
 }
 
 func (s *sandboxAuthority) clock() time.Time {
@@ -138,11 +152,6 @@ func (s *sandboxAuthority) stopText(uid int, id string) string {
 	}
 	return run.StopText
 }
-
-// sandboxAuthorities holds each API server's authority, created on first
-// use. Package state rather than an APIServer field: the server type is
-// shared by every lane of this change.
-var sandboxAuthorities sync.Map // *APIServer -> *sandboxAuthorityHolder
 
 // sandboxAuthorityHolder creates an API server's authority once it can:
 // a failure (an unusable data directory, a key that can't be loaded yet)
@@ -174,8 +183,7 @@ func (a *APIServer) sandboxAuth() (*sandboxAuthority, error) {
 	if a == nil {
 		return nil, errors.New("no API server")
 	}
-	entry, _ := sandboxAuthorities.LoadOrStore(a, &sandboxAuthorityHolder{})
-	holder := entry.(*sandboxAuthorityHolder)
+	holder := &a.sandboxAuthority
 	if auth := holder.ready.Load(); auth != nil {
 		return auth, nil
 	}
@@ -206,6 +214,117 @@ func (a *APIServer) sandboxAuth() (*sandboxAuthority, error) {
 	return auth, nil
 }
 
+// sandboxForgetPreviousAccounts removes, before peer's account (subjectKey)
+// registers or restarts a sandbox, the registrations and saved decisions an
+// earlier account holding the same uid left behind: a deleted account whose
+// uid the account database gave to a new one, or an account since renamed.
+// The account holding the uid now never inherits them, never sees them and
+// is never refused because of them (rel-1-0-6:GAP-0262). Only the
+// administrator is told, in the gateway log; the account is not, since what
+// another account ran is not its business.
+//
+// Nothing is removed on the strength of a name the account database did not
+// just give: not while the peer's lookup failed (peer.Name is empty and the
+// last name stands in), and not before sandboxAccountNow, asked again with no
+// cache, names the same account. The decisions go first, and the
+// registrations only once that write is stored: a failed write or a crash in
+// between leaves the registrations, so the next start finds them and tries
+// again. While records are kept, none of them is served to the caller: a
+// decision without a subject key applies only inside its own registration
+// (Decision.AppliesTo).
+//
+// A decision saved before 1.0.7 takes the key of the registration it was made
+// in. One whose registration is gone takes the caller's key only when its
+// actor's directory principal is the caller's (principal, from the directory
+// facts the route just resolved); otherwise, a local account or a cold cache
+// included, it is dropped, which costs a new ask and never a grant.
+func (a *APIServer) sandboxForgetPreviousAccounts(auth *sandboxAuthority, peer managedHookPeer, subjectKey, principal string) {
+	uid := peer.UID
+	if subjectKey == "" || strings.TrimSpace(peer.Name) == "" {
+		return
+	}
+	regs, err := auth.store.List(uid)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[sandbox-authority] forget previous accounts uid=%d: %v\n", uid, err)
+		return
+	}
+	owners := make(map[string]string, len(regs))
+	reused := false
+	for _, r := range regs {
+		owners[r.ID] = r.SubjectKey
+		reused = reused || r.SubjectKey != subjectKey
+	}
+	var saved []sandboxreg.Decision
+	if auth.decisions != nil {
+		if saved, err = auth.decisions.List(uid, ""); err != nil {
+			fmt.Fprintf(os.Stderr, "[sandbox-authority] forget previous accounts uid=%d decisions: %v\n", uid, err)
+			return
+		}
+	}
+	principalHash := sandboxPrincipalHash(auth.key, principal)
+	keyOf := func(d sandboxreg.Decision) (string, bool) {
+		if key, ok := owners[d.Registration]; ok {
+			return key, true
+		}
+		if principalHash != "" && d.Actor.PrincipalHash == principalHash {
+			return subjectKey, true
+		}
+		return "", false
+	}
+	settle := false
+	confirm := reused
+	for _, d := range saved {
+		if d.SubjectKey == "" {
+			settle = true
+			if key, ok := keyOf(d); !ok || key != subjectKey || owners[d.Registration] == "" {
+				confirm = true
+			}
+			continue
+		}
+		if d.SubjectKey != subjectKey {
+			settle, confirm = true, true
+		}
+	}
+	if !reused && !settle {
+		return
+	}
+	if confirm {
+		name, err := sandboxAccountNow(uid)
+		if err == nil && sandboxSubjectKey(auth.key, uid, name, "") != subjectKey {
+			err = errors.New("the account database names another account for the uid")
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[sandbox-authority] uid=%d: records of another account are kept until the account database confirms the account that holds the uid: %v\n", uid, err)
+			return
+		}
+	}
+	dropped := 0
+	if settle {
+		if dropped, err = auth.decisions.SettleAccount(uid, subjectKey, keyOf); err != nil {
+			fmt.Fprintf(os.Stderr, "[sandbox-authority] forget previous accounts uid=%d decisions: %v; the registrations stay until a later start\n", uid, err)
+			return
+		}
+	}
+	var gone []sandboxreg.Registration
+	if reused {
+		if gone, err = auth.store.ForgetOtherAccounts(uid, subjectKey); err != nil {
+			fmt.Fprintf(os.Stderr, "[sandbox-authority] forget previous accounts uid=%d: %v\n", uid, err)
+		}
+	}
+	if len(gone) > 0 || dropped > 0 {
+		fmt.Fprintf(os.Stderr, "[sandbox-authority] uid=%d: removed %d sandbox registrations and %d saved decisions another account (a deleted or renamed account) or an unproven earlier release left on it; the account that holds the uid does not inherit them\n", uid, len(gone), dropped)
+	}
+}
+
+// sandboxFactsPrincipal is the directory principal of facts as a decision's
+// actor records it (sandboxPeerPrincipal): the principal, else the UPN.
+func sandboxFactsPrincipal(facts useridentity.DirectoryFacts) string {
+	if facts.Principal != "" {
+		return facts.Principal
+	}
+	return facts.UPN
+}
+
 // sandboxSubjectKey is a registration's subject key: DigestPrefix and the
 // HMAC of "v1|uid|account|sid", the kernel uid, the lowercased account
 // name the account database gives for it at peer auth and the account SID
@@ -234,7 +353,8 @@ func sandboxSubjectMatches(key []byte, reg sandboxreg.Registration, peer managed
 // sandboxFactsDigest is a registration's facts digest: DigestPrefix and
 // the HMAC of the directory facts a profile match uses (principal, UPN,
 // domain, directory, tenant, sorted groups) and whether they resolved. A
-// change re-matches the registration; it never refuses it.
+// change re-matches the registration without revoking it. Requests whose
+// assignments need the unresolved fact are refused until it is confirmed.
 func sandboxFactsDigest(key []byte, facts useridentity.DirectoryFacts, resolved bool) string {
 	groups := slices.Clone(facts.Groups)
 	for i := range groups {
@@ -308,7 +428,7 @@ type sandboxRouteAuthorizerKey struct{}
 func (a *APIServer) serveSandboxRoute(authorizer *managedHookAuthorizer, peer managedHookPeer, route string, w http.ResponseWriter, r *http.Request, next http.Handler) {
 	if r.Header.Get(sandboxrelay.ClientHeader) == "" {
 		a.emitHTTPAuthFailure(r.Context(), r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "csrf_mismatch")
-		http.Error(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
+		writeJSONRefusal(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
 		return
 	}
 	if peer.UID == 0 {
@@ -322,9 +442,60 @@ func (a *APIServer) serveSandboxRoute(authorizer *managedHookAuthorizer, peer ma
 		return
 	}
 	defer release()
+	if sandboxDaemonOutdated(r) && !sandboxOutdatedDaemonRoute(r.URL.Path) {
+		refuseOutdatedSandboxDaemon(w, peer, route)
+		return
+	}
 	ctx := attachVerifiedSubject(r.Context(), a.observabilityV8RuntimeEmitter(), strconv.Itoa(peer.UID), peer.Name, subjectSourcePeerCredentials)
 	ctx = context.WithValue(ctx, sandboxRouteAuthorizerKey{}, authorizer)
 	next.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// sandboxDaemonOutdated reports a call from a daemon below the floor
+// contract (sandboxrelay.DaemonContract): it would mark a partial floor
+// confirmed (GAP-0182). A package upgrade leaves the account's old daemon
+// running until its sandboxes stop.
+func sandboxDaemonOutdated(r *http.Request) bool {
+	contract, err := strconv.Atoi(strings.TrimSpace(r.Header.Get(sandboxrelay.DaemonContractHeader)))
+	return err != nil || contract < sandboxrelay.DaemonContract
+}
+
+// sandboxOutdatedDaemonRoute reports a sandbox route a daemon below the
+// floor contract still reaches; every other one is refused before its
+// handler. Settings and the sandbox events (the audit of what the daemon
+// does) are answered as usual, and a deletion is recorded. Resolve
+// records its refusal (GAP-0148), and policy/current and the state report
+// pass a revocation and a stopped sandbox through but never confirm a
+// floor or renew a running one (serveSandboxCurrent).
+func sandboxOutdatedDaemonRoute(path string) bool {
+	switch path {
+	case sandboxrelay.PathSettings, sandboxrelay.PathEvents, sandboxrelay.PathPolicyResolve, sandboxrelay.PathPolicyCurrent:
+		return true
+	}
+	if id, ok := strings.CutPrefix(path, sandboxrelay.PathRegistrations); ok {
+		return strings.HasSuffix(id, sandboxrelay.RegistrationStateSub) || strings.HasSuffix(id, sandboxrelay.RegistrationDelSub)
+	}
+	return false
+}
+
+// sandboxOutdatedDaemonLogged holds the uids whose outdated daemon this
+// gateway already logged, so a running sandbox's hooks log it once.
+var sandboxOutdatedDaemonLogged sync.Map
+
+// refuseOutdatedSandboxDaemon answers a daemon below the floor contract
+// with ReasonDaemonOutdated.
+func refuseOutdatedSandboxDaemon(w http.ResponseWriter, peer managedHookPeer, route string) {
+	logOutdatedSandboxDaemon(peer, route)
+	writeSandboxReason(w, sandboxrelay.ReasonDaemonOutdated, sandboxTextDaemonOutdated)
+}
+
+// logOutdatedSandboxDaemon logs the first refusal of peer's outdated daemon.
+func logOutdatedSandboxDaemon(peer managedHookPeer, route string) {
+	if _, logged := sandboxOutdatedDaemonLogged.LoadOrStore(peer.UID, true); !logged {
+		fmt.Fprintf(os.Stderr, "[sandbox-authority] uid=%d route=%s reason=%s: the account's sandbox daemon does not state contract %d; "+
+			"new sandboxes and policy confirmations are refused until it restarts on this version\n",
+			peer.UID, route, sandboxrelay.ReasonDaemonOutdated, sandboxrelay.DaemonContract)
+	}
 }
 
 // sandboxDecide runs decide(peer, connectorName, "sandbox") for a sandbox
@@ -442,11 +613,12 @@ func (a *APIServer) sandboxRegistrationFor(w http.ResponseWriter, auth *sandboxA
 // sandboxStandInName is the account name a new registration binds for peer:
 // the account database's, else, while it gives none (a directory outage), the
 // name the uid last resolved to, which a managed gateway keeps across
-// restarts. A new run then starts, provisional under the default profile,
-// instead of being refused with "your account can't be looked up" (GAP-0507);
-// sandboxCheckSubject applies the same stand-in to the calls that follow, and
-// revokes the registration if the directory later names another account.
-// "" when neither is known.
+// restarts, so the run is not refused with "your account can't be looked
+// up" (GAP-0507). The run is still refused, naming the missing fact, when an
+// assignment needs a fact the outage withholds; otherwise the proven or
+// default profile applies. sandboxCheckSubject applies the same stand-in to
+// the calls that follow, and revokes the registration if the directory later
+// names another account. "" when neither is known.
 func sandboxStandInName(peer managedHookPeer) string {
 	if name := strings.TrimSpace(peer.Name); name != "" {
 		return name
@@ -458,12 +630,12 @@ func sandboxStandInName(peer managedHookPeer) string {
 // the uid is not the one that registered it (a recycled uid, a renamed
 // account). While the account database gives no name for the uid (a
 // directory outage), the name the uid last resolved to stands in for it, so
-// a running sandbox keeps working and its re-match moves it to the default
-// profile, provisionally, instead of every hook failing (GAP-0506); a
-// recycled uid resolves through the account database that now holds it. A
-// peer with neither, or whose last name is not the registration's, can't be
-// told apart from another account: the call is refused (503) and the
-// registration kept.
+// a running sandbox keeps its last proven profile until the facts resolve
+// instead of every hook failing (GAP-0506); a call whose assignments need
+// the missing fact is refused, naming it. A recycled uid resolves through
+// the account database that now holds it. A peer with neither, or whose last
+// name is not the registration's, can't be told apart from another account:
+// the call is refused (503) and the registration kept.
 func (a *APIServer) sandboxCheckSubject(w http.ResponseWriter, auth *sandboxAuthority, peer managedHookPeer, reg sandboxreg.Registration) bool {
 	if strings.TrimSpace(peer.Name) == "" {
 		last := peer
@@ -616,7 +788,7 @@ func (a *APIServer) sandboxPolicyKey(ctx context.Context, cfg *config.Config) st
 // never with another group's profile, which the host generation would
 // reveal. The daemon compares it for equality only.
 func (a *APIServer) sandboxViewGeneration(cfg *config.Config, reg sandboxreg.Registration) uint64 {
-	floor, floorDigest, err := sandboxFloorFor(cfg, reg.Profile)
+	floor, floorDigest, err := sandboxRegistrationFloor(cfg, reg)
 	if err != nil {
 		floorDigest = "unloadable"
 	}
@@ -635,6 +807,69 @@ func (a *APIServer) sandboxViewGeneration(cfg *config.Config, reg sandboxreg.Reg
 // sandbox_policy_unloadable.
 var sandboxFloorFor = func(cfg *config.Config, profile string) (config.OpenShellAdminConfig, string, error) {
 	return cfg.SandboxManagedFloor(profile)
+}
+
+func sandboxStoredMeetFloor(cfg *config.Config, profile string, members []string) (config.OpenShellAdminConfig, string, error) {
+	if len(members) != 0 {
+		return cfg.SandboxManagedFloorWithMembers(profile, members)
+	}
+	return sandboxFloorFor(cfg, profile)
+}
+
+// sandboxRegistrationFloor is the floor F of a registered sandbox and its
+// digest: the floor of the profile it is matched to now, tightened by the
+// floor of the profile it was created under when a profile-assignment
+// change has since moved it (Registration.CreateProfile). Floors are pinned
+// at create per sandbox: a re-match may tighten a running sandbox, never
+// loosen it, and the person's next sandbox takes the new profile alone
+// (GAP-0242). An administrator's edit of a profile's own settings applies
+// to both floors, so it still reaches a running sandbox. Floors that do not
+// combine (a contradiction, or a create profile no longer defined) fail
+// closed like any floor that does not load.
+func sandboxRegistrationFloor(cfg *config.Config, reg sandboxreg.Registration) (config.OpenShellAdminConfig, string, error) {
+	floor, digest, err := sandboxStoredMeetFloor(cfg, reg.Profile, reg.ProfileMembers)
+	if err != nil || reg.CreateProfile == nil || *reg.CreateProfile == reg.Profile {
+		return floor, digest, err
+	}
+	created, createdDigest, err := sandboxStoredMeetFloor(cfg, *reg.CreateProfile, reg.CreateProfileMembers)
+	if err != nil {
+		return config.OpenShellAdminConfig{}, "", fmt.Errorf("the floor of profile %q the sandbox was created under: %w", *reg.CreateProfile, err)
+	}
+	pinned, err := config.TightenOpenShellAdmin(floor, &created)
+	if err != nil {
+		return config.OpenShellAdminConfig{}, "", err
+	}
+	if access := strings.TrimSpace(floor.RequestAccess); access != "" {
+		// The contact of the profile the person is assigned to now.
+		pinned.RequestAccess = floor.RequestAccess
+	}
+	return pinned, sandboxDigestOf([]string{"create-pinned-v1", digest, createdDigest}), nil
+}
+
+// sandboxPinnedProfile names, in reg's owner's views, the profile reg's
+// sandbox was created under while its floor is still pinned to it: a
+// profile-assignment change moved the registration to another profile, and
+// the created profile's floor still tightens the new one
+// (sandboxRegistrationFloor). "" when the floor is the current profile's
+// alone, or cannot be loaded (GAP-0285).
+func sandboxPinnedProfile(cfg *config.Config, reg sandboxreg.Registration) string {
+	if cfg == nil || reg.CreateProfile == nil || *reg.CreateProfile == reg.Profile ||
+		sandboxProfileWithheld(cfg, reg.Profile, reg.ProfileMatch) {
+		return ""
+	}
+	current, _, err := sandboxStoredMeetFloor(cfg, reg.Profile, reg.ProfileMembers)
+	if err != nil {
+		return ""
+	}
+	pinned, _, err := sandboxRegistrationFloor(cfg, reg)
+	if err != nil {
+		return ""
+	}
+	pinned.RequestAccess = current.RequestAccess
+	if reflect.DeepEqual(current, pinned) {
+		return ""
+	}
+	return profileUserLabel(*reg.CreateProfile)
 }
 
 // sandboxDigestOf is "sha256:" and the hex SHA-256 of v's JSON.
@@ -714,7 +949,9 @@ func (a *APIServer) sandboxMatchPeer(ctx context.Context, peer managedHookPeer, 
 		UserID: id, IDKind: useridentity.KindForID(id), UserName: verifiedAccountName(id, peer.Name),
 		Directory: facts, Source: subjectSourcePeerCredentials,
 	}, lookup)
-	decision := set.match(&subject, profileSubjectVerified, config.NormalizeConnectorName(connectorName), "")
+	connectorName = config.NormalizeConnectorName(connectorName)
+	scans := set.requestScanScopes(ctx, connectorName)
+	decision := set.matchResolved(&subject, resolveIdentity(&subject, nil), profileSubjectVerified, connectorName, scans, profilePathAny, "")
 	return sandboxMatch{
 		decision: decision, resolved: resolved, facts: facts,
 		provisional: decision.Match == profileMatchDefaultLookupFailed,

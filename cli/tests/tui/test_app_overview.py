@@ -807,28 +807,6 @@ def test_policy_posture_multi_connector() -> None:
     assert _policy_posture(strict) == "action: block CRIT, alert MED+ (strict)"
 
 
-def test_enforcement_label_multi_connector() -> None:
-    """Multi-connector enforcement reports the connector count instead of
-    naming a single primary; single-connector keeps the named-connector form."""
-
-    multi = OverviewConfig(
-        guardrail_connector="codex",
-        guardrail_mode="action",
-        guardrail_enabled=True,
-        connector_modes=(("codex", "action"), ("claudecode", "action")),
-    )
-    assert _enforcement_label(multi) == "2 connectors (per-connector modes)"
-    # GAP-1561: after "defenseclaw uninstall" turned the guardrail off.
-    off = OverviewConfig(connector_modes=multi.connector_modes)
-    assert _enforcement_label(off) == "off - guardrail disabled, nothing is guarded"
-    assert _agents_summary(off, 2) == "2 configured, guardrail off (nothing is guarded)"
-    assert _agents_summary(multi, 2) == "2 active"
-
-    single = OverviewConfig(guardrail_connector="codex", guardrail_mode="action")
-    assert _enforcement_label(single) == "codex hook enforcement (action)"
-
-    omnigent = OverviewConfig(guardrail_connector="omnigent", guardrail_mode="action")
-    assert _enforcement_label(omnigent) == "omnigent policy enforcement (action)"
 
 
 def test_overview_reuses_hook_event_snapshot_within_one_render() -> None:

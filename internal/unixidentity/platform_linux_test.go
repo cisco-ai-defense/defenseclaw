@@ -103,6 +103,8 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 	}
 	services := map[int]string{70005: "winbind", 70006: "winbind", 70007: "ldap", 70008: "winbind", 70009: "ldap"}
 	startFakeSSSD(t, nil)
+	// nslcd completes its searches: it lists no second account of a uid.
+	startFakeNSLCD(t, &fakeNSLCD{})
 	f := &fakeRun{results: map[string]commandResult{"group 70000": {stdout: []byte("users:*:70000:\n")}}}
 	for uid, name := range accounts {
 		line := commandResult{stdout: []byte(name + ":*:" + strconv.Itoa(uid) + ":70000::/home/" + name + ":/bin/bash\n")}
@@ -546,6 +548,8 @@ func TestSSSDAccountDomainTakesTheAnnouncedFlatName(t *testing.T) {
 }
 
 func TestSSSDAccountKeepsGroupFromAnotherNSSService(t *testing.T) {
+	// An nslcd that completes every search (nslcdSearchesComplete).
+	startFakeNSLCD(t, &fakeNSLCD{})
 	dir := t.TempDir()
 	oldPasswd, oldGroup, oldNSS := localPasswdPath, localGroupPath, nsswitchPath
 	t.Cleanup(func() { localPasswdPath, localGroupPath, nsswitchPath = oldPasswd, oldGroup, oldNSS })
@@ -574,7 +578,14 @@ func TestSSSDAccountKeepsGroupFromAnotherNSSService(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(facts.Groups, []string{"alice", "ldap-admins"}) {
 		t.Fatalf("SSSD account groups = %q, %v", facts.Groups, err)
 	}
+	// An empty LDAP answer counts once nslcd completes the search: getent
+	// answers the same for a search that failed (fail closed).
 	f.results["-s ldap initgroups alice"] = commandResult{stdout: []byte("alice\n")}
+	startFakeNSLCD(t, &fakeNSLCD{incomplete: map[string]bool{"member:alice": true}})
+	if facts, err = newFakeNSS(f).DirectoryFactsForUID(1001, time.Now()); err == nil {
+		t.Fatalf("an LDAP search that did not complete dropped its groups: %q", facts.Groups)
+	}
+	startFakeNSLCD(t, &fakeNSLCD{})
 	facts, err = newFakeNSS(f).DirectoryFactsForUID(1001, time.Now())
 	if err != nil || !reflect.DeepEqual(facts.Groups, []string{"alice"}) {
 		t.Fatalf("without LDAP membership, groups = %q, %v", facts.Groups, err)

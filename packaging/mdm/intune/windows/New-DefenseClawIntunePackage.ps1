@@ -10,14 +10,23 @@
     Run on an administrator workstation. Verifies DefenseClawSetup-Enterprise-Standalone-x64.exe
     (hash-pinned against -Sha256, which you take from the release's
     cosign-verified checksums.txt, and/or Authenticode against
-    -AllowedSigners), copies it with either config.yaml or a signed policy
-    bundle and optional trust anchors into a content folder, writes intune-package.json with the SHA-256 pins
+    -AllowedSigners), copies it with config.yaml, a signed policy
+    bundle with optional trust anchors, or both (the single app) into a content folder, writes intune-package.json with the SHA-256 pins
     the launcher re-checks on the device, and, when -IntuneWinAppUtil is
     given, wraps the folder into a .intunewin.
 
     Never put credentials in config.yaml: the Win32 app content is not secret
     storage. Deliver the AI Defense key separately (see the Intune on Windows page in the docs).
-    A bundle package needs an installed base deployment. -BaseConfigPath names
+    Single app (recommended): -ConfigPath with -BundlePath and -TrustAnchorPath
+    builds one app. On a new device Setup stages the install from config.yaml
+    with every service stopped, then applies the signed bundle and starts the
+    services on it; nothing runs on config.yaml. On an installed device the
+    same app applies the bundle only, so later bundle versions are new
+    versions of this app (no app dependency).
+
+    Bundle-only app (devices installed with the earlier two-app recipe until
+    they move to the single app): -BundlePath without -ConfigPath. It needs
+    an installed base deployment. -BaseConfigPath names
     the config packaged in that base app; its guardrail policy must match the
     signed bundle, apart from the custom pack's installed path. Install that
     pack before the base app with a rule-pack app built from
@@ -58,8 +67,8 @@ if (-not [IO.Path]::IsPathRooted($OutputDirectory)) {
 }
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
 
-if ($BundlePath -and $ConfigPath) { throw '-BundlePath cannot be combined with -ConfigPath: the signed bundle carries the config. Build the first-install (base) package with -ConfigPath, and each bundle package with -BundlePath as an Intune dependency of the base app' }
-if ($BundlePath -and -not $BaseConfigPath) { throw '-BaseConfigPath is required with -BundlePath: the base CONFIG= must enforce the signed bundle rule pack before the bundle app runs' }
+if ($BundlePath -and $ConfigPath -and $BaseConfigPath) { throw '-BaseConfigPath is only for a bundle-only app: the single app (-ConfigPath with -BundlePath) never runs on config.yaml, so it is not compared with the bundle' }
+if ($BundlePath -and -not $ConfigPath -and -not $BaseConfigPath) { throw '-BaseConfigPath is required with -BundlePath alone (a bundle-only app for a device installed with the two-app recipe): the base CONFIG= must enforce the signed bundle rule pack. For a new deployment build the single app with -ConfigPath and -BundlePath' }
 if ($BaseConfigPath -and -not $BundlePath) { throw '-BaseConfigPath needs -BundlePath' }
 if ($TrustAnchorPath -and -not $BundlePath) { throw '-TrustAnchorPath needs -BundlePath: the kit installs trust anchors together with a signed bundle' }
 if ($BundlePath -and -not $RequireBundle) { throw '-RequireBundle is required with -BundlePath for the bundle app detection rule' }
@@ -264,7 +273,7 @@ function Get-PreinstalledPackPath {
     return $found
 }
 
-if ($BundlePath) {
+if ($BundlePath -and $BaseConfigPath) {
     # Raw bytes: Get-Content would decode them (as ANSI in Windows PowerShell).
     $baseBytes = [IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $BaseConfigPath).ProviderPath)
     $spelling = Get-BaseConfigSpellingProblem -Bytes $baseBytes
@@ -433,13 +442,33 @@ $version = if ($ProductVersion) { $ProductVersion } else { '<the release version
 # A pack the base config names outside the install tree must be on the device
 # before Setup runs, or Setup refuses CONFIG= with 1639 (GAP-0109).
 $packHint = ''
-$preinstalled = @(Get-PreinstalledPackPath -Text $(if ($BundlePath) { $baseText } else { $configText }))
+$preinstalled = @(Get-PreinstalledPackPath -Text $(if ($BaseConfigPath) { $baseText } else { $configText }))
 if ($preinstalled.Count -gt 0) {
     $packHint = "Prerequisite:      the base config names rule pack(s) that this app does not deliver: " +
         (($preinstalled | ForEach-Object { "$($_.Name) at $($_.Path)" }) -join '; ') + "`n" +
         "                   Deliver each first with a rule-pack Win32 app built from Install-DefenseClawRulePack.ps1 (it grants NT SERVICE\DefenseClawGateway`n" +
         "                   Read & execute on the pack and its parent folder; detection Detect-DefenseClawRulePack.ps1), and make that app a dependency of the`n" +
         "                   base app (Automatically install: Yes). Without the pack, or if the gateway cannot read it, Setup refuses CONFIG= with 1639."
+}
+if ($BundlePath -and $ConfigPath) {
+@"
+Win32 app content: $content
+Install command:   %SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\Install-DefenseClawIntune.ps1
+                   (runs Setup /ensure CONFIG= BUNDLE= TRUSTANCHORS=: a new device installs with the services stopped and starts them on the
+                   signed bundle; if the bundle is not applied Setup removes the staged install and the app fails, so Intune retries it whole)
+Uninstall command: powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\Install-DefenseClawIntune.ps1 -Uninstall
+Install behavior:  System
+Return codes:      0 Success, 1707 Success, 3010 Soft reboot, 1641 Hard reboot, 1618 Retry (defaults; 1603 and 1639 report Failed)
+Requirements:      x64 only; Windows 10 22H2 or later; dependency: PowerShell 7.4+ (x64 MSI) Win32 app
+Dependency:        none on another DefenseClaw app
+Supersedence:      a later bundle version is a new version of this app (supersede it; Uninstall previous version: No)
+Detection rule:    Custom script $(Join-Path $OutputDirectory 'detect-bundle.ps1'), Run script as 32-bit process on 64-bit clients: No
+Pins:              config.yaml sha256 $configPin; policy.dcbundle sha256 $bundlePin; bundle-anchors.json sha256 $(if ($anchorPin) { $anchorPin } else { 'none' })
+Moving from two apps: assign this app to devices that run the base app and the bundle app, then remove both assignments
+                   (on an installed device this app applies the bundle only).
+"@
+    if ($packHint) { $packHint }
+    return
 }
 if ($BundlePath) {
 @"
@@ -472,6 +501,6 @@ Requirements:      x64 only; Windows 10 22H2 or later; dependency: PowerShell 7.
 Detection rule:    Registry, HKEY_LOCAL_MACHINE\SOFTWARE\Cisco\DefenseClaw\Enterprise, value ProductVersion,
                    Version comparison, Greater than or equal to $version, 32-bit app on 64-bit clients: No
 Purge twin:        the same uninstall command with -Purge (Setup PURGE=1; assign as Uninstall when purging)
-Bundle mode:       once a device takes signed bundles, do not assign a package built with -ConfigPath to it again (Setup refuses it with bundle_required); build upgrade packages without -ConfigPath.
+Bundle mode:       once a device takes signed bundles, do not assign a package built with -ConfigPath alone to it again (Setup refuses it with bundle_required); build the single app (-ConfigPath with -BundlePath) instead.
 "@
 if ($packHint) { $packHint }

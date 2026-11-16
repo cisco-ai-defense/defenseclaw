@@ -16,6 +16,7 @@ import (
 	"errors"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -31,6 +32,44 @@ func TestV9SchemaErrorDoesNotPointToV8(t *testing.T) {
 	}
 }
 
+// A top-level audit_db or judge_bodies_db (the 0.8.x store paths that
+// config_version 8 moved under observability.local) is still refused, and
+// the refusal names the key that replaced it. A nested key of the same name
+// keeps the plain unknown-field answer.
+func TestV9SchemaRefusalNamesMovedStorePathKey(t *testing.T) {
+	for key, home := range map[string]string{
+		"audit_db":        "observability.local.path",
+		"judge_bodies_db": "observability.local.judge_bodies_path",
+	} {
+		err := ValidateV8SchemaBytes("config.yaml", []byte("config_version: 9\n"+key+": /tmp/store.db\n"))
+		var schemaErr *V8SchemaError
+		if !errors.As(err, &schemaErr) || schemaErr.Path != "$."+key || schemaErr.Suggestion != "" ||
+			!strings.Contains(err.Error(), "config_version 9: "+key+" was retired in config_version 8; use "+home) ||
+			strings.Contains(err.Error(), "did you mean") {
+			t.Errorf("top-level %s = %v (%+v)", key, err, schemaErr)
+		}
+		// The managed ensure and validate refusals add the same key (GAP-0188).
+		if hint, ok := schemaErr.RetiredKeyMessage(); !ok || hint != key+" was retired in config_version 8; use "+home {
+			t.Errorf("top-level %s hint = %q, %t", key, hint, ok)
+		}
+	}
+	err := ValidateV8SchemaBytes("config.yaml", []byte("config_version: 9\nguardrail:\n  audit_db: /tmp/store.db\n"))
+	var schemaErr *V8SchemaError
+	if !errors.As(err, &schemaErr) || schemaErr.Suggestion == "observability.local.path" {
+		t.Errorf("nested audit_db = %v (%+v)", err, schemaErr)
+	}
+	if hint, ok := schemaErr.RetiredKeyMessage(); ok {
+		t.Errorf("nested audit_db hint = %q", hint)
+	}
+	err = ValidateV8SchemaBytes("config.yaml", []byte("config_version: 9\naudit_dbx: /tmp/store.db\n"))
+	if !errors.As(err, &schemaErr) {
+		t.Fatalf("typo = %v", err)
+	}
+	if hint, ok := schemaErr.RetiredKeyMessage(); ok {
+		t.Errorf("audit_dbx hint = %q", hint)
+	}
+}
+
 // GAP-0940: an http_jsonl destination with bearer_env and bearer_credential
 // is reported as those two fields, not as the kind of another destination
 // type ("kind must be the literal jsonl").
@@ -42,6 +81,71 @@ func TestV8SchemaNamesFieldsThatExcludeEachOther(t *testing.T) {
 	if !errors.As(err, &schemaErr) || schemaErr.Keyword != "not" || schemaErr.Path != "$.observability.destinations[0]" ||
 		schemaErr.Expected != "either bearer_env or bearer_credential, not both" {
 		t.Fatalf("both credential fields = %v (%+v)", err, schemaErr)
+	}
+}
+
+// GAP-0760 (#1099): severity_overrides takes the rule severities block_at
+// takes, in any case. INFO, which no rule can have, passed the schema and was
+// then refused by the rule composer; the schema now refuses it and names the
+// words it takes, as it does for block_at.
+func TestV8SchemaRuleSeverityOverrideWords(t *testing.T) {
+	override := func(value string) []byte {
+		return []byte("config_version: 9\nguardrail:\n  rules:\n    severity_overrides: {SEC-AWS-SECRET: " + value + "}\n")
+	}
+	for _, value := range []string{"CRITICAL", "high", "Medium", "low"} {
+		if err := ValidateV8SchemaBytes("admin.yaml", override(value)); err != nil {
+			t.Errorf("severity_overrides %s refused: %v", value, err)
+		}
+	}
+	for _, value := range []string{"INFO", "info", "severe"} {
+		err := ValidateV8SchemaBytes("admin.yaml", override(value))
+		var schemaErr *V8SchemaError
+		if !errors.As(err, &schemaErr) || schemaErr.Keyword != "pattern" ||
+			schemaErr.Expected != "one of CRITICAL, HIGH, MEDIUM, LOW in any case" {
+			t.Errorf("severity_overrides %s = %v (%+v)", value, err, schemaErr)
+		}
+	}
+	err := ValidateV8SchemaBytes("admin.yaml", []byte("config_version: 9\nguardrail:\n  block_at: severe\n"))
+	var schemaErr *V8SchemaError
+	if !errors.As(err, &schemaErr) || schemaErr.Expected != "one of CRITICAL, HIGH, MEDIUM, LOW in any case (empty inherits)" {
+		t.Errorf("block_at severe = %v (%+v)", err, schemaErr)
+	}
+}
+
+// GAP-0760 (#1099): hilt.min_severity follows the same case rule as block_at
+// and severity_overrides. The Go and Python validators and every gateway
+// reader already took any case; only the schema refused lower case.
+func TestV8SchemaHILTMinSeverityTakesAnyCase(t *testing.T) {
+	hilt := func(value string) []byte {
+		return []byte("config_version: 9\nguardrail:\n  hilt: {enabled: true, min_severity: \"" + value + "\"}\n" +
+			"  connectors:\n    codex:\n      hilt: {enabled: true, min_severity: \"" + value + "\"}\n")
+	}
+	for _, value := range []string{"", "CRITICAL", "high", "Medium", "low"} {
+		if err := ValidateV8SchemaBytes("admin.yaml", hilt(value)); err != nil {
+			t.Errorf("hilt.min_severity %q refused: %v", value, err)
+		}
+	}
+	for _, value := range []string{"INFO", "severe"} {
+		err := ValidateV8SchemaBytes("admin.yaml", hilt(value))
+		var schemaErr *V8SchemaError
+		if !errors.As(err, &schemaErr) || schemaErr.Keyword != "pattern" ||
+			schemaErr.Expected != "one of CRITICAL, HIGH, MEDIUM, LOW in any case (empty inherits)" {
+			t.Errorf("hilt.min_severity %q = %v (%+v)", value, err, schemaErr)
+		}
+	}
+}
+
+func TestV8SchemaPatternWords(t *testing.T) {
+	for pattern, want := range map[string]string{
+		"^([Ll][Oo][Ww]|[Hh][Ii][Gg][Hh])$": "one of LOW, HIGH in any case",
+		"^(|observe|action)$":               "one of observe, action (empty inherits)",
+		"^[a-z0-9][a-z0-9_-]{0,63}$":        "",
+		"^agt-[0-9a-f]{16}$":                "",
+		"^(a.b|c)$":                         "",
+	} {
+		if got := v8SchemaPatternWords(pattern); got != want {
+			t.Errorf("v8SchemaPatternWords(%q) = %q, want %q", pattern, got, want)
+		}
 	}
 }
 
@@ -224,5 +328,41 @@ func TestV8SchemaNamesMissingKeysAndLimits(t *testing.T) {
 		if tc.keyword == "required" && !slices.Equal(schemaErr.Missing, []string{"match"}) {
 			t.Fatalf("%s: missing = %q", tc.name, schemaErr.Missing)
 		}
+	}
+}
+
+// GAP-0617: `defenseclaw config reference` printed a "v8" reference with
+// config_version: 8 on a v9 install. Every embedded reference format and the
+// JSON Schema title must name MaxSupportedConfigVersion, the version written.
+func TestConfigReferenceNamesCurrentConfigVersion(t *testing.T) {
+	version := strconv.Itoa(MaxSupportedConfigVersion)
+	yamlRef := string(publicschemas.DefenseClawConfigV8ObservabilityReferenceYAML())
+	if !strings.HasPrefix(yamlRef, "# DEFENSECLAW CONFIGURATION v"+version+" — OBSERVABILITY REFERENCE\n") {
+		t.Errorf("YAML reference header does not name v%s: %q", version, strings.SplitN(yamlRef, "\n", 2)[0])
+	}
+	if !strings.Contains(yamlRef, "\nconfig_version: "+version+"\n") {
+		t.Errorf("YAML reference does not declare config_version: %s", version)
+	}
+	mdRef := string(publicschemas.DefenseClawConfigV8ObservabilityReferenceMarkdown())
+	if !strings.HasPrefix(mdRef, "# DefenseClaw v"+version+" observability configuration reference\n") ||
+		!strings.Contains(mdRef, "`config_version: "+version+"`") {
+		t.Errorf("Markdown reference does not name config_version %s: %q", version, strings.SplitN(mdRef, "\n", 2)[0])
+	}
+	var schema struct {
+		Title      string `json:"title"`
+		Properties struct {
+			ConfigVersion struct {
+				Enum []int `json:"enum"`
+			} `json:"config_version"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(publicschemas.DefenseClawConfigV8Schema(), &schema); err != nil {
+		t.Fatal(err)
+	}
+	if schema.Title != "DefenseClaw configuration v"+version {
+		t.Errorf("schema title = %q", schema.Title)
+	}
+	if enum := schema.Properties.ConfigVersion.Enum; len(enum) == 0 || slices.Max(enum) != MaxSupportedConfigVersion {
+		t.Errorf("schema config_version enum = %v, want max %d", enum, MaxSupportedConfigVersion)
 	}
 }

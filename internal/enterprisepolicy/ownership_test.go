@@ -136,7 +136,7 @@ func TestRemoveAfterReconcileKeepsLaterAdministratorEdits(t *testing.T) {
 		}
 		mustReconcile(t, opencodeTarget{}, opts)
 		mustRemove(t, opencodeTarget{}, opts)
-		if got := readFile(t, path); !strings.Contains(got, "admin-later") || strings.Contains(got, opts.OpenCodePluginPath) {
+		if got := readFile(t, path); !strings.Contains(got, "admin-later") || strings.Contains(got, openCodePluginSpec(opts)) {
 			t.Fatalf("removal must keep the admin plugin added after install:\n%s", got)
 		}
 	})

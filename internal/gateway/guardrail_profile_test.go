@@ -112,7 +112,7 @@ func TestGuardrailProfileRemovalUsesReloadedBaseForUnmatchedHook(t *testing.T) {
 	live := startup
 	api.SetGenerationSource(func() *Generation { return &Generation{Config: live} })
 	ctx := api.withGuardrailProfileDecision(t.Context(), "opencode")
-	if got := hookModeForConfig(api.decisionConfig(ctx), "opencode"); got != "observe" {
+	if got := api.decisionConfig(ctx).HookModeForConnector("opencode"); got != "observe" {
 		t.Fatalf("startup unmatched hook mode = %q", got)
 	}
 	reloaded := *startup
@@ -122,7 +122,7 @@ func TestGuardrailProfileRemovalUsesReloadedBaseForUnmatchedHook(t *testing.T) {
 	reloaded.Guardrail.ProfileAssignments = nil
 	live = &reloaded
 	api.setGuardrailProfiles(nil)
-	if got := hookModeForConfig(api.decisionConfig(ctx), "opencode"); got != "action" {
+	if got := api.decisionConfig(ctx).HookModeForConnector("opencode"); got != "action" {
 		t.Fatalf("reloaded unmatched hook mode = %q, want action", got)
 	}
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/guardrail/profiles/resolve?connector=opencode", nil)
@@ -382,9 +382,14 @@ type testVerifiedSubjectKey struct{}
 
 // stubProfileSources replaces the verified-identity sources for one test:
 // only a subject placed under testVerifiedSubjectKey is verified, and the
-// gateway's process owner is not.
+// gateway's process owner is not. The test also starts without a
+// process-wide profile set. An API server of an earlier test (NewAPIServer
+// publishes its set) would otherwise be the set snapshotRulePackGenerationFor
+// re-resolves the requests of this test against, so the rules of its own
+// profiles never fired on the next -count iteration (rel-1-0-6 GAP-0335).
 func stubProfileSources(t *testing.T) {
 	t.Helper()
+	liveGuardrailProfiles.Store(nil)
 	prevSubject, prevAgent, prevOwner := profileSubjectSource, profileAgentSource, processOwnerProfileSubject
 	profileSubjectSource = func(ctx context.Context) (profileSubject, bool) {
 		subject, ok := ctx.Value(testVerifiedSubjectKey{}).(profileSubject)
@@ -456,8 +461,10 @@ func TestGuardrailProfileSelectionIgnoresClaimedIdentity(t *testing.T) {
 		{name: "claimed headers alone", ctx: []func(context.Context) context.Context{claimedAlice}, connector: "cursor", profile: "watch", match: profileMatchDefaultUnverified},
 		{name: "claimed headers over a verified other user", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1003", UserName: "bob"}), claimedAlice}, connector: "cursor", profile: "watch", match: profileMatchDefault},
 		{name: "unverified connector-only assignment", ctx: []func(context.Context) context.Context{claimedAlice}, connector: "codex", profile: "tooling", match: profileMatchConnector},
-		{name: "failed directory lookup", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1001", UPN: "alice@corp.example", LookupFailed: true})}, connector: "cursor", profile: "watch", match: profileMatchDefaultLookupFailed},
-		{name: "failed directory lookup on a connector-only assignment", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1002", LookupFailed: true})}, connector: "codex", profile: "watch", match: profileMatchDefaultLookupFailed},
+		// GAP-0323: a failed lookup never selects the weaker default: the
+		// strictest profile that could apply does.
+		{name: "failed directory lookup", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1001", UPN: "alice@corp.example", LookupFailed: true})}, connector: "cursor", profile: "strict", match: profileMatchDefaultLookupFailed},
+		{name: "failed directory lookup on a connector-only assignment", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1002", LookupFailed: true})}, connector: "codex", profile: "strict", match: profileMatchDefaultLookupFailed},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -508,7 +515,8 @@ func TestGuardrailProfileSelectionIgnoresClaimedIdentity(t *testing.T) {
 // TestGuardrailProfileSelectsVerifiedDirectoryGroup runs the real S1
 // source: a verified subject's directory group selects the group's profile,
 // a request that only claims that user in its headers gets the default, and
-// a waited-on lookup that never resolved reports default_lookup_failed.
+// a waited-on lookup that never resolved refuses when an assignment needs
+// the missing fact, naming it (default_lookup_failed).
 func TestGuardrailProfileSelectsVerifiedDirectoryGroup(t *testing.T) {
 	prevOwner := processOwnerProfileSubject
 	processOwnerProfileSubject = func() (profileSubject, bool) { return profileSubject{}, false }
@@ -562,7 +570,9 @@ func TestGuardrailProfileSelectsVerifiedDirectoryGroup(t *testing.T) {
 		} {
 			pinned := &config.Config{}
 			pinned.Guardrail.Mode = "action"
-			pinned.Guardrail.Profiles = map[string]config.GuardrailProfile{"pin": {Mode: "observe"}, "ml": {Mode: "action"}}
+			// The pin is the strictest, so it wins over the group whatever
+			// the order (r104 identity).
+			pinned.Guardrail.Profiles = map[string]config.GuardrailProfile{"pin": {Mode: "action", BlockAt: "LOW"}, "ml": {Mode: "observe"}}
 			pinned.Guardrail.ProfileAssignments = []config.ProfileAssignment{
 				{Profile: "pin", Match: want},
 				{Profile: "ml", Match: config.ProfileMatch{Groups: []string{"dc-ml-team@dclab.test"}}},
@@ -577,8 +587,8 @@ func TestGuardrailProfileSelectsVerifiedDirectoryGroup(t *testing.T) {
 			}
 			proxy := &GuardrailProxy{cfg: &config.GuardrailConfig{Connector: "zeptoclaw"}}
 			r := proxy.withProxyAgent(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(subject))
-			if mode, _ := proxy.profileModeFor(r.Context(), "action", ""); mode != "observe" {
-				t.Fatalf("proxy mode with %s pin = %q, want observe", match, mode)
+			if mode, _ := proxy.profileModeFor(r.Context(), "observe", ""); mode != "action" {
+				t.Fatalf("proxy mode with %s pin = %q, want action", match, mode)
 			}
 			if id, _ := agentIdentityFromContext(r.Context()); id != agent {
 				t.Fatalf("proxy agent identity = %q, want %q", id, agent)
@@ -586,7 +596,7 @@ func TestGuardrailProfileSelectsVerifiedDirectoryGroup(t *testing.T) {
 		}
 	})
 	t.Run("unresolved lookup", func(t *testing.T) {
-		check(t, withVerifiedSubject(context.Background(), unresolved), "watch", profileMatchDefaultLookupFailed, "")
+		check(t, withVerifiedSubject(context.Background(), unresolved), "ml", profileMatchDefaultLookupFailed, "")
 	})
 	t.Run("claimed headers", func(t *testing.T) {
 		request := httptest.NewRequest(http.MethodPost, "/api/v1/claude-code/hook", nil)
@@ -834,6 +844,146 @@ rules:
 	}
 }
 
+// GAP-1526: a scope the preload did not list loads its rules on first use
+// (GAP-1508), but connectorRulePack, which feeds the hook judge's
+// suppressions, read only the preloaded packs: such a request scanned with
+// the profile's rules and judged with the base pack's suppressions. Loaded
+// eagerly or lazily, judge first or rules first, or through the lazy retry,
+// a profile request applies its own pack's suppressions and not the base
+// pack's; a request with no profile keeps the base pack's.
+func TestLazyProfileScopeAppliesTheProfileJudgeSuppressions(t *testing.T) {
+	stubProfileSources(t)
+	resetConnectorRuleCategories(t)
+	withLocalPatternsRestored(t)
+	priorManaged := ManagedEnterpriseActive()
+	setManagedEnterpriseRedactionPosture(false)
+	t.Cleanup(func() { setManagedEnterpriseRedactionPosture(priorManaged) })
+	writeProfilePack := func(dir string) {
+		writeRulePackFixtureFile(t, dir, "rules/marker.yaml", `version: 1
+category: secret
+rules:
+  - id: LAZY-PROFILE-MARKER
+    pattern: "lazy_profile_marker_token"
+    title: lazy profile scope fixture
+    severity: HIGH
+    confidence: 0.99
+    tags: [test]
+`)
+		writeRulePackFixtureFile(t, dir, "suppressions.yaml", `version: 1
+pre_judge_strips: []
+finding_suppressions:
+  - id: PROFILE-ONLY-SUPPRESSION
+    finding_pattern: "LAZY-PROFILE-MARKER"
+    entity_pattern: "lazy_profile_marker_token"
+    reason: allowed in this profile
+tool_suppressions: []
+`)
+	}
+	basePack := &guardrail.RulePack{Suppressions: &guardrail.SuppressionsConfig{Version: 1,
+		FindingSupps: []guardrail.FindingSuppression{{ID: "BASE-ONLY-SUPPRESSION"}}}}
+	baseGeneration := &Generation{Config: &config.Config{}, activeRules: &compiledRulePackCategories{},
+		RulePacks: map[string]*guardrail.RulePack{"global": basePack}}
+	newAPI := func(packDir string) (*APIServer, *guardrailProfileSet) {
+		inspect := true
+		cfg := &config.Config{}
+		cfg.ApplicationProtection.Enabled = true
+		cfg.ApplicationProtection.Guardrail.Rules = &config.GuardrailRulesConfig{
+			SensitiveTools: []config.GuardrailSensitiveTool{{Name: "crm_export", ResultInspection: &inspect}},
+		}
+		cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"strict": {Mode: "action", RulePackDir: packDir}}
+		cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{{Profile: "strict", Match: config.ProfileMatch{Users: []string{"1001"}}}}
+		api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+		set := api.guardrailProfileSet()
+		if set == nil {
+			t.Fatal("profile set was not built")
+		}
+		return api, set
+	}
+	// unlist drops the scope from the preload, as for a scope it never
+	// listed (a plugin connector under application protection).
+	unlist := func(set *guardrailProfileSet, connector string) {
+		key := effectiveRulePackKey(set.profiles["strict"].Config, connector)
+		delete(set.rules, key)
+		delete(set.packs, key)
+		delete(set.missing, key)
+	}
+	request := func(api *APIServer, user, connector string) context.Context {
+		ctx := withPinnedGeneration(t.Context(), baseGeneration)
+		ctx = context.WithValue(ctx, testVerifiedSubjectKey{}, profileSubject{UserID: user})
+		return api.withGuardrailProfileDecision(ctx, connector)
+	}
+	scan := func(api *APIServer, connector string) []string {
+		return findingIDs(scanAllRulesForConnectorFor(request(api, "1001", connector), connector, "lazy_profile_marker_token", "exec"))
+	}
+	// judged is what the hook judge applies: runHookJudge's pack on a judge
+	// built with the base pack.
+	judged := func(api *APIServer, user, connector string) (*guardrail.RulePack, []string) {
+		ctx := request(api, user, connector)
+		pack := api.connectorRulePack(ctx, connector)
+		applied := (&LLMJudge{rp: basePack}).suppressionPack(withJudgeSuppressionPack(ctx, pack))
+		var ids []string
+		if applied != nil && applied.Suppressions != nil {
+			for _, s := range applied.Suppressions.FindingSupps {
+				ids = append(ids, s.ID)
+			}
+		}
+		return pack, ids
+	}
+	wantProfile := func(label string, api *APIServer, connector string) {
+		t.Helper()
+		if _, ids := judged(api, "1001", connector); !slices.Contains(ids, "PROFILE-ONLY-SUPPRESSION") || slices.Contains(ids, "BASE-ONLY-SUPPRESSION") {
+			t.Fatalf("%s: profile request judged with suppressions %v, want the profile pack's only", label, ids)
+		}
+	}
+	wantBase := func(label string, api *APIServer, connector string) {
+		t.Helper()
+		if pack, ids := judged(api, "2002", connector); pack != basePack || !slices.Contains(ids, "BASE-ONLY-SUPPRESSION") || slices.Contains(ids, "PROFILE-ONLY-SUPPRESSION") {
+			t.Fatalf("%s: request with no profile judged with suppressions %v, want the base pack's", label, ids)
+		}
+	}
+	packDir := filepath.Join(t.TempDir(), "strict")
+	writeProfilePack(packDir)
+
+	eager, _ := newAPI(packDir)
+	wantProfile("eager", eager, "claudecode")
+	wantBase("eager", eager, "claudecode")
+
+	judgeFirst, set := newAPI(packDir)
+	unlist(set, "claudecode")
+	wantProfile("lazy, judge before any rule scan", judgeFirst, "claudecode")
+	if ids := scan(judgeFirst, "claudecode"); !containsRuleID(ids, "LAZY-PROFILE-MARKER") {
+		t.Fatalf("lazy scope scanned without the profile rule: %v", ids)
+	}
+	wantBase("lazy", judgeFirst, "claudecode")
+
+	rulesFirst, set := newAPI(packDir)
+	unlist(set, "claudecode")
+	if ids := scan(rulesFirst, "claudecode"); !containsRuleID(ids, "LAZY-PROFILE-MARKER") {
+		t.Fatalf("lazy scope scanned without the profile rule: %v", ids)
+	}
+	wantProfile("lazy, rules first", rulesFirst, "claudecode")
+	wantBase("lazy, rules first", rulesFirst, "claudecode")
+
+	latePackDir := filepath.Join(t.TempDir(), "late")
+	late, set := newAPI(latePackDir)
+	unlist(set, "claudecode")
+	if pack, _ := judged(late, "1001", "claudecode"); pack != basePack {
+		t.Fatal("a lazy scope whose pack has not loaded must judge with the base pack until it loads")
+	}
+	writeProfilePack(latePackDir)
+	key := effectiveRulePackKey(set.profiles["strict"].Config, "claudecode")
+	value, ok := set.lazy.Load(key)
+	if !ok || value.(*profileLazyScope).retry == nil {
+		t.Fatal("the lazy scope kept no retry")
+	}
+	retry := value.(*profileLazyScope).retry
+	retry.mu.Lock()
+	retry.nextTry = time.Time{}
+	retry.mu.Unlock()
+	wantProfile("lazy retry", late, "claudecode")
+	wantBase("lazy retry", late, "claudecode")
+}
+
 // GAP-0094: a local account's groups count once each. macOS listed every
 // gid and then its name, so explain and identity.observed doubled the count.
 func TestLocalAccountGroupsCountEachGroupOnce(t *testing.T) {
@@ -855,8 +1005,8 @@ func TestLocalAccountGroupsCountEachGroupOnce(t *testing.T) {
 }
 
 // TestExplainReportsAFailedDirectoryLookup pins GAP-0124: when the directory
-// lookup of an account fails, explain says so, as a request gets
-// default_lookup_failed; it must not answer from the OS account database
+// lookup of an account fails, explain says so, as a request needing that
+// fact is refused and names it; it must not answer from the OS account database
 // with a profile no request receives.
 func TestExplainReportsAFailedDirectoryLookup(t *testing.T) {
 	previousBlocking := identityLookupBlocking.Load()
@@ -875,9 +1025,10 @@ func TestExplainReportsAFailedDirectoryLookup(t *testing.T) {
 }
 
 // TestExplainShowsWhatRequestsGetWhileTheGatewayLookupFails pins GAP-0212:
-// explain resolves the account afresh, but the gateway's requests for it get
-// default_lookup_failed while its own lookups fail, and explain says so; groups
-// kept as numbers are named as a sign of an unreachable directory.
+// explain resolves the account afresh, but requests use the gateway's cached
+// outcome. With no assignment needing a missing fact, they use the default
+// (default_lookup_failed), and explain says so; groups kept as numbers are
+// named as a sign of an unreachable directory.
 func TestExplainShowsWhatRequestsGetWhileTheGatewayLookupFails(t *testing.T) {
 	previousBlocking := identityLookupBlocking.Load()
 	setIdentityLookupBlocking(true)
@@ -893,11 +1044,19 @@ func TestExplainShowsWhatRequestsGetWhileTheGatewayLookupFails(t *testing.T) {
 	set := &guardrailProfileSet{}
 	decision := set.match(&explained, profileSubjectLookup, "", "")
 	view, warning := explainCacheView(set, &explained, decision, "", "", time.Now())
-	if view == nil || view["match"] != profileMatchDefaultLookupFailed || !strings.Contains(warning, "default_lookup_failed") ||
-		!strings.Contains(warning, "timeout") {
+	if view == nil || view["match"] != profileMatchDefaultLookupFailed || view["refused"] != false ||
+		!strings.Contains(warning, "default_lookup_failed") ||
+		!strings.Contains(warning, "timeout") || !strings.Contains(warning, "rerun explain after a successful lookup") ||
+		strings.Contains(warning, "the profile above applies") {
 		t.Fatalf("view %v, warning %q; want the lookup failure named", view, warning)
 	}
-	if note := unnamedGroupsNote(&explained); !strings.Contains(note, "1 of this account's 1 group(s) are shown by number") {
+	set.profiles = map[string]config.DerivedGuardrailProfile{"strict": {Digest: "strict-digest"}}
+	set.assignments = []config.ProfileAssignment{{Profile: "strict", Match: config.ProfileMatch{Groups: []string{"dc-sbx-devs"}}}}
+	view, _ = explainCacheView(set, &explained, decision, "", "", time.Now())
+	if view["refused"] != true || !strings.Contains(fmt.Sprint(view["refused_reason"]), "group") {
+		t.Fatalf("view %v; want explicit refusal state and missing group fact", view)
+	}
+	if note := unnamedGroupsNote(&explained, nil); !strings.Contains(note, "1 of this account's 1 group(s) are shown by number") {
 		t.Fatalf("unnamed groups note = %q", note)
 	}
 }
@@ -910,7 +1069,7 @@ func TestExplainNamesWindowsGroupsWithoutAnIdentityRecord(t *testing.T) {
 	previous := currentIdentitySpoolDir()
 	t.Cleanup(func() { setIdentitySpoolDir(previous) })
 	setIdentitySpoolDir(t.TempDir())
-	if note := spoolRecordNote("S-1-5-21-1-2-3-1104", time.Now()); !strings.Contains(note, "no identity record for this account yet") {
+	if note := spoolRecordNote("S-1-5-21-1-2-3-1104", time.Now(), false); !strings.Contains(note, "no identity record for this account yet") {
 		t.Fatalf("spool note = %q", note)
 	}
 	if !awaitingSpool(useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory}) ||
@@ -925,20 +1084,22 @@ func TestExplainNamesWindowsGroupsWithoutAnIdentityRecord(t *testing.T) {
 	}
 	// GAP-0575: so is an Open Directory answer without the guardian's UPN or
 	// without its directory (an Active Directory account before the
-	// guardian's record, which Open Directory may list as a local node
-	// account), but not one the record named.
+	// guardian's record), but not one the record named. GAP-0532: an account
+	// the answer proves is of the local node (not a mobile copy) has no UPN
+	// to wait for.
 	if !awaitingSpoolUPN(useridentity.DirectoryFacts{Source: useridentity.SourceMacOSOpenDirectory}) ||
-		!awaitingSpoolUPN(useridentity.DirectoryFacts{Source: useridentity.SourceMacOSOpenDirectory, Directory: useridentity.DirectoryLocal}) ||
+		!awaitingSpoolUPN(useridentity.DirectoryFacts{Source: useridentity.SourceMacOSOpenDirectory, Directory: useridentity.DirectoryActiveDirectory}) ||
+		awaitingSpoolUPN(useridentity.DirectoryFacts{Source: useridentity.SourceMacOSOpenDirectory, Directory: useridentity.DirectoryLocal}) ||
 		awaitingSpoolUPN(useridentity.DirectoryFacts{Source: useridentity.SourceMacOSOpenDirectory, Directory: useridentity.DirectoryActiveDirectory,
 			UPN: "alice@corp.example.com"}) {
-		t.Fatal("Open Directory facts without a UPN or a directory must await the guardian record, facts the record named must not")
+		t.Fatal("Open Directory facts without a UPN or a directory must await the guardian record; a local node account and facts the record named must not")
 	}
 	setIdentitySpoolDir("")
-	if spoolRecordNote("S-1-5-21-1-2-3-1104", time.Now()) != "" {
+	if spoolRecordNote("S-1-5-21-1-2-3-1104", time.Now(), false) != "" {
 		t.Fatal("a gateway without a spool has no record to wait for")
 	}
 	named := &profileSubject{Groups: []string{"S-1-1-0", "Everyone", "S-1-5-21-1-2-3-9001", "S-1-5-21-1-2-3-9002"}}
-	if note := unnamedGroupsNote(named); !strings.Contains(note, "2 of this account's 3 group(s) have no name, only a SID") {
+	if note := unnamedGroupsNote(named, nil); !strings.Contains(note, "2 of this account's 3 group(s) have no name, only a SID") {
 		t.Fatalf("unnamed SID note = %q", note)
 	}
 }
@@ -1269,6 +1430,77 @@ func TestUnknownAssignmentGroupsReportsIncompleteCheck(t *testing.T) {
 	}
 }
 
+// GAP-2434: a directory that does not answer in time (a slow SSSD at gateway
+// start) leaves groups unchecked; the warning names each assignment and group
+// it could not check, not just "timed out".
+func TestUnknownAssignmentGroupsNameTheGroupsATimedOutCheckSkipped(t *testing.T) {
+	assignments := []config.ProfileAssignment{
+		{Profile: "open", Match: config.ProfileMatch{Groups: []string{"devs@corp.example.com"}}},
+		{Profile: "open", Match: config.ProfileMatch{Groups: []string{"renamed@corp.example.com"}}},
+		{Profile: "open", Match: config.ProfileMatch{Groups: []string{"gone@corp.example.com"}}},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	exists := func(ctx context.Context, _ string) (bool, error) {
+		cancel() // the budget runs out during the first lookup
+		return false, ctx.Err()
+	}
+	warnings := unknownAssignmentGroups(ctx, assignments, exists, nil, nil)
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %q; want one incomplete-check note", warnings)
+	}
+	for _, want := range []string{`assignment 1: group "devs@corp.example.com"`, `assignment 2: group "renamed@corp.example.com"`,
+		`assignment 3: group "gone@corp.example.com"`, "not checked"} {
+		if !strings.Contains(warnings[0], want) {
+			t.Fatalf("warning = %q; want it to name %q", warnings[0], want)
+		}
+	}
+}
+
+// GAP-2434: a pass that ran out of time is not kept for the whole TTL: once
+// the directory answers again, the next command gets the per-group warnings
+// within profileGroupCheckRetry.
+func TestGroupCheckThatRanOutOfTimeIsRetriedSoon(t *testing.T) {
+	saved := profileGroupCheckBudget
+	profileGroupCheckBudget = 50 * time.Millisecond
+	t.Cleanup(func() { profileGroupCheckBudget = saved })
+	var slow atomic.Bool
+	slow.Store(true)
+	exists := func(ctx context.Context, name string) (bool, error) {
+		if slow.Load() {
+			<-ctx.Done()
+			return false, ctx.Err()
+		}
+		return name == "devs@corp.example.com", nil
+	}
+	set := &guardrailProfileSet{assignments: []config.ProfileAssignment{
+		{Profile: "open", Match: config.ProfileMatch{Groups: []string{"devs@corp.example.com"}}},
+		{Profile: "open", Match: config.ProfileMatch{Groups: []string{"renamed@corp.example.com"}}},
+	}}
+	unmatched := func(context.Context, string) string { return "" }
+	health := func() identityCacheHealth { return identityCacheHealth{} }
+	first := set.unknownGroupWarningsWith(exists, nil, nil, unmatched, health, 2*time.Second)
+	if len(first) != 1 || !strings.Contains(first[0], "not checked") {
+		t.Fatalf("first pass = %q; want the incomplete-check note", first)
+	}
+	slow.Store(false)
+	set.groupCheck.mu.Lock()
+	set.groupCheck.checkedAt = set.groupCheck.checkedAt.Add(-profileGroupCheckRetry - time.Second)
+	set.groupCheck.mu.Unlock()
+	set.unknownGroupWarningsWith(exists, nil, nil, unmatched, health, 0) // starts the next pass
+	set.groupCheck.mu.Lock()
+	running := set.groupCheck.running
+	set.groupCheck.mu.Unlock()
+	if running == nil {
+		t.Fatal("an incomplete pass older than profileGroupCheckRetry must start a new pass")
+	}
+	<-running
+	got := set.unknownGroupWarningsWith(exists, nil, nil, unmatched, health, 0)
+	if len(got) != 1 || !strings.Contains(got[0], `assignment 2: group "renamed@corp.example.com" is not known to this host`) {
+		t.Fatalf("after the directory answers = %q; want the assignment 2 warning", got)
+	}
+}
+
 func TestUnknownAssignmentGroupsNormalizeUnicode(t *testing.T) {
 	assignments := []config.ProfileAssignment{
 		{Profile: "strict", Match: config.ProfileMatch{Groups: []string{"dc-cafe\u0301"}}},
@@ -1311,7 +1543,8 @@ func TestExplainShowsTheProfileRequestsStillGet(t *testing.T) {
 		return cached, now.Add(-7 * time.Minute), true
 	}
 	view, warning := explainCacheView(set, explained, decision, "", "", now)
-	if view["age_seconds"] != 420 || view["refresh_after_seconds"] != 480 || view["profile"] != "watch" || view["differs"] != true ||
+	if view["age_seconds"] != 420 || view["refresh_after_seconds"] != 480 || view["profile"] != "watch" ||
+		view["refused"] != false || view["differs"] != true ||
 		!strings.Contains(warning, "7m0s ago") || !strings.Contains(warning, "within 8m0s") {
 		t.Fatalf("view = %v, warning = %q; want 7 minute old facts that still give watch", view, warning)
 	}
@@ -1365,7 +1598,7 @@ func TestProfileExplainReportsTheLiveMode(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("%v: %s", err, rec.Body.String())
 	}
-	if out.Effective.Mode != hookModeForConfig(live, "codex") || out.Effective.Mode != "action" {
+	if out.Effective.Mode != live.HookModeForConnector("codex") || out.Effective.Mode != "action" {
 		t.Fatalf("effective mode = %q, want the live action mode: %s", out.Effective.Mode, rec.Body.String())
 	}
 }
@@ -1375,6 +1608,7 @@ func TestProfileExplainReportsTheLiveMode(t *testing.T) {
 // printed null on an install with no guardrail profiles, because the handler
 // answered before any directory lookup.
 func TestProfileExplainShowsTheSubjectWithoutProfiles(t *testing.T) {
+	managedExplainView(t) // the managed administrator view of made-up accounts
 	prev := profileExplainSubjectLookup
 	profileExplainSubjectLookup = func(string) (profileSubject, error) {
 		return profileSubject{UserID: "1201", UserName: "alice", Principal: "alice@CORP.EXAMPLE.COM", Groups: []string{"dc-devs@corp.example.com"}}, nil
@@ -1402,6 +1636,7 @@ func TestProfileExplainShowsTheSubjectWithoutProfiles(t *testing.T) {
 // OS names but cannot resolve (an Entra user the aad module has not cached)
 // reported default_lookup_failed with no lookup_error and no user id.
 func TestProfileExplainSaysWhyTheLookupFailed(t *testing.T) {
+	managedExplainView(t) // the managed administrator view of made-up accounts
 	previousBlocking := identityLookupBlocking.Load()
 	setIdentityLookupBlocking(true)
 	t.Cleanup(func() { setIdentityLookupBlocking(previousBlocking) })
@@ -1473,6 +1708,7 @@ func TestProfileExplainFlagsUnknownConnectorAndUnverifiedAgent(t *testing.T) {
 }
 
 func TestProfileExplainNamesHookIdentityCacheWindow(t *testing.T) {
+	managedExplainView(t) // the managed administrator view of made-up accounts
 	previous := profileExplainSubjectLookup
 	profileExplainSubjectLookup = func(string) (profileSubject, error) {
 		return profileSubject{UserID: "1201", UserName: "alice", Groups: []string{"team"}}, nil
@@ -1498,6 +1734,7 @@ func TestProfileExplainNamesHookIdentityCacheWindow(t *testing.T) {
 // refreshes the cache the hooks read, so the block states what the hooks use
 // from their next call, and the note says so.
 func TestProfileExplainRefreshesTheHookCache(t *testing.T) {
+	managedExplainView(t) // the managed administrator view of made-up accounts
 	old := time.Now().Add(-12 * time.Minute)
 	clock := old
 	current := useridentity.DirectoryFacts{Groups: []string{"dc-sbx-devs"}, ResolvedAt: old}
@@ -1535,6 +1772,7 @@ func TestProfileExplainRefreshesTheHookCache(t *testing.T) {
 // cleared the failure, so they were never dropped and directory_lookups_failing
 // came and went. Explain now leaves the cache as its failed lookup left it.
 func TestProfileExplainDuringAnOutageKeepsTheHourOfCachedFacts(t *testing.T) {
+	managedExplainView(t) // the managed administrator view of made-up accounts
 	start := time.Now().Add(-50 * time.Minute)
 	clock := start
 	var down bool
@@ -1628,6 +1866,7 @@ func explainTestResolve(t *testing.T, api *APIServer, user string, out any) {
 // inspects and blocks, matching the account as the hook socket does (by uid
 // or the account database's name).
 func TestProfileExplainNamesTheEnrollmentExemption(t *testing.T) {
+	managedExplainView(t) // the managed administrator view of made-up accounts
 	previous := profileExplainSubjectLookup
 	profileExplainSubjectLookup = func(string) (profileSubject, error) {
 		return profileSubject{UserID: "1916801104", UserName: "ent-alice", accountName: "ent-alice@dclab.test"}, nil
@@ -1744,11 +1983,134 @@ func TestProfileQualifiedUserMatchesVerifiedAccountDomain(t *testing.T) {
 	}
 }
 
-// PM-13: a bare users entry selects the directory account of that name and
-// never a local namesake, which falls to default_profile on Linux (SSSD next
-// to /etc/passwd), Windows (the domain next to the computer's SAM) and macOS
-// (an AD account next to the local node). The local account is selected by
-// its uid or SID, or as .\name (GAP-0305, GAP-0313, GAP-0418).
+// GAP-0725: on a host whose SSSD AD accounts come from more than one trusted
+// domain, a bare users entry selects the account of that name in each of
+// them. In the default and permissive policy tiers it still matches (no
+// over-tightening: 1.0.3 configs keep their meaning), and explain, status and
+// verify warn and name every account it selects with the exact replacement.
+// The strict policy tier refuses the ambiguous entry when it could change
+// the decision.
+func TestSSSDQualifiedNamesDoNotGrantBareNamesakeProfile(t *testing.T) {
+	useridentity.SetTrustedADChildDomains([]string{"dclab2.test"})
+	t.Cleanup(func() { useridentity.SetTrustedADChildDomains(nil) })
+	previous := identityFactsEnabled.Load()
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(previous) })
+	namesakes := []struct{ uid, domain, source string }{
+		{"94404135", "dclab.test", useridentity.SourceSSSD},
+		{"844201107", "dclab2.test", useridentity.SourceSSSDInfoPipe},
+	}
+	previousRecords := profileShortNameRecords
+	profileShortNameRecords = func() []enterprisehooks.IdentitySpoolRecord {
+		var records []enterprisehooks.IdentitySpoolRecord
+		for _, tc := range namesakes {
+			records = append(records, enterprisehooks.IdentitySpoolRecord{Key: tc.uid, User: "dcad-r103-eng1@" + tc.domain,
+				Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory, Source: tc.source,
+					Domain: tc.domain, UPN: "dcad-r103-eng1@" + tc.domain}})
+		}
+		return records
+	}
+	t.Cleanup(func() { profileShortNameRecords = previousRecords })
+	for _, tier := range []string{"", "strict"} {
+		cfg := &config.Config{}
+		cfg.Guardrail.Mode = "action"
+		if tier == "strict" {
+			// A pack folder named strict is the strict policy tier.
+			cfg.Guardrail.RulePackDir = meetRulePackDir(t, t.TempDir(), "strict")
+		}
+		cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+			"strict": {Mode: "action", BlockAt: "low"}, "relaxed": {Mode: "observe"},
+		}
+		cfg.Guardrail.DefaultProfile = "strict"
+		cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{{
+			Profile: "relaxed", Match: config.ProfileMatch{Users: []string{"dcad-r103-eng1"}},
+		}}
+		set, err := newGuardrailProfileSet(cfg, nil, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tc := range namesakes {
+			subject := profileSubjectFromVerified(VerifiedSubject{
+				UserID: tc.uid, UserName: "dcad-r103-eng1@" + tc.domain,
+				Directory: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
+					Source: tc.source, Domain: tc.domain, ResolvedAt: time.Now()},
+			}, true)
+			got := set.match(&subject, profileSubjectVerified, "claudecode", "")
+			warning := ambiguousShortNameUserNote(set, got, &subject)
+			if tier == "strict" {
+				if got.Name != "strict" || got.Refused == "" || got.Match != profileMatchDefaultLookupFailed {
+					t.Errorf("strict tier, %s: bare namesake decision %+v; want the strict refusal", tc.domain, got)
+				}
+				if !strings.Contains(warning, "strict policy tier refuses") {
+					t.Errorf("strict tier, %s: warning %q does not say the tier refuses the entry", tc.domain, warning)
+				}
+			} else if got.Name != "relaxed" || got.Refused != "" || got.Match != profileMatchUser {
+				t.Errorf("default tier, %s: bare namesake decision %+v; want relaxed by user, as before", tc.domain, got)
+			}
+			for _, other := range namesakes {
+				if !strings.Contains(warning, "dcad-r103-eng1@"+other.domain) || !strings.Contains(warning, "uid "+other.uid) {
+					t.Errorf("tier %q, %s: warning %q does not name %s (uid %s)", tier, tc.domain, warning, other.domain, other.uid)
+				}
+			}
+			if note := shortNameUserNote(set, got, &subject); note != "" {
+				t.Errorf("tier %q, %s: a second short-name note %q", tier, tc.domain, note)
+			}
+		}
+		health := strings.Join(shortNameAssignmentWarnings(set.assignments, profileShortNameRecords()), "\n")
+		if strings.Count(health, "assignment 1") != 1 || !strings.Contains(health, "dcad-r103-eng1@dclab.test (uid 94404135) and dcad-r103-eng1@dclab2.test (uid 844201107)") {
+			t.Errorf("tier %q: status and verify warning %q does not name both accounts in one line", tier, health)
+		}
+	}
+}
+
+// A 1.0.3 single-domain realm-join config selected alice by her bare users
+// entry. Upgrading must keep that assignment while still naming the exact
+// form the administrator can write to bind it to this account.
+func TestSingleDomainSSSDBareUserAssignmentSurvivesUpgrade(t *testing.T) {
+	useridentity.SetTrustedADChildDomains(nil)
+	previous := identityFactsEnabled.Load()
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(previous) })
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"strict": {Mode: "action", BlockAt: "low"}, "relaxed": {Mode: "observe"},
+	}
+	cfg.Guardrail.DefaultProfile = "strict"
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{{Profile: "relaxed", Match: config.ProfileMatch{Users: []string{"alice"}}}}
+	set, err := newGuardrailProfileSet(cfg, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subject := profileSubjectFromVerified(VerifiedSubject{UserID: "94404135", UserName: "alice@corp.example.com",
+		Directory: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
+			Source: useridentity.SourceSSSD, Domain: "corp.example.com", Principal: "alice@corp.example.com", ResolvedAt: time.Now()}}, true)
+	got := set.match(&subject, profileSubjectVerified, "claudecode", "")
+	if got.Name != "relaxed" || got.Match != profileMatchUser || got.Refused != "" {
+		t.Fatalf("1.0.3 single-domain assignment after upgrade: %+v", got)
+	}
+	if warning := shortNameUserNote(set, got, &subject); !strings.Contains(warning, "alice@corp.example.com") {
+		t.Fatalf("short-name warning does not name the qualified replacement: %q", warning)
+	}
+	if runtime.GOOS == "linux" {
+		previousRecords := profileShortNameRecords
+		profileShortNameRecords = func() []enterprisehooks.IdentitySpoolRecord {
+			return []enterprisehooks.IdentitySpoolRecord{{Key: subject.UserID, User: "alice@corp.example.com",
+				Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
+					Source: useridentity.SourceSSSDInfoPipe, UPN: "alice@login.example.com"}}}
+		}
+		t.Cleanup(func() { profileShortNameRecords = previousRecords })
+		if warnings := set.healthProfileWarnings(); !strings.Contains(strings.Join(warnings, "\n"), "write alice@login.example.com") {
+			t.Fatalf("status, verify and doctor do not name the qualified form: %v", warnings)
+		}
+	}
+}
+
+// PM-13: a bare users entry never selects a local namesake; it selects the
+// directory account (on an SSSD host with qualified names in the default
+// tier too: only the strict tier refuses it as ambiguous, GAP-0725). The local account
+// is selected by its uid or SID, or as .\name (GAP-0305, GAP-0313, GAP-0418,
+// GAP-0725).
 func TestBareUsersEntrySkipsLocalNamesake(t *testing.T) {
 	previous := identityFactsEnabled.Load()
 	setIdentityFactsEnabled(true)
@@ -1774,7 +2136,7 @@ func TestBareUsersEntrySkipsLocalNamesake(t *testing.T) {
 			name: "linux",
 			domain: VerifiedSubject{UserID: "1916801104", UserName: "ent-alice@dclab.test", Directory: useridentity.DirectoryFacts{
 				Directory: useridentity.DirectoryActiveDirectory, Source: useridentity.SourceSSSD, Domain: "dclab.test",
-				AccountDomain: "DCLAB", Assurance: useridentity.AssuranceVerified, ResolvedAt: now}},
+				AccountDomain: "DCLAB", QualifiedNamesMayCollide: true, Assurance: useridentity.AssuranceVerified, ResolvedAt: now}},
 			local: VerifiedSubject{UserID: "2500", UserName: "ent-alice", Directory: useridentity.DirectoryFacts{
 				Directory: useridentity.DirectoryLocal, Source: useridentity.SourceNSSFiles, Assurance: useridentity.AssuranceVerified,
 				ResolvedAt: now}},
@@ -1804,7 +2166,8 @@ func TestBareUsersEntrySkipsLocalNamesake(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			domain := profileSubjectFromVerified(tc.domain, true)
 			local := profileSubjectFromVerified(tc.local, true)
-			if got := set.match(&domain, profileSubjectVerified, "claudecode", ""); got.Name != "contractors" || got.Match != profileMatchUser {
+			got := set.match(&domain, profileSubjectVerified, "claudecode", "")
+			if got.Name != "contractors" || got.Match != profileMatchUser {
 				t.Fatalf("directory account: %+v, want contractors by user", got)
 			}
 			if got := set.match(&local, profileSubjectVerified, "claudecode", ""); got.Name != "floor" || got.Match != profileMatchDefault {
@@ -1880,8 +2243,12 @@ func TestProfileWindowsPartialGroupsUseLookupFailed(t *testing.T) {
 		t.Fatalf("last-session group selected %+v, want strict default_lookup_failed", got)
 	}
 	set.assignments = append([]config.ProfileAssignment{{Profile: "user", Match: config.ProfileMatch{Users: []string{"alice@corp.example"}}}}, set.assignments...)
-	if got := set.matchUncached(&subject, profileSubjectVerified, "codex", ""); got.Name != "user" || got.Match != profileMatchUser {
-		t.Fatalf("verified UPN selected %+v, want user assignment", got)
+	// r104 identity: the UPN assignment matches, the unknown groups may
+	// match lenient, and strict is the default; these profiles do not cover
+	// each other, so their strictest combination applies, never the last
+	// session's lenient group alone.
+	if got := set.matchUncached(&subject, profileSubjectVerified, "codex", ""); got.Name == "lenient" {
+		t.Fatalf("verified UPN with unknown groups selected %+v, want their strictest combination", got)
 	}
 	set.assignments = set.assignments[1:]
 	facts.GroupsPartial = false
@@ -2131,7 +2498,9 @@ func TestWindowsGroupAssignmentsMatchOnResolvedSIDs(t *testing.T) {
 		t.Fatalf("warnings do not name the unresolved groups:\n%s", warnings)
 	}
 	// The retry is due: the next request starts it, a later one matches on the
-	// SID, never on a name, and the memoised default does not shadow it.
+	// SID, never on a name, and the memoised default does not shadow it. The
+	// strict assignment's names still stall: they may name one of the
+	// caller's groups, so strict stays a candidate beside tooling (GAP-0487).
 	for _, entry := range set.groupSIDs.entries {
 		entry.nextTry = time.Time{}
 	}
@@ -2139,7 +2508,7 @@ func TestWindowsGroupAssignmentsMatchOnResolvedSIDs(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		got := set.match(subject, profileSubjectVerified, "codex", "")
-		if got.Name == "tooling" && got.Match == profileMatchGroup && got.MatchedGroup == `CORP\gap0860-devs` {
+		if slices.Contains(got.Candidates, "tooling") && slices.Contains(got.Candidates, "strict") {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -2264,5 +2633,40 @@ func TestWindowsSIDGroupAssignmentIgnoresSIDShapedNames(t *testing.T) {
 		Groups: []string{assignedSID}}
 	if got := set.match(member, profileSubjectVerified, "codex", ""); got.Name != "tooling" || got.Match != profileMatchGroup {
 		t.Fatalf("assigned SID selected %+v, want tooling group assignment", got)
+	}
+}
+
+// GAP-0495: the policy matcher compares group names without case, so an
+// assignment written DC-R102-OKTA-DEV selects the members of dc-r102-okta-dev.
+// A host whose group lookup is case-sensitive (an Okta LDAP domain in SSSD)
+// answers "no such group" for the uppercase spelling; the advisory must not
+// say the assignment selects nobody then.
+func TestUnknownAssignmentGroupsAgreeWithCaseInsensitiveMatcher(t *testing.T) {
+	previousHealth := directoryCacheHealth
+	t.Cleanup(func() { directoryCacheHealth = previousHealth })
+	directoryCacheHealth = func() identityCacheHealth { return identityCacheHealth{} }
+	assignments := []config.ProfileAssignment{
+		{Profile: "ml", Match: config.ProfileMatch{Groups: []string{"DC-R102-OKTA-DEV"}}},
+		{Profile: "ml", Match: config.ProfileMatch{Groups: []string{"DC-R102-GONE"}}},
+	}
+	exists := func(_ context.Context, name string) (bool, error) { return name == "dc-r102-okta-dev", nil }
+	got := unknownAssignmentGroupsForOS(context.Background(), assignments, exists, nil, nil, "linux")
+	if len(got) != 1 || !strings.HasPrefix(got[0], `assignment 2: group "DC-R102-GONE" is not known`) {
+		t.Fatalf("warnings = %q, want only the group no spelling of which exists", got)
+	}
+}
+
+// GAP-0507: the signed-out note names the strict default as the safety net
+// only when no assignment chose the profile; a users, SID or agent assignment
+// ahead of the groups selects it without the token groups.
+func TestSignedOutNoteClaimsTheStrictDefaultOnlyWhenNoAssignmentSelected(t *testing.T) {
+	if got := spoolSignedOutNote(false); !strings.Contains(got, "a strict default profile protects this gap") ||
+		!strings.Contains(got, "group assignments cannot match") {
+		t.Fatalf("default-profile note = %q", got)
+	}
+	got := spoolSignedOutNote(true)
+	if strings.Contains(got, "strict default") || !strings.Contains(got, "group assignments cannot match") ||
+		!strings.Contains(got, "chosen by an assignment") {
+		t.Fatalf("selected-profile note = %q", got)
 	}
 }

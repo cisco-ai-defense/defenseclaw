@@ -14,6 +14,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/productlayout"
 )
 
 // Windows enterprise profiles. The names match
@@ -68,36 +70,55 @@ func EnterpriseRootsFor(profile, programFiles, programData string) (EnterpriseRo
 	join := func(base string, parts ...string) string {
 		return base + `\` + strings.Join(parts, `\`)
 	}
-	state := join(programData, vendor, "DefenseClaw")
+	state := join(programData, vendor, productlayout.ProductFolder)
 	return EnterpriseRoots{
 		Profile:                  strings.ToLower(strings.TrimSpace(profile)),
-		InstallRoot:              join(programFiles, vendor, "DefenseClaw"),
+		InstallRoot:              join(programFiles, vendor, productlayout.ProductFolder),
 		StateRoot:                state,
-		CertificationInstallBase: join(programFiles, vendor, "DefenseClaw-Cert"),
-		CertificationStateBase:   join(programData, vendor, "DefenseClaw-Cert"),
-		ManagedIPCDir:            join(programFiles, vendor, "DefenseClaw", "ipc"),
-		LifecycleDir:             join(programData, vendor, "DefenseClaw-Lifecycle"),
+		CertificationInstallBase: join(programFiles, vendor, productlayout.WindowsCertificationFolder),
+		CertificationStateBase:   join(programData, vendor, productlayout.WindowsCertificationFolder),
+		ManagedIPCDir:            join(programFiles, vendor, productlayout.ProductFolder, "ipc"),
+		LifecycleDir:             join(programData, vendor, productlayout.WindowsLifecycleFolder),
 		MetadataPath:             join(state, "install", "deployment.json"),
 		PowerShellProfile:        powerShell,
 	}, nil
+}
+
+// EnterpriseGatewayServiceName is the gateway service the installer
+// registers for the production install root. internal/managed pins the
+// equality with StandaloneWindowsGatewaySvc.
+const EnterpriseGatewayServiceName = "DefenseClawGateway"
+
+// enterpriseCertificationGatewayPrefix starts the gateway service name of a
+// run-scoped certification install; the run identifier follows.
+const enterpriseCertificationGatewayPrefix = "DefenseClawCertGateway_"
+
+// EnterpriseGatewayServiceForRoot returns the gateway service the installer
+// registers for root, which must be exactly the profile's production install
+// root (DefenseClawGateway) or one run-scoped certification root beneath its
+// certification base (DefenseClawCertGateway_<run id>, the run id being the
+// last folder of the root). Any other root is an error.
+func EnterpriseGatewayServiceForRoot(roots EnterpriseRoots, root string) (string, error) {
+	clean := strings.TrimRight(strings.TrimSpace(root), `\`)
+	if strings.EqualFold(clean, roots.InstallRoot) {
+		return EnterpriseGatewayServiceName, nil
+	}
+	prefix := roots.CertificationInstallBase + `\`
+	if len(clean) > len(prefix) && strings.EqualFold(clean[:len(prefix)], prefix) {
+		runID := clean[len(prefix):]
+		if len(runID) == 10 && strings.Trim(runID, "0123456789abcdef") == "" {
+			return enterpriseCertificationGatewayPrefix + runID, nil
+		}
+	}
+	return "", fmt.Errorf("windows enterprise install root %q is neither %q nor a certification root under %q", root, roots.InstallRoot, roots.CertificationInstallBase)
 }
 
 // ValidateEnterpriseInstallRoot accepts exactly the profile's production
 // install root or one run-scoped certification root beneath its
 // certification base.
 func ValidateEnterpriseInstallRoot(roots EnterpriseRoots, root string) error {
-	clean := strings.TrimRight(strings.TrimSpace(root), `\`)
-	if strings.EqualFold(clean, roots.InstallRoot) {
-		return nil
-	}
-	prefix := roots.CertificationInstallBase + `\`
-	if len(clean) > len(prefix) && strings.EqualFold(clean[:len(prefix)], prefix) {
-		runID := clean[len(prefix):]
-		if len(runID) == 10 && strings.Trim(runID, "0123456789abcdef") == "" {
-			return nil
-		}
-	}
-	return fmt.Errorf("Windows enterprise install root %q is neither %q nor a certification root under %q", root, roots.InstallRoot, roots.CertificationInstallBase)
+	_, err := EnterpriseGatewayServiceForRoot(roots, root)
+	return err
 }
 
 func windowsAbsoluteDrivePath(value string) bool {
@@ -136,6 +157,10 @@ type EnterpriseDeployment struct {
 	// TrustMode is the payload trust standalone metadata records
 	// ("authenticode" or "hash_pinned"); Secure Client metadata has none.
 	TrustMode string
+	// DeferredConfigPending is an installed deployment's
+	// deferred_config_pending: a deferred install that waits for the repair
+	// that completes its configuration.
+	DeferredConfigPending bool
 }
 
 // classifyEnterpriseMetadata interprets deployment.json. Metadata without an
@@ -156,6 +181,23 @@ func classifyEnterpriseMetadata(body []byte) (EnterpriseDeploymentState, string)
 		return EnterpriseDeploymentTombstone, record.ProductVersion
 	}
 	return EnterpriseDeploymentInstalled, record.ProductVersion
+}
+
+// enterpriseMetadataDeferredConfigPending reads deployment.json's
+// deferred_config_pending; only a JSON true counts, as the lifecycle module
+// refuses any other value.
+func enterpriseMetadataDeferredConfigPending(body []byte) bool {
+	var record struct {
+		DeferredConfigPending *bool `json:"deferred_config_pending"`
+	}
+	trimmed := body
+	if len(trimmed) >= 3 && trimmed[0] == 0xef && trimmed[1] == 0xbb && trimmed[2] == 0xbf {
+		trimmed = trimmed[3:]
+	}
+	if err := json.Unmarshal(trimmed, &record); err != nil {
+		return false
+	}
+	return record.DeferredConfigPending != nil && *record.DeferredConfigPending
 }
 
 // enterpriseMetadataTrustMode reads the payload trust deployment.json

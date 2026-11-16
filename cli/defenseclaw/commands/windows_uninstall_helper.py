@@ -10,6 +10,7 @@ validated first and must hold no cmd.exe metacharacter.
 from __future__ import annotations
 
 import ctypes
+import errno
 import json
 import os
 import re
@@ -28,6 +29,8 @@ _ALLOWED_BINARIES = {
     "defenseclaw-gateway.exe",
     "defenseclaw-acp.exe",
     "defenseclaw-hook.exe",
+    # The one-line install's Claude Code PreToolUse guard (GAP-2467).
+    "defenseclaw-hook-guard.exe",
     "skill-scanner.cmd",
     "mcp-scanner.cmd",
     "defenseclaw-hook-state.json",
@@ -37,9 +40,12 @@ _ALLOWED_BINARIES = {
     "uvx.exe",
     "uvw.exe",
 }
-# A copy of an owned binary that a source install renamed aside while it ran
-# (install_publish; GAP-1929).
-_RETIRED_COPY_RE = re.compile(r"\.(?P<name>.+)\.source-install-old-[0-9a-f]+", re.IGNORECASE)
+# A copy of an owned binary that a source install (install_publish; GAP-1929)
+# or install.ps1 (<name>.old-<yyyyMMddTHHmmssfff>; GAP-1760) renamed aside
+# while it ran.
+_RETIRED_COPY_RE = re.compile(
+    r"\.(?P<name>.+)\.source-install-old-[0-9a-f]+|(?P<aside>.+)\.old-[0-9]{8}T[0-9]{9}", re.IGNORECASE
+)
 _OWNERSHIP_MARKERS = {"config.yaml", "audit.db", ".env", "policies", "quarantine", ".venv"}
 _LAUNCHER_UNWIND_GRACE_SECONDS = 1.0
 # scripts/install.ps1 holds this folder in the data dir while it installs; it
@@ -137,7 +143,7 @@ def _shim_encodings() -> list[str]:
 
 
 def shim_runs(path: str, executable: str) -> bool:
-    """Report whether the .cmd shim at path runs executable with its arguments.
+    """Report whether the .cmd shim runs an owned CLI launcher with its arguments.
 
     The CLI uses this check too. A non-ASCII profile path is encoded
     differently in each code page (install.ps1 writes "\u00e9" as byte 0x82
@@ -150,13 +156,17 @@ def shim_runs(path: str, executable: str) -> bool:
         data = stream.read(_SHIM_MAX_BYTES + 1)
     if len(data) > _SHIM_MAX_BYTES:
         raise ValueError("Windows CLI shim is oversized")
-    invocation = f'"{executable}" %*'.lower()
+    invocations = (
+        f'"{executable}" %*'.lower(),  # Earlier installer releases.
+        f'"{os.path.join(os.path.dirname(path), "defenseclaw.exe")}" %*'.lower(),
+    )
     for encoding in _shim_encodings():
         try:
             text = data.decode(encoding, errors="replace")
         except LookupError:
             continue
-        if invocation in text.lower():
+        lines = text.splitlines()
+        if len(lines) == 2 and lines[0].lower() == "@echo off" and lines[1].lower() in invocations:
             return True
     return False
 
@@ -193,7 +203,9 @@ def _validate_plan(plan: dict[str, object]) -> tuple[str, str, list[str]]:
         target = _norm(str(raw))
         name = os.path.basename(target).lower()
         retired = _RETIRED_COPY_RE.fullmatch(name)
-        owned = name in _ALLOWED_BINARIES or (retired is not None and retired.group("name") in _ALLOWED_BINARIES)
+        owned = name in _ALLOWED_BINARIES or (
+            retired is not None and (retired.group("name") or retired.group("aside")) in _ALLOWED_BINARIES
+        )
         if not owned or os.path.dirname(target) != install_root:
             raise ValueError(f"binary target is not product-owned: {raw}")
         if os.path.lexists(target) and _is_reparse(target):
@@ -250,17 +262,18 @@ def _parent_pids(kernel32) -> dict[int, int]:
 def _open_launchers(plan: dict[str, object]) -> list[tuple[int, float]]:
     """Open the managed-runtime launchers waiting on the uninstall CLI.
 
-    defenseclaw.cmd runs Scripts/defenseclaw.exe, which can start the venv's
-    python.exe launcher, which starts the base interpreter. cmd.exe reads the
+    defenseclaw.cmd runs the installer's defenseclaw.exe, which starts the
+    managed runtime. The runtime can start the venv's python.exe launcher,
+    which starts the base interpreter. cmd.exe reads the
     rest of the shim only after the outermost launcher returns, and that can
     be well after the base interpreter exits. Deleting the shim earlier ends a
     successful uninstall with "The batch file cannot be found" and exit 1.
     Ancestors whose image lives in the managed runtime's Scripts folder are
     opened, then the cmd.exe running the shim (a shorter wait, since an
     interactive prompt stays open); the walk stops at any other process.
-    PowerShell and cmd.exe start the installer's defenseclaw.exe instead of
-    the shim (GAP-2237): it is opened too, and the walk ends there, since no
-    batch file is read after it.
+    PowerShell and cmd.exe can also start the installer's defenseclaw.exe
+    directly. The walk continues through it to find a cmd.exe that may still
+    be reading the shim; any other parent ends the walk.
     Each entry is (handle, seconds to wait at most).
     """
     kernel32 = _kernel32()
@@ -286,13 +299,24 @@ def _open_launchers(plan: dict[str, object]) -> list[tuple[int, float]]:
             continue
         if _norm(image.value) == cli_launcher:
             handles.append((handle, _LAUNCHER_WAIT_SECONDS))
-            break
+            process_id = parents.get(process_id, 0)
+            continue
         if handles and os.path.basename(_norm(image.value)) == "cmd.exe":
             handles.append((handle, _SHIM_SHELL_WAIT_SECONDS))
         else:
             kernel32.CloseHandle(handle)
         break
     return handles
+
+
+def _wait_launchers(kernel32, launchers: list[tuple[int, float]]) -> None:
+    """Bound the launcher wait, then give a shim's shell its own resume window."""
+    started = time.monotonic()
+    for handle, limit in launchers:
+        if limit == _SHIM_SHELL_WAIT_SECONDS:
+            started = time.monotonic()
+        remaining = max(0, int((started + limit - time.monotonic()) * 1000))
+        kernel32.WaitForSingleObject(handle, remaining)
 
 
 def _interpreter_dirs(plan: dict[str, object], data_dir: str) -> list[str]:
@@ -318,7 +342,34 @@ def _interpreter_dirs(plan: dict[str, object], data_dir: str) -> list[str]:
 
 
 _EMPTY_DIR_RD_TRIES = 30
+# rd /s of a renamed folder: a file Defender or another reader still holds
+# open stays delete-pending, so its parent folders stay and the first rd
+# leaves a chain of empty folders behind (GAP-2233). About 2 s per try.
+_TREE_RD_TRIES = 15
 _LOCK_CLOCK_SLACK_SECONDS = 0.5
+# The waits of one removal retry loop (_retry). A file removal waits 10 s for
+# its holder to let go. The data folder waits a minute: a folder that a
+# terminal, File Explorer or an agent still has open stays held until that
+# program lets go, and the 10 s wait left the whole data folder behind
+# (cowork-1-0-8 GAP-0058), while the CLI had already told the user which
+# folders were held (held_folders).
+_FILE_RETRY_DELAYS = (0.125,) * 80
+_DATA_RETRY_DELAYS = _FILE_RETRY_DELAYS + (1.0,) * 50
+# The Windows errors of a file or folder another program holds.
+_ERROR_ACCESS_DENIED = 5
+_ERROR_SHARING_VIOLATION = 32
+_ERROR_LOCK_VIOLATION = 33
+_ERROR_DIR_NOT_EMPTY = 145
+# held_folders: open a folder for delete, as rmdir does, with full sharing.
+_DELETE = 0x00010000
+_FILE_SHARE_ALL = 0x00000007
+_OPEN_EXISTING = 3
+_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+_HELD_FOLDERS_MAX_SCANNED = 2000
+# denied_entries: at most this many files and folders are opened.
+_DENIED_ENTRIES_MAX_PROBED = 20000
 
 
 class _SupersededError(Exception):
@@ -395,17 +446,24 @@ def _remove_after_exit(
     for path in dirs:
         # Rename first, then delete the renamed folder: the rename is instant,
         # so a reinstall that recreates the folder while rd still runs keeps
-        # its new files (GAP-1647). Retry the rename once; if it still fails,
-        # fall back to removing the folder in place as before.
+        # its new files (GAP-1647). A program that holds a folder inside it
+        # open without delete sharing (a scanner, or a process whose current
+        # folder it is) makes both the rename and rd fail until it lets go,
+        # and one rd left a chain of empty folders and "remove it by hand"
+        # (GAP-2233): so the rename and the rd of the renamed copy are retried
+        # (no new install can own the copy). Only when the rename never
+        # succeeds is the folder removed in place, once, as before.
         tombstone_name = f"{os.path.basename(path)}.dc-removed-{os.urandom(4).hex()}"
         tombstone = os.path.join(os.path.dirname(path), tombstone_name)
         must_go.extend((path, tombstone))
-        rename = f'ren "{path}" "{tombstone_name}" 2>nul'
         steps.append(
-            f"({rename} || (ping -n 5 127.0.0.1 >nul & {rename}))"
+            f'(for /l %i in (1,1,{_TREE_RD_TRIES}) do if not exist "{tombstone}" if exist "{path}" '
+            f'(ren "{path}" "{tombstone_name}" 2>nul || ping -n 3 127.0.0.1 >nul))'
             # Parenthesize the if: cmd would run a trailing "& next step" only
             # in the else branch.
-            f' & (if exist "{tombstone}" (rd /s /q "{tombstone}") else (rd /s /q "{path}"))'
+            f' & (if exist "{tombstone}" (for /l %i in (1,1,{_TREE_RD_TRIES}) do if exist "{tombstone}" '
+            f'(rd /s /q "{tombstone}" 2>nul & if exist "{tombstone}" ping -n 3 127.0.0.1 >nul)) '
+            f'else (rd /s /q "{path}"))'
         )
     # Retry the empty-folder rd: Defender or another reader can hold a deleted
     # file open, so the tombstone stays delete-pending for a few seconds and the
@@ -479,9 +537,9 @@ def _contains(parent: str, child: str) -> bool:
         return False
 
 
-def _retry(action, description: str) -> None:
+def _retry(action, description: str, delays: tuple[float, ...] = _FILE_RETRY_DELAYS) -> None:
     last_error: Exception | None = None
-    for _ in range(80):
+    for delay in delays:
         try:
             action()
             return
@@ -489,13 +547,162 @@ def _retry(action, description: str) -> None:
             return
         except (OSError, ValueError) as exc:
             last_error = exc
-            time.sleep(0.125)
-    raise OSError(f"{description} failed after waiting for file release: {last_error}") from last_error
+            time.sleep(delay)
+    waited = round(sum(delays))
+    raise OSError(f"{description} failed after waiting {waited} s for file release: {last_error}") from last_error
+
+
+def _held_reason(error: BaseException | None) -> tuple[str, str]:
+    """Say why a path could not go, and what to do, from its OSError (GAP-0058).
+
+    Every error that named a path read "is in use by another program", also
+    an access denial, so the result could send the user to close a program
+    that did not exist. The Windows error decides; an error without one (a
+    test double, or not from Windows) keeps the in-use wording.
+    """
+    winerror = getattr(error, "winerror", None)
+    code = getattr(error, "errno", None)
+    if winerror in (_ERROR_SHARING_VIOLATION, _ERROR_LOCK_VIOLATION) or (
+        winerror is None and code in (errno.EACCES, errno.EPERM, errno.EBUSY)
+    ):
+        return "is in use by another program", "Close that program"
+    if winerror == _ERROR_DIR_NOT_EMPTY or (winerror is None and code == errno.ENOTEMPTY):
+        return "is not empty: a program is still writing in it", "Close that program"
+    if winerror == _ERROR_ACCESS_DENIED:
+        return (
+            "cannot be removed by your account (Windows denied access)",
+            "Remove it from an elevated prompt, or give your account full control of it",
+        )
+    reason = getattr(error, "strerror", None) or str(error)
+    return f"could not be removed ({reason})", "Fix that"
+
+
+def _walk_folders(root: str, skip: set[str] | None):
+    """Yield (folder, entries, error) for root and the folders under it.
+
+    entries is the folder's listing, or None with the OSError that refused
+    it. Reparse points are not followed, the folders in skip (normalized) and
+    everything below them are not visited, and the walk stops after a bounded
+    number of folders.
+    """
+    skip = {_norm(path) for path in (skip or set())}
+    pending = [root]
+    scanned = 0
+    while pending and scanned < _HELD_FOLDERS_MAX_SCANNED:
+        folder = pending.pop()
+        if _norm(folder) in skip or _is_reparse(folder):
+            continue
+        scanned += 1
+        try:
+            with os.scandir(folder) as listing:
+                entries = list(listing)
+        except OSError as error:
+            yield folder, None, error
+            continue
+        yield folder, entries, None
+        pending.extend(entry.path for entry in entries if entry.is_dir(follow_symlinks=False))
+
+
+def held_folders(root: str, skip: set[str] | None = None, *, opener=None) -> list[str]:
+    """The folders under root (root included) another program holds open.
+
+    A folder that is some program's current folder, or that a program opened
+    without delete sharing, cannot be removed or renamed until that program
+    lets go (cowork-1-0-8 GAP-0058: hooks\\.outage-warnings stopped the deferred
+    cleanup, and nothing said so at the console). The check opens each folder
+    for delete with full sharing, as rmdir does, and closes it at once: it
+    changes nothing. Off Windows nothing is held.
+    """
+    if opener is None:
+        if sys.platform != "win32":
+            return []
+        opener = _folder_held
+    return sorted(folder for folder, _entries, _error in _walk_folders(root, skip) if opener(folder))
+
+
+def denied_entries(root: str, skip: set[str] | None = None, *, prober=None) -> list[str]:
+    """The files and folders under root this account cannot remove (GAP-0063).
+
+    An elevated run (Claude Desktop runs elevated as the built-in
+    Administrator, and runs the hooks) left hooks\\.outage-warnings owned by
+    Administrators with only SYSTEM and OWNER RIGHTS in its DACL. A token
+    without elevation can neither list nor remove such a folder, so the
+    deferred cleanup failed after the CLI had exited and the data folder
+    stayed. Windows lets nobody but an administrator take such a file over,
+    so the CLI says so before it exits. A folder this account cannot list is
+    reported as a whole; every other file and folder is opened for delete
+    with full sharing, as removal does, and closed at once: nothing changes.
+    The folders in skip and what is below them are not checked; the walk is
+    bounded. Off Windows nothing is denied.
+    """
+    if prober is None:
+        if sys.platform != "win32":
+            return []
+        prober = _delete_denied
+    skipped = {_norm(path) for path in (skip or set())}
+    denied: list[str] = []
+    probed = 0
+    for folder, entries, error in _walk_folders(root, skip):
+        if entries is None:
+            if getattr(error, "winerror", None) == _ERROR_ACCESS_DENIED or isinstance(error, PermissionError):
+                denied.append(folder)
+            continue
+        for entry in entries:
+            if _norm(entry.path) in skipped:
+                continue
+            if probed >= _DENIED_ENTRIES_MAX_PROBED:
+                return sorted(denied)
+            probed += 1
+            # A folder that can be listed is checked on its own visit.
+            if not entry.is_dir(follow_symlinks=False) and prober(entry.path):
+                denied.append(entry.path)
+    return sorted(denied)
+
+
+def _open_for_delete_error(path: str) -> int:
+    """Open path for delete with full sharing and close it; 0 or the Windows error."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.CreateFileW(
+        path,
+        _DELETE,
+        _FILE_SHARE_ALL,
+        None,
+        _OPEN_EXISTING,
+        _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    if handle is None or handle == _INVALID_HANDLE_VALUE:
+        return ctypes.get_last_error()
+    kernel32.CloseHandle(handle)
+    return 0
+
+
+def _folder_held(path: str) -> bool:
+    """Whether another program holds the folder open without delete sharing."""
+    return _open_for_delete_error(path) == _ERROR_SHARING_VIOLATION
+
+
+def _delete_denied(path: str) -> bool:
+    """Whether Windows refuses this account the right to delete path."""
+    return _open_for_delete_error(path) == _ERROR_ACCESS_DENIED
 
 
 def _data_left_detail(plan: dict[str, object], data_dir: str, error: OSError) -> str:
     """Say what is left of a data folder that could not go and what to do (GAP-2055)."""
-    held = getattr(error.__cause__, "filename", "") or ""
+    cause = error.__cause__
+    held = getattr(cause, "filename", "") or ""
     shim = os.path.join(str(plan["install_root"]), "defenseclaw.cmd")
     flags = " --binaries" if plan.get("remove_empty_install_root") else ""
     # PowerShell (the Windows Terminal default) needs the & call operator
@@ -506,9 +713,10 @@ def _data_left_detail(plan: dict[str, object], data_dir: str, error: OSError) ->
         else "remove it by hand"
     )
     if held:
-        detail = f"could not remove {data_dir}: {held} is in use by another program. Close that program, then {rerun}."
+        reason, remedy = _held_reason(cause)
+        detail = f"could not remove {data_dir}: {held} {reason}. {remedy}, then {rerun}."
     else:
-        detail = f"could not remove {data_dir}: {error.__cause__ or error}. To finish, {rerun}."
+        detail = f"could not remove {data_dir}: {cause or error}. To finish, {rerun}."
     try:
         left = sorted(os.listdir(data_dir))
     except OSError:
@@ -594,10 +802,7 @@ def main() -> int:
             raise TimeoutError("uninstall parent did not exit within 120 seconds")
         # Bounded: a launcher or shell that outlives its wait does not block
         # cleanup.
-        started = time.monotonic()
-        for launcher, limit in launchers:
-            remaining = max(0, int((started + limit - time.monotonic()) * 1000))
-            kernel32.WaitForSingleObject(launcher, remaining)
+        _wait_launchers(kernel32, launchers)
 
         # cmd.exe resumes the shim just after its launcher child exits. Leave a
         # bounded unwind window before removing launcher files; all paths are
@@ -615,7 +820,7 @@ def main() -> int:
             # Data first: if it cannot go, the launchers stay, so the
             # uninstall can run again (GAP-2055).
             try:
-                _retry(remove_data, f"remove {data_dir}")
+                _retry(remove_data, f"remove {data_dir}", _DATA_RETRY_DELAYS)
             except OSError as exc:
                 raise OSError(_data_left_detail(plan, data_dir, exc)) from exc
         # The data dir is gone (or only the helper's .uv is left in it), so

@@ -5,23 +5,46 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"math"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/version"
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 )
 
 const hookDecisionMetricsV8Producer = "gateway.hook.decision.metrics"
+
+// hookDecisionLogResult is what became of one hook_decision record. Only a
+// failed attempt can turn out differently on a retry, so a pending managed
+// hook occurrence (agent_hook_pending.go) waits for its record only then.
+type hookDecisionLogResult uint8
+
+const (
+	// hookDecisionLogFailed: the record could be kept and was not (the
+	// runtime is not bound yet, the local write failed).
+	hookDecisionLogFailed hookDecisionLogResult = iota
+	// hookDecisionLogPersisted: the record is in the local store.
+	hookDecisionLogPersisted
+	// hookDecisionLogNotCollected: the collection policy for
+	// guardrail.evaluation logs drops the record.
+	hookDecisionLogNotCollected
+	// hookDecisionLogUnbuildable: these facts never make a valid record.
+	hookDecisionLogUnbuildable
+)
+
+// settled reports whether a retry cannot change the result.
+func (result hookDecisionLogResult) settled() bool { return result != hookDecisionLogFailed }
 
 func (a *APIServer) emitHookDecisionObservabilityV8(
 	ctx context.Context,
@@ -29,16 +52,23 @@ func (a *APIServer) emitHookDecisionObservabilityV8(
 	resp agentHookResponse,
 	env HookAuditEnvelope,
 	panicked bool,
-) {
+) hookDecisionLogResult {
 	if a == nil || ctx == nil {
-		return
+		return hookDecisionLogFailed
 	}
 	meta, connectorName, ok := a.hookDecisionMeta(ctx, req)
 	if !ok {
-		return
+		return hookDecisionLogUnbuildable
 	}
-	a.emitHookDecisionLogV8(ctx, req, resp, env, panicked, meta, connectorName)
-	a.recordHookDecisionMetricsV8(ctx, req, resp, env, panicked, meta, connectorName)
+	if req.pendingProvenance != nil {
+		meta = req.pendingProvenance.decisionMeta(meta)
+	}
+	result := a.emitHookDecisionLogV8(ctx, req, resp, env, panicked, meta, connectorName)
+	if !req.pendingRecovery {
+		// The live call counted itself; recovery writes its record only.
+		a.recordHookDecisionMetricsV8(ctx, req, resp, env, panicked, meta, connectorName)
+	}
+	return result
 }
 
 func (a *APIServer) emitHookDecisionLogV8(
@@ -49,15 +79,15 @@ func (a *APIServer) emitHookDecisionLogV8(
 	panicked bool,
 	meta llmEventMeta,
 	connectorName string,
-) {
-	emitter, ok := a.observabilityV8RuntimeEmitter().(sidecarRuntimeEmitter)
-	if !ok || emitter == nil {
-		return
+) hookDecisionLogResult {
+	emitter := a.observabilityV8RuntimeEmitter()
+	if emitter == nil {
+		return hookDecisionLogFailed
 	}
 	connectorName = hookDecisionMetricConnector(connectorName)
 	severity := observability.NormalizeSeverity(firstNonEmpty(resp.Severity, "NONE"))
 	if !severity.Valid || !severity.Present {
-		return
+		return hookDecisionLogUnbuildable
 	}
 	// A clean or INFO decision logs at INFO. A finding severity (LOW..CRITICAL)
 	// has no log level, so the record's severity_text follows the security
@@ -70,13 +100,10 @@ func (a *APIServer) emitHookDecisionLogV8(
 	case severity.Severity == observability.SeverityInfo:
 		logLevel = observability.Present(observability.LogLevelInfo)
 	}
-	result := "ok"
-	if panicked || env.Result == "panic" {
-		result = "panic"
-	}
+	result := hookDecisionResult(env, panicked)
 	effectiveAction := normalizeHookActionLabel(resp.Action)
-	sandboxID, sandboxName := hookV8Sandbox(audit.EnvelopeFromContext(ctx))
-	managed := sandboxHookManagedV8(ctx)
+	auditEnvelope := audit.EnvelopeFromContext(ctx)
+	sandboxID, sandboxName := hookV8Sandbox(auditEnvelope)
 	classification := observability.ClassificationContext{
 		Bucket: observability.BucketGuardrailEvaluation, EventName: observability.EventName(observability.TelemetryEventHookDecision),
 		RawSeverity: string(severity.Severity), Enforced: env.Enforced,
@@ -91,18 +118,25 @@ func (a *APIServer) emitHookDecisionLogV8(
 		observability.ProducerKey(gatewaylog.EventHookDecision),
 	)
 	if err != nil {
-		return
+		return hookDecisionLogUnbuildable
 	}
-	_, _ = emitter.Emit(ctx, metadata, func(
+	outcome, emitErr := emitter.Emit(ctx, metadata, func(
 		snapshot observabilityruntime.EmitContext,
 		admission router.Admission,
 	) (observability.Record, error) {
 		if admission != router.AdmissionOrdinary || snapshot.Generation() > math.MaxInt64 {
 			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 		}
+		// A pending occurrence's decision record has the ID recovery checks;
+		// every other record takes the train's time-ordered IDs.
+		ids := observability.TimeOrderedOccurrenceIDs
+		if req.pendingOccurrenceID != "" {
+			id := req.pendingOccurrenceID + "-decision"
+			ids = observability.OccurrenceIDGeneratorFunc(func() (string, error) { return id, nil })
+		}
 		builder, buildErr := observability.NewFamilyBuilder(
 			observability.ClockFunc(func() time.Time { return time.Now().UTC() }),
-			observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+			ids,
 		)
 		if buildErr != nil {
 			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
@@ -125,12 +159,20 @@ func (a *APIServer) emitHookDecisionLogV8(
 				ConfigGeneration: int64(snapshot.Generation()), ConfigDigest: snapshot.Digest(),
 			},
 		}
-		profileTelemetry := guardrailProfileTelemetryFor(ctx)
+		// A journaled call names the policy it was evaluated under, also
+		// when a later gateway process writes its record.
+		policy := req.pendingProvenance.decisionPolicyOr(ctx)
+		managed := policy.sandbox
+		var agentInstanceID observability.Optional[string]
+		if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+			agentInstanceID = hookV8OptionalIdentifier(auditEnvelope.AgentInstanceID)
+		}
 		identityInput := observability.LogCompatHookDecisionInput{
-			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
-			DefenseClawPolicyEffectiveDigest: policyDigestV8(ctx), DefenseClawPolicyGeneration: policyGenerationV8(ctx),
-			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
-			DefenseClawUserEnrollment: enterpriseEnrollmentV8(ctx),
+			DefenseClawGuardrailProfileName: policy.profile.Name, DefenseClawGuardrailProfileDigest: policy.profile.Digest,
+			DefenseClawPolicyEffectiveDigest: policy.digest, DefenseClawPolicyGeneration: policy.generation,
+			DefenseClawGuardrailProfileMatch: policy.profile.Match, DefenseClawGuardrailProfileMatchedGroup: policy.profile.MatchedGroup,
+			DefenseClawUserEnrollment: policy.enrollment,
+			DefenseClawAgentSurface:   coworkSurfaceV8(ctx),
 			Envelope:                  envelope, Severity: observability.Present(severity.Severity),
 			LogLevel: logLevel, Outcome: hookDecisionV8Outcome(effectiveAction, result),
 			DefenseClawRequestID:                hookV8OptionalIdentifier(meta.RequestID),
@@ -142,6 +184,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 			DefenseClawUserName:                 v8UserName(meta.UserName, hookV8OptionalIdentifier),
 			DefenseClawUserEmail:                v8UserEmail(meta.UserEmail),
 			DefenseClawAgentIdentityID:          agentIdentityV8FromContext(ctx),
+			DefenseClawAgentInstanceID:          agentInstanceID,
 			DefenseClawPolicyID:                 hookV8OptionalIdentifier(meta.PolicyID),
 			DefenseClawDestinationApp:           hookV8OptionalIdentifier(meta.DestinationApp),
 			GenAIConversationID:                 hookV8OptionalIdentifier(meta.SessionID),
@@ -175,8 +218,9 @@ func (a *APIServer) emitHookDecisionLogV8(
 			DefenseClawGuardrailEnforced:        env.Enforced,
 			DefenseClawConnectorStepIdx:         hookV8OptionalPositiveInt64(int64(env.StepIdx)),
 			DefenseClawGuardrailLatencyMs:       observability.Present(max(float64(env.ElapsedMs), 0)),
-			DefenseClawGuardrailReason:          hookV8OptionalText(hookSourceReason(resp), 65536),
+			DefenseClawGuardrailReason:          hookV8OptionalText(hookSourceReason(resp), hookDecisionReasonMaxBytes),
 			DefenseClawGuardrailRuleIds:         hookDecisionV8RuleIDs(resp.RuleIDs),
+			DefenseClawGuardrailJudgeFallback:   hookDecisionV8JudgeFallback(env),
 			DefenseClawSandboxID:                sandboxID,
 			DefenseClawSandboxName:              sandboxName,
 			DefenseClawSandboxDriver:            managed.Driver,
@@ -191,6 +235,30 @@ func (a *APIServer) emitHookDecisionLogV8(
 		meta.Identity.applyTo(&identityInput)
 		return builder.BuildLogCompatHookDecision(identityInput)
 	})
+	var pipelineErr *pipeline.Error
+	switch {
+	case emitErr == nil && outcome.LocalPersisted():
+		return hookDecisionLogPersisted
+	case emitErr == nil && outcome.Admission() == router.AdmissionDrop:
+		// Collection is off for this record (a managed-only projection
+		// included): no retry keeps it locally.
+		return hookDecisionLogNotCollected
+	case errors.As(emitErr, &pipelineErr) && pipelineErr.Code() == pipeline.ErrorRecordBuild:
+		return hookDecisionLogUnbuildable
+	}
+	return hookDecisionLogFailed
+}
+
+// hookDecisionResult is the result every sink of a hook decision carries:
+// panic when the evaluator panicked or the decision's audit envelope
+// recorded a panic recovered elsewhere on the call (finalizeAgentHookAnswer),
+// else ok. The hook_decision log and the hook invocation and latency metrics
+// read it, so they agree with the audit row and the span.
+func hookDecisionResult(env HookAuditEnvelope, panicked bool) string {
+	if panicked || env.Result == "panic" {
+		return "panic"
+	}
+	return "ok"
 }
 
 func (a *APIServer) recordHookDecisionMetricsV8(
@@ -214,10 +282,10 @@ func (a *APIServer) recordHookDecisionMetricsV8(
 	// event still needs the same bounded dashboard label vocabulary.
 	eventLabel := telemetry.NormalizeHookEventTypeLabel(normalizeHookEventLabel(req.HookEventName))
 	decisionLabel := normalizeHookActionLabel(resp.Action)
-	result := "ok"
+	result := hookDecisionResult(env, panicked)
 	reason := normalizeHookReasonLabel(resp.Action, resp.WouldBlock)
-	if panicked {
-		result, reason = "panic", "panic"
+	if result == "panic" {
+		reason = "panic"
 	}
 	severity := observability.NormalizeSeverity(firstNonEmpty(resp.Severity, "NONE"))
 	if !severity.Valid || !severity.Present {
@@ -458,7 +526,7 @@ func hookDecisionV8Outcome(action, result string) observability.Outcome {
 		return observability.OutcomeAllowed
 	case "block":
 		return observability.OutcomeBlocked
-	case "confirm":
+	case "confirm", hookActionUnconfirmed:
 		return observability.OutcomePartial
 	default:
 		return observability.OutcomeCompleted
@@ -466,7 +534,7 @@ func hookDecisionV8Outcome(action, result string) observability.Outcome {
 }
 
 func hookDecisionV8Mode(value string) string {
-	if normalizeAgentHookMode(value) == "action" {
+	if config.NormalizeHookMode(value) == "action" {
 		return "enforce"
 	}
 	return "observe"
@@ -504,4 +572,18 @@ func hookDecisionV8RuleIDs(values []string) observability.Optional[[]string] {
 		return observability.Absent[[]string]()
 	}
 	return observability.Present(result)
+}
+
+// hookJudgeFallbackExtraKey is the audit-row extra that says why the rules
+// decided a check the LLM judge was asked to review (#1395).
+const hookJudgeFallbackExtraKey = "judge_fallback"
+
+// hookDecisionV8JudgeFallback is the decision's judge fallback, when it had
+// one.
+func hookDecisionV8JudgeFallback(env HookAuditEnvelope) observability.Optional[string] {
+	switch reason := env.Extra[hookJudgeFallbackExtraKey]; reason {
+	case judgeFallbackTimeout, judgeFallbackError, judgeFallbackLate, judgeFallbackBusy, judgeFallbackBudget:
+		return observability.Present(reason)
+	}
+	return observability.Absent[string]()
 }

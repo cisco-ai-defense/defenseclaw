@@ -28,9 +28,9 @@ MANIFEST_FILES = (
     "plugin.json",
     "plugin.yaml",
     "plugin.yml",
+    "openclaw.plugin.json",
     "package.json",
     "manifest.json",
-    "openclaw.plugin.json",
 )
 _MAX_MANIFEST_BYTES = 1_048_576
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
@@ -153,7 +153,10 @@ def canonical_plugin_id(plugin_path: str) -> tuple[str, str]:
     manifest = read_plugin_manifest(plugin_path)
     if manifest is not None:
         payload, rel = manifest
-        declared = payload.get("id") or payload.get("name")
+        # An npm package name can be scoped (for example @openclaw/provider)
+        # and is package provenance, not the plugin's filesystem identity.
+        # The OpenClaw manifest above declares that identity explicitly.
+        declared = payload.get("id") or (payload.get("name") if rel != "package.json" else None)
         if declared is None:
             # Some supported connector manifests (notably Antigravity's
             # plugin.json contract) explicitly permit directory-name identity.
@@ -186,7 +189,7 @@ def filesystem_identity_key(value: str, root: str) -> str:
 
 
 def enumerate_physical_identities(root: str) -> list[PluginPhysicalIdentity]:
-    """Read immediate plugin entries; reject links and path escapes."""
+    """Read safe immediate plugin entries without letting one bad entry hide peers."""
     if not os.path.exists(root):
         return []
     if is_link_or_reparse(root) or not os.path.isdir(root):
@@ -202,15 +205,20 @@ def enumerate_physical_identities(root: str) -> list[PluginPhysicalIdentity]:
             continue
         try:
             if entry.is_symlink() or is_link_or_reparse(entry.path):
-                raise PluginIdentityError(f"linked plugin entry is not allowed: {entry.path}")
+                continue
             if not entry.is_dir(follow_symlinks=False):
                 continue
-        except OSError as exc:
-            raise PluginIdentityError(f"could not inspect plugin entry {entry.path}: {exc}") from exc
+        except OSError:
+            continue
         real_path = os.path.realpath(entry.path)
         if not real_path.startswith(real_root + os.sep):
-            raise PluginIdentityError(f"plugin entry escapes configured root: {entry.path}")
-        plugin_id, manifest = canonical_plugin_id(entry.path)
+            continue
+        try:
+            plugin_id, manifest = canonical_plugin_id(entry.path)
+        except PluginIdentityError:
+            # One broken manifest must not hide unrelated installed plugins.
+            # It cannot claim an identity until its manifest is repaired.
+            continue
         found.append(PluginPhysicalIdentity(plugin_id, entry.path, manifest))
     return found
 

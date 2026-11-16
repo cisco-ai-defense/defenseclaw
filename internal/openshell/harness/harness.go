@@ -22,8 +22,7 @@
 // sandbox creation, the credential profiles and the user customization paths
 // worth importing, plus the tamper tier of the hook registration and the
 // evidence the harness was verified with. It covers claudecode, codex,
-// opencode, copilot, amp, cursor, kiro, devin, hermes, openhands,
-// antigravity and omnigent.
+// opencode, copilot, amp, cursor, kiro, devin, hermes and antigravity.
 package harness
 
 import (
@@ -111,7 +110,7 @@ exit 127
 // WorkloadPythonShimStep is the image step that installs the python3 and
 // python shims (pythonShimScript) when the base image has the workload venv,
 // and the pip and pip3 shims (pipShimScript) when that venv has pip.
-// Like WorkloadPythonStep it is a compatibility fix, not a control: the
+// It is a compatibility fix, not a control: the
 // venv is the workload's, as pip already was. A base image without the
 // venv, or with a program of its own at a shim's path, builds on without
 // it. It runs after the harness install steps, which keep the base image's
@@ -178,9 +177,10 @@ unset dc_var
 
 // launcherPreamble is the environment set-up every launcher runs first: the
 // loader variables are dropped (launcherLoaderScrub), system directories
-// lead PATH, Node's compile cache is off, and the egress proxy is exported
-// (egressEnvScript, which the sandbox's login shells and `sandbox exec`
-// commands run too; see shellenv.go). It also defines dc_launch, which
+// lead PATH, Node's compile cache is off, and the egress proxy and the
+// trusted CA bundle are exported (egressEnvScript and trustedCAScript, which
+// the sandbox's login shells and `sandbox exec` commands run too; see
+// shellenv.go). It also defines dc_launch, which
 // launcherExec starts the harness with (launcherJobControl).
 //
 // Node keeps its compile cache wherever NODE_COMPILE_CACHE (or a harness's
@@ -195,7 +195,7 @@ export PATH
 # root-owned harness sources.
 NODE_DISABLE_COMPILE_CACHE=1
 export NODE_DISABLE_COMPILE_CACHE
-` + egressEnvScript + timeZoneScript + launcherJobControl
+` + egressEnvScript + trustedCAScript + timeZoneScript + launcherJobControl
 
 // launcherJobControl defines dc_launch COMMAND..., which every launcher
 // ends with: it execs COMMAND, except in a terminal session, where nothing
@@ -241,9 +241,8 @@ export NODE_DISABLE_COMPILE_CACHE
 // changing the sandbox while DefenseClaw pulls or reviews the session's
 // work. The supervisor is a child subreaper, so those commands are
 // re-parented to it; they get two seconds to end on their own, then SIGTERM
-// and SIGKILL, and the terminal names them. A launcher whose harness keeps
-// a server running between sessions (OmniGent), and the `sandbox exec`
-// wrapper, set dc_keep_leftovers=1 before dc_launch, which passes
+// and SIGKILL, and the terminal names them. The `sandbox exec` wrapper sets
+// dc_keep_leftovers=1 before dc_launch, which passes
 // --keep-leftovers; the wrapper also sets dc_say_kept=1 (--say-kept), and
 // the supervisor names what the command left running in the terminal's
 // session, which holds OpenShell's --tty exec open. The preamble unsets
@@ -722,7 +721,7 @@ func goBoolTrue(v string) bool {
 // --dangerously-skip-permissions, --allow-dangerously-skip-permissions and
 // --permission-mode bypassPermissions; Codex's
 // --dangerously-bypass-approvals-and-sandbox, --ask-for-approval never and
-// -c approval_policy="never"; for argparse harnesses (Hermes, OpenHands)
+// -c approval_policy="never"; for argparse harnesses (Hermes)
 // every prefix the parser resolves to a bypass flag, for agy (Go flags) the
 // single-dash and =true forms, and for Kiro (clap) -a in any short-flag
 // cluster. Arguments after "--" are never flags. The filter spares the user
@@ -786,9 +785,10 @@ func tomlStringValue(value string) string {
 
 // Env returns the environment for `openshell sandbox create --env`: the
 // connector artifacts' startup env, the DefenseClaw sandbox identity, the
-// egress proxy settings and the credential profile's env. Provider hosts and
-// host.openshell.internal bypass the proxy, so hooks reach the ingress and
-// OpenShell can inject LLM credentials on its direct provider rules. The
+// egress proxy settings and the credential profile's env. Provider hosts,
+// local service addresses and host.openshell.internal bypass the proxy.
+// Hooks reach the ingress, and OpenShell can inject LLM credentials on its
+// direct provider rules. The
 // proxy settings are also passed as openshell.EnvEgressURL and
 // openshell.EnvEgressBypass, from which the launcher exports them
 // (OpenShell 0.1.1 drops the standard names).
@@ -838,11 +838,27 @@ func (s *Spec) Env(opts EnvOptions) (map[string]string, error) {
 	return env, nil
 }
 
+// sandboxLoopbackNoProxy names local service addresses in the forms common
+// sandbox HTTP clients recognize. The exact IPv4 address is needed by clients
+// that do not understand CIDR entries.
+const sandboxLoopbackNoProxy = "localhost,127.0.0.1,127.0.0.0/8,::1"
+
 // SetNoProxy sets the proxy bypass list in every spelling a sandbox needs:
 // NO_PROXY and no_proxy for runtimes that read them, and
 // openshell.EnvEgressBypass, which survives OpenShell's environment filter
-// for the launchers.
+// for the launchers. Local service addresses are always present, including
+// when the manager adds credential hosts after Spec.Env.
 func SetNoProxy(env map[string]string, list string) {
+	seen := map[string]bool{}
+	var hosts []string
+	for _, host := range strings.Split(list+","+sandboxLoopbackNoProxy, ",") {
+		host = strings.TrimSpace(host)
+		if host != "" && !seen[host] {
+			seen[host] = true
+			hosts = append(hosts, host)
+		}
+	}
+	list = strings.Join(hosts, ",")
 	env["NO_PROXY"] = list
 	env["no_proxy"] = list
 	env[openshell.EnvEgressBypass] = list
@@ -934,4 +950,12 @@ func Names() []string {
 // shellQuote single-quotes s for a POSIX shell.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// pinVersionCheck compares a tool's extracted version with its pinned release.
+// CLIs may print the semver tag marker; the remaining version must match the
+// pin exactly, including any prerelease or build suffix.
+func pinVersionCheck(displayName, version string) string {
+	return `case "$got" in v*) got="${got#v}" ;; esac; ` +
+		`[ "$got" = ` + shellQuote(version) + ` ] || { echo "` + displayName + ` '$got' is not the pinned ` + version + `" >&2; exit 1; }`
 }

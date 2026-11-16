@@ -34,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/wrapper"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
 // DefenseClaw doctor check IDs (the host checks are openshell.CheckID*).
@@ -43,9 +44,23 @@ const (
 	CheckIDWrappers = "shell-wrappers"
 	CheckIDAdmin    = "admin-policy"
 	CheckIDHooks    = "sandbox-hooks"
+	// CheckIDLegacySandbox fails while a sandbox runs the supervisor of an
+	// OpenShell release older than openshell.SupportedMin
+	// (sandboxapi.Sandbox.OldSupervisor).
+	CheckIDLegacySandbox = "legacy-sandbox"
+	// CheckIDContainedSandbox fails while a MicroVM runs contained
+	// (sandboxapi.UnprotectedContained).
+	CheckIDContainedSandbox = "contained-sandbox"
+	// CheckIDUnknownSandbox fails while a sandbox that may be a live legacy
+	// or contained one has a gateway that has not said whether it runs
+	// (sandboxapi.UnprotectedUnknown).
+	CheckIDUnknownSandbox = "unknown-sandbox"
 	// CheckIDManagedRuntime is a managed computer's OpenShell as the
 	// account's daemon reports it.
 	CheckIDManagedRuntime = "managed-runtime"
+	// CheckIDHostGit fails when this computer has no git DefenseClaw can
+	// drive (workspace.HostGit), which every sandbox run needs (GAP-1068).
+	CheckIDHostGit = "host-git"
 )
 
 // DoctorOptions are the `sandbox doctor` flags.
@@ -63,6 +78,9 @@ func (a *App) defaultDoctor() *openshell.Doctor {
 			a.warnErr("could not record the gateway change for teardown: " + err.Error())
 		}
 	}}
+	// A fix's restart gives a MicroVM gateway's service the stop sync
+	// first, or syncs its running MicroVMs (GAP-1927, GAP-1928).
+	d.StopSync, d.StopSyncOut = a.stopSyncSpec(), a.IO.Err
 	if onManagedHost() {
 		// The account's gateway runs on the administrator's rendered
 		// configuration, not on files of the account's own (GAP-0254).
@@ -107,13 +125,36 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 	managed := onManagedHost()
 	if a.Cfg != nil || managed {
 		st = a.probeDaemon(ctx, managed)
+		if managed && st.status != nil && st.status.IngressPort > 0 && st.status.EgressPort > 0 {
+			d.Ports = []openshell.PortRequirement{
+				{Name: "ingress", Port: st.status.IngressPort},
+				{Name: "egress", Port: st.status.EgressPort},
+			}
+		} else if managed {
+			// Older daemons did not report the administrator's ports. A
+			// per-user config cannot supply their values on a managed host.
+			d.Ports = nil
+		}
 		for i := range d.Ports {
-			// The running daemon holds its own listeners.
-			d.Ports[i].ServedByDaemon = st.listening
+			// A daemon can hold one port while another program owns the other, and
+			// an advertised address is not proof that this daemon bound it.
+			switch d.Ports[i].Name {
+			case "ingress":
+				d.Ports[i].ServedByDaemon = st.listenersProven && st.ingressListening
+			case "egress":
+				d.Ports[i].ServedByDaemon = st.listenersProven && st.egressListening
+			}
+			if st.status != nil && st.status.PortConflict != nil && st.status.PortConflict.Name == d.Ports[i].Name {
+				d.Ports[i].Holder = st.status.PortConflict.Holder
+			}
 		}
 		// The uid the daemon reports (an older one reports none, and the
 		// check then has nothing to compare).
 		d.DaemonUID = st.daemonUID
+		if st.status != nil {
+			d.DaemonPID = st.status.DaemonPID
+		}
+		d.ResponderPID = st.responderPID
 		managed = managed || st.managed != nil
 	}
 	// On a managed computer the host checks are of this account's own
@@ -135,6 +176,20 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 	if managed && st != nil && st.managed != nil {
 		rep.ConfiguredDriver = openshell.ComputeDriver(sandboxapi.DisplayText(st.managed.Driver))
 		rep.Driver = rep.ConfiguredDriver
+	} else if managed && a.GOOS == "darwin" {
+		// The daemon may be stopped while the administrator's rendered
+		// gateway still selects Docker. Use the same applied configuration
+		// as the exec shim before deciding which prerequisites to check.
+		if driver, err := managedRenderedDoctorDriver(d.Rendered); err == nil {
+			rep.ConfiguredDriver, rep.Driver = driver, driver
+		} else {
+			rep.ConfiguredDriver, rep.Driver = "", ""
+			rep.Checks = append(rep.Checks, openshell.Check{
+				ID: openshell.CheckIDManagedE2fsprogs, Title: "Sandbox prerequisites",
+				Status: openshell.StatusFail,
+				Detail: "cannot determine the applied sandbox driver: " + err.Error(),
+			})
+		}
 	}
 	if st != nil {
 		switch gw := rep.Get(openshell.CheckIDGatewayVersion); {
@@ -152,7 +207,29 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 		}
 		rep.Checks = append(rep.Checks, st.check)
 		if st.available {
-			rep.Checks = append(rep.Checks, a.hooksCheck(ctx, st.ingress))
+			// Host checks can take long enough for the daemon's sandbox state
+			// to change. Read the hooks/list snapshot at the Sandbox section.
+			// Containment rows read status again when each check runs.
+			snapshot := &doctorSnapshot{}
+			api, err := a.api()
+			if err != nil {
+				snapshot.apiErr = err
+			} else {
+				snapshot.list, snapshot.err = api.List(ctx)
+				if snapshot.err == nil {
+					snapshot.status, _ = api.Status(ctx)
+				}
+			}
+			rep.Checks = append(rep.Checks, a.hooksCheck(ctx, st.ingress, snapshot))
+			if c := a.legacySandboxCheck(ctx, snapshot); c != nil {
+				rep.Checks = append(rep.Checks, *c)
+			}
+			if c := a.containedSandboxCheck(ctx); c != nil {
+				rep.Checks = append(rep.Checks, *c)
+			}
+			if c := a.unknownSandboxCheck(ctx); c != nil {
+				rep.Checks = append(rep.Checks, *c)
+			}
 		}
 		runDriver, _ := openshell.LookupDriver(string(rep.Driver))
 		images := a.imagesCheck(ctx, image.MicroVMTarget(runDriver))
@@ -168,7 +245,7 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 		case st.managed != nil:
 			// A user on a managed computer reads the organization's policy
 			// from the daemon, never from a configuration they cannot read.
-			rep.Checks = append(rep.Checks, a.managedPolicyCheck(st.managed), managedRuntimeCheck(st.managed))
+			rep.Checks = append(rep.Checks, a.managedPolicyCheck(ctx, st.managed), managedRuntimeCheck(st.managed))
 			if c := a.withAdminVMDriver(managedDriverCheck(st.managed), st.managed); c != nil {
 				c = a.withRenderedVMDriver(c, st.managed, d.Rendered)
 				rep.Checks = append(rep.Checks, *c)
@@ -177,7 +254,7 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 				rep.Checks = append(rep.Checks, *c)
 			}
 			if a.GOOS == "darwin" {
-				rep.Checks = append(rep.Checks, a.managedDockerCheck(ctx, st.managed))
+				rep.Checks = append(rep.Checks, a.managedDockerCheck(ctx, st.managed, st.elsewhere))
 			}
 			if c := managedDockerGroupCheck(a.GOOS, st.managed, dockerGroup); c != nil {
 				rep.Checks = append(rep.Checks, *c)
@@ -194,8 +271,21 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 			rep.Checks = append(rep.Checks, a.adminCheck())
 		}
 	}
+	if a.Cfg != nil || managed {
+		rep.Checks = append(rep.Checks, a.tlsTrustCheck(ctx, managed), a.hostGitCheck(ctx, managed, a.everyRunCopies(managed, string(rep.Driver))))
+	}
+	if managed && rep.Driver == openshell.DriverVM {
+		// The MicroVM driver's disks need room on the account's volume; the
+		// managed report has no machine checks of its own (GAP-0259).
+		rep.Checks = append(rep.Checks, d.ManagedVMDiskCheck())
+	}
 	if managed && a.GOOS == "darwin" {
-		rep.Checks = append(rep.Checks, d.ManagedE2fsprogsCheck())
+		if rep.Driver == openshell.DriverDocker {
+			managedDockerPlatform(rep)
+		}
+		if rep.Driver == openshell.DriverVM || (st.managed != nil && rep.Driver != openshell.DriverDocker) {
+			rep.Checks = append(rep.Checks, d.ManagedE2fsprogsCheck())
+		}
 		// The per-user job is outside the root gateway's readiness report.
 		// Read only this account's gui domain through the host doctor's runner.
 		d.GOOS, d.Geteuid = a.GOOS, a.Geteuid
@@ -206,10 +296,55 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 	return rep
 }
 
+// managedDockerPlatform makes the Platform row of a managed Mac whose
+// administrator chose the docker driver say so: the row's MicroVM note
+// (the vm driver, experimental upstream) is not this computer's setup, and
+// the doctor and the exec shim name the same driver in every state
+// (GAP-0249).
+func managedDockerPlatform(rep *openshell.DoctorReport) {
+	for i := range rep.Checks {
+		c := &rep.Checks[i]
+		if c.ID != openshell.CheckIDPlatform || c.Status != openshell.StatusWarn {
+			continue
+		}
+		platform, _, _ := strings.Cut(c.Detail, ":")
+		c.Status = openshell.StatusPass
+		c.Detail = platform + ": your organization runs sandboxes on this Mac with the docker driver (in Docker's Linux VM)"
+	}
+}
+
+func managedRenderedDoctorDriver(paths *openshell.RenderedPaths) (openshell.ComputeDriver, error) {
+	if paths == nil || paths.TOML == "" {
+		return "", errors.New("the administrator's rendered gateway configuration is unavailable")
+	}
+	if err := managedRenderedVMConfigTrust(paths.TOML, "OpenShell gateway configuration"); err != nil {
+		return "", fmt.Errorf("the administrator's rendered gateway configuration is not trusted: %w", err)
+	}
+	data, err := os.ReadFile(paths.TOML)
+	if err != nil {
+		return "", fmt.Errorf("read the administrator's rendered gateway configuration: %w", err)
+	}
+	rendered, err := openshell.ParseRenderedGateway(data, nil)
+	if err != nil {
+		return "", err
+	}
+	if err := rendered.Validate(); err != nil {
+		return "", err
+	}
+	return rendered.ComputeDriver, nil
+}
+
 type statusProbe struct {
-	// listening is set when the daemon holds its listeners; unavailable
-	// when it runs but serves no sandbox.
-	listening, unavailable bool
+	status *sandboxapi.Status
+	// responderPID is verified against the Unix status response by the
+	// kernel; a PID supplied only in status JSON is not port ownership proof.
+	responderPID int
+	// A configured port is not proof the daemon holds it.
+	ingressListening, egressListening bool
+	// listenersProven: the daemon's status names only the ports it holds
+	// (sandboxapi.Status.ListenersProven).
+	listenersProven bool
+	unavailable     bool
 	// available is set when the daemon serves sandboxes; ingress is its
 	// hook ingress address.
 	available bool
@@ -218,32 +353,285 @@ type statusProbe struct {
 	daemonUID *int
 	// managed is the managed part of the daemon's status (managed computers).
 	managed *sandboxapi.ManagedStatus
-	check   openshell.Check
+	// elsewhere: another account holds this computer's sandbox ports
+	// (sandboxapi.Status.GatewayElsewhere).
+	elsewhere bool
+	check     openshell.Check
+}
+
+// doctorSnapshot is confined to one read-only doctor run. Its error is
+// retained so an unavailable list produces the same hooks warning while
+// the dependent legacy row stays absent.
+type doctorSnapshot struct {
+	status *sandboxapi.Status
+	list   []sandboxapi.Sandbox
+	err    error
+	apiErr error
+}
+
+// isAre is " is" for one name, " are" for more.
+func isAre(names []string) string {
+	if len(names) == 1 {
+		return " is"
+	}
+	return " are"
+}
+
+// itsTheir is "its" for one name, "their" for more.
+func itsTheir(names []string) string {
+	if len(names) == 1 {
+		return "its"
+	}
+	return "their"
+}
+
+// legacySandboxCheck fails while a sandbox runs the supervisor of an
+// OpenShell release older than openshell.SupportedMin
+// (sandboxapi.Sandbox.OldSupervisor): that release's network broker can let
+// its connections bypass sandbox policy, DefenseClaw cannot contain it, and
+// the daemon creates and starts no sandbox while it runs. DefenseClaw stops
+// none itself, so the fix names the command that ends each. nil when none
+// runs, or when the list cannot be read (the hooks check says so).
+func (a *App) legacySandboxCheck(ctx context.Context, cached ...*doctorSnapshot) *openshell.Check {
+	var list []sandboxapi.Sandbox
+	if len(cached) != 0 {
+		if cached[0].err != nil || cached[0].apiErr != nil {
+			return nil
+		}
+		list = cached[0].list
+	} else {
+		api, err := a.api()
+		if err != nil {
+			return nil
+		}
+		list, err = api.List(ctx)
+		if err != nil {
+			return nil
+		}
+	}
+	// In name order, whatever order the daemon lists them in.
+	slices.SortFunc(list, func(a, b sandboxapi.Sandbox) int { return strings.Compare(a.Name, b.Name) })
+	var names, ways []string
+	for i := range list {
+		if sb := &list[i]; sb.OldSupervisor {
+			names = append(names, sb.Name)
+			ways = append(ways, legacyStopWay(sb))
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	gone := "it is gone"
+	if len(names) > 1 {
+		gone = "they are gone"
+	}
+	return &openshell.Check{ID: CheckIDLegacySandbox, Title: "Legacy sandboxes", Status: openshell.StatusFail,
+		Detail: strings.Join(names, ", ") + ": " + sandboxapi.LegacyUnprotected + " (" + itsTheir(names) +
+			" session runs the supervisor of an OpenShell release older than " + openshell.SupportedMin +
+			", which DefenseClaw cannot verify under the current policy); DefenseClaw stops " + itThem(names) +
+			" for nobody, and creates and starts no sandbox until " + gone,
+		Fix: &openshell.Fix{Summary: strings.Join(ways, "; ")}}
+}
+
+// containedSandboxCheck fails while a MicroVM runs contained, as the
+// daemon's status names it (sandboxapi.UnprotectedContained, the one
+// account of it the status and the run refusal give too): DefenseClaw had
+// to stop it but could not sync its disk first, so it keeps it running
+// with the network it added withdrawn, and creates and starts no sandbox
+// until it is gone. DefenseClaw stops none itself, so the fix names the
+// command that ends each. nil when none runs, or when the status cannot be
+// read (the daemon row says so).
+func (a *App) containedSandboxCheck(ctx context.Context, cached ...*doctorSnapshot) *openshell.Check {
+	var st *sandboxapi.Status
+	if len(cached) != 0 {
+		if cached[0].apiErr != nil {
+			return nil
+		}
+		st = cached[0].status
+	} else {
+		api, err := a.api()
+		if err != nil {
+			return nil
+		}
+		st, err = api.Status(ctx)
+		if err != nil {
+			return nil
+		}
+	}
+	if st == nil {
+		return nil
+	}
+	var names, ways []string
+	for _, u := range st.Unprotected {
+		if u.Reason == sandboxapi.UnprotectedContained {
+			names = append(names, u.Name)
+			ways = append(ways, "save the work you need in "+u.Name+", then run `"+u.Stop+"`")
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	gone := "it is gone"
+	if len(names) > 1 {
+		gone = "they are gone"
+	}
+	return &openshell.Check{ID: CheckIDContainedSandbox, Title: "Contained sandboxes", Status: openshell.StatusFail,
+		Detail: strings.Join(names, ", ") + ": " + sandboxapi.ContainedUnprotected + " (DefenseClaw had to stop " + itThem(names) +
+			", but could not sync the MicroVM's disk first, so it keeps " + itThem(names) + " running with the network rules and providers it added withdrawn); " +
+			"DefenseClaw stops " + itThem(names) + " for nobody, and creates and starts no sandbox until " + gone,
+		Fix: &openshell.Fix{Summary: strings.Join(ways, "; ")}}
+}
+
+// hostGitCheck checks the host git DefenseClaw drives (App.HostGit, git
+// 2.29 or newer). A copy-mode run copies its project into the sandbox with
+// it, so without it no copy-mode run starts (GAP-1068); a mount-mode run
+// needs it only for the pre-session snapshot of a git repository, and a
+// mount-mode run of any other folder works without it (GAP-2117). So the
+// row fails when every run here works on a copy (copyOnly) and warns
+// otherwise. The fix says how to install it, or on a managed computer whom
+// to ask.
+func (a *App) hostGitCheck(ctx context.Context, managed, copyOnly bool) openshell.Check {
+	v, err := a.HostGit(ctx)
+	if err == nil {
+		return openshell.Check{ID: CheckIDHostGit, Title: "Host Git", Status: openshell.StatusPass, Detail: "git " + v}
+	}
+	fix := "install git 2.29 or newer on this computer (RHEL and Fedora: `sudo dnf install git`; Debian and Ubuntu: `sudo apt-get install git`; " +
+		"macOS: `xcode-select --install`), then run `" + CommandName + " doctor` again"
+	if managed {
+		fix = "ask your administrator to install git 2.29 or newer on this computer"
+	}
+	why := sandboxapi.DisplayText(strings.TrimPrefix(err.Error(), "workspace: "))
+	if copyOnly {
+		return openshell.Check{ID: CheckIDHostGit, Title: "Host Git", Status: openshell.StatusFail,
+			Detail: "every sandbox run here works on a copy of the project, which it makes and snapshots with this computer's git, so no run starts without it: " + why,
+			Fix:    &openshell.Fix{Summary: fix}}
+	}
+	return openshell.Check{ID: CheckIDHostGit, Title: "Host Git", Status: openshell.StatusWarn,
+		Detail: "a copy-mode run (--copy) and the pre-session snapshot of a git repository need this computer's git, so those runs do not start without it; " +
+			"a mount-mode run of a folder that is not a git repository works: " + why,
+		Fix: &openshell.Fix{Summary: fix}}
+}
+
+// everyRunCopies reports whether every sandbox run of this account works
+// on a copy of its project: on a managed computer (the floor makes the
+// workspace a copy), with openshell.workdir.mode copy, or on a compute
+// driver that mounts no host folders.
+func (a *App) everyRunCopies(managed bool, driver string) bool {
+	if managed {
+		return true
+	}
+	if a.Cfg != nil && a.Cfg.OpenShell.Workdir.Mode == config.OpenShellWorkdirCopy {
+		return true
+	}
+	d, known := openshell.LookupDriver(driver)
+	return known && !d.HostMounts
+}
+
+// unknownSandboxCheck fails while a sandbox may run unprotected and its
+// gateway has not said whether it runs, as the daemon's status names it
+// (sandboxapi.UnprotectedUnknown, the one account of it the status and
+// the run refusal give too): DefenseClaw creates and starts no sandbox
+// until it does. The fix is the daemon's detail for each. nil when there is
+// none, or when the status cannot be read (the daemon row says so).
+func (a *App) unknownSandboxCheck(ctx context.Context, cached ...*doctorSnapshot) *openshell.Check {
+	var st *sandboxapi.Status
+	if len(cached) != 0 {
+		if cached[0].apiErr != nil {
+			return nil
+		}
+		st = cached[0].status
+	} else {
+		api, err := a.api()
+		if err != nil {
+			return nil
+		}
+		st, err = api.Status(ctx)
+		if err != nil {
+			return nil
+		}
+	}
+	if st == nil {
+		return nil
+	}
+	var names, ways []string
+	for _, u := range st.Unprotected {
+		if u.Reason == sandboxapi.UnprotectedUnknown {
+			names = append(names, u.Name)
+			ways = append(ways, u.Name+": "+u.Detail)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	return &openshell.Check{ID: CheckIDUnknownSandbox, Title: "Unseen sandboxes", Status: openshell.StatusFail,
+		Detail: strings.Join(names, ", ") + ": " + sandboxapi.UnknownUnprotected + " (" + itsTheir(names) + " session may run a legacy supervisor, " +
+			"or a MicroVM DefenseClaw contained, and " + itsTheir(names) + " gateway has not said whether it runs); DefenseClaw stops " + itThem(names) +
+			" for nobody, and creates and starts no sandbox until it does",
+		Fix: &openshell.Fix{Summary: strings.Join(ways, "; ")}}
+}
+
+// legacyStopWay is how the user ends the legacy sandbox sb
+// (sandboxapi.Sandbox.OldSupervisor): the stop of a ready one, which on a
+// MicroVM syncs its disk first because that release's stop does not, and
+// the delete of a MicroVM whose workload ended, which OpenShell does not
+// stop (openshell.EndedVMWayOn: OpenShell 0.1.5 does not start it either).
+func legacyStopWay(sb *sandboxapi.Sandbox) string {
+	if sb.Phase == "ready" {
+		way := "save the work you need in " + sb.Name + ", then run `" + CommandName + " stop " + sb.Name + "`"
+		if d, ok := openshell.LookupDriver(sb.Driver); !ok || !d.StopFlushes {
+			way += ", which syncs the VM's disk first (that release's stop does not flush it, so what the guest writes after the sync may be lost) " +
+				"and, when that sync fails, asks before it stops the VM"
+		}
+		return way
+	}
+	return openshell.EndedVMWayOn(sb.Name)
 }
 
 // hooksCheck reports the sandboxes whose current session's hooks do not
 // reach DefenseClaw, with the daemon's reason for each.
-func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
+func (a *App) hooksCheck(ctx context.Context, ingress string, cached ...*doctorSnapshot) openshell.Check {
 	c := openshell.Check{ID: CheckIDHooks, Title: "Sandbox hooks", Status: openshell.StatusPass}
-	api, err := a.api()
-	if err != nil {
-		c.Status, c.Detail = openshell.StatusSkip, err.Error()
-		return c
+	var list []sandboxapi.Sandbox
+	var st *sandboxapi.Status
+	var err error
+	if len(cached) != 0 {
+		if cached[0].apiErr != nil {
+			c.Status, c.Detail = openshell.StatusSkip, cached[0].apiErr.Error()
+			return c
+		}
+		list, st, err = cached[0].list, cached[0].status, cached[0].err
+	} else {
+		api, apiErr := a.api()
+		if apiErr != nil {
+			c.Status, c.Detail = openshell.StatusSkip, apiErr.Error()
+			return c
+		}
+		list, err = api.List(ctx)
+		if err == nil {
+			st, _ = api.Status(ctx)
+		}
 	}
-	list, err := api.List(ctx)
 	if err != nil {
 		c.Status, c.Detail = openshell.StatusWarn, "could not list the sandboxes: "+apiError(err).Error()
 		return c
 	}
-	var bad, stopped, errored []string
+	var bad, stopped, stoppedSilent, errored, erroredVMs, timedOut, lingeringVMs, lingeringWayOn []string
 	running := 0
 	// A sandbox of the compute driver the gateway ran before a switch is in
 	// OpenShell's error state because the gateway cannot run it, not because a
-	// container stopped or Docker restarted (GAP-0455).
-	liveDriver := ""
-	if st, serr := api.Status(ctx); serr == nil && st.Gateway != nil {
+	// container stopped or Docker restarted (GAP-0455). A gateway older than
+	// openshell.SupportedMin can neither stop nor start a sandbox in that state.
+	liveDriver, oldGateway, managed := "", false, false
+	if st != nil && st.Gateway != nil {
 		liveDriver = st.Gateway.Driver
+		oldGateway = !openshell.RunsSandboxes(st.Gateway.Version)
+		managed = st.Managed != nil
 	}
+	// The MicroVMs in the error state that hold the gateway
+	// (openshell.HoldsGateway): an OpenShell older than SupportedMin neither
+	// stops nor starts them, so the upgrade is refused until they are
+	// deleted.
+	var heldVMs []string
 	otherDriver := otherDriverSandboxes(list, liveDriver)
 	otherDriverNames := map[string]bool{}
 	for _, sb := range otherDriver {
@@ -253,8 +641,28 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 		if sb.Phase == "ready" {
 			running++
 		}
-		if sb.Phase == "error" && !otherDriverNames[sb.Name] {
+		switch {
+		case sb.Phase != "error" || otherDriverNames[sb.Name]:
+		case openshell.ProvisioningTimedOut(sb.PhaseReason):
+			timedOut = append(timedOut, sb.Name)
+		case sb.Driver == "vm" && openshell.LingeringVM(openshell.PhaseError, sb.PhaseReason, false):
+			lingeringVMs = append(lingeringVMs, sb.Name)
+			way := openshell.StopWayOn(sb.Name, openshell.PhaseError, sb.PhaseReason, openshell.SupportedMin)
+			if !openshell.MainProcessFailed(sb.PhaseReason) {
+				way += "; its MicroVM work is kept only through the last successful disk sync"
+			}
+			lingeringWayOn = append(lingeringWayOn, sb.Name+": "+way)
+		case sb.Driver == "vm":
+			erroredVMs = append(erroredVMs, sb.Name)
+		default:
 			errored = append(errored, sb.Name)
+		}
+		if d, ok := openshell.LookupDriver(sb.Driver); sb.Phase == "error" && !otherDriverNames[sb.Name] && (!ok || !d.StopFlushes) &&
+			openshell.HoldsGateway(openshell.PhaseError, sb.PhaseReason, false) {
+			heldVMs = append(heldVMs, sb.Name)
+		}
+		if sb.Phase != "ready" && sb.Phase != "error" && sb.Hooks.Silent && sb.Hooks.OnSilence == "stop" {
+			stoppedSilent = append(stoppedSilent, sb.Name)
 		}
 		switch {
 		case !sb.Hooks.Unreachable:
@@ -272,17 +680,86 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 		c.Status = openshell.StatusFail
 		c.Detail = "hooks do not reach the ingress " + firstNonEmpty(ingress, "(unknown)") + ", so every tool call fails closed: " + strings.Join(bad, "; ")
 		c.Fix = &openshell.Fix{Summary: "fix the cause above, then start the session again"}
-	case len(errored) > 0:
-		// A sandbox OpenShell lost (its container stopped: a Docker
-		// restart) can be neither stopped nor started (GAP-0278).
+	case len(errored) > 0 || len(erroredVMs) > 0 || len(timedOut) > 0 || len(lingeringVMs) > 0:
+		// A Docker sandbox whose container stopped can stop and start
+		// again. A MicroVM still held after its main process failed needs a
+		// lossy end or delete; another held VM gets its phase-specific stop
+		// advice, and one whose provisioning timed out starts without a stop,
+		// which OpenShell refuses for it (NVIDIA/OpenShell#4231, GAP-0278).
 		c.Status = openshell.StatusWarn
-		verb := " is in"
-		if len(errored) > 1 {
-			verb = " are in"
+		var details, fixes []string
+		if len(errored) > 0 {
+			details = append(details, strings.Join(errored, ", ")+isAre(errored)+" in OpenShell's error state (the container stopped: Docker restarted, or the workload failed)")
+			fixes = append(fixes, "fix what stopped "+itThem(errored)+", then `"+CommandName+" stop NAME` and `"+CommandName+
+				" start NAME`, which keep the sandbox and its work")
 		}
-		c.Detail = strings.Join(errored, ", ") + verb + " OpenShell's error state (the container stopped: Docker restarted, or the workload failed), " +
-			"where OpenShell can neither stop nor start " + itThem(errored)
-		c.Fix = &openshell.Fix{Summary: "delete " + itThem(errored) + " (`" + CommandName + " delete NAME --keep-snapshot` keeps a mounted project's undo point) and run again"}
+		if len(erroredVMs) > 0 {
+			details = append(details, strings.Join(erroredVMs, ", ")+isAre(erroredVMs)+" in OpenShell's error state (the MicroVM failed or exited)")
+			fixes = append(fixes, "fix what stopped "+itThem(erroredVMs)+", then `"+CommandName+" stop NAME` and `"+CommandName+
+				" start NAME`; the sandbox remains, but its MicroVM work is kept only through the last successful disk sync")
+		}
+		if len(lingeringVMs) > 0 {
+			details = append(details, strings.Join(lingeringVMs, ", ")+isAre(lingeringVMs)+" in OpenShell's error state; "+itThem(lingeringVMs)+" may still have a running MicroVM")
+			fixes = append(fixes, lingeringWayOn...)
+		}
+		if len(timedOut) > 0 {
+			details = append(details, strings.Join(timedOut, ", ")+isAre(timedOut)+" in OpenShell's error state because "+
+				itsTheir(timedOut)+" provisioning timed out")
+			fixes = append(fixes, "for "+strings.Join(timedOut, ", ")+", wait a minute for OpenShell's cleanup, then `"+CommandName+
+				" start NAME` with no stop: OpenShell refuses to stop a sandbox whose provisioning timed out")
+		}
+		c.Detail = strings.Join(details, "; ")
+		c.Fix = &openshell.Fix{Summary: strings.Join(fixes, "; ")}
+		if oldGateway {
+			// The upgrade first; after it, the way on of the upgraded
+			// gateway, which still refuses to stop a sandbox whose
+			// provisioning timed out. The upgrade (per user, or the
+			// administrator's pin move on a managed computer) is refused
+			// while OpenShell does not report a MicroVM in the error state
+			// stopped (heldVMs), which this OpenShell neither stops nor
+			// starts: only its delete lets the upgrade go ahead.
+			allErrored := append(slices.Clone(errored), erroredVMs...)
+			allErrored = append(allErrored, lingeringVMs...)
+			allErrored = append(allErrored, timedOut...)
+			c.Detail += ", where this OpenShell can neither stop nor start " + itThem(allErrored)
+			upgrade, move, waits := "upgrade OpenShell to "+openshell.InstallerVersion, "the upgrade", []string{"see Gateway"}
+			if managed {
+				upgrade, move, waits = "your organization's OpenShell setting moves this account to "+openshell.InstallerVersion+
+					" on its own where DefenseClaw installs OpenShell (ask IT otherwise)", "the move", nil
+			}
+			if len(heldVMs) > 0 {
+				waits = append(waits, move+" is refused while OpenShell does not report "+strings.Join(heldVMs, ", ")+" stopped, and this OpenShell neither "+
+					"stops nor starts a MicroVM in its error state: `"+CommandName+" delete NAME` deletes "+itThem(heldVMs)+" with "+itsTheir(heldVMs)+" work")
+			}
+			if len(waits) > 0 {
+				upgrade += " (" + strings.Join(waits, "; ") + ")"
+			}
+			// What survives the upgrade: not the MicroVMs deleted for it.
+			deleted := func(name string) bool { return slices.Contains(heldVMs, name) }
+			errored, erroredVMs = slices.DeleteFunc(errored, deleted), slices.DeleteFunc(erroredVMs, deleted)
+			timedOut = slices.DeleteFunc(timedOut, deleted)
+			var after []string
+			if len(errored) > 0 {
+				after = append(after, "`"+CommandName+" stop NAME` and `"+CommandName+" start NAME` for "+strings.Join(errored, ", ")+
+					", which keep the sandbox and its work")
+			}
+			if len(erroredVMs) > 0 {
+				after = append(after, "`"+CommandName+" stop NAME` and `"+CommandName+" start NAME` for "+strings.Join(erroredVMs, ", ")+
+					"; the sandbox remains, but its MicroVM work is kept only through the last successful disk sync")
+			}
+			if len(timedOut) > 0 {
+				after = append(after, "for "+strings.Join(timedOut, ", ")+" wait a minute for OpenShell's cleanup, then `"+CommandName+
+					" start NAME` with no stop: OpenShell "+openshell.SupportedMin+" refuses to stop a sandbox whose provisioning timed out")
+			}
+			if len(after) > 0 {
+				upgrade += ", then " + strings.Join(after, "; ")
+			}
+			c.Fix = &openshell.Fix{Summary: upgrade}
+		}
+	case len(stoppedSilent) > 0:
+		c.Status = openshell.StatusWarn
+		c.Detail = strings.Join(stoppedSilent, ", ") + " stopped after its harness worked without hooks reaching DefenseClaw (hooks.on_silence: stop); no sandbox work runs now"
+		c.Fix = &openshell.Fix{Summary: "fix the sandbox harness's hook configuration before starting it again, or delete it"}
 	case len(otherDriver) > 0 && len(stopped) == 0:
 		c.Status = openshell.StatusWarn
 		c.Detail = otherDriverNote(list, liveDriver)
@@ -319,10 +796,23 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 	p := &statusProbe{}
 	api, err := a.api()
 	if err == nil {
-		st, serr := api.Status(ctx)
+		var st *sandboxapi.Status
+		var serr error
+		if verified, ok := api.(interface {
+			StatusWithPeer(context.Context) (*sandboxapi.Status, int, error)
+		}); ok {
+			st, p.responderPID, serr = verified.StatusWithPeer(ctx)
+		} else {
+			st, serr = api.Status(ctx)
+		}
 		if serr == nil {
+			p.status = st
 			p.daemonUID = st.DaemonUID
 			p.managed = st.Managed
+			p.ingressListening = st.IngressAddr != ""
+			p.egressListening = st.EgressAddr != ""
+			p.listenersProven = st.ListenersProven
+			p.elsewhere = st.GatewayElsewhere != ""
 		}
 		managed = managed || (serr == nil && st.Managed != nil)
 		switch {
@@ -343,13 +833,16 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 		case !st.Enabled:
 			c.Status, c.Detail = openshell.StatusWarn, "openshell.enabled is false: sandboxes are off"
 			c.Fix = &openshell.Fix{Summary: "turn sandboxes on", Command: CommandName + " setup"}
+		case st.Managed != nil && st.PortConflict != nil:
+			p.unavailable = true
+			c.Status, c.Detail = openshell.StatusSkip, "running; sandbox port is occupied (see Sandbox "+st.PortConflict.Name+" port)"
 		case !st.Available && st.Managed != nil && st.Managed.Unavailable == "" && st.Running == 0 && st.GatewayElsewhere == "":
 			// Before the first sandbox, and after an idle daemon stopped it,
 			// the account's OpenShell gateway is not running: the next run
 			// starts it, installing OpenShell first in setup mode. Nothing
 			// failed (GAP-0439, GAP-0441). Another account's sandboxes
 			// holding the port are the busy row below (GAP-0461).
-			p.listening = st.IngressAddr != ""
+			p.ingressListening, p.egressListening = false, false
 			if st.DockerGroupMissing {
 				// Nothing has failed yet, but the first run's image build will
 				// (GAP-0556): the daemon cannot reach Docker.
@@ -358,7 +851,14 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 			}
 			c.Status, c.Detail = openshell.StatusPass, "running; "+a.managedFirstRunText(st.Managed)
 		case !st.Available:
-			p.listening, p.unavailable = st.IngressAddr != "", true
+			// A daemon that names only the ports it holds (ListenersProven)
+			// still serves the one it names: its egress listener while
+			// another account holds its ingress port is no other process
+			// (GAP-1875). An older daemon's addresses prove nothing here.
+			if !p.listenersProven {
+				p.ingressListening, p.egressListening = false, false
+			}
+			p.unavailable = true
 			c.Status, c.Detail = openshell.StatusFail, "running, but sandboxes are unavailable: "+sandboxapi.DisplayText(firstNonEmpty(st.Reason, "not connected to OpenShell"))
 			switch {
 			case st.Managed != nil && st.GatewayElsewhere != "":
@@ -375,13 +875,13 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 			// The account's user services started before the group was
 			// given, and a restart of one keeps their groups: a new login
 			// gives them (GAP-0367).
-			p.listening, p.available, p.ingress = true, true, st.IngressAddr
+			p.available, p.ingress = true, st.IngressAddr
 			c.Status, c.Detail, c.Fix = dockerGroupMissingRow(true)
 		case st.DockerGroupMissing:
-			p.listening, p.available, p.ingress = true, true, st.IngressAddr
+			p.available, p.ingress = true, st.IngressAddr
 			c.Status, c.Detail, c.Fix = dockerGroupMissingRow(false)
 		default:
-			p.listening, p.available, p.ingress = true, true, st.IngressAddr
+			p.available, p.ingress = true, st.IngressAddr
 			c.Status = openshell.StatusPass
 			c.Detail = fmt.Sprintf("connected to %s; ingress %s, egress proxy %s", gatewayText(st.Gateway), st.IngressAddr, st.EgressAddr)
 		}
@@ -445,9 +945,7 @@ func gatewayText(g *sandboxapi.Gateway) string {
 // it warns about when one is not built, and every other harness built for
 // this user and DefenseClaw (`sandbox run kiro` builds one without
 // configuring it). An image Docker no longer has does not count, whatever
-// its record says; a MicroVM image whose MicroVM check refused it, or
-// settled nothing yet, is named apart with the command that checks it
-// again.
+// its record says.
 func (a *App) imagesCheck(ctx context.Context, microVM bool) openshell.Check {
 	c := openshell.Check{ID: CheckIDImages, Title: "Harness images"}
 	specs, err := a.harnesses(nil)
@@ -487,26 +985,13 @@ func (a *App) imagesCheck(ctx context.Context, microVM bool) openshell.Check {
 			}
 		}
 	}
-	var ready, missing, unchecked, refused []string
-	// verdict files the harness name's newest image by its MicroVM check.
-	verdict := func(name string) {
-		r := newest[name]
-		switch {
-		case r.MicroVMProblem != "":
-			// Every run of it on the MicroVM driver is refused.
-			refused = append(refused, name)
-		case r.MicroVMUnchecked():
-			// Its next run checks it again first, which takes a while.
-			unchecked = append(unchecked, name)
-		default:
-			ready = append(ready, name+" "+r.HarnessVersion)
-		}
-	}
+	var ready, missing []string
 	covered := map[string]bool{}
 	for _, spec := range specs {
 		covered[spec.Name] = true
 		if _, ok := newest[spec.Name]; ok {
-			verdict(spec.Name)
+			r := newest[spec.Name]
+			ready = append(ready, spec.Name+" "+r.HarnessVersion)
 		} else {
 			missing = append(missing, spec.Name)
 		}
@@ -520,7 +1005,8 @@ func (a *App) imagesCheck(ctx context.Context, microVM bool) openshell.Check {
 	others, _ = a.allowedHarnesses(others)
 	sort.Slice(others, func(i, j int) bool { return others[i].Name < others[j].Name })
 	for _, spec := range others {
-		verdict(spec.Name)
+		r := newest[spec.Name]
+		ready = append(ready, spec.Name+" "+r.HarnessVersion)
 	}
 	var notes, never, rebuild []string
 	for _, name := range missing {
@@ -537,14 +1023,6 @@ func (a *App) imagesCheck(ctx context.Context, microVM bool) openshell.Check {
 		notes = append(notes, "built by an earlier DefenseClaw build only: "+strings.Join(rebuild, ", ")+
 			" (the next run builds it for this one, which takes a while; then `"+CommandName+" image prune` frees the old one)")
 	}
-	if len(refused) > 0 {
-		notes = append(notes, "cannot start in an OpenShell MicroVM: "+strings.Join(refused, ", ")+
-			" (the image build's MicroVM check says why; a gateway on the docker driver runs it)")
-	}
-	if len(unchecked) > 0 {
-		notes = append(notes, "not checked for an OpenShell MicroVM yet: "+strings.Join(unchecked, ", ")+
-			" (the next run checks it first, which takes a while)")
-	}
 	if len(notes) > 0 && len(ready) > 0 {
 		notes = append(notes, "hook-verified: "+strings.Join(ready, ", "))
 	}
@@ -554,10 +1032,6 @@ func (a *App) imagesCheck(ctx context.Context, microVM bool) openshell.Check {
 	case len(missing) > 0:
 		c.Status, c.Detail = openshell.StatusWarn, strings.Join(notes, "; ")
 		c.Fix = &openshell.Fix{Summary: "build the images now", Command: CommandName + " image build " + strings.Join(missing, " ")}
-	default:
-		c.Status, c.Detail = openshell.StatusWarn, strings.Join(notes, "; ")
-		recheck := append(append([]string{}, refused...), unchecked...)
-		c.Fix = &openshell.Fix{Summary: "check them again", Command: CommandName + " image build " + strings.Join(recheck, " ") + " --force"}
 	}
 	if forbidden != "" {
 		c.Detail += "; " + forbidden
@@ -705,7 +1179,13 @@ func (a *App) adminCheck() openshell.Check {
 	if s.Authority == packs.AuthorityAuthoritative {
 		whose = "authoritative (an administrator owns config.yaml)"
 	}
-	c.Detail = whose + ": " + strings.Join(adminConstraints(packs.BaseFloor(a.Cfg)), ", ")
+	floor := packs.BaseFloor(a.Cfg)
+	c.Detail = whose + ": " + strings.Join(adminConstraints(floor), ", ")
+	if len(floor.RequiredFor) > 0 && !a.Cfg.StandaloneEnterprise() {
+		// Only a managed gateway refuses the host runs of a required agent
+		// (requireSandboxDecision); here the key changes nothing (#1209).
+		c.Detail += "; required_for has no effect on a per-user gateway: only a managed computer refuses host runs"
+	}
 	return c
 }
 
@@ -723,6 +1203,9 @@ func adminConstraints(ad config.OpenShellAdminConfig) []string {
 			p += " (pinned)"
 		}
 		out = append(out, p)
+	}
+	if len(ad.RequiredFor) > 0 {
+		out = append(out, "sandbox required for "+strings.Join(ad.RequiredFor, ", "))
 	}
 	if ad.MinProfile != "" {
 		out = append(out, "profile "+ad.MinProfile+" or stricter")
@@ -775,7 +1258,18 @@ func (a *App) RunDoctor(ctx context.Context, o DoctorOptions) error {
 			// known) it is a no by default, and --yes takes that default.
 			def := true
 			if d, _ := openshell.LookupDriver(string(rep.Driver)); c.Fix.RestartsGateway && !d.StopFlushes {
-				if why := a.restartStops(ctx); why != "" {
+				why, held := a.restartStops(ctx)
+				if held != "" {
+					// The restart's own gate refuses it under them.
+					def = false
+					if o.Output != OutputJSON {
+						a.warn(c.Title + ": this restarts the OpenShell gateway, and " + held)
+						if o.Yes {
+							a.note("not fixed with --yes while OpenShell does not report every MicroVM sandbox on the gateway stopped")
+						}
+					}
+				}
+				if why != "" {
 					def = false
 					if o.Output != OutputJSON {
 						a.warn(c.Title + ": " + why)
@@ -909,10 +1403,13 @@ func (a *App) printDoctor(rep *openshell.DoctorReport) {
 	// The last line is the verdict, a failing one too (it ended on the
 	// last check's line, with only the exit status to tell).
 	a.println()
-	if failed := failedChecks(rep); failed > 0 {
-		a.bad("not ready for sandboxes: " + plural(int64(failed), "check", "checks") + " failed")
-	} else if why, off := sandboxesOff(rep); off {
+	why, off := sandboxesOff(rep)
+	failed := failedChecks(rep)
+	setupChanging := rep.Get(CheckIDManagedRuntime)
+	if off && (failed == 0 || failed == 1 && setupChanging != nil && setupChanging.Status == openshell.StatusFail && setupChanging.Detail == sandboxrelay.UnavailableSetupChanging) {
 		a.warn("not ready for sandboxes yet: " + why)
+	} else if failed > 0 {
+		a.bad("not ready for sandboxes: " + plural(int64(failed), "check", "checks") + " failed")
 	} else {
 		a.ok("ready for sandboxes")
 	}
@@ -929,10 +1426,12 @@ func failedChecks(rep *openshell.DoctorReport) int {
 	return n
 }
 
-// sandboxesOff reports a report without failures whose sandboxes are still
-// turned off (openshell.enabled is false, a warning of the daemon check):
-// the machine can run them, but no sandbox starts until they are on.
+// sandboxesOff reports a daemon whose sandboxes are turned off or a managed
+// setup change that has not finished: a run refuses in either state.
 func sandboxesOff(rep *openshell.DoctorReport) (string, bool) {
+	if c := rep.Get(CheckIDManagedRuntime); c != nil && c.Status == openshell.StatusFail && c.Detail == sandboxrelay.UnavailableSetupChanging {
+		return c.Detail, true
+	}
 	c := rep.Get(CheckIDDaemon)
 	if c == nil || c.Status != openshell.StatusWarn {
 		return "", false

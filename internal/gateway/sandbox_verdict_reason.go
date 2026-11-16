@@ -19,12 +19,12 @@ package gateway
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -49,7 +49,7 @@ const (
 )
 
 // sandboxRuleIDPattern is the shape of a rule ID a reason may name.
-var sandboxRuleIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$`)
+var sandboxRuleIDPattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$`)
 
 // sandboxFlaggedNote closes the reason of a verdict that let the action run
 // (an alert, or a block the hook event cannot enforce): telling the agent
@@ -120,7 +120,7 @@ func (a *APIServer) sandboxMatchUndecided(ctx context.Context, connectorName str
 		return false
 	}
 	probe := []RuleFinding{{Severity: strings.ToUpper(strings.TrimSpace(resp.Severity)), Confidence: 1}}
-	switch guardrailActionForConnectorFindings(a.decisionConfig(ctx), connectorName, probe, true) {
+	switch profileMeetActionForFindings(ctx, a.decisionConfig(ctx), connectorName, probe, true, false) {
 	case guardrailActionBlock, guardrailActionConfirm:
 		return true
 	}
@@ -133,7 +133,7 @@ func (a *APIServer) sandboxMatchUndecided(ctx context.Context, connectorName str
 // threshold is audited only (GAP-0634, GAP-0640).
 func (a *APIServer) sandboxMatchAlerts(ctx context.Context, connectorName string, resp agentHookResponse) bool {
 	probe := []RuleFinding{{Severity: strings.ToUpper(strings.TrimSpace(resp.Severity)), Confidence: 1}}
-	return guardrailActionForConnectorFindings(a.decisionConfig(ctx), connectorName, probe, true) != guardrailActionAllow
+	return profileMeetActionForFindings(ctx, a.decisionConfig(ctx), connectorName, probe, true, false) != guardrailActionAllow
 }
 
 // sandboxRulesSubject names the deciding rules the way agentMatchedRules
@@ -284,6 +284,7 @@ func (a *APIServer) safeApplySandboxVerdictReason(
 			a.handleHookPanic(ctx, connectorName, req.HookEventName, fmt.Sprintf("sandbox verdict reason panic: %v", r))
 		}
 	}()
+	hookStageForTest(ctx, "sandbox_reason")
 	return a.applySandboxVerdictReason(ctx, profile, connectorName, req, rawBody, payload, resp)
 }
 
@@ -396,8 +397,11 @@ func (a *APIServer) failSandboxHookClosed(
 	resp.Findings = nil
 	defer func() {
 		if r := recover(); r != nil {
+			// The callback-free render keeps the native denial: a bare
+			// block reaches some agents as an allow.
 			out = resp
 			out.Reason = sandboxInternalErrorReason
+			out.HookOutput = nativeFallbackOutput(profile, connectorName, req, "block", sandboxInternalErrorReason)
 			a.handleHookPanic(ctx, connectorName, req.HookEventName, fmt.Sprintf("sandbox fail-closed render panic: %v", r))
 		}
 	}()
@@ -422,6 +426,9 @@ func (a *APIServer) renderSandboxVerdict(
 	switch profile.Name {
 	case "claudecode":
 		decoded := decodeClaudeCodeRequestForContext(ctx, rawBody, payload)
+		// A caller without the request body (a recovered synthetic hook)
+		// still renders the native output of the event it answers.
+		decoded.HookEventName = firstNonEmpty(decoded.HookEventName, req.HookEventName)
 		cc = &decoded
 		resp.AdditionalContext = claudeCodeAdditionalContext(
 			resp.RawAction, resp.Severity, plain, resp.WouldBlock && claudeCodeCanEnforce(decoded),

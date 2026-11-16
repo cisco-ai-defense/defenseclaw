@@ -1,0 +1,17 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build !linux
+
+package testenv
+
+import "time"
+
+// The host reports no time a thread was ready and without a CPU, so a Call
+// reads 0, a Window is never starved, and every bound stays the product value.
+// The shared build box that makes these tests miss their bounds is Linux; a
+// hosted runner is not shared between jobs.
+
+func threadWaited() (time.Duration, bool) { return 0, false }
+
+func readThreadTimes() map[int]threadTimes { return nil }

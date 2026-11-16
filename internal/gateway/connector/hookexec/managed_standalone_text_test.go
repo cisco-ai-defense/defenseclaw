@@ -6,6 +6,7 @@ package hookexec
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,7 +15,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 )
 
 // A Unix standalone managed hook that fails closed says, in one line that
@@ -46,6 +46,7 @@ func TestManagedStandaloneFailClosedTextIsPlain(t *testing.T) {
 		},
 	} {
 		r, _ := runSessionStop(t, tc.failure, tc.ev, true)
+		r.stderr = withoutLocalDenyEventID(r.stderr)
 		if tc.ev.connector == "claudecode" {
 			if r.code != 0 || !strings.Contains(r.stdout, mustJSONString(tc.want)) || r.stderr != "" {
 				t.Fatalf("%s: expected structured prompt block: %+v", tc.name, r)
@@ -67,6 +68,7 @@ func TestManagedStandaloneFailClosedTextIsPlain(t *testing.T) {
 func TestManagedFailClosedTextOutsideStandaloneIsUnchanged(t *testing.T) {
 	r, _ := runSessionStop(t, sessionStopCauses[0],
 		sessionStopEvent{connector: "claudecode", payload: `{"hook_event_name":"UserPromptSubmit"}`}, false)
+	r.stderr = withoutLocalDenyEventID(r.stderr)
 	if want := "defenseclaw: gateway unreachable, blocking claude-code tool (fail mode closed): enterprise_managed_hook_socket_missing"; strings.TrimSpace(r.stderr) != want {
 		t.Fatalf("stderr = %q, want %q", r.stderr, want)
 	}
@@ -90,6 +92,19 @@ func TestManagedGatewayStoppedTextNamesThisPlatformAndRefusalCode(t *testing.T) 
 	}
 	if got := managedStatusCommand("linux"); got != "enterprise linux status" {
 		t.Fatalf("linux status command = %q", got)
+	}
+}
+
+// GAP-0759: a missing DefenseClaw folder names that cause and its code
+// instead of "not set up correctly"; any other runtime refusal keeps it.
+func TestManagedRuntimeHomeMissingTextNamesTheFolder(t *testing.T) {
+	text := managedStandaloneFailClosedText("PreToolUse", "transport", managedRuntimeHomeMissingReason)
+	if !strings.Contains(text, "DefenseClaw folder") || strings.Contains(text, "not set up correctly") ||
+		!strings.HasSuffix(text, " ("+managedRuntimeHomeMissingReason+")") || !strings.HasPrefix(text, "DefenseClaw blocked this tool call: ") {
+		t.Fatalf("text = %q", text)
+	}
+	if other := managedStandaloneFailClosedText("PreToolUse", "transport", "enterprise_managed_runtime_state_invalid"); !strings.Contains(other, "not set up correctly") {
+		t.Fatalf("state invalid text = %q", other)
 	}
 }
 
@@ -130,7 +145,7 @@ func TestWindowsStandaloneHeldAPIPortFailsClosedNamingThePort(t *testing.T) {
 		var out, errb bytes.Buffer
 		Run(context.Background(), Options{
 			Connector: "codex", Event: "PreToolUse", HookContractID: "codex-hooks-v4", APIAddr: "127.0.0.1:1",
-			Home: home, HookDir: filepath.Join(home, "hooks"), FailMode: "open", ManagedEnterprise: true,
+			Home: home, HookDir: filepath.Join(home, "hooks"), FailMode: "closed", ManagedEnterprise: true, FailureLogHome: userLogHome(home),
 			ExplainUnenrolledAccount: explain, AuthenticatedManagedToken: &token,
 			Stdin:  strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"shell"}`),
 			Stdout: &out, Stderr: &errb, HTTPClient: &http.Client{Transport: portHeldRT{}},
@@ -141,16 +156,23 @@ func TestWindowsStandaloneHeldAPIPortFailsClosedNamingThePort(t *testing.T) {
 		if explain != held || strings.Contains(out.String(), "not running") {
 			t.Fatalf("explain=%v: stdout = %q failures = %q, want the held-port text only for the standalone hook", explain, out.String(), failures)
 		}
+		// Another process on the port is never a stopped service: Secure
+		// Client fails closed here even in open mode.
+		if !explain && !strings.Contains(out.String(), failedClosed) {
+			t.Fatalf("secure client: stdout = %q, want a fail-closed answer for a held port in open mode", out.String())
+		}
 	}
 }
 
 // A Windows standalone managed hook (ExplainUnenrolledAccount) whose gateway
 // service is stopped fails closed with the plain text and says the service
 // is not running, in the agent's denial and in hook-failures.jsonl
-// (GAP-0013). Secure Client keeps the peer-unverified reason and the
-// generic text.
+// (GAP-0013). An authenticated Secure Client hook follows its fail mode
+// instead (#1163): open allows the call, closed keeps the generic text; both
+// log the not-running reason.
 func TestWindowsStandaloneStoppedGatewayFailsClosedWithAPlainReason(t *testing.T) {
-	run := func(explain bool) (int, string, string, string) {
+	shortRestartBudget(t)
+	run := func(explain bool, failMode string) (int, string, string, string) {
 		home := t.TempDir()
 		token := "managed-test-token"
 		var out, errb bytes.Buffer
@@ -160,9 +182,11 @@ func TestWindowsStandaloneStoppedGatewayFailsClosedWithAPlainReason(t *testing.T
 			HookContractID:            "codex-hooks-v4",
 			APIAddr:                   "127.0.0.1:1",
 			Home:                      home,
+			FailureLogHome:            userLogHome(home),
 			HookDir:                   filepath.Join(home, "hooks"),
-			FailMode:                  "open",
+			FailMode:                  failMode,
 			ManagedEnterprise:         true,
+			SecureClient:              !explain,
 			ExplainUnenrolledAccount:  explain,
 			AuthenticatedManagedToken: &token,
 			Stdin:                     strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"shell"}`),
@@ -173,7 +197,7 @@ func TestWindowsStandaloneStoppedGatewayFailsClosedWithAPlainReason(t *testing.T
 		failures, _ := os.ReadFile(filepath.Join(home, "logs", "hook-failures.jsonl"))
 		return code, out.String(), errb.String(), string(failures)
 	}
-	code, stdout, stderr, failures := run(true)
+	code, stdout, stderr, failures := run(true, "closed")
 	want := "DefenseClaw blocked this tool call: the DefenseClaw gateway service is not running on this computer. " +
 		"Try again in a moment; if this continues, ask your administrator to check DefenseClaw on this computer: `" +
 		managedStatusCommand(runtime.GOOS) + "` names what to do. (enterprise_managed_gateway_not_running)"
@@ -183,9 +207,14 @@ func TestWindowsStandaloneStoppedGatewayFailsClosedWithAPlainReason(t *testing.T
 	if !strings.Contains(failures, managedGatewayNotRunningReason) {
 		t.Fatalf("hook-failures.jsonl = %q, want %s", failures, managedGatewayNotRunningReason)
 	}
-	_, stdout, _, failures = run(false)
-	if !strings.Contains(stdout, failedClosed) || !strings.Contains(failures, managedGatewayPeerUnverifiedReason) {
-		t.Fatalf("secure client: stdout = %q failures = %q, want the unchanged text and reason", stdout, failures)
+	code, stdout, _, failures = run(false, "open")
+	if code != 0 || strings.Contains(stdout, "deny") || strings.Contains(stdout, failedClosed) ||
+		!strings.Contains(failures, managedGatewayNotRunningReason) || !strings.Contains(failures, `"outcome":"fail_open"`) {
+		t.Fatalf("secure client open: code = %d stdout = %q failures = %q, want an allow logged as not running", code, stdout, failures)
+	}
+	_, stdout, _, failures = run(false, "closed")
+	if !strings.Contains(stdout, failedClosed) || !strings.Contains(failures, managedGatewayNotRunningReason) {
+		t.Fatalf("secure client closed: stdout = %q failures = %q, want the generic text and the not-running reason", stdout, failures)
 	}
 }
 
@@ -254,9 +283,7 @@ func TestManagedStandaloneOversizedPromptIsBlockedAndReported(t *testing.T) {
 // plain text and no operator-only advice a standard user cannot follow
 // (GAP-0680).
 func TestWindowsStandaloneFirstCallRetriesA401WithoutOperatorAdvice(t *testing.T) {
-	original := hookAuthRetryDelay
-	hookAuthRetryDelay = time.Millisecond
-	t.Cleanup(func() { hookAuthRetryDelay = original })
+	shortAuthRetryDelay(t)
 	managed := func(opts *Options) {
 		token := "managed-test-token"
 		opts.ManagedEnterprise = true
@@ -281,6 +308,46 @@ func TestWindowsStandaloneFirstCallRetriesA401WithoutOperatorAdvice(t *testing.T
 	for _, leaked := range []string{"token drift", "doctor --fix", "defenseclaw-gateway restart"} {
 		if strings.Contains(r.stdout+r.stderr, leaked) {
 			t.Fatalf("a standard user sees operator advice %q: %q", leaked, r.stdout+r.stderr)
+		}
+	}
+}
+
+// A managed hook that fails closed because the account's DefenseClaw folder
+// is missing must not create that folder to write its failure log. Claude
+// Code runs one hook process per event: the session-start event's log line
+// created .defenseclaw, so the prompt's hook found a folder, refused it as
+// state_invalid and printed the generic "not set up correctly" text instead
+// of the missing-folder one (GAP-0154, GAP-0759).
+func TestManagedHookFailureLogDoesNotRecreateAMissingHome(t *testing.T) {
+	profile := t.TempDir()
+	t.Setenv("HOME", profile)
+	t.Setenv("USERPROFILE", profile)
+	home := filepath.Join(profile, ".defenseclaw")
+	for _, tc := range []struct {
+		name string
+		opts Options
+	}{
+		// The Windows hook whose protected runtime failed passes no home.
+		{"runtime failure", Options{ManagedRuntimeFailure: managedRuntimeHomeMissingReason}},
+		{"home guard", Options{Home: home, HookDir: filepath.Join(home, "hooks")}},
+	} {
+		for _, event := range []string{"SessionStart", "UserPromptSubmit"} {
+			opts := tc.opts
+			opts.Connector = "claudecode"
+			opts.APIAddr = "127.0.0.1:1"
+			opts.ManagedEnterprise = true
+			opts.StrictAvailability = true
+			opts.FailMode = "closed"
+			opts.Stdin = strings.NewReader(`{"hook_event_name":"` + event + `"}`)
+			var out, errb bytes.Buffer
+			opts.Stdout, opts.Stderr = &out, &errb
+			Run(context.Background(), opts)
+			if !strings.Contains(out.String()+errb.String(), managedRuntimeHomeMissingReason) {
+				t.Fatalf("%s %s: output %q %q, want %s", tc.name, event, out.String(), errb.String(), managedRuntimeHomeMissingReason)
+			}
+			if _, err := os.Lstat(home); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("%s %s: the hook created %s (Lstat: %v)", tc.name, event, home, err)
+			}
 		}
 	}
 }

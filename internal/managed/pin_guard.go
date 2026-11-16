@@ -14,14 +14,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // declaresManagedConfig matches a config.yaml that itself says
 // deployment_mode: managed_enterprise.
-var declaresManagedConfig = regexp.MustCompile(`(?m)^deployment_mode:\s*["']?managed_enterprise`)
+var declaresManagedConfig = lazyregexp.New(`(?m)^deployment_mode:\s*["']?managed_enterprise`)
 
 // IgnoreUnmanagedPins drops the machine-wide pins (DEFENSECLAW_DEPLOYMENT_MODE
 // and DEFENSECLAW_ENTERPRISE_PROFILE) from this process's environment when it

@@ -9,6 +9,16 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# This smoke exercises the refuse-on-drift validator contract (e.g. the
+# "managed DACL is not protected after exact ACL replacement" throw and
+# strict identity verdicts). The non-strict managed_enterprise bulldoze
+# path intentionally relaxes some of those checks via Write-DefenseClaw-
+# AclSelfHealAdvisory. Pin strict mode for the duration of this smoke so
+# the validator continues to fail the specific drift scenarios the test
+# cases inject. Production deployments default to non-strict; strict is
+# an operator opt-in and the posture these tests certify.
+$env:DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS = '1'
+
 $modulePath = [IO.Path]::GetFullPath(
     (Microsoft.PowerShell.Management\Join-Path $PSScriptRoot '..\DefenseClawEnterprise.psm1')
 )
@@ -645,7 +655,7 @@ targets:
                 CodexManagedHooksLockPath = (
                     Microsoft.PowerShell.Management\Join-Path `
                         $codexMachinePolicyDirectory `
-                        '.defenseclaw-managed-hooks.lock'
+                        '.defenseclaw-managed-hooks.writer.lock'
                 )
                 CodexTargetEnabled = $false
                 ClaudeTargetEnabled = $true
@@ -826,7 +836,8 @@ targets:
                 [string]$SelfHealKind,
                 [string]$SelfHealGatewayServiceSID,
                 # Accepted and ignored: the config ACL repair gate passes it.
-                [switch]$IgnoreCreatorTemplates
+                [switch]$IgnoreCreatorTemplates,
+                [switch]$HealOnlyUntrusted
             )
             if ($script:HarnessState.ContainsKey('purge_acl_invalid') -and
                 [bool]$script:HarnessState.purge_acl_invalid -and
@@ -1383,7 +1394,7 @@ targets:
                 [string]$ExpectedSensorHelperImage,
                 [switch]$Guardian,
                 [switch]$SensorHelper,
-                # Spec 005 D1: the uninstall path now also calls this
+                # The uninstall path now also calls this
                 # helper with -Enumerator to verify the third service
                 # before removing it. Accepted for parity with the
                 # real function; the mock records the ownership check
@@ -1409,6 +1420,25 @@ targets:
             )
             $script:HarnessState.events.Add("owned:$Name")
             $script:HarnessState.owned_checks++
+        }
+        function script:Assert-DefenseClawStandaloneSensorHelperOwned {
+            param(
+                [Parameter(Mandatory)][string]$Name,
+                [Parameter(Mandatory)][hashtable]$Layout
+            )
+            # Services in this harness exist only in HarnessState, not HKLM.
+            # Keep the sensor-helper check on that same simulated SCM boundary
+            # and preserve the ownership event and foreign-service refusal.
+            if ($Name -cne [string]$Layout.SensorHelperServiceName) {
+                throw "sensor-helper ownership check crossed the fixture scope: $Name"
+            }
+            Assert-DefenseClawOwnedServiceOrAbsent `
+                -Name $Name `
+                -ExpectedGatewayPath $Layout.GatewayPath `
+                -ExpectedSensorHelperImage (
+                    '"{0}" --managed-enterprise' -f $Layout.SensorHelperPath
+                ) `
+                -SensorHelper
         }
         function script:Assert-DefenseClawManagedServiceConfigurations {
             param(
@@ -1460,6 +1490,21 @@ targets:
         function script:Assert-DefenseClawManagedInstallTree {
             param([Parameter(Mandatory)][hashtable]$Layout)
         }
+        function script:Assert-DefenseClawStandaloneInstallTreeNotInUse {
+            param(
+                [Parameter(Mandatory)][hashtable]$Layout,
+                [Parameter(Mandatory)][string]$GatewayServiceName,
+                [Parameter(Mandatory)][string]$GuardianServiceName,
+                [int]$SelfUninstallCallerPID
+            )
+            if ($script:HarnessState.crash_at -ceq 'install-holder-refusal') {
+                throw 'uninstall_in_use: an outside program holds an installed file; nothing was changed'
+            }
+        }
+        function script:Remove-DefenseClawStandaloneInstallTreeReplacementBackups {
+            param([Parameter(Mandatory)][hashtable]$Layout)
+            $script:HarnessState.events.Add('replacement-backups-retired')
+        }
         function script:Assert-DefenseClawRecordedArtifactHashes {
             param(
                 [Parameter(Mandatory)]$Metadata,
@@ -1482,7 +1527,8 @@ targets:
         function script:Write-DefenseClawJsonAtomic {
             param(
                 [Parameter(Mandatory)]$Value,
-                [Parameter(Mandatory)][string]$Path
+                [Parameter(Mandatory)][string]$Path,
+                [string]$Kind
             )
             $isPurgeIntent = (
                 $script:HarnessState.ContainsKey('layout') -and
@@ -1563,8 +1609,42 @@ targets:
                 # preimage capture). The smoke harness does not need to
                 # branch on it; accepting the parameter keeps the mock
                 # signature-compatible with Invoke-DefenseClawUninstall...
-                [switch]$SkipRedactionKeySnapshot
+                [switch]$SkipRedactionKeySnapshot,
+                # The production function's Cowork switch (cowork-1-0-8): an
+                # install that delivers Cowork snapshots its host artifacts.
+                # This harness delivers no Cowork; the stub only accepts it.
+                [switch]$CoworkRequested,
+                # The production function's uninstall-only switch (GAP-0773):
+                # a kept link at the Codex machine-policy folder leaves the
+                # Codex machine state out of the snapshot. This harness has no
+                # such link; the stub only accepts it.
+                [switch]$SkipLinkedCodexMachineState,
+                # The production function's replacement hook, published
+                # before the services stop (GAP-0993). Production types it
+                # [hashtable]; this harness's sources are plain strings, so
+                # the stub keeps it untyped and records what it was given.
+                [object]$EarlyHookSource,
+                # The content gate scope of the transaction's ACL drift
+                # repair (g582 review 2 S1): an uninstall passes Retain, a
+                # purge Purge, every other action the Lifecycle default.
+                [ValidateSet('Lifecycle', 'Retain', 'Purge')][string]$ContentGateScope = 'Lifecycle'
             )
+            $expectedContentGateScope = switch ([string]$script:HarnessState.operation) {
+                'uninstall' { if ([bool]$script:HarnessState['self_purge']) { 'Purge' } else { 'Retain' } }
+                'purge' { 'Purge' }
+                default { 'Lifecycle' }
+            }
+            if ($ContentGateScope -cne $expectedContentGateScope) {
+                throw "transaction content gate scope $ContentGateScope, want $expectedContentGateScope for $([string]$script:HarnessState.operation)"
+            }
+            if ($null -ne $EarlyHookSource -and
+                $script:HarnessState.operation -in @('uninstall', 'purge')) {
+                throw (
+                    'an uninstall transaction was given a replacement ' +
+                    'hook to publish'
+                )
+            }
+            $script:HarnessState.early_hook_source = $EarlyHookSource
             if (-not $PSBoundParameters.ContainsKey(
                     'PriorDeploymentActive'
                 )) {
@@ -1961,7 +2041,8 @@ targets:
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$GuardianServiceName,
-                [switch]$Purge
+                [switch]$Purge,
+                [switch]$NativeSealed
             )
             return Invoke-DefenseClawManagedHooksTeardownCommand `
                 -Layout $Layout `
@@ -2267,6 +2348,11 @@ targets:
                                 -GatewayServiceSID 'S-1-5-80-1-2-3-4-5' `
                                 -TransactionCreatedServicePresent)
                         }
+                        if ($name -eq 'DefenseClawSensorHelper') {
+                            Assert-DefenseClawStandaloneSensorHelperOwned `
+                                -Name $name `
+                                -Layout $Layout
+                        }
                         $script:HarnessState.events.Add(
                             "remove-service:$name"
                         )
@@ -2388,12 +2474,26 @@ targets:
                 [Parameter(Mandatory)][string]$GuardianServiceName,
                 $ManagedHooksActivation,
                 [bool]$DeferredConfigPending = $false,
-                [bool]$Installed = $true
+                [bool]$Installed = $true,
+                [string]$InstallRootIdentity = '',
+                [string]$StateRootIdentity = '',
+                [bool]$UninstallPurgeRequested = $false,
+                [bool]$UninstallPurgeUserStateRequested = $false,
+                [hashtable]$ApprovedPolicySources = @{}
             )
+            if ($ApprovedPolicySources.Count -ne 0) {
+                throw 'Secure Client deployment metadata recorded approved policy sources'
+            }
             if ($null -eq $ManagedHooksActivation) {
                 throw 'deployment metadata fixture lost managed-hook activation evidence'
             }
             $script:HarnessState.installed = [bool]$Installed
+            if (-not $Installed) {
+                $script:HarnessState.tombstone_purge_requested =
+                    [bool]$UninstallPurgeRequested
+                $script:HarnessState.tombstone_purge_user_state_requested =
+                    [bool]$UninstallPurgeUserStateRequested
+            }
             if ($null -ne $ManagedHooksActivation) {
                 $script:HarnessState.managed_hooks_activation =
                     $ManagedHooksActivation
@@ -2411,7 +2511,8 @@ targets:
         function script:Set-DefenseClawPreservedStateAcls {
             param(
                 [Parameter(Mandatory)][hashtable]$Layout,
-                [Parameter(Mandatory)][string]$GatewayServiceSID
+                [Parameter(Mandatory)][string]$GatewayServiceSID,
+                [switch]$Purge
             )
             if ([string]::IsNullOrWhiteSpace($GatewayServiceSID)) {
                 throw 'preserved-state ACL restoration lost its gateway SID'
@@ -2786,7 +2887,11 @@ targets:
             param(
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
-                [Parameter(Mandatory)][string]$Action
+                [Parameter(Mandatory)][string]$Action,
+                # The uninstall's removal passes -Teardown (GAP-0773); this
+                # harness has no Codex machine-policy folder link, so the stub
+                # only accepts it.
+                [switch]$Teardown
             )
             if ($script:HarnessState.ContainsKey(
                     'require_inactive_tombstone_adoption'
@@ -2834,7 +2939,8 @@ targets:
             param(
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
-                [switch]$RecordLifecycle
+                [switch]$RecordLifecycle,
+                [string]$ApprovedConfigSHA256
             )
         }
         function script:Wait-DefenseClawEnterpriseReadiness {
@@ -2844,8 +2950,19 @@ targets:
                 [Parameter(Mandatory)][string]$GuardianServiceName,
                 [bool]$RequireBroker = $true,
                 [bool]$RequireEnumerator = $true,
-                [int]$TimeoutSeconds = 90
+                [int]$TimeoutSeconds = 90,
+                [switch]$AllowFailedTargets,
+                [string[]]$AllowedFailedTargetSIDs,
+                [switch]$GuardianCoverageDeferred
             )
+            if ($null -ne $AllowedFailedTargetSIDs -and $AllowedFailedTargetSIDs.Count -ne 0) {
+                throw 'Secure Client lifecycle passed standalone skipped-account SIDs'
+            }
+            if ($GuardianCoverageDeferred) {
+                # GAP-0947 pin: only the standalone rollback of a held Codex
+                # republish defers the guardian coverage proof.
+                throw 'Secure Client lifecycle deferred the guardian coverage proof'
+            }
             $script:HarnessState.events.Add(
                 'readiness-require-broker:{0}' -f (
                     $RequireBroker.ToString().ToLowerInvariant()
@@ -2864,8 +2981,13 @@ targets:
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$GuardianServiceName,
                 [string]$ExpectedManifestSHA256,
-                [int]$TimeoutSeconds = 90
+                [int]$TimeoutSeconds = 90,
+                [switch]$AllowFailedTargets,
+                [string[]]$AllowedFailedTargetSIDs
             )
+            if ($null -ne $AllowedFailedTargetSIDs -and $AllowedFailedTargetSIDs.Count -ne 0) {
+                throw 'Secure Client lifecycle passed standalone skipped-account SIDs'
+            }
             if ($script:HarnessState.service_start_modes[
                     $GatewayServiceName
                 ] -ne 4) {
@@ -2912,7 +3034,11 @@ targets:
             param(
                 [Parameter(Mandatory)][string]$ServicesQuiescedAt,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
-                [Parameter(Mandatory)][string]$GuardianServiceName
+                [Parameter(Mandatory)][string]$GuardianServiceName,
+                # The production switch (GAP-0044) skips only the rest of the
+                # wait; the disable and stop still run, so the barrier this
+                # mock models and checks is the same either way.
+                [switch]$CleanStopProven
             )
             [void](ConvertFrom-DefenseClawServiceQuiescenceTimestamp `
                 -Value $ServicesQuiescedAt)
@@ -2940,8 +3066,13 @@ targets:
                 [switch]$ServicingTransaction,
                 [switch]$AllowTransactionRecordedBrokerAbsence,
                 [switch]$AllowTransactionRecordedEnumeratorAbsence,
-                [string[]]$ExpectedGatewayAccount
+                [string[]]$ExpectedGatewayAccount,
+                [switch]$AcceptDegradedTargets,
+                [string[]]$AllowedFailedTargetSIDs
             )
+            if ($null -ne $AllowedFailedTargetSIDs -and $AllowedFailedTargetSIDs.Count -ne 0) {
+                throw 'Secure Client lifecycle passed standalone skipped-account SIDs'
+            }
             if ($null -ne $ExpectedGatewayAccount) {
                 $script:HarnessState.verified_gateway_account = @($ExpectedGatewayAccount)
             }
@@ -2967,7 +3098,12 @@ targets:
         function script:Install-DefenseClawSourceDescriptor {
             param(
                 [Parameter(Mandatory)]$Source,
-                [Parameter(Mandatory)][string]$Destination
+                [Parameter(Mandatory)][string]$Destination,
+                # The production switch keeps an installed file that already
+                # has the source's bytes. This mock always writes the
+                # destination, which publishes the same bytes, so the
+                # ordering it records is unchanged.
+                [switch]$SkipIfContentMatches
             )
             $sourcePath = if ($Source -is [Collections.IDictionary] -and
                 $Source.Contains('path')) {
@@ -3225,8 +3361,13 @@ targets:
                 [Parameter(Mandatory)][string]$Action,
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
-                [Parameter(Mandatory)][string]$GuardianServiceName
+                [Parameter(Mandatory)][string]$GuardianServiceName,
+                [switch]$AcceptDegradedTargets,
+                [string[]]$AllowedFailedTargetSIDs
             )
+            if ($null -ne $AllowedFailedTargetSIDs -and $AllowedFailedTargetSIDs.Count -ne 0) {
+                throw 'Secure Client lifecycle passed standalone skipped-account SIDs'
+            }
             return [ordered]@{
                 ok = $true
                 installed = $false
@@ -3245,6 +3386,20 @@ targets:
                 file_identity = '12345678:1234567890abcdef'
                 sha256 = ('a' * 64)
             }
+        }
+        function script:Assert-DefenseClawInstallRootNameReserved {
+            param([Parameter(Mandatory)][string]$InstallRoot)
+            # The fixture's disposable parent has the runner's ordinary
+            # inherited ACL. Model the trusted parent boundary here; the
+            # production ACL guard has its own dedicated tests.
+            if (-not [string]::Equals(
+                    $InstallRoot,
+                    [string]$script:HarnessState.layout.InstallRoot,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                throw "install-root check crossed the fixture scope: $InstallRoot"
+            }
+            $script:HarnessState.events.Add('install-root-name-reserved')
         }
         function script:Set-DefenseClawInstallTreeRetirementAcls {
             param([Parameter(Mandatory)][hashtable]$Layout)
@@ -3468,6 +3623,23 @@ targets:
             Assert-Harness `
                 -Condition ($failed -ne $ExpectSuccess) `
                 -Message "$Name success result did not match expectation"
+            if ($ExpectSuccess -and
+                $script:HarnessState.ContainsKey('tombstone_purge_requested')) {
+                # Recovery of an interrupted uninstall replays the mode
+                # the tombstone this case wrote recorded at commit.
+                Assert-Harness `
+                    -Condition (
+                        [bool]$script:HarnessState.tombstone_purge_requested -eq [bool]$Purge
+                    ) `
+                    -Message "$Name tombstone did not record its uninstall mode"
+                # The per-user purge request is the run's own (Setup PURGE=1).
+                Assert-Harness `
+                    -Condition (
+                        [bool]$script:HarnessState.tombstone_purge_user_state_requested -eq
+                            [bool]$script:DefenseClawUninstallPurgeUserState
+                    ) `
+                    -Message "$Name tombstone did not record its per-user purge request"
+            }
 
             if ($ExpectSuccess) {
                 Assert-Harness `
@@ -3499,16 +3671,21 @@ targets:
                     ) `
                     -Message "$Name did not preserve exact purge retry semantics"
             }
-            elseif ($CrashAt -eq 'service-drift-preflight') {
+            elseif ($CrashAt -in @('service-drift-preflight', 'install-holder-refusal')) {
                 Assert-Harness `
                     -Condition ($script:HarnessState.transaction_calls -eq 0) `
-                    -Message "$Name mutated lifecycle state after service drift"
+                    -Message "$Name mutated lifecycle state after a precommit refusal"
                 Assert-Harness `
                     -Condition ($script:HarnessState.prepare_calls -eq 0) `
-                    -Message "$Name began hook teardown after service drift"
+                    -Message "$Name began hook teardown after a precommit refusal"
                 Assert-Harness `
                     -Condition ([bool]$script:HarnessState.binary_present) `
-                    -Message "$Name removed a binary after service drift"
+                    -Message "$Name removed a binary after a precommit refusal"
+                if ($CrashAt -ceq 'install-holder-refusal') {
+                    Assert-Harness `
+                        -Condition ($script:HarnessState.events.IndexOf('replacement-backups-retired') -lt 0) `
+                        -Message "$Name removed replacement backups before refusing an install-root holder"
+                }
             }
             elseif ($CrashAt -ceq 'post-binary-delete') {
                 Assert-Harness `
@@ -3635,6 +3812,15 @@ targets:
                     -Message "$Name did not quiesce transactionally before prepare"
             }
             if ($SelfUninstall -and $ExpectSuccess) {
+                $rootGuardIndex = $script:HarnessState.events.IndexOf(
+                    'install-root-name-reserved'
+                )
+                Assert-Harness `
+                    -Condition (
+                        $rootGuardIndex -ge 0 -and
+                        $rootGuardIndex -lt $transactionIndex
+                    ) `
+                    -Message "$Name crossed the transaction boundary before the install-root name guard"
                 $verifyIndex = $script:HarnessState.events.IndexOf(
                     'teardown:verify'
                 )
@@ -3798,7 +3984,10 @@ targets:
             $outputPath = ''
             switch ($action) {
                 'plan' {
-                    if ($Arguments.Count -ne 8 -or
+                    # A fresh Install also passes --skip-busy-profiles last.
+                    if (($Arguments.Count -ne 8 -and
+                            -not ($Arguments.Count -eq 9 -and
+                                [string]$Arguments[8] -ceq '--skip-busy-profiles')) -or
                         [string]$Arguments[4] -cne '--manifest' -or
                         [string]$Arguments[6] -cne '--output') {
                         throw 'target-runtime plan mock received unexpected arguments'
@@ -4130,6 +4319,18 @@ targets:
                 $transaction = $script:HarnessState.events.IndexOf(
                     'transaction'
                 )
+                if ($transaction -ge 0) {
+                    Assert-Harness `
+                        -Condition (
+                            [string]$script:HarnessState.early_hook_source -ceq
+                                [string]$sources['hook']
+                        ) `
+                        -Message (
+                            "fresh install attempt $attempt did not give " +
+                            'its transaction the replacement hook source ' +
+                            "(got '$($script:HarnessState.early_hook_source)')"
+                        )
+                }
                 $manifestPublished = $script:HarnessState.events.IndexOf(
                     'manifest-published'
                 )
@@ -4347,6 +4548,18 @@ targets:
                             'fresh install rollback retired authenticated ' +
                             'authority before exact target/IPC cleanup'
                         )
+                    Assert-Harness `
+                        -Condition (
+                            $script:HarnessState.events.IndexOf(
+                                'owned:DefenseClawSensorHelper'
+                            ) -ge 0 -and
+                            $script:HarnessState.events.IndexOf(
+                                'owned:DefenseClawSensorHelper'
+                            ) -lt $script:HarnessState.events.IndexOf(
+                                'remove-service:DefenseClawSensorHelper'
+                            )
+                        ) `
+                        -Message 'fresh install rollback removed its sensor helper without an ownership check'
                     Assert-Harness `
                         -Condition (
                             -not [bool]$script:HarnessState.service_exists[
@@ -7139,6 +7352,11 @@ targets:
             -CrashAt '' `
             -ExpectSuccess:$true
         Invoke-HarnessUninstallCase `
+            -Name 'install-holder-refusal-before-backup-retirement' `
+            -CrashAt 'install-holder-refusal' `
+            -ExpectSuccess:$false `
+            -Purge:$true
+        Invoke-HarnessUninstallCase `
             -Name 'crash-after-complete-retry-retirement' `
             -CrashAt '' `
             -ExpectSuccess:$true `
@@ -7408,8 +7626,13 @@ targets:
                 [Parameter(Mandatory)][string]$Action,
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
-                [Parameter(Mandatory)][string]$GuardianServiceName
+                [Parameter(Mandatory)][string]$GuardianServiceName,
+                [switch]$AcceptDegradedTargets,
+                [string[]]$AllowedFailedTargetSIDs
             )
+            if ($null -ne $AllowedFailedTargetSIDs -and $AllowedFailedTargetSIDs.Count -ne 0) {
+                throw 'Secure Client lifecycle passed standalone skipped-account SIDs'
+            }
             return [pscustomobject]@{
                 schema_version = 1
                 ok = $true
@@ -7445,6 +7668,15 @@ targets:
             if ($WithLock) {
                 [IO.File]::WriteAllBytes(
                     $layout.CodexManagedHooksLockPath,
+                    [byte[]]@()
+                )
+                # The lock of 1.0.8 and earlier goes with it (GAP-0650).
+                [IO.File]::WriteAllBytes(
+                    (
+                        Microsoft.PowerShell.Management\Join-Path `
+                            $layout.CodexMachinePolicyDirectory `
+                            '.defenseclaw-managed-hooks.lock'
+                    ),
                     [byte[]]@()
                 )
             }

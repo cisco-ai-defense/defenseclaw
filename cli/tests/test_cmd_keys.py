@@ -159,6 +159,8 @@ class KeysProvenanceCliTests(unittest.TestCase):
                 )
                 self.assertEqual(saved.exit_code, 0, msg=saved.output)
                 self.assertNotIn(secret, saved.output)
+                self.assertNotIn(secret[-4:], saved.output)
+                self.assertIn("value hidden", saved.output)
                 # ``keys set`` updates its current process environment.
                 # Ending that process leaves only the persisted dotenv value.
                 os.environ.pop("VIRUSTOTAL_API_KEY", None)
@@ -256,7 +258,7 @@ class KeysSetTests(unittest.TestCase):
             self.assertIn("DEFENSECLAW_TEST_KEY", body)
             self.assertIn("s3cret", body)
 
-    def test_set_confirmation_shows_only_the_last_four_characters(self):
+    def test_set_confirmation_hides_every_secret_character(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app_context(tmp)
             result = CliRunner().invoke(
@@ -265,7 +267,9 @@ class KeysSetTests(unittest.TestCase):
                 obj=app,
             )
             self.assertEqual(result.exit_code, 0, msg=result.output)
-            self.assertIn("DEFENSECLAW_TEST_KEY = …wxyz", result.output)
+            self.assertIn("DEFENSECLAW_TEST_KEY", result.output)
+            self.assertIn("value hidden", result.output)
+            self.assertNotIn("wxyz", result.output)
             self.assertNotIn("abcd", result.output)
 
     def test_set_tells_a_running_gateway_to_restart(self):
@@ -355,3 +359,54 @@ class BoundEndpointHintTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_keys_set_refuses_an_invalid_name_without_a_traceback(tmp_path) -> None:
+    # GAP-0078: a usage error, not a DotenvValueError traceback; the value
+    # is never printed.
+    app = _make_app_context(str(tmp_path))
+    result = CliRunner().invoke(keys_cmd, ["set", "123INVALID", "--value", "test-only-value"], obj=app)
+    assert result.exit_code == 2, result.output
+    assert "not a valid environment variable name" in result.output
+    assert "test-only-value" not in result.output and "Traceback" not in result.output
+    assert not (tmp_path / ".env").exists()
+
+
+def _dotenv_lines(tmp_path) -> dict[str, str]:
+    body = (tmp_path / ".env").read_text(encoding="utf-8")
+    return dict(line.split("=", 1) for line in body.splitlines() if "=" in line and not line.startswith("#"))
+
+
+def test_keys_set_gateway_token_replaces_an_adopted_copy_under_the_other_name(tmp_path) -> None:
+    # GAP-0847: the gateway writes an adopted OpenClaw token under both names.
+    # A token the operator saves under one name must not lose to the older copy
+    # under the other, which the gateway reads first at its next start.
+    (tmp_path / ".env").write_text(
+        "DEFENSECLAW_GATEWAY_TOKEN=stale-adopted\nOPENCLAW_GATEWAY_TOKEN=stale-adopted\nOTHER=keep\n",
+        encoding="utf-8",
+    )
+    app = _make_app_context(str(tmp_path))
+    result = CliRunner().invoke(keys_cmd, ["set", "OPENCLAW_GATEWAY_TOKEN", "--value", "fresh-saved"], obj=app)
+    assert result.exit_code == 0, result.output
+    assert _dotenv_lines(tmp_path) == {
+        "DEFENSECLAW_GATEWAY_TOKEN": "fresh-saved",
+        "OPENCLAW_GATEWAY_TOKEN": "fresh-saved",
+        "OTHER": "keep",
+    }
+    assert "fresh-saved" not in result.output
+
+
+def test_keys_set_gateway_token_does_not_add_a_spelling_that_was_not_stored(tmp_path) -> None:
+    (tmp_path / ".env").write_text("OPENCLAW_GATEWAY_TOKEN=old\n", encoding="utf-8")
+    app = _make_app_context(str(tmp_path))
+    result = CliRunner().invoke(keys_cmd, ["set", "OPENCLAW_GATEWAY_TOKEN", "--value", "new"], obj=app)
+    assert result.exit_code == 0, result.output
+    assert _dotenv_lines(tmp_path) == {"OPENCLAW_GATEWAY_TOKEN": "new"}
+
+
+def test_keys_set_other_key_leaves_the_gateway_token_alone(tmp_path) -> None:
+    (tmp_path / ".env").write_text("DEFENSECLAW_GATEWAY_TOKEN=keep-me\n", encoding="utf-8")
+    app = _make_app_context(str(tmp_path))
+    result = CliRunner().invoke(keys_cmd, ["set", "DEFENSECLAW_TEST_KEY", "--value", "other"], obj=app)
+    assert result.exit_code == 0, result.output
+    assert _dotenv_lines(tmp_path) == {"DEFENSECLAW_GATEWAY_TOKEN": "keep-me", "DEFENSECLAW_TEST_KEY": "other"}

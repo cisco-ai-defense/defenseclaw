@@ -26,9 +26,54 @@ import (
 
 const hermesGuardTestBinary = "/opt/cisco/defenseclaw/bin/defenseclaw-hook"
 
-// The foreign-hook guard directives in hermes-hook.sh render to nothing when
-// the guard is off, so every Hermes hook other than the Linux and macOS
-// standalone one (per-user, Secure Client, Windows) keeps its exact bytes.
+func TestHermesOutageBlockExplainsRecoveryByProfile(t *testing.T) {
+	asset, err := hookFS.ReadFile("hooks/hermes-hook.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		data templateData
+		want string
+		omit string
+	}{
+		// Per-user and managed outages print hermes_block_message, which names
+		// the cause and the next step at run time (per-user: defenseclaw-gateway
+		// start or status; managed: the gateway service and the administrator;
+		// TestPerUserHermesHookBlocksAToolCallWhileTheGatewayIsDown,
+		// TestManagedStandaloneHermesHookBlockSaysWhy).
+		{"per-user", templateData{}, "hermes_block transport \"$1\"", "DefenseClaw hook failed closed"},
+		{"managed", templateData{Managed: true}, "hermes_block transport \"$1\"", "DefenseClaw hook failed closed"},
+		{"secure-client", templateData{Managed: true, SecureClient: true}, "DefenseClaw hook failed closed", "hermes_block transport"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hook, err := renderTemplate(string(asset), tc.data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			start := strings.Index(hook, "fail_unreachable() {")
+			if start < 0 {
+				t.Fatal("rendered Hermes outage handler missing")
+			}
+			end := strings.Index(hook[start:], "fail_response() {")
+			if end < 0 {
+				t.Fatal("rendered Hermes outage handler missing")
+			}
+			block := hook[start : start+end]
+			if !strings.Contains(block, tc.want) || strings.Contains(block, tc.omit) {
+				t.Fatalf("outage block for %s has wrong recovery text: %s", tc.name, block)
+			}
+			if tc.name == "secure-client" && !strings.Contains(block, "if defenseclaw_should_fail_closed_on_unreachable; then\n    printf '{\"action\":\"block\",\"message\":\"DefenseClaw hook failed closed\"}\\n'\n    exit 2\n") {
+				t.Fatal("Secure Client outage block changed its rendered bytes")
+			}
+		})
+	}
+}
+
+// The foreign-hook guard renders to nothing when the guard is off (its
+// directive in hermes-hook.sh and its place in the socket transport), so
+// every Hermes hook other than the Linux and macOS standalone one (per-user,
+// Secure Client, Windows) keeps its exact bytes.
 func TestHermesHookRendersUnchangedWithoutTheForeignHookGuard(t *testing.T) {
 	content, err := hookFS.ReadFile("hooks/hermes-hook.sh")
 	if err != nil {
@@ -36,15 +81,18 @@ func TestHermesHookRendersUnchangedWithoutTheForeignHookGuard(t *testing.T) {
 	}
 	current := string(content)
 	previous := strings.Replace(current, "{{if .ForeignHookGuardSH}}DEFENSECLAW_GUARD_AGENT_HOME=\"$HOME\"\n{{end}}", "", 1)
-	previous = strings.Replace(previous, "{{.ForeignHookGuardSH}}", "", 1)
 	if previous == current || strings.Contains(previous, "ForeignHookGuardSH") {
-		t.Fatal("hermes-hook.sh no longer carries the two foreign-hook guard directives this test removes")
+		t.Fatal("hermes-hook.sh no longer carries the foreign-hook guard directive this test removes")
+	}
+	if !strings.Contains(shellHookSocketTransportBlock, "@GUARD@") ||
+		shellHookSocketTransport("/var/run/defenseclaw/hook.sock", 461, "", "", "hermes", runtime.GOOS) != strings.Replace(renderShellHookSocket(strings.Replace(shellHookSocketTransportBlock, "@GUARD@", "", 1), "/var/run/defenseclaw/hook.sock", 461), "@FACTS@", "", 1) {
+		t.Fatal("the socket transport without the guard differs from its render without the guard placeholder")
 	}
 	for _, data := range []templateData{
 		{APIAddr: "127.0.0.1:18970", FailMode: "closed", TokenFile: ".token"},
 		{APIAddr: "127.0.0.1:18970", FailMode: "closed", Managed: true, TokenFile: ".token-hermes", ScopedToken: true, ConnectorName: "hermes"},
 		{APIAddr: "127.0.0.1:18970", FailMode: "closed", Managed: true, TokenFile: ".token-hermes", ScopedToken: true, ConnectorName: "hermes",
-			HookSocketTransportSH: shellHookSocketTransport("/var/run/defenseclaw/hook.sock", 461, "")},
+			HookSocketTransportSH: shellHookSocketTransport("/var/run/defenseclaw/hook.sock", 461, "", "", "hermes", runtime.GOOS)},
 	} {
 		want, err := renderTemplate(previous, data)
 		if err != nil {
@@ -62,8 +110,9 @@ func TestHermesHookRendersUnchangedWithoutTheForeignHookGuard(t *testing.T) {
 
 // Only the Hermes hook of a standalone install with a hook socket and an
 // administrator-owned hook binary renders the guard; it runs after the
-// socket check and before the gateway request, with the binary as one
-// shell word.
+// socket trust functions, before the socket checks (a stopped gateway's
+// missing socket must not end the hook before the guard, GAP-0354) and
+// before the gateway request, with the binary as one shell word.
 func TestOnlyTheStandaloneHermesHookRendersTheForeignHookGuard(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the Hermes shell hook is not used on Windows")
@@ -97,11 +146,17 @@ func TestOnlyTheStandaloneHermesHookRendersTheForeignHookGuard(t *testing.T) {
 	}
 	capture := strings.Index(hook, `DEFENSECLAW_GUARD_AGENT_HOME="$HOME"`)
 	hardening := strings.Index(hook, "defenseclaw_harden_env\n")
-	socket := strings.Index(hook, "if ! defenseclaw_hook_socket_trusted; then")
+	trust := strings.Index(hook, "defenseclaw_hook_socket_trusted() {")
 	guard := strings.Index(hook, "DEFENSECLAW_FOREIGN_GUARD=")
+	missing := strings.Index(hook, `if [ ! -e "$DEFENSECLAW_HOOK_SOCKET" ]`)
+	socket := strings.Index(hook, "\nif ! defenseclaw_hook_socket_trusted; then")
 	request := strings.Index(hook, "RESPONSE=$(defenseclaw_hook_post)")
-	if capture < 0 || hardening < capture || socket < 0 || guard < socket || request < guard {
-		t.Fatalf("guard order: agent HOME %d, hardening %d, socket check %d, guard %d, request %d", capture, hardening, socket, guard, request)
+	if capture < 0 || hardening < capture || trust < hardening || guard < trust || missing < guard || socket < missing || request < socket {
+		t.Fatalf("guard order: agent HOME %d, hardening %d, socket trust functions %d, guard %d, missing-socket check %d, socket trust check %d, request %d",
+			capture, hardening, trust, guard, missing, socket, request)
+	}
+	if strings.Count(hook, "DEFENSECLAW_FOREIGN_GUARD=") != 1 {
+		t.Fatal("the standalone Hermes hook renders the guard more than once")
 	}
 
 	noGuard := standalone
@@ -114,9 +169,6 @@ func TestOnlyTheStandaloneHermesHookRendersTheForeignHookGuard(t *testing.T) {
 		if hook := render(opts, NewHermesConnector(), "hermes-hook.sh"); strings.Contains(hook, "foreign-hook-check") || strings.Contains(hook, "DEFENSECLAW_GUARD_AGENT_HOME") {
 			t.Fatalf("%s: the Hermes hook rendered the guard", name)
 		}
-	}
-	if hook := render(standalone, NewOpenHandsConnector(), "openhands-hook.sh"); strings.Contains(hook, "foreign-hook-check") {
-		t.Fatal("another connector's shell hook rendered the Hermes guard")
 	}
 }
 
@@ -349,6 +401,112 @@ func TestStandaloneHermesHookBlocksWhileTheForeignHookGuardDenies(t *testing.T) 
 	}
 	if _, ran := stubRead("args"); ran {
 		t.Fatal("post_tool_call ran the guard")
+	}
+}
+
+// GAP-0354: a stopped gateway removes the hook socket, and the socket checks
+// end the hook in fail_unreachable, which allows under fail mode open. The
+// standalone Hermes hook runs the foreign-hook guard before those checks, so
+// the guard's check (which denies a guarded connector whose session the
+// gateway cannot answer for, in every fail mode) blocks the tool call with
+// its Hermes block object under fail mode open and closed alike. A check
+// that allows (foreign_hooks report, or the guard off) leaves the outage to
+// the hook's fail mode, as before.
+func TestStandaloneHermesHookRunsTheGuardWhileTheGatewayIsStopped(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Hermes shell hook is not used on Windows")
+	}
+	root, err := os.MkdirTemp("/tmp", "dchs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	runDir := filepath.Join(root, "run")
+	if err := os.Mkdir(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The socket's directory is trusted; the socket itself is gone, as when
+	// the gateway service and its socket are stopped.
+	socketPath := filepath.Join(runDir, "hook.sock")
+	guardBinary := filepath.Join(root, "bin", "defenseclaw-hook")
+	if err := os.Mkdir(filepath.Dir(guardBinary), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	answerPath := filepath.Join(root, "answer")
+	ranPath := filepath.Join(root, "ran")
+	script := "#!/bin/bash\n" +
+		"[ \"$*\" = \"hook session-facts\" ] && exit 0\n" +
+		"cat > /dev/null\n" +
+		"printf '%s' \"$*\" > " + shellSingleQuoteForTest(ranPath) + "\n" +
+		"cat " + shellSingleQuoteForTest(answerPath) + "\n"
+	if err := os.WriteFile(guardBinary, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	notRunning := "DefenseClaw blocked this tool call: the DefenseClaw gateway service is not running on this computer. (enterprise_managed_gateway_not_running)"
+	deny := `{"deny":true,"reason":"` + notRunning + `","hook_output":{"action":"block","message":"` + notRunning + `"}}`
+	block := `{"action":"block","message":"` + notRunning + `"}`
+	for _, failMode := range []string{"open", "closed"} {
+		t.Run(failMode, func(t *testing.T) {
+			agentHome := filepath.Join(root, "home-"+failMode)
+			dataDir := filepath.Join(agentHome, ".defenseclaw")
+			hookDir := filepath.Join(dataDir, "hooks")
+			opts := SetupOpts{
+				DataDir:                dataDir,
+				APIAddr:                "127.0.0.1:1",
+				APIToken:               "tok",
+				ManagedEnterprise:      true,
+				HookFailMode:           failMode,
+				ManagedHookSocket:      socketPath,
+				ManagedServiceUID:      os.Getuid(),
+				ForeignHookGuardBinary: guardBinary,
+			}
+			if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewHermesConnector()); err != nil {
+				t.Fatal(err)
+			}
+			hookPath := filepath.Join(hookDir, "hermes-hook.sh")
+			if data, err := os.ReadFile(hookPath); err != nil || !strings.Contains(string(data), `FAIL_MODE="`+failMode+`"`) {
+				t.Fatalf("the hook was not rendered for fail mode %s: %v", failMode, err)
+			}
+			bakeHookPathForTest(t, hookPath, "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+			run := func(answer string) (int, string, string) {
+				t.Helper()
+				_ = os.Remove(ranPath)
+				if err := os.WriteFile(answerPath, []byte(answer+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, "bash", hookPath)
+				cmd.Env = append(os.Environ(), "HOME="+agentHome)
+				cmd.Stdin = strings.NewReader(`{"hook_event_name":"pre_tool_call","session_id":"s-1","tool_name":"terminal","tool_input":{"command":"echo marker"}}`)
+				var stdout, stderr bytes.Buffer
+				cmd.Stdout, cmd.Stderr = &stdout, &stderr
+				err := cmd.Run()
+				code := 0
+				if exitErr, ok := err.(*exec.ExitError); ok {
+					code = exitErr.ExitCode()
+				} else if err != nil {
+					t.Fatalf("run hook: %v", err)
+				}
+				if args, _ := os.ReadFile(ranPath); string(args) != "hook --connector hermes --foreign-hook-check" {
+					t.Fatalf("the guard did not run before the socket checks (args %q, stderr %q)", args, stderr.String())
+				}
+				return code, strings.TrimSpace(stdout.String()), stderr.String()
+			}
+			if code, stdout, stderr := run(deny); code != 0 || stdout != block || !strings.Contains(stderr, "blocking hermes tool") || strings.Contains(stderr, "allowing") {
+				t.Fatalf("the guard's outage denial: exit %d stdout=%q stderr=%q, want its Hermes block", code, stdout, stderr)
+			}
+			code, stdout, stderr := run(`{"deny":false}`)
+			if !strings.Contains(stderr, "enterprise_managed_gateway_not_running") {
+				t.Fatalf("an allowed check must reach the missing-socket outage: stderr=%q", stderr)
+			}
+			if failMode == "open" && (code != 0 || stdout != "") {
+				t.Fatalf("open, check allows: exit %d stdout=%q, want the outage allow", code, stdout)
+			}
+			if failMode == "closed" && (code != 2 || !strings.HasPrefix(stdout, `{"action":"block"`)) {
+				t.Fatalf("closed, check allows: exit %d stdout=%q, want the outage block", code, stdout)
+			}
+		})
 	}
 }
 

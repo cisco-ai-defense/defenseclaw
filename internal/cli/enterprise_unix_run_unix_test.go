@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -226,12 +227,13 @@ func TestLifecycleFailureOfAnInstalledVerifyNamesRepair(t *testing.T) {
 		t.Fatalf("config_refused: %q, want no repair advice", err)
 	}
 	// GAP-2246: a status that found another run in progress checked nothing.
+	// GAP-0129: it is a pending apply that still exits 75.
 	busy := enterprisestatus.New(enterpriseunix.ActionStatus, "standalone", "darwin", "1.0.0")
-	busy.Installed = true
-	busy.AddError("lifecycle_busy", "another DefenseClaw enterprise lifecycle run is in progress")
+	busy.Installed, busy.PendingApply = true, true
+	busy.AddWarning("lifecycle_busy", "another DefenseClaw enterprise lifecycle run is in progress")
 	busy.Finish("darwin", enterprisestatus.UnixExitBusy)
-	if err := lifecycleFailure(busy, false, repair); strings.Contains(err.Error(), "repair") {
-		t.Fatalf("busy status: %q, want no repair advice", err)
+	if err := lifecycleFailure(busy, false, repair); err == nil || strings.Contains(err.Error(), "repair") || commandExitCode(err) != 75 || !busy.OK {
+		t.Fatalf("busy status: %v (ok=%v), want exit 75 and no repair advice", err, busy.OK)
 	}
 	// GAP-0265: a config that enables no connector is fixed in config.yaml
 	// and with ensure, as its line says, not by repair.
@@ -252,6 +254,27 @@ func TestLifecycleFailureOfAnInstalledVerifyNamesRepair(t *testing.T) {
 	verifyOnly.Finish("linux", 0)
 	if err := lifecycleFailure(verifyOnly, false, repair); strings.Contains(err.Error(), "repair") {
 		t.Fatalf("verify_only: %q, want no repair advice", err)
+	}
+	// The pin of the same connector differs from its trusted digest because
+	// the file is the company's: repair cannot fix that either (managed RHEL
+	// printed the repair advice next to it; managed deb had no pin line).
+	pinned := enterprisestatus.New(enterpriseunix.ActionVerify, "standalone", "linux", "1.0.0")
+	pinned.Installed = true
+	pinned.AddError("verify_failed", "vendor machine policy for codex (/etc/codex/requirements.toml) no longer carries the DefenseClaw hooks, so codex runs without them; missing_defenseclaw_hooks: DefenseClaw does not write this file (ownership: verify_only), so repair does not restore it")
+	pinned.AddError("verify_failed", "codex policy view differs from its trusted digest; its managed hook keeps enforcing the managed policy while the gateway raises a policy-view alert; run `enterprise linux reconcile` or `enterprise linux ensure` to pin the verified policy view")
+	pinned.Finish("linux", 0)
+	if err := lifecycleFailure(pinned, false, repair); strings.Contains(err.Error(), "repair") {
+		t.Fatalf("verify_only with a pin problem: %q, want no repair advice", err)
+	}
+	// A pin problem of a connector that is not verify_only, or next to a
+	// problem repair does fix, keeps the repair advice.
+	other := enterprisestatus.New(enterpriseunix.ActionVerify, "standalone", "linux", "1.0.0")
+	other.Installed = true
+	other.AddError("verify_failed", "vendor machine policy for codex (/etc/codex/requirements.toml) no longer carries the DefenseClaw hooks; missing_defenseclaw_hooks: DefenseClaw does not write this file (ownership: verify_only)")
+	other.AddError("verify_failed", "claude policy view differs from its trusted digest; its managed hook keeps enforcing the managed policy")
+	other.Finish("linux", 0)
+	if err := lifecycleFailure(other, false, repair); !strings.Contains(err.Error(), "repair") {
+		t.Fatalf("pin problem of another connector: %q, want the repair advice", err)
 	}
 }
 
@@ -305,28 +328,40 @@ func TestUnixLifecycleLockWaitOutOfRange(t *testing.T) {
 	}
 }
 
-// GAP-2030: repair restarts the services even on a healthy deployment, and
-// its output says so; with --no-start (not_started) it does not claim it.
-func TestRepairOutputSaysItRestartedTheServices(t *testing.T) {
-	const note = "restarted the DefenseClaw services to re-apply the deployment"
+// I-1317: the first SIGTERM of a changing lifecycle run asks it to stop at
+// its next safe point, and says so; it no longer kills the run mid-step.
+func TestSettleInterruptedLifecycleAsksTheRunToStop(t *testing.T) {
+	var out bytes.Buffer
+	interrupted, stop := settleInterruptedLifecycle(&out, "enterprise linux ensure", "linux")
+	defer stop()
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-interrupted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("SIGTERM did not reach the lifecycle run")
+	}
+	if !strings.Contains(out.String(), "enterprise linux ensure was interrupted; finishing the current step") {
+		t.Fatalf("output: %q", out.String())
+	}
+}
+
+// GAP-2030, GAP-0020: the text output of a repair lists its changes, the
+// service restart and "nothing to repair" of a healthy deployment included,
+// once each: the lifecycle puts them in the result, which --json prints.
+func TestRepairOutputListsItsChangesOnce(t *testing.T) {
 	healthy := enterprisestatus.New(enterpriseunix.ActionRepair, "standalone", "linux", "1.0.0")
+	healthy.Changes = []string{enterpriseunix.RepairNothingChanged, enterpriseunix.RepairRestartedServices}
 	healthy.Finish("linux", 0)
 	var out bytes.Buffer
 	if err := printLifecycleResult(&out, healthy, false); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "nothing to repair") || !strings.Contains(out.String(), note) {
-		t.Fatalf("healthy repair output:\n%s", out.String())
-	}
-	stopped := enterprisestatus.New(enterpriseunix.ActionRepair, "standalone", "linux", "1.0.0")
-	stopped.AddWarning("not_started", "installed without starting the services (--no-start)")
-	stopped.Finish("linux", 0)
-	out.Reset()
-	if err := printLifecycleResult(&out, stopped, false); err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(out.String(), note) {
-		t.Fatalf("--no-start repair claims a restart:\n%s", out.String())
+	for _, line := range healthy.Changes {
+		if strings.Count(out.String(), line) != 1 {
+			t.Fatalf("healthy repair output does not list %q once:\n%s", line, out.String())
+		}
 	}
 }
 
@@ -352,8 +387,10 @@ func TestEnterpriseSecretArgumentErrorsPrintUsage(t *testing.T) {
 	}{
 		{"set", "pass exactly one of --from-stdin or --from-file", enterpriseSecretOptions{name: "ok-name"}},
 		{"set", "pass exactly one of --from-stdin or --from-file", enterpriseSecretOptions{name: "ok-name", fromStdin: true, fromFile: "/etc/hostname"}},
-		{"set", `--name takes lowercase letters, digits and dashes, not "BAD_NAME"`, enterpriseSecretOptions{name: "BAD_NAME", fromStdin: true}},
-		{"remove", `--name takes lowercase letters, digits and dashes, not "BAD_NAME"`, enterpriseSecretOptions{name: "BAD_NAME"}},
+		{"set", `--name takes 1 to 63 lowercase letters, digits and dashes, starting with a letter or digit; not "BAD_NAME"`, enterpriseSecretOptions{name: "BAD_NAME", fromStdin: true}},
+		{"remove", `--name takes 1 to 63 lowercase letters, digits and dashes, starting with a letter or digit; not "BAD_NAME"`, enterpriseSecretOptions{name: "BAD_NAME"}},
+		// p0.GAP-0670: a name one character too long says what the limit is.
+		{"set", "--name takes 1 to 63 lowercase letters", enterpriseSecretOptions{name: strings.Repeat("a", 64), fromStdin: true}},
 	}
 	for _, tc := range cases {
 		cmd := newEnterpriseSecretCommand(tc.action, "")
@@ -376,6 +413,21 @@ func TestEnterpriseSecretArgumentErrorsPrintUsage(t *testing.T) {
 		if out.Len() != 0 {
 			t.Fatalf("%s %+v ran the lifecycle: %q", tc.action, tc.opts, out.String())
 		}
+	}
+}
+
+// The name flag help names the length limit; a Secure Client host keeps its
+// prior help text (GAP-0670). The --json refusals themselves are the
+// management contract's one failure document, pinned by
+// TestManagementContractUnixSecretFailuresPrintOneDocument and
+// TestManagementContractUnixSecretFlagErrorsPrintTheFailureDocument.
+func TestEnterpriseSecretNameHelpKeepsSecureClientUsage(t *testing.T) {
+	nameFlag := newEnterpriseSecretCommand("set", "").Flags().Lookup("name")
+	if !strings.Contains(nameFlag.Usage, "1-63") {
+		t.Fatalf("name help does not name the length limit: %q", nameFlag.Usage)
+	}
+	if legacy := nameFlag.Annotations[secureClientUsageAnnotation]; len(legacy) != 1 || legacy[0] != "credential name (lowercase letters, digits and dashes)" {
+		t.Fatalf("Secure Client name help changed: %v", legacy)
 	}
 }
 
@@ -534,12 +586,14 @@ func TestSecretSetUpToDateHeadlineMatchesTheChange(t *testing.T) {
 // they wait 5s and exit 75.
 func TestLifecycleBusyStatusShowsTheInstalledVersion(t *testing.T) {
 	busy := enterprisestatus.New(enterpriseunix.ActionStatus, "standalone", "darwin", "1.0.0")
-	busy.Installed, busy.InstalledVersion = true, "1.0.24"
-	busy.AddError("lifecycle_busy", "another DefenseClaw enterprise lifecycle run is in progress; waited 5s for it")
+	busy.Installed, busy.InstalledVersion, busy.PendingApply = true, "1.0.24", true
+	busy.AddWarning("lifecycle_busy", "another DefenseClaw enterprise lifecycle run is in progress; waited 5s for it")
 	busy.Finish("darwin", 75)
 	var out bytes.Buffer
 	_ = printLifecycleResult(&out, busy, false)
-	if !strings.Contains(out.String(), "installed=true version=1.0.24") || strings.Contains(out.String(), "gateway_ready") {
+	// GAP-0129: a pending apply, neither "done" nor "failed".
+	if !strings.Contains(out.String(), "installed=true version=1.0.24") || strings.Contains(out.String(), "gateway_ready") ||
+		!strings.Contains(out.String(), "! status: pending apply: ") || strings.Contains(out.String(), "failed") || strings.Contains(out.String(), "done") {
 		t.Fatalf("busy status output:\n%s", out.String())
 	}
 	for _, action := range []string{"status", "verify"} {
@@ -601,4 +655,33 @@ type noHostCommands struct{}
 
 func (noHostCommands) Run(context.Context, string, ...string) (enterpriseunix.CommandResult, error) {
 	return enterpriseunix.CommandResult{ExitCode: -1}, enterpriseunix.ErrCommandNotFound
+}
+
+func TestUnixLifecycleNotRootReportsManagedRefusal(t *testing.T) {
+	goos := enterpriseunix.CurrentGOOS()
+	layout, err := managed.StandaloneLayoutFor(goos)
+	if err != nil {
+		t.Skip(err)
+	}
+	platform := "linux"
+	if goos == "darwin" {
+		platform = "macos"
+	}
+	previousEnv, previousReport := newUnixLifecycleEnv, reportManagedCommandRefusal
+	newUnixLifecycleEnv = func(string) (*enterpriseunix.Env, error) {
+		return &enterpriseunix.Env{GOOS: goos, Root: t.TempDir(), Layout: layout,
+			Geteuid: func() int { return 1000 }, Runner: noHostCommands{}}, nil
+	}
+	var reported []string
+	reportManagedCommandRefusal = func(command, reason string) { reported = append(reported, command+":"+reason) }
+	t.Cleanup(func() { newUnixLifecycleEnv, reportManagedCommandRefusal = previousEnv, previousReport })
+	cmd := &cobra.Command{Use: "ensure"}
+	cmd.SetContext(t.Context())
+	cmd.SetOut(&bytes.Buffer{})
+	if err := runUnixLifecycle(cmd, platform, "ensure", &unixLifecycleOptions{}); err == nil {
+		t.Fatal("non-root ensure succeeded")
+	}
+	if got, want := strings.Join(reported, ","), "enterprise "+platform+" ensure:not_root"; got != want {
+		t.Fatalf("refusal reports %q, want %q", got, want)
+	}
 }

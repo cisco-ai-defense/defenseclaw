@@ -9,11 +9,12 @@ import { TypeTable as FumadocsTypeTable } from 'fumadocs-ui/components/type-tabl
 import Link from 'fumadocs-core/link';
 import type { MDXComponents } from 'mdx/types';
 import { Flow, Node, Edge, Zone, Sequence, Message } from '@/components/diagram';
-import { CapabilityMatrix, HookEventsList, SandboxHarnessTable } from '@/components/capability-matrix';
+import { CapabilityMatrix, HookEventsList, OutageMatrix, SandboxHarnessTable } from '@/components/capability-matrix';
 import { CommandGenerator } from '@/components/command-generator';
 import PolicyCreator from '@/components/policy-creator';
 import { RecipeCatalog } from '@/components/policy-creator/recipe-catalog';
 import { Video } from '@/components/video';
+import { VideoEmbed } from '@/components/video-embed';
 import { TerminalAnimation } from '@/components/terminal-animation';
 import { DefenseClawDemo } from '@/components/feature-demo';
 import { EditorialTab as Tab, EditorialTabs as Tabs } from '@/components/editorial-tabs';
@@ -134,10 +135,12 @@ export const mdxComponents: MDXComponents = {
   CapabilityMatrix,
   HookEventsList,
   SandboxHarnessTable,
+  OutageMatrix,
   CommandGenerator,
   PolicyCreator,
   RecipeCatalog,
   Video,
+  VideoEmbed,
   TerminalAnimation,
   DefenseClawDemo,
   ConnectorCatalog,

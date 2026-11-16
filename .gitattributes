@@ -19,13 +19,23 @@ internal/gateway/connector/hooks/amp-plugin-secure-client.ts text eol=lf
 internal/gateway/connector/hooks/opencode-plugin-secure-client.js text eol=lf
 internal/gateway/connector/hooks/*.sh text eol=lf
 internal/enterprisepolicy/opencode_managed_plugin.js text eol=lf
+internal/opencodebridge/adapter.js text eol=lf
 # The host variants of the Amp and OpenCode bridges; the plugin scanner pins
 # their SHA-256, so a Windows checkout must keep them LF as well.
 internal/gateway/connector/testdata/bridge_host/** text eol=lf
+# Released per-user hook renders the upgrade tests run as they shipped.
+internal/gateway/connector/testdata/released-hooks/** text eol=lf
 
 # Seeded guardrail rule packs are matched by SHA-256 of their exact bytes
 # (STOCK_PROFILE_DIGESTS); keep them LF on Windows checkouts too.
 policies/guardrail/** text eol=lf
+
+# A Fleet-off upgrade retires these optional templates only when their bytes
+# match the reviewed SHA-256 (bundle_refresh._LOCAL_OBSERVABILITY_RETIRED_SHA256); keep
+# them LF on Windows checkouts too.
+bundles/local_observability_stack/docker-compose.fleet.yml text eol=lf
+bundles/local_observability_stack/prometheus/examples/fleet.yml text eol=lf
+bundles/local_observability_stack/grafana/dashboards/defenseclaw-fleet.json text eol=lf
 
 # The MDM kit scripts are uploaded to MDM consoles as committed and the Unix
 # ones run under /bin/sh; keep them LF on Windows checkouts too.
@@ -51,6 +61,12 @@ schemas/telemetry/v8/upstream/** -text
 # rewriting before the strict normalization gate reads them.
 benchmarks/fixtures/** -text
 
+# The Hermes vendor skill fixture is a byte copy of an upstream Hermes skill
+# tree that internal/hermesskills/vendor_digests.go (and the Python twin
+# hermes_vendor_digests.py) pin by SHA-256 over exact bytes. A Windows CRLF
+# checkout changed the digest, so the pinned bundle read as a user skill.
+internal/hermesskills/testdata/vendor/** -text
+
 # The Secure Client evaluation goldens are compared byte for byte, also on a
 # Windows checkout.
 internal/gateway/testdata/secure_client_evaluation/** text eol=lf
@@ -59,6 +75,22 @@ internal/gateway/testdata/secure_client_evaluation/** text eol=lf
 # TestDigestIsPinned, the CHANGELOG digest line and tetragon verify); a CRLF
 # checkout changed the digest. Keep them LF on Windows checkouts too.
 policies/kernel/** text eol=lf
+
+# The shipped managed config templates are signed into bundles and matched
+# by digest (internal/gateway TestOfflineSignShippedTemplateMatchesDeviceDigest
+# edits them by exact LF text); a CRLF checkout broke that test on Windows.
+testdata/enterprise-configs/*.yaml text eol=lf
+
+# The local observability bundle upgrade removes a retired or Fleet asset only
+# when its SHA-256 matches a shipped digest (bundle_refresh
+# _LOCAL_OBSERVABILITY_RETIRED_SHA256, taken over LF bytes); keep the bundle
+# LF on Windows checkouts too.
+bundles/local_observability_stack/** text eol=lf
+
+# The Windows standalone Setup build scripts run under bash on the release
+# runner, and cmd/defenseclaw-enterprise-setup build_contract_test.go reads
+# their multi-line commands by exact LF text; keep them LF on Windows too.
+packaging/windows/standalone/*.sh text eol=lf
 
 # The sandbox golden texts are compared byte-for-byte; keep them LF on
 # Windows checkouts too.
@@ -70,6 +102,30 @@ internal/openshell/sandboxapi/testdata/*.golden text eol=lf
 # output (LF); keep them LF on Windows checkouts too.
 internal/cli/testdata/enterprise_bundle/*.golden.json text eol=lf
 
+# Go embeds these checkout bytes into hook/adaptor renderers. A Windows CRLF
+# checkout would otherwise change protected adapter hashes across platforms
+# and prevent lifecycle snapshot capture during an upgrade.
+internal/gateway/connector/hooks/** text eol=lf
+internal/gateway/connector/shims/*.sh text eol=lf
+
+# internal/config TestPythonAssetNameFoldMatchesGo compares this generated
+# fold table with Go's by exact bytes; a CRLF checkout on Windows read as
+# "out of date" (GAP-1144). Keep it LF on Windows checkouts too.
+cli/defenseclaw/enforce/_asset_name_fold.py text eol=lf
+
 # Vendored upstream Eclipse Paho embedded MQTT sources are kept byte-for-byte
 # as published upstream; do not flag their whitespace in git diff --check.
 edge-connector/third_party/** -whitespace
+
+# Go tests quote docs pages, a generated Python table and rendered fixtures
+# byte for byte; a Windows checkout (core.autocrlf=true) must keep them LF.
+docs-site/content/**/*.mdx text eol=lf
+cli/defenseclaw/enforce/_asset_name_fold.py text eol=lf
+internal/enterprisepolicy/testdata/copilot-vscode-guarded/** text eol=lf
+# dscl output fixtures: a value dscl prints with its own trailing spaces is part of the case.
+internal/unixidentity/testdata/dscl-listing/* text eol=lf -whitespace
+
+# The Cowork sensor's Claude release manifest fixtures are checked against
+# their detached signature over the exact bytes; a Windows CRLF checkout
+# broke the signature (TestClaudeReleaseManifestSignatureAndPlatformChecksum).
+internal/sensor/testdata/** -text

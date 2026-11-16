@@ -56,12 +56,13 @@ func TestACPRegistryCoversEveryBuiltinConnector(t *testing.T) {
 		if row.Support != "none" && agents[row.AgentID] != row.Support {
 			t.Fatalf("ACP connector %q support %q differs from agent %q kind %q", row.ConnectorID, row.Support, row.AgentID, agents[row.AgentID])
 		}
-		if row.Support == "native" {
+		switch row.Support {
+		case "native":
 			capability := ACPAgentCapabilityForConnector(row.ConnectorID)
 			if !capability.Agent || capability.Kind != "native" {
 				t.Fatalf("native ACP connector %q does not publish agent capability", row.ConnectorID)
 			}
-		} else if row.Support == "bridge" {
+		case "bridge":
 			capability := ACPAgentCapabilityForConnector(row.ConnectorID)
 			if !capability.Agent || capability.Kind != "bridge" {
 				t.Fatalf("bridge ACP connector %q does not publish bridge capability", row.ConnectorID)

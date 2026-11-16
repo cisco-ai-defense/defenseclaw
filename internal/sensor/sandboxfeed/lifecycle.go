@@ -25,11 +25,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
 	"golang.org/x/mod/semver"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // Installed locations. The feed is a root service, so it runs a root-owned
@@ -177,7 +178,7 @@ type InstallResult struct {
 var ErrNotRoot = errors.New("the sandbox kernel feed is a root service: run this with sudo")
 
 // versionPattern reads `defenseclaw-sensor-helper version X (commit=...)`.
-var versionPattern = regexp.MustCompile(`version (\S+)`)
+var versionPattern = lazyregexp.New(`version (\S+)`)
 
 // Install copies helper (the defenseclaw-sensor-helper of this install) to
 // InstalledBinary, checks the copy is the release wantVersion names (unless

@@ -13,16 +13,20 @@
 package enterpriseunix
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"syscall"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 const snapshotIndexName = "index.json"
@@ -43,6 +47,14 @@ type snapshotEntry struct {
 	// Store is the managed root whose per-filesystem store holds Blob, when
 	// the file could not be linked into the snapshot directory itself.
 	Store string `json:"store,omitempty"`
+	// Empty marks a directory that held no state (nothing but empty
+	// directories, as the package's tmpfiles.d entry creates them before
+	// its postinstall ensure), and EmptyDirs lists those subdirectories,
+	// relative to it. A rollback empties such a state directory back to
+	// them, so a failed install from a package leaves nothing the retry
+	// would take for an unmanaged layout (rel-1-0-6:GAP-0286).
+	Empty     bool     `json:"empty,omitempty"`
+	EmptyDirs []string `json:"empty_dirs,omitempty"`
 }
 
 type snapshot struct {
@@ -56,15 +68,24 @@ type snapshot struct {
 // own. The returned directory is recorded in the pending intent before the
 // first mutation.
 func (e *Env) takeSnapshot(id string, files, dirs []string) (_ *snapshot, err error) {
-	dir := filepath.Join(e.P(e.Layout.LifecycleDir), snapshotsDirName, id)
-	if err := os.MkdirAll(filepath.Join(dir, "files"), 0o700); err != nil {
-		return nil, fmt.Errorf("create snapshot: %w", err)
-	}
+	root := e.P(e.Layout.LifecycleDir)
+	store := filepath.Join(root, snapshotsDirName)
+	dir := filepath.Join(store, id)
+	_, preexistingErr := os.Lstat(dir)
+	created := errors.Is(preexistingErr, os.ErrNotExist)
 	defer func() {
-		if err != nil {
+		if err != nil && created {
 			e.discardSnapshot(&snapshot{Dir: dir})
 		}
 	}()
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return nil, fmt.Errorf("create snapshot: %w", err)
+	}
+	for _, path := range []string{store, dir, filepath.Join(dir, "files")} {
+		if err := e.secureSnapshotDir(path); err != nil {
+			return nil, fmt.Errorf("create snapshot: %w", err)
+		}
+	}
 	snap := &snapshot{Dir: dir}
 	seen := map[string]bool{}
 	for index, canonical := range files {
@@ -111,9 +132,20 @@ func (e *Env) takeSnapshot(id string, files, dirs []string) (_ *snapshot, err er
 		}
 		seen[canonical] = true
 		entry := snapshotEntry{Path: canonical, Dir: true}
-		uid, gid, mode, err := statOwnerMode(e.P(canonical))
+		_, _, mode, err := statOwnerMode(e.P(canonical))
 		if err == nil && mode.IsDir() {
+			// The owner through OwnerOf, which every other lifecycle check
+			// reads (and the tests' fake host records), so the rollback puts
+			// back the owner the checks saw: a kept data folder goes back to
+			// root after a failed first install (GAP-0631).
+			uid, gid, ownerErr := e.OwnerOf(e.P(canonical))
+			if ownerErr != nil {
+				return nil, fmt.Errorf("snapshot %s: %w", canonical, ownerErr)
+			}
 			entry.Present, entry.Mode, entry.UID, entry.GID = true, mode.Perm(), uid, gid
+			if dirs, ok := stateFreeSubdirs(e.P(canonical)); ok {
+				entry.Empty, entry.EmptyDirs = true, dirs
+			}
 		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("snapshot %s: %w", canonical, err)
 		}
@@ -127,6 +159,31 @@ func (e *Env) takeSnapshot(id string, files, dirs []string) (_ *snapshot, err er
 		return nil, err
 	}
 	return snap, nil
+}
+
+// secureSnapshotDir clears inherited ACLs before a child can be created.
+// Preserved hard links must not have their ACLs cleared through their
+// snapshot names: they share ACLs with the live files repaired later.
+func (e *Env) secureSnapshotDir(path string) error {
+	if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is not a snapshot directory", path)
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		return fmt.Errorf("set snapshot directory mode of %s: %w", path, err)
+	}
+	if e.GOOS == "darwin" {
+		if _, err := e.Runner.Run(context.Background(), "chmod", "-h", "-N", path); err != nil {
+			return fmt.Errorf("clear snapshot directory ACL of %s: %w", path, err)
+		}
+	}
+	return nil
 }
 
 // snapshotLinks records, beside the files of snap, the symbolic links a
@@ -313,7 +370,12 @@ func (e *Env) restoreFiles(snap *snapshot) error {
 		path := e.P(entry.Path)
 		switch {
 		case entry.Dir:
-			if entry.Present {
+			// A directory whose mode and owner are already the snapshotted
+			// ones is left alone: a shared parent the plan only lists
+			// (/usr/local on macOS) is SIP-protected, and root gets EPERM
+			// from even a no-op chmod there, which failed every rollback
+			// with rollback_failed (GAP-0091 launcher parents).
+			if entry.Present && !e.dirMetadataIs(path, entry) {
 				if err := os.Chmod(path, entry.Mode); err != nil && !errors.Is(err, os.ErrNotExist) {
 					errs = append(errs, err)
 				}
@@ -345,6 +407,17 @@ func (e *Env) restoreFiles(snap *snapshot) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// dirMetadataIs reports whether the directory at path already has the mode
+// and owner the snapshot recorded.
+func (e *Env) dirMetadataIs(path string, entry snapshotEntry) bool {
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	uid, gid, err := e.OwnerOf(path)
+	return err == nil && info.Mode().Perm() == entry.Mode.Perm() && uid == entry.UID && gid == entry.GID
 }
 
 // restoreFile puts a preserved blob back at path without copying its bytes
@@ -419,15 +492,24 @@ func (e *Env) removeCreatedDirs(snap *snapshot) error {
 	state := map[string]bool{
 		l.DataDir: true, l.GuardianAuthDir: true, l.LogDir: true, filepath.Join(l.LogDir, "gateway"): true,
 		l.HookSocketDir: true, l.VendorPolicyDir: true,
+		// The gateway writes clean-session entries during activation.
+		managed.ForeignHookCleanDir(l.DataDir): true,
 	}
 	created := []string{}
+	var errs []error
 	for _, entry := range snap.Entries {
 		if entry.Dir && !entry.Present {
 			created = append(created, entry.Path)
 		}
+		// The two state directories the adoption guard inspects
+		// (unmanagedLeftovers): one that held no state goes back to none.
+		if entry.Dir && entry.Present && entry.Empty && (entry.Path == l.DataDir || entry.Path == l.GuardianAuthDir) {
+			if err := emptyBackTo(e.P(entry.Path), entry.EmptyDirs); err != nil {
+				errs = append(errs, fmt.Errorf("empty %s: %w", entry.Path, err))
+			}
+		}
 	}
 	sort.Slice(created, func(i, j int) bool { return len(created[i]) > len(created[j]) })
-	var errs []error
 	for _, dir := range created {
 		if state[dir] {
 			if err := os.RemoveAll(e.P(dir)); err != nil {
@@ -438,6 +520,100 @@ func (e *Env) removeCreatedDirs(snap *snapshot) error {
 		_ = removeDirIfEmpty(e.P(dir))
 	}
 	return errors.Join(errs...)
+}
+
+// stateFreeSubdirs reports whether dir holds nothing but directories and
+// lists those, relative to it. It is the snapshot's own check, strict
+// where holdsState (the adoption guard's) is lenient: a walk error at dir
+// itself or below, or any entry that is not a directory (a file, a symbolic
+// link, a socket), means not state-free, so a directory that cannot be
+// listed is never recorded empty and a rollback never empties it
+// (rel-1-0-6:GAP-0286 review).
+func stateFreeSubdirs(dir string) ([]string, bool) {
+	var dirs []string
+	ok := true
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			ok = false
+			return filepath.SkipAll
+		}
+		if path == dir {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			ok = false
+			return filepath.SkipAll
+		}
+		dirs = append(dirs, filepath.ToSlash(rel))
+		return nil
+	})
+	if err != nil || !ok {
+		return nil, false
+	}
+	return dirs, true
+}
+
+// emptyBackTo removes everything under dir but the subdirectories keep
+// names (relative to dir), which it leaves in place: a state directory that
+// held no state before a rolled-back transaction holds none after it. It
+// works through an os.Root at dir, so no step follows a symbolic link out
+// of the tree (a link is removed as a link, a kept subdirectory swapped for
+// a link is removed, never listed), and it leaves an entry on another
+// filesystem (a mount point) alone.
+func emptyBackTo(dir string, keep []string) error {
+	root, err := os.OpenRoot(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	top, err := root.Lstat(".")
+	if err != nil {
+		return err
+	}
+	kept := make(map[string]bool, len(keep))
+	for _, rel := range keep {
+		kept[filepath.FromSlash(rel)] = true
+	}
+	var clear func(string) error
+	clear = func(rel string) error {
+		f, err := root.Open(rel)
+		if err != nil {
+			return err
+		}
+		entries, err := f.ReadDir(-1)
+		_ = f.Close()
+		if err != nil {
+			return err
+		}
+		var errs []error
+		for _, entry := range entries {
+			child := filepath.Join(rel, entry.Name())
+			info, err := root.Lstat(child)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			if !sameDevice(top, info) {
+				continue
+			}
+			if info.IsDir() && kept[child] {
+				errs = append(errs, clear(child))
+				continue
+			}
+			if err := root.RemoveAll(child); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		return errors.Join(errs...)
+	}
+	return clear(".")
 }
 
 func (e *Env) discardSnapshot(snap *snapshot) {

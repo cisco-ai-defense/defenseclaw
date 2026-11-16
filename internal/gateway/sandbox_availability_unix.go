@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"syscall"
 
+	"github.com/defenseclaw/defenseclaw/internal/posixacl"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
@@ -53,11 +54,14 @@ var sandboxGroupName = func(gid int) string {
 
 // sandboxPathAccess judges whether uid may read and write path, by the
 // POSIX rule: the owner bits for its owner, else the group bits for a
-// member of its group, else the other bits. ACLs are not consulted, so an
-// ACL-only grant reads as no access (the gate then says sandboxes aren't
-// available, never the reverse). A path that can't be examined exists but
-// grants nothing.
+// member of its group, else the other bits. For /dev/kvm, a named user ACL
+// takes precedence over group and other bits. A path or ACL that cannot be
+// examined grants nothing.
 func sandboxPathAccess(path string, uid int) sandboxDeviceAccess {
+	return sandboxDevicePathAccess(path, uid, path == sandboxKVMDevicePath)
+}
+
+func sandboxDevicePathAccess(path string, uid int, checkACL bool) sandboxDeviceAccess {
 	info, err := os.Stat(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -68,6 +72,20 @@ func sandboxPathAccess(path string, uid int) sandboxDeviceAccess {
 	st, statOK := info.Sys().(*syscall.Stat_t)
 	if !statOK {
 		return sandboxDeviceAccess{State: sandboxDeviceDenied}
+	}
+	if checkACL && uid != int(st.Uid) {
+		acl, err := posixacl.ReadAccessXattr(path)
+		if err != nil {
+			return sandboxDeviceAccess{State: sandboxDeviceDenied}
+		}
+		if acl.Present {
+			if found, allowed := acl.NamedUserAllows(uid, 0o6); found {
+				if allowed {
+					return sandboxDeviceAccess{State: sandboxDeviceUsable}
+				}
+				return sandboxDeviceAccess{State: sandboxDeviceDenied}
+			}
+		}
 	}
 	access := sandboxDeviceAccess{State: sandboxModeAccess(info.Mode().Perm(), int(st.Uid), int(st.Gid), uid, sandboxAccountGroupIDs)}
 	if access.State == sandboxDeviceNotMember {

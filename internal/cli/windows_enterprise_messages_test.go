@@ -44,6 +44,17 @@ func TestWindowsEnterprisePurgedUserStateNamesWhatWent(t *testing.T) {
 	}
 }
 
+func TestGAP0669WindowsPurgeResultNamesRetainedAccountFile(t *testing.T) {
+	account := `dcw-std1: C:\Users\dcw-std1\.defenseclaw`
+	entry := windowsManagedHooksPurgedLabel(account+windowsManagedHooksKeptEntriesMarker+"personal.txt", nil)
+	change := windowsEnterprisePurgedUserStateChange(entry)
+	if !strings.Contains(change, "removed DefenseClaw-owned per-user entries") ||
+		!strings.Contains(change, "personal.txt") ||
+		strings.Contains(change, "removed all DefenseClaw per-user data") {
+		t.Fatalf("purge change = %q", change)
+	}
+}
+
 // GAP-1756 and GAP-1720: the remedies name an active (connected) session,
 // and a standard user's status is a refusal with the administrator's step,
 // not installer internals.
@@ -79,5 +90,14 @@ func TestWindowsEnterpriseStandardUserMutationAnswerKeepsAttestation(t *testing.
 	}
 	if plain := windowsEnterpriseStandardUserMutationAnswer("repair"); !strings.Contains(plain, "repair --profile standalone`. Nothing") {
 		t.Fatalf("plain answer = %q", plain)
+	}
+}
+
+func TestWindowsUntrustedPowerShellHealthNamesRecoveryAndUncheckedEnrollment(t *testing.T) {
+	message := windowsEnterpriseUncheckedHealthMessage("standalone", true)
+	for _, part := range []string{"enrollment were not checked", "counts read zero", "restore", "PowerShell 7", "then run", "enterprise windows verify --profile standalone --json"} {
+		if !strings.Contains(message, part) {
+			t.Fatalf("missing %q in %s", part, message)
+		}
 	}
 }

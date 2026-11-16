@@ -93,10 +93,20 @@ func (ServiceAvailability) EnumDescriptor() ([]byte, []int) {
 }
 
 // ConfigurationState mirrors internal/gateway/health.go's
-// ConfigurationState (spec 003) on the wire. The values track the
+// ConfigurationState on the wire. The values track the
 // managed-enterprise UCB drop lifecycle:
 //   - UNSPECIFIED: non-managed-enterprise or unknown (proto3 default).
 //   - WAITING_FOR_CONFIG: gateway daemon has not yet loaded config.yaml.
+//     Reserved value. The current gateway build does NOT publish this
+//     state on the initial-boot path — rootPersistentPreRunE blocks in
+//     waitForConfigV8Managed before the SidecarHealth object is
+//     constructed, so during the actual config-wait window there is
+//     no health surface for AVC to poll (connect refused, not
+//     WAITING_FOR_CONFIG). Kept in the enum for wire-compat with
+//     existing AVC UI clients and reserved for a future hot-reload
+//     path that flips SetDaemonConfigLoaded(false) at reload start.
+//     UI implementers should treat this value as observable-but-rare
+//     and MUST NOT hard-fail on receiving it.
 //   - WAITING_FOR_TARGETS: config.yaml loaded, hook-guardian has not
 //     yet loaded targets.yaml.
 //   - READY: both files loaded, hook enforcement engaged.
@@ -369,12 +379,11 @@ type HealthSnapshot struct {
 	// DefenseClaw product/runtime version, if available.
 	DefenseClawVersion string `protobuf:"bytes,3,opt,name=defense_claw_version,json=defenseClawVersion,proto3" json:"defense_claw_version,omitempty"`
 	// Managed-enterprise deferred-config state, plumbed through from
-	// internal/gateway/health.go's HealthSnapshot.Configuration.State
-	// (spec 003 REQ-19 / REQ-20). Present on Windows and macOS managed-
+	// internal/gateway/health.go's HealthSnapshot.Configuration.State.
+	// Present on Windows and macOS managed-
 	// enterprise deployments; UNSPECIFIED on every other build (OSS,
 	// SaaS, DP, CP) so a Secure Client UI can key on the value without
-	// additional deployment-mode probing. See
-	// docs/specs/004-windows-ui-ipc/design.md § Interfaces.
+	// additional deployment-mode probing.
 	//
 	// Semantic layering with `availability` above: `availability` reports
 	// overall reachability of the DefenseClaw runtime; `configuration_state`

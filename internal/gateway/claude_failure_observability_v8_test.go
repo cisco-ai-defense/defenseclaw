@@ -206,12 +206,12 @@ func TestClaudeFailureHooksAgreeAcrossLifecycleLogsAndSpans(t *testing.T) {
 					"lifecycle_state": logStringAttribute(record.Attributes, "defenseclaw.agent.lifecycle.state"),
 				})
 			}
-			switch {
-			case eventName == observability.TelemetryEventModelCallFailed:
+			switch eventName {
+			case observability.TelemetryEventModelCallFailed:
 				modelFailedLog = true
-			case eventName == observability.TelemetryEventToolInvocationFailed:
+			case observability.TelemetryEventToolInvocationFailed:
 				toolFailedLog = true
-			case eventName == observability.TelemetryEventToolInvocationBlocked:
+			case observability.TelemetryEventToolInvocationBlocked:
 				toolBlockedLog = true
 			}
 		}

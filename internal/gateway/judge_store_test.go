@@ -37,6 +37,9 @@ func TestJudgeStore_PersistJudgeEventV7Columns(t *testing.T) {
 	)
 
 	t.Setenv("DEFENSECLAW_RUN_ID", "run-judge-test")
+	// The env id counts only while no gateway installed its own run id in this
+	// process (rel-1-0-6 GAP-0365).
+	gatewaylog.SetProcessRunID("")
 
 	p := gatewaylog.JudgePayload{
 		Kind:        "injection",
@@ -65,7 +68,7 @@ func TestJudgeStore_PersistJudgeEventV7Columns(t *testing.T) {
 		t.Fatalf("Shutdown: %v", err)
 	}
 
-	rows, err := store.ListJudgeResponses(5)
+	rows, err := store.ListJudgeResponsesCtx(t.Context(), 5)
 	if err != nil {
 		t.Fatalf("ListJudgeResponses: %v", err)
 	}

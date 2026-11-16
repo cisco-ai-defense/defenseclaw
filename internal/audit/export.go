@@ -17,7 +17,6 @@
 package audit
 
 import (
-	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,25 +31,6 @@ type ExportJSONLOptions struct {
 	// ActivityPath is the output path for activity rows when IncludeActivity is true.
 	// Empty means derive from AuditPath by inserting ".activity" before the extension.
 	ActivityPath string
-}
-
-func (s *Store) ExportJSON(path string, limit int) error {
-	events, err := s.ListEvents(limit)
-	if err != nil {
-		return fmt.Errorf("audit: export json: %w", err)
-	}
-
-	data, err := json.MarshalIndent(events, "", "  ")
-	if err != nil {
-		return fmt.Errorf("audit: marshal json: %w", err)
-	}
-
-	if path == "-" || path == "" {
-		_, err = os.Stdout.Write(data)
-		fmt.Println()
-		return err
-	}
-	return os.WriteFile(path, data, 0o600)
 }
 
 // ExportJSONL writes one JSON object per line (NDJSON). Audit rows include
@@ -130,47 +110,3 @@ func openNDJSON(path string) (io.WriteCloser, error) {
 type nopCloser struct{ io.Writer }
 
 func (nopCloser) Close() error { return nil }
-
-func (s *Store) ExportCSV(path string, limit int) error {
-	events, err := s.ListEvents(limit)
-	if err != nil {
-		return fmt.Errorf("audit: export csv: %w", err)
-	}
-
-	var f *os.File
-	if path == "-" || path == "" {
-		f = os.Stdout
-	} else {
-		var err error
-		f, err = os.Create(path)
-		if err != nil {
-			return fmt.Errorf("audit: create csv: %w", err)
-		}
-		defer f.Close()
-		if err := os.Chmod(path, 0o600); err != nil {
-			return fmt.Errorf("audit: chmod csv: %w", err)
-		}
-	}
-
-	w := csv.NewWriter(f)
-	if err := w.Write([]string{"id", "timestamp", "action", "target", "actor", "details", "severity", "run_id", "trace_id"}); err != nil {
-		return err
-	}
-	for _, e := range events {
-		if err := w.Write([]string{
-			e.ID,
-			e.Timestamp.Format("2006-01-02T15:04:05Z"),
-			e.Action,
-			e.Target,
-			e.Actor,
-			e.Details,
-			e.Severity,
-			e.RunID,
-			e.TraceID,
-		}); err != nil {
-			return err
-		}
-	}
-	w.Flush()
-	return w.Error()
-}

@@ -9,7 +9,9 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -22,6 +24,141 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
+
+// GAP-0824: the receipt and state keep the digest of the build that
+// confirmed the bundle. After an upgrade, status must use this build's
+// verified stored bundle and the installed config to check the live policy.
+// The historical receipt must remain intact.
+func TestBundleStatusAfterProductUpgradeUsesVerifiedCurrentDigest(t *testing.T) {
+	for _, sourceVersion := range []string{"1.0.2", "1.0.3"} {
+		t.Run(sourceVersion, func(t *testing.T) {
+			e := newBundleCLIEnv(t)
+			appVersion = sourceVersion
+			e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+			signed := filepath.Join(e.dir, "upgrade.dcbundle")
+			if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+				t.Fatalf("sign exit %d: %s", code, out)
+			}
+			b, err := readBundleInput(signed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest, err := enterprisebundle.DecodeManifest(b.Manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Model the old build's derived digest in the signed manifest as
+			// well as its receipt. The upgraded build computes a different one.
+			const oldDigest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+			manifest.EffectivePolicy.Digests[runtime.GOOS] = oldDigest
+			b.Manifest, err = manifest.Marshal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			signature, err := enterprisebundle.Sign(b.Manifest, e.edKey, "k1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			b.Signature, err = signature.Marshal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := bundleDevice(t, e)
+			// Production Unix sealing keeps the version directory movable.
+			// This status test needs only its signed and hashed contents.
+			store.SealVersion = func(string) error { return nil }
+			r, err := store.Receive(manifest.BundleID, manifest.Version, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Stage(r, b); err != nil {
+				t.Fatal(err)
+			}
+			manifestHash := sha256.Sum256(b.Manifest)
+			if err := store.Advance(r, enterprisebundle.StateVerified, func(rc *enterprisebundle.Receipt) {
+				rc.ManifestSHA256 = fmt.Sprintf("%x", manifestHash)
+				rc.SignerKeyID, rc.Principal = "k1", manifest.CreatedBy
+				rc.ExpectedDigest = manifest.EffectivePolicy.Digests[runtime.GOOS]
+				rc.SetDigestComparison(true, false, false)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Promote(r); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Advance(r, enterprisebundle.StateApplied, func(rc *enterprisebundle.Receipt) {
+				rc.EffectivePolicyDigest, rc.ConfigGeneration = oldDigest, 17
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Confirm(r); err != nil {
+				t.Fatal(err)
+			}
+			root := store.VersionDir(r.Dir)
+			layout, err := enterprisebundle.Layout(runtime.GOOS)
+			if err != nil {
+				t.Fatal(err)
+			}
+			deviceLayout := enterprisebundle.DeviceLayoutFromManaged(layout)
+			cfg, rendered, err := enterprisebundle.LoadConfigForDeviceLayout(b, root, runtime.GOOS, deviceLayout)
+			if err != nil {
+				t.Fatal(err)
+			}
+			currentDigest, err := bundleDigester(t.Context(), cfg, rendered, runtime.GOOS, root)
+			if err != nil || currentDigest == oldDigest {
+				t.Fatalf("upgraded digest %q, err %v", currentDigest, err)
+			}
+			appVersion = "1.0.4"
+			savedInstalled := bundleInstalledConfig
+			t.Cleanup(func() { bundleInstalledConfig = savedInstalled })
+			bundleInstalledConfig = func(string) ([]byte, error) { return rendered, nil }
+			bundleGatewayPolicy = func(context.Context) *enterprisestatus.PolicyState {
+				return &enterprisestatus.PolicyState{EffectiveDigest: currentDigest, GatewayReportedDigest: currentDigest, Applied: true, ConfigGeneration: 17}
+			}
+			status := func() bundleStatusResult {
+				t.Helper()
+				out, code := runBundle(t, "status", "--json")
+				var result bundleStatusResult
+				if err := json.Unmarshal([]byte(out), &result); err != nil || code != 0 {
+					t.Fatalf("status exit %d, %v: %s", code, err, out)
+				}
+				return result
+			}
+			result := status()
+			if !result.Applied || result.Current == nil || result.Current.EffectivePolicyDigest != currentDigest ||
+				result.LastReceipt == nil || result.LastReceipt.EffectivePolicyDigest != oldDigest ||
+				!hasBundleWarning(result.Warnings, enterprisebundle.WarnDigestUnverifiable) {
+				t.Fatalf("upgrade status: %+v", result)
+			}
+			bundleInstalledConfig = func(string) ([]byte, error) { return append(bytes.Clone(rendered), []byte("# changed\n")...), nil }
+			if result := status(); result.Applied {
+				t.Fatal("edited installed config was reported as the signed bundle")
+			}
+			bundleInstalledConfig = func(string) ([]byte, error) { return rendered, nil }
+			bundleGatewayPolicy = func(context.Context) *enterprisestatus.PolicyState {
+				return &enterprisestatus.PolicyState{EffectiveDigest: currentDigest, GatewayReportedDigest: oldDigest, Applied: false, ConfigGeneration: 17}
+			}
+			if result := status(); result.Applied {
+				t.Fatal("gateway enforcing the old digest was reported as upgraded bundle")
+			}
+			bundleGatewayPolicy = func(context.Context) *enterprisestatus.PolicyState {
+				return &enterprisestatus.PolicyState{EffectiveDigest: currentDigest, GatewayReportedDigest: currentDigest, Applied: true, ConfigGeneration: 17}
+			}
+			if err := os.Remove(filepath.Join(store.LifecycleDir, enterprisebundle.ReceiptsDirName, r.ReceiptID+".json")); err != nil {
+				t.Fatal(err)
+			}
+			if result := status(); !result.Applied || result.LastReceipt != nil || result.Current.EffectivePolicyDigest != currentDigest {
+				t.Fatalf("upgrade status after receipt pruning: %+v", result)
+			}
+			if err := os.Remove(e.anchors); err != nil {
+				t.Fatal(err)
+			}
+			if result := status(); !result.Applied || result.BundleMode || !hasBundleWarning(result.Warnings, "anchor_missing") {
+				t.Fatalf("the confirmed bundle stopped being enforced after anchors were removed: %+v", result)
+			}
+		})
+	}
+}
 
 // bundleDevice makes the test a standalone managed device with its bundle
 // store in a temp dir and anchors trusted without the root-owner check.
@@ -67,6 +204,47 @@ func TestBundleStatusPrivilegeRefusalDoesNotClaimUnmanagedState(t *testing.T) {
 	}
 }
 
+// A status refused before the live session scan (not managed, Secure
+// Client, unreadable state) reports the scan as unknown with an empty
+// entry list, never the Go zero value {"state":"","entries":null} that the
+// published session schema does not allow.
+func TestBundleStatusRefusalReportsTheSessionScanAsUnknown(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	store := bundleDevice(t, e)
+	for name, refuse := range map[string]func(){
+		"not managed":   func() { bundleManagedDevice = func() bool { return false } },
+		"Secure Client": func() { bundleSecureClient = func() bool { return true } },
+		"state invalid": func() {
+			if err := os.MkdirAll(filepath.Dir(store.StatePath()), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(store.StatePath(), []byte("{"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			savedDevice, savedSC := bundleManagedDevice, bundleSecureClient
+			t.Cleanup(func() {
+				bundleManagedDevice, bundleSecureClient = savedDevice, savedSC
+				_ = os.Remove(store.StatePath())
+			})
+			refuse()
+			out, code := runBundle(t, "status", "--json")
+			var res struct {
+				OK       bool                                   `json:"ok"`
+				Sessions *enterprisestatus.SessionRestartStatus `json:"sessions_restart_required"`
+			}
+			if err := json.Unmarshal([]byte(out), &res); err != nil || code != bundleFailureExitCode() || res.OK {
+				t.Fatalf("exit %d, %v:\n%s", code, err, out)
+			}
+			if s := res.Sessions; s == nil || s.State != "unknown" || s.Count != 0 || s.Entries == nil || len(s.Entries) != 0 || s.Reason == "" {
+				t.Fatalf("sessions_restart_required = %+v:\n%s", s, out)
+			}
+		})
+	}
+}
+
 // A Windows receipt that recorded an unfinished session scan must not be
 // reported as a digest mismatch (GAP-0104).
 func TestBundleReceiptSessionScanWarningIsNotADigestMismatch(t *testing.T) {
@@ -76,6 +254,41 @@ func TestBundleReceiptSessionScanWarningIsNotADigestMismatch(t *testing.T) {
 	}
 	if got := bundleReceiptWarningMessage(string(enterprisebundle.CodeDigestMismatch), nil); !strings.Contains(got, "differs from the signed expected digest") {
 		t.Fatalf("digest mismatch message = %q", got)
+	}
+}
+
+// GAP-1013: receipt warning codes that are not about digests keep their own
+// explanation in bundle status; receipt_publish_failed said the gateway's
+// digest differed from the signed one while all three digests were equal.
+func TestBundleReceiptPublishWarningsAreNotADigestMismatch(t *testing.T) {
+	for code, want := range map[string]string{
+		enterprisebundle.WarnReceiptPublishFailed: "could not be written",
+		"receipt_events_dropped":                  "oldest were removed",
+		enterprisebundle.WarnDigestUnverifiable:   "different product version",
+	} {
+		if got := bundleReceiptWarningMessage(code, nil); strings.Contains(got, "differs from the signed expected digest") || !strings.Contains(got, want) {
+			t.Errorf("%s message = %q", code, got)
+		}
+	}
+}
+
+// GAP-1052: a standard account cannot read the bundle state. Its not_root
+// refusal, like the not_admin one, carries no device fields that look
+// inspected (bundle_mode, current, floor, applied, gateway_checked).
+func TestBundleStatusNotRootRefusalOmitsDeviceState(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	bundleDevice(t, e)
+	bundleSettleStatus = func(context.Context) error {
+		return fmt.Errorf("open bundle-state.json: %w", fs.ErrPermission)
+	}
+	out, code := runBundle(t, "status", "--json")
+	if code != bundleFailureExitCode() || !strings.Contains(out, `"code": "not_root"`) {
+		t.Fatalf("not_root refusal exit=%d: %s", code, out)
+	}
+	for _, field := range []string{`"bundle_mode"`, `"current"`, `"last_good"`, `"floor"`, `"applied"`, `"gateway_checked"`, `"anchors"`} {
+		if strings.Contains(out, field) {
+			t.Fatalf("not_root refusal reports %s as device state: %s", field, out)
+		}
 	}
 }
 
@@ -93,6 +306,51 @@ func TestConfirmedSignerRevocationIsReported(t *testing.T) {
 	// says which key no longer vouches for the enforcing bundle.
 	if warning == nil || warning.Code != string(enterprisebundle.CodeKeyRevoked) || !strings.Contains(warning.Message, "signer k1 is revoked") {
 		t.Fatalf("revoked confirmed signer warning = %+v", warning)
+	}
+}
+
+// The confirmed bundle's signer is checked against the installed anchors
+// also after its confirmed receipt was pruned (MaxReceipts newer receipts):
+// the store state names the signer.
+func TestBundleStatusWarnsOfAnUntrustedSignerAfterTheReceiptWasPruned(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k2": e.edKey.Public()})
+	store := bundleDevice(t, e)
+	const id = "b-01JA0000000000000000000041"
+	digest := "sha256:" + strings.Repeat("4", 64)
+	r, err := store.Receive(id, 4, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Stage(r, &enterprisebundle.Bundle{Files: map[string][]byte{"config.yaml": []byte("config_version: 9\n")}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Advance(r, enterprisebundle.StateVerified, func(r *enterprisebundle.Receipt) {
+		r.SignerKeyID, r.ManifestSHA256, r.ExpectedDigest = "k1", strings.Repeat("f", 64), digest
+		r.SetDigestComparison(true, false, false)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Promote(r); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Advance(r, enterprisebundle.StateApplied, func(r *enterprisebundle.Receipt) { r.EffectivePolicyDigest = digest }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Confirm(r); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(store.LifecycleDir, enterprisebundle.ReceiptsDirName, r.ReceiptID+".json")); err != nil {
+		t.Fatal(err)
+	}
+	out, code := runBundle(t, "status", "--json")
+	var result bundleStatusResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil || code != 0 {
+		t.Fatalf("status exit %d, %v:\n%s", code, err, out)
+	}
+	if result.Current == nil || result.Current.BundleID != id || result.LastReceipt != nil ||
+		!hasBundleWarning(result.Warnings, string(enterprisebundle.CodeKeyUnknown)) {
+		t.Fatalf("pruned confirmed receipt, signer k1 not in the anchors: want key_unknown:\n%s", out)
 	}
 }
 
@@ -132,7 +390,19 @@ func confirmBundle(t *testing.T, store *enterprisebundle.Store, id string, versi
 
 func confirmBundleWithExpected(t *testing.T, store *enterprisebundle.Store, id string, version uint64, digest, expected string, comparable bool, disabled ...string) {
 	t.Helper()
-	r, err := store.Receive(id, version)
+	confirmBundleReceipt(t, store, id, version, digest, expected, comparable, "", disabled)
+}
+
+// confirmBundleDelivery confirms id/version as `bundle apply --delivery-id
+// deliveryID` does: the receipt and the state record carry the id.
+func confirmBundleDelivery(t *testing.T, store *enterprisebundle.Store, id string, version uint64, digest, deliveryID string) {
+	t.Helper()
+	confirmBundleReceipt(t, store, id, version, digest, digest, true, deliveryID, nil)
+}
+
+func confirmBundleReceipt(t *testing.T, store *enterprisebundle.Store, id string, version uint64, digest, expected string, comparable bool, deliveryID string, disabled []string) {
+	t.Helper()
+	r, err := store.Receive(id, version, deliveryID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +562,7 @@ func TestEnterpriseBundleStatusReportsTheEnforcingBundle(t *testing.T) {
 	const goodID, badID = "b-01JA0000000000000000000007", "b-01JA0000000000000000000006"
 	digest := "sha256:" + strings.Repeat("1", 64)
 	confirmBundle(t, store, goodID, 7, digest)
-	bad, err := store.Receive(badID, 6)
+	bad, err := store.Receive(badID, 6, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -482,7 +752,7 @@ func TestEnterpriseBundleStatusLayoutUnverifiableIsNotDigestDiffers(t *testing.T
 			}
 			device := "sha256:" + strings.Repeat("8", 64)
 			store := bundleDevice(t, e)
-			r, err := store.Receive(manifest.BundleID, manifest.Version)
+			r, err := store.Receive(manifest.BundleID, manifest.Version, "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -521,5 +791,34 @@ func TestEnterpriseBundleStatusLayoutUnverifiableIsNotDigestDiffers(t *testing.T
 				t.Fatalf("layout_unverifiable=%t status: %s", layoutDependent, out)
 			}
 		})
+	}
+}
+
+// An installed anchor file that fails its checks is explained by a warning
+// on a device with no confirmed bundle too, so the absent anchors_summary
+// is never silent: malformed is anchor_invalid, untrusted anchor_insecure.
+func TestBundleStatusWarnsOfAnInvalidAnchorFileWithoutAConfirmedBundle(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	bundleDevice(t, e)
+	writeBundleTestFile(t, e.anchors, []byte("{not json"))
+	status := func() bundleStatusResult {
+		t.Helper()
+		out, code := runBundle(t, "status", "--json")
+		var result bundleStatusResult
+		if err := json.Unmarshal([]byte(out), &result); err != nil || code != 0 {
+			t.Fatalf("status exit %d, %v:\n%s", code, err, out)
+		}
+		if !result.BundleMode || result.Current != nil || result.AnchorsSummary != nil {
+			t.Fatalf("fresh device with a bad anchor file: bundle_mode %v, current %+v, anchors_summary %+v", result.BundleMode, result.Current, result.AnchorsSummary)
+		}
+		return result
+	}
+	if result := status(); !hasBundleWarning(result.Warnings, string(enterprisebundle.CodeAnchorInvalid)) {
+		t.Fatalf("malformed anchor file: warnings %+v, want anchor_invalid", result.Warnings)
+	}
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	bundleAnchorTrust = func(string) error { return errors.New("the anchor file is writable by another account") }
+	if result := status(); !hasBundleWarning(result.Warnings, string(enterprisebundle.CodeAnchorInsecure)) {
+		t.Fatalf("untrusted anchor file: warnings %+v, want anchor_insecure", result.Warnings)
 	}
 }

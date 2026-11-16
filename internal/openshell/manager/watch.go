@@ -18,11 +18,12 @@ package manager
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/netip"
 	"path"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -30,6 +31,8 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/ocsf"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -264,6 +267,9 @@ func (m *Manager) statusEvent(ctx context.Context, b *box, st *stream.Status) {
 	if b.rec.ID == "" && st.ID != "" {
 		b.rec.ID = st.ID
 	}
+	if st.Phase != openshell.PhaseError {
+		m.forgetPending(b.rec.Name)
+	}
 	creating := b.creating
 	m.mu.Unlock()
 	if creating {
@@ -273,8 +279,12 @@ func (m *Manager) statusEvent(ctx context.Context, b *box, st *stream.Status) {
 	var cond *audit.SandboxCondition
 	for _, c := range st.Conditions {
 		if !strings.EqualFold(c.Status, "true") {
-			cond = &audit.SandboxCondition{Type: c.Type, Status: c.Status, Reason: c.Reason, Message: c.Message}
-			break
+			if cond == nil || strings.EqualFold(c.Type, "Ready") {
+				cond = &audit.SandboxCondition{Type: c.Type, Status: c.Status, Reason: c.Reason, Message: c.Message}
+			}
+			if strings.EqualFold(c.Type, "Ready") {
+				break
+			}
 		}
 	}
 	phase := auditPhase(st.Phase)
@@ -284,10 +294,43 @@ func (m *Manager) statusEvent(ctx context.Context, b *box, st *stream.Status) {
 	m.lifecycle(ctx, b, phase, audit.SandboxTriggerWatch, false, cond, st.ExitCode)
 }
 
+const maxSeenDenials = 1024
+
+// replayedDenial recognizes an old stream event re-sent after a profile
+// import. Live repeats still go through the normal bounded coalescer.
+func (m *Manager) replayedDenial(b *box, r ocsf.Record, at time.Time) bool {
+	data, err := json.Marshal(r)
+	if err != nil {
+		return false
+	}
+	key := sha256.Sum256(append(strconv.AppendInt(nil, at.UnixNano(), 10), data...))
+	now := m.now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, seen := b.seenDenials[key]; seen {
+		return now.Sub(at) >= feedFoldWindow
+	}
+	if b.seenDenials == nil {
+		b.seenDenials = make(map[[32]byte]struct{})
+	}
+	if len(b.seenDenialOrder) < maxSeenDenials {
+		b.seenDenialOrder = append(b.seenDenialOrder, key)
+	} else {
+		delete(b.seenDenials, b.seenDenialOrder[b.seenDenialCursor])
+		b.seenDenialOrder[b.seenDenialCursor] = key
+		b.seenDenialCursor = (b.seenDenialCursor + 1) % maxSeenDenials
+	}
+	b.seenDenials[key] = struct{}{}
+	return false
+}
+
 // ocsfEvent handles one OpenShell OCSF record.
 func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.Time) {
 	if at.IsZero() {
 		at = m.now()
+	}
+	if r.Denied() && (r.Class == ocsf.ClassNetwork || r.Class == ocsf.ClassHTTP) && m.replayedDenial(b, r, at) {
+		return
 	}
 	m.mu.Lock()
 	id := b.identity()
@@ -332,7 +375,7 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		// reloaded the sandbox's settings (remapped): the reload dropped the
 		// mappings of the names the sandbox looked up, and the client looks
 		// up and connects again (GAP-0379).
-		remapped := r.Denied() && mappingDenial(r) && m.reloadedRecently(b)
+		remapped := r.Denied() && mappingDenial(r) && m.reloadedMappedPort(b, host, r.Port)
 		quiet := fetch || (r.Denied() && (dnsRefusal(r) || ownHostName(host, hostname) || policyReloadCut(r) || remapped))
 		ofHarness := harnessActivity(harnessName, r.Binary)
 		if !fetch {
@@ -456,6 +499,12 @@ func (m *Manager) ocsfFinding(ctx context.Context, b *box, id audit.SandboxIdent
 		ev.Description = strings.TrimSuffix(firstNonEmpty(r.Message, ev.Title), ".") + ". " + uninspectableCredentialText
 		ev.Remediation = "If the sandbox's conversation printed its environment, start a new conversation " +
 			"(`defenseclaw sandbox connect " + name + "`, without --continue)."
+	}
+	if r.FindingType == "openshell.provider_credential.endpoint_mismatch" {
+		ev.Description = strings.TrimSuffix(firstNonEmpty(r.Message, ev.Title), ".") +
+			". A credential placeholder is bound to its configured endpoint; it cannot be used as the model provider key at another endpoint."
+		ev.Remediation = "Check the model provider and endpoint for this sandbox. Use the model provider's configured credential for model requests; " +
+			"keep a sandbox credential placeholder only with the endpoint it was bound to."
 	}
 	if repeats > 0 {
 		ev.Description = strings.TrimSpace(ev.Description + " (OpenShell raised it " + strconv.Itoa(repeats) +
@@ -645,11 +694,11 @@ const maxSyntheticNames = 512
 // syntheticMapping is OpenShell's record of a synthetic address it handed
 // out: "Policy DNS mapped <name> resolved=… synthetic=<addr> …" or "Policy
 // DNS staged unapproved name <name> synthetic=<addr> …".
-var syntheticMapping = regexp.MustCompile(`^Policy DNS (?:mapped|staged unapproved name) (\S+) (?:\S+ )*?synthetic=(\S+)`)
+var syntheticMapping = lazyregexp.New(`^Policy DNS (?:mapped|staged unapproved name) (\S+) (?:\S+ )*?synthetic=(\S+)`)
 
 // mappingPorts is the port list of a "Policy DNS mapped" record: the ports
 // the name's transparent mapping covers ("ports=38821,38871,38872").
-var mappingPorts = regexp.MustCompile(`(?:^| )ports=([0-9,]+)(?: |$)`)
+var mappingPorts = lazyregexp.New(`(?:^| )ports=([0-9,]+)(?: |$)`)
 
 // maxMappedPorts bounds the host alias ports a record keeps.
 const maxMappedPorts = 64
@@ -681,16 +730,20 @@ func (m *Manager) noteSyntheticAddress(b *box, msg string) {
 	}
 	key := addr.Unmap().String()
 	var alias *hostAliasRecord
-	if name == openshellHostAlias && strings.HasPrefix(msg, "Policy DNS mapped ") {
-		alias = &hostAliasRecord{Addr: key}
+	var ports []int
+	mapped := strings.HasPrefix(msg, "Policy DNS mapped ")
+	if mapped {
 		if p := mappingPorts.FindStringSubmatch(msg); p != nil {
 			for _, f := range strings.Split(p[1], ",") {
-				if port, err := strconv.Atoi(f); err == nil && port > 0 && port < 65536 && len(alias.Ports) < maxMappedPorts &&
-					!slices.Contains(alias.Ports, port) {
-					alias.Ports = append(alias.Ports, port)
+				if port, err := strconv.Atoi(f); err == nil && port > 0 && port < 65536 && len(ports) < maxMappedPorts &&
+					!slices.Contains(ports, port) {
+					ports = append(ports, port)
 				}
 			}
-			slices.Sort(alias.Ports)
+			slices.Sort(ports)
+		}
+		if name == openshellHostAlias {
+			alias = &hostAliasRecord{Addr: key, Ports: ports}
 		}
 	}
 	m.mu.Lock()
@@ -698,6 +751,12 @@ func (m *Manager) noteSyntheticAddress(b *box, msg string) {
 		b.synthetic = map[string]string{}
 	}
 	b.synthetic[key] = name
+	if mapped {
+		if b.mappedPorts == nil || len(b.mappedPorts) >= maxSyntheticNames {
+			b.mappedPorts = map[string][]int{}
+		}
+		b.mappedPorts[name] = ports
+	}
 	changed := alias != nil && !b.deleted && (b.rec.HostAlias == nil || b.rec.HostAlias.Addr != alias.Addr ||
 		!slices.Equal(b.rec.HostAlias.Ports, alias.Ports))
 	if changed {
@@ -808,8 +867,13 @@ func (m *Manager) hostAliasEvent(ctx context.Context, b *box, r ocsf.Record, at 
 		// call, which goes around the proxy.
 		m.markWork(b, at, harnessActivity(harnessName, r.Binary), noModelCall)
 		if r.Allowed() && r.Binary != "" {
+			pid := ocsfPID(r)
 			m.mu.Lock()
-			b.proxyOpens = append(b.proxyOpens, proxyOpen{binary: r.Binary, pid: ocsfPID(r), at: m.now()})
+			name := b.rec.Name
+			m.mu.Unlock()
+			lineage := m.actorLineage(name, r.Binary, pid, at)
+			m.mu.Lock()
+			b.proxyOpens = append(b.proxyOpens, proxyOpen{binary: r.Binary, pid: pid, at: m.now(), lineage: lineage})
 			if n := len(b.proxyOpens); n > maxProxyOpens {
 				b.proxyOpens = slices.Delete(b.proxyOpens, 0, n-maxProxyOpens)
 			}
@@ -838,6 +902,26 @@ func (m *Manager) hostAliasEvent(ctx context.Context, b *box, r ocsf.Record, at 
 // was republished under the connection (a policy or provider reload).
 func mappingDenial(r ocsf.Record) bool {
 	return strings.EqualFold(strings.TrimSpace(r.Reason), "transparent_tcp_mapping_denied")
+}
+
+// reloadedMappedPort distinguishes a temporary loss of a previously mapped
+// connection from a side port OpenShell never allowed. A provider endpoint
+// on its exact port also counts when the stream missed the DNS mapping row.
+func (m *Manager) reloadedMappedPort(b *box, host string, port int) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !b.reloadedLocked(m.now()) || port <= 0 {
+		return false
+	}
+	if slices.Contains(b.mappedPorts[host], port) {
+		return true
+	}
+	for _, ep := range b.rec.ProviderEndpoints {
+		if strings.EqualFold(ep.Host, host) && ep.Port == port && !slices.Contains(b.rec.DetachedProviders, ep.Provider) {
+			return true
+		}
+	}
+	return false
 }
 
 // harnessFetchDenial reports an OpenShell denial of one of the sandbox

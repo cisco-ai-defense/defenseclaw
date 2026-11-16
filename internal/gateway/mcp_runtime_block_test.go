@@ -34,6 +34,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
 
 // ---------------------------------------------------------------------------
@@ -170,12 +171,18 @@ func TestMCPServerRuntimeBlock_NonMCPAndUnblocked(t *testing.T) {
 	if err := store.SetActionFieldForConnector("mcp", "wiki-rogue", "claudecode", "runtime", "disable", "scanner failure (fail-closed): loopback"); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.SetSourcePathForConnector("mcp", "wiki-rogue", "claudecode", watcher.MCPEventPath(config.MCPServerEntry{Name: "wiki-rogue", Connector: "claudecode"})); err != nil {
+		t.Fatal(err)
+	}
 	if deny, _, reason := mcpServerRuntimeBlock(pe, "mcp__wiki-rogue__count_words", "claudecode", ""); !deny ||
 		!strings.Contains(reason, "install admission rejected it (scanner failure (fail-closed): loopback)") {
 		t.Errorf("disabled mcp server: deny=%v reason=%q, want the admission verdict named", deny, reason)
 	}
 	// Codex passes the configured name its hook resolved (GAP-0939).
 	if err := store.SetActionFieldForConnector("mcp", "wiki-rogue", "codex", "runtime", "disable", "scanner failure (fail-closed): loopback"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSourcePathForConnector("mcp", "wiki-rogue", "codex", watcher.MCPEventPath(config.MCPServerEntry{Name: "wiki-rogue", Connector: "codex"})); err != nil {
 		t.Fatal(err)
 	}
 	if deny, server, _ := mcpServerRuntimeBlock(pe, "mcp__wiki_rogue__count_words", "codex", "wiki-rogue"); !deny || server != "wiki-rogue" {
@@ -235,10 +242,11 @@ func TestMCPServerRuntimeBlock_URLRule(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := &config.Config{}
+	cfg.Claw.Mode = config.ClawOpenClaw
 	cfg.Claw.ConfigFile = path
 	cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{Name: "https://server.example/mcp"}}
 	pe := configPolicy(store, cfg)
-	if deny, _, _ := mcpServerRuntimeBlock(pe, "mcp__filesystem__read", "", ""); !deny {
+	if deny, _, _ := mcpServerRuntimeBlock(pe, "mcp__filesystem__read", "openclaw", ""); !deny {
 		t.Fatal("URL block did not deny the configured server tool")
 	}
 }
@@ -265,5 +273,56 @@ func TestInspectToolPolicyUsesOneConfigAcrossMCPAndToolChecks(t *testing.T) {
 	}, trustedActionRequest{})
 	if verdict.Action != "block" || !hasFinding(verdict.Findings, "STATIC-BLOCK") {
 		t.Fatalf("mixed-generation verdict = %+v, want the pinned tool block", verdict)
+	}
+}
+
+// GAP-0216: on a managed gateway, the admission verdict of one enrolled
+// user's MCP server refused another user's clean server of the same name.
+// The account's own row refuses only that account's server in its project;
+// a caller whose home is not known is refused (fail closed).
+func TestInspectToolEnrolledAccountMCPVerdictIsThatAccountsOnly(t *testing.T) {
+	api, store := toolPolicyAPI(t, "action")
+	base := t.TempDir()
+	u1 := config.MCPServerEntry{Name: "gb05-benign", Connector: "claudecode",
+		Home: filepath.Join(base, "dcw-std1"), Project: filepath.Join(base, "dcw-std1", "proj")}
+	u2Home := filepath.Join(base, "dcw-std2")
+	if err := store.SetRuntimeDisableForConnector(watcher.MCPJournalType(u1), watcher.MCPJournalName(u1), "claudecode", watcher.MCPEventPath(u1),
+		"scanner failure (fail-closed): dcw-std1 is not signed in"); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := json.Marshal(map[string]string{"name": u1.Name, "connector": u1.Connector,
+		"home": u1.Home, "project": u1.Project})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hashes, err := json.Marshal(map[string]string{"mcp.servers." + u1.Name: "hash", "mcp.snapshot.identity.v1": string(identity)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetTargetSnapshot("mcp", watcher.MCPEventPath(u1), "hash", "{}", string(hashes), "[]", "", "fingerprint"); err != nil {
+		t.Fatal(err)
+	}
+	call := func(home, cwd string) *ToolInspectVerdict {
+		t.Helper()
+		ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: home})
+		return api.inspectToolPolicyCtx(ctx, &ToolInspectRequest{Tool: "mcp__gb05-benign__ping", Args: json.RawMessage(`{}`),
+			Direction: "tool_call", Connector: "claudecode", callerCWD: cwd})
+	}
+	if v := call(u2Home, filepath.Join(u2Home, "proj")); hasFinding(v.Findings, "MCP-BLOCK") {
+		t.Fatalf("dcw-std2's clean server refused by dcw-std1's verdict: %+v", v)
+	}
+	if v := call(u1.Home, filepath.Join(u1.Project, "src")); !hasFinding(v.Findings, "MCP-BLOCK") ||
+		!strings.Contains(v.Reason, "install admission rejected it") || !strings.Contains(v.Reason, "not signed in") {
+		t.Fatalf("dcw-std1's own server: %+v, want the admission refusal", v)
+	}
+	if v := call(u1.Home, filepath.Join(u1.Home, "other")); hasFinding(v.Findings, "MCP-BLOCK") {
+		t.Fatalf("another project of dcw-std1 refused: %+v", v)
+	}
+	if v := call("", ""); !hasFinding(v.Findings, "MCP-BLOCK") {
+		t.Fatalf("a caller whose home is not known: %+v, want refused", v)
+	}
+	codex := &ToolInspectRequest{Tool: "mcp__gb05-benign__ping", Args: json.RawMessage(`{}`), Direction: "tool_call", Connector: "codex"}
+	if v := api.inspectToolPolicyCtx(withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: u1.Home}), codex); hasFinding(v.Findings, "MCP-BLOCK") {
+		t.Fatalf("another connector refused: %+v", v)
 	}
 }

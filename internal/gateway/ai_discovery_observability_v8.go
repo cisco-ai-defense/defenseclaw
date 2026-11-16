@@ -16,13 +16,14 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 	"github.com/defenseclaw/defenseclaw/internal/version"
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -211,7 +212,7 @@ func (adapter *aiDiscoveryV8Adapter) EmitReport(
 		// new/changed/gone signal (see resolveSignalsPublish), so no
 		// lifecycle delta can be dropped here.
 		if (isDelta || (managedSnapshot && signal.State == inventory.AIStateSeen)) &&
-			!(managedSnapshot && !signalsPublish) {
+			(!managedSnapshot || signalsPublish) {
 			outcome, err := adapter.emitSignalLog(ctx, report.Summary, signal)
 			// Emit returns nil when the optional managed AI Defense projection fails,
 			// so the outcome — not the error — is what says whether the managed
@@ -407,7 +408,7 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 			// lifecycle records can be split by user like the observations.
 			UserID:                aiDiscoveryV8OptionalText(signal.UserID),
 			DefenseClawUserIDKind: v8UserIDKind(discoveryUserIDKind(signal.UserID)),
-			DefenseClawUserName:   v8UserName(signal.UserName, aiDiscoveryV8OptionalText),
+			DefenseClawUserName:   v8UserName(inventoryTelemetryUserName(signal.UserID, signal.UserName), aiDiscoveryV8OptionalText),
 			// The agent identity of the connector install the signal belongs
 			// to, so discovery joins that agent's decisions.
 			DefenseClawAgentIdentityID: agentIdentityV8(inventoryAgentIdentityID(signal.SupportedConnector, signal.UserID, signal.UserName)),
@@ -415,7 +416,7 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 			DefenseClawSandboxID:   aiDiscoveryV8Optional(signal.SandboxID),
 			DefenseClawSandboxName: aiDiscoveryV8Optional(signal.SandboxName),
 		}
-		identity := inventoryIdentity(signal.UserID)
+		identity := inventoryIdentityFor(signal.UserID, signal.UserName)
 		identity.applyTo(&base)
 		if signal.Category == inventory.SignalLocalModel && signal.Model != nil && signal.Model.Provenance != nil {
 			provenance := signal.Model.Provenance
@@ -530,15 +531,27 @@ var errIDEPluginSkipped = errors.New("ide plugin outside the registered attribut
 var (
 	// IDE inventory accepts bounded Unicode text without control characters.
 	// Keep the telemetry contract equally broad so valid plugin ids are emitted.
-	ideV8PluginIDPattern = regexp.MustCompile(`^[^\x00-\x1f\x7f-\x9f]+$`)
+	ideV8PluginIDPattern = lazyregexp.New(`^[^\x00-\x1f\x7f-\x9f]+$`)
 	ideV8VersionPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+~-]*$`)
-	ideV8ProductPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,63}$`)
+	ideV8ProductPattern  = lazyregexp.New(`^[a-z0-9][a-z0-9_.-]{0,63}$`)
 	ideV8UserPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
 	ideV8UserNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@-]*$`)
 )
 
 func ideV8UserName(value string) observability.Optional[string] {
 	return ideV8Optional(value, ideV8UserNamePattern, 256)
+}
+
+// An NSS spelling remains on the inventory row for identity binding. When
+// that spelling is outside the telemetry name syntax, use its account part
+// for the POSIX display field; the verified principal stays separate.
+func ideV8DisplayUserName(userID, fullName string) observability.Optional[string] {
+	name := v8UserName(fullName, ideV8UserName)
+	if name.IsPresent() || !identityFactsEnabled.Load() ||
+		useridentity.KindForID(userID) != useridentity.KindPOSIXUID {
+		return name
+	}
+	return v8UserName(inventoryTelemetryUserName(userID, fullName), ideV8UserName)
 }
 
 func ideV8Optional(value string, pattern *regexp.Regexp, limit int) observability.Optional[string] {
@@ -608,9 +621,9 @@ func (adapter *aiDiscoveryV8Adapter) emitIDEPluginLog(
 			DefenseClawAIDiscoveryScanID: aiDiscoveryV8Optional(summary.ScanID),
 			UserID:                       ideV8Optional(plugin.UserID, ideV8UserPattern, 256),
 			DefenseClawUserIDKind:        v8UserIDKind(discoveryUserIDKind(plugin.UserID)),
-			DefenseClawUserName:          v8UserName(plugin.UserName, ideV8UserName),
+			DefenseClawUserName:          ideV8DisplayUserName(plugin.UserID, plugin.UserName),
 		}
-		inventoryIdentity(plugin.UserID).applyTo(&base)
+		inventoryIdentityFor(plugin.UserID, plugin.UserName).applyTo(&base)
 		switch plugin.State {
 		case inventory.AIStateNew:
 			return builder.BuildLogIdePluginDiscovered(observability.LogIdePluginDiscoveredInput(base))
@@ -1102,7 +1115,7 @@ func aiDiscoveryV8EmitEnvelope(ctx context.Context, snapshot observabilityruntim
 }
 
 func aiDiscoveryV8Builder() (*observability.FamilyBuilder, error) {
-	return observability.NewFamilyBuilder(observability.ClockFunc(func() time.Time { return time.Now().UTC() }), observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }))
+	return observability.NewFamilyBuilder(observability.ClockFunc(func() time.Time { return time.Now().UTC() }), observability.TimeOrderedOccurrenceIDs)
 }
 
 func aiDiscoveryV8Optional(value string) observability.Optional[string] {

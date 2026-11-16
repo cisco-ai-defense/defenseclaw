@@ -62,3 +62,15 @@ func TestVerifyNamesDuplicateRPMRecordsOfAnInterruptedUpgrade(t *testing.T) {
 		t.Fatalf("verify with one rpm record: %s", got)
 	}
 }
+
+func TestStatusWarnsAboutDuplicateRPMRecordsWhenBinaryVersionMatches(t *testing.T) {
+	h := packageHost(t, "1.0.0")
+	requireOK(t, h.run(Options{Action: ActionInstall, FromPackage: true}))
+	writeFreshLedger(t, h)
+	h.env.Runner = rpmRecordsRunner{Runner: h.runner, records: "1.0.0-1\n0.9.0-1\n"}
+	r := h.run(Options{Action: ActionStatus})
+	got := messagesOf(r.Warnings, codeVerify)
+	if !strings.Contains(got, "1.0.0-1, 0.9.0-1") || !strings.Contains(got, "dnf reinstall") {
+		t.Fatalf("status omitted duplicate rpm records: %s", got)
+	}
+}

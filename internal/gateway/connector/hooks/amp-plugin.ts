@@ -27,9 +27,11 @@
 import type { Agent, PluginAPI, ThreadMessage, ToolCallResult, ToolResultResult } from '@ampcode/plugin'
 import { execFile{{if not .Sandbox}}, execFileSync{{end}} } from 'node:child_process'
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
-import { lstat } from 'node:fs/promises'
+{{if not .Sandbox}}import { lstatSync, readFileSync } from 'node:fs'
+{{end}}
+import { lstat{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}, mkdir, open{{end}}{{if not .Sandbox}}, stat{{end}} } from 'node:fs/promises'
 import { {{if not .Sandbox}}homedir, {{end}}userInfo } from 'node:os'
-import { dirname{{if not .Sandbox}}, join{{end}} } from 'node:path'
+import { dirname{{if not .Sandbox}}, isAbsolute, join{{end}} } from 'node:path'
 
 const DC_API_ADDR = "{{.APIAddr}}"
 {{if .Sandbox}}const DC_FAIL_MODE: string = "closed" // sandbox hooks always fail closed
@@ -43,8 +45,9 @@ const DC_TOKEN_PATTERN = /^[A-Za-z0-9:._-]{1,512}$/
 const DC_HOOK_SOCKET: string = ""
 const DC_FOREIGN_GUARD: string = ""
 const DC_INSTALL_MARKER: string = ""
+const DC_LIFECYCLE_MARKER: string = ""
 {{else}}const DC_TOKEN_FILE = "{{.TokenFileJS}}"
-const DC_FAIL_MODE: string = "{{if and .Managed (not .SecureClient)}}closed{{else}}{{.FailMode}}{{end}}" // "open" or "closed"
+const DC_FAIL_MODE: string = "{{if and .Managed .SecureClient}}{{.FailMode}}{{else}}closed{{end}}" // per-user and standalone hooks stay closed
 // Standalone managed installs talk to the gateway's peer-authorized unix hook
 // socket instead of the TCP API: the gateway identifies the caller by
 // kernel-verified uid, so no bearer token leaves this process, and a user who
@@ -65,6 +68,9 @@ const DC_FOREIGN_GUARD: string = "{{.ForeignHookGuardJS}}"
 // the deployment was uninstalled and this plugin stops failing closed. A
 // standard user cannot remove the marker. Empty keeps the fail mode.
 const DC_INSTALL_MARKER: string = "{{.InstallMarkerJS}}"
+// The standalone Unix lifecycle holds this public, root-owned marker while
+// install, upgrade or recovery may stop the gateway.
+const DC_LIFECYCLE_MARKER: string = "{{.LifecycleMarkerJS}}"
 // Windows standalone installs reach the gateway over loopback TCP, where a
 // local user can hold the port while the gateway restarts, and this plugin
 // cannot compare the listener with the gateway service the way the hook
@@ -75,6 +81,18 @@ const DC_INSTALL_MARKER: string = "{{.InstallMarkerJS}}"
 // verdict. Empty skips the proof (per-user installs, Secure Client, and the
 // hook socket, whose owner is verified instead).
 const DC_LISTENER_PROOF: string = "{{.ListenerProofJS}}"
+// Per-user plugins ask the native gateway binary to verify the connected
+// listener's account before each request. The proof above serves managed TCP.
+const DC_PER_USER_NATIVE_POST: string = "{{if and (not .Managed) (not .SecureClient)}}1{{end}}"
+// The Windows PowerShell that checks the helper's owner and DACL: setup
+// resolves the system directory with GetSystemDirectoryW, so a Windows
+// installed outside C:\Windows runs its own copy.
+const DC_WINDOWS_POWERSHELL: string = "{{.WindowsPowerShellJS}}"
+// The gateway binary of the install that rendered this plugin, which a
+// per-user plugin runs for hook-post and session facts: native Windows Setup
+// renders the one in its install root's bin folder (GAP-1847). Empty keeps the
+// .gateway-helper record that install.sh and install.ps1 write for ~/.local/bin.
+const DC_GATEWAY_BINARY: string = "{{.GatewayBinaryJS}}"
 const DC_LISTENER_PROOF_DOMAIN = "defenseclaw.listener-proof.v1"
 const DC_TIMEOUT_MS = 10000
 const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/
@@ -89,7 +107,7 @@ const DC_MAX_BODY_BYTES = 900 * 1024
 // see whose session a request belongs to; the plugin is in-session and can.
 // A value that is not a safe header field is dropped rather than sanitized, so
 // a hostile account name cannot smuggle a second header into every hook call.
-function identityHeaders(): Record<string, string> {
+async function identityHeaders(): Promise<Record<string, string>> {
 	const headers: Record<string, string> = {}
 	let info: ReturnType<typeof userInfo>
 	try {
@@ -110,7 +128,7 @@ function identityHeaders(): Record<string, string> {
 		info.username.length <= 256 && /^[A-Za-z0-9._-]+$/.test(info.username)) {
 		headers["X-DefenseClaw-User-Name"] = info.username
 	}
-	const facts = sessionFactsHeader()
+	const facts = await sessionFactsHeader()
 	if (facts !== "") {
 		headers["X-DefenseClaw-Session-Facts"] = facts
 	}
@@ -122,22 +140,65 @@ function identityHeaders(): Record<string, string> {
 // it: `hook session-facts` prints the whole X-DefenseClaw-Session-Facts value,
 // the principal included, and keeps its own five-minute cache in
 // ~/.defenseclaw. A managed install runs its administrator-owned hook binary
-// (DC_FOREIGN_GUARD); a per-user install runs the gateway binary the installer
-// puts in ~/.local/bin. No answer is a supported outcome: the SSH and logind
+// (DC_FOREIGN_GUARD); a per-user install runs its install's gateway binary
+// (DC_GATEWAY_BINARY, or ~/.local/bin). No answer is a supported outcome: the SSH and logind
 // variables alone follow.
 const DC_SESSION_FACTS_TTL_MS = 300000
 const DC_SESSION_FACTS_RETRY_MS = 30000
 let sessionFactsCache = { key: "", value: "", until: 0 }
 
-function fullSessionFacts(): string {
+// The modification time of this login's FILE or DIR Kerberos credential
+// cache is part of the session facts key: a new kinit into the same cache
+// changes the principal while every session variable stays the same
+// (GAP-1139). KCM, KEYRING and API caches have no file; the variables alone
+// key them. The stat runs off the event loop and gets
+// DC_CREDENTIAL_CACHE_STAT_MS; calls share one stat, and one still
+// unanswered after that (a stalled network or FUSE mount) reads as null: the
+// call sends the session variables alone.
+const DC_CREDENTIAL_CACHE_STAT_MS = 250
+let credentialCacheStat: { pending: Promise<string> | null; since: number } = { pending: null, since: 0 }
+
+async function credentialCacheStamp(): Promise<string | null> {
+	const name = String(process.env.KRB5CCNAME || "")
+	let path = name
+	if (name === "") path = typeof process.getuid === "function" ? "/tmp/krb5cc_" + process.getuid() : ""
+	else if (name.startsWith("FILE:")) path = name.slice(5)
+	else if (name.startsWith("DIR::")) path = name.slice(5)
+	else if (name.startsWith("DIR:")) path = name.slice(4)
+	if (!path.startsWith("/")) return ""
+	const now = Date.now()
+	if (credentialCacheStat.pending === null) {
+		const pending = stat(path).then((info) => String(info.mtimeMs), () => "")
+		credentialCacheStat = { pending, since: now }
+		pending.then(() => {
+			if (credentialCacheStat.pending === pending) credentialCacheStat = { pending: null, since: 0 }
+		})
+	}
+	const left = credentialCacheStat.since + DC_CREDENTIAL_CACHE_STAT_MS - now
+	if (left <= 0) return null
+	let timer: ReturnType<typeof setTimeout> | undefined
+	const overdue = new Promise<null>((resolve) => { timer = setTimeout(resolve, left, null) })
+	try {
+		return await Promise.race([credentialCacheStat.pending, overdue])
+	} finally {
+		clearTimeout(timer)
+	}
+}
+
+async function fullSessionFacts(): Promise<string> {
 	const env = process.env
-	const key = [env.KRB5CCNAME, env.XDG_SESSION_ID, env.SSH_CONNECTION, env.SSH_TTY].map((v) => String(v || "")).join("|")
+	const stamp = await credentialCacheStamp()
+	// The binary would wait on a stalled credential cache too.
+	if (stamp === null) return ""
+	const key = [env.KRB5CCNAME, env.XDG_SESSION_ID, env.SSH_CONNECTION, env.SSH_TTY, stamp]
+		.map((v) => String(v || "")).join("|")
 	const now = Date.now()
 	if (sessionFactsCache.key === key && now < sessionFactsCache.until) return sessionFactsCache.value
 	let value = ""
 	try {
-		const binary = DC_FOREIGN_GUARD ||
-			join(homedir(), ".local", "bin", process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway")
+		const binary = DC_FOREIGN_GUARD || (DC_PER_USER_NATIVE_POST
+			? perUserNativePostBinary()
+			: join(homedir(), ".local", "bin", process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway"))
 		const out = String(execFileSync(binary, ["hook", "session-facts"], {
 			timeout: 3000, maxBuffer: 4096, windowsHide: true, stdio: ["ignore", "pipe", "ignore"],
 		})).trim()
@@ -152,8 +213,8 @@ function fullSessionFacts(): string {
 {{end}}// sessionFactsHeader renders the claimed SSH and logind session facts as the
 // X-DefenseClaw-Session-Facts value the hook runner also sends. Each value is
 // dropped unless it matches the header's allowlisted charset.
-function sessionFactsHeader(): string {
-{{if not .Sandbox}}	const full = fullSessionFacts()
+async function sessionFactsHeader(): Promise<string> {
+{{if not .Sandbox}}	const full = await fullSessionFacts()
 	if (full !== "") return full
 {{end}}	const env = process.env
 	const address = String(env.SSH_CONNECTION || "").trim().split(/\s+/)[0] || ""
@@ -175,6 +236,9 @@ type GatewayResponse = {
 	reason?: string
 	additional_context?: string
 	severity?: string
+	// outage_notice is the warning of a per-user call that ran because this
+	// account's gateway is down (perUserOutageOpen); never from the gateway.
+	outage_notice?: string
 }
 
 type TurnState = {
@@ -199,7 +263,69 @@ type AgentFacts = {
 function stringID(value: unknown): string {
 	return value === undefined || value === null ? "" : String(value)
 }
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}
 
+// Command and target fields the bounded review of an oversized call keeps
+// verbatim at any depth (a shell "command" or "cmd", argv arrays, patches,
+// scripts and every path or target form); other strings keep an 8 KiB head.
+// Every value of the call's arguments (tool_input) is kept the same way,
+// whatever its key (an MCP server may act on any argument, and the gateway
+// reads all of them), except its file text and description
+// (DC_REVIEW_BULK_KEYS), which keep a head. Keys are compared lower-case
+// without "_" and "-".
+const DC_REVIEW_KEYS = new Set(["cmd", "command", "commands", "commandline", "args", "arguments", "argv", "toolargs", "script", "code", "input", "patch", "patchtext", "diff", "filepath", "path", "paths", "file", "files", "filename", "target", "targetfile", "targetpath", "targets", "destination", "dest", "source", "sourcepath", "oldpath", "newpath", "absolutepath", "relativepath", "url", "uri", "cwd", "workdir", "workingdirectory", "directory", "dir"]);
+const DC_REVIEW_BULK_KEYS = new Set(["content", "oldstring", "newstring", "oldstr", "newstr", "edits", "newsource", "filetext", "description"]);
+
+// boundedReview reduces an oversized payload to a request under
+// the gateway's 1 MiB cap that keeps every key of the call, so the gateway
+// judges its command and target as at normal size. Every review is marked
+// oversize_command_not_inspected: it keeps only a head of the call's file
+// text, prompt or tool result, where a configured rule may match past the
+// head, so the gateway warns and audits it in observe mode and blocks it in
+// action mode. It returns null only when even the last pass, which keeps no
+// value whole, stays over the cap.
+function boundedReview(payload: Record<string, unknown>, originalBytes: number): string | null {
+  for (let pass = 0; pass <= 4; pass++) {
+    // Command and target values are kept whole while they fit; only the
+    // context heads shrink when the review is too large. The last pass keeps
+    // none whole.
+    let keep = pass === 4 ? 0 : 832 * 1024;
+    let heads = (192 * 1024) >> Math.min(pass, 3);
+    const walk = (value: unknown, inKeep: boolean, depth: number, atArgs = false): unknown => {
+      if (typeof value === "string") {
+        if (inKeep && value.length <= keep) { keep -= value.length; return value; }
+        if (inKeep && depth < 128 && /^\s*[[{]/.test(value)) {
+          try { return JSON.stringify(walk(JSON.parse(value), true, depth + 1)); } catch (_) { /* not JSON */ }
+        }
+        // A command or target value that does not fit whole: only a head.
+        const n = Math.max(0, Math.min(value.length, 8192, heads));
+        heads -= n;
+        return n > 0 || value === "" ? value.slice(0, n) : undefined;
+      }
+      if (value === null || typeof value !== "object") return value;
+      if (depth >= 128) return undefined;
+      if (Array.isArray(value)) return value.map((item) => walk(item, inKeep, depth + 1));
+      const out: Record<string, unknown> = {};
+      for (const [key, item] of Object.entries(value)) {
+        const name = String(key).toLowerCase().replace(/[_-]/g, "");
+        const args = depth === 0 && name === "toolinput";
+        const keepChild = args || (atArgs && DC_REVIEW_BULK_KEYS.has(name) ? false : inKeep || DC_REVIEW_KEYS.has(name));
+        out[key] = walk(item, keepChild, depth + 1, args);
+      }
+      return out;
+    };
+    const review = (walk(payload, false, 0) || {}) as Record<string, unknown>;
+    review.oversize_command_not_inspected = true;
+    review.content_truncated = true;
+    review.bounded_prefix_review = true;
+    review.original_body_bytes = originalBytes;
+    const body = JSON.stringify(review);
+    // The native helper's transport refuses a body over DC_MAX_BODY_BYTES.
+    if (utf8Bytes(body) <= DC_MAX_BODY_BYTES) return body;
+  }
+  return null;
+}
+{{end}}
 function utf8Bytes(value: string): number {
 	return new TextEncoder().encode(value).byteLength
 }
@@ -207,6 +333,40 @@ function utf8Bytes(value: string): number {
 function safeError(error: unknown): string {
 	if (error instanceof Error && error.message) return error.message
 	return String(error)
+}
+
+// gatewayJSON parses a gateway answer and refuses one that repeats a key in
+// any object. JSON.parse keeps the last copy, so {"action":"block",
+// "action":"allow"} would read as allow; the native and shell hooks refuse
+// such an answer too (GAP-1007). The caller's catch closes the call.
+function gatewayJSON(text: string): unknown {
+	const value = JSON.parse(text)
+	const objects: Array<Set<string> | null> = []
+	let keyNext = false
+	for (let i = 0; i < text.length; i++) {
+		const c = text[i]
+		if (c === '"') {
+			let end = i + 1
+			while (text[end] !== '"') end += text[end] === "\\" ? 2 : 1
+			const keys = objects[objects.length - 1]
+			if (keyNext && keys) {
+				const key = JSON.parse(text.slice(i, end + 1)) as string
+				if (keys.has(key)) throw new Error("ambiguous gateway answer (repeated key)")
+				keys.add(key)
+			}
+			keyNext = false
+			i = end
+		} else if (c === "{" || c === "[") {
+			objects.push(c === "{" ? new Set<string>() : null)
+			keyNext = c === "{"
+		} else if (c === "}" || c === "]") {
+			objects.pop()
+			keyNext = false
+		} else if (c === ",") {
+			keyNext = objects[objects.length - 1] instanceof Set
+		}
+	}
+	return value
 }
 
 {{if .Sandbox}}async function scopedHookToken(): Promise<string> {
@@ -268,45 +428,280 @@ async function verifyHookSocket(): Promise<void> {
 	}
 }
 
-// proveListener resolves once the TCP listener has proven it can derive
-// token (the gateway's listener proof); anything else rejects, and the
-// caller then sends the listener nothing else.
-async function proveListener(token: string, signal?: AbortSignal | null): Promise<void> {
+function peerError(reason: string): Error & { code: string } {
+	return Object.assign(new Error(reason), { code: "DC_PEER_UNVERIFIED" })
+}
+
+// The proof and the hook request must use the same accepted socket. A new
+// listener can take the port between two fetch calls, so never hand a bearer
+// or event to a second socket even after a valid proof response.
+async function provenTCPRequest(path: string, init: RequestInit, token: string): Promise<Response> {
 	if (!DC_TOKEN_PATTERN.test(token || "")) throw new Error("invalid scoped hook credential")
+	const http = await import("node:http")
+	const endpoint = new URL(`http://${DC_API_ADDR}`)
+	const agent = new http.Agent({ keepAlive: true, maxSockets: 1, maxFreeSockets: 1 })
+	let provenSocket: import("node:net").Socket | undefined
+	type TCPReply = { status: number; headers: Record<string, string | string[] | undefined>; body: string }
+	const send = (
+		requestPath: string, method: string, headers: Record<string, string>, body?: string,
+		requiredSocket?: import("node:net").Socket,
+	): Promise<TCPReply> => new Promise((resolve, reject) => {
+		const req = http.request({
+			hostname: endpoint.hostname.replace(/^\[|\]$/g, ""), port: endpoint.port,
+			path: requestPath, method, headers, agent, signal: init.signal ?? undefined,
+		}, (res) => {
+			const chunks: Buffer[] = []
+			let length = 0
+			res.on("data", (chunk: Buffer) => {
+				length += chunk.length
+				if (length > 1048576) {
+					req.destroy(new Error("oversized DefenseClaw gateway response"))
+					return
+				}
+				chunks.push(chunk)
+			})
+			res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers,
+				body: Buffer.concat(chunks).toString("utf8") }))
+			res.on("error", reject)
+		})
+		req.on("error", reject)
+		req.on("socket", (socket) => {
+			if (requiredSocket && socket !== requiredSocket) {
+				req.destroy(peerError("the DefenseClaw gateway listener changed after proving its identity"))
+				return
+			}
+			if (!requiredSocket) provenSocket = socket
+			req.end(body)
+		})
+	})
 	const nonce = randomBytes(32).toString("hex")
-	const response = await fetch(`http://${DC_API_ADDR}/api/v1/hook-listener-proof`, {
-		method: "GET",
-		headers: {
+	try {
+		const challenge = await send("/api/v1/hook-listener-proof", "GET", {
 			"X-DefenseClaw-Connector": "amp",
 			"X-DefenseClaw-Listener-Key-Id": createHash("sha256").update(token).digest("hex"),
 			"X-DefenseClaw-Listener-Nonce": nonce,
-		},
-		signal,
-	})
-	const proof = String(response.headers.get("x-defenseclaw-listener-proof") || "")
-	if (response.body) {
-		try {
-			await response.body.cancel()
-		} catch {
-			// Nothing is read from the proof response body.
+		})
+		const proof = String(challenge.headers["x-defenseclaw-listener-proof"] || "")
+		const want = createHmac("sha256", token)
+			.update(`${DC_LISTENER_PROOF_DOMAIN}\u0000amp\u0000${nonce}`)
+			.digest("hex")
+		if (challenge.status !== 204 || !/^[0-9a-f]{64}$/.test(proof) ||
+			!timingSafeEqual(Buffer.from(proof, "hex"), Buffer.from(want, "hex"))) {
+			throw peerError("the DefenseClaw gateway listener did not prove its identity")
 		}
-	}
-	const want = createHmac("sha256", token)
-		.update(`${DC_LISTENER_PROOF_DOMAIN}\u0000amp\u0000${nonce}`)
-		.digest("hex")
-	if (response.status !== 204 || proof.length !== want.length || !timingSafeEqual(Buffer.from(proof), Buffer.from(want))) {
-		throw new Error("the DefenseClaw gateway listener did not prove its identity")
+		const response = await send(path, init.method || "POST", init.headers as Record<string, string>,
+			String(init.body || ""), provenSocket)
+		if (response.status >= 300 && response.status < 400) {
+			throw peerError("the DefenseClaw gateway redirected a proven hook request")
+		}
+		return {
+			ok: response.status >= 200 && response.status < 300, status: response.status,
+			headers: { get: (name: string) => {
+				const value = response.headers[name.toLowerCase()]
+				return Array.isArray(value) ? value.join(", ") : value ?? null
+			} },
+			text: async () => response.body,
+			json: async () => JSON.parse(response.body),
+		} as Response
+	} finally {
+		agent.destroy()
 	}
 }
 
-// gatewayFetch posts over the verified managed hook socket when one is
-// configured (Bun's unix fetch option), and over TCP otherwise; a TCP
-// request that carries a per-user credential first requires the listener
-// proof.
+{{if not .Sandbox}}function perUserNativePostBinary(): string {
+	const account = userInfo()
+	if (DC_GATEWAY_BINARY) {
+		// Windows Setup (GAP-1847): its install root has no ~/.local/bin and no
+		// .gateway-helper record; the rendered gateway's folders are checked as 1.0.4 does.
+		const directory = dirname(DC_GATEWAY_BINARY)
+		const setupPaths = [dirname(directory), directory, DC_GATEWAY_BINARY]
+		for (let index = 0; index < setupPaths.length; index++) {
+			const info = lstatSync(setupPaths[index])
+			if (info.isSymbolicLink() || (index === setupPaths.length - 1 ? !info.isFile() : !info.isDirectory())) throw new Error("per-user gateway helper path is untrusted")
+			if (process.platform !== "win32" && (info.uid !== account.uid || (info.mode & 0o022) !== 0)) throw new Error("per-user gateway helper path is writable by another account")
+		}
+		return DC_GATEWAY_BINARY
+	}
+	const hookDir = dirname(DC_TOKEN_FILE)
+	const record = join(hookDir, ".gateway-helper")
+	const recordInfo = lstatSync(record)
+	if (!recordInfo.isFile() || recordInfo.isSymbolicLink() || recordInfo.size > 4096) throw new Error("per-user gateway helper record is untrusted")
+	const content = readFileSync(record, "utf8")
+	if (!content.endsWith("\n") || /[\r\n\0]/.test(content.slice(0, -1))) throw new Error("per-user gateway helper record is malformed")
+	const binary = content.slice(0, -1)
+	const home = dirname(dirname(dirname(binary)))
+	if (!isAbsolute(binary) || binary !== join(home, ".local", "bin", process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway")) throw new Error("per-user gateway helper path is untrusted")
+	const paths = [dirname(hookDir), hookDir, record, home, join(home, ".local"), join(home, ".local", "bin"), binary]
+	for (let index = 0; index < paths.length; index++) {
+		const info = lstatSync(paths[index])
+		if (info.isSymbolicLink() || ([2, 6].includes(index) ? !info.isFile() : !info.isDirectory())) throw new Error("per-user gateway helper path is untrusted")
+		if (process.platform !== "win32" && (info.uid !== account.uid || (info.mode & 0o022) !== 0)) throw new Error("per-user gateway helper path is writable by another account")
+	}
+	if (process.platform === "win32") {
+		// A data directory nested deeper in the profile has its parents up to
+		// the profile checked too.
+		const root = home.toLowerCase() + "\\"
+		for (let dir = dirname(dirname(hookDir)); dir.toLowerCase().startsWith(root); dir = dirname(dir)) paths.push(dir)
+		checkWindowsHelperACL(paths)
+	}
+	return binary
+}
+
+// perUserHookPostBinary picks the small hook-post helper the POSIX installer
+// puts beside the gateway (in the same folder), so a hook event does not start the full gateway
+// CLI; both read the same JSON request and run the same connected-peer check.
+// An install without it (Windows, or an older installer's roll-forward) keeps
+// the verified gateway CLI. A present but untrusted helper is refused, never
+// bypassed.
+function perUserHookPostBinary(): string {
+	const gateway = perUserNativePostBinary()
+	const helper = join(dirname(gateway), process.platform === "win32" ? "defenseclaw-hook-post.exe" : "defenseclaw-hook-post")
+	let info: ReturnType<typeof lstatSync>
+	try {
+		info = lstatSync(helper)
+	} catch (error) {
+		if (error && (error as { code?: string }).code === "ENOENT") return gateway
+		throw error
+	}
+	if (info.isSymbolicLink() || !info.isFile()) {
+		throw new Error("per-user hook helper path is untrusted")
+	}
+	if (process.platform !== "win32" && (info.uid !== userInfo().uid || (info.mode & 0o022) !== 0)) {
+		throw new Error("per-user hook helper path is writable by another account")
+	}
+	return helper
+}
+
+function checkWindowsHelperACL(paths: string[]): void {
+	// Windows stat mode bits do not represent the DACL. Check the owner and
+	// write grants before the bearer-bearing native helper is launched: the
+	// owner is this account, SYSTEM, Administrators (an elevated install) or
+	// TrustedInstaller, and no other principal may write the path. An
+	// OWNER RIGHTS (S-1-3-4) entry, which the DefenseClaw CLI and installer
+	// write on the data folder, grants only that trusted owner, so it is
+	// not another writer (GAP-2042). An
+	// inherit-only entry does not apply to the path itself; its children
+	// carry it. execFileSync opens the helper by this path, so every folder
+	// above a checked path, up to its volume root, must not let another
+	// principal rename or replace what it holds (a custom data root's
+	// parent, for one): a trusted owner and no delete-child, delete,
+	// change-permissions or take-ownership grant to anyone else. A volume
+	// root cannot be renamed, so delete is not checked there.
+	const checked = new Set(paths.map((path) => path.toLowerCase()))
+	const entries: [number, string][] = paths.map((p) => [0x500D0156, p])
+	for (const path of paths) {
+		for (let dir = dirname(path), top = false; !top; dir = dirname(dir)) {
+			top = dirname(dir) === dir
+			if (checked.has(dir.toLowerCase())) continue
+			checked.add(dir.toLowerCase())
+			entries.push([top ? 0x100C0040 : 0x100D0040, dir])
+		}
+	}
+	// PowerShell finds a cmdlet through PSModulePath, which the agent's
+	// environment sets: a module planted in a folder it names first could
+	// answer for ConvertFrom-Json or Get-Acl and pass every path. The script
+	// calls no cmdlet, only .NET methods and language statements, runs with
+	// PSModulePath set to the system PowerShell's own module folder (and no
+	// .NET profiler or COMPlus setting), and the check passes only when it
+	// reports every entry checked. Each path goes as base64 UTF-8, so a
+	// non-ASCII path is not mangled by the console code page.
+	const script = [
+		"$ErrorActionPreference='Stop'",
+		"try {",
+		"$current=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
+		"$trusted=@($current,'S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')",
+		"$writers=$trusted+@('S-1-3-4')",
+		"$inheritOnly=[int][System.Security.AccessControl.PropagationFlags]::InheritOnly",
+		"$sid=[System.Security.Principal.SecurityIdentifier]",
+		"$count=0",
+		"foreach($line in [Console]::In.ReadToEnd().Split([char]10)) {",
+		"  $entry=$line.Split([char]32)",
+		"  if($entry.Length -ne 2) { throw 'entry' }",
+		"  $writeMask=[int64]$entry[0]",
+		"  $p=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($entry[1]))",
+		"  if([System.IO.Directory]::Exists($p)) { $acl=[System.IO.Directory]::GetAccessControl($p) } elseif([System.IO.File]::Exists($p)) { $acl=[System.IO.File]::GetAccessControl($p) } else { throw 'missing' }",
+		"  if($trusted -notcontains $acl.GetOwner($sid).Value) { throw 'owner' }",
+		"  foreach($ace in $acl.GetAccessRules($true,$true,$sid)) {",
+		"    if($ace.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and (([int]$ace.PropagationFlags -band $inheritOnly) -eq 0) -and $writers -notcontains $ace.IdentityReference.Value -and (([int64]$ace.FileSystemRights -band $writeMask) -ne 0)) { throw 'writable' }",
+		"  }",
+		"  $count++",
+		"}",
+		"[Console]::Out.Write('checked ' + $count)",
+		"} catch { [Console]::Out.Write('failed ' + $_.Exception.Message); exit 3 }",
+	].join("\n")
+	const env: Record<string, string> = {}
+	for (const [name, value] of Object.entries(process.env)) {
+		if (value !== undefined && !/^(psmodulepath|psmoduleanalysiscachepath|cor_|complus_)/i.test(name)) env[name] = value
+	}
+	env.PSModulePath = join(dirname(DC_WINDOWS_POWERSHELL), "Modules")
+	let output = ""
+	let failure = ""
+	try {
+		output = execFileSync(DC_WINDOWS_POWERSHELL, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], {
+			input: entries.map(([mask, path]) => mask + " " + Buffer.from(path, "utf8").toString("base64")).join("\n"),
+			env, timeout: 5000, windowsHide: true, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+		})
+	} catch (error) {
+		failure = windowsACLCheckFailure(error)
+	}
+	// Only an owner or another writer the script found is a DACL refusal;
+	// a timeout or any other failure says what it was (rel-1-0-6 GAP-0025).
+	if (failure) throw new Error(failure)
+	if (output.trim() !== "checked " + entries.length) throw new Error("per-user gateway helper path has an untrusted Windows owner or DACL")
+}
+
+function windowsACLCheckFailure(error: unknown): string {
+	const failed = (error || {}) as { code?: string; signal?: string | null; status?: number | null; stdout?: string }
+	const reason = String(failed.stdout || "").trim().replace(/^failed /, "")
+	if (failed.status === 3 && (reason === "owner" || reason === "writable")) return ""
+	if (failed.code === "ETIMEDOUT") {
+		return "the per-user gateway helper ACL check did not finish within 5 s (Windows PowerShell was slow to start); retry the call, and run defenseclaw doctor if it repeats"
+	}
+	if (failed.signal) return "the per-user gateway helper ACL check was stopped (" + failed.signal + "); retry the call"
+	if (typeof failed.status !== "number") {
+		return "Windows PowerShell (" + DC_WINDOWS_POWERSHELL + ") did not start for the per-user gateway helper ACL check (" + (failed.code || "unknown error") + "); run defenseclaw doctor"
+	}
+	if (reason === "missing") return "a per-user gateway helper path went missing during its ACL check; retry the call, or run defenseclaw doctor"
+	return "the per-user gateway helper ACL check failed (" + (reason.slice(0, 200) || "exit " + failed.status) + "); retry the call, or run defenseclaw doctor"
+}
+{{end}}// gatewayFetch posts over the verified managed hook socket when one is
+// configured (Bun's unix fetch option). A per-user post goes through the
+// native helper, which verifies the same connected socket it sends on.
 async function gatewayFetch(path: string, init: RequestInit, token: string): Promise<Response> {
 	if (!DC_HOOK_SOCKET) {
-		if (DC_LISTENER_PROOF) await proveListener(token, init.signal)
-		return fetch(`http://${DC_API_ADDR}${path}`, init)
+		if (DC_PER_USER_NATIVE_POST) {
+			const binary = perUserHookPostBinary()
+			const post = () => execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR], {
+				input: JSON.stringify({ path, headers: init.headers || {}, body: String(init.body || "") }),
+				// The helper's diagnostics (a refused connection during an outage)
+				// stay in the error the caller classifies; inherited, they reached
+				// the agent's screen over the one outage warning (GAP-1314).
+				timeout: DC_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024, windowsHide: true, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"],
+			})
+			let output: string
+			try {
+				output = post()
+			} catch (error) {
+				// One more try only for a connected-peer proof that failed (exit 8:
+				// nothing was sent, GAP-1236); any other failure may come after the
+				// gateway took the call and is not sent twice (GAP-2083).
+				const failed = error as { status?: unknown; signal?: unknown } | null
+				if (!failed || failed.status !== 8 || failed.signal) throw error
+				output = post()
+			}
+			const reply = JSON.parse(output) as { status: number; body: string; retry_after?: string }
+			if (!Number.isInteger(reply.status) || reply.status < 100 || reply.status > 599 || typeof reply.body !== "string") {
+				throw new Error("invalid native gateway response")
+			}
+			return {
+				ok: reply.status >= 200 && reply.status < 300,
+				status: reply.status,
+				headers: { get: (name: string) => name.toLowerCase() === "retry-after" ? reply.retry_after || null : null },
+				text: async () => reply.body,
+			} as Response
+		}
+		if (DC_LISTENER_PROOF) return provenTCPRequest(path, init, token)
+		throw peerError("the DefenseClaw gateway listener has no account proof")
 	}
 	await verifyHookSocket()
 	if (!(globalThis as typeof globalThis & { Bun?: unknown }).Bun) {
@@ -364,19 +759,19 @@ function assistantResponse(messages: ThreadMessage[]): string {
 }
 
 // runForeignHookCheck asks the administrator-owned hook binary for the
-// foreign-hook guard's decision and resolves to a block reason, or "" when
-// no unapproved plugin or hook is present. A binary that cannot be run,
+// foreign-hook guard's decision and resolves to a ForeignCheck: a block
+// reason, or "" when no unapproved plugin or hook is present. A binary that cannot be run,
 // times out, or answers anything but {"deny": false} blocks, unless the
 // managed deployment was uninstalled (its install marker is gone): uninstall
 // removes the hook binary too, and this plugin then stops failing closed as
 // it does for the gateway call.
-function runForeignHookCheck(event: string, cwd: string): Promise<string> {
-	if (!DC_FOREIGN_GUARD) return Promise.resolve("")
+function runForeignHookCheck(event: string, cwd: string): Promise<ForeignCheck> {
+	if (!DC_FOREIGN_GUARD) return Promise.resolve({ reason: "", retryable: false })
 	return new Promise(resolve => {
 		const fail = (why: string) => {
 			void deploymentRemoved().then(removed => resolve(removed
-				? ""
-				: foreignCheckFailure(event, why)))
+				? { reason: "", retryable: false }
+				: { reason: foreignCheckFailure(event, why), retryable: true }))
 		}
 		try {
 			const child = execFile(
@@ -388,7 +783,7 @@ function runForeignHookCheck(event: string, cwd: string): Promise<string> {
 						fail(safeError(error))
 						return
 					}
-					let verdict: { deny?: unknown, reason?: unknown }
+					let verdict: { deny?: unknown, reason?: unknown, retryable?: unknown, warnings?: unknown }
 					try {
 						verdict = JSON.parse(String(stdout))
 					} catch {
@@ -396,12 +791,19 @@ function runForeignHookCheck(event: string, cwd: string): Promise<string> {
 						return
 					}
 					if (verdict && verdict.deny === false) {
-						resolve("")
+						// foreign_hooks report names the unapproved hook's file and
+						// digest for the user (GAP-0697).
+						resolve({ reason: "", retryable: false, warnings: Array.isArray(verdict.warnings) ? verdict.warnings.map(String) : [] })
 						return
 					}
-					resolve(verdict && typeof verdict.reason === "string" && verdict.reason
-						? verdict.reason
-						: "DefenseClaw blocked this tool call because an unapproved plugin is present.")
+					resolve({
+						reason: verdict && typeof verdict.reason === "string" && verdict.reason
+							? verdict.reason
+							: "DefenseClaw blocked this tool call because an unapproved plugin is present.",
+						// Only the guard's structured answer marks a deny as the
+						// gateway not answering, never the text of its reason.
+						retryable: Boolean(verdict && verdict.retryable === true),
+					})
 				},
 			)
 			child.stdin?.on("error", () => {})
@@ -413,16 +815,22 @@ function runForeignHookCheck(event: string, cwd: string): Promise<string> {
 }
 
 // foreignCheckFailure is the block reason when the foreign-plugin check
-// itself could not run. Amp loads plugins once, so a check that failed at
-// load keeps blocking for the life of this process; that reason says to
-// restart the agent.
+// itself could not run. A later tool call retries this startup check.
 function foreignCheckFailure(event: string, why: string): string {
 	const detail = String(why || "").split(/\r?\n/)[0].trim() || "no answer"
 	if (event === "session.load") {
-		return `DefenseClaw could not check for unapproved plugins when the agent started (${detail}), so this tool call is blocked. Restart the agent once DefenseClaw is available.`
+		return `DefenseClaw could not check for unapproved plugins when the agent started (${detail}), so this tool call is blocked. Retry when DefenseClaw is available.`
 	}
 	return `DefenseClaw could not check for unapproved plugins (${detail}), so this tool call is blocked.`
 }
+
+// ForeignCheck is the foreign-plugin check's answer: a block reason ("" for
+// none) and whether the block is an availability failure (the check could
+// not run, or the guard says the gateway could not answer for the session).
+// A confirmed foreign plugin loaded with Amp stays loaded for this process,
+// so only an availability failure lets a later call retry the load-time
+// check, while this call stays closed.
+type ForeignCheck = { reason: string, retryable: boolean, warnings?: string[] }
 
 // promptNotice sets DefenseClaw's hidden agent.start notice apart from the
 // user's prompt. Amp places the message right after the prompt text, and a
@@ -454,6 +862,19 @@ async function deploymentRemoved(): Promise<boolean> {
 	}
 }
 
+async function managedLifecycleHeld(): Promise<boolean> {
+	if (!DC_LIFECYCLE_MARKER) return false
+	try {
+		await lstat(DC_LIFECYCLE_MARKER)
+		return true
+	} catch (error) {
+		// Only a definite absence ends the install window.
+		return (error as { code?: unknown } | null)?.code !== "ENOENT"
+	}
+}
+
+const DC_MANAGED_LIFECYCLE_TEXT = "DefenseClaw is being installed or upgraded on this computer; try again in a moment."
+
 // DC_GATEWAY_STOPPED_TEXT is what a managed install says when its gateway
 // service is stopped, in the words of the native hook, instead of the
 // runtime's network error (GAP-0639).
@@ -465,12 +886,371 @@ const DC_GATEWAY_STOPPED_TEXT = "DefenseClaw blocked this tool call: the Defense
 // running: its hook socket is missing, or nothing accepts the connection
 // (Node ECONNREFUSED, Bun ConnectionRefused).
 function gatewayStopped(error: unknown): boolean {
-	const failure = error as { code?: unknown; cause?: { code?: unknown } } | null
-	const codes = [failure?.code, failure?.cause?.code]
+	const failure = error as { code?: unknown; {{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}status?: unknown; {{end}}cause?: { code?: unknown } } | null
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}	// The per-user native helper exits 7 for a gateway that is not running.
+	if (failure?.status === 7) return true
+{{end}}	const codes = [failure?.code, failure?.cause?.code]
 	return codes.some((code) => code === "ENOENT" || code === "ECONNREFUSED" || code === "ConnectionRefused")
 }
 
-function failureResponse(reason: string): GatewayResponse {
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}// The installer holds this data-directory lock while it replaces this
+// account's stopped gateway. An open outage mode cannot bypass that upgrade.
+const DC_INSTALL_WINDOW_TEXT = "DefenseClaw blocked this tool call: DefenseClaw is being installed or upgraded for this account, " +
+	"and its gateway starts again when that is done. Try again in a moment; if the installer has stopped, run the installer again to finish or undo the interrupted install. `defenseclaw-gateway status` shows its state."
+
+{{end}}{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}// perUserGatewayDownText is what a per-user install that fails closed says
+// when its gateway gave no usable answer: why (an install or upgrade, a
+// `defenseclaw-gateway stop`, a stopped, busy or failing gateway) and what
+// brings it back, in the words of the native and shell hooks, instead of the
+// runtime's network error alone (GAP-0850).
+// defenseclaw-call-time-outage-v1: perUserOutageOpen reports a per-user call that may run unchecked: the
+// native helper exited 7 (hookexec.PerUserPostOutageExit: this account's
+// gateway refused or dropped the connection before any status), the outage
+// mode in the config on disk is open and no install holds the data directory.
+// An answer the gateway gave, an
+// unverified listener and every other error keep the call blocked. Like the
+// rest of this plugin it reads no environment, so strict availability does
+// not apply (the strict policy tier closes it).
+async function perUserOutageOpen(error: unknown): Promise<boolean> {
+	if ((error as { status?: unknown } | null)?.status !== 7) return false
+	return !(await installLockHeld()) && configOutageOpen()
+}
+
+// configOutageOpen asks the per-user helper (`hook-outage-mode`, which only
+// reads the config.yaml of this plugin's data directory, never one the
+// agent's DEFENSECLAW_CONFIG or DEFENSECLAW_HOME names) for Amp's outage mode
+// now. A helper that cannot run or answers anything but "open" keeps it closed.
+function configOutageOpen(installWindow = false): boolean {
+	try {
+		const args = ["hook-outage-mode", "--connector", "amp", "--hook-dir", dirname(DC_TOKEN_FILE)]
+		if (installWindow) args.push("--install-window")
+		const output = execFileSync(perUserNativePostBinary(), args, {
+			timeout: 3000, maxBuffer: 4096, windowsHide: true, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+		})
+		return String(output).trim() === "open"
+	} catch {
+		return false
+	}
+}
+
+// perUserOutageNotice is the one warning of a call that ran because this
+// account's gateway is down: the cause and the fix.
+async function perUserOutageNotice(): Promise<string> {
+	let stopped = false
+	try {
+		await lstat(join(dirname(dirname(DC_TOKEN_FILE)), "gateway.stopped"))
+		stopped = true
+	} catch {
+		// No marker: the gateway is down for another reason.
+	}
+	const cause = stopped
+		? "this account's gateway was stopped with `defenseclaw-gateway stop`"
+		: "this account's gateway is not running"
+	return `DefenseClaw is not checking this session: ${cause}, so tool calls run unchecked (fail mode open for an outage). ` +
+		"Run `defenseclaw-gateway start` to resume protection. `defenseclaw-gateway status` shows its state. " +
+		"If it does not start, run `defenseclaw doctor`."
+}
+
+// logFailOpen appends the hook-failures.jsonl row the shell and native hooks
+// write for a call that ran unchecked, in this install's data directory, so
+// the gateway reports it when it is back. Best effort: a row that cannot be
+// written never changes the verdict.
+// perUserFailureCause is the cause of a failed per-user check, for the block
+// text: the helper's last stderr line without its program prefix, else the
+// plugin's own error (an answer it refused), bounded and on one line.
+function perUserFailureCause(error: unknown): string {
+	const failed = error as { stderr?: unknown; status?: unknown } | null
+	const lines = String(failed?.stderr || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+	let cause = lines.length ? lines[lines.length - 1].replace(/^defenseclaw-(gateway|hook-post)( hook-post)?: /, "") : ""
+	if (!cause && !Number.isInteger(failed?.status)) cause = safeError(error)
+	cause = cause.replace(/[\u0000-\u001f]+/g, " ").slice(0, 240)
+	return cause || "per-user gateway peer unverified"
+}
+
+async function logFailOpen(reason: string, payload: Record<string, unknown>, closed = false): Promise<void> {
+	try {
+		const dir = join(dirname(dirname(DC_TOKEN_FILE)), "logs")
+		await mkdir(dir, { recursive: true, mode: 0o700 })
+		const file = await open(join(dir, "hook-failures.jsonl"), "a", 0o600)
+		try {
+			await file.appendFile(JSON.stringify({
+				ts: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+				connector: "amp",
+				hook: "amp-plugin",
+				reason,
+				category: closed ? "response" : "transport",
+				fail_mode: closed ? "closed" : "open",
+				outcome: closed ? "fail_closed" : "fail_open",
+				session_id: String(payload.session_id || "").slice(0, 256),
+				call_id: String(payload.source_event_id || payload.tool_call_id || randomBytes(16).toString("hex")).slice(0, 256),
+			}) + "\n")
+		} finally {
+			await file.close()
+		}
+	} catch {
+		// A record of a failure never fails the call.
+	}
+}
+
+async function perUserGatewayDownText(error: unknown, status: number): Promise<string> {
+	const data = dirname(dirname(DC_TOKEN_FILE))
+	const present = async (name: string) => {
+		try {
+			await lstat(join(data, name))
+			return true
+		} catch {
+			return false
+		}
+	}
+	const failure = error as { name?: unknown } | null
+	let text: string
+	if (await installLockHeld()) {
+		text = "DefenseClaw is being installed or upgraded for this account, and its gateway starts again when that is done (fail mode closed). " +
+			"Try again in a moment; if the installer has stopped, run the installer again to finish or undo the interrupted install."
+	} else if (await present("gateway.stopped")) {
+		text = "the DefenseClaw gateway was stopped with `defenseclaw-gateway stop` (fail mode closed). " +
+			"Start it with `defenseclaw-gateway start`, then try again."
+	} else if (status) {
+		text = `this account's DefenseClaw gateway answered HTTP ${status} (fail mode closed); it may be starting or overloaded. ` +
+			"Try again in a moment."
+	} else if (gatewayStopped(error)) {
+		text = "this account's DefenseClaw gateway is not running (fail mode closed). " +
+			"Start it with `defenseclaw-gateway start`, then try again."
+	} else if (failure?.name === "AbortError" || failure?.name === "TimeoutError") {
+		text = "this account's DefenseClaw gateway did not answer in time (a call the gateway took and did not answer is blocked in every fail mode); it may be restarting or busy. " +
+			"Try again in a moment."
+	} else {
+		text = "the DefenseClaw gateway is not running or not answering (fail mode closed). " +
+			"Start it with `defenseclaw-gateway start`, then try again."
+	}
+	const detail = status ? `HTTP ${status}` : safeError(error)
+	return `DefenseClaw blocked this tool call: ${text} \`defenseclaw-gateway status\` shows its state. (${detail})`
+}
+
+{{end}}{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}// installLockDirs are the folders an installer of this account locks: the
+// gateway's data_dir (the folder that holds the hook credential) and the
+// folder install.sh and install.ps1 lock, DEFENSECLAW_HOME or else
+// ~/.defenseclaw, which differ when data_dir is set apart from it (GAP-1002);
+// the shell hooks check the same two (GAP-0948).
+function installLockDirs(): string[] {
+	return [dirname(dirname(DC_TOKEN_FILE)), String(process.env.DEFENSECLAW_HOME || "") || join(homedir(), ".defenseclaw")]
+}
+
+// installLockNumber reads the lock's pid file: "absent" (missing,
+// empty or not a positive number), "valid", or "unreadable" (not a small
+// regular file, or a read error but its absence).
+async function installLockNumber(path: string): Promise<{ state: "absent" | "valid" | "unreadable"; value: number }> {
+	try {
+		const info = await lstat(path)
+		if (!info.isFile() || info.size > 64) return { state: "unreadable", value: 0 }
+		const text = String(readFileSync(path, "utf8")).trim()
+		return /^[1-9][0-9]{0,11}$/.test(text) ? { state: "valid", value: Number(text) } : { state: "absent", value: 0 }
+	} catch (error) {
+		return { state: (error as { code?: unknown } | null)?.code === "ENOENT" ? "absent" : "unreadable", value: 0 }
+	}
+}
+
+// processIdentity names process pid as install.sh and install.ps1
+// record their own in a lock (proc-start; hookexec procidentity), from what
+// the system keeps of its creation, which no clock step moves: on Linux
+// "<boot_id> <starttime>" (field 22 of /proc/<pid>/stat), on macOS its
+// creation second as `LC_ALL=C TZ=UTC ps -o lstart=` prints it, on Windows
+// its creation FILETIME; null when the system does not say.
+// processStartMs is when process pid started (ms since the epoch), from the
+// identity the system keeps (processIdentity), or null.
+function processStartMs(pid: number): number | null {
+	const identity = processIdentity(pid)
+	if (identity === null) return null
+	try {
+		if (process.platform === "linux") {
+			const line = String(readFileSync("/proc/stat", "utf8")).split("\n").find((entry) => entry.startsWith("btime "))
+			const boot = line ? Number(line.slice(6).trim()) : NaN
+			const ticks = Number(identity.split(" ")[1])
+			return Number.isFinite(boot) && Number.isFinite(ticks) ? boot * 1000 + ticks * 10 : null
+		}
+		if (process.platform === "darwin") {
+			const [, month, day, time, year] = identity.split(" ")
+			const started = Date.parse(month + " " + day + ", " + year + " " + time + " UTC")
+			return Number.isFinite(started) ? started : null
+		}
+		if (process.platform === "win32") return Number(BigInt(identity) / 10000n - 11644473600000n)
+	} catch {
+		// The system does not say.
+	}
+	return null
+}
+
+function processIdentity(pid: number): string | null {
+	try {
+		if (process.platform === "linux") {
+			const boot = String(readFileSync("/proc/sys/kernel/random/boot_id", "utf8")).trim()
+			const stat = String(readFileSync("/proc/" + pid + "/stat", "utf8"))
+			const end = stat.lastIndexOf(")")
+			const fields = stat.slice(end + 1).trim().split(/\s+/)
+			if (end < 0 || fields.length < 20 || !/^[0-9]+$/.test(fields[19]) || !/^[0-9a-f-]+$/.test(boot)) return null
+			return boot + " " + fields[19]
+		}
+		if (process.platform === "darwin") {
+			const fields = String(execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)],
+				{ encoding: "utf8", timeout: 5000, env: { LC_ALL: "C", TZ: "UTC", PATH: "/usr/bin:/bin" }, stdio: ["ignore", "pipe", "ignore"] })).trim().split(/\s+/)
+			return fields.length === 5 ? fields.join(" ") : null
+		}
+		if (process.platform === "win32") {
+			// Arguments apart: the helper ACL check is the plugin's one inline PowerShell call (its repair marker).
+			const identityArgs = ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+				"(Get-Process -Id " + Number(pid) + " -ErrorAction Stop).StartTime.ToFileTimeUtc()"]
+			const text = String(execFileSync(DC_WINDOWS_POWERSHELL, identityArgs,
+				{ encoding: "utf8", timeout: 10000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] })).trim()
+			return /^[1-9][0-9]{0,19}$/.test(text) ? text : null
+		}
+	} catch {
+		// Fall through: the system does not say.
+	}
+	return null
+}
+
+// processEnded reports a process that has exited but keeps its pid: a
+// zombie its parent has not reaped (hookexec procidentity.Ended). It keeps
+// its start but runs nothing. On Windows process.kill already reads the
+// exit code of a process object a handle keeps. False when the system does
+// not say.
+function processEnded(pid: number): boolean {
+	try {
+		if (process.platform === "linux") {
+			const stat = String(readFileSync("/proc/" + pid + "/stat", "utf8"))
+			const end = stat.lastIndexOf(")")
+			const state = end < 0 ? "" : stat.slice(end + 1).trim().split(/\s+/)[0]
+			return state === "Z" || state === "X" || state === "x"
+		}
+		if (process.platform === "darwin") {
+			const state = String(execFileSync("/bin/ps", ["-o", "stat=", "-p", String(pid)],
+				{ encoding: "utf8", timeout: 5000, env: { LC_ALL: "C", PATH: "/usr/bin:/bin" }, stdio: ["ignore", "pipe", "ignore"] })).trim()
+			return state.startsWith("Z")
+		}
+	} catch {
+		// Fall through: the system does not say.
+	}
+	return false
+}
+
+// installLockRecord reads the lock's proc-start record: "absent", "valid"
+// (with its trimmed text), or "unreadable" (not a small regular file, empty,
+// or a read error but its absence).
+async function installLockRecord(path: string): Promise<{ state: "absent" | "valid" | "unreadable"; value: string }> {
+	try {
+		const info = await lstat(path)
+		if (!info.isFile() || info.size > 128) return { state: "unreadable", value: "" }
+		const text = String(readFileSync(path, "utf8")).trim()
+		return text ? { state: "valid", value: text } : { state: "unreadable", value: "" }
+	} catch (error) {
+		return { state: (error as { code?: unknown } | null)?.code === "ENOENT" ? "absent" : "unreadable", value: "" }
+	}
+}
+
+// installLockState is the one install-lock rule of every
+// per-user hook (hookexec installLockStale, the shell hooks, the OpenCode
+// plugin) and of `defenseclaw doctor` (_install_lock_state). It reads no
+// clock and keeps no answer between calls: "none" when dir has no
+// .install.lock and is a folder or absent; "stale" when the lock is a
+// folder, no interrupted-install record sits beside it and its installer is
+// proven gone: its pid names no process, or this plugin's own (no plugin
+// writes a lock), or another process than its proc-start record names (a
+// reused pid); "held" for a live install however long it runs, a lock
+// without a valid pid, a lock without a proc-start record whose pid names a
+// process (1.0.2, 1.0.3), and an owner whose identity cannot be read. A
+// stale lock is no lock; `defenseclaw doctor --fix` or the next installer
+// run removes it.
+async function installLockState(dir: string): Promise<"none" | "stale" | "held"> {
+	const missing = (error: unknown) => (error as { code?: unknown } | null)?.code === "ENOENT"
+	const lock = join(dir, ".install.lock")
+	let info
+	try {
+		info = await lstat(lock)
+	} catch (error) {
+		if (!missing(error)) return "held"
+		try {
+			// A folder that is not one cannot be looked in (Windows reports its
+			// child as absent).
+			if (!(await lstat(dir)).isDirectory()) return "held"
+		} catch (inner) {
+			if (!missing(inner)) return "held"
+		}
+		return "none"
+	}
+	if (!info.isDirectory()) return "held"
+	const owner = await installLockNumber(join(lock, "pid"))
+	if (owner.state !== "valid" || owner.value > 2147483647) return "held"
+	// A live installer's pid names no other process: this one is reused.
+	if (owner.value === process.pid) return "stale"
+	try {
+		process.kill(owner.value, 0)
+	} catch (error) {
+		if ((error as { code?: unknown } | null)?.code === "ESRCH") return "stale"
+	}
+	if (processEnded(owner.value)) return "stale"
+	const identity = await installLockRecord(join(lock, "proc-start"))
+	if (identity.state === "absent") {
+		// A 1.0.2/1.0.3 lock has no identity record: its pid names a later
+		// process when that process started after the lock (GAP-1465).
+		const started = processStartMs(owner.value)
+		return started !== null && started > info.mtimeMs + 2000 ? "stale" : "held"
+	}
+	if (identity.state !== "valid") return "held"
+	const current = processIdentity(owner.value)
+	return current !== null && current !== identity.value ? "stale" : "held"
+}
+
+// installLocks reads the lock of every folder an installer of this account
+// locks: whether one is held, and whether one is stale.
+async function installLocks(): Promise<{ held: boolean; stale: boolean }> {
+	const states: string[] = []
+	for (const dir of installLockDirs()) states.push(await installLockState(dir))
+	return { held: states.includes("held"), stale: states.includes("stale") }
+}
+
+// installLockHeld reports an install that may be running: a lock that is
+// not stale. Every failure and every outage stays closed under it.
+async function installLockHeld(): Promise<boolean> {
+	return (await installLocks()).held
+}
+
+const DC_INSTALL_WINDOW_NOTICE = "DefenseClaw is being installed or upgraded for this account. Its gateway checked this tool call, " +
+	"so it runs (the default and permissive policies let checked calls run during an install; any failure blocks). `defenseclaw-gateway status` shows its state."
+const DC_STALE_INSTALL_LOCK_NOTICE = "DefenseClaw found an install lock whose installer is no longer running, so it ignores it and checks tool calls as usual. " +
+	"Run `defenseclaw doctor --fix` (or the installer again) to remove it."
+let staleLockNoticeShown = false
+
+// installWindow is what an install does to a call the gateway answers:
+// "closed" holds it back while an installer holds this account's data
+// directory and the outage mode the config gives Amp for an install window
+// is not open (the strict tier, a saved closed, any doubt: hook-outage-mode
+// --install-window); "open" lets the answer through with a warning (the
+// default and permissive tiers, or a saved open); "stale" when only a
+// stale lock is there; "none" otherwise.
+async function installWindow(): Promise<"none" | "open" | "closed" | "stale"> {
+	const locks = await installLocks()
+	if (locks.held) return configOutageOpen(true) ? "open" : "closed"
+	return locks.stale ? "stale" : "none"
+}
+
+// withInstallWindowNotice adds to a verdict that lets the call run the
+// warning of an install window, or the one warning of this process about a
+// stale lock.
+function withInstallWindowNotice(data: GatewayResponse, lockWindow: string): GatewayResponse {
+	if (data.action === "block" || data.action === "confirm" || data.outage_notice) return data
+	if (lockWindow === "open") return { ...data, outage_notice: DC_INSTALL_WINDOW_NOTICE }
+	if (lockWindow !== "stale" || staleLockNoticeShown) return data
+	staleLockNoticeShown = true
+	return { ...data, outage_notice: DC_STALE_INSTALL_LOCK_NOTICE }
+}
+
+{{end}}async function perUserInstallInProgress(): Promise<boolean> {
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}	if (DC_FAIL_MODE !== "open") return false
+	return await installLockHeld()
+{{else}}	return false
+{{end}}}
+
+async function failureResponse(reason: string): Promise<GatewayResponse> {
 	if (DC_FAIL_MODE === "closed") {
 		return { action: "block", reason: `DefenseClaw hook failed closed (${reason})` }
 	}
@@ -501,9 +1281,26 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 	// Amp loads plugins once at startup: a foreign plugin present now keeps
 	// running for this process even if its file is deleted later, so a block
 	// found at load holds for the whole process.
-	const startupGuard = runForeignHookCheck("session.load", workspaceRoot)
-	const foreignHookCheck = async (event: string): Promise<string> =>
-		(await startupGuard) || (await runForeignHookCheck(event, workspaceRoot))
+	let startupGuard: Promise<ForeignCheck> | null = runForeignHookCheck("session.load", workspaceRoot)
+	let foreignWarned = false
+	const foreignHookCheck = async (event: string): Promise<string> => {
+		if (await managedLifecycleHeld()) return DC_MANAGED_LIFECYCLE_TEXT
+		if (!startupGuard) startupGuard = runForeignHookCheck("session.load", workspaceRoot)
+		const startup = await startupGuard
+		if (startup.retryable) startupGuard = null
+		if (startup.reason) return startup.reason
+		const call = await runForeignHookCheck(event, workspaceRoot)
+		const warnings = (call.warnings && call.warnings.length ? call.warnings : startup.warnings) || []
+		if (!call.reason && !foreignWarned && warnings.length) {
+			foreignWarned = true
+			try {
+				void Promise.resolve(amp.ui.notify("DefenseClaw warning: " + warnings.join("; "))).catch(() => {})
+			} catch {
+				// A notice never changes the verdict.
+			}
+		}
+		return call.reason
+	}
 
 	async function agentFacts(threadID: string, ctx: { thread: { agent(): Promise<Agent> } }): Promise<AgentFacts> {
 		const cached = agents.get(threadID)
@@ -580,16 +1377,31 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 	}
 
 	async function post(payload: Record<string, unknown>, actionable: boolean): Promise<GatewayResponse> {
-		let body: string
+		if (actionable && await managedLifecycleHeld()) return { action: "block", reason: DC_MANAGED_LIFECYCLE_TEXT }
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}		if (actionable && await installWindow() === "closed") return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+{{end}}		let body: string
 		try {
 			body = JSON.stringify(payload)
 		} catch (error) {
-			return failureResponse(`payload serialization: ${safeError(error)}`)
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (actionable && await installLockHeld()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+{{end}}			return failureResponse(`payload serialization: ${safeError(error)}`)
 		}
 
 		const originalBytes = utf8Bytes(body)
+		let oversizedReview = false
 		if (originalBytes > DC_MAX_BODY_BYTES) {
-			if (actionable) return failureResponse(`payload exceeds ${DC_MAX_BODY_BYTES} bytes`)
+			if (actionable) {
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				if (await installLockHeld()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+				if (configOutageOpen(false)) {
+					const review = boundedReview(payload, originalBytes)
+					if (review) {
+						body = review
+						oversizedReview = true
+					}
+				}
+{{end}}				if (!oversizedReview) return failureResponse(`payload exceeds ${DC_MAX_BODY_BYTES} bytes`)
+			}
+			if (!oversizedReview) {
 			const reduced = {
 				hook_event_name: payload.hook_event_name || "",
 				session_id: payload.session_id || "",
@@ -617,6 +1429,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 				tool_response: "[DefenseClaw payload omitted: size limit exceeded]",
 			}
 			body = JSON.stringify(reduced)
+			}
 		}
 
 		let token: string
@@ -638,7 +1451,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 		const headers: Record<string, string> = {
 			"Content-Type": "application/json",
 			"X-DefenseClaw-Client": "amp-plugin/1.0",
-			...identityHeaders(),
+			...(await identityHeaders()),
 		}
 		if (token) headers.Authorization = `Bearer ${token}`
 
@@ -649,19 +1462,68 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 				body,
 				signal: controller.signal,
 			}, token), controller.signal){{end}}
-			if (!response.ok) return failureResponse(`HTTP ${response.status}`)
+			if (!response.ok) {
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				// During an install an error status blocks (GAP-1372).
+				if (actionable && await installLockHeld()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+{{end}}				if (oversizedReview) return { action: "block", reason: "DefenseClaw hook failed closed (gateway refused bounded payload review)" }
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				if (response.status >= 500 && (DC_FAIL_MODE === "closed" || await perUserInstallInProgress())) {
+					return { action: "block", reason: await perUserGatewayDownText(null, response.status) }
+				}
+{{end}}				return failureResponse(`HTTP ${response.status}`)
+			}
 
-			const data = await response.json() as GatewayResponse
+			const data = gatewayJSON(await response.text()) as GatewayResponse
+			if (actionable && await managedLifecycleHeld()) return { action: "block", reason: DC_MANAGED_LIFECYCLE_TEXT }
+
 			if (!data || !["allow", "block", "confirm", "alert"].includes(data.action || "")) {
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				if (actionable && await installLockHeld()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+{{end}}				if (oversizedReview) return { action: "block", reason: "DefenseClaw hook failed closed (invalid bounded payload verdict)" }
 				return failureResponse("invalid gateway verdict")
 			}
-			return data
-		} catch (error) {
-			if (await deploymentRemoved()) return { action: "allow" }
-			if (DC_FAIL_MODE === "closed" && (DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && gatewayStopped(error)) {
+			if (oversizedReview && (data.action === "allow" || data.action === "alert")) {
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				await logFailOpen("payload exceeded cap; oversize, command not inspected", payload)
+				const notice = "DefenseClaw warning: this hook payload exceeded the bounded inspection cap (oversize, command not inspected); the gateway allowed and audited this call."
+{{else}}				await logFailOpen("payload exceeded cap; bounded prefix reviewed by gateway", payload)
+				const notice = "DefenseClaw warning: this hook payload exceeded the bounded inspection cap; the gateway allowed and audited this call."
+{{end}}				if (data.action === "allow") data.outage_notice = notice
+				else await notifyIfForeground(String(payload.thread_id || ""), notice)
+			}
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			const lockWindow = actionable ? await installWindow() : "none"
+			if (lockWindow === "closed") return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+			return withInstallWindowNotice(data, lockWindow)
+{{else}}			return data
+{{end}}		} catch (error) {
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (error && typeof error === "object" && "code" in error && error.code === "DC_PEER_UNVERIFIED") {
+				return { action: "block", reason: `DefenseClaw hook failed closed (${safeError(error)})` }
+			}
+			if (DC_PER_USER_NATIVE_POST) {
+				if (await perUserOutageOpen(error)) {
+					if (actionable) await logFailOpen("gateway unreachable", payload)
+					return { action: "allow", outage_notice: actionable ? await perUserOutageNotice() : "" }
+				}
+				if ((error as { status?: unknown } | null)?.status === 7) {
+					return { action: "block", reason: await perUserGatewayDownText(error, 0) }
+				}
+				// Name the cause and record the call (GAP-1898, GAP-1236).
+				const cause = perUserFailureCause(error)
+				if (actionable) await logFailOpen(cause, payload, true)
+				return { action: "block", reason: `DefenseClaw hook failed closed (${cause})` }
+			}
+{{else if not .Sandbox}}			if (error && typeof error === "object" && "code" in error && error.code === "DC_PEER_UNVERIFIED") {
+				return { action: "block", reason: `DefenseClaw hook failed closed (${safeError(error)})` }
+			}
+			if (DC_PER_USER_NATIVE_POST) {
+				return { action: "block", reason: "DefenseClaw hook failed closed (per-user gateway peer unverified)" }
+			}
+{{end}}			if (await deploymentRemoved()) return { action: "allow" }
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (actionable && await installLockHeld()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+{{end}}			if (DC_FAIL_MODE === "closed" && (DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && gatewayStopped(error)) {
 				return { action: "block", reason: DC_GATEWAY_STOPPED_TEXT }
 			}
-			return failureResponse(safeError(error))
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (DC_FAIL_MODE === "closed" || await perUserInstallInProgress()) {
+				return { action: "block", reason: await perUserGatewayDownText(error, 0) }
+			}
+{{end}}			return failureResponse(safeError(error))
 		} finally {
 			clearTimeout(timer)
 		}
@@ -673,6 +1535,24 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			await amp.ui.notify(message)
 		} catch {
 			// Alert delivery is observe-only and must never change the verdict.
+		}
+	}
+
+	const warnedUncheckedThreads = new Set<string>()
+	async function warnUncheckedThread(
+		threadID: string,
+		message: string,
+		ctx: { ui: { notify(message: string): Promise<void> } },
+	) {
+		if (!message || warnedUncheckedThreads.has(threadID)) return
+		warnedUncheckedThreads.add(threadID)
+		if (warnedUncheckedThreads.size > 1024) warnedUncheckedThreads.delete(warnedUncheckedThreads.values().next().value as string)
+		try {
+			// UI notifications reach the user without becoming a model turn.
+			await ctx.ui.notify(message)
+		} catch {
+			// Retry on the next call if the UI was temporarily unavailable.
+			warnedUncheckedThreads.delete(threadID)
 		}
 	}
 
@@ -772,6 +1652,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			await notifyIfForeground(threadID, verdict.additional_context || verdict.reason || "DefenseClaw flagged this tool call.")
 			return { action: "allow" }
 		default:
+			if (verdict.outage_notice) await warnUncheckedThread(threadID, verdict.outage_notice, ctx)
 			return { action: "allow" }
 		}
 	})
@@ -819,7 +1700,10 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			)
 			return
 		default:
-			// Returning void preserves Amp's original status and output.
+			// A result kept because this account's gateway is down carries the
+			// same one warning as the call. Returning void preserves Amp's
+			// original status and output.
+			if (verdict.outage_notice) await warnUncheckedThread(threadID, verdict.outage_notice, ctx)
 			return
 		}
 	})

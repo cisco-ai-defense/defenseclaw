@@ -12,3 +12,5 @@ type systemReader struct{}
 var System Reader = systemReader{}
 
 func (systemReader) Read(string, os.FileMode) (View, error) { return View{}, nil }
+
+func ReadAccessXattr(string) (View, error) { return View{}, nil }

@@ -237,13 +237,13 @@ func TestWatcherMetricsNeverReachLegacyProvider(t *testing.T) {
 	}
 
 	logs, generated := runtime.snapshot()
-	// GAP-0133: the failed move is an audit event, not only a log line.
-	if len(logs) != 1 {
-		t.Fatalf("audit records for the asset that could not be quarantined = %d, want 1", len(logs))
+	// GAP-0133: retain the enforcement audit and a visible runtime alert.
+	if len(logs) != 2 {
+		t.Fatalf("quarantine enforcement and alert records = %d, want 2", len(logs))
 	}
-	// Seven watcher metrics and the counter of the quarantine failure's audit record.
-	if len(generated) != 8 {
-		t.Fatalf("generated watcher metrics = %d, want 8", len(generated))
+	// Seven watcher metrics, two audit counters, and the runtime alert counter.
+	if len(generated) != 10 {
+		t.Fatalf("generated watcher and alert metrics = %d, want 10", len(generated))
 	}
 }
 
@@ -273,7 +273,7 @@ func TestEmitRescanResultUsesGeneratedV8AndPreservesForensics(t *testing.T) {
 			Title: "Unsafe instruction", Scanner: "skill-scanner",
 		}},
 	}
-	scanID := w.emitRescanResult(ctx, result)
+	scanID := w.emitRescanResult(ctx, InstallEvent{Type: InstallSkill, Path: result.Target}, result)
 	if scanID == "" || scanID != result.ScanID {
 		t.Fatalf("scan id = %q, result scan id = %q", scanID, result.ScanID)
 	}

@@ -358,3 +358,46 @@ func TestCodexHookRestoresNestedLifecycleFromSignedHistoryAfterAPIRestart(t *tes
 		t.Fatalf("post-restart lifecycle projection=%#v", got)
 	}
 }
+
+// GAP-0186: a root agent's hooks all look like an unresolved self root, and
+// each one read the signed lifecycle history again, which scanned every audit
+// row of the session. The history is read once while the process holds the
+// session; a session it no longer holds, or a read that failed, is read again.
+func TestRestoreHookLifecycleReadsHistoryOncePerHeldSession(t *testing.T) {
+	reader := &hookLifecycleHistoryStub{found: false}
+	root := restartHookMeta("tool_start", "tool", "execution-live")
+	key := hookSessionStateKey(root)
+	api := &APIServer{
+		observabilityV8:       reader,
+		hookSessionStates:     map[string]hookSessionState{key: {meta: root}},
+		hookSessionStateOrder: []string{key},
+	}
+	for range 50 {
+		if got := api.restoreHookSessionLifecycle(t.Context(), root); !reflect.DeepEqual(got, root) {
+			t.Fatalf("restore changed a root agent with no history: %#v", got)
+		}
+	}
+	if reader.calls != 1 {
+		t.Fatalf("history reads for 50 hooks of one held session = %d, want 1", reader.calls)
+	}
+
+	api.llmPromptMu.Lock()
+	delete(api.hookSessionStates, key)
+	api.llmPromptMu.Unlock()
+	api.restoreHookSessionLifecycle(t.Context(), root)
+	if reader.calls != 2 {
+		t.Fatalf("history reads after the session state was dropped = %d, want 2", reader.calls)
+	}
+
+	failing := &hookLifecycleHistoryStub{err: context.DeadlineExceeded}
+	api = &APIServer{
+		observabilityV8:       failing,
+		hookSessionStates:     map[string]hookSessionState{key: {meta: root}},
+		hookSessionStateOrder: []string{key},
+	}
+	api.restoreHookSessionLifecycle(t.Context(), root)
+	api.restoreHookSessionLifecycle(t.Context(), root)
+	if failing.calls != 2 {
+		t.Fatalf("history reads after a failed read = %d, want 2", failing.calls)
+	}
+}

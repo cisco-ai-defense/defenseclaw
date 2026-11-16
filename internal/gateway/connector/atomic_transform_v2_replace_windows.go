@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -294,8 +295,7 @@ func repairAtomicTransformV2ReplacementDACL(
 	if len(beforeDescriptor) > 1 {
 		return false, fmt.Errorf("multiple ReplaceFileW DACL repair test hooks")
 	}
-	if receipt.Old.PreservedMetadataSHA256 != "" &&
-		observed.Target.preservedMetadataDigest == receipt.Old.PreservedMetadataSHA256 {
+	if atomicTransformV2PublishedMetadataMatches(receipt, observed.Target) {
 		return false, nil
 	}
 	if observed.Stage.exists || !atomicTransformV2BackupOldMatches(receipt.Old, observed.Backup) ||
@@ -345,6 +345,12 @@ func repairAtomicTransformV2ReplacementDACL(
 	if err != nil {
 		return false, err
 	}
+	if receipt.OldPreservedEAMetadataSHA256 != "" {
+		if targetMetadata.EACopyability != atomicTransformEACopyable || oldMetadata.EACopyability != atomicTransformEACopyable {
+			return false, nil
+		}
+		targetMetadata.Streams, oldMetadata.Streams = targetMetadata.PreservedStreams, oldMetadata.PreservedStreams
+	}
 	if !atomicTransformV2WindowsPreservedMatchesExceptDACL(targetMetadata, oldMetadata) {
 		return false, nil
 	}
@@ -353,6 +359,14 @@ func repairAtomicTransformV2ReplacementDACL(
 	)
 	if err != nil {
 		return false, err
+	}
+	if !normalized {
+		normalized, err = atomicTransformV2WindowsDACLIsInheritedReplaceMerge(
+			targetMetadata.DACLCanonical, oldMetadata.DACLCanonical,
+		)
+		if err != nil {
+			return false, err
+		}
 	}
 	if !normalized {
 		return false, nil
@@ -476,7 +490,7 @@ func repairAtomicTransformV2ReplacementOwner(
 	if !receipt.PreserveOldOwner || observed.Stage.exists ||
 		!atomicTransformV2BackupOldMatches(receipt.Old, observed.Backup) ||
 		!atomicTransformV2StageContentMatches(receipt.Stage, observed.Target) ||
-		observed.Target.preservedMetadataDigest != receipt.Old.PreservedMetadataSHA256 ||
+		!atomicTransformV2PublishedMetadataMatches(receipt, observed.Target) ||
 		observed.Target.ownerGroupDigest != receipt.Stage.OwnerGroupSHA256 ||
 		observed.Target.linkCount != 1 || observed.Target.creationTime != receipt.Old.CreationTime {
 		return false, nil
@@ -998,6 +1012,81 @@ func restoreAtomicTransformV2Replace1177(
 	return reportAtomicTransformV2ReplaceProgress(progress, atomicTransformV2ReplaceBoundary1177OldRestored)
 }
 
+// atomicTransformV2EnrolledInheritedDACLIsSafe reports whether an enrolled
+// user's config still has the DACL it inherits from that user's profile and
+// that DACL is as private as the converged one: not protected, allow entries
+// only, each for the owner, LocalSystem or Administrators, or at most read and
+// execute (0x1200a9) for the DefenseClaw gateway service, the inventory read
+// DefenseClaw itself puts on the user's agent folders. The owner and
+// LocalSystem must hold full access. Converging such a file to the protected
+// private DACL turned the user's inherited settings.json explicit and dropped
+// the gateway's inherited read, so status could no longer read it (GAP-2096).
+// Any other principal, a deny entry or a gateway right beyond read and execute
+// is not safe, and the file converges as before.
+func atomicTransformV2EnrolledInheritedDACLIsSafe(descriptor *windows.SECURITY_DESCRIPTOR, owner *windows.SID) bool {
+	if descriptor == nil || owner == nil {
+		return false
+	}
+	control, _, err := descriptor.Control()
+	if err != nil || control&windows.SE_DACL_PROTECTED != 0 || control&windows.SE_DACL_PRESENT == 0 {
+		return false
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil || dacl.AceCount == 0 {
+		return false
+	}
+	gateways := atomicTransformV2GatewayServiceSIDs()
+	const readExecute windows.ACCESS_MASK = 0x001200a9
+	const fileAllAccess windows.ACCESS_MASK = 0x001F01FF
+	var ownerMask, systemMask windows.ACCESS_MASK
+	for index := uint16(0); index < dacl.AceCount; index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil || ace == nil {
+			return false
+		}
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+			return false
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		mask := ace.Mask
+		if mask&windows.GENERIC_ALL != 0 {
+			mask |= fileAllAccess
+		}
+		if ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
+			mask = 0
+		}
+		switch {
+		case sid.Equals(owner):
+			ownerMask |= mask
+		case sid.IsWellKnown(windows.WinLocalSystemSid):
+			systemMask |= mask
+		case sid.IsWellKnown(windows.WinBuiltinAdministratorsSid):
+		default:
+			gateway := false
+			for _, candidate := range gateways {
+				gateway = gateway || sid.Equals(candidate)
+			}
+			if !gateway || ace.Mask&^readExecute != 0 {
+				return false
+			}
+		}
+	}
+	return ownerMask&fileAllAccess == fileAllAccess && systemMask&fileAllAccess == fileAllAccess
+}
+
+// atomicTransformV2GatewayServiceSIDs returns the managed gateway's service
+// SID: the account the service environment pins, and the production
+// NT SERVICE\DefenseClawGateway, derived from its name when the service is gone.
+func atomicTransformV2GatewayServiceSIDs() []*windows.SID {
+	var sids []*windows.SID
+	for _, account := range []string{os.Getenv(managed.WindowsServiceAccountEnv), managed.DefaultGatewayServiceAccount} {
+		if sid, err := managed.WindowsServiceAccountSID(account); err == nil && sid != nil {
+			sids = append(sids, sid)
+		}
+	}
+	return sids
+}
+
 // convergeAtomicTransformV2ExistingProtection runs before the snapshot and Ra
 // receipt are created. This guarantees that a requested private replacement
 // can inherit only a safe DACL while keeping already-safe custom DACLs intact.
@@ -1075,7 +1164,23 @@ func convergeAtomicTransformV2ExistingProtection(
 		return false, fmt.Errorf("resolve current user while converging config protection: %w", err)
 	}
 	if owner == nil || (!owner.Equals(userSID) && (expectedOwner == nil || !owner.Equals(expectedOwner))) {
-		return false, fmt.Errorf("refusing to rewrite protection on a config not owned by the current user or enrolled target")
+		if expectedOwner != nil {
+			// An enrolled-target edit proved the owner before the snapshot
+			// (validateAtomicTransformV2ExpectedOwner); a different owner here
+			// is a race, not drift.
+			return false, fmt.Errorf("refusing to rewrite protection on a config not owned by the current user or enrolled target")
+		}
+		// An agent once run elevated, a backup restore or a provisioning
+		// script leaves the config owned by Administrators. The installer or
+		// the LocalSystem guardian transfers ownership back to the user on the
+		// exact inode this handle holds; the caller then takes a new snapshot
+		// and the DACL convergence runs as the owner. A foreign user owner, or
+		// a caller that cannot repair, stays an error with the reason spelled
+		// out.
+		if transferErr := transferAtomicTransformV2ConfigOwner(path, handle, owner, userSID); transferErr != nil {
+			return false, transferErr
+		}
+		return true, nil
 	}
 	foreignOwner := !owner.Equals(userSID)
 	if foreignOwner {
@@ -1104,6 +1209,12 @@ func convergeAtomicTransformV2ExistingProtection(
 		return validateAtomicTransformBoundFilePrivatePlatform(file)
 	}
 	if err := validatePrivate(); err == nil {
+		return false, nil
+	}
+	if foreignOwner && atomicTransformV2EnrolledInheritedDACLIsSafe(current, owner) {
+		// The enrolled user's file still inherits a DACL as private as the
+		// converged one. ReplaceFileW publishes Old's DACL, so the edit keeps
+		// it inherited, with the gateway's inventory read (GAP-2096).
 		return false, nil
 	}
 	private, err := atomicTransformPrivateSecurityDescriptorForOwner(owner, foreignOwner)
@@ -1142,4 +1253,58 @@ func convergeAtomicTransformV2ExistingProtection(
 		return false, fmt.Errorf("config name changed after handle-bound protection convergence")
 	}
 	return before.protectionDigest != after.protectionDigest, nil
+}
+
+// transferAtomicTransformV2ConfigOwner re-owns an administrator-owned config
+// to the current (impersonated) user from a privileged thread. The repair
+// handle is bound to the held handle's file identity, so a concurrent rename
+// cannot redirect it.
+func transferAtomicTransformV2ConfigOwner(
+	path string, held windows.Handle, owner, user *windows.SID,
+) error {
+	ownerText := "<nil>"
+	if owner != nil {
+		ownerText = owner.String()
+	}
+	if owner == nil || !managed.IsWindowsTrustedAdminOwner(owner) {
+		return fmt.Errorf(
+			"config %s is owned by %s, not the current user %s; refusing to rewrite its protection",
+			path, ownerText, user.String(),
+		)
+	}
+	want, err := windowsManagedHandleIdentity(held)
+	if err != nil {
+		return fmt.Errorf("read config identity before owner transfer: %w", err)
+	}
+	repairErr := runWindowsManagedPrivilegedRepair(func() error {
+		handle, openErr := openWindowsManagedRepairHandle(path, false, windows.READ_CONTROL|windows.WRITE_OWNER)
+		if openErr != nil {
+			return openErr
+		}
+		defer windows.CloseHandle(handle)
+		got, idErr := windowsManagedHandleIdentity(handle)
+		if idErr != nil {
+			return idErr
+		}
+		if got != want {
+			return errors.New("config path no longer names the held config")
+		}
+		return windows.SetSecurityInfo(
+			handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION,
+			user, nil, nil, nil,
+		)
+	})
+	if errors.Is(repairErr, errWindowsManagedRepairUnprivileged) {
+		return fmt.Errorf(
+			"config %s is owned by %s, not the current user %s; the DefenseClaw installer or guardian transfers it on the next reconcile",
+			path, ownerText, user.String(),
+		)
+	}
+	if repairErr != nil {
+		return fmt.Errorf("transfer config %s ownership from %s to %s: %w", path, ownerText, user.String(), repairErr)
+	}
+	emitManagedResilience(managed.MarkerRepair, path,
+		fmt.Sprintf("transferred config ownership from %s to the target user", ownerText),
+		map[string]string{"sid": user.String()})
+	return nil
 }

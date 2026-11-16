@@ -39,7 +39,9 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"gopkg.in/yaml.v3"
 )
 
@@ -70,7 +72,42 @@ type RulePack struct {
 	// manifestDigest is the sha256 of the pack's defenseclaw-pack.json, ""
 	// without one. Its posture sets the pack's default levels, so it is
 	// part of the pin and of Summary (GAP-0431).
-	manifestDigest string
+	manifestDigest  string
+	manifestPosture string
+	compilation     *rulePackCompilation
+}
+
+// rulePackCompilation is shared by a loaded pack and its in-memory variants.
+// Keys are the complete source strings, so editing a rule never reuses a
+// result compiled for its previous value.
+type rulePackCompilation struct {
+	mu           sync.Mutex
+	patterns     map[string]*regexp.Regexp
+	semanticOnce sync.Once
+	semantic     *semantic.Compiler
+	semanticErr  error
+}
+
+// SemanticCompiler returns the candidate's expression compiler. A pack built
+// directly in memory keeps the independent compiler behavior.
+func (rp *RulePack) SemanticCompiler() (*semantic.Compiler, error) {
+	if rp == nil || rp.compilation == nil {
+		return semantic.NewCompiler()
+	}
+	c := rp.compilation
+	c.semanticOnce.Do(func() { c.semantic, c.semanticErr = semantic.NewCompiler() })
+	return c.semantic, c.semanticErr
+}
+
+// ValidatedPattern returns a pattern compiled during rule-pack validation.
+// A missing entry must be compiled and checked by the caller.
+func (rp *RulePack) ValidatedPattern(pattern string) *regexp.Regexp {
+	if rp == nil || rp.compilation == nil {
+		return nil
+	}
+	rp.compilation.mu.Lock()
+	defer rp.compilation.mu.Unlock()
+	return rp.compilation.patterns[pattern]
 }
 
 // RulePackError is the safe, machine-readable error returned by the strict
@@ -225,15 +262,19 @@ type RulesFileYAML struct {
 
 // RuleDefYAML is a single detection rule definition in YAML.
 type RuleDefYAML struct {
-	ID           string   `yaml:"id"`
-	Enabled      *bool    `yaml:"enabled,omitempty"`
-	Pattern      string   `yaml:"pattern"`
-	Expression   string   `yaml:"expression,omitempty"`
-	ToolCallOnly bool     `yaml:"tool_call_only,omitempty"`
-	Title        string   `yaml:"title"`
-	Severity     string   `yaml:"severity"`
-	Confidence   float64  `yaml:"confidence"`
-	Tags         []string `yaml:"tags"`
+	ID           string `yaml:"id"`
+	Enabled      *bool  `yaml:"enabled,omitempty"`
+	Pattern      string `yaml:"pattern"`
+	Expression   string `yaml:"expression,omitempty"`
+	ToolCallOnly bool   `yaml:"tool_call_only,omitempty"`
+	// MigratedLiteral marks a rule the 0.8.x upgrade gave an expression
+	// from its literal pattern (MigratedLiteralRule). Only a marked rule
+	// also blocks when its literal is anywhere in a tool call's text.
+	MigratedLiteral bool     `yaml:"migrated_literal,omitempty"`
+	Title           string   `yaml:"title"`
+	Severity        string   `yaml:"severity"`
+	Confidence      float64  `yaml:"confidence"`
+	Tags            []string `yaml:"tags"`
 
 	decoded       bool `yaml:"-"`
 	confidenceSet bool `yaml:"-"`
@@ -409,17 +450,21 @@ func loadRulePack(dir string, validateManifest bool) (*RulePack, error) {
 		if err != nil {
 			return nil, err
 		}
-		if validateManifest {
-			var parsed struct {
-				Posture string `json:"posture"`
-			}
-			if err := json.Unmarshal(data, &parsed); err != nil {
+		var parsed struct {
+			Posture string `json:"posture"`
+		}
+		if err := json.Unmarshal(data, &parsed); err != nil {
+			if validateManifest {
 				return nil, rulePackErr(PackManifestFile, "invalid_manifest", "manifest must be valid JSON with a known posture")
 			}
-			switch strings.ToLower(strings.TrimSpace(parsed.Posture)) {
+		} else {
+			switch posture := strings.ToLower(strings.TrimSpace(parsed.Posture)); posture {
 			case "default", "strict", "permissive":
+				rp.manifestPosture = posture
 			default:
-				return nil, rulePackErr(PackManifestFile, "invalid_manifest", "manifest must name default, strict or permissive posture")
+				if validateManifest {
+					return nil, rulePackErr(PackManifestFile, "invalid_manifest", "manifest must name default, strict or permissive posture")
+				}
 			}
 		}
 		sum := sha256.Sum256(data)
@@ -458,8 +503,20 @@ func (rp *RulePack) FilesDigest() string {
 	return rp.filesDigest
 }
 
+// Posture is the level named by the manifest bytes loaded and covered by
+// FilesDigest. An absent or unrecognized optional manifest has no posture.
+func (rp *RulePack) Posture() string {
+	if rp == nil {
+		return ""
+	}
+	return rp.manifestPosture
+}
+
 func loadEmbeddedRulePack() (*RulePack, error) {
-	rp := &RulePack{JudgeConfigs: make(map[string]*JudgeYAML, len(knownJudgeNames))}
+	rp := &RulePack{
+		JudgeConfigs: make(map[string]*JudgeYAML, len(knownJudgeNames)),
+		compilation:  &rulePackCompilation{patterns: make(map[string]*regexp.Regexp)},
+	}
 
 	suppressions, err := decodeEmbeddedYAML[SuppressionsConfig]("suppressions.yaml")
 	if err != nil {
@@ -582,12 +639,12 @@ func inspectRulePackDirectory(dir string) (*rulePackInventory, error) {
 			return nil
 		}
 		if !isRecognizedRulePackYAML(rel) {
-			return rulePackErr(safeInventoryPath(rel), "inventory_unexpected", "unexpected YAML component")
+			return rulePackErr(safeInventoryPath(rel), "inventory_unexpected", unexpectedYAMLReason(safeInventoryPath(rel)))
 		}
 
 		fileInfo, infoErr := entry.Info()
 		if infoErr != nil {
-			return rulePackErr(rel, "file_unreadable", "component cannot be inspected")
+			return rulePackFileUnreadable(rel, "inspected", infoErr)
 		}
 		if entry.Type()&os.ModeSymlink != 0 || !fileInfo.Mode().IsRegular() {
 			return rulePackErr(rel, "file_type", "component must be a regular file")
@@ -616,6 +673,27 @@ func inspectRulePackDirectory(dir string) (*rulePackInventory, error) {
 		return nil, rulePackErr(".", "inventory_unreadable", "rule-pack inventory cannot be inspected")
 	}
 	return inventory, nil
+}
+
+// unexpectedYAMLReason says what to take out of the pack folder for a YAML file
+// the loader does not recognize. rel is the safe, slash-separated path under
+// the pack root. A file below a folder that is neither rules nor judge (a copy
+// of another pack placed inside this one, such as default/judge/injection.yaml)
+// is named by that folder, since removing the one file would only surface the
+// next; any other file is named by itself. The text holds relative names only
+// (RulePackError.Reason never carries an absolute path); the installer adds the
+// absolute folder (GAP-1566).
+func unexpectedYAMLReason(rel string) string {
+	const base = "unexpected YAML component"
+	const next = ", then run the command or installer again"
+	if rel == "" || rel == "." {
+		return base
+	}
+	first, _, nested := strings.Cut(rel, "/")
+	if nested && first != "rules" && first != "judge" {
+		return base + ": the folder " + first + " does not belong in a rule pack (a copy of another pack placed inside this one?); move " + first + " out of the rule-pack folder or remove it" + next
+	}
+	return base + ": move " + rel + " out of the rule-pack folder or remove it" + next
 }
 
 // isPackManifestName reports whether rel names the pack manifest. Windows
@@ -654,12 +732,15 @@ func readRulePackFile(file diskRulePackFile) ([]byte, error) {
 		if errors.Is(err, errRulePackFileType) {
 			return nil, rulePackErr(file.relPath, "file_type", "component must be a regular file")
 		}
-		return nil, rulePackErr(file.relPath, "file_unreadable", "component cannot be read")
+		return nil, rulePackFileUnreadable(file.relPath, "read", err)
 	}
 	defer handle.Close()
 
 	info, err := handle.Stat()
-	if err != nil || !info.Mode().IsRegular() {
+	if err != nil {
+		return nil, rulePackFileUnreadable(file.relPath, "inspected", err)
+	}
+	if !info.Mode().IsRegular() {
 		return nil, rulePackErr(file.relPath, "file_type", "component must be a regular file")
 	}
 	if info.Size() > maxRulePackFileBytes {
@@ -667,12 +748,20 @@ func readRulePackFile(file diskRulePackFile) ([]byte, error) {
 	}
 	data, err := io.ReadAll(io.LimitReader(handle, maxRulePackFileBytes+1))
 	if err != nil {
-		return nil, rulePackErr(file.relPath, "file_unreadable", "component cannot be read")
+		return nil, rulePackFileUnreadable(file.relPath, "read", err)
 	}
 	if len(data) > maxRulePackFileBytes {
 		return nil, rulePackErr(file.relPath, "file_size_limit", "component exceeds the per-file byte limit")
 	}
 	return data, nil
+}
+
+func rulePackFileUnreadable(rel, action string, err error) *RulePackError {
+	reason := "component cannot be " + action
+	if errors.Is(err, fs.ErrPermission) {
+		reason += " by this account (access denied)"
+	}
+	return rulePackErr(rel, "file_unreadable", reason)
 }
 
 func decodeStrictYAML(data []byte, rel string, out any) error {
@@ -981,6 +1070,37 @@ func (rp *RulePack) validate(allowEmptyCategories bool) error {
 	return rp.validateSensitiveTools()
 }
 
+// countSemanticRules counts the rules with an expression, as
+// validateRuleFiles does.
+func countSemanticRules(files []*RulesFileYAML) int {
+	count := 0
+	for _, ruleFile := range files {
+		if ruleFile == nil {
+			continue
+		}
+		for _, rule := range ruleFile.Rules {
+			if rule.Expression != "" || (rule.decoded && rule.expressionSet) {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+// CandidateRemedy is the action a config writer names when a candidate
+// config selects a pack that fails with e (config.CheckCandidateAssets):
+// a catalog over a limit needs fewer rules, not another reference.
+func (e *RulePackError) CandidateRemedy() string {
+	if e == nil {
+		return ""
+	}
+	switch e.Code {
+	case "semantic_rule_count_limit", "semantic_catalog_cost_limit", "rule_count_limit":
+		return "select fewer rules (disable rules, or remove guardrail.rules protections), then retry"
+	}
+	return ""
+}
+
 func (rp *RulePack) validateRuleFiles(allowEmptyCategories bool) error {
 	seenCategories := make(map[string]string, len(rp.RuleFiles))
 	seenIDs := make(map[string]struct{})
@@ -1025,7 +1145,7 @@ func (rp *RulePack) validateRuleFiles(allowEmptyCategories bool) error {
 				return rulePackErr(rel, "duplicate_rule_id", fmt.Sprintf("rule %d id duplicates another rule", ruleIndex))
 			}
 			seenIDs[ruleID] = struct{}{}
-			if err := validateRequiredRegex(rel, ruleFieldLabel(ruleIndex, ruleID)+" pattern", rule.Pattern); err != nil {
+			if err := rp.validateRulePattern(rel, ruleFieldLabel(ruleIndex, ruleID)+" pattern", rule.Pattern); err != nil {
 				return err
 			}
 			hasExpression := rule.Expression != "" || (rule.decoded && rule.expressionSet)
@@ -1038,11 +1158,17 @@ func (rp *RulePack) validateRuleFiles(allowEmptyCategories bool) error {
 			if hasExpression {
 				semanticRules++
 				if semanticRules > maxSemanticRules {
-					return rulePackErr(rel, "semantic_rule_count_limit", "rule pack contains too many semantic rules")
+					// The limit is on the whole catalog, protections composed
+					// in included, so name no file of it (GAP-0965).
+					return rulePackErr(".", "semantic_rule_count_limit", fmt.Sprintf(
+						"the rule catalog has %d rules with an expression, more than the limit of %d "+
+							"(rules that guardrail.rules protections add count too); disable or remove rules or "+
+							"protections, or split the rules across packs",
+						countSemanticRules(rp.RuleFiles), maxSemanticRules))
 				}
 				if compiler == nil {
 					var err error
-					compiler, err = semantic.NewCompiler()
+					compiler, err = rp.SemanticCompiler()
 					if err != nil {
 						return rulePackErr(rel, "semantic_unavailable", "semantic expression validation is unavailable")
 					}
@@ -1403,20 +1529,42 @@ func (rp *RulePack) validateSensitiveTools() error {
 }
 
 func validateRequiredRegex(rel, field, pattern string) error {
-	if strings.TrimSpace(pattern) == "" {
-		return rulePackErr(rel, "validation", field+" must not be blank")
+	_, err := compileRequiredRegex(rel, field, pattern)
+	return err
+}
+
+func (rp *RulePack) validateRulePattern(rel, field, pattern string) error {
+	if rp.ValidatedPattern(pattern) != nil {
+		return nil
 	}
-	if len(pattern) > maxRegexBytes {
-		return rulePackErr(rel, "pattern_size_limit", field+" exceeds 2048 bytes")
+	re, err := compileRequiredRegex(rel, field, pattern)
+	if err != nil {
+		return err
 	}
-	if _, err := regexp.Compile(pattern); err != nil {
-		return rulePackErr(rel, "regex", field+" is not a valid Go regular expression"+regexErrorReason(err))
+	if rp.compilation != nil {
+		rp.compilation.mu.Lock()
+		rp.compilation.patterns[pattern] = re
+		rp.compilation.mu.Unlock()
 	}
 	return nil
 }
 
+func compileRequiredRegex(rel, field, pattern string) (*regexp.Regexp, error) {
+	if strings.TrimSpace(pattern) == "" {
+		return nil, rulePackErr(rel, "validation", field+" must not be blank")
+	}
+	if len(pattern) > maxRegexBytes {
+		return nil, rulePackErr(rel, "pattern_size_limit", field+" exceeds 2048 bytes")
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, rulePackErr(rel, "regex", field+" is not a valid Go regular expression"+regexErrorReason(err))
+	}
+	return re, nil
+}
+
 // safeRuleIDPattern bounds the rule ids echoed in validation errors.
-var safeRuleIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`)
+var safeRuleIDPattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`)
 
 // ruleFieldLabel names a rule by its id and its 1-based place in the file, so
 // an author can find it (GAP-1225). An id outside the safe set is left out.
@@ -1472,6 +1620,23 @@ func safeJudgeName(name string) string {
 		}
 	}
 	return "component"
+}
+
+func init() { config.RegisterCustomRulePackValidator(validateCustomRulePack) }
+
+// validateCustomRulePack is the config-load verdict on a guardrail.custom_packs
+// folder, made with the loader and validation the gateway uses for a
+// generation: the digest of the files it loaded and the posture its manifest
+// names. config compares the digest with the entry's pin.
+func validateCustomRulePack(dir string) (digest, posture string, err error) {
+	pack, err := LoadRulePack(dir)
+	if err != nil {
+		return "", "", err
+	}
+	if err := validateRulePack(pack); err != nil {
+		return "", "", err
+	}
+	return "sha256:" + pack.FilesDigest(), pack.Posture(), nil
 }
 
 // RulePackDigest is the FilesDigest of the valid pack in dir, the value
@@ -1608,7 +1773,7 @@ func semanticCompileReason(label string, code semantic.CompileCode) string {
 	switch code {
 	case semantic.CompileStaticCost:
 		return fmt.Sprintf("%s expression's estimated worst-case evaluation cost is above the per-rule limit of %d "+
-			"(lists and strings are costed at their maximum sizes); a list macro (exists, all, map, filter) nested inside "+
+			"(lists and strings are costed at their maximum sizes); an exists() or all() nested inside "+
 			"another multiplies the cost, so test one list, prefer ==, in or startsWith over contains or matches inside "+
 			"a nested macro, or split the check into separate rules", label, semanticRuleStaticCostLimit)
 	case semantic.CompileStaticCostUnbounded:
@@ -1633,7 +1798,7 @@ var semanticCompileProblems = map[semantic.CompileCode]string{
 	semantic.CompileResultType:         "it must evaluate to true or false",
 	semantic.CompileSurface:            "it uses a field or function that rule-pack expressions don't allow",
 	semantic.CompileEnumDomain:         "it compares a field with a value that field never has",
-	semantic.CompileComprehensionDepth: "it nests list macros (exists, all, map, filter) too deeply",
+	semantic.CompileComprehensionDepth: "it nests exists() and all() too deeply; flatten the check or split it into separate rules",
 	semantic.CompileRegexForm:          "call matches() on a string with one pattern argument",
 	semantic.CompileRegexDynamic:       "the matches() pattern must be a string literal",
 	semantic.CompileRegexSize:          "the matches() pattern is too long",

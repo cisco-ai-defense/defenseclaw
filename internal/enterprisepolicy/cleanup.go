@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // CleanupResult reports what the guardian removed from one user's config.
@@ -64,6 +65,15 @@ func CleanUserForeignHooksWithRedirects(req GuardRequest, redirects []EnvRedirec
 	}
 	backupDir := filepath.Join(req.Home, ".defenseclaw", "foreign-hooks-backup", req.Connector, now.UTC().Format("20060102T150405Z"))
 	var errs []error
+	if req.Connector == ConnectorCopilot && req.goos() == "windows" && req.RetireLegacyClaudeUserHooks {
+		// Copilot can reach this user file through its project walk. Retire
+		// only the exact old product registration; ordinary Claude user hooks
+		// remain the user's, and project files are still never rewritten.
+		source := hookSource{scope: ScopeUser, path: filepath.Join(req.Home, ".claude", "settings.json"), format: formatGrouped, home: req.Home, base: req.Home}
+		errs = append(errs, cleanJSONSourceMatching(newGuardScan(req), source, backupDir, &result, func(finding Finding) bool {
+			return connector.IsLegacyClaudeCodeUserHookCommand(finding.command, req.Home)
+		}))
+	}
 	passes := []GuardRequest{req}
 	for _, redirect := range redirects {
 		passes = append(passes, redirect.request(req))
@@ -146,8 +156,12 @@ func cleanUserSources(req GuardRequest, backupDir string, first func(hookSource)
 					}
 					continue
 				}
-				if err := movePluginAside(finding.Path, backupDir); err != nil {
+				path := finding.Path
+				ran, removeErr, err := req.guardedRemoval([]string{path}, func() error { return movePluginAside(path, backupDir) })
+				if err != nil {
 					errs = append(errs, err)
+				}
+				if !ran || removeErr != nil {
 					result.Reported = append(result.Reported, finding)
 					continue
 				}
@@ -169,7 +183,7 @@ func cleanUserSources(req GuardRequest, backupDir string, first func(hookSource)
 				continue
 			}
 			for _, entry := range entries {
-				if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
+				if !effectivePolicyDropIn(entry) {
 					continue
 				}
 				child := source.child(filepath.Join(source.path, entry.Name()), formatFlat)
@@ -188,6 +202,10 @@ func cleanUserSources(req GuardRequest, backupDir string, first func(hookSource)
 
 // cleanJSONSource rewrites one user JSON file without its foreign entries.
 func cleanJSONSource(scan *guardScan, source hookSource, backupDir string, result *CleanupResult) error {
+	return cleanJSONSourceMatching(scan, source, backupDir, result, nil)
+}
+
+func cleanJSONSourceMatching(scan *guardScan, source hookSource, backupDir string, result *CleanupResult, matches func(Finding) bool) error {
 	req := scan.req
 	data, exists, err := scan.readSource(source)
 	if err != nil {
@@ -207,6 +225,9 @@ func cleanJSONSource(scan *guardScan, source hookSource, backupDir string, resul
 	remove := map[string]bool{}
 	var removed []Finding
 	for _, finding := range findings {
+		if matches != nil && !matches(finding) {
+			continue
+		}
 		if finding.Allowed {
 			continue
 		}
@@ -229,15 +250,25 @@ func cleanJSONSource(scan *guardScan, source hookSource, backupDir string, resul
 		return err
 	}
 	if source.format == formatPluginList {
-		value, _ := doc.get("plugin")
-		list, _ := value.([]any)
-		kept := make([]any, 0, len(list))
-		for _, item := range list {
-			if !remove[sha256Hex(canonicalJSON(item))] {
-				kept = append(kept, item)
+		for _, key := range []string{"plugin", "plugins"} {
+			value, exists := doc.get(key)
+			if !exists {
+				continue
+			}
+			list, ok := value.([]any)
+			if !ok {
+				continue
+			}
+			kept := make([]any, 0, len(list))
+			for _, item := range list {
+				if !remove[sha256Hex(canonicalJSON(item))] {
+					kept = append(kept, item)
+				}
+			}
+			if len(kept) != len(list) {
+				doc.set(key, kept)
 			}
 		}
-		doc.set("plugin", kept)
 	} else {
 		hooksValue, _ := doc.get("hooks")
 		hooks, _ := hooksValue.(*object)
@@ -285,20 +316,45 @@ func cleanJSONSource(scan *guardScan, source hookSource, backupDir string, resul
 	if err != nil {
 		return err
 	}
-	if err := backupUserFile(source.path, data, backupDir); err != nil {
-		return err
+	return rewriteUserSource(req, source, data, rendered, removed, backupDir, result)
+}
+
+// rewriteUserSource replaces source's file with rendered, which drops the
+// removed hooks, as one guarded removal (GuardRequest.GuardRemoval), after
+// a backup of the original data.
+func rewriteUserSource(req GuardRequest, source hookSource, data, rendered []byte, removed []Finding, backupDir string, result *CleanupResult) error {
+	backedUp := false
+	ran, removeErr, err := req.guardedRemoval(findingPaths(removed), func() error {
+		if err := backupUserFile(source.path, data, backupDir); err != nil {
+			return err
+		}
+		backedUp = true
+		info, err := os.Lstat(source.path)
+		if err != nil {
+			return err
+		}
+		return rewriteUserFile(source.path, rendered, info.Mode().Perm())
+	})
+	if backedUp {
+		result.BackupDir = backupDir
 	}
-	result.BackupDir = backupDir
-	info, err := os.Lstat(source.path)
-	if err != nil {
-		return err
+	switch {
+	case !ran:
+		result.Reported = append(result.Reported, removed...)
+	case removeErr == nil:
+		result.Removed = append(result.Removed, removed...)
+		result.FilesTouch = appendUnique(result.FilesTouch, source.path)
 	}
-	if err := rewriteUserFile(source.path, rendered, info.Mode().Perm()); err != nil {
-		return err
+	return err
+}
+
+// findingPaths lists the files findings name, each once.
+func findingPaths(findings []Finding) []string {
+	var paths []string
+	for _, finding := range findings {
+		paths = appendUnique(paths, finding.Path)
 	}
-	result.Removed = append(result.Removed, removed...)
-	result.FilesTouch = appendUnique(result.FilesTouch, source.path)
-	return nil
+	return paths
 }
 
 func backupName(path string) string {

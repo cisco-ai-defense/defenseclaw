@@ -23,6 +23,8 @@ assessment.
 
 from __future__ import annotations
 
+import dataclasses
+import io
 import json
 import os
 import stat
@@ -41,6 +43,7 @@ from defenseclaw.scanner.plugin_scanner.helpers import (
     inspect_path_link,
     make_finding,
 )
+from defenseclaw.scanner.plugin_scanner.llm_analyzer import JUDGE_TAG
 from defenseclaw.scanner.plugin_scanner.policy import (
     PluginScanPolicy,
     apply_severity_override,
@@ -58,6 +61,7 @@ from defenseclaw.scanner.plugin_scanner.types import (
     ScanMetadata,
     ScanResult,
 )
+from defenseclaw.scanner.plugin_scanner.vendor_identity import inspect_official_provider_tree
 
 # The C loader is several times faster on manifests; same safe semantics.
 _YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
@@ -65,6 +69,45 @@ _YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+
+# What a published provider release has on its own code (the exec class), and
+# the rules that read what a package declares: dependencies, install scripts
+# and permissions. A published release declares nothing that these rules flag
+# at MEDIUM or above. An identity that rests on an install record alone waives
+# the first and nothing else (see ``_ordinary_scan_unless_vendor_code_only``).
+_PROVIDER_CODE_RULES = frozenset({"SRC-EXEC"})
+_DECLARATION_RULE_PREFIXES = ("DEP-", "SCRIPT-", "PERM-")
+
+
+def _beyond_provider_code(finding: Finding) -> bool:
+    if finding.severity in ("HIGH", "CRITICAL"):
+        return finding.rule_id not in _PROVIDER_CODE_RULES
+    return finding.severity == "MEDIUM" and finding.rule_id.startswith(_DECLARATION_RULE_PREFIXES)
+
+
+def _ordinary_scan_unless_vendor_code_only(
+    target: str, options: PluginScanOptions | None,
+) -> ScanResult | None:
+    """The ordinary scan of an unverified provider tree, or None to admit it.
+
+    The registry could not be asked, so the bytes are not proven: the same
+    analyzers as for any other plugin read the tree, manifest scripts,
+    dependencies and permissions as much as source and protected-file rules.
+    The tree is admitted only when every finding that counts belongs to the
+    class that the published provider code has by itself; any other finding
+    gives the ordinary verdict, in every profile. The judge stays off:
+    it would be a network call on an outage.
+    """
+
+    override = {**((options.llm_override if options else None) or {}), "enabled": False}
+    ordinary = scan_plugin(
+        target,
+        dataclasses.replace(
+            options or PluginScanOptions(), disable_vendor_identity=True, llm_override=override,
+        ),
+    )
+    return ordinary if any(_beyond_provider_code(f) for f in ordinary.findings) else None
 
 
 def scan_plugin(
@@ -116,6 +159,54 @@ def scan_plugin(
 
     # Profile from options overrides policy profile
     profile = (options.profile if options and options.profile else None) or policy.profile
+
+    if (profile in ("default", "permissive")
+            and policy.profile in ("default", "permissive")
+            and not (options and (options.include_self or options.disable_vendor_identity))):
+        official = inspect_official_provider_tree(
+            target, data_dir=options.data_dir if options else "",
+        )
+        if official is not None and official.unverified:
+            ordinary = _ordinary_scan_unless_vendor_code_only(target, options)
+            if ordinary is not None:
+                return ordinary
+        if official is not None:
+            findings = audit_skipped_dirs_for_native(target)
+            if official.possible_peer:
+                findings.append(make_finding(
+                    len(findings) + 1,
+                    rule_id="VENDOR-PEER-POSSIBLE",
+                    severity="INFO",
+                    confidence=1.0,
+                    title="OpenClaw peer link has possible provenance",
+                    description=(
+                        "Published provider bytes match. The peer link resolves to an "
+                        "OpenClaw package outside protected and state paths; the "
+                        "active runtime package is not verified."
+                    ),
+                    location=os.path.join(target, "node_modules", "openclaw"),
+                    tags=["supply-chain"],
+                ))
+            if official.unverified:
+                findings.append(make_finding(
+                    len(findings) + 1,
+                    rule_id="VENDOR-REGISTRY-UNVERIFIED",
+                    severity="MEDIUM",
+                    confidence=1.0,
+                    title="Provider release not confirmed against the registry",
+                    description=(
+                        "The npm registry could not be reached. The install record names "
+                        "the registry archive of this release; the package files were "
+                        "not compared with it. Scan again when the registry is reachable, "
+                        "or use the strict profile, which does not rely on the record."
+                    ),
+                    location=os.path.join(target, "package.json"),
+                    tags=["supply-chain"],
+                ))
+            return build_result(
+                target, findings, start_ms,
+                ScanMetadata(manifest_name=official.name),
+            )
 
     # --- Load manifest ---
     manifest = _load_manifest(target)
@@ -221,6 +312,15 @@ def scan_plugin(
 
         all_findings.extend(findings)
 
+    # GAP-1389 (LEAD DECISION 09:05): a judge that read no code cannot rate a
+    # plugin with no executable files HIGH. Its findings rest on the manifest
+    # alone ("manifest-only, no source"), so they are capped at MEDIUM on
+    # every tier; static findings keep their severity and an operator's
+    # severity override (applied next) still wins.
+    if not _plugin_has_executable_files(target, ctx):
+        for f in all_findings:
+            _cap_judge_finding_without_code(f)
+
     # --- Apply policy: severity overrides + suppression ---
     for f in all_findings:
         apply_severity_override(f, policy.severity_overrides)
@@ -288,6 +388,163 @@ _MANIFEST_CANDIDATES: tuple[tuple[str, str], ...] = (
 )
 
 
+# Files that run code: source, script and binary suffixes the analyzers
+# read or flag, plus the other common interpreters.
+_EXECUTABLE_SUFFIXES = frozenset({
+    ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".cjs", ".mjs", ".py", ".pyc", ".pyz", ".rb", ".pl", ".php",
+    ".lua", ".go", ".rs", ".java", ".jar", ".class", ".ps1", ".psm1", ".vbs", ".bash", ".zsh", ".fish",
+    ".exe", ".so", ".dylib", ".wasm", ".dll", ".node", ".sh", ".bat", ".cmd",
+    ".com", ".scr", ".msi", ".cpl", ".hta", ".wsf", ".vbe", ".jse", ".psd1", ".pyw",
+    # Other interpreters and compiled sources an agent can run or build, and
+    # archives, which can carry any of the above (GAP-2039).
+    ".applescript", ".scpt", ".swift", ".r", ".jl", ".tcl", ".groovy", ".kts", ".ex", ".exs",
+    ".c", ".cc", ".cpp", ".cs",
+    ".zip", ".tar", ".tgz", ".gz", ".whl", ".deb", ".rpm", ".pkg", ".dmg", ".7z",
+})
+# Build files a single command runs (make, just) whatever their suffix (GAP-2039).
+_EXECUTABLE_NAMES = frozenset({"makefile", "gnumakefile", "justfile"})
+# First bytes of a file the OS can run whatever its name: a #! script, an
+# ELF, Mach-O (thin and fat, both byte orders) or Windows PE (MZ) binary.
+_EXECUTABLE_MAGIC = (
+    b"#!", b"\x7fELF", b"MZ",
+    b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe",
+    b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf", b"\xbe\xba\xfe\xca", b"\xbf\xba\xfe\xca",
+)
+# Files that make an agent run a command (hooks, MCP and LSP servers).
+_EXECUTABLE_CONFIG_NAMES = frozenset({"hooks.json", ".mcp.json", "mcp.json", ".lsp.json"})
+# Manifests and the keys in them that start code.
+_MANIFEST_NAMES = frozenset({"plugin.json", "package.json", "openclaw.plugin.json", "plugin.yaml", "plugin.yml"})
+_EXECUTABLE_MANIFEST_KEYS = frozenset({
+    "hooks", "mcpServers", "lspServers", "main", "bin", "scripts", "exports", "module", "browser",
+    "entry", "entrypoint", "entrypoints", "command", "extensions", "runtime",
+})
+_EXECUTABLE_WALK_LIMIT = 5000
+
+
+def _plugin_has_executable_files(target: str, ctx: ScanContext) -> bool:
+    return _first_executable_file(target, ctx) is not None
+
+
+def _first_executable_file(target: str, ctx: ScanContext) -> str | None:
+    """What makes the plugin hold anything that runs (None: nothing does):
+    collected source, a script, binary or interpreter suffix, a regular file
+    with an executable bit or whose first bytes are ``#!``, ELF, Mach-O or ``MZ`` (on every OS),
+    a hooks/MCP/LSP config, or a manifest key that starts code. A symlink, a
+    non-regular file, an unreadable file or folder, an unparsable manifest or
+    a tree past the walk limit counts as executable, so only a plain,
+    readable tree of documents is "no executable files" (GAP-1389, GAP-2009).
+    A ``.git`` folder is walked like any other; only git's hook samples are
+    skipped (GAP-2036). The answer names the first path and why, so a test
+    can say which file of a git checkout counted (GAP-2140)."""
+    if ctx.source_files:
+        return "collected source files"
+    if not os.path.isdir(target) or os.path.islink(target):
+        return "plugin root is not a plain folder"
+    walk_errors: list[OSError] = []
+    seen = 0
+    for root, dirs, files in os.walk(target, followlinks=False, onerror=walk_errors.append):
+        if walk_errors:
+            return f"unreadable: {walk_errors[0]}"
+        for name in dirs:
+            if os.path.islink(os.path.join(root, name)):
+                return f"folder link: {os.path.relpath(os.path.join(root, name), target)}"
+        git_parts = _git_dir_parts(os.path.relpath(root, target))
+        git_objects = git_parts is not None and "objects" in git_parts
+        for name in files:
+            # git's object store is data git writes read-only; it is still
+            # read below, but it does not use up the walk limit (GAP-2100).
+            if not git_objects:
+                seen += 1
+            if seen > _EXECUTABLE_WALK_LIMIT:
+                return f"more than {_EXECUTABLE_WALK_LIMIT} files"
+            path = os.path.join(root, name)
+            if _is_git_hook_sample(root, git_parts, name):
+                continue
+            suffix = os.path.splitext(name)[1].casefold()
+            folded = name.casefold()
+            if suffix in _EXECUTABLE_SUFFIXES or folded in _EXECUTABLE_CONFIG_NAMES or folded in _EXECUTABLE_NAMES:
+                return f"name: {os.path.relpath(path, target)}"
+            try:
+                st = os.lstat(path)
+            except OSError as exc:
+                return f"unreadable: {exc}"
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+                return f"not a regular file: {os.path.relpath(path, target)}"
+            if st.st_mode & 0o111:
+                return f"mode {stat.S_IMODE(st.st_mode):o}: {os.path.relpath(path, target)}"
+            if _starts_with_executable_magic(path):
+                return f"first bytes: {os.path.relpath(path, target)}"
+            if name.casefold() in _MANIFEST_NAMES and _manifest_starts_code(path):
+                return f"manifest starts code: {os.path.relpath(path, target)}"
+    return f"unreadable: {walk_errors[0]}" if walk_errors else None
+
+
+def _git_dir_parts(rel_root: str) -> list[str] | None:
+    """The path parts of a folder below the first ``.git`` folder of the
+    plugin (``[]`` for ``.git`` itself), or None outside any ``.git``."""
+    parts = [] if rel_root in ("", os.curdir) else rel_root.split(os.sep)
+    if ".git" not in parts:
+        return None
+    return parts[parts.index(".git") + 1:]
+
+
+def _is_git_hook_sample(root: str, git_parts: list[str] | None, name: str) -> bool:
+    """git's own ``*.sample`` hook templates in the ``hooks`` folder of a git
+    dir: ``.git/hooks`` and a submodule's git dir anywhere under
+    ``.git/modules`` (GAP-2100). git names a submodule's git dir after its
+    path, so ``vendor/lib`` is ``.git/modules/vendor/lib``; a git dir holds
+    ``HEAD``. git never runs the samples and the agent does not load them.
+    Every other file under a ``.git`` folder is read with the same rule as the
+    rest of the plugin, because a local, zip or tarball plugin controls
+    ``.git`` too (GAP-2036)."""
+    if git_parts is None or not name.endswith(".sample") or os.path.basename(root) != "hooks":
+        return False
+    git_dir = git_parts[:-1]
+    if not git_dir:
+        return True  # .git/hooks
+    return (
+        len(git_dir) >= 2
+        and git_dir[0] == "modules"
+        and os.path.isfile(os.path.join(os.path.dirname(root), "HEAD"))
+    )
+
+
+def _starts_with_executable_magic(path: str) -> bool:
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(4)
+    except OSError:
+        return True
+    return head.startswith(_EXECUTABLE_MAGIC)
+
+
+def _manifest_starts_code(path: str) -> bool:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read(1024 * 1024)
+        data = yaml.safe_load(text) if path.casefold().endswith((".yaml", ".yml")) else json.loads(text)
+    except (OSError, ValueError, yaml.YAMLError):
+        return True
+    if not isinstance(data, dict):
+        return True
+    return any(key in data for key in _EXECUTABLE_MANIFEST_KEYS)
+
+
+def _cap_judge_finding_without_code(finding: Finding) -> None:
+    """Cap an LLM judge or meta-judge HIGH/CRITICAL at MEDIUM (GAP-1389)."""
+    rule = finding.rule_id or ""
+    judge = rule != "LLM-SCAN-ERROR" and (
+        JUDGE_TAG in finding.tags or rule.startswith("LLM-") or rule.startswith("META-LLM-")
+    )
+    if not judge or str(finding.severity).upper() not in ("HIGH", "CRITICAL"):
+        return
+    finding.severity = "MEDIUM"
+    note = "Capped at MEDIUM: the plugin has no executable files and the judge read no code."
+    finding.description = f"{finding.description} {note}".strip()
+    if "judge-no-executable-files" not in finding.tags:
+        finding.tags.append("judge-no-executable-files")
+
+
 def _safe_read_manifest(candidate: str, scan_root: str) -> dict | None:
     """Read and JSON-parse a manifest candidate without following symlinks.
 
@@ -339,6 +596,14 @@ def _safe_read_manifest(candidate: str, scan_root: str) -> dict | None:
             except OSError:
                 pass
 
+    return _parse_manifest_text(candidate, raw_text)
+
+
+def _parse_manifest_text(candidate: str, raw_text: str) -> dict | None:
+    """Parse manifest text as a scan does: YAML for .yaml/.yml, JSON otherwise.
+
+    Returns None for text that is not a mapping or that the loader refuses.
+    """
     try:
         if candidate.endswith((".yaml", ".yml")):
             data = yaml.load(raw_text, Loader=_YAML_LOADER)
@@ -347,6 +612,31 @@ def _safe_read_manifest(candidate: str, scan_root: str) -> dict | None:
     except (json.JSONDecodeError, ValueError, yaml.YAMLError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def declared_entrypoints(manifests: dict[str, bytes]) -> list[str]:
+    """Entrypoints declared by manifest bytes that the caller already read.
+
+    The gateway watcher must know which files of a shipped plugin a scan can
+    read (a declared entrypoint is read wherever it lives). It asks this
+    module, so the manifest grammar has one reader. manifests maps a candidate
+    path (slash-separated, as in _MANIFEST_CANDIDATES) to the bytes the caller
+    read once. The bytes are decoded and parsed exactly as _safe_read_manifest
+    does (UTF-8 text mode), and the entrypoints of every manifest present are
+    united, which is a superset of what one scan reads. Text the loader refuses
+    declares nothing, as in a scan; bytes that are not UTF-8 raise, as in a scan.
+    """
+    declared: list[str] = []
+    for rel_path, _label in _MANIFEST_CANDIDATES:
+        raw = manifests.get(rel_path.replace(os.sep, "/"))
+        if raw is None:
+            continue
+        with io.TextIOWrapper(io.BytesIO(raw), encoding="utf-8") as handle:
+            data = _parse_manifest_text(rel_path, handle.read())
+        if data is None:
+            continue
+        declared.extend(ep for ep in _manifest_entrypoints(data) if ep not in declared)
+    return declared
 
 
 def _manifest_parent_is_safe(directory: str, rel_path: str, scan_root: str) -> bool:

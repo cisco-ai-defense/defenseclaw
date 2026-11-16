@@ -24,6 +24,8 @@ from defenseclaw.config import MCPScannerConfig, MCPServerEntry
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.scanner import mcp
 
+from tests.os_view import os_view
+
 FIXTURES = Path(__file__).parent / "fixtures" / "mcp_launchers"
 PYTHON_FIXTURE = FIXTURES / "python" / "defenseclaw_mcp_launcher_fixture.py"
 HOST_LOCALAPPDATA = os.environ.get("LOCALAPPDATA", "")
@@ -225,7 +227,7 @@ def test_failed_start_reads_only_bounded_stderr_tail(capsys: pytest.CaptureFixtu
     ["npx.bat", "npx.ps1", r"C:\tools\npx", "node"],
 )
 def test_unsupported_npx_spellings_remain_outside_allowlist(command: str) -> None:
-    with patch.object(mcp.os, "name", "nt"):
+    with patch.object(mcp, "os", os_view("nt")):
         error = mcp._stdio_scan_command_error(command, ["package"])
         # GAP-0385: npx.cmd and uvx.exe name the same launchers on Windows
         # and go through the same trusted-path resolution as npx and uvx.
@@ -398,14 +400,14 @@ def test_lifecycle_trace_reaches_tools_list_and_analyzer_handoff(
     assert stages == [
         "transport-opening",
         "process-created-job-assigned-resumed",
-        "process-context-entered",
         "transport-opened",
         "initialize-sent",
         "initialize-responded-initialized-sent",
         "tools-list-sent",
         "tools-list-responded",
         "session-closed",
-        "process-context-exited",
+        # MCP SDK 2.x has no process context: its stdio shutdown closes the
+        # job through close_process_job before the transport closes.
         "job-containment-closed",
         "transport-closed",
         "analyzer-handoff",
@@ -445,6 +447,28 @@ def test_yara_verdicts_keep_clean_and_malicious_tool_semantics() -> None:
     assert by_name["malicious_shell"].findings
 
 
+# rel-1-0-6 GAP-0226: this scan pays a cold node + npm start of npx.cmd, which the
+# product's 60 s scan bound (mcp._STDIO_SCAN_TIMEOUT_SECONDS) is not sized for on a
+# hosted runner. Measured 2026-10-31: Windows Native CI, 87 green runs of this test:
+# p50 7.8 s, p90 10.9 s, max 26.6 s, and one run (41246277718) where npm made no
+# progress for 60 s after it opened its log; dc-win2 1.5-3.2 s. npm's own work is
+# under 0.3 s of that (npm timing: load 45 ms, idealTree 17 ms, reify 41 ms), and a
+# warm npm cache or no registry update check changes it by under 0.15 s, so neither
+# the cache nor the network is the cause: the rest is the runner starting node and
+# npm. 180 s is about 7x the measured CI maximum. The product bound is unchanged and
+# has its own timeout tests.
+_NPX_COLD_START_SCAN_SECONDS = 180
+
+
+def _last_npm_debug_log() -> str:
+    """The tail of npm's newest debug log in the test identity, for a timeout."""
+    logs = Path(os.environ.get("LOCALAPPDATA", "")) / "npm-cache" / "_logs"
+    found = sorted(logs.glob("*-debug-*.log"), key=lambda path: path.stat().st_mtime) if logs.is_dir() else []
+    if not found:
+        return "none"
+    return " | ".join(found[-1].read_text(encoding="utf-8", errors="replace").splitlines()[-3:])
+
+
 @pytest.mark.allow_subprocess
 @pytest.mark.skipif(not HOST_NPX, reason="native npx.cmd is unavailable")
 def test_native_npx_cmd_acceptance_with_quoted_local_package(
@@ -465,7 +489,15 @@ def test_native_npx_cmd_acceptance_with_quoted_local_package(
     )
     plan = mcp._windows_stdio_launch_plan(entry)
     scanner = _RecordingScanner()
-    results, _stderr_size = asyncio.run(mcp._scan_windows_stdio_tools(scanner, plan, ["fixture"]))
+    try:
+        results, _stderr_size = asyncio.run(
+            mcp._scan_windows_stdio_tools(scanner, plan, ["fixture"], timeout_seconds=_NPX_COLD_START_SCAN_SECONDS)
+        )
+    except TimeoutError:
+        pytest.fail(
+            f"npx.cmd did not list the fixture's tools within {_NPX_COLD_START_SCAN_SECONDS} s; "
+            f"npm debug log ends: {_last_npm_debug_log()}"
+        )
 
     assert Path(plan.args[5]).name.lower() == "npx.cmd"
     assert [result.tool_name for result in results] == ["benign_echo", "malicious_shell"]
@@ -867,7 +899,10 @@ def test_installed_cli_batch_entrypoint_scans_npx_and_uvx_for_both_connectors(
         event for event in _read_fixture_trace(install_trace) if event["event"] == "tools_list_responded"
     ]
     assert install_responses == [{"event": "tools_list_responded", "tools": ["benign_echo"]}]
-    assert admitted
+    # The fixture listener is not a recorded DefenseClaw gateway process, so
+    # the installed CLI never sends it the gateway token or an observability
+    # fact (GAP-1260: only a proven gateway listener gets the token).
+    assert admitted == []
 
 
 @pytest.mark.parametrize(
@@ -918,7 +953,7 @@ def test_windows_scan_preserves_cancellation() -> None:
         raise asyncio.CancelledError
 
     with (
-        patch.object(mcp.os, "name", "nt"),
+        patch.object(mcp, "os", os_view("nt")),
         patch.object(mcp, "_windows_stdio_launch_plan", return_value=plan),
         patch.object(mcp, "_scan_windows_stdio_tools", cancel),
         pytest.raises(asyncio.CancelledError),
@@ -976,9 +1011,7 @@ def test_protocol_error_is_distinguished_from_timeout() -> None:
     assert "timeout" not in message.lower()
 
 
-@pytest.mark.allow_subprocess
-@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object regression")
-def test_timeout_cleans_up_process_tree_without_orphan(tmp_path: Path) -> None:
+def _windows_pid_exists(pid: int) -> bool:
     import ctypes
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -992,20 +1025,48 @@ def test_timeout_cleans_up_process_tree_without_orphan(tmp_path: Path) -> None:
     get_exit_code.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
     get_exit_code.restype = ctypes.c_int
 
-    def pid_exists(pid: int) -> bool:
-        handle = open_process(0x1000, 0, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-        if handle:
-            try:
-                exit_code = ctypes.c_uint32()
-                if get_exit_code(handle, ctypes.byref(exit_code)):
-                    return exit_code.value == 259  # STILL_ACTIVE
-                return True
-            finally:
-                close_handle(handle)
-        # ERROR_INVALID_PARAMETER means the PID no longer exists. Access
-        # denied still means a live process, so fail closed for the assertion.
-        return ctypes.get_last_error() != 87
+    handle = open_process(0x1000, 0, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if handle:
+        try:
+            exit_code = ctypes.c_uint32()
+            if get_exit_code(handle, ctypes.byref(exit_code)):
+                return exit_code.value == 259  # STILL_ACTIVE
+            return True
+        finally:
+            close_handle(handle)
+    # ERROR_INVALID_PARAMETER means the PID no longer exists. Access
+    # denied still means a live process, so fail closed for the assertion.
+    return ctypes.get_last_error() != 87
 
+
+@pytest.mark.allow_subprocess
+@pytest.mark.skipif(os.name != "nt", reason="native Windows stdio adapter")
+def test_graceful_exit_closes_the_job_and_reaps_a_lingering_child(tmp_path: Path) -> None:
+    # The server answers tools/list and exits when stdin closes, but leaves a
+    # child running. Only closing the Job Object (KILL_ON_JOB_CLOSE) ends it;
+    # MCP SDK 2.x closes jobs through close_process_job, not a process context.
+    child_pid_path = tmp_path / "child.pid"
+    env = mcp._safe_subprocess_env({"MCP_FIXTURE_LINGER_CHILD_PID": os.fspath(child_pid_path)})
+    results, _stderr_size = asyncio.run(
+        mcp._scan_windows_stdio_tools(_RecordingScanner(), _python_plan(env), ["fixture"])
+    )
+    assert [result.tool_name for result in results] == ["benign_echo", "malicious_shell"]
+
+    child_pid = int(child_pid_path.read_text(encoding="ascii"))
+    deadline = time.monotonic() + 5
+    while _windows_pid_exists(child_pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    try:
+        assert not _windows_pid_exists(child_pid)
+    finally:
+        if _windows_pid_exists(child_pid):
+            subprocess.run(["taskkill", "/F", "/PID", str(child_pid)], capture_output=True, check=False)
+
+
+@pytest.mark.allow_subprocess
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object regression")
+def test_timeout_cleans_up_process_tree_without_orphan(tmp_path: Path) -> None:
+    pid_exists = _windows_pid_exists
     child_pid_path = tmp_path / "child.pid"
     env = mcp._safe_subprocess_env(
         {
@@ -1040,7 +1101,7 @@ def test_non_windows_local_scan_preserves_existing_scanner_config_path(
             return []
 
     wrapper = mcp.MCPScannerWrapper(MCPScannerConfig(analyzers="yara"))
-    monkeypatch.setattr(mcp.os, "name", "posix")
+    monkeypatch.setattr(mcp, "os", os_view("posix"))
     result = wrapper._scan_local(
         FakeScanner(),
         MCPServerEntry(name="fixture", command="npx", args=["package"], env={}),

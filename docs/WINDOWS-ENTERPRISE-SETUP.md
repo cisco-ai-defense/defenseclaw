@@ -159,7 +159,7 @@ It differs from the Secure Client Setup in these ways:
 | Lifecycle engine | Windows PowerShell 5.1 | PowerShell 7 x64 (see `WINDOWS-MACHINE-INSTALLER-INTERFACE.md`) |
 | Actions | The seven above | The seven above plus `/ensure` |
 | Exit codes | `0`, `1603` | `0`, `1603`, `1618`, `1639`; `3010` is reserved and never returned |
-| `/uninstall` | Keeps the machine state unless `PURGE=1` | Always removes the machine state; `PURGE=1` also removes each enrolled account's per-user data and binaries |
+| `/uninstall` | Keeps the machine state unless `PURGE=1` | Removes deployment machine roots; a pending Cursor registration can retain an allow-only hook tombstone and lock. `PURGE=1` also removes each enrolled account's per-user data and binaries |
 
 ### Invocation
 
@@ -176,7 +176,7 @@ reboot.
 | `JSON=1` | Print the lifecycle result document. |
 | `NOSTART=1` | Install, upgrade, repair or ensure without starting the services. |
 | `PURGE=1` | With `/uninstall`, also remove each enrolled account's `%USERPROFILE%\.defenseclaw` and per-user binaries. `/uninstall` always removes the machine state under `C:\ProgramData\Cisco\DefenseClaw`. |
-| `TIMEOUTSECONDS=` | The lifecycle time limit, from 60 to 7200 seconds. The default is 1800. |
+| `TIMEOUTSECONDS=` | The lifecycle time limit, from 60 to 7200 seconds, counted from when Setup starts. The default is 1800. A change needs at least about 120; lower values suit only `/verify` and `/status`. A standalone run stopped at the limit then recovers for up to 10 more minutes, so let your MDM wait `TIMEOUTSECONDS` plus 10 minutes. |
 
 `CONFIG=` and `MANIFEST=` must be absolute local drive paths to regular,
 non-link files whose folder chain only administrators and SYSTEM can write.
@@ -194,6 +194,31 @@ folder for you.
 
 `/ensure` installs, upgrades or repairs as needed and does nothing when the
 device is compliant. The first `/ensure` without `CONFIG=` exits `1639`.
+
+On standalone `/uninstall`, the Cursor machine hook adapter
+(`C:\ProgramData\Cursor\defenseclaw-hook.ps1`) and its
+`.defenseclaw-managed-hooks.lock` are removed when no Cursor user registration
+is pending. If a signed-out Cursor account still has a registration, Setup
+keeps the adapter as a credential-free allow-only tombstone and names both
+existing files in `machine_state_kept`. Run `/ensure` and then `/uninstall`
+while that account has an active session to clear its registration, or use
+`/uninstall PURGE=1` to remove the tombstone and lock. Pending registrations
+for other connectors do not keep Cursor machine files. Restart already-running
+Cursor clients after uninstall because they may have cached the retired hook
+command.
+
+The guardian reserves `C:\ProgramData\ampcode` while installed because Amp
+reads that machine folder for every account. Setup records when it created the
+folder and removes it on uninstall if it holds only Setup's ownership marker.
+An Amp or administrator folder that predates Setup, and any folder with other
+content, remains. An older installation (1.0.2 through 1.0.6) created the folder
+empty and has no ownership marker (1.0.7 and later write one when they create
+it), so the first install, upgrade or repair of this release records the
+empty folder as Setup-created only when it was created after
+`C:\ProgramData\Cisco\DefenseClaw` and has exactly the permissions Setup gives
+it; uninstall then removes it while it is empty. Otherwise uninstall leaves it
+intact and names it.
+
 Setup's own checks run before the lifecycle: a malformed command line (an
 unknown property, a missing, relative, padded or environment-expanded
 `CONFIG=` or `MANIFEST=` path, `/install` without `CONFIG=` and `MANIFEST=`,
@@ -216,6 +241,55 @@ built:
   lifecycle requires a valid signature on each one. Pass `ALLOWEDSIGNERS=` to
   accept only your signer.
 
+### Concurrent file publication
+
+The managed-policy writer leaves an existing file in place when its bytes
+already match. The standalone module's JSON and metadata writers publish a
+staged file by rename without deleting the destination first. When an install,
+upgrade, repair, or policy change replaces a named file, Windows can briefly
+return `ERROR_FILE_NOT_FOUND` or a sharing error to another process opening
+that name. DefenseClaw's own managed-file readers use a bounded retry for
+transient opens. A separate application that opens the file at that instant may
+need to reopen it. Run upgrades while clients are idle when possible.
+Publication uses two classes based on who can write the destination.
+DefenseClaw-only managed policy, requirements, state and guardian records use
+a file transaction for non-image compare-and-swap publication; a reader that
+shares deletion must open the old or new name on its first attempt. A file
+that an administrator, vendor or user can also save, such as Cursor
+`hooks.json` or a shared standalone vendor policy file, uses a plain one-step
+replacement without a transaction, so an external editor is not exposed to a
+transaction conflict. Third-party readers of these shared files should share
+deletion and retry transient open failures (`ERROR_FILE_NOT_FOUND`,
+`ERROR_PATH_NOT_FOUND`, or a sharing violation) within a bounded window.
+When a volume cannot use transactions for an owned file, DefenseClaw warns
+and uses the guarded one-step replacement. The policy compare-and-swap test
+gives readers without deletion sharing two seconds, matching the writer's
+lock wait.
+
+This is an observed Windows file-name replacement limit, not a field failure
+rate. In a 2026-11-06 Windows Server 2025 NTFS stress run of 400 changed-body
+publications and two concurrent readers, one accepted POSIX-style rename run
+returned a missing name in 1 of 78,734 opens. A classic rename run returned
+2 missing names in 132,180 opens. A loaded CI run of the POSIX-style path
+returned 2,667 in 69,765 opens. The rate varies with scheduling and workload;
+neither rename request establishes a zero-error guarantee for a fresh external
+open.
+
+In a 2026-11-07 Windows Server 2025 NTFS stress run at branch head
+`afc6eea8c6`, each reader made 200,000 opens during repeated changed-body
+publication. A deletion-sharing reader saw 46 missing names with paced
+managed-policy reads, 93,424 with continuous guardian-state reads (5,204
+paced), and 267 with paced safefile replacement reads. The standalone module
+metadata reader saw 8,288 missing names. These are stress-run counts, not
+field rates; the exact values depend on writer frequency and scheduling.
+
+The policy compare-and-swap reader test also reached this Windows name
+window. In 50 native repetitions on the same Windows Server 2025 host, the
+release base passed 45 and branch head `afc6eea8c6` passed 46. The published
+body remained complete, but a fresh open occasionally found no name during a
+replacement. The test requires a complete old or new policy after that retry
+window, so later Windows behavior changes remain visible.
+
 ### Build
 
 `packaging/windows/standalone/build-setup.sh` builds the standalone Setup on
@@ -230,12 +304,24 @@ directory.
 | `build-setup.sh --version <version> --sign-command <cmd>` | Builds the inner files, runs `<cmd> <file>` to sign each one in place, embeds them, and signs the outer Setup with the same command. |
 | `build-setup.sh --version <version> --payload-dir <dir>` | Embeds seven files that were already signed. The directory must hold exactly those seven files. |
 
+Both signed forms also take `--signing-type DEV|PROD` and
+`--expected-signer-sha256 <64-hex>`: the assembler verifies every signed inner
+file against that signer before it appends the payload, with `osslsigncode
+verify` (2.5 or later) on macOS and Linux. `PROD` needs a chain to a root the
+build host trusts; `DEV` also accepts a test or self-signed certificate.
+`authenticode-sign.sh --thumbprint` prints the value of `AUTHENTICODE_PFX`.
+
 With `--payload-dir`, sign the outer Setup afterwards with the same
 certificate, then compute its SHA-256 again: the script hashes the Setup
 before you sign it. `packaging/mdm/signing/authenticode-sign.sh` is a signing
 command for `--sign-command`; the release workflow uses it when a
 code-signing certificate is configured and otherwise ships the hash-pinned
-flavor.
+flavor. Every release dry run proves the signed build with a throwaway
+self-signed certificate (`packaging/windows/standalone/prove-signing-path.sh`).
+
+Every build links the payload binding (the flavor, version and source commit
+of the payload manifest and the SHA-256 of each inner file) into the outer
+Setup, and the Setup stages only that payload under that identity.
 
 There is no AVC handoff kit for the standalone Setup. The AVC flow in
 [Windows AVC packaging handoff](WINDOWS-AVC-PACKAGING-HANDOFF.md) builds only

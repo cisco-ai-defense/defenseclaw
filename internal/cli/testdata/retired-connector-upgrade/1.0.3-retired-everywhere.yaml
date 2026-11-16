@@ -1,0 +1,48 @@
+# A 1.0.3 host that named OpenHands and OmniGent in every section with
+# per-connector settings: guardrail, profiles and assignments, the judge,
+# asset policy, application protection and observability.
+claw:
+  mode: codex
+guardrail:
+  connector: codex
+  enabled: true
+  mode: action
+  connectors:
+    codex:
+      mode: action
+    openhands:
+      mode: action
+    omnigent:
+      mode: observe
+  judge:
+    hook_connectors: [codex, openhands]
+  profiles:
+    team:
+      connectors:
+        openhands:
+          mode: observe
+        codex:
+          mode: action
+  profile_assignments:
+    - profile: team
+      match:
+        groups: [engineering]
+        connectors: [openhands]
+    - profile: team
+      match:
+        groups: [engineering]
+        connectors: [codex, omnigent]
+asset_policy:
+  connectors:
+    openhands: {}
+application_protection:
+  include_connectors: [codex, openhands]
+  connectors:
+    omnigent:
+      enabled: true
+observability:
+  connectors:
+    openhands: {}
+    codex: {}
+data_dir: '@HOME@'
+config_version: 9

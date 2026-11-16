@@ -34,7 +34,11 @@ import (
 // older release shipped and this build replaced (see legacyconnector). It is
 // never registered: discovery, setup, routing and the hook API cannot reach
 // it. Callers use it only to remove the state an older release left behind.
+// OpenHands and OmniGent resolve here too (until 1.1, see removed.go).
 func RetiredConnector(name string) (Connector, bool) {
+	if conn, ok := removedConnector(name); ok {
+		return conn, true
+	}
 	if !legacyconnector.IsRetired(name) {
 		return nil, false
 	}

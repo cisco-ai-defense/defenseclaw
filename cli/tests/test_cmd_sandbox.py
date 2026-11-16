@@ -267,17 +267,6 @@ def test_help_is_answered_by_the_stub(exec_capture) -> None:
     assert exec_capture == []
 
 
-def test_run_help_names_every_harness(exec_capture) -> None:
-    # Manual test R2-73; internal/cli pins that this is the Go help text and
-    # that it names every harness in the registry.
-    result = CliRunner().invoke(sandbox, ["run", "--help"], obj=AppContext())
-    assert result.exit_code == 0
-    text = " ".join(result.output.split())
-    # Certification AG-MAC-F8: Antigravity by the name image build, image
-    # list and openshell.harnesses use, with its command accepted too.
-    assert "The harness is claude, codex, copilot, opencode, kiro, hermes, openhands, omnigent or antigravity" in text
-    assert "(its command, agy, works too; amp, cursor-agent and devin are not verified yet, so they do not run)" in text
-    assert exec_capture == []
 
 
 def test_help_says_how_a_mac_differs(exec_capture) -> None:
@@ -290,9 +279,9 @@ def test_help_says_how_a_mac_differs(exec_capture) -> None:
 
     run = help_text("run")
     assert "on macOS (the MicroVM driver) every run works on a copy" in run
-    assert "(mount: keep the changes; copy: leave them in the sandbox for pull)" in run
+    assert "(mount: keep the changes; copy: leave them in the sandbox for later pull --apply, --branch or --patch-out FILE)" in run
     assert "(repeatable; mount mode only)" in run
-    assert "copy: leave them in the sandbox for pull" in help_text("connect")
+    assert "copy: leave them in the sandbox for later pull --apply" in help_text("connect")
     assert 'previews what "sandbox pull" would bring back and applies nothing' in help_text("review")
     assert "on a Mac it switches the gateway to OpenShell's MicroVM driver" in help_text("setup")
     assert exec_capture == []

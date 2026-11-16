@@ -27,12 +27,12 @@ import (
 	"net/http"
 	"net/url"
 	pathpkg "path"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -187,6 +187,20 @@ func (c *UnixClient) Report(ctx context.Context, registration string, running bo
 	return out, err
 }
 
+// Restart is POST registrations/{id}/restart: the registration's sandbox
+// starts again under the new registration it answers.
+func (c *UnixClient) Restart(ctx context.Context, registration string) (RegistrationView, error) {
+	if err := validRegistration(registration); err != nil {
+		return RegistrationView{}, err
+	}
+	body := struct {
+		V int `json:"v"`
+	}{WireVersion}
+	var out RegistrationView
+	err := c.call(ctx, http.MethodPost, PathRegistrations+url.PathEscape(registration)+RegistrationRestartSub, nil, nil, body, &out)
+	return out, err
+}
+
 // Current is GET policy/current.
 func (c *UnixClient) Current(ctx context.Context, registration string) (CurrentPolicy, error) {
 	if err := validRegistration(registration); err != nil {
@@ -320,7 +334,7 @@ func (c *UnixClient) Events(ctx context.Context, batch EventBatch) error {
 }
 
 // connectorTarget is a connector name in a relayed path.
-var connectorTarget = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+var connectorTarget = lazyregexp.New(`^[a-z][a-z0-9-]{0,31}$`)
 
 // inspectTargets are the inspect kinds of a relayed inspect call.
 var inspectTargets = map[string]bool{"tool": true, "request": true, "response": true, "tool-response": true}
@@ -348,8 +362,8 @@ func RelayPath(class RouteClass, target string) (string, error) {
 
 // ForwardedHeader returns the request headers a relayed call sends: only
 // the ForwardHeaders allowlist copied out of in, then the headers the relay
-// sets itself (RegistrationHeader, ClientHeader, AgentSurfaceHeader).
-// Anything else the sandbox sent (its bearer, identity, session facts,
+// sets itself (RegistrationHeader, ClientHeader, AgentSurfaceHeader,
+// DaemonContractHeader). Anything else the sandbox sent (its bearer, identity, session facts,
 // request ids, any X-DefenseClaw-Sandbox-* header) is dropped. The
 // allowlisted headers are at most MaxForwardHeaderBytes in total, or
 // ErrHeadersTooLarge.
@@ -368,6 +382,7 @@ func ForwardedHeader(in http.Header, registration string) (http.Header, error) {
 	out.Set(RegistrationHeader, registration)
 	out.Set(ClientHeader, ClientHeaderValue)
 	out.Set(AgentSurfaceHeader, AgentSurfaceValue)
+	out.Set(DaemonContractHeader, daemonContractValue)
 	return out, nil
 }
 
@@ -448,6 +463,7 @@ func (c *UnixClient) OTLP(ctx context.Context, call OTLPCall) error {
 	req.ContentLength = int64(len(call.Body))
 	req.Header.Set(RegistrationHeader, call.Registration)
 	req.Header.Set(ClientHeader, ClientHeaderValue)
+	req.Header.Set(DaemonContractHeader, daemonContractValue)
 	if call.ContentType != "" {
 		req.Header.Set("Content-Type", call.ContentType)
 	}
@@ -497,6 +513,9 @@ func truncateUTF8(s string, n int) string {
 	return s
 }
 
+// daemonContractValue is DaemonContractHeader's value.
+var daemonContractValue = strconv.Itoa(DaemonContract)
+
 // validRegistration refuses an empty or malformed registration id before
 // it goes into a header or a path.
 func validRegistration(id string) error {
@@ -543,6 +562,7 @@ func (c *UnixClient) call(ctx context.Context, method, path string, query url.Va
 		}
 	}
 	req.Header.Set(ClientHeader, ClientHeaderValue)
+	req.Header.Set(DaemonContractHeader, daemonContractValue)
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")

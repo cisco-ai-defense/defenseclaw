@@ -3,8 +3,7 @@
 
 // Package guardianstate is the out-of-band state file the hook-guardian
 // service writes to signal its `waiting_for_targets` / `ready` state to
-// the gateway sidecar. See spec 003 (docs/specs/003-windows-deferred-config/)
-// § Data flow.
+// the gateway sidecar, whose health surface reports it.
 //
 // Contract:
 //
@@ -32,9 +31,13 @@ package guardianstate
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // State names — the exact bytes the guardian writes and the sidecar
@@ -55,12 +58,9 @@ const (
 // root directory. Constant so tests and callers don't guess.
 const FileName = ".state"
 
-// StateDirName is the subdirectory under the daemon's data dir
-// (cfg.DataDir on both platforms) that the hook-guardian owns. The
-// guardian's targets.yaml AND its .state file both live here. Windows
-// installer maps this to `<StateRoot>\hook-guardian\` via the psm1
-// module's directory-prep block; Linux/macOS keep the same subdir
-// name for consistency across the two `.state` reader-writer paths.
+// StateDirName names the guardian-owned directory containing targets.yaml
+// and .state. The Windows installer places it under StateRoot, beside the
+// daemon's runtime data directory; Linux/macOS keep it under cfg.DataDir.
 const StateDirName = "hook-guardian"
 
 // PathForStateRoot returns the full state file path for a given
@@ -72,14 +72,15 @@ func PathForStateRoot(stateRoot string) string {
 	return filepath.Join(stateRoot, FileName)
 }
 
-// PathForDataDir returns the state file path derived from the
-// daemon's data dir. Callers on the READ side (the sidecar) don't
-// know the manifest path directly — they resolve it from cfg.DataDir
-// plus the fixed hook-guardian subdirectory convention. The writer
-// side (the guardian) uses PathForStateRoot with
-// filepath.Dir(manifestPath).
+// PathForDataDir returns the guardian's state file path for the sidecar.
+// Windows enterprise services keep runtime data in <StateRoot>\runtime and
+// guardian state in <StateRoot>\hook-guardian, so the installed service uses
+// its protected authorization-directory pin to resolve that sibling. Other
+// deployments retain the data-dir subdirectory convention. An invalid Windows
+// service layout returns an empty path, which ReadState treats as unknown.
+// The writer uses PathForStateRoot with filepath.Dir(manifestPath).
 func PathForDataDir(dataDir string) string {
-	return filepath.Join(dataDir, StateDirName, FileName)
+	return pathForDataDir(dataDir)
 }
 
 // PathForPlatform is the single state-file path both the guardian (writer)
@@ -105,33 +106,47 @@ func PathForPlatform(standaloneUnix bool, dataDir, authDir string) string {
 // a mistake or an attempt to consume unbounded RAM in the sidecar's
 // hot path; discard it.
 func ReadState(path string) string {
-	f, err := os.Open(path) // #nosec G304 — path derives from install-time layout, not user input.
+	var state string
+	err := safefile.RetryPublishedRead(func() error {
+		var readErr error
+		state, readErr = readStateOnce(path)
+		return readErr
+	})
 	if err != nil {
 		return StateUnknown
 	}
+	return state
+}
+
+func readStateOnce(path string) (string, error) {
+	trusted, err := readStatePathTrusted(path)
+	if err != nil {
+		return StateUnknown, err
+	}
+	if !trusted {
+		return StateUnknown, nil
+	}
+	f, err := winpath.OpenReadShared(path) // #nosec G304 — path derives from install-time layout, not user input.
+	if err != nil {
+		return StateUnknown, err
+	}
 	defer f.Close()
-
-	var buf [128]byte
-	n, err := f.Read(buf[:])
-	if err != nil && n == 0 {
-		return StateUnknown
+	data, err := io.ReadAll(io.LimitReader(f, 129))
+	if err != nil {
+		return StateUnknown, err
 	}
-	// Reject a state file that exceeded the 128-byte read: if there is
-	// another byte after our buffer, the file is oversized and we
-	// don't want to trust its contents.
-	var extra [1]byte
-	if m, _ := f.Read(extra[:]); m > 0 {
-		return StateUnknown
+	if len(data) > 128 {
+		return StateUnknown, nil
 	}
 
-	body := strings.TrimSpace(string(buf[:n]))
+	body := strings.TrimSpace(string(data))
 	switch body {
 	case StateWaitingForTargets:
-		return StateWaitingForTargets
+		return StateWaitingForTargets, nil
 	case StateReady:
-		return StateReady
+		return StateReady, nil
 	default:
-		return StateUnknown
+		return StateUnknown, nil
 	}
 }
 
@@ -172,7 +187,7 @@ func WriteState(path, state string) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("guardianstate: close temp file: %w", err)
 	}
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := safefile.ReplaceFileAtomically(tmpPath, path); err != nil {
 		return fmt.Errorf("guardianstate: rename %s -> %s: %w", tmpPath, path, err)
 	}
 	return nil

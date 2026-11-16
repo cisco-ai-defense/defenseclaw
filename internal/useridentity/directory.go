@@ -19,6 +19,15 @@ const (
 	// session (the Kerberos credential cache, SSH_CONNECTION, the logon
 	// session). They are attribution only and never select a profile.
 	AssuranceClaimed Assurance = "claimed"
+	// AssuranceVerifiedByConnector marks the directory facts of a person a
+	// trusted connector (enterprise.identity.trusted_connectors) said it
+	// acts for: the gateway verified the connector's service account and
+	// resolved the person's facts itself, but did not see the person's own
+	// process. The facts select a guardrail profile and nothing else: a
+	// check that needs proof of the person's own process (the session-start
+	// gate, sandbox ownership, per-user secret paths, require-sandbox) never
+	// takes it as verified.
+	AssuranceVerifiedByConnector Assurance = "verified_by_connector"
 )
 
 // Directory names the directory that owns an account. It is the Go side of
@@ -79,6 +88,10 @@ const (
 	SourceMacOSOpenDirectory   = "macos_opendirectory"
 	SourceMacOSPlatformSSO     = "macos_platform_sso"
 	SourceHookReported         = "hook_reported"
+	// SourceProcessCredentials is the per-user gateway's own kernel
+	// credentials (its supplementary groups), named through NSS: the facts
+	// of its own account when a proof of who holds the uid needs root.
+	SourceProcessCredentials = "process_credentials"
 )
 
 // DirectoryFacts are the directory attributes of one end-user account,
@@ -96,12 +109,24 @@ type DirectoryFacts struct {
 	// UPN is the userPrincipalName when the directory exposes one (SSSD
 	// InfoPipe, the Windows identity store, TranslateNameW).
 	UPN string `json:"upn,omitempty"`
+	// UPNKept marks a UPN that the latest completed directory answer did
+	// not confirm: the last good Windows AD UPN a failed TranslateNameW
+	// reuses (GAP-0129), or one the guardian kept (GAP-0284, InfoPipe's
+	// infopipe_kept). Profile matching reads UPN and ignores this mark;
+	// agent identity rows leave a kept UPN out because it is not a current
+	// fact. Never serialized.
+	UPNKept bool `json:"-"`
 	// Domain is the account's domain in lower case, by its DNS name where
 	// the OS knows it, else its NetBIOS name (defenseclaw.user.domain).
 	Domain string `json:"domain,omitempty"`
 	// AccountDomain is the verified account namespace (NetBIOS or local
 	// computer name). It is only used for profile matching, never emitted.
 	AccountDomain string `json:"-"`
+	// QualifiedNamesMayCollide is true when this SSSD AD account belongs to
+	// a host with more than one joined AD domain or configured trusted child.
+	// It is proved during the directory lookup, never inferred from an @ in
+	// the account name, and is used only for bare users assignments.
+	QualifiedNamesMayCollide bool `json:"-"`
 	// Realm is the Kerberos realm, usually the upper-case DNS domain.
 	Realm string `json:"realm,omitempty"`
 	// Directory is the directory that owns the account.
@@ -115,9 +140,60 @@ type DirectoryFacts struct {
 	// GroupsPartial marks Windows group membership as unknown because the
 	// SYSTEM enumerator found no active desktop session. Older spool records
 	// can still contain last-session groups; profile matching must ignore them.
-	// The gateway refreshes these facts soon and uses the default profile
-	// for group-dependent decisions (GAP-0243).
+	// The gateway refreshes these facts soon. A request whose assignment
+	// needs the unknown groups is refused with that fact named (GAP-0243).
 	GroupsPartial bool `json:"groups_partial,omitempty"`
+	// UnconfirmedGroups are the gids among Groups, as numbers, that stay
+	// numbers although no NSS group service proved they have no name: one
+	// that cannot be asked or checked (Himmelblau, aad), or one whose answer
+	// the system's lookup did not take. The account is in those groups
+	// (initgroups proved it); their names are unknown, so a group
+	// assignment that names a group may or may not apply. Never emitted or
+	// stored.
+	UnconfirmedGroups []string `json:"-"`
+	// OnlyPrimaryGroup marks the facts of an SSSD account that SSSD listed in
+	// its primary group only (or only Domain Users, when SSSD gives it a
+	// private group), besides the /etc/group groups that list it. While SSSD
+	// cannot reach the directory, that is its answer for an account whose
+	// memberships it never looked up, as for one in no other group
+	// (GAP-0191). The gateway refreshes such facts sooner, and takes them as
+	// a failed lookup while the guardian finds SSSD offline for the account's
+	// domain. Never emitted or stored.
+	OnlyPrimaryGroup bool `json:"-"`
+	// AccountSID is the SID SSSD holds for the uid (Linux), "" for none. It
+	// binds a guardian record to the directory object it was resolved for,
+	// which the uid and name alone do not. Never emitted or stored.
+	AccountSID string `json:"-"`
+	// AccountRecord names the macOS local node record of the account (a
+	// digest of its listed record: uid, GeneratedUID, home and primary
+	// group), "" for none. An account deleted and created again under the
+	// same name and uid has another one, so the gateway keeps nothing proven
+	// for one account under the other's key. Never emitted or stored.
+	AccountRecord string `json:"-"`
+	// GuardianRecord says the hook guardian's current identity record of
+	// the account was merged into these facts (Linux and macOS): its UPN,
+	// or the absence of one, is what the guardian reported, not a fact still
+	// to come. Never emitted or stored.
+	GuardianRecord bool `json:"-"`
+	// UPNPending says the gateway's own answer proves the account local but
+	// could not show that it has no UPN to wait for (macOS: the local node's
+	// Platform SSO link listing failed). The account stays local for name
+	// matching, and a UPN or DOMAIN\name entry waits for the guardian's
+	// record. Never emitted or stored.
+	UPNPending bool `json:"-"`
+	// HolderUnproven says these facts do not show which account holds the
+	// uid (SourceProcessCredentials: the uid may be another account's too),
+	// so no users entry that names an account matches them for sure. Never
+	// emitted or stored.
+	HolderUnproven bool `json:"-"`
+	// SpoolSeenAt is when the guardian wrote the newest identity record or
+	// withdrawal of the account that the lookup of these facts read (Linux
+	// and macOS), zero for none. The gateway acts once on a record or a
+	// withdrawal written after it and never again on one the lookup already
+	// took into account, so a record that lacks a fact (a SID) or that the
+	// lookup refused does not discard the facts at every request. Never
+	// emitted or stored.
+	SpoolSeenAt time.Time `json:"-"`
 	// Source is the OS facility that resolved these facts, one of the
 	// Source* constants (defenseclaw.user.identity.source).
 	Source string `json:"source,omitempty"`

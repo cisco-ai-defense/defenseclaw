@@ -21,6 +21,12 @@ import (
 // hook or in the sidecar's discovery pass.
 const maxCredentialFileBytes = 1 << 20
 
+// maxClaudeAccountFileBytes bounds Claude Code's .claude.json. It is not a
+// credential file but the agent's whole state, with its project history,
+// and a valid one outgrows the credential limit; AI discovery reads it with
+// the same limit (GAP-1276).
+const maxClaudeAccountFileBytes = 256 << 20
+
 // maxEmailLength is the RFC 5321 forward-path limit.
 const maxEmailLength = 254
 
@@ -118,9 +124,10 @@ func ProfileEmailForConnector(connector, home string) (string, error) {
 	}
 	var path string
 	var parse func([]byte) (string, error)
+	limit := int64(maxCredentialFileBytes)
 	switch normalizeConnector(connector) {
 	case "claudecode":
-		path, parse = filepath.Join(home, ".claude.json"), claudeCodeEmailFromJSON
+		path, parse, limit = filepath.Join(home, ".claude.json"), claudeCodeEmailFromJSON, maxClaudeAccountFileBytes
 	case "codex":
 		path, parse = filepath.Join(home, ".codex", "auth.json"), codexEmailFromJSON
 	default:
@@ -129,7 +136,7 @@ func ProfileEmailForConnector(connector, home string) (string, error) {
 	if err := profileFileInside(home, path); err != nil {
 		return "", err
 	}
-	data, err := readBoundedFile(path)
+	data, err := safefile.ReadRegularFileBounded(path, limit)
 	if errors.Is(err, os.ErrNotExist) {
 		return "", ErrNoEmail
 	}
@@ -168,7 +175,7 @@ func claudeCodeEmail(home string) (string, error) {
 	if path == "" {
 		return "", ErrNoEmail
 	}
-	data, err := readBoundedFile(path)
+	data, err := safefile.ReadRegularFileBounded(path, maxClaudeAccountFileBytes)
 	if err != nil {
 		return "", ErrNoEmail
 	}

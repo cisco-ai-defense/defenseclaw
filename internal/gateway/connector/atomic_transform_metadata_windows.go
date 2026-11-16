@@ -101,12 +101,13 @@ func atomicTransformMetadataPlatform(file *os.File) (atomicTransformPlatformMeta
 		return atomicTransformPlatformMetadata{}, err
 	}
 	return atomicTransformPlatformMetadata{
-		digest:           witness.Digest,
-		preservedDigest:  witness.PreservedDigest,
-		stageOwnedDigest: witness.StageOwnedDigest,
-		ownerGroupDigest: witness.OwnerGroupSHA256,
-		creationTime:     witness.CreationTime,
-		lastWriteTime:    witness.LastWriteTime,
+		digest:            witness.Digest,
+		preservedDigest:   witness.PreservedDigest,
+		canonicalEADigest: witness.CanonicalEAPreservedDigest,
+		stageOwnedDigest:  witness.StageOwnedDigest,
+		ownerGroupDigest:  witness.OwnerGroupSHA256,
+		creationTime:      witness.CreationTime,
+		lastWriteTime:     witness.LastWriteTime,
 	}, nil
 }
 

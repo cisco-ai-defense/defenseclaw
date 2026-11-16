@@ -37,6 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
 
@@ -77,7 +78,7 @@ type generationInputs struct {
 }
 
 // managedPolicyTreeTrust refuses a managed standalone policy_dir that a
-// standard user could change (managed.ValidateTrustedServiceRuntimeTree).
+// standard user could change (config.ValidateManagedPolicyDir).
 var managedPolicyTreeTrust = func(cfg *config.Config, dir string) error {
 	if !cfg.StandaloneEnterprise() || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		return nil
@@ -85,8 +86,15 @@ var managedPolicyTreeTrust = func(cfg *config.Config, dir string) error {
 	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	return managed.ValidateTrustedServiceRuntimeTree(dir, "policy_dir", os.Getenv(managed.WindowsServiceAccountEnv))
+	// The same check as the config validation: the rule pack folders no
+	// setting names are not loaded, so they are not trust inputs (GAP-1694).
+	return validateManagedPolicyDir(cfg, dir, os.Getenv(managed.WindowsServiceAccountEnv))
 }
+
+// validateManagedPolicyDir is the shared check managedPolicyTreeTrust runs;
+// a test replaces it (the real one needs root-owned folders) to prove the
+// gateway's build uses it (GAP-1890).
+var validateManagedPolicyDir = config.ValidateManagedPolicyDir
 
 func buildGeneration(ctx context.Context, in generationInputs) (*Generation, error) {
 	cfg := in.cfg
@@ -142,12 +150,24 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 		}
 	}
 
-	if dir := strings.TrimSpace(cfg.PolicyDir); dir != "" {
+	dir := strings.TrimSpace(cfg.PolicyDir)
+	if in.offline && dir != "" && !newDigestScope(cfg, in.goos, in.bundleRoot).bundleFile(dir) {
+		// An offline digest (bundle sign and verify) loads Rego only from
+		// the bundle. A policy_dir outside it names the target device's
+		// folder, which the signer need not have, and its Rego is never
+		// digested (the "rego" component below), so it is not read
+		// (GAP-0239).
+		dir = ""
+	}
+	if dir != "" {
 		// A module a standard user could change since the config was
 		// loaded is not loaded as managed policy: the build fails, so a
-		// reload keeps the previous generation (GAP-1499).
-		if err := managedPolicyTreeTrust(cfg, dir); err != nil && !in.offline {
-			return nil, fmt.Errorf("generation: OPA policy: managed standalone policy_dir is not administrator-controlled: %w", err)
+		// reload keeps the previous generation (GAP-1499). An offline
+		// digest loads no policy into a gateway.
+		if !in.offline {
+			if err := managedPolicyTreeTrust(cfg, dir); err != nil {
+				return nil, fmt.Errorf("generation: OPA policy: managed standalone policy_dir is not administrator-controlled: %w", err)
+			}
 		}
 		prepared, err := policy.Prepare(ctx, dir)
 		switch {
@@ -184,29 +204,51 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 	if in.bundleRoot == "" && record.Recorded && enterprisebundle.ValidBundleID(record.BundleID) && record.BundleVersion > 0 {
 		// The signer and staged verifier digest paths beneath their bundle
 		// root as ${bundle_root}. The installed config names the immutable
-		// directory for this receipt; retries of one version use fresh names.
+		// directory for this receipt (retries of one version use fresh
+		// names), or none for a settings-only bundle.
 		bundlesDir := filepath.Join(filepath.Dir(cfg.ConfigFilePath), enterprisebundle.BundlesDirName)
 		raw := in.raw
 		if raw == nil {
 			raw, _ = os.ReadFile(cfg.ConfigFilePath)
 		}
-		names := enterprisebundle.VersionDirsNamed(raw, bundlesDir)
-		if len(names) > 1 {
-			return nil, fmt.Errorf("generation: config names more than one bundle version directory")
-		}
-		if len(names) == 1 {
+		// Only a configuration value names a version directory: a YAML
+		// comment or key that mentions one is not configuration (GAP-1853).
+		switch names := enterprisebundle.VersionDirsInValues(raw, bundlesDir); len(names) {
+		case 0:
+			// A settings-only bundle (config.yaml names no bundle file) is
+			// still digested in the bundle scope: the signer and the staged
+			// verifier set a bundle root, which leaves out the rule packs and
+			// other assets outside the bundle. No config path is under this
+			// root, so only that scope applies (GAP-0158).
+			in.bundleRoot = filepath.Join(bundlesDir, enterprisebundle.VersionDirName(record.BundleVersion, record.BundleID))
+		case 1:
 			root := filepath.Join(bundlesDir, names[0])
-			if info, err := os.Stat(root); err == nil && info.IsDir() {
-				in.bundleRoot = root
-			} else {
+			if info, err := os.Stat(root); err != nil || !info.IsDir() {
 				return nil, fmt.Errorf("generation: installed bundle version directory %s is unavailable", root)
 			}
+			in.bundleRoot = root
+		default:
+			return nil, fmt.Errorf("generation: config names more than one bundle version directory")
 		}
 	}
 	g.bundleRoot = in.bundleRoot
 
 	scope := newDigestScope(cfg, in.goos, in.bundleRoot)
 	scope.vendorRoot, scope.vendorTarget = in.vendorRoot, in.vendorTarget
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) && !cfg.SecureClientIntegration() {
+		loaded, err := loadSandboxRequiredPacks(cfg, scope, in.offline)
+		if err != nil {
+			return nil, fmt.Errorf("generation: %w", err)
+		}
+		g.sandboxPacks, g.sandboxPackDir = loaded, cfg.OpenShell.PackDir
+		for ref, pack := range loaded {
+			if scope.bundleFile(pack.Source) {
+				// Attest the exact validated copy this generation publishes,
+				// including inherited content, whether or not a pin is set.
+				g.Components["sandbox_pack:"+scope.rewrite(ref)] = pack.Digest
+			}
+		}
+	}
 	configComponent, err := configDigest(cfg, scope)
 	if err != nil {
 		return nil, fmt.Errorf("generation: %w", err)
@@ -269,6 +311,77 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 	g.assetDirs = generationAssetDirs(cfg, g)
 	g.assetFiles = generationAssetFiles(cfg)
 	return g, nil
+}
+
+// loadSandboxGenerationPack is replaced by content-only tests of attestation.
+var loadSandboxGenerationPack = packs.LoadGenerationPack
+
+// loadSandboxRequiredPacks loads every custom required sandbox pack that a
+// floor of cfg names (openshell.admin, alone and with each guardrail
+// profile's sandbox section) as the sandbox routes load it. A pack that
+// does not load (malformed, a value it does not build with, missing, a
+// file standard users could change, or content other than its pin) fails
+// the generation: a reload keeps the last good generation and its packs,
+// the gateway refuses to start on it, and `policy digest` refuses it, so
+// ensure neither records nor restarts for it (GAP-0229). A pack this
+// process may not read (a standard user's `policy digest`) is left to the
+// gateway, which can. A floor that does not resolve is refused by the
+// sandbox routes, as before.
+func loadSandboxRequiredPacks(cfg *config.Config, scope digestScope, offline bool) (map[string]*packs.Pack, error) {
+	// A profile without a required pack of its own runs the
+	// administrator's: only those with one name another pack.
+	names := []string{""}
+	for name, profile := range cfg.Guardrail.Profiles {
+		if profile.Sandbox != nil && strings.TrimSpace(profile.Sandbox.RequiredPack) != "" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	subject := packs.Subject{UID: os.Getuid()}
+	loaded := map[string]*packs.Pack{}
+	for _, name := range names {
+		floor, _, err := cfg.SandboxManagedFloor(name)
+		if err != nil {
+			continue
+		}
+		ref := strings.TrimSpace(floor.RequiredPack)
+		if ref == "" || packs.IsBuiltin(ref) {
+			continue
+		}
+		assetPath := ref
+		if !filepath.IsAbs(assetPath) {
+			assetPath = filepath.Join(cfg.OpenShell.PackDir, ref)
+		}
+		if offline && !scope.bundleFile(assetPath) {
+			// A signer cannot inspect assets outside the bundle. Runtime
+			// still validates and publishes them, as before.
+			continue
+		}
+		pack, done := loaded[ref]
+		if !done {
+			var packErr *packs.Error
+			if offline {
+				// A signer hashes staged bundle data before the installer
+				// promotes it to administrator ownership. This generation is
+				// never published; runtime still uses the trusted loader.
+				pack, err = packs.LoadRequired(subject, ref, cfg.OpenShell.PackDir, false)
+			} else {
+				pack, err = loadSandboxGenerationPack(subject, ref, cfg.OpenShell.PackDir)
+			}
+			switch {
+			case err == nil:
+				loaded[ref] = pack
+			case errors.As(err, &packErr) && packErr.Code == "unreadable":
+				continue
+			default:
+				return nil, fmt.Errorf("sandbox pack %s does not load: %w", ref, err)
+			}
+		}
+		if pin := strings.TrimSpace(floor.RequiredPackDigest); pin != "" && pack.Digest != pin {
+			return nil, fmt.Errorf("sandbox pack %s has digest %s, not the pinned required_pack_digest %s", ref, pack.Digest, pin)
+		}
+	}
+	return loaded, nil
 }
 
 // rulePackSourceDir identifies the files behind a loaded pack component.
@@ -437,8 +550,9 @@ func generationAssetDirs(cfg *config.Config, g *Generation) []string {
 		}
 	}
 	for _, entry := range cfg.AIDiscovery.SignaturePacks {
-		if _, watchDir := inventory.SignaturePackEntry(entry); watchDir != "" {
-			add(watchDir)
+		_, watchDirs := inventory.SignaturePackEntry(entry)
+		for _, dir := range watchDirs {
+			add(dir)
 		}
 	}
 	if dir := strings.TrimSpace(cfg.PolicyDir); dir != "" {
@@ -486,6 +600,7 @@ func publishGeneration(g *Generation) {
 	g.N = generationSeq.Add(1)
 	bindRegisteredConnectorRules(g)
 	liveGeneration.Store(g)
+	packs.UseGenerationPacks(g.sandboxPackDir, g.sandboxPacks)
 	publishPackPostures()
 	liveReloadError.Store("")
 	applyGenerationProviders(g.Providers)

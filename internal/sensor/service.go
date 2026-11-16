@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -96,11 +97,13 @@ type Resolver interface {
 
 // Options configure a Service.
 type Options struct {
-	Config    config.AIRuntimeConfig
-	Inventory InventoryProvider
-	Resolver  Resolver
-	Providers *catalog.Catalog
-	Platform  platform.Platform
+	Config config.AIRuntimeConfig
+	// SecureClient retains the existing Plane C client classification profile.
+	SecureClient bool
+	Inventory    InventoryProvider
+	Resolver     Resolver
+	Providers    *catalog.Catalog
+	Platform     platform.Platform
 	// HomeDirs are the user homes whose credential and agent-config paths the
 	// host plane watches. Empty means the daemon's own $HOME, which under
 	// launchd or a Windows service is not a real user's -- the caller should
@@ -115,6 +118,11 @@ type Options struct {
 	// Owners are the account lookups that attribute a finding whose process
 	// owner the probe could not read. The zero value skips them.
 	Owners OwnerLookups
+	// ManagedHooks is set on a managed host, where every agent runs machine
+	// policy hooks, so a tool call no hook decision covers is a fact
+	// (hook_seen=false). Elsewhere (the Cowork VM, per-user installs) hooks
+	// are not machine policy and no hook_seen label is given.
+	ManagedHooks bool
 	// Acquirer is where the privileged reads come from: directly from this
 	// process, or brokered by a helper that holds the privilege the gateway
 	// deliberately does not. Defaults to reading directly.
@@ -154,6 +162,10 @@ type Service struct {
 	planeAOn bool
 	planeBOn bool
 
+	// selfPID is this process (os.Getpid). Only its own release manifest
+	// fetch is DefenseClaw's egress rather than AI use (GAP-0068).
+	selfPID int
+
 	// episodes carries per-process state between polls: the previous CPU
 	// reading, first-seen time, and how many distinct unnamed public peers the
 	// process has reached. Escalation depends on that history, so it cannot be
@@ -176,13 +188,18 @@ type Service struct {
 	kernel        *KernelState
 	kernelNextTry time.Time
 	// kernelHits is the growth of the helper's hit totals per read over the
-	// last hour, and kernelHitTotals the previous read's totals (both under
-	// mu): KernelState's hour counts.
+	// last hour, kernelHitTotals the previous read's totals and
+	// kernelHitsEpoch their epoch (all under mu): KernelState's hour counts.
 	kernelHits      []kernelHitGrowth
 	kernelHitTotals *[2]int64
+	kernelHitsEpoch int64
 	// lastContainerEvents is the container-event count at the previous
 	// poll, for the per-cycle figure. Poll owns it (pollMu).
 	lastContainerEvents int64
+	// kernelTaken (under mu) is set once TakeSnapshot handed the current
+	// snapshot's kernel events to the emitter. Until then a newer poll
+	// carries them forward instead of dropping them (rel-1-0-6:GAP-0148).
+	kernelTaken bool
 }
 
 type episode struct {
@@ -294,6 +311,7 @@ func New(options Options) (*Service, error) {
 			options.Config.EffectiveChainWindow()+2*options.Config.EffectivePollInterval()),
 		dnsCache: dnsCache,
 		dnsCap:   dnsCap,
+		selfPID:  os.Getpid(),
 	}
 	for _, selected := range options.Config.EffectivePlanes() {
 		switch selected {
@@ -307,20 +325,27 @@ func New(options Options) (*Service, error) {
 		if selected != "c" {
 			continue
 		}
+		indicators := tactics.Indicators()
+		indicators.KeepClientMCP = options.SecureClient
+		if options.SecureClient {
+			// This profile never uses a client image digest.
+			plane.DisableClientImageDigests()
+		}
 		service.hostPlane = newHostPlane(
 			options.NewPlaneSource(options.HomeDirs),
 			service.tracker,
-			tactics.Indicators(),
+			indicators,
 			options.Config.EffectiveChainWindow(),
 			scoring.KillChainMinStages,
 		)
 	}
 	if service.hostPlane != nil && options.Acquirer.Brokered() {
-		// A brokered plane runs on a managed host, where the hooks that
-		// matter are machine policy every agent runs: a tool call no
-		// decision covers is a fact (hook_seen=false), not a missing
-		// install.
-		service.hostPlane.hooks = newHookRing(hookRingSize, hookRingWindow)
+		if options.ManagedHooks {
+			// On a managed host the hooks that matter are machine policy
+			// every agent runs: a tool call no decision covers is a fact
+			// (hook_seen=false), not a missing install.
+			service.hostPlane.hooks = newHookRing(hookRingSize, hookRingWindow)
+		}
 		if reader, ok := options.Acquirer.(kernelStatusReader); ok {
 			service.kernelReader = reader
 		}
@@ -350,6 +375,29 @@ func (s *Service) Snapshot() Snapshot {
 	snapshot := s.snapshot
 	snapshot.Kernel = copyKernelState(s.kernel)
 	s.mu.RUnlock()
+	return s.withLiveState(snapshot)
+}
+
+// TakeSnapshot is Snapshot for the one consumer that reports the kernel
+// events (the gateway's emitter): it also hands them over, so the next poll
+// starts a fresh batch. Polls come from several clocks (the poll interval,
+// the 10 s kernel-status tick, the supervisor, an operator scan) and the
+// emitter reads on its own tick, so two polls can land between two reads; a
+// poll that replaces a snapshot nobody took carries that snapshot's kernel
+// events forward instead of losing them (rel-1-0-6:GAP-0148: would-blocks
+// missing from defenseclaw.kernel.events while the helper counted them).
+func (s *Service) TakeSnapshot() Snapshot {
+	s.mu.Lock()
+	snapshot := s.snapshot
+	snapshot.Kernel = copyKernelState(s.kernel)
+	s.kernelTaken = true
+	s.mu.Unlock()
+	return s.withLiveState(snapshot)
+}
+
+// withLiveState adds what changes between polls: Plane C's current backend
+// and the latest customer kernel events.
+func (s *Service) withLiveState(snapshot Snapshot) Snapshot {
 	if s.hostPlane == nil || len(snapshot.Planes) == 0 {
 		return snapshot
 	}
@@ -416,7 +464,7 @@ func (s *Service) refreshKernelState(ctx context.Context) {
 		// A helper that predates the op: nothing to report, and nothing to
 		// infer about kernel policies it cannot load.
 		s.kernel = nil
-		s.kernelHits, s.kernelHitTotals = nil, nil
+		s.kernelHits, s.kernelHitTotals, s.kernelHitsEpoch = nil, nil, 0
 		s.kernelNextTry = now.Add(kernelStatusUnsupportedRetry)
 	case err != nil:
 		state := KernelState{}
@@ -430,7 +478,7 @@ func (s *Service) refreshKernelState(ctx context.Context) {
 		state.Error = boundedError(err)
 		s.kernel = &state
 	default:
-		wouldBlock, blocked := s.noteKernelHits(now, status.Counters)
+		wouldBlock, blocked := s.noteKernelHits(now, status.Counters, status.CountersEpoch)
 		s.kernel = &KernelState{Status: status, FetchedAt: now, Reachable: true,
 			WouldBlockLastHour: wouldBlock, BlockedLastHour: blocked}
 	}
@@ -453,16 +501,22 @@ type kernelHitGrowth struct {
 
 // noteKernelHits records a read's growth of the helper's would_block_total
 // and blocked_total and returns their sums over the last hour. The first
-// read is the baseline. The caller holds mu.
-func (s *Service) noteKernelHits(now time.Time, counters map[string]int64) (wouldBlock, blocked int64) {
+// read is the baseline. epoch is the counters' epoch
+// (KernelStatus.CountersEpoch). The caller holds mu.
+func (s *Service) noteKernelHits(now time.Time, counters map[string]int64, epoch int64) (wouldBlock, blocked int64) {
 	totals := [2]int64{counters["would_block_total"], counters["blocked_total"]}
 	if previous := s.kernelHitTotals; previous != nil {
-		growth := kernelHitGrowth{at: now, wouldBlock: counterGrowth(previous[0], totals[0]), blocked: counterGrowth(previous[1], totals[1])}
+		restarted := countersRestarted(s.kernelHitsEpoch, epoch)
+		growth := kernelHitGrowth{
+			at:         now,
+			wouldBlock: counterGrowth(previous[0], totals[0], restarted),
+			blocked:    counterGrowth(previous[1], totals[1], restarted),
+		}
 		if growth.wouldBlock > 0 || growth.blocked > 0 {
 			s.kernelHits = append(s.kernelHits, growth)
 		}
 	}
-	s.kernelHitTotals = &totals
+	s.kernelHitTotals, s.kernelHitsEpoch = &totals, epoch
 	cut := now.Add(-kernelHitWindow)
 	kept := s.kernelHits[:0]
 	for _, growth := range s.kernelHits {
@@ -481,13 +535,21 @@ func (s *Service) noteKernelHits(now time.Time, counters map[string]int64) (woul
 	return wouldBlock, blocked
 }
 
-// counterGrowth is how much a since-start counter grew; one that went down
-// was restarted and counts from zero.
-func counterGrowth(previous, current int64) int64 {
-	if current < previous {
+// counterGrowth is how much a since-start counter grew. A restarted one (a
+// new epoch, or without epochs a count that went down) counts from zero.
+func counterGrowth(previous, current int64, restarted bool) int64 {
+	if restarted || current < previous {
 		return current
 	}
 	return current - previous
+}
+
+// countersRestarted reports a changed epoch of the helper's since-start
+// counters (KernelStatus.CountersEpoch): the helper restarted, and
+// its counts began again at zero. A zero epoch, from a helper that predates
+// it, tells nothing (cowork-1-0-8 GAP-0080).
+func countersRestarted(previous, current int64) bool {
+	return previous != 0 && current != 0 && previous != current
 }
 
 // boundedError is an error's text cut to a status-sized length.
@@ -698,6 +760,7 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 		row := agentchain.ProcessRow{
 			PID: process.PID, PPID: process.PPID,
 			Name: process.Name, Cmdline: process.Cmdline, Start: process.StartedAt,
+			UserSID: process.UserSID,
 		}
 		rows = append(rows, row)
 	}
@@ -740,10 +803,14 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 
 		var result planeBResult
 		if s.planeBOn {
-			result = planeB(byPID[process.PID], process.Name, s.options.Providers,
-				func(connection netprobe.Connection) (string, float64, string) {
-					return s.options.Resolver.Resolve(nameCtx, connection)
-				}, sanctioned)
+			resolve := func(connection netprobe.Connection) (string, float64, string) {
+				return s.options.Resolver.Resolve(nameCtx, connection)
+			}
+			processConnections := byPID[process.PID]
+			if s.hostPlane != nil && s.selfPID > 0 && process.PID == s.selfPID {
+				processConnections = withoutReleaseManifestFetch(processConnections, resolve)
+			}
+			result = planeB(processConnections, process.Name, s.options.Providers, resolve, sanctioned)
 			signals = append(signals, result.signals...)
 
 			// planeB already resolved every public peer and counted the ones
@@ -823,6 +890,7 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 		snapshot.HostPlaneGated = gated
 		snapshot.HostPlaneContainerEvents = s.hostPlane.containerEvents.Load()
 		snapshot.HostPlaneHookUnexpected = s.hostPlane.hookUnexpected.Load()
+		snapshot.HostPlaneClientExecs = s.hostPlane.clientExecs.counts()
 		snapshot.KernelEvents, snapshot.KernelEventsDropped = s.hostPlane.drainKernelEvents()
 		snapshot.CustomerKernelEvents, snapshot.CustomerKernelEventsDropped = s.hostPlane.drainCustomer()
 		for index := range snapshot.Planes {
@@ -844,10 +912,36 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 	snapshot.Degraded = len(snapshot.DegradedReasons) > 0
 
 	s.mu.Lock()
+	if !s.kernelTaken {
+		// The emitter never read the snapshot this poll replaces: keep its
+		// kernel events, oldest first, within the per-poll bounds.
+		snapshot.KernelEvents, snapshot.KernelEventsDropped = carryForward(
+			s.snapshot.KernelEvents, s.snapshot.KernelEventsDropped,
+			snapshot.KernelEvents, snapshot.KernelEventsDropped, maxKernelEventsPerPoll)
+		snapshot.CustomerKernelEvents, snapshot.CustomerKernelEventsDropped = carryForward(
+			s.snapshot.CustomerKernelEvents, s.snapshot.CustomerKernelEventsDropped,
+			snapshot.CustomerKernelEvents, snapshot.CustomerKernelEventsDropped, maxCustomerRecordsPerPoll)
+	}
+	s.kernelTaken = false
 	s.snapshot = snapshot
 	snapshot.Kernel = copyKernelState(s.kernel)
 	s.mu.Unlock()
 	return snapshot
+}
+
+// carryForward joins the events of a snapshot nobody took with a new poll's,
+// oldest first, at most limit of them; the rest count as dropped.
+func carryForward[T any](older []T, olderDropped int64, newer []T, newerDropped int64, limit int) ([]T, int64) {
+	if len(older) == 0 && olderDropped == 0 {
+		return newer, newerDropped
+	}
+	keptOlder := min(len(older), limit)
+	keptNewer := min(len(newer), limit-keptOlder)
+	joined := make([]T, 0, keptOlder+keptNewer)
+	joined = append(joined, older[:keptOlder]...)
+	joined = append(joined, newer[:keptNewer]...)
+	dropped := olderDropped + newerDropped + int64(len(older)-keptOlder) + int64(len(newer)-keptNewer)
+	return joined, dropped
 }
 
 // degradedReasonsFor renders one operator-facing line per plane that is not
@@ -1177,11 +1271,21 @@ func (s *Service) hostPlaneFindings(
 			StartedAt: session.RootStart,
 		})
 		account := owners.resolve(session.Processes, session.ConfigPaths)
-		if account.Attribution == AttributionUnattributed && session.Root.User != "" && session.Root.UID != nil {
+		if account.Attribution == AttributionUnattributed && session.Root.UID != nil {
 			// The kernel event that started the root process (Tetragon's exec,
-			// or the Linux helper's) named its account with its uid. It is the
-			// root instance's own, never a later holder's of its pid.
-			account = owner{User: session.Root.User, Attribution: AttributionProcessOwner}
+			// the Linux helper's or event source's, or the macOS Endpoint
+			// Security audit token's euid) named its uid. It is the root
+			// instance's own, never a later holder's of its pid. The event
+			// source names the account only from a cache, so a uid it saw for
+			// the first time is named here, off the event loop (p0-round
+			// GAP-1389). A uid no account holds stays unattributed.
+			name := session.Root.User
+			if name == "" {
+				name = accountOfUID(*session.Root.UID)
+			}
+			if name != "" {
+				account = owner{User: name, Attribution: AttributionProcessOwner}
+			}
 		}
 		findings = append(findings, Finding{
 			FindingID:         hostFindingID(session),

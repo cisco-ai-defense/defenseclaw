@@ -385,7 +385,12 @@ func (s *scanner) readVSCodeDisabled(db string) (map[string]bool, stateKnowledge
 	if !s.charge(0) {
 		return nil, stateUnreadable
 	}
-	raw, ok := readStateDBValue(db, vscodeDisabledKey, s.limits.StateDBTimeout)
+	path, done, ok := s.confinedStateDB(db)
+	if !ok {
+		return nil, stateUnreadable
+	}
+	defer done()
+	raw, ok := readStateDBValue(path, vscodeDisabledKey, s.limits.StateDBTimeout)
 	if !ok {
 		return nil, stateUnreadable
 	}

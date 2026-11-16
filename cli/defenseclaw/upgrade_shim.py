@@ -20,11 +20,17 @@ This is the only upgrade code that stays on a machine between releases, so it
 must never need to change. It picks a release, downloads that release's
 installer, checks it against the release's ``checksums.txt``, and runs it.
 Everything else (what to download, how to swap, migrate, and roll back) lives
-in the installer of the release being installed, so a fix to any of it ships
-with the next release.
+in the installer. Windows downgrades first run the saved current installer,
+whose recovery checks must run before an older installer takes over.
 
 Standard library only, and imported before the rest of the CLI, so it keeps
 working when anything else in the installed version is broken.
+
+A downgrade is the one case the older release's installer cannot handle on
+its own: it refuses a config.yaml that sets a key it does not have. So this
+shim sets aside the keys of ``NEWER_CONFIG_KEYS`` the older release lacks
+(``SET_ASIDE_FILE`` in the data folder) before it runs that installer, and
+``defenseclaw migrate`` of a release that has them puts them back.
 """
 
 from __future__ import annotations
@@ -36,15 +42,26 @@ import os
 import re
 import shutil
 import ssl
+import stat
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 
 DEFAULT_REPO = "cisco-ai-defense/defenseclaw"
 # Deprecated alias of config.yaml update.source: a GitHub owner/name.
 REPO_ENV = "DEFENSECLAW_REPO"
+# DEFENSECLAW_REPO is a GitHub owner/name or an https:// mirror base URL. Any
+# other value (an http:// URL, a path) used to be appended to github.com and
+# ended in an HTTP 404 (GAP-1065). The value is never echoed: a mirror URL can
+# carry credentials.
+_VALID_REPO_ENV = re.compile(r"^(https://\S+|[^\s/:@]+/[^\s/:@]+)$")
+REPO_ENV_REFUSAL = (
+    f"{REPO_ENV} must be a GitHub owner/name or an https:// mirror URL (an http:// URL is not accepted). "
+    f"Fix or unset {REPO_ENV}, or set update.source to an https:// URL"
+)
 OFFICIAL_SOURCE = "https://github.com/" + DEFAULT_REPO
 # The release signing identity is compiled in. update.source and
 # DEFENSECLAW_REPO only change where release bytes are fetched from; a
@@ -55,6 +72,21 @@ RELEASE_ISSUER = "https://token.actions.githubusercontent.com"
 # pass it to the installer as --local.
 LOCAL_DIR_ENV = "DEFENSECLAW_UPGRADE_LOCAL_DIR"
 _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+# Configuration keys added after 1.0.2, with the first release that has each.
+# The installer of an older release refuses a config.yaml that sets one
+# ("unknown field", GAP-0137), so a downgrade sets them aside first.
+# guardrail.chains and connectors (connectors.agent_gateway) are set aside
+# whole: an older release refuses the block itself, so taking only the inner
+# key out would leave an empty block behind.
+NEWER_CONFIG_KEYS = (
+    ("openshell.trusted_ca_bundle", (1, 0, 3)),
+    ("guardrail.internal_domains", (1, 0, 6)),
+    ("guardrail.chains", (1, 0, 6)),
+    ("connectors", (1, 0, 6)),
+)
+# Where a downgrade keeps the keys it set aside, in the data folder:
+# {"version": 1, "for": "<older release>", "keys": {"<dotted key>": value}}.
+SET_ASIDE_FILE = "config-set-aside.json"
 _TIMEOUT = 30
 
 RECOVER_CORRUPT_AUDIT_NOTE = (
@@ -85,6 +117,16 @@ class ShimError(RuntimeError):
     """A user-facing failure; nothing on the machine was changed."""
 
     exit_code = 1
+    changed_nothing = True
+
+
+class ShimOutcomeUnknownError(ShimError):
+    """The installer was started and ended, or is still running, with a result the shim cannot prove.
+
+    The machine may have changed, so the failure must not say it did not.
+    """
+
+    changed_nothing = False
 
 
 class ShimUsageError(ShimError):
@@ -164,7 +206,8 @@ def run(argv: list[str]) -> int:
         return _upgrade(options["version"], yes=options["yes"])
     except ShimError as exc:
         print(f"  ✗ {exc}", file=sys.stderr)
-        print("    Nothing was changed.", file=sys.stderr)
+        if exc.changed_nothing:
+            print("    Nothing was changed.", file=sys.stderr)
         return exc.exit_code
     except KeyboardInterrupt:
         return 130
@@ -224,6 +267,9 @@ def _tolerant_output() -> None:
             setattr(sys, name, _AsciiGlyphs(stream))
 
 
+_VERSION_NEEDS_VALUE = "--version needs a release number, for example: defenseclaw upgrade --version 1.2.3"
+
+
 def _parse(command: str, args: list[str]) -> dict[str, object] | None:
     options: dict[str, object] = {"version": None, "yes": False}
     index = 0
@@ -233,11 +279,17 @@ def _parse(command: str, args: list[str]) -> dict[str, object] | None:
             return None
         if arg in ("-y", "--yes"):
             options["yes"] = True
-        elif command == "upgrade" and arg == "--version" and index + 1 < len(args):
+        elif command == "upgrade" and arg == "--version":
+            # A missing value is not an unknown option (GAP-2258): the flag is
+            # valid, so say what it needs. "--version --yes" is the same mistake.
+            if index + 1 >= len(args) or args[index + 1].startswith("-"):
+                raise ShimUsageError(_VERSION_NEEDS_VALUE)
             index += 1
             options["version"] = args[index]
         elif command == "upgrade" and arg.startswith("--version="):
             options["version"] = arg.split("=", 1)[1]
+            if not options["version"]:
+                raise ShimUsageError(_VERSION_NEEDS_VALUE)
         elif command == "upgrade" and arg == "--recover-corrupt-audit":
             # Hidden, kept for 0.8.x muscle memory and scripts: recovery is now automatic.
             print(RECOVER_CORRUPT_AUDIT_NOTE, file=sys.stderr)
@@ -263,6 +315,8 @@ def release_source() -> str:
         return configured.rstrip("/")
     repo = os.environ.get(REPO_ENV, "").strip()
     if repo:
+        if not _VALID_REPO_ENV.match(repo):
+            raise ShimUsageError(REPO_ENV_REFUSAL)
         return _source_url(repo)
     return OFFICIAL_SOURCE
 
@@ -295,6 +349,9 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
     repo = release_source()
     local_dir = os.environ.get(LOCAL_DIR_ENV)
     explicit = version is not None
+    # The command as the user ran it, for a message that sends them back
+    # through this shim and the current controller.
+    rerun = " ".join(["defenseclaw upgrade", *(["--version", version] if version else []), *(["--yes"] if yes else [])])
     if version is None:
         version = _local_version(local_dir) if local_dir else _latest_version(repo)
     if not explicit and _key(version) <= _key(installed):
@@ -306,16 +363,171 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
         return 0
     if _key(version) < (1, 0, 0):
         raise ShimError(f"DefenseClaw {installed} cannot install {version}; 1.x installs only 1.0.0 or later")
+    if _key(version) < _key(installed):
+        _refuse_unguarding_downgrade(version)
 
     print(f"  → Installing DefenseClaw {version} (installed: {installed})")
     workdir = tempfile.mkdtemp(prefix="defenseclaw-upgrade-")
+    extra = ["--local", local_dir] if local_dir else []
     try:
-        installer = _fetch_installer(repo, version, local_dir, workdir)
+        if os.name == "nt" and _key(version) < _key(installed):
+            # Older installers cannot read current recovery receipts. Let this
+            # install's controller quiesce the gateway and check them before
+            # it delegates to the verified installer of the requested release.
+            saved = os.path.join(_data_home(), "installer", "install.ps1")
+            installer = os.path.join(workdir, "install.ps1")
+            try:
+                _copy_windows_saved_installer(saved, installer)
+                _check_saved_installer(installer, saved, _data_home(), installed)
+                _check_installer_version(installer, installed)
+            except (OSError, ShimError) as exc:
+                raise ShimError(
+                    f"cannot safely use the current saved installer {saved}: {exc}. "
+                    f"Repair DefenseClaw {installed} with its installer before retrying this downgrade"
+                ) from None
+            extra = ["--version", version, *extra]
+        else:
+            installer = _fetch_installer(repo, version, local_dir, workdir)
     except BaseException:
         shutil.rmtree(workdir, ignore_errors=True)
         raise
-    extra = ["--local", local_dir] if local_dir else []
-    return _run_installer(installer, (["--yes"] if yes else []) + extra, workdir)
+    if _key(version) < _key(installed):
+        try:
+            _set_aside_newer_keys(version)
+        except BaseException:
+            shutil.rmtree(workdir, ignore_errors=True)
+            raise
+    # Only a downgrade to a release that keeps the newer hook helper waits
+    # for its installer and drops the helper (rel-1-0-4:GAP-2503).
+    newer = installed if _key(version) < min(_key(installed), HOOK_HELPER_KEPT_BEFORE) else None
+    return _run_installer(installer, (["--yes"] if yes else []) + extra, workdir, newer=newer, rerun=rerun)
+
+
+def _refuse_unguarding_downgrade(version: str) -> None:
+    """Stop a downgrade to a release that cannot guard an agent set up here.
+
+    ``defenseclaw rollback`` runs the same check (``migrate
+    --check-rollback-to``); a downgrade runs the older release's installer,
+    which has none, so this install checks before anything changes
+    (rel-1-0-6 GAP-0128: OpenCode V2 under 1.0.5 ran unguarded). The check
+    belongs to the rest of the CLI: when that cannot load, the downgrade goes
+    on as before, since it may be the way out of a broken install.
+    """
+
+    try:
+        from defenseclaw.migrations import MigrationError, check_opencode_rollback
+    except Exception:  # noqa: BLE001 - a broken CLI must not block the way back
+        return
+    try:
+        check_opencode_rollback(_data_home(), version, downgrade=True)
+    except MigrationError as exc:
+        raise ShimError(str(exc)) from None
+
+
+def _active_config_path() -> str:
+    override = os.environ.get("DEFENSECLAW_CONFIG", "").strip()
+    return os.path.expanduser(override) if override else os.path.join(_data_home(), "config.yaml")
+
+
+def _set_aside_newer_keys(version: str) -> None:
+    """Take the keys DefenseClaw ``version`` does not have out of config.yaml.
+
+    Its installer would refuse the configuration ("unknown field", GAP-0137).
+    The values go to ``SET_ASIDE_FILE`` first, then one validated write
+    removes the keys; ``defenseclaw migrate`` of a release that has them
+    puts them back. When the keys cannot be set aside, the upgrade stops
+    with the command that removes them, and nothing is changed.
+    """
+
+    target = _key(version)
+    config = _active_config_path()
+    try:
+        import yaml
+
+        with open(config, encoding="utf-8") as stream:
+            raw = yaml.safe_load(stream)
+    except Exception:  # noqa: BLE001 - no config or one that does not parse: the installer's check names it
+        return
+    found: dict[str, object] = {}
+    for dotted, since in NEWER_CONFIG_KEYS:
+        if target >= since:
+            continue
+        node: object = raw
+        for part in dotted.split("."):
+            node = node.get(part) if isinstance(node, dict) else None
+        if node not in (None, ""):
+            found[dotted] = node
+    if not found:
+        return
+    names = ", ".join(found)
+    stop = (
+        f"DefenseClaw {version} does not have {names}, so its installer would refuse config.yaml; "
+        f"remove it with 'defenseclaw config unset {' '.join(found)}' and run the upgrade again"
+    )
+    held = os.path.join(_data_home(), SET_ASIDE_FILE)
+    try:
+        from defenseclaw.config_writer import ACTOR_MIGRATION, Change, apply
+    except Exception as exc:  # noqa: BLE001 - a broken install: say what to remove by hand
+        raise ShimError(f"{stop} (the keys could not be set aside: {exc})") from None
+    previous: bytes | None = None
+    try:
+        with open(held, "rb") as stream:
+            previous = stream.read()
+        kept = json.loads(previous.decode("utf-8")).get("keys")
+    except FileNotFoundError:
+        kept = None
+    except (OSError, ValueError, AttributeError):
+        kept = None
+    keys = dict(kept) if isinstance(kept, dict) else {}
+    keys.update(found)
+    try:
+        _write_private_json(held, {"version": 1, "for": version, "keys": keys})
+    except OSError as exc:
+        raise ShimError(f"{stop} (could not write {held}: {exc})") from None
+    try:
+        apply(
+            [Change(key, unset=True) for key in found],
+            ACTOR_MIGRATION,
+            f"set aside for the downgrade to {version}",
+            path=config,
+        )
+    except Exception as exc:  # noqa: BLE001 - config.yaml is unchanged; so is the record
+        try:
+            if previous is None:
+                os.remove(held)
+            else:
+                _write_private_bytes(held, previous)
+        except OSError:
+            pass
+        raise ShimError(f"{stop} (the keys could not be set aside: {exc})") from None
+    print(f"  → DefenseClaw {version} does not have {names}: set aside in {held}.")
+    print(
+        "    Installing a release that has it puts it back. If the installer stops, "
+        "or after a rollback, put it back with: defenseclaw migrate"
+    )
+
+
+def _write_private_json(path: str, document: dict[str, object]) -> None:
+    _write_private_bytes(path, (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+
+
+def _write_private_bytes(path: str, data: bytes) -> None:
+    """Write ``path`` owner-only and atomically."""
+
+    fd, tmp = tempfile.mkstemp(prefix=".config-set-aside.", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _data_home() -> str:
@@ -323,15 +535,94 @@ def _data_home() -> str:
     return os.path.normpath(os.path.expanduser(os.environ.get("DEFENSECLAW_HOME") or "~/.defenseclaw"))
 
 
+def _windows_regular_file_info(path: str) -> os.stat_result:
+    """Validate the saved controller's locator without accepting reparse aliases."""
+    path = os.path.abspath(path)
+    ancestors = []
+    parent = os.path.dirname(path)
+    while True:
+        ancestors.append(parent)
+        above = os.path.dirname(parent)
+        if above == parent:
+            break
+        parent = above
+    for entry in [*reversed(ancestors), path]:
+        info = os.lstat(entry)
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise OSError(f"saved installer path contains a reparse point: {entry}")
+        expected_type = stat.S_ISREG if entry == path else stat.S_ISDIR
+        if not expected_type(info.st_mode):
+            raise OSError(f"saved installer path has an unexpected file type: {entry}")
+    return info
+
+
+def _read_windows_regular_file(path: str, limit: int) -> bytes:
+    before = _windows_regular_file_info(path)
+    if before.st_size > limit:
+        raise OSError(f"saved installer metadata exceeds its size limit: {path}")
+    with open(path, "rb") as source:
+        opened = os.fstat(source.fileno())
+        body = source.read(limit + 1)
+        after = os.fstat(source.fileno())
+    named = _windows_regular_file_info(path)
+    fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns")
+    witness = tuple(getattr(before, field) for field in fields)
+    # On Windows Python can expose creation time through lstat's st_ctime
+    # and change time through fstat's. Compare each source with itself.
+    if (
+        len(body) != before.st_size
+        or before.st_ctime_ns != named.st_ctime_ns
+        or opened.st_ctime_ns != after.st_ctime_ns
+        or any(tuple(getattr(info, field) for field in fields) != witness for info in (opened, after, named))
+    ):
+        raise OSError(f"saved installer changed while being copied: {path}")
+    return body
+
+
+def _copy_windows_saved_installer(source: str, destination: str) -> None:
+    body = _read_windows_regular_file(source, 4 * 1024 * 1024)
+    with open(destination, "xb") as target:
+        target.write(body)
+
+
 def _rollback(*, yes: bool) -> int:
+    from defenseclaw import __version__ as installed
+
     home = _data_home()
     name = _installer_name()
     installer = os.path.join(home, "installer", name)
-    if not os.path.isfile(installer):
+    if os.name == "nt":
+        try:
+            _windows_regular_file_info(installer)
+            use_previous = False
+        except FileNotFoundError:
+            use_previous = True
+        except OSError as exc:
+            raise ShimError(
+                f"cannot safely use the current saved installer {installer}: {exc}. "
+                "Repair the current DefenseClaw install before retrying rollback"
+            ) from None
+    else:
+        use_previous = not os.path.isfile(installer)
+    if use_previous:
         # A source ('make all') install saves no installer. After a rollback to
         # one, the install it replaced (now in previous/) still has its own, and
         # that one rolls forward again (GAP-2459).
         installer = os.path.join(home, "previous", "installer", name)
+        if os.name == "nt":
+            try:
+                back_to = (
+                    _read_windows_regular_file(os.path.join(home, "previous", "VERSION"), 128)
+                    .decode("utf-8-sig")
+                    .strip()
+                )
+            except (OSError, UnicodeError):
+                back_to = ""
+            if not _VERSION.fullmatch(back_to) or _key(back_to) < _key(installed):
+                raise ShimError(
+                    "the current saved Windows installer is missing, and the previous install cannot safely control "
+                    "this rollback. Repair the current DefenseClaw install before retrying rollback"
+                )
     if not os.path.isfile(installer):
         saved = os.path.join(home, "installer")
         raise ShimError(
@@ -351,13 +642,79 @@ def _rollback(*, yes: bool) -> int:
     workdir = tempfile.mkdtemp(prefix="defenseclaw-rollback-")
     copy = os.path.join(workdir, name)
     try:
-        shutil.copyfile(installer, copy)
+        if os.name == "nt":
+            _copy_windows_saved_installer(installer, copy)
+            _check_installer_version(copy, back_to if use_previous else installed)
+        else:
+            shutil.copyfile(installer, copy)
     except BaseException as exc:
         shutil.rmtree(workdir, ignore_errors=True)
-        if isinstance(exc, OSError):
-            raise ShimError(f"could not copy the saved installer {installer}: {exc}") from None
+        if isinstance(exc, (OSError, ShimError)):
+            hint = ". Repair the current DefenseClaw install before retrying rollback" if os.name == "nt" else ""
+            raise ShimError(f"could not copy the saved installer {installer}: {exc}{hint}") from None
         raise
-    return _run_installer(copy, ["--rollback"] + (["--yes"] if yes else []), workdir)
+    try:
+        # until 1.1: an installer that 1.0.3 or older saved in previous/ has
+        # no digest record; one a later release saved is checked.
+        if use_previous:
+            _check_saved_installer(copy, installer, os.path.join(previous, "data"), None)
+        else:
+            _check_saved_installer(copy, installer, home, installed)
+    except BaseException:
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise
+    rerun = "defenseclaw rollback" + (" --yes" if yes else "")
+    return _run_installer(copy, ["--rollback"] + (["--yes"] if yes else []), workdir, rerun=rerun)
+
+
+INSTALLER_RECORD = os.path.join("receipts", "installer.sha256")
+
+
+def _check_saved_installer(copy: str, saved: str, data_dir: str, reinstall: str | None) -> None:
+    """Refuse a saved installer whose bytes are not the ones its install saved (GAP-1067).
+
+    The installer records the SHA-256 of the copy it saves in
+    ``<data>/receipts/installer.sha256`` (record_saved_installer,
+    Save-InstallerDigest), and every swap moves that record with the install
+    it belongs to. *copy* is the file that will run, already copied out of
+    *saved*, so a change after this check cannot reach it. *reinstall* is the
+    release whose installer saves a verified copy again; ``None`` accepts a
+    missing record (an installer saved by 1.0.3 or older).
+    """
+
+    record = os.path.join(data_dir, INSTALLER_RECORD)
+    again = (
+        f"Save a verified copy again with: defenseclaw upgrade --version {reinstall} --yes, then run this command again"
+        if reinstall
+        else f"download {_installer_name()} from the release you want and run it with --rollback"
+    )
+    try:
+        if os.name == "nt":
+            raw = _read_windows_regular_file(record, 256)
+        else:
+            with open(record, "rb") as handle:
+                raw = handle.read(257)
+    except FileNotFoundError:
+        if reinstall is None:
+            return
+        raise ShimError(
+            f"there is no record of the installer DefenseClaw saved in {saved} ({record} is missing), "
+            f"so it is not run; nothing was changed. {again}"
+        ) from None
+    except OSError as exc:
+        raise ShimError(
+            f"could not read the record of the saved installer {record}: {exc}; nothing was changed. {again}"
+        ) from None
+    fields = raw.decode("ascii", errors="replace").split()
+    expected = fields[0].lower() if len(raw) <= 256 and len(fields) == 2 and fields[1] == _installer_name() else ""
+    with open(copy, "rb") as stream:
+        actual = hashlib.sha256(stream.read()).hexdigest()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected) or actual != expected:
+        raise ShimError(
+            f"the saved installer {saved} is not the one DefenseClaw saved (its SHA-256 is {actual}; {record} "
+            f"records {expected or 'no valid digest'}): it was changed after the install, so it is not run; "
+            f"nothing was changed. {again}"
+        )
 
 
 def legacy_setup_rollback_refusal(back_to: str, previous: str, repo: str) -> str:
@@ -370,12 +727,222 @@ def legacy_setup_rollback_refusal(back_to: str, previous: str, repo: str) -> str
     )
 
 
-def _run_installer(path: str, args: list[str], workdir: str) -> int:
+# How long the shim waits for a started Windows installer to open its log. Before
+# it has one the installer can wait up to 300 seconds for an earlier uninstall's
+# cleanup (Wait-UninstallCleanup in install.ps1) and then fails; an installer run
+# with --yes that fails keeps its console for up to 120 seconds (Wait-BeforeClose)
+# before the process exits. The wait covers both and a margin, so the exit code is
+# known before the shim reports.
+_INSTALLER_CLEANUP_WAIT = 300.0
+_INSTALLER_ERROR_WINDOW = 120.0
+_INSTALLER_LOG_WAIT = _INSTALLER_CLEANUP_WAIT + _INSTALLER_ERROR_WINDOW + 30.0
+_INSTALLER_LOG_POLL = 0.25
+# A log's new bytes are read in chunks that overlap by more than a transcript
+# header line is long, so a header cut by a chunk edge is still found.
+_INSTALLER_LOG_CHUNK = 1 << 20
+_INSTALLER_LOG_OVERLAP = 256
+
+
+def _terminal_command(script: str, ps_args: list[str]) -> str:
+    """The command that runs *script* in the current terminal, for a message."""
+    return " ".join(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", f'"{script}"', *ps_args])
+
+
+_RECOVERY_COMPANIONS = ("checksums.txt", "checksums.txt.bundle")
+
+
+def _stage_recovery_copy(path: str) -> tuple[str, str] | None:
+    """Copy the verified installer and its checksum files to a directory only the shim owns (GAP-1011).
+
+    install.ps1 deletes the temporary directory it runs from (a leaf named
+    defenseclaw-upgrade-* or defenseclaw-rollback-*) before the process ends,
+    so a command printed for a file in that directory names a file that is
+    gone. This directory has a different leaf name, which that cleanup never
+    matches. Returns (installer copy, SHA-256 of the verified bytes), or
+    ``None`` when the copy could not be made.
+    """
+    directory: str | None = None
+    try:
+        directory = tempfile.mkdtemp(prefix="defenseclaw-recovery-")
+        with open(path, "rb") as stream:
+            body = stream.read()
+        copy = os.path.join(directory, os.path.basename(path))
+        with open(copy, "xb") as target:
+            target.write(body)
+        for name in _RECOVERY_COMPANIONS:
+            try:
+                shutil.copyfile(os.path.join(os.path.dirname(path), name), os.path.join(directory, name))
+            except FileNotFoundError:
+                continue
+    except OSError:
+        if directory:
+            shutil.rmtree(directory, ignore_errors=True)
+        return None
+    return copy, hashlib.sha256(body).hexdigest()
+
+
+def _drop_recovery_copy(recovery: tuple[str, str] | None) -> None:
+    if recovery:
+        shutil.rmtree(os.path.dirname(recovery[0]), ignore_errors=True)
+
+
+# Runs hidden after the shim has exited and removes the recovery copy once the
+# installer it started has ended with exit code 0. A failed or unreadable run
+# keeps the copy, which the failed run's message names (GAP-1011). It uses
+# language operators and .NET calls only, so no PowerShell module has to load.
+# The process handle is read before the wait: without it a process found by id
+# reports no exit code at all, which would read as a failure.
+# Its own exit code says what it did: 0 removed the copy, 3 could not watch
+# the installer, 4 the installer failed (copy kept), 5 the folder is not a
+# recovery copy, 6 the removal failed.
+_RECOVERY_WATCHER = (
+    "$ErrorActionPreference = 'Stop'; "
+    "try { $p = [System.Diagnostics.Process]::GetProcessById([int]$env:DC_WATCH_PID) } catch { exit 3 }; "
+    "if (@('powershell', 'pwsh') -notcontains $p.ProcessName) { exit 3 }; "
+    "$null = $p.Handle; "
+    "$p.WaitForExit(); "
+    "if ($p.ExitCode -ne 0) { exit 4 }; "
+    "$d = $env:DC_WATCH_DIR; "
+    "if (-not [System.IO.Path]::GetFileName($d).StartsWith('defenseclaw-recovery-')) { exit 5 }; "
+    "try { [System.IO.Directory]::Delete($d, $true) } catch { exit 6 }; "
+    "exit 0"
+)
+
+
+def _watch_recovery_copy(
+    powershell: str, pid: int, recovery: tuple[str, str] | None, env: dict[str, str]
+) -> subprocess.Popen[bytes] | None:
+    """Start the hidden process that removes *recovery* when the installer *pid* ends with exit code 0.
+
+    The shim returns while the installer still runs (it must free the files of
+    the running CLI), so only a process that outlives it can see the result.
+    It is not started from the CLI's own interpreter, which would hold files
+    the installer replaces, and its working directory is the system folder, so
+    it never holds the folder it removes. ``None`` when it could not start: the
+    copy then stays, as it does after a failed run.
+    """
+    if not recovery:
+        return None
+    watch_env = dict(env)
+    watch_env["DC_WATCH_PID"] = str(pid)
+    watch_env["DC_WATCH_DIR"] = os.path.dirname(recovery[0])
+    try:
+        return subprocess.Popen(  # noqa: S603 - fixed interpreter and fixed script
+            [powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", _RECOVERY_WATCHER],
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            cwd=os.environ.get("SystemRoot", r"C:\Windows"),
+            env=watch_env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return None
+
+
+def _recovery_copy_verifies(recovery: tuple[str, str] | None) -> bool:
+    if not recovery:
+        return False
+    try:
+        with open(recovery[0], "rb") as stream:
+            return hashlib.sha256(stream.read()).hexdigest() == recovery[1]
+    except OSError:
+        return False
+
+
+def _install_logs(logs: str) -> dict[str, int]:
+    """The install logs (name -> size) in *logs*."""
+    sizes: dict[str, int] = {}
+    try:
+        names = os.listdir(logs)
+    except OSError:
+        return sizes
+    for name in names:
+        if name.startswith("install-") and name.endswith(".log"):
+            try:
+                sizes[name] = os.stat(os.path.join(logs, name)).st_size
+            except OSError:
+                continue
+    return sizes
+
+
+def _log_opened_by(logs: str, known: dict[str, int], pid: int, scanned: dict[str, int] | None = None) -> bool:
+    """Whether the process *pid* wrote a transcript header into *logs* since *known*.
+
+    The installer names a log to the second and opens it with ``-Append``, so
+    a name already in *known* may be the installer's own log, and a log that
+    appeared or grew may be another run's. The transcript header names the
+    process (``Process ID: <pid>``): only the bytes added since the snapshot
+    count, however many another run added before this header, and only a
+    header with this process's id. *scanned* (name -> bytes read so far) lets
+    a poll read only what is new.
+    """
+    if scanned is None:
+        scanned = {}
+    marker = re.compile(rb"Process ID:\s*" + str(pid).encode("ascii") + rb"(?!\d)")
+    for name, size in _install_logs(logs).items():
+        floor = known.get(name, 0)
+        if size < floor:  # replaced by a shorter file: all of it is new
+            floor = 0
+        done = scanned.get(name, floor)
+        if size < done:
+            done = floor
+        if size == done:
+            continue
+        pos = max(floor, done - _INSTALLER_LOG_OVERLAP)
+        try:
+            with open(os.path.join(logs, name), "rb") as stream:
+                stream.seek(pos)
+                while True:
+                    chunk = stream.read(_INSTALLER_LOG_CHUNK)
+                    # A UTF-16 transcript spaces every character with a NUL.
+                    if marker.search(chunk.replace(b"\x00", b"")):
+                        return True
+                    pos += len(chunk)
+                    if len(chunk) < _INSTALLER_LOG_CHUNK:
+                        break
+                    pos -= _INSTALLER_LOG_OVERLAP
+                    stream.seek(pos)
+        except OSError:
+            continue
+        scanned[name] = pos
+    return False
+
+
+def _await_installer_log(proc: subprocess.Popen[bytes], logs: str, known: dict[str, int]) -> tuple[bool, int | None]:
+    """Wait until the started installer opens its install log or ends.
+
+    Returns (log opened, exit code or None while it still runs). It gives up
+    waiting after ``_INSTALLER_LOG_WAIT`` seconds, which outlasts the
+    installer's own 300-second wait for an earlier uninstall and its 120-second
+    error window; the caller reports an installer that still runs then as
+    unconfirmed.
+    """
+    deadline = time.monotonic() + _INSTALLER_LOG_WAIT
+    scanned: dict[str, int] = {}
+    while True:
+        rc = proc.poll()
+        if _log_opened_by(logs, known, proc.pid, scanned):
+            return True, rc
+        if rc is not None:
+            return False, rc
+        if time.monotonic() >= deadline:
+            return False, None
+        time.sleep(_INSTALLER_LOG_POLL)
+
+
+def _run_installer(path: str, args: list[str], workdir: str, *, rerun: str, newer: str | None = None) -> int:
     # The installer downloads the release assets: hand it update.source
     # through its DEFENSECLAW_REPO input (an owner/name or an https base URL).
     configured = _configured_update_source()
     if configured:
         os.environ[REPO_ENV] = configured.rstrip("/")
+    # until 1.1: older OmniGent setups may select their config relative to
+    # the caller's directory. Bind these paths before the installer handoff.
+    for name in ("OMNIGENT_CONFIG_HOME", "OMNIGENT_CONFIG"):
+        value = os.environ.get(name, "")
+        if value and not os.path.isabs(value):
+            os.environ[name] = os.path.abspath(os.path.expanduser(value))
     if os.name == "nt":
         # The running CLI holds files in .venv open; start the installer in its
         # own console and exit so it can replace them.
@@ -391,17 +958,21 @@ def _run_installer(path: str, args: list[str], workdir: str) -> int:
             # An SSH session has no desktop: the new window never appears and
             # the result would only be in the install log (GAP-1993). Keep the
             # staged installer and give the command that runs it right here.
-            command = " ".join(
-                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", f'"{path}"', *ps_args]
-            )
+            command = _terminal_command(path, ps_args)
             raise ShimError(
                 "this terminal has no desktop (SSH session), so the installer's window would not be "
                 "visible here.\n"
                 "    Run the installer in this terminal instead; it shows the result and sets the exit code:\n"
                 f"      {command}"
             )
+        home = _data_home()
+        logs = os.path.join(home, "logs")
+        known = _install_logs(logs)
+        # The installer deletes the directory it runs from; keep a verified
+        # copy elsewhere for the recovery command of a failed run.
+        recovery = _stage_recovery_copy(path)
         try:
-            subprocess.Popen(  # noqa: S603 - fixed interpreter and verified script
+            proc = subprocess.Popen(  # noqa: S603 - fixed interpreter and verified script
                 [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path, *ps_args],
                 creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
                 cwd=workdir,
@@ -409,22 +980,159 @@ def _run_installer(path: str, args: list[str], workdir: str) -> int:
             )
         except OSError as exc:
             shutil.rmtree(workdir, ignore_errors=True)
+            _drop_recovery_copy(recovery)
             raise ShimError(f"could not start {powershell}: {exc}") from None
-        home = _data_home()
-        print("  → The installer continues in a new window, which shows the result when it ends.")
-        print(f"    Its log is saved in {os.path.join(home, 'logs')} (install-<time>.log).")
+        # The shim ends while the installer runs, so a process that outlives it
+        # removes the copy once the installer has ended with exit code 0.
+        _watch_recovery_copy(powershell, proc.pid, recovery, env)
+        # A started process is not a running install (GAP-1011): the installer
+        # opens its log only after it has the install lock, and an installer
+        # that ends before then leaves nothing but a window that closes.
+        print(f"  → Waiting for the installer to open its log (up to {int(_INSTALLER_LOG_WAIT)} s)...", flush=True)
+        opened, rc = _await_installer_log(proc, logs, known)
+        if opened:
+            # An open log is a start, not a result: the installer may still
+            # fail and delete the folder it runs from, so the verified copy
+            # stays until the installer ends with exit code 0. The watcher
+            # started above removes it then; an installer that already ended
+            # with 0 is handled here.
+            if rc == 0:
+                _drop_recovery_copy(recovery)
+            print("  → The installer continues in a new window, which shows the result when it ends.")
+            print(f"    Its log is saved in {logs} (install-<time>.log).")
+        elif rc == 0:
+            shutil.rmtree(workdir, ignore_errors=True)
+            _drop_recovery_copy(recovery)
+            print("  → The installer ran in its own window and ended with exit code 0 without opening an install log.")
+        elif rc is not None:
+            # No log is not proof that nothing changed: the installer goes on
+            # without a transcript when it cannot write one. Keep the staged
+            # installer, so the result can be read in this terminal.
+            shutil.rmtree(workdir, ignore_errors=True)
+            if recovery and _recovery_copy_verifies(recovery):
+                route = (
+                    "run the kept installer copy, verified against SHA-256 "
+                    f"{recovery[1]}, in this terminal:\n      {_terminal_command(recovery[0], ps_args)}\n"
+                    f"    or run this command again:\n      {rerun}\n"
+                )
+            else:
+                # A release installer of a lower target cannot read the recovery
+                # receipts of this install: go back through the shim, which
+                # picks the current controller again.
+                _drop_recovery_copy(recovery)
+                route = f"run this command again (the kept copy is not available):\n      {rerun}\n"
+            raise ShimOutcomeUnknownError(
+                f"the installer ended with exit code {rc} before it opened its log. It may have stopped before "
+                "changing anything, or later if it could not write its log, so the result is not known; the "
+                "reason was shown only in its window, which has closed. Check the install with: "
+                "defenseclaw --version and defenseclaw doctor. To read the result, "
+                f"{route}"
+                "    The installer first restores an install it was replacing."
+            )
+        else:
+            # Still running, so no result: the verified copy stays.
+            raise ShimOutcomeUnknownError(
+                f"the installer is still running and has not opened its log after {int(_INSTALLER_LOG_WAIT)} "
+                "seconds, so the start is not confirmed: it may wait on an earlier uninstall's cleanup or another "
+                "install, or hold an error in its window. Read that window and let the installer end before you "
+                "start another install; then check: defenseclaw --version and defenseclaw doctor"
+            )
         print("    Confirm the result afterwards with: defenseclaw --version")
         return 0
     bash = "/bin/bash" if os.path.exists("/bin/bash") else (shutil.which("bash") or "bash")
     sys.stdout.flush()
     sys.stderr.flush()
+    if newer:
+        # A downgrade from newer: the older installer keeps the hook helper of
+        # this release, so the shim waits for it (rel-1-0-4:GAP-2503).
+        rc = _wait_for_installer([bash, path, *args])
+        shutil.rmtree(workdir, ignore_errors=True)
+        if rc == 0:
+            _drop_newer_hook_helper(newer)
+        return rc
     try:
-        os.chdir(workdir)
+        # path is absolute; keep the caller's directory for relative vendor
+        # paths handed to an installer from an older release.
         os.execv(bash, [bash, path, *args])
     except OSError as exc:
         shutil.rmtree(workdir, ignore_errors=True)
         raise ShimError(f"could not run {bash}: {exc}") from None
     return 0  # pragma: no cover - execv does not return
+
+
+def _wait_for_installer(argv: list[str]) -> int:
+    try:
+        proc = subprocess.Popen(argv)  # noqa: S603 - fixed interpreter and verified script
+    except OSError as exc:
+        raise ShimError(f"could not run {argv[0]}: {exc}") from None
+    while True:
+        try:
+            return proc.wait()
+        except KeyboardInterrupt:
+            # The installer gets the same Ctrl-C and finishes or undoes its swap.
+            continue
+
+
+HOOK_HELPER = os.path.join("hooks", "_hardening.sh")
+# A gateway of 1.0.4 or older keeps the newer hooks/_hardening.sh. 1.0.5 and
+# later ship the same helper (schema v10), and a gateway with only plugin
+# connectors (OpenCode) set up never writes one: once the shim dropped it,
+# that gateway refused to start (rel-1-0-6:GAP-0047). A release that changes
+# the helper's schema line must revisit this floor and install.sh's.
+HOOK_HELPER_KEPT_BEFORE = (1, 0, 5)
+_HOOK_HELPER_MAX_BYTES = 4 << 20
+
+
+def _drop_newer_hook_helper(newer: str) -> None:
+    """After a downgrade from ``newer``, let the older gateway write its own hook helper.
+
+    A gateway of 1.0.4 or older keeps a hooks/_hardening.sh whose schema line
+    is newer than its own, and the helper of a newer release runs native
+    commands the older binaries do not have: after ``defenseclaw upgrade
+    --version 1.0.2`` every hook call was refused as "the gateway is running
+    but did not answer" until the helper was removed and the gateway restarted
+    (rel-1-0-4:GAP-2503). The helper goes only when it is byte for byte the one
+    the replaced install (previous/, ``newer``) has. Until 1.1: remove with the
+    1.0.2, 1.0.3 and 1.0.4 downgrade paths.
+    """
+    home = _data_home()
+    live = os.path.join(home, HOOK_HELPER)
+    left = os.path.join(home, "previous", "data", HOOK_HELPER)
+    try:
+        with open(os.path.join(home, "previous", "VERSION"), encoding="utf-8") as handle:
+            if handle.read(64).strip() != newer:
+                return
+        if not all(stat.S_ISREG(os.lstat(path).st_mode) for path in (live, left)):
+            return
+        with open(live, "rb") as mine, open(left, "rb") as theirs:
+            if mine.read(_HOOK_HELPER_MAX_BYTES + 1) != theirs.read(_HOOK_HELPER_MAX_BYTES + 1):
+                return
+        os.unlink(live)
+    except OSError:
+        return
+    gateway = os.path.join(os.path.expanduser("~"), ".local", "bin", "defenseclaw-gateway")
+    print(f"  → Removed the hook helper of DefenseClaw {newer}; the gateway writes its own when it starts")
+    if not _gateway_running(home):
+        return
+    try:
+        rc = subprocess.call([gateway, "restart"])  # noqa: S603 - the installed gateway
+    except OSError:
+        rc = 1
+    if rc != 0:
+        print("  ! The gateway did not restart; hook calls are refused until it does. Run: defenseclaw-gateway restart")
+
+
+def _gateway_running(home: str) -> bool:
+    try:
+        with open(os.path.join(home, "gateway.pid"), encoding="utf-8") as handle:
+            text = handle.read(4096).strip()
+        pid = json.loads(text).get("pid") if text.startswith("{") else int(text)
+        if not isinstance(pid, int) or pid <= 0:
+            return False
+        os.kill(pid, 0)
+    except (OSError, ValueError, AttributeError):
+        return False
+    return True
 
 
 def _windows_terminal_without_desktop() -> bool:
@@ -433,7 +1141,7 @@ def _windows_terminal_without_desktop() -> bool:
 
 
 def _powershell_flag(arg: str) -> str:
-    return {"--yes": "-Yes", "--rollback": "-Rollback", "--local": "-Local"}.get(arg, arg)
+    return {"--yes": "-Yes", "--rollback": "-Rollback", "--local": "-Local", "--version": "-Version"}.get(arg, arg)
 
 
 def _installer_name() -> str:

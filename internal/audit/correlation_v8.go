@@ -541,6 +541,16 @@ func (repo *CorrelationRepository) resolveConnectorInstance(
 	if !validCustody(custody) {
 		return ConnectorInstance{}, errors.New("audit: invalid connector export custody")
 	}
+	key := connectorInstanceKey{scoped: scoped, connector: connector}
+	if cached, ok := repo.store.connectorInstances.Load(key); ok && repo.store.Ready() {
+		// The instance this store resolved or wrote: returned as is when the
+		// call would change nothing (no custody promotion, same profile).
+		instance := cached.(ConnectorInstance)
+		if (custody != ConnectorCustodyDefenseClaw || instance.ExportCustody == ConnectorCustodyDefenseClaw) &&
+			profileVersion == instance.ProfileVersion {
+			return instance, nil
+		}
+	}
 	release, err := repo.store.acquireReady()
 	if err != nil {
 		return ConnectorInstance{}, err
@@ -608,25 +618,45 @@ func (repo *CorrelationRepository) resolveConnectorInstance(
 		if custody == ConnectorCustodyDefenseClaw {
 			effectiveCustody = ConnectorCustodyDefenseClaw
 		}
-		_, err = txExecContextObserved(ctx, tx, "correlation_connector_resolve_update",
-			repo.store.sqliteBusyObservabilityV8(), `UPDATE correlation_connector_instances SET
-				export_custody=?, profile_version=?, updated_time_unix_nano=?
-				WHERE connector_instance_id=?`, string(effectiveCustody), profileVersion, unixNano(now),
-			string(instance.ConnectorInstanceID))
-		if err != nil {
-			return ConnectorInstance{}, fmt.Errorf("audit: refresh %s: %w", label, err)
-		}
-		instance.ExportCustody = effectiveCustody
-		instance.ProfileVersion = profileVersion
 		instance.ManagedConfigDigest = digest.String
 		instance.Default = isDefault != 0
 		instance.CreatedAt = time.Unix(0, created).UTC()
-		instance.UpdatedAt = now
+		instance.UpdatedAt = time.Unix(0, updated).UTC()
+		if effectiveCustody != instance.ExportCustody || profileVersion != instance.ProfileVersion {
+			_, err = txExecContextObserved(ctx, tx, "correlation_connector_resolve_update",
+				repo.store.sqliteBusyObservabilityV8(), `UPDATE correlation_connector_instances SET
+					export_custody=?, profile_version=?, updated_time_unix_nano=?
+					WHERE connector_instance_id=?`, string(effectiveCustody), profileVersion, unixNano(now),
+				string(instance.ConnectorInstanceID))
+			if err != nil {
+				return ConnectorInstance{}, fmt.Errorf("audit: refresh %s: %w", label, err)
+			}
+			instance.ExportCustody = effectiveCustody
+			instance.ProfileVersion = profileVersion
+			instance.UpdatedAt = now
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return ConnectorInstance{}, fmt.Errorf("audit: commit connector instance resolution: %w", err)
 	}
+	repo.store.connectorInstances.Store(key, instance)
 	return instance, nil
+}
+
+// connectorInstanceKey names a resolved connector instance
+// (Store.connectorInstances): the default instance of connector when scoped
+// is empty, the scoped instance otherwise.
+type connectorInstanceKey struct {
+	scoped    ConnectorInstanceID
+	connector string
+}
+
+// forgetConnectorInstances drops every resolved connector instance, so the
+// next resolution reads the table again.
+func (s *Store) forgetConnectorInstances() {
+	if s != nil {
+		s.connectorInstances.Clear()
+	}
 }
 
 func (repo *CorrelationRepository) UpsertConnectorInstance(
@@ -663,6 +693,8 @@ func (repo *CorrelationRepository) UpsertConnectorInstance(
 		return ConnectorInstance{}, err
 	}
 	defer release()
+	// Whatever the outcome, the next resolution reads the table.
+	defer repo.store.forgetConnectorInstances()
 	result, err := repo.store.execDB(ctx, "correlation_connector_upsert", `
 		INSERT INTO correlation_connector_instances (
 			connector_instance_id, connector, export_custody, profile_version,
@@ -703,7 +735,7 @@ func (repo *CorrelationRepository) GetConnectorInstance(
 	var digest sql.NullString
 	var created, updated int64
 	var isDefault int
-	err := repo.store.db.QueryRowContext(ctx, `SELECT connector_instance_id, connector,
+	err := repo.store.queryPool().QueryRowContext(ctx, `SELECT connector_instance_id, connector,
 		export_custody, profile_version, managed_config_digest, is_default, created_time_unix_nano,
 		updated_time_unix_nano FROM correlation_connector_instances
 		WHERE connector_instance_id=?`, string(id)).Scan(
@@ -916,12 +948,22 @@ func (repo *CorrelationRepository) BeginOccurrence(
 	if err != nil {
 		return nil, empty, err
 	}
-	tx, err := repo.store.db.BeginTx(ctx, nil)
+	// The occurrence reads before it writes. Another writer of this process
+	// that commits in between makes the upgrade fail at once with
+	// SQLITE_BUSY_SNAPSHOT and the hook starts its correlation over, so this
+	// transaction takes the write baton first (writeBaton).
+	turn, err := repo.store.writeBaton.acquire(ctx)
 	if err != nil {
 		release()
 		return nil, empty, fmt.Errorf("audit: begin correlation occurrence: %w", err)
 	}
-	correlationTx := &CorrelationTx{repo: repo, tx: tx, release: release}
+	tx, err := repo.store.db.BeginTx(ctx, nil)
+	if err != nil {
+		turn()
+		release()
+		return nil, empty, fmt.Errorf("audit: begin correlation occurrence: %w", err)
+	}
+	correlationTx := &CorrelationTx{repo: repo, tx: tx, release: func() { turn(); release() }}
 	fail := func(cause error) (*CorrelationTx, CorrelationOccurrenceResult, error) {
 		_ = correlationTx.Rollback()
 		return nil, empty, cause
@@ -1296,18 +1338,37 @@ func (repo *CorrelationRepository) markReceiptCanonicalPersisted(
               AND observation.status='export_eligible'
               AND observation.bucket<>'telemetry.ingest'
             )`
-	result, err := repo.store.execDB(ctx, "correlation_receipt_accept", `
+	const statement = `
 		UPDATE correlation_receipts SET accepted_time_unix_nano=COALESCE(
 			accepted_time_unix_nano, MAX(?, first_received_time_unix_nano))
 		WHERE connector_instance_id=? AND source_key_digest=? AND fingerprint_sha256=?
-		  AND semantic_event_id=?`+observationGuard, unixNano(acceptedAt), string(instance), sourceKeyDigest,
-		fingerprintSHA256, string(semantic))
-	if err != nil {
-		return fmt.Errorf("audit: mark correlation receipt accepted: %w", err)
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("audit: inspect accepted correlation receipt: %w", err)
+		  AND semantic_event_id=?` + observationGuard
+	args := []any{unixNano(acceptedAt), string(instance), sourceKeyDigest, fingerprintSHA256, string(semantic)}
+	var rows int64
+	if repo.store.secureClientSchema {
+		result, err := repo.store.execDB(ctx, "correlation_receipt_accept", statement, args...)
+		if err != nil {
+			return fmt.Errorf("audit: mark correlation receipt accepted: %w", err)
+		}
+		if rows, err = result.RowsAffected(); err != nil {
+			return fmt.Errorf("audit: inspect accepted correlation receipt: %w", err)
+		}
+	} else {
+		// The hook-call write group: concurrent calls' receipts share a commit
+		// instead of each waiting for the writer connection (r108 SWEEP-100).
+		err := repo.store.callGroupWrite(ctx, func(ctx context.Context, tx *sql.Tx) error {
+			result, err := tx.ExecContext(ctx, statement, args...)
+			if err != nil {
+				return fmt.Errorf("audit: mark correlation receipt accepted: %w", err)
+			}
+			if rows, err = result.RowsAffected(); err != nil {
+				return fmt.Errorf("audit: inspect accepted correlation receipt: %w", err)
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
 	}
 	if rows != 1 {
 		return ErrCorrelationNotFound
@@ -1338,13 +1399,17 @@ func (tx *CorrelationTx) PutObservation(ctx context.Context, observation Correla
 	return putCorrelationObservationTx(ctx, tx.tx, tx.repo.store, observation)
 }
 
-// RecordObservation durably commits metadata for an already accepted
-// occurrence. Runtime trace and metric paths call this before handing a signal
-// to a provider/exporter, preserving commit-before-export without storing the
-// trace or metric payload in audit.db.
-func (repo *CorrelationRepository) RecordObservation(
+// RecordObservations durably commits metadata for already accepted
+// occurrences, all in one transaction. Runtime trace and metric paths call
+// this before handing a signal to a provider/exporter, preserving
+// commit-before-export without storing the trace or metric payload in
+// audit.db. A metric batch passes the observations of all its records, so it
+// costs one commit, not one per metric (B-26), and concurrent batches share
+// one (GAP-1790). Either every observation of a call commits or none does.
+// Inside a hook call's open CallWriteBatch they commit when the call flushes.
+func (repo *CorrelationRepository) RecordObservations(
 	ctx context.Context,
-	observation CorrelationObservation,
+	observations ...CorrelationObservation,
 ) error {
 	if repo == nil || repo.store == nil {
 		return errors.New("audit: correlation repository is not initialized")
@@ -1352,29 +1417,65 @@ func (repo *CorrelationRepository) RecordObservation(
 	if ctx == nil {
 		return errors.New("audit: correlation context is required")
 	}
-	release, err := repo.store.acquireReady()
-	if err != nil {
-		return err
+	if len(observations) == 0 {
+		return nil
 	}
-	defer release()
+	// A hook call commits its observations with its appends (CallWriteBatch).
+	if repo.deferObservations(ctx, append([]CorrelationObservation(nil), observations...)) {
+		return nil
+	}
+	return repo.recordObservationsDirect(ctx, observations)
+}
+
+// recordObservationsDirect is RecordObservations' own (grouped) transaction.
+func (repo *CorrelationRepository) recordObservationsDirect(
+	ctx context.Context,
+	observations []CorrelationObservation,
+) error {
+	// Concurrent observation batches share one transaction (writeGroup).
 	// BeginTx is outside putCorrelationObservationTx's busy retry. On Windows
 	// antivirus can lock a freshly created audit.db long enough that the first
 	// begin fails even though the insert path would have waited.
-	return retryBusyObserved(ctx, "correlation_observation_write", repo.store.sqliteBusyObservabilityV8(), func() error {
-		tx, beginErr := repo.store.db.BeginTx(ctx, nil)
-		if beginErr != nil {
-			return fmt.Errorf("audit: begin correlation observation write: %w", beginErr)
-		}
-		defer tx.Rollback() //nolint:errcheck
-		if putErr := putCorrelationObservationTx(ctx, tx, repo.store, observation); putErr != nil {
-			return putErr
-		}
-		if commitErr := tx.Commit(); commitErr != nil {
-			return fmt.Errorf("audit: commit correlation observation: %w", commitErr)
+	write := &groupedWrite{ctx: ctx, run: func(ctx context.Context, tx *sql.Tx) error {
+		for _, observation := range observations {
+			if err := putCorrelationObservationTx(ctx, tx, repo.store, observation); err != nil {
+				return err
+			}
 		}
 		return nil
+	}}
+	store := repo.store
+	return store.observationGroup.do(write, func(batch []*groupedWrite) {
+		release, err := store.acquireReady()
+		if err != nil {
+			for _, item := range batch {
+				item.err = err
+			}
+			return
+		}
+		defer release()
+		_ = store.runGroupedTx(batch, groupedTxHooks{
+			op: "correlation_observation_write",
+			begin: func(err error) error {
+				return fmt.Errorf("audit: begin correlation observation write: %w", err)
+			},
+			commit: func(_ context.Context, tx *sql.Tx, _ []*groupedWrite) error {
+				if err := tx.Commit(); err != nil {
+					return fmt.Errorf("audit: commit correlation observation: %w", err)
+				}
+				return nil
+			},
+		})
 	})
 }
+
+// correlationObservationInsertSQL inserts one correlation observation
+// (txExecPrepared).
+const correlationObservationInsertSQL = `INSERT INTO correlation_observations (
+			record_id, semantic_event_id, signal, bucket, event_name, observed_time_unix_nano,
+			trace_id, span_id, session_id, turn_id, agent_id, lifecycle_id, execution_id,
+			model_request_id, model_response_id, tool_invocation_id, projection_hash, status
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 func putCorrelationObservationTx(
 	ctx context.Context,
@@ -1394,12 +1495,7 @@ func putCorrelationObservationTx(
 	if err := validateObservation(observation); err != nil {
 		return err
 	}
-	_, err := txExecContextObserved(ctx, tx, "correlation_observation_insert",
-		store.sqliteBusyObservabilityV8(), `INSERT INTO correlation_observations (
-			record_id, semantic_event_id, signal, bucket, event_name, observed_time_unix_nano,
-			trace_id, span_id, session_id, turn_id, agent_id, lifecycle_id, execution_id,
-			model_request_id, model_response_id, tool_invocation_id, projection_hash, status
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	_, err := store.txExecPrepared(ctx, tx, "correlation_observation_insert", correlationObservationInsertSQL,
 		observation.RecordID, string(observation.SemanticEventID), string(observation.Signal),
 		observation.Bucket, observation.EventName, unixNano(observation.ObservedAt),
 		nullStr(observation.TraceID), nullStr(observation.SpanID), nullStr(observation.SessionID),

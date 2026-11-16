@@ -17,14 +17,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -40,11 +43,13 @@ const codeNotStarted = "not_started"
 // readOnly handles status and verify.
 func (l *lifecycle) readOnly(ctx context.Context) int {
 	env, r := l.env, l.result
+	env.boundedHomeLookups = true
 	// status waits for a run that holds the lock the same way, because the
 	// run stops and starts the services (GAP-2246). It still reports the
 	// recorded deployment below, so detection sees it installed.
 	statusBusy := false
 	busyMessage := ""
+	var unsettled []*enterprisebundle.Receipt
 	if env.waitForApplyTrigger(ctx) {
 		// The apply trigger is applying a changed config.yaml, secret or
 		// policy file: until it commits, the files differ from the record and
@@ -59,6 +64,14 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	} else if l.opts.Action == ActionStatus && env.Geteuid() == 0 {
 		lock, err := env.acquireLock(ctx)
 		statusBusy = errors.Is(err, errLockBusy)
+		if err == nil {
+			// No run holds the lock, so no run owns a receipt it did not
+			// finish: a killed apply left it. Status read
+			// transaction_pending false with the bundle staged until the
+			// next ensure settled it (GAP-0028). Read (never settled) while
+			// the lock is held, so an apply that starts now is not counted.
+			unsettled, _ = env.bundleStore().Unsettled()
+		}
 		lock.release()
 	}
 	if l.opts.Action == ActionVerify && env.packageTransactionInProgress() {
@@ -99,15 +112,36 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	if pending != nil {
 		r.TransactionPending = true
 	}
+	if record != nil && len(unsettled) > 0 {
+		r.TransactionPending = true
+		r.AddWarning(enterprisebundle.WarnBundlePending, enterprisebundle.UnsettledMessage(unsettled, env.lifecycleCommand(ActionEnsure)))
+	}
 	if statusBusy {
 		if record != nil {
 			r.Installed = true
 			r.InstalledVersion = record.ProductVersion
 		}
 		if busyMessage == "" {
-			busyMessage = errLockBusy.Error() + "; " + readOnlyBusyNextStep(env.LockTimeout, ActionStatus)
+			holder := errLockBusy.Error()
+			if pending != nil && pending.Action != "" {
+				// Name the run and how far it got, from its intent record.
+				detail := pending.Action
+				if pending.Phase != "" {
+					detail += ", phase " + pending.Phase
+				}
+				holder += " (" + detail + ")"
+			}
+			busyMessage = holder + "; " + readOnlyBusyNextStep(env.LockTimeout, ActionStatus)
 		}
-		r.AddError(codeBusy, busyMessage)
+		// A change being applied is a pending apply, not an unhealthy
+		// deployment: rapid config pushes read ok false with a
+		// lifecycle_busy error until each apply ended (GAP-0129). The code
+		// stays (as a warning) and so does exit 75, which detect.sh and
+		// management agents read as busy and retry; verify, which checks
+		// health, still fails busy.
+		r.PendingApply = true
+		r.AddWarning(codeBusy, busyMessage)
+		r.MarkCoverageIncomplete(codeBusy)
 		return enterprisestatus.BusyExitCode(env.GOOS)
 	}
 	if record == nil {
@@ -128,6 +162,23 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	}
 	r.Installed = true
 	r.InstalledVersion = record.ProductVersion
+	if env.GOOS == "linux" && record.Channel == ChannelPackage {
+		if duplicates := env.rpmDuplicateRecords(ctx); len(duplicates) > 1 {
+			r.AddWarning(codeVerify, fmt.Sprintf(
+				"the rpm database records %d versions of %s (%s); remove duplicate records with `sudo dnf remove --duplicates %s`, then reinstall the package with `sudo dnf reinstall %s`",
+				len(duplicates), linuxPackageName, strings.Join(duplicates, ", "), linuxPackageName, linuxPackageName))
+		}
+	}
+	// The 1.0.2 loader accepted these literals. Keep an installed deployment
+	// running while pointing the administrator to the candidate-safe form.
+	if raw, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes); err == nil {
+		if installed, err := config.LoadRuntimeV8InspectionCandidateFromBytes(env.Layout.ConfigPath, raw); err == nil {
+			if paths := config.ManagedStandaloneUpgradeAdvisories(installed, raw); len(paths) > 0 {
+				r.AddWarning("managed_literal_credentials", "installed config uses literals at "+strings.Join(paths, ", ")+"; use {credential: NAME} or {env: NAME} where supported; webhook URLs remain supported")
+			}
+		}
+	}
+	env.warnOpenCodePortsRecord(r)
 	if failure := env.lastPackageInstallFailure(); failure != "" {
 		// A package reinstall or upgrade the lifecycle refused (a full disk,
 		// a config it rejected) printed Complete and left status and verify
@@ -136,7 +187,20 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		r.AddWarning(codePackageInstallFailed, "the last package install, reinstall or upgrade did not apply: "+failure+
 			"; the deployment keeps running as it was. Fix that, then apply the package with `"+env.lifecycleCommand(ActionEnsure)+" --from-package`")
 	}
+	// A release below the confirmed bundle's floor (installed by a package
+	// that had no floor check) is reported, never repaired: a warning
+	// starts no repair, reinstall or fail-mode change.
+	if warning := env.bundleStore().ProductBelowFloorWarning(record.ProductVersion); warning != nil {
+		r.AddWarning(warning.Code, warning.Message)
+	}
 	strict := l.opts.Action == ActionVerify
+	if strict && pending == nil {
+		// The enumerator may have just rewritten the manifest (a fresh install
+		// enrolls every eligible account): verify the guardian reconcile of it,
+		// not the seconds before it (GAP-2176), and the retirement of an
+		// account just deleted (GAP-0777).
+		l.awaitGuardianReconcile(ctx)
+	}
 	problems := l.verifyInstalled(ctx, record, strict)
 	l.warnLowDiskSpace()
 	dropInProblems, dropIns := l.unitDropIns(ctx, record)
@@ -145,15 +209,27 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		r.AddWarning(codeUnitDropIn, "local drop-ins change DefenseClaw units: "+strings.Join(dropIns, ", ")+"; they keep the units' account, sandbox and config")
 	}
 	l.describe(ctx, record, true)
+	l.warnDirectoryUnreachable()
 	l.warnSELinuxConfinedUsers()
 	problems = append(problems, l.describeMachinePolicy(record)...)
 	problems = append(problems, l.describeTetragon(ctx)...)
+	l.describeStatusV2(record)
+	l.describeUnansweredHomes()
+	if strict && record != nil {
+		if err := l.verifyManagedHermesRegistration(ctx); err != nil {
+			problems = append(problems, "managed Hermes hook registration: "+err.Error())
+		}
+	}
+	if strict && record != nil && !record.NoStart {
+		// The check managed Windows verify runs (GAP-1360): a warning only.
+		l.warnUserNativeOTLPExporters(ctx)
+	}
 	if machinePolicyIncomplete(r) {
-		r.SecurityComplete = false
+		r.MarkSecurityIncomplete(codeMachinePolicyIncomplete)
 	}
-	if strict {
-		l.warnUnprivilegedUserNamespaces()
-	}
+	// This is the observed host setting. The hook proves its managed policy
+	// view separately on each invocation.
+	l.warnOpenPolicyViews()
 	if strict {
 		// An agent the guardian or the enumerator could not protect for one
 		// account (an unverified hook contract, an agent it could not enroll)
@@ -164,7 +240,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		// status reports them as warnings with security_complete false.
 		for _, warning := range r.Warnings {
 			if warning.Code == codeMachinePolicyIncomplete || warning.Code == codeGuardianTargetFailed || warning.Code == codeConfigRejected ||
-				warning.Code == codeNoConnectorsEnabled || warning.Code == codeSandboxPackDir {
+				warning.Code == codeNoConnectorsEnabled || warning.Code == codeSandboxPackDir || warning.Code == codeLegacySandbox || warning.Code == codeCoworkIncomplete {
 				problems = append(problems, warning.Message)
 			}
 		}
@@ -283,7 +359,8 @@ func (l *lifecycle) clearSupersededUnitFailures(ctx context.Context) {
 }
 
 // interruptedTransactionProblem names a transaction a reset or a killed run
-// left pending, and the commands that finish it.
+// left pending, and the commands that finish it: the config it was applying
+// when the intent records one (GAP-0098).
 func (e *Env) interruptedTransactionProblem(pending *Pending) string {
 	action, phase, started := pending.Action, pending.Phase, pending.StartedAt
 	if action == "" {
@@ -295,9 +372,22 @@ func (e *Env) interruptedTransactionProblem(pending *Pending) string {
 	if started == "" {
 		started = "an unknown time"
 	}
+	finish := "to apply the config it was applying run `" + e.lifecycleCommand(ActionEnsure) + " --config <file>` again"
+	if pending.ConfigFile != "" {
+		finish = "to apply the config it was applying (" + pending.ConfigFile + ") run `" +
+			e.lifecycleCommand(ActionEnsure) + " --config " + shellWord(pending.ConfigFile) + "` again"
+	}
 	return fmt.Sprintf("a lifecycle %s that started at %s was interrupted in its %s phase (a reset or a killed run), so files differ from the deployment record; "+
-		"`%s` rolls it back to the last committed deployment, and to apply the config it was applying run `%s --config <file>` again",
-		action, started, phase, e.lifecycleCommand("repair"), e.lifecycleCommand(ActionEnsure))
+		"`%s` rolls it back to the last committed deployment, and %s",
+		action, started, phase, e.lifecycleCommand("repair"), finish)
+}
+
+// shellWord is value as one POSIX shell word, quoted only when it needs it.
+func shellWord(value string) string {
+	if value != "" && strings.Trim(value, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._-+=:@,") == "" {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
 
 // withoutTransactionDrift drops the file and config drift an interrupted
@@ -324,13 +414,7 @@ func (l *lifecycle) recoverPendingFromVerify(ctx context.Context) string {
 	if env.Geteuid() != 0 {
 		return "the next mutating run recovers it"
 	}
-	var err error
-	if env.GOOS == "darwin" {
-		_, err = env.Runner.Run(ctx, "launchctl", "kickstart", "system/"+labelApply)
-	} else {
-		_, err = env.Runner.Run(ctx, "systemctl", "start", "--no-block", unitApplyService)
-	}
-	if err != nil {
+	if err := env.startApplyTrigger(ctx); err != nil {
 		return "run `" + env.lifecycleCommand("repair") + "` to roll it back"
 	}
 	return "started the apply trigger, which rolls it back and starts the stopped services again"
@@ -444,9 +528,19 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 	}
 	// A pack file a standard user came to own (or that turned writable)
 	// changes enforcement at the next restart with no trace (GAP-0552).
+	// A configured pack that is gone fails the next gateway restart, while
+	// the running gateway keeps the rules it loaded (p0 GAP-1207). Shipped
+	// packs are payload files, checked with the other installed files.
 	for _, label := range config.RulePackCheckOrder(record.RulePacks) {
 		dir := record.RulePacks[label]
-		if err := env.Trust(env.P(dir), TrustRulePack); err != nil && !errors.Is(err, os.ErrNotExist) {
+		shipped := pathWithin(dir, env.Layout.VendorPolicyDir)
+		if _, err := os.Lstat(env.P(dir)); errors.Is(err, os.ErrNotExist) {
+			if !shipped {
+				add("%s %q is missing: the gateway cannot load it when it restarts; restore the pack, or remove it from config.yaml and run ensure", label, dir)
+			}
+			continue
+		}
+		if err := env.Trust(env.P(dir), TrustRulePack); err != nil && (!shipped || !errors.Is(err, os.ErrNotExist)) {
 			add("%s %q is not administrator-controlled: %v; %s", label, dir, err, rulePackTrustAdvice)
 		}
 	}
@@ -511,7 +605,8 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 
 	if !record.NoStart {
 		for _, unit := range env.Services.Units() {
-			if unit.Required && !env.Services.Active(ctx, unit) && !l.backFromRestart(ctx, unit) {
+			if unit.Required && !env.Services.Active(ctx, unit) && !l.backFromRestart(ctx, unit) &&
+				(unit.Name != unitApplyPath || !l.packageHoldsApplyTrigger()) {
 				add("%s is not active", unit.Name)
 			}
 		}
@@ -574,6 +669,7 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 		}
 	}
 	problems = append(problems, l.verifyOpenShell(record)...)
+	problems = append(problems, l.verifyCoworkFiles(record)...)
 	return problems
 }
 
@@ -731,7 +827,7 @@ func (e *Env) installedModeProblems(record *Deployment, skipConfig bool, skip st
 // which every account (the services, the agents running the hook) executes.
 func managedExecutable(name string) bool {
 	switch name {
-	case binGateway, binHook, binSensorHelper, binACP:
+	case binGateway, binHook, binSensorHelper, binACP, binScanners:
 		return true
 	}
 	return false
@@ -749,7 +845,14 @@ func (e *Env) lifecycleCommand(action string) string {
 	if e.GOOS == "darwin" {
 		group = "macos"
 	}
-	return filepath.Join(e.Layout.BinDir, binGateway) + " enterprise " + group + " " + action
+	return e.gatewayCommand("enterprise " + group + " " + action)
+}
+
+// gatewayCommand is the installed gateway, by its absolute path, with args:
+// it is not on the PATH, and sudo's secure_path does not include
+// the install directory, so a bare defenseclaw-gateway is "command not found".
+func (e *Env) gatewayCommand(args string) string {
+	return filepath.Join(e.Layout.BinDir, binGateway) + " " + args
 }
 
 // hookBinaryProblem names a damaged hook binary, what it means for the
@@ -954,12 +1057,15 @@ func (l *lifecycle) ledgerProblem() string {
 			}
 		}
 		problem, torn := env.attestationProblem(data)
-		if torn && attempt == 5 && problem == guardianManifestNotReconciled && l.manifestJustChanged() {
+		if torn && attempt == 5 && (problem == guardianManifestNotReconciled || problem == guardianLedgerNotAttested) && l.manifestJustChanged() {
 			// An apply, ensure or enumerator cycle has just rewritten
 			// targets.yaml, and the guardian reconciles it within about a
 			// minute while it keeps enforcing the targets it last reconciled.
-			// Keep the wait guidance (GAP-0691), but report incomplete
-			// coverage until the guardian attests the new roster.
+			// Both torn states of that reconcile are named (the attestation
+			// still names the old targets.yaml, or the new ledger is out and
+			// its attestation is not): the same states the ensure catch-up
+			// wait holds for. Keep the wait guidance (GAP-0691), but report
+			// incomplete coverage until the guardian attests the new roster.
 			l.noteGuardianCatchingUp()
 			return problem
 		}
@@ -974,6 +1080,16 @@ func (l *lifecycle) ledgerProblem() string {
 // it holds the config-apply trigger for the transaction; the postinstall
 // removes it after its ensure.
 const packageTransactionMarker = "/run/defenseclaw-enterprise-apply-path.held"
+
+// packageHoldsApplyTrigger reports the package's own ensure (--from-package
+// --reason package) while the package scripts hold the config-apply trigger
+// (packageTransactionMarker): the postinstall starts it again after this
+// run, so it being stopped is not drift. It made an identical reinstall
+// (dpkg -i, dnf reinstall of the installed package) run a transaction that
+// restarted the gateway and reported noop false (GAP-0542).
+func (l *lifecycle) packageHoldsApplyTrigger() bool {
+	return l.opts.FromPackage && l.opts.Reason == "package" && l.env.packageTransactionInProgress()
+}
 
 // packageTransactionInProgress reports a package transaction that started
 // less than half an hour ago (an older marker is from an interrupted one).
@@ -1021,6 +1137,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	env, r := l.env, l.result
 	r.Services = r.Services[:0]
 	reportedPolicy, reloadError := "", ""
+	var gatewayPolicy bundleHealth
 	kernelApplied, kernelGeneration := "", ""
 	for _, unit := range env.Services.Units() {
 		status, _ := env.Services.Status(ctx, unit)
@@ -1047,7 +1164,9 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 				}, env.PollInterval, 8); err == nil {
 					r.Readiness.Gateway = true
 					l.readGatewayPosture(body)
+					l.gatewayHealthBody = body
 					reportedPolicy, reloadError = gatewayPolicyHealth(body)
+					gatewayPolicy = parseBundleHealth(body)
 					kernelApplied, kernelGeneration = gatewayKernelPolicy(body)
 				}
 			}
@@ -1067,7 +1186,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		}
 	}
 	r.Enrollment = l.enrollmentCounts()
-	l.describePolicy(ctx, reportedPolicy, reloadError)
+	l.describePolicy(ctx, reportedPolicy, reloadError, gatewayPolicy)
 	l.describeBundle()
 	l.describeKernelPolicy(kernelApplied, kernelGeneration)
 	if problem := env.rejectedConfigProblem(); problem != "" {
@@ -1075,20 +1194,57 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		// record, and ensure must stay a no-op until config.yaml changes.
 		r.AddWarning(codeConfigRejected, problem)
 	}
-	r.CoverageComplete = r.Readiness.Gateway && r.Readiness.Guardian && r.Readiness.Enumerator
-	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0 && !machinePolicyIncomplete(r)
+	r.ResetCompleteness()
+	for _, service := range []struct {
+		ready bool
+		name  string
+	}{{r.Readiness.Gateway, "the gateway"}, {r.Readiness.Guardian, "the hook guardian"}, {r.Readiness.Enumerator, "the hook enumerator"}} {
+		if !service.ready {
+			r.MarkCoverageIncomplete(service.name + " is not ready")
+		}
+	}
+	if record != nil {
+		drift, unpinnable := l.policyViewPinProblems(record.MachinePolicyConnectors)
+		for _, problem := range drift {
+			r.AddWarning(codeMachinePolicyIncomplete, problem+"; run `"+env.lifecycleCommand(ActionReconcile)+"` or `"+env.lifecycleCommand(ActionEnsure)+"` to pin the verified policy view")
+		}
+		for _, problem := range unpinnable {
+			r.AddWarning(codeMachinePolicyIncomplete, problem)
+		}
+	}
+	if !r.Readiness.SensorHelper {
+		r.MarkSecurityIncomplete("the sensor helper is not ready")
+	}
+	if len(r.Errors) > 0 {
+		r.SecurityComplete = false
+	}
+	if machinePolicyIncomplete(r) {
+		r.MarkSecurityIncomplete(codeMachinePolicyIncomplete)
+	}
+	if l.gatewayAuditFailure {
+		r.MarkSecurityIncomplete(codeAuditWriteFailed)
+	}
+	if reloadError != "" {
+		r.MarkSecurityIncomplete(codePolicyReloadRejected)
+	}
+	if r.Policy == nil || !r.Policy.Applied {
+		r.MarkSecurityIncomplete("the gateway does not report the installed policy as applied")
+	}
 	l.describeHookContracts(ctx)
 	l.describeUnprotectedAgents()
-	l.describeGuardianCleanups()
-	l.describeDeletedEnrolledAccounts()
+	l.describeChangedGuardianFiles()
+	l.describeGuardianCleanups(ctx)
+	l.describeUnavailableEnrolledHomes()
 	l.describeDiscoveryHomeDirs()
 	l.describeIdentityRecords()
 	l.describeDestinations()
 	l.describeOpenShell(ctx)
+	l.describeCoworkVM(ctx, record)
 	l.describeSandboxPolicy(ctx)
 	if record != nil {
 		l.describePerUserGateways(ctx)
 		l.describeAgentSessionsBeforeActivation(ctx, record)
+		l.describePluginLaunchCoverage(ctx, record)
 	}
 	if exists(env.rotationIntentPath()) {
 		r.AddWarning(codeRotationIncomplete, "a credential rotation did not finish; run rotate-credentials, or any other lifecycle action, to complete it or roll it back")
@@ -1099,17 +1255,16 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	if r.Inspection.AIDefense == "" {
 		r.Inspection.AIDefense = "unknown"
 	}
-	if strings.HasPrefix(r.Inspection.AIDefense, "unavailable") {
-		// Not an error: the local policy engine keeps deciding. But the
-		// cloud inspection the administrator enabled is not running.
-		r.AddWarning(codeAIDefenseUnavailable, "Cisco AI Defense inspection is enabled but reports "+
-			r.Inspection.AIDefense+"; the local policy engine keeps deciding. Check the "+
-			"enterprise.inspection.ai_defense credential and network access")
+	r.AddAIDefenseWarning()
+	// Ensure, install and repair describe the same managed Hermes coverage
+	// limit as status and verify, without adding status-v2 output blocks.
+	if record != nil && !l.statusV2() {
+		l.describeConnectors(record)
 	}
 }
 
 // runningDeploymentPrefix starts each warning describeRunning adds.
-const runningDeploymentPrefix = "running deployment (the refused config changed nothing): "
+const runningDeploymentPrefix = enterprisestatus.RunningDeploymentPrefix
 
 // describeRunning is describe for a run that refused the submitted config
 // before it changed anything. The services, readiness, policy and advisories
@@ -1122,12 +1277,7 @@ func (l *lifecycle) describeRunning(ctx context.Context, record *Deployment) {
 	r := l.result
 	before := len(r.Warnings)
 	l.describe(ctx, record, false)
-	r.ConfigRefused = true
-	for i := before; i < len(r.Warnings); i++ {
-		if r.Warnings[i].Code != codeConfigRejected {
-			r.Warnings[i].Message = runningDeploymentPrefix + r.Warnings[i].Message
-		}
-	}
+	r.LabelRunningDeployment(before, codeConfigRejected)
 }
 
 // codeSandboxPackDir warns about a sandbox packs folder other accounts could
@@ -1158,16 +1308,33 @@ func (l *lifecycle) describeSandboxPolicy(ctx context.Context) {
 	}
 }
 
-// codeAIDefenseUnavailable warns that enabled AI Defense inspection is
-// failing (for example a rejected key).
-const codeAIDefenseUnavailable = "ai_defense_unavailable"
-
 // codeDirectoryLookups warns that the gateway cannot resolve some accounts in
 // the directory (a domain controller or SSSD that does not answer).
 const codeDirectoryLookups = "directory_lookups_failing"
 
-const codeProfileAssignments = "profile_assignment_unmatched"
+// warnDirectoryUnreachable reports the guardian's current reachability
+// observation independently of the gateway's count of failed account lookups.
+// Cached directory facts can keep that count at zero throughout an outage.
+func (l *lifecycle) warnDirectoryUnreachable() {
+	env := l.env
+	dir := enterprisehooks.IdentitySpoolDir(env.P(env.Layout.GuardianAuthDir))
+	domains := enterprisehooks.ReadDirectoryUnreachable(dir, func(path, _ string) error {
+		return env.Trust(path, TrustAdminFile)
+	}, env.Now())
+	if len(domains) == 0 {
+		return
+	}
+	check := "Check SSSD or the domain controller"
+	if env.GOOS == "darwin" {
+		check = "Check the directory binding of this Mac (dsconfigad -show) or the domain controller"
+	}
+	l.result.AddWarning(codeDirectoryLookups, "the hook guardian reports a directory controller unreachable for "+
+		strings.Join(domains, ", ")+"; cached account facts may still select their verified profiles. "+check+
+		"; `"+env.lifecycleCommand("profile-explain --user <account>")+"` shows each account's current match")
+}
+
 const codeOptionalDestination = "optional_destination_failing"
+const codeAuditWriteFailed = "audit_write_failed"
 
 // codeJudgeFailing names an LLM judge whose recent calls all failed, or that
 // could not start.
@@ -1175,9 +1342,10 @@ const codeJudgeFailing = enterprisestatus.CodeJudgeFailing
 
 // readGatewayPosture copies the gateway's inspection posture from /health
 // when the gateway publishes it, and warns when it reports directory lookups
-// that fail: the accounts without cached facts then run under the default
-// guardrail profile, and nothing else in status or verify showed it (GAP-0216).
+// that fail: requests whose assignments need the missing facts are refused
+// and name them, and nothing else in status or verify showed it (GAP-0216).
 func (l *lifecycle) readGatewayPosture(body []byte) {
+	l.noteIdentityHealth(body)
 	var health struct {
 		ProfileAssignmentWarnings []string `json:"profile_assignment_warnings"`
 		// The number of the warnings /health lists only to root on the
@@ -1187,8 +1355,11 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 		ProfileWarningCount           int `json:"profile_warning_count"`
 		Telemetry                     struct {
 			Details struct {
-				OptionalState  string `json:"optional_destination_state"`
-				FailureSummary string `json:"optional_destination_failure_summary"`
+				OptionalState       string `json:"optional_destination_state"`
+				FailureSummary      string `json:"optional_destination_failure_summary"`
+				EventHistoryFailure string `json:"event_history_failure"`
+				LastSQLiteClass     string `json:"event_history_last_sqlite_class"`
+				LastFailureAt       string `json:"event_history_last_failure_at"`
 			} `json:"details"`
 		} `json:"telemetry"`
 		Inspection *struct {
@@ -1209,6 +1380,46 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 	if json.Unmarshal(body, &health) != nil {
 		return
 	}
+	l.gatewayAuditFailure = health.Telemetry.Details.EventHistoryFailure != ""
+	if l.gatewayAuditFailure {
+		failure := health.Telemetry.Details.EventHistoryFailure
+		switch failure {
+		case "projection_rejected", "integrity_unsigned", "integrity_signing_failed", "sqlite_write_failed":
+		default:
+			failure = "unknown"
+		}
+		message := "the gateway cannot write mandatory audit records (" + failure + ")"
+		class := health.Telemetry.Details.LastSQLiteClass
+		switch class {
+		case "busy_locked", "deadline", "full", "io", "readonly_cantopen", "constraint_corrupt", "unavailable", "other":
+			message += "; last SQLite failure class: " + class
+		}
+		// A call whose audit record cannot be written is blocked on a
+		// managed install (rel-1-0-6 GAP-0174): say so, and for a full
+		// disk where to free space.
+		message += "; until it can, managed hooks block the agent prompts and tool calls whose records fail (fail closed)"
+		if class == "full" {
+			message += "; the filesystem holding " + l.env.Layout.DataDir + " is full: free space on it, and agent work resumes by itself"
+		}
+		l.result.AddWarning(codeAuditWriteFailed, message+"; inspect the gateway /health telemetry details")
+	} else if class := health.Telemetry.Details.LastSQLiteClass; class != "" && class != "busy_locked" && class != "deadline" &&
+		!auditWriteFailureRecovered(health.Telemetry.Details.LastFailureAt, l.env.Now()) {
+		// Any later record clears the active failure, so one that fails
+		// only some records (one agent's hook calls) showed as healthy
+		// while those calls were refused (GAP-0773). The gateway keeps the
+		// last class after it recovers, so a lock or a timed-out write,
+		// which the next commit clears (GAP-1537, GAP-1790), is not kept
+		// as a failure for the rest of the gateway's life.
+		switch class {
+		case "full", "io", "readonly_cantopen", "constraint_corrupt", "unavailable", "other":
+		default:
+			class = "other"
+		}
+		l.gatewayAuditFailure = true
+		l.result.AddWarning(codeAuditWriteFailed, "the gateway failed to write a mandatory audit record since it started (last SQLite failure class: "+class+
+			"); later records were written, but a failure that hits only some records can still block those calls (managed hooks fail closed when a call's audit record cannot be written); inspect the gateway /health telemetry details. The warning clears "+
+			auditWriteFailureWindow.String()+" after the last failed write")
+	}
 	// A judge that stops answering silently downgrades detection to the
 	// static rules; only /health and the journal said so (GAP-0626).
 	if g := health.Guardrail; g != nil {
@@ -1221,27 +1432,27 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 		l.result.Inspection.AIDefense = health.Inspection.AIDefense
 	}
 	for _, warning := range health.ProfileAssignmentWarnings {
-		l.result.AddWarning(codeProfileAssignments, warning)
+		l.result.AddWarning(codeProfileAssignment, warning)
 	}
 	if withheld := max(health.ProfileAssignmentWarningCount, health.ProfileWarningCount); withheld > 0 &&
 		len(health.ProfileAssignmentWarnings)+len(health.ProfileWarnings) == 0 {
 		// Fail closed: a /health read other than root on the hook socket
 		// (the TCP fallback) carries only their number.
-		l.result.AddWarning(codeProfileAssignments, fmt.Sprintf("%d guardrail profile assignment warning(s) are not listed: the gateway "+
+		l.result.AddWarning(codeProfileAssignment, fmt.Sprintf("%d guardrail profile assignment warning(s) are not listed: the gateway "+
 			"lists them only to root on its hook socket, because they name the configured groups and accounts; `%s` shows them",
 			withheld, l.env.lifecycleCommand("profile-explain --user <account>")))
 	}
 	if health.Telemetry.Details.OptionalState == "degraded" {
 		l.result.AddWarning(codeOptionalDestination, "optional telemetry destination failing: "+health.Telemetry.Details.FailureSummary+
-			"; inspect `defenseclaw-gateway status` or the gateway /health telemetry details")
+			"; inspect `"+l.env.gatewayCommand("status")+"` or the gateway /health telemetry details")
 	}
 	if d := health.Directory; d != nil && d.Failing > 0 {
 		which := ""
 		if ids := directoryLookupAccounts(d.Accounts); ids != "" {
 			which = " (" + ids + ")"
 		}
-		message := fmt.Sprintf("directory lookups are failing for %d account(s)%s since %s; accounts without cached facts get the "+
-			"default guardrail profile (default_lookup_failed)", d.Failing, which, d.Since)
+		message := fmt.Sprintf("directory lookups are failing for %d account(s)%s since %s; requests whose assignments need missing identity facts are refused "+
+			"(default_lookup_failed), and the refusal names the missing fact", d.Failing, which, d.Since)
 		if d.Stale > 0 {
 			message += fmt.Sprintf(", and %d account(s) are served older facts that are dropped after an hour", d.Stale)
 		}
@@ -1265,7 +1476,12 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 			break
 		}
 		if warning = strings.TrimSpace(warning); warning != "" && len(warning) <= 1024 {
-			l.result.AddWarning(codeProfileAssignment, "guardrail profile "+warning)
+			// A warning about a setting ("guardrail: human approval ...")
+			// already names where it is.
+			if !strings.HasPrefix(warning, "guardrail") {
+				warning = "guardrail profile " + warning
+			}
+			l.result.AddWarning(codeProfileAssignment, warning)
 		}
 	}
 }
@@ -1293,8 +1509,8 @@ func (l *lifecycle) describeIdentityRecords() {
 	// The guardian removes the record of an account it no longer publishes
 	// (GAP-1113), so a stale record is one it still publishes and could not
 	// refresh: name the account and where the guardian says why.
-	l.result.AddWarning(codeIdentityRecordsStale, fmt.Sprintf("the hook guardian's oldest identity record, of uid %s, was last written at %s by "+
-		"this host's clock: the clock was stepped, the directory lookup for that account keeps failing, or the guardian is not "+
+	l.result.AddWarning(codeIdentityRecordsStale, fmt.Sprintf("the hook guardian's identity record of uid %s was last written at %s by "+
+		"this host's clock, over 30 minutes ago or in the future: the clock was stepped, the directory lookup for that account keeps failing, or the guardian is not "+
 		"running; records over an hour old are ignored, and accounts a guardrail profile assignment selects by UPN then get "+
 		"the default profile. The guardian rewrites them within about a minute of a clock step; if this persists, fix the "+
 		"lookup failure its log names for that uid (%s), or restart the hook guardian if it is not running",
@@ -1350,3 +1566,112 @@ func (l *lifecycle) enrollmentCounts() enterprisestatus.Enrollment {
 	}
 	return counts
 }
+
+// auditWriteFailureWindow is how long after the gateway's last failed audit
+// write status and verify keep reporting it once later records were
+// written: a failure that hits only some records still refuses those calls
+// (GAP-0773), but one fixed long ago (a full disk freed) does not keep the
+// host incomplete until the gateway restarts (GAP-1627). It is the window
+// of the coverage records, so a failure is seen by at least one enumerator
+// cycle and one status run.
+const auditWriteFailureWindow = 16 * time.Minute
+
+// auditWriteFailureRecovered reports a last failed write (RFC 3339, from
+// /health) older than auditWriteFailureWindow. A time that is missing or
+// unreadable is not proof of recovery.
+func auditWriteFailureRecovered(lastFailureAt string, now time.Time) bool {
+	at, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(lastFailureAt))
+	if err != nil {
+		return false
+	}
+	return now.Sub(at) > auditWriteFailureWindow
+}
+
+// warnOpenCodePortsRecord reports a guardian OpenCode service ports record
+// that cannot be read: the guardian then gives no account a new OpenCode
+// port (REVIEW-gx053-4 MF2). Removing it rebuilds it from the accounts'
+// service.json files on the next pass.
+func (env *Env) warnOpenCodePortsRecord(r *enterprisestatus.Result) {
+	path := filepath.Join(env.Layout.GuardianAuthDir, enterprisehooks.UnixOpenCodeServicePortsFileName)
+	if _, err := os.Lstat(env.P(path)); err != nil {
+		// A non-root status cannot open the root-only guardian folder: say
+		// it could not check, where OpenCode is on the machine policy, so a
+		// silent status never reads as "no problem" (REVIEW-gx053-5 MF2).
+		if !errors.Is(err, fs.ErrNotExist) && openCodePortsRecordGeteuid() != 0 {
+			if _, pluginErr := os.Stat(env.P(filepath.Join(openCodePluginDir(env.Layout), "index.js"))); pluginErr == nil {
+				r.AddWarning("opencode_port_record_unchecked", fmt.Sprintf(
+					"this account cannot read the guardian's OpenCode service ports record %s; while it cannot be read no account gets a new OpenCode port. Check it as root: sudo %s",
+					path, env.lifecycleCommand(ActionStatus)))
+			}
+		}
+		return
+	}
+	state, err := loadOpenCodePortsRecord(env.P(path))
+	if err != nil {
+		r.AddWarning("opencode_port_record_unreadable", fmt.Sprintf(
+			"the guardian's OpenCode service ports record %s cannot be read (%v), so no account gets a new OpenCode port; ports already in service.json files are kept. Remove it to rebuild it on the next pass: sudo rm %s",
+			path, err, path))
+		return
+	}
+	for _, entry := range state.Contested {
+		uids := make([]string, 0, len(entry.UIDs))
+		for _, uid := range entry.UIDs {
+			uids = append(uids, strconv.Itoa(uid))
+		}
+		if len(entry.UIDs) == 1 {
+			r.AddWarning("opencode_port_contested", fmt.Sprintf(
+				"OpenCode service port %d remains held because uid %s's file could not be replaced in the record's import pass; repair the account file, then release the held mark: sudo %s %d --yes",
+				entry.Port, uids[0], env.lifecycleCommand("opencode-port-clear"), entry.Port))
+			continue
+		}
+		r.AddWarning("opencode_port_contested", fmt.Sprintf(
+			"OpenCode service port %d was named by the files of uids %s when the guardian's record was built, so no account is given it; to release it: sudo %s %d --yes",
+			entry.Port, strings.Join(uids, ", "), env.lifecycleCommand("opencode-port-clear"), entry.Port))
+	}
+	env.warnOpenCodePortsUnknown(r, state.Unknown)
+}
+
+// warnOpenCodePortsUnknown reports the unknown list of the guardian record:
+// the accounts whose service.json the last pass could not read or write. The
+// list is the last pass snapshot and the pass rewrites it only while OpenCode
+// is on the machine policy, so the entry of an account deleted since then can
+// outlive the account. Status and verify never hide an entry: one whose uid no
+// account of the host holds is reported as a record with no account, with the
+// one command that removes it after it checks the uid again; the rest keep the
+// account, file, reason and step. The lookup only picks the wording. A lookup
+// that does not answer keeps the account wording.
+func (env *Env) warnOpenCodePortsUnknown(r *enterprisestatus.Result, unknown []enterprisehooks.UnixOpenCodeServicePortUnknown) {
+	if len(unknown) == 0 {
+		return
+	}
+	var accounts, orphans []string
+	for _, entry := range unknown {
+		has, err := env.UIDHasAccount(context.Background(), entry.UID)
+		if err == nil && !has {
+			detail := entry.Reason
+			if entry.Path != "" {
+				detail = entry.Path + " (" + entry.Reason + ")"
+			}
+			orphans = append(orphans, fmt.Sprintf(
+				"OpenCode port record for UID %d (no account found): recorded for %s, %s; its recorded port stays reserved. If the UID really has no account, remove this stale entry; the command refuses while the UID still resolves: sudo %s %d --yes",
+				entry.UID, entry.User, detail, env.lifecycleCommand("opencode-port-unknown-clear"), entry.UID))
+			continue
+		}
+		accounts = append(accounts, fmt.Sprintf("%s (uid %d): %s (%s); to clear it: %s", entry.User, entry.UID, entry.Path, entry.Reason, entry.Fix))
+	}
+	if len(accounts) > 0 {
+		r.AddWarning("opencode_port_account_unknown", fmt.Sprintf(
+			"the guardian could not read or write the OpenCode service port file of these accounts as the account; each keeps its recorded port, nothing in the record changes, and other accounts are not affected: %s",
+			strings.Join(accounts, "; ")))
+	}
+	for _, orphan := range orphans {
+		r.AddWarning("opencode_port_account_unknown", orphan)
+	}
+}
+
+// openCodePortsRecordGeteuid is os.Geteuid (tests replace it).
+var openCodePortsRecordGeteuid = os.Geteuid
+
+// loadOpenCodePortsRecord is enterprisehooks.LoadUnixOpenCodeServicePortsFull
+// (tests replace it).
+var loadOpenCodePortsRecord = enterprisehooks.LoadUnixOpenCodeServicePortsFull

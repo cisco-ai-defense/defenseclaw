@@ -121,7 +121,7 @@ func TestArtifactRulesSkipDocMentionsAndCrossLineCommands(t *testing.T) {
 	if _, ok := found["COG-MEMORY SKILL.md"]; !ok {
 		t.Errorf("COG-MEMORY no longer checks SKILL.md: %v", found)
 	}
-	if got := scanArtifactText(pack.artifactRules(), "cleanup:\n\trm -rf /\n", "Makefile"); len(got) == 0 {
+	if got := scanArtifactText(pack.artifactRules(), "cleanup:\n\trm -rf /\n", "Makefile", ""); len(got) == 0 {
 		t.Error("a one-line rm -rf / is no longer found")
 	}
 }
@@ -144,17 +144,17 @@ def save(note):
     with open(target, "a") as fh:
         fh.write(note)
 `
-	found := scanArtifactText(pack.artifactRules(), source, "writer.py")
+	found := scanArtifactText(pack.artifactRules(), source, "writer.py", "")
 	if len(found) != 1 || found[0].Location != "writer.py:4" {
 		t.Fatalf("Python write findings = %+v, want writer.py:4", found)
 	}
-	if mentions := scanArtifactText(pack.artifactRules(), `NEVER_TRACK = {"MEMORY.md"}`, "notes.py"); len(mentions) != 0 {
+	if mentions := scanArtifactText(pack.artifactRules(), `NEVER_TRACK = {"MEMORY.md"}`, "notes.py", ""); len(mentions) != 0 {
 		t.Fatalf("data-list mention became a write: %+v", mentions)
 	}
-	if direct := scanArtifactText(pack.artifactRules(), `Path("MEMORY.md").write_text("note")`, "direct.py"); len(direct) != 1 {
+	if direct := scanArtifactText(pack.artifactRules(), `Path("MEMORY.md").write_text("note")`, "direct.py", ""); len(direct) != 1 {
 		t.Fatalf("direct Python write findings = %+v, want one", direct)
 	}
-	if unrelated := scanArtifactText(pack.artifactRules(), `open(other, "w"); print("MEMORY.md")`, "unrelated.py"); len(unrelated) != 0 {
+	if unrelated := scanArtifactText(pack.artifactRules(), `open(other, "w"); print("MEMORY.md")`, "unrelated.py", ""); len(unrelated) != 0 {
 		t.Fatalf("unrelated write became a path write: %+v", unrelated)
 	}
 }

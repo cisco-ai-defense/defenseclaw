@@ -20,6 +20,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
 // #1202 (GAP-0713, GAP-0705): a keep-on-exit stop failure printed
@@ -33,8 +35,18 @@ func TestGatewayTransportTextHidesRawGRPC(t *testing.T) {
 		"OpenShell: wait for sandbox r5r deletion failed: rpc error: code = Canceled desc = grpc: the client connection is closing",
 		"rpc error: code = Unavailable desc = connection error: desc = \"transport: Error while dialing\"",
 		"rpc error: code = Unavailable desc = error reading from server: EOF",
+		"Error: code: Unknown error, message: h2 protocol error: error reading a body from connection | hyper::Error(Body, Error { kind: Io(Custom { kind: UnexpectedEof, error: peer closed connection without sending TLS close_notify }) })",
 	} {
 		if got := gatewayTransportText(raw); got != "the connection to the OpenShell gateway closed" {
+			t.Fatalf("%q -> %q", raw, got)
+		}
+	}
+	// The OpenShell CLI's chain when nothing listens on the gateway port: a
+	// delete's work check printed it (#1202).
+	for _, raw := range []string{
+		"workspace: inspect the sandbox copy (exit 1): Error:   × transport error |   ├─▶ tcp connect error |   ├─▶ tcp connect error: Connection refused (os error 111)",
+	} {
+		if got := gatewayTransportText(raw); got != "the OpenShell gateway does not answer" {
 			t.Fatalf("%q -> %q", raw, got)
 		}
 	}
@@ -47,5 +59,14 @@ func TestGatewayTransportTextHidesRawGRPC(t *testing.T) {
 	if strings.Contains(msg, "grpc") || !strings.Contains(msg, "the connection to the OpenShell gateway closed") ||
 		!strings.Contains(msg, "retry `defenseclaw sandbox delete r5r`") {
 		t.Fatalf("delete failure = %q", msg)
+	}
+}
+
+func TestManagedDeleteTransportErrorHasRecoveryText(t *testing.T) {
+	err := &sandboxapi.Error{Code: sandboxapi.CodeUpstream, Message: "OpenShell: wait for sandbox r5r deletion failed",
+		Detail: "Cancelled: grpc: the client connection is closing"}
+	text, ok := managedErrorText(err, nil)
+	if !ok || strings.Contains(text, "grpc") || !strings.Contains(text, "sandbox doctor") || !strings.Contains(text, "retry") {
+		t.Fatalf("managed transport error = %q, %v", text, ok)
 	}
 }

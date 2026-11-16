@@ -19,6 +19,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // TrustStrictAncestorsEnv restores the pre-AIFW-34262 behaviour: ancestor
@@ -50,6 +52,23 @@ const TrustAdvisoryMarker = "managed_trust_ancestor_advisory"
 // a check in flight. When nil the advisory goes to the standard logger.
 var ReportTrustAdvisory func(path, label, reason string)
 
+// TrustDriftAdvisoryMarker prefixes every drift-tolerant trust advisory: a
+// permission verdict on a path the caller asked about (not just an ancestor)
+// that a *Tolerant validator accepted and continued past.
+const TrustDriftAdvisoryMarker = "managed_trust_drift_advisory"
+
+// ReportTrustDrift is the ReportTrustAdvisory counterpart for drift advisories.
+// Same contract: nil by default, set once during process startup before any
+// managed trust check runs. When nil the advisory goes to the standard logger.
+var ReportTrustDrift func(path, label, reason string)
+
+// DescribeTrustAdvisoryReason, when set, rewrites an advisory's reason the way
+// an administrator reads it before it is reported: on a standalone Windows
+// install, the account next to its SID, the access mask in words and the
+// icacls command that clears it, as the trust refusals print them
+// (GAP-0925). Set once during process startup, like ReportTrustAdvisory.
+var DescribeTrustAdvisoryReason func(reason string) string
+
 // PlatformInstallerOwnedRoots returns the directories whose permissions belong
 // to the Cisco Secure Client installer (AVC) rather than to DefenseClaw. AVC
 // creates them, shares them with other Cisco software, and re-ACLs them on its
@@ -70,10 +89,11 @@ func PlatformInstallerOwnedRoots() []string {
 		// partially redirected environment (%ProgramFiles% set, %ProgramData%
 		// not) must still read `C:\ProgramData\Cisco` as installer-owned, or
 		// the managed state root itself would be judged foreign.
+		// The other bases come from the HKLM machine registration, never the
+		// process environment, which the invoking user controls.
 		roots := make([]string, 0, 4)
 		roots = append(roots, `C:\ProgramData\Cisco`)
-		for _, envName := range []string{"ProgramData", "ProgramFiles", "ProgramFiles(x86)"} {
-			base := os.Getenv(envName)
+		for _, base := range trustedMachineInstallBases() {
 			if base == "" {
 				continue
 			}
@@ -108,6 +128,16 @@ func PlatformInstallerOwnedPath(path string) bool {
 		}
 	}
 	return false
+}
+
+// AdvisoryAncestorPath reports whether an ancestor's permission verdict should
+// be advisory: the ancestor is inside PlatformInstallerOwnedRoots or, on
+// Windows, is one of the fixed operating system roots (system drive root,
+// Windows, System32, ProgramData, Program Files). Every ancestor walk, in this
+// package and outside it, uses this so the scope cannot drift between walks.
+// Like PlatformInstallerOwnedPath it says nothing about the named path itself.
+func AdvisoryAncestorPath(path string) bool {
+	return PlatformInstallerOwnedPath(path) || osRootAncestor(path)
 }
 
 // containsInstallerOwnedRoot keeps PlatformInstallerOwnedRoots free of
@@ -189,6 +219,9 @@ func relaxAncestorTrustVerdict(advisory bool, path, label string, verdict error)
 }
 
 func reportTrustAdvisory(path, label, reason string) {
+	if describe := DescribeTrustAdvisoryReason; describe != nil {
+		reason = describe(reason)
+	}
 	if hook := ReportTrustAdvisory; hook != nil {
 		// Embedders (structured log, telemetry) get every occurrence and
 		// dedupe themselves with their richer context. The default-log
@@ -210,6 +243,30 @@ func reportTrustAdvisory(path, label, reason string) {
 	log.Printf(
 		"%s: %s ancestor %s is not provably trusted, continuing (permissions are owned by the platform installer): %s",
 		TrustAdvisoryMarker, label, path, reason,
+	)
+}
+
+// EmitTrustDriftAdvisory reports a permission drift that a caller outside this
+// package found and accepted, through the same hook and default-log dedupe the
+// *Tolerant validators use. The gateway's CMID broker client calls it for
+// auth key owner and DACL drift it accepts without repairing.
+func EmitTrustDriftAdvisory(path, label, reason string) {
+	reportTrustDrift(path, label, reason)
+}
+
+func reportTrustDrift(path, label, reason string) {
+	if hook := ReportTrustDrift; hook != nil {
+		hook(path, label, reason)
+		return
+	}
+	// The dedupe key carries the marker so a drift advisory and an ancestor
+	// advisory about the same tuple are both emitted once.
+	if !advisoryLogDedupe.shouldEmit(path, label, TrustDriftAdvisoryMarker+"\x00"+reason) {
+		return
+	}
+	log.Printf(
+		"%s: %s %s does not match its expected permissions, continuing: %s",
+		TrustDriftAdvisoryMarker, label, path, reason,
 	)
 }
 
@@ -278,7 +335,61 @@ func relaxAncestorTrustJudgement(advisory bool, path, label string, err error) e
 	return relaxAncestorTrustVerdict(advisory, path, label, err)
 }
 
+func init() {
+	safefile.ManagedModeAdvisory = managedModeAdvisory
+	safefile.ManagedWriteModeAdvisory = secureClientInstallPath
+}
+
+// secureClientInstallPath reports whether path is in the Secure Client
+// install (/opt/cisco/secureclient, and /Library/Logs/Cisco/SecureClient on
+// macOS). A group or world write bit there still reaches managedModeAdvisory,
+// as before GAP-0026, because Secure Client is out of scope for that fix. The
+// standalone install below the same roots (/opt/cisco/defenseclaw,
+// /Library/Logs/Cisco/DefenseClaw) keeps write bits fatal.
+func secureClientInstallPath(path string) bool {
+	if path == "" {
+		return false
+	}
+	roots := []string{"/opt/cisco/secureclient"}
+	if runtime.GOOS == "darwin" {
+		roots = append(roots, "/Library/Logs/Cisco/SecureClient")
+	}
+	clean := filepath.Clean(path)
+	for _, root := range roots {
+		if pathAtOrUnder(clean, root) {
+			return true
+		}
+	}
+	return false
+}
+
+// managedModeAdvisory downgrades a safefile group/other read mode verdict on a
+// path inside PlatformInstallerOwnedRoots to an advisory; safefile keeps a
+// group or world write bit fatal before it asks, outside the Secure Client
+// install (secureClientInstallPath). The managed install below
+// those roots is root-owned and laid out by the platform installer (the macOS
+// runtime directory is root:wheel 0750, wheel holds only root); the managed
+// release line never enforced owner-only modes there, and enforcing them made
+// the gateway exit at every start. TrustStrictAncestorsEnv keeps them fatal.
+func managedModeAdvisory(path, reason string) bool {
+	if !PlatformInstallerOwnedPath(path) || trustStrictAncestors() {
+		return false
+	}
+	reportTrustAdvisory(path, "managed private path", reason)
+	return true
+}
+
 func trustStrictAncestors() bool {
+	return TrustStrictAncestors()
+}
+
+// TrustStrictAncestors reports whether the TrustStrictAncestorsEnv env
+// var is set to a truthy value. Exported so callers outside this
+// package (enterprisehooks reclaim paths, Windows filelock trust checks)
+// can honor the same strict/non-strict toggle without duplicating the
+// env-var parse, and so a future rename of the env var only has to
+// change the TrustStrictAncestorsEnv constant.
+func TrustStrictAncestors() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(TrustStrictAncestorsEnv))) {
 	case "1", "true", "yes", "on":
 		return true

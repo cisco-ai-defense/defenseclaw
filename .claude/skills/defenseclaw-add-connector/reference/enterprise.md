@@ -158,7 +158,7 @@ Without these, the plugin fails closed with "hook credential is unavailable".
 | Vendor-enforced floor drop-in | `internal/enterprisepolicy/claude_floor.go` (`00-defenseclaw-version-floor.json`, `ClaudeVersionFloor()`); `EnterpriseConnectorPolicy.VersionFloor` accepted only for claudecode | Only when the vendor has a managed "refuse to start below X" key. Use a separate drop-in so the hook drop-in bytes don't change. Write it only while no admin source sets the key. Record ownership plus a postimage hash, and save the record before the file. |
 | Not-gated standalone floor | `agent_floor_standalone.go` | Connectors without versioned contracts (Kiro). Gates new enrollments only. |
 | Windows platform minimum | `agent_floor_standalone_windows.go` | Minimums above the contract. |
-| Secure Client floors | `install_windows.go` `requireWindowsEnterpriseManagedAgentVersion`; psm1 `Get-DefenseClawClaudeMinimumClientVersion` | **Don't touch.** Pinned by `TestWindowsEnterpriseManagedAgentVersionMinimums` (`internal/enterprisehooks/install_windows_test.go`) and `test_secure_client_claude_floor_is_unchanged` (`cli/tests/test_windows_enterprise_standalone_contract.py`). |
+| Managed Windows version floors | `install_windows.go` `requireWindowsEnterpriseManagedAgentVersion` (enforced outside Secure Client; under Secure Client an unverified version installs in open delivery); psm1 `Get-DefenseClawClaudeMinimumClientVersion` | **Don't touch.** Pinned by `TestWindowsEnterpriseManagedAgentVersionMinimums` (`internal/enterprisehooks/install_windows_test.go`) and `test_secure_client_claude_floor_is_unchanged` (`cli/tests/test_windows_enterprise_standalone_contract.py`). |
 
 ## 7. How the existing connectors differ
 
@@ -199,7 +199,7 @@ Without these, the plugin fails closed with "hook credential is unavailable".
 - `enumerator_windows.go` `windowsHookConnectors` stays those three.
 - `install_windows.go` `requireWindowsEnterpriseManagedAgentVersion` floors stay as they are.
 - In `packaging/windows/install-enterprise.ps1`, don't change `$script:DefenseClawSupportedConnectors`, `$script:DefenseClawWindowsManagedEnterpriseSupportedConnectors`, `ConvertTo-DefenseClawConnectorList`, `Resolve-DefenseClawConnectorMetadataVersion` or the `param()` block. Also leave the psm1 Secure Client helpers and `internal/cli/hook_foreign_guard_host*.go` alone.
-- The macOS allow-list in `packaging/macos/lib/installer_lib.sh` (`amp|codex|claudecode|cursor|opencode`) stays as is.
+- The macOS allow-list in `packaging/macos/lib/installer_lib.sh` (`amp|codex|claudecode|copilot|cursor|opencode`) stays as is.
 - `internal/gateway/connector/hook_only.go` `secureClientPluginAssets` stays as is.
 - **Check:** the Secure Client invariance check is run by maintainers outside the repo; there are no Secure Client golden fixtures or golden tests in the tree. If a change touches `packaging/windows`, `packaging/macos` or a Secure Client code path, say so in the PR so a maintainer runs that check before it is marked ready. The in-repo pins that remain are:
   - `TestSecureClientPluginTemplatesArePinned` (the Secure Client plugin templates and renders);

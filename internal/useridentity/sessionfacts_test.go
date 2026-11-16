@@ -6,6 +6,7 @@ package useridentity
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,25 @@ import (
 	"testing"
 	"time"
 )
+
+func TestLegacySessionFactsCacheRefreshesForShellExpiry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), SessionFactsCacheFileName)
+	now := time.Now()
+	legacy := fmt.Sprintf(`{"key":"key","env_key":"env","written_at":%q,"header":"v1;k=local"}`,
+		now.UTC().Format(time.RFC3339Nano))
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cachedSessionFactsHeader(path, "key", "env", now); ok {
+		t.Fatal("legacy cache without shell-readable expiry was reused")
+	}
+	if err := writeSessionFactsCache(path, "key", "env", "v1;k=local", now); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := cachedSessionFactsHeader(path, "key", "env", now); !ok || got != "v1;k=local" {
+		t.Fatalf("current cache = %q, %t", got, ok)
+	}
+}
 
 func ccachePrincipalBytes(realm string, components ...string) []byte {
 	var buf bytes.Buffer
@@ -89,19 +109,6 @@ func TestKCMDefaultPrincipal(t *testing.T) {
 	}
 	if len(kcm.ops) != 2 || kcm.ops[0] != kcmOpGetDefaultCache || kcm.ops[1] != kcmOpGetPrincipal {
 		t.Fatalf("KCM operations = %v, want GET_DEFAULT_CACHE then GET_PRINCIPAL", kcm.ops)
-	}
-}
-
-// macOS keeps the default ticket in an API: cache only its own klist reads.
-// Recorded from /usr/bin/klist --json on macOS 15.8; only the top-level
-// principal counts, never a ticket's.
-func TestParseKlistJSONPrincipal(t *testing.T) {
-	recorded := `{ "version" : 1, "cache" : "API:FF284205-CDB6-4352-B0DB-5E77C3A75D02", "principal" : "dcad-alice@DCLAB.TEST", "tickets" : [{"Issued" : "20261006200131","Expires" : "20261007060131","Principal" : "krbtgt/DCLAB.TEST@DCLAB.TEST"}]}`
-	if got := parseKlistJSONPrincipal([]byte(recorded)); got != "dcad-alice@DCLAB.TEST" {
-		t.Fatalf("klist principal = %q", got)
-	}
-	if got := parseKlistJSONPrincipal([]byte(`{"version":1,"tickets":[{"Principal":"krbtgt/DCLAB.TEST@DCLAB.TEST"}]}`)); got != "" {
-		t.Fatalf("a ticket's principal was taken as the default: %q", got)
 	}
 }
 
@@ -183,9 +190,20 @@ func TestShellHookSendsTheCachedKerberosPrincipal(t *testing.T) {
 	t.Setenv("SSH_CONNECTION", "192.0.2.10 50000 192.0.2.1 22")
 	t.Setenv("SSH_TTY", "/dev/pts/3")
 	t.Setenv("XDG_SESSION_ID", "12")
+	// GAP-0654: an account without ~/.defenseclaw (a purge removed it) gets
+	// its header, and the cache does not create the folder again.
 	want := currentSessionFactsHeader(time.Now())
 	if want != "v1;k=ssh;tty=pts/3;ls=12;ca=192.0.2.10;krb=alice@CORP.EXAMPLE;cc=FILE" {
 		t.Fatalf("header = %q", want)
+	}
+	if _, err := os.Lstat(filepath.Join(home, ".defenseclaw")); !os.IsNotExist(err) {
+		t.Fatalf("the session facts cache created ~/.defenseclaw (%v)", err)
+	}
+	if err := os.Mkdir(filepath.Join(home, ".defenseclaw"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got := currentSessionFactsHeader(time.Now()); got != want {
+		t.Fatalf("header = %q, want %q", got, want)
 	}
 	helper := filepath.Join("..", "gateway", "connector", "hooks", "_hardening.sh")
 	command := exec.Command("/bin/bash", "-c", `source "$0"; defenseclaw_session_facts_value`, helper)

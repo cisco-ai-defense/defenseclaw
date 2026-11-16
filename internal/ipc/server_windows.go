@@ -37,13 +37,12 @@ const windowsSocketParentDirMode = os.FileMode(0o750)
 // test binary in the same Go package can flip this — service binaries
 // (defenseclaw.exe / defenseclaw-gateway.exe) never touch it, so a
 // production process cannot have the anchor disabled by any env,
-// registry, or config surface. See CR spec-004:PRRT_kwDORuAK-s6aoOZv
-// for the rationale — the earlier env-var-based escape hatch was
+// registry, or config surface. The earlier env-var-based escape hatch was
 // reachable from the service environment and thus disabled the
 // fail-closed boundary in every production Windows binary.
 var allowUnsafeSocketOverrideForTest bool
 
-// bindListenerForOS is the Windows bind block for the spec 004
+// bindListenerForOS is the Windows bind block for the
 // initial-cut deferred-auth IPC surface. Differences from
 // server_unix.go's sibling:
 //
@@ -53,8 +52,7 @@ var allowUnsafeSocketOverrideForTest bool
 //   - Applies a four-ACE baseline hygiene DACL via
 //     applyBaselineIPCACL at BOTH the parent directory and the
 //     socket file, with SE_DACL_PROTECTED so ancestor policy on
-//     ProgramData cannot silently over-permit (spec 004 REQ-03
-//     through REQ-05).
+//     ProgramData cannot silently over-permit.
 //
 // Returns the raw net.Listener; the caller wraps it in the codesign
 // validating listener (a passthrough on Windows — the Windows
@@ -65,9 +63,7 @@ func (s *Server) bindListenerForOS(ctx context.Context) (net.Listener, error) {
 	// pre-existing path outside our dedicated dir. Applying
 	// applyBaselineIPCACL to a shared directory would REPLACE the
 	// caller's original DACL — including any ACEs Cisco Secure
-	// Client or an unrelated installer relies on. See CR
-	// spec-004:PRRT_kwDORuAK-s6ankzx and
-	// spec-004:PRRT_kwDORuAK-s6aoCwa.
+	// Client or an unrelated installer relies on.
 	if err := validateWindowsSocketPathOverride(s.socketPath); err != nil {
 		return nil, err
 	}
@@ -83,21 +79,20 @@ func (s *Server) bindListenerForOS(ctx context.Context) (net.Listener, error) {
 	// rewrite the DACL of the junction's TARGET — a shared directory
 	// the attacker controls. RejectReparseChain walks from dir up to
 	// the volume root, so a junction at any ancestor level is refused
-	// too. See CR spec-004:PRRT_kwDORuAK-s6aoCwa.
+	// too.
 	if err := winpath.RejectReparseChain(dir); err != nil {
 		return nil, fmt.Errorf("ipc: reject reparse chain %s: %w", dir, err)
 	}
 	// Directory gets the read-only traversal/inspection Authenticated Users
 	// ACE. AVC needs to inspect the recreated endpoint after restart;
 	// FILE_ADD_FILE remains deliberately refused so an auth-user cannot
-	// pre-create a decoy at the socket path while the daemon is stopped
-	// (CR spec-004:PRRT_kwDORuAK-s6ankzk).
+	// pre-create a decoy at the socket path while the daemon is stopped.
 	if err := applyBaselineIPCACL(dir, aclObjectDirectory); err != nil {
 		return nil, err
 	}
 
 	// Best-effort remove of a stale socket file from a previous run
-	// (matches the unix path — spec 004 REQ-20 bind-only-once).
+	// (matches the unix path — bind once per run).
 	if err := os.Remove(s.socketPath); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("ipc: remove stale socket %s: %w", s.socketPath, err)
 	}
@@ -141,8 +136,7 @@ func (s *Server) bindListenerForOS(ctx context.Context) (net.Listener, error) {
 // 1-3 apply. No service binary can flip that flag — there is no
 // exported setter, no env-var reader, and no config surface — so a
 // production Windows install has NO way to disable the trusted-root
-// anchor. See CR spec-004:PRRT_kwDORuAK-s6aoCwa and
-// spec-004:PRRT_kwDORuAK-s6aoOZv.
+// anchor.
 func validateWindowsSocketPathOverride(socketPath string) error {
 	return validateWindowsSocketPathFor(socketPath, SocketFileName)
 }

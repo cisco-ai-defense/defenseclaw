@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -16,16 +18,20 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-func withAuditExportManagedSeams(t *testing.T, managedHost, administrator bool) {
+// withAuditExportManagedSeams makes this a managed Windows host (or not)
+// and the caller an administrator (or not), with the deployment at
+// testAdministratorPinLayout, which it returns. The pinned commands load the
+// config the pin names into the package cfg, so cfg is set back too.
+func withAuditExportManagedSeams(t *testing.T, managedHost, administrator bool) managed.StandaloneLayout {
 	t.Helper()
-	host, admin, layout := auditExportManagedHost, auditExportCallerIsAdministrator, auditExportManagedLayout
+	pinned := testAdministratorPinLayout(t)
+	host, admin, layout, previousCfg := auditExportManagedHost, auditExportCallerIsAdministrator, auditExportManagedLayout, cfg
 	auditExportManagedHost = func() bool { return managedHost }
 	auditExportCallerIsAdministrator = func() bool { return administrator }
-	auditExportManagedLayout = func() (managed.StandaloneLayout, error) {
-		return managed.StandaloneWindowsLayoutForRoots(`C:\Program Files`, `C:\ProgramData`)
-	}
+	auditExportManagedLayout = func() (managed.StandaloneLayout, error) { return pinned, nil }
 	t.Cleanup(func() {
 		auditExportManagedHost, auditExportCallerIsAdministrator, auditExportManagedLayout = host, admin, layout
+		cfg = previousCfg
 	})
 	for _, key := range []string{
 		"DEFENSECLAW_HOME", managed.ConfigPathEnv, managed.DeploymentModeEnv, managed.EnterpriseProfileEnv,
@@ -36,18 +42,40 @@ func withAuditExportManagedSeams(t *testing.T, managedHost, administrator bool) 
 			t.Fatal(err)
 		}
 	}
+	return pinned
+}
+
+// testAdministratorPinLayout is the standalone Windows layout the
+// administrator pin tests point at. On Windows its roots are in the test's
+// temp folder: on a managed computer C:\ProgramData holds the real
+// deployment, and a pinned command loaded its config into the package cfg
+// and its runtime .env, with the gateway token, into the test process
+// (GAP-0093). Elsewhere no process can open a C:\ path, so the product's
+// own roots stay.
+func testAdministratorPinLayout(t *testing.T) managed.StandaloneLayout {
+	t.Helper()
+	programFiles, programData := `C:\Program Files`, `C:\ProgramData`
+	if runtime.GOOS == "windows" {
+		root := t.TempDir()
+		programFiles, programData = filepath.Join(root, "Program Files"), filepath.Join(root, "ProgramData")
+	}
+	layout, err := managed.StandaloneWindowsLayoutForRoots(programFiles, programData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return layout
 }
 
 // An elevated administrator's export reads the managed deployment,
 // with the same identity pins the lifecycle gives gateway commands.
 func TestAuditExportManagedEnvironmentPointsAnAdministratorAtTheDeployment(t *testing.T) {
-	withAuditExportManagedSeams(t, true, true)
+	layout := withAuditExportManagedSeams(t, true, true)
 	if err := prepareManagedAuditExportEnvironment(); err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
 	want := map[string]string{
-		"DEFENSECLAW_HOME":                     `C:\ProgramData\Cisco\DefenseClaw\runtime`,
-		managed.ConfigPathEnv:                  `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`,
+		"DEFENSECLAW_HOME":                     layout.DataDir,
+		managed.ConfigPathEnv:                  layout.ConfigPath,
 		managed.DeploymentModeEnv:              "managed_enterprise",
 		managed.EnterpriseProfileEnv:           managed.ProfileStandalone,
 		managed.WindowsServiceAccountEnv:       `NT SERVICE\DefenseClawGateway`,
@@ -58,8 +86,10 @@ func TestAuditExportManagedEnvironmentPointsAnAdministratorAtTheDeployment(t *te
 			t.Fatalf("%s = %q, want %q", key, got, value)
 		}
 	}
-	// enterprise acp enroll|verify|revoke get the same pins (GAP-0249).
-	withAuditExportManagedSeams(t, true, true)
+	// enterprise acp enroll|verify|revoke get the same pins (GAP-0249), for
+	// the deployment of the second setup.
+	layout = withAuditExportManagedSeams(t, true, true)
+	want["DEFENSECLAW_HOME"], want[managed.ConfigPathEnv] = layout.DataDir, layout.ConfigPath
 	if err := pinEnterpriseACPAdministratorEnv(enterpriseACPEnrollCmd); err != nil {
 		t.Fatalf("enterprise acp: %v", err)
 	}
@@ -81,7 +111,7 @@ func TestManagedAdministratorViewRefusesAStandardAccountWithElevationRequired(t 
 	managedHostCurrentAccount = func() string { return `HOST\dcw-std1` }
 	refusal := func() string {
 		return windowsManagedStandardUserViewAnswer("the AI Discovery inventory",
-			"enterprise windows discovery --user "+managedHostCurrentAccountName())
+			"enterprise", "windows", "discovery", "--user", managedHostCurrentAccountName())
 	}
 	err := pinManagedAdministratorEnvironment("enterprise windows discovery", refusal)
 	if err == nil || commandExitCode(err) != 5 {

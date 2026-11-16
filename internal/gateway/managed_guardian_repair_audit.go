@@ -24,6 +24,21 @@ type managedGuardianRepairRequest struct {
 	User      string `json:"user"`
 	UID       *int   `json:"uid"`
 	Connector string `json:"connector"`
+	// Element names the protected element the guardian put back (for example
+	// the Hermes hook script). Optional: a report of a repaired target as a
+	// whole, such as a hook file the foreign-hook pass rewrote, has none.
+	Element string `json:"element,omitempty"`
+	// Change says what happened to the element: deleted, appended or edited.
+	// Optional: the guardian leaves it out where it could not read it.
+	Change string `json:"change,omitempty"`
+}
+
+// guardianRepairChangeWords says, for each change the guardian reports, how
+// the audit row words it.
+var guardianRepairChangeWords = map[string]string{
+	"deleted":  "a deletion",
+	"appended": "an append",
+	"edited":   "an edit",
 }
 
 func (a *APIServer) handleManagedGuardianRepairAudit(w http.ResponseWriter, r *http.Request) {
@@ -47,7 +62,8 @@ func (a *APIServer) handleManagedGuardianRepairAudit(w http.ResponseWriter, r *h
 	var extra any
 	if err := decoder.Decode(&report); err != nil || decoder.Decode(&extra) != io.EOF ||
 		!utf8.ValidString(report.User) || !utf8.ValidString(report.Connector) ||
-		len(report.User) > 256 || len(report.Connector) > 64 ||
+		!utf8.ValidString(report.Element) || guardianRepairChangeWords[report.Change] == "" && report.Change != "" ||
+		len(report.User) > 256 || len(report.Connector) > 64 || len(report.Element) > 256 ||
 		report.UID == nil || *report.UID < 0 || *report.UID > 1<<31-1 ||
 		strings.TrimSpace(report.User) == "" || strings.TrimSpace(report.Connector) == "" {
 		http.Error(w, "invalid repair report", http.StatusBadRequest)
@@ -59,11 +75,25 @@ func (a *APIServer) handleManagedGuardianRepairAudit(w http.ResponseWriter, r *h
 		http.Error(w, "invalid repair report", http.StatusBadRequest)
 		return
 	}
+	element := strings.TrimSpace(stripLogInjectionRunes(report.Element))
+	if report.Element != "" && element == "" {
+		http.Error(w, "invalid repair report", http.StatusBadRequest)
+		return
+	}
+	details := fmt.Sprintf("re-installed hook entries for user %s", user)
 	structured := map[string]any{}
+	if element != "" {
+		details = fmt.Sprintf("restored %s for user %s", element, user)
+		if words := guardianRepairChangeWords[report.Change]; words != "" {
+			details = fmt.Sprintf("restored %s after %s for user %s", element, words, user)
+			structured["hook_change"] = report.Change
+		}
+		structured["hook_element"] = element
+	}
 	(auditCaller{ID: strconv.Itoa(*report.UID), IDKind: useridentity.KindPOSIXUID, Name: auditUserName(user)}).addTo(structured)
 	if err := a.logger.LogEvent(audit.Event{
 		Action: string(audit.ActionConnectorHookRepaired), Target: connectorName,
-		Actor: "defenseclaw", Details: fmt.Sprintf("re-installed hook entries after deletion for user %s", user),
+		Actor: "defenseclaw", Details: details,
 		Severity: "HIGH", Connector: connectorName, Structured: structured,
 	}); err != nil {
 		http.Error(w, "audit emission failed", http.StatusServiceUnavailable)

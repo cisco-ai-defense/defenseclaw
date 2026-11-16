@@ -6,7 +6,10 @@
 
 package unixidentity
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseNSSwitchDirectoryConfigured(t *testing.T) {
 	for content, want := range map[string]bool{
@@ -45,9 +48,72 @@ func TestParseLocalPasswdAndDSCL(t *testing.T) {
 	if len(nodes) != 2 || nodes["ent-bob"] != "/Active Directory/DCLAB/dclab.test" || nodes["ent-ldap"] != "/LDAPv3/ldap.example.test" {
 		t.Fatalf("parseDSCLOriginalNodes = %v", nodes)
 	}
+	// GAP-0532: a local node account linked to Platform SSO is the identity
+	// provider's account; a Kerberos or malformed link is no such link.
+	linked := parseDSCLPlatformSSOAccounts("alice  PlatformSSO:alice@corp.example\n" +
+		"bob Kerberos:bob@LKDC:SHA1.1 PlatformSSO:Bob@Corp.Example\ncarol Kerberos:carol@LKDC:SHA1.2\n" +
+		"dave PlatformSSO:\neve PlatformSSO:not-a-upn\nbroken\n")
+	if len(linked) != 2 || !linked["alice"] || !linked["bob"] {
+		t.Fatalf("parseDSCLPlatformSSOAccounts = %v", linked)
+	}
 	groups := parseLocalGroups("wheel:x:10:root\n+nisgroup:::\ndc-sbx-contractors:x:2501:ent-hank\nbroken\nwheel:x:11:\n")
 	if len(groups) != 2 || groups["wheel"] != 10 || groups["dc-sbx-contractors"] != 2501 {
 		t.Fatalf("parseLocalGroups = %v", groups)
+	}
+}
+
+// GAP-0669: the gateway's macOS account stamp lists each local account's
+// uid, GeneratedUID, home and primary group, so an account deleted and
+// created again under the same name and uid is seen as another account.
+// rel-1-0-6 GAP-0326: one `dscl -plist . -readall` answers them, as the four
+// `dscl . -list` runs it replaces did.
+func TestParseDSCLAccountRecordsPlist(t *testing.T) {
+	record := func(attributes ...string) string {
+		out := "\t<dict>\n"
+		for i := 0; i+1 < len(attributes); i += 2 {
+			out += "\t\t<key>dsAttrTypeStandard:" + attributes[i] + "</key>\n\t\t<array>\n"
+			for _, value := range strings.Split(attributes[i+1], "|") {
+				out += "\t\t\t<string>" + value + "</string>\n"
+			}
+			out += "\t\t</array>\n"
+		}
+		return out + "\t</dict>\n"
+	}
+	output := `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<array>
+` + record("GeneratedUID", "FFFFEEEE-0046", "NFSHomeDirectory", "/Library/WebServer", "PrimaryGroupID", "70",
+		"RecordName", "_www|www", "UniqueID", "70") +
+		record("GeneratedUID", "8C1F-AAAA", "NFSHomeDirectory", "/Users/alice smith &amp; co", "PrimaryGroupID", "20",
+			"RecordName", "alice", "UniqueID", "501") +
+		record("PrimaryGroupID", "-2", "RecordName", "nobody", "UniqueID", "-2") +
+		record("RecordName", "bad", "UniqueID", "5|6") +
+		record("RecordName", "nouid", "GeneratedUID", "AAAA") +
+		record("UniqueID", "502") +
+		record("RecordName", "bad name", "UniqueID", "503") +
+		"</array>\n</plist>\n"
+	records, err := parseDSCLAccountRecordsPlist([]byte(output))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]LocalAccountRecord{
+		"alice":  {UID: 501, RecordID: "8C1F-AAAA", Home: "/Users/alice smith & co", PrimaryGID: "20"},
+		"_www":   {UID: 70, RecordID: "FFFFEEEE-0046", Home: "/Library/WebServer", PrimaryGID: "70"},
+		"nobody": {UID: -2, PrimaryGID: "-2"},
+	}
+	if len(records) != len(want) {
+		t.Fatalf("records = %+v, want %+v", records, want)
+	}
+	for name, record := range want {
+		if records[name] != record {
+			t.Fatalf("records[%q] = %+v, want %+v", name, records[name], record)
+		}
+	}
+	for _, broken := range []string{"<plist><array><dict><key>x</key>", "not a plist"} {
+		if _, err := parseDSCLAccountRecordsPlist([]byte(broken)); err == nil {
+			t.Fatalf("parseDSCLAccountRecordsPlist(%q) did not fail", broken)
+		}
 	}
 }
 

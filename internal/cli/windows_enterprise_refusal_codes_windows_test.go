@@ -28,6 +28,11 @@ func TestWindowsStandalonePreflightRulePackUnreadableCode(t *testing.T) {
 	}{
 		{fmt.Errorf("%w: %s that C:\\cfg\\config.yaml names: guardrail.rule_pack C:\\packs\\strict: the gateway service account NT SERVICE\\DefenseClawGateway cannot read C:\\packs\\strict; fix it and run again (nothing was changed)",
 			errWindowsEnterpriseInvalidArguments, standaloneRulePackUnreadableText), "rule_pack_unreadable"},
+		// A custom pack no setting selects is refused by the config check.
+		{fmt.Errorf("%w: config: managed standalone guardrail.custom_packs.acme.path C:\\packs\\acme: the gateway service account NT SERVICE\\DefenseClawGateway cannot read C:\\packs\\acme; fix it and run again (nothing was changed)",
+			errWindowsEnterpriseInvalidArguments), "rule_pack_unreadable"},
+		{fmt.Errorf("%w: config: managed standalone guardrail.custom_packs.acme.path is not administrator-controlled: BUILTIN\\Users can write to C:\\packs\\acme",
+			errWindowsEnterpriseInvalidArguments), "invalid_arguments"},
 		{fmt.Errorf("%w: the config does not compile", errWindowsEnterpriseInvalidArguments), "invalid_arguments"},
 	} {
 		var out, stderr bytes.Buffer

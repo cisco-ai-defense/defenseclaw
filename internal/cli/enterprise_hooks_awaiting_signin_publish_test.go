@@ -60,10 +60,14 @@ func (store awaitingSignInEnrollmentStore) verify(desired awaitingSignInEnrollme
 // target is enrolled and verify's exact-set check passes. A real failure
 // still blocks both.
 func TestEnterpriseHookReconcilePublishesExactEnrollmentWhileAccountsAwaitSignIn(t *testing.T) {
+	stubEarlierReleaseClosedMachineRegistration(t)
 	restoreEnterpriseHooksLifecycleTestState(t)
 	stubEnterpriseHookAuthorizationTrustForTempDir(t)
 	stubEnterpriseHookTokenSources(t)
 	awaitingSignInTestPlatformSetup(t)
+	previousSecureClient := enterpriseHookReconcileSecureClient
+	t.Cleanup(func() { enterpriseHookReconcileSecureClient = previousSecureClient })
+	enterpriseHookReconcileSecureClient = func() bool { return false }
 	previousManifest, previousAPI, previousProxy := enterpriseHookManifest, enterpriseHookAPIAddr, enterpriseHookProxyAddr
 	previousVerifier, previousInstaller := enterpriseHookReconcileVerifier, enterpriseHookReconcileInstaller
 	previousSession, previousCleanup := enterpriseHookReconcileSessionAvailable, enterpriseForeignHookCleanup
@@ -210,7 +214,7 @@ func TestEnterpriseHookReconcilePublishesExactEnrollmentWhileAccountsAwaitSignIn
 			Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileStandalone},
 		}
 		defer func() { cfg = reconcileCfg }()
-		removed, awaiting = enterpriseHookExcusedFailures(state)
+		removed, awaiting, _ = enterpriseHookExcusedFailures(state)
 		return removed, awaiting, state
 	}
 
@@ -250,13 +254,18 @@ func TestEnterpriseHookReconcilePublishesExactEnrollmentWhileAccountsAwaitSignIn
 		t.Fatalf("new targets: excused %d/%d state %+v", removed, awaiting, state)
 	}
 
-	// A real failure (Erin's repair is denied) still blocks staging and the
-	// exact publication.
+	// A real failure (Erin's repair is denied) no longer holds back the
+	// others: Dave is staged and the exact set is published again. Erin was
+	// protected before, so her SID stays enrolled while the guardian retries.
 	installErr = errors.New("write managed Codex hook runtime: access is denied")
 	staged = staged[:0]
 	run, err = runEnterpriseHookReconcileOnce(context.Background())
-	if err != nil || run.Failures != 7 || exactPublications != 2 || len(staged) != 0 {
+	if err != nil || run.Failures != 7 || exactPublications != 3 ||
+		strings.Join(staged, ",") != dave.sid+"/claudecode" {
 		t.Fatalf("real failure: failures=%d pending=%d stateErr=%v exact=%d staged=%v err=%v", run.Failures, run.Pending, run.StateErr, exactPublications, staged, err)
+	}
+	if !store["codex"][strings.ToUpper(erin.sid)] {
+		t.Fatalf("real failure: Codex enrollment %v dropped the previously protected %s", store.sorted("codex"), erin.sid)
 	}
 	if removed, awaiting, _ := excused(); removed != 0 || awaiting != 0 {
 		t.Fatalf("real failure: excused %d/%d, want none", removed, awaiting)

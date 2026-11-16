@@ -408,7 +408,7 @@ class V8EventHistoryReader:
             f"""SELECT {_v8_select_columns(self._columns)}
                FROM audit_events
                WHERE signal = 'logs' AND bucket IN {_MUTATION_BUCKETS_SQL}
-               ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+               ORDER BY {self._time_order()} LIMIT ?""",
             (
                 _MAX_PAYLOAD_BYTES,
                 _MAX_PAYLOAD_BYTES,
@@ -501,9 +501,9 @@ class V8EventHistoryReader:
         self._alert_mark = max_rowid
         self._alert_rowids = alert_rowids
         self._alert_scope = scope
-        history_rows = [tuple(row[2:]) for row in rows if int(row[0]) == 0]
-        alert_rows = [tuple(row[2:]) for row in rows if int(row[0]) == 1]
-        mutation_rows = [tuple(row[2:]) for row in rows if int(row[0]) == 2]
+        history_rows = [tuple(row[3:]) for row in rows if int(row[0]) == 0]
+        alert_rows = [tuple(row[3:]) for row in rows if int(row[0]) == 1]
+        mutation_rows = [tuple(row[3:]) for row in rows if int(row[0]) == 2]
         return (
             _decode_v8_event_history_rows(history_rows),
             _decode_v8_event_history_rows(alert_rows),
@@ -538,12 +538,12 @@ class V8EventHistoryReader:
         return self.db.execute(
             f"""SELECT * FROM (
                WITH history AS (
-                   SELECT rowid AS dc_rowid, {select_columns}
+                   SELECT rowid AS dc_rowid, {self._time_instant()} AS dc_instant, {select_columns}
                    FROM audit_events
                    WHERE signal = 'logs' AND bucket IS NOT NULL AND bucket <> ''
-                   ORDER BY timestamp DESC, rowid DESC LIMIT ?
+                   ORDER BY {self._time_order()} LIMIT ?
                ), newest_alerts AS (
-                   SELECT rowid AS dc_rowid, timestamp AS dc_timestamp,
+                   SELECT rowid AS dc_rowid, {self._time_instant()} AS dc_instant,
                           0 AS dc_priority
                    FROM audit_events{alert_table_hint}
                    WHERE (
@@ -553,9 +553,9 @@ class V8EventHistoryReader:
                      AND {alert_where}
                      {ack_filter}
                      {alert_scope}
-                   ORDER BY timestamp DESC, rowid DESC LIMIT ?
+                   ORDER BY {self._time_order()} LIMIT ?
                ), actionable_alerts AS (
-                   SELECT rowid AS dc_rowid, timestamp AS dc_timestamp,
+                   SELECT rowid AS dc_rowid, {self._time_instant()} AS dc_instant,
                           1 AS dc_priority
                    FROM audit_events{alert_table_hint}
                    WHERE (
@@ -566,28 +566,28 @@ class V8EventHistoryReader:
                      AND {_V8_ACTIONABLE_ALERT_WHERE_SQL}
                      {ack_filter}
                      {alert_scope}
-                   ORDER BY timestamp DESC, rowid DESC LIMIT ?
+                   ORDER BY {self._time_order()} LIMIT ?
                ), selected_alerts AS (
                    SELECT dc_rowid, MAX(dc_priority) AS dc_priority,
-                          MAX(dc_timestamp) AS dc_timestamp
+                          MAX(dc_instant) AS dc_instant
                    FROM (
                        SELECT * FROM newest_alerts
                        UNION ALL
                        SELECT * FROM actionable_alerts
                    )
                    GROUP BY dc_rowid
-                   ORDER BY dc_priority DESC, dc_timestamp DESC, dc_rowid DESC
+                   ORDER BY dc_priority DESC, dc_instant DESC, dc_rowid DESC
                    LIMIT ?
                ), alerts AS (
-                   SELECT audit_events.rowid AS dc_rowid, {select_columns}
+                   SELECT audit_events.rowid AS dc_rowid, {self._time_instant("audit_events")} AS dc_instant, {select_columns}
                    FROM audit_events
                    JOIN selected_alerts
                      ON selected_alerts.dc_rowid = audit_events.rowid
                ), mutations AS (
-                   SELECT rowid AS dc_rowid, {select_columns}
+                   SELECT rowid AS dc_rowid, {self._time_instant()} AS dc_instant, {select_columns}
                    FROM audit_events
                    WHERE signal = 'logs' AND bucket IN {_MUTATION_BUCKETS_SQL}
-                   ORDER BY timestamp DESC, rowid DESC LIMIT ?
+                   ORDER BY {self._time_order()} LIMIT ?
                )
                SELECT * FROM (
                    SELECT 0 AS dc_view, history.* FROM history
@@ -597,7 +597,7 @@ class V8EventHistoryReader:
                    SELECT 2 AS dc_view, mutations.* FROM mutations
                )
                )
-               ORDER BY dc_view, timestamp DESC, dc_rowid DESC""",
+               ORDER BY dc_view, dc_instant DESC, dc_rowid DESC""",
             (
                 _MAX_PAYLOAD_BYTES,
                 _MAX_PAYLOAD_BYTES,
@@ -637,6 +637,16 @@ class V8EventHistoryReader:
             self._schema_version = schema_version
         return bool(self._supported)
 
+    def _time_instant(self, alias: str = "") -> str:
+        prefix = f"{alias}." if alias else ""
+        if "retention_timestamp_unix_nano" in self._columns:
+            return f"{prefix}retention_timestamp_unix_nano"
+        return f"julianday({prefix}timestamp)"
+
+    def _time_order(self, alias: str = "") -> str:
+        prefix = f"{alias}." if alias else ""
+        return f"{self._time_instant(alias)} DESC, {prefix}rowid DESC"
+
     def _alert_ack_count(self) -> int:
         if not self._has_ack_projection:
             return 0
@@ -671,35 +681,35 @@ class V8EventHistoryReader:
             ) AND {alert_where} {self._alert_ack_filter_sql()}"""
             rows = self.db.execute(
                 f"""WITH newest_alerts AS (
-                       SELECT rowid AS dc_rowid, timestamp AS dc_timestamp,
+                       SELECT rowid AS dc_rowid, {self._time_instant()} AS dc_instant,
                               0 AS dc_priority
                        FROM audit_events
                        WHERE {alert_scope}
-                       ORDER BY timestamp DESC, rowid DESC LIMIT ?
+                       ORDER BY {self._time_order()} LIMIT ?
                    ), actionable_alerts AS (
-                       SELECT rowid AS dc_rowid, timestamp AS dc_timestamp,
+                       SELECT rowid AS dc_rowid, {self._time_instant()} AS dc_instant,
                               1 AS dc_priority
                        FROM audit_events
                        WHERE {alert_scope}
                          AND {_V8_ACTIONABLE_ALERT_WHERE_SQL}
-                       ORDER BY timestamp DESC, rowid DESC LIMIT ?
+                       ORDER BY {self._time_order()} LIMIT ?
                    ), selected_alerts AS (
                        SELECT dc_rowid, MAX(dc_priority) AS dc_priority,
-                              MAX(dc_timestamp) AS dc_timestamp
+                              MAX(dc_instant) AS dc_instant
                        FROM (
                            SELECT * FROM newest_alerts
                            UNION ALL
                            SELECT * FROM actionable_alerts
                        )
                        GROUP BY dc_rowid
-                       ORDER BY dc_priority DESC, dc_timestamp DESC, dc_rowid DESC
+                       ORDER BY dc_priority DESC, dc_instant DESC, dc_rowid DESC
                        LIMIT ?
                    )
                    SELECT {select_columns}
                    FROM audit_events
                    JOIN selected_alerts
                      ON selected_alerts.dc_rowid = audit_events.rowid
-                   ORDER BY timestamp DESC, audit_events.rowid DESC""",
+                   ORDER BY {self._time_order("audit_events")}""",
                 (
                     bounded,
                     bounded,
@@ -715,7 +725,7 @@ class V8EventHistoryReader:
             f"""SELECT {select_columns}
                FROM audit_events
                WHERE {where}
-               ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+               ORDER BY {self._time_order()} LIMIT ?""",
             (
                 _MAX_PAYLOAD_BYTES,
                 _MAX_PAYLOAD_BYTES,

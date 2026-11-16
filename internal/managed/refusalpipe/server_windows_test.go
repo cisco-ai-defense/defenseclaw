@@ -7,12 +7,17 @@ package refusalpipe
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // GAP-1242: the gateway names the account from the pipe client token, not
@@ -68,6 +73,20 @@ func TestRefusalPipeIdentifiesTheClientToken(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("no report received")
 	}
+	// GAP-2639: a CLI command report travels the same pipe and is named by
+	// the same token.
+	command := Report{Command: "enterprise windows repair", Reason: ReasonElevationRequired}
+	if err := Send(context.Background(), command); err != nil {
+		t.Fatalf("send command report: %v", err)
+	}
+	select {
+	case r := <-got:
+		if r.sid != user.User.Sid.String() || r.report != command {
+			t.Fatalf("received %+v, want %s %+v", r, user.User.Sid, command)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no command report received")
+	}
 
 	gatewayServerPID = func() (uint32, error) { return uint32(os.Getpid()) + 4, nil }
 	if err := Send(context.Background(), report); err == nil {
@@ -77,5 +96,275 @@ func TestRefusalPipeIdentifiesTheClientToken(t *testing.T) {
 	case r := <-got:
 		t.Fatalf("server received %+v from a client that should have refused to write", r)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// GAP-1253: serve returns only after the reports it accepted were handled,
+// so the stop's drain that follows it sees them.
+func TestRefusalPipeServeWaitsForItsHandlers(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !AccountSID(user.User.Sid.String()) {
+		t.Skipf("test account %s is not a user account SID", user.User.Sid)
+	}
+	name := fmt.Sprintf(`\\.\pipe\defenseclaw-refusal-join-%d-%d`, os.Getpid(), time.Now().UnixNano())
+	restoreName, restorePID := clientPipeName, gatewayServerPID
+	t.Cleanup(func() { clientPipeName, gatewayServerPID = restoreName, restorePID })
+	clientPipeName = name
+	gatewayServerPID = func() (uint32, error) { return uint32(os.Getpid()), nil }
+
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	served := make(chan error, 1)
+	go func() {
+		served <- serve(ctx, name, func(string, Report) {
+			once.Do(func() { close(entered) })
+			<-release
+		})
+	}()
+	report := Report{Connector: "claudecode", Reason: ReasonSIDUnregistered, Event: "PreToolUse", Tool: "Bash"}
+	var sendErr error
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		sendCtx, stop := context.WithTimeout(context.Background(), time.Second)
+		sendErr = Send(sendCtx, report)
+		stop()
+		if sendErr == nil {
+			break
+		}
+	}
+	if sendErr != nil {
+		t.Fatalf("send: %v", sendErr)
+	}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no report handled")
+	}
+	cancel()
+	select {
+	case <-served:
+		t.Fatal("serve returned while a handler was still running")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-served:
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not return after its handler")
+	}
+}
+
+// GAP-2639: a client that closes its end right after its write lost the
+// report when the server read or identified it after the close: on the
+// managed host most refusals of a standard account's CLI run never reached
+// the audit log. Every report a client sent, one after another, arrives.
+func TestRefusalPipeKeepsEveryReportOfAClientThatExitsAtOnce(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !AccountSID(user.User.Sid.String()) {
+		t.Skipf("test account %s is not a user account SID", user.User.Sid)
+	}
+	name := fmt.Sprintf(`\\.\pipe\defenseclaw-refusal-burst-%d-%d`, os.Getpid(), time.Now().UnixNano())
+	restoreName, restorePID := clientPipeName, gatewayServerPID
+	t.Cleanup(func() { clientPipeName, gatewayServerPID = restoreName, restorePID })
+	clientPipeName = name
+	gatewayServerPID = func() (uint32, error) { return uint32(os.Getpid()), nil }
+	var mu sync.Mutex
+	received := 0
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() {
+		served <- serve(ctx, name, func(sid string, _ Report) {
+			if sid == user.User.Sid.String() {
+				mu.Lock()
+				received++
+				mu.Unlock()
+			}
+		})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-served
+	})
+	report := Report{Command: "enterprise windows repair", Reason: ReasonElevationRequired}
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if Send(context.Background(), report) == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the pipe never accepted a report")
+		}
+	}
+	const sent = 40
+	for i := 1; i < sent; i++ {
+		sendCtx, stop := context.WithTimeout(context.Background(), 2*time.Second)
+		if err := Send(sendCtx, report); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
+		stop()
+	}
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		mu.Lock()
+		n := received
+		mu.Unlock()
+		if n == sent {
+			return
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	t.Fatalf("received %d of %d reports", received, sent)
+}
+
+// GAP-0547: the next pipe instance may briefly be unavailable between two
+// reports. The client waits for it within its connection budget.
+func TestRefusalPipeSendWaitsForNextInstance(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !AccountSID(user.User.Sid.String()) {
+		t.Skipf("test account %s is not a user account SID", user.User.Sid)
+	}
+	name := fmt.Sprintf(`\\.\pipe\defenseclaw-refusal-gap-%d-%d`, os.Getpid(), time.Now().UnixNano())
+	restoreName, restorePID := clientPipeName, gatewayServerPID
+	t.Cleanup(func() { clientPipeName, gatewayServerPID = restoreName, restorePID })
+	clientPipeName = name
+	gatewayServerPID = func() (uint32, error) { return uint32(os.Getpid()), nil }
+
+	security, err := pipeSecurity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	firstReady := make(chan struct{})
+	gap := make(chan struct{})
+	resume := make(chan struct{})
+	var release sync.Once
+	received := make(chan Report, 2)
+	served := make(chan error, 1)
+	go func() {
+		for i := 0; i < 2; i++ {
+			if i == 1 {
+				close(gap)
+				select {
+				case <-ctx.Done():
+					served <- ctx.Err()
+					return
+				case <-resume:
+				}
+			}
+			pipe, err := createPipe(name, security, true, uint32(len(Receipt)))
+			if err != nil {
+				served <- err
+				return
+			}
+			if i == 0 {
+				close(firstReady)
+			}
+			_, err = overlapped(ctx, 0, pipe, func(_ *uint32, o *windows.Overlapped) error {
+				err := windows.ConnectNamedPipe(pipe, o)
+				if errors.Is(err, windows.ERROR_PIPE_CONNECTED) {
+					return nil
+				}
+				return err
+			})
+			if err == nil {
+				var sid string
+				var report Report
+				var ok bool
+				sid, report, ok = receive(ctx, pipe)
+				if !ok || sid != user.User.Sid.String() {
+					err = fmt.Errorf("report %d was not attributed to the client", i)
+				} else {
+					received <- report
+				}
+			}
+			_ = windows.DisconnectNamedPipe(pipe)
+			_ = windows.CloseHandle(pipe)
+			if err != nil {
+				served <- err
+				return
+			}
+		}
+		served <- nil
+	}()
+	t.Cleanup(func() {
+		cancel()
+		release.Do(func() { close(resume) })
+		<-served
+	})
+	select {
+	case <-firstReady:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	report := Report{Command: "enterprise windows repair", Reason: ReasonElevationRequired}
+	if !t.Run("available instance", func(t *testing.T) {
+		if err := Send(ctx, report); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case got := <-received:
+			if got != report {
+				t.Fatalf("received %+v, want %+v", got, report)
+			}
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+	}) {
+		return
+	}
+	select {
+	case <-gap:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	t.Run("next instance", func(t *testing.T) {
+		result := make(chan error, 1)
+		go func() { result <- Send(ctx, report) }()
+		select {
+		case err := <-result:
+			t.Fatalf("send returned before the next instance was ready: %v", err)
+		case <-time.After(100 * time.Millisecond):
+		}
+		release.Do(func() { close(resume) })
+		select {
+		case err := <-result:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+		select {
+		case got := <-received:
+			if got != report {
+				t.Fatalf("received %+v, want %+v", got, report)
+			}
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+	})
+}
+
+// GAP-2639: the gateway service's write-restricted token creates the pipe's
+// further instances only through an ACE for its service SID; clients get
+// clientRights and never FILE_CREATE_PIPE_INSTANCE.
+func TestRefusalPipeSecurityLetsTheRestrictedServiceCreateInstances(t *testing.T) {
+	sddl := pipeSDDL("S-1-5-18")
+	service := managed.WindowsServiceSIDString(managed.StandaloneWindowsGatewaySvc)
+	if !strings.HasPrefix(service, "S-1-5-80-") || !strings.Contains(sddl, "(A;;GA;;;"+service+")") ||
+		!strings.Contains(sddl, "(A;;"+clientRights+";;;AU)") {
+		t.Fatalf("refusal pipe SDDL = %s", sddl)
+	}
+	if _, err := windows.SecurityDescriptorFromString(sddl); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -20,6 +20,7 @@ package sandboxcli
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"strings"
 	"testing"
@@ -102,7 +103,7 @@ func TestStopKeepsAFullDiskMicroVMWithUnpulledWork(t *testing.T) {
 			wantExit(t, err, ExitStopKept)
 			ta.wantCalls(t, 0, "POST", "vmbox/stop")
 			has(t, ta.output(), "Sandbox vmbox keeps running: a MicroVM stopped with its disk full cannot start again, and its work that was not pulled would be lost",
-				"`defenseclaw sandbox exec vmbox -- df -h /`", "`defenseclaw sandbox pull vmbox`", "to give that work up, delete it: `defenseclaw sandbox delete vmbox`")
+				"`defenseclaw sandbox exec vmbox -- df -h /`", "`defenseclaw sandbox pull vmbox --apply`", "to give that work up, delete it: `defenseclaw sandbox delete vmbox`")
 			if !ranDF(ta) {
 				t.Fatalf("the stop did not look at the disk: %q", ta.stream.commands())
 			}
@@ -171,7 +172,7 @@ func TestStatusSaysAMicroVMsDiskIsFilling(t *testing.T) {
 	diskAnswers(ta, "run=none\n", dfFilling, 0)
 	ta.ok(t, ta.Status(bg, "vmbox", OutputText))
 	has(t, ta.output(), "vmbox's own disk is 93% full (143.4 MiB of 2.0 GiB free): a MicroVM stopped with its disk full cannot start again",
-		"`defenseclaw sandbox exec vmbox -- df -h /` shows it", "`defenseclaw sandbox pull vmbox` brings its work back before it fills")
+		"`defenseclaw sandbox exec vmbox -- df -h /` shows it", "`defenseclaw sandbox pull vmbox --apply` brings its work back before it fills")
 	ta.out.Reset()
 	diskAnswers(ta, "run=none\n", dfHalf, 0)
 	ta.ok(t, ta.Status(bg, "vmbox", OutputText))
@@ -182,9 +183,9 @@ func TestStatusSaysAMicroVMsDiskIsFilling(t *testing.T) {
 // own disk is filling, rather than only at the end once a write failed; it
 // stops looking after that.
 func TestSessionWarnsOnceThatItsMicroVMDiskIsFilling(t *testing.T) {
-	prev := overlayDiskEvery
-	overlayDiskEvery = time.Millisecond
-	t.Cleanup(func() { overlayDiskEvery = prev })
+	prev, prevSmall := overlayDiskEvery, smallOverlayDiskEvery
+	overlayDiskEvery, smallOverlayDiskEvery = time.Millisecond, time.Millisecond
+	t.Cleanup(func() { overlayDiskEvery, smallOverlayDiskEvery = prev, prevSmall })
 	sb := vmCopySandbox("vmbox")
 	ta := newTestApp(t, "", sb)
 	ta.IO.TTY = false
@@ -215,8 +216,55 @@ func TestSessionWarnsOnceThatItsMicroVMDiskIsFilling(t *testing.T) {
 	if got := strings.Count(ta.err.String(), "own disk is 93% full"); got != 1 {
 		t.Fatalf("warned %d times:\n%s", got, ta.err.String())
 	}
-	if len(s.notices) != 1 || !strings.Contains(s.notices[0].summary, "`defenseclaw sandbox pull vmbox`") {
+	if len(s.notices) != 1 || !strings.Contains(s.notices[0].summary, "`defenseclaw sandbox pull vmbox --apply`") {
 		t.Fatalf("summary notices = %+v", s.notices)
+	}
+}
+
+// GAP-1140: a small MicroVM disk an agent fills fast is warned about before
+// it is full: at the rate it filled since the last look it would be full
+// before the look after next, so the session warns at about 70%, not at 90%
+// after the write already failed. A disk that does not fill is not.
+func TestSessionWarnsAboutAFastFillingSmallDisk(t *testing.T) {
+	prev, prevSmall := overlayDiskEvery, smallOverlayDiskEvery
+	overlayDiskEvery, smallOverlayDiskEvery = time.Hour, 20*time.Millisecond
+	t.Cleanup(func() { overlayDiskEvery, smallOverlayDiskEvery = prev, prevSmall })
+	df70 := dfHeader + "/dev/vda           2097152 1468006    629146      70% /\n"
+	for _, tc := range []struct {
+		name    string
+		answers []string
+		warn    bool
+	}{
+		{"filling fast", []string{dfHalf, df70}, true},
+		{"steady", []string{dfHalf, dfHalf, dfHalf}, false},
+		// The early warning does not end the watch: the disk that then
+		// fills is named too (GAP-1785).
+		{"filling fast, then full", []string{dfHalf, df70, dfFull}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sb := vmCopySandbox("vmbox")
+			ta := newTestApp(t, "", sb)
+			ta.IO.TTY = false
+			looks := 0
+			ta.stream.answer = func(argv []string) (int, string) {
+				if cmd := sandboxCommand(argv); len(cmd) > 0 && cmd[0] == "df" {
+					looks++
+					return 0, tc.answers[min(looks, len(tc.answers))-1]
+				}
+				return 0, ""
+			}
+			s := &session{app: ta.App, cli: ta.cli("gw"), sb: &sb}
+			ctx, cancel := context.WithTimeout(bg, time.Duration(len(tc.answers))*smallOverlayDiskEvery+500*time.Millisecond)
+			defer cancel()
+			s.watchOverlayDisk(ctx)
+			warned := strings.Contains(ta.err.String(), "own disk is 69% full")
+			if warned != tc.warn || tc.warn && looks < 2 {
+				t.Fatalf("warned %v after %d looks:\n%s", warned, looks, ta.err.String())
+			}
+			if full := strings.Contains(ta.err.String(), "own disk is 100% full"); full != (tc.answers[len(tc.answers)-1] == dfFull) {
+				t.Fatalf("full disk named %v after %d looks:\n%s", full, looks, ta.err.String())
+			}
+		})
 	}
 }
 
@@ -243,5 +291,42 @@ func TestParseOverlayDF(t *testing.T) {
 	if ExitStopKept != 5 {
 		// The TUI reads this status (sandbox_panel.SANDBOX_STOP_KEPT_EXIT).
 		t.Fatalf("ExitStopKept = %d, want 5", ExitStopKept)
+	}
+}
+
+// GAP-1140: the warnings of the disk watch reach the daemon as they are
+// given, so `sandbox activity` names a filling disk while the agent runs,
+// not only the summary at the end of the session.
+func TestSessionDiskWarningsReachTheActivityFeed(t *testing.T) {
+	prev, prevSmall := overlayDiskEvery, smallOverlayDiskEvery
+	overlayDiskEvery, smallOverlayDiskEvery = time.Hour, 20*time.Millisecond
+	t.Cleanup(func() { overlayDiskEvery, smallOverlayDiskEvery = prev, prevSmall })
+	df70 := dfHeader + "/dev/vda           2097152 1468006    629146      70% /\n"
+	answers := []string{dfHalf, df70, dfFull}
+	sb := vmCopySandbox("vmbox")
+	ta := newTestApp(t, "", sb)
+	ta.IO.TTY = false
+	looks := 0
+	ta.stream.answer = func(argv []string) (int, string) {
+		if cmd := sandboxCommand(argv); len(cmd) > 0 && cmd[0] == "df" {
+			looks++
+			return 0, answers[min(looks, len(answers))-1]
+		}
+		return 0, ""
+	}
+	s := &session{app: ta.App, api: ta.API, cli: ta.cli("gw"), sb: &sb}
+	ctx, cancel := context.WithTimeout(bg, time.Duration(len(answers))*smallOverlayDiskEvery+500*time.Millisecond)
+	defer cancel()
+	s.watchOverlayDisk(ctx)
+	var reports []sandboxapi.DiskReport
+	for _, c := range ta.daemon.callsTo("POST", sandboxapi.PathSandboxes+"/vmbox/disk") {
+		var r sandboxapi.DiskReport
+		if err := json.Unmarshal(c.Body, &r); err != nil {
+			t.Fatal(err)
+		}
+		reports = append(reports, r)
+	}
+	if len(reports) != 2 || !reports[0].Fast || reports[0].SizeBytes != 2<<30 || reports[1].Fast || reports[1].FreeBytes != 0 {
+		t.Fatalf("disk reports after %d looks = %+v", looks, reports)
 	}
 }

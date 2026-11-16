@@ -166,6 +166,24 @@ class TestBridgeReadinessContract(unittest.TestCase):
 
 
 class TestManagedNoWaitSecurityGate(unittest.TestCase):
+    def test_invalid_signals_do_not_touch_the_stack_or_config(self):
+        from defenseclaw.commands.cmd_setup_local_observability import local_observability
+
+        app = AppContext()
+        app.cfg = SimpleNamespace(data_dir="/tmp/defenseclaw-test")
+        with (
+            patch("defenseclaw.commands.cmd_setup_local_observability._resolve_controller") as resolve,
+            patch("defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_config") as apply,
+        ):
+            for flags in ([], ["--no-config"], ["--no-wait"]):
+                result = CliRunner().invoke(
+                    local_observability, ["up", "--signals", "metrics,banana", *flags], obj=app
+                )
+                self.assertEqual(result.exit_code, 2, result.output)
+                self.assertIn("banana", result.output)
+            resolve.assert_not_called()
+            apply.assert_not_called()
+
     def test_password_flags_propagate_exact_selected_mode(self):
         from defenseclaw.commands.cmd_setup_local_observability import local_observability
 
@@ -208,7 +226,8 @@ class TestManagedNoWaitSecurityGate(unittest.TestCase):
                 grafana_access_mode=expected,
             )
             if expected == GRAFANA_ACCESS_NO_PASSWORD:
-                self.assertIn("anonymous Admin", result.output)
+                self.assertIn("anonymous Viewer, read-only", result.output)
+                self.assertNotIn("Admin", result.output)
                 self.assertIn("every local process", result.output)
             else:
                 self.assertIn(str(controller.grafana_password_file), result.output)
@@ -301,7 +320,7 @@ class TestStackSummary(unittest.TestCase):
         rendered = "\n".join(output)
         self.assertIn("user: admin", rendered)
         self.assertIn("/resolved/stack/.grafana-admin-password", rendered)
-        self.assertNotIn("anonymous Admin", rendered)
+        self.assertNotIn("anonymous Viewer", rendered)
         self.assertNotIn("admin / admin", rendered)
         self.assertIn("applies the destination itself", rendered)
         self.assertNotIn("defenseclaw-gateway restart", rendered)
@@ -328,7 +347,8 @@ class TestStackSummary(unittest.TestCase):
             )
 
         rendered = "\n".join(output)
-        self.assertIn("anonymous Admin; no password", rendered)
+        self.assertIn("anonymous Viewer, read-only; no password", rendered)
+        self.assertNotIn("as Admin", rendered)
         self.assertIn("every local process", rendered)
         self.assertNotIn(".grafana-admin-password", rendered)
 

@@ -145,9 +145,15 @@ func TestOpenCodeSetup_WritesBridgePlugin(t *testing.T) {
 	if err != nil || !current {
 		t.Fatalf("OpenCode registration publication = %v, %v; want plugin plus custody receipt", current, err)
 	}
+	if _, err := EnsureHookAPIToken(opts.DataDir, conn.Name()); err != nil {
+		t.Fatalf("issue scoped plugin credential: %v", err)
+	}
 
 	if err := conn.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
+	}
+	if token, err := LoadHookAPIToken(opts.DataDir, conn.Name()); err != nil || token != "" {
+		t.Fatalf("removed OpenCode plugin still authenticates: %q, %v", token, err)
 	}
 	if _, err := os.Stat(pluginPath); !os.IsNotExist(err) {
 		t.Fatalf("plugin still present after teardown (err=%v)", err)
@@ -247,7 +253,7 @@ func TestOpenCodePluginReloadsScopedTokenAndFailsCredentialErrorsClosed(t *testi
 			authorizationsMu.Unlock()
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"hook_output":{"decision":"allow"}}`))
+		_, _ = w.Write([]byte(`{"action":"allow","hook_output":{"decision":"allow"}}`))
 	}))
 	defer server.Close()
 
@@ -288,6 +294,13 @@ func TestOpenCodePluginReloadsScopedTokenAndFailsCredentialErrorsClosed(t *testi
 			t.Fatal("rendered OpenCode plugin contains a rotation credential")
 		}
 	}
+	// This test exercises token rotation against a fake HTTP gateway; the
+	// connected-account check is exercised with the production render in
+	// TestPerUserPluginsCheckPeerBeforeSending.
+	harnessPluginPath := filepath.Join(root, "plugins", "token-rotation-harness.mjs")
+	if err := os.WriteFile(harnessPluginPath, []byte(withoutPeerCheckForTest(string(pluginBytes))), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	// The harness applies the config hook before it is ready, as OpenCode
 	// does at startup: its load heartbeat pays the process's first gateway
 	// request (fetch's first use and connection), which on a fresh or busy
@@ -298,7 +311,7 @@ import { pathToFileURL } from "node:url";
 import { createInterface } from "node:readline";
 const href = pathToFileURL(process.argv[1]).href;
 const loaded = await import(href);
-const plugin = await loaded.DefenseClaw({ directory: "" });
+const plugin = await fixtureBridge(loaded, { directory: "" });
 await plugin.config({ plugin_origins: [{ spec: href }], mcp: {} });
 console.log("` + nodeHarnessReady + `");
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
@@ -314,7 +327,7 @@ for await (const _ of lines) {
   }
 }
 `
-	session := startNodeHarnessSession(t, harness, pluginPath)
+	session := startNodeHarnessSession(t, harness, harnessPluginPath)
 	for index, token := range []string{aToken, bToken, aToken} {
 		if index > 0 {
 			if err := atomicWriteFile(tokenPath, []byte(token+"\n"), 0o600); err != nil {
@@ -468,10 +481,8 @@ func TestOpenCodeBridgeDistinguishesBlockingAndObserveOnlyHooks(t *testing.T) {
 	if strings.Contains(afterBody[:afterEnd], "const verdict") || strings.Contains(afterBody[:afterEnd], "throw new Error") {
 		t.Fatal("tool.execute.after must ignore the advisory verdict and remain observe-only")
 	}
-	for _, field := range []string{"output.title", "output.output", "output.metadata"} {
-		if !strings.Contains(afterBody[:afterEnd], field) {
-			t.Fatalf("tool.execute.after omits official result field %q", field)
-		}
+	if !strings.Contains(afterBody[:afterEnd], "const result = output;") {
+		t.Fatal("V2 must forward the native result without projecting V1 string fields")
 	}
 	if !strings.Contains(afterBody[:afterEnd], "input && input.args") {
 		t.Fatal("tool.execute.after must read tool args from the official input object")
@@ -506,12 +517,10 @@ func TestOpenCodeBridgePinsPluginOrderMCPIdentityAndHeartbeat(t *testing.T) {
 	text := string(body)
 	for _, want := range []string{
 		"defenseclaw-managed-plugin v7",
-		"const DC_PLUGIN_URL = import.meta.url",
-		"Array.isArray(config.plugin_origins)",
-		"DC_ARGUMENTS_AUTHORITATIVE = ownIndex >= 0 && DC_LATER_PLUGIN_COUNT === 0",
+		"defenseclawPinV2Event(event)",
+		"DC_ARGUMENTS_AUTHORITATIVE = true",
 		`replace(/[^a-zA-Z0-9_-]/g, "_")`,
-		`mcp[name].enabled !== false`,
-		`return { status: "ambiguous", name: "" }`,
+		`"ambiguous"`,
 		"payload.mcp_server_name = mcpIdentity.name",
 		`verdict.mode === "action" && mcpIdentity.status === "ambiguous"`,
 		`verdict.mode === "action" && !DC_ARGUMENTS_AUTHORITATIVE`,
@@ -519,10 +528,10 @@ func TestOpenCodeBridgePinsPluginOrderMCPIdentityAndHeartbeat(t *testing.T) {
 		`load_heartbeat: true`,
 	} {
 		if !strings.Contains(text, want) {
-			t.Errorf("OpenCode bridge is missing audited v1.18.10-v1.18.19 behavior %q", want)
+			t.Errorf("OpenCode bridge is missing V2 bridge behavior %q", want)
 		}
 	}
-	if strings.Contains(text, "mcp__") || strings.Contains(text, "mcp:") {
+	if strings.Contains(text, "mcp__") || strings.Contains(text, `startsWith("mcp:")`) {
 		t.Fatal("OpenCode bridge must not fall back to another connector's MCP naming grammar")
 	}
 }
@@ -584,11 +593,11 @@ func TestOpenCodeBridgeExecutableMCPIdentityAndFailurePosture(t *testing.T) {
 	}
 	render := func(failMode string) []byte {
 		t.Helper()
-		return []byte(renderOpenCodePluginTemplate(t, templateData{
+		return []byte(withoutPeerCheckForTest(renderOpenCodePluginTemplate(t, templateData{
 			APIAddr:     "127.0.0.1:18970",
 			TokenFileJS: javaScriptStringContent(tokenPath),
 			FailMode:    failMode,
-		}))
+		})))
 	}
 	openPlugin := filepath.Join(dir, "opencode-open.mjs")
 	closedPlugin := filepath.Join(dir, "opencode-closed.mjs")
@@ -1143,5 +1152,45 @@ func TestPluginTemplatesRenderTheManagedOnlySafeguards(t *testing.T) {
 	}
 	if got := managedPluginForeignHookGuard(SetupOpts{ManagedEnterprise: true, ForeignHookGuardBinary: guard}); got != guard {
 		t.Fatalf("managed guard binary = %q", got)
+	}
+}
+
+// GAP-0635: the plugin reads no shell hook runtime record, so Setup removes
+// a stale one of its own (here still open after the mode became closed) and
+// keeps the other connectors' records.
+func TestOpenCodeSetupRemovesItsStaleHookRuntimeRecord(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	pluginPath := filepath.Join(dir, ".config", "opencode", "plugins", "defenseclaw.js")
+	prev := OpenCodePluginPathOverride
+	OpenCodePluginPathOverride = pluginPath
+	t.Cleanup(func() { OpenCodePluginPathOverride = prev })
+	opts := prepareOpenCodeSetupOptsForTest(t, SetupOpts{
+		DataDir: filepath.Join(dir, "dc"), APIAddr: "127.0.0.1:18970", APIToken: "tok", HookFailMode: "closed",
+	})
+	hookDir := filepath.Join(opts.DataDir, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"opencode", "codex"} {
+		mode := map[string]string{"opencode": "open", "codex": "closed"}[name]
+		if err := writeHookConfigSidecar(hookDir, opts.APIAddr, name, mode, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := NewOpenCodeConnector().Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(hookDir, ".hookcfg.opencode")); !os.IsNotExist(err) {
+		t.Fatalf(".hookcfg.opencode still there after Setup (%v)", err)
+	}
+	var state hookConfigSidecar
+	if raw, err := os.ReadFile(filepath.Join(hookDir, ".hookcfg")); err != nil || json.Unmarshal(raw, &state) != nil {
+		t.Fatalf("read .hookcfg: %v", err)
+	}
+	if _, ok := state.FailModes["opencode"]; ok || state.FailModes["codex"] != "closed" {
+		t.Fatalf(".hookcfg fail_modes = %v; want no opencode entry and codex kept closed", state.FailModes)
+	}
+	if body, err := os.ReadFile(filepath.Join(hookDir, ".hookcfg.codex")); err != nil || !strings.Contains(string(body), "DEFENSECLAW_FAIL_MODE=closed") {
+		t.Fatalf(".hookcfg.codex = %q (%v); want it kept", body, err)
 	}
 }

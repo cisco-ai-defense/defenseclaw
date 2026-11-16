@@ -1215,7 +1215,7 @@ attributes:
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.ai.runtime.events_lost
   type: int64
-  brief: Events the Plane C backend reported losing since it started
+  brief: Events the Plane C backends reported losing since the gateway started
   examples: [0]
   stability: stable
   owner: defenseclaw
@@ -1225,7 +1225,7 @@ attributes:
   normalization:
     id: numeric-range-v1
     overrides: {min: 0, max: 9223372036854775807}
-    notes: Cumulative since the backend's stream opened. It always counts the drops the stream itself reported (rate-limit drops); loss_known says whether the backend's own loss counters were readable as well, so zero with loss_known false means none seen, not none happened
+    notes: Cumulative for the life of the gateway process (a new service.instance.id starts it again) and across backends; the losses of earlier event streams, replaced when the sensor helper restarts or its backend changes, are carried, so it never goes back while the gateway runs and can include the losses of an earlier backend (Tetragon losses still count after a change to the native backend). Tetragon's own loss counters count from their first successful read in each session. It always counts the drops the stream itself reported (rate-limit drops); loss_known says whether the backend's own loss counters were readable as well, so zero with loss_known false means none seen, not none happened
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.ai.runtime.loss_known
   type: boolean
@@ -1343,8 +1343,8 @@ attributes:
   normalization:
     id: enum-v1
     overrides:
-      enum: [kernel.ssh_private_key_read, kernel.persistence_write]
-    notes: The two built-in controls. kernel.ssh_private_key_read maps to the guardrail rule PATH-SSH-KEY and kernel.persistence_write to persistence.shell_profile_write
+      enum: [kernel.ssh_private_key_read, kernel.persistence_write, kernel.ssh_authorized_keys_write]
+    notes: The three built-in controls. kernel.ssh_private_key_read maps to the guardrail rule PATH-SSH-KEY, kernel.persistence_write to persistence.shell_profile_write and kernel.ssh_authorized_keys_write to persistence.ssh_authorized_keys_write
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.ai.runtime.kernel.event
   type: string
@@ -1575,7 +1575,7 @@ attributes:
   normalization:
     id: numeric-range-v1
     overrides: {min: 1, max: 1000000000}
-    notes: The sensor helper folds repeats of the same policy, process, function, action and target within a minute into one record
+    notes: The sensor helper folds repeats of the same policy, process, function, action and target within a minute into one record. On ai.runtime.activity it is how many kernel events of the activity's kernel outcome and control the tactic carries, so a chart counts each native hit
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.ai.runtime.hook_action
   type: string
@@ -1791,7 +1791,7 @@ attributes:
   normalization:
     id: enum-v1
     overrides:
-      enum: [kernel.ssh_private_key_read, kernel.persistence_write, customer]
+      enum: [kernel.ssh_private_key_read, kernel.persistence_write, kernel.ssh_authorized_keys_write, customer]
     notes: The DefenseClaw control of a denial or would-block, or customer for an event of the host's own Tetragon policy
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.ai.model.provenance.quantized
@@ -3199,6 +3199,20 @@ attributes:
     overrides: {max_utf8_bytes: 28, pattern: '^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$'}
     notes: the bundle id, or r- and a ULID for a delivery whose manifest could not be read
   introduced_in: telemetry-registry-v2
+- id: defenseclaw.policy.bundle.delivery_id
+  type: string
+  brief: Caller-supplied delivery id of one policy bundle apply
+  examples: ['acme-agent:d-000913']
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 128, pattern: '^[A-Za-z0-9._:-]{1,128}$'}
+    notes: the --delivery-id of enterprise bundle apply, opaque and not authenticated; absent when the apply had none
+  introduced_in: telemetry-registry-v3
 - id: defenseclaw.policy.bundle.state
   type: string
   brief: Terminal state of a policy bundle receipt
@@ -3266,6 +3280,118 @@ attributes:
     id: digest-v1
     overrides: {max_utf8_bytes: 71, pattern: '^sha256:[0-9a-f]{64}$'}
     notes: for a failed receipt the digest of the last good policy that kept enforcing
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.config.change.id
+  type: string
+  brief: Identifier of one trust anchor or credential change record on a standalone managed device
+  examples: [c-01JB8Z4X6T2Q9V3M5N7P1R0S4W]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 28, pattern: '^c-[0-7][0-9A-HJKMNP-TV-Z]{25}$'}
+    notes: c-<ULID> the enterprise lifecycle writes into the change spool; the gateway reports each one once
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.config.change.reason_code
+  type: string
+  brief: Closed code of a refused or failed trust anchor or credential change
+  examples: [anchor_invalid]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 64, pattern: '^[a-z][a-z0-9_]{0,63}$'}
+    notes: the errors[].code of the command (anchor_invalid, anchor_insecure, invalid_arguments, change_failed and the others of the management agent contract); absent when the change was applied
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.trust_anchors.sha256
+  type: string
+  brief: SHA-256 of the trust anchor file installed by the change
+  examples: [3f0a8c1e5b7d9f2a4c6e8b0d2f4a6c8e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 64, pattern: '^[0-9a-f]{64}$'}
+    notes: lowercase hex of the file bytes; trust anchors hold public keys only
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.trust_anchors.previous_sha256
+  type: string
+  brief: SHA-256 of the trust anchor file the change replaced
+  examples: [9b1d3f5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a3c5e7b9d1f3a5c7e9b1d]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 64, pattern: '^[0-9a-f]{64}$'}
+    notes: absent when no anchor file was installed before
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.trust_anchors.key_ids.added
+  type: string[]
+  brief: Signing key ids the new trust anchor file adds
+  examples: [[fleet-2026-11]]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 4096, max_item_utf8_bytes: 128}
+    notes: key_id values of the anchor file, sorted; never a public key
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.trust_anchors.key_ids.removed
+  type: string[]
+  brief: Signing key ids the new trust anchor file no longer holds
+  examples: [[fleet-2026-10]]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 4096, max_item_utf8_bytes: 128}
+    notes: key_id values of the replaced anchor file, sorted; never a public key
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.secret.name
+  type: string
+  brief: Name of the protected credential a change set or removed
+  examples: [splunk-hec-token]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 63, pattern: '^[a-z0-9][a-z0-9-]{0,62}$'}
+    notes: the --name of enterprise secret set or remove; a name the command refused is left out. Never the value or a hash of it
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.secret.action
+  type: string
+  brief: What a protected credential change did
+  examples: [set]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [set, remove]}
+    notes: the enterprise secret verb
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.metric.policy.bundle.result
   type: string
@@ -3428,6 +3554,20 @@ attributes:
     id: identifier-v1
     overrides: {max_utf8_bytes: 1024}
     notes: Bounded reference only; never a raw config document, request body, token, or secret value
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.admin.target_type_detail
+  type: string
+  brief: Source-supplied activity target type, retained as redactable audit evidence rather than a metric label or join identifier
+  examples: [policy]
+  stability: stable
+  owner: defenseclaw
+  field_class: evidence
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: redacted-content-v1
+    overrides: {max_utf8_bytes: 256}
+    notes: Bounded source evidence; may contain account names and must follow the selected redaction profile
   introduced_in: telemetry-registry-v1
 - id: defenseclaw.admin.before_summary
   type: string
@@ -3649,6 +3789,621 @@ attributes:
       max_utf8_bytes: 65536
     notes: Source-backed health failure text retained until central route redaction
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.health.report_id
+  type: string
+  brief: Unique identity of one endpoint health report
+  examples: ['0f8fad5b-d9cb-469f-a165-70867728950e']
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 36
+      pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    notes: Lower-case UUID minted per report
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.sequence
+  type: int64
+  brief: Monotonic per-installation endpoint health report sequence
+  examples: [1234]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: high
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: Nonnegative; persisted across gateway restarts
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.trigger
+  type: string
+  brief: Why the endpoint health report was built
+  examples: [scheduled]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - startup
+      - scheduled
+      - config_reload
+    notes: startup|scheduled|config_reload
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.observed_at
+  type: string
+  brief: Endpoint clock time at which the health snapshot was taken
+  examples: ['2026-07-11T00:00:00Z']
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: high
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$'
+    notes: RFC3339 timestamp only
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.report_interval_s
+  type: int64
+  brief: Effective endpoint health report interval in seconds
+  examples: [1800]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 60
+      max: 86400
+    notes: Effective interval including the operator override
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.status
+  type: string
+  brief: Overall endpoint health status
+  examples: [degraded]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - healthy
+      - degraded
+      - unhealthy
+      - starting
+    notes: Worst severity across reasons; healthy when there are none
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.reasons
+  type: array
+  brief: Ordered reason codes that explain the overall endpoint health status
+  examples: [[{code: HOOKS_PARTIAL, component: hooks, severity: degraded, connector: codex}]]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: structured-content-v1
+    overrides: {max_utf8_bytes: 9216, max_item_utf8_bytes: 288, max_items: 160, max_depth: 2, max_properties: 128}
+    notes: Sealed typed array of at most 32 reason records sorted by severity then code
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.reasons_truncated
+  type: boolean
+  brief: Whether the reason list was capped
+  examples: [false]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: Boolean
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.version.product
+  type: string
+  brief: Installed DefenseClaw product version
+  examples: ['1.0.9']
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[0-9A-Za-z.+_-]{1,64}$'
+    notes: Version token only
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.version.policy_bundle
+  type: string
+  brief: Applied managed policy bundle version
+  examples: ['42']
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[0-9A-Za-z.+_:-]{1,64}$'
+    notes: Version token only
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.version.avc
+  type: string
+  brief: Version of the host Secure Client AVC module
+  examples: ['5.1.21.4204']
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[0-9A-Za-z.+_-]{1,64}$'
+    notes: Version token only; omitted when unreadable
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.os.version
+  type: string
+  brief: Operating system version of the endpoint
+  examples: ['15.5']
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$'
+    notes: Version token only
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.gateway.started_at
+  type: string
+  brief: Time the gateway process started
+  examples: ['2026-07-11T00:00:00Z']
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: high
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$'
+    notes: RFC3339 timestamp only
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.gateway.uptime_s
+  type: int64
+  brief: Gateway process uptime in seconds
+  examples: [86400]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: Nonnegative count
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.gateway.configuration
+  type: string
+  brief: Overall gateway configuration readiness
+  examples: [ready]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 32
+      pattern: '^[a-z][a-z0-9_]{0,31}$'
+    notes: Bounded lower-case state token; free-form text is forbidden
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.subsystems
+  type: array
+  brief: Present gateway subsystems and their states
+  examples: [[{name: guardrail, state: running, since: '2026-07-11T00:00:00Z'}]]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: structured-content-v1
+    overrides: {max_utf8_bytes: 4608, max_item_utf8_bytes: 288, max_items: 80, max_depth: 2, max_properties: 64}
+    notes: Sealed typed array of at most 16 subsystem records; error text is mapped to an error class
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.subsystems_truncated
+  type: boolean
+  brief: Whether the subsystem list was capped
+  examples: [false]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: Boolean
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.guardian.state
+  type: string
+  brief: Hook guardian liveness state
+  examples: [running]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - running
+      - stale
+      - absent
+    notes: running|stale|absent
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.guardian.last_pass_at
+  type: string
+  brief: Time of the last completed hook guardian pass
+  examples: ['2026-07-11T00:00:00Z']
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: high
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$'
+    notes: RFC3339 timestamp only
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.hooks.targets
+  type: int64
+  brief: Hook targets known to the guardian
+  examples: [12]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: Nonnegative count
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.hooks.ok
+  type: int64
+  brief: Hook targets wired and verified
+  examples: [10]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: Nonnegative count
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.hooks.failed
+  type: int64
+  brief: Hook targets that failed to wire
+  examples: [1]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: Nonnegative count
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.hooks.pending
+  type: int64
+  brief: Hook targets awaiting wiring
+  examples: [1]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: Nonnegative count
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.hooks.connectors
+  type: array
+  brief: Per-connector hook target counts
+  examples: [[{connector: claude_code, targets: 4, ok: 4, failed: 0, pending: 0}]]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: structured-content-v1
+    overrides: {max_utf8_bytes: 6144, max_item_utf8_bytes: 384, max_items: 128, max_depth: 2, max_properties: 112}
+    notes: Sealed typed array of at most 16 connector records
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.hooks.connectors_truncated
+  type: boolean
+  brief: Whether the hook connector list was capped
+  examples: [false]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: Boolean
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.hooks.failing_targets
+  type: array
+  brief: Hook targets that are failing or pending, with the affected user identity
+  examples: [[{connector: codex, user.id: S-1-5-21-1-2-3-1001, user.id_kind: windows_sid, error_class: CONFIG_WRITE_DENIED, pending: false}]]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: sensitive
+  cardinality: bounded
+  normalization:
+    id: structured-content-v1
+    overrides: {max_utf8_bytes: 7168, max_item_utf8_bytes: 448, max_items: 96, max_depth: 2, max_properties: 80}
+    notes: Sealed typed array of at most 16 records; carries user.id and its namespace, never email
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.hooks.failing_targets_truncated
+  type: boolean
+  brief: Whether the failing hook target list was capped
+  examples: [false]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: Boolean
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.inspection.ai_defense
+  type: string
+  brief: Cisco AI Defense inspection availability
+  examples: [ok]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - ok
+      - unavailable
+      - unknown
+      - disabled
+    notes: ok|unavailable|unknown|disabled
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.inspection.unavailable_code
+  type: string
+  brief: Bounded code explaining why AI Defense inspection is unavailable
+  examples: [aid_unavailable]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$'
+    notes: Closed code only; error text is forbidden
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.inspection.cmid_token
+  type: string
+  brief: CMID bearer token availability
+  examples: [ok]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - ok
+      - unavailable
+    notes: ok|unavailable
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.inspection.cmid_last_success_at
+  type: string
+  brief: Time a CMID token was last obtained
+  examples: ['2026-07-11T00:00:00Z']
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: high
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$'
+    notes: RFC3339 timestamp only
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.inspection.fail_open_since_last
+  type: int64
+  brief: Fail-open inspection decisions since the previous report
+  examples: [0]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: Nonnegative count
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.cloud_delivery.state
+  type: string
+  brief: Health state of the managed AI Defense delivery destination
+  examples: [healthy]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 32
+      pattern: '^[a-z][a-z0-9_]{0,31}$'
+    notes: Bounded lower-case state token; free-form text is forbidden
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.cloud_delivery.circuit
+  type: string
+  brief: Circuit state of the managed AI Defense delivery destination
+  examples: [closed]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 32
+      pattern: '^[a-z][a-z0-9_]{0,31}$'
+    notes: Bounded lower-case state token; free-form text is forbidden
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.cloud_delivery.consecutive_failures
+  type: int64
+  brief: Consecutive delivery failures to the managed AI Defense destination
+  examples: [0]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: Nonnegative count
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.cloud_delivery.last_success_at
+  type: string
+  brief: Time of the last successful managed AI Defense delivery
+  examples: ['2026-07-11T00:00:00Z']
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: high
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$'
+    notes: RFC3339 timestamp only
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.cloud_delivery.last_failure_class
+  type: string
+  brief: Bounded class of the last managed AI Defense delivery failure
+  examples: [transient]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[a-z][a-z0-9_]{0,63}$'
+    notes: Bounded lower-case state token; free-form text is forbidden
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.cloud_delivery.dropped_since_last
+  type: int64
+  brief: Records dropped by the managed AI Defense destination since the previous report
+  examples: [0]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: Nonnegative count
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.local_store.audit_store
+  type: string
+  brief: Local audit store availability
+  examples: [ok]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 32
+      pattern: '^[a-z][a-z0-9_]{0,31}$'
+    notes: Bounded lower-case state token; free-form text is forbidden
+  introduced_in: telemetry-registry-v3
 - id: defenseclaw.schema.error_code
   type: string
   brief: Stable schema error code
@@ -5391,7 +6146,7 @@ attributes:
     overrides:
       max_utf8_bytes: 64
       pattern: '^[a-z][a-z0-9_]{0,63}$'
-    notes: A registered snake_case code such as required_group, os_unsupported, no_docker_group, no_kvm, prerequisite_missing, offline_floor or floor_denied; display text never goes here
+    notes: A registered snake_case code such as required_for, os_unsupported, no_docker_group, no_kvm, prerequisite_missing, offline_floor or floor_denied; display text never goes here
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.managed.action
   type: string
@@ -6036,6 +6791,8 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.admin.target_ref
     requirement_level: recommended
+  - ref: defenseclaw.admin.target_type_detail
+    requirement_level: recommended
   - ref: defenseclaw.admin.before_summary
     requirement_level: recommended
   - ref: defenseclaw.admin.after_summary
@@ -6076,6 +6833,8 @@ groups:
   - ref: defenseclaw.admin.origin
     requirement_level: recommended
   - ref: defenseclaw.admin.target_ref
+    requirement_level: recommended
+  - ref: defenseclaw.admin.target_type_detail
     requirement_level: recommended
   - ref: defenseclaw.admin.before_summary
     requirement_level: recommended
@@ -6440,6 +7199,8 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.ai.runtime.hook_join
     requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.count
+    requirement_level: recommended
 - id: body.ai.runtime.plane_health
   type: body_group
   brief: One detection plane's state, emitted every cycle including when it is down.
@@ -6746,6 +7507,92 @@ groups:
   - ref: defenseclaw.health.error_summary
     requirement_level: recommended
   - ref: defenseclaw.schema.error_code
+    requirement_level: recommended
+- id: body.endpoint.health
+  type: body_group
+  brief: Bounded periodic endpoint health report; states, codes, counts, timestamps and versions only.
+  stability: stable
+  introduced_in: telemetry-registry-v3
+  extends: []
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.health.report_id
+    requirement_level: required
+  - ref: defenseclaw.health.sequence
+    requirement_level: required
+  - ref: defenseclaw.health.trigger
+    requirement_level: required
+  - ref: defenseclaw.health.observed_at
+    requirement_level: required
+  - ref: defenseclaw.health.report_interval_s
+    requirement_level: required
+  - ref: defenseclaw.health.status
+    requirement_level: required
+  - ref: defenseclaw.health.reasons
+    requirement_level: recommended
+  - ref: defenseclaw.health.reasons_truncated
+    requirement_level: recommended
+  - ref: defenseclaw.health.version.product
+    requirement_level: recommended
+  - ref: defenseclaw.health.version.policy_bundle
+    requirement_level: recommended
+  - ref: defenseclaw.health.version.avc
+    requirement_level: recommended
+  - ref: defenseclaw.health.os.version
+    requirement_level: recommended
+  - ref: defenseclaw.health.gateway.started_at
+    requirement_level: recommended
+  - ref: defenseclaw.health.gateway.uptime_s
+    requirement_level: recommended
+  - ref: defenseclaw.health.gateway.configuration
+    requirement_level: recommended
+  - ref: defenseclaw.health.subsystems
+    requirement_level: recommended
+  - ref: defenseclaw.health.subsystems_truncated
+    requirement_level: recommended
+  - ref: defenseclaw.health.guardian.state
+    requirement_level: recommended
+  - ref: defenseclaw.health.guardian.last_pass_at
+    requirement_level: recommended
+  - ref: defenseclaw.health.hooks.targets
+    requirement_level: recommended
+  - ref: defenseclaw.health.hooks.ok
+    requirement_level: recommended
+  - ref: defenseclaw.health.hooks.failed
+    requirement_level: recommended
+  - ref: defenseclaw.health.hooks.pending
+    requirement_level: recommended
+  - ref: defenseclaw.health.hooks.connectors
+    requirement_level: recommended
+  - ref: defenseclaw.health.hooks.connectors_truncated
+    requirement_level: recommended
+  - ref: defenseclaw.health.hooks.failing_targets
+    requirement_level: recommended
+  - ref: defenseclaw.health.hooks.failing_targets_truncated
+    requirement_level: recommended
+  - ref: defenseclaw.health.inspection.ai_defense
+    requirement_level: recommended
+  - ref: defenseclaw.health.inspection.unavailable_code
+    requirement_level: recommended
+  - ref: defenseclaw.health.inspection.cmid_token
+    requirement_level: recommended
+  - ref: defenseclaw.health.inspection.cmid_last_success_at
+    requirement_level: recommended
+  - ref: defenseclaw.health.inspection.fail_open_since_last
+    requirement_level: recommended
+  - ref: defenseclaw.health.cloud_delivery.state
+    requirement_level: recommended
+  - ref: defenseclaw.health.cloud_delivery.circuit
+    requirement_level: recommended
+  - ref: defenseclaw.health.cloud_delivery.consecutive_failures
+    requirement_level: recommended
+  - ref: defenseclaw.health.cloud_delivery.last_success_at
+    requirement_level: recommended
+  - ref: defenseclaw.health.cloud_delivery.last_failure_class
+    requirement_level: recommended
+  - ref: defenseclaw.health.cloud_delivery.dropped_since_last
+    requirement_level: recommended
+  - ref: defenseclaw.health.local_store.audit_store
     requirement_level: recommended
 - id: body.diagnostic
   type: body_group
@@ -7609,6 +8456,27 @@ groups:
     event_name: ai.runtime.activity
   x-defenseclaw:
     bucket: ai.discovery
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - completed
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.endpoint.health_reported
+  type: log
+  brief: Periodic managed-endpoint health report delivered to Cisco AI Defense.
+  stability: stable
+  introduced_in: telemetry-registry-v3
+  extends:
+  - body.endpoint.health
+  attributes: []
+  body_fields: []
+  log:
+    event_name: endpoint.health_reported
+  x-defenseclaw:
+    bucket: platform.health
     family_schema_version: 1
     outcome_requirement: required
     allowed_outcomes:
@@ -10690,56 +11558,6 @@ groups:
     legacy_bindings:
     - source: schemas/otel/metrics.schema.json x-emitted-metrics
       disposition: preserved
-- id: metric.defenseclaw.judge.semaphore.depth
-  type: metric
-  brief: 'Judge concurrency semaphore: slots currently held'
-  stability: stable
-  introduced_in: telemetry-registry-v1
-  extends: []
-  attributes: []
-  body_fields: []
-  metric:
-    instrument_name: defenseclaw.judge.semaphore.depth
-    instrument_type: updowncounter
-    value_type: int64
-    unit: '{slot}'
-    description: 'Judge concurrency semaphore: slots currently held'
-    temporality: delta
-    empty_labels_reason: All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider.
-  x-defenseclaw:
-    bucket: platform.health
-    family_schema_version: 1
-    route_selector: true
-    compatibility_profiles:
-    - local-observability-v1
-    legacy_bindings:
-    - source: schemas/otel/metrics.schema.json x-emitted-metrics
-      disposition: preserved
-- id: metric.defenseclaw.judge.semaphore.drops
-  type: metric
-  brief: Judge semaphore drops (queue full)
-  stability: stable
-  introduced_in: telemetry-registry-v1
-  extends: []
-  attributes: []
-  body_fields: []
-  metric:
-    instrument_name: defenseclaw.judge.semaphore.drops
-    instrument_type: counter
-    value_type: int64
-    unit: '{drop}'
-    description: Judge semaphore drops (queue full)
-    temporality: delta
-    empty_labels_reason: All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider.
-  x-defenseclaw:
-    bucket: platform.health
-    family_schema_version: 1
-    route_selector: true
-    compatibility_profiles:
-    - local-observability-v1
-    legacy_bindings:
-    - source: schemas/otel/metrics.schema.json x-emitted-metrics
-      disposition: preserved
 - id: metric.defenseclaw.managed_aid.fail_open.decisions
   type: metric
   brief: Managed AI Defense decisions that fail open instead of enforcing a remote verdict
@@ -11164,6 +11982,34 @@ groups:
     legacy_bindings:
     - source: schemas/otel/metrics.schema.json x-emitted-metrics
       disposition: preserved
+- id: metric.defenseclaw.queue.oldest_age
+  type: metric
+  brief: Age of the oldest queued write
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.metric.queue
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.queue.oldest_age
+    instrument_type: gauge
+    value_type: int64
+    unit: ms
+    description: Age of the oldest queued write
+    temporality: unspecified
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.metric.queue
+        label: queue
+  x-defenseclaw:
+    bucket: platform.health
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
 - id: metric.defenseclaw.redaction.applied
   type: metric
   brief: Guardrail/egress redactions applied by detector/field
@@ -12758,6 +13604,214 @@ groups:
     route_selector: true
     compatibility_profiles:
     - local-observability-v1
+- id: metric.defenseclaw.sandbox.managed.refusals
+  type: metric
+  brief: Managed sandbox refusals (host run refused, sandbox unavailable, access refused) by reason, guardrail profile, driver and harness connector; no user or sandbox label.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.sandbox.managed.reason
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.profile.name
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.driver
+    requirement_level: recommended
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.sandbox.managed.refusals
+    instrument_type: counter
+    value_type: int64
+    unit: '{refusal}'
+    description: Managed sandbox refusals (host run refused, sandbox unavailable, access refused) by reason, guardrail profile, driver and harness connector; no user or sandbox label.
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.sandbox.managed.reason
+        label: reason
+      - ref: defenseclaw.guardrail.profile.name
+        label: profile
+      - ref: defenseclaw.sandbox.driver
+        label: driver
+      - ref: defenseclaw.connector.source
+        label: connector
+  x-defenseclaw:
+    bucket: enforcement.action
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.sandbox.managed.asks
+  type: metric
+  brief: Managed sandbox asks decided by the gateway, by result, reason, guardrail profile, driver and harness connector; no user or sandbox label.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.approval.result
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.managed.reason
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.profile.name
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.driver
+    requirement_level: recommended
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.sandbox.managed.asks
+    instrument_type: counter
+    value_type: int64
+    unit: '{ask}'
+    description: Managed sandbox asks decided by the gateway, by result, reason, guardrail profile, driver and harness connector; no user or sandbox label.
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.approval.result
+        label: result
+      - ref: defenseclaw.sandbox.managed.reason
+        label: reason
+      - ref: defenseclaw.guardrail.profile.name
+        label: profile
+      - ref: defenseclaw.sandbox.driver
+        label: driver
+      - ref: defenseclaw.connector.source
+        label: connector
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.sandbox.managed.foreign_items
+  type: metric
+  brief: Foreign sandboxes, containers and network rules found on a managed host, by kind, action, guardrail profile, driver and harness connector; no user or sandbox label.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.metric.kind
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.managed.action
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.profile.name
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.driver
+    requirement_level: recommended
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.sandbox.managed.foreign_items
+    instrument_type: counter
+    value_type: int64
+    unit: '{item}'
+    description: Foreign sandboxes, containers and network rules found on a managed host, by kind, action, guardrail profile, driver and harness connector; no user or sandbox label.
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.metric.kind
+        label: kind
+      - ref: defenseclaw.sandbox.managed.action
+        label: action
+      - ref: defenseclaw.guardrail.profile.name
+        label: profile
+      - ref: defenseclaw.sandbox.driver
+        label: driver
+      - ref: defenseclaw.connector.source
+        label: connector
+  x-defenseclaw:
+    bucket: enforcement.action
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.sandbox.managed.provisional
+  type: metric
+  brief: Provisional managed sandbox resolutions (registered on the offline floor, or resolved once the directory lookup answered), by result, guardrail profile, driver and harness connector; no user or sandbox label.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.metric.result
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.profile.name
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.driver
+    requirement_level: recommended
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.sandbox.managed.provisional
+    instrument_type: counter
+    value_type: int64
+    unit: '{resolution}'
+    description: Provisional managed sandbox resolutions (registered on the offline floor, or resolved once the directory lookup answered), by result, guardrail profile, driver and harness connector; no user or sandbox label.
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.metric.result
+        label: result
+      - ref: defenseclaw.guardrail.profile.name
+        label: profile
+      - ref: defenseclaw.sandbox.driver
+        label: driver
+      - ref: defenseclaw.connector.source
+        label: connector
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.sandbox.managed.drift
+  type: metric
+  brief: OpenShell settings drift found on a managed sandbox, by setting, guardrail profile, driver and harness connector; no user or sandbox label.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.openshell.settings.field
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.profile.name
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.driver
+    requirement_level: recommended
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.sandbox.managed.drift
+    instrument_type: counter
+    value_type: int64
+    unit: '{drift}'
+    description: OpenShell settings drift found on a managed sandbox, by setting, guardrail profile, driver and harness connector; no user or sandbox label.
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.openshell.settings.field
+        label: field
+      - ref: defenseclaw.guardrail.profile.name
+        label: profile
+      - ref: defenseclaw.sandbox.driver
+        label: driver
+      - ref: defenseclaw.connector.source
+        label: connector
+  x-defenseclaw:
+    bucket: enforcement.action
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
 - id: log.config.bundle.receipt
   type: log
   brief: 'Canonical config.bundle.receipt log identity; one record for every signed policy bundle receipt that ends confirmed or failed on a standalone managed device.'
@@ -12770,6 +13824,8 @@ groups:
     requirement_level: required
   - ref: defenseclaw.policy.bundle.state
     requirement_level: required
+  - ref: defenseclaw.policy.bundle.delivery_id
+    requirement_level: recommended
   - ref: defenseclaw.policy.bundle.id
     requirement_level: recommended
   - ref: defenseclaw.policy.bundle.version
@@ -12857,6 +13913,101 @@ groups:
     bucket: compliance.activity
     family_schema_version: 1
     route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.config.trust_anchors.changed
+  type: log
+  brief: 'Canonical config.trust_anchors.changed log identity; one record per trust anchor install on a standalone managed device that changed the anchor file, was refused or failed. It carries hashes and key ids only.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.compliance.activity
+  attributes:
+  - ref: defenseclaw.config.change.id
+    requirement_level: required
+  - ref: defenseclaw.trust_anchors.sha256
+    requirement_level: recommended
+  - ref: defenseclaw.trust_anchors.previous_sha256
+    requirement_level: recommended
+  - ref: defenseclaw.trust_anchors.key_ids.added
+    requirement_level: recommended
+  - ref: defenseclaw.trust_anchors.key_ids.removed
+    requirement_level: recommended
+  - ref: defenseclaw.config.change.reason_code
+    requirement_level: recommended
+  body_fields: []
+  log:
+    event_name: config.trust_anchors.changed
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - applied
+    - failed
+    - rejected
+    route_selector: true
+    mandatory_floor:
+    - control_plane_mutation
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.config.secret.changed
+  type: log
+  brief: 'Canonical config.secret.changed log identity; one record per protected credential set or removed on a standalone managed device. It never carries the value or a hash of it.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.compliance.activity
+  attributes:
+  - ref: defenseclaw.config.change.id
+    requirement_level: required
+  - ref: defenseclaw.secret.name
+    requirement_level: required
+  - ref: defenseclaw.secret.action
+    requirement_level: required
+  body_fields: []
+  log:
+    event_name: config.secret.changed
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - applied
+    route_selector: true
+    mandatory_floor:
+    - control_plane_mutation
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.config.secret.change_failed
+  type: log
+  brief: 'Canonical config.secret.change_failed log identity; one record per protected credential set or removal that was refused or failed on a standalone managed device. It never carries the value or a hash of it.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.compliance.activity
+  attributes:
+  - ref: defenseclaw.config.change.id
+    requirement_level: required
+  - ref: defenseclaw.secret.name
+    requirement_level: recommended
+  - ref: defenseclaw.secret.action
+    requirement_level: required
+  - ref: defenseclaw.config.change.reason_code
+    requirement_level: required
+  body_fields: []
+  log:
+    event_name: config.secret.change_failed
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - failed
+    - rejected
+    route_selector: true
+    mandatory_floor:
+    - control_plane_mutation
     compatibility_profiles:
     - local-observability-v1
 - id: log.fleet.alert
@@ -13367,6 +14518,9 @@ producer_identity_sets:
   - event_name: legacy.audit.config.update
     bucket: compliance.activity
     compatibility_only: true
+  - event_name: legacy.audit.connector.hook.account.removed
+    bucket: compliance.activity
+    compatibility_only: true
   - event_name: legacy.audit.connector.hook.repaired
     bucket: compliance.activity
     compatibility_only: true
@@ -13407,6 +14561,9 @@ producer_identity_sets:
     bucket: compliance.activity
     compatibility_only: true
   - event_name: legacy.audit.guardrail.hilt
+    bucket: compliance.activity
+    compatibility_only: true
+  - event_name: legacy.audit.identity.refresh.completed
     bucket: compliance.activity
     compatibility_only: true
   - event_name: legacy.audit.init.gateway
@@ -14880,6 +16037,9 @@ producer_identity_sets:
   - event_name: legacy.audit.gateway.tool.call.judge.flagged
     bucket: security.finding
     compatibility_only: true
+  - event_name: legacy.audit.protected.file.changed
+    bucket: security.finding
+    compatibility_only: true
   - event_name: legacy.audit.scan.finding
     bucket: security.finding
     compatibility_only: true
@@ -15070,6 +16230,9 @@ producer_identity_sets:
     compatibility_only: true
   - event_name: legacy.audit.llm.judge.response
     bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.protected.file.changed
+    bucket: security.finding
     compatibility_only: true
   - event_name: legacy.audit.scan.finding
     bucket: security.finding
@@ -15323,6 +16486,21 @@ producer_identity_sets:
   - event_name: config.bundle.receipt
     bucket: compliance.activity
     family: log.config.bundle.receipt
+- id: identity_set.config_trust_anchors_changed
+  identities:
+  - event_name: config.trust_anchors.changed
+    bucket: compliance.activity
+    family: log.config.trust_anchors.changed
+- id: identity_set.config_secret_changed
+  identities:
+  - event_name: config.secret.changed
+    bucket: compliance.activity
+    family: log.config.secret.changed
+- id: identity_set.config_secret_change_failed
+  identities:
+  - event_name: config.secret.change_failed
+    bucket: compliance.activity
+    family: log.config.secret.change_failed
 - id: identity_set.fleet_alert
   identities:
   - event_name: fleet.alert
@@ -15601,6 +16779,20 @@ producer_mappings:
     introduced_in: telemetry-registry-v1
     disposition: translate_to_v8
   allowed_context_identity_set: identity_set.ai_discovery
+- producer: gateway_event
+  key: endpoint_health
+  source: internal/gatewaylog/events.go
+  event_name_policy: fixed
+  severity_policy: canonical_or_info
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+  default_identity:
+    event_name: endpoint.health_reported
+    bucket: platform.health
+    family: log.endpoint.health_reported
 - producer: audit_action
   key: acknowledge-alerts
   source: internal/audit/actions.go
@@ -16145,6 +17337,26 @@ producer_mappings:
     bucket: guardrail.evaluation
     compatibility_only: true
 - producer: audit_action
+  key: connector-hook-account-removed
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.compliance_activity
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  - approval_resolution
+  - alert_mutation
+  - protected_boundary_auth_failure
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.connector.hook.account.removed
+    bucket: compliance.activity
+    compatibility_only: true
+- producer: audit_action
   key: connector-hook-repaired
   source: internal/audit/actions.go
   event_name_policy: context_optional
@@ -16185,6 +17397,26 @@ producer_mappings:
     bucket: compliance.activity
     compatibility_only: true
 - producer: audit_action
+  key: identity-refresh-completed
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.compliance_activity
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  - approval_resolution
+  - alert_mutation
+  - protected_boundary_auth_failure
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.identity.refresh.completed
+    bucket: compliance.activity
+    compatibility_only: true
+- producer: audit_action
   key: connector-hook-synthetic
   source: internal/audit/actions.go
   event_name_policy: context_optional
@@ -16215,6 +17447,22 @@ producer_mappings:
     disposition: translate_to_v8
   default_identity:
     event_name: legacy.audit.connector.hook.tampered
+    bucket: security.finding
+    compatibility_only: true
+- producer: audit_action
+  key: protected-file-changed
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.security_finding
+  severity_policy: finding_required
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.protected.file.changed
     bucket: security.finding
     compatibility_only: true
 - producer: audit_action
@@ -17415,10 +18663,7 @@ producer_mappings:
   allowed_context_identity_set: identity_set.compliance_activity
   severity_policy: canonical_or_info
   mandatory_rules:
-  - control_plane_mutation
-  - approval_resolution
-  - alert_mutation
-  - protected_boundary_auth_failure
+  - always
   companion_rules: []
   compatibility:
     introduced_in: telemetry-registry-v1
@@ -19708,6 +20953,42 @@ producer_mappings:
   source: internal/audit/actions.go
   event_name_policy: context_required
   allowed_context_identity_set: identity_set.config_bundle_receipt
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    disposition: translate_to_v8
+- producer: audit_action
+  key: config.trust_anchors.changed
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.config_trust_anchors_changed
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    disposition: translate_to_v8
+- producer: audit_action
+  key: config.secret.changed
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.config_secret_changed
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    disposition: translate_to_v8
+- producer: audit_action
+  key: config.secret.change_failed
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.config_secret_change_failed
   severity_policy: canonical_or_info
   mandatory_rules:
   - control_plane_mutation

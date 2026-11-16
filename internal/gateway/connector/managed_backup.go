@@ -17,10 +17,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -28,6 +30,12 @@ import (
 
 const managedBackupVersion = 1
 const managedBackupMissingHash = "missing"
+
+// managedBackupDriftedHash is the post-setup hash of a record whose target
+// held bytes DefenseClaw did not commit when a later setup began. It is not a
+// digest, so no file ever matches it: an exact restore is off for good and
+// teardown or rollback removes only DefenseClaw-owned entries.
+const managedBackupDriftedHash = "drifted"
 
 type managedFileBackup struct {
 	Version        int    `json:"version"`
@@ -152,8 +160,10 @@ func captureManagedFileBackup(dataDir, connectorName, logicalName, targetPath st
 	backupPath := managedFileBackupPath(dataDir, connectorName, logicalName)
 	existing, err := loadManagedFileBackupPath(backupPath)
 	if err == nil {
-		_, err = validateManagedFileBackupTarget(existing, connectorName, logicalName, boundPath)
-		return err
+		if _, err = validateManagedFileBackupTarget(existing, connectorName, logicalName, boundPath); err != nil {
+			return err
+		}
+		return retireManagedFileBackupExactRestore(backupPath, existing, boundPath)
 	}
 	if !os.IsNotExist(err) {
 		return fmt.Errorf("load managed backup: %w", err)
@@ -179,7 +189,43 @@ func captureManagedFileBackup(dataDir, connectorName, logicalName, targetPath st
 	} else {
 		b.PristineSHA256 = managedBackupMissingHash
 	}
-	return writeManagedFileBackup(backupPath, b)
+	if err := writeManagedFileBackup(backupPath, b); err != nil {
+		return err
+	}
+	beginManagedSetupSpan(boundPath, b.PristineSHA256, false)
+	return nil
+}
+
+// retireManagedFileBackupExactRestore runs when a setup finds a record from an
+// earlier setup. A target that does not hold the bytes DefenseClaw last
+// committed (the post hash, or the pre-setup bytes while no post hash was
+// published) was changed by someone else: the operator saving the file again,
+// the agent itself, or an earlier setup that stopped before it recorded its
+// output. The setup that follows merges over those bytes, and recording the
+// result as its own would make teardown restore the pre-setup copy over the
+// change. The record is marked instead, so only the DefenseClaw entries are
+// ever removed from that file. A target that still matches keeps the exact
+// restore, but only on condition: an in-memory span stays open until the
+// read-back update (see updateManagedFileBackupPostHash), so a setup that
+// rewrites nothing leaves the record file untouched. A target that is not a
+// regular file changes nothing.
+func retireManagedFileBackupExactRestore(backupPath string, b managedFileBackup, targetPath string) error {
+	endManagedSetupSpan(targetPath)
+	if b.PostSHA256 == managedBackupDriftedHash {
+		return nil
+	}
+	expected := managedFileBackupExpectedHash(&b)
+	data, info, err := readManagedTarget(targetPath)
+	if err != nil {
+		return nil
+	}
+	if managedFileSnapshotHash(data, info != nil) != expected {
+		b.PostSHA256 = managedBackupDriftedHash
+		b.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		return writeManagedFileBackup(backupPath, b)
+	}
+	beginManagedSetupSpan(targetPath, expected, true)
+	return nil
 }
 
 func updateManagedFileBackupPostHash(dataDir, connectorName, logicalName, targetPath string) error {
@@ -195,6 +241,12 @@ func updateManagedFileBackupPostHash(dataDir, connectorName, logicalName, target
 	if err != nil {
 		return err
 	}
+	if b.PostSHA256 == managedBackupDriftedHash {
+		// The file holds more than DefenseClaw wrote: it is never recorded
+		// as DefenseClaw own output (see retireManagedFileBackupExactRestore).
+		return nil
+	}
+	span, spanOpen := endManagedSetupSpan(boundPath)
 	data, info, err := readManagedTarget(boundPath)
 	if err != nil {
 		return err
@@ -202,6 +254,29 @@ func updateManagedFileBackupPostHash(dataDir, connectorName, logicalName, target
 	nextHash := managedFileSnapshotHash(nil, false)
 	if info != nil {
 		nextHash = managedFileSnapshotHash(data, true)
+	}
+	if spanOpen && !span.later && (span.tainted || nextHash != span.expected) {
+		// A first setup records its output only when the target holds the
+		// bytes its writers committed on top of the bytes it began with
+		// (managedSetupSpan). An edit at any point in between stays out of
+		// the exact restore.
+		b.PostSHA256 = managedBackupDriftedHash
+		b.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		return writeManagedFileBackup(backupPath, b)
+	}
+	if spanOpen && span.later {
+		// A later setup began on the expected bytes (the committed ones, or
+		// the pre-setup ones while no post hash was published). Bytes it
+		// left unchanged are still ours, and the record is not rewritten.
+		// Anything else was merged over a base this read cannot vouch for
+		// (an edit may have landed between the capture and the merge), so
+		// it is never recorded as ours.
+		if nextHash == span.base {
+			return nil
+		}
+		b.PostSHA256 = managedBackupDriftedHash
+		b.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		return writeManagedFileBackup(backupPath, b)
 	}
 	return updateManagedFileBackupPostHashValue(dataDir, connectorName, logicalName, boundPath, nextHash)
 }
@@ -221,9 +296,13 @@ func updateManagedFileBackupPostHashValue(
 		}
 		return err
 	}
-	if _, err := validateManagedFileBackupTarget(b, connectorName, logicalName, targetPath); err != nil {
+	boundPath, err := validateManagedFileBackupTarget(b, connectorName, logicalName, targetPath)
+	if err != nil {
 		return err
 	}
+	// The connector publishes its own hash: a span the capture opened has
+	// nothing left to vouch for.
+	endManagedSetupSpan(boundPath)
 	if nextHash == "" {
 		return fmt.Errorf("managed backup post hash is empty")
 	}
@@ -233,6 +312,20 @@ func updateManagedFileBackupPostHashValue(
 	b.PostSHA256 = nextHash
 	b.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	return writeManagedFileBackup(backupPath, b)
+}
+
+// managedFileBackupFor returns the record of connectorName for the agent file
+// at path. A store that cannot be read yields no record.
+func managedFileBackupFor(dataDir, connectorName, path string) (managedFileBackup, bool) {
+	var found managedFileBackup
+	ok := false
+	_ = forEachManagedFileBackup(dataDir, func(b managedFileBackup) error {
+		if strings.EqualFold(b.Connector, connectorName) && sameManagedTargetPath(b.Path, path) {
+			found, ok = b, true
+		}
+		return nil
+	})
+	return found, ok
 }
 
 func managedFileSnapshotHash(data []byte, exists bool) string {
@@ -448,10 +541,239 @@ func loadManagedFileBackupPath(path string) (managedFileBackup, error) {
 	if b.Version != managedBackupVersion {
 		return b, fmt.Errorf("unsupported managed backup version %d", b.Version)
 	}
+	if b.Connector == "codex" && b.LogicalName == "config.toml" {
+		moved, err := codexBackupTargetMatchingPostHash(path, b.Path, b.PostSHA256)
+		if err != nil {
+			return b, err
+		}
+		if moved != "" {
+			b.Path = moved
+			return b, nil
+		}
+	}
 	if moved, ok := managedBackupTargetAfterHomeMove(path, b.Path); ok {
 		b.Path = moved
 	}
 	return b, nil
+}
+
+// codexBackupTargetMatchingPostHash locates the installed config when a home
+// was copied but the old home still contains unrelated files. Path-only home
+// move detection cannot distinguish that copy from another user's root. The
+// post-write hash or the current data dir's Codex hooks identify its copy,
+// including after Codex appends a project trust entry to config.toml.
+func codexBackupTargetMatchingPostHash(recordPath, captured, postSHA256 string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" || !filepath.IsAbs(captured) || filepath.Base(captured) != "config.toml" {
+		return "", nil
+	}
+	record, err := filepath.Abs(recordPath)
+	if err != nil || !managedPathWithin(record, home) || managedPathWithin(captured, home) {
+		return "", nil
+	}
+	expected, err := hex.DecodeString(postSHA256)
+	if err != nil || len(expected) != sha256.Size {
+		return "", nil
+	}
+	if codexConfigMatchesBackupHash(captured, expected) {
+		return "", nil // the recorded root still has the installed hooks
+	}
+	oldHome := ""
+	if strings.EqualFold(filepath.Base(filepath.Dir(captured)), ".codex") {
+		oldHome = filepath.Dir(filepath.Dir(captured))
+	}
+	var copiedHomeCommands map[string]struct{}
+	if runtime.GOOS == "windows" && oldHome != "" {
+		oldLauncher := filepath.Join(oldHome, ".local", "bin", windowsHookBinaryName)
+		copiedHomeCommands = codexNativeCommandsForLauncher(oldLauncher)
+	}
+	// A populated previous home can still be a working Codex installation.
+	// Never rebind its receipt to a different home while it has managed hooks.
+	if codexConfigHasManagedHooks(captured, "", "", copiedHomeCommands) {
+		return "", nil
+	}
+	dataDir := filepath.Dir(filepath.Dir(filepath.Dir(record)))
+	copiedDataDir := ""
+	if oldHome != "" && managedPathWithin(dataDir, home) {
+		if relative, err := filepath.Rel(home, dataDir); err == nil {
+			copiedDataDir = filepath.Join(oldHome, relative)
+		}
+	}
+	var match string
+	for ancestor, i := filepath.Dir(captured), 0; ancestor != filepath.Dir(ancestor) && i < 32; ancestor, i = filepath.Dir(ancestor), i+1 {
+		rel, err := filepath.Rel(ancestor, captured)
+		if err != nil {
+			break // different Windows volumes
+		}
+		candidate := filepath.Join(home, rel)
+		if !managedPathWithin(candidate, home) ||
+			(!codexConfigMatchesBackupHash(candidate, expected) &&
+				!codexConfigHasManagedHooks(candidate, dataDir, copiedDataDir, copiedHomeCommands)) {
+			continue
+		}
+		if match != "" && !sameManagedTargetPath(match, candidate) {
+			return "", fmt.Errorf("codex managed backup matches multiple current-home configs after a home move")
+		}
+		match = candidate
+	}
+	return match, nil
+}
+
+// codexConfigHasManagedHooks reads only bounded Codex config and inspects hook
+// commands. On Unix the candidate must invoke this backup's current or copied
+// data-dir script; native Windows registrations use the installer-owned launcher.
+// Passing an empty dataDir checks whether the recorded old root still has any
+// DefenseClaw Codex registration, which must take precedence over a copy.
+func codexConfigHasManagedHooks(path, dataDir, copiedDataDir string, copiedHomeCommands map[string]struct{}) bool {
+	readPath, err := userOwnedSettingsReadPath(path)
+	if err != nil {
+		return false
+	}
+	raw, err := safefile.ReadRegularFileBounded(readPath, atomicTransformMaxConfigBytes)
+	if err != nil {
+		return false
+	}
+	var config map[string]interface{}
+	if err := parseCodexTOML(raw, &config); err != nil {
+		return false
+	}
+	hooks, ok := config["hooks"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	hooksDir := ""
+	if dataDir != "" {
+		hooksDir = filepath.Join(dataDir, "hooks")
+	}
+	for event, value := range hooks {
+		if event == "state" {
+			continue
+		}
+		groups, ok := value.([]interface{})
+		if !ok {
+			continue
+		}
+		for _, value := range groups {
+			group, ok := value.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			handlers, ok := group["hooks"].([]interface{})
+			if !ok {
+				continue
+			}
+			for _, handler := range handlers {
+				if runtime.GOOS == "windows" {
+					entry, ok := handler.(map[string]interface{})
+					if ok {
+						for _, key := range []string{"command", "command_windows", "commandWindows"} {
+							command, _ := entry[key].(string)
+							if _, ok := copiedHomeCommands[command]; ok {
+								return true
+							}
+						}
+					}
+				}
+				if !isOwnedCodexHookHandler(handler, hooksDir) {
+					continue
+				}
+				if dataDir == "" {
+					return true
+				}
+				entry, ok := handler.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				command, _ := entry["command"].(string)
+				if runtime.GOOS == "windows" {
+					for _, key := range []string{"command", "command_windows", "commandWindows"} {
+						candidate, _ := entry[key].(string)
+						if isNativeHookCommand(candidate) {
+							return true
+						}
+					}
+					continue
+				}
+				command = posixHookCommandUnquoted(claudeCodeUnguardedHookCommand(command))
+				if strings.HasPrefix(command, filepath.Join(hooksDir, "codex-hook.sh")+" --event ") ||
+					(copiedDataDir != "" && strings.HasPrefix(
+						command, filepath.Join(copiedDataDir, "hooks", "codex-hook.sh")+" --event ",
+					)) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// A copied Windows home may retain native Codex commands bound to its old
+// ~/.local launcher. The copied backup proves that old home belongs to this
+// data dir; claim only Codex commands that the shipped contracts generated for
+// that exact launcher, so repair replaces them instead of appending a second
+// hook matrix beside them.
+func codexCopiedHomeNativeCommands(dataDir, configPath string) (map[string]struct{}, error) {
+	if runtime.GOOS != "windows" || dataDir == "" {
+		return nil, nil
+	}
+	recordPath := managedFileBackupPath(dataDir, "codex", "config.toml")
+	raw, err := os.ReadFile(recordPath)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var backup managedFileBackup
+	if err := json.Unmarshal(raw, &backup); err != nil {
+		return nil, err
+	}
+	if backup.Version != managedBackupVersion || backup.Connector != "codex" || backup.LogicalName != "config.toml" ||
+		!filepath.IsAbs(backup.Path) || !strings.EqualFold(filepath.Base(filepath.Dir(backup.Path)), ".codex") {
+		return nil, nil
+	}
+	moved, err := codexBackupTargetMatchingPostHash(recordPath, backup.Path, backup.PostSHA256)
+	if err != nil || !sameManagedTargetPath(moved, configPath) {
+		return nil, err
+	}
+	oldHome := filepath.Dir(filepath.Dir(backup.Path))
+	oldLauncher := filepath.Join(oldHome, ".local", "bin", windowsHookBinaryName)
+	return codexNativeCommandsForLauncher(oldLauncher), nil
+}
+
+func codexNativeCommandsForLauncher(oldLauncher string) map[string]struct{} {
+	commands := map[string]struct{}{}
+	add := func(command string) {
+		commands[command] = struct{}{}
+		if legacy, ok := legacyWindowsAwaitedHookCommand(command); ok {
+			commands[legacy] = struct{}{}
+		}
+	}
+	add(windowsNativePowerShellHookCommandForBinary("codex", oldLauncher))
+	add(legacyStartProcessWindowsNativePowerShellHookCommand("codex", oldLauncher))
+	add(legacyUnqualifiedWindowsNativePowerShellHookCommandForBinary("codex", oldLauncher))
+	add(legacyWindowsNativePowerShellHookCommandForBinary("codex", oldLauncher))
+	for _, contract := range builtinHookContracts["codex"] {
+		for _, event := range contract.Events {
+			for _, command := range windowsCodexPerUserHookCommands(event, contract.ContractID, oldLauncher) {
+				add(command)
+			}
+		}
+	}
+	return commands
+}
+
+func codexConfigMatchesBackupHash(path string, expected []byte) bool {
+	readPath, err := userOwnedSettingsReadPath(path)
+	if err != nil {
+		return false
+	}
+	data, err := safefile.ReadRegularFileBounded(readPath, atomicTransformMaxConfigBytes)
+	if err != nil {
+		return false
+	}
+	sum := sha256.Sum256(data)
+	return bytes.Equal(sum[:], expected)
 }
 
 // managedBackupTargetAfterHomeMove maps a record captured before the account
@@ -463,8 +785,11 @@ func loadManagedFileBackupPath(path string) (managedFileBackup, error) {
 // The mapping only applies when the record itself lives under the current
 // home, the captured target is outside it, the old root of the captured
 // target no longer exists at all, and the same relative file exists under
-// the current home. Restore still compares the hash of the file with the
-// one setup recorded before it writes anything.
+// the current home. An account moved by copying its home and then emptying
+// the old folder (rsync, then deleting what it held) keeps the old home as an
+// empty folder; that empty folder is the old root too (GAP-0633). Restore
+// still compares the hash of the file with the one setup recorded before it
+// writes anything.
 func managedBackupTargetAfterHomeMove(recordPath, captured string) (string, bool) {
 	home, err := os.UserHomeDir()
 	if err != nil || strings.TrimSpace(home) == "" || strings.TrimSpace(captured) == "" {
@@ -476,8 +801,34 @@ func managedBackupTargetAfterHomeMove(recordPath, captured string) (string, bool
 	if err != nil || !filepath.IsAbs(captured) || !managedPathWithin(record, home) || managedPathWithin(captured, home) {
 		return "", false
 	}
-	oldRoot := shallowestMissingAncestor(captured)
-	if oldRoot == "" || managedPathWithin(home, oldRoot) || managedPathWithin(oldRoot, home) {
+	if previous := boundManagedBackupPreviousHome(); previous != "" {
+		// The per-user cleanup of a re-homed account names the home the
+		// account had. A receipt copied from it belongs to this home's copy
+		// of the file, whether or not the old home still exists: following
+		// it into the other home removed that home's plugin and then the
+		// copied receipt, even when this home's copy was kept for an edit
+		// (rel-1-0-3 GAP-0200).
+		if candidate, ok := managedBackupTargetUnderPreviousHome(home, previous, captured); ok {
+			return candidate, true
+		}
+	}
+	missing := shallowestMissingAncestor(captured)
+	if missing == "" {
+		return "", false
+	}
+	if candidate, ok := managedBackupTargetUnder(home, missing, captured); ok {
+		return candidate, true
+	}
+	if parent := filepath.Dir(missing); parent != filepath.Dir(parent) && emptyDirectory(parent) {
+		return managedBackupTargetUnder(home, parent, captured)
+	}
+	return "", false
+}
+
+// managedBackupTargetUnder maps captured below oldRoot onto the same file
+// under home, when that file exists and neither root holds the other.
+func managedBackupTargetUnder(home, oldRoot, captured string) (string, bool) {
+	if managedPathWithin(home, oldRoot) || managedPathWithin(oldRoot, home) {
 		return "", false
 	}
 	rel, err := filepath.Rel(oldRoot, captured)
@@ -489,6 +840,65 @@ func managedBackupTargetAfterHomeMove(recordPath, captured string) (string, bool
 		return "", false
 	}
 	return candidate, true
+}
+
+// managedBackupTargetUnderPreviousHome maps captured below the previous home
+// onto the same path below home. Unlike managedBackupTargetUnder the file
+// need not exist: a copy the user deleted leaves nothing to restore, and
+// the receipt must still not lead out of this home.
+func managedBackupTargetUnderPreviousHome(home, previous, captured string) (string, bool) {
+	previous = filepath.Clean(previous)
+	if !filepath.IsAbs(previous) || managedPathWithin(home, previous) || managedPathWithin(previous, home) {
+		return "", false
+	}
+	rel, err := filepath.Rel(previous, captured)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", false
+	}
+	return filepath.Join(home, rel), true
+}
+
+var managedBackupPreviousHome struct {
+	sync.RWMutex
+	home string
+}
+
+// BindManagedBackupPreviousHome makes receipts that name a file below home,
+// the account's previous home, name the same file in the current home until
+// the returned function is called. The per-user worker binds it for the
+// cleanup of a re-homed account, so a receipt copied with the home acts on
+// that home's copy only and never on the other home. An empty home binds
+// nothing.
+func BindManagedBackupPreviousHome(home string) func() {
+	home = strings.TrimSpace(home)
+	managedBackupPreviousHome.Lock()
+	previous := managedBackupPreviousHome.home
+	if home != "" {
+		managedBackupPreviousHome.home = filepath.Clean(home)
+	}
+	managedBackupPreviousHome.Unlock()
+	return func() {
+		managedBackupPreviousHome.Lock()
+		managedBackupPreviousHome.home = previous
+		managedBackupPreviousHome.Unlock()
+	}
+}
+
+func boundManagedBackupPreviousHome() string {
+	managedBackupPreviousHome.RLock()
+	defer managedBackupPreviousHome.RUnlock()
+	return managedBackupPreviousHome.home
+}
+
+// emptyDirectory reports whether path is a directory (not a link to one)
+// that holds no entry.
+func emptyDirectory(path string) bool {
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	entries, err := os.ReadDir(path)
+	return err == nil && len(entries) == 0
 }
 
 // shallowestMissingAncestor returns the first directory on the way down to
@@ -562,20 +972,29 @@ func ensureManagedBackupDirRestricted(dir string) error {
 	return nil
 }
 
+// readManagedTarget reads a managed target without waiting on it. A missing
+// path is (nil, nil, nil); anything that is not a regular file (a named pipe, a
+// device, a directory) is an error, because opening a named pipe for reading
+// blocks until a writer appears and would stall the Setup that inspects it.
 func readManagedTarget(path string) ([]byte, os.FileInfo, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil, nil
-		}
-		return nil, nil, fmt.Errorf("read %s: %w", path, err)
-	}
-	info, err := os.Stat(path)
+	file, err := openManagedTargetForRead(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil, nil
 		}
+		return nil, nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
 		return nil, nil, fmt.Errorf("stat %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, nil, fmt.Errorf("%s is %s, not a regular file", path, hookConfigFileKind(info.Mode()))
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	return data, info, nil
 }
@@ -610,6 +1029,161 @@ func RestoreManagedFileBackups(dataDir, home string) (restored, kept []string, e
 		return nil
 	})
 	return restored, kept, err
+}
+
+// RestoreManagedFileBackupsForRollback uses the saved newer install's
+// connector backup list after the older data directory is back in place.
+// Every connector absent from the restored configuration is eligible,
+// including one the restored gateway does not know. Each backup still
+// requires its exact post-setup file hash, so later operator
+// edits remain in place for the normal surgical prune to handle.
+func RestoreManagedFileBackupsForRollback(
+	savedDataDir, currentDataDir, home string, configured map[string]bool, onlyConnector string,
+) (restored, kept []string, err error) {
+	current := newManagedDataDir(currentDataDir)
+	err = forEachManagedFileBackup(savedDataDir, func(b managedFileBackup) error {
+		if configured[strings.ToLower(strings.TrimSpace(b.Connector))] ||
+			(onlyConnector != "" && !strings.EqualFold(b.Connector, onlyConnector)) {
+			return nil
+		}
+		if !managedBackupRollbackTargetUsable(b, current, home) {
+			kept = append(kept, b.Path)
+			return nil
+		}
+		if b.PostSHA256 == "" {
+			kept = append(kept, b.Path)
+			return nil
+		}
+		if !managedBackupDigestMatches(b) {
+			return fmt.Errorf("restore %s: connector backup does not match its saved digest", b.Path)
+		}
+		ok, restoreErr := restoreManagedFileBackupIfUnchanged(savedDataDir, b.Connector, b.LogicalName, b.Path)
+		switch {
+		case restoreErr != nil:
+			return fmt.Errorf("restore %s: %w", b.Path, restoreErr)
+		case ok:
+			restored = append(restored, b.Path)
+		default:
+			kept = append(kept, b.Path)
+		}
+		return nil
+	})
+	return restored, kept, err
+}
+
+func managedBackupDigestMatches(b managedFileBackup) bool {
+	return managedFileSnapshotHash(b.PristineBytes, b.Existed) == b.PristineSHA256
+}
+
+// managedBackupRollbackTargetUsable reports whether a rollback may act on the
+// agent file the record names: an absolute path inside the account home and
+// outside the data directory now in place. Restore and verification share it,
+// so a record the restore would not touch is never counted as proof.
+func managedBackupRollbackTargetUsable(b managedFileBackup, current *managedDataDir, home string) bool {
+	return managedBackupTargetInside(home, b.Path) && !current.contains(b.Path)
+}
+
+// managedDataDir is the data directory a rollback is putting back, resolved
+// once: as given (a relative folder is taken from the working directory),
+// with its links resolved, and as the directory it physically is.
+type managedDataDir struct {
+	abs      string
+	resolved string
+	info     os.FileInfo
+}
+
+// newManagedDataDir resolves dir once. A blank or unresolvable dir yields a
+// matcher that contains nothing; a dir that does not exist yet is compared by
+// spelling only.
+func newManagedDataDir(dir string) *managedDataDir {
+	if strings.TrimSpace(dir) == "" {
+		return &managedDataDir{}
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return &managedDataDir{}
+	}
+	d := &managedDataDir{abs: abs, resolved: resolveExistingPrefix(abs)}
+	if info, err := os.Stat(abs); err == nil && info.IsDir() {
+		d.info = info
+	}
+	return d
+}
+
+// contains reports whether path is inside the data directory by spelling, by
+// resolved links, or by identity: a folder the filesystem opens through a
+// different spelling (a case variant on a case-insensitive volume, a link)
+// is the same directory whatever its components are called.
+func (d *managedDataDir) contains(path string) bool {
+	if d == nil || d.abs == "" || !filepath.IsAbs(path) {
+		return false
+	}
+	if managedBackupTargetInside(d.abs, path) ||
+		managedBackupTargetInside(d.resolved, resolveExistingPrefix(path)) {
+		return true
+	}
+	if d.info == nil {
+		return false
+	}
+	for cur := filepath.Dir(filepath.Clean(path)); ; {
+		if info, err := os.Stat(cur); err == nil && os.SameFile(info, d.info) {
+			return true
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return false
+		}
+		cur = parent
+	}
+}
+
+// resolveExistingPrefix resolves links in the longest existing leading part
+// of path and keeps the rest as written, so a file that does not exist yet
+// still lands in the folder its parent really is.
+func resolveExistingPrefix(path string) string {
+	path = filepath.Clean(path)
+	rest := ""
+	for cur := path; ; {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			return filepath.Join(resolved, rest)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return path
+		}
+		rest = filepath.Join(filepath.Base(cur), rest)
+		cur = parent
+	}
+}
+
+// VerifyManagedFileBackups reads every connector backup record in dataDir and
+// returns how many name an agent file a rollback can restore: an absolute path
+// inside home and outside currentDataDir. A record that does not load, does
+// not sit where its connector and name put it, does not match its saved
+// digest, or names a path that is empty, relative or inside currentDataDir is
+// an error. A record for an absolute path outside home (a connector whose
+// config root the operator moved) is valid but is left alone by the restore,
+// so it is neither proof nor a veto: the other records decide. A nil error
+// with a positive count therefore means every record is sound and at least
+// one is usable. Rollback cleanup that has no config.yaml to go by needs that
+// proof before it removes anything.
+func VerifyManagedFileBackups(dataDir, currentDataDir, home string) (int, error) {
+	count := 0
+	current := newManagedDataDir(currentDataDir)
+	err := forEachManagedFileBackup(dataDir, func(b managedFileBackup) error {
+		usable := managedBackupRollbackTargetUsable(b, current, home)
+		if !usable && (!filepath.IsAbs(b.Path) || current.contains(b.Path)) {
+			return fmt.Errorf("connector backup %q does not name an agent file a rollback can restore", b.Path)
+		}
+		if !managedBackupDigestMatches(b) {
+			return fmt.Errorf("connector backup %s does not match its saved digest", b.Path)
+		}
+		if usable {
+			count++
+		}
+		return nil
+	})
+	return count, err
 }
 
 // ManagedFileBackupTargets lists the agent file each connector backup record
@@ -674,4 +1248,50 @@ func managedBackupTargetInside(home, path string) bool {
 	rel, err := filepath.Rel(filepath.Clean(home), filepath.Clean(path))
 	return err == nil && rel != "." && !filepath.IsAbs(rel) &&
 		rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// keepPristineEmptyHooks puts back the empty "hooks" object (or list) the
+// operator's file had before Setup, after a surgical teardown of path left
+// none. Removing DefenseClaw's entries empties the object, which the cleanup
+// then drops; only the copy Setup captured tells that the key was the
+// operator's (GAP-1140). With no such copy, a copy whose "hooks" is not
+// empty, or a file that still has the key or is gone, nothing changes.
+func keepPristineEmptyHooks(dataDir, connectorName, logicalName, path string) error {
+	b, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, connectorName, logicalName))
+	if err != nil || !b.Existed {
+		return nil
+	}
+	var pristine map[string]interface{}
+	if json.Unmarshal(b.PristineBytes, &pristine) != nil {
+		return nil
+	}
+	var empty interface{}
+	switch hooks := pristine["hooks"].(type) {
+	case map[string]interface{}:
+		if len(hooks) == 0 {
+			empty = map[string]interface{}{}
+		}
+	case []interface{}:
+		if len(hooks) == 0 {
+			empty = []interface{}{}
+		}
+	}
+	if empty == nil {
+		return nil
+	}
+	if _, err := os.Lstat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	cfg, err := readJSONObject(path)
+	if err != nil {
+		return err
+	}
+	if _, present := cfg["hooks"]; present {
+		return nil
+	}
+	cfg["hooks"] = empty
+	return writeJSONObject(path, cfg)
 }

@@ -49,11 +49,20 @@ import (
 // nousresearch.github.io; Hermes falls back to the lists it ships), which
 // no DefenseClaw provider uses.
 //
+// display.interface pinned cli, with HERMES_TUI=0 in the managed .env, keeps
+// the pinned Hermes (0.19.0 to 0.21.0 build the agent of their TUI without
+// the shell hooks, GAP-1036) on its hooked classic interface whatever a user
+// config, .env or the environment selects; Hermes resolves the TUI from
+// exactly those two after --cli and --tui (an explicit --tui reaches the
+// image's root-owned TUI refusal).
+//
 // Hermes also applies /etc/hermes/.env last, over the user's ~/.hermes/.env
 // and the process environment, per variable. The image pins there the
-// variables that would switch the hooks off or re-enable Tirith; the one
+// variables that would switch the hooks off, select the unhooked TUI or
+// re-enable Tirith; the one
 // that moves the managed scope itself (HERMES_MANAGED_DIR) cannot be pinned
-// from inside it, so the launcher refuses a user .env that names it. The
+// from inside it, so the launcher sets it and refuses a user .env that names
+// it. The
 // harness's home stays workload-writable (plugins, .env, profiles), so the
 // connector is user tier: the launcher's checks, not file ownership, keep
 // the hooks in place.
@@ -105,14 +114,16 @@ func hermesSandboxProvider() map[string]interface{} {
 // hermesSandboxManagedEnv are the variables the managed .env pins: safe
 // mode and project plugins off (a user .env or shell export of either would
 // otherwise switch the hooks off or load a repository's plugins), hook
-// consent given, Tirith off (TIRITH_ENABLED overrides the config key) and
-// runtime installs off.
+// consent given, Tirith off (TIRITH_ENABLED overrides the config key),
+// runtime installs off and the TUI not selected (Hermes starts it only for
+// HERMES_TUI=1; GAP-1036).
 var hermesSandboxManagedEnv = [][2]string{
 	{"HERMES_SAFE_MODE", "0"},
 	{"HERMES_ENABLE_PROJECT_PLUGINS", "0"},
 	{"HERMES_ACCEPT_HOOKS", "1"},
 	{"TIRITH_ENABLED", "0"},
 	{"HERMES_DISABLE_LAZY_INSTALLS", "1"},
+	{"HERMES_TUI", "0"},
 }
 
 func renderHermesSandboxManagedEnv() []byte {
@@ -179,6 +190,9 @@ func hermesSandboxHookEntries(rt resolvedSandboxTarget) (map[string]interface{},
 			"command": hermesSandboxHookCommand(),
 			"timeout": hermesSandboxHookTimeoutSecond,
 		}
+		if event == "pre_tool_call" && rt.contract.ContractID == "hermes-hooks-v2" {
+			entry["fail_closed"] = true
+		}
 		if matcher != "" {
 			entry["matcher"] = matcher
 		}
@@ -201,6 +215,7 @@ func renderHermesSandboxManagedConfig(rt resolvedSandboxTarget) ([]byte, error) 
 		"agent":             map[string]interface{}{"disabled_toolsets": []interface{}{"code_execution"}},
 		"security":          map[string]interface{}{"tirith_enabled": false, "allow_lazy_installs": false},
 		"model_catalog":     map[string]interface{}{"enabled": false},
+		"display":           map[string]interface{}{"interface": "cli"},
 	}
 	body, err := yaml.Marshal(cfg)
 	if err != nil {
@@ -242,6 +257,10 @@ func verifyHermesSandboxManagedConfig(data []byte, rt resolvedSandboxTarget) err
 	catalog, _ := cfg["model_catalog"].(map[string]interface{})
 	if catalog["enabled"] != false {
 		return fmt.Errorf("verify Hermes sandbox managed config: model_catalog.enabled is not pinned false")
+	}
+	display, _ := cfg["display"].(map[string]interface{})
+	if display["interface"] != "cli" {
+		return fmt.Errorf("verify Hermes sandbox managed config: display.interface is not pinned cli")
 	}
 	providers, _ := cfg["providers"].(map[string]interface{})
 	if !reflect.DeepEqual(providers, map[string]interface{}{HermesSandboxProviderName: hermesSandboxProvider()}) {

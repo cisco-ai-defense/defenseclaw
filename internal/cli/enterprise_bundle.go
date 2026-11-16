@@ -51,11 +51,18 @@ var (
 	bundleIDEntropy      io.Reader
 	bundleManagedDevice  = managed.IsStandaloneManagedHost
 	bundlePrivilege      = func() error { return nil }
-	bundleSecretPresent  = managedBundleSecretPresent
+	bundleSecretValue    = managedBundleSecretValue
 	bundleSecureClient   = func() bool { return secureClientHost() }
 	bundleDefaultAnchors = func() (string, error) { return enterprisebundle.AnchorsPath(runtime.GOOS) }
 	// bundleAnchorTrust is the anchor file trust check on a device.
 	bundleAnchorTrust = enterprisebundle.TrustCheck(enterprisebundle.TrustAnchorFile)
+	// bundleAnchorsLstat inspects the installed anchor file before verify
+	// reads it.
+	bundleAnchorsLstat = os.Lstat
+	// bundleDeviceRecordUnreadable reports a deployment record this account
+	// cannot read (a standard user on Windows), so verify cannot tell
+	// whether this is a managed device.
+	bundleDeviceRecordUnreadable = func() bool { return false }
 )
 
 const enterpriseBundleLong = `Sign, verify and report signed policy bundles for the standalone
@@ -64,7 +71,8 @@ names, a manifest with their hashes and the effective policy digest per
 platform, and a detached signature. Devices trust the keys in their
 MDM-installed anchor file (<etc>/trust/bundle-anchors.json). sign and verify
 run offline and change nothing; status reports the bundle state of a managed
-device; apply installs a bundle on a Linux or macOS managed device as root.
+device; apply installs a bundle on a managed device (as root on Linux and
+macOS, as an elevated administrator or SYSTEM on Windows).
 Secure Client computers do not have them.`
 
 func init() {
@@ -87,6 +95,7 @@ func newEnterpriseBundleCommand() *cobra.Command {
 	}
 	group.SetFlagErrorFunc(lifecycleFlagError)
 	group.AddCommand(newEnterpriseBundleSignCommand(), newEnterpriseBundleVerifyCommand(), newEnterpriseBundleStatusCommand(), newEnterpriseBundleApplyCommand())
+	group.AddCommand(platformBundleVerbs()...)
 	return group
 }
 
@@ -94,12 +103,12 @@ type bundleSignOptions struct {
 	in, out, key, keyID, publicKey, attachSig, tbsOut  string
 	tenant, deviceGroup, createdBy, parent, rollbackOf string
 	summary, minProductVersion                         string
-	platforms                                          []string
+	platforms, secretFiles                             []string
 	version                                            uint64
 	emitDigest, json                                   bool
 }
 
-var bundleComposeFlags = []string{"tenant", "device-group", "version", "created-by", "parent", "rollback-of", "summary", "min-product-version", "platform"}
+var bundleComposeFlags = []string{"tenant", "device-group", "version", "created-by", "parent", "rollback-of", "summary", "min-product-version", "platform", "secret-file"}
 
 func newEnterpriseBundleSignCommand() *cobra.Command {
 	opts := &bundleSignOptions{}
@@ -110,6 +119,14 @@ func newEnterpriseBundleSignCommand() *cobra.Command {
 .dcbundle: files[] hashes, secret references, the effective policy digest
 per platform and group reachability warnings. Errors refuse; warnings are
 printed and recorded in the manifest.
+
+Every credential config.yaml references needs --secret-file NAME=PATH with
+the value the devices will store. The bundle never carries the value: its
+secret_refs entry signs a SHA-256 of the tenant, the name and the value
+(value_sha256), and a device refuses the bundle while it stores another
+value (secret_ref_mismatch). To rotate a credential, sign a bundle with the
+new value, store the value with enterprise secret set --bundle, then apply
+the bundle.
 
 For managed bundles, omit data_dir so each device uses its service state
 directory: /var/lib/defenseclaw on Linux, /opt/cisco/defenseclaw/runtime on
@@ -155,6 +172,7 @@ unsigned bundle, the signature and the public key.`,
 	f.StringVar(&opts.summary, "summary", "", "change summary shown in audit (512 characters at most)")
 	f.StringVar(&opts.minProductVersion, "min-product-version", "", "lowest product version that may apply the bundle")
 	f.StringSliceVar(&opts.platforms, "platform", nil, "target platform: linux, darwin or windows (repeat; default all three)")
+	f.StringArrayVar(&opts.secretFiles, "secret-file", nil, "NAME=PATH: the value of credential NAME that the bundle binds (repeat once for every credential config.yaml references)")
 	f.BoolVar(&opts.emitDigest, "emit-digest", false, "write the unsigned bundle and print the digest to sign with an HSM or KMS")
 	f.StringVar(&opts.tbsOut, "tbs-out", "", "with --emit-digest: also write the exact bytes to sign (ed25519 HSMs)")
 	f.StringVar(&opts.attachSig, "attach-sig", "", "attach this detached signature (DER, raw r||s or base64) to the unsigned bundle --in")
@@ -167,6 +185,9 @@ unsigned bundle, the signature and the public key.`,
 type bundleVerifyOptions struct {
 	bundle, anchors, platform string
 	json                      bool
+	// skipSecretStore leaves the stored credentials unchecked: secret set
+	// --bundle verifies the bundle that binds a value it has not stored yet.
+	skipSecretStore bool
 }
 
 func newEnterpriseBundleVerifyCommand() *cobra.Command {
@@ -178,7 +199,17 @@ func newEnterpriseBundleVerifyCommand() *cobra.Command {
 signature, manifest, tenant, device group and platform, version floor,
 minimum product version, files[] hashes, inline secrets, secret references,
 the config validator and the effective policy digest. On a standalone managed
-device it also checks that every required credential is present.`,
+device it also checks that every required credential is present.
+
+A bundle must have a version above both floors: the min_version of the trust
+anchors and the last confirmed bundle version; the confirmed bundle itself
+passes as already_applied. On Linux and macOS a standard account cannot read
+the confirmed state, so verify warns floor_unchecked and checks only the
+anchor floor; apply checks again as root. On Windows the installed anchors
+are readable only by administrators and SYSTEM, so run verify elevated; a
+standard account gets not_admin. A bundle signed by a revoked key is refused
+(key_revoked). A retired key verifies only the confirmed bundle, which needs
+the confirmed state; any other bundle it signed is refused (key_expired).`,
 		Args:         bundleNoArgs,
 		SilenceUsage: true,
 		Annotations:  map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
@@ -245,24 +276,37 @@ type bundleSignResult struct {
 	Errors           []bundleError                     `json:"errors"`
 }
 
+// bundleVerifyResult is the bundle verify --json document. SecretRefsMissing
+// is set when the presence of every secret_refs credential was checked;
+// RestartPrediction for a verified bundle on this device.
 type bundleVerifyResult struct {
-	SchemaVersion         int                        `json:"schema_version"`
-	Command               string                     `json:"command"`
-	OK                    bool                       `json:"ok"`
-	Result                string                     `json:"result"`
-	Platform              string                     `json:"platform"`
-	Anchors               string                     `json:"anchors,omitempty"`
-	AnchorTrust           string                     `json:"anchor_trust,omitempty"`
-	Bundle                *bundleSummary             `json:"bundle,omitempty"`
-	SignerKeyID           string                     `json:"signer_key_id,omitempty"`
-	Alg                   string                     `json:"alg,omitempty"`
-	Floor                 uint64                     `json:"floor"`
-	FloorSource           string                     `json:"floor_source,omitempty"`
-	EffectivePolicyDigest string                     `json:"effective_policy_digest,omitempty"`
-	ExpectedDigest        string                     `json:"expected_digest,omitempty"`
-	DigestVerified        bool                       `json:"digest_verified"`
-	Warnings              []enterprisebundle.Warning `json:"warnings"`
-	Errors                []bundleError              `json:"errors"`
+	SchemaVersion         int            `json:"schema_version"`
+	Command               string         `json:"command"`
+	OK                    bool           `json:"ok"`
+	Result                string         `json:"result"`
+	Platform              string         `json:"platform"`
+	Anchors               string         `json:"anchors,omitempty"`
+	AnchorTrust           string         `json:"anchor_trust,omitempty"`
+	Bundle                *bundleSummary `json:"bundle,omitempty"`
+	SignerKeyID           string         `json:"signer_key_id,omitempty"`
+	Alg                   string         `json:"alg,omitempty"`
+	Floor                 uint64         `json:"floor"`
+	FloorSource           string         `json:"floor_source,omitempty"`
+	EffectivePolicyDigest string         `json:"effective_policy_digest,omitempty"`
+	ExpectedDigest        string         `json:"expected_digest,omitempty"`
+	DigestVerified        bool           `json:"digest_verified"`
+	SecretRefsMissing     *[]string      `json:"secret_refs_missing,omitempty"`
+	SecretRefsMismatch    *[]string      `json:"secret_refs_mismatch,omitempty"`
+	// SecretRefs is every secret_refs entry with its state (names and
+	// booleans only), present exactly when SecretRefsMissing is.
+	SecretRefs        *[]enterprisebundle.SecretRefState `json:"secret_refs,omitempty"`
+	RestartPrediction *bundleRestartPrediction           `json:"restart_prediction,omitempty"`
+	ConfigDrift       *bool                              `json:"config_drift,omitempty"`
+	Warnings          []enterprisebundle.Warning         `json:"warnings"`
+	Errors            []bundleError                      `json:"errors"`
+
+	// manifest is the verified manifest, for secret set --bundle.
+	manifest *enterprisebundle.Manifest
 }
 
 // bundleRefusal turns err into errors[] and the failure exit code
@@ -360,6 +404,15 @@ func bundleSign(ctx context.Context, cmd *cobra.Command, opts *bundleSignOptions
 			return err
 		}
 	}
+	secretValues, err := readBundleSecretFiles(opts.secretFiles)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		for _, value := range secretValues {
+			clear(value)
+		}
+	}()
 	info, err := os.Lstat(opts.in)
 	if err != nil || !info.IsDir() {
 		return bundleUsage("--in must be a bundle directory")
@@ -382,7 +435,7 @@ func bundleSign(ctx context.Context, cmd *cobra.Command, opts *bundleSignOptions
 		Bundle: b, Root: root, BundleID: id, TenantID: opts.tenant, DeviceGroup: opts.deviceGroup,
 		Platforms: opts.platforms, Version: opts.version, Parent: opts.parent, RollbackOf: opts.rollbackOf,
 		CreatedAt: now, CreatedBy: opts.createdBy, ChangeSummary: opts.summary, MinProductVersion: opts.minProductVersion,
-		ProductVersion: appVersion, HostPlatform: runtime.GOOS, Digester: bundleDigester,
+		ProductVersion: appVersion, HostPlatform: runtime.GOOS, Digester: bundleDigester, SecretValues: secretValues,
 	})
 	if err != nil {
 		return err
@@ -492,6 +545,13 @@ func runEnterpriseBundleVerify(cmd *cobra.Command, opts *bundleVerifyOptions) er
 	return printBundleResult(cmd, opts.json, res, err, func(w io.Writer) { printVerifyText(w, res) })
 }
 
+// bundleAnchorsNotAdmin is the refusal of verify for an account that cannot
+// read the installed trust anchors.
+func bundleAnchorsNotAdmin() error {
+	return &enterprisebundle.Error{Code: enterprisebundle.CodeNotAdmin, Path: enterprisebundle.AnchorsName,
+		Detail: "this account cannot read the installed trust anchors; run verify as root or as an elevated administrator or SYSTEM, or pass --anchors with a copy of the anchor file that this account can read"}
+}
+
 func bundleVerify(ctx context.Context, opts *bundleVerifyOptions, res *bundleVerifyResult) error {
 	if bundleSecureClient() {
 		return secureClientBundleRefusal()
@@ -507,12 +567,22 @@ func bundleVerify(ctx context.Context, opts *bundleVerifyOptions, res *bundleVer
 		if path, err = bundleDefaultAnchors(); err != nil {
 			return err
 		}
+		// On Windows the installed anchors are readable only by
+		// administrators and SYSTEM (GAP-0009): say how to verify instead
+		// of calling the anchor file insecure.
+		if _, err := bundleAnchorsLstat(path); errors.Is(err, fs.ErrPermission) {
+			res.Anchors = path
+			return bundleAnchorsNotAdmin()
+		}
 	} else if !device {
 		// An administrator checking a bundle on a workstation names an
 		// anchor file of their own; only a device needs it root-owned.
 		trust, res.AnchorTrust = nil, "unchecked"
-		res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: "anchor_trust_unchecked",
-			Message: "not a managed device: the anchor file ownership and permissions were not checked"})
+		message := "not a managed device: the anchor file ownership and permissions were not checked"
+		if bundleDeviceRecordUnreadable() {
+			message = "this account cannot read the deployment record, so the device checks were skipped and the anchor file ownership and permissions were not checked; run verify elevated for them"
+		}
+		res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: "anchor_trust_unchecked", Message: message})
 	}
 	res.Anchors = path
 	b, err := readBundleInput(opts.bundle)
@@ -521,6 +591,11 @@ func bundleVerify(ctx context.Context, opts *bundleVerifyOptions, res *bundleVer
 	}
 	anchors, err := enterprisebundle.LoadAnchors(path, trust)
 	if err != nil {
+		// The file can be listed but not inspected or read by this account
+		// (an ACL that denies it the file only).
+		if opts.anchors == "" && errors.Is(err, fs.ErrPermission) {
+			return bundleAnchorsNotAdmin()
+		}
 		return err
 	}
 	in := enterprisebundle.VerifyInput{
@@ -534,7 +609,9 @@ func bundleVerify(ctx context.Context, opts *bundleVerifyOptions, res *bundleVer
 		}
 		deviceLayout := enterprisebundle.DeviceLayoutFromManaged(layout)
 		in.DeviceLayout = &deviceLayout
-		in.SecretPresent = bundleSecretPresent
+		if !opts.skipSecretStore {
+			in.SecretValue = bundleSecretValue
+		}
 		// The version floor is the confirmed bundle of bundle-state.json. A
 		// standard account cannot read it (apply checks it again as root);
 		// a state that cannot be parsed refuses, so it never lowers the floor.
@@ -572,12 +649,21 @@ func bundleVerify(ctx context.Context, opts *bundleVerifyOptions, res *bundleVer
 	res.FloorSource = out.FloorSource
 	res.EffectivePolicyDigest, res.ExpectedDigest, res.DigestVerified = out.EffectivePolicyDigest, out.ExpectedDigest, out.DigestVerified
 	res.Warnings = append(res.Warnings, out.Warnings...)
+	if out.SecretRefsMissing != nil {
+		missing, mismatch, states := out.SecretRefsMissing, out.SecretRefsMismatch, out.SecretRefs
+		res.SecretRefsMissing, res.SecretRefsMismatch, res.SecretRefs = &missing, &mismatch, &states
+	}
 	if err != nil {
 		return err
 	}
+	res.manifest = out.Manifest
 	res.Result = "verified"
 	if out.AlreadyApplied {
 		res.Result = "already_applied"
+	}
+	// An apply on this device runs for its own platform only.
+	if device && opts.platform == runtime.GOOS {
+		res.RestartPrediction, res.ConfigDrift = bundleVerifyRestartPrediction(opts.platform, out)
 	}
 	return nil
 }
@@ -626,16 +712,35 @@ func printVerifyText(w io.Writer, res *bundleVerifyResult) {
 	for _, warning := range res.Warnings {
 		fmt.Fprintf(w, "warning: %s: %s\n", warning.Code, warning.Message)
 	}
+	if res.SecretRefsMissing != nil && len(*res.SecretRefsMissing) > 0 {
+		fmt.Fprintf(w, "Credentials missing: %s (store them with enterprise secret set before the apply).\n", strings.Join(*res.SecretRefsMissing, ", "))
+	}
+	if res.SecretRefsMismatch != nil && len(*res.SecretRefsMismatch) > 0 {
+		fmt.Fprintf(w, "Credentials not the signed value: %s (store the signed values with enterprise secret set --bundle before the apply).\n", strings.Join(*res.SecretRefsMismatch, ", "))
+	}
 	if !res.OK {
 		return
 	}
 	switch res.Result {
 	case "already_applied":
 		fmt.Fprintf(w, "Bundle %s version %d is the bundle already applied.\n", res.Bundle.BundleID, res.Bundle.Version)
+		if res.ConfigDrift != nil && *res.ConfigDrift {
+			fmt.Fprintln(w, "The installed config.yaml is not this bundle's config: apply the bundle again to repair it.")
+		}
 	default:
 		fmt.Fprintf(w, "Bundle %s version %d verified for %s (key %s, floor %d).\n", res.Bundle.BundleID, res.Bundle.Version, res.Platform, res.SignerKeyID, res.Floor)
 	}
 	fmt.Fprintf(w, "Effective policy digest: %s\n", res.EffectivePolicyDigest)
+	if p := res.RestartPrediction; p != nil {
+		line := "Gateway restart on apply: " + p.GatewayRestart
+		if len(p.ReasonCodes) > 0 {
+			line += " (" + strings.Join(p.ReasonCodes, ", ") + ")"
+		}
+		if len(p.Settings) > 0 {
+			line += "; settings: " + strings.Join(p.Settings, ", ")
+		}
+		fmt.Fprintln(w, line)
+	}
 }
 
 func bundleDigester(ctx context.Context, cfg *config.Config, raw []byte, goos, root string) (string, error) {
@@ -644,6 +749,28 @@ func bundleDigester(ctx context.Context, cfg *config.Config, raw []byte, goos, r
 		enterprisebundle.ReportPolicyComponents(ctx, policy.Components)
 	}
 	return policy.Digest, err
+}
+
+// readBundleSecretFiles reads the --secret-file NAME=PATH values bundle
+// sign binds, as the gateway reads a stored credential
+// (managed.ReadCredentialSource).
+func readBundleSecretFiles(specs []string) (map[string][]byte, error) {
+	values := map[string][]byte{}
+	for _, spec := range specs {
+		name, path, ok := strings.Cut(spec, "=")
+		if !ok || path == "" || !config.ValidEnterpriseCredentialName(name) {
+			return nil, bundleUsage("--secret-file takes NAME=PATH with an enterprise credential name (lowercase letters, digits and dashes)")
+		}
+		if _, dup := values[name]; dup {
+			return nil, bundleUsage("--secret-file names the credential %s twice", name)
+		}
+		value, err := managed.ReadCredentialSource(path)
+		if err != nil {
+			return nil, bundleUsage("--secret-file %s: %v", name, err)
+		}
+		values[name] = value
+	}
+	return values, nil
 }
 
 // readBundleInput reads a .dcbundle file or a bundle directory.
@@ -754,25 +881,6 @@ func readBundlePublicKey(path string) (crypto.PublicKey, error) {
 		return nil, bundleUsage("--public-key: %v", err)
 	}
 	return public, nil
-}
-
-// managedBundleSecretPresent looks a credential up in the standalone
-// enterprise secret store. The value is dropped at once and never printed.
-// An unreadable store (a standard account) is reported as an error, so
-// verify warns instead of refusing.
-func managedBundleSecretPresent(name string) (bool, error) {
-	layout, err := enterprisebundle.Layout(runtime.GOOS)
-	if err != nil {
-		return false, err
-	}
-	value, _, err := managed.ResolveServiceCredential(name, layout.SecretsDir)
-	for i := range value {
-		value[i] = 0
-	}
-	if errors.Is(err, fs.ErrPermission) {
-		return false, err
-	}
-	return err == nil, nil
 }
 
 func bundleContext(cmd *cobra.Command) context.Context {

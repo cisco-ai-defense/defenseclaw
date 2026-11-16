@@ -47,6 +47,19 @@ func boolPtr(b bool) *bool { return &b }
 // policy classifies the request as "known" and forwards it.
 func newForwardingProxy(t *testing.T, upstreamURL string) *GuardrailProxy {
 	t.Helper()
+	p := newPassthroughProxy(t)
+	u, err := url.Parse(upstreamURL)
+	if err != nil {
+		t.Fatalf("parse upstream URL: %v", err)
+	}
+	registerForwardingProviderDomain(t, u.Hostname(), "openai")
+	return p
+}
+
+// newPassthroughProxy constructs the passthrough-test GuardrailProxy
+// without registering any provider domain.
+func newPassthroughProxy(t *testing.T) *GuardrailProxy {
+	t.Helper()
 	cfg := &config.GuardrailConfig{
 		Enabled:   true,
 		Model:     "openai/gpt-4",
@@ -67,11 +80,6 @@ func newForwardingProxy(t *testing.T, upstreamURL string) *GuardrailProxy {
 		skipAuthForTest: true,
 	}
 	p.resolveProviderFn = func(_ *ChatRequest) LLMProvider { return &mockProvider{} }
-	u, err := url.Parse(upstreamURL)
-	if err != nil {
-		t.Fatalf("parse upstream URL: %v", err)
-	}
-	registerForwardingProviderDomain(t, u.Hostname(), "openai")
 	return p
 }
 

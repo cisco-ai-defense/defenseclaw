@@ -28,7 +28,7 @@ Before starting, pick the closest sibling and list its footprint: `git grep -l -
 - [ ] `correlationContractSources` entry (immutable revision, fixture sha256). Verify: `TestCorrelationContractSourcesAndFixturesAreImmutable`.
 - [ ] `nativeTelemetryForConnector` / `mirrorIdentityTargets` / `declaredCorrelationAliases` where they apply. Verify: `TestNativeTelemetryRegistryIsExplicit`.
 - [ ] `HookProfile` Decode, DecodeToolArgs, MapVerdict, Respond; `hookOnlyProfileRespond` case; `hookOnlyConnector.HookProfile` name case. Verify: `TestHookProfile_HasDispatchCallbacks`, Respond parity tests, decode tests with real payloads.
-- [ ] Template `hooks/<id>-hook.sh` (or plugin, or `.ps1` adapter) and `connectorHookScripts["<id>"]`. Verify: a script exit test under bash (`TestOpenHandsHookScript_BlockExitsTwo` pattern), `hook_user_identity_test.go`.
+- [ ] Template `hooks/<id>-hook.sh` (or plugin, or `.ps1` adapter) and `connectorHookScripts["<id>"]`. Verify: a script exit test under bash (`cursor_hook_failopen_test.go` pattern), `hook_user_identity_test.go`.
 - [ ] `hookexec` `specs["<id>"]` (style, outputField, failOpenOnly). Verify: `TestSupportedConnectorsSorted`, `TestNativeConnectorEndpointMatrix`, `TestDecisionGolden`.
 - [ ] `hookexec` branches: event validation, `hookRequestTimeout` (below the timeout registered in the vendor config), `failForeignHookBlocked`, `emitHookResult`, `hookDialects`. Verify: `TestForeignHookBlockNamesTheFileInEveryConnectorsResponse`.
 - [ ] `foreignHookStopEvent` has the exact-case stop and session-end events. Verify: a row in `TestManagedSessionStopEventsAllowWhileOtherEventsStayBlocked` (`hookexec/session_stop_test.go`).
@@ -92,11 +92,10 @@ Before starting, pick the closest sibling and list its footprint: `git grep -l -
 - [ ] `doctor_hooks.py` `_EXPECTED_CONTRACTS`, event tuples, Windows argv checks; `fail_mode.py` tables. Verify: `test_cmd_doctor_connector.py` (Windows doctor test pattern).
 - [ ] `cmd_guardrail.py` labels and runtime fail-mode set. Verify: surface parity.
 - [ ] `credentials._HOOK_POLICY_ONLY_CONNECTORS`. Verify: **none**; check by hand.
-- [ ] `cmd_uninstall._CONNECTOR_BACKUP_MARKERS`, `_CONNECTOR_RESIDUE_ARTIFACTS`, `windows_native_uninstall.py` allowlist. Verify: `test_cmd_uninstall.py`.
+- [ ] `cmd_uninstall._CONNECTOR_BACKUP_MARKERS`, `_CONNECTOR_RESIDUE_ARTIFACTS`. Verify: `test_cmd_uninstall.py`.
 - [ ] TUI: `cli_choices.CONNECTORS`, `MODE_PICKER_CHOICES`, `_SETUP_CONNECTOR_ALIASES`, `GO_PARITY_REGISTRY`, `_connector_setup_alias`, `first_run.CONNECTOR_CHOICES`, `overview_state` / `catalog_state` labels. Verify: `tui/test_mode_picker.py`, `test_setup_panel.py`, `test_tui_label_maps_have_explicit_brand_cases`, `make cli-test-snap`.
 - [ ] Go CLI: `connector_cmd.go` reconcile allowlist and config-home case; `status.go` `friendlyConnectorName`. Verify: `connector_cmd_test.go`, `status_connectors_test.go`.
 - [ ] `scripts/install.sh` `CONNECTOR_CHOICES`, `scripts/install.ps1` `$ConnectorChoices`. Verify: `test_windows_installer_tracks_supported_connectors`.
-- [ ] Windows native Setup: `nativeLifecycleConnectorNames`, `normalizeConnector`, `wizardConnectorChoices`, transaction home resolution, `platform_windows.go` vendor home and executable, executable admission if Setup pins it, `nativeinstallstate`. Verify: `wizard_windows_test.go`, `main_test.go`, `transaction_test.go`.
 - [ ] macOS app lists (`AppState.swift`, `SetupDefinitions.swift`, `FirstRunView.swift`, `ConfigEditorDefinitions.swift`, `CommandRegistry.swift`, `Models.swift`, `SkillScanner.swift`). Verify: `make macos-app-test` on a Mac (CI runs only the onboarding script).
 - [ ] `internal/envvars/registry.json` entries for new `DEFENSECLAW_*` variables. Verify: `test_envvars_codebase_coverage.py`, `python scripts/gen_envvars_docs.py --check`.
 
@@ -123,7 +122,7 @@ Before starting, pick the closest sibling and list its footprint: `git grep -l -
 
 ## 7. Docs
 - [ ] `docs-site/content/docs/connectors/<id>.mdx` with one `## Platform support` in the exact table form. Verify: `test_connector_pages_are_the_canonical_cross_platform_support_source`.
-- [ ] `connectors/meta.json` page. Verify: the same test.
+- [ ] `../<id>` entry in `connectors/(hook-connectors)/meta.json` or `(proxy-connectors)/meta.json`, and the same in `reference/connectors/`. Verify: the same test.
 - [ ] `connectors/index.mdx` platform row, families card, capability summary, count. Verify: platform row only (the same test).
 - [ ] `connectors/compatibility.mdx` rows, plus a pin test. Verify: the new pin.
 - [ ] `docs-site/data/capability-matrix.json` row (`windowsSupport` matching platform support). Verify: `TestDocsCapabilityMatrixMatchesConnectors`, `npm run test:feature-demos`.
@@ -138,7 +137,7 @@ Before starting, pick the closest sibling and list its footprint: `git grep -l -
 - [ ] Hard-coded test lists updated, including the hand-kept tables that don't fail when a connector is missing (docs-tests-ci.md §4.1). Verify: the listed tests.
 - [ ] `test/e2e/connectormatrix.go` row and the `testdata/v7/golden/<id>/verdict-blocked.golden.json`. Verify: `TestConnectorLifecycle_Matrix`, `TestGoldenPerConnectorLayout`.
 - [ ] Live harness: `run.sh` `ALL_CONNECTORS` (shell hooks), `golden/<id>/*`, `lib/setup.sh`, and a driver if the agent is headless. Verify: `bash scripts/live-connector-e2e/run.sh --layer contract --connector <id>`.
-- [ ] `connector-live-e2e.yml` dispatch options, `full=` matrix, secret scoping; `windows-native.yml` matrix and `windows-native-ci.ps1` `ValidateSet`. Verify: `test_connector_live_e2e_path_policy.py`, `test_connector_live_secret_scoping.py`.
+- [ ] `connector-live-e2e.yml` dispatch options, `full=` matrix, secret scoping; `windows-native.yml` `connector-contract` matrix and `run-windows-install.ps1` `ValidateSet` plus a registration check. Verify: `test_connector_live_e2e_path_policy.py`, `test_connector_live_secret_scoping.py`, `test_windows_connector_contract.py`.
 - [ ] Windows `_test.go` files compile. Verify: `GOOS=windows go vet ./...` on the touched packages.
 - [ ] Narrow validation set passes. Verify: docs-tests-ci.md §7.
 - [ ] Interactive live certification on each claimed OS, then a `validated_versions.json` row. Verify: a person, after a green run.

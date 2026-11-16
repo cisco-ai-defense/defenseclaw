@@ -83,6 +83,17 @@ def test_judge_auth_failure_fails_llm_reachable(tmp_path, monkeypatch) -> None:
     assert r.checks[-1]["status"] == "warn"
 
 
+def test_malformed_llm_url_is_a_failed_row_without_a_probe(tmp_path) -> None:
+    cfg = _bedrock_judge_cfg(tmp_path, "api_key")
+    cfg.guardrail.judge.llm.base_url = "https://[broken"
+    r = _DoctorResult()
+    with mock.patch("defenseclaw.llm.ping") as ping:
+        cmd_doctor._check_llm_reachable(cfg, r)
+    ping.assert_not_called()
+    assert r.checks[-1]["status"] == "fail"
+    assert "llm.base_url is malformed" in r.checks[-1]["detail"]
+
+
 def test_bedrock_key_rejection_raised_as_connection_error_is_auth_failed() -> None:
     # GAP-2108: LiteLLM raises a Bedrock 403 for an expired or malformed key as
     # APIConnectionError (status 500) whose text has no 403.

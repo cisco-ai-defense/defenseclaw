@@ -81,6 +81,17 @@ var errWindowsUserHiveNotLoaded = errors.New("its registry hive is not loaded")
 // persistent environment applies to request's connector: every absolute
 // location value its user sources read, when one of them lies outside the
 // default locations. It runs as the user.
+// enterpriseForeignHookAsGuardian runs fn with the guardian's own token from
+// inside an in-process cleanup. Impersonation is per thread: the cleanup
+// runs on an OS thread locked to it under the user's token
+// (enterprisehooks.RunAsTarget), and a new goroutine never runs on that
+// thread, so fn runs as the guardian.
+func enterpriseForeignHookAsGuardian(fn func() error) error {
+	done := make(chan error, 1)
+	go func() { done <- fn() }()
+	return <-done
+}
+
 func enterpriseForeignHookUserEnvRedirects(target enterprisehooks.TargetCredentials, request enterprisepolicy.GuardRequest) ([]enterprisepolicy.EnvRedirect, error) {
 	env, err := windowsUserPersistentEnvironment(target.SID, target.UserHome)
 	if errors.Is(err, errWindowsUserHiveNotLoaded) {

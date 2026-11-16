@@ -22,8 +22,12 @@
 package tactics
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
+	"unicode"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // Observation is one normalised kernel event handed to the classifier.
@@ -32,12 +36,15 @@ import (
 // free of the acquisition layer and remains a pure function over data. The
 // service does the two-line translation.
 type Observation struct {
-	Kind    string // exec | exit | file_read | file_write | identity | privilege
-	PID     int
-	Name    string
-	Cmdline string
-	Path    string
-	Detail  string
+	Kind string // exec | exit | file_read | file_write | identity | privilege
+	PID  int
+	Name string
+	// ClaudeClient is set only when the exec image's digest, read by the
+	// event's source at exec time, is a signed Claude Code release image.
+	ClaudeClient bool
+	Cmdline      string
+	Path         string
+	Detail       string
 }
 
 // Kind values, mirroring plane.Kind.
@@ -108,19 +115,19 @@ var exfilHosts = []string{
 }
 
 // exfilCommand recognises a transfer to a public drop point in one argv.
-var exfilCommand = regexp.MustCompile(`(?i)\b(curl|wget|nc|ncat|scp|rsync|Invoke-WebRequest|iwr|Invoke-RestMethod)\b`)
+var exfilCommand = lazyregexp.New(`(?i)\b(curl|wget|nc|ncat|scp|rsync|Invoke-WebRequest|iwr|Invoke-RestMethod)\b`)
 
 // credentialReader recognises the commands that read a file, so a path in an
 // argv is only treated as credential access when something is actually reading
 // it. Without this an editor opening a config, or a grep across a tree, would
 // classify as a credential read.
-var credentialReader = regexp.MustCompile(
+var credentialReader = lazyregexp.New(
 	`(?i)\b(cat|head|tail|less|more|strings|xxd|od|base64|cp|scp|rsync|dd|` +
 		`type|Get-Content|gc|Copy-Item|awk|sed|python3?|node|jq)\b`)
 
 // localMCPCommand recognises an agent starting a local MCP tool server, which
 // is how it reaches the filesystem, a database, or a cloud API.
-var localMCPCommand = regexp.MustCompile(`(?i)(mcp[-_]server|server[-_]mcp|@modelcontextprotocol/)`)
+var localMCPCommand = lazyregexp.New(`(?i)(mcp[-_]server|server[-_]mcp|@modelcontextprotocol/)`)
 
 // Classify turns one observation into a tactic match, or reports false when
 // the observation is not one.
@@ -154,6 +161,25 @@ func Classify(observation Observation, indicators IndicatorSet) (Match, bool) {
 	return Match{}, false
 }
 
+// vendorPluginStores are the folders an agent's own plugin manager fills with
+// clones of third-party marketplaces and plugins (Claude Code: the marketplace
+// clone, its .staging copy, and the plugin cache). The files inside are the
+// vendor's and the plugin authors', not the agent's standing configuration or a
+// credential store, even when one is named .mcp.json or .npmrc: the first run
+// of Claude Code clones the official marketplace there (GAP-1448). A secret at
+// rest named by a high-confidence indicator still counts; the plugin's own
+// activation lives in settings.json and installed_plugins.json, which stay
+// indicators.
+var vendorPluginStores = []string{
+	"/.claude/plugins/marketplaces/", "/.claude/plugins/cache/",
+}
+
+// inVendorPluginStore reports whether path is inside a vendorPluginStores folder.
+func inVendorPluginStore(path string, indicators IndicatorSet) bool {
+	_, ok := containsAnyFold(path, vendorPluginStores, indicators.CaseInsensitivePaths)
+	return ok
+}
+
 func classifyFileRead(observation Observation, indicators IndicatorSet) (Match, bool) {
 	path := observation.Path
 	if path == "" {
@@ -164,6 +190,9 @@ func classifyFileRead(observation Observation, indicators IndicatorSet) (Match, 
 			Tactic: CredentialAccess, SignalID: "agent_credential_access",
 			Title: "agent read a secret at rest", Detail: match, Confidence: 1.0,
 		}, true
+	}
+	if inVendorPluginStore(path, indicators) {
+		return Match{}, false
 	}
 	if match, ok := containsAnyFold(path, indicators.CredentialPaths, indicators.CaseInsensitivePaths); ok {
 		// A path that merely looks credential-adjacent is graded down rather
@@ -189,7 +218,13 @@ func classifyFileWrite(observation Observation, indicators IndicatorSet) (Match,
 			Detail: match, Confidence: 1.0,
 		}, true
 	}
-	if match, ok := containsAnyFold(path, indicators.AgentConfigPaths, indicators.CaseInsensitivePaths); ok {
+	credentialPaths := indicators.CredentialPaths
+	if inVendorPluginStore(path, indicators) {
+		// The plugin manager's own clones (GAP-1448): not the agent's standing
+		// configuration, and a file there that is only named like a credential
+		// store (.npmrc) is the plugin author's.
+		credentialPaths = indicators.HighConfidenceCredentials
+	} else if match, ok := containsAnyFold(path, indicators.AgentConfigPaths, indicators.CaseInsensitivePaths); ok {
 		// The category with no equivalent in a traditional endpoint product.
 		// An agent that appends to its own CLAUDE.md or registers an MCP
 		// server is arranging to influence every future session on the
@@ -202,7 +237,7 @@ func classifyFileWrite(observation Observation, indicators IndicatorSet) (Match,
 			Detail: match, Confidence: 1.0,
 		}, true
 	}
-	if match, ok := containsAnyFold(path, indicators.CredentialPaths, indicators.CaseInsensitivePaths); ok {
+	if match, ok := containsAnyFold(path, credentialPaths, indicators.CaseInsensitivePaths); ok {
 		return Match{
 			Tactic: CredentialAccess, SignalID: "agent_credential_access",
 			Title: "agent wrote to a credential store", Detail: match, Confidence: 1.0,
@@ -269,7 +304,8 @@ func classifyExec(observation Observation, indicators IndicatorSet) (Match, bool
 			}, true
 		}
 	}
-	if localMCPCommand.MatchString(cmdline) {
+	if localMCPCommand.MatchString(cmdline) &&
+		(indicators.KeepClientMCP || !observation.ClaudeClient || !claudeClientOnlyMCPReference(cmdline)) {
 		return Match{
 			Tactic: LocalInference, SignalID: "agent_local_mcp_server",
 			Title:  "agent started a local MCP tool server",
@@ -287,6 +323,90 @@ func classifyExec(observation Observation, indicators IndicatorSet) (Match, bool
 		}, true
 	}
 	return Match{}, false
+}
+
+// claudeClientOnlyMCPReference checks, for a Claude Code client image, the
+// argument that owns an MCP name. A configuration value or print prompt may
+// name a package; a separate positional package remains a server invocation.
+func claudeClientOnlyMCPReference(cmdline string) bool {
+	args, valid := claudeCommandArgs(cmdline)
+	if !valid || len(args) == 0 || localMCPCommand.MatchString(args[0]) {
+		return false
+	}
+	configValues := false
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			configValues = false
+			continue
+		}
+		if configValues {
+			if !strings.HasPrefix(arg, "-") {
+				continue
+			}
+			configValues = false
+		}
+		switch {
+		case arg == "--mcp-config":
+			configValues = true // Values continue until the next option.
+		case strings.HasPrefix(arg, "--mcp-config="):
+			// The value is attached to the option.
+		case arg == "-p" || arg == "--print":
+			return true // Remaining positional text is the client's prompt.
+		case localMCPCommand.MatchString(arg):
+			return false
+		}
+	}
+	return true
+}
+
+// claudeCommandArgs keeps a JSON configuration value together after the
+// acquisition layer has joined argv. An incomplete JSON value is ambiguous.
+func claudeCommandArgs(cmdline string) ([]string, bool) {
+	var args []string
+	configValues := false
+	appendArg := func(arg string) {
+		args = append(args, arg)
+		if arg == "--mcp-config" {
+			configValues = true
+		} else if strings.HasPrefix(arg, "-") {
+			configValues = false
+		}
+	}
+	for cmdline != "" {
+		cmdline = strings.TrimLeftFunc(cmdline, unicode.IsSpace)
+		if cmdline == "" {
+			break
+		}
+		prefix := ""
+		value := cmdline
+		if strings.HasPrefix(value, "--mcp-config={") {
+			prefix = "--mcp-config="
+			value = value[len(prefix):]
+		}
+		if strings.HasPrefix(value, "{") && (configValues || prefix != "") {
+			var raw json.RawMessage
+			decoder := json.NewDecoder(strings.NewReader(value))
+			if err := decoder.Decode(&raw); err != nil {
+				return nil, false
+			}
+			end := int(decoder.InputOffset())
+			if end < len(value) && !unicode.IsSpace(rune(value[end])) {
+				return nil, false
+			}
+			appendArg(prefix + value[:end])
+			cmdline = value[end:]
+			continue
+		}
+		end := strings.IndexFunc(cmdline, unicode.IsSpace)
+		if end < 0 {
+			appendArg(cmdline)
+			break
+		}
+		appendArg(cmdline[:end])
+		cmdline = cmdline[end:]
+	}
+	return args, true
 }
 
 // containsAny returns the first fragment present in value.
@@ -432,9 +552,9 @@ func encodingCommand(words []shellWord) (string, bool) {
 var (
 	harnessShell          = `^(?:"[^"]*"|\S*)\s+(?:-\S*\s+)*["']?`
 	harnessSnapshotFile   = `["']?[^\s"']*[/\\]shell-snapshots[/\\]snapshot-[\w.-]+\.sh`
-	harnessSnapshotWriter = regexp.MustCompile(harnessShell + `SNAPSHOT_FILE=` + harnessSnapshotFile)
-	harnessToolCall       = regexp.MustCompile(harnessShell + `source\s+` + harnessSnapshotFile)
-	harnessEval           = regexp.MustCompile(
+	harnessSnapshotWriter = lazyregexp.New(harnessShell + `SNAPSHOT_FILE=` + harnessSnapshotFile)
+	harnessToolCall       = lazyregexp.New(harnessShell + `source\s+` + harnessSnapshotFile)
+	harnessEval           = lazyregexp.New(
 		`(?s)&&\s*eval\s+(.+?)\s*<\s*/dev/null\s*&&\s*pwd\s+-P\s*>\|\s*\S*claude-[0-9a-f]+-cwd["']?\s*$`)
 )
 

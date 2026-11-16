@@ -24,6 +24,11 @@ import (
 // not during an install, one try a minute after a failed start (GAP-0377).
 // Secure Client and managed computers keep their own lifecycle: none of the
 // stop marker, the PATH record or that start applies there.
+// hookColdStartLockWait is zero on Windows: the hook runs its cold start in
+// the foreground within the hook deadline, so a start that finds another
+// start or restart running ends at once and the hook sends its call again.
+const hookColdStartLockWait time.Duration = 0
+
 func hookColdStartSupported() bool {
 	if managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) || secureClientHost() {
 		return false

@@ -29,8 +29,11 @@ class PolicyAlertDocsTest(unittest.TestCase):
         )[0]
         self.assertIn("policy_reload_rejected", alerts)
         self.assertIn("policy_not_applied", alerts)
-        self.assertRegex(alerts, r"policy_not_applied[^\n]*changing actions")
-        self.assertRegex(alerts, r"policy warnings[^\n]*verify[^\n]*exit code")
+        # status and changing actions warn, verify fails (internal/enterpriseunix
+        # policystate.go describePolicy); the first table row alerts on the exit code.
+        self.assertRegex(alerts, r"`status` and changing actions warn with `policy_not_applied`")
+        self.assertIn("`verify` reports either as an error and exits nonzero", alerts)
+        self.assertIn("| `verify` exit code | Not `0` |", alerts)
         self.assertNotIn("verify` reports each as an error", alerts)
 
 

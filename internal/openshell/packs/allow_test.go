@@ -252,12 +252,12 @@ func TestAllowActions(t *testing.T) {
 			err := eff.Allow(tc.action)
 			var v *Violation
 			isViolation := errors.As(err, &v)
-			switch {
-			case tc.want == allowed:
+			switch tc.want {
+			case allowed:
 				if err != nil {
 					t.Fatalf("Allow(%+v) = %v, want nil", tc.action, err)
 				}
-			case tc.want == invalid:
+			case invalid:
 				if err == nil || isViolation {
 					t.Fatalf("Allow(%+v) = %v, want a plain error", tc.action, err)
 				}

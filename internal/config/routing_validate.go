@@ -7,14 +7,15 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"regexp"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 var (
-	routingEnvNamePattern         = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-	routingModelIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
-	routingVersionPattern         = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$`)
+	routingEnvNamePattern         = lazyregexp.New(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	routingModelIdentifierPattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
+	routingVersionPattern         = lazyregexp.New(`^v?[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$`)
 )
 
 const (

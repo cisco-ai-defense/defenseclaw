@@ -1,26 +1,108 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import os
 import stat
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import yaml
 from click.testing import CliRunner
 from defenseclaw import config as dcconfig
 from defenseclaw import fail_mode as fail_mode_runtime
-from defenseclaw.commands import cmd_guardrail
+from defenseclaw.commands import cmd_doctor, cmd_guardrail
 from defenseclaw.context import AppContext
+from defenseclaw.doctor_hooks import _CLAUDE_CONTRACT_EVENTS, _CLAUDE_REQUIRED_HOOKS, _HERMES_REQUIRED_HOOKS
 from defenseclaw.fail_mode import (
     ConnectorFailModeState,
     connector_fail_mode_report,
     resolve_connector_fail_mode,
 )
 
+from tests.fail_mode_tier import policy_tier_follows_the_saved_fail_mode  # noqa: F401 - autouse fixture
+
 _WINDOWS_REGISTRATION_FRESHNESS = fail_mode_runtime._windows_registration_freshness
+
+
+def test_current_amp_bridge_reports_the_live_outage_tier(tmp_path: Path) -> None:
+    """A stopped gateway can leave an earlier plugin render on disk."""
+    plugin = tmp_path / "defenseclaw.ts"
+    plugin.write_text(
+        '// defenseclaw-call-time-outage-v1\nconst DC_FAIL_MODE: string = "closed"\n',
+        encoding="utf-8",
+    )
+    selected = {"mode": "closed"}
+    guardrail = SimpleNamespace(effective_hook_outage_fail_mode=lambda _name: selected["mode"])
+    cfg = SimpleNamespace(guardrail=guardrail)
+
+    assert fail_mode_runtime._read_amp_plugin_mode(plugin, cfg) == "closed"
+    selected["mode"] = "open"
+    assert fail_mode_runtime._read_amp_plugin_mode(plugin, cfg) == "open"
+
+
+def test_current_opencode_bridge_reports_the_live_outage_tier(tmp_path: Path) -> None:
+    plugin = tmp_path / "defenseclaw.js"
+    plugin.write_text(
+        '// defenseclaw-call-time-outage-v1\nconst DC_FAIL_MODE = "closed";\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "hook_contract_lock.json").write_text(
+        json.dumps({"connectors": {"opencode": {"locations": {"hook_config_paths": [str(plugin)]}}}}),
+        encoding="utf-8",
+    )
+    selected = {"mode": "closed"}
+    guardrail = SimpleNamespace(effective_hook_outage_fail_mode=lambda _name: selected["mode"])
+    cfg = SimpleNamespace(data_dir=str(tmp_path), guardrail=guardrail)
+
+    assert fail_mode_runtime._read_opencode_plugin_mode(cfg) == "closed"
+    selected["mode"] = "open"
+    assert fail_mode_runtime._read_opencode_plugin_mode(cfg) == "open"
+
+
+def test_current_shell_helper_reports_the_live_outage_tier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    (hooks / "codex-hook.sh").write_text('FAIL_MODE="closed"\n', encoding="utf-8")
+    (hooks / "_hardening.sh").write_text("# defenseclaw-call-time-outage-v1\n", encoding="utf-8")
+    selected = {"mode": "closed"}
+    guardrail = SimpleNamespace(effective_hook_outage_fail_mode=lambda _name: selected["mode"])
+    cfg = SimpleNamespace(data_dir=str(tmp_path), deployment_mode="", guardrail=guardrail)
+    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: False)
+
+    assert fail_mode_runtime._platform_runtime_source(cfg, "codex") == ("hook-script", "closed")
+    selected["mode"] = "open"
+    assert fail_mode_runtime._platform_runtime_source(cfg, "codex") == ("hook-script", "open")
+
+# The fail-mode lines of real per-user Unix hook renders; the Go test
+# TestUnixHookFailModeLinesMatchTheSharedGolden checks them against Setup.
+_HOOK_FAIL_MODE_LINES = json.loads(
+    (
+        Path(__file__).resolve().parents[2] / "internal/gateway/connector/testdata/unix_hook_fail_mode_lines.json"
+    ).read_text(encoding="utf-8")
+)
+
+# The hooks/.hookcfg bodies the Go test TestReadHookSidecarSharedVectors runs
+# through the native hook's reader (readHookSidecar).
+_WINDOWS_SIDECAR_VECTORS = json.loads(
+    (Path(__file__).resolve().parents[2] / "internal/cli/testdata/windows_hook_sidecar_vectors.json").read_text(
+        encoding="utf-8"
+    )
+)["vectors"]
+
+
+def _legacy_open_hook_lines(script: str) -> list[str]:
+    """Model an older rendered hook that still contains an open mode."""
+    return [
+        line.replace('FAIL_MODE="closed"', 'FAIL_MODE="open"')
+        if line.startswith('FAIL_MODE="closed"') else line
+        for line in _HOOK_FAIL_MODE_LINES[f"{script}/closed"]
+    ]
 
 _SHARED_HOOK_SCRIPTS = (
     "inspect-tool.sh",
@@ -35,6 +117,11 @@ _SHARED_HOOK_SCRIPTS = (
 def _clear_global_fail_mode(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.delenv("DEFENSECLAW_FAIL_MODE", raising=False)
     monkeypatch.setattr("defenseclaw.fail_mode._windows_registration_freshness", lambda *_args: None)
+    if sys.platform == "win32":
+        # These fixtures model baked runtime mode and lock digests, not native
+        # agent hook files. The real registration is checked in the Windows
+        # doctor and hook-integrity suites.
+        monkeypatch.setattr("defenseclaw.fail_mode.registration_integrity_drift", lambda *_args: [])
     yield
 
 
@@ -94,13 +181,16 @@ def _write_current_runtime(cfg: SimpleNamespace, home: Path, modes: dict[str, st
     for script_name in _SHARED_HOOK_SCRIPTS:
         script_body = f"canonical shared hook: {script_name}\n".encode()
         (hook_dir / script_name).write_bytes(script_body)
+        # Setup installs hook scripts 0700; a script the agent cannot run is drift (w20).
+        (hook_dir / script_name).chmod(0o700)
         shared_digests[script_name] = "sha256:" + hashlib.sha256(script_body).hexdigest()
     entries = {}
     for name, mode in modes.items():
         script_name = "claude-code-hook.sh" if name == "claudecode" else f"{name}-hook.sh"
         script_path = hook_dir / script_name
-        script_body = f'FAIL_MODE="${{DEFENSECLAW_FAIL_MODE:-{mode}}}"\n'.encode()
+        script_body = ("\n".join(_HOOK_FAIL_MODE_LINES[f"{script_name}/{mode}"]) + "\n").encode()
         script_path.write_bytes(script_body)
+        script_path.chmod(0o700)
         config_path = home / (".claude/settings.json" if name == "claudecode" else ".codex/managed_config.toml")
         entries[name] = {
             "connector": name,
@@ -252,7 +342,8 @@ def test_scoped_amp_fail_mode_refreshes_plugin_registration(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"amp": "open", "codex": "open"})
+    # The strict tier (closed) with a plugin still rendered open.
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"amp": "closed", "codex": "closed"})
     plugin_path = tmp_path / "amp-home" / "plugins" / "defenseclaw.ts"
     _write_current_amp_runtime(cfg, plugin_path, "open")
     monkeypatch.setattr("defenseclaw.fail_mode.amp_policy_plugin_path", lambda: str(plugin_path))
@@ -276,7 +367,9 @@ def test_global_amp_fail_mode_refreshes_plugin_registration(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"amp": "open"})
+    # The strict tier (closed) with a plugin still rendered open.
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"amp": "closed"})
+    cfg.guardrail.hook_fail_mode = "closed"
     plugin_path = tmp_path / "amp-home" / "plugins" / "defenseclaw.ts"
     _write_current_amp_runtime(cfg, plugin_path, "open")
     monkeypatch.setattr("defenseclaw.fail_mode.amp_policy_plugin_path", lambda: str(plugin_path))
@@ -314,7 +407,7 @@ def _write_opencode_runtime(
                 "connectors": {
                     "opencode": {
                         "connector": "opencode",
-                        "contract_id": "opencode-hooks-v1",
+                        "contract_id": "opencode-hooks-v2",
                         "hook_fail_mode": lock_mode,
                         "locations": {"hook_config_paths": [str(plugin_path)]},
                     }
@@ -329,27 +422,30 @@ def _write_opencode_runtime(
 def test_fail_mode_state_reports_effective_provenance() -> None:
     state = ConnectorFailModeState(
         connector="codex",
-        desired="closed",
-        configured="closed",
-        runtime="open",
+        desired="open",
+        configured="open",
+        runtime="closed",
         sources=(
-            ("config", "closed"),
+            ("config", "open"),
             ("windows-sidecar", "closed"),
-            ("process-env", "open"),
+            ("claude-env", "open"),
             ("registration-lock", "open"),
         ),
-        drift=("process-env-open",),
+        drift=("windows-sidecar-closed",),
     )
 
     report = state.to_report()
 
-    assert report["effective"] == "open"
-    assert report["provenance"] == "process-env"
-    assert report["configured"] == "closed"
-    assert report["drift"] == ["process-env-open"]
+    assert report["effective"] == "closed"
+    # Claude Code's settings env is registration evidence, never the source
+    # of the runtime mode: no hook reads a fail mode from its environment.
+    assert report["provenance"] == "windows-sidecar"
+    assert report["configured"] == "open"
+    assert report["drift"] == ["windows-sidecar-closed"]
     assert report["note"] == ""
+    assert "caller_env" not in report
 
-    # GAP-0129: closed in config.yaml with open hooks is intended in observe mode, and the report says so.
+    # The per-user default-tier outage mode can differ from the saved value.
     observe = ConnectorFailModeState(
         connector="claudecode",
         desired="open",
@@ -357,9 +453,101 @@ def test_fail_mode_state_reports_effective_provenance() -> None:
         runtime="open",
         sources=(("config", "closed"), ("hook-script", "open"), ("claude-env", "open")),
         drift=(),
+        deployment="per-user",
+        policy_tier="default",
     ).to_report()
     assert observe["effective"] == "open" and observe["drift"] == []
-    assert observe["note"] == "observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed applies in action mode"
+    assert (
+        observe["note"] == "the default per-user policy tier keeps gateway outages fail-open; "
+        "guardrail.hook_fail_mode=closed does not control hook failures here"
+    )
+
+
+def test_closed_per_user_hook_note_does_not_claim_observe_mode() -> None:
+    # A saved open preference on a per-user action-mode host is overridden by
+    # the closed hook rule. Status must name that rule, not observe mode.
+    state = ConnectorFailModeState(
+        connector="codex",
+        desired="closed",
+        configured="open",
+        runtime="closed",
+        sources=(("config", "open"), ("hook-script", "closed")),
+        drift=(),
+        deployment="per-user",
+    )
+    report = state.to_report()
+    assert report["effective"] == "closed"
+    assert report["note"] == (
+        "this per-user deployment keeps hooks fail-closed; "
+        "guardrail.hook_fail_mode=open does not control hook failures here"
+    )
+
+
+@pytest.mark.parametrize(
+    ("deployment", "tier", "configured", "desired", "reason"),
+    [
+        ("per-user", "default", "closed", "open", "the default per-user policy tier keeps gateway outages fail-open"),
+        ("per-user", "strict", "open", "closed", "the strict per-user policy tier keeps gateway outages fail-closed"),
+        ("managed", "default", "open", "closed", "managed application protection selects hooks fail-closed"),
+        ("secure-client", "default", "closed", "open", "Secure Client policy selects hooks fail-open"),
+    ],
+)
+def test_fail_mode_note_names_deployment_and_tier_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    deployment: str,
+    tier: str,
+    configured: str,
+    desired: str,
+    reason: str,
+) -> None:
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"cursor": ""})
+    cfg.guardrail.hook_fail_mode = configured
+    cfg.guardrail.effective_hook_fail_mode = lambda _name: desired
+    cfg.guardrail.hook_policy_tier = lambda _name: tier
+    cfg.managed_outside_secure_client = lambda: deployment == "managed"
+    cfg.guardrail.secure_client_hook_fail_modes = lambda: deployment == "secure-client"
+    monkeypatch.setattr(fail_mode_runtime, "_platform_runtime_source", lambda _cfg, _name: ("hook-script", desired))
+
+    state = resolve_connector_fail_mode(cfg, "cursor")
+
+    assert state.desired == desired
+    assert state.effective == desired
+    assert state.note == (
+        f"{reason}; guardrail.hook_fail_mode={configured} does not control hook failures here"
+    )
+
+
+@pytest.mark.parametrize("loaded", [False, True])
+def test_fail_mode_note_names_no_saved_value_when_none_is_saved(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    loaded: bool,
+) -> None:
+    # GAP-2248: with no hook fail mode saved (a fresh or upgraded per-user
+    # install on the default tier), doctor said "guardrail.hook_fail_mode=closed
+    # does not control hook failures here" although config.yaml saves none.
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"cursor": ""})
+    if loaded:
+        # What load() builds from a config.yaml without the key: the field
+        # holds the closed default and the saved flag is off.
+        cfg.guardrail = dcconfig.GuardrailConfig(enabled=True, connectors=cfg.guardrail.connectors)
+        assert cfg.guardrail.hook_fail_mode == "closed"
+    else:
+        cfg.guardrail.hook_fail_mode = ""
+    cfg.guardrail.effective_hook_fail_mode = lambda _name: "open"
+    cfg.guardrail.hook_policy_tier = lambda _name: "default"
+    cfg.managed_outside_secure_client = lambda: False
+    cfg.guardrail.secure_client_hook_fail_modes = lambda: False
+    monkeypatch.setattr(fail_mode_runtime, "_platform_runtime_source", lambda _cfg, _name: ("hook-script", "open"))
+
+    state = resolve_connector_fail_mode(cfg, "cursor")
+
+    assert state.effective == "open"
+    assert "=closed" not in state.to_report()["note"]
+    assert state.note == (
+        "the default per-user policy tier keeps gateway outages fail-open; guardrail.hook_fail_mode is not set"
+    )
 
 
 def test_opencode_fail_mode_uses_baked_plugin_and_ignores_process_env(
@@ -377,9 +565,7 @@ def test_opencode_fail_mode_uses_baked_plugin_and_ignores_process_env(
     assert ("process-env", "open") not in state.sources
 
 
-def test_opencode_fail_mode_reports_managed_plugin_drift(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_opencode_fail_mode_reports_managed_plugin_drift(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"opencode": "closed"})
     _write_opencode_runtime(cfg, tmp_path, plugin_mode="open", lock_mode="closed")
 
@@ -409,12 +595,87 @@ def test_connector_fail_mode_report_uses_disposable_windows_runtime(
 
 
 @pytest.mark.parametrize("connector", ["antigravity", "copilot", "hermes"])
-def test_connector_fail_mode_report_upstream_fail_open_preserves_configured_but_reports_open(
+def test_native_deny_connector_reports_the_mode_its_hook_renders(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    connector: str,
+) -> None:
+    # A per-user Copilot CLI, Antigravity or Hermes hook follows its fail
+    # mode: closed blocks every failure DefenseClaw sees, and the report names
+    # the vendor limit it keeps.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {connector: "closed"})
+    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: False)
+    monkeypatch.setattr(fail_mode_runtime, "_native_deny_registration_freshness", lambda *_args: None, raising=False)
+    _register_native_deny_hook(monkeypatch, cfg, home, connector)
+    script = f"{connector}-hook.sh"
+    hook = Path(cfg.data_dir) / "hooks" / script
+    if connector != "hermes":
+        # Hermes' read-back also seals and executes the registered script;
+        # the fixture above already installed its closed, probed render.
+        hook.write_text("\n".join(_HOOK_FAIL_MODE_LINES[f"{script}/closed"]) + "\n", encoding="utf-8")
+
+    report = connector_fail_mode_report(cfg, connector)
+
+    assert report["configured"] == "closed"
+    assert report["effective"] == "closed"
+    assert report["runtime"] == "closed"
+    assert report["provenance"] == "hook-script"
+    assert report["current"] is True
+    label = {"antigravity": "Antigravity", "copilot": "Copilot", "hermes": "Hermes"}[connector]
+    assert report["note"] == (
+        f"DefenseClaw failures block; {label} itself lets a call run when the hook times out or cannot start"
+    )
+
+    # A hook rendered open while config says closed is drift, so doctor and
+    # verify report it instead of passing.
+    hook.write_text("\n".join(_legacy_open_hook_lines(script)) + "\n", encoding="utf-8")
+    report = connector_fail_mode_report(cfg, connector)
+    assert report["effective"] == "open"
+    assert report["desired"] == "closed"
+    assert report["current"] is False
+    assert report["drift"] == (
+        # Hermes seals its script in the contract lock: the open rewrite is
+        # also an edit of the sealed hook (registration_integrity_drift). The
+        # sealed-script runtime check (hook_runtime_problems) reads POSIX
+        # scripts only, so a Windows host simulating this hook never runs it.
+        ["registration-digest-stale", *(["hook-runtime-stale"] if os.name != "nt" else []), "hook-script-open"]
+        if connector == "hermes"
+        else ["hook-script-open"]
+    )
+    assert report["note"] == ""
+
+
+@pytest.mark.parametrize("connector", ["antigravity", "copilot", "hermes"])
+def test_native_deny_connector_reads_the_windows_hookcfg(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    connector: str,
+) -> None:
+    # r104 W3 G3-upg: the per-user hooks print the agent's native denial for
+    # their own failures in fail mode closed, so they are no upstream
+    # fail-open (Secure Client still is).
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {connector: "closed"})
+    (Path(cfg.data_dir) / "hooks" / ".hookcfg").write_text(
+        json.dumps({"version": 2, "gateway_addr": "127.0.0.1:18970", "fail_modes": {connector: "open"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: True)
+
+    report = connector_fail_mode_report(cfg, connector)
+
+    assert report["runtime"] == "open"
+    assert "windows-sidecar-open" in report["drift"]
+
+
+@pytest.mark.parametrize("connector", ["antigravity", "copilot", "hermes"])
+def test_secure_client_native_deny_connector_stays_upstream_fail_open(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     connector: str,
 ) -> None:
     cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {connector: "closed"})
+    cfg.deployment_mode = "managed_enterprise"
+    cfg.managed_outside_secure_client = lambda: False
 
     report = connector_fail_mode_report(cfg, connector)
 
@@ -476,6 +737,41 @@ def test_windows_registration_freshness_surfaces_codex_effective_policy_block(
     assert observed["connector"] == "codex"
 
 
+@pytest.mark.parametrize(
+    ("states", "expected", "attempts"),
+    [
+        (["access-denied", "current"], None, 2),
+        (["access-denied"] * 5, "registration-access-denied", 5),
+        (["policy-blocked"], "registration-policy-blocked", 1),
+    ],
+)
+def test_windows_registration_freshness_retries_access_denied_without_accepting_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, states: list[str], expected: str | None, attempts: int
+) -> None:
+    checks = iter(states)
+    validate = MagicMock(
+        side_effect=lambda **_kwargs: SimpleNamespace(healthy=(state := next(checks)) == "current", state=state)
+    )
+    waits: list[float] = []
+    monkeypatch.setattr("defenseclaw.doctor_hooks.validate_windows_hook_registration", validate)
+    monkeypatch.setattr("time.sleep", waits.append)
+
+    assert _WINDOWS_REGISTRATION_FRESHNESS(SimpleNamespace(data_dir=str(tmp_path)), "claudecode") == expected
+    assert validate.call_count == attempts
+    assert len(waits) == attempts - 1 and sum(waits) <= 2
+    if expected:
+        monkeypatch.setattr("defenseclaw.fail_mode.path_gateway", lambda **_kwargs: str(tmp_path / "gateway.exe"))
+        monkeypatch.setattr(
+            "defenseclaw.fail_mode.subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0)
+        )
+        monkeypatch.setattr(
+            "defenseclaw.fail_mode.resolve_connector_fail_mode",
+            lambda *_args: SimpleNamespace(current=False, connector="claudecode", drift=(expected,)),
+        )
+        with pytest.raises(OSError, match="defenseclaw doctor"):
+            fail_mode_runtime.reconcile_connector_registration(SimpleNamespace(data_dir=str(tmp_path)), "claudecode")
+
+
 def test_windows_codex_presence_uses_native_registration_validator(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -508,13 +804,12 @@ def test_windows_resolver_reports_effective_mixed_modes(monkeypatch: pytest.Monk
     ):
         claude = resolve_connector_fail_mode(cfg, "claudecode")
         codex = resolve_connector_fail_mode(cfg, "codex")
+    # Each connector runs its own tier's outage mode (oss-outage-open).
     assert claude.current and claude.runtime == "closed"
-    assert codex.current and codex.runtime == "open"
+    assert codex.current and codex.desired == "open" and codex.runtime == "open"
 
 
-def test_windows_resolver_accepts_sealed_claude_v2_contract(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_windows_resolver_accepts_sealed_claude_v2_contract(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed"})
     _write_current_runtime(cfg, home, {"claudecode": "closed"})
     lock_path = Path(cfg.data_dir) / "hook_contract_lock.json"
@@ -541,6 +836,7 @@ def test_windows_resolver_initial_open_open_and_reverse_mixed_mode(
         patch("defenseclaw.fail_mode._is_windows", return_value=True),
         patch("defenseclaw.fail_mode.Path.home", return_value=home),
     ):
+        # The default tier's open is current (oss-outage-open).
         assert resolve_connector_fail_mode(cfg, "claudecode").current
         assert resolve_connector_fail_mode(cfg, "codex").current
 
@@ -548,15 +844,16 @@ def test_windows_resolver_initial_open_open_and_reverse_mixed_mode(
         _write_current_runtime(cfg, home, {"claudecode": "open", "codex": "closed"})
         claude = resolve_connector_fail_mode(cfg, "claudecode")
         codex = resolve_connector_fail_mode(cfg, "codex")
-    assert claude.current and claude.runtime == "open"
+    assert claude.current and claude.runtime == "open" and claude.desired == "open"
     assert codex.current and codex.runtime == "closed"
 
 
-def test_cli_status_reports_effective_mixed_modes_without_drift(
+def test_cli_status_reports_old_open_mode_as_drift(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed", "codex": "open"})
-    _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "open"})
+    # Codex's tier gives open, but its installed hook still records closed.
+    _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "closed"})
     app = AppContext()
     app.cfg = cfg
     app.logger = MagicMock()
@@ -568,7 +865,7 @@ def test_cli_status_reports_effective_mixed_modes_without_drift(
     assert result.exit_code == 0, result.output
     assert "Claude Code" in result.output and "closed" in result.output
     assert "Codex" in result.output and "open" in result.output
-    assert "runtime fail-mode drift" not in result.output
+    assert "runtime fail-mode drift" in result.output
 
 
 def test_stale_persisted_closed_runtime_open_is_not_current(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -582,7 +879,10 @@ def test_stale_persisted_closed_runtime_open_is_not_current(monkeypatch: pytest.
     assert not state.current
     assert state.desired == "closed"
     assert state.runtime == "open"
-    assert "claude-env-open" in state.drift
+    # The sidecar is the stale carrier; the settings env is no input of the
+    # native hook (round h), so it is not reported.
+    assert "windows-sidecar-open" in state.drift
+    assert "claude-env-open" not in state.drift
 
 
 def test_stale_closed_never_reports_already_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -607,12 +907,44 @@ def test_stale_closed_never_reports_already_closed(monkeypatch: pytest.MonkeyPat
     reconcile.assert_called_once()
 
 
-def test_raw_global_closed_observe_runtime_open_creates_scoped_override(
+@pytest.mark.parametrize("windows", [False, True])
+def test_same_mode_command_repairs_malformed_shared_fail_map(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, windows: bool
+) -> None:
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed", "codex": "closed"})
+    _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "closed"})
+    sidecar = Path(cfg.data_dir) / "hooks" / ".hookcfg"
+    body = json.loads(sidecar.read_text(encoding="utf-8"))
+    body["fail_modes"] = None
+    sidecar.write_text(json.dumps(body), encoding="utf-8")
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=windows),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+        patch("defenseclaw.fail_mode._codex_registration_current", return_value=True),
+        patch("defenseclaw.fail_mode._unix_registration_freshness", return_value=None),
+        patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration") as reconcile,
+    ):
+        state = resolve_connector_fail_mode(cfg, "codex")
+        result = CliRunner().invoke(
+            cmd_guardrail.fail_mode_cmd, ["closed", "--connector", "codex", "--yes"], obj=app
+        )
+    assert "shared-sidecar-malformed" in state.drift
+    assert "nothing to do" not in result.output
+    assert result.exit_code == 0, result.output
+    reconcile.assert_called_once_with(cfg, "codex")
+
+
+def test_secure_client_unset_global_runtime_open_creates_scoped_override(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "open", "codex": "open"})
-    cfg.guardrail.hook_fail_mode = "closed"
+    cfg.guardrail.hook_fail_mode = ""
     cfg.guardrail.connectors["claudecode"].hook_fail_mode = ""
+    # Under Secure Client an unset fail mode is open (#1163).
+    cfg.guardrail._secure_client = True
     _write_current_runtime(cfg, home, {"claudecode": "open", "codex": "open"})
     app = AppContext()
     app.cfg = cfg
@@ -660,7 +992,8 @@ def test_legacy_hookcfg_is_runtime_fallback_but_requires_migration(
 def test_scoped_reconcile_failure_rolls_back_config_and_registration(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "open", "codex": "open"})
+    # Claude Code in the strict tier with its hook still rendered open.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed", "codex": "open"})
     _write_current_runtime(cfg, home, {"claudecode": "open", "codex": "open"})
     original_settings = (home / ".claude" / "settings.json").read_bytes()
     tracked_paths = [
@@ -697,7 +1030,7 @@ def test_scoped_reconcile_failure_rolls_back_config_and_registration(
             obj=app,
         )
     assert result.exit_code != 0
-    assert cfg.guardrail.connectors["claudecode"].hook_fail_mode == "open"
+    assert cfg.guardrail.connectors["claudecode"].hook_fail_mode == "closed"
     assert (home / ".claude" / "settings.json").read_bytes() == original_settings
     assert {path: path.read_bytes() for path in tracked_paths} == original_runtime
     assert "restored" in result.output
@@ -705,6 +1038,52 @@ def test_scoped_reconcile_failure_rolls_back_config_and_registration(
     # copy of the snapshot over the other writer's commit (GAP-0303).
     assert cfg.save.call_count == 2
     assert config_yaml.read_bytes() == concurrent
+
+
+def test_global_rollback_keeps_an_unset_global_fail_mode_unset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # GAP-2019: a default-tier install has no saved global hook_fail_mode
+    # (it reads "closed" in memory). A failed `guardrail fail-mode closed
+    # --yes` must not roll back to a saved "closed" the user never chose.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "", "codex": ""})
+    cfg.guardrail = dcconfig.GuardrailConfig()
+    cfg.guardrail.enabled = True
+    cfg.guardrail.connectors = {
+        name: dcconfig.PerConnectorGuardrailConfig(hook_fail_mode="") for name in ("claudecode", "codex")
+    }
+    assert not cfg.guardrail._hook_fail_mode_saved
+    _write_current_runtime(cfg, home, {"claudecode": "open", "codex": "open"})
+    saves: list[tuple[str, bool, dict[str, str]]] = []
+    cfg.save = MagicMock(
+        side_effect=lambda **_kw: saves.append(
+            (
+                cfg.guardrail.hook_fail_mode,
+                cfg.guardrail._hook_fail_mode_saved,
+                {name: entry.hook_fail_mode for name, entry in cfg.guardrail.connectors.items()},
+            )
+        )
+    )
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    refused = OSError("copilot: cannot repair event preToolUse: an independent or unrecognized handler is present")
+    with (
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+        patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration", side_effect=refused),
+        patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=True),
+        patch("defenseclaw.commands.cmd_setup._restart_services", side_effect=refused),
+    ):
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app)
+    assert result.exit_code != 0, result.output
+    assert "restored" in result.output
+    assert len(saves) == 2, saves
+    assert saves[0][0] == "closed" and saves[0][1]
+    # The rollback save writes the global back unset, not as a saved closed.
+    assert saves[1][1] is False, saves
+    assert saves[1][2] == {"claudecode": "", "codex": ""}
+    assert cfg.guardrail.hook_fail_mode == "closed"
+    assert not cfg.guardrail._hook_fail_mode_saved
 
 
 def test_truthful_noop_requires_current_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -888,13 +1267,40 @@ def test_unix_registration_freshness_requires_current_script_path(
         assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is None
 
 
+@pytest.mark.parametrize(
+    ("connector", "script"),
+    [("claudecode", "claude-code-hook.sh"), ("codex", "codex-hook.sh"), ("devin", "devin-hook.sh")],
+)
+def test_unix_registration_freshness_checks_each_connectors_own_script(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, connector: str, script: str
+) -> None:
+    # GAP-0027: a current Devin registration was reported stale because the
+    # check looked for codex-hook.sh in it.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {connector: "closed"})
+    with (
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+        patch("defenseclaw.connector_paths.Path.home", return_value=home),
+    ):
+        registration = Path(fail_mode_runtime.connector_config_files(connector, workspace_dir="")[0])
+        registration.parent.mkdir(parents=True, exist_ok=True)
+        registration.write_text(json.dumps({"command": "/stale/" + script}), encoding="utf-8")
+        assert fail_mode_runtime._unix_registration_freshness(cfg, connector) == "registration-command-stale"
+        current = str((Path(cfg.data_dir) / "hooks" / script).resolve())
+        registration.write_text(json.dumps({"command": current}), encoding="utf-8")
+        assert fail_mode_runtime._unix_registration_freshness(cfg, connector) is None
+
+
 def test_global_fail_mode_leaves_a_stopped_gateway_stopped_and_lists_effective_modes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # GAP-1370: observe connectors already run fail-open, and a mixed roster
-    # (hermes has no runtime registration) must not start a stopped gateway.
+    # GAP-1370: under Secure Client connectors with an unset fail mode
+    # already run fail-open (#1163), and a mixed roster (hermes has no
+    # runtime registration) must not start a stopped gateway.
     cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "", "hermes": ""})
-    cfg.guardrail.hook_fail_mode = "closed"
+    cfg.guardrail.hook_fail_mode = ""
+    cfg.guardrail._secure_client = True
+    cfg.deployment_mode = "managed_enterprise"
+    cfg.managed_outside_secure_client = lambda: False
     app = AppContext()
     app.cfg = cfg
     app.logger = MagicMock()
@@ -908,17 +1314,43 @@ def test_global_fail_mode_leaves_a_stopped_gateway_stopped_and_lists_effective_m
     restart.assert_not_called()
     reconcile.assert_called_once_with(cfg, "claudecode")
     assert "closed → open" not in result.output
-    assert "(hermes): already open; saved as its own setting" in result.output
+    # Neither connector is listed as a closed -> open change: both already
+    # resolve open.
+    assert "Hermes (hermes): " in result.output
     assert "left stopped" in result.output and "defenseclaw-gateway start" in result.output
     assert cfg.guardrail.connectors["hermes"].hook_fail_mode == "open"
+
+
+def test_fail_mode_help_and_docs_describe_registration_refresh() -> None:
+    result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["--help"])
+    assert result.exit_code == 0, result.output
+    help_text = " ".join(result.output.split())
+    docs = " ".join(
+        (Path(__file__).resolve().parents[2] / "docs-site/content/docs/reference/fail-modes.mdx")
+        .read_text(encoding="utf-8").split()
+    )
+    persisted = docs.split("## Persisted fail mode", 1)[1].split("## ", 1)[0]
+    for text in (help_text, persisted):
+        assert "runtime registrations" in text and "refresh" in text
+        assert "--restart" in text and "--no-restart" in text
+        assert "stopped gateway" in text
+        assert "restarts the gateway so" not in text
+        assert "restarts the gateway by default" not in text
 
 
 def test_fail_mode_change_list_matches_status_runtime_and_cursor_contract(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     # GAP-1370: the change list shows the installed runtime value that
-    # guardrail status shows, and Cursor in action mode stays fail-closed.
+    # guardrail status shows. The guardrail mode no longer pins Cursor's fail
+    # mode: it changes like every other connector.
     cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"codex": "", "cursor": ""})
+    cfg.deployment_mode = "managed_enterprise"
+    cfg.managed_outside_secure_client = lambda: True
+    # The resolver reads the managed profile from the config that owns the
+    # guardrail (sa-port-peer: only a managed config may keep an open).
+    cfg.application_protection = SimpleNamespace(enabled=False)
+    cfg.guardrail._owner = lambda: cfg
     cfg.guardrail.hook_fail_mode = "closed"
     cfg.guardrail.mode = "observe"
     cfg.guardrail.connectors["cursor"].mode = "action"
@@ -935,10 +1367,10 @@ def test_fail_mode_change_list_matches_status_runtime_and_cursor_contract(
         result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["open", "--yes"], obj=app)
     assert result.exit_code == 0, result.output
     restart.assert_not_called()
-    assert "(codex): closed → open" in result.output
+    assert "(codex): closed → open" in result.output or "(codex): closed -> open" in result.output
     assert "(codex): already open" not in result.output
-    assert "(cursor): stays closed" in result.output
-    assert "Cursor action mode keeps hook failures closed" in result.output
+    assert "(cursor): stays closed" not in result.output
+    assert "(cursor): closed → open" in result.output or "(cursor): closed -> open" in result.output
 
 
 def test_rollback_skips_unchanged_immutable_config(tmp_path) -> None:
@@ -950,3 +1382,2014 @@ def test_rollback_skips_unchanged_immutable_config(tmp_path) -> None:
     with patch.object(fail_mode_runtime.os, "replace", side_effect=PermissionError("immutable")) as replace:
         fail_mode_runtime.restore_fail_mode_transaction((snapshot,))
     replace.assert_not_called()
+
+
+@pytest.mark.parametrize("windows", [False, True])
+def test_hermes_reports_its_configured_fail_mode_on_every_os(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    windows: bool,
+) -> None:
+    # GAP-0150 (Linux, macOS) and GAP-0269 (the Windows native hook): the
+    # Hermes hook blocks in fail mode closed, so it is not reported as
+    # upstream fail-open.
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"hermes": "closed"})
+    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: windows)
+
+    report = connector_fail_mode_report(cfg, "hermes")
+
+    assert report["configured"] == "closed"
+    assert report["effective"] == "closed"
+    # The native Windows hook fails closed on a missing sidecar, which status
+    # names (g-hooks-upg); a missing Unix script falls back to the config.
+    assert report["provenance"] == ("no-installed-mode" if windows else "config")
+    assert ("windows-sidecar" if windows else "hook-script") + "-missing" in report["drift"]
+    assert fail_mode_runtime.upstream_fail_open(cfg, "hermes") is False
+    assert fail_mode_runtime.upstream_fail_open(cfg, "copilot") is False
+
+
+# ── 1.0.4 review (GAP-0315): the environment only tightens ──────────────────
+
+
+@pytest.mark.parametrize("key", sorted(_HOOK_FAIL_MODE_LINES))
+def test_unix_resolver_reads_the_installed_mode_of_a_real_render(key: str, tmp_path: Path) -> None:
+    # A 1.0.4 per-user render bakes closed even if an old option requests
+    # open; reading it as missing made a refresh fail verification.
+    script = tmp_path / "hook.sh"
+    script.write_text("#!/bin/bash\n" + "\n".join(_HOOK_FAIL_MODE_LINES[key]) + "\n", encoding="utf-8")
+    assert fail_mode_runtime._read_baked_hook_state(script) == ("closed", False)
+
+
+@pytest.mark.parametrize("mode", ["open", "closed"])
+def test_unix_resolver_still_reads_a_legacy_render(mode: str, tmp_path: Path) -> None:
+    # 1.0.3 and older renders (and Secure Client renders) keep the override,
+    # so the mode read is only their default.
+    script = tmp_path / "hook.sh"
+    script.write_text(f'#!/bin/bash\nFAIL_MODE="${{DEFENSECLAW_FAIL_MODE:-{mode}}}"\n', encoding="utf-8")
+    assert fail_mode_runtime._read_baked_hook_state(script) == (mode, True)
+
+
+@pytest.mark.parametrize("windows", [False, True])
+def test_environment_open_does_not_reopen_a_closed_hook(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, windows: bool
+) -> None:
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed", "codex": "closed"})
+    _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "closed"})
+    monkeypatch.setenv("DEFENSECLAW_FAIL_MODE", "open")
+    monkeypatch.setattr(fail_mode_runtime, "_codex_registration_current", lambda *_args: True)
+    monkeypatch.setattr(fail_mode_runtime, "_unix_registration_freshness", lambda *_args: None)
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=windows),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
+        states = [resolve_connector_fail_mode(cfg, name) for name in ("claudecode", "codex")]
+    for state in states:
+        assert state.current, state.drift
+        assert state.effective == "closed"
+        assert state.provenance != "process-env"
+        assert all(source != "process-env" for source, _mode in state.sources)
+
+
+_DEPLOYMENTS = {
+    "per-user": None,
+    "managed-standalone": True,
+    "secure-client": False,
+}
+
+
+@pytest.mark.parametrize("deployment", sorted(_DEPLOYMENTS))
+@pytest.mark.parametrize("env_value", ["open", "closed", "Closed", " CLOSED "])
+@pytest.mark.parametrize("installed", ["closed"])
+@pytest.mark.parametrize("windows", [False, True])
+def test_no_environment_changes_the_reported_fail_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    windows: bool,
+    installed: str,
+    env_value: str,
+    deployment: str,
+) -> None:
+    # A current closed hook cannot be reopened by the caller's environment,
+    # on any deployment or OS. Old open installs are covered as drift below.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"codex": installed})
+    _write_current_runtime(cfg, home, {"codex": installed})
+    standalone = _DEPLOYMENTS[deployment]
+    if standalone is not None:
+        cfg.deployment_mode = "managed_enterprise"
+        cfg.managed_outside_secure_client = lambda: standalone
+    monkeypatch.setenv("DEFENSECLAW_FAIL_MODE", env_value)
+    monkeypatch.setattr(fail_mode_runtime, "_codex_registration_current", lambda *_args: True)
+    monkeypatch.setattr(fail_mode_runtime, "_unix_registration_freshness", lambda *_args: None)
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=windows),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
+        state = resolve_connector_fail_mode(cfg, "codex")
+        report = connector_fail_mode_report(cfg, "codex")
+    if windows and standalone is not None:
+        # A managed native hook runs on the authenticated runtime generation,
+        # which status cannot verify: the administrator's mode, unverified.
+        assert state.runtime is None and state.effective == installed
+        assert "windows-managed-runtime-unverified" in state.drift
+        assert not state.runtime_verified and "guardian" in report["note"]
+    else:
+        assert state.runtime == installed and state.effective == installed
+        assert state.provenance == ("windows-sidecar" if windows else "hook-script")
+        assert state.current, state.drift
+        assert report["note"] == ""
+    assert report["effective"] == installed
+    assert "caller_env" not in report
+    assert not hasattr(fail_mode_runtime, "_inherited_fail_mode")
+
+
+@pytest.mark.parametrize("windows", [False, True])
+def test_the_callers_environment_does_not_hide_an_installed_open_hook(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, windows: bool
+) -> None:
+    # Config asks for closed, the installed hook is still open: doctor's Mode
+    # row fails on effective != desired. A closed caller shell must not turn
+    # the report closed and hide that.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"codex": "closed"})
+    _write_current_runtime(cfg, home, {"codex": "open"})
+    if not windows:
+        script = Path(cfg.data_dir) / "hooks" / "codex-hook.sh"
+        script.write_text("\n".join(_legacy_open_hook_lines("codex-hook.sh")) + "\n", encoding="utf-8")
+    monkeypatch.setenv("DEFENSECLAW_FAIL_MODE", "closed")
+    monkeypatch.setattr(fail_mode_runtime, "_codex_registration_current", lambda *_args: True)
+    monkeypatch.setattr(fail_mode_runtime, "_unix_registration_freshness", lambda *_args: None)
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=windows),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
+        report = connector_fail_mode_report(cfg, "codex")
+    assert report["desired"] == "closed"
+    assert report["runtime"] == "open" and report["effective"] == "open"
+    assert not report["current"]
+
+
+@pytest.mark.parametrize("installed", ["open", "closed"])
+def test_a_missing_windows_sidecar_reports_closed_as_the_native_hook_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, installed: str
+) -> None:
+    # The native hook reads its mode from hooks/.hookcfg alone and fails
+    # closed without it (readHookSidecar). Status reads the same file, so a
+    # missing one reports closed, with the drift, whatever config.yaml asks.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"codex": "open"})
+    _write_current_runtime(cfg, home, {"codex": installed})
+    (Path(cfg.data_dir) / "hooks" / ".hookcfg").unlink()
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=True),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
+        report = connector_fail_mode_report(cfg, "codex")
+    assert report["runtime"] == "closed" and report["effective"] == "closed"
+    assert report["provenance"] == "no-installed-mode"
+    assert "windows-sidecar-missing" in report["drift"] and not report["current"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "{not json",
+        "[]",
+        '"open"',
+        "true",
+        '{"version": 1, "fail_modes": {"codex": "open"}, "legacy_fail_mode": "open"}',
+        '{"version": "2", "fail_modes": {"codex": "open"}}',
+        '{"version": 2.5, "fail_modes": {"codex": "open"}}',
+        '{"version": true, "fail_modes": {"codex": "open"}}',
+        '{"fail_modes": {"codex": "open"}}',
+        '{"version": 2, "fail_modes": {"codex": "open"}\nDEFENSECLAW_FAIL_MODE=open\n',
+        "  {\nDEFENSECLAW_FAIL_MODE=open\n",
+    ],
+)
+def test_windows_sidecar_report_reads_malformed_json_closed_as_the_native_hook_does(
+    tmp_path: Path, text: str
+) -> None:
+    # As readHookSidecar: JSON that does not parse or is not a v2 sidecar is
+    # malformed state and closed, never read as KEY=value lines (where a
+    # stray DEFENSECLAW_FAIL_MODE=open line would otherwise open it).
+    path = tmp_path / ".hookcfg"
+    path.write_text(text, encoding="utf-8")
+    assert fail_mode_runtime._read_windows_hook_mode(path, "codex") == ("closed", False)
+
+
+# The connector-scoped key of the 0.8.x KEY=value sidecar (a dynamic name).
+_SCOPED_CODEX_KEY = "DEFENSECLAW_FAIL_MODE" + "_CODEX"
+
+
+@pytest.mark.parametrize(
+    "text,want",
+    [
+        ("DEFENSECLAW_FAIL_MODE=open\n", "open"),
+        ("DEFENSECLAW_FAIL_MODE=open\n" + _SCOPED_CODEX_KEY + "=closed\n", "closed"),
+        ("export " + _SCOPED_CODEX_KEY + '="open"\nDEFENSECLAW_FAIL_MODE=closed\n', "open"),
+        ("DEFENSECLAW_FAIL_MODE=bogus\n", "closed"),
+        ("DEFENSECLAW_GATEWAY_ADDR=127.0.0.1:18970\n", None),
+    ],
+)
+def test_windows_flat_sidecar_report_matches_the_native_hook(tmp_path: Path, text: str, want: str | None) -> None:
+    # The 0.8.x KEY=value sidecar: the connector's own key comes first, as
+    # readHookSidecar reads it. None (no mode) is reported closed by
+    # resolve_connector_fail_mode.
+    path = tmp_path / ".hookcfg"
+    path.write_text(text, encoding="utf-8")
+    assert fail_mode_runtime._read_windows_hook_mode(path, "codex") == (want, True)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "DEFENSECLAW_FAIL_MODE=open\nDEFENSECLAW_FAIL_MODE=closed\n",
+        "DEFENSECLAW_FAIL_MODE=closed\nDEFENSECLAW_FAIL_MODE=open\n",
+        "\ufeff{broken\nDEFENSECLAW_FAIL_MODE=open\n",
+        "# note\n{broken\nDEFENSECLAW_FAIL_MODE=open\n",
+        "not a setting\nDEFENSECLAW_FAIL_MODE=open\n",
+    ],
+)
+def test_windows_sidecar_that_is_not_the_legacy_shape_is_closed(tmp_path: Path, text: str) -> None:
+    # 1.0.4 review (loop round 3 of G-hooks-upg): a byte-order mark or a
+    # comment hid the opening brace of broken JSON, and a following
+    # DEFENSECLAW_FAIL_MODE=open line then read open; a key given twice took
+    # its last value. Only a document with the KEY=value shape throughout,
+    # each key once, reads as one (connector.ParseLegacyHookSidecar).
+    path = tmp_path / ".hookcfg"
+    path.write_text(text, encoding="utf-8")
+    assert fail_mode_runtime._read_windows_hook_mode(path, "codex") == ("closed", False)
+
+
+@pytest.mark.parametrize("vector", _WINDOWS_SIDECAR_VECTORS, ids=lambda vector: vector["name"])
+def test_windows_sidecar_report_matches_the_native_hook_contract(tmp_path: Path, vector: dict) -> None:
+    # 1.0.4 review (loop round 2 of G-hooks-upg): a gateway_addr or peer entry
+    # that is not a string made the native hook run closed while status
+    # reported open, and a connector key in another case the other way round.
+    # Status reads every vector the Go test runs through readHookSidecar to
+    # the same mode.
+    path = tmp_path / ".hookcfg"
+    body = base64.b64decode(vector["body_b64"]) if "body_b64" in vector else vector.get("body", "").encode("utf-8")
+    kind = vector.get("kind", "")
+    if kind == "dir":
+        path.mkdir()
+    elif kind == "link":
+        target = tmp_path / "target"
+        target.write_bytes(body)
+        try:
+            path.symlink_to(target)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+    elif kind == "oversize":
+        path.write_bytes(body + b" " * (70 * 1024))
+    elif kind != "missing":
+        path.write_bytes(body)
+    mode, legacy = fail_mode_runtime._read_windows_hook_mode(path, vector["connector"])
+    assert (mode or "closed") == vector["mode"]
+    if "legacy" in vector:
+        assert legacy is vector["legacy"]
+
+
+@pytest.mark.parametrize("sidecar", ["missing", "closed", "malformed", "open"])
+@pytest.mark.parametrize("desired", ["open", "closed"])
+def test_managed_windows_status_does_not_report_the_sidecar_as_the_hook_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, desired: str, sidecar: str
+) -> None:
+    # 1.0.4 review (loop round 2 of G-hooks-upg): a managed native hook takes
+    # its mode from the authenticated runtime generation, never from
+    # hooks/.hookcfg, so a missing or stale sidecar made status and doctor
+    # report closed while the hook ran the administrator's open. Status
+    # cannot authenticate the generation: it reports the administrator's
+    # mode and says the runtime is unverified, whatever the sidecar holds.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"codex": desired})
+    _write_current_runtime(cfg, home, {"codex": desired})
+    cfg.deployment_mode = "managed_enterprise"
+    cfg.managed_outside_secure_client = lambda: True
+    # The resolver reads the managed profile from the config that owns the
+    # guardrail (sa-port-peer: only a managed config may keep an open).
+    cfg.application_protection = SimpleNamespace(enabled=False)
+    cfg.guardrail._owner = lambda: cfg
+    path = Path(cfg.data_dir) / "hooks" / ".hookcfg"
+    if sidecar == "missing":
+        path.unlink()
+    elif sidecar == "malformed":
+        path.write_text("{not json", encoding="utf-8")
+    else:
+        path.write_text(json.dumps({"version": 2, "fail_modes": {"codex": sidecar}}), encoding="utf-8")
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=True),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
+        report = connector_fail_mode_report(cfg, "codex")
+    assert report["effective"] == desired and report["runtime"] is None
+    assert report["provenance"] == "windows-managed-runtime-unverified"
+    assert report["runtime_verified"] is False
+    assert "windows-managed-runtime-unverified" in report["drift"] and not report["current"]
+    assert {"name": "windows-managed-runtime", "mode": None} in report["sources"]
+    assert not [reason for reason in report["drift"] if reason.startswith("windows-sidecar")]
+    assert not [source for source in report["sources"] if source["name"].startswith("windows-sidecar")]
+
+
+@pytest.mark.parametrize("secure_client", [False, True])
+@pytest.mark.parametrize("sidecar", ["missing", "closed", "malformed", "open"])
+@pytest.mark.parametrize(("configured", "deployed"), [("closed", "open"), ("open", "closed"), ("closed", "closed")])
+def test_doctor_never_passes_an_unverified_managed_windows_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    configured: str,
+    deployed: str,
+    sidecar: str,
+    secure_client: bool,
+) -> None:
+    # 1.0.4 review (loop round 2 of G-hooks-upg, post round 4): the
+    # administrator changes the mode (open to closed, say) while the guardian's
+    # authenticated runtime generation still runs the old one. Status cannot
+    # read that generation, yet it reported the configured mode as verified
+    # and doctor's Mode row passed. Every state of the sidecar the managed
+    # hook does not read, every pair of modes: the runtime is unverified, the
+    # report says why, and doctor warns (it can never verify it) instead of
+    # passing.
+    from defenseclaw.commands import cmd_doctor
+
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"codex": configured})
+    _write_current_runtime(cfg, home, {"codex": configured})
+    cfg.deployment_mode = "managed_enterprise"
+    cfg.managed_outside_secure_client = lambda: not secure_client
+    cfg.guardrail.mode = "action"
+    cfg.guardrail._secure_client = secure_client
+    cfg.skill_dirs = lambda connector=None: []
+    cfg.plugin_dirs = lambda connector=None: []
+    cfg.mcp_servers = lambda connector=None, **_: []
+    path = Path(cfg.data_dir) / "hooks" / ".hookcfg"
+    if sidecar == "missing":
+        path.unlink()
+    elif sidecar == "malformed":
+        path.write_text("{not json", encoding="utf-8")
+    else:
+        mode = deployed if sidecar == "open" else sidecar
+        path.write_text(json.dumps({"version": 2, "fail_modes": {"codex": mode}}), encoding="utf-8")
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=True),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
+        state = resolve_connector_fail_mode(cfg, "codex")
+        report = connector_fail_mode_report(cfg, "codex")
+    assert not state.runtime_verified and not state.current
+    assert report["runtime_verified"] is False and report["current"] is False
+    assert report["provenance"] == "windows-managed-runtime-unverified"
+    # cowork-1-0-8 GAP-0076: the installed CLI as typed in PowerShell; Setup
+    # puts no DefenseClaw command on PATH.
+    verify = r"`& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows verify --profile standalone`"
+    assert verify + " from an elevated PowerShell prompt" in report["note"], report["note"]
+    assert "`defenseclaw enterprise windows" not in report["note"]
+    emitted: list[tuple[str, str, str, str]] = []
+    with (
+        patch("defenseclaw.fail_mode.connector_fail_mode_report", return_value=report),
+        patch.object(cmd_doctor, "_workspace_dir", return_value=""),
+        patch.object(
+            cmd_doctor,
+            "_emit",
+            side_effect=lambda tag, label, detail="", **kw: emitted.append(
+                (tag, label, detail, str(kw.get("remediation") or ""))
+            ),
+        ),
+    ):
+        cmd_doctor._check_connector_inventory(cfg, "codex", cmd_doctor._DoctorResult())
+    rows = [row for row in emitted if row[1] == "Mode"]
+    assert [row[0] for row in rows] == ["warn"], rows
+    assert "unverified" in rows[0][2] and rows[0][3] == "from an elevated PowerShell prompt run " + verify, rows
+
+
+@pytest.mark.parametrize(
+    "body,want",
+    [
+        ({"version": 2, "fail_modes": None, "legacy_fail_mode": "open"}, ("closed", False)),
+        ({"version": 2, "fail_modes": [], "legacy_fail_mode": "open"}, ("closed", False)),
+        ({"version": 2, "fail_modes": "open", "legacy_fail_mode": "open"}, ("closed", False)),
+        ({"version": 2, "fail_modes": {"codex": ""}, "legacy_fail_mode": "open"}, ("closed", False)),
+        ({"version": 2, "fail_modes": {"codex": True}, "legacy_fail_mode": "open"}, ("closed", False)),
+        # An entry no installer writes is no readable mode (doctor fails it),
+        # never the legacy open (T4: hooks-upg loop 3 with w3-g3-hooks).
+        ({"version": 2, "fail_modes": {"codex": "bogus"}, "legacy_fail_mode": "open"}, (None, False)),
+        # Controls: an unrefreshed install keeps its legacy mode.
+        ({"version": 2, "legacy_fail_mode": "open"}, ("open", True)),
+        ({"version": 2, "fail_modes": {"claudecode": "closed"}, "legacy_fail_mode": "open"}, ("open", True)),
+        ({"version": 2, "fail_modes": {"codex": "open"}, "legacy_fail_mode": "closed"}, ("open", False)),
+    ],
+)
+def test_windows_sidecar_report_reads_a_malformed_map_as_the_native_hook_does(
+    tmp_path: Path, body: dict, want: tuple[str, bool]
+) -> None:
+    # 1.0.4 review (loop round 3): the native hook resolves a present but
+    # malformed connector map, or a blank or invalid entry, closed; status
+    # must not report the legacy open mode for it.
+    path = tmp_path / ".hookcfg"
+    path.write_text(json.dumps(body), encoding="utf-8")
+    assert fail_mode_runtime._read_windows_hook_mode(path, "codex") == want
+
+
+@pytest.mark.parametrize("windows", [False, True])
+@pytest.mark.parametrize("installed,settings_env", [("closed", "open")])
+def test_claude_settings_env_is_never_the_effective_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, windows: bool, installed: str, settings_env: str
+) -> None:
+    # Claude Code passes its settings env to the hook, which reads no fail
+    # mode from it: a closed installed mode stays closed. Setup takes back a
+    # value DefenseClaw wrote and keeps one the user set, so a value left
+    # there is not drift either (round h, GAP-1422).
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": installed})
+    _write_current_runtime(cfg, home, {"claudecode": installed})
+    settings = home / ".claude" / "settings.json"
+    payload = json.loads(settings.read_text(encoding="utf-8"))
+    payload["env"]["DEFENSECLAW_FAIL_MODE"] = settings_env
+    settings.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(fail_mode_runtime, "_unix_registration_freshness", lambda *_args: None)
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=windows),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
+        state = resolve_connector_fail_mode(cfg, "claudecode")
+    assert state.runtime == installed and state.effective == installed
+    assert state.provenance == ("windows-sidecar" if windows else "hook-script")
+    assert not [item for item in state.drift if item.startswith("claude-env")], state.drift
+
+
+@pytest.mark.parametrize("env_value", ["open", "closed"])
+@pytest.mark.parametrize("installed", ["open", "closed"])
+def test_opencode_fail_mode_ignores_the_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, installed: str, env_value: str
+) -> None:
+    # The plugin reads no fail mode from its environment (GAP-0315), so the
+    # baked plugin mode is the report, with no caller-environment note.
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"opencode": installed})
+    _write_opencode_runtime(cfg, tmp_path, plugin_mode=installed, lock_mode=installed)
+    monkeypatch.setenv("DEFENSECLAW_FAIL_MODE", env_value)
+    report = connector_fail_mode_report(cfg, "opencode")
+    assert report["effective"] == installed and report["provenance"] == "opencode-plugin"
+    assert report["note"] == "" and "caller_env" not in report
+
+
+def _stale_native_deny_app(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, connectors: list[str], *, multi: bool
+) -> AppContext:
+    # config.yaml says closed while each hook is still rendered open (an
+    # older install, or a fail-mode change the hook never received).
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, dict.fromkeys(connectors, "closed") if multi else {})
+    cfg.guardrail.hook_fail_mode = "closed"
+    cfg.active_connector = lambda: connectors[0]
+    cfg.active_connectors = lambda: list(connectors)
+    for name in connectors:
+        script = f"{name}-hook.sh"
+        (Path(cfg.data_dir) / "hooks" / script).write_text(
+            "\n".join(_HOOK_FAIL_MODE_LINES[f"{script}/open"]) + "\n", encoding="utf-8"
+        )
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    return app
+
+
+@pytest.mark.parametrize("connector", ["antigravity", "copilot"])
+def test_closed_fail_mode_re_renders_a_single_native_deny_hook_still_rendered_open(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, connector: str
+) -> None:
+    app = _stale_native_deny_app(monkeypatch, tmp_path, [connector], multi=False)
+    with (
+        patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=True),
+        patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration") as reconcile,
+        patch("defenseclaw.commands.cmd_setup._restart_services") as restart,
+    ):
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app)
+    assert result.exit_code == 0, result.output
+    assert "nothing to do" not in result.output
+    assert "Re-applying hook fail mode" in result.output
+    reconcile.assert_called_once_with(app.cfg, connector)
+    restart.assert_not_called()
+
+
+def test_closed_fail_mode_re_renders_native_deny_hooks_with_the_gateway_stopped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    app = _stale_native_deny_app(monkeypatch, tmp_path, ["antigravity", "copilot"], multi=True)
+    with (
+        patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=False),
+        patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration") as reconcile,
+        patch("defenseclaw.commands.cmd_setup._restart_services") as restart,
+    ):
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app)
+    assert result.exit_code == 0, result.output
+    assert "nothing to do" not in result.output
+    assert sorted(call.args[1] for call in reconcile.call_args_list) == ["antigravity", "copilot"]
+    restart.assert_not_called()
+
+
+def test_closed_fail_mode_closes_each_hook_before_a_mixed_gateway_restart(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    app = _stale_native_deny_app(monkeypatch, tmp_path, ["copilot", "hermes"], multi=True)
+    app.cfg.guardrail.connectors["kiro"] = dcconfig.PerConnectorGuardrailConfig(hook_fail_mode="closed")
+    app.cfg.active_connectors = lambda: ["copilot", "hermes", "kiro"]
+    closed: set[str] = set()
+
+    def state(_cfg: object, name: str) -> SimpleNamespace:
+        return SimpleNamespace(desired="closed", current=name in closed, runtime="closed" if name in closed else "open", drift=())
+
+    def reconcile(_cfg: object, name: str) -> None:
+        closed.add(name)
+
+    def restart(*_args: object, **_kwargs: object) -> None:
+        assert closed == {"copilot", "hermes"}, "gateway restart exposed an older open hook"
+
+    with (
+        patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=True),
+        patch("defenseclaw.commands.cmd_guardrail.resolve_connector_fail_mode", side_effect=state),
+        patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration", side_effect=reconcile),
+        patch("defenseclaw.commands.cmd_setup._restart_services", side_effect=restart),
+    ):
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app)
+    assert result.exit_code == 0, result.output
+    assert closed == {"copilot", "hermes"}
+
+
+def test_closed_fail_mode_refuses_a_mixed_restart_when_a_hook_cannot_close(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    app = _stale_native_deny_app(monkeypatch, tmp_path, ["copilot", "hermes"], multi=True)
+    app.cfg.guardrail.connectors["kiro"] = dcconfig.PerConnectorGuardrailConfig(hook_fail_mode="closed")
+    app.cfg.active_connectors = lambda: ["copilot", "hermes", "kiro"]
+
+    def reconcile(_cfg: object, name: str) -> None:
+        if name == "hermes":
+            raise OSError("hermes registration unavailable")
+
+    with (
+        patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=True),
+        patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration", side_effect=reconcile),
+        patch("defenseclaw.commands.cmd_guardrail._rollback_fail_mode_transaction"),
+        patch("defenseclaw.commands.cmd_setup._restart_services") as restart,
+    ):
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app)
+    assert result.exit_code != 0
+    assert "hermes registration unavailable" in result.output
+    restart.assert_not_called()
+
+
+def test_closed_fail_mode_no_restart_refuses_open_registered_hooks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    app = _stale_native_deny_app(monkeypatch, tmp_path, ["copilot", "hermes"], multi=True)
+    result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes", "--no-restart"], obj=app)
+    assert result.exit_code != 0
+    assert "defenseclaw guardrail fail-mode closed --yes" in result.output
+    app.cfg.save.assert_not_called()
+
+
+def test_secure_client_native_deny_hooks_need_no_fail_mode_refresh(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Under Secure Client they stay open whatever is configured, so their open
+    # hooks are no stale runtime.
+    app = _stale_native_deny_app(monkeypatch, tmp_path, ["antigravity", "copilot"], multi=True)
+    app.cfg.deployment_mode = "managed_enterprise"
+    app.cfg.managed_outside_secure_client = lambda: False
+    with patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration") as reconcile:
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app)
+    assert result.exit_code == 0, result.output
+    assert "nothing to do" in result.output
+    reconcile.assert_not_called()
+
+
+@pytest.mark.parametrize("windows", [False, True])
+def test_doctor_fails_an_open_rendered_hook_whatever_its_own_environment_says(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, windows: bool
+) -> None:
+    # DEFENSECLAW_FAIL_MODE=closed in doctor's process changes nothing: no
+    # hook reads it (GAP-0315), so the open-rendered hook stays open and
+    # fails the Mode row.
+    from defenseclaw.commands import cmd_doctor
+
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"copilot": "closed"})
+    cfg.guardrail.hook_fail_mode = "closed"
+    cfg.guardrail.mode = "action"
+    cfg.skill_dirs = lambda connector=None: []
+    cfg.plugin_dirs = lambda connector=None: []
+    cfg.mcp_servers = lambda connector=None, **_: []
+    hook_dir = Path(cfg.data_dir) / "hooks"
+    # Each case picks the hook it renders, whatever OS runs the test.
+    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: windows)
+    if windows:
+        (hook_dir / ".hookcfg").write_text(
+            json.dumps({"version": 2, "gateway_addr": "127.0.0.1:18970", "fail_modes": {"copilot": "open"}}),
+            encoding="utf-8",
+        )
+    else:
+        (hook_dir / "copilot-hook.sh").write_text(
+            "\n".join(_legacy_open_hook_lines("copilot-hook.sh")) + "\n", encoding="utf-8"
+        )
+    monkeypatch.setenv("DEFENSECLAW_FAIL_MODE", "closed")
+    report = connector_fail_mode_report(cfg, "copilot")
+    assert report["effective"] == "open"
+    assert "caller_env" not in report
+    emitted: list[tuple[str, str, str]] = []
+    with (
+        patch.object(cmd_doctor, "_workspace_dir", return_value=""),
+        patch.object(
+            cmd_doctor, "_emit", side_effect=lambda tag, label, detail="", **_: emitted.append((tag, label, detail))
+        ),
+    ):
+        cmd_doctor._check_connector_inventory(cfg, "copilot", cmd_doctor._DoctorResult())
+    mode_rows = [row for row in emitted if row[1] == "Mode"]
+    assert len(mode_rows) == 1 and mode_rows[0][0] == "fail", mode_rows
+    assert "fail-mode=open" in mode_rows[0][2] and "config wants fail-mode=closed" in mode_rows[0][2]
+
+
+_COPILOT_BOUND_EVENTS = ("preToolUse", "permissionRequest", "postToolUse")
+_ANTIGRAVITY_EVENTS = ("PreInvocation", "PreToolUse", "PostToolUse", "PostInvocation", "Stop")
+
+
+def _register_native_deny_hook(
+    monkeypatch: pytest.MonkeyPatch,
+    cfg: SimpleNamespace,
+    home: Path,
+    connector: str,
+    *,
+    lock_mode: str = "closed",
+    script: str = "",
+    binding: dict[str, str] | None = None,
+) -> Path:
+    """Write the lock entry and the live registration a per-user Setup writes.
+
+    binding maps an event to the registered command arguments that replace
+    the exact ones (for a stale or lost binding).
+    """
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("COPILOT_HOME", str(home / ".copilot"))
+    monkeypatch.setenv("HERMES_HOME", str(home / ".hermes"))
+    selected_script = script
+    script = script or str(Path(cfg.data_dir) / "hooks" / f"{connector}-hook.sh")
+    binding = binding or {}
+    lock_path = Path(cfg.data_dir) / "hook_contract_lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8")) if lock_path.exists() else {"version": 2, "connectors": {}}
+    lock["connectors"][connector] = {"hook_fail_mode": lock_mode}
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+    if connector == "copilot":
+        path = home / ".copilot" / "hooks" / "defenseclaw.json"
+        hooks = {
+            event: [
+                {
+                    "type": "command",
+                    "bash": f"{script} {binding.get(event, '--event ' + event)}".strip(),
+                    "timeoutSec": 30,
+                }
+            ]
+            for event in _COPILOT_BOUND_EVENTS
+        }
+        document: object = {"version": 1, "hooks": hooks}
+    elif connector == "antigravity":
+        path = home / ".gemini" / "config" / "hooks.json"
+        document = {}
+        for event in _ANTIGRAVITY_EVENTS:
+            handler = {"type": "command", "command": f"{script} {binding.get(event, event)}".strip(), "timeout": 30}
+            entries = [{"matcher": "*", "hooks": [handler]}] if event.endswith("ToolUse") else [handler]
+            document[f"defenseclaw-antigravity-{event.lower()}"] = {event: entries}
+    else:
+        path = home / ".hermes" / "config.yaml"
+        current_script = Path(cfg.data_dir) / "hooks" / "hermes-hook.sh"
+        if not selected_script:
+            current_script.write_text(
+                '#!/bin/sh\nFAIL_MODE="closed"\nprintf \'defenseclaw-execution-probe-ok\\n\'\n', encoding="utf-8"
+            )
+            current_script.chmod(0o700)
+        command = "'" + script + "'"
+        lock["connectors"][connector]["locations"] = {
+            "hook_config_paths": [str(path)], "hook_script_paths": [str(current_script)]
+        }
+        lock["connectors"][connector]["hook_script_digests"] = {
+            "hermes-hook.sh": "sha256:" + hashlib.sha256(current_script.read_bytes()).hexdigest()
+        }
+        lock_path.write_text(json.dumps(lock), encoding="utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        hooks = {
+            event: [{"command": command, "timeout": 30, **({"matcher": matcher} if matcher else {})}]
+            for event, matcher in _HERMES_REQUIRED_HOOKS.items()
+        }
+        path.write_text(yaml.safe_dump({"hooks": hooks, "hooks_auto_accept": False}), encoding="utf-8")
+        path.with_name("shell-hooks-allowlist.json").write_text(json.dumps({"approvals": [
+            {"event": event, "command": command, "defenseclaw_managed": True}
+            for event in _HERMES_REQUIRED_HOOKS
+        ]}), encoding="utf-8")
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document), encoding="utf-8")
+    return path
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+@pytest.mark.parametrize("connector", ["antigravity", "copilot", "hermes"])
+def test_native_deny_state_reports_a_stale_lock_or_registration_next_to_a_closed_script(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, connector: str
+) -> None:
+    # Review round 2: the hook script says closed, but the lock records open or
+    # the live registration still runs an older copy of the hook (which may be
+    # rendered open). Neither is current, so guardrail fail-mode closed
+    # reconciles instead of saying there is nothing to do.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {connector: "closed"})
+    if connector == "hermes":
+        # This test checks the lock and registered command. Its synthetic
+        # hook is not a containment test, and CI hosts may forbid user PID
+        # namespaces needed by Doctor's real execution probe.
+
+        def registered_hook_probe(argv: list[str]) -> tuple[int, bytes]:
+            assert argv[0] == str(Path(cfg.data_dir) / "hooks" / "hermes-hook.sh")
+            return 0, cmd_doctor._HERMES_EXECUTION_PROBE_RESPONSE
+
+        monkeypatch.setattr(cmd_doctor, "_run_hermes_execution_probe", registered_hook_probe)
+    script = f"{connector}-hook.sh"
+    (Path(cfg.data_dir) / "hooks" / script).write_text(
+        "\n".join(_HOOK_FAIL_MODE_LINES[f"{script}/closed"]) + "\n", encoding="utf-8"
+    )
+
+    _register_native_deny_hook(monkeypatch, cfg, home, connector, lock_mode="open")
+    state = resolve_connector_fail_mode(cfg, connector)
+    assert state.runtime == "closed"
+    assert not state.current
+    assert {"registration-stale", "registration-lock-open"} <= set(state.drift)
+
+    old = tmp_path / "old-data" / "hooks" / script
+    old.parent.mkdir(parents=True)
+    old.write_text("\n".join(_HOOK_FAIL_MODE_LINES[f"{script}/open"]) + "\n", encoding="utf-8")
+    _register_native_deny_hook(monkeypatch, cfg, home, connector, script=str(old))
+    state = resolve_connector_fail_mode(cfg, connector)
+    assert not state.current
+    assert state.drift == (("registration-command-stale",) if connector == "hermes" else ("registration-stale",))
+
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    cfg.guardrail.hook_fail_mode = "closed"
+    with (
+        patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=True),
+        patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration") as reconcile,
+        patch("defenseclaw.commands.cmd_setup._restart_services"),
+    ):
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app)
+    assert result.exit_code == 0, result.output
+    assert "nothing to do" not in result.output
+    reconcile.assert_called_once_with(cfg, connector)
+
+    _register_native_deny_hook(monkeypatch, cfg, home, connector)
+    assert resolve_connector_fail_mode(cfg, connector).current
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+@pytest.mark.parametrize(
+    ("connector", "event", "args"),
+    [
+        ("copilot", "preToolUse", ""),
+        ("copilot", "preToolUse", "--event postToolUse"),
+        ("copilot", "permissionRequest", "--event"),
+        ("antigravity", "PreToolUse", ""),
+        ("antigravity", "PreToolUse", "Stop"),
+    ],
+)
+def test_a_registration_that_loses_its_event_binding_is_drift_and_fails_doctor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, connector: str, event: str, args: str
+) -> None:
+    # Review round 2: neither agent names the event in its hook input, so a
+    # registered command that binds another event, or none, answers a tool
+    # call as an event that cannot block. Status and doctor said current.
+    from defenseclaw.commands import cmd_doctor
+
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {connector: "closed"})
+    script = f"{connector}-hook.sh"
+    (Path(cfg.data_dir) / "hooks" / script).write_text(
+        "\n".join(_HOOK_FAIL_MODE_LINES[f"{script}/closed"]) + "\n", encoding="utf-8"
+    )
+    path = _register_native_deny_hook(monkeypatch, cfg, home, connector, binding={event: args})
+
+    state = resolve_connector_fail_mode(cfg, connector)
+    assert not state.current
+    assert "registration-stale" in state.drift
+
+    cfg.connector_workspace_dir = lambda: ""
+    emitted: list[tuple[str, str, str]] = []
+    with (
+        patch.object(cmd_doctor, "_workspace_dir", return_value=""),
+        patch.object(cmd_doctor, "_edited_hook_problem", return_value=""),
+        patch.object(
+            cmd_doctor, "_emit", side_effect=lambda tag, label, detail="", **_: emitted.append((tag, label, detail))
+        ),
+    ):
+        if connector == "copilot":
+            cmd_doctor._check_copilot_hooks(cfg, cmd_doctor._DoctorResult(), platform_name="posix")
+        else:
+            cmd_doctor._check_antigravity_hooks(cfg, cmd_doctor._DoctorResult(), platform_name="posix")
+    rows = [row for row in emitted if row[1].endswith("hooks")]
+    assert rows and rows[0][0] == "fail", emitted
+    assert "not bound to its registered event" in rows[0][2]
+
+    _register_native_deny_hook(monkeypatch, cfg, home, connector)
+    assert resolve_connector_fail_mode(cfg, connector).current
+    emitted.clear()
+    with (
+        patch.object(cmd_doctor, "_workspace_dir", return_value=""),
+        patch.object(cmd_doctor, "_edited_hook_problem", return_value=""),
+        patch.object(
+            cmd_doctor, "_emit", side_effect=lambda tag, label, detail="", **_: emitted.append((tag, label, detail))
+        ),
+    ):
+        if connector == "copilot":
+            cmd_doctor._check_copilot_hooks(cfg, cmd_doctor._DoctorResult(), platform_name="posix")
+        else:
+            cmd_doctor._check_antigravity_hooks(cfg, cmd_doctor._DoctorResult(), platform_name="posix")
+    assert [row[0] for row in emitted if row[1].endswith("hooks")] == ["pass"], emitted
+    assert path.exists()
+
+
+def _antigravity_entry(document: dict, event: str) -> dict:
+    return document[f"defenseclaw-antigravity-{event.lower()}"]
+
+
+def _skip_antigravity_disabled(document: dict) -> None:
+    _antigravity_entry(document, "PreToolUse")["enabled"] = False
+
+
+def _skip_antigravity_matcher(document: dict) -> None:
+    _antigravity_entry(document, "PreToolUse")["PreToolUse"][0]["matcher"] = "run_command"
+
+
+def _skip_antigravity_type(document: dict) -> None:
+    _antigravity_entry(document, "PreToolUse")["PreToolUse"][0]["hooks"][0]["type"] = "prompt"
+
+
+def _skip_antigravity_timeout(document: dict) -> None:
+    _antigravity_entry(document, "PreToolUse")["PreToolUse"][0]["hooks"][0]["timeout"] = 1
+
+
+def _skip_antigravity_extra(document: dict) -> None:
+    group = _antigravity_entry(document, "PreToolUse")["PreToolUse"]
+    group.append({"matcher": "*", "hooks": [dict(group[0]["hooks"][0])]})
+
+
+def _skip_copilot_type(document: dict) -> None:
+    document["hooks"]["preToolUse"][0]["type"] = "prompt"
+
+
+def _skip_copilot_timeout(document: dict) -> None:
+    document["hooks"]["permissionRequest"][0]["timeoutSec"] = 1
+
+
+def _skip_copilot_disabled(document: dict) -> None:
+    document["disableAllHooks"] = True
+
+
+def _skip_copilot_version(document: dict) -> None:
+    del document["version"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+@pytest.mark.parametrize(
+    ("connector", "skip"),
+    [
+        ("antigravity", _skip_antigravity_disabled),
+        ("antigravity", _skip_antigravity_matcher),
+        ("antigravity", _skip_antigravity_type),
+        ("antigravity", _skip_antigravity_timeout),
+        ("antigravity", _skip_antigravity_extra),
+        ("copilot", _skip_copilot_type),
+        ("copilot", _skip_copilot_timeout),
+        ("copilot", _skip_copilot_disabled),
+        ("copilot", _skip_copilot_version),
+    ],
+    ids=lambda value: value.__name__.removeprefix("_skip_") if callable(value) else value,
+)
+def test_a_registration_the_agent_skips_is_drift_and_fails_doctor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, connector: str, skip
+) -> None:
+    # Review round 3: the registration keeps the exact command and event, but
+    # the agent skips it (disabled, a narrowed matcher, not a command handler,
+    # a timeout shorter than Setup's), so some tool calls never run the hook.
+    # Status and doctor said current.
+    from defenseclaw.commands import cmd_doctor
+
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {connector: "closed"})
+    script = f"{connector}-hook.sh"
+    (Path(cfg.data_dir) / "hooks" / script).write_text(
+        "\n".join(_HOOK_FAIL_MODE_LINES[f"{script}/closed"]) + "\n", encoding="utf-8"
+    )
+    path = _register_native_deny_hook(monkeypatch, cfg, home, connector)
+    assert resolve_connector_fail_mode(cfg, connector).current
+    document = json.loads(path.read_text(encoding="utf-8"))
+    skip(document)
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    state = resolve_connector_fail_mode(cfg, connector)
+    assert not state.current
+    assert any(item.startswith("registration-") for item in state.drift), state.drift
+
+    cfg.connector_workspace_dir = lambda: ""
+    emitted: list[tuple[str, str, str]] = []
+    with (
+        patch.object(cmd_doctor, "_workspace_dir", return_value=""),
+        patch.object(cmd_doctor, "_edited_hook_problem", return_value=""),
+        patch.object(
+            cmd_doctor, "_emit", side_effect=lambda tag, label, detail="", **_: emitted.append((tag, label, detail))
+        ),
+    ):
+        if connector == "copilot":
+            cmd_doctor._check_copilot_hooks(cfg, cmd_doctor._DoctorResult(), platform_name="posix")
+        else:
+            cmd_doctor._check_antigravity_hooks(cfg, cmd_doctor._DoctorResult(), platform_name="posix")
+    rows = [row for row in emitted if row[1].endswith("hooks")]
+    assert rows and rows[0][0] == "fail", emitted
+
+
+@pytest.mark.parametrize(
+    ("body", "mode", "legacy"),
+    [
+        ({"version": 2, "fail_modes": {"copilot": "OPEN"}}, "open", False),
+        ({"version": 2, "fail_modes": {"copilot": " Closed "}}, "closed", False),
+        # A top-level key that names a field in another case is malformed
+        # (connector.HookSidecarJSONMalformed, the one contract of the hook,
+        # status and the writers): closed.
+        ({"Version": 2, "Fail_Modes": {"Copilot": "open"}}, "closed", False),
+        ({"version": 2, "fail_modes": {"copilot": "bogus"}}, None, False),
+        # Entries that normalize alike are open only when every one is.
+        ({"version": 2, "fail_modes": {"copilot": "open", "COPILOT": "closed"}}, "closed", False),
+        ({"version": 2, "fail_modes": {}, "legacy_fail_mode": "Open"}, "open", True),
+        # JSON that Go cannot decode as a v2 sidecar is closed (readHookSidecar).
+        ({"version": "2", "fail_modes": {"copilot": "open"}}, "closed", False),
+        # A key given twice is malformed state (connector.ParseLegacyHookSidecar).
+        ("DEFENSECLAW_FAIL_MODE=closed\nDEFENSECLAW_FAIL_MODE=open\n", "closed", False),
+        (f"export {fail_mode_runtime._native_hook_sidecar_key('copilot')}='OPEN'\n", "open", True),
+        ('DEFENSECLAW_FAIL_MODE="closed"\n', "closed", True),
+    ],
+)
+def test_windows_hookcfg_is_read_as_the_native_hook_reads_it(
+    tmp_path: Path, body: object, mode: str | None, legacy: bool
+) -> None:
+    # Review round 2: the native hook treats "open" in any case as open (and
+    # reads Go's case-insensitive JSON fields, the last KEY=value line, and a
+    # connector key); the reader rejected OPEN and reported no runtime mode.
+    path = tmp_path / ".hookcfg"
+    path.write_text(body if isinstance(body, str) else json.dumps(body), encoding="utf-8")
+    got_mode, got_legacy = fail_mode_runtime._read_windows_hook_mode(path, "copilot")
+    assert got_mode == mode
+    if mode is not None:
+        assert got_legacy is legacy
+
+
+@pytest.mark.parametrize(
+    ("sidecar", "phrase"),
+    [("OPEN", "fail-mode=open"), ("bogus", "no readable fail mode"), (None, "no readable fail mode")],
+)
+def test_doctor_mode_fails_a_windows_hook_rendered_open_or_without_a_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sidecar: str | None, phrase: str
+) -> None:
+    from defenseclaw.commands import cmd_doctor
+
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"copilot": "closed"})
+    cfg.guardrail.hook_fail_mode = "closed"
+    cfg.guardrail.mode = "action"
+    cfg.skill_dirs = lambda connector=None: []
+    cfg.plugin_dirs = lambda connector=None: []
+    cfg.mcp_servers = lambda connector=None, **_: []
+    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: True)
+    monkeypatch.setattr(fail_mode_runtime, "_native_deny_registration_freshness", lambda *_args: None, raising=False)
+    _register_native_deny_hook(monkeypatch, cfg, home, "copilot")
+    if sidecar is not None:
+        (Path(cfg.data_dir) / "hooks" / ".hookcfg").write_text(
+            json.dumps({"version": 2, "gateway_addr": "127.0.0.1:18970", "fail_modes": {"copilot": sidecar}}),
+            encoding="utf-8",
+        )
+    if sidecar == "OPEN":
+        # Doctor's own environment is reported apart and does not mask it.
+        monkeypatch.setenv("DEFENSECLAW_FAIL_MODE", "closed")
+    emitted: list[tuple[str, str, str]] = []
+    with (
+        patch.object(cmd_doctor, "_workspace_dir", return_value=""),
+        patch.object(
+            cmd_doctor, "_emit", side_effect=lambda tag, label, detail="", **_: emitted.append((tag, label, detail))
+        ),
+    ):
+        cmd_doctor._check_connector_inventory(cfg, "copilot", cmd_doctor._DoctorResult())
+    mode_rows = [row for row in emitted if row[1] == "Mode"]
+    assert len(mode_rows) == 1 and mode_rows[0][0] == "fail", mode_rows
+    assert phrase in mode_rows[0][2]
+
+
+# ── 1.0.4 review loop round 1 (G-hooks-upg): renders that read the agent env ─
+#
+# A 0.8.x or 1.0.3 render the upgrade's connector refresh has not replaced
+# yet, and a Secure Client render (#1163), take DEFENSECLAW_FAIL_MODE from the
+# agent's environment. Its default is not the mode it runs, so status and
+# doctor never report it closed and current, whatever the status shell says.
+
+_ENV_READING_RENDERS = {
+    # 0.8.10 and 1.0.3 per-user renders, and Secure Client renders.
+    "default": 'FAIL_MODE="${{DEFENSECLAW_FAIL_MODE:-{mode}}}"',
+    "export": 'export FAIL_MODE="${{DEFENSECLAW_FAIL_MODE:-{mode}}}"',
+    # A baked line the environment then overrides.
+    "baked-then-env": 'FAIL_MODE="{mode}"\n  FAIL_MODE="${{DEFENSECLAW_FAIL_MODE:-{mode}}}"',
+}
+
+
+def _install_render(cfg: SimpleNamespace, name: str, body: str) -> None:
+    """Write *name*'s hook render and keep the contract lock's digest of it current."""
+
+    script_name = "claude-code-hook.sh" if name == "claudecode" else f"{name}-hook.sh"
+    script_path = Path(cfg.data_dir) / "hooks" / script_name
+    script_path.write_text("#!/bin/bash\n" + body + "\n", encoding="utf-8")
+    lock_path = Path(cfg.data_dir) / "hook_contract_lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    entry = lock["connectors"][name]
+    entry["contract_id"] = f"{name}-hooks-v1"
+    entry["hook_script_digests"][script_name] = "sha256:" + hashlib.sha256(script_path.read_bytes()).hexdigest()
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+
+def _set_claude_settings_env(home: Path, value: str | None) -> None:
+    settings = home / ".claude" / "settings.json"
+    payload = json.loads(settings.read_text(encoding="utf-8"))
+    if value is None:
+        payload.pop("env", None)
+    else:
+        payload["env"] = {"DEFENSECLAW_FAIL_MODE": value}
+    settings.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _unix_report(monkeypatch: pytest.MonkeyPatch, cfg: SimpleNamespace, home: Path, name: str) -> tuple:
+    monkeypatch.setattr(fail_mode_runtime, "_codex_registration_current", lambda *_args: True)
+    monkeypatch.setattr(fail_mode_runtime, "_unix_registration_freshness", lambda *_args: None)
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=False),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
+        return resolve_connector_fail_mode(cfg, name), connector_fail_mode_report(cfg, name)
+
+
+@pytest.mark.parametrize("render", sorted(_ENV_READING_RENDERS))
+@pytest.mark.parametrize("shell_env", [None, "open", "closed"])
+@pytest.mark.parametrize(
+    ("name", "mode"),
+    # Claude Code with its settings env open is verified open (below). A
+    # per-user open is no longer a mode: it resolves closed (sa-port-peer).
+    [("claudecode", "closed"), ("codex", "closed"), ("devin", "closed")],
+)
+def test_a_render_that_reads_the_agent_env_is_never_reported_current(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str, mode: str, shell_env: str | None, render: str
+) -> None:
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {name: mode})
+    _write_current_runtime(cfg, home, {name: mode})
+    if shell_env is None:
+        monkeypatch.delenv("DEFENSECLAW_FAIL_MODE", raising=False)
+    else:
+        monkeypatch.setenv("DEFENSECLAW_FAIL_MODE", shell_env)
+
+    # The same install with the 1.0.4 render is current: only the render differs.
+    _install_render(cfg, name, "\n".join(_HOOK_FAIL_MODE_LINES[f"{_unix_script(name)}/{mode}"]))
+    baked, _ = _unix_report(monkeypatch, cfg, home, name)
+    assert baked.current and baked.runtime_verified, baked.drift
+
+    _install_render(cfg, name, _ENV_READING_RENDERS[render].format(mode=mode))
+    state, report = _unix_report(monkeypatch, cfg, home, name)
+    assert not state.runtime_verified and not state.current
+    assert "agent-env-unverified" in state.drift
+    assert ("hook-script-reads-agent-env" in state.drift) is (name != "devin")
+    assert state.provenance == "agent-env-unverified"
+    assert "DEFENSECLAW_FAIL_MODE" in state.note
+    assert report["current"] is False and report["runtime_verified"] is False
+    assert report["provenance"] == "agent-env-unverified"
+    # The status shell is not the agent: its value is never the runtime mode,
+    # which stays the render's default (none read from an exported line).
+    assert state.runtime == (None if render == "export" else mode)
+    assert all(source != "process-env" for source, _mode in state.sources)
+
+
+def _unix_script(name: str) -> str:
+    return "claude-code-hook.sh" if name == "claudecode" else f"{name}-hook.sh"
+
+
+@pytest.mark.parametrize("default", ["open", "closed"])
+def test_claude_settings_env_open_is_the_mode_of_a_render_that_reads_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, default: str
+) -> None:
+    # Claude Code applies its settings env over the environment it started
+    # in, so open there is what a 1.0.3 render runs: reported open, verified,
+    # and stale until the refresh re-renders it.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed"})
+    _write_current_runtime(cfg, home, {"claudecode": "closed"})
+    _set_claude_settings_env(home, "open")
+    _install_render(cfg, "claudecode", _ENV_READING_RENDERS["default"].format(mode=default))
+    state, report = _unix_report(monkeypatch, cfg, home, "claudecode")
+    assert state.runtime_verified and state.runtime == "open" and state.effective == "open"
+    assert state.provenance == "agent-env"
+    assert not state.current and "hook-script-reads-agent-env" in state.drift
+    assert report["effective"] == "open" and report["desired"] == "closed"
+
+
+def test_claude_settings_env_closed_does_not_verify_a_render_that_reads_the_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A project's or managed settings env can still set open over the user
+    # settings env, so closed there is no closed claim.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed"})
+    _write_current_runtime(cfg, home, {"claudecode": "closed"})
+    _set_claude_settings_env(home, "closed")
+    _install_render(cfg, "claudecode", _ENV_READING_RENDERS["default"].format(mode="closed"))
+    state, report = _unix_report(monkeypatch, cfg, home, "claudecode")
+    assert not state.runtime_verified and not state.current
+    assert report["provenance"] == "agent-env-unverified"
+
+
+@pytest.mark.parametrize(
+    ("name", "desired", "secure_client", "want"),
+    [
+        ("codex", "closed", False, "fail"),
+        ("devin", "closed", False, "fail"),
+        ("devin", "closed", True, "warn"),
+        # A per-user render no longer carries an open line (sa-port-peer pins it
+        # closed), so the Secure Client open case has no per-user fixture here.
+    ],
+)
+def test_doctor_never_passes_a_render_that_reads_the_agent_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str, desired: str, secure_client: bool, want: str
+) -> None:
+    from defenseclaw.commands import cmd_doctor
+
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {name: desired})
+    _write_current_runtime(cfg, home, {name: desired})
+    cfg.guardrail.mode = "action"
+    cfg.guardrail._secure_client = secure_client
+    cfg.skill_dirs = lambda connector=None: []
+    cfg.plugin_dirs = lambda connector=None: []
+    cfg.mcp_servers = lambda connector=None, **_: []
+
+    def mode_rows() -> list[tuple[str, str, str]]:
+        _state, report = _unix_report(monkeypatch, cfg, home, name)
+        emitted: list[tuple[str, str, str]] = []
+        with (
+            patch("defenseclaw.fail_mode.connector_fail_mode_report", return_value=report),
+            patch.object(cmd_doctor, "_workspace_dir", return_value=""),
+            patch.object(
+                cmd_doctor,
+                "_emit",
+                side_effect=lambda tag, label, detail="", **_: emitted.append((tag, label, detail)),
+            ),
+        ):
+            cmd_doctor._check_connector_inventory(cfg, name, cmd_doctor._DoctorResult())
+        return [row for row in emitted if row[1] == "Mode"]
+
+    _install_render(cfg, name, "\n".join(_HOOK_FAIL_MODE_LINES[f"{_unix_script(name)}/{desired}"]))
+    assert [row[0] for row in mode_rows()] == ["pass"]
+    _install_render(cfg, name, _ENV_READING_RENDERS["default"].format(mode=desired))
+    rows = mode_rows()
+    assert [row[0] for row in rows] == [want], rows
+    assert "unverified" in rows[0][2]
+
+
+def test_windows_codex_reconcile_waits_for_a_transient_registration_read(tmp_path: Path) -> None:
+    # Windows can briefly deny a read of Codex's freshly reconciled hook
+    # target while an existing app-server releases its handle. The final
+    # verdict still has to come from a successful full registration check.
+    unread = SimpleNamespace(current=False, connector="codex", drift=("registration-access-denied",))
+    current = SimpleNamespace(current=True, connector="codex", drift=())
+    cfg = SimpleNamespace(data_dir=str(tmp_path))
+    with (
+        patch.object(fail_mode_runtime, "_is_windows", return_value=True),
+        patch.object(fail_mode_runtime, "path_gateway", return_value="C:/bin/defenseclaw-gateway.exe"),
+        patch.object(fail_mode_runtime.subprocess, "run", return_value=SimpleNamespace(returncode=0)),
+        patch.object(fail_mode_runtime, "resolve_connector_fail_mode", side_effect=(unread, current)) as check,
+    ):
+        assert fail_mode_runtime.reconcile_connector_registration(cfg, "codex") is current
+    assert check.call_count == 2
+
+
+def test_windows_codex_reconcile_refuses_persistent_registration_read_denial(tmp_path: Path) -> None:
+    unread = SimpleNamespace(current=False, connector="codex", drift=("registration-access-denied",))
+    cfg = SimpleNamespace(data_dir=str(tmp_path))
+    with (
+        patch.object(fail_mode_runtime, "_is_windows", return_value=True),
+        patch.object(fail_mode_runtime, "path_gateway", return_value="C:/bin/defenseclaw-gateway.exe"),
+        patch.object(fail_mode_runtime.subprocess, "run", return_value=SimpleNamespace(returncode=0)),
+        patch.object(fail_mode_runtime, "resolve_connector_fail_mode", return_value=unread) as check,
+    ):
+        with pytest.raises(OSError, match="registration-access-denied"):
+            fail_mode_runtime.reconcile_connector_registration(cfg, "codex")
+    assert check.call_count == 3
+
+
+@pytest.mark.parametrize("windows", [False, True])
+@pytest.mark.parametrize("installed", ["open", "closed"])
+def test_claude_settings_without_a_fail_mode_carrier_is_not_drift(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, windows: bool, installed: str
+) -> None:
+    # oss-outage-open review (round g, loop round 2): a per-user setup no
+    # longer writes DEFENSECLAW_FAIL_MODE into Claude Code's settings env
+    # (no 1.0.4 render reads it). Status used to report the product-owned
+    # closed it wrote as claude-env-closed next to an open outage, and would
+    # report the carrier's absence as claude-env-missing.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": installed})
+    _write_current_runtime(cfg, home, {"claudecode": installed})
+    settings = home / ".claude" / "settings.json"
+    payload = json.loads(settings.read_text(encoding="utf-8"))
+    del payload["env"]["DEFENSECLAW_FAIL_MODE"]
+    settings.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(fail_mode_runtime, "_unix_registration_freshness", lambda *_args: None)
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=windows),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
+        state = resolve_connector_fail_mode(cfg, "claudecode")
+    assert not [item for item in state.drift if item.startswith("claude-env")], state.drift
+
+
+_RELEASED_CARRIERS = Path(__file__).resolve().parents[2] / "internal/gateway/connector/testdata/released-carriers"
+
+
+@pytest.mark.parametrize("windows", [False, True])
+@pytest.mark.parametrize(("release", "user_value"), [("1.0.2", "closed"), ("1.0.3", "open"), ("1.0.3", "closed")])
+@pytest.mark.parametrize("installed", ["open", "closed"])
+def test_a_claude_settings_carrier_the_user_kept_is_not_drift_for_a_render_that_ignores_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, windows: bool, release: str, user_value: str, installed: str
+) -> None:
+    # oss-outage-open round h (GAP-1422 class): the upgrade takes back the
+    # DEFENSECLAW_FAIL_MODE that 1.0.2 or 1.0.3 wrote into Claude Code's
+    # settings env, and keeps one the user changed. No 1.0.4 render (baked
+    # shell hook, Windows sidecar) reads it, so status must not report that
+    # kept value as drift; it made status non-current and rolled back the
+    # fail-mode setter's verification. The env is the real released one.
+    released = json.loads((_RELEASED_CARRIERS / release / "claude-settings.json").read_text(encoding="utf-8"))
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": installed})
+    _write_current_runtime(cfg, home, {"claudecode": installed})
+    settings = home / ".claude" / "settings.json"
+    payload = json.loads(settings.read_text(encoding="utf-8"))
+    del payload["env"]["DEFENSECLAW_FAIL_MODE"]
+    settings.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(fail_mode_runtime, "_unix_registration_freshness", lambda *_args: None)
+
+    def resolve():
+        with (
+            patch("defenseclaw.fail_mode._is_windows", return_value=windows),
+            patch("defenseclaw.fail_mode.Path.home", return_value=home),
+        ):
+            return resolve_connector_fail_mode(cfg, "claudecode")
+
+    without = resolve()
+    payload["env"] = dict(released["env"], DEFENSECLAW_FAIL_MODE=user_value)
+    settings.write_text(json.dumps(payload), encoding="utf-8")
+    state = resolve()
+    assert not [item for item in state.drift if item.startswith("claude-env")], state.drift
+    assert (state.runtime, state.drift, state.current) == (without.runtime, without.drift, without.current)
+
+
+@pytest.mark.parametrize("user_value", ["open", "closed"])
+def test_a_claude_settings_carrier_is_still_an_input_of_a_render_that_reads_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, user_value: str
+) -> None:
+    # The other half: a 1.0.3 render the refresh has not replaced yet reads
+    # the settings env (FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-closed}"), so a
+    # value there is what it runs, and status still says so.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed"})
+    _write_current_runtime(cfg, home, {"claudecode": "closed"})
+    _install_render(cfg, "claudecode", 'FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-closed}"')
+    _set_claude_settings_env(home, user_value)
+    state, _report = _unix_report(monkeypatch, cfg, home, "claudecode")
+    assert not state.current
+    assert "hook-script-reads-agent-env" in state.drift, state.drift
+    if user_value == "open":
+        assert state.runtime == "open"
+        assert "claude-env-open" in state.drift, state.drift
+    else:
+        assert "agent-env-unverified" in state.drift, state.drift
+
+
+def test_codex_registration_under_a_custom_home_is_current(monkeypatch, tmp_path) -> None:
+    """GAP-1882: hooks rendered under a custom DEFENSECLAW_HOME (~/dchome)
+    name no "defenseclaw" in their command path and are still DefenseClaw's
+    registration; another program's hooks are not."""
+    data_dir = tmp_path / "dchome"
+    config = tmp_path / ".codex" / "config.toml"
+    config.parent.mkdir(parents=True)
+    monkeypatch.setattr(fail_mode_runtime, "connector_config_files", lambda *_a, **_k: [str(config)])
+    config.write_text(
+        "[hooks]\n[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\n"
+        f"command = '{data_dir}/hooks/codex-hook.sh --event PreToolUse --hook-contract codex-hooks-v4'\n",
+        encoding="utf-8",
+    )
+    assert fail_mode_runtime._codex_registration_current("", str(data_dir))
+    assert not fail_mode_runtime._codex_registration_current("", str(tmp_path / "other"))
+    config.write_text(
+        "[hooks]\n[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\ncommand = '/usr/local/bin/other-hook.sh'\n",
+        encoding="utf-8",
+    )
+    assert not fail_mode_runtime._codex_registration_current("", str(data_dir))
+
+
+def test_codex_registration_matches_every_spelling_of_the_hook_path(monkeypatch, tmp_path) -> None:
+    """GAP-2275: the registration names the install's hook whatever the
+    separator, a TOML basic string's doubled backslashes, or (on Windows) the
+    case; a hook under another directory is still not DefenseClaw's."""
+    data_dir = tmp_path / "dchome"
+    config = tmp_path / ".codex" / "config.toml"
+    config.parent.mkdir(parents=True)
+    monkeypatch.setattr(fail_mode_runtime, "connector_config_files", lambda *_a, **_k: [str(config)])
+    hook = os.path.join(str(data_dir), "hooks", "codex-hook.sh")
+    spellings = [
+        "'" + hook.replace("\\", "/") + " --event PreToolUse'",
+        '"' + hook.replace("\\", "\\\\") + ' --event PreToolUse"',
+    ]
+    if os.name == "nt":
+        spellings.append("'" + hook.replace("/", "\\").upper() + " --event PreToolUse'")
+    for command in spellings:
+        config.write_text(f"[hooks]\n[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\ncommand = {command}\n", encoding="utf-8")
+        assert fail_mode_runtime._codex_registration_current("", str(data_dir)), command
+        assert not fail_mode_runtime._codex_registration_current("", str(tmp_path / "other")), command
+
+
+def test_unix_registration_freshness_accepts_a_home_below_a_symlinked_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # GAP-2371: HOME below a symlinked directory. Setup registers the hook by
+    # the data dir's own spelling; the check compared only the resolved path
+    # and reported a registration it had just written as stale.
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    cfg, home = _runtime_cfg(monkeypatch, link, {"codex": "closed"})
+    assert str(Path(cfg.data_dir)).startswith(str(link)), cfg.data_dir
+    with (
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+        patch("defenseclaw.connector_paths.Path.home", return_value=home),
+    ):
+        registration = Path(fail_mode_runtime.connector_config_files("codex", workspace_dir="")[0])
+        registration.parent.mkdir(parents=True, exist_ok=True)
+        lexical = str(Path(cfg.data_dir) / "hooks" / "codex-hook.sh")
+        resolved = str((Path(cfg.data_dir) / "hooks" / "codex-hook.sh").resolve())
+        assert lexical != resolved
+        for command in (lexical, resolved):
+            registration.write_text(json.dumps({"command": command + " --event PreToolUse"}), encoding="utf-8")
+            assert fail_mode_runtime._unix_registration_freshness(cfg, "codex") is None, command
+        registration.write_text(json.dumps({"command": str(tmp_path / "other" / "codex-hook.sh")}), encoding="utf-8")
+        assert fail_mode_runtime._unix_registration_freshness(cfg, "codex") == "registration-command-stale"
+
+
+def _stale_lock_after_a_pack_switch(cfg: SimpleNamespace, home: Path, *, call_time: bool) -> None:
+    """A closed per-user render whose lock still records the open the hooks had before a pack switch."""
+
+    _write_current_runtime(cfg, home, {"claudecode": "closed"})
+    hook_dir = Path(cfg.data_dir) / "hooks"
+    lock_path = Path(cfg.data_dir) / "hook_contract_lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    if call_time:
+        helper = b"# defenseclaw-call-time-outage-v1\ncanonical shared hook: _hardening.sh\n"
+        (hook_dir / "_hardening.sh").write_bytes(helper)
+        lock["shared_hook_script_digests"]["_hardening.sh"] = "sha256:" + hashlib.sha256(helper).hexdigest()
+    lock["connectors"]["claudecode"]["hook_fail_mode"] = "open"
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS per-user shell hook")
+def test_a_lock_that_lags_a_pack_switch_is_not_drift_for_a_call_time_hook(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # GAP-0272: guardrail use-pack strict with the gateway stopped saves the
+    # closed mode and rewrites the hooks' runtime records; the lock keeps the
+    # open of the last render until the gateway starts and renders again.
+    # The per-user hook reads its outage mode from the config on every call
+    # (it blocked with "fail mode closed"), yet status warned "runtime
+    # fail-mode drift: registration-stale, registration-lock-open".
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed"})
+    _stale_lock_after_a_pack_switch(cfg, home, call_time=True)
+    monkeypatch.setattr(fail_mode_runtime, "_unix_registration_freshness", lambda *_args: None)
+    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: False)
+    state = resolve_connector_fail_mode(cfg, "claudecode")
+    assert state.desired == "closed" and state.runtime == "closed", state
+    assert "registration-stale" not in state.drift and "registration-lock-open" not in state.drift, state.drift
+    assert dict(state.sources)["registration-lock"] == "open"
+
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    with patch("defenseclaw.fail_mode.Path.home", return_value=home):
+        result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
+    assert result.exit_code == 0, result.output
+    assert "registration-lock-open" not in result.output, result.output
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS per-user shell hook")
+def test_a_stale_lock_is_still_drift_for_a_hook_that_reads_its_records(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A render without the call-time helper runs the mode its records hold,
+    # which the lock describes: a lock that disagrees stays drift, and so does
+    # a missing lock (GAP-0272 keeps both).
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed"})
+    _stale_lock_after_a_pack_switch(cfg, home, call_time=False)
+    monkeypatch.setattr(fail_mode_runtime, "_unix_registration_freshness", lambda *_args: None)
+    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: False)
+    state = resolve_connector_fail_mode(cfg, "claudecode")
+    assert {"registration-stale", "registration-lock-open"} <= set(state.drift), state.drift
+
+    _stale_lock_after_a_pack_switch(cfg, home, call_time=True)
+    (Path(cfg.data_dir) / "hook_contract_lock.json").unlink()
+    state = resolve_connector_fail_mode(cfg, "claudecode")
+    assert "registration-lock-missing" in state.drift, state.drift
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS shell hook")
+def test_a_stale_lock_is_still_drift_on_a_managed_host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # GAP-0272 review (mutant M3): every _hardening.sh render carries the
+    # call-time marker, managed ones too, but a managed hook runs the
+    # administrator's resolved mode, which the lock records. A managed lock
+    # that disagrees is drift whatever the helper says.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed"})
+    cfg.deployment_mode = "managed_enterprise"
+    _stale_lock_after_a_pack_switch(cfg, home, call_time=True)
+    monkeypatch.setattr(fail_mode_runtime, "_unix_registration_freshness", lambda *_args: None)
+    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: False)
+    assert not fail_mode_runtime._outage_mode_read_at_call_time(cfg, "claudecode", ("hook-script", "closed"))
+    state = resolve_connector_fail_mode(cfg, "claudecode")
+    assert {"registration-stale", "registration-lock-open"} <= set(state.drift), state.drift
+
+
+# rel-1-0-6 GAP-0569: a packaged per-user Linux install registers the native
+# direct-argv handlers (GAP-0322), which name no claude-code-hook.sh. The
+# expected handlers come from the golden the Go render test pins
+# (internal/gateway/connector/claudecode_linux_peruser_handlers_golden_test.go).
+_CLAUDE_LINUX_GOLDEN = json.loads(
+    (
+        Path(__file__).resolve().parents[2]
+        / "internal"
+        / "gateway"
+        / "connector"
+        / "testdata"
+        / "claudecode_linux_peruser_handlers.json"
+    ).read_text(encoding="utf-8")
+)
+
+
+def _claude_native_layout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, hook_user: bool = True, hook_post: bool = True
+) -> tuple[SimpleNamespace, Path]:
+    home = tmp_path / "home"
+    data_dir = home / ".defenseclaw"
+    bin_dir = home / ".local" / "bin"
+    for directory in (data_dir / "hooks", bin_dir, home / ".claude"):
+        directory.mkdir(parents=True, exist_ok=True)
+    for name, wanted in (("defenseclaw-hook-user", hook_user), ("defenseclaw-hook-post", hook_post)):
+        if wanted:
+            (bin_dir / name).write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (bin_dir / name).chmod(0o700)
+    helper = data_dir / "hooks" / ".gateway-helper"
+    helper.write_text(str(bin_dir / "defenseclaw-gateway") + "\n", encoding="utf-8")
+    helper.chmod(0o600)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude"))
+    monkeypatch.setattr(fail_mode_runtime.Path, "home", lambda: home)
+    monkeypatch.setattr(fail_mode_runtime, "_is_linux", lambda: True)
+    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: False)
+    cfg = SimpleNamespace(
+        data_dir=str(data_dir),
+        deployment_mode="",
+        gateway=SimpleNamespace(host="127.0.0.1", port=18789, api_port=18970, api_bind=""),
+    )
+    return cfg, home
+
+
+def _claude_golden_hooks(home: Path) -> dict:
+    return json.loads(json.dumps(_CLAUDE_LINUX_GOLDEN["hooks"]).replace(_CLAUDE_LINUX_GOLDEN["account"], str(home)))
+
+
+def _claude_contract_hooks(template: dict) -> dict:
+    """Every event Setup registers (doctor_hooks._CLAUDE_REQUIRED_HOOKS), each shaped like *template*.
+
+    The golden pins one synchronous event (PreToolUse) and the asynchronous
+    MessageDisplay; the other events carry the same handlers.
+    """
+
+    hooks = {}
+    for event, (matcher, timeout) in _CLAUDE_REQUIRED_HOOKS.items():
+        source = template.get(event) or template["PreToolUse"]
+        group = json.loads(json.dumps(source[0]))
+        group.pop("matcher", None)
+        if matcher is not None:
+            group["matcher"] = matcher
+        for handler in group["hooks"]:
+            handler["timeout"] = timeout
+        hooks[event] = [group]
+    return hooks
+
+
+def _write_claude_hooks(home: Path, hooks: dict) -> None:
+    (home / ".claude" / "settings.json").write_text(json.dumps({"hooks": hooks}), encoding="utf-8")
+
+
+def _claude_shell_hooks(data_dir: str) -> dict:
+    script = os.path.join(data_dir, "hooks", "claude-code-hook.sh")
+    command = script + " || { rc=$?; echo 'DefenseClaw blocked this' >&2; exit 2; }"
+    return {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": command, "timeout": 30}]}]}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+def test_claude_linux_per_user_native_registration_is_current(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    cfg, home = _claude_native_layout(monkeypatch, tmp_path)
+    _write_claude_hooks(home, _claude_golden_hooks(home))
+    assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux per-user native registration")
+def test_gap0612_status_and_quickstart_share_native_registration_verdict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from defenseclaw import bootstrap, hook_integrity
+    from defenseclaw.commands import cmd_status
+
+    cfg, home, _app = _claude_native_runtime(monkeypatch, tmp_path, "open")
+    healthy = _claude_contract_hooks(_claude_golden_hooks(home))
+    assert _doctor_claude_hooks_row(cfg, home)["status"] == "pass"
+    assert hook_integrity.hook_registration_problems(cfg, "claudecode") == []
+    assert "DEGRADED" not in cmd_status._hook_runtime_degraded_suffix(cfg, "claudecode")
+    assert bootstrap._connector_runtime_readiness(cfg, "claudecode") is None
+
+    # A foreign command cannot stand in for the native registration, and a
+    # missing event must not be called healthy just because other events remain.
+    wrong_home = json.loads(json.dumps(healthy))
+    wrong_home["PreToolUse"][0]["hooks"][0]["args"][6] = str(tmp_path / "other")
+    missing_companion = json.loads(json.dumps(healthy))
+    missing_companion["PreToolUse"][0]["hooks"].pop()
+    for hooks in (
+        {"PreToolUse": [{"hooks": [{"type": "command", "command": "/usr/local/bin/audit-tool"}]}]},
+        {event: groups for event, groups in healthy.items() if event != "PreToolUse"},
+        wrong_home,
+        missing_companion,
+    ):
+        _write_claude_hooks(home, hooks)
+        assert hook_integrity.hook_registration_problems(cfg, "claudecode")
+        assert "DEGRADED" in cmd_status._hook_runtime_degraded_suffix(cfg, "claudecode")
+        assert bootstrap._connector_runtime_readiness(cfg, "claudecode") is not None
+
+    _write_claude_hooks(home, healthy)
+    assert hook_integrity.hook_registration_problems(cfg, "claudecode") == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux per-user native registration")
+@pytest.mark.parametrize("form", ["direct", "shell"])
+@pytest.mark.parametrize(
+    "edit", ["current", "matcher", "timeout", "condition", "lifecycle_matcher", "lifecycle_timeout"]
+)
+def test_gap0612_native_tool_guard_fields_share_registration_verdict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, form: str, edit: str
+) -> None:
+    from defenseclaw import bootstrap, hook_integrity
+    from defenseclaw.commands import cmd_status
+
+    if form == "direct":
+        cfg, home, _app = _claude_native_runtime(monkeypatch, tmp_path, "open")
+        hooks = _claude_contract_hooks(_claude_golden_hooks(home))
+    else:
+        cfg, home = _claude_native_layout(monkeypatch, tmp_path, hook_post=False)
+        settings = home / ".claude" / "settings.json"
+        (Path(cfg.data_dir) / "hook_contract_lock.json").write_text(
+            json.dumps(
+                {
+                    "connectors": {
+                        "claudecode": {
+                            "contract_id": "claudecode-hooks-v1",
+                            "locations": {"hook_config_paths": [str(settings)]},
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        native = fail_mode_runtime._claude_per_user_native_registration(cfg)
+        assert native is not None
+        command = fail_mode_runtime._claude_native_shell_command(native)
+        hooks = {}
+        for event in _CLAUDE_CONTRACT_EVENTS["claudecode-hooks-v1"]:
+            matcher, timeout = _CLAUDE_REQUIRED_HOOKS[event]
+            group = {"hooks": [{"type": "command", "command": command, "timeout": timeout}]}
+            if matcher is not None:
+                group["matcher"] = matcher
+            if event == "MessageDisplay":
+                group["hooks"][0]["async"] = True
+            hooks[event] = [group]
+
+    group = hooks["PreToolUse"][0]
+    if edit == "matcher":
+        group["matcher"] = "Read"
+    elif edit == "timeout":
+        group["hooks"][0]["timeout"] = 1
+    elif edit == "condition":
+        group["if"] = "Bash(git *)"
+    elif edit == "lifecycle_matcher":
+        hooks["SessionStart"][0]["matcher"] = "startup"
+    elif edit == "lifecycle_timeout":
+        hooks["Stop"][0]["hooks"][0]["timeout"] = 1
+    _write_claude_hooks(home, hooks)
+
+    problems = hook_integrity.hook_registration_problems(cfg, "claudecode")
+    status = cmd_status._hook_runtime_degraded_suffix(cfg, "claudecode")
+    readiness = bootstrap._connector_runtime_readiness(cfg, "claudecode")
+    doctor = _doctor_claude_hooks_row(cfg, home)
+    if edit == "current":
+        assert not problems
+        assert "DEGRADED" not in status
+        assert readiness is None
+        assert doctor["status"] == "pass"
+    else:
+        assert problems
+        assert "DEGRADED" in status
+        assert readiness is not None
+        assert doctor["status"] == "fail"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux per-user native registration")
+@pytest.mark.parametrize("edit", ["timeout", "condition"])
+def test_gap0612_native_companion_fields_share_registration_verdict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, edit: str
+) -> None:
+    from defenseclaw import bootstrap, hook_integrity
+    from defenseclaw.commands import cmd_status
+
+    cfg, home, _app = _claude_native_runtime(monkeypatch, tmp_path, "open")
+    hooks = _claude_contract_hooks(_claude_golden_hooks(home))
+    companion = hooks["PreToolUse"][0]["hooks"][1]
+    if edit == "timeout":
+        companion["timeout"] = 1
+    else:
+        companion["if"] = "Bash(git *)"
+    _write_claude_hooks(home, hooks)
+
+    assert hook_integrity.hook_registration_problems(cfg, "claudecode")
+    assert "DEGRADED" in cmd_status._hook_runtime_degraded_suffix(cfg, "claudecode")
+    assert bootstrap._connector_runtime_readiness(cfg, "claudecode") is not None
+    assert _doctor_claude_hooks_row(cfg, home)["status"] == "fail"
+
+
+def _doctor_claude_hooks_row(cfg: SimpleNamespace, home: Path) -> dict:
+    result = cmd_doctor._DoctorResult()
+    cmd_doctor._check_claudecode_hooks(
+        cfg, result, platform_name="posix", config_path=str(home / ".claude" / "settings.json")
+    )
+    rows = [check for check in result.checks if check["label"] == "Claude Code hooks"]
+    assert len(rows) == 1, result.checks
+    return rows[0]
+
+
+def _claude_shell_contract_hooks(data_dir: str) -> dict:
+    return _claude_contract_hooks(_claude_shell_hooks(data_dir))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+@pytest.mark.parametrize("form", ["native", "shell"])
+def test_doctor_claude_hooks_checks_each_required_event(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, form: str
+) -> None:
+    # rel-1-0-2 GAP-0645: 1.0.8 registers a guard and its companion per
+    # synchronous event on per-user Linux (GAP-0322). Doctor counted
+    # DefenseClaw handlers and passed "55 DefenseClaw hook(s) registered"
+    # with PreToolUse gone while status said DEGRADED.
+    cfg, home, _app = _claude_native_runtime(monkeypatch, tmp_path, "open")
+    if form == "native":
+        full = _claude_contract_hooks(_claude_golden_hooks(home))
+    else:
+        # macOS (and managed) installs keep the shell hook (GAP-0559).
+        monkeypatch.setattr(fail_mode_runtime, "_is_linux", lambda: False)
+        full = _claude_shell_contract_hooks(cfg.data_dir)
+    # The lock records claudecode-hooks-v1, which has no DirectoryAdded.
+    assert fail_mode_runtime.claude_required_events(cfg) == _CLAUDE_CONTRACT_EVENTS["claudecode-hooks-v1"]
+
+    _write_claude_hooks(home, full)
+    row = _doctor_claude_hooks_row(cfg, home)
+    assert row["status"] == "pass", row
+
+    # A foreign handler beside DefenseClaw's, and a foreign event, change nothing.
+    foreign = json.loads(json.dumps(full))
+    foreign["PreToolUse"][0]["hooks"].append({"type": "command", "command": "/usr/local/bin/audit-tool", "timeout": 5})
+    foreign["PreToolUse"].append({"matcher": "Bash", "hooks": [{"type": "command", "command": "/usr/bin/true"}]})
+    foreign["Setup"] = [{"hooks": [{"type": "command", "command": "/usr/bin/true"}]}]
+    _write_claude_hooks(home, foreign)
+    row = _doctor_claude_hooks_row(cfg, home)
+    assert row["status"] == "pass", row
+
+    for event in ("PreToolUse", "SessionStart", "MessageDisplay"):
+        cut = json.loads(json.dumps(full))
+        del cut[event]
+        _write_claude_hooks(home, cut)
+        row = _doctor_claude_hooks_row(cfg, home)
+        assert row["status"] == "fail", (event, row)
+        assert f"the DefenseClaw {event} hook" in row["detail"] and "is not registered" in row["detail"], row
+        assert "setup claude-code --yes" in row["remediation"], row
+        if form == "native":
+            assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") == "registration-missing"
+
+    # Only DefenseClaw's handler of an event gone, a foreign one left behind.
+    cut = json.loads(json.dumps(full))
+    cut["PreToolUse"][0]["hooks"] = [{"type": "command", "command": "/usr/local/bin/audit-tool"}]
+    _write_claude_hooks(home, cut)
+    row = _doctor_claude_hooks_row(cfg, home)
+    assert row["status"] == "fail" and "PreToolUse hook is not registered" in row["detail"], row
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+def test_doctor_claude_hooks_fails_a_native_event_without_its_companion(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cfg, home, _app = _claude_native_runtime(monkeypatch, tmp_path, "open")
+    full = _claude_contract_hooks(_claude_golden_hooks(home))
+    for event in ("PreToolUse", "Stop"):
+        cut = json.loads(json.dumps(full))
+        cut[event][0]["hooks"] = cut[event][0]["hooks"][:1]
+        _write_claude_hooks(home, cut)
+        row = _doctor_claude_hooks_row(cfg, home)
+        assert row["status"] == "fail", (event, row)
+        assert f"the DefenseClaw {event} hook has no fallback-guard-user-hook companion" in row["detail"], row
+        assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is not None
+    # The companion in a group of its own does not guard the event either.
+    split = json.loads(json.dumps(full))
+    guard, companion = split["PreToolUse"][0]["hooks"]
+    split["PreToolUse"] = [{"matcher": "*", "hooks": [guard]}, {"matcher": "*", "hooks": [companion]}]
+    _write_claude_hooks(home, split)
+    row = _doctor_claude_hooks_row(cfg, home)
+    assert row["status"] == "fail" and "PreToolUse hook has no fallback-guard-user-hook companion" in row["detail"]
+    # An asynchronous guard does not block a synchronous event.
+    async_guard = json.loads(json.dumps(full))
+    async_guard["PreToolUse"][0]["hooks"][0]["async"] = True
+    _write_claude_hooks(home, async_guard)
+    row = _doctor_claude_hooks_row(cfg, home)
+    assert row["status"] == "fail" and "PreToolUse" in row["detail"], row
+    # MessageDisplay is asynchronous and has no companion.
+    _write_claude_hooks(home, full)
+    assert len(full["MessageDisplay"][0]["hooks"]) == 1
+    assert _doctor_claude_hooks_row(cfg, home)["status"] == "pass"
+    assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+def test_claude_shell_form_is_current_where_setup_writes_it(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    cfg, home = _claude_native_layout(monkeypatch, tmp_path)
+    for platform_linux, managed in ((False, ""), (True, "managed_enterprise")):
+        # macOS and managed installs keep the shell hook (GAP-0559), so the
+        # native handlers are not what Setup wrote there.
+        monkeypatch.setattr(fail_mode_runtime, "_is_linux", lambda value=platform_linux: value)
+        cfg.deployment_mode = managed
+        _write_claude_hooks(home, _claude_shell_hooks(cfg.data_dir))
+        assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is None
+        _write_claude_hooks(home, _claude_golden_hooks(home))
+        assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") == "registration-command-stale"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+def test_claude_linux_custom_data_dir_keeps_the_shell_form(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    cfg, home = _claude_native_layout(monkeypatch, tmp_path)
+    custom = tmp_path / "custom-data"
+    (custom / "hooks").mkdir(parents=True)
+    cfg.data_dir = str(custom)
+    _write_claude_hooks(home, _claude_shell_hooks(cfg.data_dir))
+    assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+def test_claude_stale_1_0_7_shell_entry_on_linux_is_drift(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # An upgrade to 1.0.8 without Setup leaves the 1.0.7 shell handlers.
+    cfg, home = _claude_native_layout(monkeypatch, tmp_path)
+    _write_claude_hooks(home, _claude_shell_hooks(cfg.data_dir))
+    assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") == "registration-command-stale"
+    # The current handlers next to a 1.0.7 entry left behind are drift too.
+    hooks = _claude_golden_hooks(home)
+    hooks["Stop"] = _claude_shell_hooks(cfg.data_dir)["PreToolUse"]
+    _write_claude_hooks(home, hooks)
+    assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") == "registration-command-stale"
+
+
+def _tamper_guard_path(hooks: dict) -> None:
+    hooks["PreToolUse"][0]["hooks"][0]["command"] = "/opt/other/defenseclaw-hook-post"
+
+
+def _tamper_drop_api_addr(hooks: dict) -> None:
+    hooks["PreToolUse"][0]["hooks"][0]["args"] = hooks["PreToolUse"][0]["hooks"][0]["args"][:-2]
+
+
+def _tamper_hook_home(hooks: dict) -> None:
+    args = hooks["PreToolUse"][0]["hooks"][0]["args"]
+    args[args.index("--hook-home") + 1] = "/tmp/other/.defenseclaw"
+
+
+def _tamper_drop_companion(hooks: dict) -> None:
+    del hooks["PreToolUse"][0]["hooks"][1]
+
+
+def _tamper_companion_args(hooks: dict) -> None:
+    hooks["PreToolUse"][0]["hooks"][1]["args"][0] = "guard-user-hook"
+
+
+def _tamper_shell_type(hooks: dict) -> None:
+    hooks["PreToolUse"][0]["hooks"][0]["type"] = "prompt"
+
+
+def _tamper_api_port(hooks: dict) -> None:
+    hooks["PreToolUse"][0]["hooks"][0]["args"][-1] = "127.0.0.1:1"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        _tamper_guard_path,
+        _tamper_drop_api_addr,
+        _tamper_hook_home,
+        _tamper_drop_companion,
+        _tamper_companion_args,
+        _tamper_shell_type,
+        _tamper_api_port,
+    ],
+)
+def test_claude_tampered_native_registration_is_drift(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tamper) -> None:
+    cfg, home = _claude_native_layout(monkeypatch, tmp_path)
+    hooks = _claude_golden_hooks(home)
+    tamper(hooks)
+    _write_claude_hooks(home, hooks)
+    assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") == "registration-command-stale"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+def test_claude_native_registration_without_guard_uses_the_launcher_shell_form(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from defenseclaw import hook_integrity
+
+    cfg, home = _claude_native_layout(monkeypatch, tmp_path, hook_post=False)
+    native = str(home / ".local" / "bin" / "defenseclaw-hook-user")
+    command = (
+        f"{native} hook --connector claudecode --hook-home {cfg.data_dir} --api-addr 127.0.0.1:18970"
+        ' || { rc=$?; [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ] || exit "$rc"; '
+        "echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. "
+        "Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, "
+        "or remove the DefenseClaw hooks from ~/.claude/settings.json.' >&2; exit 2; }"
+    )
+    settings = home / ".claude" / "settings.json"
+    (Path(cfg.data_dir) / "hook_contract_lock.json").write_text(
+        json.dumps({"connectors": {"claudecode": {"locations": {"hook_config_paths": [str(settings)]}}}}),
+        encoding="utf-8",
+    )
+    assert command == fail_mode_runtime._claude_native_shell_command(
+        fail_mode_runtime._claude_per_user_native_registration(cfg)
+    )
+    _write_claude_hooks(home, {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": command, "timeout": 30}]}]})
+    assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is None
+    assert hook_integrity.hook_registration_problems(cfg, "claudecode") == []
+    _write_claude_hooks(
+        home,
+        {
+            "PreToolUse": [
+                {"matcher": "*", "hooks": [{"type": "command", "command": command.replace("exit 2; }", "exit 0; }"), "timeout": 30}]}
+            ]
+        },
+    )
+    assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") == "registration-command-stale"
+    assert hook_integrity.hook_registration_problems(cfg, "claudecode")
+    _write_claude_hooks(home, _claude_golden_hooks(home))
+    assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") == "registration-command-stale"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+def test_claude_rollback_form_is_current_in_the_rolled_back_layout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # ConvertHooksForRollback rewrites the native handlers to the bare script
+    # path 1.0.7 owns; 1.0.7 installs no defenseclaw-hook-user, so its layout
+    # expects the shell form.
+    cfg, home = _claude_native_layout(monkeypatch, tmp_path, hook_user=False)
+    script = os.path.join(cfg.data_dir, "hooks", "claude-code-hook.sh")
+    hooks = _claude_golden_hooks(home)
+    for groups in hooks.values():
+        for group in groups:
+            group["hooks"] = [{"type": "command", "command": script, "timeout": group["hooks"][0]["timeout"]}]
+    _write_claude_hooks(home, hooks)
+    assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is None
+
+
+def _claude_native_runtime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, start: str
+) -> tuple[SimpleNamespace, Path, AppContext]:
+    """A per-user Linux install with the native handlers and a current lock and render."""
+
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": start})
+    cfg.data_dir = str(home / ".defenseclaw")
+    (home / ".defenseclaw" / "hooks").mkdir(parents=True)
+    _write_current_runtime(cfg, home, {"claudecode": start})
+    bin_dir = home / ".local" / "bin"
+    for name in ("defenseclaw-hook-user", "defenseclaw-hook-post"):
+        (bin_dir / name).write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (bin_dir / name).chmod(0o700)
+    helper = home / ".defenseclaw" / "hooks" / ".gateway-helper"
+    helper.write_text(str(bin_dir / "defenseclaw-gateway") + "\n", encoding="utf-8")
+    helper.chmod(0o600)
+    _write_claude_hooks(home, _claude_contract_hooks(_claude_golden_hooks(home)))
+    # A 1.0.8 per-user render: closed baked in, the outage mode read from
+    # config at call time by the shared helper.
+    hardening = Path(cfg.data_dir) / "hooks" / "_hardening.sh"
+    hardening.write_text("# defenseclaw-call-time-outage-v1\n", encoding="utf-8")
+    hardening.chmod(0o700)
+    lock_path = Path(cfg.data_dir) / "hook_contract_lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    lock["shared_hook_script_digests"]["_hardening.sh"] = "sha256:" + hashlib.sha256(hardening.read_bytes()).hexdigest()
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+    _install_render(cfg, "claudecode", "\n".join(_HOOK_FAIL_MODE_LINES["claude-code-hook.sh/closed"]))
+    monkeypatch.setattr(fail_mode_runtime.Path, "home", lambda: home)
+    monkeypatch.setattr(fail_mode_runtime, "_is_linux", lambda: True)
+    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: False)
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    return cfg, home, app
+
+
+def _claude_fake_reconcile(cfg: SimpleNamespace, mode: str, calls: list[list[str]]):
+    """Stand in for `defenseclaw-gateway connector reconcile`: record *mode* in .hookcfg and the lock."""
+
+    def run(args, **_kwargs):
+        calls.append(list(args))
+        _install_render(cfg, "claudecode", "\n".join(_HOOK_FAIL_MODE_LINES["claude-code-hook.sh/closed"]))
+        lock_path = Path(cfg.data_dir) / "hook_contract_lock.json"
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        lock["connectors"]["claudecode"]["hook_fail_mode"] = mode
+        lock_path.write_text(json.dumps(lock), encoding="utf-8")
+        (Path(cfg.data_dir) / "hooks" / ".hookcfg").write_text(
+            json.dumps({"version": 2, "gateway_addr": "127.0.0.1:18970", "fail_modes": {"claudecode": mode}}),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+    return run
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+@pytest.mark.parametrize("scope", [["--connector", "claudecode"], []])
+@pytest.mark.parametrize(("start", "mode"), [("open", "closed"), ("closed", "open")])
+def test_fail_mode_change_applies_and_verifies_on_a_native_claude_registration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scope: list[str], start: str, mode: str
+) -> None:
+    # rel-1-0-6 GAP-0572: the runtime verification after the reconcile judged
+    # the native handlers by claude-code-hook.sh, so every fail-mode change
+    # for Claude Code on a per-user Linux install was refused and rolled back.
+    cfg, home, app = _claude_native_runtime(monkeypatch, tmp_path, start)
+    calls: list[list[str]] = []
+    with (
+        patch.object(fail_mode_runtime, "path_gateway", return_value="/usr/bin/defenseclaw-gateway"),
+        patch.object(fail_mode_runtime.subprocess, "run", side_effect=_claude_fake_reconcile(cfg, mode, calls)),
+    ):
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, [mode, *scope, "--yes"], obj=app)
+        state = resolve_connector_fail_mode(cfg, "claudecode")
+    assert result.exit_code == 0, result.output
+    assert "restored" not in result.output
+    assert "refreshed and verified" in result.output
+    assert calls and calls[0][1:5] == ["connector", "reconcile", "--connector", "claudecode"]
+    assert state.current and state.desired == mode, state.drift
+    assert "registration-command-stale" not in state.drift
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+def test_fail_mode_change_rolls_back_over_a_stale_claude_shell_entry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A 1.0.7 shell handler the refresh did not replace is still stale: the
+    # update fails and the previous config and registration come back.
+    cfg, home, app = _claude_native_runtime(monkeypatch, tmp_path, "open")
+    _write_claude_hooks(home, _claude_shell_hooks(cfg.data_dir))
+    settings = home / ".claude" / "settings.json"
+    script = Path(cfg.data_dir) / "hooks" / "claude-code-hook.sh"
+    before = (settings.read_bytes(), script.read_bytes())
+    calls: list[list[str]] = []
+    with (
+        patch.object(fail_mode_runtime, "path_gateway", return_value="/usr/bin/defenseclaw-gateway"),
+        patch.object(fail_mode_runtime.subprocess, "run", side_effect=_claude_fake_reconcile(cfg, "closed", calls)),
+    ):
+        result = CliRunner().invoke(
+            cmd_guardrail.fail_mode_cmd, ["closed", "--connector", "claudecode", "--yes"], obj=app
+        )
+    assert result.exit_code != 0, result.output
+    assert calls
+    assert "previous config and registration restored" in result.output
+    assert "registration-command-stale" in result.output
+    assert (settings.read_bytes(), script.read_bytes()) == before
+    assert cfg.guardrail.connectors["claudecode"].hook_fail_mode == "open"
+
+
+def test_managed_windows_verify_command_ignores_a_poisoned_program_files(monkeypatch):
+    """g072 review 2 S2: the verify command an administrator pastes elevated
+    names the registered Program Files, not a ProgramFiles a standard user set."""
+    from defenseclaw import fail_mode
+
+    want = r"& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows verify --profile standalone"
+    for poison in (r"C:\Users\dcw-std1\Controlled", r"D:\Apps' x"):
+        monkeypatch.setenv("ProgramFiles", poison)
+        if sys.platform == "win32":
+            from defenseclaw import windows_owner
+
+            monkeypatch.setattr(windows_owner, "_program_files_dir", lambda: "C:\\Program Files")
+        assert fail_mode.managed_windows_verify_command() == want
+    if sys.platform == "win32":
+        from defenseclaw import windows_owner
+
+        monkeypatch.setattr(windows_owner, "_program_files_dir", lambda: "D:\\O\u2019Brien Apps\\")
+        assert fail_mode.managed_windows_verify_command().startswith("& 'D:\\O\u2019\u2019Brien Apps\\Cisco\\")

@@ -17,8 +17,12 @@
 package actionfacts
 
 import (
+	"path"
+	"slices"
+	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -41,6 +45,85 @@ import (
 // function and has no here-document, the twin analysis is complete, and
 // every command in it is a plain POSIX process with a static argv.
 func ShortCircuitListReduction(input Input, facts Facts) (view Facts, ok bool) {
+	return sequenceReduction(input, facts, false)
+}
+
+// CompoundCommandReduction returns a complete view of a partial POSIX action
+// whose simple commands sit in compound commands, read as if each of them
+// runs alone: a subshell, a { } group, the bodies and conditions of if,
+// while, until, for and case, a negated or background statement, and && or ||
+// lists. A block stops the whole tool call before any of it runs, so a rule
+// that blocks `rm -rf /` also blocks `(rm -rf /)` and
+// `if true; then rm -rf /; fi`. facts must be Analyze(input).
+//
+// The view is the analysis of a twin of the command in which each simple
+// command is a statement of its own, with the redirects of the compound
+// commands around it, and without an exit that only ends a subshell. A
+// subshell or group no longer scopes the directory or variables of its
+// commands there, and a loop runs its body once, so callers may count only a
+// match on the view, for an expression that more commands cannot turn off.
+//
+// The view is unavailable when a for or case word runs a command, a
+// statement is a coprocess, the command defines a function or has a
+// here-document, the twin analysis is not complete, or a command in it is not
+// a plain POSIX process with a static argv.
+func CompoundCommandReduction(input Input, facts Facts) (view Facts, ok bool) {
+	return sequenceReduction(input, facts, true)
+}
+
+// maxStatementsAlone bounds the commands evaluated in one action.
+const maxStatementsAlone = 128
+
+// withoutDescriptorDuplications returns statement without its descriptor
+// duplications (2>&1, <&3, >&-), and reports whether it had any.
+func withoutDescriptorDuplications(statement string) (string, bool) {
+	file, ok := shellparse.Parse(statement)
+	if !ok {
+		return "", false
+	}
+	var cuts [][2]int
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if redirect, ok := node.(*syntax.Redirect); ok &&
+			(redirect.Op == syntax.DplIn || redirect.Op == syntax.DplOut) {
+			cuts = append(cuts, [2]int{int(redirect.Pos().Offset()), int(redirect.End().Offset())})
+		}
+		return true
+	})
+	if len(cuts) == 0 {
+		return "", false
+	}
+	// Walk visits redirects in source order; cut from the last.
+	for index := len(cuts) - 1; index >= 0; index-- {
+		start, end := cuts[index][0], cuts[index][1]
+		if start < 0 || end <= start || end > len(statement) {
+			return "", false
+		}
+		statement = statement[:start] + statement[end:]
+	}
+	return statement, true
+}
+
+// shellDirectoryCommands are the POSIX commands that change the directory of
+// the shell that runs them or run text that may.
+var shellDirectoryCommands = map[string]bool{
+	"cd": true, "pushd": true, "popd": true, "source": true, ".": true,
+	"eval": true, "exec": true, "builtin": true, "command": true,
+	"alias": true, "trap": true,
+}
+
+// ChangesShellDirectory reports whether command may change the directory
+// later commands of its action run in: a POSIX command that changes it or
+// runs text that may, or one whose program is not static. A PowerShell or
+// cmd.exe script shares its caller's location, so there any command may.
+func ChangesShellDirectory(command CommandFact) bool {
+	if command.Dialect != DialectPOSIX {
+		return true
+	}
+	program := strings.ToLower(strings.TrimSpace(command.Program))
+	return program == "" || shellDirectoryCommands[program]
+}
+
+func sequenceReduction(input Input, facts Facts, compound bool) (view Facts, ok bool) {
 	defer func() {
 		if recover() != nil {
 			view, ok = Facts{}, false
@@ -54,7 +137,7 @@ func ShortCircuitListReduction(input Input, facts Facts) (view Facts, ok bool) {
 	if original.Parse.Status != StatusPartial {
 		return Facts{}, false
 	}
-	twinSource, ok := shortCircuitListSequence(capture.source)
+	twinSource, ok := shortCircuitListSequence(capture.source, compound)
 	if !ok {
 		return Facts{}, false
 	}
@@ -83,59 +166,1066 @@ func ShortCircuitListReduction(input Input, facts Facts) (view Facts, ok bool) {
 }
 
 // shortCircuitListSequence returns source with each top-level && or || list
-// replaced by its commands, one statement per line. It declines a source
-// without such a list, one with a negated, background or coprocess statement
-// in a list, and one where a statement could change what another runs (a
-// function definition) or where cutting the text could lose input (a
-// here-document).
-func shortCircuitListSequence(source string) (string, bool) {
-	if source == "" {
+// replaced by its commands, one statement per line; with compound, also each
+// subshell, group, if, while, until, for and case, and each negated or
+// background statement (sequenceStatements). It declines a source with
+// nothing to replace.
+func shortCircuitListSequence(source string, compound bool) (string, bool) {
+	statements, reduced, ok := sequenceStatements(source, compound)
+	if !ok || !reduced {
 		return "", false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).
-		Parse(strings.NewReader(source), "")
-	if err != nil {
-		return "", false
+	return strings.Join(statements, "\n"), true
+}
+
+// sequenceStatements returns the statements of source with each top-level &&
+// or || list replaced by its commands, and reports whether it replaced
+// anything. With compound, it also replaces each subshell, group, if, while,
+// until, for and case by the statements in it, and a negated or background
+// statement by its command. A redirect of a replaced compound command is
+// moved onto each statement in it, which then writes or reads what the
+// compound command did, and an exit in a subshell, which ends only that
+// subshell, is left out. It declines a source with a negated, background
+// (unless compound) or coprocess statement in a list, one where a dropped
+// word could run a command (a for or case word with a command substitution),
+// and one where a statement could change what another runs (a function
+// definition) or where cutting the text could lose input (a here-document).
+func sequenceStatements(source string, compound bool) (statements []string, reduced, ok bool) {
+	parts, reduced, ok := sequenceStatementDetails(source, compound, false, false, false)
+	if !ok {
+		return nil, false, false
+	}
+	statements = make([]string, 0, len(parts))
+	for _, part := range parts {
+		statements = append(statements, part.text)
+	}
+	return statements, reduced, true
+}
+
+// functionDefinition is where the walk met a function definition: how many
+// statements it had kept, and the scope, loop bindings, subshell depth and
+// function depth it was in. A function the text never calls is walked there.
+type functionDefinition struct {
+	body             *syntax.Stmt
+	at               int
+	scope            string
+	binds            []simpleLoopBind
+	subshells, depth int
+}
+
+type sequenceStatement struct {
+	text, scope string
+	sourceStart int
+	// maySkip marks a statement that is the right side of && or ||: it runs
+	// only when the left side lets it.
+	maySkip bool
+	// read is the value a read of one here-string word leaves its variable
+	// (simpleHereStringRead), nil for any other statement.
+	read *simpleReadWord
+	// binds holds the USER and LOGNAME names that a for or select loop
+	// around the statement binds, outermost first, with the list each
+	// takes its values from: the statement runs after the binding.
+	binds []simpleLoopBind
+}
+
+// loopScopeKinds are the scope kinds of the body of a loop that binds USER
+// (u) or LOGNAME (o); other conditional and loop bodies are kind c.
+var loopScopeKinds = map[string]byte{"USER": 'u', "LOGNAME": 'o'}
+
+// simpleLoopBind is a for or select loop that gives USER or LOGNAME one
+// word of its list in each iteration (an empty list is the positional
+// parameters).
+type simpleLoopBind struct {
+	name  string
+	items []*syntax.Word
+	// fork marks a variable other than USER and LOGNAME, read once for each
+	// word of its list (simpleForkLoopBind).
+	fork bool
+	// read marks a while read loop. Its IFS is the one fixed for it (fixedIFS,
+	// ifs): the one the read sets for itself, or in the straight-line reading
+	// the one a top-level statement before the loop leaves. Any other read has
+	// what readIFS finds: the value the walk holds where the loop starts and the
+	// assignments of outerIFS.
+	read, fixedIFS bool
+	ifs            []string
+	outerIFS       []*syntax.Assign
+	// rebound is where the body may hold another value of the variable than
+	// the loop gave it (simpleReboundSpans).
+	rebound []simpleSpan
+	// token is the placeholder that stands for the plain words of the list
+	// in one state (simplePlaceholderToken), "" when each is read alone.
+	token string
+	// certain marks a read loop that reads its word before every pass of the
+	// body (the straight-line reading, the builtin read): the body never runs
+	// with the variable as it was before the loop.
+	certain bool
+}
+
+// sequenceStatementDetails is the one full-parser flattening step. The
+// reductions retain ordinary pipelines as a unit; simple-command policy
+// evaluation asks it to expose their individual stages too. Scope identifies
+// statements whose shell directory and variables are shared. walkUncalled
+// also walks, where it is defined, the body of a function no call of the text
+// expands, for the apply_patch envelope in it; without it (a caller that
+// judges only what the shell runs, Input.StraightLineFunctions) such a body
+// contributes no statement and no state. straight limits the code a loop
+// binding follows to the top-level statements before the loop (Input.LoopBindsStraightLine).
+func sequenceStatementDetails(source string, compound, allSimple, straight, walkUncalled bool) (statements []sequenceStatement, reduced, ok bool) {
+	if source == "" {
+		return nil, false, false
+	}
+	file, parsed := shellparse.Parse(source)
+	if !parsed {
+		return nil, false, false
 	}
 	declined := false
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch typed := node.(type) {
 		case *syntax.FuncDecl:
-			declined = true
+			declined = declined || !allSimple
 		case *syntax.Redirect:
-			declined = declined || typed.Op == syntax.Hdoc || typed.Op == syntax.DashHdoc
+			declined = declined || !allSimple &&
+				(typed.Op == syntax.Hdoc || typed.Op == syntax.DashHdoc)
 		}
 		return !declined
 	})
 	if declined {
-		return "", false
+		return nil, false, false
 	}
-	kept := make([]string, 0, len(file.Stmts))
-	reduced := false
-	var flatten func(stmt *syntax.Stmt) bool
-	flatten = func(stmt *syntax.Stmt) bool {
-		if posixStatementHasUnsupportedControl(stmt) {
-			return false
+	statements = make([]sequenceStatement, 0, len(file.Stmts))
+	// order is the declared functions and loops of the call, read once and
+	// only for a call that has a loop to bind.
+	var codeOrder *simpleScriptOrder
+	order := func() *simpleScriptOrder {
+		if codeOrder == nil {
+			codeOrder = newSimpleScriptOrder(file, straight)
 		}
-		if list, isList := stmt.Cmd.(*syntax.BinaryCmd); isList && len(stmt.Redirs) == 0 &&
-			(list.Op == syntax.AndStmt || list.Op == syntax.OrStmt) {
-			reduced = true
-			return flatten(list.X) && flatten(list.Y)
-		}
-		start, end := int(stmt.Pos().Offset()), int(stmt.End().Offset())
+		return codeOrder
+	}
+	text := func(from, to syntax.Pos) (string, bool) {
+		start, end := int(from.Offset()), int(to.Offset())
 		if start < 0 || end <= start || end > len(source) {
-			return false
-		}
-		kept = append(kept, source[start:end])
-		return true
-	}
-	for _, stmt := range file.Stmts {
-		if !flatten(stmt) {
 			return "", false
 		}
+		return source[start:end], true
 	}
-	if !reduced {
+	// redirects are those of the compound commands being replaced, outermost
+	// first, as text to append to each statement.
+	var redirects []string
+	scope := "0"
+	nextScope := 0
+	// childScope walks statements in a child scope of a kind: s a subshell
+	// (its state is dropped), c a conditional or loop body of the same
+	// shell (its state joins the path that skipped it), f a function body
+	// run by this shell (its state replaces the caller state, less its
+	// local variables), e a function body run by a child shell.
+	namedScope := func(kind byte, name string, walk func() bool) bool {
+		parent := scope
+		nextScope++
+		scope = parent + "/" + string(kind) + strconv.Itoa(nextScope)
+		if name != "" {
+			// The variable of a forked loop, dropped where its body ends.
+			scope += "=" + name
+		}
+		defer func() { scope = parent }()
+		return walk()
+	}
+	childScope := func(kind byte, walk func() bool) bool { return namedScope(kind, "", walk) }
+	// assigned holds the static values the walk has seen assigned to each
+	// variable, so a program word such as $x can name the function it
+	// calls (GAP-0934); unbound holds the variables the action may also
+	// bind in a way the walk cannot read.
+	assigned := make(map[string][]string)
+	unbound := simpleUnreadBindings(file)
+	// calling is the chain of calls whose function bodies are being flattened,
+	// outermost first.
+	var calling []*syntax.CallExpr
+	var loopBinds []simpleLoopBind
+	// stateOnly is set while the walk is in the body of a function the text
+	// never calls: keep then drops every command but the ones that set what an
+	// apply_patch envelope in the body reads (simpleUncalledBodyCommand);
+	// envelopes counts the envelopes it kept.
+	stateOnly := false
+	envelopes := 0
+	// enclosingLoops are the for and while loops being flattened, outermost
+	// first, through the functions they call.
+	var enclosingLoops []syntax.Node
+	// skippable counts the right sides of && and || around the statement
+	// being flattened.
+	skippable := 0
+	// pipeInput is the stage before the while loop being flattened, and
+	// hereString the word of a here-string it reads (done <<< word).
+	var pipeInput *syntax.Stmt
+	var hereString *syntax.Word
+	// keep adds the text of node, or of a command and its redirects.
+	keep := func(node syntax.Node, redirs ...*syntax.Redirect) bool {
+		if stateOnly {
+			state, envelope := simpleUncalledBodyCommand(node, len(redirs) != 0, assigned, unbound)
+			if !state && !envelope {
+				return true
+			}
+			if envelope {
+				envelopes++
+			}
+		}
+		from, to := node.Pos(), node.End()
+		for _, redirect := range redirs {
+			if redirect.Pos().Offset() < from.Offset() {
+				from = redirect.Pos()
+			}
+			if redirect.End().Offset() > to.Offset() {
+				to = redirect.End()
+			}
+		}
+		statement, ok := text(from, to)
+		if !ok {
+			return false
+		}
+		for index := len(redirects) - 1; index >= 0; index-- {
+			statement += " " + redirects[index]
+		}
+		var read *simpleReadWord
+		if call, ok := node.(*syntax.CallExpr); ok {
+			read = simpleHereStringRead(call, redirs, order, calling)
+		}
+		statements = append(statements, sequenceStatement{text: statement, scope: scope,
+			sourceStart: int(from.Offset()), maySkip: skippable != 0, read: read, binds: slices.Clone(loopBinds)})
+		return true
+	}
+	subshells := 0
+	functions := make(map[string]*syntax.Stmt)
+	functionDepth := 0
+	// expanded are the function bodies a call walked; definitions are the
+	// functions the walk met, to be walked where defined when no call did.
+	expanded := make(map[*syntax.Stmt]bool)
+	var definitions []functionDefinition
+	record := func(assign *syntax.Assign) {
+		if assign == nil || assign.Name == nil || assign.Naked {
+			return
+		}
+		value := ""
+		if assign.Value != nil {
+			static, ok := simpleStaticWord(assign.Value, nil)
+			if !ok {
+				return
+			}
+			value = static
+		}
+		if !slices.Contains(assigned[assign.Name.Value], value) {
+			assigned[assign.Name.Value] = append(assigned[assign.Name.Value], value)
+		}
+	}
+	// exported are the functions this action exported. A child shell imports
+	// them, so each body is judged once, at the first later command that may
+	// start one; an export alone runs nothing.
+	var exported []string
+	var importedBodies []*syntax.Stmt
+	var flatten func(stmt *syntax.Stmt) bool
+	flattenAll := func(stmts []*syntax.Stmt) bool {
+		for _, stmt := range stmts {
+			if !flatten(stmt) {
+				return false
+			}
+		}
+		return true
+	}
+	flattenSubstitutions := func(node syntax.Node) bool {
+		var nested [][]*syntax.Stmt
+		syntax.Walk(node, func(part syntax.Node) bool {
+			switch part := part.(type) {
+			case *syntax.CmdSubst:
+				nested = append(nested, part.Stmts)
+				return false
+			case *syntax.ProcSubst:
+				nested = append(nested, part.Stmts)
+				return false
+			}
+			return true
+		})
+		for _, stmts := range nested {
+			subshells++
+			ok := childScope('s', func() bool { return flattenAll(stmts) })
+			subshells--
+			if !ok {
+				return false
+			}
+		}
+		return true
+	}
+	// flattenCompound replaces a compound command by its statements. It
+	// reports whether command is one it replaces, and whether that worked.
+	flattenCompound := func(command syntax.Command) (replaced, ok bool) {
+		switch typed := command.(type) {
+		case *syntax.BinaryCmd:
+			if typed.Op != syntax.AndStmt && typed.Op != syntax.OrStmt &&
+				(!compound || (typed.Op != syntax.Pipe && typed.Op != syntax.PipeAll) ||
+					!allSimple &&
+						!pipelineHasCompoundCommand(typed)) {
+				return false, false
+			}
+			if allSimple && (typed.Op == syntax.Pipe || typed.Op == syntax.PipeAll) {
+				// The stage before a while loop is its input.
+				if _, loop := typed.Y.Cmd.(*syntax.WhileClause); loop && typed.Op == syntax.Pipe && len(typed.Y.Redirs) == 0 {
+					pipeInput = typed.X
+				}
+				return true, childScope('s', func() bool { return flatten(typed.X) }) &&
+					childScope('s', func() bool { return flatten(typed.Y) })
+			}
+			if !flatten(typed.X) {
+				return true, false
+			}
+			if typed.Op == syntax.AndStmt || typed.Op == syntax.OrStmt {
+				skippable++
+				defer func() { skippable-- }()
+			}
+			return true, flatten(typed.Y)
+		}
+		if !compound {
+			return false, false
+		}
+		switch typed := command.(type) {
+		case *syntax.FuncDecl:
+			if !allSimple || typed.Name == nil || typed.Body == nil {
+				return true, false
+			}
+			functions[typed.Name.Value] = typed.Body
+			definitions = append(definitions, functionDefinition{body: typed.Body, at: len(statements),
+				scope: scope, binds: slices.Clone(loopBinds), subshells: subshells, depth: functionDepth})
+			return true, true
+		case *syntax.Subshell:
+			subshells++
+			defer func() { subshells-- }()
+			return true, childScope('s', func() bool { return flattenAll(typed.Stmts) })
+		case *syntax.Block:
+			return true, flattenAll(typed.Stmts)
+		case *syntax.TimeClause:
+			if !allSimple || typed.Stmt == nil {
+				return true, false
+			}
+			return true, flatten(typed.Stmt)
+		case *syntax.IfClause:
+			for clause := typed; clause != nil; clause = clause.Else {
+				if !flattenAll(clause.Cond) || !childScope('c', func() bool { return flattenAll(clause.Then) }) {
+					return true, false
+				}
+			}
+			return true, true
+		case *syntax.WhileClause:
+			kind, name := byte('c'), ""
+			word := simpleEchoWord(pipeInput)
+			if hereString != nil {
+				word = hereString
+			}
+			pipeInput, hereString = nil, nil
+			bind, forks := simpleReadLoopBind(typed, word, order(), enclosingLoops)
+			// The condition runs before the variable has its first word.
+			if !flattenAll(typed.Cond) {
+				return true, false
+			}
+			if forks {
+				outer := loopBinds
+				loopBinds = append(slices.Clone(outer), bind)
+				defer func() { loopBinds = outer }()
+				kind, name = forkedLoopScopeKind, bind.name
+			}
+			enclosingLoops = append(enclosingLoops, typed)
+			defer func() { enclosingLoops = enclosingLoops[:len(enclosingLoops)-1] }()
+			return true, namedScope(kind, name, func() bool { return flattenAll(typed.Do) })
+		case *syntax.ForClause:
+			switch iteration := typed.Loop.(type) {
+			case *syntax.WordIter:
+				if !allSimple && !inertPOSIXWords(iteration.Items...) ||
+					allSimple && !flattenSubstitutions(iteration) {
+					return true, false
+				}
+			case *syntax.CStyleLoop:
+				// Arithmetic can contain command substitutions. Those run while
+				// evaluating the loop header, before its body.
+				if !allSimple || !flattenSubstitutions(iteration) {
+					return true, false
+				}
+			default:
+				return true, false
+			}
+			kind, name := byte('c'), ""
+			if iteration, ok := typed.Loop.(*syntax.WordIter); ok && iteration.Name != nil &&
+				slices.Contains(simpleUserNames, iteration.Name.Value) {
+				outer := loopBinds
+				loopBinds = append(slices.Clone(outer), simpleLoopBind{name: iteration.Name.Value, items: iteration.Items})
+				defer func() { loopBinds = outer }()
+				// The scope kind names the login the loop binds, so the
+				// name has no value the walk can follow once the loop ends.
+				kind = loopScopeKinds[iteration.Name.Value]
+			} else if iteration, ok := typed.Loop.(*syntax.WordIter); ok && simpleLoopForks(iteration) {
+				outer := loopBinds
+				loopBinds = append(slices.Clone(outer), simpleLoopBind{name: iteration.Name.Value, items: iteration.Items, fork: true,
+					rebound: simpleReboundSpans(typed.Do, iteration.Name.Value, order()),
+					token:   simplePlaceholderToken(typed.Do, iteration.Name.Value, source)})
+				defer func() { loopBinds = outer }()
+				kind, name = forkedLoopScopeKind, iteration.Name.Value
+			}
+			enclosingLoops = append(enclosingLoops, typed)
+			defer func() { enclosingLoops = enclosingLoops[:len(enclosingLoops)-1] }()
+			return true, namedScope(kind, name, func() bool { return flattenAll(typed.Do) })
+		case *syntax.CaseClause:
+			if !allSimple && !inertPOSIXWords(typed.Word) ||
+				allSimple && !flattenSubstitutions(typed.Word) {
+				return true, false
+			}
+			for _, item := range typed.Items {
+				if !allSimple && !inertPOSIXWords(item.Patterns...) {
+					return true, false
+				}
+				if allSimple {
+					for _, pattern := range item.Patterns {
+						if !flattenSubstitutions(pattern) {
+							return true, false
+						}
+					}
+				}
+				if !childScope('c', func() bool { return flattenAll(item.Stmts) }) {
+					return true, false
+				}
+			}
+			return true, true
+		}
+		return false, false
+	}
+	// flattenRedirected replaces the compound command of stmt with its
+	// redirects moved onto the statements in it.
+	flattenRedirected := func(stmt *syntax.Stmt) (replaced, ok bool) {
+		if len(stmt.Redirs) == 0 {
+			return flattenCompound(stmt.Cmd)
+		}
+		if !compound {
+			return false, false
+		}
+		moved, ok := text(stmt.Redirs[0].Pos(), stmt.Redirs[len(stmt.Redirs)-1].End())
+		if !ok {
+			return false, false
+		}
+		saved := redirects
+		redirects = append(redirects[:len(redirects):len(redirects)], moved)
+		defer func() { redirects = saved }()
+		if _, loop := stmt.Cmd.(*syntax.WhileClause); loop && len(stmt.Redirs) == 1 &&
+			stmt.Redirs[0].Op == syntax.WordHdoc && stmt.Redirs[0].N == nil {
+			hereString = stmt.Redirs[0].Word
+		}
+		return flattenCompound(stmt.Cmd)
+	}
+	flatten = func(stmt *syntax.Stmt) bool {
+		if stmt == nil || stmt.Coprocess || stmt.Disown {
+			return false
+		}
+		if compound && subshells > 0 && !stmt.Negated && !stmt.Background &&
+			len(stmt.Redirs) == 0 && subshellExit(stmt.Cmd) {
+			reduced = true
+			return true
+		}
+		if stmt.Negated || stmt.Background {
+			if !compound {
+				return false
+			}
+			reduced = true
+			if replaced, ok := flattenRedirected(stmt); replaced {
+				return ok
+			}
+			if allSimple && !flattenSubstitutions(stmt) {
+				return false
+			}
+			return stmt.Cmd != nil && keep(stmt.Cmd, stmt.Redirs...)
+		}
+		if replaced, ok := flattenRedirected(stmt); replaced {
+			reduced = true
+			return ok
+		}
+		if stmt.Cmd == nil {
+			if allSimple && !flattenSubstitutions(stmt) {
+				return false
+			}
+			return len(stmt.Redirs) != 0 && keep(stmt.Redirs[0], stmt.Redirs...)
+		}
+		if allSimple && !flattenSubstitutions(stmt) {
+			return false
+		}
+		if allSimple {
+			if decl, ok := stmt.Cmd.(*syntax.DeclClause); ok && len(functions) != 0 &&
+				(decl.Variant.Value == "export" || decl.Variant.Value == "declare" ||
+					decl.Variant.Value == "typeset") {
+				names, known := simpleExportedFunctionNames(decl)
+				if !known {
+					return false
+				}
+				for _, exportedName := range names {
+					// Bash refuses to export a name that is not yet a function.
+					if _, found := functions[exportedName]; found && !slices.Contains(exported, exportedName) {
+						exported = append(exported, exportedName)
+					}
+				}
+			}
+			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) == 0 {
+				for _, assign := range call.Assigns {
+					record(assign)
+				}
+			}
+			if decl, ok := stmt.Cmd.(*syntax.DeclClause); ok {
+				for _, assign := range decl.Args {
+					record(assign)
+				}
+			}
+			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) != 0 {
+				name, known := simpleFunctionCallName(call)
+				var bound []string
+				if !known && len(functions) != 0 {
+					// A runtime program word may name any function defined in
+					// this action. It is read only when it is one variable
+					// that the action binds to static values alone: each
+					// value is a call the action may make.
+					names, ok := simpleAssignedProgramNames(call.Args[0], assigned, unbound)
+					if !ok {
+						return false
+					}
+					bound = names
+				}
+				var bodies []*syntax.Stmt
+				if body, found := functions[name]; found {
+					bodies = append(bodies, body)
+				}
+				for _, boundName := range bound {
+					if body, found := functions[boundName]; found && !slices.Contains(bodies, body) {
+						bodies = append(bodies, body)
+					}
+				}
+				program, _ := simpleStaticWord(call.Args[0], nil)
+				_, _, trapAction, _ := simpleNestedScript(call, nil, nil, nil)
+				if (program == "eval" || program == "trap" && trapAction) && len(functions) != 0 {
+					called, ok := simpleEvalFunctionNames(call)
+					if !ok {
+						return false
+					}
+					for _, calledName := range called {
+						if body, found := functions[calledName]; found && !slices.Contains(bodies, body) {
+							bodies = append(bodies, body)
+						}
+					}
+				}
+				if len(bodies) != 0 {
+					if functionDepth >= 8 || !keep(stmt.Cmd, stmt.Redirs...) {
+						return false
+					}
+					reduced = true
+					if len(stmt.Redirs) != 0 {
+						moved, ok := text(stmt.Redirs[0].Pos(), stmt.Redirs[len(stmt.Redirs)-1].End())
+						if !ok {
+							return false
+						}
+						saved := redirects
+						redirects = append(redirects[:len(redirects):len(redirects)], moved)
+						defer func() { redirects = saved }()
+					}
+					for _, body := range bodies {
+						if functionDepth >= 8 {
+							return false
+						}
+						functionDepth++
+						calling = append(calling, call)
+						expanded[body] = true
+						ok := childScope('f', func() bool { return flatten(body) })
+						calling = calling[:len(calling)-1]
+						functionDepth--
+						if !ok {
+							return false
+						}
+					}
+					return true
+				}
+			}
+		}
+		// Not stmt itself, whose text may end in a ; that a moved redirect
+		// cannot follow.
+		if !keep(stmt.Cmd, stmt.Redirs...) {
+			return false
+		}
+		call, isCall := stmt.Cmd.(*syntax.CallExpr)
+		if !allSimple || len(exported) == 0 || !isCall ||
+			!simpleMayImportExportedFunctions(call, source, exported) {
+			return true
+		}
+		var bodies []*syntax.Stmt
+		for _, exportedName := range exported {
+			if body := functions[exportedName]; body != nil && !slices.Contains(importedBodies, body) {
+				bodies = append(bodies, body)
+			}
+		}
+		if len(bodies) == 0 {
+			return true
+		}
+		importedBodies = append(importedBodies, bodies...)
+		reduced = true
+		if len(stmt.Redirs) != 0 {
+			moved, ok := text(stmt.Redirs[0].Pos(), stmt.Redirs[len(stmt.Redirs)-1].End())
+			if !ok {
+				return false
+			}
+			saved := redirects
+			redirects = append(redirects[:len(redirects):len(redirects)], moved)
+			defer func() { redirects = saved }()
+		}
+		for _, body := range bodies {
+			if functionDepth >= 8 {
+				return false
+			}
+			// The body runs in the child shell: its exit, directory and
+			// variables stay there.
+			functionDepth++
+			subshells++
+			calling = append(calling, call)
+			expanded[body] = true
+			ok := childScope('e', func() bool { return flatten(body) })
+			calling = calling[:len(calling)-1]
+			subshells--
+			functionDepth--
+			if !ok {
+				return false
+			}
+		}
+		return true
+	}
+	if !flattenAll(file.Stmts) {
+		return nil, false, false
+	}
+	if walkUncalled && len(definitions) != 0 {
+		// A function the text never calls runs nothing, and the content rules
+		// read the envelope, not the order in which the shell would run it: walk
+		// its body where it is defined, as the body of a child shell, so its
+		// directory and variables stay out of the statements that follow.
+		// A body with no envelope has nothing to judge: its statements are not
+		// kept, so they do not count against the statement budget. found is the
+		// number of envelopes in the bodies walkUncalled kept.
+		var walkUncalled func(defs []functionDefinition, into []sequenceStatement) (result []sequenceStatement, found int, ok bool)
+		walkUncalled = func(defs []functionDefinition, into []sequenceStatement) ([]sequenceStatement, int, bool) {
+			found := 0
+			for index := len(defs) - 1; index >= 0; index-- {
+				def := defs[index]
+				if expanded[def.body] {
+					continue
+				}
+				outer, outerScope, outerBinds := statements, scope, loopBinds
+				outerSubshells, outerDepth, mark := subshells, functionDepth, len(definitions)
+				statements, scope, loopBinds = nil, def.scope, def.binds
+				subshells, functionDepth, stateOnly, envelopes = def.subshells+1, def.depth, true, 0
+				ok := childScope('e', func() bool { return flatten(def.body) })
+				walked, nested, own := statements, slices.Clone(definitions[mark:]), envelopes
+				definitions = definitions[:mark]
+				statements, scope, loopBinds = outer, outerScope, outerBinds
+				subshells, functionDepth, stateOnly = outerSubshells, outerDepth, false
+				if !ok {
+					return nil, 0, false
+				}
+				walked, inner, ok := walkUncalled(nested, walked)
+				if !ok {
+					return nil, 0, false
+				}
+				if own+inner != 0 {
+					into = slices.Insert(into, def.at, walked...)
+					found += own + inner
+				}
+			}
+			return into, found, true
+		}
+		var ok bool
+		if statements, _, ok = walkUncalled(slices.Clone(definitions), statements); !ok {
+			return nil, false, false
+		}
+	}
+	return statements, reduced, true
+}
+
+// simpleUncalledBodyCommand classifies node, a command of the body of a
+// function the text never calls, for the walk of that body: an apply_patch
+// command with redirects is an envelope, and the commands that set what the
+// envelope reads are state: assignments, declarations and the commands that may
+// change the directory, named directly or through a variable the action assigns
+// static values. The walk keeps those two kinds; every other command of such a
+// body stays unexposed.
+func simpleUncalledBodyCommand(node syntax.Node, redirected bool, assigned map[string][]string, unbound map[string]bool) (state, envelope bool) {
+	switch typed := node.(type) {
+	case *syntax.DeclClause:
+		return true, false
+	case *syntax.CallExpr:
+		if len(typed.Args) == 0 {
+			return len(typed.Assigns) != 0, false
+		}
+		var names []string
+		if program, static := simpleStaticWord(typed.Args[0], nil); static {
+			names = []string{program}
+		} else if bound, ok := simpleAssignedProgramNames(typed.Args[0], assigned, unbound); ok {
+			names = bound
+		}
+		for _, name := range names {
+			envelope = envelope || name == "apply_patch" && redirected
+			state = state || name != "" && ChangesShellDirectory(CommandFact{Dialect: DialectPOSIX, Program: name})
+		}
+	}
+	return state, envelope
+}
+
+// simpleAssignedProgramNames returns the program names that word, one
+// plain $x or ${x} (quoted or not), can expand to when the action assigns x
+// only static values (x=f; $x calls the function f, GAP-0934). It is false
+// for any other word, for an x the action never assigns (its value comes
+// from the environment) and for an x it may bind in another way.
+func simpleAssignedProgramNames(word *syntax.Word, assigned map[string][]string, unbound map[string]bool) ([]string, bool) {
+	if word == nil {
+		return nil, false
+	}
+	name := ""
+	plain := true
+	syntax.Walk(word, func(node syntax.Node) bool {
+		if param, ok := node.(*syntax.ParamExp); ok {
+			if name != "" || param.Param == nil {
+				plain = false
+			} else {
+				name = param.Param.Value
+			}
+			return false
+		}
+		return plain
+	})
+	values := assigned[name]
+	if !plain || name == "" || unbound[name] || len(values) == 0 {
+		return nil, false
+	}
+	names := make([]string, 0, len(values))
+	for _, value := range values {
+		resolved, ok := simpleStaticWord(word, map[string]string{name: value})
+		if !ok {
+			return nil, false
+		}
+		if resolved != "" && !slices.Contains(names, resolved) {
+			names = append(names, resolved)
+		}
+	}
+	return names, true
+}
+
+// simpleUnreadBindings returns the variables that file may bind other than
+// by a static NAME=value assignment: a dynamic, appended or array value, a
+// declaration option (a nameref or an attribute), a for loop, arithmetic,
+// or a builtin that writes a named variable (read, printf -v, unset, ...).
+func simpleUnreadBindings(file *syntax.File) map[string]bool {
+	unbound := make(map[string]bool)
+	mark := func(name string) {
+		if simpleVariableName(name) {
+			unbound[name] = true
+		}
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch typed := node.(type) {
+		case *syntax.Assign:
+			if typed.Name == nil {
+				break
+			}
+			_, static := simpleStaticWord(typed.Value, nil)
+			if typed.Append || typed.Index != nil || typed.Array != nil || typed.Value != nil && !static {
+				mark(typed.Name.Value)
+			}
+		case *syntax.DeclClause:
+			for _, assign := range typed.Args {
+				if assign != nil && assign.Naked && assign.Name == nil {
+					// An option such as -n or -i changes what every name means.
+					for _, other := range typed.Args {
+						if other != nil && other.Name != nil {
+							mark(other.Name.Value)
+						}
+					}
+				}
+			}
+		case *syntax.ForClause:
+			if iteration, ok := typed.Loop.(*syntax.WordIter); ok && iteration.Name != nil {
+				mark(iteration.Name.Value)
+			}
+		case *syntax.ArithmCmd, *syntax.ArithmExp, *syntax.LetClause:
+			syntax.Walk(node, func(inner syntax.Node) bool {
+				if literal, ok := inner.(*syntax.Lit); ok {
+					mark(literal.Value)
+				}
+				return true
+			})
+			return false
+		case *syntax.CallExpr:
+			// Any literal argument that is a name or starts NAME= (read x,
+			// printf -v x, unset x, eval x=g) may bind that name.
+			for _, arg := range typed.Args[min(1, len(typed.Args)):] {
+				if literal := arg.Lit(); literal != "" {
+					name, _, _ := strings.Cut(literal, "=")
+					mark(name)
+				}
+			}
+		}
+		return true
+	})
+	return unbound
+}
+
+// eval parses its static script in the caller's shell. Function definitions
+// from the enclosing action remain visible to calls inside that script.
+func simpleEvalFunctionNames(call *syntax.CallExpr) ([]string, bool) {
+	script, _, nested, static := simpleNestedScript(call, nil, nil, nil)
+	if !nested || !static {
+		return nil, false
+	}
+	file, ok := shellparse.Parse(script)
+	if !ok {
+		return nil, false
+	}
+	var names []string
+	known := true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if _, definition := node.(*syntax.FuncDecl); definition {
+			return false
+		}
+		inner, call := node.(*syntax.CallExpr)
+		if !call || len(inner.Args) == 0 {
+			return true
+		}
+		name, ok := simpleFunctionCallName(inner)
+		if !ok {
+			known = false
+			return false
+		}
+		names = append(names, name)
+		return true
+	})
+	return names, known
+}
+
+// simpleExportedFunctionNames returns the functions an export, declare -fx
+// or typeset -fx statement exports. Only a later command that may start a
+// shell can run them (simpleMayImportExportedFunctions).
+func simpleExportedFunctionNames(decl *syntax.DeclClause) ([]string, bool) {
+	if decl == nil || len(decl.Args) == 0 {
+		return nil, true
+	}
+	values := make([]string, 0, len(decl.Args))
+	for _, arg := range decl.Args {
+		if arg == nil {
+			return nil, false
+		}
+		if arg.Name != nil && arg.Naked {
+			values = append(values, arg.Name.Value)
+			continue
+		}
+		if arg.Name != nil {
+			// NAME=value sets a variable; it exports no function (export
+			// HOME=v in a function body, GAP-2476).
+			continue
+		}
+		if arg.Name == nil && arg.Value != nil {
+			value, known := simpleStaticWord(arg.Value, nil)
+			if !known {
+				return nil, false
+			}
+			values = append(values, value)
+			continue
+		}
+		return nil, false
+	}
+	index := 0
+	exportFunctions := false
+	exportAttribute := decl.Variant.Value == "export"
+	unexport := false
+	for index < len(values) {
+		option := values[index]
+		if option == "--" {
+			index++
+			break
+		}
+		if len(option) < 2 || option[0] != '-' {
+			break
+		}
+		for _, flag := range option[1:] {
+			switch flag {
+			case 'f':
+				exportFunctions = true
+			case 'x':
+				exportAttribute = true
+			case 'n':
+				unexport = true
+			}
+			// Another attribute (-g, -r, -p, ...) exports no function.
+		}
+		index++
+	}
+	if !exportFunctions || !exportAttribute || unexport {
+		return nil, true
+	}
+	var names []string
+	for ; index < len(values); index++ {
+		name := values[index]
+		if name == "" || strings.ContainsRune(name, '=') {
+			return nil, false
+		}
+		names = append(names, name)
+	}
+	return names, true
+}
+
+// simpleFunctionCallName resolves literal spellings and the shell builtins
+// that can run a name supplied after them. Their interpretation can differ
+// among shells, so including the body is the conservative policy view.
+func simpleFunctionCallName(call *syntax.CallExpr) (string, bool) {
+	name, ok := simpleStaticWord(call.Args[0], nil)
+	if !ok {
 		return "", false
 	}
-	return strings.Join(kept, "\n"), true
+	switch name {
+	case "command", "builtin", "eval", "time":
+		index := 1
+		for index < len(call.Args) && strings.HasPrefix(call.Args[index].Lit(), "-") {
+			index++
+		}
+		if index == len(call.Args) {
+			return name, true
+		}
+		return simpleStaticWord(call.Args[index], nil)
+	}
+	return name, true
+}
+
+// pipelineHasCompoundCommand keeps an ordinary pipeline intact. Its data
+// flow can be part of an exact rule's proof. A compound element needs its
+// inner statements exposed to the match-only pass.
+func pipelineHasCompoundCommand(binary *syntax.BinaryCmd) bool {
+	var contains func(*syntax.Stmt) bool
+	contains = func(stmt *syntax.Stmt) bool {
+		if stmt == nil {
+			return false
+		}
+		switch cmd := stmt.Cmd.(type) {
+		case *syntax.Subshell, *syntax.Block, *syntax.IfClause,
+			*syntax.WhileClause, *syntax.ForClause, *syntax.CaseClause:
+			return true
+		case *syntax.BinaryCmd:
+			if cmd.Op == syntax.Pipe || cmd.Op == syntax.PipeAll {
+				return contains(cmd.X) || contains(cmd.Y)
+			}
+		}
+		return false
+	}
+	return contains(binary.X) || contains(binary.Y)
+}
+
+// subshellExit reports whether command is a plain exit, which in a subshell
+// ends only the subshell.
+func subshellExit(command syntax.Command) bool {
+	call, ok := command.(*syntax.CallExpr)
+	return ok && len(call.Assigns) == 0 && len(call.Args) != 0 &&
+		call.Args[0].Lit() == "exit" && inertPOSIXWords(call.Args...)
+}
+
+// inertPOSIXWords reports whether words run no command when the shell
+// expands them.
+func inertPOSIXWords(words ...*syntax.Word) bool {
+	inert := true
+	for _, word := range words {
+		syntax.Walk(word, func(node syntax.Node) bool {
+			switch node.(type) {
+			case *syntax.CmdSubst, *syntax.ProcSubst:
+				inert = false
+			}
+			return inert
+		})
+	}
+	return inert
+}
+
+// simpleNonSpawningBuiltins are shell builtins that start no process, so no
+// shell that could import an exported function.
+var simpleNonSpawningBuiltins = map[string]bool{
+	":": true, "true": true, "false": true, "echo": true, "printf": true,
+	"test": true, "[": true, "export": true, "declare": true, "typeset": true,
+	"local": true, "readonly": true, "unset": true, "set": true, "shift": true,
+	"read": true, "cd": true, "pwd": true, "return": true, "exit": true,
+	"type": true, "hash": true, "alias": true, "unalias": true, "umask": true,
+	"wait": true, "jobs": true, "getopts": true, "let": true, "shopt": true,
+}
+
+// simpleSystemProgramDirs hold system utilities. A program run by a path
+// elsewhere may be a shell script.
+var simpleSystemProgramDirs = []string{"/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/"}
+
+// simpleMayImportExportedFunctions reports whether call may start a shell
+// that imports the exported functions of its action and so may run one: a
+// shell named anywhere in its argv (directly, through a wrapper such as env,
+// sudo, xargs or find -exec, or in an interpreter's script text), $SHELL or
+// $BASH, a script launched by path, or an argv word that names an exported
+// function. A builtin that starts no process imports nothing.
+func simpleMayImportExportedFunctions(call *syntax.CallExpr, source string, exported []string) bool {
+	if call == nil || len(call.Args) == 0 {
+		return false
+	}
+	program, known := simpleStaticWord(call.Args[0], nil)
+	if known && simpleNonSpawningBuiltins[program] {
+		return false
+	}
+	if known && strings.Contains(program, "/") && !slices.ContainsFunc(simpleSystemProgramDirs,
+		func(dir string) bool { return strings.HasPrefix(program, dir) }) {
+		return true
+	}
+	// Only a shell runs an exported function by name. A name in the argv
+	// of an ordinary program (ls f, nice ls f, time grep f x) is data; it
+	// counts when the program word itself is the name, or a runner that
+	// hands its words to a shell (watch, parallel ...) is present
+	// (GAP-1094).
+	shellText := known && slices.Contains(exported, program)
+	for _, arg := range call.Args {
+		if word, static := simpleStaticWord(arg, nil); static && simpleShellTextRunner(path.Base(word)) {
+			shellText = true
+		}
+	}
+	for _, arg := range call.Args {
+		start, end := int(arg.Pos().Offset()), int(arg.End().Offset())
+		if start < 0 || end <= start || end > len(source) {
+			// No text to read: assume the worst.
+			return true
+		}
+		raw := source[start:end]
+		if strings.HasPrefix(strings.Trim(raw, `'"`), "./") ||
+			strings.HasPrefix(strings.Trim(raw, `'"`), "../") {
+			return true
+		}
+		for _, token := range strings.FieldsFunc(raw, simpleNotWordTokenRune) {
+			switch path.Base(token) {
+			case "sh", "bash", "rbash", "dash", "ksh", "mksh", "zsh", "ash", "busybox", "SHELL", "BASH":
+				return true
+			}
+			if strings.HasSuffix(token, ".sh") || strings.HasSuffix(token, ".bash") ||
+				shellText && slices.Contains(exported, token) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// simpleShellTextRunner reports a program that runs its argument words as
+// shell text (watch joins them for sh -c; parallel, script and flock take
+// a command string) or an interpreter whose code can start a
+// shell (os.system, system(), backticks), so a word naming an exported
+// function may call it.
+func simpleShellTextRunner(program string) bool {
+	switch program {
+	case "watch", "parallel", "script", "flock",
+		"perl", "ruby", "node", "nodejs", "deno", "bun", "php", "lua", "tclsh", "awk", "gawk", "mawk", "nawk":
+		return true
+	}
+	return strings.HasPrefix(program, "python") || strings.HasPrefix(program, "pypy")
+}
+
+// simpleNotWordTokenRune separates the program-name and path tokens of an
+// argv word, including those inside script text.
+func simpleNotWordTokenRune(r rune) bool {
+	return r != '_' && r != '.' && r != '/' && r != '-' && r != '+' &&
+		(r < '0' || r > '9') && (r < 'a' || r > 'z') && (r < 'A' || r > 'Z')
 }

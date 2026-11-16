@@ -34,25 +34,36 @@ import io
 import json
 import os
 import re
-import shlex
 import shutil
 import stat
 import subprocess
+import sys
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from defenseclaw import platform_support
+from defenseclaw import long_paths, platform_support
+from defenseclaw.config import gateway_pid_path
 from defenseclaw.connector_paths import (
     amp_policy_plugin_path,
     connector_config_files,
     connector_hook_config_paths,
     hermes_config_path,
-    omnigent_config_path,
-    opencode_writable_plugin_folder,
+    opencode_custody_text,
+    opencode_unsafe_plugin_paths,
 )
+from defenseclaw.doctor_recovery import (
+    DEVICE_KEY_UNUSABLE_REASONS,
+    DeviceKeyHealthStatus,
+    device_identity_leftovers,
+    inspect_device_key_usability,
+    keyless_identity_message,
+    unusable_key_message,
+)
+from defenseclaw.gateway_path import path_gateway
 from defenseclaw.inventory import agent_discovery
-from defenseclaw.scanner_binary import MCP_SCANNER_BINARY, SKILL_SCANNER_BINARY
+from defenseclaw.scanner_binary import MCP_SCANNER_BINARY, SKILL_SCANNER_BINARY, resolve_scanner_binary
 
 if TYPE_CHECKING:
     from defenseclaw.config import Config, PerConnectorGuardrailConfig
@@ -87,8 +98,15 @@ class BootstrapReport:
     splunk_bridge_dest: str = ""  # "" if bundle missing, otherwise dest path
     splunk_bridge_preserved: bool = False
     openclaw_token_detected: bool = False
+    # Set when openclaw.json holds a gateway token DefenseClaw cannot read
+    # (a SecretRef, issue #1404); it never contains the token.
+    openclaw_token_notice: str = ""
+    # Set when a stale SecretRef gateway token line was removed from .env.
+    gateway_token_cleanup: str = ""
     device_key_file: str = ""
     errors: list[str] = field(default_factory=list)
+    # Optional seeds that could not be written; they never fail the first run.
+    warnings: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -113,12 +131,15 @@ class StepResult:
 class FirstRunOptions:
     """Structured input for the guided first-run backend."""
 
-    connector: str = "codex"
+    connector: str = "none"
     rerun_command: str = "defenseclaw init"
     # Complete ordered connector selection for this first-run transaction.
     # ``None`` preserves single-connector callers by using ``connector``.
     connector_settings: list[dict] | None = None
     profile: str = "observe"  # observe | action
+    # A quickstart re-run without --mode: profile is the connector's current
+    # mode, so leave guardrail.mode and the connector's override as they are.
+    keep_modes: bool = False
     scanner_mode: str = "local"  # local | remote | both
     with_judge: bool = False
     judge_hook_connectors: list[str] | None = None
@@ -138,14 +159,10 @@ class FirstRunOptions:
     cisco_endpoint: str = ""
     cisco_api_key: str = ""
     cisco_api_key_env: str = "CISCO_AI_DEFENSE_API_KEY"
-    # hook_fail_mode controls what generated hooks (codex-hook,
-    # claude-code-hook, inspect-*) do when delivery, authentication,
-    # or a gateway response fails. Empty string means "leave the
-    # current cfg.guardrail.hook_fail_mode untouched" so callers
-    # who don't care don't accidentally clobber an operator's
-    # earlier choice. Transport failures and invalid responses
-    # follow the same effective value. DEFENSECLAW_STRICT_AVAILABILITY=1
-    # additionally forces transport and missing-token failures closed.
+    # hook_fail_mode is the saved choice for a classified gateway outage.
+    # Empty means preserve the current operator choice. A reached gateway's
+    # bad answer and authentication failures remain closed on OSS installs;
+    # DEFENSECLAW_STRICT_AVAILABILITY=1 also closes transport failures.
     hook_fail_mode: str = ""
     # human_approval is the operator's HITL (Human-In-the-Loop)
     # toggle. ``None`` means "leave whatever was loaded alone" —
@@ -175,6 +192,9 @@ class FirstRunOptions:
     # the trust decision into the final v8 transaction instead of treating it
     # as transient discovery input. None keeps non-init callers unchanged.
     trusted_binary_prefixes: tuple[str, ...] | None = None
+    # init --api-port / --proxy-port (GAP-0053): 0 lets a new config choose.
+    api_port: int = 0
+    proxy_port: int = 0
 
 
 @dataclass
@@ -260,6 +280,9 @@ _API_PORT_CLAIM_PREFIX = "defenseclaw-api-port-"
 # init claims a guardrail proxy port the same way, so two accounts that run
 # init at the same time don't both pick it (GAP-2198). Only init writes these.
 _GUARDRAIL_PORT_CLAIM_PREFIX = "defenseclaw-guardrail-port-"
+# setup claims the OpenCode V2 background-server port it gives an account
+# (opencode_service.PORT_CLAIM_PREFIX, GAP-0053).
+_OPENCODE_PORT_CLAIM_PREFIX = "defenseclaw-opencode-port-"
 _WINDOWS_CLAIM_SID = re.compile(r"S-1-[0-9]+(?:-[0-9]+)+")
 
 
@@ -314,8 +337,12 @@ def _api_port_claimed_by_other_account(port: int, prefix: str = _API_PORT_CLAIM_
     return stat.S_ISREG(info.st_mode) and info.st_uid != os.getuid()
 
 
-def remove_own_api_port_claims() -> None:
-    """Drop this account's port claims (``uninstall --all``). Best effort."""
+def remove_own_api_port_claims(ports: Collection[int] | None = None) -> None:
+    """Drop this account's port claims. Best effort.
+
+    *ports* limits it to the claims of those ports (the ones a stopped gateway
+    held); None drops every claim of this account.
+    """
     windows = _windows_port_claims()
     if os.name == "nt" and not windows:
         return
@@ -326,8 +353,20 @@ def remove_own_api_port_claims() -> None:
         return
     own = _windows_own_sid() if windows else ""
     for name in names:
-        if not name.startswith((_API_PORT_CLAIM_PREFIX, _GUARDRAIL_PORT_CLAIM_PREFIX)):
+        prefix = next(
+            (
+                p
+                for p in (_API_PORT_CLAIM_PREFIX, _GUARDRAIL_PORT_CLAIM_PREFIX, _OPENCODE_PORT_CLAIM_PREFIX)
+                if name.startswith(p)
+            ),
+            "",
+        )
+        if not prefix:
             continue
+        if ports is not None:
+            number = name[len(prefix) :]
+            if not (number.isascii() and number.isdigit() and int(number) in ports):
+                continue
         path = os.path.join(claim_dir, name)
         if windows:
             sid = _windows_claim_sid(path)
@@ -392,7 +431,7 @@ def suggest_free_api_port(host: str, port: int) -> int:
     return 0
 
 
-def choose_first_run_api_port(cfg: Config) -> str:
+def choose_first_run_api_port(cfg: Config, avoid: frozenset[int] = frozenset()) -> str:
     """Move a new config off the default API port when something holds it.
 
     Per-user installs of several accounts on one host all default to 18970.
@@ -409,11 +448,17 @@ def choose_first_run_api_port(cfg: Config) -> str:
     if host in {"", "localhost"}:
         host = "127.0.0.1"
     host = host.strip("[]")
-    if _api_port_available(host, _DEFAULT_API_PORT) and _reserve_api_port(_DEFAULT_API_PORT):
+    # avoid: ports init was given for something else (--proxy-port, GAP-0053);
+    # the API port and the two sandbox ports after it stay clear of them.
+    def clear(port: int) -> bool:
+        return not ({port, port + 1, port + 2} & avoid)
+
+    default = _DEFAULT_API_PORT
+    if clear(default) and _api_port_available(host, default) and _reserve_api_port(default):
         return ""
     for step in range(1, _FIRST_RUN_API_PORT_TRIES + 1):
         port = _DEFAULT_API_PORT + step * _FIRST_RUN_API_PORT_STEP
-        if _api_port_available(host, port) and _reserve_api_port(port):
+        if clear(port) and _api_port_available(host, port) and _reserve_api_port(port):
             cfg.gateway.api_port = port
             return (
                 f"{host}:{_DEFAULT_API_PORT} is in use or configured by another account's DefenseClaw gateway, "
@@ -438,7 +483,7 @@ def _guardrail_port_available(host: str, port: int) -> bool:
     )
 
 
-def choose_first_run_guardrail_port(cfg: Config) -> str:
+def choose_first_run_guardrail_port(cfg: Config, avoid: frozenset[int] = frozenset()) -> str:
     """Move a new config's guardrail proxy port off 4000 when something holds it.
 
     Like the API port: a second account's proxy (OpenClaw) on the same host
@@ -453,11 +498,11 @@ def choose_first_run_guardrail_port(cfg: Config) -> str:
     host = str(getattr(gc, "host", "") or "").strip().strip("[]")
     if host.lower() in {"", "localhost", "::1"}:
         host = "127.0.0.1"
-    if _guardrail_port_available(host, _DEFAULT_GUARDRAIL_PORT):
+    if _DEFAULT_GUARDRAIL_PORT not in avoid and _guardrail_port_available(host, _DEFAULT_GUARDRAIL_PORT):
         return ""
     for step in range(1, _FIRST_RUN_API_PORT_TRIES + 1):
         port = _DEFAULT_GUARDRAIL_PORT + step * _FIRST_RUN_API_PORT_STEP
-        if _guardrail_port_available(host, port):
+        if port not in avoid and _guardrail_port_available(host, port):
             gc.port = port
             return (
                 # A claim by another account's init has no listener yet, so
@@ -470,6 +515,131 @@ def choose_first_run_guardrail_port(cfg: Config) -> str:
         "claimed by other accounts; choose a free guardrail proxy port with "
         "`defenseclaw setup guardrail --port <free port> --non-interactive`"
     )
+
+
+# OpenClaw's own gateway port (gateway.port); DefenseClaw's ports stay off it.
+_DEFAULT_OPENCLAW_GATEWAY_PORT = 18789
+
+
+def port_layout_conflict(api_port: int, proxy_port: int, openclaw_port: int = 0) -> str:
+    """Why these ports cannot all listen on one account, or "" (GAP-0053).
+
+    The gateway API listens on api_port and its two sandbox ports after it;
+    the guardrail proxy on proxy_port; OpenClaw's gateway on openclaw_port.
+    """
+    api_ports = {api_port, api_port + 1, api_port + 2} if api_port else set()
+    sandbox = f"({api_port + 1}, {api_port + 2})"
+    if api_port and api_port + 2 > 65535:
+        return f"API port {api_port} leaves no room for its two sandbox ports {sandbox}; use 65533 or lower"
+    if proxy_port and proxy_port in api_ports:
+        return (
+            f"guardrail proxy port {proxy_port} is the gateway API port {api_port} or one of its "
+            f"sandbox ports {sandbox}; choose another"
+        )
+    if openclaw_port and openclaw_port in api_ports:
+        return (
+            f"API port {api_port} or a sandbox port after it is OpenClaw's gateway port {openclaw_port}; "
+            "choose another"
+        )
+    if openclaw_port and proxy_port == openclaw_port:
+        return f"guardrail proxy port {proxy_port} is OpenClaw's gateway port; choose another"
+    return ""
+
+
+def first_run_port_flags_conflict(api_port: int, proxy_port: int) -> str:
+    """Why init --api-port / --proxy-port cannot be used, or "".
+
+    A flag is checked against the other flag, or against the default the
+    other port takes when it was not given, and against OpenClaw's gateway
+    port. The automatic pick avoids a given flag too (api_port_avoid).
+    """
+    if not api_port and not proxy_port:
+        return ""
+    conflict = port_layout_conflict(
+        api_port or _DEFAULT_API_PORT, proxy_port or _DEFAULT_GUARDRAIL_PORT, _DEFAULT_OPENCLAW_GATEWAY_PORT
+    )
+    if not conflict:
+        return ""
+    flags = " and ".join(name for name, value in (("--api-port", api_port), ("--proxy-port", proxy_port)) if value)
+    return f"{flags}: {conflict}"
+
+
+def api_port_avoid(cfg: Config, proxy_port: int = 0) -> frozenset[int]:
+    """Ports the automatic API pick keeps its three ports off."""
+    proxy = proxy_port or int(getattr(cfg.guardrail, "port", 0) or 0)
+    return frozenset(p for p in (proxy, _DEFAULT_OPENCLAW_GATEWAY_PORT) if p)
+
+
+def proxy_port_avoid(cfg: Config) -> frozenset[int]:
+    """Ports the automatic proxy pick stays off: the API port and its sandbox ports."""
+    api = int(getattr(cfg.gateway, "api_port", 0) or 0)
+    ports = {api, api + 1, api + 2} if api else set()
+    return frozenset(ports | {_DEFAULT_OPENCLAW_GATEWAY_PORT})
+
+
+def apply_first_run_ports(cfg: Config, api_port: int, proxy_port: int, *, new_config: bool) -> list[StepResult]:
+    """Use the ports given to init with --api-port and --proxy-port (GAP-0053).
+
+    A new config takes them instead of the automatic choice, and they are
+    claimed like a chosen port. An existing config keeps its ports: moving
+    them re-registers every connector, which ``setup gateway --api-port`` and
+    ``setup guardrail --port`` do, so the row names that command.
+    """
+    from defenseclaw.config import api_bind_host
+
+    steps: list[StepResult] = []
+    if api_port:
+        current = int(getattr(cfg.gateway, "api_port", 0) or 0)
+        host = (api_bind_host(cfg) or "127.0.0.1").strip("[]")
+        if host == "localhost":
+            host = "127.0.0.1"
+        if not new_config:
+            if api_port != current:
+                steps.append(StepResult(
+                    "Gateway API port", "warn",
+                    f"this configuration keeps API port {current}; init sets ports only in a new configuration",
+                    f"defenseclaw setup gateway --api-port {api_port} --non-interactive",
+                ))
+        else:
+            cfg.gateway.api_port = api_port
+            if _api_port_available(host, api_port) and _reserve_api_port(api_port):
+                steps.append(
+                    StepResult("Gateway API port", "pass", f"this account's gateway uses port {api_port} (--api-port)")
+                )
+            else:
+                steps.append(StepResult(
+                    "Gateway API port", "warn",
+                    f"{host}:{api_port} (--api-port) is in use or claimed by another account; "
+                    "the gateway cannot listen there until it is free",
+                    "defenseclaw setup gateway --api-port <free port> --non-interactive",
+                ))
+    if proxy_port:
+        gc = cfg.guardrail
+        current = int(getattr(gc, "port", 0) or 0)
+        host = str(getattr(gc, "host", "") or "").strip().strip("[]")
+        if host.lower() in {"", "localhost", "::1"}:
+            host = "127.0.0.1"
+        if not new_config:
+            if proxy_port != current:
+                steps.append(StepResult(
+                    "Guardrail proxy port", "warn",
+                    f"this configuration keeps guardrail proxy port {current}; "
+                    "init sets ports only in a new configuration",
+                    f"defenseclaw setup guardrail --port {proxy_port} --non-interactive",
+                ))
+        else:
+            gc.port = proxy_port
+            if _guardrail_port_available(host, proxy_port):
+                detail = f"this account's guardrail proxy uses port {proxy_port} (--proxy-port)"
+                steps.append(StepResult("Guardrail proxy port", "pass", detail))
+            else:
+                steps.append(StepResult(
+                    "Guardrail proxy port", "warn",
+                    f"{host}:{proxy_port} (--proxy-port) is in use or claimed by another account; "
+                    "the guardrail proxy cannot listen there until it is free",
+                    "defenseclaw setup guardrail --port <free port> --non-interactive",
+                ))
+    return steps
 
 
 def finalize_first_run_config(cfg: Config, *, was_config_absent: bool) -> None:
@@ -552,7 +722,7 @@ def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
 
     # --- gateway defaults (OpenClaw token detection) ---
     try:
-        report.openclaw_token_detected = _apply_gateway_defaults(cfg, report.is_new_config, logger)
+        report.openclaw_token_detected = _apply_gateway_defaults(cfg, report.is_new_config, logger, report)
     except Exception as exc:  # pragma: no cover — defensive
         report.errors.append(f"gateway defaults: {exc}")
 
@@ -637,7 +807,105 @@ def _restore_first_run_selection_authority(cfg, setup_snapshot) -> str:
     return "; ".join(errors)
 
 
+# How long a second init waits for the one that holds the data home before it
+# reports that another init is running.
+_FIRST_RUN_LOCK_WAIT_SECONDS = 30.0
+
+
+class InitLockError(Exception):
+    """The init lock of the data home could not be taken; the run changed nothing."""
+
+
+class InitLockBusyError(InitLockError):
+    """Another init still held the lock after the wait."""
+
+
+class InitLocks:
+    """The init locks one run holds, one per data folder it initializes."""
+
+    def __init__(self, stack: contextlib.ExitStack) -> None:
+        self._stack = stack
+        self._held: set[str] = set()
+
+    def take(self, directory: str | os.PathLike[str]) -> None:
+        """Take the init lock of one data folder; a folder this run already holds is skipped.
+
+        The lock is one exclusive file lock (init.lock: a byte lock on Windows,
+        flock on POSIX). The second run waits for the first and then runs as an
+        ordinary re-run of a finished init; if the first is still going after
+        _FIRST_RUN_LOCK_WAIT_SECONDS it raises InitLockBusyError. A folder whose
+        lock cannot be made or opened raises InitLockError, because without the
+        lock the run could race another one into the same half-created state.
+        """
+
+        from defenseclaw.file_lock import FileLockTimeoutError, locked_file_update
+        from defenseclaw.file_permissions import make_private_directory
+
+        folder = os.fspath(directory)
+        try:
+            make_private_directory(folder)
+            key = os.path.normcase(os.path.realpath(folder))
+            if key in self._held:
+                return
+            self._stack.enter_context(
+                locked_file_update(os.path.join(folder, "init"), timeout_seconds=_FIRST_RUN_LOCK_WAIT_SECONDS)
+            )
+        except FileLockTimeoutError as exc:
+            raise InitLockBusyError(
+                f"another defenseclaw init is running on {folder}; this run changed nothing"
+            ) from exc
+        except OSError as exc:
+            raise InitLockError(
+                f"cannot take the init lock of {folder} ({exc.strerror or type(exc).__name__}); "
+                "this run changed nothing"
+            ) from exc
+        self._held.add(key)
+
+
+@contextlib.contextmanager
+def hold_init_lock() -> Iterator[InitLocks]:
+    """Hold the init lock of the data home for one init run.
+
+    Two inits started together on one home used to race through the same seeds
+    and device identity and leave it half created (GAP-0927). Every path that
+    initializes the home takes the lock before anything is read or written.
+    The home is not always where the identity lives: config.yaml can name
+    another data_dir, so the caller also takes that folder's lock
+    (InitLocks.take) as soon as the config says which it is, and before it
+    changes anything there. Two runs that name each other's folders can wait
+    on each other; both then stop at the wait limit and change nothing.
+    """
+
+    from defenseclaw import config as cfg_mod
+
+    with contextlib.ExitStack() as stack:
+        locks = InitLocks(stack)
+        locks.take(cfg_mod.default_data_path())
+        yield locks
+
+
 def run_first_run(options: FirstRunOptions) -> FirstRunReport:
+    """Run the first-run setup flow while holding the init lock of the data home."""
+
+    try:
+        with hold_init_lock() as locks:
+            return _run_first_run_locked(options, locks)
+    except InitLockError as exc:
+        from defenseclaw import config as cfg_mod
+
+        connector = _normalize_connector(options.connector)
+        return FirstRunReport(
+            status="needs_attention",
+            config_file=str(cfg_mod.config_path()),
+            data_dir=str(cfg_mod.default_data_path()),
+            connector=connector,
+            profile=_normalize_profile(options.profile, connector),
+            setup=[StepResult("Init lock", "fail", str(exc), options.rerun_command)],
+            next_commands=[options.rerun_command],
+        )
+
+
+def _run_first_run_locked(options: FirstRunOptions, locks: InitLocks) -> FirstRunReport:
     """Run the canonical first-run setup flow without rendering UI.
 
     This is the backend shared by ``defenseclaw init``, ``quickstart``,
@@ -720,19 +988,45 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         if new_config and getattr(cfg, "_source_config_version", 0) == 0:
             cfg_mod.prepare_fresh_v8_config(cfg)
 
+    # The identity and the stores live in the data folder the config names, which
+    # may not be the home locked so far. Lock it before anything is changed there.
+    if getattr(cfg, "data_dir", ""):
+        locks.take(cfg.data_dir)
+
+    # First step after the config loads, before anything is set aside, written or
+    # started: hooks of a DefenseClaw Setup 0.8.x install in the agent's settings
+    # (GAP-0101). Init names that install and the next step instead of starting
+    # the sidecar and rolling back over the two disagreeing registrations.
+    roster = _first_run_connector_roster(options, connector)
+    legacy_hooks = _first_run_legacy_hook_refusal(roster, options.rerun_command)
+    if legacy_hooks:
+        setup.append(StepResult("Older install", "fail", legacy_hooks, "defenseclaw uninstall"))
+        return FirstRunReport(
+            status="needs_attention",
+            config_file=str(cfg_mod.config_path()),
+            data_dir=cfg.data_dir,
+            connector=connector,
+            profile=profile,
+            setup=setup,
+            next_commands=["defenseclaw uninstall", options.rerun_command],
+            connector_mode_warnings=connector_mode_warnings,
+        )
+
+    setup.extend(apply_first_run_ports(cfg, options.api_port, options.proxy_port, new_config=new_config))
     if new_config:
-        port_note = choose_first_run_api_port(cfg)
+        avoid = api_port_avoid(cfg, options.proxy_port)
+        port_note = "" if options.api_port else choose_first_run_api_port(cfg, avoid)
         if port_note:
             status = "pass" if cfg.gateway.api_port != _DEFAULT_API_PORT else "warn"
             setup.append(StepResult("Gateway API port", status, port_note))
-        proxy_note = choose_first_run_guardrail_port(cfg)
+        proxy_note = "" if options.proxy_port else choose_first_run_guardrail_port(cfg, proxy_port_avoid(cfg))
         if proxy_note:
             status = "pass" if cfg.guardrail.port != _DEFAULT_GUARDRAIL_PORT else "warn"
             setup.append(StepResult("Guardrail proxy port", status, proxy_note))
 
     transaction_app = AppContext()
     transaction_app.cfg = cfg
-    from defenseclaw.commands.cmd_setup import _capture_setup_config_snapshot
+    from defenseclaw.commands.cmd_setup import RollbackSourceRefusedError, _capture_setup_config_snapshot
 
     preserved_trusted_prefixes: tuple[str, ...] | None = None
     if options.trusted_binary_prefixes is not None:
@@ -777,14 +1071,39 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         preserved_trusted_prefixes = tuple(preserved)
         cfg.ai_discovery.trusted_binary_prefixes = list(preserved_trusted_prefixes)
 
+    if was_config_absent:
+        # Files a removed managed (enterprise) install left in the data
+        # folder are moved aside, never read or restored, before the
+        # rollback point is taken (cowork-1-0-8 GAP-0045).
+        from defenseclaw import managed_leftovers
+
+        try:
+            set_aside = managed_leftovers.set_aside_managed_leftovers(cfg.data_dir)
+        except OSError as exc:
+            setup.append(StepResult("Managed leftovers", "fail", str(exc), "defenseclaw init"))
+            return FirstRunReport(
+                status="needs_attention",
+                config_file=str(cfg_mod.config_path()),
+                data_dir=cfg.data_dir,
+                connector=connector,
+                profile=profile,
+                setup=setup,
+                next_commands=["defenseclaw init"],
+                connector_mode_warnings=connector_mode_warnings,
+            )
+        if set_aside is not None:
+            setup.append(StepResult("Managed leftovers", "pass", set_aside.detail(cfg.data_dir)))
+
     try:
         setup_snapshot = _capture_setup_config_snapshot(cfg)
     except OSError as exc:
+        # The file is in this account's own data folder: name it (GAP-0074).
+        reason = exc.for_user("defenseclaw init") if isinstance(exc, RollbackSourceRefusedError) else str(exc)
         setup.append(
             StepResult(
                 "First-run transaction",
                 "fail",
-                f"could not establish the protected first-run rollback point: {exc}",
+                f"could not establish the protected first-run rollback point: {reason}",
                 "defenseclaw init",
             )
         )
@@ -798,6 +1117,25 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
             next_commands=["defenseclaw init"],
             connector_mode_warnings=connector_mode_warnings,
         )
+
+    # Before any write: a connector setup refuses in every mode is not
+    # configured in observe either (GAP-0554).
+    refusal = ""
+    if connector != "none":
+        refusal = _first_run_setup_refusal(connector, getattr(cfg, "data_dir", ""), options.rerun_command)
+    if refusal:
+        setup.append(StepResult("Hook contract", "fail", f"{refusal} Nothing was changed.", options.rerun_command))
+        return FirstRunReport(
+            status="needs_attention",
+            config_file=str(cfg_mod.config_path()),
+            data_dir=cfg.data_dir,
+            connector=connector,
+            profile=profile,
+            setup=setup,
+            next_commands=[options.rerun_command],
+            connector_mode_warnings=connector_mode_warnings,
+        )
+
     selection_targets: tuple[str, ...] | None = None
     if platform_support.host_os() == "windows":
         from defenseclaw.agent_selection import setup_agent_selection_connectors
@@ -828,6 +1166,7 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         )
 
 
+    kiro_refusal = ""
     try:
         if protected_selection is not None:
             from defenseclaw.commands.cmd_setup import _revalidate_setup_agent_selections
@@ -866,9 +1205,27 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
             if mode_warning:
                 connector_mode_warnings.append(mode_warning)
                 profile = "observe"
+        if connector == "kiro" and profile == "observe":
+            # GAP-0828: a kiro-cli below its hook floor is refused in every
+            # mode, so neither an observe profile nor the observe fallback of
+            # a refused action request may configure it. An admitted action
+            # check already proved the version, so only observe asks.
+            from defenseclaw.commands.cmd_setup import _kiro_setup_refusal
 
-        if connector != "none":
-            _apply_first_run_choices(cfg, options, connector, profile, scanner_mode)
+            kiro_refusal = _kiro_setup_refusal(data_dir=getattr(cfg, "data_dir", ""))
+
+        if kiro_refusal:
+            pass
+        elif connector != "none":
+            _apply_first_run_choices(
+                cfg,
+                options,
+                connector,
+                profile,
+                scanner_mode,
+                # A downgraded profile (unverified version) still applies.
+                keep_modes=options.keep_modes and profile == _normalize_profile(options.profile, connector),
+            )
         else:
             if new_config:
                 # A fresh config defaults to OpenClaw. Persist the explicit
@@ -889,6 +1246,22 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
                 f"first-run choice application failed ({exc}); rollback was incomplete: {rollback_error}"
             ) from exc
         raise
+
+    if kiro_refusal:
+        setup.append(StepResult("Connector version", "fail", kiro_refusal, "defenseclaw init"))
+        rollback_error = _restore_first_run_selection_transaction(transaction_app, setup_snapshot)
+        if rollback_error:
+            setup.append(StepResult("First-run rollback", "fail", rollback_error, "defenseclaw init"))
+        return FirstRunReport(
+            status="needs_attention",
+            config_file=str(cfg_mod.config_path()),
+            data_dir=cfg.data_dir,
+            connector=connector,
+            profile=profile,
+            setup=setup,
+            next_commands=["defenseclaw init"],
+            connector_mode_warnings=connector_mode_warnings,
+        )
 
     try:
         cfg.save()
@@ -937,10 +1310,32 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         bootstrap = bootstrap_env(cfg, logger)
         if bootstrap.errors:
             setup.extend(
-                StepResult("Bootstrap", "fail", e, "defenseclaw doctor --fix --dry-run") for e in bootstrap.errors
+                StepResult(
+                    "Bootstrap",
+                    "fail",
+                    e,
+                    # A device key gone with its provenance files, or one that cannot be used, is never
+                    # replaced by init itself: the message names the manual steps, after which init runs again.
+                    options.rerun_command
+                    if any(f"({code})" in e for code in ("continuity-evidence-present", *DEVICE_KEY_UNUSABLE_REASONS))
+                    else "defenseclaw doctor --fix --dry-run",
+                )
+                for e in bootstrap.errors
             )
         else:
             setup.append(StepResult("Bootstrap", "pass", cfg.data_dir))
+        setup.extend(StepResult("Bootstrap", "warn", w, "defenseclaw init") for w in bootstrap.warnings)
+        if bootstrap.gateway_token_cleanup:
+            setup.append(StepResult("Gateway token", "pass", bootstrap.gateway_token_cleanup))
+        if bootstrap.openclaw_token_notice:
+            setup.append(
+                StepResult(
+                    "OpenClaw token",
+                    "warn",
+                    bootstrap.openclaw_token_notice,
+                    "defenseclaw keys set DEFENSECLAW_GATEWAY_TOKEN",
+                )
+            )
 
         _persist_first_run_secrets(cfg, options, setup)
 
@@ -1072,6 +1467,48 @@ def _until_key_ok(detail: str) -> str:
     return "until the key is set" if "not set" in detail else "until a valid key is set"
 
 
+def _device_key_readiness(cfg: Config, options: FirstRunOptions) -> StepResult:
+    """The device key row of first-run readiness, decided on the identity state init and Doctor use.
+
+    A key that cannot be used, or a key gone with its provenance files, is never replaced by a command:
+    the row carries the manual steps and the next command is the init rerun they end with.
+    """
+    device_key = cfg.gateway.device_key_file
+    if not device_key:
+        return StepResult("Device key", "fail", "(unset)", "defenseclaw init")
+    data_dir = cfg.data_dir
+    health = inspect_device_key_usability(device_key, data_dir=data_dir)
+    if health.status is DeviceKeyHealthStatus.VALID:
+        return StepResult("Device key", "pass", device_key)
+    if health.status is DeviceKeyHealthStatus.MISSING:
+        return StepResult(
+            "Device key",
+            "fail",
+            device_key,
+            "defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize",
+        )
+    if health.reason_code == "continuity-evidence-present":
+        files = device_identity_leftovers(device_key, data_dir)
+        return StepResult("Device key", "fail", keyless_identity_message(device_key, files), options.rerun_command)
+    if health.reason_code in DEVICE_KEY_UNUSABLE_REASONS:
+        return StepResult(
+            "Device key",
+            "fail",
+            unusable_key_message(device_key, data_dir, str(health.reason_code)),
+            options.rerun_command,
+        )
+    # A folder-level custody reason is about the folders, not the key; Doctor reports it. The row keeps
+    # its earlier meaning: the key file is there or it is not.
+    if os.path.isfile(device_key):
+        return StepResult("Device key", "pass", device_key)
+    return StepResult(
+        "Device key",
+        "fail",
+        device_key,
+        "defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize",
+    )
+
+
 def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult]:
     """Run scoped readiness checks for the choices made during first run."""
     from defenseclaw.config import config_path_for_data_dir
@@ -1098,19 +1535,7 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
             ),
         )
     )
-    device_key = cfg.gateway.device_key_file
-    steps.append(
-        StepResult(
-            "Device key",
-            "pass" if device_key and os.path.isfile(device_key) else "fail",
-            device_key or "(unset)",
-            (
-                "defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize"
-                if not (device_key and os.path.isfile(device_key))
-                else ""
-            ),
-        )
-    )
+    steps.append(_device_key_readiness(cfg, options))
 
     for s in _scanner_availability(cfg):
         if s.status == "warn":
@@ -1123,7 +1548,7 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
         steps.append(_agent_installation_readiness(cfg, connector))
 
     if options.start_gateway:
-        pid_file = os.path.join(cfg.data_dir, "gateway.pid")
+        pid_file = gateway_pid_path(cfg.data_dir)
         running = _pid_file_running(pid_file)
         steps.append(
             StepResult(
@@ -1180,19 +1605,35 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
     else:
         steps.append(StepResult("Cisco AI Defense", "skip", "scanner_mode is local"))
 
-    if shutil.which("defenseclaw-gateway") is None:
+    gateway_binary = path_gateway()
+    if gateway_binary is None:
         steps.append(
             StepResult(
                 "Gateway binary",
                 "warn",
-                "defenseclaw-gateway not on PATH",
+                "defenseclaw-gateway not found next to this defenseclaw or on PATH",
                 "make gateway-install",
             )
         )
+    elif _gateway_override_missing(gateway_binary):
+        steps.append(
+            StepResult(
+                "Gateway binary",
+                "warn",
+                f"set by DEFENSECLAW_GATEWAY_BIN, not found: {gateway_binary}",
+                "unset DEFENSECLAW_GATEWAY_BIN, or point it at defenseclaw-gateway",
+            )
+        )
     else:
-        steps.append(StepResult("Gateway binary", "pass", "found on PATH"))
+        steps.append(StepResult("Gateway binary", "pass", f"found at {gateway_binary}"))
 
     return steps
+
+
+def _gateway_override_missing(gateway_binary: str) -> bool:
+    """True when ``gateway_binary`` came from DEFENSECLAW_GATEWAY_BIN and is not a file."""
+    override = os.environ.get("DEFENSECLAW_GATEWAY_BIN", "").strip()
+    return bool(override) and gateway_binary == override and not os.path.isfile(override)
 
 
 def _normalize_connector(raw: str | None) -> str:
@@ -1204,11 +1645,11 @@ def _normalize_connector(raw: str | None) -> str:
     if value == "none":
         return "none"
     if value == "":
-        value = "codex"
+        return "none"
     try:
         return connector_paths.normalize(value)
     except Exception:
-        return value or "openclaw"
+        return value
 
 
 def _normalize_profile(raw: str, connector: str) -> str:
@@ -1248,11 +1689,7 @@ def _preflight_first_run_agent_selections(
     """Record one complete protected roster before first-run state mutation."""
 
     host_os = platform_support.host_os()
-    if host_os == "darwin" and _normalize_connector(connector) == "openhands":
-        # The macOS gateway installs OpenHands hooks only from a setup-selected,
-        # digest-pinned executable, the same receipt `setup openhands` writes.
-        selected_connectors = ("openhands",)
-    elif host_os != "windows":
+    if host_os != "windows":
         return None, ""
 
     from defenseclaw.agent_selection import (
@@ -1294,11 +1731,93 @@ def _preflight_first_run_agent_selections(
     return verified, ""
 
 
+def _first_run_legacy_hook_refusal(connectors: tuple[str, ...], rerun: str) -> str:
+    """Say which DefenseClaw Setup 0.8.x install has hooks in the roster's agent settings, or "".
+
+    until the 0.8 bridge retires: only a Windows per-user Setup 0.8.x install
+    leaves hooks of its own in an agent's settings.
+    """
+    from contextlib import suppress
+
+    from defenseclaw.commands import legacy_setup_install
+
+    install = legacy_setup_install.find(sys.platform)
+    if install is None:
+        return ""
+    files: list[str] = []
+    for name in connectors:
+        if name and name != "none":
+            with suppress(Exception):
+                files.extend(connector_config_files(name))
+    files = legacy_setup_install.hook_entries(install, list(dict.fromkeys(files)))
+    return legacy_setup_install.hook_refusal(install, files, rerun) if files else ""
+
+
+def _first_run_setup_refusal(connector: str, data_dir, rerun: str = "defenseclaw init") -> str:
+    """Say why setup refuses *connector* in observe and action mode, or "".
+
+    Setup refuses an installed agent version with no hook contract in both
+    modes, and a gateway started with that connector alone refuses it too
+    (GAP-0554). First run must not write such a connector in either mode, so
+    it is left out instead of downgraded to observe. A version that is only
+    unverified (not probed, or outside a trusted prefix) still gets observe.
+    *rerun* is the command the refusal names for after the upgrade.
+
+    The probe publishes the version it read to the discovery cache, as setup's
+    own version check does (cowork-1-0-8 GAP-0033). The default connector is
+    picked from a scan that ran before config.yaml named it, so that scan did
+    not run the agent's CLI and cached it unversioned. In observe nothing else
+    probes it, so the gateway started on that cache with an unversioned hook
+    contract and the first doctor warned that the version was not observed,
+    until `agent discover --refresh`.
+    """
+    from defenseclaw import envvars
+    from defenseclaw.agent_selection import codex_setup_version_problem
+    from defenseclaw.commands.cmd_setup import (
+        _CONNECTOR_META,
+        _connector_contract_upgrade_guidance,
+        _no_hook_contract_detail,
+        _version_scan_persists,
+    )
+    from defenseclaw.connector_contracts import STATUS_UNKNOWN, resolve_connector_contract
+
+    key = _normalize_connector(connector)
+    if key == "none" or envvars.lookup("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1":
+        return ""
+    if key == "opencode" and platform_support.host_os() == "windows":
+        # The exact SST selection gates native-Windows OpenCode.
+        return ""
+    try:
+        discovery = agent_discovery.discover_with_probes(
+            [key], use_cache=False, refresh=True, data_dir=data_dir, persist_cache=_version_scan_persists(key)
+        )
+    except Exception:  # noqa: BLE001 - setup continues in observe without discovery too
+        return ""
+    signal = discovery.agents.get(key)
+    if signal is None or not signal.installed:
+        return ""
+    raw_version = signal.version or ""
+    label = _CONNECTOR_META.get(key, {}).get("label", key)
+    if key == "codex" and (problem := codex_setup_version_problem(raw_version)):
+        return f"{problem}. Then run: {rerun}."
+    compatibility = resolve_connector_contract(key, raw_version)
+    if compatibility.status != STATUS_UNKNOWN:
+        return ""
+    return (
+        _no_hook_contract_detail(label, raw_version.rstrip(".") or "(not probed)", compatibility)
+        + " Setup refuses it in observe and action mode, and a gateway started with it alone refuses it. "
+        + _connector_contract_upgrade_guidance(key, label, compatibility.normalized_version, rerun)
+    )
+
+
 def _first_run_action_mode_warning(
     connector: str,
     data_dir: str,
 ) -> dict | None:
-    """Return structured action-to-observe remediation for first-run flows."""
+    """Return structured action-to-observe remediation for first-run flows.
+
+    Called only for a connector :func:`_first_run_setup_refusal` accepted, so
+    observe is a mode setup and the gateway run."""
     from defenseclaw.commands.cmd_setup import _check_connector_version_supported_for_setup
 
     if _check_connector_version_supported_for_setup(
@@ -1310,16 +1829,30 @@ def _first_run_action_mode_warning(
     ):
         return None
 
-    discovery = None
+    return _action_downgrade_record(connector, _downgrade_discovery(connector, data_dir))
+
+
+def _downgrade_discovery(connector: str, data_dir: str | os.PathLike[str] | None, fallback=None):
+    """The scan an action downgrade is explained from: the one that probes *connector*.
+
+    A plain refresh probes only the connectors already enrolled, and a
+    connector being set up for the first time is not, so it was reported as
+    "not being set up" with the real probe failure lost (GAP-1077). Inside a
+    guided init this reuses the scan the version gate just made.
+    """
+    from defenseclaw.commands.cmd_setup import _version_scan_persists
+
+    key = _normalize_connector(connector)
     try:
-        discovery = agent_discovery.discover_agents(
+        return agent_discovery.discover_with_probes(
+            [key],
             use_cache=False,
             refresh=True,
             data_dir=data_dir,
+            persist_cache=_version_scan_persists(key),
         )
-    except Exception:
-        discovery = None
-    return _action_downgrade_record(connector, discovery)
+    except Exception:  # noqa: BLE001 - the downgrade is reported with the generic reason
+        return fallback
 
 
 def _action_downgrade_record(connector: str, discovery=None) -> dict:
@@ -1404,6 +1937,8 @@ def _apply_first_run_choices(
     connector: str,
     profile: str,
     scanner_mode: str,
+    *,
+    keep_modes: bool = False,
 ) -> None:
     # Keep a pinned workspace only when every connector in the new first-run
     # roster was already pinned. Adding a peer starts at global scope as before.
@@ -1434,7 +1969,10 @@ def _apply_first_run_choices(
         cfg.guardrail.connectors = {}
     cfg.guardrail.scanner_mode = scanner_mode
     profile_mode = "action" if profile == "action" else "observe"
-    cfg.guardrail.mode = profile_mode
+    if not keep_modes:
+        # A scoped action used to become the global mode on a quickstart
+        # re-run, and clearing the scope then left it in action (GAP-0115).
+        cfg.guardrail.mode = profile_mode
     cfg.guardrail.enabled = True
     if options.with_judge:
         cfg.guardrail.judge.enabled = True
@@ -1449,7 +1987,7 @@ def _apply_first_run_choices(
     else:
         cfg.guardrail.judge.enabled = False
     cfg.guardrail.detection_strategy = cfg.guardrail.detection_strategy or "regex_judge"
-    _apply_first_run_connector_override(cfg, connector, profile_mode)
+    _apply_first_run_connector_override(cfg, connector, None if keep_modes else profile_mode)
 
     # Honor an explicit operator choice supplied via flag/prompt.
     # Empty string means "leave whatever was loaded alone": "closed"
@@ -1463,6 +2001,9 @@ def _apply_first_run_choices(
     desired = (options.hook_fail_mode or "").strip().lower()
     if desired:
         cfg.guardrail.hook_fail_mode = "closed" if desired == "closed" else "open"
+        selected = _first_run_selected_connector_override(cfg, connector)
+        if selected is not None and (selected.hook_fail_mode or "").strip():
+            selected.hook_fail_mode = cfg.guardrail.hook_fail_mode
 
     # Human-In-the-Loop (HITL). ``None`` is the no-op sentinel so
     # init/quickstart reruns don't clobber an operator who already
@@ -1530,11 +2071,10 @@ def _apply_first_run_llm_choices(cfg: Config, options: FirstRunOptions) -> None:
 
 
 def pin_cursor_posture(gc, primary: str = "") -> None:
-    """Pin Cursor's fail mode to its guardrail mode and turn approvals off.
+    """Turn off approvals for Cursor without inventing a saved fail mode.
 
-    Cursor's hook contract ties failures to the mode (action fails closed)
-    and has no native approval prompt; ``setup cursor`` already forces both,
-    and doctor fails any other persisted combination.
+    Cursor has no native approval prompt. Its outage mode follows the policy
+    tier unless the user explicitly chose a fail mode.
     """
     from defenseclaw.config import HILTConfig
 
@@ -1542,20 +2082,20 @@ def pin_cursor_posture(gc, primary: str = "") -> None:
     key = next((k for k in connectors if _normalize_connector(str(k)) == "cursor"), "")
     if not key and _normalize_connector(primary or gc.connector or "") != "cursor":
         return
-    fail_mode = "closed" if gc.effective_mode("cursor").strip().lower() == "action" else "open"
     hilt = gc.effective_hilt("cursor")
     if key:
         pc = connectors[key]
-        pc.hook_fail_mode = fail_mode
         if hilt.enabled:
             pc.hilt = HILTConfig(enabled=False, min_severity=hilt.min_severity or "HIGH")
     else:
-        gc.hook_fail_mode = fail_mode
         gc.hilt.enabled = False
 
 
-def _apply_first_run_connector_override(cfg: Config, connector: str, mode: str) -> None:
-    """Keep an existing multi-connector map aligned with first-run choices."""
+def _apply_first_run_connector_override(cfg: Config, connector: str, mode: str | None) -> None:
+    """Keep an existing multi-connector map aligned with first-run choices.
+
+    ``mode`` None keeps the connector's own mode setting as it is.
+    """
     gc = cfg.guardrail
     if not getattr(gc, "connectors", None):
         return
@@ -1573,7 +2113,8 @@ def _apply_first_run_connector_override(cfg: Config, connector: str, mode: str) 
                 break
     if pc is None:
         pc = PerConnectorGuardrailConfig()
-    pc.mode = "action" if mode == "action" else "observe"
+    if mode is not None:
+        pc.mode = "action" if mode == "action" else "observe"
     if pc.enabled is False:
         pc.enabled = True
     gc.connectors[key] = pc
@@ -1634,7 +2175,9 @@ def _scanner_availability(cfg: Config) -> list[StepResult]:
     ]
     out: list[StepResult] = []
     for label, binary, next_command in scanners:
-        path = shutil.which(binary)
+        # This install's own scanner first: a DefenseClaw Setup 0.8.x folder listed
+        # first on PATH must not be reported as this release's scanner (GAP-0100).
+        path = resolve_scanner_binary(binary)
         if path:
             out.append(StepResult(label, "pass", path))
         else:
@@ -1686,7 +2229,9 @@ def _quiet_guardrail_setup(app, connector: str, *, verbose: bool) -> StepResult:
             if hasattr(app.cfg.guardrail, "effective_hook_fail_mode")
             else app.cfg.guardrail.hook_fail_mode
         )
-        return StepResult("Guardrail", "pass", f"{connector}, mode={mode}, fail mode={fail_mode}{port_note}")
+        return StepResult(
+            "Guardrail", "pass", f"{connector}, mode={mode}, fail mode={fail_mode}{port_note}"
+        )
     if ok:
         return StepResult("Guardrail", "warn", "; ".join(warnings), "defenseclaw doctor")
     return StepResult("Guardrail", "fail", "setup returned false", "defenseclaw setup guardrail")
@@ -1741,7 +2286,13 @@ def _connector_runtime_readiness(cfg: Config, connector: str) -> StepResult | No
     if connector in ("", "none"):
         return None
     from defenseclaw.commands.cmd_setup import _CONNECTOR_META
-    from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems, repair_command
+    from defenseclaw.hook_integrity import (
+        agent_hook_switch_problems,
+        hook_registration_problems,
+        hook_runtime_problems,
+        repair_command,
+        unguarded_tool_call_hooks,
+    )
 
     label = _CONNECTOR_META.get(connector, {}).get("label", connector)
     roster = _running_connectors_from_state_file(cfg.data_dir)
@@ -1758,10 +2309,20 @@ def _connector_runtime_readiness(cfg: Config, connector: str) -> StepResult | No
         return None
     if not problems:
         return None
+    # A hook command the shell cannot run guards nothing (GAP-0382), and an
+    # agent setting that turns its hooks off, a hook file another account
+    # can change, or a hook entry edited so tool calls run unchecked is not
+    # repaired by a gateway restart (rel-1-0-4 GAP-0580, GAP-0600).
+    blocking = (
+        getattr(problems[0], "blocking", False)
+        or problems[0].startswith("hook command ")
+        or "another account can change" in problems[0]
+        or problems[0] in agent_hook_switch_problems(cfg, connector)
+        or problems[0] in unguarded_tool_call_hooks(cfg, connector)
+    )
     return StepResult(
         "Connector runtime",
-        # A hook command the shell cannot run guards nothing (GAP-0382).
-        "fail" if problems[0].startswith("hook command ") else "warn",
+        "fail" if blocking else "warn",
         f"{label} is not guarded: {problems[0]}",
         repair_command(connector, problems[0]),
     )
@@ -1820,6 +2381,35 @@ def gateway_failure_detail(result: subprocess.CompletedProcess, default: str) ->
     return useful[0] if useful else default
 
 
+def _running_gateway_has_no_connector(cfg: Config) -> bool:
+    """True when this account's running gateway says it booted with no connector.
+
+    That boot path writes no ``active_connector.json`` and reports
+    ``no connector configured`` on /health (sidecar.go
+    ``waitForConnectorSetup``). Any other answer, or none, keeps the
+    I-don't-know rule of :func:`_running_connector_from_state_file`.
+    """
+    try:
+        from defenseclaw.gateway import OrchestratorClient, foreign_loopback_listener, gateway_api_client_host
+
+        port = int(getattr(cfg.gateway, "api_port", 0) or 0)
+        if not port:
+            return False
+        host = gateway_api_client_host(cfg)
+        # /health takes no token: another account's gateway must not answer.
+        if foreign_loopback_listener(host, port):
+            return False
+        client = OrchestratorClient(host=host, port=port, timeout=3)
+        try:
+            health = client.health()
+        finally:
+            client.close()
+    except Exception:  # noqa: BLE001 - no answer keeps the no-restart rule.
+        return False
+    guardrail = health.get("guardrail") if isinstance(health, dict) else None
+    return isinstance(guardrail, dict) and guardrail.get("last_error") == "no connector configured"
+
+
 def _start_gateway_structured(cfg: Config) -> StepResult:
     """Start (or restart) the defenseclaw-gateway sidecar to match
     the on-disk config, returning a structured StepResult.
@@ -1849,10 +2439,15 @@ def _start_gateway_structured(cfg: Config) -> StepResult:
     :func:`_running_connector_from_state_file` for the I-don't-know
     sentinel rule.
     """
-    gw = shutil.which("defenseclaw-gateway")
+    gw = path_gateway(honor_override=False)
     if not gw:
-        return StepResult("Sidecar", "warn", "defenseclaw-gateway not on PATH", "make gateway-install")
-    pid_file = os.path.join(cfg.data_dir, "gateway.pid")
+        return StepResult(
+            "Sidecar",
+            "warn",
+            "defenseclaw-gateway not found next to this defenseclaw or on PATH",
+            "make gateway-install",
+        )
+    pid_file = gateway_pid_path(cfg.data_dir)
     if _pid_file_running(pid_file):
         # Compare what the live sidecar booted with against what
         # the just-saved config says it *should* be running. Drift
@@ -1869,7 +2464,13 @@ def _start_gateway_structured(cfg: Config) -> StepResult:
         )
         roster = _running_connectors_from_state_file(cfg.data_dir)
         running = None
-        if roster is not None and roster != desired_roster:
+        if roster is None and cfg.active_connectors() and _running_gateway_has_no_connector(cfg):
+            # No state file because the gateway booted with no connector
+            # (init chose none): it loads one only when it restarts, so
+            # "already running" left the agent unguarded (GAP-2342).
+            running = "no connector"
+            roster = []
+        elif roster is not None and roster != desired_roster:
             running = roster[0] if len(roster) == 1 else f"{len(roster)} connectors"
             if len(desired_roster) > 1:
                 desired = f"{len(desired_roster)} connectors"
@@ -2102,11 +2703,6 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Copilot hooks found")
         return StepResult("Connector", "warn", "Copilot hooks not found yet", "defenseclaw setup copilot")
-    if connector == "openhands":
-        candidates = connector_hook_config_paths("openhands", cfg.connector_workspace_dir())
-        if any(os.path.isfile(path) for path in candidates):
-            return StepResult("Connector", "pass", "OpenHands hooks found")
-        return StepResult("Connector", "warn", "OpenHands hooks not found yet", "defenseclaw setup openhands")
     if connector == "antigravity":
         # DefenseClaw owns only the documented global hook file, under the
         # effective Antigravity config home. Workspace .agents/hooks.json is a
@@ -2128,15 +2724,16 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
         path = connector_config_files("opencode")[0]
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "OpenCode bridge plugin found")
-        if loose := opencode_writable_plugin_folder([path]):
+        if unsafe := opencode_unsafe_plugin_paths([path]):
             # The gateway will not install its plugin there and does not
             # start; `setup opencode` would fail the same way.
+            advice = opencode_custody_text(unsafe)
             return StepResult(
                 "Connector",
                 "warn",
-                f"{loose} can be written by other accounts, so the gateway does not install the "
-                "OpenCode plugin there; fix its mode, then run `defenseclaw-gateway restart`",
-                f"chmod go-w {shlex.quote(loose)}",
+                f"{advice.named} {advice.why}, so the gateway does not install the OpenCode plugin there; "
+                f"{advice.action}, then run `defenseclaw-gateway restart`",
+                advice.remedy,
             )
         return StepResult(
             "Connector",
@@ -2162,30 +2759,6 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             "warn",
             f"Amp system policy plugin not found at {path}",
             "defenseclaw setup amp",
-        )
-    if connector == "omnigent":
-        path = omnigent_config_path()
-        try:
-            config_text = Path(path).read_text(encoding="utf-8")
-            configured = all(
-                marker in config_text for marker in ("defenseclaw_omnigent_policy", "defenseclaw_guardrail")
-            )
-        except (OSError, UnicodeError):
-            configured = False
-        if configured:
-            return StepResult(
-                "Connector",
-                "warn",
-                f"OmniGent custom policy configured at {path}; OmniGent does not expose "
-                "a loaded policy generation/module identity, so live action/fail-closed "
-                "enforcement is unverified pending OmniGent reload/restart",
-                "defenseclaw doctor",
-            )
-        return StepResult(
-            "Connector",
-            "warn",
-            f"OmniGent custom policy not found at {path}",
-            "defenseclaw setup omnigent",
         )
     if connector == "kiro":
         # Kiro merges hooks from every scope; setup writes the global
@@ -2344,7 +2917,7 @@ def _seed_guardrail_profiles(policy_dir: str, report: BootstrapReport) -> None:
             report.guardrail_profiles_preserved.append(profile.name)
             continue
         try:
-            shutil.copytree(str(profile), dst)
+            long_paths.copytree(profile, dst)
             report.guardrail_profiles_seeded.append(profile.name)
         except OSError as exc:
             report.errors.append(f"seed guardrail profile {profile.name}: {exc}")
@@ -2363,10 +2936,12 @@ def _seed_splunk_bridge(data_dir: str, report: BootstrapReport) -> None:
         report.splunk_bridge_preserved = True
         return
 
+    # The bridge is optional: it runs from the packaged files when this copy is
+    # missing, so a copy that cannot be made is a warning, not a failed init.
     try:
-        shutil.copytree(str(bundled), dest)
+        long_paths.copytree(bundled, dest)
     except OSError as exc:
-        report.errors.append(f"seed splunk-bridge: {exc}")
+        report.warnings.append(f"splunk-bridge was not copied to {dest} ({exc}); defenseclaw init tries again")
         return
 
     bridge_bin = os.path.join(dest, "bin", "splunk-claw-bridge")
@@ -2377,11 +2952,16 @@ def _seed_splunk_bridge(data_dir: str, report: BootstrapReport) -> None:
             pass
     from defenseclaw.bundle_refresh import ensure_splunk_bridge_container_access
 
-    report.errors.extend(f"seed splunk-bridge: {e}" for e in ensure_splunk_bridge_container_access(dest))
+    report.warnings.extend(f"splunk-bridge: {e}" for e in ensure_splunk_bridge_container_access(dest))
     report.splunk_bridge_dest = dest
 
 
-def _apply_gateway_defaults(cfg: Config, is_new_config: bool, logger: Logger | None = None) -> bool:
+def _apply_gateway_defaults(
+    cfg: Config,
+    is_new_config: bool,
+    logger: Logger | None = None,
+    report: BootstrapReport | None = None,
+) -> bool:
     """Sync gateway host/port/token from ``openclaw.json`` and dotenv.
 
     Returns True when a gateway token was detected (either from
@@ -2404,6 +2984,9 @@ def _apply_gateway_defaults(cfg: Config, is_new_config: bool, logger: Logger | N
 
     A running gateway keeps the token it loaded until it restarts, so
     *logger* sends this run's audit events with that one (GAP-0490).
+
+    A SecretRef token DefenseClaw cannot read is skipped and its notice goes
+    on *report* (issue #1404).
     """
     from defenseclaw.commands.cmd_init import (
         _ensure_device_key,
@@ -2426,6 +3009,9 @@ def _apply_gateway_defaults(cfg: Config, is_new_config: bool, logger: Logger | N
 
     token_configured = False
     token = gw.get("token", "")
+    if report is not None:
+        report.openclaw_token_notice = str(gw.get("token_notice", "") or "")
+        report.gateway_token_cleanup = str(gw.get("token_cleanup", "") or "")
     if token:
         keep_running_gateway_token(logger, cfg.data_dir, cfg.gateway.resolved_token(), token)
         _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", token, cfg.data_dir)

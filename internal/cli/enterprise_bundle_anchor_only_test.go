@@ -68,6 +68,25 @@ func TestAnchorOnlyEnsureThatChangedTheAnchorsIsNotANoop(t *testing.T) {
 		t.Fatalf("a failed run reported changes: %q", failed.Changes)
 	}
 
+	// GAP-0034: BUNDLE= TRUSTANCHORS= that repeats the confirmed bundle but
+	// commits other anchors (key A only -> A and B) changed the device, so
+	// it is not an already_applied no-op; the same anchors again still are.
+	keyA := []byte(`{"schema_version":1,"keys":[{"id":"a","status":"active"}]}`)
+	keyAB := []byte(`{"schema_version":1,"keys":[{"id":"a","status":"active"},{"id":"b","status":"active"}]}`)
+	alreadyApplied := func() *enterprisestatus.Result {
+		return &enterprisestatus.Result{Action: "ensure", Noop: true, NoopReason: "already_applied"}
+	}
+	rotated := alreadyApplied()
+	settleAnchorOnlyEnsure(rotated, &anchorOnlyChange{path: path, existed: true, previous: keyA, installed: keyAB}, false)
+	if rotated.Noop || rotated.NoopReason != "" || len(rotated.Changes) != 1 || rotated.Changes[0] != "replaced the trust anchors in "+path {
+		t.Fatalf("repeat bundle with new anchors: noop=%v reason=%q changes=%q", rotated.Noop, rotated.NoopReason, rotated.Changes)
+	}
+	repeated := alreadyApplied()
+	settleAnchorOnlyEnsure(repeated, &anchorOnlyChange{path: path, existed: true, previous: keyAB, installed: append([]byte(nil), keyAB...)}, false)
+	if !repeated.Noop || repeated.NoopReason != "already_applied" || len(repeated.Changes) != 0 {
+		t.Fatalf("repeat bundle with the same anchors: %+v", repeated)
+	}
+
 	bundleRun := compliant()
 	settleAnchorOnlyEnsure(bundleRun, nil, true)
 	if !bundleRun.Noop || len(bundleRun.Changes) != 0 {

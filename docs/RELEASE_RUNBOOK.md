@@ -116,7 +116,7 @@ git show X.Y.Z:policies/kernel/testdata/digest.golden
 
 When it changed, say so in the CHANGELOG too, and tell administrators to push
 the old and the new digest together as `enforce_ack` while their rings
-upgrade. See [Tetragon on a Linux fleet](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/tetragon#upgrades).
+upgrade. See [Tetragon on a Linux fleet](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/tetragon/#upgrades).
 
 ## The enterprise upgrade gate
 
@@ -142,8 +142,10 @@ Each lane:
    `checksums.txt` against the Release workflow's cosign identity, then the
    package against its SHA-256. A previous release that lacks the package
    fails the lane.
-2. Installs the previous package and applies a `config_version: 8`
-   administrator config on it, then runs `verify` and `status`.
+2. Installs the previous package and applies an administrator config on it
+   (`config_version: 9`, the version every 1.x release reads), saved as
+   `config-before.yaml`. It stores a protected credential with
+   `enterprise secret set`, then runs `verify` and `status`.
 3. **Linux and macOS only, the rollback drill.** With the root-only lifecycle
    test fault in place (`.test-fault` in the lifecycle directory), installs
    this release's package. The upgrade must fail after the services start,
@@ -153,18 +155,17 @@ Each lane:
 4. Upgrades to this release (`ensure --from-package`, or the new Setup's
    `/ensure`). It must succeed with `verify` passing and the deployment
    complete, and the result must report the applied policy
-   (`policy.applied`) from a config generation above the previous release's.
-   `migration-v9.json` must exist, `config.yaml.v8.bak` must equal the
-   previous config, and the secrets and the guardian ledger must be
-   unchanged.
+   (`policy.applied`). A version 9 config keeps its bytes, so the config
+   generation must be at least the previous release's. The secrets must be
+   unchanged, the stored credential byte for byte, and so must the guardian
+   ledger. The lane saves the upgraded config as `config-upgraded.yaml`.
 5. Runs the rest of the install lane on the upgraded deployment: `ensure`
    again is a no-op, `verify` and `status` pass, the MDM detection script
    passes, and uninstall and purge leave nothing behind.
-6. Runs `scripts/check_enterprise_upgrade_config.py` on the saved files
-   (`config-v8.yaml`, `config-upgraded.yaml`, `migration-v9.json`). It fails
-   on any migration conflict, a wrong `source_sha256`, a `config_version`
-   other than 9, and any value of the version 8 config that is neither still at
-   its path with the same value nor listed in the record as moved or removed.
+6. Runs `scripts/check_enterprise_upgrade_config.py` on `config-before.yaml`
+   and `config-upgraded.yaml`. It fails on a `config_version` other than 9 and
+   on any value of the applied config that is not still at its path with the
+   same value.
 7. Uploads the lifecycle results as the artifact
    `enterprise-upgrade-results-<lane>` (7 days).
 
@@ -178,6 +179,9 @@ package, verify it as above, and run the lane script with
 `--package`, `--version`, `--upgrade-from` and `--previous-version` (see the
 header of `scripts/test-enterprise-unix-install.sh`). Run it as root only on a
 machine you can throw away: it installs and removes system services.
+
+The previous release must be 1.x. No 0.x release ships a standalone
+enterprise package, so the lane scripts refuse a 0.x `--previous-version`.
 
 ## Dry run
 
@@ -197,8 +201,14 @@ With `dry_run: true`:
   failing. It refuses `operation: legacy-channel`.
 - `build`, `macos-app`, `enterprise-windows` and `enterprise-macos` run outside
   the `release` environment with every secret blanked. The app is ad-hoc
-  signed, and the Setup, pkg and Linux packages are unsigned. Nothing is
-  Authenticode-signed, GPG-signed or sent to Apple for notarization.
+  signed, and the Setup, pkg and Linux packages are unsigned. Nothing that
+  ships is Authenticode-signed, GPG-signed or sent to Apple for notarization.
+- `enterprise-windows-signing-proof` runs only in a dry run. It builds the
+  Windows Setup once more through the signed path with a self-signed
+  certificate it creates and deletes
+  (`packaging/windows/standalone/prove-signing-path.sh`), so the signing step
+  is known to work before a certificate is configured. That Setup is never
+  uploaded, and `dry-run-assets` waits for the proof.
 - `sign` is skipped, because it writes to the public Sigstore log.
   `dry-run-assets` writes an unsigned `checksums.txt` instead.
 - `install-gate` runs the full install and upgrade lifecycle on the unsigned

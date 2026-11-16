@@ -1,0 +1,808 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""Docs contract: enterprise, sandbox and lifecycle facts the rewritten docs must keep.
+
+These checks replace the exact-phrase tests that lived in
+docs-site/scripts/test_r10*_docs.py, which pinned the old page layout and no
+longer matched any page. Each entry names the page that now holds the fact; a
+phrase is checked after whitespace is collapsed. When a page is reworded or
+split, repoint the entry. Do not drop it unless the product behavior it
+protects is gone.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+DOCS = ROOT / "docs-site/content/docs"
+
+
+def _flat(page: str) -> str:
+    return " ".join((DOCS / page).read_text(encoding="utf-8").split())
+
+
+def test_managed_hook_docs_distinguish_outages_from_refusals() -> None:
+    threat_model = (ROOT / "docs/ENTERPRISE-THREAT-MODEL.md").read_text(encoding="utf-8")
+    rate_limit = next(line for line in threat_model.splitlines() if line.startswith("| R31 |"))
+    coverage = _flat("segmentation.mdx")
+    for text in (rate_limit, coverage):
+        assert not re.search(r"always fails?[ -]closed", text, re.IGNORECASE)
+        assert all(term in text for term in ("default", "closed", "administrator", "open", "outage", "Secure Client"))
+        assert all(term in text for term in ("runtime", "peer", "credential"))
+    assert "429" in rate_limit and "block" in rate_limit
+    assert "outage-only" in rate_limit and "outage-only" in coverage
+
+    fail_modes = _flat("reference/fail-modes.mdx")
+    # guard GAP-0782: the closed-posture section replaces the strict-availability one.
+    strict = fail_modes.split("## Set a closed posture", 1)[1].split("## ", 1)[0]
+    assert "classified outages" in strict
+    assert "force the unavailable-home and transport failures closed" not in strict
+    assert "force the relevant unavailable-home and transport failures closed" not in strict
+
+    guidance = (
+        _flat("enterprise/threat-model.mdx").split("### Disable hooks", 1)[1].split("### ", 1)[0],
+        _flat("enterprise/machine-policy.mdx").split("### Hook commands by route", 1)[1].split("## ", 1)[0],
+        _flat("enterprise/lifecycle.mdx").split("## Restart the managed gateway", 1)[1].split("## ", 1)[0],
+        _flat("enterprise/lifecycle.mdx")
+        .split("### Gateway restarts and hook timing", 1)[1].split("### ", 1)[0],
+    )
+    for text in guidance:
+        assert not re.search(r"always fails?[ -]closed|never allows a call because", text, re.IGNORECASE)
+        assert "hook_fail_mode: open" in text and "outage" in text
+
+    troubleshooting = (DOCS / "enterprise/troubleshooting.mdx").read_text(encoding="utf-8")
+    for reason in ("enterprise_managed_rate_limited", "enterprise_managed_overloaded"):
+        row = next(line for line in troubleshooting.splitlines() if line.startswith(f"| `{reason}` |"))
+        assert "not a classified" in row and "block" in row
+        assert "always fails closed" not in row
+
+
+
+def test_managed_hook_docs_name_the_measured_burst_capacity() -> None:
+    """A busy managed gateway blocks a tool call only at the end of the
+    answer budget, and the docs give the measured burst capacity per vCPU
+    (owner ruling 3, GAP-0050)."""
+    timing = (
+        _flat("enterprise/lifecycle.mdx")
+        .split("### Gateway restarts and hook timing", 1)[1].split("### ", 1)[0]
+    )
+    assert "never before it" in timing
+    assert "8 vCPUs" in timing and "60 tool calls at once" in timing
+    assert "per vCPU" in timing and "observe mode" in timing
+    assert "`enterprise_managed_gateway_no_answer`" in timing
+    # Linux agents-per-vCPU figure (T11 C09, LEAD 11:52): next to the Windows burst figure.
+    assert "3 interactive agents per vCPU" in timing and "4 vCPUs" in timing
+    linux = _flat("support-matrix.mdx").split("## Many agents on one Linux host", 1)[1].split("## ", 1)[0]
+    assert "3 interactive agents per vCPU" in linux and "613 tool calls" in linux
+
+
+def test_managed_outage_open_docs_name_rate_limits_and_the_guard_session_check() -> None:
+    """Rate limits block after the resends; with the administrator's open, a
+    guarded call runs only on Linux or macOS for a session with a clean-session
+    note (rel-1-0-3 GAP-0352)."""
+    threat_model = (ROOT / "docs/ENTERPRISE-THREAT-MODEL.md").read_text(encoding="utf-8")
+    r31 = next(line for line in threat_model.splitlines() if line.startswith("| R31 |"))
+    assert "including for Claude Code, Codex and Devin" not in r31
+    assert "If no verdict follows" in r31 and "every fail mode" in r31
+    for name in ("Cursor", "GitHub Copilot", "Devin", "OpenCode", "Amp", "Hermes", "managed_hooks_only: preserve"):
+        assert name in r31
+
+    coverage = _flat("segmentation.mdx")
+    guarded = (
+        r31,
+        coverage.split("Secure Client keeps its separate open default", 1)[0],
+        _flat("enterprise/machine-policy.mdx").split("### Hook commands by route", 1)[1].split("## ", 1)[0],
+        _flat("reference/fail-modes.mdx").split("## Effective behavior", 1)[0],
+        _flat("enterprise/lifecycle.mdx").split("## Restart the managed gateway", 1)[1].split("## ", 1)[0],
+        _flat("enterprise/lifecycle.mdx")
+        .split("### Gateway restarts and hook timing", 1)[1].split("### ", 1)[0],
+        _flat("enterprise/threat-model.mdx").split("### Disable hooks", 1)[1].split("### ", 1)[0],
+    )
+    for text in guarded:
+        assert "foreign_hooks: remove" in text
+
+    per_layer = coverage.split("## Fail-open and fail-closed, per layer", 1)[1].split("## ", 1)[0]
+    assert "in observe mode | Open" not in per_layer
+    assert "Managed Claude Code and Codex hooks | Always closed" not in per_layer
+    assert "observe and action mode alike" in per_layer and "outage only" in per_layer
+    # GAP-0352: the administrator open covers a guarded call only on Linux and macOS, for a session with a clean-session note.
+    assert "covers a gateway outage only. For a connector whose foreign-hook guard checks the session with the gateway, it covers only a Linux or macOS session with a clean-session note" in per_layer
+    assert "and not for a connector whose foreign-hook guard checks the session" not in per_layer
+    assert "observe mode fails open" not in coverage
+
+    troubleshooting = (DOCS / "enterprise/troubleshooting.mdx").read_text(encoding="utf-8")
+    for reason in ("enterprise_managed_rate_limited", "enterprise_managed_overloaded"):
+        row = next(line for line in troubleshooting.splitlines() if line.startswith(f"| `{reason}` |"))
+        assert "resends" in row and "if no verdict follows" in row
+    no_answer = next(
+        line for line in troubleshooting.splitlines() if line.startswith("| `enterprise_managed_gateway_no_answer` |")
+    )
+    assert "HTTP 429" in no_answer and "foreign_hooks: remove" in no_answer
+
+
+# (fact, [(pages that may hold the phrase, phrase), ...])
+FACTS = [
+    ('scanner_tree_names_the_linux_custodian_escape_limit', [
+        (('scanning/skill-scanner.mdx',),
+         'On Linux, if a scanner SIGKILLs its child-subreaper custodian, a detached child can keep running even though the scan fails closed.'),
+    ]),
+    ('scanner_tree_names_the_macos_escape_limit', [
+        (('scanning/skill-scanner.mdx',),
+         "macOS has one known limit: a child that forks, starts a new session and exits between two reads of the process table (about 100 ms apart) can hand its own child to launchd before the gateway sees it. If that child keeps a descriptor it inherited, the scan fails closed; if it closes every descriptor, it is not found and keeps running."),
+    ]),
+    ('account_outage_refusal_matches_the_cli', [
+        (('enterprise/sandboxes.mdx',),
+         "This isn't your organization's sandbox policy."),
+        (('enterprise/sandboxes.mdx',),
+         'If a profile assignment needs the unanswered identity fact, the create and hooks are refused with that fact named.'),
+    ]),
+    ('managed_start_session_rule_row', [
+        (('sandboxes/guide.mdx',),
+         'approved for its last session, could not be removed from its policy'),
+        (('sandboxes/guide.mdx',),
+         'is still running with the network rule <rule> approved for its last session'),
+    ]),
+    ('troubleshooting_explains_the_api_level_mtls_check', [
+        (('sandboxes/guide.mdx',),
+         "DefenseClaw checks that the gateway lets a client without a certificate finish the TLS handshake but refuses that client's API calls, and that the gateway has no OIDC issuer."),
+    ]),
+    ('gap_0012_admission_profile_roots', [
+        (('policies/admission.mdx',),
+         'assets there do not receive its install-admission scan'),
+        (('policies/admission.mdx',),
+         'Explicit `gateway.watcher.skill.dirs` prevent project folders from being added on every platform'),
+    ]),
+    ('gap_0957_managed_windows_profile_runtime_rules', [
+        (('policies/admission.mdx',),
+         'MCP runtime detection defaults to true'),
+        (('policies/admission.mdx',),
+         'Set `asset_policy.enabled: true` as well'),
+    ]),
+    ('gap_0012_denied_config_rechecks_watched_roots_only', [
+        (('policies/admission.mdx',),
+         'For watched roots (per-user installs and managed Windows roots outside profiles)'),
+        (('policies/admission.mdx',),
+         'Managed Windows profile assets and managed Linux/macOS connector assets are refused only by the hooks'),
+    ]),
+    ('gap_0012_skill_watcher_profile_roots', [
+        (('scanning/skill-scanner.mdx',),
+         'skills there receive no watcher scan'),
+        (('policies/admission.mdx', 'scanning/index.mdx'),
+         'scan a copy outside profiles'),
+    ]),
+    ('gap_0012_mcp_watcher_profile_roots', [
+        (('scanning/mcp-scanner.mdx',),
+         'receive the install-watcher scan: the scanner runs in the gateway service and the hook enumerator starts each server as its user'),
+    ]),
+    ('gap_0554_enterprise_linux_docker_limit', [
+        (('enterprise/linux.mdx',),
+         'must not give them Docker access'),
+        (('enterprise/linux.mdx',),
+         'root-owned image and lifecycle service'),
+    ]),
+    ('gap_0445_cli_unreadable_sandbox_list', [
+        (('reference/cli.mdx',),
+         'Only `stopped`, `completed`, `deleted` and `missing` do not'),
+        (('reference/cli.mdx',),
+         '`error`, `stopping`, `creating` and `deleting` phases count as running'),
+    ]),
+    ('gap_0226_windows_install_discovery', [
+        (('enterprise/enrollment.mdx',),
+         'official Codex `install.ps1` layout'),
+        (('enterprise/enrollment.mdx',),
+         'per-user WinGet packages for signed-in users'),
+    ]),
+    ('gap_0255_profile_explain_account_ids', [
+        (('guardrail/user-and-group-policies.mdx',),
+         'Group assignments follow the OS-verified account ID'),
+        (('guardrail/user-and-group-policies.mdx',),
+         # rel-1-0-6:GAP-0328: a per-user install explains only its own
+         # account, so the per-account check is the managed command.
+         'an administrator uses each uid or SID with the managed `enterprise <os> profile-explain --user`'),
+        (('guardrail/user-and-group-policies.mdx',),
+         'a per-user install explains only your own account'),
+    ]),
+    ('gap_0528_macos_bare_group_name_selects_local_and_domain_group', [
+        (('guardrail/user-and-group-policies.mdx',),
+         'selects the members of that local group'),
+        (('guardrail/user-and-group-policies.mdx',),
+         'A bare name also selects, by its name part,'),
+    ]),
+    ('gap_0595_matched_group_source_lists_every_value', [
+        (('guardrail/user-and-group-policies.mdx',),
+         '`matched_group_source` (`local`, `directory` or `local and directory`)'),
+        (('guardrail/user-and-group-policies.mdx',),
+         'If the source cannot be determined, `matched_group_source` is left out'),
+    ]),
+    ('no_sandbox_registry_names_both_host_run_exceptions', [
+        (('reference/env-vars.mdx',),
+         'host run is still refused unless the account is in `enterprise.enrollment.exempt_users`, or sandboxes are unavailable to the account and the effective `when_unavailable` setting is `alert`'),
+    ]),
+    ('no_sandbox_generated_env_vars_row_names_both_exceptions', [
+        (('reference/env-vars.mdx',),
+         'host run is still refused unless the account is in `enterprise.enrollment.exempt_users`, or sandboxes are unavailable to the account and the effective `when_unavailable` setting is `alert`'),
+    ]),
+    ('gap_0534_macos_users_entry_names_the_upn', [
+        (('guardrail/user-and-group-policies.mdx',),
+         "and by its UPN, which the hook guardian reads from the account's domain record (a mobile account's included)"),
+    ]),
+    ('gap_1356_windows_project_skill_roots_skipped', [
+        (('enterprise/windows.mdx',),
+         'Ordinary project skill folders inside profiles are not watched or admission-scanned'),
+        (('enterprise/windows.mdx',),
+         '`project_skill_roots_unverified`, and enterprise status shows a'),
+        (('enterprise/windows.mdx',),
+         'root is refused in every asset policy mode until a fresh caller inspection'),
+    ]),
+    ('gap_0289_invalid_machine_policy_is_config_invalid', [
+        (('enterprise/troubleshooting.mdx',),
+         'Invalid `enterprise.machine_policy` settings fail validation as `config_invalid`'),
+    ]),
+    ('gap_0292_linux_fips_support', [
+        (('enterprise/linux.mdx',),
+         '| FIPS mode | RHEL 9 in FIPS mode is supported'),
+    ]),
+    ('gap_0294_purge_removes_lifecycle_lock', [
+        (('enterprise/windows.mdx',),
+         'The Secure Client profile keeps the lock unless `PURGE=1`'),
+        (('enterprise/windows.mdx',),
+         'A standalone Setup uninstall removes the administrator-only'),
+    ]),
+    ('gap_0303_jsonl_collection_requires_read_access', [
+        (('enterprise/operations.mdx',),
+         'file is `0600` inside a service-owned `0750` folder'),
+        (('enterprise/operations.mdx',),
+         'only if it runs as root or the `defenseclaw` service account'),
+    ]),
+    ('gap_0304_managed_audit_pipe_has_consistent_ownership', [
+        (('enterprise/identity-and-authentication.mdx',),
+         'audit export --since 10m \\ | jq -c'),
+    ]),
+    ('gap_0345_projected_principal_values', [
+        (('enterprise/identity-and-authentication.mdx',),
+         'and `kerberos_principal` values are `null`'),
+    ]),
+    ('gap_0306_never_signed_in_lookup_is_host_specific', [
+        (('enterprise/identity-entra-id.mdx',),
+         'may resolve an Entra name or UPN to a SID before first sign-in'),
+    ]),
+    ('deprecated_enterprise_example_omits_omnigent_image', [
+        (('enterprise/sandboxes.mdx',),
+         'Claude Code, Codex, Copilot and Cursor images'),
+    ]),
+    ('gap_0319_host_refusal_reason_is_required_for', [
+        (('enterprise/sandboxes.mdx',),
+         '| `required_for` | Not a failure.'),
+    ]),
+    ('fg01_absent_connector_cleanup', [
+        (('reference/cli.mdx',),
+         'the command removes DefenseClaw hook entries it left'),
+    ]),
+    ('fg05_active_metric_refresh', [
+        (('observability/sandbox-telemetry.mdx',),
+         'Exported every minute, including `0`'),
+        (('observability/sandbox-telemetry.mdx',),
+         'a running sandbox counts again within a minute'),
+    ]),
+    ('fg07_macos_app_stop_full_disk', [
+        (('macos-app.mdx',),
+         'full-disk MicroVM with work not yet pulled keeps running'),
+    ]),
+    ('fg11_windows_secret_remove_checks_config', [
+        (('enterprise/ai-defense-key.mdx',),
+         'leaves the credential in place'),
+        (('enterprise/ai-defense-key.mdx',),
+         'If it cannot read that config, it refuses'),
+    ]),
+    ('fg12_package_uninstall_refusal', [
+        (('enterprise/lifecycle.mdx',),
+         '`uninstall_incomplete` keeps the package files'),
+    ]),
+    ('fg12_duplicate_rpm_repair', [
+        (('enterprise/lifecycle.mdx',),
+         'does not repair the package database'),
+        (('enterprise/lifecycle.mdx',),
+         '`sudo dnf remove --duplicates defenseclaw-enterprise`'),
+    ]),
+    ('fg12_infopipe_upn_expiry', [
+        (('enterprise/identity-sources.mdx',),
+         'kept for at most 24 hours (`upn_source: infopipe_kept`)'),
+    ]),
+    ('fg12_local_groups_follow_nsswitch', [
+        (('enterprise/identity-sources.mdx',),
+         'only when `nsswitch.conf` lists `files` or `compat`'),
+    ]),
+    ('fg13_intune_rollback_assignment', [
+        (('enterprise/lifecycle.mdx',),
+         'remove the superseding **Required** assignment'),
+    ]),
+    ('lfuninst_cli_running_sandbox_option', [
+        (('reference/cli.mdx',),
+         '`reset` takes this option too'),
+        (('reference/cli.mdx',),
+         '| `defenseclaw uninstall --stop-sandboxes` |'),
+    ]),
+    ('pr886_api_key_rule_list', [
+        (('reference/configuration.mdx',),
+         'an unset, null or empty `cisco_ai_defense.enabled_rules` sends no `config`'),
+    ]),
+    ('fg05_policy_explain_default_new_run', [
+        (('reference/sandbox-cli.mdx',),
+         'describes a new run of the default agent'),
+        (('enterprise/sandboxes.mdx',),
+         'it explains a new run of the default agent'),
+    ]),
+    ('fg05_approval_always_refused_under_floor', [
+        (('enterprise/sandboxes.mdx',),
+         'With `allow_unblock: false`, the person can approve'),
+        (('reference/sandbox-cli.mdx',),
+         '`approve --always` is refused, even when `user_approvals` is unset'),
+    ]),
+    ('fg05_upstream_telemetry_profile_floor', [
+        (('enterprise/sandboxes.mdx',),
+         "host's rendered `gateway.env`"),
+        (('enterprise/sandboxes.mdx',),
+         "`allow_upstream_telemetry: false` has OpenShell's own telemetry off"),
+    ]),
+    ('fg06_image_build_reference_names_probe_directory', [
+        (('reference/sandbox-cli.mdx',),
+         '`sandbox image build <harness> --force` recheck command'),
+        (('reference/sandbox-cli.mdx', 'sandboxes/macos.mdx'),
+         '`~/Library/Caches/defenseclaw/hookfire`'),
+    ]),
+    ('fg02_duplicate_custom_providers_merge', [
+        (('reference/migrate-v9.mdx',),
+         '`migration-v9.json` notes each merged provider'),
+        (('reference/migrate-v9.mdx',),
+         "lists are unioned and the later entry's values win"),
+    ]),
+    ('macos_protected_folder_skip_is_partial', [
+        (('enterprise/macos.mdx',),
+         'protected folders were not scanned'),
+        (('enterprise/macos.mdx', 'ai-discovery.mdx'),
+         '`detector_errors.macos_privacy`'),
+    ]),
+    ('fg04a_windows_plugin_refusal_is_structured', [
+        (('enterprise/windows.mdx',),
+         'ASSET-POLICY reason_code=admin-deny'),
+    ]),
+    ('lfwin_guardian_first_reconcile_wait', [
+        (('enterprise/troubleshooting.mdx',),
+         'no longer running during its first reconcile'),
+        (('enterprise/troubleshooting.mdx',),
+         "Setup waits up to 10 minutes for the guardian's first reconcile"),
+    ]),
+    ('fg12_uninstall_incomplete_code', [
+        (('enterprise/troubleshooting.mdx',),
+         '| `uninstall_incomplete` |'),
+        (('enterprise/troubleshooting.mdx',),
+         'started the services again'),
+    ]),
+    ('fg12_linux_package_removal_keeps_files', [
+        (('enterprise/linux.mdx',),
+         'apt or dnf fails and keeps the package files'),
+    ]),
+    ('fg12_doctor_prints_pinned_driver_digest', [
+        (('enterprise/sandboxes.mdx',),
+         'install command with the SHA-256 digest this DefenseClaw build pins'),
+    ]),
+    ('fg11_machine_policy_summary_missing', [
+        (('enterprise/troubleshooting.mdx',),
+         '| `machine_policy_summary_missing` | Windows |'),
+    ]),
+    ('fg11_stopped_service_verify_is_not_ready', [
+        (('enterprise/troubleshooting.mdx',),
+         '`verify` also reports it'),
+    ]),
+    ('fg11_rule_pack_preflight_grant', [
+        (('enterprise/troubleshooting.mdx',),
+         "service's derived SID"),
+        (('enterprise/troubleshooting.mdx',),
+         "Setup's config preflight"),
+    ]),
+    ('fg11_secret_remove_requires_readable_config', [
+        (('enterprise/configuration.mdx',),
+         'refuses when it cannot read the installed config'),
+    ]),
+    ('fg11_setup_upgrade_file_held', [
+        (('enterprise/troubleshooting.mdx',),
+         'Setup upgrade says another program holds a file open'),
+    ]),
+    ('fg08_predate_troubleshooting_excludes_self_update', [
+        (('enterprise/tetragon.mdx',),
+         'old controls policy enforcing'),
+        (('enterprise/tetragon.mdx',),
+         'enforce turned on or Tetragon restarted'),
+    ]),
+    ('fg08_limit_keeps_old_controls', [
+        (('enterprise/tetragon.mdx',),
+         'old controls policy enforcing'),
+    ]),
+    ('fg08_lifecycle_retains_old_policy', [
+        (('enterprise/tetragon.mdx',),
+         'removed when the last one exits'),
+    ]),
+    ('gap_0038_write_proof_names_child_program_limit_without_recipes', [
+        (('guardrail/index.mdx',),
+         '### Protected-file write proof'),
+        (('guardrail/index.mdx',),
+         'use a sandbox or file permissions'),
+    ]),
+    ('gap_0296_manifest_is_in_pinned_digest', [
+        (('policies/rulepack-validation.mdx',),
+         'pinned digest also covers the'),
+    ]),
+    ('gap_0346_allow_rule_marks_example_values', [
+        (('policies/admission.mdx',),
+         'Replace the skill name and path with your reviewed asset'),
+    ]),
+    ('gap_0297_managed_windows_tool_names_are_exact', [
+        (('policies/admission.mdx',),
+         'Codex has no `Read` or `Skill` tool name'),
+        (('policies/admission.mdx',),
+         'Write these exact names, including capitals'),
+    ]),
+    ('gap_0300_mcp_scan_verdict_survives_runtime_toggle', [
+        (('policies/admission.mdx',),
+         'scan verdict still refuses MCP calls'),
+        (('policies/admission.mdx',),
+         'runtime_detection.enabled` is `false`'),
+    ]),
+    ('gap_0301_claude_skill_call_checks_each_copy_path', [
+        (('policies/admission.mdx',),
+         'judges each copy at its own path'),
+        (('policies/admission.mdx',),
+         'a matching deny on any copy blocks the call'),
+    ]),
+    ('gap_0314_equal_custom_policy_can_fold_to_preset', [
+        (('reference/migrate-v9.mdx',),
+         '`policy list` can show the preset as active'),
+        (('reference/migrate-v9.mdx',),
+         "does not retain an activated custom policy's name"),
+    ]),
+    ('gap_0309_failed_group_lookup_can_match_verified_identity', [
+        (('guardrail/user-and-group-policies.mdx',),
+         'A verified UID, SID or agent'),
+    ]),
+    ('gap_0312_unreadable_scanner_policy_stops_migration', [
+        (('reference/migrate-v9.mdx',),
+         'If the file cannot be read, migration stops'),
+    ]),
+    ('gap_0299_legacy_install_requires_vacant_data_home', [
+        (('reference/migrate-v9.mdx',),
+         'Move the kept data home out of the install location'),
+        (('reference/migrate-v9.mdx',),
+         '0.8.x installer refuses a data home that is still there'),
+    ]),
+    ('gap_0349_ide_inventory_counts_four_ai_plugins', [
+        (('ai-discovery.mdx',),
+         '7 plugin(s) shown; 7 in total, 4 AI'),
+    ]),
+    ('gap_0350_current_kernel_feed_line_has_text_fallback', [
+        (('reference/sandbox-cli.mdx',),
+         'An install or update restarts the feed:'),
+        (('reference/sandbox-cli.mdx',),
+         'own hook calls in full until you stop and start it'),
+    ]),
+    ('group_test_macos_output_matches_documented_forms', [
+        (('enterprise/macos.mdx',),
+         'separate per-user CLI, if present, exits `3`'),
+        (('enterprise/identity-and-authentication.mdx',),
+         'Its JSON output shows the resolved subject and groups'),
+    ]),
+    ('1101_windows_event_ids', [
+        (('enterprise/operations.mdx',),
+         '`/ensure` writes 111 or 112 instead'),
+    ]),
+    ('1101_admission_managed_alternative', [
+        (('policies/admission.mdx',),
+         'A standard account is refused'),
+        (('policies/admission.mdx',),
+         'The managed Windows CLI has no `config get`'),
+    ]),
+    ('cli_keep_state_and_purge_rows', [
+        (('reference/cli.mdx',),
+         'The deployment record goes either way'),
+    ]),
+    ('gap_0360_landlock_is_an_abi_not_a_kernel_version', [
+        (('enterprise/linux.mdx', 'enterprise/sandboxes.mdx', 'sandboxes/linux.mdx', 'reference/sandbox-cli.mdx', 'sandboxes/linux.mdx'),
+         'Landlock ABI 3 or newer'),
+    ]),
+    ('gap_0453_pin_is_not_applied_to_windows_profiles', [
+        (('policies/admission.mdx',),
+         'This per-copy check is for Linux and macOS'),
+    ]),
+    ('gap_0377_0659_max_tokens_limits_named', [
+        (('connectors/zeptoclaw.mdx',),
+         '`max_completion_tokens`'),
+    ]),
+    ('gap_0586_group_row_precision', [
+        (('guardrail/user-and-group-policies.mdx',),
+         'names that contain `@` are skipped'),
+        (('guardrail/user-and-group-policies.mdx',),
+         'A numeric group id matches only while no name answers for that group'),
+    ]),
+    ('gap_0046_standalone_uninstall_removes_lock', [
+        (('enterprise/windows.mdx',),
+         'The Secure Client profile keeps the lock unless `PURGE=1`'),
+        (('enterprise/windows.mdx',),
+         'A standalone Setup uninstall removes the administrator-only'),
+    ]),
+    ('gap_0060_0061_macos_directory_steps', [
+        (('enterprise/enrollment.mdx',),
+         'For Hermes, create its config file'),
+        (('enterprise/configuration.mdx', 'enterprise/macos.mdx', 'enterprise/macos.mdx'),
+         'sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos reconcile'),
+    ]),
+    # Facts whose old wording was reworded or moved into the reference pages.
+    ("docker_group_is_root_equivalent", [
+        (("enterprise/sandboxes.mdx",),
+         "**Docker is root-equivalent.** On Linux a member of the `docker` group can do anything root can."),
+        (("enterprise/linux.mdx",),
+         "Membership in `docker` is root-equivalent: a member can read and change what root"
+         " can, including `/etc/defenseclaw/config.yaml`, the protected credentials"),
+        (("enterprise/sandboxes.mdx",),
+         "Put only the accounts that run sandboxes in `docker`"),
+    ]),
+    ("managed_config_refuses_inline_credentials", [
+        (("enterprise/sandboxes.mdx",),
+         "A managed config refuses inline values for `llm.api_key`, `inspect_llm.api_key`, `guardrail.llm.api_key`"),
+    ]),
+    ("one_account_shares_a_sandbox_trust_boundary", [
+        (("enterprise/sandboxes.mdx",),
+         "A registration vouches for the account, not for a VM."),
+    ]),
+    ("host_run_is_refused_for_non_exempt_accounts", [
+        (("enterprise/sandboxes.mdx",),
+         "For a non-exempt account, a host run is refused even when it claims to be nested in a sandbox, "
+         "unless sandboxes are unavailable to the account"),
+        (("enterprise/sandboxes.mdx",),
+         "`exempt_users` ([enrollment](/docs/enterprise/enrollment)) are not refused for a required agent"),
+    ]),
+    ("managed_uninstall_keeps_sandboxes_until_purge", [
+        (("enterprise/sandboxes.mdx",),
+         "Without `--purge`, uninstall stops running sandboxes through the sandbox daemon"),
+        (("enterprise/sandboxes.mdx",),
+         "Sandbox records and disks stay"),
+        (("enterprise/sandboxes.mdx",),
+         "unpulled copy-mode work remains only through the last successful disk sync if the guest sync fails"),
+    ]),
+    ("per_user_uninstall_stops_on_a_running_sandbox", [
+        (("get-started/install.mdx",),
+         "A running sandbox stops the uninstall before any change"),
+        (("reference/cli.mdx",),
+         "if DefenseClaw cannot read the sandbox list"),
+    ]),
+    ("rollback_carries_the_sandbox_setup", [
+        (("get-started/upgrade.mdx",),
+         "Between releases from 1.0.1 on, rollback also carries your sandbox setup"),
+        (("get-started/upgrade.mdx",),
+         "A release before 1.0.1 cannot take over that setup."),
+    ]),
+    ("block_message_has_a_length_limit", [
+        (("enterprise/configuration.mdx",),
+         "`block_message` may contain at most 4096 characters."),
+    ]),
+    ("windows_packagers_need_a_version_9_config", [
+        (("enterprise/mdm/intune-windows.mdx",),
+         "The packager requires a `config_version: 9` config"),
+    ]),
+    ("kiro_cli_prompt_blocks_do_not_stop_the_model", [
+        (("connectors/kiro.mdx",),
+         "On `kiro-cli --v3`, a blocked prompt still reaches the model with DefenseClaw's reason attached"),
+    ]),
+    ("windows_wsl2_and_per_user_docker_are_out_of_scope", [
+        (('get-started/windows/install-lifecycle.mdx',),
+         "Windows Home, per-user Docker Desktop, WSL2 engines and Windows containers are not supported"),
+    ]),
+    # GAP-0650, owner decision for 1.0.9: a held requirements.toml is a
+    # documented Windows platform limit.
+    ("gap_0650_held_codex_requirements_is_a_platform_limit", [
+        (('enterprise/windows.mdx',),
+         "A user who can read it can also hold it open, and while it is held Windows does not let DefenseClaw replace it, so Codex policy updates wait."),
+        (('enterprise/windows.mdx',),
+         "The enforced policy already in place stays in effect. Status names the process that holds the file (the warning `codex_requirements_held`). On a standalone deployment, if the holder lets go within 30 seconds of the failed attempt, the running command applies the update. Otherwise the guardian applies it at its next pass, about a minute later, and a failed Setup run needs the administrator to run it again. Secure Client keeps the earlier behavior and does not wait."),
+    ]),
+    # g582 review 7 M1: the vendor-folder fix also removes inherited entries.
+    ("g582_vendor_folder_fix_removes_inherited_entries", [
+        (('enterprise/machine-policy.mdx',),
+         '`icacls "<folder>" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-32-545:(OI)(CI)RX"`'),
+    ]),
+]
+
+
+def test_runtracked_comment_names_the_linux_containment():
+    # w25-misc (0b503331ab) runs a Linux scanner tree as PID 1 of a private PID
+    # and user namespace, which closes the custodian SIGKILL escape the comment
+    # used to name; the comment names the namespace and the refusal instead.
+    source = (ROOT / "internal/processutil/command.go").read_text(encoding="utf-8")
+    match = re.search(r"// RunTracked runs.*?\nfunc RunTracked\(", source, re.DOTALL)
+    assert match is not None
+    comment = " ".join(line.removeprefix("//").strip() for line in match.group().splitlines())
+    assert "PID 1 of a new PID and user namespace" in comment
+    assert "RunTracked returns ErrNotContained" in comment
+
+
+@pytest.mark.parametrize("fact", [f[0] for f in FACTS])
+def test_docs_keep_the_fact(fact: str) -> None:
+    checks = dict(FACTS)[fact]
+    for pages, phrase in checks:
+        assert any(phrase in _flat(page) for page in pages), (fact, pages, phrase)
+
+
+@pytest.mark.parametrize("name", ["WINDOWS-ENTERPRISE-CERTIFICATION.md", "WINDOWS-ENTERPRISE-THREAT-MODEL.md"])
+def test_windows_codex_held_file_rows_say_standalone_and_when_it_changes(name: str) -> None:
+    # g582 round 10: the certification and threat-model rows carry the round 9
+    # wording: the retry and the per-change state file are standalone only.
+    text = " ".join((ROOT / "docs" / name).read_text(encoding="utf-8").split())
+    assert "in each transaction" not in text
+    assert "as soon as the file is released" not in text
+    assert "state file is written under a new name when it changes" in text
+    assert "On a standalone deployment" in text
+    assert "if the holder lets go within 30 seconds of the failed attempt" in text or "retried for up to 30 seconds from the failed attempt" in text
+    assert "Secure Client" in text
+
+
+def test_sandbox_docs_name_the_openshell_release_setup_installs() -> None:
+    version_go = (ROOT / "internal/openshell/version.go").read_text(encoding="utf-8")
+    match = re.search(r'InstallerVersion = "(\d+\.\d+\.\d+)"', version_go)
+    assert match, "internal/openshell/version.go no longer defines InstallerVersion"
+    pinned = match.group(1)
+    assert f"Setup installs OpenShell {pinned}" in _flat("sandboxes/index.mdx")
+    for page in (
+        "sandboxes/index.mdx",
+        "enterprise/sandboxes.mdx",
+        "enterprise/sandboxes.mdx",
+        "reference/sandbox-cli.mdx",
+    ):
+        text = _flat(page)
+        for pattern in (
+            r"[Ii]nstalls? OpenShell (\d+\.\d+\.\d+)",
+            r"upgrades? (?:OpenShell |it )?(?:to )?(\d+\.\d+\.\d+) in place",
+            r"\((\d+\.\d+\.\d+) available\)",
+        ):
+            for found in re.finditer(pattern, text):
+                assert found.group(1) == pinned, (page, found.group(0))
+
+
+def test_windows_docs_say_how_to_leave_bundle_mode() -> None:
+    # GAP-2261: managed Windows had no documented way back to a local admin
+    # config. A current signed bundle keeps bundle mode on without the anchor
+    # file, so the documented way is uninstall without purge, then ensure.
+    source = (ROOT / "internal/cli/windows_enterprise_bundle.go").read_text(encoding="utf-8")
+    mode = source.split("func windowsBundleMode(", 1)[1].split("\n}\n", 1)[0]
+    assert "state.Current != nil" in mode
+    lifecycle = _flat("enterprise/lifecycle.mdx")
+    section = lifecycle.split("**Leave bundle mode on Windows.**", 1)[1].split("A change is applied by the apply trigger", 1)[0]
+    for phrase in (
+        "`/repair`, a new `CONFIG=` and moving the anchor file away do not turn bundle mode off",
+        "Stop delivering bundles",
+        "`/uninstall JSON=1`, without `PURGE=1`",
+        "removes the trust anchors, the bundle state",
+        "`user_registrations_pending`",
+        "A user who is signed out, or whose session is disconnected, keeps an inert registration",
+        "needs no `/repair`",
+        "except the Claude Code registration of the account running Setup, which is removed",
+        "`/ensure CONFIG=<file> JSON=1`",
+        "a signed-out user at their next sign-in",
+    ):
+        assert phrase in section, phrase
+    windows = (DOCS / "enterprise/windows.mdx").read_text(encoding="utf-8")
+    assert "\n## Remove\n" in windows
+    assert "\n### Run Setup as LocalSystem\n" in windows
+
+
+def _table_cells(line: str) -> int:
+    """Count the cells GFM sees in a table row (code spans and escaped pipes do not split)."""
+    seps = 0
+    in_code = False
+    for i, ch in enumerate(line):
+        if ch == "`":
+            in_code = not in_code
+        elif ch == "|" and not in_code and (i == 0 or line[i - 1] != "\\"):
+            seps += 1
+    return seps - 1 if line.strip().endswith("|") else seps
+
+
+def test_docs_table_rows_have_no_cells_beyond_the_header() -> None:
+    # GFM drops every cell past the header's count, so text after an extra "|"
+    # never renders (the Windows machine_policy_incomplete sentence did this).
+    wide = []
+    for page in sorted(DOCS.rglob("*.mdx")):
+        header = None
+        fenced = False
+        for number, line in enumerate(page.read_text(encoding="utf-8").splitlines(), 1):
+            if line.lstrip().startswith("```"):
+                fenced = not fenced
+            if fenced or not line.startswith("|"):
+                header = None
+                continue
+            if header is None:
+                header = _table_cells(line)
+            elif _table_cells(line) > header:
+                wide.append(f"{page.relative_to(DOCS)}:{number}")
+    assert wide == []
+
+
+def test_windows_rollback_docs_name_the_hermes_fail_closed_limit_of_older_releases() -> None:
+    """GAP-2120: 1.0.4 and later write fail_closed on the Hermes pre_tool_call
+    hook; 1.0.0-1.0.3 read that hook as foreign, so a signed-out Hermes user
+    fails the older /verify after an /upgrade rollback until they sign in."""
+    hook_only = (ROOT / "internal/gateway/connector/hook_only.go").read_text(encoding="utf-8")
+    if 'entry["fail_closed"] = true' not in hook_only:
+        pytest.skip("Setup no longer writes the Hermes fail_closed key")
+    roll_back = _flat("enterprise/lifecycle.mdx").split("## Roll back", 1)[1].split(" ## ", 1)[0]
+    assert "Windows rollback to 1.0.0–1.0.3 with Hermes users" in roll_back
+    bullet = roll_back.split("Windows rollback to 1.0.0–1.0.3 with Hermes users", 1)[1].split("- **", 1)[0]
+    for phrase in ("fail_closed: true", "pre_tool_call", "signed out", "1603", "signs in", "uninstall the newer release"):
+        assert phrase in bullet, phrase
+
+
+# Display names the enterprise docs use for each connector route.
+_ROUTE_DOC_NAMES = {
+    "amp": "Amp", "antigravity": "Antigravity", "devin": "Devin", "hermes": "Hermes", "kiro": "Kiro",
+    "opencode": "OpenCode", "codex": "Codex", "claudecode": "Claude Code", "cursor": "Cursor", "copilot": "Copilot",
+}
+
+
+def _route_connectors(route: str) -> set[str]:
+    """Connectors enterprisepolicy.RouteFor gives route, read from the Go switch."""
+    source = (ROOT / "internal/enterprisepolicy/types.go").read_text(encoding="utf-8")
+    body = source.split("func RouteFor(connector, goos string) string {", 1)[1].split("\n}\n", 1)[0]
+    names: set[str] = set()
+    for case, returned in re.findall(r"case ([^:]+):(?:\s*//[^\n]*)*\s*return (Route\w+)", body):
+        if returned != route:
+            continue
+        for item in case.split(","):
+            item = item.strip()
+            if item.startswith('"'):
+                names.add(item.strip('"'))
+            elif item == "ConnectorCodex":
+                names.add("codex")
+            elif item == "ConnectorClaudeCode":
+                names.add("claudecode")
+            elif item == "ConnectorCursor":
+                names.add("cursor")
+            elif item == "ConnectorCopilot":
+                names.add("copilot")
+            elif item == "ConnectorDevinCascade":
+                continue  # the Cascade refusal bridge enrolls nobody (devin_cascade.go)
+            else:
+                raise AssertionError(f"unmapped RouteFor case {item}")
+    return names
+
+
+def test_defenseclaw_folder_rule_names_the_accounts_it_holds_for() -> None:
+    # guard p0-round GAP-1078: the guardian repairs and reports ~/.defenseclaw only
+    # in an account it has a per-user target for. An account that runs only
+    # machine-policy agents (Claude Code and Codex on the rc4 AD account) has
+    # no target, so the folder rule must say which accounts it covers and what
+    # status shows for the others.
+    per_user = _route_connectors("RoutePerUser")
+    machine = _route_connectors("RouteMachinePolicy")
+    assert {"amp", "hermes", "kiro"} <= per_user and {"codex", "claudecode"} <= machine
+    page = _flat("enterprise/operations.mdx")
+    rule = page.split("`~/.defenseclaw` and `~/.defenseclaw/hooks` follow one rule", 1)[1].split("## ", 1)[0]
+    per_user_text, machine_text = rule.split("get DefenseClaw's hooks from vendor machine policy", 1)
+    for name in per_user:
+        assert _ROUTE_DOC_NAMES[name] in per_user_text, name
+    for name in machine - {"opencode"}:
+        assert _ROUTE_DOC_NAMES[name] in per_user_text.rsplit(".", 1)[-1], name
+    assert "OpenCode through its managed plugin" in per_user_text.rsplit(".", 1)[-1]
+    assert "within a minute" in per_user_text and "`guardian_target_user_path`" in per_user_text
+    assert "has no per-user target" in machine_text
+    assert "reports no `guardian_target_user_path`" in machine_text
+    assert "`agent_install_scan_incomplete`" in machine_text
+    assert "`enterprise hooks status`" in machine_text

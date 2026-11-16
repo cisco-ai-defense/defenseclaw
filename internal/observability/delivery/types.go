@@ -395,7 +395,10 @@ type CircuitPolicy struct {
 
 // Config is generation-owned and immutable after NewDispatcher returns.
 type Config struct {
-	LegacyCircuit    bool
+	LegacyCircuit bool
+	// RetryUntilClosed retains transient work in the bounded queue across
+	// retry rounds. Close and queue overflow still count explicit drops.
+	RetryUntilClosed bool
 	Destination      string
 	Generation       uint64
 	Signal           string

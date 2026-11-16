@@ -719,7 +719,8 @@ func CheckTLSFiles(files *TLSFiles) ([]string, error) {
 // shellQuote quotes a path for a copy-pasteable fix command.
 func shellQuote(s string) string {
 	if s != "" && strings.IndexFunc(s, func(r rune) bool {
-		return !(r == '/' || r == '.' || r == '-' || r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'))
+		return r != '/' && r != '.' && r != '-' && r != '_' &&
+			(r < '0' || r > '9') && (r < 'a' || r > 'z') && (r < 'A' || r > 'Z')
 	}) < 0 {
 		return s
 	}

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -127,6 +128,22 @@ func fileOwnerMatches(path string, uid int) (bool, int) {
 	return int(st.Uid) == uid, int(st.Uid)
 }
 
+// ownerCredentialWindows counts active euid drops.
+var ownerCredentialWindows atomic.Int64
+
+// OwnerCredentialsDropped reports whether a per-user euid drop is active.
+// The drop is process-wide on macOS (XNU credentials belong to the process,
+// not the locked thread), so for its duration every goroutine runs as the
+// target user. Root-path file I/O stays on the reconcile loop, outside the
+// drop; an EACCES on a root-owned path while this reports true is a
+// transient to retry on the next tick, never permission drift.
+func OwnerCredentialsDropped() bool {
+	return ownerCredentialWindows.Load() > 0
+}
+
+// withOwnerCredentials runs fn with the effective uid, gid and groups of the
+// target user. LockOSThread keeps the Go runtime from moving fn, but the
+// seteuid itself is process-wide on macOS (see OwnerCredentialsDropped).
 func withOwnerCredentials(uid, gid int, fn func() error) (err error) {
 	if uid < 0 || gid < 0 {
 		return fn()
@@ -174,6 +191,8 @@ func withOwnerCredentials(uid, gid int, fn func() error) (err error) {
 		}
 	}()
 
+	ownerCredentialWindows.Add(1)
+	defer ownerCredentialWindows.Add(-1)
 	if err := syscall.Setgroups([]int{gid}); err != nil {
 		return fmt.Errorf("enterprise hooks: narrow supplementary groups to gid=%d: %w", gid, err)
 	}
@@ -265,7 +284,7 @@ func lchownInstallFootprint(uid, gid int, dataDir string, footprint connector.Ag
 	if uid < 0 || gid < 0 {
 		return nil
 	}
-	if os.Geteuid() != 0 {
+	if os.Geteuid() != 0 || ownerFootprintRepairedAsRoot() {
 		return nil
 	}
 	if err := chownTree(dataDir, uid, gid); err != nil {

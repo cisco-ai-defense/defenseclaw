@@ -57,7 +57,7 @@ def resolve_list_connector(app: Any, requested: str | None) -> str:
     active = (
         cfg.active_connector()
         if cfg is not None and hasattr(cfg, "active_connector")
-        else "openclaw"
+        else ""
     )
     requested = requested.strip() if requested else ""
     try:
@@ -68,7 +68,7 @@ def resolve_list_connector(app: Any, requested: str | None) -> str:
     except Exception:  # noqa: BLE001 — fall back to the singular active connector.
         configured = [active]
     # Match connector-name-insensitively: fold case AND the hyphen/underscore
-    # aliases (e.g. "open-hands" → "openhands") via connector_paths.normalize
+    # aliases (e.g. "claude-code" → "claudecode") via connector_paths.normalize
     # so a user passing a documented alias resolves the configured canonical
     # peer instead of hitting "not configured".
     from defenseclaw import connector_paths

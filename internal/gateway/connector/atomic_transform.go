@@ -47,28 +47,37 @@ var errAtomicTransformConflict = errors.New("atomic transform target changed")
 
 // atomicTransformResult is the next state returned by a read/merge
 // transformation. Remove is used by teardown when the connector originally
-// created a config file that did not exist before setup.
+// created a config file that did not exist before setup. Keep leaves the file
+// exactly as it is, bytes and permissions, whatever Data and Perm say: a
+// teardown that found nothing of DefenseClaw's in a user's file must not
+// rewrite it (GAP-0650).
 type atomicTransformResult struct {
 	Data   []byte
 	Remove bool
+	Keep   bool
 	Perm   os.FileMode
+	// Force publishes a distinct file even when Data and Perm already match.
+	// Retired connector teardown needs this after writing a deny stub into an
+	// old file: the path gets a distinct file while other names keep the stub.
+	Force bool
 }
 
 type atomicFileSnapshot struct {
-	writePath                string
-	exists                   bool
-	data                     []byte
-	info                     os.FileInfo
-	identity                 string
-	parentIdentity           string
-	protectionDigest         string
-	metadataDigest           string
-	preservedMetadataDigest  string
-	stageOwnedMetadataDigest string
-	ownerGroupDigest         string
-	creationTime             uint64
-	lastWriteTime            uint64
-	linkCount                uint32
+	writePath                 string
+	exists                    bool
+	data                      []byte
+	info                      os.FileInfo
+	identity                  string
+	parentIdentity            string
+	protectionDigest          string
+	metadataDigest            string
+	preservedMetadataDigest   string
+	canonicalEAMetadataDigest string
+	stageOwnedMetadataDigest  string
+	ownerGroupDigest          string
+	creationTime              uint64
+	lastWriteTime             uint64
+	linkCount                 uint32
 }
 
 type atomicTransformIntent struct {
@@ -92,29 +101,31 @@ type atomicTransformIntent struct {
 }
 
 type atomicTransformArtifactState struct {
-	exists                   bool
-	data                     []byte
-	info                     os.FileInfo
-	digest                   string
-	size                     int64
-	protectionDigest         string
-	identity                 string
-	metadataDigest           string
-	preservedMetadataDigest  string
-	stageOwnedMetadataDigest string
-	ownerGroupDigest         string
-	creationTime             uint64
-	lastWriteTime            uint64
-	linkCount                uint32
+	exists                    bool
+	data                      []byte
+	info                      os.FileInfo
+	digest                    string
+	size                      int64
+	protectionDigest          string
+	identity                  string
+	metadataDigest            string
+	preservedMetadataDigest   string
+	canonicalEAMetadataDigest string
+	stageOwnedMetadataDigest  string
+	ownerGroupDigest          string
+	creationTime              uint64
+	lastWriteTime             uint64
+	linkCount                 uint32
 }
 
 type atomicTransformPlatformMetadata struct {
-	digest           string
-	preservedDigest  string
-	stageOwnedDigest string
-	ownerGroupDigest string
-	creationTime     uint64
-	lastWriteTime    uint64
+	digest            string
+	preservedDigest   string
+	canonicalEADigest string
+	stageOwnedDigest  string
+	ownerGroupDigest  string
+	creationTime      uint64
+	lastWriteTime     uint64
 }
 
 type atomicTransformLoadedIntent struct {
@@ -301,7 +312,7 @@ func readAtomicFileSnapshot(path string) (atomicFileSnapshot, error) {
 			return snapshot, fmt.Errorf("inspect open config hard-link count %s: %w", writePath, linkCountErr)
 		}
 		if runtime.GOOS == "windows" && linkCount != 1 {
-			return snapshot, fmt.Errorf("Windows config %s has %d hard links; refusing ambiguous replacement", writePath, linkCount)
+			return snapshot, fmt.Errorf("windows config %s has %d hard links; refusing ambiguous replacement", writePath, linkCount)
 		}
 		if identityErr != nil {
 			return snapshot, fmt.Errorf("identify open config %s: %w", writePath, identityErr)
@@ -323,6 +334,7 @@ func readAtomicFileSnapshot(path string) (atomicFileSnapshot, error) {
 		snapshot.protectionDigest = protectionDigest
 		snapshot.metadataDigest = metadata.digest
 		snapshot.preservedMetadataDigest = metadata.preservedDigest
+		snapshot.canonicalEAMetadataDigest = metadata.canonicalEADigest
 		snapshot.stageOwnedMetadataDigest = metadata.stageOwnedDigest
 		snapshot.ownerGroupDigest = metadata.ownerGroupDigest
 		snapshot.creationTime = metadata.creationTime
@@ -417,6 +429,7 @@ func atomicFileSnapshotStillMatches(path string, snapshot atomicFileSnapshot) (b
 	}
 	if metadata.digest != snapshot.metadataDigest ||
 		metadata.preservedDigest != snapshot.preservedMetadataDigest ||
+		metadata.canonicalEADigest != snapshot.canonicalEAMetadataDigest ||
 		metadata.stageOwnedDigest != snapshot.stageOwnedMetadataDigest ||
 		metadata.ownerGroupDigest != snapshot.ownerGroupDigest ||
 		metadata.creationTime != snapshot.creationTime ||
@@ -457,7 +470,7 @@ func stageAtomicTransformFile(
 	perm os.FileMode,
 ) (string, atomicTransformArtifactState, error) {
 	dir := filepath.Dir(writePath)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := atomicMkdirAll(dir, 0o755); err != nil {
 		return "", atomicTransformArtifactState{}, fmt.Errorf("create directory for %s: %w", writePath, err)
 	}
 	tmp, err := os.CreateTemp(dir, ".tmp-cas-provisional-*")
@@ -469,6 +482,9 @@ func stageAtomicTransformFile(
 		_ = tmp.Close()
 		_ = os.Remove(tmpPath)
 		return "", atomicTransformArtifactState{}, cause
+	}
+	if err := atomicStageKeepOwner(tmpPath, writePath); err != nil {
+		return cleanup(fmt.Errorf("keep owner of compare-and-swap temp file: %w", err))
 	}
 	if runtime.GOOS == "windows" && perm.Perm()&0o077 == 0 {
 		if err := safefile.ProtectFile(tmpPath); err != nil {
@@ -1167,8 +1183,7 @@ func atomicTransformIntentCandidateBase(name string) (string, bool) {
 		return "", false
 	}
 	for _, char := range digest {
-		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') ||
-			(runtime.GOOS == "windows" && char >= 'A' && char <= 'F')) {
+		if ((char < '0' || char > '9') && (char < 'a' || char > 'f')) && ((runtime.GOOS != "windows" || char < 'A') || char > 'F') {
 			return "", false
 		}
 	}
@@ -1420,6 +1435,7 @@ func atomicTransformArtifactStatesEqualExact(a, b atomicTransformArtifactState) 
 		a.protectionDigest == b.protectionDigest &&
 		a.metadataDigest == b.metadataDigest &&
 		a.preservedMetadataDigest == b.preservedMetadataDigest &&
+		a.canonicalEAMetadataDigest == b.canonicalEAMetadataDigest &&
 		a.stageOwnedMetadataDigest == b.stageOwnedMetadataDigest &&
 		a.ownerGroupDigest == b.ownerGroupDigest &&
 		a.creationTime == b.creationTime &&

@@ -28,8 +28,8 @@ import (
 func TestGatewayEventClassificationsMatchSourceConstants(t *testing.T) {
 	want := typedStringConstants(t, "internal/gatewaylog/events.go", "EventType")
 	got := producerKeysAsStrings(observability.ClassificationKeys(observability.ProducerGatewayEvent))
-	if len(want) != 16 {
-		t.Fatalf("gateway EventType source constants = %d, want 16", len(want))
+	if len(want) != 17 {
+		t.Fatalf("gateway EventType source constants = %d, want 17", len(want))
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("gateway classifications = %v, source constants = %v", got, want)
@@ -44,8 +44,8 @@ func TestAuditActionClassificationsMatchSourceConstantsAndRegistry(t *testing.T)
 	}
 	sort.Strings(registry)
 	got := producerKeysAsStrings(observability.ClassificationKeys(observability.ProducerAuditAction))
-	if len(sourceConstants) != 234 {
-		t.Fatalf("audit Action source constants = %d, want 234", len(sourceConstants))
+	if len(sourceConstants) != 240 {
+		t.Fatalf("audit Action source constants = %d, want 240", len(sourceConstants))
 	}
 	if !reflect.DeepEqual(registry, sourceConstants) {
 		t.Fatalf("audit.AllActions registry differs from typed source constants\nregistry: %v\nsource: %v", registry, sourceConstants)

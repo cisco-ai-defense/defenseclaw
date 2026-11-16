@@ -13,12 +13,38 @@
 package kernelpolicy
 
 import (
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
 )
+
+func TestReadExecPathUsesKernelExecName(t *testing.T) {
+	dir := t.TempDir()
+	const launch = "/opt/agents/bin/claude"
+	word := strconv.IntSize / 8
+	auxv := make([]byte, 4*word)
+	if word == 8 {
+		binary.NativeEndian.PutUint64(auxv, 31)
+		binary.NativeEndian.PutUint64(auxv[word:], 128)
+	} else {
+		binary.NativeEndian.PutUint32(auxv, 31)
+		binary.NativeEndian.PutUint32(auxv[word:], 128)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "auxv"), auxv, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mem := make([]byte, 128+len(launch)+1)
+	copy(mem[128:], launch)
+	if err := os.WriteFile(filepath.Join(dir, "mem"), mem, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readExecPath(dir); got != launch {
+		t.Fatalf("exec path = %q, want %q", got, launch)
+	}
+}
 
 type fakeProc struct {
 	pid, ppid int

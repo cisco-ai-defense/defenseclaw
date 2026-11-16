@@ -33,6 +33,7 @@ import click
 
 from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_CONFIG_UPDATE
+from defenseclaw.config import gateway_pid_path
 from defenseclaw.config_writer import ACTOR_PREFIX_CLI, current_actor
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.credentials import (
@@ -102,11 +103,10 @@ def _emit_gateway_restart_hint(cfg, env_name: str) -> None:
     The gateway reads ``.env`` once, at start, so a rotated judge, LLM or
     destination key keeps its old value until the gateway restarts.
     """
-    import os
 
     from defenseclaw.process_liveness import pid_file_alive
 
-    if pid_file_alive(os.path.join(cfg.data_dir, "gateway.pid")):
+    if pid_file_alive(gateway_pid_path(cfg.data_dir)):
         ux.subhead(
             f"The running gateway keeps the {env_name} it loaded at start; "
             "apply the change with: defenseclaw-gateway restart",
@@ -121,6 +121,20 @@ def _gateway_token_names(cfg) -> set[str]:
     if token_env:
         names.add(token_env)
     return names
+
+
+def _gateway_token_name(cfg, name: str) -> str | None:
+    """Return the configured spelling of a gateway token environment name."""
+    from defenseclaw import platform_support
+
+    names = _gateway_token_names(cfg)
+    if platform_support.host_os() != "windows":
+        return name if name in names else None
+    configured = str(getattr(getattr(cfg, "gateway", None), "token_env", "") or "").strip()
+    for candidate in (configured, "DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"):
+        if candidate and candidate.casefold() == name.casefold():
+            return candidate
+    return None
 
 
 def required_removal_warning(cfg, env_name: str) -> str:
@@ -197,6 +211,12 @@ def _refuse_managed_secret_write(app: AppContext, action: str) -> None:
         )
 
 
+def _refuse_unsafe_dotenv(path: str, error: Exception) -> None:
+    raise click.ClickException(
+        f"Cannot change {path}: {error}. Restore .env as a regular private file and retry."
+    ) from error
+
+
 @keys_cmd.command("set")
 @click.argument("env_name")
 @click.option("--value", "value", default=None, help="Value to store; prompts if omitted.")
@@ -215,9 +235,47 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
     """
     import os
 
-    _refuse_managed_secret_write(app, "set")
     if value_stdin and value is not None:
         raise click.UsageError("--value and --value-stdin are mutually exclusive")
+
+    from defenseclaw.commands.cmd_setup import _save_secret_to_dotenv
+
+    env_name = env_name.strip()
+    if not env_name:
+        raise click.UsageError("env_name must be non-empty")
+    from defenseclaw.file_permissions import dotenv_key_is_process_control, dotenv_key_is_valid
+
+    if not dotenv_key_is_valid(env_name):
+        # Refused before any prompt or write; the value is never shown (GAP-0078).
+        raise click.UsageError(
+            f"{env_name!r} is not a valid environment variable name: use ASCII letters, digits "
+            "and underscores, starting with a letter or an underscore"
+        )
+
+    if dotenv_key_is_process_control(env_name):
+        from defenseclaw.enforce.asset_lists import is_managed_standalone
+
+        if env_name.upper() == "DEFENSECLAW_FAIL_MODE":
+            change = (
+                "ask an administrator to change the installed policy bundle and apply it with "
+                "defenseclaw-gateway enterprise bundle apply --bundle <signed-bundle>"
+                if is_managed_standalone(app.cfg)
+                else "use defenseclaw guardrail fail-mode <mode> to change the installed policy"
+            )
+        else:
+            change = "export it in the shell of the command that needs it"
+        raise click.UsageError(f"{env_name} is ignored in .env; {change} instead")
+
+    _refuse_managed_secret_write(app, "set")
+
+    from defenseclaw.safety import SafetyError, reject_symlink
+
+    dotenv_path = os.path.join(app.cfg.data_dir, ".env")
+    try:
+        reject_symlink(dotenv_path, what="dotenv file")
+    except SafetyError as exc:
+        _refuse_unsafe_dotenv(dotenv_path, exc)
+
     if value_stdin:
         line = click.get_text_stream("stdin").readline()
         value = line.rstrip("\r\n")
@@ -225,14 +283,14 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
             ux.err("No value on stdin — nothing saved.")
             raise SystemExit(1)
 
-    from defenseclaw.commands.cmd_setup import _save_secret_to_dotenv
-
-    env_name = env_name.strip()
-    if not env_name:
-        raise click.UsageError("env_name must be non-empty")
+    gateway_name = _gateway_token_name(app.cfg, env_name)
+    if gateway_name:
+        env_name = gateway_name
 
     spec = lookup(env_name, app.cfg)
-    if spec is None:
+    if gateway_name:
+        click.echo("  DefenseClaw gateway authentication token (managed by DefenseClaw).")
+    elif spec is None:
         ux.warn(f"{env_name} is not in the DefenseClaw registry.")
         ux.subhead(
             "Saving anyway — it will be available via os.environ for custom setups.",
@@ -255,7 +313,6 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
         ux.subhead(f"To clear a stored key, run: defenseclaw keys remove {env_name}", indent="  ")
         raise click.Abort()
 
-    dotenv_path = os.path.join(app.cfg.data_dir, ".env")
     had = False
     if os.path.isfile(dotenv_path):
         try:
@@ -267,14 +324,26 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
         except OSError:
             had = False
 
-    if env_name in _gateway_token_names(app.cfg):
+    if gateway_name:
         from defenseclaw.logger import keep_running_gateway_token
 
         # The running gateway accepts only the token it loaded until it
         # restarts; the audit event below sent the new one, got 401 and the
         # command failed after the key was saved (GAP-0490).
         keep_running_gateway_token(app.logger, app.cfg.data_dir, app.cfg.gateway.resolved_token(), value)
-    _save_secret_to_dotenv(env_name, value, app.cfg.data_dir)
+    try:
+        # The gateway token is one value with two spellings (and the gateway
+        # writes both when it adopts a token from openclaw.json). A saved token
+        # replaces every spelling already in .env, so an older copy under the
+        # other name never wins at the next gateway start (GAP-0847).
+        spellings = [env_name]
+        if gateway_name:
+            stored = set(_dotenv_names(dotenv_path))
+            spellings += sorted(name for name in _gateway_token_names(app.cfg) if name != env_name and name in stored)
+        for spelling in spellings:
+            _save_secret_to_dotenv(spelling, value, app.cfg.data_dir)
+    except SafetyError as exc:
+        _refuse_unsafe_dotenv(dotenv_path, exc)
     if app.logger:
         from defenseclaw.logger import CanonicalObservabilityUnavailableError
 
@@ -303,7 +372,7 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
                 err=True,
             )
     # One path style: keys remove prints os.path.join too (GAP-1297).
-    ux.ok(f"Saved {env_name} = {mask(value)} to {dotenv_path}", indent="  ")
+    ux.ok(f"Saved {env_name} to {dotenv_path} (value hidden)", indent="  ")
     _emit_bound_endpoint_hint(spec, app.cfg, indent="    ")
     _emit_gateway_restart_hint(app.cfg, env_name)
 
@@ -324,12 +393,19 @@ def keys_remove(app: AppContext, env_name: str, yes: bool) -> None:
     env_name = env_name.strip()
     if not env_name:
         raise click.UsageError("env_name must be non-empty")
+    env_name = _gateway_token_name(app.cfg, env_name) or env_name
+
+    from defenseclaw.safety import SafetyError, reject_symlink
 
     dotenv_path = os.path.join(app.cfg.data_dir, ".env")
+    try:
+        reject_symlink(dotenv_path, what="dotenv file")
+    except SafetyError as exc:
+        _refuse_unsafe_dotenv(dotenv_path, exc)
     if env_name not in _dotenv_names(dotenv_path):
         ux.warn(f"{env_name} is not stored in {dotenv_path} — nothing removed.")
         return
-    if env_name in _gateway_token_names(app.cfg):
+    if _gateway_token_name(app.cfg, env_name):
         raise click.ClickException(
             f"{env_name} is DefenseClaw's own gateway auth token; removing it would cut the hooks, "
             "the CLI and the TUI off from the gateway. It is not removed. "
@@ -349,7 +425,11 @@ def keys_remove(app: AppContext, env_name: str, yes: bool) -> None:
     from_dotenv = bool(shell_value) and credential_provenance.was_injected_from_dotenv(
         app.cfg.data_dir, env_name, shell_value
     )
-    if not _remove_dotenv_key(dotenv_path, env_name):
+    try:
+        removed = _remove_dotenv_key(dotenv_path, env_name)
+    except SafetyError as exc:
+        _refuse_unsafe_dotenv(dotenv_path, exc)
+    if not removed:
         ux.warn(f"{env_name} is not stored in {dotenv_path} — nothing removed.")
         return
     if from_dotenv:
@@ -389,12 +469,12 @@ def _dotenv_names(dotenv_path: str) -> list[str]:
 
 
 def _remove_dotenv_key(dotenv_path: str, env_name: str) -> bool:
-    """Drop every ``env_name=`` line from the dotenv file; keep all other bytes."""
+    """Drop every ``env_name=`` line from the dotenv file; keep every other line."""
     import os
 
     from defenseclaw.commands.cmd_setup import _rotate_token_snapshot_locked
     from defenseclaw.config import locked_file_update
-    from defenseclaw.file_permissions import atomic_write_private_bytes
+    from defenseclaw.file_permissions import atomic_write_private_bytes, serialize_dotenv
 
     wanted = env_name.encode("utf-8")
     if os.name == "nt":
@@ -415,7 +495,7 @@ def _remove_dotenv_key(dotenv_path: str, env_name: str) -> bool:
                 continue
             kept.append(line)
         if removed:
-            atomic_write_private_bytes(dotenv_path, b"".join(kept))
+            atomic_write_private_bytes(dotenv_path, serialize_dotenv(kept, snapshot.body))
         return removed
 
 

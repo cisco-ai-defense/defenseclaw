@@ -19,8 +19,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
@@ -36,8 +39,10 @@ import (
 // the gateway (GAP-0946). The lifecycle writes no ACL entries, so status and
 // verify name every entry that lets another account change a file or folder
 // the deployment installs, and every transaction (repair, ensure, the
-// package postinstall ensure --from-package) removes them with chmod -N
-// before it writes anything. A recursive read entry for a group of standard
+// package postinstall ensure --from-package) removes those entries, one by
+// one with chmod -a# (never the path's whole ACL: chmod -N also removed an
+// administrator's unrelated entries, GAP-0034), before it writes anything.
+// A recursive read entry for a group of standard
 // users on the install root let every user read runtime/device.key,
 // runtime/.env and the lifecycle record while status and verify stayed green
 // (GAP-0950): on a private path (one whose mode gives other accounts no
@@ -64,24 +69,36 @@ const aclListBatch = 200
 // that grants write to an account other than root or an administrator group;
 // elsewhere an entry that grants write.
 type aclTarget struct {
-	path          string
-	private       bool
-	publishedDir  bool
-	publishedFile bool
-	gatewayRead   bool
-	requireList   bool
-	ancestor      bool
+	path           string
+	private        bool
+	publishedDir   bool
+	publishedFile  bool
+	gatewayRead    bool
+	requireList    bool
+	requireListing bool
+	ancestor       bool
+	// serviceRead marks the administrator policy folder (policy_dir) and
+	// what is in it, which the gateway reads as its service account: an
+	// entry that denies that account a right it needs there is wrong, and
+	// an entry for another account is not (GAP-1323). serviceOnly targets
+	// are checked for that alone: the deployment does not install them.
+	serviceRead bool
+	serviceOnly bool
+	dir         bool
 }
 
-// aclFinding is a path with the ACL entries that are wrong for it; write is
-// set when one of them grants write; ancestor when the path is a folder above
-// a vendor machine-policy folder.
+// aclFinding is a path with the ACL entries that are wrong for it and their
+// indexes, as chmod -a# takes them; write is set when one of them grants
+// write; ancestor when the path is a folder above a vendor machine-policy
+// folder.
 type aclFinding struct {
 	path     string // canonical
 	rooted   string
 	entries  []string
+	indexes  []int
 	write    bool
 	deny     bool
+	service  bool // an entry denies the gateway service account the policy folder (GAP-1323)
 	ancestor bool
 }
 
@@ -101,6 +118,10 @@ func (e *Env) aclTargets(files, connectors []string) []aclTarget {
 		published[path] = true
 	}
 	var targets []aclTarget
+	policyRoot := e.P(e.Layout.PolicyDir)
+	inPolicyDir := func(rooted string) bool {
+		return rooted == policyRoot || strings.HasPrefix(rooted, policyRoot+string(filepath.Separator))
+	}
 	// private is nil to take it from the current mode.
 	add := func(rooted string, private *bool) {
 		if seen[rooted] {
@@ -120,6 +141,7 @@ func (e *Env) aclTargets(files, connectors []string) []aclTarget {
 			publishedDir: info.IsDir() && published[rooted], publishedFile: info.Mode().IsRegular() && published[rooted],
 			gatewayRead: rooted == e.P(e.Layout.ConfigPath) || rooted == e.P(e.Layout.ConfigDir),
 			requireList: filepath.Base(rooted) == "managed-settings.d" || filepath.Base(rooted) == "policy.d",
+			serviceRead: inPolicyDir(rooted), dir: info.IsDir(),
 		})
 	}
 	yes := true
@@ -135,6 +157,7 @@ func (e *Env) aclTargets(files, connectors []string) []aclTarget {
 	for _, path := range policyPaths {
 		add(path, nil)
 	}
+	snapshotStore := e.P(filepath.Join(e.Layout.LifecycleDir, snapshotsDirName))
 	for _, dir := range []string{e.Layout.DataDir, filepath.Dir(e.Layout.ManifestPath), e.Layout.GuardianAuthDir, e.Layout.SecretsDir, e.Layout.LifecycleDir} {
 		root := e.P(dir)
 		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -142,6 +165,13 @@ func (e *Env) aclTargets(files, connectors []string) []aclTarget {
 				return nil
 			}
 			add(path, &yes)
+			// Preserved files are links to the live files. Checking both names
+			// schedules the same ACL entry for removal twice. The snapshot
+			// directories and index remain checked; the live files are checked
+			// through their deployment paths.
+			if d.IsDir() && filepath.Base(path) == "files" && filepath.Dir(filepath.Dir(path)) == snapshotStore {
+				return fs.SkipDir
+			}
 			if d.IsDir() && path != root && strings.Count(strings.TrimPrefix(path, root), string(filepath.Separator)) >= maxStateDepth {
 				return fs.SkipDir
 			}
@@ -176,6 +206,24 @@ func (e *Env) aclTargets(files, connectors []string) []aclTarget {
 	for _, file := range e.configStateFiles(Account{}) {
 		add(e.P(file.path), &yes)
 	}
+	// The rest of the policy folder: the administrator's rule packs and
+	// policies, checked only for entries that deny the gateway reading them.
+	walked := 0
+	_ = filepath.WalkDir(policyRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || seen[path] {
+			return nil
+		}
+		if walked++; walked > rulePackTreeMaxEntries {
+			return fs.SkipAll
+		}
+		info, err := os.Lstat(path)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || (!info.IsDir() && !info.Mode().IsRegular()) {
+			return nil
+		}
+		seen[path] = true
+		targets = append(targets, aclTarget{path: path, serviceRead: true, serviceOnly: true, dir: info.IsDir()})
+		return nil
+	})
 	// Last, so a folder the deployment also installs keeps its stricter check.
 	for _, dir := range e.machinePolicyAncestors(policyPaths) {
 		if seen[dir] {
@@ -186,7 +234,7 @@ func (e *Env) aclTargets(files, connectors []string) []aclTarget {
 			targets = append(targets, aclTarget{path: dir, ancestor: true})
 		}
 	}
-	return targets
+	return mergeCoworkACLTargets(targets, e.coworkACLTargets(files))
 }
 
 // machinePolicyAncestors are the folders above the rooted vendor
@@ -275,26 +323,49 @@ func (e *Env) aclFindings(ctx context.Context, targets []aclTarget) ([]aclFindin
 		}
 		for _, target := range batch {
 			entries, ok := listed[target.path]
-			if !ok && target.ancestor {
+			if !ok && (target.ancestor || target.requireListing) {
 				// Fail closed: an unread folder above a policy folder is not trusted.
 				failure = fmt.Errorf("ls did not list the ACL of %s", target.path)
 				continue
 			}
 			finding := aclFinding{path: e.canonical(target.path), rooted: target.path, ancestor: target.ancestor}
+			serviceDenied := map[int]bool{}
+			if target.serviceRead {
+				needs := []string{"read"}
+				if target.dir {
+					needs = []string{"list", "read", "search"}
+				}
+				serviceDenied = e.darwinACLServiceDenials(entries, needs)
+			}
 			for _, entry := range entries {
-				if target.ancestor {
-					if entry.GrantsWrite() && !darwinACLAdminPrincipal(entry) {
+				if target.serviceOnly {
+					if serviceDenied[entry.Index] {
 						finding.entries = append(finding.entries, entry.Text)
-						finding.write = true
+						finding.indexes = append(finding.indexes, entry.Index)
+						finding.service = true
+					}
+					continue
+				}
+				if target.ancestor {
+					write := entry.GrantsWrite() && !darwinACLAdminPrincipal(entry)
+					deny := target.publishedDir && entry.DeniesDirectoryAccess(false)
+					if write || deny {
+						finding.entries = append(finding.entries, entry.Text)
+						finding.indexes = append(finding.indexes, entry.Index)
+						finding.write = finding.write || write
+						finding.deny = finding.deny || deny
 					}
 					continue
 				}
 				deny := ((target.publishedDir || target.gatewayRead) && entry.DeniesDirectoryAccess(target.requireList)) ||
 					((target.publishedFile || target.gatewayRead) && entry.DeniesFileRead())
-				if entry.GrantsWrite() || (target.private && entry.GrantsAccess()) || deny {
+				service := serviceDenied[entry.Index]
+				if entry.GrantsWrite() || (target.private && entry.GrantsAccess()) || deny || service {
 					finding.entries = append(finding.entries, entry.Text)
+					finding.indexes = append(finding.indexes, entry.Index)
 					finding.write = finding.write || entry.GrantsWrite()
 					finding.deny = finding.deny || deny
+					finding.service = finding.service || service
 				}
 			}
 			if len(finding.entries) > 0 {
@@ -320,7 +391,7 @@ func (e *Env) aclProblems(ctx context.Context, record *Deployment) []string {
 	if err != nil && e.Geteuid() == 0 {
 		problems = append(problems, fmt.Sprintf("the macOS ACLs of the deployment could not be read (%v), so entries that grant write or deny policy access are not checked", err))
 	}
-	var write, read, deny, ancestors []aclFinding
+	var write, read, deny, service, ancestors []aclFinding
 	for _, finding := range findings {
 		if finding.ancestor {
 			ancestors = append(ancestors, finding)
@@ -332,7 +403,10 @@ func (e *Env) aclProblems(ctx context.Context, record *Deployment) []string {
 		if finding.deny {
 			deny = append(deny, finding)
 		}
-		if !finding.write && !finding.deny {
+		if finding.service {
+			service = append(service, finding)
+		}
+		if !finding.write && !finding.deny && !finding.service {
 			read = append(read, finding)
 		}
 	}
@@ -341,7 +415,7 @@ func (e *Env) aclProblems(ctx context.Context, record *Deployment) []string {
 	}
 	if len(write) > 0 {
 		problems = append(problems, fmt.Sprintf(
-			"macOS ACL entries let other accounts change DefenseClaw files and folders that root and every agent rely on, although their owner and mode bits do not: %s; run `%s` to remove them (it runs chmod -N on each path)",
+			"macOS ACL entries let other accounts change DefenseClaw files and folders that root and every agent rely on, although their owner and mode bits do not: %s; run `%s` to remove them (it removes only those entries)",
 			describeACLFindings(write), e.lifecycleCommand(ActionRepair)))
 	}
 	if len(deny) > 0 {
@@ -349,9 +423,14 @@ func (e *Env) aclProblems(ctx context.Context, record *Deployment) []string {
 			"macOS ACL entries deny users access to published machine-policy directories or files, so their agents cannot load DefenseClaw hooks: %s; run `%s` to remove them",
 			describeACLFindings(deny), e.lifecycleCommand(ActionRepair)))
 	}
+	if len(service) > 0 {
+		problems = append(problems, fmt.Sprintf(
+			"macOS ACL entries deny the %s service account reading the administrator policy folder (policy_dir), so the gateway refuses it and does not start after its next restart: %s; run `%s` to remove them (it removes only those entries)",
+			e.Layout.ServiceUser, describeACLFindings(service), e.lifecycleCommand(ActionRepair)))
+	}
 	if len(read) > 0 {
 		problems = append(problems, fmt.Sprintf(
-			"macOS ACL entries let other accounts read private DefenseClaw files and folders (the device key, credentials, audit store and lifecycle state) that their owner and mode bits keep from them: %s; run `%s` to remove them (it runs chmod -N on each path)",
+			"macOS ACL entries let other accounts read private DefenseClaw files and folders (the device key, credentials, audit store and lifecycle state) that their owner and mode bits keep from them: %s; run `%s` to remove them (it removes only those entries)",
 			describeACLFindings(read), e.lifecycleCommand(ActionRepair)))
 	}
 	return problems
@@ -361,6 +440,11 @@ func (e *Env) aclProblems(ctx context.Context, record *Deployment) []string {
 // folder above a vendor machine-policy folder; the administrator removes
 // them, since DefenseClaw does not change system folders.
 func ancestorACLProblem(findings []aclFinding, rerun string) string {
+	for _, finding := range findings {
+		if finding.deny {
+			return fmt.Sprintf("macOS ACL entries grant unsafe write access or deny standard users traversal above the published Cowork VM sensor files: %s; remove those entries with `chmod -a \"<entry>\" <folder>` (DefenseClaw does not change system folders), then run `%s`", describeACLFindings(findings), rerun)
+		}
+	}
 	return fmt.Sprintf(
 		"macOS ACL entries let accounts other than root and administrators add or delete folders above the vendor machine-policy folders, so they could put a policy without DefenseClaw hooks in place of the published one: %s; remove those entries with `chmod -a \"<entry>\" <folder>` (DefenseClaw does not change system folders), then run `%s`",
 		describeACLFindings(findings), rerun)
@@ -386,11 +470,12 @@ func describeACLFindings(findings []aclFinding) string {
 	return strings.Join(parts, "; ")
 }
 
-// removeACLs removes the macOS ACL of every target with an entry that lets
-// another account change it, or reach it when it is private. chmod -h never
-// follows a link put in place of a path after it was listed. An entry still
-// listed afterwards fails the transaction with the paths, so a repair never
-// reports success while verify keeps naming them (GAP-0946).
+// removeACLs removes, from every target, the macOS ACL entries that let
+// another account change it, or reach it when it is private, and keeps its
+// other entries (GAP-0034). chmod -h never follows a link put in place of a
+// path after it was listed. An entry still listed afterwards fails the
+// transaction with the paths, so a repair never reports success while
+// verify keeps naming them (GAP-0946).
 func (l *lifecycle) removeACLs(ctx context.Context, files, connectors []string) error {
 	return l.removeACLTargets(ctx, l.env.aclTargets(files, connectors))
 }
@@ -415,7 +500,7 @@ func (l *lifecycle) removeConfigACLs(ctx context.Context) error {
 func (l *lifecycle) removeACLTargets(ctx context.Context, targets []aclTarget) error {
 	env := l.env
 	findings, err := env.aclFindings(ctx, targets)
-	// Set before anything below can fail: a run that stops before chmod -N
+	// Set before anything below can fail: a run that stops before chmod -a#
 	// cleared config.yaml (or could not list its ACL) must not keep bytes
 	// written through the entry as a newer config (GAP-1518, GAP-1535).
 	if err != nil && env.GOOS == "darwin" {
@@ -441,11 +526,40 @@ func (l *lifecycle) removeACLTargets(ctx context.Context, targets []aclTarget) e
 	if len(ancestors) > 0 {
 		return errors.New(ancestorACLProblem(ancestors, env.lifecycleCommand(l.opts.Action)))
 	}
-	var removed []string
+	// Several selected paths can name one inode. Their path policies still
+	// decide which entries must go, but each ACL index is removed only once.
+	type inode struct{ device, number uint64 }
+	byInode := make(map[inode]int, len(findings))
+	removals := make([]aclFinding, 0, len(findings))
 	for _, finding := range findings {
-		if _, err := env.Runner.Run(ctx, "chmod", "-h", "-N", finding.rooted); err != nil {
-			return fmt.Errorf("remove the macOS ACL of %s: %w; remove it with `chmod -N %s`, then rerun `%s`",
-				finding.path, err, finding.path, env.lifecycleCommand(l.opts.Action))
+		info, err := os.Lstat(finding.rooted)
+		if err != nil {
+			return fmt.Errorf("inspect the macOS ACL target %s: %w", finding.path, err)
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("inspect the macOS ACL target %s: inode unavailable or path is a link", finding.path)
+		}
+		key := inode{uint64(stat.Dev), uint64(stat.Ino)}
+		if index, ok := byInode[key]; ok {
+			removals[index].indexes = append(removals[index].indexes, finding.indexes...)
+			removals[index].entries = append(removals[index].entries, finding.entries...)
+		} else {
+			byInode[key] = len(removals)
+			removals = append(removals, finding)
+		}
+	}
+	var removed []string
+	for _, finding := range removals {
+		// Highest index first: removing an entry renumbers the ones after it.
+		indexes := slices.Clone(finding.indexes)
+		slices.Sort(indexes)
+		slices.Reverse(indexes)
+		for _, index := range slices.Compact(indexes) {
+			if _, err := env.Runner.Run(ctx, "chmod", "-h", "-a#", strconv.Itoa(index), finding.rooted); err != nil {
+				return fmt.Errorf("remove the macOS ACL entries %s of %s: %w; remove them with `chmod -a \"<entry>\" %s`, then rerun `%s`",
+					strings.Join(finding.entries, ", "), finding.path, err, finding.path, env.lifecycleCommand(l.opts.Action))
+			}
 		}
 		removed = append(removed, finding.path)
 	}
@@ -454,7 +568,7 @@ func (l *lifecycle) removeACLTargets(ctx context.Context, targets []aclTarget) e
 		return fmt.Errorf("read the macOS ACLs of the deployment after removing them: %w", err)
 	}
 	if len(left) > 0 {
-		return fmt.Errorf("harmful macOS ACL entries are still there after chmod -N: %s; remove them with `chmod -N <path>`, then rerun `%s`",
+		return fmt.Errorf("harmful macOS ACL entries are still there after removing them: %s; remove them with `chmod -a \"<entry>\" <path>`, then rerun `%s`",
 			describeACLFindings(left), env.lifecycleCommand(l.opts.Action))
 	}
 	l.noteChange("removed harmful macOS ACL entries from %d %s (%s)", len(removed), plural(len(removed), "path", "paths"), examples(removed))
@@ -491,6 +605,107 @@ func aclConnectors(p *plan, record *Deployment) []string {
 		connectors = append(connectors, record.MachinePolicyConnectors...)
 	}
 	return connectors
+}
+
+// darwinServiceACLDenial returns the first rooted path, of paths, whose
+// macOS ACL denies the gateway service account one of the rights its entry
+// in rights lists, with the denying entry. The owner and mode checks pass
+// such a path, and the gateway failed only when it started (GAP-1414,
+// GAP-1442). macOS reads the entries in order and the first applicable
+// entry that names a right decides it, so an earlier allow wins over a
+// later deny. An entry applies to the service account when it names the
+// account, its group or everyone, or a principal ls could not name; the
+// service account has no other groups. Inherit-only entries do not apply to
+// the path itself. Every path must exist: an ls error, or a path ls did not
+// list, is an error, never a pass. It does nothing off macOS.
+func (e *Env) darwinServiceACLDenial(ctx context.Context, paths []string, rights map[string][]string) (string, string, error) {
+	if e.GOOS != "darwin" || len(paths) == 0 {
+		return "", "", nil
+	}
+	for start := 0; start < len(paths); start += aclListBatch {
+		batch := paths[start:min(start+aclListBatch, len(paths))]
+		result, err := e.Runner.Run(ctx, "ls", append([]string{"-lde", "--"}, batch...)...)
+		if err != nil {
+			return "", "", err
+		}
+		listed, err := managed.ParseDarwinACLListing(string(result.Stdout), batch)
+		if err != nil {
+			return "", "", err
+		}
+		for _, path := range batch {
+			entries, ok := listed[path]
+			if !ok {
+				return "", "", fmt.Errorf("ls did not list the ACL of %s", e.canonical(path))
+			}
+			if entry, denied := e.darwinACLDeniesService(entries, rights[path]); denied {
+				return path, entry, nil
+			}
+		}
+	}
+	return "", "", nil
+}
+
+// darwinACLDeniesService reports the entry, of entries in ACL order, that
+// denies the gateway service account one of rights: for each right the
+// first applicable entry naming it decides.
+func (e *Env) darwinACLDeniesService(entries []managed.DarwinACLEntry, rights []string) (string, bool) {
+	for _, right := range rights {
+		for _, entry := range entries {
+			if !e.darwinACLAppliesToService(entry) || !slices.Contains(entry.Rights, right) {
+				continue
+			}
+			if !entry.Allow {
+				return entry.Text, true
+			}
+			break
+		}
+	}
+	return "", false
+}
+
+// darwinACLServiceDenials are the indexes of the entries, of entries in ACL
+// order, that deny the gateway service account one of rights, by the rule of
+// darwinACLDeniesService: for each right the first applicable entry naming
+// it decides, so a deny after an allow for the same right denies nothing.
+func (e *Env) darwinACLServiceDenials(entries []managed.DarwinACLEntry, rights []string) map[int]bool {
+	denied := map[int]bool{}
+	for _, right := range rights {
+		for _, entry := range entries {
+			if !e.darwinACLAppliesToService(entry) || !slices.Contains(entry.Rights, right) {
+				continue
+			}
+			if !entry.Allow {
+				denied[entry.Index] = true
+			}
+			break
+		}
+	}
+	return denied
+}
+
+// darwinACLAppliesToService reports an entry that governs the path itself
+// for the gateway service account.
+func (e *Env) darwinACLAppliesToService(entry managed.DarwinACLEntry) bool {
+	if slices.Contains(entry.Rights, "only_inherit") {
+		return false
+	}
+	principal := ""
+	if fields := strings.Fields(strings.ToLower(entry.Text)); len(fields) > 0 {
+		principal = fields[0]
+	}
+	// A principal ls printed as a number (it could not name it) applies:
+	// fail closed.
+	kind, name, _ := strings.Cut(principal, ":")
+	if strings.Trim(name, "0123456789") == "" {
+		return true
+	}
+	switch kind {
+	case "user":
+		return name == strings.ToLower(e.Layout.ServiceUser)
+	case "group":
+		return name == strings.ToLower(e.Layout.ServiceGroup) || name == "everyone"
+	}
+	return true
 }
 
 // jsonlACLProblem checks a custom output file, which is outside the

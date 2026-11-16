@@ -47,7 +47,7 @@
         "properties": {
           "uid": { "type": "integer" },
           "user": { "type": "string" },
-          "state": { "type": "string", "description": "The sensor helper's state of the user: enforcing, burn_in, monitor or inactive." },
+          "state": { "type": "string", "description": "The sensor helper's state of the user: enforcing, armed (enforce is loaded and no running agent session is anchored yet), burn_in, monitor or inactive." },
           "reason": { "type": "string", "description": "The sensor helper's reason for the state. kernel_pid_anchor_monitor_only and kernel_binary_anchor_scope_limited mark a user that finished burn-in but stays in monitor without a deny anchor of its own." },
           "covered_hours": { "type": "number" },
           "needed_hours": { "type": "number" },
@@ -57,7 +57,7 @@
           "measuring": { "type": "boolean", "description": "The window is younger than 24h, so there is no ETA yet." },
           "monitor_only": { "type": "boolean", "description": "No connector of the user is in action mode: enforce never denies for it (guardrail_observe), whatever the burn-in says." },
           "eta_hours": { "type": "number", "description": "Calendar hours until ready at the user's rate of agent use so far." },
-          "phase": { "enum": ["enforcing", "ready", "burn_in", "reset", "monitor_only", "no_agent", "held"], "description": "The one word a fleet summary counts the user by. held: finished burn-in or limited, and not denied (a deny-anchor limit, a pause, an operator's change); ready is held while the host runs enforce." },
+          "phase": { "enum": ["enforcing", "armed", "ready", "burn_in", "reset", "monitor_only", "no_agent", "held"], "description": "The one word a fleet summary counts the user by. held: finished burn-in or limited, and not denied (a deny-anchor limit, a pause, an operator's change); ready is held while the host runs enforce." },
           "hits": {
             "type": "array",
             "items": {

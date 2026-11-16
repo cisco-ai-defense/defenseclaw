@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import { Check, CircleDashed, Minus } from 'lucide-react';
 import { ConnectorBrand } from '@/components/connector-brand';
-import { HOME_CONNECTORS, type OsStatus } from './home-data';
+import { HOME_TILES, type OsStatus } from './home-data';
 import styles from './home.module.css';
 
 const OS_LABELS = [
@@ -22,11 +22,11 @@ function StatusIcon({ status }: { status: OsStatus }) {
   return <Minus aria-hidden />;
 }
 
-/** Logo grid of the hook connectors with per-OS marks. */
+/** Logo grid of the hook connectors, plus Claude Cowork, with per-OS marks. */
 export function ConnectorGrid() {
   return (
     <ul className={styles.agents} aria-label="Supported AI agents">
-      {HOME_CONNECTORS.map((connector) => (
+      {HOME_TILES.map((connector) => (
         <li key={connector.id}>
           <Link href={`/docs/connectors/${connector.id}`} className={styles.agent}>
             <ConnectorBrand id={connector.id} />

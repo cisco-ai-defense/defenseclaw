@@ -25,10 +25,10 @@ import (
 	"unicode/utf16"
 )
 
-// Bounds on the copy stageUTF16Skill makes.
+// Bounds on the copy stageSkill makes.
 const (
-	utf16StageMaxBytes = 64 << 20
-	utf16StageMaxFiles = 2000
+	skillStageMaxBytes = 64 << 20
+	skillStageMaxFiles = 2000
 )
 
 // DecodeSkillText returns raw as UTF-8 text: a UTF-8 byte order mark is
@@ -54,13 +54,21 @@ func DecodeSkillText(raw []byte) ([]byte, bool) {
 	return raw, false
 }
 
-// stageUTF16Skill returns a copy of the skill folder at target whose SKILL.md
-// is re-encoded as UTF-8 when it was saved as UTF-16, and a cleanup. The
-// scanner refused such a skill ("skill.md contains null bytes") and the
-// watcher quarantined it with the reason only in gateway.log (GAP-0417). The
-// copy holds regular files only and is bounded; otherwise, and for any other
-// SKILL.md, target is scanned as it is.
-func stageUTF16Skill(target string) (string, func(), error) {
+// stageSkill returns the folder skill-scanner reads for the skill at
+// target, the OS metadata files it leaves out and a cleanup. That folder is
+// target itself unless the skill needs a scan copy:
+//   - a SKILL.md saved as UTF-16 is re-encoded as UTF-8: the scanner refused
+//     it ("skill.md contains null bytes") and the watcher quarantined the
+//     skill with the reason only in gateway.log (GAP-0417);
+//   - OS metadata files that pass their format check (skill_metadata.go) are
+//     left out and reported as INFO findings, and a UTF-16 desktop.ini is
+//     re-encoded as UTF-8: the scanner scored them as opaque binaries and
+//     the watcher quarantined a plain-text skill in action mode (GAP-0106).
+//
+// The copy holds regular files only and is bounded. A UTF-16 SKILL.md that
+// cannot be copied fails the scan; any other skill is then scanned as it
+// is, metadata files included.
+func stageSkill(target string) (string, []metadataSidecar, func(), error) {
 	noop := func() {}
 	manifest := ""
 	for _, name := range []string{"SKILL.md", "skill.md"} {
@@ -69,20 +77,89 @@ func stageUTF16Skill(target string) (string, func(), error) {
 			break
 		}
 	}
-	if manifest == "" {
-		return target, noop, nil
+	utf16Manifest := manifest != "" && hasUTF16BOM(filepath.Join(target, manifest))
+	plan, err := planSkillStage(target)
+	if err == nil && !utf16Manifest && len(plan.metadata) == 0 && len(plan.transcode) == 0 {
+		return target, nil, noop, nil
 	}
-	head := make([]byte, 2)
-	f, err := os.Open(filepath.Join(target, manifest))
+	if err == nil {
+		var stage string
+		var cleanup func()
+		stage, cleanup, err = copySkillStage(target, manifest, utf16Manifest, plan)
+		if err == nil {
+			return stage, plan.metadata, cleanup, nil
+		}
+	}
+	if !utf16Manifest {
+		return target, nil, noop, nil
+	}
+	return "", nil, noop, fmt.Errorf("scanner: %s is saved as UTF-16 and could not be re-encoded for the scan (%v); save it as UTF-8", manifest, err)
+}
+
+func hasUTF16BOM(path string) bool {
+	f, err := os.Open(path)
 	if err != nil {
-		return target, noop, nil
+		return false
 	}
+	defer f.Close()
+	head := make([]byte, 2)
 	n, _ := f.Read(head)
-	_ = f.Close()
-	if n < 2 || !(head[0] == 0xFF && head[1] == 0xFE || head[0] == 0xFE && head[1] == 0xFF) {
-		return target, noop, nil
-	}
-	dir, err := os.MkdirTemp("", "dc-skill-utf8-")
+	return n == 2 && (head[0] == 0xFF && head[1] == 0xFE || head[0] == 0xFE && head[1] == 0xFF)
+}
+
+// skillStagePlan is what a scan copy of a skill changes.
+type skillStagePlan struct {
+	metadata  []metadataSidecar // left out of the copy
+	skip      map[string]bool   // rel paths of metadata
+	transcode map[string]bool   // rel paths re-encoded as UTF-8
+}
+
+// planSkillStage walks the skill once (bounded) and finds its OS metadata
+// files; an error means the skill cannot be copied.
+func planSkillStage(target string) (skillStagePlan, error) {
+	plan := skillStagePlan{skip: map[string]bool{}, transcode: map[string]bool{}}
+	var total int64
+	files := 0
+	err := filepath.WalkDir(target, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(target, path)
+		if err != nil {
+			return err
+		}
+		if !d.Type().IsRegular() {
+			return fmt.Errorf("%s is not a regular file", rel)
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		files++
+		total += info.Size()
+		if files > skillStageMaxFiles || total > skillStageMaxBytes {
+			return fmt.Errorf("the skill is too large to re-encode")
+		}
+		kind, transcode := classifySkillFile(target, rel, info.Size())
+		switch {
+		case kind != "":
+			plan.skip[rel] = true
+			plan.metadata = append(plan.metadata, metadataSidecar{Rel: filepath.ToSlash(rel), Kind: kind})
+		case transcode:
+			plan.transcode[rel] = true
+		}
+		return nil
+	})
+	return plan, err
+}
+
+// copySkillStage writes the scan copy of target that plan describes.
+func copySkillStage(target, manifest string, utf16Manifest bool, plan skillStagePlan) (string, func(), error) {
+	noop := func() {}
+	dir, err := os.MkdirTemp("", "dc-skill-scan-")
 	if err != nil {
 		return "", noop, err
 	}
@@ -105,27 +182,30 @@ func stageUTF16Skill(target string) (string, func(), error) {
 		if !d.Type().IsRegular() {
 			return fmt.Errorf("%s is not a regular file", rel)
 		}
+		if plan.skip[rel] {
+			return nil
+		}
 		info, err := d.Info()
 		if err != nil {
 			return err
 		}
 		files++
 		total += info.Size()
-		if files > utf16StageMaxFiles || total > utf16StageMaxBytes {
+		if files > skillStageMaxFiles || total > skillStageMaxBytes {
 			return fmt.Errorf("the skill is too large to re-encode")
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
-		if rel == manifest {
+		if rel == manifest && utf16Manifest || plan.transcode[rel] {
 			data, _ = DecodeSkillText(data)
 		}
 		return os.WriteFile(dest, data, 0o600)
 	})
 	if err != nil {
 		cleanup()
-		return "", noop, fmt.Errorf("scanner: %s is saved as UTF-16 and could not be re-encoded for the scan (%v); save it as UTF-8", manifest, err)
+		return "", noop, err
 	}
 	return stage, cleanup, nil
 }

@@ -176,3 +176,98 @@ func TestReplaceFilePreservesExistingNTFSAlternateDataStream(t *testing.T) {
 		t.Fatalf("alternate stream=%q error=%v, want preserved metadata", metadata, err)
 	}
 }
+
+// A metadata merge must finish away from the name used by readers. A refused
+// final publication keeps that name bound to its prior complete file.
+func TestReplaceFileKeepsPublishedNameWhenFinalRenameIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "settings.json")
+	source := filepath.Join(dir, "stage.json")
+	if err := os.WriteFile(destination, []byte("old body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("new body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := atomicRenameReplace
+	t.Cleanup(func() { atomicRenameReplace = previous })
+	calls := 0
+	atomicRenameReplace = func(_, _ string) error {
+		calls++
+		return windows.ERROR_INVALID_NAME
+	}
+	if err := ReplaceFile(source, destination); !errors.Is(err, windows.ERROR_INVALID_NAME) {
+		t.Fatalf("replacement error = %v, want refused final rename", err)
+	}
+	if calls != 1 {
+		t.Fatalf("POSIX publication calls = %d, want 1", calls)
+	}
+	if body, err := os.ReadFile(destination); err != nil || string(body) != "old body" {
+		t.Fatalf("published body = %q, error = %v", body, err)
+	}
+}
+
+func TestReplaceFilePublishesChangedBodyWithOrdinaryMetadata(t *testing.T) {
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "settings.json")
+	source := filepath.Join(dir, "stage.json")
+	if err := os.WriteFile(destination, []byte("old body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("new body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReplaceFile(source, destination); err != nil {
+		t.Fatal(err)
+	}
+	if body, err := os.ReadFile(destination); err != nil || string(body) != "new body" {
+		t.Fatalf("published body = %q, error = %v", body, err)
+	}
+}
+
+func TestReplaceFileOverwritesExistingWithProtectedDACL(t *testing.T) {
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "settings.json")
+	source := filepath.Join(dir, "stage.json")
+	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{
+		windowsAccessEntry(user.User.Sid, windows.GENERIC_ALL),
+		windowsAccessEntry(system, windows.GENERIC_READ),
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(destination, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, acl, nil); err != nil {
+		t.Fatal(err)
+	}
+	wantSystemMask := windowsAllowMaskForSID(t, destination, system)
+	if err := ReplaceFile(source, destination); err != nil {
+		t.Fatalf("replace existing file: %v", err)
+	}
+	data, err := os.ReadFile(destination)
+	if err != nil || string(data) != "new" {
+		t.Fatalf("published body = %q, err = %v", data, err)
+	}
+	if got := windowsAllowMaskForSID(t, destination, system); got != wantSystemMask {
+		t.Fatalf("SYSTEM mask = 0x%x, want 0x%x", uint32(got), uint32(wantSystemMask))
+	}
+	protected, err := windowsDACLProtected(destination)
+	if err != nil || !protected {
+		t.Fatalf("protected DACL = %t, err = %v", protected, err)
+	}
+}

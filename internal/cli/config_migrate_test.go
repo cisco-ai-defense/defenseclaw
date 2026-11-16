@@ -18,9 +18,13 @@ package cli
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -40,7 +44,7 @@ func TestMigrateManagedStandaloneConfigRecordsStagedBundle(t *testing.T) {
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+	if err := migrateManagedStandaloneConfig(context.Background(), path, ""); err != nil {
 		t.Fatal(err)
 	}
 	saved := managedStandaloneBundleGeneration
@@ -54,7 +58,7 @@ func TestMigrateManagedStandaloneConfigRecordsStagedBundle(t *testing.T) {
 			Reason: configwrite.BundleReason(id, 3, "guardrail pack update"),
 			Bundle: configwrite.BundleRef{ID: id, Version: 3, SignerKeyID: "k1"}}, true, nil
 	}
-	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+	if err := migrateManagedStandaloneConfig(context.Background(), path, ""); err != nil {
 		t.Fatal(err)
 	}
 	got, ok := observabilityruntime.ReadBundleAttribution(path)
@@ -74,7 +78,7 @@ func TestMigrateManagedStandaloneConfig(t *testing.T) {
 	if err := os.WriteFile(path, v8, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+	if err := migrateManagedStandaloneConfig(context.Background(), path, ""); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	raw, _ := os.ReadFile(path)
@@ -88,11 +92,69 @@ func TestMigrateManagedStandaloneConfig(t *testing.T) {
 	if err != nil || state.Actor != configwrite.ActorLifecycle || state.ConfigSHA256 != configwrite.SHA256Hex(raw) {
 		t.Fatalf("generation = %+v (%v)", state, err)
 	}
-	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+	if err := migrateManagedStandaloneConfig(context.Background(), path, ""); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
 	if again, _ := configwrite.ReadGenerationState(path); again.Generation != state.Generation {
 		t.Fatalf("an unchanged config advanced the generation to %d", again.Generation)
+	}
+}
+
+// The Windows config step restores a Cursor fail mode the 1.0.0-1.0.2
+// migration rewrote to open, through the config writer, once; an open the
+// administrator sets afterwards stays, and without a record nothing changes.
+func TestMigrateManagedStandaloneConfigRestoresMigratedCursorFailMode(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	const key = "guardrail.connectors.cursor.hook_fail_mode"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	open := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\ndata_dir: " + dir +
+		"\nobservability: {}\nguardrail:\n  mode: observe\n  connectors:\n    cursor:\n      hook_fail_mode: open\n")
+	if err := os.WriteFile(path, open, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateManagedStandaloneConfig(context.Background(), path, ""); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := os.ReadFile(path); string(raw) != string(open) {
+		t.Fatalf("no record, but the config changed:\n%s", raw)
+	}
+	record := config.MigrationRecord{
+		SchemaVersion: config.MigrationRecordSchemaVersion, FromVersion: 8, ToVersion: 9, Actor: "lifecycle",
+		MigratedAt:   "2026-09-01T00:00:00Z",
+		SourceSHA256: strings.Repeat("c", 64), ResultSHA256: configwrite.SHA256Hex(open),
+		Moved: []config.MigrationMove{{Source: "config", From: key, To: key, Value: "open"}},
+	}
+	if err := config.WriteMigrationRecord(path, record); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateManagedStandaloneConfig(context.Background(), path, ""); err != nil {
+		t.Fatal(err)
+	}
+	repaired, _ := os.ReadFile(path)
+	if want := strings.Replace(string(open), "hook_fail_mode: open", "hook_fail_mode: closed", 1); string(repaired) != want {
+		t.Fatalf("repaired config:\n%s", repaired)
+	}
+	state, err := configwrite.ReadGenerationState(path)
+	if err != nil || state.Actor != configwrite.ActorLifecycle || state.ConfigSHA256 != configwrite.SHA256Hex(repaired) {
+		t.Fatalf("generation = %+v (%v)", state, err)
+	}
+	if err := migrateManagedStandaloneConfig(context.Background(), path, ""); err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := configwrite.ReadGenerationState(path); again.Generation != state.Generation {
+		t.Fatal("the repair ran twice")
+	}
+	adminOpen := strings.Replace(string(repaired), "hook_fail_mode: closed", "hook_fail_mode: open", 1)
+	if err := os.WriteFile(path, []byte(adminOpen), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateManagedStandaloneConfig(context.Background(), path, ""); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := os.ReadFile(path); string(raw) != adminOpen {
+		t.Fatalf("an administrator open set after the repair was undone:\n%s", raw)
 	}
 }
 
@@ -110,7 +172,7 @@ func TestRecordRestoredManagedStandaloneConfig(t *testing.T) {
 	if _, err := os.Stat(configwrite.GenerationPath(path)); !os.IsNotExist(err) {
 		t.Fatalf("a restored config with no record got one: %v", err)
 	}
-	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+	if err := migrateManagedStandaloneConfig(context.Background(), path, ""); err != nil {
 		t.Fatal(err)
 	}
 	installed, _ := configwrite.ReadGenerationState(path)
@@ -180,6 +242,60 @@ func TestConfigMigrateLeavesASecureClientConfigUnchanged(t *testing.T) {
 	entries, _ := os.ReadDir(dir)
 	if raw, _ := os.ReadFile(path); string(raw) != string(v8) || len(entries) != 1 {
 		t.Fatalf("config migrate changed the Secure Client directory: %d entries", len(entries))
+	}
+}
+
+// --dry-run writes nothing, so --dry-run --ack is refused and leaves the
+// pending record as it is (GAP-0627).
+func TestConfigMigrateDryRunAckWritesNothing(t *testing.T) {
+	previousPath, previousTo, previousDry, previousAck := configMigratePath, configMigrateTo, configMigrateDryRun, configMigrateAck
+	t.Cleanup(func() {
+		configMigratePath, configMigrateTo, configMigrateDryRun, configMigrateAck = previousPath, previousTo, previousDry, previousAck
+	})
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("config_version: 9\ndata_dir: "+dir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := config.MigrationRecordPath(path)
+	pending := []byte(`{"from_version":8,"to_version":9}`)
+	if err := os.WriteFile(record, pending, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configMigratePath, configMigrateTo, configMigrateDryRun, configMigrateAck = path, config.ConfigVersionV9, true, true
+	err := configMigrateCmd.RunE(configMigrateCmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "use one of them") {
+		t.Fatalf("config migrate --dry-run --ack = %v, want a refusal", err)
+	}
+	if raw, _ := os.ReadFile(record); string(raw) != string(pending) {
+		t.Fatalf("config migrate --dry-run --ack changed %s: %s", record, raw)
+	}
+}
+
+// --ack with no migration record has nothing to acknowledge: a plain
+// sentence and success, not a raw open error (GAP-1677).
+func TestConfigMigrateAckWithoutARecordHasNothingToAcknowledge(t *testing.T) {
+	previousPath, previousTo, previousDry, previousAck := configMigratePath, configMigrateTo, configMigrateDryRun, configMigrateAck
+	t.Cleanup(func() {
+		configMigratePath, configMigrateTo, configMigrateDryRun, configMigrateAck = previousPath, previousTo, previousDry, previousAck
+		configMigrateCmd.SetOut(nil)
+	})
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("config_version: 9\ndata_dir: "+dir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	configMigrateCmd.SetOut(&out)
+	configMigratePath, configMigrateTo, configMigrateDryRun, configMigrateAck = path, config.ConfigVersionV9, false, true
+	if err := configMigrateCmd.RunE(configMigrateCmd, nil); err != nil {
+		t.Fatalf("config migrate --ack with no record = %v, want success", err)
+	}
+	if !strings.Contains(out.String(), "nothing to acknowledge") {
+		t.Fatalf("config migrate --ack output = %q", out.String())
+	}
+	if _, err := os.Stat(config.MigrationRecordPath(path)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("config migrate --ack created a record: %v", err)
 	}
 }
 
@@ -306,12 +422,535 @@ func TestConfigMigrateRebasesTheDefaultPackEditedInPlace(t *testing.T) {
 				t.Fatalf("rules/commands.yaml of the 1.0 copy has no %s", tc.id)
 			}
 			rule := commands.Rules[i]
-			if !guardrail.MigratedLiteralRule(rule.Pattern, rule.Expression) {
+			if !guardrail.MigratedLiteralRule(rule.Pattern, rule.Expression, rule.MigratedLiteral) {
 				t.Errorf("%s: expression %q is not the literal form of %q", tc.id, rule.Expression, rule.Pattern)
 			}
 			if tc.id == "CMD-U6-MARKER" && !regexp.MustCompile(rule.Pattern).MatchString("run: echo "+marker) {
 				t.Errorf("%s pattern %q no longer matches the prompt", tc.id, rule.Pattern)
 			}
 		})
+	}
+}
+
+// Re-review P1: a signed policy bundle whose config bytes match an old v9
+// migration result is the administrator's signed choice. Once it is
+// confirmed (its config generation names the bundle, or the bundle store has
+// a current bundle) the Windows config step never repairs its explicit open.
+func TestMigrateManagedStandaloneConfigNeverRepairsABundleConfig(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	const key = "guardrail.connectors.cursor.hook_fail_mode"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	open := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\ndata_dir: " + dir +
+		"\nobservability: {}\nguardrail:\n  mode: observe\n  connectors:\n    cursor:\n      hook_fail_mode: open\n")
+	if err := os.WriteFile(path, open, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := config.MigrationRecord{
+		SchemaVersion: config.MigrationRecordSchemaVersion, FromVersion: 8, ToVersion: 9, Actor: "lifecycle",
+		MigratedAt:   "2026-09-01T00:00:00Z",
+		SourceSHA256: strings.Repeat("c", 64), ResultSHA256: configwrite.SHA256Hex(open),
+		Moved: []config.MigrationMove{{Source: "config", From: key, To: key, Value: "open"}},
+	}
+	if err := config.WriteMigrationRecord(path, record); err != nil {
+		t.Fatal(err)
+	}
+	// The confirmed bundle's generation attribution.
+	generation := `{"generation":3,"config_sha256":"` + configwrite.SHA256Hex(open) +
+		`","actor":"bundle","written_at":"2026-10-20T00:00:00Z","bundle_id":"acme-endpoints","bundle_version":4,"signer_key_id":"k1"}`
+	if err := os.WriteFile(configwrite.GenerationPath(path), []byte(generation), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateManagedStandaloneConfig(context.Background(), path, ""); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := os.ReadFile(path); string(raw) != string(open) {
+		t.Fatalf("a confirmed bundle's config was repaired:\n%s", raw)
+	}
+
+	// A current bundle in the store, whatever the generation record says.
+	if err := os.Remove(configwrite.GenerationPath(path)); err != nil {
+		t.Fatal(err)
+	}
+	previous := managedStandaloneBundleCurrent
+	t.Cleanup(func() { managedStandaloneBundleCurrent = previous })
+	managedStandaloneBundleCurrent = func() (bool, error) { return true, nil }
+	if err := migrateManagedStandaloneConfig(context.Background(), path, ""); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := os.ReadFile(path); string(raw) != string(open) {
+		t.Fatalf("the config of a host with a current bundle was repaired:\n%s", raw)
+	}
+
+	// No bundle: the record's rewrite is repaired, as before.
+	managedStandaloneBundleCurrent = func() (bool, error) { return false, nil }
+	if err := os.Remove(configwrite.GenerationPath(path)); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := migrateManagedStandaloneConfig(context.Background(), path, ""); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := os.ReadFile(path); !strings.Contains(string(raw), "hook_fail_mode: closed") {
+		t.Fatalf("without a bundle the migrated open must be repaired:\n%s", raw)
+	}
+}
+
+// G-small loop 4, finding 2: the Windows config step reads the
+// migration-v9.json beside the installed config. A record that is there but
+// cannot be read or decoded is an error, not "no record": the step does not
+// report the Cursor fail mode it may prove rewritten as settled, and the
+// config stays as it is.
+func TestMigrateManagedStandaloneConfigRefusesAMigrationRecordItCannotRead(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	for _, tc := range []struct {
+		name  string
+		place func(recordPath string) error
+	}{
+		{"undecodable", func(recordPath string) error { return os.WriteFile(recordPath, []byte(`{"moved":[`), 0o600) }},
+		// G-small loop round 2: a record that decodes without the fields
+		// every migration writes is not "no record".
+		{"an empty object", func(recordPath string) error { return os.WriteFile(recordPath, []byte(`{}`), 0o600) }},
+		{"null", func(recordPath string) error { return os.WriteFile(recordPath, []byte(`null`), 0o600) }},
+		{"a directory", func(recordPath string) error { return os.Mkdir(recordPath, 0o700) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			open := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\ndata_dir: " + dir +
+				"\nobservability: {}\nguardrail:\n  mode: observe\n  connectors:\n    cursor:\n      hook_fail_mode: open\n")
+			if err := os.WriteFile(path, open, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.place(config.MigrationRecordPath(path)); err != nil {
+				t.Fatal(err)
+			}
+			err := migrateManagedStandaloneConfig(context.Background(), path, "")
+			if err == nil || !strings.Contains(err.Error(), config.MigrationV9RecordFile) {
+				t.Fatalf("config step = %v, want an error naming %s", err, config.MigrationV9RecordFile)
+			}
+			if raw, _ := os.ReadFile(path); string(raw) != string(open) {
+				t.Fatalf("the config changed under an unreadable record:\n%s", raw)
+			}
+		})
+	}
+}
+
+// G-small: only nothing at the path of migration-v9.json means no record.
+// A dangling link read through its path looked like a missing record, and a
+// Windows ensure reported compliance while the Cursor correction it may prove
+// stayed unapplied. A link (dangling or live), a directory, a record past the
+// bound are errors that name the record.
+func TestManagedMigrationRecordReadRefusesWhatIsNotAPlainFile(t *testing.T) {
+	const limit = 64
+	dir := t.TempDir()
+	target := filepath.Join(dir, "elsewhere.json")
+	if err := os.WriteFile(target, []byte(`{"schema_version":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name    string
+		place   func(t *testing.T, recordPath string)
+		want    string
+		wantErr bool
+	}{
+		{name: "nothing there", place: func(*testing.T, string) {}},
+		{name: "a plain record", place: func(t *testing.T, p string) {
+			if err := os.WriteFile(p, []byte(`{"schema_version":1}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, want: `{"schema_version":1}`},
+		{name: "a directory", place: func(t *testing.T, p string) {
+			if err := os.Mkdir(p, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}, wantErr: true},
+		{name: "past the bound", place: func(t *testing.T, p string) {
+			if err := os.WriteFile(p, []byte(strings.Repeat(" ", limit+1)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, wantErr: true},
+		{name: "a dangling link", place: func(t *testing.T, p string) {
+			symlinkOrSkip(t, filepath.Join(dir, "gone.json"), p)
+		}, wantErr: true},
+		{name: "a live link", place: func(t *testing.T, p string) { symlinkOrSkip(t, target, p) }, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recordPath := filepath.Join(t.TempDir(), config.MigrationV9RecordFile)
+			tc.place(t, recordPath)
+			raw, err := readManagedMigrationRecord(recordPath, limit)
+			if (err != nil) != tc.wantErr || string(raw) != tc.want {
+				t.Fatalf("read = %q, %v; want %q with error=%v", raw, err, tc.want, tc.wantErr)
+			}
+			if tc.wantErr && !strings.Contains(err.Error(), config.MigrationV9RecordFile) {
+				t.Fatalf("error %q does not name %s", err, config.MigrationV9RecordFile)
+			}
+			if tc.want == "" && !tc.wantErr && raw != nil {
+				t.Fatalf("no record read as %q", raw)
+			}
+		})
+	}
+}
+
+// G-small: the Windows config step refuses a migration-v9.json that is a
+// link, dangling or live, and leaves the config as it is: it neither reads a
+// dangling link as no record nor follows a live one.
+func TestMigrateManagedStandaloneConfigRefusesALinkedMigrationRecord(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	for _, live := range []bool{false, true} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		open := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\ndata_dir: " + dir +
+			"\nobservability: {}\nguardrail:\n  mode: observe\n  connectors:\n    cursor:\n      hook_fail_mode: open\n")
+		if err := os.WriteFile(path, open, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(t.TempDir(), "record.json")
+		if live {
+			if err := os.WriteFile(target, []byte(`{"schema_version":1}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		symlinkOrSkip(t, target, config.MigrationRecordPath(path))
+		err := migrateManagedStandaloneConfig(context.Background(), path, "")
+		if err == nil || !strings.Contains(err.Error(), config.MigrationV9RecordFile) {
+			t.Fatalf("live=%v: config step = %v, want an error naming %s", live, err, config.MigrationV9RecordFile)
+		}
+		if raw, _ := os.ReadFile(path); string(raw) != string(open) {
+			t.Fatalf("live=%v: the config changed under a linked record:\n%s", live, raw)
+		}
+	}
+}
+
+// symlinkOrSkip links link to target, or skips where the account may not
+// create symbolic links (Windows without the privilege).
+func symlinkOrSkip(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symbolic links unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+}
+
+func TestMigrateManagedStandaloneConfigRefusesAnUnrecoverableGeneration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := []byte("config_version: 9\nobservability: {}\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := []byte("broken record")
+	if err := os.WriteFile(configwrite.GenerationPath(path), record, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := migrateManagedStandaloneConfig(context.Background(), path, "")
+	after, _ := os.ReadFile(configwrite.GenerationPath(path))
+	if err == nil || !strings.Contains(err.Error(), "restore") || string(after) != string(record) {
+		t.Fatalf("unrecoverable record: error=%v, bytes=%q", err, after)
+	}
+}
+
+func TestManagedStandaloneConfigGenerationRecoveryRequiresProof(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := []byte("config_version: 9\nobservability: {}\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := []byte("broken record")
+	if err := os.WriteFile(configwrite.GenerationPath(path), record, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := repairManagedStandaloneConfigGeneration(context.Background(), path, raw, 0); err == nil || changed {
+		t.Fatalf("unproven counter accepted: %v, %v", changed, err)
+	}
+	after, _ := os.ReadFile(configwrite.GenerationPath(path))
+	if string(after) != string(record) {
+		t.Fatal("refused repair changed the record")
+	}
+	if changed, err := repairManagedStandaloneConfigGeneration(context.Background(), path, raw, 10); err != nil || !changed {
+		t.Fatalf("proven counter refused: %v, %v", changed, err)
+	}
+	state, err := configwrite.ReadGenerationState(path)
+	if err != nil || state.Generation != 11 || state.Actor != configwrite.ActorLifecycle {
+		t.Fatalf("recovered record = %+v, %v", state, err)
+	}
+}
+
+// W4b loop round 1: a Codex target repair (or an equal-byte first bundle
+// upgrade) runs this step in the lifecycle child with the staged bundle
+// matching the installed bytes. Over generation evidence that is there but
+// unreadable it refuses before it migrates, records or re-permissions
+// anything, for a config_version 9 and a config_version 8 install alike.
+// Without a staged bundle the step still records the lifecycle as before.
+func TestMigrateManagedStandaloneConfigRefusesBundleBindingOverUnreadableGeneration(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	const id = "b-01JA0000000000000000000360"
+	for _, tc := range []struct {
+		name    string
+		version int
+		staged  bool
+		link    bool
+	}{
+		{name: "v9 staged bundle", version: 9, staged: true},
+		{name: "v8 staged bundle", version: 8, staged: true},
+		{name: "v9 without a bundle", version: 9},
+		// W4b loop round 2: a dangling link reads as a missing record.
+		{name: "v9 staged bundle over a dangling link", version: 9, staged: true, link: true},
+		{name: "v8 staged bundle over a dangling link", version: 8, staged: true, link: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			raw := []byte(fmt.Sprintf("config_version: %d\ndata_dir: %s\nobservability: {}\n", tc.version, dir))
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			broken := []byte(`{"generation":4,"config_sha256":`)
+			gone := filepath.Join(t.TempDir(), "gone.json")
+			if tc.link {
+				symlinkOrSkip(t, gone, configwrite.GenerationPath(path))
+			} else if err := os.WriteFile(configwrite.GenerationPath(path), broken, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			saved := managedStandaloneBundleGeneration
+			t.Cleanup(func() { managedStandaloneBundleGeneration = saved })
+			managedStandaloneBundleGeneration = func(string, []byte) (configwrite.Options, bool, error) {
+				if !tc.staged {
+					return configwrite.Options{}, false, nil
+				}
+				return configwrite.Options{Actor: "control-plane:acme/alice", Lifecycle: true,
+					Reason: configwrite.BundleReason(id, 1, "codex target"),
+					Bundle: configwrite.BundleRef{ID: id, Version: 1, SignerKeyID: "k1"}}, true, nil
+			}
+			err := migrateManagedStandaloneConfig(context.Background(), path, "")
+			if !tc.staged {
+				// fix/r104-windows: an unreadable record is never reset to a
+				// fresh lifecycle record; the step refuses and names the
+				// backup restore (GAP-0236), bundle or not.
+				if err == nil || !strings.Contains(err.Error(), "restore") {
+					t.Fatalf("unreadable record without a bundle: %v", err)
+				}
+				if after, err := os.ReadFile(configwrite.GenerationPath(path)); err != nil || string(after) != string(broken) {
+					t.Fatalf("the refusal rewrote the generation evidence: %q, %v", after, err)
+				}
+				return
+			}
+			if !errors.Is(err, configwrite.ErrUnprovenBundleBinding) || !strings.Contains(err.Error(), "enterprise bundle status --json") {
+				t.Fatalf("bundle binding over unreadable generation: %v", err)
+			}
+			if tc.link {
+				if got, err := os.Readlink(configwrite.GenerationPath(path)); err != nil || got != gone {
+					t.Fatalf("the refusal replaced the dangling link: %q, %v", got, err)
+				}
+			} else if after, err := os.ReadFile(configwrite.GenerationPath(path)); err != nil || string(after) != string(broken) {
+				t.Fatalf("the refusal rewrote the generation evidence: %q, %v", after, err)
+			}
+			if after, err := os.ReadFile(path); err != nil || string(after) != string(raw) {
+				t.Fatalf("the refusal changed config.yaml: %q, %v", after, err)
+			}
+			for _, leftover := range []string{path + config.ConfigV8BackupSuffix, config.MigrationRecordPath(path)} {
+				if _, err := os.Stat(leftover); !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("the refusal wrote %s: %v", leftover, err)
+				}
+			}
+		})
+	}
+}
+
+// GAP-0268: a rule without tags loaded on 0.8.x, and a config_version 8
+// document naming such a pack as rule_pack_dir (the fixture of the vsweep7
+// 1.0.0 -> 1.0.6 upgrade lane) failed the upgrade check with "the rebased
+// pack does not load: rule 0 tags must not be empty", nothing changed. The
+// 1.0 copy gives each such rule the tag custom and keeps the rest of it;
+// the operator's folder stays as it is.
+func TestConfigMigrateTagsTheUntaggedRulesOfACustomPack(t *testing.T) {
+	cases := []struct {
+		name, file, rule, id string
+		tags                 []string
+	}{
+		{name: "pattern-only rule without tags in a file of a shipped category", file: "rules/zz-team.yaml", tags: []string{"custom"},
+			id: "TEAM-LANE-RULE", rule: "version: 1\ncategory: c2\nrules:\n  - id: TEAM-LANE-RULE\n" +
+				"    pattern: \"team-lane-marker-literal\"\n    title: \"team lane rule\"\n    severity: MEDIUM\n    confidence: 0.8\n"},
+		{name: "rule with an expression and empty tags in a category of yours", file: "rules/acme.yaml",
+			id: "ACME-EXPR", tags: []string{"custom"}, rule: "version: 1\ncategory: acme\nrules:\n  - id: ACME-EXPR\n    pattern: acme-[0-9]+\n" +
+				"    expression: \"f.commands.exists(c, c.program == 'acme')\"\n    title: Acme\n    severity: HIGH\n" +
+				"    confidence: 0.9\n    tags: []\n"},
+		{name: "blank and repeated tags", file: "rules/acme.yaml", id: "ACME-DUP", tags: []string{"acme"},
+			rule: "version: 1\ncategory: acme\nrules:\n  - id: ACME-DUP\n    pattern: acme-dup-literal\n    title: Acme dup\n" +
+				"    severity: LOW\n    confidence: 0.5\n    tags: [\"\", acme, \" acme \"]\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+			t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+			dir := t.TempDir()
+			t.Setenv("DEFENSECLAW_HOME", dir)
+			pack := filepath.Join(dir, "policies", "guardrail", "team")
+			files, err := policyassets.Files()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, file := range files {
+				if rel, ok := strings.CutPrefix(file.Path, "guardrail/default/"); ok {
+					target := filepath.Join(pack, filepath.FromSlash(rel))
+					if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(target, file.Data, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			own := filepath.Join(pack, filepath.FromSlash(tc.file))
+			if err := os.WriteFile(own, []byte(tc.rule), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "config.yaml")
+			v8 := "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  mode: action\n  scanner_mode: local\n" +
+				"  rule_pack_dir: " + pack + "\nobservability: {}\nupdate_check: false\n"
+			if err := os.WriteFile(path, []byte(v8), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			input, err := configMigrateV9Input(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dry := input
+			dry.DryRun = true
+			if _, err := config.MigrateV9(context.Background(), dry); err != nil {
+				t.Fatalf("the upgrade check refuses the pack: %v", err)
+			}
+			result, err := config.MigrateV9(context.Background(), input)
+			if err != nil {
+				t.Fatalf("migrate the pack: %v", err)
+			}
+			copyDir := pack + "-1.0"
+			if got := string(result.Migrated); !strings.Contains(got, "path: "+copyDir) {
+				t.Fatalf("want the 1.0 copy of the pack pinned:\n%s", got)
+			}
+			loaded, err := guardrail.LoadRulePack(copyDir)
+			if err != nil {
+				t.Fatalf("the 1.0 copy does not load: %v", err)
+			}
+			var found *guardrail.RuleDefYAML
+			for _, file := range loaded.RuleFiles {
+				for i := range file.Rules {
+					if file.Rules[i].ID == tc.id {
+						found = &file.Rules[i]
+					}
+				}
+			}
+			if found == nil {
+				t.Fatalf("the 1.0 copy has no %s", tc.id)
+			}
+			if !slices.Equal(found.Tags, tc.tags) {
+				t.Errorf("%s tags %q, want %q", tc.id, found.Tags, tc.tags)
+			}
+			var source guardrail.RulesFileYAML
+			if err := yaml.Unmarshal([]byte(tc.rule), &source); err != nil {
+				t.Fatal(err)
+			}
+			want := source.Rules[0]
+			if found.Pattern != want.Pattern || found.Title != want.Title || found.Severity != want.Severity ||
+				found.Confidence != want.Confidence {
+				t.Errorf("%s changed beyond its tags: %+v, was %+v", tc.id, *found, want)
+			}
+			if want.Expression != "" && found.Expression != want.Expression {
+				t.Errorf("%s expression %q, was %q", tc.id, found.Expression, want.Expression)
+			}
+			if !slices.ContainsFunc(result.Record.Notes, func(note string) bool {
+				return strings.Contains(note, tc.id) && strings.Contains(note, "which 1.0 refuses")
+			}) {
+				t.Errorf("no note names %s and its tags: %q", tc.id, result.Record.Notes)
+			}
+			if len(result.Record.TaggedRules) != 1 || !strings.Contains(result.Record.TaggedRules[0], tc.id) {
+				t.Errorf("tagged rules %q, want %s named for the upgrade summary", result.Record.TaggedRules, tc.id)
+			}
+			if kept, err := os.ReadFile(own); err != nil || string(kept) != tc.rule {
+				t.Errorf("the operator's %s changed (%v)", tc.file, err)
+			}
+		})
+	}
+}
+
+// GAP-0646: a hand-edit record of exactly the bytes this run installed from
+// its approved source (CONFIG=) is the hook guardian's claim on the
+// lifecycle's own write, so the config step records them as the lifecycle's
+// generation; the gateway starts only on that. Without an approved source, or
+// with another one, a hand edit stays a hand edit.
+func TestMigrateManagedStandaloneConfigRecordsTheApprovedSourceOverAHandEditRecord(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	raw := []byte("config_version: 9\nobservability: {}\n")
+	sum := configwrite.SHA256Hex(raw)
+	for _, tc := range []struct {
+		name, approved string
+		lifecycle      bool
+	}{
+		{name: "approved source", approved: sum, lifecycle: true},
+		{name: "no approved source"},
+		{name: "another approved source", approved: configwrite.SHA256Hex([]byte("config_version: 9\n"))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if recorded, err := configwrite.RecordUnrecorded(context.Background(), path, raw, configwrite.Options{
+				Actor: configwrite.ActorUnattributedHandEdit, Reason: "config.yaml edited outside the lifecycle",
+			}); err != nil || !recorded {
+				t.Fatalf("hand-edit record = %t, %v", recorded, err)
+			}
+			if err := migrateManagedStandaloneConfig(context.Background(), path, tc.approved); err != nil {
+				t.Fatal(err)
+			}
+			state, err := configwrite.ReadGenerationState(path)
+			if err != nil || state.ConfigSHA256 != sum {
+				t.Fatalf("record = %+v, %v", state, err)
+			}
+			if tc.lifecycle && (state.Generation != 2 || state.Actor != configwrite.ActorLifecycle) {
+				t.Fatalf("record = %+v, want generation 2 by the lifecycle", state)
+			}
+			if !tc.lifecycle && (state.Generation != 1 || !configwrite.IsHandEditActor(state.Actor)) {
+				t.Fatalf("record = %+v, want the hand edit kept", state)
+			}
+		})
+	}
+}
+
+// GAP-0646 review 4: the takeover records only the approved bytes it
+// compared. A config.yaml that changes after that check is a conflict: no
+// new generation, and the hand-edit record stays.
+func TestMigrateManagedStandaloneConfigTakeoverRefusesBytesChangedAfterTheCheck(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	raw := []byte("config_version: 9\nobservability: {}\n")
+	sum := configwrite.SHA256Hex(raw)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if recorded, err := configwrite.RecordUnrecorded(context.Background(), path, raw, configwrite.Options{
+		Actor: configwrite.ActorUnattributedHandEdit, Reason: "config.yaml edited outside the lifecycle",
+	}); err != nil || !recorded {
+		t.Fatalf("hand-edit record = %t, %v", recorded, err)
+	}
+	saved := managedStandaloneConfigBeforeRecord
+	t.Cleanup(func() { managedStandaloneConfigBeforeRecord = saved })
+	managedStandaloneConfigBeforeRecord = func(path string) {
+		if err := os.WriteFile(path, []byte("config_version: 9\nobservability: {}\n# changed after the check\n"), 0o600); err != nil {
+			t.Error(err)
+		}
+	}
+	if err := migrateManagedStandaloneConfig(context.Background(), path, sum); !errors.Is(err, configwrite.ErrConflict) {
+		t.Fatalf("migrate over bytes changed after the check = %v, want configwrite.ErrConflict", err)
+	}
+	state, err := configwrite.ReadGenerationState(path)
+	if err != nil || state.Generation != 1 || !configwrite.IsHandEditActor(state.Actor) || state.ConfigSHA256 != sum {
+		t.Fatalf("record = %+v, %v; want the hand-edit record of the checked bytes kept", state, err)
 	}
 }

@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -29,6 +28,8 @@ import (
 
 	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
 	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // Client is the narrow surface DefenseClaw drives the OpenShell gateway
@@ -201,13 +202,14 @@ type GatewayHealth struct {
 	RawVersion string
 }
 
-// CheckVersion reports whether the gateway release is inside the
-// supported window.
+// CheckVersion reports whether DefenseClaw talks to a gateway of this
+// release (CheckConnects): a legacy one passes, for the move off it only,
+// and runs no sandbox work (CheckSandboxRelease).
 func (h *GatewayHealth) CheckVersion() error {
 	if h.Version == (Version{}) {
 		return fmt.Errorf("openshell: gateway reported an unrecognized version %q", h.RawVersion)
 	}
-	return CheckSupported(h.Version)
+	return CheckConnects(h.Version)
 }
 
 // ConfigurationRejectedError reports a sandbox whose configuration the
@@ -230,10 +232,10 @@ func (e *ConfigurationRejectedError) Error() string {
 var ErrInvalidName = errors.New("openshell: invalid name")
 
 var (
-	sandboxNamePattern  = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
-	providerNamePattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$`)
-	labelKeyPattern     = regexp.MustCompile(`^([a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?/)?[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$`)
-	labelValuePattern   = regexp.MustCompile(`^([A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?)?$`)
+	sandboxNamePattern  = lazyregexp.New(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+	providerNamePattern = lazyregexp.New(`^[A-Za-z0-9]([A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$`)
+	labelKeyPattern     = lazyregexp.New(`^([a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?/)?[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$`)
+	labelValuePattern   = lazyregexp.New(`^([A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?)?$`)
 )
 
 // ValidSandboxName reports whether name is a DNS-label sandbox name
@@ -603,16 +605,16 @@ func (c *client) withFailureReason(ctx context.Context, name string, err error) 
 	if gerr != nil || sb == nil || sb.Status.Phase != PhaseError {
 		return err
 	}
-	if reason := failureReason(sb); reason != "" {
+	if reason := FailureReason(sb); reason != "" {
 		return fmt.Errorf("%w; OpenShell says: %s", err, reason)
 	}
 	return err
 }
 
-// failureReason is what a sandbox's conditions that do not hold say
+// FailureReason is what a sandbox's conditions that do not hold say
 // ("reason: message" each, "; " between), on one line and without control
 // characters, or "" when none says anything.
-func failureReason(sb *Sandbox) string {
+func FailureReason(sb *Sandbox) string {
 	var parts []string
 	for _, cond := range sb.Status.Conditions {
 		if strings.EqualFold(cond.Status, "True") {

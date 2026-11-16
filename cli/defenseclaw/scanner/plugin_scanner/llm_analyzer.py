@@ -177,6 +177,39 @@ def _safe_filename(rel_path: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+# GAP-2040: every finding whose rule id and severity the judge model wrote
+# carries this tag, so callers key on who made the finding, not on the rule
+# id string the model chose (a judge may answer "OB-009-001" without "LLM-").
+JUDGE_TAG = "llm-judge"
+
+
+# GAP-2107: the rule ids the scanner itself writes. A model answer never
+# takes one of them (it reads as LLM-UNKNOWN / META-LLM-UNKNOWN instead).
+_SCANNER_RULE_IDS = frozenset({"LLM-SCAN-ERROR", "META-LLM-CORR", "META-LLM-FP-ADVISORY"})
+
+
+def _judge_rule_id(raw: Any, prefix: str) -> str:
+    """The rule id of a judge (``LLM-``) or meta-judge (``META-LLM-``) finding.
+
+    GAP-2107: the model writes the id. Its prompt asks for ``LLM-<category>-<N>``
+    (``META-LLM-<N>``), and the admission pre-step and the cap read that
+    prefix, so an answer without it ("OB-009-001", "MISSED-001") gets it here.
+    """
+    rule = str(raw).strip().upper() if raw is not None else ""
+    if not rule:
+        return prefix + "UNKNOWN"
+    if not rule.startswith(prefix):
+        rule = prefix + rule
+    return prefix + "UNKNOWN" if rule in _SCANNER_RULE_IDS else rule
+
+
+def _judge_tags(tags: Any) -> list[str]:
+    out = [str(tag) for tag in tags] if isinstance(tags, list) else ["llm-detected"]
+    if JUDGE_TAG not in out:
+        out.append(JUDGE_TAG)
+    return out
+
+
 def _make_scan_error_finding(
     finding_counter: list[int],
     title: str,
@@ -249,7 +282,7 @@ def _parse_llm_findings(
         if not isinstance(item, dict):
             continue
 
-        rule_id = str(item.get("rule_id", "LLM-UNKNOWN"))
+        rule_id = _judge_rule_id(item.get("rule_id"), "LLM-")
         severity = str(item.get("severity", "MEDIUM"))
         confidence = float(item.get("confidence", 0.7))
         title = str(item.get("title", "LLM-detected issue"))
@@ -264,7 +297,7 @@ def _parse_llm_findings(
                 description=str(item.get("description", "")),
                 location=str(item["location"]) if item.get("location") else None,
                 remediation=str(item["remediation"]) if item.get("remediation") else None,
-                tags=list(item["tags"]) if isinstance(item.get("tags"), list) else ["llm-detected"],
+                tags=_judge_tags(item.get("tags")),
             )
         )
         finding_counter[0] += 1
@@ -519,12 +552,12 @@ def run_meta_llm(
             new_findings.append(
                 make_finding(
                     ctx.finding_counter[0],
-                    rule_id=mt.get("rule_id", "META-LLM-UNKNOWN"),
+                    rule_id=_judge_rule_id(mt.get("rule_id"), "META-LLM-"),
                     severity=mt.get("severity", "MEDIUM"),
                     confidence=float(mt.get("confidence", 0.7)),
                     title=mt.get("title", ""),
                     description=mt.get("description", ""),
-                    tags=mt.get("tags") if isinstance(mt.get("tags"), list) else ["llm-detected"],
+                    tags=_judge_tags(mt.get("tags")),
                 )
             )
             ctx.finding_counter[0] += 1
@@ -584,7 +617,7 @@ def run_meta_llm(
                     description=desc,
                     evidence=evidence,
                     location=referenced[0].location,
-                    tags=["llm-detected", "correlation", "static-analysis"],
+                    tags=["llm-detected", "correlation", "static-analysis", JUDGE_TAG],
                 )
             )
             ctx.finding_counter[0] += 1

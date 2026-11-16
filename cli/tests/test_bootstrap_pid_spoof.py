@@ -41,13 +41,13 @@ class PidLooksLikeGatewayTests(unittest.TestCase):
         fake_cmdline = b"defenseclaw-gateway\x00--config=/etc/dc.yaml\x00"
 
         class FakeFile:
-            def __enter__(self_inner):
-                return self_inner
+            def __enter__(self):
+                return self
 
-            def __exit__(self_inner, *_args):
+            def __exit__(self, *_args):
                 return False
 
-            def read(self_inner):
+            def read(self):
                 return fake_cmdline
 
         with patch("builtins.open", return_value=FakeFile()):
@@ -59,13 +59,13 @@ class PidLooksLikeGatewayTests(unittest.TestCase):
         fake_cmdline = b"/bin/sleep\x000\x00"
 
         class FakeFile:
-            def __enter__(self_inner):
-                return self_inner
+            def __enter__(self):
+                return self
 
-            def __exit__(self_inner, *_args):
+            def __exit__(self, *_args):
                 return False
 
-            def read(self_inner):
+            def read(self):
                 return fake_cmdline
 
         with patch("builtins.open", return_value=FakeFile()):
@@ -75,13 +75,13 @@ class PidLooksLikeGatewayTests(unittest.TestCase):
     @unittest.skipIf(os.name == "nt", "this assertion exercises the Linux /proc cmdline reader")
     def test_empty_cmdline_rejected(self):
         class FakeFile:
-            def __enter__(self_inner):
-                return self_inner
+            def __enter__(self):
+                return self
 
-            def __exit__(self_inner, *_args):
+            def __exit__(self, *_args):
                 return False
 
-            def read(self_inner):
+            def read(self):
                 return b""
 
         with patch("builtins.open", return_value=FakeFile()):

@@ -153,7 +153,7 @@
       </html>
       <chart>
         <search>
-          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.activity" AND ($agent|s$="*" OR runtime_agent=$agent|s$) | timechart span=10m count by runtime_tactic</query>
+          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.activity" AND ($agent|s$="*" OR runtime_agent=$agent|s$) | sort 0 + _time | dedup host runtime_finding_id runtime_tactic | timechart span=10m count by runtime_tactic</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -220,7 +220,7 @@
       <title>Agent activity with no hook decision</title>
       <single>
         <search>
-          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.activity" AND runtime_hook_seen IN ("false","False") | streamstats count as runtime_event_row | eval runtime_activity_key=if(runtime_finding_id="(unknown)" OR runtime_finding_id="", "event:" . runtime_event_row, "finding:" . runtime_finding_id) | dedup host runtime_activity_key runtime_tactic | stats count as no_hook_decision</query>
+          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.activity" AND runtime_hook_seen IN ("false","False") | dedup host runtime_finding_id runtime_tactic | stats count as no_hook_decision</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -261,7 +261,7 @@
       <title>Would-block by control (monitor mode)</title>
       <chart>
         <search>
-          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.activity" AND runtime_kernel_outcome="would_block" | streamstats count as runtime_event_row | eval runtime_activity_key=if(runtime_finding_id="(unknown)" OR runtime_finding_id="", "event:" . runtime_event_row, "finding:" . runtime_finding_id) | dedup host runtime_activity_key runtime_kernel_control | timechart span=10m count by runtime_kernel_control</query>
+          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.activity" AND runtime_kernel_outcome="would_block" | sort 0 + _time | eval runtime_kernel_hits=coalesce(runtime_kernel_count, 1) | eventstats max(runtime_kernel_hits) as runtime_kernel_hits by host runtime_finding_id runtime_kernel_control | dedup host runtime_finding_id runtime_kernel_control | timechart span=10m sum(runtime_kernel_hits) by runtime_kernel_control</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>

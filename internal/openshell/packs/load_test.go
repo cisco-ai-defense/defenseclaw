@@ -23,7 +23,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -152,9 +151,6 @@ func TestLoadRefusals(t *testing.T) {
 }
 
 func TestLoadRefusesWritableByOthers(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX permissions")
-	}
 	root := t.TempDir()
 	teamDir := writePack(t, root, "team", customPack("team"))
 	file := filepath.Join(teamDir, PackFileName)
@@ -225,9 +221,6 @@ func fakeOwners(t *testing.T, owner func(fs.FileInfo) int) {
 }
 
 func TestLoadRefusesPacksOtherUsersOwn(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX ownership")
-	}
 	root := t.TempDir()
 	teamDir := writePack(t, root, "team", customPack("team"))
 	const otherUID = 5151

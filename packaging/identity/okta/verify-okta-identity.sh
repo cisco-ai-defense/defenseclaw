@@ -257,9 +257,21 @@ except ValueError:
     print("unreadable")
     sys.exit(0)
 s = d.get("subject") or {}
+cache = d.get("cache") or {}
+def seconds(name):
+    value = cache.get(name)
+    return str(value) if type(value) is int and value >= 0 else ""
 print("|".join([
+    str(d.get("refused") is True or bool(d.get("refused_reason"))),
+    d.get("refused_reason") or "the gateway did not name the missing identity fact",
+    str(cache.get("refused") is True or bool(cache.get("refused_reason"))),
+    cache.get("refused_reason") or "the gateway did not name the missing identity fact",
     "ok", str(d.get("profiles_configured")), d.get("profile") or "", d.get("match") or "",
     d.get("matched_group") or "", str(s.get("group_count", 0)), d.get("lookup_error") or "",
+    str(cache.get("differs") is True), str(cache.get("profile") is not None), cache.get("profile") or "",
+    str(cache.get("match") is not None), cache.get("match") or "", str(cache.get("stale") is True),
+    cache.get("failing_since") or "", seconds("age_seconds"),
+    seconds("refresh_after_seconds"), cache.get("last_error") or "",
     "; ".join(d.get("warnings") or []),
 ]))' <<< "$out"); then
     fail "could not read DefenseClaw's answer"
@@ -269,10 +281,63 @@ print("|".join([
     fail "DefenseClaw's answer for $user is not JSON: $(head -c 200 <<< "$out" | tr '\n' ' ')"
     return
   fi
-  local _ok configured profile match matched groups lookup_error warnings
-  IFS='|' read -r _ok configured profile match matched groups lookup_error warnings <<< "$summary"
+  local refused refused_reason cache_refused cache_refused_reason _ok configured profile match matched groups lookup_error
+  local cache_differs cache_profile_recorded cache_profile cache_match_recorded cache_match cache_stale cache_failing_since
+  local cache_age cache_refresh cache_last_error warnings cache_context missing_fields live_default
+  IFS='|' read -r refused refused_reason cache_refused cache_refused_reason _ok configured profile match matched groups lookup_error \
+    cache_differs cache_profile_recorded cache_profile cache_match_recorded cache_match cache_stale cache_failing_since \
+    cache_age cache_refresh cache_last_error warnings <<< "$summary"
+  if [[ $refused == True ]]; then
+    fail "DefenseClaw refuses requests for $user: $refused_reason"
+    return
+  fi
+  if [[ $cache_refused == True ]]; then
+    if [[ -n $cache_failing_since || $cache_stale == True ]]; then
+      if [[ -n $cache_failing_since && -n $cache_last_error ]]; then
+        cache_context="the gateway's directory lookup is failing since $cache_failing_since: $cache_last_error"
+      elif [[ -n $cache_failing_since ]]; then
+        cache_context="the gateway's directory lookup is failing since $cache_failing_since; last_error was not reported"
+      elif [[ -n $cache_last_error ]]; then
+        cache_context="the gateway reports a failing directory lookup: $cache_last_error; failing_since was not reported"
+      else
+        cache_context="the gateway reports a failing directory lookup but did not report failing_since or last_error"
+      fi
+    elif [[ -n $cache_age && -n $cache_refresh ]]; then
+      cache_context="the gateway's cached directory facts, ${cache_age}s old, refuse them; it refreshes within ${cache_refresh}s"
+    else
+      missing_fields=""
+      [[ -n $cache_age ]] || missing_fields="age_seconds"
+      [[ -n $cache_refresh ]] || missing_fields="${missing_fields:+$missing_fields and }refresh_after_seconds"
+      cache_context="the gateway did not report $missing_fields for its cached directory facts"
+    fi
+    fail "DefenseClaw refuses requests for $user right now: $cache_refused_reason ($cache_context)"
+    return
+  fi
   if [[ -n $lookup_error ]]; then
     fail "DefenseClaw's directory lookup for $user failed: $lookup_error"
+    return
+  fi
+  if [[ $cache_differs == True ]]; then
+    missing_fields=""
+    [[ $cache_profile_recorded == True ]] || missing_fields="cache.profile"
+    if [[ $cache_match_recorded != True ]]; then
+      missing_fields="${missing_fields:+$missing_fields and }cache.match"
+    fi
+    if [[ -n $missing_fields ]]; then
+      fail "DefenseClaw cannot verify $user: the gateway did not report $missing_fields for its different cached decision"
+      return
+    fi
+    if [[ $cache_profile != "$profile" || $cache_match != "$match" ]]; then
+      if [[ $cache_match == default_lookup_failed ]]; then
+        live_default="the default profile"
+        [[ -z $cache_profile ]] || live_default="the default profile $cache_profile"
+        fail "DefenseClaw's requests for $user use $live_default (default_lookup_failed), while the fresh lookup reports profile ${profile:-none} (match ${match:-none}): the gateway's directory lookup failed; no assignment needs the missing fact; rerun after a successful lookup"
+      else
+        fail "DefenseClaw's requests for $user use profile ${cache_profile:-none} (match ${cache_match:-none}), while the fresh lookup reports profile ${profile:-none} (match ${match:-none}): the gateway's cached decision differs; rerun after its next successful refresh"
+      fi
+      return
+    fi
+    fail "DefenseClaw cannot verify $user: cache.differs is true, but cache.profile and cache.match match the fresh decision; the gateway did not report which other decision field differs"
     return
   fi
   if [[ $configured != True ]]; then
@@ -281,14 +346,14 @@ print("|".join([
   fi
   info "DefenseClaw: profile ${profile:-none}, match ${match:-none}${matched:+ ($matched)}, $groups group(s) seen"
   [[ -n $warnings ]] && info "warnings: $warnings"
-  if [[ -n $EXPECT_PROFILE ]]; then
+  if [[ $match == default_lookup_failed ]]; then
+    fail "DefenseClaw's directory lookup for $user failed; the default profile applies; no assignment needs the missing fact (default_lookup_failed)"
+  elif [[ -n $EXPECT_PROFILE ]]; then
     if [[ $profile == "$EXPECT_PROFILE" ]]; then
       pass "DefenseClaw picks profile $EXPECT_PROFILE for $user"
     else
       fail "DefenseClaw picks profile '${profile:-none}' for $user, expected $EXPECT_PROFILE (match ${match:-none}). Compare the group spelling in profile_assignments with id -Gn"
     fi
-  elif [[ $match == default_lookup_failed ]]; then
-    fail "DefenseClaw could not look up $user and used the default profile (default_lookup_failed)"
   else
     pass "DefenseClaw resolved $user to profile ${profile:-none} (match ${match:-none})"
   fi

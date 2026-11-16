@@ -35,6 +35,19 @@ import (
 // stopped sandbox on the closed-floor deny until another policy change.
 func TestRefreshPoliciesSerializesOverlappingFloorChanges(t *testing.T) {
 	e, _ := managedEnv(t, func(c *config.Config) { c.OpenShell.Profile = config.OpenShellProfileBalanced })
+	var calls atomic.Int32
+	var armed atomic.Bool
+	entered, release := make(chan struct{}), make(chan struct{})
+	// Install the callback before live starts configLoop. Replacing opts.Config
+	// after that goroutine starts races its periodic read of the callback.
+	e.m.opts.Config = func() *config.Config {
+		cfg := e.config()
+		if armed.Load() && calls.Add(1) == 2 {
+			close(entered)
+			<-release
+		}
+		return cfg
+	}
 	e.live(sandboxapi.CreateRequest{Name: "stopped-box"})
 	e.register("stopped-box")
 	e.stopBox("stopped-box")
@@ -50,18 +63,9 @@ func TestRefreshPoliciesSerializesOverlappingFloorChanges(t *testing.T) {
 		t.Fatalf("fixture did not start with the closed-floor deny: %+v", closed)
 	}
 
-	var calls atomic.Int32
-	entered, release := make(chan struct{}), make(chan struct{})
-	e.m.opts.Config = func() *config.Config {
-		cfg := e.config()
-		if calls.Add(1) == 2 {
-			// The first refresh has recorded cfgSeen as closed. Hold
-			// its per-box resolve until the new floor can overtake it.
-			close(entered)
-			<-release
-		}
-		return cfg
-	}
+	// The first refresh has recorded cfgSeen as closed. Hold its per-box
+	// resolve until the new floor can overtake it.
+	armed.Store(true)
 	oldDone := make(chan struct{})
 	go func() { e.m.RefreshPolicies(); close(oldDone) }()
 	select {

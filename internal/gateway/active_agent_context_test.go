@@ -28,7 +28,30 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
+
+func TestActiveAgentContextScopesRelayedSessionsByRegistration(t *testing.T) {
+	api := activeClaudeCodeTestAPI()
+	for _, registration := range []string{"reg-alice", "reg-bob"} {
+		ctx := sandboxauth.WithRequest(authenticatedClaudeCodeTestContext(), sandboxauth.Binding{
+			ID: "same-caller-claim", RegistrationID: registration, Connector: "claudecode",
+		}, nil)
+		api.applyClaudeCodeActiveAgentContext(ctx, claudeCodeHookRequest{
+			HookEventName: "SessionStart", SessionID: "same-session",
+		})
+	}
+	api.activeAgentContext.mu.Lock()
+	defer api.activeAgentContext.mu.Unlock()
+	for _, registration := range []string{"reg-alice", "reg-bob"} {
+		key := activeAgentContextKey{scope: "registration\x00" + registration,
+			connector: "claudecode", sessionID: "same-session"}
+		if _, ok := api.activeAgentContext.sessions[key]; !ok {
+			t.Fatalf("missing isolated session for %s", registration)
+		}
+	}
+}
 
 func writeActiveAgentTestFile(t *testing.T, root, name string) string {
 	t.Helper()
@@ -649,9 +672,13 @@ func TestActiveAgentContextInvalidRelativeSymlinkAndOverflowPreserveExactEntries
 			SessionID:     sessionID,
 			FilePath:      filePath,
 		})
-		if got := api.activeAgentContext.snapshot("claudecode", sessionID); !slices.Equal(got.files, wantFiles) || !got.uncertain ||
-			got.caseInsensitiveUncertain {
-			t.Fatalf("unprovable load context = %#v", got)
+		// The symlinked name is kept with the identity of the file it
+		// reaches, so that file is protected by identity (GAP-0971). That
+		// proves the load: the session stays certain (review loop round 2).
+		wantFiles = append(wantFiles, filePath)
+		if got := api.activeAgentContext.snapshot("claudecode", sessionID); !slices.Equal(got.files, wantFiles) || got.uncertain ||
+			got.caseInsensitiveUncertain || got.identities[filePath] != hookpaths.FileIdentity(filePath) {
+			t.Fatalf("symlinked load context = %#v", got)
 		}
 		mutation := evaluateClaudeCodeToolFacts(
 			t,
@@ -694,7 +721,7 @@ func TestActiveAgentContextInvalidRelativeSymlinkAndOverflowPreserveExactEntries
 		}
 	})
 
-	t.Run("direct symlink marks fresh session uncertain", func(t *testing.T) {
+	t.Run("direct symlink is kept by identity", func(t *testing.T) {
 		link := filepath.Join(root, "link", "MEMORY.md")
 		if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
 			t.Fatal(err)
@@ -705,7 +732,7 @@ func TestActiveAgentContextInvalidRelativeSymlinkAndOverflowPreserveExactEntries
 		assertIdentityFailureFailsClosed(t, link, "COG-MEMORY", false)
 	})
 
-	t.Run("parent symlink preserves exact entry and marks uncertainty", func(t *testing.T) {
+	t.Run("parent symlink preserves exact entry and is kept by identity", func(t *testing.T) {
 		realDir := filepath.Join(root, "real-parent")
 		memory := writeActiveAgentTestFile(t, realDir, "MEMORY.md")
 		linkDir := filepath.Join(root, "linked-parent")

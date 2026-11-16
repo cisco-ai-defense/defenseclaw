@@ -24,17 +24,20 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -142,6 +145,12 @@ type Event struct {
 	// a path-class record field (issue #1092).
 	RulePackDirInEnvelope bool `json:"-"`
 
+	// WorkspaceHostPaths are the folders connected to the Claude Cowork
+	// session of a claudecode hook row. There is no SQLite column: the
+	// compatibility record carries them in its v8 body as a path-class
+	// field, so a profile that hashes or removes paths reaches them.
+	WorkspaceHostPaths []string `json:"-"`
+
 	// SandboxID and SandboxName attribute an event to the OpenShell
 	// sandbox whose request produced it. They are filled from the
 	// correlation envelope, which takes them only from the authenticated
@@ -199,6 +208,12 @@ func (a ActionState) Summary() string {
 	return strings.Join(parts, ", ")
 }
 
+// AccountMCPActionType is the target type of the actions rows that hold the
+// admission decision of an enrolled account MCP server. A server name is free
+// text, so these rows live under their own type rather than beside the rows
+// of account-less servers, which could otherwise share a row with them.
+const AccountMCPActionType = "mcp-account"
+
 // ActionEntry is the unified record for all enforcement actions on a target.
 type ActionEntry struct {
 	ID         string      `json:"id"`
@@ -215,10 +230,18 @@ type ActionEntry struct {
 	// entry plus one entry per connector. Mirrors ActionEntry.connector in
 	// cli/defenseclaw/models.py.
 	Connector string `json:"connector,omitempty"`
+	// RuntimeSource is the event path whose admission recorded the runtime
+	// disable, written in the same statement (SetRuntimeDisableForConnector).
+	// Any other runtime write or clear drops it, and releases before 1.0.9
+	// never wrote it, so it is the provenance of the current runtime value.
+	RuntimeSource string `json:"-"`
 }
 
 type Store struct {
-	db          *sql.DB
+	db *sql.DB
+	// readDB serves point-in-time queries outside Secure Client. The
+	// writer remains a single connection for ordered durable transactions.
+	readDB      *sql.DB
 	dbPath      string
 	dbPathGuard *preparedAuditDatabasePath
 
@@ -226,23 +249,88 @@ type Store struct {
 	// (WithSecureClientSchema).
 	secureClientSchema bool
 
+	// fieldClassSets: rows name their field class set (field_class_sets.go);
+	// fieldClassSetCount is the number of sets, for the table bound.
+	fieldClassSets     atomic.Bool
+	fieldClassSetCount atomic.Int64
+
+	// prepared holds the repeated hook-call inserts, prepared once the store
+	// is ready (prepareStatements).
+	prepared atomic.Pointer[map[string]*sql.Stmt]
+
 	// lifecycleMu serializes initialization/close and lets mandatory v8
 	// event-history transactions pin a ready store until commit or rollback.
 	lifecycleMu sync.RWMutex
 	ready       atomic.Bool
 	closed      bool
+	// toolChainRootTablesReady is set once the root-scope chain tables exist
+	// (tool_chain_root.go); they are created on first use, not by a migration.
+	toolChainRootTablesReady atomic.Bool
+	// findingsRetentionInstant is set once scan_findings has its
+	// retention_timestamp_unix_nano column (the retention migration only adds
+	// it), so a hook's correlation read stops asking the schema for it on the
+	// store's one connection on every call (rel-1-0-6 GAP-0152).
+	findingsRetentionInstant atomic.Bool
 
 	// checkpointDB is a second connection used only for PASSIVE WAL
 	// checkpoints. It is opened on first use and closed with the store.
 	checkpointMu sync.Mutex
 	checkpointDB *sql.DB
+	// durableDB is a synchronous=FULL connection that makes committed
+	// writes power-loss durable (SyncCommittedWrites). It is opened on
+	// first use under checkpointMu and closed with the store.
+	durableDB *sql.DB
+	// walGuardMu guards the checkpoint connection's data_version as of the
+	// previous WAL guard pass (CheckpointWALIfLarge).
+	walGuardMu      sync.Mutex
+	walGuardSeen    bool
+	walGuardVersion int64
+	// walBoundedMisses counts the bounded catch-ups in a row that gave the
+	// writer back before the log restarted (boundedCatchUpPolicy). Guarded
+	// by walGuardMu.
+	walBoundedMisses int
+	// walPressure is true while the last WAL guard pass left the log over
+	// its limit; background writers wait for it (awaitWALHeadroom).
+	walPressure atomic.Bool
 
 	// plannerStatsRows is the history size at the last ANALYZE
 	// (RefreshPlannerStatistics).
 	plannerStatsRows atomic.Int64
+	// plannerStatsComplete is set once this process has checked that every
+	// planner statistics target of the history has its statistics.
+	plannerStatsComplete atomic.Bool
+	// plannerStatsNext is the target a full ANALYZE pass that yielded to
+	// the hooks goes on from (RefreshPlannerStatistics).
+	plannerStatsNext atomic.Int64
+	// observationGroup groups concurrent correlation observation writes
+	// into one transaction (CorrelationRepository.RecordObservations).
+	observationGroup writeGroup
+	// connectorInstances holds the connector instances this store resolved
+	// (connectorInstanceKey -> ConnectorInstance), so a hook call whose
+	// instance needs no change does not take the store's one connection to
+	// read it again (rel-1-0-6 GAP-0381). Only this store writes the table
+	// (resolveConnectorInstance, UpsertConnectorInstance); an upsert and a
+	// failed occurrence forget every entry.
+	connectorInstances sync.Map
+	// callGroup groups the flushes of concurrent hook calls' write batches
+	// into one transaction (CallWriteBatch).
+	callGroup writeGroup
+	// durableGroup groups the commits of concurrent writes to the synchronous=FULL
+	// connection into one transaction and one flush (durableGrouped).
+	durableGroup writeGroup
+	// writeBaton orders the transactions of the pool connection and the
+	// durable connection (writeBaton).
+	writeBaton writeBaton
+	// dirSyncedWAL is the write-ahead log file whose directory entry the last
+	// folder flush of the durable connection covered (syncDurableDir).
+	dirSyncMu    sync.Mutex
+	dirSyncedWAL os.FileInfo
 
 	sqliteBusyMu       sync.RWMutex
 	sqliteBusyObserver SQLiteBusyObservabilityV8
+	// lockWait stops the waits on a write lock another process holds
+	// (GAP-1021).
+	lockWait writeLockWait
 
 	// progress receives the one-line notes Init writes while it applies
 	// migrations. nil means os.Stderr, which is gateway.log in the daemon.
@@ -298,6 +386,26 @@ func (s *Store) sqliteBusyObservabilityV8() SQLiteBusyObservabilityV8 {
 	s.sqliteBusyMu.RLock()
 	observer := s.sqliteBusyObserver
 	s.sqliteBusyMu.RUnlock()
+	if observer == nil {
+		return nil
+	}
+	return storeBusyObserver{store: s, inner: observer}
+}
+
+// groupedTxBusyObservabilityV8 is the busy observer of a grouped transaction
+// (runGroupedTx). Its caller leads a writeGroup until the batch is handed
+// on, and the busy metric records correlation observations and event-history
+// rows through the same groups: reported in line, the report joined the
+// group its own caller leads and waited for itself, every later audit write
+// queued behind it, and a managed gateway answered no hook until a restart
+// (rel-1-0-5 GAP-0027). It reports in the background, bounded, as a busy
+// statement of an open transaction does.
+func (s *Store) groupedTxBusyObservabilityV8() SQLiteBusyObservabilityV8 {
+	observer, ok := s.sqliteBusyObservabilityV8().(storeBusyObserver)
+	if !ok {
+		return nil
+	}
+	observer.detached = true
 	return observer
 }
 
@@ -313,14 +421,18 @@ func (s *Store) sqliteBusyObservabilityV8() SQLiteBusyObservabilityV8 {
 // Settings explained:
 //   - journal_mode=WAL          enables write-ahead logging so readers
 //     and writers do not block each other.
-//   - busy_timeout=5000         SQLite waits up to 5 seconds before
+//   - busy_timeout=750          SQLite waits up to 0.75 seconds before
 //     returning SQLITE_BUSY, absorbing the
-//     vast majority of write contention.
+//     vast majority of write contention
+//     (auditBusyTimeoutMillis, writeLockWait).
 //   - wal_autocheckpoint=0      disables SQLite's connection-local commit
-//     hook. DefenseClaw checkpoints through the serialized Store connection
-//     in health and retention maintenance; running a second checkpoint from
+//     hook. DefenseClaw copies the log on a dedicated checkpoint connection
+//     (the WAL guard, health and retention maintenance); running a checkpoint from
 //     inside a commit can race a retiring sidecar process over the shared WAL
 //     mapping and terminate the gateway with SIGBUS.
+//   - journal_size_limit=64MiB  cuts the WAL file back to 64 MiB when a
+//     writer restarts the log, so a burst does not keep its disk space
+//     (rel-1-0-2:GAP-0709; see CheckpointWALIfLarge).
 //   - synchronous=NORMAL        the sweet spot for WAL: durable
 //     across crashes (loses only the last
 //     transaction on power loss) while ~3x
@@ -330,9 +442,9 @@ func (s *Store) sqliteBusyObservabilityV8() SQLiteBusyObservabilityV8 {
 //   - temp_store=MEMORY         spill temp tables to RAM instead of
 //     disk; eliminates a common contention
 //     source on writes that allocate temp.
-//   - mmap_size=268435456       map up to 256 MB of the DB into the
-//     process address space for read-heavy
-//     queries (audit views, exports).
+//   - mmap_size=0               never map audit.db into the process; pages
+//     are read into the page cache above (auditMmapSizeBytes). Secure
+//     Client keeps main's 256 MiB map (secureClientMmapSizeBytes).
 //   - foreign_keys=ON           defenseclaw relies on the FK between
 //     findings and scan_results; turning
 //     this off at the DSN level would be a
@@ -344,44 +456,81 @@ type auditIntegerPragma struct {
 }
 
 var auditMandatoryIntegerPragmas = [...]auditIntegerPragma{
-	{name: "busy_timeout", dsnValue: "5000", want: 5000},
+	{name: "busy_timeout", dsnValue: strconv.Itoa(auditBusyTimeoutMillis), want: auditBusyTimeoutMillis},
 	{name: "wal_autocheckpoint", dsnValue: "0", want: 0},
+	{name: "journal_size_limit", dsnValue: strconv.Itoa(auditWALJournalSizeLimitBytes), want: auditWALJournalSizeLimitBytes},
 	{name: "synchronous", dsnValue: "NORMAL", want: 1},
 	{name: "cache_size", dsnValue: "-20000", want: -20000},
 	{name: "temp_store", dsnValue: "MEMORY", want: 2},
 	{name: "foreign_keys", dsnValue: "ON", want: 1},
 }
 
-var auditPragmas = buildAuditPragmas()
+var (
+	auditPragmas = buildAuditPragmas(auditMmapSizeBytes)
+	// secureClientAuditPragmas keep main's memory map on a Secure Client host
+	// (#1092): 256 MiB, 0 on Windows (secureClientMmapSizeBytes).
+	secureClientAuditPragmas = buildAuditPragmas(secureClientMmapSizeBytes())
+)
 
-func buildAuditPragmas() string {
+// auditPragmasFor is the pragma set of a store's connections.
+func auditPragmasFor(secureClient bool) string {
+	if secureClient {
+		return secureClientAuditPragmas
+	}
+	return auditPragmas
+}
+
+func buildAuditPragmas(mmapSize int64) string {
 	var result strings.Builder
 	result.WriteString("?_pragma=journal_mode(WAL)")
 	for _, pragma := range auditMandatoryIntegerPragmas {
 		fmt.Fprintf(&result, "&_pragma=%s(%s)", pragma.name, pragma.dsnValue)
 	}
-	result.WriteString("&_pragma=mmap_size(268435456)")
+	fmt.Fprintf(&result, "&_pragma=mmap_size(%d)", mmapSize)
 	return result.String()
 }
 
-// openSQLite opens a SQLite connection with the audit-tier hardening
-// applied (DSN pragmas + a single-connection pool). Sharing this
-// helper between NewStore and the upcoming judge_body_store keeps
-// the contention guarantees in lockstep.
+// auditMmapSizeBytes is the mmap_size of every audit connection outside
+// Secure Client: 0, so audit.db is never mapped into the gateway.
 //
-// Pool sizing: SQLite serializes writers internally, so opening
-// multiple connections for the same DB just races them for the same
-// write lock and surfaces as SQLITE_BUSY. We cap MaxOpenConns at 1
-// and let Go's database/sql mutex serialize callers — this is the
-// canonical pattern recommended by modernc.org/sqlite. Reads share
-// the same connection, which is fine in practice because every
-// audit write completes in microseconds; if read latency ever
-// becomes a problem, we can introduce a separate read-only pool
-// without touching this hot path.
-func openSQLite(dbPath string) (*sql.DB, error) {
-	return openSQLiteWithPragmas(dbPath, auditPragmas)
+// Windows: a FlushFileBuffers of the memory-mapped audit.db cost about as much
+// with a few dirty pages as with many and grew with the database: 120 ms at
+// about 100 MB and 500 ms at 1.2 GB under a 10 calls/s hook flood, while the
+// same sync of the WAL file, which SQLite does not map, took about 10 ms at
+// 30 GB. The checkpoint that lets SQLite restart the log ends with that
+// database sync, so it never fit in the WAL guard's hold of the writer, the
+// log was never restarted and the WAL file grew past 12 GB (rel-1-0-3
+// GAP-0247, GAP-0136).
+//
+// Linux and macOS: the 256 MiB map they had kept every page a connection read
+// through it resident in the gateway. The startup quick_check read the whole
+// store that way, and on Linux the kernel maps whole page-cache folios on a
+// fault, so the gateway's RSS grew with the store about 1 MiB per MiB up to
+// the map size: 215, 243 and 264 MiB on a 30, 57 and 85 MB store on macOS,
+// 198, 224 and 251 MiB on a 27, 53 and 79 MB store on Linux (rel-1-0-6
+// GAP-0327). Without the map, the same 80 MB store on Linux idled at 195
+// instead of 272 MiB, with hook latency the same or lower (idle p50 55 against
+// 56-57 ms, p95 61-63 against 66-76 ms, burst-32 p95 671-701 against
+// 676-707 ms). The page cache the pragmas set (cache_size) bounds what a
+// connection keeps.
+const auditMmapSizeBytes = 0
+
+// secureClientMmapSizeBytes is main's mmap_size, which a Secure Client host
+// keeps (#1092): 256 MiB, and 0 on Windows (rel-1-0-3 GAP-0247, above).
+func secureClientMmapSizeBytes() int64 {
+	if runtime.GOOS == "windows" {
+		return 0
+	}
+	return 256 << 20
 }
 
+// openSQLiteWithPragmas opens a SQLite connection with the audit-tier hardening
+// applied (DSN pragmas + a single-connection pool). NewStore,
+// JudgeBodyStore, and maintenance connections share these settings.
+//
+// Pool sizing: SQLite serializes writers internally. The Store's main pool
+// has one connection; selected point reads use a separate read-only WAL
+// pool once the store is ready.
 func openSQLiteWithPragmas(dbPath, pragmas string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", dbPath+pragmas)
 	if err != nil {
@@ -398,6 +547,7 @@ func NewStore(dbPath string, opts ...StoreOption) (*Store, error) {
 }
 
 func newStoreWithHooks(dbPath string, hooks auditDBPathHooks, opts ...StoreOption) (*Store, error) {
+	hooks.secureClient = secureClientStoreOptions(opts)
 	db, identity, pathGuard, err := openHardenedAuditSQLiteWithIdentity(dbPath, hooks)
 	if err != nil {
 		return nil, err
@@ -411,6 +561,20 @@ func newStoreWithHooks(dbPath string, hooks auditDBPathHooks, opts ...StoreOptio
 
 // StoreOption configures a Store when it is opened.
 type StoreOption func(*Store)
+
+// StoreOptions are the options a store of the same deployment opens with
+// (WithSecureClientSchema), for a store opened beside this one.
+func (s *Store) StoreOptions() []StoreOption {
+	if s != nil && s.secureClientSchema {
+		return []StoreOption{WithSecureClientSchema()}
+	}
+	return nil
+}
+
+// SecureClientSchema reports whether this store uses the Secure Client layout.
+func (s *Store) SecureClientSchema() bool {
+	return s != nil && s.secureClientSchema
+}
 
 // WithSecureClientSchema keeps audit.db identical to main's on a Secure
 // Client host: the indexes no query reads stay (#1092, GAP-0253). Every
@@ -449,7 +613,10 @@ func isSQLiteBusy(err error) bool {
 	}
 	var coded sqliteCoded
 	if errors.As(err, &coded) {
-		switch coded.Code() {
+		// Extended codes retain the primary result in their low byte.
+		// SQLITE_BUSY_SNAPSHOT (517) needs a new transaction, not a retry
+		// of the failed statement inside its stale read snapshot.
+		switch coded.Code() & 0xff {
 		case sqliteCodeBusy, sqliteCodeLocked:
 			return true
 		}
@@ -472,6 +639,15 @@ func isSQLiteBusy(err error) bool {
 		current = next
 	}
 	return false
+}
+
+// IsSQLiteBusy reports transient SQLite contention to callers that must
+// retry an entire transaction after a stale read snapshot.
+//
+// A busy error met while another process holds the write lock is not
+// transient (writeLockWait): retrying would only hold the caller's answer.
+func IsSQLiteBusy(err error) bool {
+	return isSQLiteBusy(err) && !errors.Is(err, errAuditWriteLockHeld)
 }
 
 // SQLite BUSY retry policy. Even with busy_timeout=5000 some bursts
@@ -503,14 +679,23 @@ func retryBusyObserved(
 	fn func() error,
 ) error {
 	delay := time.Duration(sqliteRetryBaseMs) * time.Millisecond
+	store := busyObserverStore(observer)
 	var err error
 	for attempt := 0; attempt < sqliteRetryAttempts; attempt++ {
+		started := time.Now()
 		err = fn()
+		store.noteWriteAttempt(started, err, false)
 		if !isSQLiteBusy(err) {
 			return err
 		}
 		if observer != nil {
 			_ = observer.RecordSQLiteBusyMetric(ctx, op)
+		}
+		// Another process holds the write lock: stop waiting on it and fail
+		// now (writeLockWait). fn has given the connection back.
+		if store.writeLockHeld() {
+			store.applyWriteLockWait(writeLockApplyWait)
+			return store.markHeldLockError(err)
 		}
 		if attempt == sqliteRetryAttempts-1 {
 			break
@@ -529,7 +714,9 @@ func (s *Store) execDB(ctx context.Context, op string, query string, args ...any
 	var res sql.Result
 	err := retryBusyObserved(ctx, op, s.sqliteBusyObservabilityV8(), func() error {
 		var execErr error
+		started := time.Now()
 		res, execErr = s.db.ExecContext(ctx, query, args...)
+		s.noteWriteAttempt(started, execErr, true)
 		return execErr
 	})
 	return res, err
@@ -567,11 +754,57 @@ func txExecContextObserved(
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	started := time.Now()
 	res, err := tx.ExecContext(ctx, query, args...)
+	store := busyObserverStore(observer)
+	store.noteWriteAttempt(started, err, true)
 	if isSQLiteBusy(err) && observer != nil {
-		_ = observer.RecordSQLiteBusyMetric(ctx, op)
+		reportSQLiteBusyDetached(ctx, observer, op)
 	}
-	return res, err
+	return res, store.markHeldLockError(err)
+}
+
+// sqliteBusyDetachedReports bounds the BUSY reports of open transactions
+// that are still running: a burst of contention drops the reports beyond it
+// instead of piling up goroutines.
+var sqliteBusyDetachedReports = make(chan struct{}, 4)
+
+const sqliteBusyDetachedReportTimeout = 5 * time.Second
+
+// reportSQLiteBusyDetached reports a BUSY that a statement of an open
+// transaction met, in the background and bounded. The observer records the
+// busy metric and its correlation observations in the audit store, whose
+// pool has one connection, and the caller's open transaction holds that
+// connection until the statement's error has gone back up. Reported in line,
+// the observer waited for the connection its own caller held, with no
+// deadline, and every later audit write and managed hook queued behind it:
+// fresh native sessions were refused with HTTP 429 while /health answered
+// 200 (rel-1-0-4 GAP-0944).
+func reportSQLiteBusyDetached(ctx context.Context, observer SQLiteBusyObservabilityV8, op string) {
+	if observer == nil {
+		return
+	}
+	value := reflect.ValueOf(observer)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		if value.IsNil() {
+			return
+		}
+	}
+	select {
+	case sqliteBusyDetachedReports <- struct{}{}:
+	default:
+		return
+	}
+	reportCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sqliteBusyDetachedReportTimeout)
+	go func() {
+		defer func() {
+			_ = recover()
+			cancel()
+			<-sqliteBusyDetachedReports
+		}()
+		_ = observer.RecordSQLiteBusyMetric(reportCtx, op)
+	}()
 }
 
 // ---------------------------------------------------------------------------
@@ -1844,6 +2077,14 @@ var migrations = []migration{
 		description: "guardrails: bind pending credential sources to authoritative results",
 		apply:       migrateToolChainReturnedCredentialSourceState,
 	},
+	{
+		description: configChangeRecordDigestMigrationDescription,
+		apply:       migrateAuditEventRecordDigest,
+	},
+	{
+		description: sparseKeyIndexesMigrationDescription,
+		apply:       migrateSparseKeyIndexes,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
@@ -1860,18 +2101,44 @@ func tableExists(ex dbExecer, table string) (bool, error) {
 	return count > 0, nil
 }
 
-// unreadAuditIndexes are audit_events indexes no query reads. Every hook
+// unreadAuditIndexes are audit.db indexes no query needs. Every hook
 // writes several audit rows, and each index is another B-tree page per row in
-// the write-ahead log (GAP-0246), so a store outside Secure Client drops them
-// after the migrations, which still create them as main does. The schema
+// the write-ahead log (GAP-0246, B-26), so a store outside Secure Client drops
+// them after the migrations, which still create them as main does. The schema
 // version does not move, so an older binary opened on the store after a
 // rollback runs without them.
+//
+// The readers of audit_events (the Go store, retention, export and alert
+// projection, the Python CLI and TUI, the evidence scripts) filter, join or
+// sort on id, timestamp, retention_timestamp_unix_nano, action, severity,
+// bucket, event_name, run_id, request_id, session_id, evaluation_id and
+// enforcement_action_id; their indexes stay. No reader filters on the columns
+// below: the session lifecycle lookup (connector, session_id, agent_id) uses
+// idx_audit_session_id, the scan-target join drives from the row id, and the
+// TUI filters connectors in memory. The last two are created by the Python
+// CLI, which no longer creates them (cli/defenseclaw/db.py); the gateway drops
+// what an older CLI left.
 var unreadAuditIndexes = []struct{ name, create string }{
 	{"idx_audit_policy_id", `CREATE INDEX IF NOT EXISTS idx_audit_policy_id ON audit_events(policy_id)`},
 	{"idx_audit_tool_name", `CREATE INDEX IF NOT EXISTS idx_audit_tool_name ON audit_events(tool_name)`},
 	{"idx_audit_generation", `CREATE INDEX IF NOT EXISTS idx_audit_generation ON audit_events(generation)`},
 	{"idx_audit_sidecar_instance_id", `CREATE INDEX IF NOT EXISTS idx_audit_sidecar_instance_id ON audit_events(sidecar_instance_id)`},
 	{"idx_audit_finding_id", `CREATE INDEX IF NOT EXISTS idx_audit_finding_id ON audit_events(finding_id)`},
+	{"idx_audit_trace_id", `CREATE INDEX IF NOT EXISTS idx_audit_trace_id ON audit_events(trace_id)`},
+	{"idx_audit_turn_id", `CREATE INDEX IF NOT EXISTS idx_audit_turn_id ON audit_events(turn_id)`},
+	{"idx_audit_agent_id", `CREATE INDEX IF NOT EXISTS idx_audit_agent_id ON audit_events(agent_id)`},
+	{"idx_audit_agent_instance_id", `CREATE INDEX IF NOT EXISTS idx_audit_agent_instance_id ON audit_events(agent_instance_id)`},
+	{"idx_audit_scan_id", `CREATE INDEX IF NOT EXISTS idx_audit_scan_id ON audit_events(scan_id)`},
+	{"idx_audit_source_timestamp", `CREATE INDEX IF NOT EXISTS idx_audit_source_timestamp ON audit_events(source, timestamp)`},
+	{"idx_audit_connector", `CREATE INDEX IF NOT EXISTS idx_audit_connector ON audit_events(connector)`},
+	{"idx_audit_action_connector_timestamp", `CREATE INDEX IF NOT EXISTS idx_audit_action_connector_timestamp ON audit_events(action, connector, timestamp DESC)`},
+	// These two are the leading columns of a unique index on the same table
+	// (sqlite_autoindex_correlation_identifiers_2 and the correlation_receipts
+	// primary key), which serves every query they served. Their keys are
+	// random digests, so each hook call wrote another random page of each
+	// (rel-1-0-3 GAP-0320).
+	{"idx_correlation_identifiers_exact", `CREATE INDEX IF NOT EXISTS idx_correlation_identifiers_exact ON correlation_identifiers(connector_instance_id, namespace, identifier_kind, value_digest)`},
+	{"idx_correlation_receipts_source", `CREATE INDEX IF NOT EXISTS idx_correlation_receipts_source ON correlation_receipts(connector_instance_id, source_key_digest)`},
 }
 
 // trimUnreadAuditIndexes drops the unread indexes, or on a Secure Client
@@ -1881,6 +2148,48 @@ func (s *Store) trimUnreadAuditIndexes() error {
 		statement := "DROP INDEX IF EXISTS " + index.name
 		if s.secureClientSchema {
 			statement = index.create
+		}
+		if _, err := s.db.Exec(statement); err != nil {
+			return fmt.Errorf("audit: index %s: %w", index.name, err)
+		}
+	}
+	return s.indexRetentionCandidates()
+}
+
+// retentionCandidateIndexes serve a retention batch that otherwise read its
+// whole table. The pending-operation batch looks for operations that ended
+// (status other than active) before the cutoff; no index leads with status or
+// the update time, so each batch scanned correlation_pending_operations. A
+// session's open operations stay active, so a store of a busy host holds tens
+// of thousands of them: on a managed RHEL store with 70,000 active operations
+// and a cold page cache the scan took 3.6 s inside the retention transaction,
+// which holds the store's writer, and the hooks queued behind the gateway's
+// first retention run after a start were closed as a gateway no-answer
+// (GAP-1790). The partial index holds only the ended operations, in the
+// batch's order, so the batch reads at most its own rows.
+//
+// Like the unread indexes, this is applied after the migrations without
+// moving the schema version: an older binary opened on the store after a
+// rollback keeps maintaining the index and does not read it. A Secure Client
+// store keeps main's schema, so the index is dropped there.
+var retentionCandidateIndexes = []struct{ name, table, create string }{
+	{"idx_correlation_pending_retention", "correlation_pending_operations", `CREATE INDEX IF NOT EXISTS idx_correlation_pending_retention
+		ON correlation_pending_operations(updated_time_unix_nano, connector_instance_id, operation_id, operation_type)
+		WHERE status<>'active'`},
+}
+
+func (s *Store) indexRetentionCandidates() error {
+	for _, index := range retentionCandidateIndexes {
+		// A partial schema without the table: the later readiness checks
+		// report what is missing.
+		if present, err := tableExists(s.db, index.table); err != nil {
+			return err
+		} else if !present {
+			continue
+		}
+		statement := index.create
+		if s.secureClientSchema {
+			statement = "DROP INDEX IF EXISTS " + index.name
 		}
 		if _, err := s.db.Exec(statement); err != nil {
 			return fmt.Errorf("audit: index %s: %w", index.name, err)
@@ -1941,6 +2250,12 @@ func (s *Store) Init() error {
 	if err := s.trimUnreadAuditIndexes(); err != nil {
 		return err
 	}
+	if err := s.keepSecureClientSparseKeyIndexes(); err != nil {
+		return err
+	}
+	if err := s.ensureFieldClassSets(); err != nil {
+		return err
+	}
 	if purgedHistory {
 		s.reclaimPurgedHistory()
 	}
@@ -1967,7 +2282,7 @@ func (s *Store) Init() error {
 	}
 	for _, column := range []string{
 		"bucket", "event_name", "source", "signal", "payload_json", "projected_record_json",
-		"record_schema_version", "projection_hash", "redaction_profile", "mandatory",
+		"record_schema_version", "projection_hash", "redaction_profile", "mandatory", "record_sha256",
 	} {
 		exists, err := s.hasColumn("audit_events", column)
 		if err != nil {
@@ -1977,7 +2292,7 @@ func (s *Store) Init() error {
 			return fmt.Errorf("audit: mandatory event-history column %s is missing", column)
 		}
 	}
-	if err := ensureRetentionTimestampInfrastructure(s.db); err != nil {
+	if err := ensureRetentionTimestampInfrastructure(s.db, !s.secureClientSchema); err != nil {
 		return fmt.Errorf("audit: verify event timestamp retention infrastructure: %w", err)
 	}
 	for _, table := range []string{
@@ -2029,6 +2344,17 @@ func (s *Store) Init() error {
 		return fmt.Errorf("audit: revalidate database paths after initialization: %w", err)
 	}
 
+	s.prepareStatements(context.Background())
+	if !s.secureClientSchema && s.dbPathGuard != nil && !s.dbPathGuard.inMemory {
+		if s.readDB == nil {
+			readDB, readErr := s.openReadPool()
+			if readErr == nil {
+				s.readDB = readDB
+			} else if err := revalidateHardenedAuditSQLite(s.dbPathGuard); err != nil {
+				return fmt.Errorf("audit: revalidate database paths after read pool open: %w", err)
+			}
+		}
+	}
 	s.ready.Store(true)
 	return nil
 }
@@ -2049,6 +2375,84 @@ func (s *Store) DatabasePath() string {
 		return ""
 	}
 	return s.dbPath
+}
+
+// HasAuditEventID reports whether a durable event-history row already owns id.
+// Spool replay uses this before re-offering an occurrence after a crash.
+func (s *Store) HasAuditEventID(ctx context.Context, id string) (bool, error) {
+	if s == nil || !s.Ready() || id == "" {
+		return false, errors.New("audit: event lookup requires a ready store and id")
+	}
+	var one int
+	err := s.scanRow(ctx, "audit", s.queryPool().QueryRowContext(ctx,
+		`SELECT 1 FROM audit_events WHERE id = ?`, id), &one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return one == 1, err
+}
+
+// StoredHookVerdict is the decision a stored hook record holds, as the
+// record stores it: the action and the reason in a connector hook row's
+// envelope, or the effective action and the reason of a hook_decision
+// record. A field the row does not hold, or holds in a form that is not
+// text (a redaction profile removed it), is empty.
+type StoredHookVerdict struct {
+	Action, Reason string
+}
+
+// StoredHookVerdict returns the decision the stored hook record id holds.
+// found is false when no row owns id.
+func (s *Store) StoredHookVerdict(ctx context.Context, id string) (verdict StoredHookVerdict, found bool, err error) {
+	if s == nil || !s.Ready() || id == "" {
+		return StoredHookVerdict{}, false, errors.New("audit: hook decision lookup requires a ready store and id")
+	}
+	var envelope, decision StoredHookVerdict
+	err = s.scanRow(ctx, "audit", s.queryPool().QueryRowContext(ctx, `SELECT
+		CASE WHEN json_valid(COALESCE(structured_json,''))
+			THEN COALESCE(json_extract(structured_json,'$.action'),'') ELSE '' END,
+		CASE WHEN json_valid(COALESCE(structured_json,'')) AND json_type(structured_json,'$.reason') = 'text'
+			THEN json_extract(structured_json,'$.reason') ELSE '' END,
+		CASE WHEN json_valid(COALESCE(projected_record_json,''))
+			THEN COALESCE(json_extract(projected_record_json,'$.body."defenseclaw.guardrail.effective_action"'),'') ELSE '' END,
+		CASE WHEN json_valid(COALESCE(projected_record_json,''))
+				AND json_type(projected_record_json,'$.body."defenseclaw.guardrail.reason"') = 'text'
+			THEN json_extract(projected_record_json,'$.body."defenseclaw.guardrail.reason"') ELSE '' END
+		FROM audit_events WHERE id = ?`, id), &envelope.Action, &envelope.Reason, &decision.Action, &decision.Reason)
+	if errors.Is(err, sql.ErrNoRows) {
+		return StoredHookVerdict{}, false, nil
+	}
+	if err != nil {
+		return StoredHookVerdict{}, false, err
+	}
+	if envelope.Action != "" {
+		return envelope, true, nil
+	}
+	return decision, true, nil
+}
+
+// LatestHookVerdictOfEvent returns the verdict of the newest hook record
+// (connector-hook or connector-hook-synthetic row, or its decision record)
+// observed for the semantic event id, so a repeat of that delivery can tell
+// what the audit last recorded for it. found is false when no hook record is
+// linked to the event (GAP-1060).
+func (s *Store) LatestHookVerdictOfEvent(ctx context.Context, semanticEventID string) (verdict StoredHookVerdict, found bool, err error) {
+	if s == nil || !s.Ready() || semanticEventID == "" {
+		return StoredHookVerdict{}, false, errors.New("audit: hook verdict lookup requires a ready store and a semantic event id")
+	}
+	var id string
+	err = s.scanRow(ctx, "audit", s.queryPool().QueryRowContext(ctx, `SELECT event.id
+		FROM correlation_observations AS observation JOIN audit_events AS event ON event.id = observation.record_id
+		WHERE observation.semantic_event_id = ? AND event.action IN (?, ?)
+		ORDER BY observation.observed_time_unix_nano DESC, event.timestamp DESC, event.rowid DESC LIMIT 1`,
+		semanticEventID, string(ActionConnectorHook), string(ActionConnectorHookSynthetic)), &id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return StoredHookVerdict{}, false, nil
+	}
+	if err != nil {
+		return StoredHookVerdict{}, false, err
+	}
+	return s.StoredHookVerdict(ctx, id)
 }
 
 // DatabaseFileReplaced reports whether the database path no longer names
@@ -2099,7 +2503,7 @@ func (s *Store) verifyMandatoryPragmas(ctx context.Context) error {
 		if err := s.scanRow(ctx, "audit_pragma_"+pragma.name, row, &got); err != nil {
 			return fmt.Errorf("audit: verify SQLite %s pragma: %w", pragma.name, err)
 		}
-		if got != pragma.want {
+		if got != pragma.want && (pragma.name != "busy_timeout" || got != 0 || !s.writeLockHeld()) {
 			return fmt.Errorf("audit: SQLite %s pragma is %d, want %d", pragma.name, got, pragma.want)
 		}
 	}
@@ -2154,6 +2558,16 @@ func (s *Store) proveDurableWrite(ctx context.Context) error {
 	return nil
 }
 
+// storeMigrationTx is the transaction a store's migration runs in; it tells a
+// migration that installs a schema object whose form depends on the store
+// (the retention insert trigger) which form this store keeps.
+type storeMigrationTx struct {
+	*sql.Tx
+	secureClient bool
+}
+
+func (tx storeMigrationTx) secureClientMigration() bool { return tx.secureClient }
+
 // applyMigration runs a single migration inside a transaction so that both the
 // DDL and the schema_version bump are atomic. On failure the transaction is
 // rolled back and the version remains unchanged, making retries safe.
@@ -2164,7 +2578,7 @@ func (s *Store) applyMigration(ver int, m migration) error {
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	if err := m.apply(tx); err != nil {
+	if err := m.apply(storeMigrationTx{Tx: tx, secureClient: s.secureClientSchema}); err != nil {
 		return fmt.Errorf("audit: migration %d (%s): %w", ver, m.description, err)
 	}
 	if _, err := txExecContextObserved(context.Background(), tx, "migration_version_insert", s.sqliteBusyObservabilityV8(), `INSERT INTO schema_version (version, applied_at) VALUES (?, ?)`,
@@ -2323,7 +2737,7 @@ func (s *Store) hasColumn(table, column string) (bool, error) {
 
 func (s *Store) LogEvent(e Event) error {
 	if e.ID == "" {
-		e.ID = uuid.New().String()
+		e.ID = observability.NewTimeOrderedID()
 	}
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now().UTC()
@@ -2370,8 +2784,8 @@ func (s *Store) LogEvent(e Event) error {
 			run_id, trace_id, request_id,
 			session_id, turn_id, agent_name, agent_instance_id, policy_id, destination_app, tool_name, tool_id,
 			schema_version, content_hash, generation, binary_version, agent_id, sidecar_instance_id,
-			connector, step_idx, enforced, rule_pack_dir)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			connector, step_idx, enforced, rule_pack_dir, retention_timestamp_unix_nano)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.ID, ts, e.Action, e.Target, e.Actor, e.Details, structuredJSON, e.Severity,
 		nullStr(e.RunID), nullStr(e.TraceID), nullStr(e.RequestID),
 		nullStr(e.SessionID), nullStr(e.TurnID), nullStr(e.AgentName), nullStr(e.AgentInstanceID),
@@ -2379,7 +2793,7 @@ func (s *Store) LogEvent(e Event) error {
 		nullInt(e.SchemaVersion), nullStr(e.ContentHash), nullUint64(e.Generation),
 		nullStr(e.BinaryVersion), nullStr(e.AgentID), nullStr(e.SidecarInstanceID),
 		nullStr(e.Connector), nullInt(e.StepIdx), nullBool(e.Enforced),
-		nullStr(e.RulePackDir),
+		nullStr(e.RulePackDir), retentionInstantOf(ts),
 	)
 	if err != nil {
 		return fmt.Errorf("audit: log event: %w", err)
@@ -2468,7 +2882,7 @@ type SinkHealthInput struct {
 // InsertSinkHealth records a single sink delivery attempt outcome.
 func (s *Store) InsertSinkHealth(h SinkHealthInput) error {
 	if h.ID == "" {
-		h.ID = uuid.New().String()
+		h.ID = observability.NewTimeOrderedID()
 	}
 	if h.Timestamp.IsZero() {
 		h.Timestamp = time.Now().UTC()
@@ -2510,7 +2924,7 @@ func (s *Store) ListActivityEvents(limit int) ([]ActivityEventRow, error) {
 			COALESCE(request_id,''), COALESCE(trace_id,''), COALESCE(run_id,''),
 			COALESCE(schema_version,0), COALESCE(content_hash,''), COALESCE(generation,0),
 			COALESCE(binary_version,''), COALESCE(agent_id,''), COALESCE(sidecar_instance_id,'')
-		FROM activity_events ORDER BY timestamp DESC LIMIT ?`, limit)
+		FROM activity_events ORDER BY `+s.timeOrderForTable("activity_events", "", true)+` LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("audit: list activity events: %w", err)
 	}
@@ -2634,7 +3048,7 @@ func (b *JudgeBatch) InsertJudgeResponse(e JudgeResponse) error {
 		return nil
 	}
 	if e.ID == "" {
-		e.ID = uuid.New().String()
+		e.ID = observability.NewTimeOrderedID()
 	}
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now().UTC()
@@ -2792,7 +3206,7 @@ func (s *Store) InsertJudgeResponse(e JudgeResponse) error {
 		return nil
 	}
 	if e.ID == "" {
-		e.ID = uuid.New().String()
+		e.ID = observability.NewTimeOrderedID()
 	}
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now().UTC()
@@ -3018,7 +3432,7 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 	}
 
 	rows, err := s.queryDB(context.Background(), "audit",
-		`SELECT id, timestamp, action, target, actor, details, structured_json, severity,
+		`SELECT id, timestamp, action, target, actor, details, `+s.structuredJSONReadSQL("")+`, severity,
 		        run_id, trace_id, request_id,
 		        session_id, turn_id, agent_name, agent_instance_id, policy_id,
 		        destination_app, tool_name, tool_id,
@@ -3052,10 +3466,35 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 // v8 retention migration (an unmigrated 0.8.x store; kept while 0.8.x
 // upgrades are supported) has no such column and sorts by julianday instead.
 func (s *Store) auditEventsNewestFirst() string {
-	if ok, err := hasColumnDB(s.db, "audit_events", "retention_timestamp_unix_nano"); err == nil && ok {
-		return "retention_timestamp_unix_nano DESC, rowid DESC"
+	return s.auditEventsNewestFirstForAlias("")
+}
+
+func (s *Store) auditEventsNewestFirstForAlias(alias string) string {
+	if alias != "" {
+		alias += "."
 	}
-	return "julianday(timestamp) DESC, rowid DESC"
+	if ok, err := hasColumnDB(s.db, "audit_events", "retention_timestamp_unix_nano"); err == nil && ok {
+		return alias + "retention_timestamp_unix_nano DESC, " + alias + "rowid DESC"
+	}
+	return "julianday(" + alias + "timestamp) DESC, " + alias + "rowid DESC"
+}
+
+// timeOrderForTable uses the exact timestamp filled by the retention migration.
+// The date fallback keeps read-only access to older audit databases working.
+func (s *Store) timeOrderForTable(table, alias string, newest bool) string {
+	direction := " DESC"
+	if !newest {
+		direction = " ASC"
+	}
+	prefix := ""
+	if alias != "" {
+		prefix = alias + "."
+	}
+	instant := "julianday(" + prefix + "timestamp)"
+	if ok, err := hasColumnDB(s.db, table, "retention_timestamp_unix_nano"); err == nil && ok {
+		instant = prefix + "retention_timestamp_unix_nano"
+	}
+	return instant + direction + ", " + prefix + "rowid" + direction
 }
 
 // scanAuditEventRow holds the column-scan logic of ListEvents so the
@@ -3160,7 +3599,7 @@ func (s *Store) SetActionForConnector(targetType, targetName, connector, sourceP
 	if err != nil {
 		return fmt.Errorf("audit: marshal actions: %w", err)
 	}
-	id := uuid.New().String()
+	id := observability.NewTimeOrderedID()
 	now := time.Now().UTC()
 	_, err = s.execDB(context.Background(), "audit",
 		`INSERT INTO actions (id, target_type, target_name, source_path, actions_json, reason, updated_at, connector)
@@ -3190,7 +3629,7 @@ func (s *Store) SetActionFieldForConnector(targetType, targetName, connector, fi
 	if err := validateActionFieldAndValue(field, value); err != nil {
 		return err
 	}
-	id := uuid.New().String()
+	id := observability.NewTimeOrderedID()
 	now := time.Now().UTC()
 	path := "$." + field
 	initJSON := "{}"
@@ -3202,16 +3641,50 @@ func (s *Store) SetActionFieldForConnector(targetType, targetName, connector, fi
 	case "runtime":
 		initJSON = fmt.Sprintf(`{"runtime":"%s"}`, value)
 	}
+	update := "json_set(actions_json, ?, ?)"
+	if field == "runtime" {
+		// A runtime value written here has no deciding path recorded with
+		// it (SetRuntimeDisableForConnector), so it carries none.
+		update = "json_remove(" + update + ", '$.runtime_source')"
+	}
 	query :=
 		`INSERT INTO actions (id, target_type, target_name, source_path, actions_json, reason, updated_at, connector)
 		 VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
 		 ON CONFLICT(target_type, target_name, connector) DO UPDATE SET
-		   actions_json = json_set(actions_json, ?, ?),
+		   actions_json = ` + update + `,
 		   reason = excluded.reason,
 		   updated_at = excluded.updated_at`
 	_, err := s.execDB(context.Background(), "audit", query, id, targetType, targetName, initJSON, reason, now, connector, path, value)
 	if err != nil {
 		return fmt.Errorf("audit: set action field %s: %w", field, err)
+	}
+	return nil
+}
+
+// SetRuntimeDisableForConnector records runtime=disable on the row scoped to
+// connector together with the path whose admission decided it, in one
+// statement: the row's source_path and its runtime_source
+// (ActionEntry.RuntimeSource). A reader that must know the runtime disable
+// is this admission's own decision, not an older row under the same name,
+// checks RuntimeSource.
+func (s *Store) SetRuntimeDisableForConnector(targetType, targetName, connector, sourcePath, reason string) error {
+	initJSON, err := json.Marshal(map[string]string{"runtime": "disable", "runtime_source": sourcePath})
+	if err != nil {
+		return fmt.Errorf("audit: marshal runtime disable: %w", err)
+	}
+	_, err = s.execDB(context.Background(), "audit",
+		`INSERT INTO actions (id, target_type, target_name, source_path, actions_json, reason, updated_at, connector)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(target_type, target_name, connector) DO UPDATE SET
+		   actions_json = json_set(actions_json, '$.runtime', 'disable', '$.runtime_source', ?),
+		   source_path = COALESCE(excluded.source_path, source_path),
+		   reason = excluded.reason,
+		   updated_at = excluded.updated_at`,
+		observability.NewTimeOrderedID(), targetType, targetName, nullStr(sourcePath), string(initJSON), reason,
+		time.Now().UTC(), connector, sourcePath,
+	)
+	if err != nil {
+		return fmt.Errorf("audit: set runtime disable: %w", err)
 	}
 	return nil
 }
@@ -3248,11 +3721,14 @@ func (s *Store) ClearActionFieldForConnector(targetType, targetName, connector, 
 	if err := validateActionFieldAndValue(field, ""); err != nil {
 		return err
 	}
-	path := "$." + field
+	remove := "json_remove(actions_json, ?)"
+	if field == "runtime" {
+		remove = "json_remove(actions_json, ?, '$.runtime_source')" // its provenance goes with it
+	}
 	_, err := s.execDB(context.Background(), "audit",
-		`UPDATE actions SET actions_json = json_remove(actions_json, ?), updated_at = ?
+		`UPDATE actions SET actions_json = `+remove+`, updated_at = ?
 		 WHERE target_type = ? AND target_name = ? AND connector = ?`,
-		path, time.Now().UTC(), targetType, targetName, connector,
+		"$."+field, time.Now().UTC(), targetType, targetName, connector,
 	)
 	if err != nil {
 		return fmt.Errorf("audit: clear action field %s: %w", field, err)
@@ -3297,7 +3773,7 @@ func (s *Store) GetActionForConnector(targetType, targetName, connector string) 
 	var e ActionEntry
 	var sourcePath, reason, actionsJSON sql.NullString
 	err := s.scanRow(context.Background(), "get_action",
-		s.db.QueryRowContext(context.Background(),
+		s.queryPool().QueryRowContext(context.Background(),
 			`SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
 		 FROM actions WHERE target_type = ? AND target_name = ? AND connector = ?`,
 			targetType, targetName, connector,
@@ -3310,9 +3786,7 @@ func (s *Store) GetActionForConnector(targetType, targetName, connector string) 
 	}
 	e.SourcePath = sourcePath.String
 	e.Reason = reason.String
-	if actionsJSON.String != "" {
-		_ = json.Unmarshal([]byte(actionsJSON.String), &e.Actions)
-	}
+	e.parseActions(actionsJSON.String)
 	return &e, nil
 }
 
@@ -3335,7 +3809,7 @@ func (s *Store) HasActionForConnector(targetType, targetName, connector, field, 
 		`SELECT COUNT(*) FROM actions WHERE target_type = ? AND target_name = ? AND connector = ? AND json_extract(actions_json, '$.%s') = ?`,
 		field)
 	err := s.scanRow(context.Background(), "has_action",
-		s.db.QueryRowContext(context.Background(), query, targetType, targetName, connector, value), &count)
+		s.queryPool().QueryRowContext(context.Background(), query, targetType, targetName, connector, value), &count)
 	if err != nil {
 		return false, fmt.Errorf("audit: has action: %w", err)
 	}
@@ -3371,7 +3845,14 @@ func (s *Store) ListByActionAndType(field, value, targetType string) ([]ActionEn
 // ListActionsByType returns all action entries for a given target type, across
 // all connectors. Each entry carries its own Connector (SK-4).
 func (s *Store) ListActionsByType(targetType string) ([]ActionEntry, error) {
-	return s.queryActions(
+	return s.ListActionsByTypeContext(context.Background(), targetType)
+}
+
+// ListActionsByTypeContext is ListActionsByType that stops waiting for the
+// store when ctx ends, so a caller on a bounded path (a hook call) is not held
+// by a connection that something else keeps.
+func (s *Store) ListActionsByTypeContext(ctx context.Context, targetType string) ([]ActionEntry, error) {
+	return s.queryActionsContext(ctx,
 		`SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
 		 FROM actions WHERE target_type = ? ORDER BY updated_at DESC`, targetType)
 }
@@ -3394,7 +3875,11 @@ func (s *Store) ListAllActions() ([]ActionEntry, error) {
 }
 
 func (s *Store) queryActions(query string, args ...any) ([]ActionEntry, error) {
-	rows, err := s.queryDB(context.Background(), "audit", query, args...)
+	return s.queryActionsContext(context.Background(), query, args...)
+}
+
+func (s *Store) queryActionsContext(ctx context.Context, query string, args ...any) ([]ActionEntry, error) {
+	rows, err := s.queryDB(ctx, "audit", query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("audit: query actions: %w", err)
 	}
@@ -3409,12 +3894,22 @@ func (s *Store) queryActions(query string, args ...any) ([]ActionEntry, error) {
 		}
 		e.SourcePath = sourcePath.String
 		e.Reason = reason.String
-		if actionsJSON.String != "" {
-			_ = json.Unmarshal([]byte(actionsJSON.String), &e.Actions)
-		}
+		e.parseActions(actionsJSON.String)
 		entries = append(entries, e)
 	}
 	return entries, rows.Err()
+}
+
+func (e *ActionEntry) parseActions(actionsJSON string) {
+	if actionsJSON == "" {
+		return
+	}
+	var stored struct {
+		ActionState
+		RuntimeSource string `json:"runtime_source"`
+	}
+	_ = json.Unmarshal([]byte(actionsJSON), &stored)
+	e.Actions, e.RuntimeSource = stored.ActionState, stored.RuntimeSource
 }
 
 func nullStr(s string) sql.NullString {
@@ -3796,6 +4291,18 @@ func (s *Store) SelectAlertAcknowledgementTargets(
 	for _, action := range legacyActions {
 		args = append(args, action)
 	}
+	// A block that a rule finding explains is one alert: the finding row.
+	// `defenseclaw alerts` does not list the connector-hook row of the same
+	// request, so a selector must not match it either (GAP-0166).
+	query += ` AND NOT (
+			LOWER(COALESCE(event.action,'')) = 'connector-hook'
+			AND COALESCE(event.request_id,'') <> ''
+			AND EXISTS (
+				SELECT 1 FROM audit_events AS finding
+				WHERE finding.request_id = event.request_id
+				  AND finding.action = 'scan-finding'
+			)
+		)`
 	// An empty or "all" severity needs no extra predicate: eligibility already
 	// excludes clean lifecycle telemetry and accepts promoted INFO non-allow
 	// outcomes plus ERROR health records.
@@ -3897,7 +4404,7 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 	legacyActions := legacyAlertEligibleActions()
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(legacyActions)), ",")
 	query := `SELECT event.id, event.timestamp, event.action, event.target, event.actor,
-			event.details, event.structured_json, ` + alertEffectiveSeveritySQL() + `,
+			event.details, ` + s.structuredJSONReadSQL("event") + `, ` + alertEffectiveSeveritySQL() + `,
 			event.run_id,
 			event.trace_id, event.request_id, event.connector, event.enforced
 		 FROM audit_events AS event
@@ -3910,7 +4417,7 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 			 SELECT 1 FROM alert_acknowledgement_projection AS projection
 			 WHERE projection.alert_id = event.id
 		 )
-		 ORDER BY event.timestamp DESC LIMIT ?`
+		 ORDER BY ` + s.auditEventsNewestFirstForAlias("event") + ` LIMIT ?`
 	args := make([]any, 0, len(legacyActions)+1)
 	for _, action := range legacyActions {
 		args = append(args, action)
@@ -3965,7 +4472,7 @@ func (s *Store) ListScanResults(limit int) ([]ScanResultRow, error) {
 	}
 	rows, err := s.queryDB(context.Background(), "audit",
 		`SELECT id, scanner, target, timestamp, duration_ms, finding_count, max_severity
-		 FROM scan_results ORDER BY timestamp DESC LIMIT ?`, limit,
+		 FROM scan_results ORDER BY `+s.timeOrderForTable("scan_results", "", true)+` LIMIT ?`, limit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("audit: list scan results: %w", err)
@@ -4045,7 +4552,7 @@ func (s *Store) GetCounts() (Counts, error) {
 	}{
 		{`SELECT COUNT(*) FROM actions WHERE target_type = 'skill' AND json_extract(actions_json, '$.install') = 'block'`, nil, &c.BlockedSkills},
 		{`SELECT COUNT(*) FROM actions WHERE target_type = 'skill' AND json_extract(actions_json, '$.install') = 'allow'`, nil, &c.AllowedSkills},
-		{`SELECT COUNT(*) FROM actions WHERE target_type = 'mcp' AND json_extract(actions_json, '$.install') = 'block'`, nil, &c.BlockedMCPs},
+		{`SELECT COUNT(*) FROM actions WHERE target_type IN ('mcp', '` + AccountMCPActionType + `') AND json_extract(actions_json, '$.install') = 'block'`, nil, &c.BlockedMCPs},
 		{`SELECT COUNT(*) FROM actions WHERE target_type = 'mcp' AND json_extract(actions_json, '$.install') = 'allow'`, nil, &c.AllowedMCPs},
 		// ActiveAlerts is the unacknowledged actionable queue, not a count
 		// of every non-INFO audit row. Keep this IPC surface aligned with
@@ -4123,7 +4630,8 @@ func (s *Store) QueryNetworkEgressEvents(f NetworkEgressFilter) ([]NetworkEgress
 		query += " AND blocked = ?"
 		args = append(args, blocked)
 	}
-	query += " ORDER BY julianday(timestamp) DESC, timestamp DESC LIMIT ?"
+	// Newest first by the exact instant, insert order on a tie (GAP-0251).
+	query += " ORDER BY " + s.timeOrderForTable("network_egress_events", "", true) + " LIMIT ?"
 	args = append(args, limit)
 
 	rows, err := s.queryDB(context.Background(), "audit", query, args...)
@@ -4177,16 +4685,18 @@ type LatestScanInfo struct {
 
 func (s *Store) LatestScansByScanner(scannerName string) ([]LatestScanInfo, error) {
 	rows, err := s.queryDB(context.Background(), "audit", `
-		SELECT sr.id, sr.target, sr.timestamp, sr.finding_count, sr.max_severity, sr.raw_json
-		FROM scan_results sr
-		INNER JOIN (
-			SELECT target, MAX(timestamp) as max_ts
-			FROM scan_results
-			WHERE scanner = ? AND COALESCE(exit_code, 0) = 0 AND COALESCE(error, '') = ''
-			GROUP BY target
-		) latest ON sr.target = latest.target AND sr.timestamp = latest.max_ts
-		WHERE sr.scanner = ? AND COALESCE(sr.exit_code, 0) = 0 AND COALESCE(sr.error, '') = ''
-	`, scannerName, scannerName)
+		SELECT id, target, timestamp, finding_count, max_severity, raw_json
+		FROM (
+			SELECT sr.id, sr.target, sr.timestamp, sr.finding_count,
+				sr.max_severity, sr.raw_json,
+				ROW_NUMBER() OVER (
+					PARTITION BY sr.target ORDER BY `+s.timeOrderForTable("scan_results", "sr", true)+`
+				) AS dc_rank
+			FROM scan_results sr
+			WHERE sr.scanner = ? AND COALESCE(sr.exit_code, 0) = 0
+				AND COALESCE(sr.error, '') = ''
+		)
+		WHERE dc_rank = 1`, scannerName)
 	if err != nil {
 		return nil, fmt.Errorf("audit: latest scans by scanner: %w", err)
 	}
@@ -4247,7 +4757,7 @@ func (s *Store) InsertNetworkEgressEvent(e NetworkEgressRow) error {
 	}
 	e.Details = netguard.ScrubURLsInText(e.Details)
 	if e.ID == "" {
-		e.ID = uuid.New().String()
+		e.ID = observability.NewTimeOrderedID()
 	}
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now().UTC()
@@ -4308,7 +4818,7 @@ type SnapshotRow struct {
 
 // SetTargetSnapshot upserts a snapshot baseline for drift comparison.
 func (s *Store) SetTargetSnapshot(targetType, targetPath, contentHash, depHashes, cfgHashes, endpoints, scanID, scannerFingerprint string) error {
-	id := uuid.New().String()
+	id := observability.NewTimeOrderedID()
 	now := time.Now().UTC()
 	_, err := s.execDB(context.Background(), "audit",
 		`INSERT INTO target_snapshots (id, target_type, target_path, content_hash, dependency_hashes, config_hashes, network_endpoints, scan_id, captured_at, scanner_fingerprint)
@@ -4352,13 +4862,15 @@ func (s *Store) ListNetworkEgressEvents(limit int, hostname string) ([]NetworkEg
 		rows *sql.Rows
 		err  error
 	)
+	// Newest first by the exact instant, insert order on a tie (GAP-0251).
+	order := s.timeOrderForTable("network_egress_events", "", true)
 	if hostname == "" {
 		rows, err = s.queryDB(context.Background(), "audit",
 			`SELECT id, timestamp, session_id, connector, agent_id, root_agent_id, parent_agent_id, root_session_id, agent_lifecycle_id,
 			        agent_execution_id, user_id, tool_id, hostname, url, http_method, protocol,
 			        policy_outcome, decision_code, blocked, severity, details
 			 FROM network_egress_events
-			 ORDER BY julianday(timestamp) DESC, timestamp DESC LIMIT ?`, limit,
+			 ORDER BY `+order+` LIMIT ?`, limit,
 		)
 	} else {
 		rows, err = s.queryDB(context.Background(), "audit",
@@ -4366,7 +4878,7 @@ func (s *Store) ListNetworkEgressEvents(limit int, hostname string) ([]NetworkEg
 			        agent_execution_id, user_id, tool_id, hostname, url, http_method, protocol,
 			        policy_outcome, decision_code, blocked, severity, details
 			 FROM network_egress_events WHERE hostname = ?
-			 ORDER BY julianday(timestamp) DESC, timestamp DESC LIMIT ?`, hostname, limit,
+			 ORDER BY `+order+` LIMIT ?`, hostname, limit,
 		)
 	}
 	if err != nil {
@@ -4459,6 +4971,32 @@ func (s *Store) GetTargetSnapshot(targetType, targetPath string) (*SnapshotRow, 
 	return &r, nil
 }
 
+// ReleaseMemory has SQLite free the page cache of every connection the store
+// holds (PRAGMA shrink_memory). Each connection keeps up to cache_size of
+// pages in memory outside the Go heap; a hook flood fills them and nothing
+// gave them back while the gateway sat idle (rel-1-0-3 GAP-0244). The gateway
+// calls it once the calls stop; the next reads load their pages again.
+func (s *Store) ReleaseMemory(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	s.lifecycleMu.RLock()
+	defer s.lifecycleMu.RUnlock()
+	if s.closed {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, "PRAGMA shrink_memory")
+	s.checkpointMu.Lock()
+	defer s.checkpointMu.Unlock()
+	for _, db := range []*sql.DB{s.checkpointDB, s.durableDB} {
+		if db != nil {
+			_, shrinkErr := db.ExecContext(ctx, "PRAGMA shrink_memory")
+			err = errors.Join(err, shrinkErr)
+		}
+	}
+	return err
+}
+
 func (s *Store) Close() error {
 	if s == nil || s.db == nil {
 		return nil
@@ -4472,11 +5010,22 @@ func (s *Store) Close() error {
 	// transactions to release the lifecycle read lock.
 	s.ready.Store(false)
 	s.closed = true
+	var readErr error
+	if s.readDB != nil {
+		readErr = s.readDB.Close()
+	}
 	err := s.db.Close()
+	if readErr != nil {
+		err = errors.Join(err, readErr)
+	}
 	s.checkpointMu.Lock()
 	if s.checkpointDB != nil {
 		err = errors.Join(err, s.checkpointDB.Close())
 		s.checkpointDB = nil
+	}
+	if s.durableDB != nil {
+		err = errors.Join(err, s.durableDB.Close())
+		s.durableDB = nil
 	}
 	s.checkpointMu.Unlock()
 	s.dbPathGuard.close()

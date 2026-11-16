@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	policyassets "github.com/defenseclaw/defenseclaw/policies"
 	"gopkg.in/yaml.v3"
 )
 
@@ -399,13 +400,13 @@ func TestGeneratedDefaultRuleCatalogMatchesShippedYAML(t *testing.T) {
 		}
 		yamlCategories[file.Category] = file
 	}
-	if got, want := len(defaultRuleCategories), len(yamlCategories); got != want {
+	if got, want := len(defaultRuleCategories()), len(yamlCategories); got != want {
 		t.Fatalf("generated category count = %d, default YAML count = %d", got, want)
 	}
 
-	seenCategories := make(map[string]bool, len(defaultRuleCategories))
+	seenCategories := make(map[string]bool, len(defaultRuleCategories()))
 	seenIDs := make(map[string]bool)
-	for _, generatedCategory := range defaultRuleCategories {
+	for _, generatedCategory := range defaultRuleCategories() {
 		if seenCategories[generatedCategory.Name] {
 			t.Fatalf("generated catalog contains duplicate category %q", generatedCategory.Name)
 		}
@@ -819,5 +820,50 @@ func guardrailPoliciesRoot(t *testing.T) string {
 	if !ok {
 		t.Fatal("cannot resolve caller path")
 	}
-	return filepath.Join(filepath.Dir(selfPath), "..", "..", "policies", "guardrail")
+	return guardrailPoliciesRootFrom(t, filepath.Join(filepath.Dir(selfPath), "..", "..", "policies", "guardrail"))
+}
+
+// guardrailPoliciesRootFrom returns source when it is a directory. A test
+// binary run on a host without the source tree (the Windows hook flood probe
+// lane) gets the embedded vendor packs written to a temporary directory: the
+// same files, so the lane needs no staging.
+func guardrailPoliciesRootFrom(t *testing.T, source string) string {
+	t.Helper()
+	if info, err := os.Stat(source); err == nil && info.IsDir() {
+		return source
+	}
+	files, err := policyassets.Files()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "policies")
+	for _, file := range files {
+		if !strings.HasPrefix(file.Path, "guardrail/") {
+			continue
+		}
+		target := filepath.Join(root, filepath.FromSlash(file.Path))
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, file.Data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return filepath.Join(root, "guardrail")
+}
+
+func TestGuardrailPoliciesRootWithoutTheSourceTreeUsesTheEmbeddedPacks(t *testing.T) {
+	source := guardrailPoliciesRoot(t)
+	embedded := guardrailPoliciesRootFrom(t, filepath.Join(t.TempDir(), "no-source-tree"))
+	if embedded == source {
+		t.Fatal("the fallback returned the source tree")
+	}
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		want := mustLoadRulePack(t, filepath.Join(source, profile))
+		got := mustLoadRulePack(t, filepath.Join(embedded, profile))
+		if len(got.RuleFiles) == 0 || got.FilesDigest() != want.FilesDigest() {
+			t.Fatalf("%s pack: the embedded files (%d rule files, digest %s) differ from the source tree (%d, %s)",
+				profile, len(got.RuleFiles), got.FilesDigest(), len(want.RuleFiles), want.FilesDigest())
+		}
+	}
 }

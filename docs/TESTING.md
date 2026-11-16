@@ -86,6 +86,26 @@ contract is documented in [E2E.md](E2E.md).
 
 Run E2E tests only when the required local services, credentials, and platform assumptions are available.
 
+The OpenCode bridge also has an opt-in test against an already downloaded
+vendor CLI. It uses a temporary home, a local fake model and a local fake
+gateway to verify allow and block for native `shell`, `read`, `write`, `edit`
+and `patch` calls, including their exact arguments and correlated results,
+through both automatic discovery and a configured directory entrypoint.
+The patch fixture uses a GPT-family model ID because V2 selects that tool by
+model family; all model responses still come from the local fake API.
+The fake HTTP transport substitutes for native connected-peer verification;
+the connector transport suites test that boundary separately.
+It installs nothing and needs no
+model credentials. On a POSIX host, run it with an OpenCode V2 binary:
+
+```bash
+python3 scripts/test_opencode_plugin_live.py --binary /path/to/opencode-v2 --major 2
+```
+
+Use `--tool shell|read|write|edit|patch` to run one tool, or
+`--registration auto|configured` to select one registration path. The default
+runs all 20 combinations (five tools, two registration paths, allow and block).
+
 ## Install and Upgrade Tests
 
 `scripts/test-install-lifecycle.sh` (macOS and Linux) and
@@ -112,11 +132,18 @@ scripts/test-install-lifecycle.sh --assets /tmp/dc-1.0.1 --previous-assets /tmp/
 | `drills` | A gateway that never becomes healthy, a migration that fails halfway, a configuration from a newer release, a CLI broken at import, an install killed mid-swap, and a stale `gateway.pid` |
 | `macos-app` | The app bundle is swapped with the runtime and restored by rollback (macOS only) |
 
+On macOS and Linux, `upgrade-0.X.Y` retries the legacy installer at most twice
+when its release download reports HTTP 5xx. Checksum failures and other
+installer errors fail the lane immediately. The Unix Standalone Lifecycle CI
+job logs each enterprise Unix test name and runs that suite separately from
+the other lifecycle packages so a stalled test can be identified.
+
 When `cosign` is installed and the assets carry `checksums.txt.bundle`, the
 `fresh` lane also checks that the installer verified the release signature.
 The PowerShell script takes `-Assets`, `-PreviousAssets` and `-Lanes`. Its
 lanes are `fresh`, `setup-import` (replacing a synthetic 0.8.x Setup install),
-`files-in-use`, `failure-drill`, `policy` (the `DisableSelfUpdate` refusal;
+`files-in-use`, `failure-drill` and `failure-drill-exit3` (an upgrade whose
+gateway refuses to start, or exits 3 without running, is undone), `policy` (the `DisableSelfUpdate` refusal;
 needs an elevated shell), and `upgrade-previous` and `shim`, which need
 `-PreviousAssets`. `upgrade-0.X.Y` (0.8.0-0.8.3) needs `-CodexExe`, a Codex CLI
 `codex.exe`: 0.x sets up the codex connector, and DefenseClaw on Windows runs
@@ -126,14 +153,13 @@ installed there, the lane copies it into the real profile's
 
 ## Enterprise Install Lanes
 
-For end-to-end manual certification on Windows, macOS and Linux, use the [enterprise test plan](ENTERPRISE-TEST-PLAN.md).
-
 The standalone managed-enterprise packages have their own install lanes.
 They install and remove system services, so run them only on a disposable
 host (a CI runner, a container or a throwaway VM), as root or from an
 elevated shell.
 
-CI runs these lanes on each pull request: the `.deb` on Ubuntu 24.04, the
+CI runs these lanes on each pull request that changes managed code: the
+`.deb` on Ubuntu 24.04, the
 `.rpm` in RHEL 9 and RHEL 8 containers that boot systemd, the macOS `.pkg` on
 a macOS runner, and the unsigned Windows Setup on a Windows runner. Each lane
 runs install, a second `ensure` that must change nothing, `verify`, `status`,
@@ -141,10 +167,10 @@ the detection script and uninstall, and checks every lifecycle result.
 
 | Script | What it does |
 | --- | --- |
-| `scripts/test-enterprise-unix-install.sh` | Installs a `.deb`, `.rpm` or macOS `.pkg` and applies a config that enables Claude Code and Codex, whose machine policy must be owned and locked. Checks that a second `ensure` is a no-op, and runs `verify`, `status` and the MDM `detect.sh`. Then uninstalls, checks that no service or machine-policy entry is left and that the config is kept, and purges |
+| `scripts/test-enterprise-unix-install.sh` | Installs a `.deb`, `.rpm` or macOS `.pkg`, applies Claude Code and Codex machine policy, checks no-op `ensure`, `verify`, `status`, MDM detection and uninstall. Fresh installs and upgrades on every OS leave host kernel settings as found. Linux results report current namespace and ptrace facts; the lane checks those warnings against `security_complete` |
 | `scripts/test-enterprise-linux-container.sh` | Runs the Linux lane in a container that boots systemd (`--image`), for a distribution other than the host's |
 | `scripts/test-enterprise-windows-install.ps1` | Runs the hash-pinned unsigned `DefenseClawSetup-Enterprise-Standalone-x64.exe` through `/ensure`, a no-op `/ensure`, `verify`, `status`, `detect.ps1`, the installed CLI's own `ensure` and `/uninstall`. Checks the four services, the HKLM marker, the Add/Remove Programs entry, and that the Codex requirements and the Claude Code managed-settings fragment name the DefenseClaw hook after `/ensure` and are gone after `/uninstall` |
-| `scripts/check_enterprise_lifecycle_result.py` | Checks one saved lifecycle result against what the step must produce. Every lane uses it. A step fails on any error and on any warning it does not allow (`--allow-warning`); `--complete` also requires `coverage_complete` and `security_complete` |
+| `scripts/check_enterprise_lifecycle_result.py` | Checks one saved lifecycle result against the step contract. Every lane uses it. Any unexpected error or warning fails; `--policy-view-status` matches Linux kernel fact warnings to incomplete security, and `--complete` requires full coverage and security |
 
 Build the packages the lanes install:
 
@@ -195,6 +221,27 @@ administrator records the live Claude Code policy proof
 so the Windows lane requires `coverage_complete` and requires
 `security_complete` to stay false.
 
+### Which pull requests run the managed lanes
+
+`.github/managed-paths.txt` lists the managed code: whole managed packages and
+directories in `[managed]`, and shared files with managed branches in
+`[managed_impacting]`. A pull request that changes a listed path runs
+`Enterprise Required` in `ci.yml` (the install, upgrade, Setup-contract and
+lifecycle lanes) and the Windows Go, Windows Python and PowerShell suites in
+`windows-native.yml`. Those are where the PowerShell enterprise smokes run.
+Any Go change also runs the enterprise lanes. `make check-managed-paths`
+fails when a tracked file whose path looks managed is in no section. When
+you add a managed file, or add a managed branch to a shared file, add it to
+the manifest.
+
+Run `packaging/windows/tests/enterprise-bootstrap-smoke.ps1` by hand as a
+standard user, or from an elevated PowerShell 5.1 or 7 session (elevated SSH
+works). The elevated run needs a medium-integrity non-admin worker. It uses the
+UAC-linked limited token when it can. Otherwise it creates a throwaway local
+standard user and a one-shot scheduled task and removes both afterwards, so that
+session must be allowed to create local users and scheduled tasks. If Windows
+still holds that user's profile, the next run removes it.
+
 ## CI Workflows
 
 Ordinary PRs stay fast, while the release dispatch tests the final signed
@@ -204,6 +251,8 @@ assets on every platform before publishing them. See the
 | Workflow | Purpose |
 |----------|---------|
 | `.github/workflows/ci.yml` | Language, parity and lint checks on every PR, plus `install-smoke`: the install lifecycle lanes on Linux and Windows against assets built from the PR, and the enterprise install lanes (deb, rpm, macOS pkg and Windows services). Each push to a pull request cancels its running CI, so on a busy branch run `gh workflow run ci.yml --ref <branch>` (and `windows-native.yml`): a dispatch tests that commit to the end and later pushes do not cancel it |
+| `.github/workflows/windows-native.yml` | Native Windows Go, Python and PowerShell suites, aggregated by `Windows Native Required`; the Windows Python shards run the `packaging/windows/tests` enterprise smokes |
+| `.github/workflows/windows-deterministic-build.yml` | The AVC reproducibility gate: byte-identical repro JSON and `assemble.sh` output on Linux and macOS. It runs when a pull request changes the build kit, its fixture or `go.mod` (`REPRO_PATHS` in `scripts/ci_changes.py`), and `Windows Deterministic Build Required` always reports |
 | `.github/workflows/telemetry-registry.yml` | Exhaustive telemetry-registry mutation, provenance, and failure-atomicity suites for telemetry-sensitive PRs, nightly, and manual dispatch |
 | `.github/workflows/e2e.yml` | Self-hosted end-to-end suites and scheduled validation |
 | `.github/workflows/release.yaml` | One manual build, sign, install-gate, `enterprise-upgrade-gate` and publish pipeline for a reviewed `main` commit. The `enterprise-upgrade-gate` job upgrades the previous 1.x enterprise package on a deb, rpm, pkg and Windows host and checks that the administrator config kept its intent; see [The enterprise upgrade gate](RELEASE_RUNBOOK.md#the-enterprise-upgrade-gate) |

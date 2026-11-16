@@ -140,7 +140,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "count(sum by (host_name, defenseclaw_sandbox_name) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"sandbox.lifecycle\" [$__range]))) or vector(0)",
+          "expr": "count(sum by (host_name, defenseclaw_sandbox_name) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"sandbox.lifecycle\" [$__range]))) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -195,7 +195,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.allowed\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.allowed\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -250,7 +250,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -309,7 +309,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"finding.observed\" |= \"sandbox.shadow_ai\" | json | __error__=\"\" | body_defenseclaw_finding_category=\"sandbox.shadow_ai\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"finding.observed\" |= \"sandbox.shadow_ai\" | json | __error__=\"\" | body_defenseclaw_finding_category=\"sandbox.shadow_ai\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -368,7 +368,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_event_name=\"subsystem.degraded\" | json | __error__=\"\" | body_defenseclaw_health_subsystem=\"openshell\" | body_defenseclaw_sandbox_name=~\"$sandbox\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_event_name=\"subsystem.degraded\" | json | __error__=\"\" | body_defenseclaw_health_subsystem=\"openshell\" | body_defenseclaw_sandbox_name=~\"$sandbox\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -378,7 +378,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_event_name=\"subsystem.degraded\" | json | __error__=\"\" | body_defenseclaw_health_subsystem=\"openshell\" | body_defenseclaw_sandbox_name=\"\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_event_name=\"subsystem.degraded\" | json | __error__=\"\" | body_defenseclaw_health_subsystem=\"openshell\" | body_defenseclaw_sandbox_name=\"\" [$__range])) or vector(0)",
           "refId": "B",
           "instant": true,
           "queryType": "instant"
@@ -475,7 +475,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "count(sum by (host_name, defenseclaw_sandbox_name) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](lifecycle|policy[.]resolved|policy[.]rematched)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_sandbox_policy_digest!=\"\" [$__range]))) or vector(0)",
+          "expr": "count(sum by (host_name, defenseclaw_sandbox_name) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](lifecycle|policy[.]resolved|policy[.]rematched)\" | defenseclaw_sandbox_name!=\"\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_sandbox_policy_digest!=\"\" [$__range]))) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -530,7 +530,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "100 * sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.policy.resolved\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_sandbox_policy_provisional=\"true\" [$__range])) / sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.policy.resolved\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" [$__range])) or vector(0)",
+          "expr": "100 * sum(count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.policy.resolved\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_sandbox_policy_provisional=\"true\" [$__range])) / sum(count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.policy.resolved\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -586,7 +586,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.host_run_refused\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.host_run_refused\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -645,7 +645,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.host_run_unavailable\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.host_run_unavailable\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -704,7 +704,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.access_refused\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.access_refused\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -763,7 +763,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](foreign_sandbox|foreign_container|policy[.]foreign_rule)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](foreign_sandbox|foreign_container|policy[.]foreign_rule)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -822,7 +822,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.ask.decided\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.ask.decided\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -877,7 +877,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.ask.decided\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_approval_result=\"approved\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.ask.decided\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_approval_result=\"approved\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -932,7 +932,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.ask.decided\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_approval_result=~\"denied|cancelled|timed_out\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.ask.decided\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_approval_result=~\"denied|cancelled|timed_out\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -987,7 +987,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.policy.rematched\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.policy.rematched\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -1042,7 +1042,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.settings_drift\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.settings_drift\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -1101,7 +1101,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "count(sum by (version) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](lifecycle|policy[.]resolved|policy[.]rematched)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_sandbox_policy_digest!=\"\" | body_defenseclaw_openshell_version!=\"\" | label_format version=\"{{.body_defenseclaw_openshell_version}}\" [$__range]))) or vector(0)",
+          "expr": "count(sum by (version) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](lifecycle|policy[.]resolved|policy[.]rematched)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_sandbox_policy_digest!=\"\" | body_defenseclaw_openshell_version!=\"\" | label_format version=\"{{.body_defenseclaw_openshell_version}}\" [$__range]))) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -1156,7 +1156,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.registration_without_guest\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.registration_without_guest\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -1195,6 +1195,99 @@
       }
     },
     {
+      "id": 132,
+      "type": "timeseries",
+      "title": "Managed sandbox events (counters, all hosts, all names)",
+      "description": "The defenseclaw.sandbox.managed.* counters: refusals, asks decided, foreign items, provisional resolutions and settings drift. They carry profile, driver, connector and the host OS, never a user, host or sandbox label, so they ignore the Host and Sandbox boxes. Counters miss a series' first increment, so the log panels are the exact count.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 14,
+        "w": 20,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum(increase(defenseclaw_sandbox_managed_refusals_total{deployment_environment_name=~\"$environment\", os_type=~\"$os\", driver=~\"$driver\", profile=~\"$profile\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "refusals",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum(increase(defenseclaw_sandbox_managed_asks_total{deployment_environment_name=~\"$environment\", os_type=~\"$os\", driver=~\"$driver\", profile=~\"$profile\"}[$__rate_interval]))",
+          "refId": "B",
+          "legendFormat": "asks decided",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum(increase(defenseclaw_sandbox_managed_foreign_items_total{deployment_environment_name=~\"$environment\", os_type=~\"$os\", driver=~\"$driver\", profile=~\"$profile\"}[$__rate_interval]))",
+          "refId": "C",
+          "legendFormat": "foreign items",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum(increase(defenseclaw_sandbox_managed_provisional_total{deployment_environment_name=~\"$environment\", os_type=~\"$os\", driver=~\"$driver\", profile=~\"$profile\"}[$__rate_interval]))",
+          "refId": "D",
+          "legendFormat": "provisional resolutions",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum(increase(defenseclaw_sandbox_managed_drift_total{deployment_environment_name=~\"$environment\", os_type=~\"$os\", driver=~\"$driver\", profile=~\"$profile\"}[$__rate_interval]))",
+          "refId": "E",
+          "legendFormat": "settings drift",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 40,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "right"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
       "id": 114,
       "type": "bargauge",
       "title": "Sandboxes by profile",
@@ -1215,7 +1308,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(20, count by (profile) (sum by (host_name, defenseclaw_sandbox_name, profile) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](lifecycle|policy[.]resolved|policy[.]rematched)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_sandbox_policy_digest!=\"\" | label_format profile=\"{{if .body_defenseclaw_guardrail_profile_name}}{{.body_defenseclaw_guardrail_profile_name}}{{else}}(organization floor){{end}}\" [$__range]))))",
+          "expr": "topk(20, count by (profile) (sum by (host_name, defenseclaw_sandbox_name, profile) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](lifecycle|policy[.]resolved|policy[.]rematched)\" | defenseclaw_sandbox_name!=\"\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_sandbox_policy_digest!=\"\" | label_format profile=\"{{if .body_defenseclaw_guardrail_profile_name}}{{.body_defenseclaw_guardrail_profile_name}}{{else}}(organization floor){{end}}\" [$__range]))))",
           "refId": "A",
           "legendFormat": "{{profile}}",
           "instant": true,
@@ -1270,7 +1363,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(50, count by (profile, match, grp) (sum by (host_name, defenseclaw_sandbox_name, profile, match, grp) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](lifecycle|policy[.]resolved|policy[.]rematched)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_sandbox_policy_digest!=\"\" | label_format profile=\"{{if .body_defenseclaw_guardrail_profile_name}}{{.body_defenseclaw_guardrail_profile_name}}{{else}}(organization floor){{end}}\", match=\"{{.body_defenseclaw_guardrail_profile_match}}\", grp=\"{{.body_defenseclaw_guardrail_profile_matched_group}}\" [$__range]))))",
+          "expr": "topk(50, count by (profile, match, grp) (sum by (host_name, defenseclaw_sandbox_name, profile, match, grp) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](lifecycle|policy[.]resolved|policy[.]rematched)\" | defenseclaw_sandbox_name!=\"\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_sandbox_policy_digest!=\"\" | label_format profile=\"{{if .body_defenseclaw_guardrail_profile_name}}{{.body_defenseclaw_guardrail_profile_name}}{{else}}(organization floor){{end}}\", match=\"{{.body_defenseclaw_guardrail_profile_match}}\", grp=\"{{.body_defenseclaw_guardrail_profile_matched_group}}\" [$__range]))))",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -1333,7 +1426,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(10, count by (os_type) (sum by (host_name, defenseclaw_sandbox_name, os_type) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](lifecycle|policy[.]resolved|policy[.]rematched)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_sandbox_policy_digest!=\"\" [$__range]))))",
+          "expr": "topk(10, count by (os_type) (sum by (host_name, defenseclaw_sandbox_name, os_type) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](lifecycle|policy[.]resolved|policy[.]rematched)\" | defenseclaw_sandbox_name!=\"\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_sandbox_policy_digest!=\"\" [$__range]))))",
           "refId": "A",
           "legendFormat": "{{os_type}}",
           "instant": true,
@@ -1388,7 +1481,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(10, count by (driver) (sum by (host_name, defenseclaw_sandbox_name, driver) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](lifecycle|policy[.]resolved|policy[.]rematched)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_sandbox_policy_digest!=\"\" | label_format driver=\"{{.body_defenseclaw_sandbox_driver}}\" [$__range]))))",
+          "expr": "topk(10, count by (driver) (sum by (host_name, defenseclaw_sandbox_name, driver) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](lifecycle|policy[.]resolved|policy[.]rematched)\" | defenseclaw_sandbox_name!=\"\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_sandbox_policy_digest!=\"\" | label_format driver=\"{{.body_defenseclaw_sandbox_driver}}\" [$__range]))))",
           "refId": "A",
           "legendFormat": "{{driver}}",
           "instant": true,
@@ -1443,7 +1536,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(50, count by (version, mode) (sum by (host_name, version, mode) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](lifecycle|policy[.]resolved|policy[.]rematched)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_sandbox_policy_digest!=\"\" | body_defenseclaw_openshell_version!=\"\" | label_format version=\"{{.body_defenseclaw_openshell_version}}\", mode=\"{{.body_defenseclaw_openshell_install_mode}}\" [$__range]))))",
+          "expr": "topk(50, count by (version, mode) (sum by (host_name, version, mode) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](lifecycle|policy[.]resolved|policy[.]rematched)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_sandbox_policy_digest!=\"\" | body_defenseclaw_openshell_version!=\"\" | label_format version=\"{{.body_defenseclaw_openshell_version}}\", mode=\"{{.body_defenseclaw_openshell_install_mode}}\" [$__range]))))",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -1517,7 +1610,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum by (reason) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.policy.rematched\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | label_format reason=\"{{.body_defenseclaw_sandbox_policy_rematch_reason}}\" [$__interval]))",
+          "expr": "sum by (reason) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.policy.rematched\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | label_format reason=\"{{.body_defenseclaw_sandbox_policy_rematch_reason}}\" [$__interval]))",
           "refId": "A",
           "legendFormat": "{{reason}}"
         }
@@ -1569,7 +1662,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum by (field) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.settings_drift\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | label_format field=\"{{.body_defenseclaw_openshell_settings_field}}\" [$__interval]))",
+          "expr": "sum by (field) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.settings_drift\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | label_format field=\"{{.body_defenseclaw_openshell_settings_field}}\" [$__interval]))",
           "refId": "A",
           "legendFormat": "{{field}}"
         }
@@ -1621,7 +1714,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "{service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.]policy[.](resolved|rematched)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | line_format \"{{.event_name}} · {{.body_defenseclaw_sandbox_name}} · {{if .body_defenseclaw_sandbox_policy_previous_profile}}{{.body_defenseclaw_sandbox_policy_previous_profile}} → {{end}}{{if .body_defenseclaw_guardrail_profile_name}}{{.body_defenseclaw_guardrail_profile_name}}{{else}}(organization floor){{end}} · {{if .body_defenseclaw_sandbox_policy_rematch_reason}}{{.body_defenseclaw_sandbox_policy_rematch_reason}}{{else}}resolved{{end}} · provisional {{.body_defenseclaw_sandbox_policy_provisional}} · {{.body_defenseclaw_sandbox_policy_digest}}\"",
+          "expr": "{service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.]policy[.](resolved|rematched)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | line_format \"{{.event_name}} · {{.body_defenseclaw_sandbox_name}} · {{if .body_defenseclaw_sandbox_policy_previous_profile}}{{.body_defenseclaw_sandbox_policy_previous_profile}} → {{end}}{{if .body_defenseclaw_guardrail_profile_name}}{{.body_defenseclaw_guardrail_profile_name}}{{else}}(organization floor){{end}} · {{if .body_defenseclaw_sandbox_policy_rematch_reason}}{{.body_defenseclaw_sandbox_policy_rematch_reason}}{{else}}resolved{{end}} · provisional {{.body_defenseclaw_sandbox_policy_provisional}} · {{.body_defenseclaw_sandbox_policy_digest}}\"",
           "refId": "A"
         }
       ],
@@ -1667,7 +1760,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum by (kind, reason) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](host_run_refused|host_run_unavailable)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | label_format kind=\"{{.event_name}}\", reason=\"{{.body_defenseclaw_sandbox_managed_reason}}\" [$__interval]))",
+          "expr": "sum by (kind, reason) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](host_run_refused|host_run_unavailable)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | label_format kind=\"{{.event_name}}\", reason=\"{{.body_defenseclaw_sandbox_managed_reason}}\" [$__interval]))",
           "refId": "A",
           "legendFormat": "{{kind}} · {{reason}}"
         }
@@ -1719,7 +1812,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum by (result, kind) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.ask.decided\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | label_format result=\"{{.body_defenseclaw_approval_result}}\", kind=\"{{.body_defenseclaw_sandbox_approval_kind}}\" [$__interval]))",
+          "expr": "sum by (result, kind) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.ask.decided\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | label_format result=\"{{.body_defenseclaw_approval_result}}\", kind=\"{{.body_defenseclaw_sandbox_approval_kind}}\" [$__interval]))",
           "refId": "A",
           "legendFormat": "{{result}} · {{kind}}"
         }
@@ -1771,7 +1864,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(20, sum by (profile) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](host_run_refused|host_run_unavailable|access_refused)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | label_format profile=\"{{if .body_defenseclaw_guardrail_profile_name}}{{.body_defenseclaw_guardrail_profile_name}}{{else}}(organization floor){{end}}\" [$__range])))",
+          "expr": "topk(20, sum by (profile) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](host_run_refused|host_run_unavailable|access_refused)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | label_format profile=\"{{if .body_defenseclaw_guardrail_profile_name}}{{.body_defenseclaw_guardrail_profile_name}}{{else}}(organization floor){{end}}\" [$__range])))",
           "refId": "A",
           "legendFormat": "{{profile}}",
           "instant": true,
@@ -1826,7 +1919,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(10, sum by (rule) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.access_refused\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | label_format rule=\"{{if .body_defenseclaw_sandbox_policy_rule}}{{.body_defenseclaw_sandbox_policy_rule}}{{else}}(none){{end}}\" [$__range])))",
+          "expr": "topk(10, sum by (rule) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.access_refused\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | label_format rule=\"{{if .body_defenseclaw_sandbox_policy_rule}}{{.body_defenseclaw_sandbox_policy_rule}}{{else}}(none){{end}}\" [$__range])))",
           "refId": "A",
           "legendFormat": "{{rule}}",
           "instant": true,
@@ -1881,7 +1974,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum by (kind, action) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](foreign_sandbox|foreign_container|policy[.]foreign_rule)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | label_format kind=\"{{.event_name}}\", action=\"{{.body_defenseclaw_sandbox_managed_action}}\" [$__interval]))",
+          "expr": "sum by (kind, action) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](foreign_sandbox|foreign_container|policy[.]foreign_rule)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | label_format kind=\"{{.event_name}}\", action=\"{{.body_defenseclaw_sandbox_managed_action}}\" [$__interval]))",
           "refId": "A",
           "legendFormat": "{{kind}} · {{action}}"
         }
@@ -1933,7 +2026,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "{service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](host_run_refused|host_run_unavailable|access_refused|settings_drift)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | line_format \"{{.event_name}} · {{if .body_defenseclaw_guardrail_profile_name}}{{.body_defenseclaw_guardrail_profile_name}}{{else}}(organization floor){{end}} · {{.body_defenseclaw_sandbox_managed_reason}} · {{.body_defenseclaw_sandbox_policy_rule}}{{.body_defenseclaw_openshell_settings_field}} · {{.body_server_address}}\"",
+          "expr": "{service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](host_run_refused|host_run_unavailable|access_refused|settings_drift)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | line_format \"{{.event_name}} · {{if .body_defenseclaw_guardrail_profile_name}}{{.body_defenseclaw_guardrail_profile_name}}{{else}}(organization floor){{end}} · {{.body_defenseclaw_sandbox_managed_reason}} · {{.body_defenseclaw_sandbox_policy_rule}}{{.body_defenseclaw_openshell_settings_field}} · {{.body_server_address}}\"",
           "refId": "A"
         }
       ],
@@ -1967,7 +2060,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "{service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](ask[.]decided|foreign_sandbox|foreign_container|policy[.]foreign_rule)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | line_format \"{{.event_name}} · {{.body_defenseclaw_sandbox_name}} · {{.body_defenseclaw_approval_result}}{{.body_defenseclaw_sandbox_managed_action}} · {{.body_defenseclaw_sandbox_managed_reason}} · {{.body_server_address}}\"",
+          "expr": "{service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](ask[.]decided|foreign_sandbox|foreign_container|policy[.]foreign_rule)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | line_format \"{{.event_name}} · {{.body_defenseclaw_sandbox_name}} · {{.body_defenseclaw_approval_result}}{{.body_defenseclaw_sandbox_managed_action}} · {{.body_defenseclaw_sandbox_managed_reason}} · {{.body_server_address}}\"",
           "refId": "A"
         }
       ],
@@ -2063,7 +2156,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum by (phase) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"sandbox.lifecycle\" | json | __error__=\"\" | label_format phase=\"{{.body_defenseclaw_sandbox_phase}}\" [$__interval]))",
+          "expr": "sum by (phase) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"sandbox.lifecycle\" | json | __error__=\"\" | label_format phase=\"{{.body_defenseclaw_sandbox_phase}}\" [$__interval]))",
           "refId": "A",
           "legendFormat": "{{phase}}"
         }
@@ -2115,7 +2208,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "{service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"sandbox.lifecycle\" | json | __error__=\"\" | line_format \"{{.body_defenseclaw_sandbox_name}} · {{if .body_defenseclaw_sandbox_phase_previous}}{{.body_defenseclaw_sandbox_phase_previous}}{{else}}?{{end}} → {{.body_defenseclaw_sandbox_phase}} · trigger {{.body_defenseclaw_sandbox_lifecycle_trigger}} · {{.body_defenseclaw_sandbox_condition_reason}}\"",
+          "expr": "{service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"sandbox.lifecycle\" | json | __error__=\"\" | line_format \"{{.body_defenseclaw_sandbox_name}} · {{if .body_defenseclaw_sandbox_phase_previous}}{{.body_defenseclaw_sandbox_phase_previous}}{{else}}?{{end}} → {{.body_defenseclaw_sandbox_phase}} · trigger {{.body_defenseclaw_sandbox_lifecycle_trigger}} · {{.body_defenseclaw_sandbox_condition_reason}}\"",
           "refId": "A"
         }
       ],
@@ -2161,7 +2254,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum by (net_source, net_decision) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=~\"egress[.]allowed|egress[.]blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" | label_format net_source=\"{{.body_defenseclaw_network_source}}\", net_decision=\"{{.body_defenseclaw_network_decision}}\" [$__interval]))",
+          "expr": "sum by (net_source, net_decision) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=~\"egress[.]allowed|egress[.]blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" | label_format net_source=\"{{.body_defenseclaw_network_source}}\", net_decision=\"{{.body_defenseclaw_network_decision}}\" [$__interval]))",
           "refId": "A",
           "legendFormat": "{{net_source}} · {{net_decision}}"
         }
@@ -2266,7 +2359,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(10, sum by (dest) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" [$__range])))",
+          "expr": "topk(10, sum by (dest) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" [$__range])))",
           "refId": "A",
           "legendFormat": "{{dest}}",
           "instant": true,
@@ -2325,7 +2418,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(10, sum by (dest) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.allowed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" [$__range])))",
+          "expr": "topk(10, sum by (dest) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.allowed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" [$__range])))",
           "refId": "A",
           "legendFormat": "{{dest}}",
           "instant": true,
@@ -2392,7 +2485,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(10, sum by (dest) (sum_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" | unwrap body_defenseclaw_network_bytes_up | __error__=\"\" [$__range])))",
+          "expr": "topk(10, sum by (dest) (sum_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" | unwrap body_defenseclaw_network_bytes_up | __error__=\"\" [$__range])))",
           "refId": "A",
           "legendFormat": "{{dest}}",
           "instant": true,
@@ -2447,7 +2540,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(10, sum by (dest) (sum_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" | unwrap body_defenseclaw_network_bytes_down | __error__=\"\" [$__range])))",
+          "expr": "topk(10, sum by (dest) (sum_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" | unwrap body_defenseclaw_network_bytes_down | __error__=\"\" [$__range])))",
           "refId": "A",
           "legendFormat": "{{dest}}",
           "instant": true,
@@ -2502,7 +2595,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(sum_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | unwrap body_defenseclaw_network_bytes_up | __error__=\"\" [$__interval]))",
+          "expr": "sum(sum_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | unwrap body_defenseclaw_network_bytes_up | __error__=\"\" [$__interval]))",
           "refId": "A",
           "legendFormat": "bytes up"
         },
@@ -2511,7 +2604,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(sum_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | unwrap body_defenseclaw_network_bytes_down | __error__=\"\" [$__interval]))",
+          "expr": "sum(sum_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | unwrap body_defenseclaw_network_bytes_down | __error__=\"\" [$__interval]))",
           "refId": "B",
           "legendFormat": "bytes down"
         }
@@ -2575,7 +2668,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(50, sum by (dest) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.allowed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" [$__range])))",
+          "expr": "topk(50, sum by (dest) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.allowed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" [$__range])))",
           "refId": "ALLOWED",
           "instant": true,
           "queryType": "instant"
@@ -2585,7 +2678,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(50, sum by (dest) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" [$__range])))",
+          "expr": "topk(50, sum by (dest) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" [$__range])))",
           "refId": "BLOCKED",
           "instant": true,
           "queryType": "instant"
@@ -2595,7 +2688,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(50, sum by (dest) (sum_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" | unwrap body_defenseclaw_network_bytes_up | __error__=\"\" [$__range])))",
+          "expr": "topk(50, sum by (dest) (sum_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" | unwrap body_defenseclaw_network_bytes_up | __error__=\"\" [$__range])))",
           "refId": "UP",
           "instant": true,
           "queryType": "instant"
@@ -2605,7 +2698,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(50, sum by (dest) (sum_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" | unwrap body_defenseclaw_network_bytes_down | __error__=\"\" [$__range])))",
+          "expr": "topk(50, sum by (dest) (sum_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" | unwrap body_defenseclaw_network_bytes_down | __error__=\"\" [$__range])))",
           "refId": "DOWN",
           "instant": true,
           "queryType": "instant"
@@ -2742,7 +2835,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "{service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" | line_format \"{{.body_defenseclaw_sandbox_name}} · {{.body_defenseclaw_network_source}} · {{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}:{{.body_server_port}} · {{.body_defenseclaw_network_decision_code}} · {{.body_defenseclaw_sandbox_process_executable}}\"",
+          "expr": "{service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" | line_format \"{{.body_defenseclaw_sandbox_name}} · {{.body_defenseclaw_network_source}} · {{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}:{{.body_server_port}} · {{.body_defenseclaw_network_decision_code}} · {{.body_defenseclaw_sandbox_process_executable}}\"",
           "refId": "A"
         }
       ],
@@ -2788,7 +2881,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum by (kind) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"finding.observed\" | json | __error__=\"\" | body_defenseclaw_finding_category=~\"sandbox[.].+\" | label_format kind=\"{{.body_defenseclaw_finding_category}}\" [$__range]))",
+          "expr": "sum by (kind) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"finding.observed\" | json | __error__=\"\" | body_defenseclaw_finding_category=~\"sandbox[.].+\" | label_format kind=\"{{.body_defenseclaw_finding_category}}\" [$__range]))",
           "refId": "A",
           "legendFormat": "{{kind}}",
           "instant": true,
@@ -2851,7 +2944,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(50, sum by (target, severity) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"finding.observed\" |= \"sandbox.shadow_ai\" | json | __error__=\"\" | body_defenseclaw_finding_category=\"sandbox.shadow_ai\" | label_format target=\"{{.body_defenseclaw_finding_target_ref}}\", severity=\"{{.body_defenseclaw_security_severity}}\" [$__range])))",
+          "expr": "topk(50, sum by (target, severity) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"finding.observed\" |= \"sandbox.shadow_ai\" | json | __error__=\"\" | body_defenseclaw_finding_category=\"sandbox.shadow_ai\" | label_format target=\"{{.body_defenseclaw_finding_target_ref}}\", severity=\"{{.body_defenseclaw_security_severity}}\" [$__range])))",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -2913,7 +3006,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "{service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"finding.observed\" | json | __error__=\"\" | body_defenseclaw_finding_category=~\"sandbox[.].+\" | line_format \"{{.body_defenseclaw_security_severity}} · {{.body_defenseclaw_sandbox_name}} · {{.body_defenseclaw_finding_rule_id}} · {{.body_defenseclaw_finding_target_ref}}\"",
+          "expr": "{service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"finding.observed\" | json | __error__=\"\" | body_defenseclaw_finding_category=~\"sandbox[.].+\" | line_format \"{{.body_defenseclaw_security_severity}} · {{.body_defenseclaw_sandbox_name}} · {{.body_defenseclaw_finding_rule_id}} · {{.body_defenseclaw_finding_target_ref}}\"",
           "refId": "A"
         }
       ],
@@ -2959,7 +3052,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum by (state) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_event_name=~\"subsystem[.](degraded|restored)\" | json | __error__=\"\" | body_defenseclaw_health_subsystem=\"openshell\" | body_defenseclaw_sandbox_name=~\"($sandbox)?\" | label_format state=\"{{.event_name}}\" [$__interval]))",
+          "expr": "sum by (state) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_event_name=~\"subsystem[.](degraded|restored)\" | json | __error__=\"\" | body_defenseclaw_health_subsystem=\"openshell\" | body_defenseclaw_sandbox_name=~\"($sandbox)?\" | label_format state=\"{{.event_name}}\" [$__interval]))",
           "refId": "A",
           "legendFormat": "{{state}}"
         }
@@ -3011,7 +3104,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "{service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_event_name=~\"subsystem[.](degraded|restored)\" | json | __error__=\"\" | body_defenseclaw_health_subsystem=\"openshell\" | body_defenseclaw_sandbox_name=~\"($sandbox)?\" | line_format \"{{.event_name}} · {{if .body_defenseclaw_sandbox_name}}{{.body_defenseclaw_sandbox_name}}{{else}}gateway{{end}} · {{.body_defenseclaw_schema_error_code}} · {{.body_defenseclaw_health_error_summary}}\"",
+          "expr": "{service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_event_name=~\"subsystem[.](degraded|restored)\" | json | __error__=\"\" | body_defenseclaw_health_subsystem=\"openshell\" | body_defenseclaw_sandbox_name=~\"($sandbox)?\" | line_format \"{{.event_name}} · {{if .body_defenseclaw_sandbox_name}}{{.body_defenseclaw_sandbox_name}}{{else}}gateway{{end}} · {{.body_defenseclaw_schema_error_code}} · {{.body_defenseclaw_health_error_summary}}\"",
           "refId": "A"
         }
       ],
@@ -3057,7 +3150,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum by (seen) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"sandbox.process_tree\" | json | __error__=\"\" | body_defenseclaw_sandbox_process_event=\"start\" | label_format seen=\"{{.body_defenseclaw_sandbox_process_source}}\" [$__interval]))",
+          "expr": "sum by (seen) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"sandbox.process_tree\" | json | __error__=\"\" | body_defenseclaw_sandbox_process_event=\"start\" | label_format seen=\"{{.body_defenseclaw_sandbox_process_source}}\" [$__interval]))",
           "refId": "A",
           "legendFormat": "{{seen}}"
         }
@@ -3109,7 +3202,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(10, sum by (program) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"sandbox.process_tree\" | json | __error__=\"\" | body_defenseclaw_sandbox_process_event=\"start\" | label_format program=\"{{if .body_defenseclaw_sandbox_process_name}}{{.body_defenseclaw_sandbox_process_name}}{{else}}{{.body_defenseclaw_sandbox_process_executable}}{{end}}\" [$__range])))",
+          "expr": "topk(10, sum by (program) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"sandbox.process_tree\" | json | __error__=\"\" | body_defenseclaw_sandbox_process_event=\"start\" | label_format program=\"{{if .body_defenseclaw_sandbox_process_name}}{{.body_defenseclaw_sandbox_process_name}}{{else}}{{.body_defenseclaw_sandbox_process_executable}}{{end}}\" [$__range])))",
           "refId": "A",
           "legendFormat": "{{program}}",
           "instant": true,
@@ -3168,8 +3261,10 @@
         },
         "definition": "label_values({service_name=\"defenseclaw\"}, deployment_environment_name)",
         "query": {
-          "query": "label_values({service_name=\"defenseclaw\"}, deployment_environment_name)",
-          "refId": "LokiVariableQueryEditor-VariableQuery"
+          "label": "deployment_environment_name",
+          "refId": "LokiVariableQueryEditor-VariableQuery",
+          "stream": "{service_name=\"defenseclaw\"}",
+          "type": 1
         },
         "refresh": 2,
         "sort": 1,
@@ -3204,10 +3299,12 @@
           "type": "loki",
           "uid": "defenseclaw-loki"
         },
-        "definition": "label_values({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name!=\"\", host_name)",
+        "definition": "label_values({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"}, host_name)",
         "query": {
-          "query": "label_values({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name!=\"\", host_name)",
-          "refId": "LokiVariableQueryEditor-VariableQuery"
+          "label": "host_name",
+          "refId": "LokiVariableQueryEditor-VariableQuery",
+          "stream": "{service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"}",
+          "type": 1
         },
         "refresh": 2,
         "sort": 1,
@@ -3274,16 +3371,18 @@
       {
         "name": "sandbox",
         "label": "Sandbox",
-        "description": "DefenseClaw sandbox name. Applies to the log panels; the panels marked (all names) ignore it. Populated from the defenseclaw.sandbox.name structured metadata the local collector adds to every record that names a sandbox, so listing sandboxes never parses log bodies. Sandbox identities are never metric labels. Defaults to All.",
+        "description": "DefenseClaw sandbox name. Applies to the log panels; the panels marked (all names) ignore it. Populated from the defenseclaw_sandbox_name Loki index label the local collector and the bundled Loki config add to every record that names a sandbox, so listing sandboxes never parses log bodies. Sandbox identities are never metric labels. Defaults to All.",
         "type": "query",
         "datasource": {
           "type": "loki",
           "uid": "defenseclaw-loki"
         },
-        "definition": "label_values({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name!=\"\", defenseclaw_sandbox_name)",
+        "definition": "label_values({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\", host_name=~\"$host\"}, defenseclaw_sandbox_name)",
         "query": {
-          "query": "label_values({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name!=\"\", defenseclaw_sandbox_name)",
-          "refId": "LokiVariableQueryEditor-VariableQuery"
+          "label": "defenseclaw_sandbox_name",
+          "refId": "LokiVariableQueryEditor-VariableQuery",
+          "stream": "{service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\", host_name=~\"$host\"}",
+          "type": 1
         },
         "refresh": 2,
         "sort": 1,
@@ -3318,10 +3417,12 @@
           "type": "loki",
           "uid": "defenseclaw-loki"
         },
-        "definition": "label_values({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type!=\"\", os_type)",
+        "definition": "label_values({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\", host_name=~\"$host\"}, os_type)",
         "query": {
-          "query": "label_values({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type!=\"\", os_type)",
-          "refId": "LokiVariableQueryEditor-VariableQuery"
+          "label": "os_type",
+          "refId": "LokiVariableQueryEditor-VariableQuery",
+          "stream": "{service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\", host_name=~\"$host\"}",
+          "type": 1
         },
         "refresh": 2,
         "sort": 1,

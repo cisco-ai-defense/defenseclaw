@@ -51,12 +51,12 @@ func TestOpenCodeBridgeUsesVerifiedManagedHookSocket(t *testing.T) {
 	if got := run(os.Getuid() + 7); !strings.Contains(got, "THREW:DefenseClaw hook failed closed") || !strings.Contains(got, "not trusted") {
 		t.Fatalf("untrusted socket result = %q, want a fail-closed refusal", got)
 	}
-	f.requireOnlyTheTrustedRequest(t, "/api/v1/opencode/hook")
+	f.requireTrustedRequests(t, "/api/v1/opencode/hook", 2)
 }
 
 // openCodeSocketHarness runs one tool call through a rendered OpenCode plugin.
 const openCodeSocketHarness = `const m = await import(process.argv[1]);
-const hooks = await m.DefenseClaw({ directory: "/tmp", worktree: "/tmp" });
+const hooks = await fixtureBridge(m, { directory: "/tmp", worktree: "/tmp" });
 try {
   await hooks["tool.execute.before"]({ tool: "bash", sessionID: "s", callID: "c" }, { args: { command: "echo hi" } });
   console.log("ALLOWED");
@@ -86,7 +86,7 @@ func fakeForeignHookGuard(t *testing.T, answers ...string) (string, string) {
 	t.Helper()
 	dir := t.TempDir()
 	guard := filepath.Join(dir, "defenseclaw-hook")
-	script := []string{"#!/bin/sh", "dir='" + dir + "'", `n=$(cat "$dir/count" 2>/dev/null || echo 0)`, `echo $((n + 1)) > "$dir/count"`, `cat > "$dir/request-$n"`, `echo "$*" > "$dir/args"`}
+	script := []string{"#!/bin/sh", `case " $* " in *" --foreign-hook-check "*) ;; *) exit 0 ;; esac`, "dir='" + dir + "'", `n=$(cat "$dir/count" 2>/dev/null || echo 0)`, `echo $((n + 1)) > "$dir/count"`, `cat > "$dir/request-$n"`, `echo "$*" > "$dir/args"`}
 	for index, answer := range answers {
 		condition := `[ "$n" -eq ` + strconv.Itoa(index) + ` ]`
 		if index == len(answers)-1 {
@@ -113,10 +113,18 @@ func TestOpenCodeBridgeRunsTheForeignHookGuard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		mu.Lock()
-		requests++
-		mu.Unlock()
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Event string `json:"hook_event_name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Error(err)
+		}
+		if payload.Event == "tool.execute.before" {
+			mu.Lock()
+			requests++
+			mu.Unlock()
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"action": "allow", "hook_output": map[string]any{"decision": "allow"}})
 	})}
 	go func() { _ = server.Serve(listener) }()
@@ -136,7 +144,7 @@ func TestOpenCodeBridgeRunsTheForeignHookGuard(t *testing.T) {
 			Managed:            true,
 		})
 		return strings.Join(runNodeHarness(t, `const m = await import(process.argv[1]);
-const hooks = await m.DefenseClaw({ directory: "/work/repo", worktree: "/work/repo" });
+const hooks = await fixtureBridge(m, { directory: "/work/repo", worktree: "/work/repo" });
 for (const call of ["c1", "c2"]) {
   try {
     await hooks["tool.execute.before"]({ tool: "bash", sessionID: "s", callID: call }, { args: { command: "echo hi" } });

@@ -41,6 +41,7 @@ func homeGoneFixture(t *testing.T) (f *standaloneFixture, resolver standaloneTes
 	uid, gid := os.Getuid(), os.Getgid()
 	resolver = standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
 	f = newStandaloneFixture(t, resolver)
+	useReportingStandaloneRunner(t)
 	gone = filepath.Join(f.homes, "dcad-gone") // removed with the mobile account
 	kept = f.home(t, "dcad-kept", 0o700)
 	moved = f.home(t, "dcad-moved", 0o700)
@@ -205,20 +206,26 @@ func TestEnterpriseHookDirectoryNoHome(t *testing.T) {
 	}
 }
 
-// A recorded home is gone only when its parent answers and the home is not
-// there: a missing parent (an unmounted volume) or a home that exists is not.
+// A recorded home is gone only when its parent answers, holds other
+// entries, and the home is not there: a missing parent, an empty parent (the
+// mount point of an unmounted volume, GAP-0443) or a home that exists is not.
 func TestEnterpriseHookRecordedHomeGone(t *testing.T) {
 	root := t.TempDir()
 	present := filepath.Join(root, "present")
 	if err := os.Mkdir(present, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	mountPoint := filepath.Join(root, "mountpoint")
+	if err := os.Mkdir(mountPoint, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	for home, want := range map[string]bool{
-		filepath.Join(root, "missing"): true,
-		present:                        false,
+		filepath.Join(root, "missing"):              true,
+		present:                                     false,
+		filepath.Join(mountPoint, "missing"):        false,
 		filepath.Join(root, "unmounted", "missing"): false,
-		"relative/home": false,
-		"/":             false,
+		"relative/home":                             false,
+		"/":                                         false,
 	} {
 		if got := enterpriseHookRecordedHomeGone(home); got != want {
 			t.Errorf("enterpriseHookRecordedHomeGone(%q) = %v, want %v", home, got, want)

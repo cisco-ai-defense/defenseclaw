@@ -23,11 +23,11 @@ def test_fail_mode_while_off_counts_every_saved_connector(monkeypatch: pytest.Mo
     out = " ".join(result.output.split())
     assert (
         "Codex (codex): disabled (no hooks); closed is saved; it stays disabled until "
-        "'defenseclaw guardrail enable --connector codex'" in out
+        "'defenseclaw guardrail enable', then 'defenseclaw guardrail enable --connector codex'" in out
     )
     assert (
         "Config saved (global default + 3 connector overrides = closed; Codex saved, stays disabled until "
-        "'defenseclaw guardrail enable --connector codex') — applies when the guardrail is enabled" in out
+        "'defenseclaw guardrail enable', then 'defenseclaw guardrail enable --connector codex') — applies when the guardrail is enabled" in out.replace(" - ", " — ")
     )
     assert "active connector" not in out
     assert "currently disabled" not in out
@@ -35,22 +35,25 @@ def test_fail_mode_while_off_counts_every_saved_connector(monkeypatch: pytest.Mo
 
     again = _fail_mode(cfg, "closed")
     assert again.exit_code == 0, again.output
-    assert "Hook fail mode is already 'closed' for configured connectors — nothing to do." in again.output
+    assert "Hook fail mode is already 'closed' for configured connectors — nothing to do." in again.output.replace(" - ", " — ")
 
 
-def test_fail_mode_open_on_openclaw_only_says_it_does_not_apply(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    # GAP-2448: "responses will now ALLOW the agent" although OpenClaw (no hooks)
-    # keeps blocking its requests while the gateway is down.
+def test_fail_mode_open_on_per_user_openclaw_saves_for_future_hooks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # OpenClaw has no hooks; an explicit open is saved for later hook connectors, and its
+    # proxied model requests continue with a warning while the gateway is down (GAP-0824).
     cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"openclaw": ""})
     cfg.guardrail.connectors = {}
     cfg.guardrail.connector = "openclaw"
     cfg.guardrail.hook_fail_mode = "closed"
     result = _fail_mode(cfg, "open")
     assert result.exit_code == 0, result.output
-    out = " ".join(result.output.split())
-    assert "OpenClaw is proxy-backed and has no hooks, so the hook fail mode does not apply to it" in out
-    assert "will now ALLOW" not in out
+    assert "OpenClaw: Its proxied model requests continue with a warning while the gateway is down." in " ".join(
+        result.output.split()
+    )
+    assert cfg.guardrail.hook_fail_mode == "open"
 
     bare = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, [], obj=_app(cfg))
     assert bare.exit_code == 0, bare.output
-    assert "OpenClaw (openclaw): closed (proxy-backed, no hooks" in " ".join(bare.output.split())
+    assert "OpenClaw (openclaw): open (proxy-backed, no hooks: model requests continue" in " ".join(
+        bare.output.split()
+    )

@@ -19,11 +19,13 @@ package gateway
 import (
 	"encoding/json"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 type toolCallCorpusCase struct {
@@ -48,6 +50,30 @@ type toolCallCorpusCase struct {
 	ProfileRuleIDs       map[string]string   `json:"profile_rule_ids,omitempty"`
 	ProfileRoutes        map[string]string   `json:"profile_routes,omitempty"`
 	ProfileDetectionOnly map[string]bool     `json:"profile_detection_only,omitempty"`
+	// OSOverrides replaces is_attack and expect_route on one GOOS, for a row
+	// whose truth depends on the platform's path rules (NTFS folds case, so a
+	// case-different spelling of the state directory is the state directory).
+	OSOverrides map[string]toolCallCorpusOSOverride `json:"os_overrides,omitempty"`
+}
+
+type toolCallCorpusOSOverride struct {
+	IsAttack    *bool  `json:"is_attack,omitempty"`
+	ExpectRoute string `json:"expect_route,omitempty"`
+}
+
+// applyToolCallCorpusOSOverride returns the row as it must score on goos.
+func applyToolCallCorpusOSOverride(test toolCallCorpusCase, goos string) toolCallCorpusCase {
+	override, ok := test.OSOverrides[goos]
+	if !ok {
+		return test
+	}
+	if override.IsAttack != nil {
+		test.IsAttack = *override.IsAttack
+	}
+	if override.ExpectRoute != "" {
+		test.ExpectRoute = override.ExpectRoute
+	}
+	return test
 }
 
 const toolCallCorpusStrictOnlyPosture = "strict_only"
@@ -94,7 +120,14 @@ func TestSecuritySuiteToolCall(t *testing.T) {
 		t.Fatal("tool-call corpus empty")
 	}
 	seen := make(map[string]struct{}, len(cases))
-	for _, test := range cases {
+	for i, test := range cases {
+		for goos := range test.OSOverrides {
+			if goos != "linux" && goos != "darwin" && goos != "windows" {
+				t.Fatalf("case %q: unsupported os_overrides key %q", test.ID, goos)
+			}
+		}
+		test = applyToolCallCorpusOSOverride(test, runtime.GOOS)
+		cases[i] = test
 		if strings.TrimSpace(test.ID) == "" || strings.TrimSpace(test.RuleID) == "" {
 			t.Fatal("id and rule_id are required")
 		}
@@ -185,6 +218,24 @@ func runToolCallCorpusProfile(t *testing.T, connector, profile string, cases []t
 				Connector:          connector,
 				EnforcementCapable: true,
 			})
+			// This corpus measures each fixture's original semantic owner. The
+			// action-mode protected-write class is an independent enforcement
+			// decision, so omit only that justified finding from noise counts.
+			noiseFindings := findings
+			if expectedRuleID != "persistence.ssh_authorized_keys_command" {
+				command := input.Command
+				if command == "" {
+					command, _ = trustedBashCommandInput(input)
+				}
+				if hookpaths.ActionCommandDecision(command, input.CWD, input.ActiveHome) != "" {
+					noiseFindings = make([]RuleFinding, 0, len(findings))
+					for _, finding := range findings {
+						if finding.RuleID != "persistence.ssh_authorized_keys_command" {
+							noiseFindings = append(noiseFindings, finding)
+						}
+					}
+				}
+			}
 
 			owner := semanticOwnerForRule(expectedRuleID)
 			count := 0
@@ -230,8 +281,8 @@ func runToolCallCorpusProfile(t *testing.T, connector, profile string, cases []t
 						profile, count, FindingStrings(findings), actionfacts.Analyze(input),
 					)
 				}
-				if (test.NoOtherFinding || strictOnlySuppressed) && len(findings) != 0 {
-					t.Fatalf("profile=%s unexpected finding noise: %v", profile, FindingStrings(findings))
+				if (test.NoOtherFinding || strictOnlySuppressed) && len(noiseFindings) != 0 {
+					t.Fatalf("profile=%s unexpected finding noise: %v", profile, FindingStrings(noiseFindings))
 				}
 				return
 			}
@@ -257,8 +308,8 @@ func runToolCallCorpusProfile(t *testing.T, connector, profile string, cases []t
 					profile, gotRoute, expectRoute, *canonical, actionfacts.Analyze(input),
 				)
 			}
-			if test.NoOtherFinding && len(findings) != 1 {
-				t.Fatalf("profile=%s finding noise count=%d: %v", profile, len(findings), FindingStrings(findings))
+			if test.NoOtherFinding && len(noiseFindings) != 1 {
+				t.Fatalf("profile=%s finding noise count=%d: %v", profile, len(noiseFindings), FindingStrings(noiseFindings))
 			}
 		})
 	}
@@ -292,6 +343,13 @@ func runToolCallCorpusProfile(t *testing.T, connector, profile string, cases []t
 
 func installToolCallCorpusProfileConnector(t *testing.T, connector, profile string) {
 	t.Helper()
+	installToolCallCorpusPackDirConnector(t, connector, filepath.Join(guardrailPoliciesRoot(t), profile))
+}
+
+// installToolCallCorpusPackDirConnector is installToolCallCorpusProfileConnector
+// for the rule pack in dir.
+func installToolCallCorpusPackDirConnector(t *testing.T, connector, dir string) {
+	t.Helper()
 	ruleCategoriesMu.Lock()
 	savedCategories, hadCategories := connectorRuleCategories[connector]
 	savedGeneration, hadGeneration := connectorRuleGenerations[connector]
@@ -311,7 +369,7 @@ func installToolCallCorpusProfileConnector(t *testing.T, connector, profile stri
 		}
 	})
 
-	pack := mustLoadRulePack(t, filepath.Join(guardrailPoliciesRoot(t), profile))
+	pack := mustLoadRulePack(t, dir)
 	if err := ApplyConnectorRulePackOverrides(connector, pack); err != nil {
 		t.Fatal(err)
 	}

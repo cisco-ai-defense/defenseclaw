@@ -9,12 +9,233 @@
 # the hook span links back to the agent's parent span. See
 # codex-hook.sh for the validation contract.
 set -euo pipefail
-
+{{if not .SecureClient}}# The agent's environment cannot change how this script runs: a function
+# nesting limit, a read timeout, ignored commands and POSIX mode would end a
+# check early and let a blocked call run (review 2 of
+# sandbox-visibility:GAP-0028). Before the first function call.
+unset -v FUNCNEST TMOUT EXECIGNORE POSIXLY_CORRECT 2>/dev/null || true
+set +o posix
+{{end}}{{if and (not .Managed) (not .Sandbox)}}# _DC_HOOK_DATA_DIR is the data directory this hook was installed in, the
+# folder above its hooks folder (defenseclaw_install_held). Until the hook
+# path is resolved below it is the folder above the path the agent ran.
+_DC_HOOK_DATA_DIR="${BASH_SOURCE[0]:-$0}"
+case "$_DC_HOOK_DATA_DIR" in
+  */*) _DC_HOOK_DATA_DIR="${_DC_HOOK_DATA_DIR%/*}/.." ;;
+  *) _DC_HOOK_DATA_DIR=".." ;;
+esac
+# _DC_HOOK_HOME is the data directory the gateway rendered this hook into,
+# written into the file: a hard link, a symlink or a copy of the hook, run
+# from any folder, still finds the installer's lock there.
+_DC_HOOK_HOME={{.HookHomeSH}}
+# defenseclaw_install_lock_held DATA returns 0 (true) while this account's
+# installer holds its data directory DATA: DATA/.install.lock exists as any
+# file type and is not stale (defenseclaw_install_lock_stale), or DATA
+# exists but cannot be searched, so the lock cannot be shown absent; no DATA
+# to look in counts as held too. The native hook (installLockHeld), the
+# in-agent plugins and the Windows adapters apply the same rule (GAP-0914).
+# defenseclaw_install_held below, the one install check of every shell hook,
+# reads it.
+defenseclaw_install_lock_held() {
+  local data="${1:-}"
+  [ -n "$data" ] || return 0
+  if [ -e "${data}/.install.lock" ] || [ -L "${data}/.install.lock" ]; then
+    defenseclaw_install_lock_stale "$data" && return 1
+    return 0
+  fi
+  if [ -e "$data" ] || [ -L "$data" ]; then
+    if [ -d "$data" ] && [ -x "$data" ]; then
+      return 1
+    fi
+    return 0
+  fi
+  return 1
+}
+# defenseclaw_install_lock_stale DATA returns 0 (true) when DATA/.install.lock
+# is a folder whose installer is proven gone (an interrupted-install record
+# beside it does not hold it, GAP-1024): its pid names no process, or this hook's own (no
+# hook writes a lock), or another process than its proc-start record names
+# (a reused pid). It reads no clock (hookexec installLockStale, the one
+# rule): a live owner keeps the lock for as long as it runs, and so do a
+# lock without a valid pid, a lock without a proc-start record whose pid
+# names a process (1.0.2, 1.0.3) and an owner whose identity cannot be read.
+defenseclaw_install_lock_stale() {
+  local data="${1:-}" lock rc pid recorded current
+  lock="${data}/.install.lock"
+  [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
+  rc=0
+  pid="$(defenseclaw_install_lock_number "${lock}/pid")" || rc=$?
+  [ "$rc" = 0 ] || return 1
+  [ "$pid" -le 2147483647 ] || return 1
+  # A live installer's pid names no other process: this one is reused.
+  [ "$pid" = "$$" ] && return 0
+  if ! kill -0 "$pid" 2>/dev/null; then
+    # A process of another account refuses the signal; only ps proves it gone.
+    command -v ps >/dev/null 2>&1 || return 1
+    ps -p "$pid" >/dev/null 2>&1 || return 0
+  fi
+  # An installer that exited but is not reaped (a zombie) keeps its pid and
+  # its start, but runs nothing.
+  defenseclaw_process_ended "$pid" && return 0
+  if [ ! -e "${lock}/proc-start" ] && [ ! -L "${lock}/proc-start" ]; then
+    defenseclaw_process_started_after_lock "$pid" "$lock"
+    return
+  fi
+  recorded="$(defenseclaw_install_lock_record "${lock}/proc-start")" || return 1
+  current="$(defenseclaw_process_identity "$pid")" || return 1
+  [ "$recorded" != "$current" ] && return 0
+  return 1
+}
+# defenseclaw_process_identity PID prints the identity of process PID as the
+# system keeps it from its creation, the record install.sh keeps of itself
+# in a lock (proc-start; hookexec procidentity): on Linux its boot id and
+# kernel start, "<boot_id> <starttime>" (field 22 of /proc/PID/stat); on
+# macOS its creation second as `LC_ALL=C TZ=UTC ps -o lstart=` prints it,
+# one space apart. No clock step moves either. It returns 1 when the system
+# does not say.
+defenseclaw_process_identity() {
+  local boot stat out IFS=' '
+  if [ -e /proc/self/stat ]; then
+    boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" || return 1
+    stat="$(cat "/proc/${1:-}/stat" 2>/dev/null)" || return 1
+    case "$stat" in *[\)]*) ;; *) return 1 ;; esac
+    stat="${stat##*[\)]}"
+    set -- $stat
+    [ "$#" -ge 20 ] || return 1
+    shift 19
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    case "$boot" in ''|*[!0-9a-f-]*) return 1 ;; esac
+    printf '%s %s' "$boot" "$1"
+    return 0
+  fi
+  [ "$(uname -s 2>/dev/null)" = Darwin ] && [ -x /bin/ps ] || return 1
+  out="$(LC_ALL=C TZ=UTC /bin/ps -o lstart= -p "${1:-}" 2>/dev/null)" || return 1
+  set -- $out
+  [ "$#" -eq 5 ] || return 1
+  printf '%s %s %s %s %s' "$1" "$2" "$3" "$4" "$5"
+}
+# defenseclaw_process_ended PID returns 0 when process PID has exited but
+# keeps its pid: a zombie its parent has not reaped (hookexec
+# procidentity.Ended). It returns 1 while it runs or when the system does
+# not say.
+defenseclaw_process_ended() {
+  local stat IFS=' '
+  if [ -e /proc/self/stat ]; then
+    stat="$(cat "/proc/${1:-}/stat" 2>/dev/null)" || return 1
+    case "$stat" in *[\)]*) ;; *) return 1 ;; esac
+    stat="${stat##*[\)]}"
+    set -- $stat
+    case "${1:-}" in Z|X|x) return 0 ;; esac
+    return 1
+  fi
+  [ -x /bin/ps ] || return 1
+  stat="$(LC_ALL=C /bin/ps -o stat= -p "${1:-}" 2>/dev/null)" || return 1
+  set -- $stat
+  case "${1:-}" in Z*) return 0 ;; esac
+  return 1
+}
+# defenseclaw_process_started_after_lock PID LOCK returns 0 when process PID
+# started more than 2 s after LOCK was last changed: a 1.0.2/1.0.3 lock
+# without a proc-start record whose pid a later process got (GAP-1465, the
+# hookexec rule). It returns 1 when it started earlier or the system does not
+# say.
+defenseclaw_process_started_after_lock() {
+  local locked="" started="" boot="" stat="" line="" out="" IFS=' '
+  locked="$(stat -c %Y "${2:-}" 2>/dev/null || stat -f %m "${2:-}" 2>/dev/null)" || return 1
+  case "$locked" in ''|*[!0-9]*) return 1 ;; esac
+  if [ -e /proc/self/stat ]; then
+    while IFS= read -r line; do
+      case "$line" in "btime "*) boot="${line#btime }"; break ;; esac
+    done < /proc/stat
+    case "$boot" in ''|*[!0-9]*) return 1 ;; esac
+    stat="$(cat "/proc/${1:-}/stat" 2>/dev/null)" || return 1
+    case "$stat" in *[\)]*) ;; *) return 1 ;; esac
+    stat="${stat##*[\)]}"
+    set -- $stat
+    [ "$#" -ge 20 ] || return 1
+    shift 19
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    started=$((boot + $1 / 100))
+  else
+    [ "$(uname -s 2>/dev/null)" = Darwin ] && [ -x /bin/ps ] || return 1
+    out="$(LC_ALL=C TZ=UTC /bin/ps -o lstart= -p "${1:-}" 2>/dev/null)" || return 1
+    started="$(LC_ALL=C TZ=UTC date -j -u -f "%a %b %e %T %Y" "$out" +%s 2>/dev/null)" || return 1
+    case "$started" in ''|*[!0-9]*) return 1 ;; esac
+  fi
+  [ "$started" -gt $((locked + 2)) ]
+}
+# defenseclaw_install_lock_record FILE prints the trimmed text of a small
+# owner record (proc-start); it returns 1 when FILE is not a small regular
+# file or is empty.
+defenseclaw_install_lock_record() {
+  local file="${1:-}" size text
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || return 1
+  size="$(wc -c < "$file" 2>/dev/null | tr -d ' ')" || return 1
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$size" -le 128 ] || return 1
+  text="$(cat "$file" 2>/dev/null)" || return 1
+  text="${text#"${text%%[![:space:]]*}"}"
+  text="${text%"${text##*[![:space:]]}"}"
+  [ -n "$text" ] || return 1
+  printf '%s' "$text"
+}
+# defenseclaw_install_lock_number FILE prints the decimal number of the owner
+# record file (pid). It returns 1 when FILE is absent, empty or
+# not a positive number, and 2 when it cannot be read (not a small regular
+# file).
+defenseclaw_install_lock_number() {
+  local file="${1:-}" size text
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    return 1
+  fi
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || return 2
+  size="$(wc -c < "$file" 2>/dev/null | tr -d ' ')" || return 2
+  case "$size" in ''|*[!0-9]*) return 2 ;; esac
+  [ "$size" -le 64 ] || return 2
+  text="$(cat "$file" 2>/dev/null)" || return 2
+  text="${text#"${text%%[![:space:]]*}"}"
+  text="${text%"${text##*[![:space:]]}"}"
+  case "$text" in ''|0*|*[!0-9]*) return 1 ;; esac
+  [ "${#text}" -le 12 ] || return 1
+  printf '%s' "$text"
+}
+# defenseclaw_install_held returns 0 (true) while an installer holds either
+# data directory of this account's hook: the one DEFENSECLAW_HOME names, else
+# ~/.defenseclaw, where install.sh and install.ps1 take the lock, and the one
+# the hook was installed in (_DC_HOOK_DATA_DIR, the folder above its hooks
+# folder), which the gateway rendered it into from its resolved data
+# directory. An agent that runs the hook without DEFENSECLAW_HOME, or a
+# data_dir apart from DEFENSECLAW_HOME, still finds the lock (GAP-0948).
+# A per-user render also checks the data directory the gateway rendered it
+# into (_DC_HOOK_HOME, written into the file), so a hard link, a symlink or a
+# copy of the hook, run from any folder, is held by that install's lock.
+defenseclaw_install_held() {
+  if [ -n "${_DC_HOOK_HOME:-}" ] && defenseclaw_install_lock_held "${_DC_HOOK_HOME}"; then
+    return 0
+  fi
+  defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME:+${HOME}/.defenseclaw}}" && return 0
+  [ -n "${_DC_HOOK_DATA_DIR:-}" ] && defenseclaw_install_lock_held "${_DC_HOOK_DATA_DIR}"
+}
+# A failure before the helpers load (a hook path that does not resolve, a
+# missing or broken _hardening.sh, a set -e error) blocks with exit 2
+# in fail mode closed, under strict availability and while this account's
+# installer holds its data directory; fail mode open keeps the exit status.
+# The installed mode decides (GAP-0315).
+# defenseclaw_harden_env replaces this trap with the hook's own.
+_DC_BOOT_FAIL_MODE="{{.FailMode}}"
+defenseclaw_boot_fails_closed() {
+  [ "$_DC_BOOT_FAIL_MODE" = "open" ] || return 0
+  case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) return 0 ;; esac
+  defenseclaw_install_held
+}
+trap '_dc_boot_rc=$?; if [ "$_dc_boot_rc" -ne 0 ] && defenseclaw_boot_fails_closed; then exit 2; fi' EXIT
+{{end}}
 # Windows: HOME may be unset when agents spawn hooks. Fall back to USERPROFILE.
 HOME="${HOME:-${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}}"
 export HOME
 
-HOOK_SOURCE="${BASH_SOURCE[0]:-$0}"
+{{if .Sandbox}}# The image's hook folder, baked: the workload's environment cannot move it.
+HOOK_DIR={{.SandboxHookDirSH}}
+{{else}}HOOK_SOURCE="${BASH_SOURCE[0]:-$0}"
 HOOK_LINK_DEPTH=0
 while [ -L "$HOOK_SOURCE" ]; do
   HOOK_LINK_DEPTH=$((HOOK_LINK_DEPTH + 1))
@@ -38,15 +259,33 @@ HOOK_PARENT="${HOOK_SOURCE%/*}"
 [ "$HOOK_PARENT" != "$HOOK_SOURCE" ] || HOOK_PARENT="."
 HOOK_DIR="$(cd -P -- "$HOOK_PARENT" 2>/dev/null && pwd)" || exit 2
 unset HOOK_SOURCE HOOK_LINK_DEPTH HOOK_PARENT HOOK_BASE HOOK_TARGET
-{{if .Managed}}
+{{end}}{{if .Managed}}
 DEFENSECLAW_MANAGED_HOOK=1
 export DEFENSECLAW_MANAGED_HOOK
 {{if not .Sandbox}}_DC_SECURE_CLIENT_HOOK={{if .SecureClient}}1{{else}}0{{end}}
+_DC_SECURE_CLIENT_DELIVERY={{if .SecureClientDelivery}}1{{else}}0{{end}}
 {{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
-{{else}}
-DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
-{{if not .Sandbox}}
+{{if .ManagedShellGuard}}{{template "managed-prologue" .}}
+{{end}}{{else}}
+# A per-user render is never a managed or Secure Client hook: those markers
+# come only from a managed render (the branch above), never from the
+# agent's environment, where they would change how the per-user hook answers
+# a missing token.
+unset DEFENSECLAW_MANAGED_HOOK _DC_SECURE_CLIENT_HOOK _DC_SECURE_CLIENT_DELIVERY
+{{if .Sandbox}}DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
+{{else}}# Without DEFENSECLAW_HOME the hook's home is the data directory it was
+# installed in, not ~/.defenseclaw: a custom-home install keeps its own
+# config, lock and gateway when the agent does not pass the variable
+# (GAP-1854).
+DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-$(cd "${HOOK_DIR}/.." && pwd -P)}"
+{{end}}{{if not .Sandbox}}# The hook path is resolved: this is the data directory it was installed in.
+_DC_HOOK_DATA_DIR="${HOOK_DIR}/.."
+# An inherited DEFENSECLAW_HOME that names no folder does not retire the
+# hook installed here, and does not block it: the hook keeps the data
+# directory it was installed in and asks its gateway (GAP-1256).
+[ -d "${DEFENSECLAW_HOME}" ] || DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
+{{end}}{{if not .Sandbox}}
 # A personal hook left on a managed computer must not fall back to its
 # personal gateway port. The managed hook is published separately by machine
 # policy; this path is never allowed to approve a tool on that host.
@@ -57,6 +296,16 @@ if [ -e /etc/defenseclaw/managed-runtime.json ] || [ -L /etc/defenseclaw/managed
 fi
 {{end}}
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
+  # A registered closed hook cannot treat missing local state as retirement.
+  # The installed mode decides; strict availability tightens this exit as it
+  # tightens every later outage.
+  _DC_HOME_FAIL_MODE="{{.FailMode}}"
+  ! defenseclaw_install_held || _DC_HOME_FAIL_MODE="closed"
+  case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE="closed" ;; esac
+  if [ "$_DC_HOME_FAIL_MODE" != "open" ]; then
+    echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
+    exit 2
+  fi
   exit 0
 fi
 {{end}}
@@ -68,14 +317,26 @@ fi
 # downstream code controls (HOME, PATH, locale, GIT_*); none of the
 # subsequent token-resolution logic depends on the operator's
 # original PATH or HOME.
-. "${HOOK_DIR}/_hardening.sh"
-{{if .Sandbox}}# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook
+# command: bash 3.2 (macOS /bin/bash) exits 0 when a sourced helper is missing or unreadable.
+{{if .SecureClient}}command . "${HOOK_DIR}/_hardening.sh" || exit "$?"
+{{else}}# A helper that does not load (a path the agent's BASH_SOURCE moved, a
+# missing or broken file) is a local failure: block, whatever the fail
+# mode (review 2 of sandbox-visibility:GAP-0028).
+# bash 3.2 can return 0 from a "." of a file that is not there: the helper
+# counts as loaded only when its functions are defined.
+if [ ! -r "${HOOK_DIR}/_hardening.sh" ] || ! command . "${HOOK_DIR}/_hardening.sh" ||
+  ! declare -F defenseclaw_harden_env >/dev/null; then
+  echo "defenseclaw: hook hardening helper unavailable; blocking (fail mode closed)" >&2
+  exit 2
+fi
+{{end}}{{if .Sandbox}}# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook
 # does not read and pins the baked PATH before the first child process
 # (mktemp in defenseclaw_harden_env) or helper call.
-. "${HOOK_DIR}/_sandbox.sh"
+command . "${HOOK_DIR}/_sandbox.sh" || exit 2
 {{end}}defenseclaw_harden_resources
 defenseclaw_harden_env
-
+{{if .ManagedShellGuard}}trap '_dc_managed_on_exit' EXIT
+{{end}}
 # Fail mode set BEFORE the missing-token check so the helper has a
 # stable FAIL_MODE to log against. See codex-hook.sh for the full
 # response-layer and transport-layer rationale.
@@ -85,7 +346,13 @@ defenseclaw_harden_env
 # 429, an unversioned placeholder a relay 500), so no failed, refused or
 # unparseable reply may ever turn into an allow.
 FAIL_MODE="closed"
-readonly FAIL_MODE{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
+readonly FAIL_MODE{{else if .Managed}}# Managed hooks use the installer-owned delivery policy; an inherited
+# DEFENSECLAW_FAIL_MODE cannot weaken an explicitly closed managed hook.
+FAIL_MODE="{{.FailMode}}"{{else}}FAIL_MODE="{{.FailMode}}"
+# The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the agent's
+# environment is not read, so status and doctor report what runs (GAP-0315).{{end}}
+{{if and (not .Managed) (not .Sandbox)}}defenseclaw_close_during_install
+{{end}}
 
 # Bail early on missing token: see codex-hook.sh +
 # defenseclaw_handle_missing_token in _hardening.sh for rationale.
@@ -93,13 +360,25 @@ DEFENSECLAW_HOOK_CONNECTOR="claudecode"
 DEFENSECLAW_HOOK_NAME="claude-code-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
-PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
-  echo "defenseclaw: claudecode hook refusing oversized payload" >&2
-  if [ "$FAIL_MODE" = "closed" ]; then
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}# A standalone managed hook blocks input too large to inspect in every
+# fail mode: the agent chooses the size.
+{{end}}{{if .SecureClient}}PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}")")" || {
+{{else}}defenseclaw_read_hook_stdin PAYLOAD response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}" || {
+{{end}}  _DC_STDIN_RC=$?
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+  if defenseclaw_prepare_oversized_stdin "$_DC_STDIN_RC"; then
+    : # the normal gateway path judges the bounded review payload
+  else
+    FAIL_MODE=closed
+{{end}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
+{{end}}  echo "defenseclaw: claudecode hook refusing oversized payload" >&2
+  if [ "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}" != "open" ]; then
     printf '{"decision":"block","reason":"DefenseClaw hook payload too large"}\n'
     exit 2
   fi
   exit 0
+{{if and (not .Managed) (not .Sandbox)}}  fi
+{{end}}
 }
 
 # Cursor 2.4+ can import Claude Code hooks from ~/.claude/settings.json while
@@ -119,7 +398,14 @@ PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
 # native bridge that will handle the matching invocation. The script-marker
 # check matters because teardown intentionally leaves a v0 no-op tombstone (and
 # may leave the scoped token) for already-running host processes.
-CURSOR_ORIGIN_VERSION="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.cursor_version // empty' 2>/dev/null || true)"
+# Only a payload that names the field can carry it, so a Claude Code call
+# runs no jq for this check (issue #1130).
+CURSOR_ORIGIN_VERSION=""
+case "$PAYLOAD" in
+  *cursor_version*)
+{{if .SecureClient}}    CURSOR_ORIGIN_VERSION="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.cursor_version // empty' 2>/dev/null || true)" ;;
+{{else}}    _dc_jq_into CURSOR_ORIGIN_VERSION text "$PAYLOAD" -r '.cursor_version // empty' 2>/dev/null || true ;;
+{{end}}esac
 if [ -n "$CURSOR_ORIGIN_VERSION" ] && [ -f "${HOOK_DIR}/.hook-cursor.token" ]; then
   CURSOR_HOOK_MARKER=""
   if [ -r "${HOOK_DIR}/cursor-hook.sh" ]; then
@@ -135,7 +421,7 @@ fi
 unset CURSOR_ORIGIN_VERSION CURSOR_HOOK_MARKER _CURSOR_HOOK_LINE
 
 {{if .Sandbox}}defenseclaw_sandbox_require_token claudecode claude-code-hook "claude-code tool"{{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
-  defenseclaw_handle_missing_token claudecode claude-code-hook "claude-code tool" "${HOOK_DIR}/{{.TokenFile}}"
+  defenseclaw_handle_missing_token claudecode claude-code-hook "claude-code tool" "${HOOK_DIR}/{{.TokenFile}}" "" "$PAYLOAD"
 fi{{end}}
 
 API_ADDR="{{.APIAddr}}"
@@ -153,7 +439,7 @@ if [ "{{if .ScopedToken}}1{{else}}0{{end}}" = "1" ]; then
   fi
 elif [ -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   # shellcheck source=/dev/null
-  . "${HOOK_DIR}/{{.TokenFile}}"
+  {{if .SecureClient}}. "${HOOK_DIR}/{{.TokenFile}}"{{else}}command . "${HOOK_DIR}/{{.TokenFile}}" || DEFENSECLAW_GATEWAY_TOKEN={{end}}
 fi
 API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 # Only the private copy is used from here on: no child process (curl, jq, the
@@ -161,8 +447,8 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 unset DEFENSECLAW_GATEWAY_TOKEN{{end}}
 
 # FAIL_MODE was already set above (before the missing-token branch).
-# Response-layer and transport-layer failures both respect FAIL_MODE;
-# DEFENSECLAW_STRICT_AVAILABILITY=1 remains a force-closed override.
+# Outside Secure Client, response failures close and eligible connection
+# outages follow FAIL_MODE. DEFENSECLAW_STRICT_AVAILABILITY=1 can only close.
 
 {{if and (not .Sandbox) (not .Managed)}}# claude_fail_closed_decision prints the JSON block decision for a prompt,
 # tool call or permission request that is blocked because the gateway did not
@@ -174,29 +460,53 @@ claude_fail_closed_decision() {
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) return 1 ;;
   esac
-  if [ -e "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/gateway.stopped" ]; then
-    reason="DefenseClaw blocked this because its gateway is stopped. Run defenseclaw-gateway start to resume protection."
+  if defenseclaw_install_held && next="$(defenseclaw_unreachable_next_step)" && [ -n "$next" ]; then
+    reason="DefenseClaw blocked this: ${next//\`/}."
+  elif [ -e "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/gateway.stopped" ]; then
+    reason="DefenseClaw blocked this because its gateway is stopped. Run defenseclaw-gateway start to resume protection (defenseclaw-gateway status shows its state)."
   elif [ "$1" = "gateway unreachable" ] && next="$(defenseclaw_unreachable_next_step)" && [ -n "$next" ]; then
     reason="DefenseClaw blocked this: ${next//\`/}."
+  elif next="$(defenseclaw_gateway_error_block_text "$1")"; then
+    # The gateway is up and answered with an error (GAP-1744).
+    reason="$next"
   else
     reason="DefenseClaw blocked this because it could not reach its gateway (${1}). Run defenseclaw-gateway status to check it."
   fi
-  event="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" || return 1
+{{if .SecureClient}}  event="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" || return 1
+{{else}}  _dc_jq_into event text "$PAYLOAD" -r '.hook_event_name // empty' 2>/dev/null || return 1
+{{end}}  local out=""
   case "$event" in
     PreToolUse)
-      _dc_jq -cn --arg r "$reason" \
-        '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$r}}' ;;
+      out="$(_dc_jq -cn --arg r "$reason" \
+        '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$r}}')" || return 1 ;;
     PermissionRequest)
-      _dc_jq -cn --arg r "$reason" \
-        '{hookSpecificOutput:{hookEventName:"PermissionRequest",decision:{behavior:"deny",message:$r}}}' ;;
+      out="$(_dc_jq -cn --arg r "$reason" \
+        '{hookSpecificOutput:{hookEventName:"PermissionRequest",decision:{behavior:"deny",message:$r}}}')" || return 1 ;;
     UserPromptSubmit|UserPromptExpansion)
-      _dc_jq -cn --arg r "$reason" '{decision:"block",reason:$r}' ;;
+      out="$(_dc_jq -cn --arg r "$reason" '{decision:"block",reason:$r}')" || return 1 ;;
+    SessionStart)
+      # Claude Code cannot block a session start: an exit 2 there only shows
+      # the hook's whole command line, guard clause included, as a hook error
+      # (GAP-0006). Say instead, as the native hook does on Windows, that
+      # this session's prompts and tool calls are blocked and why.
+      out="$(_dc_jq -cn --arg m "DefenseClaw is blocking prompts and tool calls in this session${reason#DefenseClaw blocked this}" \
+        '{systemMessage:$m}')" || return 1 ;;
+    *) return 1 ;;
+  esac
+  # Without jq or python3 the fallback reader cannot build this object and
+  # prints "null": that is no decision, so the caller's exit 2 blocks instead.
+  case "$out" in
+    "{"*deny*|"{"*block*|"{"*systemMessage*) printf '%s\n' "$out" ;;
     *) return 1 ;;
   esac
 }
 
 {{end}}fail_unreachable() {
-  defenseclaw_log_hook_failure claudecode claude-code-hook "$1" transport "$FAIL_MODE"
+  # A blocked stop event only keeps Claude Code running (#1140).
+  if defenseclaw_should_fail_closed_on_unreachable; then
+    defenseclaw_allow_failed_stop_event claudecode claude-code-hook "" "${PAYLOAD:-}" "$1" transport
+  fi
+  defenseclaw_log_hook_delivery_failure claudecode claude-code-hook "$1" transport "$FAIL_MODE"
 {{if .Sandbox}}  # Claude shows this line under the blocked step: a prompt hook blocks the
   # prompt, every other hook a tool call.
   case "$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" in
@@ -213,22 +523,47 @@ claude_fail_closed_decision() {
       printf '%s\n' "$blocked"
       exit 0
     }
+    # A subagent start cannot be blocked either and has nothing to show: an
+    # exit 2 would only print the hook command line (GAP-0006; the native
+    # hook exits 0 there too, GAP-0203). The failure is in hook-failures.jsonl.
+    case "$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" in
+      SubagentStart) exit 0 ;;
+    esac
 {{end}}    exit 2
   fi
-{{if not .Sandbox}}  # Claude Code does not show stderr of a hook that exits 0: say on screen
+{{if and .SecureClient (not .Sandbox)}}  # Claude Code does not show stderr of a hook that exits 0: say on screen
   # that this account's gateway is down and how to start it again.
   if [ "$1" = "gateway unreachable" ]; then
     case "$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" in
       SessionStart|UserPromptSubmit|PreToolUse) defenseclaw_unreachable_notice_json ;;
     esac
   fi
+{{else if not .Sandbox}}  # Claude Code does not show stderr of a hook that exits 0: say on screen
+  # that this account's gateway is down and how to start it again. A prompt
+  # or tool call carries the warning: only the interactive terminal shows a
+  # SessionStart systemMessage, while Claude Cowork, the IDE extensions and
+  # claude -p (the Agent SDK stream) drop it, so a session start would spend
+  # the once-per-session warning unseen (cowork-1-0-8 GAP-0040). Secure
+  # Client renders keep their pinned bytes.
+  if [ "$1" = "gateway unreachable" ]; then
+    case "$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" in
+      UserPromptSubmit|PreToolUse) defenseclaw_unreachable_notice_json ;;
+    esac
+  fi
 {{end}}  exit 0
 }
 
 fail_response() {
-  local reason
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}{{if and (not .SecureClient) (not .Sandbox)}}  # Outside Secure Client the open fail mode covers a gateway outage only
+  # (the service not running, restarting or giving no answer in time). A
+  # refusal, an error status or an unusable answer blocks.
+  FAIL_MODE="closed"
+{{end}}  local reason
   reason="$(defenseclaw_response_failure_reason "$1")"
-  defenseclaw_log_hook_failure claudecode claude-code-hook "$reason" response "$FAIL_MODE"
+  [ "$FAIL_MODE" = "open" ] ||
+    defenseclaw_allow_failed_stop_event claudecode claude-code-hook "" "${PAYLOAD:-}" "$reason" response
+  defenseclaw_log_hook_delivery_failure claudecode claude-code-hook "$reason" response "$FAIL_MODE"
   echo "defenseclaw: claude-code hook error: $reason" >&2
   if [ "$FAIL_MODE" = "open" ]; then
     exit 0
@@ -236,7 +571,7 @@ fail_response() {
   exit 2
 }
 
-{{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}{{.ManagedHTTPFailureSH}}{{end}}{{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
 {{if not .Sandbox}}  # A bearer is an HTTP field value: CR or LF is never valid in it, and either
   # would end the curl config line defenseclaw_gateway_post writes it to.
@@ -248,22 +583,73 @@ fi
 
 # W3C trace propagation: forward validated traceparent / tracestate.
 TRACE_HEADER_ARGS=()
-if command -v mapfile >/dev/null 2>&1; then
-  mapfile -t TRACE_HEADER_ARGS < <(defenseclaw_extract_trace_context)
-fi
-
+{{if .SecureClient}}# A read loop, not mapfile: macOS ships bash 3.2, which has no mapfile.
+while IFS= read -r trace_header_arg; do
+  TRACE_HEADER_ARGS+=("$trace_header_arg")
+done < <(defenseclaw_extract_trace_context)
+{{else}}defenseclaw_trace_header_args
+{{end}}
 # Per-user attribution: the gateway cannot read the real user's identity from
 # its own service-account process, so the hook reports it.
-# Read with a read loop rather than mapfile: macOS ships bash 3.2, which has
+{{if .SecureClient}}# Read with a read loop rather than mapfile: macOS ships bash 3.2, which has
 # no mapfile, and there the array would stay empty and the endpoint would send
 # no identity at all.
-IDENTITY_HEADER_ARGS=()
-if declare -F defenseclaw_user_identity_args >/dev/null 2>&1; then
+{{end}}IDENTITY_HEADER_ARGS=()
+{{if .SecureClient}}if declare -F defenseclaw_user_identity_args >/dev/null 2>&1; then
   while IFS= read -r identity_header_arg; do
     IDENTITY_HEADER_ARGS+=("$identity_header_arg")
   done < <(defenseclaw_user_identity_args)
 fi
-
+{{else}}defenseclaw_user_identity_header_args
+{{end}}{{if and (not .SecureClient) (not .Sandbox)}}
+# Claude Cowork runs this hook from the Claude Code engine Claude Desktop
+# bundles, with CLAUDE_CODE_IS_COWORK=1: the call names its Cowork session for
+# the audit (X-DefenseClaw-Cowork, hookexec.CoworkHeader), as the native
+# runner does. It is attribution, never a policy input. The engine is looked
+# for among the nearest ancestors only when the flag is set, by the same
+# paths the native runner knows (rendered from the Claude Desktop data
+# folder table, connector.ClaudeDesktopEngineCaseSH), compared in lower case.
+defenseclaw_cowork_engine() {
+  local pid="${PPID:-}" hops=0 exe parent
+  while [ "$hops" -lt 3 ] && [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null; do
+    exe=
+    if [ -e "/proc/$pid/exe" ]; then
+      exe="$(readlink "/proc/$pid/exe" 2>/dev/null)" || exe=
+    elif [ -x /bin/ps ]; then
+      exe="$(LC_ALL=C /bin/ps -o comm= -p "$pid" 2>/dev/null)" || exe=
+    fi
+    if [ -n "$exe" ]; then
+      exe="$(printf '%s' "$exe" | LC_ALL=C tr '[:upper:]' '[:lower:]')" || exe=
+    fi
+    case "$exe" in
+      {{.ClaudeDesktopEngineCaseSH}}) return 0 ;;
+    esac
+    if [ -r "/proc/$pid/stat" ]; then
+      parent="$(sed -e 's/^.*) [A-Za-z] //' -e 's/ .*//' "/proc/$pid/stat" 2>/dev/null)" || parent=
+    elif [ -x /bin/ps ]; then
+      parent="$(LC_ALL=C /bin/ps -o ppid= -p "$pid" 2>/dev/null)" || parent=
+    else
+      parent=
+    fi
+    pid="${parent//[!0-9]/}"
+    hops=$((hops + 1))
+  done
+  return 1
+}
+COWORK_HEADER_ARGS=()
+if [ "${CLAUDE_CODE_IS_COWORK:-}" = "1" ] && defenseclaw_cowork_engine; then
+  _dc_cowork_session="${CLAUDE_CODE_SESSION_ID:-}"
+  case "$_dc_cowork_session" in *[!A-Za-z0-9._:-]*) _dc_cowork_session= ;; esac
+  # The raw folder list, base64 encoded (the gateway parses it): no shell
+  # quoting of an arbitrary value. Over 8 KiB it is left out.
+  _dc_cowork_paths=
+  if [ -n "${CLAUDE_CODE_WORKSPACE_HOST_PATHS:-}" ] && [ "${#CLAUDE_CODE_WORKSPACE_HOST_PATHS}" -le 8192 ]; then
+    _dc_cowork_paths="$(printf '%s' "$CLAUDE_CODE_WORKSPACE_HOST_PATHS" | base64 2>/dev/null | tr -d '\r\n')" || _dc_cowork_paths=
+    case "$_dc_cowork_paths" in *[!A-Za-z0-9+/=]*) _dc_cowork_paths= ;; esac
+  fi
+  COWORK_HEADER_ARGS=(-H "X-DefenseClaw-Cowork: {\"session_id\":\"${_dc_cowork_session}\",\"workspace_host_paths_b64\":\"${_dc_cowork_paths}\"}")
+fi
+{{end}}
 {{if .Sandbox}}# One short attempt plus one retry carrying the same idempotency key: the
 # OpenShell relay occasionally drops a request, and the ingress dedupes by key.
 RESPONSE="$(defenseclaw_sandbox_post "/api/v1/claude-code/hook" "$PAYLOAD" \
@@ -274,57 +660,188 @@ RESPONSE="$(defenseclaw_sandbox_post "/api/v1/claude-code/hook" "$PAYLOAD" \
   "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
   "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}")" || {
   fail_unreachable "$(defenseclaw_sandbox_unreachable_reason "$RESPONSE")"
-}{{else}}if defenseclaw_api_listener_foreign "$API_ADDR"; then
-  fail_unreachable "${API_ADDR} is held by another account while this account's gateway is not running; no token was sent. Run \`defenseclaw-gateway start\` for the fix"
+}{{else}}{{if and .Managed (not .SecureClient)}}# Resolve write operands as the hook user; the managed gateway cannot
+# inspect this home under ProtectHome. Keep the payload off argv.
+# The standalone gateway of this OS (managed.StandaloneLayoutFor): a macOS
+# hook ran the Linux path, which is not there, and wrote its shell error to
+# the agent on every call.
+case "${OSTYPE:-}" in
+  darwin*) _DC_MANAGED_GATEWAY=/opt/cisco/defenseclaw/bin/defenseclaw-gateway ;;
+  *) _DC_MANAGED_GATEWAY=/opt/defenseclaw/bin/defenseclaw-gateway ;;
+esac
+_DC_RESOLVED_WRITES=
+if [ -x "$_DC_MANAGED_GATEWAY" ]; then
+  _DC_RESOLVED_WRITES="$("$_DC_MANAGED_GATEWAY" hook resolve-writes < <(printf '%s' "${PAYLOAD}"))" || _DC_RESOLVED_WRITES=
 fi
-# A refused connection means this account's gateway is not running (after
-# a reboot, for example): start it once and retry. See
-# defenseclaw_gateway_cold_start in _hardening.sh.
-# defenseclaw_gateway_post (_hardening.sh) hands curl the bearer and the
+RESOLVED_HEADER_ARGS=()
+if [ -n "${_DC_RESOLVED_WRITES}" ]; then
+  RESOLVED_HEADER_ARGS=(-H "X-DefenseClaw-Resolved-Writes: ${_DC_RESOLVED_WRITES}")
+fi
+{{end}}# A refused or dropped connection means this account's gateway is
+# restarting or not running (after a reboot, for example): send the call
+# again for up to 3 seconds, starting the gateway after a refusal. See
+# defenseclaw_await_gateway in _hardening.sh.
+# A tool call's request is bounded like the native hook's answer budget, by
+# the payload's top-level event (defenseclaw_payload_tool_gate_max_time).
+HOOK_MAX_TIME=10
+{{if not .SecureClient}}defenseclaw_payload_tool_gate_max_time "$PAYLOAD" 10
+{{end}}# defenseclaw_gateway_post (_hardening.sh) hands curl the bearer and the
 # payload on descriptors, never on its command line.
 defenseclaw_hook_post() {
-  defenseclaw_gateway_post "http://${API_ADDR}/api/v1/claude-code/hook" 10 "$PAYLOAD" \
+  defenseclaw_gateway_post "http://${API_ADDR}/api/v1/claude-code/hook" "$HOOK_MAX_TIME" "$PAYLOAD" \
     -H "Content-Type: application/json" \
     -H "X-DefenseClaw-Client: claude-code-hook/1.0" \
-    "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
+{{if and .Managed (not .SecureClient)}}    "${RESOLVED_HEADER_ARGS[@]+"${RESOLVED_HEADER_ARGS[@]}"}" \
+{{end}}    "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
     "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
-    "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}"{{if .HookSocketTransportSH}} \
+    "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}"{{if not .SecureClient}} \
+    "${COWORK_HEADER_ARGS[@]+"${COWORK_HEADER_ARGS[@]}"}"{{end}}{{if .HookSocketTransportSH}} \
+    -H "X-DefenseClaw-Hook-Bridge: shell" \
     --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}}
 }
 RESPONSE=$(defenseclaw_hook_post) || {
-  defenseclaw_gateway_cold_start "$?" || fail_unreachable "gateway unreachable"
-  RESPONSE=$(defenseclaw_hook_post) || fail_unreachable "gateway unreachable"
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  DC_POST_STATUS=$?
+  defenseclaw_split_response
+  defenseclaw_managed_http_result "$HTTP_CODE" incomplete
+  defenseclaw_await_gateway "$DC_POST_STATUS" _dc_hook_post_response || {
+    defenseclaw_split_response
+    defenseclaw_managed_http_result "$HTTP_CODE" incomplete
+    fail_unreachable "gateway unreachable"
+  }
+{{else}}  defenseclaw_await_gateway "$?" _dc_hook_post_response || fail_unreachable "$(defenseclaw_gateway_unreachable_reason 2>/dev/null || printf 'gateway unreachable')"{{end}}
 }
-defenseclaw_retry_busy _dc_hook_post_response || fail_unreachable "gateway unreachable"{{end}}
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}# The gateway answered 429, so it is up: a resend that fails after it is no
+# outage in a standalone managed hook.
+{{end}}defenseclaw_retry_busy _dc_hook_post_response || {{if and .Managed (not .SecureClient) (not .Sandbox)}}fail_response "gateway returned HTTP 429"{{else}}fail_unreachable "gateway unreachable"{{end}}{{end}}
 
-HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-RESULT=$(echo "$RESPONSE" | sed '$d')
+defenseclaw_split_response
 
-if [ -z "$HTTP_CODE" ]; then
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}defenseclaw_managed_http_result "$HTTP_CODE"
+{{else}}if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"
 elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/null; then
-  fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
-elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  fail_response "gateway returned HTTP ${HTTP_CODE}"
+{{else}}  fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
+{{end}}
+{{if .Sandbox}}elif [ "$HTTP_CODE" = 429 ]; then
+  fail_response "$(defenseclaw_sandbox_rate_refusal_reason "$RESULT")"
+{{end}}elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
   fail_response "gateway returned HTTP ${HTTP_CODE}"
-fi
+fi{{end}}
 
-OUTPUT=$(echo "$RESULT" | _dc_jq -c '.claude_code_output // empty' 2>/dev/null) || {
-  fail_response "invalid JSON response"
+{{if and (not .SecureClient) (not .Sandbox)}}defenseclaw_json_answer_valid "$RESULT" action || fail_response "invalid or ambiguous JSON response"
+{{end}}
+{{if and (not .Managed) (not .Sandbox)}}# Decode the action and its structured output together. Successful personal
+# hooks need one parser process rather than two (#1130). The fallback keeps
+# working on supported hosts without jq; managed/Secure Client renders retain
+# their delivery contract.
+if command -v jq >/dev/null 2>&1; then
+  unset RESPONSE_FIELDS
+{{if .SecureClient}}  RESPONSE_FIELDS=$(printf '%s' "$RESULT" | jq -ers '
+{{else}}  _dc_jq_into RESPONSE_FIELDS text "$RESULT" -ers '
+{{end}}    if length != 1 or (.[0] | type) != "object" then error("invalid response") else .[0] end
+    | if (.action == "allow" or .action == "alert" or .action == "block" or .action == "confirm")
+         and (.claude_code_output == null or (.claude_code_output | type) == "object")
+      then .action, (.claude_code_output // empty | tojson)
+{{if .SecureClient}}      else error("invalid response fields") end' 2>/dev/null) || fail_response "invalid JSON response"
+{{else}}      else error("invalid response fields") end' 2>/dev/null || fail_response "invalid JSON response"
+{{end}}  ACTION="${RESPONSE_FIELDS%%$'\n'*}"
+  OUTPUT=""
+  if [ "$ACTION" != "$RESPONSE_FIELDS" ]; then
+    OUTPUT="${RESPONSE_FIELDS#*$'\n'}"
+  fi
+  unset RESPONSE_FIELDS
+else
+{{end}}{{if .SecureClient}}OUTPUT=$(echo "$RESULT" | _dc_jq -c '.claude_code_output // empty' 2>/dev/null) || {
+{{else}}_dc_jq_into OUTPUT line "$RESULT" -c '.claude_code_output // empty' 2>/dev/null || {
+{{end}}  fail_response "invalid JSON response"
 }
-if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
-  echo "$OUTPUT"
-fi
-
-ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
-  fail_response "failed to parse action from response"
+{{if .SecureClient}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
+{{else}}_dc_jq_into ACTION line "$RESULT" -r '.action // empty' 2>/dev/null || {
+{{end}}  fail_response "failed to parse action from response"
 }
-# alert is advisory (would_block=false): the notice printed above is all
+{{if and (not .Managed) (not .Sandbox)}}fi
+{{end}}# alert is advisory (would_block=false): the notice printed above is all
 # Claude Code gets, and the tool runs, as with allow.
 case "$ACTION" in
   allow|alert|block|confirm) ;;
   *) fail_response "invalid or missing action in gateway response" ;;
 esac
 
+# A Stop directive that contradicts a gateway block ends the turn rather than
+# allowing it, as in hookexec nativeOutputAgrees: continue must be false with a
+# stopReason, or absent with decision block. A block
+# without a directive is a policy denial and gets the exit-2 feedback below.
+if [ "$ACTION" = "block" ] && [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+{{if .SecureClient}}  CLAUDE_EVENT=$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null) || CLAUDE_EVENT=""
+{{else}}  _dc_jq_into CLAUDE_EVENT text "$PAYLOAD" -r '.hook_event_name // empty' 2>/dev/null || CLAUDE_EVENT=""
+{{end}}  case "$CLAUDE_EVENT" in
+    Stop|SubagentStop|TeammateIdle)
+{{if .SecureClient}}      NATIVE_CONTINUE=$(printf '%s' "$OUTPUT" | _dc_jq -c '.continue' 2>/dev/null) || NATIVE_CONTINUE=""
+      NATIVE_STOP_REASON=$(printf '%s' "$OUTPUT" | _dc_jq -r '.stopReason // empty' 2>/dev/null) || NATIVE_STOP_REASON=""
+      NATIVE_DECISION=$(printf '%s' "$OUTPUT" | _dc_jq -r '.decision // empty' 2>/dev/null) || NATIVE_DECISION=""
+      NATIVE_REASON=$(printf '%s' "$OUTPUT" | _dc_jq -r '.reason // empty' 2>/dev/null) || NATIVE_REASON=""
+{{else}}      _dc_jq_into NATIVE_CONTINUE text "$OUTPUT" -c '.continue' 2>/dev/null || NATIVE_CONTINUE=""
+      _dc_jq_into NATIVE_STOP_REASON text "$OUTPUT" -r '.stopReason // empty' 2>/dev/null || NATIVE_STOP_REASON=""
+      _dc_jq_into NATIVE_DECISION text "$OUTPUT" -r '.decision // empty' 2>/dev/null || NATIVE_DECISION=""
+      _dc_jq_into NATIVE_REASON text "$OUTPUT" -r '.reason // empty' 2>/dev/null || NATIVE_REASON=""
+{{end}}      NATIVE_AGREES=no
+      if [ "$NATIVE_CONTINUE" = "false" ] && [ -n "$NATIVE_STOP_REASON" ]; then
+        NATIVE_AGREES=yes
+      elif { [ -z "$NATIVE_CONTINUE" ] || [ "$NATIVE_CONTINUE" = "null" ]; } &&
+           [ "$NATIVE_DECISION" = "block" ] && [ -n "$NATIVE_REASON" ]; then
+        NATIVE_AGREES=yes
+      fi
+      if [ "$NATIVE_AGREES" != "yes" ]; then
+{{if .SecureClient}}        REASON=$(printf '%s' "$RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null) || REASON=""
+{{else}}        _dc_jq_into REASON text "$RESULT" -r '.reason // empty' 2>/dev/null || REASON=""
+{{end}}        [ -n "$REASON" ] || REASON="DefenseClaw hook failed closed."
+        OUTPUT=$(printf '{"continue":false,"stopReason":"%s"}' "$(defenseclaw_json_escape "$REASON")")
+      fi
+      ;;
+  esac
+fi
+{{if not .SecureClient}}# A block or confirmation reaches Claude Code as the native object, which
+# Claude Code acts on: one that does not deny (or ask) for this event would
+# let the call run beside the gateway's block. The hook refuses such an
+# answer closed, in every fail mode, as the native hook does (GAP-0950). The
+# Stop directives above already agree (or were replaced).
+# A confirmation with no object at all would let the call run too: Claude
+# Code asks only through it (GAP-0983).
+if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+  case "$ACTION" in
+    block|confirm)
+{{if .SecureClient}}      _DC_PAYLOAD_EVENT="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" || _DC_PAYLOAD_EVENT=""
+{{else}}      _dc_jq_into _DC_PAYLOAD_EVENT text "$PAYLOAD" -r '.hook_event_name // empty' 2>/dev/null || _DC_PAYLOAD_EVENT=""
+{{end}}      case "$_DC_PAYLOAD_EVENT" in
+        Stop|SubagentStop|TeammateIdle) ;;
+        *)
+          if ! defenseclaw_native_output_agrees claudecode "$_DC_PAYLOAD_EVENT" "$ACTION" "$OUTPUT"; then
+            [ "$FAIL_MODE" = "closed" ] || FAIL_MODE=closed
+            fail_response "native output contradicts gateway action"
+          fi
+          ;;
+      esac
+      ;;
+  esac
+elif [ "$ACTION" = "confirm" ]; then
+  [ "$FAIL_MODE" = "closed" ] || FAIL_MODE=closed
+  fail_response "confirm without native output in gateway response"
+fi
+{{end}}{{if not .Sandbox}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+  printf '%s\n' "$OUTPUT"
+fi
+{{end}}{{if .Sandbox}}if ! defenseclaw_sandbox_confirm_receipt "/api/v1/claude-code/hook" "$RESULT"; then
+  # A 429 is the gateway answering: a refusal for rate, not an outage.
+  if [ "$DC_SANDBOX_RECEIPT_STATUS" = 429 ]; then
+    fail_response "$(defenseclaw_sandbox_rate_refusal_reason "$DC_SANDBOX_RECEIPT_BODY")"
+  fi
+  fail_unreachable "sandbox hook receipt was not acknowledged (status ${DC_SANDBOX_RECEIPT_STATUS})"
+fi
+if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+  printf '%s\n' "$OUTPUT"
+fi
+{{end}}
 # Anthropic's Claude Code hook protocol — like Codex's — is strictly
 # EITHER structured JSON on stdout with exit 0 (Claude parses the
 # permissionDecision/decision from the JSON) OR exit 2 with the reason
@@ -349,11 +866,12 @@ if [ "$ACTION" = "block" ]; then
     # decision=block. Exit 0 so Claude Code honors it.
     exit 0
   fi
-  REASON=$(echo "$RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null)
-  if [ -z "$REASON" ]; then
+{{if .SecureClient}}  REASON=$(echo "$RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null)
+{{else}}  _dc_jq_into REASON line "$RESULT" -r '.reason // empty' 2>/dev/null
+{{end}}  if [ -z "$REASON" ]; then
     REASON="Blocked by DefenseClaw Claude Code policy."
   fi
-  printf '%s\n' "$REASON" >&2
+  {{if .ManagedShellGuard}}_dc_managed_block_reason "$REASON"{{else}}printf '%s\n' "$REASON" >&2{{end}}
   exit 2
 fi
 exit 0

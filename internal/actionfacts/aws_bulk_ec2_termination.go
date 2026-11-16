@@ -5,7 +5,6 @@ package actionfacts
 
 import (
 	"encoding/json"
-	"regexp"
 )
 
 const (
@@ -13,7 +12,7 @@ const (
 	maxAWSBulkEC2TerminationInstances = 100
 )
 
-var canonicalEC2InstanceIDPattern = regexp.MustCompile(`^i-(?:[0-9a-f]{8}|[0-9a-f]{17})$`)
+var canonicalEC2InstanceIDPattern = lazyMustCompile(`^i-(?:[0-9a-f]{8}|[0-9a-f]{17})$`)
 
 // AWSBulkEC2TerminationFact is deliberately value-free. Its existence proves
 // that one trusted aws.ec2.terminate_instances invocation names a bounded set

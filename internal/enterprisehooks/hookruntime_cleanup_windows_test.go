@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -66,6 +67,13 @@ func TestRemoveWindowsStandaloneHookRuntimeDirectoriesRemovesOnlyEmptiedDirector
 	writeHookRuntimeFile(t, filepath.Join(root, "devin", windowsPerUserManagedEnrollmentLockFile))
 	enrollment := filepath.Join(root, "devin", windowsPerUserManagedEnrollmentFile)
 	writeHookRuntimeFile(t, enrollment)
+	closure := filepath.Join(root, windowsStandaloneHookClosureFile)
+	if err := os.WriteFile(closure, windowsStandaloneHookClosureBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trust := windowsManagedPolicyFileTrustCheck
+	windowsManagedPolicyFileTrustCheck = func(string) error { return nil }
+	t.Cleanup(func() { windowsManagedPolicyFileTrustCheck = trust })
 
 	kept, err := RemoveWindowsStandaloneHookRuntimeDirectories()
 	if err != nil {
@@ -79,6 +87,9 @@ func TestRemoveWindowsStandaloneHookRuntimeDirectoriesRemovesOnlyEmptiedDirector
 	}
 	if len(kept) != 2 {
 		t.Fatalf("kept = %v, want the devin directory and the root", kept)
+	}
+	if held, err := readWindowsStandaloneHookClosure(closure); err != nil || !held {
+		t.Fatalf("incomplete teardown removed the hook closure: held=%t err=%v", held, err)
 	}
 
 	if err := os.Remove(enrollment); err != nil {
@@ -143,11 +154,7 @@ func TestRemoveWindowsStandaloneMachinePolicySelectorLocks(t *testing.T) {
 // its lock with it.
 func TestRemoveWindowsStandaloneDeletedAccountSelectorTargets(t *testing.T) {
 	stubWindowsHookRuntimeRoot(t)
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil || user == nil || user.User.Sid == nil {
-		t.Fatalf("resolve test SID: %v", err)
-	}
-	owner := user.User.Sid
+	owner := currentWindowsTestSID(t)
 	const deleted = "S-1-5-21-1111111111-2222222222-3333333333-1021"
 	base := t.TempDir()
 	previousPath, previousOwner := windowsManagedRuntimeSelectorPathResolver, windowsManagedPolicyOwnerSID
@@ -218,5 +225,47 @@ func TestRemoveWindowsStandaloneDeletedAccountSelectorTargets(t *testing.T) {
 		if _, err := os.Lstat(filepath.Join(base, "codex", leaf)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("codex %s must be gone once its only entry was a deleted account's: %v", leaf, err)
 		}
+	}
+}
+
+// An administrator link at a per-user connector
+// folder of the hook runtime root, with an enrollment.json behind it, is kept
+// and named by the last step of the teardown. Nothing behind it is read or
+// removed, and the step does not fail the uninstall that already committed. A
+// folder that is no link still goes, and a link at another connector excuses
+// nothing.
+func TestRemoveWindowsStandaloneHookRuntimeDirectoriesKeepsALinkedConnectorFolder(t *testing.T) {
+	root := stubWindowsHookRuntimeRoot(t)
+	windowsManagedPolicyKept.Lock()
+	windowsManagedPolicyKept.paths = map[string]string{}
+	windowsManagedPolicyKept.Unlock()
+	t.Cleanup(func() {
+		windowsManagedPolicyKept.Lock()
+		windowsManagedPolicyKept.paths = map[string]string{}
+		windowsManagedPolicyKept.Unlock()
+	})
+	linked := filepath.Join(root, "copilot")
+	decoy := filepath.Join(linked, windowsPerUserManagedEnrollmentFile)
+	plant(t, decoy, "decoy enrollment behind the link")
+	writeHookRuntimeFile(t, filepath.Join(root, "devin", windowsPerUserManagedEnrollmentLockFile))
+	previousProbe := windowsReparseChainProbe
+	windowsReparseChainProbe = linkProbe(linked)
+	t.Cleanup(func() { windowsReparseChainProbe = previousProbe })
+
+	kept, err := RemoveWindowsStandaloneHookRuntimeDirectories()
+	if err != nil {
+		t.Fatalf("a link at a per-user connector folder failed the cleanup: %v", err)
+	}
+	if !slices.Contains(kept, linked) {
+		t.Fatalf("kept = %v, want the linked copilot folder named", kept)
+	}
+	if body, readErr := os.ReadFile(decoy); readErr != nil || string(body) != "decoy enrollment behind the link" {
+		t.Fatalf("the file behind the link changed: %q %v", body, readErr)
+	}
+	if _, statErr := os.Lstat(filepath.Join(root, "devin")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("a folder that is no link and holds only a lock file must still go: %v", statErr)
+	}
+	if got := WindowsManagedPolicyFoldersKept(); !slices.Contains(got, linked) {
+		t.Fatalf("the kept link is not named: %v", got)
 	}
 }

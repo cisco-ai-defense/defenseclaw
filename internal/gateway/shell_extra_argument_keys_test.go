@@ -76,13 +76,17 @@ func shellExtraKeyHook(t *testing.T, connectorName, tool string, args json.RawMe
 func TestShellToolCallWithExtraArgumentKeys(t *testing.T) {
 	const rm = `"rm -rf ~/"`
 	for _, shell := range []struct{ connector, tool, workdir string }{
-		{"opencode", "bash", "workdir"},
+		{"opencode", "shell", "workdir"},
 		{"claudecode", "Bash", "workdir"},
 		{"devin", "exec", "workdir"},
 		{"kiro", "execute_bash", "working_dir"},
+		{"kiro", "execute_pwsh", "cwd"},
 		{"kiro", "shell", "working_dir"},
 		{"hermes", "terminal", "workdir"},
 		{"codex", "Bash", "workdir"},
+		// A bash tool no projection lists (GAP-0694).
+		{"opencode", "bash", "workdir"},
+		{"devin", "bash", "workdir"},
 	} {
 		upper := strings.ToUpper(shell.workdir[:1]) + shell.workdir[1:]
 		for _, row := range []struct {
@@ -106,12 +110,6 @@ func TestShellToolCallWithExtraArgumentKeys(t *testing.T) {
 			{"benign", `{"command":"ls","description":"x","timeout":5}`, "allow"},
 			{"benign-extra", `{"command":"ls","extra":"x"}`, "allow"},
 		} {
-			if shell.tool == "shell" && row.rule != unverifiedShellCommandRuleID && row.rule != "allow" {
-				// Kiro's shell alias does not reach the command rules even
-				// with the command alone (rel-1-0-2 GAP-0689, open): only the
-				// rows without a command to judge are pinned for it here.
-				continue
-			}
 			t.Run(shell.connector+"/"+shell.tool+"/"+row.name, func(t *testing.T) {
 				got := shellExtraKeyHook(t, shell.connector, shell.tool, json.RawMessage(row.args))
 				if row.rule == "allow" {

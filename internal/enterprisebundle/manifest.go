@@ -8,11 +8,11 @@ package enterprisebundle
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -20,6 +20,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // ManifestSchemaVersion is the manifest.json schema this build reads.
@@ -77,14 +78,27 @@ type FileEntry struct {
 	Size   int64  `json:"size"`
 }
 
-// SecretRef names an enterprise credential the device must hold.
+// SecretRef names an enterprise credential the device must hold, and binds
+// its value: ValueSHA256 is CredentialValueSHA256 of the value the signer
+// gave. A device refuses a stored value with another digest
+// (secret_ref_mismatch) and an entry without one (secret_ref_unbound).
 type SecretRef struct {
-	Ref      string `json:"ref"`
-	Required bool   `json:"required"`
+	Ref         string `json:"ref"`
+	Required    bool   `json:"required"`
+	ValueSHA256 string `json:"value_sha256,omitempty"`
 }
 
 // Name is the credential name of a secret://<name> reference.
 func (r SecretRef) Name() string { return strings.TrimPrefix(r.Ref, SecretRefScheme) }
+
+// Binds reports whether the reference signs value as the credential of a
+// bundle for tenant. An entry without a digest binds no value.
+func (r SecretRef) Binds(tenant string, value []byte) bool {
+	if r.ValueSHA256 == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(r.ValueSHA256), []byte(CredentialValueSHA256(tenant, r.Name(), value))) == 1
+}
 
 // EffectivePolicy is the per-platform effective policy digest bundle sign
 // computed, with the product version that computed it (the digest covers
@@ -120,14 +134,14 @@ type Warning struct {
 var (
 	// bundleIDPattern is "b-" and a ULID in canonical upper-case Crockford
 	// base32 (the first character at most 7: 128 bits).
-	bundleIDPattern        = regexp.MustCompile(`^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
-	scopeIDPattern         = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-	sha256Pattern          = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	digestPattern          = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	componentDigestPattern = regexp.MustCompile(`^sha256:([0-9a-f]{12}|[0-9a-f]{64})$`)
-	productVersionRegex    = regexp.MustCompile(`^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})(-[0-9A-Za-z.-]{1,64})?(\+[0-9A-Za-z.-]{1,64})?$`)
-	warningCodePattern     = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
-	manifestKeyPattern     = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
+	bundleIDPattern        = lazyregexp.New(`^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
+	scopeIDPattern         = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	sha256Pattern          = lazyregexp.New(`^[0-9a-f]{64}$`)
+	digestPattern          = lazyregexp.New(`^sha256:[0-9a-f]{64}$`)
+	componentDigestPattern = lazyregexp.New(`^sha256:([0-9a-f]{12}|[0-9a-f]{64})$`)
+	productVersionRegex    = lazyregexp.New(`^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})(-[0-9A-Za-z.-]{1,64})?(\+[0-9A-Za-z.-]{1,64})?$`)
+	warningCodePattern     = lazyregexp.New(`^[a-z0-9_]{1,64}$`)
+	manifestKeyPattern     = lazyregexp.New(`^[a-z0-9_]{1,64}$`)
 )
 
 // MaxVersion is the highest manifest version: 2^53-1, the largest integer a
@@ -141,6 +155,10 @@ const maxManifestDepth = 8
 
 // ValidBundleID reports whether id is "b-" followed by a canonical ULID.
 func ValidBundleID(id string) bool { return bundleIDPattern.MatchString(id) }
+
+// ValidDeviceGroup reports whether group is a device group name: 1 to 128
+// characters of [A-Za-z0-9._-] that start with a letter or digit.
+func ValidDeviceGroup(group string) bool { return scopeIDPattern.MatchString(group) }
 
 // DecodeManifest decodes and validates manifest.json. It refuses
 // (manifest_invalid) a document over MaxManifestBytes, invalid UTF-8 or a
@@ -323,7 +341,7 @@ func (m *Manifest) Validate() error {
 	if err := checkDisplayText(m.ChangeSummary, MaxChangeSummary); err != nil {
 		return bad("change_summary", "%s", err)
 	}
-	if m.MinProductVersion != "" && !productVersionRegex.MatchString(m.MinProductVersion) {
+	if m.MinProductVersion != "" && !IsReleaseVersion(m.MinProductVersion) {
 		return bad("min_product_version", "want a version such as 1.2.3")
 	}
 	if err := m.validateFiles(); err != nil {
@@ -332,7 +350,7 @@ func (m *Manifest) Validate() error {
 	if err := m.validateSecretRefs(); err != nil {
 		return err
 	}
-	if !productVersionRegex.MatchString(m.EffectivePolicy.ProductVersion) {
+	if !IsReleaseVersion(m.EffectivePolicy.ProductVersion) {
 		return bad("effective_policy.product_version", "want a version such as 1.2.3")
 	}
 	if !knownPlatform(m.EffectivePolicy.ComputedOn) {
@@ -438,6 +456,9 @@ func (m *Manifest) validateSecretRefs() error {
 			return refuse(CodeManifestInvalid, field, "%s is listed twice", name)
 		}
 		seen[name] = true
+		if ref.ValueSHA256 != "" && !validSHA256Hex(ref.ValueSHA256) {
+			return refuse(CodeManifestInvalid, fmt.Sprintf("secret_refs[%d].value_sha256", i), "want 64 lower-case hex characters")
+		}
 	}
 	return nil
 }

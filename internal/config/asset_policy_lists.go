@@ -83,7 +83,7 @@ func (c *Config) AssetListDecision(in AssetPolicyInput) (string, AssetPolicyRule
 // mcpAllowCommandMatches binds an operator allow to the reviewed launcher and
 // complete argument list. Denied rules retain their broad basename/prefix scope.
 func mcpAllowCommandMatches(rule AssetPolicyRule, in AssetPolicyInput) bool {
-	if strings.TrimSpace(rule.Command) != strings.TrimSpace(in.Command) ||
+	if in.ArgsCut || strings.TrimSpace(rule.Command) != strings.TrimSpace(in.Command) ||
 		len(rule.ArgsPrefix) != len(in.Args) {
 		return false
 	}
@@ -148,9 +148,8 @@ func assetRuleMatchesAnyName(rule AssetPolicyRule, in AssetPolicyInput) bool {
 }
 
 // SameConnector reports whether two connector names name the same connector
-// once aliases are normalized (claude-code and claude_code are claudecode,
-// open-hands and open_hands are openhands). asset_policy rules compare
-// connectors this way, as the Python lists do (connector_paths.normalize):
+// once aliases are normalized (claude-code and claude_code are
+// claudecode). asset_policy rules compare connectors this way, as the Python lists do (connector_paths.normalize):
 // the runtime always passes the canonical name. Secure Client asset rules
 // keep their pre-v9 trimmed, case-insensitive comparison.
 func SameConnector(a, b string) bool {

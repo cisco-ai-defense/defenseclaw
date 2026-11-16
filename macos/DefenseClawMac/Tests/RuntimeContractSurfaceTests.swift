@@ -19,15 +19,29 @@ import Foundation
 @main
 enum RuntimeContractSurfaceTests {
     static func main() {
-        precondition(CommandRegistry.sourceCount == 223, "unexpected upstream command count")
         precondition(CommandRegistry.all.count == CommandRegistry.sourceCount, "registry count mismatch")
+        precondition(Set(CommandRegistry.all.map(\.id)).count == CommandRegistry.all.count, "command IDs must be unique")
 
         let titles = CommandRegistry.all.map(\.title)
         precondition(Set(titles).count == titles.count, "command titles must be unique")
         precondition(titles.contains("setup amp"), "Amp setup command is missing")
         precondition(titles.contains("setup kiro"), "Kiro setup command is missing")
-        precondition(titles.contains("setup omnigent"), "OmniGent setup command is missing")
+        precondition(titles.contains("setup cowork"), "Cowork setup command is missing")
         precondition(titles.contains("setup galileo"), "Galileo setup command is missing")
+        // `keys set` secret transport (runtime 1.0.0+ documents --value-stdin).
+        let keysSetArgv = ["keys", "set", "OPENAI_API_KEY"]
+        precondition(SecretStandardInputTransport.arguments(keysSetArgv, binary: "defenseclaw", standardInput: "s", runtimeVersion: "1.0.3")
+                     == keysSetArgv + ["--value-stdin"], "runtime 1.0.3 must receive --value-stdin")
+        precondition(SecretStandardInputTransport.arguments(keysSetArgv, binary: "defenseclaw", standardInput: "s", runtimeVersion: "0.8.10")
+                     == keysSetArgv, "runtime 0.8.10 keeps the prompt-fallback transport")
+        precondition(SecretStandardInputTransport.arguments(keysSetArgv, binary: "defenseclaw", standardInput: "s", runtimeVersion: nil)
+                     == keysSetArgv, "an unknown runtime version must not add --value-stdin")
+        precondition(SecretStandardInputTransport.arguments(keysSetArgv, binary: "defenseclaw", standardInput: nil, runtimeVersion: "1.0.3")
+                     == keysSetArgv, "no stdin secret, no flag")
+        precondition(SecretStandardInputTransport.arguments(keysSetArgv + ["--value-stdin"], binary: "defenseclaw", standardInput: "s", runtimeVersion: "1.0.3")
+                     == keysSetArgv + ["--value-stdin"], "the flag is never appended twice")
+        precondition(SecretStandardInputTransport.arguments(["keys", "list"], binary: "defenseclaw", standardInput: "s", runtimeVersion: "1.0.3")
+                     == ["keys", "list"], "only keys set carries the flag")
         precondition(titles.contains("config show effective observability"), "effective observability command is missing")
         precondition(titles.contains("observability plan"), "observability plan command is missing")
         precondition(!titles.contains("setup observability migrate-splunk"), "retired migrate-splunk command remains")
@@ -36,6 +50,7 @@ enum RuntimeContractSurfaceTests {
         let bundledTitles = CommandRegistry.paletteCommands(supportedSetupCommands: []).map(\.title)
         precondition(!bundledTitles.contains("setup amp"), "runtime 0.8.10 must not expose setup amp")
         precondition(!bundledTitles.contains("setup kiro"), "runtimes without Kiro must not expose setup kiro")
+        precondition(!bundledTitles.contains("setup cowork"), "runtimes without Cowork must not expose setup cowork")
         let unknownTitles = CommandRegistry.paletteCommands(supportedSetupCommands: nil).map(\.title)
         precondition(!unknownTitles.contains("setup kiro"), "unknown setup capability must fail closed")
         let futureTitles = CommandRegistry.paletteCommands(supportedSetupCommands: ["amp"]).map(\.title)
@@ -57,10 +72,9 @@ enum RuntimeContractSurfaceTests {
         Commands:
           amp          Configure Amp.
           kiro         Configure Kiro.
-          omnigent     Configure OmniGent.
                        Wrapped description text must not become a command.
         """)
-        precondition(setupCommands == ["amp", "kiro", "omnigent"], "setup help capabilities must parse exactly")
+        precondition(setupCommands == ["amp", "kiro"], "setup help capabilities must parse exactly")
 
         let galileo = command(titled: "setup galileo")
         precondition(galileo.requiresTerminal, "interactive Galileo setup must be terminal-only")

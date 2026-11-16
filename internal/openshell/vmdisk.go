@@ -47,22 +47,15 @@ func VMStateDir(stateDir, home string) string {
 // beyond the image's own size in Docker.
 const VMDiskHeadroomBytes = 1 << 30
 
-// vmDiskGuess is the disk the MicroVM driver prepares from a harness image
-// whose size is not known: about 5 GB.
-const vmDiskGuess = 5 << 30
-
 // VMDiskRoom is the free space a MicroVM create needs where the driver
 // prepares a disk from an image it has not prepared one from yet, for an
-// image of imageBytes in Docker (0: unknown, about 5 GB): need is what the
-// disk takes, about the image's size plus VMDiskHeadroomBytes; below fail
-// the create is refused (never below the doctor's VMDiskFailBytes), and
+// image of imageBytes in Docker (0: unknown): need covers the measured
+// first-start peak, or the image's size plus headroom if larger; below fail
+// the create is refused (with another GiB free beyond need), and
 // below warn it is warned about (never below VMDiskWarnBytes).
 func VMDiskRoom(imageBytes uint64) (need, fail, warn uint64) {
-	if imageBytes == 0 {
-		imageBytes = vmDiskGuess
-	}
-	need = imageBytes + VMDiskHeadroomBytes
-	return need, max(VMDiskFailBytes, need), max(VMDiskWarnBytes, 2*need)
+	need = max(VMDiskFirstStartBytes, imageBytes+VMDiskHeadroomBytes)
+	return need, max(VMDiskFailBytes, need+VMDiskHeadroomBytes), max(VMDiskWarnBytes, 2*need)
 }
 
 // ErrVMDiskShort means there is too little free space where the MicroVM
@@ -77,14 +70,14 @@ var ErrVMDiskShort = errors.New("not enough free disk space")
 // what frees space.
 func VMDiskShortage(dir string, free, imageBytes uint64, what string) (warning string, err error) {
 	need, fail, warn := VMDiskRoom(imageBytes)
-	size := humanBytes(need - VMDiskHeadroomBytes)
+	size := humanBytes(need)
 	switch {
 	case free < fail:
-		return "", fmt.Errorf("%w for %s: the MicroVM driver prepares a disk of about %s from its image in %s, where %s is free and at least %s is needed; "+
+		return "", fmt.Errorf("%w for %s: the MicroVM driver's first start uses about %s while preparing a disk from its image in %s, where %s is free and at least %s is needed; "+
 			"free space on that volume first (`%s` removes superseded harness images and the MicroVM disks prepared from them)",
 			ErrVMDiskShort, what, size, dir, humanBytes(free), humanBytes(fail), pruneCommand)
 	case free < warn:
-		return fmt.Sprintf("only %s is free in %s, and %s prepares a MicroVM disk of about %s there (%s or more is recommended; "+
+		return fmt.Sprintf("only %s is free in %s, and %s uses about %s while preparing a MicroVM disk there (%s or more is recommended; "+
 			"`%s` removes superseded harness images and the MicroVM disks prepared from them)",
 			humanBytes(free), dir, what, size, humanBytes(warn), pruneCommand), nil
 	}

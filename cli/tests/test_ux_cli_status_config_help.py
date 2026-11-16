@@ -77,7 +77,7 @@ def test_help_lists_and_examples_keep_their_lines() -> None:
 
     scan = page("skill", "scan")
     assert "\n  Examples:\n    defenseclaw skill scan\n" in scan
-    assert "\n    defenseclaw skill scan clawhub://my-skill@1.2.3\n" in scan
+    assert "\n    defenseclaw skill scan clawhub://my-skill\n" in scan
     guard = page("setup", "guardrail")
     assert "\n  Two modes:\n    observe - " in guard
     assert "OpenClaw" not in guard.split("Options:")[0]

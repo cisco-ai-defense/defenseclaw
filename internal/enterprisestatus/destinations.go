@@ -55,3 +55,43 @@ func WriteDestinations(w io.Writer, destinations []Destination) {
 		fmt.Fprintf(w, "    %s: %s%s signals=%s redaction=%s\n", destination.Name, kind, state, signals, profiles)
 	}
 }
+
+// AuditStore is the local audit store (audit.db) of the installed config:
+// observability.local.retention_days (0: kept until the size cap or forever),
+// observability.local.max_store_mb (0: no size cap) and the bytes of the store
+// files on disk (omitted when they cannot be read). The per-user status that
+// shows the retention and the cap is refused on a managed computer, so
+// enterprise status shows them (GAP-0141).
+type AuditStore struct {
+	RetentionDays int    `json:"retention_days"`
+	MaxStoreMB    int    `json:"max_store_mb"`
+	SizeBytes     *int64 `json:"size_bytes,omitempty"`
+}
+
+// RetentionLabel is the retention as the per-user status says it: "7 days",
+// "unbounded", "7 days, size cap 64 MiB" or "size cap 64 MiB".
+func RetentionLabel(days, maxStoreMB int64) string {
+	if maxStoreMB > 0 {
+		capText := fmt.Sprintf("size cap %d MiB", maxStoreMB)
+		if days == 0 {
+			return capText
+		}
+		return fmt.Sprintf("%d days, %s", days, capText)
+	}
+	if days == 0 {
+		return "unbounded"
+	}
+	return fmt.Sprintf("%d days", days)
+}
+
+// WriteAuditStore prints the human status line of the audit store.
+func WriteAuditStore(w io.Writer, store *AuditStore) {
+	if store == nil {
+		return
+	}
+	line := "  audit store retention: " + RetentionLabel(int64(store.RetentionDays), int64(store.MaxStoreMB))
+	if store.SizeBytes != nil {
+		line += fmt.Sprintf(" (%.1f MiB on disk)", float64(*store.SizeBytes)/(1<<20))
+	}
+	fmt.Fprintln(w, line)
+}

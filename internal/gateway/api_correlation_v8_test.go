@@ -69,7 +69,7 @@ func TestCorrelationReadAPIIsNoStoreAndFailClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.RecordObservation(t.Context(), audit.CorrelationObservation{
+	if err := repo.RecordObservations(t.Context(), audit.CorrelationObservation{
 		RecordID: "api-lifecycle-observation", SemanticEventID: audit.SemanticEventID(req.SemanticEventID),
 		Signal: audit.CorrelationSignalLogs, Bucket: "agent_lifecycle", EventName: "tool.started",
 		ObservedAt: time.Now().UTC(), LifecycleID: "api-lifecycle", ExecutionID: "api-execution",

@@ -13,4 +13,9 @@ func TestWindowsServiceSIDStringMatchesWindows(t *testing.T) {
 			t.Fatalf("WindowsServiceSIDString(%q) = %s, want %s", name, got, want)
 		}
 	}
+	// sc showsid for a name with no SCM row: the SID needs no service.
+	const probe = "S-1-5-80-557343067-3914267301-595778489-1841644181-1709292513"
+	if got := WindowsServiceSIDString("DefenseClawRecoveryNoSuchServiceProbe_48A6"); got != probe {
+		t.Fatalf("WindowsServiceSIDString(probe) = %s, want %s", got, probe)
+	}
 }

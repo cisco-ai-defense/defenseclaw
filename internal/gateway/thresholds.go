@@ -52,6 +52,30 @@ var packPostures sync.Map // directory -> posture
 // pendingPackPostures holds what builds read until a generation publishes.
 var pendingPackPostures sync.Map // directory -> posture
 
+// packPostureFor is packPosture for a configuration a generation build
+// bound postures to: the posture that build read for the directory, else
+// the process-wide one.
+func packPostureFor(cfg *config.Config, ref config.RulePackRef, dir string) string {
+	key := strings.TrimSpace(dir)
+	if key == "" {
+		key = strings.TrimSpace(ref.Dir)
+	}
+	if raw, ok := cfg.PinnedRulePackPosture(key); ok {
+		return postureFromManifest(key, raw)
+	}
+	return packPosture(ref, dir)
+}
+
+// postureFromManifest is the posture of the loaded content at dir: its
+// manifest value, else the legacy folder-name table. A custom pack may use
+// a built-in name, so the selected name cannot determine its posture.
+func postureFromManifest(dir, raw string) string {
+	if raw != "" {
+		return raw
+	}
+	return guardrailProfileForDir(dir)
+}
+
 func rememberPackPosture(dir, posture string) {
 	if dir = strings.TrimSpace(dir); dir != "" {
 		packPostures.Store(dir, posture)
@@ -76,33 +100,39 @@ func publishPackPostures() {
 
 // packPosture returns the posture of ref's pack at dir (its resolved
 // directory; "" uses ref.Dir): the manifest posture a generation recorded
-// for that directory, a built-in pack's own name, else the folder-name
-// table (guardrailProfileForDir).
+// for that directory, else the legacy folder-name table.
 func packPosture(ref config.RulePackRef, dir string) string {
 	if dir = strings.TrimSpace(dir); dir == "" {
 		dir = strings.TrimSpace(ref.Dir)
 	}
+	raw := ""
 	if dir != "" {
-		if v, ok := packPostures.Load(dir); ok && v.(string) != "" {
-			return v.(string)
+		if v, ok := packPostures.Load(dir); ok {
+			raw = v.(string)
 		}
 	}
-	if ref.Name != "" && config.IsBuiltinRulePack(ref.Name) {
-		return ref.Name
-	}
-	return guardrailProfileForDir(dir)
+	return postureFromManifest(dir, raw)
 }
 
-// guardrailRulePackDir is the directory of ref for a caller that holds only
-// the guardrail block: a custom_packs entry's path, else ref.Dir (a built-in
-// name needs policy_dir and keeps its own posture).
-func guardrailRulePackDir(gc *config.GuardrailConfig, ref config.RulePackRef) string {
+// guardrailPackPosture is packPosture of ref for a caller that holds only the
+// guardrail block, with the verdict and fallback every other reader of the
+// configuration uses: a usable custom_packs entry takes its own folder, a
+// broken one its built-in fallback (a broken entry named like a built-in
+// pack keeps that pack's posture, any other the default posture), and a
+// built-in name its own. gc carries the verdict of the load that built it, so
+// a folder that went away since does not change a posture already loaded.
+// Under the Secure Client integration (the process-wide managed flag) the
+// loader's own refusals apply and an entry always names its folder.
+func guardrailPackPosture(gc *config.GuardrailConfig, ref config.RulePackRef) string {
 	if gc != nil && ref.Name != "" {
-		if custom, ok := gc.CustomPacks[ref.Name]; ok {
-			return strings.TrimSpace(custom.Path)
+		if _, ok := gc.CustomPacks[ref.Name]; ok && (ManagedEnterpriseActive() || !gc.CustomRulePackFallsBack(ref.Name)) {
+			return packPosture(ref, gc.CustomRulePackPath(ref.Name))
+		}
+		if name := gc.BuiltinRulePackFor(ref.Name); name != "" {
+			return name
 		}
 	}
-	return ref.Dir
+	return packPosture(ref, ref.Dir)
 }
 
 func packLabel(ref config.RulePackRef, posture string) string {
@@ -113,9 +143,14 @@ func packLabel(ref config.RulePackRef, posture string) string {
 }
 
 // resolveThresholds returns the block and alert levels for connector ("" for
-// the global scope) of cfg, a base or profile-derived configuration.
+// the global scope) of cfg, a base or profile-derived configuration, with
+// the postures its generation build read (packPostureFor).
 func resolveThresholds(cfg *config.Config, connector string) ResolvedThresholds {
-	return resolveThresholdsWith(cfg, connector, packPosture)
+	if cfg == nil {
+		return thresholdsFromLevels(nil, "", "default", config.RulePackRef{})
+	}
+	ref := cfg.EffectiveRulePackRefForConnector(connector)
+	return thresholdsFromLevels(&cfg.Guardrail, connector, packPostureFor(cfg, ref, cfg.ResolveRulePackDir(ref)), ref)
 }
 
 func resolveThresholdsWith(cfg *config.Config, connector string, posture func(config.RulePackRef, string) string) ResolvedThresholds {
@@ -126,18 +161,29 @@ func resolveThresholdsWith(cfg *config.Config, connector string, posture func(co
 	return thresholdsFromLevels(&cfg.Guardrail, connector, posture(ref, cfg.ResolveRulePackDir(ref)), ref)
 }
 
-// buildingPackPosture is packPosture for the generation being built: the
-// postures its build just read are not published yet, but the table built
-// with it is what the proxy path serves once it is, so it must resolve with
-// them, as the request-time resolution does after publishing.
-func buildingPackPosture(ref config.RulePackRef, dir string) string {
+// buildingPackPostures resolves postures for the generation being built and
+// records them: what its build just read (not yet published), else what the
+// published generations read. The table and the configurations the build
+// binds them to (Config.BindRulePackPostures) then decide with the same postures.
+type buildingPackPostures map[string]string
+
+func (b buildingPackPostures) posture(ref config.RulePackRef, dir string) string {
 	if dir = strings.TrimSpace(dir); dir == "" {
 		dir = strings.TrimSpace(ref.Dir)
 	}
-	if v, ok := pendingPackPostures.Load(dir); ok && v.(string) != "" {
-		return v.(string)
+	if dir == "" {
+		return postureFromManifest(dir, "")
 	}
-	return packPosture(ref, dir)
+	raw, seen := b[dir]
+	if !seen {
+		if v, ok := pendingPackPostures.Load(dir); ok {
+			raw = v.(string)
+		} else if v, ok := packPostures.Load(dir); ok {
+			raw = v.(string)
+		}
+		b[dir] = raw
+	}
+	return postureFromManifest(dir, raw)
 }
 
 // ConfigThresholds is resolveThresholds for a caller outside the gateway
@@ -160,7 +206,7 @@ func resolvePackThresholds(cfg *config.Config, connector string) ResolvedThresho
 		return thresholdsFromLevels(nil, "", "default", config.RulePackRef{})
 	}
 	ref := cfg.EffectiveRulePackRefForConnector(connector)
-	return thresholdsFromLevels(nil, connector, packPosture(ref, cfg.ResolveRulePackDir(ref)), ref)
+	return thresholdsFromLevels(nil, connector, packPostureFor(cfg, ref, cfg.ResolveRulePackDir(ref)), ref)
 }
 
 // resolveGuardrailThresholds is resolveThresholds for a caller that holds
@@ -170,7 +216,7 @@ func resolveGuardrailThresholds(gc *config.GuardrailConfig, connector string) Re
 		return thresholdsFromLevels(nil, "", "default", config.RulePackRef{})
 	}
 	ref := gc.EffectiveRulePackRef(connector)
-	return thresholdsFromLevels(gc, connector, packPosture(ref, guardrailRulePackDir(gc, ref)), ref)
+	return thresholdsFromLevels(gc, connector, guardrailPackPosture(gc, ref), ref)
 }
 
 func thresholdsFromLevels(gc *config.GuardrailConfig, connector, posture string, ref config.RulePackRef) ResolvedThresholds {
@@ -241,23 +287,37 @@ func severityName(rank int) string {
 
 // buildThresholdTable resolves every (profile, connector) pair of cfg: the
 // base configuration and each derived profile, for the global scope and
-// every connector either configures.
+// every connector either configures. It binds the postures it read to cfg
+// and each derived configuration (Config.BindRulePackPostures), so a pair resolved
+// later from them, and every decision made with them, uses the same ones.
 func buildThresholdTable(cfg *config.Config, profiles *guardrailProfileSet) thresholdTable {
 	table := thresholdTable{}
 	if cfg == nil {
 		return table
 	}
+	postures := buildingPackPostures{}
 	connectors := thresholdConnectorNames(cfg)
 	fill := func(profile string, derived *config.Config) {
-		table[thresholdKey{Profile: profile}] = resolveThresholdsWith(derived, "", buildingPackPosture)
+		table[thresholdKey{Profile: profile}] = resolveThresholdsWith(derived, "", postures.posture)
 		for _, name := range connectors {
-			table[thresholdKey{Profile: profile, Connector: name}] = resolveThresholdsWith(derived, name, buildingPackPosture)
+			table[thresholdKey{Profile: profile, Connector: name}] = resolveThresholdsWith(derived, name, postures.posture)
 		}
 	}
 	fill("", cfg)
 	if profiles != nil {
 		for name, derived := range profiles.profiles {
 			fill(name, derived.Config)
+		}
+	}
+	// A connector first seen after the build takes the application
+	// protection pack, when one is set.
+	if scope, ok := applicationProtectionRulePackScope(cfg); ok {
+		postures.posture(scope.ref, scope.dir)
+	}
+	cfg.BindRulePackPostures(postures)
+	if profiles != nil {
+		for _, derived := range profiles.profiles {
+			derived.Config.BindRulePackPostures(postures)
 		}
 	}
 	return table
@@ -312,7 +372,7 @@ func ResolveThresholds(g *Generation, connector, profile string) ResolvedThresho
 	}
 	cfg := g.Config
 	if profile != "" && g.Profiles != nil {
-		if derived, ok := g.Profiles.profiles[profile]; ok {
+		if derived, ok := g.Profiles.derivedProfile(profile); ok {
 			cfg = derived.Config
 		}
 	}
@@ -383,7 +443,13 @@ func requestThresholds(ctx context.Context) policy.ThresholdsInput {
 		// whatever the rule pack.
 		return policy.SecureClientGuardrailThresholds(g.Config.PolicyDir)
 	}
-	resolved := ResolveThresholds(g, thresholdConnectorFrom(ctx), profile)
+	var resolved ResolvedThresholds
+	if profileResolved := requestProfile(ctx, g); profileResolved != nil && config.IsProfileMeet(profile) {
+		// A meet's levels are those of the request's path (pathConfig).
+		resolved = resolveThresholds(profileResolved.derived, config.NormalizeConnectorName(thresholdConnectorFrom(ctx)))
+	} else {
+		resolved = ResolveThresholds(g, thresholdConnectorFrom(ctx), profile)
+	}
 	block, alert := guardrailThresholdRanks(resolved)
 	trust := config.CiscoTrustFull
 	if g != nil && g.Config != nil {

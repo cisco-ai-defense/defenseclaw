@@ -38,7 +38,7 @@ Public surface
   a matching dispatch arm in each ``*_for_connector`` function below
   and a Go-side ``connector.NewDefaultRegistry`` registration.
 * :func:`normalize` — canonicalize an operator-supplied connector name
-  (trim, lowercase, default to ``"openclaw"``). Mirrors
+  (trim, lowercase, empty when unset). Mirrors
   ``Config.activeConnector`` semantics in claw.go.
 * :func:`is_known` — connector-name allow-list check.
 * :func:`skill_dirs` / :func:`plugin_dirs` / :func:`agent_dirs` /
@@ -59,6 +59,7 @@ import ntpath
 import os
 import posixpath
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -68,7 +69,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from itertools import islice
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from defenseclaw import codex_toml
 
@@ -106,11 +107,9 @@ KNOWN_CONNECTORS: tuple[str, ...] = (
     "cursor",
     "devin",
     "copilot",
-    "openhands",
     "antigravity",
     "opencode",
     "amp",
-    "omnigent",
     "kiro",
 )
 """Allow-list of recognized agent-framework connector names.
@@ -193,7 +192,7 @@ class MCPServerEntry:
 
 @dataclass(frozen=True)
 class OpenCodeConfigLayer:
-    """One locally representable OpenCode v1.18.10-v1.18.19 config layer."""
+    """One locally representable OpenCode v1 or v2 config layer."""
 
     source: str
     source_scope: str
@@ -409,18 +408,15 @@ def _flag_claude_unloadable(
 def normalize(connector: str | None) -> str:
     """Return the canonical lowercase connector name.
 
-    Empty / whitespace-only / None values default to ``"openclaw"`` for
-    backward compatibility with pre-S1.x deployments. Matches the
+    Empty / whitespace-only / None values select no connector. Matches the
     precedence rule in ``Config.activeConnector`` (Go).
     """
     if not connector:
-        return "openclaw"
+        return ""
     name = connector.strip().lower()
-    if name in {"open-hands", "open_hands"}:
-        return "openhands"
     if name in {"claude-code", "claude_code"}:
         return "claudecode"
-    return name or "openclaw"
+    return name
 
 
 def is_known(connector: str | None) -> bool:
@@ -614,11 +610,6 @@ def _discovery_path(
     return os.path.join(root, *parts)
 
 
-def _omnigent_config_home() -> str:
-    config_home = (os.environ.get("OMNIGENT_CONFIG_HOME") or "").strip()
-    if config_home:
-        return os.path.abspath(_expand(config_home))
-    return os.path.join(str(Path.home()), ".omnigent")
 
 
 def _connector_env_home(variable: str, default_dir: str) -> str:
@@ -874,13 +865,17 @@ def codex_home() -> str:
     return _connector_env_home("CODEX_HOME", ".codex")
 
 
+class InventoryFileTooLargeError(OSError):
+    """A file is larger than the bounded inventory read takes."""
+
+
 def _read_bounded_stable_file(path: str, *, max_bytes: int) -> bytes:
     """Read one regular file without reparse traversal or replacement races."""
     fd = open_regular_file_no_follow(path)
     try:
         before = os.fstat(fd)
         if before.st_size > max_bytes:
-            raise OSError(f"file exceeds {max_bytes} byte inventory limit")
+            raise InventoryFileTooLargeError(f"file exceeds {max_bytes} byte inventory limit")
         chunks: list[bytes] = []
         remaining = max_bytes + 1
         while remaining:
@@ -891,7 +886,7 @@ def _read_bounded_stable_file(path: str, *, max_bytes: int) -> bytes:
             remaining -= len(chunk)
         payload = b"".join(chunks)
         if len(payload) > max_bytes:
-            raise OSError(f"file exceeds {max_bytes} byte inventory limit")
+            raise InventoryFileTooLargeError(f"file exceeds {max_bytes} byte inventory limit")
         after = os.fstat(fd)
         before_identity = (
             before.st_dev,
@@ -1245,11 +1240,6 @@ def connector_hook_config_paths(connector: str, workspace_dir: str | None = None
     if name == "copilot":
         root = _workspace_path(workspace, ".github") if workspace else copilot_home()
         return [os.path.join(root, "hooks", "defenseclaw.json")]
-    if name == "openhands":
-        paths = [os.path.join(connector_home("openhands"), "hooks.json")]
-        if workspace:
-            paths.insert(0, _workspace_path(workspace, ".openhands", "hooks.json"))
-        return paths
     if name == "kiro":
         paths = [os.path.join(connector_home("kiro"), "hooks", "defenseclaw.json")]
         if workspace:
@@ -1270,6 +1260,22 @@ def amp_policy_plugin_path() -> str:
     """Return the single global DefenseClaw policy-plugin path Amp loads."""
 
     return os.path.join(amp_config_home(), "plugins", "defenseclaw.ts")
+
+
+def managed_plugin_path(connector: str | None) -> str:
+    """Return the in-agent plugin DefenseClaw installs for *connector*.
+
+    Only Amp and OpenCode load a DefenseClaw plugin. Their setup receipt
+    (``connector_backups/<connector>/config.json``) records this file and
+    nothing else, so integrity checks compare the receipt only to it, never
+    to the agent's own settings files. Returns "" for other connectors.
+    """
+    name = normalize(connector)
+    if name == "amp":
+        return amp_policy_plugin_path()
+    if name == "opencode":
+        return os.path.join(connector_home("opencode"), "plugins", "defenseclaw.js")
+    return ""
 
 
 def _resolve_amp_managed_settings_path(
@@ -1483,6 +1489,36 @@ def _read_hermes_config_bounded(path: str | None = None) -> tuple[dict[str, Any]
     return document, ""
 
 
+_HERMES_PROFILE_ID_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789")
+
+
+def hermes_profile_entry_name(name: str) -> bool:
+    """Return whether an entry under profiles/ is one Hermes can run as a named profile.
+
+    The same rule as hermesProfileEntryName in
+    internal/gateway/connector/hook_only.go, and tested against the same
+    cases (internal/gateway/connector/testdata/hermes_profile_names.json).
+    Hermes lists, serves and resolves the names its id pattern
+    ``^[a-z0-9][a-z0-9_-]{0,63}$`` admits under ``re.match``, whose ``$``
+    also matches before one final newline. Only the exact name ``default``
+    is the root home; Hermes' own metadata (the ``.deleted`` that
+    ``hermes profile delete`` leaves, other dot directories) and any other
+    name are never a profile. The name is lowercased first, as Go's
+    strings.ToLower does it (a case-insensitive file system opens
+    profiles/Coder for ``hermes -p coder``).
+    """
+    lowered = name.replace("\u0130", "i").lower()
+    newline = lowered.endswith("\n")
+    profile_id = lowered[:-1] if newline else lowered
+    if (profile_id == "default" and not newline) or not 0 < len(profile_id) <= 64:
+        return False
+    for index, char in enumerate(profile_id):
+        if char in _HERMES_PROFILE_ID_CHARS or (index > 0 and char in "_-"):
+            continue
+        return False
+    return True
+
+
 def hermes_profile_unsupported_reason(config_path: str | None = None) -> str:
     """Return why a selected Hermes home is outside the single-profile contract."""
 
@@ -1524,8 +1560,10 @@ def hermes_profile_unsupported_reason(config_path: str | None = None) -> str:
     if len(entries) > _HERMES_PROFILE_ENTRY_LIMIT:
         return "Hermes profiles directory exceeds the bounded inspection limit"
     for entry in entries:
+        if not hermes_profile_entry_name(entry.name):
+            continue
         try:
-            if entry.is_dir(follow_symlinks=False):
+            if entry.is_dir(follow_symlinks=False) or entry.is_symlink():
                 return (
                     f"Hermes named profile {entry.name!r} is unsupported by the "
                     f"single-HERMES_HOME connector; remove it with 'hermes profile "
@@ -1541,19 +1579,6 @@ def hermes_profile_unsupported_reason(config_path: str | None = None) -> str:
     return ""
 
 
-def omnigent_config_path() -> str:
-    """Return OmniGent's effective user-level ``config.yaml`` path.
-
-    OmniGent's hosted server entrypoints resolve an explicit
-    ``OMNIGENT_CONFIG`` file before ``OMNIGENT_CONFIG_HOME/config.yaml`` and
-    the ``~/.omnigent/config.yaml`` default. The CLI server still needs that
-    selected path passed with ``--config``; Doctor verifies that separately
-    from this setup-time resolver.
-    """
-    explicit = (os.environ.get("OMNIGENT_CONFIG") or "").strip()
-    if explicit:
-        return os.path.abspath(_expand(explicit))
-    return os.path.join(_omnigent_config_home(), "config.yaml")
 
 
 # ---------------------------------------------------------------------------
@@ -1589,11 +1614,6 @@ def connector_home(
         return os.environ.get("ZEPTOCLAW_HOME") or os.path.join(home, ".zeptoclaw")
     if name == "copilot":
         return copilot_home()
-    if name == "openhands":
-        root = _workspace_dir(workspace_dir)
-        if root:
-            return os.path.join(root, ".openhands")
-        return os.path.join(home, ".openhands")
     if name == "antigravity":
         # Google documents one global customization root at ~/.gemini/config
         # and publishes no config-home environment override. workspace_dir is
@@ -1611,8 +1631,6 @@ def connector_home(
         # Surfaced so inventory/doctor render a truthful home label rather
         # than an empty string or — worse — OpenClaw's path.
         return _opencode_config_dir() or os.path.join(home, ".config", "opencode")
-    if name == "omnigent":
-        return _omnigent_config_home()
     if name == "kiro":
         # Kiro IDE and Kiro CLI share ~/.kiro; neither documents a config-home
         # environment override.
@@ -1666,7 +1684,7 @@ def connector_config_files(
             _workspace_path(workspace_dir, ".amp", "settings.json"),
             _workspace_path(workspace_dir, ".amp", "settings.jsonc"),
             amp_managed_settings_path(),
-            amp_policy_plugin_path(),
+            managed_plugin_path("amp"),
         ]
     elif name == "zeptoclaw":
         zepto_home = os.environ.get("ZEPTOCLAW_HOME") or os.path.join(home, ".zeptoclaw")
@@ -1680,12 +1698,6 @@ def connector_config_files(
             *copilot_settings_paths(workspace_dir)[1:],
             os.path.join(copilot_root, "hooks", "defenseclaw.json"),
             _workspace_path(workspace_dir, ".github", "hooks", "defenseclaw.json"),
-        ]
-    elif name == "openhands":
-        paths = [
-            os.path.join(home, ".openhands", "hooks.json"),
-            os.path.join(home, ".openhands", "mcp.json"),
-            _workspace_path(workspace_dir, ".openhands", "hooks.json"),
         ]
     elif name == "antigravity":
         # Google's global Hooks and MCP contract is pinned to
@@ -1701,10 +1713,8 @@ def connector_config_files(
         # DefenseClaw owns only this exact bridge. Operator JSON/JSONC remains
         # outside lifecycle snapshots and rollback custody.
         paths = [
-            os.path.join(connector_home("opencode"), "plugins", "defenseclaw.js"),
+            managed_plugin_path("opencode"),
         ]
-    elif name == "omnigent":
-        paths = [omnigent_config_path()]
     elif name == "kiro":
         kiro_root = connector_home("kiro")
         paths = [
@@ -1887,14 +1897,12 @@ def skill_dirs(
     at every repository directory from the active workspace to the project
     root, then ``$HOME/.agents/skills``. Its own managed installer and bundled
     system cache live under ``$CODEX_HOME/skills``; the Unix admin directory is
-    ``/etc/codex/skills``. For OpenClaw — and any unknown
-    name — we walk ``openclaw.json`` to honor any ``skills.load.extraDirs``
-    overrides, then add the home_dir/skills fallback.
+    ``/etc/codex/skills``. For OpenClaw we walk ``openclaw.json`` to honor
+    any ``skills.load.extraDirs`` overrides, then add the home_dir/skills
+    fallback. Empty and unknown names return no paths.
 
     *openclaw_home* and *openclaw_config* are only consulted on the
-    OpenClaw branch. Callers that pass ``None`` get the documented
-    OpenClaw defaults (``~/.openclaw`` and
-    ``~/.openclaw/openclaw.json``).
+    OpenClaw branch, which uses the documented ``~/.openclaw`` defaults.
     """
     name = normalize(connector)
     if name == "claudecode":
@@ -1913,20 +1921,18 @@ def skill_dirs(
         return _devin_skill_dirs(workspace_dir)
     if name == "copilot":
         return _copilot_skill_dirs(workspace_dir)
-    if name == "openhands":
-        return _openhands_skill_dirs(workspace_dir)
     if name == "antigravity":
         return _antigravity_skill_dirs(workspace_dir)
     if name == "opencode":
         return _opencode_skill_dirs(workspace_dir)
-    if name == "omnigent":
-        return []
     if name == "kiro":
         # Kiro's reusable context lives in steering docs and specs, not a
         # skills root. Returning [] keeps doctor from pointing an operator at
         # OpenClaw's directories.
         return []
-    return _openclaw_skill_dirs(openclaw_home, openclaw_config)
+    if name == "openclaw":
+        return _openclaw_skill_dirs(openclaw_home, openclaw_config)
+    return []
 
 
 def skill_write_dirs(
@@ -2002,17 +2008,15 @@ def plugin_dirs(
         return []
     if name == "copilot":
         return []
-    if name == "openhands":
-        return []
     if name == "antigravity":
         return _antigravity_plugin_dirs(workspace_dir)
     if name == "opencode":
         return []
-    if name == "omnigent":
-        return []
     if name == "kiro":
         return []
-    return _openclaw_plugin_dirs(openclaw_home)
+    if name == "openclaw":
+        return _openclaw_plugin_dirs(openclaw_home)
+    return []
 
 
 def plugin_inventory_dirs(
@@ -2210,8 +2214,6 @@ def mcp_servers(
             infer_from_cwd=infer,
             diagnostic_sink=diagnostic_sink,
         )
-    if name == "openhands":
-        return _openhands_mcp_servers(diagnostic_sink=diagnostic_sink)
     if name == "antigravity":
         return _antigravity_mcp_servers(
             workspace_dir,
@@ -2228,19 +2230,19 @@ def mcp_servers(
             infer_from_cwd=infer,
             diagnostic_sink=diagnostic_sink,
         )
-    if name == "omnigent":
-        return []
     if name == "kiro":
         return _kiro_mcp_servers(
             workspace_dir,
             infer_from_cwd=infer,
             diagnostic_sink=diagnostic_sink,
         )
-    return _openclaw_mcp_servers(
-        openclaw_config,
-        openclaw_bin_resolver=openclaw_bin_resolver,
-        diagnostic_sink=diagnostic_sink,
-    )
+    if name == "openclaw":
+        return _openclaw_mcp_servers(
+            openclaw_config,
+            openclaw_bin_resolver=openclaw_bin_resolver,
+            diagnostic_sink=diagnostic_sink,
+        )
+    return []
 
 
 def mcp_source_locations(
@@ -2263,8 +2265,8 @@ def mcp_source_locations(
     with a precise falsehood.
 
     Locations are mostly file paths. OpenClaw's preferred source is a
-    command, and omnigent has no MCP registry at all; both are rendered as
-    a parenthesised phrase so a caller can still print and count them. An
+    command, rendered as a parenthesised phrase so a caller can still print
+    and count it. An
     empty list therefore means one thing only — *we do not know where to
     look for this connector* — which is the condition worth an error.
 
@@ -2324,8 +2326,6 @@ def mcp_source_locations(
         return _dedup(_devin_mcp_read_paths(workspace))
     if name == "copilot":
         return _dedup(copilot_mcp_config_files(workspace))
-    if name == "openhands":
-        return _dedup([os.path.join(home, ".openhands", "mcp.json")])
     if name == "antigravity":
         return _dedup(
             [
@@ -2335,8 +2335,6 @@ def mcp_source_locations(
         )
     if name == "opencode":
         return _dedup(_opencode_config_paths(workspace_dir, infer_from_cwd=infer))
-    if name == "omnigent":
-        return ["(omnigent exposes no MCP registry)"]
     if name == "kiro":
         return _dedup(_kiro_mcp_read_paths(workspace_dir, infer_from_cwd=infer))
     if name == "openclaw":
@@ -2347,15 +2345,8 @@ def mcp_source_locations(
             ]
         )
 
-    # Deliberately NOT mirroring mcp_servers here. That function ends in an
-    # unconditional `return _openclaw_mcp_servers(...)`, so an unrecognised
-    # --connector reads OpenClaw's config and reports "no servers for
-    # <name>" — a silent read of the wrong file, which is the failure this
-    # whole change is about. Returning [] lets the caller say so.
-    #
-    # It also catches the realistic regression: a connector added to
-    # KNOWN_CONNECTORS and to mcp_servers but not here shows up as zero
-    # locations on its first run, rather than after months of clean reports.
+    # An unknown connector has no known MCP source. A new connector must add
+    # its reader and its source locations together.
     return []
 
 
@@ -3108,28 +3099,191 @@ def devin_rule_files(workspace_dir: str | None = None) -> list[str]:
     return _dedup(files)
 
 
-def opencode_writable_plugin_folder(plugin_paths: list[str]) -> str:
-    """Return a folder of an OpenCode plugin destination that group or other can write.
+class PluginCustodyPath(str):
+    """A path the gateway refuses for the OpenCode plugin, and why.
 
-    The gateway refuses to install its plugin there and does not start.
-    Linux distributions with a umask of 002 create ~/.config/opencode/plugins
-    as 0775. Only the folders inside the home directory are checked.
+    ``problems`` is any of ``mode`` (group/other write), ``owner`` (an owner the
+    gateway does not trust), ``acl`` (an access list that grants write) and
+    ``link`` (a link or a non-folder, which no permission change clears).
+    """
+
+    problems: tuple[str, ...]
+
+    def __new__(cls, path: str, *problems: str) -> PluginCustodyPath:
+        found = super().__new__(cls, path)
+        found.problems = problems
+        return found
+
+
+def opencode_unsafe_plugin_paths(plugin_paths: list[str]) -> list[PluginCustodyPath]:
+    """Return every element of an OpenCode plugin destination the gateway refuses, outermost first.
+
+    Ask each element of the folder chain the gateway's own questions
+    (``hookAPIValidateDirectoryChainWith`` and the plugin-file check in
+    ``internal/gateway/connector``): is it a link or not a folder, can another
+    account write it by mode, is its owner untrusted, does an access list grant
+    write. The gateway checks the leaf first and stops there, but fixing the
+    leaf does not clear the refusal while a folder above it is as open, so
+    every refused element is returned (folders from the top down, then the
+    plugin file), and :func:`opencode_custody_text` gives the one repair.
+
+    A link the gateway refuses (whatever it points to) is returned and ends the
+    walk: the folders below it change when it is replaced. A link it accepts (a
+    root-owned system link) leads to a folder it then judges as well, so the
+    resolved chain is judged too. Ancestors the gateway judges only advisory
+    (the Secure Client tree) are not part of a per-user config folder and are
+    not mirrored here.
     """
     if os.name == "nt":
-        return ""
-    home = os.path.realpath(os.path.expanduser("~"))
+        return []
+
     for plugin_path in plugin_paths:
-        folder = os.path.dirname(os.path.realpath(plugin_path))
-        while folder.startswith(home + os.sep):
+        plugin = os.path.abspath(plugin_path)
+        plugin_folder = os.path.dirname(plugin)
+        unsafe: list[PluginCustodyPath] = []
+        if _opencode_judge_folders(plugin_folder, unsafe):
+            resolved = os.path.realpath(plugin_folder)
+            if resolved != plugin_folder:
+                _opencode_judge_folders(resolved, unsafe)
             try:
-                mode = os.lstat(folder).st_mode
+                info = os.lstat(plugin)
             except OSError:
-                folder = os.path.dirname(folder)
-                continue
-            if stat.S_ISDIR(mode) and stat.S_IMODE(mode) & 0o022:
-                return folder
-            folder = os.path.dirname(folder)
-    return ""
+                info = None
+            if info is not None:
+                if not stat.S_ISREG(info.st_mode):
+                    unsafe.append(PluginCustodyPath(plugin, "link"))
+                elif problems := _opencode_element_problems(plugin, info, False):
+                    unsafe.append(PluginCustodyPath(plugin, *problems))
+        if unsafe:
+            return unsafe
+    return []
+
+
+def _opencode_judge_folders(leaf: str, unsafe: list[PluginCustodyPath]) -> bool:
+    """Judge *leaf* and its ancestors, outermost first, into *unsafe*; False after a refused link or non-folder."""
+    from defenseclaw.file_permissions import plugin_link_refused
+
+    chain = []
+    folder = leaf
+    while True:
+        chain.append(folder)
+        parent = os.path.dirname(folder)
+        if parent == folder:
+            break
+        folder = parent
+    for folder in reversed(chain):
+        try:
+            info = os.lstat(folder)
+        except OSError:
+            continue
+        if stat.S_ISLNK(info.st_mode):
+            if plugin_link_refused(folder, info, leaf=folder == leaf):
+                unsafe.append(PluginCustodyPath(folder, "link"))
+                return False
+            continue
+        if not stat.S_ISDIR(info.st_mode):
+            unsafe.append(PluginCustodyPath(folder, "link"))
+            return False
+        # A root-owned sticky ancestor above the plugin folder (/tmp) is
+        # accepted by mode, as in the gateway.
+        sticky = folder != leaf and info.st_uid == 0 and bool(info.st_mode & stat.S_ISVTX)
+        problems = _opencode_element_problems(folder, info, sticky)
+        if problems and folder not in unsafe:
+            unsafe.append(PluginCustodyPath(folder, *problems))
+    return True
+
+
+def _opencode_element_problems(path: str, info: os.stat_result, sticky: bool) -> list[str]:
+    """What the gateway refuses about one folder or file that is not a link."""
+    from defenseclaw.file_permissions import other_accounts_can_write, plugin_acl_refused, plugin_owner_untrusted
+
+    problems = []
+    if not sticky and other_accounts_can_write(path, info):
+        problems.append("mode")
+    if plugin_owner_untrusted(info):
+        problems.append("owner")
+    if plugin_acl_refused(path):
+        problems.append("acl")
+    return problems
+
+
+class OpenCodeCustodyAdvice(NamedTuple):
+    """What to tell the user about the paths :func:`opencode_unsafe_plugin_paths` returned.
+
+    ``named`` is the path list for a sentence, ``why`` the cause, ``action`` the
+    sentence that fixes it, ``command`` the shell command in it (empty when no
+    repair is a command) and ``manual`` the steps only a person can do (empty
+    when the command is the whole repair).
+    """
+
+    named: str
+    why: str
+    action: str
+    command: str
+    manual: str = ""
+
+    @property
+    def remedy(self) -> str:
+        """The shell command alone when it is the whole repair, else the full sentence."""
+        return self.action if self.manual else (self.command or self.action)
+
+
+def opencode_custody_text(unsafe: list[PluginCustodyPath]) -> OpenCodeCustodyAdvice:
+    """Return the one account of how to clear *unsafe*, one repair per refused element.
+
+    ``chmod go-w`` clears a mode, ``setfacl -b`` (Linux) or ``chmod -N``
+    (macOS) an access list; those are the command. Replacing a link or
+    non-folder (no permission change clears it, the gateway refuses a link
+    whatever it points to) and an owner no command of this account can fix are
+    steps by hand, named separately, never joined into the command.
+    """
+
+    def quote(paths: list[PluginCustodyPath]) -> str:
+        return " ".join(shlex.quote(path) for path in paths)
+
+    # Written the way the repair writes them, so a name that holds the words a
+    # repair clause starts with, a comma or a space cannot blur the sentence.
+    first, *rest = (shlex.quote(path) for path in unsafe)
+    others = ", ".join(rest)
+    named = first if not rest else f"{first} (and {others})"
+    links = [path for path in unsafe if "link" in path.problems]
+    chmod = [path for path in unsafe if "mode" in path.problems]
+    # On Linux the group bits of a path with an access list are its mask, so
+    # the chmod above also removes the list's effective write.
+    acl = [
+        path
+        for path in unsafe
+        if "acl" in path.problems and (sys.platform == "darwin" or "mode" not in path.problems)
+    ]
+    owner = [path for path in unsafe if "owner" in path.problems]
+    steps = []
+    if chmod:
+        steps.append("chmod go-w " + quote(chmod))
+    if acl:
+        steps.append(("chmod -N " if sys.platform == "darwin" else "setfacl -b ") + quote(acl))
+    command = " && ".join(steps)
+    by_hand = []
+    if links:
+        by_hand.append(
+            f"replace {quote(links)} with a real folder or file owned by this account "
+            "(a link is refused whatever it points to; changing permissions does not clear it)"
+        )
+    if owner:
+        by_hand.append(f"have an administrator give {quote(owner)} back to this account")
+    manual = "; ".join(by_hand)
+    action = f"run `{command}`" if command else ""
+    if manual:
+        action = f"{action}, then {manual}" if action else manual
+    problems = {problem for path in unsafe for problem in path.problems}
+    if problems == {"mode"}:
+        why = "is group/other writable"
+    elif problems == {"owner"}:
+        why = "is owned by another account"
+    elif problems == {"link"}:
+        why = "is a link or not a folder, which the gateway refuses whatever it points to"
+    else:
+        why = "is not private to this account (mode, owner, access list or link)"
+    return OpenCodeCustodyAdvice(named, why, action, command, manual)
 
 
 def _opencode_config_dir() -> str:
@@ -3399,20 +3553,6 @@ def _copilot_custom_skill_dirs(workspace_dir: str) -> list[str]:
     return _dedup(out)
 
 
-def _openhands_skill_dirs(workspace_dir: str | None = None) -> list[str]:
-    home = str(Path.home())
-    return _dedup(
-        [
-            _workspace_path(workspace_dir, ".agents", "skills"),
-            _workspace_path(workspace_dir, ".openhands", "skills"),
-            _workspace_path(workspace_dir, ".openhands", "microagents"),
-            os.path.join(home, ".agents", "skills"),
-            os.path.join(home, ".openhands", "skills"),
-            os.path.join(home, ".openhands", "microagents"),
-            os.path.join(home, ".openhands", "skills", "installed"),
-            os.path.join(home, ".openhands", "cache", "skills", "public-skills", "skills"),
-        ]
-    )
 
 
 def _openclaw_skill_dirs(
@@ -4084,14 +4224,6 @@ def _copilot_mcp_servers(
     return _dedup_mcp_entries(entries)
 
 
-def _openhands_mcp_servers(
-    *,
-    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
-) -> list[MCPServerEntry]:
-    return _read_dotmcp_json(
-        os.path.join(str(Path.home()), ".openhands", "mcp.json"),
-        diagnostic_sink=diagnostic_sink,
-    )
 
 
 def _antigravity_global_mcp_path() -> str:
@@ -4294,7 +4426,7 @@ def _opencode_config_paths(
     *,
     infer_from_cwd: bool = False,
 ) -> list[str]:
-    """Return locally representable file layers in v1.18.10 merge order."""
+    """Return locally representable file layers in OpenCode V2 precedence order."""
     return [
         layer.path
         for layer in _resolve_opencode_config(
@@ -4302,6 +4434,37 @@ def _opencode_config_paths(
         ).layers
         if layer.path
     ]
+
+
+def _opencode_direct_mcp_entry(value: Any) -> bool:
+    """V2 recognizes typed compatible entries even at reserved container names."""
+    return isinstance(value, dict) and value.get("type") in ("local", "remote")
+
+
+def _opencode_mcp_container(mcp: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Return the mutable server container without discarding malformed members."""
+    servers = mcp.get("servers")
+    if "servers" in mcp:
+        if _opencode_direct_mcp_entry(servers):
+            return mcp, False
+        return (servers if isinstance(servers, dict) else {}), True
+    if "timeout" in mcp and not _opencode_direct_mcp_entry(mcp["timeout"]):
+        return {}, True
+    return mcp, False
+
+
+def _opencode_mcp_map(mcp: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Combine compatible direct entries and native entries; native names win."""
+    container, native = _opencode_mcp_container(mcp)
+    selected = {
+        name: value
+        for name, value in mcp.items()
+        if name not in ("servers", "timeout") or _opencode_direct_mcp_entry(value)
+        if not (isinstance(value, dict) and "type" not in value and isinstance(value.get("enabled"), bool))
+    }
+    if native:
+        selected.update(container)
+    return selected, native
 
 
 def _opencode_mcp_servers(
@@ -4330,36 +4493,25 @@ def _opencode_mcp_servers(
         servers = data.get("mcp") if isinstance(data, dict) else None
         if not isinstance(servers, dict):
             continue
+        servers, _ = _opencode_mcp_map(servers)
         for name_raw, cfg in servers.items():
             if not isinstance(cfg, dict):
                 continue
+            cfg = dict(cfg)
+            if "disabled" in cfg:
+                cfg["enabled"] = cfg.pop("disabled") is not True
             name = str(name_raw)
             if name not in entries:
                 order.append(name)
-            # OpenCode deep-merges config objects. Merge the raw entry before
-            # projecting it into MCPServerEntry so a higher-precedence
-            # enabled-only override preserves the lower command/url.
-            entries[name] = _merge_opencode_mcp_config(entries.get(name, {}), cfg)
+            # V2 normalizes compatible syntax before applying config layers.
+            # A same-name server replaces the entire object, so an override
+            # cannot inherit another endpoint's headers or environment.
+            entries[name] = cfg
             provenance[name] = (layer.source, layer.source_scope)
     return [
         _opencode_entry_to_mcp(name, entries[name], *provenance[name])
         for name in order
     ]
-
-
-def _merge_opencode_mcp_config(
-    base: dict[str, Any],
-    override: dict[str, Any],
-) -> dict[str, Any]:
-    """Deep-merge one OpenCode MCP config layer over another."""
-    merged = dict(base)
-    for key, value in override.items():
-        previous = merged.get(key)
-        if isinstance(previous, dict) and isinstance(value, dict):
-            merged[key] = _merge_opencode_mcp_config(previous, value)
-        else:
-            merged[key] = value
-    return merged
 
 
 def _opencode_entry_to_mcp(
@@ -4552,11 +4704,190 @@ def _next_jsonc_significant_char(raw: str, index: int) -> str:
 
 
 def _read_openclaw_json(config_file: str) -> dict[str, Any] | None:
+    """Parse openclaw.json as JSON5, the way OpenClaw and the gateway sidecar do.
+
+    ``None`` when the file is missing, unreadable, or neither JSON nor JSON5.
+    """
+    from defenseclaw import openclaw_json5
+
     try:
-        with open(_expand(config_file), encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
+        return openclaw_json5.load_file(_expand(config_file))
+    except (OSError, ValueError):
         return None
+
+
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_GATEWAY_TOKEN_ENV_NAMES = frozenset({"OPENCLAW_GATEWAY_TOKEN", "DEFENSECLAW_GATEWAY_TOKEN"})
+_CREDENTIAL_NAME_PARTS = ("API_KEY", "SECRET", "PASSWORD", "ACCESS_KEY", "PRIVATE_KEY", "SESSION_TOKEN")
+
+
+def is_secret_ref_text(value: object) -> bool:
+    """True for the text of a SecretRef object saved as if it were a token.
+
+    DefenseClaw 1.0.5 and 1.0.6 wrote ``OPENCLAW_GATEWAY_TOKEN={'source': ...}``
+    to ``~/.defenseclaw/.env`` before init failed on a SecretRef (issue #1404).
+    That text is never a token; every gateway token reader ignores it.
+    """
+    if not isinstance(value, str):
+        return False
+    return _SECRET_REF_TEXT_RE.fullmatch(value.strip()) is not None
+
+
+# A quoted "source" key followed by a colon inside braces: the Python repr and
+# the JSON form, any key order. Same pattern as envvars.IsSecretRefText in Go.
+_SECRET_REF_TEXT_RE = re.compile(r"\{.*[\"\x27]source[\"\x27]\s*:.*\}")
+
+
+def _dotenv_key_names(data_dir: str) -> set[str]:
+    names: set[str] = set()
+    try:
+        with open(os.path.join(data_dir, ".env"), encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                key, sep, _value = line.strip().partition("=")
+                key = key.strip()
+                if key.startswith("export "):
+                    key = key[len("export ") :].strip()
+                if sep and key and not key.startswith("#"):
+                    names.add(key.upper())
+    except OSError:
+        pass
+    return names
+
+
+def _configured_api_key_env_names(value: Any, depth: int = 0) -> set[str]:
+    """Every ``*api_key_env`` value set anywhere in the loaded config."""
+    import dataclasses
+
+    names: set[str] = set()
+    if depth > 8 or value is None:
+        return names
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        items = ((f.name, getattr(value, f.name, None)) for f in dataclasses.fields(value))
+    elif isinstance(value, dict):
+        items = ((str(k), v) for k, v in value.items())
+    elif isinstance(value, (list, tuple)):
+        items = (("", v) for v in value)
+    else:
+        return names
+    for key, child in items:
+        if key.endswith("api_key_env") and isinstance(child, str) and child.strip():
+            names.add(child.strip().upper())
+        elif not isinstance(child, (str, bytes, int, float, bool)):
+            names |= _configured_api_key_env_names(child, depth + 1)
+    return names
+
+
+def defenseclaw_credential_names(cfg: Any = None) -> frozenset[str]:
+    """Env names that hold DefenseClaw's own credentials (issue #1404).
+
+    Every key in ``~/.defenseclaw/.env`` (the CLI loads that file into the
+    environment), every configured ``*api_key_env``, the provider key names
+    of ``llm_keys`` and the credential registry, minus the two gateway token
+    names. An OpenClaw env SecretRef naming one of them is refused.
+    """
+    from defenseclaw.credentials import CREDENTIALS
+    from defenseclaw.llm_keys import PROVIDER_KEY_ENV_NAMES
+
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if not data_dir:
+        from defenseclaw.config import default_data_path
+
+        data_dir = str(default_data_path())
+    names = _dotenv_key_names(data_dir) | _configured_api_key_env_names(cfg)
+    names |= {name.upper() for name in PROVIDER_KEY_ENV_NAMES}
+    names |= {spec.env_name.upper() for spec in CREDENTIALS}
+    return frozenset(names - _GATEWAY_TOKEN_ENV_NAMES)
+
+
+def _names_defenseclaw_credential(name: str, credential_names: frozenset[str] | None) -> bool:
+    """True when an env SecretRef id names a credential DefenseClaw keeps."""
+    upper = name.upper()
+    if upper in _GATEWAY_TOKEN_ENV_NAMES:
+        return False
+    names = defenseclaw_credential_names() if credential_names is None else credential_names
+    if upper in names:
+        return True
+    # Backstop for names DefenseClaw has not stored yet.
+    return upper.startswith("DEFENSECLAW_") or any(part in upper for part in _CREDENTIAL_NAME_PARTS)
+
+
+@dataclass(frozen=True)
+class OpenClawGatewayToken:
+    """The OpenClaw gateway token read from ``gateway.auth.token``.
+
+    ``value`` is the token, or "" when there is none DefenseClaw can use.
+    ``notice`` is set when the setting holds a token DefenseClaw cannot read
+    (a SecretRef object, issue #1404); it never contains the token.
+    """
+
+    value: str = ""
+    notice: str = ""
+
+
+_OPENCLAW_TOKEN_UNREADABLE = (
+    "The OpenClaw gateway token (gateway.auth.token) is not a plain string, and DefenseClaw cannot read it."
+)
+
+
+def _openclaw_token_notice(reason: str) -> str:
+    return (
+        f"{reason} "
+        "Give DefenseClaw that token in OPENCLAW_GATEWAY_TOKEN or DEFENSECLAW_GATEWAY_TOKEN, "
+        "for example: defenseclaw keys set DEFENSECLAW_GATEWAY_TOKEN"
+    )
+
+
+def openclaw_gateway_token(
+    openclaw_config: Any,
+    environ: Any = None,
+    credential_names: frozenset[str] | None = None,
+) -> OpenClawGatewayToken:
+    """Read ``gateway.auth.token`` from a parsed ``openclaw.json``.
+
+    OpenClaw stores the token as a string or as a SecretRef object such as
+    ``{"source": "env", "provider": "default", "id": "NAME"}``. A ``source:
+    env`` reference is resolved from the named environment variable. Every
+    other reference (``store``, ``file``, ``exec``, a malformed object) is
+    never used as a token: the result carries a notice instead (issue #1404).
+    """
+    gateway = openclaw_config.get("gateway") if isinstance(openclaw_config, dict) else None
+    auth = gateway.get("auth") if isinstance(gateway, dict) else None
+    raw = auth.get("token") if isinstance(auth, dict) else None
+    if raw is None:
+        return OpenClawGatewayToken()
+    if isinstance(raw, str):
+        if is_secret_ref_text(raw):
+            return OpenClawGatewayToken(notice=_openclaw_token_notice(_OPENCLAW_TOKEN_UNREADABLE))
+        return OpenClawGatewayToken(raw)
+    if not isinstance(raw, dict):
+        return OpenClawGatewayToken(notice=_openclaw_token_notice(_OPENCLAW_TOKEN_UNREADABLE))
+    source = raw.get("source")
+    name = raw.get("id")
+    if source == "env" and isinstance(name, str) and _ENV_NAME_RE.fullmatch(name):
+        if _names_defenseclaw_credential(name, credential_names):
+            return OpenClawGatewayToken(
+                notice=_openclaw_token_notice(
+                    f"OpenClaw names {name} for its gateway token (gateway.auth.token). "
+                    "That variable holds one of DefenseClaw's own credentials, so DefenseClaw does not use it."
+                )
+            )
+        value = (os.environ if environ is None else environ).get(name, "")
+        if isinstance(value, str) and value and not is_secret_ref_text(value):
+            return OpenClawGatewayToken(value)
+        return OpenClawGatewayToken(
+            notice=_openclaw_token_notice(
+                f"OpenClaw reads its gateway token (gateway.auth.token) from the environment variable {name}, "
+                "which is not set here."
+            )
+        )
+    if isinstance(source, str) and source and source != "env" and _ENV_NAME_RE.fullmatch(source):
+        return OpenClawGatewayToken(
+            notice=_openclaw_token_notice(
+                f'OpenClaw keeps its gateway token (gateway.auth.token) in its "{source}" secret source, '
+                "which DefenseClaw cannot read."
+            )
+        )
+    return OpenClawGatewayToken(notice=_openclaw_token_notice(_OPENCLAW_TOKEN_UNREADABLE))
 
 
 def _load_mcp_json_document(
@@ -4818,20 +5149,21 @@ def _read_mcp_servers_from_openclaw_json(
     except UnicodeError:
         _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
         return []
-    data: dict[str, Any] | None = None
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        try:
-            import json5  # type: ignore[import-untyped]
+    from defenseclaw import openclaw_json5
 
-            data = json5.loads(raw)
-        except Exception:
-            _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
-            return []
+    data: dict[str, Any] | None
+    try:
+        data = openclaw_json5.loads(raw)
+    except ValueError:
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
+        return []
     if not isinstance(data, dict):
         return []
-    servers = data.get("mcp", {}).get("servers")
+    mcp = data.get("mcp")
+    if mcp is not None and not isinstance(mcp, dict):
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
+        return []
+    servers = (mcp or {}).get("servers")
     if not isinstance(servers, dict):
         return []
     return _parse_mcp_servers_dict(servers)
@@ -4984,8 +5316,7 @@ def set_mcp_server(
     * Devin        — user ``<config-root>/mcp_config.json`` by default, or
                      ``<workspace>/.devin/mcp_config.json`` when scoped.
     * ZeptoClaw    — :class:`MCPWriteUnsupportedError`.
-    * Hook-backed  — connector-owned JSON/YAML config when documented
-                     (for example OpenHands writes ``~/.openhands/mcp.json``).
+    * Hook-backed  — connector-owned JSON/YAML config when documented.
     """
     name_n = normalize(connector)
     if name_n == "openclaw":
@@ -5058,21 +5389,12 @@ def set_mcp_server(
         )
         _atomic_json_merge(path, ("mcpServers", name), entry)
         return
-    if name_n == "openhands":
-        path = os.path.join(str(Path.home()), ".openhands", "mcp.json")
-        _atomic_json_merge(path, ("mcpServers", name), entry)
-        return
     if name_n == "antigravity":
         _set_antigravity_mcp_server(name, entry, workspace_dir=workspace_dir)
         return
     if name_n == "opencode":
         _set_opencode_mcp_server(name, entry, workspace_dir=workspace_dir)
         return
-    if name_n == "omnigent":
-        raise MCPWriteUnsupportedError(
-            "omnigent MCP configuration is unsupported and unverified by the "
-            "DefenseClaw connector; only the custom policy bridge is installed.",
-        )
     if name_n == "kiro":
         raise MCPWriteUnsupportedError(
             "kiro MCP configuration is discovery-only in DefenseClaw. Configure MCP servers "
@@ -5230,21 +5552,12 @@ def unset_mcp_server(
         )
         _atomic_json_delete(path, ("mcpServers", name))
         return
-    if name_n == "openhands":
-        path = os.path.join(str(Path.home()), ".openhands", "mcp.json")
-        _atomic_json_delete(path, ("mcpServers", name))
-        return
     if name_n == "antigravity":
         _unset_antigravity_mcp_server(name, workspace_dir=workspace_dir)
         return
     if name_n == "opencode":
         _unset_opencode_mcp_server(name, workspace_dir=workspace_dir)
         return
-    if name_n == "omnigent":
-        raise MCPWriteUnsupportedError(
-            "omnigent MCP configuration is unsupported and unverified by the "
-            "DefenseClaw connector; only the custom policy bridge is installed.",
-        )
     if name_n == "kiro":
         raise MCPWriteUnsupportedError(
             "kiro MCP configuration is discovery-only in DefenseClaw. Remove MCP servers "
@@ -5673,7 +5986,21 @@ def _set_opencode_mcp_server(
     mcp = data.get("mcp")
     if not isinstance(mcp, dict):
         mcp = {}
-    mcp[name] = _opencode_mcp_entry_from_generic(entry)
+    converted = _opencode_mcp_entry_from_generic(entry)
+    servers, native = _opencode_mcp_container(mcp)
+    if native:
+        if "servers" in mcp and not isinstance(mcp["servers"], dict):
+            raise MCPWriteUnsupportedError(
+                "refusing to replace malformed OpenCode mcp.servers; repair that field before adding a server",
+            )
+        if "enabled" in converted:
+            converted["disabled"] = not converted.pop("enabled")
+        servers[name] = converted
+        mcp["servers"] = servers
+        if name in mcp and _opencode_direct_mcp_entry(mcp[name]):
+            del mcp[name]
+    else:
+        mcp[name] = converted
     data["mcp"] = mcp
     parent = os.path.dirname(path)
     if parent and not os.path.exists(parent):
@@ -5706,9 +6033,18 @@ def _unset_opencode_mcp_server(
         _reject_symlink_config(path)
         data = _read_opencode_doc_for_write(path)
         mcp = data.get("mcp")
-        if not isinstance(mcp, dict) or name not in mcp:
+        if not isinstance(mcp, dict):
             continue
-        del mcp[name]
+        servers, native = _opencode_mcp_container(mcp)
+        changed = False
+        if native and name in servers:
+            del servers[name]
+            changed = True
+        if name in mcp and (name not in ("servers", "timeout") or _opencode_direct_mcp_entry(mcp[name])):
+            del mcp[name]
+            changed = True
+        if not changed:
+            continue
         data["mcp"] = mcp
         updates.append((path, data))
     for path, data in updates:

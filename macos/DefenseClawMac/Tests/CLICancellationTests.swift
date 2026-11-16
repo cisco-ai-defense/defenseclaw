@@ -30,6 +30,7 @@ struct DoctorCheck {
 struct CLICancellationTests {
     static func main() async {
         CLIProcessGroupLauncher.execIfRequested()
+        await exclusiveUpgradeOperationBlocksOtherCommands()
         await launcherRejectsExternalInvocation()
         await launcherPreservesArgumentsAndStandardInput()
         await explicitCancellationInterruptsChild()
@@ -42,6 +43,30 @@ struct CLICancellationTests {
         await standardInputIsWrittenAndClosed()
         cancelledResultIsNotSuccessful()
         print("CLICancellationTests passed")
+    }
+
+    private static func exclusiveUpgradeOperationBlocksOtherCommands() async {
+        let runner = CLIRunner()
+        let owner = UUID()
+        let acquired = await runner.beginExclusiveOperation(id: owner)
+        expect(acquired, "idle runner permits an exclusive upgrade")
+        let duplicate = await runner.beginExclusiveOperation(id: UUID())
+        expect(!duplicate, "second upgrade cannot overlap")
+        let blocked = await runner.run(binary: "/usr/bin/true", arguments: [], mutation: false)
+        expect(blocked.exitCode == 75, "even read commands cannot use a venv during replacement")
+        let permitted = await runner.run(binary: "/usr/bin/true", arguments: [], mutation: false, runID: owner)
+        expect(permitted.succeeded, "exclusive owner can execute")
+        await runner.endExclusiveOperation(id: UUID())
+        let stillBlocked = await runner.run(binary: "/usr/bin/true", arguments: [], mutation: false)
+        expect(stillBlocked.exitCode == 75, "another owner cannot release the upgrade lock")
+        await runner.endExclusiveOperation(id: owner)
+        let resumed = await runner.run(binary: "/usr/bin/true", arguments: [], mutation: false)
+        expect(resumed.succeeded, "normal commands resume after upgrade cleanup")
+        let pending = UUID()
+        _ = await runner.reserve(runID: pending)
+        let refused = await runner.beginExclusiveOperation(id: owner)
+        expect(!refused, "upgrade refuses already reserved commands")
+        _ = await runner.run(binary: "/usr/bin/true", arguments: [], mutation: false, runID: pending)
     }
 
     private static func launcherRejectsExternalInvocation() async {

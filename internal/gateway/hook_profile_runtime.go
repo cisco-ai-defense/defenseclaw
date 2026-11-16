@@ -19,6 +19,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
@@ -72,6 +73,7 @@ func defaultHookProfileRuntime(_ connector.HookProfile) hookProfileRuntime {
 }
 
 func codexHookProfileRuntime(profile connector.HookProfile) hookProfileRuntime {
+	aidToolCallDeclared := connector.HookProfileCarriesAIDToolCall(profile)
 	return hookProfileRuntime{
 		RememberRawEvents: func(a *APIServer, ctx context.Context, req agentHookRequest, rawBody []byte, payload map[string]interface{}) []string {
 			return a.rememberCodexRawHookEvents(decodeCodexRequestForContext(ctx, rawBody, payload), req.SemanticEventID)
@@ -81,13 +83,15 @@ func codexHookProfileRuntime(profile connector.HookProfile) hookProfileRuntime {
 		},
 		Evaluate: func(a *APIServer, ctx context.Context, _ agentHookRequest, rawBody []byte, payload map[string]interface{}) agentHookResponse {
 			cxReq := decodeCodexRequestForContext(ctx, rawBody, payload)
+			cxReq.aidToolCallDeclared = aidToolCallDeclared
 			enrichCodexHookSpan(ctx, cxReq)
 			return codexResponseToAgentHookResponse(a.evaluateCodexHookForProfile(ctx, cxReq, profile))
 		},
 	}
 }
 
-func claudeCodeHookProfileRuntime(_ connector.HookProfile) hookProfileRuntime {
+func claudeCodeHookProfileRuntime(profile connector.HookProfile) hookProfileRuntime {
+	aidToolCallDeclared := connector.HookProfileCarriesAIDToolCall(profile)
 	return hookProfileRuntime{
 		RememberRawEvents: func(a *APIServer, ctx context.Context, req agentHookRequest, rawBody []byte, payload map[string]interface{}) []string {
 			return a.rememberClaudeCodeRawHookEvents(decodeClaudeCodeRequestForContext(ctx, rawBody, payload), req.SemanticEventID)
@@ -96,7 +100,9 @@ func claudeCodeHookProfileRuntime(_ connector.HookProfile) hookProfileRuntime {
 			a.emitClaudeCodeHookLLMEvent(ctx, decodeClaudeCodeRequestForContext(ctx, rawBody, payload), rawEventIDs, rawBody)
 		},
 		Evaluate: func(a *APIServer, ctx context.Context, _ agentHookRequest, rawBody []byte, payload map[string]interface{}) agentHookResponse {
-			return claudeCodeResponseToAgentHookResponse(a.evaluateClaudeCodeHook(ctx, decodeClaudeCodeRequestForContext(ctx, rawBody, payload)))
+			ccReq := decodeClaudeCodeRequestForContext(ctx, rawBody, payload)
+			ccReq.aidToolCallDeclared = aidToolCallDeclared
+			return claudeCodeResponseToAgentHookResponse(a.evaluateClaudeCodeHook(ctx, ccReq))
 		},
 	}
 }
@@ -119,11 +125,15 @@ func decodeClaudeCodeRequestForContext(ctx context.Context, rawBody []byte, payl
 	}
 	req.AgentType = firstNonEmpty(req.AgentType, agentType)
 	req.guestCWD = sandboxHookGuestCWD(ctx, req.CWD, "")
+	req.reportedCWD = strings.TrimSpace(req.CWD)
+	req.reportedNewCWD = strings.TrimSpace(req.NewCWD)
 	req.CWD = hookCWDForContext(ctx, req.CWD)
 	req.NewCWD = hookCWDForContext(ctx, req.NewCWD)
 	req.OldCWD = hookCWDForContext(ctx, req.OldCWD)
 	req.sandboxView, _ = sandboxHookView(ctx)
-	return req
+	// A failed check renders its answer from this request too: a managed
+	// gateway watches the verified caller's home, never its own (GAP-0472).
+	return req.withWatchHome(ctx)
 }
 
 func decodeCodexRequestFromBytes(rawBody []byte, payload map[string]interface{}) codexHookRequest {
@@ -137,7 +147,13 @@ func decodeCodexRequestForContext(ctx context.Context, rawBody []byte, payload m
 	_ = json.Unmarshal(rawBody, &req)
 	req.Payload = payload
 	req.guestCWD = sandboxHookGuestCWD(ctx, req.CWD, "")
+	reportedCWD := req.CWD
 	req.CWD = hookCWDForContext(ctx, req.CWD)
+	if req.CWD == "" && !ManagedEnterpriseActive() && strings.EqualFold(req.ToolName, "apply_patch") {
+		// A managed service may not be able to read the caller's project.
+		// Keep the patch base only inside the verified caller's home.
+		req.CWD = managedPeerLexicalCWD(ctx, reportedCWD, "")
+	}
 	req.sandboxView, _ = sandboxHookView(ctx)
 	return req
 }

@@ -3,8 +3,8 @@
 //
 // Amp loads system plugins from ~/.config/amp/plugins on macOS/Linux and
 // %USERPROFILE%\.config\amp\plugins on Windows. This dependency-free plugin
-// forwards all five documented lifecycle events to the authenticated local
-// DefenseClaw hook endpoint. tool.call is a synchronous pre-execution policy
+// sends all five documented lifecycle events through the administrator-owned
+// native peer verifier to the local DefenseClaw hook endpoint. tool.call is a synchronous pre-execution policy
 // boundary. tool.result can replace unsafe output before Amp sends it back to
 // the model, but cannot undo tool side effects that already occurred.
 // DefenseClaw may allow, reject, or ask through Amp's native confirmation UI.
@@ -16,14 +16,14 @@
 // does not read secrets or policy from process environment variables.
 
 import type { Agent, PluginAPI, ThreadMessage, ToolCallResult, ToolResultResult } from '@ampcode/plugin'
-import { execFile } from 'node:child_process'
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
+import { execFile, execFileSync } from 'node:child_process'
 import { lstat } from 'node:fs/promises'
 import { userInfo } from 'node:os'
 import { dirname } from 'node:path'
 
 const DC_API_ADDR = "{{.APIAddr}}"
 const DC_TOKEN_FILE = "{{.TokenFileJS}}"
+const DC_NATIVE_POST_BINARY = "{{.NativePostBinaryJS}}"
 const DC_FAIL_MODE: string = "{{.FailMode}}" // "open" or "closed"
 // Standalone managed installs talk to the gateway's peer-authorized unix hook
 // socket instead of the TCP API: the gateway identifies the caller by
@@ -45,17 +45,6 @@ const DC_FOREIGN_GUARD: string = "{{.ForeignHookGuardJS}}"
 // the deployment was uninstalled and this plugin stops failing closed. A
 // standard user cannot remove the marker. Empty keeps the fail mode.
 const DC_INSTALL_MARKER: string = "{{.InstallMarkerJS}}"
-// Windows standalone installs reach the gateway over loopback TCP, where a
-// local user can hold the port while the gateway restarts, and this plugin
-// cannot compare the listener with the gateway service the way the hook
-// binary does. "1" makes it ask the listener to prove it can derive this
-// user's credential before sending that credential or any hook payload: the
-// proof request carries only the credential's SHA-256 and a fresh nonce, so
-// an impostor gets nothing to replay and no chance to answer with a
-// verdict. Empty skips the proof (per-user installs, Secure Client, and the
-// hook socket, whose owner is verified instead).
-const DC_LISTENER_PROOF: string = "{{.ListenerProofJS}}"
-const DC_LISTENER_PROOF_DOMAIN = "defenseclaw.listener-proof.v1"
 const DC_TIMEOUT_MS = 10000
 const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/
 const DC_MAX_TOKEN_FILE_BYTES = 4096
@@ -155,45 +144,43 @@ async function verifyHookSocket(): Promise<void> {
 	}
 }
 
-// proveListener resolves once the TCP listener has proven it can derive
-// token (the gateway's listener proof); anything else rejects, and the
-// caller then sends the listener nothing else.
-async function proveListener(token: string, signal?: AbortSignal | null): Promise<void> {
-	if (!DC_TOKEN_PATTERN.test(token || "")) throw new Error("invalid scoped hook credential")
-	const nonce = randomBytes(32).toString("hex")
-	const response = await fetch(`http://${DC_API_ADDR}/api/v1/hook-listener-proof`, {
-		method: "GET",
-		headers: {
-			"X-DefenseClaw-Connector": "amp",
-			"X-DefenseClaw-Listener-Key-Id": createHash("sha256").update(token).digest("hex"),
-			"X-DefenseClaw-Listener-Nonce": nonce,
-		},
-		signal,
-	})
-	const proof = String(response.headers.get("x-defenseclaw-listener-proof") || "")
-	if (response.body) {
-		try {
-			await response.body.cancel()
-		} catch {
-			// Nothing is read from the proof response body.
-		}
-	}
-	const want = createHmac("sha256", token)
-		.update(`${DC_LISTENER_PROOF_DOMAIN}\u0000amp\u0000${nonce}`)
-		.digest("hex")
-	if (response.status !== 204 || proof.length !== want.length || !timingSafeEqual(Buffer.from(proof), Buffer.from(want))) {
-		throw new Error("the DefenseClaw gateway listener did not prove its identity")
-	}
+function unverifiedPeer(reason: string): Error & { code: string } {
+	const error = new Error(reason) as Error & { code: string }
+	error.code = "DC_UNVERIFIED_PEER"
+	return error
 }
 
-// gatewayFetch posts over the verified managed hook socket when one is
-// configured (Bun's unix fetch option), and over TCP otherwise; a TCP
-// request that carries a per-user credential first requires the listener
-// proof.
+// The native gateway binary proves the connected service before sending a
+// Secure Client bearer or event. An absent helper never selects bare TCP.
+function nativePost(path: string, init: RequestInit): Response {
+	if (!DC_NATIVE_POST_BINARY) throw unverifiedPeer("the DefenseClaw gateway listener has no service peer verifier")
+	let output: Buffer
+	try {
+		output = execFileSync(DC_NATIVE_POST_BINARY,
+			["hook-post", "--api-addr", DC_API_ADDR, "--secure-client-service", "--max-time", "10"],
+			{ input: JSON.stringify({ path, headers: init.headers, body: init.body }),
+				timeout: DC_TIMEOUT_MS + 1000, maxBuffer: 2 << 20, windowsHide: true })
+	} catch {
+		throw unverifiedPeer("the DefenseClaw gateway listener could not be verified by its service")
+	}
+	let answer: { status?: unknown; body?: unknown }
+	try {
+		answer = JSON.parse(String(output))
+	} catch {
+		throw unverifiedPeer("the DefenseClaw native gateway verifier returned an invalid reply")
+	}
+	if (!answer || !Number.isInteger(answer.status) || (answer.status as number) < 100 ||
+		(answer.status as number) > 599 || typeof answer.body !== "string") {
+		throw unverifiedPeer("the DefenseClaw native gateway verifier returned an invalid reply")
+	}
+	return new Response(answer.body, { status: answer.status as number })
+}
+
+// The Secure Client profile uses the native service peer verifier on TCP.
+// A configured Unix socket keeps its path and owner checks.
 async function gatewayFetch(path: string, init: RequestInit, token: string): Promise<Response> {
 	if (!DC_HOOK_SOCKET) {
-		if (DC_LISTENER_PROOF) await proveListener(token, init.signal)
-		return fetch(`http://${DC_API_ADDR}${path}`, init)
+		return nativePost(path, init)
 	}
 	await verifyHookSocket()
 	if (!(globalThis as typeof globalThis & { Bun?: unknown }).Bun) {
@@ -469,6 +456,9 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			}
 			return data
 		} catch (error) {
+			if (error instanceof Error && (error as Error & { code?: string }).code === "DC_UNVERIFIED_PEER") {
+				return { action: "block", reason: `DefenseClaw hook failed closed (${error.message})` }
+			}
 			if (await deploymentRemoved()) return { action: "allow" }
 			return failureResponse(safeError(error))
 		} finally {

@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"runtime"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -42,6 +43,11 @@ type SplunkHECConfig struct {
 	TLS                 TLSOptions
 	Network             NetworkOptions
 	Observer            WarningObserver
+	// LocalStack marks the sink local Splunk setup recorded. Its listener
+	// is DefenseClaw's own container on loopback with a certificate nobody
+	// verifies, so a connection is closed before any byte unless the
+	// listener is this account's or the system's (GAP-2115).
+	LocalStack bool
 }
 
 type SplunkHEC struct {
@@ -82,6 +88,7 @@ func NewSplunkHEC(ctx context.Context, config SplunkHECConfig) (*SplunkHEC, erro
 		network:     config.Network,
 		observer:    config.Observer,
 		credentials: true,
+		localStack:  config.LocalStack,
 	})
 	if err != nil {
 		return nil, err
@@ -253,6 +260,7 @@ func encodeHECEnvelope(envelope hecEnvelope) ([]byte, error) {
 }
 
 type compatibilityAlias struct {
+	OSType              string `json:"os.type,omitempty"`
 	ID                  string `json:"id,omitempty"`
 	RecordID            string `json:"record_id,omitempty"`
 	Timestamp           string `json:"timestamp,omitempty"`
@@ -302,6 +310,7 @@ func projectedAliases(projected []byte) (compatibilityAlias, string, bool) {
 		return compatibilityAlias{}, "", false
 	}
 	alias := compatibilityAlias{
+		OSType:   runtime.GOOS,
 		RecordID: stringAt(wire, "record_id"), Timestamp: stringAt(wire, "timestamp"),
 		Bucket: stringAt(wire, "bucket"), EventName: stringAt(wire, "event_name"),
 		Severity: stringAt(wire, "severity"), Source: stringAt(wire, "source"),

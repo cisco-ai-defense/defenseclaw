@@ -23,11 +23,12 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,6 +37,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
 
@@ -55,6 +57,11 @@ func init() {
 	policyEvaluateCmd.Flags().String("target-name", "", "Target name to evaluate")
 	policyEvaluateCmd.Flags().String("severity", "", "Max severity of scan result (empty = pre-scan)")
 	policyEvaluateCmd.Flags().Int("findings", 0, "Number of findings")
+	policyEvaluateCmd.Flags().String("connector", "", "Connector the asset is installed for")
+	policyEvaluateCmd.Flags().String("url", "", "MCP server URL, as the registry pins it")
+	policyEvaluateCmd.Flags().String("command", "", "MCP server command, as the registry pins it")
+	policyEvaluateCmd.Flags().StringArray("arg", nil, "MCP server argument, repeatable, in order")
+	policyEvaluateCmd.Flags().String("transport", "", "MCP server transport (stdio, http, sse)")
 }
 
 var policyCmd = &cobra.Command{
@@ -75,7 +82,7 @@ func policyConfigOnlyPreRunE(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	if err := pinManagedAdministratorEnvironment("policy", func() string {
-		return windowsManagedStandardUserViewAnswer("the managed policy", "enterprise policy show --user "+managedHostCurrentAccountName())
+		return windowsManagedStandardUserViewAnswer("the managed policy", "enterprise", "policy", "show", "--user", managedHostCurrentAccountName())
 	}); err != nil {
 		return err
 	}
@@ -84,6 +91,18 @@ func policyConfigOnlyPreRunE(cmd *cobra.Command, _ []string) error {
 }
 
 func policyConfigOnlyPostRun(*cobra.Command, []string) {}
+
+// managedStandaloneHost reports a standalone managed host (Windows, Linux or
+// macOS). There an administrator command reads the deployment's config and
+// leaves the audit store, which the gateway service account owns, to the
+// gateway.
+func managedStandaloneHost() bool {
+	if _, windows := managedHostWindowsStandalone(); windows {
+		return true
+	}
+	_, unix := managedHostUnixRecord(nil)
+	return unix
+}
 
 // ---------------------------------------------------------------------------
 // policy validate
@@ -106,15 +125,20 @@ var policyValidateCmd = &cobra.Command{
 
 		if _, statErr := os.Stat(regoDir); errors.Is(statErr, fs.ErrNotExist) {
 			// An existing policy root without Rego is config-only mode, as
-			// the gateway treats it. A missing root is a failed reload.
+			// the gateway treats it, and so is no policy_dir at all. A
+			// missing configured root is a failed reload.
 			paths, err := resolvePolicyPaths()
 			if err != nil {
 				return err
 			}
 			if _, rootErr := os.Stat(paths.rootDir); rootErr != nil {
-				return fmt.Errorf("policy: compilation failed:\npolicy: read rego directory: %w", statErr)
+				if policyDirConfigured() {
+					return fmt.Errorf("policy: compilation failed:\npolicy: read rego directory: %w", statErr)
+				}
+				fmt.Println("No policy_dir is set, so the gateway loads no Rego: the admission policy is compiled from config.yaml alone.")
+			} else {
+				fmt.Printf("No Rego directory at %s: the admission policy is compiled from config.yaml alone.\n", regoDir)
 			}
-			fmt.Printf("No Rego directory at %s: the admission policy is compiled from config.yaml alone.\n", regoDir)
 		} else {
 			fmt.Fprintf(os.Stderr, "Validating Rego in %s ...\n", regoDir)
 			if _, err := policy.NewExact(regoDir); errors.Is(err, policy.ErrNoModules) {
@@ -159,12 +183,32 @@ func validateSecureClientPolicy(regoDir string) error {
 var policyTestCmd = &cobra.Command{
 	Use:   "test",
 	Short: "Run the Rego unit tests (*_test.rego) without an external opa binary",
+	// The tests write no audit event. On a managed host the audit store is
+	// the gateway service account's, which an administrator command does
+	// not open (GAP-0052).
+	PersistentPreRunE: policyConfigOnlyPreRunE,
+	PersistentPostRun: policyConfigOnlyPostRun,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		regoDir, err := policyCommandRegoDir(cmd)
 		if err != nil {
 			return err
 		}
 		verbose, _ := cmd.Flags().GetBool("verbose")
+		if cfg != nil && !cfg.SecureClientIntegration() {
+			if _, statErr := os.Stat(regoDir); errors.Is(statErr, fs.ErrNotExist) {
+				// Managed packages compile admission from config.yaml and
+				// ship no Rego directory. A missing policy root still fails.
+				paths, pathErr := resolvePolicyPaths()
+				if pathErr != nil {
+					return pathErr
+				}
+				info, rootErr := os.Stat(paths.rootDir)
+				if (rootErr == nil && info.IsDir()) || (errors.Is(rootErr, fs.ErrNotExist) && !policyDirConfigured()) {
+					fmt.Fprintln(cmd.OutOrStdout(), noRegoTestsMessage(regoDir))
+					return nil
+				}
+			}
+		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
@@ -197,6 +241,16 @@ var policyTestCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+// policyDirConfigured reports a policy_dir set in config.yaml. Without one
+// the gateway loads no Rego and decides from config.yaml alone (a Windows
+// managed install clears it, config.standalonePolicyDirDefault, and ships
+// no data_dir policies folder), so validate and test take the absent
+// default folder for that config-only mode instead of failing on it
+// (GAP-2292).
+func policyDirConfigured() bool {
+	return cfg != nil && strings.TrimSpace(cfg.PolicyDir) != ""
 }
 
 // noRegoTestsMessage explains a Rego directory without unit tests.
@@ -293,27 +347,35 @@ var policyEvaluateCmd = &cobra.Command{
 	Use:   "evaluate",
 	Short: "Dry-run the admission policy for a given input",
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		if _, windows := managedHostWindowsStandalone(); windows {
-			return policyConfigOnlyPreRunE(cmd, args)
-		}
-		if _, unix := managedHostUnixRecord(nil); unix {
+		if managedStandaloneHost() {
 			return policyConfigOnlyPreRunE(cmd, args)
 		}
 		return rootPersistentPreRunE(cmd, args)
 	},
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		paths, err := resolvePolicyPaths()
-		if err != nil {
-			return fmt.Errorf("policy: resolve paths: %w", err)
-		}
-
 		targetType, _ := cmd.Flags().GetString("target-type")
 		targetName, _ := cmd.Flags().GetString("target-name")
 		severity, _ := cmd.Flags().GetString("severity")
 		findings, _ := cmd.Flags().GetInt("findings")
+		if targetType != "skill" && targetType != "mcp" && targetType != "plugin" {
+			return usageError(cmd, fmt.Errorf("--target-type must be skill, mcp or plugin"))
+		}
+		severity = strings.ToUpper(severity)
+		switch severity {
+		case "", "INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL":
+		default:
+			return usageError(cmd, fmt.Errorf("--severity must be INFO, LOW, MEDIUM, HIGH or CRITICAL (or empty for pre-scan)"))
+		}
+		if findings < 0 {
+			return usageError(cmd, fmt.Errorf("--findings must be zero or greater"))
+		}
 
 		if targetName == "" {
-			return fmt.Errorf("--target-name is required")
+			return usageError(cmd, fmt.Errorf("--target-name is required"))
+		}
+		paths, err := resolvePolicyPaths()
+		if err != nil {
+			return fmt.Errorf("policy: resolve paths: %w", err)
 		}
 
 		secureClient := cfg != nil && cfg.SecureClientIntegration()
@@ -322,10 +384,14 @@ var policyEvaluateCmd = &cobra.Command{
 			TargetName: targetName,
 			Path:       "/dry-run",
 		}
+		asset := config.AssetPolicyInput{TargetType: targetType, Name: targetName, SourcePath: "/dry-run"}
+		asset.Connector, _ = cmd.Flags().GetString("connector")
+		asset.URL, _ = cmd.Flags().GetString("url")
+		asset.Command, _ = cmd.Flags().GetString("command")
+		asset.Args, _ = cmd.Flags().GetStringArray("arg")
+		asset.Transport, _ = cmd.Flags().GetString("transport")
 		if !secureClient {
-			input.BlockList, input.AllowList = policy.AssetPolicyListsFor(cfg, config.AssetPolicyInput{
-				TargetType: targetType, Name: targetName, SourcePath: "/dry-run",
-			})
+			input.BlockList, input.AllowList = policy.AssetPolicyListsFor(cfg, asset)
 			input.Admission = policy.AdmissionFor(policy.CompileAdmission(cfg), targetType)
 		}
 
@@ -366,10 +432,53 @@ var policyEvaluateCmd = &cobra.Command{
 			}
 		}
 
+		if !secureClient {
+			out = withAssetPolicyDryRun(cfg, asset, out)
+		}
 		result, _ := json.MarshalIndent(out, "", "  ")
 		fmt.Println(string(result))
 		return nil
 	},
+}
+
+// withAssetPolicyDryRun applies the asset_policy decision the gateway takes
+// before admission, in the watcher and the hooks: a registry_required,
+// registry or default-deny verdict that the admission lists do not carry.
+// Without it the dry run said scan / awaiting scan for an approved and an
+// unregistered MCP server alike while the runtime refused the unregistered
+// one (p0 GAP-0945). A registry entry of that name pinned to a URL, command,
+// arguments, transport or connector the input does not give leaves the
+// result undetermined, not blocked: the runtime matches the server's own
+// definition and may admit it.
+func withAssetPolicyDryRun(cfg *config.Config, asset config.AssetPolicyInput, out *policy.AdmissionOutput) *policy.AdmissionOutput {
+	if cfg == nil || out == nil || out.Verdict == "blocked" {
+		return out
+	}
+	asset.RuntimeSurface = "watcher"
+	decision := cfg.EvaluateAssetPolicy(asset)
+	if decision.Source == "registry-required" {
+		if unknown := cfg.AssetRegistryPinsUnknown(asset); len(unknown) > 0 {
+			flags := make([]string, len(unknown))
+			for i, field := range unknown {
+				flags[i] = "--" + strings.TrimSuffix(field, "s")
+			}
+			out.Reason += fmt.Sprintf("; asset policy undetermined: the registry entry for %q pins its %s; pass %s to check it",
+				asset.Name, strings.Join(unknown, ", "), strings.Join(flags, " "))
+			return out
+		}
+	}
+	switch {
+	case decision.Enabled && decision.RawAction == "block" && decision.Action == "block":
+		return &policy.AdmissionOutput{
+			Verdict: "blocked", Reason: decision.Reason,
+			FileAction: "none", InstallAction: "block", RuntimeAction: "block",
+		}
+	case decision.WouldBlock:
+		out.Reason += "; asset policy would block (" + decision.Source + "): " + decision.Reason
+	case decision.Source == "registry":
+		out.Reason = decision.Reason + "; " + out.Reason
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -390,18 +499,16 @@ var policyReloadCmd = &cobra.Command{
 		bind := "127.0.0.1"
 		if cfg != nil {
 			port = cfg.Gateway.APIPort
-			if cfg.Gateway.APIBind != "" {
-				bind = cfg.Gateway.APIBind
-			}
+			bind = gatewayClientHost(cfg)
 		}
 
 		// The reload carries the gateway token: never to a listener that is
 		// not this account's gateway (GAP-1563).
 		if problem := foreignGatewayListener(cfg); problem != "" {
-			return fmt.Errorf("policy reload: %s; the gateway token was not sent. %s", problem, foreignGatewayListenerFix(cfg))
+			return fmt.Errorf("policy reload: %s; the gateway token was not sent. %s", problemClause(problem), foreignGatewayListenerFix(cfg))
 		}
 
-		url := fmt.Sprintf("http://%s:%d/policy/reload", bind, port)
+		url := "http://" + net.JoinHostPort(bind, strconv.Itoa(port)) + "/policy/reload"
 
 		req, err := http.NewRequest(http.MethodPost, url, nil)
 		if err != nil {
@@ -428,7 +535,10 @@ var policyReloadCmd = &cobra.Command{
 			}
 		}
 
-		client := &http.Client{Timeout: 10 * time.Second}
+		client, err := gatewayPeerClient(cfg, bind, port, 10*time.Second)
+		if err != nil {
+			return fmt.Errorf("policy reload: %w", err)
+		}
 		resp, err := client.Do(req)
 		if err != nil {
 			return fmt.Errorf("cannot reach sidecar at %s — is it running?", url)
@@ -465,8 +575,8 @@ func printSecureClientPolicyReload(status int, body []byte) error {
 	return nil
 }
 
-// policyReloadMessage says a successful /policy/reload in one sentence, naming
-// the generation and digest that are enforcing now when the gateway reports them.
+// policyReloadMessage names the in-process rebuild count explicitly: it
+// restarts at one with the gateway, unlike the persisted config generation.
 func policyReloadMessage(body []byte) string {
 	var result struct {
 		Generation uint64 `json:"generation"`
@@ -476,14 +586,14 @@ func policyReloadMessage(body []byte) string {
 		return "Policy reloaded."
 	}
 	if result.Digest == "" {
-		return fmt.Sprintf("Policy reloaded (generation %d).", result.Generation)
+		return fmt.Sprintf("Policy reloaded (rebuild %d).", result.Generation)
 	}
-	return fmt.Sprintf("Policy reloaded (generation %d, digest %s).", result.Generation, result.Digest)
+	return fmt.Sprintf("Policy reloaded (rebuild %d, digest %s).", result.Generation, result.Digest)
 }
 
 // customPackPinMismatch matches the rebuild error for a custom rule pack whose
 // files no longer match its guardrail.custom_packs pin.
-var customPackPinMismatch = regexp.MustCompile(`rule pack "([^"]+)": digest (sha256:[0-9a-f]{64}) does not match guardrail\.custom_packs\.`)
+var customPackPinMismatch = lazyregexp.New(`rule pack "([^"]+)": digest (sha256:[0-9a-f]{64}) does not match guardrail\.custom_packs\.`)
 
 // policyReloadError says a refused /policy/reload in plain words: no HTTP
 // status, no JSON body and no internal stage names. A rebuild that fails leaves

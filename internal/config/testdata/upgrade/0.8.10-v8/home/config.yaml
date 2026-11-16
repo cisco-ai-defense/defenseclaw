@@ -1,9 +1,9 @@
 config_version: 8
 data_dir: '@HOME@'
 # A 0.8.10 home after its own config v8 upgrade, with an operator rule pack,
-# a skill-scanner policy file named custom (0.8.x read it relative to the
-# working directory) and a hand-written provider overlay that names one
-# provider twice.
+# a skill-scanner policy file named custom (the 0.8.x gateway read it relative
+# to data_dir, its working directory) and a hand-written provider overlay that
+# names one provider twice.
 update_check: false
 guardrail:
   mode: action

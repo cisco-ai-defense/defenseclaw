@@ -64,12 +64,16 @@ func startKernelPolicy(ctx context.Context, logger *slog.Logger, homes []string,
 	}
 	ledger := tetragon.NewCustomerLedger()
 	controller := kernelPolicyStart(ctx, logger, intent, policyDialer(scope), manifest, customerSource(ledger))
+	// The ledger's and the controller's counts begin with this process: the
+	// epoch the gateway tells a restarted helper by (cowork-1-0-8 GAP-0080).
+	countersEpoch := kernelpolicy.NewEpoch()
 	config := &acquire.TetragonConfig{
 		Mode:             string(intent.Mode),
 		OwnObservePolicy: func(name string) bool { return controller.OwnsPolicy(name, kernelpolicy.FamilyObserve) },
 		KernelStatus: func(context.Context) (acquire.KernelStatus, error) {
 			status := kernelStatusOf(controller.Status(), intent)
 			withCustomer(&status, ledger, time.Now(), tetragonInstalled())
+			status.CountersEpoch = countersEpoch
 			return status, nil
 		},
 		Tap: hitTap(controller),
@@ -193,18 +197,30 @@ func cleanupResult(code int) error {
 type hitSink interface {
 	RecordHit(kernelpolicy.Hit)
 	RecordLoss()
+	RecordExec(kernelpolicy.Exec)
+	RecordExit(pid int, execID string)
 }
 
 // hitTap counts the events of DefenseClaw's own controls policies (the
 // controller keeps only exact names it loaded) and the loss signals, from the
-// stream the helper can vouch for. An event of a customer policy is never a
-// hit. It must not block.
+// stream the helper can vouch for, and hands it Tetragon's host process
+// starts and exits: a native agent session counts as anchored only once
+// Tetragon reported its start (GAP-0166). An event of a customer policy is
+// never a hit. It must not block.
 func hitTap(sink hitSink) func(plane.KernelBatch) {
 	return func(batch plane.KernelBatch) {
 		if batch.ThrottleStart || batch.Dropped > 0 {
 			sink.RecordLoss()
 		}
 		for _, event := range batch.Events {
+			if event.Source == plane.SourceTetragon && event.ContainerID == "" && event.PID > 1 {
+				switch event.Kind {
+				case plane.KindExec:
+					sink.RecordExec(kernelpolicy.Exec{PID: event.PID, ExecID: event.ExecID, Exe: event.Exe, At: event.At})
+				case plane.KindExit:
+					sink.RecordExit(event.PID, event.ExecID)
+				}
+			}
 			if event.Policy == "" || event.PolicyOwner != plane.PolicyOwnerDefenseClaw || event.UID == nil {
 				continue
 			}
@@ -244,7 +260,7 @@ func kernelStatusOf(state kernelpolicy.State, intent kernelpolicy.Intent) acquir
 			family, _ := kernelpolicy.FamilyOfName(name)
 			status.Policies = append(status.Policies, acquire.KernelPolicyStatus{Name: name, Family: string(family), Recorded: true})
 		}
-		status.Changes = kernelChanges(state.Changes)
+		status.Changes, status.SeqEpoch = kernelChanges(state.Changes), state.SeqEpoch
 		return status
 	}
 	status := acquire.KernelStatus{
@@ -323,7 +339,7 @@ func kernelStatusOf(state kernelpolicy.State, intent kernelpolicy.Intent) acquir
 		status.Overrides = append(status.Overrides, string(family))
 	}
 	sort.Strings(status.Overrides)
-	status.Changes = kernelChanges(state.Changes)
+	status.Changes, status.SeqEpoch = kernelChanges(state.Changes), state.SeqEpoch
 	return status
 }
 
@@ -342,7 +358,7 @@ func kernelChanges(changes []kernelpolicy.Change) []acquire.KernelChange {
 
 func userMode(state string) string {
 	switch state {
-	case kernelpolicy.UIDEnforcing:
+	case kernelpolicy.UIDEnforcing, kernelpolicy.UIDArmed:
 		return "enforce"
 	case kernelpolicy.UIDBurnIn:
 		return "burnin"

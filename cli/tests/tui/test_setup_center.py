@@ -84,7 +84,8 @@ def test_statuses_follow_the_config(config) -> None:
 
     guardrail = _status(SetupWizard.GUARDRAIL, config)
     assert guardrail.state == "ok" and "action" in guardrail.text
-    assert "open" in _status(SetupWizard.GUARDRAIL_ACTIONS, config).text
+    # A per-user outage follows the default tier (oss-outage-open).
+    assert _status(SetupWizard.GUARDRAIL_ACTIONS, config).text == "fail open"
     assert "strict" in _status(SetupWizard.SKILL_SCANNER, config).text
     assert _status(SetupWizard.ACP_GUARD, config).state == "ok"
 
@@ -93,13 +94,21 @@ def test_statuses_follow_the_config(config) -> None:
 
 
 def test_fail_mode_status_is_the_effective_value_per_connector(config) -> None:
-    # GAP-0152: an observe-mode connector fails open whatever the global value says.
+    # GAP-0152: the status is each connector's effective value. A saved
+    # per-user choice wins before the tier; Secure Client keeps its default.
     from defenseclaw.config import PerConnectorGuardrailConfig
 
     config.guardrail.enabled = True
     config.guardrail.hook_fail_mode = "closed"
     config.guardrail.connectors = {"claudecode": PerConnectorGuardrailConfig()}
 
+    assert _status(SetupWizard.GUARDRAIL_ACTIONS, config).text == "fail closed"
+    config.guardrail.connectors["claudecode"].rule_pack = "strict"
+    assert _status(SetupWizard.GUARDRAIL_ACTIONS, config).text == "fail closed"
+    config.guardrail.connectors["claudecode"].rule_pack = ""
+    config.guardrail.hook_fail_mode = ""
+    assert _status(SetupWizard.GUARDRAIL_ACTIONS, config).text == "fail open"
+    config.guardrail._secure_client = True
     assert _status(SetupWizard.GUARDRAIL_ACTIONS, config).text == "fail open"
     config.guardrail.connectors["codex"] = PerConnectorGuardrailConfig(hook_fail_mode="closed")
     assert _status(SetupWizard.GUARDRAIL_ACTIONS, config).text == "fail closed, 1 open"

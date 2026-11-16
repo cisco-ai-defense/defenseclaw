@@ -18,6 +18,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,7 +30,7 @@ import (
 
 // TestActiveConnector_Precedence pins the resolution order:
 //
-//	guardrail.connector  >  claw.mode  >  "openclaw"
+//	guardrail.connector  >  claw.mode  >  no connector
 //
 // Whitespace-only values must not "win" the fallback chain — they are
 // treated as unset so a stray "  " in YAML can't silently mask a real
@@ -45,8 +46,8 @@ func TestActiveConnector_Precedence(t *testing.T) {
 		{"connector_overrides_mode", "claudecode", "openclaw", "claudecode"},
 		{"empty_connector_uses_mode", "", "openclaw", "openclaw"},
 		{"whitespace_connector_uses_mode", "  ", "zeptoclaw", "zeptoclaw"},
-		{"both_empty_defaults_openclaw", "", "", "openclaw"},
-		{"whitespace_mode_defaults_openclaw", "", "  ", "openclaw"},
+		{"both_empty_selects_none", "", "", ""},
+		{"whitespace_mode_selects_none", "", "  ", ""},
 		{"trims_connector", "  codex  ", "openclaw", "codex"},
 	}
 	for _, tt := range tests {
@@ -63,8 +64,8 @@ func TestActiveConnector_Precedence(t *testing.T) {
 
 func TestActiveConnector_NilSafe(t *testing.T) {
 	var cfg *Config
-	if got := cfg.activeConnector(); got != "openclaw" {
-		t.Errorf("nil cfg activeConnector() = %q, want openclaw", got)
+	if got := cfg.activeConnector(); got != "" {
+		t.Errorf("nil cfg activeConnector() = %q, want none", got)
 	}
 }
 
@@ -240,9 +241,10 @@ func TestClaudePluginDirsIncludeAncestorAndNestedSkillsRoots(t *testing.T) {
 	}
 }
 
-func TestSkillDirs_FallsBackToOpenClaw(t *testing.T) {
+func TestSkillDirs_ExplicitOpenClaw(t *testing.T) {
 	homeDir := t.TempDir()
 	cfg := &Config{}
+	cfg.Claw.Mode = "openclaw"
 	cfg.Claw.HomeDir = homeDir
 	cfg.Claw.ConfigFile = filepath.Join(homeDir, "openclaw.json")
 
@@ -258,12 +260,11 @@ func TestSkillDirs_FallsBackToOpenClaw(t *testing.T) {
 	}
 }
 
-// TestPluginDirs_FallsBackToOpenClaw is the parallel guarantee for
-// plugins — must continue producing claw_home/extensions when no
-// connector is configured.
-func TestPluginDirs_FallsBackToOpenClaw(t *testing.T) {
+// An explicit OpenClaw selection keeps its plugin directories.
+func TestPluginDirs_ExplicitOpenClaw(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "legacy-oc-home")
 	cfg := &Config{}
+	cfg.Claw.Mode = "openclaw"
 	cfg.Claw.HomeDir = home
 
 	dirs := cfg.PluginDirs()
@@ -274,11 +275,8 @@ func TestPluginDirs_FallsBackToOpenClaw(t *testing.T) {
 }
 
 // TestSkillDirsForConnector_DefaultArmDoesNotRecurse ensures the
-// "openclaw" / unknown branch of SkillDirsForConnector calls the
-// private skillDirsOpenClaw helper directly. Before S1.2 it called
-// c.SkillDirs() which now dispatches polymorphically — that would
-// have caused infinite recursion when guardrail.connector was set
-// to a non-built-in name.
+// OpenClaw's explicit branch avoids recursion, while an unknown connector
+// returns no agent paths.
 func TestSkillDirsForConnector_DefaultArmDoesNotRecurse(t *testing.T) {
 	homeDir := t.TempDir()
 	cfg := &Config{}
@@ -292,8 +290,8 @@ func TestSkillDirsForConnector_DefaultArmDoesNotRecurse(t *testing.T) {
 	}
 
 	dirs = cfg.SkillDirsForConnector("totally-unknown-connector")
-	if !containsPath(dirs, filepath.Join(homeDir, "skills")) {
-		t.Errorf("SkillDirsForConnector(unknown) did not fall back to OpenClaw: %v", dirs)
+	if len(dirs) != 0 {
+		t.Errorf("SkillDirsForConnector(unknown) = %v, want none", dirs)
 	}
 }
 
@@ -762,7 +760,7 @@ func TestReadMCPServersForConnector_OpenCode(t *testing.T) {
 	}
 }
 
-func TestReadMCPServersOpenCode_V11810PrecedenceJSONCAndDisabled(t *testing.T) {
+func TestReadMCPServersOpenCodeV2PrecedenceJSONCAndUnsupportedLegacyOverride(t *testing.T) {
 	home := t.TempDir()
 	testenv.SetHome(t, home)
 	t.Setenv("OPENCODE_CONFIG", "")
@@ -819,11 +817,11 @@ func TestReadMCPServersOpenCode_V11810PrecedenceJSONCAndDisabled(t *testing.T) {
 		t.Fatalf("entries = %+v, want one merged server", entries)
 	}
 	entry := entries[0]
-	if entry.Command != "custom-directory" || !entry.Disabled {
-		t.Fatalf("entry = %+v, want custom-directory preserved and disabled", entry)
+	if entry.Command != "custom-directory" || entry.Disabled {
+		t.Fatalf("entry = %+v, want V2 to ignore the unsupported legacy enabled-only override", entry)
 	}
-	if entry.Source != "OPENCODE_CONFIG_CONTENT" || entry.SourceScope != "inline" {
-		t.Fatalf("provenance = (%q, %q), want inline content", entry.Source, entry.SourceScope)
+	if entry.Source != filepath.Join(customDir, "opencode.json") || entry.SourceScope != "custom-directory" {
+		t.Fatalf("provenance = (%q, %q), want the last supported server declaration", entry.Source, entry.SourceScope)
 	}
 
 	resolution := resolveOpenCodeConfig(workspace)
@@ -833,9 +831,7 @@ func TestReadMCPServersOpenCode_V11810PrecedenceJSONCAndDisabled(t *testing.T) {
 			positions[layer.Scope] = index
 		}
 	}
-	if !(positions["project-directory"] < positions["home-directory"] &&
-		positions["home-directory"] < positions["custom-directory"] &&
-		positions["custom-directory"] < positions["inline"]) {
+	if (positions["project-directory"] >= positions["home-directory"] || positions["home-directory"] >= positions["custom-directory"]) || positions["custom-directory"] >= positions["inline"] {
 		t.Fatalf("layer positions = %+v, want project < home < custom < inline", positions)
 	}
 	var remote, managed bool
@@ -1105,18 +1101,6 @@ func TestConnectorHomeDir_OpenCodeHonorsConfigDir(t *testing.T) {
 	t.Setenv("OPENCODE_CONFIG_DIR", "relative-opencode-home")
 	if got, want := cfg.ConnectorHomeDir("opencode"), filepath.Join(workspace, "relative-opencode-home"); got != want {
 		t.Fatalf("relative ConnectorHomeDir(opencode) = %q, want workspace-relative %q", got, want)
-	}
-}
-
-func TestConnectorHomeDir_OmnigentConfigHome(t *testing.T) {
-	home := t.TempDir()
-	configHome := filepath.Join(home, "isolated-omnigent")
-	testenv.SetHome(t, home)
-	t.Setenv("OMNIGENT_CONFIG_HOME", configHome)
-	cfg := &Config{}
-
-	if got := cfg.ConnectorHomeDir("omnigent"); got != configHome {
-		t.Fatalf("ConnectorHomeDir(omnigent) = %q, want %q", got, configHome)
 	}
 }
 
@@ -1395,8 +1379,7 @@ func TestHermesSurfacesHonorHermesHome(t *testing.T) {
 
 // TestHasConnectorConfigured pins the Go mirror of Python's
 // has_connector_configured() (mcp.md M1). It must distinguish a
-// genuinely-unconfigured install from an explicit one — WITHOUT changing
-// the activeConnector() "openclaw" floor that many call sites depend on.
+// genuinely-unconfigured install from an explicit one.
 func TestHasConnectorConfigured(t *testing.T) {
 	var nilCfg *Config
 	if nilCfg.HasConnectorConfigured() {
@@ -1407,10 +1390,8 @@ func TestHasConnectorConfigured(t *testing.T) {
 	if empty.HasConnectorConfigured() {
 		t.Error("all-empty config must NOT report a configured connector (phantom-openclaw root)")
 	}
-	// The floor is deliberately preserved — only the helper distinguishes
-	// the phantom from a real install.
-	if got := empty.activeConnector(); got != "openclaw" {
-		t.Errorf("activeConnector() floor changed to %q; must stay openclaw", got)
+	if got := empty.activeConnector(); got != "" {
+		t.Errorf("activeConnector() = %q, want none", got)
 	}
 
 	withConn := &Config{}
@@ -1439,5 +1420,90 @@ func TestHasConnectorConfigured(t *testing.T) {
 	multi.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{"codex": {}}
 	if !multi.HasConnectorConfigured() {
 		t.Error("populated guardrail.connectors map must report configured")
+	}
+}
+
+// GAP-0219: the managed enumerator read a project .mcp.json that did not
+// parse, or a server whose fields had the wrong type, as no servers, so its
+// servers silently stayed out of admission. The strict reader fails and
+// names the file; the per-user reader keeps skipping such a file.
+func TestClaudeStateMCPServersRefusesAServerListThatDoesNotParse(t *testing.T) {
+	project := filepath.Join(t.TempDir(), "proj")
+	state := func(local string) []byte {
+		data, err := json.Marshal(map[string]any{"projects": map[string]any{project: json.RawMessage(local)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	for name, file := range map[string]string{
+		"not json":          `{"mcpServers":{"x":`,
+		"args not an array": `{"mcpServers":{"x":{"command":"npx","args":"-y pkg"}}}`,
+	} {
+		_, err := ClaudeStateMCPServers(state(`{}`), func(string) ([]byte, error) { return []byte(file), nil })
+		var fileErr *MCPFileParseError
+		if !errors.As(err, &fileErr) || fileErr.Path != filepath.Join(project, ".mcp.json") {
+			t.Errorf("%s: err %v, want a parse error naming the project .mcp.json", name, err)
+		}
+	}
+	if _, err := ClaudeStateMCPServers(state(`{"mcpServers":{"x":{"command":"npx","env":"A=1"}}}`), nil); err == nil {
+		t.Error("a local-scope server whose env is not a map was read as no servers")
+	}
+	if _, err := ClaudeStateMCPServers([]byte(`{"mcpServers":{"x":{"command":7}}}`), nil); err == nil {
+		t.Error("a user-scope server whose command is a number was read as no servers")
+	}
+	servers, err := ClaudeStateMCPServers(state(`{}`), func(string) ([]byte, error) { return []byte(" \n"), nil })
+	if err != nil || len(servers) != 0 {
+		t.Errorf("an empty .mcp.json: %+v, %v; want no servers", servers, err)
+	}
+	lenient, err := claudeStateProjectServers(map[string]any{"projects": map[string]any{project: map[string]any{}}},
+		func(string) ([]byte, error) { return []byte(`{"mcpServers":{"x":`), nil }, false)
+	if err != nil || len(lenient) != 0 {
+		t.Errorf("per-user reader: %+v, %v; want the file skipped", lenient, err)
+	}
+}
+
+// OpenClaw reads openclaw.json as JSON5. A file it runs on must still name the
+// workspace and extra skill directories the scanner watches, and a file that
+// is neither JSON nor JSON5 keeps the defaults.
+func TestSkillDirs_OpenClawReadsJSON5Config(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body          string
+		wantWorkspace bool
+	}{
+		"strict JSON": {`{"agents":{"defaults":{"workspace":"WS"}},"skills":{"load":{"extraDirs":["EXTRA"]}}}`, true},
+		"JSON5 with comments, bare keys, single quotes and trailing commas": {
+			"// OpenClaw accepts JSON5\n{ agents: { defaults: { workspace: 'WS', }, }, skills: { load: { extraDirs: ['EXTRA',], }, }, gateway: { port: 0x7077 }, }\n", true,
+		},
+		"broken file keeps the defaults": {"{ agents: { defaults: { workspace: 'WS' ", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			homeDir := t.TempDir()
+			workspace := filepath.Join(homeDir, "custom-workspace")
+			extra := filepath.Join(homeDir, "extra-skills")
+			// The paths sit inside quoted strings, so a Windows path needs its
+			// backslashes doubled to be the same path after JSON or JSON5 reads it.
+			escape := func(p string) string { return strings.ReplaceAll(p, `\`, `\\`) }
+			body := strings.NewReplacer("WS", escape(workspace), "EXTRA", escape(extra)).Replace(tc.body)
+			configFile := filepath.Join(homeDir, "openclaw.json")
+			if err := os.WriteFile(configFile, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := &Config{}
+			cfg.Claw.Mode = "openclaw"
+			cfg.Claw.HomeDir = homeDir
+			cfg.Claw.ConfigFile = configFile
+
+			dirs := cfg.SkillDirs()
+			if got := containsPath(dirs, filepath.Join(workspace, "skills")); got != tc.wantWorkspace {
+				t.Errorf("workspace skills dir listed = %v, want %v; dirs %v", got, tc.wantWorkspace, dirs)
+			}
+			if got := containsPath(dirs, extra); got != tc.wantWorkspace {
+				t.Errorf("extra dir listed = %v, want %v; dirs %v", got, tc.wantWorkspace, dirs)
+			}
+			if !containsPath(dirs, filepath.Join(homeDir, "skills")) {
+				t.Errorf("home skills dir missing; dirs %v", dirs)
+			}
+		})
 	}
 }

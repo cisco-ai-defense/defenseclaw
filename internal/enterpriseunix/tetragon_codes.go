@@ -156,9 +156,11 @@ type tetragonFacts struct {
 	// At is when an operator changed a family; Verb what they did.
 	At   time.Time
 	Verb string
-	// Names are policy names; Users and Connectors those a message lists.
-	Names, Users, Connectors []string
-	Count                    int
+	// Names are policy names and Connectors the connectors a message lists;
+	// UserCount counts the users it is about.
+	Names, Connectors []string
+	UserCount         int
+	Count             int
 	// State and Error describe a policy.
 	State, Error string
 	// ETA is when the next user is ready, in words.
@@ -307,8 +309,10 @@ var tetragonCodes = map[string]tetragonCodeText{
 			return "no user has finished burn-in yet (nothing is denied yet); nothing to do: " + eta
 		}
 		var who []string
-		if len(f.Users) > 0 {
-			who = append(who, "no agent installed for "+strings.Join(f.Users, ", "))
+		if f.UserCount > 0 {
+			// A count, not names: status documents go to management tooling
+			// (status-v2 GAP-0005).
+			who = append(who, fmt.Sprintf("no agent installed for %d enrolled %s", f.UserCount, plural(f.UserCount, "user", "users")))
 		}
 		if len(f.Connectors) > 0 {
 			who = append(who, "no enrolled user has a row for "+strings.Join(f.Connectors, ", "))
@@ -374,10 +378,32 @@ var tetragonCodes = map[string]tetragonCodeText{
 			" restart " + plural(n, "it", "them") + " to be denied: after enforce starts, and after a Tetragon restart. " + gwStatus +
 			" lists " + plural(n, "it", "them") + " under Observed, not enforced"
 	}},
+	kernelpolicy.WarnSessionsUnconfirmed: {Message: func(f tetragonFacts) string {
+		count, n := sessionCount(f.Detail, "agent session of an enforced user", "agent sessions of enforced users")
+		return count + " fit the enforcing kernel controls, but Tetragon never reported " + plural(n, "its", "their") +
+			" start on the event stream (" + plural(n, "it is", "they are") + " not counted as denied and " +
+			plural(n, "its user is", "their users are") + " armed, not enforcing; the stream was down, or the sensor helper restarted" +
+			" before it saw " + plural(n, "it", "them") + "); restart " + plural(n, "it", "them") + " while the stream is connected. " +
+			gwStatus + " lists " + plural(n, "it", "them") + " under Observed, not enforced"
+	}},
+	kernelpolicy.ReasonNoAnchoredSession: {Message: func(tetragonFacts) string {
+		return "enforce is loaded for the user, but no running agent session of theirs started from an agent binary after the" +
+			" kernel controls loaded (nothing of theirs is denied now); nothing to do: the next agent session they start is denied"
+	}},
 	kernelpolicy.WarnBinaryScopeLimited: {Message: func(tetragonFacts) string {
 		return "more than one user of a controls policy has a native agent install" +
 			" (in enforce it denies for one of them, the lowest uid; the others stay in monitor mode);" +
 			" nothing to do: their would-block hits are still counted, and the Tetragon guide lists this limit"
+	}},
+	kernelpolicy.NoteExtraLinks: {Message: func(f tetragonFacts) string {
+		file := defaultStr(f.Detail, "<path>")
+		return "the protected file " + file + " has a second hard link, and no path control matches another name for a file" +
+			" (a write through the other name is not denied); remove the other name, found with find ~ -samefile " + file
+	}},
+	kernelpolicy.NoteDentryMount: {Message: func(f tetragonFacts) string {
+		file := defaultStr(f.Detail, "<path>")
+		return "the protected path " + file + " is not on the root mount (the link and rename controls cannot name it;" +
+			" the open control and the protected-file watch still cover it); nothing to do, or move the home onto the root mount"
 	}},
 	kernelpolicy.WarnReconcileFailed: {Message: func(tetragonFacts) string {
 		return "the sensor helper's last pass failed (policies stay in or move to monitor mode); see the ERROR column of " + gwStatus +
@@ -435,16 +461,21 @@ func tetragonMessage(fullCode string, f tetragonFacts) string {
 	if entry, ok := tetragonCodes[base]; ok {
 		return entry.Message(f)
 	}
+	// A detail the caller already split off is part of what the helper wrote.
+	if !strings.Contains(fullCode, ":") && f.Detail != "" {
+		fullCode += ":" + f.Detail
+	}
 	return fullCode + " (reported by the sensor helper); see " + gwStatus
 }
 
 // observedReasonWords say why an agent session is observed, not enforced.
 var observedReasonWords = map[string]string{
-	kernelpolicy.ReasonIDEHosted:        "an IDE terminal",
-	kernelpolicy.ReasonHeuristicRoot:    "looks like an agent by name only",
-	kernelpolicy.ReasonNotEnrolled:      "user not enrolled",
-	kernelpolicy.ReasonGuardrailObserve: "connector in observe mode",
-	kernelpolicy.ReasonPredatesControls: "started before the kernel controls loaded; restart it to be denied",
+	kernelpolicy.ReasonIDEHosted:         "an IDE terminal",
+	kernelpolicy.ReasonHeuristicRoot:     "looks like an agent by name only",
+	kernelpolicy.ReasonNotEnrolled:       "user not enrolled",
+	kernelpolicy.ReasonGuardrailObserve:  "connector in observe mode",
+	kernelpolicy.ReasonPredatesControls:  "started before the kernel controls loaded; restart it to be denied",
+	kernelpolicy.ReasonKernelUnconfirmed: "Tetragon did not report its start; restart it to be denied",
 }
 
 // observedReason is the reason in words with the code in parentheses.

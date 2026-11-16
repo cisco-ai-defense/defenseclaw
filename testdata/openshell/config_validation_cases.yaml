@@ -545,6 +545,41 @@ cases:
       openshell:
         pack_dir: '~alice/packs'
 
+  - name: trusted-ca-bundle-absolute
+    valid: true
+    source: |
+      config_version: 8
+      openshell:
+        trusted_ca_bundle: /etc/defenseclaw/corp-root-ca.pem
+
+  - name: trusted-ca-bundle-home
+    valid: true
+    source: |
+      config_version: 8
+      openshell:
+        trusted_ca_bundle: '~/certs/corp-root-ca.pem'
+
+  - name: trusted-ca-bundle-relative
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        trusted_ca_bundle: corp-root-ca.pem
+
+  - name: trusted-ca-bundle-other-users-home
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        trusted_ca_bundle: '~alice/corp-root-ca.pem'
+
+  - name: trusted-ca-bundle-not-a-string
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        trusted_ca_bundle: [/etc/ca.pem]
+
   - name: harness-version-dotted-key
     valid: false
     source: |

@@ -350,7 +350,7 @@ func (a *App) activityLine(ev sandboxapi.ActivityEvent, withSandbox bool) string
 		}
 		if ev.Repeats > 0 {
 			// The refusals folded into this line (GAP-0309).
-			b.WriteString(fmt.Sprintf(" (and %d more like it)", ev.Repeats))
+			fmt.Fprintf(&b, " (and %d more like it)", ev.Repeats)
 		}
 		if ev.Unblockable && ev.Host != "" && !sshPort(ev) {
 			scope := ""

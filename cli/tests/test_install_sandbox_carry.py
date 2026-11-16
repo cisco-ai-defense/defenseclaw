@@ -281,3 +281,98 @@ def test_an_upgrade_after_a_rollback_by_an_earlier_release_brings_the_setup_back
     # The data previous/ holds is parked only after the swap is final.
     finish = text[text.index("finish_swap() {") :][:600]
     assert "keep_rolled_back_data" in finish
+
+
+def _legacy_refusal(tmp_path: Path, previous: str, listing: str, *, version: str = "1.0.5", running: bool = True):
+    bin_dir, venv = tmp_path / "bin", tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    bin_dir.mkdir()
+    (venv / "bin" / "python").symlink_to(sys.executable)
+    gateway = bin_dir / "defenseclaw-gateway"
+    gateway.write_text(
+        f"#!/bin/sh\n[ \"$*\" = \"sandbox list --output json\" ] && printf '%s\\n' '{listing}'\n",
+        encoding="utf-8",
+    )
+    gateway.chmod(0o755)
+    script = tmp_path / "refuse.sh"
+    script.write_text(
+        f'set -euo pipefail\nBIN_DIR="{bin_dir}"\nVENV="{venv}"\nVERSION="{version}"\n'
+        + ("gateway_pid() { printf 42; }\n" if running else "gateway_pid() { return 1; }\n")
+        + 'err() { echo "ERR $*" >&2; }\n'
+        + _functions("refuse_legacy_sandboxes")
+        + f'refuse_legacy_sandboxes "{previous}"\necho went-on\n',
+        encoding="utf-8",
+    )
+    return _run(script, tmp_path)
+
+
+_LEGACY_LISTING = (
+    '{"sandboxes": ['
+    '{"name": "np5-legacy", "phase": "ready", "driver": "vm"}, '
+    '{"name": "dock", "phase": "ready"}, '
+    '{"name": "vm-done", "phase": "completed", "driver": "vm"}, '
+    '{"name": "dock-done", "phase": "completed", "driver": "docker"}, '
+    '{"name": "vm-gone", "phase": "error", "driver": "vm", "phase_reason": "ProcessExited: exit 0"}, '
+    '{"name": "off", "phase": "stopped", "driver": "vm"}'
+    ']}'
+)
+
+
+@pytest.mark.parametrize("previous", ["1.0.0", "1.0.2", "1.0.3"])
+def test_an_upgrade_from_1_0_3_or_older_refuses_while_its_sandboxes_hold_compute(tmp_path: Path, previous: str) -> None:
+    """rel-1-0-4:GAP-0901: a 1.0.3 MicroVM kept running through the per-user
+    upgrade with its old broker; the installer now refuses first and names
+    each sandbox with the command that ends it."""
+    proc = _legacy_refusal(tmp_path, previous, _LEGACY_LISTING)
+
+    assert proc.returncode == 1, proc
+    assert "went-on" not in proc.stdout
+    assert f"ERR Sandboxes of DefenseClaw {previous} are running; nothing was changed." in proc.stderr
+    assert "DefenseClaw stops no sandbox for you" in proc.stderr
+    assert "np5-legacy (ready): save the work you need, then defenseclaw sandbox stop np5-legacy" in proc.stderr
+    assert "dock (ready): save the work you need, then defenseclaw sandbox stop dock" in proc.stderr
+    assert (
+        "vm-done (completed MicroVM, which OpenShell does not stop): defenseclaw sandbox delete vm-done "
+        "(it deletes the sandbox with its work)" in proc.stderr
+    )
+    for gone in ("dock-done", "vm-gone", "off"):
+        assert gone not in proc.stderr
+
+
+@pytest.mark.parametrize(
+    ("previous", "listing", "version", "running"),
+    [
+        ("1.0.4", _LEGACY_LISTING, "1.0.5", True),  # its gateway counts its own sandboxes
+        ("0.8.10", _LEGACY_LISTING, "1.0.5", True),  # no OpenShell sandboxes before 1.0
+        ("1.0.3", _LEGACY_LISTING, "1.0.3", True),  # not an upgrade to a release that reports them
+        ("1.0.3", _LEGACY_LISTING, "1.0.5", False),  # no gateway runs to ask
+        ("1.0.3", '{"sandboxes": [{"name": "off", "phase": "stopped", "driver": "vm"}]}', "1.0.5", True),
+        ("1.0.3", "", "1.0.5", True),  # sandboxes off: the listing fails
+    ],
+)
+def test_the_legacy_sandbox_refusal_lets_other_upgrades_go_on(
+    tmp_path: Path, previous: str, listing: str, version: str, running: bool
+) -> None:
+    proc = _legacy_refusal(tmp_path, previous, listing, version=version, running=running)
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "went-on"
+    assert proc.stderr == ""
+
+
+def test_the_legacy_sandbox_refusal_runs_before_the_upgrade_question_and_the_swap() -> None:
+    text = _text()
+    order = [
+        'refuse_legacy_sandboxes "${PREV_VERSION}"\nwarn_running_sandboxes\n',
+        'ask_yes_no "Upgrade DefenseClaw ${PREV_VERSION} → ${VERSION}?"',
+        "assert_locks_ours\nassert_no_loaded_plugin_agents\n",
+    ]
+    positions = [text.index(needle) for needle in order]
+    assert positions == sorted(positions)
+
+
+def test_the_upgrade_page_states_the_legacy_sandbox_refusal() -> None:
+    page = " ".join((ROOT / "docs-site/content/docs/get-started/upgrade.mdx").read_text(encoding="utf-8").split())
+    assert "An upgrade from 1.0.3 or earlier refuses, and changes nothing, while that release's gateway runs a sandbox." in page
+    assert "`defenseclaw sandbox stop NAME`, or `defenseclaw sandbox delete NAME`" in page
+    assert "When the gateway is not running the installer cannot ask it, so end your sandboxes before you upgrade." in page

@@ -64,17 +64,18 @@ type assetListEdit struct {
 // connector from both lists (one decision per asset, as the actions table
 // kept), then appends the new rule; an unblock only drops the denied rule.
 // Names compare as the readers match them: skill, MCP and plugin names
-// case-insensitively (assetRuleMatches), tool names exactly
-// (ToolListDecision). An unnamed rule matches the first key shown by
-// /enforce/blocked and /enforce/allowed. An exact compare left a denied
-// MySkill in place on an unblock or allow of myskill (GAP-0319).
+// after Unicode NFC, ignoring case (config.SameAssetName), tool names
+// exactly (ToolListDecision). An unnamed rule matches the first key shown
+// by /enforce/blocked and /enforce/allowed. An exact compare left a denied
+// MySkill in place on an unblock or allow of myskill (GAP-0319), and a
+// compare without NFC left a deny written in the other Unicode spelling of
+// the same name (p0 GAP-0878).
 func assetListChange(cfg *config.Config, edit assetListEdit) []configwrite.Change {
 	base := "asset_policy." + edit.TargetType
 	sameAsset := func(name, connector string) bool {
-		name = strings.TrimSpace(name)
-		sameName := strings.EqualFold(name, strings.TrimSpace(edit.Name))
+		sameName := config.SameAssetName(name, edit.Name)
 		if edit.TargetType == "tool" {
-			sameName = name == edit.Name
+			sameName = strings.TrimSpace(name) == edit.Name
 		}
 		return sameName && config.SameConnector(connector, edit.Connector)
 	}
@@ -297,6 +298,19 @@ func (a *APIServer) liveConfig() *config.Config {
 	return a.scannerCfg
 }
 
+// requestConfig is the config a decision for ctx reads: the config of the
+// generation the request is pinned to, else liveConfig. A reload that
+// publishes a newer config while the request runs leaves its admission lists
+// and rules alone, so one decision never mixes two generations (GAP-0873).
+// Secure Client keeps its start-time config (issue #1092).
+func (a *APIServer) requestConfig(ctx context.Context) *config.Config {
+	cfg := a.liveConfig()
+	if g := pinnedGeneration(ctx); g != nil && g.Config != nil && (cfg == nil || !cfg.SecureClientIntegration()) {
+		return g.Config
+	}
+	return cfg
+}
+
 // apiConfigActor is the writer actor for a REST change: api:<principal>.
 func apiConfigActor(ctx context.Context) string {
 	principal := auditCallerIdentity(ctx).principalRef()
@@ -315,7 +329,10 @@ func (a *APIServer) writeAssetListError(w http.ResponseWriter, r *http.Request, 
 		return
 	case errors.Is(err, configwrite.ErrLockBusy):
 		status = http.StatusServiceUnavailable
-	case errors.Is(err, configwrite.ErrConflict):
+	case errors.Is(err, configwrite.ErrConflict), errors.Is(err, configwrite.ErrInvalidDocument):
+		// A config.yaml the writer cannot edit (a second YAML document, a
+		// syntax error) is the operator's to fix, not a gateway fault
+		// (GAP-1421).
 		status = http.StatusConflict
 	}
 	a.writeJSON(w, status, map[string]string{"error": err.Error()})

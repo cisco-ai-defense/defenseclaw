@@ -65,21 +65,22 @@ func WatchDirs(opts InstallOptions) ([]string, error) {
 	}
 
 	setupOpts := connector.SetupOpts{
-		DataDir:           dataDir,
-		ProxyAddr:         strings.TrimSpace(opts.ProxyAddr),
-		APIAddr:           strings.TrimSpace(opts.APIAddr),
-		APIToken:          strings.TrimSpace(opts.APIToken),
-		Interactive:       false,
-		ManagedEnterprise: true,
-		WorkspaceDir:      strings.TrimSpace(opts.WorkspaceDir),
-		HookFailMode:      strings.TrimSpace(opts.HookFailMode),
-		GuardrailMode:     strings.TrimSpace(opts.GuardrailMode),
-		HILTEnabled:       opts.HILTEnabled,
-		AgentVersion:      strings.TrimSpace(opts.AgentVersion),
-		HookContractID:    strings.TrimSpace(opts.HookContractID),
+		DataDir:                  dataDir,
+		ProxyAddr:                strings.TrimSpace(opts.ProxyAddr),
+		APIAddr:                  strings.TrimSpace(opts.APIAddr),
+		APIToken:                 strings.TrimSpace(opts.APIToken),
+		Interactive:              false,
+		ManagedEnterprise:        true,
+		WorkspaceDir:             strings.TrimSpace(opts.WorkspaceDir),
+		HookFailMode:             strings.TrimSpace(opts.HookFailMode),
+		SecureClientHookDelivery: secureClientHookDelivery(),
+		GuardrailMode:            strings.TrimSpace(opts.GuardrailMode),
+		HILTEnabled:              opts.HILTEnabled,
+		AgentVersion:             strings.TrimSpace(opts.AgentVersion),
+		HookContractID:           strings.TrimSpace(opts.HookContractID),
 	}
 	if setupOpts.AgentVersion == "" {
-		setupOpts.AgentVersion = connector.LoadCachedAgentVersion(dataDir, conn.Name())
+		setupOpts.AgentVersion = cachedSetupAgentVersion(dataDir, conn.Name())
 	}
 	if setupOpts.HookContractID == "" {
 		resolution := resolveHookContract(conn.Name(), setupOpts.AgentVersion)
@@ -166,10 +167,11 @@ func WatchDirs(opts InstallOptions) ([]string, error) {
 //	  session prefs), ~/.claude/settings.json (Claude Code writes
 //	  project-scoped settings), ~/.cursor/hooks.json (Cursor rewrites
 //	  for extensions). Write and Chmod on these are almost always
-//	  the agent updating its own state, NOT a tamper — so we react
-//	  only to Create, Remove, and Rename, and let the 5-min backstop
-//	  reconcile catch any pathological in-place rewrite. Create is
-//	  included because Linux reports rename-into-place as Create.
+//	  the agent updating its own state, NOT a tamper — so the watch
+//	  loop reacts to Create, Remove, and Rename, and to a Write or
+//	  Chmod only when the file no longer holds what the last reconcile
+//	  left there (GAP-0045). Create is included because Linux reports
+//	  rename-into-place as Create.
 //
 // The rationale: without this split, every session Codex opens will
 // touch config.toml, fire an fsnotify Write, pass the ownership
@@ -241,21 +243,22 @@ func WatchOwnedFiles(opts InstallOptions) (WatchOwnership, error) {
 	}
 
 	setupOpts := connector.SetupOpts{
-		DataDir:           dataDir,
-		ProxyAddr:         strings.TrimSpace(opts.ProxyAddr),
-		APIAddr:           strings.TrimSpace(opts.APIAddr),
-		APIToken:          strings.TrimSpace(opts.APIToken),
-		Interactive:       false,
-		ManagedEnterprise: true,
-		WorkspaceDir:      strings.TrimSpace(opts.WorkspaceDir),
-		HookFailMode:      strings.TrimSpace(opts.HookFailMode),
-		GuardrailMode:     strings.TrimSpace(opts.GuardrailMode),
-		HILTEnabled:       opts.HILTEnabled,
-		AgentVersion:      strings.TrimSpace(opts.AgentVersion),
-		HookContractID:    strings.TrimSpace(opts.HookContractID),
+		DataDir:                  dataDir,
+		ProxyAddr:                strings.TrimSpace(opts.ProxyAddr),
+		APIAddr:                  strings.TrimSpace(opts.APIAddr),
+		APIToken:                 strings.TrimSpace(opts.APIToken),
+		Interactive:              false,
+		ManagedEnterprise:        true,
+		WorkspaceDir:             strings.TrimSpace(opts.WorkspaceDir),
+		HookFailMode:             strings.TrimSpace(opts.HookFailMode),
+		SecureClientHookDelivery: secureClientHookDelivery(),
+		GuardrailMode:            strings.TrimSpace(opts.GuardrailMode),
+		HILTEnabled:              opts.HILTEnabled,
+		AgentVersion:             strings.TrimSpace(opts.AgentVersion),
+		HookContractID:           strings.TrimSpace(opts.HookContractID),
 	}
 	if setupOpts.AgentVersion == "" {
-		setupOpts.AgentVersion = connector.LoadCachedAgentVersion(dataDir, conn.Name())
+		setupOpts.AgentVersion = cachedSetupAgentVersion(dataDir, conn.Name())
 	}
 	if setupOpts.HookContractID == "" {
 		resolution := resolveHookContract(conn.Name(), setupOpts.AgentVersion)
@@ -295,9 +298,9 @@ func WatchOwnedFiles(opts InstallOptions) (WatchOwnership, error) {
 		// SHARED-WRITER: the native hook config file (codex
 		// config.toml / claudecode settings.json / cursor hooks.json).
 		// The agent itself writes to this constantly during normal use
-		// (MRU model, plugin state, session prefs), so we ONLY react
-		// to Create/Remove/Rename here. Any in-place stripping via
-		// `sed -i` is caught by the 5-min backstop reconcile.
+		// (MRU model, plugin state, session prefs), so the watch loop
+		// reacts to a Write here only when the file's content changed
+		// since the last reconcile (an in-place strip, GAP-0045).
 		for _, path := range connector.HookConfigPathsForConnector(conn, setupOpts) {
 			if _, managedPlugin := managedPluginArtifacts[filepath.Clean(path)]; managedPlugin {
 				addExclusive(path)
@@ -365,6 +368,11 @@ func WatchOwnedFiles(opts InstallOptions) (WatchOwnership, error) {
 			}
 			addExclusive(p)
 		}
+		// The connector's flat runtime record (.hookcfg.<connector>), which
+		// its hook script reads, is DefenseClaw-only and connector-scoped
+		// too: a user who moved it aside waited for the interval pass
+		// (GAP-0671).
+		addExclusive(filepath.Join(dataDir, "hooks", ".hookcfg."+conn.Name()))
 		return nil
 	})
 	if err != nil {

@@ -35,12 +35,13 @@ func stageCodexDiscoveryAuthorityFixture(
 	// executable authority. Their caller persists the protected lock entry.
 }
 
-func TestMain(m *testing.M) {
+// prepareGatewayTestProcess runs the Codex app-server fixture before the
+// shared TestMain isolates the package's tests from the host Hermes setup.
+func prepareGatewayTestProcess() {
 	if os.Getenv(codexSetupAppServerHelperEnv) == "1" &&
 		len(os.Args) == 3 && os.Args[1] == "app-server" && os.Args[2] == "--stdio" {
 		os.Exit(runCodexSetupAppServerHelper())
 	}
-	os.Exit(m.Run())
 }
 
 func runCodexSetupAppServerHelper() int {

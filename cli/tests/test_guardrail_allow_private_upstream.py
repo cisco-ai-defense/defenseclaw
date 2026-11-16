@@ -24,8 +24,8 @@ import unittest
 from unittest.mock import patch
 
 from click.testing import CliRunner
-
 from defenseclaw.commands.cmd_guardrail import guardrail
+
 from tests.helpers import cleanup_app, make_app_context
 
 HOST = "bedrock-runtime.us-east-1.amazonaws.com"

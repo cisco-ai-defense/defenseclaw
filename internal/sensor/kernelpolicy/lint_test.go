@@ -29,24 +29,74 @@ func validControls(t *testing.T) (tracingPolicy, LintOptions, *world) {
 	bin := policyOf(t, withoutRoots, FamilyControls)
 	// Exercise lint against both anchor kinds in one synthetic policy. The
 	// compiler keeps them separate in monitor mode to avoid duplicate hits.
+	// Each compiled policy is one file_open hook: [NoPost, ssh, profile
+	// files, autostart dirs].
+	// The path_link and path_rename entries after it are linted on their
+	// own (TestLintNameChangeHooks).
 	tp := cloneTP(t, p.tp)
 	binTP := cloneTP(t, bin.tp)
+	if hookNames(tp) != "file_open,path_link,path_rename,path_symlink" || hookNames(binTP) != "file_open,path_link,path_rename,path_symlink" {
+		t.Fatalf("hooks = %s and %s, want file_open, path_link, path_rename, path_symlink", hookNames(tp), hookNames(binTP))
+	}
+	tp.Spec.LsmHooks, binTP.Spec.LsmHooks = tp.Spec.LsmHooks[:1], binTP.Spec.LsmHooks[:1]
 	tp.Spec.LsmHooks[0].Selectors = []tpSelector{
 		tp.Spec.LsmHooks[0].Selectors[0],
 		binTP.Spec.LsmHooks[0].Selectors[1],
 		tp.Spec.LsmHooks[0].Selectors[1],
-		binTP.Spec.LsmHooks[0].Selectors[2],
-		tp.Spec.LsmHooks[0].Selectors[2],
-	}
-	tp.Spec.LsmHooks[1].Selectors = []tpSelector{
-		binTP.Spec.LsmHooks[1].Selectors[0],
-		tp.Spec.LsmHooks[1].Selectors[0],
+		binTP.Spec.LsmHooks[0].Selectors[3],
+		tp.Spec.LsmHooks[0].Selectors[3],
 	}
 	opts := LintOptions{Homes: []string{"/home/alice", "/home/bob"}, FS: w.fs}
 	if v := lintTP(t, tp, opts); len(v) != 0 {
 		t.Fatalf("the compiler's own output fails lint: %v", v)
 	}
 	return tp, opts, w
+}
+
+func hookNames(tp tracingPolicy) string {
+	var names []string
+	for _, hook := range tp.Spec.LsmHooks {
+		names = append(names, hook.Hook)
+	}
+	return strings.Join(names, ",")
+}
+
+// TestLintNameChangeHooks: the compiled path_link and path_rename entries
+// pass lint, and each loses that when it breaks a rule an Override needs.
+func TestLintNameChangeHooks(t *testing.T) {
+	w := newWorld(t, baseTargets)
+	c := w.compile(Input{Controls: &Scope{Mode: PolicyEnforce, UIDs: []int{1001}}})
+	p := policyOf(t, c, FamilyControls)
+	opts := LintOptions{Homes: []string{"/home/alice", "/home/bob"}, FS: w.fs}
+	if v := lintTP(t, cloneTP(t, p.tp), opts); len(v) != 0 {
+		t.Fatalf("compiled policy fails lint: %v", v)
+	}
+	cases := []struct {
+		name   string
+		rule   int
+		mutate func(*tracingPolicy)
+	}{
+		{"another hook", 5, func(tp *tracingPolicy) { tp.Spec.LsmHooks[1].Hook = "path_unlink" }},
+		{"no uid condition", 2, func(tp *tracingPolicy) {
+			sel := &tp.Spec.LsmHooks[2].Selectors[0]
+			sel.MatchArgs = sel.MatchArgs[:1]
+		}},
+		{"a path outside the homes", 6, func(tp *tracingPolicy) {
+			tp.Spec.LsmHooks[1].Selectors[1].MatchArgs[0].Values = []string{"/etc/passwd"}
+		}},
+		{"no lineage anchor", 2, func(tp *tracingPolicy) {
+			tp.Spec.LsmHooks[2].Selectors[1].MatchBinaries[0].FollowChildren = false
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tp := cloneTP(t, p.tp)
+			tc.mutate(&tp)
+			if v := lintTP(t, tp, opts); !hasRule(v, tc.rule) {
+				t.Fatalf("violations = %v, want rule %d", v, tc.rule)
+			}
+		})
+	}
 }
 
 func cloneTP(t *testing.T, tp tracingPolicy) tracingPolicy {
@@ -80,12 +130,13 @@ func hasRule(v []Violation, rule int) bool {
 	return false
 }
 
-// Selector positions in the valid controls policy (two hooks, see
-// compileControls): hook 0 = [NoPost, ssh bin, ssh pid, persist bin, persist pid].
+// Selector positions in the valid controls policy (one hook, see
+// compileControls): [NoPost, ssh bin, ssh pid, autostart bin, autostart pid].
 const (
-	selNoPost  = 0
-	selSSHBins = 1
-	selSSHPids = 2
+	selNoPost   = 0
+	selSSHBins  = 1
+	selSSHPids  = 2
+	selDirsBins = 3
 )
 
 func TestLintRefusesEveryEmptyList(t *testing.T) {
@@ -118,8 +169,8 @@ func TestLintRefusesEveryEmptyList(t *testing.T) {
 		{"exemption without binaries", func(tp *tracingPolicy) {
 			tp.Spec.LsmHooks[0].Selectors[selNoPost].MatchBinaries = nil
 		}},
-		{"persistence directory hook, empty binaries", func(tp *tracingPolicy) {
-			tp.Spec.LsmHooks[1].Selectors[0].MatchBinaries[0].Values = []string{}
+		{"persistence directory selector, empty binaries", func(tp *tracingPolicy) {
+			tp.Spec.LsmHooks[0].Selectors[selDirsBins].MatchBinaries[0].Values = []string{}
 		}},
 	}
 	for _, tc := range cases {
@@ -240,7 +291,7 @@ func TestLintRules(t *testing.T) {
 			tp.Spec.LsmHooks[0].Selectors[selSSHBins].MatchArgs[0].Values = []string{"/home/alice/.ssh/id_rsa/"}
 		}},
 		{"prefix without a trailing slash", 6, func(tp *tracingPolicy) {
-			tp.Spec.LsmHooks[1].Selectors[0].MatchArgs[0].Values = []string{"/home/alice/.config/autostart"}
+			tp.Spec.LsmHooks[0].Selectors[selDirsBins].MatchArgs[0].Values = []string{"/home/alice/.config/autostart"}
 		}},
 		{"unclean path", 6, func(tp *tracingPolicy) {
 			tp.Spec.LsmHooks[0].Selectors[selSSHBins].MatchArgs[0].Values = []string{"/home/alice//.ssh/id_rsa"}
@@ -275,7 +326,14 @@ func TestLintRules(t *testing.T) {
 			}
 			tp.Spec.LsmHooks[0].Selectors[selSSHBins].MatchArgs[0].Values = values
 		}},
-		{"no selector", 7, func(tp *tracingPolicy) { tp.Spec.LsmHooks[1].Selectors = nil }},
+		{"no selector", 7, func(tp *tracingPolicy) { tp.Spec.LsmHooks[0].Selectors = nil }},
+		// GAP-0218: Tetragon 1.7.0 runs only the last entry of a hook name,
+		// so a second file_open entry silently disables the first.
+		{"a second file_open entry", 7, func(tp *tracingPolicy) {
+			second := tp.Spec.LsmHooks[0]
+			second.Selectors = []tpSelector{tp.Spec.LsmHooks[0].Selectors[selDirsBins]}
+			tp.Spec.LsmHooks = append(tp.Spec.LsmHooks, second)
+		}},
 		// Tetragon refuses a numeric Equal list of more than 4 values, and
 		// with it the whole policy (GAP-0049).
 		{"five uids in an Equal list", 7, func(tp *tracingPolicy) {

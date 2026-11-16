@@ -25,7 +25,7 @@ const KindUnixPeer = "UnixPeer"
 
 // KindUnixPeerUnauthenticated is the peerIdentity.Kind value assigned
 // to a peer on platforms (currently: Windows) where the initial
-// deferred-auth cut (spec 004, docs/specs/004-windows-ui-ipc/) skips
+// deferred-auth cut skips
 // codesign / DACL-pinned peer verification. macOS never assigns this
 // value — its peer-auth always produces a validated KindUnixPeer with
 // full codesign metadata. The constant is mirrored here so
@@ -35,8 +35,7 @@ const KindUnixPeer = "UnixPeer"
 // A build reporting this Kind on managed-enterprise Windows is a
 // beta-only posture. The GA release-gate at
 // internal/ipc/authposture_gagate.go refuses a release-candidate
-// build in which the unauthenticated code path is still reachable
-// (see spec 004 REQ-18 + REQ-19).
+// build in which the unauthenticated code path is still reachable.
 const KindUnixPeerUnauthenticated = "UnixPeerUnauthenticated"
 
 // peerIdentity carries everything we can learn about a UDS peer at

@@ -6,21 +6,40 @@
 
 package enterprisehooks
 
-import "testing"
+import (
+	"errors"
+	"fmt"
+	"testing"
+)
 
-// GAP-0644: the Secure Client profile never defers a protected target to a
-// sign-in, so the release check answers no without reading the target; on a
-// standalone host a target it cannot pin to its profile is no wait either.
-func TestWindowsProtectedTargetFromOtherReleaseStandaloneOnly(t *testing.T) {
+// GAP-0644: a protected target an earlier release wrote waits for its
+// account's next sign-in on both profiles (a Secure Client upgrade with a
+// signed-out enrolled account failed the same way), so the release check
+// reads the target on both; one it cannot pin to its profile is no wait.
+func TestWindowsProtectedTargetFromOtherReleaseReadsTheTargetOnBothProfiles(t *testing.T) {
 	previous := windowsEnterpriseStandaloneProcess
 	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previous })
 	opts := InstallOptions{ConnectorName: "codex", UserHome: `C:\Users\does-not-exist`, OwnerSID: "S-1-12-1-1-2-3-1002"}
-	windowsEnterpriseStandaloneProcess = func() bool { return false }
-	if written, other, err := WindowsProtectedTargetFromOtherRelease(opts); written != "" || other || err != nil {
-		t.Fatalf("Secure Client: %q %t %v, want no wait and no error", written, other, err)
+	for _, standalone := range []bool{false, true} {
+		windowsEnterpriseStandaloneProcess = func() bool { return standalone }
+		if _, other, err := WindowsProtectedTargetFromOtherRelease(opts); other || err == nil {
+			t.Fatalf("standalone=%t, unpinned profile: other=%t err=%v, want an error and no wait", standalone, other, err)
+		}
+		if WindowsSecureClientProfileProcess() == standalone {
+			t.Fatalf("standalone=%t: WindowsSecureClientProfileProcess = %t", standalone, !standalone)
+		}
 	}
-	windowsEnterpriseStandaloneProcess = func() bool { return true }
-	if _, other, err := WindowsProtectedTargetFromOtherRelease(opts); other || err == nil {
-		t.Fatalf("standalone, unpinned profile: other=%t err=%v, want an error and no wait", other, err)
+}
+
+// Setup's verify runs outside LocalSystem; only that exact refusal is
+// recognised, wrapped or not.
+func TestIsWindowsEnterpriseNotLocalSystem(t *testing.T) {
+	if !IsWindowsEnterpriseNotLocalSystem(errWindowsEnterpriseNotLocalSystem) ||
+		!IsWindowsEnterpriseNotLocalSystem(fmt.Errorf("session check: %w", errWindowsEnterpriseNotLocalSystem)) {
+		t.Fatal("the not-LocalSystem refusal was not recognised")
+	}
+	if IsWindowsEnterpriseNotLocalSystem(errors.New("enterprise hooks: WTS query failed: access is denied")) ||
+		IsWindowsEnterpriseNotLocalSystem(nil) {
+		t.Fatal("another error was taken for the not-LocalSystem refusal")
 	}
 }

@@ -17,10 +17,21 @@ import (
 // User states in the rollout.
 const (
 	UIDEnforcing = "enforcing"
-	UIDBurnIn    = "burn_in"
-	UIDMonitor   = "monitor"
-	UIDInactive  = "inactive"
+	// UIDArmed is a user the plan enforces, whose controls policy is loaded
+	// in enforce mode, while no running agent session of theirs is anchored
+	// in it. Nothing is denied for them at that moment, so they are never
+	// called enforcing (GAP-0166); an anchored session makes them enforcing.
+	UIDArmed    = "armed"
+	UIDBurnIn   = "burn_in"
+	UIDMonitor  = "monitor"
+	UIDInactive = "inactive"
 )
+
+// Enforced reports a user state the plan enforces for: enforcing, or armed
+// (enforce is loaded for the user and no session of theirs is anchored yet).
+func Enforced(state string) bool {
+	return state == UIDEnforcing || state == UIDArmed
+}
 
 // PlanInput is every input to the desired-state decision. All of it is
 // root-owned or derived from root-owned inputs: the drop-in, the guardian

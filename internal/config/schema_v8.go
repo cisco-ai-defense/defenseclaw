@@ -22,12 +22,15 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	publicschemas "github.com/defenseclaw/defenseclaw/schemas"
 	jsonschema "github.com/santhosh-tekuri/jsonschema/v5"
 	"gopkg.in/yaml.v3"
 )
 
-const observabilityV8ConfigSchemaID = "https://schemas.defenseclaw.dev/config/v8/defenseclaw-config.schema.json"
+// The schema file keeps its v8 directory; its $id names the version it
+// describes, config_version 9 (GAP-1651).
+const observabilityV8ConfigSchemaID = "https://schemas.defenseclaw.dev/config/v9/defenseclaw-config.schema.json"
 
 var (
 	observabilityV8SchemaOnce sync.Once
@@ -37,8 +40,8 @@ var (
 )
 
 var (
-	observabilityV8AdditionalPropertyPattern = regexp.MustCompile(`additionalProperties ((?:'(?:\\'|[^'])+'(?:, )?)+) not allowed`)
-	observabilityV8QuotedPropertyPattern     = regexp.MustCompile(`'((?:\\'|[^'])+)'`)
+	observabilityV8AdditionalPropertyPattern = lazyregexp.New(`additionalProperties ((?:'(?:\\'|[^'])+'(?:, )?)+) not allowed`)
+	observabilityV8QuotedPropertyPattern     = lazyregexp.New(`'((?:\\'|[^'])+)'`)
 )
 
 type V8SchemaError struct {
@@ -60,6 +63,41 @@ type V8SchemaError struct {
 	// schema's order, so a message can name them (GAP-0498).
 	Missing []string
 	Version int
+	// RetiredVersion and RetiredReplacement identify a key an earlier config
+	// migration moved. They are set only for an undeclared key at its exact path.
+	RetiredVersion     int
+	RetiredReplacement string
+}
+
+// RetiredKeyMessage names the earlier version and replacement for a retired
+// key. It is empty for an undeclared key the migrations do not recognize.
+func (e *V8SchemaError) RetiredKeyMessage() (string, bool) {
+	if e == nil || e.Keyword != "additionalProperties" || e.RetiredVersion == 0 || e.RetiredReplacement == "" {
+		return "", false
+	}
+	return fmt.Sprintf("%s was retired in config_version %d; use %s",
+		strings.TrimPrefix(e.Path, "$."), e.RetiredVersion, e.RetiredReplacement), true
+}
+
+// EnumChoices returns the values an enum violation allows, in the schema's
+// order, for a message that names them. An empty string in the enum means
+// "unset" (a per-connector key that inherits the global value), not a value
+// to type, so it is left out (GAP-2213, as config validate does for GAP-0199).
+// ok is false when the violation is not an enum or names no value.
+func (e *V8SchemaError) EnumChoices() (names []string, ok bool) {
+	if e == nil || e.Keyword != "enum" || !strings.HasPrefix(e.Expected, "one of ") {
+		return nil, false
+	}
+	var choices []any
+	if json.Unmarshal([]byte(strings.TrimPrefix(e.Expected, "one of ")), &choices) != nil {
+		return nil, false
+	}
+	for _, choice := range choices {
+		if name := fmt.Sprint(choice); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names, len(names) > 0
 }
 
 func (e *V8SchemaError) Error() string {
@@ -76,7 +114,11 @@ func (e *V8SchemaError) Error() string {
 			source += ":" + strconv.Itoa(e.Column)
 		}
 	}
+	retired, isRetired := e.RetiredKeyMessage()
 	if e.Version >= 9 {
+		if isRetired {
+			return fmt.Sprintf("config_version %d: %s; see defenseclaw config reference --format json-schema.", e.Version, retired)
+		}
 		key := strings.TrimPrefix(e.Path, "$.")
 		key = regexp.MustCompile(`\[[^]]+\]`).ReplaceAllString(key, "")
 		if key == "" || key == "$" {
@@ -90,6 +132,9 @@ func (e *V8SchemaError) Error() string {
 			message += "; did you mean " + e.Suggestion + "?"
 		}
 		return message + "; see defenseclaw config reference --format json-schema."
+	}
+	if isRetired {
+		return source + ": [config_schema_invalid] " + retired
 	}
 	message := fmt.Sprintf("%s: [config_schema_invalid]", source)
 	if e.Path != "" {
@@ -163,7 +208,15 @@ func validateV8Schema(source string, document *V8YAMLDocument) error {
 			path = v8YAMLChildPath(path, unknown)
 		}
 		node := v8SchemaYAMLNode(document.Document, leaf.InstanceLocation, unknown)
-		expected, suggestion := v8SchemaExpectation(leaf, unknown)
+		retiredReplacement := ""
+		if unknown != "" && keyword == "additionalProperties" {
+			parts := append(v8SchemaPointerSegments(leaf.InstanceLocation), unknown)
+			retiredReplacement = legacyV7RetiredReplacement(parts)
+		}
+		expected, suggestion := "", ""
+		if retiredReplacement == "" {
+			expected, suggestion = v8SchemaExpectation(leaf, unknown)
+		}
 		if v8SchemaDocumentVersion(document) >= 9 && expected == "the canonical v8 field contract" {
 			expected = "a valid value for this setting"
 		}
@@ -181,6 +234,10 @@ func validateV8Schema(source string, document *V8YAMLDocument) error {
 			Summary:       "configuration violates the " + keyword + " constraint",
 			Action:        action,
 			Version:       v8SchemaDocumentVersion(document),
+		}
+		if retiredReplacement != "" {
+			result.RetiredVersion = 8
+			result.RetiredReplacement = retiredReplacement
 		}
 		if key := v8SchemaUnknownKeyNode(document.Document, leaf.InstanceLocation, unknown); key != nil {
 			// The line of the key itself: an unknown section's value
@@ -523,6 +580,14 @@ func v8SchemaDeclaredExpectation(validation *jsonschema.ValidationError) string 
 			// An agent identity (GAP-0829).
 			return "an agent identity: agt- followed by 16 lowercase hexadecimal digits"
 		}
+		if words := v8SchemaPatternWords(current); words != "" {
+			// A severity or level spelled in any case (GAP-0760).
+			return words
+		}
+		if v8SchemaPathPatterns[fmt.Sprint(current)] {
+			// openshell.trusted_ca_bundle and pack_dir (rel-1-0-4 GAP-0590).
+			return "an absolute path or one starting with ~/"
+		}
 		return "a value matching the schema-declared pattern"
 	case "minimum", "maximum":
 		return v8SchemaNumberRange(parent)
@@ -538,6 +603,61 @@ func v8SchemaDeclaredExpectation(validation *jsonschema.ValidationError) string 
 	}
 	return ""
 }
+
+// v8SchemaPathPatterns are the patterns of the path settings.
+var v8SchemaPathPatterns = map[string]bool{
+	`^(|~/.+|/.+)$`:                        true,
+	`^(|~|~/.*|[/\\].*|[A-Za-z]:[/\\].*)$`: true,
+}
+
+// v8SchemaPatternWords names the words a ^(a|b|c)$ pattern allows, as the
+// Python validator does: [Cc][Rr]... spellings mean any case and an empty
+// alternative means an empty value inherits. It is "" for any other pattern.
+func v8SchemaPatternWords(value any) string {
+	pattern, _ := value.(string)
+	inner, ok := strings.CutPrefix(pattern, "^(")
+	if !ok {
+		return ""
+	}
+	if inner, ok = strings.CutSuffix(inner, ")$"); !ok {
+		return ""
+	}
+	var words []string
+	anyCase, empty := false, false
+	for _, part := range strings.Split(inner, "|") {
+		switch {
+		case part == "":
+			empty = true
+		case v8SchemaAnyCaseWord.MatchString(part):
+			var word strings.Builder
+			for i := 2; i < len(part); i += 4 {
+				word.WriteByte(part[i])
+			}
+			words = append(words, strings.ToUpper(word.String()))
+			anyCase = true
+		case v8SchemaPlainWord.MatchString(part):
+			words = append(words, part)
+		default:
+			return ""
+		}
+	}
+	if len(words) == 0 {
+		return ""
+	}
+	out := "one of " + strings.Join(words, ", ")
+	if anyCase {
+		out += " in any case"
+	}
+	if empty {
+		out += " (empty inherits)"
+	}
+	return out
+}
+
+var (
+	v8SchemaAnyCaseWord = lazyregexp.New(`^(?:\[[A-Za-z][A-Za-z]\])+$`)
+	v8SchemaPlainWord   = lazyregexp.New(`^[A-Za-z0-9_-]+$`)
+)
 
 // v8SchemaSizeExpectation words a length, item or key count limit: "a string
 // of at most 512 characters", "a mapping that sets at least one of agents,

@@ -49,9 +49,14 @@ def _only(checks: list[dict]) -> dict:
     return checks[0]
 
 
-def test_no_row_without_tetragon_or_off_linux(tmp_path: Path) -> None:
-    # Most Linux hosts have no Tetragon: no noise.
-    assert _row(tmp_path, info=None) == []
+def test_missing_tetragon_has_explicit_linux_row(tmp_path: Path) -> None:
+    row = _only(_row(tmp_path, info=None))
+    assert row["status"] == "skip"
+    assert row["reason_code"] == "tetragon-not-detected"
+    assert "not detected" in row["detail"]
+
+
+def test_no_row_off_linux(tmp_path: Path) -> None:
     # macOS and Windows have no Tetragon agent release.
     for os_name in ("darwin", "windows"):
         assert _row(tmp_path, info=_UNIX_INFO, os_name=os_name) == []
@@ -83,6 +88,7 @@ def test_doctor_never_opens_the_tetragon_socket(tmp_path: Path) -> None:
     with (
         patch("socket.socket", side_effect=AssertionError("doctor opened a socket")),
         patch("subprocess.run", side_effect=AssertionError("doctor ran a binary")),
+        patch.object(cmd_doctor, "_http_probe", side_effect=AssertionError("doctor read admin-only /health")),
     ):
         row = _only(_row(tmp_path, info=_UNIX_INFO))
     assert row["status"] == "skip"

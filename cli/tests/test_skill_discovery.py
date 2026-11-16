@@ -6,12 +6,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import defenseclaw.skill_discovery as skill_discovery_module
 import pytest
-from defenseclaw.hermes_skills import directory_md5, is_bundled_skill_path
+from defenseclaw.hermes_skills import _tree_sha256, is_bundled_skill_path
 from defenseclaw.skill_discovery import discover_skill_directories
 
 from tests.environment import requires_symlink_privilege
@@ -174,18 +176,17 @@ def test_codex_arbitrary_system_directory_is_not_bundled(tmp_path, monkeypatch) 
     ]
 
 
-def test_hermes_nested_manifest_provenance_distinguishes_vendor_and_user_skills(
+def test_hermes_nested_pinned_provenance_distinguishes_vendor_and_user_skills(
     tmp_path,
     monkeypatch,
 ) -> None:
     hermes_home = tmp_path / "hermes-home"
     root = hermes_home / "skills"
-    bundled = root / "productivity" / "vendor-docs"
+    bundled = root / "media" / "songsee"
     modified = root / "software-development" / "modified-vendor"
     forged = root / "productivity" / "manifest-only"
     user = root / "operator-skill"
     for path, name in (
-        (bundled, "vendor-docs"),
         (modified, "modified-vendor"),
         (forged, "manifest-only"),
         (user, "operator-skill"),
@@ -196,9 +197,15 @@ def test_hermes_nested_manifest_provenance_distinguishes_vendor_and_user_skills(
             encoding="utf-8",
         )
 
+    bundled.mkdir(parents=True)
+    vendor_marker = (
+        Path(__file__).resolve().parents[2]
+        / "internal/hermesskills/testdata/vendor/media/songsee/SKILL.md"
+    ).read_bytes()
+    (bundled / "SKILL.md").write_bytes(vendor_marker)
+
     source_root = hermes_home / "hermes-agent" / "skills"
     for relative, name in (
-        (bundled.relative_to(root), "vendor-docs"),
         (modified.relative_to(root), "modified-vendor"),
     ):
         source = source_root / relative
@@ -208,14 +215,12 @@ def test_hermes_nested_manifest_provenance_distinguishes_vendor_and_user_skills(
             encoding="utf-8",
         )
 
-    bundled_hash = directory_md5(os.fspath(bundled))
-    modified_hash = directory_md5(os.fspath(modified))
-    forged_hash = directory_md5(os.fspath(forged))
-    assert bundled_hash and modified_hash and forged_hash
+    def manifest_hash(path: Path) -> str:
+        return hashlib.md5(b"SKILL.md" + (path / "SKILL.md").read_bytes()).hexdigest()
+
     (root / ".bundled_manifest").write_text(
-        f"vendor-docs:{bundled_hash}\n"
-        f"modified-vendor:{modified_hash}\n"
-        f"manifest-only:{forged_hash}\n",
+        f"modified-vendor:{manifest_hash(modified)}\n"
+        f"manifest-only:{manifest_hash(forged)}\n",
         encoding="utf-8",
     )
     (modified / "SKILL.md").write_text(
@@ -231,10 +236,10 @@ def test_hermes_nested_manifest_provenance_distinguishes_vendor_and_user_skills(
         "manifest-only",
         "modified-vendor",
         "operator-skill",
-        "vendor-docs",
+        "songsee",
     }
-    assert by_name["vendor-docs"].path == os.fspath(bundled)
-    assert by_name["vendor-docs"].bundled
+    assert by_name["songsee"].path == os.fspath(bundled)
+    assert by_name["songsee"].bundled
     assert not by_name["modified-vendor"].bundled
     assert not by_name["manifest-only"].bundled
     assert not by_name["operator-skill"].bundled
@@ -242,6 +247,8 @@ def test_hermes_nested_manifest_provenance_distinguishes_vendor_and_user_skills(
     assert not is_bundled_skill_path(os.fspath(modified))
     assert not is_bundled_skill_path(os.fspath(forged))
     assert not is_bundled_skill_path(os.fspath(user))
+    (bundled / "SKILL.md").write_bytes(vendor_marker + b"\nlocal change\n")
+    assert not is_bundled_skill_path(os.fspath(bundled))
 
 
 def test_hermes_tree_hash_fails_open_when_content_exceeds_bounds(
@@ -255,11 +262,11 @@ def test_hermes_tree_hash_fails_open_when_content_exceeds_bounds(
     (skill / "SKILL.md").write_bytes(b"12345")
 
     monkeypatch.setattr(hermes_skills, "_SKILL_FILE_MAX_BYTES", 4)
-    assert directory_md5(os.fspath(skill)) is None
+    assert _tree_sha256(os.fspath(skill)) is None
 
     monkeypatch.setattr(hermes_skills, "_SKILL_FILE_MAX_BYTES", 10)
     monkeypatch.setattr(hermes_skills, "_SKILL_TREE_MAX_BYTES", 4)
-    assert directory_md5(os.fspath(skill)) is None
+    assert _tree_sha256(os.fspath(skill)) is None
 
 
 def test_claude_skills_directory_plugin_is_not_a_plain_skill(tmp_path) -> None:
@@ -317,6 +324,59 @@ def test_claudecode_follows_and_deduplicates_skill_directory_symlinks(
 
     assert len(discovered) == 1
     assert discovered[0].path == str(target)
+    assert discovered[0].aliases == ("second",)
+
+
+@requires_symlink_privilege
+def test_claudecode_real_folder_names_the_skill_and_its_links_are_aliases(
+    tmp_path,
+) -> None:
+    """A link that sorts first must not hide the folder it points at."""
+    root = tmp_path / "skills"
+    folder = root / "zeta-skill"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text("# Zeta\n", encoding="utf-8")
+    (root / "alpha-link").symlink_to(folder, target_is_directory=True)
+
+    discovered = discover_skill_directories(str(root), connector="claudecode")
+
+    assert [(d.name, d.path, d.aliases) for d in discovered] == [
+        ("zeta-skill", os.path.realpath(folder), ("alpha-link",))
+    ]
+
+
+def test_claudecode_commands_folder_keeps_precedence_over_same_stem_markdown(
+    tmp_path,
+) -> None:
+    """The sorted walk order decides a folder/Markdown name collision."""
+    root = tmp_path / ".claude" / "commands"
+    folder = root / "ordinary"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text("# Ordinary\n", encoding="utf-8")
+    (root / "ordinary.md").write_text("# legacy command\n", encoding="utf-8")
+
+    discovered = discover_skill_directories(str(root), connector="claudecode")
+
+    assert discovered[0].name == "ordinary"
+    assert discovered[0].path == os.path.realpath(folder)
+
+
+@requires_symlink_privilege
+def test_claudecode_commands_folder_with_link_and_markdown_stays_one_folder_skill(
+    tmp_path,
+) -> None:
+    root = tmp_path / ".claude" / "commands"
+    folder = root / "ordinary"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text("# Ordinary\n", encoding="utf-8")
+    (root / "ordinary.md").write_text("# legacy command\n", encoding="utf-8")
+    (root / "z-link").symlink_to(folder, target_is_directory=True)
+
+    discovered = discover_skill_directories(str(root), connector="claudecode")
+
+    assert discovered[0].name == "ordinary"
+    assert discovered[0].path == os.path.realpath(folder)
+    assert discovered[0].aliases == ("z-link",)
 
 
 @pytest.mark.parametrize("connector", ["claudecode", "amp"])

@@ -33,6 +33,17 @@ STATUS_UNKNOWN = "unknown"
 STATUS_NOT_GATED = "not-gated"
 
 _VERSION_RE = re.compile(r"(?i)(?:^|[^0-9])v?([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?")
+# A source build ("Hermes Agent vgit.5bba024 (2026.9.24)") and the release
+# date it prints after the commit; mirrors Go gitBuildVersionRE and
+# gitBuildReleaseDateRE.
+_GIT_BUILD_RE = re.compile(r"(?i)(?:^|[^a-z0-9])v?git[.+-]?[0-9a-f]{7,40}(?:[^a-z0-9]|$)")
+_GIT_BUILD_RELEASE_DATE_RE = re.compile(r"\(([0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2})(?:\.[0-9]+)?\)")
+# Stands in for a git build when it is compared with release-style (non-date)
+# tested bounds; mirrors Go gitBuildCompareVersion.
+_GIT_BUILD_COMPARE_VERSION = "999.999.999"
+# A Hermes git install prints only the release date it is on, in this exact
+# vendor form; mirrors Go hermesGitReleaseRE (GAP-0232, GAP-2052).
+_HERMES_GIT_RELEASE_RE = re.compile(r"^Hermes Agent vunknown \(([0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2})\)$")
 _CONTRACT_PLATFORMS = frozenset({"darwin", "linux", "windows"})
 _PLATFORM_OVERRIDE_FIELDS = frozenset(
     {
@@ -93,6 +104,10 @@ class ConnectorCompatibility:
     # known-broken entry matches, so the newest contract applies.
     untested: bool = False
     newest_tested: str = ""
+    # The reason and issue of the warn_only known_broken_versions entry a
+    # known version falls in: it keeps its contract, and setup and doctor say
+    # what its hooks miss (mirrors Go HookContractResolution.Warning).
+    warning: str = ""
 
     @property
     def supported(self) -> bool:
@@ -106,9 +121,17 @@ def normalize_connector(name: str | None) -> str:
     value = (name or "").strip().lower()
     if value in {"claude", "claude-code", "claude_code"}:
         return "claudecode"
-    if value in {"open-hands", "open_hands"}:
-        return "openhands"
     return value
+
+
+# Connectors whose ordinary hook answers a confirm verdict with the agent's
+# own approval prompt. Other connectors use their own fallback; Copilot CLI
+# blocks an action-mode confirm because its hook cannot prove prompt availability.
+NATIVE_APPROVAL_CONNECTORS = frozenset({"claudecode", "openclaw", "antigravity", "amp"})
+
+
+def has_native_approval_prompt(name: str | None) -> bool:
+    return normalize_connector(name) in NATIVE_APPROVAL_CONNECTORS
 
 
 def hook_contract_manifest() -> dict[str, Any]:
@@ -293,7 +316,7 @@ HOOK_CONTRACT_MANIFEST = hook_contract_manifest()
 PROXY_CONNECTORS, HOOK_CONTRACTS = _load_contracts_from_manifest(HOOK_CONTRACT_MANIFEST)
 
 
-def _load_known_broken(manifest: dict[str, Any]) -> dict[str, tuple[dict[str, str], ...]]:
+def _load_known_broken(manifest: dict[str, Any]) -> dict[str, tuple[dict[str, Any], ...]]:
     out: dict[str, tuple[dict[str, str], ...]] = {}
     for raw_name, raw_spec in (manifest.get("connectors", {}) or {}).items():
         entries = raw_spec.get("known_broken_versions", []) if isinstance(raw_spec, dict) else []
@@ -304,12 +327,16 @@ def _load_known_broken(manifest: dict[str, Any]) -> dict[str, tuple[dict[str, st
             if not isinstance(entry, dict):
                 raise ValueError(f"hook_contracts.json connector {raw_name!r} has a malformed known-broken entry")
             keys = ("exact", "min_inclusive", "max_exclusive", "reason", "issue")
-            item = {key: str(entry.get(key, "") or "") for key in keys}
+            item: dict[str, Any] = {key: str(entry.get(key, "") or "") for key in keys}
             has_version = item["exact"] or item["min_inclusive"] or item["max_exclusive"]
             if not item["reason"] or not item["issue"] or not has_version:
                 raise ValueError(
                     f"hook_contracts.json connector {raw_name!r} known-broken entry needs a version, reason and issue"
                 )
+            # A warn_only entry is not refused: its hooks still guard the
+            # agent's main interface (Hermes 0.19.0-0.21.0 run them everywhere
+            # but in their TUI and dashboard chat).
+            item["warn_only"] = entry.get("warn_only") is True
             parsed.append(item)
         if parsed:
             out[normalize_connector(str(raw_name))] = tuple(parsed)
@@ -355,6 +382,216 @@ def normalize_agent_version(raw: str | None) -> str:
     return ".".join(normalized)
 
 
+def opencode_requires_v2_upgrade(raw_version: str | None) -> bool:
+    """Mirror RequireOpenCodeV2, independently of exploratory contract drift."""
+    raw = (raw_version or "").strip()
+    if _GIT_BUILD_RE.search(raw):
+        return True
+    normalized = normalize_agent_version(raw)
+    return bool(normalized and normalized.split(".", 1)[0] != "2")
+
+
+# Mirror Go connector.KiroCLIHookFloor: before it a non-interactive
+# `kiro-cli chat --v3` run loads no hooks (kiro.dev/docs/cli/headless), so its
+# tool calls never reach DefenseClaw (rel-1-0-4 GAP-0227).
+KIRO_CLI_HOOK_FLOOR = str(HOOK_CONTRACT_MANIFEST["connectors"]["kiro"]["cli_hook_floor"])
+KIRO_IDE_GLOBAL_HOOKS_FLOOR = str(HOOK_CONTRACT_MANIFEST["connectors"]["kiro"]["ide_global_hooks_floor"])
+# The banner `kiro-cli --version` prints; the Kiro IDE launcher prints a bare
+# version, which is not a kiro-cli version.
+_KIRO_CLI_VERSION_RE = re.compile(r"(?i)^kiro-cli\s+v?[0-9]")
+
+
+def kiro_cli_below_hook_floor(raw: str | None) -> str:
+    """Return the normalized kiro-cli version when *raw* is a kiro-cli banner
+    below KIRO_CLI_HOOK_FLOOR, else ""."""
+
+    value = (raw or "").strip()
+    if not _KIRO_CLI_VERSION_RE.match(value):
+        return ""
+    normalized = normalize_agent_version(value)
+    if normalized and _compare_version(normalized, KIRO_CLI_HOOK_FLOOR) < 0:
+        return normalized
+    return ""
+
+
+def kiro_cli_below_hook_floor_reason(normalized: str) -> str:
+    """Mirror Go connector.KiroCLIBelowHookFloorReason."""
+
+    floor = KIRO_CLI_HOOK_FLOOR
+    return (
+        f"kiro-cli {normalized} is below {floor}: before {floor} a non-interactive kiro-cli --v3 run loads no hooks, "
+        f"so its tool calls never reach DefenseClaw; update Kiro CLI to {floor} or later"
+    )
+
+
+def kiro_ide_below_hook_floor(raw: str | None) -> str:
+    """Return an IDE version that cannot read the global hooks file."""
+
+    value = (raw or "").strip()
+    if not value or _KIRO_CLI_VERSION_RE.match(value):
+        return ""
+    normalized = normalize_agent_version(value)
+    if normalized and _compare_version(normalized, KIRO_IDE_GLOBAL_HOOKS_FLOOR) < 0:
+        return normalized
+    return ""
+
+
+# The one Kiro detection judgment, mirroring Go enterprisehooks.AssessKiro
+# (internal/enterprisehooks/kiro_forms.go); both are held to
+# internal/enterprisehooks/testdata/kiro_forms_table.json. Each installed form
+# (kiro-cli, each Kiro IDE install) is judged on its own: at or above its
+# floor it is protected, below it it is not, and a form whose version could
+# not be read is unknown, which is not protected. Setup and doctor use it.
+KIRO_FORM_CLI = "cli"
+KIRO_FORM_IDE = "ide"
+KIRO_CODE_CLI_BELOW_FLOOR = "kiro_cli_below_hook_floor"
+KIRO_CODE_IDE_BELOW_FLOOR = "kiro_ide_below_global_hooks_floor"
+KIRO_CODE_UNVERIFIED = "hook_contract_unverified"
+_KIRO_IDE_VERSION_SUFFIX = "+kiro-ide"
+
+
+@dataclass(frozen=True)
+class KiroFormVerdict:
+    """One installed Kiro form and its judgment."""
+
+    kind: str
+    version: str
+    normalized: str
+    protected: bool
+    code: str = ""
+    reason: str = ""
+    path: str = ""
+
+    @property
+    def below_floor(self) -> bool:
+        return self.code in (KIRO_CODE_CLI_BELOW_FLOOR, KIRO_CODE_IDE_BELOW_FLOOR)
+
+    @property
+    def unknown(self) -> bool:
+        return not self.protected and not self.normalized
+
+
+@dataclass(frozen=True)
+class KiroAssessment:
+    """Every installed Kiro form, the one a setup covers, and its refusals."""
+
+    forms: tuple[KiroFormVerdict, ...]
+    selected: KiroFormVerdict | None
+    #: Why action setup refuses: no installed form is protected (or none is
+    #: installed). "" when one is protected.
+    action_refusal: str
+    #: Why observe setup refuses too: no form is protected and one is known
+    #: to be below its floor (GAP-0828). An unknown form refuses action only.
+    every_mode_refusal: str
+
+    def unprotected(self) -> tuple[KiroFormVerdict, ...]:
+        return tuple(form for form in self.forms if not form.protected)
+
+
+def judge_kiro_form(kind: str, version: str = "", *, unread: str = "", path: str = "") -> KiroFormVerdict:
+    """Judge one installed Kiro form against its floor (Go JudgeKiroForm)."""
+
+    raw = (version or "").strip()
+    if raw.endswith(_KIRO_IDE_VERSION_SUFFIX):
+        raw = raw[: -len(_KIRO_IDE_VERSION_SUFFIX)].strip()
+    normalized = normalize_agent_version(raw)
+    where = (unread or "").strip()
+    if kind == KIRO_FORM_IDE:
+        if not normalized:
+            reason = (
+                f"{where or 'Kiro IDE is installed, but its version could not be read'}, so it is not verified "
+                f"against a known hook contract (the global hooks file needs Kiro IDE {KIRO_IDE_GLOBAL_HOOKS_FLOOR} "
+                "or later) and is not counted as protected"
+            )
+            return KiroFormVerdict(kind, raw, "", False, KIRO_CODE_UNVERIFIED, reason, path)
+        if _compare_version(normalized, KIRO_IDE_GLOBAL_HOOKS_FLOOR) < 0:
+            reason = (
+                f"Kiro IDE {normalized} is below {KIRO_IDE_GLOBAL_HOOKS_FLOOR}, the first build that reads the "
+                "global ~/.kiro/hooks file, so its agent sessions run without DefenseClaw hooks; update Kiro IDE"
+            )
+            return KiroFormVerdict(kind, raw, normalized, False, KIRO_CODE_IDE_BELOW_FLOOR, reason, path)
+        return KiroFormVerdict(kind, raw, normalized, True, path=path)
+    if not normalized:
+        reason = (
+            f"{where or 'kiro-cli is installed, but its version could not be read'}; without a version "
+            "DefenseClaw cannot check this kiro-cli against its hook floor, so it is not counted as protected"
+        )
+        return KiroFormVerdict(kind, raw, "", False, KIRO_CODE_UNVERIFIED, reason, path)
+    if _compare_version(normalized, KIRO_CLI_HOOK_FLOOR) < 0:
+        return KiroFormVerdict(
+            kind, raw, normalized, False, KIRO_CODE_CLI_BELOW_FLOOR, kiro_cli_below_hook_floor_reason(normalized), path
+        )
+    return KiroFormVerdict(kind, raw, normalized, True, path=path)
+
+
+def assess_kiro(forms: list[KiroFormVerdict] | tuple[KiroFormVerdict, ...]) -> KiroAssessment:
+    """Combine judged forms: a protected kiro-cli is selected, else a
+    protected IDE; without one action setup refuses (Go AssessKiro)."""
+
+    forms = tuple(forms)
+    selected = next((f for f in forms if f.protected and f.kind == KIRO_FORM_CLI), None) or next(
+        (f for f in forms if f.protected), None
+    )
+    if selected is not None:
+        return KiroAssessment(forms, selected, "", "")
+    action = next((f.reason for f in forms), "no Kiro installation was found, so no Kiro form is known to be protected")
+    every_mode = next((f.reason for f in forms if f.below_floor), "")
+    return KiroAssessment(forms, None, action, every_mode)
+
+
+def kiro_forms_from_signal(signal: Any) -> tuple[KiroFormVerdict, ...]:
+    """Judge every Kiro form an agent-discovery signal recorded.
+
+    ``kiro_forms`` (cache schema 7 and later) lists each probed install. A
+    signal without it (an earlier cache, or a hook-contract lock) has only
+    the selected version: a ``kiro-cli`` banner is the CLI, a bare version the
+    IDE, and an installed signal with no version an unknown kiro-cli.
+    """
+
+    recorded = getattr(signal, "kiro_forms", None)
+    if isinstance(recorded, (list, tuple)) and recorded:
+        out: list[KiroFormVerdict] = []
+        for item in recorded:
+            if not isinstance(item, dict):
+                continue
+            kind = KIRO_FORM_IDE if item.get("kind") == KIRO_FORM_IDE else KIRO_FORM_CLI
+            out.append(
+                judge_kiro_form(
+                    kind,
+                    str(item.get("version") or ""),
+                    unread=str(item.get("unread") or ""),
+                    path=str(item.get("path") or ""),
+                )
+            )
+        return tuple(out)
+    out = []
+    for kind, field_name in ((KIRO_FORM_CLI, "kiro_cli_version"), (KIRO_FORM_IDE, "kiro_ide_version")):
+        value = getattr(signal, field_name, "")
+        if isinstance(value, str) and value.strip():
+            out.append(judge_kiro_form(kind, value))
+    if out:
+        return tuple(out)
+    version = getattr(signal, "version", "")
+    version = version.strip() if isinstance(version, str) else ""
+    if version:
+        kind = KIRO_FORM_CLI if _KIRO_CLI_VERSION_RE.match(version) else KIRO_FORM_IDE
+        return (judge_kiro_form(kind, version),)
+    if bool(getattr(signal, "installed", False)):
+        error = getattr(signal, "error", "")
+        path = getattr(signal, "binary_path", "")
+        where = f"{path or 'kiro-cli'} is installed, but its version could not be read"
+        if isinstance(error, str) and error.strip():
+            where += f" ({error.strip()})"
+        return (judge_kiro_form(KIRO_FORM_CLI, "", unread=where, path=str(path or "")),)
+    return ()
+
+
+def assess_kiro_signal(signal: Any) -> KiroAssessment:
+    """:func:`assess_kiro` for an agent-discovery signal (or ``None``)."""
+
+    return assess_kiro(kiro_forms_from_signal(signal) if signal is not None else ())
+
+
 def resolve_connector_contract(
     connector: str,
     raw_version: str | None,
@@ -387,6 +624,15 @@ def resolve_connector_contract(
             STATUS_NOT_GATED,
             "acp-contract",
         }:
+            if name == "kiro" and (below := kiro_cli_below_hook_floor(raw)):
+                return ConnectorCompatibility(
+                    connector=name,
+                    raw_version=raw,
+                    normalized_version=below,
+                    status=STATUS_UNKNOWN,
+                    reason=kiro_cli_below_hook_floor_reason(below),
+                    contract=None,
+                )
             return ConnectorCompatibility(
                 connector=name,
                 raw_version=raw,
@@ -413,6 +659,52 @@ def resolve_connector_contract(
             reason="agent version not probed; using connector default hook contract",
             contract=contract,
         )
+    if name == "opencode" and _GIT_BUILD_RE.search(raw):
+        return ConnectorCompatibility(
+            connector=name,
+            raw_version=raw,
+            normalized_version="",
+            status=STATUS_UNKNOWN,
+            reason="OpenCode git build has no release version; install a versioned OpenCode V2 release",
+            contract=None,
+        )
+    if _GIT_BUILD_RE.search(raw):
+        # A source build (Hermes "vgit.5bba024 (2026.9.24)") has no release
+        # version: its digits are a commit hash or a date. Mirrors Go
+        # ResolveHookContract, so the preflight here and the protected lock the
+        # gateway writes read one version (GAP-1043): newer than every tested
+        # range, with no normalized version, unless the release date it
+        # prints is known broken.
+        broken, broken_date = known_broken_entry(name, raw)
+        if broken is not None:
+            return ConnectorCompatibility(
+                connector=name,
+                raw_version=raw,
+                normalized_version=broken_date,
+                status=STATUS_UNKNOWN,
+                reason=(
+                    f"agent version {broken_date} is known broken: "
+                    f"{broken['reason']} ({broken['issue']})"
+                ),
+                contract=None,
+            )
+        newest_git = _newest_contract_below(contracts, _GIT_BUILD_COMPARE_VERSION)
+        if newest_git is not None:
+            contract, label = newest_git
+            return ConnectorCompatibility(
+                connector=name,
+                raw_version=raw,
+                normalized_version="",
+                status=STATUS_KNOWN,
+                reason=(
+                    f"{UNTESTED_NEWER_VERSION}: git build with no release version, treated as newer than "
+                    f"the tested versions ({label}); no known problems; using hook contract {contract.contract_id}"
+                ),
+                contract=contract,
+                untested=True,
+                newest_tested=label,
+                warning=known_version_warning(name, raw),
+            )
     normalized = normalize_agent_version(raw)
     if not normalized:
         return ConnectorCompatibility(
@@ -423,19 +715,21 @@ def resolve_connector_contract(
             reason="could not normalize agent version",
             contract=None,
         )
-    for entry in KNOWN_BROKEN_VERSIONS.get(name, ()):
-        if (entry["exact"] and _exact_agent_version_match(raw, (entry["exact"],))) or (
-            not entry["exact"]
-            and _version_in_range(normalized, entry["min_inclusive"], entry["max_exclusive"])
-        ):
-            return ConnectorCompatibility(
-                connector=name,
-                raw_version=raw,
-                normalized_version=normalized,
-                status=STATUS_UNKNOWN,
-                reason=f"agent version {normalized} is known broken: {entry['reason']} ({entry['issue']})",
-                contract=None,
-            )
+    broken, broken_version = known_broken_entry(name, raw)
+    if broken is not None:
+        return ConnectorCompatibility(
+            connector=name,
+            raw_version=raw,
+            normalized_version=broken_version,
+            status=STATUS_UNKNOWN,
+            reason=f"agent version {broken_version} is known broken: {broken['reason']} ({broken['issue']})",
+            contract=None,
+        )
+    warning = known_version_warning(name, raw)
+    if name == "opencode":
+        # A new major changes the plugin API; reuse only within its major.
+        major = normalized.split(".", 1)[0]
+        contracts = tuple(c for c in contracts if c.min_agent_version.split(".", 1)[0] == major)
     for contract in contracts:
         if _contract_matches_agent_version(contract, raw, normalized):
             return ConnectorCompatibility(
@@ -445,6 +739,7 @@ def resolve_connector_contract(
                 status=STATUS_KNOWN,
                 reason=f"matched hook contract {contract.contract_id}",
                 contract=contract,
+                warning=warning,
             )
     newest = _newest_contract_below(contracts, normalized)
     if newest is not None:
@@ -461,6 +756,7 @@ def resolve_connector_contract(
             contract=contract,
             untested=True,
             newest_tested=label,
+            warning=warning,
         )
     return ConnectorCompatibility(
         connector=name,
@@ -589,7 +885,7 @@ def _contract_matches_agent_version(
     normalized_version: str,
 ) -> bool:
     if contract.exact_agent_versions and _exact_agent_version_match(
-        raw_version, contract.exact_agent_versions
+        raw_version, contract.exact_agent_versions, connector=contract.connector
     ):
         return True
     # Empty min/max would otherwise accept any normalized version.
@@ -602,7 +898,56 @@ def _contract_matches_agent_version(
     return False
 
 
-def _exact_agent_version_match(raw: str, expected: tuple[str, ...]) -> bool:
+def known_broken_entry(connector: str, raw_version: str | None) -> tuple[dict[str, Any] | None, str]:
+    """The refusing (not warn_only) known_broken_versions entry raw_version
+    falls in, and the version it was matched as; mirrors Go
+    knownBrokenAgentVersion for the agent on the host. A source build is
+    matched by the release date it prints."""
+
+    return _known_broken_match(connector, raw_version, warn_only=False)
+
+
+def known_warning_entry(connector: str, raw_version: str | None) -> dict[str, Any] | None:
+    """The warn_only known_broken_versions entry raw_version falls in, matched
+    like a refusing one; mirrors Go knownVersionWarning."""
+
+    entry, _ = _known_broken_match(connector, raw_version, warn_only=True)
+    return entry
+
+
+def known_version_warning(connector: str, raw_version: str | None) -> str:
+    entry = known_warning_entry(connector, raw_version)
+    return f"{entry['reason']} ({entry['issue']})" if entry is not None else ""
+
+
+def _known_broken_match(
+    connector: str, raw_version: str | None, *, warn_only: bool
+) -> tuple[dict[str, Any] | None, str]:
+    name = normalize_connector(connector)
+    raw = (raw_version or "").strip()
+    normalized = normalize_agent_version(raw)
+    if raw and _GIT_BUILD_RE.search(raw):
+        date = _GIT_BUILD_RELEASE_DATE_RE.search(raw)
+        normalized = normalize_agent_version(date.group(1)) if date else ""
+    if not normalized:
+        return None, ""
+    for entry in KNOWN_BROKEN_VERSIONS.get(name, ()):
+        if entry["warn_only"] != warn_only:
+            continue
+        if (entry["exact"] and _exact_agent_version_match(raw, (entry["exact"],), connector=name)) or (
+            not entry["exact"]
+            and _version_in_range(normalized, entry["min_inclusive"], entry["max_exclusive"])
+        ):
+            return entry, normalized
+    return None, ""
+
+
+def _exact_agent_version_match(raw: str, expected: tuple[str, ...], *, connector: str = "") -> bool:
+    # A Hermes git install matches only a pinned release date, never an
+    # arbitrary version substring (mirrors Go exactAgentVersionMatch).
+    hermes_git = _HERMES_GIT_RELEASE_RE.match(raw.strip()) if connector == "hermes" else None
+    if hermes_git is not None:
+        raw = hermes_git.group(1)
     fields = raw.strip().split()
     if not fields or len(fields) > 2:
         return False
@@ -666,6 +1011,87 @@ def openclaw_needs_interception_advisory(raw_version: str | None) -> bool:
     if not normalized:
         return False
     return compare_agent_versions(normalized, OPENCLAW_TRANSPORT_ADVISORY_SINCE) >= 0
+
+
+# First OpenClaw release with plugin approvals (the requireApproval result of
+# before_tool_call and the approvals.plugin config block). Older releases
+# reject approvals.plugin, so their gateway no longer starts (GAP-1956).
+OPENCLAW_PLUGIN_APPROVALS_SINCE = "2026.3.28"
+
+
+# Where OpenClaw shows a plugin approval request: the Control UI, chat
+# channels that forward /approve, and openclaw tui in OpenClaw 2026.10.9,
+# where Allow once works too (GAP-0597, TST-17954, TST-17958). A confirm
+# verdict asked where no request is shown is denied when the request times
+# out (GAP-1958).
+OPENCLAW_TUI_APPROVALS_SINCE = "2026.10.9"
+OPENCLAW_APPROVAL_SURFACES = (
+    "OpenClaw shows DefenseClaw approval requests in its Control UI (openclaw dashboard), "
+    "on chat channels that forward /approve, and in openclaw tui from OpenClaw 2026.10.9; "
+    "a call that needs approval where no request is shown is denied when the request times out"
+)
+
+
+def openclaw_tui_shows_approvals(raw_version: str | None) -> bool:
+    """Return True for an OpenClaw whose openclaw tui shows DefenseClaw
+    approval requests (OPENCLAW_TUI_APPROVALS_SINCE or later)."""
+
+    normalized = normalize_agent_version(raw_version or "")
+    return bool(normalized) and compare_agent_versions(normalized, OPENCLAW_TUI_APPROVALS_SINCE) >= 0
+
+# First OpenClaw release that no longer bundles the Amazon Bedrock provider:
+# from it, Bedrock models need the external plugin (GAP-1959).
+OPENCLAW_EXTERNAL_BEDROCK_SINCE = "2026.5.12"
+OPENCLAW_BEDROCK_PLUGIN_ID = "amazon-bedrock"
+OPENCLAW_BEDROCK_PLUGIN_PACKAGE = "@openclaw/amazon-bedrock-provider"
+
+
+def openclaw_bedrock_plugin_missing(raw_version: str | None, openclaw_config: Any) -> bool:
+    """Return True when OpenClaw needs the Bedrock provider plugin it lacks.
+
+    True only for a known OpenClaw version from
+    OPENCLAW_EXTERNAL_BEDROCK_SINCE whose openclaw.json names an Amazon
+    Bedrock model (the amazon-bedrock provider or the bedrock-converse-stream
+    API) while plugins.entries has no enabled amazon-bedrock plugin, or
+    plugins.allow / plugins.deny keep it from loading. OpenClaw's model calls
+    then fail with "No API provider registered for api:
+    bedrock-converse-stream". Setup only warns.
+    """
+
+    normalized = normalize_agent_version(raw_version or "")
+    if not normalized or compare_agent_versions(normalized, OPENCLAW_EXTERNAL_BEDROCK_SINCE) < 0:
+        return False
+    if not isinstance(openclaw_config, dict):
+        return False
+    chunks = []
+    models = openclaw_config.get("models")
+    if isinstance(models, dict) and models.get("providers") is not None:
+        chunks.append(json.dumps(models.get("providers")))
+    if openclaw_config.get("agents") is not None:
+        chunks.append(json.dumps(openclaw_config.get("agents")))
+    text = "\n".join(chunks)
+    if "bedrock-converse-stream" not in text and f'"{OPENCLAW_BEDROCK_PLUGIN_ID}' not in text:
+        return False
+    plugins = openclaw_config.get("plugins")
+    plugins = plugins if isinstance(plugins, dict) else {}
+    entries = plugins.get("entries")
+    entry = entries.get(OPENCLAW_BEDROCK_PLUGIN_ID) if isinstance(entries, dict) else None
+    if not isinstance(entry, dict) or entry.get("enabled") is False:
+        return True
+    allow = plugins.get("allow")
+    if isinstance(allow, list) and OPENCLAW_BEDROCK_PLUGIN_ID not in allow:
+        return True
+    deny = plugins.get("deny")
+    return isinstance(deny, list) and OPENCLAW_BEDROCK_PLUGIN_ID in deny
+
+
+def openclaw_lacks_plugin_approvals(raw_version: str | None) -> bool:
+    """Return True for a known OpenClaw version older than plugin approvals."""
+
+    normalized = normalize_agent_version(raw_version or "")
+    if not normalized:
+        return False
+    return compare_agent_versions(normalized, OPENCLAW_PLUGIN_APPROVALS_SINCE) < 0
 
 
 def _version_tuple(value: str) -> tuple[int, int, int]:

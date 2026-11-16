@@ -18,13 +18,16 @@ own tests elsewhere.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import errno
 import hashlib
 import io
 import json
 import os
+import re
 import shlex
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -32,7 +35,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 import click
+import pytest
 from click.testing import CliRunner
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_agent_configs(monkeypatch):
+    # The sweep also reads the real Codex and Claude Code configs of the account (GAP-0376).
+    monkeypatch.setattr(cmd_uninstall, "_agent_config_wiring_files", lambda: [])
 
 
 @contextlib.contextmanager
@@ -128,9 +138,38 @@ class BuildPlanTests(unittest.TestCase):
         self.assertFalse(os.path.lexists(bin_dir / "defenseclaw"))
         self.assertTrue((bin_dir / "defenseclaw-gateway").is_file())
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX launcher links")
+    def test_reset_keeps_the_launcher_of_the_venv_it_keeps(self):
+        # GAP-0029/GAP-0114: reset removed ~/.local/bin/defenseclaw and then
+        # said to run 'defenseclaw quickstart', which was no longer found.
+        bin_dir = Path(self._tmp.name) / "bin"
+        venv_bin = Path(self._tmp.name) / ".venv" / "bin"
+        bin_dir.mkdir()
+        venv_bin.mkdir(parents=True)
+        (venv_bin / "defenseclaw").write_text("cli", encoding="utf-8")
+        (bin_dir / "defenseclaw").symlink_to(venv_bin / "defenseclaw")
+        owned = (str(bin_dir), (str(bin_dir / "defenseclaw"),))
+        with patch.object(cmd_uninstall, "_owned_binary_targets", return_value=owned):
+            plan = cmd_uninstall._build_plan(
+                wipe_data=True,
+                binaries=False,
+                revert_openclaw=True,
+                remove_plugin=False,
+                preserve_data_entries=cmd_uninstall._RESET_PRESERVED_ENTRIES,
+                platform_name="linux",
+            )
+
+        self.assertEqual(plan.data_bound_launchers, ())
+        with capture_click_output() as out:
+            cmd_uninstall._render_kept_and_next_steps(plan)
+        self.assertNotIn("launcher", out.getvalue().lower())
+
     def test_windows_git_bash_launcher_is_bound_to_the_data_dir(self):
         data_dir = Path(self._tmp.name) / "data"
         launcher = Path(self._tmp.name) / "defenseclaw"
+        native = Path(self._tmp.name) / "defenseclaw.exe"
+        launcher.write_text(f'#!/bin/sh\nexec "{str(native).replace(os.sep, "/")}" "$@"\n', encoding="utf-8")
+        self.assertTrue(cmd_uninstall._is_data_bound_launcher(str(launcher), str(data_dir), "win32"))
         exe = os.path.join(os.path.normcase(os.path.abspath(data_dir)), ".venv", "Scripts", "defenseclaw.exe")
         launcher.write_text(f'#!/bin/sh\nexec "{exe.replace(os.sep, "/")}" "$@"\n', encoding="utf-8")
         self.assertTrue(cmd_uninstall._is_data_bound_launcher(str(launcher), str(data_dir), "win32"))
@@ -150,14 +189,6 @@ class BuildPlanTests(unittest.TestCase):
 
 
 class UninstallCommandTests(unittest.TestCase):
-    def setUp(self) -> None:
-        patcher = patch(
-            "defenseclaw.commands.windows_native_uninstall.prepare_native_windows_uninstall",
-            return_value=None,
-        )
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
     def test_dry_run_does_not_execute(self):
         runner = CliRunner()
         with patch("defenseclaw.commands.cmd_uninstall._execute_plan") as exec_mock:
@@ -190,6 +221,169 @@ class UninstallCommandTests(unittest.TestCase):
             )
             self.assertEqual(result.exit_code, 0, msg=result.output)
             exec_mock.assert_called_once()
+
+
+class CoworkPluginLineTests(unittest.TestCase):
+    """The printed step is the one reminder that always reaches the user (cowork-1-0-8 GAP-0084).
+
+    The in-chat notice after an uninstall reaches only the model, so uninstall
+    (dry run and real) and reset print the same line whenever setup cowork
+    built a plugin, and print nothing about Cowork otherwise.
+    """
+
+    LINE = "The DefenseClaw Cowork plugin stays in your Claude account. Remove it in Claude: Customize > Plugins."
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._data = Path(self._tmp.name) / "data"
+        self._data.mkdir()
+        patcher = patch(
+            "defenseclaw.commands.cmd_uninstall.config_module.default_data_path",
+            return_value=self._data,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _cowork_state(self) -> None:
+        from defenseclaw import cowork
+
+        state = Path(cowork.state_path(str(self._data)))
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text("{}")
+
+    def _uninstall(self, *args: str) -> str:
+        plan = cmd_uninstall.UninstallPlan(data_dir=str(self._data), remove_data_dir="--all" in args)
+        with (
+            patch.object(cmd_uninstall, "_build_plan", return_value=plan),
+            patch.object(cmd_uninstall, "_render_plan"),
+            patch.object(cmd_uninstall, "_execute_plan"),
+            patch.object(cmd_uninstall, "_configured_gateway_ports", return_value=frozenset()),
+            patch.object(cmd_uninstall, "_remove_marked_native_otel_left"),
+            patch.object(cmd_uninstall, "_render_kept_and_next_steps"),
+        ):
+            result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, list(args))
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        return " ".join(result.output.split())
+
+    def _reset(self) -> str:
+        with patch.object(cmd_uninstall, "_execute_plan"):
+            result = CliRunner().invoke(cmd_uninstall.reset_cmd, ["--yes"])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        return " ".join(result.output.split())
+
+    def test_dry_run_uninstall_prints_the_line(self):
+        self._cowork_state()
+        self.assertIn(self.LINE, self._uninstall("--dry-run"))
+
+    def test_real_uninstall_prints_the_line_in_the_plan(self):
+        self._cowork_state()
+        flat = self._uninstall("--yes")
+        self.assertIn(self.LINE, flat)
+        # In the plan, before the work and the closing warning.
+        self.assertLess(flat.index(self.LINE), flat.index("cannot remove its Cowork plugin"))
+
+    def test_real_uninstall_with_all_prints_the_line(self):
+        self._cowork_state()
+        self.assertIn(self.LINE, self._uninstall("--all", "--yes"))
+
+    def test_dry_run_uninstall_prints_the_full_removal_step_too(self):
+        # A 1.0.8-plugin user doing a dry run must still hear that calls may block (review F1).
+        self._cowork_state()
+        flat = self._uninstall("--dry-run")
+        self.assertIn("Customize > Plugins, then the ... menu > Remove", flat)
+        self.assertIn("older plugins may block", flat)
+        self.assertLess(flat.index(self.LINE), flat.index("cannot remove its Cowork plugin"))
+        self.assertLess(flat.index("older plugins may block"), flat.index("dry-run"))
+
+    def test_reset_prints_the_line(self):
+        self._cowork_state()
+        flat = self._reset()
+        self.assertIn(self.LINE, flat)
+        self.assertLess(flat.index(self.LINE), flat.index("Reset complete"))
+
+    def test_no_cowork_state_prints_no_cowork_line(self):
+        for output in (self._uninstall("--dry-run"), self._uninstall("--yes"), self._reset()):
+            self.assertNotIn("Cowork", output)
+            self.assertNotIn(self.LINE, output)
+
+
+class CoworkRemovalNotRecordedTests(unittest.TestCase):
+    """A refused Cowork marker never crashes uninstall or reset after the teardown (cowork-1-0-8 GAP-0085).
+
+    What is left of the work still runs; then the reason, which names the
+    folder owner, and the plugin removal step are printed and the exit is 1.
+    """
+
+    PROBLEM = (
+        "unsafe export parent C:\\Users\\a: owner SID S-1-5-21-1-2-3-1002 is not this account, SYSTEM, "
+        "BUILTIN Administrators or TrustedInstaller"
+    )
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._data = Path(self._tmp.name) / "data"
+        self._data.mkdir()
+        for target, value in (("defenseclaw.commands.cmd_uninstall.config_module.default_data_path", self._data),):
+            patcher = patch(target, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        from defenseclaw import cowork
+
+        state = Path(cowork.state_path(str(self._data)))
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text("{}")
+        self._marker = Path(cowork.uninstalled_marker_path(str(self._data)))
+
+    def _uninstall(self, refused: bool):
+        plan = cmd_uninstall.UninstallPlan(data_dir=str(self._data), remove_data_dir=True)
+        refusal = patch("defenseclaw.cowork.mark_uninstalled", side_effect=OSError(self.PROBLEM))
+        with (
+            patch.object(cmd_uninstall, "_build_plan", return_value=plan),
+            patch.object(cmd_uninstall, "_render_plan"),
+            patch.object(cmd_uninstall, "_execute_plan") as execute,
+            patch.object(cmd_uninstall, "_configured_gateway_ports", return_value=frozenset()),
+            patch.object(cmd_uninstall, "_remove_marked_native_otel_left") as otel,
+            patch.object(cmd_uninstall, "_render_kept_and_next_steps") as next_steps,
+            refusal if refused else contextlib.nullcontext(),
+        ):
+            result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, ["--all", "--yes"])
+        execute.assert_called_once_with(plan)
+        otel.assert_called_once()
+        next_steps.assert_called_once_with(plan)
+        return result, " ".join(result.output.split())
+
+    def test_refused_marker_finishes_the_uninstall_then_exits_1_naming_the_owner(self):
+        result, flat = self._uninstall(refused=True)
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertIsInstance(result.exception, SystemExit)
+        self.assertIn(f"DefenseClaw could not record its removal for the Cowork plugin: {self.PROBLEM}", flat)
+        self.assertIn("it blocks every Cowork tool call", flat)
+        self.assertNotIn("lets Cowork calls run after the data folder is removed", flat)
+        self.assertFalse(self._marker.exists())
+
+    def test_written_marker_is_the_ordinary_uninstall(self):
+        result, flat = self._uninstall(refused=False)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(self._marker.read_text(), "removed\n")
+        self.assertIn("lets Cowork calls run after the data folder is removed", flat)
+        self.assertNotIn("could not record", flat)
+
+    def test_refused_marker_finishes_the_reset_then_exits_1(self):
+        with (
+            patch.object(cmd_uninstall, "_execute_plan") as execute,
+            patch("defenseclaw.cowork.mark_uninstalled", side_effect=OSError(self.PROBLEM)),
+        ):
+            result = CliRunner().invoke(cmd_uninstall.reset_cmd, ["--yes"])
+        execute.assert_called_once()
+        flat = " ".join(result.output.split())
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertIsInstance(result.exception, SystemExit)
+        self.assertIn("Reset complete", flat)
+        self.assertIn(self.PROBLEM, flat)
+        self.assertLess(flat.index("Reset complete"), flat.index("could not record its removal"))
+        self.assertNotIn("lets Cowork calls run after the data folder is removed", flat)
 
 
 class KeptAndNextStepsTests(unittest.TestCase):
@@ -264,11 +458,13 @@ class KeptAndNextStepsTests(unittest.TestCase):
 class ResetCommandTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
+        self._data = Path(self._tmp.name) / "data"
+        self._data.mkdir()
         self.addCleanup(self._tmp.cleanup)
-        (Path(self._tmp.name) / ".venv").mkdir()
+        (self._data / ".venv").mkdir()
         patcher = patch(
             "defenseclaw.commands.cmd_uninstall.config_module.default_data_path",
-            return_value=self._tmp.name,
+            return_value=self._data,
         )
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -290,6 +486,32 @@ class ResetCommandTests(unittest.TestCase):
             self.assertFalse(plan.remove_binaries)
             self.assertEqual(plan.preserve_data_entries, (".venv", ".uv"))
             self.assertIn("preserve runtime:", result.output)
+
+    def test_reset_says_the_cowork_plugin_stays_in_the_claude_account(self):
+        # setup cowork recorded a plugin; reset wipes that record, so it says
+        # what only the user can remove, as uninstall does.
+        from defenseclaw import cowork
+
+        state = Path(cowork.state_path(self._data))
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text("{}")
+        runner = CliRunner()
+        with patch("defenseclaw.commands.cmd_uninstall._execute_plan"):
+            result = runner.invoke(cmd_uninstall.reset_cmd, ["--yes"])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        flat = " ".join(result.output.split())
+        self.assertIn("cannot remove its Cowork plugin from your Claude account", flat)
+        self.assertIn("Customize > Plugins, then the ... menu > Remove", flat)
+        self.assertIn("A plugin built with 1.0.9 lets Cowork calls run after the data folder is removed", flat)
+        self.assertEqual(Path(cowork.uninstalled_marker_path(self._data)).read_text(), "removed\n")
+        self.assertLess(flat.index("Cowork plugin"), flat.index("Reset complete"))
+
+    def test_reset_without_a_cowork_plugin_prints_no_cowork_line(self):
+        runner = CliRunner()
+        with patch("defenseclaw.commands.cmd_uninstall._execute_plan"):
+            result = runner.invoke(cmd_uninstall.reset_cmd, ["--yes"])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertNotIn("Cowork", result.output)
 
     def test_reset_failure_is_nonzero_and_never_reports_complete(self):
         runner = CliRunner()
@@ -332,6 +554,7 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
                 "defenseclaw-gateway.exe",
                 "defenseclaw-acp.exe",
                 "defenseclaw-hook.exe",
+                "defenseclaw-hook-guard.exe",
                 "skill-scanner.cmd",
                 "mcp-scanner.cmd",
                 "defenseclaw-hook-state.json",
@@ -392,7 +615,7 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
             hook.parent.mkdir(parents=True)
             hook.write_bytes(b"MZ")
             (local / "DefenseClaw" / "InstallerState").mkdir()
-            with patch.object(cmd_uninstall.windows_native_uninstall, "_known_folder_path", return_value=str(local)):
+            with patch.object(cmd_uninstall.legacy_setup_install, "local_app_data", return_value=str(local)):
                 leftovers = cmd_uninstall._windows_setup_leftovers("win32")
                 self.assertEqual(len(leftovers), 2)
                 cmd_uninstall._remove_setup_leftovers(leftovers)
@@ -400,6 +623,25 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
                 # A live Setup hook runtime keeps its folders.
                 (local / "DefenseClaw" / "HookRuntime").mkdir(parents=True)
                 (local / "DefenseClaw" / "HookRuntime" / "hook-runtime-state.json").write_text("{}")
+                self.assertEqual(cmd_uninstall._windows_setup_leftovers("win32"), ())
+
+    def test_binaries_removes_the_launcher_trampoline_this_install_published(self):
+        # GAP-1000: once install.ps1 replaced Setup, Setup's launcher delegates
+        # to a copy of this install's hook (HookRuntime\delegated). That state
+        # goes with this install; Setup's own state keeps its folders.
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp).resolve()
+            runtime = local / "DefenseClaw" / "HookRuntime"
+            copy = runtime / "delegated" / ("0" * 32) / "defenseclaw-hook.exe"
+            copy.parent.mkdir(parents=True)
+            copy.write_bytes(b"MZ")
+            (runtime / "defenseclaw-hook.exe").write_bytes(b"MZ")
+            state = runtime / "hook-runtime-state.json"
+            with patch.object(cmd_uninstall.legacy_setup_install, "local_app_data", return_value=str(local)):
+                state.write_text(json.dumps({"schema_version": 2, "hook_path": str(copy)}), encoding="utf-8")
+                leftovers = cmd_uninstall._windows_setup_leftovers("win32")
+                self.assertEqual(leftovers, (str(runtime),))
+                state.write_text(json.dumps({"schema_version": 2, "hook_path": str(local / "Programs" / "DefenseClaw" / "bin" / "defenseclaw-hook.exe")}), encoding="utf-8")
                 self.assertEqual(cmd_uninstall._windows_setup_leftovers("win32"), ())
 
     def test_binary_removal_drops_install_bookkeeping_and_pip_hint(self):
@@ -653,7 +895,7 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
         with (
             patch.object(cmd_uninstall, "_validate_plan", side_effect=lambda _: order.append("validate")),
             patch.object(cmd_uninstall, "_stop_gateway", side_effect=lambda _: order.append("stop")),
-            patch.object(cmd_uninstall, "_connector_teardown", side_effect=lambda _: order.append("teardown")),
+            patch.object(cmd_uninstall, "_connector_teardown", side_effect=lambda *_: order.append("teardown")),
             patch.object(cmd_uninstall, "_requires_deferred_cleanup", return_value=True),
             patch.object(
                 cmd_uninstall,
@@ -736,6 +978,29 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
             launcher.write_bytes(b"MZ\0trampoline" + python.upper().encode("utf-8") + b"PK\0script")
             self.assertTrue(cmd_uninstall._is_data_bound_launcher(str(launcher), data_dir, "win32"))
             launcher.write_bytes(b"MZ\0trampoline C:\\Other\\.venv\\Scripts\\python.exe")
+            self.assertFalse(cmd_uninstall._is_data_bound_launcher(str(launcher), data_dir, "win32"))
+
+    def test_installer_native_cli_launcher_is_bound_to_recorded_data_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = os.path.join(tmp, ".defenseclaw")
+            launcher = Path(tmp) / "defenseclaw.exe"
+            gateway = Path(tmp) / "defenseclaw-gateway.exe"
+            state = Path(tmp) / "defenseclaw-hook-state.json"
+            launcher.write_bytes(b"MZ\0native launcher")
+            gateway.write_bytes(launcher.read_bytes())
+            valid_state = json.dumps({
+                "schema_version": 1,
+                "install_kind": "powershell-windows",
+                "install_scope": "user",
+                "data_root": data_dir,
+            })
+            state.write_text(valid_state, encoding="utf-8")
+            self.assertTrue(cmd_uninstall._is_data_bound_launcher(str(launcher), data_dir, "win32"))
+            self.assertFalse(cmd_uninstall._is_data_bound_launcher(str(launcher), os.path.join(tmp, "other"), "win32"))
+            state.write_text("[]", encoding="utf-8")
+            self.assertFalse(cmd_uninstall._is_data_bound_launcher(str(launcher), data_dir, "win32"))
+            state.write_text(valid_state, encoding="utf-8")
+            gateway.write_bytes(b"MZ\0different image")
             self.assertFalse(cmd_uninstall._is_data_bound_launcher(str(launcher), data_dir, "win32"))
 
     def test_deferred_scheduling_failure_is_nonzero_and_stops_cleanup(self):
@@ -847,7 +1112,7 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
 
             teardown_plans = []
 
-            def record_teardown(plan):
+            def record_teardown(plan, connectors=None):
                 teardown_plans.append(plan)
 
             isolated_env = {
@@ -1278,6 +1543,59 @@ class RenderPlanConnectorTests(unittest.TestCase):
             )
         self.assertEqual(got, ("openclaw", "codex"))
 
+    def test_teardown_connectors_include_an_inactive_agent_config_that_names_defenseclaw(self):
+        # GAP-0376: Codex inactive, no backup marker, but config.toml still
+        # runs DefenseClaw's notify launcher: uninstall tears Codex down too.
+        with tempfile.TemporaryDirectory() as data_dir, tempfile.TemporaryDirectory() as home:
+            codex = os.path.join(home, "config.toml")
+            claude = os.path.join(home, "settings.json")
+            with open(codex, "w") as fh:
+                fh.write("notify = ['C:/Users/u/.local/bin/defenseclaw-hook.exe', 'notify']\nmodel = 'keep'\n")
+            with open(claude, "w") as fh:
+                fh.write('{"model": "keep"}')
+            with patch.object(
+                cmd_uninstall, "_agent_config_wiring_files", return_value=[("codex", codex), ("claudecode", claude)]
+            ):
+                got = cmd_uninstall._teardown_connectors(
+                    "claudecode", data_dir=data_dir, openclaw_config_file="", include_openclaw=False
+                )
+                with open(codex, "w") as fh:
+                    fh.write("model = 'keep'\n")
+                clean = cmd_uninstall._teardown_connectors(
+                    "claudecode", data_dir=data_dir, openclaw_config_file="", include_openclaw=False
+                )
+        self.assertEqual(got, ("claudecode", "codex"))
+        self.assertEqual(clean, ("claudecode",))
+
+    def test_teardown_connectors_include_an_inactive_codex_notify_on_the_gateway(self):
+        # GAP-0376 (L-win-J10-005): a notify entry that names DefenseClaw's
+        # gateway executable, in any Windows spelling, makes uninstall tear
+        # Codex down; a user's own notifier and a project path do not.
+        spellings = (
+            'notify = ["C:\\\\Users\\\\u\\\\.local\\\\bin\\\\defenseclaw-gateway.exe", "codex-notify"]\n',
+            "notify = ['C:/Users/u/.local/bin/defenseclaw-gateway.exe', 'codex-notify']\n",
+            "notify = ['\"C:\\\\Users\\\\u\\\\.local\\\\bin\\\\DefenseClaw-Gateway.EXE\"', 'codex-notify']\n",
+            "notify = ['defenseclaw-gateway.exe', 'codex-notify']\n",
+        )
+        with tempfile.TemporaryDirectory() as data_dir, tempfile.TemporaryDirectory() as home:
+            codex = os.path.join(home, "config.toml")
+            claude = os.path.join(home, "settings.json")
+            with open(claude, "w") as fh:
+                fh.write('{"model": "keep"}')
+            got = {}
+            for text in spellings + ("notify = ['C:/Tools/notify.exe', 'codex-notify']\n",):
+                with open(codex, "w") as fh:
+                    fh.write(text + "model = 'keep'\n")
+                with patch.object(
+                    cmd_uninstall, "_agent_config_wiring_files", return_value=[("codex", codex), ("claudecode", claude)]
+                ):
+                    got[text] = cmd_uninstall._teardown_connectors(
+                        "claudecode", data_dir=data_dir, openclaw_config_file="", include_openclaw=False
+                    )
+        for text in spellings:
+            self.assertEqual(got[text], ("claudecode", "codex"), text)
+        self.assertEqual(list(got.values())[-1], ("claudecode",))
+
     def test_teardown_connectors_include_inactive_amp_backup(self):
         with tempfile.TemporaryDirectory() as data_dir:
             managed = os.path.join(
@@ -1314,7 +1632,17 @@ class RenderPlanConnectorTests(unittest.TestCase):
 
         self.assertEqual(got, expected)
 
-    def test_backup_roster_covers_all_native_lifecycle_connectors_and_legacy_receipts(self):
+
+class RemovedConnectorUninstallTests(unittest.TestCase):
+    """until 1.1: OpenHands and OmniGent (removed in 1.0.4) are still torn down."""
+
+    def _write(self, data_dir: str, rel: str, body: str = "{}") -> None:
+        path = os.path.join(data_dir, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+
+    def test_backup_roster_covers_native_lifecycle_and_removed_connectors(self):
         native_connectors = {
             "amp",
             "antigravity",
@@ -1323,15 +1651,12 @@ class RenderPlanConnectorTests(unittest.TestCase):
             "copilot",
             "cursor",
             "hermes",
-            "omnigent",
             "opencode",
             legacy_connector.RETIRED_DESKTOP_ID,
+            "omnigent",
+            "openhands",
         }
         self.assertLessEqual(native_connectors, set(cmd_uninstall._CONNECTOR_BACKUP_MARKERS))
-        self.assertIn(
-            os.path.join("connector_backups", "cursor", "config.json"),
-            cmd_uninstall._CONNECTOR_BACKUP_MARKERS["cursor"],
-        )
         self.assertIn(
             os.path.join("connector_backups", "cursor", "hooks.json.json"),
             cmd_uninstall._CONNECTOR_BACKUP_MARKERS["cursor"],
@@ -1346,8 +1671,297 @@ class RenderPlanConnectorTests(unittest.TestCase):
                 os.path.join("connector_backups", "omnigent", "config.json"),
                 os.path.join("connector_backups", "omnigent", "module.json"),
                 os.path.join("connector_backups", "omnigent", "pth.json"),
+                os.path.join("hooks", "defenseclaw_omnigent_policy.py"),
             },
         )
+        self.assertEqual(
+            set(cmd_uninstall._CONNECTOR_BACKUP_MARKERS["openhands"]),
+            {
+                os.path.join("connector_backups", "openhands", "config.json"),
+                os.path.join("hooks", "openhands-hook.sh"),
+            },
+        )
+
+    def test_removed_connector_backups_select_teardown(self):
+        for marker, name in (
+            (os.path.join("connector_backups", "openhands", "config.json"), "openhands"),
+            (os.path.join("connector_backups", "omnigent", "config.json"), "omnigent"),
+            (os.path.join("connector_backups", "omnigent", "module.json"), "omnigent"),
+            (os.path.join("connector_backups", "omnigent", "pth.json"), "omnigent"),
+            # The hook script an older release wrote: its teardown writes the stub.
+            (os.path.join("hooks", "defenseclaw_omnigent_policy.py"), "omnigent"),
+            (os.path.join("hooks", "openhands-hook.sh"), "openhands"),
+        ):
+            with self.subTest(marker=marker), tempfile.TemporaryDirectory() as data_dir:
+                self._write(data_dir, marker)
+                got = cmd_uninstall._teardown_connectors(
+                    ("codex",),
+                    data_dir=data_dir,
+                    openclaw_config_file="",
+                    include_openclaw=False,
+                )
+                self.assertEqual(got, ("codex", name))
+
+    def test_active_roster_names_only_removed_connectors(self):
+        # Config loading drops the removed names; the gateway's active roster
+        # from an older release still names them.
+        for body, want in (
+            ('{"version": 3, "names": ["codex", "OpenHands", "omnigent"], "name": "codex"}', ("openhands", "omnigent")),
+            ('{"name": "omnigent"}', ("omnigent",)),
+            ('{"names": ["codex", "not-a-connector"]}', ()),
+            ("not json", ()),
+        ):
+            with self.subTest(body=body), tempfile.TemporaryDirectory() as data_dir:
+                self._write(data_dir, "active_connector.json", body)
+                got = cmd_uninstall._teardown_connectors(
+                    (),
+                    data_dir=data_dir,
+                    openclaw_config_file="",
+                    include_openclaw=False,
+                )
+                self.assertEqual(got, want)
+
+    def test_removed_connectors_reach_gateway_teardown(self):
+        plan = cmd_uninstall.UninstallPlan(
+            connector="codex",
+            connectors=("codex", "openhands", "omnigent"),
+            data_dir="/tmp/dc",
+            gateway_path="/opt/dc/defenseclaw-gateway",
+        )
+        with (
+            patch.object(cmd_uninstall, "_gateway_supports_connector_teardown", return_value=True),
+            patch.object(cmd_uninstall, "_run_gateway_connector_teardown", return_value=True) as run_mock,
+            patch.object(cmd_uninstall, "_gateway_connector_is_unknown") as unknown,
+        ):
+            cmd_uninstall._connector_teardown(plan)
+        self.assertEqual([c.args[0] for c in run_mock.call_args_list], ["codex", "openhands", "omnigent"])
+        unknown.assert_not_called()
+
+
+class RemovedConnectorLeftoversTests(unittest.TestCase):
+    """until 1.1: uninstall never waits on a removed connector's leftovers; it lists them."""
+
+    def _run(self, plan: cmd_uninstall.UninstallPlan, deferred: bool = False) -> dict:
+        calls: dict = {}
+
+        def record(name):
+            return lambda *args, **kwargs: calls.setdefault(name, True)
+
+        def connector_teardown(plan):
+            calls.setdefault("teardown", []).append(tuple(plan.connectors))
+
+        with (
+            patch.object(cmd_uninstall, "_validate_plan"),
+            patch.object(cmd_uninstall, "_sandbox_teardown", side_effect=record("sandbox")),
+            patch.object(cmd_uninstall, "_stop_gateway", side_effect=record("gateway_stop")),
+            patch.object(cmd_uninstall, "_connector_teardown", side_effect=connector_teardown),
+            patch.object(cmd_uninstall, "_turn_guardrail_off", side_effect=record("guardrail_off")),
+            patch.object(cmd_uninstall, "_remove_probe_created_state"),
+            patch.object(cmd_uninstall, "_remove_created_dirs"),
+            patch.object(cmd_uninstall, "_remove_orphan_copilot_plugin"),
+            patch.object(cmd_uninstall, "_remove_mcp_writer_backups"),
+            patch.object(cmd_uninstall, "_remove_legacy_codex_candidate"),
+            patch.object(cmd_uninstall, "_remove_empty_plugin_cache"),
+            patch.object(cmd_uninstall, "remove_own_api_port_claims"),
+            patch.object(cmd_uninstall, "_requires_deferred_cleanup", return_value=deferred),
+            patch.object(
+                cmd_uninstall, "_schedule_deferred_cleanup", side_effect=lambda _: calls.setdefault("deferred", True) and "r"
+            ),
+            patch.object(cmd_uninstall, "_remove_data_dir", side_effect=lambda *a, **k: calls.setdefault("data", True)),
+            patch.object(cmd_uninstall, "_remove_binaries", side_effect=lambda _: calls.setdefault("binaries", True)),
+            patch.object(cmd_uninstall, "_render_execution_result"),
+            patch.object(cmd_uninstall.click, "echo", side_effect=lambda text="", **_: calls.setdefault("echo", []).append(text)),
+        ):
+            try:
+                cmd_uninstall._execute_plan(plan)
+            except click.ClickException as exc:
+                calls["error"] = exc.format_message()
+        return calls
+
+    def _stage(self, home: str) -> tuple[str, str]:
+        data_dir = os.path.join(home, ".defenseclaw")
+        script = os.path.join(data_dir, "hooks", "openhands-hook.sh")
+        os.makedirs(os.path.dirname(script))
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh -p\n# defenseclaw-managed-hook v0 (disabled tombstone)\n# support was removed in DefenseClaw 1.0.4\nexit 2\n")
+        config = os.path.join(home, ".openhands", "hooks.json")
+        os.makedirs(os.path.dirname(config))
+        with open(config, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"pre_tool_use": [{"hooks": [{"command": script}]}]}))
+        return data_dir, config
+
+    def test_every_removal_goes_on_and_lists_what_is_left(self):
+        # Review loop round 1 (simplified teardown): a removed connector's
+        # manual steps held data and binary removal and reordered the
+        # teardown. Now every form runs in its usual order and lists them.
+        for flags in ({}, {"remove_data_dir": True}, {"remove_binaries": True}, {"remove_data_dir": True, "remove_binaries": True}):
+            for deferred in (False, True):
+                with (
+                    self.subTest(flags=flags, deferred=deferred),
+                    tempfile.TemporaryDirectory() as home,
+                    patch("os.path.expanduser", side_effect=lambda p, home=home: p.replace("~", home, 1)),
+                ):
+                    data_dir, config = self._stage(home)
+                    plan = cmd_uninstall.UninstallPlan(
+                        data_dir=data_dir, connectors=("codex", "openhands"), sandbox_teardown=True, stop_gateway=True, **flags
+                    )
+                    calls = self._run(plan, deferred=deferred)
+                    self.assertNotIn("error", calls)
+                    self.assertEqual(calls.get("teardown"), [("codex", "openhands")])
+                    self.assertTrue(calls.get("sandbox") and calls.get("gateway_stop"))
+                    if flags.get("remove_data_dir"):
+                        self.assertTrue(calls.get("data") or calls.get("deferred"))
+                    if flags.get("remove_binaries"):
+                        self.assertTrue(calls.get("binaries") or calls.get("deferred"))
+                    text = "\n".join(calls.get("echo", []))
+                    self.assertIn("OpenHands/OmniGent support was removed in 1.0.5; DefenseClaw no longer guards it.", text)
+                    self.assertIn(f"  - {config}: ", text)
+                    script_listed = os.path.join(data_dir, "hooks", "openhands-hook.sh") in text
+                    self.assertEqual(script_listed, not flags.get("remove_data_dir"))
+                    self.assertEqual("data folder is removed by this uninstall" in text, bool(flags.get("remove_data_dir")))
+
+    def test_nothing_left_prints_nothing(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            calls = self._run(cmd_uninstall.UninstallPlan(data_dir=data_dir, connectors=("codex",)))
+        self.assertNotIn("error", calls)
+        self.assertNotIn("echo", calls)
+
+    def test_omnigent_uninstall_reports_manual_steps_with_edited_vendor_config(self):
+        with tempfile.TemporaryDirectory() as home, patch(
+            "os.path.expanduser", side_effect=lambda p: p.replace("~", home, 1)
+        ):
+            data_dir = os.path.join(home, ".defenseclaw")
+            config = os.path.join(home, ".omnigent", "config.yaml")
+            module = os.path.join(data_dir, "hooks", "defenseclaw_omnigent_policy.py")
+            pth = os.path.join(home, "venv", "site-packages", "defenseclaw_omnigent.pth")
+            backup_dir = os.path.join(data_dir, "connector_backups", "omnigent")
+            record = os.path.join(backup_dir, "pth.json")
+            files = {
+                config: "policy_modules: [defenseclaw_omnigent_policy]\nmodel: local\n",
+                module: "# defenseclaw-managed-policy v0\n# support was removed in DefenseClaw 1.0.4\n",
+                pth: os.path.join(data_dir, "hooks") + "\n",
+                record: json.dumps({"connector": "omnigent", "logical_name": "pth", "path": pth}),
+            }
+            for path, body in files.items():
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(body)
+            plan = cmd_uninstall.UninstallPlan(data_dir=data_dir, connectors=("codex", "omnigent"), stop_gateway=True)
+            calls = self._run(plan)
+            self.assertNotIn("error", calls)
+            report = "\n".join(calls.get("echo", []))
+            self.assertIn("OpenHands/OmniGent support was removed in 1.0.5; DefenseClaw no longer guards it.", report)
+            for path in (config, module, pth, backup_dir):
+                self.assertIn(path, report)
+            self.assertIn("remove defenseclaw_omnigent_policy from policy_modules", report)
+
+
+class RemovedConnectorBackupsKeptTests(unittest.TestCase):
+    """until 1.1 (rel-1-0-4 GAP-0651): a data removal never deletes what the leftover list tells the user to keep."""
+
+    def _stage(self, home: str) -> tuple[str, dict[str, str]]:
+        data_dir = os.path.join(home, ".defenseclaw")
+        backups = os.path.join(data_dir, "connector_backups")
+        kept = {
+            os.path.join("omnigent", "config.json"): json.dumps(
+                {"connector": "omnigent", "logical_name": "config", "path": os.path.join(home, "oc", "config.yaml")}
+            ),
+            os.path.join("omnigent", "defenseclaw_omnigent_policy.py.edited-0123"): "# my edit\n",
+            os.path.join("openhands", "config.json"): json.dumps({"connector": "openhands"}),
+        }
+        files = {
+            os.path.join(data_dir, "config.yaml"): "config_version: 9\n",
+            os.path.join(data_dir, "hooks", "defenseclaw_omnigent_policy.py"): (
+                "# defenseclaw-managed-policy v0\n# support was removed in DefenseClaw 1.0.4\n"
+            ),
+            os.path.join(backups, "codex", "config.toml.json"): "{}",
+            # A config only the backup record names (OMNIGENT_CONFIG_HOME at setup).
+            os.path.join(home, "oc", "config.yaml"): "policy_modules: [defenseclaw_omnigent_policy]\n",
+        }
+        files.update({os.path.join(backups, rel): body for rel, body in kept.items()})
+        for path, body in files.items():
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(body)
+        return data_dir, kept
+
+    def _run(self, plan: cmd_uninstall.UninstallPlan, teardown_stdout: str) -> tuple[list[str], str]:
+        echoed: list[str] = []
+        proc = subprocess.CompletedProcess([], 0, stdout=teardown_stdout, stderr="")
+        with (
+            patch.object(cmd_uninstall, "_validate_plan"),
+            patch.object(cmd_uninstall, "_stop_gateway"),
+            patch.object(cmd_uninstall, "_gateway_supports_connector_teardown", return_value=True),
+            patch.object(cmd_uninstall.subprocess, "run", return_value=proc),
+            patch.object(cmd_uninstall, "_remove_probe_created_state"),
+            patch.object(cmd_uninstall, "_remove_created_dirs"),
+            patch.object(cmd_uninstall, "_remove_orphan_copilot_plugin"),
+            patch.object(cmd_uninstall, "_remove_mcp_writer_backups"),
+            patch.object(cmd_uninstall, "_remove_legacy_codex_candidate"),
+            patch.object(cmd_uninstall, "_remove_empty_plugin_cache"),
+            patch.object(cmd_uninstall, "remove_own_api_port_claims"),
+            patch.object(cmd_uninstall, "_requires_deferred_cleanup", return_value=False),
+            patch.object(cmd_uninstall, "_render_execution_result"),
+            patch.object(cmd_uninstall.click, "echo", side_effect=lambda text="", **_: echoed.append(str(text))),
+            patch.object(cmd_uninstall.ux, "echo", side_effect=lambda text="", **_: echoed.append(str(text))),
+        ):
+            error = ""
+            try:
+                cmd_uninstall._execute_plan(plan)
+            except click.ClickException as exc:
+                error = exc.format_message()
+        return echoed, error
+
+    def test_uninstall_all_keeps_the_backups_it_tells_the_user_to_copy_back_from(self):
+        with (
+            tempfile.TemporaryDirectory() as home,
+            patch("os.path.expanduser", side_effect=lambda p, home=home: p.replace("~", home, 1)),
+        ):
+            data_dir, kept = self._stage(home)
+            backups = os.path.join(data_dir, "connector_backups", "omnigent")
+            # What the gateway's removed-connector teardown prints (removed.go FormatRemovedLeftovers).
+            teardown_stdout = (
+                "OpenHands/OmniGent support was removed in 1.0.5; DefenseClaw no longer guards it.\n"
+                f"  - {backups}: files DefenseClaw saved when it set up OmniGent. "
+                "To remove: copy back what you need, then delete this folder.\n"
+            )
+            plan = cmd_uninstall.UninstallPlan(
+                data_dir=data_dir, connectors=("omnigent",), stop_gateway=True, remove_data_dir=True, gateway_path="gw"
+            )
+            echoed, error = self._run(plan, teardown_stdout)
+            self.assertEqual(error, "")
+            self.assertFalse(os.path.lexists(data_dir))
+            root = data_dir + "-removed-connector-backups"
+            for rel, body in kept.items():
+                with open(os.path.join(root, rel), encoding="utf-8") as fh:
+                    self.assertEqual(fh.read(), body, rel)
+            self.assertFalse(os.path.lexists(os.path.join(root, "codex")))
+            text = "\n".join(echoed)
+            self.assertIn(f"  - {os.path.join(root, 'omnigent')}: files DefenseClaw saved", text)
+            # The config only the moved record names is still listed.
+            self.assertIn(os.path.join(home, "oc", "config.yaml"), text)
+            # Every path the uninstall tells the user about is still there.
+            named = re.findall(r"^\s*(?:·\s*)?- (\S.*?): ", text, flags=re.MULTILINE)
+            self.assertTrue(named)
+            for path in named:
+                self.assertTrue(os.path.lexists(path), f"the uninstall names {path}, which it removed:\n{text}")
+
+    def test_a_backup_that_cannot_move_stops_the_uninstall_before_any_removal(self):
+        with (
+            tempfile.TemporaryDirectory() as home,
+            patch("os.path.expanduser", side_effect=lambda p, home=home: p.replace("~", home, 1)),
+        ):
+            data_dir, kept = self._stage(home)
+            with open(data_dir + "-removed-connector-backups", "w", encoding="utf-8") as fh:
+                fh.write("in the way")
+            plan = cmd_uninstall.UninstallPlan(
+                data_dir=data_dir, connectors=("omnigent",), stop_gateway=True, remove_data_dir=True, gateway_path="gw"
+            )
+            _echoed, error = self._run(plan, "")
+            self.assertIn("No data or binaries were removed", error)
+            for rel in kept:
+                self.assertTrue(os.path.isfile(os.path.join(data_dir, "connector_backups", rel)), rel)
+            self.assertTrue(os.path.isfile(os.path.join(data_dir, "config.yaml")))
 
 
 class ConnectorTeardownDispatchTests(unittest.TestCase):
@@ -1507,6 +2121,39 @@ class MCPWriterBackupRemovalTests(unittest.TestCase):
             self.assertTrue(config.exists())
             self.assertIn(str(backup), buf.getvalue())
 
+    def test_full_uninstall_removes_unregistered_mcp_writer_backups(self):
+        # GAP-1636: after a 1.0.3 -> 1.0.4 upgrade uninstall --all left
+        # ~/.codex/.defenseclaw-config.toml.bak (with DefenseClaw hook entries)
+        # because no registry entry named it. The writer's own name beside a
+        # config DefenseClaw edits is removed; other files stay.
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"HOME": tmp, "USERPROFILE": tmp}
+            drop = {k: "" for k in ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "COPILOT_HOME", "OPENCODE_CONFIG_DIR")}
+            with patch.dict(os.environ, {**env, **drop}):
+                for key in drop:
+                    os.environ.pop(key, None)
+                codex = Path(tmp) / ".codex"
+                codex.mkdir()
+                (codex / "config.toml").write_text("[mcp_servers]\n")
+                backup = codex / ".defenseclaw-config.toml.bak"
+                backup.write_text('[hooks]\ncommand = "defenseclaw"\n')
+                other = codex / ".other-config.toml.bak"
+                other.write_text("mine")
+                link_target = Path(tmp) / "elsewhere"
+                link_target.write_text("not ours")
+                claude_backup = Path(tmp) / ".defenseclaw-claude.json.bak"
+                claude_backup.symlink_to(link_target)
+
+                with capture_click_output() as buf:
+                    cmd_uninstall._remove_unregistered_mcp_writer_backups()
+
+                self.assertFalse(backup.exists())
+                self.assertIn(str(backup), buf.getvalue())
+                self.assertTrue((codex / "config.toml").exists())
+                self.assertTrue(other.exists())
+                # Only a regular file is removed, never a link at that name.
+                self.assertTrue(claude_backup.is_symlink() and link_target.exists())
+
     def test_full_uninstall_removes_only_empty_legacy_codex_candidate(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp}):
             codex = Path(tmp) / ".codex"
@@ -1528,11 +2175,25 @@ class MCPWriterBackupRemovalTests(unittest.TestCase):
 
 
 class GatewayTeardownOutputTests(unittest.TestCase):
+    def test_gateway_teardown_needs_no_uninstall_flag_for_removed_connectors(self):
+        # 1.0.5: every OpenHands/OmniGent teardown removes what DefenseClaw
+        # wrote, so the uninstall no longer marks it.
+        completed = type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        with (
+            patch("shutil.which", return_value="defenseclaw-gateway"),
+            patch("subprocess.run", return_value=completed) as run_mock,
+            capture_click_output(),
+        ):
+            self.assertTrue(cmd_uninstall._run_gateway_connector_teardown("omnigent"))
+        teardown = run_mock.call_args_list[0]
+        self.assertIn("teardown", teardown.args[0])
+        self.assertNotIn("env", teardown.kwargs)
+
     def test_gateway_teardown_uses_utf8_and_preserves_checkmark(self):
         completed = type(
             "Completed",
             (),
-            {"returncode": 0, "stdout": "✓ restored\n", "stderr": ""},
+            {"returncode": 0, "stdout": "✓ restored\n", "stderr": "WARNING: manual cleanup required; remove the edited hook entry\n"},
         )()
         with (
             patch("shutil.which", return_value="defenseclaw-gateway.exe"),
@@ -1542,6 +2203,7 @@ class GatewayTeardownOutputTests(unittest.TestCase):
             self.assertTrue(cmd_uninstall._run_gateway_connector_teardown("codex"))
 
         self.assertIn("✓ restored", buf.getvalue())
+        self.assertIn("manual cleanup required; remove the edited hook entry", buf.getvalue())
         kwargs = run_mock.call_args.kwargs
         self.assertEqual(kwargs["encoding"], "utf-8")
         self.assertEqual(kwargs["errors"], "replace")
@@ -1685,6 +2347,81 @@ class RemoveDataDirTests(unittest.TestCase):
                 cmd_uninstall._remove_data_dir(str(data_dir), preserve_entries=(".venv",))
 
             self.assertTrue(outside.is_dir())
+
+    def test_concurrent_remover_of_the_same_trees_is_not_a_failure(self):
+        # GAP-2355: two uninstalls of one account at once (two terminals)
+        # each failed with ENOENT on what the other one had just deleted, and
+        # the data stayed for a third run. What another remover took is gone.
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / ".defenseclaw"
+            for name in ("previous", ".failed-20261028T022310"):
+                deep = data_dir / name / "venv" / "lib" / "site-packages" / "pkg" / "sub"
+                deep.mkdir(parents=True)
+                for index in range(5):
+                    (deep / f"m{index}.py").write_text("x", encoding="utf-8")
+            (data_dir / "receipts").write_text("r", encoding="utf-8")
+            (data_dir / "config.yaml").write_text("config", encoding="utf-8")
+            real_unlink = os.unlink
+            raced: list[str] = []
+
+            def other_uninstall_takes_it_first(path, *args, **kwargs):
+                # The other run deletes these files a moment before this run
+                # does: the file is gone and this run's unlink reports ENOENT.
+                name = os.path.basename(os.fspath(path))
+                real_unlink(path, *args, **kwargs)
+                if name in ("m0.py", "m3.py", "receipts"):
+                    raced.append(name)
+                    raise FileNotFoundError(errno.ENOENT, "No such file or directory", os.fspath(path))
+
+            with (
+                patch.object(cmd_uninstall.os, "unlink", side_effect=other_uninstall_takes_it_first),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                cmd_uninstall._remove_data_dir(str(data_dir))
+
+            self.assertTrue(raced)
+            self.assertFalse(data_dir.exists())
+
+    def test_data_dir_another_remover_took_last_is_removed(self):
+        # GAP-2355: the other run's final rmdir won the race.
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / ".defenseclaw"
+            data_dir.mkdir()
+            (data_dir / "config.yaml").write_text("config", encoding="utf-8")
+            real_rmdir = os.rmdir
+
+            def other_removed_it(path, *args, **kwargs):
+                if os.fspath(path) == str(data_dir):
+                    real_rmdir(path)
+                    raise FileNotFoundError(errno.ENOENT, "No such file or directory", os.fspath(path))
+                return real_rmdir(path, *args, **kwargs)
+
+            out = io.StringIO()
+            with patch.object(cmd_uninstall.os, "rmdir", side_effect=other_removed_it), contextlib.redirect_stdout(out):
+                cmd_uninstall._remove_data_dir(str(data_dir))
+
+            self.assertFalse(data_dir.exists())
+            self.assertIn("removed", out.getvalue())
+
+    def test_a_real_removal_error_still_fails_the_data_phase(self):
+        # GAP-2355 keeps every other error: only "already gone" is success.
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / ".defenseclaw"
+            (data_dir / "previous" / "venv").mkdir(parents=True)
+            (data_dir / "previous" / "venv" / "locked.so").write_text("x", encoding="utf-8")
+            (data_dir / "config.yaml").write_text("config", encoding="utf-8")
+            real_unlink = os.unlink
+
+            def denied(path, *args, **kwargs):
+                if os.path.basename(os.fspath(path)) == "locked.so":
+                    raise PermissionError(errno.EACCES, "Permission denied", os.fspath(path))
+                return real_unlink(path, *args, **kwargs)
+
+            with patch.object(cmd_uninstall.os, "unlink", side_effect=denied), self.assertRaises(OSError) as raised:
+                cmd_uninstall._remove_data_dir(str(data_dir))
+
+            self.assertIn("Permission denied", str(raised.exception))
+            self.assertTrue((data_dir / "config.yaml").is_file())
 
     def test_partial_failure_retains_identity_marker_for_safe_retry(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1847,7 +2584,7 @@ class OrphanCopilotPluginTests(unittest.TestCase):
             plugin = Path(tmp) / ".copilot" / "installed-plugins" / "defenseclaw" / "defenseclaw"
             (plugin / "hooks").mkdir(parents=True)
             (plugin / "plugin.json").write_text(json.dumps(cmd_uninstall._COPILOT_PLUGIN_MANIFEST))
-            command = "'/opt/dc/defenseclaw-hook' hook --connector copilot --enterprise-managed --event 'PreToolUse'"
+            command = "'/opt/dc/defenseclaw-hook' hook --connector copilot --enterprise-managed --event 'PreToolUse' --hook-surface vscode-local"
             hooks = {"hooks": {"PreToolUse": [{"type": "command", "command": command, "timeout": 30}]}}
             (plugin / "hooks" / "hooks.json").write_text(json.dumps(hooks))
             with (
@@ -1862,6 +2599,149 @@ class OrphanCopilotPluginTests(unittest.TestCase):
             ):
                 cmd_uninstall._remove_orphan_copilot_plugin()
             self.assertFalse(plugin.parent.exists())
+
+    def test_orphan_cleanup_preserves_independent_copilot_plugin_handler(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = Path(tmp) / ".copilot" / "installed-plugins" / "defenseclaw" / "defenseclaw"
+            (plugin / "hooks").mkdir(parents=True)
+            (plugin / "plugin.json").write_text(json.dumps(cmd_uninstall._COPILOT_PLUGIN_MANIFEST))
+            own = "'/opt/dc/defenseclaw-hook' hook --connector copilot --enterprise-managed --event 'PreToolUse' --hook-surface vscode-local"
+            independent = "'/opt/operator/copilot-audit' hook --enterprise-managed --event 'PreToolUse'"
+            hooks = {"hooks": {"PreToolUse": [
+                {"type": "command", "command": own, "timeout": 30},
+                {"type": "command", "command": independent, "timeout": 30},
+            ]}}
+            path = plugin / "hooks" / "hooks.json"
+            path.write_text(json.dumps(hooks))
+            with (
+                patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp}, clear=False),
+                patch("defenseclaw.upgrade_shim.managed_deployment", return_value=None),
+            ):
+                cmd_uninstall._remove_orphan_copilot_plugin()
+            self.assertTrue(plugin.exists(), "cleanup must keep a plugin with an independent handler")
+            self.assertEqual(json.loads(path.read_text()), {"hooks": {"PreToolUse": [hooks["hooks"]["PreToolUse"][1]]}})
+            self.assertTrue((plugin / "plugin.json").exists())
+
+    def test_orphan_cleanup_keeps_independent_fields_in_a_shared_handler(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = Path(tmp) / ".copilot" / "installed-plugins" / "defenseclaw" / "defenseclaw"
+            (plugin / "hooks").mkdir(parents=True)
+            (plugin / "plugin.json").write_text(json.dumps(cmd_uninstall._COPILOT_PLUGIN_MANIFEST))
+            own = "'/opt/dc/defenseclaw-hook' hook --connector copilot --enterprise-managed --event 'PreToolUse' --hook-surface vscode-local"
+            hooks = {"hooks": {"PreToolUse": [{"type": "command", "command": own, "operator": {"command": "/opt/operator/audit"}}]}}
+            path = plugin / "hooks" / "hooks.json"
+            path.write_text(json.dumps(hooks))
+            with (
+                patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp}, clear=False),
+                patch("defenseclaw.upgrade_shim.managed_deployment", return_value=None),
+            ):
+                cmd_uninstall._remove_orphan_copilot_plugin()
+            self.assertEqual(json.loads(path.read_text()), hooks)
+
+    def test_orphan_cleanup_recognizes_released_windows_plugin(self):
+        fixture = Path(__file__).resolve().parents[2] / "internal" / "enterprisepolicy" / "testdata" / "copilot-vscode-1.0.0" / "windows-hooks.json"
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = Path(tmp) / ".copilot" / "installed-plugins" / "defenseclaw" / "defenseclaw"
+            (plugin / "hooks").mkdir(parents=True)
+            (plugin / "plugin.json").write_text(json.dumps(cmd_uninstall._COPILOT_PLUGIN_MANIFEST))
+            (plugin / "hooks" / "hooks.json").write_bytes(fixture.read_bytes())
+            with (
+                patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp}, clear=False),
+                patch("defenseclaw.upgrade_shim.managed_deployment", return_value=None),
+            ):
+                cmd_uninstall._remove_orphan_copilot_plugin()
+            self.assertFalse(plugin.exists(), "the released Windows plugin was DefenseClaw's")
+
+    def test_orphan_cleanup_removes_current_guarded_plugin_on_both_platforms(self):
+        fixture_dir = (
+            Path(__file__).resolve().parents[2]
+            / "internal"
+            / "enterprisepolicy"
+            / "testdata"
+            / "copilot-vscode-guarded"
+        )
+        for platform_name in ("linux", "windows"):
+            with self.subTest(platform=platform_name), tempfile.TemporaryDirectory() as tmp:
+                fixture = fixture_dir / f"{platform_name}-hooks.json"
+                hooks = json.loads(fixture.read_text(encoding="utf-8"))
+                commands = [handler["command"] for group in hooks["hooks"].values() for handler in group]
+                self.assertTrue(commands)
+                if platform_name == "linux":
+                    self.assertTrue(all(" || exit 0; exec " in command for command in commands))
+                else:
+                    self.assertTrue(all("-EncodedCommand " in command for command in commands))
+                plugin = Path(tmp) / ".copilot" / "installed-plugins" / "defenseclaw" / "defenseclaw"
+                (plugin / "hooks").mkdir(parents=True)
+                (plugin / "plugin.json").write_text(json.dumps(cmd_uninstall._COPILOT_PLUGIN_MANIFEST))
+                (plugin / "hooks" / "hooks.json").write_text(json.dumps(hooks))
+                with (
+                    patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp}, clear=False),
+                    patch("defenseclaw.upgrade_shim.managed_deployment", return_value=None),
+                ):
+                    cmd_uninstall._remove_orphan_copilot_plugin()
+                self.assertFalse(plugin.exists(), f"the guarded {platform_name} plugin was DefenseClaw's")
+
+    def test_orphan_cleanup_removes_guarded_windows_plugin_with_and_without_constrained_fail_closed(self):
+        # The guarded render shipped through 1.0.6 exits $LASTEXITCODE in its
+        # Constrained Language branch; the current one exits 1 first when the
+        # launcher never started. An uninstall owns both.
+        fixture = (
+            Path(__file__).resolve().parents[2]
+            / "internal"
+            / "enterprisepolicy"
+            / "testdata"
+            / "copilot-vscode-guarded"
+            / "windows-hooks.json"
+        )
+        fail_closed = "if ($null -eq $LASTEXITCODE) { exit 1 }; "
+        out_host = "| Microsoft.PowerShell.Core\\Out-Host; "
+
+        def with_branch(command: str, *, closed: bool) -> str:
+            prefix, encoded = command.split(" -EncodedCommand ", 1)
+            script = base64.b64decode(encoded).decode("utf-16le").replace(out_host + fail_closed, out_host)
+            if closed:
+                script = script.replace(out_host + "exit $LASTEXITCODE }", out_host + fail_closed + "exit $LASTEXITCODE }")
+            return prefix + " -EncodedCommand " + base64.b64encode(script.encode("utf-16le")).decode("ascii")
+
+        for closed in (False, True):
+            with self.subTest(constrained_fail_closed=closed), tempfile.TemporaryDirectory() as tmp:
+                hooks = json.loads(fixture.read_text(encoding="utf-8"))
+                for group in hooks["hooks"].values():
+                    for handler in group:
+                        handler["command"] = with_branch(handler["command"], closed=closed)
+                        script = base64.b64decode(handler["command"].split(" -EncodedCommand ", 1)[1]).decode("utf-16le")
+                        self.assertEqual(fail_closed in script, closed)
+                plugin = Path(tmp) / ".copilot" / "installed-plugins" / "defenseclaw" / "defenseclaw"
+                (plugin / "hooks").mkdir(parents=True)
+                (plugin / "plugin.json").write_text(json.dumps(cmd_uninstall._COPILOT_PLUGIN_MANIFEST))
+                (plugin / "hooks" / "hooks.json").write_text(json.dumps(hooks))
+                with (
+                    patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp}, clear=False),
+                    patch("defenseclaw.upgrade_shim.managed_deployment", return_value=None),
+                ):
+                    cmd_uninstall._remove_orphan_copilot_plugin()
+                self.assertFalse(plugin.exists(), f"guarded Windows plugin (fail-closed={closed}) was DefenseClaw's")
+
+    def test_orphan_cleanup_keeps_edited_windows_handler_with_operator_command(self):
+        fixture = Path(__file__).resolve().parents[2] / "internal" / "enterprisepolicy" / "testdata" / "copilot-vscode-1.0.0" / "windows-hooks.json"
+        hooks = json.loads(fixture.read_text())
+        command = hooks["hooks"]["SessionStart"][0]["command"]
+        prefix, encoded = command.split(" -EncodedCommand ", 1)
+        script = base64.b64decode(encoded).decode("utf-16le") + "; Write-Output operator"
+        hooks["hooks"]["SessionStart"][0]["command"] = prefix + " -EncodedCommand " + base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = Path(tmp) / ".copilot" / "installed-plugins" / "defenseclaw" / "defenseclaw"
+            (plugin / "hooks").mkdir(parents=True)
+            (plugin / "plugin.json").write_text(json.dumps(cmd_uninstall._COPILOT_PLUGIN_MANIFEST))
+            path = plugin / "hooks" / "hooks.json"
+            path.write_text(json.dumps(hooks))
+            with (
+                patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp}, clear=False),
+                patch("defenseclaw.upgrade_shim.managed_deployment", return_value=None),
+            ):
+                cmd_uninstall._remove_orphan_copilot_plugin()
+            self.assertTrue(plugin.exists(), "cleanup removed an independent PowerShell statement")
+            self.assertEqual(json.loads(path.read_text()), {"hooks": {"SessionStart": hooks["hooks"]["SessionStart"]}})
 
 
 class _BlockDefenseClawImports:
@@ -1908,6 +2788,7 @@ class ExecutePlanAfterVenvRemovalTests(unittest.TestCase):
             patch.object(cmd_uninstall, "_remove_data_dir", side_effect=remove_data),
             patch.object(cmd_uninstall, "_remove_empty_plugin_cache"),
             patch.object(cmd_uninstall, "remove_own_api_port_claims") as claims,
+            patch.object(cmd_uninstall, "_configured_claim_ports", return_value=frozenset({18970, 4000})),
             patch.object(cmd_uninstall, "_remove_binaries") as binaries,
             capture_click_output(),
         ):
@@ -1915,7 +2796,7 @@ class ExecutePlanAfterVenvRemovalTests(unittest.TestCase):
 
         self.assertTrue(result.succeeded)
         self.assertEqual([p.name for p in result.phases][-2:], ["data removal", "binary removal"])
-        claims.assert_called_once_with()
+        claims.assert_called_once_with(frozenset({18970, 4000}))
         binaries.assert_called_once_with(plan)
 
 
@@ -2018,7 +2899,7 @@ class RetiredSourceInstallCopyTests(unittest.TestCase):
             managed_venv = home / ".defenseclaw" / ".venv"
             managed_venv.mkdir(parents=True)
             (bin_dir / "defenseclaw.cmd").write_text(
-                f'@echo off\r\n"{managed_venv / "Scripts" / "defenseclaw.exe"}" %*\r\n', encoding="utf-8"
+                f'@echo off\r\n"{managed_venv / "Scripts" / "defenseclaw.exe"}" %*\r\n', encoding="utf-8", newline=""
             )
             plan = {
                 "install_root": install_root,
@@ -2034,6 +2915,170 @@ class RetiredSourceInstallCopyTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 windows_uninstall_helper._validate_plan(plan)
 
+    def test_windows_plan_takes_the_hook_install_ps1_renamed_aside(self):
+        # GAP-1760: a restore under hook traffic leaves the running hook as
+        # defenseclaw-hook.exe.old-<yyyyMMddTHHmmssfff>; uninstall takes it.
+        from defenseclaw.commands import windows_uninstall_helper
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            bin_dir = home / ".local" / "bin"
+            bin_dir.mkdir(parents=True)
+            aside = bin_dir / "defenseclaw-hook.exe.old-20261026T103423123"
+            aside.write_bytes(b"MZold")
+            (bin_dir / "claude.exe.old-20261026T103423123").write_bytes(b"not ours")
+            (bin_dir / "defenseclaw-hook.exe.old-1").write_bytes(b"not an installer name")
+            with patch.dict(os.environ, {"USERPROFILE": str(home)}):
+                install_root, targets = cmd_uninstall._owned_binary_targets("win32")
+            self.assertEqual([target for target in targets if ".old-" in target], [str(aside)])
+
+            managed_venv = home / ".defenseclaw" / ".venv"
+            managed_venv.mkdir(parents=True)
+            (bin_dir / "defenseclaw.cmd").write_text(
+                f'@echo off\r\n"{managed_venv / "Scripts" / "defenseclaw.exe"}" %*\r\n', encoding="utf-8", newline=""
+            )
+            plan = {
+                "install_root": install_root,
+                "data_dir": str(home / ".defenseclaw"),
+                "managed_venv": str(managed_venv),
+                "protected_paths": [],
+                "binary_targets": [str(aside)],
+                "remove_data_dir": False,
+            }
+            _root, _data, accepted = windows_uninstall_helper._validate_plan(plan)
+            self.assertEqual(accepted, [os.path.normcase(os.path.abspath(aside))])
+            plan["binary_targets"] = [str(bin_dir / "claude.exe.old-20261026T103423123")]
+            with self.assertRaises(ValueError):
+                windows_uninstall_helper._validate_plan(plan)
+
+
+@unittest.skipIf(sys.platform == "win32", "the per-user Linux and macOS install")
+class NativeHookLauncherRemovalTests(unittest.TestCase):
+    """GAP-0571: --binaries left ~/.local/bin/defenseclaw-hook-user behind."""
+
+    def test_binaries_removes_the_native_hook_launcher_and_skips_it_when_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp).resolve()
+            bin_dir = home / ".local" / "bin"
+            bin_dir.mkdir(parents=True)
+            native = bin_dir / "defenseclaw-hook-user"
+            native.write_bytes(b"\x7fELF native launcher")
+            (bin_dir / "defenseclaw-hook-post").write_bytes(b"\x7fELF guard")
+            unrelated = bin_dir / "rg"
+            unrelated.write_bytes(b"ripgrep")
+            with patch.dict(os.environ, {"HOME": str(home)}):
+                install_root, targets = cmd_uninstall._owned_binary_targets("linux")
+            self.assertEqual(install_root, str(bin_dir))
+            self.assertIn(str(native), targets)
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="linux",
+                install_root=install_root,
+                gateway_path=str(bin_dir / "defenseclaw-gateway"),
+                binary_targets=targets,
+                remove_binaries=True,
+            )
+
+            with patch.object(cmd_uninstall.ux, "ok"):
+                cmd_uninstall._remove_binaries(plan)
+            self.assertFalse(os.path.lexists(native))
+            self.assertFalse(os.path.lexists(bin_dir / "defenseclaw-hook-post"))
+            self.assertTrue(unrelated.is_file())
+
+            # An install without the launcher (macOS, 1.0.7, a source build): a no-op.
+            with patch.object(cmd_uninstall.ux, "ok") as ok:
+                cmd_uninstall._remove_binaries(plan)
+            ok.assert_not_called()
+            self.assertEqual(sorted(os.listdir(bin_dir)), ["rg"])
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MovedDataDirTeardownTests(unittest.TestCase):
+    """GAP-0874: after `config set data_dir` the hook scripts and connector records are in the new folder.
+
+    The plan took the install home for them, so the gateway teardown computed
+    the hook commands of the install home, found none of the commands Setup
+    wrote and refused to clean them up as a tampered entry.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name) / ".defenseclaw"
+        self.store = Path(self._tmp.name) / "state"
+        self.home.mkdir()
+        self.store.mkdir()
+        env = {key: value for key, value in os.environ.items() if not key.startswith("DEFENSECLAW_")}
+        patcher = patch.dict(os.environ, env, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = patch(
+            "defenseclaw.commands.cmd_uninstall.config_module.default_data_path",
+            return_value=str(self.home),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _config(self, text: str) -> None:
+        (self.home / "config.yaml").write_text(text, encoding="utf-8")
+
+    def _plan(self):
+        class Guardrail:
+            connector = "hermes"
+
+        class Claw:
+            home_dir = "~/.openclaw"
+            config_file = "~/.openclaw/openclaw.json"
+
+        class Cfg:
+            guardrail = Guardrail()
+            claw = Claw()
+
+        with patch("defenseclaw.commands.cmd_uninstall.config_module.load", return_value=Cfg()):
+            return cmd_uninstall._build_plan(wipe_data=False, binaries=False, revert_openclaw=True, remove_plugin=True)
+
+    def _teardown_data_dir(self, plan) -> str:
+        completed = type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        with (
+            patch("shutil.which", return_value="defenseclaw-gateway"),
+            patch("subprocess.run", return_value=completed) as run_mock,
+            capture_click_output(),
+        ):
+            self.assertTrue(cmd_uninstall._run_gateway_connector_teardown("hermes", plan=plan))
+        calls = [call.args[0] for call in run_mock.call_args_list]
+        self.assertEqual(len(calls), 2)  # teardown, then verify
+        for argv in calls:
+            self.assertEqual(argv[argv.index("--data-dir") + 1], plan.records_dir)
+        return calls[0][calls[0].index("--data-dir") + 1]
+
+    def test_teardown_and_verify_read_the_data_dir_config_names(self):
+        self._config(f"data_dir: {self.store}\n")
+        plan = self._plan()
+        self.assertEqual(plan.data_dir, str(self.home))
+        self.assertEqual(os.path.realpath(plan.store_dir), os.path.realpath(self.store))
+        self.assertEqual(self._teardown_data_dir(plan), plan.store_dir)
+
+    def test_the_plan_names_the_folder_it_reads_the_records_from(self):
+        self._config(f"data_dir: {self.store}\n")
+        with capture_click_output() as buf:
+            cmd_uninstall._render_plan(self._plan(), dry_run=True)
+        self.assertIn(f"data_dir in config.yaml: {self.store}", buf.getvalue())
+
+    def test_a_backup_record_in_the_moved_folder_selects_its_connector(self):
+        self._config(f"data_dir: {self.store}\n")
+        marker = self.store / "connector_backups" / "codex" / "config.toml.json"
+        marker.parent.mkdir(parents=True)
+        marker.write_text("{}", encoding="utf-8")
+        self.assertIn("codex", self._plan().connectors)
+
+    def test_an_install_that_keeps_the_default_folder_is_unchanged(self):
+        for text in ("", f"data_dir: {self.home}\n"):
+            self._config(text)
+            plan = self._plan()
+            self.assertEqual(plan.store_dir, "")
+            self.assertEqual(self._teardown_data_dir(plan), str(self.home))
+            with capture_click_output() as buf:
+                cmd_uninstall._render_plan(plan, dry_run=True)
+            self.assertNotIn("data_dir in config.yaml", buf.getvalue())

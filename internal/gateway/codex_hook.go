@@ -42,7 +42,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -111,6 +114,10 @@ type codexHookRequest struct {
 	// from the request context (never decoded from the body).
 	activeHome         string
 	activeHomeResolved bool
+
+	// aidToolCallDeclared comes from the hook contract the dispatcher
+	// resolved for this request, never from the body.
+	aidToolCallDeclared bool
 }
 
 // withTrustedActiveHome records the request's trusted home so helpers that
@@ -145,7 +152,7 @@ type codexHookResponse struct {
 	RuleIDs      []string `json:"rule_ids,omitempty"`
 	// RedactionEnabled carries the cloud-controlled per-inspection
 	// redaction directive back through the unified dispatch so
-	// finalizeAgentHook can honor it on the hook_decision event +
+	// finalizeAgentHookAnswer can honor it on the hook_decision event +
 	// audit row. Never serialized on the hook response wire.
 	RedactionEnabled     *bool  `json:"-"`
 	SourceReason         string `json:"-"`
@@ -221,6 +228,15 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	req codexHookRequest,
 	profile connector.HookProfile,
 ) codexHookResponse {
+	callCWD := req.CWD
+	if req.HookEventName == "PreToolUse" || req.HookEventName == "PermissionRequest" {
+		callCWD = codexToolCallCWD(ctx, req)
+	}
+	// The snapshot takes the folder the call runs in, not only the session
+	// folder, before the call is judged (GAP-1388).
+	startup := a.applyInstructionStartup(ctx, "codex", req.SessionID, req.HookEventName, req.Source, callCWD)
+	ctx = a.withInstructionStartup(ctx, "codex", req.SessionID, startup)
+	a.mcpSessionStarted(ctx, "codex", req.SessionID, req.HookEventName, req.Source)
 	mode := sandboxHookMode(ctx, "codex", a.codexMode(ctx))
 	// Sandbox hooks are always judged, and enforced (see evaluateAgentHook).
 	if a.scannerCfg != nil && !sandboxHookForConnector(ctx, "codex") && !a.codexEnabled() {
@@ -247,9 +263,10 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		}
 	case "UserPromptSubmit":
 		if !a.managedAIDOnly() && (cfg == nil || !cfg.SecureClientIntegration()) {
-			if judge := a.judgeFor(ctx); judge != nil {
+			for _, judge := range a.hookSessionJudges(ctx) {
 				judge.ObserveSessionPrompt(ctx, req.Prompt)
 			}
+			a.observeUserDownloadRequest(ctx, req.Prompt)
 		}
 		// Secure Client keeps the prompt of main, so AI Defense is sent the
 		// text it was sent before (issue #1092).
@@ -273,6 +290,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	case "PreToolUse", "PermissionRequest":
 		toolName := codexToolName(req)
 		toolArgs := codexToolArgs(req)
+		toolCWD := callCWD
 		actionTool, resourceIdentity := trustedToolActionFromContext(
 			ctx, "codex", toolName, toolName,
 		)
@@ -282,6 +300,13 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			Direction:     "tool_call",
 			Connector:     "codex",
 			MCPServerName: a.codexMCPServerName(ctx, req),
+			callerCWD:     toolCWD,
+			toolUseID:     req.ToolUseID,
+
+			aidToolCallDeclared: req.aidToolCallDeclared,
+			toolNameIsLabel:     strings.TrimSpace(req.ToolName) == "",
+			toolArgsAbsent:      req.ToolInput == nil,
+			hookEvent:           req.HookEventName,
 		}
 		command, commandTool := sandboxShellCommand(ctx, "codex", req.HookEventName, toolName, actionTool, toolArgs)
 		if command == nil {
@@ -290,7 +315,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		actionInput := actionfacts.Input{
 			Tool:                     actionTool,
 			Args:                     toolArgs,
-			CWD:                      req.CWD,
+			CWD:                      toolCWD,
 			ActiveHome:               hookActiveHome(ctx),
 			ToolResourceIdentity:     resourceIdentity,
 			CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
@@ -306,7 +331,8 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			LegacyText:                    string(toolArgs),
 			Connector:                     "codex",
 			EnforcementCapable:            true,
-			ResolvedWriteTargets:          resolvedWritesFromContext(ctx),
+			ManagedHookOverflowHold:       managedWindowsHookOverflowHold(ctx, a.scannerCfg, "codex", runtime.GOOS),
+			ResolvedWriteTargets:          commandHookResolvedWrites(ctx, cfg, actionInput),
 			SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
 			DowngradeReadOnlyDataArgs:     mode != "action",
 			SandboxGuestCWD:               req.guestCWD,
@@ -342,8 +368,17 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
 	action := rawAction
-	wouldBlock := rawAction == "block" && mode != "action"
-	if mode != "action" && rawAction == "block" {
+	stateMutation := a.provenHookActionMustEnforce(ctx, verdict)
+	effectiveMode := mode
+	if stateMutation {
+		effectiveMode = "action"
+	}
+	if capable, _ := mapHookActionForProfile("block", effectiveMode, req.HookEventName,
+		profile.Capabilities, profile, nil); capable != "block" {
+		stateMutation = false
+	}
+	wouldBlock := rawAction == "block" && mode != "action" && !stateMutation
+	if mode != "action" && rawAction == "block" && !stateMutation {
 		action = "allow"
 	}
 	if mode != "action" && (rawAction == "alert" || rawAction == "confirm") {
@@ -360,13 +395,13 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			asset.decision, true, asset.targetType, req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings,
 		)
 		if mergedAction == "block" {
-			capable, capableWouldBlock := mapHookActionForProfile(
-				"block",
-				mode,
+			capable, capableWouldBlock := mapAssetBlockForProfile(
+				effectiveMode,
 				req.HookEventName,
 				caps,
 				profile,
 				req.Payload,
+				cfg != nil && cfg.SecureClientIntegration(),
 			)
 			if capable != "block" {
 				mergedAction = capable
@@ -430,7 +465,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 // prompt. It tells the model to name the task and "Do not answer the request",
 // so the injection judge read it, next to the user prompt after it, as an
 // instruction override and blocked a benign prompt (GAP-0230).
-var codexTitleHelperPreamble = regexp.MustCompile(`^\s*` +
+var codexTitleHelperPreamble = lazyregexp.New(`^\s*` +
 	regexp.QuoteMeta("Generate a concise, single-line task title of at most ") + `\d+` +
 	regexp.QuoteMeta(" characters and under five words where possible. Start with an imperative verb."+
 		" Capitalize only the first word unless the user's language, proper nouns, acronyms, or code terms require otherwise."+
@@ -524,7 +559,7 @@ func (a *APIServer) codexEnabled() bool {
 	// still calls in. EffectiveEnabled defaults to true, so this is a
 	// no-op for single-connector installs and any connector never
 	// explicitly disabled.
-	if cfg.ManualConnectorConfigured("codex") && !cfg.Guardrail.EffectiveEnabled("codex") {
+	if cfg.ConnectorDisabled("codex") {
 		return false
 	}
 	if cfg.ConnectorHookConfig("codex").Enabled {
@@ -538,13 +573,13 @@ func (a *APIServer) codexEnabled() bool {
 	if cfg.Guardrail.HasConnector("codex") {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(cfg.Guardrail.Connector), "codex")
+	return cfg.Guardrail.NamesConnector("codex")
 }
 
 func (a *APIServer) codexMode(ctx context.Context) string {
 	// The request's guardrail profile, when one applies, replaces the live
 	// configuration (see guardrail_profile.go).
-	return hookModeForConfig(a.decisionConfigFrom(ctx, a.runtimeConfigSnapshot()), "codex")
+	return a.decisionConfigFrom(ctx, a.runtimeConfigSnapshot()).HookModeForConnector("codex")
 }
 
 func codexResponseFor(event, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool, policy ...redaction.SinkPolicy) codexHookResponse {
@@ -665,6 +700,11 @@ func codexOutput(event, action, rawAction, reason, additional string) map[string
 func codexAdditionalContext(rawAction, severity, reason, mode string, wouldBlock bool) string {
 	if rawAction == "allow" || rawAction == "" {
 		return ""
+	}
+	if strings.HasPrefix(reason, "DefenseClaw is still scanning MCP server ") ||
+		strings.HasPrefix(reason, "DefenseClaw could not read admission for MCP server ") ||
+		strings.HasPrefix(reason, mcpAdmissionAllowedLead) {
+		return reason
 	}
 	if mode != "action" && guardrailSeverityRank(severity) < codexObserveContextMinSeverity {
 		return ""
@@ -831,6 +871,28 @@ func reasonOrDefault(reason string) string {
 
 func normalizeCodexAction(action string) string {
 	return normalizedGuardrailAction(action)
+}
+
+// codexToolCallCWD is the folder a Codex tool call runs in: a shell call
+// runs in its workdir, from tool_input or, since the Codex hook leaves it
+// out, from the call in the session rollout (codexTranscriptCallWorkdir).
+func codexToolCallCWD(ctx context.Context, req codexHookRequest) string {
+	if !codexShellExecutionTool(codexToolName(req)) {
+		return req.CWD
+	}
+	workdir, _ := req.ToolInput["workdir"].(string)
+	if workdir == "" {
+		workdir = codexTranscriptCallWorkdir(ctx, req)
+	}
+	if workdir == "" {
+		// A managed gateway cannot read the rollout: its hook client did, as
+		// the user, and sent the workdir of the call (GAP-0991).
+		workdir = resolvedWritesFromContext(ctx)[hookpaths.CallWorkdirKey]
+	}
+	if workdir == "" {
+		return req.CWD
+	}
+	return agentHookTrustedActionCWDReported(ctx, "codex", req.CWD, "", workdir)
 }
 
 func codexToolName(req codexHookRequest) string {
@@ -1048,6 +1110,7 @@ func mergeCodexToolResultVerdicts(
 	}
 	merged.WouldBlock = source.WouldBlock || untrusted.WouldBlock
 	merged.laneVerdict = source.laneVerdict || untrusted.laneVerdict
+	merged.decisionConfirm = mergedDecisionConfirm(merged.Action, source, untrusted)
 	if source.RedactionEnabled != nil || untrusted.RedactionEnabled != nil {
 		enabled := source.RedactionEnabled != nil && *source.RedactionEnabled ||
 			untrusted.RedactionEnabled != nil && *untrusted.RedactionEnabled
@@ -1494,7 +1557,7 @@ func codexReadVerifiedGitDiffCurrentLines(
 		return nil, false
 	}
 	target := filepath.Join(realCWD, physicalRelative)
-	listed, err := os.Lstat(target)
+	listed, err := pathidentity.LstatPinned(target)
 	if err != nil || !listed.Mode().IsRegular() || listed.Size() < 0 ||
 		listed.Size() > codexTrustedSourceTreeMaxBytes ||
 		!codexSingleLinkRegularFile(target, listed) {
@@ -2520,7 +2583,7 @@ func codexReaderTargetWithType(
 func codexCatInputs(argv []string) (codexStaticReaderInputs, bool) {
 	var inputs codexStaticReaderInputs
 	options := true
-	for _, arg := range argv[1:] {
+	for _, arg := range argvOperands(argv) {
 		if options && arg == "--" {
 			options = false
 			continue
@@ -2766,8 +2829,8 @@ func codexSafeAwkProgram(program string) bool {
 			start := i
 			for i < len(program) {
 				char = program[i]
-				if char != '_' && !(char >= 'A' && char <= 'Z') &&
-					!(char >= 'a' && char <= 'z') && !(char >= '0' && char <= '9') {
+				if char != '_' && (char < 'A' || char > 'Z') &&
+					(char < 'a' || char > 'z') && (char < '0' || char > '9') {
 					break
 				}
 				i++

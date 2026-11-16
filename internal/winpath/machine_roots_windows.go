@@ -104,6 +104,21 @@ func TrustedProgramFiles() (string, error) {
 	return readTrustedMachineRoot(key, "ProgramFilesDir", "Program Files")
 }
 
+// TrustedProgramFilesX86 resolves the protected 32-bit Program Files root
+// from the machine registration, never the process environment.
+func TrustedProgramFilesX86() (string, error) {
+	key, err := registry.OpenKey(
+		registry.LOCAL_MACHINE,
+		windowsCurrentVersionKey,
+		registry.QUERY_VALUE|registry.WOW64_64KEY,
+	)
+	if err != nil {
+		return "", fmt.Errorf("open trusted 32-bit Program Files registration: %w", err)
+	}
+	defer key.Close()
+	return readTrustedMachineRoot(key, "ProgramFilesDir (x86)", "Program Files (x86)")
+}
+
 // TrustedProgramData resolves the protected machine-wide ProgramData root.
 func TrustedProgramData() (string, error) {
 	key, err := registry.OpenKey(

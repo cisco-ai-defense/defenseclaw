@@ -18,13 +18,99 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // Recovery evidence and failure guidance for the standalone Windows
 // lifecycle. The Windows-only wrapper feeds these the installer's report;
 // the logic itself is platform-neutral so every platform tests it.
 
-const windowsEnterpriseStandaloneSetupName = "DefenseClawSetup-Enterprise-Standalone-x64.exe"
+// windowsEnterpriseSetupCommand is the standalone Setup run with args, as a
+// PowerShell command in backticks: `& '.\DefenseClawSetup-Enterprise-Standalone-x64.exe' ...`.
+// Setup is not installed on a managed computer (cowork-1-0-8 GAP-0095), so
+// the bare name a hint printed was not a command that runs there. A hint that
+// names it ends with windowsEnterpriseSetupSourceNote, once; one that needs no
+// payload names the installed CLI instead (windowsEnterpriseAdminCommand).
+func windowsEnterpriseSetupCommand(args ...string) string {
+	return "`" + managed.WindowsSetupCommand(args...) + "`"
+}
+
+// windowsEnterpriseSetupSourceNote ends a hint that names a Setup command: it
+// says that Setup is not on the computer and where it comes from.
+const windowsEnterpriseSetupSourceNote = " " + managed.WindowsSetupSource + "."
+
+type windowsEnterpriseIgnoredDeploymentRecord struct {
+	profile string
+	path    string
+	reason  string
+}
+
+// windowsEnterpriseConfigRecoveryGuidance names the recovery supported by a
+// deployment with a confirmed policy bundle. Its config cannot be supplied
+// through CONFIG=, even when the installed bytes were restored exactly.
+func windowsEnterpriseConfigRecoveryGuidance(result *enterprisestatus.Result, bundleMode bool) {
+	if !bundleMode || result == nil || result.Profile != "standalone" || result.Platform != "windows" {
+		return
+	}
+	const ordinary = "; run ensure with the intended config to put the managed config back"
+	// The installed CLI, not Setup: it re-applies the confirmed bundle from
+	// the bundle store and records its generation again, which Setup /repair
+	// refuses to do for a deployment that stored a bundle and names this
+	// command instead.
+	bundle := "; run " + windowsEnterpriseAdminCommand("repair", "--json") + " from an elevated PowerShell prompt to restore the confirmed policy bundle"
+	for i := range result.Warnings {
+		if result.Warnings[i].Code == "config_edited_outside_lifecycle" {
+			result.Warnings[i].Message = strings.Replace(result.Warnings[i].Message, ordinary, bundle, 1)
+		}
+	}
+	for i := range result.Errors {
+		if result.Errors[i].Code == "lifecycle_error" &&
+			strings.HasPrefix(result.Errors[i].Message, "config generation is unproven or records a hand edit;") {
+			result.Errors[i].Message = "config generation is unproven or records a hand edit" + bundle
+		}
+	}
+}
+
+// An owner mismatch on the standalone record left under StateRoot can make a
+// later ensure refuse its probe. A forced metadata-free purge may leave that
+// record behind, so the owner has to be restored before the last resort.
+func windowsEnterpriseDeploymentRecordOwnerNextStep() string {
+	return " Next step: as an administrator, inspect the deployment record owner and restore its expected owner and group (BUILTIN\\Administrators) if this record belongs to the DefenseClaw deployment." +
+		" If /ensure still refuses, as a last resort run " + windowsEnterpriseSetupCommand("/uninstall", "FORCE=1", "PURGE=1", "JSON=1") +
+		" as LocalSystem, then run " + windowsEnterpriseSetupCommand("/ensure", "CONFIG=<config.yaml>", "JSON=1") +
+		" with an administrator-only config." + windowsEnterpriseSetupSourceNote
+}
+
+func windowsEnterpriseUntrustedDeploymentRecordMessage(record windowsEnterpriseIgnoredDeploymentRecord) string {
+	// The Secure Client warning must retain the original text, including the
+	// validator's path, without sending its operator to Standalone Setup.
+	if record.profile == "secure_client" {
+		return "ignored a deployment record an administrator did not write: " + record.path + ": " + record.reason
+	}
+	detail := record.path + ": " + record.reason
+	if strings.Contains(strings.ToLower(record.reason), strings.ToLower(record.path)) {
+		detail = record.reason
+	}
+	if strings.HasPrefix(strings.ToLower(record.reason), strings.ToLower(record.path)+": owner ") &&
+		strings.Contains(record.reason, " is not trusted") {
+		return "ignored a deployment record an administrator did not write: " + detail +
+			windowsEnterpriseDeploymentRecordOwnerNextStep()
+	}
+	return "ignored an untrusted deployment record: " + detail +
+		" Next step: as an administrator, inspect the named trust failure. For this standalone deployment, remove the untrusted deployment record after confirming its origin, replace any reparse point with a regular path, and correct unsafe permissions on the named path and affected ancestors." +
+		" A forced /uninstall FORCE=1 PURGE=1 can keep StateRoot and the bad record, so remove or fix those paths before running " +
+		windowsEnterpriseSetupCommand("/ensure", "CONFIG=<config.yaml>", "JSON=1") + " with an administrator-only config." + windowsEnterpriseSetupSourceNote
+}
+
+func windowsEnterpriseRecordOwnerMismatchNextStep(message string) string {
+	if strings.Contains(message, "managed path owner/group do not match the exact canonical descriptor after ACL replacement:") &&
+		strings.Contains(strings.ToLower(message), `\install\deployment.json`) {
+		return windowsEnterpriseDeploymentRecordOwnerNextStep()
+	}
+	return ""
+}
 
 // windowsEnterpriseRecoveryGatewayRun is one managed-hook lifecycle step
 // that a pending transaction's recovery ran with the running Setup's
@@ -182,7 +268,10 @@ func windowsEnterpriseRecoveryGatewayWarnings(
 var (
 	// Internal security-descriptor detail that a failed lifecycle must not
 	// hand the administrator as its error.
-	windowsEnterpriseSecurityDetailPattern = regexp.MustCompile(`(?i)\b(DACLs?|ACEs?|ACLs?|SDDL|security descriptors?)\b`)
+	// A word inside a file name or a path (codex-requirements-acl-backup.json)
+	// is not detail: it took the rest of the message, and the icacls fix in
+	// it, away (GAP-0602).
+	windowsEnterpriseSecurityDetailPattern = lazyregexp.New(`(?i)(?:^|[^\w\\/.-])(DACLs?|ACEs?|ACLs?|SDDL|security descriptors?)(?:$|[^\w\\/-])`)
 	windowsEnterpriseSecurityRewrites      = []struct {
 		pattern *regexp.Regexp
 		plain   string
@@ -204,7 +293,7 @@ var (
 			"DefenseClaw could not read the permissions on $1 ($2)",
 		},
 	}
-	windowsEnterpriseDrivePathPattern = regexp.MustCompile(`[A-Za-z]:\\`)
+	windowsEnterpriseDrivePathPattern = lazyregexp.New(`[A-Za-z]:\\`)
 )
 
 // windowsEnterpriseStandaloneErrorText turns a lifecycle diagnostic into the
@@ -259,7 +348,7 @@ func windowsEnterprisePerUserDataDirNextStep(original, text string) string {
 	return ". DefenseClaw's managed install did not create " + folder +
 		"; a per-user DefenseClaw install leaves it, also after `defenseclaw uninstall --binaries`." +
 		" Next step: have that user run `defenseclaw uninstall --all --binaries --yes`, or move " + folder +
-		" out of the profile, then run Setup again."
+		" out of the profile, then run the same command again."
 }
 
 // windowsEnterpriseCommittedJournalNextStep says what an install, upgrade or
@@ -279,12 +368,12 @@ func windowsEnterpriseCommittedJournalNextStep(original string, installed bool) 
 				" have that user run `defenseclaw uninstall --all --binaries --yes`, or move the folder out of the profile."
 		}
 	}
-	return step + " Next step: run Setup /ensure again; it removes the stale journal and converges."
+	return step + " Next step: run " + windowsEnterpriseAdminCommand("ensure") + " from an elevated PowerShell prompt again; it removes the stale journal and converges."
 }
 
 // windowsEnterpriseANSIPattern matches the color sequences PowerShell may
 // write around an error record.
-var windowsEnterpriseANSIPattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+var windowsEnterpriseANSIPattern = lazyregexp.New(`\x1b\[[0-9;]*m`)
 
 // windowsEnterpriseExecutionPolicyRefusal explains a lifecycle that
 // PowerShell refused to start because of the machine execution policy. A
@@ -322,7 +411,7 @@ func windowsEnterpriseRolledBackMessage(version string) string {
 	}
 	return "ensure rolled back an interrupted lifecycle change (for example an upgrade cut off by a restart or a power loss), and " +
 		restored + " runs again. The interrupted change did not finish: run the Setup that started it again with /ensure " +
-		"(" + windowsEnterpriseStandaloneSetupName + " of that release, or let the MDM retry its app assignment)"
+		"(the Setup of that release from your MDM package or the release download, or let the MDM retry its app assignment)"
 }
 
 // windowsEnterpriseInvalidRuntimeBundleNextStep names the next step when a
@@ -353,7 +442,8 @@ func windowsEnterpriseMissingArtifactNextStep(original string, hasPayload bool) 
 		return ""
 	}
 	return ". The installed CLI carries no payload to restore it from. Next step: run DefenseClaw Setup of the installed release as LocalSystem: " +
-		windowsEnterpriseStandaloneSetupName + " /repair JSON=1 (or /ensure CONFIG=<config.yaml> JSON=1); it restores the file from its own payload"
+		windowsEnterpriseSetupCommand("/repair", "JSON=1") + " (or " + windowsEnterpriseSetupCommand("/ensure", "CONFIG=<config.yaml>", "JSON=1") +
+		"); it restores the file from its own payload. " + managed.WindowsSetupSource
 }
 
 // windowsEnterpriseLifecycleLogPath is the lifecycle log Setup and the CLI
@@ -368,13 +458,13 @@ func windowsEnterpriseInstallerBuildMismatchText(message, action string, purge b
 	if !strings.Contains(message, "installer module SHA-256 does not match the pinned payload manifest") {
 		return "", false
 	}
-	command := action
+	var flags []string
 	if action == "uninstall" && purge {
-		command += " --purge"
+		flags = append(flags, "--purge")
 	}
 	return "this CLI does not match the installed DefenseClaw: the enterprise installer module it carries is not the one the installed deployment recorded" +
 		" (a CLI from another DefenseClaw build, or a changed module file), so the " + action + " stopped before it changed anything." +
-		" Next step: run the installed CLI, " + windowsEnterpriseAdminCommand(command) +
+		" Next step: from an elevated PowerShell prompt run the installed CLI, " + windowsEnterpriseAdminCommand(action, flags...) +
 		", or the DefenseClaw Setup of the installed release; to move to another release, run that release's Setup", true
 }
 
@@ -418,9 +508,9 @@ func windowsEnterpriseFirstWindowsPath(text string) string {
 func windowsEnterpriseStandaloneSetupCommand(action, configPath string, purge bool) string {
 	if action == "uninstall" {
 		if purge {
-			return windowsEnterpriseStandaloneSetupName + " /uninstall PURGE=1 JSON=1"
+			return windowsEnterpriseSetupCommand("/uninstall", "PURGE=1", "JSON=1")
 		}
-		return windowsEnterpriseStandaloneSetupName + " /uninstall JSON=1"
+		return windowsEnterpriseSetupCommand("/uninstall", "JSON=1")
 	}
 	config := strings.TrimSpace(configPath)
 	switch {
@@ -429,41 +519,143 @@ func windowsEnterpriseStandaloneSetupCommand(action, configPath string, purge bo
 	case strings.ContainsAny(config, " \t"):
 		config = `"` + config + `"`
 	}
-	return windowsEnterpriseStandaloneSetupName + " /ensure CONFIG=" + config + " JSON=1"
+	// CONFIG= stays one bare word: the MDM wrapper swaps its staging copy of
+	// the config for the administrator's own path in this text
+	// (ConvertTo-WrapperPublicText), and PowerShell passes the word on.
+	return "`" + managed.WindowsSetupCommand("/ensure") + " CONFIG=" + config + " JSON=1`"
 }
 
 // windowsEnterprisePendingInspectionStep is what status and verify say about
-// a pending transaction. Status named only not_ready and the installed
-// version, and verify said "run Repair", which an administrator shell cannot
-// use to recover it; a failed Setup names this same command.
+// a pending transaction. Its service states are reported separately: an
+// in-flight ensure can have all four services running. A failed Setup names
+// this same recovery command.
 func windowsEnterprisePendingInspectionStep(configPath string) string {
-	return "A lifecycle transaction is pending, so the DefenseClaw services stay stopped until it finishes or is recovered. " +
+	return "A lifecycle transaction is pending; check the reported service states until it finishes or is recovered. " +
 		"If no DefenseClaw Setup or lifecycle command is running now, run DefenseClaw Setup (this release or a newer one) as LocalSystem: " +
-		windowsEnterpriseStandaloneSetupCommand("ensure", configPath, false) + "; as LocalSystem, Setup recovers the transaction with its own verified gateway."
+		windowsEnterpriseStandaloneSetupCommand("ensure", configPath, false) + "; as LocalSystem, Setup recovers the transaction with its own verified gateway." +
+		windowsEnterpriseSetupSourceNote
+}
+
+// windowsEnterprisePendingLead says what a pending transaction means for the
+// DefenseClaw services, from their states when the result is written. It said
+// "the DefenseClaw services stay stopped" also after a rollback had restarted
+// every one of them (GAP-0029). It says they keep enforcing only when every
+// service of the standalone roster is listed and running: services omits
+// the ones the service manager does not have, and a gateway a pending
+// transaction left absent beside a running guardian read as enforcing.
+func windowsEnterprisePendingLead(services []enterprisestatus.Service) string {
+	switch stopped := windowsEnterpriseStoppedRequiredServices(services); {
+	case len(stopped) == 1:
+		return "The transaction is still pending: the " + stopped[0] + " service stays stopped until it is recovered."
+	case len(stopped) > 1:
+		return "The transaction is still pending: the " + strings.Join(stopped, ", ") + " services stay stopped until it is recovered."
+	}
+	if windowsEnterpriseStandaloneRosterRunning(services) {
+		return "The transaction is still pending: the DefenseClaw services are running and keep enforcing, but the deployment cannot be changed until the transaction is recovered."
+	}
+	return "The transaction is still pending, so the deployment cannot be changed until it is recovered."
+}
+
+// windowsEnterprisePendingUnsettledLead is the lead for a rollback that a Codex
+// writer which never settles left pending (GAP-0999). The services run, but
+// the rollback did not finish, so it does not say they keep enforcing: what is
+// covered is what verify says once /repair has finished it.
+func windowsEnterprisePendingUnsettledLead(services []enterprisestatus.Service) string {
+	switch stopped := windowsEnterpriseStoppedRequiredServices(services); {
+	case len(stopped) == 1:
+		return "The transaction is still pending: the " + stopped[0] + " service stays stopped until it is recovered."
+	case len(stopped) > 1:
+		return "The transaction is still pending: the " + strings.Join(stopped, ", ") + " services stay stopped until it is recovered."
+	}
+	return "The transaction is still pending and the rollback is not finished: the DefenseClaw services are running, but protection may be incomplete until /repair finishes it (verify says what is not covered), and the deployment cannot be changed until the transaction is recovered."
+}
+
+// windowsEnterpriseStandaloneRosterRunning reports whether services lists
+// every service of the standalone roster as running. A service it does not
+// list (absent) counts as not running.
+func windowsEnterpriseStandaloneRosterRunning(services []enterprisestatus.Service) bool {
+	for _, required := range winpath.EnterpriseStandaloneServices {
+		running := false
+		for _, service := range services {
+			if strings.EqualFold(strings.TrimSpace(service.Name), required.Name) &&
+				strings.EqualFold(strings.TrimSpace(service.State), "running") {
+				running = true
+				break
+			}
+		}
+		if !running {
+			return false
+		}
+	}
+	return true
 }
 
 // windowsEnterpriseStandaloneNextStep names what the administrator runs
 // after a failed lifecycle left its transaction pending: the exact Setup
 // command, and when the recovery could not use this Setup's gateway, why.
-// It is empty when nothing is pending.
+// busy is a run refused lifecycle_busy. force is a FORCE=1 uninstall.
+// services are the DefenseClaw services as the service manager reports them
+// now. It is empty when nothing is pending and the run was not busy.
 func windowsEnterpriseStandaloneNextStep(
 	action string,
 	configPath string,
 	purge bool,
+	busy bool,
+	force bool,
 	pending bool,
 	runs []windowsEnterpriseRecoveryGatewayRun,
 	refusal *windowsEnterpriseRecoveryGatewayRefusal,
+	services []enterprisestatus.Service,
 ) string {
+	step := windowsEnterpriseStandaloneNextStepText(action, configPath, purge, busy, force, pending, runs, refusal, services)
+	if step == "" {
+		return ""
+	}
+	// Every branch runs Setup, which a managed computer does not keep.
+	return step + windowsEnterpriseSetupSourceNote
+}
+
+func windowsEnterpriseStandaloneNextStepText(
+	action string,
+	configPath string,
+	purge bool,
+	busy bool,
+	force bool,
+	pending bool,
+	runs []windowsEnterpriseRecoveryGatewayRun,
+	refusal *windowsEnterpriseRecoveryGatewayRefusal,
+	services []enterprisestatus.Service,
+) string {
+	command := windowsEnterpriseStandaloneSetupCommand(action, configPath, purge)
+	if busy {
+		// The lock is held by a live lifecycle run, and a pending
+		// transaction is that run's: it finishes or rolls back on its own.
+		// This run did not recover anything, so the FORCE=1 last resort
+		// would remove a deployment an upgrade is still changing (GAP-0622).
+		return "Another DefenseClaw lifecycle run (an install, upgrade, repair or uninstall) is in progress and holds the lock; this run changed nothing." +
+			" Next step: wait for that run to finish, then run " + command + " again (an MDM retries exit 1618 on its own)."
+	}
 	if !pending {
 		return ""
 	}
-	command := windowsEnterpriseStandaloneSetupCommand(action, configPath, purge)
-	const lead = "The transaction is still pending: the DefenseClaw services stay stopped until it is recovered."
+	lead := windowsEnterprisePendingLead(services)
+	if force && action == "uninstall" {
+		// The forced uninstall is the last resort the other steps name, so
+		// it is never told to run itself "otherwise" (GAP-0848). What stops
+		// it is a program that keeps a DefenseClaw file open, which the
+		// error names; a restart closes every such program.
+		forced := windowsEnterpriseSetupCommand("/uninstall", "FORCE=1", "JSON=1")
+		return lead + " The forced uninstall did not finish." +
+			" Next step: end or close each program the error above says holds a DefenseClaw file (or fix what else it names), then run " + forced + " again as LocalSystem." +
+			" If the error names no program, or the program cannot be ended, restart Windows and run " + forced + " as LocalSystem before any other DefenseClaw Setup;" +
+			" a restart closes every program that holds a DefenseClaw file. If it still fails, send the lifecycle log (" +
+			windowsEnterpriseLifecycleLogPath + ") to DefenseClaw support."
+	}
 	const recovers = "; as LocalSystem, Setup recovers the transaction with its own verified gateway."
 	// The last resort when no recovery finishes: it removes the deployment
 	// without recovering the transaction (GAP-0920, GAP-1041).
 	lastResort := " If you cannot wait for that, remove the deployment without recovering the transaction, as LocalSystem: " +
-		windowsEnterpriseStandaloneSetupName + " /uninstall FORCE=1 JSON=1, then install again with /ensure."
+		windowsEnterpriseSetupCommand("/uninstall", "FORCE=1", "JSON=1") + ", then install again with /ensure."
 	if len(runs) != 0 {
 		return lead + " Recovery ran with this Setup's verified gateway and still did not finish." +
 			" Next step: leave DefenseClaw files and permissions as they are, send the lifecycle log to DefenseClaw support," +
@@ -511,11 +703,25 @@ func windowsEnterpriseStandaloneNextStep(
 			return lead + " This run was LocalSystem and its recovery did not finish, so running it again unchanged fails the same way." +
 				" Next step: if the error above names something to fix (a path, an account or an icacls command), fix it and run " + command +
 				". Otherwise, or if it fails the same way, remove the deployment without recovering the transaction, as LocalSystem: " +
-				windowsEnterpriseStandaloneSetupName + " /uninstall FORCE=1 JSON=1, then install again with /ensure, and send the lifecycle log (" +
+				windowsEnterpriseSetupCommand("/uninstall", "FORCE=1", "JSON=1") + ", then install again with /ensure, and send the lifecycle log (" +
 				windowsEnterpriseLifecycleLogPath + ") to DefenseClaw support."
 		}
 		return lead + " Next step: run DefenseClaw Setup (this release or a newer one) as LocalSystem: " + command + recovers
 	}
+}
+
+// windowsEnterpriseHeldRollbackNextStep is the next step of a rollback or
+// recovery that a program holding a Codex file open stopped (GAP-0803): the
+// error already says to close that program and run Setup again, and that the
+// same command then finishes the rollback, so the standard recovery steps
+// ("it fails the same way", the forced uninstall) are not added. Only the
+// pending transaction and the stopped services are named. Without a pending
+// transaction (the gate before the run) it adds nothing, as before.
+func windowsEnterpriseHeldRollbackNextStep(pending bool, services []enterprisestatus.Service) string {
+	if !pending {
+		return ""
+	}
+	return windowsEnterprisePendingLead(services)
 }
 
 // windowsEnterpriseRunningAsLocalSystem reports a lifecycle running as
@@ -531,16 +737,18 @@ func windowsEnterpriseStoppedServiceNextStep(services []enterprisestatus.Service
 	if len(stopped) == 0 {
 		return ""
 	}
-	return ". Next step: from an elevated PowerShell prompt run " + windowsEnterpriseAdminCommand("repair") + ", or " +
-		windowsEnterpriseStandaloneSetupName + " /repair JSON=1, to start " + strings.Join(stopped, ", ") + " again"
+	return ". Next step: from an elevated PowerShell prompt run " + windowsEnterpriseAdminCommand("repair") +
+		" to start " + strings.Join(stopped, ", ") + " again"
 }
 
 // windowsEnterpriseAdminCommand is an `enterprise windows <action>` command
 // for the standalone profile as an administrator types it. Setup puts no
 // DefenseClaw command on PATH, so a bare `defenseclaw ...` hint was "not
 // recognized"; the installed CLI is named by its path (GAP-1183, GAP-1338).
-func windowsEnterpriseAdminCommand(action string) string {
-	return "`& '" + managedWindowsAdminCLI() + "' enterprise windows " + action + " --profile standalone`"
+// flags come before --profile.
+func windowsEnterpriseAdminCommand(action string, flags ...string) string {
+	args := append([]string{"enterprise", "windows", action}, flags...)
+	return managedWindowsCommand(append(args, "--profile", "standalone")...)
 }
 
 // windowsEnterpriseStandaloneLifecycleAction reports whether a standalone
@@ -613,11 +821,40 @@ func windowsEnterpriseEnumeratorFailureText(message string) (text, code string, 
 	if text == "" {
 		return message, "", false
 	}
-	if label, _, found := strings.Cut(strings.TrimPrefix(text, "the managed config's "), " "); found &&
-		windowsEnterpriseRulePackLabel(label) && strings.Contains(text, "cannot read") {
+	if label, detail, found := strings.Cut(strings.TrimPrefix(text, "the managed config's "), " "); found &&
+		windowsEnterpriseRulePackServiceReadRefusal(label, detail) {
 		code = "rule_pack_unreadable"
 	}
 	return text, code, true
+}
+
+// windowsEnterpriseRulePackUnreadable reports whether message refuses a rule
+// pack the gateway service account cannot read: Setup's preflight text for a
+// selected pack, or the config check's "managed standalone <setting> <dir>:
+// the gateway service account ... cannot read" for any rule-pack setting.
+// The config check refuses a guardrail.custom_packs path that no setting
+// selects before the preflight reads the selected packs, and that refusal
+// got invalid_arguments although troubleshooting.mdx documents
+// rule_pack_unreadable for it (GAP-0314).
+func windowsEnterpriseRulePackUnreadable(message string) bool {
+	if strings.Contains(message, standaloneRulePackUnreadableText) {
+		return true
+	}
+	_, rest, found := strings.Cut(message, "managed standalone ")
+	if !found {
+		return false
+	}
+	label, detail, found := strings.Cut(rest, " ")
+	return found && windowsEnterpriseRulePackServiceReadRefusal(label, detail)
+}
+
+// windowsEnterpriseRulePackServiceReadRefusal reports whether detail, the
+// text after a setting's label, says the gateway service account cannot read
+// the pack or list a folder above it, and label is a rule-pack setting.
+func windowsEnterpriseRulePackServiceReadRefusal(label, detail string) bool {
+	return windowsEnterpriseRulePackLabel(label) &&
+		strings.Contains(detail, "the gateway service account ") &&
+		(strings.Contains(detail, " cannot read ") || strings.Contains(detail, " cannot list or read "))
 }
 
 // windowsEnterpriseRulePackLabel reports whether label is a rule-pack

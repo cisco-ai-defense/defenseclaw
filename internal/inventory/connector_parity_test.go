@@ -71,9 +71,7 @@ func TestSupportedConnectorParityMatrix(t *testing.T) {
 	// surfaces are exempt — record the reason inline so a future
 	// regression can't hide behind "some connector should be here".
 	// Keep this list narrow and audited.
-	zeroSurfacesExempt := map[string]string{
-		"omnigent": "custom policy bridge with ALLOW/ASK/DENY enforcement — no MCP, skill, or plugin surfaces are user-facing",
-	}
+	zeroSurfacesExempt := map[string]string{}
 
 	var fails []string
 	for _, c := range connectors {
@@ -108,14 +106,11 @@ func TestSupportedConnectorMCPOnEveryConnector(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load catalog: %v", err)
 	}
-	// Some connectors (e.g. omnigent) intentionally use a custom
 	// non-standard config surface. Track the exemption set so a
 	// regression that DROPS mcp_paths from a non-exempted connector
 	// still fails, while genuinely-MCP-less agents don't trip the
 	// test. Keep this list narrow and audited.
-	mcpExempt := map[string]bool{
-		"omnigent": true, // OmniGent uses a proprietary custom policy bridge, not MCP.
-	}
+	mcpExempt := map[string]bool{}
 
 	var fails []string
 	for _, sig := range sigs {
@@ -154,7 +149,7 @@ func TestSupportedConnectorCountMatchesRegistry(t *testing.T) {
 			seen[s] = true
 		}
 	}
-	const expected = 14
+	const expected = 12
 	if len(seen) != expected {
 		names := make([]string, 0, len(seen))
 		for n := range seen {

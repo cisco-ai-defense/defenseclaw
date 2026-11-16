@@ -10,3 +10,11 @@ import "errors"
 func readProcessArgv(int) ([]string, error) {
 	return nil, errors.New("kern.procargs2 is available only on macOS")
 }
+
+func readProcessEnv(int) (map[string]string, error) {
+	return nil, errors.New("kern.procargs2 is available only on macOS")
+}
+
+func readProcessParent(int) (int, error) {
+	return 0, errors.New("kern.proc.pid is read only on macOS; Linux reads /proc/<pid>/stat")
+}

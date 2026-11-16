@@ -60,7 +60,8 @@ func newBinaryMark(binaries []string, loadTicks uint64) binaryMark {
 // load with no process alive (load ticks 1, as at a boot before any login)
 // marked every later session.
 func (m binaryMark) marked(root Root) bool {
-	return root.Native && m.binaries[root.Exe] && m.loadTicks > 0 && root.StartTicks > m.loadTicks
+	return root.Native && root.Launch != "" && m.binaries[root.Exe] && m.binaries[root.Launch] &&
+		m.loadTicks > 0 && root.StartTicks > m.loadTicks
 }
 
 // retain sets c.retained and c.retainedRoots for this pass. desired is the

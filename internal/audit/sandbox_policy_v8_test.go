@@ -117,9 +117,9 @@ func TestSandboxManagedFamilies(t *testing.T) {
 			}},
 		{"host run refused", SandboxHostRunRefusedEvent{
 			Sandbox: SandboxIdentity{Connector: "claudecode", Managed: identity.Managed}, Subject: subject,
-			Reason: "required_group", Rule: "contractors",
+			Reason: "required_for", Rule: "contractors",
 		}, observability.TelemetryEventSandboxHostRunRefused, observability.BucketEnforcementAction, true,
-			map[string]any{"defenseclaw.sandbox.managed.reason": "required_group", "defenseclaw.sandbox.policy.rule": "contractors"}},
+			map[string]any{"defenseclaw.sandbox.managed.reason": "required_for", "defenseclaw.sandbox.policy.rule": "contractors"}},
 		{"host run unavailable refused", SandboxHostRunUnavailableEvent{
 			Sandbox: SandboxIdentity{Connector: "codex", Managed: identity.Managed}, Subject: subject, Reason: "os_unsupported",
 		}, observability.TelemetryEventSandboxHostRunUnavailable, observability.BucketEnforcementAction, true,
@@ -230,7 +230,7 @@ func TestSandboxManagedMandatoryFloor(t *testing.T) {
 	harness := newSandboxHarness(t)
 	runtime, recorder := harness.bind(t, router.AdmissionFloor)
 	if err := recorder.RecordSandboxHostRunRefused(context.Background(), SandboxHostRunRefusedEvent{
-		Sandbox: SandboxIdentity{Connector: "claudecode"}, Subject: testManagedSubject(), Reason: "required_group",
+		Sandbox: SandboxIdentity{Connector: "claudecode"}, Subject: testManagedSubject(), Reason: "required_for",
 	}); err != nil {
 		t.Fatal(err)
 	}

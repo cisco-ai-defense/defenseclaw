@@ -19,7 +19,16 @@ package openshell
 import (
 	"io/fs"
 	"testing"
+	"time"
 )
+
+// SetLifecycleLockWait makes LockGatewayLifecycle wait at most d for the
+// lock, for the rest of t.
+func SetLifecycleLockWait(t *testing.T, d time.Duration) {
+	prev := lifecycleLockWait
+	lifecycleLockWait = d
+	t.Cleanup(func() { lifecycleLockWait = prev })
+}
 
 // SetGatewayFileOwner makes owned judge which gateway files are the
 // caller's for the rest of t: only root could make another user's file.

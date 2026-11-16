@@ -95,6 +95,7 @@ func atomicFilePublish(source, destination string, stagedInfo os.FileInfo, perm 
 		stagedInfo,
 		validateAtomicTransformBoundFilePrivatePlatform,
 		false,
+		true,
 	)
 }
 
@@ -112,6 +113,7 @@ func atomicFilePublishHookAPIToken(
 		stagedInfo,
 		validateHookAPITokenBoundFileCustodyPlatform,
 		true,
+		true,
 	)
 }
 
@@ -120,6 +122,7 @@ func atomicFilePublishPrivateBound(
 	stagedInfo os.FileInfo,
 	validate func(*os.File) error,
 	preserveExactHookProtection bool,
+	replace bool,
 ) error {
 	if !atomicTransformPathsEqualPlatform(filepath.Dir(source), filepath.Dir(destination)) {
 		return fmt.Errorf("private atomic publication crosses directories")
@@ -158,13 +161,16 @@ func atomicFilePublishPrivateBound(
 		}
 	}
 
-	// Private publication deliberately replaces the destination with the
-	// already-private staged inode. Unlike ReplaceFileW, changed writes do not
-	// retain destination metadata such as alternate data streams, EFS state, or
-	// its DACL. Identical writes return before this point and preserve metadata.
+	// A replacement uses the already-private staged inode. Unlike ReplaceFileW,
+	// it does not retain destination metadata such as alternate data streams,
+	// EFS state, or its DACL. A no-replace publication leaves every existing
+	// destination byte and name untouched.
 	if err := renameAtomicTransformBoundFileWithBusyRetry(
-		parent, stage, filepath.Base(destination), true,
+		parent, stage, filepath.Base(destination), replace,
 	); err != nil {
+		if !replace && errors.Is(err, errAtomicTransformConflict) {
+			return fmt.Errorf("destination %s exists: %w", destination, os.ErrExist)
+		}
 		return err
 	}
 	if preserveExactHookProtection {

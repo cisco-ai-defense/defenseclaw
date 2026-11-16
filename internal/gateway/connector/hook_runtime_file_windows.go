@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"golang.org/x/sys/windows"
 )
 
@@ -19,6 +20,9 @@ func validateHookRuntimeOpenedFile(file *os.File, label string) error {
 		&info,
 	); err != nil {
 		return fmt.Errorf("inspect opened %s: %w", label, err)
+	}
+	if info.NumberOfLinks == 0 {
+		return fmt.Errorf("%s changed identity during open: %w", label, safefile.ErrReadIdentityChanged)
 	}
 	if info.FileAttributes&(windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
 		info.NumberOfLinks != 1 {

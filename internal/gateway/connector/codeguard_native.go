@@ -250,7 +250,7 @@ func codexCodeGuardReceiptPath(opts SetupOpts) string {
 
 func writeCodexCodeGuardReceipt(path string, receipt codexCodeGuardReceipt) error {
 	if strings.TrimSpace(path) == "" || !filepath.IsAbs(path) {
-		return fmt.Errorf("Codex CodeGuard receipt path is not absolute: %q", path)
+		return fmt.Errorf("Codex CodeGuard receipt path is not absolute: %q", path) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if err := atomicTransformValidateNoReparsePathPlatform(path); err != nil {
 		return fmt.Errorf("validate Codex CodeGuard receipt path: %w", err)
@@ -272,7 +272,7 @@ func loadCodexCodeGuardReceipt(
 	var receipt codexCodeGuardReceipt
 	path := codexCodeGuardReceiptPath(opts)
 	if strings.TrimSpace(opts.DataDir) == "" || !filepath.IsAbs(path) {
-		return receipt, false, fmt.Errorf("Codex CodeGuard receipt requires an absolute data directory")
+		return receipt, false, fmt.Errorf("Codex CodeGuard receipt requires an absolute data directory") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if err := atomicTransformValidateNoReparsePathPlatform(path); err != nil {
 		return receipt, false, fmt.Errorf("validate Codex CodeGuard receipt path: %w", err)
@@ -285,11 +285,11 @@ func loadCodexCodeGuardReceipt(
 		return receipt, false, fmt.Errorf("inspect Codex CodeGuard ownership receipt: %w", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return receipt, false, fmt.Errorf("Codex CodeGuard ownership receipt is not a regular file")
+		return receipt, false, fmt.Errorf("Codex CodeGuard ownership receipt is not a regular file") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	data, ok := readStableNativeWindowsFile(path, nativeCodeGuardReceiptMaxBytes)
 	if !ok {
-		return receipt, false, fmt.Errorf(
+		return receipt, false, fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			"Codex CodeGuard ownership receipt is unsafe, changing, or exceeds %d bytes",
 			nativeCodeGuardReceiptMaxBytes,
 		)
@@ -304,17 +304,17 @@ func loadCodexCodeGuardReceipt(
 		)
 	}
 	if !sameCodexInventoryPath(receipt.Target, expectedTarget) {
-		return receipt, false, fmt.Errorf(
+		return receipt, false, fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			"Codex CodeGuard receipt target mismatch: captured %q, expected %q",
 			receipt.Target,
 			expectedTarget,
 		)
 	}
 	if !validCodexCodeGuardDigest(receipt.SHA256) {
-		return receipt, false, fmt.Errorf("Codex CodeGuard receipt contains an invalid SHA-256 digest")
+		return receipt, false, fmt.Errorf("Codex CodeGuard receipt contains an invalid SHA-256 digest") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if receipt.CreatedAgentsDir && !receipt.CreatedSkillsDir {
-		return receipt, false, fmt.Errorf(
+		return receipt, false, fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			"Codex CodeGuard receipt has impossible parent-directory custody",
 		)
 	}
@@ -333,7 +333,7 @@ func codexCodeGuardPathMissing(path string) (bool, error) {
 		return false, fmt.Errorf("inspect Codex CodeGuard parent path %s: %w", path, err)
 	}
 	if !info.IsDir() {
-		return false, fmt.Errorf("Codex CodeGuard parent path %s is not a directory", path)
+		return false, fmt.Errorf("Codex CodeGuard parent path %s is not a directory", path) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	return false, nil
 }
@@ -350,7 +350,7 @@ func digestCodexCodeGuardSkill(root string) (string, bool, error) {
 		return "", false, err
 	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return "", true, fmt.Errorf("Codex CodeGuard skill target is not an ordinary directory")
+		return "", true, fmt.Errorf("Codex CodeGuard skill target is not an ordinary directory") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 
 	digest := sha256.New()
@@ -371,12 +371,12 @@ func digestCodexCodeGuardSkill(root string) (string, bool, error) {
 			return err
 		}
 		if entryInfo.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("Codex CodeGuard skill contains a symlink: %s", path)
+			return fmt.Errorf("Codex CodeGuard skill contains a symlink: %s", path) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		kind := byte('d')
 		if !entryInfo.IsDir() {
 			if !entryInfo.Mode().IsRegular() {
-				return fmt.Errorf("Codex CodeGuard skill contains a non-regular file: %s", path)
+				return fmt.Errorf("Codex CodeGuard skill contains a non-regular file: %s", path) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			}
 			kind = 'f'
 		}
@@ -391,7 +391,7 @@ func digestCodexCodeGuardSkill(root string) (string, bool, error) {
 		}
 		body, ok := readStableNativeWindowsFile(path, nativeCodeGuardFileMaxBytes)
 		if !ok {
-			return fmt.Errorf(
+			return fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 				"Codex CodeGuard skill file is unsafe, changing, or exceeds %d bytes: %s",
 				nativeCodeGuardFileMaxBytes,
 				path,
@@ -399,7 +399,7 @@ func digestCodexCodeGuardSkill(root string) (string, bool, error) {
 		}
 		totalBytes += int64(len(body))
 		if totalBytes > nativeCodeGuardTreeMaxBytes {
-			return fmt.Errorf(
+			return fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 				"Codex CodeGuard skill tree exceeds %d bytes",
 				nativeCodeGuardTreeMaxBytes,
 			)
@@ -449,7 +449,7 @@ func removeOwnedCodexCodeGuardTree(
 
 		quarantine := targetDir + ".defenseclaw-remove-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 		if _, err := os.Lstat(quarantine); err == nil {
-			return fmt.Errorf("Codex CodeGuard removal quarantine already exists: %s", quarantine)
+			return fmt.Errorf("Codex CodeGuard removal quarantine already exists: %s", quarantine) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		} else if !os.IsNotExist(err) {
 			return fmt.Errorf("inspect Codex CodeGuard removal quarantine: %w", err)
 		}

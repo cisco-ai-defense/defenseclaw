@@ -104,10 +104,18 @@ def test_watchdog_row_counts_one_dir_in_the_singular() -> None:
     assert model.watchdog_detail() == "2 skill dirs, 1 plugin dir"
 
 
-async def test_notice_is_one_line_after_a_height_only_resize_to_80x24(tmp_path, monkeypatch) -> None:
-    # GAP-2519: 80x45 -> 80x24 kept the wrapped notice; its end hid under the bar.
+def test_gap0613_watchdog_row_names_unavailable_admission_connector() -> None:
+    model = _model()
+    model.set_health(HealthSnapshot(watcher=SubsystemHealth(state="degraded", details={
+        "skill_dirs": 1, "watch_roots_unavailable": 1, "admission_scanning_off": ["claudecode"],
+    })))
+    assert "admission scanning off for claudecode" in model.watchdog_detail()
+
+
+async def test_notice_keeps_full_action_after_a_height_only_resize_to_80x24(tmp_path, monkeypatch) -> None:
+    # GAP-0514: the end of an actionable notice must remain readable at 80x24.
     # The Overview sample started at 80x45 lands after the resize, as it did on
-    # a slow Windows runner, and must not put the wrapped notice back.
+    # a slow Windows runner, and must preserve the full notice after resizing.
     started, resized = threading.Event(), threading.Event()
     build = app_module.DefenseClawTUI._build_overview_render_snapshot
 
@@ -119,18 +127,20 @@ async def test_notice_is_one_line_after_a_height_only_resize_to_80x24(tmp_path, 
 
     monkeypatch.setattr(app_module.DefenseClawTUI, "_build_overview_render_snapshot", build_after_resize)
     app = snapshot_app(tmp_path)
-    message = "Doctor cache shows 1 stale failure(s) that /health disagrees with - press [d] to refresh"
-    app.overview_model.build_notices = lambda now=None: (OverviewNotice("info", message),)
+    message = (
+        "Telemetry continues via hooks + local audit; point gateway.host at a real OpenClaw upstream "
+        "and restart to enable fleet integration"
+    )
+    app.overview_model.build_notices = lambda now=None, connector="": (OverviewNotice("info", message),)
     try:
         async with app.run_test(size=(80, 45)) as pilot:
             app.action_switch_panel("overview")
             await settle_layout(pilot, started.is_set)
             await pilot.resize_terminal(80, 24)
-            await settle_layout(pilot, lambda: "disagrees with …" in screen_text(app))
+            await settle_layout(pilot, lambda: "fleet integration" in screen_text(app))
             resized.set()
             await settle_panel(app, pilot)
             text = screen_text(app)
     finally:
         resized.set()
-    assert "disagrees with …" in text
-    assert "press [d] to refresh" not in text
+    assert message in " ".join(text.split())

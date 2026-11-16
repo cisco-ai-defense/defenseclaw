@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
@@ -38,9 +39,9 @@ func TestSandboxDaemonNewGenerationAppliesTheLiveFieldsAtOnce(t *testing.T) {
 	if err := f.d.regs.put(daemonRegistration{ID: "reg-1", Sandbox: "dc-a", Digest: "sha256:v1", UpdatedAt: time.Now(), Confirmed: true}); err != nil {
 		t.Fatal(err)
 	}
-	live := sandboxrelay.LiveFields{EgressBlock: []string{"github.com"}}
+	floor := config.OpenShellAdminConfig{EgressBlock: []string{"github.com"}}
 	f.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
-		return sandboxrelay.CurrentPolicy{V: 1, Generation: 9, Digest: "sha256:v2", Live: live}, nil
+		return sandboxrelay.CurrentPolicy{V: 1, Generation: 9, Digest: "sha256:v2", Floor: &floor}, nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -66,10 +67,10 @@ func TestSandboxDaemonNewGenerationAppliesTheLiveFieldsAtOnce(t *testing.T) {
 	}
 	// Tightened: github.com blocked.
 	f.d.observeGeneration("reg-1", 9)
-	wait("sha256:v2", live.EgressBlock)
+	wait("sha256:v2", floor.EgressBlock)
 	// Loosened again, under a smaller generation digest.
 	f.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
-		return sandboxrelay.CurrentPolicy{V: 1, Generation: 4, Digest: "sha256:v3"}, nil
+		return sandboxrelay.CurrentPolicy{V: 1, Generation: 4, Digest: "sha256:v3", Floor: &config.OpenShellAdminConfig{}}, nil
 	}
 	f.d.observeGeneration("reg-1", 4)
 	wait("sha256:v3", nil)

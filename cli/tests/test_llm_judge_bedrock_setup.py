@@ -242,6 +242,43 @@ class JudgeBedrockSetupTests(unittest.TestCase):
         r = run()
         self.assertEqual((r.failed, r.warned), (0, 1), r.checks)
 
+    def test_doctor_judge_calls_ignore_decision_model_rows(self) -> None:
+        """An unreachable decision model is not a failing LLM judge."""
+        cfg = self.app.cfg
+        cfg.guardrail.enabled = True
+        cfg.guardrail.judge.enabled = True
+        rows = (
+            ("1", {"defenseclaw.judge.kind": "decision_model", "defenseclaw.judge.action": "error",
+                   "defenseclaw.judge.error_summary": "decision model unreachable: connection failed"}),
+            ("2", {"defenseclaw.judge.kind": "decision_model", "defenseclaw.judge.action": "allow"}),
+        )
+        with closing(sqlite3.connect(cfg.audit_db)) as db:
+            for row_id, payload in rows:
+                db.execute(
+                    "INSERT INTO audit_events (id, timestamp, action, structured_json) VALUES (?, ?, ?, ?)",
+                    (row_id, f"2099-01-01T00:00:0{row_id}Z", "llm-judge-response", json.dumps(payload)),
+                )
+            db.commit()
+
+        def run() -> _DoctorResult:
+            r = _DoctorResult()
+            with mock.patch.object(cmd_doctor, "_json_mode", True):
+                cmd_doctor._check_judge_calls(cfg, r)
+            return r
+
+        r = run()
+        self.assertEqual((r.failed, r.warned, r.skipped), (0, 0, 1), r.checks)
+        with closing(sqlite3.connect(cfg.audit_db)) as db:
+            db.execute(
+                "INSERT INTO audit_events (id, timestamp, action, structured_json) VALUES (?, ?, ?, ?)",
+                ("3", "2099-01-01T00:00:03Z", "llm-judge-response",
+                 json.dumps({"defenseclaw.judge.kind": "pii", "defenseclaw.judge.action": "allow"})),
+            )
+            db.commit()
+        r = run()
+        self.assertEqual((r.failed, r.warned), (0, 0), r.checks)
+        self.assertIn("last 1 judge call", r.checks[0]["detail"])
+
     def test_doctor_judge_next_step_matches_the_cause(self) -> None:
         """GAP-1669: a network failure points at the proxy/network, not at setup llm."""
         cfg = self.app.cfg

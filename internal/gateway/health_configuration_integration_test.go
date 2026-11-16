@@ -12,7 +12,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
 )
 
-// TestConfigurationEndToEndDeferredFlow exercises the full spec 003
+// TestConfigurationEndToEndDeferredFlow exercises the full deferred-config
 // state machine across daemon + guardian:
 //
 //  1. Deferred install, both files absent  →  waiting_for_config.

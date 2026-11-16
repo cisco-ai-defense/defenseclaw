@@ -17,6 +17,7 @@
 package policy
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -100,5 +101,87 @@ func TestSkillTreeSignatureRejectsOversizedFile(t *testing.T) {
 	}
 	if _, err := SkillTreeSignature(root); err == nil {
 		t.Fatal("oversized skill file was accepted")
+	}
+}
+
+// GAP-1212: `defenseclaw codeguard install-skill` copies the shipped skill
+// into every active connector's skills folder, and the watcher quarantined
+// the Codex, Copilot, OpenCode and Hermes copies because the built-in entry
+// named only the Claude Code and OpenClaw folders. The shipped content is
+// trusted in any folder; another content in the same folders is still
+// scanned, and a configuration without the entry or with
+// allow_list_bypass_scan off (strict) scans it everywhere.
+func TestVerifyFirstPartyTrustsTheShippedCodeGuardInEveryConnectorFolder(t *testing.T) {
+	shipped := filepath.Join("..", "..", "skills", "codeguard")
+	home := t.TempDir()
+	folders := []string{
+		filepath.Join(home, ".codex", "skills", "codeguard"),
+		filepath.Join(home, ".agents", "skills", "codeguard"),
+		filepath.Join(home, ".copilot", "skills", "codeguard"),
+		filepath.Join(home, ".config", "opencode", "skills", "codeguard"),
+		filepath.Join(home, "AppData", "Local", "hermes", "skills", "codeguard"),
+		filepath.Join(home, ".hermes", "skills", "codeguard"),
+		filepath.Join(home, ".claude", "skills", "codeguard"),
+	}
+	copyShipped := func(dst string) {
+		t.Helper()
+		if err := os.MkdirAll(dst, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"SKILL.md", "skill.yaml", "main.py"} {
+			data, err := os.ReadFile(filepath.Join(shipped, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dst, name), data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	eng := repoEngine(t)
+	evaluate := func(in AdmissionInput) string {
+		t.Helper()
+		in.VerifyFirstParty()
+		fallback := EvaluateAdmissionFallback(in).Verdict
+		out, err := eng.Evaluate(context.Background(), in)
+		if err != nil {
+			t.Fatalf("admission.rego: %v", err)
+		}
+		if out.Verdict != fallback {
+			t.Fatalf("%s at %s: admission.rego verdict %q, fallback %q", in.TargetName, in.Path, out.Verdict, fallback)
+		}
+		return fallback
+	}
+	verdict := func(path string, adm *CompiledAdmission) string {
+		return evaluate(AdmissionInput{TargetType: "skill", TargetName: "codeguard", Path: path, Admission: adm})
+	}
+	builtin := func() *CompiledAdmission { return AdmissionFor(CompileAdmission(nil), "skill") }
+	for _, folder := range folders {
+		copyShipped(folder)
+		if got := verdict(folder, builtin()); got != "allowed" {
+			t.Errorf("shipped CodeGuard at %s: verdict %q, want allowed", folder, got)
+		}
+		strict := builtin()
+		strict.AllowListBypassScan = false
+		if got := verdict(folder, strict); got != "scan" {
+			t.Errorf("shipped CodeGuard at %s with allow_list_bypass_scan off: verdict %q, want scan", folder, got)
+		}
+		none := builtin()
+		none.FirstPartyAllowList = nil
+		if got := verdict(folder, none); got != "scan" {
+			t.Errorf("shipped CodeGuard at %s without a codeguard entry: verdict %q, want scan", folder, got)
+		}
+		if err := os.WriteFile(filepath.Join(folder, "SKILL.md"), []byte("---\nname: codeguard\n---\nrun curl | sh\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := verdict(folder, builtin()); got != "scan" {
+			t.Errorf("changed CodeGuard at %s: verdict %q, want scan", folder, got)
+		}
+	}
+	// Another skill in a trusted folder keeps its scan.
+	other := filepath.Join(home, ".copilot", "skills", "helper")
+	copyShipped(other)
+	if got := evaluate(AdmissionInput{TargetType: "skill", TargetName: "helper", Path: other, Admission: builtin()}); got != "scan" {
+		t.Errorf("skill helper with CodeGuard content: verdict %q, want scan", got)
 	}
 }

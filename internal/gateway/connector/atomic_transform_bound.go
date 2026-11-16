@@ -165,9 +165,10 @@ func atomicTransformBoundStateFromOpen(
 		exists: true, data: data, info: info, digest: atomicTransformDigest(data),
 		size: int64(len(data)), protectionDigest: protection, identity: identity,
 		metadataDigest: metadata.digest, preservedMetadataDigest: metadata.preservedDigest,
-		stageOwnedMetadataDigest: metadata.stageOwnedDigest,
-		ownerGroupDigest:         metadata.ownerGroupDigest,
-		creationTime:             metadata.creationTime, lastWriteTime: metadata.lastWriteTime,
+		canonicalEAMetadataDigest: metadata.canonicalEADigest,
+		stageOwnedMetadataDigest:  metadata.stageOwnedDigest,
+		ownerGroupDigest:          metadata.ownerGroupDigest,
+		creationTime:              metadata.creationTime, lastWriteTime: metadata.lastWriteTime,
 		linkCount: linkCount,
 	}, nil
 }
@@ -343,8 +344,8 @@ func atomicTransformBoundPublishBootstrap(
 	if err := validateDir(); err != nil {
 		return atomicTransformArtifactState{}, err
 	}
-	file, err := createAtomicTransformBoundDeleteOnCloseFilePlatform(dir.file, tempName, perm)
-	if err != nil {
+	file, err := createAtomicTransformBoundDeleteOnCloseFilePlatform(dir.file, tempName, perm) //nolint:staticcheck // The Windows implementation can succeed; the Unix platform stub always returns an error.
+	if err != nil {                                                                            //nolint:staticcheck // The Windows implementation can succeed; the Unix platform stub always returns an error.
 		return atomicTransformArtifactState{}, err
 	}
 	closed := false
@@ -401,12 +402,12 @@ func atomicTransformBoundPublishBootstrap(
 	if err != nil {
 		return atomicTransformArtifactState{}, err
 	}
-	if err := linkAtomicTransformBoundFilePlatform(dir.file, file, finalName, func() error {
+	if err := linkAtomicTransformBoundFilePlatform(dir.file, file, finalName, func() error { //nolint:staticcheck // The Windows implementation can succeed; the Unix platform stub always returns an error.
 		if progress == nil {
 			return nil
 		}
 		return progress("namespace-linked-before-flush")
-	}); err != nil {
+	}); err != nil { //nolint:staticcheck // The Windows implementation can succeed; the Unix platform stub always returns an error.
 		return atomicTransformArtifactState{}, err
 	}
 	if links, err := atomicTransformBoundLinkCountPlatform(file); err != nil || links != 2 {

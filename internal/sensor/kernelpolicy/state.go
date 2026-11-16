@@ -259,12 +259,22 @@ type FileState struct {
 	Warnings  []string            `json:"warnings,omitempty"`
 	Seq       uint64              `json:"seq"`
 	Changes   []Change            `json:"changes,omitempty"`
+	// SeqEpoch names the sequence Seq counts in: set (NewEpoch, a random
+	// id) when the helper starts without a recorded one, so a state file that
+	// was missing or unreadable, whose Seq starts again at 1, starts a new
+	// sequence the gateway tells from an old one (cowork-1-0-8 GAP-0080).
+	SeqEpoch int64 `json:"seq_epoch,omitempty"`
 	// CustomerPolicies are the host's own Tetragon policies (at most 64)
 	// and CustomerEvents the totals of all of them, refreshed whenever the
 	// state is written (every Intervals.Flush in every mode with an event
 	// stream).
 	CustomerPolicies []CustomerPolicy `json:"customer_policies,omitempty"`
 	CustomerEvents   *CustomerEvents  `json:"customer_events,omitempty"`
+	// ConfirmedSessions are the live agent sessions ("pid:start ticks")
+	// whose start Tetragon reported on the event stream. Only those count as
+	// anchored by the binaries anchor (GAP-0166); keeping them here carries
+	// them across a helper restart.
+	ConfirmedSessions []string `json:"confirmed_sessions,omitempty"`
 }
 
 // State is the helper's whole published state, read by the root CLI, verify

@@ -19,7 +19,6 @@ import (
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/version"
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -301,7 +300,7 @@ func (operation *hiltV8Operation) emitLog(
 			return observability.Record{}, errors.New("hilt v8 generation is invalid")
 		}
 		clock := observability.ClockFunc(func() time.Time { return observedAt })
-		ids := observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil })
+		ids := observability.TimeOrderedOccurrenceIDs
 		provenance := observability.Provenance{
 			Producer: hiltV8Producer, BinaryVersion: version.Current().BinaryVersion,
 			RegistrySchemaVersion: observability.CurrentRecordSchemaVersion,
@@ -416,7 +415,7 @@ func (operation *hiltV8Operation) recordMetric(
 			}
 			builder, err := observability.NewFamilyBuilder(
 				observability.ClockFunc(func() time.Time { return observedAt }),
-				observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+				observability.TimeOrderedOccurrenceIDs,
 			)
 			if err != nil {
 				return observability.Record{}, err

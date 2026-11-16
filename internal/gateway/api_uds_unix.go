@@ -25,6 +25,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/peercred"
 	"github.com/defenseclaw/defenseclaw/internal/systemd"
@@ -54,14 +56,11 @@ func (a *APIServer) newManagedHookSocketServer(ctx context.Context, base func(ht
 		fmt.Fprintf(os.Stderr, "[sidecar-api] standalone runtime descriptor rejected: %v\n", descriptorErr)
 		descriptor = nil
 	}
-	var machinePolicy []string
-	if descriptor != nil {
-		machinePolicy = descriptor.MachinePolicyConnectors
-	}
 	ledger := newManagedHookLedgerLoader(managed.HookGuardianAuthorizationPath(a.configDataDir()))
-	authorizer := newManagedHookAuthorizer(a.scannerCfg.Enterprise.Enrollment, machinePolicy, ledger.Load)
+	authorizer := newManagedHookAuthorizer(a.scannerCfg.Enterprise.Enrollment, nil, ledger.Load)
 	authorizer.loadRefused = newManagedHookRefusedLoader(filepath.Join(
 		managed.HookGuardianAuthorizationDir(a.configDataDir()), managed.HookGuardianRefusedSurfacesFile)).Load
+	a.managedHookAuthz.Store(authorizer)
 
 	listener, inherited, err := inheritedHookListener()
 	if err != nil {
@@ -88,13 +87,44 @@ func (a *APIServer) newManagedHookSocketServer(ctx context.Context, base func(ht
 		return nil, nil, fmt.Errorf("api: socket-activated hook listener %s is not a unix socket", listener.Addr())
 	}
 
-	handler := base(managedHookSocketHealth(a.handleHealth, a.managedHookPeerAuth(authorizer, a.managedHookSocketMux())))
+	// Prove the published vendor policy before the first call, then again
+	// only when it or the descriptor changes; no hook call computes it.
+	a.startManagedPolicyView(ctx, runtime.GOOS, authorizer)
 	server := &http.Server{
-		Handler:     managedHookPeerIdentityMiddleware(handler),
-		BaseContext: func(net.Listener) context.Context { return ctx },
+		Handler:     a.managedHookSocketHandler(authorizer, base),
+		BaseContext: apiRequestBaseContext(ctx),
 		ConnContext: managedHookConnContext,
+		// The asset facts header of a hook request can pass the net/http
+		// default of 1 MiB (assetfacts.Header).
+		MaxHeaderBytes: assetfacts.MaxRequestHeaderBytes,
 	}
 	return server, listener, nil
+}
+
+// managedHookSocketHandler is the hook socket's handler chain.
+func (a *APIServer) managedHookSocketHandler(authorizer *managedHookAuthorizer, base func(http.Handler) http.Handler) http.Handler {
+	handler := base(managedHookSocketHealth(a.handleHealth, a.managedHookPeerAuth(authorizer, a.managedHookSocketMux())))
+	return managedHookEarlyReceipt(managedHookPeerIdentityMiddleware(handler))
+}
+
+// managedHookEarlyReceipt advertises full duplex before the socket's first
+// account lookup. A directory lookup can exceed the native hook's bounded
+// capability wait even when the gateway is healthy. Only a connection whose
+// kernel peer credentials were read can receive this informational response;
+// all authorization and the final verdict remain in the ordinary handler.
+func managedHookEarlyReceipt(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		peer, verified := r.Context().Value(managedHookConnPeerContextKey{}).(*managedHookConnPeer)
+		if r.Method == http.MethodPost && r.Header.Get(hookexec.HookDeliveryReceiptHeader) == "1" &&
+			verified && peer != nil && http.NewResponseController(w).EnableFullDuplex() == nil {
+			if r.ProtoMajor == 1 {
+				w.Header().Set("Connection", "close")
+			}
+			w.WriteHeader(http.StatusEarlyHints)
+			r = r.WithContext(context.WithValue(r.Context(), hookDeliveryAdvertisedKey{}, true))
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // managedHookSocketHealth answers GET /health on the hook socket with the

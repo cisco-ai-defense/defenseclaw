@@ -495,7 +495,8 @@ exporters:
       { id: 'mcp-config', label: 'mcpServers.json', language: 'json', source: `{
   "mcpServers": {
     "catalog-lookup": {
-      "command": "demo-mcp-server",
+      "command": "npx",
+      "args": ["-y", "demo-mcp-server"],
       "transport": "stdio"
     }
   }
@@ -540,7 +541,7 @@ scanners:
     steps: [
       step('mcp-discover', 'Discover', 'Read the server entry from Claude Code configuration.', 'mcp-config', ['mcp-discovered'], [{ tabId: 'mcp-config', start: 2, end: 7, tone: 'info' }]),
       step('mcp-hold', 'Hold admission', 'Keep the server unavailable while the scan runs.', 'mcp-config', ['mcp-discovered', 'mcp-held'], [{ tabId: 'mcp-config', start: 3, end: 7, tone: 'warning' }]),
-      step('mcp-start', 'Start server', 'Start the local stdio server as a short-lived scan subprocess.', 'mcp-config', ['mcp-held', 'mcp-sandbox'], [{ tabId: 'mcp-config', start: 4, end: 6, tone: 'info' }]),
+      step('mcp-start', 'Start server', 'Start the local stdio server as a short-lived scan subprocess.', 'mcp-config', ['mcp-held', 'mcp-sandbox'], [{ tabId: 'mcp-config', start: 3, end: 5, tone: 'info' }]),
       step('mcp-enumerate', 'Enumerate', 'Read tool descriptions and schemas, plus prompts/resources when enabled.', 'tools', ['mcp-sandbox', 'mcp-effects'], [{ tabId: 'tools', start: 2, end: 6, tone: 'danger' }]),
       step('mcp-severity', 'Consolidate', 'The claimed-intent mismatch resolves to HIGH.', 'mcp-result', ['mcp-effects', 'mcp-high'], [{ tabId: 'mcp-result', start: 3, end: 5, tone: 'warning' }]),
       step('mcp-resolve', 'Resolve policy', 'admission.mcp.actions.high disables runtime and blocks installation.', 'mcp-actions', ['mcp-high', 'mcp-map'], [{ tabId: 'mcp-actions', start: 1, end: 6, tone: 'danger' }]),
@@ -622,10 +623,12 @@ admission:
       { id: 'registry-config', label: 'registry.yaml', language: 'yaml', source: `id: internal-catalog
 kind: http_yaml
 url: https://registry.example.invalid/catalog.yaml
+content: skill
 auth_env: REGISTRY_AUTH_TOKEN
-allow_private_network: false
-sync: on_demand
-registry_required: true` },
+# set with: defenseclaw registry require --type skill --enabled --enforce
+asset_policy:
+  skill:
+    registry_required: true` },
       { id: 'registry-scan', label: 'scanner-result.json', language: 'json', source: `{
   "entry": "workspace-helper@1.2.0",
   "sha256": "verified",
@@ -643,8 +646,7 @@ registry_required: true` },
       { id: 'asset-policy', label: 'asset-policy.yaml', language: 'yaml', source: `asset_policy:
   skill:
     registry:
-      workspace-helper@1.2.0:
-        action: allow
+      - name: workspace-helper
         reason: registry:internal-catalog` },
       { id: 'admission', label: 'admission-decision.json', language: 'json', source: `{
   "asset": "workspace-helper@1.2.0",
@@ -675,23 +677,23 @@ registry_required: true` },
       { id: 'registry-deny', kind: 'block', label: 'Deny unknown asset', reason: 'registry_required=true and no promoted rule matched', action: 'Apply registry empty/default deny action' },
     ],
     steps: [
-      step('registry-sync', 'Fetch on demand', 'An operator starts registry sync; no runtime poller is implied.', 'registry-config', ['registry-fetch'], [{ tabId: 'registry-config', start: 1, end: 7, tone: 'info' }]),
+      step('registry-sync', 'Fetch on demand', 'An operator starts registry sync; no runtime poller is implied.', 'registry-config', ['registry-fetch'], [{ tabId: 'registry-config', start: 1, end: 5, tone: 'info' }]),
       step('registry-verify', 'Verify', 'Validate the source and SHA-256 before scanning.', 'registry-scan', ['registry-fetch', 'registry-integrity'], [{ tabId: 'registry-scan', start: 2, end: 3, tone: 'success' }]),
       step('registry-scan-step', 'Scan', 'Route the entry to the existing skill scanner.', 'registry-scan', ['registry-integrity', 'registry-route'], [{ tabId: 'registry-scan', start: 3, end: 5, tone: 'info' }]),
-      step('registry-promote', 'Promote', 'The clean result becomes an attributed asset policy rule.', 'asset-policy', ['registry-route', 'registry-clean'], [{ tabId: 'asset-policy', start: 1, end: 6, tone: 'success' }], 'registry-promoted'),
+      step('registry-promote', 'Promote', 'The clean result becomes an attributed asset policy rule.', 'asset-policy', ['registry-route', 'registry-clean'], [{ tabId: 'asset-policy', start: 1, end: 5, tone: 'success' }], 'registry-promoted'),
     ],
     variants: [
       { id: 'clean', label: 'Clean', description: 'Verify, scan, and promote.', steps: [
-        step('clean-fetch', 'Fetch on demand', 'The operator starts the sync.', 'registry-config', ['registry-fetch'], [{ tabId: 'registry-config', start: 1, end: 7, tone: 'info' }]),
+        step('clean-fetch', 'Fetch on demand', 'The operator starts the sync.', 'registry-config', ['registry-fetch'], [{ tabId: 'registry-config', start: 1, end: 5, tone: 'info' }]),
         step('clean-verify', 'Verify + scan', 'Source integrity is verified and the skill scanner returns clean.', 'registry-scan', ['registry-integrity', 'registry-route'], [{ tabId: 'registry-scan', start: 2, end: 6, tone: 'success' }]),
-        step('clean-promote', 'Promote', 'Write an attributed allow rule into asset_policy.', 'asset-policy', ['registry-clean'], [{ tabId: 'asset-policy', start: 1, end: 6, tone: 'success' }], 'registry-promoted'),
+        step('clean-promote', 'Promote', 'Write an attributed allow rule into asset_policy.', 'asset-policy', ['registry-clean'], [{ tabId: 'asset-policy', start: 1, end: 5, tone: 'success' }], 'registry-promoted'),
       ] },
       { id: 'warning', label: 'Warning', description: 'Cache and require operator review.', steps: [
-        step('warning-fetch', 'Fetch on demand', 'The operator starts the sync.', 'registry-config', ['registry-fetch'], [{ tabId: 'registry-config', start: 1, end: 7, tone: 'info' }]),
+        step('warning-fetch', 'Fetch on demand', 'The operator starts the sync.', 'registry-config', ['registry-fetch'], [{ tabId: 'registry-config', start: 1, end: 5, tone: 'info' }]),
         step('warning-review', 'Hold', 'A warning result is cached but not promoted.', 'registry-warning-scan', ['registry-warning'], [{ tabId: 'registry-warning-scan', start: 4, end: 6, tone: 'warning' }], 'registry-review'),
       ] },
       { id: 'unknown', label: 'Unknown + required', description: 'Deny when no promoted rule matches.', steps: [
-        step('unknown-check', 'Check policy', 'registry_required is enabled for this asset class.', 'registry-config', ['registry-fetch'], [{ tabId: 'registry-config', start: 6, end: 7, tone: 'warning' }]),
+        step('unknown-check', 'Check policy', 'registry_required is enabled for this asset class.', 'registry-config', ['registry-fetch'], [{ tabId: 'registry-config', start: 6, end: 9, tone: 'warning' }]),
         step('unknown-deny', 'Deny', 'No promoted registry rule matches the unknown asset.', 'admission-deny', ['registry-unknown'], [{ tabId: 'admission-deny', start: 2, end: 6, tone: 'danger' }], 'registry-deny'),
       ] },
     ],

@@ -28,7 +28,7 @@ enum MenuBarState {
 
 enum PanelID: String, CaseIterable, Identifiable {
     case overview, alerts, logs, audit, activity
-    case skills, mcps, plugins, tools
+    case skills, mcps, plugins, tools, policies
     case inventory, aiDiscovery, aiRuntime, registries
     case setup
     case sandboxes
@@ -46,6 +46,7 @@ enum PanelID: String, CaseIterable, Identifiable {
         case .mcps: "MCPs"
         case .plugins: "Plugins"
         case .tools: "Tools"
+        case .policies: "Policies"
         case .inventory: "Inventory"
         case .aiDiscovery: "AI Discovery"
         case .aiRuntime: "Runtime"
@@ -66,6 +67,7 @@ enum PanelID: String, CaseIterable, Identifiable {
         case .mcps: "server.rack"
         case .plugins: "puzzlepiece.extension"
         case .tools: "wrench.and.screwdriver"
+        case .policies: "list.bullet.rectangle.portrait"
         case .inventory: "shippingbox"
         case .aiDiscovery: "sparkle.magnifyingglass"
         case .aiRuntime: "waveform.path.ecg"
@@ -197,6 +199,13 @@ final class AppState {
     var updateRestartsApp: Bool {
         availableUpdate.map { UpdateChecker.isNewer($0.version, than: UpdateChecker.currentVersion) } ?? false
     }
+    /// Bumped each time config.yaml is re-read from disk (a rotation, a
+    /// setup command, the TUI editing it): open editors rebase on it.
+    var configDiskGeneration = 0
+    /// Detection-only findings of the last 24 hours (a rule matched but could
+    /// not decide the call): not alerts, so the Alerts panel says how many
+    /// there are and where to read them (GAP-0314).
+    var detectionOnlyFindings24h = 0
 
     var updateOperationInProgress: Bool {
         updateCheckInProgress || installerState.isBusy
@@ -248,6 +257,8 @@ final class AppState {
 
     // Alerts state
     var unackedAlerts: [AlertRow] = []
+    /// A failed canonical alert refresh leaves the last good rows visible.
+    var alertLoadError: String?
     var dismissedIDs: Set<String> = []
     var overviewEnforcementMetrics = OverviewEnforcementMetrics()
     /// Last `alerts acknowledge` failure, surfaced in the popover/panel.
@@ -281,12 +292,25 @@ final class AppState {
     var connectorStatsAllTimeCache: [String: AuditStore.ConnectorStats] = [:]
     /// Last-good doctor cache from <data_dir>/doctor_cache.json (pulse-fed).
     var doctorCache: DoctorCache?
+    /// The Cowork block of `defenseclaw status --json` (pulse-fed, at most every
+    /// `coworkStatusInterval` seconds); nil when Cowork plays no part here or the
+    /// runtime predates the block. TUI parity: overview_model.cowork_status.
+    var coworkStatus: CoworkStatus?
+    @ObservationIgnored private var lastCoworkStatusFetch: Date?
+    /// The installation generation of the `status --json` run in flight, if any.
+    @ObservationIgnored private var coworkStatusInFlight: Int?
+    static let coworkStatusInterval: TimeInterval = 30
+    /// The budget of one `status --json` run; a run past it is cancelled.
+    static let coworkStatusTimeout: Duration = .seconds(60)
     /// Silent LLM bypass egress events in the last 5 minutes (pulse-fed).
     var silentBypassCount = 0
     /// Session-scoped "Total scans" for the Activity card (pulse-fed).
     var sessionTotalScans = 0
     /// True while a background diagnose probe is running (⇧⌘D).
     var diagnoseRunning = false
+    /// Reserves installation rebinding and mutating commands during a runtime replacement.
+    private(set) var runtimeUpgradeRunID: UUID?
+
     var alertPanelRequest: AlertPanelRequest?
     var auditPresetRequest: String?
     var logPanelRequest: LogPanelRequest?
@@ -313,12 +337,16 @@ final class AppState {
     private var wasReachable: Bool?
     @ObservationIgnored private var lastConfigSignature = ""
 
-    init(installationContext: InstallationContext = .resolve()) {
+    init(
+        installationContext: InstallationContext = .resolve(),
+        gatewayListenerTrust: @escaping @Sendable (URL) -> Bool = { GatewayListenerTrust.isTrusted($0) }
+    ) {
         self.installationContext = installationContext
         configStore = ConfigStore(context: installationContext)
         gateway = GatewayClient(
             mutationsAllowed: installationContext.permitsMutation,
-            mutationDenialReason: installationContext.accessMode.reason ?? "This installation is read only."
+            mutationDenialReason: installationContext.accessMode.reason ?? "This installation is read only.",
+            listenerTrust: gatewayListenerTrust
         )
         audit = AuditStore(url: installationContext.auditDBURL)
         stream = EventStreamReader(
@@ -329,6 +357,9 @@ final class AppState {
         let runner = CLIRunner(context: installationContext)
         cli = runner
         activity = CommandActivityStore(runner: runner)
+        AppDelegate.sandboxNotificationHandler = { [weak self] action, info in
+            self?.handleSandboxNotification(action: action, userInfo: info)
+        }
     }
 
     var menuBarState: MenuBarState {
@@ -380,7 +411,8 @@ final class AppState {
         )
     }
 
-    private func bindSelectedInstallation(resolved requested: InstallationContext? = nil) async {
+    private func bindSelectedInstallation(resolved requested: InstallationContext? = nil, upgradeRunID: UUID? = nil) async {
+        guard runtimeUpgradeRunID == nil || runtimeUpgradeRunID == upgradeRunID else { return }
         let initialTarget = requested ?? selectedInstallationContext()
         if installationBindInProgress {
             // Last request wins, but every caller waits until the serialized
@@ -471,11 +503,17 @@ final class AppState {
         !installationBindInProgress && generation == installationGeneration
     }
 
+    /// Inspection reads must stop when their installation is rebound.
+    func sandboxInspectionMayRead(generation: Int) -> Bool {
+        installationSnapshotIsCurrent(generation) && runtimeUpgradeRunID == nil
+    }
+
     /// No state derived from one config/data root may survive a path switch.
     /// App preferences, navigation, self-update state, and Activity history
     /// intentionally remain process-wide.
     private func resetInstallationScopedState() {
         installedRuntimeVersion = nil
+        alertLoadError = nil
         runtimeSetupCommands = nil
         runtimeDiscoveryCommands = nil
         runtimeVersionError = nil
@@ -517,6 +555,9 @@ final class AppState {
         connectorStatsCache = [:]
         connectorStatsAllTimeCache = [:]
         doctorCache = nil
+        coworkStatus = nil
+        lastCoworkStatusFetch = nil
+        coworkStatusInFlight = nil
         silentBypassCount = 0
         sessionTotalScans = 0
         alertPanelRequest = nil
@@ -572,7 +613,7 @@ final class AppState {
 
     /// One automatic attempt per app launch. First-run completion uses a new
     /// coordinator because an explicit setup retry is a new user action.
-    /// The exact lifecycle command preserves administrator routing and Activity.
+    /// The exact lifecycle command preserves the root-state repair and Activity.
     @discardableResult
     func ensureGatewayStarted(
         origin: String,
@@ -589,6 +630,12 @@ final class AppState {
             snapshot: snapshot,
             currentSnapshot: { self.gatewayStartupSnapshot() },
             probe: {
+                // A gateway an earlier app version ran as root for this home
+                // answers health but must run as this account: treat it as
+                // absent so the start below repairs it first (CLIRunner).
+                if !GatewayRootState.rootOwnedMarkers(home: self.installationContext.homeRoot).isEmpty {
+                    return .offline
+                }
                 do {
                     _ = try await self.gateway.health()
                     return .running
@@ -664,7 +711,7 @@ final class AppState {
     }
 
     func pulse() async {
-        guard !installationBindInProgress else { return }
+        guard !installationBindInProgress, runtimeUpgradeRunID == nil else { return }
         let selected = selectedInstallationContext()
         if selected != installationContext {
             guard selected.hasSamePaths(as: installationContext)
@@ -690,12 +737,36 @@ final class AppState {
                 await bindSelectedInstallation(resolved: rebound)
                 return
             }
-            let cfg = await configStore.reload()
-            guard installationSnapshotIsCurrent(generation) else { return }
-            await gateway.update(config: cfg)
-            guard installationSnapshotIsCurrent(generation) else { return }
-            config = cfg
-            lastConfigSignature = signature
+            // tui/app.py _poll_config_once: a config.yaml the runtime cannot
+            // load keeps the last valid snapshot and raises a banner naming
+            // the line, rather than rendering a lenient parser's guesses.
+            // The first read (launch, rebind) must not hold the health read
+            // behind a CLI start, so it validates in the background.
+            let firstRead = lastConfigSignature.isEmpty
+            var problem: String?
+            if !firstRead {
+                let validation = await cli.run(arguments: ["config", "validate"], mutation: false)
+                guard installationSnapshotIsCurrent(generation) else { return }
+                problem = ConfigValidation.invalidConfigSummary(
+                    fileName: installationContext.configURL.lastPathComponent,
+                    exitCode: validation.exitCode, output: validation.output, cancelled: validation.cancelled
+                )
+            }
+            if let problem {
+                // Keep the last valid snapshot; the health and alert reads
+                // below still run this pulse.
+                if config.loadError != problem { config.loadError = problem }
+                lastConfigSignature = signature
+            } else {
+                let cfg = await configStore.reload()
+                guard installationSnapshotIsCurrent(generation) else { return }
+                await gateway.update(config: cfg)
+                guard installationSnapshotIsCurrent(generation) else { return }
+                config = cfg
+                lastConfigSignature = signature
+                configDiskGeneration += 1
+                if firstRead { validateConfigInBackground(generation: generation, signature: signature) }
+            }
         }
         await resolveProbePaths(generation: generation) // no-op after the first pulse
         guard installationSnapshotIsCurrent(generation) else { return }
@@ -773,6 +844,7 @@ final class AppState {
         let guardrailState = health.subsystems.first { $0.name == "guardrail" }?.state
         // Doctor cache: keep last-good on parse failure (TUI semantics).
         doctorCache = DoctorCache.load(dataDirectory: installationContext.dataDirectory) ?? doctorCache
+        refreshCoworkStatusInBackground(generation: generation)
         scanners = ScannerProbe.statuses(
             config: config,
             guardrailState: guardrailState,
@@ -824,6 +896,8 @@ final class AppState {
         guard installationSnapshotIsCurrent(generation) else { return }
         let blockCount = await activeAudit.overviewBlockCount()
         guard installationSnapshotIsCurrent(generation) else { return }
+        let detectionOnly = await activeAudit.countDetectionOnlyFindings(since: Date().addingTimeInterval(-24 * 3600))
+        guard installationSnapshotIsCurrent(generation) else { return }
 
         // count_recent_silent_bypass: allow-decision LLM-shaped bypasses in
         // the last 300s (passthrough+looks_like_llm, or the shape branch).
@@ -836,12 +910,24 @@ final class AppState {
                 && ((branch == "passthrough" && $0.looksLikeLLM) || branch == "shape")
         }.count
 
+        var canonicalRows: [AuditEvent]?
+        if installedRuntimeVersion?.hasPrefix("1.") == true {
+            let result = await cli.run(arguments: ["alerts", "--json", "--limit", "500"], mutation: false)
+            guard installationSnapshotIsCurrent(generation) else { return }
+            guard result.succeeded, let parsed = RuntimeV1Alerts.parse(result.output) else {
+                alertLoadError = "The runtime alert list could not be refreshed. Previously loaded alerts may be stale; retry Refresh or review runtime diagnostics."
+                return
+            }
+            canonicalRows = parsed
+        }
+        alertLoadError = nil
         var rows: [AlertRow] = queue.map { .audit($0) }
         rows += blocks.map { .scan($0) }
         rows += egress.suffix(100).filter {
             let decision = $0.decision.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             return (decision != "allow" && decision != "allowed") || $0.looksLikeLLM
         }.map { .egress($0) }
+        if let canonicalRows { rows = canonicalRows.map { .audit($0) } }
         rows.sort { $0.timestamp > $1.timestamp }
 
         let fresh = rows.filter { !dismissedIDs.contains($0.id) }
@@ -877,9 +963,10 @@ final class AppState {
         // Publish only on real row changes so Table does not re-diff mid-gesture.
         // These adjacent assignments contain no suspension point, preventing a
         // frame where the badge and the detailed alert list disagree.
-        if fresh.map(\.id) != unackedAlerts.map(\.id) {
+        if fresh != unackedAlerts {
             unackedAlerts = fresh
         }
+        if detectionOnly != detectionOnlyFindings24h { detectionOnlyFindings24h = detectionOnly }
         overviewEnforcementMetrics = nextMetrics
     }
 
@@ -900,6 +987,9 @@ final class AppState {
         suggestedNextAction: String = "",
         refreshOnSuccess: Bool = false
     ) async -> CLIResult {
+        if let upgradeID = runtimeUpgradeRunID, upgradeID != runID, mutation {
+            return CLIResult(exitCode: 75, output: "A runtime upgrade is in progress. Wait for it to finish before making other changes.")
+        }
         guard !(mutation && installationBindInProgress) else {
             return CLIResult(
                 exitCode: 75,
@@ -908,7 +998,7 @@ final class AppState {
         }
         if let startupRunID = gatewayStartupRunID, startupRunID != runID,
            binary == "defenseclaw-gateway", let action = arguments.first,
-           GatewayAdminAction(rawValue: action) != nil {
+           CLIRunner.gatewayLifecycleActions.contains(action) {
             return CLIResult(
                 exitCode: 75,
                 output: "Automatic gateway startup is still running. Wait for its result or cancel it in Activity before starting, stopping, or restarting the gateway."
@@ -917,6 +1007,11 @@ final class AppState {
         // Any user mutation during the startup probe supersedes that probe,
         // including an explicit Stop that finishes before the probe returns.
         if mutation { commandGeneration += 1 }
+        // `keys set` secrets: use the runtime's documented stdin flag when the
+        // installed runtime accepts it (see SecretStandardInputTransport).
+        let arguments = SecretStandardInputTransport.arguments(
+            arguments, binary: binary, standardInput: standardInput, runtimeVersion: installedRuntimeVersion
+        )
         let result = await activity.run(
             id: runID,
             title: title,
@@ -1826,9 +1921,7 @@ final class AppState {
             return "\(name) connector has seen 0 hook events after \(formatted) - normal until Codex emits a hook/notify event; verify ~/.codex hooks if this persists"
         case "claudecode":
             return "\(name) connector has seen 0 hook events after \(formatted) - normal until Claude Code emits a hook event; verify Claude Code hooks if this persists"
-        case "omnigent":
-            return "\(name) connector has seen 0 policy events after \(formatted) - normal until OmniGent emits a supported policy callback; verify OmniGent policy setup if this persists"
-        case "hermes", "cursor", "devin", "copilot", "openhands", "antigravity", "opencode", "amp":
+        case "hermes", "cursor", "devin", "copilot", "antigravity", "opencode", "amp":
             return "\(name) connector has seen 0 hook events after \(formatted) - verify connector hook setup if this persists"
         default:
             return "\(name) connector has seen 0 requests after \(formatted) - verify your agent is dialing the gateway port (gateway.port)"
@@ -2023,6 +2116,65 @@ final class AppState {
         }
     }
 
+    // MARK: - Cowork status row
+
+    /// Read the Cowork block of `defenseclaw status --json` off the pulse, so the
+    /// refresh never waits on it: `status` starts Python and probes the gateway,
+    /// the sidecar and the plugin state, which takes the probe timeouts when the
+    /// gateway hangs. Cowork is a Claude Code surface, so the run is skipped
+    /// unless that connector is active; it starts at most every
+    /// `coworkStatusInterval` seconds and one at a time. `status` exits 1 when it
+    /// reports problems and still prints the report, so the output decides: no
+    /// readable report (a failed run) keeps the last row, and a report without a
+    /// `cowork` object (older runtime, no Cowork on this account) clears it. The
+    /// result of a run for an earlier installation is dropped. A run that takes
+    /// longer than `coworkStatusTimeout` is cancelled by its run id, as the
+    /// background diagnose is, so a wedged `status` cannot hold the in-flight
+    /// marker and freeze the row; the cancelled run keeps the last row
+    /// (cowork audit review 2 N2).
+    private func refreshCoworkStatusInBackground(generation: Int) {
+        guard activeConnectorNames.contains(where: { $0.lowercased() == "claudecode" }) else {
+            coworkStatus = nil
+            lastCoworkStatusFetch = nil
+            return
+        }
+        guard coworkStatusInFlight == nil else { return }
+        if let last = lastCoworkStatusFetch, Date().timeIntervalSince(last) < Self.coworkStatusInterval { return }
+        lastCoworkStatusFetch = Date()
+        coworkStatusInFlight = generation
+        let cli = self.cli
+        let timeout = Self.coworkStatusTimeout
+        Task { [weak self] in
+            let runID = UUID()
+            let watchdog = Task {
+                try? await Task.sleep(for: timeout)
+                if !Task.isCancelled { await cli.cancel(runID: runID) }
+            }
+            let result = await cli.run(arguments: ["status", "--json"], mutation: false, runID: runID)
+            watchdog.cancel()
+            guard let self else { return }
+            if self.coworkStatusInFlight == generation { self.coworkStatusInFlight = nil }
+            guard self.installationSnapshotIsCurrent(generation),
+                  self.activeConnectorNames.contains(where: { $0.lowercased() == "claudecode" }),
+                  !result.cancelled, !result.outputTruncated,
+                  result.exitCode == 0 || result.exitCode == 1
+            else { return }
+            switch CoworkStatus.report(result.output) {
+            case .unreadable:
+                return
+            case .noCowork:
+                if self.coworkStatus != nil { self.coworkStatus = nil }
+            case .cowork(let parsed):
+                if parsed != self.coworkStatus { self.coworkStatus = parsed }
+            }
+        }
+    }
+
+    /// The Cowork rows for the CONFIGURATION box (TUI cowork_overview_rows).
+    private var coworkConfigurationRows: [ConfigurationRow] {
+        (coworkStatus?.overviewRows(home: NSHomeDirectory()) ?? []).map { .init(label: $0.label, value: $0.value) }
+    }
+
     // MARK: - Configuration box (Overview, parity with the TUI CONFIGURATION panel)
 
     /// The global CONFIGURATION rows shown above the Connectors table, mirroring
@@ -2054,8 +2206,11 @@ final class AppState {
         let redaction = "default \(redactionProfile)"
         let approval = config.hiltEnabled ? "ON (min \(config.hiltMinSeverity))" : "OFF"
 
-        var rows: [ConfigurationRow] = [
-            agentRow,
+        // Cowork is a Claude Code surface: its rows sit under the agent row
+        // (TUI GAP-0046), in the all-connectors view only.
+        var rows: [ConfigurationRow] = [agentRow]
+        rows += coworkConfigurationRows
+        rows += [
             .init(label: "Redaction", value: redaction),
             .init(label: "Policy posture", value: policyPosture),
             .init(label: "Enforcement", value: enforcementLabel),
@@ -2105,6 +2260,8 @@ final class AppState {
             .init(label: "Redaction", value: redaction),
             .init(label: "Human approval", value: approval),
         ]
+        // The claudecode view also carries the Cowork rows (TUI _connector_configuration_lines).
+        if name.lowercased() == "claudecode" { rows += coworkConfigurationRows }
         if let env = config.environment?.nonEmpty {
             rows.append(.init(label: "Environment", value: "\(env) (global)"))
         }
@@ -2284,14 +2441,30 @@ final class AppState {
     /// Every agent DefenseClaw knows how to hook — the catalog-scan and
     /// Connectors-table fallback roster.
     static let knownConnectors = ["openclaw", "zeptoclaw", "codex", "claudecode", "hermes",
-                                  "cursor", "devin", "copilot", "openhands",
-                                  "antigravity", "opencode", "amp", "omnigent"]
+                                  "cursor", "devin", "copilot",
+                                  "antigravity", "opencode", "amp"]
 
     func configuredConnectors() -> [String] {
         let fromHealth = health.connectors.map(\.name)
         if !fromHealth.isEmpty { return fromHealth }
         if !config.connectors.isEmpty { return config.connectors }
         return Self.knownConnectors
+    }
+
+    /// The launch-time counterpart of the blocking check in pulse(): run
+    /// `config validate` off the pulse path and raise the banner if the file
+    /// does not load. Only this signature's verdict is applied.
+    private func validateConfigInBackground(generation: Int, signature: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            let validation = await self.cli.run(arguments: ["config", "validate"], mutation: false)
+            guard self.installationSnapshotIsCurrent(generation), self.lastConfigSignature == signature else { return }
+            guard let problem = ConfigValidation.invalidConfigSummary(
+                fileName: self.installationContext.configURL.lastPathComponent,
+                exitCode: validation.exitCode, output: validation.output, cancelled: validation.cancelled
+            ) else { return }
+            if self.config.loadError.isEmpty { self.config.loadError = problem }
+        }
     }
 
     func reloadConfig() {

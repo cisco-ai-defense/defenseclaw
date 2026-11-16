@@ -1986,6 +1986,26 @@ def build_setup_sections(
             "Read-only effective plan; press E to manage destinations through setup observability.",
         ),
         ConfigSection("Webhooks", tuple(_webhook_summary_fields(cfg)), "Read-only notifier webhook summary."),
+        # The admission defaults had no row since the retired
+        # watch.allow_list_bypass_scan row went (GAP-1870).
+        ConfigSection(
+            "Admission Defaults",
+            (
+                # Unset inherits the built-in default, on: show it, so the
+                # Value column is not blank and the first toggle turns it off.
+                _field_with_original(
+                    _field(
+                        cfg,
+                        "Allow List Bypass",
+                        "admission.defaults.allow_list_bypass_scan",
+                        "bool",
+                        hint="On (default): a first-party allow-list entry installs without a scan; off: it is scanned.",
+                    ),
+                    _value(cfg, "admission.defaults.allow_list_bypass_scan") or "true",
+                ),
+            ),
+            "Admission defaults for skills, MCP servers and plugins.",
+        ),
         ConfigSection("Skill Admission", admission_action_fields("skill", cfg), "Skill admission action per severity."),
         ConfigSection("MCP Admission", admission_action_fields("mcp", cfg), "MCP admission action per severity."),
         ConfigSection("Plugin Admission", admission_action_fields("plugin", cfg), "Plugin admission action per severity."),
@@ -2002,6 +2022,28 @@ def build_setup_sections(
                 _header("Max Retries", value=_value(cfg, "inspect_llm.max_retries") or UNSET_VALUE),
             ),
             "Deprecated v4 block. Edit the Unified LLM section instead.",
+        ),
+        ConfigSection(
+            "Decision Model",
+            (
+                _field(cfg, "Enabled", "decision_model.enabled", "bool", hint="Off by default. Runs in front of the LLM judge, or alone for the connectors below."),
+                _field(cfg, "Model", "decision_model.model", hint="Model name the System One endpoint serves."),
+                _field(cfg, "Endpoint URL", "decision_model.base_url", hint="https, or http to loopback only."),
+                _field(cfg, "Token Env", "decision_model.api_key_env", hint="Env var NAME; default DEFENSECLAW_DECISION_MODEL_KEY."),
+                _field(cfg, "Timeout (s)", "decision_model.timeout", hint="Blank = 1. The judge runs when it is late."),
+                _field(cfg, "Allow At", "decision_model.allow_threshold", hint="Risk at or below skips the judge. Blank = 0.30."),
+                _field(cfg, "Block At", "decision_model.block_threshold", hint="Risk at or above is a confident block. Blank = 0.75."),
+                _field(
+                    cfg, "Confident Block", "decision_model.on_confident_block", "choice", ("escalate", "decide"),
+                    "escalate: the judge still checks it (default). decide: it stands.",
+                ),
+                _field(
+                    cfg, "Answers Alone For", "decision_model.hook_connectors",
+                    hint="Connectors (comma list, or *) answered alone where the judge is off.",
+                ),
+            ),
+            "Fast first pass on tool calls, in front of the LLM judge or alone; skill scans record its advisory score.",
+            "Token value: defenseclaw keys set DEFENSECLAW_DECISION_MODEL_KEY. Check: setup decision-model --ping.",
         ),
         ConfigSection(
             "Cisco AI Defense", tuple(_cisco_ai_defense_fields(cfg)), "Cloud-hosted prompt/response moderation."
@@ -2057,7 +2099,10 @@ def _openclaw_path_field(cfg: object | Mapping[str, Any] | None, label: str, key
     shown read-only as unused instead.
     """
 
-    mode = _active_connector(cfg) or "openclaw"
+    mode = _active_connector(cfg)
+    if not mode and not _active_connector_names_for_setup(cfg):
+        shown = "(not used: no agent configured)"
+        return ConfigField(label=label, key=key, kind="header", value=shown, original=shown)
     if mode == "openclaw" or "openclaw" in _active_connector_names_for_setup(cfg):
         return _field(cfg, label, key, hint=hint)
     shown = f"(not used: Mode is {mode})"
@@ -3328,6 +3373,12 @@ def _cfg_port(cfg: object | Mapping[str, Any] | None, path: str) -> str:
 
 
 def _active_connector(cfg: object | Mapping[str, Any] | None) -> str:
+    configured = getattr(cfg, "has_connector_configured", None)
+    if callable(configured) and not configured():
+        return ""
+    active = getattr(cfg, "active_connector", None)
+    if callable(active):
+        return str(active() or "").strip().lower()
     return _cfg_str(cfg, "claw.mode", "").lower()
 
 
@@ -3340,8 +3391,7 @@ def _active_connector_names_for_setup(cfg: object | Mapping[str, Any] | None) ->
             names = None
         if isinstance(names, (list, tuple)):
             resolved = [str(name).strip().lower() for name in names if str(name).strip()]
-            if resolved:
-                return resolved
+            return resolved
 
     connectors_map = get_config_value(cfg, "guardrail.connectors", None)
     if isinstance(connectors_map, Mapping):
@@ -3351,6 +3401,24 @@ def _active_connector_names_for_setup(cfg: object | Mapping[str, Any] | None) ->
 
     singular = _active_connector(cfg)
     return [singular] if singular else []
+
+
+def connector_turned_off(cfg: object | Mapping[str, Any] | None, name: str) -> bool:
+    """Whether the config turns this roster connector off.
+
+    The same test as ``defenseclaw status`` (``enabled: false``) and the
+    Inventory's "(off)" chip: ``guardrail.effective_enabled``, or for a plain
+    mapping an explicit ``guardrail.connectors.<name>.enabled: false``. Setup
+    listed such a connector as active (GAP-0854).
+    """
+
+    resolver = getattr(getattr(cfg, "guardrail", None), "effective_enabled", None)
+    if callable(resolver):
+        try:
+            return not resolver(name)
+        except Exception:  # noqa: BLE001 - a config quirk must not hide setup workflows.
+            return False
+    return get_config_value(cfg, f"guardrail.connectors.{name}.enabled", None) is False
 
 
 def _guardrail_connector_choices(cfg: object | Mapping[str, Any] | None) -> tuple[str, ...]:
@@ -3574,6 +3642,15 @@ def _connector_setup_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wiza
             summary="Drop a connector from the active set; force is required for the last connector.",
             presets={"@Action": "remove"},
             fields=("Connector", "Action", "Restart Gateway", "Force Last Connector Removal"),
+        ),
+        # Cowork runs Claude Desktop's Claude Code engine; status shows its
+        # row, so Setup offers the command that fixes it (GAP-0046).
+        WizardGoal(
+            "cowork",
+            "Protect Claude Cowork",
+            summary="Build the plugin to upload in Claude; turns on Claude Code hooks if off.",
+            presets={"@Action": "cowork"},
+            fields=("Action",),
         ),
     )
 
@@ -4367,7 +4444,9 @@ def _effective_strategy_text(cfg: object | Mapping[str, Any] | None, strategy: s
     return "regex_only (judge on for no active connector)"
 
 
-def wizard_state_summary(wizard: SetupWizard | int, cfg: object | Mapping[str, Any] | None = None) -> str:
+def wizard_state_summary(
+    wizard: SetupWizard | int, cfg: object | Mapping[str, Any] | None = None, observability: object | None = None
+) -> str:
     """One-line "here's what's configured today" string for the goal menu.
 
     Returns an empty string for wizards without a useful summary so the
@@ -4385,7 +4464,13 @@ def wizard_state_summary(wizard: SetupWizard | int, cfg: object | Mapping[str, A
         role = "judge+agent available" if _any_active_connector_is_proxy(cfg) else "judge only"
         return f"Main: {main}  ·  Judge: {judge}  ·  Connectors: {connector_summary} ({role})"
     if wizard == SetupWizard.REDACTION:
-        profile = _cfg_str(cfg, "observability.defaults.redaction_profile", "none") or "none"
+        # The loaded Config has no observability.defaults; the canonical
+        # status read from config.yaml does (GAP-1394).
+        profile = (
+            str(getattr(observability, "default_redaction_profile", "") or "")
+            or _cfg_str(cfg, "observability.defaults.redaction_profile", "none")
+            or "none"
+        )
         posture = "unredacted" if profile == "none" else "redacted"
         return f"Default profile: {profile} ({posture})  ·  Each observability destination can set its own profile"
     if wizard == SetupWizard.GUARDRAIL:
@@ -4395,7 +4480,11 @@ def wizard_state_summary(wizard: SetupWizard | int, cfg: object | Mapping[str, A
         return f"Guardrail: {enabled}  ·  Mode: {mode}  ·  Strategy: {_effective_strategy_text(cfg, strategy)}"
     if wizard == SetupWizard.CONNECTOR_SETUP:
         connectors = _active_connector_names_for_setup(cfg)
-        return f"Active connectors: {', '.join(connectors) if connectors else 'not set'}"
+        on = [name for name in connectors if not connector_turned_off(cfg, name)]
+        off = [name for name in connectors if connector_turned_off(cfg, name)]
+        summary = f"Active connectors: {', '.join(on) if on else 'none' if off else 'not set'}"
+        # A connector turned off stays in the roster; it is not active (GAP-0854).
+        return f"{summary}  ·  Off: {', '.join(off)}" if off else summary
     if wizard == SetupWizard.AI_DISCOVERY:
         enabled = "on" if bool(get_config_value(cfg, "ai_discovery.enabled", True)) else "off"
         mode = _cfg_str(cfg, "ai_discovery.mode", "enhanced") or "enhanced"
@@ -5537,7 +5626,7 @@ def sandbox_wizard_fields(
                 hint="Docker Desktop's Linux kernel has no Landlock, so setup switches the OpenShell gateway to "
                 'its MicroVM driver (compute_driver = "vm"; Apple silicon; experimental upstream)'
                 + microvm_restart
-                + ". MicroVMs mount no host folders: the agent works on a copy, and defenseclaw sandbox pull "
+                + ". MicroVMs mount no host folders: the agent works on a copy, and defenseclaw sandbox pull NAME --apply "
                 "brings the changes back. The first run of each image prepares its MicroVM disk (about a minute "
                 "and 5 GB).",
                 visible_when=is_setup,
@@ -6054,11 +6143,6 @@ def uninstall_intent(option: UninstallOption) -> SetupCommandIntent:
     )
 
 
-# The connector install.sh offers first; the Setup form starts on it when no
-# connector is configured (GAP-2159).
-_DEFAULT_SETUP_CONNECTOR = "codex"
-
-
 def connector_setup_wizard_fields(
     cfg: object | Mapping[str, Any] | None = None,
     os_name: str | None = None,
@@ -6070,17 +6154,17 @@ def connector_setup_wizard_fields(
     if "@Connector" in overrides:
         connector = str(overrides.get("@Connector", "") or "").strip()
     else:
-        connector = str(get_config_value(cfg, "guardrail.connector", "") or "").strip()
-        if not connector:
+        active = getattr(cfg, "active_connector", None)
+        if callable(active):
+            connector = str(active() or "").strip()
+        else:
+            connector = str(get_config_value(cfg, "guardrail.connector", "") or "").strip()
+        if not connector and not callable(active):
             connector = str(get_config_value(cfg, "claw.mode", "") or "").strip()
-    # No connector configured: start where install.sh does (codex), not on
-    # openclaw, so Ctrl+R can't set up an agent nobody picked (GAP-2159).
-    connector = connector or _DEFAULT_SETUP_CONNECTOR
-    # A stored compatibility mirror can name a proxy connector that this OS
-    # can't run (e.g. a config copied from macOS opened on Windows); fall back
-    # to the first supported connector rather than offering an unusable default.
+    # An empty or unsupported connector requires an explicit choice. A stored
+    # compatibility mirror can name a proxy that this OS cannot run.
     if connector not in choices:
-        connector = choices[0] if choices else connector
+        connector = ""
     action = str(overrides.get("@Action", "setup") or "setup").strip().lower()
     mode = (
         str(get_config_value(cfg, "guardrail.mode", "observe") or "observe")
@@ -6114,7 +6198,8 @@ def connector_setup_wizard_fields(
             "choice",
             value="setup",
             default="setup",
-            options=("setup", "batch", "remove"),
+            # cowork only under the Protect Claude Cowork goal.
+            options=("setup", "batch", "remove", *(("cowork",) if action == "cowork" else ())),
             hint="Set up/add one connector, choose the active connector set, or remove one.",
         ),
         WizardFormField(
@@ -7575,8 +7660,10 @@ def wizard_bool_value(fields: Sequence[WizardFormField], label: str, fallback: s
 
 
 def _build_connector_setup_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
-    connector = wizard_field_value(fields, "Connector") or _DEFAULT_SETUP_CONNECTOR
+    connector = wizard_field_value(fields, "Connector")
     action = wizard_field_value(fields, "Action") or "setup"
+    if action == "cowork":
+        return ("setup", "cowork", "--yes")
     if action == "batch":
         out = ["setup", "--yes"]
         for name in split_csv(wizard_field_value(fields, "Connectors (CSV)")):
@@ -7602,8 +7689,7 @@ def _build_connector_setup_args(fields: Sequence[WizardFormField]) -> tuple[str,
 
     args, _display = connector_setup_command(connector)
     if not args:
-        args, _display = connector_setup_command("openclaw")
-        connector = "openclaw"
+        return ()
     out = list(args)
     # ``--mode`` and ``--no-restart`` apply to every connector (proxy and
     # hook). Previously the hook branch dropped ``--mode`` silently, so
@@ -8083,7 +8169,7 @@ def _guardrail_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
         _header(
             "Hook Fail Mode (use Guardrail action)",
             "guardrail.hook_fail_mode",
-            _value(cfg, "guardrail.hook_fail_mode"),
+            _effective_guardrail_value(cfg, "", "effective_hook_fail_mode", "guardrail.hook_fail_mode"),
         ),
         _field(
             cfg,
@@ -8648,6 +8734,11 @@ def _openshell_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
         ),
         field("Blocklist Feed", "openshell.egress.feed", "choice", (OPENSHELL_INHERIT, "builtin", "none"), hint="The pack's feeds unless set."),
         field("Base Image", "openshell.image.base", hint="Overlay base image; empty is the pinned NVIDIA base."),
+        field(
+            "Trusted CA Bundle",
+            "openshell.trusted_ca_bundle",
+            hint="PEM file of your TLS-inspecting proxy's root CA (absolute or ~/); images are rebuilt to trust it.",
+        ),
         field("Approval Debounce ms", "openshell.approvals.debounce_ms", "int", hint="Batch approvals until hooks are quiet."),
         field("Agent Proposals", "openshell.approvals.agent_proposals", "choice", inherit_bool, hint="Let the agent propose rules (default on)."),
         field("CPU", "openshell.resources.cpu", hint="Per-sandbox CPU, for example 2 or 500m."),
@@ -8663,7 +8754,6 @@ def _openshell_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
         field("MCP Host Ports", "openshell.mcp.host_ports", hint="Localhost ports opened for host MCP servers, comma-separated."),
         field("Upstream Telemetry", "openshell.upstream_telemetry", "bool", hint="Keep OpenShell's anonymous usage telemetry."),
         field("Token Delivery", "openshell.token_delivery", "choice", ("provider", "env"), hint="How the sandbox token reaches hooks."),
-        field("Middleware (experimental)", "openshell.middleware.enabled", "bool", hint="Supervisor middleware; Phase 3."),
         _header(
             "Organization Policy",
             "openshell.admin",
@@ -8902,7 +8992,7 @@ def _v8_observability_fields(
             how_to,
         )
 
-    retention = "unbounded" if status.unbounded_retention else f"{status.retention_days} days"
+    retention = status.retention_label
     fields: list[ConfigField] = [
         _header("Plan Digest", "observability.plan_digest", status.plan_digest[:12]),
         _header("Bucket Catalog", "observability.bucket_catalog_version", str(status.bucket_catalog_version)),
@@ -9142,11 +9232,9 @@ def _connector_setup_alias(wire: str) -> str:
         "cursor",
         "devin",
         "copilot",
-        "openhands",
         "antigravity",
         "opencode",
         "amp",
-        "omnigent",
         "kiro",
     }:
         return normalized

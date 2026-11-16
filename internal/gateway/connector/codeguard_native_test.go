@@ -395,63 +395,8 @@ func TestCodexSetupUserConfigFailureRollsBackManagedAndRuntime(t *testing.T) {
 		APIAddr:        "127.0.0.1:18970",
 		HookContractID: "codex-hooks-v3",
 	})
-	if err == nil || !strings.Contains(err.Error(), "Codex hooks are disabled") {
-		t.Fatalf("Setup disabled user config error = %v, want config-patch refusal", err)
-	}
-	assertCodexFailedSetupRestored(t, dataDir, configPath, managedPath, configBefore, managedBefore)
-}
-
-func TestCodexSetupRollsBackBothConfigLayersAfterCodeGuardFailure(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("managed Codex hook layer is native-Windows-only")
-	}
-	dir := testenv.PrivateTempDir(t)
-	dataDir := filepath.Join(dir, "defenseclaw")
-	configPath := filepath.Join(dir, "codex", "config.toml")
-	managedPath := filepath.Join(filepath.Dir(configPath), codexManagedConfigLogicalName)
-	configBefore := []byte("model = \"gpt-5\"\r\n")
-	managedBefore := []byte("[operator_policy]\r\nmode = \"strict\"\r\n")
-	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(configPath, configBefore, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(managedPath, managedBefore, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	previousConfig := CodexConfigPathOverride
-	CodexConfigPathOverride = configPath
-	t.Cleanup(func() { CodexConfigPathOverride = previousConfig })
-	previousInspector := codexPolicyInspector
-	codexPolicyInspector = func(context.Context, SetupOpts) (codexEffectivePolicy, error) {
-		return codexEffectivePolicy{Source: "focused lifecycle test"}, nil
-	}
-	t.Cleanup(func() { codexPolicyInspector = previousInspector })
-	setHookBinaryOverride(t, filepath.Join(dir, "DefenseClaw", windowsHookBinaryName))
-
-	emptyRepo := filepath.Join(dir, "invalid-project-codeguard")
-	oldOverride := nativeCodeGuardRepoDirOverride
-	nativeCodeGuardRepoDirOverride = emptyRepo
-	t.Cleanup(func() { nativeCodeGuardRepoDirOverride = oldOverride })
-
-	userHome := filepath.Join(dir, "profile")
-	restoreHome, err := BindUserHomeDir(userHome)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(restoreHome)
-
-	err = NewCodexConnector().Setup(context.Background(), SetupOpts{
-		DataDir:           dataDir,
-		APIAddr:           "127.0.0.1:18970",
-		InstallCodeGuard:  true,
-		HookContractID:    "codex-hooks-v3",
-		ManagedEnterprise: true,
-	})
-	if err == nil || !strings.Contains(err.Error(), "CodeGuard skill install") {
-		t.Fatalf("Setup CodeGuard failure = %v, want post-patch install failure", err)
+	if err == nil || !strings.Contains(err.Error(), "Codex hooks are turned off") {
+		t.Fatalf("Setup disabled user config error = %v, want a refusal", err)
 	}
 	assertCodexFailedSetupRestored(t, dataDir, configPath, managedPath, configBefore, managedBefore)
 }

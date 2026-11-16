@@ -389,12 +389,13 @@ func boundedCorrelationLimit(limit int) int {
 	return limit
 }
 
-func (repo *CorrelationRepository) anchorEventIDs(
-	ctx context.Context,
+// correlationAnchorStatement is the anchor query of anchorEventIDs. The
+// sparse-key index test runs EXPLAIN on it (GAP-1793).
+func correlationAnchorStatement(
 	anchor CorrelationAnchor,
 	page CorrelationPageRequest,
 	limit int,
-) ([]SemanticEventID, bool, error) {
+) (string, []any) {
 	column := ""
 	value := ""
 	from := "correlation_events AS event"
@@ -443,6 +444,16 @@ func (repo *CorrelationRepository) anchorEventIDs(
 	}
 	statement += ` ORDER BY event.received_time_unix_nano, event.semantic_event_id LIMIT ?`
 	args = append(args, limit+1)
+	return statement, args
+}
+
+func (repo *CorrelationRepository) anchorEventIDs(
+	ctx context.Context,
+	anchor CorrelationAnchor,
+	page CorrelationPageRequest,
+	limit int,
+) ([]SemanticEventID, bool, error) {
+	statement, args := correlationAnchorStatement(anchor, page, limit)
 	rows, err := repo.store.queryDB(ctx, "correlation_anchor_events", statement, args...)
 	if err != nil {
 		return nil, false, fmt.Errorf("audit: query correlation anchor: %w", err)
@@ -654,7 +665,7 @@ func (repo *CorrelationRepository) loadEvidence(
 
 func (repo *CorrelationRepository) ingestWatermark(ctx context.Context) (time.Time, error) {
 	var watermark sql.NullInt64
-	if err := repo.store.db.QueryRowContext(ctx,
+	if err := repo.store.queryPool().QueryRowContext(ctx,
 		`SELECT MAX(received_time_unix_nano) FROM correlation_events`).Scan(&watermark); err != nil {
 		return time.Time{}, fmt.Errorf("audit: read correlation ingest watermark: %w", err)
 	}

@@ -40,6 +40,7 @@ import os
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import click
@@ -62,10 +63,8 @@ HOOK_ALIAS_CONNECTORS = (
     "cursor",
     "devin",
     "copilot",
-    "openhands",
     "antigravity",
     "opencode",
-    "omnigent",
 )
 
 
@@ -281,8 +280,23 @@ class TestSetupCodexAlias(unittest.TestCase):
             )
             return {}, {"codex": "selection receipt is invalid or expired"}
 
+        # Reach the selection failure with the shared Windows launcher present.
+        atomic_write_private_bytes(os.path.join(self.tmp_dir, "defenseclaw-hook.exe"), b"installed fixture")
+        launcher_identity = json.dumps({
+            "schema_version": 1,
+            "name": "defenseclaw-hook-launcher",
+            "version": "1.0.8",
+            "commit": "fixture",
+        }).encode()
         with (
             patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
+            patch("defenseclaw.commands.cmd_setup.subprocess.run", return_value=SimpleNamespace(
+                returncode=0, stdout=launcher_identity,
+            )) as launcher_probe,
+            patch(
+                "defenseclaw.gateway.canonical_install_path",
+                return_value=os.path.join(self.tmp_dir, "defenseclaw-gateway.exe"),
+            ),
             patch(
                 "defenseclaw.commands.cmd_setup._capture_setup_applied_runtime",
                 return_value=cmd_setup._SetupAppliedRuntimeEvidence("stopped", "", ()),
@@ -298,6 +312,11 @@ class TestSetupCodexAlias(unittest.TestCase):
             result = _invoke(["codex", "--yes"], self.app)
 
         self.assertNotEqual(result.exit_code, 0)
+        launcher_probe.assert_called_once()
+        self.assertEqual(
+            launcher_probe.call_args.args[0],
+            [os.path.join(self.tmp_dir, "defenseclaw-hook.exe"), "--version-json"],
+        )
         self.assertIn("freshly verified selected agent executable", result.output)
         self.assertFalse(os.path.exists(self.cfg_path))
         self.assertEqual(self.app.cfg.claw.mode, "openclaw")
@@ -416,6 +435,9 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
 
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
+        preflight = patch("defenseclaw.commands.cmd_setup._preflight_opencode_plugin_folder")
+        preflight.start()
+        self.addCleanup(preflight.stop)
         self.selection_patcher = patch(
             "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections"
         )
@@ -481,7 +503,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                 if connector == "cursor":
                     self.assertIn("defenseclaw setup cursor --mode action", result.output)
                     self.assertIn(
-                        "cursor hook failures=open (failClosed=false)",
+                        "cursor gateway outage=open (failClosed=true)",
                         result.output,
                     )
                     self.assertIn(
@@ -533,7 +555,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                 self.assertNotIn("set guardrail.mode=observe", result.output)
                 if connector == "cursor":
                     self.assertIn(
-                        "cursor hook failures=closed (failClosed=true)",
+                        "cursor gateway outage=open (failClosed=true)",
                         result.output,
                     )
                     self.assertIn(
@@ -542,6 +564,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                     )
                 version_mock.assert_called_with(
                     connector,
+                    _refusal_scope={},
                     mode=expected_mode,
                     data_dir=self.app.cfg.data_dir,
                     _allow_prompt=False,
@@ -568,34 +591,6 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
         self.assertEqual(again.exit_code, 0, msg=again.output)
         self.assertEqual(self.app.cfg.guardrail.effective_mode(connector), "action")
 
-    def test_omnigent_restart_reports_staged_policy_not_live_enforcement(self):
-        with (
-            patch(
-                "defenseclaw.commands.cmd_setup._restart_services",
-                return_value=None,
-            ) as restart_mock,
-            patch(
-                "defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack",
-                return_value=None,
-            ),
-            patch(
-                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
-                return_value=True,
-            ),
-        ):
-            result = _invoke(["omnigent", "--yes", "--mode", "action"], self.app)
-
-        self.assertEqual(result.exit_code, 0, msg=result.output)
-        restart_mock.assert_called_once()
-        self.assertIn("OmniGent on-disk policy registration staged", result.output)
-        self.assertIn("loaded policy generation/module/config identity", result.output)
-        self.assertIn("action/fail-closed enforcement remains unverified", result.output)
-        self.assertIn(
-            "enforcement:           configured (custom policy API; live policy generation unverified)",
-            result.output,
-        )
-        self.assertNotIn("OmniGent connector setup complete", result.output)
-        self.assertNotIn("enforcement:           enabled", result.output)
 
     def test_hermes_selection_failure_preserves_prior_connector_roster_before_save(self):
         from defenseclaw.config import PerConnectorGuardrailConfig
@@ -638,7 +633,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
         )
         restart_mock.assert_not_called()
 
-    def test_cursor_observe_reports_fail_open_despite_explicit_closed_preference(self):
+    def test_cursor_observe_reports_explicit_closed_outage_choice(self):
         from defenseclaw.config import PerConnectorGuardrailConfig
 
         self.app.cfg.guardrail.connectors = {
@@ -665,11 +660,11 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("cursor mode=observe", result.output)
+        # failClosed is true in observe mode too. The saved outage choice wins.
         self.assertIn(
-            "cursor hook failures=open (failClosed=false)",
+            "cursor gateway outage=closed (failClosed=true)",
             result.output,
         )
-        self.assertNotIn("failClosed=true", result.output)
 
     def test_later_connector_setup_waits_for_cursor_and_full_active_roster(self):
         from defenseclaw.config import PerConnectorGuardrailConfig
@@ -745,7 +740,6 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
             "claudecode": ("action", "closed"),
             "codex": ("observe", "open"),
             "cursor": ("action", "closed"),
-            "omnigent": ("observe", "open"),
         }
         self.app.cfg.guardrail.connector = "claudecode"
         self.app.cfg.claw.mode = "claudecode"
@@ -850,6 +844,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                 self.assertNotIn("NameError", result.output)
                 version_mock.assert_called_with(
                     connector,
+                    _refusal_scope={},
                     mode="observe",
                     data_dir=self.app.cfg.data_dir,
                     _allow_prompt=False,
@@ -864,7 +859,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
             patch("defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack", return_value=None),
             patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True),
         ):
-            result = _invoke(["openhands", "--yes", "--no-restart", "--workspace", workspace], self.app)
+            result = _invoke(["codex", "--yes", "--no-restart", "--workspace", workspace], self.app)
 
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertEqual(self.app.cfg.claw.workspace_dir, os.path.realpath(workspace))
@@ -948,13 +943,6 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                 self.assertNotIn("Pins claw.mode", result.output)
                 self.assertNotIn("OpenClaw default layout", result.output)
 
-    def test_omnigent_help_describes_policy_api_not_pretool_hooks(self):
-        result = _invoke(["omnigent", "--help"], self.app)
-        self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("custom policy API", result.output)
-        self.assertIn("approval verdict", result.output)
-        self.assertNotIn("PreToolUse deny", result.output)
-        self.assertNotIn("pre-tool hook", result.output)
 
     def test_guardrail_help_mentions_new_connector_choices(self):
         host = "windows"

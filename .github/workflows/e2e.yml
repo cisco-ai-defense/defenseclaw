@@ -33,6 +33,10 @@ jobs:
     # job further down the file. Mirrors the guard already in
     # `full-live` below — we just forgot to clone it onto `core`.
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    # GAP-1110 known limit (owner BALANCED-DEFAULTS.md rule 6): the real
+    # splunk/splunk:10.2.0 image is linux/amd64 only. On this ARM64 E2E
+    # runner, compose cannot start Splunk until a prepared X64 E2E runner
+    # is available. Keep the real Splunk search assertions in this job.
     runs-on: [self-hosted, Linux, ARM64, e2e]
     timeout-minutes: 30
     env:
@@ -161,7 +165,7 @@ jobs:
           # Bring down the Splunk compose stack from any prior run BEFORE
           # the host-wide reclaim, so docker can release its volumes.
           cd bundles/splunk_local_bridge/compose 2>/dev/null && {
-            export SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0
+            export SPLUNK_IMAGE=splunk/splunk:10.2.0
             docker compose -f docker-compose.ci.yml down -v 2>/dev/null || true
             cd -
           } || true
@@ -322,7 +326,7 @@ jobs:
           cd bundles/splunk_local_bridge
           bash splunk/package_local_mode_app.sh
           cd compose
-          export SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0
+          export SPLUNK_IMAGE=splunk/splunk:10.2.0
           docker compose -f docker-compose.ci.yml up -d
           echo "Waiting for Splunk HEC..."
           for i in $(seq 1 60); do
@@ -691,7 +695,7 @@ jobs:
           fi
 
           cd bundles/splunk_local_bridge/compose 2>/dev/null && {
-            export SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0
+            export SPLUNK_IMAGE=splunk/splunk:10.2.0
             docker compose -f docker-compose.ci.yml down -v 2>/dev/null || true
             cd -
           } || true
@@ -712,6 +716,9 @@ jobs:
     # phases cannot cancel or corrupt each other on the same runner.
     needs: core
     if: ${{ always() && (github.event_name == 'schedule' || (needs.core.result == 'success' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)))) }}
+    # GAP-1110 known limit (owner BALANCED-DEFAULTS.md rule 6): the real
+    # splunk/splunk:10.2.0 image is linux/amd64 only. This ARM64 job also
+    # needs a prepared X64 E2E runner before its real Splunk checks can run.
     runs-on: [self-hosted, Linux, ARM64, e2e]
     timeout-minutes: 45
     env:
@@ -888,7 +895,7 @@ jobs:
           # Bring down any leftover Splunk compose stack BEFORE host-wide
           # reclaim so docker can release its volumes.
           cd bundles/splunk_local_bridge/compose 2>/dev/null && {
-            export SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0
+            export SPLUNK_IMAGE=splunk/splunk:10.2.0
             docker compose -f docker-compose.ci.yml down -v 2>/dev/null || true
             cd -
           } || true
@@ -1048,7 +1055,7 @@ jobs:
           cd bundles/splunk_local_bridge
           bash splunk/package_local_mode_app.sh
           cd compose
-          export SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0
+          export SPLUNK_IMAGE=splunk/splunk:10.2.0
           docker compose -f docker-compose.ci.yml up -d
           echo "Waiting for Splunk HEC..."
           for i in $(seq 1 60); do
@@ -1732,7 +1739,7 @@ jobs:
           fi
 
           cd bundles/splunk_local_bridge/compose 2>/dev/null && {
-            export SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0
+            export SPLUNK_IMAGE=splunk/splunk:10.2.0
             docker compose -f docker-compose.ci.yml down -v 2>/dev/null || true
             cd -
           } || true

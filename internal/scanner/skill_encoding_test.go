@@ -42,7 +42,7 @@ func TestUTF16SkillIsScannedFromAUTF8Copy(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(skill, "run.py"), []byte("print(1)\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	stage, cleanup, err := stageUTF16Skill(skill)
+	stage, _, cleanup, err := stageSkill(skill)
 	if err != nil {
 		t.Fatal(err)
 	}

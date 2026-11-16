@@ -48,11 +48,11 @@ func ValidateManagedStandaloneConfig(raw []byte, cfg *Config, plan *Observabilit
 			return fmt.Errorf("config data_dir %q must be %s: the service sandbox only allows writes there", dataDir, layout.DataDir)
 		}
 	}
-	if bind := strings.TrimSpace(cfg.Gateway.APIBind); bind != "" && bind != "127.0.0.1" {
-		return fmt.Errorf("config gateway.api_bind %q must be 127.0.0.1", bind)
+	if err := ValidateManagedStandaloneListener(cfg, layout.GOOS); err != nil {
+		return err
 	}
-	if port := cfg.Gateway.APIPort; port != 0 && port != 18970 {
-		return fmt.Errorf("config gateway.api_port %d must be 18970: the socket unit owns that listener", port)
+	if err := ValidateManagedGuardrailProxyBind(cfg); err != nil {
+		return err
 	}
 	dirs := cfg.ReferencedRulePackDirs()
 	for _, label := range RulePackCheckOrder(dirs) {
@@ -66,6 +66,24 @@ func ValidateManagedStandaloneConfig(raw []byte, cfg *Config, plan *Observabilit
 		}
 	}
 	return validateManagedStandaloneJSONL(plan, layout)
+}
+
+// ValidateManagedStandaloneListener checks the gateway API listener of a
+// standalone config for goos. Every OS refuses a bind other than loopback
+// 127.0.0.1. Linux and macOS also refuse a port other than 18970, which their
+// socket units own; Windows Setup takes the port chosen before the first
+// install, so goos "windows" or "" (an OS not known) skips the port.
+func ValidateManagedStandaloneListener(cfg *Config, goos string) error {
+	if bind := strings.TrimSpace(cfg.Gateway.APIBind); bind != "" && bind != "127.0.0.1" {
+		return fmt.Errorf("config gateway.api_bind %q must be 127.0.0.1", bind)
+	}
+	if goos != "linux" && goos != "darwin" {
+		return nil
+	}
+	if port := cfg.Gateway.APIPort; port != 0 && port != DefaultGatewayAPIPort {
+		return fmt.Errorf("config gateway.api_port %d must be %d on %s: the socket unit owns that listener", port, DefaultGatewayAPIPort, goos)
+	}
+	return nil
 }
 
 // validateManagedStandaloneJSONL checks the path restriction imposed by the

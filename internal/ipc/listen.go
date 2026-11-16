@@ -25,7 +25,7 @@ import (
 // path outside the dedicated directory, and a parent directory mode
 // that would let an unprivileged user pre-create a decoy at the socket
 // path while the daemon is stopped. Every one of those came out of
-// review on spec 004.
+// security review of the Windows UI IPC server.
 //
 // It is exported so a second local service cannot get any of that
 // subtly wrong by reimplementing it. A privileged sensor helper is the

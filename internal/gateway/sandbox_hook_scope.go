@@ -35,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -122,7 +123,7 @@ func sandboxProfileHookMode(ctx context.Context, connectorName string) string {
 	if mode == "" {
 		return ""
 	}
-	return normalizeAgentHookMode(mode)
+	return config.NormalizeHookMode(mode)
 }
 
 // hookCWDForContext resolves a payload working directory: unchanged host
@@ -131,6 +132,10 @@ func hookCWDForContext(ctx context.Context, cwd string) string {
 	if view, ok := sandboxHookView(ctx); ok {
 		return sandboxHookCWD(view, cwd)
 	}
+	// Where the system reads a parent step as text (Windows), the directory a
+	// call starts in is the cleaned one, whatever link the text crosses; the
+	// hook client keys its evidence there (hookpaths.PlaceDirectory).
+	cwd = hookpaths.OSCleanedDirectory(cwd)
 	if resolved := sanitizeHookCWD(cwd); resolved != "" {
 		return resolved
 	}
@@ -153,11 +158,37 @@ func serviceAccountCallerCWD(ctx context.Context, cwd string) string {
 	if home == "" || home == unresolvedCallerHome {
 		return ""
 	}
-	if !insideHome(home, cwd) && !(filepath.IsAbs(strings.TrimSpace(cwd)) && !hasParentElement(cwd) &&
-		projectRootKey(strings.TrimSpace(cwd)) == projectRootKey(home)) {
+	if !insideHome(home, cwd) && ((!(filepath.IsAbs(strings.TrimSpace(cwd))) || hasParentElement(cwd)) || projectRootKey(strings.TrimSpace(cwd)) != projectRootKey(home)) {
 		return ""
 	}
 	return filepath.Clean(strings.TrimSpace(cwd))
+}
+
+// managedClientCWD is the working directory of a managed POSIX hook call
+// that the gateway could not resolve (cwd is not absolute): the directory
+// the managed hook client ran the call in as the user (hookpaths.CWDKey of
+// its evidence). The gateway service runs with ProtectHome, so
+// sanitizeHookCWD returns "" for every home project; the session's startup
+// evidence then had no project, and an absolute, relative or alias write to
+// the AGENTS.md the session started with had no load location (GAP-1462).
+// The client's directory is kept lexically, as for a managed Windows caller
+// (serviceAccountCallerCWD, GAP-1356), only when it is the kernel-verified
+// hook-socket caller's home or lies in it; the client's evidence, not this
+// host, resolves what is below it. Any other cwd is returned unchanged.
+func managedClientCWD(ctx context.Context, cwd string, evidence map[string]string) string {
+	if filepath.IsAbs(cwd) || isSandboxHookRequest(ctx) {
+		return cwd
+	}
+	peer, ok := managedHookPeerFromContext(ctx)
+	if !ok || !filepath.IsAbs(peer.Home) {
+		return cwd
+	}
+	client := evidence[hookpaths.CWDKey]
+	if !filepath.IsAbs(client) || hasParentElement(client) || strings.ContainsRune(client, 0) ||
+		projectRootKey(client) != projectRootKey(peer.Home) && !insideHome(peer.Home, client) {
+		return cwd
+	}
+	return filepath.Clean(client)
 }
 
 // hookActiveHome is the directory "~" names in a request's tool calls: the
@@ -250,7 +281,9 @@ func sandboxSessionStateKey(ctx context.Context, sessionID string) string {
 	if binding, ok := sandboxauth.FromContext(ctx); ok {
 		return "sandbox\x00" + sandboxBindingScope(binding) + "\x00" + sessionID
 	}
-	return sessionID
+	// A trusted connector's call for a person keeps its state under the
+	// connector account and the person (trusted_connector.go).
+	return actingForSessionStateScope(ctx) + sessionID
 }
 
 // sandboxBindingScope names the trust domain of a sandbox's state: its
@@ -306,6 +339,12 @@ func resolveConnectorInstanceForRequest(
 ) (audit.ConnectorInstance, error) {
 	binding, sandboxed := sandboxauth.FromContext(ctx)
 	if !sandboxed {
+		if af, ok := actingForFromContext(ctx); ok {
+			// One instance per (trusted connector account, person): their
+			// cursors, pending operations and chain partitions never mix.
+			return repo.ResolveScopedConnectorInstance(ctx, trustedConnectorInstanceID(af),
+				connectorName, profileVersion, custody)
+		}
 		return repo.ResolveConnectorInstance(ctx, connectorName, profileVersion, custody)
 	}
 	if sandboxauth.CanonicalConnector(connectorName) != binding.Connector {
@@ -460,7 +499,12 @@ func sandboxHookManagedV8(ctx context.Context) audit.SandboxManagedV8 {
 // envelope.
 func hookRequestAuditExtra(ctx context.Context, profile connector.HookProfile) map[string]string {
 	extra := mergeHookEnvelopeExtra(hookCompatibilityExtra(profile), sandboxHookAuditExtra(ctx))
-	return mergeHookEnvelopeExtra(extra, agentHostExtra(ctx))
+	extra = mergeHookEnvelopeExtra(extra, agentHostExtra(ctx))
+	extra = mergeHookEnvelopeExtra(extra, coworkSurfaceAuditExtra(ctx))
+	if reason := resolvedWritesFromContext(ctx)[hookpaths.UnprovenReasonKey]; hookpaths.UnprovenWriteTitle(reason) != "" {
+		extra = mergeHookEnvelopeExtra(extra, map[string]string{"unresolved_command": reason})
+	}
+	return extra
 }
 
 // sandboxBindingEnvelope overlays the binding's identity onto env.
@@ -519,6 +563,15 @@ func sandboxStopTargets(ctx context.Context, view *sandboxauth.FSView, hostCWD s
 // host-only entries (the host user's Claude home) are dropped.
 func claudeCodeWatchPathsForRequest(req claudeCodeHookRequest, root string) []string {
 	if req.sandboxView == nil {
+		if req.managedWatch {
+			// An unresolved caller keeps its project entries; only the
+			// home entries it cannot prove are left out.
+			home := req.watchHome
+			if home == unresolvedCallerHome {
+				home = ""
+			}
+			return connector.ClaudeCodeWatchPathsForHome(root, home)
+		}
 		return connector.ClaudeCodeWatchPaths(root)
 	}
 	out := []string{}

@@ -111,12 +111,13 @@ func windowsStandaloneSignedOutRollbackEnabled() bool {
 	return strings.TrimSpace(os.Getenv(windowsStandaloneSignedOutRollbackSwitch)) != "0"
 }
 
-// RemoveWindowsStandalonePerUserRuntimeSelectors removes the runtime selector
-// of every standalone per-user connector. A connector without its machine
-// directory has none, and none is created.
-func RemoveWindowsStandalonePerUserRuntimeSelectors() error {
+// RemoveWindowsPerUserRuntimeSelectors removes the runtime selector
+// of every per-user connector the profile manages (Copilot alone on Secure
+// Client). A connector without its machine directory has none, and none is
+// created.
+func RemoveWindowsPerUserRuntimeSelectors() error {
 	var errs []error
-	for _, name := range WindowsStandalonePerUserConnectorNames() {
+	for _, name := range WindowsProfilePerUserConnectorNames() {
 		present, err := windowsPerUserManagedRuntimeDirPresent(name)
 		if err != nil {
 			errs = append(errs, err)
@@ -133,7 +134,7 @@ func RemoveWindowsStandalonePerUserRuntimeSelectors() error {
 		if !current.Existed {
 			continue
 		}
-		if err := RestoreWindowsManagedRuntimeSelectorCAS(WindowsManagedRuntimeSelectorFullRestoreOptions{
+		if _, err := RestoreWindowsManagedRuntimeSelectorCAS(WindowsManagedRuntimeSelectorFullRestoreOptions{
 			Snapshot:        WindowsManagedRuntimeSelectorSnapshot{SchemaVersion: 1, Connector: name},
 			ExpectedCurrent: current.CAS,
 		}); err != nil {
@@ -144,9 +145,9 @@ func RemoveWindowsStandalonePerUserRuntimeSelectors() error {
 }
 
 // RemoveWindowsStandaloneManagedPolicyLocks removes the Claude Code and Codex
-// managed-policy transaction lock files in those vendors' machine-policy
-// folders. A lock that is not a plain administrator-owned file stays and is
-// reported.
+// managed-policy transaction lock files (the Codex writer lock and the lock of
+// 1.0.8 and earlier) in those vendors' machine-policy folders. A lock that is
+// not a plain administrator-owned file stays and is reported.
 func RemoveWindowsStandaloneManagedPolicyLocks(codexRequirementsPath string) error {
 	if !windowsEnterpriseStandaloneProcess() {
 		return nil
@@ -157,7 +158,11 @@ func RemoveWindowsStandaloneManagedPolicyLocks(codexRequirementsPath string) err
 	}
 	locks := []string{filepath.Join(filepath.Dir(policyPath), windowsClaudeManagedLockFile)}
 	if path := strings.TrimSpace(codexRequirementsPath); path != "" {
-		locks = append(locks, filepath.Join(filepath.Dir(filepath.Clean(path)), windowsClaudeManagedLockFile))
+		codexDir := filepath.Dir(filepath.Clean(path))
+		locks = append(locks,
+			filepath.Join(codexDir, connector.WindowsCodexManagedWriterLockFile),
+			// The lock of 1.0.8 and earlier (GAP-0650).
+			filepath.Join(codexDir, windowsClaudeManagedLockFile))
 	}
 	var errs []error
 	for _, lock := range locks {

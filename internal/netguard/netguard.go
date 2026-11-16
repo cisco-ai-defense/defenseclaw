@@ -32,11 +32,11 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/sensitivequery"
 )
 
@@ -203,7 +203,7 @@ const (
 	redactedDiagnosticText = "<redacted-diagnostic-text>"
 )
 
-var diagnosticURLStart = regexp.MustCompile(`(?i)https?://`)
+var diagnosticURLStart = lazyregexp.New(`(?i)https?://`)
 
 // ScrubURL returns a string representation of u safe for logs:
 //

@@ -12,15 +12,19 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
 var (
-	windowsManagedRuntimeGenerationPrepare = PrepareWindowsManagedRuntimeGeneration
-	windowsManagedRuntimeGenerationCommit  = CommitWindowsManagedRuntimeGeneration
-	windowsManagedRuntimeGenerationDiscard = DiscardWindowsManagedRuntimeGenerationPublication
-	windowsManagedRuntimeGenerationResolve = ResolveWindowsManagedRuntimeGeneration
-	windowsManagedRuntimeGenerationVerify  = VerifyWindowsManagedRuntimeGeneration
+	windowsManagedRuntimeGenerationPrepare  = PrepareWindowsManagedRuntimeGeneration
+	windowsManagedRuntimeGenerationCommit   = CommitWindowsManagedRuntimeGeneration
+	windowsManagedRuntimeGenerationDiscard  = DiscardWindowsManagedRuntimeGenerationPublication
+	windowsManagedRuntimeGenerationResolve  = ResolveWindowsManagedRuntimeGeneration
+	windowsManagedRuntimeGenerationVerify   = VerifyWindowsManagedRuntimeGeneration
+	windowsManagedRuntimeGenerationFinalize = func(commit WindowsManagedRuntimeSelectorCommit) error {
+		return commit.Finalize()
+	}
 )
 
 func prepareWindowsManagedRuntimeGenerationForInstall(
@@ -33,6 +37,7 @@ func prepareWindowsManagedRuntimeGenerationForInstall(
 	hookContractID,
 	hookContractLockUpdatedAt,
 	hookContractEntryUpdatedAt string,
+	failMode ...string,
 ) (WindowsManagedRuntimeGenerationPublication, error) {
 	if targetSID == nil {
 		return WindowsManagedRuntimeGenerationPublication{}, errors.New(
@@ -54,6 +59,7 @@ func prepareWindowsManagedRuntimeGenerationForInstall(
 			HookExecutable:             hookExecutable,
 			GatewayAddr:                gatewayAddr,
 			GatewayServiceName:         serviceName,
+			FailMode:                   windowsManagedGenerationFailMode(failMode),
 			ScopedToken:                scopedToken,
 			HookContractID:             hookContractID,
 			HookContractLockUpdatedAt:  hookContractLockUpdatedAt,
@@ -75,6 +81,26 @@ func rollbackWindowsManagedRuntimeGeneration(
 	)
 }
 
+// retireWindowsManagedRuntimePreviousGeneration deletes the bundle a
+// successful install just replaced, so rotations of the token, gateway, fail
+// mode or contract stop piling up stale bundles toward the collection cap.
+// It runs only when the embedding process says no lifecycle transaction could
+// still roll back to that bundle, and it is best effort: a bundle that cannot
+// be retired is logged and left for generation collection.
+func retireWindowsManagedRuntimePreviousGeneration(commit WindowsManagedRuntimeSelectorCommit) {
+	allowed := WindowsManagedRuntimeRetirePreviousGenerationAllowed
+	if allowed == nil || !commit.Changed() || !allowed() {
+		return
+	}
+	if err := windowsManagedRuntimeGenerationFinalize(commit); err != nil {
+		managed.EmitResilienceEvent(managed.MarkerSkip, map[string]string{
+			"connector": commit.connector,
+			"sid":       commit.targetSID,
+			"reason":    "runtime_generation_retire_skipped: " + err.Error(),
+		})
+	}
+}
+
 func discardWindowsManagedRuntimeGeneration(
 	publication WindowsManagedRuntimeGenerationPublication,
 ) error {
@@ -91,6 +117,7 @@ func verifyWindowsManagedRuntimeGenerationForInstall(
 	hookContractID,
 	hookContractLockUpdatedAt,
 	hookContractEntryUpdatedAt string,
+	failMode ...string,
 ) error {
 	if targetSID == nil {
 		return errors.New("enterprise hooks: managed runtime generation target SID is unavailable")
@@ -107,10 +134,26 @@ func verifyWindowsManagedRuntimeGenerationForInstall(
 			HookExecutable:             hookExecutable,
 			GatewayAddr:                gatewayAddr,
 			GatewayServiceName:         serviceName,
+			FailMode:                   windowsManagedGenerationFailMode(failMode),
 			ScopedToken:                scopedToken,
 			HookContractID:             hookContractID,
 			HookContractLockUpdatedAt:  hookContractLockUpdatedAt,
 			HookContractEntryUpdatedAt: hookContractEntryUpdatedAt,
 		},
 	)
+}
+
+// windowsManagedGenerationFailMode is the delivery mode an authenticated
+// runtime generation records: the mode the administrator's config resolved
+// (owner decision 2026-10-20: an explicit open or closed wins on every
+// profile). Without one it is open under Secure Client (#1163) and closed on
+// every other profile.
+func windowsManagedGenerationFailMode(modes []string) string {
+	if len(modes) == 0 {
+		if secureClientHookDelivery() {
+			return "open"
+		}
+		return "closed"
+	}
+	return canonicalHookFailMode(modes[0])
 }

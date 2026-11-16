@@ -24,10 +24,69 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
+
+type managedRefusalCounterCapture struct {
+	sandboxStampCapture
+	metrics []observability.Record
+}
+
+func (capture *managedRefusalCounterCapture) RecordRuntimeV8GeneratedMetricBatch(
+	_ context.Context, operations []audit.RuntimeV8GeneratedMetric,
+) error {
+	for _, operation := range operations {
+		record, err := operation.Build(audit.RuntimeV8BuildContext{ConfigGeneration: 1, ConfigDigest: strings.Repeat("a", 64)})
+		if err != nil {
+			return err
+		}
+		capture.metrics = append(capture.metrics, record)
+	}
+	return nil
+}
+
+// GAP-0774: the gateway's host-run refusal has no registration from which
+// to inherit a driver, so its counter must use the configured driver.
+func TestHostRunRefusalCounterCarriesConfiguredDriver(t *testing.T) {
+	for _, driver := range []string{"docker", "vm"} {
+		t.Run(driver, func(t *testing.T) {
+			a, _ := requireSandboxTestAPI(t, "")
+			a.scannerCfg.Enterprise.OpenShell.Driver = driver
+			capture := &managedRefusalCounterCapture{}
+			logger := audit.NewLogger(nil)
+			logger.SetRuntimeV8Emitter(capture)
+			a.logger = logger
+			t.Cleanup(func() { managedSandboxRecorders.Delete(a) })
+			emitRequireSandboxRecord(t.Context(), a, requireSandboxRecord{
+				Connector: "codex", Reason: requireSandboxReasonRequired, Profile: "contractors",
+			})
+			for _, metric := range capture.metrics {
+				if metric.EventName() != observability.EventName(observability.TelemetryInstrumentDefenseClawSandboxManagedRefusals) {
+					continue
+				}
+				data, ok := metric.InstrumentData()
+				if !ok {
+					t.Fatal("refusal counter has no instrument data")
+				}
+				body, err := data.Object()
+				if err != nil {
+					t.Fatal(err)
+				}
+				labels, _ := body["attributes"].(map[string]any)
+				if labels["defenseclaw.sandbox.driver"] != driver ||
+					labels["defenseclaw.guardrail.profile.name"] != "contractors" ||
+					labels["defenseclaw.connector.source"] != "codex" {
+					t.Fatalf("refusal counter labels = %#v, want driver %q with profile and connector", labels, driver)
+				}
+				return
+			}
+			t.Fatal("host-run refusal emitted no managed refusal counter")
+		})
+	}
+}
 
 func managedTelemetryTestRegistration() sandboxreg.Registration {
 	return sandboxreg.Registration{

@@ -20,5 +20,6 @@ func init() {
 
 // recordEnterpriseHookStandaloneUnixRestores is Linux and macOS only; the
 // standalone Unix guardian never runs here.
-func recordEnterpriseHookStandaloneUnixRestores(io.Writer, string, time.Time, enterpriseHookReconcileRun) {
+func recordEnterpriseHookStandaloneUnixRestores(io.Writer, string, time.Time, enterpriseHookReconcileRun) error {
+	return nil
 }

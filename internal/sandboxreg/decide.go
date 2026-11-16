@@ -33,6 +33,7 @@ const (
 	RuleEgressBlock     = "egress_block"
 	RuleEgressAllowOnly = "egress_allow_only"
 	RuleAllowHostPorts  = "allow_host_ports"
+	RuleMinProfile      = "min_profile"
 	RuleInvalid         = "invalid_request"
 )
 
@@ -129,22 +130,20 @@ func CheckApprovals(f config.OpenShellAdminConfig, kind, scope string) error {
 		return refused(RuleAllowUnblock, "blocked destinations can't be unblocked under your profile")
 	case !session && approvals == config.OpenShellUserApprovalsSession:
 		return refused(RuleUserApprovals, "your profile lets you unblock a destination for this session only, not for future sandboxes")
+	case !session && StrictFloor(f):
+		// A strict sandbox has no web proxy, so a lasting allow or unblock
+		// would never apply; it is refused against the profile's floor now,
+		// not the one a running sandbox registered under (GAP-0198).
+		return refused(RuleMinProfile, "your profile requires the strict sandbox profile, which has no web proxy, "+
+			"so access can't be kept for future sandboxes; approve a connection request for this session instead")
 	}
 	return nil
 }
 
-// CapDecisions keeps the saved decisions f still allows: saved decisions
-// are capped by the floor at every resolve, so a tightened profile takes
-// back what it no longer allows without rewriting the store.
-func CapDecisions(f config.OpenShellAdminConfig, saved []Decision) []Decision {
-	out := make([]Decision, 0, len(saved))
-	for _, d := range saved {
-		req := sandboxrelay.DecisionRequest{V: sandboxrelay.WireVersion, Registration: d.Registration, Kind: d.Kind, Host: d.Host, Scope: d.Scope}
-		if CheckDecision(f, req) == nil {
-			out = append(out, d)
-		}
-	}
-	return out
+// StrictFloor reports a floor whose min_profile is strict: every sandbox
+// under it runs the strict profile, with no web proxy.
+func StrictFloor(f config.OpenShellAdminConfig) bool {
+	return strings.ToLower(strings.TrimSpace(f.MinProfile)) == config.OpenShellProfileStrict
 }
 
 func refused(rule, why string) *DecisionRefusedError {

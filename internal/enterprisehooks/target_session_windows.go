@@ -12,7 +12,9 @@ import (
 	"io/fs"
 	"path/filepath"
 	"strings"
+	"sync"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -33,6 +35,58 @@ func windowsEnterpriseStandaloneDeferredDataDirAbsent(err error) bool {
 // adopts it in the account's session.
 func windowsEnterpriseStandaloneDeferredDataDirAccountCreated(dataDir string, target *windows.SID) bool {
 	return windowsEnterpriseStandaloneProcess() && windowsAccountCreatedDataDirAt(dataDir, target)
+}
+
+// windowsEnterpriseStandaloneDeferredDataDirAccountLink reports, in a
+// standalone process only, a link or junction the account itself made at its
+// canonical data directory or at that directory's hooks folder
+// (windowsTargetOwnedDataDirLink). Refusing it failed the signed-out
+// account's row and, through it, every administrator lifecycle on the
+// computer (GAP-0193); the account stays pending until it signs in.
+func windowsEnterpriseStandaloneDeferredDataDirAccountLink(home, dataDir string, target *windows.SID) bool {
+	return windowsEnterpriseStandaloneProcess() && windowsTargetOwnedDataDirLink(home, dataDir, target) != ""
+}
+
+// WindowsAccountOwnedDataDirLink reports whether home's
+// %USERPROFILE%\.defenseclaw, or its hooks folder, is a link or junction the
+// account (sid) made itself (windowsTargetOwnedDataDirLink). The account
+// stays pending until it next signs in, when the guardian moves the link
+// aside and enrolls it. Status names such accounts.
+func WindowsAccountOwnedDataDirLink(home, sid string) bool {
+	return windowsAccountOwnedDataDirLinkPath(home, sid) != ""
+}
+
+// WindowsAccountOwnedRootDataDirLink reports only an account-owned link at
+// the canonical folder itself. A link below a plain folder does not qualify.
+func WindowsAccountOwnedRootDataDirLink(home, sid string) bool {
+	root := filepath.Join(filepath.Clean(home), ".defenseclaw")
+	return sameWindowsEnterprisePath(windowsAccountOwnedDataDirLinkPath(home, sid), root)
+}
+
+// WindowsForeignOwnedDataDirLink reports whether home's
+// %USERPROFILE%\.defenseclaw, or its hooks folder, is a link or junction that
+// the account (sid) does not own: one an administrator or another principal
+// made, or whose owner cannot be read (GAP-0585). Nothing follows or repairs
+// such a link, and no enrollment can move it aside, so the account stays
+// unprotected until an administrator removes it. A caller leaves that one
+// account out instead of failing the computer's lifecycle for it.
+func WindowsForeignOwnedDataDirLink(home, sid string) bool {
+	target, err := windows.StringToSid(strings.TrimSpace(sid))
+	if err != nil || strings.TrimSpace(home) == "" {
+		return false
+	}
+	home = filepath.Clean(home)
+	_, owner, ok := windowsDataDirLink(home, filepath.Join(home, ".defenseclaw"))
+	return ok && (owner == nil || !owner.Equals(target))
+}
+
+func windowsAccountOwnedDataDirLinkPath(home, sid string) string {
+	target, err := windows.StringToSid(strings.TrimSpace(sid))
+	if err != nil || strings.TrimSpace(home) == "" {
+		return ""
+	}
+	home = filepath.Clean(home)
+	return windowsTargetOwnedDataDirLink(home, filepath.Join(home, ".defenseclaw"), target)
 }
 
 // windowsAccountCreatedDataDirAt reads dataDir's owner and DACL and reports
@@ -78,10 +132,9 @@ func requireWindowsEnterpriseDeferredTargetPendingPlatform(target ManifestTarget
 		return errors.New("enterprise hooks: pending proof requires an enabled deferred manifest target")
 	}
 	connectorName := strings.ToLower(strings.TrimSpace(target.Connector))
-	_, perUser := windowsStandalonePerUserConnector(connectorName)
 	switch {
 	case connectorName == "codex" || connectorName == "claudecode" || connectorName == "cursor":
-	case perUser && windowsEnterpriseStandaloneProcess():
+	case windowsProfilePerUserConnector(connectorName):
 	default:
 		return fmt.Errorf(
 			"enterprise hooks: deferred pending proof does not support connector %q",
@@ -96,19 +149,27 @@ func requireWindowsEnterpriseDeferredTargetPendingPlatform(target ManifestTarget
 	if err != nil {
 		return err
 	}
-	if err := validateWindowsUserPathElement(dataDir, targetSID, true, true, true); err != nil {
+	if err := windowsDeferredTargetDataDirExactCheck(dataDir, targetSID); err != nil {
 		if !windowsEnterpriseStandaloneDeferredDataDirAbsent(err) &&
-			!windowsEnterpriseStandaloneDeferredDataDirAccountCreated(dataDir, targetSID) {
-			return fmt.Errorf(
-				"enterprise hooks: deferred target data directory is untrusted: %w",
-				err,
-			)
+			!windowsEnterpriseStandaloneDeferredDataDirAccountCreated(dataDir, targetSID) &&
+			!windowsEnterpriseStandaloneDeferredDataDirAccountLink(home, dataDir, targetSID) {
+			// Permission drift on an enrolled data directory is repaired by
+			// the LocalSystem guardian, or accepted when no untrusted
+			// principal can write it; structural failures stay fatal.
+			if healErr := healWindowsEnterpriseDeferredTargetDataDir(home, dataDir, targetSID, err); healErr != nil {
+				return fmt.Errorf(
+					"enterprise hooks: deferred target data directory is untrusted: %w",
+					healErr,
+				)
+			}
 		}
 		// Standalone writes every discovered row deferred, including users
 		// DefenseClaw has never touched. An absent canonical data directory,
-		// or one the account created itself before enrollment,
-		// holds no runtime, so it proves the pending state as well as a
-		// trusted empty one; the selector-absence proof below still runs.
+		// one the account created itself before enrollment, or a link the
+		// account made there (never followed; the enrollment in its session
+		// moves it aside) holds no runtime, so it proves the pending state as
+		// well as a trusted empty one; the selector-absence proof below
+		// still runs.
 	}
 	hookExecutable, err := windowsEnterpriseHookExecutable()
 	if err != nil {
@@ -129,4 +190,67 @@ func requireWindowsEnterpriseDeferredTargetPendingPlatform(target ManifestTarget
 			HookExecutable: hookExecutable,
 		},
 	)
+}
+
+// Seams for tests.
+var (
+	windowsDeferredTargetDataDirExactCheck = func(path string, target *windows.SID) error {
+		return validateWindowsUserPathElement(path, target, true, true, true)
+	}
+	windowsDeferredTargetDataDirWriterCheck = func(path string, target *windows.SID) error {
+		return validateWindowsUserPathElement(path, target, true, true, false)
+	}
+)
+
+// windowsDeferredTargetAccepted holds the accepted findings already logged, so
+// a guardian tick does not repeat an unchanged one.
+var windowsDeferredTargetAccepted sync.Map
+
+// healWindowsEnterpriseDeferredTargetDataDir handles a deferred (signed-out)
+// target whose data directory is not at its exact per-user descriptor, as
+// after an ACL reset of the profile folder. There is no user session to
+// impersonate, so the LocalSystem guardian restores the canonical per-user
+// DACL itself through the privileged no-follow repair: the owner stays the
+// target user (an administrator or orphaned owner is handed back to it), and
+// reparse points and hard links are refused before anything is written. The
+// repair is logged once. When the descriptor still is not exact but no
+// untrusted principal can write the folder, the drift is accepted and logged
+// once instead of failing the target. Anything else, and every finding in
+// strict mode, returns the original error.
+func healWindowsEnterpriseDeferredTargetDataDir(home, dataDir string, target *windows.SID, driftErr error) error {
+	if managed.TrustStrictAncestors() {
+		return driftErr
+	}
+	var repairErr error
+	if identityErr := windowsEnterpriseMutationIdentityCheck(); identityErr == nil {
+		repairErr = windowsEnterpriseGuardianDACLRepair(home, dataDir, target, true)
+		if repairErr == nil {
+			recheck := windowsDeferredTargetDataDirExactCheck(dataDir, target)
+			if recheck == nil {
+				windowsDeferredTargetAccepted.Delete(strings.ToLower(filepath.Clean(dataDir)))
+				managed.EmitResilienceEvent(managed.MarkerRepair, map[string]string{
+					"sid":    target.String(),
+					"path":   dataDir,
+					"reason": "deferred target data directory: " + driftErr.Error(),
+				})
+				return nil
+			}
+			repairErr = fmt.Errorf("still not exact after repair: %w", recheck)
+		}
+	} else {
+		repairErr = fmt.Errorf("repair needs the LocalSystem guardian: %w", identityErr)
+	}
+	if writerErr := windowsDeferredTargetDataDirWriterCheck(dataDir, target); writerErr != nil {
+		return errors.Join(driftErr, writerErr)
+	}
+	reason := "deferred target data directory: " + driftErr.Error() + "; not repaired: " + repairErr.Error()
+	key := strings.ToLower(filepath.Clean(dataDir))
+	if previous, loaded := windowsDeferredTargetAccepted.Swap(key, reason); !loaded || previous != reason {
+		managed.EmitResilienceEvent(managed.MarkerAccept, map[string]string{
+			"sid":    target.String(),
+			"path":   dataDir,
+			"reason": reason,
+		})
+	}
+	return nil
 }

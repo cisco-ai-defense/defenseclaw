@@ -216,6 +216,29 @@ func TestDecodeAnchors(t *testing.T) {
 	}
 }
 
+// ReadAnchorsFile returns the exact bytes it decoded, so a caller that
+// installs them never reads the source a second time.
+func TestReadAnchorsFileReturnsTheDecodedBytes(t *testing.T) {
+	raw := anchorsJSON("acme", nil, 0, edAnchorKey(t))
+	path := filepath.Join(t.TempDir(), "anchors.json")
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a, got, err := ReadAnchorsFile(path, nil)
+	if err != nil || string(got) != raw || a.Key("k1") == nil {
+		t.Fatalf("ReadAnchorsFile = %v, %q, %v", a, got, err)
+	}
+	if _, _, err := ReadAnchorsFile(filepath.Join(t.TempDir(), "absent.json"), nil); CodeOf(err) != CodeAnchorMissing {
+		t.Fatalf("absent: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, got, err := ReadAnchorsFile(path, nil); CodeOf(err) != CodeAnchorInvalid || got != nil {
+		t.Fatalf("invalid: %q, %v", got, err)
+	}
+}
+
 // Anchor permission cases: the file the MDM installs must not be a link,
 // a folder, writable by other accounts or owned by a standard account.
 // Every one is anchor_insecure through the device trust check; with the
@@ -233,8 +256,14 @@ func TestLoadAnchorsPermissions(t *testing.T) {
 		t.Fatalf("unchecked: %v", err)
 	}
 	// The temp folder and the file belong to the test account (and on
-	// Linux and macOS the temp root is writable by every account).
-	if _, err := LoadAnchors(good, TrustAnchorFile); CodeOf(err) != CodeAnchorInsecure {
+	// Linux and macOS the temp root is writable by every account). Run as
+	// LocalSystem, the account and its temp folder are trusted, so the file
+	// rightly loads; the cases below still hold.
+	if _, err := LoadAnchors(good, TrustAnchorFile); testRunsAsLocalSystem() {
+		if err != nil {
+			t.Fatalf("LocalSystem-owned: %v", err)
+		}
+	} else if CodeOf(err) != CodeAnchorInsecure {
 		t.Fatalf("user-owned: %v", err)
 	}
 	cases := map[string]string{"folder": filepath.Join(dir, "folder")}
@@ -309,6 +338,7 @@ func TestCheckProductVersion(t *testing.T) {
 	}{
 		{"", "dev", true}, {"1.0.2", "1.0.2", true}, {"1.0.2", "1.1.0", true}, {"1.0.2", "1.0.10", true},
 		{"1.0.2", "1.0.1", false}, {"1.0.2", "1.0.2-rc.1", false}, {"1.0.2", "dev", false}, {"1.0.2", "1.0.2+build.7", true},
+		{"1.0.4-01", "1.0.3", false},
 	} {
 		err := CheckProductVersion(tc.min, tc.running)
 		if (err == nil) != tc.ok || (err != nil && CodeOf(err) != CodeProductTooOld) {

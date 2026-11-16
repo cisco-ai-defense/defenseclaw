@@ -26,10 +26,88 @@ import (
 
 func agentIdentityTestSetup(t *testing.T) {
 	t.Helper()
+	freshAgentIdentityLedger(t)
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	setAgentIdentityConfig(nil)
 	t.Cleanup(func() { setAgentIdentityConfig(nil) })
 	InstallSharedAgentRegistry("", "")
+}
+
+// freshAgentIdentityLedger gives the test an empty process-wide agent
+// identity ledger (sharedAgentIdentities) and puts the previous one back
+// after it. The ledger keeps every sighting for the life of the process, so
+// a test that counts sessions or filters rows saw the rows of an earlier test
+// in the binary or of its own earlier -count run (rel-1-0-6 GAP-0304).
+func freshAgentIdentityLedger(t *testing.T) {
+	t.Helper()
+	previous := sharedAgentIdentities
+	sharedAgentIdentities = &agentIdentityRecorder{
+		pending: make(map[string]*inventory.AgentIdentityRecord),
+		hints:   make(map[string]string),
+	}
+	t.Cleanup(func() { sharedAgentIdentities = previous })
+}
+
+// A hook after a restart can have no cached directory UPN. Its API row and
+// the next stored row must not keep the UPN from an earlier hook.
+func TestAgentIdentityUPNClearsAfterUnavailableHook(t *testing.T) {
+	agentIdentityTestSetup(t)
+	store, err := inventory.NewInventoryStore(filepath.Join(t.TempDir(), "inventory.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	recorder := &agentIdentityRecorder{pending: map[string]*inventory.AgentIdentityRecord{}}
+	facts := agentIdentityFacts{ID: "agt-upn", UserID: "S-1-5-21-1-2-3-1104", Connector: "codex", MachineHash: "m", UserUPN: "carol@corp.example.com"}
+	recorder.observe(facts, "s1", true)
+	if err := recorder.flush(ctx, store); err != nil {
+		t.Fatal(err)
+	}
+
+	// A second recorder models the gateway restarting with no UPN cached.
+	recorder = &agentIdentityRecorder{pending: map[string]*inventory.AgentIdentityRecord{}}
+	previous := sharedAgentIdentities
+	sharedAgentIdentities = recorder
+	recorder.setStoreSource(func() *inventory.InventoryStore { return store }, nil, nil)
+	t.Cleanup(func() { sharedAgentIdentities = previous })
+	facts.UserUPN, facts.UPNUnavailable = "", true
+	recorder.observe(facts, "s2", true)
+	pending, hints, _ := recorder.snapshot()
+	stored, _, err := store.ListAgentIdentities(ctx, inventory.AgentIdentityFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows := mergeAgentIdentityRows(stored, pending, hints, inventory.AgentIdentityFilter{}); len(rows) != 1 || rows[0].UPN != "" {
+		t.Fatalf("buffered API rows = %+v; want no stale UPN", rows)
+	}
+	if row := listedAgentIdentityRows(t)[facts.ID]; row == nil {
+		t.Fatal("agent identity missing from API")
+	} else if _, named := row["upn"]; named {
+		t.Fatalf("API row = %+v; want no stale UPN", row)
+	}
+	if err := recorder.flush(ctx, store); err != nil {
+		t.Fatal(err)
+	}
+	stored, _, err = store.ListAgentIdentities(ctx, inventory.AgentIdentityFilter{})
+	if err != nil || len(stored) != 1 || stored[0].UPN != "" {
+		t.Fatalf("stored rows = %+v, err %v; want no stale UPN", stored, err)
+	}
+}
+
+func TestAgentIdentityUPNFailedFlushKeepsNewerUnavailableSighting(t *testing.T) {
+	recorder := &agentIdentityRecorder{pending: map[string]*inventory.AgentIdentityRecord{}}
+	facts := agentIdentityFacts{ID: "agt-upn", UserID: "S-1-5-21-1-2-3-1104", Connector: "codex", MachineHash: "m", UserUPN: "carol@corp.example.com"}
+	recorder.observe(facts, "s1", true)
+	batch, _, _ := recorder.take()
+	// The older batch fails to write while a newer hook has no cached UPN.
+	facts.UserUPN, facts.UPNUnavailable = "", true
+	recorder.observe(facts, "s2", true)
+	recorder.restore(batch, nil, nil)
+	pending, _, _ := recorder.snapshot()
+	if row := pending[facts.ID]; row.UPN != "" || !row.UPNUnavailable {
+		t.Fatalf("restored row = %+v; want the newer unavailable UPN", row)
+	}
 }
 
 // GAP-0097: an agent identity records the account as the host names it, so
@@ -191,7 +269,7 @@ func TestHookAgentIdentityIgnoresClaimsAndKeysInstances(t *testing.T) {
 	if again.IdentityID != want || again.AgentInstanceID != first.AgentInstanceID {
 		t.Fatalf("claims moved the identity: %q/%q, want %q/%q", again.IdentityID, again.AgentInstanceID, want, first.AgentInstanceID)
 	}
-	if _, hints := sharedAgentIdentities.snapshot(); hints[want] != "/srv/elsewhere/.claude" {
+	if _, hints, _ := sharedAgentIdentities.snapshot(); hints[want] != "/srv/elsewhere/.claude" {
 		t.Fatalf("install hint = %q", hints[want])
 	}
 
@@ -334,7 +412,7 @@ func TestAgentIdentitySessionsSurviveRestartAndSkipDoctorProbe(t *testing.T) {
 		ConnectorName: "claudecode", SessionID: doctorProbeSessionID, HookEventName: "SessionStart",
 		Payload: map[string]interface{}{},
 	})
-	if pending, _ := sharedAgentIdentities.snapshot(); probe.IdentityID == "" || pending[probe.IdentityID].AgentID != "" {
+	if pending, _, _ := sharedAgentIdentities.snapshot(); probe.IdentityID == "" || pending[probe.IdentityID].AgentID != "" {
 		t.Fatalf("doctor probe recorded identity %q: %+v", probe.IdentityID, pending[probe.IdentityID])
 	}
 }
@@ -384,7 +462,7 @@ func TestCodexTranscriptlessThreadIsNotASession(t *testing.T) {
 	}
 	chat := hook("thread-chat", "/home/erin/.codex/sessions/rollout.jsonl")
 	hook("thread-helper", nil)
-	pending, _ := sharedAgentIdentities.snapshot()
+	pending, _, _ := sharedAgentIdentities.snapshot()
 	if rec := pending[chat.IdentityID]; rec.SessionsSeen != 1 || rec.LastSessionID != "thread-chat" {
 		t.Fatalf("recorded %+v, want only the chat counted", rec)
 	}
@@ -600,7 +678,6 @@ func TestPerUserAgentIdentityIgnoresGatewayEnvironmentOverrides(t *testing.T) {
 	for _, tc := range []struct{ connector, variable string }{
 		{"claudecode", "CLAUDE_CONFIG_DIR"}, {"codex", "CODEX_HOME"},
 		{"hermes", "HERMES_HOME"}, {"opencode", "OPENCODE_CONFIG_DIR"},
-		{"omnigent", "OMNIGENT_CONFIG_HOME"},
 	} {
 		t.Run(tc.connector, func(t *testing.T) {
 			t.Setenv(tc.variable, "")

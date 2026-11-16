@@ -11,65 +11,64 @@ keywords:
   - MQTT escalation
 ---
 
-The Edge Connector is a C-language enforcement engine for Linux edge devices. It evaluates tool calls locally with policy and content inspection, then can escalate undecided actions to a DefenseClaw Fleet gateway over MQTT. Measure size, memory use, and latency for your own target and build profile; TLS libraries and compiler flags change those values.
-
-<Callout type="info">
-The Edge Connector is designed for **IoT and edge devices** — Raspberry Pi, Jetson, industrial SBCs, and similar Linux platforms. For desktop AI coding agents (Claude Code, Codex, Cursor, etc.), use the standard [connectors](/docs/connectors).
-</Callout>
+The Edge Connector is a C engine for Linux edge devices such as Raspberry Pi, Jetson and industrial single-board computers. It checks an agent's tool calls on the device with local rules and content inspection. When local rules cannot decide, it asks a DefenseClaw Fleet gateway over MQTT. It works with no network at all for the local checks.
 
 ## Why a separate engine?
 
-Desktop connectors intercept tool calls via hooks or proxy and delegate evaluation to the Go gateway sidecar. That architecture assumes reliable networking, plentiful memory, and a human at the keyboard. Edge devices have none of those:
-
-| Constraint | Desktop | Edge |
-| --- | --- | --- |
-| Binary size | Go gateway plus Python CLI | C engine plus any linked TLS libraries; measure the target build |
-| Memory | Desktop resources | Profile-dependent; measure under the expected workload |
-| Latency | Local gateway call | Local C evaluation; benchmark on the target hardware |
-| Network | Always-on | Intermittent or absent |
-| Consequences of failure | Bad file on disk | **Physical world action** |
-
-The Edge Connector runs local guards before its verdict cache and can request a verdict from the Fleet gateway over MQTT when local policy cannot decide. The current gateway evaluates those requests by tool hash; its default result for an unknown hash is BLOCK.
+Use a [connector](/docs/connectors) for desktop coding agents such as Claude Code, Codex and Cursor. Those assume a reliable network, plenty of memory and a person at the keyboard. Use the Edge Connector when the agent runs on a small device, the network comes and goes, or a bad tool call causes a physical action.
 
 ## What it does
 
-<Cards>
-  <Card title="Content scanning" description="Detects secrets, PII, credentials, data exfiltration, prompt injection, and dangerous commands in tool arguments and LLM responses." />
-  <Card title="SSRF validation" description="Blocks requests to private/internal IP ranges and cloud metadata endpoints before they reach the network." />
-  <Card title="Sequence correlation" description="FSM-based detection of dangerous multi-step capability patterns (e.g., net_fetch → exec_shell)." />
-  <Card title="Rate limiting" description="Built-in token buckets for tool calls, network requests, and physical actuations. OTA cannot change their rates in this release." />
-  <Card title="Verdict caching" description="In-memory Fleet verdict cache keyed by tool hash; local guards still run before each cache lookup." />
-  <Card title="Fleet escalation" description="Sends undecided requests via MQTT 3.1.1 to the Fleet gateway's verdict cache; unknown tool hashes block by default." />
-</Cards>
+- Detects secrets, PII, credentials, exfiltration, prompt injection and dangerous commands in tool arguments and LLM responses.
+- Blocks requests to private ranges and cloud metadata addresses, and allows network destinations only from a public-IP allowlist.
+- Tracks multi-step capability patterns, for example fetch from the network then run a shell command.
+- Applies fixed rate limits: 60 tool calls, 30 network requests and 10 physical actuations per minute.
+- Keeps an HMAC-chained audit ring so changes to retained history are detectable.
+- Takes signed policy updates over MQTT with a rollback canary. Production builds accept HMAC updates only when built with `DCLAW_ALLOW_HMAC_OTA=ON` and given a separate HMAC key.
 
 ## Evaluation path
 
-The engine runs these seven checkpoints in order, stopping on a local BLOCK verdict. A cache hit avoids a new Fleet request while the earlier local guards still run. The C engine has no local hash deny-list lookup or policy YAML hash feed.
+The engine runs seven checks in order and stops at the first local block. A cache hit avoids a new Fleet request, but the earlier local checks still run.
 
-```
-1. Input validation     →  Reject malformed requests at the IPC boundary
-2. Rate limiting        →  Three token buckets (tools, network, actuations)
-3. Content scanning     →  Secrets, PII, credentials, exfil, injection, commands
-4. Destination filter   →  Public-IP allowlist + SSRF validation
-5. Sequence correlation →  Multi-step pattern detection via DFA
-6. Verdict cache        →  Tool-hash lookup with monotonic TTL
-7. Fleet escalation     →  MQTT 3.1.1 on a cache miss; gateway verdict uses tool hash
-```
+<Flow
+  direction="TB"
+  caption="The seven checks of one tool call, in order. Checks 1 to 5 are local and any of them can block. A Fleet verdict from check 6 or 7 decides what the local checks leave open."
+>
+  <Node id="s1" kind="generic">{`1. Validate input\nname, hash, session`}</Node>
+  <Node id="s2" kind="generic">{`2. Rate limit\n3 token buckets`}</Node>
+  <Node id="s3" kind="generic">{`3. Scan content\nsecrets, PII, injection`}</Node>
+  <Node id="s4" kind="generic">{`4. Check destination\nSSRF and allowlist`}</Node>
+  <Node id="s5" kind="generic">{`5. Match sequences\nrisky multi-step patterns`}</Node>
+  <Node id="s6" kind="datastore">{`6. Verdict cache\nby tool hash`}</Node>
+  <Node id="s7" kind="gateway">{`7. Ask Fleet\nMQTT 3.1.1`}</Node>
+  <Edge from="s1" to="s2" />
+  <Edge from="s2" to="s3" />
+  <Edge from="s3" to="s4" />
+  <Edge from="s4" to="s5" />
+  <Edge from="s5" to="s6" />
+  <Edge from="s6" to="s7" label="cache miss" />
+</Flow>
+
+The result is `ALLOW`, `BLOCK`, `WARN` or `PENDING`. The Fleet gateway decides unknown tool hashes by tool hash, and blocks them by default.
 
 ## Build profiles
 
-| Profile | Features | Use case |
+| Profile | Features | Use |
 | --- | --- | --- |
-| `MINIMAL` | No MQTT | Constrained builds, without Fleet connection |
-| `STANDARD` | MQTT and content inspection | Raspberry Pi, Jetson, SBCs |
+| `MINIMAL` | No MQTT, no content scan | Constrained builds with no Fleet |
+| `STANDARD` | MQTT and content inspection | Raspberry Pi, Jetson, single-board computers |
 | `EDGE` | MQTT, content inspection, bloom filter | Edge gateways |
 
-See the [install guide](/docs/edge-connector/install) for production TLS, signing keys, and the Linux service unit.
+Measure size, memory and latency on your own target; TLS libraries and compiler flags change them.
+
+See the [install guide](/docs/edge-connector/install) for the build and the Fleet connection steps.
 
 ## Next steps
 
 <Cards>
-  <Card title="Install" href="/docs/edge-connector/install" description="Build from source, configure a policy, and integrate with your AI agent." />
-  <Card title="Architecture" href="/docs/edge-connector/architecture" description="Evaluation pipeline, content scanning, Fleet verdicts, and audit trail." />
-  <Card title="Policies" href="/docs/edge-connector/policies" description="Write capability sequences and approved public-IP destinations." />
+  <Card title="Install the Edge Connector" href="/docs/edge-connector/install" description="Build it, run the local smoke test, then connect to Fleet." />
+  <Card title="Architecture" href="/docs/edge-connector/architecture" description="The system, each check, the audit ring and the IPC schema." />
+  <Card title="Policies" href="/docs/edge-connector/policies" description="Capability sequences and the destination allowlist." />
+  <Card title="Configuration" href="/docs/edge-connector/install" description="Build profiles, environment variables, compile-time constants, tool-to-capability mapping, MQTT broker setup, agent integrations and troubleshooting." />
+  <Card title="Fleet API" href="/docs/edge-connector/api-reference" description="REST API for Edge Connector fleets: device registration and keys, policy and emergency distribution, threat intelligence, health and Prometheus metrics." />
 </Cards>

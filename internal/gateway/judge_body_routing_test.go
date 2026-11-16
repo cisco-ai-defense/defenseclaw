@@ -89,7 +89,7 @@ func TestSidecar_WiresJudgeBodyStore(t *testing.T) {
 		t.Fatalf("Shutdown: %v", err)
 	}
 
-	bodies, err := bodyStore.ListJudgeResponses(10)
+	bodies, err := bodyStore.ListJudgeResponsesCtx(t.Context(), 10)
 	if err != nil {
 		t.Fatalf("ListJudgeResponses(judge_bodies.db): %v", err)
 	}
@@ -141,7 +141,7 @@ func TestOpenAuthoritativeJudgeBodyStore_CutoverFailureNeverFallsBack(t *testing
 	}
 	conflict := legacyRow
 	conflict.Raw = "conflicting target body"
-	if err := seed.InsertJudgeResponse(conflict); err != nil {
+	if err := seed.InsertJudgeResponseCtx(t.Context(), conflict); err != nil {
 		t.Fatalf("seed target conflict: %v", err)
 	}
 	if err := seed.Close(); err != nil {

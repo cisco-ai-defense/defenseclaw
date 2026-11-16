@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -206,7 +205,7 @@ func buildWatcherRuntimeV8GeneratedMetric(
 	}
 	builder, err := observability.NewFamilyBuilder(
 		observability.ClockFunc(func() time.Time { return event.Timestamp.UTC() }),
-		observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+		observability.TimeOrderedOccurrenceIDs,
 	)
 	if err != nil {
 		return observability.Record{}, err

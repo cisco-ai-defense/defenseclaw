@@ -73,10 +73,12 @@ from typing import Protocol
 
 import yaml
 
+from defenseclaw import long_paths
 from defenseclaw.observability.local_stack import (
     GRAFANA_ACCESS_PASSWORD,
     LocalStackController,
     LocalStackError,
+    _grafana_basic_get,
     ensure_grafana_admin_password,
 )
 from defenseclaw.paths import (
@@ -249,7 +251,7 @@ def refresh_splunk_bridge(data_dir: str) -> RefreshResult:
         # No prior seed — fall back to a plain copytree. Keeps the
         # refresh path safe to call before ``init`` has run.
         try:
-            shutil.copytree(str(bundle), dest)
+            long_paths.copytree(bundle, dest)
         except OSError as exc:
             result.errors.append(f"initial seed: {exc}")
             return result
@@ -307,8 +309,18 @@ _LOCAL_OBSERVABILITY_OPERATOR_PATHS: tuple[str, ...] = (
 # dashboards survive upgrades; explicit tombstones let us remove only retired
 # DefenseClaw assets without turning refresh into a destructive directory
 # mirror.
+_FLEET_TEMPLATE_PATHS: tuple[str, ...] = (
+    "docker-compose.fleet.yml",
+    "prometheus/examples/fleet.yml",
+    "grafana/dashboards/defenseclaw-fleet.json",
+)
 _LOCAL_OBSERVABILITY_RETIRED_PATHS: tuple[str, ...] = ("grafana/dashboards/defenseclaw-reliability.json",)
 _LOCAL_OBSERVABILITY_RETIRED_SHA256: dict[str, frozenset[str]] = {
+    "docker-compose.fleet.yml": frozenset({"064c52a51e34d1eecad79a3aa1c227d3c4eeff084ad905ab2eb15d23eaf558ca"}),
+    "prometheus/examples/fleet.yml": frozenset({"ab61cbb6140b630af054e351acc213bff2e7b64fd4f5b0ff7532829db7b66075"}),
+    "grafana/dashboards/defenseclaw-fleet.json": frozenset(
+        {"f91450a43b59eb832501779fd9bb33fb6f644760de397dd34156e98213f7c202"}
+    ),
     "grafana/dashboards/defenseclaw-reliability.json": frozenset(
         {
             "4993c6ca65313823a410df84778531c377eec217b2947f2e78d083b18437aae5",
@@ -371,7 +383,6 @@ _LOCAL_OBSERVABILITY_DASHBOARD_UIDS: tuple[str, ...] = (
     "defenseclaw-connector-detail",
     "defenseclaw-connectors",
     "defenseclaw-findings",
-    "defenseclaw-fleet",
     "defenseclaw-hitl",
     "defenseclaw-identity",
     "defenseclaw-overview",
@@ -484,10 +495,13 @@ def refresh_local_observability_stack(
     result.errors = errors
     result.refreshed = bool(refreshed)
 
-    if refresh_config:
+    retired_paths = _LOCAL_OBSERVABILITY_RETIRED_PATHS if refresh_config else ()
+    if not _fleet_enabled_for_bundle(Path(data_dir)):
+        retired_paths += tuple(path for path in _FLEET_TEMPLATE_PATHS if not (bundle / path).exists())
+    if retired_paths:
         removed, removal_errors = _remove_retired_paths(
             Path(dest),
-            _LOCAL_OBSERVABILITY_RETIRED_PATHS,
+            retired_paths,
         )
         result.refreshed_paths.extend(f"{path} (removed)" for path in removed)
         result.errors.extend(removal_errors)
@@ -529,7 +543,7 @@ def upgrade_local_observability_stack(
     source = bundled_local_observability_dir().absolute()
     target = _build_local_observability_manifest(source, bundle_version)
     prior = _read_installed_bundle_manifest(destination)
-    managed_retired = _managed_retired_paths(destination)
+    managed_retired = _managed_retired_paths(destination, source, _fleet_enabled_for_bundle(data_root))
     _preflight_upgrade_destination(destination, target, managed_retired)
 
     was_running = _strict_compose_project_running(LOCAL_OBSERVABILITY_COMPOSE_PROJECT)
@@ -924,7 +938,11 @@ def _validate_dashboard_inventory(source: Path, paths: set[str]) -> tuple[str, .
             raise LocalObservabilityUpgradeError("target_dashboard_invalid", "manifest")
         uids.append(uid)
     observed = tuple(sorted(uids))
-    if observed != _LOCAL_OBSERVABILITY_DASHBOARD_UIDS:
+    # The optional Fleet dashboard is installed only with the separate Fleet assets.
+    if observed not in (
+        _LOCAL_OBSERVABILITY_DASHBOARD_UIDS,
+        tuple(sorted((*_LOCAL_OBSERVABILITY_DASHBOARD_UIDS, "defenseclaw-fleet"))),
+    ):
         raise LocalObservabilityUpgradeError("target_dashboard_inventory_mismatch", "manifest")
     return observed
 
@@ -1022,7 +1040,24 @@ def _read_installed_bundle_manifest(destination: Path) -> _BundleManifest | None
         raise LocalObservabilityUpgradeError("installed_manifest_invalid", "preflight") from exc
 
 
-def _managed_retired_paths(destination: Path) -> set[str]:
+def _fleet_enabled_for_bundle(data_root: Path) -> bool:
+    """Preserve optional templates unless config explicitly leaves Fleet off."""
+    try:
+        config_path = data_root / "config.yaml"
+        if not config_path.exists():
+            return False
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        if not isinstance(config, dict):
+            return True
+        fleet = config.get("fleet")
+        if fleet is None:
+            return False
+        return not isinstance(fleet, dict) or fleet.get("enabled", False) is not False
+    except (OSError, UnicodeError, yaml.YAMLError):
+        return True
+
+
+def _managed_retired_paths(destination: Path, source: Path, fleet_enabled: bool) -> set[str]:
     """Return only retired files whose bytes match a reviewed shipped asset.
 
     A destination-only file at a retired DefenseClaw filename is still an
@@ -1032,6 +1067,8 @@ def _managed_retired_paths(destination: Path) -> set[str]:
 
     managed: set[str] = set()
     for relative, historical_digests in _LOCAL_OBSERVABILITY_RETIRED_SHA256.items():
+        if relative in _FLEET_TEMPLATE_PATHS and (fleet_enabled or (source / relative).exists()):
+            continue
         path = destination / relative
         if not path.exists() or path.is_symlink():
             continue
@@ -2040,16 +2077,15 @@ def _http_get_json(
     *,
     basic_auth: tuple[str, str] | None = None,
 ) -> object:
-    request: str | urllib.request.Request = url
     if basic_auth is not None:
         username, password = basic_auth
-        encoded = base64.b64encode(f"{username}:{password}".encode("ascii")).decode("ascii")
-        request = urllib.request.Request(
-            url,
-            headers={"Authorization": f"Basic {encoded}"},
-            method="GET",
-        )
-    with urllib.request.urlopen(request, timeout=3) as response:  # noqa: S310 - fixed loopback URL
+        if username != "admin" or url != "http://127.0.0.1:3000/api/search?type=dash-db":
+            raise ValueError("Grafana credential target is not the bundled local endpoint")
+        status, raw = _grafana_basic_get(password)
+        if not 200 <= status < 300:
+            raise OSError("unexpected HTTP status")
+        return json.loads(raw)
+    with urllib.request.urlopen(url, timeout=3) as response:  # noqa: S310 - fixed loopback URL
         if not 200 <= response.status < 300:
             raise OSError("unexpected HTTP status")
         raw = response.read(2 * 1024 * 1024 + 1)
@@ -2377,8 +2413,9 @@ def _rsync_overwrite(
     except OSError as exc:
         return refreshed, preserved, [f"unsafe destination root: {exc}"]
 
-    for root, dirs, files in os.walk(src):
-        rel_root = os.path.relpath(root, src)
+    walk_root = long_paths.extended(src)
+    for root, dirs, files in os.walk(walk_root):
+        rel_root = os.path.relpath(root, walk_root)
         if rel_root == ".":
             rel_root = ""
 

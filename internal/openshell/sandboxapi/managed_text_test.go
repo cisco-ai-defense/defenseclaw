@@ -34,6 +34,15 @@ func TestAccessContact(t *testing.T) {
 	}
 }
 
+func TestManagedRefusalDoesNotRepeatContact(t *testing.T) {
+	for _, value := range []string{RequestAccessFallback, "Contact your IT help desk", "your IT help desk"} {
+		got := ManagedRefusal("This destination is blocked", "contractors", "", value)
+		if !strings.HasSuffix(got, "Need an exception? Contact your IT help desk") {
+			t.Fatalf("contact %q: %q", value, got)
+		}
+	}
+}
+
 // On a managed computer the off message never names another account, never
 // sends the user to setup, and ends with the organization's contact.
 func TestOffMessageManaged(t *testing.T) {
@@ -54,6 +63,13 @@ func TestOffMessageManaged(t *testing.T) {
 	if !strings.Contains(unavailable, "aren't available on this computer: OpenShell is not installed.") ||
 		!strings.Contains(unavailable, "IT help desk") {
 		t.Errorf("unavailable message = %q", unavailable)
+	}
+	// The temporary setup-change notice says to retry and never sends the
+	// user to IT for an exception (GAP-0023, GAP-0187).
+	changing := (&Status{Managed: &ManagedStatus{Unavailable: UnavailableSetupChanging, RequestAccess: "it@example.com"}}).OffMessage()
+	if changing != "Sandboxes aren't available on this computer: "+UnavailableSetupChanging+"." ||
+		strings.Contains(changing, "exception") || strings.Contains(changing, "it@example.com") || strings.Contains(changing, "IT help desk") {
+		t.Errorf("setup-changing message = %q", changing)
 	}
 	if off := (&Status{Managed: &ManagedStatus{}}).OffMessage(); strings.Contains(off, "defenseclaw sandbox setup") {
 		t.Errorf("off message sends a managed user to setup: %q", off)

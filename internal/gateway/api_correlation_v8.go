@@ -58,10 +58,7 @@ func (a *APIServer) handleCorrelationTimelineV8(w http.ResponseWriter, r *http.R
 
 func (a *APIServer) handleCorrelationConflictsV8(w http.ResponseWriter, r *http.Request) {
 	a.handleCorrelationReadV8(w, r, func(repo *audit.CorrelationRepository, query audit.CorrelationGraphQuery) (any, error) {
-		return repo.QueryConflicts(r.Context(), audit.CorrelationConflictsQuery{
-			Anchor: query.Anchor,
-			Page:   query.Page,
-		})
+		return repo.QueryConflicts(r.Context(), audit.CorrelationConflictsQuery(query))
 	})
 }
 

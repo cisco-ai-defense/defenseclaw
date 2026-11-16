@@ -39,6 +39,9 @@ const unsetAUID = ^uint32(0)
 const (
 	ControlSSHPrivateKeyRead = "kernel.ssh_private_key_read"
 	ControlPersistenceWrite  = "kernel.persistence_write"
+	// ControlSSHAuthorizedKeysWrite is the authorized keys control: write
+	// opens, hard links and renames of the files and renames of .ssh.
+	ControlSSHAuthorizedKeysWrite = "kernel.ssh_authorized_keys_write"
 )
 
 // MapperConfig configures a Mapper.
@@ -349,11 +352,16 @@ func (m *Mapper) mapHook(hook hookEvent, at time.Time) []plane.Event {
 	if file == "" {
 		return nil
 	}
+	if nameChange(hook.function) {
+		// A link or rename names two paths; the event is about the
+		// protected one, and changing a name is a write.
+		file, write = protectedName(hook.args, file), true
+	}
 	event.Path = file
 	switch family {
 	case "controls", "controls-burnin":
 		event.Control = controlFor(file)
-		if event.Control == ControlPersistenceWrite {
+		if event.Control == ControlPersistenceWrite || event.Control == ControlSSHAuthorizedKeysWrite {
 			write = true
 		}
 		event.Outcome = plane.OutcomeWouldBlock
@@ -510,14 +518,49 @@ func writeFlags(flags string) bool {
 	return false
 }
 
+// nameChange reports whether an LSM function makes or changes a name
+// (path_link, path_rename, path_symlink), whose events name more than one
+// path.
+func nameChange(function string) bool {
+	return strings.HasSuffix(function, "path_link") || strings.HasSuffix(function, "path_rename") ||
+		strings.HasSuffix(function, "path_symlink")
+}
+
+// protectedName is the path of a link or rename event the authorized keys
+// control names: an authorized keys file or the .ssh directory, else first.
+func protectedName(args []*pb.KprobeArgument, first string) string {
+	for _, arg := range args {
+		if p := arg.GetPathArg(); p != nil && authorizedKeysPath(p.GetPath()) {
+			return p.GetPath()
+		}
+	}
+	return first
+}
+
+// authorizedKeysPath reports whether file is an authorized keys file or the
+// .ssh directory itself.
+func authorizedKeysPath(file string) bool {
+	switch path.Base(file) {
+	case "authorized_keys", "authorized_keys2":
+		return path.Base(path.Dir(file)) == ".ssh"
+	case ".ssh":
+		return true
+	}
+	return false
+}
+
 // controlFor names the control a controls-policy path belongs to: the SSH
-// private key names, or the persistence paths.
+// private key names, the authorized keys files (and .ssh), or the
+// persistence paths.
 func controlFor(file string) string {
 	switch path.Base(file) {
 	case "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa":
 		if path.Base(path.Dir(file)) == ".ssh" {
 			return ControlSSHPrivateKeyRead
 		}
+	}
+	if authorizedKeysPath(file) {
+		return ControlSSHAuthorizedKeysWrite
 	}
 	return ControlPersistenceWrite
 }

@@ -14,6 +14,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,9 +24,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
-// renderListenerProofPlugin fills the plugin template's placeholders the way
-// the Windows standalone guardian does: loopback TCP, the per-user
-// credential file, closed fail mode, and the listener proof on.
+// renderListenerProofPlugin adapts the host bridge golden to the Windows
+// managed listener-proof profile: loopback TCP, a scoped credential, closed
+// fail mode, and no per-user native post helper.
 func renderListenerProofPlugin(t *testing.T, asset, addr, tokenPath string) []byte {
 	t.Helper()
 	// The bridge host template: the source template with its OpenShell
@@ -43,18 +44,35 @@ func renderListenerProofPlugin(t *testing.T, asset, addr, tokenPath string) []by
 		"{{.ServiceUID}}", "0",
 		"{{.ForeignHookGuardJS}}", "",
 		"{{.InstallMarkerJS}}", "",
+		"{{.LifecycleMarkerJS}}", "",
 		"{{.ListenerProofJS}}", "1",
+		// Read by the win32 branch only (fix/r104-oss-outage-open template field).
+		"{{.WindowsPowerShellJS}}", `C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`,
+		"{{.GatewayBinaryJS}}", "",
 	).Replace(string(body))
 	if strings.Contains(rendered, "{{.") {
 		t.Fatalf("%s rendered with a placeholder left", asset)
 	}
+	// These bridge-host goldens are rendered for a per-user install. The
+	// listener proof is the managed TCP profile, which leaves native post off.
+	perUserMarker := `const DC_PER_USER_NATIVE_POST = "1";`
+	managedMarker := `const DC_PER_USER_NATIVE_POST = "";`
+	if strings.HasSuffix(asset, ".ts") {
+		perUserMarker = `const DC_PER_USER_NATIVE_POST: string = "1"`
+		managedMarker = `const DC_PER_USER_NATIVE_POST: string = ""`
+	}
+	if !strings.Contains(rendered, perUserMarker) {
+		t.Fatalf("%s has no per-user transport marker", asset)
+	}
+	rendered = strings.Replace(rendered, perUserMarker, managedMarker, 1)
 	return []byte(rendered)
 }
 
 const openCodeGatewayProofHarness = `
 import { pathToFileURL } from "node:url";
 const loaded = await import(pathToFileURL(process.argv[1]).href);
-const plugin = await loaded.DefenseClaw({ directory: "" });
+const { fixtureBridge } = await import(pathToFileURL("../opencodebridge/testdata/fixture.mjs"));
+const plugin = await fixtureBridge(loaded, { directory: "/work/repo" });
 try {
   await plugin["tool.execute.before"](
     { tool: "Bash", sessionID: "S", messageID: "M", callID: "C" },
@@ -110,7 +128,7 @@ func TestInAgentPluginsProveTheGatewayListener(t *testing.T) {
 	for _, tc := range []struct {
 		asset, connectorName, hookPath, harness, file, allow string
 	}{
-		{"opencode-plugin.js", "opencode", "/api/v1/opencode/hook", openCodeGatewayProofHarness, "opencode-plugin.mjs", `{"hook_output":{"decision":"allow"}}`},
+		{"opencode-plugin.js", "opencode", "/api/v1/opencode/hook", openCodeGatewayProofHarness, "opencode-plugin.mjs", `{"action":"allow","hook_output":{"decision":"allow"}}`},
 		{"amp-plugin.ts", "amp", "/api/v1/amp/hook", ampGatewayProofHarness, "amp-plugin.mts", `{"action":"allow"}`},
 	} {
 		t.Run(tc.connectorName, func(t *testing.T) {
@@ -152,8 +170,12 @@ func TestInAgentPluginsProveTheGatewayListener(t *testing.T) {
 			}
 			mu.Lock()
 			defer mu.Unlock()
-			want := tc.hookPath + " user=" + uid + " connector=" + tc.connectorName + " marker=true"
-			if verdict := strings.TrimSpace(string(out)); verdict != "allow" || len(served) != 1 || served[0] != want {
+			base := tc.hookPath + " user=" + uid + " connector=" + tc.connectorName
+			want := []string{base + " marker=true"}
+			if tc.connectorName == "opencode" {
+				want = append([]string{base + " marker=false"}, want...) // V2 setup heartbeat.
+			}
+			if verdict := strings.TrimSpace(string(out)); verdict != "allow" || !slices.Equal(served, want) {
 				t.Fatalf("verdict %q, served %q; want allow and %q", verdict, served, want)
 			}
 		})

@@ -41,28 +41,31 @@ func TestBundleEnforcementDecision(t *testing.T) {
 		{name: "base-only device", in: bundleEnforcement{InstalledConfig: edited, GatewayReady: true,
 			Policy: &enterprisestatus.PolicyState{GatewayReportedDigest: editedDigest, ConfigUnrecorded: true}}},
 		{name: "untampered bundle enforces", in: bundleEnforcement{Current: current, CurrentConfig: bundleConfig,
-			InstalledConfig: bundleConfig, GatewayReady: true, Policy: enforcing}},
+			CurrentDigest: bundleDigest, InstalledConfig: bundleConfig, GatewayReady: true, Policy: enforcing}},
 		{name: "tampered config, gateway on the edit", in: bundleEnforcement{Current: current, CurrentConfig: bundleConfig,
-			InstalledConfig: edited, GatewayReady: true,
+			CurrentDigest: bundleDigest, InstalledConfig: edited, GatewayReady: true,
 			Policy: &enterprisestatus.PolicyState{EffectiveDigest: editedDigest, GatewayReportedDigest: editedDigest, Applied: true, ConfigUnrecorded: true}},
 			replaced: true, problem: "config.yaml is not the config of signed policy bundle b-01M4XRVFSG2C3VST7D5FYX95E9 version 3"},
 		{name: "tampered config, gateway stopped", in: bundleEnforcement{Current: current, CurrentConfig: bundleConfig,
-			InstalledConfig: edited}, replaced: true, problem: "ensure re-applies the bundle from the bundle store"},
+			CurrentDigest: bundleDigest, InstalledConfig: edited}, replaced: true, problem: "ensure re-applies the bundle from the bundle store"},
 		{name: "config restored, gateway still on the edit", in: bundleEnforcement{Current: current, CurrentConfig: bundleConfig,
-			InstalledConfig: bundleConfig, GatewayReady: true,
+			CurrentDigest: bundleDigest, InstalledConfig: bundleConfig, GatewayReady: true,
 			Policy: &enterprisestatus.PolicyState{EffectiveDigest: bundleDigest, GatewayReportedDigest: editedDigest}},
 			problem: "the gateway enforces effective policy sha256:f7d2f379e981, not sha256:bd021570b814"},
 		{name: "gateway rejected the reload", in: bundleEnforcement{Current: current, CurrentConfig: bundleConfig,
-			InstalledConfig: bundleConfig, GatewayReady: true,
+			CurrentDigest: bundleDigest, InstalledConfig: bundleConfig, GatewayReady: true,
 			Policy: &enterprisestatus.PolicyState{GatewayReportedDigest: bundleDigest, LastReloadError: "rule pack p2int: hash mismatch"}},
 			problem: "rejected its last reload (rule pack p2int: hash mismatch)"},
 		{name: "gateway ready but reports no policy", in: bundleEnforcement{Current: current, CurrentConfig: bundleConfig,
-			InstalledConfig: bundleConfig, GatewayReady: true}, problem: "did not report its policy"},
+			CurrentDigest: bundleDigest, InstalledConfig: bundleConfig, GatewayReady: true}, problem: "did not report its policy"},
 		{name: "gateway not ready, config is the bundle's", in: bundleEnforcement{Current: current, CurrentConfig: bundleConfig,
-			InstalledConfig: bundleConfig}},
+			CurrentDigest: bundleDigest, InstalledConfig: bundleConfig}},
+		{name: "current build digest unavailable", in: bundleEnforcement{Current: current, CurrentConfig: bundleConfig,
+			InstalledConfig: bundleConfig, GatewayReady: true, Policy: enforcing}, problem: "cannot be read from the bundle store"},
 		{name: "bundle store unreadable", in: bundleEnforcement{Current: current, CurrentErr: errors.New("file_hash_mismatch: policies/guardrail/p2int/rules.yaml"),
 			InstalledConfig: bundleConfig, GatewayReady: true, Policy: enforcing}, problem: "cannot be read from the bundle store (file_hash_mismatch"},
-		{name: "installed config unreadable", in: bundleEnforcement{Current: current, CurrentConfig: bundleConfig, GatewayReady: true, Policy: enforcing},
+		{name: "installed config unreadable", in: bundleEnforcement{Current: current, CurrentConfig: bundleConfig, CurrentDigest: bundleDigest,
+			GatewayReady: true, Policy: enforcing},
 			replaced: true, problem: "the installed config.yaml cannot be read"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -98,9 +101,19 @@ func TestBundleEnforcementRestorePlan(t *testing.T) {
 		in        bundleEnforcement
 		installed []byte
 		readErr   error
+		handEdit  bool
 		want      bundleConfigRestore
 		wantErr   bool
 	}{
+		// A byte-exact restore by hand leaves the guardian record calling the
+		// bundle bytes a hand edit: the lifecycle records the bundle again.
+		{name: "bundle bytes recorded as a hand edit", in: confirmed, installed: bundleConfig, handEdit: true,
+			want: bundleConfigRestore{Write: true, Rerecord: true, ExpectSHA256: configwrite.SHA256Hex(bundleConfig)}},
+		{name: "edited and recorded as a hand edit", in: confirmed, installed: edited, handEdit: true,
+			want: bundleConfigRestore{Write: true, ExpectSHA256: configwrite.SHA256Hex(edited)}},
+		{name: "hand edit record, bundle store unreadable", in: bundleEnforcement{Current: current, CurrentErr: errors.New("file_hash_mismatch")},
+			installed: bundleConfig, handEdit: true},
+		{name: "hand edit record, no bundle confirmed", installed: bundleConfig, handEdit: true},
 		{name: "edited", in: confirmed, installed: edited, want: bundleConfigRestore{Write: true, ExpectSHA256: configwrite.SHA256Hex(edited)}},
 		{name: "deleted", in: confirmed, readErr: fmt.Errorf("open config.yaml: %w", fs.ErrNotExist), want: bundleConfigRestore{Write: true, Missing: true}},
 		{name: "untampered", in: confirmed, installed: bundleConfig},
@@ -110,7 +123,7 @@ func TestBundleEnforcementRestorePlan(t *testing.T) {
 		{name: "deleted, no bundle confirmed", readErr: fs.ErrNotExist},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := tc.in.planRestore(tc.installed, tc.readErr)
+			got, err := tc.in.planRestore(tc.installed, tc.readErr, tc.handEdit)
 			if (err != nil) != tc.wantErr || got != tc.want {
 				t.Fatalf("planRestore = %+v, %v; want %+v (error %v)", got, err, tc.want, tc.wantErr)
 			}

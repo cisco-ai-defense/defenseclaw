@@ -172,6 +172,9 @@ func (a batchApplier) GetDraft(ctx context.Context, sandbox, status string) (*op
 }
 
 func (a batchApplier) ApproveDraftChunks(ctx context.Context, sandbox string, approvals []openshell.DraftChunkApproval) (*openshell.ApproveAllResult, error) {
+	if err := a.m.networkWithdrawn(sandbox); err != nil {
+		return nil, err
+	}
 	gw, err := a.m.gateway(ctx)
 	if err != nil {
 		return nil, err
@@ -180,6 +183,9 @@ func (a batchApplier) ApproveDraftChunks(ctx context.Context, sandbox string, ap
 }
 
 func (a batchApplier) ApproveDraftChunk(ctx context.Context, sandbox, chunkID, reviewToken string) (*openshell.ApproveResult, error) {
+	if err := a.m.networkWithdrawn(sandbox); err != nil {
+		return nil, err
+	}
 	gw, err := a.m.gateway(ctx)
 	if err != nil {
 		return nil, err
@@ -273,7 +279,6 @@ func (m *Manager) triageSweep() {
 // credential carries, so a direct rule is approved only where the proxy
 // would let the sandbox through.
 func (m *Manager) triagePolicy(b *box, eff *packs.Effective) triage.Policy {
-	cfg := m.config()
 	m.mu.Lock()
 	d := b.decider
 	if b.eff != eff {
@@ -281,6 +286,10 @@ func (m *Manager) triagePolicy(b *box, eff *packs.Effective) triage.Policy {
 	}
 	rec := b.rec
 	m.mu.Unlock()
+	cfg := m.configForSandbox(rec.Name)
+	if cfg == nil {
+		return triage.Policy{} // Classify refuses an unresolved policy.
+	}
 	if d == nil {
 		d, _ = m.egressDeciderFor(cfg, eff, m.registrationOf(b))
 	}
@@ -722,6 +731,23 @@ func (m *Manager) recordApproval(ctx context.Context, id audit.SandboxIdentity, 
 	m.tel.RecordSandboxApproval(ctx, ev)
 }
 
+// The gateway records approvals that reach its decisions route. A plain
+// rejection and a floor-bounded attempt never reach it, so relay those two
+// outcomes once under the sandbox's registered identity.
+func (m *Manager) recordManagedAskDecision(ctx context.Context, b *box, a *approval, reason string) {
+	if m.authority() == nil {
+		return
+	}
+	m.mu.Lock()
+	identity := b.identity()
+	m.mu.Unlock()
+	m.tel.RecordManagedAskDecision(ctx, audit.SandboxAskDecidedEvent{
+		Sandbox: identity, ApprovalID: a.id, Kind: audit.SandboxApprovalKind(a.decision.Kind),
+		Host: a.decision.Host, Port: a.decision.Port, Result: audit.SandboxApprovalDenied,
+		Reason: reason, Timestamp: m.now(),
+	})
+}
+
 // approvalsApplied receives the batcher's results.
 func (m *Manager) approvalsApplied(results []triage.Result) {
 	ctx := context.Background()
@@ -971,6 +997,7 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 			m.mu.Unlock()
 		}
 	}()
+	m.confirmPolicy(ctx, a.sandbox)
 	eff, err := m.resolveBox(b)
 	if err != nil {
 		return nil, err
@@ -990,6 +1017,7 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 		f := m.floor(eff)
 		if err := sandboxreg.CheckApprovals(f, sandboxrelay.DecisionEgressAllow, scope); err != nil {
 			m.recordAdminRefusal(ctx, a.sandbox, audit.SandboxPolicyRuleAdd, host)
+			m.recordManagedAskDecision(ctx, b, a, "floor_denied")
 			return nil, m.decisionRefusal(err, b, f, host)
 		}
 		if d.Always {
@@ -1115,12 +1143,20 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 		m.mu.Unlock()
 		decided = true
 		m.recordApproval(ctx, ident, a, audit.SandboxApprovalResolved, audit.SandboxApprovalDenied, actorOperator)
+		if !d.Always || len(hosts) == 0 {
+			m.recordManagedAskDecision(ctx, b, a, "")
+		}
 		// The feed names the port as the approval does, the reply says what
 		// the reject leaves, and the agent's next hook says the user
-		// declined, not a network error (GAP-0236, GAP-0260).
+		// declined, not a network error (GAP-0236, GAP-0260). Only a
+		// host-port ask is a port on this machine; the egress proxy's ask
+		// (proxyAsk, also local) is a destination outside it (GAP-0415).
 		target := host
-		if local {
+		switch {
+		case local && !proxyAsk:
 			target = fmt.Sprintf("port %d on your machine (%s:%d)", port, host, port)
+		case port > 0:
+			target = fmt.Sprintf("%s:%d", host, port)
 		}
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityApprovalResolved, Sandbox: a.sandbox, ApprovalID: a.id,
 			Host: host, Port: port, Reason: "rejected", Message: "rejected " + target})
@@ -1214,6 +1250,39 @@ func persistError(err error) error {
 	return &sandboxapi.Error{Code: sandboxapi.CodeInternal, Message: "save the decision to config.yaml", Detail: err.Error()}
 }
 
+// endStoppedAsks ends the asks of a sandbox that stopped. Its session's
+// asks can't be answered any more (a managed gateway refuses the answer as
+// sandbox_registration_stopped, an unmanaged one has no gateway to apply it
+// to), yet status and approvals went on saying they waited for the user
+// (GAP-0508). Each ends as expired, in the audit and the activity feed; the
+// next session asks again if it still needs the destination.
+func (m *Manager) endStoppedAsks(ctx context.Context, b *box, sandbox, bindingID string) {
+	m.mu.Lock()
+	var ended []*approval
+	for id, a := range m.approvals {
+		if a.sandbox == sandbox && a.status == sandboxapi.ApprovalPending {
+			a.status, a.resolvedAt = sandboxapi.ApprovalFailed, m.now().UTC()
+			ended = append(ended, a)
+			delete(m.approvals, id)
+		}
+	}
+	ident := b.identity()
+	m.mu.Unlock()
+	for _, a := range ended {
+		m.recordApproval(ctx, ident, a, audit.SandboxApprovalResolved, audit.SandboxApprovalExpired, actorAutomatic)
+		target := a.decision.Host
+		if a.decision.Port > 0 {
+			target = fmt.Sprintf("%s:%d", a.decision.Host, a.decision.Port)
+		}
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityApprovalResolved, Sandbox: sandbox, ApprovalID: a.id,
+			Host: a.decision.Host, Port: a.decision.Port, Reason: "expired",
+			Message: "the ask for " + target + " ended: sandbox " + sandbox + " stopped"})
+		if bindingID != "" {
+			m.refusals.forgetNote(bindingID, triage.NormalizeHost(a.decision.Host), a.decision.Port, NoteAsked)
+		}
+	}
+}
+
 func (m *Manager) dropApprovals(sandbox string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1294,6 +1363,23 @@ func (m *Manager) registrationOf(b *box) string {
 	}
 	m.mu.Unlock()
 	return registration
+}
+
+// SetRegistration records registration as the managed registration of
+// sandbox name in place of the one its record keeps: a start runs a
+// stopped sandbox under a new registration (GAP-0673).
+func (m *Manager) SetRegistration(name, registration string) {
+	m.mu.Lock()
+	b, ok := m.boxes[name]
+	if !ok || b.deleted || b.rec.RegistrationID == registration {
+		m.mu.Unlock()
+		return
+	}
+	b.rec.RegistrationID = registration
+	m.mu.Unlock()
+	if err := m.saveRecord(b); err != nil {
+		m.logf("record the registration of sandbox %s: %v", name, err)
+	}
 }
 
 // liveBoxes are the sandboxes the manager holds that are neither deleted
@@ -1567,6 +1653,10 @@ type managedState struct {
 	// decisions are the saved decisions per registration, as the last
 	// refresh (or a decision since) left them.
 	decisions map[string][]sandboxrelay.Decision
+	// unanswered are the registrations whose decisions load got no answer
+	// (prefetchDecisions), and when: for decisionsRetryAfter no policy
+	// build or refresh waits for them again (missedRecently).
+	unanswered map[string]time.Time
 	// foreignRules counts each sandbox's removals of rules DefenseClaw
 	// neither rendered nor approved: a repeat stops the sandbox.
 	foreignRules map[string]int
@@ -1634,9 +1724,10 @@ func (m *Manager) savedDecisions(registration string, f config.OpenShellAdminCon
 	st := m.managedSide()
 	st.mu.Lock()
 	list, loaded := st.decisions[registration]
+	unanswered := st.missedRecently(registration, m.now())
 	list = slices.Clone(list)
 	st.mu.Unlock()
-	if !loaded {
+	if !loaded && !unanswered {
 		list = m.loadDecisions(registration)
 	}
 	return slices.DeleteFunc(list, func(d sandboxrelay.Decision) bool {
@@ -1680,6 +1771,74 @@ func (m *Manager) loadDecisions(registration string) []sandboxrelay.Decision {
 	return slices.Clone(list)
 }
 
+// decisionsRetryAfter is how long a registration whose decisions load got
+// no answer is not waited for again. A daemon start refreshes the policies
+// back to back (the manager, its egress proxy, the confirmed floor) before
+// it serves: on a managed gateway that stopped answering, each refresh
+// waited out loadDecisionsTimeout again (GAP-0608). Until a load answers,
+// the sandbox runs without the saved "always" decisions: stricter, never
+// looser.
+const decisionsRetryAfter = 3 * loadDecisionsTimeout
+
+// missedRecently reports a registration whose decisions load got no answer
+// less than decisionsRetryAfter before now. Callers hold st.mu.
+func (st *managedState) missedRecently(registration string, now time.Time) bool {
+	at, ok := st.unanswered[registration]
+	if !ok {
+		return false
+	}
+	since := now.Sub(at)
+	return since >= 0 && since < decisionsRetryAfter
+}
+
+// prefetchDecisions loads, side by side, the saved decisions of the boxes'
+// registrations not loaded yet (loadDecisions, each bounded by
+// loadDecisionsTimeout), so a refresh of the policies waits for one load,
+// not one per sandbox: the daemon's start-up refresh runs before it serves
+// (GAP-0608). A registration that got no answer is not asked again, by
+// this refresh or the next, for decisionsRetryAfter (missedRecently).
+func (m *Manager) prefetchDecisions(boxes []*box) {
+	if m.authority() == nil {
+		return
+	}
+	var regs []string
+	for _, b := range boxes {
+		if r := m.registrationOf(b); r != "" && !slices.Contains(regs, r) {
+			regs = append(regs, r)
+		}
+	}
+	st := m.managedSide()
+	st.mu.Lock()
+	now := m.now()
+	regs = slices.DeleteFunc(regs, func(r string) bool {
+		_, ok := st.decisions[r]
+		return ok || st.missedRecently(r, now)
+	})
+	st.mu.Unlock()
+	var wg sync.WaitGroup
+	for _, r := range regs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			m.loadDecisions(r)
+		}()
+	}
+	wg.Wait()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	at := m.now()
+	for _, r := range regs {
+		if _, ok := st.decisions[r]; ok {
+			delete(st.unanswered, r)
+			continue
+		}
+		if st.unanswered == nil {
+			st.unanswered = map[string]time.Time{}
+		}
+		st.unanswered[r] = at
+	}
+}
+
 // refreshDecisions reloads the saved decisions of every registered
 // sandbox from the managed gateway (reconcile). A registration the gateway
 // can't answer for keeps what it had; one no sandbox holds, or one the
@@ -1715,6 +1874,52 @@ func (m *Manager) refreshDecisions(ctx context.Context) {
 		fresh[r] = st.decisions[r]
 	}
 	st.decisions = fresh
+}
+
+// ReloadDecisions loads the saved decisions of registration from the
+// managed gateway again, which caps them by the person's floor now, and
+// re-resolves the sandboxes' egress when they changed. The daemon calls it
+// when the gateway's answer moved the registration's policy and when its
+// sandbox starts, so a floor that no longer keeps a saved allow takes it
+// back from a running or restarted sandbox at once, not at the next
+// reconcile (GAP-0224). A reload that fails keeps only the user blocks: a
+// policy that moved is not decided under allows its new floor may refuse.
+// A registration the gateway no longer knows keeps none; one never loaded
+// is left for its first load.
+func (m *Manager) ReloadDecisions(ctx context.Context, registration string) {
+	auth := m.authority()
+	if auth == nil || registration == "" {
+		return
+	}
+	list, err := auth.Decisions(ctx, registration)
+	st := m.managedSide()
+	st.mu.Lock()
+	have, loaded := st.decisions[registration]
+	switch {
+	case err == nil:
+		if list == nil {
+			list = []sandboxrelay.Decision{}
+		}
+	case registrationGone(err):
+		list = []sandboxrelay.Decision{}
+	case !loaded:
+		st.mu.Unlock()
+		m.logf("reload the saved sandbox decisions of registration %s: %v", registration, err)
+		return
+	default:
+		list = slices.DeleteFunc(slices.Clone(have), func(d sandboxrelay.Decision) bool {
+			return d.Kind != sandboxrelay.DecisionEgressBlock
+		})
+	}
+	changed := !loaded || !slices.Equal(have, list)
+	st.decisions[registration] = list
+	st.mu.Unlock()
+	if err != nil {
+		m.logf("reload the saved sandbox decisions of registration %s: %v", registration, err)
+	}
+	if changed {
+		m.refreshEgress()
+	}
 }
 
 // maxPendingEvents bounds the records kept for the managed gateway

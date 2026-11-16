@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 import pytest
@@ -111,8 +112,9 @@ def test_identity_filters_name_empty_results_and_reject_invalid_inputs(monkeypat
     monkeypatch.setattr(cmd_agent, "_usage_client", lambda *a, **k: EmptyClient())
     runner = CliRunner()
     empty = runner.invoke(cli, ["agent", "identities", "--user", "nosuchuser"])
-    assert empty.exit_code == 0, empty.output
-    assert "No agent identity matches --user nosuchuser (2621 identities exist" in empty.output
+    # GAP-0089, GAP-0944: Linux, macOS and Windows refuse an unknown account.
+    assert empty.exit_code == 2, empty.output
+    assert "unknown account for --user: nosuchuser" in empty.output
     unknown = runner.invoke(cli, ["agent", "identities", "--connector", "bogus"])
     assert unknown.exit_code != 0 and "valid names" in unknown.output
     huge = runner.invoke(cli, ["agent", "identities", "--limit", "99999999999999999999"])
@@ -168,3 +170,45 @@ def test_ide_inventory_scope_option_and_read_only_log_recovery(monkeypatch: pyte
     assert not _audit_logs_can_read_with_ide_scope_typo(
         ctx, SimpleNamespace(errors=["guardrail.block_at: invalid"], timed_out=False, parse_error="")
     )
+
+
+def test_windows_account_lookup_answers_only_a_definite_unknown() -> None:
+    # GAP-0944: the Windows form of the unknown-account refusal.
+    known = cmd_agent._windows_account_known
+    assert known("alice", lookup=lambda _u: (True, 0, 1)) is True
+    assert known("Domain Users", lookup=lambda _u: (True, 0, 2)) is False
+    assert known("nosuchuser", lookup=lambda _u: (False, 1332, 0)) is False
+    # An unreachable domain or any other failure is no answer.
+    assert known("CORP\\bob", lookup=lambda _u: (False, 1789, 0)) is None
+
+    def broken(_user: str) -> tuple[bool, int, int]:
+        raise OSError("advapi32 unavailable")
+
+    assert known("alice", lookup=broken) is None
+
+
+def test_identity_filter_with_a_real_account_or_id_keeps_the_no_match_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    account_known = cmd_agent._account_known
+
+    class EmptyClient:
+        def agent_identities_all(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"enabled": True, "identities": [], "total": 0}
+
+        def agent_identities(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"total": 3}
+
+    monkeypatch.setattr(cmd_agent, "_usage_client", lambda *a, **k: EmptyClient())
+    monkeypatch.setattr(cmd_agent, "_account_known", lambda _user: True)
+    result = CliRunner().invoke(cli, ["agent", "identities", "--user", "alice"])
+    assert result.exit_code == 0, result.output
+    assert "No agent identity matches --user alice (3 identities exist" in result.output
+    # A lookup that cannot answer never refuses the filter.
+    monkeypatch.setattr(cmd_agent, "_account_known", lambda _user: None)
+    result = CliRunner().invoke(cli, ["agent", "identities", "--user", "S-1-5-21-1-2-3-1001"])
+    assert result.exit_code == 0, result.output
+    if os.name == "posix":
+        import pwd
+
+        current = pwd.getpwuid(os.getuid())
+        assert account_known(str(os.getuid())) is True
+        assert account_known(current.pw_name) is True

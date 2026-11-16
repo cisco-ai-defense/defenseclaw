@@ -1327,6 +1327,9 @@ func TestOTLPGenerationAssemblerKeepsReloadGenerationsIsolated(t *testing.T) {
 	if reloadErr != nil || result.Status() != runtimegraph.ReloadApplied {
 		t.Fatalf("reload=%s error=%v", result.Status(), reloadErr)
 	}
+	if err := manager.WaitCleanup(t.Context()); err != nil {
+		t.Fatalf("retired graph cleanup: %v", err)
+	}
 	if firstProvider.DestinationAcknowledgedCanaryTrace("reload-traces", firstCanary.TraceID) {
 		t.Fatal("retired generation remained queryable")
 	}
@@ -1387,6 +1390,9 @@ func TestGeneratedMetricOTLPSinksKeepReloadGenerationsAndEndpointsIsolated(t *te
 	reload, err := manager.Reload(t.Context(), runtimegraph.ConfigFromPlan(secondPlan, false))
 	if err != nil || reload.Status() != runtimegraph.ReloadApplied {
 		t.Fatalf("reload=%s error=%v", reload.Status(), err)
+	}
+	if err := manager.WaitCleanup(t.Context()); err != nil {
+		t.Fatalf("retired graph cleanup: %v", err)
 	}
 	if result, recordErr := firstProvider.RecordGeneratedMetric(t.Context(), firstRecord); recordErr == nil ||
 		result != (telemetry.V8MetricRecordResult{}) {

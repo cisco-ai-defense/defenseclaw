@@ -219,7 +219,7 @@ func TestEvaluateCodexHookCurlSMTPMetadataEgress(t *testing.T) {
 func TestTrustedActionCurlSMTPBracketedMetadataRiskPair(t *testing.T) {
 	t.Parallel()
 
-	generation := mustCompileRulePackGeneration(defaultRuleCategories)
+	generation := mustCompileRulePackGeneration(defaultRuleCategories())
 	finding := trustedActionDispositionTestFinding(t, generation, "SEC-OPENAI")
 	disposition := func(facts actionfacts.Facts) []RuleFinding {
 		got := applyTrustedActionContextDisposition(

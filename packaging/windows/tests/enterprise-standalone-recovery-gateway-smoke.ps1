@@ -52,6 +52,7 @@ $failures = & $module {
     $failures = [Collections.Generic.List[string]]::new()
     $script:TestCalls = [Collections.Generic.List[string]]::new()
     $script:TestFailing = @{}
+    $script:TestConfigGuard = $false
     $script:TestLocalSystem = $true
     $script:TestUntrustedSource = ''
     $script:TestVersions = @{}
@@ -110,6 +111,13 @@ $failures = & $module {
             $report['leftovers'] = @($script:TestLeftover)
         }
         $exitCode = 0
+        if ($script:TestConfigGuard -and $action -ceq 'restore' -and
+            [IO.File]::ReadAllText([string]$Layout.ConfigPath).Contains('/opt/cisco/defenseclaw/runtime')) {
+            $report.ok = $false
+            $report.phase = ''
+            $report['error'] = 'load protected Windows enterprise config: managed_enterprise data_dir trust check failed'
+            $exitCode = 1
+        }
         if ($script:TestFailing.ContainsKey("${gateway}:$action")) {
             $report.ok = $false
             $report.phase = ''
@@ -197,6 +205,7 @@ $failures = & $module {
                 $script:TestFailing[$entry] = $true
             }
             $script:TestCalls.Clear()
+            $script:TestConfigGuard = $false
             $script:TestLocalSystem = $true
             $script:TestUntrustedSource = ''
             Set-DefenseClawRecoveryGatewayCandidate -InstallerSource $setupInstaller
@@ -384,6 +393,9 @@ $failures = & $module {
         Reset-TestHost -StagedVersion '1.0.40' -SetupVersion '1.0.40-rc.1'
         Assert-TestRefused 'a prerelease of the staged release' 'older_release'
 
+        Reset-TestHost -StagedVersion '1.0.40-rc.10' -SetupVersion '1.0.40-rc.9'
+        Assert-TestRefused 'an earlier numbered prerelease (rc.9 over rc.10)' 'older_release'
+
         Reset-TestHost -SetupVersion ''
         Assert-TestRefused 'a Setup gateway without a version resource' 'version_unknown'
 
@@ -394,7 +406,8 @@ $failures = & $module {
             @('1.0.40', '1.0.40'),
             @('1.0.40-rc.1', '1.0.40'),
             @('1.0.40', 'v1.0.41+abc'),
-            @('1.0.9', '1.0.10')
+            @('1.0.9', '1.0.10'),
+            @('1.0.40-rc.9', '1.0.40-rc.10')
         )) {
             Reset-TestHost -StagedVersion $pair[0] -SetupVersion $pair[1]
             $outcome = Invoke-TestRecovery
@@ -412,7 +425,13 @@ $failures = & $module {
             @('1.0', '1.0.0', 0),
             @('V1.0.43+build.7', '1.0.43', 0),
             @('1.0.43-rc.1', '1.0.43', -1),
-            @('1.0.43-rc.2', '1.0.43-rc.10', 1),
+            @('1.0.43-rc.2', '1.0.43-rc.10', -1),
+            @('1.0.43-rc.9', '1.0.43-rc.10', -1),
+            @('1.0.43-rc.10', '1.0.43-rc.9', 1),
+            @('1.0.43-rc.1', '1.0.43-rc.1.1', -1),
+            @('1.0.43-rc.1', '1.0.43-rc.a', -1),
+            @('1.0.43-alpha', '1.0.43-beta', -1),
+            @('1.0.43-dev.wm9', '1.0.43-dev.wm10', 1),
             @('1.0.43.1', '1.0.43', 1)
         )) {
             $left = ConvertTo-DefenseClawRecoveryGatewayRelease -Value $case[0]
@@ -553,6 +572,9 @@ $failures = & $module {
                 [string]$GuardianServiceName
             )
             $script:TestCalls.Add('cleanup:' + [IO.File]::ReadAllText([string]$Layout.GatewayPath).Trim())
+            if ($script:TestCleanupFails) {
+                throw 'enterprise hooks: inspect user home C:\Users\carol: The system cannot find the file specified.'
+            }
             return (Microsoft.PowerShell.Management\Get-Content -LiteralPath $SnapshotPath -Raw |
                 Microsoft.PowerShell.Utility\ConvertFrom-Json)
         }
@@ -573,12 +595,21 @@ $failures = & $module {
             param([string]$Path, [string]$Kind, [string]$GatewayServiceSID)
             $script:TestAcls.Add($Kind + ':' + [IO.Path]::GetFileName($Path))
         }
+        function Get-DefenseClawDeterministicServiceSID {
+            param([string]$ServiceName)
+            return 'S-1-5-80-1-2-3-4-5'
+        }
+        function Sync-DefenseClawCodexManagedHooksStateCopy {
+            param([hashtable]$Layout, [string]$GatewayServiceSID)
+            $script:TestCalls.Add('state-copy-sync')
+        }
 
         Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
         $stateRoot = [IO.Path]::Combine($root, 'state')
         $layout.StateRoot = $stateRoot
         $layout.ManifestPath = [IO.Path]::Combine($stateRoot, 'targets.yaml')
         $layout.ConfigDirectory = [IO.Path]::Combine($stateRoot, 'etc')
+        $layout.ConfigPath = [IO.Path]::Combine($layout.ConfigDirectory, 'config.yaml')
         $layout.CertificationCodexHome = ''
         $layout.CoreHardeningCertification = $false
         $layout.ProviderLibraryPath = ''
@@ -589,20 +620,42 @@ $failures = & $module {
         $layout.AgentApplicationControlAttestationPath = [IO.Path]::Combine($stateRoot, 'agent-application-control.json')
         $layout.StateRootAncestors = @()
         $priorGateway = [IO.Path]::Combine($stateRoot, 'install', 'backup', 'defenseclaw-gateway.exe')
+        $priorConfig = [IO.Path]::Combine($stateRoot, 'install', 'file-06.bak')
         [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($priorGateway))
         [IO.File]::WriteAllText($priorGateway, 'prior-gateway', $utf8)
+        [IO.File]::WriteAllText($priorConfig, "config_version: 9`ndata_dir: C:\ProgramData\Cisco\DefenseClaw\runtime`n", $utf8)
         $snapshotPath = [IO.Path]::Combine($stateRoot, 'install', 'transaction.json')
         $generationRecord = [IO.Path]::Combine($layout.ConfigDirectory, 'config.generation.json')
         [void][IO.Directory]::CreateDirectory($layout.ConfigDirectory)
+        # GAP-0856: a per-user runtime cleanup that fails with the staged and
+        # the Setup gateway no longer ends a standalone rollback before the
+        # file rollback: <InstallRoot>\bin gets the prior release back and
+        # each folder the plan says this change created is a rollback
+        # leftover. Secure Client still stops at the cleanup failure.
         foreach ($case in @(
             @{ Profile = 'Standalone'; Existed = $true; Label = 'rollback of a failed upgrade' },
+            @{ Profile = 'Standalone'; Existed = $true; StateCopy = 'plain'; Label = 'rollback that restored the Codex state writes the hook copy' },
+            @{ Profile = 'Standalone'; Existed = $true; StateCopy = 'link'; Label = 'rollback with a link on the Codex folder writes nothing through it' },
             @{ Profile = 'Standalone'; Existed = $false; Label = 'rollback of a failed first install' },
-            @{ Profile = 'SecureClient'; Existed = $true; Label = 'Secure Client rollback' }
+            @{ Profile = 'SecureClient'; Existed = $true; Label = 'Secure Client rollback' },
+            @{ Profile = 'Standalone'; Existed = $true; CleanupFails = $true; Label = 'rollback whose runtime cleanup fails' },
+            @{ Profile = 'Standalone'; Existed = $false; CleanupFails = $true; Label = 'first-install rollback whose runtime cleanup fails' },
+            @{ Profile = 'SecureClient'; Existed = $true; CleanupFails = $true; Failing = @(); Label = 'Secure Client rollback whose runtime cleanup fails' }
         )) {
             $existed = [bool]$case.Existed
             $label = [string]$case.Label
+            # Strict mode: a key a case does not set is read by index.
+            $cleanupFails = [bool]$case['CleanupFails']
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile $case.Profile
-            Reset-TestHost
+            if ($case.ContainsKey('Failing')) {
+                Reset-TestHost -Failing ([string[]]$case.Failing)
+            }
+            else {
+                Reset-TestHost
+            }
+            $script:TestConfigGuard = $case.Profile -ceq 'Standalone' -and $existed
+            [IO.File]::WriteAllText($layout.ConfigPath, "config_version: 9`ndata_dir: /opt/cisco/defenseclaw/runtime`n", $utf8)
+            $script:TestCleanupFails = $cleanupFails
             [IO.File]::WriteAllText($layout.ManagedHooksLifecycleJournalPath, '{}', $utf8)
             [IO.File]::WriteAllText($generationRecord, 'rejected-generation', $utf8)
             $script:TestAcls = [Collections.Generic.List[string]]::new()
@@ -625,9 +678,45 @@ $failures = & $module {
                     }
                 )
             }
+            if ($case.Profile -ceq 'Standalone') {
+                $snapshot['files'] += [ordered]@{
+                    path = $layout.ConfigPath
+                    existed = $existed
+                    backup = $(if ($existed) { $priorConfig } else { '' })
+                }
+            }
             if (-not $existed) {
                 # Only a record the transaction creates is in the snapshot.
                 $snapshot['files'] += [ordered]@{ path = $generationRecord; existed = $false; backup = '' }
+            }
+            $stateCopy = [string]$case['StateCopy']
+            $decoy = [IO.Path]::Combine($root, 'codex-decoy')
+            $decoyBefore = ''
+            if ($stateCopy -ne '') {
+                # GAP-0900: the restored Codex state is written for the hook into the Codex
+                # machine-policy folder; with a link on its path nothing is written through it.
+                $snapshot['codex_machine_state_included'] = $true
+                if ([IO.Directory]::Exists($layout.CodexMachinePolicyDirectory)) {
+                    [IO.Directory]::Delete($layout.CodexMachinePolicyDirectory, $false)
+                }
+                if ($stateCopy -eq 'link') {
+                    [void][IO.Directory]::CreateDirectory($decoy)
+                    [IO.File]::WriteAllText([IO.Path]::Combine($decoy, 'requirements.toml'), 'decoy', $utf8)
+                    [void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path $layout.CodexMachinePolicyDirectory -Target $decoy)
+                }
+                else {
+                    [void][IO.Directory]::CreateDirectory($layout.CodexMachinePolicyDirectory)
+                }
+                $decoyBefore = (@(Get-ChildItem -LiteralPath $decoy -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName + ':' + $_.Length }) -join '|')
+            }
+            if ($cleanupFails) {
+                # carol's folder is one this change created; dave's existed.
+                $snapshot['target_runtime_plan'] = [ordered]@{
+                    roots = @(
+                        [ordered]@{ data_dir = 'C:\Users\carol\.defenseclaw'; sid = 'S-1-5-21-1-2-3-1020'; baseline = 'absent' },
+                        [ordered]@{ data_dir = 'C:\Users\dave\.defenseclaw'; sid = 'S-1-5-21-1-2-3-1021'; baseline = 'canonical' }
+                    )
+                }
             }
             [IO.File]::WriteAllText(
                 $snapshotPath,
@@ -642,6 +731,56 @@ $failures = & $module {
                 $restoreError = $_.Exception.Message
             }
             $calls = @($script:TestCalls) -join '|'
+            if ($stateCopy -ne '') {
+                $syncs = @($script:TestCalls | Microsoft.PowerShell.Core\Where-Object { $_ -ceq 'state-copy-sync' }).Count
+                $decoyAfter = (@(Get-ChildItem -LiteralPath $decoy -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName + ':' + $_.Length }) -join '|')
+                if (-not [string]::IsNullOrEmpty($restoreError)) {
+                    $failures.Add("${label}: the rollback failed: '$restoreError'")
+                }
+                if ($stateCopy -eq 'plain' -and $syncs -ne 1) {
+                    $failures.Add("${label}: the hook copy was written $syncs times, want 1")
+                }
+                if ($stateCopy -eq 'link' -and ($syncs -ne 0 -or $decoyAfter -cne $decoyBefore)) {
+                    $failures.Add("${label}: the state was written through the link ($syncs sync calls; decoy before '$decoyBefore' after '$decoyAfter')")
+                }
+                if ([IO.Directory]::Exists($layout.CodexMachinePolicyDirectory)) {
+                    [IO.Directory]::Delete($layout.CodexMachinePolicyDirectory, $false)
+                }
+                continue
+            }
+            if ($case.Profile -ceq 'SecureClient' -and $cleanupFails) {
+                # Secure Client: the cleanup failure ends the rollback before
+                # any file is restored, as before.
+                if (-not $restoreError.Contains('cannot find the file') -or
+                    $calls -cne 'staged-gateway:restore|staged-gateway:retire|cleanup:staged-gateway' -or
+                    @($script:DefenseClawRollbackLeftovers).Count -ne 0 -or
+                    [IO.File]::ReadAllText($layout.GatewayPath).Trim() -cne 'staged-gateway') {
+                    $failures.Add("${label}: '$restoreError', calls $calls")
+                }
+                continue
+            }
+            if ($cleanupFails) {
+                # The retire report adds its own leftovers; the cleanup adds
+                # only carol's folder, which this change created.
+                $all = @($script:DefenseClawRollbackLeftovers)
+                $leftovers = @($all | Microsoft.PowerShell.Core\Where-Object { ([string]$_).Contains('.defenseclaw (account ') })
+                if (-not [string]::IsNullOrEmpty($restoreError) -or
+                    -not $calls.StartsWith('staged-gateway:restore|staged-gateway:retire|setup-gateway:retire|cleanup:setup-gateway', [StringComparison]::Ordinal) -or
+                    $leftovers.Count -ne 1 -or
+                    -not ([string]$leftovers[0]).StartsWith('C:\Users\carol\.defenseclaw (account S-1-5-21-1-2-3-1020), if it exists: a per-user DefenseClaw folder this change created; the rollback could not remove it (', [StringComparison]::Ordinal) -or
+                    -not ([string]$leftovers[0]).Contains('cannot find the file')) {
+                    $failures.Add("${label}: '$restoreError', calls $calls, leftovers $($all -join ' | ')")
+                }
+                $present = [IO.File]::Exists($layout.GatewayPath)
+                if ($existed -and
+                    (-not $present -or [IO.File]::ReadAllText($layout.GatewayPath).Trim() -cne 'prior-gateway')) {
+                    $failures.Add("${label}: the file rollback did not put the prior release's gateway back")
+                }
+                if (-not $existed -and $present) {
+                    $failures.Add("${label}: the file rollback left a gateway at <InstallRoot>\bin")
+                }
+                continue
+            }
             if ($case.Profile -ceq 'SecureClient') {
                 # Secure Client keeps the staged gateway: its failure ends
                 # the recovery before any file is restored.
@@ -667,6 +806,9 @@ $failures = & $module {
                 (-not $present -or [IO.File]::ReadAllText($layout.GatewayPath).Trim() -cne 'prior-gateway')) {
                 $failures.Add("${label}: <InstallRoot>\bin does not hold the prior release's gateway again")
             }
+            if ($existed -and [IO.File]::ReadAllText($layout.ConfigPath) -cne [IO.File]::ReadAllText($priorConfig)) {
+                $failures.Add("${label}: rollback did not restore the prior config")
+            }
             if (-not $existed -and $present) {
                 $failures.Add("${label}: the recovery gateway was left at <InstallRoot>\bin")
             }
@@ -674,7 +816,8 @@ $failures = & $module {
                 [IO.File]::ReadAllText($generationRecord).Trim()
             } else { '' })
             $acls = @($script:TestAcls) -join '|'
-            if (($existed -and ($record -cne 'rejected-generation' -or $acls -cne '')) -or
+            $expectedAcls = $(if ($case.Profile -ceq 'Standalone' -and $existed) { 'ConfigFile:config.yaml' } else { '' })
+            if (($existed -and ($record -cne 'rejected-generation' -or $acls -cne $expectedAcls)) -or
                 (-not $existed -and ($record -cne '' -or $acls -cne '')) -or
                 $script:TestRecordedRestore -ne 1) {
                 $failures.Add("${label}: config.generation.json is '$record' with access $acls, restore recorded $($script:TestRecordedRestore) times, after the rollback")

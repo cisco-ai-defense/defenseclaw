@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -248,11 +249,15 @@ func (l *egressLeases) prune(regs []daemonRegistration) {
 // changed the registration (applyLive) and moved that it named another
 // generation than the registration's. err is a transient failure.
 type policyAnswer struct {
-	id             string
-	sent           time.Time
-	err            error
-	gone           bool
-	reason         string
+	id     string
+	sent   time.Time
+	err    error
+	gone   bool
+	reason string
+	// stopText is the managed gateway's words for a revoke it answered
+	// (CurrentPolicy.RevokedReason); "" for a refusal that ended the
+	// registration (registrationGone), whose reason is a code.
+	stopText       string
 	changed, moved bool
 }
 
@@ -297,15 +302,45 @@ func (d *SandboxDaemon) askPolicy(ctx context.Context, r daemonRegistration, rep
 		return ans
 	}
 	if ans.err != nil {
+		if policyUnloadable(ans.err) && d.regs.unconfirm(r.Sandbox, r.ID) {
+			// The managed gateway answered and cannot state this
+			// sandbox's policy: the floor confirmed before may be looser
+			// than the organization's now (an alert where it now says
+			// stop, GAP-0058). The sandbox runs under the closed floor
+			// until an answer carries its policy again.
+			d.logf("sandbox %s: the managed gateway can't load its policy (%v); it runs under the closed floor until it can", r.Sandbox, ans.err)
+		}
 		return ans
 	}
 	if cp.Revoked {
+		ans.stopText = cp.RevokedReason
 		markGone(cp.RevokedReason)
+		return ans
+	}
+	if cp.Floor == nil {
+		ans.err = errors.New("managed gateway omitted the complete sandbox policy floor")
+		return ans
+	}
+	if ans.err = useCurrentPack(cp); ans.err != nil {
 		return ans
 	}
 	ans.moved = cp.Generation != 0 && cp.Generation != r.Generation
 	ans.changed = d.regs.applyOrdered(r, seq, cp)
+	if ans.moved || ans.changed {
+		// The managed gateway caps the saved decisions by the floor now: an
+		// allow the new floor no longer keeps leaves the running sandbox
+		// before its next connection is decided (GAP-0224).
+		d.rt.manager.ReloadDecisions(ctx, r.ID)
+	}
 	return ans
+}
+
+// policyUnloadable reports the managed gateway's answer that it cannot load
+// the registration's policy (sandbox_policy_unloadable): an answer, not an
+// outage, so the policy confirmed before is not kept in force.
+func policyUnloadable(err error) bool {
+	var refused *sandboxrelay.Error
+	return errors.As(err, &refused) && refused.Reason == sandboxrelay.ReasonPolicyUnloadable
 }
 
 // adoptApplied puts every registration change applied so far in force
@@ -335,12 +370,12 @@ func (d *SandboxDaemon) adoptApplied(ctx context.Context, refresh bool) (changed
 
 // adoptLocked is one adoption, under adoptMu: the floor of the sandboxes
 // phases lists as running (adoptRunningFloor), every sandbox's policy
-// re-resolved when the floor changed or with refresh. With listed, every
-// registration change applied before it is in force once it returns.
+// re-resolved when its registration changed or with refresh. With listed,
+// every registration change applied before it is in force once it returns.
 func (d *SandboxDaemon) adoptLocked(phases map[string]string, listed, refresh bool) bool {
 	target := d.regs.changeCount()
 	changed := d.adoptRunningFloor(phases)
-	if refresh && !changed {
+	if (refresh || (listed && target > d.adopted.Load())) && !changed {
 		d.rt.manager.RefreshPolicies()
 		changed = true
 	}
@@ -396,6 +431,24 @@ func (d *SandboxDaemon) confirmEgressPolicy(ctx context.Context, pr egress.Princ
 	return changed || adopted, nil
 }
 
+// confirmSandboxPolicy is the manager's ConfirmPolicy: before an unblock or
+// an ask's answer for sandbox name is judged, the policy of its registration
+// is confirmed as for a new connection (confirmLease, adoptApplied), so the
+// decision uses the profile `sandbox policy explain` shows. A registration
+// the daemon does not hold, or one revoked, keeps the closed floor; a
+// managed gateway that does not answer keeps the policy in force, and it
+// checks the decision against the person's floor itself (GAP-0132).
+func (d *SandboxDaemon) confirmSandboxPolicy(ctx context.Context, name string) {
+	r, ok := d.regs.get(name)
+	if !ok || r.ID == "" || r.Revoked {
+		return
+	}
+	if _, off := d.confirmLease(ctx, r); off != nil {
+		return
+	}
+	_, _ = d.adoptApplied(ctx, false)
+}
+
 // confirmLease is confirmEgressPolicy's lease: fresh, the outcome of the
 // confirmation under way or of the last failed one, or a new confirmation
 // (confirmOnce). A connection whose request ends while it waits is refused.
@@ -447,7 +500,7 @@ func (d *SandboxDaemon) confirmOnce(ctx context.Context, r daemonRegistration, c
 		d.askPoll()
 		return false, sandboxEgressRevoked(), true
 	case ans.err != nil:
-		if changing {
+		if changing || policyUnloadable(ans.err) {
 			d.logf("confirm the changed policy of sandbox %s: %v", r.Sandbox, ans.err)
 			return false, sandboxEgressRefusal(), true
 		}

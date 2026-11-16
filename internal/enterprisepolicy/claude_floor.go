@@ -16,11 +16,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // Claude Code refuses to start when its version is below the managed
@@ -79,7 +79,7 @@ const (
 
 // claudeVersionPattern is a major.minor.patch version, optionally with a
 // pre-release or build suffix.
-var claudeVersionPattern = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$`)
+var claudeVersionPattern = lazyregexp.New(`^v?[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$`)
 
 // VersionFloorState is Claude Code's requiredMinimumVersion as the
 // claudecode machine policy report shows it.
@@ -737,7 +737,8 @@ func inspectClaudeVersionFloor(opts Options, policy config.ResolvedConnectorPoli
 			}
 			state.conflict("Claude Code version floor: %s and DefenseClaw's %s is missing, so Claude Code builds below %s can start; %s", unset, plan.path, plan.floor, restore)
 		case plan.mode == config.ClaudeVersionFloorEnforce:
-			state.detail("Claude Code version floor: %s; deploy the output of `defenseclaw-gateway enterprise policy export --connector claudecode --format version-floor` through your policy tool, or set the key yourself (Claude Code reads it from %s)", unset, claudeFloorSettingVersion)
+			state.detail("Claude Code version floor: %s; deploy the output of %s through your policy tool, or set the key yourself (Claude Code reads it from %s)",
+				unset, policyExportCommand(opts.goos(), "--connector", "claudecode", "--format", "version-floor"), claudeFloorSettingVersion)
 		case plan.mode == config.ClaudeVersionFloorReport:
 			state.detail("Claude Code version floor: %s, so Claude Code builds below %s can start (version_floor: report)", unset, plan.floor)
 		default:

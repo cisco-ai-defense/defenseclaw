@@ -6,6 +6,7 @@ package gateway
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -322,5 +323,33 @@ func TestBuildGenerationRefusesUntrustedManagedPolicyTree(t *testing.T) {
 	cfg := &config.Config{DeploymentMode: "managed_enterprise", PolicyDir: dir, Enterprise: config.EnterpriseConfig{Profile: "standalone"}}
 	if _, err := buildGeneration(context.Background(), generationInputs{cfg: cfg}); err == nil || !strings.Contains(err.Error(), "not administrator-controlled") {
 		t.Fatalf("buildGeneration error = %v, want the untrusted policy tree refused", err)
+	}
+}
+
+// GAP-1890: the gateway's policy build runs the managed policy_dir check
+// the config validation runs (config.ValidateManagedPolicyDir, whose own
+// tests cover what it skips and refuses), on the configured policy_dir, and
+// its refusal fails the build. An unmanaged config is not checked.
+func TestBuildGenerationRunsTheSharedManagedPolicyDirCheck(t *testing.T) {
+	dir := t.TempDir()
+	previous := validateManagedPolicyDir
+	t.Cleanup(func() { validateManagedPolicyDir = previous })
+	refused := errors.New("policies/guardrail/acme/rules.yaml: group/other writable permissions 0666 are not trusted")
+	var checked []string
+	validateManagedPolicyDir = func(cfg *config.Config, got, _ string) error {
+		checked = append(checked, got)
+		return refused
+	}
+	cfg := &config.Config{DeploymentMode: "managed_enterprise", PolicyDir: dir, Enterprise: config.EnterpriseConfig{Profile: "standalone"}}
+	if _, err := buildGeneration(context.Background(), generationInputs{cfg: cfg}); !errors.Is(err, refused) ||
+		!strings.Contains(err.Error(), "not administrator-controlled") {
+		t.Fatalf("buildGeneration error = %v, want the shared check's refusal", err)
+	}
+	if len(checked) != 1 || checked[0] != dir {
+		t.Fatalf("the shared check ran on %q, want once on %q", checked, dir)
+	}
+	checked = nil
+	if _, err := buildGeneration(context.Background(), generationInputs{cfg: &config.Config{PolicyDir: dir}}); err != nil || len(checked) != 0 {
+		t.Fatalf("an unmanaged build: err = %v, checked %q", err, checked)
 	}
 }

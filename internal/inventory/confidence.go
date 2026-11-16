@@ -539,16 +539,6 @@ func sortedKeys(m map[string]bool) []string {
 	return out
 }
 
-// min is a local helper so this file can compile on Go 1.20 where
-// the builtin `min` is not yet available. (The repo's go.mod already
-// requires 1.21+, but a small local helper documents intent.)
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // String renders a ConfidenceResult as a multi-line waterfall for
 // the `agent confidence explain` CLI command. Kept on the engine
 // rather than the CLI so the gateway, TUI, and Python via JSON all

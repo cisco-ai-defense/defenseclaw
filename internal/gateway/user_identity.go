@@ -7,12 +7,12 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"regexp"
 	"strings"
 	"sync/atomic"
 
 	osuser "os/user"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -318,7 +318,7 @@ func hookUserEmail(connector string, payload map[string]interface{}) string {
 // rejects is a build failure, not a dropped field. Checking first means an
 // unusual address costs the record its email attribute rather than the whole
 // record.
-var v8UserEmailPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z]{2,}$`)
+var v8UserEmailPattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z]{2,}$`)
 
 // v8UserEmailMaxBytes is the registry's max_utf8_bytes for the same attribute.
 const v8UserEmailMaxBytes = 254

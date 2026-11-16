@@ -31,8 +31,8 @@ import (
 func TestTetragonSessionCountsAgree(t *testing.T) {
 	for code, want := range map[string][2]string{
 		kernelpolicy.WarnRootsOverLimit: {
-			"1 live agent session is over the 8-session limit of the monitor controls (the controls do not count its opens, and its user's burn-in pauses",
-			"3 live agent sessions are over the 8-session limit of the monitor controls (the controls do not count their opens, and their users' burn-in pauses",
+			"1 live agent session is over the 4-session limit of the monitor controls (the controls do not count its opens, and its user's burn-in pauses",
+			"3 live agent sessions are over the 4-session limit of the monitor controls (the controls do not count their opens, and their users' burn-in pauses",
 		},
 		kernelpolicy.WarnSessionPolicyPending: {
 			"1 agent session is waiting for an enabled controls policy that includes its process id (its user accrues no covered time",
@@ -57,12 +57,12 @@ func TestTetragonSessionCountsAgree(t *testing.T) {
 	in.State.UIDs[0].User = "Dcr-Mixed.Case"
 	in.State.UIDs[0].Reason = kernelpolicy.WarnRootsOverLimit
 	text := readinessText(t, tetragonReadiness(in, "observe", readyProbes, readinessNow))
-	if !strings.Contains(text, "  ! The user Dcr-Mixed.Case runs more than 8 agent sessions") {
+	if !strings.Contains(text, "  ! The user Dcr-Mixed.Case runs more than 4 agent sessions") {
 		t.Fatalf("readiness text:\n%s", text)
 	}
 	in.State.UIDs[0].User = "dcr-std1"
 	text = readinessText(t, tetragonReadiness(in, "observe", readyProbes, readinessNow))
-	if !strings.Contains(text, "  ! The user dcr-std1 runs more than 8 agent sessions") || strings.Contains(text, "Dcr-std1") {
+	if !strings.Contains(text, "  ! The user dcr-std1 runs more than 4 agent sessions") || strings.Contains(text, "Dcr-std1") {
 		t.Fatalf("readiness text:\n%s", text)
 	}
 }

@@ -18,7 +18,6 @@ from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
 from defenseclaw.tui.command_line import (
@@ -28,6 +27,7 @@ from defenseclaw.tui.command_line import (
     infer_command_risk,
 )
 from defenseclaw.tui.markup_safe import escape as rich_escape
+from defenseclaw.tui.modal import GuardedModalScreen
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
 SECRET_FLAG_FRAGMENTS = ("key", "token", "secret", "password", "credential")
@@ -298,7 +298,7 @@ def _restart_effect(risk: str, args: tuple[str, ...]) -> str:
     return "no"
 
 
-class CommandPreviewScreen(ModalScreen[bool]):
+class CommandPreviewScreen(GuardedModalScreen[bool]):
     """Rounded command confirmation modal."""
 
     CSS = f"""

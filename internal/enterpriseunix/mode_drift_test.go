@@ -17,6 +17,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -332,6 +333,29 @@ func TestRepairRestoresStateFilesAfterARecursiveChownOrChmod(t *testing.T) {
 	}
 }
 
+// The enumerator publishes targets.yaml root:root 0640. A repair of a
+// healthy host after a publish has nothing to restore (GAP-0658).
+func TestRepairLeavesThePublishedTargetsManifestAlone(t *testing.T) {
+	for _, goos := range []string{"darwin", "linux"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			manifest := h.env.P(h.env.Layout.ManifestPath)
+			if err := os.Chmod(manifest, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			h.owners[manifest] = [2]int{0, 0}
+			for range 2 {
+				r := h.run(Options{Action: ActionRepair})
+				requireOK(t, r)
+				if containsLine(r.Changes, "restored the owner and mode") {
+					t.Fatalf("repair restored a manifest nothing changed: %v", r.Changes)
+				}
+			}
+		})
+	}
+}
+
 // GAP-0510: the subprocess shims the gateway writes at start (an upgrade
 // starts the new gateway after the transaction settled the modes) are
 // executable, 0700; verify passes them and ensure keeps them executable.
@@ -438,8 +462,14 @@ func TestRepairRemovesMacOSACLEntriesThatLetOtherAccountsChangeTheDeployment(t *
 				}
 			}
 			requireOK(t, h.run(Options{Action: ActionRepair}))
-			if len(h.runner.acls) != 1 || h.runner.acls[denyOnly] == nil || h.runner.acls[managedDir] != nil {
-				t.Fatalf("after repair the ACL entries are %v, want only the deny entry on %s", h.runner.acls, l.ConfigDir)
+			// Only the harmful entries go; the deny delete entries stay (GAP-0034).
+			if h.runner.acls[denyOnly] == nil || h.runner.acls[managedDir] != nil {
+				t.Fatalf("after repair the ACL entries are %v, want the deny entry on %s and none on the managed directory", h.runner.acls, l.ConfigDir)
+			}
+			for canonical := range writable {
+				if got := h.runner.acls[h.env.P(canonical)]; !slices.Equal(got, []string{"group:everyone deny delete"}) {
+					t.Errorf("after repair %s has the ACL entries %v, want only the deny delete entry", canonical, got)
+				}
 			}
 			requireOK(t, h.run(Options{Action: ActionStatus}))
 		})

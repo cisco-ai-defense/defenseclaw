@@ -75,7 +75,7 @@ func TestReadyNativeUserBeyondTheBinaryUIDIsScopeLimited(t *testing.T) {
 	h.burnedIn(1001, 24*time.Hour)
 	h.burnedIn(1002, 24*time.Hour)
 	h.pass()
-	if alice := uidStatus(h.status(), 1001); alice.State != UIDEnforcing {
+	if alice := uidStatus(h.status(), 1001); !Enforced(alice.State) {
 		t.Fatalf("the lowest uid with a native install is enforced: %+v", alice)
 	}
 	if bob := uidStatus(h.status(), 1002); bob.State != UIDMonitor || bob.Reason != WarnBinaryScopeLimited {

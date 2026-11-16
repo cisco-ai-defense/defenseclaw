@@ -27,7 +27,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
@@ -97,7 +99,7 @@ func TestSandboxDaemonEgressConfirmsTheChangedPolicyFirst(t *testing.T) {
 
 	// Tightened: the relayed hook before the clone named another generation.
 	f.set(sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:v2",
-		Live: sandboxrelay.LiveFields{EgressBlock: []string{"github.com"}}}, nil)
+		Floor: &config.OpenShellAdminConfig{EgressBlock: []string{"github.com"}}}, nil)
 	f.d.observeGeneration("reg-1", 3)
 	if changed, off := f.confirm(); !changed || off != nil {
 		t.Fatalf("tightened: changed %v off %v", changed, off)
@@ -124,7 +126,7 @@ func TestSandboxDaemonEgressConfirmsTheChangedPolicyFirst(t *testing.T) {
 	// No hook before the connection: the lease runs out and the connection
 	// confirms the policy itself.
 	f.set(sandboxrelay.CurrentPolicy{V: 1, Generation: 11, Digest: "sha256:v4",
-		Live: sandboxrelay.LiveFields{EgressBlock: []string{"github.com"}}}, nil)
+		Floor: &config.OpenShellAdminConfig{EgressBlock: []string{"github.com"}}}, nil)
 	time.Sleep(sandboxEgressLease + 50*time.Millisecond)
 	if changed, off := f.confirm(); !changed || off != nil || !f.floorBlocks("github.com") {
 		t.Fatalf("after the lease: changed %v off %v floor %+v", changed, off, f.d.floor)
@@ -192,7 +194,7 @@ func TestSandboxDaemonEgressBurstDuringAdoption(t *testing.T) {
 		return map[string]string{"dc-a": "ready"}, true
 	}
 	f.set(sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:v2",
-		Live: sandboxrelay.LiveFields{EgressBlock: []string{"github.com"}}}, nil)
+		Floor: &config.OpenShellAdminConfig{EgressBlock: []string{"github.com"}}}, nil)
 	f.d.observeGeneration("reg-1", 3)
 	calls := f.calls.Load()
 	var wg sync.WaitGroup
@@ -238,7 +240,7 @@ func TestSandboxDaemonEgressAdoptsAChangeAppliedElsewhere(t *testing.T) {
 	calls := f.calls.Load()
 	r2, _ := f.d.regs.get("dc-b")
 	if !f.d.regs.applyOrdered(r2, f.d.regs.nextSeq(), sandboxrelay.CurrentPolicy{V: 1, Generation: 4, Digest: "sha256:v2",
-		UpdatedAt: time.Now(), Live: sandboxrelay.LiveFields{EgressBlock: []string{"github.com"}}}) {
+		UpdatedAt: time.Now(), Floor: &config.OpenShellAdminConfig{EgressBlock: []string{"github.com"}}}) {
 		t.Fatal("the change was not applied")
 	}
 	if changed, off := f.confirm(); !changed || off != nil || !f.floorBlocks("github.com") {
@@ -249,7 +251,8 @@ func TestSandboxDaemonEgressAdoptsAChangeAppliedElsewhere(t *testing.T) {
 	}
 	// Sandboxes that can't be listed leave the change out of force: refused.
 	f.d.opts.listPhases = func(context.Context) (map[string]string, bool) { return nil, false }
-	f.d.regs.applyLive("dc-b", sandboxrelay.CurrentPolicy{V: 1, Generation: 5, Digest: "sha256:v3", UpdatedAt: time.Now()})
+	f.d.regs.applyLive("dc-b", sandboxrelay.CurrentPolicy{V: 1, Generation: 5, Digest: "sha256:v3", UpdatedAt: time.Now(),
+		Floor: &config.OpenShellAdminConfig{EgressBlock: []string{"gitlab.com"}}})
 	if _, off := f.confirm(); off == nil || off.Reason != sandboxEgressPolicyChanging {
 		t.Fatalf("unlisted: off %+v", off)
 	}
@@ -264,7 +267,7 @@ func TestSandboxDaemonRegistrationsDropAnOlderAnswer(t *testing.T) {
 	r, _ := f.d.regs.get("dc-a")
 	older, newer := f.d.regs.nextSeq(), f.d.regs.nextSeq()
 	block := sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:v2",
-		Live: sandboxrelay.LiveFields{EgressBlock: []string{"github.com"}}}
+		Floor: &config.OpenShellAdminConfig{EgressBlock: []string{"github.com"}}}
 	if !f.d.regs.applyOrdered(r, newer, block) {
 		t.Fatal("the newer answer was not applied")
 	}
@@ -352,7 +355,7 @@ func TestSandboxDaemonEgressLeaseRenewsAfterTheAdoption(t *testing.T) {
 		return map[string]string{"dc-a": "ready"}, true
 	}
 	f.set(sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:v2",
-		Live: sandboxrelay.LiveFields{EgressBlock: []string{"github.com"}}}, nil)
+		Floor: &config.OpenShellAdminConfig{EgressBlock: []string{"github.com"}}}, nil)
 	f.d.observeGeneration("reg-1", 3)
 	done := make(chan struct{})
 	go func() { f.confirm(); close(done) }()
@@ -383,7 +386,7 @@ func TestSandboxDaemonEgressPollRenewsAfterTheAdoption(t *testing.T) {
 		return f.d.currentSettings(), nil
 	}
 	f.set(sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:v2", UpdatedAt: time.Now(),
-		Live: sandboxrelay.LiveFields{EgressBlock: []string{"github.com"}}}, nil)
+		Floor: &config.OpenShellAdminConfig{EgressBlock: []string{"github.com"}}}, nil)
 	f.d.observeGeneration("reg-1", 3)
 	pollDone := make(chan struct{})
 	go func() { f.d.pollRegistrations(context.Background(), true); close(pollDone) }()
@@ -426,7 +429,7 @@ func TestSandboxDaemonEgressRetriesALeaseAfterAFailedConfirmationEnded(t *testin
 func TestSandboxDaemonEgressAConnectionAfterTheChangeWaitsForANewerConfirmation(t *testing.T) {
 	f := newFreshFixture(t)
 	newA := sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:v2",
-		Live: sandboxrelay.LiveFields{EgressBlock: []string{"github.com"}}}
+		Floor: &config.OpenShellAdminConfig{EgressBlock: []string{"github.com"}}}
 	f.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
 		if f.calls.Add(1) == 1 {
 			time.Sleep(300 * time.Millisecond)
@@ -464,7 +467,7 @@ func TestSandboxDaemonEgressInFlightAnswerAfterChangeIsRetried(t *testing.T) {
 			return sandboxrelay.CurrentPolicy{V: 1, Generation: 7, Digest: "sha256:v1"}, nil
 		}
 		return sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:v2",
-			Live: sandboxrelay.LiveFields{EgressBlock: []string{"github.com"}}}, nil
+			Floor: &config.OpenShellAdminConfig{EgressBlock: []string{"github.com"}}}, nil
 	}
 	done := make(chan *egress.Decision, 1)
 	go func() {
@@ -480,5 +483,74 @@ func TestSandboxDaemonEgressInFlightAnswerAfterChangeIsRetried(t *testing.T) {
 	}
 	if off == nil && f.calls.Load() != 2 {
 		t.Fatalf("admitted after %d policy requests, want a new confirmation", f.calls.Load())
+	}
+}
+
+// GAP-0224: the saved decisions of a running sandbox follow the floor the
+// managed gateway answers with now. An answer that moved the policy reloads
+// the registration's decisions, which the gateway caps by that floor,
+// before the connection is decided; within the lease, and for an answer
+// that changed nothing, nothing is reloaded.
+func TestSandboxDaemonEgressReloadsSavedDecisionsWhenThePolicyMoves(t *testing.T) {
+	f := newFreshFixture(t)
+	var reloads atomic.Int32
+	f.relay.decisions = func(registration string) ([]sandboxrelay.Decision, error) {
+		if registration != "reg-1" {
+			t.Errorf("decisions of %q, want reg-1", registration)
+		}
+		reloads.Add(1)
+		return nil, nil
+	}
+	if _, off := f.confirm(); off != nil || reloads.Load() != 0 {
+		t.Fatalf("an unchanged answer reloaded: off %v reloads %d", off, reloads.Load())
+	}
+	time.Sleep(sandboxEgressLease + 50*time.Millisecond)
+	if _, off := f.confirm(); off != nil || reloads.Load() != 0 {
+		t.Fatalf("an unchanged answer after the lease reloaded: off %v reloads %d", off, reloads.Load())
+	}
+	strict := config.OpenShellProfileStrict
+	f.set(sandboxrelay.CurrentPolicy{V: 1, Generation: 8, Digest: "sha256:v2", MinProfile: &strict}, nil)
+	f.d.observeGeneration("reg-1", 8)
+	if _, off := f.confirm(); off != nil || reloads.Load() != 1 {
+		t.Fatalf("a moved policy: off %v reloads %d, want 1", off, reloads.Load())
+	}
+	if _, off := f.confirm(); off != nil || reloads.Load() != 1 {
+		t.Fatalf("within the lease: off %v reloads %d", off, reloads.Load())
+	}
+	// The profile minimum is not live: the running sandbox keeps its own.
+	if r, _ := f.d.regs.get("dc-a"); r.Floor.MinProfile != "" {
+		t.Fatalf("a running sandbox's registration took min_profile %q", r.Floor.MinProfile)
+	}
+}
+
+// GAP-0224: a sandbox that starts again takes the profile minimum of the
+// floor now (policy/current's min_profile), not the looser one it
+// registered under. An answer without one, or for another registration,
+// changes nothing. The registrations file is not trusted for the floor
+// (GAP-0182): a reloaded registration confirms it again at its next start.
+func TestSandboxDaemonStartTakesTheCurrentMinProfile(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	if err := f.d.regs.put(daemonRegistration{ID: "reg-a", Sandbox: "dc-a", UpdatedAt: time.Now(), Confirmed: true,
+		Floor: config.OpenShellAdminConfig{MinProfile: config.OpenShellProfileBalanced}}); err != nil {
+		t.Fatal(err)
+	}
+	f.d.regs.applyStartFloor("dc-a", "reg-a", sandboxrelay.CurrentPolicy{V: 1})
+	if r, _ := f.d.regs.get("dc-a"); r.Floor.MinProfile != config.OpenShellProfileBalanced {
+		t.Fatalf("an answer without min_profile changed it to %q", r.Floor.MinProfile)
+	}
+	strict := config.OpenShellProfileStrict
+	f.d.regs.applyStartFloor("dc-a", "reg-other", sandboxrelay.CurrentPolicy{V: 1, MinProfile: &strict})
+	if r, _ := f.d.regs.get("dc-a"); r.Floor.MinProfile != config.OpenShellProfileBalanced {
+		t.Fatalf("another registration's answer changed it to %q", r.Floor.MinProfile)
+	}
+
+	ctl := &managedSandboxController{Manager: f.d.rt.manager, d: f.d}
+	f.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
+		return sandboxrelay.CurrentPolicy{V: 1, Generation: 4, MinProfile: &strict}, nil
+	}
+	// No such sandbox in OpenShell: the start fails after the floor is taken.
+	_, _ = ctl.Start(context.Background(), "dc-a", sandboxapi.StartRequest{})
+	if r, _ := f.d.regs.get("dc-a"); r.Floor.MinProfile != config.OpenShellProfileStrict {
+		t.Fatalf("a start kept min_profile %q, want strict", r.Floor.MinProfile)
 	}
 }

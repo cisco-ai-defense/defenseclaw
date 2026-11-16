@@ -16,7 +16,13 @@ import (
 )
 
 // shellHookForeignGuardBlock is inserted into the standalone Hermes shell
-// hook after the socket transport block and before the gateway request.
+// hook inside the socket transport block, after its trust functions and
+// before its socket checks (shellHookSocketTransport): a missing socket (the
+// gateway is stopped) or an untrusted one ends the hook in fail_unreachable,
+// which allows under fail mode open, so the guard placed after those checks
+// never ran during an outage and the guarded call was allowed (GAP-0354).
+// The check denies a guarded connector whose session the gateway cannot
+// answer for, in every fail mode, as the hook-time guard does.
 // Hermes runs every shell hook registered for an event in order and lets a
 // later pre_tool_call hook rewrite the tool call, so a hook a user adds after
 // DefenseClaw's could change a command DefenseClaw already checked. Before a
@@ -33,8 +39,9 @@ import (
 // blocks the tool call with the Hermes block object the check rendered, or,
 // when the check gave no decision, with a fixed one that names why; that
 // block is also sent to the gateway's session route, which writes the audit
-// row the check would have. A session-start event cannot be blocked and
-// continues to the gateway.
+// row the check would have, when the hook socket passes its trust check (the
+// guard runs before the hook's own socket checks). A session-start event
+// cannot be blocked and continues to the gateway.
 const shellHookForeignGuardBlock = `# Standalone foreign-hook guard. Hermes runs every shell hook registered for
 # an event, and a hook that runs after this one can rewrite the tool call
 # DefenseClaw checked. Before a tool call, and at session start, the
@@ -51,11 +58,29 @@ case "$DEFENSECLAW_GUARD_EVENT" in
     DEFENSECLAW_GUARD_RESULT="$(ulimit -S -v "$(ulimit -H -v)" 2>/dev/null || :; HOME="${DEFENSECLAW_GUARD_AGENT_HOME:-}" "$DEFENSECLAW_FOREIGN_GUARD" hook --connector hermes --foreign-hook-check 2>/dev/null <<<"$PAYLOAD")" || { DEFENSECLAW_GUARD_STATUS=$?; DEFENSECLAW_GUARD_RESULT=""; }
     case "$DEFENSECLAW_GUARD_RESULT" in
       '{"deny":false}') ;;
+      '{"deny":false,"warnings":["the DefenseClaw gateway is not running'*)
+        # A gateway outage the administrator's open fail mode lets through.
+        echo "defenseclaw: warning: the DefenseClaw gateway is not running; your organization's fail mode lets this call run without DefenseClaw checks until it is back" >&2
+        ;;
       '{"deny":false,"warnings":'*)
         echo "defenseclaw: warning: an unapproved Hermes hook is configured for this account; your organization reports it but allows it to run" >&2
         ;;
       *)
         if [ "$DEFENSECLAW_GUARD_EVENT" != "on_session_start" ]; then
+          # The lifecycle marker is published before the gateway can stop and
+          # is also held by a run that changes nothing. Like the native hook,
+          # it decides only what the gateway could not answer: no answer, or a
+          # deny the check marked retryable. An allow goes on to the gateway
+          # and a confirmed deny keeps its own block (GAP-1676).
+          if defenseclaw_managed_lifecycle_held; then
+            case "$DEFENSECLAW_GUARD_RESULT" in
+              ""|*'"retryable":true'*)
+                defenseclaw_log_hook_failure hermes hermes-hook "managed lifecycle in progress" policy closed fail_closed
+                hermes_block transport "the DefenseClaw gateway is being installed or upgraded on this computer; try again in a moment."
+                exit 0
+                ;;
+            esac
+          fi
           DEFENSECLAW_GUARD_REASON="$(printf '%s' "$DEFENSECLAW_GUARD_RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null)" || DEFENSECLAW_GUARD_REASON=""
           DEFENSECLAW_GUARD_OUTPUT="$(printf '%s' "$DEFENSECLAW_GUARD_RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null)" || DEFENSECLAW_GUARD_OUTPUT=""
           case "$DEFENSECLAW_GUARD_OUTPUT" in
@@ -75,17 +100,20 @@ case "$DEFENSECLAW_GUARD_EVENT" in
                 DEFENSECLAW_GUARD_REASON="enterprise_foreign_hook_check_failed: DefenseClaw could not check the Hermes hooks of this account: $DEFENSECLAW_GUARD_CAUSE"
                 DEFENSECLAW_GUARD_SESSION="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.session_id // empty' 2>/dev/null)" || DEFENSECLAW_GUARD_SESSION=""
                 # The body names the session: it goes to curl on a descriptor
-                # (defenseclaw_gateway_post), never on its command line.
+                # (defenseclaw_gateway_post), never on its command line, and
+                # only to a socket that passes the trust check.
                 DEFENSECLAW_GUARD_BODY='{"key":{"Connector":"hermes","Session":"'"$(defenseclaw_json_escape "$DEFENSECLAW_GUARD_SESSION")"'"},"session_start":false,"decision":{"deny":true,"reason":"'"$(defenseclaw_json_escape "$DEFENSECLAW_GUARD_REASON")"'"}}'
-                defenseclaw_gateway_post "http://${API_ADDR}/api/v1/foreign-hook-session/hermes" 5 "$DEFENSECLAW_GUARD_BODY" \
-                  -H "Content-Type: application/json" \
-                  -H "X-DefenseClaw-Client: hermes-hook/1.0" \
-                  --unix-socket "${DEFENSECLAW_HOOK_SOCKET}" >/dev/null 2>&1 || :
+                if defenseclaw_hook_socket_trusted; then
+                  defenseclaw_gateway_post "http://${API_ADDR}/api/v1/foreign-hook-session/hermes" 5 "$DEFENSECLAW_GUARD_BODY" \
+                    -H "Content-Type: application/json" \
+                    -H "X-DefenseClaw-Client: hermes-hook/1.0" \
+                    --unix-socket "${DEFENSECLAW_HOOK_SOCKET}" >/dev/null 2>&1 || :
+                fi
               fi
               ;;
           esac
           DEFENSECLAW_GUARD_REASON="${DEFENSECLAW_GUARD_REASON:-enterprise_foreign_hook_check_failed}"
-          defenseclaw_log_hook_failure hermes hermes-hook "$DEFENSECLAW_GUARD_REASON" policy closed
+          defenseclaw_log_hook_failure hermes hermes-hook "$DEFENSECLAW_GUARD_REASON" policy closed fail_closed
           echo "defenseclaw: blocking hermes tool: $DEFENSECLAW_GUARD_REASON" >&2
           printf '%s\n' "$DEFENSECLAW_GUARD_OUTPUT"
           exit 0

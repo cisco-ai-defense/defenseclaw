@@ -234,6 +234,10 @@ type harness struct {
 	now    time.Time
 	procs  []Proc
 	intent Intent
+	// noStarts stops the fake event stream from reporting process starts;
+	// started holds the starts it reported, once each, as Tetragon does.
+	noStarts bool
+	started  map[rootKey]bool
 }
 
 func newHarness(t *testing.T, intent Intent, targets string) *harness {
@@ -274,7 +278,31 @@ func (h *harness) start(intent Intent) {
 
 func (h *harness) pass() {
 	h.t.Helper()
+	h.reportStarts()
 	h.ctl.pass(context.Background(), "test")
+}
+
+// reportStarts plays Tetragon's event stream: each new process start is
+// reported once, under the name it was executed by.
+func (h *harness) reportStarts() {
+	if h.noStarts {
+		return
+	}
+	if h.started == nil {
+		h.started = map[rootKey]bool{}
+	}
+	for _, p := range h.procs {
+		key := rootKey{p.PID, p.StartTicks}
+		if h.started[key] {
+			continue
+		}
+		h.started[key] = true
+		exe := p.Exe
+		if p.Launch != "" {
+			exe = p.Launch
+		}
+		h.ctl.RecordExec(Exec{PID: p.PID, ExecID: fmt.Sprintf("%d:%d", p.PID, p.StartTicks), Exe: exe, At: h.now})
+	}
 }
 
 func (h *harness) status() State { return h.ctl.Status() }

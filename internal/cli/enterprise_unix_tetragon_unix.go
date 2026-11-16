@@ -32,6 +32,7 @@ func runUnixTetragon(cmd *cobra.Command, action string, opts *unixTetragonOption
 	}
 	if action == enterpriseunix.TetragonActionVerify {
 		readiness := enterpriseunix.RunTetragonVerify(cmd.Context(), env, opts.readyFor)
+		reportTetragonNotRoot(action, readiness.Errors)
 		if err := enterpriseunix.WriteTetragonReadiness(cmd.OutOrStdout(), readiness, opts.json); err != nil {
 			return err
 		}
@@ -46,6 +47,7 @@ func runUnixTetragon(cmd *cobra.Command, action string, opts *unixTetragonOption
 	report := enterpriseunix.RunTetragon(cmd.Context(), env, enterpriseunix.TetragonOptions{
 		Action: action, For: opts.pauseFor, UntilReboot: opts.untilReboot, Reason: opts.reason, User: opts.user,
 	})
+	reportTetragonNotRoot(action, report.Errors)
 	if err := enterpriseunix.WriteTetragonReport(cmd.OutOrStdout(), report, opts.json); err != nil {
 		return err
 	}
@@ -53,4 +55,13 @@ func runUnixTetragon(cmd *cobra.Command, action string, opts *unixTetragonOption
 		return nil
 	}
 	return withExitCode(errors.New("tetragon "+action+" failed; see the "+countNoun(len(report.Errors), "problem")+" listed above"), report.ExitCode)
+}
+
+func reportTetragonNotRoot(action string, errors []enterprisestatus.Message) {
+	for _, problem := range errors {
+		if problem.Code == "not_root" {
+			reportManagedCommandRefusal("enterprise linux tetragon "+action, "not_root")
+			return
+		}
+	}
 }

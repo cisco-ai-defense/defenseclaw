@@ -16,7 +16,6 @@ import (
 	observabilityrouter "github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/version"
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -411,7 +410,7 @@ func (r *EventRouter) emitEventRouterToolLogV8WithEmitter(
 		}
 		builder, buildErr := observability.NewFamilyBuilder(
 			observability.ClockFunc(func() time.Time { return observation.finishedAt }),
-			observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+			observability.TimeOrderedOccurrenceIDs,
 		)
 		if buildErr != nil {
 			return observability.Record{}, buildErr
@@ -482,9 +481,10 @@ func eventRouterToolFields(
 ) eventRouterToolLogFields {
 	severity := observability.SeverityInfo
 	level := observability.LogLevelInfo
-	if kind == eventRouterToolLogBlocked {
+	switch kind {
+	case eventRouterToolLogBlocked:
 		severity, level = observability.SeverityHigh, observability.LogLevelWarn
-	} else if kind == eventRouterToolLogFailed {
+	case eventRouterToolLogFailed:
 		severity, level = observability.SeverityHigh, observability.LogLevelError
 	}
 	return eventRouterToolLogFields{

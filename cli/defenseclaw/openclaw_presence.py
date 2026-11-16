@@ -121,15 +121,73 @@ def openclaw_binary_installed() -> bool:
         return True
 
 
+def openclaw_installed(cfg: Any) -> bool:
+    """True when an openclaw.json candidate exists or an openclaw binary is found."""
+    return _openclaw_config_present(cfg) or openclaw_binary_installed()
+
+
+def openclaw_only_implied(cfg: Any) -> bool:
+    """True when only ``claw.mode`` names OpenClaw.
+
+    ``guardrail.connector`` and the connector roster are empty, so nothing
+    but the ``claw.mode`` default (or a leftover
+    of it) selects OpenClaw. ``setup openclaw`` pins ``guardrail.connector``.
+    """
+    guardrail = getattr(cfg, "guardrail", None)
+    claw = getattr(cfg, "claw", None)
+    if claw is None:
+        return False
+    if str(getattr(guardrail, "connector", "") or "").strip():
+        return False
+    connectors = getattr(guardrail, "connectors", None) or {}
+    if isinstance(connectors, dict) and any(str(name).strip() for name in connectors):
+        return False
+    return str(getattr(claw, "mode", "") or "").strip().lower() == "openclaw"
+
+
+def openclaw_fleet_link_configured(cfg: Any) -> bool:
+    """Whether a remote gateway host or enabled fleet mode keeps OpenClaw."""
+    gateway = getattr(cfg, "gateway", None)
+    if gateway is None:
+        return False
+    raw_mode = getattr(gateway, "fleet_mode", "")
+    fleet_mode = str(raw_mode if raw_mode is not None else "").strip().lower()
+    if fleet_mode in {"disabled", "off", "false", "0"}:
+        return False
+    return fleet_mode not in {"", "auto"} or not _is_loopback_gateway_host(getattr(gateway, "host", ""))
+
+
+def openclaw_setup_fleet_link_configured(cfg: Any) -> bool:
+    """Whether setup keeps a saved OpenClaw that this host does not have.
+
+    Mirrors the dial override in ``gatewayShouldConnectForConfiguredConnector``:
+    ``enabled``/``on``/``true`` always dial, ``disabled``/``off``/``false``
+    never do, and any other value (unset, ``auto`` or a typo) dials only a
+    remote gateway host. Unlike :func:`openclaw_fleet_link_configured` (the
+    loader's question, which keeps a typo's connector), a value that never
+    dials is no link, so an absent OpenClaw cannot win setup's selection.
+    """
+    gateway = getattr(cfg, "gateway", None)
+    if gateway is None:
+        return False
+    raw_mode = getattr(gateway, "fleet_mode", "")
+    fleet_mode = str(raw_mode if raw_mode is not None else "").strip().lower()
+    if fleet_mode in {"enabled", "on", "true"}:
+        return True
+    if fleet_mode in {"disabled", "off", "false", "0"}:
+        return False
+    return not _is_loopback_gateway_host(getattr(gateway, "host", ""))
+
+
 def openclaw_implied_but_not_installed(cfg: Any) -> bool:
     """True when the gateway reports the OpenClaw fleet off as "not installed".
 
     Mirrors ``openClawImpliedButNotInstalled`` in the gateway. All of:
 
-    * ``gateway.fleet_mode`` is unset (``""`` or ``"auto"``),
-    * ``gateway.host`` is loopback,
-    * ``guardrail.connector`` is empty and ``guardrail.connectors`` has no
-      openclaw entry, so only ``claw.mode`` names OpenClaw, and
+    * ``gateway.fleet_mode`` is unset, ``"auto"`` or explicitly disabled,
+    * ``gateway.host`` is loopback unless fleet mode is disabled,
+    * ``guardrail.connector`` and the connector roster are empty, so only
+      ``claw.mode`` names OpenClaw, and
     * no openclaw.json candidate exists and no openclaw binary is found.
 
     Anything else, including an installed or configured OpenClaw, keeps the
@@ -138,19 +196,8 @@ def openclaw_implied_but_not_installed(cfg: Any) -> bool:
     if cfg is None:
         return False
     gateway = getattr(cfg, "gateway", None)
-    guardrail = getattr(cfg, "guardrail", None)
-    claw = getattr(cfg, "claw", None)
-    if gateway is None or claw is None:
+    if gateway is None:
         return False
-    if str(getattr(gateway, "fleet_mode", "") or "").strip().lower() not in {"", "auto"}:
+    if openclaw_fleet_link_configured(cfg):
         return False
-    if not _is_loopback_gateway_host(getattr(gateway, "host", "")):
-        return False
-    if str(getattr(guardrail, "connector", "") or "").strip():
-        return False
-    connectors = getattr(guardrail, "connectors", None) or {}
-    if isinstance(connectors, dict) and any(str(name).strip().lower() == "openclaw" for name in connectors):
-        return False
-    if str(getattr(claw, "mode", "") or "").strip().lower() != "openclaw":
-        return False
-    return not _openclaw_config_present(cfg) and not openclaw_binary_installed()
+    return openclaw_only_implied(cfg) and not openclaw_installed(cfg)

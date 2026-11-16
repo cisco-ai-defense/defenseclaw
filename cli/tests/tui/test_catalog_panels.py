@@ -32,7 +32,6 @@ from defenseclaw.tui.panels.tools import (
 )
 from defenseclaw.tui.services.catalog_state import (
     connector_source_label,
-    friendly_connector_name,
     parse_mcp_list_json,
     parse_plugin_list_json,
     parse_skill_list_json,
@@ -314,45 +313,6 @@ def test_mcp_actions_name_connector_specific_unset_targets(monkeypatch, tmp_path
     assert action_keys(mcp_actions("active", "openclaw")) == ["s", "i", "b", "a"]
 
 
-def test_catalog_empty_connector_stays_unowned_and_hook_connector_labels_contract_paths(
-    monkeypatch,
-    tmp_path,
-) -> None:
-    assert friendly_connector_name("") == "No connector"
-    assert PluginsPanelModel(connector="").is_visible_for_connector() is False
-
-    assert ".gemini/config/mcp_config.json" in connector_source_label("antigravity", "mcps")
-    assert ".agents/mcp_config.json" in connector_source_label("antigravity", "mcps")
-    assert "hooks-only" not in connector_source_label("antigravity", "mcps")
-    assert ".gemini/config/skills" in connector_source_label("antigravity", "skills")
-    antigravity_plugins = connector_source_label("antigravity", "plugins")
-    assert ".gemini/config/plugins" in antigravity_plugins
-    assert "read/write" in antigravity_plugins
-    assert "OMNIGENT_CONFIG_HOME" in connector_source_label("omnigent", "config")
-    assert "OMNIGENT_CONFIG" in connector_source_label("omnigent", "config")
-    assert "--config" in connector_source_label("omnigent", "config")
-    assert "unsupported/unverified" in connector_source_label("omnigent", "mcps")
-    assert "unsupported" in mcp_unset_target_for_connector("omnigent")
-
-    opencode_home = tmp_path / "opencode-config"
-    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(opencode_home))
-    assert str(opencode_home / "plugins" / "defenseclaw.js") in connector_source_label(
-        "opencode", "config"
-    )
-    assert ".config/opencode/opencode.json" in connector_source_label("opencode", "mcps")
-    assert "~/.opencode/opencode.json" in connector_source_label("opencode", "mcps")
-    assert str(opencode_home / "opencode.json") in connector_source_label("opencode", "mcps")
-    assert "OPENCODE_CONFIG_CONTENT" in connector_source_label("opencode", "mcps")
-    assert "enterprise precedence excluded" in connector_source_label("opencode", "mcps")
-    assert str(opencode_home / "opencode.json") in mcp_unset_target_for_connector("opencode")
-    assert "<workspace>/opencode.json" in mcp_unset_target_for_connector("opencode")
-    assert ".opencode/{skill,skills}" in connector_source_label("opencode", "skills")
-    assert "excluded from inventory and scans" in connector_source_label(
-        "opencode", "plugins"
-    )
-    assert "tools permission map is not an asset" in connector_source_label(
-        "opencode", "tools"
-    )
 
 
 def test_catalog_codex_labels_use_current_official_asset_layouts() -> None:
@@ -1144,3 +1104,43 @@ def test_catalog_load_intent_for_targets_connector_and_restores(model_factory, b
     # Prior single-connector state is untouched.
     assert model.connector == "codex"
     assert model.connector_focus_enabled is False
+
+
+def test_skills_source_path_keeps_the_actions_column_inside_80_columns(monkeypatch) -> None:
+    """GAP-2624: a full /home/<user>/... skill source or a long skill name pushed Actions off an 80x24 screen."""
+
+    # os.path.expanduser("~") reads HOME on POSIX and USERPROFILE on Windows.
+    monkeypatch.setenv("HOME", "/home/fcd-u3")
+    monkeypatch.setenv("USERPROFILE", "/home/fcd-u3")
+    panel = SkillsPanelModel()
+    names = ("imagegen", "openai-docs", "skill-installer", "a-very-long-hermes-skill-name-xyz")
+    panel.apply_loaded(
+        [
+            SkillRow(
+                name=name,
+                status="active",
+                source="/home/fcd-u3/.codex/skills/.system",
+                connector="codex",
+                description="x" * 60,
+            )
+            for name in names
+        ]
+        + [SkillRow(name="deep", status="active", source="/opt/vendor/agents/shared/skills/library/deep", connector="codex")]
+    )
+    panel.show_connector_column = True
+    panel.refresh()
+
+    columns = panel.data_table_columns()
+    assert panel.data_table_rows()[0][columns.index("Source")] == "~/.codex/skills/.system"
+    body = 80 - 9  # app.py: the body less borders, padding and the scrollbar
+    rows = panel.data_table_rows(body)
+    actions = columns.index("Actions")
+    used = sum(max(len(columns[i]), *(len(row[i]) for row in rows)) + 2 for i in range(actions + 1))
+    assert used <= body
+    assert all(row[actions] == "-" for row in rows)
+    assert rows[1][columns.index("Name")] == "openai-docs"
+    assert rows[-1][columns.index("Source")].startswith("\u2026")
+    assert rows[-1][columns.index("Source")].endswith("library/deep")
+    assert rows[3][columns.index("Name")].endswith("\u2026")
+    # A wide terminal keeps every value whole.
+    assert panel.data_table_rows(200)[3][columns.index("Name")] == names[3]

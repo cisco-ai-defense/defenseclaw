@@ -48,7 +48,7 @@ func emitJudgeAndReadBodyRows(t *testing.T, input string) []audit.JudgeResponse 
 		t.Fatal(err)
 	}
 	SetJudgeResponseStore(nil)
-	rows, err := bodyStore.ListJudgeResponses(10)
+	rows, err := bodyStore.ListJudgeResponsesCtx(t.Context(), 10)
 	if err != nil {
 		t.Fatal(err)
 	}

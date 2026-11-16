@@ -127,7 +127,7 @@ class CheckTests(unittest.TestCase):
         """All env vars empty — surface the local config state so
         the operator can correlate with sidecar /health failure.
         """
-        cfg = _make_cfg(token_env="OPENCLAW_GATEWAY_TOKEN")
+        cfg = _make_cfg(token_env="OPENCLAW_GATEWAY_TOKEN", active=["openclaw"])
         env = _clean_env()
         r = _DoctorResult()
         with patch.dict(os.environ, env, clear=True):
@@ -135,6 +135,16 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(r.warned, 1)
         warn_msg = next(c for c in r.checks if c["status"] == "warn")["detail"]
         self.assertIn("defenseclaw keys set", warn_msg)
+
+    def test_no_agent_does_not_suggest_setting_openclaw_token(self):
+        cfg = _make_cfg(token_env="OPENCLAW_GATEWAY_TOKEN", active=[])
+        r = _DoctorResult()
+        with patch.dict(os.environ, _clean_env(), clear=True):
+            _check_gateway_token_env_alignment(cfg, r)
+
+        warn_msg = next(c for c in r.checks if c["status"] == "warn")["detail"]
+        self.assertIn("doctor --fix", warn_msg)
+        self.assertNotIn("defenseclaw keys set", warn_msg)
 
     def test_skips_when_token_env_unset(self):
         """No token_env configured at all — other checks (sidecar

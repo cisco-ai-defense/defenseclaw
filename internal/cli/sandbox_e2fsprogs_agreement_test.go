@@ -33,6 +33,10 @@ func TestManagedMacE2fsprogsEnsureGatewayDoctorAgree(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(configDir, "openshell"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	configPath := filepath.Join(configDir, "openshell", "gateway.toml")
+	if err := os.WriteFile(configPath, []byte("[openshell.gateway]\nbind_address = '127.0.0.1:17670'\ncompute_driver = 'vm'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +112,7 @@ func TestManagedMacE2fsprogsEnsureGatewayDoctorAgree(t *testing.T) {
 		{name: "tools split across folders", form: "prefix", write: []string{"sbin/mke2fs", "bin/debugfs"}},
 		{name: "untrusted folder", form: "prefix", write: []string{"sbin/mke2fs", "sbin/debugfs"}, untrusted: true},
 		{name: "private tool folder", form: "prefix", write: []string{"sbin/mke2fs", "sbin/debugfs"}, private: true},
-		{name: "private unused sibling", form: "prefix", write: []string{"bin/mke2fs", "bin/debugfs"}, private: true},
+		{name: "private unused sibling", form: "prefix", write: []string{"bin/mke2fs", "bin/debugfs"}, private: true, want: "bin"},
 		{name: "bad admin setting with an account build", form: "prefix", write: []string{"sbin/mke2fs"}, ownBuild: true},
 	}
 	for i, tc := range cases {
@@ -158,6 +162,15 @@ func TestManagedMacE2fsprogsEnsureGatewayDoctorAgree(t *testing.T) {
 				t.Fatalf("refusal did not name %s in all three: ensure %+v, gateway %v, doctor %+v", refusedPath, result, planErr, doctor)
 			}
 		})
+	}
+	// The rendered Docker driver does not format MicroVM disks. A broken
+	// e2fsprogs setting must not stop its gateway or add a prerequisite row.
+	if err := os.WriteFile(configPath, []byte("[openshell.gateway]\nbind_address = '127.0.0.1:17670'\ncompute_driver = 'docker'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adminDir = filepath.Join(root, "missing-e2fsprogs")
+	if _, err := planSandboxOpenShellExec(context.Background(), "darwin", nil); err != nil {
+		t.Fatalf("Docker gateway with no e2fsprogs: %v", err)
 	}
 }
 

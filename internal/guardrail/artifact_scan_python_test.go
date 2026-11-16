@@ -1,0 +1,613 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package guardrail
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"strings"
+	"testing"
+)
+
+// An f- or t-string runs its replacement fields, so only inert comments and
+// triple-quoted strings are blanked; source the scan cannot follow is left
+// whole (fail closed).
+func TestMaskPythonCommentsAndDocstringsKeepsExecutedText(t *testing.T) {
+	const write = "p.write_text("
+	for _, tc := range []struct {
+		name, source string
+		visible      bool
+	}{
+		{"comment", "x = 1  # p.write_text(\"k\")\n", false},
+		{"docstring", `"""p.write_text("k")"""` + "\nprint(1)\n", false},
+		{"bytes docstring", `b"""p.write_text("k")"""`, false},
+		{"docstring after an f-string", `print(f"{1}"); """p.write_text("k")"""`, false},
+		{"name ending in a prefix letter", `if"""p.write_text("k")""" in x: pass`, false},
+		{"code", `p.write_text("k")`, true},
+		{"f-string field", `f"""{p.write_text("k")}"""`, true},
+		{"raw f-string field", `rF'''{p.write_text("k")}'''`, true},
+		{"template string field", `t"""{p.write_text("k")}"""`, true},
+		{"same quotes in a field", `f"""{"""a""" + str(p.write_text("k"))}"""`, true},
+		{"format spec field", `f"""{x:{p.write_text("k")}}"""`, true},
+		{"code after an escaped quote", `x = """a\""""; p.write_text("k")`, true},
+		{"code after an f-string", `f"""{x!r:>{w}}"""; p.write_text("k")`, true},
+		// The literal text of an f-string is inert; only its fields run.
+		{"f-string literal text", `f"""p.write_text("k")"""`, false},
+		{"raw f-string literal text", `Rf'''p.write_text("k")'''`, false},
+		{"template string literal text", `t"""p.write_text("k") {x}"""`, false},
+		{"f-string text after a field", `f"""{x!r:>{w}} p.write_text("k")"""`, false},
+		{"f-string text beside a field that writes", `f"""p.write_text {p.write_text("k")}"""`, true},
+		{"f-string escaped braces are text", `f"""{{p.write_text("k")}}"""`, false},
+		// Format spec text is literal; its nested fields run.
+		{"format spec text", `f"""{x:p.write_text("k")}"""`, false},
+		{"format spec text after a conversion", `f"""{x!r:p.write_text("k")}"""`, false},
+		{"format spec text after a nested field", `f"""{x:{w}p.write_text("k")}"""`, false},
+		{"multiline f-string field", "f\"\"\"a\n{\n p.write_text(\"k\")\n}\nb\"\"\"", true},
+		{"single-quoted f-string", `f"p.write_text('k')"`, true},
+		{"unclosed field", `f"""{p.write_text("k")"""`, true},
+		{"unclosed docstring", `"""p.write_text("k")`, true},
+	} {
+		masked := MaskPythonCommentsAndDocstrings(tc.source)
+		if len(masked) != len(tc.source) {
+			t.Fatalf("%s: masked length %d, want %d", tc.name, len(masked), len(tc.source))
+		}
+		if got := strings.Contains(masked, write); got != tc.visible {
+			t.Errorf("%s: %q masked to %q: write visible=%t, want %t", tc.name, tc.source, masked, got, tc.visible)
+		}
+	}
+}
+
+// MaskPythonStrings leaves only the code that runs: the text of every string
+// is blanked, f-string fields are kept with their own strings blanked.
+func TestMaskPythonStringsKeepsOnlyCode(t *testing.T) {
+	const write = "p.write_text("
+	for _, tc := range []struct {
+		name, source string
+		visible      bool
+	}{
+		{"code", `p.write_text("k")`, true},
+		{"string", `print("p.write_text(1)")`, false},
+		{"one-line f-string text", `print(f"p.write_text(42)")`, false},
+		{"one-line f-string field", `print(f"{p.write_text('k')}")`, true},
+		{"string in a field", `print(f"{'p.write_text(1)'}")`, false},
+		{"nested f-string text", `print(f"{f'p.write_text(1) {x}'}")`, false},
+		{"docstring", `"""p.write_text(1)"""`, false},
+		{"comment", "x = 1 # p.write_text(1)", false},
+		{"bytes", `b"p.write_text(1)"`, false},
+		{"unclosed string", `print("p.write_text(1)`, true},
+		// Format spec text is literal; a nested field and the expression run.
+		{"one-line format spec text", `print(f"{x:p.write_text(42)}")`, false},
+		{"format spec text after a conversion", `print(f"{x!s:p.write_text(42)}")`, false},
+		{"format spec text beside a nested field", `print(f"{x:>{w}p.write_text(42)}")`, false},
+		{"nested format spec field", `print(f"{x:{p.write_text(42)}}")`, true},
+		{"expression before a format spec", `print(f"{p.write_text(42):>10}")`, true},
+		{"expression before a conversion", `print(f"{p.write_text(42)!r}")`, true},
+		{"inequality in a field", `print(f"{p.write_text(42) != 1}")`, true},
+	} {
+		masked := MaskPythonStrings(tc.source)
+		if len(masked) != len(tc.source) {
+			t.Fatalf("%s: masked length %d, want %d", tc.name, len(masked), len(tc.source))
+		}
+		if got := strings.Contains(masked, write); got != tc.visible {
+			t.Errorf("%s: %q masked to %q: write visible=%t, want %t", tc.name, tc.source, masked, got, tc.visible)
+		}
+	}
+}
+
+// Only the expressions of f-string fields are code: the braces, a conversion,
+// a self-documenting "=" and format spec text are blanked.
+func TestMaskPythonStringsFieldExpressions(t *testing.T) {
+	for _, tc := range []struct{ source, want string }{
+		{`f"{x:>{w}}"`, `f  x   w   `},
+		{`f"{p=}"`, `f  p   `},
+		{`f"{p = !r}"`, `f  p       `},
+		{`f"{p!r}"`, `f  p    `},
+		{`f"{a != b}"`, `f  a != b  `},
+		{`f"{a == b}"`, `f  a == b  `},
+		{`f"{x!r:{w}}"`, `f  x    w   `},
+		{`f"{d['k']=}"`, `f  d[   ]   `},
+	} {
+		if got := MaskPythonStrings(tc.source); got != tc.want {
+			t.Errorf("MaskPythonStrings(%q) = %q, want %q", tc.source, got, tc.want)
+		}
+	}
+}
+
+// Code may run a string only through a sink it names in code, or through a
+// module an import may load from the working directory (a shadowed
+// subprocess.py or helper.py can run __main__.__doc__). In a directory that
+// holds no module, an import of standard-library modules no name of which is
+// used runs nothing, nor does a variable of the program's own whose name
+// holds a sink word. With the directory not known every program counts: the
+// interpreter imports on its own ("a".encode("idna") imports stringprep).
+func TestPythonStringsMayRun(t *testing.T) {
+	t.Setenv("PYTHONPATH", "")
+	t.Setenv("PYTHONHOME", "")
+	clean := t.TempDir()
+	for _, tc := range []struct {
+		source string
+		want   bool
+	}{
+		{`import subprocess; """x"""; print("ok")`, false},
+		{"import subprocess as sp, ctypes\nfrom os import system as run, popen\nprint('ok')", false},
+		{"from os import system as run, popen\nprint('ok')", false},
+		{`if x: import subprocess`, false},
+		{`if x: import os`, false},
+		{"from importlib import (util,\n    machinery)", false},
+		{"from os import (path,\n    sep)", false},
+		// A module outside the standard library may be a file of the working
+		// directory, used or not.
+		{`import helper`, true},
+		{`import os.path as p; p.join("a")`, false},
+		{`from os.path import join; join("a")`, false},
+		{`import sys, io, abc, codecs, stat`, false},
+		{`import builtins`, false},
+		{`from . import helper`, true},
+		{`from .helper import x`, true},
+		{`from.helper import x`, true},
+		{`import os,`, true},
+		// Python reads identifiers in NFKC form: a name the scan cannot
+		// match may be exec or an import of any module.
+		{"ｅｘｅｃ(\"x\")", true},
+		{"import ｊｓｏｎ", true},
+		{"import os; print('café')", false},
+		{`print("exec subprocess")`, false},
+		{`# exec`, false},
+		{`f"exec {x}"`, false},
+		{`import subprocess; subprocess.run(["true"])`, true},
+		{`import subprocess as sp; sp.run(["true"])`, true},
+		{`from subprocess import run; f = run`, true},
+		{`from subprocess import *`, true},
+		{`from subprocess import run,`, true},
+		{`exec("x")`, true},
+		{`f"{eval('x')}"`, true},
+		{`import os; os.posix_spawn("/bin/true", [], {})`, true},
+		{`import timeit; timeit.timeit("x")`, true},
+		{`exec(__doc__)`, true},
+		{`print(__doc__)`, true},
+		{`import sys; print(sys.orig_argv)`, true},
+		{`open("m.py", "w").write("x"); import m`, true},
+		{`import sys; sys.modules["subprocess"]`, true},
+		{`().__class__.__base__.__subclasses__()`, true},
+		{`import pty`, false},
+		{`import pty; pty.spawn("sh")`, true},
+		// A variable of the program's own is not a sink.
+		{`source = 1; print(source)`, false},
+		{`source: int = 1`, false},
+		{`(source := 1)`, false},
+		{"for frame in []:\n    pass", false},
+		{`def write(doc, handler=None): return doc`, false},
+		{`class Loader: pass`, false},
+		{`copy_count = 1; f(write=True)`, false},
+		{`code = 1; gc = code`, false},
+		// A builtin, a dunder, an attribute, an imported name, or a name a star
+		// import may bind still counts.
+		{`source = exec; source("x")`, true},
+		{`exec = print`, true},
+		{`print(copyright)`, true},
+		{`print(__loader__)`, true},
+		{`print(x.source)`, true},
+		{"print(x.\\\n source)", true},
+		{`from inspect import getsource as source; print(source)`, true},
+		{`from m import source; print(source)`, true},
+		{`from os import *; source = 1`, true},
+		{`from os import *; system("x")`, true},
+		{`import os as source; source.getcwd()`, true},
+	} {
+		if got := PythonStringsMayRun(MaskPythonStrings(tc.source), clean); got != tc.want {
+			t.Errorf("PythonStringsMayRun(%q, clean dir) = %t, want %t", tc.source, got, tc.want)
+		}
+		if !PythonStringsMayRun(MaskPythonStrings(tc.source), "") {
+			t.Errorf("PythonStringsMayRun(%q, unknown dir) = false: the interpreter imports on its own", tc.source)
+		}
+	}
+}
+
+// A write call spelled in a string, or in the literal text of an f-string,
+// writes nothing; a path in a string that a call in code writes still does.
+func TestPythonPathWriteMatchNeedsAWriteCallInCode(t *testing.T) {
+	rule := regexp.MustCompile(`authorized_keys`)
+	sourceDir := t.TempDir()
+	// The script itself sits in its directory; it is not a module beside it.
+	script := filepath.Join(sourceDir, "writer.py")
+	if err := os.WriteFile(script, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PYTHONPATH", "")
+	t.Setenv("PYTHONHOME", "")
+	for _, tc := range []struct {
+		name, source string
+		want         bool
+	}{
+		{"assigned then written", "from pathlib import Path\np = Path.home() / \".ssh\" / \"authorized_keys\"\np.write_text(\"k\")\n", true},
+		{"open append", "open('/home/a/.ssh/authorized_keys', 'a').write('k')\n", true},
+		{"f-string field open", "print(f\"{open('/home/a/.ssh/authorized_keys', 'a')}\")\n", true},
+		{"exec of a string", "exec(\"open('/home/a/.ssh/authorized_keys', 'a').write('k')\")\n", true},
+		{"f-string text", "p = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(f\"p.write_text(42)\")\n", false},
+		{"string text", "p = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(\"p.write_text(42)\")\n", false},
+		{"f-string text beside an import", "from pathlib import Path\np = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(f\"p.write_text(42)\")\n", false},
+		{"string text beside an import", "from pathlib import Path\np = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(\"p.write_text(42)\")\n", false},
+		{"string text beside a preloaded import", "import os\np = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(\"p.write_text(42)\")\n", false},
+		{"printed open", "print(\"open('/home/a/.ssh/authorized_keys', 'a')\")\n", false},
+		{"printed Path write", "print(\"Path('/home/a/.ssh/authorized_keys').write_text('k')\")\n", false},
+		{"format spec text", "p = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(f\"{1:p.write_text(42)}\")\n", false},
+		{"format spec field", "from pathlib import Path\np = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(f\"{1:{p.write_text(42)}}\")\n", true},
+		{"printed open beside an ordinary variable", "source = 1\nprint(\"open('/home/a/.ssh/authorized_keys', 'a')\")\n", false},
+		{"exec through a local alias", "source = exec\nsource(\"open('/home/a/.ssh/authorized_keys', 'a').write('k')\")\n", true},
+	} {
+		if got := pythonPathWriteMatch(rule, tc.source, script) != nil; got != tc.want {
+			t.Errorf("%s: pythonPathWriteMatch(%q) = %t, want %t", tc.name, tc.source, got, tc.want)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "pathlib.py"), []byte("# local module\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	shadowed := "from pathlib import Path\np = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(\"p.write_text(42)\")\n"
+	if pythonPathWriteMatch(rule, shadowed, script) == nil {
+		t.Fatal("a local pathlib.py can consume the program's string text")
+	}
+	if err := os.Remove(filepath.Join(sourceDir, "pathlib.py")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "fnmatch.py"), []byte("# pathlib dependency\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if pythonPathWriteMatch(rule, shadowed, script) == nil {
+		t.Fatal("an import dependency can consume the program's string text")
+	}
+	if err := os.Remove(filepath.Join(sourceDir, "fnmatch.py")); err != nil {
+		t.Fatal(err)
+	}
+	pathChanged := "import sys\nsys.path.insert(0, 'other')\n" + shadowed
+	if pythonPathWriteMatch(rule, pathChanged, script) == nil {
+		t.Fatal("a changed sys.path can load another module")
+	}
+	t.Setenv("PYTHONPATH", sourceDir)
+	if pythonPathWriteMatch(rule, shadowed, script) == nil {
+		t.Fatal("PYTHONPATH can load another module")
+	}
+}
+
+// With the directory Python imports from first known, a standard-library
+// import leaves the strings inert only when that directory holds nothing an
+// import can load and nothing moves the import path. Any other import, a
+// sink, a loadable file or package of any kind, a link, an unreadable or
+// oversized directory, PYTHONPATH or PYTHONHOME, or code that changes
+// sys.path or the directory still counts.
+func TestPythonStringsMayRunInAKnownDirectory(t *testing.T) {
+	t.Setenv("PYTHONPATH", "")
+	t.Setenv("PYTHONHOME", "")
+	clean := t.TempDir()
+	if err := os.WriteFile(filepath.Join(clean, "notes.txt"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, sub := range []string{"docs", "my-dir", ".git"} {
+		if err := os.MkdirAll(filepath.Join(clean, sub), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A directory no import can name, or a directory that is not a package.
+	for _, file := range []string{"docs/README.md", "my-dir/__init__.py", ".git/__init__.py"} {
+		if err := os.WriteFile(filepath.Join(clean, file), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		source string
+		want   bool
+	}{
+		{`import subprocess; """x"""; print("ok")`, false},
+		{"import subprocess as sp, ctypes\nfrom os import system as run, popen\nprint('ok')", false},
+		{`import json; print(json.loads("1"))`, false},
+		{`from pathlib import Path; print(Path("a"))`, false},
+		{`import os, json`, false},
+		{`import xml.etree.ElementTree as ET`, false},
+		{`from __future__ import annotations`, false},
+		{"from collections import (OrderedDict,\n    deque)", false},
+		// Not the standard library, or not a form the scan reads.
+		{`import helper`, true},
+		{`import json, helper`, true},
+		{`from helper import x`, true},
+		{`from . import helper`, true},
+		{`from .helper import x`, true},
+		{`from json import *`, true},
+		{`import __main__`, true},
+		{`import tomllib`, true},
+		{`import imp`, true},
+		// A sink still counts.
+		{`import subprocess; subprocess.run(["true"])`, true},
+		{`import json; exec("x")`, true},
+		// The import path or the directory moves.
+		{`import sys; sys.path.insert(0, "x"); import json`, true},
+		{`import sys; sys . meta_path.clear(); import json`, true},
+		{`import sys; sys.path_hooks.clear(); import json`, true},
+		{`import os; os.sys.path.insert(0, "x"); import json`, true},
+		{`from sys import path; path.insert(0, "x"); import json`, true},
+		{`import sys as s; s.path.insert(0, "x"); import json`, true},
+		{`import os, sys as s; import json`, true},
+		{`import os; os.chdir("/tmp"); import json`, true},
+		{`from os import chdir as cd; cd("/tmp"); import json`, true},
+		{`import os; os.fchdir(3); import json`, true},
+		{`import os; os.chroot("x"); import json`, true},
+		// sys by another name, or an attribute that holds the import system.
+		{`import sys; s = sys; s.path.insert(0, "x"); import json`, true},
+		{`import sys; (sys).path.insert(0, "x"); import json`, true},
+		{`import sys; [sys][0].path.insert(0, "x"); import json`, true},
+		{`import sys; m = {"m": sys}; import json`, true},
+		{`import sys; f(sys); import json`, true},
+		{`import sys; (s := sys); import json`, true},
+		{`import sys; f"{sys}"; import json`, true},
+		{"import sys\nmatch sys:\n    case _: pass\nimport json", true},
+		{"import os\nmatch os:\n    case object(sys=s): pass\nimport json", true},
+		{`import sys; sys.exit.__self__.path.insert(0, "x"); import json`, true},
+		{`import os; p = os.sys; p.path.insert(0, "x"); import json`, true},
+		{`import codecs; codecs.sys.path.insert(0, "x"); import json`, true},
+		{`import os; os.path.sys.path.insert(0, "x"); import json`, true},
+		{`import sys as s, sys; s.path.insert(0, "x"); import json`, true},
+		{"import sys \\\n    as s; import json", true},
+		{"from sys \\\n    import path; import json", true},
+		{`from os import sys as s; import json`, true},
+		{`from os import (sys as s); import json`, true},
+		{`import sys; sys = None; import json`, true},
+		{`import sys; sys.pycache_prefix = "x"; import json`, true},
+		{`import sys; sys.implementation.cache_tag = "x"; import json`, true},
+		{`import sys; sys.remote_exec(1, "x"); import json`, true},
+		{`import sys; sys.path_importer_cache.clear(); import json`, true},
+		{`import sys; sys.`, true},
+		// A package's search path, or a module that loads from any directory.
+		{`import json; json.__path__.insert(0, "x"); import json.evil`, true},
+		{`import json; json.__spec__.submodule_search_locations.append("x")`, true},
+		{`import site; site.addsitedir("x")`, true},
+		{`from site import addsitedir; addsitedir("x")`, true},
+		{`import zipimport`, true},
+		// A module the code puts in the directory before it imports.
+		{`import os; os.symlink("x", "json.py"); import json`, true},
+		{`import os; os.link("x", "json.py"); import json`, true},
+		{`import os; os.rename("x", "json.py"); import json`, true},
+		{`import os; os.replace("x", "json.py"); import json`, true},
+		{`from pathlib import Path; Path("json.py").symlink_to("x"); import json`, true},
+		{`from pathlib import Path; Path("x").rename("json.py"); import json`, true},
+		{`import shutil; shutil.move("x", "json.py"); import json`, true},
+		{`import shutil; shutil.unpack_archive("x"); import json`, true},
+		{`import zipfile; zipfile.ZipFile("x").extractall(); import json`, true},
+		{`import urllib.request; urllib.request.urlretrieve("x", "json.py"); import json`, true},
+		{`import os; os.mkfifo("json.py"); import json`, true},
+		// sys read through attributes that hold nothing of the import system.
+		{`import sys; sys.exit(0); import json`, false},
+		{`import os, sys; print(os.sys.version_info, sys.platform); import json`, false},
+		{"import sys\nsys.stderr.flush()\nsys . maxsize\nimport json", false},
+		{`from os import sys; sys.exit(0)`, false},
+		{`import sys.monitoring`, false},
+		// No import statement: the interpreter's own imports load from the
+		// directory too, and it holds nothing.
+		{`"a".encode("idna")`, false},
+	} {
+		if got := PythonStringsMayRun(MaskPythonStrings(tc.source), clean); got != tc.want {
+			t.Errorf("PythonStringsMayRun(%q, clean dir) = %t, want %t", tc.source, got, tc.want)
+		}
+	}
+	const program = `import json; """x"""; print("ok")`
+	// The interpreter imports on its own ("a".encode("idna") imports
+	// stringprep and re, help() imports pydoc), with no import statement.
+	const implicit = `"""x"""; "a".encode("idna"); help(len)`
+	// Anything an import may load, in the directory.
+	for _, entry := range []string{
+		"helper.py", "JSON.PY", "tool.pyw", "cached.pyc", "old.pyo", "native.so",
+		"native.cpython-312-x86_64-linux-gnu.so", "native.pyd", "bundle.zip", "bundle.egg",
+		"pkg/__init__.py", "pkg/__init__.pyc", "pkg/__init__.cpython-312-x86_64-linux-gnu.so",
+		"Pkg/__INIT__.PY", "caf\u00e9/__init__.py",
+	} {
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, entry)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, entry), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for _, code := range []string{program, implicit} {
+			if !PythonStringsMayRun(MaskPythonStrings(code), dir) {
+				t.Errorf("PythonStringsMayRun(%q) beside %s = false: an import may load it", code, entry)
+			}
+		}
+	}
+	if runtime.GOOS != "windows" {
+		linked := t.TempDir()
+		if err := os.Symlink(filepath.Join(clean, "notes.txt"), filepath.Join(linked, "notes")); err != nil {
+			t.Fatal(err)
+		}
+		if !PythonStringsMayRun(MaskPythonStrings(program), linked) {
+			t.Error("PythonStringsMayRun beside a link = false: a link may name a module")
+		}
+	}
+	crowded := t.TempDir()
+	for i := 0; i <= pythonDirMaxEntries; i++ {
+		if err := os.WriteFile(filepath.Join(crowded, fmt.Sprintf("n%03d.txt", i)), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !PythonStringsMayRun(MaskPythonStrings(program), crowded) {
+		t.Error("PythonStringsMayRun in a directory over the entry bound = false")
+	}
+	bigPackage := t.TempDir()
+	for _, sub := range []string{"a", "b"} {
+		for i := 0; i < pythonPackageMaxEntries/2+1; i++ {
+			name := filepath.Join(bigPackage, sub, fmt.Sprintf("n%04d.txt", i))
+			if err := os.MkdirAll(filepath.Dir(name), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(name, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if !PythonStringsMayRun(MaskPythonStrings(program), bigPackage) {
+		t.Error("PythonStringsMayRun past the package entry bound = false")
+	}
+	for _, dir := range []string{"", "relative/dir", filepath.Join(clean, "missing")} {
+		for _, code := range []string{program, implicit} {
+			if !PythonStringsMayRun(MaskPythonStrings(code), dir) {
+				t.Errorf("PythonStringsMayRun(%q, %q) = false: the directory is not known", code, dir)
+			}
+		}
+	}
+	if !PythonStringsMayRun(MaskPythonStrings(program), clean+string(filepath.Separator)+"notes.txt") {
+		t.Error("PythonStringsMayRun with a file for a directory = false")
+	}
+	t.Setenv("PYTHONPATH", clean)
+	if !PythonStringsMayRun(MaskPythonStrings(program), clean) {
+		t.Error("PYTHONPATH puts another directory first")
+	}
+	t.Setenv("PYTHONPATH", "")
+	t.Setenv("PYTHONHOME", clean)
+	if !PythonStringsMayRun(MaskPythonStrings(program), clean) {
+		t.Error("PYTHONHOME moves the standard library")
+	}
+}
+
+// The artifact scan reads a script's imports from the script's own
+// directory, wherever the scan is started from.
+func TestArtifactPythonPathWriteReadsTheScriptsDirectory(t *testing.T) {
+	t.Setenv("PYTHONPATH", "")
+	t.Setenv("PYTHONHOME", "")
+	pack := &RulePack{RuleFiles: []*RulesFileYAML{{
+		Category: "persistence",
+		Rules: []RuleDefYAML{{
+			ID: "SSH-KEYS", Pattern: `authorized_keys`, Title: "authorized keys write",
+			Severity: "HIGH", Confidence: 0.9,
+			Expression: "f.paths.exists(p, p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE)",
+		}},
+	}}}
+	work := t.TempDir()
+	t.Chdir(work)
+	// work/scripts is clean; the skill's own scripts directory is not.
+	for _, dir := range []string{"scripts", filepath.Join("skill", "scripts")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	script := "from pathlib import Path\np = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(\"p.write_text(42)\")\n"
+	writer := filepath.Join("skill", "scripts", "writer.py")
+	if err := os.WriteFile(writer, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"skill", writer} {
+		findings, err := pack.ScanArtifact(context.Background(), path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(findings) != 0 {
+			t.Errorf("ScanArtifact(%s) beside no module = %+v, want none (the text is printed)", path, findings)
+		}
+	}
+	if err := os.WriteFile(filepath.Join("skill", "scripts", "re.py"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"skill", writer} {
+		findings, err := pack.ScanArtifact(context.Background(), path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(findings) != 1 {
+			t.Errorf("ScanArtifact(%s) beside re.py = %+v, want the write (pathlib imports re)", path, findings)
+		}
+	}
+}
+
+// GAP-1312 (p0-round): a name holding a cognitive file path stays a write
+// of that path when it is rebound before the write. A rebinding exemption
+// was tried five times and every independent review found forms it missed
+// (~/dc-eh/plans/r107/IN-bd-w2hooks{,2,3,4,5}-REVIEW.md); the lead withdrew
+// it on 2026-10-31. Every row must flag, the first four by design: they are
+// the benign GAP row and its twins, kept so a future exemption has to argue
+// with this table. TestRebindingRowsFlag in
+// cli/tests/test_plugin_scanner_python_source.py has the same rows.
+func TestPythonPathWriteMatchFlagsARebindingAsBase(t *testing.T) {
+	rule := regexp.MustCompile(`MEMORY\.md`)
+	for _, tc := range []struct{ name, source string }{
+		// Flags by design (lead ruling 2026-10-31): the benign GAP row and its twins.
+		{"by design: row: rebound before the write", "from pathlib import Path\ntarget = Path(\"MEMORY.md\")\ntarget = Path(\"safe.txt\")\ntarget.write_text(\"hello\")\n"},
+		{"by design: rebound before open append", "from pathlib import Path\ntarget = Path(\"MEMORY.md\")\ntarget = Path(\"safe.txt\")\nwith open(target, \"a\") as fh:\n    fh.write(\"x\")\n"},
+		{"by design: written in a block the rebinding dominates", "from pathlib import Path\ntarget = Path(\"MEMORY.md\")\ntarget = Path(\"safe.txt\")\nif ok:\n    target.write_text(\"hello\")\n"},
+		{"by design: rebound to a string", "from pathlib import Path\ntarget = Path(\"MEMORY.md\")\ntarget = \"safe.txt\"\nopen(target, \"w\").write(\"x\")\n"},
+		// Must flag: reviews 1 to 5 of the withdrawn exemption.
+		{"written before the rebinding", "from pathlib import Path\ntarget = Path(\"MEMORY.md\")\ntarget.write_text(\"hello\")\ntarget = Path(\"safe.txt\")\n"},
+		{"rebound only in a nested branch", "from pathlib import Path\ntarget = Path(\"MEMORY.md\")\nif other:\n    target = Path(\"safe.txt\")\ntarget.write_text(\"hello\")\n"},
+		{"rebound in the else branch", "from pathlib import Path\nif c:\n    target = Path.home() / \".claude\" / \"MEMORY.md\"\nelse:\n    target = Path(\"notes.txt\")\ntarget.write_text(x)\n"},
+		{"rebound in the elif branch", "from pathlib import Path\nif c:\n    target = Path(\"MEMORY.md\")\nelif d:\n    target = Path(\"notes.txt\")\ntarget.write_text(x)\n"},
+		{"dead rebinding before except", "from pathlib import Path\ntry:\n    target = Path(\"MEMORY.md\")\n    raise E\n    target = Path(\"safe.txt\")\nexcept E:\n    target.write_text(x)\n"},
+		{"written in finally", "from pathlib import Path\ntry:\n    target = Path(\"MEMORY.md\")\n    risky()\n    target = Path(\"safe.txt\")\nfinally:\n    target.write_text(x)\n"},
+		{"rebound in the for else", "from pathlib import Path\nfor item in items:\n    target = Path(\"MEMORY.md\")\n    break\nelse:\n    target = Path(\"safe.txt\")\ntarget.write_text(x)\n"},
+		{"loop body rebinding after a break", "from pathlib import Path\nwhile True:\n    target = Path(\"MEMORY.md\")\n    if done:\n        break\n    target = Path(\"safe.txt\")\ntarget.write_text(x)\n"},
+		{"rebound in another match case", "from pathlib import Path\nmatch mode:\n    case \"m\":\n        target = Path(\"MEMORY.md\")\n    case _:\n        target = Path(\"safe.txt\")\ntarget.write_text(x)\n"},
+		{"rebound in another function", "from pathlib import Path\n\ndef a():\n    global target\n    target = Path.home() / \".claude\" / \"MEMORY.md\"\n\ndef b():\n    target = None\n\ndef c():\n    target.write_text(x)\n"},
+		{"rebound in a function (gate: def)", "from pathlib import Path\ndef f():\n    target = Path(\"MEMORY.md\")\n    target = Path(\"safe.txt\")\n    target.write_text(\"hello\")\n"},
+		{"rebound in a function, written at module level", "from pathlib import Path\ntarget = Path(\"MEMORY.md\")\ndef b():\n    target = None\ntarget.write_text(x)\n"},
+		{"rebound after the inner block", "from pathlib import Path\nfor x in xs:\n    target = Path(\"MEMORY.md\")\ntarget = Path(\"safe.txt\")\ntarget.write_text(\"hello\")\n"},
+		{"rebound from itself", "from pathlib import Path\ntarget = Path.home() / \"MEMORY.md\"\ntarget = target.resolve()\ntarget.write_text(\"hello\")\n"},
+		{"rebound through an alias", "from pathlib import Path\ntarget = Path(\"MEMORY.md\")\nalias = target\ntarget = alias\ntarget.write_text(x)\n"},
+		{"compared, not rebound", "from pathlib import Path\ntarget = Path(\"MEMORY.md\")\ntarget == other\ntarget.write_text(\"hello\")\n"},
+		{"rebound across lines", "from pathlib import Path\ntarget = Path(\"MEMORY.md\")\ntarget = pick(\n    target)\ntarget.write_text(\"hello\")\n"},
+		{"rebound beside another statement", "from pathlib import Path\ntarget = Path(\"MEMORY.md\")\ntarget = Path(\"safe.txt\"); target = alias\ntarget.write_text(\"hello\")\n"},
+		{"keyword argument, not a rebinding", "from pathlib import Path\ntarget = Path(\"MEMORY.md\")\nconfigure(\ntarget=None,\n)\ntarget.write_text(x)\n"},
+		{"def after the rebinding", "from pathlib import Path\ntarget = Path(\"MEMORY.md\")\ntarget = Path(\"safe.txt\")\ndef later():\n    target.write_text(x)\n"},
+		{"lambda after the rebinding", "from pathlib import Path\ntarget = Path(\"MEMORY.md\")\ntarget = Path(\"safe.txt\")\nsave = lambda: target.write_text(x)\n"},
+		{"copy back after the rebinding", "from pathlib import Path\nt = Path(\"MEMORY.md\")\na = t\nt = Path(\"safe.txt\")\nt = a\nt.write_text(x)\n"},
+		{"str() copy back", "from pathlib import Path\nt = Path(\"MEMORY.md\")\na = t\nt = Path(\"safe.txt\")\nt = str(a)\nt.write_text(x)\n"},
+		{"tuple copy back", "from pathlib import Path\nt = Path(\"MEMORY.md\")\na = t\nt = Path(\"safe.txt\")\nt, y = a, 1\nt.write_text(x)\n"},
+		{"global restore function", "from pathlib import Path\nt = Path(\"MEMORY.md\")\na = t\n\ndef restore():\n    global t\n    t = a\n\nt = Path(\"safe.txt\")\nrestore()\nt.write_text(x)\n"},
+		{"generator, then a copy back", "from pathlib import Path\nt = Path(\"MEMORY.md\")\na = t\nt = Path(\"safe.txt\")\ng = (t.write_text(x) for _ in s)\nt = a\nnext(g)\n"},
+		{"generator, then the path again", "from pathlib import Path\nt = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\ng = (t.write_text(x) for _ in s)\nt = Path(\"MEMORY.md\")\nnext(g)\n"},
+		{"nonlocal restore", "from pathlib import Path\ndef outer():\n    t = Path(\"MEMORY.md\")\n    a = t\n\n    def restore():\n        nonlocal t\n        t = a\n\n    t = Path(\"safe.txt\")\n    restore()\n    t.write_text(x)\n"},
+		{"walrus copy back", "from pathlib import Path\nt = Path(\"MEMORY.md\")\na = t\nt = Path(\"safe.txt\")\nif (t := a):\n    t.write_text(x)\n"},
+		{"backslash-continued rebinding", "from pathlib import Path\nt = Path(\"MEMORY.md\")\nt = \\\n    Path(\"safe.txt\")\nt.write_text(x)\n"},
+		{"walrus rebinding", "from pathlib import Path\nt = Path(\"MEMORY.md\")\n(t := Path(\"safe.txt\"))\nt.write_text(x)\n"},
+		{"exec after the rebinding", "from pathlib import Path\nt = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\nexec(code)\nt.write_text(x)\n"},
+		{"import as after the rebinding", "from pathlib import Path\nt = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\nfrom cfg import P as t\nt.write_text(x)\n"},
+		{"function before the rebinding restores through globals()", "from pathlib import Path\nt = Path(\"MEMORY.md\")\ndef r():\n    globals()[\"t\"] = Path.home() / \".claude\" / \"MEMORY.md\"\nt = Path(\"safe.txt\")\nr()\nt.write_text(x)\n"},
+		{"frame f_locals restore", "from pathlib import Path\nimport sys\nt = Path(\"MEMORY.md\")\nf = sys._getframe()\nt = Path(\"safe.txt\")\nf.f_locals[\"t\"] = Path.home() / \".claude\" / \"MEMORY.md\"\nt.write_text(x)\n"},
+		{"__main__ restore", "from pathlib import Path\nimport __main__\nt = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\n__main__.t = Path.home() / \".claude\" / \"MEMORY.md\"\nt.write_text(x)\n"},
+		{"generator frame restore", "from pathlib import Path\nt = Path(\"MEMORY.md\")\ng = (n for n in [1])\nt = Path(\"safe.txt\")\ng.gi_frame.f_locals[\"t\"] = Path.home() / \".claude\" / \"MEMORY.md\"\nt.write_text(x)\n"},
+		{"__setattr__ restore", "from pathlib import Path\nimport os\nt = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\nm.__setattr__(\"t\", Path.home() / \".claude\" / \"MEMORY.md\")\nt.write_text(x)\n"},
+		{"match capture rebinding", "from pathlib import Path\nt = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\nmatch [Path.home() / \".claude\" / \"MEMORY.md\"]:\n    case [t, *_]:\n        pass\nt.write_text(x)\n"},
+		{"match name capture", "from pathlib import Path\nt = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\nmatch Path.home() / \".claude\" / \"MEMORY.md\":\n    case t:\n        pass\nt.write_text(x)\n"},
+		{"full-width name rebinding", "from pathlib import Path\nt = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\n\uff54 = Path.home() / \".claude\" / \"MEMORY.md\"\nt.write_text(x)\n"},
+		{"full-width exec", "from pathlib import Path\nt = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\n\uff45\uff58\uff45\uff43(code)\nt.write_text(x)\n"},
+		{"Path shadowed by a lambda", "from pathlib import Path\nt = Path(\"MEMORY.md\")\nPath = lambda s: Path.home() / \".claude\" / \"MEMORY.md\"\nt = Path(\"safe.txt\")\nt.write_text(x)\n"},
+		{"Path shadowed by an assignment", "from pathlib import Path\nt = Path(\"MEMORY.md\")\nPath = make_path\nt = Path(\"safe.txt\")\nt.write_text(x)\n"},
+		{"Path from another module", "from mylib import Path\nt = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\nt.write_text(x)\n"},
+		{"Path not imported", "t = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\nt.write_text(x)\n"},
+		{"module outside the gate list", "from pathlib import Path\nimport subprocess\nt = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\nt.write_text(x)\n"},
+		{"comprehension after the rebinding", "from pathlib import Path\nt = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\nitems = [n for n in range(3)]\nt.write_text(x)\n"},
+		{"utf-7 coding cookie", "# -*- coding: utf-7 -*-\nfrom pathlib import Path\ntarget = Path(\"MEMORY.md\")\ntarget = Path(\"safe.txt\")\ntarget.write_text(\"hello\")\n"},
+		{"form-feed indent", "from pathlib import Path\ntarget = Path(\"MEMORY.md\")\nif ok:\n\f    target = Path(\"safe.txt\")\ntarget.write_text(x)\n"},
+		{"lone carriage return in a comment", "from pathlib import Path\ntarget = Path(\"MEMORY.md\")\ntarget = Path(\"safe.txt\")\n# note\rtarget = Path(\"MEMORY.md\")\ntarget.write_text(\"hello\")\n"},
+		{"symlink_to between the assignment and the rebinding", "from pathlib import Path\ntarget = Path(\"MEMORY.md\")\nPath(\"safe.txt\").symlink_to(target)\ntarget = Path(\"safe.txt\")\ntarget.write_text(\"hello\")\n"},
+		{"os.symlink between the assignment and the rebinding", "import os\nfrom pathlib import Path\ntarget = Path(\"MEMORY.md\")\nos.symlink(target, \"safe.txt\")\ntarget = Path(\"safe.txt\")\ntarget.write_text(\"hello\")\n"},
+		{"hardlink_to between the assignment and the rebinding", "from pathlib import Path\ntarget = Path(\"MEMORY.md\")\nPath(\"safe.txt\").hardlink_to(target)\ntarget = Path(\"safe.txt\")\ntarget.write_text(\"hello\")\n"},
+		{"os.symlink literal after rebinding", "from pathlib import Path\nimport os\nimport shutil\nt = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\nos.symlink(\"MEMORY.md\", \"safe.txt\")\nt.write_text(x)\n"},
+		{"symlink_to literal after rebinding", "from pathlib import Path\nimport os\nimport shutil\nt = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\nPath(\"safe.txt\").symlink_to(\"MEMORY.md\")\nt.write_text(x)\n"},
+		{"hardlink_to literal after rebinding", "from pathlib import Path\nimport os\nimport shutil\nt = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\nPath(\"safe.txt\").hardlink_to(\"MEMORY.md\")\nt.write_text(x)\n"},
+		{"os.link literal after rebinding", "from pathlib import Path\nimport os\nimport shutil\nt = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\nos.link(\"MEMORY.md\", \"safe.txt\")\nt.write_text(x)\n"},
+		{"os.symlink concat after rebinding", "from pathlib import Path\nimport os\nimport shutil\nt = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\nos.symlink(\"MEM\" + \"ORY.md\", \"safe.txt\")\nt.write_text(x)\n"},
+		{"os.symlink os.path.join after rebinding", "from pathlib import Path\nimport os\nimport shutil\nt = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\nos.symlink(os.path.join(\".\", \"MEMORY.md\"), \"safe.txt\")\nt.write_text(x)\n"},
+		{"os.symlink literal before the assignment", "from pathlib import Path\nimport os\nimport shutil\nos.symlink(\"MEMORY.md\", \"safe.txt\")\nt = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\nt.write_text(x)\n"},
+		{"os.symlink between assignment and rebinding, literal", "from pathlib import Path\nimport os\nimport shutil\nt = Path(\"MEMORY.md\")\nos.symlink(\"MEMORY.md\", \"safe.txt\")\nt = Path(\"safe.txt\")\nt.write_text(x)\n"},
+		{"os.replace concat onto target after write", "from pathlib import Path\nimport os\nimport shutil\nt = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\nt.write_text(x)\nos.replace(\"safe.txt\", \"MEM\" + \"ORY.md\")\n"},
+		{"Path.replace concat onto target after write", "from pathlib import Path\nimport os\nimport shutil\nt = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\nt.write_text(x)\nPath(\"safe.txt\").replace(\"MEM\" + \"ORY.md\")\n"},
+		{"shutil.copy concat onto target after write", "from pathlib import Path\nimport os\nimport shutil\nt = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\nt.write_text(x)\nshutil.copy(\"safe.txt\", \"MEM\" + \"ORY.md\")\n"},
+		{"second name built by concat, replace onto it", "from pathlib import Path\nimport os\nimport shutil\nt = Path(\"MEMORY.md\")\nu = \"MEM\" + \"ORY.md\"\nt = Path(\"safe.txt\")\nt.write_text(x)\nos.replace(\"safe.txt\", u)\n"},
+		{"other handle opened with mode= keyword", "from pathlib import Path\nimport os\nimport shutil\nt = Path(\"MEMORY.md\")\nh = open(\"MEMORY.md\", mode=\"a\")\nt = Path(\"safe.txt\")\nt.write_text(x)\nh.write(x)\n"},
+		{"other handle via Path.open", "from pathlib import Path\nimport os\nimport shutil\nt = Path(\"MEMORY.md\")\nh = Path(\"MEMORY.md\").open(\"a\")\nt = Path(\"safe.txt\")\nt.write_text(x)\nh.write(x)\n"},
+		{"other handle via os.open", "from pathlib import Path\nimport os\nimport shutil\nt = Path(\"MEMORY.md\")\nfd = os.open(\"MEMORY.md\", os.O_WRONLY | os.O_APPEND)\nt = Path(\"safe.txt\")\nt.write_text(x)\nos.write(fd, b\"x\")\n"},
+		{"walrus alias in the assignment", "from pathlib import Path\nimport os\nimport shutil\nt = (a := Path(\"MEMORY.md\"))\nt = Path(\"safe.txt\")\nt.write_text(y)\na.write_text(x)\n"},
+	} {
+		if pythonPathWriteMatch(rule, tc.source, "") == nil {
+			t.Errorf("%s: pythonPathWriteMatch(%q) = nil, want the MEMORY.md write", tc.name, tc.source)
+		}
+	}
+}

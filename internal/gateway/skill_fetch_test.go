@@ -51,8 +51,8 @@ func TestF3287_SkillFetch_RejectsOutsideRoots(t *testing.T) {
 		t.Fatalf("write id_rsa: %v", err)
 	}
 
-	// SkillDirs() resolves to <home_dir>/skills for the OpenClaw
-	// (default) connector, so we point home_dir at a parent and
+	// SkillDirs() resolves to <home_dir>/skills for an explicitly selected
+	// OpenClaw connector, so we point home_dir at a parent and
 	// stash the approved skill under <home_dir>/skills/<name>.
 	homeDir := t.TempDir()
 	skillsParent := filepath.Join(homeDir, "skills")
@@ -61,6 +61,7 @@ func TestF3287_SkillFetch_RejectsOutsideRoots(t *testing.T) {
 	}
 	approvedSkill = filepath.Join(skillsParent, "approved")
 	cfg := &config.Config{}
+	cfg.Claw.Mode = "openclaw"
 	cfg.Claw.HomeDir = homeDir
 	store, logger := testStoreAndLogger(t)
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg)
@@ -128,6 +129,7 @@ func TestF3287_SkillFetch_SymlinkEscapeBlocked(t *testing.T) {
 	}
 
 	cfg := &config.Config{}
+	cfg.Claw.Mode = "openclaw"
 	cfg.Claw.HomeDir = homeDir
 	store, logger := testStoreAndLogger(t)
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg)

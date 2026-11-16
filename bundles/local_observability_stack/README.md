@@ -4,7 +4,7 @@ Operator setup, commands, dashboards, retention, and troubleshooting live in
 the
 [published local-observability guide](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/local-observability/).
 The [Grafana catalog](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/grafana-dashboards/)
-and [Agent360 guide](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/agent360/)
+and [Agent360 guide](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/local-observability/#agent-directory-and-agent360)
 describe the user-visible dashboard behavior.
 
 This directory is the source bundle copied into an installed DefenseClaw
@@ -23,13 +23,15 @@ All published host ports are loopback-bound by default in
 bind address, so it is not equivalent to the managed CLI's loopback safety
 checks.
 
-Direct `docker compose up` retains the historical anonymous Admin experience.
+Direct `docker compose up` shows the dashboards to anonymous visitors as a
+read-only Viewer; anonymous access is never Admin.
 The managed controller has two explicit modes:
 
 - `--password` applies [`docker-compose.password.yml`](docker-compose.password.yml),
   creates a private `.grafana-admin-password`, and supplies it as a Compose
   secret. New managed stacks use this mode by default.
-- `--no-password` keeps anonymous Admin access and prints a warning. An
+- `--no-password` allows anonymous read-only Viewer access (no sign-in, no
+  editing) and prints a warning. An
   existing managed stack with a legacy Grafana container or data volume is
   grandfathered into this mode so an upgrade does not change its login flow.
 
@@ -77,8 +79,11 @@ access-control boundary when exposed beyond loopback.
   local storage configuration.
 - [`grafana/provisioning/`](grafana/provisioning/): datasource and dashboard
   provisioning.
-- [`grafana/dashboards/`](grafana/dashboards/): the nineteen shipped dashboard
-  JSON definitions.
+- [`grafana/dashboards/`](grafana/dashboards/): the dashboard JSON
+  definitions: 18 core dashboards, which the wheel ships, plus the optional
+  Fleet dashboard (`defenseclaw-fleet.json`), which releases ship in
+  `defenseclaw-fleet-assets.tar.gz`. That makes 19 from a source checkout,
+  which seeds this directory as is.
 - [`bin/openclaw-observability-bridge`](bin/openclaw-observability-bridge):
   low-level bundle controller; [`run.sh`](run.sh) is its compatibility shim.
 

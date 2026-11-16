@@ -213,8 +213,12 @@ type enterprisePolicyUserReport struct {
 	Home string `json:"home"`
 	// Enrollment says why the enumerator never enrolls this account
 	// (Linux and macOS), or is empty.
-	Enrollment string                                    `json:"enrollment,omitempty"`
-	Decisions  map[string]enterprisepolicy.GuardDecision `json:"foreign_hooks"`
+	Enrollment string `json:"enrollment,omitempty"`
+	// OpenCodeNote is set for an exclude_users account when the report has
+	// an OpenCode machine-policy row: the install scan skips that account,
+	// so a covered row says nothing about the OpenCode it runs (GAP-0949).
+	OpenCodeNote string                                    `json:"opencode_note,omitempty"`
+	Decisions    map[string]enterprisepolicy.GuardDecision `json:"foreign_hooks"`
 	// Sandbox is the account's sandbox policy and whether it can run one
 	// (Linux and macOS, only where the configuration has a sandbox policy).
 	Sandbox *enterprisePolicySandbox      `json:"sandbox,omitempty"`
@@ -238,6 +242,9 @@ type enterprisePolicyReport struct {
 	// (Windows). Each runs without DefenseClaw hooks for that account only,
 	// so it does not change machine-policy coverage.
 	Unprotected []enterprisehooks.UnprotectedAgent `json:"unprotected_agents,omitempty"`
+	// UnprotectedScanError prevents a stale or unreadable protected record
+	// from making policy show look as if no private installs were found.
+	UnprotectedScanError string `json:"unprotected_agents_scan_error,omitempty"`
 	// Errors carries the failure (an unknown --user, an unreadable policy
 	// source) for a --json caller, which gets no "Error:" line (GAP-2456).
 	Errors []string `json:"errors,omitempty"`
@@ -275,11 +282,33 @@ func buildEnterprisePolicyReport(ctx enterprisePolicyContext, connectors []strin
 		}
 	}
 	connectors = kept
+	// A connector named with --connector that the managed config does not
+	// enable has no machine policy to check: "not configured", as the
+	// unfiltered report, which omits it, says by its absence. It is not a
+	// missing hook (GAP-1688).
+	var notConfigured []enterprisepolicy.State
+	if requested > 0 {
+		configured := map[string]bool{}
+		for _, name := range enterprisepolicy.WithCompanions(ctx.connectors) {
+			configured[name] = true
+		}
+		kept = []string{}
+		for _, name := range connectors {
+			if configured[name] {
+				kept = append(kept, name)
+				continue
+			}
+			notConfigured = append(notConfigured, enterprisepolicy.State{Connector: name, Route: enterprisepolicy.RouteNotConfigured,
+				Details: []string{name + " is not enabled in the managed config, so DefenseClaw publishes no machine policy or hooks for it and there is nothing to check or repair"}})
+		}
+		connectors = kept
+	}
 	var result enterprisepolicy.Result
 	var err error
 	if len(connectors) > 0 || requested == 0 {
 		result, err = enterprisepolicy.VerifyAll(ctx.opts, connectors)
 	}
+	result.States = append(result.States, notConfigured...)
 	if includeWSL {
 		state, wslErr := enterprisePolicyWSLState(ctx)
 		result.States = append(result.States, state)
@@ -294,7 +323,12 @@ func buildEnterprisePolicyReport(ctx enterprisePolicyContext, connectors []strin
 		Guard:      summary.Connectors,
 		goos:       ctx.opts.GOOS,
 	}
-	for _, agent := range enterprisePolicyUnprotectedAgents(ctx.layout.ManifestPath) {
+	agents, installScanErr := enterprisePolicyUnprotectedAgents(ctx.layout.ManifestPath)
+	if installScanErr != nil {
+		report.Complete = false
+		report.UnprotectedScanError = enterprisehooks.UnprotectedCodeInstallScanIncomplete + ": " + installScanErr.Error()
+	}
+	for _, agent := range agents {
 		for _, name := range connectors {
 			if agent.Connector == name {
 				report.Unprotected = append(report.Unprotected, agent)
@@ -326,6 +360,7 @@ func buildEnterprisePolicyReport(ctx enterprisePolicyContext, connectors []strin
 			name = enterprisePolicyUser
 		}
 		userReport.Enrollment = unixEnrollmentExclusion(cfg.Enterprise.Enrollment, name, target.UID)
+		userReport.OpenCodeNote = excludedOpenCodeNote(userReport.Enrollment, result.States)
 	}
 	if ctx.opts.GOOS != "windows" {
 		account := strings.TrimSpace(target.Username)
@@ -385,6 +420,35 @@ var enterprisePolicyResolveTarget = enterprisePolicyTarget
 // the enumerator does) and uid 0. It returns "" for any other account.
 // Root listed in exempt_users is not exempt: the hook socket never marks
 // its calls exempt, and enrollment.root decides them (GAP-0555).
+const enrollmentExcludedPrefix = "excluded by enterprise.enrollment.exclude_users"
+
+// excludedOpenCodeNote is the line that keeps an OpenCode machine-policy row
+// from reading as protection for an excluded account. The install scan skips
+// an excluded account before it finds the OpenCode it runs, so no
+// unprotected-agent entry can name V1; only OpenCode V2 registers the plugin
+// hooks, and V1 runs every tool call unchecked. The line claims V2 coverage
+// only when the row is verified covered; an uncovered row says the policy
+// must be repaired first (GAP-0949).
+func excludedOpenCodeNote(enrollment string, states []enterprisepolicy.State) string {
+	if !strings.HasPrefix(enrollment, enrollmentExcludedPrefix) {
+		return ""
+	}
+	for _, state := range states {
+		if state.Connector != enterprisepolicy.ConnectorOpenCode || state.Route != enterprisepolicy.RouteMachinePolicy ||
+			state.Ownership == config.MachinePolicyOwnershipOff {
+			continue
+		}
+		const v1 = "OpenCode V1 (opencode-ai) is not protected for this account: "
+		if !state.Covered {
+			return v1 + "the OpenCode machine policy is not covered either (see the opencode row above), so repair it and run enterprise policy verify; " +
+				"even then it covers OpenCode V2 (@opencode/cli 2.x) calls only, and the install scan does not look at excluded accounts, so V2 is required"
+		}
+		return v1 + "the machine policy covers OpenCode V2 (@opencode/cli 2.x) calls only, " +
+			"the install scan does not look at excluded accounts, so V2 is required"
+	}
+	return ""
+}
+
 func unixEnrollmentExclusion(enrollment config.EnterpriseEnrollmentConfig, name string, uid int) string {
 	listed := func(values []string) bool {
 		for _, value := range values {
@@ -402,7 +466,7 @@ func unixEnrollmentExclusion(enrollment config.EnterpriseEnrollmentConfig, name 
 		}
 		return "root is never enrolled; enterprise.enrollment.root (" + root + ") decides how its agent calls are treated"
 	case listed(enrollment.ExcludeUsers):
-		return "excluded by enterprise.enrollment.exclude_users: never enrolled, so DefenseClaw installs no per-user hooks for this account"
+		return enrollmentExcludedPrefix + ": never enrolled, so DefenseClaw installs no per-user hooks for this account"
 	case listed(enrollment.ExemptUsers):
 		return "exempt by enterprise.enrollment.exempt_users: not enrolled; its agent calls are allowed, inspected and logged"
 	}
@@ -512,8 +576,8 @@ func enterprisePolicyAuditDBPath() string {
 }
 
 // enterprisePolicyRowUnguarded reports whether state is a per-user agent
-// that no foreign-hook guard covers (OpenHands, Antigravity, OmniGent, Kiro,
-// Hermes on Windows): its foreign_hooks setting is not enforced and its
+// that no foreign-hook guard covers (Antigravity, Kiro, and Hermes on
+// Windows): its foreign_hooks setting is not enforced and its
 // foreign entries are not counted.
 func enterprisePolicyRowUnguarded(report enterprisePolicyReport, state enterprisepolicy.State) bool {
 	if state.Route != enterprisepolicy.RoutePerUser || state.ForeignHooks == config.ForeignHooksAllow {
@@ -608,14 +672,26 @@ func writeEnterprisePolicyReport(out io.Writer, report enterprisePolicyReport) e
 	}
 	if len(report.Unprotected) != 0 {
 		fmt.Fprintln(out, "\nUnprotected agents (each runs without DefenseClaw hooks for that account only):")
-		for _, agent := range report.Unprotected {
-			fmt.Fprintf(out, "    %s: %s\n", agent.Code, agent.Message())
+		sharedLines, sharedEntry := enterprisehooks.CollapseSharedOpenCodeV1(report.Unprotected, "")
+		for _, line := range sharedLines {
+			fmt.Fprintf(out, "    %s: %s\n", line.Code, line.Message())
 		}
+		for _, agent := range report.Unprotected {
+			if !sharedEntry(agent) {
+				fmt.Fprintf(out, "    %s: %s\n", agent.Code, agent.Message())
+			}
+		}
+	}
+	if report.UnprotectedScanError != "" {
+		fmt.Fprintf(out, "\nUnprotected agent install scan: %s\n", report.UnprotectedScanError)
 	}
 	if report.User != nil {
 		fmt.Fprintf(out, "\nUser %s (%s)\n", report.User.User, dashIfEmpty(report.User.Home))
 		if report.User.Enrollment != "" {
 			fmt.Fprintf(out, "    enrollment: %s\n", report.User.Enrollment)
+		}
+		if note := excludedOpenCodeNote(report.User.Enrollment, report.Result.States); note != "" {
+			fmt.Fprintf(out, "    opencode:   %s\n", note)
 		}
 		if report.User.Error != "" {
 			fmt.Fprintf(out, "    error: %s\n", report.User.Error)
@@ -670,6 +746,12 @@ func writeEnterprisePolicyReport(out io.Writer, report enterprisePolicyReport) e
 	}
 	if report.Complete {
 		fmt.Fprintln(out, "\nResult: complete")
+		for _, state := range report.Result.States {
+			if state.Connector == enterprisepolicy.ConnectorDevinCascade {
+				fmt.Fprintln(out, "    complete covers the machine-policy routes above only: Devin Desktop builds before 3.9.19 (Cascade) are not covered, see the devincascade note")
+				break
+			}
+		}
 	} else {
 		fmt.Fprintln(out, "\nResult: INCOMPLETE")
 	}

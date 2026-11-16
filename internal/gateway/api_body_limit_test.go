@@ -91,6 +91,24 @@ func TestMaxBodyMiddlewareRemainsUniformForOTLPPaths(t *testing.T) {
 	}
 }
 
+func TestScanResultNamesOversizedJSONInsteadOfCallingItMalformed(t *testing.T) {
+	store, logger := testStoreAndV8Logger(t)
+	api := &APIServer{health: NewSidecarHealth(), store: store, logger: logger}
+	handler := apiBodyLimitMiddleware(http.HandlerFunc(api.handleScanResult), apiRequestBodyMaxBytes, otlpRequestBodyMaxBytes)
+	body := `{"scanner":"bounded","target":"probe","findings":[],"pad":"` +
+		strings.Repeat("x", int(apiRequestBodyMaxBytes)) + `"}`
+	request := httptest.NewRequest(http.MethodPost, "/scan/result", strings.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusRequestEntityTooLarge || !strings.Contains(response.Body.String(), "too large") {
+		t.Fatalf("oversized valid JSON: status=%d body=%q", response.Code, response.Body.String())
+	}
+	results, err := store.ListScanResults(10)
+	if err != nil || len(results) != 0 {
+		t.Fatalf("oversized scan persisted rows: %v, %v", results, err)
+	}
+}
+
 func TestOTLPIngestAcceptsValidBatchesAboveOrdinaryAPILimit(t *testing.T) {
 	fixture := newSidecarRuntimeFixture(t, true)
 	api := &APIServer{}

@@ -8,8 +8,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // claudeCodeTranscriptTailBytes bounds how much of a session transcript is
@@ -92,7 +93,7 @@ func claudeCodeTranscriptModel(path string) string {
 // bedrockInferenceProfileModel matches a Bedrock cross-region inference
 // profile ID ("us.anthropic.claude-haiku-4-5-20251001-v1:0") and captures the
 // model ID it routes to ("anthropic.claude-haiku-4-5-20251001-v1:0").
-var bedrockInferenceProfileModel = regexp.MustCompile(`^(?:us|us-gov|eu|apac|ca|jp|au|global)\.(anthropic\..+)$`)
+var bedrockInferenceProfileModel = lazyregexp.New(`^(?:us|us-gov|eu|apac|ca|jp|au|global)\.(anthropic\..+)$`)
 
 // telemetryModelID gives one model one ID on every connector's telemetry. On
 // Bedrock the startup SessionStart names the inference profile the user

@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -33,6 +32,7 @@ import (
 	"google.golang.org/protobuf/types/known/wrapperspb"
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	pb "github.com/defenseclaw/defenseclaw/third_party/tetragon/api/v1/tetragon"
 )
 
@@ -306,7 +306,7 @@ func (c *Client) ConfigurePolicy(ctx context.Context, name string, mode pb.Traci
 
 // ownPolicyName is the only shape of policy name DefenseClaw loads:
 // defenseclaw-<family>-<first 8 hex of the rendered YAML's sha256>.
-var ownPolicyName = regexp.MustCompile(`^defenseclaw-(observe|connect|controls|controls-burnin)-[0-9a-f]{8}$`)
+var ownPolicyName = lazyregexp.New(`^defenseclaw-(observe|connect|controls|controls-burnin)-[0-9a-f]{8}$`)
 
 // OwnPolicyFamily returns the family (observe, connect, controls,
 // controls-burnin) of a DefenseClaw policy name. A matching name is only a
@@ -349,7 +349,7 @@ type Version struct {
 	Raw                 string
 }
 
-var versionPattern = regexp.MustCompile(`^v?(\d+)\.(\d+)\.(\d+)`)
+var versionPattern = lazyregexp.New(`^v?(\d+)\.(\d+)\.(\d+)`)
 
 // ParseVersion parses GetVersion's answer (v1.7.1, possibly with a suffix).
 func ParseVersion(raw string) (Version, bool) {

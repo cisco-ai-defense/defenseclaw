@@ -15,6 +15,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
+	"github.com/defenseclaw/defenseclaw/internal/managed/mcpasuser"
 )
 
 // GAP-0132: the standalone Windows payload's embedded scanner runtime is
@@ -109,8 +110,8 @@ func TestScannerRuntimeCommandLines(t *testing.T) {
 		t.Fatal("the scanner environment drops PROCESSOR_ARCHITECTURE")
 	}
 
-	plugin := &PluginScanner{BinaryPath: runtimeBinary, Connector: "codex", IncludeSelf: true}
-	if _, args := plugin.pluginScanCommand("C:/p"); !reflect.DeepEqual(args, []string{"plugin-scan", "C:/p", "--connector", "codex", "--include-self"}) {
+	plugin := &PluginScanner{BinaryPath: runtimeBinary, Connector: "codex", IncludeSelf: true, DisableVendorIdentity: true}
+	if _, args := plugin.pluginScanCommand("C:/p"); !reflect.DeepEqual(args, []string{"plugin-scan", "C:/p", "--connector", "codex", "--include-self", "--disable-vendor-identity"}) {
 		t.Fatalf("plugin args = %v", args)
 	}
 	// GAP-1408: the runtime's plugin scan gets the scanners.plugin judge.
@@ -285,41 +286,87 @@ func TestMCPRuntimeServerWorkDir(t *testing.T) {
 	}
 }
 
-// GAP-1317: on managed Windows the gateway service account cannot stat the
-// user profile. A folder the enumerator verified is used without that walk;
-// an unverified one is refused, as is a verified one the gateway cannot open
-// or that is outside the project and home, and a failed scan says why.
-func TestMCPRuntimeVerifiedServerWorkDir(t *testing.T) {
-	home := filepath.Join(t.TempDir(), "home")
-	project := filepath.Join(home, "project")
-	denied := filepath.Join(project, "denied")
-	restoreLstat, restoreOpen := workDirLstat, workDirOpen
-	t.Cleanup(func() { workDirLstat, workDirOpen = restoreLstat, restoreOpen })
-	workDirLstat = func(string) (os.FileInfo, error) { return nil, os.ErrPermission }
-	workDirOpen = func(path string) (*os.File, error) {
-		if path == denied {
-			return nil, os.ErrPermission
-		}
-		return os.Open(os.DevNull)
+// #1164: a server the hook enumerator published for an enrolled user is
+// handed to the runtime with a relay in its place: the gateway executable
+// with a request that names the account, connector, server, project and
+// definition digest, and no folder of its own. The runtime still gets the
+// real definition, so the launcher rules and the rule pack see it.
+func TestMCPRuntimeAsUserServerRunsThroughTheRelay(t *testing.T) {
+	restore := mcpAsUserRelayExecutable
+	t.Cleanup(func() { mcpAsUserRelayExecutable = restore })
+	mcpAsUserRelayExecutable = func() (string, error) { return `C:\Program Files\Cisco\DefenseClaw\defenseclaw-gateway.exe`, nil }
+	t.Setenv(mcpasuser.GatewayServiceEnv, "DefenseClawGateway")
+	entry := &config.MCPServerEntry{Name: "notes", Command: "npx", Args: []string{"-y", ".", "--config", `.\srv.json`},
+		Env: map[string]string{"NOTES_TOKEN": "x"}, CWD: "sub", Connector: "claudecode",
+		Project: `C:\Users\dcw-std1\proj`, Home: `C:\Users\dcw-std1`, RunAsSID: "S-1-5-21-1-2-3-1001"}
+	mcp := &MCPScanner{ServerEntry: entry}
+	input, err := mcp.runtimeInput()
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, tc := range []struct {
-		name, workDir, refusedIn, want, note string
-	}{
-		{"verified", project, "", project, ""},
-		{"verified after refused cwd", project, "C:\\link: link", project, ""},
-		{"unverified", "", "", "", "permission denied"},
-		{"refused by the enumerator", "", "C:\\other: in another user profile", "", "in another user profile"},
-		{"gateway cannot read it", denied, "", "", "gateway service cannot read"},
-		{"outside project and home", filepath.Join(t.TempDir(), "x"), "", "", "outside the project"},
-	} {
-		mcp := &MCPScanner{ServerEntry: &config.MCPServerEntry{Name: "local", Command: "npx", Args: []string{"-y", "."},
-			Project: project, Home: home, WorkDir: tc.workDir, WorkDirRefused: tc.refusedIn}}
-		if got := mcp.serverWorkDir(); got != tc.want {
-			t.Errorf("%s: server starts in %q, want %q", tc.name, got, tc.want)
-		}
-		if note := mcp.workDirNote(); (tc.note == "") != (note == "") || !strings.Contains(note, tc.note) {
-			t.Errorf("%s: failure note %q, want one containing %q", tc.name, note, tc.note)
-		}
+	var payload struct {
+		ServerEntry struct {
+			Name    string   `json:"name"`
+			Command string   `json:"command"`
+			Args    []string `json:"args"`
+			CWD     string   `json:"cwd"`
+		} `json:"server_entry"`
+		AsUserRelay []string `json:"as_user_relay"`
+	}
+	if err := json.Unmarshal(input, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.ServerEntry.Command != "npx" || !slices.Equal(payload.ServerEntry.Args, entry.Args) || payload.ServerEntry.CWD != "" {
+		t.Fatalf("server entry %+v", payload.ServerEntry)
+	}
+	relay := payload.AsUserRelay
+	if len(relay) != 6 || relay[0] != `C:\Program Files\Cisco\DefenseClaw\defenseclaw-gateway.exe` ||
+		!slices.Equal(relay[1:5], []string{"enterprise", "windows", "mcp-relay", "--request"}) {
+		t.Fatalf("relay %q", relay)
+	}
+	request, err := mcpasuser.DecodeRequestArg(relay[5])
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := mcpasuser.Request{Version: mcpasuser.ProtocolVersion, GatewayService: "DefenseClawGateway", SID: entry.RunAsSID,
+		Connector: "claudecode", Name: "notes", Project: entry.Project, Digest: mcpasuser.Digest(*entry)}
+	if request != want {
+		t.Fatalf("request %+v, want %+v", request, want)
+	}
+	if strings.Contains(string(input), "NOTES_TOKEN=x") || strings.Contains(strings.Join(relay, " "), "NOTES_TOKEN") {
+		t.Fatal("the relay command line carries the server env")
+	}
+	// No folder note: the gateway never chose the server's folder.
+	if note := mcp.workDirNote(); note != "" {
+		t.Fatalf("as-user server has a folder note %q", note)
+	}
+}
+
+// #1164: an enrolled user's server is never started any other way: not by
+// the CLI scanner the gateway would run with its own rights, not for a
+// connector the enumerator does not publish, and not without the gateway
+// service name the relay needs.
+func TestMCPAsUserServerFailsClosedOutsideTheRuntime(t *testing.T) {
+	entry := &config.MCPServerEntry{Name: "notes", Command: "npx", Args: []string{"-y", "."}, Connector: "claudecode",
+		Project: `C:\Users\dcw-std1\proj`, RunAsSID: "S-1-5-21-1-2-3-1001"}
+	cli := &MCPScanner{Config: config.MCPScannerConfig{Binary: "defenseclaw"}, ServerEntry: entry}
+	if _, err := cli.Scan(t.Context(), "notes"); err == nil || !strings.Contains(err.Error(), "starts only as that user") {
+		t.Fatalf("CLI scan of an as-user server: %v", err)
+	}
+	t.Setenv(mcpasuser.GatewayServiceEnv, "")
+	if _, err := (&MCPScanner{ServerEntry: entry}).runtimeInput(); err == nil || !strings.Contains(err.Error(), mcpasuser.GatewayServiceEnv) {
+		t.Fatalf("missing gateway service name: %v", err)
+	}
+	t.Setenv(mcpasuser.GatewayServiceEnv, "DefenseClawGateway")
+	unpublished := *entry
+	unpublished.Connector = "opencode"
+	if _, err := (&MCPScanner{ServerEntry: &unpublished}).runtimeInput(); err == nil || !strings.Contains(err.Error(), "no published servers") {
+		t.Fatalf("unpublished connector: %v", err)
+	}
+	remote := *entry
+	remote.Command, remote.URL = "", "https://example.test/mcp"
+	if (&MCPScanner{ServerEntry: &remote}).asUser() {
+		t.Fatal("a URL server is started as its user")
 	}
 }
 

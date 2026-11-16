@@ -41,7 +41,7 @@ python3 intune_tenant.py groups --name defenseclaw-windows --apply
 python3 intune_tenant.py groups --add-device PC-0042:defenseclaw-windows --apply
 python3 intune_tenant.py assign-app --app "DefenseClaw Enterprise" --group defenseclaw-windows
 python3 intune_tenant.py remediation --group defenseclaw-windows --daily-at 02:00
-python3 intune_tenant.py macos-script --name "DefenseClaw Enterprise" --file ./defenseclaw-enterprise.sh --group defenseclaw-macos
+python3 intune_tenant.py macos-script --name "DefenseClaw Enterprise" --file ../../macos/defenseclaw-enterprise.sh --group defenseclaw-macos
 python3 intune_tenant.py status --app "DefenseClaw Enterprise" --remediation "DefenseClaw Enterprise health"
 ```
 

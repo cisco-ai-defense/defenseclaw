@@ -17,6 +17,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // The gateway's sandbox registration store and the key behind it, below
@@ -31,8 +33,8 @@ import (
 // revoked, and a stopped copy-mode MicroVM, whose review and pull have to
 // start it, could not be reached any more (GAP-0598).
 const (
-	sandboxStoreDirName    = "sandbox"
-	correlationKeyFileName = "redaction-correlation.key"
+	sandboxStoreDirName    = managed.StandaloneSandboxStoreDirName
+	correlationKeyFileName = managed.StandaloneCorrelationKeyFileName
 )
 
 // removeDataDirKeepingSandboxStore removes the gateway data folder dir but

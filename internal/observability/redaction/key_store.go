@@ -14,7 +14,14 @@ import (
 	"crypto/rand"
 	"errors"
 	"io"
+	"path/filepath"
 )
+
+// CorrelationKeyPath returns the file LoadOrCreateCorrelationKey keeps the
+// correlation key in for dataDir.
+func CorrelationKeyPath(dataDir string) string {
+	return filepath.Join(dataDir, correlationKeyFilename)
+}
 
 const (
 	correlationKeyFilename   = "redaction-correlation.key"
@@ -88,6 +95,14 @@ func (k CorrelationKey) Material() ([hashV1KeySize]byte, bool) {
 // override in this API.
 func LoadOrCreateCorrelationKey(dataDir string) (CorrelationKey, error) {
 	return loadOrCreateCorrelationKeyPlatform(dataDir, rand.Reader, keyStoreHooks{})
+}
+
+// LoadExistingCorrelationKeyForOwner reads a Unix managed installation's key
+// without creating or repairing anything. The caller must obtain ownerUID and
+// dataDir from verified administrator-owned deployment metadata. This does not
+// broaden ownership trust for the ordinary per-user key store.
+func LoadExistingCorrelationKeyForOwner(dataDir string, ownerUID uint32) (CorrelationKey, error) {
+	return loadExistingCorrelationKeyForOwnerPlatform(dataDir, ownerUID)
 }
 
 // keyStoreHooks exists only to exercise cleanup and failure-closed behavior in

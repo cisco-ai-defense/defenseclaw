@@ -10,13 +10,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/inventory/ideplugins"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc/mgr"
@@ -38,7 +39,6 @@ var inventoryDACLDotdirs = append([]string{
 	// Antigravity hook path, so it is granted even where the guardian owns
 	// .gemini (GAP-1863).
 	`.gemini\antigravity-cli`,
-	".openhands",
 	".openclaw",
 	".hermes",
 	".amp",
@@ -109,7 +109,7 @@ var inventoryDACLProfileFiles = []string{
 // gatewayServiceNamePattern matches the certification-scoped gateway service
 // name. The scope suffix (10 lowercase hex chars) is generated at install time
 // and shared across CertGateway/CertGuardian/CertEnumerator/CertCMIDBroker.
-var gatewayServiceNamePattern = regexp.MustCompile(`^DefenseClawCertGateway_[a-f0-9]{10}$`)
+var gatewayServiceNamePattern = lazyregexp.New(`^DefenseClawCertGateway_[a-f0-9]{10}$`)
 
 // productionGatewayServiceName is the un-scoped gateway service name used by
 // production installs (no cert suffix).
@@ -151,7 +151,7 @@ func GrantGatewayInventoryReadForManifest(manifest Manifest, gatewayServiceName 
 		return fmt.Errorf("enterprise hooks: refusing untrusted gateway service name %q", name)
 	}
 	account := `NT SERVICE\` + name
-	sid, _, _, err := windows.LookupSID("", account)
+	sid, err := managed.WindowsServiceAccountSID(account)
 	if err != nil {
 		return fmt.Errorf("enterprise hooks: resolve gateway service SID %q: %w", account, err)
 	}
@@ -163,17 +163,9 @@ func GrantGatewayInventoryReadForManifest(manifest Manifest, gatewayServiceName 
 	guardianOwned := inventoryDACLGuardianOwnedByHome(manifest)
 	enrolled := inventoryDACLEnrolledByHome(manifest)
 	ownHome, _ := os.UserHomeDir()
-	seenHome := map[string]struct{}{}
-	for _, target := range manifest.Targets {
+	for _, target := range inventoryDACLGrantTargets(manifest) {
 		home := filepath.Clean(strings.TrimSpace(target.UserHome))
-		if home == "" {
-			continue
-		}
 		key := strings.ToLower(home)
-		if _, dup := seenHome[key]; dup {
-			continue
-		}
-		seenHome[key] = struct{}{}
 		// The standalone profile (ideInventory) refuses links on the agent
 		// folders as it does on the IDE folders; the Secure Client profile
 		// keeps the grants it always made.

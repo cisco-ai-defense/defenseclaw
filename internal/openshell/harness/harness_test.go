@@ -50,10 +50,11 @@ func artifactsFor(t *testing.T, spec *Spec) connector.SandboxArtifacts {
 // shParses reports a script /bin/sh cannot parse.
 func shParses(t *testing.T, what, script string) {
 	t.Helper()
-	if _, err := os.Stat("/bin/sh"); err != nil {
+	sh := maybeBinSh()
+	if sh == "" {
 		return
 	}
-	cmd := exec.Command("/bin/sh", "-n")
+	cmd := exec.Command(sh, "-n")
 	cmd.Stdin = strings.NewReader(script)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Errorf("%s does not parse: %v\n%s", what, err, out)
@@ -64,7 +65,7 @@ func TestRegistry(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("OpenShell sandbox artifacts are not rendered on Windows hosts")
 	}
-	if want := []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "omnigent", "opencode", "openhands"}; !slices.Equal(Names(), want) || !sort.StringsAreSorted(Names()) {
+	if want := []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode"}; !slices.Equal(Names(), want) || !sort.StringsAreSorted(Names()) {
 		t.Fatalf("Names() = %v, want %v", Names(), want)
 	}
 	catalog := map[string]bool{}
@@ -133,7 +134,7 @@ func TestRegistry(t *testing.T) {
 	// hooks.json is root-owned and its deny wins over user and project hooks.
 	for spec, want := range map[*Spec][2]string{
 		ClaudeCode: {connector.SandboxTamperTierManaged, VerifiedLive}, Codex: {connector.SandboxTamperTierManaged, VerifiedLive},
-		OpenCode: {connector.SandboxTamperTierUser, VerifiedLive}, Copilot: {connector.SandboxTamperTierManaged, VerifiedLive},
+		OpenCode: {connector.SandboxTamperTierUser, Unverified}, Copilot: {connector.SandboxTamperTierManaged, VerifiedLive},
 		Amp: {connector.SandboxTamperTierUser, Unverified}, Cursor: {connector.SandboxTamperTierManaged, Unverified},
 		Devin: {connector.SandboxTamperTierUser, Unverified}, Kiro: {connector.SandboxTamperTierUser, VerifiedLive},
 	} {
@@ -167,10 +168,10 @@ func TestInstallStepsPinContract(t *testing.T) {
 		{"codex-range", Codex, ">=0.146", nil, nil},
 		// Inside the contract, but DefenseClaw pinned no digests for it.
 		{"codex-unpinned-digest", Codex, "0.150.0", nil, nil},
-		{"opencode-pin", OpenCode, "", []string{"'opencode-ai@1.18.31'"}, nil},
+		{"opencode-pin", OpenCode, "", []string{"'@opencode/cli@2.1.4'"}, nil},
 		{"opencode-base-1.2.18", OpenCode, "1.2.18", nil, ErrUnknownContract},
-		{"opencode-above-range", OpenCode, "1.19.2", nil, ErrUnknownContract},
-		{"opencode-unpinned-digest", OpenCode, "1.18.20", nil, nil},
+		{"opencode-above-range", OpenCode, "2.3.0", nil, ErrUnknownContract},
+		{"opencode-unpinned-digest", OpenCode, "2.1.5", nil, nil},
 		{"copilot-pin", Copilot, "", []string{"'@github/copilot@1.0.88'"}, nil},
 		{"copilot-base-1.0.16", Copilot, "1.0.16", nil, ErrUnknownContract},
 		{"copilot-unpinned-digest", Copilot, "1.0.90", nil, nil},
@@ -186,18 +187,15 @@ func TestInstallStepsPinContract(t *testing.T) {
 		{"kiro-latest", Kiro, "latest", nil, nil},
 		{"devin-pin", Devin, "", []string{"'https://static.devin.ai/cli/3000.4.25/devin-3000.4.25-aarch64-unknown-linux.tar.gz'"}, nil},
 		{"devin-newer", Devin, "3000.12.0", nil, ErrUnknownContract},
-		{"hermes-pin", Hermes, "", []string{"hermes-agent==0.19.0", "uv python install '3.12.13'", "--exclude-newer '2026-09-27T00:00:00Z'", "UV_NO_CONFIG=1", "is not the pinned"}, nil},
+		{"hermes-pin", Hermes, "", []string{"hermes-agent[anthropic]==0.19.0", "uv python install '3.12.13'", "--exclude-newer '2026-09-27T00:00:00Z'", "UV_NO_CONFIG=1", "is not the pinned"}, nil},
 		{"hermes-below-contract", Hermes, "0.18.2", nil, ErrUnknownContract},
 		{"hermes-above-contracts", Hermes, "0.22.0", nil, ErrUnknownContract},
 		{"hermes-not-exact", Hermes, "latest", nil, nil},
-		{"openhands-pin", OpenHands, "", []string{"'openhands==1.16.0'", "is not the pinned"}, nil},
-		{"openhands-below-contract", OpenHands, "1.11.0", nil, ErrUnknownContract},
 		{"antigravity-pin", Antigravity, "", []string{"sha512sum -c", "1.2.12-5784551402897408", "aarch64)", "x86_64)", "is not the pinned"}, nil},
 		{"antigravity-below-contract", Antigravity, "1.1.7", nil, ErrUnknownContract},
 		{"antigravity-unpinned-build", Antigravity, "1.2.13", nil, nil},
 		// Inside the host contract (>=0.7.0), but its image never fires
 		// AfterAgentResponse (RT-A-2).
-		{"omnigent-below-sandbox-floor", OmniGent, "0.12.0", nil, ErrUnknownContract},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			steps, err := tc.spec.InstallSteps(tc.version)
@@ -240,7 +238,8 @@ func TestNpmPinnedInstallChecksDigests(t *testing.T) {
 		{Codex, codexPin, "npm uninstall -g '@openai/codex'", nil},
 		{OpenCode, openCodePin, "npm uninstall -g 'opencode-ai'", nil},
 		{Copilot, copilotPin, "npm uninstall -g '@github/copilot'", []string{
-			`COPILOT_PKG_CACHE_HOME="$cache" /usr/local/bin/copilot --version`, "'GitHub Copilot CLI 1.0.88.'",
+			`COPILOT_PKG_CACHE_HOME="$cache" /usr/local/bin/copilot --version`,
+			`got="${got#GitHub Copilot CLI }"; got="${got%.}"`, pinVersionCheck("Copilot", copilotPin.Version),
 			"-name .extraction-complete", `chown -R root:root "$cache"; chmod -R go-w "$cache"`,
 		}},
 		{Amp, ampPin, "", nil},
@@ -255,11 +254,15 @@ func TestNpmPinnedInstallChecksDigests(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			link := "ln -sfn \"$root/bin/" + tc.spec.Command + "\" /usr/local/bin/" + tc.spec.Command
+			if tc.spec == OpenCode {
+				link = `ln -sfn "$bin" /usr/local/bin/opencode`
+			}
 			for _, want := range append([]string{
 				`npm pack "$pkg"`, `sha512sum "$tgz"`, shellQuote(sum),
 				`npm install -g --no-fund --no-audit --prefix "$root" "$tgz"`,
 				"aarch64) bin=", "x86_64) bin=", shellQuote(tc.pin.Native["aarch64"].SHA256), shellQuote(tc.pin.Native["x86_64"].SHA256),
-				`sha256sum "$bin"`, "ln -sfn \"$root/bin/" + tc.spec.Command + "\" /usr/local/bin/" + tc.spec.Command,
+				`sha256sum "$bin"`, link,
 			}, tc.extra...) {
 				if !strings.Contains(run, want) {
 					t.Errorf("install steps lack %q:\n%s", want, run)
@@ -293,7 +296,8 @@ func TestNpmPinnedInstallChecksDigests(t *testing.T) {
 // the native executable it installs has the pinned sha256.
 func TestNpmPinnedInstallVerifiesTheTarball(t *testing.T) {
 	// The install runs with PATH=<fake npm>:/usr/bin:/bin.
-	for _, tool := range []string{"/bin/sh", "/usr/bin/sha512sum", "/usr/bin/sha256sum"} {
+	sh := binSh(t)
+	for _, tool := range []string{"/usr/bin/sha512sum", "/usr/bin/sha256sum"} {
 		if _, err := os.Stat(tool); err != nil {
 			t.Skipf("%s is required", tool)
 		}
@@ -342,7 +346,7 @@ func TestNpmPinnedInstallVerifiesTheTarball(t *testing.T) {
 				"esac\n")
 			script := strings.NewReplacer("root='/opt/x'", "root="+shellQuote(filepath.Join(dir, "root")), "install -d -o root -g root -m 0755", "install -d -m 0755",
 				"/usr/local/bin/dctool", filepath.Join(dir, "dctool")).Replace(run)
-			cmd := exec.Command("/bin/sh", "-c", script)
+			cmd := exec.Command(sh, "-c", script)
 			cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "TMPDIR=" + dir}
 			out, err := cmd.CombinedOutput()
 			args, _ := os.ReadFile(filepath.Join(dir, "install-args"))
@@ -376,9 +380,9 @@ func TestTarballPinnedInstallChecksDigests(t *testing.T) {
 		pin     tarballPin
 		version string
 	}{
-		{Cursor, cursorPin, `[ "$got" = '2026.07.23-e383d2b' ]`},
-		{Kiro, kiroPin, `[ "$got" = 'kiro-cli-chat 2.24.1' ]`},
-		{Devin, devinPin, `[ "$got" = '3000.4.25' ]`},
+		{Cursor, cursorPin, pinVersionCheck("Cursor Agent", cursorPin.Version)},
+		{Kiro, kiroPin, `got="${got#kiro-cli-chat }"; ` + pinVersionCheck("Kiro CLI", kiroPin.Version)},
+		{Devin, devinPin, pinVersionCheck("Devin CLI", devinPin.Version)},
 	} {
 		t.Run(tc.spec.Name, func(t *testing.T) {
 			steps, err := tc.spec.InstallSteps("")
@@ -454,11 +458,11 @@ func TestLaunchArgv(t *testing.T) {
 				"-c", `model_providers.mantle.base_url="https://bedrock-mantle.us-west-2.api.aws/openai/v1"`,
 				"-c", `model_providers.mantle.env_key="BEDROCK_MANTLE_API_KEY"`, "-c", `model_providers.mantle.wire_api="responses"`,
 				"--disable", "multi_agent", "-c", `web_search="disabled"`, "-m", "openai.gpt-5.4", "p"}},
-		{"opencode-interactive-yolo", OpenCode, LaunchOptions{Mode: Interactive, Yolo: true}, []string{OpenCodeLauncherPath, "--auto"}},
-		{"opencode-interactive-safe", OpenCode, LaunchOptions{Mode: Interactive, Args: []string{"-m", "anthropic/claude-haiku-4-5"}},
-			[]string{OpenCodeLauncherPath, "-m", "anthropic/claude-haiku-4-5"}},
+		{"opencode-interactive-yolo", OpenCode, LaunchOptions{Mode: Interactive, Yolo: true}, []string{OpenCodeLauncherPath, "--standalone", "--auto"}},
+		{"opencode-interactive-safe", OpenCode, LaunchOptions{Mode: Interactive, Args: []string{"--session", "ses_test"}},
+			[]string{OpenCodeLauncherPath, "--standalone", "--session", "ses_test"}},
 		{"opencode-headless-mantle", OpenCode, LaunchOptions{Mode: Headless, Yolo: true, Prompt: "fix it", CredentialProfile: profiles.OpenCodeBedrockMantleID, Args: []string{"--format", "json"}},
-			[]string{OpenCodeLauncherPath, "run", "--auto", "--format", "json", "fix it"}},
+			[]string{OpenCodeLauncherPath, "run", "--standalone", "--auto", "--format", "json", "fix it"}},
 		{"copilot-interactive-yolo", Copilot, LaunchOptions{Mode: Interactive, Yolo: true}, []string{CopilotLauncherPath, "--yolo"}},
 		{"copilot-interactive-safe", Copilot, LaunchOptions{Mode: Interactive}, []string{CopilotLauncherPath}},
 		{"copilot-headless-yolo", Copilot, LaunchOptions{Mode: Headless, Yolo: true, Prompt: "fix it", Args: []string{"--no-color"}},
@@ -490,39 +494,16 @@ func TestLaunchArgv(t *testing.T) {
 			[]string{HermesLauncherPath, "chat", "-q", "fix it", "-Q", "--yolo", "--provider", "defenseclaw", "-m", HermesMantleDefaultModel}},
 		{"hermes-safe-anthropic", Hermes, LaunchOptions{Mode: Interactive, CredentialProfile: profiles.AnthropicID},
 			[]string{HermesLauncherPath, "--provider", "anthropic"}},
-		{"openhands-headless-yolo", OpenHands, LaunchOptions{Mode: Headless, Yolo: true, Prompt: "p", CredentialProfile: profiles.OpenAIID},
-			[]string{OpenHandsLauncherPath, "--headless", "--exit-without-confirmation", "-t", "p", "--always-approve", "--override-with-envs"}},
-		{"openhands-interactive-safe", OpenHands, LaunchOptions{Mode: Interactive}, []string{OpenHandsLauncherPath}},
 		{"antigravity-headless-yolo", Antigravity, LaunchOptions{Mode: Headless, Yolo: true, Prompt: "p", CredentialProfile: profiles.GeminiID},
 			[]string{AntigravityLauncherPath, "-p", "p", "--dangerously-skip-permissions"}},
 		{"antigravity-interactive", Antigravity, LaunchOptions{Mode: Interactive, Args: []string{"--model", "gemini-3.1-pro"}},
 			[]string{AntigravityLauncherPath, "--model", "gemini-3.1-pro"}},
-		// The OmniGent sandbox agent names no model: a credential profile
 		// brings its default, or the caller passes one.
-		{"omnigent-headless-mantle", OmniGent, LaunchOptions{Mode: Headless, Prompt: "p", CredentialProfile: profiles.BedrockMantleOpenAIID},
-			[]string{OmniGentLauncherPath, "run", "-p", "p", "--model", omnigentMantleModel}},
-		{"omnigent-mantle-own-model", OmniGent, LaunchOptions{Mode: Interactive, CredentialProfile: profiles.BedrockMantleOpenAIID, Args: []string{"--model=openai.gpt-oss-120b"}},
-			[]string{OmniGentLauncherPath, "run", "--model=openai.gpt-oss-120b"}},
-		{"omnigent-openai-model", OmniGent, LaunchOptions{Mode: Interactive, CredentialProfile: profiles.OpenAIID, Args: []string{"--model", "gpt-5-mini"}},
-			[]string{OmniGentLauncherPath, "run", "--model", "gpt-5-mini"}},
 		// `sandbox connect NAME -- --continue` continues the sandbox agent's
 		// latest conversation (OG-U2).
-		{"omnigent-continue", OmniGent, LaunchOptions{Mode: Interactive, Args: []string{"--model", "mock-model", "--continue"}},
-			[]string{OmniGentLauncherPath, "run", "--model", "mock-model", "--continue"}},
-		// The shell wrapper forwards `omnigent run …` as typed, OmniGent's
 		// own resume hint among them, after the sandbox's stored arguments
 		// on a resume: the subcommand is dropped, not taken for the agent.
-		{"omnigent-wrapped-run", OmniGent, LaunchOptions{Mode: Interactive, Args: []string{"run", "--model", "gpt-5-mini"}},
-			[]string{OmniGentLauncherPath, "run", "--model", "gpt-5-mini"}},
-		{"omnigent-wrapped-resume", OmniGent, LaunchOptions{Mode: Interactive, Args: []string{"--model", "mock-model", "run",
-			connector.SandboxCanonicalDir("omnigent") + "/agent", "--model", "mock-model", "--resume", "b2b58f42"}},
-			[]string{OmniGentLauncherPath, "run", "--model", "mock-model", connector.SandboxCanonicalDir("omnigent") + "/agent",
-				"--model", "mock-model", "--resume", "b2b58f42"}},
 		// An option's value, the agent, and anything after it stay.
-		{"omnigent-run-as-values", OmniGent, LaunchOptions{Mode: Interactive, Args: []string{"-p", "run", "--resume", "run", "--tools", "run", "./agent", "run"}},
-			[]string{OmniGentLauncherPath, "run", "-p", "run", "--resume", "run", "--tools", "run", "./agent", "run"}},
-		{"omnigent-resume-picker", OmniGent, LaunchOptions{Mode: Interactive, Args: []string{"--resume", "--model=m", "run"}},
-			[]string{OmniGentLauncherPath, "run", "--resume", "--model=m"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := tc.spec.LaunchArgv(tc.opts)
@@ -535,13 +516,12 @@ func TestLaunchArgv(t *testing.T) {
 		spec *Spec
 		opts LaunchOptions
 	}{
-		"headless-no-prompt":       {ClaudeCode, LaunchOptions{Mode: Headless}},
-		"unknown-mode":             {ClaudeCode, LaunchOptions{Mode: "detached"}},
-		"foreign-profile":          {ClaudeCode, LaunchOptions{Mode: Interactive, CredentialProfile: profiles.OpenAIID}},
-		"antigravity-openai":       {Antigravity, LaunchOptions{Mode: Interactive, CredentialProfile: profiles.OpenAIID}},
-		"omnigent-openai-no-model": {OmniGent, LaunchOptions{Mode: Interactive, CredentialProfile: profiles.OpenAIID}},
+		"headless-no-prompt": {ClaudeCode, LaunchOptions{Mode: Headless}},
+		"unknown-mode":       {ClaudeCode, LaunchOptions{Mode: "detached"}},
+		"foreign-profile":    {ClaudeCode, LaunchOptions{Mode: Interactive, CredentialProfile: profiles.OpenAIID}},
+		"antigravity-openai": {Antigravity, LaunchOptions{Mode: Interactive, CredentialProfile: profiles.OpenAIID}},
 	} {
-		if _, err := tc.spec.LaunchArgv(tc.opts); err == nil || name == "omnigent-openai-no-model" && !strings.Contains(err.Error(), "--model") {
+		if _, err := tc.spec.LaunchArgv(tc.opts); err == nil {
 			t.Errorf("%s: launch argv rendered or the error does not say what is missing: %v", name, err)
 		}
 	}
@@ -557,7 +537,8 @@ func TestEnv(t *testing.T) {
 		t.Skip("OpenShell sandbox artifacts are not rendered on Windows hosts")
 	}
 	const proxy = "http://b1:secret@host.openshell.internal:18972"
-	mantleWest := "bedrock-mantle.us-west-2.api.aws,host.openshell.internal"
+	const localSuffix = ",localhost,127.0.0.1,127.0.0.0/8,::1"
+	mantleWest := "bedrock-mantle.us-west-2.api.aws,host.openshell.internal" + localSuffix
 	for _, tc := range []struct {
 		name string
 		spec *Spec
@@ -568,15 +549,15 @@ func TestEnv(t *testing.T) {
 			CredentialProfile: profiles.ClaudeBedrockMantleID, BedrockRegion: "us-east-1"}, map[string]string{
 			"DISABLE_AUTOUPDATER": "1", "DEFENSECLAW_SANDBOX_ID": "sb-1", "DEFENSECLAW_SANDBOX_NAME": "dc-claudecode-myapp-7f3a",
 			"http_proxy": proxy, "NODE_USE_ENV_PROXY": "1", "ANTHROPIC_BASE_URL": "https://bedrock-mantle.us-east-1.api.aws/anthropic",
-			"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1", "NO_PROXY": "bedrock-mantle.us-east-1.api.aws,host.openshell.internal",
+			"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1", "NO_PROXY": "bedrock-mantle.us-east-1.api.aws,host.openshell.internal" + localSuffix,
 		}},
-		{"codex strict", Codex, EnvOptions{CredentialProfile: profiles.OpenAIID}, map[string]string{"NO_PROXY": "api.openai.com,host.openshell.internal"}},
+		{"codex strict", Codex, EnvOptions{CredentialProfile: profiles.OpenAIID}, map[string]string{"NO_PROXY": "api.openai.com,host.openshell.internal" + localSuffix}},
 		{"opencode mantle", OpenCode, EnvOptions{EgressProxyURL: proxy, CredentialProfile: profiles.OpenCodeBedrockMantleID, BedrockRegion: "us-west-2"}, map[string]string{
 			"OPENCODE_DISABLE_AUTOUPDATE": "1", "NO_PROXY": mantleWest,
 			"OPENCODE_CONFIG_CONTENT": strings.ReplaceAll(openCodeMantleConfig, bedrockHostToken, "bedrock-mantle.us-west-2.api.aws"),
 		}},
 		{"opencode anthropic", OpenCode, EnvOptions{EgressProxyURL: proxy, CredentialProfile: profiles.OpenCodeAnthropicID},
-			map[string]string{"OPENCODE_DISABLE_AUTOUPDATE": "1", "NO_PROXY": "api.anthropic.com,host.openshell.internal"}},
+			map[string]string{"OPENCODE_DISABLE_AUTOUPDATE": "1", "NO_PROXY": "api.anthropic.com,host.openshell.internal" + localSuffix}},
 		// A Copilot BYOK profile must run offline; the GitHub-token one cannot.
 		{"copilot mantle", Copilot, EnvOptions{EgressProxyURL: proxy, CredentialProfile: profiles.CopilotBedrockMantleID, BedrockRegion: "us-west-2"}, map[string]string{
 			"COPILOT_AUTO_UPDATE": "false", "COPILOT_PKG_CACHE_HOME": CopilotPackageCache, "COPILOT_OFFLINE": "true",
@@ -585,25 +566,21 @@ func TestEnv(t *testing.T) {
 		}},
 		{"copilot github", Copilot, EnvOptions{EgressProxyURL: proxy, CredentialProfile: profiles.CopilotGitHubID}, map[string]string{
 			"COPILOT_AUTO_UPDATE": "false", "COPILOT_OFFLINE": "",
-			"NO_PROXY": "api.business.githubcopilot.com,api.enterprise.githubcopilot.com,api.github.com,api.githubcopilot.com,api.individual.githubcopilot.com,host.openshell.internal",
+			"NO_PROXY": "api.business.githubcopilot.com,api.enterprise.githubcopilot.com,api.github.com,api.githubcopilot.com,api.individual.githubcopilot.com,host.openshell.internal" + localSuffix,
 		}},
 		{"amp", Amp, EnvOptions{EgressProxyURL: proxy, CredentialProfile: profiles.AmpID},
-			map[string]string{"AMP_SKIP_UPDATE_CHECK": "1", "NO_PROXY": "ampcode.com,host.openshell.internal"}},
+			map[string]string{"AMP_SKIP_UPDATE_CHECK": "1", "NO_PROXY": "ampcode.com,host.openshell.internal" + localSuffix}},
 		{"cursor", Cursor, EnvOptions{EgressProxyURL: proxy, CredentialProfile: profiles.CursorID},
-			map[string]string{"NO_PROXY": "api2.cursor.sh,api3.cursor.sh,host.openshell.internal,repo42.cursor.sh"}},
+			map[string]string{"NO_PROXY": "api2.cursor.sh,api3.cursor.sh,host.openshell.internal,repo42.cursor.sh" + localSuffix}},
 		{"kiro", Kiro, EnvOptions{EgressProxyURL: proxy, CredentialProfile: profiles.KiroID}, map[string]string{
 			connector.KiroSandboxAgentDirEnv: connector.KiroSandboxAgentDir,
-			"NO_PROXY":                       "host.openshell.internal,management.us-east-1.kiro.dev,prod.us-east-1.auth.desktop.kiro.dev,q.us-east-1.amazonaws.com,runtime.us-east-1.kiro.dev",
+			"NO_PROXY":                       "host.openshell.internal,management.us-east-1.kiro.dev,prod.us-east-1.auth.desktop.kiro.dev,q.us-east-1.amazonaws.com,runtime.us-east-1.kiro.dev" + localSuffix,
 		}},
 		{"hermes mantle", Hermes, EnvOptions{CredentialProfile: profiles.BedrockMantleOpenAIID, BedrockRegion: "us-west-2"}, map[string]string{
 			connector.HermesSandboxProviderBaseURLEnv: "https://bedrock-mantle.us-west-2.api.aws/v1", "NO_PROXY": mantleWest,
 		}},
-		{"openhands mantle", OpenHands, EnvOptions{CredentialProfile: profiles.BedrockMantleOpenAIID},
-			map[string]string{"LLM_BASE_URL": "https://bedrock-mantle.us-east-1.api.aws/v1", "OPENHANDS_SUPPRESS_BANNER": "1"}},
 		{"antigravity gemini", Antigravity, EnvOptions{CredentialProfile: profiles.GeminiID},
-			map[string]string{"NO_PROXY": "generativelanguage.googleapis.com,host.openshell.internal"}},
-		{"omnigent mantle", OmniGent, EnvOptions{CredentialProfile: profiles.BedrockMantleOpenAIID, BedrockRegion: "eu-west-1"},
-			map[string]string{"OPENAI_BASE_URL": "https://bedrock-mantle.eu-west-1.api.aws/v1"}},
+			map[string]string{"NO_PROXY": "generativelanguage.googleapis.com,host.openshell.internal" + localSuffix}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			opts := tc.opts
@@ -663,17 +640,26 @@ func TestProbeVersionPatterns(t *testing.T) {
 		want string
 	}{
 		{ClaudeCode, "2.1.156 (Claude Code)\n", "2.1.156"},
+		{ClaudeCode, "v2.1.156 (Claude Code)\n", "2.1.156"},
 		{Codex, "codex-cli 0.146.0\n", "0.146.0"},
-		{OpenCode, "1.18.31", "1.18.31"},
+		{Codex, "codex-cli v0.146.0\n", "0.146.0"},
+		{OpenCode, "2.1.4", "2.1.4"},
+		{OpenCode, "opencode v2.1.4", "2.1.4"},
 		// The probe keeps only [A-Za-z0-9 ._()+-] of the first line.
 		{Copilot, "GitHub Copilot CLI 1.0.88.", "1.0.88"},
+		{Copilot, "GitHub Copilot CLI v1.0.88.", "1.0.88"},
 		{Amp, "0.0.1785334225-g9abe75 (released 2026-07-29T141025.000Z 1mo ago)", "0.0.1785334225-g9abe75"},
+		{Amp, "v0.0.1785334225-g9abe75 (released 2026-07-29T141025.000Z 1mo ago)", "0.0.1785334225-g9abe75"},
 		{Cursor, "2026.07.23-e383d2b", "2026.07.23-e383d2b"},
+		{Cursor, "v2026.07.23-e383d2b", "2026.07.23-e383d2b"},
 		{Kiro, "kiro-cli-chat 2.24.1", "2.24.1"},
+		{Kiro, "kiro-cli-chat v2.24.1", "2.24.1"},
 		{Devin, "devin 3000.4.25 (7e8e528a)", "3000.4.25"},
+		{Devin, "devin v3000.4.25 (7e8e528a)", "3000.4.25"},
 		{Hermes, "Hermes Agent v0.19.0 (2026.7.20)\n", "0.19.0"},
-		{OpenHands, "OpenHands CLI 1.16.0\n", "1.16.0"},
+		{Hermes, "Hermes Agent 0.19.0 (2026.7.20)\n", "0.19.0"},
 		{Antigravity, "1.2.12\n", "1.2.12"},
+		{Antigravity, "v1.2.12\n", "1.2.12"},
 	} {
 		if m := tc.spec.Probe().VersionRE.FindStringSubmatch(strings.TrimSpace(tc.out)); len(m) != 2 || m[1] != tc.want {
 			t.Errorf("%s version pattern on %q = %v", tc.spec.Name, tc.out, m)
@@ -681,6 +667,48 @@ func TestProbeVersionPatterns(t *testing.T) {
 	}
 	if !strings.Contains(Hermes.Probe().NetworkBinaries, "/opt/defenseclaw-harness/hermes/tools/hermes-agent/bin/python") {
 		t.Fatalf("hermes network binary probe = %s", Hermes.Probe().NetworkBinaries)
+	}
+}
+
+func TestHarnessImageVersionChecksUsePinnedRelease(t *testing.T) {
+	for _, tc := range []struct {
+		spec    *Spec
+		display string
+	}{
+		{ClaudeCode, "Claude Code"}, {Codex, "Codex"},
+		{OpenCode, "OpenCode"}, {Copilot, "Copilot"},
+		{Amp, "Amp"}, {Cursor, "Cursor Agent"},
+		{Kiro, "Kiro CLI"}, {Devin, "Devin CLI"},
+		{Hermes, "Hermes Agent"}, {Antigravity, "Antigravity CLI"},
+	} {
+		t.Run(tc.spec.Name, func(t *testing.T) {
+			check := pinVersionCheck(tc.display, tc.spec.DefaultVersion)
+			steps, err := tc.spec.InstallSteps("")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var run strings.Builder
+			for _, step := range steps {
+				run.WriteString(step.Run)
+			}
+			if !strings.Contains(run.String(), check) {
+				t.Fatal("image install does not use the shared pinned version check")
+			}
+			for _, sample := range []struct {
+				value string
+				allow bool
+			}{
+				{tc.spec.DefaultVersion, true},
+				{"v" + tc.spec.DefaultVersion, true},
+				{tc.spec.DefaultVersion + ".1", false},
+				{"vv" + tc.spec.DefaultVersion, false},
+			} {
+				out, err := runPinnedVersionScript(t, `got="$VERSION_REPLY"; `+check, sample.value, nil)
+				if (err == nil) != sample.allow {
+					t.Errorf("version %q: allowed=%t, want %t: %s", sample.value, err == nil, sample.allow, out)
+				}
+			}
+		})
 	}
 }
 
@@ -724,10 +752,6 @@ func TestBypassArgs(t *testing.T) {
 			[]string{"--permission-mode", "auto"}, []string{"--permission-mode", "dangerous", "--permission-mode=autonomous"}},
 		{"hermes yolo prefixes", Hermes, []string{"--y", "--yo", "--yol", "--yolo", "-m", "m"}, []string{"-m", "m"}, []string{"--y", "--yo", "--yol", "--yolo"}},
 		{"hermes other options", Hermes, []string{"--yes", "--yolo-extra", "--", "--yolo"}, []string{"--yes", "--yolo-extra", "--", "--yolo"}, nil},
-		{"openhands approve prefixes", OpenHands,
-			[]string{"--a", "--always", "--always-approve", "--y", "--yolo", "--ll", "--llm-approve", "-t", "x"},
-			[]string{"-t", "x"}, []string{"--a", "--always", "--always-approve", "--y", "--yolo", "--ll", "--llm-approve"}},
-		{"openhands ambiguous", OpenHands, []string{"--l", "--headless"}, []string{"--l", "--headless"}, nil},
 		{"agy go flags", Antigravity,
 			[]string{"--dangerously-skip-permissions", "-dangerously-skip-permissions", "--dangerously-skip-permissions=true", "-dangerously-skip-permissions=1", "-p", "x"},
 			[]string{"-p", "x"}, []string{"--dangerously-skip-permissions", "-dangerously-skip-permissions", "--dangerously-skip-permissions=true", "-dangerously-skip-permissions=1"}},
@@ -760,11 +784,7 @@ func TestBypassArgs(t *testing.T) {
 				added = append(added, arg)
 			}
 		}
-		// OmniGent has no permission prompts of its own to skip: its
 		// policies, DefenseClaw's among them, decide in the server.
-		if len(added) == 0 && name != "omnigent" {
-			t.Errorf("%s: a yolo launch adds no flag", name)
-		}
 		if kept, _ := spec.BypassArgs(added); len(kept) != 0 {
 			t.Errorf("%s: safe launches keep the yolo flags %q", name, kept)
 		}

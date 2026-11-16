@@ -14,7 +14,7 @@ import (
 // The --json refusal shows the PowerShell call operator as a literal &, the
 // same copy-pasteable command the human line shows, not \u0026 (GAP-2504).
 func TestEnterpriseJSONKeepsPowerShellCallOperator(t *testing.T) {
-	message := windowsManagedStandardUserViewAnswer("the AI discovery records", "enterprise windows discovery")
+	message := windowsManagedStandardUserViewAnswer("the AI discovery records", "enterprise", "windows", "discovery")
 	if !strings.Contains(message, "`& '") {
 		t.Fatalf("message has no call operator: %q", message)
 	}
@@ -29,5 +29,15 @@ func TestEnterpriseJSONKeepsPowerShellCallOperator(t *testing.T) {
 	}
 	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil || len(decoded.Errors) != 1 || decoded.Errors[0].Message != message {
 		t.Fatalf("decoded %+v err %v", decoded, err)
+	}
+}
+
+func TestWindowsSandboxAdminHintNamesGateway(t *testing.T) {
+	message := windowsManagedStandardUserViewAnswer("the sandbox registrations",
+		"enterprise", "windows", "sandbox", "list", "--user", "r103 probe")
+	for _, want := range []string{`\bin\defenseclaw-gateway.exe' enterprise windows sandbox list`, "--user 'r103 probe'"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("sandbox administrator hint omits %q: %s", want, message)
+		}
 	}
 }

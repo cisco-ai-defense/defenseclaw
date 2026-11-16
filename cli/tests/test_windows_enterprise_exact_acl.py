@@ -26,6 +26,7 @@ def _powershell_engines() -> list[str]:
     candidates: list[str | None] = [
         shutil.which("powershell.exe"),
         shutil.which("pwsh.exe"),
+        shutil.which("pwsh"),
     ]
     windows_root = os.environ.get("SystemRoot")
     if windows_root:
@@ -61,6 +62,21 @@ def _powershell_engines_or_fail() -> list[str]:
     if os.name == "nt":
         return ["<no-powershell-engine-found>"]
     return []
+
+
+def _assert_store_ensures_public_receipt_events_with_exact_acl(go: str) -> None:
+    """The bundle store creates receipt-events with the public exact ACL.
+
+    Production wires the store hook through the package seam
+    windowsBundleEnsurePublicReceiptEventsDirectory (GAP-0079, g079 review
+    F4), whose one and only assignment in the product source is the
+    exact-ACL helper ensureWindowsBundlePublicReceiptEventsDirectory. Tests
+    replace the seam; the product never does.
+    """
+    assert "store.EnsurePublicReceiptEventsDirectory = windowsBundleEnsurePublicReceiptEventsDirectory" in go
+    assignments = re.findall(r"\bwindowsBundleEnsurePublicReceiptEventsDirectory\s*=\s*(\w+)", go)
+    assert assignments == ["ensureWindowsBundlePublicReceiptEventsDirectory"], assignments
+    assert "func ensureWindowsBundlePublicReceiptEventsDirectory(path string) error {" in go
 
 
 def _extract_function_body(source: str, function_name: str, terminator: str) -> str:
@@ -117,11 +133,92 @@ def test_canonical_setter_replaces_the_entire_protected_dacl() -> None:
     assert "GetSecurityDescriptorSddlForm" not in assertion
     assert "GetFileSecurityDescriptor" in assertion
     assert "Test-DefenseClawExactRawDACL" in assertion
+    # Get-Acl stays out of the verifier (it strips SE_DACL_PROTECTED on some
+    # .NET revisions, which is the very bug the verifier is designed to
+    # catch). The icacls /inheritance:r self-heal uses the native
+    # GetFileSecurityDescriptor to re-read after forcing the protected flag.
     assert "Get-Acl" not in assertion
     assert "$ownerSID -cne $expectedOwnerSID" in assertion
     assert "$groupSID -cne $expectedGroupSID" in assertion
     assert "Invoke-DefenseClawNative" not in setter
+    # Validation never mutates: icacls is gone from the canonical setter and
+    # verifier. A stamping caller's one re-stamp goes through the privileged
+    # no-follow native writer, and a descriptor that is not byte-exact is
+    # judged by write authority outside the strict pin.
+    raw_verifier = setter[
+        setter.index("function Assert-DefenseClawCanonicalRawPathAcl") : setter.index(
+            "function Test-DefenseClawCanonicalRawPathAcl"
+        )
+    ]
     assert "$script:IcaclsExe" not in setter
+    assert "inheritance:r" not in setter
+    assert "SetPathSecurityDescriptorPrivilegedNoFollow" in raw_verifier
+    assert "if ($AllowSelfHeal)" in raw_verifier
+    assert "Get-DefenseClawRawDescriptorFindings" in raw_verifier
+    assert "Test-DefenseClawTrustStrictAncestors" in raw_verifier
+    assert "defenseclaw_accept" in raw_verifier
+    # The path-based setter falls back to the privileged writer when Set-Acl
+    # cannot write another principal's owner or lacks WRITE_DAC.
+    path_setter = setter[setter.index("function Set-DefenseClawPathAcl") :]
+    assert "SetPathSecurityDescriptorPrivilegedNoFollow" in path_setter
+    assert "UninstallFilePrivilegeScope(true)" in source
+    assert "SeTakeOwnershipPrivilege" in source
+
+
+def test_shared_vendor_ace_updates_preserve_other_raw_aces() -> None:
+    # GAP-0760: .NET's projected AddAccessRule/PurgeAccessRules round trip
+    # widened a pre-existing BUILTIN Users 0x1200a0 ACE to 0x1200a9.
+    source = MODULE.read_text(encoding="utf-8")
+    for start, end in (
+        ("function Grant-DefenseClawStateAncestorTraverse", "function Assert-DefenseClawStateAncestorTraverse"),
+        ("function Revoke-DefenseClawStateAncestorTraverse", "$script:VendorDirectoryUsersRights"),
+        ("function Grant-DefenseClawStandaloneVendorUsersRead", "function Revoke-DefenseClawStandaloneVendorUsersRead"),
+        ("function Revoke-DefenseClawStandaloneVendorUsersRead", "function Initialize-DefenseClawManagedRoot"),
+    ):
+        body = _extract_function_body(source, start, end)
+        assert "Set-DefenseClawSharedDirectoryRawAce" in body
+        assert "Microsoft.PowerShell.Security\\Set-Acl" not in body
+    editor = _extract_function_body(source, "function Set-DefenseClawSharedDirectoryRawAce", "function Grant-DefenseClawStateAncestorTraverse")
+    assert "SetSharedDirectoryDaclNoFollow" in editor
+    assert "Test-DefenseClawExactRawDACL" in editor
+
+
+@pytest.mark.skipif(os.name != "nt" or not _powershell_engines(), reason="requires Windows ACL APIs")
+def test_shared_vendor_raw_ace_editor_keeps_existing_users_bytes() -> None:
+    source = MODULE.read_text(encoding="utf-8")
+    editor = _extract_function_body(
+        source, "function Update-DefenseClawSharedRawDescriptor", "function Set-DefenseClawSharedDirectoryRawAce",
+    )
+    script = editor + r"""
+$ErrorActionPreference = 'Stop'
+$before = [Security.AccessControl.RawSecurityDescriptor]::new(
+    'O:BAG:BAD:P(A;;0x1200a0;;;BU)(A;;FA;;;SY)')
+$service = 'S-1-5-80-1-2-3-4-5'
+$granted = Update-DefenseClawSharedRawDescriptor -Descriptor $before -SID $service -Action Replace -AccessMask 0x1200a9
+$twice = Update-DefenseClawSharedRawDescriptor -Descriptor $granted.Descriptor -SID $service -Action Replace -AccessMask 0x1200a9
+$removed = Update-DefenseClawSharedRawDescriptor -Descriptor $granted.Descriptor -SID $service -Action Remove
+if (-not $granted.Changed -or $twice.Changed -or -not $removed.Changed -or
+    $before.GetSddlForm('All') -cne $removed.Descriptor.GetSddlForm('All')) { throw 'service grant changed a foreign ACE' }
+$partial = [Security.AccessControl.RawSecurityDescriptor]::new(
+    'O:BAG:BAD:P(A;;0x120080;;;BU)(A;;FA;;;SY)')
+$added = Update-DefenseClawSharedRawDescriptor -Descriptor $partial -SID 'S-1-5-32-545' -Action Add -AccessMask 0x20
+$users = @($added.Descriptor.DiscretionaryAcl | Where-Object {
+    $_ -is [Security.AccessControl.KnownAce] -and $_.SecurityIdentifier.Value -ceq 'S-1-5-32-545'
+})
+if ($users.Count -ne 2 -or @($users | Where-Object { $_.AccessMask -eq 0x120080 }).Count -ne 1 -or
+    @($users | Where-Object { $_.AccessMask -eq 0x20 }).Count -ne 1) { throw 'partial Users ACE was merged or widened' }
+$reverted = Update-DefenseClawSharedRawDescriptor -Descriptor $added.Descriptor -SID 'S-1-5-32-545' -Action RemoveExact -AccessMask 0x20
+if (-not $reverted.Changed -or $partial.GetSddlForm('All') -cne $reverted.Descriptor.GetSddlForm('All')) {
+    throw 'removal changed the pre-existing Users ACE'
+}
+'OK'
+"""
+    for engine in _powershell_engines():
+        result = subprocess.run(
+            [engine, "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
 
 
 def test_state_root_ancestor_grant_is_additive_not_a_canonical_seizure() -> None:
@@ -133,14 +230,14 @@ def test_state_root_ancestor_grant_is_additive_not_a_canonical_seizure() -> None
     """
     source = MODULE.read_text(encoding="utf-8")
     grant = source[
-        source.index("function Add-DefenseClawStateAncestorTraverseRule") : source.index(
+        source.index("function Update-DefenseClawSharedRawDescriptor") : source.index(
             "function Assert-DefenseClawStateAncestorTraverse"
         )
     ]
 
-    assert "PurgeAccessRules" in grant
-    assert "InheritanceFlags]::None" in grant
-    assert "Get-Acl" in grant
+    assert "SetSharedDirectoryDaclNoFollow" in grant
+    assert "[Security.AccessControl.AceFlags]::None" in grant
+    assert "GetDirectorySecuritySnapshotNoFollow" in grant
     # The canonical builder replaces the owner and the whole DACL.
     assert "New-DefenseClawCanonicalPathAcl" not in grant
     assert "Set-DefenseClawPathAcl" not in grant
@@ -279,6 +376,13 @@ def test_public_bundle_receipt_acl_does_not_expose_private_paths() -> None:
     assert "$top -ceq 'receipt-events'" in classifier
     assert "return 'BundleDirectory'" in classifier
     assert "^receipt-events\\\\[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}\\.json$" in classifier
+    # Change events are readable by the gateway service, not by standard users.
+    assert "$top -ceq 'change-events'" in classifier
+    assert "^change-events\\\\c-[0-7][0-9A-HJKMNP-TV-Z]{25}\\.json$" in classifier
+    # So are the reservations of changes in progress (change-events\reserved).
+    assert "$RelativePath -ceq 'change-events\\reserved' -and $IsDirectory" in classifier
+    assert "^change-events\\\\reserved\\\\c-[0-7][0-9A-HJKMNP-TV-Z]{25}\\.json$" in classifier
+    assert classifier.index("$top -ceq 'change-events'") < classifier.index("if ($IsDirectory) { return 'AdminDirectory' }")
     assert classifier.index("$top -ceq 'receipt-events'") < classifier.index("if ($IsDirectory) { return 'AdminDirectory' }")
     assert "if ($IsDirectory) { return 'AdminDirectory' }" in classifier
     assert "Get-DefenseClawBundlePathKind -RelativePath $relative" in contract
@@ -289,7 +393,7 @@ def test_public_bundle_receipt_acl_does_not_expose_private_paths() -> None:
     assert "Assert-DefenseClawCanonicalPathAcl -Path $item.Path -Expected $expected" in contract
     go = WINDOWS_BUNDLE.read_text(encoding="utf-8")
     store = GO_STORE.read_text(encoding="utf-8")
-    assert "store.EnsurePublicReceiptEventsDirectory = ensureWindowsBundlePublicReceiptEventsDirectory" in go
+    _assert_store_ensures_public_receipt_events_with_exact_acl(go)
     assert "return createWindowsBundleDirectory(path, windowsBundleDirectorySDDL(service.String()))" in go
     assert "ensureErr = s.EnsurePublicReceiptEventsDirectory(eventsDir)" in store
     assert "ensureErr = os.MkdirAll(eventsDir, 0o755)" in store
@@ -371,6 +475,7 @@ def test_receipt_version_name_selects_creator_acl_on_every_asset() -> None:
         "BundleVersionFile": creator_sddl("windowsBundleVersionSDDL"),
         "AdminDirectory": creator_sddl("windowsBundlePrivateSDDL"),
         "AdminFile": creator_sddl("windowsBundleAdminFileSDDL"),
+        "ConfigFile": creator_sddl("windowsConfigFileSDDL"),
     }
     assert 'inherit = "OICI"' in go_acl.split("func windowsBundleVersionSDDL(", 1)[1].split("\n}", 1)[0]
     for kind, actual in creators.items():
@@ -393,7 +498,10 @@ def test_receipt_version_name_selects_creator_acl_on_every_asset() -> None:
     assert "store.EnsureStageDirectory = windowsBundleEnsureStageDirectory" in go
     assert "store.PublishStageFile = windowsBundlePublishStageFile" in go
     assert "windowsBundleEnsurePrivateDirectory(filepath.Dir(dst))" in go
-    assert "writeWindowsBundleAdminFile(dst, raw)" in go
+    # The anchors are replaced, then sealed admin-only (w3-g3-obs splits the
+    # two steps so a failed seal is recorded as a changed file).
+    assert "writeWindowsBundleFile(dst, raw)" in go
+    assert "windowsBundlePublishPrivateFile(dst)" in go
     assert "'trust'" in module.split("function Invoke-DefenseClawBundleAclContract {", 1)[1].split("function Set-DefenseClawManagedAcls {", 1)[0]
     assert "s.EnsureStageDirectory(dir, parent)" in store
     assert "if !dirs[parent]" in store
@@ -455,7 +563,7 @@ def test_public_receipt_event_paths_select_public_exact_acl() -> None:
     go = WINDOWS_BUNDLE.read_text(encoding="utf-8")
     go_acl = WINDOWS_BUNDLE_ACL.read_text(encoding="utf-8")
     store = GO_STORE.read_text(encoding="utf-8")
-    assert "store.EnsurePublicReceiptEventsDirectory = ensureWindowsBundlePublicReceiptEventsDirectory" in go
+    _assert_store_ensures_public_receipt_events_with_exact_acl(go)
     assert "ensureErr = s.EnsurePublicReceiptEventsDirectory(eventsDir)" in store
     public_dir = go_acl.split("func windowsBundleDirectorySDDL(", 1)[1].split("\n}", 1)[0]
     public_file = go_acl.split("func windowsBundleReceiptSDDL(", 1)[1].split("\n}", 1)[0]
@@ -499,6 +607,12 @@ def test_uninstall_removes_only_its_gateway_sid_from_the_shared_ipc_dacl() -> No
     assert "$matchingIndexes.Count -ne 1" in matcher
     assert "duplicate ACEs" in matcher
     assert "non-canonical ACE" in matcher
+    # Outside the strict pin every retired-SID ACE is removed and logged; the
+    # shared directory's group and inheritance never block the cleanup.
+    assert "Test-DefenseClawTrustStrictAncestors" in matcher
+    assert "defenseclaw_accept" in matcher
+    assert "Test-DefenseClawTrustStrictAncestors" in descriptor_guard
+    assert "untrusted group" not in descriptor_guard
     assert "Get-DefenseClawServiceSIDForRecovery" in resolver
     assert "Resolve-DefenseClawRetiredGatewayServiceSID" in cleanup
     assert "Remove-DefenseClawSIDFromRawDACL" in cleanup
@@ -703,7 +817,12 @@ def test_every_managed_path_kind_has_an_exact_descriptor(engine: str) -> None:
         timeout=90,
     )
     assert completed.returncode == 0, completed.stderr or completed.stdout
-    payload = json.loads(completed.stdout)
+    # The module's resilience events (defenseclaw_accept and friends) go to
+    # the warning stream, which Windows PowerShell writes to stdout under
+    # -File; the smoke's result is the last line, one compressed JSON object.
+    lines = [line for line in completed.stdout.splitlines() if line.strip()]
+    assert lines, completed.stderr or completed.stdout
+    payload = json.loads(lines[-1])
     descriptor_count = payload.pop("descriptors_checked")
     pairing_count = payload.pop("installer_verifier_pairings_checked")
     # The smoke script checks its descriptor kinds against both module
@@ -721,6 +840,8 @@ def test_every_managed_path_kind_has_an_exact_descriptor(engine: str) -> None:
         "split_explicit_aces_rejected": True,
         "acl_kind_sets_agree": True,
         "state_ancestor_grant_is_additive": True,
+        "widened_prior_grant_collapsed": True,
+        "tree_not_seized": True,
         "managed_ipc_scope_cleanup_exact": True,
         "managed_ipc_other_service_ace_preserved": True,
         "managed_ipc_cleanup_idempotent": True,
@@ -735,3 +856,162 @@ def test_every_managed_path_kind_has_an_exact_descriptor(engine: str) -> None:
         "retained_runtime_secret_hash_preserved": True,
         "retained_runtime_secret_identity_preserved": True,
     }
+
+
+def test_nuclear_purge_is_bounded_scoped_and_truthful() -> None:
+    """The purge never deadlocks, never hard-codes a drive and reports leftovers."""
+    source = MODULE.read_text(encoding="utf-8")
+    silent = _extract_function_body(
+        source,
+        "function Invoke-DefenseClawNuclearSilentExec",
+        "function Get-DefenseClawNuclearServicePresence",
+    )
+    # Both streams drain concurrently and every child has a timeout.
+    assert "ReadToEndAsync()" in silent
+    assert "WaitForExit($TimeoutSeconds * 1000)" in silent
+    assert "$process.Kill()" in silent
+    assert "RedirectStandardInput  = $true" in silent
+
+    nuclear = _extract_function_body(
+        source,
+        "function Invoke-DefenseClawNuclearUninstall",
+        "function Invoke-DefenseClawUninstallLifecycle",
+    )
+    # Locale-independent ownership: no takeown prompt answer anywhere.
+    assert "takeown" not in nuclear
+    assert "'C:\\" not in nuclear
+    assert "$script:ProgramFiles" in nuclear
+    assert "$script:ProgramData" in nuclear
+    # The shared lifecycle folder keeps other scopes' receipts and the lock.
+    assert "Get-DefenseClawStableScopeSHA256" in nuclear
+    assert '"*-$purgeScope.*"' in nuclear
+    assert ".retired-" in nuclear
+    assert "Get-DefenseClawNuclearUserDataPaths" in nuclear
+    # Users are listed before any teardown step can touch the manifest.
+    assert nuclear.index("Get-DefenseClawNuclearUserDataPaths") < nuclear.index("# 1a. Disarm SCM FIRST")
+    user_data = _extract_function_body(
+        source,
+        "function Get-DefenseClawNuclearUserDataPaths",
+        "function Invoke-DefenseClawNuclearUninstall",
+    )
+    # The manifest's data_dir rows are optional; managed-runtime evidence in
+    # a registered interactive profile also counts.
+    assert "Get-DefenseClawNuclearRegisteredProfiles" in user_data
+    assert "Test-DefenseClawNuclearManagedUserDataFolder" in user_data
+    evidence = _extract_function_body(
+        source,
+        "function Test-DefenseClawNuclearManagedUserDataFolder",
+        "function Get-DefenseClawNuclearRegisteredProfiles",
+    )
+    assert "ReparsePoint" in evidence
+    assert "'.managed-runtime-*.json'" in evidence
+    assert '"managed_gateway_service_name"' in evidence
+    assert "ok                                       = ($incomplete.Count -eq 0)" in nuclear
+    assert "reboot_required" in nuclear
+    assert "1072" in nuclear
+
+    remover = _extract_function_body(
+        source,
+        "function Remove-DefenseClawNuclearPath",
+        "function Get-DefenseClawNuclearUserDataPaths",
+    )
+    assert "DeleteTreePrivileged" in remover
+    assert "/setowner" in remover
+    assert "ScheduleDeleteOnRestart" in remover
+    assert "/reset" not in remover
+    assert "public static string[] DeleteTreePrivileged(string root)" in source
+
+
+def test_fresh_install_prunes_orphaned_runtime_selectors() -> None:
+    source = MODULE.read_text(encoding="utf-8")
+    wrapper = _extract_function_body(
+        source,
+        "function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand",
+        "function Get-DefenseClawManagedHooksLegacyActivationClassification",
+    )
+    assert "'prune-orphaned-selectors'" in wrapper
+    for phase in ("'pruned'", "'none_present'", "'skipped_recorded_state'", "'skipped_machine_policy'"):
+        assert phase in wrapper
+    prune = _extract_function_body(
+        source,
+        "function Invoke-DefenseClawOrphanedSelectorPrune",
+        "function Get-DefenseClawTransactionFileSnapshotEntry",
+    )
+    assert "Test-DefenseClawTrustStrictAncestors" in prune
+    assert "selector_paths" in prune
+    assert "'.defenseclaw-managed-runtime-selector.state'" in prune
+    assert "fallback=raw-delete" in prune
+    assert "pruned-selectors.json" in prune
+    install_like = _extract_function_body(
+        source,
+        "function Invoke-DefenseClawInstallLikeLifecycle",
+        "function Invoke-DefenseClawNuclearSilentExec",
+    )
+    call = install_like.index("Invoke-DefenseClawOrphanedSelectorPrune")
+    assert install_like.rfind("-not $priorDeploymentActive", 0, call) > install_like.rfind(
+        "policy staging: $requiredPath", 0, call
+    )
+    assert call < install_like.index("$targetRuntimePlan = Invoke-DefenseClawTargetRuntimePreparation")
+
+
+def test_install_recovers_from_leftover_state_and_reconcile_repairs_services() -> None:
+    source = MODULE.read_text(encoding="utf-8")
+    lifecycle = source[source.index("function Invoke-DefenseClawEnterpriseLifecycle {") :]
+    # Only an Install on the real managed roots, outside the strict pin and
+    # never over a live deployment, clears leftover state and runs again.
+    assert "$installAutoRecoveryEligible = [bool](" in lifecycle
+    assert "$Action -eq 'Install' -and" in lifecycle
+    assert "-not $installLiveDeployment" in lifecycle
+    loop = lifecycle[lifecycle.index("$installRecoveryAttempted = $false") :]
+    assert loop.index("Invoke-DefenseClawInstallAutoRecovery") < loop.index(
+        "$preLayoutRecovery = Invoke-DefenseClawPreLayoutRecovery"
+    )
+    install_call = loop.index("$installResult = Invoke-DefenseClawInstallLikeLifecycle")
+    assert install_call < loop.index("$installRecoveryReason = [string]$_.Exception.Message")
+    # A successful Install, Upgrade or Repair cancels the restart deletes a
+    # held-file purge queued for its paths before it returns.
+    cancel = loop.index("Clear-DefenseClawQueuedRestartDeletes -Layout $layout")
+    assert install_call < cancel < loop.index("return $installResult")
+    # A failed cancel is named in the result field the standalone CLI reads
+    # into its warnings; the CLI drops warnings[] (restart_delete_cancel_failed).
+    failed = loop.index("-Name restart_delete_cancel_failed", cancel)
+    assert failed < loop.index("return $installResult")
+    standalone = (ROOT / "internal" / "cli" / "windows_enterprise_standalone.go").read_text(encoding="utf-8")
+    assert 'RestartDeleteCancelFailed string `json:"restart_delete_cancel_failed"`' in standalone
+    assert "report.RestartDeleteCancelFailed" in standalone
+    recovery = _extract_function_body(
+        source,
+        "function Invoke-DefenseClawInstallAutoRecovery",
+        "function Invoke-DefenseClawEnterpriseLifecycle",
+    )
+    assert "Invoke-DefenseClawNuclearUninstall" in recovery
+    assert "defenseclaw_recover" in recovery
+    assert "Get-DefenseClawInstallLeftoverState" in recovery
+
+    # A rollback that cannot finish keeps the pending transaction for the
+    # next recovery and reports the error that failed the action.
+    install_like = _extract_function_body(
+        source,
+        "function Invoke-DefenseClawInstallLikeLifecycle",
+        "function Invoke-DefenseClawNuclearSilentExec",
+    )
+    assert "rollback did not complete; the pending transaction is kept for recovery" in install_like
+    assert "outside a fresh Install" not in source
+
+    reconcile = _extract_function_body(
+        source,
+        "function Invoke-DefenseClawReconcileLifecycle",
+        "function Get-DefenseClawInstallLeftoverState",
+    )
+    assert reconcile.index("Repair-DefenseClawManagedServiceConfiguration") < reconcile.index(
+        "Assert-DefenseClawEnterpriseDeployment"
+    )
+    config = _extract_function_body(
+        source,
+        "function Assert-DefenseClawServiceConfiguration",
+        "function Get-DefenseClawServiceDacl",
+    )
+    assert "Test-DefenseClawServiceImageSameFile" in config
+    assert "ConvertTo-DefenseClawServiceAccountSID" in config
+    assert "Assert-DefenseClawServiceRegistryAcl -Name $Name -Repair" in config
+    assert "Assert-DefenseClawServiceSecurityDescriptor -Name $Name" in config

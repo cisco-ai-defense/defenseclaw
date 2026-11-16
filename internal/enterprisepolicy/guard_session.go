@@ -20,6 +20,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // Per-session foreign-hook state.
@@ -166,6 +168,16 @@ func SessionPath(accountHome, connector, kind, id string) string {
 	return sessionPathInDir(filepath.Join(accountHome, ".defenseclaw", sessionDirName), connector, kind, id)
 }
 
+// ForeignHookSessionStoreDir is the gateway's private session store of one
+// caller under its data directory. The digest keeps the 1.0.3 store path
+// stable across upgrades.
+func ForeignHookSessionStoreDir(dataDir, identity string) string {
+	if canonical, ok := connector.CanonicalUserScopedIdentity(identity); ok {
+		identity = canonical
+	}
+	return filepath.Join(dataDir, sessionDirName, sha256Hex([]byte(identity))[:40])
+}
+
 func sessionPathInDir(dir, connector, kind, id string) string {
 	name := kind + "-" + sha256Hex([]byte(connector + "\x00" + kind + "\x00" + id))[:40] + ".json"
 	return filepath.Join(dir, name)
@@ -216,14 +228,18 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 	if now.IsZero() {
 		now = time.Now()
 	}
-	if update.RemovalsErr != nil {
-		return sessionUnavailableDecision(decision)
+	removed := ApplyForeignHookRemovals(decision, key, update.Removals, update.RemovalsErr, now)
+	if update.RemovalsErr == nil && removed.Deny != decision.Deny {
+		return removed
 	}
-	if !decision.Deny {
-		if removal, ok := removalAfterProcessStart(update.Removals, key, now); ok {
-			return removedHookDecision(decision, key.Connector, removal)
-		}
-	}
+	// Removals that cannot be read (a ledger that fails its check, a removal
+	// of the account in progress)
+	// deny the call, but they do not skip the session state: a session
+	// start that found an unapproved hook still records its block, and a
+	// block is still carried to the other key. Before, the block was never recorded,
+	// so an earlier allow outlived it once the removals could be read again
+	// (GAP-0352, 1.0.4 guard loop round 3). Nothing else is written.
+	removalsDeny := update.RemovalsErr != nil
 	type loaded struct {
 		path   string
 		record SessionRecord
@@ -310,27 +326,7 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 		return record
 	}
 
-	blockable := hasBlockableFindings(decision)
-	if decision.Deny && update.SessionStart && (blockable || decision.Incomplete) {
-		// The block names the first unapproved hook or plugin; a scan that
-		// stopped on a budget without reaching one names where it stopped
-		// (the last finding).
-		cause, note := Finding{}, sessionBlockNote
-		for _, finding := range decision.Findings {
-			if isBlockableFinding(finding) {
-				cause = finding
-				break
-			}
-		}
-		if !blockable {
-			note = sessionIncompleteNote
-			for _, finding := range decision.Findings {
-				if !finding.Allowed {
-					cause = finding
-				}
-			}
-			cause.Reason = incompleteScanReason + strings.TrimPrefix(cause.Reason, "cannot verify hook file: ")
-		}
+	if cause, note, ok := sessionStartBlockCause(decision, update.SessionStart); ok {
 		blocked := func(existing loaded) SessionRecord {
 			record := fresh(existing)
 			record.Blocked, record.BlockedAt = true, stamp
@@ -379,6 +375,9 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 		return result
 	}
 
+	if removalsDeny {
+		return removed
+	}
 	if process.path != "" && !process.exists {
 		if !write(process.path, fresh(process)) {
 			return sessionUnavailableDecision(decision)
@@ -396,6 +395,36 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 	return decision
 }
 
+// sessionStartBlockCause reports a decision that blocks its session: a
+// session start (sessionStart) whose scan found an unapproved hook or
+// plugin, or stopped on a budget before it checked every source. The cause
+// is the first unapproved hook or plugin; a scan that stopped without
+// reaching one names where it stopped (the last finding). note ends the
+// denial.
+func sessionStartBlockCause(decision GuardDecision, sessionStart bool) (cause Finding, note string, ok bool) {
+	blockable := hasBlockableFindings(decision)
+	if !decision.Deny || !sessionStart || (!blockable && !decision.Incomplete) {
+		return Finding{}, "", false
+	}
+	note = sessionBlockNote
+	for _, finding := range decision.Findings {
+		if isBlockableFinding(finding) {
+			cause = finding
+			break
+		}
+	}
+	if !blockable {
+		note = sessionIncompleteNote
+		for _, finding := range decision.Findings {
+			if !finding.Allowed {
+				cause = finding
+			}
+		}
+		cause.Reason = incompleteScanReason + strings.TrimPrefix(cause.Reason, "cannot verify hook file: ")
+	}
+	return cause, note, true
+}
+
 func validGatewaySessionRecord(record SessionRecord, key SessionKey, kind string) bool {
 	if record.Version != 1 || record.Connector != key.Connector || record.Started == "" ||
 		len(record.State) != len("sha256:")+64 || !strings.HasPrefix(record.State, "sha256:") ||
@@ -411,14 +440,60 @@ func validGatewaySessionRecord(record SessionRecord, key SessionKey, kind string
 	return record.Session == key.Session
 }
 
+// SessionRecordUnavailableReason is the denial of an exchange the session
+// store could not apply (a record read or write that failed, the account's
+// removal lock that could not be taken, or an allow it could not give within
+// the hold). The gateway applies a clean scan's exchange again on it.
+const SessionRecordUnavailableReason = "enterprise_foreign_hook_blocked: DefenseClaw cannot verify this agent session's hook record. Remove any unapproved hook and restart the agent."
+
 func sessionUnavailableDecision(decision GuardDecision) GuardDecision {
 	decision.Deny = true
-	decision.Reason = "enterprise_foreign_hook_blocked: DefenseClaw cannot verify this agent session's hook record. Remove any unapproved hook and restart the agent."
+	decision.Reason = SessionRecordUnavailableReason
+	return decision
+}
+
+// ErrForeignHookRemovalPending is an exchange that could not take its
+// account's removal lock in time (LockForeignHookAccountExchange): the hook
+// guardian is removing one of the account's hooks. The call is denied; the
+// next call after the removal is decided from the removal it recorded.
+var ErrForeignHookRemovalPending = errors.New("a foreign-hook removal of this account is in progress")
+
+// ApplyForeignHookRemovals is the removal step of ApplyForeignHookSession.
+// removalsErr denies the call (a removal in progress with its own reason),
+// and an allowed call of an agent process that started before a removal of
+// its connector for this account is denied. Anything else returns decision
+// unchanged.
+func ApplyForeignHookRemovals(decision GuardDecision, key SessionKey, removals []ForeignHookRemoval, removalsErr error, now time.Time) GuardDecision {
+	switch {
+	case errors.Is(removalsErr, ErrForeignHookRemovalPending):
+		return pendingRemovalDecision(decision, key.Connector)
+	case removalsErr != nil:
+		return sessionUnavailableDecision(decision)
+	case decision.Deny:
+		return decision
+	}
+	if removal, ok := removalAfterProcessStart(removals, key, now); ok {
+		return removedHookDecision(decision, key.Connector, removal)
+	}
+	return decision
+}
+
+// pendingRemovalDecision denies a call of an account whose hook removal is
+// in progress (ErrForeignHookRemovalPending).
+func pendingRemovalDecision(decision GuardDecision, connector string) GuardDecision {
+	decision.Deny = true
+	decision.Reason = "enterprise_foreign_hook_blocked: DefenseClaw is removing an unapproved hook from your account, so it blocks your agents' " + connector +
+		" tool calls until the removal is recorded. Retry the tool call; if the agent loaded the hook, restart it."
+	decision.Findings = append([]Finding{{Connector: connector, Reason: "a hook removal is in progress"}}, decision.Findings...)
 	return decision
 }
 
 // sessionBlockNote ends every denial the session state applies to.
 const sessionBlockNote = "The agent can keep running a hook it loaded when the session started, even after the file changes, so DefenseClaw blocks tool calls for the rest of this session: after removing the hook, restart the agent."
+
+// sessionHookGoneNote ends a session denial once the hook that blocked the
+// session is gone from its file.
+const sessionHookGoneNote = "DefenseClaw blocks this session's tool calls until you restart the agent."
 
 // sessionIncompleteNote ends a denial for a session whose start scan stopped
 // on a budget.
@@ -470,6 +545,17 @@ func stickySessionDecision(decision GuardDecision, connector string, record Sess
 		}
 		cause = fmt.Sprintf("When this agent session started, the %s file %s %s (digest sha256:%s). %s",
 			scope, record.Path, what, record.Digest, foreignHookAdvice(connector, record.Reason))
+		if !decision.Deny && !decision.Incomplete && !hasBlockableFindings(decision) {
+			// This call's scan is clean: the hook was removed (by the
+			// guardian's migration, the user or an administrator) or
+			// approved since, and only the agent process that loaded it
+			// is left. Restarting is the one fix (GAP-1540, LEAD DECISION
+			// 03:34). The scan cannot tell removed from approved, so the
+			// message names both (review RV-2).
+			cause = fmt.Sprintf("When this agent session started, the %s file %s %s (digest sha256:%s). This call's check no longer finds it (it was removed or approved), but this agent loaded it.",
+				scope, record.Path, what, record.Digest)
+			note = sessionHookGoneNote
+		}
 	}
 	decision.Deny = true
 	decision.Reason = fmt.Sprintf(

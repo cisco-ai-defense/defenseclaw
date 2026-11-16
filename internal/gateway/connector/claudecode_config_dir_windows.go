@@ -34,7 +34,7 @@ func ensureClaudeCodeConfigDir(path string) error {
 	if err != nil {
 		return fmt.Errorf("create private Claude Code configuration directory: %w", err)
 	}
-	if err := hookAPIValidateDirectory(path); err != nil {
+	if err := hookAPIValidateUserConfigDirectory(path, created); err != nil {
 		state := "existing"
 		if created {
 			state = "new"

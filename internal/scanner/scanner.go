@@ -18,8 +18,12 @@ package scanner
 
 import (
 	"context"
+	"os/exec"
 	"strings"
 	"sync/atomic"
+	"unicode"
+
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
 // Scanner defines the interface that all scanner implementations must satisfy.
@@ -32,6 +36,11 @@ type Scanner interface {
 	Scan(ctx context.Context, target string) (*ScanResult, error)
 }
 
+// Every scanner child must be contained for its entire lifetime, including
+// descendants that leave the original process group or session, and may
+// start the helpers it needs.
+var runScannerCommand func(*exec.Cmd) error = processutil.RunTracked
+
 // keepFullFailureText is set by KeepFullFailureText.
 var keepFullFailureText atomic.Bool
 
@@ -39,6 +48,28 @@ var keepFullFailureText atomic.Bool
 // unchanged, as main did. The Secure Client profile keeps its scan errors
 // that way (issue #1092).
 func KeepFullFailureText(keep bool) { keepFullFailureText.Store(keep) }
+
+// ScanErrorForAudit keeps scanner diagnostics on one printable line in
+// per-user audit text fields. Secure Client retains its full failure text.
+func ScanErrorForAudit(value string) string {
+	if keepFullFailureText.Load() {
+		return value
+	}
+	return printableScanErrorLine(value)
+}
+
+func printableScanErrorLine(value string) string {
+	value = strings.Map(func(r rune) rune {
+		switch {
+		case unicode.IsSpace(r):
+			return ' '
+		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r):
+			return -1
+		}
+		return r
+	}, value)
+	return strings.Join(strings.Fields(value), " ")
+}
 
 // scannerFailureText is a scanner subprocess's stderr as it is reported to the
 // caller: a Python traceback is cut to its exception line, so interpreter and

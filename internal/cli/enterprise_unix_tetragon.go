@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // unixTetragonOptions are the flags of `enterprise linux tetragon <action>`.
@@ -65,7 +67,7 @@ config change.
 
 These commands read the helper's state files and write only the pause file;
 they never connect to Tetragon. Run as root:
-sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon ...
+sudo ` + managed.StandaloneGatewayPath("linux") + ` enterprise linux tetragon ...
 
 Exit codes: 0 success, 1 failure, 2 invalid arguments.`,
 		PersistentPreRunE: func(*cobra.Command, []string) error { return nil },

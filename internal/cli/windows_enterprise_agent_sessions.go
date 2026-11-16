@@ -80,7 +80,7 @@ var (
 	// windowsEnterpriseEnrolledTargets returns the targets the installed
 	// guardian manifest enrolls, keyed as windowsEnterpriseManifestRowKey.
 	windowsEnterpriseEnrolledTargets = func() (map[string]bool, error) {
-		layout, err := managed.StandaloneWindowsLayout()
+		layout, err := windowsManagedLayout.standalone()
 		if err != nil {
 			return nil, err
 		}
@@ -109,7 +109,7 @@ var (
 	// put back each target's hooks, keyed as windowsEnterpriseManifestRowKey,
 	// or an error when its record stays unreadable.
 	windowsEnterpriseGuardianRestores = func() (map[string]time.Time, error) {
-		layout, err := managed.StandaloneWindowsLayout()
+		layout, err := windowsManagedLayout.standalone()
 		if err != nil {
 			return nil, err
 		}
@@ -306,8 +306,14 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 	}
 	processes, err := windowsEnterpriseAgentProcesses()
 	if err != nil {
+		// A snapshot that cannot be read says nothing about the sessions, so
+		// their restart status is named unknown, not left out
+		// (rel-1-0-2:GAP-0672).
 		if restoresErr != nil {
 			result.AddWarning(windowsAgentSessionsRestartCode, "restart status unknown: the hook guardian's restore record and running agent sessions could not be read")
+		} else {
+			result.SecurityComplete = false
+			result.AddWarning(windowsAgentSessionsRestartCode, "restart status unknown: the running agent sessions could not be read, so DefenseClaw cannot tell whether an agent session started before its hooks were installed: "+err.Error())
 		}
 		return
 	}
@@ -337,7 +343,10 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 	// process kept running, or an unreachable directory): judged by their SID
 	// below, and named as unknown if no verdict and no enrolled target covers
 	// them (GAP-0591).
-	type sidOnlySession struct{ sid, connector, label string }
+	type sidOnlySession struct {
+		sid, connector, label string
+		pid                   int
+	}
 	var sidOnly []sidOnlySession
 	sids := map[string]string{}
 	for _, process := range processes {
@@ -353,17 +362,19 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 		}
 		if user == "" && sid == "" {
 			unknownOwners[name] = append(unknownOwners[name], label)
+			result.NotePendingSession(name, process.PID)
 			continue
 		}
 		if user == "" {
 			user = sid
-			sidOnly = append(sidOnly, sidOnlySession{sid: sid, connector: name, label: label})
+			sidOnly = append(sidOnly, sidOnlySession{sid: sid, connector: name, label: label, pid: process.PID})
 		}
 		if process.StartedAt.IsZero() {
 			continue
 		}
 		if !activated.IsZero() && process.StartedAt.Before(activated) {
 			byUser[user] = append(byUser[user], label)
+			result.NotePendingSession(name, process.PID)
 			continue
 		}
 		if currentErr != nil || !currentSet[name] {
@@ -374,6 +385,7 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 				connectorSessions[user] = map[string][]string{}
 			}
 			connectorSessions[user][name] = append(connectorSessions[user][name], label)
+			result.NotePendingSession(name, process.PID)
 			continue
 		}
 		if len(record.EnrollmentActivatedAt) == 0 && len(restores) == 0 && restoresErr == nil {
@@ -390,6 +402,7 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 		if sid == "" {
 			if restoresErr != nil && !windowsMachinePolicyHookConnectors[name] {
 				unknownSessions[user] = append(unknownSessions[user], label)
+				result.NotePendingSession(name, process.PID)
 			}
 			continue
 		}
@@ -399,6 +412,7 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 				enrollmentSessions[user] = map[string][]string{}
 			}
 			enrollmentSessions[user][key] = append(enrollmentSessions[user][key], label)
+			result.NotePendingSession(name, process.PID)
 			continue
 		}
 		if windowsMachinePolicyHookConnectors[name] {
@@ -406,6 +420,7 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 		}
 		if restoresErr != nil {
 			unknownSessions[user] = append(unknownSessions[user], label)
+			result.NotePendingSession(name, process.PID)
 			continue
 		}
 		if at, ok := restores[key]; ok && process.StartedAt.Before(at) {
@@ -413,6 +428,7 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 				restoredSessions[user] = map[string][]string{}
 			}
 			restoredSessions[user][key] = append(restoredSessions[user][key], label)
+			result.NotePendingSession(name, process.PID)
 		}
 	}
 	users := make([]string, 0, len(byUser))
@@ -508,6 +524,7 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 				continue
 			}
 			unknownOwners[session.connector] = append(unknownOwners[session.connector], session.label+" as "+session.sid)
+			result.NotePendingSession(session.connector, session.pid)
 		}
 	}
 	warnWindowsEnterpriseUnknownOwnerSessions(result, unknownOwners)
@@ -543,17 +560,13 @@ func windowsServiceIdentity(user string) bool {
 	return false
 }
 
-// windowsServiceSID reports built-in and virtual service identities that may
-// have no account name in a process snapshot.
+// windowsServiceSID reports a process owner SID that names no interactive
+// user account: a built-in, virtual or IIS application pool service
+// identity, which may have no account name in a process snapshot. It
+// classifies owners as the enumerator does (GAP-0673).
 func windowsServiceSID(sid string) bool {
-	sid = strings.ToUpper(strings.TrimSpace(sid))
-	switch sid {
-	case "S-1-5-18", "S-1-5-19", "S-1-5-20":
-		return true
-	}
-	return strings.HasPrefix(sid, "S-1-5-80-") ||
-		strings.HasPrefix(sid, "S-1-5-90-") ||
-		strings.HasPrefix(sid, "S-1-5-96-")
+	sid = strings.TrimSpace(sid)
+	return sid != "" && !enterprisehooks.WindowsInteractiveUserSID(sid)
 }
 
 // windowsEnterpriseSessionNamed reports whether a restart-status verdict of
@@ -642,6 +655,7 @@ func warnWindowsEnterpriseHotAgentSessions(result *enterprisestatus.Result, prev
 		label := fmt.Sprintf("%s (pid %d)", process.Connector, process.PID)
 		if user == "" && sid == "" {
 			unknownOwners[name] = append(unknownOwners[name], label)
+			result.NotePendingSession(name, process.PID)
 			continue
 		}
 		if process.StartedAt.IsZero() || !process.StartedAt.Before(changedAt) {
@@ -651,6 +665,7 @@ func warnWindowsEnterpriseHotAgentSessions(result *enterprisestatus.Result, prev
 			user = sid
 		}
 		byUser[user] = append(byUser[user], label)
+		result.NotePendingSession(name, process.PID)
 	}
 	users := make([]string, 0, len(byUser))
 	for user := range byUser {

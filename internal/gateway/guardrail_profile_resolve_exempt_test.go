@@ -23,6 +23,7 @@ import (
 // A no-profile deployment still has an organization sandbox floor. Resolve
 // must report the same enrollment exemption as the hook for that floor.
 func TestProfileResolveWithoutProfilesReportsHookExemption(t *testing.T) {
+	managedExplainView(t) // the managed administrator view of made-up accounts
 	previousLookup, previousFacts := profileExplainSubjectLookup, managedHookExemptFacts
 	previousEnabled := identityFactsEnabled.Load()
 	t.Cleanup(func() {
@@ -35,8 +36,11 @@ func TestProfileResolveWithoutProfilesReportsHookExemption(t *testing.T) {
 	facts := useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
 		Source: useridentity.SourceSSSD, Assurance: useridentity.AssuranceVerified,
 		AccountDomain: "CORP", Domain: "corp.example", Principal: "carol@corp.example", ResolvedAt: time.Now()}
-	managedHookExemptFacts = func(uid int) (useridentity.DirectoryFacts, bool) {
-		return facts, uid == 2203
+	managedHookExemptFacts = func(uid int, _ bool) (useridentity.DirectoryFacts, exemptFactsState) {
+		if uid == 2203 {
+			return facts, exemptFactsCurrent
+		}
+		return facts, exemptFactsNone
 	}
 	profileExplainSubjectLookup = func(name string) (profileSubject, error) {
 		switch name {

@@ -13,7 +13,6 @@
 package enterpriseunix
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,16 +57,39 @@ func TestManagedConfigPatternNamesAllowedFormat(t *testing.T) {
 	}
 }
 
-func TestManagedConfigModeAndProfileNameOnlyInstalledChoices(t *testing.T) {
+func TestManagedConfigModeNamesOnlyInstalledChoices(t *testing.T) {
 	h := newTestHost(t, "linux")
 	mode := &config.V8SchemaError{Path: "$.deployment_mode", Keyword: "enum", Expected: `one of ["","managed_enterprise","saas"]`, Value: "standalone"}
 	got, ok := h.env.plainConfigProblem(mode, "/tmp/admin.yaml", nil)
 	if !ok || !strings.Contains(got, "allowed values: managed_enterprise") || strings.Contains(got, "saas") {
 		t.Fatalf("deployment mode = %q", got)
 	}
-	got, ok = h.env.plainConfigProblem(errors.New(`config: enterprise.profile="secure_client" conflicts with immutable DEFENSECLAW_ENTERPRISE_PROFILE="standalone"`), "/tmp/admin.yaml", nil)
-	if !ok || !strings.Contains(got, "fixed to standalone") || strings.Contains(got, "DEFENSECLAW_ENTERPRISE_PROFILE") {
-		t.Fatalf("enterprise profile = %q", got)
+}
+
+// GAP-2213: a per-connector enum whose schema allows "" (unset, inherit the
+// global value) names only the values an administrator can type.
+func TestManagedConfigEnumLeavesOutTheUnsetChoice(t *testing.T) {
+	h := newTestHost(t, "linux")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "connector-fail-mode.yaml")
+	raw := string(DefaultConfig(h.env.Layout))
+	raw = strings.Replace(raw, "guardrail:\n", "guardrail:\n  connectors:\n    codex:\n      hook_fail_mode: OPEN\n", 1)
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: path})
+	requireError(t, r, codeConfig)
+	got := r.Errors[0].Message
+	if !strings.Contains(got, `guardrail.connectors.codex.hook_fail_mode is "OPEN"; allowed values: open, closed.`) ||
+		strings.Contains(got, "allowed values: ,") {
+		t.Fatalf("connector hook_fail_mode error = %q", got)
+	}
+	// GAP-2226: config validate on a managed host (PlainConfigRefusal) words
+	// enterprise.openshell.install the same way.
+	install := &config.V8SchemaError{Path: "$.enterprise.openshell.install", Keyword: "enum", Expected: `one of ["","prerequisite","setup"]`, Value: "bogusmode"}
+	got, ok := h.env.PlainConfigRefusal(install, "/tmp/admin.yaml", nil)
+	if !ok || !strings.Contains(got, "allowed values: prerequisite, setup.") || strings.Contains(got, "allowed values: ,") {
+		t.Fatalf("openshell install error = %q", got)
 	}
 }
 
@@ -206,6 +228,19 @@ func TestManagedConfigNamesTheMalformedAgentIdentity(t *testing.T) {
 	if !strings.Contains(got, `guardrail.profile_assignments[0].match.agents[0] is "agt-49fb88f74f28975"`) ||
 		!strings.Contains(got, "agt- followed by 16 lowercase hexadecimal digits") {
 		t.Fatalf("agent identity: %s", got)
+	}
+}
+
+// GAP-0760 (#1099): a severity override the composer would refuse (INFO) is
+// refused by the schema check with the value and the words it takes, the
+// ones block_at takes, in any case.
+func TestManagedConfigNamesTheSeverityOverrideWords(t *testing.T) {
+	h := newTestHost(t, "linux")
+	raw := string(DefaultConfig(h.env.Layout)) + "  rules:\n    severity_overrides:\n      SEC-AWS-SECRET: INFO\n"
+	got := installMessage(t, h, raw)
+	if !strings.Contains(got, "severity_overrides") || !strings.Contains(got, `is "INFO"`) ||
+		!strings.Contains(got, "one of CRITICAL, HIGH, MEDIUM, LOW in any case") {
+		t.Fatalf("severity override: %s", got)
 	}
 }
 
@@ -378,6 +413,24 @@ func TestManagedConfigNamesMissingKeyAndSizeLimit(t *testing.T) {
 		got, ok := h.env.plainConfigProblem(err, "/tmp/admin.yaml", []byte(doc))
 		if !ok || !strings.Contains(got, want) {
 			t.Fatalf("refusal = %q (handled %t), want %q", got, ok, want)
+		}
+	}
+}
+
+// rel-1-0-4 GAP-0590: an administrator's openshell path that is not
+// absolute is refused with the requirement, not "does not match the
+// setting's required format".
+func TestManagedConfigOpenShellPathsNameTheAbsolutePathRequirement(t *testing.T) {
+	for _, tc := range []struct{ setting, value, want string }{
+		{"trusted_ca_bundle", "proxy-root-ca.pem", "openshell.trusted_ca_bundle must be an absolute path: a managed configuration needs an absolute path to an administrator-owned file"},
+		{"trusted_ca_bundle", "./proxy-root-ca.pem", "openshell.trusted_ca_bundle must be an absolute path: a managed configuration needs an absolute path to an administrator-owned file"},
+		{"trusted_ca_bundle", "~/proxy-root-ca.pem", "a managed configuration needs an absolute path to an administrator-owned file"},
+		{"pack_dir", "sandbox-packs", "openshell.pack_dir must be an absolute path or one starting with ~/"},
+	} {
+		h := newTestHost(t, "linux")
+		got := installMessage(t, h, string(DefaultConfig(h.env.Layout))+"openshell:\n  "+tc.setting+": "+tc.value+"\n")
+		if !strings.Contains(got, tc.want) || strings.Contains(got, "required format") {
+			t.Fatalf("%s: %s: %s", tc.setting, tc.value, got)
 		}
 	}
 }

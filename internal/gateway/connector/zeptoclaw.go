@@ -146,7 +146,7 @@ func (c *ZeptoClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 
 	// Surface 3: Plugin subprocess enforcement
 	policy := ResolveSubprocessPolicy(SubprocessShims)
-	if err := SetupSubprocessEnforcement(policy, opts); err != nil {
+	if err := SetupSubprocessEnforcement(policy, opts, c.Name()); err != nil {
 		return fmt.Errorf("zeptoclaw subprocess enforcement: %w", err)
 	}
 
@@ -172,7 +172,12 @@ func (c *ZeptoClawConnector) Teardown(ctx context.Context, opts SetupOpts) error
 	if len(errs) > 0 {
 		return fmt.Errorf("zeptoclaw teardown errors: %s", strings.Join(errs, "; "))
 	}
-	return nil
+	if !opts.ManagedEnterprise && opts.DataDir != "" {
+		if err := c.VerifyClean(opts); err != nil {
+			return fmt.Errorf("zeptoclaw verify clean before token revocation: %w", err)
+		}
+	}
+	return revokePerUserHookAPIToken(opts, c.Name())
 }
 
 func (c *ZeptoClawConnector) VerifyClean(opts SetupOpts) error {

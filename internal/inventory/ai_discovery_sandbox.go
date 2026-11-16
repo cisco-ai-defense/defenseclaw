@@ -20,7 +20,6 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"sort"
@@ -28,6 +27,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -82,7 +82,7 @@ const (
 
 // sandboxNamePattern accepts the names of sandbox directories the scan
 // records live in (DefenseClaw sandbox names are shorter and stricter).
-var sandboxNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
+var sandboxNamePattern = lazyregexp.New(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 
 // SandboxScanDirForConfig is <data_dir>/sandboxes while sandboxes are on, and
 // empty otherwise and on Windows, where sandboxes do not run.
@@ -543,7 +543,51 @@ func (s *ContinuousDiscoveryService) lookPath(name string) (string, error) {
 		}
 		return "", exec.ErrNotFound
 	}
-	return exec.LookPath(name)
+	dirs := s.binaryFallbackDirs
+	if dirs == nil && runtime.GOOS == "darwin" {
+		dirs = macOSDiscoveryBinaryDirs(s.opts.HomeDir)
+	}
+	if found, err := exec.LookPath(name); err == nil {
+		if !s.userHomeScan || dirs == nil ||
+			evidenceInsideHome([]AIEvidence{{RawPath: found}}, []string{s.opts.HomeDir}) ||
+			evidenceInSystemBinaryDirs([]AIEvidence{{Type: "binary", RawPath: found}}, dirs) {
+			return found, nil
+		}
+	} else if dirs == nil {
+		return found, err
+	}
+	// launchd services inherit a sparse PATH. Probe the conventional macOS
+	// install locations and the scanned user's bins without changing PATH or
+	// executing the candidate. The sandbox branch above stays isolated.
+	return lookPathInDirs(name, dirs)
+}
+
+func macOSDiscoveryBinaryDirs(home string) []string {
+	return discoveryBinaryDirsWithHome(macOSDiscoverySystemBinaryDirs(), home)
+}
+
+func macOSDiscoverySystemBinaryDirs() []string {
+	return []string{"/usr/local/bin", "/opt/homebrew/bin", "/opt/local/bin", "/opt/dc-agents/bin"}
+}
+
+func discoveryBinaryDirsWithHome(systemDirs []string, home string) []string {
+	dirs := append([]string(nil), systemDirs...)
+	if home != "" {
+		dirs = append(dirs, filepath.Join(home, ".local", "bin"), filepath.Join(home, "bin"))
+	}
+	return dirs
+}
+
+func lookPathInDirs(name string, dirs []string) (string, error) {
+	if name == "" || name != filepath.Base(name) || name == "." || name == ".." {
+		return "", exec.ErrNotFound
+	}
+	for _, dir := range dirs {
+		if found, err := exec.LookPath(filepath.Join(dir, name)); err == nil {
+			return found, nil
+		}
+	}
+	return "", exec.ErrNotFound
 }
 
 // environment is the process environment as KEY=VALUE pairs; a sandbox
@@ -564,8 +608,16 @@ func (s *ContinuousDiscoveryService) variable(name string) (string, bool) {
 		value, ok := s.sandbox.variables[name]
 		return value, ok
 	}
+	if discoveryVariableOverride != nil {
+		return discoveryVariableOverride(name)
+	}
 	return platformDiscoveryVariable(name, s.opts.HomeDir)
 }
+
+// discoveryVariableOverride replaces the platform lookup of a path variable
+// ($APPDATA, ...) in tests, which on Windows otherwise reads the account's
+// known folders and ignores the environment. nil in production.
+var discoveryVariableOverride func(name string) (string, bool)
 
 // hostOnlyDetector reports a detector of a machine-wide surface, which a
 // sandbox scan does not run.
@@ -574,7 +626,7 @@ func (s *ContinuousDiscoveryService) hostOnlyDetector(name string) bool {
 		return false
 	}
 	switch name {
-	case "application", "editor_extension", "local_endpoint", "local_model_api", "model_file":
+	case "application", claudeDesktopDetector, "editor_extension", "local_endpoint", "local_model_api", "model_file":
 		return true
 	}
 	return false
@@ -739,5 +791,7 @@ func (s *ContinuousDiscoveryService) attributeSandboxSignal(sig AISignal, id, na
 		sig.Runtime = &runtimeInfo
 	}
 	sig.Model = nil
+	// A sandbox scan runs no claude_desktop detector (hostOnlyDetector).
+	sig.ClaudeDesktop = nil
 	return sig
 }

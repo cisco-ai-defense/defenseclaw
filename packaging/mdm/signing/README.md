@@ -11,7 +11,7 @@ The artifact and the options you install it with choose the channel:
   deployment was installed with. A later `ensure` by the installed CLI (for
   example the Intune Remediations script) keeps it, so a hash-pinned
   deployment stays `hash_pinned`.
-- **Windows CLI** (`defenseclaw.exe enterprise windows ...` from an extracted
+- **Windows CLI** (`.\defenseclaw.exe enterprise windows ...` from an extracted
   payload): `--trust-mode authenticode` is the default; `--trust-mode
   hash_pinned` needs `--payload-manifest`, and `--allowed-signer` pins
   signers.
@@ -53,16 +53,31 @@ verdict. Use hash-pinned trust for a payload archive.
 
 ```sh
 export AUTHENTICODE_PFX=/secure/codesign.pfx AUTHENTICODE_PFX_PASSWORD=...
+signer=$(packaging/mdm/signing/authenticode-sign.sh --thumbprint)
 packaging/windows/standalone/build-setup.sh --version 1.4.0 \
-  --sign-command packaging/mdm/signing/authenticode-sign.sh
+  --sign-command packaging/mdm/signing/authenticode-sign.sh \
+  --signing-type PROD --expected-signer-sha256 "$signer"
 ```
 
 The helper:
 
 - signs PE files and PowerShell scripts in place with osslsigncode 2.5 or
-  later, SHA-256, with an RFC 3161 timestamp;
+  later, SHA-256, with an RFC 3161 timestamp (`AUTHENTICODE_TIMESTAMP_URL=none`
+  skips it, for throwaway test certificates only);
 - verifies the result;
-- prints `signer_sha256=<thumbprint>`.
+- prints `signer_sha256=<thumbprint>`; `--thumbprint` prints only the
+  thumbprint of `AUTHENTICODE_PFX` and signs nothing.
+
+The build runs on Linux or macOS. Before it appends the payload,
+`windows-avc-assembler` checks each signed inner file with `osslsigncode
+verify` against `--expected-signer-sha256`: `PROD` needs a chain to a root in
+the build host's CA store, `DEV` also accepts a chain that ends at a
+certificate the signature carries (a test or self-signed certificate). On a
+Windows build host the same check runs with PowerShell.
+
+`packaging/windows/standalone/prove-signing-path.sh --version <v> --out-dir
+<dir>` runs the whole signed build with a self-signed certificate it creates
+and deletes; every release dry run runs it. Its Setup is a test artifact.
 
 The thumbprint is the SHA-256 of the DER signer certificate, the value to
 pin. It matches what Windows computes from `SignerCertificate.RawData`, and

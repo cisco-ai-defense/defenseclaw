@@ -15,7 +15,7 @@ import (
 func TestTrustedActionCurlCapabilityBoundProofs(t *testing.T) {
 	t.Parallel()
 
-	generation := mustCompileRulePackGeneration(defaultRuleCategories)
+	generation := mustCompileRulePackGeneration(defaultRuleCategories())
 	finding := trustedActionDispositionTestFinding(t, generation, "SEC-OPENAI")
 	full := actionfacts.CurlCapability{
 		Executable: "curl",

@@ -33,7 +33,7 @@ func runEmitManifest(args []string) error {
 	out := fs.String("out", "", "output path for manifest.json")
 	// --unsigned stamps `"unsigned": true` into the manifest and appends
 	// "-unsigned" to distribution_flavor unless the caller explicitly
-	// passes --distribution-flavor. Used by the spec 002 assemble path
+	// passes --distribution-flavor. Used by the AVC kit's assemble path
 	// when running under --allow-unsigned for the local developer loop;
 	// the runtime hash gate at stageEnterprisePayload keys off the
 	// same field to refuse non-disposable-scope installs.
@@ -73,8 +73,7 @@ func runEmitManifest(args []string) error {
 	// this via `fs.Visit` after Parse (rather than comparing against
 	// the default) is the only correct way; an explicit
 	// `--distribution-flavor managed-enterprise --unsigned` needs to
-	// stay `managed-enterprise`, not be re-suffixed. See CR
-	// spec-002:PRRT_kwDORuAK-s6ahAB9.
+	// stay `managed-enterprise`, not be re-suffixed.
 	explicitFlavor := false
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "distribution-flavor" {
@@ -188,8 +187,8 @@ func requireFlags(flags map[string]string) error {
 }
 
 // validateSourceCommit refuses anything but a 40-char lowercase hex
-// git OID. This is the same shape scripts/build-windows-installer.ps1
-// asserts for gateway-source-commit.txt.
+// git OID, the shape packaging/scripts/build-managed-windows-bundle.sh
+// writes to gateway-source-commit.txt.
 func validateSourceCommit(sha string) error {
 	if len(sha) != 40 {
 		return errors.New("--source-commit must be a 40-char lowercase git OID")

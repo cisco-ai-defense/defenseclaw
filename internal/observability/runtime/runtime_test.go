@@ -443,11 +443,7 @@ func TestRuntimeActivationBindsBeforeOldGenerationRetires(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("generation two did not activate while old lease was held")
 	}
-	select {
-	case outcome := <-reloadDone:
-		t.Fatalf("reload returned before old generation retirement: %+v", outcome)
-	default:
-	}
+	// The reload returned once generation two was published (#1302).
 	// Invoke the generationBindingHealthReporter test double directly to prove
 	// activation ordering while the old lease is still held. The production
 	// SidecarHealth rejection path is covered by
@@ -522,6 +518,7 @@ func TestRuntimeTelemetryProviderSharesExactGraphGenerationAndRetirement(t *test
 	if first == second || secondGeneration != firstGeneration+1 {
 		t.Fatalf("provider/generation reused across reload: %p/%d -> %p/%d", first, firstGeneration, second, secondGeneration)
 	}
+	waitRuntimeRetired(t, runtime)
 	if first.Enabled() {
 		t.Fatal("retired runtime graph left telemetry provider enabled")
 	}
@@ -772,3 +769,14 @@ func TestRuntimeMandatoryFloorPersistsWhenCollectionDisabled(t *testing.T) {
 }
 
 var _ runtimegraph.Reporter = (*discardGraphReporter)(nil)
+
+// waitRuntimeRetired waits until the graphs a reload retired are torn down:
+// a reload returns once the new graph is published (#1302).
+func waitRuntimeRetired(t *testing.T, runtime *Runtime) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := runtime.manager.WaitCleanup(ctx); err != nil {
+		t.Fatalf("retired generation was not torn down: %v", err)
+	}
+}

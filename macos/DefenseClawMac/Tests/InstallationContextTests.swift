@@ -24,6 +24,7 @@ struct InstallationContextTests {
     static func main() async {
         CLIProcessGroupLauncher.execIfRequested()
         sourcePrecedenceMatchesRuntime()
+        defaultSourceLauncherOutranksLeftoverVenv()
         managedLayoutAndCapabilitiesAreExact()
         explicitUnreadableAndRelativePathsFailClosed()
         configPathsAndVenvResolveIndependently()
@@ -37,6 +38,43 @@ struct InstallationContextTests {
         await lowerLevelMutationGateSurvivesRebind()
         await gatewayPOSTGateFailsBeforeNetwork()
         print("InstallationContextTests passed")
+    }
+
+    private static func defaultSourceLauncherOutranksLeftoverVenv() {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("defenseclaw-runtime-choice-\(UUID().uuidString)")
+            .resolvingSymlinksInPath()
+        let runtime = root.appendingPathComponent("checkout/.venv")
+        let oldRuntime = root.appendingPathComponent(".defenseclaw/.venv")
+        let launcher = root.appendingPathComponent(".local/bin/defenseclaw")
+        let fm = FileManager.default
+        defer { try? fm.removeItem(at: root) }
+        do {
+            for venv in [runtime, oldRuntime] {
+                try fm.createDirectory(at: venv.appendingPathComponent("bin"), withIntermediateDirectories: true)
+                for relative in ["bin/defenseclaw", "bin/python", "pyvenv.cfg"] {
+                    try Data().write(to: venv.appendingPathComponent(relative))
+                }
+            }
+            try fm.createDirectory(at: launcher.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try fm.createSymbolicLink(at: launcher, withDestinationURL: runtime.appendingPathComponent("bin/defenseclaw"))
+            func context(_ environment: [String: String] = [:], managed: Bool = false) -> InstallationContext {
+                InstallationContext.resolve(environment: environment, appConfigOverride: nil, userHome: root,
+                    fileExists: { $0.hasPrefix(root.path) && fm.fileExists(atPath: $0) },
+                    readText: { _ in managed ? "deployment_mode: managed_enterprise\n" : "config_version: 8\n" })
+            }
+            let selected = context()
+            expect(selected.venvURL.path == runtime.path, "published source launcher wins over leftover packaged runtime")
+            expect(selected.configURL.path == root.appendingPathComponent(".defenseclaw/config.yaml").path, "runtime selection preserves config")
+            expect(selected.dataDirectory.path == root.appendingPathComponent(".defenseclaw").path, "runtime selection preserves data")
+            expect(context(["DEFENSECLAW_VENV": oldRuntime.path]).venvURL.path == oldRuntime.path, "explicit venv remains pinned")
+            expect(context(["DEFENSECLAW_HOME": root.appendingPathComponent(".defenseclaw").path]).venvURL.path == oldRuntime.path, "explicit home remains pinned")
+            expect(context(managed: true).venvURL.path == oldRuntime.path, "managed config never adopts user source launcher")
+            try fm.removeItem(at: runtime.appendingPathComponent("pyvenv.cfg"))
+            expect(context().venvURL.path == oldRuntime.path, "non-venv launcher does not invent a Python environment")
+            try fm.removeItem(at: launcher)
+            expect(context().venvURL.path == oldRuntime.path, "absent launcher preserves normal packaged default")
+        } catch { fatalError("Runtime selection fixture failed: \(error)") }
     }
 
     private static func sourcePrecedenceMatchesRuntime() {

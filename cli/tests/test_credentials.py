@@ -373,28 +373,7 @@ class RequirementPredicateTests(unittest.TestCase):
         cfg = _make_cfg("/tmp/dc-test", guardrail=GuardrailConfig(enabled=True))
         self.assertEqual(C._defenseclaw_llm_key(cfg), C.Requirement.OPTIONAL)
 
-    def test_defenseclaw_llm_key_optional_for_omnigent_without_judge(self):
-        cfg = _make_cfg(
-            "/tmp/dc-test",
-            guardrail=GuardrailConfig(
-                enabled=True,
-                mode="action",
-                connector="omnigent",
-                judge=JudgeConfig(enabled=False),
-            ),
-        )
-        self.assertEqual(C._defenseclaw_llm_key(cfg), C.Requirement.OPTIONAL)
 
-    def test_defenseclaw_llm_key_required_for_omnigent_judge(self):
-        cfg = _make_cfg(
-            "/tmp/dc-test",
-            guardrail=GuardrailConfig(
-                enabled=True,
-                connector="omnigent",
-                judge=JudgeConfig(enabled=True),
-            ),
-        )
-        self.assertEqual(C._defenseclaw_llm_key(cfg), C.Requirement.REQUIRED)
 
     def test_defenseclaw_llm_key_ignores_stale_primary_when_connector_set_is_active(self):
         cfg = _make_cfg(
@@ -402,35 +381,13 @@ class RequirementPredicateTests(unittest.TestCase):
             claw=ClawConfig(mode="openclaw"),
             guardrail=GuardrailConfig(
                 enabled=True,
-                connectors={"omnigent": PerConnectorGuardrailConfig()},
+                connectors={},
                 judge=JudgeConfig(enabled=False),
             ),
         )
         self.assertEqual(C._defenseclaw_llm_key(cfg), C.Requirement.OPTIONAL)
 
-    def test_defenseclaw_llm_key_optional_for_omnigent_connector_set_without_judge(self):
-        cfg = _make_cfg(
-            "/tmp/dc-test",
-            claw=ClawConfig(mode="omnigent"),
-            guardrail=GuardrailConfig(
-                enabled=True,
-                connectors={"omnigent": PerConnectorGuardrailConfig()},
-                judge=JudgeConfig(enabled=False),
-            ),
-        )
-        self.assertEqual(C._defenseclaw_llm_key(cfg), C.Requirement.OPTIONAL)
 
-    def test_defenseclaw_llm_key_required_for_omnigent_connector_set_judge(self):
-        cfg = _make_cfg(
-            "/tmp/dc-test",
-            claw=ClawConfig(mode="omnigent"),
-            guardrail=GuardrailConfig(
-                enabled=True,
-                connectors={"omnigent": PerConnectorGuardrailConfig()},
-                judge=JudgeConfig(enabled=True),
-            ),
-        )
-        self.assertEqual(C._defenseclaw_llm_key(cfg), C.Requirement.REQUIRED)
 
     def test_defenseclaw_llm_key_optional_with_local_guardrail(self):
         """Local provider needs no key, but the knob is still surfaced."""
@@ -452,6 +409,21 @@ class RequirementPredicateTests(unittest.TestCase):
             ),
         )
         self.assertEqual(C._defenseclaw_llm_key(cfg), C.Requirement.REQUIRED)
+
+    def test_defenseclaw_llm_key_not_required_when_skill_scanner_llm_off(self):
+        # p0 GAP-1368: a resolved hosted model with use_llm false still made
+        # the default key required.
+        def cfg(use_llm: bool) -> Config:
+            return _make_cfg(
+                "/tmp/dc-test",
+                scanners=ScannersConfig(
+                    skill_scanner=SkillScannerConfig(use_llm=use_llm, llm=LLMConfig(model="anthropic/claude-sonnet-5-5")),
+                ),
+            )
+
+        self.assertTrue(C._any_llm_component_uses_default_key(cfg(True)))
+        self.assertFalse(C._any_llm_component_uses_default_key(cfg(False)))
+        self.assertNotEqual(C._defenseclaw_llm_key(cfg(False)), C.Requirement.REQUIRED)
 
 
 class EffectiveEnvNameTests(unittest.TestCase):

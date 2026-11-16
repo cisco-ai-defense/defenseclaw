@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // LaunchAgentState contains the service fields needed to judge an on-demand
@@ -51,7 +53,7 @@ func (s LaunchAgentState) Failure(expectedRunning bool) string {
 	if s.State == "running" {
 		return ""
 	}
-	if strings.Contains(strings.ToUpper(s.ExitReason), "CODESIGN") || strings.Contains(strings.ToUpper(s.SpawnError), "CODESIGN") {
+	if s.CodeSigningKilled() {
 		return "last start was killed for code signing (" + strings.TrimSpace(s.ExitReason+" "+s.SpawnError) + ")"
 	}
 	if s.SpawnError != "" {
@@ -61,6 +63,12 @@ func (s LaunchAgentState) Failure(expectedRunning bool) string {
 		return "loaded but not running when it must be running"
 	}
 	return ""
+}
+
+// CodeSigningKilled reports a job that is not running because macOS killed
+// or refused its last start for code signing (OS_REASON_CODESIGNING).
+func (s LaunchAgentState) CodeSigningKilled() bool {
+	return s.State != "running" && (strings.Contains(strings.ToUpper(s.ExitReason), "CODESIGN") || strings.Contains(strings.ToUpper(s.SpawnError), "CODESIGN"))
 }
 
 // Notice describes an idle job's previous exit without treating an on-demand
@@ -85,7 +93,8 @@ func (s LaunchAgentState) Notice() string {
 // CheckIDManagedLaunchAgent is the managed Mac's current-user gateway job.
 const CheckIDManagedLaunchAgent = "managed-openshell-launchagent"
 
-const managedLaunchAgentLabel = "com.cisco.defenseclaw.openshell-gateway"
+// managedLaunchAgentsDir is where the gateway job's plist is; a var for tests.
+var managedLaunchAgentsDir = LaunchAgentsDir
 
 // ManagedLaunchAgentCheck reads the current user's loaded gateway job in both
 // launchd domains; an ssh session can leave it in user/<uid>.
@@ -96,9 +105,10 @@ func (d *Doctor) ManagedLaunchAgentCheck(ctx context.Context) *Check {
 	}
 	d.defaults()
 	uid := strconv.Itoa(d.Geteuid())
+	label, _ := FindLaunchAgent(managedLaunchAgentsDir, GatewayAgentBase)
 	var failed, warning, healthy *Check
 	for _, domain := range []string{"gui/" + uid, "user/" + uid} {
-		target := domain + "/" + managedLaunchAgentLabel
+		target := domain + "/" + label
 		raw, err := d.Runner.Output(ctx, Command{Name: "launchctl", Args: []string{"print", target}, Timeout: 10 * time.Second})
 		if err != nil && launchAgentMissing(raw, err) {
 			continue
@@ -120,8 +130,8 @@ func (d *Doctor) ManagedLaunchAgentCheck(ctx context.Context) *Check {
 			continue
 		}
 		if why := state.Failure(false); why != "" {
-			c.Status, c.Detail = StatusFail, target+" is "+why
-			c.Fix = &Fix{Summary: "ask your administrator to repair this computer's sandbox LaunchAgent", Command: "sudo defenseclaw-gateway enterprise macos repair", Sudo: true}
+			c.Status, c.Detail = StatusFail, target+" failed: "+why
+			c.Fix = &Fix{Summary: "ask your administrator to repair this computer's sandbox LaunchAgent", Command: macosRepairCommand(), Sudo: true}
 			if failed == nil {
 				failed = c
 			}
@@ -156,4 +166,11 @@ func (d *Doctor) ManagedLaunchAgentCheck(ctx context.Context) *Check {
 func launchAgentMissing(raw []byte, err error) bool {
 	message := strings.ToLower(string(raw) + " " + err.Error())
 	return strings.Contains(message, "could not find service") || strings.Contains(message, "could not find domain") || strings.Contains(message, "no such process")
+}
+
+// macosRepairCommand is the administrator's repair of a managed Mac, with the
+// gateway by its absolute path: it is not on the PATH (cowork-1-0-8
+// GAP-0081).
+func macosRepairCommand() string {
+	return "sudo " + managed.StandaloneGatewayPath("darwin") + " enterprise macos repair"
 }

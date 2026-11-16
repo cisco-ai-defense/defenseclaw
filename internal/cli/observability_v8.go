@@ -185,21 +185,9 @@ func recordDestinationTestActivity(
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-DefenseClaw-Client", "python-cli")
 
-	dialer := &net.Dialer{Timeout: destinationTestComplianceTimeout}
-	client := &http.Client{
-		Timeout: destinationTestComplianceTimeout,
-		Transport: &http.Transport{
-			Proxy:               nil,
-			DialContext:         dialer.DialContext,
-			DisableCompression:  true,
-			ForceAttemptHTTP2:   false,
-			MaxIdleConns:        1,
-			MaxIdleConnsPerHost: 1,
-			IdleConnTimeout:     time.Second,
-		},
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
+	client, err := gatewayPeerClient(loaded.runtime, access.host, access.port, destinationTestComplianceTimeout)
+	if err != nil {
+		return errors.New("destination-test compliance recorder is unavailable")
 	}
 	response, err := client.Do(request)
 	if err != nil {
@@ -299,22 +287,9 @@ func requestTraceCanary(
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-DefenseClaw-Client", "python-cli")
 
-	dialer := &net.Dialer{Timeout: timeout}
-	client := &http.Client{
-		Timeout: timeout,
-		Transport: &http.Transport{
-			Proxy:                 nil,
-			DialContext:           dialer.DialContext,
-			DisableCompression:    true,
-			DisableKeepAlives:     true,
-			ForceAttemptHTTP2:     false,
-			MaxIdleConns:          1,
-			MaxIdleConnsPerHost:   1,
-			ResponseHeaderTimeout: timeout,
-		},
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
+	client, err := gatewayPeerClient(loaded.runtime, access.host, access.port, timeout)
+	if err != nil {
+		return traceCanaryFailure(destination, "gateway_unavailable")
 	}
 	response, err := client.Do(request)
 	if err != nil {

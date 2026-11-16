@@ -77,11 +77,16 @@ func TestClaudeSlashSkillDeniedWhereGatewaySkipsUserProfiles(t *testing.T) {
 			ExpansionType: "slash_command", CommandName: name, CommandSource: source, CWD: project,
 		})
 	}
+	// The hook can report the folder under another spelling of the home
+	// (a redirected or aliased profile path) that matches no candidate
+	// (r102 GAP-0676).
+	aliased := filepath.Join(filepath.Dir(home), "alias-of-home", ".claude", "skills", "fc-wm-denied")
 	for _, source := range []string{"userSettings", "projectSettings", ""} {
 		for label, ctx := range map[string]context.Context{
-			"user skill reported":    reporting(userSkill),
-			"project skill reported": reporting(projectSkill),
-			"unreported":             peer,
+			"user skill reported":                  reporting(userSkill),
+			"project skill reported":               reporting(projectSkill),
+			"unreported":                           peer,
+			"reported under another home spelling": reporting(aliased),
 		} {
 			got := slash(ctx, source, "fc-wm-denied")
 			if len(got) != 1 || got[0].decision.Action != "block" {
@@ -95,7 +100,10 @@ func TestClaudeSlashSkillDeniedWhereGatewaySkipsUserProfiles(t *testing.T) {
 				t.Fatalf("source %q, %s: reason %q does not name the skill", source, label, reason)
 			}
 		}
-		for label, ctx := range map[string]context.Context{"reported": reporting(allowedSkill), "unreported": peer} {
+		for label, ctx := range map[string]context.Context{
+			"reported": reporting(allowedSkill), "unreported": peer,
+			"reported under another home spelling": reporting(filepath.Join(filepath.Dir(aliased), "fc-wm-allowed")),
+		} {
 			for _, got := range slash(ctx, source, "fc-wm-allowed") {
 				if got.decision.Action == "block" {
 					t.Fatalf("source %q, %s: /fc-wm-allowed = %+v, want it to expand", source, label, got)

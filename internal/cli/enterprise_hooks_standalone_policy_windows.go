@@ -14,11 +14,13 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
@@ -31,8 +33,36 @@ import (
 
 func init() {
 	enterprisehooks.SetWindowsOpenCodeMachinePolicy(windowsOpenCodeMachinePolicy)
+	enterprisehooks.SetWindowsOpenCodeServicePortWriter(func(home string, port int) (int, error) {
+		result, err := enterprisepolicy.SetOpenCodeServicePort(home, port)
+		return result.Port, err
+	})
 	enterprisehooks.SetWindowsClaudeManagedHooksOnlyPolicy(windowsClaudeManagedHooksOnlyEnforced)
 	enterprisehooks.SetWindowsCopilotVSCodeUser(windowsCopilotVSCodeUser)
+	enterpriseHookVerifyRunScope = func() func() {
+		enterpriseHookVerifyProfiles.Store(&enterpriseHookProfileList{})
+		return func() { enterpriseHookVerifyProfiles.Store(nil) }
+	}
+}
+
+// enterpriseHookVerifyProfiles holds, for one `enterprise hooks verify` or
+// `readiness` run, the eligible profile list its target checks share: the
+// Copilot row check of an account's Claude Code user settings listed every
+// profile again for each row (GAP-1970). It is nil outside a run, so a check
+// outside one lists the profiles itself.
+var enterpriseHookVerifyProfiles atomic.Pointer[enterpriseHookProfileList]
+
+// enterpriseHookProfileList lists the profiles once, on first use, for every
+// check of one run.
+type enterpriseHookProfileList struct {
+	once     sync.Once
+	profiles []enterprisehooks.TargetCredentials
+	err      error
+}
+
+func (l *enterpriseHookProfileList) get(list func() ([]enterprisehooks.TargetCredentials, error)) ([]enterprisehooks.TargetCredentials, error) {
+	l.once.Do(func() { l.profiles, l.err = list() })
+	return l.profiles, l.err
 }
 
 // windowsCopilotVSCodeUser places, checks (verify) or removes DefenseClaw's
@@ -42,10 +72,50 @@ func init() {
 // standalone removal falls back to the deployment's own hook launcher, the
 // one the files were rendered for.
 func windowsCopilotVSCodeUser(home string, verify, remove bool) error {
+	return windowsCopilotVSCodeUserAccepting(home, verify, remove, false)
+}
+
+// windowsCopilotVSCodeUserAccepting is windowsCopilotVSCodeUser; acceptPrior is
+// windowsCopilotVSCodeUserFilesAccepting's.
+func windowsCopilotVSCodeUserAccepting(home string, verify, remove, acceptPrior bool) error {
 	opts, ok, err := windowsCopilotVSCodeUserOptions(remove && !verify)
 	if err != nil || !ok {
 		return err
 	}
+	var settingsErr error
+	if verify && !remove && !enterpriseHookGuardianWatching.Load() {
+		if err := windowsClaudeUserSettingsMigrated(home); err != nil {
+			notes := enterpriseHookReadinessNotes.Load()
+			if notes == nil {
+				settingsErr = err
+			} else {
+				notes.add(err.Error())
+			}
+		}
+	}
+	err = windowsCopilotVSCodeUserFilesAccepting(opts, home, verify, remove, acceptPrior)
+	switch {
+	case settingsErr == nil:
+		return err
+	case err != nil:
+		return fmt.Errorf("%v; %w", settingsErr, err)
+	}
+	// The row's only fault is the account's own Claude settings file: its
+	// DefenseClaw hooks are in place, so verify compares the guardian's
+	// protected records with it as protected (GAP-0031).
+	return enterpriseHookUserFileFault{err: settingsErr}
+}
+
+// windowsCopilotVSCodeUserFiles places, checks (verify) or removes the VS
+// Code Local hook file and Copilot plugin themselves.
+func windowsCopilotVSCodeUserFiles(opts enterprisepolicy.Options, home string, verify, remove bool) error {
+	return windowsCopilotVSCodeUserFilesAccepting(opts, home, verify, remove, false)
+}
+
+// windowsCopilotVSCodeUserFilesAccepting is windowsCopilotVSCodeUserFiles; with
+// acceptPrior (a read-only verify), files that hold exactly the render of
+// releases up to 1.0.6 count as current (GAP-0980).
+func windowsCopilotVSCodeUserFilesAccepting(opts enterprisepolicy.Options, home string, verify, remove, acceptPrior bool) error {
 	hookFile, plugin := enterprisepolicy.CopilotVSCodeUserWant(opts)
 	if remove {
 		hookFile, plugin = false, false
@@ -57,15 +127,115 @@ func windowsCopilotVSCodeUser(home string, verify, remove bool) error {
 		HookFile:   hookFile,
 		Plugin:     plugin,
 		DryRun:     verify,
+
+		AcceptPriorRelease: acceptPrior,
 	})
 	if err != nil {
 		return err
 	}
-	if verify && len(result.Kept) > 0 {
-		return fmt.Errorf("DefenseClaw's Copilot plugin under %s holds hooks DefenseClaw did not write: %s; the guardian leaves such a file in place and the foreign-hook guard denies this user's Copilot calls while it is there: move it aside, and the guardian writes DefenseClaw's plugin on its next pass", home, strings.Join(result.Kept, ", "))
+	if !remove && len(result.Kept) > 0 {
+		return fmt.Errorf("copilot hook files under %s hold handlers DefenseClaw did not write: %s; DefenseClaw leaves them in place and does not claim Local hook coverage", home, strings.Join(result.Kept, ", "))
 	}
 	if verify && len(result.Changed)+len(result.Removed) > 0 {
 		return fmt.Errorf("DefenseClaw's VS Code Local hooks under %s are not current: %s", home, strings.Join(append(result.Changed, result.Removed...), ", "))
+	}
+	return nil
+}
+
+// windowsClaudeUserSettingsMigrated is the verify check (enterprise verify and
+// ensure fail the row; Setup's readiness reports it as a warning, the
+// guardian's own pass skips it) that an account's Claude Code user settings,
+// which Copilot CLI in a project under the home and Cursor read, hold none of
+// DefenseClaw's older per-user hooks and can be read at all. Either one makes
+// the foreign-hook guard deny those agents' tool calls, so verify is not ok
+// and names the file and the reason instead of the calls failing with no
+// status error (GAP-1540, LEAD DECISION 03:34). Read-only; an account the
+// eligible profile list does not name is not checked. A verify or readiness
+// run lists the profiles once for all its rows (GAP-1970). Tests replace it.
+var windowsClaudeUserSettingsMigrated = func(home string) error {
+	list := func() ([]enterprisehooks.TargetCredentials, error) {
+		return enterpriseHookWindowsEligibleProfiles(context.Background())
+	}
+	var profiles []enterprisehooks.TargetCredentials
+	var err error
+	if run := enterpriseHookVerifyProfiles.Load(); run != nil {
+		profiles, err = run.get(list)
+	} else {
+		profiles, err = list()
+	}
+	if err != nil {
+		return nil
+	}
+	for _, profile := range profiles {
+		if strings.TrimSpace(profile.SID) == "" || strings.TrimSpace(profile.UserHome) == "" ||
+			!strings.EqualFold(filepath.Clean(profile.UserHome), filepath.Clean(home)) {
+			continue
+		}
+		return windowsClaudeUserSettingsMigrationError(profile)
+	}
+	return nil
+}
+
+// appendWindowsClaudeUserSettingsWarnings warns claude_settings_unmigrated,
+// in the status, verify and ensure result (Setup /status, /verify, /ensure
+// and Intune detection read it), for each enrolled account whose Claude Code
+// user settings the guardian's migration cannot finish or has not finished:
+// that account's Copilot CLI in a home project and Cursor block their tool
+// calls on the file, and only `enterprise hooks verify` and the guardian log
+// named it while the deployment reported healthy (GAP-1967). It is a warning,
+// as in Setup's readiness: one account's file never fails the host.
+func appendWindowsClaudeUserSettingsWarnings(result *enterprisestatus.Result, accounts []enterprisestatus.EnrollmentAccount) {
+	seen := map[string]bool{}
+	for _, account := range accounts {
+		sid := strings.ToUpper(strings.TrimSpace(account.SID))
+		if sid == "" || seen[sid] {
+			continue
+		}
+		seen[sid] = true
+		home, err := windowsEnterpriseClaudeSettingsHome(sid)
+		if err != nil || strings.TrimSpace(home) == "" {
+			continue
+		}
+		err = windowsClaudeUserSettingsMigrationError(enterprisehooks.TargetCredentials{UserHome: home, UID: -1, GID: -1, SID: sid})
+		if err == nil {
+			continue
+		}
+		result.AddWarning("claude_settings_unmigrated", err.Error())
+	}
+}
+
+// windowsClaudeSettingsCheckerIsLocalSystem reports whether this process runs
+// as LocalSystem. Tests replace it.
+var windowsClaudeSettingsCheckerIsLocalSystem = func() bool {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	return err == nil && user != nil && user.User.Sid != nil && user.User.Sid.IsWellKnown(windows.WinLocalSystemSid)
+}
+
+// windowsEnterpriseClaudeSettingsHome resolves an enrolled account's profile
+// folder from its SID. Tests replace it.
+var windowsEnterpriseClaudeSettingsHome = windowsEnterpriseHookSIDProfilePath
+
+// windowsClaudeUserSettingsMigrationError is the verify error for one
+// account's Claude Code user settings, or nil. Access denied is an error only
+// under LocalSystem, the identity of Setup and the guardian, which read every
+// profile: an elevated administrator console cannot read a profile whose
+// settings carry a private ACL, and its `enterprise hooks verify` and status
+// failed that account on a file the guardian reads and migrates.
+func windowsClaudeUserSettingsMigrationError(target enterprisehooks.TargetCredentials) error {
+	settings := filepath.Join(target.UserHome, ".claude", "settings.json")
+	present, _, err := windowsManagedClaudeRegistrationProbe(target.UserHome, target.SID)
+	if err != nil && errors.Is(err, os.ErrPermission) && !windowsClaudeSettingsCheckerIsLocalSystem() {
+		return nil
+	}
+	switch {
+	case err != nil:
+		return fmt.Errorf("DefenseClaw cannot check %s for its older per-user hooks (%w); "+
+			"until the file is valid JSON or removed, Copilot CLI in a project "+
+			"under the home and Cursor block their tool calls on it", settings, err)
+	case present:
+		return fmt.Errorf("%s still holds DefenseClaw's older per-user Claude Code hooks; the guardian removes them "+
+			"on its next pass, and until then Copilot CLI in a project under the home and Cursor block their tool calls on them; "+
+			"if this stays, DefenseClaw cannot write the file (read-only or locked, see the guardian log): remove the hooks by hand", settings)
 	}
 	return nil
 }
@@ -129,20 +299,10 @@ var windowsOpenCodeMachinePolicy = func() (string, bool) {
 	return path, err == nil && present
 }
 
+// windowsStandaloneGuardianOptions is the guardian's machine policy options
+// from the loaded config.
 func windowsStandaloneGuardianOptions() (enterprisepolicy.Options, []string, bool, error) {
-	if cfg == nil || !cfg.StandaloneEnterprise() {
-		return enterprisepolicy.Options{}, nil, false, nil
-	}
-	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
-	if err != nil {
-		return enterprisepolicy.Options{}, nil, true, err
-	}
-	opts, err := enterprisepolicy.StandaloneOptions(layout, programFiles, programData, cfg)
-	if err != nil {
-		return enterprisepolicy.Options{}, nil, true, err
-	}
-	opts.ClaudeMachineHookContract = standaloneClaudeMachineHookContract(layout)
-	return opts, enterprisepolicy.StandaloneConnectors(cfg), true, nil
+	return standaloneGuardianOptionsFor(cfg)
 }
 
 // enterpriseHookStandalonePlatformPrepare publishes the Go-owned Windows
@@ -152,10 +312,18 @@ func windowsStandaloneGuardianOptions() (enterprisepolicy.Options, []string, boo
 // of users the machine policies no longer enroll. Failure is
 // reported, not fatal: rows that depend on the policy (Copilot) fail their
 // own verification, and `enterprise policy verify` reports a missing floor.
-func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) {
+// The one failure it returns is a vendor folder that does not protect
+// DefenseClaw's recorded policy file (E3 case c): the reconcile names it and
+// is not clean, as Setup's lifecycle and machine-policy verify judge the
+// same folder (GAP-0756, GAP-0760). Secure Client returns nil.
+func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) error {
+	if cfg != nil && cfg.SecureClientIntegration() {
+		enterpriseHookSecureClientPlatformPrepare(stderr)
+		return nil
+	}
 	opts, connectors, standalone, err := enterpriseHookWindowsGuardianOptions()
 	if !standalone {
-		return
+		return nil
 	}
 	// After this pass's revocations and before any row: a deferred row
 	// whose SID kept a selection would fail its pending proof (GAP-0262).
@@ -164,16 +332,68 @@ func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) {
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): %v\n", err)
-		return
+		return nil
+	}
+	// Before the machine policy the hook-side guard enforces is published:
+	// an account this pass enrolls never meets DefenseClaw's own older
+	// per-user Claude Code hooks as foreign hooks (GAP-1540). The finish
+	// step reports what is left once per cleanup interval.
+	for _, profile := range windowsClaudeMigrationProfiles() {
+		migrateWindowsClaudeUserHooks(io.Discard, stderr, profile)
+	}
+	// A managed_hooks_only change is machine policy only: write it into the
+	// Claude Code drop-in here, before any row, so no enrolled account needs
+	// its own Windows session for it (cowork-1-0-8 GAP-0064).
+	applyHooksOnlyLock := func() error {
+		written, err := enterpriseHookWindowsClaudeHooksOnlyLock()
+		if err != nil {
+			fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): Claude Code managed_hooks_only: %v\n", err)
+		} else if written {
+			fmt.Fprintf(stderr, "[hook-guardian] wrote the configured managed_hooks_only setting into DefenseClaw's Claude Code drop-in\n")
+		}
+		return err
+	}
+	// The summary the hook-side guard reads turns the Claude Code
+	// foreign-hook guard off under the lock and on without it. The lock goes
+	// on before the summary turns the guard off, and comes off only after
+	// the summary turned the guard on, so a session that starts between the
+	// two writes always has one of them. The gateway keeps serving during a
+	// guardian-only restart (GAP-0044), so that span is live.
+	// A lock that could not be written on the way to enforce leaves the
+	// published summary as it was, so the guard stays on until a pass
+	// writes the lock (or an undo goes back to preserve). Only the summary
+	// is held back: the other connectors' machine policy is reconciled as
+	// on every pass. opts itself stays whole for the steps below.
+	lockFirst := windowsClaudeManagedHooksOnlyEnforced()
+	publishOpts := opts
+	if lockFirst && applyHooksOnlyLock() != nil {
+		publishOpts.PublicPolicyPath = ""
+		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): the hook-side summary was not updated, so the Claude Code foreign-hook guard stays on until the managed_hooks_only lock is written\n")
 	}
 	windowsStandaloneGoOwnedPolicyMu.Lock()
-	_, err = enterprisepolicy.PublishWindowsGoOwned(opts, connectors)
+	published, err := enterpriseHookWindowsPublishGoOwned(publishOpts, connectors)
 	windowsStandaloneGoOwnedPolicyMu.Unlock()
+	// A vendor policy file DefenseClaw has no record of that another account
+	// can change and the publish just failed to use or move aside is the same
+	// refusal as a weak recorded folder: alerted once, and the pass is not
+	// clean (GAP-0930).
+	unrecorded := enterpriseHookWindowsUnrecordedFiles(opts, connectors)
+	reportWindowsGuardianVendorFolders(stderr, published, err, unrecorded)
+	var refusal error
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): %v\n", err)
+		if len(windowsVendorFolderRefusals(err)) != 0 {
+			refusal = err
+		}
+	}
+	for _, problem := range unrecorded {
+		refusal = errors.Join(refusal, fmt.Errorf("%s: %s", problem.Connector, problem.Message))
 	}
 	if _, err := enterpriseHookWindowsClaudeVersionFloor(opts, connectors); err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): Claude Code version floor: %v\n", err)
+	}
+	if !lockFirst {
+		_ = applyHooksOnlyLock()
 	}
 	if _, err := enterpriseHookWindowsWSL(opts); err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): WSL agent sessions: %v\n", err)
@@ -183,7 +403,98 @@ func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) {
 	} else if refreshed {
 		fmt.Fprintf(stderr, "[hook-guardian] rewrote the Cursor enterprise adapter for this release\n")
 	}
+	return refusal
 }
+
+// enterpriseHookWindowsUnrecordedFiles is replaceable in tests.
+var enterpriseHookWindowsUnrecordedFiles = enterprisepolicy.UnrecordedPolicyFileProblems
+
+// windowsVendorFolderRefusals is replaceable in tests.
+var windowsVendorFolderRefusals = enterprisepolicy.VendorFolderRefusals
+
+// enterpriseHookWindowsHookRepairedAudit is replaceable in tests.
+var enterpriseHookWindowsHookRepairedAudit = postWindowsManagedHookRepaired
+
+// enterpriseHookWindowsVendorFolderAlert is replaceable in tests.
+var enterpriseHookWindowsVendorFolderAlert = postWindowsManagedCoverageAlert
+
+// windowsGuardianVendorFolderRefusals remembers, by folder, the refusal each
+// vendor folder had at the last pass, so the audit alert is written when a
+// folder's refusal appears or changes and not at every pass. A folder that is
+// healed or no longer refused is forgotten, so a refusal that comes back
+// after a recovery is alerted again.
+var (
+	windowsGuardianVendorFolderMu       sync.Mutex
+	windowsGuardianVendorFolderRefusals = map[string]string{}
+)
+
+// reportWindowsGuardianVendorFolders reports, once each, what the pass did to
+// the vendor folders DefenseClaw did not create that hold a file it recorded:
+// a folder it re-protected gets one HIGH connector-hook-repaired audit row
+// and one log line; a refused folder gets one alert row naming it (and not a
+// repaired row), and the log line at every pass (GAP-0756, GAP-0760). An
+// alert that could not be written is tried again at the next pass.
+func reportWindowsGuardianVendorFolders(stderr io.Writer, published enterprisepolicy.Result, publishErr error, unrecorded []enterprisepolicy.VendorFolderProblem) {
+	for _, state := range published.States {
+		for _, folder := range state.Reprotected {
+			fmt.Fprintf(stderr, "[hook-guardian] re-protected %s (%s): %s; access list before %s, after %s\n",
+				folder.Dir, folder.Connector, folder.Why, folder.Before, folder.After)
+			for _, note := range folder.Displaced {
+				fmt.Fprintf(stderr, "[hook-guardian] %s\n", note)
+			}
+			if err := enterpriseHookWindowsHookRepairedAudit(folder, "defenseclaw-hook-guardian"); err != nil {
+				fmt.Fprintf(stderr, "[hook-guardian] the audit row for %s could not be written: %v\n", folder.Dir, err)
+			}
+		}
+	}
+	refused := map[string]bool{}
+	var fresh []enterprisepolicy.VendorFolderRefusal
+	windowsGuardianVendorFolderMu.Lock()
+	refusals := windowsVendorFolderRefusals(publishErr)
+	for _, problem := range unrecorded {
+		// Keyed by the file: its folder may be fine.
+		refusals = append(refusals, enterprisepolicy.VendorFolderRefusal{Dir: problem.File, Message: problem.Message})
+	}
+	for _, refusal := range refusals {
+		key := windowsGuardianVendorFolderKey(refusal.Dir)
+		refused[key] = true
+		if windowsGuardianVendorFolderRefusals[key] != refusal.Message {
+			windowsGuardianVendorFolderRefusals[key] = refusal.Message
+			fresh = append(fresh, refusal)
+		}
+	}
+	for key := range windowsGuardianVendorFolderRefusals {
+		if !refused[key] {
+			delete(windowsGuardianVendorFolderRefusals, key)
+		}
+	}
+	windowsGuardianVendorFolderMu.Unlock()
+	for _, refusal := range fresh {
+		if err := enterpriseHookWindowsVendorFolderAlert("managed-vendor-folder", "managed_vendor_folder_not_protected",
+			windowsVendorFolderAlertDetails(refusal.Dir, refusal.Message)); err != nil {
+			fmt.Fprintf(stderr, "[hook-guardian] the audit row for the refused vendor folder %s could not be written: %v\n", refusal.Dir, err)
+			windowsGuardianVendorFolderMu.Lock()
+			delete(windowsGuardianVendorFolderRefusals, windowsGuardianVendorFolderKey(refusal.Dir))
+			windowsGuardianVendorFolderMu.Unlock()
+		}
+	}
+}
+
+func windowsGuardianVendorFolderKey(dir string) string {
+	return strings.ToLower(filepath.Clean(dir))
+}
+
+// windowsVendorFolderAlertDetails are the details of the
+// managed_vendor_folder_not_protected alert, from the guardian and from Setup.
+func windowsVendorFolderAlertDetails(dir, message string) map[string]any {
+	return map[string]any{"coverage_state": "incomplete", "path": dir, "message": message}
+}
+
+// enterpriseHookWindowsClaudeHooksOnlyLock is replaceable in tests.
+var enterpriseHookWindowsClaudeHooksOnlyLock = enterprisehooks.ApplyWindowsClaudeManagedHooksOnlyLock
+
+// enterpriseHookWindowsPublishGoOwned is replaceable in tests.
+var enterpriseHookWindowsPublishGoOwned = enterprisepolicy.PublishWindowsGoOwned
 
 // enterpriseHookWindowsCursorAdapterRefresh is replaceable in tests.
 var enterpriseHookWindowsCursorAdapterRefresh = enterprisehooks.RefreshWindowsCursorManagedAdapter
@@ -227,10 +538,11 @@ func windowsStandalonePerUserEnrollmentKeep(manifest enterprisehooks.Manifest) f
 }
 
 // pruneWindowsStandalonePerUserEnrollments revokes per-user connector
-// enrollment for SIDs the manifest no longer authorizes, so a removed user
-// or disabled connector fails closed before any target runtime is touched.
+// enrollment (Copilot's alone on Secure Client) for SIDs the manifest no
+// longer authorizes, so a removed user or disabled connector fails closed
+// before any target runtime is touched.
 func pruneWindowsStandalonePerUserEnrollments(manifest enterprisehooks.Manifest, hookBinary string) error {
-	if cfg == nil || !cfg.StandaloneEnterprise() {
+	if cfg == nil || (!cfg.StandaloneEnterprise() && !cfg.SecureClientIntegration()) {
 		return nil
 	}
 	return enterprisehooks.PruneWindowsPerUserManagedEnrollments(
@@ -242,6 +554,9 @@ func pruneWindowsStandalonePerUserEnrollments(manifest enterprisehooks.Manifest,
 // enterpriseHookWindowsUserCleanupAttempt removes one user's DefenseClaw
 // registration; replaceable in tests.
 var enterpriseHookWindowsUserCleanupAttempt enterpriseHookUserCleanupAttempt = attemptWindowsStandaloneUserCleanup
+
+// enterpriseHookWindowsRevokeHookPathDotdirGrant is replaceable in tests.
+var enterpriseHookWindowsRevokeHookPathDotdirGrant = enterprisehooks.RevokeGatewayInventoryReadOnHookPathDotdirs
 
 // enterpriseHookWindowsRequireTargetSession and
 // enterpriseHookWindowsUserCleanupIdentity are replaceable in tests.
@@ -255,6 +570,62 @@ func windowsStandalonePerUserCleanupConnector(name string) bool {
 	return perUser
 }
 
+// windowsStandaloneRevokedUserCleanupConnector is the set the guardian cleans
+// after a user loses enrollment: the per-user connectors, whose registrations
+// live in the account's agent configuration, and the machine-scope ones
+// (Claude Code, Codex, Cursor), whose scoped hook token, hook config and
+// runtime records stay in the account's DefenseClaw folder after the machine
+// enrollment is revoked (GAP-0916). Uninstall's own plan keeps
+// windowsStandalonePerUserCleanupConnector.
+func windowsStandaloneRevokedUserCleanupConnector(name string) bool {
+	return windowsStandalonePerUserCleanupConnector(name) || enterprisehooks.WindowsMachineScopeUserRuntimeConnector(name)
+}
+
+// enterpriseHookWindowsConnectorUserRuntimeRemover and
+// enterpriseHookWindowsOffRosterPublisher are replaceable in tests.
+var (
+	enterpriseHookWindowsConnectorUserRuntimeRemover = enterprisehooks.RemoveWindowsConnectorUserRuntime
+	enterpriseHookWindowsOffRosterPublisher          = enterprisehooks.PublishWindowsConnectorOffRoster
+)
+
+// enterpriseHookStandalonePlatformClearStaleOffRoster removes the off-roster
+// marker of every connector the loaded config publishes, before the pass
+// republishes its machine policy: a connector back on the roster never keeps a
+// marker into the pass that publishes its policy again. The markers of the
+// connectors still off the roster are published after the machine policy is
+// synced (enterpriseHookStandalonePlatformRevokeUsers).
+func enterpriseHookStandalonePlatformClearStaleOffRoster(stderr io.Writer) {
+	if cfg == nil || !cfg.StandaloneEnterprise() || !enterprisehooks.WindowsStandaloneProcess() {
+		return
+	}
+	clearWindowsStandaloneOffRosterMarkers(stderr, func(name string) bool { return enterprisepolicy.StandaloneConnectorPublished(cfg, name) })
+}
+
+// clearWindowsStandaloneOffRosterMarkers removes the markers of the published
+// connectors; a failure is logged, and the marker then only keeps the hook's
+// refusal (the hook allows nothing while the policy is present).
+func clearWindowsStandaloneOffRosterMarkers(stderr io.Writer, published func(string) bool) {
+	for _, name := range []string{"claudecode", "codex"} {
+		if published(name) {
+			if err := enterpriseHookWindowsOffRosterPublisher(name, false); err != nil {
+				fmt.Fprintf(stderr, "defenseclaw: enterprise off-roster marker for %s: %v\n", name, err)
+			}
+		}
+	}
+}
+
+// publishWindowsStandaloneOffRosterMarkers publishes, for Claude Code and
+// Codex, whether the loaded config leaves the connector off the roster; a
+// failure is logged and the previous marker stays, which only keeps the hook's
+// existing refusal.
+func publishWindowsStandaloneOffRosterMarkers(stderr io.Writer, published func(string) bool) {
+	for _, name := range []string{"claudecode", "codex"} {
+		if err := enterpriseHookWindowsOffRosterPublisher(name, !published(name)); err != nil {
+			fmt.Fprintf(stderr, "defenseclaw: enterprise off-roster marker for %s: %v\n", name, err)
+		}
+	}
+}
+
 // enterpriseHookStandalonePlatformRevokeUsers removes DefenseClaw's own hook
 // registrations and plugins (Amp, Antigravity, Copilot, Devin, Hermes,
 // OpenCode) from the agent configuration of every user whose row the
@@ -266,15 +637,176 @@ func enterpriseHookStandalonePlatformRevokeUsers(ctx context.Context, stderr io.
 	if cfg == nil || !cfg.StandaloneEnterprise() || !enterprisehooks.WindowsStandaloneProcess() {
 		return nil
 	}
+	// A connector back on the roster for an account, or an account that is
+	// gone, ends its removed-connectors record; a machine-scope connector the
+	// config no longer publishes is recorded for each account the guardian's
+	// last pass or its ledger held a row of it for.
+	published := func(name string) bool { return enterprisepolicy.StandaloneConnectorPublished(cfg, name) }
+	// The hook of a running agent is told the connector is off the roster
+	// through a marker it can read as the user.
+	publishWindowsStandaloneOffRosterMarkers(stderr, published)
+	if err := pruneEnterpriseHookRemovedConnectors(cfg.DataDir, manifest, published,
+		func(sid string) bool { return enterpriseHookWindowsUserProfileRemoved(sid) },
+		time.Now()); err != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise removed connectors record: %v\n", err)
+	}
+	var held []enterpriseHookReconcileRow
+	if state, _, err := loadEnterpriseHookGuardianState(cfg.DataDir); err == nil {
+		held = append(held, state.Results...)
+	}
+	if authorization, _, err := loadEnterpriseHookGuardianAuthorization(cfg.DataDir); err == nil {
+		held = append(held, authorization.ProtectedTargets...)
+	}
+	// The files of a connector that left the roster are found in the accounts'
+	// own folders, not only through the rows the guardian held, and an account
+	// found that way is recorded as not managed like any other (GAP-0964).
+	now := time.Now()
+	discovered := windowsStandaloneOffRosterRuntimeCleanups(ctx, stderr, published, held, now)
+	recorded := held
+	for _, entry := range discovered {
+		recorded = append(recorded, enterpriseHookReconcileRow{
+			UserHome: entry.UserHome, SID: entry.SID, Connector: entry.Connector,
+		})
+	}
+	if err := recordEnterpriseHookRemovedConnectors(cfg.DataDir, recorded, manifest, published,
+		enterprisehooks.WindowsMachineScopeUserRuntimeConnector, now); err != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise removed connectors record: %v\n", err)
+	}
 	return reconcileEnterpriseHookUserCleanups(
 		ctx,
 		stderr,
 		cfg.DataDir,
 		manifest,
-		windowsStandalonePerUserCleanupConnector,
+		windowsStandaloneRevokedUserCleanupConnector,
+		discovered,
+		windowsStandaloneReAddedHold(ctx, published),
 		enterpriseHookWindowsUserCleanupAttempt,
-		time.Now(),
+		now,
 	)
+}
+
+// enterpriseHookWindowsConnectorUserRuntimeLeftovers is replaceable in tests.
+var enterpriseHookWindowsConnectorUserRuntimeLeftovers = enterprisehooks.WindowsConnectorUserRuntimeLeftovers
+
+// The scan of the accounts' folders for a removed connector's files is not
+// made on every pass: when the set of connectors off the roster changes, and
+// then at most once in the interval, as the foreign-hook step does.
+var (
+	enterpriseHookWindowsOffRosterScanState struct {
+		sync.Mutex
+		last        time.Time
+		fingerprint string
+	}
+	enterpriseHookWindowsOffRosterScanInterval = 5 * time.Minute
+)
+
+// windowsStandaloneOffRosterRuntimeCleanups lists a cleanup for each account
+// whose own DefenseClaw folder still holds files of a machine-scope connector
+// (Claude Code, Codex, Cursor) the loaded config no longer publishes. The
+// guardian used to plan the cleanup only from the account's previously
+// protected row, so an account that had no protected row when the connector
+// left the roster kept its files for good: one whose row was only pending
+// (its session was disconnected or it was signed out when the connector was
+// installed or when an earlier roster change was undone) or whose ledger had
+// been rebuilt. The files are the fact, not the row, and removing them needs
+// no session (the machine enrollment is revoked and LocalSystem does it), so
+// every account with the files is cleaned the same way, whatever its Windows
+// session is doing. The accounts are the enrollment's eligible profiles and
+// the accounts of the rows the guardian held. Each folder is looked at through
+// the removal's own no-follow gates
+// (enterprisehooks.WindowsConnectorUserRuntimeLeftovers), one listing for all
+// the connectors that are off the roster (GAP-0964).
+func windowsStandaloneOffRosterRuntimeCleanups(
+	ctx context.Context,
+	stderr io.Writer,
+	published func(string) bool,
+	held []enterpriseHookReconcileRow,
+	now time.Time,
+) []enterpriseHookUserCleanup {
+	var offRoster []string
+	for _, name := range enterprisehooks.WindowsMachineScopeUserRuntimeConnectorNames() {
+		if !published(name) {
+			offRoster = append(offRoster, name)
+		}
+	}
+	fingerprint := strings.Join(offRoster, ",")
+	enterpriseHookWindowsOffRosterScanState.Lock()
+	due := fingerprint != "" && (fingerprint != enterpriseHookWindowsOffRosterScanState.fingerprint ||
+		now.Sub(enterpriseHookWindowsOffRosterScanState.last) >= enterpriseHookWindowsOffRosterScanInterval)
+	if due || fingerprint == "" {
+		enterpriseHookWindowsOffRosterScanState.last = now
+		enterpriseHookWindowsOffRosterScanState.fingerprint = fingerprint
+	}
+	enterpriseHookWindowsOffRosterScanState.Unlock()
+	if !due {
+		return nil
+	}
+	type account struct{ sid, home string }
+	var accounts []account
+	seen := map[string]bool{}
+	add := func(sid, home string) {
+		sid, home = strings.TrimSpace(sid), strings.TrimSpace(home)
+		key := strings.ToUpper(sid)
+		if sid == "" || home == "" || seen[key] {
+			return
+		}
+		seen[key] = true
+		accounts = append(accounts, account{sid: sid, home: home})
+	}
+	for _, row := range held {
+		add(row.SID, row.UserHome)
+	}
+	profiles, err := enterpriseHookWindowsEligibleProfiles(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise per-user cleanup: eligible profiles for the removed-connector scan: %v\n", err)
+	}
+	for _, profile := range profiles {
+		add(profile.SID, profile.UserHome)
+	}
+	var found []enterpriseHookUserCleanup
+	for _, one := range accounts {
+		home := filepath.Clean(one.home)
+		if !filepath.IsAbs(home) {
+			continue
+		}
+		for _, name := range enterpriseHookWindowsConnectorUserRuntimeLeftovers(home, one.sid, "", offRoster) {
+			found = append(found, enterpriseHookUserCleanup{
+				Connector:  name,
+				SID:        one.sid,
+				UserHome:   home,
+				RecordedAt: now.UTC().Format(time.RFC3339Nano),
+			})
+		}
+	}
+	return found
+}
+
+// windowsStandaloneReAddedHold keeps an entry for a machine-scope connector
+// that the config publishes again: when it was queued the connector was off the
+// roster, and an account the enrollment admits is about to be enrolled for it
+// again, so its token and hook config are not removed in the window before the
+// manifest admits the pair. An account the enrollment does not admit (an
+// excluded user) is cleaned all the same (GAP-0964).
+func windowsStandaloneReAddedHold(ctx context.Context, published func(string) bool) func(connectorName, sid string) bool {
+	var eligible map[string]bool
+	listFailed := false
+	return func(connectorName, sid string) bool {
+		if !enterprisehooks.WindowsMachineScopeUserRuntimeConnector(connectorName) || !published(connectorName) {
+			return false
+		}
+		if eligible == nil {
+			eligible = map[string]bool{}
+			profiles, err := enterpriseHookWindowsEligibleProfiles(ctx)
+			listFailed = err != nil
+			for _, profile := range profiles {
+				eligible[strings.ToUpper(strings.TrimSpace(profile.SID))] = true
+			}
+		}
+		// A profile list that failed says nothing about the account: hold the
+		// entry (the held-pass count still ends it) instead of removing files
+		// of an account the enrollment may admit.
+		return listFailed || eligible[strings.ToUpper(strings.TrimSpace(sid))]
+	}
 }
 
 // enterpriseHookWindowsUserProfileRemoved is replaceable in tests.
@@ -327,12 +859,36 @@ func attemptWindowsStandaloneUserCleanup(
 		}
 		return enterpriseHookUserCleanupPending, nil
 	}
+	if enterprisehooks.WindowsMachineScopeUserRuntimeConnector(entry.Connector) {
+		// A machine-scope connector's machine enrollment is already revoked, so
+		// only DefenseClaw's own files in the account's DefenseClaw folder are
+		// left. LocalSystem removes them whether or not the account is signed
+		// in; no session token is needed and none is waited for (GAP-0916).
+		if err := enterpriseHookWindowsConnectorUserRuntimeRemover(home, entry.SID, entry.DataDir, entry.Connector); err != nil {
+			var left *enterprisehooks.WindowsConnectorUserRuntimeLinksLeft
+			if errors.As(err, &left) {
+				// Everything the connector owned is gone; a link where one of
+				// its files should be is left as found. Said once: the entry
+				// is done and the scan does not offer a link again.
+				fmt.Fprintf(os.Stderr, "defenseclaw: enterprise per-user cleanup: %s/%s: %v\n",
+					strings.ToLower(strings.TrimSpace(entry.Connector)), entry.SID, left)
+				return enterpriseHookUserCleanupDone, nil
+			}
+			return enterpriseHookUserCleanupFailed, err
+		}
+		return enterpriseHookUserCleanupDone, nil
+	}
 	if err := enterpriseHookWindowsRequireTargetSession(entry.SID, home); err != nil {
 		if enterprisehooks.IsWindowsTargetSessionUnavailable(err) {
 			return enterpriseHookUserCleanupPending, nil
 		}
 		return enterpriseHookUserCleanupFailed, err
 	}
+	// The enumerator's read grant on a dotdir on this connector's hook path
+	// (~\.config for OpenCode and Amp) makes the removal's exact DACL check
+	// refuse it; take it off first, as the uninstall does (GAP-2380). The
+	// removal still reports whatever stays wrong.
+	revokeErr := enterpriseHookWindowsRevokeHookPathDotdirGrant(home, entry.Connector)
 	err := enterpriseHooksRemoveManagedPolicy(ctx, enterprisehooks.InstallOptions{
 		ConnectorName: strings.ToLower(strings.TrimSpace(entry.Connector)),
 		UserHome:      home,
@@ -347,7 +903,7 @@ func attemptWindowsStandaloneUserCleanup(
 		// The user signed out between the session check and the removal.
 		return enterpriseHookUserCleanupPending, nil
 	default:
-		return enterpriseHookUserCleanupFailed, err
+		return enterpriseHookUserCleanupFailed, errors.Join(err, revokeErr)
 	}
 }
 
@@ -387,6 +943,70 @@ func enterpriseHookWindowsEligibleProfilesFor(ctx context.Context, current *conf
 		}
 	}
 	return enterpriseHookWindowsStandaloneEligibleList(ctx, opts)
+}
+
+// migrateWindowsClaudeUserHooks removes DefenseClaw's own older per-user
+// Claude Code hooks (those running the per-user launcher in ~/.local/bin,
+// directly or through the launcher guard) from the user's Claude settings,
+// as the Unix guardian removes its leftover registrations each pass. Claude
+// Code is enrolled by machine policy; left in place, the old hooks make every
+// agent that reads the file (Copilot CLI in a project under the home) block
+// as on a foreign hook (GAP-0587). A read-only probe runs first, so a file
+// without such a hook is never rewritten or re-protected; the hooks that
+// still name DefenseClaw are reported, after the removal or, when nothing
+// was removable, from the probe. The guardian's prepare step runs it on
+// every reconcile (the interval and each debounced file change) and logs
+// only removals; its finish step reports what is left once per cleanup
+// interval, so the report repeats at most that often.
+//
+// It runs for every user, also one with a Claude Code manifest row: that row
+// is the machine policy registration and its verify does not touch the user's
+// settings, so skipping such users left the older hooks of every Claude Code
+// user in place and Copilot blocked every tool call in a home project after
+// a 1.0.x per-user to managed upgrade and after a fresh managed install over
+// a retained profile (GAP-0587, T11 TST-28276, T12 TST-29537/29865/29921).
+//
+// stderr gets the failures and the hooks left, removals the removal lines:
+// the pass before enforcement (enterpriseHookStandalonePlatformPrepare)
+// reports only removals, the finish step everything.
+func migrateWindowsClaudeUserHooks(stderr, removals io.Writer, target enterprisehooks.TargetCredentials) {
+	settings := filepath.Join(target.UserHome, ".claude", "settings.json")
+	present, left, err := windowsManagedClaudeRegistrationProbe(target.UserHome, target.SID)
+	removed := 0
+	if err == nil && present {
+		removed, left, err = windowsManagedClaudeSettingsRemover(target.UserHome, target.SID)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: older DefenseClaw hooks in %s: %v\n", settings, err)
+		return
+	}
+	// The cleanup's own transaction folder goes once it holds only its lock
+	// (sidecar-r107:GAP-0007); one that stays is retried next pass.
+	_ = windowsManagedClaudeGuardianLeftoverRemover()
+	if removed > 0 {
+		fmt.Fprintf(removals, "defenseclaw: enterprise foreign-hook guard: removed %d older DefenseClaw hook command(s) from %s\n", removed, settings)
+	}
+	for _, hook := range left {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: %s still holds %s; remove it so other agents do not block on it\n",
+			settings, boundedEnterpriseHookUserCleanupText(hook))
+	}
+}
+
+// windowsClaudeMigrationProfiles is the profiles the pass before enforcement
+// migrates: every eligible profile with a SID and a home. The finish step
+// reports a profile list that cannot be read.
+func windowsClaudeMigrationProfiles() []enterprisehooks.TargetCredentials {
+	profiles, err := enterpriseHookWindowsEligibleProfiles(context.Background())
+	if err != nil {
+		return nil
+	}
+	out := profiles[:0:0]
+	for _, profile := range profiles {
+		if strings.TrimSpace(profile.SID) != "" && strings.TrimSpace(profile.UserHome) != "" {
+			out = append(out, profile)
+		}
+	}
+	return out
 }
 
 // enterpriseHookStandalonePlatformFinish removes unapproved foreign hooks
@@ -474,16 +1094,18 @@ func enterpriseHookStandalonePlatformFinish(ctx context.Context, stderr io.Write
 			blocksError = blocksErr.Error()
 		}
 		logEnterpriseForeignHookBlocks(stderr, current.creds.UserHome, blocks, dropped, blocksError)
+		migrateWindowsClaudeUserHooks(stderr, stderr, current.creds)
 		for _, name := range connectors {
 			if current.rows[name] {
 				continue
 			}
+			// The cleanup holds the cleanup fence only for each removal and
+			// records it in the removal ledger.
 			result, err := enterpriseForeignHookCleanup(current.creds, name, current.dataDir)
 			for _, finding := range result.Removed {
 				fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: removed %s %s hook from %s (sha256:%s); backup in %s\n",
 					finding.Connector, dashIfEmpty(finding.Event), finding.Path, finding.Digest, result.BackupDir)
 			}
-			recordEnterpriseForeignHookRemovals(stderr, current.creds.SID, current.creds.UserHome, name, removedForeignHookPaths(result))
 			if err != nil {
 				fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: cleanup for %s %s: %v\n", name, current.creds.UserHome, err)
 			}

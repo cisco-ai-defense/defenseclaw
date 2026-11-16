@@ -5,6 +5,7 @@
     "compatibility",
     "---Agents---",
     "claudecode",
+    "cowork",
     "codex",
     "openclaw",
     "openclaw-integration",
@@ -12,12 +13,11 @@
     "hermes",
     "opencode",
     "amp",
-    "omnigent",
     "copilot",
-    "openhands",
     "antigravity",
     "devin",
     "kiro",
+    "agent-gateway",
     "zeptoclaw"
   ]
 }

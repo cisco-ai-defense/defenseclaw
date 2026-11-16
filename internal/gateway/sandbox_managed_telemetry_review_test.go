@@ -69,6 +69,47 @@ func boundRegistration(t *testing.T, f *sandboxFixture, peer managedHookPeer, n 
 	return id
 }
 
+func TestManagedSandboxEventsExactBatchReplayRecordsOnce(t *testing.T) {
+	f, store := managedTelemetryFixture(t)
+	id := boundRegistration(t, f, sbxAlice, 1)
+	batch := sandboxrelay.EventBatch{V: sandboxrelay.WireVersion, Registration: id,
+		Events: []sandboxrelay.Event{telemetryEvent(t, sandboxrelay.EventSandboxLifecycle,
+			time.Now().UTC(), map[string]any{"sandbox": "dc-claude-1", "phase": "ready"})}}
+	for range 2 {
+		resp := f.do(sbxAlice, http.MethodPost, sandboxrelay.PathEvents, batch, nil)
+		if resp.Code != http.StatusAccepted {
+			t.Fatalf("events replay returned %d: %s", resp.Code, resp.Body.String())
+		}
+	}
+	if got := len(auditEventsOf(t, store, audit.ActionSandboxLifecycle)); got != 1 {
+		t.Fatalf("exact replay emitted %d lifecycle rows, want one", got)
+	}
+}
+
+func TestManagedSandboxPolicyRevocationKeepsDeletedPhase(t *testing.T) {
+	f, store := managedTelemetryFixture(t)
+	id := boundRegistration(t, f, sbxAlice, 1)
+	auth, err := f.api.sandboxAuth()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := auth.store.Revoke(sbxAlice.UID, id, sandboxreg.ReasonPolicyChanged); err != nil {
+		t.Fatal(err)
+	}
+	if resp := f.do(sbxAlice, http.MethodPost,
+		sandboxrelay.PathRegistrations+id+sandboxrelay.RegistrationDelSub, nil, nil); resp.Code != http.StatusNoContent {
+		t.Fatalf("delete report returned %d: %s", resp.Code, resp.Body.String())
+	}
+	if resp := postEvents(f, sbxAlice, id, telemetryEvent(t,
+		sandboxrelay.EventSandboxLifecycle, time.Now().UTC(),
+		map[string]any{"sandbox": "dc-claude-1", "phase": "deleted"})); resp.Code != http.StatusAccepted {
+		t.Fatalf("final lifecycle returned %d: %s", resp.Code, resp.Body.String())
+	}
+	if got := len(auditEventsOf(t, store, audit.ActionSandboxLifecycle)); got != 1 {
+		t.Fatalf("deleted phase emitted %d rows, want one", got)
+	}
+}
+
 func auditEventsOf(t *testing.T, store *audit.Store, action audit.Action) []audit.Event {
 	t.Helper()
 	events, err := store.ListEvents(500)
@@ -160,7 +201,13 @@ func TestManagedSandboxTelemetryNeedsABoundRegistration(t *testing.T) {
 // phase, not bob's.
 func TestManagedSandboxTelemetrySameNameOfTwoAccounts(t *testing.T) {
 	f, store := managedTelemetryFixture(t)
-	alice, bob := boundRegistration(t, f, sbxAlice, 1), boundRegistration(t, f, sbxBob, 1)
+	alice := boundRegistration(t, f, sbxAlice, 1)
+	bob := f.resolve(sbxBob, claudeResolve()).Registration.ID
+	if rec := f.do(sbxBob, http.MethodPost, sandboxrelay.PathRegistrations+bob+sandboxrelay.RegistrationBindSub,
+		sandboxrelay.BindRequest{V: 1, SandboxName: "dc-claude-1", SandboxID: "sbx-bob",
+			BindingID: "sb_" + strings.Repeat("2", 32)}, nil); rec.Code != http.StatusOK {
+		t.Fatalf("bob bind: %d %s", rec.Code, rec.Body.String())
+	}
 	post := func(peer managedHookPeer, reg, phase string) {
 		t.Helper()
 		if rec := postEvents(f, peer, reg, telemetryEvent(t, sandboxrelay.EventSandboxLifecycle, time.Now(),
@@ -317,10 +364,12 @@ func TestManagedSandboxTelemetryRecordBudgetAndBatchCap(t *testing.T) {
 	id := boundRegistration(t, f, sbxAlice, 1)
 	frozen := time.Now().Add(time.Second)
 	auth.now = func() time.Time { return frozen }
+	batchSeq := 0
 	batch := func(kind string, n int) []sandboxrelay.Event {
+		batchSeq++
 		events := make([]sandboxrelay.Event, n)
 		for i := range events {
-			events[i] = telemetryEvent(t, kind, time.Time{}, map[string]any{"sandbox": "dc-claude-1", "phase": "ready", "field": "x"})
+			events[i] = telemetryEvent(t, kind, time.Time{}, map[string]any{"sandbox": "dc-claude-1", "phase": "ready", "field": batchSeq})
 		}
 		return events
 	}

@@ -6,7 +6,6 @@ package useridentity
 import (
 	"bytes"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,17 +16,14 @@ import (
 //
 // The hook reports the default principal of the user's credential cache as a
 // claimed session fact. It parses the cache itself wherever it can, because a
-// hook must not spawn a helper per tool call and the klist on PATH is the
-// agent's to choose:
+// hook must not spawn a helper per tool call:
 //
 //   - FILE: (and the current file of a DIR: collection) holds the default
 //     principal right after the file header (MIT ccache formats 3 and 4);
 //   - KCM: asks the KCM daemon (sssd-kcm on RHEL) over its Unix socket with
 //     two read-only operations, GET_DEFAULT_CACHE and GET_PRINCIPAL;
-//   - API: on macOS lives in the system Kerberos daemon behind Mach IPC, which
-//     only Apple's Heimdal speaks, so the hook runs /usr/bin/klist --json (an
-//     absolute path, never PATH) with a short timeout. The session-facts cache
-//     limits that to once per SessionFactsCacheTTL;
+//   - API: on macOS is read through the system Kerberos framework and the
+//     session-facts cache limits that to once per SessionFactsCacheTTL;
 //   - KEYRING: is reported by type only.
 //
 // Nothing here is authentication: the user owns the cache and can put any
@@ -105,39 +101,6 @@ func ParseFileCCachePrincipal(r io.Reader) (string, error) {
 		return "", errCCacheFormat
 	}
 	return reader.principal()
-}
-
-// parseKlistJSONPrincipal reads the default principal from the output of
-// macOS's Heimdal `klist --json`:
-//
-//	{ "version" : 1, "cache" : "API:...", "principal" : "alice@CORP.EXAMPLE", "tickets" : [...]}
-//
-// Only the top-level "principal" counts (each ticket has a "Principal" of its
-// own). It streams the object, so output cut short after the principal still
-// parses.
-func parseKlistJSONPrincipal(out []byte) string {
-	decoder := json.NewDecoder(bytes.NewReader(out))
-	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
-		return ""
-	}
-	for decoder.More() {
-		token, err := decoder.Token()
-		if err != nil {
-			return ""
-		}
-		if key, _ := token.(string); key == "principal" {
-			var principal string
-			if decoder.Decode(&principal) != nil || len(principal) > maxCCacheString {
-				return ""
-			}
-			return NormalizePrincipal(principal)
-		}
-		var skip json.RawMessage
-		if decoder.Decode(&skip) != nil {
-			return ""
-		}
-	}
-	return ""
 }
 
 // KCM protocol (MIT krb5 kcm.h; implemented by sssd-kcm and Heimdal kcm).

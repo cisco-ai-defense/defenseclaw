@@ -36,9 +36,11 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 	"github.com/defenseclaw/defenseclaw/internal/systemd"
@@ -46,10 +48,10 @@ import (
 
 // sandboxDaemonCmd runs this account's sandbox daemon on a standalone
 // managed computer: the user unit defenseclaw-sandbox.service (Linux,
-// socket-activated) or the LaunchAgent com.cisco.defenseclaw.sandbox
-// (macOS, bootstrapped on demand by the launcher). It runs as the user and
-// takes no config file: the managed gateway's hook socket gives it its
-// settings and judges everything its sandboxes do.
+// socket-activated) or the LaunchAgent com.cisco.defenseclaw.sandbox.<tag>
+// (macOS, bootstrapped on demand by the launcher; openshell.LaunchAgentLabel).
+// It runs as the user and takes no config file: the managed gateway's hook
+// socket gives it its settings and judges everything its sandboxes do.
 var sandboxDaemonCmd = &cobra.Command{
 	Use:               "sandbox-daemon",
 	Short:             "Run this account's sandbox daemon (standalone managed computers)",
@@ -100,8 +102,177 @@ var sandboxDaemonStopCmd = &cobra.Command{
 	},
 }
 
+// sandboxDaemonSyncGateway is sync-sandboxes' --gateway, and
+// sandboxDaemonSyncManaged its --managed.
+var (
+	sandboxDaemonSyncGateway string
+	sandboxDaemonSyncManaged bool
+)
+
+// sandboxDaemonSyncCmd is the ExecStop DefenseClaw gives the OpenShell
+// gateway service of a per-user gateway on the MicroVM driver (a systemd
+// drop-in setup writes, openshell.StopSync) and, with --managed, the
+// managed gateway unit of a standalone managed computer
+// (defenseclaw-openshell-gateway.service, after stop-sandboxes): a stop or
+// restart of the gateway ends every MicroVM on it, so it first syncs the
+// disk of each one OpenShell lists ready, whoever started it and whoever
+// stops the gateway (GAP-0380). The managed unit's stop-sandboxes stops
+// only the sandboxes the account's daemon knows, as they were when it
+// listed them: a sandbox a raw openshell client created, or started after
+// that list, is still running when the gateway stops. It runs as the
+// account, under the user manager.
+var sandboxDaemonSyncCmd = &cobra.Command{
+	Use:          "sync-sandboxes",
+	Short:        "Sync each running MicroVM's disk before the OpenShell gateway stops (the gateway service's ExecStop)",
+	Hidden:       true,
+	Args:         cobra.NoArgs,
+	SilenceUsage: true,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		ctx, cancel := context.WithTimeout(cmd.Context(), openshell.StopSyncTimeout)
+		defer cancel()
+		opts := openshell.DiscoverOptions{Gateway: sandboxDaemonSyncGateway}
+		dataDir := config.DefaultDataPath()
+		if sandboxDaemonSyncManaged {
+			target, err := managedStopSyncTarget(ctx, runtime.GOOS, sandboxOpenShellDaemonSettings)
+			if err != nil {
+				return err
+			}
+			if opts.Gateway == "" {
+				opts.Gateway = target.gateway
+			}
+			dataDir = target.dataDir
+		}
+		err := openshell.SyncGatewaySandboxes(ctx, opts, cmd.OutOrStdout())
+		// The gateway's stop ends each one it could not sync: the next
+		// sandbox daemon's feed says what may be lost (stop_unflushed),
+		// not only this unit's journal (GAP-2081). A managed account's
+		// daemon reads its own state directory, not ~/.defenseclaw.
+		if names := openshell.UnsyncedSandboxes(err); len(names) > 0 {
+			if rerr := manager.RecordUnsyncedStops(dataDir, names, time.Now()); rerr != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "could not record the unsynced stop for the sandbox feed: %v\n", rerr)
+			}
+		}
+		return err
+	},
+}
+
+// stopSyncTarget is what a managed gateway unit's stop sync dials and where
+// it notes a sandbox it could not sync.
+type stopSyncTarget struct {
+	gateway string // the registration the account's daemon uses
+	dataDir string // the account's sandbox daemon state directory
+}
+
+// managedStopSyncSettingsWait bounds the read of the managed settings in a
+// stop: a managed gateway that does not answer leaves the default name.
+const managedStopSyncSettingsWait = 5 * time.Second
+
+// managedStopSyncTarget resolves the registration the account's sandbox
+// daemon registered its managed gateway under (openshell.gateway.name of
+// the managed settings, openshell.DefaultGatewayName when unset or when the
+// managed gateway does not answer) and the daemon's state directory, whose
+// feed reads RecordUnsyncedStops' file.
+func managedStopSyncTarget(ctx context.Context, goos string, settings func(context.Context) (sandboxrelay.DaemonSettings, bool)) (stopSyncTarget, error) {
+	_, state, err := sandboxDaemonPaths(goos)
+	if err != nil {
+		return stopSyncTarget{}, err
+	}
+	t := stopSyncTarget{gateway: openshell.DefaultGatewayName, dataDir: state}
+	sctx, cancel := context.WithTimeout(ctx, managedStopSyncSettingsWait)
+	defer cancel()
+	if s, ok := settings(sctx); ok && s.Operational.GatewayName != "" {
+		t.gateway = s.Operational.GatewayName
+	}
+	return t, nil
+}
+
+// sandboxDaemonDrainCmd is what the managed lifecycle runs as the account
+// right before it stops the account's sandbox daemon and OpenShell gateway
+// for a waiting change (a switch of its OpenShell setup, a stop, a
+// LaunchAgent reload): the lifecycle's status check came earlier, and a
+// sandbox started and ended since would be stopped with the gateway, its
+// MicroVM with no flush. It takes the account's lifecycle lock
+// (openshell.LockGatewayLifecycle), which keeps the account's DefenseClaw
+// from creating or starting a sandbox, checks under it
+// (openshell.CheckAccountGateways), prints openshell.LifecycleDrained, and
+// holds the lock until its standard input ends: the lifecycle closes it
+// once the units are stopped. It exits non-zero, holding nothing, when the
+// check refuses.
+var sandboxDaemonDrainCmd = &cobra.Command{
+	Use:          "drain",
+	Short:        "Hold this account's OpenShell gateway for the managed lifecycle's stop",
+	Hidden:       true,
+	Args:         cobra.NoArgs,
+	SilenceUsage: true,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		if os.Getuid() == 0 {
+			return errors.New("the drain runs as the account whose gateway stops, not root")
+		}
+		ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, os.Interrupt)
+		defer stop()
+		return drainAccountGateway(ctx, cmd.InOrStdin(), cmd.OutOrStdout(), sandboxDrain{
+			lock:  func(ctx context.Context) (func(), error) { return openshell.LockGatewayLifecycle(ctx, "") },
+			check: func(ctx context.Context) error { return openshell.CheckAccountGateways(ctx, sandboxDrainMicroVMs) },
+			hold:  sandboxDrainHold,
+		})
+	},
+}
+
+// sandboxDrainMicroVMs counts the MicroVMs that run as this account; a seam
+// for tests.
+var sandboxDrainMicroVMs openshell.VMCount = func(ctx context.Context) (int, error) {
+	return openshell.CountMicroVMs(ctx, openshell.ExecRunner{})
+}
+
+// sandboxDrainHold bounds how long a drain holds the lock when the
+// lifecycle never closes its input: longer than the unit stops it covers.
+var sandboxDrainHold = 15 * time.Minute
+
+// sandboxDrain is what a drain needs.
+type sandboxDrain struct {
+	lock  func(context.Context) (unlock func(), err error)
+	check func(context.Context) error
+	hold  time.Duration
+}
+
+// drainAccountGateway takes the lock, checks under it and, when nothing
+// would be lost, prints openshell.LifecycleDrained and holds the lock until
+// in ends, ctx ends or d.hold passes.
+func drainAccountGateway(ctx context.Context, in io.Reader, out io.Writer, d sandboxDrain) error {
+	unlock, err := d.lock(ctx)
+	if err != nil {
+		return fmt.Errorf("hold this account's OpenShell gateway: %w", err)
+	}
+	defer unlock()
+	if err := d.check(ctx); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(out, openshell.LifecycleDrained); err != nil {
+		return err
+	}
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, in)
+		close(done)
+	}()
+	t := time.NewTimer(d.hold)
+	defer t.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return fmt.Errorf("let the OpenShell gateway lifecycle go after %s: the managed lifecycle never said its stop was done", d.hold)
+	}
+}
+
 func init() {
 	sandboxDaemonCmd.AddCommand(sandboxDaemonStopCmd)
+	sandboxDaemonSyncCmd.Flags().StringVar(&sandboxDaemonSyncGateway, "gateway", "", "the OpenShell gateway registration (default: the openshell CLI's active one)")
+	sandboxDaemonSyncCmd.Flags().BoolVar(&sandboxDaemonSyncManaged, "managed", false, "the managed gateway unit's stop: the registration and state directory of the account's sandbox daemon")
+	sandboxDaemonCmd.AddCommand(sandboxDaemonSyncCmd)
+	sandboxDaemonCmd.AddCommand(sandboxDaemonDrainCmd)
 	rootCmd.AddCommand(sandboxDaemonCmd)
 }
 
@@ -159,13 +330,13 @@ func runSandboxDaemon(ctx context.Context, logw io.Writer) error {
 	logf := func(format string, args ...any) {
 		fmt.Fprintf(logw, "[sandbox-daemon] "+format+"\n", args...)
 	}
-	unavailable := func(cause error) error {
+	unavailable := func(cause error, recovered func(context.Context) bool) error {
 		if ctx.Err() != nil {
 			_ = ln.Close()
 			return nil
 		}
 		logf("sandboxes cannot run now: %v", cause)
-		return gateway.ServeSandboxDaemonUnavailable(ctx, ln, cause)
+		return gateway.ServeSandboxDaemonUnavailable(ctx, ln, cause, recovered)
 	}
 	hookSocket := descriptor.HookSocket
 	if hookSocket == "" {
@@ -177,12 +348,19 @@ func runSandboxDaemon(ctx context.Context, logw io.Writer) error {
 	}
 	relay, err := sandboxrelay.NewClient(sandboxrelay.ClientOptions{SocketPath: hookSocket, TrustedOwners: trusted})
 	if err != nil {
-		return unavailable(fmt.Errorf("the managed gateway's hook socket: %w", err))
+		return unavailable(fmt.Errorf("the managed gateway's hook socket: %w", err), nil)
 	}
 	defer relay.Close()
-	settings, err := sandboxDaemonSettings(ctx, relay)
+	settings, err := sandboxDaemonSettings(ctx, relay, sandboxDaemonSettingsCallTimeout)
 	if err != nil {
-		return unavailable(err)
+		// Once the managed gateway answers the settings again, this daemon
+		// exits and the next command starts one that serves.
+		return unavailable(err, func(ctx context.Context) bool {
+			cctx, cancel := context.WithTimeout(ctx, sandboxDaemonSettingsCallTimeout)
+			defer cancel()
+			_, err := relay.Settings(cctx)
+			return err == nil
+		})
 	}
 	d, err := gateway.NewSandboxDaemon(gateway.SandboxDaemonOptions{
 		RuntimeOptions: gateway.RuntimeOptions{Managed: true, Relay: relay, Settings: &settings},
@@ -202,14 +380,31 @@ func runSandboxDaemon(ctx context.Context, logw io.Writer) error {
 	return err
 }
 
+// sandboxDaemonSettingsCallTimeout bounds one read of the managed settings
+// at start. The relay client allows two minutes for a relayed hook; a
+// managed gateway that took the read and never answered (stopped, hung)
+// held the daemon that long, and every command on its socket waited until
+// the watchdog replaced the gateway: 25 to 51 s (GAP-0608).
+const sandboxDaemonSettingsCallTimeout = 5 * time.Second
+
 // sandboxDaemonSettings reads the managed settings, waiting briefly for a
-// gateway that is still starting.
-func sandboxDaemonSettings(ctx context.Context, relay sandboxrelay.Client) (sandboxrelay.DaemonSettings, error) {
+// gateway that is still starting (its socket refuses or is not there yet).
+// Each read has its own deadline, callTimeout. A gateway that took a read
+// and did not answer within it is not asked again: the daemon answers that
+// sandboxes cannot run now (fail closed) and exits, and the next command
+// starts it again.
+func sandboxDaemonSettings(ctx context.Context, relay sandboxrelay.Client, callTimeout time.Duration) (sandboxrelay.DaemonSettings, error) {
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		s, err := relay.Settings(ctx)
+		cctx, cancel := context.WithTimeout(ctx, callTimeout)
+		s, err := relay.Settings(cctx)
+		silent := err != nil && ctx.Err() == nil && errors.Is(cctx.Err(), context.DeadlineExceeded)
+		cancel()
 		if err == nil {
 			return s, nil
+		}
+		if silent {
+			return sandboxrelay.DaemonSettings{}, fmt.Errorf("read the managed sandbox settings: the managed gateway did not answer within %s: %w", callTimeout, err)
 		}
 		var refused *sandboxrelay.Error
 		if errors.As(err, &refused) || errors.Is(err, sandboxrelay.ErrSocketUntrusted) || time.Now().After(deadline) {
@@ -322,28 +517,76 @@ type managedSandboxStopper interface {
 	Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, error)
 }
 
+// stopUnsyncedBudget bounds how long stopManagedSandboxes tries again the
+// stop of a MicroVM whose disk could not be synced, and stopUnsyncedPause
+// is the pause between tries: within the gateway unit's TimeoutStopSec (2
+// minutes), after which systemd ends the gateway, and the VM with it.
+var (
+	stopUnsyncedBudget = 90 * time.Second
+	stopUnsyncedPause  = 5 * time.Second
+)
+
 // stopManagedSandboxes stops every sandbox of the account that may be
-// running. A daemon that is not running has nothing to stop.
+// running. A daemon that is not running has nothing to stop. The daemon
+// does not stop a MicroVM whose disk it could not sync first
+// (sandboxapi.CodeUnsynced, GAP-0902), but what this runs for (a sign-out,
+// a stop of the gateway unit) ends the gateway next, and the VM with it
+// (GAP-0998): its stop, which syncs first, is tried again while there is
+// time, and one still unsynced is named with what it may lose.
 func stopManagedSandboxes(ctx context.Context, c managedSandboxStopper, out io.Writer) error {
 	list, err := c.List(ctx)
 	if err != nil {
-		if sandboxapi.IsCode(err, sandboxapi.CodeUnavailable) {
+		switch {
+		case sandboxapi.IsCode(err, sandboxapi.CodeUnavailable):
+			return nil
+		case sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation), sandboxapi.IsCode(err, sandboxapi.CodeDisabled):
+			// The daemon answers every call with the managed gateway's
+			// refusal of its settings (the account is no longer enrolled,
+			// the deployment was removed, sandboxes are off): it runs no
+			// manager and so no sandbox of its own to stop. Failing here
+			// left the unit failed after an uninstall and a package
+			// removal (GAP-0137).
+			fmt.Fprintf(out, "the sandbox daemon runs no sandbox: %v\n", err)
 			return nil
 		}
 		return err
 	}
 	var failed []error
+	var unsynced []string
+	stop := func(name string) {
+		if _, err := c.Stop(ctx, name); err != nil {
+			if sandboxapi.IsCode(err, sandboxapi.CodeUnsynced) {
+				unsynced = append(unsynced, name)
+				return
+			}
+			failed = append(failed, fmt.Errorf("stop %s: %w", name, err))
+			return
+		}
+		fmt.Fprintf(out, "stopped sandbox %s\n", name)
+	}
 	for _, sb := range list {
 		switch audit.SandboxPhase(sb.Phase) {
 		case audit.SandboxPhaseProvisioning, audit.SandboxPhaseStarting, audit.SandboxPhaseReady, audit.SandboxPhaseUnknown:
 		default:
 			continue
 		}
-		if _, err := c.Stop(ctx, sb.Name); err != nil {
-			failed = append(failed, fmt.Errorf("stop %s: %w", sb.Name, err))
-			continue
+		stop(sb.Name)
+	}
+	deadline := time.Now().Add(stopUnsyncedBudget)
+	for len(unsynced) > 0 && time.Now().Before(deadline) && ctx.Err() == nil {
+		select {
+		case <-ctx.Done():
+		case <-time.After(stopUnsyncedPause):
 		}
-		fmt.Fprintf(out, "stopped sandbox %s\n", sb.Name)
+		again := unsynced
+		unsynced = nil
+		for _, name := range again {
+			stop(name)
+		}
+	}
+	for _, name := range unsynced {
+		failed = append(failed, fmt.Errorf("sandbox %s keeps running: its MicroVM's disk could not be synced, so DefenseClaw did not stop it; "+
+			"what stops its OpenShell gateway now (a sign-out, a stop of the gateway unit) ends the VM, and what its guest wrote since its last sync may be lost", name))
 	}
 	return errors.Join(failed...)
 }

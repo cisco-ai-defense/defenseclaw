@@ -20,11 +20,11 @@ import (
 	"context"
 	"errors"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
@@ -48,12 +48,12 @@ const managedFactsTimeout = 5 * time.Second
 // and every error on any other computer, is returned as it is. An exit
 // status err carries is kept.
 func (a *App) ManagedError(ctx context.Context, err error) error {
-	if err == nil || !(a.ManagedHost() || onManagedHost()) {
+	var silent *Silent
+	if err == nil || errors.As(err, &silent) {
 		return err
 	}
-	var silent *Silent
-	if errors.As(err, &silent) {
-		return err
+	if !(a.ManagedHost()) && !(onManagedHost()) {
+		return withoutReasonCode(err)
 	}
 	var e *sandboxapi.Error
 	if !errors.As(err, &e) {
@@ -71,8 +71,26 @@ func (a *App) ManagedError(ctx context.Context, err error) error {
 	}
 	text, ok := managedErrorText(e, a.managedFacts(ctx))
 	if !ok {
+		return withoutReasonCode(err)
+	}
+	var exit *ExitError
+	if errors.As(err, &exit) {
+		return &ExitError{Code: exit.Code, Err: &refusalError{text: text, err: e}}
+	}
+	return &refusalError{text: text, err: e}
+}
+
+// withoutReasonCode is err without the bare reason code a daemon error
+// carries as its detail ("...stop them and run this again: driver_mismatch"):
+// the message already says what happened and what to do, and the code is
+// for programs, which read it from the detail (GAP-0607). An exit status
+// err carries is kept; any other error is returned as it is.
+func withoutReasonCode(err error) error {
+	var e *sandboxapi.Error
+	if !errors.As(err, &e) || strings.TrimSpace(e.Message) == "" || !reasonCode(strings.TrimSpace(e.Detail)) {
 		return err
 	}
+	text := strings.Replace(err.Error(), e.Error(), strings.TrimSpace(e.Message), 1)
 	var exit *ExitError
 	if errors.As(err, &exit) {
 		return &ExitError{Code: exit.Code, Err: &refusalError{text: text, err: e}}
@@ -101,10 +119,10 @@ func shellDockerHostHint(lookupEnv func(string) (string, bool)) string {
 // (GAP-0595).
 func (a *App) accountOutage(ctx context.Context, err error) error {
 	var lookup *openshell.AccountLookupError
-	if err == nil || !(errors.As(err, &lookup) || strings.Contains(err.Error(), "ssh found no user for it")) {
+	if err == nil || (!(errors.As(err, &lookup)) && !(strings.Contains(err.Error(), "ssh found no user for it"))) {
 		return err
 	}
-	if !(a.ManagedHost() || onManagedHost() || a.managedSeen != nil) {
+	if (!(a.ManagedHost()) && !(onManagedHost())) && a.managedSeen == nil {
 		return errors.New("your account can't be looked up on this computer right now (ssh found no user for it); try again in a moment")
 	}
 	return errors.New(sandboxapi.AccountUnknownText + " " + accountOutageNote + " " + accountOutageContact(a.managedFacts(ctx).RequestAccess))
@@ -132,13 +150,37 @@ func accountOutageContact(contact string) string {
 	return "If it lasts, tell IT: " + text
 }
 
+// accountRechecks and accountRecheckEvery are how long a managed run waits
+// for the computer to look the account up before it refuses: 10 seconds, as
+// long as a create waits for a cold group lookup. An SSSD that restarts, or
+// whose cache comes back, then starts the run instead of refusing it
+// (GAP-0507).
+const (
+	accountRechecks     = 5
+	accountRecheckEvery = 2 * time.Second
+)
+
 // checkAccount stops a managed run at its start when the account cannot be
-// looked up, before the project is copied.
+// looked up, before the project is copied. It asks again for up to 10
+// seconds first, and refuses (fails closed) if the computer still names no
+// account: ssh, over which OpenShell reaches every sandbox, cannot run for
+// it.
 func (a *App) checkAccount(ctx context.Context) error {
 	if a.AccountCheck == nil {
 		return nil
 	}
-	return a.accountOutage(ctx, a.AccountCheck())
+	err := a.AccountCheck()
+	var lookup *openshell.AccountLookupError
+	if errors.As(err, &lookup) {
+		a.note("This computer can't look your account up right now; waiting up to 10 seconds for it.")
+		for i := 0; i < accountRechecks && errors.As(err, &lookup); i++ {
+			if a.Sleep == nil || a.Sleep(ctx, accountRecheckEvery) != nil {
+				break
+			}
+			err = a.AccountCheck()
+		}
+	}
+	return a.accountOutage(ctx, err)
 }
 
 // managedFlagRefusal refuses, before the project is copied or anything is
@@ -235,12 +277,16 @@ var managedReasonTexts = map[string]string{
 
 // adminKeyNote is an openshell.admin key a policy text names in
 // parentheses: the managed user has no such file.
-var adminKeyNote = regexp.MustCompile(`\s*\(openshell\.admin\.[a-z_]+\)`)
+var adminKeyNote = lazyregexp.New(`\s*\(openshell\.admin\.[a-z_]+\)`)
 
 // managedErrorText is e as a user on a managed computer reads it, and
 // whether it is a refusal ManagedError words; m is the caller's own
 // profile and contact.
 func managedErrorText(e *sandboxapi.Error, m *sandboxapi.ManagedStatus) (string, bool) {
+	if (e.Code == sandboxapi.CodeUpstream || e.Code == sandboxapi.CodeUnavailable) &&
+		gatewayTransportText(e.Detail) != e.Detail {
+		return "the connection to the OpenShell gateway closed; `defenseclaw sandbox doctor` checks it, then retry the command", true
+	}
 	if sandboxapi.IsPolicyRefusal(e.Message) {
 		// A refusal the daemon passed on complete (sandboxapi.AccessRefusedWhy
 		// and the other policy refusals) keeps its words: it already names
@@ -264,6 +310,9 @@ func managedErrorText(e *sandboxapi.Error, m *sandboxapi.ManagedStatus) (string,
 		return sandboxapi.ManagedRefusal(adminKeyNote.ReplaceAllString(why, ""), profile, quote, access), true
 	}
 	sentence, code := managedSentence(e)
+	if sentence != "" && (code == sandboxrelay.ReasonDaemonOutdated || code == sandboxrelay.DetailSetupChanging) {
+		return sentence, true
+	}
 	switch e.Code {
 	case sandboxapi.CodeAdminViolation:
 		quote := ""
@@ -331,7 +380,13 @@ func managedSentence(e *sandboxapi.Error) (sentence, code string) {
 var gatewayTransportErrors = []string{
 	"client connection is closing", "transport is closing", "code = unavailable", "connection error: desc",
 	"error reading from server", "grpc: ",
+	"h2 protocol error: error reading a body from connection", "peer closed connection without sending tls close_notify",
 }
+
+// gatewayUnreachableErrors are the words of the OpenShell CLI's failure to
+// reach a gateway that does not listen ("× transport error ├─▶ tcp connect
+// error ... Connection refused").
+var gatewayUnreachableErrors = []string{"tcp connect error", "transport error", "connection refused"}
 
 // gatewayTransportText is why with a raw gRPC transport failure of the
 // OpenShell gateway ("Cancelled: grpc: the client connection is closing")
@@ -340,6 +395,11 @@ var gatewayTransportErrors = []string{
 // returned unchanged.
 func gatewayTransportText(why string) string {
 	lower := strings.ToLower(why)
+	for _, raw := range gatewayUnreachableErrors {
+		if strings.Contains(lower, raw) {
+			return "the OpenShell gateway does not answer"
+		}
+	}
 	for _, raw := range gatewayTransportErrors {
 		if strings.Contains(lower, raw) {
 			return "the connection to the OpenShell gateway closed"

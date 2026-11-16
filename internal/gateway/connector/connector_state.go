@@ -33,6 +33,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 const activeConnectorFile = "active_connector.json"
@@ -405,7 +409,7 @@ func canonicalProtectedConnectorNames(field string, rawNames []string) ([]string
 // file. Callers that need teardown intent must use ConnectorExplicitlyInactive;
 // an empty active set alone never suppresses a connector guard.
 func ReadActiveConnectorState(dataDir string) (names []string, exists bool, err error) {
-	data, err := os.ReadFile(filepath.Join(dataDir, activeConnectorFile))
+	data, err := readConnectorStateFile(filepath.Join(dataDir, activeConnectorFile))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, false, nil
@@ -430,7 +434,7 @@ func ReadActiveConnectorState(dataDir string) (names []string, exists bool, err 
 // treated as intentional teardown: the hook guard continues to heal in those
 // cases. An explicit active entry wins over a stale inactive entry.
 func ConnectorExplicitlyInactive(dataDir, name string) bool {
-	data, err := os.ReadFile(filepath.Join(dataDir, activeConnectorFile))
+	data, err := readConnectorStateFile(filepath.Join(dataDir, activeConnectorFile))
 	if err != nil {
 		return false
 	}
@@ -489,7 +493,7 @@ func MarkConnectorInactive(dataDir, name string) (restore func() error, err erro
 	want := strings.TrimSpace(name)
 	err = withActiveConnectorStateLock(path, func() error {
 		var readErr error
-		original, readErr = os.ReadFile(path)
+		original, readErr = readConnectorStateFile(path)
 		existed = true
 		if readErr != nil {
 			if !os.IsNotExist(readErr) {
@@ -528,7 +532,7 @@ func MarkConnectorInactive(dataDir, name string) (restore func() error, err erro
 
 	return func() error {
 		return withActiveConnectorStateLock(path, func() error {
-			current, readErr := os.ReadFile(path)
+			current, readErr := readConnectorStateFile(path)
 			if readErr != nil && !os.IsNotExist(readErr) {
 				return readErr
 			}
@@ -565,8 +569,45 @@ func MarkConnectorInactive(dataDir, name string) (restore func() error, err erro
 	}, nil
 }
 
+// A connector state file is published by atomic replacement. On Windows the
+// publisher keeps its renamed handle for a short validation step, and another
+// process (an indexer or antivirus scan) can hold the file briefly too, so a
+// reader waits a bounded time for such a lock before it reports the error
+// (rel-1-0-3 GAP-0300).
+const (
+	connectorStateReadAttempts   = 10
+	connectorStateReadRetryDelay = 100 * time.Millisecond
+)
+
+// connectorStateReadSleep is the wait between attempts; tests replace it.
+var connectorStateReadSleep = time.Sleep
+
+func openConnectorStateFileWithRetry(path string) (*os.File, error) {
+	for attempt := 1; ; attempt++ {
+		file, err := openConnectorStateFile(path)
+		if err == nil || !connectorStateFileBusy(err) || attempt >= connectorStateReadAttempts {
+			return file, err
+		}
+		connectorStateReadSleep(connectorStateReadRetryDelay)
+	}
+}
+
+// readConnectorStateFile is os.ReadFile with the sharing and bounded lock wait
+// of openConnectorStateFileWithRetry. The hook runtime files (the .hookcfg
+// sidecars, the hook contract lock and the hook scripts) are read the same
+// way: a fail-mode change publishes them while the gateway hook guard and
+// running hooks read them (rel-1-0-4 GAP-0584).
+func readConnectorStateFile(path string) ([]byte, error) {
+	file, err := openConnectorStateFileWithRetry(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return io.ReadAll(file)
+}
+
 func loadInactiveConnectorNames(path string) []string {
-	data, err := os.ReadFile(path)
+	data, err := readConnectorStateFile(path)
 	if err != nil {
 		return nil
 	}
@@ -868,11 +909,6 @@ func saveHookContractLockEntry(
 	entry.Connector = normalizeConnectorName(entry.Connector)
 	if runtime.GOOS == "windows" && entry.Connector == "hermes" {
 		if err := validateHermesWindowsLockPublication(context.Background(), dataDir, entry); err != nil {
-			return err
-		}
-	}
-	if runtime.GOOS == "darwin" && entry.Connector == "openhands" {
-		if err := validateOpenHandsDarwinLockPublication(dataDir, entry); err != nil {
 			return err
 		}
 	}
@@ -1213,7 +1249,9 @@ func newHookContractLockEntry(
 		HookScriptVersion:      contract.HookScriptVersion,
 		Locations:              ResolvedConnectorLocations(opts, conn),
 		DefenseClawVersion:     defenseClawVersion,
-		HookFailMode:           resolveHookFailMode(opts, conn),
+		// The mode the hooks' runtime records hold (OutageHookFailMode): a
+		// per-user render's gateway-outage mode.
+		HookFailMode: OutageHookFailMode(opts, conn),
 		RegistrationPosture: &HookRegistrationPosture{
 			CodexOtelEnvironment:  opts.CodexOtelEnvironment,
 			ConfigHome:            opts.ConfigHome,
@@ -1247,10 +1285,8 @@ func protectedSetupSelectionConnectorForOS(connectorName, goos string) bool {
 	connectorName = normalizeConnectorName(connectorName)
 	switch strings.ToLower(strings.TrimSpace(goos)) {
 	case "windows":
-		return connectorName == "codex" || connectorName == "hermes" || connectorName == "omnigent" ||
+		return connectorName == "codex" || connectorName == "hermes" ||
 			connectorName == "opencode" || connectorName == "amp"
-	case "darwin":
-		return connectorName == "openhands"
 	default:
 		return false
 	}
@@ -1283,7 +1319,7 @@ func HookRuntimeRegistrationCurrent(
 		return true, nil
 	}
 	if strings.TrimSpace(opts.DataDir) == "" || !filepath.IsAbs(opts.DataDir) {
-		return false, errors.New("Codex runtime registration requires an absolute data directory")
+		return false, errors.New("Codex runtime registration requires an absolute data directory") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 
 	hookDir := filepath.Join(opts.DataDir, "hooks")
@@ -1302,7 +1338,10 @@ func HookRuntimeRegistrationCurrent(
 	if runtimeState.Version != 2 {
 		return false, fmt.Errorf("unsupported Codex hook runtime evidence version %d", runtimeState.Version)
 	}
-	wantMode := normalizeHookFailMode(opts.HookFailMode)
+	// The sidecar records the rendered outage mode. A per-user hook can
+	// record an explicitly resolved outage mode while its other failures
+	// remain closed, so compare the registration with what Setup wrote.
+	wantMode := renderedHookFailMode(opts, conn)
 	if strings.TrimSpace(runtimeState.GatewayAddr) != strings.TrimSpace(opts.APIAddr) ||
 		runtimeState.FailModes["codex"] != wantMode ||
 		runtimeState.Managed != opts.ManagedEnterprise {
@@ -1317,7 +1356,11 @@ func HookRuntimeRegistrationCurrent(
 	if err != nil || !exists {
 		return false, err
 	}
-	if !hookRuntimeFlatEvidenceCurrent(flatBody, "codex", wantMode) {
+	flatSource := HookFailModeSourceConfig
+	if opts.ManagedEnterprise {
+		flatSource = ""
+	}
+	if !hookRuntimeFlatEvidenceCurrent(flatBody, "codex", wantMode, flatSource) {
 		return false, nil
 	}
 
@@ -1381,13 +1424,12 @@ func HookRuntimeRegistrationCurrent(
 	return true, nil
 }
 
-func hookRuntimeFlatEvidenceCurrent(body []byte, connectorName, failMode string) bool {
-	expected := fmt.Sprintf(
-		"DEFENSECLAW_CONNECTOR=%s\nDEFENSECLAW_FAIL_MODE=%s\n",
+func hookRuntimeFlatEvidenceCurrent(body []byte, connectorName, failMode, source string) bool {
+	return bytes.Equal(body, hookRuntimeFlatRecord(
 		normalizeConnectorName(connectorName),
 		normalizeHookFailMode(failMode),
-	)
-	return bytes.Equal(body, []byte(expected))
+		source,
+	))
 }
 
 // RequiresHookRuntimeRegistrationEvidence identifies the concrete Windows
@@ -1427,7 +1469,7 @@ func setupSelectedAgentExecutableEvidence(path string) (string, string, bool) {
 		return "", "", false
 	}
 	path = filepath.Clean(path)
-	before, err := os.Lstat(path)
+	before, err := pathidentity.LstatPinned(path)
 	if err != nil || before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
 		return "", "", false
 	}
@@ -1471,9 +1513,7 @@ func ResolvedConnectorLocations(opts SetupOpts, conn Connector) ConnectorLocatio
 		caps := hp.HookCapabilities(opts)
 		loc.HookConfigPaths = uniqueNonEmptyStrings(append(loc.HookConfigPaths, caps.ConfigPath))
 	}
-	for _, path := range hookRuntimeArtifactPaths(opts, conn) {
-		loc.HookScriptPaths = append(loc.HookScriptPaths, path)
-	}
+	loc.HookScriptPaths = append(loc.HookScriptPaths, hookRuntimeArtifactPaths(opts, conn)...)
 	loc.HookScriptPaths = uniqueNonEmptyStrings(loc.HookScriptPaths)
 
 	cp, ok := conn.(ConnectorCapabilityProvider)
@@ -1655,6 +1695,12 @@ func HookContractChangedByDefenseClawRelease(previous, current HookContractLockE
 // instead of refusing. A contract change without an agent version change is
 // not an update, and Secure Client (strict resolution) refuses every agent
 // change as before.
+//
+// A connector whose hooks are not version-gated (Kiro, HookCompatibilityNotGated)
+// has no contract for an update to leave, so its update to a readable version is
+// admitted too: a vendor self-update (kiro-cli 2.26.1 -> 2.35.1) must not stop
+// the gateway and roll an upgrade back (GAP-2427). An update to a kiro-cli below
+// KiroCLIHookFloor, or to a version that could not be read, still drifts.
 func HookContractAgentUpdateAdmitted(previous, current HookContractLockEntry) bool {
 	if strings.TrimSpace(previous.Connector) == "" || StrictHookContractResolution() {
 		return false
@@ -1663,7 +1709,30 @@ func HookContractAgentUpdateAdmitted(previous, current HookContractLockEntry) bo
 		previous.NormalizedAgentVersion == current.NormalizedAgentVersion {
 		return false
 	}
+	if current.CompatibilityStatus == HookCompatibilityNotGated {
+		return notGatedAgentUpdateAdmitted(previous, current)
+	}
 	return current.CompatibilityStatus == HookCompatibilityKnown && strings.TrimSpace(current.ContractID) != ""
+}
+
+// notGatedAgentUpdateAdmitted is HookContractAgentUpdateAdmitted for a
+// connector without a version-gated contract: neither side names a contract,
+// the new version was read, and a kiro-cli is at or above KiroCLIHookFloor.
+func notGatedAgentUpdateAdmitted(previous, current HookContractLockEntry) bool {
+	name := normalizeConnectorName(current.Connector)
+	if !catalogedOnlyConnectorsWithoutHookGate[name] || name != normalizeConnectorName(previous.Connector) ||
+		strings.TrimSpace(previous.ContractID) != "" || strings.TrimSpace(current.ContractID) != "" {
+		return false
+	}
+	normalized := strings.TrimSpace(current.NormalizedAgentVersion)
+	if normalized == "" {
+		return false
+	}
+	if name == "kiro" && !strings.HasSuffix(strings.TrimSpace(current.RawAgentVersion), KiroIDEVersionSuffix) &&
+		compareVersion(normalized, KiroCLIHookFloor) < 0 {
+		return false
+	}
+	return true
 }
 
 // AgentUnchangedSinceLock reports whether rawAgentVersion is the agent version
@@ -1709,12 +1778,12 @@ func HookScriptDigests(opts SetupOpts, conn Connector) map[string]string {
 	}
 	out := map[string]string{}
 	for _, path := range hookRuntimeArtifactPaths(opts, conn) {
-		data, err := os.ReadFile(path)
+		// On Windows the paths include the installed hook binary.
+		digest, err := digestNativeFileShared(path)
 		if err != nil {
 			continue
 		}
-		sum := sha256.Sum256(data)
-		out[filepath.Base(path)] = "sha256:" + hex.EncodeToString(sum[:])
+		out[filepath.Base(path)] = digest
 	}
 	if len(out) == 0 {
 		return nil
@@ -1754,6 +1823,82 @@ func managedHookScriptDigests(
 		return nil, nil
 	}
 	return out, nil
+}
+
+// ErrManagedSharedHookScriptDigestMismatch reports that a shared generated
+// hook script no longer matches the digest pinned in the protected contract.
+// Its text keeps the historical "managed shared hook script digest mismatch".
+var ErrManagedSharedHookScriptDigestMismatch = errors.New("managed shared hook script digest mismatch")
+
+// RepublishManagedSharedHookScripts rewrites the shared generated hook scripts
+// and helpers under dataDir/hooks from the embedded templates through the
+// managed per-user runtime writer, which publishes the canonical descriptor
+// and is a no-op for bytes that already match. It is the repair for
+// ErrManagedSharedHookScriptDigestMismatch: run it as (or impersonating) the
+// target user, then verify again. apiAddr must be the address the contract
+// was written with. The shared scripts also depend on the managed profile
+// (standalone, Secure Client, Secure Client delivery), which the caller does
+// not know, so only the profile whose render matches every pinned digest is
+// written; when none matches, nothing is written.
+func RepublishManagedSharedHookScripts(dataDir, apiAddr string) error {
+	dataDir = strings.TrimSpace(dataDir)
+	if dataDir == "" || !filepath.IsAbs(dataDir) {
+		return errors.New("managed shared hook data directory is not absolute")
+	}
+	dataDir = filepath.Clean(dataDir)
+	lock, err := loadManagedHookContractLock(dataDir)
+	if err != nil {
+		return fmt.Errorf("load managed hook contract: %w", err)
+	}
+	scripts, err := managedSharedHookScriptsMatchingPins(apiAddr, lock.SharedHookScriptDigests)
+	if err != nil {
+		return err
+	}
+	hookDir := filepath.Join(dataDir, "hooks")
+	if err := writeHookHelpersForMode(hookDir, true); err != nil {
+		return err
+	}
+	writeFile := hookRuntimeFileWriter(true)
+	for _, script := range scripts {
+		hookPath := filepath.Join(hookDir, script.Name)
+		if err := writeFile(hookPath, script.Data, 0o700); err != nil {
+			return fmt.Errorf("republish hook %s: %w", script.Name, err)
+		}
+	}
+	emitManagedResilience(managed.MarkerRepair, hookDir, "republished managed shared hook scripts", nil)
+	return nil
+}
+
+// managedSharedHookScriptsMatchingPins renders the shared inspect-* scripts
+// through renderHookScriptSet, as renderHookScripts does, for each managed
+// profile and returns the render whose digests equal pins. The shared render
+// is what the installer pinned (a standalone render carries the privileged
+// host shebang), so a raw template render would match no profile.
+func managedSharedHookScriptsMatchingPins(apiAddr string, pins map[string]string) ([]renderedHookFile, error) {
+	profiles := []templateData{
+		{APIAddr: apiAddr, Managed: true},
+		{APIAddr: apiAddr, Managed: true, SecureClient: true},
+		{APIAddr: apiAddr, Managed: true, SecureClient: true, SecureClientDelivery: true},
+	}
+	for _, data := range profiles {
+		set, err := renderHookScriptSet(data, data, nil)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]renderedHookFile, 0, len(genericHookScripts))
+		for _, file := range set[:len(genericHookScripts)] {
+			sum := sha256.Sum256(file.Data)
+			if pins[file.Name] != "sha256:"+hex.EncodeToString(sum[:]) {
+				out = nil
+				break
+			}
+			out = append(out, file)
+		}
+		if out != nil {
+			return out, nil
+		}
+	}
+	return nil, errors.New("no managed shared hook script render matches the contract digests")
 }
 
 // VerifyManagedSharedHookScriptDigests verifies the one authenticated digest
@@ -1812,7 +1957,15 @@ func VerifyManagedSharedHookScriptDigests(dataDir, expectedOwnerSID string) erro
 			return fmt.Errorf("managed shared hook script is missing: %s", path)
 		}
 		if actualDigest != expectedDigest {
-			return fmt.Errorf("managed shared hook script digest mismatch: %s", path)
+			// A code-integrity finding: logged with both hashes, and returned
+			// as ErrManagedSharedHookScriptDigestMismatch so the caller
+			// republishes the generated scripts (RepublishManagedSharedHookScripts)
+			// instead of failing the user. This check never re-pins, so it
+			// cannot bless modified bytes.
+			emitManagedResilience(managed.MarkerBoundary, path,
+				"managed shared hook script differs from its contract digest",
+				map[string]string{"pinned_sha256": expectedDigest, "live_sha256": actualDigest})
+			return fmt.Errorf("%w: %s", ErrManagedSharedHookScriptDigestMismatch, path)
 		}
 	}
 	after, err := loadManagedHookContractLockForOwner(dataDir, expectedOwnerSID)
@@ -1821,6 +1974,60 @@ func VerifyManagedSharedHookScriptDigests(dataDir, expectedOwnerSID string) erro
 	}
 	if !reflect.DeepEqual(lock, after) {
 		return errors.New("managed hook contract changed during shared script verification")
+	}
+	return nil
+}
+
+// VerifyManagedConnectorHookScriptDigests checks, without following a link,
+// that each per-user hook script of conn the contract lock entry recorded
+// (claude-code-hook.sh, for example) is still in opts.DataDir/hooks with the
+// recorded bytes. A recorded script that is missing or edited is an error, so
+// the guardian's verify reports the drift and its repair rewrites the script:
+// the drift check ignores script digests, and the managed Windows verify
+// checked only the shared inspect-* scripts, so a deleted
+// claude-code-hook.sh stayed missing until another runtime file drifted
+// (GAP-2227). A script the lock does not record (a lock an earlier release
+// wrote) is not checked.
+func VerifyManagedConnectorHookScriptDigests(
+	opts SetupOpts,
+	conn Connector,
+	entry HookContractLockEntry,
+	expectedOwnerSID string,
+) error {
+	if conn == nil || strings.TrimSpace(opts.DataDir) == "" || len(entry.HookScriptDigests) == 0 {
+		return nil
+	}
+	if runtime.GOOS == "windows" && strings.TrimSpace(expectedOwnerSID) == "" {
+		return errors.New("managed connector hook script target SID is empty")
+	}
+	shared := map[string]bool{}
+	for _, name := range append(append([]string{}, genericHookScripts...), hookHelperScripts...) {
+		shared[name] = true
+	}
+	for _, path := range hookScriptPathsForConnector(opts, conn) {
+		name := filepath.Base(path)
+		if shared[name] {
+			continue
+		}
+		want, ok := entry.HookScriptDigests[name]
+		if !ok {
+			continue
+		}
+		got, exists, err := stableManagedArtifactDigestForOwner(
+			path,
+			"managed connector hook script "+name,
+			managedHookRuntimeArtifactMaxBytes,
+			expectedOwnerSID,
+		)
+		if err != nil {
+			return fmt.Errorf("verify managed connector hook script %s: %w", path, err)
+		}
+		if !exists {
+			return fmt.Errorf("managed connector hook script is missing: %s", path)
+		}
+		if got != want {
+			return fmt.Errorf("managed connector hook script digest mismatch: %s", path)
+		}
 	}
 	return nil
 }
@@ -1881,7 +2088,7 @@ func stableManagedArtifactDigestWithAge(
 		lock.Lock()
 		defer lock.Unlock()
 	}
-	expected, err := os.Lstat(path)
+	expected, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return "", false, nil
 	}
@@ -2020,6 +2227,7 @@ func stableManagedArtifactDigestWithAge(
 		!after.ModTime().Equal(opened.ModTime()) {
 		return "", true, fmt.Errorf("%s changed during bounded digest", label)
 	}
+	remember := stamped
 	if stamped {
 		stampOf := managedArtifactStampOf
 		if attributeOnly {
@@ -2030,11 +2238,44 @@ func stableManagedArtifactDigestWithAge(
 			later.USN = 0
 		}
 		if !ok || later != stamp {
-			return "", true, fmt.Errorf("%s changed during bounded digest", label)
+			if !ok || !managedArtifactStampMovedOnlyInJournal(stamp, later) {
+				return "", true, fmt.Errorf("%s changed during bounded digest", label)
+			}
+			// Only the change-journal number moved: another process ended
+			// the change epoch of the file during this read, as its own full
+			// read of the shared hook binary does (a status or verify call
+			// next to the guardian, GAP-0256). No handle could write the file
+			// while this deny-write handle was open, but the stamp no longer
+			// names this read, so it is not remembered. The two-pass check
+			// that unguarded files get confirms the bytes instead.
+			second, secondSize, err := hashOnce()
+			if err != nil {
+				return "", true, err
+			}
+			final, err := file.Stat()
+			if err != nil {
+				return "", true, err
+			}
+			current, err := os.Lstat(path)
+			if err != nil {
+				return "", true, fmt.Errorf("%s changed after open: %w", label, err)
+			}
+			last, ok := stampOf(file)
+			if attributeOnly {
+				last.USN = 0
+			}
+			if !ok || second != first || secondSize != firstSize ||
+				final.Size() != opened.Size() || !final.ModTime().Equal(opened.ModTime()) ||
+				current.Mode()&os.ModeSymlink != 0 || !current.Mode().IsRegular() ||
+				!os.SameFile(opened, current) ||
+				(last != stamp && !managedArtifactStampMovedOnlyInJournal(stamp, last)) {
+				return "", true, fmt.Errorf("%s changed during bounded digest", label)
+			}
+			remember = false
 		}
 	}
 	digest := "sha256:" + hex.EncodeToString(first[:])
-	if stamped {
+	if remember {
 		rememberManagedArtifactDigest(path, stamp, digest, attributeOnly, fullStampAvailable)
 	}
 	return digest, true, nil
@@ -2170,21 +2411,6 @@ func protectedAuthorityFromSelection(
 
 func LoadCachedAgentVersion(dataDir, connectorName string) string {
 	normalizedName := normalizeConnectorName(connectorName)
-	if runtime.GOOS == "darwin" && normalizedName == "openhands" {
-		if entry, exists := loadProtectedHookContractEntry(dataDir, normalizedName); exists {
-			if selection, supersedes := supersedingProtectedSetupSelection(dataDir, normalizedName, entry); supersedes {
-				return selection.RawVersion
-			}
-			if validSetupSelectedAgentExecutableEvidence(entry, normalizedName) {
-				return strings.TrimSpace(entry.RawAgentVersion)
-			}
-			return ""
-		}
-		if selection, ok := loadSetupAgentSelection(dataDir, normalizedName); ok {
-			return selection.RawVersion
-		}
-		return ""
-	}
 	if runtime.GOOS == "windows" && normalizedName == "codex" {
 		if entry, exists := loadProtectedCodexContractEntry(dataDir); exists {
 			if validCodexAgentExecutableEvidence(entry) {
@@ -2200,7 +2426,7 @@ func LoadCachedAgentVersion(dataDir, connectorName string) string {
 		}
 		return ""
 	}
-	if normalizedName == "hermes" || normalizedName == "omnigent" || normalizedName == "opencode" || normalizedName == "amp" {
+	if normalizedName == "hermes" || normalizedName == "opencode" || normalizedName == "amp" {
 		if runtime.GOOS == "windows" {
 			authority, ok := loadProtectedSetupExecutableAuthority(dataDir, normalizedName)
 			if !ok {
@@ -2228,21 +2454,6 @@ func LoadCachedAgentVersion(dataDir, connectorName string) string {
 // established discovery-cache behavior.
 func LoadCachedAgentExecutable(dataDir, connectorName string) string {
 	normalizedName := normalizeConnectorName(connectorName)
-	if runtime.GOOS == "darwin" && normalizedName == "openhands" {
-		if entry, exists := loadProtectedHookContractEntry(dataDir, normalizedName); exists {
-			if selection, supersedes := supersedingProtectedSetupSelection(dataDir, normalizedName, entry); supersedes {
-				return selection.Executable
-			}
-			if validSetupSelectedAgentExecutableEvidence(entry, normalizedName) {
-				return strings.TrimSpace(entry.AgentExecutable)
-			}
-			return ""
-		}
-		if selection, ok := loadSetupAgentSelection(dataDir, normalizedName); ok {
-			return selection.Executable
-		}
-		return ""
-	}
 	if runtime.GOOS == "windows" && normalizedName == "codex" {
 		if entry, exists := loadProtectedCodexContractEntry(dataDir); exists {
 			if validCodexAgentExecutableEvidence(entry) {
@@ -2255,7 +2466,7 @@ func LoadCachedAgentExecutable(dataDir, connectorName string) string {
 		}
 		return ""
 	}
-	if normalizedName == "hermes" || normalizedName == "omnigent" || normalizedName == "opencode" || normalizedName == "amp" {
+	if normalizedName == "hermes" || normalizedName == "opencode" || normalizedName == "amp" {
 		if runtime.GOOS == "windows" {
 			authority, ok := loadProtectedSetupExecutableAuthority(dataDir, normalizedName)
 			if !ok {
@@ -2437,7 +2648,7 @@ func readStablePrivateStateFile(dataDir, name string, limit int64) ([]byte, bool
 		return nil, false
 	}
 	path := filepath.Join(dataDir, name)
-	before, err := os.Lstat(path)
+	before, err := pathidentity.LstatPinned(path)
 	if err != nil || before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() || before.Size() > limit {
 		return nil, false
 	}
@@ -2450,7 +2661,7 @@ func readStablePrivateStateFile(dataDir, name string, limit int64) ([]byte, bool
 	if err := hookAPIValidateOwner(path, before); err != nil {
 		return nil, false
 	}
-	file, err := os.Open(path)
+	file, err := openConnectorStateFileWithRetry(path)
 	if err != nil {
 		return nil, false
 	}
@@ -2494,6 +2705,90 @@ type cachedAgentSignal struct {
 	Version    string `json:"version"`
 	BinaryPath string `json:"binary_path"`
 	Installed  *bool  `json:"installed"`
+	Error      string `json:"error"`
+	// Identity names the executable the version was read from (the Python
+	// _executable_identity: path, size, times, file id, change time).
+	Identity []json.RawMessage `json:"identity"`
+}
+
+// cachedAgentIdentityFields is the length of a recorded executable identity.
+const cachedAgentIdentityFields = 6
+
+// unidentifiedCachedVersionError is the reason recorded for a cached version
+// that names no executable. It reads as "not probed" to the refusal text.
+const unidentifiedCachedVersionError = "version not probed: the cached version records no executable identity"
+
+// agentVersionProbeErrorMaxBytes bounds the discovery error a refusal quotes.
+const agentVersionProbeErrorMaxBytes = 400
+
+// AgentVersionProbeCause is why the last agent discovery found a connector's
+// agent binary but recorded no version. Each cause has its own next step, so
+// a refusal does not tell a user with a slow or untrusted install to fix PATH
+// (GAP-2479). The texts it matches are the ones
+// cli/defenseclaw/inventory/agent_discovery.py records.
+type AgentVersionProbeCause int
+
+const (
+	// AgentVersionProbeUnreadable: the version could not be read for another
+	// recorded reason (version metadata, an unidentified Kiro surface).
+	AgentVersionProbeUnreadable AgentVersionProbeCause = iota
+	// AgentVersionProbeDidNotRun: the binary ran and failed or printed no
+	// version (a node script with no node on PATH exits 127).
+	AgentVersionProbeDidNotRun
+	// AgentVersionProbeTimedOut: the binary did not answer within the probe
+	// budget (a cold first start or a busy host).
+	AgentVersionProbeTimedOut
+	// AgentVersionProbeUntrustedPath: discovery did not run the binary
+	// because it is outside the trusted install prefixes.
+	AgentVersionProbeUntrustedPath
+	// AgentVersionProbeNotProbed: the command that wrote the cache set up
+	// other connectors only, so it did not run this agent.
+	AgentVersionProbeNotProbed
+)
+
+// classifyAgentVersionProbeError reads the whole recorded error (one entry
+// per binary candidate, joined by "; "). A timed-out candidate is the one
+// discovery selects, so it wins; a trusted candidate that ran and failed wins
+// over one that was not run.
+func classifyAgentVersionProbeError(detail string) AgentVersionProbeCause {
+	switch {
+	case strings.Contains(detail, "version probe timed out"):
+		return AgentVersionProbeTimedOut
+	case strings.Contains(detail, "version not probed"):
+		return AgentVersionProbeNotProbed
+	case strings.Contains(detail, "version probe exited"),
+		strings.Contains(detail, "version probe failed"),
+		strings.Contains(detail, "version probe returned empty stdout"):
+		return AgentVersionProbeDidNotRun
+	case strings.Contains(detail, "not in a trusted install prefix"):
+		return AgentVersionProbeUntrustedPath
+	default:
+		return AgentVersionProbeUnreadable
+	}
+}
+
+// CachedAgentVersionProbeError returns what the last agent discovery recorded
+// when it found the connector's agent binary but could not read its version,
+// and why (for example "version probe exited 127: /usr/bin/env: node: No
+// such file or directory" for a node script with no node on PATH). A refusal
+// of the unversioned agent then names that cause and its own next step
+// instead of an agent "holding its settings" (GAP-1167, GAP-2479). It returns
+// "" when the cache has a version, records no binary, or records no error.
+func CachedAgentVersionProbeError(dataDir, connectorName string) (string, AgentVersionProbeCause) {
+	signal, ok := loadCachedAgentSignal(dataDir, connectorName)
+	if !ok || strings.TrimSpace(signal.Version) != "" || strings.TrimSpace(signal.BinaryPath) == "" {
+		return "", AgentVersionProbeUnreadable
+	}
+	detail := strings.Join(strings.Fields(signal.Error), " ")
+	cause := classifyAgentVersionProbeError(detail)
+	if len(detail) <= agentVersionProbeErrorMaxBytes {
+		return detail, cause
+	}
+	cut := agentVersionProbeErrorMaxBytes
+	for cut > 0 && !utf8.RuneStart(detail[cut]) {
+		cut--
+	}
+	return detail[:cut] + "...", cause
 }
 
 // CachedAgentNotFound reports whether the last agent discovery recorded in
@@ -2523,9 +2818,19 @@ func loadCachedAgentSignal(dataDir, connectorName string) (cachedAgentSignal, bo
 	if payload.Agents == nil {
 		return cachedAgentSignal{}, false
 	}
-	signal, ok := payload.Agents[normalizeConnectorName(connectorName)]
+	name := normalizeConnectorName(connectorName)
+	signal, ok := payload.Agents[name]
 	if !ok {
 		return cachedAgentSignal{}, false
+	}
+	// The Kiro hook floor is judged from this version alone, so a version that
+	// names no executable (a cache written before discovery recorded one) is
+	// never admitted: the file may have changed to one below the floor since.
+	// It reads as not probed until discovery reads the agent again and rewrites
+	// the entry with its identity. Python judges the identity against the file.
+	if name == "kiro" && strings.TrimSpace(signal.Version) != "" && len(signal.Identity) != cachedAgentIdentityFields {
+		signal.Version = ""
+		signal.Error = unidentifiedCachedVersionError
 	}
 	return signal, true
 }
@@ -2534,7 +2839,7 @@ func loadHookContractLock(dataDir string) hookContractLock {
 	if strings.TrimSpace(dataDir) == "" {
 		return hookContractLock{Version: 1, Connectors: map[string]HookContractLockEntry{}}
 	}
-	data, err := os.ReadFile(filepath.Join(dataDir, hookContractLockFile))
+	data, err := readConnectorStateFile(filepath.Join(dataDir, hookContractLockFile))
 	if err != nil {
 		return hookContractLock{Version: 1, Connectors: map[string]HookContractLockEntry{}}
 	}
@@ -2562,7 +2867,7 @@ func loadHookContractLockForUpdate(
 	if managedEnterprise {
 		return loadManagedHookContractLock(dataDir)
 	}
-	data, err := os.ReadFile(filepath.Join(dataDir, hookContractLockFile))
+	data, err := readConnectorStateFile(filepath.Join(dataDir, hookContractLockFile))
 	if os.IsNotExist(err) {
 		return empty, nil
 	}

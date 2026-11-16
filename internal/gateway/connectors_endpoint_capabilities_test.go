@@ -57,7 +57,8 @@ func TestConnectorsEndpointPublishesCodexAndClaudeCapabilities(t *testing.T) {
 			t.Errorf("%s missing public capability metadata: %+v", entry.Name, entry)
 			continue
 		}
-		if entry.Capabilities.LLMTrafficMode != connector.LLMTrafficModeHooksOnly || !entry.Capabilities.Telemetry.NativeOTLP {
+		if entry.Capabilities.LLMTrafficMode != connector.LLMTrafficModeHooksOnly ||
+			entry.Capabilities.Telemetry.NativeOTLP || len(entry.Capabilities.Telemetry.HookSignals) != 3 {
 			t.Errorf("%s capabilities=%+v", entry.Name, entry.Capabilities)
 		}
 		if len(entry.Locations.TelemetryConfigPaths) == 0 || len(entry.Locations.Surfaces) != 5 {

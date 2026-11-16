@@ -96,7 +96,7 @@ func testBundleCustomGuardrailPackSignedDigestMatchesAppliedDigest(t *testing.T,
 			return nil
 		})
 	})
-	driver := &enterprisebundle.Driver{Store: store, AnchorsPath: anchorsPath, Platform: platform, ProductVersion: "1.0.2", Digester: digester, Now: func() time.Time { return verifyAt }}
+	driver := &enterprisebundle.Driver{Store: store, ConfigPath: filepath.Join(root, "config.yaml"), AnchorsPath: anchorsPath, Platform: platform, ProductVersion: "1.0.2", Digester: digester, Now: func() time.Time { return verifyAt }}
 	prepared, err := driver.Prepare(context.Background(), f.bundle, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -121,7 +121,9 @@ func testBundleCustomGuardrailPackSignedDigestMatchesAppliedDigest(t *testing.T,
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := driver.Finish(prepared, prepared.ConfigSHA256, nil, enterprisebundle.GatewayPolicy{EffectiveDigest: deviceDigest, Digest: deviceDigest, Applied: true}, false, nil); err != nil {
+	policy := installPreparedBundle(t, driver, prepared)
+	policy.EffectiveDigest, policy.Digest = deviceDigest, deviceDigest
+	if _, err := driver.Finish(prepared, prepared.ConfigSHA256, nil, policy, false, nil); err != nil {
 		t.Fatal(err)
 	}
 	if rc := prepared.Receipt; rc.State != enterprisebundle.StateConfirmed || rc.ExpectedDigest != deviceDigest || rc.EffectivePolicyDigest != deviceDigest {
@@ -153,8 +155,12 @@ ai_discovery:
 // carry them).
 func bundleConfig(t *testing.T) string {
 	t.Helper()
-	_, file, _, _ := runtime.Caller(0)
-	dir := filepath.Join(filepath.Dir(file), "..", "..", "policies")
+	// The test runs in its package folder; a source path compiled into a
+	// cross-built test binary does not exist on the host that runs it.
+	dir, err := filepath.Abs(filepath.Join("..", "..", "policies"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := os.Stat(filepath.Join(dir, "guardrail", "default")); err != nil {
 		t.Skipf("policies not found: %v", err)
 	}
@@ -674,5 +680,37 @@ func TestRenderConfig(t *testing.T) {
 				t.Fatalf("got %v, want file_missing or config_invalid", err)
 			}
 		})
+	}
+}
+
+// A standard user on a managed device cannot open the service data_dir (0700,
+// owned by the service account). Offline sign and verify run as any account,
+// so they check the target's audit.db path by name there, as they do on a
+// computer without that folder; the gateway's own load still refuses a path
+// it cannot inspect (sidecar F02).
+func TestOfflineBundleLoadToleratesUnreadableDataDir(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a POSIX account that a mode 0 folder denies")
+	}
+	base := t.TempDir()
+	dataDir := filepath.Join(base, "runtime")
+	if err := os.Mkdir(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "audit.db"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dataDir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dataDir, 0o700) })
+	root, b := writeBundle(t, bundleConfig(t))
+	layout := enterprisebundle.DeviceLayout{ConfigPath: filepath.Join(base, "etc", "config.yaml"), DataDir: dataDir, PolicyDir: filepath.Join(base, "policies")}
+	if _, _, err := enterprisebundle.LoadConfigForDeviceLayout(b, root, runtime.GOOS, layout); err != nil {
+		t.Fatalf("offline load as a standard user: %v", err)
+	}
+	_, err := config.ParseCompileObservabilityV8(layout.ConfigPath, b.Files[enterprisebundle.ConfigName], config.ObservabilityV8CompileOptions{DefaultDataDir: dataDir})
+	if err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("the gateway compile must still refuse an uninspectable audit.db: %v", err)
 	}
 }

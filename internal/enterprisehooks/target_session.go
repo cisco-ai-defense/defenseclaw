@@ -40,11 +40,16 @@ type windowsSessionState struct {
 // are tried: the active sessions, then, when allowDisconnected is set, the
 // disconnected ones, each in session ID order. A disconnected session keeps
 // its user signed in, and managed ACP enrollment refused such a user as
-// having no signed-in session (GAP-0835).
+// having no signed-in session (GAP-0835). Session 0 is the services session:
+// no user signs in there, and its token query fails with ERROR_NO_TOKEN,
+// which turned a signed-out target into a token error instead of "not signed
+// in" (GAP-0217).
 func windowsTargetSessionOrder(sessions []windowsSessionState, allowDisconnected bool) []uint32 {
 	var active, disconnected []uint32
 	for _, session := range sessions {
 		switch {
+		case session.ID == 0:
+			continue
 		case session.Active:
 			active = append(active, session.ID)
 		case session.Disconnected && allowDisconnected:

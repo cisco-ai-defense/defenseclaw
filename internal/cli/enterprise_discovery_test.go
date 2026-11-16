@@ -30,6 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/spf13/cobra"
 )
 
@@ -126,6 +127,61 @@ func TestEnterpriseDiscoveryListsEachAccountsInventory(t *testing.T) {
 	var empty bytes.Buffer
 	if err := writeEnterpriseDiscovery(&empty, filepath.Join(dir, "missing"), "", false); err != nil || !strings.Contains(empty.String(), "no records yet") {
 		t.Fatalf("a missing spool = %v:\n%s", err, empty.String())
+	}
+}
+
+// --user <uid> lists the runtime findings of the account that holds the uid,
+// as --user <name> does, and none of another account; Linux and macOS
+// findings carry the account name only (rel-1-0-6 GAP-0159).
+func TestEnterpriseDiscoveryUIDUserListsThatAccountsRuntimeFindings(t *testing.T) {
+	dir := t.TempDir()
+	record := inventory.UserScanRecord{Version: inventory.UserScanRecordVersion, UID: 1013, User: "r106fs7b", UpdatedAt: time.Now().UTC(),
+		Report: inventory.AIDiscoveryReport{Summary: inventory.AIDiscoverySummary{Result: "ok"}}}
+	data, _ := json.Marshal(record)
+	if err := os.WriteFile(filepath.Join(dir, "1013.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousIDs, previousName, previousRead := enterpriseDiscoveryAccountIDs, enterpriseDiscoveryUIDName, enterpriseDiscoveryReadRecord
+	t.Cleanup(func() {
+		enterpriseDiscoveryAccountIDs, enterpriseDiscoveryUIDName, enterpriseDiscoveryReadRecord = previousIDs, previousName, previousRead
+	})
+	enterpriseDiscoveryAccountIDs = func(string) []string { return nil }
+	enterpriseDiscoveryReadRecord = func(path string) (inventory.UserScanRecord, error) {
+		var record inventory.UserScanRecord
+		data, err := os.ReadFile(path)
+		if err == nil {
+			err = json.Unmarshal(data, &record)
+		}
+		return record, err
+	}
+	previousRuntime := enterpriseDiscoveryRuntime
+	t.Cleanup(func() { enterpriseDiscoveryRuntime = previousRuntime })
+	enterpriseDiscoveryRuntime = func() (*enterpriseRuntimeView, error) {
+		return &enterpriseRuntimeView{Enabled: true, Findings: []enterpriseRuntimeFinding{
+			{PID: 41, Process: "python3", User: "r106fs7b", Attribution: "process_owner", Score: 40, Severity: "medium"},
+			{PID: 42, Process: "python3", User: "r106fs7c", Attribution: "process_owner", Score: 40, Severity: "medium"},
+		}}, nil
+	}
+	for _, tc := range []struct {
+		name   string
+		lookup func(int) string
+	}{
+		{"the account database names the uid", func(uid int) string { return map[int]string{1013: "r106fs7b"}[uid] }},
+		{"only the record names the uid", func(int) string { return "" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			enterpriseDiscoveryUIDName = tc.lookup
+			for _, spelling := range []string{"r106fs7b", "1013"} {
+				var out bytes.Buffer
+				var report enterpriseDiscoveryReport
+				if err := writeEnterpriseDiscovery(&out, dir, spelling, true); err != nil || json.Unmarshal(out.Bytes(), &report) != nil {
+					t.Fatalf("--user %s = %v:\n%s", spelling, err, out.String())
+				}
+				if report.Runtime == nil || len(report.Runtime.Findings) != 1 || report.Runtime.Findings[0].PID != 41 {
+					t.Fatalf("--user %s runtime = %+v, want only pid 41 of r106fs7b", spelling, report.Runtime)
+				}
+			}
+		})
 	}
 }
 
@@ -262,7 +318,7 @@ func TestGatewayStatusShowsTheKernelSensor(t *testing.T) {
 	if got, want := kernelSensorStatusLine(&snap), "Tetragon v1.7.1 (observe); kernel controls: monitoring 3 users, not enforcing"; got != want {
 		t.Fatalf("line %q, want %q", got, want)
 	}
-	if out := captureStdout(t, func() { printSubsystems(&snap) }); !strings.Contains(out, "Kernel sensor: Tetragon v1.7.1 (observe); kernel controls: monitoring 3 users, not enforcing") {
+	if out := captureStdout(t, func() { printSubsystems(&snap, 0) }); !strings.Contains(out, "Kernel sensor: Tetragon v1.7.1 (observe); kernel controls: monitoring 3 users, not enforcing") {
 		t.Fatalf("subsystems:\n%s", out)
 	}
 	var native gateway.HealthSnapshot
@@ -272,7 +328,7 @@ func TestGatewayStatusShowsTheKernelSensor(t *testing.T) {
 	}
 	var plain gateway.HealthSnapshot
 	_ = json.Unmarshal([]byte(`{"ai_runtime":{"details":{"planes":{"c":{"running":true}}}}}`), &plain)
-	if out := captureStdout(t, func() { printSubsystems(&plain) }); strings.Contains(out, "Kernel sensor") || kernelSensorStatusLine(&plain) != "" {
+	if out := captureStdout(t, func() { printSubsystems(&plain, 0) }); strings.Contains(out, "Kernel sensor") || kernelSensorStatusLine(&plain) != "" {
 		t.Fatalf("a gateway without a backend prints a kernel line:\n%s", out)
 	}
 }
@@ -282,6 +338,11 @@ func TestGatewayStatusShowsTheKernelSensor(t *testing.T) {
 // managed deployment's config first; this runs the real fetch against a
 // gateway that only the pinned config and token reach.
 func TestEnterpriseDiscoveryRuntimeReadsTheManagedDeployment(t *testing.T) {
+	previousFactory := managedGatewayClientFactory
+	managedGatewayClientFactory = func(time.Duration, string, string) (*http.Client, error) {
+		return &http.Client{}, nil // This test's httptest server stands in for the protected service.
+	}
+	t.Cleanup(func() { managedGatewayClientFactory = previousFactory })
 	const token = "dc-test-discovery-token"
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/guardrail/profiles/resolve" {
@@ -373,6 +434,38 @@ func TestEnterpriseDiscoveryRuntimeReadsTheManagedDeployment(t *testing.T) {
 	gateway.Close()
 	if _, err := enterpriseGatewayGet("/api/v1/slow", &answer); err == nil || !strings.Contains(err.Error(), "check the deployment") {
 		t.Fatalf("stopped gateway error = %v, want the deployment status hint", err)
+	}
+}
+
+func TestEnterpriseDiscoveryDoesNotSendItsTokenToAnUnverifiedListener(t *testing.T) {
+	seen := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		seen++
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+	port := server.Listener.Addr().(*net.TCPAddr).Port
+	previousCfg, previousPin, previousLoad, previousFactory := cfg, enterpriseDiscoveryPinManagedEnv,
+		enterpriseDiscoveryLoadConfig, managedGatewayClientFactory
+	t.Cleanup(func() {
+		cfg, enterpriseDiscoveryPinManagedEnv, enterpriseDiscoveryLoadConfig, managedGatewayClientFactory =
+			previousCfg, previousPin, previousLoad, previousFactory
+	})
+	enterpriseDiscoveryPinManagedEnv = func() error { return nil }
+	enterpriseDiscoveryLoadConfig = func(*cobra.Command) error {
+		cfg = &config.Config{DeploymentMode: "managed_enterprise", Gateway: config.GatewayConfig{
+			APIBind: "127.0.0.1", APIPort: port,
+		}}
+		return nil
+	}
+	managedGatewayClientFactory = func(time.Duration, string, string) (*http.Client, error) {
+		return nil, errors.New("connected gateway service peer is unverified")
+	}
+	var out json.RawMessage
+	_, err := enterpriseGatewayGet("/status", &out)
+	if err == nil || seen != 0 {
+		t.Fatalf("managed discovery sent a request to another account: requests=%d error=%v", seen, err)
 	}
 }
 
@@ -766,5 +859,60 @@ func TestSecureClientKeepsTheEnterpriseViews(t *testing.T) {
 	want := fmt.Sprintf("no AI Discovery signal for account %q in the gateway's scan; the account has no AI agent, skill or MCP server found yet, or ai_discovery is off", user)
 	if err := writeWindowsEnterpriseDiscovery(&bytes.Buffer{}, user, false); err == nil || err.Error() != want {
 		t.Fatalf("Secure Client --user %s = %v, want %q", user, err, want)
+	}
+}
+
+// defenseclaw-gateway is not on the PATH, so the hint names it by its
+// full path (cowork-1-0-8 GAP-0081).
+func TestEnterpriseDiscoveryStatusHintNamesTheGatewayByItsFullPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows names the managed CLI; see enterprise_discovery_windows_hint_test.go")
+	}
+	platform := "linux"
+	if runtime.GOOS == "darwin" {
+		platform = "macos"
+	}
+	want := "sudo " + managed.StandaloneGatewayPath(runtime.GOOS) + " enterprise " + platform + " status"
+	if got := enterpriseDiscoveryStatusHint(true); got != want || !strings.HasPrefix(got, "sudo /opt/") {
+		t.Fatalf("hint = %q, want %q", got, want)
+	}
+}
+
+// Any other profile, Secure Client included, keeps the text of release 1.0.5
+// (review round 4, S1): the bare gateway name, no sudo.
+func TestEnterpriseDiscoveryStatusHintOnSecureClientKeepsTheReleasedText(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows names the managed CLI for every profile; see enterprise_discovery_windows_hint_test.go")
+	}
+	platform := "linux"
+	if runtime.GOOS == "darwin" {
+		platform = "macos"
+	}
+	want := "defenseclaw-gateway enterprise " + platform + " status"
+	for name, profile := range map[string]string{"explicit": managed.ProfileSecureClient, "default": ""} {
+		c := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+		c.Enterprise.Profile = profile
+		if !c.SecureClientIntegration() || c.StandaloneEnterprise() {
+			t.Fatalf("%s: the fixture is not a Secure Client config", name)
+		}
+		if got := enterpriseDiscoveryStatusHint(c.StandaloneEnterprise()); got != want {
+			t.Errorf("%s: hint = %q, want %q", name, got, want)
+		}
+	}
+	if got := enterpriseDiscoveryStatusHint((*config.Config)(nil).StandaloneEnterprise()); got != want {
+		t.Errorf("no config: hint = %q, want %q", got, want)
+	}
+}
+
+// managedHostGatewayCommand gives the text it gave in release 1.0.5: the
+// standalone layout's gateway on Linux and macOS, the bare name elsewhere. The
+// hints that call it are the same on Secure Client (review round 4, S1).
+func TestManagedHostGatewayCommandKeepsTheReleasedValue(t *testing.T) {
+	want := "defenseclaw-gateway"
+	if layout, err := managed.StandaloneLayoutFor(runtime.GOOS); err == nil {
+		want = layout.BinDir + "/defenseclaw-gateway"
+	}
+	if got := managedHostGatewayCommand(); got != want {
+		t.Fatalf("managedHostGatewayCommand() = %q, want %q", got, want)
 	}
 }

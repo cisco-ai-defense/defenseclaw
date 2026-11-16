@@ -17,6 +17,7 @@
   ],
   "properties": {
     "profile": {"type": "string"},
+    "pinned_profile": {"type": "string"},
     "description": {"type": "string"},
     "match": {"type": "string"},
     "matched_group": {"type": "string"},
@@ -32,7 +33,10 @@
     "egress_block": {"type": "array", "items": {"type": "string"}},
     "user_approvals": {"type": "string", "enum": ["", "none", "session"]},
     "allow_unblock": {"type": "boolean"},
+    "foreign_sandboxes": {"type": "string", "enum": ["", "stop", "alert"]},
     "mcp_included": {"type": "array", "items": {"type": "string"}},
+    "mcp_project_count": {"type": "integer", "minimum": 0},
+    "mcp_project_blocked": {"type": "boolean"},
     "mcp_blocked": {
       "type": "array",
       "items": {

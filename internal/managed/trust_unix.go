@@ -33,13 +33,62 @@ import (
 // changing the mode bits; on Linux a named POSIX ACL entry with effective
 // write. Code outside this package that trusts a path's mode bits checks
 // its ACL with this, as the trust checks here do.
-func ValidatePathACL(path string) error { return validateTrustedPathACL(path) }
+func ValidatePathACL(path string) error { return validateStrictPathACL(path) }
 
-// ValidateTrustedConfigPath rejects managed_enterprise config paths that a
-// standard user could replace or edit. The managed service may run as a
-// dedicated non-root user, but the authoritative config must stay admin-owned.
-func ValidateTrustedConfigPath(path string) error {
-	return ValidateTrustedFilePath(path, "managed config")
+// ValidatePathACLForAccount is ValidatePathACL for a path owned by the account
+// with the given uid and name (its own configuration folders): an entry for
+// root or for the account itself adds no authority and is not judged, and an
+// entry for any other principal is judged as ValidatePathACL does.
+func ValidatePathACLForAccount(path string, uid int, account string) error {
+	return validateAccountPathACL(path, uid, account)
+}
+
+// ModeWithoutACLMask is mode with its group bits corrected for a Linux POSIX
+// access ACL on path: there the kernel reports the ACL mask as the group
+// bits, so a named entry for root or the owner makes a private path look
+// group writable. Callers that judge group write from the mode bits and judge
+// named ACL entries with ValidatePathACLForAccount use this for the group
+// bits. Unchanged on a path without an ACL and off Linux.
+func ModeWithoutACLMask(path string, mode fs.FileMode) fs.FileMode {
+	return modeWithoutACLMask(path, mode)
+}
+
+// ValidateTrustedInstallMarkerDir accepts a Secure Client install marker
+// only when root owns it, with no group, other or ACL writer and no symlink
+// in the path. An ancestor may also be written by the administrators the
+// Secure Client ACL rule already trusts: a group write bit for an
+// administrator group (administratorWriterGroup: wheel or admin on macOS)
+// is accepted and reported, and the operating system roots / and /opt keep
+// the advisory verdict every other managed walk gives them. Any other
+// writer of an ancestor (another group, other write, a write ACL entry for
+// another principal, a foreign owner below /opt) stays fatal, so only an
+// administrator can change what certifies a deployment profile that changes
+// hook availability. The marker folder itself is never relaxed.
+func ValidateTrustedInstallMarkerDir(path, label string) error {
+	if path == "" {
+		return fmt.Errorf("%s path is empty", label)
+	}
+	clean, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve %s path: %w", label, err)
+	}
+	for cur := clean; ; cur = filepath.Dir(cur) {
+		var err error
+		switch {
+		case cur == clean:
+			err = validateTrustedPathElement(cur, true, label, false)
+		case osRootAncestor(cur):
+			err = validateTrustedPathElement(cur, true, label, true)
+		default:
+			err = validateTrustedPathElementWriters(cur, true, label, false, administratorWriterGroup)
+		}
+		if err != nil {
+			return err
+		}
+		if cur == filepath.Dir(cur) {
+			return nil
+		}
+	}
 }
 
 // ValidateTrustedFilePath rejects managed_enterprise policy/input files that a
@@ -60,12 +109,15 @@ func ValidateTrustedFilePath(path, label string) error {
 		return err
 	}
 	for dir := filepath.Dir(clean); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
-		if err := validateTrustedPathElement(dir, true, label, PlatformInstallerOwnedPath(dir)); err != nil {
+		if trustedRootAlias(dir) {
+			continue
+		}
+		if err := validateTrustedPathElement(dir, true, label, AdvisoryAncestorPath(dir)); err != nil {
 			return err
 		}
 	}
 	root := filepath.VolumeName(clean) + string(filepath.Separator)
-	return validateTrustedPathElement(root, true, label, PlatformInstallerOwnedPath(root))
+	return validateTrustedPathElement(root, true, label, AdvisoryAncestorPath(root))
 }
 
 // ValidateTrustedRuntimeDir rejects managed_enterprise runtime directories that
@@ -85,7 +137,10 @@ func ValidateTrustedRuntimeDir(path, label string) error {
 		return fmt.Errorf("resolve %s path: %w", label, err)
 	}
 	for cur := clean; ; cur = filepath.Dir(cur) {
-		advisory := cur != clean && PlatformInstallerOwnedPath(cur)
+		if cur != clean && trustedRootAlias(cur) {
+			continue
+		}
+		advisory := cur != clean && AdvisoryAncestorPath(cur)
 		if err := validateTrustedRuntimeDirElement(cur, label, advisory); err != nil {
 			return err
 		}
@@ -94,20 +149,6 @@ func ValidateTrustedRuntimeDir(path, label string) error {
 		}
 	}
 	return nil
-}
-
-// ValidateTrustedServiceRuntimeDir is the cross-platform service-runtime
-// entry point. On unix the packaged defenseclaw account is resolved by
-// username (via user.Lookup) inside trustedRuntimeOwner; the
-// Windows-format `NT SERVICE\...` account name in the third argument
-// cannot be reused for a unix user lookup, so it is intentionally
-// dropped here. To point unix trust at a non-default username, set the
-// DEFENSECLAW_UNIX_SERVICE_ACCOUNT env — trustedRuntimeOwner reads it
-// on every check. When neither the env is set nor the "defenseclaw"
-// user exists, the ancestor walk fails with a clear "owner uid N is
-// not trusted" error instead of silently allowing any owner.
-func ValidateTrustedServiceRuntimeDir(path, label, _ string) error {
-	return ValidateTrustedRuntimeDir(path, label)
 }
 
 // serviceRuntimeTreeMaxEntries bounds the walk of a managed policy tree.
@@ -140,7 +181,7 @@ func validateServiceRuntimeTreeEntries(root, label string) error {
 	entries := 0
 	err := filepath.WalkDir(root, func(cur string, _ fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			return walkErr
+			return UnreadableServiceFolder(cur, label, walkErr)
 		}
 		if cur == root {
 			return nil
@@ -162,8 +203,9 @@ func validateServiceRuntimeTreeEntries(root, label string) error {
 		if !ok {
 			return fmt.Errorf("%s: cannot inspect file owner", cur)
 		}
-		if !trustedRuntimeOwner(st.Uid) {
-			return fmt.Errorf("%s: owner uid %d is not trusted for %s; expected root/admin uid 0 or defenseclaw service uid", cur, st.Uid, label)
+		owner := hostOwnerUID(cur, info, st.Uid)
+		if !trustedRuntimeOwner(owner) {
+			return fmt.Errorf("%s: owner uid %d is not trusted for %s; expected root/admin uid 0 or defenseclaw service uid", cur, owner, label)
 		}
 		return validateTrustedPathACL(cur)
 	})
@@ -171,6 +213,58 @@ func validateServiceRuntimeTreeEntries(root, label string) error {
 		return fmt.Errorf("%s has more than %d entries", root, serviceRuntimeTreeMaxEntries)
 	}
 	return err
+}
+
+// UnreadableServiceFolder turns a permission error from listing dir, a
+// folder of a policy tree, into one that names the folder, its mode and owner,
+// and the fix the lifecycle gives for the same folder. A root shell under
+// umask 077 makes such a folder (mkdir -p policies/guardrail), and every
+// reload of the gateway service account then failed with only
+// "open <folder>: permission denied" (GAP-2432). Any other error, or a path
+// that is not a folder, is returned unchanged.
+func UnreadableServiceFolder(dir, label string, cause error) error {
+	if !errors.Is(cause, fs.ErrPermission) {
+		return cause
+	}
+	info, err := os.Lstat(dir)
+	if err != nil || !info.IsDir() {
+		return cause
+	}
+	owner := "an unknown owner"
+	if st, ok := info.Sys().(*syscall.Stat_t); ok {
+		owner = fmt.Sprintf("%s:%s", lookupUserName(st.Uid), lookupGroupName(st.Gid))
+	}
+	group := serviceGroupName(runtime.GOOS, os.Getenv(UnixServiceAccountEnv))
+	return fmt.Errorf("%s is %04o owned by %s, so the %s service account cannot read the %s below it; "+
+		"let the %s service group through it without opening it to other accounts "+
+		"(for example: chown root:%s %s && chmod 0750 %s) and retry: %w",
+		dir, info.Mode().Perm(), owner, group, label, group, group, dir, dir, cause)
+}
+
+// serviceGroupName is the group of the packaged gateway service account,
+// the group the lifecycle gives read access to administrator folders.
+func serviceGroupName(goos, custom string) string {
+	if custom = strings.TrimSpace(custom); custom != "" {
+		return custom
+	}
+	if goos == "darwin" {
+		return StandaloneDarwinServiceUser
+	}
+	return StandaloneLinuxServiceUser
+}
+
+func lookupUserName(uid uint32) string {
+	if u, err := user.LookupId(strconv.FormatUint(uint64(uid), 10)); err == nil && u.Username != "" {
+		return u.Username
+	}
+	return strconv.FormatUint(uint64(uid), 10)
+}
+
+func lookupGroupName(gid uint32) string {
+	if g, err := user.LookupGroupId(strconv.FormatUint(uint64(gid), 10)); err == nil && g.Name != "" {
+		return g.Name
+	}
+	return strconv.FormatUint(uint64(gid), 10)
 }
 
 // ValidateTrustedServiceRuntimeFilePath validates a service-owned runtime
@@ -195,12 +289,15 @@ func ValidateTrustedServiceRuntimeFilePath(path, label, _ string) error {
 		return err
 	}
 	for dir := filepath.Dir(clean); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
-		if err := validateTrustedRuntimeDirElement(dir, label, PlatformInstallerOwnedPath(dir)); err != nil {
+		if trustedRootAlias(dir) {
+			continue
+		}
+		if err := validateTrustedRuntimeDirElement(dir, label, AdvisoryAncestorPath(dir)); err != nil {
 			return err
 		}
 	}
 	root := filepath.VolumeName(clean) + string(filepath.Separator)
-	return validateTrustedRuntimeDirElement(root, label, PlatformInstallerOwnedPath(root))
+	return validateTrustedRuntimeDirElement(root, label, AdvisoryAncestorPath(root))
 }
 
 func validateTrustedRuntimeFileElement(path, label string) error {
@@ -224,8 +321,9 @@ func validateTrustedRuntimeFileElement(path, label string) error {
 	if !ok {
 		return fmt.Errorf("%s: cannot inspect file owner", path)
 	}
-	if !trustedRuntimeOwner(st.Uid) {
-		return fmt.Errorf("%s: owner uid %d is not trusted for %s; expected root/admin uid 0 or defenseclaw service uid", path, st.Uid, label)
+	owner := hostOwnerUID(path, info, st.Uid)
+	if !trustedRuntimeOwner(owner) {
+		return fmt.Errorf("%s: owner uid %d is not trusted for %s; expected root/admin uid 0 or defenseclaw service uid", path, owner, label)
 	}
 	return nil
 }
@@ -238,16 +336,26 @@ func validateTrustedRuntimeFileElement(path, label string) error {
 // see AIFW-34262 and TrustStrictAncestorsEnv. Structural failures stay fatal at
 // every element, and the named leaf (advisory=false) keeps every verdict fatal.
 //
-// Callers pass advisory=true only for an ancestor that PlatformInstallerOwnedPath
-// accepts. An ancestor outside those roots — a temp, home, or third-party
-// prefix — keeps its verdicts fatal, because nobody else has a claim on the
-// permissions there and a writable directory above the artifact means the
-// artifact can be swapped.
+// Callers pass advisory=true only for an ancestor that AdvisoryAncestorPath
+// accepts: the platform installer's roots and, on macOS, `/` and `/opt`. An
+// ancestor outside those — a temp, home, or third-party prefix — keeps its
+// verdicts fatal, because nobody else has a claim on the permissions there and
+// a writable directory above the artifact means the artifact can be swapped.
+// Apple's root aliases (`/etc`, `/tmp`, `/var`) are skipped by the walks
+// before they reach this check.
 //
 // Unlike Windows there is no second, narrower ancestor rule here: unix has no
 // equivalent of the stock known-folder create-child grant, so advisory is the
 // only ancestor relaxation this platform needs.
 func validateTrustedPathElement(path string, wantDir bool, label string, advisory bool) error {
+	return validateTrustedPathElementWriters(path, wantDir, label, advisory, nil)
+}
+
+// validateTrustedPathElementWriters is validateTrustedPathElement that also
+// accepts, and reports, a group write bit when trustedGroup names the
+// element's group. Other write is never accepted that way, and the strict
+// ancestor switch (trustStrictAncestors) still makes the verdict fatal.
+func validateTrustedPathElementWriters(path string, wantDir bool, label string, advisory bool, trustedGroup func(gid uint32) bool) error {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return fmt.Errorf("%s: %w", path, err)
@@ -261,9 +369,14 @@ func validateTrustedPathElement(path string, wantDir bool, label string, advisor
 	if !wantDir && !info.Mode().IsRegular() {
 		return fmt.Errorf("%s: expected regular %s file", path, label)
 	}
-	if info.Mode().Perm()&0o022 != 0 {
-		if err := relaxAncestorTrustVerdict(advisory, path, label, fmt.Errorf(
-			"%s: group/other writable permissions %04o are not trusted", path, info.Mode().Perm(),
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("%s: cannot inspect file owner", path)
+	}
+	if perm := info.Mode().Perm(); perm&0o022 != 0 {
+		relax := advisory || (trustedGroup != nil && perm&0o002 == 0 && trustedGroup(st.Gid))
+		if err := relaxAncestorTrustVerdict(relax, path, label, fmt.Errorf(
+			"%s: group/other writable permissions %04o are not trusted", path, perm,
 		)); err != nil {
 			return err
 		}
@@ -271,13 +384,10 @@ func validateTrustedPathElement(path string, wantDir bool, label string, advisor
 	if err := relaxAncestorTrustJudgement(advisory, path, label, validateTrustedPathACL(path)); err != nil {
 		return err
 	}
-	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return fmt.Errorf("%s: cannot inspect file owner", path)
-	}
-	if st.Uid != 0 {
+	owner := hostOwnerUID(path, info, st.Uid)
+	if owner != 0 {
 		return relaxAncestorTrustVerdict(advisory, path, label, fmt.Errorf(
-			"%s: owner uid %d is not trusted for %s; expected root/admin uid 0", path, st.Uid, label,
+			"%s: owner uid %d is not trusted for %s; expected root/admin uid 0", path, owner, label,
 		))
 	}
 	return nil
@@ -311,10 +421,11 @@ func validateTrustedRuntimeDirElement(path string, label string, advisory bool) 
 	if !ok {
 		return fmt.Errorf("%s: cannot inspect directory owner", path)
 	}
-	if !trustedRuntimeOwner(st.Uid) {
+	owner := hostOwnerUID(path, info, st.Uid)
+	if !trustedRuntimeOwner(owner) {
 		return relaxAncestorTrustVerdict(advisory, path, label, fmt.Errorf(
 			"%s: owner uid %d is not trusted for %s; expected root/admin uid 0 or defenseclaw service uid",
-			path, st.Uid, label,
+			path, owner, label,
 		))
 	}
 	return nil
@@ -368,3 +479,7 @@ func trustedServiceAccounts(goos, custom string) []string {
 	}
 	return []string{StandaloneLinuxServiceUser}
 }
+
+// trustedMachineInstallBases is Windows-only; PlatformInstallerOwnedRoots
+// returns fixed roots on Unix.
+func trustedMachineInstallBases() []string { return nil }

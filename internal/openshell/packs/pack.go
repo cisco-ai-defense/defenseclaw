@@ -42,11 +42,11 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"gopkg.in/yaml.v3"
 )
 
@@ -146,9 +146,9 @@ const (
 )
 
 var (
-	packNamePattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
-	blockedToolPattern = regexp.MustCompile(`^[A-Za-z0-9_.:*-]{1,256}$`)
-	harnessNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
+	packNamePattern    = lazyregexp.New(`^[a-z0-9][a-z0-9-]{0,62}$`)
+	blockedToolPattern = lazyregexp.New(`^[A-Za-z0-9_.:*-]{1,256}$`)
+	harnessNamePattern = lazyregexp.New(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 )
 
 // Pack is a validated, normalized sandbox policy pack.

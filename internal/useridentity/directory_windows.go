@@ -18,11 +18,25 @@ import (
 // the machine's own state (see directory_windows_facts.go). An AD UPN comes
 // from TranslateNameW, which may contact a domain controller: the call waits
 // at most wait for it (0 does not wait), and a lookup still running then
-// finishes in the background and answers a later call.
+// finishes in the background and answers a later call. UPNKept marks an AD
+// UPN that the latest translation did not confirm (adUPNCache.unconfirmed).
 func WindowsDirectoryFacts(sid string, wait time.Duration) DirectoryFacts {
-	return resolveWindowsDirectoryFacts(osWindowsDirectoryReader{}, sid,
-		func(sid, samName string) string { return adUPNs.lookup(sid, samName, wait) }, time.Now())
+	kept := false
+	facts := resolveWindowsDirectoryFacts(osWindowsDirectoryReader{}, sid,
+		func(sid, samName string) string {
+			upn := adUPNs.lookup(sid, samName, wait)
+			kept = upn != "" && adUPNs.unconfirmed(sid, samName, upn)
+			return upn
+		}, time.Now())
+	facts.UPNKept = kept && facts.UPN != ""
+	return facts
 }
+
+// ExpireWindowsADUPN makes the next lookup of sid's AD UPN ask TranslateNameW
+// again rather than reuse the answer cached for up to adUPNTTL, so
+// `enterprise identity refresh` applies a renamed UPN now (identity-round
+// GAP-1238).
+func ExpireWindowsADUPN(sid string) { adUPNs.expire(sid) }
 
 // WindowsGroupNames renders group SIDs as DOMAIN\name where LookupAccountSid
 // answers, keeping the SID otherwise. At most limit SIDs are looked up and

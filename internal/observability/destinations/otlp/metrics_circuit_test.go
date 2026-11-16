@@ -510,9 +510,7 @@ func TestMetricObserverCanShutdownWithoutLockInversion(t *testing.T) {
 // gateway.log line, failure code and health transition as logs and traces.
 func TestMetricHTTPRejectionIsLoggedCodedAndObserved(t *testing.T) {
 	var out bytes.Buffer
-	previous := rejectionLogWriter
-	rejectionLogWriter = &out
-	t.Cleanup(func() { rejectionLogWriter = previous })
+	setRejectionLogTestWriter(t, &out)
 
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "text/plain")

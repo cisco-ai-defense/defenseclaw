@@ -19,6 +19,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -43,16 +44,116 @@ func (a *APIServer) correlateHookOccurrence(
 	req agentHookRequest,
 	rawBody []byte,
 ) (context.Context, agentHookRequest, error) {
+	// The correlation ledger reads and writes audit.db on the store's one
+	// connection. Waiting for it (cold index pages after a start, another
+	// writer's commit) uses no gateway CPU, so it must not hold the caller's
+	// run slot: with one slot a caller's next hooks queued behind this
+	// call's store wait and passed their answer budget (GAP-1790).
+	resume := waitWithoutHookRunSlot(ctx)
+	defer resume()
+	runCtx := ctx
+	if end, ok := a.observeHookCorrelationEnd(ctx, req.ConnectorName); ok {
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithDeadline(ctx, end)
+		defer cancel()
+	}
 	for attempt := 1; ; attempt++ {
-		outCtx, out, err := a.correlateHookOccurrenceOnce(ctx, profile, cloneHookCorrelationState(req), rawBody)
-		if !errors.Is(err, audit.ErrCorrelationStale) || attempt >= hookCorrelationAttempts || ctx.Err() != nil {
+		outCtx, out, err := a.correlateHookOccurrenceOnce(runCtx, profile, cloneHookCorrelationState(req), rawBody)
+		if runCtx != ctx {
+			// The ledger's deadline bounds the ledger only: the call goes on
+			// with the request's own context and the values the ledger added.
+			outCtx = hookCallContextWithValuesOf(ctx, outCtx)
+		}
+		if err != nil && ctx.Err() == nil && runCtx.Err() != nil {
+			return ctx, req, fmt.Errorf("%w: %w", errHookCorrelationLate, err)
+		}
+		if err == nil || attempt >= hookCorrelationAttempts || ctx.Err() != nil {
 			return outCtx, out, err
+		}
+		if errors.Is(err, audit.ErrCorrelationStale) {
+			continue
+		}
+		if !audit.IsSQLiteBusy(err) {
+			return outCtx, out, err
+		}
+		// A read transaction cannot upgrade after another writer commits:
+		// SQLITE_BUSY_SNAPSHOT must restart from the connector resolution,
+		// cursor and receipt, not just repeat its failed INSERT. Give the
+		// competing writer a bounded chance to finish without extending the
+		// hook's answer deadline.
+		hookCorrelationBusyWait(attempt)
+		wait := min(10*time.Millisecond<<uint(attempt-1), 80*time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return outCtx, out, ctx.Err()
+		case <-time.After(wait):
 		}
 	}
 }
 
 // hookCorrelationAttempts bounds the attempts of one hook's correlation.
 const hookCorrelationAttempts = 8
+
+// errHookCorrelationLate is the correlation error of an observe-mode call
+// whose ledger work did not finish inside its share of the hook's answer
+// window (observeHookCorrelationEnd).
+var errHookCorrelationLate = errors.New("correlation ledger late for the hook's answer window (observe mode)")
+
+// hookCorrelationAnswerReserve is kept from a bounded call's answer window
+// for the rest of its decision, its audit commit and the answer's way back
+// once the correlation ledger has had its share.
+var hookCorrelationAnswerReserve = 1400 * time.Millisecond
+
+// observeHookCorrelationEnd is the latest time the correlation ledger may
+// hold an observe-mode call whose hook bounds its wait for the answer
+// (hookJudgeAnswerEnd, or for a per-user shell tool gate the end
+// hookCorrelationBoundContext put on ctx), and false for every other call. The ledger reads and
+// writes audit.db on the store's one connection; in a burst of concurrent
+// hooks (32 on a 2-vCPU host) the calls queued there past the hook's 4 s and
+// the hook denied benign calls as "the gateway is running but did not
+// answer", in observe mode too (rel-1-0-6 GAP-0152). Observe never enforces
+// a policy verdict, and a call whose ledger work fails already goes on
+// without its cross-call join IDs (CorrelationUnavailable), so a late ledger
+// takes that path instead of costing the answer. Action mode, sandboxed
+// calls in action and unbounded callers (Secure Client, session events,
+// in-process callers) keep waiting for the ledger as before.
+func (a *APIServer) observeHookCorrelationEnd(ctx context.Context, connectorName string) (time.Time, bool) {
+	end, bounded := hookJudgeAnswerEnd(ctx)
+	if !bounded {
+		end, bounded = ctx.Value(hookCorrelationAnswerEndKey{}).(time.Time)
+		bounded = bounded && !end.IsZero()
+	}
+	if !bounded || a == nil {
+		return time.Time{}, false
+	}
+	if sandboxHookMode(ctx, connectorName, a.agentHookMode(ctx, connectorName)) == "action" {
+		return time.Time{}, false
+	}
+	return end.Add(-hookCorrelationAnswerReserve), true
+}
+
+// hookCallValues is ctx for its deadline, cancellation and error, with the
+// values of values (a context derived from ctx).
+type hookCallValues struct {
+	context.Context
+	values context.Context
+}
+
+func (c hookCallValues) Value(key any) any { return c.values.Value(key) }
+
+// hookCallContextWithValuesOf is the call's context ctx carrying the values
+// the correlation ledger added on its bounded child context (values).
+func hookCallContextWithValuesOf(ctx, values context.Context) context.Context {
+	if values == nil || values == ctx {
+		return ctx
+	}
+	return hookCallValues{Context: ctx, values: values}
+}
+
+// hookCorrelationBusyWait runs when attempt failed on a competing SQLite
+// writer, before the wait for it. Tests replace it to let the writer commit
+// at that point instead of after a wall-clock delay.
+var hookCorrelationBusyWait = func(attempt int) {}
 
 // cloneHookCorrelationState copies the correlation maps and slices an
 // attempt adds to, so a stale attempt leaves the request as it arrived.
@@ -72,6 +173,13 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 	if a == nil || a.store == nil {
 		return ctx, req, nil
 	}
+	// One attempt of a session at a time, from the read of its cursor to the
+	// commit that moves it (hookCorrelationSerial). The wait ends with ctx.
+	release, waitErr := a.hookCorrelationTurns.acquire(ctx, req.ConnectorName+"\x00"+req.SessionID)
+	if waitErr != nil {
+		return ctx, req, waitErr
+	}
+	defer release()
 	repo, err := a.store.CorrelationRepository()
 	if err != nil {
 		return ctx, req, err
@@ -87,15 +195,35 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 		return ctx, req, err
 	}
 	custody := audit.ConnectorCustodyHookOnly
+	nativePerUserHookOnly := false
 	if spec.NativeTelemetry.Stability != connector.NativeTelemetryNone {
-		// Migration never rewrites a connector's exporter. Authenticated native
-		// ingestion promotes this to defenseclaw; hook traffic only records the
-		// unchanged external topology.
+		// On managed hosts, authenticated native ingestion promotes this to
+		// defenseclaw; hook traffic alone records external custody.
 		custody = audit.ConnectorCustodyExternal
+		// Per-user Codex and Claude Code no longer install a native exporter:
+		// it cannot prove the account behind a loopback port. A previous
+		// release's native custody is historical after this upgrade.
+		_, sandboxed := sandboxauth.FromContext(ctx)
+		if cfg := a.runtimeConfigSnapshot(); !sandboxed && cfg != nil && cfg.EnterpriseProfile() == "" &&
+			(req.ConnectorName == "codex" || req.ConnectorName == "claudecode") {
+			custody = audit.ConnectorCustodyHookOnly
+			nativePerUserHookOnly = true
+		}
 	}
 	instance, err := resolveConnectorInstanceForRequest(ctx, repo, req.ConnectorName, string(spec.ProfileVersion), custody)
 	if err != nil {
 		return ctx, req, err
+	}
+	if nativePerUserHookOnly && instance.ExportCustody != custody {
+		// Resolve never downgrades an authenticated native stream from an older
+		// release. The verified per-user profile transition explicitly does.
+		instance.ExportCustody = custody
+		instance.ManagedConfigDigest = ""
+		instance.UpdatedAt = time.Now().UTC()
+		instance, err = repo.UpsertConnectorInstance(ctx, instance)
+		if err != nil {
+			return ctx, req, err
+		}
 	}
 
 	now := time.Now().UTC()
@@ -258,6 +386,7 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 	receipt := correlationReceiptForHook(
 		spec,
 		instance.ConnectorInstanceID,
+		hookReceiptCaller(ctx),
 		sourceDigest,
 		fingerprintHex,
 		now,
@@ -313,7 +442,9 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 	}
 	defer tx.Rollback() //nolint:errcheck
 	if occurrence.Status == audit.CorrelationOccurrenceReplay {
-		if err := tx.Commit(); err != nil {
+		err := tx.Commit()
+		release()
+		if err != nil {
 			return ctx, req, err
 		}
 		resolved, resolveErr := repo.MatchOccurrence(ctx, audit.CorrelationMatchInput{
@@ -382,7 +513,7 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 		}
 	}
 	if stateAdmissible && lifecycle == connector.CorrelationLifecycleToolStart && req.ToolInvocationID != "" {
-		identity := hookOperationIdentityForValue(instance.ConnectorInstanceID,
+		identity := hookSessionOperationIdentityForValue(instance.ConnectorInstanceID, req.SessionID,
 			req.CorrelationValues[connector.CorrelationTargetTool], connector.CorrelationTargetTool)
 		if !identity.valid() {
 			return ctx, req, errors.New("tool start is missing a typed pending-operation identity")
@@ -400,7 +531,7 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 		}
 	}
 	if stateAdmissible && lifecycle == connector.CorrelationLifecycleModelStart && req.ModelRequestID != "" {
-		identity := hookOperationIdentityForValue(instance.ConnectorInstanceID,
+		identity := hookSessionOperationIdentityForValue(instance.ConnectorInstanceID, req.SessionID,
 			req.CorrelationValues[connector.CorrelationTargetModelRequest], connector.CorrelationTargetModelRequest)
 		if !identity.valid() {
 			return ctx, req, errors.New("model start is missing a typed pending-operation identity")
@@ -435,8 +566,10 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 			return ctx, req, resolveErr
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return ctx, req, err
+	commitErr := tx.Commit()
+	release()
+	if commitErr != nil {
+		return ctx, req, commitErr
 	}
 	correlatedCtx := contextWithHookCorrelation(ctx, req, traceID)
 	if emitErr := a.emitCorrelationRelationshipsV8(
@@ -466,6 +599,60 @@ func hookToolCorrelationTerminalStatus(
 		return audit.CorrelationOperationCancelled
 	default:
 		return audit.CorrelationOperationUnresolved
+	}
+}
+
+// hookReceiptFollowUpWait bounds how long a hook's answer waits for the
+// acceptance mark of its correlation receipt (finalizeHookCorrelationReceipt)
+// after its audit row committed. The mark only authorizes the suppression of
+// an exact replay; the decision and its audit row are durable before it. A
+// mark still waiting for the audit writer when the bound passes finishes in
+// the background within agentHookPersistGrace, and a replay that arrives
+// before it is evaluated and recorded again, as after a crash between the two
+// commits. Under a 100 calls/s flood the mark, one more write per call, held
+// answers behind the writer queue (r108 SWEEP-100). A var so tests can
+// shorten it.
+var hookReceiptFollowUpWait = 500 * time.Millisecond
+
+// finalizeHookCorrelationReceiptBounded marks the receipt accepted, waiting
+// at most hookReceiptFollowUpWait for it outside Secure Client, which keeps
+// waiting for the mark as before.
+func (a *APIServer) finalizeHookCorrelationReceiptBounded(
+	ctx context.Context,
+	receipt *audit.CorrelationReceiptLocator,
+	connectorName, event string,
+) {
+	if receipt == nil {
+		return
+	}
+	report := func(err error) {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[gateway] hook receipt finalization failed connector=%s event=%s: %v\n",
+				connectorName, event, err)
+		}
+	}
+	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.SecureClientIntegration() {
+		report(a.finalizeHookCorrelationReceipt(ctx, receipt))
+		return
+	}
+	markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), agentHookPersistGrace)
+	done := make(chan error, 1)
+	go func() {
+		defer cancel()
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				done <- fmt.Errorf("receipt finalization panicked: %v", recovered)
+			}
+		}()
+		done <- a.finalizeHookCorrelationReceipt(markCtx, receipt)
+	}()
+	timer := time.NewTimer(hookReceiptFollowUpWait)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		report(err)
+	case <-timer.C:
+		go func() { report(<-done) }()
 	}
 }
 
@@ -589,12 +776,11 @@ func (identity hookOperationIdentity) locator(
 	}
 }
 
-// Pending-operation identity is always scoped by the authenticated connector
-// instance in addition to the provider namespace and canonical ID kind. This
-// permits an exact terminal ID to recover its start even when the terminal
-// hook omits session/turn context, while a provider reusing the same ID in a
-// second session fails closed as an identity collision instead of merging two
-// operations.
+// The connector instance, provider namespace and canonical ID kind scope
+// every pending operation. Hook starts with a session add that recorded
+// session to the key: a provider may reuse a tool ID in another session.
+// A terminal lacking its session may recover a start only when the exact ID
+// names one active operation across those sessions.
 func hookOperationIdentityForValue(
 	instance audit.ConnectorInstanceID,
 	value connector.CorrelationValue,
@@ -619,6 +805,20 @@ func hookOperationIdentityForValue(
 	}
 }
 
+func hookSessionOperationIdentityForValue(
+	instance audit.ConnectorInstanceID,
+	sessionID string,
+	value connector.CorrelationValue,
+	target connector.CorrelationTarget,
+) hookOperationIdentity {
+	identity := hookOperationIdentityForValue(instance, value, target)
+	if identity.valid() && sessionID != "" {
+		identity.scopeKind = audit.CorrelationOperationScopeSession
+		identity.scopeID = sessionID
+	}
+	return identity
+}
+
 func hookOperationIdentityCandidates(
 	instance audit.ConnectorInstanceID,
 	req agentHookRequest,
@@ -627,7 +827,9 @@ func hookOperationIdentityCandidates(
 	exactOperationID string,
 ) []hookOperationIdentity {
 	if exactOperationID != "" {
-		return []hookOperationIdentity{hookOperationIdentityForValue(instance, req.CorrelationValues[target], target)}
+		return []hookOperationIdentity{hookSessionOperationIdentityForValue(
+			instance, req.SessionID, req.CorrelationValues[target], target,
+		)}
 	}
 	values := make([]connector.CorrelationValue, 0, len(spec.HookBindings)+1)
 	for _, binding := range spec.HookBindings {
@@ -643,16 +845,21 @@ func hookOperationIdentityCandidates(
 	values = append(values, connector.CorrelationValue{
 		Target: target, Namespace: "defenseclaw", IDKind: string(target),
 	})
-	identities := make([]hookOperationIdentity, 0, len(values))
+	identities := make([]hookOperationIdentity, 0, 2*len(values))
 	seen := make(map[string]bool, len(values))
 	for _, value := range values {
-		identity := hookOperationIdentityForValue(instance, value, target)
-		key := identity.namespace + "\x00" + string(identity.kind) + "\x00" + identity.scopeID
-		if !identity.valid() || seen[key] {
-			continue
+		for _, identity := range []hookOperationIdentity{
+			hookSessionOperationIdentityForValue(instance, req.SessionID, value, target),
+			hookOperationIdentityForValue(instance, value, target),
+		} {
+			key := identity.namespace + "\x00" + string(identity.kind) + "\x00" +
+				string(identity.scopeKind) + "\x00" + identity.scopeID
+			if !identity.valid() || seen[key] {
+				continue
+			}
+			seen[key] = true
+			identities = append(identities, identity)
 		}
-		seen[key] = true
-		identities = append(identities, identity)
 	}
 	return identities
 }
@@ -675,18 +882,55 @@ func findHookPendingOperation(
 	var matched audit.CorrelationPendingOperation
 	var matchedIdentity hookOperationIdentity
 	found := false
+	if exactOperationID != "" {
+		// An exact provider ID is sufficient only when it identifies one
+		// active operation. A reported session must match a recorded session,
+		// or a start with no recorded session. A terminal that omits its
+		// session may still recover a unique start across all sessions.
+		seen := make(map[string]bool, len(identities))
+		for _, identity := range identities {
+			key := identity.namespace + "\x00" + string(identity.kind)
+			if !identity.valid() || seen[key] {
+				continue
+			}
+			seen[key] = true
+			query := audit.CorrelationPendingQuery{
+				ConnectorInstanceID: instance, Namespace: identity.namespace, Kind: identity.kind,
+				OperationID: exactOperationID, Type: operationType,
+				SessionID: req.SessionID, SessionIDOrAbsent: req.SessionID != "",
+				Status: audit.CorrelationOperationActive, Limit: 2,
+			}
+			operations, err := repo.ListPendingOperations(ctx, query)
+			if err != nil {
+				return audit.CorrelationPendingOperation{}, identity, false, err
+			}
+			if len(operations) > 1 {
+				return audit.CorrelationPendingOperation{}, identity, false, audit.ErrCorrelationConflict
+			}
+			if len(operations) == 0 {
+				continue
+			}
+			operation := operations[0]
+			if found {
+				return audit.CorrelationPendingOperation{}, identity, false, audit.ErrCorrelationConflict
+			}
+			matched = operation
+			matchedIdentity = hookOperationIdentity{namespace: operation.Namespace, kind: operation.Kind,
+				scopeKind: operation.ScopeKind, scopeID: operation.ScopeID}
+			found = true
+		}
+		if found {
+			return matched, matchedIdentity, true, nil
+		}
+		return audit.CorrelationPendingOperation{}, identities[0], false, audit.ErrCorrelationNotFound
+	}
 	for _, identity := range identities {
 		query := audit.CorrelationPendingQuery{
 			ConnectorInstanceID: instance, Namespace: identity.namespace, Kind: identity.kind,
-			OperationID: exactOperationID, Type: operationType,
+			Type:      operationType,
 			ScopeKind: identity.scopeKind, ScopeID: identity.scopeID,
-		}
-		if exactOperationID == "" {
-			query.Name = name
-			query.SessionID = req.SessionID
-			query.TurnID = req.TurnID
-			query.AgentID = req.AgentID
-			query.ExecutionID = req.ExecutionID
+			Name: name, SessionID: req.SessionID, TurnID: req.TurnID,
+			AgentID: req.AgentID, ExecutionID: req.ExecutionID,
 		}
 		operation, err := repo.FindUniquePendingOperation(ctx, query)
 		if errors.Is(err, audit.ErrCorrelationNotFound) {
@@ -705,11 +949,6 @@ func findHookPendingOperation(
 	}
 	if found {
 		return matched, matchedIdentity, true, nil
-	}
-	// Retain an exact provider identity as unresolved evidence. Crucially, it
-	// never falls through to the current cursor or a name/time-only operation.
-	if exactOperationID != "" {
-		return audit.CorrelationPendingOperation{}, identities[0], false, audit.ErrCorrelationNotFound
 	}
 	return audit.CorrelationPendingOperation{}, hookOperationIdentity{}, false, audit.ErrCorrelationNotFound
 }
@@ -947,20 +1186,40 @@ func dedupeCorrelationValues(slices []connector.CorrelationValue, canonical map[
 	return out
 }
 
+// correlationReceiptForHook is the delivery receipt of a hook occurrence.
+// caller (hookReceiptCaller) scopes it to the verified account that sent
+// the hook: on a managed host every account's hooks share one connector
+// instance, and the same body from another account is that account's own
+// call, never a replay of the first one's, so it keeps its own decision
+// records (GAP-1028).
 func correlationReceiptForHook(
 	spec connector.CorrelationSpec,
 	instance audit.ConnectorInstanceID,
-	sourceDigest, fingerprint string,
+	caller, sourceDigest, fingerprint string,
 	now time.Time,
 ) *audit.CorrelationReceiptClaim {
 	if sourceDigest == "" ||
 		!spec.AllowsReceiptTarget(connector.CorrelationTargetSourceEvent) {
 		return nil
 	}
+	channel := string(connector.CorrelationSurfaceHook)
+	if caller != "" {
+		channel += "/caller=" + caller
+	}
 	return &audit.CorrelationReceiptClaim{SourceKeyDigest: correlationReceiptSourceKey(
-		instance, audit.CorrelationRailHook, string(connector.CorrelationSurfaceHook), sourceDigest,
+		instance, audit.CorrelationRailHook, channel, sourceDigest,
 	), FingerprintSHA256: fingerprint,
 		ReceivedAt: now, ExpiresAt: now.Add(correlationReceiptTTL)}
+}
+
+// hookReceiptCaller is the verified caller of a hook (verifiedAuditCaller),
+// "" when the gateway has none.
+func hookReceiptCaller(ctx context.Context) string {
+	caller, ok := verifiedAuditCaller(ctx)
+	if !ok || caller.ID == "" {
+		return ""
+	}
+	return caller.IDKind + ":" + caller.ID
 }
 
 // reviewedHookToolRetryDigest admits a provider tool invocation ID as an
@@ -1253,7 +1512,7 @@ func putCorrelationMatchRelationships(
 			MatchedSemanticEventID: evidence.SemanticEventID,
 			LogicalEventID:         occurrence.LogicalEventID, Method: audit.CorrelationMethodReported,
 			RuleID: evidence.RuleID, RuleVersion: evidence.RuleVersion,
-			MergeAllowed: true, RelationshipType: audit.CorrelationSameAs, CandidateCount: 1,
+			MergeAllowed: true, RelationshipType: audit.CorrelationSameAs,
 		}
 		relationship, err := putCorrelationMatchRelationship(ctx, tx, semantic, occurrence, exactMatch, now)
 		if err != nil {

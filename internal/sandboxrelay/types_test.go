@@ -35,7 +35,7 @@ var wireTypes = []any{
 	ResolveResponse{}, RegistrationView{}, MCPSkip{}, BannerView{}, Refusal{},
 	OperationalSettings{}, ImageSettings{}, ApprovalsSettings{}, MCPSettings{},
 	DaemonSettings{}, EnterpriseOpenShell{}, HookDecision{}, BindRequest{},
-	CurrentPolicy{}, LiveFields{}, DecisionRequest{}, DecisionResult{}, Decision{},
+	CurrentPolicy{}, DecisionRequest{}, DecisionResult{}, Decision{},
 	EventBatch{}, Event{}, ExplainRequest{}, PackView{}, ErrorBody{},
 }
 
@@ -80,14 +80,15 @@ func TestTopLevelBodiesCarryVersion(t *testing.T) {
 
 func TestHeaderContract(t *testing.T) {
 	for name, got := range map[string]string{
-		"X-DefenseClaw-Sandbox-Registration": RegistrationHeader,
-		"X-DefenseClaw-Sandbox-Profile":      ProfileHeader,
-		"X-DefenseClaw-Policy-Generation":    GenerationHeader,
-		"X-DefenseClaw-Sandbox-Decision":     DecisionTrailer,
-		"X-DefenseClaw-Sandbox-Files":        FilesHeader,
-		"X-DefenseClaw-Client":               ClientHeader,
-		"X-DefenseClaw-Connector":            ConnectorHeader,
-		hookexec.AgentSurfaceHeader:          AgentSurfaceHeader,
+		"X-DefenseClaw-Sandbox-Registration":    RegistrationHeader,
+		"X-DefenseClaw-Sandbox-Profile":         ProfileHeader,
+		"X-DefenseClaw-Policy-Generation":       GenerationHeader,
+		"X-DefenseClaw-Sandbox-Decision":        DecisionTrailer,
+		"X-DefenseClaw-Sandbox-Files":           FilesHeader,
+		"X-DefenseClaw-Sandbox-Daemon-Contract": DaemonContractHeader,
+		"X-DefenseClaw-Client":                  ClientHeader,
+		"X-DefenseClaw-Connector":               ConnectorHeader,
+		hookexec.AgentSurfaceHeader:             AgentSurfaceHeader,
 	} {
 		if got != name {
 			t.Errorf("header constant %q, want %q", got, name)
@@ -114,7 +115,7 @@ func TestHeaderContract(t *testing.T) {
 			t.Errorf("%q is both forwarded and dropped", h)
 		}
 	}
-	for _, h := range []string{RegistrationHeader, FilesHeader, ClientHeader, AgentSurfaceHeader, ConnectorHeader} {
+	for _, h := range []string{RegistrationHeader, FilesHeader, ClientHeader, AgentSurfaceHeader, ConnectorHeader, DaemonContractHeader} {
 		if forwarded[http.CanonicalHeaderKey(h)] {
 			t.Errorf("%q must not be copied from the sandbox", h)
 		}
@@ -128,16 +129,20 @@ func TestHeaderContract(t *testing.T) {
 
 func TestReasonStatus(t *testing.T) {
 	for reason, want := range map[string]int{
-		ReasonRegistrationUnknown:         http.StatusNotFound,
-		ReasonRegistrationRevoked:         http.StatusGone,
-		ReasonRegistrationExpired:         http.StatusGone,
-		ReasonConnectorMismatch:           http.StatusForbidden,
-		ReasonSubjectChanged:              http.StatusConflict,
-		ReasonNotAllowed:                  http.StatusForbidden,
-		ReasonUnavailable:                 http.StatusServiceUnavailable,
-		ReasonPolicyUnloadable:            http.StatusServiceUnavailable,
-		ReasonRelayFilesUnsupported:       http.StatusBadRequest,
-		ReasonDecisionRefused:             http.StatusForbidden,
+		ReasonRegistrationUnknown:   http.StatusNotFound,
+		ReasonRegistrationRevoked:   http.StatusGone,
+		ReasonRegistrationExpired:   http.StatusGone,
+		ReasonConnectorMismatch:     http.StatusForbidden,
+		ReasonSubjectChanged:        http.StatusConflict,
+		ReasonNotAllowed:            http.StatusForbidden,
+		ReasonUnavailable:           http.StatusServiceUnavailable,
+		ReasonPolicyUnloadable:      http.StatusServiceUnavailable,
+		ReasonRelayFilesUnsupported: http.StatusBadRequest,
+		ReasonDecisionRefused:       http.StatusForbidden,
+		// 403, never 404/409/410: an older daemon treats those as the end of
+		// its registration (GAP-0182).
+		ReasonDaemonOutdated:              http.StatusForbidden,
+		DetailSetupChanging:               http.StatusServiceUnavailable,
 		"enterprise_managed_rate_limited": 0,
 	} {
 		if got := ReasonStatus(reason); got != want {

@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -72,9 +73,14 @@ func (a *APIServer) recordConnectorHookRejection(ctx context.Context, connectorN
 // per codeguard-0-logging: a hostile prompt that smuggles CR/LF/ANSI
 // escapes cannot forge fake audit rows or corrupt the operator's
 // terminal.
+// errHookAuditNotConfigured is the audit write of a gateway built without an
+// audit logger. The sidecar always has one; such a gateway (a unit test, a
+// tool) has no audit store whose row a verdict could require.
+var errHookAuditNotConfigured = errors.New("gateway: audit logger is unavailable")
+
 func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookAuditEnvelope) error {
 	if a.logger == nil {
-		return fmt.Errorf("gateway: audit logger is unavailable")
+		return errHookAuditNotConfigured
 	}
 	env.Connector = normalizeHookTelemetryLabel(env.Connector, "unknown")
 	env.Event = normalizeHookTelemetryLabel(env.Event, "unknown")
@@ -85,6 +91,8 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 		caller := auditCallerIdentity(ctx)
 		env.UserID, env.UserIDKind, env.UserName = caller.ID, caller.IDKind, caller.Name
 	}
+	// A trusted connector's call for a person names both in the local audit.
+	env.Extra = mergeHookEnvelopeExtra(env.Extra, agentGatewayAuditExtra(ctx))
 	if a.managedAIDOnly() {
 		env.SecureClientRulePackDir = env.RulePackDir
 	}
@@ -96,13 +104,20 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 	legacy := renderHookAuditLegacyDetails(env)
 	combined := fmt.Sprintf("connector=%s %s details_json=%s",
 		env.Connector, legacy, strconv.Quote(jsonDetails))
+	auditSeverity := "INFO"
+	if env.Extra["bounded_prefix_review"] == "true" && (env.Action == "allow" || env.Action == "alert") {
+		auditSeverity = "HIGH"
+	}
 	return a.logger.LogEventCtx(ctx, audit.Event{
-		Action:     auditAction,
-		Target:     env.Event,
-		Actor:      "defenseclaw",
-		Details:    combined,
-		Severity:   "INFO",
-		Structured: structured,
+		ID:          env.occurrenceID,
+		Generation:  env.configGeneration,
+		ContentHash: env.configHash,
+		Action:      auditAction,
+		Target:      env.Event,
+		Actor:       "defenseclaw",
+		Details:     combined,
+		Severity:    auditSeverity,
+		Structured:  structured,
 		// Mirror the structured-envelope identity fields onto the
 		// dedicated SQLite columns (migration 16) so the column data
 		// and structured_json agree. env.Connector is already
@@ -112,11 +127,13 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 		StepIdx:     env.StepIdx,
 		Enforced:    env.Enforced,
 		RulePackDir: env.RulePackDir,
+		// The connected folders of a Cowork call (path class).
+		WorkspaceHostPaths: env.WorkspaceHostPaths,
 		// Secure Client keeps the directory in the envelope and the raw
 		// column, as on main (issue #1092).
 		RulePackDirInEnvelope: env.SecureClientRulePackDir != "",
 		// Carry the cloud-controlled per-inspection redaction directive
-		// (re-injected onto ctx before finalizeAgentHook) so the audit
+		// (re-injected onto ctx before finalizeAgentHookAnswer) so the audit
 		// sanitize + webhook fan-out honor it on the Details surface.
 		RedactionEnabled: redactionDecisionFromContext(ctx),
 	})
@@ -338,7 +355,7 @@ func (a *APIServer) effectiveRulePackDir(ctx context.Context, connector string) 
 }
 
 // stampHookEnvelopeIdentity fills the multi-connector identity fields on
-// a HookAuditEnvelope before finalizeAgentHook logs it. connectorName is
+// a HookAuditEnvelope before finalizeAgentHookAnswer logs it. connectorName is
 // threaded explicitly from the request
 // entry point; StepIdx comes from the per-turn populator; Enforced
 // reflects an actual block; RulePackDir from the effective resolver.
@@ -370,7 +387,7 @@ func (a *APIServer) stampHookEnvelopeIdentity(ctx context.Context, connectorName
 	meta = applyHookEventMeta(meta, req.HookEventName, req.Payload)
 	meta = a.reconcileHookParent(meta)
 	meta = a.mergeHookSessionLifecycle(meta)
-	if snapshot, ok := a.hookPhaseSnapshot(meta); ok {
+	if snapshot, ok := a.hookDeliveryPhaseSnapshot(meta, req.Payload); ok {
 		env.AgentPhase = snapshot.Phase
 		env.AgentPreviousPhase = snapshot.PreviousPhase
 		env.AgentSequence = snapshot.Sequence

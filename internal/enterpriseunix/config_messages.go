@@ -13,22 +13,21 @@
 package enterpriseunix
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"gopkg.in/yaml.v3"
 )
 
 // settingsReferenceURL is the enterprise settings reference.
 const settingsReferenceURL = config.EnterpriseSettingsReferenceURL
 
-var configHeaderPattern = regexp.MustCompile(`headers(?:\["([^"]+)"\]|\.([A-Za-z0-9_.-]+))$`)
+var configHeaderPattern = lazyregexp.New(`headers(?:\["([^"]+)"\]|\.([A-Za-z0-9_.-]+))$`)
 
 // plainConfigProblem renders an invalid enum value or an unstored protected
 // credential as one plain sentence: the file and line, the field, the value
@@ -39,9 +38,6 @@ func (e *Env) plainConfigProblem(err error, source string, raw []byte) (string, 
 	where := source
 	if where == "" {
 		where = e.Layout.ConfigPath
-	}
-	if strings.Contains(err.Error(), "enterprise.profile=") && strings.Contains(err.Error(), "conflicts with immutable") {
-		return fmt.Sprintf("%s: enterprise.profile is fixed to standalone on this host; change the profile by reinstalling the deployment", where), true
 	}
 	var yamlErr *config.V8YAMLError
 	if errors.As(err, &yamlErr) {
@@ -69,13 +65,9 @@ func (e *Env) plainConfigProblem(err error, source string, raw []byte) (string, 
 	}
 	var schemaErr *config.V8SchemaError
 	if errors.As(err, &schemaErr) && schemaErr.Keyword == "enum" && strings.HasPrefix(schemaErr.Expected, "one of ") {
-		var choices []any
-		if json.Unmarshal([]byte(strings.TrimPrefix(schemaErr.Expected, "one of ")), &choices) != nil || len(choices) == 0 {
+		names, ok := schemaErr.EnumChoices()
+		if !ok {
 			return "", false
-		}
-		names := make([]string, len(choices))
-		for i, choice := range choices {
-			names[i] = fmt.Sprint(choice)
 		}
 		if schemaErr.Path == "$.deployment_mode" {
 			names = []string{"managed_enterprise"}
@@ -92,6 +84,9 @@ func (e *Env) plainConfigProblem(err error, source string, raw []byte) (string, 
 		reason := "has an invalid value"
 		if schemaErr.Keyword == "additionalProperties" {
 			reason = "is an unknown setting"
+			if retired, ok := schemaErr.RetiredKeyMessage(); ok {
+				return fmt.Sprintf("%s%s: %s. The settings reference: %s", where, lineSuffix(schemaErr.Line), retired, settingsReferenceURL), true
+			}
 		} else if schemaErr.Keyword == "pattern" {
 			switch {
 			case strings.HasSuffix(field, ".rule_pack"), strings.Contains(field, ".custom_packs.") && !strings.HasSuffix(field, ".digest"):
@@ -100,12 +95,19 @@ func (e *Env) plainConfigProblem(err error, source string, raw []byte) (string, 
 				reason = "must be sha256: followed by 64 lowercase hexadecimal characters"
 			case strings.HasSuffix(field, ".block_at"), strings.HasSuffix(field, ".alert_at"):
 				reason = "must be one of CRITICAL, HIGH, MEDIUM, LOW"
-			case strings.HasPrefix(schemaErr.Expected, "an agent identity"):
-				// The assignment, the value and the form (GAP-0829).
+			case strings.HasPrefix(schemaErr.Expected, "an agent identity"), strings.HasPrefix(schemaErr.Expected, "one of "):
+				// The assignment, the value and the form (GAP-0829), or the
+				// words a severity takes (GAP-0760).
 				reason = "must be " + schemaErr.Expected
 				if value, ok := yamlScalarAt(raw, schemaErr.Line, schemaErr.Column); ok {
 					reason = fmt.Sprintf("is %q; it must be %s", value, schemaErr.Expected)
 				}
+			case strings.HasSuffix(field, "openshell.trusted_ca_bundle"):
+				// The managed rule (config.validateManagedTrustedCABundle),
+				// not the per-user ~/ form the schema also allows (rel-1-0-4 GAP-0590).
+				reason = "must be an absolute path: a managed configuration needs an absolute path to an administrator-owned file"
+			case schemaErr.Expected != "" && schemaErr.Expected != "a value matching the schema-declared pattern":
+				reason = "must be " + schemaErr.Expected
 			default:
 				reason = "does not match the setting's required format"
 			}
@@ -155,6 +157,12 @@ func (e *Env) plainConfigProblem(err error, source string, raw []byte) (string, 
 		return fmt.Sprintf("%s%s: %s: %s. The settings reference: %s", where, lineSuffix(semanticErr.Line), configField(semanticErr.Path), reason, settingsReferenceURL), true
 	}
 	return "", false
+}
+
+// PlainConfigRefusal is plainConfigProblem for `config validate` on a
+// managed host, so it words a refusal the way ensure does (GAP-0087).
+func (e *Env) PlainConfigRefusal(err error, source string, raw []byte) (string, bool) {
+	return e.plainConfigProblem(err, source, raw)
 }
 
 var errManagedEnvReference = errors.New("an observability destination reads a secret from an environment variable")

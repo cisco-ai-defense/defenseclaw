@@ -217,8 +217,8 @@ def test_validate_rejects_empty_and_duplicate_connector_names():
         ObservabilityConfig(connectors={"": PerConnectorObservability()}).validate()
     with pytest.raises(ValueError):
         ObservabilityConfig(connectors={
-            "open-hands": PerConnectorObservability(webhooks=[]),
-            "openhands": PerConnectorObservability(webhooks=[]),
+            "claude-code": PerConnectorObservability(webhooks=[]),
+            "claudecode": PerConnectorObservability(webhooks=[]),
         }).validate()
 
 

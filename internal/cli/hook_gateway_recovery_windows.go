@@ -200,6 +200,14 @@ func perUserGatewayRecovery() func(context.Context, error) error {
 	}
 	dataRoot := filepath.Clean(state.DataRoot)
 	return func(ctx context.Context, _ error) error {
+		// install.ps1 stops the gateway like an operator does and starts it
+		// again when it is done, holding .install.lock meanwhile. That is a
+		// restart: no start, and the hook keeps sending the call within the
+		// restart budget, then names the restart, not an operator stop
+		// (GAP-0196; the shell hooks do the same, GAP-0140).
+		if hookInstallInProgress(dataRoot) {
+			return nil
+		}
 		return perUserGatewayStartRunner(ctx, gateway, dataRoot)
 	}
 }

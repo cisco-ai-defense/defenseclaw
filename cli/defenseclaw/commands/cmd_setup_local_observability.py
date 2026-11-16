@@ -35,6 +35,7 @@ from defenseclaw.observability.local_stack import (
     GRAFANA_ACCESS_NO_PASSWORD,
     GRAFANA_ACCESS_PASSWORD,
     GRAFANA_ADMIN_USER,
+    GRAFANA_ANONYMOUS_ROLE,
     GRAFANA_PASSWORD_FILE_NAME,
     LocalStackController,
     LocalStackError,
@@ -103,7 +104,8 @@ def local_observability(ctx: click.Context) -> None:
     default=None,
     help=(
         "Select Grafana access explicitly. New managed stacks default to a "
-        "password; existing anonymous stacks keep their current behavior."
+        "password; --no-password allows anonymous read-only (Viewer) access, "
+        "never Admin. Existing anonymous stacks keep anonymous access, read-only."
     ),
 )
 @click.option(
@@ -172,6 +174,7 @@ def up_cmd(
     refresh_config: bool,
 ) -> None:
     """Start the stack, wait for readiness, and wire the gateway config."""
+    selected_signals = _parse_signals(signals)
     controller = _resolve_controller(app.cfg.data_dir)
     _run_native_controller(controller.preflight, "Docker preflight")
 
@@ -214,7 +217,6 @@ def up_cmd(
             "stack is ready to enable export."
         )
     elif not no_config:
-        selected_signals = _parse_signals(signals)
         try:
             _apply_local_otlp_config(
                 app,
@@ -512,7 +514,7 @@ def _refresh_and_maybe_restart_local_observability(
         count = len(result.refreshed_paths)
         preserved_count = len(result.preserved_paths)
         click.echo(
-            f"  {ux.bold('Bundle refreshed:')} ~/.defenseclaw/observability-stack/ "
+            f"  {ux.bold('Bundle refreshed:')} {result.seeded_dest}{os.sep} "
             f"({count} file{'s' if count != 1 else ''} updated, "
             f"{preserved_count} preserved)"
         )
@@ -638,10 +640,11 @@ def _print_stack_summary(
         click.echo(
             f"    {ux.bold('Grafana:')}    "
             f"{contract.get('grafana_url', 'http://localhost:3000')}  "
-            "(anonymous Admin; no password)"
+            f"(anonymous {GRAFANA_ANONYMOUS_ROLE}, read-only; no password)"
         )
         click.echo(
-            "    warning: every local process can access Grafana as Admin; managed ports remain loopback-only",
+            "    warning: every local process can view Grafana's dashboards without a password (read-only); "
+            "managed ports remain loopback-only",
             err=True,
         )
     else:

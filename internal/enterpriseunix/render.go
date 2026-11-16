@@ -53,7 +53,9 @@ type renderInputs struct {
 	LoadCredential bool
 	// MachinePolicy are the connectors the descriptor records as protected
 	// by vendor machine policy.
-	MachinePolicy []string
+	MachinePolicy         []string
+	PolicyViewDigests     map[string]string
+	PolicyViewUserSources map[string]map[string]string
 }
 
 // renderFiles returns every non-binary file the deployment consists of.
@@ -147,6 +149,9 @@ func (e *Env) renderDropins(in renderInputs) []renderedDropin {
 		var b strings.Builder
 		b.WriteString("# Written by the DefenseClaw enterprise lifecycle. Do not edit.\n[Service]\n")
 		for _, name := range in.Secrets {
+			if !managed.GatewayReadsCredential(name) {
+				continue // root reads it from the secrets folder
+			}
 			fmt.Fprintf(&b, "LoadCredential=%s:%s\n", name, filepath.Join(e.Layout.SecretsDir, name))
 		}
 		fmt.Fprintf(&b, "InaccessiblePaths=-%s\n", e.Layout.SecretsDir)
@@ -189,7 +194,7 @@ func (e *Env) renderDropins(in renderInputs) []renderedDropin {
 	}
 	// enterprise.tetragon reaches the sensor helper only through this
 	// drop-in; the helper never reads config.yaml. None is rendered while the
-	// helper's defaults (consume) already say the same.
+	// helper's defaults (consume) already say the same (tetragonIntent.dropin).
 	if in.Config != nil {
 		if data := in.Config.Tetragon.dropin(); data != nil {
 			out = append(out, renderedDropin{Path: dropinPath(unitSensorHelper, dropinTetragon), Data: data})
@@ -244,6 +249,21 @@ func proxyEnvironment(cfg *validatedConfig) map[string]string {
 }
 
 func (e *Env) renderDescriptor(in renderInputs) ([]byte, error) {
+	digests := in.PolicyViewDigests
+	userSources := in.PolicyViewUserSources
+	if digests == nil {
+		// An unchanged plan keeps the last committed pins. A publish updates
+		// them only after the vendor policy is actually on disk.
+		path := e.P(e.Layout.DescriptorPath)
+		if e.Trust(path, TrustAdminFile) == nil {
+			if data, err := readBounded(path, 64<<10); err == nil {
+				if previous, err := managed.ParseRuntimeDescriptor(data); err == nil {
+					digests = previous.PolicyViewDigests
+					userSources = previous.PolicyViewUserSources
+				}
+			}
+		}
+	}
 	d := &managed.RuntimeDescriptor{
 		SchemaVersion:           managed.RuntimeDescriptorSchemaVersion,
 		Profile:                 managed.ProfileStandalone,
@@ -254,14 +274,53 @@ func (e *Env) renderDescriptor(in renderInputs) ([]byte, error) {
 		APIAddr:                 e.Layout.APIAddr,
 		HookSocket:              e.Layout.HookSocketPath,
 		MachinePolicyConnectors: append([]string{}, in.MachinePolicy...),
+		PolicyViewDigests:       make(map[string]string),
+		PolicyViewUserSources:   make(map[string]map[string]string),
 		DisableSelfUpdate:       true,
 		InstalledAt:             in.InstalledAt,
 	}
 	sort.Strings(d.MachinePolicyConnectors)
+	for _, name := range d.MachinePolicyConnectors {
+		if digest := digests[name]; digest != "" {
+			d.PolicyViewDigests[name] = digest
+		}
+		if len(userSources[name]) != 0 {
+			d.PolicyViewUserSources[name] = userSources[name]
+		}
+	}
 	if in.Config != nil {
 		d.DisableSelfUpdate = in.Config.SelfUpdateDisabled
+		d.OpenHookConnectors = openHookConnectors(in.Config, d.MachinePolicyConnectors)
 	}
 	return managed.MarshalRuntimeDescriptor(d)
+}
+
+// openHookConnectors is each configured, machine-policy or per-connector
+// guardrail entry whose hook fail mode the administrator's config resolves
+// open (config.Config.EffectiveHookFailModeForConnector), sorted; nil when
+// none is. The `--enterprise-managed` hook runtime reads it from the
+// descriptor. A connector the administrator set open under
+// guardrail.connectors counts even when it is not in the enrolled list (a
+// per-user registered Hermes, GAP-0362): its explicit open wins.
+func openHookConnectors(cfg *validatedConfig, machinePolicy []string) []string {
+	if cfg == nil || cfg.Loaded == nil {
+		return nil
+	}
+	names := append(append([]string{}, cfg.Connectors...), machinePolicy...)
+	for name := range cfg.Loaded.Guardrail.Connectors {
+		names = append(names, name)
+	}
+	set := map[string]bool{}
+	for _, name := range names {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name != "" && cfg.Loaded.EffectiveHookFailModeForConnector(name) == "open" {
+			set[name] = true
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return sortedKeys(set)
 }
 
 // injectPlistEnvironment adds variables to a plist's EnvironmentVariables

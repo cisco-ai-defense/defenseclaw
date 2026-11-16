@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 )
@@ -70,5 +71,48 @@ func TestWindowsNamespacePurgeExchangePathsAreDistinctAndOutsideRoot(t *testing.
 	}
 	if err := validateWindowsNamespacePurgeExchangePaths(request, output, root); err == nil {
 		t.Fatal("final-path alias placed the request inside the cleanup root")
+	}
+}
+
+func TestWindowsNamespaceStatePurgeExchangeDoesNotOpenACLDeniedRoot(t *testing.T) {
+	root := `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw`
+	request := `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw-Lifecycle\request.json`
+	output := `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw-Lifecycle\report.json`
+	originalResolver := windowsNamespacePurgeFinalPathResolver
+	rootOpened := false
+	windowsNamespacePurgeFinalPathResolver = func(path string, directory bool) (string, bool, error) {
+		if directory || sameWindowsEnterprisePathCLI(path, root) {
+			rootOpened = true
+			return "", false, errors.New("access denied")
+		}
+		return filepath.Clean(path), true, nil
+	}
+	t.Cleanup(func() { windowsNamespacePurgeFinalPathResolver = originalResolver })
+	if err := validateWindowsNamespacePurgeUninstallExchangePaths(request, output, root); err != nil {
+		t.Fatalf("protected exchange should not need root attributes: %v", err)
+	}
+	if rootOpened {
+		t.Fatal("state purge exchange preflight opened the ACL-denied root")
+	}
+	if err := validateWindowsNamespacePurgeExchangePaths(request, output, root); err == nil {
+		t.Fatal("canonical install mode silently skipped its root final-path check")
+	}
+
+	rootOpened = false
+	windowsNamespacePurgeFinalPathResolver = func(path string, directory bool) (string, bool, error) {
+		if directory || sameWindowsEnterprisePathCLI(path, root) {
+			rootOpened = true
+			return "", false, errors.New("access denied")
+		}
+		if sameWindowsEnterprisePathCLI(path, request) {
+			return filepath.Join(root, "aliased-request.json"), true, nil
+		}
+		return filepath.Clean(path), true, nil
+	}
+	if err := validateWindowsNamespacePurgeUninstallExchangePaths(request, output, root); err == nil {
+		t.Fatal("state purge accepted a request that resolves inside its root")
+	}
+	if rootOpened {
+		t.Fatal("state purge alias check opened the ACL-denied root")
 	}
 }

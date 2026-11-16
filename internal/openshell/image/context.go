@@ -30,18 +30,19 @@ package image
 import (
 	"bytes"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 )
@@ -49,9 +50,16 @@ import (
 // DefaultRepository names overlay images when BuildSpec.Repository is empty.
 const DefaultRepository = "defenseclaw/sandbox"
 
-// contextSchema versions the Dockerfile layout; bump it whenever the
-// generated Dockerfile changes shape so older images stop matching.
-const contextSchema = 1
+// contextSchema versions image admission and the Dockerfile layout; bump it
+// when either changes so older records stop matching.
+const contextSchema = 9
+
+// The VM resolver check runs this pinned caller against the completed
+// image's libc and NSS configuration.
+const microVMResolverPath = "/usr/local/lib/defenseclaw/localhost-resolver"
+
+//go:embed testdata/localhost-resolver.c
+var microVMResolverSource []byte
 
 // Image labels. The content hash is attached with `docker build --label`
 // because it is computed over the context itself.
@@ -67,6 +75,9 @@ const (
 	LabelVersion        = "io.defenseclaw.defenseclaw-version"
 	// LabelOwner is the Store.Owner of the data dir that built the image.
 	LabelOwner = "io.defenseclaw.owner"
+	// LabelTrustedCAs is the digest of the trusted CAs an image carries
+	// (BuildSpec.TrustedCAs); absent without any.
+	LabelTrustedCAs = "io.defenseclaw.trusted-cas"
 )
 
 // ErrUnknownContract is returned when the pinned harness version has no
@@ -99,24 +110,26 @@ type BuildSpec struct {
 	// the tag, and the LabelOwner label, which is applied with --label so
 	// data dirs sharing a daemon still share every build layer.
 	Owner string
-	// MicroVM builds the image for a compute driver whose workload gets no
-	// /etc/hosts (MicroVMTarget: OpenShell's MicroVM driver). Such an image
-	// installs the pinned nss-myhostname (localhostStep), so localhost
-	// resolves there, and its hook-fire probe also runs the harness with a
-	// MicroVM's name resolution (ScenarioMicroVM). It is part of the
-	// content hash only when set: an image for the docker driver has the
-	// Dockerfile, the content hash and so the tag it had before MicroVM
-	// images existed.
+	// MicroVM marks an image for the vm compute driver. Its exported hosts
+	// file is checked against the completed image's resolver before the
+	// image is recorded. It is part of the content hash only when set.
 	MicroVM bool
+	// TrustedCAs is the PEM bundle of openshell.trusted_ca_bundle
+	// (openshell.ParseTrustedCAs): CA certificates the image's system store
+	// takes, so programs in the sandbox trust a TLS-inspecting proxy's
+	// re-signed certificates (the shells add them to OpenShell's bundle,
+	// harness trustedCAScript). The build adds them before any download, so
+	// the image's own installs trust them too. They are build-context
+	// files, so the content hash covers them;
+	// an image without any has the Dockerfile and the content hash it had
+	// before.
+	TrustedCAs []byte
 }
 
-// MicroVMTarget reports whether the images of sandboxes on compute driver
-// d are built for a workload without /etc/hosts (BuildSpec.MicroVM): d is
-// a driver DefenseClaw drives that writes none (openshell.Driver.HostsFile
-// off). The zero Driver, of a driver DefenseClaw does not know, gets the
-// docker driver's images.
+// MicroVMTarget reports whether d is the vm compute driver. An unknown
+// driver uses the docker driver's image.
 func MicroVMTarget(d openshell.Driver) bool {
-	return d.Name != "" && !d.HostsFile
+	return d.Name == openshell.DriverVM
 }
 
 // ContextFile is one build-context entry. UID/GID record the in-image owner
@@ -144,7 +157,10 @@ type Context struct {
 	Spec           BuildSpec
 	HarnessVersion string
 	Contract       string
-	Artifacts      connector.SandboxArtifacts
+	// TrustedCAs are the parsed BuildSpec.TrustedCAs (Spec.TrustedCAs is
+	// their normalized PEM).
+	TrustedCAs openshell.TrustedCAs
+	Artifacts  connector.SandboxArtifacts
 	// ImageFiles are the connector artifacts plus the harness launcher and
 	// its shell environment files (harness.Spec.ShellFiles).
 	ImageFiles []ImageFile
@@ -171,10 +187,10 @@ type Context struct {
 }
 
 var (
-	digestRE     = regexp.MustCompile(`^[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}$`)
-	repositoryRE = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$`)
-	versionRE    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}$`)
-	safePathRE   = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
+	digestRE     = lazyregexp.New(`^[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}$`)
+	repositoryRE = lazyregexp.New(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$`)
+	versionRE    = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}$`)
+	safePathRE   = lazyregexp.New(`^/[A-Za-z0-9._/-]+$`)
 )
 
 // systemDirs are never re-owned or re-moded by the overlay.
@@ -192,7 +208,8 @@ func NewContext(spec BuildSpec) (*Context, error) {
 		spec.BaseImage = openshell.DefaultBaseImage
 	}
 	if !digestRE.MatchString(spec.BaseImage) {
-		return nil, fmt.Errorf("openshell image: base image %q is not digest-pinned", spec.BaseImage)
+		return nil, fmt.Errorf("openshell image: base image %q is not digest-pinned: name it name@sha256:<digest>; "+
+			"for an image built on this computer the digest is its image ID (docker image inspect --format '{{.Id}}' <image>)", spec.BaseImage)
 	}
 	if spec.Repository == "" {
 		spec.Repository = DefaultRepository
@@ -214,6 +231,14 @@ func NewContext(spec BuildSpec) (*Context, error) {
 		spec.FailMode = connector.SandboxFailMode
 	default:
 		return nil, fmt.Errorf("openshell image: sandbox hooks always fail closed; fail mode %q is refused", spec.FailMode)
+	}
+	var trusted openshell.TrustedCAs
+	if len(spec.TrustedCAs) != 0 {
+		cas, err := openshell.ParseTrustedCAs(spec.TrustedCAs)
+		if err != nil {
+			return nil, fmt.Errorf("openshell image: the trusted CAs (%s): %w", openshell.TrustedCAKey, err)
+		}
+		trusted, spec.TrustedCAs = cas, cas.PEM
 	}
 	version := strings.TrimSpace(spec.HarnessVersion)
 	if version == "" {
@@ -237,7 +262,7 @@ func NewContext(spec BuildSpec) (*Context, error) {
 	}
 
 	c := &Context{Spec: spec, HarnessVersion: version, Contract: artifacts.HookContract, Artifacts: artifacts,
-		ImageBinaries: []string{harness.SupervisorInterpreter}}
+		TrustedCAs: trusted, ImageBinaries: []string{harness.SupervisorInterpreter}}
 	sources := append([]connector.SandboxFile(nil), artifacts.Files...)
 	sources = append(sources, spec.Harness.Launcher())
 	sources = append(sources, spec.Harness.ShellFiles()...)
@@ -280,6 +305,12 @@ func NewContext(spec BuildSpec) (*Context, error) {
 
 	c.Dockerfile = renderDockerfile(c, steps)
 	c.Files = append(c.Files, ContextFile{Name: "Dockerfile", Mode: 0o644, Data: c.Dockerfile})
+	if spec.MicroVM {
+		c.Files = append(c.Files, ContextFile{Name: "localhost-resolver.c", Mode: 0o644, Data: microVMResolverSource})
+	}
+	for i, data := range c.TrustedCAs.Files() {
+		c.Files = append(c.Files, ContextFile{Name: trustedCAContextName(i), Mode: 0o644, Data: data})
+	}
 	for _, f := range c.ImageFiles {
 		c.Files = append(c.Files, ContextFile{Name: contextName(f.Path), Mode: f.Mode, UID: f.UID, GID: f.GID, Data: f.Data})
 	}
@@ -300,68 +331,62 @@ func NewContext(spec BuildSpec) (*Context, error) {
 		LabelVersion:        spec.DefenseClawVersion,
 		LabelOwner:          spec.Owner,
 	}
+	if d := trusted.Digest(); d != "" {
+		c.Labels[LabelTrustedCAs] = d
+	}
 	return c, nil
 }
 
-// localhostStep is the Dockerfile step of an image for the MicroVM driver
-// (BuildSpec.MicroVM) that makes it resolve localhost without /etc/hosts.
-// An OpenShell MicroVM boots it with an empty /etc/hosts (the vm driver
-// makes the root disk from a `docker export`, whose init layer masks the
-// image's file, and its guest init writes none) and a loopback DNS relay
-// that answers localhost with SERVFAIL, so every program that resolved
-// localhost failed there: Antigravity CLI would not start. nss-myhostname
-// (Ubuntu's libnss-myhostname) answers localhost, localhost.localdomain,
-// *.localhost and the hostname with loopback addresses, and it does no
-// network I/O. It would answer _gateway and _outbound with the default
-// route's, which a MicroVM has none of (only its loopback is configured),
-// so those names go on to the relay, which answers every name but
-// localhost, even a nonexistent one, with a synthetic 198.18.x.x address;
-// the egress proxy refuses a connection to _gateway's as an invalid
-// destination. It is asked after /etc/hosts and before DNS, so a
-// localhost query never leaves the sandbox. Go programs linked with cgo hand these names to libc when
-// nsswitch.conf names myhostname; Go's own resolver and static musl
-// programs read /etc/hosts and DNS themselves and still cannot resolve
-// localhost in a MicroVM, which the hook-fire probe's MicroVM scenario
-// catches.
-//
-// The package is the pinned openshell.NSSMyhostnameDebs file of the build
-// architecture: downloaded by URL, checked with `sha256sum -c` and
-// installed with `dpkg -i`, so two images with one content hash carry the
-// same module and the build needs no package index (a base that already
-// answers localhost this way installs nothing). Its postinst appends
-// myhostname after dns, so the hosts line is rewritten with it right after
-// files, and the build checks that the module answers localhost with
-// 127.0.0.1.
-func localhostStep() string {
-	debs := openshell.NSSMyhostnameDebs
-	arches := make([]string, 0, len(debs))
-	for arch := range debs {
-		arches = append(arches, arch)
-	}
-	sort.Strings(arches)
-	pkg := "libnss-myhostname " + openshell.NSSMyhostnameVersion
+// trustedCAContextName is the build-context entry of trusted CA i, and
+// trustedCAImageName its file in openshell.SandboxTrustedCADir.
+func trustedCAContextName(i int) string { return "trusted-ca/" + trustedCAImageName(i) }
+
+func trustedCAImageName(i int) string { return fmt.Sprintf("defenseclaw-trusted-ca-%02d.crt", i+1) }
+
+// trustedCAStep is the Dockerfile part of an image with trusted CAs
+// (BuildSpec.TrustedCAs): one root-owned file per certificate in
+// openshell.SandboxTrustedCADir, then update-ca-certificates, and a check
+// that every one reached the system bundle. It comes right
+// after USER root, before any download. A base without
+// update-ca-certificates fails the build: an image that silently left the
+// CAs out would fail every intercepted TLS connection with no word why.
+func trustedCAStep(c *Context) string {
+	dir, bundle := openshell.SandboxTrustedCADir, openshell.SandboxSystemCABundle
 	var b strings.Builder
-	b.WriteString("# A MicroVM's /etc/hosts is empty and its DNS relay does not answer localhost: nss-myhostname answers it (and\n" +
-		"# *.localhost and the hostname) with loopback addresses, after /etc/hosts and before DNS. The package is the pinned\n" +
-		"# " + pkg + " (Ubuntu 24.04), checked by sha256; it needs only the base's libc6 and libcap2.\n")
-	// The system PATH: dpkg needs ldconfig and start-stop-daemon from
-	// /usr/sbin, which the base image's PATH leaves out.
-	b.WriteString(`RUN set -eu; PATH=` + connector.SandboxHookPATH + `; if ! getent -s hosts:myhostname hosts localhost >/dev/null 2>&1; then `)
-	b.WriteString(`arch="$(dpkg --print-architecture)"; case "$arch" in `)
-	for _, arch := range arches {
-		b.WriteString(arch + `) want=` + shQuote(debs[arch].SHA256) + `; urls=` + shQuote(strings.Join(debs[arch].URLs, " ")) + ` ;; `)
+	b.WriteString("# The trusted CAs of " + openshell.TrustedCAKey + " (a TLS-inspecting proxy's root): in the system store, which\n" +
+		"# this build's downloads use and the sandbox shells add to OpenShell's bundle.\n")
+	fmt.Fprintf(&b, "RUN install -d -o root -g root -m 0755 %s\n", dir)
+	for i := range c.TrustedCAs.Certs {
+		fmt.Fprintf(&b, "COPY --chown=0:0 --chmod=0644 %s %s/%s\n", trustedCAContextName(i), dir, trustedCAImageName(i))
 	}
-	b.WriteString(`*) echo "` + pkg + ` is pinned for ` + strings.Join(arches, " and ") + ` only, not $arch" >&2; exit 1 ;; esac; `)
-	b.WriteString(`tmp="$(mktemp -d)"; deb="$tmp/libnss-myhostname.deb"; ok=""; for url in $urls; do ` +
-		`curl -fsSL --proto '=https' --tlsv1.2 --retry 3 -o "$deb" "$url" && printf '%s  %s\n' "$want" "$deb" | sha256sum -c --status - && { ok=1; break; }; ` +
-		`echo "$url did not give the pinned ` + pkg + ` (sha256 $want)" >&2; done; `)
-	b.WriteString(`[ -n "$ok" ] || { echo "could not download the pinned ` + pkg + ` for $arch" >&2; exit 1; }; `)
-	b.WriteString(`dpkg -i "$deb"; rm -rf "$tmp"; fi; `)
-	b.WriteString(`sed -i -E '/^hosts:/{s/[[:space:]]+myhostname([[:space:]]|$)/\1/g;s/^hosts:([[:space:]]+)files([[:space:]]|$)/hosts:\1files myhostname\2/}' /etc/nsswitch.conf; ` +
-		`grep -Eq '^hosts:[[:space:]]+files myhostname([[:space:]]|$)' /etc/nsswitch.conf || ` +
-		`{ echo "the base image's /etc/nsswitch.conf has no hosts line that starts with files, so myhostname cannot follow it" >&2; exit 1; }; ` +
-		`getent -s hosts:myhostname ahosts localhost | grep -q '^127\.0\.0\.1[[:space:]]' || { echo "nss-myhostname does not answer localhost with 127.0.0.1" >&2; exit 1; }` + "\n")
+	b.WriteString(`RUN set -eu; PATH=` + connector.SandboxHookPATH + `; ` +
+		`command -v update-ca-certificates >/dev/null 2>&1 || { echo "` + openshell.TrustedCAKey + `: the base image has no update-ca-certificates (the ca-certificates package), so its system store cannot take the trusted CAs" >&2; exit 1; }; ` +
+		`update-ca-certificates >/dev/null; ` +
+		`for f in ` + dir + `/*.crt; do line="$(sed -n 2p "$f")"; grep -qxF -- "$line" ` + bundle + ` || { echo "update-ca-certificates did not add $f to ` + bundle + `" >&2; exit 1; }; done` + "\n")
+	b.WriteString("# The build's own downloads (npm, uv, pip, curl) go through the proxy too, and Node, npm, pip and uv do not\n" +
+		"# read the system store: every one is pointed at it for this build only (ARG, not ENV: the sandbox shells\n" +
+		"# point them at the bundle that also holds OpenShell's CA).\n")
+	for _, name := range BuildCAEnv {
+		fmt.Fprintf(&b, "ARG %s=%s\n", name, bundle)
+	}
 	return b.String()
+}
+
+// BuildCAEnv are the variables the build steps of an image with trusted CAs
+// (trustedCAStep) take as ARGs naming the system bundle, so that every
+// download of the build trusts a TLS-inspecting proxy's root: Node and npm
+// (the npm harness installs) use their own root list and add only
+// NODE_EXTRA_CA_CERTS or npm's cafile, pip its certifi copy unless PIP_CERT
+// or REQUESTS_CA_BUNDLE, uv its bundled roots unless SSL_CERT_FILE, and Deno
+// DENO_CERT (GAP-0192: the pinned @openai/codex install failed with
+// UNABLE_TO_VERIFY_LEAF_SIGNATURE behind an inspecting proxy, though the
+// system store held the CA). ARG and not ENV: a sandbox never sees them in
+// its image environment, where npm's cafile would replace Node's roots with
+// a bundle that lacks OpenShell's CA; the sandbox shells set the runtime
+// values (harness trustedCAScript).
+var BuildCAEnv = []string{
+	"SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO",
+	"NODE_EXTRA_CA_CERTS", "npm_config_cafile", "PIP_CERT", "DENO_CERT",
 }
 
 // contextName maps an in-image path to its build-context entry.
@@ -374,6 +399,9 @@ func renderDockerfile(c *Context, steps []harness.InstallStep) []byte {
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "# DefenseClaw OpenShell overlay: %s %s, hook contract %s.\n", spec.Harness.DisplayName, c.HarnessVersion, c.Contract)
 	b.WriteString("# Generated by DefenseClaw; the image tag is a content hash of this context. Do not edit.\n")
+	if spec.MicroVM {
+		b.WriteString(microVMResolverToolStage())
+	}
 	fmt.Fprintf(&b, "FROM %s\n", spec.BaseImage)
 	// Static labels only: the content hash is added with docker build --label.
 	fmt.Fprintf(&b, "LABEL %s=\"1\" %s=%q %s=%q %s=%q %s=\"%d\" %s=\"%d\" %s=\"%d\" %s=%q\n",
@@ -381,13 +409,13 @@ func renderDockerfile(c *Context, steps []harness.InstallStep) []byte {
 		LabelHookContract, c.Contract, LabelUID, spec.UID, LabelGID, spec.GID, LabelIngressPort, spec.IngressPort,
 		LabelVersion, spec.DefenseClawVersion)
 	b.WriteString("USER root\n")
+	if !c.TrustedCAs.Empty() {
+		b.WriteString(trustedCAStep(c))
+	}
 	b.WriteString("# The hooks need jq and curl on the baked hook PATH, not just the image PATH.\n")
 	b.WriteString(`RUN set -eu; PATH=` + connector.SandboxHookPATH + `; missing=""; for tool in jq curl; do command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"; done; ` +
 		`if [ -n "$missing" ]; then apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $missing && rm -rf /var/lib/apt/lists/*; fi` + "\n")
-	if spec.MicroVM {
-		b.WriteString(localhostStep())
-	}
-	for _, step := range []harness.InstallStep{harness.WorkloadPythonStep(), harness.WorkloadMakeStep()} {
+	for _, step := range []harness.InstallStep{harness.WorkloadMakeStep()} {
 		fmt.Fprintf(&b, "# %s\nRUN %s\n", step.Comment, step.Run)
 	}
 	for _, step := range steps {
@@ -419,8 +447,67 @@ func renderDockerfile(c *Context, steps []harness.InstallStep) []byte {
 		"install -d -o root -g root -m 0755 %s; chown -R %d:%d %s\n",
 		dirs, harness.WorkRoot, spec.UID, spec.GID, connector.SandboxHomeDir)
 	b.WriteString("RUN " + runAsUserStep(spec.UID, spec.GID, "/etc/passwd", "/etc/group") + "\n")
+	if spec.MicroVM {
+		b.WriteString(microVMResolverCopyStep())
+	}
 	b.WriteString("USER sandbox\n")
 	return b.Bytes()
+}
+
+func microVMResolverCopyStep() string {
+	return fmt.Sprintf(`USER root
+RUN set -eu; fail() { echo 'MicroVM image resolver caller location is not root-owned and read-only' >&2; exit 1; }; \
+    for d in / /usr /usr/local /usr/local/lib; do \
+      [ ! -L "$d" ] && [ -d "$d" ] && [ "$(stat -c %%u "$d")" = 0 ] || fail; \
+      mode=$(stat -c %%a "$d"); [ $((0$mode & 022)) -eq 0 ] || fail; \
+    done; \
+    d=/usr/local/lib/defenseclaw; \
+    if [ ! -e "$d" ] && [ ! -L "$d" ]; then install -d -o root -g root -m 0755 "$d"; fi; \
+    [ ! -L "$d" ] && [ -d "$d" ] && [ "$(stat -c %%u "$d")" = 0 ] || fail; \
+    mode=$(stat -c %%a "$d"); [ $((0$mode & 022)) -eq 0 ] || fail; \
+    [ ! -e %[1]s ] && [ ! -L %[1]s ] || fail
+COPY --from=dc-localhost-tool --chown=0:0 --chmod=0755 /tmp/localhost-resolver %[1]s
+RUN set -eu; [ -f %[1]s ] && [ ! -L %[1]s ] && [ "$(stat -c %%u %[1]s)" = 0 ]; \
+    mode=$(stat -c %%a %[1]s); [ $((0$mode & 022)) -eq 0 ]
+`, microVMResolverPath)
+}
+
+func microVMResolverToolStage() string {
+	return fmt.Sprintf(`FROM %s AS dc-localhost-tool
+USER root
+COPY localhost-resolver.c /tmp/localhost-resolver.c
+RUN gcc -O2 -Wall -Wextra -Werror -o /tmp/localhost-resolver /tmp/localhost-resolver.c
+`, openshell.DefaultBaseImage)
+}
+
+// microVMResolverStep checks the completed image's name service with the
+// exported /etc/hosts overlaid. The shell tools come from the pinned tool
+// stage; only the resolver's libc and NSS configuration come from the image.
+// The caller asks libc for every family (unspec, inet, inet6) without
+// AI_ADDRCONFIG, which BuildKit's network=none would empty, and passes only
+// when every answer is loopback and only libc's files and dns sources gave
+// them; awk accepts only that exact report.
+func microVMResolverStep(baseImage string) string {
+	return strings.Replace(`FROM dc-localhost-tool AS dc-resolver-check
+USER root
+RUN --network=none --mount=type=bind,from=dc-complete,source=/,target=/tmp/dc-root,ro set -eu; \
+    root=/tmp/dc-root; hosts="$root/etc/hosts"; \
+    fail() { echo 'MicroVM image localhost check failed for BASE_IMAGE: leave its hosts file empty or make its resolver return a loopback address for localhost' >&2; exit 1; }; \
+    for d in "$root" "$root/usr" "$root/usr/local" "$root/usr/local/lib" "$root/usr/local/lib/defenseclaw"; do \
+      [ ! -L "$d" ] && [ -d "$d" ] && [ "$(/usr/bin/stat -c %u "$d")" = 0 ] || fail; \
+      mode=$(/usr/bin/stat -c %a "$d") || fail; [ $((0$mode & 022)) -eq 0 ] || fail; \
+    done; \
+    caller="$root/usr/local/lib/defenseclaw/localhost-resolver"; \
+    [ -f "$caller" ] && [ ! -L "$caller" ] && [ "$(/usr/bin/stat -c %u "$caller")" = 0 ] || fail; \
+    mode=$(/usr/bin/stat -c %a "$caller") || fail; [ $((0$mode & 022)) -eq 0 ] || fail; \
+    /usr/bin/cmp -s /tmp/localhost-resolver "$caller" || fail; \
+    if [ ! -e "$hosts" ] && [ ! -L "$hosts" ]; then exit 0; fi; \
+    if [ -f "$hosts" ] && [ ! -L "$hosts" ] && [ ! -s "$hosts" ]; then exit 0; fi; \
+    answer=$(/usr/sbin/chroot "$root" /usr/local/lib/defenseclaw/localhost-resolver) || fail; \
+    [ ${#answer} -le 4096 ] && [ -n "$answer" ] || fail; \
+    printf '%s\n' "$answer" | /usr/bin/awk 'done { bad = 1 } $0 == "loopback-only" { done = 1; next } $0 == "unspec 127.0.0.1" || $0 == "unspec ::1" { if (rank > 0 || seen[$0]++) bad = 1; unspec = 1; next } $0 == "inet 127.0.0.1" { if (rank > 1 || seen[$0]++) bad = 1; rank = 1; next } $0 == "inet6 ::1" { if (seen[$0]++) bad = 1; rank = 2; next } { bad = 1 } END { exit bad || !done || !unspec }' || fail
+USER sandbox
+`, "BASE_IMAGE", baseImage, 1)
 }
 
 // runAsUserStep names the run-as uid and gid in the image: the workload
@@ -455,8 +542,8 @@ type hashInput struct {
 	IngressPort        int    `json:"ingress_port"`
 	FailMode           string `json:"fail_mode"`
 	Owner              string `json:"owner"`
-	// MicroVM is left out when unset, which keeps the content hash of an
-	// image for the docker driver what it was before MicroVM images.
+	// MicroVM is left out when unset, so a docker-driver image's hash input
+	// has no MicroVM field (contextSchema still changes every hash).
 	MicroVM bool        `json:"microvm,omitempty"`
 	Files   []hashEntry `json:"files"`
 }

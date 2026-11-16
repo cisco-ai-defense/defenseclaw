@@ -37,7 +37,11 @@ REQUIRED_CHECKS = {
         "make test (unified)",
         "Go Test",
         "Rego Policy Tests",
+        # The managed-mode aggregates.
+        "Enterprise Required",
     },
+    "windows-native.yml": {"Windows Native Required"},
+    "windows-deterministic-build.yml": {"Windows Deterministic Build Required"},
 }
 # connector-live-e2e.yml builds its matrix at run time; every matrix it can
 # choose must contain this cell (see the no-op test below).
@@ -59,7 +63,7 @@ FAKE_REPO = {
     ),
     "internal/cli/docs_paths_test.go": 'var sandboxDoc = "sandboxes.mdx"\n',
     "scripts/gen_envvars_docs.py": 'OUT = "docs-site/content/docs/reference/env-vars.mdx"\n',
-    "scripts/live-connector-e2e/test-windows.ps1": "$ci = '.github\\workflows\\windows-native.yml'\n",
+    "scripts/windows-native-ci.ps1": "$ci = '.github\\workflows\\windows-native.yml'\n",
 }
 
 
@@ -83,6 +87,11 @@ def classify(*files: str) -> dict:
     return ci_changes.classify(list(files), references=fake_references, read=FAKE_REPO.__getitem__)
 
 
+def test_postinstall_only_selects_reboot_regression() -> None:
+    selected = ci_changes.classify(["packaging/linux/postinstall.sh"])["py_select"]
+    assert "cli/tests/test_enterprise_install_lanes.py" in selected.split()
+
+
 def ran(outputs: dict) -> set[str]:
     groups = (
         "go",
@@ -99,12 +108,26 @@ def ran(outputs: dict) -> set[str]:
         "enterprise",
         "windows_go",
         "windows_python",
-        "windows_pkg",
+        "windows_contract",
         "pwsh",
         "workflows",
+        "managed",
         "code",
     )
     return {group for group in groups if outputs[group]}
+
+
+# What a managed path adds on top of its own rule.
+MANAGED_LANES = {"managed", "enterprise", "windows_go", "windows_python", "windows_contract", "pwsh"}
+
+
+@pytest.mark.parametrize("path", [
+    "internal/opencodebridge/adapter.js",
+    "internal/gateway/connector/hooks/opencode-plugin.js",
+    "scripts/generate_opencode_plugins.py",
+])
+def test_opencode_shared_adapter_runs_managed_lanes(path):
+    assert MANAGED_LANES <= ran(classify(path))
 
 
 ALL_GROUPS = ran(ci_changes.everything("test")) - {"go_pinned"}
@@ -143,22 +166,29 @@ ALL_GROUPS = ran(ci_changes.everything("test")) - {"go_pinned"}
             id="generated-docs-run-parity-checks",
         ),
         pytest.param(
-            [".github/workflows/ci.yml"],
-            {"workflows", "python_tests"},
-            "cli/tests/test_ci_workflow_efficiency.py",
+            [".github/workflows/docs-site.yml"],
+            {"workflows"},
+            "",
             [],
             id="workflow-only",
         ),
         pytest.param(
+            [".github/workflows/ci.yml"],
+            {"workflows", "python_tests"} | MANAGED_LANES,
+            "cli/tests/test_ci_workflow_efficiency.py",
+            [],
+            id="managed-workflow-runs-the-managed-lanes",
+        ),
+        pytest.param(
             [".github/workflows/windows-native.yml"],
-            {"workflows", "pwsh"},
+            {"workflows"} | MANAGED_LANES,
             "",
             [],
             id="workflow-pinned-by-powershell-harness",
         ),
         pytest.param(
             ["cli/defenseclaw/commands/cmd_status.py"],
-            {"python", "python_tests", "python_lint", "wheel", "checks", "core", "install", "windows_python", "windows_pkg", "pwsh", "code"},
+            {"python", "python_tests", "python_lint", "wheel", "checks", "core", "install", "windows_python", "windows_contract", "pwsh", "code"},
             "",
             [],
             id="python-only",
@@ -178,7 +208,7 @@ ALL_GROUPS = ran(ci_changes.everything("test")) - {"go_pinned"}
                 "core",
                 "install",
                 "windows_python",
-                "windows_pkg",
+                "windows_contract",
                 "pwsh",
                 "code",
             },
@@ -195,14 +225,14 @@ ALL_GROUPS = ran(ci_changes.everything("test")) - {"go_pinned"}
         ),
         pytest.param(
             ["internal/gateway/router.go"],
-            {"go", "checks", "core", "install", "enterprise", "windows_go", "windows_pkg", "pwsh", "code"},
+            {"go", "checks", "core", "install", "enterprise", "windows_go", "windows_contract", "pwsh", "code"},
             "",
             [],
             id="go-only",
         ),
         pytest.param(
             ["packaging/windows/standalone/build-setup.sh"],
-            {"install", "enterprise", "windows_go", "windows_python", "windows_pkg", "pwsh", "code"},
+            {"install", "windows_contract", "code"} | MANAGED_LANES,
             "",
             [],
             id="windows-packaging",
@@ -216,16 +246,44 @@ ALL_GROUPS = ran(ci_changes.everything("test")) - {"go_pinned"}
         ),
         pytest.param(
             ["extensions/defenseclaw/src/index.ts"],
-            {"go", "python", "ts", "python_tests", "python_lint", "wheel", "checks", "core", "install", "enterprise", "windows_go", "windows_python", "windows_pkg", "pwsh", "code"},
+            {"go", "python", "ts", "python_tests", "python_lint", "wheel", "checks", "core", "install", "enterprise", "windows_go", "windows_python", "windows_contract", "pwsh", "code"},
             "",
             [],
             id="extension-is-embedded",
+        ),
+        pytest.param(
+            ["packaging/mdm/README.md"],
+            MANAGED_LANES,
+            "",
+            [],
+            id="managed-docs-run-the-managed-lanes",
+        ),
+        pytest.param(
+            ["cli/defenseclaw/config_writer.py"],
+            {"python", "python_tests", "python_lint", "wheel", "checks", "core", "install", "windows_contract", "code"} | MANAGED_LANES,
+            "",
+            [],
+            id="managed-python-predicate-runs-the-managed-lanes",
+        ),
+        pytest.param(
+            ["internal/enterprisehooks/installer.go"],
+            {"go", "checks", "core", "install", "windows_contract", "code"} | MANAGED_LANES,
+            "",
+            [],
+            id="managed-go-runs-the-windows-enterprise-smokes",
+        ),
+        pytest.param(
+            [".github/workflows/windows-native.yml"],
+            {"workflows"} | MANAGED_LANES,
+            "",
+            [],
+            id="editing-the-windows-native-workflow-runs-its-contract-jobs",
         ),
         pytest.param(["Makefile"], ALL_GROUPS, "", [], id="shared-makefile-runs-everything"),
         pytest.param(["somewhere/new.file"], ALL_GROUPS, "", [], id="unknown-path-runs-everything"),
         pytest.param(
             ["docs-site/content/docs/hitl.mdx", "internal/gateway/router.go"],
-            {"go", "checks", "core", "install", "enterprise", "windows_go", "windows_pkg", "pwsh", "code"},
+            {"go", "checks", "core", "install", "enterprise", "windows_go", "windows_contract", "pwsh", "code"},
             "",
             [],
             id="mixed-is-the-union",
@@ -239,16 +297,64 @@ def test_pull_request_suites(files, expected, py_select, go_packages) -> None:
     assert json.loads(outputs["go_tests"]) == go_packages
 
 
-def test_enterprise_lifecycle_paths_run_the_enterprise_lanes() -> None:
+def test_managed_paths_run_every_managed_lane() -> None:
     for path in (
         "internal/enterpriseunix/lifecycle.go",
         "internal/enterprisestatus/result.go",
         "internal/managed/managed.go",
         "internal/config/migrate_v9.go",
+        "internal/cli/windows_enterprise_service.go",
         "packaging/mdm/contract/lifecycle-result.schema.json",
+        "packaging/windows/DefenseClawEnterprise.psm1",
+        "scripts/test-enterprise-unix-install.sh",
+        "uv.lock",
+        ".github/managed-paths.txt",
     ):
         outputs = classify(path)
-        assert outputs["packaging"] and outputs["enterprise"], path
+        assert MANAGED_LANES <= ran(outputs), path
+
+
+def test_paths_outside_the_manifest_are_not_managed() -> None:
+    for path in (
+        "internal/gateway/router.go",
+        "cli/defenseclaw/commands/cmd_status.py",
+        "docs-site/content/docs/enterprise/index.mdx",
+        "policies/guardrail/default/rules/enterprise-data.yaml",
+    ):
+        assert not classify(path)["managed"], path
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "internal/managed/\n",
+        "[managed]\n[unknown]\nx/\n",
+        "[managed_impacting]\nuv.lock\n",
+    ),
+    ids=("pattern-before-section", "unknown-section", "empty-managed"),
+)
+def test_malformed_manifests_are_rejected(text: str) -> None:
+    with pytest.raises(ValueError):
+        ci_changes.parse_managed_manifest(text)
+
+
+def test_an_unreadable_manifest_runs_everything(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(ci_changes, "MANAGED_MANIFEST", "does/not/exist.txt")
+    changed = tmp_path / "files.txt"
+    changed.write_text("docs-site/content/docs/hitl.mdx\n", encoding="utf-8")
+    for output in ("enterprise", "windows_python", "managed"):
+        assert ci_changes.main(["--event", "pull_request", "--files-from", str(changed), "--get", output]) == 0
+        assert capsys.readouterr().out.strip() == "true"
+
+
+def test_management_contract_files_run_the_go_contract_tests_and_checks() -> None:
+    for path in (
+        "packaging/mdm/contract/management-agent.md",
+        "packaging/mdm/contract/bundle-status.schema.json",
+        "packaging/mdm/contract/exit-codes.md",
+    ):
+        outputs = classify(path)
+        assert outputs["go"] and outputs["checks"] and outputs["windows_go"], path
 
 
 def test_the_develop_skill_runs_the_checks_lane() -> None:
@@ -292,6 +398,15 @@ def _workflow(name: str) -> dict:
     return yaml.safe_load((WORKFLOWS / name).read_text(encoding="utf-8"))
 
 
+def test_windows_native_ci_runs_standalone_transaction_recovery_smoke() -> None:
+    steps = _workflow("windows-native.yml")["jobs"]["powershell-static"]["steps"]
+    smoke = "./packaging/windows/tests/enterprise-standalone-recovery-gateway-smoke.ps1"
+    assert any(
+        smoke in str(step.get("run", "")) and step.get("if") == "${{ !cancelled() }}"
+        for step in steps
+    )
+
+
 def _check_names(job: dict) -> set[str]:
     name = job.get("name", "")
     matrix = job.get("strategy", {}).get("matrix", {})
@@ -327,13 +442,78 @@ def test_aggregates_accept_skips_only_from_the_classifier() -> None:
         assert job["if"] == "${{ always() }}"
         assert "changes" in job["needs"]
     native = _workflow("windows-native.yml")["jobs"]["windows-native-required"]
+    assert native["if"] == "${{ always() }}"
     assert "changes" in native["needs"]
     assert "$results.changes.result -eq 'success'" in native["steps"][0]["run"]
+    repro = _workflow("windows-deterministic-build.yml")["jobs"]
+    aggregate = repro["deterministic-build-required"]
+    assert aggregate["if"] == "${{ always() }}"
+    assert set(aggregate["needs"]) == set(repro) - {"deterministic-build-required"}
+    assert '[ "$REPRO" = false ] && [ "$result" = skipped ]' in aggregate["steps"][0]["run"]
+
+
+def test_enterprise_required_needs_every_enterprise_gated_job() -> None:
+    jobs = _workflow("ci.yml")["jobs"]
+    gated = {
+        job_id
+        for job_id, job in jobs.items()
+        if "needs.changes.outputs.enterprise" in str(job.get("if", ""))
+    }
+    needs = set(jobs["enterprise-required"]["needs"])
+    assert gated <= needs, gated - needs
+    run = jobs["enterprise-required"]["steps"][0]["run"]
+    for job_id in needs - {"changes"}:
+        assert f"needs.{job_id}.result" in str(jobs["enterprise-required"]["steps"][0]["env"]), job_id
+    assert "for gate in" in run
+
+
+def test_the_deterministic_build_gate_runs_only_for_its_inputs() -> None:
+    for path in (
+        "packaging/scripts/lib/assemble.sh",
+        "cmd/windows-repro-manifest/main.go",
+        "internal/build-repro/testdata/signed-payload-fixture.tar.zst",
+        "go.mod",
+        ".github/workflows/windows-deterministic-build.yml",
+        # The classifier selects the gate, so a change to it runs the gate.
+        "scripts/ci_changes.py",
+    ):
+        assert classify(path)["repro"], path
+    for path in ("internal/gateway/router.go", "packaging/windows/DefenseClawEnterprise.psm1"):
+        assert not classify(path)["repro"], path
+    assert ci_changes.everything("test")["repro"]
+
+
+def test_a_release_workflow_change_runs_the_cowork_vm_install_suite() -> None:
+    release_only = classify(".github/workflows/release.yaml")
+    assert release_only["cowork_vm"] and not release_only["install"]
+    assert classify("packaging/cowork-vm/install.sh")["cowork_vm"]
+    assert classify("internal/gateway/router.go")["cowork_vm"]
+    for path in (".github/workflows/docs-site.yml", "docs-site/content/docs/hitl.mdx"):
+        assert not classify(path)["cowork_vm"], path
+    assert ci_changes.everything("test")["cowork_vm"]
+    job = _workflow("ci.yml")["jobs"]["cowork-vm-package"]
+    assert "needs.changes.outputs.cowork_vm != 'false'" in job["if"]
+
+
+def test_cowork_sign_attaches_signatures_and_leaves_the_notes_alone() -> None:
+    # Audit review S3: the release notes never name the Cowork packages
+    # (P2-1), so cowork-sign has no notes paragraph to remove.
+    steps = _workflow("release.yaml")["jobs"]["cowork-sign"]["steps"]
+    script = "\n".join(str(step.get("run", "")) for step in steps)
+    assert "gh release upload" in script
+    assert "gh release edit" not in script and "--notes" not in script
+    assert "cowork-vm-unsigned" not in (WORKFLOWS / "release.yaml").read_text(encoding="utf-8")
+
+
+def test_repro_paths_mirror_the_deterministic_build_push_paths() -> None:
+    push = _workflow("windows-deterministic-build.yml")[True]["push"]["paths"]
+    mirrored = {path[: -len("**")] if path.endswith("/**") else path for path in push}
+    assert mirrored == set(ci_changes.REPRO_PATHS)
 
 
 def test_workflows_read_only_outputs_the_classifier_writes() -> None:
     outputs = set(ci_changes.everything("test"))
-    for name in ("ci.yml", "windows-native.yml"):
+    for name in ("ci.yml", "windows-native.yml", "windows-deterministic-build.yml"):
         text = (WORKFLOWS / name).read_text(encoding="utf-8")
         used = set(re.findall(r"steps\.classify\.outputs\.(\w+)", text))
         assert used, name

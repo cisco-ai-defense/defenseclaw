@@ -53,15 +53,27 @@ func CheckCandidateAssets(cfg *Config) error {
 		if errors.As(err, &semantic) {
 			return err // the check named its own field
 		}
+		action := "fix the reference, then retry"
+		var remedied candidateRemedy
+		if errors.As(err, &remedied) && remedied.CandidateRemedy() != "" {
+			// A valid reference whose composed catalog is too large.
+			action = remedied.CandidateRemedy()
+		}
 		return &V8SemanticError{
 			Path:     "$.guardrail",
 			Summary:  err.Error(),
 			Expected: "rule packs, custom pack digests and rule IDs the gateway can load",
-			Action:   "fix the reference, then retry",
+			Action:   action,
 			cause:    err,
 		}
 	}
 	return nil
+}
+
+// candidateRemedy is an asset check error that names its own action
+// (guardrail.RulePackError for a catalog over a limit).
+type candidateRemedy interface {
+	CandidateRemedy() string
 }
 
 // ValidateCandidateAssets decodes candidate bytes and runs
@@ -100,8 +112,11 @@ func ValidateCandidate(configFile string, raw []byte) error {
 	if _, err := ParseCompileObservabilityV8(configFile, raw, ObservabilityV8CompileOptions{DefaultDataDir: dataDir}); err != nil {
 		return err
 	}
-	_, err = LoadRuntimeV8InspectionCandidateFromBytes(configFile, raw)
-	return err
+	cfg, err := LoadRuntimeV8InspectionCandidateFromBytes(configFile, raw)
+	if err != nil {
+		return err
+	}
+	return ValidateManagedStandaloneLiteralCandidate(cfg, raw)
 }
 
 // StandaloneManagedSource reports whether config bytes describe a managed

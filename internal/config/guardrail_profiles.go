@@ -10,9 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // Identity-based guardrail profiles.
@@ -23,7 +24,7 @@ import (
 //	guardrail:
 //	  profiles:
 //	    contractors: {mode: action, block_at: medium, connectors: {codex: {mode: observe}}}
-//	  profile_assignments:          # ordered, first match wins; keys AND, values OR
+//	  profile_assignments:          # the strictest match wins; keys AND, values OR
 //	    - {profile: contractors, match: {groups: ["CORP\\Contractors"]}}
 //	  default_profile: ""           # "" keeps today's guardrail.* behaviour
 //
@@ -112,8 +113,8 @@ func (g *GuardrailConfig) HasProfiles() bool {
 }
 
 var (
-	guardrailProfileNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
-	agentIdentityPattern        = regexp.MustCompile(`^agt-[0-9a-f]{16}$`)
+	guardrailProfileNamePattern = lazyregexp.New(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+	agentIdentityPattern        = lazyregexp.New(`^agt-[0-9a-f]{16}$`)
 )
 
 // errProfileForbiddenKey explains why enabled and hook_fail_mode cannot live
@@ -181,6 +182,21 @@ func (g *GuardrailConfig) validateProfiles(secureClient bool) error {
 		if assignment.Match.Empty() {
 			return settingErrorAt(fmt.Sprintf("guardrail.profile_assignments[%d]", i),
 				fmt.Errorf("guardrail.profile_assignments[%d]: match needs at least one of groups, users, connectors or agents; use guardrail.default_profile for everyone else", i))
+		}
+		// A selector that is only white space is trimmed to nothing at match
+		// time and selects nobody, while the assignment looked set
+		// (GAP-1052).
+		for _, selector := range []struct {
+			key    string
+			values []string
+		}{{"groups", assignment.Match.Groups}, {"users", assignment.Match.Users}} {
+			key := selector.key
+			for _, value := range selector.values {
+				if strings.TrimSpace(value) == "" {
+					return settingErrorAt(fmt.Sprintf("guardrail.profile_assignments[%d].match.%s", i, key),
+						fmt.Errorf("guardrail.profile_assignments[%d].match.%s: an entry is empty; name a %s or remove the entry", i, key, strings.TrimSuffix(key, "s")))
+				}
+			}
 		}
 		for _, agent := range assignment.Match.Agents {
 			if !agentIdentityPattern.MatchString(agent) {
@@ -395,6 +411,11 @@ type guardrailPolicyDigestView struct {
 	// Sandbox is the profile's sandbox floor digest (Config.SandboxFloor),
 	// set only for a profile with a sandbox section.
 	Sandbox string `json:"sandbox,omitempty"`
+	// CiscoTrustLevel is guardrail.cisco_trust_level when it is not the
+	// default (full): it decides whether Cisco AI Defense verdicts block, so
+	// a policy that changed only it digested the same (GAP-0934). The
+	// default is left out, so the digest of a policy at full is unchanged.
+	CiscoTrustLevel string `json:"cisco_trust_level,omitempty"`
 }
 
 // GuardrailPolicyDigest returns "sha256:" + the hex SHA-256 of the canonical
@@ -443,6 +464,9 @@ func guardrailPolicyDigest(cfg *Config, sandboxDigest string, rewrite func(strin
 			"codex":       cfg.Codex.Mode,
 		},
 		Sandbox: sandboxDigest,
+	}
+	if level := g.EffectiveCiscoTrustLevel(); level != CiscoTrustFull {
+		view.CiscoTrustLevel = level
 	}
 	if rewrite != nil {
 		view.RulePackDir = rewrite(view.RulePackDir)
@@ -734,6 +758,13 @@ func (c *Config) DeepCopy() (*Config, error) {
 		return nil, fmt.Errorf("copy configuration: %w", err)
 	}
 	out.RuntimeV8RulePackRebase = c.RuntimeV8RulePackRebase
+	out.legacyOpenShellPackDir = c.legacyOpenShellPackDir
+	out.offlineInspection = c.offlineInspection
+	out.openClawNotInstalled = c.openClawNotInstalled
+	out.offlineVendorPolicyDir, out.offlineVendorPolicyRoot = c.offlineVendorPolicyDir, c.offlineVendorPolicyRoot
+	// The custom_packs verdict the loader recorded belongs to the load, not to
+	// the copy: a copy never re-reads a folder that has changed since.
+	out.Guardrail.customPackBase, out.Guardrail.customRulePackChecks = c.Guardrail.customPackBase, maps.Clone(c.Guardrail.customRulePackChecks)
 	aid := c.CiscoAIDefense
 	out.CiscoAIDefense.protectedCredentialRequired = aid.protectedCredentialRequired
 	out.CiscoAIDefense.protectedCredential, out.CiscoAIDefense.protectedSecretsDir = aid.protectedCredential, aid.protectedSecretsDir

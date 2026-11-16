@@ -31,6 +31,9 @@ func AcquireEnterpriseCredentialEnrollmentLock(dataDir string) (func(), error) {
 	); err != nil {
 		return fail(err)
 	}
+	if err := managed.EnsureCanonicalLockFile(path, managed.ObjectRuntimeFile); err != nil {
+		return fail(fmt.Errorf("create ACP enrollment lock: %w", err))
+	}
 	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return fail(err)

@@ -837,11 +837,7 @@ func TestGeneratedJudgeTracePinsGenerationAcrossReload(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	select {
-	case <-reloadDone:
-		t.Fatal("judge reload returned before the active handle released generation one")
-	default:
-	}
+	// The reload returned once generation two was published (#1302).
 	if judge.Generation() != 1 {
 		t.Fatalf("live judge generation=%d, want 1", judge.Generation())
 	}
@@ -1055,16 +1051,13 @@ func TestGeneratedRootModelDoesNotFabricateAgentAndAbortReleasesRequestLease(t *
 		}
 		time.Sleep(time.Millisecond)
 	}
-	select {
-	case <-reloadDone:
-		t.Fatal("reload returned before request Abort released the lease")
-	default:
-	}
+	// The reload returned once generation two was published (#1302).
 	agent.Abort()
 	reload := <-reloadDone
 	if reload.err != nil || reload.result.Status() != runtimegraph.ReloadApplied {
 		t.Fatalf("reload after request Abort=%s error=%v", reload.result.Status(), reload.err)
 	}
+	waitRuntimeRetired(t, runtime)
 	if pipelines.consumer(t, 1).closed.Load() == 0 {
 		t.Fatal("request Abort did not permit generation retirement")
 	}
@@ -1128,6 +1121,7 @@ func TestGeneratedRootApprovalDoesNotFabricateAgentAndEndReleasesLease(t *testin
 	if reloadErr != nil || reload.Status() != runtimegraph.ReloadApplied {
 		t.Fatalf("reload after root approval End=%s error=%v", reload.Status(), reloadErr)
 	}
+	waitRuntimeRetired(t, runtime)
 	if pipelines.consumer(t, 1).closed.Load() == 0 {
 		t.Fatal("root approval End did not release the generation lease")
 	}
@@ -1155,6 +1149,7 @@ func TestGeneratedRootApprovalSamplingDropAndInvalidInputReleaseLease(t *testing
 	if reloadErr != nil || reload.Status() != runtimegraph.ReloadApplied {
 		t.Fatalf("reload after root approval build rejection=%s error=%v", reload.Status(), reloadErr)
 	}
+	waitRuntimeRetired(t, runtime)
 	if pipelines.consumer(t, 1).closed.Load() == 0 {
 		t.Fatal("root approval build rejection retained the generation lease")
 	}
@@ -1177,6 +1172,7 @@ func TestGeneratedRootApprovalSamplingDropAndInvalidInputReleaseLease(t *testing
 	if resumeErr != nil || resume.Status() != runtimegraph.ReloadApplied {
 		t.Fatalf("reload after root approval drop=%s error=%v", resume.Status(), resumeErr)
 	}
+	waitRuntimeRetired(t, runtime)
 	if pipelines.consumer(t, 2).closed.Load() == 0 {
 		t.Fatal("root approval sampling drop retained the generation lease")
 	}
@@ -1318,11 +1314,7 @@ func TestGeneratedTraceSessionPinsGenerationAcrossReloadAndRejectsStaleUse(t *te
 	if first.closed.Load() != 0 {
 		t.Fatal("generation one retired while root/model were live")
 	}
-	select {
-	case <-reloadDone:
-		t.Fatal("reload returned before the trace hierarchy released its lease")
-	default:
-	}
+	// The reload returned once generation two was published (#1302).
 	if agent.Generation() != 1 || model.Generation() != 1 || transition.Generation() != 1 {
 		t.Fatal("live trace handles changed generation after reload publication")
 	}
@@ -1357,6 +1349,7 @@ func TestGeneratedTraceSessionPinsGenerationAcrossReloadAndRejectsStaleUse(t *te
 	if reload.err != nil || reload.result.Status() != runtimegraph.ReloadApplied {
 		t.Fatalf("reload=%s error=%v", reload.result.Status(), reload.err)
 	}
+	waitRuntimeRetired(t, runtime)
 	if first.closed.Load() == 0 {
 		t.Fatal("generation one was not retired after root End released the lease")
 	}

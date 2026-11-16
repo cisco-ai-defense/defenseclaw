@@ -714,8 +714,8 @@
       "body": {
         "id": "tamper.detector_state_write",
         "tool_call_only": true,
-        "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
-        "pattern": "(?i)(?:~|\\$HOME|\\$\\{HOME\\}|/root|/(?:home|Users)/[^/\\\\\"']+|[a-z]:[/\\\\]Users[/\\\\][^/\\\\\"']+)[/\\\\]\\.defenseclaw[/\\\\](?:\\.env|config\\.yaml|confidence_policy\\.yaml|guardrail_runtime\\.json|device\\.key|picked_connector|custom-providers\\.json|(?:audit|judge|judge_bodies)\\.db(?:-(?:wal|shm))?|(?:cache|policies|quarantine|receipts|registries)[/\\\\][^;\\s]+)\\b",
+        "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_METADATA]))",
+        "pattern": "(?i)(?:~|\\$HOME|\\$\\{HOME\\}|/root|/(?:home|Users)/[^/\\\\\"']+|[a-z]:[/\\\\]Users[/\\\\][^/\\\\\"']+)[/\\\\]\\.defenseclaw[/\\\\](?:\\.env|config\\.yaml|confidence_policy\\.yaml|guardrail_runtime\\.json|device\\.key|picked_connector|custom-providers\\.json|(?:audit|judge|judge_bodies)\\.db(?:-(?:wal|shm))?|(?:cache|hooks|installer|policies|previous[/\\\\]installer|quarantine|receipts|registries)[/\\\\][^;\\s]+)\\b",
         "title": "DefenseClaw security state mutation",
         "severity": "HIGH",
         "confidence": 0.98,
@@ -735,6 +735,58 @@
         "security-state"
       ],
       "data_axis": []
+    },
+    {
+      "id": "RECIPE-tamper.agent_hook_config_disable",
+      "title": "Turn off the agent's DefenseClaw hooks",
+      "kind": "rule:cognitive-file",
+      "body": {
+        "id": "tamper.agent_hook_config_disable",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Turn off the agent's DefenseClaw hooks",
+        "severity": "CRITICAL",
+        "confidence": 0.98,
+        "tags": [
+          "cognitive-tampering",
+          "tampering",
+          "security-state"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (cognitive.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/cognitive.yaml",
+      "tags": [
+        "cognitive-tampering",
+        "tampering",
+        "security-state"
+      ]
+    },
+    {
+      "id": "RECIPE-tamper.agent_hook_config_write",
+      "title": "Shell write to an agent hook config",
+      "kind": "rule:cognitive-file",
+      "body": {
+        "id": "tamper.agent_hook_config_write",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Shell write to an agent hook config",
+        "severity": "HIGH",
+        "confidence": 0.8,
+        "tags": [
+          "cognitive-tampering",
+          "tampering"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (cognitive.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/cognitive.yaml",
+      "tags": [
+        "cognitive-tampering",
+        "tampering"
+      ]
     },
     {
       "id": "RECIPE-CMD-REVSHELL-POWERSHELL-TCP",
@@ -913,6 +965,93 @@
       "tags": [
         "execution",
         "download-exec"
+      ],
+      "data_axis": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-WRAPPED-DOWNLOAD-EXEC",
+      "title": "Download piped through a privilege wrapper to a shell",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-WRAPPED-DOWNLOAD-EXEC",
+        "tool_call_only": true,
+        "expression": "false",
+        "pattern": "a^",
+        "title": "Download piped through a privilege wrapper to a shell",
+        "severity": "CRITICAL",
+        "confidence": 0.99,
+        "tags": [
+          "execution",
+          "download-exec"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution",
+        "download-exec"
+      ],
+      "data_axis": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-SUBST-DOWNLOAD-EXEC",
+      "title": "Downloaded command substitution evaluated by a shell",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-SUBST-DOWNLOAD-EXEC",
+        "tool_call_only": true,
+        "expression": "false",
+        "pattern": "a^",
+        "title": "Downloaded command substitution evaluated by a shell",
+        "severity": "CRITICAL",
+        "confidence": 0.99,
+        "tags": [
+          "execution",
+          "download-exec"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution",
+        "download-exec"
+      ],
+      "data_axis": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-PYTHON-SOCKET-CONNECT",
+      "title": "Python code connects to a nonlocal socket",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-PYTHON-SOCKET-CONNECT",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, c.program in ['python', 'python2', 'python3'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONNECT in c.operations)",
+        "pattern": "a^",
+        "title": "Python code connects to a nonlocal socket",
+        "severity": "CRITICAL",
+        "confidence": 0.99,
+        "tags": [
+          "execution",
+          "network"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution",
+        "network"
       ],
       "data_axis": [
         "egress_external"
@@ -2570,7 +2709,7 @@
       "body": {
         "id": "impact.sql_destructive_mutation",
         "tool_call_only": true,
-        "expression": "f.tool in ['sql_query', 'db.execute'] || f.commands.exists(c, c.argv_complete && c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd'])",
+        "expression": "f.tool in ['sql_query', 'db.execute'] || f.commands.exists(c, c.argv_complete && c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd', 'snowsql'])",
         "pattern": "a^",
         "title": "Exact destructive SQL mutation",
         "severity": "HIGH",
@@ -3696,7 +3835,7 @@
       "body": {
         "id": "impact.linux_magic_sysrq_destruction",
         "tool_call_only": true,
-        "expression": "f.paths.exists(p, p.normalized == '/proc/sysrq-trigger')",
+        "expression": "f.paths.exists(p, p.resolved == '/proc/sysrq-trigger' || p.normalized == '/proc/sysrq-trigger')",
         "pattern": "(?i)(?:^|[;\\r\\n]\\s*)echo\\s+[\"']?[bocei][\"']?\\s*>\\s*/proc/sysrq-trigger(?:\\s|$)",
         "title": "Trigger destructive Linux Magic SysRq action",
         "severity": "CRITICAL",
@@ -3756,7 +3895,7 @@
       "body": {
         "id": "tamper.posix_system_log_destruction",
         "tool_call_only": true,
-        "expression": "f.paths.exists(p, p.normalized in ['/var/log/messages', '/var/log/security', '/var/log/syslog', '/var/log/auth.log', '/var/log/secure', '/var/log/audit/audit.log'] && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
+        "expression": "f.paths.exists(p, (p.resolved in ['/var/log/messages', '/var/log/security', '/var/log/syslog', '/var/log/auth.log', '/var/log/secure', '/var/log/audit/audit.log'] || p.normalized in ['/var/log/messages', '/var/log/security', '/var/log/syslog', '/var/log/auth.log', '/var/log/secure', '/var/log/audit/audit.log']) && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
         "pattern": "(?i)(?:^|[;\"\\r\\n]\\s*)(?:cat\\s+/dev/(?:null|zero)\\s*>\\s*/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|echo\\s+(?:''|\"\")\\s*>\\s*/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|(?:sudo\\s+)?(?:/usr/bin/)?truncate\\s+(?:-s\\s+0|--size=0)\\s+/var/log/(?:(?:messages|security|syslog|secure|audit/audit\\.log)|auth\\.log(?:/current\\.log)?)(?:\\s+2>/dev/null)?(?:\\s+\\|\\|\\s+true)?|chattr\\s+-i\\s+/var/log/audit/audit\\.log\\.1(?:\\s+2>/dev/null)?\\s*;\\s*(?:/usr/bin/)?truncate\\s+-s\\s+0\\s+/var/log/audit/audit\\.log\\.1|(?:rm\\s+-(?:rf|fr)|unlink)\\s+/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|(?:sudo\\s+)?rm\\s+-f\\s+/var/log/journal/\\*/system\\.journal|(?:sudo\\s+)?journalctl\\s+--vacuum-time=0)(?:\\s|\"|$)",
         "title": "Destroy canonical POSIX system logs",
         "severity": "CRITICAL",
@@ -4824,7 +4963,7 @@
       "body": {
         "id": "integrity.posix_system_interpreter_wrapper",
         "tool_call_only": true,
-        "expression": "f.paths.exists(p, p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE && p.normalized.startsWith('/usr/bin/python3.'))",
+        "expression": "f.paths.exists(p, p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE && (p.resolved.startsWith('/usr/bin/python3.') || p.normalized.startsWith('/usr/bin/python3.')))",
         "pattern": "(?mi)^[ \\t]*mv[ \\t]+-f[ \\t]+/usr/bin/\\.python3\\.[0-9]{1,2}\\.wrap[ \\t]+/usr/bin/python3\\.[0-9]{1,2}[ \\t]*$",
         "title": "Replace a versioned system Python interpreter with an environment wrapper",
         "severity": "HIGH",
@@ -5380,8 +5519,8 @@
       },
       "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity CRITICAL.",
       "examples": [
-        "AKIAIOSFODNN7EXAMPLE",
-        "ASIA1234567890ABCDEFGHIJ"
+        "AKIA0000000000000000",
+        "ASIA0000000000000000"
       ],
       "counterexamples": [
         "BANANAFRUITNOTAKEY",
@@ -6355,7 +6494,7 @@
       "body": {
         "id": "PATH-ETC-PASSWD",
         "tool_call_only": true,
-        "expression": "f.paths.exists(p, p.normalized == '/etc/passwd' && (p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE] || (p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ && f.commands.exists(c, c.id == p.command_id && c.dialect == defenseclaw.guardrail.semantic.v1.Dialect.DIALECT_ARGV && c.program in ['read', 'readfile', 'read_file', 'read-file', 'fsread', 'fs_read', 'fs-read', 'fs.read', 'fs.read_file', 'fileread', 'file_read', 'file-read', 'catfile', 'cat_file', 'cat-file', 'openfile', 'open_file', 'open-file', 'viewfile', 'view_file', 'view-file', 'getfile', 'get_file', 'get-file']))))",
+        "expression": "f.paths.exists(p, (p.resolved == '/etc/passwd' || p.normalized == '/etc/passwd') && (p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE] || (p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ && f.commands.exists(c, c.id == p.command_id && c.dialect == defenseclaw.guardrail.semantic.v1.Dialect.DIALECT_ARGV && c.program in ['read', 'readfile', 'read_file', 'read-file', 'fsread', 'fs_read', 'fs-read', 'fs.read', 'fs.read_file', 'fileread', 'file_read', 'file-read', 'catfile', 'cat_file', 'cat-file', 'openfile', 'open_file', 'open-file', 'viewfile', 'view_file', 'view-file', 'getfile', 'get_file', 'get-file']))))",
         "pattern": "a^",
         "title": "/etc/passwd typed read or mutation",
         "severity": "HIGH",
@@ -6382,7 +6521,7 @@
       "body": {
         "id": "PATH-ETC-SHADOW",
         "tool_call_only": true,
-        "expression": "f.paths.exists(p, p.normalized == '/etc/shadow' && (p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE] || (p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ && f.commands.exists(c, c.id == p.command_id && c.program in ['cat', 'base64', 'head', 'tail', 'less', 'more', 'strings', 'xxd', 'hexdump', 'cp', 'read', 'readfile', 'read_file', 'read-file', 'fsread', 'fs_read', 'fs-read', 'fs.read', 'fs.read_file', 'fileread', 'file_read', 'file-read', 'catfile', 'cat_file', 'cat-file', 'openfile', 'open_file', 'open-file', 'viewfile', 'view_file', 'view-file', 'getfile', 'get_file', 'get-file']))))",
+        "expression": "f.paths.exists(p, (p.resolved == '/etc/shadow' || p.normalized == '/etc/shadow') && (p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE] || (p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ && f.commands.exists(c, c.id == p.command_id && c.program in ['cat', 'base64', 'head', 'tail', 'less', 'more', 'strings', 'xxd', 'hexdump', 'cp', 'read', 'readfile', 'read_file', 'read-file', 'fsread', 'fs_read', 'fs-read', 'fs.read', 'fs.read_file', 'fileread', 'file_read', 'file-read', 'catfile', 'cat_file', 'cat-file', 'openfile', 'open_file', 'open-file', 'viewfile', 'view_file', 'view-file', 'getfile', 'get_file', 'get-file']))))",
         "pattern": "a^",
         "title": "/etc/shadow credential read or mutation",
         "severity": "CRITICAL",
@@ -6758,7 +6897,7 @@
       "kind": "rule:trust-exploit",
       "body": {
         "id": "TRUST-MAINTENANCE",
-        "pattern": "(?im)(?:(?:^|[.!?;]\\s*|^\\s*(?:[-*>•]|<!--|[\"'])\\s*|\\b(?:task|instruction|system|assistant)\\s*:\\s*)(?:(?:(?:please,?|now,?|next,?)\\s+)?(?:enable|activate|enter|switch\\s+to)\\s+(?:maintenance|debug|admin|developer)\\s+mode\\b[\\s\\S]{0,80}\\b(?:ignore\\s+(?:safety|rules?|instructions?)|bypass\\s+(?:safety|guardrails?|filters?)|without\\s+(?:rules?|restrictions?|filters?|safety)|do\\s+anything|answer\\s+without\\s+(?:rules?|restrictions?|filters?))|(?:maintenance|debug|admin|developer)\\s+mode\\s+(?:enabled|activated|on)\\b[\\s\\S]{0,80}\\b(?:ignore\\s+(?:safety|rules?|instructions?)|bypass\\s+(?:safety|guardrails?|filters?)|without\\s+(?:rules?|restrictions?|filters?|safety)|do\\s+anything|answer\\s+without\\s+(?:rules?|restrictions?|filters?)))|\\bnew\\s+system\\s+message\\b[\\s\\S]{0,100}\\byou\\s+are\\s+now\\s+in\\s+(?:maintenance|debug|admin|developer)\\s+mode\\b[\\s\\S]{0,100}\\b(?:refusals?|guardrails?|filters?|safety\\s+checks?)\\s+(?:are\\s+)?disabled\\b)",
+        "pattern": "(?im)(?:(?:^|^\\[[^\\]\\n]{0,64}\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}[^\\]\\n]{0,32}\\]\\s*|[.!?;]\\s*|^\\s*(?:[-*>•]|<!--|[\"'])\\s*|\\b(?:task|instruction|system|assistant)\\s*:\\s*)(?:(?:(?:please,?|now,?|next,?)\\s+)?(?:enable|activate|enter|switch\\s+to)\\s+(?:maintenance|debug|admin|developer)\\s+mode\\b[\\s\\S]{0,80}\\b(?:ignore\\s+(?:safety|rules?|instructions?)|bypass\\s+(?:safety|guardrails?|filters?)|without\\s+(?:rules?|restrictions?|filters?|safety)|do\\s+anything|answer\\s+without\\s+(?:rules?|restrictions?|filters?))|(?:maintenance|debug|admin|developer)\\s+mode\\s+(?:enabled|activated|on)\\b[\\s\\S]{0,80}\\b(?:ignore\\s+(?:safety|rules?|instructions?)|bypass\\s+(?:safety|guardrails?|filters?)|without\\s+(?:rules?|restrictions?|filters?|safety)|do\\s+anything|answer\\s+without\\s+(?:rules?|restrictions?|filters?)))|\\bnew\\s+system\\s+message\\b[\\s\\S]{0,100}\\byou\\s+are\\s+now\\s+in\\s+(?:maintenance|debug|admin|developer)\\s+mode\\b[\\s\\S]{0,100}\\b(?:refusals?|guardrails?|filters?|safety\\s+checks?)\\s+(?:are\\s+)?disabled\\b)",
         "title": "Fake mode activation",
         "severity": "HIGH",
         "confidence": 0.85,
@@ -6783,7 +6922,7 @@
       "kind": "rule:trust-exploit",
       "body": {
         "id": "TRUST-SAFETY-OVERRIDE",
-        "pattern": "(?im)(?:^|[.!?;]\\s*|^\\s*(?:[-*>•]|<!--|[\"'])\\s*|\\b(?:task|instruction|system|assistant)\\s*:\\s*)(?:(?:(?:please,?|(?:can|could|will|would)\\s+you|i\\s+(?:want|need)\\s+you\\s+to|let'?s|now,?|next,?)\\s+)?(?:override|bypass|disable|turn\\s+off|remove)\\s+(?:guardrails?|(?:all|your)\\s+(?:guardrails?|filters?|restrictions?|safety(?:\\s+(?:rules?|checks?|filters?|restrictions?))?)|(?:the\\s+)?(?:ai|assistant|agent|model)\\s+(?:guardrails?|filters?|restrictions?|safety(?:\\s+(?:rules?|checks?|filters?|restrictions?))?))|(?:safety|guardrails?)\\s+(?:override|bypass)\\s+(?:enabled|activated|on|now)|(?:guardrails?|(?:all|your)\\s+(?:guardrails?|filters?|restrictions?|safety(?:\\s+(?:rules?|checks?|filters?|restrictions?))?)|(?:the\\s+)?(?:ai|assistant|agent|model)\\s+(?:guardrails?|filters?|restrictions?|safety(?:\\s+(?:rules?|checks?|filters?|restrictions?))?))\\s+(?:must\\s+be|should\\s+be|are\\s+now|is\\s+now|have\\s+been|has\\s+been)\\s+(?:overridden|bypassed|disabled|turned\\s+off|removed))",
+        "pattern": "(?im)(?:^|^\\[[^\\]\\n]{0,64}\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}[^\\]\\n]{0,32}\\]\\s*|[.!?;]\\s*|^\\s*(?:[-*>•]|<!--|[\"'])\\s*|\\b(?:task|instruction|system|assistant)\\s*:\\s*)(?:(?:(?:please,?|(?:can|could|will|would)\\s+you|i\\s+(?:want|need)\\s+you\\s+to|let'?s|now,?|next,?)\\s+)?(?:override|bypass|disable|turn\\s+off|remove)\\s+(?:guardrails?|(?:all|your)\\s+(?:guardrails?|filters?|restrictions?|safety(?:\\s+(?:rules?|checks?|filters?|restrictions?))?)|(?:the\\s+)?(?:ai|assistant|agent|model)\\s+(?:guardrails?|filters?|restrictions?|safety(?:\\s+(?:rules?|checks?|filters?|restrictions?))?))|(?:safety|guardrails?)\\s+(?:override|bypass)\\s+(?:enabled|activated|on|now)|(?:guardrails?|(?:all|your)\\s+(?:guardrails?|filters?|restrictions?|safety(?:\\s+(?:rules?|checks?|filters?|restrictions?))?)|(?:the\\s+)?(?:ai|assistant|agent|model)\\s+(?:guardrails?|filters?|restrictions?|safety(?:\\s+(?:rules?|checks?|filters?|restrictions?))?))\\s+(?:must\\s+be|should\\s+be|are\\s+now|is\\s+now|have\\s+been|has\\s+been)\\s+(?:overridden|bypassed|disabled|turned\\s+off|removed))",
         "title": "Safety override attempt",
         "severity": "CRITICAL",
         "confidence": 0.9,
@@ -6833,7 +6972,7 @@
       "kind": "rule:trust-exploit",
       "body": {
         "id": "TRUST-IGNORE-PREVIOUS",
-        "pattern": "(?im)(?:^|[.!?;,:]\\s*|(?:[-*>•]|<!--|[\"'])\\s*|\\b(?:task|instruction|system|assistant)\\s*:\\s*)(?:(?:please,?|(?:can|could|will|would)\\s+you(?:\\s+please)?|i\\s+(?:want|need)\\s+you\\s+to(?:\\s+please)?|now,?|next,?|you\\s+(?:must|should|need\\s+to))\\s+)?ignore\\s+(?:all\\s+)?(?:previous|prior|above|earlier)\\s+(?:instructions|rules|guidelines|context)",
+        "pattern": "(?im)(?:^|^\\[[^\\]\\n]{0,64}\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}[^\\]\\n]{0,32}\\]\\s*|[.!?;,:]\\s*|(?:[-*>•]|<!--|[\"'])\\s*|\\b(?:task|instruction|system|assistant)\\s*:\\s*)(?:(?:please,?|(?:can|could|will|would)\\s+you(?:\\s+please)?|i\\s+(?:want|need)\\s+you\\s+to(?:\\s+please)?|now,?|next,?|you\\s+(?:must|should|need\\s+to))\\s+)?ignore\\s+(?:all\\s+)?(?:previous|prior|above|earlier)\\s+(?:instructions|rules|guidelines|context)",
         "title": "Ignore previous instructions",
         "severity": "CRITICAL",
         "confidence": 0.9,
@@ -6858,7 +6997,7 @@
       "kind": "rule:trust-exploit",
       "body": {
         "id": "TRUST-DISREGARD",
-        "pattern": "(?im)(?:^|[.!?;,:]\\s*|(?:[-*>•]|<!--|[\"'])\\s*|\\b(?:task|instruction|system|assistant)\\s*:\\s*)(?:(?:please,?|(?:can|could|will|would)\\s+you(?:\\s+please)?|i\\s+(?:want|need)\\s+you\\s+to(?:\\s+please)?|now,?|next,?|you\\s+(?:must|should|need\\s+to))\\s+)?disregard\\s+(?:all\\s+)?(?:previous|prior|above|your|earlier)\\s+(?:instructions|rules|guidelines|programming|context)",
+        "pattern": "(?im)(?:^|^\\[[^\\]\\n]{0,64}\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}[^\\]\\n]{0,32}\\]\\s*|[.!?;,:]\\s*|(?:[-*>•]|<!--|[\"'])\\s*|\\b(?:task|instruction|system|assistant)\\s*:\\s*)(?:(?:please,?|(?:can|could|will|would)\\s+you(?:\\s+please)?|i\\s+(?:want|need)\\s+you\\s+to(?:\\s+please)?|now,?|next,?|you\\s+(?:must|should|need\\s+to))\\s+)?disregard\\s+(?:all\\s+)?(?:previous|prior|above|your|earlier)\\s+(?:instructions|rules|guidelines|programming|context)",
         "title": "Disregard instructions",
         "severity": "CRITICAL",
         "confidence": 0.9,
@@ -6883,7 +7022,7 @@
       "kind": "rule:trust-exploit",
       "body": {
         "id": "TRUST-JAILBREAK",
-        "pattern": "(?im)(?:^|[.!?;]\\s*|^\\s*(?:[-*>•]|<!--|[\"'])\\s*|\\b(?:task|instruction|system|assistant)\\s*:\\s*)(?:(?:(?:please,?|(?:can|could|will|would)\\s+you|i\\s+(?:want|need)\\s+you\\s+to|let'?s|now,?|next,?)\\s+)?(?:enable|activate|enter|use|switch\\s+to)\\s+(?:a\\s+|the\\s+)?(?:jailbreak(?:ed)?|dan)(?:\\s+(?:mode|persona))?|(?:(?:please,?)\\s+)?(?:follow|run|apply)\\s+(?:this\\s+|the\\s+|a\\s+)?jailbreak\\s+(?:prompt|instructions?)|(?:(?:please,?)\\s+)?jailbreak\\s+(?:yourself|(?:this|the|your)\\s+(?:ai|assistant|agent|model|system))|(?:jailbreak|dan)\\s+mode\\s+(?:enabled|activated|on)|you\\s+are\\s+(?:now\\s+)?dan\\b[\\s\\S]{0,80}\\b(?:without\\s+(?:rules?|restrictions?|filters?)|do\\s+anything|ignore\\s+(?:safety|rules?|instructions?))|do\\s+anything\\s+now|you\\s+are\\s+now\\s+(?:unfiltered|free\\s+(?:from|without)\\s+(?:rules?|restrictions?|filters?|safety(?:\\s+(?:rules?|filters?|checks?))?)))",
+        "pattern": "(?im)(?:^|^\\[[^\\]\\n]{0,64}\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}[^\\]\\n]{0,32}\\]\\s*|[.!?;]\\s*|^\\s*(?:[-*>•]|<!--|[\"'])\\s*|\\b(?:task|instruction|system|assistant)\\s*:\\s*)(?:(?:(?:please,?|(?:can|could|will|would)\\s+you|i\\s+(?:want|need)\\s+you\\s+to|let'?s|now,?|next,?)\\s+)?(?:enable|activate|enter|use|switch\\s+to)\\s+(?:a\\s+|the\\s+)?(?:jailbreak(?:ed)?|dan)(?:\\s+(?:mode|persona))?|(?:(?:please,?)\\s+)?(?:follow|run|apply)\\s+(?:this\\s+|the\\s+|a\\s+)?jailbreak\\s+(?:prompt|instructions?)|(?:(?:please,?)\\s+)?jailbreak\\s+(?:yourself|(?:this|the|your)\\s+(?:ai|assistant|agent|model|system))|(?:jailbreak|dan)\\s+mode\\s+(?:enabled|activated|on)|you\\s+are\\s+(?:now\\s+)?dan\\b[\\s\\S]{0,80}\\b(?:without\\s+(?:rules?|restrictions?|filters?)|do\\s+anything|ignore\\s+(?:safety|rules?|instructions?))|do\\s+anything\\s+now|you\\s+are\\s+now\\s+(?:unfiltered|free\\s+(?:from|without)\\s+(?:rules?|restrictions?|filters?|safety(?:\\s+(?:rules?|filters?|checks?))?)))",
         "title": "Jailbreak attempt",
         "severity": "CRITICAL",
         "confidence": 0.92,
@@ -7133,7 +7272,7 @@
       "kind": "rule:trust-exploit",
       "body": {
         "id": "TRUST-TOOL-MANIP",
-        "pattern": "(?im)(?:^|[.!?;]\\s*|^\\s*(?:[-*>•]|<!--|[\"'])\\s*|\\b(?:task|instruction|system|assistant)\\s*:\\s*)(?:invoke\\s+(?:the\\s+)?\\w+\\s+(?:tool|function)\\s+without\\s+(?:asking|confirmation|approval)|automatically\\s+(?:execute|run|call)\\s+(?:all\\s+)?(?:tools?|functions?))",
+        "pattern": "(?im)(?:^|^\\[[^\\]\\n]{0,64}\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}[^\\]\\n]{0,32}\\]\\s*|[.!?;]\\s*|^\\s*(?:[-*>•]|<!--|[\"'])\\s*|\\b(?:task|instruction|system|assistant)\\s*:\\s*)(?:invoke\\s+(?:the\\s+)?\\w+\\s+(?:tool|function)\\s+without\\s+(?:asking|confirmation|approval)|automatically\\s+(?:execute|run|call)\\s+(?:all\\s+)?(?:tools?|functions?))",
         "title": "Tool manipulation directive",
         "severity": "HIGH",
         "confidence": 0.85,

@@ -20,6 +20,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -357,7 +358,11 @@ class CliSmokeTests(unittest.TestCase):
                     "real gateway binary unavailable and `go` not on PATH; "
                     "set PYTEST_GATEWAY_BIN to skip building",
                 )
-            built = repository_root / gateway_name
+            # Build outside the checkout: a gateway left in the repository root
+            # is also in the working directory of every later test in the run.
+            build_directory = Path(tempfile.mkdtemp(prefix="dc-smoke-gateway-"))
+            self.addCleanup(shutil.rmtree, build_directory, ignore_errors=True)
+            built = build_directory / gateway_name
             # The gateway binary is produced from the `./cmd/defenseclaw`
             # package (renamed to `defenseclaw-gateway` in the Makefile
             # recipe). The cmd tree has no `defenseclaw-gateway`
@@ -596,7 +601,7 @@ class CliSmokeTests(unittest.TestCase):
         self.assertIn("config_version: 9", config_text)
         self.assertNotIn("emit_otel", config_text)
         self.assertTrue(audit_db_exists)
-        self.assertIn("Config saved to ~/.defenseclaw/config.yaml", result.output)
+        self.assertIn(f"Config saved to {data_dir / 'config.yaml'}", result.output)
 
 
 if __name__ == "__main__":

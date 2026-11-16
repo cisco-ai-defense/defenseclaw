@@ -73,7 +73,7 @@ from defenseclaw.webhooks.writer import (
     VALID_EVENT_CATEGORIES,
     VALID_SEVERITIES,
     VALID_TYPES,
-    _normalize_events,
+    build_webhook_entry,
     redact_webhook_url,
 )
 
@@ -440,9 +440,10 @@ def test_cmd(app: AppContext, name: str, dry_run: bool, timeout: float) -> None:
     secret_value = ""
     if v.secret_env:
         secret_value = os.environ.get(v.secret_env, "")
-        if not secret_value and not dry_run:
+        if not secret_value and (not dry_run or v.type == "pagerduty"):
+            next_step = "set it before testing" if v.type == "pagerduty" else "export it or pass --dry-run"
             click.echo(
-                f"error: env var {v.secret_env!r} is unset; export it or pass --dry-run",
+                f"error: env var {v.secret_env!r} is unset; {next_step}",
                 err=True,
             )
             raise SystemExit(2)
@@ -472,16 +473,19 @@ def test_cmd(app: AppContext, name: str, dry_run: bool, timeout: float) -> None:
     if dry_run:
         ux.subhead("(dry-run) formatting only, no delivery")
 
-    result: DispatchResult = send_synthetic(
-        webhook_type=v.type,
-        url=v.url,
-        secret=secret_value,
-        room_id=v.room_id,
-        event=evt,
-        timeout_seconds=max(1, int(timeout)),
-        name=v.name,
-        preview_only=dry_run,
-    )
+    try:
+        result: DispatchResult = send_synthetic(
+            webhook_type=v.type,
+            url=v.url,
+            secret=secret_value,
+            room_id=v.room_id,
+            event=evt,
+            timeout_seconds=max(1, int(timeout)),
+            name=v.name,
+            preview_only=dry_run,
+        )
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
 
     click.echo(f"    {ux.dim('Payload:')}        {result.payload_bytes} bytes")
     click.echo(f"    {ux.dim('Preview:')}        {result.request_body_preview[:160]}")
@@ -653,9 +657,7 @@ def _print_write_result(result: WebhookWriteResult, *, connector: str = "") -> N
 # ``config.ObservabilityConfig`` so any *fully-loaded* ``cfg.save()`` (a
 # setup wizard, the TUI) preserves these notification entries.
 #
-# Validation (SSRF guard, type/severity/env-name checks, name derivation) is
-# reused from the writer's public ``apply_webhook`` via a ``dry_run`` probe,
-# so the per-connector path never drifts from the global path.
+# Validation and entry construction are shared with the global writer.
 # ---------------------------------------------------------------------------
 
 
@@ -749,13 +751,10 @@ def _apply_webhook_to_connector(
     dry_run: bool,
 ) -> WebhookWriteResult:
     """Insert/update a per-connector webhook (D5b)."""
-    # Reuse the writer's full validation + name derivation via a dry-run
-    # apply against the global surface (validates, never writes).
-    probe = apply_webhook(
+    entry = build_webhook_entry(
         name=name,
         type_=type_,
         url=url or "",
-        data_dir=data_dir,
         secret_env=secret_env,
         room_id=room_id,
         min_severity=min_severity,
@@ -763,28 +762,11 @@ def _apply_webhook_to_connector(
         timeout_seconds=timeout_seconds,
         cooldown_seconds=cooldown_seconds,
         enabled=enabled,
-        dry_run=True,
     )
-    derived_name = probe.name
-    severity = (min_severity or DEFAULT_MIN_SEVERITY).upper()
-    timeout = int(timeout_seconds) if timeout_seconds is not None else DEFAULT_TIMEOUT_SECONDS
-    entry: dict[str, Any] = {
-        "name": derived_name,
-        "url": (url or "").strip(),
-        "type": type_,
-        "min_severity": severity,
-        "events": list(_normalize_events(events)),
-        "timeout_seconds": timeout,
-        "enabled": bool(enabled),
-    }
-    if cooldown_seconds is not None:
-        entry["cooldown_seconds"] = int(cooldown_seconds)
-    if secret_env:
-        entry["secret_env"] = secret_env
-    if room_id:
-        entry["room_id"] = room_id
-
-    warnings = list(probe.warnings)
+    derived_name = entry["name"]
+    severity = entry["min_severity"]
+    type_ = entry["type"]
+    warnings: list[str] = []
     if not dry_run:
         cfg_path = str(config_path_for_data_dir(data_dir))
         with locked_config_yaml(cfg_path):

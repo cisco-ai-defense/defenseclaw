@@ -46,3 +46,7 @@ func isSigPipe(sig os.Signal) bool {
 	s, ok := sig.(syscall.Signal)
 	return ok && s == syscall.SIGPIPE
 }
+
+// sidecarAnswerAtHookPriority: only Windows hooks raise their priority class
+// (sidecar_priority_windows.go), so a Linux or macOS gateway keeps its own.
+func sidecarAnswerAtHookPriority() {}

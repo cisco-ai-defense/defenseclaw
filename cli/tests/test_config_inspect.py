@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import unittest
 from unittest.mock import patch
 
 import pytest
@@ -410,3 +411,145 @@ def test_reference_decodes_utf8_and_never_crashes_on_missing_stdout() -> None:
 def test_helper_failure_drops_the_cobra_error_prefix() -> None:
     # click adds its own "Error: " to a ClickException, so the helper's would print twice.
     assert config_inspect._helper_failure("Error: config: bad rule pack\n", "migrate") == "config: bad rule pack"
+
+
+def _hilt_preview_wire(**overrides):
+    payload = {
+        "wire_version": 1,
+        "connector": "claudecode",
+        "base": {"mode": "action", "hilt": {"enabled": True, "min_severity": "MEDIUM"}, "follows_connector_hilt": True},
+        "profiles": [
+            {
+                "profile": "audit",
+                "mode": "observe",
+                "hilt": {"enabled": True, "min_severity": "MEDIUM"},
+                "follows_connector_hilt": True,
+            },
+            {
+                "profile": "own",
+                "mode": "action",
+                "hilt": {"enabled": False, "min_severity": ""},
+                "follows_connector_hilt": False,
+            },
+        ],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_hilt_preview_asks_the_gateway_resolver() -> None:
+    with (
+        patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value="/opt/bin/defenseclaw-gateway"),
+        patch.object(
+            config_inspect, "run_pinned_executable", return_value=_completed(stdout=json.dumps(_hilt_preview_wire()))
+        ) as run,
+    ):
+        preview = config_inspect.connector_hilt_preview(
+            "claudecode", enabled=True, min_severity="MEDIUM", config_path="/tmp/dc/config.yaml"
+        )
+    assert preview.connector == "claudecode"
+    assert preview.base == config_inspect.HILTPreviewScope("", "action", True, "MEDIUM", True)
+    assert preview.profiles == (
+        config_inspect.HILTPreviewScope("audit", "observe", True, "MEDIUM", True),
+        config_inspect.HILTPreviewScope("own", "action", False, "", False),
+    )
+    assert run.call_args.args[0] == [
+        "/opt/bin/defenseclaw-gateway",
+        "connector",
+        "hilt-preview",
+        "--connector",
+        "claudecode",
+        "--enabled=true",
+        "--min-severity",
+        "MEDIUM",
+        "--config",
+        "/tmp/dc/config.yaml",
+    ]
+
+
+def test_hilt_preview_refuses_what_it_cannot_trust() -> None:
+    bad_profile = _hilt_preview_wire()
+    bad_profile["profiles"][0]["profile"] = "evil\x1b[2J"
+    cases = [
+        (_completed(stdout="Usage:\n  defenseclaw-gateway connector [command]\n"), "cannot resolve the preview"),
+        (_completed(stdout=json.dumps(_hilt_preview_wire(wire_version=2))), "protocol is incompatible"),
+        (_completed(stdout=json.dumps(_hilt_preview_wire(base={"mode": "enforce"}))), "incompatible preview"),
+        (_completed(stdout=json.dumps(bad_profile)), "incompatible preview"),
+        (
+            _completed(returncode=1, stderr="Error: connector hilt-preview: failed to load config\nUsage: ..."),
+            "^connector hilt-preview: failed to load config$",
+        ),
+    ]
+    for completed, message in cases:
+        with (
+            patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value="/opt/bin/defenseclaw-gateway"),
+            patch.object(config_inspect, "run_pinned_executable", return_value=completed),
+            pytest.raises(config_inspect.ConfigInspectError, match=message),
+        ):
+            config_inspect.connector_hilt_preview("claudecode", enabled=False, min_severity="HIGH", config_path="c")
+    with (
+        patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value=None),
+        patch.object(config_inspect, "run_pinned_executable") as run,
+        pytest.raises(config_inspect.ConfigInspectError, match="not installed"),
+    ):
+        config_inspect.connector_hilt_preview("claudecode", enabled=False, min_severity="HIGH", config_path="c")
+    run.assert_not_called()
+
+
+class OlderGatewayNoteTests(unittest.TestCase):
+    """GAP-0099: name an older gateway that judged this release's config."""
+
+    def _note(self, version_output: str, cli_version: str = "1.0.9") -> str:
+        done = subprocess.CompletedProcess([], 0, stdout=version_output, stderr="")
+        with (
+            patch.object(config_inspect, "run_pinned_executable", return_value=done),
+            patch("defenseclaw.__version__", cli_version),
+        ):
+            return config_inspect._older_gateway_note("C:\\old\\defenseclaw-gateway.exe")
+
+    def test_a_0_8_gateway_is_named_with_the_uninstall_step(self):
+        note = self._note("defenseclaw-gateway version 0.8.10 (commit=abc, built=x)")
+        self.assertIn("DefenseClaw 0.8.10, at C:\\old\\defenseclaw-gateway.exe", note)
+        self.assertIn("older release than this defenseclaw (1.0.9)", note)
+        self.assertIn("DEFENSECLAW_GATEWAY_BIN", note)
+        self.assertIn("defenseclaw uninstall", note)
+
+    def test_an_older_1_x_gateway_gets_no_uninstall_step(self):
+        note = self._note("defenseclaw-gateway version 1.0.4 (commit=abc)")
+        self.assertIn("DefenseClaw 1.0.4", note)
+        self.assertNotIn("defenseclaw uninstall", note)
+
+    def test_the_same_or_a_newer_gateway_adds_nothing(self):
+        self.assertEqual(self._note("defenseclaw-gateway version 1.0.9 (commit=abc)"), "")
+        self.assertEqual(self._note("defenseclaw-gateway version 1.1.0"), "")
+        self.assertEqual(self._note("no version here"), "")
+
+    def test_a_gateway_that_cannot_be_asked_adds_nothing(self):
+        with patch.object(config_inspect, "run_pinned_executable", side_effect=OSError("gone")):
+            self.assertEqual(config_inspect._older_gateway_note("x"), "")
+
+    def test_a_failed_check_carries_the_note(self):
+        stderr = "Error: config_version: newer than the supported v8 contract"
+        failed = subprocess.CompletedProcess([], 1, stdout="", stderr=stderr)
+        with (
+            patch.object(config_inspect, "_run", return_value=failed),
+            patch.object(config_inspect, "_helper_argv", return_value=["gw.exe", "config-v8", "validate"]),
+            patch.object(config_inspect, "_older_gateway_note", return_value=" [older gateway]"),
+        ):
+            with self.assertRaises(config_inspect.ConfigInspectError) as caught:
+                config_inspect.inspect_v8_config("validate", config_path="c.yaml")
+        self.assertTrue(str(caught.exception).endswith("supported v8 contract [older gateway]"))
+
+    def test_the_note_survives_the_plain_words_rewrite(self):
+        from defenseclaw.config_writer import ConfigWriteError, plain_error
+
+        error = config_inspect.ConfigInspectError(
+            "candidate field=config_version; reason=newer [older gateway]",
+            field_path="config_version",
+            reason="this configuration version is newer than the supported v8 contract",
+            note=" [older gateway]",
+        )
+        wrapped = ConfigWriteError("config.yaml change rejected")
+        wrapped.__cause__ = error
+        self.assertTrue(plain_error(wrapped).endswith(" [older gateway]"))
+        self.assertEqual(plain_error(wrapped).count("[older gateway]"), 1)

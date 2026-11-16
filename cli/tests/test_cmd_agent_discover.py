@@ -575,16 +575,24 @@ class TestAgentDiscoverCommand(unittest.TestCase):
         try:
             result = self.runner.invoke(
                 agent,
-                ["signatures", "disable", "Custom_AI"],
+                ["signatures", "disable", "Codex"],
                 obj=app,
                 catch_exceptions=False,
             )
+            # GAP-0557: an ID no pack defines is refused, and nothing is stored.
+            unknown = [
+                self.runner.invoke(agent, ["signatures", verb, "no-such-signature-id"], obj=app)
+                for verb in ("disable", "enable")
+            ]
         finally:
             cleanup_app(app, db_path, tmp_dir)
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("custom-ai", result.output)
-        self.assertIn("custom-ai", app.cfg.ai_discovery.disabled_signature_ids)
+        self.assertIn("codex", result.output)
+        self.assertEqual(app.cfg.ai_discovery.disabled_signature_ids, ["codex"])
+        for refused in unknown:
+            self.assertNotEqual(refused.exit_code, 0, refused.output)
+            self.assertIn("signatures list", refused.output)
 
 
 def _ai_signal(
@@ -1485,6 +1493,35 @@ class AiUsageCommandFlagsTests(unittest.TestCase):
         self.assertIn("AI discovery has found nothing in sandbox fresh yet: `defenseclaw sandbox discover fresh`", fresh.output)
         self.assertEqual(windows.exit_code, 3, windows.output)
         self.assertIn("Linux and macOS only", windows.output)
+
+    def test_unknown_sandbox_is_an_error_with_discovery_disabled(self):
+        from defenseclaw.gateway import SandboxAPIError
+
+        class DisabledClient:
+            def __init__(self, **_kwargs):
+                pass
+
+            def ai_usage(self):
+                return {"enabled": False, "signals": []}
+
+            def get_sandbox(self, name):
+                if name == "missing":
+                    raise SandboxAPIError("not_found", "sandbox not found", status=404)
+                return {"name": name}
+
+        app, tmp_dir, db_path = make_app_context()
+        app.cfg.gateway.token = "secret-token-123"
+        try:
+            with patch("defenseclaw.commands.cmd_agent.OrchestratorClient", DisabledClient), \
+                    patch("defenseclaw.platform_support.host_os", return_value="linux"):
+                missing = self.runner.invoke(agent, ["usage", "--sandbox", "missing"], obj=app)
+                existing = self.runner.invoke(agent, ["usage", "--sandbox", "fresh"], obj=app)
+        finally:
+            cleanup_app(app, db_path, tmp_dir)
+        self.assertEqual(missing.exit_code, 1, missing.output)
+        self.assertIn("no sandbox missing", missing.output)
+        self.assertEqual(existing.exit_code, 0, existing.output)
+        self.assertIn("AI discovery is disabled", existing.output)
 
 
 if __name__ == "__main__":

@@ -143,6 +143,44 @@ class TestListSkillsForNonOpenClawConnector(unittest.TestCase):
             rows = skill_list.list_skills(cfg)
         self.assertEqual([r["name"] for r in rows], ["weather"])
 
+    @requires_symlink_privilege
+    def test_claudecode_sibling_link_and_folder_are_both_listed(self):
+        """A folder on disk is listed even when an earlier-sorted link points at it."""
+        cfg = _make_cfg(self.tmp, "claudecode")
+        skill_root = os.path.join(self.tmp, ".claude", "skills")
+        folder = _seed_skill(skill_root, "r-benign")
+        os.symlink(folder, os.path.join(skill_root, "alias-ok"), target_is_directory=True)
+        with self._patch_skill_dirs([skill_root]):
+            rows = skill_list.list_skills(cfg)
+        by_name = {r["name"]: r for r in rows}
+        self.assertEqual(sorted(by_name), ["alias-ok", "r-benign"])
+        self.assertTrue(all(r["eligible"] for r in rows))
+        self.assertNotIn("alias_of", by_name["r-benign"])
+        self.assertEqual(by_name["alias-ok"]["alias_of"], "r-benign")
+        self.assertEqual(by_name["alias-ok"]["path"], by_name["r-benign"]["path"])
+
+    def test_claudecode_plain_folders_have_no_alias(self):
+        cfg = _make_cfg(self.tmp, "claudecode")
+        skill_root = os.path.join(self.tmp, ".claude", "skills")
+        _seed_skill(skill_root, "r-benign")
+        _seed_skill(skill_root, "other")
+        with self._patch_skill_dirs([skill_root]):
+            rows = skill_list.list_skills(cfg)
+        self.assertEqual(sorted(r["name"] for r in rows), ["other", "r-benign"])
+        self.assertFalse(any("alias_of" in r for r in rows))
+
+    def test_claudecode_commands_folder_beside_same_stem_markdown_is_active(self):
+        cfg = _make_cfg(self.tmp, "claudecode")
+        skill_root = os.path.join(self.tmp, ".claude", "commands")
+        folder = _seed_skill(skill_root, "ordinary")
+        with open(os.path.join(skill_root, "ordinary.md"), "w", encoding="utf-8") as fh:
+            fh.write("# legacy command\n")
+        with self._patch_skill_dirs([skill_root]):
+            rows = skill_list.list_skills(cfg)
+        self.assertEqual([r["name"] for r in rows], ["ordinary"])
+        self.assertTrue(rows[0]["eligible"])
+        self.assertEqual(rows[0]["path"], os.path.realpath(folder))
+
     def test_zeptoclaw_walks_disk_with_skill_json(self):
         cfg = _make_cfg(self.tmp, "zeptoclaw")
         skill_root = os.path.join(self.tmp, ".zeptoclaw", "skills")
@@ -166,31 +204,7 @@ class TestListSkillsForNonOpenClawConnector(unittest.TestCase):
         self.assertTrue(by_name["marked"]["eligible"])
         self.assertFalse(by_name["empty"]["eligible"])
 
-    def test_description_uses_skill_frontmatter(self):
-        cfg = _make_cfg(self.tmp, "openhands")
-        skill_root = os.path.join(self.tmp, "skills")
-        _seed_skill(
-            skill_root,
-            "frontmatter",
-            body="---\nname: frontmatter\ndescription: Frontmatter description\n---\n\n# Fallback\n",
-        )
 
-        with self._patch_skill_dirs([skill_root]):
-            rows = skill_list.list_skills(cfg)
-
-        self.assertEqual(rows[0]["description"], "Frontmatter description")
-
-    def test_openhands_installed_container_is_not_a_skill(self):
-        cfg = _make_cfg(self.tmp, "openhands")
-        openhands_skills = os.path.join(self.tmp, ".openhands", "skills")
-        installed = os.path.join(openhands_skills, "installed")
-        os.makedirs(installed, exist_ok=True)
-        _seed_skill(installed, "real-installed")
-
-        with self._patch_skill_dirs([openhands_skills, installed]):
-            rows = skill_list.list_skills(cfg)
-
-        self.assertEqual([r["name"] for r in rows], ["real-installed"])
 
     def test_dedup_across_skill_dirs(self):
         cfg = _make_cfg(self.tmp, "codex")

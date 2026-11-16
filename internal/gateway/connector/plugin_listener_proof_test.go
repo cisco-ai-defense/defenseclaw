@@ -6,10 +6,14 @@ package connector
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -23,16 +27,17 @@ import (
 // transport renders it; a unix hook socket verifies its owner instead.
 func TestManagedPluginListenerProofOnlyForManagedTCPPlugins(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), "hook.sock")
+	guard := filepath.Join(t.TempDir(), "defenseclaw-hook")
 	for _, tc := range []struct {
 		name string
 		opts SetupOpts
 		want bool
 	}{
-		{"managed TCP plugin", SetupOpts{ManagedEnterprise: true, ManagedListenerProof: true}, true},
-		{"not requested", SetupOpts{ManagedEnterprise: true}, false},
+		{"managed TCP plugin", SetupOpts{ManagedEnterprise: true, ManagedListenerProof: true, ForeignHookGuardBinary: guard}, true},
+		{"not requested", SetupOpts{ManagedEnterprise: true, ForeignHookGuardBinary: guard}, false},
 		{"unmanaged", SetupOpts{ManagedListenerProof: true}, false},
 		// Windows keeps TCP even when a socket is named.
-		{"hook socket", SetupOpts{ManagedEnterprise: true, ManagedListenerProof: true, ManagedHookSocket: socket}, runtime.GOOS == "windows"},
+		{"hook socket", SetupOpts{ManagedEnterprise: true, ManagedListenerProof: true, ManagedHookSocket: socket, ForeignHookGuardBinary: guard}, runtime.GOOS == "windows"},
 	} {
 		if got := managedPluginListenerProof(tc.opts); got != tc.want {
 			t.Errorf("%s: listener proof = %v, want %v", tc.name, got, tc.want)
@@ -101,9 +106,11 @@ func newImpostorListener(t *testing.T, recorder *listenerProofRecorder) *httptes
 }
 
 const openCodeListenerProofHarness = `
+import { unlink } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 const loaded = await import(pathToFileURL(process.argv[1]).href);
-const plugin = await loaded.DefenseClaw({ directory: "" });
+const plugin = await fixtureBridge(loaded, { directory: "" });
+if (process.argv[2]) await unlink(process.argv[2]);
 try {
   await plugin["tool.execute.before"](
     { tool: "Bash", sessionID: "S", messageID: "M", callID: "C" },
@@ -148,17 +155,33 @@ func runListenerProofPlugin(t *testing.T, asset, addr, tokenPath string, proof b
 		proofValue = "1"
 	}
 	harness, name := openCodeListenerProofHarness, "opencode-plugin.mjs"
-	if asset == "amp-plugin.ts" {
+	if strings.HasPrefix(asset, "amp-plugin") {
 		harness, name = ampListenerProofHarness, "amp-plugin.mts"
 	}
-	path := writeRenderedPlugin(t, asset, name, templateData{
+	data := templateData{
 		APIAddr:         addr,
 		TokenFileJS:     javaScriptStringContent(tokenPath),
 		ListenerProofJS: proofValue,
 		FailMode:        "closed",
 		Managed:         true,
-	})
-	return strings.Join(runNodeHarness(t, harness, path), "\n")
+	}
+	args := []string{}
+	if name == "opencode-plugin.mjs" {
+		// Setup skips the diagnostic load heartbeat while the lifecycle marker
+		// exists. The harness removes it before the tool call, so the listener
+		// must prove that call independently of load-time scheduling.
+		marker := filepath.Join(testenv.PrivateTempDir(t), "lifecycle-marker")
+		if err := os.WriteFile(marker, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		data.LifecycleMarkerJS = javaScriptStringContent(marker)
+		args = append(args, marker)
+	}
+	path := filepath.Join(testenv.PrivateTempDir(t), name)
+	if err := os.WriteFile(path, []byte(renderPluginAssetForTest(t, asset, data)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return strings.Join(runNodeHarness(t, harness, append([]string{path}, args...)...), "\n")
 }
 
 // A Windows standalone plugin reaches the gateway over loopback TCP. A local
@@ -196,22 +219,262 @@ func TestPluginListenerProofKeepsTheCredentialFromAnImpostor(t *testing.T) {
 				t.Fatalf("impostor listener: verdict %q, want a fail-closed block", verdict)
 			}
 			requests := impostorSeen.snapshot()
-			if len(requests) != 1 || requests[0].path != UserScopedListenerProofPath || requests[0].method != http.MethodGet {
-				t.Fatalf("impostor must see only the proof request, saw %+v", requests)
+			if len(requests) != 1 {
+				t.Fatalf("impostor tool proof requests = %d, want 1", len(requests))
 			}
-			if request := requests[0]; request.authorization != "" || request.body != "" ||
-				strings.Contains(request.path, credential) {
-				t.Fatalf("impostor received a credential or payload: %+v", request)
+			for _, request := range requests {
+				if request.path != UserScopedListenerProofPath || request.method != http.MethodGet ||
+					request.authorization != "" || request.body != "" || strings.Contains(request.path, credential) {
+					t.Fatalf("impostor received a credential or payload: %+v", request)
+				}
 			}
 
-			// Control: without the proof the impostor is trusted.
+			// A host render missing both the native account check and the
+			// listener proof must refuse its TCP fallback as well.
 			verdict = runListenerProofPlugin(t, tc.asset, addr, tokenPath, false)
 			requests = impostorSeen.snapshot()
-			if verdict != "allow" || len(requests) != 1 || requests[0].authorization != "Bearer "+credential ||
-				!strings.Contains(requests[0].body, "listener-proof-marker") {
-				t.Fatalf("control without the proof: verdict %q, requests %+v", verdict, requests)
+			if !strings.HasPrefix(verdict, "block:DefenseClaw hook failed closed") ||
+				!strings.Contains(verdict, "no account proof") || len(requests) != 0 {
+				t.Fatalf("unguarded TCP fallback: verdict %q, requests %+v", verdict, requests)
 			}
 
+		})
+	}
+}
+
+func TestOpenCodeListenerProofAllowsProvenListener(t *testing.T) {
+	nodeForTest(t)
+	key := strings.Repeat("a", 64)
+	credential, err := UserScopedHookAPIToken(key, "opencode", "S-1-5-21-1111-2222-3333-1001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := testenv.PrivateTempDir(t)
+	tokenPath := filepath.Join(root, ".hook-opencode.token")
+	if err := os.WriteFile(tokenPath, []byte(credential+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recorder := &listenerProofRecorder{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		recorder.record(req)
+		if req.URL.Path == UserScopedListenerProofPath {
+			proof := hmac.New(sha256.New, []byte(credential))
+			_, _ = proof.Write([]byte("defenseclaw.listener-proof.v1\x00opencode\x00" + req.Header.Get("X-DefenseClaw-Listener-Nonce")))
+			w.Header().Set(UserScopedListenerProofHeader, hex.EncodeToString(proof.Sum(nil)))
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		_, _ = io.WriteString(w, `{"action":"allow","hook_output":{"decision":"allow"}}`)
+	}))
+	defer server.Close()
+	addr := strings.TrimPrefix(server.URL, "http://")
+	if verdict := runListenerProofPlugin(t, "opencode-plugin.js", addr, tokenPath, true); verdict != "allow" {
+		t.Fatalf("proven listener verdict = %q, want allow", verdict)
+	}
+	requests := recorder.snapshot()
+	if len(requests) != 2 || requests[0].path != UserScopedListenerProofPath || requests[0].authorization != "" ||
+		requests[1].path != "/api/v1/opencode/hook" || requests[1].authorization != "Bearer "+credential {
+		t.Fatalf("proven listener request sequence invalid: count=%d", len(requests))
+	}
+}
+
+// Per-user setup places the scoped token in the runtime's hooks directory.
+// That baked path also anchors the native helper lookup.
+func writePerUserPluginPeerTokenForTest(t *testing.T, root, connector, credential string) string {
+	t.Helper()
+	path := filepath.Join(root, ".defenseclaw", "hooks", ".hook-"+connector+".token")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(credential+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// The per-user plugin must consult the native account check before posting a
+// bearer or an event. A stopped gateway lets a peer bind the same port; a
+// failed check must keep that peer from seeing either value.
+func TestPerUserPluginsCheckPeerBeforeSending(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Node harness uses a POSIX stub binary; Windows ownership is covered by hookexec")
+	}
+	node := nodeForTest(t)
+	for _, tc := range []struct{ asset, connector string }{
+		{"opencode-plugin.js", "opencode"},
+		{"amp-plugin.ts", "amp"},
+	} {
+		t.Run(tc.connector, func(t *testing.T) {
+			const credential = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+			root := testenv.PrivateTempDir(t)
+			binary := filepath.Join(root, ".local", "bin", "defenseclaw-gateway")
+			marker := filepath.Join(root, "peer-check-args")
+			if err := os.MkdirAll(filepath.Dir(binary), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(binary, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$DC_PEER_MARKER\"\nexit 1\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			tokenPath := writePerUserPluginPeerTokenForTest(t, root, tc.connector, credential)
+			recordGatewayHelperForTest(t, filepath.Dir(tokenPath), binary)
+			recorder := &listenerProofRecorder{}
+			impostor := newImpostorListener(t, recorder)
+			addr := strings.TrimPrefix(impostor.URL, "http://")
+			harness, name := openCodeListenerProofHarness, "opencode-plugin.mjs"
+			if tc.connector == "amp" {
+				harness, name = ampListenerProofHarness, "amp-plugin.mts"
+			}
+			plugin := filepath.Join(testenv.PrivateTempDir(t), name)
+			body := renderPluginAssetForTest(t, tc.asset, templateData{
+				APIAddr: addr, TokenFileJS: javaScriptStringContent(tokenPath), FailMode: "closed",
+			})
+			if err := os.WriteFile(plugin, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), nodeHarnessTimeout)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, node, "--input-type=module", "-e", withOpenCodeV2Fixture(t, harness), plugin)
+			cmd.Env = append(os.Environ(), "HOME="+root, "DC_PEER_MARKER="+marker)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("node: %v: %s", err, output)
+			}
+			if !strings.Contains(string(output), "block:") {
+				t.Fatalf("peer check did not fail closed: %s", output)
+			}
+			if got := recorder.snapshot(); len(got) != 0 {
+				t.Fatalf("unproven peer received a request: %+v", got)
+			}
+			if data, err := os.ReadFile(marker); err != nil || string(data) != "hook-post --api-addr "+addr+"\n" {
+				t.Fatalf("native post was not invoked for %s: %q, %v; plugin output=%q", addr, data, err, output)
+			}
+			openPlugin := filepath.Join(testenv.PrivateTempDir(t), name)
+			openBody := renderPluginAssetForTest(t, tc.asset, templateData{
+				APIAddr: addr, TokenFileJS: javaScriptStringContent(tokenPath), FailMode: "open",
+			})
+			if err := os.WriteFile(openPlugin, []byte(openBody), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cmd = exec.CommandContext(ctx, node, "--input-type=module", "-e", withOpenCodeV2Fixture(t, harness), openPlugin)
+			cmd.Env = append(os.Environ(), "HOME="+root, "DC_PEER_MARKER="+marker)
+			output, err = cmd.CombinedOutput()
+			if err != nil || !strings.Contains(string(output), "block:") {
+				t.Fatalf("unproven peer in open mode did not fail closed: %v: %s", err, output)
+			}
+			if got := recorder.snapshot(); len(got) != 0 {
+				t.Fatalf("open mode sent data to unproven peer: %+v", got)
+			}
+		})
+	}
+}
+
+// A successful check on one socket says nothing about the next connection:
+// the gateway can stop and a peer account can bind before JavaScript posts.
+// The native helper must own the post and verify its very own connected socket.
+func TestPerUserPluginsDoNotPostAfterTheCheckedListenerChanges(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Node harness uses a POSIX stub binary; Windows socket ownership is covered by hookexec")
+	}
+	node := nodeForTest(t)
+	for _, tc := range []struct{ asset, connector string }{
+		{"opencode-plugin.js", "opencode"},
+		{"amp-plugin.ts", "amp"},
+	} {
+		t.Run(tc.connector, func(t *testing.T) {
+			root := testenv.PrivateTempDir(t)
+			binary := filepath.Join(root, ".local", "bin", "defenseclaw-gateway")
+			if err := os.MkdirAll(filepath.Dir(binary), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			// A separate preflight would pass; a post owned by the native
+			// helper fails because the destination changed before it dialed.
+			if err := os.WriteFile(binary, []byte("#!/bin/sh\n[ \"$1\" = hook-verify-peer ] && exit 0\nexit 1\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			tokenPath := writePerUserPluginPeerTokenForTest(t, root, tc.connector, strings.Repeat("a", 64))
+			recorder := &listenerProofRecorder{}
+			peer := newImpostorListener(t, recorder)
+			addr := strings.TrimPrefix(peer.URL, "http://")
+			harness, name := openCodeListenerProofHarness, "opencode-plugin.mjs"
+			if tc.connector == "amp" {
+				harness, name = ampListenerProofHarness, "amp-plugin.mts"
+			}
+			plugin := filepath.Join(testenv.PrivateTempDir(t), name)
+			body := renderPluginAssetForTest(t, tc.asset, templateData{
+				APIAddr: addr, TokenFileJS: javaScriptStringContent(tokenPath), FailMode: "closed",
+			})
+			if err := os.WriteFile(plugin, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), nodeHarnessTimeout)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, node, "--input-type=module", "-e", withOpenCodeV2Fixture(t, harness), plugin)
+			cmd.Env = append(os.Environ(), "HOME="+root)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("node: %v: %s", err, output)
+			}
+			if !strings.Contains(string(output), "block:") {
+				t.Fatalf("peer replacement was trusted: %s", output)
+			}
+			if seen := recorder.snapshot(); len(seen) != 0 {
+				t.Fatalf("peer replacement received credential or event: %+v", seen)
+			}
+		})
+	}
+}
+
+// The native helper receives the bearer on stdin. A peer-writable indirection
+// to another executable must be rejected before execFileSync gets that input.
+func TestPerUserPluginsRejectSymlinkedNativePostBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Node harness uses a POSIX stub binary")
+	}
+	node := nodeForTest(t)
+	for _, tc := range []struct{ asset, connector string }{
+		{"opencode-plugin.js", "opencode"},
+		{"amp-plugin.ts", "amp"},
+	} {
+		t.Run(tc.connector, func(t *testing.T) {
+			root := testenv.PrivateTempDir(t)
+			binary := filepath.Join(root, ".local", "bin", "defenseclaw-gateway")
+			if err := os.MkdirAll(filepath.Dir(binary), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(root, "stolen-input")
+			foreign := filepath.Join(root, "foreign-helper")
+			if err := os.WriteFile(foreign, []byte("#!/bin/sh\n[ \"$1\" = hook-post ] && cat > \"$DC_PEER_MARKER\"\nexit 1\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(foreign, binary); err != nil {
+				t.Fatal(err)
+			}
+			credential := strings.Repeat("a", 64)
+			tokenPath := writePerUserPluginPeerTokenForTest(t, root, tc.connector, credential)
+			harness, name := openCodeListenerProofHarness, "opencode-plugin.mjs"
+			if tc.connector == "amp" {
+				harness, name = ampListenerProofHarness, "amp-plugin.mts"
+			}
+			plugin := filepath.Join(testenv.PrivateTempDir(t), name)
+			body := renderPluginAssetForTest(t, tc.asset, templateData{
+				APIAddr: "127.0.0.1:18970", TokenFileJS: javaScriptStringContent(tokenPath), FailMode: "closed",
+			})
+			if err := os.WriteFile(plugin, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), nodeHarnessTimeout)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, node, "--input-type=module", "-e", withOpenCodeV2Fixture(t, harness), plugin)
+			cmd.Env = append(os.Environ(), "HOME="+root, "DC_PEER_MARKER="+marker)
+			output, err := cmd.CombinedOutput()
+			if err != nil || !strings.Contains(string(output), "block:") {
+				t.Fatalf("symlinked helper did not fail closed: %v: %s", err, output)
+			}
+			if data, err := os.ReadFile(marker); err == nil {
+				t.Fatalf("symlinked helper received stdin: %q", data)
+			} else if !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
 		})
 	}
 }
@@ -233,7 +496,7 @@ func TestManagedPluginVerificationRequiresEachRenderedSafeguard(t *testing.T) {
 		{"amp foreign-hook guard", "amp", func(o *SetupOpts) { o.ForeignHookGuardBinary = guard },
 			`const DC_FOREIGN_GUARD: string = ""` + "\n", `const DC_FOREIGN_GUARD: string = "` + javaScriptStringContent(guard) + `"` + "\n", true},
 		{"amp listener proof", "amp", func(o *SetupOpts) { o.ManagedListenerProof = true },
-			`const DC_LISTENER_PROOF: string = ""` + "\n", `const DC_LISTENER_PROOF: string = "1"` + "\n", true},
+			`const DC_LISTENER_PROOF: string = ""` + "\n", `const DC_LISTENER_PROOF: string = "1"` + "\n", false},
 		{"opencode listener proof", "opencode", func(o *SetupOpts) { o.ManagedListenerProof = true },
 			`const DC_LISTENER_PROOF = "";` + "\n", `const DC_LISTENER_PROOF = "1";` + "\n", false},
 	} {
@@ -271,6 +534,7 @@ func TestManagedPluginVerificationRequiresEachRenderedSafeguard(t *testing.T) {
 			}
 			required := opts
 			required.ManagedEnterprise = true
+			required.ForeignHookGuardBinary = guard
 			tc.require(&required)
 			if present, err := OwnedHooksPresent(conn, required); err != nil || present {
 				t.Fatalf("a plugin without the safeguard must fail verification: %v %v", present, err)

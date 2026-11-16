@@ -82,6 +82,11 @@ func sharedDefaultRegistry() *connector.Registry {
 // profile fields (Capabilities, NativeOTLP, MapVerdict, etc.) without
 // a nil-check ladder.
 func (a *APIServer) hookProfileForConnector(name string) connector.HookProfile {
+	if name == connector.AgentGatewayConnectorName {
+		// The agent-gateway route installs nothing and is not in the
+		// connector registry; its profile is fixed (agent_gateway_hook.go).
+		return connector.AgentGatewayHookProfile()
+	}
 	provider, ok := a.hookProfileProvider(name)
 	if !ok {
 		return connector.HookProfile{Name: name}
@@ -92,12 +97,15 @@ func (a *APIServer) hookProfileForConnector(name string) connector.HookProfile {
 	if contractID == "" {
 		contractID = connector.ResolveHookContract(name, agentVersion).Contract.ContractID
 	}
+	live := a.liveConfig()
+	secureClient := live != nil && live.SecureClientIntegration()
 	return provider.HookProfile(connector.SetupOpts{
-		DataDir:        a.configDataDir(),
-		APIAddr:        a.apiAddrForCapabilities(),
-		WorkspaceDir:   a.connectorWorkspaceDir(),
-		AgentVersion:   agentVersion,
-		HookContractID: contractID,
+		DataDir:                  a.configDataDir(),
+		APIAddr:                  a.apiAddrForCapabilities(),
+		WorkspaceDir:             a.connectorWorkspaceDir(),
+		AgentVersion:             agentVersion,
+		HookContractID:           contractID,
+		SecureClientHookDelivery: secureClient,
 	})
 }
 
@@ -114,6 +122,11 @@ func (a *APIServer) hookProfileForRequest(ctx context.Context, name string) conn
 		// A hook command registered for the VS Code Local harness speaks
 		// that harness's dialect (agent_hook_copilot_vscode.go).
 		return connector.CopilotVSCodeLocalProfile(profile)
+	}
+	if name == "copilot" {
+		if event := copilotCLISharedEventFromContext(ctx); event != "" {
+			return connector.CopilotCLISharedProfile(profile, event)
+		}
 	}
 	return profile
 }
@@ -149,8 +162,8 @@ func (a *APIServer) hookProfileProvider(name string) (connector.HookProfileProvi
 // sandboxSetupOpts is the profile input for a sandbox binding. The
 // workspace directory stays empty: the sandbox's project is not a host
 // workspace the connector may configure. The contract resolves for Linux,
-// which every sandbox runs, so host-OS contract adjustments (such as the
-// macOS-only OpenHands native OTLP lane) never apply to a sandboxed harness.
+// which every sandbox runs, so host-OS contract adjustments never apply to
+// a sandboxed harness.
 func sandboxSetupOpts(a *APIServer, binding sandboxauth.Binding) connector.SetupOpts {
 	return connector.SetupOpts{
 		DataDir:        a.configDataDir(),

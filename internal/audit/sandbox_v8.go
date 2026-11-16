@@ -25,7 +25,6 @@ import (
 	"net"
 	"net/netip"
 	"path"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -34,6 +33,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -721,11 +721,11 @@ const sandboxInvalidHost = "invalid-host"
 const sandboxHostRefPrefix = "host:"
 
 var (
-	sandboxIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
-	sandboxHostPattern       = regexp.MustCompile(`^[a-z0-9_][a-z0-9._-]*$`)
-	sandboxUnderscoreName    = regexp.MustCompile(`^_[A-Za-z0-9._-]*$`)
-	sandboxDigestPattern     = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	sandboxPolicyHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	sandboxIdentifierPattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
+	sandboxHostPattern       = lazyregexp.New(`^[a-z0-9_][a-z0-9._-]*$`)
+	sandboxUnderscoreName    = lazyregexp.New(`^_[A-Za-z0-9._-]*$`)
+	sandboxDigestPattern     = lazyregexp.New(`^sha256:[0-9a-f]{64}$`)
+	sandboxPolicyHashPattern = lazyregexp.New(`^[0-9a-f]{64}$`)
 )
 
 // RecordSandboxLifecycle emits log.sandbox.lifecycle and, when the phase
@@ -1908,7 +1908,7 @@ func (recorder *SandboxRecorder) newEvent(
 		timestamp = time.Now()
 	}
 	event := Event{
-		ID: uuid.NewString(), Timestamp: timestamp.UTC(), Action: string(action),
+		ID: observability.NewTimeOrderedID(), Timestamp: timestamp.UTC(), Action: string(action),
 		Target: target, Actor: "defenseclaw", Severity: severity, Connector: identity.Connector,
 	}
 	if ctx != nil {
@@ -2605,7 +2605,7 @@ func sandboxMetricEnvelope(event Event, snapshot RuntimeV8BuildContext) (observa
 func sandboxMetricBuilder(event Event) (*observability.FamilyBuilder, error) {
 	return observability.NewFamilyBuilder(
 		observability.ClockFunc(func() time.Time { return event.Timestamp.UTC() }),
-		observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+		observability.TimeOrderedOccurrenceIDs,
 	)
 }
 

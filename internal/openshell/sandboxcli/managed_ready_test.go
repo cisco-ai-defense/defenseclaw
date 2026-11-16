@@ -59,6 +59,8 @@ func TestRunReadiesManagedOpenShellAtFirstRun(t *testing.T) {
 	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", Rm: true}))
 	if r, c := ta.daemon.callsTo("POST", sandboxapi.PathReady), ta.daemon.callsTo("POST", sandboxapi.PathSandboxes); len(r) != 1 || len(c) != 1 {
 		t.Fatalf("ready calls %d, create calls %d", len(r), len(c))
+	} else if string(r[0].Body) != `{"harness":"claudecode"}` {
+		t.Fatalf("ready request = %s, want the run's harness", r[0].Body)
 	}
 	has(t, ta.output()+ta.err.String(), "Installing OpenShell 0.1.3 for your account and starting it (first run only)")
 	if ta.Cfg.OpenShell.Binary != cli {
@@ -80,6 +82,78 @@ func TestRunReadiesManagedOpenShellAtFirstRun(t *testing.T) {
 	if r := off.daemon.callsTo("POST", sandboxapi.PathReady); len(r) != 0 {
 		t.Fatalf("an unavailable computer readied OpenShell: %d calls", len(r))
 	}
+}
+
+// A first run that the run's own policy forbids (here a pack whose
+// harness.allowed leaves the agent out) is refused before the daemon
+// readies anything: no OpenShell is installed or started for a run that
+// cannot go ahead (GAP-0812).
+func TestAForbiddenFirstManagedRunReadiesNothing(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.daemon.status.Available, ta.daemon.status.Gateway = false, nil
+	ta.daemon.status.Managed = managedStatusFixture()
+	ta.daemon.explain.Violations = []sandboxapi.Violation{{Key: "harness", Fatal: true, Admin: true,
+		Constraint: "harness.allowed", Message: "codex is not an allowed harness of pack team-pack"}}
+	err := ta.Run(bg, RunOptions{Harness: "codex", Pack: "team-pack"})
+	if err == nil || !strings.Contains(err.Error(), "codex is not an allowed harness of pack team-pack") {
+		t.Fatalf("forbidden first run: %v", err)
+	}
+	if r := ta.daemon.callsTo("POST", sandboxapi.PathReady); len(r) != 0 {
+		t.Fatalf("a forbidden first run readied OpenShell: %d ready calls", len(r))
+	}
+}
+
+// A run's ready names the run's own agent, so the daemon asks only that
+// agent's policy view (S2 review, loop round 2).
+func TestRunReadiesTheRequestedManagedHarness(t *testing.T) {
+	ta := newTestApp(t, "")
+	gw := ta.daemon.status.Gateway
+	ta.daemon.status.Available, ta.daemon.status.Gateway = false, nil
+	ta.daemon.status.Managed = managedStatusFixture()
+	ta.daemon.onReady = func(st *sandboxapi.Status) {
+		st.Available, st.Gateway = true, gw
+	}
+	api, err := ta.api()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ta.preflight(bg, api, sandboxapi.ReadyRequest{Harness: "codex"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	ready := ta.daemon.callsTo("POST", sandboxapi.PathReady)
+	if len(ready) != 1 || string(ready[0].Body) != `{"harness":"codex"}` {
+		t.Fatalf("codex ready request = %+v", ready)
+	}
+}
+
+// GAP-1551: a run's ready names its --pack, which the daemon judges the
+// agent under.
+func TestRunReadiesWithTheRunsPack(t *testing.T) {
+	ta := newTestApp(t, "")
+	gw := ta.daemon.status.Gateway
+	ta.daemon.status.Available, ta.daemon.status.Gateway = false, nil
+	ta.daemon.status.Managed = managedStatusFixture()
+	ta.daemon.onReady = func(st *sandboxapi.Status) { st.Available, st.Gateway = true, gw }
+	_ = ta.Run(bg, RunOptions{Harness: "codex", Pack: "codex-pack"})
+	ready := ta.daemon.callsTo("POST", sandboxapi.PathReady)
+	if len(ready) != 1 || string(ready[0].Body) != `{"harness":"codex","pack":"codex-pack"}` {
+		t.Fatalf("ready request = %+v", ready)
+	}
+}
+
+// GAP-1552: when the run's policy view is provisional (the directory did not
+// answer, off VPN), the ready waits for it before it starts anything; the
+// run says so instead of pausing without a word.
+func TestAProvisionalRunSaysItWaitsForTheDirectory(t *testing.T) {
+	ta := newTestApp(t, "")
+	gw := ta.daemon.status.Gateway
+	ta.daemon.status.Available, ta.daemon.status.Gateway = false, nil
+	ta.daemon.status.Managed = managedStatusFixture()
+	ta.daemon.explain.Managed = managedExplainFixture()
+	ta.daemon.explain.Managed.Provisional = true
+	ta.daemon.onReady = func(st *sandboxapi.Status) { st.Available, st.Gateway = true, gw }
+	_ = ta.Run(bg, RunOptions{Harness: "codex"})
+	has(t, ta.output(), "your organization's directory did not answer, so DefenseClaw waits up to 10s for your sandbox policy")
 }
 
 // While another account's sandboxes hold the one gateway port, a run is
@@ -110,6 +184,24 @@ func TestRunWhileAnotherAccountUsesSandboxes(t *testing.T) {
 	}
 }
 
+func TestManagedPortConflictNamesAnOrdinaryProcessInRunAndStatus(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.daemon.status.Available, ta.daemon.status.Gateway = false, nil
+	ta.daemon.status.Managed = managedStatusFixture()
+	ta.daemon.status.PortConflict = &sandboxapi.PortConflict{Name: "ingress", Port: 18971, Holder: "process"}
+	err := ta.Run(bg, RunOptions{Harness: "claude"})
+	if err == nil || !strings.Contains(err.Error(), "another process") || !strings.Contains(err.Error(), "openshell.ingress_port") ||
+		strings.Contains(err.Error(), "another account is using them") {
+		t.Fatalf("run with ordinary port holder = %v", err)
+	}
+	ta.fresh()
+	ta.printStatus(&ta.daemon.status)
+	if out := ta.output(); !strings.Contains(out, "another process") || !strings.Contains(out, "openshell.ingress_port") ||
+		strings.Contains(out, "another account is using") {
+		t.Fatalf("status with ordinary port holder = %s", out)
+	}
+}
+
 // GAP-0613: an engine the shell names only with DOCKER_HOST answers the
 // doctor but not the sandbox daemon, which uses the account's current
 // Docker context. The doctor warns and the launch refusal says what to do.
@@ -119,7 +211,7 @@ func TestManagedMacDockerHostOfTheShellIsNamed(t *testing.T) {
 	ta := newTestApp(t, "")
 	m := managedStatusFixture()
 	ta.DockerEngine = func(context.Context) (string, error) { return "Ubuntu 24.04.4 LTS", nil }
-	c := ta.managedDockerCheck(bg, m)
+	c := ta.managedDockerCheck(bg, m, false)
 	if c.Status != openshell.StatusWarn || c.Fix == nil {
 		t.Fatalf("doctor row with the shell's DOCKER_HOST: %+v", c)
 	}
@@ -144,14 +236,32 @@ func TestManagedMacDoctorChecksDocker(t *testing.T) {
 	ta := newTestApp(t, "")
 	m := managedStatusFixture()
 	ta.DockerEngine = func(context.Context) (string, error) { return "", errors.New("Cannot connect to the Docker daemon") }
-	c := ta.managedDockerCheck(bg, m)
+	c := ta.managedDockerCheck(bg, m, false)
 	if c.Status != openshell.StatusFail || c.Fix == nil {
 		t.Fatalf("no Docker: %+v", c)
 	}
 	has(t, c.Fix.Summary, "start Docker Desktop", "contact it-security@example.com")
 	ta.DockerEngine = func(context.Context) (string, error) { return "Docker Desktop", nil }
-	if c := ta.managedDockerCheck(bg, m); c.Status != openshell.StatusPass {
+	if c := ta.managedDockerCheck(bg, m, false); c.Status != openshell.StatusPass {
 		t.Fatalf("Docker answers: %+v", c)
+	}
+}
+
+// GAP-0515: an account signed out of the Mac's desktop, while another
+// account's sandboxes hold this computer's ports, was told to start Docker
+// Desktop. It can run no sandbox until that account's stop, whatever its
+// Docker does: the Docker row names that cause and gives no Docker fix.
+func TestManagedMacDoctorDockerWhileAnotherAccountHoldsSandboxes(t *testing.T) {
+	t.Setenv("DOCKER_HOST", "")
+	ta := newTestApp(t, "")
+	ta.DockerEngine = func(context.Context) (string, error) { return "", errors.New("Cannot connect to the Docker daemon") }
+	c := ta.managedDockerCheck(bg, managedStatusFixture(), true)
+	if c.Status != openshell.StatusSkip || c.Fix != nil {
+		t.Fatalf("Docker row while another account holds the sandboxes: %+v", c)
+	}
+	has(t, c.Detail, "another account is using sandboxes", "signed in to this Mac's desktop")
+	if strings.Contains(c.Detail, "start Docker Desktop") {
+		t.Fatalf("Docker row tells this account to start Docker Desktop: %+v", c)
 	}
 }
 
@@ -170,5 +280,135 @@ func TestManagedCopyStagesWithTheDaemonsPolicy(t *testing.T) {
 	}
 	if _, err := ta.copyStageOptions(packs.Flags{Pack: "contractors", Project: ta.project}, "dc-claude-a", nil); err == nil {
 		t.Fatal("staged without the daemon's copy policy")
+	}
+}
+
+// A 1.0.4 CLI on a managed computer whose sandbox daemon is still 1.0.3
+// (it has not restarted since the package upgrade): that daemon's Ready
+// refuses the harness field, so the CLI readies with the empty object it
+// takes. The doctor's daemon row, which says the first run readies
+// OpenShell, is then true: the run readies it and creates the sandbox.
+func TestFirstRunReadiesOnAnOlderManagedDaemon(t *testing.T) {
+	ta := newTestApp(t, "")
+	gw := ta.daemon.status.Gateway
+	ta.daemon.status.Available, ta.daemon.status.Gateway = false, nil
+	ta.daemon.status.Managed = managedStatusFixture()
+	ta.daemon.statusWithoutAllowed, ta.daemon.strictReady = true, true
+	ta.daemon.onReady = func(st *sandboxapi.Status) {
+		st.Available, st.Reason, st.Gateway = true, "", gw
+	}
+	if c := ta.probeDaemon(bg, true).check; c.Status != openshell.StatusPass {
+		t.Fatalf("doctor daemon row before the first run: %+v", c)
+	}
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", Rm: true}))
+	ready := ta.daemon.callsTo("POST", sandboxapi.PathReady)
+	if len(ready) != 2 || string(ready[0].Body) != `{"harness":"claudecode"}` || string(ready[1].Body) != `{}` {
+		t.Fatalf("ready requests = %+v, want the harness, then the older daemon's empty object", ready)
+	}
+	if c := ta.daemon.callsTo("POST", sandboxapi.PathSandboxes); len(c) != 1 {
+		t.Fatalf("create calls %d after readying an older daemon", len(c))
+	}
+}
+
+// GAP-0534: a first run the organization does not allow (sandboxes not
+// allowed for the account, or an agent its profile leaves out) announces no
+// OpenShell install or start: the ready refuses it in the organization's
+// words and installs nothing.
+func TestAForbiddenAccountsFirstRunAnnouncesNoInstall(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(*sandboxapi.ManagedExplain)
+	}{
+		{"sandboxes not allowed", func(me *sandboxapi.ManagedExplain) { me.Allowed = false }},
+		{"agent left out", func(me *sandboxapi.ManagedExplain) { me.AllowedHarnesses = []string{"claudecode"} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			ta.daemon.status.Available, ta.daemon.status.Gateway = false, nil
+			ta.daemon.status.Managed = managedStatusFixture()
+			ta.daemon.explain.Managed = managedExplainFixture()
+			tc.edit(ta.daemon.explain.Managed)
+			_ = ta.Run(bg, RunOptions{Harness: "codex"})
+			if out := ta.output(); strings.Contains(out, "Installing OpenShell") || strings.Contains(out, "Starting your OpenShell gateway") {
+				t.Fatalf("a forbidden first run announced an install or start:\n%s", out)
+			}
+			if r := ta.daemon.callsTo("POST", sandboxapi.PathReady); len(r) != 1 {
+				t.Fatalf("ready calls = %d, want the one whose refusal the run prints", len(r))
+			}
+		})
+	}
+	// The allowed run still says what it does.
+	ta := newTestApp(t, "")
+	ta.daemon.status.Available, ta.daemon.status.Gateway = false, nil
+	ta.daemon.status.Managed = managedStatusFixture()
+	ta.daemon.explain.Managed = managedExplainFixture()
+	_ = ta.Run(bg, RunOptions{Harness: "codex"})
+	if out := ta.output(); !strings.Contains(out, "Installing OpenShell") && !strings.Contains(out, "Starting your OpenShell gateway") {
+		t.Fatalf("an allowed first run did not say it readies OpenShell:\n%s", out)
+	}
+}
+
+// GAP-0534: an account the organization does not allow sandboxes is refused
+// by the managed gateway's own view before the run reaches its sandbox
+// daemon, whose socket would start it: no status, explain or ready call goes
+// to the daemon, and the words are the daemon's ready refusal. A view that
+// allows the account, a provisional one, a left-out agent and a gateway that
+// does not answer still go to the daemon, which decides as before.
+func TestAForbiddenAccountsRunStartsNoSandboxDaemon(t *testing.T) {
+	forbidden := managedExplainFixture()
+	forbidden.Allowed = false
+	ta := newTestApp(t, "")
+	ta.daemon.status.Available, ta.daemon.status.Gateway = false, nil
+	ta.daemon.status.Managed = managedStatusFixture()
+	var asked []string
+	ta.ManagedAccountPolicy = func(_ context.Context, harness string) (*sandboxapi.ManagedExplain, error) {
+		asked = append(asked, harness)
+		return forbidden, nil
+	}
+	err := ta.Run(bg, RunOptions{Harness: "codex"})
+	if err == nil || !strings.Contains(err.Error(), "doesn't allow sandboxes for your account") {
+		t.Fatalf("forbidden account run = %v", err)
+	}
+	if len(asked) != 1 || asked[0] != "codex" {
+		t.Fatalf("policy asked for %q", asked)
+	}
+	ta.daemon.mu.Lock()
+	reached := len(ta.daemon.calls)
+	ta.daemon.mu.Unlock()
+	if reached != 0 {
+		t.Fatalf("the forbidden run reached the sandbox daemon %d times", reached)
+	}
+	if out := ta.output(); strings.Contains(out, "Installing OpenShell") || strings.Contains(out, "Starting your OpenShell gateway") {
+		t.Fatalf("a forbidden run announced an install or start:\n%s", out)
+	}
+
+	for _, tc := range []struct {
+		name string
+		view func() (*sandboxapi.ManagedExplain, error)
+	}{
+		{"allowed", func() (*sandboxapi.ManagedExplain, error) { return managedExplainFixture(), nil }},
+		{"provisional", func() (*sandboxapi.ManagedExplain, error) {
+			me := managedExplainFixture()
+			me.Allowed, me.Provisional = false, true
+			return me, nil
+		}},
+		{"agent left out", func() (*sandboxapi.ManagedExplain, error) {
+			me := managedExplainFixture()
+			me.AllowedHarnesses = []string{"claudecode"}
+			return me, nil
+		}},
+		{"gateway does not answer", func() (*sandboxapi.ManagedExplain, error) { return nil, errors.New("hook socket refused") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			ta.daemon.status.Available, ta.daemon.status.Gateway = false, nil
+			ta.daemon.status.Managed = managedStatusFixture()
+			ta.daemon.explain.Managed = managedExplainFixture()
+			ta.ManagedAccountPolicy = func(context.Context, string) (*sandboxapi.ManagedExplain, error) { return tc.view() }
+			_ = ta.Run(bg, RunOptions{Harness: "codex"})
+			if len(ta.daemon.callsTo("GET", sandboxapi.PathStatus)) == 0 {
+				t.Fatal("the run did not reach the sandbox daemon")
+			}
+		})
 	}
 }

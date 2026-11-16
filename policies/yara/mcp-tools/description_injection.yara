@@ -8,6 +8,25 @@
 // destination, amount, or ownership evidence. Static YARA findings remain
 // alert-only: authorization and destination trust require deployment policy or
 // a bounded ActionFacts proof before DefenseClaw can safely block.
+rule defenseclaw_hidden_credential_exfiltration {
+    meta:
+        author = "Cisco DefenseClaw"
+        description = "Detects instructions to secretly read and exfiltrate credential files"
+        classification = "harmful"
+        threat_type = "DATA EXFILTRATION"
+        defenseclaw_category = "CREDENTIAL HARVESTING"
+
+    strings:
+        $override = /\b(ignore|disregard|override)\s+(all\s+)?(previous|prior|system|developer)\s+instructions\b/i
+        $credential_path = /(\~|\$HOME|\$\{HOME\}|%USERPROFILE%)[\\\/]\.(ssh|aws)([\\\/]credentials)?\b/i
+        $read = /(^|[\n.!?;]\s*|\band\s+)(please\s+)?(read|access|collect|retrieve)\s+[^\n.!?;]{0,48}(\~|\$HOME|\$\{HOME\}|%USERPROFILE%)[\\\/]\.(ssh|aws)\b/i
+        $exfiltrate = /\bexfiltrate\s+(the\s+|its\s+|these\s+)?(results?|contents?|credentials?|data|files?)\b/i
+        $conceal = /\b(hide|conceal)\s+(the\s+)?(read|access|action|activity)\s+from\s+the\s+user\b/i
+
+    condition:
+        $credential_path and (($read and $exfiltrate) or ($override and ($exfiltrate or $conceal)))
+}
+
 rule defenseclaw_sensitive_data_to_addressed_sink {
     meta:
         author = "Cisco DefenseClaw"

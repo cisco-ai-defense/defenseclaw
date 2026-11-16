@@ -33,7 +33,8 @@ func TestValidateSourceRefusalMatrix(t *testing.T) {
 	protected := filepath.Join(e.root, "vault")
 	mustMkdir(t, filepath.Join(protected, "inner"))
 	for _, h := range []string{".ssh/keys", ".aws", ".config/nvim", ".defenseclaw/sandboxes",
-		".claude/skills", ".codex", ".cursor", ".copilot", ".gemini/antigravity", ".agents", ".local/share/opencode"} {
+		".claude/skills", ".codex", ".cursor", ".copilot", ".gemini/antigravity", ".agents", ".local/share/opencode",
+		".openhands/hooks", ".omnigent"} {
 		mustMkdir(t, filepath.Join(e.home, filepath.FromSlash(h)))
 	}
 	link := filepath.Join(e.home, "code", "link")
@@ -66,6 +67,10 @@ func TestValidateSourceRefusalMatrix(t *testing.T) {
 		{"antigravity home", filepath.Join(e.home, ".gemini", "antigravity"), "~/.gemini"},
 		{"shared agent skills", filepath.Join(e.home, ".agents"), "~/.agents"},
 		{"opencode data", filepath.Join(e.home, ".local", "share", "opencode"), "~/.local/share/opencode"},
+		// Agents without a DefenseClaw connector still load these.
+		{"openhands home", filepath.Join(e.home, ".openhands"), "~/.openhands"},
+		{"inside openhands home", filepath.Join(e.home, ".openhands", "hooks"), "~/.openhands"},
+		{"omnigent home", filepath.Join(e.home, ".omnigent"), "~/.omnigent"},
 		{"contains protected", e.root, "contains"},
 		{"inside protected", filepath.Join(protected, "inner"), "inside"},
 		{"symlinked component", link, "symbolic link"},

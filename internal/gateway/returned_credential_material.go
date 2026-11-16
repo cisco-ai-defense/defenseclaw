@@ -44,14 +44,27 @@ func exactReturnedCredentialResultBytes(
 			return nil, false
 		}
 		response, ok := req.Payload["tool_response"].(map[string]interface{})
-		if !ok {
+		if !ok || response["opencode_v2_status"] != "completed" {
 			return nil, false
 		}
-		output, ok := response["output"].(string)
-		if !ok {
-			return nil, false
+		if output, ok := response["output"].(string); ok {
+			return []byte(output), true
 		}
-		return []byte(output), true
+		// V2's native shell result nests its text and exit status under
+		// output. MCP/read tools may instead return a text content block.
+		if output, ok := response["output"].(map[string]interface{}); ok {
+			if text, ok := output["output"].(string); ok {
+				return []byte(text), true
+			}
+		}
+		if content, ok := response["content"].([]interface{}); ok && len(content) == 1 {
+			if block, ok := content[0].(map[string]interface{}); ok && block["type"] == "text" {
+				if text, ok := block["text"].(string); ok {
+					return []byte(text), true
+				}
+			}
+		}
+		return nil, false
 	case "amp":
 		if canonicalEvent(req.HookEventName) != "toolresult" ||
 			strings.TrimSpace(payloadString(req.Payload, "error")) != "" ||

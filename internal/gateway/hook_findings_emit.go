@@ -116,7 +116,11 @@ func (a *APIServer) emitInspectVerdictFindings(
 	if a.logger == nil {
 		return hookEvaluationContext{}
 	}
+	// Recording the scan waits on the audit store; a hook gives its caller's
+	// run slot up for that wait (GAP-1790).
+	resume := waitWithoutHookRunSlot(ctx)
 	evalID, scanID, err := a.logger.LogInspectFindingsWithCorrelation(ctx, src, ScanCorrelationFromContext(ctx))
+	resume()
 	if err != nil {
 		metricRuntime, _ := a.observabilityV8RuntimeEmitter().(hookLifecycleMetricV8Runtime)
 		recordScanErrorV8(ctx, metricRuntime, "gateway.runtime.findings", src.Scanner, src.TargetType, errorReason)
@@ -161,7 +165,17 @@ func (p *GuardrailProxy) emitGuardrailScanVerdictFindings(
 	if len(normalized) == 0 {
 		return hookEvaluationContext{}
 	}
+	for i := range normalized {
+		if i < len(verdict.findingSeverities) && verdict.findingSeverities[i] != "" {
+			normalized[i].Severity = normalizeSeverity(verdict.findingSeverities[i])
+		}
+	}
 	inspectFindings := normalizedFindingsToInspect(normalized, verdict.Severity)
+	for i := range inspectFindings {
+		if i < len(verdict.findingProfiles) && verdict.findingProfiles[i] != "" {
+			inspectFindings[i].Tags = append(inspectFindings[i].Tags, "profile:"+verdict.findingProfiles[i])
+		}
+	}
 	src := scanner.InspectFindingSource{
 		ScanID:       verdict.ScanID,
 		Scanner:      scannerEnum,
@@ -283,7 +297,11 @@ func (a *APIServer) emitAssetPolicyDecisionFindings(
 	if a.logger == nil {
 		return hookEvaluationContext{}
 	}
+	// Recording the scan waits on the audit store; a hook gives its caller's
+	// run slot up for that wait (GAP-1790).
+	resume := waitWithoutHookRunSlot(ctx)
 	evalID, scanID, err := a.logger.LogInspectFindingsWithCorrelation(ctx, src, ScanCorrelationFromContext(ctx))
+	resume()
 	if err != nil {
 		metricRuntime, _ := a.observabilityV8RuntimeEmitter().(hookLifecycleMetricV8Runtime)
 		recordScanErrorV8(ctx, metricRuntime, "gateway.runtime.findings", src.Scanner, src.TargetType, "emit_asset_policy")
@@ -539,6 +557,9 @@ func ruleFindingsToInspect(in []RuleFinding, location string) []scanner.InspectF
 	out := make([]scanner.InspectFinding, 0, len(in))
 	for _, f := range in {
 		tags := append([]string(nil), f.Tags...)
+		if f.profile != "" {
+			tags = append(tags, "profile:"+f.profile)
+		}
 		if f.enforcement == findingEnforcementDetectionOnly && !hasStableFindingTag(tags, scanner.FindingTagDetectionOnly) {
 			tags = append(tags, scanner.FindingTagDetectionOnly)
 		}

@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -60,6 +61,144 @@ func TestRestorePublishedDirsAddsOnlyTheMissingModeBits(t *testing.T) {
 	}
 }
 
+func TestRestorePublishedDirsRemovesWriteWithoutMissingReadOrSearch(t *testing.T) {
+	withHigherSources(t)
+	for _, platform := range []string{"linux", "darwin"} {
+		for _, mode := range []os.FileMode{0o775, 0o757, 0o777} {
+			t.Run(fmt.Sprintf("%s/%04o", platform, mode), func(t *testing.T) {
+				opts := publishTestOptions(t)
+				opts.GOOS = platform
+				if _, err := Publish(opts, []string{"claudecode"}); err != nil {
+					t.Fatal(err)
+				}
+				dir := filepath.Join(claudeDir(t, opts), "managed-settings.d")
+				if err := os.Chmod(dir, mode); err != nil {
+					t.Fatal(err)
+				}
+				restored, err := RestorePublishedPolicyDirs(opts)
+				if err != nil || !containsString(restored, dir) {
+					t.Fatalf("restore writable published dir = %v, %v", restored, err)
+				}
+				if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != mode&^0o022 {
+					t.Fatalf("repaired directory = %v, %v; want %04o", info, err, mode&^0o022)
+				}
+				result, err := VerifyAll(opts, []string{"claudecode"})
+				if err != nil || !containsString(result.MachinePolicyConnectors, "claudecode") {
+					t.Fatalf("verify repaired policy: %+v, %v", result, err)
+				}
+				if again, err := RestorePublishedPolicyDirs(opts); err != nil || len(again) != 0 {
+					t.Fatalf("second repair = %v, %v", again, err)
+				}
+			})
+		}
+	}
+}
+
+// GAP-2181: a repair of a managed-settings.d an account made group-writable
+// (0775) took the write away only after the publish had read the drop-in,
+// and that read refuses a writable directory, so the repair exited 1
+// machine_policy_incomplete in the run that fixed the directory. The publish
+// takes the write away first and puts the hooks back in the same run.
+func TestPublishTakesWriteAwayFromAPublishedDirectoryBeforeItReadsThePolicy(t *testing.T) {
+	withHigherSources(t)
+	previous := trustedOwner
+	uid := uint32(os.Getuid())
+	trustedOwner = func(owner uint32) bool { return owner == uid }
+	t.Cleanup(func() { trustedOwner = previous })
+	for _, platform := range []string{"linux", "darwin"} {
+		t.Run(platform, func(t *testing.T) {
+			opts := publishTestOptions(t)
+			opts.GOOS = platform
+			opts.SkipTrustChecks = false
+			if err := os.Chmod(opts.Root, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Publish(opts, []string{"claudecode"}); err != nil {
+				t.Fatal(err)
+			}
+			dir := filepath.Join(claudeDir(t, opts), "managed-settings.d")
+			dropIn := filepath.Join(dir, DefenseClawDropInName)
+			published := readFile(t, dropIn)
+			if err := os.WriteFile(dropIn, []byte("{}\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(dir, 0o775); err != nil {
+				t.Fatal(err)
+			}
+			result, err := Publish(opts, []string{"claudecode"})
+			if err != nil {
+				t.Fatalf("publish under a group-writable %s: %v", dir, err)
+			}
+			if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0o755 {
+				t.Fatalf("%s after the publish: %v, %v; want 0755", dir, info, err)
+			}
+			if got := readFile(t, dropIn); got != published {
+				t.Fatalf("the publish did not put the hooks back:\n%s", got)
+			}
+			if !containsString(result.MachinePolicyConnectors, "claudecode") || !result.Changed {
+				t.Fatalf("publish result = %+v", result)
+			}
+			verified, err := VerifyAll(opts, []string{"claudecode"})
+			if err != nil || !containsString(verified.MachinePolicyConnectors, "claudecode") {
+				t.Fatalf("verify after the publish: %+v, %v", verified, err)
+			}
+		})
+	}
+}
+
+// GAP-0924: Codex opens /etc/codex/requirements.toml by name, so the repair
+// of an administrator's 0700 /etc/codex adds search only: listing it showed
+// its unrelated files to every account. Search alone lets any account open
+// a file it can name, so while an unrelated file there grants other
+// accounts access the repair leaves the directory as it is and names it.
+func TestRestorePublishedDirsAddsOnlySearchAboveASingleFile(t *testing.T) {
+	withHigherSources(t)
+	opts := publishTestOptions(t)
+	if _, err := Publish(opts, []string{"codex"}); err != nil {
+		t.Fatal(err)
+	}
+	vendor := filepath.Join(opts.Root, "etc/codex")
+	notes := filepath.Join(vendor, "admin-notes.toml")
+	if err := os.WriteFile(notes, []byte("x = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(notes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(vendor, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := RestorePublishedPolicyDirs(opts)
+	if !errors.Is(err, errPublishedDirExposes) || !strings.Contains(err.Error(), notes) || len(restored) != 0 {
+		t.Fatalf("restore with a readable unrelated file = %v, %v; want it refused, naming %s", restored, err, notes)
+	}
+	if info, err := os.Stat(vendor); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("%s: mode %v (%v) after the refused repair, want 0700", vendor, info.Mode().Perm(), err)
+	}
+	published, err := Publish(opts, []string{"codex"})
+	if err != nil || published.Complete() {
+		t.Fatalf("publish with a readable unrelated file = %+v, %v; want codex not covered", published, err)
+	}
+	for _, state := range published.States {
+		if state.Connector == "codex" && !strings.Contains(strings.Join(state.Conflicts, "; "), notes) {
+			t.Fatalf("the codex conflicts do not name %s: %v", notes, state.Conflicts)
+		}
+	}
+	if err := os.Chmod(notes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restored, err = RestorePublishedPolicyDirs(opts)
+	if err != nil || !containsString(restored, vendor) {
+		t.Fatalf("restore published dirs = %v, %v", restored, err)
+	}
+	if info, err := os.Stat(vendor); err != nil || info.Mode().Perm() != 0o711 {
+		t.Fatalf("%s: mode %v (%v) after the repair, want 0711", vendor, info.Mode().Perm(), err)
+	}
+	if problem := publishedDirProblem(opts, filepath.Join("/etc/codex", "requirements.toml")); problem != "" {
+		t.Fatalf("a searchable /etc/codex is still reported: %s", problem)
+	}
+}
+
 // GAP-1323: the macOS repair ran `chmod -N`, which removed every ACL entry
 // of the vendor directory, an administrator's unrelated ones too. It
 // removes only the entries that deny search or list, and the ones that
@@ -74,6 +213,9 @@ func TestRestorePublishedDirsRemovesOnlyTheDenyingMacOSACLEntries(t *testing.T) 
 		t.Fatal(err)
 	}
 	dir := filepath.Join(opts.Root, "Library/Application Support/ClaudeCode/managed-settings.d")
+	if err := os.Chmod(dir, 0o775); err != nil {
+		t.Fatal(err)
+	}
 	acl := []managed.DarwinACLEntry{
 		{Index: 0, Text: "user:admin allow read,write", Allow: true, Rights: []string{"read", "write"}},
 		{Index: 1, Text: "group:everyone deny list,search", Rights: []string{"list", "search"}},
@@ -114,6 +256,9 @@ func TestRestorePublishedDirsRemovesOnlyTheDenyingMacOSACLEntries(t *testing.T) 
 	if err != nil || !containsString(restored, dir) {
 		t.Fatalf("restore published dirs = %v, %v", restored, err)
 	}
+	if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("ACL repair left a writable directory: %v, %v", info, err)
+	}
 	if !reflect.DeepEqual(removed, []int{3, 1, 0}) {
 		t.Fatalf("removed ACL entries %v, want only the denying and the write ones, highest first: [3 1 0]", removed)
 	}
@@ -133,7 +278,8 @@ func TestRestorePublishedDirsRemovesOnlyTheDenyingMacOSACLEntries(t *testing.T) 
 
 // GAP-1323 on Linux: the repair removed the whole access ACL of the
 // drop-in directory. It gives the entries without access search and list,
-// raises the mask, and keeps every other entry as it was.
+// raises the mask, and keeps every other read-only entry as it was (an
+// entry with write goes: GAP-0410).
 func TestRestorePublishedDirsKeepsUnrelatedLinuxACLEntries(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("POSIX ACL xattrs are Linux-only")
@@ -146,7 +292,7 @@ func TestRestorePublishedDirsKeepsUnrelatedLinuxACLEntries(t *testing.T) {
 	dir := filepath.Join(opts.Root, "etc/claude-code/managed-settings.d")
 	start := posixacl.View{
 		Present: true, Owner: 7, Group: 5, Mask: 1, Other: 5,
-		Users:  []posixacl.Entry{{Kind: "user", ID: 54321, Perm: 0}, {Kind: "user", ID: 54322, Perm: 7}},
+		Users:  []posixacl.Entry{{Kind: "user", ID: 54321, Perm: 0}, {Kind: "user", ID: 54322, Perm: 5}},
 		Groups: []posixacl.Entry{{Kind: "group", ID: 54400, Perm: 4}},
 	}
 	if err := unix.Setxattr(dir, linuxAccessACLXattr, linuxAccessACLData(start), 0); errors.Is(err, unix.ENOTSUP) {
@@ -177,7 +323,7 @@ func TestRestorePublishedDirsKeepsUnrelatedLinuxACLEntries(t *testing.T) {
 	}
 	want := posixacl.View{
 		Present: true, Owner: 7, Group: 5, Mask: 5, Other: 5,
-		Users:  []posixacl.Entry{{Kind: "user", ID: 54321, Perm: 5}, {Kind: "user", ID: 54322, Perm: 7}},
+		Users:  []posixacl.Entry{{Kind: "user", ID: 54321, Perm: 5}, {Kind: "user", ID: 54322, Perm: 5}},
 		Groups: []posixacl.Entry{{Kind: "group", ID: 54400, Perm: 5}},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -208,7 +354,8 @@ func groupClassPerms(acl posixacl.View) map[string]uint16 {
 // here the owning group -w-) under a mask rwx came out rwx: usable write on
 // the root-owned drop-in folder, where that account can add or replace
 // machine policy, while verify reported the connector covered. The repaired
-// group class has search and list, and no write.
+// group class has search and list, and no write: the named entries with
+// write are gone (GAP-0410) and the owning group entry is r-x.
 func TestRestorePublishedDirsGivesNoWriteThroughTheLinuxACL(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("POSIX ACL xattrs are Linux-only")
@@ -241,7 +388,11 @@ func TestRestorePublishedDirsGivesNoWriteThroughTheLinuxACL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]uint16{"group::": 5, "user:54321:": 5, "group:54400:": 5}
+	want := map[string]uint16{"group::": 5}
+	if !got.Present {
+		// No named entry left: the kernel keeps the ACL as the mode bits.
+		got.Group = uint16(info.Mode().Perm()>>3) & 7
+	}
 	if perms := groupClassPerms(got); !reflect.DeepEqual(perms, want) {
 		t.Fatalf("effective ACL permissions after the repair %v (ACL %+v), want r-x and no write: %v", perms, got, want)
 	}

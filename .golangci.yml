@@ -4,3 +4,14 @@ linters:
   default: standard
   disable:
     - errcheck      # TODO: fix unchecked Close() calls across codebase
+  exclusions:
+    rules:
+      # These shared CAS helpers are called by the Windows v2 transaction
+      # implementation. A Linux-only unused pass cannot see those callers.
+      - path: 'internal/gateway/connector/atomic_transform_(bound|bound_other|metadata_other)\.go'
+        linters:
+          - unused
+      # Machine requirements types and helpers have Windows production callers.
+      - path: 'internal/gateway/connector/codex_machine_requirements\.go'
+        linters:
+          - unused

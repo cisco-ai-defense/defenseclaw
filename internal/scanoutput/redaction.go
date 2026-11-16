@@ -63,8 +63,9 @@ func NewRedactor(key observabilityredaction.CorrelationKey) *Redactor {
 }
 
 // NewEphemeralRedactor creates a process-local projector for callers without
-// an installation data directory (principally hermetic tests). Production CLI
-// and gateway paths use LoadRedactor so tokens correlate within an install.
+// an installation data directory, and administrator-only managed scans that
+// persist no result and cannot open the service account's key. Persistent
+// CLI and gateway paths use LoadRedactor so tokens correlate within an install.
 func NewEphemeralRedactor() (*Redactor, error) {
 	redactor := &Redactor{available: true}
 	if _, err := rand.Read(redactor.key[:]); err != nil {

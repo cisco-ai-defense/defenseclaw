@@ -807,6 +807,45 @@ func TestCompileObservabilityV8WarningsAndProvenance(t *testing.T) {
 	}
 }
 
+func TestCompileObservabilityV8PlainHTTPDoesNotWarnAboutTLSVerification(t *testing.T) {
+	destination := validObservabilityV8Destination("collector", ObservabilityV8DestinationOTLP)
+	destination.Endpoint = "http://127.0.0.1:4318"
+	destination.TLS.Insecure = true
+	destination.NetworkSafety.AllowPrivateNetworks = true
+	plan := mustCompileObservabilityV8(t, &ObservabilityV8Source{
+		Destinations: []ObservabilityV8DestinationSource{destination},
+	})
+	for _, warning := range plan.Snapshot().Warnings {
+		if warning.Code == "tls_verification_disabled" {
+			t.Fatal("plain HTTP has no TLS verification to disable")
+		}
+		if warning.Code == "plaintext_transport" {
+			t.Fatal("loopback HTTP does not cross the host boundary")
+		}
+	}
+}
+
+func TestCompileObservabilityV8WarnsForRemotePlainHTTP(t *testing.T) {
+	destination := validObservabilityV8Destination("collector", ObservabilityV8DestinationOTLP)
+	destination.Endpoint = "http://collector.example.test:4318"
+	destination.TLS.Insecure = true
+	plan := mustCompileObservabilityV8(t, &ObservabilityV8Source{
+		Destinations: []ObservabilityV8DestinationSource{destination},
+	})
+	found := false
+	for _, warning := range plan.Snapshot().Warnings {
+		if warning.Code == "tls_verification_disabled" {
+			t.Fatal("plain HTTP was mislabeled as disabled TLS verification")
+		}
+		if warning.Code == "plaintext_transport" && warning.Path == "observability.destinations[collector].endpoint" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("remote plaintext HTTP warning was absent")
+	}
+}
+
 func TestCompileObservabilityV8RejectsSecretBearingResourceAttributes(t *testing.T) {
 	for _, attributes := range []map[string]string{
 		{"service.api_key": "not-rendered"},

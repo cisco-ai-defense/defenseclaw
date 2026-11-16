@@ -22,8 +22,9 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
-	"regexp"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // TokenPrefix marks every sandbox binding credential. The main API refuses
@@ -35,8 +36,8 @@ const TokenPrefix = "dcsb_"
 const tokenBytes = 32
 
 var (
-	tokenPattern     = regexp.MustCompile(`^dcsb_[A-Za-z0-9_-]{43}$`)
-	tokenHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	tokenPattern     = lazyregexp.New(`^dcsb_[A-Za-z0-9_-]{43}$`)
+	tokenHashPattern = lazyregexp.New(`^[0-9a-f]{64}$`)
 )
 
 // LooksLikeToken reports whether s has the shape of a binding credential.

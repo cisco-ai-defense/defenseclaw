@@ -83,7 +83,6 @@ func TestSetupInstallsNothingWhileAnotherAccountHoldsTheGatewayPort(t *testing.T
 		d.OpenKVM = func() error { return os.ErrNotExist }
 		d.HostMemory = func() uint64 { return 32 << 30 }
 		d.DiskFree = func(string) (uint64, error) { return 100 << 30, nil }
-		d.TempDir = t.TempDir
 		d.DockerGroup = func() (bool, bool, error) { return true, true, nil }
 		d.ServiceDockerGroupMissing = func() bool { return false }
 		d.SSHShim = func() (*openshell.SSHShim, error) {

@@ -33,6 +33,20 @@
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
+	<key>Sockets</key>
+	<dict>
+		<key>api</key>
+		<dict>
+			<key>SockFamily</key>
+			<string>IPv4</string>
+			<key>SockNodeName</key>
+			<string>127.0.0.1</string>
+			<key>SockServiceName</key>
+			<string>18970</string>
+			<key>SockType</key>
+			<string>stream</string>
+		</dict>
+	</dict>
 	<key>StandardErrorPath</key>
 	<string>/Library/Logs/Cisco/DefenseClaw/gateway/gateway.err.log</string>
 	<key>StandardOutPath</key>

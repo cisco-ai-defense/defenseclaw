@@ -25,8 +25,10 @@ import (
 // The Active Directory example in the identity kit is also the main example in
 // the docs. It must load with the managed sandbox keys, every profile's floor
 // must resolve, and its default_profile must be at least as strict as every
-// assigned profile: a directory outage gives people default_profile, and an
-// example that is looser there teaches a gap.
+// assigned profile. A directory outage refuses requests whose assignments
+// need the missing fact, naming it; default_profile applies only when no
+// assignment needs it. A looser default still teaches a gap for unassigned
+// accounts.
 func TestADSandboxProfilesExampleLoadsWithoutDefaultWarnings(t *testing.T) {
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
 	raw, err := os.ReadFile(filepath.Join("..", "..", "packaging", "identity", "ad", "sandbox-profiles.example.yaml"))

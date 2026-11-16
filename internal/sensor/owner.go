@@ -17,6 +17,7 @@
 package sensor
 
 import (
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -42,7 +43,9 @@ const (
 
 // Account is one enrolled account of the enrolled-user table.
 type Account struct {
-	// Name is DOMAIN\name, or COMPUTER\name for a local Windows account.
+	// Name is DOMAIN\name, or COMPUTER\name for a local Windows account;
+	// on Linux and macOS the account name, which then identifies it (SID
+	// is empty there).
 	Name string
 	SID  string
 	// Home is the account's profile folder.
@@ -58,6 +61,9 @@ type OwnerLookups struct {
 	// Accounts returns the enrolled-user table.
 	Accounts func() []Account
 }
+
+// accountOfUID names the account that holds a uid; a variable for tests.
+var accountOfUID = procprobe.OwnerNameOfUID
 
 // owner is the account a finding is attributed to, or why it is not.
 type owner struct {
@@ -83,6 +89,10 @@ type procRef struct {
 	// User and SID are the account the finding's own event named for the
 	// process, empty when it named none.
 	User, SID string
+	// Descendant marks a process of an agent session other than its root.
+	// It may run as another account (a setuid or runas child), so the owner
+	// the probe read for it never names the session (GAP-1401).
+	Descendant bool
 }
 
 // processInstance is what the polls recorded about one process instance.
@@ -116,6 +126,20 @@ type pidEvent struct {
 	// Instance is the lineage tracker's instance the event concerned, zero
 	// when the tracker had no record of the pid.
 	Instance uint64
+	// User and SID are the account a creation event named, empty when it
+	// named none.
+	User, SID string
+}
+
+// keepsOwner reports that a creation at the pid names, by name, the account
+// recorded for instance, on a platform whose events and probes carry no SID
+// (POSIX). A POSIX exec replaces the image of the same process, and even a
+// new process on the pid would be that account's, so the recorded owner is
+// still the one to report (GAP-1465). A creation that carries a SID (a
+// Windows 4688), or names no account or another one, still hands the pid on.
+func (event pidEvent) keepsOwner(instance *processInstance) bool {
+	return !event.Exit && event.SID == "" && instance.sid == "" &&
+		event.User != "" && instance.user != "" && strings.EqualFold(event.User, instance.user)
 }
 
 // pidEvents are the creations and exits the host plane saw since the owner
@@ -298,6 +322,7 @@ func (b *ownerBook) heard(events pidEvents) {
 				case !event.At.After(instance.lastSeen):
 				case event.Exit:
 					markFirst(&instance.exitedAt, event.At)
+				case event.keepsOwner(instance):
 				default:
 					markFirst(&instance.replacedAt, event.At)
 				}
@@ -559,10 +584,14 @@ func (r *ownerResolver) resolve(processes []procRef, configPaths []string) owner
 		return r.named(user, sid, AttributionProcessOwner)
 	}
 	var matched []*processInstance
-	reused := false
+	reused, descendants := false, false
 	for _, ref := range processes {
 		instance, recycled := r.book.instance(ref)
-		if instance != nil {
+		switch {
+		case instance == nil:
+		case ref.Descendant:
+			descendants = true
+		default:
 			matched = append(matched, instance)
 		}
 		reused = reused || recycled
@@ -577,30 +606,53 @@ func (r *ownerResolver) resolve(processes []procRef, configPaths []string) owner
 			return r.named(instance.sessionUser, instance.sessionSID, AttributionSession)
 		}
 	}
-	if found, ok := r.profileOwner(configPaths); ok {
+	found, ok, ambiguous := r.profileOwner(configPaths)
+	if ok {
 		return found
 	}
-	reason := "the process owner could not be read (process token, Win32_Process owner and session user) " +
-		"and no enrolled profile holds the agent's configuration"
+	// Say why the profiles named nobody: none holds the configuration, or
+	// it spans more than one, which is ambiguous (p0-round GAP-1447).
+	config := "no enrolled profile holds the agent's configuration"
+	if ambiguous {
+		config = "the agent's configuration spans more than one enrolled profile, so it is ambiguous"
+	}
+	reason := "the process owner could not be read (" + ownerSourcesFor(ownerGOOS) + ") and " + config
 	switch {
+	case len(matched) == 0 && descendants:
+		reason = "the agent's own process is no longer in the process table, the owner of a process it " +
+			"started is not the session's, and " + config
 	case len(matched) == 0 && reused:
 		reason = "the finding's processes have exited and their pids now belong to other processes, " +
-			"whose owners are not the finding's; no enrolled profile holds the agent's configuration"
+			"whose owners are not the finding's; " + config
 	case len(matched) == 0:
-		reason = "the finding's processes are no longer in the process table " +
-			"and no enrolled profile holds the agent's configuration"
+		reason = "the finding's processes are no longer in the process table and " + config
 	}
 	return owner{Attribution: AttributionUnattributed, Reason: reason}
+}
+
+// ownerGOOS is the system the owner sources are named for; tests replace it.
+var ownerGOOS = runtime.GOOS
+
+// ownerSourcesFor names the sources an unattributed finding's owner was
+// looked up in on goos, so a Linux or macOS diagnostic does not name Windows
+// mechanisms (GAP-0092).
+func ownerSourcesFor(goos string) string {
+	if goos == "windows" {
+		return "process token, Win32_Process owner and session user"
+	}
+	return "the process's owning uid in the process table"
 }
 
 // eventOwner is the one account the events of processes named, and mixed
 // reports that they named more than one. The account an event names is that
 // of the process instance that produced it, so unlike an owner looked up by
-// pid it is never a later holder's.
+// pid it is never a later holder's. Only the session's root says who owns
+// it: a descendant's event can name the account a runas or setuid child
+// runs as, so it is left out (GAP-1401).
 func eventOwner(processes []procRef) (user, sid string, mixed bool) {
 	for _, process := range processes {
 		switch {
-		case process.SID == "":
+		case process.Descendant, process.SID == "":
 		case sid == "":
 			user, sid = process.User, process.SID
 		case !strings.EqualFold(sid, process.SID):
@@ -623,29 +675,56 @@ func (r *ownerResolver) named(user, sid, attribution string) owner {
 }
 
 // profileOwner is the enrolled account whose profile holds the agent's
-// configuration files. Paths in more than one profile name no account, and
-// paths outside every profile (a project's AGENTS.md) say nothing.
-func (r *ownerResolver) profileOwner(paths []string) (owner, bool) {
-	var found *Account
+// configuration files. Paths in more than one profile name no account and
+// report ambiguous, and paths outside every profile (a project's AGENTS.md)
+// say nothing.
+//
+// A Windows account is identified by its SID. A Linux or macOS account has
+// none and is identified by its name: the enrolled-account table there
+// (the hook guardian's identity records) had no entry at all, so an exited
+// session could not be attributed to the one enrolled profile it wrote
+// (p0-round GAP-1389).
+func (r *ownerResolver) profileOwner(paths []string) (found owner, ok, ambiguous bool) {
+	var account *Account
 	for _, path := range paths {
-		account := r.accountForPath(path)
+		holder := r.accountForPath(path)
 		switch {
-		case account == nil:
+		case holder == nil:
 			continue
-		case found != nil && !strings.EqualFold(found.SID, account.SID):
-			return owner{}, false
+		case account != nil && accountKey(*account) != accountKey(*holder):
+			return owner{}, false, true
 		}
-		found = account
+		account = holder
 	}
-	if found == nil || found.SID == "" {
-		return owner{}, false
+	if account == nil || accountKey(*account) == "" {
+		return owner{}, false, false
 	}
-	return owner{User: found.Name, SID: found.SID, Attribution: AttributionEnrolledProfile}, true
+	return owner{User: account.Name, SID: account.SID, Attribution: AttributionEnrolledProfile}, true, false
+}
+
+// accountKey identifies an enrolled account: its SID (Windows, any case),
+// or the name of an account with a POSIX home (Linux, macOS); "" when it
+// has neither.
+func accountKey(account Account) string {
+	if sid := strings.TrimSpace(account.SID); sid != "" {
+		return "sid\x00" + strings.ToUpper(sid)
+	}
+	if !posixOwnerPath(account.Home) || strings.TrimSpace(account.Name) == "" {
+		return ""
+	}
+	return "name\x00" + strings.TrimSpace(account.Name)
+}
+
+// posixOwnerPath reports a Linux or macOS path (absolute, no backslash).
+func posixOwnerPath(path string) bool {
+	path = strings.TrimSpace(path)
+	return strings.HasPrefix(path, "/") && !strings.Contains(path, `\`)
 }
 
 // accountForPath returns the account whose profile folder holds path, the
-// deepest one when profiles nest. Comparison ignores case and separator
-// style, as Windows paths do.
+// deepest one when profiles nest. Windows paths compare without case and
+// separator style, as Windows does; Linux and macOS paths compare exactly
+// (/home/Ann and /home/ann are two accounts' homes).
 func (r *ownerResolver) accountForPath(path string) *Account {
 	path = normalizeOwnerPath(path)
 	var best *Account
@@ -663,5 +742,8 @@ func (r *ownerResolver) accountForPath(path string) *Account {
 }
 
 func normalizeOwnerPath(path string) string {
+	if posixOwnerPath(path) {
+		return strings.TrimSpace(path)
+	}
 	return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(path), `\`, "/"))
 }

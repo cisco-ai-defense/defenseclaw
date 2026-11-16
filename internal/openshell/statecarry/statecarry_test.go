@@ -368,3 +368,20 @@ func keys(m map[string]string) []string {
 	sort.Strings(out)
 	return out
 }
+
+// The installer line for kept sandboxes names the stop and start a retained
+// guest on an older supervisor needs after a roll forward (GAP-1161), as the
+// upgrade guide does; with no sandbox kept there is nothing to start.
+func TestTheKeptSandboxLineNamesTheStopAndStartAfterARollForward(t *testing.T) {
+	for _, r := range []Result{{Carried: true, Sandboxes: []string{"a-1"}}, {Carried: true, Sandboxes: []string{"a-1", "b-2"}}} {
+		got := r.Summary()
+		for _, want := range []string{"legacy sandbox running", "`defenseclaw sandbox stop NAME`", "`defenseclaw sandbox start NAME`", "hooks work again once the gateway is up"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("Summary() = %q, missing %q", got, want)
+			}
+		}
+	}
+	if got := (Result{Carried: true}).Summary(); strings.Contains(got, "sandbox stop") {
+		t.Fatalf("no kept sandbox: %q", got)
+	}
+}

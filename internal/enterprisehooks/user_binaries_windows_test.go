@@ -141,9 +141,10 @@ func TestPurgeWindowsUserBinariesRemovesTheFilesFolderAndPathEntry(t *testing.T)
 		t.Fatalf("the result does not name the Path entry: %v", removed)
 	}
 
-	// A rerun, or no folder at all, is not an error.
-	if _, err := PurgeWindowsUserBinaries(home, sid); err != nil {
-		t.Fatalf("rerun: %v", err)
+	// A rerun, or no folder at all, is not an error and reports nothing
+	// removed (GAP-2231: it named an emptied folder the account never had).
+	if removed, err := PurgeWindowsUserBinaries(home, sid); err != nil || len(removed) != 0 {
+		t.Fatalf("rerun: removed %v, %v", removed, err)
 	}
 
 	// A signed-out account (no loaded hive) keeps its Path entry, and the

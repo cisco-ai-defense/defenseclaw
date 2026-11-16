@@ -12,8 +12,10 @@ import (
 	"io"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/godbus/dbus/v5"
@@ -47,8 +49,22 @@ const (
 var (
 	utmpSessionPath     = utmpPath
 	utmpSessionID       = unix.Getsid
+	utmpProcessUID      = processOwnerUID
 	logindSessionLookup = logindSessionFacts
 )
+
+// processOwnerUID is the uid that owns a running process.
+func processOwnerUID(pid int) (int, error) {
+	info, err := os.Stat("/proc/" + strconv.Itoa(pid))
+	if err != nil {
+		return -1, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return -1, errors.New("process owner unavailable")
+	}
+	return int(stat.Uid), nil
+}
 
 // verifyPeerSession confirms the claimed session for a verified peer.
 func verifyPeerSession(uid, pid int, name string, claimed useridentity.SessionFacts) (useridentity.SessionFacts, bool) {
@@ -70,7 +86,7 @@ func verifyPeerSession(uid, pid int, name string, claimed useridentity.SessionFa
 	if claimed.TTY != "" && name != "" && pid > 0 {
 		// A TTY can be reused immediately after logout. Read utmp on every
 		// claim and use it when logind is unavailable or cannot verify.
-		session, err := utmpSessionFacts(claimed.TTY, name, pid)
+		session, err := utmpSessionFacts(claimed.TTY, name, pid, uid)
 		return session, err == nil && session.Assurance == useridentity.AssuranceVerified
 	}
 	return useridentity.SessionFacts{}, false
@@ -197,11 +213,23 @@ func sessionUser(v dbus.Variant) int {
 
 // utmpSessionFacts confirms a claimed terminal from /run/utmp: a login
 // record on that line for the peer's account and kernel session.
-func utmpSessionFacts(tty, name string, peerPID int) (useridentity.SessionFacts, error) {
-	return utmpSessionFactsFrom(utmpSessionPath, tty, name, peerPID)
+func utmpSessionFacts(tty, name string, peerPID, peerUID int) (useridentity.SessionFacts, error) {
+	return utmpSessionFactsFrom(utmpSessionPath, tty, name, peerPID, peerUID)
 }
 
-func utmpSessionFactsFrom(path, tty, name string, peerPID int) (useridentity.SessionFacts, error) {
+// utmpUserMatches reports whether the user field of a utmp record names
+// account name. The field holds utmpUserSize bytes, so a longer name (a
+// qualified directory account) is recorded cut to that length (GAP-1254); a
+// full field that is the start of name names it only when the login's
+// kernel session belongs to the peer's uid (truncatedHolder).
+func utmpUserMatches(recorded, name string, truncatedHolder func() bool) bool {
+	if recorded == name {
+		return true
+	}
+	return len(recorded) == utmpUserSize && len(name) > utmpUserSize && name[:utmpUserSize] == recorded && truncatedHolder()
+}
+
+func utmpSessionFactsFrom(path, tty, name string, peerPID, peerUID int) (useridentity.SessionFacts, error) {
 	if peerPID <= 0 {
 		return useridentity.SessionFacts{}, nil
 	}
@@ -218,8 +246,14 @@ func utmpSessionFactsFrom(path, tty, name string, peerPID int) (useridentity.Ses
 	if err != nil {
 		return useridentity.SessionFacts{}, err
 	}
+	// The session leader of the peer's kernel session is the login's own
+	// process (its shell): it must be the peer's account for a cut name.
+	leaderIsPeer := func() bool {
+		owner, err := utmpProcessUID(peerSID)
+		return err == nil && peerUID >= 0 && owner == peerUID
+	}
 	for _, entry := range parseUtmp(data, binary.NativeEndian) {
-		if entry.Line != tty || entry.User != name || entry.PID <= 0 {
+		if entry.Line != tty || entry.PID <= 0 || !utmpUserMatches(entry.User, name, leaderIsPeer) {
 			continue
 		}
 		recordSID, err := utmpSessionID(int(entry.PID))

@@ -194,6 +194,47 @@ def _validated_record(row: tuple[object, ...]) -> str:
     return raw
 
 
+_FIELD_CLASS_SET_PREFIX = '"field_classes":{"$set":"'
+
+
+def _field_class_sets(database: Path) -> dict[str, str]:
+    """Return the field class sets a 1.0.6 store keeps once (#1384)."""
+    uri = database.resolve().as_uri() + "?mode=ro"
+    connection = sqlite3.connect(uri, uri=True, timeout=2)
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        present = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='audit_field_class_sets'"
+        ).fetchone()
+        if present is None:
+            return {}
+        return dict(connection.execute("SELECT digest, classes_json FROM audit_field_class_sets"))
+    finally:
+        connection.close()
+
+
+def _expand_field_classes(raw: str, sets: dict[str, str], rowid: object) -> str:
+    """Put a row's field class set back inline, as the record had it.
+
+    A standalone 1.0.6 store keeps each distinct set once and the row names
+    it by sha256; the row's projection hash covers the reference, and the set
+    must hash to it."""
+    start = raw.find(_FIELD_CLASS_SET_PREFIX)
+    if start < 0:
+        return raw
+    digest_start = start + len(_FIELD_CLASS_SET_PREFIX)
+    digest = raw[digest_start : digest_start + 64]
+    reference = _FIELD_CLASS_SET_PREFIX + digest + '"}'
+    classes = sets.get(digest)
+    if (
+        classes is None
+        or raw[start : start + len(reference)] != reference
+        or hashlib.sha256(classes.encode("utf-8")).hexdigest() != digest
+    ):
+        raise ValueError(f"audit row {rowid} names a missing or altered field class set")
+    return raw[:start] + '"field_classes":' + classes + raw[start + len(reference) :]
+
+
 def _read_projected_records(
     database: Path,
     validated: dict[object, tuple[object, ...]] | None = None,
@@ -207,12 +248,19 @@ def _read_projected_records(
     """
     records: list[str] = []
     accepted: dict[object, tuple[object, ...]] = {}
-    for row in _query_rows(database):
+    rows = _query_rows(database)
+    sets: dict[str, str] | None = None
+    for row in rows:
         rowid = row[0]
         if validated is None or validated.get(rowid) != row:
             _validated_record(row)
         accepted[rowid] = row
-        records.append(row[-2])  # type: ignore[arg-type]
+        raw = row[-2]
+        if isinstance(raw, str) and _FIELD_CLASS_SET_PREFIX in raw:
+            if sets is None:
+                sets = _field_class_sets(database)
+            raw = _expand_field_classes(raw, sets, rowid)
+        records.append(raw)  # type: ignore[arg-type]
     if validated is not None:
         validated.clear()
         validated.update(accepted)

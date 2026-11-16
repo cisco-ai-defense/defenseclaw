@@ -26,9 +26,13 @@ from defenseclaw.alert_semantics import (
     ALERT_NON_ALLOW_OUTCOMES,
     copilot_hook_target,
     copilot_hook_target_spellings,
+    cowork_hook_target,
+    surface_label,
 )
+from defenseclaw.audit_time_order import audit_time_order
 from defenseclaw.hook_metrics import (
     POST_TOOL_DECISION,
+    allowed_finding_hook_label,
     connector_hook_decision,
     detection_only_hook_label,
     parse_detail_tokens,
@@ -82,6 +86,9 @@ class AlertEvent:
     # The sandbox the alert was raised in (its record, or the hook decision
     # of a finding's request), so the Sandboxes panel can count them.
     sandbox: str = ""
+    # The agent surface (defenseclaw.agent.surface): "cowork" for a Claude
+    # Cowork call on the claudecode connector, else "".
+    surface: str = ""
 
 
 @dataclass(frozen=True)
@@ -293,6 +300,28 @@ _DECISION_KEYS = (
 )
 
 
+_SURFACE_KEY = "defenseclaw.agent.surface"
+
+
+def _evaluation_surfaces(rows: Iterable[V8EventHistoryRow]) -> dict[str, str]:
+    """Map a guardrail evaluation id (and "req:" + request id) to the agent surface of that call.
+
+    Only the hook decision record carries defenseclaw.agent.surface; the
+    finding of the same evaluation or request takes it from here (GAP-0047).
+    """
+
+    surfaces: dict[str, str] = {}
+    for row in rows:
+        surface = payload_text(row.payload, _SURFACE_KEY).lower()
+        if not surface:
+            continue
+        if evaluation := payload_text(row.payload, "defenseclaw.evaluation.id"):
+            surfaces.setdefault(evaluation, surface)
+        if row.request_id:
+            surfaces.setdefault(f"req:{row.request_id}", surface)
+    return surfaces
+
+
 def _evaluation_decisions(rows: Iterable[V8EventHistoryRow]) -> dict[str, str]:
     """Map a guardrail evaluation id to the action taken for that call.
 
@@ -313,8 +342,18 @@ def _evaluation_decisions(rows: Iterable[V8EventHistoryRow]) -> dict[str, str]:
 _POST_TOOL_DECISION = POST_TOOL_DECISION
 
 
-def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None = None) -> AlertEvent:
+def _v8_alert_event(
+    row: V8EventHistoryRow,
+    decisions: Mapping[str, str] | None = None,
+    surfaces: Mapping[str, str] | None = None,
+) -> AlertEvent:
     payload = row.payload
+    surfaces = surfaces or {}
+    surface = (
+        payload_text(payload, _SURFACE_KEY).lower()
+        or surfaces.get(payload_text(payload, "defenseclaw.evaluation.id") or "-", "")
+        or (surfaces.get(f"req:{row.request_id}", "") if row.request_id else "")
+    )
     action = (
         payload_text(
             payload,
@@ -380,6 +419,8 @@ def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None 
                 facts.append(("File", file_path))
     if row.connector:
         facts.append(("Connector", row.connector))
+    if surface:
+        facts.append(("Surface", surface_label(surface)))
     rule_id = payload_text(payload, "defenseclaw.finding.rule_id")
     rule = ": ".join(
         value
@@ -427,7 +468,7 @@ def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None 
         id=row.id,
         severity=severity,
         action=action,
-        target=copilot_hook_target(target, row.connector),
+        target=cowork_hook_target(copilot_hook_target(target, row.connector), surface),
         details=" ".join(detail_parts),
         timestamp=row.timestamp or datetime.now(timezone.utc),
         actor=row.actor or row.source,
@@ -438,6 +479,7 @@ def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None 
         connector=row.connector,
         facts=tuple(facts),
         sandbox=sandbox,
+        surface=surface,
     )
 
 
@@ -452,7 +494,8 @@ def alerts_from_v8_history(
     """
 
     decisions = _evaluation_decisions((*rows, *context))
-    return tuple(_v8_alert_event(row, decisions) for row in rows if _is_v8_alert_row(row))
+    surfaces = _evaluation_surfaces((*rows, *context))
+    return tuple(_v8_alert_event(row, decisions, surfaces) for row in rows if _is_v8_alert_row(row))
 
 
 def humanize_alert_details(raw: str) -> str:
@@ -1188,6 +1231,7 @@ class AlertsPanelModel:
             details_cell = _alert_details_label(event)
             if self.show_connector_column:
                 connector_cell = _alert_connector(event) or "—"
+                target_cell = _target_without_connector(target_cell, connector_cell)
                 cells = (
                     marker,
                     severity_cell,
@@ -1347,10 +1391,16 @@ class AlertsPanelModel:
                 facts=event.facts,
             )
         connector = (hydrated.connector if hydrated is not None else "") or event.connector
+        surface = event.surface
         event = hydrated or event
         # The list shows one Copilot hook target for both harnesses; so do
         # the detail pane and its History (GAP-2619).
         event = replace(event, target=copilot_hook_target(event.target, connector))
+        history_target = event.target
+        if surface and hydrated is not None and event.target and not _is_hook_event(event):
+            # The stored row names the connector; the list row and the Surface
+            # line say Cowork, so the Target line does too (GAP-0056).
+            event = replace(event, target=cowork_hook_target(event.target, surface), surface=surface)
         if event.action == "scan-finding":
             # A hook-rule finding carries the rule, not the outcome; the
             # connector-hook row of the same request says whether the call was
@@ -1367,7 +1417,7 @@ class AlertsPanelModel:
         return AlertDetailInfo(
             event=event,
             findings=_list_findings_by_run_id(self.store, event.run_id),
-            history=_list_events_by_target(self.store, event.target, 10, connector),
+            history=_list_events_by_target(self.store, history_target, 10, connector),
         )
 
     def detail_pairs(self) -> tuple[tuple[str, str], ...]:
@@ -1767,7 +1817,8 @@ def _list_events_by_target(
     # Both harness spellings of a Copilot hook target (GAP-2619).
     spellings = copilot_hook_target_spellings(target, connector)
     try:
-        if hasattr(store, "list_events_by_target"):
+        db = getattr(store, "db", None)
+        if hasattr(store, "list_events_by_target") and (len(spellings) == 1 or db is None):
             events = [
                 _coerce_alert_event(item)
                 for spelling in spellings
@@ -1776,13 +1827,12 @@ def _list_events_by_target(
             if len(spellings) > 1:
                 events = sorted(events, key=lambda item: item.timestamp, reverse=True)[:limit]
         else:
-            db = getattr(store, "db", None)
             if db is None:
                 return ()
             marks = ",".join("?" * len(spellings))
             rows = db.execute(
                 "SELECT id, timestamp, action, target, actor, details, severity, run_id"
-                f" FROM audit_events WHERE target IN ({marks}) ORDER BY timestamp DESC LIMIT ?",
+                f" FROM audit_events WHERE target IN ({marks}) ORDER BY {audit_time_order(db)} LIMIT ?",
                 (*spellings, max(limit, 1)),
             ).fetchall()
             events = [_alert_event_from_row(row) for row in rows]
@@ -1895,7 +1945,11 @@ def _hook_decision_from_rows(rows: Iterable[str], hook_target: str = "") -> str:
             # The same label as "defenseclaw alerts" (GAP-1560).
             decision = would_block_hook_label(hook_target, mode)
         elif not decision and action:
-            decision = "allowed" if action == "allow" else action
+            decision = (
+                allowed_finding_hook_label(hook_target, mode) or "allowed"
+                if action == "allow"
+                else action
+            )
     return decision
 
 
@@ -1960,6 +2014,23 @@ def _event_attr(event: object, *names: str) -> object:
 
 def _is_hook_event(event: AlertEvent) -> bool:
     return event.action == "connector-hook"
+
+
+def _target_without_connector(target: str, connector: str) -> str:
+    """``PreToolUse`` for ``claudecode:PreToolUse`` next to a Connector cell.
+
+    The Connector column already names it: at 80 columns the repeated prefix
+    cut the target to ``claudecode:PreTo`` (GAP-0112).
+    """
+
+    name = connector.strip()
+    if not name or name == "—":
+        return target
+    for separator in (":", " · "):
+        prefix = f"{name}{separator}"
+        if target.lower().startswith(prefix.lower()) and len(target) > len(prefix):
+            return target[len(prefix) :]
+    return target
 
 
 def _alert_target_label(event: AlertEvent) -> str:

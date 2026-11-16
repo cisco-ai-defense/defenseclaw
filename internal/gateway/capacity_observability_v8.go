@@ -20,6 +20,8 @@ const (
 	sidecarCapacityInterval    = 15 * time.Second
 	sidecarSQLiteHealthTimeout = 10 * time.Second
 	sidecarCapacityV8Producer  = "gateway.capacity"
+	callWriteQueueName         = "audit.call_write"
+	observationQueueName       = "audit.observation_write"
 )
 
 type capacityInt64FamilyBuilder func(
@@ -311,11 +313,14 @@ func (s *Sidecar) capacityMetricBatch(
 	observedAt time.Time,
 ) []observabilityruntime.GeneratedMetricBatchItem {
 	var (
-		runtimeOnce     sync.Once
-		runtimeSnapshot telemetry.RuntimeMetrics
-		sqliteOnce      sync.Once
-		sqliteSnapshot  audit.SQLiteHealthSnapshot
-		sqliteErr       error
+		runtimeOnce      sync.Once
+		runtimeSnapshot  telemetry.RuntimeMetrics
+		sqliteOnce       sync.Once
+		sqliteSnapshot   audit.SQLiteHealthSnapshot
+		sqliteErr        error
+		queueOnce        sync.Once
+		callQueue        audit.WriteQueueSnapshot
+		observationQueue audit.WriteQueueSnapshot
 	)
 	runtimeValue := func() telemetry.RuntimeMetrics {
 		runtimeOnce.Do(func() {
@@ -335,8 +340,21 @@ func (s *Sidecar) capacityMetricBatch(
 		})
 		return sqliteSnapshot, sqliteErr
 	}
+	queueValue := func(name string) (audit.WriteQueueSnapshot, error) {
+		if s.store == nil {
+			return audit.WriteQueueSnapshot{}, fmt.Errorf("gateway: mandatory SQLite store is unavailable")
+		}
+		queueOnce.Do(func() {
+			callQueue = s.store.CallWriteQueueSnapshot()
+			observationQueue = s.store.ObservationWriteQueueSnapshot()
+		})
+		if name == callWriteQueueName {
+			return callQueue, nil
+		}
+		return observationQueue, nil
+	}
 
-	items := make([]observabilityruntime.GeneratedMetricBatchItem, 0, 11)
+	items := make([]observabilityruntime.GeneratedMetricBatchItem, 0, 15)
 	items = append(items,
 		capacityInt64MetricItem(ctx, observedAt, observability.TelemetryInstrumentDefenseClawRuntimeGoroutines,
 			func() (int64, error) { return runtimeValue().Goroutines, nil },
@@ -394,6 +412,33 @@ func (s *Sidecar) capacityMetricBatch(
 				return builder.BuildMetricDefenseClawSqliteCheckpointDuration(observability.MetricDefenseClawSqliteCheckpointDurationInput{Envelope: envelope, Value: value})
 			}),
 	)
+	if s.store != nil && s.store.SecureClientSchema() {
+		return items
+	}
+	if cfg := s.currentConfig(); cfg != nil && cfg.SecureClientIntegration() {
+		return items
+	}
+	for _, queue := range []string{callWriteQueueName, observationQueueName} {
+		items = append(items,
+			capacityInt64MetricItem(ctx, observedAt, observability.TelemetryInstrumentDefenseClawQueueDepth,
+				func() (int64, error) { snapshot, err := queueValue(queue); return snapshot.Depth, err },
+				func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput, value int64) (observability.Record, error) {
+					return builder.BuildMetricDefenseClawQueueDepth(observability.MetricDefenseClawQueueDepthInput{
+						Envelope: envelope, Value: value, DefenseClawMetricQueue: observability.Present(queue),
+					})
+				}),
+			capacityInt64MetricItem(ctx, observedAt, observability.TelemetryInstrumentDefenseClawQueueOldestAge,
+				func() (int64, error) {
+					snapshot, err := queueValue(queue)
+					return snapshot.OldestAge.Milliseconds(), err
+				},
+				func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput, value int64) (observability.Record, error) {
+					return builder.BuildMetricDefenseClawQueueOldestAge(observability.MetricDefenseClawQueueOldestAgeInput{
+						Envelope: envelope, Value: value, DefenseClawMetricQueue: observability.Present(queue),
+					})
+				}),
+		)
+	}
 	return items
 }
 

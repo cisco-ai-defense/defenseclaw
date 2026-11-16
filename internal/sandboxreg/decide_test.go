@@ -139,20 +139,33 @@ func TestCheckDecisionDirectRoutePastFloor(t *testing.T) {
 	}
 }
 
-// Saved decisions are capped by the floor at every resolve: a profile that
-// tightened takes back what it no longer allows, and keeps user blocks.
-func TestCapDecisions(t *testing.T) {
-	saved := []Decision{
-		{ID: "d1", Kind: sandboxrelay.DecisionEgressAllow, Host: "a.example.org", Scope: sandboxrelay.DecisionScopeAlways},
-		{ID: "d2", Kind: sandboxrelay.DecisionUnblock, Host: "b.example.org", Scope: sandboxrelay.DecisionScopeAlways},
-		{ID: "d3", Kind: sandboxrelay.DecisionEgressBlock, Host: "c.example.org", Scope: sandboxrelay.DecisionScopeAlways},
+// GAP-0198: under a strict floor nothing lasting is allowed or unblocked,
+// whatever profile a running sandbox registered under; session answers and
+// user blocks still pass. The gateway's decisions route and the daemon cap
+// saved decisions with this check (GAP-0224 tests the reload).
+func TestCheckDecisionStrictFloorKeepsNothingForFutureSandboxes(t *testing.T) {
+	f := config.OpenShellAdminConfig{MinProfile: " Strict "}
+	for _, tc := range []struct {
+		kind, scope, rule string
+	}{
+		{sandboxrelay.DecisionEgressAllow, sandboxrelay.DecisionScopeAlways, RuleMinProfile},
+		{sandboxrelay.DecisionUnblock, sandboxrelay.DecisionScopeAlways, RuleMinProfile},
+		{sandboxrelay.DecisionEgressAllow, sandboxrelay.DecisionScopeSession, ""},
+		{sandboxrelay.DecisionUnblock, sandboxrelay.DecisionScopeSession, ""},
+		{sandboxrelay.DecisionEgressBlock, sandboxrelay.DecisionScopeAlways, ""},
+	} {
+		err := CheckDecision(f, decision(tc.kind, tc.scope, "api.example.org"))
+		var refusal *DecisionRefusedError
+		switch {
+		case tc.rule == "" && err != nil:
+			t.Errorf("%s/%s refused under a strict floor: %v", tc.kind, tc.scope, err)
+		case tc.rule != "" && (!errors.As(err, &refusal) || refusal.Rule != tc.rule || !strings.Contains(refusal.Message, "for this session instead")):
+			t.Errorf("%s/%s = %v, want refused by %s", tc.kind, tc.scope, err, tc.rule)
+		}
 	}
-	if got := CapDecisions(config.OpenShellAdminConfig{}, saved); len(got) != 3 {
-		t.Fatalf("an unset floor kept %d of 3", len(got))
-	}
-	got := CapDecisions(config.OpenShellAdminConfig{UserApprovals: config.OpenShellUserApprovalsSession}, saved)
-	if len(got) != 1 || got[0].ID != "d3" {
-		t.Fatalf("a session-only floor kept %+v, want only the user block", got)
+	if err := CheckApprovals(config.OpenShellAdminConfig{MinProfile: config.OpenShellProfileBalanced},
+		sandboxrelay.DecisionEgressAllow, sandboxrelay.DecisionScopeAlways); err != nil {
+		t.Fatalf("a balanced floor refused an always allow: %v", err)
 	}
 }
 

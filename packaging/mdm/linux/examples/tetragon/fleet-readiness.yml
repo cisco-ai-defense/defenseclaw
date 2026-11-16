@@ -43,6 +43,7 @@
           - "Hosts ready: {{ fleet_ready_hosts | length }} of {{ fleet_vars | length }}"
           - "Hosts not ready: {{ fleet_not_ready_hosts | join(', ') | default('none', true) }}"
           - "Users enforcing: {{ fleet_users_all | selectattr('phase', 'equalto', 'enforcing') | list | length }}"
+          - "Users armed (enforce loaded, no agent session anchored yet): {{ fleet_users_all | selectattr('phase', 'equalto', 'armed') | list | length }}"
           - "Users ready for enforce: {{ fleet_users_all | selectattr('phase', 'equalto', 'ready') | list | length }}"
           - "Users in burn-in: {{ fleet_users_all | selectattr('phase', 'equalto', 'burn_in') | list | length }}"
           - "Users reset by a hit: {{ fleet_users_all | selectattr('phase', 'equalto', 'reset') | list | length }}"

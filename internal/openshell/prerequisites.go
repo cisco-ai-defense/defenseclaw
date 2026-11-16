@@ -59,6 +59,12 @@ type PrerequisiteMissing struct {
 	Item   string `json:"item"`
 	Detail string `json:"detail"`
 	Fix    string `json:"fix"`
+	// Version is the release an OpenShell part (openshell cli, openshell
+	// gateway, microvm driver) is installed in when that release is
+	// refused: the gateway then says it is installed and unsupported, or
+	// not the pinned release, rather than not installed (GAP-0266). Empty
+	// for other items and for a part that is missing.
+	Version string `json:"version,omitempty"`
 }
 
 // ReadPrerequisites reads the record at path. Like the rendered gateway

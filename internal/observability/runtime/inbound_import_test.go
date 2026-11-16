@@ -116,11 +116,7 @@ func TestInboundImportBatchPinsLogAndMetricTargetsToOneReloadGeneration(t *testi
 	if runtime.Active().Generation() != 2 {
 		t.Fatal("reload did not publish generation two")
 	}
-	select {
-	case result := <-reloaded:
-		t.Fatalf("reload retired generation one before batch close: status=%s err=%v", result.result.Status(), result.err)
-	default:
-	}
+	// The reload returned once generation two was published (#1302).
 
 	var metricGeneration atomic.Uint64
 	recorded, err := batch.RecordGeneratedMetric(t.Context(), generatedMetricFamily, func(

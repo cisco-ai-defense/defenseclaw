@@ -27,11 +27,16 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
+
+var guardianFreshAccountRecordGone = unixidentity.AccountRecordGone
 
 // codeHookContractUnverified names a guardian target whose agent version
 // has no verified DefenseClaw hook contract. The guardian refuses to
@@ -51,8 +56,11 @@ const codeGuardianTargetAccountRemoved = "guardian_target_account_removed"
 
 // codeGuardianTargetUserPath names a guardian target the guardian refused
 // because of a path in that account's own home: a symbolic link, a file
-// where a folder belongs (or a folder where a file belongs), or a folder the
-// account made unreadable. Only that account is affected, and it could have
+// where a folder belongs (or a folder where a file belongs), a folder the
+// account made unreadable, or the agent's own config folder the account has
+// not created yet, or its config file (it has not set the agent up,
+// GAP-2593). Only that account
+// is affected, and it could have
 // made the change itself, so it is a warning: verify, MDM detection and
 // security_complete do not fail on it. The guardian protects the target
 // again at its next reconcile after the path is fixed.
@@ -65,12 +73,13 @@ const guardianStateFile = "hook_guardian_state.json"
 // its definitive misses per target and the source of each account.
 const enumeratorStateFile = ".targets-enumerator-state.json"
 
-var unverifiedVersionPattern = regexp.MustCompile(`agent version "([^"]*)"`)
+var unverifiedVersionPattern = lazyregexp.New(`agent version "([^"]*)"`)
 
 // describeHookContracts reports every guardian target the guardian could
 // not protect (an unverified hook contract gets its own code) and marks the
 // deployment security-incomplete: an unprotected agent must never look like
-// a healthy deployment. A target refused only because of a path in its
+// a healthy deployment. A target with no verified hook contract also marks
+// coverage incomplete: no DefenseClaw hook is installed for it. A target refused only because of a path in its
 // account's own home is reported for that account without marking the
 // deployment incomplete.
 func (l *lifecycle) describeHookContracts(ctx context.Context) {
@@ -108,7 +117,9 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 			continue
 		}
 		stateFailed[enterprisehooks.CredentialAttestationTarget{Connector: result.Connector, User: result.User, UserHome: result.UserHome}.Key()] = true
-		if (targetAccountMissingError(result.Error) || targetHomeUnavailableError(result.Error)) && l.accountAbsent(ctx, result.User) {
+		missingTarget := targetAccountMissingError(result.Error) || targetHomeUnavailableError(result.Error)
+		freshGone := missingTarget && guardianFreshAccountRecordGone(ctx, result.User)
+		if missingTarget && (freshGone || l.accountAbsent(ctx, result.User)) {
 			// An account that does not resolve, or whose home went with it, is
 			// not a protection failure.
 			// Say it is gone only when the enumerator confirmed it: a directory
@@ -117,7 +128,7 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 			// Even then it says the account does not resolve, not that it
 			// was deleted: while the directory is unreachable the lookup
 			// gives the same answer (GAP-0838).
-			if enterprisehooks.UnixMissConfirmed(enumeration, result.User, result.Connector) {
+			if freshGone || enterprisehooks.UnixMissConfirmed(enumeration, result.User, result.Connector) {
 				message := fmt.Sprintf("%s for user %s: the account does not resolve (the lookup answers \"no such account\"); "+
 					"if it was deleted, the enumerator removes this target after %d consecutive definitive misses, one per "+
 					"enumeration cycle; while the directory does not answer, nothing is removed",
@@ -128,6 +139,13 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 						result.Connector, result.User)
 				}
 				removed = append(removed, message)
+			} else if !directoryLookupsFailing(r.Warnings) {
+				// A miss the enumerator has not confirmed, with no directory
+				// outage to explain it, is a target the guardian could not
+				// protect: it stays and is reported (GAP-1133).
+				failed = append(failed, fmt.Sprintf("%s for user %s is not protected: the guardian's last reconcile could not "+
+					"resolve the account, and the enumerator has not confirmed that it is gone; the guardian protects it again "+
+					"once the account resolves", result.Connector, result.User))
 			}
 			continue
 		}
@@ -178,7 +196,59 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 	for _, message := range failed {
 		r.AddWarning(codeGuardianTargetFailed, message)
 	}
-	r.SecurityComplete = false
+	if len(failed) > 0 {
+		r.MarkSecurityIncomplete(codeGuardianTargetFailed)
+	}
+	if len(unverified) > 0 {
+		// An enrolled agent with no hook contract has no DefenseClaw hook at
+		// all, so the deployment does not cover it (GAP-0151).
+		r.MarkCoverageIncomplete(codeHookContractUnverified)
+	}
+}
+
+// requireProtectedTargets fails an install, upgrade, repair or ensure that
+// leaves an enrolled target unprotected: each guardian_target_failed warning
+// describe reported becomes an error with the same cause, as verify and
+// reconcile already fail on it. The change itself stays committed. An
+// ensure on a managed host whose enrolled Hermes the guardian could not
+// verify returned ok and exit 0 next to security_complete false (GAP-0846).
+// A target refused for a path in its own account's home, the target of an
+// account that is gone and an agent version with no verified hook contract
+// stay warnings here, as in verify. It returns code.
+func (l *lifecycle) requireProtectedTargets(code int) int {
+	r := l.result
+	failed := map[string]bool{}
+	for _, message := range r.Errors {
+		if message.Code == codeGuardianTargetFailed {
+			failed[message.Message] = true
+		}
+	}
+	for _, warning := range r.Warnings {
+		if warning.Code != codeGuardianTargetFailed || failed[warning.Message] {
+			continue
+		}
+		failed[warning.Message] = true
+		r.AddError(codeGuardianTargetFailed, warning.Message+"; the change was applied, but DefenseClaw does not protect that agent: fix the cause, then run `"+
+			l.env.lifecycleCommand(ActionReconcile)+"` (the guardian also retries every minute) and `"+l.env.lifecycleCommand(ActionVerify)+"`")
+	}
+	if len(failed) > 0 {
+		r.MarkSecurityIncomplete(codeGuardianTargetFailed)
+	}
+	return code
+}
+
+// requireProtectedTargetsOnChange is requireProtectedTargets for a run that
+// ends before its action does anything: an empty bundle inbox, a bundle
+// mode refusal, or a queued apply run that stands down. Such an ensure
+// (or install, upgrade, repair) exited 0 while describe reported an
+// enrolled target unprotected (GAP-0985). Other actions return code as it
+// is.
+func (l *lifecycle) requireProtectedTargetsOnChange(code int) int {
+	switch l.opts.Action {
+	case ActionInstall, ActionUpgrade, ActionRepair, ActionEnsure:
+		return l.requireProtectedTargets(code)
+	}
+	return code
 }
 
 // codeAgentSettingsNotRestored names an account whose agent config the
@@ -336,8 +406,233 @@ func (l *lifecycle) guardianTargetFailedSince(since time.Time) bool {
 // eligible user but could not enroll; it runs without DefenseClaw hooks.
 const codeAgentUnprotected = enterprisehooks.UnprotectedCodeAgentUnprotected
 
+// reportInstallScanPending reports a missing or stale unprotected-agents
+// record, or one an earlier install wrote, as one NOT COVERED warning, verify included (GAP-1430). Only that
+// condition is a warning: every other check, and every agent a stale record
+// names, keeps its own verdict.
+func (l *lifecycle) reportInstallScanPending(age string) {
+	remedy := "sudo systemctl restart " + unitEnumerator
+	if l.env.GOOS == "darwin" {
+		remedy = "sudo launchctl kickstart -k system/" + labelEnumerator
+	}
+	l.result.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, enterprisehooks.UnprotectedAgentsScanPending(age, remedy))
+	l.result.MarkCoverageIncomplete(enterprisehooks.UnprotectedCodeInstallScanIncomplete)
+}
+
+// installScanPendingReason says why the enumerator's unprotected-agents
+// record (data, last written at modTime) is not the current install's scan:
+// stale by age, or written by another install generation. A recent record
+// of the previous install is not this install's scan (GAP-1454): pending
+// until the current enumerator publishes.
+func installScanPendingReason(data []byte, modTime, now time.Time) (string, bool) {
+	if enterprisehooks.UnprotectedAgentsRecordStale(modTime, now) {
+		return enterprisehooks.UnprotectedAgentsRecordAge(modTime, now), true
+	}
+	if written := enterprisehooks.UnprotectedAgentsRecordGeneration(data); written != enterprisehooks.UnprotectedAgentsGeneration() {
+		return enterprisehooks.UnprotectedAgentsRecordFromEarlierInstall(written), true
+	}
+	return "", false
+}
+
+// installScanPending reports whether the record is missing or is not the
+// scan of the installed config by the current install, the states the
+// enumerator restarted by this change resolves with its first cycle. A
+// record that cannot be read, or an installed config no scan can be matched
+// to, is not waited for: describeUnprotectedAgents reports it as it is.
+func (l *lifecycle) installScanPending() bool {
+	env := l.env
+	path := env.P(enterprisehooks.UnprotectedAgentsPath(env.Layout.ManifestPath))
+	data, err := readBounded(path, enterprisehooks.UnprotectedAgentsMaxBytes)
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	_, pending, _ := l.installScanVerdict(data, info.ModTime(), time.Now())
+	return pending
+}
+
+// installScanVerdict is the one test of an unprotected-agents record (data,
+// last written at modTime) that the wait for the restarted enumerator and the
+// result both use, so the wait ends exactly when the result stops reporting
+// the scan as pending (GAP-0782: the wait tested only the build and the age,
+// returned at once on a record the previous config generation stamped, and
+// the result then reported it pending). pending is true, with the reason,
+// when the record is stale, from another install, or does not name the
+// installed config generation and digest: the first cycle of the enumerator
+// restarted by this change resolves each. unmatched is set instead when the
+// installed config has no usable generation record, which no scan resolves.
+func (l *lifecycle) installScanVerdict(data []byte, modTime, now time.Time) (reason string, pending bool, unmatched string) {
+	if reason, pending := installScanPendingReason(data, modTime, now); pending {
+		return reason, true, ""
+	}
+	// The build and age can match after a connector or policy change.
+	// The scan stamp must name a generation bound to the installed config
+	// bytes; a restored or incomplete generation record is not proof.
+	configPath := l.env.P(l.env.Layout.ConfigPath)
+	current, err := configwrite.ReadGenerationState(configPath)
+	switch {
+	case err != nil:
+		unmatched = err.Error()
+	case current.Generation == 0:
+		unmatched = "generation is zero"
+	case current.ConfigSHA256 == "":
+		unmatched = "config digest is missing"
+	default:
+		installed, readErr := readBounded(configPath, maxInputBytes)
+		if readErr != nil {
+			unmatched = "config.yaml cannot be read: " + readErr.Error()
+		} else if sha256Bytes(installed) != current.ConfigSHA256 {
+			unmatched = "config digest differs from config.yaml"
+		}
+	}
+	if unmatched != "" {
+		return "", false, unmatched
+	}
+	// The digest names the bytes the scan read. A number alone can repeat
+	// after the generation record is rebuilt.
+	if enterprisehooks.UnprotectedAgentsRecordConfigGeneration(data) != current.Generation ||
+		enterprisehooks.UnprotectedAgentsRecordConfigSHA256(data) != current.ConfigSHA256 {
+		return "from a different config generation", true, ""
+	}
+	// The enumerator announces a scan of this config before it runs it; the
+	// announcement carries the previous scan's agents and is not a result.
+	if enterprisehooks.UnprotectedAgentsRecordScanInProgress(data) {
+		return "still being rewritten by a scan of the new config that has not finished", true, ""
+	}
+	return "", false, ""
+}
+
+// defaultInstallScanTimeout bounds awaitInstallScan. The restarted macOS
+// enumerator wrote its first record 38 s after the launchd kickstart (GAP-0782,
+// two measurements on the standalone pkg host), so the bound is more than
+// twice that.
+const defaultInstallScanTimeout = 90 * time.Second
+
+// installScanProgressEvery spaces the progress lines of awaitInstallScan.
+const installScanProgressEvery = 10 * time.Second
+
+// awaitInstallScan waits, bounded by InstallScanTimeout, for the enumerator
+// this change restarted to publish its first record, so the result of an
+// upgrade reports the install scan of the new install, not the previous
+// release's. Without it an ensure that restarts the enumerator a moment before
+// its own verify read "NOT COVERED (scan pending)" from the record the
+// previous release wrote (GAP-0726: the Enterprise Upgrade Lane (pkg) step
+// "upgrade to 9.9.9" exited 0 with coverage_complete=false). The wait ends
+// at once when the record is already current (this install, the installed
+// config generation), so a change that left the enumerator running does
+// not wait. It polls and prints a progress line while it waits. A record
+// still pending at the deadline is reported by describeUnprotectedAgents
+// with its remedy.
+func (l *lifecycle) awaitInstallScan(ctx context.Context) bool {
+	env := l.env
+	start := env.Now()
+	deadline := start.Add(env.InstallScanTimeout)
+	nextProgress := start
+	for {
+		if !l.installScanPending() {
+			return true
+		}
+		now := env.Now()
+		if !now.Before(deadline) {
+			return false
+		}
+		if env.Progress != nil && !now.Before(nextProgress) {
+			env.Progress(fmt.Sprintf("waiting for the enumerator to scan the new config (%s of at most %s)",
+				now.Sub(start).Round(time.Second), env.InstallScanTimeout))
+			nextProgress = now.Add(installScanProgressEvery)
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(env.PollInterval):
+		}
+	}
+}
+
+// guardianCatchUpPending reports whether the guardian is still reconciling
+// what this change wrote: its credential attestation does not yet name the
+// current targets.yaml (the enumerator rewrites it after the config changes,
+// for example a connector roster change) or does not yet match the
+// authorization ledger it just published (its normal two-step publication), or a per-user cleanup this change
+// started (recorded at or after since, with no failed attempt) is still on
+// the guardian ledger. A ledger that is not published, or an attestation that
+// is wrong in another way, is not waited for: describe reports it.
+func (l *lifecycle) guardianCatchUpPending(since time.Time) bool {
+	env := l.env
+	if data, err := readBounded(env.P(filepath.Join(env.Layout.GuardianAuthDir, managed.HookGuardianAuthorizationFile)), 4<<20); err == nil {
+		// Both are the guardian part-way through one reconcile: the cleanup
+		// ledger is already gone and the new authorization ledger is out, but
+		// its matching attestation is not (or still names the old targets.yaml).
+		if problem, _ := env.attestationProblem(data); problem == guardianManifestNotReconciled || problem == guardianLedgerNotAttested {
+			return true
+		}
+	}
+	data, err := readBounded(env.P(filepath.Join(env.Layout.GuardianAuthDir, managed.HookGuardianUserCleanupFile)), 4<<20)
+	if err != nil {
+		return false
+	}
+	var ledger struct {
+		Pending []struct {
+			RecordedAt string `json:"recorded_at"`
+			LastError  string `json:"last_error"`
+		} `json:"pending"`
+	}
+	if json.Unmarshal(data, &ledger) != nil {
+		return false
+	}
+	for _, entry := range ledger.Pending {
+		if recorded, err := time.Parse(time.RFC3339Nano, entry.RecordedAt); err == nil && !recorded.Before(since) && strings.TrimSpace(entry.LastError) == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// awaitGuardianCatchUp waits, until deadline (the end of the install scan
+// wait, so a change never waits longer than InstallScanTimeout for both), for
+// the running guardian to reconcile the targets.yaml this change produced and
+// to finish the per-user cleanups the change started. A roster change that
+// removes a connector ended with coverage_complete=false and
+// guardian_reconcile_pending / guardian_cleanup_pending because the result was
+// read seconds before the guardian finished (GAP-0842). A guardian that does
+// not finish in time leaves those warnings, which name the transient.
+func (l *lifecycle) awaitGuardianCatchUp(ctx context.Context, deadline, since time.Time) bool {
+	env := l.env
+	for _, unit := range env.Services.Units() {
+		if unit.Kind == "guardian" && !env.Services.Active(ctx, unit) {
+			return false
+		}
+	}
+	start := env.Now()
+	nextProgress := start
+	for {
+		if !l.guardianCatchUpPending(since) {
+			return true
+		}
+		now := env.Now()
+		if !now.Before(deadline) {
+			return false
+		}
+		if env.Progress != nil && !now.Before(nextProgress) {
+			env.Progress(fmt.Sprintf("waiting for the hook guardian to reconcile the new targets (%s)", now.Sub(start).Round(time.Second)))
+			nextProgress = now.Add(installScanProgressEvery)
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(env.PollInterval):
+		}
+	}
+}
+
 // describeUnprotectedAgents reports the agents the enumerator found
-// installed but could not enroll (its unprotected-agents record next to the
+// uncovered (its unprotected-agents record next to the
 // manifest) and marks the deployment security-incomplete. Each is one
 // account's agent, so it is a warning for that account, verify included; an
 // unreadable record hides which agents they are, so verify fails on it, as
@@ -346,29 +641,88 @@ const codeAgentUnprotected = enterprisehooks.UnprotectedCodeAgentUnprotected
 func (l *lifecycle) describeUnprotectedAgents() {
 	env, r := l.env, l.result
 	data, err := readBounded(env.P(enterprisehooks.UnprotectedAgentsPath(env.Layout.ManifestPath)), enterprisehooks.UnprotectedAgentsMaxBytes)
+	if errors.Is(err, os.ErrNotExist) {
+		l.reportInstallScanPending(enterprisehooks.UnprotectedAgentsRecordMissing)
+		return
+	}
 	if err != nil {
+		message := "the enumerator's unprotected-agents record is missing or unreadable: " + err.Error()
+		if l.opts.Action == ActionVerify {
+			r.AddError(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
+		} else {
+			r.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
+		}
+		r.MarkCoverageIncomplete(enterprisehooks.UnprotectedCodeInstallScanIncomplete)
 		return
 	}
 	agents, err := enterprisehooks.ParseUnprotectedAgents(data)
 	if err != nil {
 		message := "the enumerator's unprotected-agents record is unreadable: " + err.Error()
 		if l.opts.Action == ActionVerify {
-			r.AddError(codeVerify, message)
+			r.AddError(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
 		} else {
-			r.AddWarning(codeAgentUnprotected, message)
+			r.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
 		}
-		r.SecurityComplete = false
+		r.MarkCoverageIncomplete(enterprisehooks.UnprotectedCodeInstallScanIncomplete)
 		return
 	}
+	info, err := os.Stat(env.P(enterprisehooks.UnprotectedAgentsPath(env.Layout.ManifestPath)))
+	if err != nil {
+		message := "the enumerator's unprotected-agents record's scan time cannot be read: " + err.Error()
+		if l.opts.Action == ActionVerify {
+			r.AddError(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
+		} else {
+			r.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
+		}
+		r.MarkCoverageIncomplete(enterprisehooks.UnprotectedCodeInstallScanIncomplete)
+	} else if reason, pending, unmatched := l.installScanVerdict(data, info.ModTime(), time.Now()); pending {
+		l.reportInstallScanPending(reason)
+	} else if unmatched != "" {
+		message := "NOT COVERED (scan pending): the enumerator's scan cannot be matched to the installed config generation: " + unmatched
+		if l.opts.Action == ActionVerify {
+			r.AddError(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
+		} else {
+			r.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
+		}
+		r.MarkCoverageIncomplete(enterprisehooks.UnprotectedCodeInstallScanIncomplete)
+	}
+	// One machine-wide OpenCode V1 copy is one warning with the user count,
+	// not one per account (GAP-0071); every account still counts below.
+	sharedLines, sharedEntry := enterprisehooks.CollapseSharedOpenCodeV1(agents, enterprisehooks.UnprotectedAgentsPath(env.Layout.ManifestPath))
+	for _, line := range sharedLines {
+		r.AddWarning(line.Code, line.Message())
+	}
 	for _, agent := range agents {
-		if agent.Refusal == enterprisehooks.RefusalMissing && l.opts.Action == ActionVerify {
+		if enterprisehooks.UnprotectedCodeLeavesCoverageIncomplete(agent.Code) {
+			// The deployment does not cover it: no contract, an incomplete
+			// install scan, a CLI path or IDE without hooks (GAP-0151), or
+			// OpenCode V1 (rel-1-0-6 GAP-0037).
+			r.MarkCoverageIncomplete(agent.Code)
+		}
+		if l.opts.Action == ActionVerify && (agent.Refusal == enterprisehooks.RefusalMissing ||
+			agent.Code == enterprisehooks.UnprotectedCodeKiroCLIBelowHookFloor ||
+			agent.Code == enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor) {
 			r.AddError(agent.Code, agent.Message())
 			continue
 		}
-		r.AddWarning(agent.Code, agent.Message())
+		if !sharedEntry(agent) {
+			r.AddWarning(agent.Code, agent.Message())
+		}
+		if agent.InstallPath != "" && (l.opts.Action == ActionStatus || l.opts.Action == ActionVerify) && env.ReportLaunchCoverage != nil && agent.UID != nil {
+			reason := "unsupported_installed_version"
+			if agent.Version == "" {
+				reason = "installed_version_unverified"
+			}
+			if err := env.ReportLaunchCoverage(context.Background(), managed.LaunchCoverageReport{
+				Connector: agent.Connector, Reason: reason, UID: *agent.UID,
+				InstallPath: agent.InstallPath, Version: agent.Version,
+			}); err != nil {
+				r.AddWarning(codeManagedLaunchAuditUnavailable, "could not audit the unprotected "+agent.Connector+" install: "+err.Error())
+			}
+		}
 	}
-	if len(agents) > 0 {
-		r.SecurityComplete = false
+	for _, agent := range agents {
+		r.MarkSecurityIncomplete(agent.Code)
 	}
 }
 
@@ -382,7 +736,7 @@ const codeGuardianCleanupPending = "guardian_cleanup_pending"
 
 // describeGuardianCleanups reports the entries of the guardian's per-user
 // cleanup ledger next to its authorization ledger.
-func (l *lifecycle) describeGuardianCleanups() {
+func (l *lifecycle) describeGuardianCleanups(ctx context.Context) {
 	env, r := l.env, l.result
 	data, err := readBounded(env.P(filepath.Join(env.Layout.GuardianAuthDir, managed.HookGuardianUserCleanupFile)), 4<<20)
 	if err != nil {
@@ -391,6 +745,7 @@ func (l *lifecycle) describeGuardianCleanups() {
 	var ledger struct {
 		Pending []struct {
 			Connector string `json:"connector"`
+			UID       int    `json:"uid"`
 			User      string `json:"user"`
 			UserHome  string `json:"user_home"`
 			LastError string `json:"last_error"`
@@ -404,14 +759,26 @@ func (l *lifecycle) describeGuardianCleanups() {
 		if account == "" {
 			account = strings.TrimSpace(entry.UserHome)
 		}
-		if home := strings.TrimSpace(entry.UserHome); home != "" {
+		// A home that does not answer a bounded lookup keeps the cleanup
+		// reported as pending (GAP-1751).
+		if home := strings.TrimSpace(entry.UserHome); home != "" && env.homeAnswers(env.P(home)) {
 			if _, err := os.Lstat(env.P(home)); errors.Is(err, os.ErrNotExist) {
-				// A deleted account took its home and the registration with
-				// it; the guardian drops the entry once the directory no
-				// longer knows the account (GAP-1205).
-				r.AddWarning(codeGuardianCleanupPending, fmt.Sprintf(
-					"%s for user %s: the home %s no longer exists (the account was deleted), so no hook registration is left there; the hook guardian drops this entry on its next pass once the account lookup reports it gone",
-					entry.Connector, account, home))
+				// The account may have moved. Keep the guardian's current-home
+				// failure visible instead of calling a missing recorded home
+				// proof that the account was deleted (GAP-0254).
+				message := fmt.Sprintf("%s for user %s: the recorded home %s no longer exists; no hook registration is left there; the hook guardian checks the account's current home before retiring this cleanup",
+					entry.Connector, account, home)
+				if live, ok := env.lookupAccountUID(ctx, entry.UID); entry.UID > 0 && ok && filepath.Clean(live.Home) != filepath.Clean(home) {
+					// A live account that was given another home (rel-1-0-2
+					// GAP-0602): say so, and what ends the cleanup.
+					message = fmt.Sprintf("%s for user %s: the account is still present with home %s; its recorded home %s no longer exists, so no hook registration can be reached there; "+
+						"the hook guardian removes DefenseClaw's hook registration from %s as that user and then retires this cleanup, which also ends when the account is removed",
+						entry.Connector, account, live.Home, home, live.Home)
+				}
+				if reason := strings.TrimSpace(entry.LastError); reason != "" {
+					message += "; the last cleanup attempt failed and is retried: " + boundedGuardianReason(strings.TrimPrefix(reason, "enterprise hooks: "))
+				}
+				r.AddWarning(codeGuardianCleanupPending, message)
 				continue
 			}
 		}
@@ -426,17 +793,19 @@ func (l *lifecycle) describeGuardianCleanups() {
 	}
 }
 
-// codeEnrolledAccountDeleted names an account targets.yaml still enrolls
-// whose home no longer exists: the account was deleted, and its enrollment
-// lasts until the hook enumerator's next pass no longer finds the account.
-// It is a warning: verify and security_complete do not fail on it.
-const codeEnrolledAccountDeleted = "enrolled_account_deleted"
+// A missing home cannot establish whether the account was deleted or its
+// home is temporarily unavailable. Enrollment is retained for a retry.
+const codeEnrolledHomeUnavailable = "enrolled_home_unavailable"
 
-// describeDeletedEnrolledAccounts names each enrolled account whose home is
-// gone. Until the enumerator's next pass drops it, status listed it among
-// the healthy targets with its agents pending and said nothing about the
-// deletion (GAP-1867).
-func (l *lifecycle) describeDeletedEnrolledAccounts() {
+// codeCopilotHomeUnclear names the home of a deleted account whose current
+// holders the directory did not answer clearly: the home is pending, not free
+// and not drift.
+const codeCopilotHomeUnclear = "copilot_home_unclear"
+
+// describeUnavailableEnrolledHomes names enrolled targets whose home cannot
+// currently be found. The enumerator decides separately whether an account
+// has definitively disappeared.
+func (l *lifecycle) describeUnavailableEnrolledHomes() {
 	env, r := l.env, l.result
 	manifest, err := enterprisehooks.LoadStandaloneManifest(env.P(env.Layout.ManifestPath))
 	if err != nil {
@@ -447,6 +816,11 @@ func (l *lifecycle) describeDeletedEnrolledAccounts() {
 	for _, target := range manifest.Targets {
 		home := strings.TrimSpace(target.UserHome)
 		if home == "" || (target.Enabled != nil && !*target.Enabled) {
+			continue
+		}
+		// A home that does not answer a bounded lookup is not looked up in
+		// this process; describeUnansweredHomes names it (GAP-1751).
+		if !env.homeAnswers(env.P(home)) {
 			continue
 		}
 		if _, err := os.Lstat(env.P(home)); !errors.Is(err, os.ErrNotExist) {
@@ -463,9 +837,22 @@ func (l *lifecycle) describeDeletedEnrolledAccounts() {
 	for _, account := range accounts {
 		names := connectors[account]
 		sort.Strings(names)
-		r.AddWarning(codeEnrolledAccountDeleted, fmt.Sprintf(
-			"user %s was deleted: its home no longer exists, but it is still enrolled for %s until the hook enumerator's next pass drops it (the hook guardian then removes it as well); nothing is left to protect in that home",
+		r.AddWarning(codeEnrolledHomeUnavailable, fmt.Sprintf(
+			"user %s: home is unavailable; enrollment for %s is retained and retried on the next hook enumerator pass",
 			account, strings.Join(names, ", ")))
+	}
+}
+
+// describeUnansweredHomes names each home whose bounded lookup did not
+// answer in this status or verify run. Nothing in it was read: the
+// DefenseClaw files, sandboxes and agent settings there are not confirmed,
+// so security_complete is false (GAP-1751).
+func (l *lifecycle) describeUnansweredHomes() {
+	for _, home := range l.env.unansweredHomes() {
+		l.result.MarkSecurityIncomplete(codeEnrolledHomeUnavailable)
+		l.result.AddWarning(codeEnrolledHomeUnavailable, fmt.Sprintf(
+			"home %s did not answer a lookup within %s (a stalled home mount?), so the DefenseClaw files, sandboxes and agent settings in it are not checked in this run; enrollment is retained",
+			boundedGuardianReason(home), enterprisestatus.LaunchPathLookupTimeout()))
 	}
 }
 
@@ -499,7 +886,7 @@ func truncateUTF8(value string, limit int) string {
 // targetAccountMissingPattern is the whole of the guardian's definitive
 // "no such account" resolution error (resolveEnterpriseHookStandaloneAccount
 // in internal/cli), with the account name quoted as Go's %q does.
-var targetAccountMissingPattern = regexp.MustCompile(`^enterprise hooks: target account "(?:[^"\\]|\\.)*" does not exist: no such account$`)
+var targetAccountMissingPattern = lazyregexp.New(`^enterprise hooks: target account "(?:[^"\\]|\\.)*" does not exist: no such account$`)
 
 // targetAccountMissingError matches the guardian's definitive "no such
 // account" resolution error: `enterprise hooks: target account "<name>"
@@ -523,23 +910,43 @@ func targetHomeUnavailableError(message string) bool {
 // folder belongs or a folder where a file belongs ("hook config parent is
 // not a directory: <path>", "hook config path is a directory: <path>"), and
 // a folder the worker, which runs as the account, cannot search ("inspect
-// hook config parent <path>: lstat <path>: permission denied"). The last
-// group is the refused path.
+// hook config parent <path>: lstat <path>: permission denied"), and a hook
+// config, or a folder above it, that does not exist ("hook config parent
+// missing: <path>", "hook config file missing: <path>"): the agent keeps its
+// config there (~/.hermes/config.yaml for Hermes), and an account that has
+// not set the agent up has none yet. A managed ensure
+// failed with guardian_target_failed for every such account of a shared
+// Hermes install (enrollment.agent_prefixes), although the change was
+// applied and only those accounts were affected (GAP-2593). The last group
+// is the refused path.
 var userHomePathRefusalPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`^refusing symlink (?:in )?[a-z][a-z ]*: (/.+)$`),
-	regexp.MustCompile(`^[a-z][a-z ]* (?:is not a directory|path is a directory): (/.+)$`),
+	regexp.MustCompile(`^[a-z][a-z ]* (?:is not a directory|path is a directory|parent missing|file missing): (/.+)$`),
 	regexp.MustCompile(`^inspect [a-z][a-z ]* /.+: lstat (/.+): (?:permission denied|not a directory)$`),
 }
 
+// userHomePathRefusalWrapper is the per-user worker's wrapper around the
+// bootstrap of a connector's missing hook config (enterprisehooks
+// installer.go: "bootstrap missing hook config for <connector>: enterprise
+// hooks: <refusal>"). The refusal inside it is classified as if it were not
+// wrapped: a folder the account made unreadable stops the bootstrap's lstat
+// before the strict validate step would (Antigravity ~/.gemini, GAP-0051).
+// The first group is the wrapped refusal.
+var userHomePathRefusalWrapper = lazyregexp.New(`^bootstrap missing hook config for [a-z][a-z0-9_-]*: enterprise hooks: (.+)$`)
+
 // userHomePathRefusal reports whether reason is one of those refusals for a
-// path strictly inside home, the target account's own home. The match is on
-// the whole reason, because other guardian errors can quote text from a
-// user's own files. A refusal of the home itself or of a path outside it,
-// and every other error, stays a guardian_target_failed.
+// path strictly inside home, the target account's own home, bare or inside
+// userHomePathRefusalWrapper. The match is on the whole reason, because
+// other guardian errors can quote text from a user's own files. A refusal of
+// the home itself or of a path outside it, and every other error, stays a
+// guardian_target_failed.
 func userHomePathRefusal(reason, home string) bool {
 	home = filepath.Clean(strings.TrimSpace(home))
 	if !filepath.IsAbs(home) || home == "/" {
 		return false
+	}
+	if match := userHomePathRefusalWrapper.FindStringSubmatch(reason); match != nil {
+		reason = match[1]
 	}
 	for _, pattern := range userHomePathRefusalPatterns {
 		if match := pattern.FindStringSubmatch(reason); match != nil {

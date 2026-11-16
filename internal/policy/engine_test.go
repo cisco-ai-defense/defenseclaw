@@ -84,8 +84,9 @@ func TestAdmissionRegoAndFallbackAgree(t *testing.T) {
 		{name: "clean", in: AdmissionInput{TargetType: "skill", TargetName: "s", ScanResult: scan("INFO", 0, "")}, verdict: "clean"},
 		{name: "skill high", in: AdmissionInput{TargetType: "skill", TargetName: "s", ScanResult: scan("high", 2, "skill-scanner")}, verdict: "rejected"},
 		{name: "skill medium", in: AdmissionInput{TargetType: "skill", TargetName: "s", ScanResult: scan("MEDIUM", 1, "skill-scanner")}, verdict: "warning"},
-		{name: "mcp medium", in: AdmissionInput{TargetType: "mcp", TargetName: "m", ScanResult: scan("MEDIUM", 1, "")}, verdict: "rejected"},
-		{name: "mcp low runtime block", in: AdmissionInput{TargetType: "mcp", TargetName: "m", ScanResult: scan("LOW", 1, "")}, verdict: "rejected"},
+		{name: "mcp high balanced warning", in: AdmissionInput{TargetType: "mcp", TargetName: "m", ScanResult: scan("HIGH", 1, "")}, verdict: "warning"},
+		{name: "mcp medium", in: AdmissionInput{TargetType: "mcp", TargetName: "m", ScanResult: scan("MEDIUM", 1, "")}, verdict: "warning"},
+		{name: "mcp low", in: AdmissionInput{TargetType: "mcp", TargetName: "m", ScanResult: scan("LOW", 1, "")}, verdict: "warning"},
 		{name: "plugin high", in: AdmissionInput{TargetType: "plugin", TargetName: "p", ScanResult: scan("HIGH", 1, "")}, verdict: "rejected"},
 		{name: "allow shorthand", in: AdmissionInput{TargetType: "skill", TargetName: "s", ScanResult: scan("LOW", 1, "")}, admission: allowLow, verdict: "allowed"},
 		{name: "scanner override", in: AdmissionInput{TargetType: "skill", TargetName: "s", ScanResult: scan("MEDIUM", 1, "virustotal")}, admission: allowLow, verdict: "rejected"},
@@ -190,7 +191,7 @@ func TestCompileAdmissionLayers(t *testing.T) {
 	if !reflect.DeepEqual(skill.Actions, want) || skill.Source != "config:admission.skill.actions" {
 		t.Fatalf("skill = %+v (%s)", skill.Actions, skill.Source)
 	}
-	if mcp := got[config.AdmissionTypeMCP]; mcp.Actions["LOW"] != want["CRITICAL"] || mcp.Actions["MEDIUM"] != actionQuarantine {
+	if mcp := got[config.AdmissionTypeMCP]; mcp.Actions["LOW"] != want["CRITICAL"] || mcp.Actions["MEDIUM"] != actionWarn {
 		t.Fatalf("mcp = %+v", mcp.Actions)
 	}
 	if plugin := got[config.AdmissionTypePlugin]; plugin.FirstPartyAllowList == nil || len(plugin.FirstPartyAllowList) != 0 {

@@ -96,7 +96,7 @@ agent_run() {
   [ "${CODEX_BYPASS_HOOK_TRUST:-0}" = "1" ] && extra+=(--dangerously-bypass-hook-trust)
   dc_timeout 180 codex exec --json --full-auto \
     --model "${CODEX_MODEL}" \
-    "${extra[@]}" \
+    ${extra[@]+"${extra[@]}"} \
     "${prompt}"
 }
 

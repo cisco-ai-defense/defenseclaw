@@ -41,9 +41,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/defenseclaw/defenseclaw/internal/acp"
+	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
@@ -51,11 +50,13 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/fleet"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinationtest"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -64,6 +65,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sensor"
 	"github.com/defenseclaw/defenseclaw/internal/systemd"
 	"github.com/defenseclaw/defenseclaw/internal/version"
+	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
 
 // APIServer exposes a local REST API for CLI and plugin communication
@@ -73,10 +75,41 @@ type APIServer struct {
 	client *Client
 	store  *audit.Store
 	logger *audit.Logger
+	// protectedFiles is the sidecar's protected-file watch (nil when off or
+	// in a test server); the hook handler records tool calls for it.
+	protectedFiles *protectedFileWatch
+	// Both API listeners start this server's one background recovery loop
+	// of the hook delivery journal (startPendingHookRecovery); neither
+	// waits for it.
+	pendingHookRecoveryOnce sync.Once
+	// hookDeliveryProcessID, when set, replaces this process's journal
+	// identity (deliveryProcessID): tests start a server as the next process.
+	hookDeliveryProcessID string
+	// sandboxAuthority is owned by this server and initialized on first use.
+	sandboxAuthority sandboxAuthorityHolder
+	// installWindowWarned is set once this per-user gateway has logged the
+	// install-window warning of strictInstallWindowGate; it clears when a
+	// call finds no install lock.
+	installWindowWarned atomic.Bool
+	// firstHookAnswerRecorded avoids a filesystem check after this process
+	// has sent its first per-user hook verdict.
+	firstHookAnswerRecorded atomic.Bool
+	firstHookAnswerMu       sync.Mutex
+	// hookShed remembers the refused hook calls that already have a shed row.
+	hookShed hookShedLedger
 
 	// projectSkills are the project skill folders the install watcher
 	// watches; nil when no watcher shares them (GAP-1063).
 	projectSkills *projectSkillRoots
+	// rootCoverage reports roots whose install admission cannot scan assets.
+	rootCoverage func() []watcher.RootCoverageIssue
+	// hookMCP are the MCP servers the managed Linux and macOS hooks report,
+	// which the install watcher admits (GAP-2591); nil elsewhere.
+	hookMCP *hookReportedMCPServers
+	// mcpResolved are the MCP server definitions the hook calls resolved, so
+	// a server removed from the agent config mid-session is still judged on
+	// where it points (GAP-0861).
+	mcpResolved mcpResolvedDefinitions
 
 	// exemptAuditAt is when each exempt account and connector last got an
 	// enterprise-exempt-user audit row (auditEnterpriseExemptUser).
@@ -86,20 +119,55 @@ type APIServer struct {
 	// caller identity: each identity has its own session store, so callers
 	// never wait on each other's exchanges.
 	foreignHookSessionLocks keyedMutex
-	// foreignHookRemovals caches the hook guardian foreign-hook removal
-	// ledger the session exchanges check.
-	foreignHookRemovals foreignHookRemovalCache
+	// foreignHookRemovals reads the hook guardian foreign-hook removal
+	// ledger on every session exchange.
+	foreignHookRemovals foreignHookRemovalSource
 	// hookCallerLimits bounds each verified caller identity's requests on a
 	// standalone gateway (hook socket and per-user credentials).
 	hookCallerLimits hookCallerLimiter
 	// managedRefusalLimits bounds the managed refusal rows per account.
 	managedRefusalLimits managedRefusalLimiter
+	// managedPolicyView is the published proof of the vendor machine
+	// policy managed hooks enforce (managed_policy_view.go).
+	managedPolicyView atomic.Pointer[managedPolicyView]
+	// managedHookAuthz is the authorizer the standalone hook socket decides
+	// calls with, so an account status reads the inputs the hook reads.
+	managedHookAuthz atomic.Pointer[managedHookAuthorizer]
+	// managedAlertLimits bounds the policy-view alerts per account: every
+	// call under an unproven view raises one until the view is pinned.
+	managedAlertLimits managedRefusalLimiter
+	// managedAlerts records those alerts off the path of their calls.
+	managedAlerts managedPolicyViewAlerts
 	// copilotDedupe answers the second delivery of one Copilot tool call
 	// with the first delivery's verdict.
 	copilotDedupe copilotHookDedupe
+	// copilotPermission binds an argumentless native permission callback to
+	// the call of one recently audited pre-tool allow from the same
+	// caller/session; the callback is then decided again, now.
+	copilotPermission copilotPermissionJoin
+	// sessionStartGate holds a session's calls until its start verdict
+	// (GAP-0806).
+	sessionStartGate sessionStartGate
 	// hermesTasks gives a Hermes hook that names only its task the session
 	// of that task.
 	hermesTasks hermesTaskSessions
+	// preToolDecisions pairs audited Claude Code/Codex PreToolUse decisions
+	// with later post-tool observations, without a background worker.
+	preToolDecisions preToolDecisionTracker
+
+	// mcpAdmissionPending names an MCP server the install watcher admits
+	// but has not admitted yet (GAP-0112). Set once before serving.
+	mcpAdmissionPending func(connector, server, home, cwd string) (string, bool)
+	// mcpAdmissionStatus also distinguishes a completed scan failure from a
+	// pending scan and carries the scan's remaining timeout.
+	mcpAdmissionStatus func(connector, server, home, cwd string) watcher.MCPAdmissionStatus
+	// mcpPublished looks for the definition, named by its launch digest, in
+	// the servers the install watcher admits for the caller (GAP-0686).
+	mcpPublished func(connector, server, home, cwd, digest string) watcher.MCPPublication
+	// mcpRefreshBeforeCall brings the gateway's view of the enrolled users'
+	// MCP servers up to date before an MCP tool call is decided (GAP-0216).
+	// Set once before serving.
+	mcpRefreshBeforeCall func(ctx context.Context, connector string) error
 
 	// shutdownRequester cancels the owning Sidecar run context after an
 	// authenticated, loopback-only management request has proven the expected
@@ -234,6 +302,10 @@ type APIServer struct {
 	// policyReloader, when set, is called by the /policy/reload handler to
 	// rebuild the configuration generation now.
 	policyReloader func() error
+	// recordedGenerationReloader is /policy/reload on a standalone managed
+	// computer: it loads only the generation the lifecycle recorded for the
+	// installed config.yaml and the gateway has not applied yet.
+	recordedGenerationReloader func() error
 	// configApply is the config.yaml writer /enforce/* uses; nil is
 	// configwrite.Apply (tests substitute a recorder).
 	configApply func(context.Context, string, []configwrite.Change, configwrite.Options) (configwrite.Result, error)
@@ -249,9 +321,11 @@ type APIServer struct {
 
 	claudeCodeMu                sync.Mutex
 	claudeCodeLastComponentScan time.Time
-	// activeAgentContext is process-local, authenticated connector context. It
-	// is deliberately separate from hook payloads so tool arguments and generic
-	// request fields cannot assert which agent instruction files are active.
+	// activeAgentContext is authenticated connector context, kept in memory
+	// and recorded per session under the data directory so a restart keeps it
+	// (saveInstructionLoads). It is deliberately separate from hook payloads
+	// so tool arguments and generic request fields cannot assert which agent
+	// instruction files are active.
 	activeAgentContext     activeAgentContextCache
 	codexMu                sync.Mutex
 	codexLastComponentScan time.Time
@@ -284,17 +358,21 @@ type APIServer struct {
 	hookSpawnLineageMu                sync.Mutex
 	hookSpawnIntents                  map[string]hookSpawnIntent
 	hookSpawnIntentOrder              []string
+	hookSpawnTakenCalls               map[string]time.Time
 	hookChildThreads                  map[string]hookChildThread
 	hookChildThreadOrder              []string
 	copilotSubagents                  []copilotPendingSubagent
-	codexPendingThreads               []codexPendingThread
 	hookSessionStates                 map[string]hookSessionState
 	hookSessionStateOrder             []string
-	hookPhaseStates                   map[string]hookPhaseState
-	hookPhaseStateOrder               []string
-	otlpMetricMu                      sync.Mutex
-	otlpMetricCumulative              map[string]otlpCumulativePoint
-	otlpMetricCumulativeOrder         []string
+	// hookLifecycleHistoryRead holds the session keys whose signed lifecycle
+	// history this process has read once (restoreHookSessionLifecycle).
+	hookLifecycleHistoryRead      map[string]struct{}
+	hookLifecycleHistoryReadOrder []string
+	hookPhaseStates               map[string]hookPhaseState
+	hookPhaseStateOrder           []string
+	otlpMetricMu                  sync.Mutex
+	otlpMetricCumulative          map[string]otlpCumulativePoint
+	otlpMetricCumulativeOrder     []string
 
 	// stepIdxMu guards stepIdxBySession, the per-session 1-indexed
 	// turn counter used to populate audit.Event.StepIdx. A "turn" is
@@ -330,6 +408,9 @@ type APIServer struct {
 	// same nil-guard semantics: only assign non-nil concrete values to
 	// this field (see inspector.go for the nil-interface trap).
 	ciscoInspector Inspector
+	// ciscoInspectorMu guards ciscoInspector: the managed inspector retry
+	// can bind it after Run has started serving hook requests.
+	ciscoInspectorMu sync.RWMutex
 
 	// hookJudge forwards hook-lane message content (prompts + tool
 	// results delivered by hook connectors) to the LLM judge — the
@@ -339,6 +420,13 @@ type APIServer struct {
 	// boot via SetHookJudge. Per-connector gating happens in
 	// hookJudgeInspect via guardrail.judge.hook_connectors.
 	hookJudge atomic.Pointer[LLMJudge]
+	// hookDecisionJudge is the decision-model-only judge of cascade 2 for an
+	// API server outside a gateway (a gateway reads its generation's).
+	hookDecisionJudge atomic.Pointer[LLMJudge]
+
+	// userDownloads remembers the hosts recent user prompts ask to download
+	// from and run (#1390), per session, judge or not.
+	userDownloads userDownloadRequests
 	// hookJudgeSem bounds concurrent hook-lane judge executions,
 	// mirroring EventRouter.judgeSem on the proxy lane. At capacity
 	// the judge is skipped (fail-open to the regex/AID verdict)
@@ -351,6 +439,9 @@ type APIServer struct {
 	// SetSandboxIngress (api_sandbox_ingress.go); nil when sandboxes are off.
 	sandboxIngressMu sync.RWMutex
 	sandboxIngress   *sandboxIngressState
+	// hookCorrelationTurns holds the hooks of one session to one correlation
+	// attempt at a time (hookCorrelationSerial).
+	hookCorrelationTurns hookCorrelationSerial
 
 	// sandboxCtl is the OpenShell sandbox manager behind /api/v1/sandbox/
 	// (api_sandbox.go); nil when sandboxes are off.
@@ -372,7 +463,21 @@ func (a *APIServer) SetCiscoInspector(c Inspector) {
 		a.observabilityV8Mu.RUnlock()
 		c.bindObservabilityV8(metricRuntime)
 	}
+	a.ciscoInspectorMu.Lock()
 	a.ciscoInspector = c
+	a.ciscoInspectorMu.Unlock()
+}
+
+// currentCiscoInspector returns the hook-lane inspector, or nil when none is
+// bound yet. Every production reader goes through it because
+// SetCiscoInspector may run concurrently with request handlers.
+func (a *APIServer) currentCiscoInspector() Inspector {
+	if a == nil {
+		return nil
+	}
+	a.ciscoInspectorMu.RLock()
+	defer a.ciscoInspectorMu.RUnlock()
+	return a.ciscoInspector
 }
 
 // judgeFor is the hook-lane judge of the generation ctx pinned, else the
@@ -382,6 +487,36 @@ func (a *APIServer) judgeFor(ctx context.Context) *LLMJudge {
 		return nil
 	}
 	return judgeOf(pinnedGeneration(ctx), a.hookJudge.Load())
+}
+
+// decisionJudgeFor is the cascade-2 judge (decision model, no LLM) of the
+// generation ctx pinned, else the server's own.
+func (a *APIServer) decisionJudgeFor(ctx context.Context) *LLMJudge {
+	if a == nil {
+		return nil
+	}
+	if g := pinnedGeneration(ctx); g.published() {
+		return g.decisionJudge
+	}
+	return a.hookDecisionJudge.Load()
+}
+
+// SetHookDecisionJudge wires the cascade-2 judge (newDecisionOnlyJudge);
+// nil turns cascade 2 off.
+func (a *APIServer) SetHookDecisionJudge(j *LLMJudge) {
+	a.hookDecisionJudge.Store(j)
+}
+
+// hookSessionJudges are the hook-lane judges that keep a session's user
+// intent and recent tool calls: the LLM judge and the cascade-2 judge.
+func (a *APIServer) hookSessionJudges(ctx context.Context) []*LLMJudge {
+	var out []*LLMJudge
+	for _, j := range []*LLMJudge{a.judgeFor(ctx), a.decisionJudgeFor(ctx)} {
+		if j != nil {
+			out = append(out, j)
+		}
+	}
+	return out
 }
 
 // SetHookJudge wires the LLM judge onto the API server so the hook
@@ -595,6 +730,15 @@ func (a *APIServer) lookupOTLPPathToken(source string) string {
 	a.otlpPathTokenLastStatAt[scope] = time.Now()
 
 	tok, err := connector.LoadOTLPPathToken(dataDir, scope)
+	// A credential every local account could read is not drift: the value
+	// may be copied, so the cached token is dropped below (GAP-0566).
+	if err != nil && connector.IsManagedPermissionDrift(err) && !errors.Is(err, connector.ErrCredentialDisclosed) && haveCached {
+		// Owner or writer drift on the token file is not a reason to fail
+		// every OTLP request: keep the cached token and let the guardian
+		// republish the file.
+		reportTokenDriftAccepted("otlp:"+string(scope), err)
+		return cached.token
+	}
 	if err != nil || tok == "" {
 		// Read failed after a successful stat: race with rotation
 		// rename, or unreadable file. Drop the cache so we don't
@@ -615,11 +759,20 @@ func (a *APIServer) lookupOTLPPathToken(source string) string {
 func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
 	name := strings.ToLower(strings.TrimSpace(connectorName))
 	presented = strings.TrimSpace(presented)
-	if name == "" || presented == "" {
+	// until 1.1: the hook token an upgraded host keeps for a connector 1.0.4
+	// removed (OpenHands) authenticates nothing; old hooks reach the route
+	// that blocks them whatever the token.
+	if name == "" || presented == "" || connector.IsRemovedConnector(name) {
 		return false
 	}
 
 	dataDir := a.configDataDir()
+	// A removed connector whose token file its teardown could not delete:
+	// the hook registration is gone, so the credential is refused while the
+	// removal is retried (GAP-0858).
+	if connector.HookAPITokenRevoked(dataDir, name) {
+		return false
+	}
 	if dataDir == "" {
 		a.hookAPITokenMu.RLock()
 		cached := ""
@@ -630,6 +783,23 @@ func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
 		return cached != "" && constantTimeStringMatch(presented, cached)
 	}
 	tok, err := connector.LoadHookAPIToken(dataDir, name)
+	// A credential every local account could read is not drift: the value
+	// may be copied, so the cached token is dropped below (GAP-0566).
+	if err != nil && connector.IsManagedPermissionDrift(err) && !errors.Is(err, connector.ErrCredentialDisclosed) {
+		// Owner or writer drift on the token file must not reject every hook
+		// request: keep authenticating against the cached token and let the
+		// guardian republish the file.
+		a.hookAPITokenMu.RLock()
+		cached := ""
+		if a.hookAPITokens != nil {
+			cached = a.hookAPITokens[name]
+		}
+		a.hookAPITokenMu.RUnlock()
+		if cached != "" {
+			reportTokenDriftAccepted("hook:"+name, err)
+			return constantTimeStringMatch(presented, cached)
+		}
+	}
 	if err != nil || tok == "" {
 		a.hookAPITokenMu.Lock()
 		if a.hookAPITokens != nil {
@@ -645,6 +815,22 @@ func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
 	a.hookAPITokens[name] = tok
 	a.hookAPITokenMu.Unlock()
 	return constantTimeStringMatch(presented, tok)
+}
+
+var tokenDriftAcceptedOnce sync.Map
+
+// reportTokenDriftAccepted logs, once per token and reason, that a token
+// file's permission drift was accepted and the cached token kept.
+func reportTokenDriftAccepted(token string, err error) {
+	reason := err.Error()
+	if _, seen := tokenDriftAcceptedOnce.LoadOrStore(token+"\x00"+reason, struct{}{}); seen {
+		return
+	}
+	managed.EmitResilienceEvent(managed.MarkerAccept, map[string]string{
+		"object": "token " + token,
+		"reason": reason,
+		"action": "cached token kept; guardian republishes",
+	})
 }
 
 func (a *APIServer) hookTokenScopeForPath(path string) (string, bool) {
@@ -883,6 +1069,13 @@ func (a *APIServer) SetPolicyReloader(fn func() error) {
 	a.policyReloader = fn
 }
 
+// SetRecordedGenerationReloader sets the managed /policy/reload. It returns
+// an error wrapping errNoRecordedGeneration when nothing the lifecycle
+// recorded is waiting to load.
+func (a *APIServer) SetRecordedGenerationReloader(fn func() error) {
+	a.recordedGenerationReloader = fn
+}
+
 // SetConnectorRegistry attaches the connector registry so the
 // /v1/connectors endpoint can list available connectors.
 func (a *APIServer) SetConnectorRegistry(reg *connector.Registry) {
@@ -1023,6 +1216,43 @@ func (a *APIServer) SetShutdownRequester(request func()) {
 	a.shutdownRequester = request
 }
 
+// SetMCPAdmissionPending wires the install watcher's pending-admission
+// check (GAP-0112). Call it before the server starts.
+func (a *APIServer) SetMCPAdmissionPending(pending func(connector, server, home, cwd string) (string, bool)) {
+	if a == nil {
+		return
+	}
+	a.mcpAdmissionPending = pending
+}
+
+// SetMCPAdmissionStatus wires the watcher's current admission state.
+func (a *APIServer) SetMCPAdmissionStatus(status func(connector, server, home, cwd string) watcher.MCPAdmissionStatus) {
+	if a == nil {
+		return
+	}
+	a.mcpAdmissionStatus = status
+}
+
+// SetMCPPublished wires the install watcher's check that a definition the
+// caller's agent runs is one it admits (GAP-0686). Call it before the server
+// starts.
+func (a *APIServer) SetMCPPublished(published func(connector, server, home, cwd, digest string) watcher.MCPPublication) {
+	if a == nil {
+		return
+	}
+	a.mcpPublished = published
+}
+
+// SetMCPRefreshBeforeCall wires the refresh of the enrolled users' MCP
+// servers before an MCP tool call (GAP-0216). Call it before the server
+// starts.
+func (a *APIServer) SetMCPRefreshBeforeCall(refresh func(ctx context.Context, connector string) error) {
+	if a == nil {
+		return
+	}
+	a.mcpRefreshBeforeCall = refresh
+}
+
 func (a *APIServer) runtimeConfigSnapshot() *config.Config {
 	if a == nil {
 		return nil
@@ -1068,10 +1298,13 @@ func listenWithRetry(ctx context.Context, addr string, budget time.Duration) (ne
 		if err == nil {
 			return ln, nil
 		}
-		if !isAddrInUse(err) || time.Now().After(deadline) || ctx.Err() != nil {
+		if !isBindConflict(err) || time.Now().After(deadline) || ctx.Err() != nil {
+			if isBindConflict(err) {
+				return nil, describeBindConflict(addr, err)
+			}
 			return nil, err
 		}
-		fmt.Fprintf(os.Stderr, "[sidecar-api] %s still in use after restart, retrying bind (attempt %d)\n", addr, attempt)
+		fmt.Fprintf(os.Stderr, "[sidecar-api] %s unavailable (%v), retrying bind (attempt %d)\n", addr, err, attempt)
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -1117,7 +1350,43 @@ func (a *APIServer) apiPortHeld(hasHookSocket bool, err error) bool {
 	return isAddrInUse(err) || isAPIPortHeldByAnotherAccount(err)
 }
 
+// isBindConflict reports a bind failure worth retrying: the address is in use,
+// or Windows refused it with WSAEACCES, which is what a port inside an
+// excluded range (Hyper-V, WinNAT, Docker reservations) or a port another
+// service holds exclusively returns.
+func isBindConflict(err error) bool {
+	return isAddrInUse(err) || isBindAccessDenied(err)
+}
+
+func isBindAccessDenied(err error) bool {
+	const wsaeacces = 10013
+	var errno syscall.Errno
+	if errors.As(err, &errno) && errno == wsaeacces {
+		return true
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "forbidden by its access permissions")
+}
+
+// describeBindConflict turns a final bind conflict into an error that names
+// the cause and the remedy, and reports it once as a missing prerequisite.
+func describeBindConflict(addr string, err error) error {
+	reason := "address in use by another process"
+	remedy := "stop the other listener or change gateway.api_port"
+	if isBindAccessDenied(err) {
+		reason = "port is reserved (excluded port range) or held by another account"
+		remedy = "check `netsh int ipv4 show excludedportrange protocol=tcp` and move gateway.api_port out of the range"
+	}
+	managed.EmitResilienceEvent(managed.MarkerPrereq, map[string]string{
+		"subsystem": "api",
+		"addr":      addr,
+		"reason":    reason,
+		"remedy":    remedy,
+	})
+	return fmt.Errorf("%s (%s; %s): %w", reason, addr, remedy, err)
+}
+
 func (a *APIServer) Run(ctx context.Context) error {
+	a.startPendingHookRecovery(ctx)
 	mux := http.NewServeMux()
 	mux.HandleFunc(enterprisepolicy.ForeignHookSessionPathPrefix+"{connector}", a.handleForeignHookSession)
 	mux.HandleFunc("/health", a.handleHealth)
@@ -1156,6 +1425,8 @@ func (a *APIServer) Run(ctx context.Context) error {
 	// Secure Client serves none of the identity routes (issue #1092).
 	if !a.managedAIDOnly() {
 		mux.HandleFunc("/api/v1/guardrail/profiles/resolve", awaitConfigReload(a.handleGuardrailProfileResolve))
+		// enterprise identity refresh (root or SYSTEM, managed only).
+		mux.HandleFunc(identityRefreshPath, awaitConfigReload(a.handleIdentityRefresh))
 	}
 	mux.HandleFunc("/api/v1/acp/challenge", a.handleACPChallenge)
 	mux.HandleFunc("/api/v1/acp/evaluate", a.handleACPEvaluate)
@@ -1186,6 +1457,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc(cliObservabilityV8Path, a.handleCLIObservabilityV8)
 	mux.HandleFunc(alertAcknowledgementV8Path, a.handleAlertAcknowledgementV8)
 	a.registerConnectorHookRoutes(mux, hookLimiter)
+	a.registerAgentGatewayRoute(mux, false, hookLimiter)
 	// OTLP-HTTP receiver for the three signal types codex
 	// (via [otel.exporter.otlp-http]) and Claude Code (via
 	// OTEL_EXPORTER_OTLP_ENDPOINT) post telemetry to. Body shape is
@@ -1277,12 +1549,13 @@ func (a *APIServer) Run(ctx context.Context) error {
 		baseCtx = withServiceAccountGateway(ctx)
 	}
 	srv := &http.Server{
-		Addr:    a.addr,
-		Handler: handler,
-		BaseContext: func(_ net.Listener) context.Context {
-			return baseCtx
-		},
+		Addr:        a.addr,
+		Handler:     handler,
+		BaseContext: apiRequestBaseContext(baseCtx),
 		ConnContext: acpPeerConnContext,
+		// A standalone hook sends the asset facts of its request in a header
+		// (assetfacts.Header) that can pass the net/http default of 1 MiB.
+		MaxHeaderBytes: assetfacts.MaxRequestHeaderBytes,
 	}
 
 	// Bind with a short retry instead of a bare ListenAndServe. During
@@ -1324,10 +1597,29 @@ func (a *APIServer) Run(ctx context.Context) error {
 
 	// The Windows standalone hook reports the calls it refuses for an
 	// unenrolled account here (GAP-1242); a no-op on every other profile.
-	// It stops with this run of the API server.
+	// It stops with this run of the API server, which waits, bounded, for
+	// its last rows (GAP-1253).
 	refusalCtx, stopRefusals := context.WithCancel(ctx)
-	defer stopRefusals()
-	go a.serveUnenrolledRefusals(refusalCtx)
+	refusalsDone := make(chan struct{})
+	defer func() {
+		stopRefusals()
+		select {
+		case <-refusalsDone:
+		case <-time.After(unenrolledRefusalStopTimeout):
+		}
+	}()
+	go func() {
+		defer close(refusalsDone)
+		// A standard account's own `defenseclaw status` on the same
+		// profile (GAP-0060); a no-op on every other one.
+		ownStatusDone := make(chan struct{})
+		go func() {
+			defer close(ownStatusDone)
+			a.serveOwnStatusPipe(refusalCtx)
+		}()
+		a.serveUnenrolledRefusals(refusalCtx)
+		<-ownStatusDone
+	}()
 
 	errCh := make(chan error, 2)
 	if hookSrv != nil {
@@ -1341,6 +1633,11 @@ func (a *APIServer) Run(ctx context.Context) error {
 	}
 
 	serveTCP := func(ln net.Listener) {
+		if err := a.recordRuntimeAPIAddress(ln); err != nil {
+			_ = ln.Close()
+			errCh <- fmt.Errorf("record the running gateway listener: %w; check data directory permissions and run defenseclaw-gateway start", err)
+			return
+		}
 		go func() {
 			fmt.Fprintf(os.Stderr, "[sidecar-api] listening on %s\n", a.addr)
 			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
@@ -1399,16 +1696,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	go systemd.RunWatchdog(watchdogCtx, nil)
 
 	shutdown := func() error {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		var hookShutdownErr error
-		if hookSrv != nil {
-			hookShutdownErr = hookSrv.Shutdown(shutdownCtx)
-		}
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			return err
-		}
-		return hookShutdownErr
+		return shutdownAPIServers(apiShutdownGrace, srv, hookSrv)
 	}
 
 	for {
@@ -1428,6 +1716,54 @@ func (a *APIServer) Run(ctx context.Context) error {
 			return shutdown()
 		}
 	}
+}
+
+// apiShutdownGrace bounds how long a stop waits for the requests the
+// gateway listeners already accepted.
+const apiShutdownGrace = 5 * time.Second
+
+// apiRequestBaseContext is the base context of every request on a gateway
+// listener: ctx's values without its cancellation. A stop cancels the run
+// context first; requests built on it were cancelled with it, so a hook call
+// the gateway had accepted was read as the client going away, audited as a
+// block and never answered (GAP-1459). The listeners close on Shutdown
+// instead, and accepted calls answer inside the grace, as the sandbox
+// ingress already does.
+func apiRequestBaseContext(ctx context.Context) func(net.Listener) context.Context {
+	base := context.WithoutCancel(ctx)
+	return func(net.Listener) context.Context { return base }
+}
+
+// shutdownAPIServers stops the servers together and waits, up to grace, for
+// the requests they accepted. A request still running after the grace (a
+// follow stream) ends with its connection, which is closed; that is still a
+// clean stop.
+func shutdownAPIServers(grace time.Duration, servers ...*http.Server) error {
+	ctx, cancel := context.WithTimeout(context.Background(), grace)
+	defer cancel()
+	errs := make([]error, len(servers))
+	var wg sync.WaitGroup
+	for i, srv := range servers {
+		if srv == nil {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := srv.Shutdown(ctx)
+			if err == nil {
+				return
+			}
+			_ = srv.Close()
+			if errors.Is(err, context.DeadlineExceeded) {
+				fmt.Fprintf(os.Stderr, "[sidecar-api] requests still running %s after the stop were closed\n", grace)
+				return
+			}
+			errs[i] = err
+		}()
+	}
+	wg.Wait()
+	return errors.Join(errs...)
 }
 
 // handleTelemetryCanary exercises the real runtime trace pipeline. The global
@@ -1506,6 +1842,7 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	w.Header().Set(hookexec.HookDeliveryCapabilityHeader, "1")
 	snap := a.health.Snapshot()
 	cfg := a.runtimeConfigSnapshot()
 	// A standalone host's ordinary account reads liveness and the binary
@@ -1574,12 +1911,14 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 			if directory := directoryHealthSummary(directoryCacheHealth(), rootPeer); directory != nil {
 				body["directory"] = directory
 			}
+			// Tokens, counts and ages only, so every caller gets it.
+			body["identity"] = identityHealthSummary(directoryCacheHealth(), directorySourceAnswers(), time.Now())
 			// An assignment group the host does not know (renamed, deleted,
 			// or spelled another way after an SSSD naming switch) selects
 			// nobody, and the whole team falls to the default profile:
 			// status and verify report it (GAP-0704). The last check is
 			// served; a stale one is refreshed in the background.
-			if warnings := liveGuardrailProfiles.Load().healthProfileWarnings(); len(warnings) > 0 {
+			if warnings := standaloneProfileWarnings(liveGuardrailProfiles.Load(), cfg); len(warnings) > 0 {
 				setHealthProfileWarnings(body, "profile_warnings", "profile_warning_count", warnings, rootPeer)
 			}
 			// Non-secret fingerprints of the per-user credential keys that
@@ -1764,15 +2103,16 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"connector_modes": a.connectorModesSummary(r.Context()),
 	}
 	if cfg := a.runtimeConfigSnapshot(); cfg != nil && !cfg.SecureClientIntegration() {
-		if set := a.guardrailProfileSet(); set != nil {
+		set := a.guardrailProfileSet()
+		if set != nil {
 			status["profile_assignment_warnings"] = set.assignmentWarnings(true)
-			// What /health lists only to root on the hook socket: Windows
-			// status and verify read it here with the gateway credential
-			// (GAP-1268).
-			if cfg.StandaloneEnterprise() {
-				if warnings := set.healthProfileWarnings(); len(warnings) > 0 {
-					status["profile_warnings"] = warnings
-				}
+		}
+		// What /health lists only to root on the hook socket: Windows
+		// status and verify read it here with the gateway credential
+		// (GAP-1268).
+		if cfg.StandaloneEnterprise() {
+			if warnings := standaloneProfileWarnings(set, cfg); len(warnings) > 0 {
+				status["profile_warnings"] = warnings
 			}
 		}
 	}
@@ -1807,6 +2147,12 @@ func (a *APIServer) handleShutdown(w http.ResponseWriter, r *http.Request) {
 	}
 	if !connector.IsLoopback(r) {
 		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "shutdown is restricted to loopback clients"})
+		return
+	}
+	// A managed standalone gateway is a system service: its service manager
+	// starts and stops it, and the gateway token does not.
+	if cfg := a.runtimeConfigSnapshot(); cfg != nil && cfg.StandaloneEnterprise() {
+		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": managedShutdownRefusal})
 		return
 	}
 	if a.shutdownRequester == nil {
@@ -1847,6 +2193,26 @@ func (a *APIServer) handleShutdown(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// managedShutdownRefusal answers a shutdown request on a managed standalone
+// computer.
+const managedShutdownRefusal = "this gateway is managed by the computer's administrator and runs as a system service; it is not stopped over the API"
+
+// managedBundlePolicyReloadRefusal answers /policy/reload on a managed
+// standalone computer when no generation the lifecycle recorded is waiting
+// to load (a hand edit, an unrecorded asset change, an unsigned record);
+// managedPolicyReloadRefusal appends the cause.
+const managedBundlePolicyReloadRefusal = "this computer takes its policy from signed policy bundles, and no generation recorded by the lifecycle is waiting to load; deliver a new signed bundle instead of reloading the policy over the API"
+
+// managedPolicyReloadRefusal is managedBundlePolicyReloadRefusal naming its
+// cause.
+func managedPolicyReloadRefusal(cause string) string {
+	cause = strings.TrimSpace(cause)
+	if cause == "" || cause == errNoRecordedGeneration.Error() {
+		return managedBundlePolicyReloadRefusal
+	}
+	return managedBundlePolicyReloadRefusal + " (cause: " + cause + ")"
+}
+
 func sameRuntimeDataDir(left, right string) bool {
 	if strings.TrimSpace(left) == "" || strings.TrimSpace(right) == "" {
 		return false
@@ -1869,8 +2235,8 @@ func sameRuntimeDataDir(left, right string) bool {
 //	  "connector":  "codex" | "claudecode" | "openclaw" | "zeptoclaw",
 //	  "mode":       "guardrail" | "observability", // legacy data-path field
 //	  "policy_mode": "observe" | "action",
-//	  "enforcement_surface": "llm_proxy" | "agent_lifecycle_hooks" | "omnigent_policy_api",
-//	  "telemetry":  ["hooks", "otel", "notify"],   // active channels
+//	  "enforcement_surface": "llm_proxy" | "agent_lifecycle_hooks",
+//	  "telemetry":  ["hooks"],   // channels the install registers
 //	  "proxy_intercept": true | false,
 //	}
 //
@@ -1931,7 +2297,6 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 	mode := "guardrail"
 	intercept := true
 	surface := "llm_proxy"
-	var telemetry []string
 	policyMode = strings.ToLower(strings.TrimSpace(policyMode))
 	if policyMode != "action" {
 		policyMode = "observe"
@@ -1945,37 +2310,20 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 	// connector, showed up in `defenseclaw-gateway status` as "Data path:
 	// DefenseClaw proxy" in the same output whose Guardrail subsystem said
 	// "proxy_port: closed" and "the local guardrail proxy is not in the LLM
-	// data path". The list below now contributes only the telemetry channels
-	// and OmniGent's policy-API surface, which are genuinely per-connector.
+	// data path". The list below now contributes only the telemetry
+	// channels, which are genuinely per-connector.
 	if !connectorProxyBindsByName(name) {
 		mode = "observability"
 		intercept = false
 		surface = "agent_lifecycle_hooks"
 	}
 
-	switch name {
-	case "codex":
-		// codex telemetry always wires all three channels (hooks,
-		// the [otel.exporter.otlp-http] block, the notify bridge).
-		telemetry = []string{"hooks", "otel", "notify"}
-	case "claudecode":
-		// Claude Code uses hooks + the OTel env-block; no notify
-		// equivalent (Anthropic doesn't ship a turn-complete shim).
-		telemetry = []string{"hooks", "otel"}
-	case "hermes", "cursor", "devin", "copilot", "openhands",
-		"antigravity", "opencode", "amp", "kiro":
-		telemetry = []string{"hooks"}
-	case "omnigent":
-		// OmniGent enforces through its own policy API rather than the
-		// shared lifecycle-hook bridge, so it keeps a distinct surface.
-		surface = "omnigent_policy_api"
-		telemetry = []string{"policy-api"}
-	default:
-		// openclaw / zeptoclaw / unknown: enforcement is the only
-		// supported mode today. Hooks are wired by the connector;
-		// no native OTel surface from those agents.
-		telemetry = []string{"hooks"}
-	}
+	// A host install registers only the connector's hooks: setup turns the
+	// native OTel exporters off (they run only in the OpenShell sandbox
+	// renderer) and writes Codex's notify bridge only for Secure Client
+	// (codexRegistersNotify). connectorModeForDecision reports the Secure
+	// Client channels.
+	telemetry := []string{"hooks"}
 
 	return map[string]interface{}{
 		"connector":           name,
@@ -1984,6 +2332,19 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 		"enforcement_surface": surface,
 		"telemetry":           telemetry,
 		"proxy_intercept":     intercept,
+	}
+}
+
+// secureClientConnectorTelemetry is the telemetry list the Secure Client
+// profile reports, unchanged from main.
+func secureClientConnectorTelemetry(name string) []string {
+	switch name {
+	case "codex":
+		return []string{"hooks", "otel", "notify"}
+	case "claudecode":
+		return []string{"hooks", "otel"}
+	default:
+		return []string{"hooks"}
 	}
 }
 
@@ -2003,10 +2364,16 @@ func connectorModeForDecision(cfg, decisionCfg *config.Config, name string) map[
 		if decisionCfg != nil {
 			guardrailMode = decisionCfg.EffectiveGuardrailModeForConnector(name)
 		}
-		hookFailMode = cfg.EffectiveHookFailModeForConnector(name)
+		// What the installed hooks do while the gateway is down
+		// (config.HookOutageFailMode); every other per-user failure closes.
+		hookFailMode = cfg.EffectiveHookOutageFailModeForConnector(name)
 		enabled = cfg.Guardrail.EffectiveEnabled(name)
 	}
 	out := connectorModeFor(name, guardrailMode)
+	if cfg != nil && cfg.SecureClientIntegration() {
+		// Secure Client answers stay as on main (out of 1.0.x scope).
+		out["telemetry"] = secureClientConnectorTelemetry(name)
+	}
 	if guardrailMode != "" {
 		out["guardrail_mode"] = guardrailMode
 	}
@@ -2317,6 +2684,11 @@ func (a *APIServer) handleScanResult(w http.ResponseWriter, r *http.Request) {
 
 	var result scanner.ScanResult
 	if err := json.NewDecoder(r.Body).Decode(&result); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			a.writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
@@ -2456,6 +2828,11 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 			if a.store != nil {
 				_ = a.store.ClearActionFieldForConnector(req.TargetType, policyName, req.Connector, "file")
 				_ = a.store.ClearActionFieldForConnector(req.TargetType, policyName, req.Connector, "runtime")
+				if req.TargetType == "mcp" {
+					// The enrolled accounts' own rows of that name too
+					// (GAP-0216).
+					_ = watcher.ClearAccountMCPJournal(a.store, policyName, req.Connector, "runtime")
+				}
 			}
 		}
 	}
@@ -2709,9 +3086,15 @@ func (a *APIServer) handleAuditEvent(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "action is required"})
 		return
 	}
+	if !audit.IsKnownAction(event.Action) && !audit.IsKnownActionPrefix(event.Action) {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported action"})
+		return
+	}
 	// Sandbox attribution comes only from an authenticated sandbox binding
 	// (audit.CorrelationEnvelope), never from a request body.
 	event.SandboxID, event.SandboxName = "", ""
+	// The same holds for the agent identity and the verified caller facts.
+	dropBodyAssignedIdentity(&event)
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
 	}
@@ -2862,7 +3245,7 @@ func scanAPIResponseEnvelope(result *scanner.ScanResult) map[string]interface{} 
 		bySev[string(f.Severity)]++
 	}
 	return map[string]interface{}{
-		"scan_id":                    uuid.New().String(),
+		"scan_id":                    observability.NewTimeOrderedID(),
 		"verdict":                    string(result.MaxSeverity()),
 		"provenance":                 version.Current(),
 		"findings_count_by_severity": bySev,
@@ -2870,11 +3253,84 @@ func scanAPIResponseEnvelope(result *scanner.ScanResult) map[string]interface{} 
 	}
 }
 
+// scanAdmissionPreview is what install admission would decide for the skill
+// or plugin a REST scan just scanned at target: the policy, the asset_policy
+// lists and the scanner gate the install watcher applies
+// (evaluateAdmissionPolicy), with no side effect. An administrator scan
+// outside the watcher blocks and quarantines nothing; it printed only the
+// scanner verdict, with no policy result, and its audit scan row read warn
+// for any finding, an INFO-only skill the policy admits included
+// (GAP-2635). The asset is named by its folder, as the watcher names it,
+// unless the request names it. Nil for a Secure Client host (its response
+// and audit rows stay as on main) or when the policy cannot be evaluated.
+func (a *APIServer) scanAdmissionPreview(
+	ctx context.Context,
+	cfg *config.Config,
+	targetType, target, name string,
+	result *scanner.ScanResult,
+) *policy.AdmissionOutput {
+	if cfg == nil || cfg.SecureClientIntegration() || result == nil {
+		return nil
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = filepath.Base(filepath.Clean(target))
+	}
+	input := policy.AdmissionInput{
+		TargetType: targetType,
+		TargetName: name,
+		Path:       target,
+		ScanResult: &policy.ScanResultInput{
+			MaxSeverity:   string(result.MaxSeverity()),
+			TotalFindings: len(result.Findings),
+			ScannerName:   result.Scanner,
+			ExitCode:      result.ExitCode,
+			ScanError:     result.ScanError,
+		},
+	}
+	for _, finding := range result.Findings {
+		input.ScanResult.Findings = append(input.ScanResult.Findings, policy.FindingInput{
+			Severity: string(finding.Severity), Scanner: finding.Scanner, Title: finding.Title, RuleID: finding.RuleID,
+		})
+	}
+	out, err := a.evaluateAdmissionPolicy(ctx, input, "")
+	if err != nil || out == nil || strings.TrimSpace(out.Verdict) == "" {
+		return nil
+	}
+	return out
+}
+
+// scanAdmissionVerdict is the audit scan verdict of a REST scan: the
+// admission verdict the watcher would log for the same asset (clean,
+// allowed, warning, rejected or blocked), or "" (findings read warn) when
+// there is no preview.
+func scanAdmissionVerdict(admission *policy.AdmissionOutput) string {
+	if admission == nil {
+		return ""
+	}
+	return admission.Verdict
+}
+
+// withScanAdmission adds the admission preview to a scan response as
+// "admission": {verdict, reason, install_action}.
+func withScanAdmission(envelope map[string]interface{}, admission *policy.AdmissionOutput) map[string]interface{} {
+	if admission == nil {
+		return envelope
+	}
+	envelope["admission"] = map[string]string{
+		"verdict":        admission.Verdict,
+		"reason":         admission.Reason,
+		"install_action": admission.InstallAction,
+	}
+	return envelope
+}
+
 // withScannerSettings adds the scanner settings a scan ran with (policy,
 // analyzers and judge model, never a key) so `defenseclaw scan skill|mcp`
-// reports them as the per-user `skill scan` does. The Secure Client
-// integration keeps its response unchanged.
-func withScannerSettings(cfg *config.Config, kind string, envelope map[string]interface{}) map[string]interface{} {
+// reports them as the per-user `skill scan` does. For MCP it names the
+// analyzers that ran and adds a warning when the LLM judge did not run
+// (GAP-2621). The Secure Client integration keeps its response unchanged.
+func withScannerSettings(cfg *config.Config, kind string, result *scanner.ScanResult, envelope map[string]interface{}) map[string]interface{} {
 	if cfg == nil || cfg.SecureClientIntegration() {
 		return envelope
 	}
@@ -2886,11 +3342,61 @@ func withScannerSettings(cfg *config.Config, kind string, envelope map[string]in
 			settings["judge_model"] = cfg.ResolveLLM("scanners.skill").Model
 		}
 	case "mcp":
-		settings["analyzers"] = cfg.Scanners.MCPScanner.AnalyzersArg()
-		settings["judge_model"] = cfg.ResolveLLM("scanners.mcp").Model
+		model := cfg.ResolveLLM("scanners.mcp").Model
+		var warnings []string
+		if result != nil {
+			warnings = append(warnings, result.Warnings...)
+		}
+		ran, llmRan, warning := mcpAnalyzersRan(cfg.Scanners.MCPScanner.EffectiveAnalyzers(), model, len(warnings) > 0)
+		settings["analyzers"] = ran
+		if llmRan {
+			settings["judge_model"] = model
+		}
+		if warning != "" {
+			warnings = append(warnings, warning)
+		}
+		if len(warnings) > 0 {
+			envelope["warnings"] = warnings
+		}
 	}
 	envelope["scanner_settings"] = settings
 	return envelope
+}
+
+// mcpAnalyzersRan is the analyzer label an MCP scan reports: the explicit
+// list, or auto (YARA, plus the LLM judge when a model is configured), less
+// the LLM when the scanner said it skipped it. It also returns whether the
+// judge ran and a warning when auto ran without a judge model.
+func mcpAnalyzersRan(names []string, model string, llmSkipped bool) (string, bool, string) {
+	auto := len(names) == 0
+	if auto {
+		names = []string{"yara"}
+		if model != "" {
+			names = append(names, "llm")
+		}
+	}
+	ran := make([]string, 0, len(names))
+	llmRan := false
+	for _, name := range names {
+		if name == "llm" {
+			if llmSkipped {
+				continue
+			}
+			llmRan = true
+		}
+		ran = append(ran, name)
+	}
+	label := strings.Join(ran, ", ")
+	if label == "" {
+		label = "none"
+	}
+	if auto {
+		label = "auto (" + label + ")"
+	}
+	if auto && model == "" {
+		return label, false, "LLM judge did not run: no LLM model is configured for the MCP scanner"
+	}
+	return label, llmRan, ""
 }
 
 // ---------------------------------------------------------------------------
@@ -2917,7 +3423,7 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
-	if a.rejectWindowsGatewayPath(w, req.Target) {
+	if a.rejectWindowsGatewayPath(w, "skill", req.Target, req.Target) {
 		return
 	}
 	if isBundledSkillScanPath(req.Target) {
@@ -2927,7 +3433,7 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if a.rejectUnreadableScanTarget(w, "target directory", req.Target, "SKILL.md") {
+	if a.rejectUnreadableScanTarget(w, "skill", "target directory", req.Target, "SKILL.md") {
 		return
 	}
 
@@ -2965,12 +3471,13 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	admission := a.scanAdmissionPreview(r.Context(), cfg, config.AdmissionTypeSkill, req.Target, req.Name, result)
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPISkillScan), req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
-		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
+		_ = a.logger.LogScanWithCorrelation(r.Context(), result, scanAdmissionVerdict(admission), scanCorrelationForTarget(r.Context(), result, req.Target))
 	}
 
-	a.writeJSON(w, http.StatusOK, withScannerSettings(cfg, "skill", scanAPIResponseEnvelope(result)))
+	a.writeJSON(w, http.StatusOK, withScanAdmission(withScannerSettings(cfg, "skill", result, scanAPIResponseEnvelope(result)), admission))
 }
 
 // rejectUnreadableScanTarget answers with one plain line when the folder to
@@ -2979,8 +3486,8 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 // would otherwise die on the same error and the caller would get its process
 // name, its exit code or its Python traceback (GAP-0229, GAP-0256). A path that
 // exists but is not a directory is only logged: the scanner reports it.
-func (a *APIServer) rejectUnreadableScanTarget(w http.ResponseWriter, what, target string, mustRead ...string) bool {
-	if a.rejectWindowsGatewayPath(w, target) {
+func (a *APIServer) rejectUnreadableScanTarget(w http.ResponseWriter, kind, what, target string, mustRead ...string) bool {
+	if a.rejectWindowsGatewayPath(w, kind, target, target) {
 		return true
 	}
 	info, err := os.Stat(target)
@@ -3010,7 +3517,7 @@ func (a *APIServer) rejectUnreadableScanTarget(w http.ResponseWriter, what, targ
 	}
 	for _, name := range mustRead {
 		file := filepath.Join(target, name)
-		if a.rejectWindowsGatewayPath(w, file) {
+		if a.rejectWindowsGatewayPath(w, kind, file, target) {
 			return true
 		}
 		handle, openErr := os.Open(file)
@@ -3027,12 +3534,42 @@ func (a *APIServer) rejectUnreadableScanTarget(w http.ResponseWriter, what, targ
 	return false
 }
 
-func (a *APIServer) rejectWindowsGatewayPath(w http.ResponseWriter, path string) bool {
-	if err := managed.RequireWindowsGatewayPathOutsideUserProfiles(path); err != nil {
-		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+// requireGatewayPathOutsideUserProfiles is the managed Windows profile
+// check of a scan path (a seam for tests).
+var requireGatewayPathOutsideUserProfiles = managed.RequireWindowsGatewayPathOutsideUserProfiles
+
+// rejectWindowsGatewayPath answers 403 for a path the managed Windows gateway
+// may not read. For a scan of kind ("" for none) it adds how an
+// administrator scans target instead.
+func (a *APIServer) rejectWindowsGatewayPath(w http.ResponseWriter, kind, path, target string) bool {
+	if err := requireGatewayPathOutsideUserProfiles(path); err != nil {
+		message := err.Error()
+		if kind != "" {
+			message += "; " + windowsProfileScanNextStep(kind, target)
+		}
+		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": message})
 		return true
 	}
 	return false
+}
+
+// windowsProfileScanNextStep is the next step of a managed Windows scan of a
+// folder inside a user profile. The refusal said to scan it as the signed-in
+// user, which managed scans refuse a standard account (GAP-0526); the
+// documented route is an administrator's copy outside the profiles.
+func windowsProfileScanNextStep(kind, target string) string {
+	trimmed := strings.TrimRight(target, `\/`)
+	name := trimmed[strings.LastIndexAny(trimmed, `\/`)+1:]
+	if name == "" || strings.HasSuffix(name, ":") {
+		name = kind
+	}
+	review := `C:\DefenseClawReview`
+	copyTo := review + `\` + name
+	quote := managed.PowerShellLiteral
+	return "standard accounts cannot run managed scans, so an administrator copies the folder out of the profiles and scans the copy " +
+		"from an elevated PowerShell prompt: `New-Item -ItemType Directory -Force " + quote(review) + " | Out-Null; " +
+		"Copy-Item -Recurse -Force -LiteralPath " + quote(target) + " -Destination " + quote(copyTo) + "`, then `" +
+		managed.WindowsAdminCommand("scan", kind, copyTo) + "`"
 }
 
 func (a *APIServer) isBundledMCPScanRequest(req mcpScanRequest) bool {
@@ -3112,7 +3649,7 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
-	if a.rejectWindowsGatewayPath(w, req.Target) {
+	if a.rejectWindowsGatewayPath(w, "plugin", req.Target, req.Target) {
 		return
 	}
 	if a.isManagedPluginScanTarget(req.Target) {
@@ -3122,7 +3659,7 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if a.rejectUnreadableScanTarget(w, "plugin target directory", req.Target) {
+	if a.rejectUnreadableScanTarget(w, "plugin", "plugin target directory", req.Target) {
 		return
 	}
 
@@ -3145,21 +3682,36 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	admission := a.scanAdmissionPreview(r.Context(), cfg, config.AdmissionTypePlugin, req.Target, req.Name, result)
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPIPluginScan), req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
-		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
+		_ = a.logger.LogScanWithCorrelation(r.Context(), result, scanAdmissionVerdict(admission), scanCorrelationForTarget(r.Context(), result, req.Target))
 	}
 
-	a.writeJSON(w, http.StatusOK, scanAPIResponseEnvelope(result))
+	a.writeJSON(w, http.StatusOK, withScanAdmission(scanAPIResponseEnvelope(result), admission))
 }
 
 // ---------------------------------------------------------------------------
-// POST /v1/mcp/scan — run MCP scanner on a target (URL or local path)
+// POST /v1/mcp/scan — run MCP scanner on a URL or configured server name.
 // ---------------------------------------------------------------------------
 
 type mcpScanRequest struct {
 	Target string `json:"target"`
 	Name   string `json:"name"`
+}
+
+func mcpScanLocalPath(target string) bool {
+	lower := strings.ToLower(target)
+	windowsDrive := len(target) >= 2 && target[1] == ':' &&
+		(target[0] >= 'A' && target[0] <= 'Z' || target[0] >= 'a' && target[0] <= 'z')
+	if strings.HasPrefix(lower, "file:") || windowsDrive || filepath.IsAbs(target) {
+		return true
+	}
+	if strings.Contains(target, "://") {
+		return false
+	}
+	return target == "." || target == ".." || strings.ContainsAny(target, `/\`) ||
+		strings.HasPrefix(target, "~") || strings.HasSuffix(lower, ".json")
 }
 
 func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
@@ -3177,9 +3729,19 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
-	if (filepath.IsAbs(req.Target) || strings.ContainsAny(req.Target, `/\`) ||
-		strings.HasSuffix(strings.ToLower(req.Target), ".json")) &&
-		!strings.Contains(req.Target, "://") && a.rejectWindowsGatewayPath(w, req.Target) {
+	if mcpScanLocalPath(req.Target) {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "local path targets are not supported by the MCP scan API; use a configured MCP server name or an MCP URL",
+		})
+		return
+	}
+	lowerTarget := strings.ToLower(req.Target)
+	if strings.Contains(req.Target, "://") && !strings.HasPrefix(lowerTarget, "http://") &&
+		!strings.HasPrefix(lowerTarget, "https://") && !strings.HasPrefix(lowerTarget, "ws://") &&
+		!strings.HasPrefix(lowerTarget, "wss://") && !strings.HasPrefix(lowerTarget, "sse://") {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "unsupported MCP scan URL scheme; use http, https, ws, wss or sse",
+		})
 		return
 	}
 
@@ -3218,7 +3780,7 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
 	}
 
-	a.writeJSON(w, http.StatusOK, withScannerSettings(cfg, "mcp", scanAPIResponseEnvelope(result)))
+	a.writeJSON(w, http.StatusOK, withScannerSettings(cfg, "mcp", result, scanAPIResponseEnvelope(result)))
 }
 
 // ---------------------------------------------------------------------------
@@ -3244,7 +3806,7 @@ func (a *APIServer) handleSkillFetch(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
-	if a.rejectWindowsGatewayPath(w, req.Target) {
+	if a.rejectWindowsGatewayPath(w, "", req.Target, req.Target) {
 		return
 	}
 
@@ -3749,6 +4311,11 @@ func (sw *statusWriter) Flush() {
 	}
 }
 
+// Unwrap lets http.ResponseController reach the connection through the
+// metrics writer (read deadlines, full duplex, and the bounded write of
+// handleForeignHookSession).
+func (sw *statusWriter) Unwrap() http.ResponseWriter { return sw.ResponseWriter }
+
 type authenticatedInspectConnectorKey struct{}
 
 func withAuthenticatedInspectConnector(ctx context.Context, connectorName string) context.Context {
@@ -3790,6 +4357,16 @@ func requestGatewayToken(r *http.Request) string {
 // and never reaches next.
 func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The receipt capability is a transport property. Advertise it
+		// before credential and admission work can use the hook's short
+		// compatibility wait. Authentication still decides the final answer.
+		if r.Method == http.MethodPost && connector.IsLoopback(r) {
+			if _, ok := a.hookTokenScopeForPath(r.URL.Path); ok {
+				if delivery := a.beginHookDeliveryReceipt(w, r); delivery != nil {
+					r = withHookDeliveryReceipt(r, delivery)
+				}
+			}
+		}
 		if r.URL.Path == "/health" && r.Method == http.MethodGet {
 			next.ServeHTTP(w, r)
 			return
@@ -3800,6 +4377,20 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			// credential (user_scoped_listener_proof.go). Every other
 			// profile keeps the ordinary authentication below.
 			a.serveUserScopedListenerProof(w, r)
+			return
+		}
+		if isGatewayTokenListenerProofRequest(r) && (a.scannerCfg == nil || !a.scannerCfg.SecureClientIntegration()) {
+			// The per-user OpenClaw plugin proves this listener with the
+			// gateway token before it sends that token (GAP-0594).
+			expected := ""
+			if a.scannerCfg != nil {
+				expected = a.scannerCfg.Gateway.Token
+			}
+			if !writeGatewayTokenListenerProof(w, r, expected, a.client.RefreshedToken()) {
+				a.emitHTTPAuthFailure(r.Context(), r, connector.UserScopedListenerProofPath,
+					gatewaylog.ErrCodeAuthInvalidToken, userScopedListenerProofRefusedReason)
+				writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			}
 			return
 		}
 		route := r.Pattern
@@ -3815,7 +4406,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		// reached with one, whatever header or path carries it.
 		if requestCarriesSandboxCredential(r) {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_token")
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
 		// Fleet API routes carry their own token auth (fleet.API's
@@ -3832,7 +4423,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			authenticated, token, nonce, ok := a.authenticateACPSignedRequest(r)
 			if !ok {
 				a.emitHTTPAuthFailure(a.withRevokedACPCredential(a.withACPCallerAccount(ctx, r), r), r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_acp_signed_request")
-				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
 			if reason := a.acpCallerAccountRefusal(authenticated); reason != "" {
@@ -3844,7 +4435,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 					writeACPSignedOtherAccountRefusal(w, r, token, nonce)
 					return
 				}
-				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
 			// The ACP credential that signed the request names who sent it:
@@ -3857,7 +4448,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		}
 		if r.URL.Path == "/api/v1/acp/challenge" || r.URL.Path == "/api/v1/acp/evaluate" {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "missing_acp_authenticated_transport")
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
 
@@ -3874,7 +4465,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			// (503) rather than silently allowing loopback — the previous
 			// "no token, trust loopback" path was a local-IDOR risk.
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthMissingToken, "no_token_configured")
-			http.Error(w, `{"error":"sidecar misconfigured: no gateway token"}`, http.StatusServiceUnavailable)
+			writeJSONRefusal(w, `{"error":"sidecar misconfigured: no gateway token"}`, http.StatusServiceUnavailable)
 			return
 		}
 		// Codex and Claude Code support arbitrary OTLP headers. Bind their
@@ -3909,7 +4500,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 						return
 					}
 					a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_scoped_header_token")
-					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+					writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 					return
 				}
 			}
@@ -3925,7 +4516,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			if scoped != "" {
 				if token != "" {
 					a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "scoped_otlp_rejects_header_token")
-					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+					writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 					return
 				}
 				if !userScoped && constantTimeStringMatch(pathToken, scoped) {
@@ -3933,7 +4524,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 					return
 				}
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_scoped_path_token")
-				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
 			// Legacy compatibility only for deployments that have not
@@ -3966,20 +4557,10 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 				return
 			}
 		}
-		if isACPAPIPath(r.URL.Path) && connector.IsLoopback(r) {
-			if authenticated, ok := a.authenticateACPToken(r, token); ok {
-				r = authenticated.WithContext(a.attachACPSubject(authenticated.Context()))
-				next.ServeHTTP(w, r)
-				return
-			}
-			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_acp_scoped_token")
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-			return
-		}
 		if strings.HasPrefix(r.URL.Path, "/api/v1/inspect/") && connector.IsLoopback(r) && token != "" {
 			hookScope := strings.ToLower(strings.TrimSpace(r.Header.Get("X-DefenseClaw-Connector")))
 			registered := false
-			if a.connectorRegistry != nil {
+			if a.connectorRegistry != nil && !connector.IsRemovedConnector(hookScope) {
 				_, registered = a.connectorRegistry.Get(hookScope)
 			}
 			if registered {
@@ -4004,12 +4585,12 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		}
 		if token == "" {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthMissingToken, "missing_token")
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
 		if !constantTimeStringMatch(token, expected) && !a.matchesRefreshedGatewayToken(token) {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_token")
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
 
@@ -4124,7 +4705,7 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 		if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" {
 			if sfs != "same-origin" && sfs != "none" {
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "sec_fetch_site_rejected")
-				http.Error(w, `{"error":"cross-site request rejected"}`, http.StatusForbidden)
+				writeJSONRefusal(w, `{"error":"cross-site request rejected"}`, http.StatusForbidden)
 				return
 			}
 		}
@@ -4144,12 +4725,12 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 			//      application/x-www-form-urlencoded.
 			if origin := r.Header.Get("Origin"); origin != "" && !isLocalhostOrigin(origin) {
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthOriginBlocked, "origin_blocked")
-				http.Error(w, `{"error":"non-localhost Origin rejected"}`, http.StatusForbidden)
+				writeJSONRefusal(w, `{"error":"non-localhost Origin rejected"}`, http.StatusForbidden)
 				return
 			}
 			if !isOTLPContentType(r.Header.Get("Content-Type")) {
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "bad_content_type")
-				http.Error(w, `{"error":"Content-Type must be application/json or application/x-protobuf"}`, http.StatusUnsupportedMediaType)
+				writeJSONRefusal(w, `{"error":"Content-Type must be application/json or application/x-protobuf"}`, http.StatusUnsupportedMediaType)
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -4163,7 +4744,7 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 		if r.Method == http.MethodOptions {
 			if r.Header.Get("X-DefenseClaw-Client") == "" {
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "csrf_mismatch_options")
-				http.Error(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
+				writeJSONRefusal(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -4172,7 +4753,7 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 
 		if r.Header.Get("X-DefenseClaw-Client") == "" {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "csrf_mismatch")
-			http.Error(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
+			writeJSONRefusal(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
 			return
 		}
 
@@ -4180,19 +4761,19 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 		if isOTLPEndpointPath(r.URL.Path) || isSandboxRelayOTLPPath(r.URL.Path) {
 			if !isOTLPContentType(ct) {
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "bad_content_type")
-				http.Error(w, `{"error":"Content-Type must be application/json or application/x-protobuf"}`, http.StatusUnsupportedMediaType)
+				writeJSONRefusal(w, `{"error":"Content-Type must be application/json or application/x-protobuf"}`, http.StatusUnsupportedMediaType)
 				return
 			}
 		} else if !strings.Contains(ct, "application/json") {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "bad_content_type")
-			http.Error(w, `{"error":"Content-Type must be application/json"}`, http.StatusUnsupportedMediaType)
+			writeJSONRefusal(w, `{"error":"Content-Type must be application/json"}`, http.StatusUnsupportedMediaType)
 			return
 		}
 
 		if origin := r.Header.Get("Origin"); origin != "" {
 			if !isLocalhostOrigin(origin) {
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthOriginBlocked, "origin_blocked")
-				http.Error(w, `{"error":"non-localhost Origin rejected"}`, http.StatusForbidden)
+				writeJSONRefusal(w, `{"error":"non-localhost Origin rejected"}`, http.StatusForbidden)
 				return
 			}
 		}
@@ -4227,7 +4808,11 @@ func maxBodyMiddleware(next http.Handler, maxBytes int64) http.Handler {
 func bodyLimitMiddleware(next http.Handler, maxBytes func(*http.Request) int64) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch {
-			r.Body = http.MaxBytesReader(w, r.Body, maxBytes(r))
+			limit := maxBytes(r)
+			if r.Header.Get(hookexec.HookDeliveryReceiptHeader) == "1" {
+				limit += int64(len(hookexec.HookDeliveryReceiptBlock))
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -4249,31 +4834,41 @@ func csrfProtect(next http.Handler) http.Handler {
 
 		if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" {
 			if sfs != "same-origin" && sfs != "none" {
-				http.Error(w, `{"error":"cross-site request rejected"}`, http.StatusForbidden)
+				writeJSONRefusal(w, `{"error":"cross-site request rejected"}`, http.StatusForbidden)
 				return
 			}
 		}
 
 		if r.Header.Get("X-DefenseClaw-Client") == "" {
-			http.Error(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
+			writeJSONRefusal(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
 			return
 		}
 
 		ct := r.Header.Get("Content-Type")
 		if !strings.Contains(ct, "application/json") {
-			http.Error(w, `{"error":"Content-Type must be application/json"}`, http.StatusUnsupportedMediaType)
+			writeJSONRefusal(w, `{"error":"Content-Type must be application/json"}`, http.StatusUnsupportedMediaType)
 			return
 		}
 
 		if origin := r.Header.Get("Origin"); origin != "" {
 			if !isLocalhostOrigin(origin) {
-				http.Error(w, `{"error":"non-localhost Origin rejected"}`, http.StatusForbidden)
+				writeJSONRefusal(w, `{"error":"non-localhost Origin rejected"}`, http.StatusForbidden)
 				return
 			}
 		}
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// writeJSONRefusal writes a CSRF gate refusal: its body is JSON, so it is
+// served as application/json like every other API error (GAP-0569), not as
+// http.Error's text/plain. Bodies and status codes are unchanged.
+func writeJSONRefusal(w http.ResponseWriter, body string, status int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(status)
+	_, _ = io.WriteString(w, body+"\n")
 }
 
 func isLocalhostOrigin(origin string) bool {
@@ -4325,10 +4920,7 @@ func toEnforcementEntries(entries []audit.ActionEntry) []enforcementEntry {
 // the request cannot pair one generation's query with another's lists
 // (GAP-0873).
 func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.AdmissionInput, connector string) (*policy.AdmissionOutput, error) {
-	cfg := a.liveConfig()
-	if g := pinnedGeneration(ctx); g != nil && g.Config != nil && (cfg == nil || !cfg.SecureClientIntegration()) {
-		cfg = g.Config
-	}
+	cfg := a.requestConfig(ctx)
 	input.BlockList, input.AllowList = policy.AssetPolicyListsFor(cfg, config.AssetPolicyInput{
 		TargetType: input.TargetType, Name: input.TargetName, Connector: connector, SourcePath: input.Path,
 	})
@@ -4438,6 +5030,28 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 		_ = a.recordAPIPolicyReloadMetricV8(r.Context(), "failed")
 		_ = a.emitAPIPolicyReloadRejectedV8(r.Context(), reason)
 	}
+	// On a standalone managed computer only the lifecycle records a new
+	// config or policy generation (a signed bundle once trust anchors are
+	// installed). The API loads that recorded generation and nothing else:
+	// the Windows lifecycle asks for it because a directory notification can
+	// be lost during the atomic config replacement. The lifecycle still
+	// confirms the generation the gateway then reports.
+	reload, managedHost := a.policyReloader, false
+	if cfg := a.runtimeConfigSnapshot(); policyCfg.StandaloneEnterprise() || cfg != nil && cfg.StandaloneEnterprise() {
+		reload, managedHost = a.recordedGenerationReloader, true
+	}
+	refuse := func(cause string) {
+		message := managedPolicyReloadRefusal(cause)
+		recordFailure(message)
+		a.writeJSON(w, http.StatusForbidden, map[string]string{
+			"error":  message,
+			"status": "refused",
+		})
+	}
+	if managedHost && reload == nil {
+		refuse("this gateway cannot load a recorded generation over the API")
+		return
+	}
 
 	// Secure Client keeps the reload check of main (issue #1092): it fails
 	// while the policy directory has no data.json.
@@ -4454,11 +5068,15 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 
 	// Rebuild the configuration generation now: Rego modules and rule packs
 	// are prepared once and swapped atomically, or the live generation stays.
-	if a.policyReloader == nil {
+	if reload == nil {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "policy reload is not available"})
 		return
 	}
-	if err := a.policyReloader(); err != nil {
+	if err := reload(); err != nil {
+		if managedHost && errors.Is(err, errNoRecordedGeneration) {
+			refuse(strings.TrimPrefix(err.Error(), errNoRecordedGeneration.Error()+": "))
+			return
+		}
 		recordFailure(err.Error())
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error":  "reload failed: " + err.Error(),
@@ -4734,4 +5352,33 @@ func connectorProxyBindsByName(name string) bool {
 		return true
 	}
 	return proxyShouldBindForConnector(conn, nil)
+}
+
+// scanCorrelationWithJudge is ScanCorrelationFromContext plus the LLM judge
+// model the skill or plugin scan ran with, so its audit rows say the judge
+// ran, as the install watcher rows do (GAP-0575, GAP-2435).
+// scanCorrelationForTarget is scanCorrelationWithJudge plus, when the request
+// names no verified caller (an administrator's scan on a managed host), the
+// enrolled user whose home holds target: the scan, scan-finding rows then
+// name the user whose asset it was, as the watcher's rows do (GAP-0575).
+// Secure Client rows keep their shape.
+func scanCorrelationForTarget(ctx context.Context, result *scanner.ScanResult, target string) audit.ScanCorrelation {
+	correlation := scanCorrelationWithJudge(ctx, result)
+	if correlation.UserID != "" || ManagedEnterpriseActive() {
+		return correlation
+	}
+	if owners := scanAssetOwners.Load(); owners != nil {
+		if owner, ok := watcher.AssetOwnerOf(*owners, target); ok {
+			correlation.UserID, correlation.UserIDKind, correlation.UserName = owner.ID, owner.IDKind, owner.Name
+		}
+	}
+	return correlation
+}
+
+func scanCorrelationWithJudge(ctx context.Context, result *scanner.ScanResult) audit.ScanCorrelation {
+	correlation := ScanCorrelationFromContext(ctx)
+	if result != nil {
+		correlation.JudgeModel = result.JudgeModel
+	}
+	return correlation
 }

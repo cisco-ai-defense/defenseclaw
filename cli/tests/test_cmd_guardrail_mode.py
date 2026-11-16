@@ -13,12 +13,14 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 from click.testing import CliRunner
 from defenseclaw.commands import cmd_guardrail, cmd_setup
 from defenseclaw.config import PerConnectorGuardrailConfig, default_config
+from defenseclaw.connector_paths import connector_hook_config_paths, copilot_home
 from defenseclaw.context import AppContext
 
 from tests.environment import isolated_home_env
@@ -52,7 +54,11 @@ def version_checks(monkeypatch):
     verdicts: dict[str, bool] = {}
 
     def check(connector, *, mode, **_k):
-        assert mode == "action"
+        if mode != "action":
+            # An observe switch asks only for a refusal that holds in every
+            # mode (GAP-1946); an installed, supported agent passes it.
+            assert mode == "observe"
+            return True
         calls.append(connector)
         return verdicts.get(connector, True)
 
@@ -108,32 +114,54 @@ def test_global_switch_sets_only_guardrail_mode(app) -> None:
     assert app.logger.log_config_change.call_args.args[0] == "guardrail-mode"  # a config-update mutation
 
 
-def test_global_switch_rerenders_hooks_without_a_restart(app, restarts, rerenders, monkeypatch) -> None:
-    # codex inherits hook_fail_mode=closed, which only applies in action mode:
-    # observe -> action flips its hooks from fail-open to fail-closed. The
-    # gateway reloads the mode hot and the script is re-rendered in place
-    # (GAP-0002); no restart.
-    result, payload = _run(app, "action", "--json")
-    assert payload["gateway"] == "live" and rerenders == ["codex"] and restarts == []
-    text, _ = _run(app, "observe")
-    assert "fail open" in text.output
-    assert rerenders == ["codex", "codex"] and restarts == []
-
-    # Without a hook fail-mode flip nothing is re-rendered.
-    app.cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig(hook_fail_mode="closed")}
+def test_cursor_mode_switch_keeps_its_fail_mode(app, restarts, rerenders) -> None:
+    # The guardrail mode no longer pins Cursor's fail mode: like every other
+    # connector it keeps the explicitly saved mode, so
+    # a mode switch re-renders no hook and restarts nothing.
+    app.cfg.claw.mode = "cursor"
+    app.cfg.guardrail.connector = "cursor"
     _, payload = _run(app, "action", "--json")
-    assert payload["gateway"] == "live" and len(rerenders) == 2
+    assert payload["gateway"] == "live" and restarts == [] and rerenders == []
+    _run(app, "observe")
+    assert restarts == [] and rerenders == []
+    assert app.cfg.guardrail.effective_hook_fail_mode("cursor") == "closed"
 
-    # A failed re-render falls back to a restart, which re-bakes the script.
-    app.cfg.guardrail.connectors = {}
-    app.cfg.guardrail.mode = "observe"
 
-    def broken(_cfg, _name):
-        raise OSError("native defenseclaw-gateway executable not found")
-
-    monkeypatch.setattr(cmd_guardrail, "reconcile_connector_registration", broken)
+def test_mode_switch_outside_secure_client_keeps_the_hook_fail_mode(app, restarts, rerenders) -> None:
+    # B-01 (owner rule): outside Secure Client observe and action mode fail
+    # the same way, so a mode switch re-renders no hook and restarts nothing.
     _, payload = _run(app, "action", "--json")
-    assert payload["gateway"] == "restarted" and restarts == [app.cfg.data_dir]
+    assert payload["gateway"] == "live" and rerenders == [] and restarts == []
+    _, payload = _run(app, "observe", "--json")
+    assert rerenders == [] and restarts == []
+    # The fixture has an explicit saved closed choice.
+    assert app.cfg.guardrail.effective_hook_fail_mode("codex") == "closed"
+
+
+@pytest.mark.parametrize("scope", ["global", "connector", "clear"])
+@pytest.mark.parametrize("fail_mode", ["closed", "open"])
+def test_observe_message_scopes_policy_findings_and_closed_outages(app, monkeypatch, scope, fail_mode) -> None:
+    gc = app.cfg.guardrail
+    monkeypatch.setattr(type(gc), "effective_hook_fail_mode", lambda _self, _connector: fail_mode)
+    if scope == "global":
+        gc.mode = "action"
+        args = ("observe", "--json")
+    elif scope == "connector":
+        gc.mode = "action"
+        args = ("observe", "--connector", "codex", "--json")
+    else:
+        gc.connectors = {"codex": PerConnectorGuardrailConfig(mode="action")}
+        args = ("--clear", "--connector", "codex", "--json")
+
+    result, payload = _run(app, *args)
+    assert result.exit_code == 0, result.output
+    message = payload["message"]
+    assert "policy findings" in message
+    assert "blocks nothing" not in message
+    if fail_mode == "closed":
+        assert "gateway outage" in message and "deny" in message
+    else:
+        assert "gateway outage" not in message
 
 
 def test_connector_override_created_on_a_single_install(app, restarts, rerenders) -> None:
@@ -154,7 +182,9 @@ def test_connector_override_created_on_a_single_install(app, restarts, rerenders
     assert payload["changed"] is False  # already there
     _, payload = _run(app, "--clear", "--connector", "codex", "--no-restart", "--json")
     assert (payload["mode"], payload["mode_source"], payload["gateway"]) == ("observe", "global", "live")
-    assert gc.connectors["codex"].mode == ""
+    # guardrail.connector already lists codex, so its emptied entry goes (GAP-1954).
+    assert "codex" not in gc.connectors
+    assert app.cfg.active_connectors() == ["codex"]
 
 
 def test_connector_scope_leaves_peers_alone_and_global_names_overrides(app) -> None:
@@ -212,13 +242,179 @@ def test_action_switch_probes_versions_and_refuses_an_unverified_connector(
     assert calls == ["codex", "codex"]
 
 
-def test_copilot_action_message_names_upstream_fail_open(app) -> None:
+def test_kiro_below_its_floor_is_refused_in_observe_too_so_the_switch_can_be_undone(app, monkeypatch, restarts) -> None:
+    # GAP-1638: kiro-cli 2.26.1 enrolled in action; `guardrail mode observe
+    # --connector kiro` succeeded, then `guardrail mode action --connector kiro`
+    # was refused, so the CLI could not undo its own switch. Setup refuses that
+    # version in every mode, and so does the observe switch now.
+    app.cfg.guardrail.connectors = {"codex": None, "kiro": None}
+    app.cfg.guardrail.connector = "codex"
+    monkeypatch.setattr(app.cfg, "active_connectors", lambda: ["codex", "kiro"])
+    monkeypatch.setattr(app.cfg.guardrail, "effective_mode", lambda c="": "action")
+    seen: list[tuple[str, str]] = []
+
+    def check(connector, *, mode, _refusal_scope=None, **_k):
+        seen.append((connector, mode))
+        if connector == "kiro" and _refusal_scope is not None:
+            _refusal_scope["observe_admitted"] = False
+            return False
+        return True
+
+    monkeypatch.setattr(cmd_setup, "_check_connector_version_supported_for_setup", check)
+    result, payload = _run(app, "observe", "--connector", "kiro", "--json")
+    assert result.exit_code == 1 and payload["ok"] is False and payload["changed"] is False
+    assert "observe and action mode" in payload["message"]
+    assert seen == [("kiro", "observe")]
+    app.cfg.save.assert_not_called()
+    # A connector setup admits in observe mode switches after the same check.
+    seen.clear()
+    result, payload = _run(app, "observe", "--connector", "codex", "--json")
+    assert result.exit_code == 0 and seen == [("codex", "observe")]
+
+
+@pytest.mark.parametrize(
+    ("connector", "reason"),
+    [
+        ("opencode", "OpenCode 1.19.4 has no DefenseClaw hook contract."),
+        ("codex", "Codex 0.120.0 cannot run the app-server command this connector requires"),
+    ],
+)
+def test_every_connector_setup_refuses_in_every_mode_is_refused_in_observe_too(
+    app, monkeypatch, restarts, connector, reason
+) -> None:
+    # GAP-1946: the GAP-1638 floor covered only kiro, so `guardrail mode
+    # observe --connector opencode` with an OpenCode outside its plugin
+    # contract (or an old Codex) was accepted and the switch back to action
+    # was refused: the CLI could not undo its own change.
+    app.cfg.guardrail.connectors = {"codex": None, "opencode": None}
+    app.cfg.guardrail.connector = "codex"
+    monkeypatch.setattr(app.cfg, "active_connectors", lambda: ["codex", "opencode"])
+    monkeypatch.setattr(app.cfg.guardrail, "effective_mode", lambda c="": "action")
+    seen: list[tuple[str, str]] = []
+
+    def check(c, *, mode, _refusal_scope=None, **_k):
+        seen.append((c, mode))
+        if c == connector and _refusal_scope is not None:
+            _refusal_scope["observe_admitted"] = False
+            _refusal_scope["reason"] = reason
+            return False
+        return True
+
+    monkeypatch.setattr(cmd_setup, "_check_connector_version_supported_for_setup", check)
+    result, _ = _run(app, "observe", "--connector", connector)
+    assert result.exit_code == 1, result.output
+    assert "Nothing was changed" in result.output and "observe and action mode" in result.output
+    assert reason in result.output
+    assert seen == [(connector, "observe")]
+    app.cfg.save.assert_not_called()
+
+
+def test_observe_switch_is_not_stopped_by_an_action_only_refusal(app, monkeypatch, restarts) -> None:
+    # Only a refusal that holds in every mode stops the switch: a version
+    # setup refuses in action mode alone (or an agent not installed here)
+    # still switches to observe, and a connector already in observe is not
+    # probed at all.
+    app.cfg.guardrail.connectors = {"codex": None, "opencode": None}
+    app.cfg.guardrail.connector = "codex"
+    monkeypatch.setattr(app.cfg, "active_connectors", lambda: ["codex", "opencode"])
+    app.cfg.guardrail.mode = "action"
+    modes = {"codex": "action", "opencode": "observe"}
+    monkeypatch.setattr(app.cfg.guardrail, "effective_mode", lambda c="": modes.get(c, "action"))
+    seen: list[tuple[str, str]] = []
+
+    def check(c, *, mode, _refusal_scope=None, **_k):
+        seen.append((c, mode))
+        return False
+
+    monkeypatch.setattr(cmd_setup, "_check_connector_version_supported_for_setup", check)
+    result, payload = _run(app, "observe", "--json")
+    assert result.exit_code == 0, result.output
+    assert payload["ok"] is True
+    assert seen == [("codex", "observe")]
+
+
+def test_copilot_mode_switch_keeps_its_fail_mode(app) -> None:
+    # A mode switch changes no fail mode outside Cursor (owner rule), so it
+    # names none.
     app.cfg.claw.mode = "copilot"
     app.cfg.guardrail.connector = "copilot"
     result, _ = _run(app, "action", "--connector", "copilot", "--no-restart")
     assert result.exit_code == 0, result.output
-    assert "upstream limitation" in result.output
-    assert "now fail closed" not in result.output
+    assert "Hook failures for" not in result.output
+
+
+@pytest.mark.parametrize("source", ["settings", "registration"])
+def test_copilot_action_refuses_hooks_off_with_no_running_gateway(app, monkeypatch, tmp_path, source) -> None:
+    # Use the native path resolver on each OS, including Windows. A stopped
+    # gateway must not make an action-mode claim when Copilot runs no hooks.
+    monkeypatch.setenv("COPILOT_HOME", str(tmp_path / "copilot"))
+    monkeypatch.setattr(cmd_guardrail, "_gateway_running", lambda _app: False)
+    app.cfg.claw.mode = "copilot"
+    app.cfg.guardrail.connector = "copilot"
+    path = (
+        Path(copilot_home(), "settings.json")
+        if source == "settings"
+        else Path(connector_hook_config_paths("copilot")[0])
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"disableAllHooks": true}', encoding="utf-8")
+
+    result, payload = _run(app, "action", "--connector", "copilot", "--json")
+
+    assert result.exit_code == 1, result.output
+    assert payload["ok"] is False and str(path) in payload["message"]
+    assert "disableAllHooks" in payload["message"]
+    assert app.cfg.guardrail.mode == "observe"
+    app.cfg.save.assert_not_called()
+
+    from defenseclaw import gateway
+
+    monkeypatch.setattr(gateway, "current_user_guardrail_profile", lambda _cfg: {"error": "offline"})
+    status = CliRunner().invoke(cmd_guardrail.guardrail, ["status", "--json"], obj=app, catch_exceptions=False)
+    assert status.exit_code == 0, status.output
+    posture = json.loads(status.stdout)
+    assert any("disableAllHooks" in warning and str(path) in warning for warning in posture["warnings"])
+
+
+@pytest.mark.parametrize("copilot_override", ["", "observe"], ids=["covered", "observe-only"])
+def test_global_action_checks_only_the_copilot_scope(app, monkeypatch, tmp_path, copilot_override) -> None:
+    monkeypatch.setenv("COPILOT_HOME", str(tmp_path / "copilot"))
+    monkeypatch.setattr(cmd_guardrail, "_gateway_running", lambda _app: False)
+    app.cfg.guardrail.connectors = {
+        "codex": PerConnectorGuardrailConfig(),
+        "copilot": PerConnectorGuardrailConfig(mode=copilot_override),
+    }
+    settings = Path(copilot_home(), "settings.json")
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text('{"disableAllHooks": true}', encoding="utf-8")
+
+    result, payload = _run(app, "action", "--json")
+
+    if copilot_override == "observe":
+        assert result.exit_code == 0, result.output
+        assert payload["not_covered"] == ["copilot"]
+        assert app.cfg.guardrail.mode == "action"
+    else:
+        assert result.exit_code == 1, result.output
+        assert payload["ok"] is False and str(settings) in payload["message"]
+        assert app.cfg.guardrail.mode == "observe"
+        app.cfg.save.assert_not_called()
+
+
+def test_copilot_action_text_does_not_claim_enforcement_with_hooks_off(app, monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("COPILOT_HOME", str(tmp_path / "copilot"))
+    app.cfg.claw.mode = "copilot"
+    app.cfg.guardrail.connector = "copilot"
+    settings = Path(copilot_home(), "settings.json")
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text('{"disableAllHooks": true}', encoding="utf-8")
+
+    result, _ = _run(app, "action")
+
+    assert result.exit_code == 1, result.output
+    assert "Nothing was changed" in result.output and "disableAllHooks" in result.output
+    assert "now in action mode" not in result.output
+    app.cfg.save.assert_not_called()
 
 
 def test_action_mode_without_registered_hooks_is_not_reported_as_success(app, restarts, rerenders, tmp_path) -> None:

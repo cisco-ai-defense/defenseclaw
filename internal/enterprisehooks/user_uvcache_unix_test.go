@@ -73,9 +73,9 @@ func TestPurgeUserStateRemovesDefenseClawUVCacheEntries(t *testing.T) {
 	}
 
 	opts := InstallOptions{UserHome: home, OwnerUID: os.Getuid(), OwnerGID: os.Getgid(), Registry: connector.NewDefaultRegistry()}
-	summary, err := PurgeUserStateSummary(context.Background(), opts)
+	summary, err := PurgeUserState(context.Background(), opts)
 	if err != nil {
-		t.Fatalf("PurgeUserStateSummary: %v", err)
+		t.Fatalf("PurgeUserState: %v", err)
 	}
 	if !summary.UVCache || !summary.Data {
 		t.Fatalf("summary = %+v, want Data and UVCache", summary)
@@ -97,14 +97,14 @@ func TestPurgeUserStateRemovesDefenseClawUVCacheEntries(t *testing.T) {
 	// A rerun after ~/.defenseclaw went still cleans the cache, and an
 	// account without a uv cache is not an error.
 	write("archive-v0/FFF/defenseclaw-1.0.1.dist-info/METADATA")
-	summary, err = PurgeUserStateSummary(context.Background(), opts)
+	summary, err = PurgeUserState(context.Background(), opts)
 	if err != nil || !summary.UVCache || summary.Data {
 		t.Fatalf("rerun: summary %+v, err %v", summary, err)
 	}
 	if err := os.RemoveAll(filepath.Join(home, ".cache")); err != nil {
 		t.Fatal(err)
 	}
-	if summary, err := PurgeUserStateSummary(context.Background(), opts); err != nil || summary.UVCache {
+	if summary, err := PurgeUserState(context.Background(), opts); err != nil || summary.UVCache {
 		t.Fatalf("without a uv cache: summary %+v, err %v", summary, err)
 	}
 }

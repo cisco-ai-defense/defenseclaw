@@ -9,7 +9,13 @@ import (
 	"context"
 	"errors"
 	"io"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
+
+// enterpriseSetupRecordedDeployment reads no deployment off Windows.
+var enterpriseSetupRecordedDeployment = func(*enterprisestatus.Result) bool { return false }
 
 func loadTrustedEnterprisePayload() (enterprisePayload, error) {
 	return loadEmbeddedEnterprisePayload()
@@ -21,4 +27,12 @@ func executeEnterpriseSetup(
 	_, _ io.Writer,
 ) (int, error) {
 	return 0, errors.New("DefenseClaw enterprise Setup is supported only on native Windows x64")
+}
+
+func enterpriseSetupProcessStarted() time.Time {
+	return enterpriseSetupInitTime
+}
+
+func runStandaloneSetupRecoveryWatchdog(string, io.Writer, io.Writer) int {
+	return 1
 }

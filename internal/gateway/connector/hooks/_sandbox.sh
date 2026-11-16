@@ -52,6 +52,11 @@ for _dc_sandbox_var in $_dc_sandbox_vars; do
     DEFENSECLAW_TRACEPARENT|DEFENSECLAW_TRACESTATE|OTEL_TRACEPARENT|OTEL_TRACESTATE|TRACEPARENT|TRACESTATE) ;;
     HOME|PWD|DEFENSECLAW_HOME|DEFENSECLAW_MANAGED_HOOK) ;;
     HOOK_DIR|DEFENSECLAW_BAKED_HOOK_PATH) export -n "$_dc_sandbox_var" ;;
+    # bash's own variables keep their meaning only while set: unsetting an
+    # exported RANDOM made the next $RANDOM fail under set -u and the hook
+    # exit 1 (review 2 of sandbox-visibility:GAP-0028).
+    RANDOM|SRANDOM|SECONDS|LINENO|BASHPID|EPOCHREALTIME|EPOCHSECONDS|BASH_ARGV0|BASH_SOURCE|BASH_LINENO|BASH_ARGC|BASH_ARGV|BASH_SUBSHELL|BASH_COMMAND|BASH_CMDS|BASH_ALIASES|BASH_REMATCH|BASH_VERSINFO|BASH_VERSION|BASH|FUNCNAME|GROUPS|DIRSTACK|PIPESTATUS|HISTCMD|HOSTNAME|OSTYPE|MACHTYPE|HOSTTYPE|UID|EUID|PPID|SHLVL|OPTIND|OPTERR|COLUMNS|LINES)
+      export -n "$_dc_sandbox_var" 2>/dev/null || true ;;
     *) unset -v "$_dc_sandbox_var" 2>/dev/null || export -n "$_dc_sandbox_var" 2>/dev/null || true ;;
   esac
 done
@@ -73,6 +78,9 @@ readonly DC_SANDBOX_CONNECT_TIMEOUT={{.SandboxConnectTimeout}}
 readonly DC_SANDBOX_MAX_TIME={{.SandboxMaxTime}}
 readonly DC_SANDBOX_RETRY_MAX_TIME={{.SandboxRetryMaxTime}}
 readonly DC_SANDBOX_SESSION_END_MAX_TIME={{.SandboxSessionEndMaxTime}}
+readonly DC_SANDBOX_HOOK_STARTED=$SECONDS
+DC_SANDBOX_RECEIPT_STATUS=transport
+DC_SANDBOX_RECEIPT_BODY=""
 
 # DC_SANDBOX_UNREACHABLE is why a sandbox hook blocked when DefenseClaw did not
 # answer, worded for the agent and for the user who reads its screen: what is
@@ -121,6 +129,36 @@ defenseclaw_sandbox_unreachable_reason() {
   esac
 }
 
+# defenseclaw_sandbox_rate_refusal_message BODY [legacy] prints the message the
+# gateway wrote for a call it refused 429. The gateway's own message names
+# which limit refused it (this sandbox's rate, its waiting requests, the
+# user's sandboxes together, or the gateway as a whole): the cause and the
+# numbers live there, not here. It is cut to one printable line of at most
+# 300 characters. With "legacy" a body that carries only an error field (the
+# older gateway answer) counts as its message; without it only the message
+# field does.
+defenseclaw_sandbox_rate_refusal_message() {
+  local message filter='if type == "object" then (.message // "") else "" end'
+  [ "${2:-}" = legacy ] && filter='if type == "object" then (.message // .error // "") else "" end'
+  message="$(printf %s "$1" | _dc_jq -r "$filter" 2>/dev/null)" || message=""
+  message="$(printf %s "$message" | LC_ALL=C tr -d '\000-\037\177')"
+  printf %s "${message:0:300}"
+}
+
+# defenseclaw_sandbox_rate_refusal_reason BODY prints why a sandbox hook
+# blocked a call the gateway refused 429, with the gateway's message when it
+# gave one. A refusal for rate is the gateway answering, not an outage, and
+# says so.
+defenseclaw_sandbox_rate_refusal_reason() {
+  local message
+  message="$(defenseclaw_sandbox_rate_refusal_message "$1" legacy)"
+  if [ -n "$message" ]; then
+    printf 'DefenseClaw refused this tool call, the gateway is limiting requests (not an outage): %s' "$message"
+  else
+    printf %s "DefenseClaw refused this tool call, the gateway answered HTTP 429 (too many requests, not an outage): retry in a few seconds"
+  fi
+}
+
 # defenseclaw_sandbox_require_token CONNECTOR HOOK_NAME SUBJECT
 #
 # The binding token is the only credential a sandbox hook may present. A
@@ -138,7 +176,7 @@ defenseclaw_sandbox_require_token() {
   if [ -z "$reason" ]; then
     return 0
   fi
-  defenseclaw_log_hook_failure "$connector" "$hook_name" "$reason" transport closed
+  defenseclaw_log_hook_failure "$connector" "$hook_name" "$reason" transport closed fail_closed
   echo "defenseclaw: ${reason}, blocking ${subject} (sandbox hooks fail closed)" >&2
   exit 2
 }
@@ -254,7 +292,11 @@ defenseclaw_sandbox_post() {
       "${auth_args[@]+"${auth_args[@]}"}" \
       --connect-timeout "$DC_SANDBOX_CONNECT_TIMEOUT" \
       --max-time "$max_time" \
-      --data-binary @- 2>/dev/null 7< <(printf 'header = "%s"\n' "$auth"))" || status=$?
+      --data-binary @- 2>/dev/null 7< <(printf 'header = "%s"\n' "$auth") |
+      tr '\000' '\001'
+      # Command substitution drops NUL bytes: keep them visible as U+0001,
+      # which jq refuses unescaped, so "al<NUL>low" is no allow (GAP-1008).
+      exit "${PIPESTATUS[1]}")" || status=$?
     if [ "$status" -eq 0 ]; then
       code="${out##*$'\n'}"
       case "$code" in
@@ -278,4 +320,43 @@ defenseclaw_sandbox_post() {
     return "$status"
   fi
   printf '%s' "$out"
+}
+
+# The buffered relay cannot carry the native hook's full-duplex receipt.
+# A new managed gateway adds delivery_receipt to a proposed tool answer; an
+# older gateway omits it. A successful receipt post commits that proposal's
+# final audit row before the hook hands the answer to its agent. The same
+# binding token is used on both calls, and any failed acknowledgement closes
+# the hook. The receipt ID is an opaque UUID, never shell syntax or a path.
+defenseclaw_sandbox_confirm_receipt() {
+  local path="$1" result="$2" receipt="" body="" reply="" code="" received=""
+  local remaining first retry status=0
+  DC_SANDBOX_RECEIPT_STATUS=transport
+  # Use the same baked sandbox binding token as the first request. The post
+  # helper moves this header into curl's descriptor-backed config, keeping
+  # the bearer off every external process command line.
+  case "${DEFENSECLAW_SANDBOX_TOKEN:-}" in
+    ''|*$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  receipt="$(printf '%s' "$result" | _dc_jq -r '.delivery_receipt // empty' 2>/dev/null)" || return 1
+  [ -n "$receipt" ] || return 0
+  [[ "$receipt" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || return 1
+  # Use the time left in the agent's 30-second hook envelope, keeping one
+  # second for the answer. Both transport attempts share this allowance.
+  remaining=$((29 - (SECONDS - DC_SANDBOX_HOOK_STARTED)))
+  [ "$remaining" -ge 2 ] || return 1
+  first=$((remaining / 2))
+  retry=$((remaining - first))
+  body="$(printf '{"delivery_receipt":"%s","result":"ack"}' "$receipt")"
+  reply="$(defenseclaw_sandbox_post "$path" "$body" "$first" "$retry" \
+    -H "Content-Type: application/json" \
+    -H "X-DefenseClaw-Client: sandbox-hook/1.0" \
+    -H "X-DefenseClaw-Hook-Receipt: 1" \
+    -H "Authorization: Bearer ${DEFENSECLAW_SANDBOX_TOKEN}")" || status=$?
+  code="${reply##*$'\n'}"
+  case "$code" in [0-9][0-9][0-9]) DC_SANDBOX_RECEIPT_STATUS="$code" ;; esac
+  [ "$code" = 429 ] && DC_SANDBOX_RECEIPT_BODY="${reply%$'\n'*}"
+  [ "$status" -eq 0 ] && [ "$code" = 200 ] || return 1
+  received="$(printf '%s' "${reply%$'\n'*}" | _dc_jq -r '.received // false' 2>/dev/null)" || return 1
+  [ "$received" = true ]
 }

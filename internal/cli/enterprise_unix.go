@@ -11,6 +11,8 @@
 package cli
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"runtime"
@@ -21,11 +23,14 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // unixLifecycleOptions are the flags of `enterprise linux|macos <action>`.
 type unixLifecycleOptions struct {
 	payload            string
+	coworkPackage      string
+	coworkSignature    string
 	fromPackage        bool
 	config             string
 	noStart            bool
@@ -45,9 +50,33 @@ type enterpriseSecretOptions struct {
 	name      string
 	fromStdin bool
 	fromFile  string
-	json      bool
+	// bundle is the signed policy bundle that binds a new value (set
+	// --bundle): a credential the confirmed bundle binds rotates only to a
+	// value a newer verified bundle signs.
+	bundle string
+	// ifConfirmed (set --bundle --if-confirmed) stores the value only while
+	// the confirmed policy bundle has this manifest SHA-256 ("none": no
+	// bundle is confirmed). undoRotation (set|remove --undo-rotation) puts
+	// back a credential a rotation changed, only while the bundle confirmed
+	// before that rotation still is and does not sign the value stored now
+	// (checkSecretTransaction). The MDM wrappers journal the
+	// confirmed bundle before a rotation and pass it to both; a 1.0.4
+	// build reporting secret_set_bundle takes them. undoConfig (remove
+	// --undo-rotation --undo-config) is the SHA-256 of the installed config
+	// the wrapper journaled before the rotation: the put-back
+	// takes a credential the installed config references only while that
+	// very config is installed (undoRotationOnConfig).
+	ifConfirmed  string
+	undoRotation string
+	undoConfig   string
+	// ifStored is the SHA-256 of the exact value a caller expects now.
+	// Windows also accepts "none" for proven absence.
+	// It is compared under the credential/lifecycle lock before a change.
+	ifStored string
+	json     bool
 	// lockWait is how long set and remove wait for another lifecycle run
-	// (Linux and macOS).
+	// (Linux and macOS) or for a policy bundle run to release bundle.lock
+	// (Windows).
 	lockWait time.Duration
 }
 
@@ -63,15 +92,29 @@ deployment reads:
 
   - the Cisco AI Defense API key named by
     enterprise.inspection.ai_defense.credential;
+  - the API key of the LLM judge and the skill, MCP and plugin scanners
+    named by enterprise.inspection.llm.credential (they never read
+    llm.api_key_env or the service environment);
   - observability destination credentials named by a header value
     {credential: NAME} (otlp, http_jsonl), token_credential (splunk_hec)
     or bearer_credential (http_jsonl).
 
 Values are read from standard input or a file and are never printed.
-Status shows only presence, modification time and a digest prefix.`,
+Status shows only presence, modification time and a digest prefix. Check
+proves the Cisco AI Defense key before the first prompt.`,
 		PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
 	}
 )
+
+const linuxFapolicydTarballHelp = `On a tarball host with fapolicyd, trust the staged payload before running
+ensure --no-start: add its entry on first extraction, or update it when its
+files change. After staging, refresh the installed-tree trust:
+
+Fresh install: fapolicyd-cli --file add /opt/defenseclaw/ --trust-file defenseclaw
+Upgrade/rerun: fapolicyd-cli --file update /opt/defenseclaw/ --trust-file defenseclaw
+
+Run fapolicyd-cli --update, check the installed gateway as the service user,
+then run ensure again to start and verify.`
 
 func newUnixLifecycleGroup(name, platform string) *cobra.Command {
 	group := &cobra.Command{
@@ -101,6 +144,9 @@ arguments, 75 another lifecycle run holds the lock.`,
 		},
 	}
 	group.SetFlagErrorFunc(lifecycleFlagError)
+	if name == "linux" {
+		group.Long += "\n\n" + linuxFapolicydTarballHelp
+	}
 	summaries := map[string]string{
 		"install":            "Install the deployment (refuses when one is already installed)",
 		"upgrade":            "Upgrade an installed deployment from a new payload or package",
@@ -116,6 +162,9 @@ arguments, 75 another lifecycle run holds the lock.`,
 		group.AddCommand(newUnixLifecycleCommand(name, action, summaries[action]))
 	}
 	group.AddCommand(newUnixDiscoveryCommand(name))
+	group.AddCommand(newUnixTransactionWatchCommand(name))
+	group.AddCommand(newUnixOpenCodePortClearCommand(name))
+	group.AddCommand(newUnixOpenCodePortUnknownClearCommand(name))
 	group.AddCommand(newEnterpriseIdentityViewCommands(name)...)
 	if name == "linux" {
 		group.AddCommand(newUnixTetragonCommand())
@@ -125,6 +174,28 @@ arguments, 75 another lifecycle run holds the lock.`,
 	policy, _, _, _ := newEnterprisePolicyGroup(name)
 	group.AddCommand(policy)
 	return group
+}
+
+// newUnixTransactionWatchCommand is the hidden action a lifecycle run starts
+// before it stops any service: when the run is killed with its transaction
+// still pending, it starts the apply trigger, which rolls the transaction
+// back and starts the stopped services again (GAP-0276). Not for operators.
+func newUnixTransactionWatchCommand(platform string) *cobra.Command {
+	var pid int
+	var snapshot string
+	cmd := &cobra.Command{
+		Use:          "watch-transaction",
+		Short:        "Recover the transaction of a lifecycle run that is killed (started by the lifecycle itself)",
+		Hidden:       true,
+		SilenceUsage: true,
+		Args:         cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runUnixTransactionWatch(cmd, platform, pid, snapshot)
+		},
+	}
+	cmd.Flags().IntVar(&pid, "pid", 0, "process id of the lifecycle run")
+	cmd.Flags().StringVar(&snapshot, "snapshot", "", "snapshot directory of its transaction")
+	return cmd
 }
 
 // sandboxRowsHelp documents the sandbox rows of status and verify.
@@ -138,7 +209,7 @@ const sandboxRowsHelp = "\n\nWhen sandboxes are on (openshell.enabled), the serv
 
 // lockWaitUsage documents --lock-wait on every action that takes the
 // lifecycle lock.
-const lockWaitUsage = "wait up to this long for another lifecycle run (default 5s, at most 15m) before exiting 75"
+const lockWaitUsage = "wait up to this long for another lifecycle run (default 5s; 10m for ensure --reason path, as the config-apply trigger passes; at most 15m) before exiting 75"
 
 // lockWaitValue is --lock-wait: a duration that keeps the text as typed, so
 // the cap error names "1h", not "60m", and whose malformed-value error gives
@@ -199,7 +270,9 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 		Use:          action,
 		Short:        summary,
 		SilenceUsage: true,
-		Args:         lifecycleNoArgs,
+		Args: func(cmd *cobra.Command, args []string) error {
+			return lifecycleArgumentError(cmd, action, opts.json, lifecycleNoArgs(cmd, args))
+		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runUnixLifecycle(cmd, platform, action, opts)
 		},
@@ -210,18 +283,27 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 	case "verify":
 		cmd.Long = summary + ".\n\nverify first waits up to 5s for another lifecycle run to finish. If that run is still going, it checks nothing and exits 75 (lifecycle_busy)."
 	case "status":
-		cmd.Long = summary + ".\n\nRun as root, status first waits up to 5s for another lifecycle run to finish. If that run is still going, it reports the installed version, checks nothing else and exits 75 (lifecycle_busy)."
+		cmd.Long = summary + ".\n\nRun as root, status first waits up to 5s for another lifecycle run to finish. If that run is still going, the change is pending apply, which is not a failure: status reports ok with pending_apply and the installed version, names the run in a lifecycle_busy warning, checks nothing else and exits 75 so you run it again."
 	}
 	if action == "status" || action == "verify" {
 		cmd.Long += sandboxRowsHelp
 	}
+	if platform == "linux" && (action == "install" || action == "upgrade" || action == "repair" || action == "ensure") {
+		cmd.Long = summary + ".\n\n" + linuxFapolicydTarballHelp
+	}
 	// An unknown flag or a malformed value fails before RunE; the documented
 	// exit code for it is invalid arguments, not cobra's generic 1.
-	cmd.SetFlagErrorFunc(lifecycleFlagError)
+	cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
+		return lifecycleArgumentError(c, action, opts.json, lifecycleFlagError(c, err))
+	})
 	flags := cmd.Flags()
 	switch action {
 	case "install", "upgrade", "repair", "ensure":
 		flags.StringVar(&opts.payload, "payload", "", "absolute directory holding the staged binaries to install")
+		if platform == "macos" {
+			flags.StringVar(&opts.coworkPackage, "cowork-package", "", "protected release package input to cache and deliver atomically (requires configured SHA-256 pin)")
+			flags.StringVar(&opts.coworkSignature, "cowork-signature", "", "protected detached signature input to cache and deliver atomically (requires configured SHA-256 pin)")
+		}
 		flags.BoolVar(&opts.fromPackage, "from-package", false, "use the binaries the defenseclaw-enterprise package installed")
 		flags.StringVar(&opts.config, "config", "", "absolute path of the administrator config to install")
 		flags.BoolVar(&opts.noStart, "no-start", false, "install without starting the services")
@@ -235,8 +317,8 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 		}
 		addLockWaitFlag(flags, &opts.lockWait)
 	case "uninstall":
-		flags.BoolVar(&opts.purge, "purge", false, "also remove each enrolled account's ~/.defenseclaw, the empty agent folders DefenseClaw created in its home, its per-user binaries in ~/.local/bin and DefenseClaw's entries in its uv cache ~/.cache/uv (after stopping its per-user gateway); the result names every enrolled account whose data it removed, and warns for each one whose data it kept; accounts the deployment never enrolled have no DefenseClaw per-user data and are not listed")
-		flags.BoolVar(&opts.keepState, "keep-state", false, "keep the machine state (config, secrets, gateway and guardian state, logs, lifecycle state) and the service account, so a reinstall resumes with them; without it uninstall removes all of it")
+		flags.BoolVar(&opts.purge, "purge", false, "also remove each enrolled account's ~/.defenseclaw, the empty agent folders DefenseClaw created in its home, its per-user binaries in ~/.local/bin and DefenseClaw's entries in its uv cache ~/.cache/uv (after stopping its per-user gateway); an account's own DefenseClaw install from before the enrollment is kept as it is (a machine uninstall never deletes or moves an account's own data); the result names every enrolled account whose data it removed, and warns for each one whose data it kept; accounts the deployment never enrolled keep their DefenseClaw files, and the result names each one that has any")
+		flags.BoolVar(&opts.keepState, "keep-state", false, unixKeepStateUsage(platform))
 		flags.BoolVar(&opts.keepServiceAccount, "keep-service-account", false, "keep the gateway service account, which uninstall deletes otherwise")
 		addLockWaitFlag(flags, &opts.lockWait)
 	case "reconcile", "rotate-credentials":
@@ -244,6 +326,23 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 	}
 	flags.BoolVar(&opts.json, "json", false, "print the lifecycle result as JSON")
 	return cmd
+}
+
+// unixKeepStateUsage is the uninstall --keep-state help. It names the paths
+// of the sandbox state a plain uninstall keeps, as the uninstall summary
+// does (GAP-0067).
+func unixKeepStateUsage(platform string) string {
+	goos := "linux"
+	if platform == "macos" {
+		goos = "darwin"
+	}
+	kept := "the gateway's sandbox registrations, their key and the lifecycle's sandbox setup record"
+	if layout, err := managed.StandaloneLayoutFor(goos); err == nil {
+		store, key, record := layout.KeptSandboxStatePaths()
+		kept = "the gateway's sandbox registrations (" + store + "), their key (" + key + ") and the lifecycle's sandbox setup record (" + record + ")"
+	}
+	return "keep the config, secrets, gateway and guardian state, logs and the service account, so a reinstall resumes with them (the deployment record goes either way); without it uninstall removes that state except " +
+		kept + " while an account keeps sandboxes; --purge removes those too"
 }
 
 // invalidLifecycleArguments labels err with the lifecycle's invalid-arguments
@@ -263,50 +362,122 @@ func lifecycleFlagError(c *cobra.Command, err error) error {
 	return invalidLifecycleArguments(&delegatedUsageError{msg: usageMessage(c, err), err: err})
 }
 
+// lifecycleArgumentError reports an argument error of a lifecycle verb (an
+// unknown flag, a malformed value, a stray argument, a --lock-wait out of
+// range) with its invalid-arguments exit code. With --json, also when the
+// parse stopped before it, stdout gets one lifecycle result whose only error
+// is invalid_arguments, so an agent never classifies the failure by the exit
+// code alone (GAP-2448). Linux and macOS keep the usage line on stderr for
+// the MDM kit log; Windows prints the document only, as its other lifecycle
+// failures do.
+func lifecycleArgumentError(cmd *cobra.Command, action string, asJSON bool, err error) error {
+	if err == nil || (!asJSON && !secretArgsRequestJSON(secretRawArgs())) {
+		return err
+	}
+	message := err.Error()
+	var usage *delegatedUsageError
+	if errors.As(err, &usage) && usage.err != nil {
+		message = usage.err.Error()
+	}
+	profile := managed.ProfileStandalone
+	if secureClientHost() {
+		profile = managed.ProfileSecureClient
+	}
+	result := enterprisestatus.New(action, profile, runtime.GOOS, "")
+	result.AddError("invalid_arguments", message)
+	result.Finish(runtime.GOOS, commandExitCode(err))
+	data, mErr := json.MarshalIndent(result, "", "  ")
+	if mErr != nil {
+		return err
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), string(data))
+	silenceJSONReportedError(cmd, runtime.GOOS == "windows", err)
+	return err
+}
+
 func newEnterpriseSecretCommand(action, summary string) *cobra.Command {
 	opts := &enterpriseSecretOptions{}
 	cmd := &cobra.Command{
 		Use:          action,
 		Short:        summary,
 		SilenceUsage: true,
-		Args:         cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runEnterpriseSecret(cmd, action, opts)
 		},
 	}
 	if action != "status" {
-		cmd.Flags().StringVar(&opts.name, "name", "", "credential name (lowercase letters, digits and dashes)")
+		cmd.Flags().StringVar(&opts.name, "name", "", "credential name (1-63 lowercase letters, digits or dashes; starts with a letter or digit)")
+		cmd.Flags().Lookup("name").Annotations = map[string][]string{
+			secureClientUsageAnnotation: {"credential name (lowercase letters, digits and dashes)"},
+		}
 		_ = cmd.MarkFlagRequired("name")
 	}
 	if action == "set" {
 		cmd.Flags().BoolVar(&opts.fromStdin, "from-stdin", false, "read the value from standard input")
 		cmd.Flags().StringVar(&opts.fromFile, "from-file", "", "read the value from this file")
+		cmd.Flags().StringVar(&opts.bundle, "bundle", "", "signed policy bundle (.dcbundle) that binds the new value; needed to change a credential the confirmed bundle binds")
+		cmd.Flags().StringVar(&opts.ifConfirmed, "if-confirmed", "", "with --bundle: store the value only while the confirmed policy bundle has this manifest SHA-256 (none: no bundle is confirmed); else confirmed_bundle_changed and nothing is written")
 	}
-	if action != "status" && runtime.GOOS != "windows" {
+	if action == "set" || action == "remove" {
+		cmd.Flags().StringVar(&opts.undoRotation, "undo-rotation", "", "put back a credential a failed rotation changed, only while the confirmed policy bundle has this manifest SHA-256 (none: no bundle is confirmed) and does not sign the value stored now; else rotation_confirmed and nothing changes")
+		usage := "change only when the stored credential still has this exact SHA-256; required with --undo-rotation"
+		if runtime.GOOS == "windows" {
+			usage = "change only when the stored credential still has this exact SHA-256, or none for proven absence; required with --undo-rotation"
+		}
+		cmd.Flags().StringVar(&opts.ifStored, "if-stored", "", usage)
+	}
+	if action == "remove" {
+		cmd.Flags().StringVar(&opts.undoConfig, "undo-config", "", "with --undo-rotation: the SHA-256 of the installed config before the rotation (none: no config); only while that config is still installed does remove take a credential it references, else credential_in_use and nothing is removed")
+	}
+	if action != "status" {
 		addLockWaitFlag(cmd.Flags(), &opts.lockWait)
+		if runtime.GOOS == "windows" {
+			cmd.Flags().Lookup("lock-wait").Usage = windowsSecretLockWaitUsage
+		}
 	}
 	cmd.Flags().BoolVar(&opts.json, "json", false, "print JSON")
-	if runtime.GOOS != "windows" {
-		// An unknown flag, a malformed value, a stray argument or a missing
-		// --name is invalid arguments: exit 2 with the usage line and the
-		// --help pointer, as on enterprise linux|macos (GAP-2095).
-		cmd.SetFlagErrorFunc(lifecycleFlagError)
-		cmd.Args = lifecycleNoArgs
-		cmd.PreRunE = func(cmd *cobra.Command, _ []string) error {
-			if err := cmd.ValidateRequiredFlags(); err != nil {
-				return lifecycleFlagError(cmd, err)
-			}
-			return nil
+	// An unknown flag, a malformed value, a stray argument or a missing
+	// --name is invalid arguments: exit 2 (Windows 1639) with the usage line
+	// and the --help pointer, as on enterprise linux|macos (GAP-2095).
+	// Windows set, remove and status also print their --json failure
+	// document.
+	flagError := func(c *cobra.Command, err error) error {
+		err = lifecycleFlagError(c, err)
+		if enterpriseSecretArgumentRefusal != nil {
+			return enterpriseSecretArgumentRefusal(c, action, opts, err)
 		}
+		return err
+	}
+	cmd.SetFlagErrorFunc(flagError)
+	cmd.Args = func(c *cobra.Command, args []string) error {
+		if err := strayArgumentError(c, args); err != nil {
+			return flagError(c, err)
+		}
+		return nil
+	}
+	cmd.PreRunE = func(cmd *cobra.Command, _ []string) error {
+		if err := cmd.ValidateRequiredFlags(); err != nil {
+			return flagError(cmd, err)
+		}
+		return nil
 	}
 	return cmd
 }
+
+// windowsSecretLockWaitUsage is --lock-wait of Windows `secret set|remove`.
+const windowsSecretLockWaitUsage = "wait up to this long for a policy bundle run to release bundle.lock (default: no wait, at most 15m) before exiting 1618; the installer's lifecycle.lock is waited for up to 30s either way"
+
+// enterpriseSecretArgumentRefusal reports an argument error of `enterprise
+// secret` the way the platform documents it: Windows prints the --json
+// failure document (enterprise_secret_windows.go); nil elsewhere.
+var enterpriseSecretArgumentRefusal func(cmd *cobra.Command, action string, opts *enterpriseSecretOptions, err error) error
 
 func init() {
 	enterpriseSecretCmd.AddCommand(
 		newEnterpriseSecretCommand("set", "Store a protected credential and apply it"),
 		newEnterpriseSecretCommand("status", "List protected credentials without revealing values"),
 		newEnterpriseSecretCommand("remove", "Remove a protected credential and apply the change"),
+		newEnterpriseSecretCheckCommand(),
 	)
 	enterpriseCmd.AddCommand(enterpriseLinuxCmd, enterpriseMacOSCmd, enterpriseSecretCmd)
 }

@@ -2,8 +2,7 @@
 #
 # repro-flags.sh — single source of truth for the reproducibility envs
 # and `go build` invocation used by the Windows managed-enterprise AVC
-# assembly step. Sourced by assemble.sh (Workstream A2). See
-# docs/specs/001-windows-deterministic-build/design.md § Components.
+# assembly step. Sourced by assemble.sh.
 #
 # WHY THIS FILE EXISTS
 # --------------------

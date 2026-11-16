@@ -23,7 +23,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -196,9 +195,6 @@ func TestRefusesDamagedMarkersAndUnsafeInput(t *testing.T) {
 // stubs writes the sandbox launcher stub and a native harness stub.
 func stubs(t *testing.T) (bin, native string) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX shells only")
-	}
 	dir := t.TempDir()
 	bin = filepath.Join(dir, "dc gateway")
 	writeScript(t, bin, strings.Replace(echoArgs, `"$STUB"`, "sandbox", 1), 0o755)

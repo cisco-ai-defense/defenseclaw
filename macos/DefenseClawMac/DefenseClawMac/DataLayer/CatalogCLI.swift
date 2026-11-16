@@ -32,12 +32,14 @@ struct CatalogListing<Item: Sendable>: Sendable {
     var items: [Item]
     var auditHistoryUnavailable: Bool
     var selectedBinaryPath: String?
+    var discoveryWarning: String? = nil
 }
 
 private struct CatalogRows {
     var values: [(String, [String: Any])]
     var auditHistoryUnavailable: Bool
     var selectedBinaryPath: String?
+    var discoveryWarning: String? = nil
 }
 
 enum CatalogCLI {
@@ -103,7 +105,8 @@ enum CatalogCLI {
         return CatalogListing(
             items: items,
             auditHistoryUnavailable: groups.auditHistoryUnavailable,
-            selectedBinaryPath: groups.selectedBinaryPath
+            selectedBinaryPath: groups.selectedBinaryPath,
+            discoveryWarning: groups.discoveryWarning
         )
     }
 
@@ -170,8 +173,9 @@ enum CatalogCLI {
                 selectedBinaryPath: nil
             )
         let result = command.result
-        guard result.succeeded else {
-            let detail = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let partialWarning = partialMCPWarning(resource: resource, result: result)
+        guard result.succeeded || partialWarning != nil else {
+            let detail = catalogFailureDetail(result)
             throw CatalogCLIError.commandFailed(
                 detail.isEmpty
                     ? "DefenseClaw \(resource) list failed (exit \(result.exitCode))."
@@ -195,8 +199,34 @@ enum CatalogCLI {
         return CatalogRows(
             values: flattened,
             auditHistoryUnavailable: command.usedIsolatedAuditStore,
-            selectedBinaryPath: command.selectedBinaryPath
+            selectedBinaryPath: command.selectedBinaryPath,
+            discoveryWarning: partialWarning
         )
+    }
+
+    /// The runtime deliberately exits 1 after emitting valid rows when one
+    /// MCP discovery source cannot be read. Keep that explicit partial state;
+    /// never treat other failures, cancellations or truncated JSON as success.
+    static func partialMCPWarning(resource: String, result: CLIResult) -> String? {
+        guard resource == "mcp", result.exitCode == 1, !result.cancelled, !result.outputTruncated,
+              let parsed = InventoryOutputParser.parse(result.output),
+              parsed.documents.allSatisfy({ $0["mcp_servers"] is [[String: Any]] || $0["name"] is String })
+        else { return nil }
+        let lines = parsed.diagnostics.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
+        guard !lines.isEmpty, lines.allSatisfy({
+            $0.hasPrefix("error: MCP discovery source is unreadable for connector=")
+                || $0.hasPrefix("error: MCP discovery source is malformed for connector=")
+        }) else { return nil }
+        return "MCP discovery is incomplete. Showing readable entries; catalog actions are disabled.\n"
+            + lines.joined(separator: "\n")
+    }
+
+    static func catalogFailureDetail(_ result: CLIResult) -> String {
+        if let parsed = InventoryOutputParser.parse(result.output) {
+            let diagnostic = parsed.diagnostics.trimmingCharacters(in: .whitespacesAndNewlines)
+            return diagnostic.isEmpty ? "Catalog command failed (exit \(result.exitCode)); returned rows could not be trusted." : diagnostic
+        }
+        return result.output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func jsonData(from output: String) throws -> Data {

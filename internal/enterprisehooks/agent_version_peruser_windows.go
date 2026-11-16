@@ -13,9 +13,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -29,8 +29,8 @@ import (
 const windowsAgentLogTailMaxBytes = 256 * 1024
 
 var (
-	windowsAntigravityLogVersion = regexp.MustCompile(`Language server version: (\d+\.\d+\.\d+)`)
-	windowsVersionDirectoryName  = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
+	windowsAntigravityLogVersion = lazyregexp.New(`Language server version: (\d+\.\d+\.\d+)`)
+	windowsVersionDirectoryName  = lazyregexp.New(`^\d+\.\d+\.\d+$`)
 )
 
 // windowsStandalonePerUserAgentVersionCandidatePaths returns package.json
@@ -43,7 +43,7 @@ func windowsStandalonePerUserAgentVersionCandidatePaths(profileHome, connectorNa
 	yarnGlobal := filepath.Join(appDataLocal, "Yarn", "Data", "global", "node_modules")
 	packages := map[string][]string{
 		"copilot":  {filepath.Join("@github", "copilot")},
-		"opencode": {"opencode-ai"},
+		"opencode": {filepath.Join("@opencode", "cli")},
 		"amp":      {filepath.Join("@ampcode", "cli"), filepath.Join("@sourcegraph", "amp")},
 	}[connectorName]
 	candidates := make([]string, 0, len(packages)*3)
@@ -190,4 +190,57 @@ func readBoundedWindowsFileTail(path string) ([]byte, error) {
 		}
 	}
 	return data, nil
+}
+
+// windowsCopilotAppCLIRoot holds the Copilot CLI releases the GitHub Copilot
+// app downloads and runs (copilot.exe --server): one folder per release,
+// named for its version (1.0.90-0).
+func windowsCopilotAppCLIRoot(profileHome string) string {
+	return filepath.Join(profileHome, "AppData", "Local", "github-copilot-sdk", "cli")
+}
+
+var windowsCopilotAppCLIDirectoryName = lazyregexp.New(`^(\d+\.\d+\.\d+)(-\d+)?$`)
+
+// discoverWindowsCopilotAppCLIVersion returns the newest Copilot CLI release
+// the GitHub Copilot app keeps for the profile, read from its folder name,
+// with its copilot.exe present; the app starts the newest one.
+func discoverWindowsCopilotAppCLIVersion(profileHome string) string {
+	version, _ := windowsCopilotAppCLIRelease(profileHome)
+	return version
+}
+
+// windowsCopilotAppCLIExecutable is that release's copilot.exe, or "".
+func windowsCopilotAppCLIExecutable(profileHome string) string {
+	_, executable := windowsCopilotAppCLIRelease(profileHome)
+	return executable
+}
+
+func windowsCopilotAppCLIRelease(profileHome string) (string, string) {
+	root := windowsCopilotAppCLIRoot(profileHome)
+	if err := winpath.RejectReparseChain(root); err != nil {
+		return "", ""
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return "", ""
+	}
+	bestVersion, bestExecutable := "", ""
+	for index, entry := range entries {
+		if index >= 64 {
+			break
+		}
+		match := windowsCopilotAppCLIDirectoryName.FindStringSubmatch(entry.Name())
+		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || match == nil {
+			continue
+		}
+		executable := filepath.Join(root, entry.Name(), "copilot.exe")
+		info, err := os.Lstat(executable)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		if bestVersion == "" || compareWindowsEnterpriseVersion(match[1], bestVersion) > 0 {
+			bestVersion, bestExecutable = match[1], executable
+		}
+	}
+	return bestVersion, bestExecutable
 }

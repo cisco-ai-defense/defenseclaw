@@ -14,6 +14,8 @@ from click.testing import CliRunner
 from defenseclaw import main as main_module
 from defenseclaw.commands import cmd_audit
 
+from tests.os_view import os_view
+
 GATEWAY = "/opt/dc/defenseclaw-gateway"
 
 
@@ -23,7 +25,7 @@ def exec_capture(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     monkeypatch.setenv("DEFENSECLAW_DELEGATED_FROM", "")  # run_gateway sets it; undo removes it
     monkeypatch.setattr(cmd_audit, "_execv", lambda path, argv: calls.append([path, *argv]))
     monkeypatch.setattr("defenseclaw.gateway.resolve_trusted_gateway_binary", lambda: GATEWAY)
-    monkeypatch.setattr(cmd_audit.os, "name", "posix")
+    monkeypatch.setattr(cmd_audit, "os", os_view("posix"))
 
     def no_config(*_args, **_kwargs):
         raise AssertionError("audit export loaded the CLI config or audit store")
@@ -52,7 +54,7 @@ def test_alias_execs_the_gateway_export_without_loading_config(
 
 def test_windows_waits_for_the_gateway_and_keeps_its_exit_code(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("defenseclaw.gateway.resolve_trusted_gateway_binary", lambda: GATEWAY)
-    monkeypatch.setattr(cmd_audit.os, "name", "nt")
+    monkeypatch.setattr(cmd_audit, "os", os_view("nt"))
     monkeypatch.setenv("DEFENSECLAW_DELEGATED_FROM", "")
     monkeypatch.setattr(cmd_audit, "_execv", lambda *_: pytest.fail("exec on Windows"))
     calls: list[list[str]] = []

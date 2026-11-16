@@ -30,7 +30,9 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -38,8 +40,27 @@ import yaml
 
 from defenseclaw import codex_toml, connector_paths
 from defenseclaw.connector_contracts import resolve_connector_contract
-from defenseclaw.hook_integrity import LAUNCHER_REINSTALL_STEP, claude_launcher_guard_view
+from defenseclaw.hook_guard_matrix import TOOL_GUARD_HOOKS
+from defenseclaw.hook_integrity import (
+    HERMES_ALLOWLIST_FILE,
+    HOOK_GUARD_NAME,
+    LAUNCHER_REINSTALL_STEP,
+    claude_launcher_guard_view,
+    hermes_approved_pairs,
+    hermes_command_hash,
+    hermes_command_written,
+    hermes_recorded_kept_commands,
+    hook_guard_problem,
+)
 from defenseclaw.inventory.plugin_identity import is_link_or_reparse
+from defenseclaw.winquote import (
+    powershell_literal,
+    powershell_literal_before_typographic_quotes,
+    powershell_literal_body,
+    powershell_literal_is_current,
+    powershell_literal_value,
+    split_windows_words,
+)
 
 _SAFE_PATHEXT = (".exe", ".cmd")
 _HOOK_RUNTIME_STATE_MAX_BYTES = 64 << 10
@@ -264,6 +285,10 @@ _COPILOT_ADAPTER_TIMEOUT = re.compile(r"(?m)^\$timeoutMS = (\d+)\r?$")
 _COPILOT_ADAPTER_TIMEOUT_ASSIGNMENT = f"$timeoutMS = {_COPILOT_ADAPTER_TIMEOUT_MS}"
 _COPILOT_ADAPTER_MAX_BYTES = 128 * 1024
 
+# Every Antigravity event Setup registers uses the matcher and timeout of the
+# PreToolUse row of the shared tool-guard table.
+_ANTIGRAVITY_GUARD = TOOL_GUARD_HOOKS["antigravity"]
+
 _ANTIGRAVITY_REQUIRED_HOOKS: dict[str, bool] = {
     "PreInvocation": False,
     "PreToolUse": True,
@@ -307,6 +332,10 @@ class WindowsHookCheck:
     target: str = ""
     raw_target: str = ""
     repair: str = ""
+    # Set only by the Hermes execution probe once the exact registered target
+    # ran and answered. A pending-reload Hermes registration is a warning only
+    # then; an unproven one stays a failure (GAP-0586, GAP-1298).
+    execution_proven: bool = False
 
     @property
     def healthy(self) -> bool:
@@ -445,6 +474,222 @@ def _windows_system_powershell_path() -> str:
             "powershell.exe",
         )
     )
+
+
+def _windows_system_cmd_path() -> str:
+    """Return the system cmd.exe path the direct Codex hook command names
+    (windowsSystemCmdExe in internal/gateway/connector/helpers.go)."""
+    powershell = _windows_system_powershell_path()
+    if not powershell:
+        return ""
+    return ntpath.join(ntpath.dirname(ntpath.dirname(ntpath.dirname(powershell))), "cmd.exe")
+
+
+# The direct Codex hook command Setup writes since GAP-1908
+# (windowsCmdDirectHookCommand in internal/gateway/connector/helpers.go):
+#
+#   <system>\cmd.exe /d /v:off /c "<launcher>" <arguments>
+#
+# Setup writes it only for a launcher path of letters, digits, spaces and
+# \ : . _ - ~ and bare arguments of letters, digits and . _ -, so neither
+# PowerShell nor cmd.exe can expand, split or redirect anything in it; any
+# other launcher path keeps the encoded PowerShell bridge.
+_CMD_DIRECT_SWITCHES = ("/d", "/v:off", "/c")
+_CMD_DIRECT_TOKEN = re.compile(r"[A-Za-z0-9._-]+")
+_CMD_DIRECT_FORBIDDEN = frozenset("\r\n\x00|<>&^%!()@$`\x27;,=")
+
+
+def _cmd_direct_path(path: str) -> bool:
+    """Report a launcher path the direct form carries (windowsCmdDirectPath, quoted)."""
+    if len(path) >= 4 and path[0].isascii() and path[0].isalpha() and path[1:3] == ":\\":
+        rest, separator, allowed = path[3:], "\\", "\\._-~ "
+    elif os.name != "nt" and path.startswith("/"):
+        # POSIX fixture paths of the non-Windows unit tests; a Windows
+        # registration always names a drive path.
+        rest, separator, allowed = path[1:], "/", "/._-~ "
+    else:
+        return False
+    if not rest or rest.endswith(separator) or separator * 2 in rest:
+        return False
+    return all(char.isalpha() or unicodedata.category(char) == "Nd" or char in allowed for char in rest)
+
+
+def _codex_cmd_direct_parts(command: str) -> tuple[str, list[str]] | None:
+    """The launcher and arguments of an exact direct Codex hook command, or None.
+
+    The command must be byte for byte what Setup renders for its launcher and
+    arguments, so a lookalike (another cmd.exe, other switches, an unquoted
+    or differently quoted launcher, shell metacharacters) stays foreign.
+    """
+    started = _codex_cmd_direct_start(command)
+    if started is None:
+        return None
+    target, args = started
+    if ntpath.basename(target).casefold() == HOOK_GUARD_NAME and args[:1] == [_CODEX_SIBLING_GUARD]:
+        # The guarded start (rel-1-0-6 GAP-0676): on the events Codex can
+        # block, the guard program starts the defenseclaw-hook.exe beside it
+        # and answers Codex's block when that launcher cannot start.
+        return _guard_launcher(target), args[1:]
+    return target, args
+
+
+def _codex_cmd_direct_start(command: str) -> tuple[str, list[str]] | None:
+    """The program and arguments an exact direct Codex hook command starts, or None."""
+    value = command.strip()
+    if any(char in _CMD_DIRECT_FORBIDDEN for char in value):
+        return None
+    try:
+        parts = _split_windows(value)
+    except _InspectionError:
+        return None
+    if len(parts) < 6 or tuple(parts[1:4]) != _CMD_DIRECT_SWITCHES:
+        return None
+    system_cmd = _windows_system_cmd_path()
+    if not system_cmd or parts[0].casefold() != system_cmd.casefold():
+        return None
+    target, args = parts[4], parts[5:]
+    if not _cmd_direct_path(target) or not all(_CMD_DIRECT_TOKEN.fullmatch(arg) for arg in args):
+        return None
+    if value != parts[0] + " /d /v:off /c \"" + target + "\" " + " ".join(args):
+        return None
+    return target, args
+
+
+# The guard argv of the guarded Codex start (hookguard.SiblingSubcommand).
+_CODEX_SIBLING_GUARD = "launcher-guard-sibling"
+
+# The guarded Devin start (hookguard.DevinSubcommand, rel-1-0-6 GAP-0676):
+# per-user Setup writes it on the events Devin can block with a prompt or tool
+# answer when the guard program sits beside the launcher; the guard starts
+# that launcher with `hook --connector devin`.
+_DEVIN_GUARD = "launcher-guard-devin"
+_DEVIN_GUARDED_EVENTS = frozenset({"PreToolUse", "PermissionRequest", "UserPromptSubmit"})
+_DEVIN_HOOK_ARGS = ["hook", "--connector", "devin"]
+
+
+def _devin_bash_word(path: str) -> str:
+    """windowsDevinBashHookCommand's single-quoted program word."""
+    return "'" + path.replace("'", "'\\''") + "'"
+
+
+def _devin_guarded_start(command: str) -> tuple[str, str] | None:
+    """The guard program and event of an exact guarded Devin command, or None.
+
+    The command must be byte for byte what Setup renders: a forward-slash
+    absolute guard path in Devin's single-quoted word, then the guard argv.
+    """
+    value = command.strip()
+    if not value.startswith("'"):
+        return None
+    try:
+        parts = shlex.split(value, posix=True)
+    except ValueError:
+        return None
+    if len(parts) != 6 or parts[1] != _DEVIN_GUARD or parts[3:] != _DEVIN_HOOK_ARGS:
+        return None
+    guard, event = parts[0], parts[2]
+    if (
+        ntpath.basename(guard).casefold() != HOOK_GUARD_NAME
+        or "\\" in guard
+        # POSIX fixture paths of the non-Windows unit tests, as _cmd_direct_path.
+        or not (ntpath.isabs(guard) or (os.name != "nt" and guard.startswith("/")))
+        or not _CMD_DIRECT_TOKEN.fullmatch(event)
+    ):
+        return None
+    if value != " ".join([_devin_bash_word(guard), _DEVIN_GUARD, event, *_DEVIN_HOOK_ARGS]):
+        return None
+    return guard, event
+
+
+def _guard_launcher(guard: str) -> str:
+    """The defenseclaw-hook.exe in the folder of *guard*, the launcher it starts."""
+    name = ntpath.basename(guard)
+    return guard[: len(guard) - len(name)] + "defenseclaw-hook.exe"
+
+
+def _hook_guard_start(command: str, connector: str) -> str:
+    """The hook guard program a guarded Codex or Devin command starts, else ""."""
+    if connector == "devin":
+        guarded = _devin_guarded_start(command)
+        return guarded[0] if guarded else ""
+    if connector == "codex":
+        started = _codex_cmd_direct_start(command)
+        if (
+            started
+            and ntpath.basename(started[0]).casefold() == HOOK_GUARD_NAME
+            and started[1][:1] == [_CODEX_SIBLING_GUARD]
+        ):
+            return started[0]
+    return ""
+
+
+def _launcher_start_message(agent: str) -> str:
+    """hookguard.LauncherMessage(agent, false), the sentence of a launcher that cannot start."""
+    return (
+        f"DefenseClaw blocked this: its {agent} hook launcher cannot start. "
+        "Run the DefenseClaw installer again to repair it."
+    )
+
+
+def _codex_launcher_block(event: str, contract: str, message: str) -> dict[str, Any] | None:
+    """hookguard.CodexBlock: Codex's block of event, None where a launcher that cannot start gets none."""
+    if event == "PreToolUse":
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": message,
+            }
+        }
+    if event == "PermissionRequest":
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {"behavior": "deny", "message": message},
+            }
+        }
+    if event in {"UserPromptSubmit", "PostToolUse"}:
+        return {"decision": "block", "reason": message}
+    if event in {"SessionStart", "PreCompact", "PostCompact"} and contract in {
+        "codex-hooks-v3",
+        "codex-hooks-v3-generic",
+        "codex-hooks-v4",
+    }:
+        return {"continue": False, "stopReason": message}
+    return None
+
+
+def _launcher_start_answer(connector: str, event: str, contract: str) -> str | None:
+    """The statements a per-user bridge answers a launcher that cannot start with.
+
+    It mirrors launcherStartAnswer.powershell (rel-1-0-6 GAP-0676): None for a
+    bridge Setup renders without the answer.
+    """
+    if connector == "kiro":
+        agent, stdout, code = "Kiro", "", 2
+    elif connector == "antigravity":
+        if event != "PreToolUse":
+            return None
+        agent, code = "Antigravity", 0
+        stdout = json.dumps(
+            {"decision": "deny", "reason": _launcher_start_message(agent)}, separators=(",", ":"), sort_keys=True
+        )
+    elif connector == "codex":
+        agent, code = "Codex", 0
+        block = _codex_launcher_block(event, contract, _launcher_start_message(agent))
+        if block is None:
+            return None
+        stdout = json.dumps(block, separators=(",", ":"), sort_keys=True)
+    else:
+        return None
+    sentence = powershell_literal(_launcher_start_message(agent))
+    text = (
+        "try { [Console]::Error.WriteLine(" + sentence + ") } catch { "
+        "Microsoft.PowerShell.Utility\\Write-Error -Message " + sentence + " -ErrorAction Continue }; "
+    )
+    if stdout:
+        text += powershell_literal(stdout) + "; "
+    return text + f"exit {code}"
 
 
 def _repair_detail(connector: str, detail: str, *, configured_mode: str = "") -> str:
@@ -797,7 +1042,15 @@ def _read_config(path: str, connector: str) -> dict[str, Any]:
         raise _InspectionError("access-denied", f"access denied to hook registration file {path}: {exc}") from exc
     except OSError as exc:
         raise _InspectionError("malformed", f"cannot inspect hook registration file {path}: {exc}") from exc
-    if is_link_or_reparse(path) or not stat.S_ISREG(before.st_mode):
+    if is_link_or_reparse(path):
+        # Setup on Windows refuses to write through a link (GAP-0034), so the
+        # repair step alone would fail the same way: say what to fix first.
+        raise _InspectionError(
+            "foreign",
+            f"hook registration file is a symlink or reparse point: {path}; "
+            "replace the link with the regular file it points to first",
+        )
+    if not stat.S_ISREG(before.st_mode):
         raise _InspectionError("foreign", f"hook registration file is a symlink or reparse point: {path}")
     try:
         with open(path, "rb") as handle:
@@ -1635,6 +1888,96 @@ def _managed_hook_command(command: str, connector: str) -> bool:
     }
 
 
+def _windows_bridge_event_suffixes(connector: str) -> tuple[str, str]:
+    """Return the optional event/contract patterns of an encoded hook bridge.
+
+    The first matches the Start-Process -ArgumentList form, the second the
+    awaited bridge's quoted call-operator arguments; both name the groups
+    ``event`` and ``contract``. Only Antigravity and Codex bind events.
+    """
+    event_suffix = ""
+    awaited_suffix = ""
+    if connector == "antigravity":
+        event_suffix = (
+            r"(?:,'--event','(?P<event>PreInvocation|PreToolUse|"
+            r"PostToolUse|PostInvocation|Stop)')?"
+        )
+        awaited_suffix = (
+            r"(?: '--event' '(?P<event>PreInvocation|PreToolUse|"
+            r"PostToolUse|PostInvocation|Stop)')?"
+        )
+    elif connector == "codex":
+        event_pattern = "|".join(
+            re.escape(event) for event in sorted(_CODEX_KNOWN_HOOK_EVENTS)
+        )
+        contract_pattern = "|".join(
+            re.escape(contract_id) for contract_id in sorted(_CODEX_CONTRACT_EVENTS)
+        )
+        # The optional forms are ownership evidence for registrations
+        # emitted before event/contract binding. Healthy validation
+        # requires both values and checks them against the table row.
+        event_suffix = (
+            r"(?:,'--event','(?P<event>"
+            + event_pattern
+            + r")'(?:,'--hook-contract','(?P<contract>"
+            + contract_pattern
+            + r")')?)?"
+        )
+        awaited_suffix = (
+            r"(?: '--event' '(?P<event>"
+            + event_pattern
+            + r")'(?: '--hook-contract' '(?P<contract>"
+            + contract_pattern
+            + r")')?)?"
+        )
+    return event_suffix, awaited_suffix
+
+
+def _awaited_hook_bridge_match(script: str, connector: str) -> re.Match[str] | None:
+    """Match the encoded bridge the gateway's windowsAwaitedHookStatements renders.
+
+    Process.Start awaits the GUI-subsystem launcher. A Constrained Language
+    host refuses the .NET calls, so the bridge repeats the launcher and its
+    arguments in a call-operator branch, which exits 1 when the launcher
+    never started; ``fail_closed`` is that exit and is absent from bridges
+    rendered before it existed. A per-user bridge since 1.0.9 answers a
+    launcher that cannot start instead (``answer``, the same statements in all
+    three places; rel-1-0-6 GAP-0676), which callers compare with
+    _launcher_start_answer. ``arguments`` is the Process.Start copy of the
+    arguments, which callers compare with the call-operator copy.
+    """
+    _event_suffix, awaited_suffix = _windows_bridge_event_suffixes(connector)
+    return re.fullmatch(
+        r"\$ErrorActionPreference='Stop'; "
+        r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "
+        r"if \(\$ExecutionContext\.SessionState\.LanguageMode -ne 'FullLanguage'\) \{ "
+        r"\$ErrorActionPreference='Continue'; "
+        r"& '(?P<target>(?:[^']|'')+)' 'hook' '--connector' '"
+        + re.escape(connector)
+        + r"'"
+        + awaited_suffix
+        + r" \| Microsoft\.PowerShell\.Core\\Out-Host; "
+        r"(?:(?P<fail_closed>if \(\$null -eq \$LASTEXITCODE\) \{ exit 1 \}; )"
+        r"|if \(\$null -eq \$LASTEXITCODE -or \$LASTEXITCODE -lt 0\) \{ "
+        r"(?P<answer>try \{ \[Console\]::Error\.WriteLine\('[^']*'\) \} "
+        r"catch \{ Microsoft\.PowerShell\.Utility\\Write-Error -Message '[^']*' "
+        r"-ErrorAction Continue \}; "
+        r"(?:'[^']*'; )?exit [02]) \}; )?"
+        r"exit \$LASTEXITCODE \}; "
+        r"\$hookStart=\[System\.Diagnostics\.ProcessStartInfo\]::new\('(?P=target)','(?P<arguments>[^']*)'\); "
+        r"\$hookStart\.UseShellExecute=\$false; "
+        r"\$hookStart\.RedirectStandardError=\$true; "
+        r"(?(answer)try \{ \$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\) \} "
+        r"catch \{ (?P=answer) \}"
+        r"|\$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\)); "
+        r"\$hookProcess\.StandardError\.BaseStream\.CopyTo\(\[Console\]::OpenStandardError\(\)\); "
+        r"\$hookProcess\.WaitForExit\(\); "
+        r"(?(answer)if \(\$hookProcess\.ExitCode -lt 0\) \{ (?P=answer) \}; )"
+        r"exit \$hookProcess\.ExitCode",
+        script,
+    )
+
+
 def _malformed_owned_hook_target(command: str, connector: str) -> str:
     """Recover an exact owned target while preserving malformed diagnostics."""
     value = command.strip()
@@ -1653,7 +1996,10 @@ def _malformed_owned_hook_target(command: str, connector: str) -> str:
         return ""
 
     first_base = ntpath.basename(parts[0]).casefold()
-    if first_base in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
+    direct = _codex_cmd_direct_parts(command) if connector == "codex" and first_base in {"cmd", "cmd.exe"} else None
+    if direct is not None:
+        target, args = direct
+    elif first_base in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
         lowered = [part.casefold() for part in parts]
         owned_target = ""
         if "-encodedcommand" in lowered:
@@ -1667,6 +2013,7 @@ def _malformed_owned_hook_target(command: str, connector: str) -> str:
                     encoded = base64.b64decode(parts[encoded_index + 1], validate=True)
                     if len(encoded) <= 16 * 1024 and len(encoded) % 2 == 0:
                         script = encoded.decode("utf-16-le")
+                        awaited = _awaited_hook_bridge_match(script, connector)
                         event_suffix = ""
                         if connector == "codex":
                             event_pattern = "|".join(
@@ -1703,8 +2050,10 @@ def _malformed_owned_hook_target(command: str, connector: str) -> str:
                                 + r"; exit \$LASTEXITCODE",
                                 script,
                             )
-                        if match:
-                            owned_target = match.group(1).replace("''", "'")
+                        if awaited:
+                            owned_target = powershell_literal_value(awaited.group("target"))
+                        elif match:
+                            owned_target = powershell_literal_value(match.group(1))
                 except (binascii.Error, UnicodeError, ValueError):
                     pass
         if owned_target:
@@ -1768,6 +2117,15 @@ def _codex_hook_state_key_source(config_path: str) -> str:
     return source
 
 
+# Codex caps the SessionEnd and Interrupt timeouts at three seconds (default
+# one) and records trust for the capped value (codex-rs/hooks/src/engine/
+# discovery.rs, normalize_command_hook), as codexCommandHookHashForPlatform does
+# on the Go side.
+_CODEX_CAPPED_TIMEOUT_EVENTS = frozenset({"session_end", "interrupt"})
+_CODEX_CAPPED_TIMEOUT_MAX_SECONDS = 3
+_CODEX_CAPPED_TIMEOUT_DEFAULT_SECONDS = 1
+
+
 def _codex_command_hook_hash(event_key: str, matcher: str | None, hook: dict[str, Any]) -> str:
     """Return Codex's canonical command-handler fingerprint for native Windows."""
 
@@ -1778,10 +2136,13 @@ def _codex_command_hook_hash(event_key: str, matcher: str | None, hook: dict[str
     if not isinstance(windows_command, str) or not windows_command.strip():
         raise _InspectionError("stale", "Codex command handler has an empty native command")
 
-    timeout = hook.get("timeout", 600)
+    capped = event_key in _CODEX_CAPPED_TIMEOUT_EVENTS
+    timeout = hook.get("timeout", _CODEX_CAPPED_TIMEOUT_DEFAULT_SECONDS if capped else 600)
     if type(timeout) is not int or timeout < 0:  # bool is intentionally not accepted as an integer.
         raise _InspectionError("stale", "Codex command handler has an invalid timeout")
     timeout = max(timeout, 1)
+    if capped:
+        timeout = min(timeout, _CODEX_CAPPED_TIMEOUT_MAX_SECONDS)
     async_value = hook.get("async", False)
     if type(async_value) is not bool:
         raise _InspectionError("stale", "Codex command handler has an invalid async value")
@@ -1951,8 +2312,8 @@ def _commands_from_hooks(
     """Extract managed commands after validating connector-specific policy."""
     _ = claude_managed_settings_paths  # retained for call-site compatibility
     if connector == "devin":
-        command, _count = _validate_devin_hook_matrix(document)
-        return [command]
+        command, _count, guarded = _validate_devin_hook_matrix(document)
+        return [command, *guarded]
     hooks = document.get("hooks")
     if not isinstance(hooks, dict):
         raise _InspectionError("missing", "hook registration has no hooks table")
@@ -2031,12 +2392,19 @@ def _commands_from_hooks(
     return managed
 
 
-def _validate_devin_hook_matrix(document: dict[str, Any]) -> tuple[str, int]:
-    """Validate the exact DefenseClaw-owned Devin eight-event registration."""
+def _validate_devin_hook_matrix(document: dict[str, Any]) -> tuple[str, int, list[str]]:
+    """Validate the exact DefenseClaw-owned Devin eight-event registration.
+
+    Every event runs the same launcher command, except that PreToolUse,
+    PermissionRequest and UserPromptSubmit may start the hook guard beside
+    that launcher for their own event (rel-1-0-6 GAP-0676). It returns the
+    launcher command, the entry count and the guarded commands.
+    """
 
     nested = document.get("hooks")
     hooks = nested if isinstance(nested, dict) else document
     commands: list[str] = []
+    guarded: list[str] = []
     for event in _DEVIN_EVENTS:
         groups = hooks.get(event)
         if not isinstance(groups, list):
@@ -2058,10 +2426,23 @@ def _validate_devin_hook_matrix(document: dict[str, Any]) -> tuple[str, int]:
         group, handler, command = owned[0]
         if group.get("matcher", "") != "" or handler.get("type") != "command":
             raise _InspectionError("stale", f"Devin {event} handler has an invalid matcher or type")
-        if handler.get("timeout") != 10:
-            raise _InspectionError("stale", f"Devin {event} handler timeout is not 10 seconds")
-        commands.append(command)
-    if len(set(commands)) != 1:
+        if handler.get("timeout") != TOOL_GUARD_HOOKS["devin"].timeout:
+            raise _InspectionError(
+                "stale", f"Devin {event} handler timeout is not {TOOL_GUARD_HOOKS['devin'].timeout} seconds"
+            )
+        guard = _devin_guarded_start(command)
+        if guard is None:
+            commands.append(command)
+            continue
+        if event not in _DEVIN_GUARDED_EVENTS:
+            raise _InspectionError(
+                "stale", f"Devin {event} starts the DefenseClaw hook guard, which Setup never writes there"
+            )
+        if guard[1] != event:
+            raise _InspectionError("stale", f"Devin {event} starts the DefenseClaw hook guard for event {guard[1]!r}")
+        guarded.append(command)
+        commands.append(" ".join([_devin_bash_word(_guard_launcher(guard[0])), *_DEVIN_HOOK_ARGS]))
+    if len(set(commands)) != 1 or (guarded and len(commands) == len(guarded)):
         raise _InspectionError("stale", "DefenseClaw Devin hooks use inconsistent commands")
     for event, groups in hooks.items():
         if event in _DEVIN_EVENTS or not isinstance(groups, list):
@@ -2072,7 +2453,7 @@ def _validate_devin_hook_matrix(document: dict[str, Any]) -> tuple[str, int]:
                 command = handler.get("command") if isinstance(handler, dict) else None
                 if isinstance(command, str) and _managed_hook_command(command, "devin"):
                     raise _InspectionError("stale", f"unexpected Devin event {event} contains a DefenseClaw handler")
-    return commands[0], len(commands)
+    return commands[0], len(commands), guarded
 
 
 def _handler_command_line(handler: dict[str, Any], connector: str, *, windows: bool) -> str:
@@ -2518,8 +2899,40 @@ def _validate_claude_hook_matrix(
     return count
 
 
-def _validate_antigravity_hook_matrix(document: dict[str, Any]) -> list[str]:
-    """Validate Google's mixed matcher/direct lifecycle schema passively."""
+def _windows_antigravity_binding(event: str, command: str) -> str:
+    """The hook a Windows Antigravity *command* runs, when it is the native hook bound to *event*."""
+
+    target, args, _kind = _command_target(command, "antigravity")
+    if args != ["hook", "--connector", "antigravity", "--event", event]:
+        raise _InspectionError("stale", f"Antigravity {event} command is not bound to its registered event")
+    if ntpath.basename(target).casefold() not in {
+        "defenseclaw-hook",
+        "defenseclaw-hook.exe",
+        "defenseclaw-hook.cmd",
+    }:
+        raise _InspectionError("foreign", f"Antigravity {event} does not use DefenseClaw's hook runtime")
+    return os.path.normcase(os.path.normpath(target))
+
+
+def _validate_antigravity_hook_matrix(
+    document: dict[str, Any],
+    bind: Callable[[str, str], str] = _windows_antigravity_binding,
+    owns: Callable[[Any], bool] | None = None,
+) -> list[str]:
+    """Validate Google's mixed matcher/direct lifecycle schema passively.
+
+    Antigravity skips a disabled registration, a PreToolUse group whose
+    matcher is not ``*`` for some tools, and a handler that is not a command,
+    so each must be exactly what Setup writes. *bind* checks one handler's
+    command against its event and returns the hook it runs (default: the
+    Windows native hook); *owns* finds a DefenseClaw handler where Setup
+    registers none.
+    """
+
+    if owns is None:
+
+        def owns(value: Any) -> bool:
+            return _hook_json_value_targets_defenseclaw(value, "antigravity")
 
     commands: list[str] = []
     targets: set[str] = set()
@@ -2541,7 +2954,7 @@ def _validate_antigravity_hook_matrix(document: dict[str, Any]) -> list[str]:
             )
         if uses_matcher:
             group = entries[0]
-            if not isinstance(group, dict) or group.get("matcher") != "*":
+            if not isinstance(group, dict) or group.get("matcher") not in _ANTIGRAVITY_GUARD.matchers:
                 raise _InspectionError("stale", f"Antigravity {event} matcher must be '*'")
             handlers = group.get("hooks")
             if not isinstance(handlers, list) or len(handlers) != 1:
@@ -2557,28 +2970,25 @@ def _validate_antigravity_hook_matrix(document: dict[str, Any]) -> list[str]:
                 )
         if not isinstance(handler, dict) or handler.get("type") != "command":
             raise _InspectionError("malformed", f"Antigravity {event} handler type is not command")
-        if handler.get("timeout") != 30:
-            raise _InspectionError("stale", f"Antigravity {event} timeout must be 30 seconds")
+        # Setup writes no "enabled" below the registration key; one set on
+        # the matcher group or the handler turns the guard off as surely as
+        # the key's own (GAP-0538).
+        for part in ([entries[0], handler] if uses_matcher else [handler]):
+            if "enabled" in part and part["enabled"] is not True:
+                raise _InspectionError(
+                    "stale", f"Antigravity DefenseClaw registration {key} has a disabled {event} entry"
+                )
+        if type(handler.get("timeout")) is not int or handler.get("timeout") != _ANTIGRAVITY_GUARD.timeout:
+            raise _InspectionError("stale", f"Antigravity {event} timeout must be {_ANTIGRAVITY_GUARD.timeout} seconds")
         command = handler.get("command")
         if not isinstance(command, str) or not command.strip():
             raise _InspectionError("malformed", f"Antigravity {event} handler has no command")
-        target, args, _kind = _command_target(command.strip(), "antigravity")
-        if args != ["hook", "--connector", "antigravity", "--event", event]:
-            raise _InspectionError(
-                "stale", f"Antigravity {event} command is not bound to its registered event"
-            )
-        if ntpath.basename(target).casefold() not in {
-            "defenseclaw-hook",
-            "defenseclaw-hook.exe",
-            "defenseclaw-hook.cmd",
-        }:
-            raise _InspectionError("foreign", f"Antigravity {event} does not use DefenseClaw's hook runtime")
+        targets.add(bind(event, command.strip()))
         commands.append(command.strip())
-        targets.add(os.path.normcase(os.path.normpath(target)))
         for field, value in container.items():
             if field in {event, "enabled"}:
                 continue
-            if _hook_json_value_targets_defenseclaw(value, "antigravity"):
+            if owns(value):
                 raise _InspectionError(
                     "stale",
                     f"unexpected Antigravity event {field} in DefenseClaw registration {key}",
@@ -2587,9 +2997,242 @@ def _validate_antigravity_hook_matrix(document: dict[str, Any]) -> list[str]:
     if len(targets) != 1:
         raise _InspectionError("stale", "Antigravity lifecycle events target inconsistent hook runtimes")
     for key, value in document.items():
-        if key not in expected_keys and _hook_json_value_targets_defenseclaw(value, "antigravity"):
+        if key not in expected_keys and owns(value):
             raise _InspectionError("stale", f"unexpected Antigravity DefenseClaw registration {key}")
     return commands
+
+
+_UNIX_EVENT_BOUND_HOOK_SCRIPTS = {"antigravity": "antigravity-hook.sh", "copilot": "copilot-hook.sh"}
+_UNIX_REGISTRATION_LIMIT = 2 * 1024 * 1024
+
+
+def unix_hermes_hook_problem(config_path: str, script_path: str, *, check_approvals: bool = True) -> tuple[str, str]:
+    """Validate the Unix Hermes event matrix: one DefenseClaw handler per event,
+    its matcher, its 30 s timeout and the command, and (check_approvals) the
+    exact agent approval of that command. Doctor leaves the approvals to
+    hook_integrity, which names each unapproved event."""
+    try:
+        document = _read_config(config_path, "hermes")
+        hooks = document.get("hooks")
+        if not isinstance(hooks, dict):
+            raise _InspectionError("missing", "Hermes hook registration has no hooks table")
+        if not os.path.isfile(script_path):
+            raise _InspectionError("missing", f"Hermes hook script is missing: {script_path}")
+        expected = os.path.realpath(script_path)
+        # Setup owns an entry by identity (hermes_command_written): its own command and any plain
+        # spelling of it. A command it did not write, one that runs another script, say, is kept for
+        # the user and is not a second DefenseClaw handler.
+        current = {os.path.normpath(script_path), expected}
+        commands: set[str] = set()
+        for event, matcher in _HERMES_REQUIRED_HOOKS.items():
+            entries = hooks.get(event)
+            if not isinstance(entries, list):
+                raise _InspectionError("missing", f"Hermes DefenseClaw hook event {event} is missing")
+            owned = [
+                entry
+                for entry in entries
+                if isinstance(entry, dict)
+                and isinstance(entry.get("command"), str)
+                and hermes_command_written(entry["command"], current)
+            ]
+            if len(owned) != 1:
+                raise _InspectionError(
+                    "stale", f"Hermes event {event} has {len(owned)} DefenseClaw handlers; expected exactly one"
+                )
+            entry = owned[0]
+            if type(entry.get("timeout")) is not int or entry["timeout"] != 30:
+                raise _InspectionError("stale", f"Hermes event {event} timeout must be 30 seconds")
+            actual_matcher = entry.get("matcher") if "matcher" in entry else None
+            if actual_matcher != matcher:
+                raise _InspectionError(
+                    "stale", f"Hermes event {event} matcher is {actual_matcher!r}; expected {matcher!r}"
+                )
+            command = entry["command"].strip()
+            try:
+                argv = shlex.split(command)
+            except ValueError as exc:
+                raise _InspectionError("malformed", f"Hermes event {event} command cannot be parsed: {exc}") from exc
+            if len(argv) != 1 or os.path.realpath(argv[0]) != expected:
+                raise _InspectionError("stale", f"Hermes event {event} command does not run {script_path}")
+            commands.add(command)
+        if len(commands) != 1:
+            raise _InspectionError("stale", "Hermes events use inconsistent DefenseClaw commands")
+        for event, entries in hooks.items():
+            if event in _HERMES_REQUIRED_HOOKS or not isinstance(entries, list):
+                continue
+            # Setup removes an extra event's entry by the same identity test, so a command it
+            # did not write (one that runs another script, say) is the user's, as above.
+            if any(
+                isinstance(entry, dict)
+                and isinstance(entry.get("command"), str)
+                and hermes_command_written(entry["command"], current)
+                for entry in entries
+            ):
+                raise _InspectionError("stale", f"unexpected Hermes event {event} contains a DefenseClaw handler")
+        if check_approvals:
+            _validate_hermes_allowlist(config_path, next(iter(commands)))
+    except _InspectionError as exc:
+        return exc.state, exc.detail
+    return "", ""
+
+
+def hermes_kept_hook_note(data_dir: str, config_path: str) -> str:
+    """The notice `defenseclaw setup hermes` prints for hook entries Setup kept, else "".
+
+    The gateway applies the registration and words the same notice in its own
+    log (warnHermesKeptHookEntries in internal/gateway/connector), which the
+    command that ran Setup does not show. Setup owns an entry by identity
+    (hermes_command_written). The notice lists an event only when the record
+    Setup made (hermes_recorded_kept_commands) names an entry still in the file
+    that Setup does not own, the entry it wrote and a person edited; it never
+    reads what a command says, and with no record it prints nothing. Per-user
+    Unix only, where the exact command is known.
+    """
+    if os.name == "nt" or not data_dir:
+        return ""
+    recorded = hermes_recorded_kept_commands(data_dir)
+    if not recorded:
+        return ""
+    try:
+        hooks = _read_config(config_path, "hermes").get("hooks")
+    except _InspectionError:
+        return ""
+    if not isinstance(hooks, dict):
+        return ""
+    script = os.path.join(data_dir, "hooks", "hermes-hook.sh")
+    current = {os.path.normpath(script), os.path.realpath(script)}
+    kept = sorted(
+        event
+        for event in _HERMES_REQUIRED_HOOKS
+        if isinstance(hooks.get(event), list)
+        and any(
+            isinstance(entry, dict)
+            and isinstance(entry.get("command"), str)
+            and not hermes_command_written(entry["command"], current)
+            and hermes_command_hash(entry["command"]) in recorded.get(event, ())
+            for entry in hooks[event]
+        )
+    )
+    if not kept:
+        return ""
+    events = ", ".join(kept)
+    return (
+        f"hermes setup: kept hook entries in {config_path} (events: {events}) "
+        "that DefenseClaw did not write; remove any that runs a DefenseClaw hook by hand"
+    )
+
+
+def unix_hook_event_binding_problem(connector: str, config_path: str, script_path: str) -> tuple[str, str]:
+    """Why a Linux or macOS Copilot CLI or Antigravity registration does not run *script_path* with each event exactly.
+
+    Neither agent names the event in its hook input, so the hook takes it
+    from its registered command: ``copilot-hook.sh --event <event>`` (Copilot
+    runs the ``bash`` field in a shell) and ``antigravity-hook.sh <Event>``
+    (Antigravity splits the command at whitespace). An entry bound to another
+    event, or to none, answers a tool call as an event that cannot block, and
+    an entry that runs another copy of the hook may run it fail-open. The
+    agent skips an entry that is disabled, not a command or (Antigravity) has
+    another matcher, so each must also be as Setup writes it. Returns
+    ``("", "")`` when every DefenseClaw entry is exact, else a state
+    (missing, malformed, stale, foreign) and the reason.
+    """
+
+    script_name = _UNIX_EVENT_BOUND_HOOK_SCRIPTS[connector]
+    try:
+        with open(config_path, "rb") as handle:
+            raw = handle.read(_UNIX_REGISTRATION_LIMIT + 1)
+    except FileNotFoundError:
+        return "missing", f"{config_path} not found"
+    except OSError as exc:
+        return "malformed", f"cannot read {config_path}: {exc}"
+    try:
+        if len(raw) > _UNIX_REGISTRATION_LIMIT:
+            raise ValueError("file is too large")
+        document = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        return "malformed", f"cannot parse {config_path}: {exc}"
+    if not isinstance(document, dict):
+        return "malformed", f"{config_path} is not a JSON object"
+    expected = os.path.realpath(script_path)
+
+    def owned(tokens: list[str]) -> bool:
+        return bool(tokens) and os.path.basename(tokens[0]) == script_name
+
+    def runs_this_hook(tokens: list[str]) -> bool:
+        return os.path.realpath(tokens[0]) == expected
+
+    if connector == "antigravity":
+
+        def bind(event: str, command: str) -> str:
+            tokens = command.split()
+            if not owned(tokens):
+                raise _InspectionError("foreign", f"Antigravity {event} does not run {script_name}: {command}")
+            if tokens[1:] != [event]:
+                raise _InspectionError(
+                    "stale", f"Antigravity {event} command is not bound to its registered event: {command}"
+                )
+            if not runs_this_hook(tokens):
+                raise _InspectionError("stale", f"Antigravity {event} runs {tokens[0]}, not {script_path}")
+            return expected
+
+        def owns(value: Any) -> bool:
+            if isinstance(value, list):
+                return any(owns(item) for item in value)
+            if not isinstance(value, dict):
+                return False
+            command = value.get("command")
+            return (isinstance(command, str) and owned(command.split())) or any(owns(item) for item in value.values())
+
+        try:
+            _validate_antigravity_hook_matrix(document, bind=bind, owns=owns)
+        except _InspectionError as exc:
+            return exc.state, exc.detail
+        return "", ""
+
+    # disableAllHooks turns off every hook in the file. Setup writes version
+    # 1 and 30-second command entries; Copilot runs a call when its hook
+    # times out, so a shorter timeout lets calls through.
+    if type(document.get("version")) is not int or document.get("version") != 1:
+        return "malformed", f"{config_path}: Copilot hook registration version must be integer 1"
+    disabled = document.get("disableAllHooks", False)
+    if type(disabled) is not bool:
+        return "malformed", f"{config_path}: Copilot disableAllHooks must be boolean"
+    if disabled:
+        return "stale", f"{config_path}: disableAllHooks disables the DefenseClaw registration"
+    hooks = document.get("hooks")
+    if not isinstance(hooks, dict):
+        return "missing", f"{config_path} has no hooks object"
+    seen = {}
+    for event, entries in hooks.items():
+        for entry in entries if isinstance(entries, list) else []:
+            command = entry.get("bash") if isinstance(entry, dict) else None
+            if not isinstance(command, str) or script_name not in command:
+                continue
+            try:
+                # posix=False only where doctor's tests run this Unix check on
+                # Windows paths, whose backslashes are no shell escapes.
+                tokens = shlex.split(command, posix=os.name != "nt")
+            except ValueError:
+                return "malformed", f"Copilot {event} command cannot be parsed: {command}"
+            if not owned(tokens):
+                continue
+            if event not in _COPILOT_REQUIRED_HOOKS or tokens[1:] != ["--event", event]:
+                return "stale", f"Copilot {event} command is not bound to its registered event: {command}"
+            if not runs_this_hook(tokens):
+                return "stale", f"Copilot {event} runs {tokens[0]}, not {script_path}"
+            if entry.get("type") != "command":
+                return "malformed", f"Copilot {event} handler type is not command"
+            timeout = entry.get("timeoutSec")
+            if type(timeout) is not int or timeout != 30:
+                return "stale", f"Copilot {event} timeoutSec is {timeout!r}; expected 30"
+            seen[event] = seen.get(event, 0) + 1
+    for event in ("preToolUse", "permissionRequest"):
+        if seen.get(event) != 1:
+            return (
+                "missing" if not seen.get(event) else "stale",
+                f"Copilot {event} has {seen.get(event, 0)} DefenseClaw handlers; expected exactly one",
+            )
+    return "", ""
 
 
 def _hook_json_value_targets_defenseclaw(value: Any, connector: str) -> bool:
@@ -2623,8 +3266,10 @@ def _validate_hermes_hook_matrix(document: dict[str, Any]) -> int:
                 f"Hermes event {event} has {len(owned)} DefenseClaw handlers; expected exactly one",
             )
         entry = owned[0]
-        if entry.get("timeout") != 30 or type(entry.get("timeout")) is not int:
-            raise _InspectionError("stale", f"Hermes event {event} timeout must be 30 seconds")
+        if entry.get("timeout") != TOOL_GUARD_HOOKS["hermes"].timeout or type(entry.get("timeout")) is not int:
+            raise _InspectionError(
+                "stale", f"Hermes event {event} timeout must be {TOOL_GUARD_HOOKS['hermes'].timeout} seconds"
+            )
         matcher = entry.get("matcher") if "matcher" in entry else None
         if matcher != expected_matcher:
             raise _InspectionError(
@@ -2664,12 +3309,11 @@ def _validate_hermes_hook_matrix(document: dict[str, Any]) -> int:
 
 
 def _validate_hermes_allowlist(config_path: str, command: str) -> int:
-    path = os.path.join(os.path.dirname(config_path), "shell-hooks-allowlist.json")
+    path = os.path.join(os.path.dirname(config_path), HERMES_ALLOWLIST_FILE)
     document = _read_config(path, "hermes-allowlist")
     approvals = document.get("approvals")
     if not isinstance(approvals, list):
         raise _InspectionError("malformed", "Hermes shell hook allowlist approvals is not an array")
-    pairs: set[tuple[str, str]] = set()
     for raw in approvals:
         if not isinstance(raw, dict):
             continue
@@ -2689,7 +3333,6 @@ def _validate_hermes_allowlist(config_path: str, command: str) -> int:
                     # command or one an older release approved (a PowerShell
                     # launcher) cannot conflict with ours. Failing here kept
                     # Hermes unenrollable after an upgrade (GAP-1304).
-                    pairs.add((event, approved_command))
                     continue
                 if (
                     kind == "direct"
@@ -2700,8 +3343,9 @@ def _validate_hermes_allowlist(config_path: str, command: str) -> int:
                         "stale",
                         f"Hermes event {event} has an inconsistent DefenseClaw approval",
                     )
-            pairs.add((event, approved_command))
-    missing = [event for event in _HERMES_REQUIRED_HOOKS if (event, command) not in pairs]
+    # The approval rule Linux and macOS doctor read too (rel-1-0-4 GAP-0339).
+    approved = hermes_approved_pairs(document)
+    missing = [event for event in _HERMES_REQUIRED_HOOKS if (event, command) not in approved]
     if missing:
         raise _InspectionError(
             "stale",
@@ -2730,7 +3374,7 @@ def _validate_hermes_pending_runtime_state(data_dir: str, command: str) -> None:
 
 def _split_windows(command: str) -> list[str]:
     try:
-        parts = shlex.split(command, posix=False)
+        parts = split_windows_words(command)
     except ValueError as exc:
         raise _InspectionError("malformed", f"cannot parse registered hook command: {exc}") from exc
     normalized: list[str] = []
@@ -2739,7 +3383,7 @@ def _split_windows(command: str) -> list[str]:
             quote = part[0]
             part = part[1:-1]
             if parts and parts[0] == "&" and quote == "'":
-                part = part.replace("''", "'")
+                part = powershell_literal_value(part)
         normalized.append(part)
     return normalized
 
@@ -2776,6 +3420,11 @@ def _command_target(
             parts = shlex.split(value, posix=True)
         except ValueError as exc:
             raise _InspectionError("malformed", f"cannot parse registered hook command: {exc}") from exc
+        guarded = _devin_guarded_start(value)
+        if guarded is not None:
+            # The guarded start reads as the launcher beside the guard; the
+            # matrix checks the event it is registered under.
+            parts = [_guard_launcher(guarded[0]), *_DEVIN_HOOK_ARGS]
     else:
         parts = _split_windows(value)
     if not parts:
@@ -2787,7 +3436,18 @@ def _command_target(
         raise _InspectionError("malformed", "registered hook command has no target")
 
     first_base = ntpath.basename(parts[0]).casefold()
-    if first_base in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
+    if connector == "codex" and first_base in {"cmd", "cmd.exe"}:
+        # The direct Codex command (GAP-1908): only its exact rendered form
+        # is DefenseClaw-owned; any other cmd.exe line stays foreign.
+        direct = None if call_operator else _codex_cmd_direct_parts(command)
+        if direct is None:
+            raise _InspectionError(
+                "malformed",
+                "cmd.exe hook differs from the exact direct DefenseClaw command form",
+            )
+        target, args = direct
+        kind = "direct"
+    elif first_base in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
         lowered = [part.casefold() for part in parts]
         if "-encodedcommand" in lowered:
             if connector in {"antigravity", "devin"}:
@@ -2811,63 +3471,11 @@ def _command_target(
                 script = encoded.decode("utf-16-le")
             except (binascii.Error, UnicodeError, ValueError) as exc:
                 raise _InspectionError("malformed", f"PowerShell EncodedCommand hook is invalid: {exc}") from exc
-            event_suffix = ""
-            awaited_suffix = ""
-            if connector == "antigravity":
-                event_suffix = (
-                    r"(?:,'--event','(?P<event>PreInvocation|PreToolUse|"
-                    r"PostToolUse|PostInvocation|Stop)')?"
-                )
-                awaited_suffix = (
-                    r"(?: '--event' '(?P<event>PreInvocation|PreToolUse|"
-                    r"PostToolUse|PostInvocation|Stop)')?"
-                )
-            elif connector == "codex":
-                event_pattern = "|".join(
-                    re.escape(event) for event in sorted(_CODEX_KNOWN_HOOK_EVENTS)
-                )
-                contract_pattern = "|".join(
-                    re.escape(contract_id) for contract_id in sorted(_CODEX_CONTRACT_EVENTS)
-                )
-                # The optional forms are ownership evidence for registrations
-                # emitted before event/contract binding. Healthy validation
-                # requires both values and checks them against the table row.
-                event_suffix = (
-                    r"(?:,'--event','(?P<event>"
-                    + event_pattern
-                    + r")'(?:,'--hook-contract','(?P<contract>"
-                    + contract_pattern
-                    + r")')?)?"
-                )
-                awaited_suffix = (
-                    r"(?: '--event' '(?P<event>"
-                    + event_pattern
-                    + r")'(?: '--hook-contract' '(?P<contract>"
-                    + contract_pattern
-                    + r")')?)?"
-                )
+            event_suffix, _awaited_suffix = _windows_bridge_event_suffixes(connector)
             # The current bridge starts the launcher with Process.Start and
             # repeats the arguments in its Constrained Language branch; both
             # copies must name the same launcher and arguments.
-            match = re.fullmatch(
-                r"\$ErrorActionPreference='Stop'; "
-                r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "
-                r"if \(\$ExecutionContext\.SessionState\.LanguageMode -ne 'FullLanguage'\) \{ "
-                r"\$ErrorActionPreference='Continue'; "
-                r"& '(?P<target>(?:[^']|'')+)' 'hook' '--connector' '"
-                + re.escape(connector)
-                + r"'"
-                + awaited_suffix
-                + r" \| Microsoft\.PowerShell\.Core\\Out-Host; exit \$LASTEXITCODE \}; "
-                r"\$hookStart=\[System\.Diagnostics\.ProcessStartInfo\]::new\('(?P=target)','(?P<arguments>[^']*)'\); "
-                r"\$hookStart\.UseShellExecute=\$false; "
-                r"\$hookStart\.RedirectStandardError=\$true; "
-                r"\$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\); "
-                r"\$hookProcess\.StandardError\.BaseStream\.CopyTo\(\[Console\]::OpenStandardError\(\)\); "
-                r"\$hookProcess\.WaitForExit\(\); "
-                r"exit \$hookProcess\.ExitCode",
-                script,
-            )
+            match = _awaited_hook_bridge_match(script, connector)
             if not match:
                 match = re.fullmatch(
                     r"\$ErrorActionPreference='Stop'; "
@@ -2888,7 +3496,7 @@ def _command_target(
                         "which loses the status of a hook that exits at once",
                     )
             if match:
-                target = match.group("target").replace("''", "'")
+                target = powershell_literal_value(match.group("target"))
                 args = ["hook", "--connector", connector]
                 event = match.groupdict().get("event")
                 contract_id = match.groupdict().get("contract")
@@ -2906,6 +3514,19 @@ def _command_target(
                     raise _InspectionError(
                         "malformed",
                         "PowerShell EncodedCommand hook starts different arguments in its two launch paths",
+                    )
+                answer = match.groupdict().get("answer")
+                if arguments is not None and match.group("fail_closed") is None and answer is None:
+                    raise _InspectionError(
+                        "stale",
+                        "PowerShell EncodedCommand hook exits 0 in Constrained Language mode "
+                        "when the launcher cannot start",
+                    )
+                if answer is not None and answer != _launcher_start_answer(connector, event or "", contract_id or ""):
+                    raise _InspectionError(
+                        "malformed",
+                        "PowerShell EncodedCommand hook answers a launcher that cannot start "
+                        "differently from the DefenseClaw bridge",
                     )
                 return target, args, "direct"
             unqualified = re.fullmatch(
@@ -3052,10 +3673,62 @@ def _contract_evidence(data_dir: str, connector: str, config_path: str) -> tuple
     return f"contract={contract} version={version} status={status}", version, contract
 
 
+def _locked_hook_script_digest(data_dir: str, connector: str, name: str) -> str:
+    """The digest Setup sealed in hook_contract_lock.json for *connector*'s hook script *name*, or ""."""
+
+    try:
+        with open(os.path.join(data_dir, "hook_contract_lock.json"), encoding="utf-8") as handle:
+            lock = json.load(handle)
+    except (OSError, ValueError):
+        return ""  # _contract_evidence reports a missing or unreadable lock
+    entry = (lock.get("connectors") or {}).get(connector) if isinstance(lock, dict) else None
+    digests = entry.get("hook_script_digests") if isinstance(entry, dict) else None
+    return str(digests.get(name) or "") if isinstance(digests, dict) else ""
+
+
+def copilot_setup_command(adapter: str, event: str) -> str:
+    """Setup's Copilot ``powershell`` handler for *event* (connector copilotHookInvocationCommandForEvent)."""
+    return f"& {powershell_literal(adapter)} -Event {powershell_literal(event)}"
+
+
+# g072 review 3 M3: a hook command whose PowerShell literal has a lone
+# typographic quote is the render of a release before 1.0.9, which doubled only
+# the apostrophe. It is DefenseClaw's own (setup rewrites it), but PowerShell
+# ends the quoted path at that quote, so the hook does not run.
+_PRE_TYPOGRAPHIC_QUOTE_RENDER = (
+    "was written before 1.0.9 and does not run: PowerShell ends its quoted path at the "
+    "typographic quote in it"
+)
+_POWERSHELL_SINGLE_QUOTED = re.compile(r"'((?:[^']|'')*)'")
+
+
+def _powershell_literals_current(command: str) -> bool:
+    """Whether every single-quoted literal of a PowerShell hook *command* is this release's render.
+
+    It reads a call-operator command itself and an -EncodedCommand bridge's
+    script. Other forms (cmd.exe, bash, shlex) do not read typographic quotes.
+    """
+    texts = [command] if command.lstrip().startswith("&") else []
+    parts = command.split()
+    lowered = [part.casefold() for part in parts]
+    if "-encodedcommand" in lowered:
+        index = lowered.index("-encodedcommand") + 1
+        if index < len(parts):
+            try:
+                texts.append(base64.b64decode(parts[index], validate=True).decode("utf-16-le"))
+            except (binascii.Error, UnicodeError, ValueError):
+                pass
+    return all(
+        powershell_literal_is_current(match.group(1))
+        for text in texts
+        for match in _POWERSHELL_SINGLE_QUOTED.finditer(text)
+    )
+
+
 def _copilot_powershell_binding(command: str) -> tuple[str, str] | None:
     match = _COPILOT_POWERSHELL_COMMAND.fullmatch(command.strip())
     if match:
-        return match.group(1).replace("''", "'"), match.group(2)
+        return powershell_literal_value(match.group(1)), match.group(2)
     lowered = command.casefold()
     if (
         "hook --connector copilot" in lowered
@@ -3080,7 +3753,8 @@ def _copilot_powershell_binding(command: str) -> tuple[str, str] | None:
 def _validate_copilot_hook_matrix(
     document: dict[str, Any],
     contract_id: str,
-) -> tuple[str, str, int]:
+    expected_adapter: str,
+) -> tuple[str, str, int, dict[str, str]]:
     if type(document.get("version")) is not int or document.get("version") != 1:
         raise _InspectionError("malformed", "Copilot hook registration version must be integer 1")
     if "disableAllHooks" in document:
@@ -3114,7 +3788,7 @@ def _validate_copilot_hook_matrix(
             binding = _copilot_powershell_binding(command)
             if binding is not None:
                 target, bound_event = binding
-                owned.append((entry, command.strip(), target))
+                owned.append((entry, command, target))
                 if bound_event != event:
                     raise _InspectionError(
                         "stale",
@@ -3125,38 +3799,72 @@ def _validate_copilot_hook_matrix(
                 "stale",
                 f"Copilot event {event} has {len(owned)} DefenseClaw handlers; expected exactly one",
             )
+        if len(entries) != 1:
+            # defenseclaw.json is DefenseClaw's file; Setup leaves its handler
+            # alone on a bound event (rel-1-0-4 GAP-0600).
+            raise _InspectionError(
+                "foreign",
+                f"Copilot event {event} runs {len(entries) - 1} other handler(s) beside DefenseClaw's "
+                "in DefenseClaw's hook file",
+            )
         entry, command, target = owned[0]
         if entry.get("type") != "command":
             raise _InspectionError("malformed", f"Copilot event {event} handler type is not command")
         timeout = entry.get("timeoutSec")
-        if type(timeout) is not int or timeout != 30:
+        expected_timeout = TOOL_GUARD_HOOKS["copilot"].timeout
+        if type(timeout) is not int or timeout != expected_timeout:
             raise _InspectionError(
                 "stale",
-                f"Copilot event {event} timeoutSec is {timeout!r}; expected 30",
+                f"Copilot event {event} timeoutSec is {timeout!r}; expected {expected_timeout}",
             )
         if "bash" in entry or "command" in entry:
             raise _InspectionError(
                 "stale",
                 f"Copilot event {event} mixes the Windows powershell handler with another command field",
             )
+        extra = sorted(set(entry) - {"type", "powershell", "timeoutSec"})
+        if extra:
+            # Setup writes these three keys only (copilotHookRegistration); a
+            # per-entry env or cwd runs DefenseClaw's hook under other terms.
+            raise _InspectionError(
+                "foreign",
+                f"Copilot event {event} handler has keys Setup does not write: {', '.join(extra)}",
+            )
         commands[event] = command
         targets.add(target)
         count += 1
 
+    def unexpected_commands(value: Any):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key == "powershell" and isinstance(item, str):
+                    yield item
+                elif isinstance(item, (dict, list)):
+                    yield from unexpected_commands(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from unexpected_commands(item)
+
+    # The adapter as this release quotes it, and as releases before 1.0.9 did.
+    adapter_body = powershell_literal_body(expected_adapter)
+    adapter_literals = {
+        adapter_body.casefold(),
+        powershell_literal_before_typographic_quotes(adapter_body).casefold(),
+    }
     for event, entries in hooks.items():
-        if event in expected or not isinstance(entries, list):
+        if event in expected:
             continue
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            command = entry.get("powershell")
-            if isinstance(command, str) and _copilot_powershell_binding(command) is not None:
+        for command in unexpected_commands(entries):
+            if (
+                any(literal in command.casefold() for literal in adapter_literals)
+                or _copilot_powershell_binding(command) is not None
+            ):
                 raise _InspectionError("stale", f"unexpected Copilot event {event} contains a DefenseClaw handler")
 
     if len(targets) != 1:
         raise _InspectionError("stale", "Copilot DefenseClaw hook events use inconsistent PowerShell targets")
     first_event = required_hooks[0]
-    return commands[first_event], next(iter(targets)), count
+    return commands[first_event], next(iter(targets)), count, commands
 
 
 def validate_windows_copilot_hook_registration(
@@ -3192,16 +3900,25 @@ def validate_windows_copilot_hook_registration(
             )
         document = _read_config(config_path, "copilot")
         evidence, _runtime_version, contract_id = _contract_evidence(data_dir, "copilot", config_path)
-        command, raw_adapter, matrix_entries = _validate_copilot_hook_matrix(document, contract_id)
+        expected_adapter = os.path.normpath(os.path.join(data_dir, "hooks", "copilot-hook.ps1"))
+        command, raw_adapter, matrix_entries, commands = _validate_copilot_hook_matrix(
+            document, contract_id, expected_adapter
+        )
         resolved_adapter = _resolve_target(raw_adapter, "powershell", search_path=search_path, pathext=pathext)
         if not resolved_adapter:
             raise _InspectionError("missing", f"registered Copilot adapter cannot be resolved: {raw_adapter}")
-        expected_adapter = os.path.join(data_dir, "hooks", "copilot-hook.ps1")
         if not _same_windows_path(resolved_adapter, expected_adapter):
             raise _InspectionError(
                 "foreign",
                 f"registered Copilot adapter is outside the DefenseClaw runtime: {resolved_adapter}",
             )
+        for event, registered in commands.items():
+            setup_command = copilot_setup_command(expected_adapter, event)
+            if registered == setup_command:
+                continue
+            if registered == powershell_literal_before_typographic_quotes(setup_command):
+                raise _InspectionError("stale", f"Copilot event {event} handler {_PRE_TYPOGRAPHIC_QUOTE_RENDER}")
+            raise _InspectionError("foreign", f"Copilot event {event} handler differs from Setup's command")
         adapter_bytes = _stable_regular_file(
             resolved_adapter,
             data_dir,
@@ -3268,7 +3985,7 @@ def validate_windows_copilot_hook_registration(
                 "malformed",
                 "registered Copilot adapter must contain exactly one bound hook executable",
             )
-        raw_target = hook_matches[0].group(1).replace("''", "'")
+        raw_target = powershell_literal_value(hook_matches[0].group(1))
         resolved = _resolve_target(raw_target, "direct", search_path=search_path, pathext=pathext)
         if not resolved:
             raise _InspectionError("missing", f"Copilot adapter hook executable cannot be resolved: {raw_target}")
@@ -3281,6 +3998,17 @@ def validate_windows_copilot_hook_registration(
         runtime_root = _windows_hook_runtime_root(resolved) or install_root
         if _stable_regular_file(resolved, runtime_root, read_limit=2) != b"MZ":
             raise _InspectionError("foreign", f"registered hook executable is not a Windows PE file: {resolved}")
+        # The markers above are in every release's adapter; only the digest
+        # Setup sealed tells an old copy from the current one (rel-1-0-4 GAP-0600).
+        sealed = _locked_hook_script_digest(data_dir, "copilot", "copilot-hook.ps1")
+        if not sealed:
+            raise _InspectionError("stale", "hook contract lock has no digest for the Copilot adapter")
+        if not hmac.compare_digest("sha256:" + hashlib.sha256(adapter_bytes).hexdigest(), sealed):
+            raise _InspectionError(
+                "stale",
+                f"registered Copilot adapter {resolved_adapter} changed since setup (an edit, or a copy from "
+                "another build; it does not match hook_contract_lock.json)",
+            )
         mode_detail = (
             f"configured mode={configured_mode}; "
             if configured_mode in {"action", "observe"}
@@ -3369,7 +4097,7 @@ def validate_windows_hook_registration(
             if inspect_effective_policy:
                 policy_detail = _validate_codex_effective_hook_policy(data_dir, config_path)
         elif connector == "devin":
-            _command, matrix_entries = _validate_devin_hook_matrix(document)
+            _command, matrix_entries, _guarded = _validate_devin_hook_matrix(document)
         elif connector == "claudecode":
             evidence, expected_runtime_version, contract_id = _contract_evidence(
                 data_dir,
@@ -3478,6 +4206,16 @@ def validate_windows_hook_registration(
             raise _InspectionError(
                 "foreign", f"registered hook target is not the DefenseClaw hook launcher: {resolved}"
             )
+        for guard in dict.fromkeys(_hook_guard_start(item, connector) for item in commands):
+            # A missing or altered guard lets the calls it starts run
+            # uninspected (rel-1-0-6 GAP-0676).
+            problem = hook_guard_problem(data_dir, connector, guard) if guard else None
+            if problem is not None:
+                raise _InspectionError("guard-unusable", f"{problem}; {problem.repair}", repair=problem.repair)
+        # Every command, not only the first: Codex has one per event, and a
+        # hand-merged file can mix forms (g072 review 4 S1).
+        if not all(_powershell_literals_current(item) for item in commands):
+            raise _InspectionError("stale", f"registered hook command {_PRE_TYPOGRAPHIC_QUOTE_RENDER}")
         limitations = ""
         if connector == "devin":
             limitations = (
@@ -3491,10 +4229,16 @@ def validate_windows_hook_registration(
                 f"on-disk Windows-native {runtime} registration is valid; "
                 f"hook_entries={matrix_entries}; allowlist_entries={allowlist_entries}; "
                 f"target={resolved}; {evidence}; running Hermes CLI/TUI/gateway/desktop/service hosts "
-                "are unverified and must be reloaded or restarted; live=false",
+                "are unverified: doctor cannot verify which hooks an already running host loaded, "
+                "even after a restart or successful hook traffic; live=false",
                 command,
                 resolved,
                 raw_target,
+                repair=(
+                    "close every Hermes CLI/TUI/gateway/desktop/service host, then run 'defenseclaw doctor'; "
+                    "start Hermes again after the on-disk checks pass. "
+                    "Running-host load verification is unavailable"
+                ),
             )
         return WindowsHookCheck(
             "healthy",
@@ -3510,7 +4254,7 @@ def validate_windows_hook_registration(
         return WindowsHookCheck(
             exc.state,
             exc.detail
-            if exc.state in {"policy-blocked", CODEX_PROBE_TIMEOUT_STATE}
+            if exc.state in {"policy-blocked", CODEX_PROBE_TIMEOUT_STATE, "guard-unusable"}
             else f"{exc.detail}; {LAUNCHER_REINSTALL_STEP}"
             if exc.state == "launcher-missing"
             else _repair_detail(connector, exc.detail),

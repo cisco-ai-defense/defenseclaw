@@ -33,6 +33,9 @@ from defenseclaw.doctor_gateway import ListenerEvidence
 from defenseclaw.doctor_health import ComponentEvidence, HealthStatus
 from defenseclaw.doctor_recovery import DeviceKeyHealthStatus, inspect_device_key
 
+from tests.os_view import os_view
+from tests.permissions import set_known_windows_directory_acl
+
 
 @pytest.fixture(autouse=True)
 def _canonical_v8_validator_stub(monkeypatch):
@@ -490,6 +493,43 @@ def test_unavailable_or_untested_compatibility_is_advisory_not_a_lifecycle_block
     assert "no positively unsupported" in connector_gate.detail
 
 
+def test_supported_kiro_ide_keeps_old_cli_finding_without_blocking_gateway_repair(tmp_path) -> None:
+    if os.name == "nt":
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        set_known_windows_directory_acl(data_dir)
+    else:
+        data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir, connector="kiro")
+
+    def signal(version, *, cli="", ide=""):
+        return SimpleNamespace(
+            installed=True, version=version, kiro_cli_version=cli, kiro_ide_version=ide
+        )
+
+    from defenseclaw import doctor_health
+
+    cases = (
+        (signal("1.0.182", cli="kiro-cli 2.26.1", ide="1.0.182"), "noop"),
+        (signal("kiro-cli 2.26.1", cli="kiro-cli 2.26.1"), "manual"),
+    )
+    for installed, expected_gate in cases:
+        with patch.object(
+            doctor_health, "read_cached_discovery",
+            return_value=SimpleNamespace(agents={"kiro": installed}),
+        ):
+            problems = cmd_doctor._connector_compatibility_problems(cfg)
+            gate = cmd_doctor._plan_connector_compatibility_gate(cfg)
+
+        assert any(
+            finding.status is HealthStatus.UNSUPPORTED and finding.installed_version == "2.26.1"
+            for finding in problems
+        )
+        assert gate.state == expected_gate
+        if expected_gate == "noop":
+            assert "selected Kiro surface can be repaired" in gate.detail
+
+
 def test_positive_unsupported_compatibility_blocks_gateway_lifecycle(tmp_path) -> None:
     data_dir = _private_data_dir(tmp_path)
     cfg = _cfg(data_dir)
@@ -775,6 +815,10 @@ def test_audit_store_moved_aside_by_the_gateway_is_reported(tmp_path) -> None:
     assert f"sqlite3 {moved} .recover" not in notice["detail"]
     assert "any -journal files to a new folder" in notice["remediation"]
     assert f"sqlite3 {moved} .recover" not in notice["remediation"]
+    # GAP-0647: a zeroed header is repaired on the copy; GAP-0614: the archived sidecars are named.
+    assert "write the SQLite header back on the copy" in notice["detail"]
+    assert "zeroed SQLite header back on the copy" in notice["remediation"]
+    assert f"Older audit records stay in {moved} together with its -wal file (" in notice["detail"]
     assert "defenseclaw mcp list" in notice["detail"] and "kept the block/allow" not in notice["detail"]
 
 
@@ -813,6 +857,46 @@ def test_archived_0x_audit_store_is_not_reported_as_corrupt(tmp_path) -> None:
     assert "was corrupt" not in notice["detail"] and "carried over" not in notice["detail"]
     assert "Copy the archive together with its -wal, -shm and any -journal files to a new folder" in notice["detail"]
     assert "sqlite3 <copy> .recover" in notice["detail"] and f"sqlite3 {moved} .recover" not in notice["detail"]
+    assert "write the SQLite header back on the copy" in notice["detail"]
+
+
+def test_moved_audit_store_report_names_the_archive_not_a_file_with_an_archive_name(tmp_path) -> None:
+    # rel-1-0-3:GAP-0106: the newest file with an archive's name took the place of
+    # the archive, which moved to a new name because the first one was taken.
+    db = tmp_path / "audit.db"
+    archive = Path(str(db) + ".corrupt-20261018T021344Z-4bfc16b6-f3ca-490f-98a0-71b4f32de5ce")
+    others = [Path(str(db) + ".corrupt-20261018T021344Z"), Path(str(db) + ".corrupt-20261018T021513Z")]
+    for path in (archive, Path(str(archive) + "-wal"), *others):
+        path.write_bytes(b"x")
+    Path(str(archive) + ".carryover.json").write_text('{"carried_over": 2}', encoding="utf-8")
+
+    result = _DoctorResult()
+    cmd_doctor._check_moved_aside_audit_stores(str(db), result)
+
+    (notice,) = result.checks
+    assert notice["detail"].startswith("the audit store was corrupt and was moved aside")
+    assert f"Older audit records stay in {archive} together with its -wal file (" in notice["detail"]
+    assert all(f"{other} " not in notice["detail"] for other in others)
+    assert cmd_doctor._reported_moved_stores(others) == others
+
+
+def test_archive_header_repair_names_a_command_for_the_platform(monkeypatch) -> None:
+    # GAP-0647: the recovery hint repairs a zeroed header on the copy, with a command the host has.
+    monkeypatch.setattr(cmd_doctor, "os", os_view("posix"))
+    assert "dd of=<copy> bs=16 count=1 conv=notrunc" in cmd_doctor._archive_header_repair()
+    monkeypatch.setattr(cmd_doctor, "os", os_view("nt"))
+    windows = cmd_doctor._archive_header_repair()
+    assert "PowerShell" in windows and "[IO.File]::OpenWrite('<copy>')" in windows and "dd of=" not in windows
+
+
+def test_archived_sidecars_are_named(tmp_path) -> None:
+    # GAP-0614: doctor lists the -wal, -shm and -journal files archived with a moved store.
+    archive = tmp_path / "audit.db.corrupt-20261014T214026Z"
+    archive.write_bytes(b"x")
+    assert cmd_doctor._archived_sidecars(archive) == ""
+    for suffix in ("-wal", "-shm", "-journal"):
+        Path(str(archive) + suffix).write_bytes(b"x")
+    assert cmd_doctor._archived_sidecars(archive) == " together with its -wal, -shm and -journal files"
 
 
 def test_moved_audit_store_with_one_carried_over_entry_uses_singular(tmp_path) -> None:
@@ -850,6 +934,8 @@ def test_audit_check_and_repair_plan_reject_world_readable_database(tmp_path) ->
     assert result.checks[0]["reason_code"] == "audit-db-custody-invalid"
     # GAP-0337: a permission slip names the mode and the chmod, not a restore.
     assert "mode 0644" in result.checks[0]["detail"]
+    # GAP-1332: the content was not checked, so it is not called intact.
+    assert "intact" not in result.checks[0]["detail"]
     assert result.checks[0]["remediation"] == f"chmod 600 {cfg.audit_db}"
     assert planned.state == "blocked"
     assert planned.blockers == ("audit-db-custody-invalid",)
@@ -918,7 +1004,7 @@ def test_windows_private_files_distinguish_unsafe_acl_from_uninspected_acl(tmp_p
     for problem, status, detail in (
         ("owner SID S-1-5-21-foreign is not the current user", "fail", "unsafe"),
         ("ACL grants write access to untrusted SID S-1-5-21-foreign", "fail", "unsafe"),
-        ("cannot read Windows ACL (access denied)", "warn", "could not verify"),
+        ("cannot read Windows ACL (access denied)", "warn", "could not inspect"),
     ):
         with patch("defenseclaw.file_permissions.windows_acl_confidentiality_error", return_value=problem):
             result = _DoctorResult()
@@ -1168,8 +1254,9 @@ def test_device_identity_requires_explicit_attended_repair(tmp_path) -> None:
     assert repaired_health.checks[-1]["reason_code"] == "device-key-provenance-valid"
 
 
-def test_deleted_device_key_with_leftover_provenance_has_an_attended_repair(tmp_path) -> None:
-    # GAP-0323: only device.key was deleted; its provenance files remain.
+def test_deleted_device_key_with_leftover_provenance_is_never_replaced_by_doctor(tmp_path) -> None:
+    # GAP-0323 / GAP-0927: only device.key was deleted; its provenance files remain. Neither Doctor nor
+    # init replaces them: Doctor names the files and the manual steps and offers no repair.
     data_dir = _private_data_dir(tmp_path)
     cfg = _cfg(data_dir)
     attended = (
@@ -1179,17 +1266,30 @@ def test_deleted_device_key_with_leftover_provenance_has_an_attended_repair(tmp_
     with attended[0], attended[1]:
         assert cmd_doctor._fix_device_key_recovery(cfg, assume_yes=False)[0] == "pass"
     os.remove(cfg.gateway.device_key_file)
+    before = {
+        name: open(os.path.join(data_dir, name), "rb").read() for name in sorted(os.listdir(data_dir)) if name.startswith("device.")
+    }
+    assert len(before) == 2, before
 
     health = _DoctorResult()
     cmd_doctor._check_device_identity(cfg, health)
-    assert "doctor.identity.device-key.initialize" in health.checks[-1]["remediation"]
-    with attended[0], attended[1]:
+    remediation = health.checks[-1]["remediation"]
+    assert "doctor.identity.device-key.initialize" not in remediation
+    assert "defenseclaw-gateway stop" in remediation
+    assert "run defenseclaw init again" in remediation
+    for name in before:
+        assert os.path.join(data_dir, name) in remediation
+
+    assert cmd_doctor._plan_device_key_recovery(cfg).state == "blocked"
+    with attended[0], attended[1] as confirm:
         tag, detail = cmd_doctor._fix_device_key_recovery(cfg, assume_yes=False)
-    assert tag == "pass", detail
-    status = inspect_device_key(cfg.gateway.device_key_file, data_dir=cfg.data_dir).status
-    assert status is DeviceKeyHealthStatus.VALID
-    kept = [name for _root, _dirs, files in os.walk(data_dir) for name in files if ".orphaned-" in name]
-    assert len(kept) == 2, kept
+    assert tag == "fail", detail
+    confirm.assert_not_called()
+    assert not os.path.exists(cfg.gateway.device_key_file)
+    assert {
+        name: open(os.path.join(data_dir, name), "rb").read() for name in sorted(os.listdir(data_dir)) if name.startswith("device.")
+    } == before
+    assert not [name for name in os.listdir(data_dir) if ".orphaned-" in name]
 
 
 def test_gateway_writing_to_a_deleted_audit_db_fails_and_restarts(tmp_path) -> None:
@@ -1214,3 +1314,108 @@ def test_gateway_writing_to_a_deleted_audit_db_fails_and_restarts(tmp_path) -> N
         with patch.object(cmd_doctor, "_recovery_gateway_blocker", return_value="gateway running"):
             assert cmd_doctor._plan_audit_db_recovery(cfg).state == "noop"
     restart.assert_called_once()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode exposure")
+def test_writable_data_directory_fails_the_private_files_row(tmp_path) -> None:
+    # GAP-1329: another account that can write the data directory can
+    # replace the private files in it.
+    data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir)
+    try:
+        os.chmod(data_dir, 0o777)
+        rows = _DoctorResult()
+        cmd_doctor._check_private_file_exposure(cfg, rows)
+        assert rows.checks[-1]["status"] == "fail", rows.checks
+        assert f"chmod 700 {data_dir}" in rows.checks[-1]["remediation"]
+        os.chmod(data_dir, 0o755)
+        rows = _DoctorResult()
+        cmd_doctor._check_private_file_exposure(cfg, rows)
+        assert rows.checks[-1]["status"] == "warn", rows.checks
+    finally:
+        os.chmod(data_dir, 0o700)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits")
+def test_macos_write_acl_on_the_data_directory_fails_the_private_files_row(tmp_path) -> None:
+    # Review fix (GAP-1329): a mode-0700 data directory with a macOS write
+    # grant ACL lets another account replace private state.
+    data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir)
+    for problem, status in (
+        ("extended ACL grants additional write access", "fail"),
+        ("extended ACL could not be inspected", "warn"),
+    ):
+        with patch("defenseclaw.file_permissions.darwin_acl_write_error", return_value=problem):
+            rows = _DoctorResult()
+            cmd_doctor._check_private_file_exposure(cfg, rows)
+        row = rows.checks[-1]
+        assert row["status"] == status, rows.checks
+        assert problem in row["detail"]
+        assert "chmod 700" not in row["remediation"]
+        if status == "fail":
+            assert "chmod -N" in row["remediation"]
+
+
+def test_windows_write_acl_on_the_data_directory_fails_the_private_files_row(tmp_path, monkeypatch) -> None:
+    # Review fix (GAP-1329): the Windows data directory gets the recovery
+    # planner's write custody check instead of being skipped.
+    data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir)
+    fake_os = SimpleNamespace(name="nt", path=os.path, lstat=os.lstat)
+    monkeypatch.setattr(cmd_doctor, "os", fake_os)
+    seen = []
+
+    def custody(path, **kwargs):
+        seen.append((path, kwargs))
+        return "ACL grants write access to untrusted SID S-1-5-21-other"
+
+    with (
+        patch("defenseclaw.file_permissions.windows_acl_confidentiality_error", return_value=None),
+        patch("defenseclaw.file_permissions.windows_acl_custody_write_error", side_effect=custody),
+    ):
+        rows = _DoctorResult()
+        cmd_doctor._check_private_file_exposure(cfg, rows)
+    row = rows.checks[-1]
+    assert row["status"] == "fail", rows.checks
+    assert f"{data_dir} (unsafe Windows ACL: ACL grants write access" in row["detail"]
+    assert "remove other accounts' write access" in row["remediation"]
+    assert [kwargs for _path, kwargs in seen] == [{"allow_current_user": True, "require_current_user_owner": True}]
+def test_administrators_owned_private_file_names_the_elevated_session_and_the_fix(tmp_path, monkeypatch) -> None:
+    # GAP-0050: a per-user init run from an elevated administrator token left
+    # audit.db owned by BUILTIN\Administrators; doctor said only "review
+    # ownership". It must name the cause and the exact fix.
+    data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir)
+    environ = {"USERDOMAIN": "DCLAB", "USERNAME": "dcadmin"}
+    monkeypatch.setattr(cmd_doctor, "os", SimpleNamespace(name="nt", path=os.path, lstat=os.lstat, environ=environ))
+    monkeypatch.setattr(
+        "defenseclaw.file_permissions._windows_current_user_sid", lambda: "S-1-5-21-111-222-333-500"
+    )
+    audit_db = os.path.join(data_dir, "audit.db")
+    with open(audit_db, "wb"):
+        pass
+
+    for owner_problem, elevated in (
+        ("owner SID S-1-5-32-544 is not the current user", True),
+        ("owner SID S-1-5-21-1-2-3-1001 is not the current user", False),
+    ):
+        with (
+            patch(
+                "defenseclaw.file_permissions.windows_acl_confidentiality_error",
+                side_effect=lambda path, problem=owner_problem: problem if path == audit_db else None,
+            ),
+            patch("defenseclaw.file_permissions.windows_acl_custody_write_error", return_value=None),
+        ):
+            rows = _DoctorResult()
+            cmd_doctor._check_private_file_exposure(cfg, rows)
+        row = rows.checks[-1]
+        assert row["status"] == "fail", rows.checks
+        assert f"{audit_db} (unsafe Windows ACL: {owner_problem})" in row["detail"]
+        if elevated:
+            assert "because DefenseClaw ran from an elevated administrator session" in row["remediation"]
+            assert f'icacls "{data_dir}" /setowner "*S-1-5-21-111-222-333-500" /T /C /Q' in row["remediation"]
+            assert "review ownership" not in row["remediation"]
+        else:
+            assert "elevated" not in row["remediation"]
+            assert f"review ownership and remove untrusted permissions on {audit_db}" in row["remediation"]

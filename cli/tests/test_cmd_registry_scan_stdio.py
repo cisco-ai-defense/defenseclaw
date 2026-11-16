@@ -124,6 +124,10 @@ class RegistrySyncScanStdioTests(unittest.TestCase):
             "default sync must not spawn the stdio MCP package",
         )
         self.assertIn("skipping stdio MCP scan", result.output)
+        self.assertIn("would spawn package", result.output)
+        row = next(line.split() for line in result.output.splitlines() if line.strip().startswith("corp-mcp"))
+        self.assertEqual(row[1:4], ["1", "0", "1"], result.output)
+        self.assertIn("scanner returned no result", result.output)
 
     def test_scan_stdio_flag_spawns_stdio_package(self):
         """With --scan-stdio the operator opts in and the scanner runs
@@ -177,6 +181,7 @@ class RegistrySyncScanStdioTests(unittest.TestCase):
         with patch("defenseclaw.registries.sync.fetch_manifest",
                    lambda _source, *, allow_private=False: (manifest, raw)), \
                 patch.object(MCPScannerWrapper, "scan", _fake_scan), \
+                patch("defenseclaw.commands.cmd_registry._registry_mcp_url_allowed", return_value=True), \
                 patch("defenseclaw.commands.cmd_registry._stderr_is_tty", return_value=True):
             text = self._invoke(["sync", "corp-mcp", "--allow-private"])
             js = self._invoke(["sync", "corp-mcp", "--allow-private", "--json"])

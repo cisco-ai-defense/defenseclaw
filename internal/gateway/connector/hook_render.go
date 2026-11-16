@@ -25,17 +25,24 @@ import (
 )
 
 // derivedHookHeader is the first comment of every per-user (unmanaged)
-// connector hook script: the digest of the config values rendered into it
-// and the hook fail mode it bakes in, so doctor can tell a script rendered
-// from another config apart from the current one (spec section 6). Managed
-// installs compare the whole render instead (HookScriptRenderDrift).
+// connector hook script: the digest of the config values rendered into it, so
+// doctor can tell a script an older build rendered apart from the current one
+// (spec section 6). Managed installs compare the whole render instead
+// (HookScriptRenderDrift).
+//
+// The line names no fail mode. A per-user script reads its outage mode from
+// the config when a call fails; the closed it bakes for every other failure
+// is not a config value. Doctor compared a baked fail_mode=closed with the
+// config's outage mode (open on the default tier) and called every fresh
+// script stale (GAP-1347). Scripts from 1.0.3 and older, which did bake the
+// config's mode, still carry the field, so doctor still finds those.
 const derivedHookHeader = "# defenseclaw-derived:"
 
 // derivedHookLine is the header line for a connector script rendered from data.
 func derivedHookLine(data templateData) string {
 	sum := sha256.Sum256([]byte(fmt.Sprintf("defenseclaw-hook-render-v1\nconnector=%s\nfail_mode=%s\napi_addr=%s\n",
 		data.ConnectorName, data.FailMode, data.APIAddr)))
-	return fmt.Sprintf("%s sha256=%s fail_mode=%s\n", derivedHookHeader, hex.EncodeToString(sum[:]), data.FailMode)
+	return fmt.Sprintf("%s sha256=%s\n", derivedHookHeader, hex.EncodeToString(sum[:]))
 }
 
 // withDerivedHeader inserts the derived-from line after the shebang and the
@@ -60,6 +67,22 @@ func withDerivedHeader(script []byte, data templateData) []byte {
 	return append(out, script[at:]...)
 }
 
+// hostHookPrivilegedShebang starts a host hook with `bash -p`, as the
+// sandbox renders are (sandboxHookShebang): with the real and effective ids
+// equal, privileged mode only stops bash from reading BASH_ENV and ENV,
+// importing exported functions and taking SHELLOPTS, BASHOPTS, CDPATH and
+// GLOBIGNORE from the agent's environment, any of which could turn the hook
+// off (review 2 of sandbox-visibility:GAP-0028). Every connector runs the
+// hook by its path, so the kernel passes -p. Secure Client renders keep
+// their contract.
+func hostHookPrivilegedShebang(script []byte) []byte {
+	const plain = "#!/bin/bash\n"
+	if !bytes.HasPrefix(script, []byte(plain)) {
+		return script
+	}
+	return append([]byte("#!/bin/bash -p\n"), script[len(plain):]...)
+}
+
 // renderedHookFile is one generated hook-directory file, rendered in memory.
 type renderedHookFile struct {
 	Name string
@@ -74,9 +97,22 @@ func renderHookTemplate(name string, data templateData) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read hook template %s: %w", name, err)
 	}
+	if data.Managed && !data.SecureClient && !data.Sandbox {
+		data.ManagedHTTPFailureSH = managedShellHTTPFailure
+	}
 	rendered, err := renderTemplate(string(content), data)
 	if err != nil {
 		return nil, fmt.Errorf("render hook %s: %w", name, err)
+	}
+	if !data.Managed && !data.Sandbox && !data.SecureClient && strings.HasSuffix(name, ".sh") && !strings.HasPrefix(name, "_") {
+		// Only a managed render may select the hook socket or managed fail mode.
+		// Clear agent-inherited markers before any per-user bootstrap branch;
+		// the managed and Secure Client render bytes stay unchanged.
+		lines := strings.SplitN(rendered, "\n", 3)
+		if len(lines) != 3 || !strings.HasPrefix(lines[1], hookSchemaVersionMarker) {
+			return nil, fmt.Errorf("render hook %s: missing schema marker", name)
+		}
+		rendered = lines[0] + "\n" + lines[1] + "\nunset DEFENSECLAW_MANAGED_HOOK DEFENSECLAW_HOOK_SOCKET DEFENSECLAW_HOOK_SOCKET_UID\n" + lines[2]
 	}
 	return []byte(rendered), nil
 }
@@ -100,6 +136,9 @@ func renderHookScriptSet(connectorData, sharedData templateData, extras []string
 		}
 		if i >= len(genericHookScripts) && !data.Managed && strings.HasSuffix(name, ".sh") && !strings.HasPrefix(name, "_") {
 			rendered = withDerivedHeader(rendered, data)
+		}
+		if !data.Sandbox && !data.SecureClient && strings.HasSuffix(name, ".sh") && !strings.HasPrefix(name, "_") {
+			rendered = hostHookPrivilegedShebang(rendered)
 		}
 		out = append(out, renderedHookFile{Name: name, Data: rendered})
 	}

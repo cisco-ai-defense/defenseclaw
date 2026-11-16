@@ -68,7 +68,7 @@ func mustEnrollment(t *testing.T, yaml string) Enrollment {
 
 // nativeProc is a native Claude Code session of uid.
 func nativeProc(pid, ppid int, ticks uint64, uid int, exe string) Proc {
-	return Proc{PID: pid, PPID: ppid, StartTicks: ticks, UID: uid, EUID: uid, Exe: exe, Host: true,
+	return Proc{PID: pid, PPID: ppid, StartTicks: ticks, UID: uid, EUID: uid, Exe: exe, Launch: exe, Host: true,
 		Cmdline: []string{exe}, Comm: "claude"}
 }
 
@@ -174,6 +174,16 @@ func selectorsOf(t *testing.T, p Policy) [][]tpSelector {
 		out = append(out, hook.Selectors)
 	}
 	return out
+}
+
+func hookCount(p Policy, name string) int {
+	n := 0
+	for _, hook := range p.tp.Spec.LsmHooks {
+		if hook.Hook == name {
+			n++
+		}
+	}
+	return n
 }
 
 func hasBinary(p Policy, want string) bool {

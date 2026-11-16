@@ -857,8 +857,9 @@ def test_cmd(
     skill_count = sum(1 for e in filtered if e.is_skill())
     mcp_count = sum(1 for e in filtered if e.is_mcp())
 
+    skip_notes = list(getattr(manifest, "notes", []) or []) if not filtered else []
     payload: dict[str, Any] = {
-        "ok": True,
+        "ok": not skip_notes,
         "source_id": source.id,
         "publisher": manifest.publisher,
         "schema_version": manifest.schema_version,
@@ -882,6 +883,9 @@ def test_cmd(
             })
         payload["entries"]["rows"] = rows
         payload["entries"]["truncated"] = len(filtered) > len(rows)
+
+    if skip_notes:
+        payload["skip_reasons"] = skip_notes
 
     if emit_json:
         _emit_json(payload)
@@ -908,6 +912,10 @@ def test_cmd(
         if len(filtered) > limit:
             ux.subhead(f"  … {len(filtered) - limit} more (raise --limit to see)")
     click.echo()
+    if skip_notes:
+        # GAP-1640: zero entries is not a successful fetch; say why.
+        ux.warn("Dry-run found no usable entries: " + "; ".join(skip_notes))
+        return
     ux.ok(
         f"Dry-run successful — run `defenseclaw registry sync {source.id}` "
         "to persist + scan + promote.",
@@ -1026,7 +1034,7 @@ def sync_cmd(  # noqa: PLR0913
         for r in reports:
             audit.log_action(
                 "registry-sync", r.source_id,
-                f"sync id={r.source_id} fetched={r.fetched} scanned={r.scanned} "
+                f"sync id={r.source_id} fetched={r.fetched} scanned={r.scanned} skipped={r.skipped} "
                 f"promoted_skills={r.promoted_skills} promoted_mcps={r.promoted_mcps} "
                 f"blocked={r.blocked} errors={len(r.errors)} promote={'off' if no_promote else 'on'}",
             )
@@ -1103,22 +1111,24 @@ def _print_sync_reports(reports: list[SyncReport]) -> None:
     # Size SOURCE to the longest id so later columns stay under their headers (GAP-2424).
     id_w = max([24] + [len(r.source_id) for r in reports])
     click.echo(
-        f"  {'SOURCE':<{id_w}} {'FETCHED':<8} {'SCANNED':<8} {'PROMOTED':<20} {'STATUS'}"
+        f"  {'SOURCE':<{id_w}} {'FETCHED':<8} {'SCANNED':<8} {'SKIPPED':<8} {'PROMOTED':<20} {'STATUS'}"
     )
     click.echo(
-        f"  {'-' * id_w} {'-' * 8} {'-' * 8} {'-' * 20} {'-' * 32}"
+        f"  {'-' * id_w} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 20} {'-' * 32}"
     )
     for r in reports:
         promoted = _promoted_label(r.promoted_skills, r.promoted_mcps)
-        status = "error" if not r.ok() else ("partial" if getattr(r, "partial", ()) else "ok")
+        status = "error" if not r.ok() else ("partial" if r.skipped or r.partial else "ok")
         click.echo(
-            f"  {r.source_id:<{id_w}} {r.fetched:<8} {r.scanned:<8} {promoted:<20} {status}"
+            f"  {r.source_id:<{id_w}} {r.fetched:<8} {r.scanned:<8} {r.skipped:<8} {promoted:<20} {status}"
         )
     for r in reports:
         for err in r.errors:
             click.echo(f"  {ux.dim('!')} {r.source_id}: {err}")
         for note in getattr(r, "partial", ()):
             click.echo(f"  {ux.dim('!')} {r.source_id}: {note}")
+        for reason in r.skip_reasons:
+            click.echo(f"  {ux.dim('!')} {r.source_id}: {reason}")
     click.echo()
 
 

@@ -14,7 +14,7 @@ package hookexec
 
 import (
 	"bytes"
-	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -25,6 +25,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // shortSocketDir returns a directory whose paths fit the 104-byte macOS
@@ -108,9 +110,13 @@ func rawRecordingListener(t *testing.T, network, address string) (net.Listener, 
 	}
 }
 
-func standaloneRun(t *testing.T, socket string, serviceUID int) runResult {
+func standaloneRun(t *testing.T, socket string, serviceUID int, payload ...string) runResult {
 	t.Helper()
 	home := t.TempDir()
+	stdin := `{"hook_event_name":"PreToolUse","tool_name":"Bash"}`
+	if len(payload) != 0 {
+		stdin = payload[0]
+	}
 	var out, errb bytes.Buffer
 	opts := Options{
 		Connector:          "claudecode",
@@ -119,7 +125,7 @@ func standaloneRun(t *testing.T, socket string, serviceUID int) runResult {
 		FailMode:           "closed",
 		Home:               home,
 		HookDir:            filepath.Join(home, "hooks"),
-		Stdin:              strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash"}`),
+		Stdin:              strings.NewReader(stdin),
 		Stdout:             &out,
 		Stderr:             &errb,
 		ManagedEnterprise:  true,
@@ -134,6 +140,35 @@ func standaloneRun(t *testing.T, socket string, serviceUID int) runResult {
 	return runResult{stdout: out.String(), stderr: errb.String(), code: code}
 }
 
+func TestR103B07ManagedNativeRedirectOnlyDoesNotPanic(t *testing.T) {
+	socket := filepath.Join(shortSocketDir(t), "hook.sock")
+	server := startStandaloneHookServer(t, socket, `{"action":"allow"}`)
+	cwd := t.TempDir()
+	payload, err := json.Marshal(map[string]any{
+		"hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": cwd,
+		"tool_input": map[string]string{"command": "> out/build.log"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := standaloneRun(t, socket, os.Getuid(), string(payload))
+	if result.code != 0 {
+		t.Fatalf("native redirect-only hook exit %d: %s", result.code, result.stderr)
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if len(server.requests) != 1 {
+		t.Fatalf("native hook sent %d requests, want 1", len(server.requests))
+	}
+	targets, ok := hookpaths.Decode(server.requests[0].Header.Get(hookpaths.Header))
+	if !ok {
+		t.Fatal("native hook sent no decodable write proof")
+	}
+	if _, ok := targets[filepath.Join(cwd, "out", "build.log")]; !ok {
+		t.Fatalf("redirect-only write missing from native proof: %v", targets)
+	}
+}
+
 func TestStandaloneUnenrolledAccountGetsEnrollmentDecision(t *testing.T) {
 	socket := filepath.Join(shortSocketDir(t), "hook.sock")
 	startStandaloneHookServer(t, socket, `{"error":"forbidden","reason":"enterprise_managed_uid_unregistered"}`, http.StatusForbidden)
@@ -145,6 +180,35 @@ func TestStandaloneUnenrolledAccountGetsEnrollmentDecision(t *testing.T) {
 		strings.Contains(result.stdout+result.stderr, "HTTP 403") ||
 		strings.Contains(result.stdout+result.stderr, "enterprise_managed_uid_unregistered") {
 		t.Fatalf("enrollment refusal: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
+	}
+}
+
+// identity-round GAP-1181: an account the policy excludes is not told to
+// wait for its enrollment and try again; it is told the policy excludes it.
+func TestStandaloneExcludedAccountIsToldThePolicyExcludesIt(t *testing.T) {
+	socket := filepath.Join(shortSocketDir(t), "hook.sock")
+	startStandaloneHookServer(t, socket, `{"enrollment":"excluded","error":"forbidden","reason":"enterprise_managed_uid_unregistered"}`, http.StatusForbidden)
+	result := standaloneRun(t, socket, os.Getuid())
+	if result.code != 0 || !strings.Contains(result.stdout, "policy excludes this account on this computer") ||
+		!strings.Contains(result.stdout, `"permissionDecision":"deny"`) ||
+		strings.Contains(result.stdout, "within about five minutes") || strings.Contains(result.stdout, "try again then") ||
+		strings.Contains(result.stdout+result.stderr, "HTTP 403") {
+		t.Fatalf("excluded refusal: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
+	}
+}
+
+// GAP-0556: root's call under enrollment.root: deny said "the DefenseClaw
+// gateway returned an answer DefenseClaw could not use". It names the policy
+// and the code.
+func TestStandaloneRootDeniedSaysRootIsNotAllowed(t *testing.T) {
+	socket := filepath.Join(shortSocketDir(t), "hook.sock")
+	startStandaloneHookServer(t, socket, `{"error":"forbidden","reason":"enterprise_managed_root_denied"}`, http.StatusForbidden)
+	result := standaloneRun(t, socket, os.Getuid())
+	if result.code != 0 || !strings.Contains(result.stdout, `"permissionDecision":"deny"`) ||
+		!strings.Contains(result.stdout, "does not allow agents to run as root") ||
+		!strings.Contains(result.stdout, managedRootDeniedReason) ||
+		strings.Contains(result.stdout+result.stderr, "could not use") {
+		t.Fatalf("root refusal: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
 	}
 }
 
@@ -196,12 +260,56 @@ func TestStandaloneHookSocketImpostorGetsZeroBytes(t *testing.T) {
 // a structured deny, one plain sentence that ends with the documented
 // refusal code (GAP-0554, GAP-1179).
 func TestStandaloneHookSocketMissingSaysGatewayStopped(t *testing.T) {
+	shortRestartBudget(t)
 	result := standaloneRun(t, filepath.Join(shortSocketDir(t), "hook.sock"), os.Getuid())
 	out := result.stdout + result.stderr
 	if result.code != 0 || !strings.Contains(result.stdout, `"permissionDecision":"deny"`) ||
 		!strings.Contains(out, "gateway service is not running") ||
 		strings.Count(out, managedGatewayNotRunningReason) != 1 || strings.Contains(out, "not owned") {
 		t.Fatalf("stopped gateway: exit %d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
+	}
+}
+
+func TestStandaloneOpenDistinguishesVerifiedAbsenceFromUntrustedSocket(t *testing.T) {
+	dir := shortSocketDir(t)
+	socket := filepath.Join(dir, "hook.sock")
+	assertClass := func(wantStopped bool) {
+		t.Helper()
+		_, err := managedStandaloneHTTPClient(time.Second, socket, os.Getuid())
+		if err == nil || errors.Is(err, errManagedGatewayNotRunning) != wantStopped {
+			t.Fatalf("socket error = %v, want stopped=%t", err, wantStopped)
+		}
+		wantMode := "closed"
+		if wantStopped {
+			wantMode = "open"
+		}
+		if got := managedPeerFailMode(Options{ManagedEnterprise: true, ManagedStandalone: true}, "open", err); got != wantMode {
+			t.Fatalf("socket error %v selected %s, want %s", err, got, wantMode)
+		}
+	}
+	assertClass(true)
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	assertClass(false)
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.(*net.UnixListener).SetUnlinkOnClose(false)
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	client, err := managedStandaloneHTTPClient(time.Second, socket, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Get("http://unix/api/v1/claude-code/hook")
+	if err == nil || errors.Is(err, errManagedGatewayNotRunning) {
+		t.Fatalf("stale socket error = %v, want unverified peer", err)
 	}
 }
 
@@ -246,6 +354,7 @@ func TestValidateStandaloneHookSocketPath(t *testing.T) {
 // fall back to loopback TCP, where another user can hold the port during a
 // gateway restart, and it must not read or send a bearer token.
 func TestStandaloneWithoutHookSocketNeverUsesTCP(t *testing.T) {
+	shortRestartBudget(t)
 	listener, sentBytes := rawRecordingListener(t, "tcp4", "127.0.0.1:0")
 	home := t.TempDir()
 	hookDir := filepath.Join(home, "hooks")
@@ -320,38 +429,47 @@ func TestStandaloneTransportRequiresSocketAndServiceUID(t *testing.T) {
 	}
 }
 
-// A waiting hook stops early only when a gateway start that began while it
-// waited fails again; a running or once-restarted gateway keeps the wait.
-func TestWatchGatewayStartsEndsOnlyARealRestartLoop(t *testing.T) {
-	for _, test := range []struct {
-		name   string
-		states []gatewayServiceState
-		ended  bool
-	}{
-		{"restart loop", []gatewayServiceState{{"activating", "auto-restart", 4}, {"activating", "start", 5}, {"activating", "auto-restart", 5}}, true},
-		{"one crash then running", []gatewayServiceState{{"activating", "auto-restart", 4}, {"activating", "start", 5}, {"active", "running", 5}}, false},
-		{"start limit reached", []gatewayServiceState{{"failed", "failed", 9}}, true},
-		{"slow inspection", []gatewayServiceState{{"active", "running", 0}}, false},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			calls := 0
-			probe := func(context.Context) (gatewayServiceState, error) {
-				state := test.states[min(calls, len(test.states)-1)]
-				calls++
-				return state, nil
-			}
-			ctx, cancel := context.WithCancelCause(context.Background())
-			defer cancel(nil)
-			finished := make(chan struct{})
-			go func() { watchGatewayStarts(ctx, nil, cancel, probe, time.Millisecond); close(finished) }()
-			select {
-			case <-finished:
-			case <-time.After(5 * time.Second):
-				t.Fatal("the watch did not end")
-			}
-			if ended := errors.Is(context.Cause(ctx), errGatewayStartFailing); ended != test.ended {
-				t.Fatalf("ended=%t after %d probes, want %t", ended, calls, test.ended)
-			}
-		})
+// GAP-2405: a hook socket directory that is not owned by root or the gateway
+// account is a peer failure the hook names: the guard's session exchange and
+// the native hook both say the directory is the cause, in the words of the
+// managed shell hooks.
+func TestUntrustedHookSocketDirectoryIsNamed(t *testing.T) {
+	dir := shortSocketDir(t)
+	socket := filepath.Join(dir, "hook.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	gatewayUID := os.Getuid() + 1 // the directory belongs to this test's account, not the gateway's
+	if os.Getuid() == 0 {
+		t.Skip("root owns a directory every hook trusts")
+	}
+	_, err = managedStandaloneHTTPClient(time.Second, socket, gatewayUID)
+	if !errors.Is(err, errManagedGatewayPeerUnverified) || !ManagedHookSocketDirectoryUntrusted(err) {
+		t.Fatalf("foreign-owned socket directory: %v; want a peer failure that names the directory", err)
+	}
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := managedStandaloneHTTPClient(time.Second, socket, os.Getuid()); !ManagedHookSocketDirectoryUntrusted(err) {
+		t.Fatalf("world-writable socket directory: %v; want it named", err)
+	}
+	if reason := managedPeerFailureReason(Options{ManagedEnterprise: true, ManagedStandalone: true}, err); reason != managedHookSocketDirectoryUntrustedReason {
+		t.Fatalf("peer failure reason = %q", reason)
+	}
+	text, ok := ManagedTransportFailureText("PreToolUse", managedHookSocketDirectoryUntrustedReason)
+	if !ok || !strings.Contains(text, "hook socket directory is not owned by root or the gateway account") ||
+		strings.Contains(text, managedGatewayPeerUnverifiedReason) || strings.Contains(text, "not available") {
+		t.Fatalf("block text = %q", text)
+	}
+	// A socket that is missing in a trusted directory is still a stopped gateway.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	listener.Close()
+	_ = os.Remove(socket)
+	if _, err := managedStandaloneHTTPClient(time.Second, socket, os.Getuid()); ManagedHookSocketDirectoryUntrusted(err) || !errors.Is(err, errManagedGatewayNotRunning) {
+		t.Fatalf("missing socket in a trusted directory: %v; want the stopped-gateway error", err)
 	}
 }

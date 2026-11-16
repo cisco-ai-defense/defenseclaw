@@ -28,6 +28,34 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
+func TestEnrolledPerUserRowReportsOnlyExplicitlyBelowFloorSurface(t *testing.T) {
+	account := unixidentity.Account{Name: "alice", UID: 1001}
+	for _, tc := range []struct {
+		name, version string
+		wantReport    bool
+	}{
+		{name: "old Devin Desktop engine", version: "3000.1.0", wantReport: true},
+		{name: "unknown engine version", version: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			admission := admitSurfaces("devin", connector.UnverifiedVersionsReport, []connector.AgentSurface{{
+				Surface: connector.HostSurfaceDesktop, Host: "devin-desktop", EngineVersion: tc.version,
+			}})
+			got := unixRejectedSurfaces(account, "devin", false, true, admission)
+			if !tc.wantReport {
+				if len(got) != 0 {
+					t.Fatalf("unknown surface beside enrolled CLI was reported as unprotected: %+v", got)
+				}
+				return
+			}
+			if len(got) != 1 || got[0].Code != UnprotectedCodeSurfaceUnverified ||
+				got[0].Version != tc.version || got[0].Refusal != "" {
+				t.Fatalf("old surface beside enrolled CLI = %+v, want one non-refusal warning", got)
+			}
+		})
+	}
+}
+
 // trustedTestDir returns a directory whose ancestors are not
 // world-writable (t.TempDir() lives under /tmp on Linux and under the
 // /var symlink on macOS, which the home checks rightly refuse).
@@ -215,6 +243,118 @@ func TestEnumerateUnixFiltersAndAutoEnrolls(t *testing.T) {
 		if !found {
 			t.Errorf("expected a skip reason starting %q in %v", needle, report.Skipped)
 		}
+	}
+}
+
+func TestEnumerateUnixKiroChecksEachInstalledSurface(t *testing.T) {
+	root := trustedTestDir(t)
+	homes := filepath.Join(root, "home")
+	if err := os.MkdirAll(homes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uid, gid := os.Getuid(), os.Getgid()
+	for _, tc := range []struct {
+		name, cli, ide, wantRow string
+		wantUnprotected         string
+	}{
+		{name: "old CLI alone", cli: "2.26.1", wantUnprotected: "2.26.1"},
+		{name: "old CLI with supported IDE", cli: "2.26.1", ide: "1.0.182", wantRow: "1.0.182" + KiroIDEVersionSuffix, wantUnprotected: "2.26.1"},
+		{name: "supported CLI", cli: "2.27.1", wantRow: "2.27.1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := makeHome(t, homes, strings.ReplaceAll(tc.name, " ", "-"))
+			resolver := &fakeResolver{
+				accounts: map[string]unixidentity.Account{"alice": {Name: "alice", UID: uid, GID: gid, Home: home, Shell: "/bin/bash"}},
+				listed:   []string{"alice"},
+			}
+			opts := UnixEnumerateOptions{
+				Resolver: resolver, HomeRoots: []string{homes}, UIDMin: uid, UIDMax: uid,
+				Discover: func(context.Context, unixidentity.Account, []string) (map[string]string, map[string]string, error) {
+					versions := map[string]string{"kiro": tc.cli}
+					if tc.ide != "" {
+						versions[KiroIDEDiscoveryKey] = tc.ide
+					}
+					return versions, nil, nil
+				},
+			}
+			manifest, report, err := EnumerateUnix(context.Background(), enumeratorConfig("kiro"), connector.NewDefaultRegistry(), opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantRow == "" {
+				if len(manifest.Targets) != 0 || report.New != 0 {
+					t.Fatalf("uninstallable Kiro row published: %+v (report %+v)", manifest.Targets, report)
+				}
+			} else if len(manifest.Targets) != 1 || manifest.Targets[0].AgentVersion != tc.wantRow || !manifest.Targets[0].IsEnabled() {
+				t.Fatalf("Kiro rows = %+v, want enabled at %s", manifest.Targets, tc.wantRow)
+			}
+			if tc.wantUnprotected == "" {
+				if len(report.Unprotected) != 0 {
+					t.Fatalf("supported Kiro reported unprotected: %+v", report.Unprotected)
+				}
+			} else if len(report.Unprotected) != 1 || report.Unprotected[0].Version != tc.wantUnprotected ||
+				!strings.Contains(report.Unprotected[0].Reason, "is below 2.27.1") {
+				t.Fatalf("unprotected Kiro = %+v, want old CLI %s", report.Unprotected, tc.wantUnprotected)
+			}
+		})
+	}
+}
+
+func TestEnumerateUnixReportsEnrolledKiroBelowHookFloors(t *testing.T) {
+	for _, tc := range []struct {
+		name, version, code string
+	}{
+		{name: "CLI", version: "2.24.1", code: UnprotectedCodeKiroCLIBelowHookFloor},
+		{name: "IDE with no current version evidence", version: "1.0.181" + KiroIDEVersionSuffix, code: UnprotectedCodeKiroIDEBelowGlobalHooksFloor},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := trustedTestDir(t)
+			homes := filepath.Join(root, "home")
+			if err := os.MkdirAll(homes, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			home := makeHome(t, homes, "alice")
+			uid, gid := os.Getuid(), os.Getgid()
+			info, err := os.Stat(home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			enabled := true
+			manifestPath := filepath.Join(root, "targets.yaml")
+			previous, err := MarshalUnixTargetsManifest(Manifest{Version: 1, Targets: []ManifestTarget{{
+				User: "alice", UserHome: home, UID: intPointer(uid), GID: intPointer(gid), Connector: "kiro",
+				DataDir: filepath.Join(home, ".defenseclaw"), AgentVersion: tc.version, Enabled: &enabled, HomeInode: statInode(t, info),
+			}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(manifestPath, previous, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			opts := UnixEnumerateOptions{
+				ExistingManifestPath: manifestPath,
+				Resolver: &fakeResolver{accounts: map[string]unixidentity.Account{
+					"alice": {Name: "alice", UID: uid, GID: gid, Home: home, Shell: "/bin/bash"},
+				}, listed: []string{"alice"}},
+				HomeRoots: []string{homes}, UIDMin: uid, UIDMax: uid,
+				Discover: func(context.Context, unixidentity.Account, []string) (map[string]string, map[string]string, error) {
+					if tc.name == "CLI" {
+						return map[string]string{"kiro": "2.24.1"}, nil, nil
+					}
+					return nil, nil, nil
+				},
+			}
+			manifest, report, err := EnumerateUnix(context.Background(), enumeratorConfig("kiro"), connector.NewDefaultRegistry(), opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(manifest.Targets) != 1 || manifest.Targets[0].AgentVersion != tc.version {
+				t.Fatalf("earlier enrollment was lost: %+v", manifest.Targets)
+			}
+			if len(report.Unprotected) != 1 || report.Unprotected[0].Code != tc.code {
+				t.Fatalf("grandfathered unhooked %s is not uncovered: %+v", tc.name, report.Unprotected)
+			}
+		})
 	}
 }
 
@@ -502,6 +642,39 @@ func TestEnumerateUnixMachinePolicyConnectorsNeedDenyForRows(t *testing.T) {
 	}
 }
 
+// A machine-policy connector can have an unprotected install and no
+// manifest target: under unenrolled_users: deny an install whose version
+// cannot be read gets no row. Status then has only the unprotected row for
+// it (enterprisestatus.BuildConnectors).
+func TestEnumerateUnixMachinePolicyUnprotectedInstallWithoutRow(t *testing.T) {
+	root := trustedTestDir(t)
+	homes := filepath.Join(root, "home")
+	if err := os.MkdirAll(homes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uid, gid := os.Getuid(), os.Getgid()
+	alice := makeHome(t, homes, "alice")
+	cfg := enumeratorConfig("codex")
+	cfg.Enterprise.Enrollment.UnenrolledUsers = config.EnterpriseUnenrolledDeny
+	opts := UnixEnumerateOptions{
+		Resolver: &fakeResolver{
+			accounts: map[string]unixidentity.Account{"alice": {Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"}},
+			listed:   []string{"alice"},
+		},
+		HomeRoots: []string{homes}, UIDMin: uid, UIDMax: uid + 1, MachinePolicyConnectors: []string{"codex"},
+		Discover: func(context.Context, unixidentity.Account, []string) (map[string]string, map[string]string, error) {
+			return nil, map[string]string{"codex": UnixAgentUnversionedReasonPrefix + "codex"}, nil
+		},
+	}
+	manifest, report, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Targets) != 0 || len(report.Unprotected) != 1 || report.Unprotected[0].Connector != "codex" {
+		t.Fatalf("rows = %+v, unprotected = %+v", manifest.Targets, report.Unprotected)
+	}
+}
+
 func TestWriteUnixTargetsManifestAtomicIsByteStable(t *testing.T) {
 	root := trustedTestDir(t)
 	current := uint32(os.Getuid())
@@ -696,7 +869,7 @@ func TestEnumerateUnixPendingHomeKeepsTheEnrolledInode(t *testing.T) {
 	manifestPath := filepath.Join(root, "targets.yaml")
 	previous := Manifest{Version: 1, Targets: []ManifestTarget{{
 		User: "alice", UserHome: alice, UID: intPointer(uid), GID: intPointer(gid), Connector: "opencode",
-		DataDir: filepath.Join(alice, ".defenseclaw"), AgentVersion: "1.0.0", Enabled: &enabled, HomeInode: 555,
+		DataDir: filepath.Join(alice, ".defenseclaw"), AgentVersion: "2.1.4", Enabled: &enabled, HomeInode: 555,
 	}}}
 	data, _ := MarshalUnixTargetsManifest(previous)
 	if err := os.WriteFile(manifestPath, data, 0o600); err != nil {
@@ -717,7 +890,7 @@ func TestEnumerateUnixPendingHomeKeepsTheEnrolledInode(t *testing.T) {
 	opts := UnixEnumerateOptions{
 		ExistingManifestPath: manifestPath, Resolver: resolver, HomeRoots: []string{homes}, UIDMin: uid, UIDMax: uid + 1,
 		CheckHome:      func(home string, _ int) HomeCheck { return state[home] },
-		MachineVersion: func(string) string { return "1.0.0" },
+		MachineVersion: func(string) string { return "2.1.4" },
 		Logger:         func(_, reason string) { logs = append(logs, reason) },
 	}
 	cfg := enumeratorConfig("opencode")
@@ -729,7 +902,7 @@ func TestEnumerateUnixPendingHomeKeepsTheEnrolledInode(t *testing.T) {
 	for _, target := range manifest.Targets {
 		rows[target.User] = target
 	}
-	if got := rows["alice"]; !got.Deferred || got.HomeInode != 555 || got.AgentVersion != "1.0.0" || report.Revoked != 0 {
+	if got := rows["alice"]; !got.Deferred || got.HomeInode != 555 || got.AgentVersion != "2.1.4" || report.Revoked != 0 {
 		t.Fatalf("a locked home must keep the enrolled row and inode: %+v report=%+v logs=%v", got, report, logs)
 	}
 	if got := rows["bob"]; !got.Deferred || got.HomeInode != 0 {
@@ -803,7 +976,7 @@ func TestEnumerateUnixDirectoryUIDsAreNotBoundByLoginDefs(t *testing.T) {
 			return map[string]int{"root": 0, "localhigh": 70000, "localuser": 1500}, nil
 		},
 		Discover: func(context.Context, unixidentity.Account, []string) (map[string]string, map[string]string, error) {
-			return map[string]string{"opencode": "1.0.0"}, nil, nil
+			return map[string]string{"opencode": "2.1.4"}, nil, nil
 		},
 	}
 	cfg := enumeratorConfig("opencode")
@@ -855,8 +1028,8 @@ func TestEnumerateUnixDirectoryOutageNeverRevokes(t *testing.T) {
 	manifestPath := filepath.Join(root, "targets.yaml")
 	uid := 1234401103
 	writeTestManifest(t, manifestPath,
-		ManifestTarget{User: "alice", UserHome: filepath.Join(homes, "alice"), UID: intPointer(uid), GID: intPointer(uid), Connector: "opencode", AgentVersion: "1.0.0", HomeInode: 42},
-		ManifestTarget{User: "carol", UserHome: filepath.Join(homes, "carol"), UID: intPointer(1500), GID: intPointer(1500), Connector: "opencode", AgentVersion: "1.0.0", HomeInode: 42},
+		ManifestTarget{User: "alice", UserHome: filepath.Join(homes, "alice"), UID: intPointer(uid), GID: intPointer(uid), Connector: "opencode", AgentVersion: "2.1.4", HomeInode: 42},
+		ManifestTarget{User: "carol", UserHome: filepath.Join(homes, "carol"), UID: intPointer(1500), GID: intPointer(1500), Connector: "opencode", AgentVersion: "2.1.4", HomeInode: 42},
 	)
 	state := &UnixEnumeratorState{Version: 1, Misses: map[string]int{}, Sources: map[string]string{"alice": unixSourceDirectory, "carol": unixSourceFiles}}
 	// The outage: only local accounts answer; alice and the deleted local
@@ -919,8 +1092,8 @@ func TestEnumerateUnixGroupFilterRevocationUsesMissCounting(t *testing.T) {
 		groupNames: map[int]string{5001: "ai-devs", 6000: "contractors"},
 	}
 	writeTestManifest(t, manifestPath,
-		ManifestTarget{User: "dev", UserHome: filepath.Join(homes, "dev"), UID: intPointer(2001), GID: intPointer(2001), Connector: "opencode", AgentVersion: "1.0.0", HomeInode: 42},
-		ManifestTarget{User: "contractor", UserHome: filepath.Join(homes, "contractor"), UID: intPointer(2002), GID: intPointer(2002), Connector: "opencode", AgentVersion: "1.0.0", HomeInode: 42},
+		ManifestTarget{User: "dev", UserHome: filepath.Join(homes, "dev"), UID: intPointer(2001), GID: intPointer(2001), Connector: "opencode", AgentVersion: "2.1.4", HomeInode: 42},
+		ManifestTarget{User: "contractor", UserHome: filepath.Join(homes, "contractor"), UID: intPointer(2002), GID: intPointer(2002), Connector: "opencode", AgentVersion: "2.1.4", HomeInode: 42},
 	)
 	cfg := enumeratorConfig("opencode")
 	cfg.Enterprise.Enrollment.IncludeGroups = []string{"ai-devs"}
@@ -959,7 +1132,7 @@ func TestEnumerateUnixExcludeAndExemptAcceptUIDs(t *testing.T) {
 	opts := UnixEnumerateOptions{
 		Resolver: resolver, HomeRoots: []string{homes}, UIDMin: 1000, UIDMax: 60000, CheckHome: availableHome,
 		Discover: func(context.Context, unixidentity.Account, []string) (map[string]string, map[string]string, error) {
-			return map[string]string{"opencode": "1.0.0"}, nil, nil
+			return map[string]string{"opencode": "2.1.4"}, nil, nil
 		},
 	}
 	manifest, report, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
@@ -1003,8 +1176,8 @@ func TestEnumerateUnixRevokesADeletedLocalAccountThatACachedLookupStillResolves(
 	homes := filepath.Join(root, "Users")
 	manifestPath := filepath.Join(root, "targets.yaml")
 	writeTestManifest(t, manifestPath,
-		ManifestTarget{User: "bob", UserHome: filepath.Join(homes, "bob"), UID: intPointer(505), GID: intPointer(20), Connector: "opencode", AgentVersion: "1.0.0", HomeInode: 42},
-		ManifestTarget{User: "alice", UserHome: filepath.Join(homes, "alice"), UID: intPointer(502), GID: intPointer(20), Connector: "opencode", AgentVersion: "1.0.0", HomeInode: 42},
+		ManifestTarget{User: "bob", UserHome: filepath.Join(homes, "bob"), UID: intPointer(505), GID: intPointer(20), Connector: "opencode", AgentVersion: "2.1.4", HomeInode: 42},
+		ManifestTarget{User: "alice", UserHome: filepath.Join(homes, "alice"), UID: intPointer(502), GID: intPointer(20), Connector: "opencode", AgentVersion: "2.1.4", HomeInode: 42},
 	)
 	state := &UnixEnumeratorState{Version: 1, Misses: map[string]int{}, Sources: map[string]string{"bob": unixSourceFiles, "alice": unixSourceFiles}}
 	// The lookup cache still answers for bob; the local node lists only
@@ -1057,7 +1230,7 @@ func TestEnumerateUnixKeepsADirectoryAccountAbsentFromTheLocalDatabase(t *testin
 	manifestPath := filepath.Join(root, "targets.yaml")
 	uid := 1234401103
 	writeTestManifest(t, manifestPath,
-		ManifestTarget{User: "alice", UserHome: filepath.Join(homes, "alice"), UID: intPointer(uid), GID: intPointer(uid), Connector: "opencode", AgentVersion: "1.0.0", HomeInode: 42},
+		ManifestTarget{User: "alice", UserHome: filepath.Join(homes, "alice"), UID: intPointer(uid), GID: intPointer(uid), Connector: "opencode", AgentVersion: "2.1.4", HomeInode: 42},
 	)
 	state := &UnixEnumeratorState{Version: 1, Misses: map[string]int{}, Sources: map[string]string{"alice": unixSourceDirectory}}
 	resolver := &fakeResolver{accounts: map[string]unixidentity.Account{
@@ -1089,7 +1262,7 @@ func TestRevokeGoneUnixTargetsRemovesOnlyDefinitivelyDeletedAccounts(t *testing.
 	root := t.TempDir()
 	manifestPath := filepath.Join(root, "targets.yaml")
 	row := func(user string, uid int, conn string) ManifestTarget {
-		return ManifestTarget{User: user, UserHome: "/Users/" + user, UID: intPointer(uid), GID: intPointer(20), Connector: conn, AgentVersion: "1.0.0", HomeInode: 42}
+		return ManifestTarget{User: user, UserHome: "/Users/" + user, UID: intPointer(uid), GID: intPointer(20), Connector: conn, AgentVersion: "2.1.4", HomeInode: 42}
 	}
 	writeTestManifest(t, manifestPath,
 		row("carol", 1500, "opencode"), row("carol", 1500, "amp"), // deleted local account
@@ -1203,7 +1376,7 @@ func TestEnumerateUnixReissuesTheRowOfAnAccountThatReturnsWithAnotherUID(t *test
 	manifestPath := filepath.Join(root, "targets.yaml")
 	newUID := 1234401103
 	writeTestManifest(t, manifestPath,
-		ManifestTarget{User: "alice", UserHome: filepath.Join(homes, "alice"), UID: intPointer(1500), GID: intPointer(1500), Connector: "opencode", AgentVersion: "1.0.0", HomeInode: 42},
+		ManifestTarget{User: "alice", UserHome: filepath.Join(homes, "alice"), UID: intPointer(1500), GID: intPointer(1500), Connector: "opencode", AgentVersion: "2.1.4", HomeInode: 42},
 	)
 	state := &UnixEnumeratorState{Version: 1, Misses: map[string]int{}, Sources: map[string]string{"alice": unixSourceFiles}}
 	resolver := &fakeResolver{accounts: map[string]unixidentity.Account{
@@ -1213,7 +1386,7 @@ func TestEnumerateUnixReissuesTheRowOfAnAccountThatReturnsWithAnotherUID(t *test
 		ExistingManifestPath: manifestPath, Resolver: resolver, HomeRoots: []string{homes}, UIDMin: 1000, UIDMax: 60000,
 		CheckHome: availableHome, State: state,
 		Discover: func(context.Context, unixidentity.Account, []string) (map[string]string, map[string]string, error) {
-			return map[string]string{"opencode": "1.0.0"}, nil, nil
+			return map[string]string{"opencode": "2.1.4"}, nil, nil
 		},
 		LocalAccounts:       func() (map[string]int, error) { return map[string]int{"root": 0}, nil },
 		DirectoryConfigured: func() bool { return true },
@@ -1241,7 +1414,7 @@ func TestRevokeGoneUnixTargetsKeepsRowsItCannotProveDeleted(t *testing.T) {
 	root := t.TempDir()
 	manifestPath := filepath.Join(root, "targets.yaml")
 	row := func(user string, uid int) ManifestTarget {
-		return ManifestTarget{User: user, UserHome: "/Users/" + user, UID: intPointer(uid), GID: intPointer(20), Connector: "opencode", AgentVersion: "1.0.0", HomeInode: 42}
+		return ManifestTarget{User: user, UserHome: "/Users/" + user, UID: intPointer(uid), GID: intPointer(20), Connector: "opencode", AgentVersion: "2.1.4", HomeInode: 42}
 	}
 	writeTestManifest(t, manifestPath, row("u1", 1501), row("u2", 1502), row("u3", 1503))
 	state := &UnixEnumeratorState{Version: 1, Misses: map[string]int{}, Sources: map[string]string{"u1": unixSourceFiles, "u2": unixSourceFiles, "u3": unixSourceFiles}}
@@ -1308,5 +1481,262 @@ func TestEnumerateUnixKeepsRefusedSurfacesWhenDiscoveryFails(t *testing.T) {
 	}
 	if len(report.RefusedSurfaces) != 1 || report.RefusedSurfaces[0].User != "alice" || report.RefusedSurfaces[0].Connector != "claudecode" {
 		t.Fatalf("a failed discovery must keep the previous refusal: %+v", report.RefusedSurfaces)
+	}
+}
+
+func TestEnumerateUnixReportsIncompleteMachinePolicySurfaceScanOnFailure(t *testing.T) {
+	root := trustedTestDir(t)
+	homes := filepath.Join(root, "home")
+	if err := os.MkdirAll(homes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uid, gid := os.Getuid(), os.Getgid()
+	alice := makeHome(t, homes, "alice")
+	cfg := enumeratorConfig("claudecode")
+	cfg.Enterprise.Enrollment.UnverifiedVersions = config.EnterpriseUnverifiedRefuse
+	for _, useSurfaces := range []bool{false, true} {
+		name := "legacy"
+		if useSurfaces {
+			name = "surfaces"
+		}
+		t.Run(name, func(t *testing.T) {
+			opts := UnixEnumerateOptions{
+				Resolver: &fakeResolver{accounts: map[string]unixidentity.Account{
+					"alice": {Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"},
+				}, listed: []string{"alice"}},
+				HomeRoots: []string{homes}, UIDMin: uid, UIDMax: uid + 1,
+				MachinePolicyConnectors: []string{"claudecode"},
+			}
+			if useSurfaces {
+				opts.DiscoverSurfaces = func(context.Context, unixidentity.Account, []string) (UnixDiscovery, error) {
+					return UnixDiscovery{}, errors.New("worker failed")
+				}
+			} else {
+				opts.Discover = func(context.Context, unixidentity.Account, []string) (map[string]string, map[string]string, error) {
+					return nil, nil, errors.New("worker failed")
+				}
+			}
+			_, report, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, agent := range report.Unprotected {
+				if agent.User == "alice" && agent.Connector == "claudecode" && agent.Code == UnprotectedCodeInstallScanIncomplete {
+					return
+				}
+			}
+			t.Fatalf("failed machine-policy surface scan reported healthy: %+v", report.Unprotected)
+		})
+	}
+}
+
+func TestEnumerateUnixReportsIncompletePrivateScanOnPerUserDiscoveryFailure(t *testing.T) {
+	root := trustedTestDir(t)
+	homes := filepath.Join(root, "homes")
+	if err := os.MkdirAll(homes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	home := makeHome(t, homes, "alice")
+	uid, gid := os.Getuid(), os.Getgid()
+	resolver := &fakeResolver{accounts: map[string]unixidentity.Account{
+		"alice": {Name: "alice", UID: uid, GID: gid, Home: home, Shell: "/bin/bash"},
+	}, listed: []string{"alice"}}
+	for _, useSurfaces := range []bool{false, true} {
+		name := "versions"
+		if useSurfaces {
+			name = "surfaces"
+		}
+		t.Run(name, func(t *testing.T) {
+			opts := UnixEnumerateOptions{
+				Resolver: resolver, HomeRoots: []string{homes}, UIDMin: uid, UIDMax: uid + 1,
+			}
+			if useSurfaces {
+				opts.DiscoverSurfaces = func(context.Context, unixidentity.Account, []string) (UnixDiscovery, error) {
+					return UnixDiscovery{}, errors.New("worker failed")
+				}
+			} else {
+				opts.Discover = func(context.Context, unixidentity.Account, []string) (map[string]string, map[string]string, error) {
+					return nil, nil, errors.New("worker failed")
+				}
+			}
+			cfg := enumeratorConfig("claudecode", "codex", "copilot")
+			_, report, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seen := map[string]bool{}
+			for _, agent := range report.Unprotected {
+				if agent.Code == UnprotectedCodeInstallScanIncomplete {
+					seen[agent.Connector] = true
+				}
+			}
+			for _, name := range []string{"claudecode", "codex", "copilot"} {
+				if !seen[name] {
+					t.Fatalf("failed %s discovery hid %s private scan: %+v", name, name, report.Unprotected)
+				}
+			}
+		})
+	}
+}
+
+// A kiro-cli installed without a readable version is not known to be at its
+// hook floor. A supported Kiro IDE next to it gets the row, but must not hide
+// the CLI from status and verify: it is reported for a new row, a kept CLI
+// row and a kept IDE row alike, in a trusted and an untrusted home, and the
+// report survives the status record next to the IDE's own finding.
+func TestEnumerateUnixKiroIDEDoesNotHideAnUnversionedCLI(t *testing.T) {
+	for _, tc := range []struct {
+		name, previous, ide, cliReason string
+		untrusted                      bool
+		wantRow                        string
+		wantCLI                        bool
+		wantOther                      string // code of another Kiro finding that must survive
+	}{
+		{name: "new row", ide: "1.0.182", cliReason: "unversioned", wantRow: "1.0.182" + KiroIDEVersionSuffix, wantCLI: true},
+		{name: "kept CLI row", previous: "2.27.1", ide: "1.0.190", cliReason: "unversioned", wantRow: "1.0.190" + KiroIDEVersionSuffix, wantCLI: true},
+		{name: "kept IDE row", previous: "1.0.182" + KiroIDEVersionSuffix, ide: "1.0.182", cliReason: "unversioned", wantRow: "1.0.182" + KiroIDEVersionSuffix, wantCLI: true},
+		{name: "IDE below its floor", ide: "1.0.181", cliReason: "unversioned", wantCLI: true, wantOther: UnprotectedCodeKiroIDEBelowGlobalHooksFloor},
+		{name: "untrusted home", ide: "1.0.182", cliReason: "unversioned", untrusted: true, wantCLI: true, wantOther: UnprotectedCodeAgentUnprotected},
+		{name: "IDE only", ide: "1.0.182", cliReason: "no kiro installation found for this user", wantRow: "1.0.182" + KiroIDEVersionSuffix},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := trustedTestDir(t)
+			homes := filepath.Join(root, "home")
+			if err := os.MkdirAll(homes, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			home := makeHome(t, homes, "alice")
+			uid, gid := os.Getuid(), os.Getgid()
+			if tc.untrusted {
+				if err := os.Chmod(home, 0o775); err != nil {
+					t.Fatal(err)
+				}
+			}
+			launcher := filepath.Join(home, ".local", "bin", "kiro-cli")
+			reason := tc.cliReason
+			if reason == "unversioned" {
+				reason = UnixAgentUnversionedReasonPrefix + launcher
+			}
+			discover := func(context.Context, unixidentity.Account, []string) (map[string]string, map[string]string, error) {
+				return map[string]string{KiroIDEDiscoveryKey: tc.ide}, map[string]string{"kiro": reason}, nil
+			}
+			opts := UnixEnumerateOptions{
+				Resolver: &fakeResolver{accounts: map[string]unixidentity.Account{
+					"alice": {Name: "alice", UID: uid, GID: gid, Home: home, Shell: "/bin/bash"},
+				}, listed: []string{"alice"}},
+				HomeRoots: []string{homes}, UIDMin: uid, UIDMax: uid,
+				Discover: discover, DiscoverStatic: discover,
+			}
+			if tc.previous != "" {
+				info, err := os.Stat(home)
+				if err != nil {
+					t.Fatal(err)
+				}
+				enabled := true
+				opts.ExistingManifestPath = filepath.Join(root, "targets.yaml")
+				previous, err := MarshalUnixTargetsManifest(Manifest{Version: 1, Targets: []ManifestTarget{{
+					User: "alice", UserHome: home, UID: intPointer(uid), GID: intPointer(gid), Connector: "kiro",
+					DataDir: filepath.Join(home, ".defenseclaw"), AgentVersion: tc.previous, Enabled: &enabled, HomeInode: statInode(t, info),
+				}}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(opts.ExistingManifestPath, previous, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			manifest, report, err := EnumerateUnix(context.Background(), enumeratorConfig("kiro"), connector.NewDefaultRegistry(), opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantRow == "" {
+				if len(manifest.Targets) != 0 {
+					t.Fatalf("Kiro rows = %+v, want none", manifest.Targets)
+				}
+			} else if len(manifest.Targets) != 1 || manifest.Targets[0].AgentVersion != tc.wantRow || !manifest.Targets[0].IsEnabled() {
+				t.Fatalf("Kiro rows = %+v, want one enabled at %s", manifest.Targets, tc.wantRow)
+			}
+			data, err := MarshalUnprotectedAgents(report.Unprotected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			recorded, err := ParseUnprotectedAgents(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var cli, other int
+			for _, agent := range recorded {
+				switch {
+				case agent.Connector == "kiro" && agent.Code == UnprotectedCodeHookContractUnverified && strings.Contains(agent.Reason, launcher):
+					cli++
+				case agent.Connector == "kiro" && agent.Code == tc.wantOther:
+					other++
+				default:
+					t.Fatalf("unexpected finding %+v in %+v", agent, recorded)
+				}
+			}
+			if wantCLI := map[bool]int{true: 1}[tc.wantCLI]; cli != wantCLI {
+				t.Fatalf("unversioned kiro-cli findings = %d, want %d: %+v", cli, wantCLI, recorded)
+			}
+			if wantOther := map[bool]int{true: 1}[tc.wantOther != ""]; other != wantOther {
+				t.Fatalf("other Kiro findings = %d, want %d: %+v", other, wantOther, recorded)
+			}
+		})
+	}
+}
+
+// An include_groups name that does not resolve (a short AD name on an SSSD
+// host that wants the qualified one) leaves membership unknown: enrolled
+// rows are kept and no account gets a new row, as on Windows (GAP-2619).
+func TestEnumerateUnixUnresolvedIncludeGroupKeepsRowsAndAddsNone(t *testing.T) {
+	root := trustedTestDir(t)
+	homes := filepath.Join(root, "home")
+	manifestPath := filepath.Join(root, "manifest.json")
+	for _, name := range []string{"dev", "newdev", "other"} {
+		makeHome(t, homes, name)
+	}
+	resolver := &fakeResolver{
+		accounts: map[string]unixidentity.Account{
+			"dev":    {Name: "dev", UID: 2001, GID: 2001, Home: filepath.Join(homes, "dev"), Shell: "/bin/bash"},
+			"newdev": {Name: "newdev", UID: 2002, GID: 2002, Home: filepath.Join(homes, "newdev"), Shell: "/bin/bash"},
+			"other":  {Name: "other", UID: 2003, GID: 2003, Home: filepath.Join(homes, "other"), Shell: "/bin/bash"},
+		},
+		listed:     []string{"dev", "newdev", "other"},
+		groups:     map[string][]int{"dev": {5001}, "newdev": {5001}, "other": {}},
+		groupNames: map[int]string{5001: "ai-devs@corp.example"},
+	}
+	writeTestManifest(t, manifestPath,
+		ManifestTarget{User: "dev", UserHome: filepath.Join(homes, "dev"), UID: intPointer(2001), GID: intPointer(2001), Connector: "opencode", AgentVersion: "2.1.4", HomeInode: 42},
+	)
+	discover := func(context.Context, unixidentity.Account, []string) (map[string]string, map[string]string, error) {
+		return map[string]string{"opencode": "2.1.4"}, nil, nil
+	}
+	cfg := enumeratorConfig("opencode")
+	cfg.Enterprise.Enrollment.IncludeGroups = []string{"ai-devs"}
+	state := &UnixEnumeratorState{Version: 1, Misses: map[string]int{}}
+	opts := UnixEnumerateOptions{ExistingManifestPath: manifestPath, Resolver: resolver, HomeRoots: []string{homes}, UIDMin: 1000, UIDMax: 60000, CheckHome: availableHome, State: state, Discover: discover}
+	for cycle := 1; cycle <= UnixRevokeAfterMisses+1; cycle++ {
+		manifest, report, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		users := manifestUsers(manifest)
+		if !users["dev"] || users["newdev"] || users["other"] {
+			t.Fatalf("cycle %d: an unresolved include group must keep enrolled rows and add none: users=%v misses=%v", cycle, users, state.Misses)
+		}
+		if !strings.Contains(strings.Join(report.Skipped, "\n"), `include_groups "ai-devs" does not resolve`) {
+			t.Fatalf("cycle %d: the unresolved name must be reported: %v", cycle, report.Skipped)
+		}
+		writeTestManifest(t, manifestPath, manifest.Targets...)
+	}
+	// The qualified name resolves: members enroll, a non-member is revoked
+	// by the usual counted path (never enrolled here, so simply absent).
+	cfg.Enterprise.Enrollment.IncludeGroups = []string{"ai-devs@corp.example"}
+	manifest, _, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if users := manifestUsers(manifest); !users["dev"] || !users["newdev"] || users["other"] {
+		t.Fatalf("resolved include group: users=%v", users)
 	}
 }

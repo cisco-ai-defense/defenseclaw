@@ -23,7 +23,6 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -31,6 +30,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentprobe"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
@@ -56,7 +58,7 @@ const (
 // discovery searches, e.g. an MDM-managed /opt/agents.
 const TrustedBinPrefixesEnv = "DEFENSECLAW_TRUSTED_BIN_PREFIXES"
 
-var unixAgentSemver = regexp.MustCompile(`^[0-9]+\.[0-9]+(\.[0-9]+)?([.+-][0-9A-Za-z.+-]*)?$`)
+var unixAgentSemver = lazyregexp.New(`^[0-9]+\.[0-9]+(\.[0-9]+)?([.+-][0-9A-Za-z.+-]*)?$`)
 
 // unixAgentProbe describes where a connector's CLI leaves metadata.
 type unixAgentProbe struct {
@@ -68,10 +70,6 @@ type unixAgentProbe struct {
 	// sees homes read-only, and some agents (Hermes) refuse to print their
 	// version when they cannot take a lock in their state directory.
 	stateEnv string
-	// uvTool names a `uv tool install` environment (tool, distribution)
-	// whose dist-info directory carries the version, for Python CLIs that
-	// take too long to start for the --version probe.
-	uvTool [2]string
 	// stamp is a home-relative JSON install stamp that records the release
 	// ("displayVersion", else "baseVersion"), for CLIs that no longer print a
 	// version outside their own environment: a current Hermes refuses
@@ -88,12 +86,10 @@ var unixAgentProbes = map[string]unixAgentProbe{
 	"claudecode": {npmPackages: []string{"@anthropic-ai/claude-code"}, versionDirs: []string{".local/share/claude/versions"}, binaries: []string{"claude"}},
 	"cursor":     {versionDirs: []string{".local/share/cursor-agent/versions"}, binaries: []string{"cursor-agent", "agent"}},
 	"copilot":    {npmPackages: []string{"@github/copilot"}, binaries: []string{"copilot"}},
-	"opencode":   {npmPackages: []string{"opencode-ai"}, binaries: []string{"opencode"}},
+	"opencode":   {npmPackages: []string{"@opencode/cli"}, binaries: []string{"opencode"}},
 	"amp":        {npmPackages: []string{"@ampcode/cli"}, binaries: []string{"amp"}},
 	"devin":      {binaries: []string{"devin"}},
 	"hermes":     {binaries: []string{"hermes"}, stateEnv: "HERMES_HOME", stamp: ".hermes/hermes-agent/install-stamp.json"},
-	"openhands":  {binaries: []string{"openhands"}, uvTool: [2]string{"openhands", "openhands"}},
-	"omnigent":   {binaries: []string{"omnigent"}, uvTool: [2]string{"omnigent", "omnigent"}},
 	// "antigravity" is the IDE launcher, a desktop surface that is never
 	// run (DiscoverUnixAgentSurfaces).
 	"antigravity": {binaries: []string{"agy"}},
@@ -116,14 +112,22 @@ func UnixAgentProbeKnown(connector string) bool {
 // prefix elsewhere) belongs to whoever installed it, so discovery reads it
 // only when unixDiscoveryCandidateTrusted admits it.
 func userNodePrefixes(home string) []string {
-	prefixes := []string{
+	prefixes, _ := userNodePrefixesBounded(home, unixVersionedPrefixLimit)
+	return prefixes
+}
+
+// userNodePrefixesBounded is userNodePrefixes with at most limit installed
+// Node versions per version manager; truncated reports that a manager
+// holds more, so a caller that must see every copy can say so.
+func userNodePrefixesBounded(home string, limit int) (prefixes []string, truncated bool) {
+	prefixes = []string{
 		filepath.Join(home, ".npm-global"),
 		filepath.Join(home, ".local"),
 		filepath.Join(home, ".bun", "install", "global"),
 		filepath.Join(home, ".volta", "tools", "image"),
 	}
 	if !unixUserDiscoveryExtended() {
-		return prefixes
+		return prefixes, false
 	}
 	if prefix := userNPMRCPrefix(home); prefix != "" {
 		prefixes = append(prefixes, prefix)
@@ -133,12 +137,14 @@ func userNodePrefixes(home string) []string {
 		filepath.Join(home, ".config", "yarn", "global"),
 	)
 	for _, pattern := range userVersionedNodePrefixPatterns(home) {
-		prefixes = append(prefixes, newestVersionedDirs(pattern, unixVersionedPrefixLimit)...)
+		dirs, more := versionedDirs(pattern, limit)
+		prefixes = append(prefixes, dirs...)
+		truncated = truncated || more
 	}
 	return append(prefixes,
 		filepath.Join(home, ".linuxbrew"),
 		"/home/linuxbrew/.linuxbrew",
-	)
+	), truncated
 }
 
 // unixUserDiscoveryExtended reports whether discovery may look through the
@@ -172,9 +178,16 @@ func userVersionedNodePrefixPatterns(home string) []string {
 // first (the version is the first path element the wildcard matched,
 // "v22.11.0" or "22.11.0"), at most limit of them.
 func newestVersionedDirs(pattern string, limit int) []string {
+	dirs, _ := versionedDirs(pattern, limit)
+	return dirs
+}
+
+// versionedDirs is newestVersionedDirs that also reports whether more than
+// limit directories matched.
+func versionedDirs(pattern string, limit int) ([]string, bool) {
 	matches, err := filepath.Glob(pattern)
 	if err != nil || len(matches) == 0 {
-		return nil
+		return nil, false
 	}
 	star := strings.Index(pattern, "*")
 	versionOf := func(match string) string {
@@ -192,9 +205,9 @@ func newestVersionedDirs(pattern string, limit int) []string {
 	}
 	sort.SliceStable(dirs, func(i, j int) bool { return compareUnixVersions(versionOf(dirs[i]), versionOf(dirs[j])) > 0 })
 	if len(dirs) > limit {
-		dirs = dirs[:limit]
+		return dirs[:limit], true
 	}
-	return dirs
+	return dirs, false
 }
 
 // userNPMRCPrefix returns the npm global prefix set in ~/.npmrc
@@ -269,10 +282,41 @@ func nodeModulesPackage(prefix, pkg string) []string {
 // allowExec enables the `--version` fallback; callers set it only when
 // already running with the target user's credentials.
 func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allowExec bool) (string, string) {
+	version, reason, _ := DiscoverUnixAgentVersionFrom(ctx, home, connector, allowExec)
+	return version, reason
+}
+
+// DiscoverUnixAgentVersionFrom is DiscoverUnixAgentVersion plus the
+// executable whose `--version` run supplied the version. The source is empty
+// when the version came from package metadata, a stamp or a linked package,
+// or when there is no version: only a live run of one CLI proves that this CLI
+// is the copy the version describes (see carryVerifiedAgentVersions).
+func DiscoverUnixAgentVersionFrom(ctx context.Context, home, connector string, allowExec bool) (version, reason, source string) {
+	return discoverUnixAgentVersion(ctx, home, connector, allowExec, true)
+}
+
+// DiscoverUnixAgentVersionInAccountHome runs a version command with the
+// account's normal state location. Managed discovery uses this for Hermes so
+// a running version command has the same home as an ordinary session. If its
+// state is busy or read-only, retry with isolated state before trusting an
+// install stamp that may describe an older CLI.
+func DiscoverUnixAgentVersionInAccountHome(ctx context.Context, home, connector string) (string, string) {
+	version, reason, _ := DiscoverUnixAgentVersionInAccountHomeFrom(ctx, home, connector)
+	return version, reason
+}
+
+// DiscoverUnixAgentVersionInAccountHomeFrom is
+// DiscoverUnixAgentVersionInAccountHome plus the executable that supplied the
+// version (see DiscoverUnixAgentVersionFrom).
+func DiscoverUnixAgentVersionInAccountHomeFrom(ctx context.Context, home, connector string) (version, reason, source string) {
+	return discoverUnixAgentVersion(ctx, home, connector, true, false)
+}
+
+func discoverUnixAgentVersion(ctx context.Context, home, connector string, allowExec, isolateState bool) (version, reason, source string) {
 	connector = strings.ToLower(strings.TrimSpace(connector))
 	probe, ok := unixAgentProbes[connector]
 	if !ok {
-		return "", fmt.Sprintf("no version probe for connector %s", connector)
+		return "", fmt.Sprintf("no version probe for connector %s", connector), ""
 	}
 	home = filepath.Clean(home)
 	userPrefixes := userNodePrefixes(home)
@@ -280,41 +324,46 @@ func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 		prefixes := userPrefixes
 		if unixUserDiscoveryExtended() {
 			// Volta keeps each global package in its own image.
-			prefixes = append([]string{filepath.Join(home, ".volta", "tools", "image", "packages", filepath.FromSlash(pkg))}, userPrefixes...)
+			prefixes = append([]string{filepath.Join(home, ".volta", "tools", "image", "packages", filepath.FromSlash(pkg))}, prefixes...)
 		}
-		for _, prefix := range append(append([]string{}, prefixes...), machinePrefixes()...) {
+		allPrefixes := append(append([]string{}, prefixes...), machinePrefixes()...)
+		if connector == "claudecode" {
+			allPrefixes = append(allPrefixes, filepath.Join(home, ".claude", "local"))
+		}
+		for _, prefix := range allPrefixes {
 			for _, candidate := range nodeModulesPackage(prefix, pkg) {
 				if !unixDiscoveryCandidateTrusted(home, candidate) {
 					continue
 				}
 				if version, ok := readUnixPackageVersion(candidate, pkg, false); ok {
-					return version, ""
+					return version, "", ""
 				}
 			}
 		}
 	}
 	for _, dir := range probe.versionDirs {
 		if version := newestVersionDir(filepath.Join(home, filepath.FromSlash(dir))); version != "" {
-			return version, ""
+			return version, "", ""
 		}
 	}
-	if probe.uvTool[0] != "" {
-		if version := readUVToolVersion(home, probe.uvTool[0], probe.uvTool[1]); version != "" {
-			return version, ""
-		}
-	}
+	stampVersion := ""
 	if probe.stamp != "" {
 		stamp := filepath.Join(home, filepath.FromSlash(probe.stamp))
 		if unixDiscoveryCandidateTrusted(home, stamp) {
-			if version := readUnixInstallStampVersion(stamp); version != "" {
-				return version, ""
-			}
+			stampVersion = readUnixInstallStampVersion(stamp)
 		}
 	}
 	if !allowExec {
-		return "", fmt.Sprintf("no %s package metadata under this home", connector)
+		if stampVersion != "" {
+			return stampVersion, "", ""
+		}
+		return "", fmt.Sprintf("no %s package metadata under this home", connector), ""
 	}
 	installedAt, installedNote := "", ""
+	stateEnv := probe.stateEnv
+	if !isolateState {
+		stateEnv = ""
+	}
 	for index, binary := range probe.binaries {
 		for _, candidate := range unixAgentBinaryCandidates(home, binary) {
 			// A CLI outside the home that another account can change is
@@ -322,8 +371,21 @@ func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 			// every enrolled user on every enumeration cycle.
 			trusted := unixDiscoveryCandidateTrusted(home, candidate)
 			if trusted {
-				if version := execUnixAgentVersion(ctx, candidate, home, probe.stateEnv); version != "" {
-					return version, ""
+				if version := execUnixAgentVersion(ctx, candidate, home, stateEnv); version != "" {
+					return version, "", candidate
+				}
+				if !isolateState && probe.stateEnv != "" && ctx.Err() == nil {
+					if version := execUnixAgentVersion(ctx, candidate, home, probe.stateEnv); version != "" {
+						return version, "", candidate
+					}
+				}
+				// A user can install an npm CLI under an arbitrary prefix and
+				// link its bin entry into a searched directory. If the bounded
+				// live probe did not answer, use the linked package's version.
+				for _, pkg := range probe.npmPackages {
+					if version := linkedUnixPackageVersion(home, candidate, pkg); version != "" {
+						return version, "", ""
+					}
 				}
 			}
 			// Only the connector's own CLI name counts as evidence of an
@@ -336,17 +398,53 @@ func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 			}
 		}
 	}
-	if installedAt != "" {
-		return "", UnixAgentUnversionedReasonPrefix + installedAt + installedNote
+	// A managed Hermes CLI whose live version could not be read cannot use
+	// the stamp as contract evidence: the installed CLI may have changed
+	// since the installer last wrote it (GAP-1274). Metadata remains useful
+	// when there is no CLI to query and for the existing isolated callers.
+	if stampVersion != "" && (installedAt == "" || isolateState) {
+		return stampVersion, "", ""
 	}
-	return "", fmt.Sprintf("no %s installation found for this user", connector)
+	if installedAt != "" {
+		return "", UnixAgentUnversionedReasonPrefix + installedAt + installedNote, ""
+	}
+	return "", fmt.Sprintf("no %s installation found for this user", connector), ""
 }
 
-// UnixAgentUnversionedReasonPrefix starts the discovery reason for an agent
-// whose CLI exists for the user but printed no usable version. The
-// enumerator cannot select a hook contract for it, so it reports the agent
-// as unprotected instead of skipping it silently.
-const UnixAgentUnversionedReasonPrefix = "installed, but its version could not be read: "
+// linkedUnixPackageVersion accepts metadata only from the package whose bin
+// entry the discovered link actually names. It keeps custom npm prefixes in
+// the same bounded, per-user metadata path as the known prefixes.
+func linkedUnixPackageVersion(home, candidate, pkg string) string {
+	info, err := os.Lstat(candidate)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		return ""
+	}
+	target, err := filepath.EvalSymlinks(candidate)
+	if err != nil || filepath.Base(filepath.Dir(target)) != "bin" || !unixDiscoveryCandidateTrusted(home, target) {
+		return ""
+	}
+	packageDir := filepath.Dir(filepath.Dir(target))
+	metadata := filepath.Join(packageDir, "package.json")
+	if !unixDiscoveryCandidateTrusted(home, metadata) {
+		return ""
+	}
+	parsed, ok := readUnixPackageJSON(metadata, false)
+	if !ok || parsed.Name != pkg || !validUnixAgentVersion(strings.TrimSpace(parsed.Version)) {
+		return ""
+	}
+	var bins map[string]string
+	bin := ""
+	if json.Unmarshal(parsed.Bin, &bins) == nil {
+		bin = bins[filepath.Base(candidate)]
+	} else if filepath.Base(candidate) == filepath.Base(pkg) {
+		// npm also accepts a single bin path named after the package.
+		_ = json.Unmarshal(parsed.Bin, &bin)
+	}
+	if bin == "" || filepath.Clean(filepath.Join(packageDir, filepath.FromSlash(bin))) != target {
+		return ""
+	}
+	return strings.TrimSpace(parsed.Version)
+}
 
 // unixUntrustedCandidateNote follows the path of an installed CLI that
 // discovery did not run because an account other than root and the user can
@@ -442,6 +540,9 @@ func DiscoverUnixMachineAgentVersion(connector string) string {
 func unixAgentBinaryCandidates(home, binary string) []string {
 	dirs := unixAgentDiscoveryDirs(home)
 	candidates := make([]string, 0, len(dirs)+2)
+	if binary == "claude" {
+		candidates = append(candidates, filepath.Join(home, ".claude", "local", "claude"))
+	}
 	for _, dir := range dirs {
 		candidates = append(candidates, filepath.Join(dir, binary))
 	}
@@ -552,26 +653,6 @@ func unixMachineAgentBinDirs() []string {
 	return dirs
 }
 
-// readUVToolVersion reads the version of distribution dist from the default
-// `uv tool install` environment of tool under home (OpenHands needs about
-// 11 s to answer --version, beyond the probe timeout).
-func readUVToolVersion(home, tool, dist string) string {
-	pattern := filepath.Join(home, ".local", "share", "uv", "tools", tool, "lib", "python*", "site-packages", dist+"-*.dist-info")
-	matches, err := filepath.Glob(pattern)
-	if err != nil || len(matches) != 1 {
-		return ""
-	}
-	info, err := os.Lstat(matches[0])
-	if err != nil || !info.IsDir() {
-		return ""
-	}
-	version := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(matches[0]), dist+"-"), ".dist-info")
-	if !validUnixAgentVersion(version) {
-		return ""
-	}
-	return version
-}
-
 // readUnixInstallStampVersion reads the release from a bounded install
 // stamp: its displayVersion ("0.21.5+8332.g3d304a1", the form --version
 // prints) or, when that is not a usable version, its baseVersion.
@@ -605,34 +686,16 @@ func readUnixInstallStampVersion(path string) string {
 }
 
 type unixPackageJSON struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
+	Name    string          `json:"name"`
+	Version string          `json:"version"`
+	Bin     json.RawMessage `json:"bin"`
 }
 
 // readUnixPackageVersion reads a bounded package.json. When requireRoot is
 // set every path element must be root-owned and not group/other writable.
 func readUnixPackageVersion(path, wantName string, requireRoot bool) (string, bool) {
-	if requireRoot && !rootOwnedChain(path) {
-		return "", false
-	}
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() {
-		return "", false
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return "", false
-	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, unixAgentVersionMaxBytes+1))
-	if err != nil || len(data) > unixAgentVersionMaxBytes {
-		return "", false
-	}
-	var parsed unixPackageJSON
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		return "", false
-	}
-	if wantName != "" && strings.TrimSpace(parsed.Name) != wantName {
+	parsed, ok := readUnixPackageJSON(path, requireRoot)
+	if !ok || wantName != "" && strings.TrimSpace(parsed.Name) != wantName {
 		return "", false
 	}
 	version := strings.TrimSpace(parsed.Version)
@@ -640,6 +703,30 @@ func readUnixPackageVersion(path, wantName string, requireRoot bool) (string, bo
 		return "", false
 	}
 	return version, true
+}
+
+func readUnixPackageJSON(path string, requireRoot bool) (unixPackageJSON, bool) {
+	if requireRoot && !rootOwnedChain(path) {
+		return unixPackageJSON{}, false
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return unixPackageJSON{}, false
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return unixPackageJSON{}, false
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, unixAgentVersionMaxBytes+1))
+	if err != nil || len(data) > unixAgentVersionMaxBytes {
+		return unixPackageJSON{}, false
+	}
+	var parsed unixPackageJSON
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return unixPackageJSON{}, false
+	}
+	return parsed, true
 }
 
 // unixDiscoveryUID is the account discovery reads and runs agent files for:
@@ -693,17 +780,8 @@ var unixAdminGroupMember = func(uid, gid uint32) bool {
 	if err != nil {
 		return false
 	}
-	groups, err := unixidentity.AccountGroupIDs(context.Background(), account)
-	if err != nil {
-		return false
-	}
-	want := strconv.FormatUint(uint64(gid), 10)
-	for _, group := range groups {
-		if group == want {
-			return true
-		}
-	}
-	return false
+	member, err := unixidentity.AccountInGroup(context.Background(), account, int(gid))
+	return err == nil && member
 }
 
 // UnixPathTrustedFor is unixPathTrustedFor for callers outside this package.
@@ -813,28 +891,46 @@ func rootOwnedChain(path string) bool {
 	}
 }
 
-// newestVersionDir returns the highest semver-named child of dir.
-func newestVersionDir(dir string) string {
-	entries, err := os.ReadDir(dir)
+// unixVersionDirsMax bounds the entries read from one version folder.
+const unixVersionDirsMax = 4096
+
+// unixVersionDirs returns the semver-named children of dir, newest first,
+// from at most unixVersionDirsMax entries. complete is false when dir holds
+// more entries than are read (a newer version may be among those left out)
+// or could not be listed for another reason than being absent or out of
+// the account's reach.
+func unixVersionDirs(dir string) (versions []string, complete bool) {
+	entries, err := readUnixDirBounded(dir, unixVersionDirsMax)
 	if err != nil {
-		return ""
+		return nil, unixEntryAbsent(err)
 	}
-	var versions []string
+	complete = len(entries) <= unixVersionDirsMax
+	if !complete {
+		entries = entries[:unixVersionDirsMax]
+	}
 	for _, entry := range entries {
-		name := entry.Name()
-		if validUnixAgentVersion(name) {
+		if name := entry.Name(); validUnixAgentVersion(name) {
 			versions = append(versions, name)
 		}
-		if len(versions) > 256 {
-			break
-		}
 	}
-	if len(versions) == 0 {
-		return ""
-	}
-	sort.Slice(versions, func(i, j int) bool { return compareUnixVersions(versions[i], versions[j]) < 0 })
-	return versions[len(versions)-1]
+	sort.SliceStable(versions, func(i, j int) bool { return compareUnixVersions(versions[i], versions[j]) > 0 })
+	return versions, complete
 }
+
+// newestVersionDir returns the highest semver-named child of dir among the
+// entries unixVersionDirs reads (the CLI version probe, whose folders hold
+// a handful of versions; the Claude Desktop surfaces, which decide
+// coverage, use unixVersionDirs and report a folder over the bound).
+func newestVersionDir(dir string) string {
+	if versions, _ := unixVersionDirs(dir); len(versions) != 0 {
+		return versions[0]
+	}
+	return ""
+}
+
+// CompareUnixAgentVersions orders two agent versions (ValidUnixAgentVersion)
+// as the enumerator does: by major, minor and patch, then by text.
+func CompareUnixAgentVersions(a, b string) int { return compareUnixVersions(a, b) }
 
 func compareUnixVersions(a, b string) int {
 	parse := func(v string) [3]int {
@@ -913,12 +1009,25 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 // it.
 var unixAgentVersionAttemptTimeout = unixAgentVersionTimeout
 
+// unixAgentVersionRetryDelay is the wait before the first retry of a run that
+// ended without a version and without timing out; the second retry waits
+// twice as long. Tests shorten it.
+var unixAgentVersionRetryDelay = 250 * time.Millisecond
+
+// unixAgentVersionMaxAttempts is the most runs of one candidate per probe.
+const unixAgentVersionMaxAttempts = 3
+
 // execUnixAgentVersion runs candidate --version with a minimal environment
 // and a timeout. The caller must already run as the target user. A run that
 // times out is retried once at once: a cold start right after install, when
 // the enumerator probes every connector for every user together, can take
 // most of the timeout (agy took 4.85 s cold and 0.15 s warm), and the next
-// cycle is five minutes away.
+// cycle is five minutes away. A run that failed (exited with an error status,
+// was killed, or printed nothing at all, as an agent can while the host is
+// busy applying a policy change) is retried after a short wait, at most
+// unixAgentVersionMaxAttempts runs in all and two timeouts, so a readable
+// agent is not reported unverified for a moment's failure. A CLI that answers
+// with something that is not a version is not run again.
 func execUnixAgentVersion(ctx context.Context, candidate, home, stateEnv string) string {
 	info, err := os.Stat(candidate)
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
@@ -927,18 +1036,56 @@ func execUnixAgentVersion(ctx context.Context, candidate, home, stateEnv string)
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	for attempt := 0; attempt < 2; attempt++ {
-		version, timedOut := runUnixAgentVersion(ctx, candidate, home, stateEnv)
-		if version != "" || !timedOut || ctx.Err() != nil {
+	timeouts := 0
+	delay := unixAgentVersionRetryDelay
+	for attempt := 0; attempt < unixAgentVersionMaxAttempts; attempt++ {
+		version, run := runUnixAgentVersion(ctx, candidate, home, stateEnv)
+		if version != "" || ctx.Err() != nil {
 			return version
 		}
+		switch run {
+		case unixVersionRunTimedOut:
+			if timeouts++; timeouts >= 2 {
+				return ""
+			}
+			continue
+		case unixVersionRunFailed:
+		default:
+			// The CLI answered with something that is not a version: it
+			// will not answer differently a moment later.
+			return ""
+		}
+		if attempt+1 == unixAgentVersionMaxAttempts {
+			break
+		}
+		wait := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			wait.Stop()
+			return ""
+		case <-wait.C:
+		}
+		delay *= 2
 	}
 	return ""
 }
 
-// runUnixAgentVersion is one `--version` run; timedOut reports that it hit
-// its own timeout.
-func runUnixAgentVersion(parent context.Context, candidate, home, stateEnv string) (version string, timedOut bool) {
+// unixVersionRun is how one `--version` run ended when it gave no version.
+type unixVersionRun int
+
+const (
+	// unixVersionRunAnswered: the CLI ran and answered, with a version or
+	// with something else.
+	unixVersionRunAnswered unixVersionRun = iota
+	// unixVersionRunTimedOut: the run hit its own timeout.
+	unixVersionRunTimedOut
+	// unixVersionRunFailed: the run could not start, exited with an error
+	// status or was killed, or printed nothing.
+	unixVersionRunFailed
+)
+
+// runUnixAgentVersion is one `--version` run and how it ended.
+func runUnixAgentVersion(parent context.Context, candidate, home, stateEnv string) (version string, run unixVersionRun) {
 	ctx, cancel := context.WithTimeout(parent, unixAgentVersionAttemptTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, candidate, "--version")
@@ -954,10 +1101,13 @@ func runUnixAgentVersion(parent context.Context, candidate, home, stateEnv strin
 	if stateEnv != "" {
 		scratch, err := os.MkdirTemp("", "dc-agent-probe-")
 		if err != nil {
-			return "", false
+			return "", unixVersionRunFailed
 		}
 		defer os.RemoveAll(scratch)
 		cmd.Env = append(cmd.Env, stateEnv+"="+scratch, "TMPDIR="+scratch)
+		if stateEnv == "HERMES_HOME" {
+			cmd.Env = append(cmd.Env, agentprobe.EnvName+"="+agentprobe.Hermes)
+		}
 	}
 	out := &cappedBuffer{limit: unixAgentVersionOutput}
 	errOut := &cappedBuffer{limit: unixAgentVersionOutput}
@@ -965,13 +1115,26 @@ func runUnixAgentVersion(parent context.Context, candidate, home, stateEnv strin
 	// Some agents (Hermes) print their version on stderr when stdout is
 	// not a terminal; read it only when stdout names no version.
 	cmd.Stderr = errOut
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = time.Second
-	_ = cmd.Run()
+	// The apply worker can end during an interrupted transaction. Keep the
+	// version command tied to that worker so it cannot survive as an
+	// unaccounted-for launch after its parent process disappears.
+	runErr := processutil.RunTree(cmd)
 	first, _, _ := strings.Cut(out.buf.String(), "\n")
 	if version := ExtractUnixAgentVersion(first); version != "" {
-		return version, false
+		return version, unixVersionRunAnswered
 	}
 	first, _, _ = strings.Cut(errOut.buf.String(), "\n")
-	return ExtractUnixAgentVersion(first), errors.Is(ctx.Err(), context.DeadlineExceeded)
+	if version := ExtractUnixAgentVersion(first); version != "" {
+		return version, unixVersionRunAnswered
+	}
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return "", unixVersionRunTimedOut
+	case runErr != nil && !errors.Is(runErr, errUnixAgentVersionOutput):
+		return "", unixVersionRunFailed
+	case out.buf.Len() == 0 && errOut.buf.Len() == 0:
+		return "", unixVersionRunFailed
+	}
+	return "", unixVersionRunAnswered
 }

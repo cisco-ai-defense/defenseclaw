@@ -192,6 +192,24 @@ func (repo *ToolChainRepository) PreparePending(
 		return result, err
 	}
 
+	if !repo.store.secureClientSchema {
+		// The hook-call write group: concurrent calls' pending actions share
+		// one commit with their audit rows (r108 SWEEP-100). A conflict still
+		// commits the deletion of the original before it is reported.
+		var attempt ToolChainPreparePendingResult
+		var prepareErr error
+		err = repo.store.callGroupWrite(ctx, func(ctx context.Context, tx *sql.Tx) error {
+			attempt, prepareErr = repo.preparePendingTx(ctx, tx, input, now)
+			if prepareErr != nil && !errors.Is(prepareErr, ErrToolChainPendingConflict) {
+				return prepareErr
+			}
+			return nil
+		})
+		if err != nil {
+			return result, err
+		}
+		return attempt, prepareErr
+	}
 	var postCommitErr error
 	err = retryBusyObserved(ctx, "guardrail_chain_pending_prepare",
 		repo.store.sqliteBusyObservabilityV8(), func() error {
@@ -229,7 +247,7 @@ func (repo *ToolChainRepository) preparePendingTx(
 	input ToolChainPreparePendingInput,
 	now time.Time,
 ) (ToolChainPreparePendingResult, error) {
-	session, received, joined, err := loadToolChainEventSession(
+	session, received, joined, err := repo.loadToolChainEventSession(
 		ctx, tx, input.PreSemanticEventID, input.ConnectorInstanceID,
 		input.PreInputFingerprint,
 	)
@@ -262,7 +280,7 @@ func (repo *ToolChainRepository) preparePendingTx(
 		return ToolChainPreparePendingResult{}, err
 	}
 
-	existing, found, err := loadToolChainPending(
+	existing, found, err := repo.loadToolChainPending(
 		ctx, tx, input.ConnectorInstanceID, session, input.ToolInvocationDigest,
 	)
 	if err != nil {
@@ -297,8 +315,8 @@ func (repo *ToolChainRepository) preparePendingTx(
 	}
 
 	if _, err := txExecContextObserved(ctx, tx, "guardrail_chain_pending_prune_expired",
-		repo.store.sqliteBusyObservabilityV8(), `DELETE FROM guardrail_chain_pending_actions
-		WHERE expires_time_unix_nano<=?`, unixNano(now)); err != nil {
+		repo.store.sqliteBusyObservabilityV8(), repo.sql(`DELETE FROM guardrail_chain_pending_actions
+		WHERE expires_time_unix_nano<=?`), unixNano(now)); err != nil {
 		return ToolChainPreparePendingResult{}, err
 	}
 	if err := repo.makePendingCapacity(ctx, tx); err != nil {
@@ -306,7 +324,7 @@ func (repo *ToolChainRepository) preparePendingTx(
 	}
 	expires := now.Add(repo.pendingTTL)
 	_, err = txExecContextObserved(ctx, tx, "guardrail_chain_pending_insert",
-		repo.store.sqliteBusyObservabilityV8(), `INSERT INTO guardrail_chain_pending_actions (
+		repo.store.sqliteBusyObservabilityV8(), repo.sql(`INSERT INTO guardrail_chain_pending_actions (
 			connector_instance_id, tool_invocation_digest, session_value_digest,
 			pre_semantic_event_id, pre_input_fingerprint, projection_fingerprint,
 		ruleset_fingerprint, parse_status, detection_step_mask,
@@ -315,7 +333,7 @@ func (repo *ToolChainRepository) preparePendingTx(
 			prepared_time_unix_nano, expires_time_unix_nano
 			, sql_value_source_table_class, sql_value_source_resource_digest,
 			returned_credential_source
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		string(input.ConnectorInstanceID), input.ToolInvocationDigest, session,
 		string(input.PreSemanticEventID), input.PreInputFingerprint, projectionFP,
 		input.RulesetFingerprint, string(input.Projection.ParseStatus),
@@ -382,7 +400,7 @@ func (repo *ToolChainRepository) resolvePendingTx(
 	input ToolChainResolvePendingInput,
 	now time.Time,
 ) (ToolChainResolvePendingResult, error) {
-	session, joined, err := loadPendingEventSession(
+	session, joined, err := repo.loadPendingEventSession(
 		ctx, tx, input.TerminalSemanticEventID, input.ConnectorInstanceID,
 		input.TerminalInputFingerprint,
 	)
@@ -392,7 +410,7 @@ func (repo *ToolChainRepository) resolvePendingTx(
 	if !joined {
 		return ToolChainResolvePendingResult{Status: ToolChainPendingNoJoin}, nil
 	}
-	pending, found, err := loadToolChainPending(
+	pending, found, err := repo.loadToolChainPending(
 		ctx, tx, input.ConnectorInstanceID, session, input.ToolInvocationDigest,
 	)
 	if err != nil {
@@ -638,7 +656,7 @@ func (repo *ToolChainRepository) DiscardPendingForEventSession(
 				return err
 			}
 			defer tx.Rollback() //nolint:errcheck
-			session, cutoff, joined, err := loadToolChainEventSession(
+			session, cutoff, joined, err := repo.loadToolChainEventSession(
 				ctx, tx, input.TerminalSemanticEventID,
 				input.ConnectorInstanceID, input.TerminalInputFingerprint,
 			)
@@ -659,7 +677,7 @@ func (repo *ToolChainRepository) DiscardPendingForEventSession(
 				result.Status = ToolChainPendingReplay
 				return tx.Commit()
 			}
-			boundary, found, err := loadToolChainPendingBoundary(
+			boundary, found, err := repo.loadToolChainPendingBoundary(
 				ctx, tx, input.ConnectorInstanceID, session,
 			)
 			if err != nil {
@@ -677,8 +695,8 @@ func (repo *ToolChainRepository) DiscardPendingForEventSession(
 					if _, err := txExecContextObserved(
 						ctx, tx, "guardrail_chain_pending_boundary_delete_expired",
 						repo.store.sqliteBusyObservabilityV8(),
-						`DELETE FROM guardrail_chain_pending_boundaries
-						WHERE connector_instance_id=? AND session_value_digest=?`,
+						repo.sql(`DELETE FROM guardrail_chain_pending_boundaries
+						WHERE connector_instance_id=? AND session_value_digest=?`),
 						string(input.ConnectorInstanceID), session,
 					); err != nil {
 						return err
@@ -708,11 +726,11 @@ func (repo *ToolChainRepository) DiscardPendingForEventSession(
 				_, err = txExecContextObserved(
 					ctx, tx, "guardrail_chain_pending_boundary_update",
 					repo.store.sqliteBusyObservabilityV8(),
-					`UPDATE guardrail_chain_pending_boundaries
+					repo.sql(`UPDATE guardrail_chain_pending_boundaries
 					SET boundary_semantic_event_id=?, boundary_input_fingerprint=?,
 						cutoff_received_time_unix_nano=?, discard_time_unix_nano=?,
 						expires_time_unix_nano=?
-					WHERE connector_instance_id=? AND session_value_digest=?`,
+					WHERE connector_instance_id=? AND session_value_digest=?`),
 					string(input.TerminalSemanticEventID), input.TerminalInputFingerprint,
 					cutoff, unixNano(now), unixNano(expires),
 					string(input.ConnectorInstanceID), session,
@@ -721,12 +739,12 @@ func (repo *ToolChainRepository) DiscardPendingForEventSession(
 				_, err = txExecContextObserved(
 					ctx, tx, "guardrail_chain_pending_boundary_insert",
 					repo.store.sqliteBusyObservabilityV8(),
-					`INSERT INTO guardrail_chain_pending_boundaries (
+					repo.sql(`INSERT INTO guardrail_chain_pending_boundaries (
 						connector_instance_id, session_value_digest,
 						boundary_semantic_event_id, boundary_input_fingerprint,
 						cutoff_received_time_unix_nano, discard_time_unix_nano,
 						expires_time_unix_nano
-					) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+					) VALUES (?, ?, ?, ?, ?, ?, ?)`),
 					string(input.ConnectorInstanceID), session,
 					string(input.TerminalSemanticEventID), input.TerminalInputFingerprint,
 					cutoff, unixNano(now), unixNano(expires),
@@ -738,12 +756,12 @@ func (repo *ToolChainRepository) DiscardPendingForEventSession(
 			queryResult, err := txExecContextObserved(
 				ctx, tx, "guardrail_chain_pending_discard_session_delete",
 				repo.store.sqliteBusyObservabilityV8(),
-				`DELETE FROM guardrail_chain_pending_actions
+				repo.sql(`DELETE FROM guardrail_chain_pending_actions
 				WHERE connector_instance_id=? AND session_value_digest=?
 				AND pre_semantic_event_id IN (
 					SELECT semantic_event_id FROM correlation_events
 					WHERE received_time_unix_nano<=?
-				)`,
+				)`),
 				string(input.ConnectorInstanceID), session, cutoff,
 			)
 			if err != nil {
@@ -833,7 +851,7 @@ func (repo *ToolChainRepository) resetForTerminalEventSessionTx(
 	input ToolChainResetForTerminalEventSessionInput,
 	now time.Time,
 ) (ToolChainResetForTerminalEventSessionResult, error) {
-	session, cutoff, joined, err := loadToolChainEventSession(
+	session, cutoff, joined, err := repo.loadToolChainEventSession(
 		ctx, tx, input.TerminalSemanticEventID, input.ConnectorInstanceID,
 		input.TerminalInputFingerprint,
 	)
@@ -857,7 +875,7 @@ func (repo *ToolChainRepository) resetForTerminalEventSessionTx(
 		}, nil
 	}
 
-	existing, found, err := loadToolChainTerminalReset(
+	existing, found, err := repo.loadToolChainTerminalReset(
 		ctx, tx, input.ConnectorInstanceID, session,
 	)
 	if err != nil {
@@ -888,21 +906,21 @@ func (repo *ToolChainRepository) resetForTerminalEventSessionTx(
 	expires := now.Add(repo.maxHorizon)
 	if found {
 		_, err = txExecContextObserved(ctx, tx, "guardrail_chain_terminal_reset_update",
-			repo.store.sqliteBusyObservabilityV8(), `UPDATE guardrail_chain_terminal_resets
+			repo.store.sqliteBusyObservabilityV8(), repo.sql(`UPDATE guardrail_chain_terminal_resets
 			SET terminal_semantic_event_id=?, terminal_input_fingerprint=?,
 				cutoff_received_time_unix_nano=?, reset_time_unix_nano=?,
 				expires_time_unix_nano=?
-			WHERE connector_instance_id=? AND session_value_digest=?`,
+			WHERE connector_instance_id=? AND session_value_digest=?`),
 			string(input.TerminalSemanticEventID), input.TerminalInputFingerprint,
 			cutoff, unixNano(now), unixNano(expires),
 			string(input.ConnectorInstanceID), session)
 	} else {
 		_, err = txExecContextObserved(ctx, tx, "guardrail_chain_terminal_reset_insert",
-			repo.store.sqliteBusyObservabilityV8(), `INSERT INTO guardrail_chain_terminal_resets (
+			repo.store.sqliteBusyObservabilityV8(), repo.sql(`INSERT INTO guardrail_chain_terminal_resets (
 				connector_instance_id, session_value_digest, terminal_semantic_event_id,
 				terminal_input_fingerprint, cutoff_received_time_unix_nano,
 				reset_time_unix_nano, expires_time_unix_nano
-			) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			) VALUES (?, ?, ?, ?, ?, ?, ?)`),
 			string(input.ConnectorInstanceID), session,
 			string(input.TerminalSemanticEventID), input.TerminalInputFingerprint,
 			cutoff, unixNano(now), unixNano(expires))
@@ -913,12 +931,12 @@ func (repo *ToolChainRepository) resetForTerminalEventSessionTx(
 
 	pendingResult, err := txExecContextObserved(
 		ctx, tx, "guardrail_chain_terminal_reset_pending",
-		repo.store.sqliteBusyObservabilityV8(), `DELETE FROM guardrail_chain_pending_actions
+		repo.store.sqliteBusyObservabilityV8(), repo.sql(`DELETE FROM guardrail_chain_pending_actions
 		WHERE connector_instance_id=? AND session_value_digest=?
 		AND pre_semantic_event_id IN (
 			SELECT semantic_event_id FROM correlation_events
 			WHERE received_time_unix_nano<=?
-		)`,
+		)`),
 		string(input.ConnectorInstanceID), session, cutoff,
 	)
 	if err != nil {
@@ -930,9 +948,9 @@ func (repo *ToolChainRepository) resetForTerminalEventSessionTx(
 	}
 	eventResult, err := txExecContextObserved(
 		ctx, tx, "guardrail_chain_terminal_reset_events",
-		repo.store.sqliteBusyObservabilityV8(), `DELETE FROM guardrail_chain_events
+		repo.store.sqliteBusyObservabilityV8(), repo.sql(`DELETE FROM guardrail_chain_events
 		WHERE connector_instance_id=? AND session_value_digest=?
-		AND received_time_unix_nano<=?`,
+		AND received_time_unix_nano<=?`),
 		string(input.ConnectorInstanceID), session, cutoff,
 	)
 	if err != nil {
@@ -944,13 +962,13 @@ func (repo *ToolChainRepository) resetForTerminalEventSessionTx(
 	}
 	if _, err := txExecContextObserved(
 		ctx, tx, "guardrail_chain_terminal_reset_empty_partition",
-		repo.store.sqliteBusyObservabilityV8(), `DELETE FROM guardrail_chain_partitions
+		repo.store.sqliteBusyObservabilityV8(), repo.sql(`DELETE FROM guardrail_chain_partitions
 		WHERE connector_instance_id=? AND session_value_digest=?
 		AND NOT EXISTS (
 			SELECT 1 FROM guardrail_chain_events event
 			WHERE event.connector_instance_id=guardrail_chain_partitions.connector_instance_id
 			AND event.session_value_digest=guardrail_chain_partitions.session_value_digest
-		)`, string(input.ConnectorInstanceID), session,
+		)`), string(input.ConnectorInstanceID), session,
 	); err != nil {
 		return ToolChainResetForTerminalEventSessionResult{}, err
 	}
@@ -1221,20 +1239,20 @@ func (repo *ToolChainRepository) pendingNow() (time.Time, error) {
 	return now, nil
 }
 
-func loadPendingEventSession(
+func (repo *ToolChainRepository) loadPendingEventSession(
 	ctx context.Context,
 	tx *sql.Tx,
 	eventID SemanticEventID,
 	connectorID ConnectorInstanceID,
 	inputFingerprint string,
 ) (string, bool, error) {
-	session, _, joined, err := loadToolChainEventSession(
+	session, _, joined, err := repo.loadToolChainEventSession(
 		ctx, tx, eventID, connectorID, inputFingerprint,
 	)
 	return session, joined, err
 }
 
-func loadToolChainEventSession(
+func (repo *ToolChainRepository) loadToolChainEventSession(
 	ctx context.Context,
 	tx *sql.Tx,
 	eventID SemanticEventID,
@@ -1259,11 +1277,11 @@ func loadToolChainEventSession(
 		eventFP.String != inputFingerprint {
 		return "", 0, false, ErrToolChainIntegrity
 	}
-	session, joined, err := loadExactToolChainSession(ctx, tx, eventID, connectorID)
+	session, joined, err := repo.scopeDigest(ctx, tx, eventID, connectorID)
 	return session, received, joined, err
 }
 
-func loadToolChainPending(
+func (repo *ToolChainRepository) loadToolChainPending(
 	ctx context.Context,
 	tx *sql.Tx,
 	connectorID ConnectorInstanceID,
@@ -1272,7 +1290,7 @@ func loadToolChainPending(
 ) (persistedToolChainPending, bool, error) {
 	var pending persistedToolChainPending
 	var enforcementJoinDigests, enforcementOutputJoinDigests, valueJoinDigests string
-	err := tx.QueryRowContext(ctx, `SELECT connector_instance_id,
+	err := tx.QueryRowContext(ctx, repo.sql(`SELECT connector_instance_id,
 		tool_invocation_digest, session_value_digest, pre_semantic_event_id,
 		pre_input_fingerprint, projection_fingerprint, ruleset_fingerprint,
 		parse_status, detection_step_mask, enforcement_step_mask,
@@ -1283,7 +1301,7 @@ func loadToolChainPending(
 		returned_credential_source
 		FROM guardrail_chain_pending_actions
 		WHERE connector_instance_id=? AND session_value_digest=?
-		AND tool_invocation_digest=?`,
+		AND tool_invocation_digest=?`),
 		string(connectorID), sessionDigest, invocationDigest).Scan(
 		&pending.connector, &pending.invocation, &pending.session,
 		&pending.preEvent, &pending.preInput, &pending.projectionFP,
@@ -1319,19 +1337,19 @@ func loadToolChainPending(
 	return pending, true, nil
 }
 
-func loadToolChainTerminalReset(
+func (repo *ToolChainRepository) loadToolChainTerminalReset(
 	ctx context.Context,
 	tx *sql.Tx,
 	connectorID ConnectorInstanceID,
 	sessionDigest string,
 ) (persistedToolChainTerminalReset, bool, error) {
 	var reset persistedToolChainTerminalReset
-	err := tx.QueryRowContext(ctx, `SELECT connector_instance_id,
+	err := tx.QueryRowContext(ctx, repo.sql(`SELECT connector_instance_id,
 		session_value_digest, terminal_semantic_event_id,
 		terminal_input_fingerprint, cutoff_received_time_unix_nano,
 		reset_time_unix_nano, expires_time_unix_nano
 		FROM guardrail_chain_terminal_resets
-		WHERE connector_instance_id=? AND session_value_digest=?`,
+		WHERE connector_instance_id=? AND session_value_digest=?`),
 		string(connectorID), sessionDigest).Scan(
 		&reset.connector, &reset.session, &reset.terminalEvent,
 		&reset.terminalInput, &reset.cutoff, &reset.resetAt, &reset.expires,
@@ -1345,19 +1363,19 @@ func loadToolChainTerminalReset(
 	return reset, true, nil
 }
 
-func loadToolChainPendingBoundary(
+func (repo *ToolChainRepository) loadToolChainPendingBoundary(
 	ctx context.Context,
 	tx *sql.Tx,
 	connectorID ConnectorInstanceID,
 	sessionDigest string,
 ) (persistedToolChainPendingBoundary, bool, error) {
 	var boundary persistedToolChainPendingBoundary
-	err := tx.QueryRowContext(ctx, `SELECT connector_instance_id,
+	err := tx.QueryRowContext(ctx, repo.sql(`SELECT connector_instance_id,
 		session_value_digest, boundary_semantic_event_id,
 		boundary_input_fingerprint, cutoff_received_time_unix_nano,
 		discard_time_unix_nano, expires_time_unix_nano
 		FROM guardrail_chain_pending_boundaries
-		WHERE connector_instance_id=? AND session_value_digest=?`,
+		WHERE connector_instance_id=? AND session_value_digest=?`),
 		string(connectorID), sessionDigest).Scan(
 		&boundary.connector, &boundary.session, &boundary.boundaryEvent,
 		&boundary.boundaryInput, &boundary.cutoff, &boundary.discardedAt,
@@ -1372,16 +1390,16 @@ func loadToolChainPendingBoundary(
 	return boundary, true, nil
 }
 
-func loadToolChainCutoffBarrier(
+func (repo *ToolChainRepository) loadToolChainCutoffBarrier(
 	ctx context.Context,
 	tx *sql.Tx,
 	kind string,
 ) (persistedToolChainCutoffBarrier, bool, error) {
 	var barrier persistedToolChainCutoffBarrier
-	err := tx.QueryRowContext(ctx, `SELECT barrier_kind,
+	err := tx.QueryRowContext(ctx, repo.sql(`SELECT barrier_kind,
 		cutoff_received_time_unix_nano, applied_time_unix_nano,
 		expires_time_unix_nano
-		FROM guardrail_chain_cutoff_barriers WHERE barrier_kind=?`, kind).Scan(
+		FROM guardrail_chain_cutoff_barriers WHERE barrier_kind=?`), kind).Scan(
 		&barrier.kind, &barrier.cutoff, &barrier.appliedAt, &barrier.expires,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1439,7 +1457,7 @@ func (repo *ToolChainRepository) globalCutoffBarrierSuppressesEvent(
 	received int64,
 	now time.Time,
 ) (bool, error) {
-	barrier, found, err := loadToolChainCutoffBarrier(ctx, tx, kind)
+	barrier, found, err := repo.loadToolChainCutoffBarrier(ctx, tx, kind)
 	if err != nil || !found {
 		return false, err
 	}
@@ -1463,7 +1481,7 @@ func (repo *ToolChainRepository) terminalResetSuppressesEvent(
 	if err != nil || suppressed {
 		return suppressed, err
 	}
-	reset, found, err := loadToolChainTerminalReset(
+	reset, found, err := repo.loadToolChainTerminalReset(
 		ctx, tx, connectorID, sessionDigest,
 	)
 	if err != nil || !found {
@@ -1492,7 +1510,7 @@ func (repo *ToolChainRepository) pendingBoundarySuppressesEvent(
 	if err != nil || suppressed {
 		return suppressed, err
 	}
-	boundary, found, err := loadToolChainPendingBoundary(
+	boundary, found, err := repo.loadToolChainPendingBoundary(
 		ctx, tx, connectorID, sessionDigest,
 	)
 	if err != nil || !found {
@@ -1636,17 +1654,24 @@ func deleteToolChainPending(
 	invocationDigest string,
 ) error {
 	_, err := txExecContextObserved(ctx, tx, "guardrail_chain_pending_delete",
-		repo.store.sqliteBusyObservabilityV8(), `DELETE FROM guardrail_chain_pending_actions
+		repo.store.sqliteBusyObservabilityV8(), repo.sql(`DELETE FROM guardrail_chain_pending_actions
 		WHERE connector_instance_id=? AND session_value_digest=?
-		AND tool_invocation_digest=?`,
+		AND tool_invocation_digest=?`),
 		string(connectorID), sessionDigest, invocationDigest)
 	return err
 }
 
+// makePendingCapacity evicts the oldest pending actions once the table is at
+// maxPending. Every row expires pendingTTL after it was prepared, so the
+// expiry order is the preparation order, and the expiry index
+// (idx_guardrail_chain_pending_expiry, same tie-break columns) serves it: an
+// eviction reads only the rows it deletes. Ordering by prepared_time had no
+// index and sorted the whole table on every PreToolUse once a session held
+// maxPending unresolved calls (rel-1-0-3 GAP-0247).
 func (repo *ToolChainRepository) makePendingCapacity(ctx context.Context, tx *sql.Tx) error {
 	var count int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*)
-		FROM guardrail_chain_pending_actions`).Scan(&count); err != nil {
+	if err := tx.QueryRowContext(ctx, repo.sql(`SELECT COUNT(*)
+		FROM guardrail_chain_pending_actions`)).Scan(&count); err != nil {
 		return err
 	}
 	excess := count - repo.maxPending + 1
@@ -1654,16 +1679,16 @@ func (repo *ToolChainRepository) makePendingCapacity(ctx context.Context, tx *sq
 		return nil
 	}
 	_, err := txExecContextObserved(ctx, tx, "guardrail_chain_pending_prune_lru",
-		repo.store.sqliteBusyObservabilityV8(), `DELETE FROM guardrail_chain_pending_actions
+		repo.store.sqliteBusyObservabilityV8(), repo.sql(`DELETE FROM guardrail_chain_pending_actions
 		WHERE (connector_instance_id, session_value_digest,
 			tool_invocation_digest) IN (
 			SELECT connector_instance_id, session_value_digest,
 				tool_invocation_digest
 			FROM guardrail_chain_pending_actions
-			ORDER BY prepared_time_unix_nano, connector_instance_id,
+			ORDER BY expires_time_unix_nano, connector_instance_id,
 				session_value_digest, tool_invocation_digest
 			LIMIT ?
-		)`, excess)
+		)`), excess)
 	return err
 }
 
@@ -1676,14 +1701,14 @@ func (repo *ToolChainRepository) makeTerminalResetCapacity(
 	if _, err := txExecContextObserved(
 		ctx, tx, "guardrail_chain_terminal_reset_prune_expired",
 		repo.store.sqliteBusyObservabilityV8(),
-		`DELETE FROM guardrail_chain_terminal_resets
-		WHERE expires_time_unix_nano<?`, unixNano(now),
+		repo.sql(`DELETE FROM guardrail_chain_terminal_resets
+		WHERE expires_time_unix_nano<?`), unixNano(now),
 	); err != nil {
 		return err
 	}
 	var count int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*)
-		FROM guardrail_chain_terminal_resets`).Scan(&count); err != nil {
+	if err := tx.QueryRowContext(ctx, repo.sql(`SELECT COUNT(*)
+		FROM guardrail_chain_terminal_resets`)).Scan(&count); err != nil {
 		return err
 	}
 	if count < 0 {
@@ -1694,9 +1719,9 @@ func (repo *ToolChainRepository) makeTerminalResetCapacity(
 	}
 	_, err := repo.advanceCutoffBarrier(
 		ctx, tx, toolChainTerminalResetBarrier,
-		`SELECT COALESCE(MAX(cutoff_received_time_unix_nano),0),
+		repo.sql(`SELECT COALESCE(MAX(cutoff_received_time_unix_nano),0),
 			COALESCE(MAX(expires_time_unix_nano),0)
-		FROM guardrail_chain_terminal_resets`, cutoff, now,
+		FROM guardrail_chain_terminal_resets`), cutoff, now,
 	)
 	if err != nil {
 		return err
@@ -1706,7 +1731,7 @@ func (repo *ToolChainRepository) makeTerminalResetCapacity(
 	excess := count - repo.maxPartitions + 1
 	result, err := txExecContextObserved(
 		ctx, tx, "guardrail_chain_terminal_reset_evict_summarized",
-		repo.store.sqliteBusyObservabilityV8(), `DELETE FROM
+		repo.store.sqliteBusyObservabilityV8(), repo.sql(`DELETE FROM
 		guardrail_chain_terminal_resets
 		WHERE (connector_instance_id, session_value_digest) IN (
 			SELECT connector_instance_id, session_value_digest
@@ -1714,7 +1739,7 @@ func (repo *ToolChainRepository) makeTerminalResetCapacity(
 			ORDER BY cutoff_received_time_unix_nano, reset_time_unix_nano,
 				connector_instance_id, session_value_digest
 			LIMIT ?
-		)`, excess,
+		)`), excess,
 	)
 	if err != nil {
 		return err
@@ -1735,14 +1760,14 @@ func (repo *ToolChainRepository) makePendingBoundaryCapacity(
 	if _, err := txExecContextObserved(
 		ctx, tx, "guardrail_chain_pending_boundary_prune_expired",
 		repo.store.sqliteBusyObservabilityV8(),
-		`DELETE FROM guardrail_chain_pending_boundaries
-		WHERE expires_time_unix_nano<?`, unixNano(now),
+		repo.sql(`DELETE FROM guardrail_chain_pending_boundaries
+		WHERE expires_time_unix_nano<?`), unixNano(now),
 	); err != nil {
 		return err
 	}
 	var count int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*)
-		FROM guardrail_chain_pending_boundaries`).Scan(&count); err != nil {
+	if err := tx.QueryRowContext(ctx, repo.sql(`SELECT COUNT(*)
+		FROM guardrail_chain_pending_boundaries`)).Scan(&count); err != nil {
 		return err
 	}
 	if count < 0 {
@@ -1753,9 +1778,9 @@ func (repo *ToolChainRepository) makePendingBoundaryCapacity(
 	}
 	_, err := repo.advanceCutoffBarrier(
 		ctx, tx, toolChainPendingBoundaryBarrier,
-		`SELECT COALESCE(MAX(cutoff_received_time_unix_nano),0),
+		repo.sql(`SELECT COALESCE(MAX(cutoff_received_time_unix_nano),0),
 			COALESCE(MAX(expires_time_unix_nano),0)
-		FROM guardrail_chain_pending_boundaries`, cutoff, now,
+		FROM guardrail_chain_pending_boundaries`), cutoff, now,
 	)
 	if err != nil {
 		return err
@@ -1765,7 +1790,7 @@ func (repo *ToolChainRepository) makePendingBoundaryCapacity(
 	excess := count - repo.maxPartitions + 1
 	result, err := txExecContextObserved(
 		ctx, tx, "guardrail_chain_pending_boundary_evict_summarized",
-		repo.store.sqliteBusyObservabilityV8(), `DELETE FROM
+		repo.store.sqliteBusyObservabilityV8(), repo.sql(`DELETE FROM
 		guardrail_chain_pending_boundaries
 		WHERE (connector_instance_id, session_value_digest) IN (
 			SELECT connector_instance_id, session_value_digest
@@ -1773,7 +1798,7 @@ func (repo *ToolChainRepository) makePendingBoundaryCapacity(
 			ORDER BY cutoff_received_time_unix_nano, discard_time_unix_nano,
 				connector_instance_id, session_value_digest
 			LIMIT ?
-		)`, excess,
+		)`), excess,
 	)
 	if err != nil {
 		return err
@@ -1799,7 +1824,7 @@ func (repo *ToolChainRepository) advanceCutoffBarrier(
 	); err != nil {
 		return persistedToolChainCutoffBarrier{}, err
 	}
-	barrier, found, err := loadToolChainCutoffBarrier(ctx, tx, kind)
+	barrier, found, err := repo.loadToolChainCutoffBarrier(ctx, tx, kind)
 	if err != nil {
 		return persistedToolChainCutoffBarrier{}, err
 	}
@@ -1831,14 +1856,14 @@ func (repo *ToolChainRepository) advanceCutoffBarrier(
 	}
 	_, err = txExecContextObserved(
 		ctx, tx, "guardrail_chain_cutoff_barrier_upsert",
-		repo.store.sqliteBusyObservabilityV8(), `INSERT INTO
+		repo.store.sqliteBusyObservabilityV8(), repo.sql(`INSERT INTO
 		guardrail_chain_cutoff_barriers (
 			barrier_kind, cutoff_received_time_unix_nano,
 			applied_time_unix_nano, expires_time_unix_nano
 		) VALUES (?, ?, ?, ?) ON CONFLICT(barrier_kind) DO UPDATE SET
 			cutoff_received_time_unix_nano=excluded.cutoff_received_time_unix_nano,
 			applied_time_unix_nano=excluded.applied_time_unix_nano,
-			expires_time_unix_nano=excluded.expires_time_unix_nano`,
+			expires_time_unix_nano=excluded.expires_time_unix_nano`),
 		barrier.kind, barrier.cutoff, barrier.appliedAt, barrier.expires,
 	)
 	if err != nil {

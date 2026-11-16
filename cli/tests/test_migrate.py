@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -29,6 +30,8 @@ from click.testing import CliRunner
 from defenseclaw import migrations
 from defenseclaw.commands.cmd_migrate import migrate_cmd
 from defenseclaw.migrations import ConfigTooNewError, MigrationError, migrate
+
+from tests.os_view import os_view
 
 
 @pytest.fixture()
@@ -250,6 +253,9 @@ def test_v8_config_runs_the_go_v9_step(
             "expressed_rules": ["CUSTOM-CMD-RM-RF", "ACME-LIT"],
             "renamed_rules": ["CMD-RM-RF -> CUSTOM-CMD-RM-RF", "CMD-SUDO -> CUSTOM-CMD-SUDO"],
             "rule_file_merges": ["/p/acme-1.0: rules/b.yaml (category \"acme\") merged into rules/a.yaml; 2 rule(s) kept"],
+            # GAP-0268: rules without tags got the tag custom in the 1.0 copy.
+            "tagged_rules": ["/p/acme-1.0: 1 rule(s) had no tags, or blank or repeated ones, which 1.0 refuses; "
+                             "their 1.0 copy has distinct tags, custom where they had none: TEAM-LANE-RULE"],
         }
         (data_dir / "migration-v9.json").write_text(json.dumps(record), encoding="utf-8")
         return {"migrated": True, "record": record}
@@ -303,6 +309,7 @@ def test_v8_config_runs_the_go_v9_step(
     assert "CUSTOM-CMD-SUDO (your edited CMD-SUDO; CMD-SUDO is the shipped 1.0 rule): detection-only" in out
     # GAP-1339: the summary says which rule files of one category were merged.
     assert 'rule pack /p/acme-1.0: rules/b.yaml (category "acme") merged into rules/a.yaml; 2 rule(s) kept' in out
+    assert "rule pack /p/acme-1.0: 1 rule(s) had no tags" in out and "TEAM-LANE-RULE" in out
     # GAP-1227: the summary names the MCP servers the upgrade keeps blocked.
     assert "MCP servers that stay blocked (asset_policy.mcp.denied): bad-mcp" in out
     expected = [
@@ -450,7 +457,9 @@ def test_cli_exit_codes(data_dir: Path, recorded: list[str]) -> None:
 
 
 def test_upgrade_names_hooks_that_now_fail_open(data_dir: Path, recorded: list[str]) -> None:
-    # 0.8.x sealed the global fail mode into observe-mode hooks.
+    # 0.8.x sealed the global fail mode into observe-mode hooks. From 1.0.3
+    # an observe-mode hook follows the global closed outside Secure Client,
+    # so the upgrade keeps it closed and says nothing about fail-open.
     _write_config(data_dir, "config_version: 7\nguardrail:\n  mode: observe\n  hook_fail_mode: closed\n")
     lock = {"connectors": {"claudecode": {"hook_fail_mode": "closed"}, "codex": {"hook_fail_mode": "open"}}}
     (data_dir / "hook_contract_lock.json").write_text(json.dumps(lock), encoding="utf-8")
@@ -458,8 +467,7 @@ def test_upgrade_names_hooks_that_now_fail_open(data_dir: Path, recorded: list[s
     result = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--from-version", "0.8.4"])
 
     assert result.exit_code == 0, result.output
-    assert "claudecode hooks now fail open" in result.output
-    assert "defenseclaw setup claudecode --mode action" in result.output
+    assert "now fail open" not in result.output
     assert "codex" not in result.output
 
     # GAP-0276: a reinstall of a current config migrates nothing and says nothing.
@@ -531,6 +539,24 @@ def test_only_a_0x_import_selects_the_windows_agents(data_dir: Path, recorded: l
     assert calls == [str(data_dir)]
 
 
+def test_every_upgrade_seals_the_windows_hook_credentials(data_dir: Path, recorded: list[str], monkeypatch) -> None:
+    # GAP-2207: 1.0.2 left .hook-amp/.hook-opencode/... tokens with an
+    # inherited DACL; after a 1.0.2 -> 1.0.5 upgrade setup rotate-token
+    # refused them, because only a 0.x import sealed them. A check changes
+    # nothing.
+    calls: list[str] = []
+    monkeypatch.setattr(migrations, "_seal_windows_hook_credentials", calls.append)
+    _write_config(data_dir, f"config_version: {migrations._FIRST_V8_CONFIG_VERSION}\n")
+
+    migrate(str(data_dir), from_version="1.0.2", check=True)
+    assert calls == []
+    migrate(str(data_dir), from_version="1.0.2")
+    migrate(str(data_dir), from_version="1.0.4")
+    migrate(str(data_dir))
+
+    assert calls == [str(data_dir)] * 3
+
+
 def test_a_0x_import_with_a_v8_config_selects_the_windows_agents(
     data_dir: Path, recorded: list[str], monkeypatch
 ) -> None:
@@ -563,7 +589,7 @@ def test_windows_agent_selection_keeps_the_agents_it_found(data_dir: Path, monke
         return found, ({} if requests[1:] else {"hermes": "not installed"})
 
     monkeypatch.setattr(agent_selection, "record_setup_agent_selections", record)
-    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(migrations, "os", os_view("nt"))
 
     migrations._select_windows_agents(str(data_dir))
 
@@ -596,13 +622,14 @@ def test_0x_windows_hook_credentials_get_a_private_dacl(tmp_path: Path, monkeypa
     sealed: list[str] = []
     monkeypatch.setattr(file_permissions, "windows_acl_custody_confidentiality_error", custody)
     monkeypatch.setattr(file_permissions, "protect_private_file", lambda path: sealed.append(os.path.basename(path)))
-    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(migrations, "os", os_view("nt"))
 
     migrations._seal_windows_hook_credentials(str(tmp_path))
 
     assert sealed == [".hook-openclaw.token", ".otlp-codex.token"]
     monkeypatch.setattr(cmd_setup, "windows_acl_custody_confidentiality_error", custody)
     monkeypatch.setattr(cmd_setup, "reject_reparse_path", lambda _path: None)
+    monkeypatch.setattr(cmd_setup, "os", os_view("nt"))
     with pytest.raises(click.ClickException) as refused:
         cmd_setup._rotate_token_hook_metadata(exposed)
     assert f"The connector hook credential {exposed} is not private (Windows DACL is inheritable)" in refused.value.message
@@ -651,7 +678,7 @@ def test_windows_agent_selection_reports_nothing_when_the_retry_fails(data_dir: 
         return found, ({"hermes": "not installed"} if len(calls) == 1 else {"codex": "changed while probing"})
 
     monkeypatch.setattr(agent_selection, "record_setup_agent_selections", record)
-    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(migrations, "os", os_view("nt"))
 
     migrations._select_windows_agents(str(data_dir))
 
@@ -672,7 +699,7 @@ def test_windows_agent_selection_writes_no_receipt_without_a_native_agent(data_d
         "record_setup_agent_selections",
         lambda *_args: pytest.fail("nothing to select, so no receipt"),
     )
-    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(migrations, "os", os_view("nt"))
 
     migrations._select_windows_agents(str(data_dir))
 
@@ -707,3 +734,358 @@ def test_cli_rejects_a_from_version_that_is_not_a_release(data_dir: Path, v8_tar
     assert "not a release version" in result.output
     ok = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--check", "--from-version", "1.0.1.dev3"])
     assert ok.exit_code == 0, ok.output
+
+
+def test_cli_check_omits_unchanged_version_range(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        migrations,
+        "migrate",
+        lambda *_args, **_kwargs: migrations.MigrateResult(
+            from_config_version=9,
+            to_config_version=9,
+            applied=["update renamed and removed connectors"],
+            changed=True,
+        ),
+    )
+    result = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--check"])
+    assert result.exit_code == 0, result.output
+    assert "1 migration step(s) pending (config_version 9):" in result.output
+    assert "9 -> 9" not in result.output
+    assert "update renamed and removed connectors" in result.output
+
+
+# GAP-0163: a legacy custom-providers.json next to a config_version 9 file.
+
+
+def _legacy_overlay(data_dir: Path, payload: dict) -> Path:
+    path = data_dir / "custom-providers.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize(
+    ("config", "overlay", "pending"),
+    [
+        ("config_version: 9\n", {"providers": [{"name": "acme-gw", "domains": ["alt.acme.test"]}]}, True),
+        ("config_version: 9\n", {"providers": [], "ollama_ports": [11500]}, True),
+        ("config_version: 9\n", {"_derived_from": "sha256:x", "providers": [{"name": "acme-gw"}]}, False),
+        ("config_version: 9\n", {"providers": [{"name": "acme-gw", "request_overrides": {"x": 1}}]}, False),
+        ("config_version: 9\ndeployment_mode: managed_enterprise\n", {"providers": [{"name": "acme-gw"}]}, False),
+        ("config_version: 9\n", {"providers": []}, False),
+    ],
+)
+def test_a_v9_config_with_a_legacy_provider_overlay_has_the_fold_step_pending(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch, config: str, overlay: dict, pending: bool
+) -> None:
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setattr(migrations, "_connector_roster_pending", lambda *_args: False)
+    _write_config(data_dir, config)
+    _legacy_overlay(data_dir, overlay)
+
+    result = migrate(str(data_dir), check=True)
+
+    assert (migrations._PROVIDERS_FOLD_STEP_NAME in result.applied) is pending
+
+
+def test_the_fold_step_warns_and_changes_nothing_when_fields_disagree(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from defenseclaw import config_inspect
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setattr(migrations, "_connector_roster_pending", lambda *_args: False)
+    monkeypatch.setattr(migrations, "_refresh_local_observability_bundle", lambda *_args: None)
+    monkeypatch.setattr(migrations, "_refresh_guardrail_profiles", lambda *_args: None)
+    monkeypatch.setattr(migrations, "_refresh_rego_policies", lambda *_args: None)
+    config = _write_config(data_dir, "config_version: 9\n")
+    overlay = _legacy_overlay(data_dir, {"providers": [{"name": "acme-gw", "base_url": "https://legacy.test"}]})
+    refusal = (
+        f"{overlay} was not folded into config.yaml: config.yaml and the file set different values for "
+        "acme-gw (base_url: config.yaml's value is in use). Neither file was changed"
+    )
+    calls: list[str] = []
+
+    def go_migrate(*, config_path: str, dry_run: bool = False, ack: bool = False, gateway_binary=None) -> dict:
+        calls.append(config_path)
+        return {"migrated": False, "dry_run": False, "written": [], "record": {"from_version": 9},
+                "providers_fold": {"overlay": str(overlay), "refused": refusal,
+                                   "conflicts": [{"provider": "acme-gw", "fields": ["base_url"],
+                                                  "in_use": {"base_url": "config.yaml"}}]}}
+
+    monkeypatch.setattr(config_inspect, "migrate_config_v9", go_migrate)
+
+    result = migrate(str(data_dir))
+
+    assert calls == [str(config)]
+    assert result.applied == [migrations._PROVIDERS_FOLD_STEP_NAME]
+    out = capsys.readouterr().out
+    assert "acme-gw (base_url: config.yaml's value is in use)" in out
+    assert "Neither file was changed" in out
+    assert "moved provider(s)" not in out
+
+
+def test_the_fold_step_reports_the_providers_config_yaml_took(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from defenseclaw import config_inspect
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setattr(migrations, "_connector_roster_pending", lambda *_args: False)
+    monkeypatch.setattr(migrations, "_refresh_local_observability_bundle", lambda *_args: None)
+    monkeypatch.setattr(migrations, "_refresh_guardrail_profiles", lambda *_args: None)
+    monkeypatch.setattr(migrations, "_refresh_rego_policies", lambda *_args: None)
+    _write_config(data_dir, "config_version: 9\n")
+    overlay = _legacy_overlay(data_dir, {"providers": [{"name": "acme-gw", "domains": ["alt.acme.test"]}]})
+    retired = f"{overlay}.migrated-v9"
+    monkeypatch.setattr(
+        config_inspect,
+        "migrate_config_v9",
+        lambda **_kwargs: {"migrated": False, "dry_run": False, "written": [retired], "record": {"from_version": 9},
+                           "providers_fold": {"overlay": str(overlay), "folded": ["acme-gw"], "retired": retired,
+                                              "headers_after_fold": [{"provider": "openai",
+                                                                      "fields": ["extra_headers.X-Team"]}]}},
+    )
+
+    result = migrate(str(data_dir))
+
+    assert result.changed
+    out = capsys.readouterr().out
+    assert f"moved provider(s) acme-gw from {overlay} into config.yaml llm_providers.custom" in out
+    assert retired in out
+    # GAP-0184: the headers sent from now on are named, never their values.
+    assert "the gateway now also sends openai (extra_headers.X-Team)" in out
+
+
+# GAP-0137: a downgrade set openshell.trusted_ca_bundle aside (upgrade_shim);
+# this release puts it back unless config.yaml sets it again, and keeps the
+# keys of a later release for that release.
+def _set_aside_record(data_dir: Path, keys: dict) -> Path:
+    from defenseclaw.upgrade_shim import SET_ASIDE_FILE
+
+    path = data_dir / SET_ASIDE_FILE
+    path.write_text(json.dumps({"version": 1, "for": "1.0.2", "keys": keys}), encoding="utf-8")
+    return path
+
+
+def test_migrate_puts_back_the_keys_a_downgrade_set_aside(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import yaml
+
+    for name in ("_refresh_local_observability_bundle", "_refresh_guardrail_profiles", "_refresh_rego_policies"):
+        monkeypatch.setattr(migrations, name, lambda *_args: None)
+    config = _write_config(data_dir, "config_version: 9\n")
+    record = _set_aside_record(data_dir, {"openshell.trusted_ca_bundle": "~/proxy-root-ca.pem"})
+
+    migrate(str(data_dir))
+
+    assert yaml.safe_load(config.read_text(encoding="utf-8"))["openshell"]["trusted_ca_bundle"] == "~/proxy-root-ca.pem"
+    assert not record.exists()
+
+
+def test_migrate_puts_back_the_1_0_6_blocks_a_downgrade_set_aside(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yaml
+
+    for name in ("_refresh_local_observability_bundle", "_refresh_guardrail_profiles", "_refresh_rego_policies"):
+        monkeypatch.setattr(migrations, name, lambda *_args: None)
+    config = _write_config(data_dir, "config_version: 9\n")
+    record = _set_aside_record(
+        data_dir, {"guardrail.chains": {"root_scope": True}, "connectors": {"agent_gateway": {"enabled": True}}}
+    )
+
+    migrate(str(data_dir))
+
+    restored = yaml.safe_load(config.read_text(encoding="utf-8"))
+    assert restored["guardrail"]["chains"] == {"root_scope": True}
+    assert restored["connectors"] == {"agent_gateway": {"enabled": True}}
+    assert not record.exists()
+
+
+def test_set_aside_internal_domains_is_put_back(data_dir: Path) -> None:
+    """#1390: a downgrade below 1.0.6 set guardrail.internal_domains aside."""
+    import yaml
+
+    config = _write_config(data_dir, "config_version: 9\n")
+    record = _set_aside_record(data_dir, {"guardrail.internal_domains": ["corp.example.com"]})
+
+    migrations._restore_set_aside_keys(str(data_dir), str(config))
+
+    assert yaml.safe_load(config.read_text(encoding="utf-8"))["guardrail"]["internal_domains"] == ["corp.example.com"]
+    assert not record.exists()
+
+
+def test_set_aside_keys_keep_a_value_set_again_and_a_later_release_key(data_dir: Path) -> None:
+    import yaml
+
+    config = _write_config(data_dir, "config_version: 9\nopenshell:\n  trusted_ca_bundle: /etc/corp/root.pem\n")
+    record = _set_aside_record(
+        data_dir, {"openshell.trusted_ca_bundle": "~/proxy-root-ca.pem", "openshell.future_key": True}
+    )
+
+    migrations._restore_set_aside_keys(str(data_dir), str(config))
+
+    assert yaml.safe_load(config.read_text(encoding="utf-8"))["openshell"] == {"trusted_ca_bundle": "/etc/corp/root.pem"}
+    assert json.loads(record.read_text(encoding="utf-8"))["keys"] == {"openshell.future_key": True}
+
+
+def test_set_aside_key_that_cannot_be_put_back_is_named_with_its_command(
+    data_dir: Path, capsys: pytest.CaptureFixture
+) -> None:
+    config = _write_config(data_dir, "config_version: 9\n")
+    record = _set_aside_record(data_dir, {"openshell.trusted_ca_bundle": "relative.pem"})
+
+    migrations._restore_set_aside_keys(str(data_dir), str(config))
+
+    assert config.read_text(encoding="utf-8") == "config_version: 9\n"
+    assert record.exists()
+    captured = capsys.readouterr()
+    assert "defenseclaw config set openshell.trusted_ca_bundle relative.pem" in captured.out + captured.err
+
+
+def _sealed_codex_lock(data_dir: Path, exe: Path, digest: str) -> None:
+    lock = {
+        "version": 1,
+        "connectors": {
+            "codex": {
+                "connector": "codex",
+                "agent_executable_source": "setup-selected",
+                "agent_executable": str(exe),
+                "agent_executable_sha256": digest,
+                "raw_agent_version": "codex-cli 0.160.0",
+            }
+        },
+    }
+    (data_dir / "hook_contract_lock.json").write_text(json.dumps(lock), encoding="utf-8")
+
+
+def _reselect_fixture(data_dir: Path, monkeypatch, *, mode: str = ""):
+    from types import SimpleNamespace
+
+    from defenseclaw import agent_selection, config
+
+    exe = data_dir / "codex.exe"
+    exe.write_bytes(b"codex 0.160.0")
+    _sealed_codex_lock(data_dir, exe, hashlib.sha256(b"codex 0.160.0").hexdigest())
+    monkeypatch.setattr(
+        config,
+        "load",
+        lambda **_kwargs: SimpleNamespace(active_connectors=lambda: ["codex", "claudecode"], deployment_mode=mode),
+    )
+    monkeypatch.delenv(config.DEPLOYMENT_MODE_ENV, raising=False)
+
+    def digest(path: str) -> str:
+        # Plain open: pathlib refuses a Path once os.name says nt.
+        with open(path, "rb") as handle:
+            return hashlib.sha256(handle.read()).hexdigest()
+
+    monkeypatch.setattr(agent_selection, "stable_executable_sha256", digest)
+    requests: list[list[str]] = []
+
+    def record(_data_dir, connectors):
+        requests.append(list(connectors))
+        return {"codex": SimpleNamespace(executable=str(exe), raw_version="codex-cli 0.165.0")}, {}
+
+    monkeypatch.setattr(agent_selection, "record_setup_agent_selections", record)
+    monkeypatch.setattr(migrations, "os", os_view("nt"))
+    return exe, requests
+
+
+def test_an_upgrade_selects_again_a_windows_agent_that_updated_itself(data_dir: Path, monkeypatch, capsys) -> None:
+    # GAP-2513: Codex updated itself (npm 0.159.3 -> 0.165.0) after setup, so
+    # its sealed SHA-256 no longer matched and the upgrade restored the old
+    # install with the gateway stopped. The upgrade now records the selection
+    # setup codex records, for the changed agent only.
+    exe, requests = _reselect_fixture(data_dir, monkeypatch)
+    exe.write_bytes(b"codex 0.165.0")
+
+    migrations.reselect_updated_windows_agents(str(data_dir))
+
+    assert requests == [["codex"]]
+    out = capsys.readouterr().out
+    assert "codex changed since DefenseClaw set it up" in out
+    assert f"selected {exe} (codex-cli 0.165.0) for the codex connector" in out
+
+
+def test_an_upgrade_keeps_the_sealed_lock_of_an_unchanged_windows_agent(data_dir: Path, monkeypatch) -> None:
+    _exe, requests = _reselect_fixture(data_dir, monkeypatch)
+
+    migrations.reselect_updated_windows_agents(str(data_dir))
+
+    assert requests == []
+
+
+def test_a_managed_upgrade_does_not_select_an_updated_windows_agent(data_dir: Path, monkeypatch) -> None:
+    exe, requests = _reselect_fixture(data_dir, monkeypatch, mode="managed_enterprise")
+    exe.write_bytes(b"codex 0.165.0")
+
+    migrations.reselect_updated_windows_agents(str(data_dir))
+
+    assert requests == []
+
+
+def test_every_upgrade_checks_the_windows_agents_setup_selected(
+    data_dir: Path, recorded: list[str], monkeypatch
+) -> None:
+    reselected: list[str] = []
+    selected: list[str] = []
+    monkeypatch.setattr(migrations, "reselect_updated_windows_agents", reselected.append)
+    monkeypatch.setattr(migrations, "_select_windows_agents", selected.append)
+    _write_config(data_dir, "config_version: 7\n")
+
+    migrate(str(data_dir), from_version="0.8.4")
+    migrate(str(data_dir), from_version="1.0.4")
+
+    assert selected == [str(data_dir)]
+    assert reselected == [str(data_dir), str(data_dir)]
+
+
+def test_the_rollback_reselect_entry_prints_its_warning_on_a_cp1252_console(data_dir: Path, monkeypatch) -> None:
+    # GAP-2513 review: install.ps1 -Rollback ran the reselect through
+    # 'python -c', which skips the CLI's console stream setup, so its
+    # warning glyph raised UnicodeEncodeError on a cp1252 stream and a
+    # traceback printed in the middle of a successful rollback. The installer
+    # now runs 'defenseclaw migrate --reselect-updated-agents'.
+    import io
+    import sys
+
+    from defenseclaw import main as main_module
+    from defenseclaw import ux
+
+    seen: list[str] = []
+
+    def reselect(path: str) -> None:
+        seen.append(path)
+        ux.warn("codex changed since DefenseClaw set it up (an agent update does this)", indent="    ")
+
+    monkeypatch.setattr(migrations, "reselect_updated_windows_agents", reselect)
+    monkeypatch.setattr(ux, "_configured_unicode_output", None)
+    monkeypatch.setattr(ux, "_configured_unicode_error_output", None)
+    monkeypatch.setenv("COLUMNS", "120")
+    out = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+    err = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", err)
+    monkeypatch.setattr(
+        sys, "argv", ["defenseclaw", "migrate", "--reselect-updated-agents", "--data-dir", str(data_dir)]
+    )
+
+    with pytest.raises(SystemExit) as exited:
+        main_module.main()
+
+    out.flush()
+    err.flush()
+    printed = out.buffer.getvalue().decode("utf-8") + err.buffer.getvalue().decode("utf-8")
+    assert exited.value.code in (0, None), printed
+    assert seen == [str(data_dir)]
+    assert "codex changed since DefenseClaw set it up" in printed
+    assert "Traceback" not in printed
+    assert not (data_dir / "config.yaml").exists()
+
+
+def test_the_rollback_selects_updated_agents_through_the_cli_entry() -> None:
+    # GAP-2513 review: not 'python -c', which has no console stream setup.
+    script = (Path(__file__).resolve().parents[2] / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    body = script[script.index("function Select-UpdatedAgents") :]
+    body = body[: body.index("\n}\n")]
+    assert '@("migrate", "--reselect-updated-agents", "--data-dir", $Data)' in body
+    assert '"-c"' not in body

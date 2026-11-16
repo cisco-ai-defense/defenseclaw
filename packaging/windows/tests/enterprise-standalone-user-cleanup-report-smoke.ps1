@@ -104,6 +104,56 @@ $failures = & $module {
         $failures.Add("remaining accounts were not carried: $(ConvertTo-HarnessJson $purgeResult)")
     }
 
+    # Each Claude settings file the finalize edited (#1290) and each
+    # DefenseClaw hook command left in one (#1286) carry through.
+    $settingsFinalize = (
+        '{"schema_version":4,"action":"finalize","ok":true,' +
+        '"user_registrations_removed":1,' +
+        '"user_settings_edited":["removed 1 DefenseClaw hook command(s) from C:\\Users\\alice\\.claude\\settings.json"],' +
+        '"user_settings_hooks_left":["C:\\Users\\alice\\.claude\\settings.json: PreToolUse: a hook command naming defenseclaw-hook (arguments not shown)"]}'
+    ) | Microsoft.PowerShell.Utility\ConvertFrom-Json
+    $settingsResult = Add-DefenseClawUserRegistrationCleanupResult `
+        -Result (New-HarnessResult) `
+        -Layout $standalone `
+        -Finalization $settingsFinalize
+    if (@($settingsResult.user_settings_edited).Count -ne 1 -or
+        -not ([string]@($settingsResult.user_settings_edited)[0]).StartsWith('removed 1 DefenseClaw hook command(s) from ')) {
+        $failures.Add("edited settings files were not carried: $(ConvertTo-HarnessJson $settingsResult)")
+    }
+    if (@($settingsResult.user_settings_hooks_left).Count -ne 1 -or
+        -not ([string]@($settingsResult.user_settings_hooks_left)[0]).EndsWith('PreToolUse: a hook command naming defenseclaw-hook (arguments not shown)')) {
+        $failures.Add("leftover Claude hook commands were not carried: $(ConvertTo-HarnessJson $settingsResult)")
+    }
+
+    # sidecar-r107:GAP-0007: a machine folder the finalize kept joins what the
+    # result already names in machine_state_remaining.
+    $keptFinalize = (
+        '{"schema_version":4,"action":"finalize","ok":true,' +
+        '"user_registrations_removed":0,' +
+        '"machine_state_remaining":["C:\\Windows\\System32\\config\\systemprofile\\AppData\\Local\\DefenseClaw\\claude-settings-teardown: kept: it holds an unfinished Claude Code settings cleanup"]}'
+    ) | Microsoft.PowerShell.Utility\ConvertFrom-Json
+    $keptBase = New-HarnessResult
+    $keptBase | Microsoft.PowerShell.Utility\Add-Member -MemberType NoteProperty -Name machine_state_remaining -Value ([string[]]@('C:\ProgramData\DefenseClaw-PowerShell-0: in use'))
+    $keptResult = Add-DefenseClawUserRegistrationCleanupResult `
+        -Result $keptBase `
+        -Layout $standalone `
+        -Finalization $keptFinalize
+    if (@($keptResult.machine_state_remaining).Count -ne 2 -or
+        -not ([string]@($keptResult.machine_state_remaining)[0]).EndsWith(': in use') -or
+        -not ([string]@($keptResult.machine_state_remaining)[1]).EndsWith('claude-settings-teardown: kept: it holds an unfinished Claude Code settings cleanup')) {
+        $failures.Add("kept machine folder was not carried: $(ConvertTo-HarnessJson $keptResult)")
+    }
+    $keptOnly = Add-DefenseClawUserRegistrationCleanupResult `
+        -Result (New-HarnessResult) `
+        -Layout $standalone `
+        -Finalization $keptFinalize
+    if (@($keptOnly.machine_state_remaining).Count -ne 1) {
+        $failures.Add("kept machine folder without earlier entries was not carried: $(ConvertTo-HarnessJson $keptOnly)")
+    }
+    if ($null -ne (Add-DefenseClawUserRegistrationCleanupResult -Result (New-HarnessResult) -Layout $standalone -Finalization $finalize).PSObject.Properties['machine_state_remaining']) {
+        $failures.Add('a finalize without kept machine folders added machine_state_remaining')
+    }
+
     # Helper output ahead of the report, and a finalize without the fields
     # (an older helper), are tolerated.
     $json = ConvertTo-HarnessJson (Add-DefenseClawUserRegistrationCleanupResult `

@@ -88,6 +88,9 @@ const (
 	secureClientShortAnnotation  = "defenseclaw.secure-client-short"
 	secureClientLongAnnotation   = "defenseclaw.secure-client-long"
 	secureClientUsageAnnotation  = "defenseclaw.secure-client-usage"
+	// secureClientExampleAnnotation holds the example of release 1.0.5 for a
+	// command whose example now names the standalone gateway by its path.
+	secureClientExampleAnnotation = "defenseclaw.secure-client-example"
 )
 
 // keepCommandTreeOfMainOnSecureClient gives a Secure Client computer the
@@ -116,6 +119,9 @@ func keepCommandTreeOfMainOnSecureClient(root *cobra.Command) {
 			}
 			if long := cmd.Annotations[secureClientLongAnnotation]; long != "" {
 				cmd.Long = long
+			}
+			if example := cmd.Annotations[secureClientExampleAnnotation]; example != "" {
+				cmd.Example = example
 			}
 			if cmd.Annotations[secureClientHiddenAnnotation] != "" {
 				cmd.Hidden = true
@@ -196,6 +202,12 @@ Administrator prompt (or as LocalSystem from an MDM script) on Windows.`,
 			if goos := enterprisePlatformGOOS(platform); runtime.GOOS != goos {
 				return invalidLifecycleArguments(fmt.Errorf("`enterprise %s %s` reads %s hosts; this host is %s", platform, view.use, goos, runtime.GOOS))
 			}
+			if view.use == "profile-explain" {
+				if refusal := refuseEnterpriseIdentityViewForStandardUser(cmd); refusal != nil {
+					// A standard user explains their own profile (GAP-0431, GAP-0422).
+					return explainOwnGuardrailProfile(cmd, values[0], values[1], values[2], refusal, refusal, asJSON)
+				}
+			}
 			query := url.Values{}
 			for i, flag := range view.flags {
 				if values[i] != "" {
@@ -204,6 +216,21 @@ Administrator prompt (or as LocalSystem from an MDM script) on Windows.`,
 			}
 			if view.use == "profile-explain" && query.Get("user") == "" {
 				return invalidLifecycleArguments(fmt.Errorf("--user is required to explain a guardrail profile"))
+			}
+			if view.use == "profile-explain" {
+				// The account as root resolves it, so explain needs no root-only
+				// lookup in the gateway service (GAP-0500).
+				if facts := enterpriseExplainCallerFacts(query.Get("user")); facts != "" {
+					query.Set("caller_facts", facts)
+				}
+			}
+			if view.use == "agent-identities" && query.Get("user") != "" {
+				// root's proof of the account's home tells an account deleted
+				// and created again under the same name and uid from the one
+				// before it, also before the guardian's next pass (GAP-0422).
+				if proof := enterpriseIdentityViewHolderProof(query.Get("user")); proof != "" {
+					query.Set("holder_proof", proof)
+				}
 			}
 			if aiOnly {
 				query.Set("ai_only", "true")
@@ -245,7 +272,19 @@ Administrator prompt (or as LocalSystem from an MDM script) on Windows.`,
 				if _, err := enterpriseIdentityViewGet(path, &answer); err != nil {
 					return enterpriseIdentityViewError(err)
 				}
-				return printEnterpriseIdentityView(cmd.OutOrStdout(), addSandboxToProfileExplain(answer, cfg))
+				if err := printEnterpriseIdentityView(cmd.OutOrStdout(), addSandboxToProfileExplain(answer, cfg)); err != nil {
+					return err
+				}
+				// The gateway answers an account it cannot resolve with
+				// lookup_error and no user id; the answer is printed and the
+				// command fails, as `defenseclaw guardrail profile explain`
+				// does. A resolved account with no matching profile succeeds.
+				if lookupErr := unresolvedProfileExplainAccount(answer); lookupErr != "" {
+					failure := withExitCode(fmt.Errorf("user lookup failed: %s", lookupErr), enterprisestatus.UnixExitFailure)
+					silenceJSONReportedError(cmd, asJSON, failure)
+					return failure
+				}
+				return nil
 			}
 			if err := writeEnterpriseIdentityView(cmd.OutOrStdout(), path); err != nil {
 				return enterpriseIdentityViewError(err)
@@ -305,26 +344,47 @@ func enterpriseIdentityViewError(err error) error {
 	return withExitCode(err, enterprisestatus.UnixExitFailure)
 }
 
-// refuseUnknownIdentityViewAccount refuses a --user that names no account,
-// with the reason profile-explain gives and the spellings the view takes.
-func refuseUnknownIdentityViewAccount(user string) error {
+// unresolvedProfileExplainAccount returns the gateway's lookup_error when
+// the account it was asked about did not resolve. A numeric uid may still
+// appear in subject.user_id for comparison with a hook call from that uid.
+func unresolvedProfileExplainAccount(answer json.RawMessage) string {
 	var resolved struct {
-		LookupError string `json:"lookup_error"`
-		Subject     struct {
+		LookupError       string `json:"lookup_error"`
+		AccountUnresolved bool   `json:"account_unresolved"`
+		Subject           struct {
 			UserID string `json:"user_id"`
 		} `json:"subject"`
 	}
-	if _, err := enterpriseIdentityViewGet("/api/v1/guardrail/profiles/resolve?user="+url.QueryEscape(user), &resolved); err != nil {
+	if json.Unmarshal(answer, &resolved) != nil || resolved.Subject.UserID != "" && !resolved.AccountUnresolved {
+		return ""
+	}
+	return resolved.LookupError
+}
+
+// refuseUnknownIdentityViewAccount refuses a --user that names no account,
+// with the reason profile-explain gives and the spellings the view takes. It
+// sends the account as root resolves it, as profile-explain does (GAP-0500):
+// the gateway service cannot look up a bare directory name on an
+// SSSD-joined host itself, and refused an existing account whose listing
+// was empty (GAP-2035).
+func refuseUnknownIdentityViewAccount(user string) error {
+	query := url.Values{"user": {user}}
+	if facts := enterpriseExplainCallerFacts(user); facts != "" {
+		query.Set("caller_facts", facts)
+	}
+	var answer json.RawMessage
+	if _, err := enterpriseIdentityViewGet("/api/v1/guardrail/profiles/resolve?"+query.Encode(), &answer); err != nil {
 		return enterpriseIdentityViewError(err)
 	}
-	if resolved.Subject.UserID != "" || resolved.LookupError == "" {
+	lookupErr := unresolvedProfileExplainAccount(answer)
+	if lookupErr == "" {
 		return nil
 	}
 	spellings := "the account name, user@domain as id prints it, DOMAIN\\name or the uid"
 	if runtime.GOOS == "windows" {
 		spellings = "the account name, DOMAIN\\name, .\\name or the SID"
 	}
-	return invalidLifecycleArguments(fmt.Errorf("%s; --user takes %s", resolved.LookupError, spellings))
+	return invalidLifecycleArguments(fmt.Errorf("%s; --user takes %s", lookupErr, spellings))
 }
 
 // enterprisePlatformGOOS is the GOOS of an `enterprise <platform>` group.

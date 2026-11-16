@@ -11,7 +11,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +19,7 @@ import (
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -48,7 +48,7 @@ import (
 // windowsCodexStandaloneReleaseName matches install.ps1's release folder
 // "<version>-<target>", with the versions its Assert-ValidReleaseVersion
 // admits and the two Windows targets it installs.
-var windowsCodexStandaloneReleaseName = regexp.MustCompile(
+var windowsCodexStandaloneReleaseName = lazyregexp.New(
 	`^([0-9]+\.[0-9]+\.[0-9]+(?:-alpha(?:\.[0-9]+){0,2}|-beta(?:\.[0-9]+)?)?)-(?:x86_64|aarch64)-pc-windows-msvc$`)
 
 // windowsReadInstallJunction reads a junction's target without following it;
@@ -314,33 +314,51 @@ var (
 // windowsWinGetPackagesBatch is how many names one directory read returns.
 const windowsWinGetPackagesBatch = 256
 
+// Why a WinGet Packages folder was not fully listed.
+const (
+	windowsWinGetScanTooManyEntries = "entries"
+	windowsWinGetScanTimedOut       = "timeout"
+	windowsWinGetScanStillRunning   = "busy"
+)
+
+// windowsWinGetPackageScanKey keys the in-flight scans: the spellings of one
+// folder (case, the \\?\ prefix, an 8.3 short name) share a slot, so a
+// second spelling cannot start a second scan of a stuck folder (GAP-0626).
+func windowsWinGetPackageScanKey(packages string) string {
+	return winpath.ComparisonKey(packages)
+}
+
 // findWindowsWinGetPackageFolder returns the first entry of packages named
-// "<packageID>_<source>" for one of packageIDs, and false when the folder was
-// not fully listed (more than windowsWinGetPackagesMaxEntries entries, or
-// not within windowsWinGetPackagesScanBudget) before one was found.
-func findWindowsWinGetPackageFolder(packages string, packageIDs []string) (string, bool) {
+// "<packageID>_<source>" for one of packageIDs, and false with the reason
+// when the folder was not fully listed before one was found: more than
+// windowsWinGetPackagesMaxEntries entries, not within
+// windowsWinGetPackagesScanBudget, or an earlier scan of the folder that has
+// not returned.
+func findWindowsWinGetPackageFolder(packages string, packageIDs []string) (string, bool, string) {
 	budget, maxEntries := windowsWinGetPackagesScanBudget, windowsWinGetPackagesMaxEntries
 	if budget <= 0 || maxEntries <= 0 {
-		return "", false
+		return "", false, windowsWinGetScanTooManyEntries
 	}
-	key := strings.ToLower(filepath.Clean(packages))
+	// The deadline starts before the key: the key's 8.3 lookup touches the
+	// same storage, so its (bounded) wait counts against the scan budget.
+	deadline := time.Now().Add(budget)
+	key := windowsWinGetPackageScanKey(packages)
 	windowsWinGetPackageScans.Lock()
 	if windowsWinGetPackageScans.inFlight[key] {
 		windowsWinGetPackageScans.Unlock()
-		return "", false
+		return "", false, windowsWinGetScanStillRunning
 	}
 	windowsWinGetPackageScans.inFlight[key] = true
 	windowsWinGetPackageScans.Unlock()
-	deadline := time.Now().Add(budget)
 	readNames := windowsWinGetReadPackageNames
 	type scanResult struct {
-		match    string
-		complete bool
+		match      string
+		incomplete string
 	}
 	results := make(chan scanResult, 1)
 	var active atomic.Pointer[os.File]
 	go func() {
-		match, complete := func() (string, bool) {
+		match, incomplete := func() (string, string) {
 			defer func() {
 				windowsWinGetPackageScans.Lock()
 				delete(windowsWinGetPackageScans.inFlight, key)
@@ -348,27 +366,29 @@ func findWindowsWinGetPackageFolder(packages string, packageIDs []string) (strin
 			}()
 			return scanWindowsWinGetPackageFolder(packages, packageIDs, maxEntries, deadline, readNames, &active)
 		}()
-		results <- scanResult{match, complete}
+		results <- scanResult{match, incomplete}
 	}()
-	timer := time.NewTimer(budget)
+	timer := time.NewTimer(time.Until(deadline))
 	defer timer.Stop()
 	select {
 	case found := <-results:
-		return found.match, found.complete
+		return found.match, found.incomplete == "", found.incomplete
 	case <-timer.C:
 		if dir := active.Load(); dir != nil {
 			// Closing the handle releases an outstanding directory read. Do
 			// not let that close hold up the next account's enumeration.
 			go dir.Close()
 		}
-		return "", false
+		return "", false, windowsWinGetScanTimedOut
 	}
 }
 
-func scanWindowsWinGetPackageFolder(packages string, packageIDs []string, maxEntries int, deadline time.Time, readNames func(*os.File, int) ([]string, error), active *atomic.Pointer[os.File]) (string, bool) {
+// scanWindowsWinGetPackageFolder lists packages for a match; the second
+// result is "" when the folder was listed in full, else why it was not.
+func scanWindowsWinGetPackageFolder(packages string, packageIDs []string, maxEntries int, deadline time.Time, readNames func(*os.File, int) ([]string, error), active *atomic.Pointer[os.File]) (string, string) {
 	dir, err := os.Open(packages)
 	if err != nil {
-		return "", true
+		return "", ""
 	}
 	defer dir.Close()
 	active.Store(dir)
@@ -380,27 +400,33 @@ func scanWindowsWinGetPackageFolder(packages string, packageIDs []string, maxEnt
 	listed := 0
 	for {
 		if !time.Now().Before(deadline) {
-			return "", false
+			return "", windowsWinGetScanTimedOut
 		}
 		names, err := readNames(dir, windowsWinGetPackagesBatch)
 		for _, name := range names {
 			listed++
-			if listed > maxEntries || !time.Now().Before(deadline) {
-				return "", false
+			if listed > maxEntries {
+				return "", windowsWinGetScanTooManyEntries
+			}
+			if !time.Now().Before(deadline) {
+				return "", windowsWinGetScanTimedOut
 			}
 			lower := strings.ToLower(name)
 			for _, prefix := range prefixes {
 				if strings.HasPrefix(lower, prefix) {
-					return filepath.Join(packages, name), true
+					return filepath.Join(packages, name), ""
 				}
 			}
 		}
 		if err != nil {
 			// io.EOF: listed in full; any other error lists no more.
-			return "", errors.Is(err, io.EOF)
+			if errors.Is(err, io.EOF) {
+				return "", ""
+			}
+			return "", windowsWinGetScanTimedOut
 		}
 		if listed >= maxEntries {
-			return "", false
+			return "", windowsWinGetScanTooManyEntries
 		}
 	}
 }
@@ -444,16 +470,36 @@ func windowsStandaloneInstalledAgent(profileHome, connectorName string) (string,
 	}
 	packages := filepath.Join(local, "Microsoft", "WinGet", "Packages")
 	if ids := windowsWinGetPackageIDs[connectorName]; len(ids) != 0 && windowsRejectInstallReparseChain(packages) == nil {
-		match, complete := findWindowsWinGetPackageFolder(packages, ids)
+		match, complete, why := findWindowsWinGetPackageFolder(packages, ids)
 		if match != "" {
 			return match, "its WinGet version is read from the user's registry while the user is signed in; the next enumeration after sign-in enrolls the account"
 		}
 		if !complete {
-			return "", fmt.Sprintf("this account was not fully scanned for a per-user WinGet %s install: %s holds more entries than DefenseClaw lists (%d) or did not list within %s; remove the packages the user no longer needs, and the next enumeration scans it again",
-				connectorName, packages, windowsWinGetPackagesMaxEntries, windowsWinGetPackagesScanBudget)
+			return "", windowsWinGetIncompleteScanMessage(connectorName, packages, why)
 		}
 	}
 	return "", ""
+}
+
+// windowsWinGetIncompleteScanMessage says why the user's WinGet Packages
+// folder was not fully scanned and what helps. Only a folder with too many
+// entries is helped by removing packages; a folder whose listing timed out
+// or whose earlier scan has not returned sits on storage that does not
+// answer (an offline redirected profile, for example), where removing
+// packages changes nothing (GAP-0626).
+func windowsWinGetIncompleteScanMessage(connectorName, packages, why string) string {
+	prefix := fmt.Sprintf("this account was not fully scanned for a per-user WinGet %s install: ", connectorName)
+	switch why {
+	case windowsWinGetScanTooManyEntries:
+		return prefix + fmt.Sprintf("%s holds more entries than DefenseClaw lists (%d); remove the packages the user no longer needs, and the next enumeration scans it again",
+			packages, windowsWinGetPackagesMaxEntries)
+	case windowsWinGetScanStillRunning:
+		return prefix + fmt.Sprintf("an earlier listing of %s has not returned, so its storage does not answer; check that the folder (a redirected or network profile folder, for example) is reachable, and the next enumeration scans it again once that listing returns",
+			packages)
+	default:
+		return prefix + fmt.Sprintf("%s did not list within %s; check that the folder (a redirected or network profile folder, for example) is reachable, and the next enumeration scans it again",
+			packages, windowsWinGetPackagesScanBudget)
+	}
 }
 
 // windowsInstallPathPresent reports whether path exists below a plain folder
@@ -482,11 +528,11 @@ func windowsStandaloneInstallFix(connectorName string) string {
 
 // windowsCodexUnpublishedConsequence is the unprotected-agent consequence
 // for Codex while the machine requirements.toml is not published.
-const windowsCodexUnpublishedConsequence = "no user is enrolled for Codex, so Codex's machine requirements.toml is not published and it runs without DefenseClaw hooks"
+const windowsCodexUnpublishedConsequence = "Codex's configured machine requirements.toml is missing; the guardian must restore it, and Codex runs without DefenseClaw hooks until then"
 
 // windowsCodexMachinePolicyPublished reports whether Codex's machine
-// requirements.toml is in force. The guardian publishes it only while a user
-// is enrolled for Codex; with none, nothing refuses an unregistered user. A
+// requirements.toml is in force. The guardian keeps it published for a
+// configured Codex connector even when no user is enrolled. A
 // path that cannot be resolved or inspected counts as published, as for
 // Cursor. Replaced in tests.
 var windowsCodexMachinePolicyPublished = func() bool {

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -114,7 +115,7 @@ func runWindowsEnterpriseGuardianDACLRepairWithACL(
 		}
 		repairErr := privilegeErr
 		if repairErr == nil {
-			repairErr = repairWindowsTargetOwnedPathDACLNoFollowWithACL(home, path, target, directory, build)
+			repairErr = repairWindowsTargetOwnedPathNoFollowWithACL(home, path, target, directory, build, true)
 		}
 		token.Close()
 
@@ -163,6 +164,19 @@ func enableWindowsThreadPrivilege(token windows.Token, name string) error {
 // opened with FILE_OPEN_REPARSE_POINT and must be owned by the manifest SID.
 // An attacker therefore cannot redirect LocalSystem DACL repair through a
 // junction to an object outside the profile.
+//
+// The walker (repairWindowsTargetOwnedPathDACLNoFollowWithACL) runs under two
+// identities: directly under the impersonated target token (this wrapper and
+// the managed-plugin repair), and on the dedicated LocalSystem thread of
+// runWindowsEnterpriseGuardianDACLRepairWithACL with SeBackupPrivilege and
+// SeRestorePrivilege enabled (reached through repairWindowsTargetOwnedPathDACL
+// and the managed-plugin service repair).
+// Under the target token no ownership is transferred: every element's owner
+// must already be the target SID (or, for the profile root, a profile-anchor
+// owner), and only the DACL is rewritten. The LocalSystem thread may first
+// hand an administrator-owned or orphaned-SID element back to the target
+// (reclaimWindowsGuardianACLOwner); every element is then held to the same
+// owner rule.
 func repairWindowsTargetOwnedPathDACLNoFollow(
 	home string,
 	path string,
@@ -179,8 +193,59 @@ func repairWindowsTargetOwnedPathDACLNoFollowWithACL(
 	directory bool,
 	build windowsGuardianACLBuilder,
 ) error {
+	return repairWindowsTargetOwnedPathNoFollowWithACL(home, path, target, directory, build, false)
+}
+
+// repairWindowsTargetOwnedPathNoFollowWithACL is the shared walk. With
+// reclaimOwner (only the LocalSystem thread holding backup and restore
+// privileges sets it), an element owned by SYSTEM, Administrators or
+// TrustedInstaller (left by an elevated agent, CLI or backup restore) or by an
+// account SID that no longer resolves (a migrated or re-provisioned profile)
+// is handed back to the target before validation. A resolvable foreign owner
+// is never adopted, and reparse points and hard links are refused before any
+// owner change.
+func repairWindowsTargetOwnedPathNoFollowWithACL(
+	home string,
+	path string,
+	target *windows.SID,
+	directory bool,
+	build windowsGuardianACLBuilder,
+	reclaimOwner bool,
+) error {
 	if build == nil {
 		return fmt.Errorf("enterprise hooks: DACL repair has no target DACL")
+	}
+	return withWindowsTargetOwnedHandleNoFollow(home, path, target, directory, reclaimOwner, func(handle windows.Handle) error {
+		acl, err := build(target, directory)
+		if err != nil {
+			return err
+		}
+		if err := setWindowsObjectDACLNoPropagation(handle, acl, directory); err != nil {
+			return fmt.Errorf("enterprise hooks: restore canonical target DACL by handle: %w", err)
+		}
+		return nil
+	})
+}
+
+// Bind both inspection and mutation to the same no-follow handle, walking
+// every child relative to the verified profile root. Teardown uses this too:
+// checking a pathname and then opening it for WRITE_DAC can follow a parent
+// junction substituted between those operations.
+func withWindowsTargetOwnedDACLHandleNoFollow(home, path string, target *windows.SID, directory bool, apply func(windows.Handle) error) error {
+	return withWindowsTargetOwnedHandleNoFollow(home, path, target, directory, false, apply)
+}
+
+// withWindowsTargetOwnedHandleNoFollow is withWindowsTargetOwnedDACLHandleNoFollow
+// with the reclaimOwner step of repairWindowsTargetOwnedPathNoFollowWithACL.
+func withWindowsTargetOwnedHandleNoFollow(
+	home, path string,
+	target *windows.SID,
+	directory bool,
+	reclaimOwner bool,
+	apply func(windows.Handle) error,
+) error {
+	if apply == nil {
+		return errors.New("enterprise hooks: DACL handle operation is missing")
 	}
 	homeAbs, err := filepath.Abs(home)
 	if err != nil {
@@ -236,9 +301,15 @@ func repairWindowsTargetOwnedPathDACLNoFollowWithACL(
 
 	for index, part := range parts {
 		final := index == len(parts)-1
-		child, err := openWindowsGuardianACLChild(handle, part, final, directory)
+		child, err := openWindowsGuardianACLChildAccess(handle, part, final, directory, reclaimOwner)
 		if err != nil {
 			return fmt.Errorf("enterprise hooks: open DACL repair path element %q: %w", part, err)
+		}
+		if reclaimOwner {
+			if err := reclaimWindowsGuardianACLOwner(child, target, filepath.Join(homeAbs, filepath.Join(parts[:index+1]...))); err != nil {
+				_ = windows.CloseHandle(child)
+				return fmt.Errorf("enterprise hooks: reclaim owner of path element %q: %w", part, err)
+			}
 		}
 		if err := validateWindowsGuardianACLHandle(child, target, !final || directory, final, false); err != nil {
 			_ = windows.CloseHandle(child)
@@ -252,14 +323,10 @@ func repairWindowsTargetOwnedPathDACLNoFollowWithACL(
 		handle = child
 	}
 
-	acl, err := build(target, directory)
-	if err != nil {
-		return err
-	}
-	if err := setWindowsObjectDACLNoPropagation(handle, acl, directory); err != nil {
-		return fmt.Errorf("enterprise hooks: restore canonical target DACL by handle: %w", err)
-	}
-	return nil
+	// The final handle has WRITE_DAC, and WRITE_OWNER only when the
+	// LocalSystem thread reclaims ownership. Inspection and the
+	// DACL-only write happen before it closes, after the owner/link checks.
+	return apply(handle)
 }
 
 // setWindowsObjectDACLNoPropagation replaces the protected DACL of exactly the
@@ -372,6 +439,9 @@ func windowsSDDLACEFlags(flags uint8) string {
 // windowsRecoverSetupRelaxedHookDirectory is replaceable in tests.
 var windowsRecoverSetupRelaxedHookDirectory = recoverWindowsSetupRelaxedHookDirectory
 
+// windowsRecoverSetupRelaxedDataDirectory is a seam for tests.
+var windowsRecoverSetupRelaxedDataDirectory = recoverWindowsSetupRelaxedDataDirectory
+
 // recoverWindowsSetupRelaxedHookDirectory restores the canonical managed DACL
 // on <dataDir>\hooks when a guardian stopped between relaxing that directory
 // for a connector setup and hardening it again (for example when a lifecycle
@@ -393,6 +463,35 @@ func recoverWindowsSetupRelaxedHookDirectory(dataDir string, target *windows.SID
 	if !filepath.IsAbs(dataDir) || filepath.Clean(dataDir) != dataDir {
 		return false, fmt.Errorf("enterprise hooks: hooks directory recovery needs an absolute clean data directory: %s", dataDir)
 	}
+	return runWindowsSetupRelaxRecovery(dataDir, target, recoverWindowsSetupRelaxedHookDirectoryPrivileged)
+}
+
+// recoverWindowsSetupRelaxedDataDirectory is recoverWindowsSetupRelaxedHookDirectory
+// for <dataDir> itself, which a guardian relaxes for a Hermes setup (Hermes
+// keeps its lifecycle lock there): a guardian stopped before it hardened it
+// again left LocalSystem and OWNER RIGHTS full control (OI|CI) on the user's
+// .defenseclaw folder, and every later retire and publication for that
+// account refused the folder, so Setup /repair failed 1603 (GAP-1334). Only
+// a plain target-owned directory whose DACL is exactly that setup shape
+// changes; its hooks child is left to recoverWindowsSetupRelaxedHookDirectory.
+func recoverWindowsSetupRelaxedDataDirectory(dataDir string, target *windows.SID) (bool, error) {
+	if target == nil {
+		return false, errors.New("enterprise hooks: target SID is unavailable for data directory recovery")
+	}
+	if !filepath.IsAbs(dataDir) || filepath.Clean(dataDir) != dataDir {
+		return false, fmt.Errorf("enterprise hooks: data directory recovery needs an absolute clean data directory: %s", dataDir)
+	}
+	return runWindowsSetupRelaxRecovery(dataDir, target, recoverWindowsSetupRelaxedDataDirectoryPrivileged)
+}
+
+// runWindowsSetupRelaxRecovery runs recover on a dedicated locked thread with
+// its own impersonation token, so the backup and restore privileges it
+// enables never reach another goroutine.
+func runWindowsSetupRelaxRecovery(
+	dataDir string,
+	target *windows.SID,
+	recover func(string, *windows.SID) (bool, error),
+) (bool, error) {
 	type outcome struct {
 		changed bool
 		err     error
@@ -405,7 +504,7 @@ func recoverWindowsSetupRelaxedHookDirectory(dataDir string, target *windows.SID
 			result <- outcome{err: fmt.Errorf("enterprise hooks: create dedicated hooks recovery token: %w", err)}
 			return
 		}
-		changed, err := recoverWindowsSetupRelaxedHookDirectoryPrivileged(dataDir, target)
+		changed, err := recover(dataDir, target)
 		if revertErr := windows.RevertToSelf(); revertErr != nil {
 			// Do not return a still-privileged thread to the runtime pool.
 			result <- outcome{changed: changed, err: errors.Join(
@@ -419,6 +518,57 @@ func recoverWindowsSetupRelaxedHookDirectory(dataDir string, target *windows.SID
 	}()
 	out := <-result
 	return out.changed, out.err
+}
+
+func recoverWindowsSetupRelaxedDataDirectoryPrivileged(dataDir string, target *windows.SID) (bool, error) {
+	if err := enableWindowsSetupRelaxRecoveryPrivileges(); err != nil {
+		return false, err
+	}
+	root, err := openWindowsGuardianACLRoot(dataDir, true)
+	if err != nil {
+		return false, err
+	}
+	defer windows.CloseHandle(root)
+	if err := validateWindowsGuardianACLHandle(root, target, true, true, false); err != nil {
+		return false, fmt.Errorf("enterprise hooks: reject managed runtime data directory %s: %w", dataDir, err)
+	}
+	sd, err := windows.GetSecurityInfo(root, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false, fmt.Errorf("enterprise hooks: read DACL of %s: %w", dataDir, err)
+	}
+	relaxed, err := windowsSetupRelaxedDirectoryDACL(sd)
+	if err != nil || !relaxed {
+		return false, err
+	}
+	acl, err := windowsUserPathProtectionACL(target, true)
+	if err != nil {
+		return false, err
+	}
+	if err := setWindowsObjectDACLNoPropagation(root, acl, true); err != nil {
+		return false, fmt.Errorf("enterprise hooks: restore canonical DACL on %s: %w", dataDir, err)
+	}
+	return true, nil
+}
+
+// enableWindowsSetupRelaxRecoveryPrivileges enables backup and restore on
+// the calling thread's impersonation token (runWindowsSetupRelaxRecovery).
+func enableWindowsSetupRelaxRecoveryPrivileges() error {
+	var token windows.Token
+	if err := windows.OpenThreadToken(
+		windows.CurrentThread(),
+		windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY,
+		false,
+		&token,
+	); err != nil {
+		return fmt.Errorf("enterprise hooks: open hooks recovery token: %w", err)
+	}
+	defer token.Close()
+	for _, privilege := range []string{"SeBackupPrivilege", "SeRestorePrivilege"} {
+		if err := enableWindowsThreadPrivilege(token, privilege); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func recoverWindowsSetupRelaxedHookDirectoryPrivileged(dataDir string, target *windows.SID) (bool, error) {
@@ -557,6 +707,16 @@ func openWindowsGuardianACLChild(
 	final bool,
 	directory bool,
 ) (windows.Handle, error) {
+	return openWindowsGuardianACLChildAccess(parent, name, final, directory, false)
+}
+
+func openWindowsGuardianACLChildAccess(
+	parent windows.Handle,
+	name string,
+	final bool,
+	directory bool,
+	writeOwner bool,
+) (windows.Handle, error) {
 	objectName, err := windows.NewNTUnicodeString(name)
 	if err != nil {
 		return 0, err
@@ -573,10 +733,19 @@ func openWindowsGuardianACLChild(
 			windows.FILE_OPEN_FOR_BACKUP_INTENT,
 	)
 	if final {
+		// DACL-only access. Callers run under the target token or on the
+		// LocalSystem guardian thread (SeBackupPrivilege +
+		// SeRestorePrivilege). WRITE_OWNER is requested only by that
+		// thread (writeOwner) to reclaim an administrator-owned or
+		// orphaned-SID element; the element must be target-owned before
+		// its DACL is rewritten.
 		access |= windows.WRITE_DAC | windows.FILE_READ_ATTRIBUTES
 	} else {
 		access |= windows.FILE_READ_ATTRIBUTES | windows.FILE_LIST_DIRECTORY | windows.SYNCHRONIZE
 		options |= windows.FILE_DIRECTORY_FILE | windows.FILE_SYNCHRONOUS_IO_NONALERT
+	}
+	if writeOwner {
+		access |= windows.WRITE_OWNER | windows.FILE_READ_ATTRIBUTES
 	}
 	var handle windows.Handle
 	var status windows.IO_STATUS_BLOCK
@@ -614,6 +783,20 @@ func validateWindowsGuardianACLHandle(
 		ownerOK = windowsEnterpriseProfileAnchorOwner(owner, target)
 	}
 	if !ownerOK {
+		// No admin reclaim here, under any caller identity. This
+		// validator runs under the target token (the no-follow walker's
+		// direct callers, target-directory and runtime-setup checks) and
+		// under LocalSystem (the guardian DACL repair thread of
+		// runWindowsEnterpriseGuardianDACLRepairWithACL, and
+		// recoverWindowsSetupRelaxedHookDirectoryPrivileged). The only
+		// owner transfer is the walker's explicit reclaim step: with
+		// reclaimOwner (the LocalSystem thread with backup and restore
+		// privileges), reclaimWindowsGuardianACLOwner hands an
+		// administrator-owned or orphaned-SID element to the target just
+		// before this check. Accepting an admin-owned element here would
+		// only hide drift. Keep the check strict: any owner that is not the
+		// exact target SID (or, for the profile root, the profile-anchor
+		// set) is fatal.
 		return fmt.Errorf(
 			"owner SID %s is not trusted for target SID %s",
 			windowsSIDString(owner),
@@ -664,4 +847,59 @@ func validateWindowsGuardianACLHandle(
 		return fmt.Errorf("expected regular file")
 	}
 	return nil
+}
+
+// reclaimWindowsGuardianACLOwner hands one already opened, no-follow element
+// back to the target when its owner is an administrator principal or an
+// account SID that no longer resolves. Any other owner is left for the
+// validation that follows to report.
+func reclaimWindowsGuardianACLOwner(handle windows.Handle, target *windows.SID, path string) error {
+	owner, err := windowsHandleOwner(handle)
+	if err != nil {
+		return err
+	}
+	if owner != nil && owner.Equals(target) {
+		return nil
+	}
+	if !windowsEnterpriseAdminIdentity(owner) && !windowsOrphanedAccountSID(owner) {
+		return nil
+	}
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return fmt.Errorf("inspect element before owner transfer: %w", err)
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return fmt.Errorf("path element is a reparse point")
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 && info.NumberOfLinks != 1 {
+		return errWindowsManagedHardlink
+	}
+	if err := windows.SetSecurityInfo(
+		handle,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION,
+		target,
+		nil,
+		nil,
+		nil,
+	); err != nil {
+		return fmt.Errorf("transfer owner to target: %w", err)
+	}
+	managed.EmitResilienceEvent(managed.MarkerRepair, map[string]string{
+		"sid":            target.String(),
+		"path":           path,
+		"previous_owner": windowsSIDString(owner),
+		"reason":         "user_runtime_owner_reclaimed",
+	})
+	return nil
+}
+
+// windowsOrphanedAccountSID reports a local or domain account SID that no
+// longer maps to an account, as after a domain migration or re-provisioning.
+func windowsOrphanedAccountSID(sid *windows.SID) bool {
+	if sid == nil || !strings.HasPrefix(sid.String(), "S-1-5-21-") {
+		return false
+	}
+	_, _, _, err := sid.LookupAccount("")
+	return errors.Is(err, windows.ERROR_NONE_MAPPED)
 }

@@ -52,11 +52,34 @@ func (e *Env) selinuxEnabled() bool {
 	return e.GOOS == "linux" && exists(e.P("/sys/fs/selinux/enforce"))
 }
 
-// selinuxModuleLoaded reports whether the policy store holds the module, at
-// any priority and for any policy type.
+// selinuxModuleLoaded reports whether the active policy store holds the
+// module, at any priority. A store of another policy type is not the one
+// the kernel loads, so a module there does not count (p0 GAP-1184).
 func (e *Env) selinuxModuleLoaded() bool {
-	matches, _ := filepath.Glob(e.P(filepath.Join("/var/lib/selinux/*/active/modules/*", selinuxpolicy.ModuleName)))
+	matches, _ := filepath.Glob(e.P(filepath.Join("/var/lib/selinux", e.selinuxPolicyType(), "active/modules/*", selinuxpolicy.ModuleName)))
 	return len(matches) > 0
+}
+
+// selinuxPolicyType is the SELINUXTYPE of /etc/selinux/config, the policy
+// store semodule writes and the kernel loads. Like libselinux it falls back
+// to "targeted" when the file or the key is missing, and a value that is not
+// a plain name is not used.
+func (e *Env) selinuxPolicyType() string {
+	const fallback = "targeted"
+	raw, err := readBounded(e.P("/etc/selinux/config"), 64<<10)
+	if err != nil {
+		return fallback
+	}
+	policyType := ""
+	for _, line := range strings.Split(string(raw), "\n") {
+		if key, value, ok := strings.Cut(strings.TrimSpace(line), "="); ok && strings.TrimSpace(key) == "SELINUXTYPE" {
+			policyType = strings.Trim(strings.TrimSpace(value), `"'`)
+		}
+	}
+	if policyType == "" || policyType == "." || policyType == ".." || strings.ContainsAny(policyType, `/\*?[`) {
+		return fallback
+	}
+	return policyType
 }
 
 // selinuxModuleStale reports an SELinux host whose policy store does not

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -117,6 +118,108 @@ func TestStandaloneGatewayConfigCheckAsksTheServiceAccount(t *testing.T) {
 	}
 }
 
+func TestStandaloneRepairRollbackCompileAllowsACLDriftButRejectsInvalidConfig(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := os.Chmod(dataDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" {
+		if err := managed.ValidateTrustedServiceRuntimeDir(dataDir, "managed data_dir", ""); err == nil {
+			t.Fatal("test runtime directory did not have the intended trust drift")
+		}
+	}
+	configDir := t.TempDir()
+	pack := filepath.Join(configDir, "bundles", "pack")
+	if err := os.MkdirAll(pack, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pack, "suppressions.yaml"),
+		[]byte("version: 1\npre_judge_strips: []\nfinding_suppressions: []\ntool_suppressions: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(configDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(strings.Replace(standaloneGatewayCheckConfig,
+		`  rule_pack_dir: ""`, "  rule_pack_dir: '"+pack+"'", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(managed.WindowsServiceAccountEnv, `NT SERVICE\DefenseClawGateway`)
+	restoreRead := standaloneServiceCanReadTree
+	t.Cleanup(func() { standaloneServiceCanReadTree = restoreRead })
+	standaloneServiceCanReadTree = func(string, string, string) error {
+		return errors.New("service SID lost rule-pack read access")
+	}
+	compiled, err := compileStandaloneGatewayRepairRollbackConfig(configPath, dataDir)
+	if err != nil {
+		t.Fatalf("repair rollback preflight refused ACL drift: %v", err)
+	}
+	if _, ok := compiled.Guardrail.Connectors["codex"]; !ok {
+		t.Fatal("repair rollback preflight dropped the configured Codex connector")
+	}
+	if _, ok := compiled.Guardrail.Connectors["claudecode"]; !ok {
+		t.Fatal("repair rollback preflight dropped the configured Claude Code connector")
+	}
+	if err := validateStandaloneGatewayConfig(configPath, dataDir, ""); err == nil ||
+		!strings.Contains(err.Error(), "service SID lost rule-pack read access") {
+		t.Fatalf("strict startup check ignored service read drift: %v", err)
+	}
+	badBind := writeStandaloneGatewayCheckConfig(t, strings.Replace(standaloneGatewayCheckConfig,
+		"api_bind: 127.0.0.1", "api_bind: 0.0.0.0", 1))
+	if _, err := compileStandaloneGatewayRepairRollbackConfig(badBind, dataDir); err == nil ||
+		!strings.Contains(err.Error(), "gateway API must bind") {
+		t.Fatalf("repair rollback preflight accepted a non-loopback listener: %v", err)
+	}
+	invalid := writeStandaloneGatewayCheckConfig(t, "config_version: 8\nguardrail:\n\tconnectors: {}\n")
+	if _, err := compileStandaloneGatewayRepairRollbackConfig(invalid, dataDir); err == nil {
+		t.Fatal("repair rollback preflight accepted malformed YAML")
+	}
+}
+
+func TestStandaloneRepairRollbackCompileAllowsUnresolvedServiceSecret(t *testing.T) {
+	t.Setenv("DC_TEST_UNSET_HEC_TOKEN", "")
+	body := standaloneGatewayCheckConfig +
+		"observability:\n  destinations:\n    - name: hec\n      kind: splunk_hec\n" +
+		"      endpoint: https://splunk.example.test\n      token_env: DC_TEST_UNSET_HEC_TOKEN\n"
+	configPath := writeStandaloneGatewayCheckConfig(t, body)
+	if _, err := compileStandaloneGatewayRepairRollbackConfig(configPath, t.TempDir()); err != nil {
+		t.Fatalf("repair rollback preflight refused unresolved gateway-service secret: %v", err)
+	}
+}
+
+func TestStandaloneRepairRollbackCompileChecksJSONLDestinationBeforeStoppingServices(t *testing.T) {
+	// A directory in place of the destination is a config-content error:
+	// restamping the managed runtime cannot turn it into a JSONL file.
+	destination := t.TempDir()
+	body := standaloneGatewayCheckConfig + "observability:\n  destinations:\n" +
+		"    - name: local-copy\n      kind: jsonl\n      path: '" + destination + "'\n"
+	configPath := writeStandaloneGatewayCheckConfig(t, body)
+	if _, err := compileStandaloneGatewayRepairRollbackConfig(configPath, t.TempDir()); err == nil ||
+		!strings.Contains(err.Error(), `destination "local-copy"`) || !strings.Contains(err.Error(), "directory") {
+		t.Fatalf("repair rollback preflight accepted an unusable JSONL destination: %v", err)
+	}
+}
+
+func TestStandaloneRepairRollbackCompileRejectsStaleCustomPackPin(t *testing.T) {
+	configDir := t.TempDir()
+	pack := filepath.Join(configDir, "bundles", "pack")
+	if err := os.MkdirAll(pack, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	suppressions := "version: 1\npre_judge_strips: []\nfinding_suppressions: []\ntool_suppressions: []\n"
+	if err := os.WriteFile(filepath.Join(pack, "suppressions.yaml"), []byte(suppressions), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Replace(strings.Replace(standaloneGatewayCheckConfig, "config_version: 8\n", "config_version: 9\n", 1),
+		`  rule_pack_dir: ""`, "  rule_pack: acme\n  custom_packs:\n    acme:\n      path: '"+pack+"'\n      digest: sha256:"+strings.Repeat("0", 64), 1)
+	configPath := filepath.Join(configDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := compileStandaloneGatewayRepairRollbackConfig(configPath, t.TempDir()); err == nil ||
+		!strings.Contains(err.Error(), "does not match guardrail.custom_packs.acme.digest") {
+		t.Fatalf("repair rollback preflight accepted stale rule-pack pin: %v", err)
+	}
+}
+
 // GAP-1118: a jsonl destination in a folder the gateway service account
 // cannot write is refused before anything changes, naming the folder and the
 // grant it needs; Setup runs as an administrator, who can write it, and the
@@ -145,19 +248,86 @@ func TestStandaloneGatewayConfigCheckRefusesAJSONLFolderTheServiceCannotWrite(t 
 	}
 }
 
+// GAP-1432: a compressing jsonl destination whose rotated files the gateway
+// service account cannot read back is refused; one that does not compress is
+// not asked about.
+func TestStandaloneGatewayConfigCheckRefusesACompressedJSONLTheServiceCannotReadBack(t *testing.T) {
+	folder := t.TempDir()
+	sink := filepath.Join(folder, "sink.jsonl")
+	const account = `NT SERVICE\DefenseClawGateway`
+	t.Setenv(managed.WindowsServiceAccountEnv, account)
+	restoreWrite, restoreRead := standaloneServiceCanWriteFile, standaloneServiceCanReadRotatedFile
+	t.Cleanup(func() { standaloneServiceCanWriteFile, standaloneServiceCanReadRotatedFile = restoreWrite, restoreRead })
+	standaloneServiceCanWriteFile = func(string, string) error { return nil }
+	var asked []string
+	standaloneServiceCanReadRotatedFile = func(path, serviceAccount string) error {
+		asked = append(asked, path+"|"+serviceAccount)
+		return errors.New("the gateway service account " + serviceAccount + " cannot read back the files it rotates in " + folder)
+	}
+	body := standaloneGatewayCheckConfig + "observability:\n  destinations:\n" +
+		"    - name: local-copy\n      kind: jsonl\n      path: '" + sink + "'\n"
+	err := validateStandaloneGatewayConfig(writeStandaloneGatewayCheckConfig(t, body), t.TempDir(), "")
+	if err == nil || !strings.Contains(err.Error(), `destination "local-copy"`) || !strings.Contains(err.Error(), "cannot read back") {
+		t.Fatalf("compressed jsonl the service cannot read back = %v", err)
+	}
+	if len(asked) != 1 || asked[0] != sink+"|"+account {
+		t.Fatalf("service read-back check calls = %q", asked)
+	}
+	asked = nil
+	body += "      rotation:\n        compress: false\n"
+	if err := validateStandaloneGatewayConfig(writeStandaloneGatewayCheckConfig(t, body), t.TempDir(), ""); err != nil {
+		t.Fatalf("uncompressed jsonl = %v", err)
+	}
+	if len(asked) != 0 {
+		t.Fatalf("an uncompressed destination was checked for read-back: %q", asked)
+	}
+}
+
+// GAP-0027: when the destination's folder does not exist yet, the grant names
+// the nearest folder that does (icacls fails on a missing one, rc 2); the
+// gateway creates the rest below it.
+func TestStandaloneGatewayConfigCheckGrantsOnAnExistingFolder(t *testing.T) {
+	folder := t.TempDir()
+	sink := filepath.Join(folder, "missing", "deeper", "events.jsonl")
+	body := standaloneGatewayCheckConfig + "observability:\n  destinations:\n" +
+		"    - name: local-copy\n      kind: jsonl\n      path: '" + sink + "'\n"
+	const account = `NT SERVICE\DefenseClawGateway`
+	t.Setenv(managed.WindowsServiceAccountEnv, account)
+	restore := standaloneServiceCanWriteFile
+	t.Cleanup(func() { standaloneServiceCanWriteFile = restore })
+	standaloneServiceCanWriteFile = func(path, serviceAccount string) error {
+		return errors.New("the gateway service account " + serviceAccount + " cannot create a folder in " + folder)
+	}
+	err := validateStandaloneGatewayConfig(writeStandaloneGatewayCheckConfig(t, body), t.TempDir(), "")
+	if err == nil || !strings.Contains(err.Error(), `icacls "`+folder+`" /grant "`+account+`:(OI)(CI)M"`) ||
+		strings.Contains(err.Error(), `icacls "`+filepath.Join(folder, "missing")) {
+		t.Fatalf("jsonl folder that does not exist yet = %v", err)
+	}
+}
+
 // GAP-0039: a connector that inherits the selected custom pack is not the key
 // a refusal names, and a custom_packs entry nothing selects is not loaded.
 func TestStandaloneGatewayRulePackDirsNameTheKeysTheAdminWrote(t *testing.T) {
+	// A selected entry must be a valid pack its pin matches (config.CustomRulePackError).
+	acme, unused := t.TempDir(), t.TempDir()
+	suppressions := "version: 1\npre_judge_strips: []\nfinding_suppressions: []\ntool_suppressions: []\n"
+	if err := os.WriteFile(filepath.Join(acme, "suppressions.yaml"), []byte(suppressions), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pin, err := guardrail.RulePackDigest(acme)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg := &config.Config{}
 	cfg.Guardrail.RulePack = "acme"
 	cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{
-		"acme":   {Path: "/packs/acme"},
-		"unused": {Path: "/packs/unused"},
+		"acme":   {Path: acme, Digest: "sha256:" + pin},
+		"unused": {Path: unused},
 	}
 	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"amp": {}, "codex": {}}
 	got := standaloneGatewayRulePackDirs(cfg)
-	if len(got) != 1 || got[0].label != "guardrail.rule_pack" || got[0].dir != "/packs/acme" {
-		t.Fatalf("rule pack checks = %+v, want one guardrail.rule_pack /packs/acme", got)
+	if len(got) != 1 || got[0].label != "guardrail.rule_pack" || got[0].dir != acme {
+		t.Fatalf("rule pack checks = %+v, want one guardrail.rule_pack %s", got, acme)
 	}
 }
 
@@ -204,6 +374,26 @@ func TestRulePackNestedCopyHintNamesTheNestedFolder(t *testing.T) {
 	}
 }
 
+// GAP-1566: a nested copy of the default pack (not of the pack itself) is
+// named by its full path as the folder to move or remove.
+func TestRulePackNestedCopyHintNamesAStrayFolder(t *testing.T) {
+	pack := filepath.Join(t.TempDir(), "teampack")
+	if err := os.MkdirAll(filepath.Join(pack, "default", "judge"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stray := &guardrail.RulePackError{Path: "default/judge/injection.yaml", Code: "inventory_unexpected", Reason: "unexpected YAML component"}
+	hint := rulePackNestedCopyHint(pack, fmt.Errorf("wrapped: %w", stray))
+	if !strings.Contains(hint, "the stray folder is "+filepath.Join(pack, "default")) ||
+		!strings.Contains(hint, "move it out of the pack folder or remove it") || strings.Contains(hint, "inside itself") {
+		t.Fatalf("hint = %q", hint)
+	}
+	for _, rel := range []string{"judge/custom.yaml", "rules/x/y.yaml", "top.yaml"} {
+		if got := rulePackNestedCopyHint(pack, &guardrail.RulePackError{Path: rel, Code: "inventory_unexpected"}); got != "" {
+			t.Fatalf("%s got hint %q, want none (the reason names the file)", rel, got)
+		}
+	}
+}
+
 // GAP-0932: inline secrets are refused naming every rejected key, never a
 // value, and how to store a secret; before, Windows Setup said only
 // "configuration could not be compiled safely" at $.
@@ -215,6 +405,16 @@ func TestStandaloneGatewayConfigCheckNamesInlineSecrets(t *testing.T) {
 		!strings.Contains(err.Error(), "enterprise secret set") || strings.Contains(err.Error(), "FAKE-MARKER") ||
 		strings.Contains(err.Error(), "compiled safely") {
 		t.Fatalf("inline secrets = %v", err)
+	}
+}
+
+// GAP-0647: a managed API bind the gateway refuses at start was installed,
+// failed the transaction and left it pending; it is refused before any change.
+func TestStandaloneGatewayConfigCheckRefusesANonLoopbackAPIBind(t *testing.T) {
+	body := strings.Replace(standaloneGatewayCheckConfig, "  api_bind: 127.0.0.1\n", "  api_bind: 0.0.0.0\n", 1)
+	err := validateStandaloneGatewayConfig(writeStandaloneGatewayCheckConfig(t, body), t.TempDir(), "")
+	if err == nil || !strings.Contains(err.Error(), "0.0.0.0") {
+		t.Fatalf("api_bind 0.0.0.0 = %v, want a refusal", err)
 	}
 }
 
@@ -243,5 +443,40 @@ func TestStandaloneGatewayConfigCheckRejectsUnknownProfileWithMissingToken(t *te
 	err := validateStandaloneGatewayConfig(writeStandaloneGatewayCheckConfig(t, body), t.TempDir(), "")
 	if err == nil || !strings.Contains(err.Error(), "guardrail.default_profile") || !strings.Contains(err.Error(), "unknown profile") {
 		t.Fatalf("unknown profile with unresolved token = %v, want profile refusal", err)
+	}
+}
+
+func TestBuiltinRulePackMissingNamesPolicyDir(t *testing.T) {
+	policyDir := t.TempDir()
+	cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise, PolicyDir: policyDir,
+		ConfigFilePath: `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`}
+	cfg.Enterprise.Profile = "standalone"
+	missing := filepath.Join(policyDir, "guardrail", "strict")
+	err := builtinRulePackMissing(cfg, "config.yaml", missing)
+	if err == nil {
+		t.Fatal("a missing strict folder under policy_dir was not refused")
+	}
+	for _, want := range []string{"directory_not_found", "policy_dir is " + policyDir, "guardrail.custom_packs", "rule_pack: default"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not contain %q", err, want)
+		}
+	}
+	if err := os.MkdirAll(missing, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := builtinRulePackMissing(cfg, "config.yaml", missing); err != nil {
+		t.Errorf("an existing folder was refused: %v", err)
+	}
+	other := filepath.Join(policyDir, "elsewhere", "strict")
+	if err := builtinRulePackMissing(cfg, "config.yaml", other); err != nil {
+		t.Errorf("a folder outside policy_dir/guardrail was claimed: %v", err)
+	}
+	if err := builtinRulePackMissing(cfg, "config.yaml", filepath.Join(policyDir, "guardrail", "default")); err != nil {
+		t.Errorf("the default pack got the strict advice: %v", err)
+	}
+	secure := *cfg
+	secure.Enterprise.Profile = "secure_client"
+	if err := builtinRulePackMissing(&secure, "config.yaml", filepath.Join(policyDir, "guardrail", "permissive")); err != nil {
+		t.Errorf("secure client got the standalone refusal: %v", err)
 	}
 }

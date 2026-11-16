@@ -220,6 +220,62 @@ func TestScanV8FailureUsesFailedFamilyWithoutInventingFindingStatus(t *testing.T
 	}
 }
 
+func TestScanV8ErrorSummaryIsOnePrintableLine(t *testing.T) {
+	for _, tc := range []struct {
+		name, source, want string
+	}{
+		{
+			name:   "scanner diagnostic with controls",
+			source: "scan failed: \x1b]0;title\x07 recheck\x00 after\tidle\r\n\u202e",
+			want:   "scan failed: ]0;title recheck after idle",
+		},
+		{
+			name:   "ordinary diagnostic",
+			source: "scan failed: process unavailable",
+			want:   "scan failed: process unavailable",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logger := newTestLogger(t)
+			runtime := &scanTraceCapturingRuntime{
+				testRuntimeV8Emitter: newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary),
+			}
+			logger.SetRuntimeV8Emitter(runtime)
+			result := &scanner.ScanResult{
+				Scanner: "mcp-scanner", Target: "mcp/example", TargetType: "mcp",
+				Timestamp: time.Now().UTC(), Duration: time.Millisecond,
+				ExitCode: 1, ScanError: tc.source,
+			}
+			if err := logger.LogScan(result); err != nil {
+				t.Fatal(err)
+			}
+			_, records := runtime.snapshot()
+			if len(records) != 1 {
+				t.Fatalf("scan records = %d, want 1", len(records))
+			}
+			if got := securityActionBody(t, records[0])["defenseclaw.scan.error_summary"]; got != tc.want {
+				t.Errorf("scan error_summary = %q, want %q", got, tc.want)
+			}
+			if len(runtime.traces) != 1 {
+				t.Fatalf("scan traces = %d, want 1", len(runtime.traces))
+			}
+			if got, ok := runtime.traces[0].DefenseClawScanErrorSummary.Get(); !ok || got != tc.want {
+				t.Errorf("trace error_summary = %q (present %t), want %q", got, ok, tc.want)
+			}
+			var stored string
+			if err := logger.store.db.QueryRow("SELECT error FROM scan_results WHERE id = ?", result.ScanID).Scan(&stored); err != nil {
+				t.Fatal(err)
+			}
+			if stored != tc.want {
+				t.Errorf("forensic scan error = %q, want %q", stored, tc.want)
+			}
+			if result.ScanError != tc.source {
+				t.Errorf("scanner diagnostic changed: %q", result.ScanError)
+			}
+		})
+	}
+}
+
 func TestScanV8RepeatedAssetFindingOnlyEmitsLifecycleChanges(t *testing.T) {
 	logger := newTestLogger(t)
 	runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)

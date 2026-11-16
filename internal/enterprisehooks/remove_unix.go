@@ -18,7 +18,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -77,7 +79,7 @@ func RemoveUserHooks(ctx context.Context, opts InstallOptions) error {
 	return connector.WithUserHomeDir(home, func() error {
 		return withOwnerCredentials(uid, gid, func() error {
 			return connector.RemovalLeavingNoNewDirs(conn, setupOpts, func() error {
-				return removeUserHooksAs(ctx, conn, setupOpts, dataDir)
+				return removeUserHooksAs(ctx, conn, setupOpts, home, dataDir)
 			})
 		})
 	})
@@ -85,12 +87,25 @@ func RemoveUserHooks(ctx context.Context, opts InstallOptions) error {
 
 // removeUserHooksAs is RemoveUserHooks' removal, run with the user's
 // credentials and home.
-func removeUserHooksAs(ctx context.Context, conn connector.Connector, setupOpts connector.SetupOpts, dataDir string) error {
+func removeUserHooksAs(ctx context.Context, conn connector.Connector, setupOpts connector.SetupOpts, home, dataDir string) error {
 	if err := conn.Teardown(ctx, setupOpts); err != nil {
 		return fmt.Errorf("enterprise hooks: connector %s teardown failed: %w", conn.Name(), err)
 	}
+	// The agent folders the install created for this connector, and its
+	// connector_backups folder, go once empty (rel-1-0-6 GAP-0207).
+	connector.RemoveCreatedDirsOf(conn, setupOpts)
+	// A hooks folder this account cannot search (a root-owned
+	// ~/.defenseclaw/hooks made by sudo with HOME kept) holds nothing the
+	// account's agents can read or run, and nothing this worker can remove
+	// or lock (the contract lock is taken in that folder): with the
+	// registration gone, its files are not a failure (GAP-1978, same class
+	// as GAP-1904). The purge then reports the per-user state it keeps.
+	hooksDir := filepath.Join(dataDir, "hooks")
+	if hookFolderUnsearchable(hooksDir) {
+		return nil
+	}
 	// The connector's hook credential goes with its registration.
-	if tokenPath, err := connector.HookTokenFilePath(filepath.Join(dataDir, "hooks"), conn.Name()); err == nil {
+	if tokenPath, err := connector.HookTokenFilePath(hooksDir, conn.Name()); err == nil {
 		if err := os.Remove(tokenPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("enterprise hooks: remove %s hook credential: %w", conn.Name(), err)
 		}
@@ -98,38 +113,53 @@ func removeUserHooksAs(ctx context.Context, conn connector.Connector, setupOpts 
 	if err := connector.ClearHookContractLockEntry(dataDir, conn.Name()); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("enterprise hooks: clear hook contract lock for %s: %w", conn.Name(), err)
 	}
+	// The account's last connector takes the shared hook scripts with it,
+	// checked while no install of another connector is under way.
+	unlock, err := lockSharedHookRuntime(ctx, home)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := connector.RemoveUnusedSharedHookRuntime(dataDir); err != nil {
+		return fmt.Errorf("enterprise hooks: remove the unused shared hook runtime: %w", err)
+	}
 	return nil
 }
 
-// PurgeUserState removes one account's DefenseClaw per-user state for the
-// standalone Unix uninstall --purge, in the per-user worker with the
-// account's credentials, after RemoveUserHooks ran for its manifest
-// targets. A connector that still keeps DefenseClaw's backups (one set up by
-// an earlier route, or disabled before the uninstall) is torn down first, so
-// the files DefenseClaw changed get their content back before the backups
-// go; if any teardown fails, the state stays for a rerun. Then all of
-// ~/.defenseclaw goes, including the hook scripts and the account's own
-// hooks the foreign-hook policy moved aside (see connector.PurgeUserState),
-// and so do the binaries and launcher links the per-user install put in
-// ~/.local/bin (see RemoveUserBinaries) and DefenseClaw's entries in the
-// account's uv cache (see RemoveUserUVCacheEntries). The caller stops the account's
-// per-user gateway first. A home that no longer exists is not an error.
-func PurgeUserState(ctx context.Context, opts InstallOptions) error {
-	_, err := PurgeUserStateSummary(ctx, opts)
-	return err
+// hookFolderUnsearchable reports a hooks folder the running account cannot
+// search: no file in it can be looked up, read or run by that account.
+func hookFolderUnsearchable(hooksDir string) bool {
+	_, err := os.Lstat(filepath.Join(hooksDir, ".defenseclaw-search-probe"))
+	return errors.Is(err, os.ErrPermission)
 }
 
-// PurgeSummary is what PurgeUserStateSummary found and removed, so the
-// uninstall names only that for each account (GAP-1444).
+// PurgeSummary is what PurgeUserState found and removed, so the uninstall
+// names only that for each account (GAP-1444).
 type PurgeSummary struct {
-	// Data reports that ~/.defenseclaw was there and is gone.
+	// Data reports that DefenseClaw-owned entries in ~/.defenseclaw went.
 	Data bool
+	// KeptEntries names account entries that remain after the owned entries
+	// were removed. They are relative to ~/.defenseclaw.
+	KeptEntries []string
+	// Kept reports that ~/.defenseclaw holds the account's own per-user
+	// install from before the managed deployment enrolled it: the purge
+	// leaves that folder and the install's binaries as they are, because a
+	// machine uninstall never deletes or moves an account's own data
+	// (GAP-0727, owner 2026-10-23).
+	Kept bool
 	// Binaries reports that per-user binaries or launcher links in
 	// ~/.local/bin were removed.
 	Binaries bool
 	// UVCache reports that DefenseClaw's entries in ~/.cache/uv were
 	// removed (GAP-1947).
 	UVCache bool
+	// KeptRemovedConnectorBackups names the folders the purge moved the
+	// OpenHands/OmniGent backups to instead of deleting them (GAP-2015).
+	KeptRemovedConnectorBackups []string
+	// KeptUnrestorableConnectorBackups names the folders the purge moved
+	// the connector backup records that name no file to (rel-1-0-2
+	// GAP-0576).
+	KeptUnrestorableConnectorBackups []string
 }
 
 // purgeUserFiles removes the per-user binaries and DefenseClaw's uv cache
@@ -142,8 +172,34 @@ func purgeUserFiles(home, dataDir string, uid int, summary *PurgeSummary) error 
 	return errors.Join(binErr, cacheErr)
 }
 
-// PurgeUserStateSummary is PurgeUserState that also reports what it removed.
-func PurgeUserStateSummary(ctx context.Context, opts InstallOptions) (PurgeSummary, error) {
+// PurgeUserState removes one account's DefenseClaw per-user state for the
+// standalone Unix uninstall --purge, in the per-user worker with the
+// account's credentials, after RemoveUserHooks ran for its manifest
+// targets, and reports what it removed. When the folder holds the account's
+// own per-user install from before the managed deployment enrolled it (its
+// config, secrets, audit history, policies or upgrade backups), the folder,
+// that install's connectors and backups and its binaries stay as they are
+// and the summary says so (Kept): a machine uninstall never deletes or moves
+// an account's own data, and tearing that install's connectors down
+// reverted its agent configs (rel-1-0-6 GAP-0178). Otherwise a connector
+// that still keeps DefenseClaw's backups (one set up by an earlier route, or
+// disabled before the uninstall) is torn down first, so the files
+// DefenseClaw changed get their content back before the backups go; if any
+// teardown fails, the state stays for a rerun. Only the
+// Claude Code blocker the enrollment wrote over the install's hook script
+// goes in both cases (UnblockPersonalClaudeHook). Otherwise
+// known managed entries in ~/.defenseclaw go, including hook scripts and
+// credentials. Unrelated entries and saved originals stay, and the folder
+// goes only if empty (see connector.PurgeUserStateWithResult). The binaries
+// and launcher links in ~/.local/bin (see RemoveUserBinaries) and
+// DefenseClaw's entries in the account's uv cache (see
+// RemoveUserUVCacheEntries) go too. The caller stops the
+// account's per-user gateway first. A home that no longer exists is not an
+// error. The per-user worker runs it only after every Remove of the same job
+// was checked clean (GAP-0632), and it keeps the state while a connector
+// backup stays after the teardowns: that backup belongs to a file DefenseClaw
+// left for the account (rel-1-0-3 GAP-0258).
+func PurgeUserState(ctx context.Context, opts InstallOptions) (PurgeSummary, error) {
 	var summary PurgeSummary
 	if err := refuseStandaloneRootInProcess("purge"); err != nil {
 		return summary, err
@@ -173,8 +229,8 @@ func PurgeUserStateSummary(ctx context.Context, opts InstallOptions) (PurgeSumma
 	if rel, err := filepath.Rel(home, dataDir); err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return summary, fmt.Errorf("enterprise hooks: refusing to purge %s, which is not inside the user home %s", dataDir, home)
 	}
-	// The purge deletes everything in the folder, so only DefenseClaw's own
-	// folder, and never through a link, which would name the user's files.
+	// The purge enters only DefenseClaw's own folder and never follows a
+	// link, which could name a different account's files.
 	if filepath.Base(dataDir) != ".defenseclaw" {
 		return summary, fmt.Errorf("enterprise hooks: refusing to purge %s, which is not a .defenseclaw folder", dataDir)
 	}
@@ -194,6 +250,26 @@ func PurgeUserStateSummary(ctx context.Context, opts InstallOptions) (PurgeSumma
 	}
 	err = connector.WithUserHomeDir(home, func() error {
 		return withOwnerCredentials(uid, gid, func() error {
+			// The account's own per-user install keeps its folder, and its
+			// connectors keep their backups and registrations: tearing them
+			// down reverted its agent configs to their content from before
+			// that install and deleted its backups (rel-1-0-6 GAP-0178).
+			own, err := HoldsPerUserInstall(dataDir)
+			if err != nil {
+				return fmt.Errorf("enterprise hooks: kept the per-user state, because it could not be read: %w", err)
+			}
+			if own {
+				if _, _, err := UnblockPersonalClaudeHook(dataDir); err != nil {
+					return fmt.Errorf("enterprise hooks: kept the per-user state, because the managed Claude Code blocker could not be removed: %w", err)
+				}
+				summary.Kept = true
+				return nil
+			}
+			unrestorable, err := moveUnrestorableConnectorBackupsOut(dataDir)
+			summary.KeptUnrestorableConnectorBackups = unrestorable
+			if err != nil {
+				return fmt.Errorf("enterprise hooks: kept the per-user state: %w", err)
+			}
 			names, err := connector.BackedUpConnectors(dataDir)
 			if err != nil {
 				return fmt.Errorf("enterprise hooks: list connector backups: %w", err)
@@ -212,15 +288,162 @@ func PurgeUserStateSummary(ctx context.Context, opts InstallOptions) (PurgeSumma
 			if len(failed) > 0 {
 				return fmt.Errorf("enterprise hooks: kept the per-user state for its backups: %w", errors.Join(failed...))
 			}
-			if err := connector.PurgeUserState(dataDir); err != nil {
+			if err := keptManagedBackupsError(dataDir); err != nil {
+				return err
+			}
+			if _, _, err := UnblockPersonalClaudeHook(dataDir); err != nil {
+				return fmt.Errorf("enterprise hooks: kept the per-user state, because the managed Claude Code blocker could not be removed: %w", err)
+			}
+			kept, err := moveRemovedConnectorBackupsOut(dataDir)
+			summary.KeptRemovedConnectorBackups = kept
+			if err != nil {
+				return fmt.Errorf("enterprise hooks: kept the per-user state: %w", err)
+			}
+			purged, err := connector.PurgeUserStateWithResult(dataDir)
+			if err != nil {
 				return fmt.Errorf("enterprise hooks: remove the per-user state: %w", err)
 			}
-			summary.Data = true
+			summary.Data = purged.Removed
+			summary.KeptEntries = purged.Kept
 			removeStaleHookTempEntries(uid, os.TempDir(), filepath.Join(home, ".hermes", "cache", "scratch"))
 			return purgeUserFiles(home, dataDir, uid, &summary)
 		})
 	})
 	return summary, err
+}
+
+// PersonalClaudeHookBlocker is the script a managed enrollment writes over
+// the account's own DefenseClaw Claude Code hook script
+// (~/.defenseclaw/hooks/claude-code-hook.sh) while the machine policy covers
+// Claude Code: the account's ~/.claude/settings.json can still run that
+// script, and it must deny instead of allowing on a stopped personal
+// gateway. It is right only while the computer is managed.
+const PersonalClaudeHookBlocker = "#!/bin/sh\n# defenseclaw-managed-hook v0\necho 'defenseclaw: this computer is managed; the personal Claude Code hook cannot approve this call' >&2\nexit 2\n"
+
+// PersonalClaudeHookCopyName is the file in ~/.defenseclaw that keeps the
+// bytes and mode of the account's own DefenseClaw Claude Code hook script
+// while the enrollment's blocker stands in its place, so that the uninstall
+// puts the script back byte for byte (rel-1-0-6 GAP-0178).
+const PersonalClaudeHookCopyName = "claude-code-hook.sh.before-managed"
+
+// personalClaudeHookMaxBytes bounds the personal hook script and its copy.
+const personalClaudeHookMaxBytes = 1 << 20
+
+// UnblockPersonalClaudeHook removes the enrollment's Claude Code blocker
+// (removePersonalClaudeHookBlocker) and then puts the account's own hook
+// script back from the copy the enrollment kept when it wrote the blocker
+// (restorePersonalClaudeHookCopy). restored reports the put-back.
+func UnblockPersonalClaudeHook(dataDir string) (removed, restored bool, err error) {
+	removed, err = removePersonalClaudeHookBlocker(dataDir)
+	if err != nil {
+		return removed, false, err
+	}
+	restored, err = restorePersonalClaudeHookCopy(dataDir)
+	return removed, restored, err
+}
+
+// restorePersonalClaudeHookCopy renames the kept copy back to
+// hooks/claude-code-hook.sh when no script is there (the blocker is gone),
+// which keeps its bytes and mode. A script that is there again (the account
+// ran its own setup) makes the copy stale, and the copy goes. A copy that is
+// not a regular file, is too large, or that the account cannot read is left
+// alone; so is a missing hooks folder.
+func restorePersonalClaudeHookCopy(dataDir string) (bool, error) {
+	copyPath := filepath.Join(dataDir, PersonalClaudeHookCopyName)
+	info, err := os.Lstat(copyPath)
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, os.ErrPermission) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect %s: %w", copyPath, err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > personalClaudeHookMaxBytes {
+		return false, nil
+	}
+	path := filepath.Join(dataDir, "hooks", "claude-code-hook.sh")
+	if _, err := os.Lstat(path); err == nil {
+		if err := os.Remove(copyPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return false, fmt.Errorf("remove the stale %s: %w", copyPath, err)
+		}
+		return false, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("inspect %s: %w", path, err)
+	}
+	if err := os.Rename(copyPath, path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("put back %s: %w", path, err)
+	}
+	return true, nil
+}
+
+// removePersonalClaudeHookBlocker removes dataDir/hooks/claude-code-hook.sh
+// when its bytes are exactly PersonalClaudeHookBlocker and reports whether it
+// did. Every uninstall runs it as each account, purge or not (rel-1-0-4
+// RB1-1): left in place, the blocker blocks every Claude Code tool call of a
+// personal registration on a computer that is no longer managed. A missing
+// script is a non-blocking hook error for Claude Code, as it was when the
+// purge deleted ~/.defenseclaw; any other script stays as it is. It runs as
+// the account, which wrote the blocker as itself: a folder or script that
+// account cannot read holds no blocker of its own, so it is not a failure
+// (GAP-1904, GAP-1905; a root-owned ~/.defenseclaw made by sudo).
+func removePersonalClaudeHookBlocker(dataDir string) (bool, error) {
+	path := filepath.Join(dataDir, "hooks", "claude-code-hook.sh")
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, os.ErrPermission) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() || info.Size() != int64(len(PersonalClaudeHookBlocker)) {
+		return false, nil
+	}
+	body, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrPermission) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read %s: %w", path, err)
+	}
+	if string(body) != PersonalClaudeHookBlocker {
+		return false, nil
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("remove %s: %w", path, err)
+	}
+	return true, nil
+}
+
+// perUserInstallMarkers are entries that only a per-user DefenseClaw
+// install keeps in ~/.defenseclaw: its config, secrets, audit history, the
+// copy of its data an upgrade keeps for a rollback, and the program the
+// installer (scripts/install.sh) puts there before any `defenseclaw init`:
+// its Python environment and its installer state. The managed enrollment
+// never writes them there (its config, state and binaries live in the
+// machine directories), so one of them means the folder holds the account's
+// own install, initialised or not (rel-1-0-6 GAP-0484: an install that never
+// ran init lost its binaries and environment to the purge).
+var perUserInstallMarkers = []string{"config.yaml", ".env", "audit.db", "previous", ".venv", "installer"}
+
+// HoldsPerUserInstall reports whether dataDir holds one of
+// perUserInstallMarkers: the account's own per-user install, which a purge
+// keeps as it is.
+func HoldsPerUserInstall(dataDir string) (bool, error) {
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	for _, entry := range entries {
+		if slices.Contains(perUserInstallMarkers, entry.Name()) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // removeStaleHookTempEntries removes the account's leftover hook temporary

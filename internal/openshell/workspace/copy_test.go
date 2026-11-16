@@ -366,7 +366,6 @@ func TestCopyReapplyKeepsThePreApplyState(t *testing.T) {
 // what changed since, flags only that, and its apply merges only that, so
 // what the operator took back of the earlier work stays taken back. An
 // undo of the apply starts the next pull from the baseline again (cert
-// hermes:HERMES-5, openhands:MAC-OSH-OH-2: a second session with no edits
 // offered the same three files, the Makefile warning and two questions,
 // then said "nothing to apply").
 func TestCopyPullStartsFromTheLastApply(t *testing.T) {
@@ -1150,7 +1149,7 @@ func TestPullRejectsTamperedBundles(t *testing.T) {
 		},
 	} {
 		err := pullWith(&tamperExec{fakeSandbox: fs, afterCapture: func() { _ = os.RemoveAll(bundle); swap() }}, limit)
-		if err == nil || !(strings.Contains(err.Error(), "not a regular file") || strings.Contains(err.Error(), "bundle has")) {
+		if err == nil || (!(strings.Contains(err.Error(), "not a regular file")) && !(strings.Contains(err.Error(), "bundle has"))) {
 			t.Fatalf("%s accepted: %v", name, err)
 		}
 		_ = os.RemoveAll(bundle)

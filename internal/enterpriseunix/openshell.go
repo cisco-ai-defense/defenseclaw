@@ -82,10 +82,14 @@ import (
 const (
 	codeOpenShell             = "openshell_failed"
 	codeOpenShellPrerequisite = "openshell_prerequisite_missing"
+	codeOpenShellPinRaised    = "openshell_pin_raised"
 	codeLauncherConflict      = "openshell_launcher_conflict"
 	codeSandboxGroups         = "sandbox_user_groups"
 	codeSandboxPending        = "sandbox_pending_restart"
 	codeSandboxUserState      = "sandbox_user_state"
+	// codeLegacySandbox: a legacy sandbox runs unprotected for an account
+	// (describeLegacySandboxes).
+	codeLegacySandbox = "sandbox_legacy_unprotected"
 	// codeDriverFallback: the MicroVM driver can't run on the host, users
 	// get the docker fallback (or the fallback itself lacks something).
 	codeDriverFallback = "openshell_driver_fallback"
@@ -104,8 +108,8 @@ const (
 	userUnitSandboxService = "defenseclaw-sandbox.service"
 	userUnitGatewayService = "defenseclaw-openshell-gateway.service"
 
-	labelSandbox          = "com.cisco.defenseclaw.sandbox"
-	labelOpenShellGateway = "com.cisco.defenseclaw.openshell-gateway"
+	labelSandbox          = openshell.SandboxAgentBase
+	labelOpenShellGateway = openshell.GatewayAgentBase
 )
 
 // openshellSettings are the sandbox settings the lifecycle derives from the
@@ -121,13 +125,19 @@ type openshellSettings struct {
 	// (enterprise.openshell.driver_fallback tightened by openshell.admin):
 	// docker, none, or "" where none applies (macOS, the docker driver).
 	Fallback string
-	// Version is enterprise.openshell.version: an exact version, a range or
-	// "" (any release the DefenseClaw build supports).
-	Version      string
-	GatewayPort  int
-	E2fsprogsDir string
+	// Version is the effective enterprise.openshell.version: an exact version,
+	// a range or "" (any supported release). RaisedFrom keeps a lower pin.
+	Version, RaisedFrom string
+	// FloorConflict says the configured range ends at or below the floor.
+	FloorConflict bool
+	GatewayPort   int
+	E2fsprogsDir  string
 	// TelemetryAllowed is openshell.admin.allow_upstream_telemetry.
 	TelemetryAllowed bool
+	// RequiredFor says openshell.admin or a profile's sandbox section sets
+	// required_for, which the docker_group_members advisory then covers
+	// (GAP-0554).
+	RequiredFor bool
 }
 
 // openshellSettingsOf applies the defaults: prerequisite mode, the macOS
@@ -146,13 +156,36 @@ func openshellSettingsOf(goos string, cfg *config.Config) openshellSettings {
 	s.Driver = o.SandboxDriver(goos)
 	s.Fallback = o.SandboxDriverFallback(goos, cfg.OpenShell.Admin)
 	s.Version = strings.TrimSpace(o.Version)
+	if v, raised, possible := openshell.ManagedVersionPin(s.Version); raised {
+		s.Version, s.RaisedFrom = v, s.Version
+	} else if !possible {
+		s.FloorConflict = true
+	}
 	s.GatewayPort = o.GatewayPort
 	if s.GatewayPort == 0 {
 		s.GatewayPort = config.DefaultEnterpriseOpenShellGatewayPort
 	}
 	s.E2fsprogsDir = o.E2fsprogsDir
 	s.TelemetryAllowed = cfg.OpenShell.Admin.AllowUpstreamTelemetry != nil && *cfg.OpenShell.Admin.AllowUpstreamTelemetry
+	s.RequiredFor = requiredForConfigured(cfg)
 	return s
+}
+
+// requiredForConfigured reports whether openshell.admin or any guardrail
+// profile's sandbox section sets required_for.
+func requiredForConfigured(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	if len(cfg.OpenShell.Admin.RequiredFor) > 0 {
+		return true
+	}
+	for _, p := range cfg.Guardrail.Profiles {
+		if p.Sandbox != nil && len(p.Sandbox.RequiredFor) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // rendered is the gateway configuration these settings render to. driverDir
@@ -255,11 +288,15 @@ type userUnit struct {
 	Source string
 }
 
+// userUnits are the sandbox user units. On macOS each label carries the tag
+// of the gateway the deployment runs (openshell.LaunchAgentLabel), so an
+// upgrade installs jobs of a label macOS has not decided on (GAP-0206).
 func (e *Env) userUnits() []userUnit {
 	if e.GOOS == "darwin" {
+		digest := e.launchAgentDigest()
 		return []userUnit{
-			{Name: labelSandbox, Source: labelSandbox + ".plist"},
-			{Name: labelOpenShellGateway, Source: labelOpenShellGateway + ".plist"},
+			{Name: openshell.LaunchAgentLabel(labelSandbox, digest), Source: labelSandbox + ".plist"},
+			{Name: openshell.LaunchAgentLabel(labelOpenShellGateway, digest), Source: labelOpenShellGateway + ".plist"},
 		}
 	}
 	return []userUnit{
@@ -283,15 +320,102 @@ func (e *Env) userUnitPath(u userUnit, channel string) string {
 // userUnitBytes reads a unit's embedded definition: the user units under
 // packaging/systemd/user and the LaunchAgents under
 // packaging/launchd-standalone/agents, which the system units' embed globs do
-// not carry (UserUnitSource overrides it in tests).
+// not carry (UserUnitSource overrides it in tests). On a managed Mac, a
+// verified packaged gateway copy gets a content-addressed program path, and
+// the plist names the unit's tagged label.
 func (e *Env) userUnitBytes(u userUnit) ([]byte, error) {
 	if e.UserUnitSource != nil {
-		return e.UserUnitSource(u.Source)
+		data, err := e.UserUnitSource(u.Source)
+		if err != nil || e.GOOS != "darwin" {
+			return data, err
+		}
+		return withLaunchAgentLabel(data, u), nil
 	}
 	if e.GOOS == "darwin" {
-		return launchdstandalone.ReadAgentPlist(strings.TrimSuffix(u.Source, ".plist"))
+		data, err := launchdstandalone.ReadAgentPlist(strings.TrimSuffix(u.Source, ".plist"))
+		if err != nil {
+			return nil, err
+		}
+		gateway := filepath.Join(e.Layout.BinDir, binGateway)
+		program, err := e.launchAgentProgram()
+		if err != nil {
+			return nil, err
+		}
+		return withLaunchAgentLabel([]byte(strings.Replace(string(data), gateway, program, 1)), u), nil
 	}
 	return systemdunits.ReadUserUnit(u.Source)
+}
+
+// withLaunchAgentLabel names u's label in the Label of its plist, which
+// the embedded asset gives as the base label.
+func withLaunchAgentLabel(data []byte, u userUnit) []byte {
+	base := strings.TrimSuffix(u.Source, ".plist")
+	return []byte(strings.Replace(string(data), "<string>"+base+"</string>", "<string>"+u.Name+"</string>", 1))
+}
+
+// launchAgentDigest is the SHA-256 of the gateway the LaunchAgents run: the
+// one the plan being applied installs, else the installed one. "" when there
+// is none yet, which keeps the bare base labels.
+func (e *Env) launchAgentDigest() string {
+	if e.agentDigest != "" {
+		return e.agentDigest
+	}
+	digest, _ := sha256File(e.P(filepath.Join(e.Layout.BinDir, binGateway)))
+	return digest
+}
+
+// launchAgentLabel is the installed job label of base: the one whose plist
+// is in /Library/LaunchAgents (openshell.FindLaunchAgent).
+func (e *Env) launchAgentLabel(base string) string {
+	label, _ := openshell.FindLaunchAgent(e.P(openshell.LaunchAgentsDir), base)
+	return label
+}
+
+// strayLaunchAgents are the plists of DefenseClaw's sandbox LaunchAgents in
+// /Library/LaunchAgents that want does not name: those of an earlier label,
+// which 1.0.0 to 1.0.3 and every earlier package installed (GAP-0206).
+func (e *Env) strayLaunchAgents(want map[string]bool) []string {
+	entries, _ := os.ReadDir(e.P(openshell.LaunchAgentsDir))
+	var stray []string
+	for _, entry := range entries {
+		name, ok := strings.CutSuffix(entry.Name(), ".plist")
+		if !ok || !openshell.IsLaunchAgentLabel(labelSandbox, name) && !openshell.IsLaunchAgentLabel(labelOpenShellGateway, name) {
+			continue
+		}
+		path := filepath.Join(openshell.LaunchAgentsDir, entry.Name())
+		if !want[path] {
+			stray = append(stray, path)
+		}
+	}
+	return stray
+}
+
+// launchAgentProgram is the gateway file both macOS LaunchAgents execute: the
+// package's content-addressed copy of the installed gateway when it is there,
+// else the gateway itself. A copy that is not a regular file or differs from
+// the gateway is refused.
+func (e *Env) launchAgentProgram() (string, error) {
+	gateway := filepath.Join(e.Layout.BinDir, binGateway)
+	digest, err := sha256File(e.P(gateway))
+	if os.IsNotExist(err) {
+		return gateway, nil // A fresh non-package payload has not installed the gateway yet.
+	}
+	if err != nil {
+		return "", fmt.Errorf("identify the LaunchAgent gateway: %w", err)
+	}
+	program := filepath.Join(e.Layout.BinDir, "launch-agents", digest, binGateway)
+	info, err := os.Lstat(e.P(program))
+	if os.IsNotExist(err) {
+		return gateway, nil // Older and non-package installations use the canonical path.
+	}
+	if err != nil || !info.Mode().IsRegular() {
+		return "", fmt.Errorf("the packaged LaunchAgent gateway is not a regular file: %s", program)
+	}
+	copyDigest, err := sha256File(e.P(program))
+	if err != nil || copyDigest != digest {
+		return "", fmt.Errorf("the packaged LaunchAgent gateway differs from %s", gateway)
+	}
+	return program, nil
 }
 
 // wantsLinkFor is the symlink that enables the sandbox socket for every
@@ -348,9 +472,12 @@ type openshellPlan struct {
 // removed by the plan's stale list.
 func (l *lifecycle) planOpenShell(p *plan) error {
 	env := l.env
+	if p.payload != nil {
+		env.agentDigest = p.payload.Digests[binGateway]
+	}
 	settings := openshellSettingsOf(env.GOOS, p.config.Loaded)
 	op := &openshellPlan{settings: settings}
-	op.defaultNamespaceBridge = dockerBridgeHolds(env.GOOS, settings, env.loadOpenShellState().Applied)
+	op.defaultNamespaceBridge = dockerBridgeHolds(env.GOOS, settings, l.openShellAppliedForPlan())
 	p.openshell = op
 	l.osPlan = op
 
@@ -366,9 +493,13 @@ func (l *lifecycle) planOpenShell(p *plan) error {
 		}
 		return nil
 	}
+	if settings.FloorConflict {
+		return fmt.Errorf("enterprise.openshell.version %q has no release at or above the OpenShell %s floor; set a range that includes %s or later",
+			settings.Version, openshell.SupportedMin, openshell.SupportedMin)
+	}
 
-	// A setup pin this build cannot install would surface only at a user's
-	// first sandbox run: refuse it here, before anything changes (GAP-0236).
+	// An enabled setup needs a release this build can install. Older releases
+	// refused an enabled setup without that pin too.
 	if settings.Install == config.EnterpriseOpenShellInstallSetup && openshell.TarballPins[settings.Version] == nil {
 		return fmt.Errorf("enterprise.openshell.version %q is not a release this DefenseClaw build can install in setup mode; set it to one of: %s",
 			settings.Version, strings.Join(openshell.PinnedTarballReleases(), ", "))
@@ -397,6 +528,9 @@ func (l *lifecycle) planOpenShell(p *plan) error {
 		op.links = append(op.links, link)
 		if link.Kind == "enable" {
 			op.dirs = append(op.dirs, desiredDir{Path: filepath.Dir(link.Path), Mode: 0o755, Owner: root, External: true})
+		}
+		if link.Kind == "launcher" {
+			op.dirs = append(op.dirs, env.launcherParentDirs()...)
 		}
 	}
 	op.daemonInputs = daemonInputsDigest(units, p.payload, op.digest)
@@ -433,8 +567,22 @@ func (e *Env) planPackagedMacOSSandbox(p *plan, op *openshellPlan) error {
 	}
 	if !e.foreignLauncher() {
 		op.links = append(op.links, desiredLink{Path: e.launcherPath(), Target: e.launcherTarget(), Kind: "launcher"})
+		p.dirs = append(p.dirs, e.launcherParentDirs()...)
 	}
 	return nil
+}
+
+// launcherParentDirs are the shared folders above the launcher, created when
+// absent and recorded so an uninstall removes them once empty, and only
+// then (GAP-0091): /usr/local and /usr/local/bin on macOS, /usr/bin on Linux.
+// One that already existed is never re-moded or removed.
+func (e *Env) launcherParentDirs() []desiredDir {
+	root := rootOwner()
+	var dirs []desiredDir
+	for dir := filepath.Dir(e.launcherPath()); dir != "/usr" && dir != "/" && dir != "."; dir = filepath.Dir(dir) {
+		dirs = append([]desiredDir{{Path: dir, Mode: 0o755, Owner: root, External: true}}, dirs...)
+	}
+	return dirs
 }
 
 // daemonInputsDigest is what a running sandbox daemon depends on.
@@ -503,7 +651,6 @@ func (l *lifecycle) applyOpenShellLinks(p *plan) error {
 			return fmt.Errorf("%s: %w", path, err)
 		}
 		l.noteChange("removed %s, which the deployment no longer uses", path)
-		_ = removeDirIfEmpty(env.P(filepath.Dir(path)))
 	}
 	if !p.openshell.settings.Enabled {
 		// What the lifecycle derived while the subsystem was on goes with it.
@@ -591,11 +738,14 @@ type openshellState struct {
 // openshellApplied is the sandbox configuration the last committed
 // transaction applied.
 type openshellApplied struct {
-	Enabled      bool   `json:"enabled"`
-	Install      string `json:"install"`
-	Driver       string `json:"driver"`
-	Fallback     string `json:"driver_fallback,omitempty"`
-	Version      string `json:"version,omitempty"`
+	Enabled  bool   `json:"enabled"`
+	Install  string `json:"install"`
+	Driver   string `json:"driver"`
+	Fallback string `json:"driver_fallback,omitempty"`
+	Version  string `json:"version,omitempty"`
+	// RaisedFrom is the setup-mode pin Version was raised from
+	// (openshellSettings.RaisedFrom), so status and verify name it too.
+	RaisedFrom   string `json:"raised_from,omitempty"`
 	GatewayPort  int    `json:"gateway_port"`
 	Rendered     string `json:"rendered,omitempty"`
 	DaemonInputs string `json:"daemon_inputs,omitempty"`
@@ -622,7 +772,7 @@ func appliedOf(op *openshellPlan) *openshellApplied {
 	}
 	s := op.settings
 	a := &openshellApplied{Enabled: s.Enabled, Install: s.Install, Driver: s.Driver, Fallback: s.Fallback, Version: s.Version,
-		GatewayPort: s.GatewayPort, Rendered: op.digest, DaemonInputs: op.daemonInputs, E2fsprogsDir: s.E2fsprogsDir,
+		RaisedFrom: s.RaisedFrom, GatewayPort: s.GatewayPort, Rendered: op.digest, DaemonInputs: op.daemonInputs, E2fsprogsDir: s.E2fsprogsDir,
 		DefaultNamespaceBridge: op.defaultNamespaceBridge}
 	if a.usesDocker() {
 		a.DockerNamespace = openshell.ManagedDockerNamespace
@@ -669,10 +819,13 @@ func (a *openshellApplied) switchKey() string {
 	}
 	version := a.Version
 	if a.Install != config.EnterpriseOpenShellInstallSetup {
-		// In prerequisite mode the pin checks the administrator's OpenShell
-		// (a verify row); changing it replaces nothing in an account
-		// (GAP-0244).
+		// Supported prerequisite pin changes replace nothing in an account.
+		// Moving any old requirement across the floor does require a switch;
+		// keep a running legacy sandbox until OpenShell reports it stopped.
 		version = ""
+		if _, raised, possible := openshell.ManagedVersionPin(a.Version); raised || !possible {
+			version = "below-floor"
+		}
 	}
 	key := strings.Join([]string{a.Install, a.Driver, version, strconv.Itoa(a.GatewayPort)}, "|")
 	if a.Fallback != "" {
@@ -698,6 +851,9 @@ type pending struct {
 	From *openshellApplied `json:"from,omitempty"`
 	// Sandboxes is how many ran when the change was last tried.
 	Sandboxes int `json:"sandboxes"`
+	// Hold is the named blocker and next step from the last failed status or
+	// drain check. It is shown on status and verify while the change waits.
+	Hold string `json:"hold,omitempty"`
 }
 
 func (e *Env) loadOpenShellState() *openshellState {
@@ -807,9 +963,11 @@ func (e *Env) desiredLinks(channel string, socket []byte) []desiredLink {
 }
 
 // removeOpenShellFiles removes, on uninstall, the links the lifecycle made
-// and the folders its user units left empty, and the lifecycle's own sandbox
-// records. The unit files and the rendered configuration are in the
-// deployment record and go with it. A link someone else made is left alone.
+// and the folders its user units left empty, and removes the lifecycle's own
+// sandbox records. When sandboxes stay, their applied setup record moves to a
+// root-only kept name for the next ensure; a rerun of a failed uninstall keeps
+// the record moved by the first run. The unit files and rendered config are in
+// the deployment record and go with it. A link someone else made is left alone.
 func (l *lifecycle) removeOpenShellFiles(record *Deployment) {
 	env := l.env
 	channel := ChannelPayload
@@ -824,12 +982,20 @@ func (l *lifecycle) removeOpenShellFiles(record *Deployment) {
 			l.result.AddWarning(codeOpenShell, fmt.Sprintf("could not remove %s: %v", link.Path, err))
 			continue
 		}
-		_ = removeDirIfEmpty(env.P(filepath.Dir(link.Path)))
+		// The folder above the link goes with the recorded folders
+		// (CreatedDirs), never by name: /usr/local/bin or a *.wants folder
+		// that existed before stays (GAP-0091).
 	}
 	if env.GOOS == "linux" {
 		for _, u := range env.userUnits() {
 			_ = removeDirIfEmpty(env.P(filepath.Join("/etc/systemd/user", u.Name+".d")))
 		}
 	}
-	env.removeOpenShellMachineState(channel)
+	kept, err := env.removeOpenShellMachineState(channel, !l.opts.Purge && len(l.sandboxesKept) > 0)
+	l.openshellRecordKept = kept
+	if err != nil {
+		// The record only helps the next activation report a changed setup;
+		// a problem with it must not stop an uninstall or a package removal.
+		l.result.AddWarning(codeOpenShell, err.Error())
+	}
 }

@@ -218,8 +218,10 @@ func TestManagedArtifactDigestMemoizesNothingWithoutAGuardedStableStamp(t *testi
 			stamp: func() func(*os.File) (managedArtifactStamp, bool) {
 				usn := int64(0)
 				return func(*os.File) (managedArtifactStamp, bool) {
+					// More than the journal number moves: a journal-only move
+					// is confirmed by a second pass instead (GAP-0256).
 					usn++
-					return managedArtifactStamp{ID: 1, USN: usn}, true
+					return managedArtifactStamp{ID: 1, USN: usn, Written: usn}, true
 				}
 			}(),
 			exclusive: os.Open,
@@ -277,7 +279,9 @@ func TestManagedArtifactDigestFullReadReplacesTheRememberedDigest(t *testing.T) 
 		moving  bool // the stamp moves on every call: the read is not remembered
 		failEnd bool // a new version whose change epoch cannot be ended
 	}{
-		{name: "the stamp moved during the read", moving: true},
+		// GAP-0256: only the journal number moves (another process ended
+		// the epoch); the bytes are confirmed by a second pass.
+		{name: "the journal number moved during the read", moving: true},
 		{name: "the change epoch cannot be ended", failEnd: true},
 	}
 	for _, tc := range cases {
@@ -315,11 +319,7 @@ func TestManagedArtifactDigestFullReadReplacesTheRememberedDigest(t *testing.T) 
 			}
 			want := writeManagedArtifactFixture(t, path, 2)
 			got, exists, err := stableManagedArtifactDigestWith(path, "managed hook runtime artifact", 4<<20, "", true)
-			if tc.moving {
-				if err == nil || !exists {
-					t.Fatalf("a moving stamp returned digest %q, exists %v, err %v", got, exists, err)
-				}
-			} else if err != nil || !exists || got != want {
+			if err != nil || !exists || got != want {
 				t.Fatalf("digest %s, exists %v, err %v; want the full read %s", got, exists, err, want)
 			}
 			if remembered := managedArtifactDigestRemembered(path); remembered != tc.failEnd {
@@ -898,5 +898,101 @@ func TestManagedArtifactDigestDegradedConcurrentMissesShareOneDataRead(t *testin
 	}
 	if got := reads.Load(); got != 1 || *ends != 1 {
 		t.Fatalf("concurrent degraded misses used %d data reads and %d epoch attempts, want one each", got, *ends)
+	}
+}
+
+// GAP-0256: a status or verify call next to the guardian reads the shared hook
+// binary in full and so ends its change epoch, which moves the journal number
+// while the guardian reads the file under its deny-write handle. That alone
+// no longer fails the guardian's pass: the bytes are confirmed by a second
+// pass and not remembered. Any other moved field, or different bytes on the
+// second pass, still fail the digest.
+func TestManagedArtifactDigestAnotherProcessEndingTheEpochKeepsTheDigest(t *testing.T) {
+	cases := []struct {
+		name string
+		// during runs once, after the first data pass.
+		during    func(t *testing.T, path string, version *managedArtifactStamp, mtime time.Time)
+		wantErr   bool
+		wantReads int64
+	}{
+		{
+			name: "only the journal number moves",
+			during: func(_ *testing.T, _ string, version *managedArtifactStamp, _ time.Time) {
+				version.USN++
+			},
+			wantReads: 2,
+		},
+		{
+			name: "the write time moves too",
+			during: func(_ *testing.T, _ string, version *managedArtifactStamp, _ time.Time) {
+				version.USN++
+				version.Written++
+			},
+			wantErr:   true,
+			wantReads: 1,
+		},
+		{
+			name: "the bytes change with the times put back",
+			during: func(t *testing.T, path string, version *managedArtifactStamp, mtime time.Time) {
+				version.USN++
+				writeManagedArtifactFixture(t, path, 2)
+				if err := os.Chtimes(path, mtime, mtime); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErr:   true,
+			wantReads: 2,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			version := managedArtifactStamp{Volume: 7, ID: 1, Size: 2 << 20, Links: 1, Written: 100, USN: 10}
+			_, ends := useManagedArtifactDigestSeams(t,
+				func(*os.File) (managedArtifactStamp, bool) { return version, true },
+				os.Open,
+				endManagedArtifactChangeEpochFake,
+			)
+			path := filepath.Join(t.TempDir(), "defenseclaw-hook.exe")
+			want := writeManagedArtifactFixture(t, path, 1)
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			saved := managedArtifactDigestRead
+			reads := &atomic.Int64{}
+			managedArtifactDigestRead = func(dst io.Writer, file *os.File, maxBytes int64) (int64, error) {
+				count, err := saved(dst, file, maxBytes)
+				if reads.Add(1) == 1 {
+					tc.during(t, path, &version, info.ModTime())
+				}
+				return count, err
+			}
+			t.Cleanup(func() { managedArtifactDigestRead = saved })
+			got, exists, err := stableManagedArtifactDigestWith(path, "managed hook runtime artifact", 4<<20, "", true)
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "changed during bounded digest") || got != "" || !exists {
+					t.Fatalf("digest %q, exists %v, err %v; want changed during bounded digest", got, exists, err)
+				}
+			} else if err != nil || !exists || got != want {
+				t.Fatalf("digest %q, exists %v, err %v; want %s", got, exists, err, want)
+			}
+			if reads.Load() != tc.wantReads || *ends != 1 {
+				t.Fatalf("data reads %d, epoch ends %d; want %d and 1", reads.Load(), *ends, tc.wantReads)
+			}
+			if managedArtifactDigestRemembered(path) {
+				t.Fatal("a read whose stamp moved was remembered")
+			}
+			if tc.wantErr {
+				return
+			}
+			// With the journal number still, the next call is a normal full
+			// read that is remembered again.
+			if got := managedArtifactDigestOf(t, path, true); got != want {
+				t.Fatalf("next digest %s, want %s", got, want)
+			}
+			if !managedArtifactDigestRemembered(path) || reads.Load() != tc.wantReads+1 {
+				t.Fatalf("next read: remembered %v, data reads %d", managedArtifactDigestRemembered(path), reads.Load())
+			}
+		})
 	}
 }

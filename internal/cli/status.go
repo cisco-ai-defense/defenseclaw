@@ -24,7 +24,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -38,8 +37,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -61,6 +62,12 @@ The sidecar must be running for this command to work.`,
 	// On a standalone managed host an administrator's status reads the
 	// managed deployment without extra environment variables.
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+		// A standard account of a managed Windows computer sees its own
+		// protection state; it has no gateway status to read (GAP-0060).
+		gatewayStatusOwnState = statusShowsOwnState()
+		if gatewayStatusOwnState {
+			return nil
+		}
 		if err := managedStandardUserGatewayRefusal(); err != nil {
 			return err
 		}
@@ -79,6 +86,9 @@ The sidecar must be running for this command to work.`,
 	},
 	PersistentPostRun: func(_ *cobra.Command, _ []string) {},
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if gatewayStatusOwnState {
+			return showOwnStatus(cmd, gatewayStatusJSON)
+		}
 		err := runSidecarStatus(cmd, args)
 		if gatewayStatusConfigProblem != nil {
 			return gatewayStatusConfigProblem
@@ -90,6 +100,10 @@ The sidecar must be running for this command to work.`,
 // gatewayStatusConfigProblem is the config.yaml error that status reports
 // after the gateway's health when only a destination secret is missing.
 var gatewayStatusConfigProblem error
+
+// gatewayStatusOwnState: this status shows the caller's own protection
+// state (statusShowsOwnState) instead of the gateway's.
+var gatewayStatusOwnState bool
 
 // gatewayStatusRelaxedConfig loads config.yaml without compiling the
 // observability destinations when err is only a missing destination secret,
@@ -161,7 +175,7 @@ func gatewayStatusDroppableValue(err error) bool {
 	return schemaErr.Keyword == "enum" || schemaErr.Keyword == "type" || schemaErr.Keyword == "additionalProperties"
 }
 
-var yamlPathSegment = regexp.MustCompile(`^(?:\.([A-Za-z0-9_-]+)|\[([0-9]+)\])`)
+var yamlPathSegment = lazyregexp.New(`^(?:\.([A-Za-z0-9_-]+)|\[([0-9]+)\])`)
 
 // yamlWithoutPath removes the value at a schema display path such as
 // $.guardrail.mode or $.connectors[0].name from a YAML document. With a
@@ -241,11 +255,15 @@ func runSidecarStatusJSON(w io.Writer) error {
 	addr := sidecarHealthURL(cfg)
 	doc := gatewayStatusDocument{Endpoint: addr}
 	var failure error
+	client, clientErr := gatewayPeerClientForURL(cfg, addr, 5*time.Second)
 	if problem := foreignGatewayListener(cfg); problem != "" {
 		doc.Error = problem
 		doc.Hint = foreignGatewayListenerFix(cfg)
-		failure = errors.New("the gateway port is held by another process")
-	} else if snap, err := fetchSidecarHealth(&http.Client{Timeout: 5 * time.Second}, addr); err != nil {
+		failure = foreignGatewayStatusError(problem)
+	} else if clientErr != nil {
+		doc.Error = clientErr.Error()
+		failure = clientErr
+	} else if snap, err := fetchSidecarHealth(client, addr); err != nil {
 		doc.Error = err.Error()
 		doc.Hint = sidecarNotRunningHint(cfg)
 		failure = errors.New("sidecar unreachable")
@@ -264,6 +282,20 @@ func runSidecarStatusJSON(w io.Writer) error {
 		return err
 	}
 	return failure
+}
+
+func foreignGatewayStatusLabel(problem string) string {
+	if problem == daemon.RootGatewayListenerReason {
+		return "Sidecar Status: RUNNING AS ROOT"
+	}
+	return "Sidecar Status: NOT THIS ACCOUNT'S GATEWAY"
+}
+
+func foreignGatewayStatusError(problem string) error {
+	if problem == daemon.RootGatewayListenerReason {
+		return errors.New("the gateway is running as root")
+	}
+	return errors.New("the gateway port is held by another process")
 }
 
 // gatewayStatusConfigLoadError adds the daemon state and the next step when
@@ -432,16 +464,27 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	// another home's or account's gateway as this one.
 	if problem := foreignGatewayListener(cfg); problem != "" {
 		fmt.Println()
-		Warn("Sidecar Status: NOT THIS ACCOUNT'S GATEWAY")
+		Warn(foreignGatewayStatusLabel(problem))
 		printGatewayKV("Endpoint", addr)
-		Subhead(problem + ". Its status is not shown.")
+		Subhead(strings.TrimSuffix(problem, ".") + ". Its status is not shown.")
 		Subhead(foreignGatewayListenerFix(cfg))
-		return fmt.Errorf("the gateway port is held by another process")
+		return foreignGatewayStatusError(problem)
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	client, clientErr := gatewayPeerClientForURL(cfg, addr, 5*time.Second)
+	if clientErr != nil {
+		return fmt.Errorf("sidecar status: %w", clientErr)
+	}
 	snap, err := fetchSidecarHealth(client, addr)
 	if err != nil {
+		if problem := foreignGatewayListener(cfg); problem != "" {
+			fmt.Println()
+			Warn(foreignGatewayStatusLabel(problem))
+			printGatewayKV("Endpoint", addr)
+			Subhead(strings.TrimSuffix(problem, ".") + ". Its status is not shown.")
+			Subhead(foreignGatewayListenerFix(cfg))
+			return foreignGatewayStatusError(problem)
+		}
 		var requestErr *url.Error
 		if errors.As(err, &requestErr) {
 			if running, pid := gatewayManagedState(); running && cfg != nil && !cfg.StandaloneEnterprise() {
@@ -472,6 +515,15 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	printGatewayStatusBanner()
 	printGatewayKV("Started", snap.StartedAt.Format(time.RFC3339))
 	printGatewayKV("Uptime", formatDuration(uptime))
+	for _, problem := range cfg.CustomRulePackErrors() {
+		Warn("Config error: " + problem.Error())
+		if config.IsStalePinError(problem) {
+			Subhead("The gateway refuses this pack until its pin matches the files")
+			continue
+		}
+		// The gateway runs the built-in pack of the selection meanwhile.
+		Subhead("A setting that selects this pack loads its built-in pack until the entry is fixed")
+	}
 	if !cfg.StandaloneEnterprise() && !managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) &&
 		gatewayRunsReplacedBinary() {
 		Warn("This account's gateway is running a binary that was replaced after it started")
@@ -484,7 +536,7 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 		printConnectorModes(modes)
 	}
 
-	printSubsystems(&snap)
+	printSubsystems(&snap, cfg.Guardrail.Judge.MaxParallel)
 
 	printConnectors(&snap)
 	if isLocalStatusTarget(bind) {
@@ -508,6 +560,7 @@ func printMovedCorruptAuditStores(cfg *config.Config, since time.Time) {
 			moved = append(moved, store)
 		}
 	}
+	moved = audit.ReportedMovedCorruptStores(moved)
 	if len(moved) == 0 {
 		return
 	}
@@ -515,19 +568,26 @@ func printMovedCorruptAuditStores(cfg *config.Config, since time.Time) {
 	fmt.Println()
 	if newest.PreCutover {
 		// Not lost history: 1.0 does not carry 0.x history over (GAP-1222).
-		OK(fmt.Sprintf("The audit store DefenseClaw 0.x wrote could not be upgraded and is kept as an archive in %s (since %s); %s",
-			newest.Path, newest.MovedAt.Local().Format(time.RFC3339), newest.BlockAllowSummary()))
-		Subhead("Delete the archive and its -wal/-shm files when you no longer need it.")
+		OK(fmt.Sprintf("The audit store DefenseClaw 0.x wrote could not be upgraded and is kept as an archive in %s%s (since %s); %s",
+			newest.Path, newest.SidecarDescription(), newest.MovedAt.Local().Format(time.RFC3339), newest.BlockAllowSummary()))
+		printMovedAuditStoreRecoveryHint(newest.Path)
+		Subhead("Delete the archive and its -wal, -shm and -journal files when you no longer need them.")
 		return
 	}
-	Warn(fmt.Sprintf("The audit store was corrupt and was moved to %s on %s; %s",
-		newest.Path, newest.MovedAt.Local().Format(time.RFC3339), newest.BlockAllowSummary()))
-	recoverHint := "Recover older audit records with: sqlite3 " + newest.Path + " .recover"
+	Warn(fmt.Sprintf("The audit store was corrupt and was moved to %s%s on %s; %s",
+		newest.Path, newest.SidecarDescription(), newest.MovedAt.Local().Format(time.RFC3339), newest.BlockAllowSummary()))
+	printMovedAuditStoreRecoveryHint(newest.Path)
+	Subhead("Delete the moved file and its -wal, -shm and -journal files when they are no longer needed.")
+}
+
+// printMovedAuditStoreRecoveryHint says to recover from a copy of the
+// archived set, never from the archive itself (rel-1-0-2:GAP-0647). The hint
+// ends with a command, so the sqlite3 note goes on its own line first.
+func printMovedAuditStoreRecoveryHint(archive string) {
 	if _, err := exec.LookPath("sqlite3"); err != nil {
-		recoverHint += " (sqlite3 is not installed; get the command-line tool from https://sqlite.org/download.html)"
+		Subhead("sqlite3 is not installed; get the command-line tool from https://sqlite.org/download.html")
 	}
-	Subhead(recoverHint)
-	Subhead("Delete the moved file and its -wal/-shm files when they are no longer needed.")
+	Subhead(audit.ArchiveRecoveryHint(archive))
 }
 
 // lastGatewayExitError returns the error a per-user gateway printed as the
@@ -659,8 +719,20 @@ func printConnectors(snap *gateway.HealthSnapshot) {
 		printConnectorBody(&c)
 	}
 	// A connector whose setup failed at start is not enforced (GAP-1714).
+	// When its agent's own settings refused the hooks, rerunning setup cannot
+	// help; the gateway's reason names the fix (GAP-0578).
+	refusedByAgentSettings := guardrailAgentSettingsRefusals(snap.Guardrail.Details)
 	for _, name := range notStarted {
 		fmt.Printf("             %s (%s)%s\n", friendlyConnectorName(name), name, styledConnectorStateVerb("NOT RUNNING"))
+		if reason := refusedByAgentSettings[name]; reason != "" {
+			fmt.Printf("               %s\n", Dim("not enforced: "+reason))
+			continue
+		}
+		if cause := guardrailNotStartedCause(snap.Guardrail.Details, name); cause != "" {
+			fmt.Printf("               %s\n", Dim("setup failed when the gateway started, so it is not enforced: "+
+				cause+"; then run: defenseclaw setup "+name))
+			continue
+		}
 		fmt.Printf("               %s\n", Dim("setup failed when the gateway started, so it is not enforced; "+
 			"see gateway.log, then run: defenseclaw setup "+name))
 	}
@@ -705,6 +777,83 @@ func guardrailConnectorsNotStarted(details map[string]interface{}) []string {
 		}
 	}
 	return names
+}
+
+// guardrailAgentSettingsRefusals reads the guardrail's
+// connectors_refused_by_agent_settings detail, a map[string]string in process
+// and a map[string]interface{} after a JSON round trip.
+func guardrailAgentSettingsRefusals(details map[string]interface{}) map[string]string {
+	refused := map[string]string{}
+	switch raw := details[gateway.GuardrailAgentSettingsRefused].(type) {
+	case map[string]string:
+		for name, reason := range raw {
+			refused[name] = reason
+		}
+	case map[string]interface{}:
+		for name, value := range raw {
+			if reason, ok := value.(string); ok && strings.TrimSpace(reason) != "" {
+				refused[name] = reason
+			}
+		}
+	}
+	return refused
+}
+
+// notStartedCauseMaxRunes bounds the recorded reason shown for a skipped connector.
+const notStartedCauseMaxRunes = 400
+
+// guardrailNotStartedCause returns the cause the gateway recorded for skipping
+// the connector name: its reason, bounded, followed by its repair as recorded.
+// It is empty when the gateway recorded no reason. Every place that tells a
+// user a connector is not enforced reads it from here, so none falls back to
+// "see gateway.log" while the gateway has already named the folder and the
+// command (GAP-0832). The details are typed in process and decoded JSON after
+// a round trip.
+func guardrailNotStartedCause(details map[string]interface{}, name string) string {
+	key := strings.ToLower(strings.TrimSpace(name))
+	var reason string
+	switch raw := details[gateway.GuardrailNotStartedReasons].(type) {
+	case map[string]string:
+		reason = raw[key]
+	case map[string]interface{}:
+		reason, _ = raw[key].(string)
+	}
+	reason = strings.Join(strings.Fields(reason), " ")
+	if reason == "" {
+		return ""
+	}
+	if runes := []rune(reason); len(runes) > notStartedCauseMaxRunes {
+		reason = string(runes[:notStartedCauseMaxRunes]) + "…"
+	}
+	var fix, byHand string
+	omitted := 0
+	switch raw := details[gateway.GuardrailNotStartedRepairs].(type) {
+	case map[string]gateway.NotStartedRepair:
+		repair := raw[key]
+		fix, byHand, omitted = repair.Fix, repair.ByHand, repair.OmittedBytes
+	case map[string]interface{}:
+		if repair, ok := raw[key].(map[string]interface{}); ok {
+			fix, _ = repair["fix"].(string)
+			byHand, _ = repair["by_hand"].(string)
+			if count, ok := repair["omitted_bytes"].(float64); ok && count > 0 {
+				omitted = int(count)
+			}
+		}
+	}
+	if fix != "" {
+		reason += "; fix: " + fix
+	}
+	if byHand != "" {
+		if fix != "" {
+			reason += "; then by hand: " + byHand
+		} else {
+			reason += "; by hand: " + byHand
+		}
+	}
+	if omitted > 0 {
+		reason += fmt.Sprintf("; repair omitted: it is %d bytes, too long for this field; the gateway log has it whole", omitted)
+	}
+	return reason
 }
 
 // printConnectorBody renders the per-connector since/mode/counter lines
@@ -878,16 +1027,12 @@ func friendlyConnectorName(name string) string {
 		return "Devin"
 	case "copilot":
 		return "GitHub Copilot CLI"
-	case "openhands":
-		return "OpenHands"
 	case "antigravity":
 		return "Antigravity"
 	case "opencode":
 		return "OpenCode"
 	case "amp":
 		return "Amp"
-	case "omnigent":
-		return "OmniGent"
 	case "kiro":
 		return "Kiro"
 	default:
@@ -1055,18 +1200,18 @@ func printConnectorModeEntry(m *connectorModeSummary) {
 // fleet uplink: when it is disabled and no rostered connector is a proxy
 // connector (OpenClaw, ZeptoClaw), nothing uses it, so its DISABLED state and
 // OpenClaw upstream advice are left out (the TUI does the same).
-func printSubsystems(snap *gateway.HealthSnapshot) {
+func printSubsystems(snap *gateway.HealthSnapshot, judgeMaxParallel int) {
 	Section("Subsystems")
 	if !fleetUplinkUnused(snap) {
-		printSubsystem("Gateway", snap.Gateway)
+		printSubsystem("Gateway", snap.Gateway, judgeMaxParallel)
 	}
-	printSubsystem("Watcher", snap.Watcher)
-	printSubsystem("API", snap.API)
-	printSubsystem("Guardrail", snap.Guardrail)
-	printSubsystem("Routing", snap.Routing)
-	printSubsystem("Telemetry", snap.Telemetry)
+	printSubsystem("Watcher", snap.Watcher, judgeMaxParallel)
+	printSubsystem("API", snap.API, judgeMaxParallel)
+	printSubsystem("Guardrail", snap.Guardrail, judgeMaxParallel)
+	printSubsystem("Routing", snap.Routing, judgeMaxParallel)
+	printSubsystem("Telemetry", snap.Telemetry, judgeMaxParallel)
 	if snap.Sandbox != nil {
-		printSubsystem("Sandbox", *snap.Sandbox)
+		printSubsystem("Sandbox", *snap.Sandbox, judgeMaxParallel)
 	}
 	if line := kernelSensorStatusLine(snap); line != "" {
 		fmt.Printf("  %s%s\n\n", Style("Kernel sensor: ", "fg=bright_black", "bold"), asciiText(line))
@@ -1130,7 +1275,7 @@ func fleetUplinkUnused(snap *gateway.HealthSnapshot) bool {
 	return true
 }
 
-func printSubsystem(name string, h gateway.SubsystemHealth) {
+func printSubsystem(name string, h gateway.SubsystemHealth, judgeMaxParallel int) {
 	// One column wider than the longest label ("Telemetry:"), so the state
 	// never runs into it and lines up with the detail rows below.
 	label := fmt.Sprintf("%-*s", 11, name+":")
@@ -1151,6 +1296,17 @@ func printSubsystem(name string, h gateway.SubsystemHealth) {
 	if judge != "" {
 		fmt.Printf("             %s %s\n", Dim("problem:"), asciiText(judge))
 	}
+	fallbacks := judgeFallbackNote(h.Details, judgeMaxParallel)
+	if fallbacks != "" {
+		fmt.Printf("             %s %s\n", Dim("judge:"), asciiText(fallbacks))
+	}
+	if retention := telemetryRetentionLabel(h.Details); retention != "" {
+		fmt.Printf("             %s %s\n", Dim("retention:"), retention)
+	}
+	capWarning := telemetryRetentionCapWarning(h.Details)
+	if capWarning != "" {
+		fmt.Printf("             %s %s\n", Style("warning:", "fg=yellow"), capWarning)
+	}
 	if len(h.Details) > 0 {
 		keys := make([]string, 0, len(h.Details))
 		for k := range h.Details {
@@ -1158,6 +1314,9 @@ func printSubsystem(name string, h gateway.SubsystemHealth) {
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
+			if strings.HasPrefix(k, "retention_cap_") || (capWarning != "" && k == "retention_state") {
+				continue
+			}
 			if strings.Contains(k, "password") || strings.Contains(k, "secret") || strings.Contains(k, "token") {
 				continue
 			}
@@ -1165,6 +1324,9 @@ func printSubsystem(name string, h gateway.SubsystemHealth) {
 				continue // already said in plain words above
 			}
 			if judge != "" && strings.HasPrefix(k, "judge_") {
+				continue
+			}
+			if fallbacks != "" && strings.HasPrefix(k, "judge_") && strings.Contains(k, "fallback") {
 				continue
 			}
 			line, ok := formatDetailValue(h.Details[k])
@@ -1175,6 +1337,45 @@ func printSubsystem(name string, h gateway.SubsystemHealth) {
 		}
 	}
 	fmt.Println()
+}
+
+func telemetryRetentionCapWarning(details map[string]interface{}) string {
+	if state, _ := details["retention_state"].(string); state != "warning" {
+		return ""
+	}
+	fallback := "audit store cap not reached; inspect the gateway retention health"
+	used, usedOK := details["retention_cap_used_bytes"].(float64)
+	capBytes, capOK := details["retention_cap_bytes"].(float64)
+	reason, _ := details["retention_cap_reason"].(string)
+	if !usedOK || !capOK || capBytes <= 0 || used <= capBytes ||
+		capBytes > float64(audit.RetentionMaxStoreMB<<20) {
+		return fallback
+	}
+	var advice string
+	switch reason {
+	case string(audit.RetentionCapActiveCorrelation):
+		advice = "active correlation state is retained; end unused sessions or raise observability.local.max_store_mb"
+	case string(audit.RetentionCapRetainedHistory):
+		advice = "recent history or pending retention work remains; allow another pass or raise observability.local.max_store_mb"
+	default:
+		return fallback
+	}
+	return fmt.Sprintf("audit store cap not reached: %.1f MiB used, cap %.1f MiB; %s",
+		used/(1<<20), capBytes/(1<<20), advice)
+}
+
+// telemetryRetentionLabel is the audit store retention in the words of the
+// per-user status ("7 days, size cap 64 MiB"), from the telemetry health
+// details retention_days and retention_max_store_mb; "" when the gateway
+// reports no retention. On a managed computer defenseclaw status, doctor and
+// the TUI are refused, so this line is where the size cap shows (GAP-0141).
+func telemetryRetentionLabel(details map[string]interface{}) string {
+	days, ok := details["retention_days"].(float64)
+	if !ok || days < 0 || days != float64(int64(days)) {
+		return ""
+	}
+	capMB, _ := details["retention_max_store_mb"].(float64)
+	return enterprisestatus.RetentionLabel(int64(days), int64(capMB))
 }
 
 // eventHistoryProblem says in plain words why audit events cannot be
@@ -1224,6 +1425,38 @@ func judgeProblem(details map[string]interface{}) string {
 		return lead + "; " + judgeNetworkNextStep
 	}
 	return lead + "; run 'defenseclaw doctor' and 'defenseclaw setup llm --role judge'"
+}
+
+// judgeFallbackNote says how many hook checks the rules decided because the
+// LLM judge gave no verdict in time, per connector (gateway judge_fallbacks
+// details, #1395), or returns "". It suggests guardrail.judge.max_parallel
+// only while that setting is 0 (off).
+func judgeFallbackNote(details map[string]interface{}, maxParallel int) string {
+	total, ok := formatDetailValue(details["judge_fallbacks"])
+	if !ok || total == "" || total == "0" {
+		return ""
+	}
+	note := "the rules decided " + total + " hook check(s) because the LLM judge gave no verdict in time"
+	if byConnector, ok := details["judge_fallbacks_by_connector"].(map[string]interface{}); ok && len(byConnector) > 0 {
+		names := make([]string, 0, len(byConnector))
+		for name := range byConnector {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		parts := make([]string, 0, len(names))
+		for _, name := range names {
+			n, _ := formatDetailValue(byConnector[name])
+			parts = append(parts, name+" "+n)
+		}
+		note += " (" + strings.Join(parts, ", ") + ")"
+	}
+	if last, _ := details["judge_last_fallback"].(string); last != "" {
+		note += "; last: " + last
+	}
+	if maxParallel > 0 {
+		return note // guardrail.judge.max_parallel is already set: nothing to suggest
+	}
+	return note + "; a slow judge model: set guardrail.judge.max_parallel (see the LLM judge docs)"
 }
 
 // judgeNetworkNextStep is the next step for a judge that cannot reach its

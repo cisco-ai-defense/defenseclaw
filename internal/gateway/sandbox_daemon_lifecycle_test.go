@@ -20,6 +20,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
@@ -37,6 +38,203 @@ import (
 
 func refusingResolve(sandboxrelay.ResolveRequest) (sandboxrelay.ResolveResponse, error) {
 	return sandboxrelay.ResolveResponse{V: 1, Refusal: &sandboxrelay.Refusal{Reason: sandboxrelay.ReasonNotAllowed, Message: "not for you"}}, nil
+}
+
+// A poll can adopt a running registration's looser floor during a create,
+// after the new floor was chosen but before Manager.Create reads its config.
+func TestSandboxDaemonPollCanAdoptDuringCreate(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	runPastRevalidate(t, f)
+	yes := true
+	if err := f.d.regs.put(daemonRegistration{ID: "reg-running", Sandbox: "running", Confirmed: true,
+		Floor: config.OpenShellAdminConfig{MinProfile: "open", AllowYolo: &yes}, UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	f.relay.resolve = func(sandboxrelay.ResolveRequest) (sandboxrelay.ResolveResponse, error) {
+		return sandboxrelay.ResolveResponse{V: 1, Registration: sandboxrelay.RegistrationView{ID: "reg-new"},
+			Effective: json.RawMessage(`{"profile":"strict","floor":{"min_profile":"strict","allow_yolo":false}}`)}, nil
+	}
+	polled, sawStrict := false, false
+	f.os.prepare = func(sandboxrelay.DaemonSettings) (bool, error) {
+		admin := f.d.config().OpenShell.Admin
+		sawStrict = admin.AllowYolo != nil && !*admin.AllowYolo
+		f.d.adoptMu.Lock()
+		polled = f.d.adoptRunningFloor(map[string]string{"running": "ready"})
+		f.d.adoptMu.Unlock()
+		return true, nil
+	}
+	ctl := &managedSandboxController{Manager: f.d.rt.manager, d: f.d}
+	_, _ = ctl.Create(t.Context(), sandboxapi.CreateRequest{Harness: "claudecode", Project: t.TempDir(), Yolo: true})
+	if !sawStrict || !polled || f.os.prepared.Load() == 0 {
+		t.Fatal("the poll did not run between the floor change and Manager.Create")
+	}
+	admin := f.d.config().OpenShell.Admin
+	if admin.AllowYolo == nil || !*admin.AllowYolo {
+		t.Fatalf("the poll did not restore the running floor: %+v", admin)
+	}
+}
+
+// GAP-0615: a floor change from Start or Create must wait for the policy
+// poll's adoption. The channels put both operations at the adoption point.
+func TestSandboxDaemonFloorChangesWaitForAdoption(t *testing.T) {
+	t.Run("adoptFloor", func(t *testing.T) {
+		f := newSandboxDaemonFixture(t)
+		if err := f.d.regs.put(daemonRegistration{ID: "reg-a", Sandbox: "box", Confirmed: true,
+			Floor: config.OpenShellAdminConfig{MinProfile: "strict"}, UpdatedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+		f.d.adoptMu.Lock()
+		locked := true
+		defer func() {
+			if locked {
+				f.d.adoptMu.Unlock()
+			}
+		}()
+		started, done := make(chan struct{}), make(chan struct{})
+		go func() { close(started); f.d.adoptFloor("box"); close(done) }()
+		<-started
+		select {
+		case <-done:
+			t.Fatal("adoptFloor passed the policy adoption lock")
+		case <-time.After(100 * time.Millisecond):
+		}
+		f.d.adoptMu.Unlock()
+		locked = false
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("adoptFloor did not finish after adoption")
+		}
+	})
+	t.Run("create", func(t *testing.T) {
+		f := newSandboxDaemonFixture(t)
+		runPastRevalidate(t, f)
+		resolved, prepared := make(chan struct{}), make(chan struct{})
+		f.relay.resolve = func(sandboxrelay.ResolveRequest) (sandboxrelay.ResolveResponse, error) {
+			close(resolved)
+			return sandboxrelay.ResolveResponse{V: 1, Registration: sandboxrelay.RegistrationView{ID: "reg-new"},
+				Effective: json.RawMessage(`{"profile":"strict","floor":{"min_profile":"strict","allow_yolo":false}}`)}, nil
+		}
+		f.os.prepare = func(sandboxrelay.DaemonSettings) (bool, error) {
+			close(prepared)
+			return true, nil
+		}
+		f.d.adoptMu.Lock()
+		locked := true
+		defer func() {
+			if locked {
+				f.d.adoptMu.Unlock()
+			}
+		}()
+		ctl := &managedSandboxController{Manager: f.d.rt.manager, d: f.d}
+		done := make(chan struct{})
+		project := t.TempDir()
+		go func() {
+			_, _ = ctl.Create(t.Context(), sandboxapi.CreateRequest{Harness: "claudecode", Project: project})
+			close(done)
+		}()
+		select {
+		case <-resolved:
+		case <-time.After(5 * time.Second):
+			t.Fatal("create did not resolve the floor")
+		}
+		select {
+		case <-prepared:
+			t.Fatal("Create passed the policy adoption lock")
+		case <-time.After(100 * time.Millisecond):
+		}
+		f.d.adoptMu.Unlock()
+		locked = false
+		select {
+		case <-prepared:
+		case <-time.After(5 * time.Second):
+			t.Fatal("create did not prepare after adoption")
+		}
+		<-done
+	})
+}
+
+// A phase can move from stopped to ready after the poll's first list. The
+// adoption must use a fresh list taken under adoptMu, not that stale view.
+func TestSandboxDaemonPollRelistsPhasesAtAdoption(t *testing.T) {
+	f := newFreshFixture(t)
+	f.d.floorMu.Lock()
+	f.d.floor = &config.OpenShellAdminConfig{MinProfile: "open"}
+	f.d.floorMu.Unlock()
+	f.set(sandboxrelay.CurrentPolicy{V: 1, Generation: 8, Digest: "sha256:v2",
+		Floor: &config.OpenShellAdminConfig{MinProfile: "strict"}}, nil)
+	listed, release := make(chan struct{}), make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	var lists atomic.Int32
+	f.d.opts.listPhases = func(context.Context) (map[string]string, bool) {
+		if lists.Add(1) == 1 {
+			close(listed)
+			<-release
+			return map[string]string{"dc-a": "stopped"}, true
+		}
+		return map[string]string{"dc-a": "ready"}, true
+	}
+	done := make(chan struct{})
+	go func() { f.d.pollRegistrations(context.Background(), true); close(done) }()
+	select {
+	case <-listed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("poll did not take its first phase snapshot")
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("poll did not finish adoption")
+	}
+	if lists.Load() < 2 || f.d.config().OpenShell.Admin.MinProfile != "strict" {
+		t.Fatalf("poll adopted the stale phase: lists %d, floor %+v", lists.Load(), f.d.config().OpenShell.Admin)
+	}
+}
+
+func TestSandboxDaemonRevalidateWaitsForAdoption(t *testing.T) {
+	f := newFreshFixture(t)
+	listed := make(chan struct{})
+	f.d.opts.listPhases = func(context.Context) (map[string]string, bool) {
+		select {
+		case <-listed:
+		default:
+			close(listed)
+		}
+		return map[string]string{"dc-a": "ready"}, true
+	}
+	f.d.adoptMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			f.d.adoptMu.Unlock()
+		}
+	}()
+	done := make(chan struct{})
+	go func() { f.d.revalidate(context.Background()); close(done) }()
+	select {
+	case <-listed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("revalidate did not list phases")
+	}
+	select {
+	case <-done:
+		t.Fatal("revalidate passed the adoption lock")
+	case <-time.After(100 * time.Millisecond):
+	}
+	f.d.adoptMu.Unlock()
+	locked = false
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("revalidate did not finish after adoption")
+	}
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {
@@ -243,7 +441,8 @@ func TestSandboxDaemonRevalidatesPersistedRegistrations(t *testing.T) {
 		case id == "reg-edited":
 			return sandboxrelay.CurrentPolicy{}, &sandboxrelay.Error{Status: http.StatusNotFound, Reason: sandboxrelay.ReasonRegistrationUnknown}
 		}
-		return sandboxrelay.CurrentPolicy{V: 1, Generation: 4}, nil
+		return sandboxrelay.CurrentPolicy{V: 1, Generation: 4,
+			Floor: &config.OpenShellAdminConfig{MinProfile: "balanced"}}, nil
 	}
 	if revoked := f.d.revalidate(context.Background()); len(revoked) != 0 || f.d.config().OpenShell.Admin.MinProfile != "strict" {
 		t.Fatalf("an unreachable gateway confirmed something: %v %+v", revoked, f.d.config().OpenShell.Admin)
@@ -322,7 +521,7 @@ func TestSandboxDaemonServesWhyItCannotRun(t *testing.T) {
 	done := make(chan error, 1)
 	cause := &sandboxrelay.Error{Status: http.StatusForbidden, Reason: sandboxrelay.ReasonNotAllowed, Message: "Sandboxes are turned off for you."}
 	go func() {
-		done <- serveSandboxDaemonUnavailable(context.Background(), ln, cause, 200*time.Millisecond, 10*time.Second)
+		done <- serveSandboxDaemonUnavailable(context.Background(), ln, cause, nil, 200*time.Millisecond, 10*time.Second, time.Second)
 	}()
 	client := sandboxapi.NewUnixClient(socket)
 	if _, err := client.Status(context.Background()); err == nil || !strings.Contains(err.Error(), "turned off for you") {

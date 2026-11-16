@@ -51,6 +51,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/stream"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 var anthropicLLM = &sandboxapi.LLMCredential{Profile: profiles.AnthropicID, Credentials: map[string]string{"ANTHROPIC_API_KEY": "sk-test-secret"}}
@@ -114,10 +115,10 @@ func TestCreateMountMode(t *testing.T) {
 		t.Fatalf("template = %+v", tmpl)
 	}
 	mounts := tmpl.DriverConfig["docker"].(map[string]any)["mounts"].([]any)
-	if len(mounts) != 4 || mounts[0].(map[string]any)["target"] != "/work/myapp" {
+	if len(mounts) != 5 || mounts[0].(map[string]any)["target"] != "/work/myapp" {
 		t.Fatalf("mounts = %v", mounts)
 	}
-	for i, want := range []string{connector.ClaudeCodeSandboxRunDropInPath, connector.ClaudeCodeSandboxManagedMCPPath} {
+	for i, want := range []string{connector.ClaudeCodeSandboxDropInPath, connector.ClaudeCodeSandboxRunDropInPath, connector.ClaudeCodeSandboxManagedMCPPath} {
 		if mt := mounts[2+i].(map[string]any); mt["target"] != want || mt["read_only"] != true || mt["type"] != "bind" {
 			t.Fatalf("run config mount %d = %v", i, mt)
 		}
@@ -217,7 +218,7 @@ func TestCreateCopyModeAndStrict(t *testing.T) {
 	}
 	_, egressRule := pol.NetworkPolicies[policy.EgressRuleName]
 	_, proxy := got.Spec.Environment["HTTPS_PROXY"]
-	if len(mounts) != 2 || proxy || egressRule {
+	if len(mounts) != 3 || proxy || egressRule {
 		t.Fatalf("strict copy: %d mounts, proxy %v, egress rule %v", len(mounts), proxy, egressRule)
 	}
 	if w := e.binding("copybox").Workdir; w.Mode != sandboxauth.WorkdirCopy || len(w.Mounts) != 0 {
@@ -875,10 +876,7 @@ func TestEndHarnessScript(t *testing.T) {
 		t.Skip("the script reads /proc")
 	}
 	root := filepath.Join(t.TempDir(), "harness")
-	sleepBin, err := exec.LookPath("sleep")
-	if err != nil {
-		t.Skip("no sleep(1)")
-	}
+	sleepBin := testenv.NativeSleep(t)
 	data, err := os.ReadFile(sleepBin)
 	must(t, err)
 	bin := writeFile(t, filepath.Join(root, "bin", "fakeharness"), string(data))
@@ -1194,7 +1192,7 @@ func TestGatewayUnavailable(t *testing.T) {
 		t.Fatal("redialed inside the backoff")
 	}
 	e.m.now = func() time.Time { return time.Now().Add(time.Minute) }
-	if st, _ := e.m.Status(t.Context()); !st.Available || st.Gateway == nil || st.Gateway.Version != "0.1.1" || st.Pack != "open" {
+	if st, _ := e.m.Status(t.Context()); !st.Available || st.Gateway == nil || st.Gateway.Version != openshell.SupportedMin || st.Pack != "open" {
 		t.Fatalf("status = %+v", st)
 	}
 	var degraded, restored bool
@@ -1457,5 +1455,34 @@ func TestStartRenewsTheModelCredential(t *testing.T) {
 	}
 	if ev := e.events("keybox", sandboxapi.ActivityLifecycle, "model_credential_updated"); len(ev) != 1 {
 		t.Fatalf("feed = %+v", ev)
+	}
+}
+
+// GAP-1140: the filling own disk a session found reaches the activity feed
+// at once, with how full it is and the steps; a report on no sandbox or
+// with impossible numbers is refused.
+func TestADiskReportNamesTheFillingDiskInTheFeed(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "vmdisk", Copy: true})
+	seq := e.m.Feed().Seq()
+	must(t, e.m.ReportDisk(t.Context(), "vmdisk", sandboxapi.DiskReport{SizeBytes: 2 << 30, FreeBytes: 600 << 20, Fast: true}))
+	var got []sandboxapi.ActivityEvent
+	for _, ev := range e.m.ActivitySince(seq, "vmdisk") {
+		if ev.Reason == sandboxapi.ReasonDiskFilling {
+			got = append(got, ev)
+		}
+	}
+	if len(got) != 1 || got[0].Kind != sandboxapi.ActivityLifecycle ||
+		!strings.Contains(got[0].Message, "70% full (600 MiB of 2.0 GiB free) and filling fast") ||
+		!strings.Contains(got[0].Message, "sandbox pull vmdisk") {
+		t.Fatalf("feed = %+v", got)
+	}
+	for _, bad := range []sandboxapi.DiskReport{{}, {SizeBytes: 1 << 30, FreeBytes: 2 << 30}, {SizeBytes: 1 << 30, FreeBytes: -1}} {
+		if err := e.m.ReportDisk(t.Context(), "vmdisk", bad); !sandboxapi.IsCode(err, sandboxapi.CodeInvalid) {
+			t.Fatalf("report %+v: %v", bad, err)
+		}
+	}
+	if err := e.m.ReportDisk(t.Context(), "nope", sandboxapi.DiskReport{SizeBytes: 1 << 30}); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+		t.Fatalf("unknown sandbox: %v", err)
 	}
 }

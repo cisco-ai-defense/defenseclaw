@@ -3,7 +3,7 @@
 // (which renders the per-connector block) can import it without
 // creating a circular dependency. Order is by adoption / popularity so
 // the rotation leads with the connectors most visitors recognize
-// first; the docs nav (content/docs/connectors/meta.json) and the
+// first; the docs nav (content/docs/connectors/index(hook-connectors)/meta.json) and the
 // capability matrix (data/capability-matrix.json) follow the same
 // ordering.
 //
@@ -11,7 +11,7 @@
 //   - proxies (OpenClaw, ZeptoClaw) → defenseclaw setup guardrail
 //   - hooks  → defenseclaw setup {claude-code|codex|hermes|opencode|amp|
 //                                  cursor|devin|copilot|
-//                                  openhands|antigravity|omnigent}
+//                                  antigravity}
 
 export interface ConnectorBlock {
   id: string;
@@ -33,9 +33,7 @@ export const TERMINAL_CONNECTORS: ConnectorBlock[] = [
   { id: 'hermes',     label: 'Hermes',             command: 'defenseclaw setup hermes',      modeId: 'hermes' },
   { id: 'opencode',   label: 'OpenCode',           command: 'defenseclaw setup opencode',    modeId: 'opencode' },
   { id: 'amp',        label: 'Amp',                command: 'defenseclaw setup amp',         modeId: 'amp' },
-  { id: 'omnigent',   label: 'OmniGent',           command: 'defenseclaw setup omnigent',    modeId: 'omnigent' },
   { id: 'copilot',    label: 'GitHub Copilot CLI', command: 'defenseclaw setup copilot',     modeId: 'copilot' },
-  { id: 'openhands',  label: 'OpenHands',          command: 'defenseclaw setup openhands',   modeId: 'openhands' },
   { id: 'antigravity',label: 'Antigravity',        command: 'defenseclaw setup antigravity', modeId: 'antigravity' },
   { id: 'zeptoclaw',  label: 'ZeptoClaw',          command: 'defenseclaw setup guardrail',   modeId: 'zeptoclaw' },
 ];

@@ -41,7 +41,7 @@ _MATCH_TEXT = {
     "connector": "this agent is assigned to it",
     "default": "the default for everyone",
     "default_unverified": "the default (your identity could not be verified)",
-    "default_lookup_failed": "the default (your directory couldn't be reached)",
+    "default_lookup_failed": "the default (your directory couldn't be reached; no assignment needs the missing facts)",
     "none": "no profile applies; your organization's floor does",
 }
 
@@ -50,6 +50,15 @@ VIEW_TITLES = {"sandboxes": "Sandboxes", "activity": "Activity", "asks": "Asks"}
 # Keys that act on the selected row in every view (a, A and x act on the
 # selected ask in the Asks view).
 _SELECTION_KEYS = frozenset({"u", "U", "R", "P", "s", "d", "c"})
+
+
+# The managed daemon's temporary setup-change notice (Go
+# sandboxapi.UnavailableSetupChanging): it says to retry, so the TUI adds no
+# exception contact to it.
+SETUP_CHANGING_NOTICE = (
+    "your organization changed how sandboxes run on this computer, and DefenseClaw is still setting that up; "
+    "try again in a few minutes"
+)
 
 
 @dataclass(frozen=True)
@@ -146,7 +155,7 @@ NO_ASKS_TEXT = (
     "No asks are waiting. An ask appears when a program connects around DefenseClaw's proxy: "
     "to a private-network address with any pack, to a host off the allowlist with balanced, "
     "and to every new destination with strict. A port on this machine asks only if the run named it "
-    "with --host-port PORT."
+    "with --host-port PORT; approve that ask to open the port."
 )
 
 # sandboxapi.reasonTexts (internal/openshell/sandboxapi/reasons.go), word for
@@ -307,9 +316,7 @@ SANDBOX_HARNESS_SPECS: tuple[tuple[str, str, str], ...] = (
     ("devin", "Devin CLI", "devin"),
     ("hermes", "Hermes Agent", "hermes"),
     ("kiro", "Kiro CLI", "kiro-cli-chat"),
-    ("omnigent", "OmniGent", "omnigent"),
     ("opencode", "OpenCode", "opencode"),
-    ("openhands", "OpenHands", "openhands"),
 )
 # sandboxcli.defaultHarnesses: the harnesses when openshell.harnesses is empty.
 DEFAULT_SANDBOX_HARNESSES: tuple[str, ...] = ("claudecode", "codex")
@@ -327,7 +334,6 @@ def resolve_harness(name: str) -> str:
     """
     text = name.strip().lower()
     canonical = {"claude-code": "claudecode", "claude_code": "claudecode"}.get(text, text)
-    canonical = {"open-hands": "openhands", "open_hands": "openhands"}.get(canonical, canonical)
     if canonical in HARNESSES:
         return canonical
     for harness, (command, display) in HARNESSES.items():
@@ -2155,8 +2161,8 @@ class SandboxesPanelModel:
         if kind == "review" and row.copy_mode:
             return SandboxPanelAction(
                 "hint",
-                hint=f"{row.name} works on a copy; P brings its work back after showing it "
-                f"(defenseclaw sandbox pull {row.name}).",
+                hint=f"{row.name} works on a copy; choose Apply or Branch in P to bring its work back "
+                f"(defenseclaw sandbox pull {row.name} --apply or --branch).",
             )
         if kind == "pull" and not row.copy_mode:
             # sandboxcli.Pull refuses a mounted project the same way.
@@ -2194,6 +2200,9 @@ class SandboxesPanelModel:
             text = f"Sandboxes aren't available on this computer: {current.unavailable}"
         else:
             text = "Sandboxes are off on this computer; your organization manages this setting"
+        if current.unavailable.strip().rstrip(".") == SETUP_CHANGING_NOTICE:
+            # A notice that clears by itself: retry, no exception to ask IT for (GAP-0187).
+            return f"{text.rstrip('.')}."
         contact = current.request_access.strip()
         return f"{text}. " + (f"Need an exception? Contact {contact}" if contact else "Need an exception? Please contact your IT help desk.")
 

@@ -61,6 +61,9 @@ type fakeAuthority struct {
 	// no floor.
 	profile, gatewayOnly atomic.Pointer[config.OpenShellAdminConfig]
 	noFloor              atomic.Bool
+	// listFloor caps the saved decisions the gateway lists, as the
+	// gateway's decisions route caps them by the person's floor now.
+	listFloor atomic.Pointer[config.OpenShellAdminConfig]
 
 	mu      sync.Mutex
 	decided []sandboxrelay.DecisionRequest
@@ -72,6 +75,11 @@ type fakeAuthority struct {
 	down   bool
 	gone   map[string]bool
 	byName map[string]string
+	// hang is a gateway that never answers a decisions load (it waits for
+	// the caller's deadline).
+	hang atomic.Bool
+	// hungLoads counts the decisions loads hang held.
+	hungLoads atomic.Int64
 }
 
 // floor is the floor of the person's profile.
@@ -131,7 +139,12 @@ func (a *fakeAuthority) Decide(_ context.Context, req sandboxrelay.DecisionReque
 	return sandboxrelay.DecisionResult{V: 1, Stored: stored, Decision: d}, nil
 }
 
-func (a *fakeAuthority) Decisions(_ context.Context, registration string) ([]sandboxrelay.Decision, error) {
+func (a *fakeAuthority) Decisions(ctx context.Context, registration string) ([]sandboxrelay.Decision, error) {
+	if a.hang.Load() {
+		a.hungLoads.Add(1)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	switch {
@@ -140,7 +153,13 @@ func (a *fakeAuthority) Decisions(_ context.Context, registration string) ([]san
 	case a.gone[registration]:
 		return nil, &sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: "the managed gateway no longer knows this sandbox"}
 	}
-	return append([]sandboxrelay.Decision(nil), a.saved[registration]...), nil
+	out := append([]sandboxrelay.Decision(nil), a.saved[registration]...)
+	if f := a.listFloor.Load(); f != nil {
+		out = slices.DeleteFunc(out, func(d sandboxrelay.Decision) bool {
+			return sandboxreg.CheckDecision(*f, sandboxrelay.DecisionRequest{V: 1, Registration: registration, Kind: d.Kind, Host: d.Host, Scope: d.Scope}) != nil
+		})
+	}
+	return out, nil
 }
 
 func (a *fakeAuthority) Events(_ context.Context, batch sandboxrelay.EventBatch) error {
@@ -218,6 +237,172 @@ func managedEnv(t *testing.T, edit func(*config.Config)) (*harnessEnv, *fakeAuth
 	containerScan = func(context.Context) ([]foreignContainer, error) { return nil, nil }
 	t.Cleanup(func() { containerScan = dockerAgentContainers })
 	return e, auth
+}
+
+func TestManagedAskDecisionsMissingGatewayRouteReachTelemetryOnce(t *testing.T) {
+	e, auth := managedEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "askbox"})
+	e.register("askbox")
+	e.setConfig(func(c *config.Config) { c.OpenShell.Profile = config.OpenShellProfileBalanced })
+	e.m.refreshEgress()
+	e.propose("askbox", "rejected.example.org")
+	e.draft("askbox")
+	rejectID := e.waitAsks("askbox", 1)[0].ID
+	if _, err := e.m.DecideApproval(t.Context(), rejectID, sandboxapi.ApprovalDecision{Decision: sandboxapi.DecisionReject}); err != nil {
+		t.Fatalf("reject ask: %v", err)
+	}
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.UserApprovals = config.OpenShellUserApprovalsSession })
+	e.m.refreshEgress()
+	e.propose("askbox", "bounded.example.org")
+	e.draft("askbox")
+	boundedID := e.waitAsks("askbox", 1)[0].ID
+	if _, err := e.m.DecideApproval(t.Context(), boundedID, sandboxapi.ApprovalDecision{Decision: sandboxapi.DecisionApprove, Always: true}); !sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) {
+		t.Fatalf("approval past session floor = %v", err)
+	}
+	e.tel.mu.Lock()
+	got := append([]audit.SandboxAskDecidedEvent(nil), e.tel.askDecisions...)
+	e.tel.mu.Unlock()
+	if len(got) != 2 || got[0].ApprovalID != rejectID || got[0].Result != audit.SandboxApprovalDenied || got[0].Reason != "" ||
+		got[1].ApprovalID != boundedID || got[1].Result != audit.SandboxApprovalDenied || got[1].Reason != "floor_denied" {
+		t.Fatalf("missing gateway decision records = %+v", got)
+	}
+	if _, err := e.m.DecideApproval(t.Context(), boundedID, sandboxapi.ApprovalDecision{Decision: sandboxapi.DecisionApprove}); err != nil {
+		t.Fatalf("ordinary gateway approval: %v", err)
+	}
+	e.tel.mu.Lock()
+	got = append([]audit.SandboxAskDecidedEvent(nil), e.tel.askDecisions...)
+	e.tel.mu.Unlock()
+	if len(got) != 2 || len(auth.decisions()) != 1 {
+		t.Fatalf("gateway approval was relayed twice: records=%+v, decisions=%+v", got, auth.decisions())
+	}
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.UserApprovals = "" })
+	e.m.refreshEgress()
+	e.propose("askbox", "always-rejected.example.org")
+	e.draft("askbox")
+	alwaysID := e.waitAsks("askbox", 1)[0].ID
+	if _, err := e.m.DecideApproval(t.Context(), alwaysID, sandboxapi.ApprovalDecision{Decision: sandboxapi.DecisionReject, Always: true}); err != nil {
+		t.Fatalf("gateway-kept rejection: %v", err)
+	}
+	e.tel.mu.Lock()
+	got = append([]audit.SandboxAskDecidedEvent(nil), e.tel.askDecisions...)
+	e.tel.mu.Unlock()
+	if len(got) != 2 || len(auth.decisions()) != 2 {
+		t.Fatalf("gateway-kept rejection was relayed twice: records=%+v, decisions=%+v", got, auth.decisions())
+	}
+}
+
+func TestManagedAskDecisionReadsIdentityUnderManagerLock(t *testing.T) {
+	e, _ := managedEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "askbox"})
+	e.register("askbox")
+	e.setConfig(func(c *config.Config) { c.OpenShell.Profile = config.OpenShellProfileBalanced })
+	e.m.refreshEgress()
+	e.propose("askbox", "locked.example.org")
+	e.draft("askbox")
+	approvalID := e.waitAsks("askbox", 1)[0].ID
+
+	e.m.mu.Lock()
+	b, a := e.m.boxes["askbox"], e.m.approvals[approvalID]
+	started, finished := make(chan struct{}), make(chan struct{})
+	go func() {
+		close(started)
+		e.m.recordManagedAskDecision(t.Context(), b, a, "")
+		close(finished)
+	}()
+	<-started
+	returnedWhileLocked := false
+	select {
+	case <-finished:
+		returnedWhileLocked = true
+	case <-time.After(250 * time.Millisecond):
+	}
+	e.m.mu.Unlock()
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("managed ask decision did not finish after the manager lock was released")
+	}
+	if returnedWhileLocked {
+		t.Fatal("managed ask decision read the box identity without the manager lock")
+	}
+}
+
+// Re-resolving one sandbox must use its registration's floor, even while a
+// second sandbox in the same account has a different floor in force.
+func TestManagedManagerResolvesEachSandboxUnderItsOwnFloor(t *testing.T) {
+	e, auth := managedEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "claudebox", Copy: true})
+	e.live(sandboxapi.CreateRequest{Name: "codexbox", Copy: true})
+	floors := map[string]string{"claudebox": "balanced", "codexbox": "strict"}
+	blocked := map[string]string{"claudebox": "pypi.org", "codexbox": "api.github.com"}
+	retention := map[string]string{"claudebox": "2h", "codexbox": "3h"}
+	proposals := map[string]bool{"claudebox": true, "codexbox": false}
+	e.m.opts.ConfigForSandbox = func(name string) *config.Config {
+		profile, ok := floors[name]
+		if !ok {
+			return nil
+		}
+		cfg := *e.config()
+		cfg.OpenShell.Admin.MinProfile = profile
+		cfg.OpenShell.Admin.EgressBlock = []string{blocked[name]}
+		cfg.OpenShell.Admin.DeleteStoppedAfter = retention[name]
+		allowProposals := proposals[name]
+		cfg.OpenShell.Approvals.AgentProposals = &allowProposals
+		return &cfg
+	}
+	for name, want := range floors {
+		b, err := e.m.box(name)
+		must(t, err)
+		eff, err := e.m.resolveBox(b)
+		must(t, err)
+		if got := eff.Floor().MinProfile; got != want {
+			t.Fatalf("%s floor = %q, want %q", name, got, want)
+		}
+		if got := eff.DecideEgress(blocked[name], 443); got.Rule != packs.RuleAdminBlock {
+			t.Fatalf("%s did not apply its own block: %+v", name, got)
+		}
+		other := "claudebox"
+		if name == other {
+			other = "codexbox"
+		}
+		if got := eff.DecideEgress(blocked[other], 443); got.Rule == packs.RuleAdminBlock {
+			t.Fatalf("%s inherited %s's block: %+v", name, other, got)
+		}
+		org, err := e.m.orgPolicy(b)
+		must(t, err)
+		if got := org.DecideEgress(blocked[name], 443); got.Rule != packs.RuleAdminBlock {
+			t.Fatalf("%s fallback missed its own block: %+v", name, got)
+		}
+		if got := org.DecideEgress(blocked[other], 443); got.Rule == packs.RuleAdminBlock {
+			t.Fatalf("%s fallback inherited %s's block: %+v", name, other, got)
+		}
+		if got := e.m.triagePolicy(b, org).AgentProposals; got != proposals[name] {
+			t.Fatalf("%s triage used another sandbox's proposal setting: %t", name, got)
+		}
+	}
+	auth.noFloor.Store(true)
+	for name, want := range map[string]time.Duration{"claudebox": 2 * time.Hour, "codexbox": 3 * time.Hour} {
+		b, err := e.m.box(name)
+		must(t, err)
+		if got := e.m.retention(b); got != want {
+			t.Fatalf("%s fallback retention = %s, want %s", name, got, want)
+		}
+	}
+	delete(floors, "claudebox")
+	b, err := e.m.box("claudebox")
+	must(t, err)
+	if _, err := e.m.resolveBox(b); err == nil {
+		t.Fatal("unconfirmed sandbox inherited another sandbox's floor")
+	}
+	if _, err := e.m.orgPolicy(b); err == nil {
+		t.Fatal("unconfirmed sandbox's fallback policy inherited another floor")
+	}
+	if got := e.m.retention(b); got != 0 {
+		t.Fatalf("unconfirmed sandbox inherited another floor's retention: %s", got)
+	}
+	if got := e.m.triagePolicy(b, nil).Effective; got != nil {
+		t.Fatal("unconfirmed sandbox's triage inherited a policy")
+	}
 }
 
 // register gives a sandbox its managed gateway registration (the daemon's
@@ -1324,7 +1509,7 @@ func TestManagedDecisionsOfAGoneRegistration(t *testing.T) {
 func TestManagedAlwaysUnblockFindsThePersonsSandbox(t *testing.T) {
 	e, auth := managedEnv(t, nil)
 	always := sandboxapi.UnblockRequest{Host: "webhook.site", Always: true}
-	if _, err := e.m.Unblock(t.Context(), always); err == nil || !strings.Contains(err.Error(), "none is running") {
+	if _, err := e.m.Unblock(t.Context(), always); err == nil || !strings.Contains(err.Error(), "start a sandbox") {
 		t.Fatalf("always unblock without a sandbox = %v", err)
 	}
 	e.live(sandboxapi.CreateRequest{Name: "onebox"})
@@ -1344,5 +1529,375 @@ func TestManagedAlwaysUnblockFindsThePersonsSandbox(t *testing.T) {
 	}
 	if _, err := e.m.Unblock(t.Context(), sandboxapi.UnblockRequest{Host: "pastebin.com", Sandbox: "twobox", Always: true}); err != nil {
 		t.Fatalf("always unblock naming the sandbox = %v", err)
+	}
+}
+
+func TestManagedPolicyAllowAndBlockUseTheGatewayDecisionStore(t *testing.T) {
+	e, auth := managedEnv(t, nil)
+	request := sandboxapi.PolicyDecisionRequest{Host: "example.org", Kind: "block"}
+	if _, err := e.m.PolicyDecision(t.Context(), request); err == nil || !strings.Contains(err.Error(), "start a sandbox") {
+		t.Fatalf("decision without a sandbox = %v", err)
+	}
+	e.live(sandboxapi.CreateRequest{Name: "onebox"})
+	reg := e.register("onebox")
+	res, err := e.m.PolicyDecision(t.Context(), request)
+	if err != nil || res.Sandbox != "onebox" || res.Kind != "block" {
+		t.Fatalf("block = %+v, %v", res, err)
+	}
+	got := auth.decisions()
+	if len(got) != 1 || got[0].Registration != reg || got[0].Kind != sandboxrelay.DecisionEgressBlock || got[0].Scope != sandboxrelay.DecisionScopeAlways {
+		t.Fatalf("stored blocks = %+v", got)
+	}
+	request.Host, request.Kind = "api.example.org", "allow"
+	if _, err := e.m.PolicyDecision(t.Context(), request); err != nil {
+		t.Fatalf("allow = %v", err)
+	}
+	got = auth.decisions()
+	if len(got) != 2 || got[1].Kind != sandboxrelay.DecisionEgressAllow {
+		t.Fatalf("stored decisions = %+v", got)
+	}
+	checked, err := e.m.PolicyTest(t.Context(), sandboxapi.PolicyTestRequest{Sandbox: "onebox", Checks: []sandboxapi.PolicyCheck{
+		{Host: "example.org", Port: 443}, {Host: "api.example.org", Port: 443},
+	}})
+	if err != nil || len(checked.Decisions) != 2 {
+		t.Fatalf("saved decision policy test: %+v, %v", checked, err)
+	}
+	for i, kind := range []string{"block", "allow"} {
+		d := checked.Decisions[i]
+		if d.Allowed != (kind == "allow") || !strings.Contains(d.Source, "your saved "+kind+" decision") ||
+			!strings.Contains(d.Source, "managed gateway") || !strings.Contains(d.Reason, "You ") {
+			t.Fatalf("saved %s provenance: %+v", kind, d)
+		}
+	}
+	off := false
+	auth.gatewayOnly.Store(&config.OpenShellAdminConfig{AllowUnblock: &off})
+	if _, err := e.m.PolicyDecision(t.Context(), sandboxapi.PolicyDecisionRequest{Host: "another.example.org", Kind: "allow"}); !sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) || len(auth.decisions()) != 2 {
+		t.Fatalf("an allow outside the gateway floor was saved: %v, %+v", err, auth.decisions())
+	}
+	if _, err := e.m.PolicyDecision(t.Context(), sandboxapi.PolicyDecisionRequest{Host: "*.example.org", Kind: "block"}); err == nil {
+		t.Fatal("wildcard decision was accepted")
+	}
+}
+
+// GAP-0198: after the organization raises the person's profile to strict,
+// a lasting allow for a sandbox still registered under the looser profile
+// is refused by the gateway's current floor and nothing is saved.
+func TestManagedPolicyAllowFollowsTheCurrentStrictFloor(t *testing.T) {
+	e, auth := managedEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "oldbox"})
+	e.register("oldbox")
+	strict := config.OpenShellAdminConfig{MinProfile: config.OpenShellProfileStrict}
+	auth.gatewayOnly.Store(&strict)
+	_, err := e.m.PolicyDecision(t.Context(), sandboxapi.PolicyDecisionRequest{Host: "api.example.org", Kind: "allow", Sandbox: "oldbox"})
+	if !sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) || !strings.Contains(err.Error(), "strict sandbox profile") {
+		t.Fatalf("allow under a raised strict floor = %v, want the gateway's refusal", err)
+	}
+	if got := auth.decisions(); len(got) != 0 {
+		t.Fatalf("a refused allow reached the decision store: %+v", got)
+	}
+	// A block only tightens: it is still kept.
+	if _, err := e.m.PolicyDecision(t.Context(), sandboxapi.PolicyDecisionRequest{Host: "api.example.org", Kind: "block", Sandbox: "oldbox"}); err != nil {
+		t.Fatalf("block under a strict floor: %v", err)
+	}
+}
+
+func TestManagedPolicyAllowRefusesDestinationsTheSandboxCannotUnblock(t *testing.T) {
+	for _, tc := range []struct {
+		name, host, pack string
+		edit             func(*config.Config)
+		requestAccess    bool
+		rule             string
+	}{
+		{name: "metadata address", host: "169.254.169.254"},
+		{name: "pack block list", host: "a.paste.example", pack: "team"},
+		{name: "network deny", host: "example.org", pack: "strict"},
+		{name: "unblocks disabled", host: "webhook.site", edit: func(c *config.Config) {
+			c.OpenShell.Admin.AllowUnblock = boolPtr(false)
+		}, requestAccess: true},
+		// GAP-0175: the organization's required pack and strict profile
+		// refuse with the request-access line, naming the floor rule.
+		{name: "required pack block list", host: "a.paste.example", pack: "team", edit: func(c *config.Config) {
+			c.OpenShell.Admin.RequiredPack = "team"
+		}, requestAccess: true, rule: "rule required_pack"},
+		{name: "required strict profile", host: "example.org", pack: "strict", edit: func(c *config.Config) {
+			c.OpenShell.Admin.MinProfile = config.OpenShellProfileStrict
+		}, requestAccess: true, rule: "rule min_profile"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, auth := managedEnv(t, tc.edit)
+			if tc.pack == "team" {
+				e.setConfig(func(c *config.Config) { c.OpenShell.PackDir = writeTeamPack(t) })
+			}
+			req := sandboxapi.CreateRequest{Name: "allowbox", Pack: tc.pack}
+			if tc.pack == "strict" {
+				req.Project = e.otherProject("strict")
+			}
+			e.live(req)
+			e.register("allowbox")
+			_, err := e.m.PolicyDecision(t.Context(), sandboxapi.PolicyDecisionRequest{
+				Host: tc.host, Kind: "allow", Sandbox: "allowbox",
+			})
+			if !sandboxapi.IsCode(err, sandboxapi.CodePolicyViolation) && !sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) {
+				t.Fatalf("allow %s = %v, want a policy refusal", tc.host, err)
+			}
+			if tc.requestAccess && !strings.Contains(err.Error(), "Request access:") {
+				t.Fatalf("refusal has no request-access guidance: %v", err)
+			}
+			if !tc.requestAccess && strings.Contains(err.Error(), "Request access:") {
+				t.Fatalf("a refusal the person can change sends them to request access: %v", err)
+			}
+			if tc.rule != "" && !strings.Contains(err.Error(), tc.rule) {
+				t.Fatalf("refusal does not name %s: %v", tc.rule, err)
+			}
+			if got := auth.decisions(); len(got) != 0 {
+				t.Fatalf("refused allow reached the decision store: %+v", got)
+			}
+		})
+	}
+}
+
+// GAP-0224: a saved allow stayed in force in a running sandbox for minutes
+// after the organization raised the profile to strict, and again after a
+// restart, because the daemon kept the decisions it had loaded until the
+// next reconcile. A reload (the daemon asks for one when the gateway's
+// answer moved the policy, and at every start) follows the gateway's list,
+// which the floor now caps; a reload that fails keeps the user blocks only.
+func TestManagedReloadDecisionsFollowsTheCurrentFloor(t *testing.T) {
+	e, auth := managedEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "keepbox"})
+	reg := e.register("keepbox")
+	if _, err := e.m.Unblock(t.Context(), sandboxapi.UnblockRequest{Host: "webhook.site", Sandbox: "keepbox", Always: true}); err != nil {
+		t.Fatalf("always unblock = %v", err)
+	}
+	if _, err := e.m.PolicyDecision(t.Context(), sandboxapi.PolicyDecisionRequest{Host: "blocked.example.org", Kind: "block", Sandbox: "keepbox"}); err != nil {
+		t.Fatalf("block = %v", err)
+	}
+	if !e.decideEgress("keepbox", "webhook.site").Allowed {
+		t.Fatal("the saved unblock does not reach the decider")
+	}
+	kept := func() []sandboxrelay.Decision {
+		st := e.m.managedSide()
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		return slices.Clone(st.decisions[reg])
+	}
+
+	auth.listFloor.Store(&config.OpenShellAdminConfig{MinProfile: config.OpenShellProfileStrict})
+	e.m.ReloadDecisions(t.Context(), reg)
+	if e.decideEgress("keepbox", "webhook.site").Allowed {
+		t.Fatal("a saved unblock the strict floor no longer keeps still opens the host after the reload")
+	}
+	if got := kept(); len(got) != 1 || got[0].Kind != sandboxrelay.DecisionEgressBlock {
+		t.Fatalf("decisions after the strict reload = %+v, want the user block only", got)
+	}
+
+	auth.listFloor.Store(nil)
+	e.m.ReloadDecisions(t.Context(), reg)
+	if !e.decideEgress("keepbox", "webhook.site").Allowed {
+		t.Fatal("the floor loosened again, but the reload did not bring the saved unblock back")
+	}
+
+	auth.set(func(a *fakeAuthority) { a.down = true })
+	e.m.ReloadDecisions(t.Context(), reg)
+	if e.decideEgress("keepbox", "webhook.site").Allowed {
+		t.Fatal("a reload that failed kept a saved unblock")
+	}
+	if got := kept(); len(got) != 1 || got[0].Kind != sandboxrelay.DecisionEgressBlock || got[0].Host != "blocked.example.org" {
+		t.Fatalf("decisions after a failed reload = %+v, want the user block kept", got)
+	}
+
+	auth.set(func(a *fakeAuthority) { a.down, a.gone = false, map[string]bool{reg: true} })
+	e.m.ReloadDecisions(t.Context(), reg)
+	if got := kept(); len(got) != 0 {
+		t.Fatalf("a registration the gateway no longer knows kept %+v", got)
+	}
+}
+
+// A registration poll can replace the daemon's default floor while a new
+// managed create is in progress. Both resolution and the later create steps
+// must use the floor pinned to that create.
+func TestManagedCreateUsesPinnedFloorAfterDefaultChanges(t *testing.T) {
+	e := newEnv(t, nil)
+	strict := *e.config()
+	strict.OpenShell.Admin.AllowYolo = boolPtr(false)
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.AllowYolo = boolPtr(true) })
+	ctx := WithCreateConfig(t.Context(), &strict)
+	sb, err := e.m.Create(ctx, sandboxapi.CreateRequest{
+		Name: "pinned-floor", Harness: "claudecode", Project: e.project, Yolo: true,
+	})
+	if err == nil {
+		if sb.Yolo {
+			t.Fatal("the create used the other registration's permissive floor")
+		}
+	} else if !sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) {
+		t.Fatalf("create under the pinned floor: %v", err)
+	}
+}
+
+// GAP-0132: after an administrator moved the person back to a looser
+// profile, `sandbox policy explain` named it at once while an unblock in the
+// same sandbox was still refused under the stricter profile until the
+// minute's poll. An unblock and an ask's answer now have the sandbox's policy
+// confirmed first (Options.ConfirmPolicy) and are judged under the policy
+// that confirmation put in force, looser or tighter.
+func TestManagedDecisionsConfirmTheSandboxPolicyFirst(t *testing.T) {
+	no := boolPtr(false)
+	e, _ := managedEnv(t, func(c *config.Config) {
+		c.OpenShell.Profile = config.OpenShellProfileBalanced
+		c.OpenShell.Admin.AllowUnblock = no
+		c.OpenShell.Admin.UserApprovals = config.OpenShellUserApprovalsSession
+	})
+	e.live(sandboxapi.CreateRequest{Name: "pinbox"})
+	e.register("pinbox")
+	var confirmed []string
+	confirmTo := func(unblock *bool, approvals string) {
+		e.m.opts.ConfirmPolicy = func(_ context.Context, name string) {
+			confirmed = append(confirmed, name)
+			e.setConfig(func(c *config.Config) {
+				c.OpenShell.Admin.AllowUnblock, c.OpenShell.Admin.UserApprovals = unblock, approvals
+			})
+		}
+	}
+
+	confirmTo(nil, "")
+	if _, err := e.m.Unblock(t.Context(), sandboxapi.UnblockRequest{Host: "webhook.site", Sandbox: "pinbox"}); err != nil {
+		t.Fatalf("unblock under the confirmed looser profile: %v", err)
+	}
+	confirmTo(no, config.OpenShellUserApprovalsSession)
+	_, err := e.m.Unblock(t.Context(), sandboxapi.UnblockRequest{Host: "webhook.site", Sandbox: "pinbox", Always: true})
+	wantCode(t, err, sandboxapi.CodeAdminViolation)
+	if !slices.Equal(confirmed, []string{"pinbox", "pinbox"}) {
+		t.Fatalf("confirmed before the unblocks: %v", confirmed)
+	}
+
+	// An ask answered always: refused under session-only approvals, the
+	// confirmation lifts that first.
+	confirmTo(nil, "")
+	e.propose("pinbox", "hz.example.org")
+	e.draft("pinbox")
+	asks := e.waitAsks("pinbox", 1)
+	must(t, e.decide(asks[0].ID, sandboxapi.ApprovalDecision{Decision: "approve", Always: true}))
+	e.waitAsks("pinbox", 0)
+	if len(confirmed) != 3 || confirmed[2] != "pinbox" {
+		t.Fatalf("confirmed before the answer: %v", confirmed)
+	}
+}
+
+// GAP-0058: foreign_sandboxes alert in the floor of the person's registered
+// sandbox reports a sandbox DefenseClaw did not start and leaves it running,
+// even while the daemon's own floor for new runs says stop: the registration
+// floor of the sandbox in force decides, not the closed floor.
+func TestManagedForeignAlertUnderTheRegistrationFloor(t *testing.T) {
+	e, auth := managedEnv(t, nil)
+	alert := e.config().OpenShell.Admin
+	alert.ForeignSandboxes = config.OpenShellForeignSandboxesAlert
+	auth.profile.Store(&alert)
+	if e.config().OpenShell.Admin.ForeignSandboxes == config.OpenShellForeignSandboxesAlert {
+		t.Fatal("the daemon's own floor must say stop for this test")
+	}
+	e.live(sandboxapi.CreateRequest{Name: "mine"})
+	e.register("mine")
+	_, err := e.client.CreateSandbox(t.Context(), "devbox", &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{})
+	must(t, err)
+	must(t, e.m.Reconcile(t.Context()))
+	must(t, e.m.Reconcile(t.Context()))
+	sb, err := e.client.GetSandbox(t.Context(), "devbox")
+	must(t, err)
+	if p := auditPhase(sb.Status.Phase); p == audit.SandboxPhaseStopped || p == audit.SandboxPhaseStopping {
+		t.Fatal("alert in the registration floor stopped the foreign sandbox")
+	}
+	if got := auth.eventsOf(sandboxrelay.EventForeignSandbox); len(got) != 1 || !strings.Contains(string(got[0].Payload), `"action":"alert"`) {
+		t.Fatalf("foreign sandbox events = %+v", got)
+	}
+	if !e.m.ForeignSandboxesRunning() {
+		t.Fatal("the alerted foreign sandbox left running is not reported")
+	}
+	if p := e.get("mine").Phase; p != string(audit.SandboxPhaseReady) {
+		t.Fatalf("the registered sandbox is %s", p)
+	}
+}
+
+// GAP-0058 (T8, TST-2216): the registration floor of a running sandbox
+// tightens from alert to stop (the organization changed foreign_sandboxes
+// and the daemon's poll applied it). The next reconcile stops the foreign
+// sandbox it reported under alert before, and records it once more with
+// action stop.
+func TestManagedForeignStopAfterTheRegistrationFloorTightens(t *testing.T) {
+	e, auth := managedEnv(t, nil)
+	alert := e.config().OpenShell.Admin
+	alert.ForeignSandboxes = config.OpenShellForeignSandboxesAlert
+	auth.profile.Store(&alert)
+	e.live(sandboxapi.CreateRequest{Name: "mine"})
+	e.register("mine")
+	_, err := e.client.CreateSandbox(t.Context(), "devbox", &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{})
+	must(t, err)
+	must(t, e.m.Reconcile(t.Context()))
+	must(t, e.m.Reconcile(t.Context()))
+	if got := auth.eventsOf(sandboxrelay.EventForeignSandbox); len(got) != 1 || !strings.Contains(string(got[0].Payload), `"action":"alert"`) {
+		t.Fatalf("foreign sandbox events under alert = %+v", got)
+	}
+
+	stop := alert
+	stop.ForeignSandboxes = config.OpenShellForeignSandboxesStop
+	auth.profile.Store(&stop)
+	e.m.RefreshPolicies()
+	must(t, e.m.Reconcile(t.Context()))
+	sb, err := e.client.GetSandbox(t.Context(), "devbox")
+	if err == nil {
+		if p := auditPhase(sb.Status.Phase); p != audit.SandboxPhaseStopped && p != audit.SandboxPhaseStopping {
+			t.Fatalf("after the floor said stop the foreign sandbox is %s", sb.Status.Phase)
+		}
+	} else if !openshell.IsNotFound(err) {
+		t.Fatal(err)
+	}
+	got := auth.eventsOf(sandboxrelay.EventForeignSandbox)
+	if len(got) != 2 || !strings.Contains(string(got[1].Payload), `"action":"stop"`) {
+		t.Fatalf("foreign sandbox events after the floor said stop = %+v", got)
+	}
+	if p := e.get("mine").Phase; p != string(audit.SandboxPhaseReady) {
+		t.Fatalf("the registered sandbox is %s", p)
+	}
+}
+
+// A managed create's floor binds the sandbox that create reserved, never
+// its name. The refresh inside the create resolves the new sandbox under it,
+// not the closed floor (GAP-0016), until the daemon keeps its registration.
+// A same-name create that fails on the name lends its floor to nothing: the
+// sandbox that holds the name, whose registration is missing, stays
+// unconfirmed and its egress credential stays off.
+func TestManagedCreateFloorBindsTheReservedSandbox(t *testing.T) {
+	e, _ := managedEnv(t, nil)
+	e.m.opts.ConfigForSandbox = func(string) *config.Config { return nil } // no registration kept
+	pinned := func(block string) context.Context {
+		cfg := *e.config()
+		cfg.OpenShell.Admin.EgressBlock = []string{block}
+		return WithCreateConfig(context.Background(), &cfg)
+	}
+	req := sandboxapi.CreateRequest{Name: "newbox", Harness: "claudecode", Project: e.project, Copy: true}
+	sb, err := e.m.Create(pinned("paste.example"), req)
+	must(t, err)
+	b, err := e.m.box("newbox")
+	must(t, err)
+	e.m.mu.Lock()
+	eff, policyErr := b.eff, b.policyErr
+	e.m.mu.Unlock()
+	if policyErr != "" || eff == nil {
+		t.Fatalf("the create's own refresh judged the new sandbox unconfirmed: %q", policyErr)
+	}
+	if got := eff.DecideEgress("paste.example", 443); got.Rule != packs.RuleAdminBlock {
+		t.Fatalf("the new sandbox does not resolve under its create floor: %+v", got)
+	}
+	e.m.EndCreate("newbox", sb.ID)
+	if _, err := e.m.resolveBox(b); err == nil {
+		t.Fatal("after its registration was kept, the sandbox still resolves under the create floor")
+	}
+	if _, err := e.m.Create(pinned("other.example"), req); !sandboxapi.IsCode(err, sandboxapi.CodeConflict) {
+		t.Fatalf("same-name create = %v, want a conflict", err)
+	}
+	if cfg := e.m.configForSandbox("newbox"); cfg != nil {
+		t.Fatalf("the sandbox holding the name borrowed the failed create's floor: %v", cfg.OpenShell.Admin.EgressBlock)
+	}
+	if _, err := e.m.resolveBox(b); err == nil {
+		t.Fatal("the sandbox holding the name resolves after a failed same-name create")
 	}
 }

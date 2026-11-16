@@ -36,6 +36,7 @@ jobs:
   changes:
     name: Detect macOS app changes
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     env:
       # The app embeds no runtime, so only app sources and its packaging
       # scripts affect this build.
@@ -54,15 +55,14 @@ jobs:
       - if: ${{ github.event_name == 'pull_request' }}
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          fetch-depth: 0
+          # The PR merge commit and its base parent cover the path diff below.
+          fetch-depth: 2
           persist-credentials: false
       - name: Select macOS app validation
         id: detect
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
 
@@ -79,29 +79,16 @@ jobs:
               ;;
           esac
 
-          if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::pull request base SHA is not an exact commit ID"
-            exit 1
-          fi
-          if [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::pull request head SHA is not an exact commit ID"
-            exit 1
-          fi
-          if [[ "$BASE_SHA" == "$HEAD_SHA" ]]; then
-            echo "::error::pull request base and head SHAs must differ"
-            exit 1
-          fi
-
           read -r -a macos_paths <<< "$MACOS_PATHS"
           if ((${#macos_paths[@]} == 0)); then
             echo "::error::macOS app path contract is empty"
             exit 1
           fi
 
-          git cat-file -e "${BASE_SHA}^{commit}"
-          git cat-file -e "${HEAD_SHA}^{commit}"
+          git cat-file -e "HEAD^1^{commit}"
+          git cat-file -e "HEAD^{commit}"
           set +e
-          git diff --quiet --no-renames "$BASE_SHA...$HEAD_SHA" -- "${macos_paths[@]}"
+          git diff --quiet --no-renames HEAD^1 HEAD -- "${macos_paths[@]}"
           diff_status=$?
           set -e
 
@@ -119,6 +106,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.macos == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -130,16 +118,15 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.macos == 'true' }}
     runs-on: macos-15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-      - name: Test connector onboarding
-        run: macos/DefenseClawMac/script/test_connector_onboarding.sh
-      - name: Test installer download verification
-        run: macos/DefenseClawMac/script/test_update_checker_verification.sh
-      - name: Test main window lifecycle contract
-        run: macos/DefenseClawMac/script/test_main_window_lifecycle_contract.sh
+      # Every script behind `make macos-app-test` (the build below is the
+      # release build, so the target itself is not repeated here).
+      - name: Run macOS app test scripts
+        run: make macos-app-test-scripts
       - name: Build ad-hoc release artifacts
         run: |
           set -euo pipefail
@@ -160,6 +147,7 @@ jobs:
     needs: [changes, license-headers, build-and-test]
     if: ${{ always() }}
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Require every macOS app check
         env:

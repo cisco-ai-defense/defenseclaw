@@ -40,7 +40,7 @@ reads that answer.
 3. Apply it as root with `enterprise linux ensure --from-package --config FILE`
    (macOS: `enterprise macos ensure ...`) and read the warnings it prints.
 4. Check a person before they sign in:
-   `defenseclaw-gateway enterprise linux profile-explain --user alice@corp.example.com --connector claudecode`
+   `/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user alice@corp.example.com --connector claudecode`
    shows `effective.sandbox` with the source of every value, and
    `enterprise linux sandbox list` shows the sandboxes people started.
 

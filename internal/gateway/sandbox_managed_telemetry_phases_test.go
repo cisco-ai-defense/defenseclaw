@@ -183,11 +183,14 @@ func TestManagedSandboxTelemetryAfterAGatewayRevocation(t *testing.T) {
 		t.Fatal("a record under the tombstone tracked the sandbox again")
 	}
 
-	// The daemon's deleted report removes the tombstone; nothing lands
-	// after it, and nothing is left tracked.
+	// The daemon's deleted report retains a short final lifecycle window,
+	// without tracking the sandbox again.
 	reportDeleted(t, f, sbxAlice, id)
-	if rec := post(phaseClaim(t, "dc-claude-1", "deleted")); rec.Code != http.StatusNotFound {
-		t.Fatalf("after the tombstone went: %d %s, want 404", rec.Code, rec.Body.String())
+	if rec := post(phaseClaim(t, "dc-claude-1", "deleted")); rec.Code != http.StatusAccepted {
+		t.Fatalf("after the deleted report: %d %s, want 202", rec.Code, rec.Body.String())
+	}
+	if recorder.TrackedSandboxes() != 0 {
+		t.Fatal("a final lifecycle record tracked the sandbox again")
 	}
 
 	// Past the window, a gateway revocation's tombstone takes nothing.

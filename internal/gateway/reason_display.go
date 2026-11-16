@@ -17,17 +17,25 @@
 package gateway
 
 import (
-	"regexp"
+	"fmt"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
 const builtInMatchReasonPrefix = "matched: "
+
+// A period keeps this fixed title inside one finding label. Semicolons split
+// independent verdicts in agentMatchedRules.
+const unprovenWriteGuidance = ". Use a literal path or split the command"
 
 // trustedBuiltInMatchReason reports whether reason consists exclusively of
 // exact rule ID/title pairs from the compiled-in catalog. The equality check
@@ -51,7 +59,7 @@ func trustedBuiltInMatchReason(reason string) bool {
 }
 
 // matchLabelStart opens every "<rule-id>:<title>" label of a matched reason.
-var matchLabelStart = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}:`)
+var matchLabelStart = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}:`)
 
 // splitMatchLabels splits the body of a "matched: " reason into its labels.
 // Labels are joined with ", ", and a rule title may hold ", " too ("P0 marker,
@@ -72,12 +80,26 @@ func splitMatchLabels(body string) []string {
 }
 
 func trustedBuiltInFindingLabel(label string) bool {
-	for _, category := range defaultRuleCategories {
+	for _, category := range defaultRuleCategories() {
 		for _, rule := range category.Rules {
 			base := rule.ID + ":" + rule.Title
 			if label == base || label == base+obfuscatedFindingLabelSuffix {
 				return true
 			}
+		}
+	}
+	// The authorized-keys block after an archive extraction (GAP-1555).
+	if label == "persistence.ssh_authorized_keys_command:"+archiveBeforeWriteTitle ||
+		label == "persistence.ssh_authorized_keys_command:"+unresolvedWriteTargetTitle {
+		return true
+	}
+	if title, ok := strings.CutPrefix(label, "persistence.ssh_authorized_keys_command:"); ok {
+		if isSSHControlFileTitle(title) {
+			return true
+		}
+		if classTitle, hasGuidance := strings.CutSuffix(title, unprovenWriteGuidance); hasGuidance &&
+			hookpaths.IsUnprovenWriteTitle(classTitle) {
+			return true
 		}
 	}
 	// A built-in CodeGuard rule on a file write (GAP-2029).
@@ -89,6 +111,36 @@ func trustedBuiltInFindingLabel(label string) bool {
 	return false
 }
 
+// trustedShipAuthoredReason reports a reason DefenseClaw wrote from its own
+// text only: catalog rule labels, CodeGuard counts, the unparsed and
+// oversize refusals, the install-window refusal and the session-start gate
+// refusals. Such a reason is guidance (what happened, what to run), and
+// redacting it left the agent with hashes instead of the repair (GAP-2643).
+func trustedShipAuthoredReason(reason string) bool {
+	return trustedRefusalReason(reason) || trustedSessionStartGateReason(reason)
+}
+
+// trustedRefusalReason is trustedShipAuthoredReason without the session-start
+// wrapper, so the reason a blocked start recorded is checked once.
+func trustedRefusalReason(reason string) bool {
+	return trustedBuiltInMatchReason(reason) || trustedCodeGuardHookReason(reason) ||
+		trustedUnparsedToolCallReason(reason) || trustedStrictInstallWindowReason(reason) ||
+		trustedHookSideRefusalReason(reason) || trustedCodexStartRegistrationRefusal(reason) ||
+		trustedDecisionModelReason(reason) ||
+		trustedIdentityRefusalReason(reason)
+}
+
+// decisionModelReason is the whole of a block or confirmation reason the
+// decision model gave (runDecisionAlone, runToolDecision): DefenseClaw's own
+// words around two numbers it formatted, no tool-call text.
+var decisionModelReason = lazyregexp.New(`^decision-model: (confident block \(risk [01]\.\d\d >= [01]\.\d\d\)|(allow|confirm|block) \(risk [01]\.\d\d\), needs a person's confirmation)$`)
+
+// trustedDecisionModelReason keeps a decision-model reason readable on agent
+// surfaces: the ask showed it as two redaction tokens.
+func trustedDecisionModelReason(reason string) bool {
+	return decisionModelReason.MatchString(reason)
+}
+
 // agentDisplayReason keeps exact, ship-authored catalog metadata readable on
 // agent surfaces under the default compatibility policy while retaining the
 // existing scrub for every free-form or scanner-authored reason. Explicit
@@ -97,7 +149,7 @@ func agentDisplayReason(reason string, policy redaction.SinkPolicy) string {
 	if policy != redaction.SinkPolicyDefault {
 		return redaction.ReasonForSink(reason, policy)
 	}
-	if trustedBuiltInMatchReason(reason) || trustedCodeGuardHookReason(reason) {
+	if trustedShipAuthoredReason(reason) {
 		return reason
 	}
 	return redaction.ReasonForAgent(reason)
@@ -110,11 +162,17 @@ func agentDisplayReason(reason string, policy redaction.SinkPolicy) string {
 // ("LLM judge: personal data or credentials"), not as raw judge labels with
 // redaction tokens (GAP-1981).
 func notificationDisplayReason(reason string, policy redaction.SinkPolicy) string {
-	if policy == redaction.SinkPolicyDefault && (trustedBuiltInMatchReason(reason) || trustedCodeGuardHookReason(reason)) {
+	if policy == redaction.SinkPolicyDefault && trustedShipAuthoredReason(reason) {
 		return reason
 	}
 	if policy == redaction.SinkPolicyDefault && !managedEnterpriseActive.Load() {
 		if subject := agentAssetPolicySubject(reason); subject != "" {
+			return subject
+		}
+		// The MCP admission verdict, as the agent reads it: the terminal
+		// fallback showed a refused launcher as redacted spans
+		// (rel-1-0-6:GAP-0258).
+		if subject := agentMCPAdmissionSubject(reason); subject != "" {
 			return subject
 		}
 		if subject := agentJudgeSubject(reason); subject != "" {
@@ -130,7 +188,7 @@ func notificationDisplayReason(reason string, policy redaction.SinkPolicy) strin
 // defaultSinkDisplayReason applies the catalog carve-out to compatibility
 // response bodies only when no managed override is active.
 func defaultSinkDisplayReason(reason string, policy redaction.SinkPolicy) string {
-	if policy == redaction.SinkPolicyDefault && (trustedBuiltInMatchReason(reason) || trustedCodeGuardHookReason(reason)) {
+	if policy == redaction.SinkPolicyDefault && trustedShipAuthoredReason(reason) {
 		return reason
 	}
 	return redaction.ReasonForSink(reason, policy)
@@ -144,7 +202,7 @@ var standaloneEnterpriseActive atomic.Bool
 func setStandaloneEnterpriseActive(v bool) { standaloneEnterpriseActive.Store(v) }
 
 // agentRuleIDPattern is the shape of a rule ID an agent message may name.
-var agentRuleIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+var agentRuleIDPattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 // agentBlockNoRetry ends every policy block the agent receives. An agent that
 // got only the rule name sometimes rewrote the blocked command to get the
@@ -180,19 +238,15 @@ func agentVerdictReason(action, sourceReason, displayReason string, policy redac
 	if managedEnterpriseActive.Load() || policy != redaction.SinkPolicyDefault {
 		return displayReason
 	}
-	subject := agentBlockListSubject(sourceReason)
-	if subject == "" {
-		subject = agentAssetPolicySubject(sourceReason)
+	if action == "block" {
+		if sentence := agentMCPAdmissionPendingSentence(sourceReason); sentence != "" {
+			return sentence
+		}
+		if sentence := agentProjectSkillPendingSentence(sourceReason); sentence != "" {
+			return sentence
+		}
 	}
-	if subject == "" {
-		subject = agentMCPAdmissionSubject(sourceReason)
-	}
-	if subject == "" {
-		subject = agentJudgeSubject(sourceReason)
-	}
-	if subject == "" {
-		subject = agentRuleAndJudgeSubject(sourceReason)
-	}
+	subject := agentReasonSubject(sourceReason)
 	if action == "block" && subject != "" {
 		return agentBlockSentence(subject)
 	}
@@ -245,19 +299,49 @@ func agentConfirmSentence(subject string) string {
 	return "DefenseClaw policy needs your confirmation for this action" + detail + "."
 }
 
+// agentReasonSubject words a ship-authored reason that is not a plain local
+// rule match (a block-list entry, an asset-policy decision, an MCP install
+// admission verdict, an LLM judge verdict alone or after a rule match) the way
+// the agent reads it, or returns "" for any other reason. agentVerdictReason
+// puts it in the block sentence and agentObservedReason in the observe notice,
+// so both modes name the same thing.
+func agentReasonSubject(sourceReason string) string {
+	for _, word := range []func(string) string{
+		agentBlockListSubject,
+		agentAssetPolicySubject,
+		agentMCPAdmissionSubject,
+		agentJudgeSubject,
+		agentRuleAndJudgeSubject,
+	} {
+		if subject := word(sourceReason); subject != "" {
+			return subject
+		}
+	}
+	return ""
+}
+
 // agentObservedReason names the rules of a finding DefenseClaw lets through
 // (observe mode, or an alert) the way agentVerdictReason names them in a
 // block: "rule R1: Title". The observe notice used to show a rule pack's
 // title as a "<redacted len=N sha=...>" token while the action-mode block
-// printed it (GAP-1187). The gates are agentVerdictReason's: a managed
+// printed it (GAP-1187), and an MCP server its install admission rejected
+// read as a row of redacted spans while the block named the server
+// (rel-1-0-6:GAP-0198): the notice words every reason the block words
+// (agentReasonSubject). The gates are agentVerdictReason's: a managed
 // deployment or an explicit redaction directive keeps displayReason, and so
-// does any reason that is not a plain local rule match.
+// does any other reason.
 func agentObservedReason(action, sourceReason, displayReason string, policy redaction.SinkPolicy) string {
 	if action == "block" || action == "confirm" || action == agentReviewAction {
 		return displayReason
 	}
 	if managedEnterpriseActive.Load() || policy != redaction.SinkPolicyDefault {
 		return displayReason
+	}
+	if sentence := agentMCPAdmissionAllowedSentence(sourceReason); sentence != "" {
+		return sentence
+	}
+	if subject := agentReasonSubject(sourceReason); subject != "" {
+		return subject
 	}
 	if displayReason == sourceReason && !trustedBuiltInMatchReason(sourceReason) {
 		return displayReason
@@ -272,7 +356,7 @@ func agentObservedReason(action, sourceReason, displayReason string, policy reda
 // reasons (inspect.go): `tool "<name>" is on the static block list` and
 // `mcp server "<name>" is blocked`. The name is the tool or server the agent
 // itself called; any other text fails the match and stays redacted.
-var agentBlockListReasonPattern = regexp.MustCompile(
+var agentBlockListReasonPattern = lazyregexp.New(
 	`^(tool|mcp server) "([A-Za-z0-9][A-Za-z0-9._:@/-]{0,127})" (?:is on the static block list|is blocked)$`)
 
 // agentJudgeKinds words the LLM judge reasons (llm_judge.go) for the agent.
@@ -344,25 +428,46 @@ var agentAssetPolicyKinds = map[string]string{"mcp": "MCP server", "skill": "ski
 // agentAssetPolicyKeys are the fields assetPolicyResponseReason emits.
 var agentAssetPolicyKeys = []string{
 	"reason_code", "source", "asset_type", "asset_name", "connector",
-	"registry_status", "registry_configured", "surface",
+	"registry_status", "registry_configured", "surface", "retry_after_s", "scan_issue", "next_step",
 }
 
 // agentAssetPolicyValuePattern is the shape of a value an asset-policy reason
 // may show the agent: the asset name the agent itself asked for, or an enum.
-var agentAssetPolicyValuePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$`)
+var agentAssetPolicyValuePattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$`)
 
 // agentAssetPolicyNamePattern is the shape of an asset_name the agent may be
 // shown: the plain shape, with letters, marks and digits of any script, so a
 // denied skill named "epa-café" reads as a sentence like an ASCII one instead
 // of the redacted key=value reason (GAP-0572). Spaces, quotes, controls and
 // format characters still fail the match and stay redacted.
-var agentAssetPolicyNamePattern = regexp.MustCompile(`^[\p{L}\p{N}][\p{L}\p{M}\p{N}._:@/-]{0,127}$`)
+var agentAssetPolicyNamePattern = lazyregexp.New(`^[\p{L}\p{N}][\p{L}\p{M}\p{N}._:@/-]{0,127}$`)
 
 // Only the fixed runtime-disable template and known admission verdict kinds
 // may become an agent sentence. Scanner errors and finding titles can contain
 // untrusted text, so the subject names their category without copying them.
-var agentMCPAdmissionPattern = regexp.MustCompile(`^mcp server "([A-Za-z0-9][A-Za-z0-9._:@/-]{0,127})" is disabled because its install admission rejected it \(([^\r\n]{1,512})\); asset_policy\.mode does not apply to admission verdicts$`)
-var agentMCPFindingPattern = regexp.MustCompile(`^auto-block: watch detected (LOW|MEDIUM|HIGH|CRITICAL) findings \(scanner=[A-Za-z0-9._-]{1,64}\)(?:: [^\r\n]{1,512})?(?:; rescan retained block)?$`)
+// The reason group has no length bound: it is never copied, and a scanner
+// reason with a folder note or a long refusal passed the old 512 and 1000
+// and was redacted whole (rel-1-0-6:GAP-0258).
+var agentMCPAdmissionPattern = lazyregexp.New(`^mcp server "([A-Za-z0-9][A-Za-z0-9._:@/-]{0,127})" is disabled because its install admission rejected it \(([^\r\n]+)\); asset_policy\.mode does not apply to admission verdicts$`)
+var agentMCPFindingPattern = lazyregexp.New(`^auto-block: watch detected (LOW|MEDIUM|HIGH|CRITICAL) findings \(scanner=[A-Za-z0-9._-]{1,64}\)(?:: [^\r\n]{1,512})?(?:; rescan retained block)?$`)
+
+// mcpLauncherRefusalCause says, in fixed words, why a scan refused an MCP
+// server's local launcher (scanner.MCPLauncherRefusal) and how to fix it.
+const mcpLauncherRefusalCause = "is refused because a scan starts a local MCP server only as a package through the bare npx or uvx, " +
+	"with a package argument and no code-running flag; start it with npx or uvx, or serve it over HTTP and use its URL, " +
+	"or have the reviewed definition allowed"
+
+// mcpLauncherRefusalVerdict is the verdict of an MCP server whose scan
+// refused its local launcher: "the launcher node is refused because ...",
+// a plain sentence. Only a bare launcher name the scanner's own refusal
+// names (scanner.MCPRefusedLauncher) is taken from the scanner text, which
+// can carry the server's command path and arguments.
+func mcpLauncherRefusalVerdict(launcher string) string {
+	if launcher != "" {
+		return "the launcher " + launcher + " " + mcpLauncherRefusalCause
+	}
+	return "the launcher " + mcpLauncherRefusalCause
+}
 
 func agentMCPAdmissionSubject(reason string) string {
 	m := agentMCPAdmissionPattern.FindStringSubmatch(reason)
@@ -370,7 +475,14 @@ func agentMCPAdmissionSubject(reason string) string {
 		return ""
 	}
 	var verdict string
+	launcher, launcherRefused := scanner.MCPRefusedLauncher(m[2])
 	switch {
+	case strings.HasPrefix(m[2], "scanner failure (fail-closed): ") && launcherRefused:
+		// The scan refused the server's launcher: say so, and how to give it
+		// a definition a scan starts, in fixed words. The agent saw only
+		// "still scanning" or the bare failure kind, and retried a refusal
+		// that never changes (rel-1-0-6:GAP-0258).
+		verdict = mcpLauncherRefusalVerdict(launcher)
 	case strings.HasPrefix(m[2], "scanner failure (fail-closed): ") && len(m[2]) > len("scanner failure (fail-closed): "):
 		verdict = "scanner failure (fail-closed)"
 	case agentMCPFindingPattern.MatchString(m[2]):
@@ -391,27 +503,32 @@ var reasonDisplayGOOS = runtime.GOOS
 // broken hook and hid the server name (GAP-2423). Every field must be a known
 // key with a plain value; anything else stays redacted.
 func agentAssetPolicySubject(reason string) string {
-	fields := strings.Split(reason, " ")
-	if len(fields) < 2 || fields[0] != "ASSET-POLICY" {
+	values, ok := agentAssetPolicyFields(reason)
+	if !ok {
 		return ""
 	}
-	values := make(map[string]string, len(fields)-1)
-	for _, field := range fields[1:] {
-		key, value, ok := strings.Cut(field, "=")
-		pattern := agentAssetPolicyValuePattern
-		if key == "asset_name" {
-			pattern = agentAssetPolicyNamePattern
-		}
-		if !ok || !slices.Contains(agentAssetPolicyKeys, key) || !pattern.MatchString(value) {
-			return ""
-		}
-		values[key] = value
-	}
 	kind, name := agentAssetPolicyKinds[values["asset_type"]], values["asset_name"]
-	if kind == "" || name == "" {
+	// A failed MCP admission scan is worded without a name the agent may not
+	// be shown (mcpAdmissionAgentName); its cause and next step stay.
+	if kind == "" || (name == "" && !agentMCPAdmissionFailedReason(values)) {
 		return ""
 	}
 	switch values["reason_code"] {
+	case "mcp-admission-pending":
+		if values["asset_type"] == "mcp" {
+			return kind + " " + name + " is not scanned yet; try the call again in " + agentMCPAdmissionRetryText(values)
+		}
+	case "mcp-admission-unavailable":
+		return kind + " " + name + " admission is unavailable; try the call again in " + agentMCPAdmissionRetryText(values)
+	case "mcp-admission-failed":
+		if values["asset_type"] == "mcp" {
+			return mcpAdmissionFailedText(name, values["scan_issue"], values["next_step"])
+		}
+		return kind + " " + name + " has a failed admission scan"
+	case "mcp-definition-unproven":
+		if values["asset_type"] == "mcp" {
+			return mcpDefinitionUnprovenText(name)
+		}
 	case "not-in-approved-registry":
 		return kind + " " + name + " is not in the approved registry"
 	case "registry-required-but-empty":
@@ -420,6 +537,17 @@ func agentAssetPolicySubject(reason string) string {
 		return kind + " " + name + " is denied by the default asset policy"
 	case "admin-deny":
 		return kind + " " + name + " is denied by asset policy"
+	case "plugin-owner-unknown":
+		// The owner of a plugin MCP server the registry could not prove is
+		// unknown: never name a plugin read off the server name as the
+		// owner (rel-1-0-6:GAP-0293).
+		if values["asset_type"] == "plugin" {
+			return "the plugin that owns this MCP server is unknown, and a plugin it can belong to is refused by security policy"
+		}
+	case "install-block":
+		if values["asset_type"] == "plugin" {
+			return kind + " " + name + " was blocked by install admission"
+		}
 	case "runtime-disable":
 		// A disabled or quarantined asset: say so in words, not with the
 		// registry fields of the record (GAP-0362).
@@ -438,6 +566,101 @@ func agentAssetPolicySubject(reason string) string {
 		return kind + " " + name + " is disabled by security policy"
 	}
 	return ""
+}
+
+// agentAssetPolicyFields are the fields of an asset-policy reason
+// (assetPolicyResponseReason), when every field is a known key with a plain
+// value; anything else stays redacted.
+func agentAssetPolicyFields(reason string) (map[string]string, bool) {
+	fields := strings.Split(reason, " ")
+	if len(fields) < 2 || fields[0] != "ASSET-POLICY" {
+		return nil, false
+	}
+	values := make(map[string]string, len(fields)-1)
+	for _, field := range fields[1:] {
+		key, value, ok := strings.Cut(field, "=")
+		pattern := agentAssetPolicyValuePattern
+		if key == "asset_name" {
+			pattern = agentAssetPolicyNamePattern
+		}
+		if !ok || !slices.Contains(agentAssetPolicyKeys, key) || !pattern.MatchString(value) {
+			return nil, false
+		}
+		values[key] = value
+	}
+	return values, true
+}
+
+// agentMCPAdmissionPendingSentence words the refusal of a tool call to an MCP
+// server whose install admission has not finished (GAP-0112) as a wait with
+// a retry estimate from the watcher.
+// The block sentence says the opposite ("Do not retry it"), and the raw
+// key=value reason read like a registry error (GAP-0210). "" for any other
+// reason.
+func agentMCPAdmissionPendingSentence(reason string) string {
+	values, ok := agentAssetPolicyFields(reason)
+	if !ok || values["asset_type"] != "mcp" || values["asset_name"] == "" {
+		return ""
+	}
+	if values["reason_code"] == "mcp-admission-unavailable" {
+		return "DefenseClaw could not read admission for MCP server " + values["asset_name"] + ", so its tools are blocked. " +
+			"Try the same call again in " + agentMCPAdmissionRetryText(values) + "."
+	}
+	if values["reason_code"] != "mcp-admission-pending" {
+		return ""
+	}
+	return "DefenseClaw is still scanning the new MCP server " + values["asset_name"] + "; retry in " + agentMCPAdmissionRetryText(values) +
+		". Its tools stay blocked until the scan finishes. If the scan rejects the server, its calls stay blocked."
+}
+
+func agentMCPAdmissionRetryText(values map[string]string) string {
+	if seconds, err := strconv.Atoi(values["retry_after_s"]); err == nil && seconds >= 1 && seconds <= 300 {
+		return fmt.Sprintf("about %d s", seconds)
+	}
+	return "about a minute"
+}
+
+func agentMCPAdmissionAllowedSentence(reason string) string {
+	values, ok := agentAssetPolicyFields(reason)
+	if !ok || values["asset_type"] != "mcp" || (values["asset_name"] == "" && !agentMCPAdmissionFailedReason(values)) {
+		return ""
+	}
+	switch values["reason_code"] {
+	case "mcp-admission-pending":
+		return "DefenseClaw is still scanning MCP server " + values["asset_name"] + ". This call is allowed while admission is pending."
+	case "mcp-admission-unavailable":
+		return "DefenseClaw could not read admission for MCP server " + values["asset_name"] + ". This call is allowed with a warning."
+	case "mcp-admission-failed":
+		return mcpAdmissionAllowedWarning(values["asset_name"], values["scan_issue"], values["next_step"])
+	case "mcp-definition-unproven":
+		return "DefenseClaw cannot prove which definition MCP server " + values["asset_name"] + " runs. This call is allowed with a warning; " +
+			mcpDefinitionUnprovenStep + "."
+	}
+	return ""
+}
+
+// agentMCPAdmissionFailedReason reports the fields of a failed MCP admission
+// scan, whose reason can omit the server name.
+func agentMCPAdmissionFailedReason(values map[string]string) bool {
+	return values["asset_type"] == "mcp" && values["reason_code"] == "mcp-admission-failed"
+}
+
+// A project skill awaiting its first scan is a temporary refusal, so name
+// the scan step instead of the generic permanent-block or registry wording.
+func agentProjectSkillPendingSentence(reason string) string {
+	values, ok := agentAssetPolicyFields(reason)
+	if !ok || values["reason_code"] != "project-skill-pending" || values["asset_type"] != "skill" || values["asset_name"] == "" {
+		return ""
+	}
+	prefix := "DefenseClaw has not scanned project skill " + values["asset_name"] + " yet, so it is blocked. "
+	if standaloneEnterpriseActive.Load() {
+		if reasonDisplayGOOS == "windows" {
+			return prefix + "Wait for the managed skill watcher to scan it, or ask your administrator to review the scan; then retry the skill."
+		}
+		// The gateway is not on the PATH: name it by its absolute path.
+		return prefix + "Ask your administrator to run `" + managed.StandaloneGatewayPath(reasonDisplayGOOS) + " scan skill PATH` for its folder; then retry the skill."
+	}
+	return prefix + "Run `defenseclaw skill scan --path PATH` for its folder; then retry the skill."
 }
 
 // agentOrderedRulePrefix starts the note an ordered tool-call chain match
@@ -463,6 +686,7 @@ func activeRulePackLabel(id, title string) bool {
 	if id == "" || title == "" {
 		return false
 	}
+	ensureDefaultRuleGeneration()
 	ruleCategoriesMu.RLock()
 	defer ruleCategoriesMu.RUnlock()
 	if allRuleGeneration != nil {

@@ -27,7 +27,7 @@ def audit() -> None:
     """Audit trail helpers: export, findings and gateway logs.
 
     \b
-    Export the audit log, config changes included (action config-update):
+    Export the audit log, config changes included (action config.change.applied):
         defenseclaw audit export [--connector X] [--since 1h]
     Report the current distinct skill/MCP/plugin/code scan findings (JSON):
         defenseclaw audit findings [--scanner NAME] [--since 30m]

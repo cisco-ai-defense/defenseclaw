@@ -1207,8 +1207,11 @@ func TestAtomicTransformV2CompleteBootstrapDecisionAwareRecovery(t *testing.T) {
 	}
 }
 
+// An edit or a recreate before the commit is the operator own save and is
+// kept (TestAtomicTransformV2PreparedOperatorSaveBeforeCommitIsKeptAndRetried);
+// a deletion cannot be told from a lost prior config and stays retained.
 func TestAtomicTransformV2AmbiguousPreparedStateIsIdempotent(t *testing.T) {
-	for _, mutation := range []string{"edit", "recreate", "delete"} {
+	for _, mutation := range []string{"delete"} {
 		t.Run(mutation, func(t *testing.T) {
 			root := t.TempDir()
 			path := filepath.Join(root, "config", "settings.json")

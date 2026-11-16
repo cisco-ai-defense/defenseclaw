@@ -25,13 +25,13 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
@@ -53,7 +53,7 @@ var (
 	// register again.
 	ErrTombstoned = errors.New("sandboxreg: the sandbox was revoked and cannot register again")
 	// ErrInUse: the binding id or sandbox id is already bound to another
-	// registration of the uid.
+	// registration on the managed gateway.
 	ErrInUse = errors.New("sandboxreg: the sandbox is already registered")
 	// ErrDriverMismatch: the sandbox was created on another compute driver
 	// than the one its registration was resolved for (a sandbox never
@@ -62,6 +62,13 @@ var (
 	// ErrFull: the uid holds MaxEntriesPerUID registrations none of which
 	// can be evicted, or its run records reached MaxRunBytesPerUID.
 	ErrFull = errors.New("sandboxreg: too many sandbox registrations")
+	// ErrTooManyLive: the uid already has MaxLivePerUID live registrations,
+	// so another one may not become live (GAP-0020).
+	ErrTooManyLive = errors.New("sandboxreg: too many running sandboxes for one account")
+	// ErrStopped: a running report for a registration whose daemon reported
+	// its sandbox stopped. A stop is final for a registration: the sandbox
+	// runs again only under a new one (Restart, GAP-0673).
+	ErrStopped = errors.New("sandboxreg: the registration's sandbox was reported stopped; starting it registers it again")
 	// ErrInvalid: a record or request fails validation.
 	ErrInvalid = errors.New("sandboxreg: invalid registration")
 	// ErrCorrupt: a store file is unreadable, mis-owned or malformed; the
@@ -87,6 +94,11 @@ const (
 	// its registrations): the registration never named that daemon's
 	// sandbox, and the sandbox never registers again.
 	ReasonForeign = "foreign_sandbox"
+	// ReasonRestarted is the revoked_reason of a registration a start
+	// replaced with a new one for the same sandbox (Restart). Like
+	// ReasonDeleted it is the user's own: the sandbox ids pass to the new
+	// registration and are not retired.
+	ReasonRestarted = "restarted"
 )
 
 // Run record and retirement bounds.
@@ -114,11 +126,11 @@ const maxStoreFileBytes = 16 << 20
 const expiredPendingKeep = time.Hour
 
 var (
-	idPattern          = regexp.MustCompile(`^` + IDPrefix + `[a-z2-7]{26}$`)
-	bindingIDPattern   = regexp.MustCompile(`^sb_[0-9a-f]{32}$`)
-	sandboxIDPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
-	sandboxNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-	uidFilePattern     = regexp.MustCompile(`^(0|[1-9][0-9]{0,9})\.json$`)
+	idPattern          = lazyregexp.New(`^` + IDPrefix + `[a-z2-7]{26}$`)
+	bindingIDPattern   = lazyregexp.New(`^sb_[0-9a-f]{32}$`)
+	sandboxIDPattern   = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+	sandboxNamePattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	uidFilePattern     = lazyregexp.New(`^(0|[1-9][0-9]{0,9})\.json$`)
 	idEncoding         = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
 )
 
@@ -160,6 +172,18 @@ func EffectiveState(r Registration, now time.Time) string {
 		return StateStopped
 	}
 	return r.State
+}
+
+// liveCount is how many of u's registrations other than except are live at
+// now (EffectiveState): the ones MaxLivePerUID caps.
+func liveCount(u *uidRecords, now time.Time, except string) int {
+	n := 0
+	for _, r := range u.regs {
+		if r.ID != except && EffectiveState(r, now) == StateLive {
+			n++
+		}
+	}
+	return n
 }
 
 // leaseStart is when r's LiveLease began: its daemon's last running
@@ -266,9 +290,27 @@ type FileStore struct {
 	// in tests.
 	limit, runLimit int
 
-	mu   sync.Mutex
-	uids map[int]*uidRecords
+	// writeMu orders the mutations; mu guards uids. Most writes release mu
+	// during disk I/O, so relayed hooks do not wait for their fsync. Writes that
+	// withdraw live authority keep mu until durable publication.
+	writeMu sync.Mutex
+	mu      sync.Mutex
+	uids    map[int]*uidRecords
 }
+
+// lockForWrite takes writeMu and then mu for one mutation and returns the
+// unlock.
+func (s *FileStore) lockForWrite() func() {
+	s.writeMu.Lock()
+	s.mu.Lock()
+	return func() {
+		s.mu.Unlock()
+		s.writeMu.Unlock()
+	}
+}
+
+// storeFileWrite writes one uid's file; replaceable by tests.
+var storeFileWrite = writeStoreFile
 
 // uidRecords is one uid's file as cached: its registrations, the run
 // records of its pending and live ones, and its retired sandboxes.
@@ -342,11 +384,15 @@ func (s *FileStore) loadLocked(uid int) (*uidRecords, error) {
 	return u, nil
 }
 
-// saveLocked writes u as uid's file and then publishes it. Expired pending
+// saveLocked writes u as uid's file and then publishes it. The caller holds
+// lockForWrite. Non-withdrawing writes release mu during disk I/O; a stop or
+// revoke keeps it so admission cannot read the old live record after the
+// withdrawal has begun but before it is stored.
+// Expired pending
 // entries past their keep window are dropped, and so are the run records
 // of tombstones (but for the stop a re-match revoked one with) and of
 // dropped entries.
-func (s *FileStore) saveLocked(uid int, u *uidRecords) error {
+func (s *FileStore) saveLocked(uid int, u *uidRecords, withdrawLiveAuthority bool) error {
 	now := s.now()
 	kept := u.regs[:0:0]
 	runs := map[string]Run{}
@@ -371,7 +417,14 @@ func (s *FileStore) saveLocked(uid int, u *uidRecords) error {
 	if len(retired) > MaxRetiredPerUID {
 		retired = retired[len(retired)-MaxRetiredPerUID:]
 	}
-	if err := writeStoreFile(s.dir, s.path(uid), registrationFile{V: storeFileVersion, Registrations: kept, Runs: runs, Retired: retired}); err != nil {
+	if !withdrawLiveAuthority {
+		s.mu.Unlock()
+	}
+	err := storeFileWrite(s.dir, s.path(uid), registrationFile{V: storeFileVersion, Registrations: kept, Runs: runs, Retired: retired})
+	if !withdrawLiveAuthority {
+		s.mu.Lock()
+	}
+	if err != nil {
 		return err
 	}
 	s.uids[uid] = &uidRecords{regs: kept, runs: runs, retired: retired}
@@ -433,8 +486,7 @@ func (s *FileStore) CreateRun(uid int, r Registration, run *Run) error {
 	}
 	var gone []Registration
 	defer func() { s.notifyGone(gone) }()
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.lockForWrite()()
 	have, err := s.loadLocked(uid)
 	if err != nil {
 		return err
@@ -470,7 +522,7 @@ func (s *FileStore) CreateRun(uid int, r Registration, run *Run) error {
 		next.runs[r.ID] = *run
 	}
 	next.regs = append(next.regs, r)
-	if err := s.saveLocked(uid, next); err != nil {
+	if err := s.saveLocked(uid, next, false); err != nil {
 		return err
 	}
 	gone = evicted
@@ -497,9 +549,12 @@ func (s *FileStore) evict(u *uidRecords) []Registration {
 	now, limit := s.now(), s.maxEntries()
 	var dropped []Registration
 	for _, evictable := range []func(Registration) bool{
-		func(r Registration) bool { return r.State == StateRevoked && r.RevokedReason == ReasonDeleted },
+		func(r Registration) bool { return r.State == StateRevoked && userRevoked(r.RevokedReason) },
 		func(r Registration) bool { return PendingExpired(r, now) },
-		func(r Registration) bool { return r.State == StateRevoked },
+		func(r Registration) bool {
+			return r.State == StateRevoked && (r.RevokedReason != ReasonPolicyChanged ||
+				!now.Before(r.RevokedAt.Add(RevokedTelemetryWindow)))
+		},
 	} {
 		for len(u.regs) >= limit {
 			oldest := -1
@@ -534,13 +589,19 @@ func (s *FileStore) notifyGone(gone []Registration) {
 // retire keeps the sandbox ids of r, a tombstone being dropped, when the
 // gateway revoked it, so its sandbox never registers again.
 func (s *FileStore) retire(u *uidRecords, r Registration) {
-	if r.State != StateRevoked || r.RevokedReason == ReasonDeleted || (r.BindingID == "" && r.SandboxID == "") {
+	if r.State != StateRevoked || userRevoked(r.RevokedReason) || (r.BindingID == "" && r.SandboxID == "") {
 		return
 	}
 	u.retired = append(u.retired, Retired{BindingID: r.BindingID, SandboxID: r.SandboxID, At: s.now()})
 	if len(u.retired) > MaxRetiredPerUID {
 		u.retired = slices.Delete(u.retired, 0, len(u.retired)-MaxRetiredPerUID)
 	}
+}
+
+// userRevoked reports a revoked_reason of the user's own (a deletion or a
+// restart), whose sandbox ids are never retired.
+func userRevoked(reason string) bool {
+	return reason == ReasonDeleted || reason == ReasonRestarted
 }
 
 func (s *FileStore) maxRunBytes() int {
@@ -600,9 +661,31 @@ func (s *FileStore) Run(uid int, id string) (Run, bool, error) {
 	return run, ok, nil
 }
 
+// GetWithRun is Get and Run read together: a write stores a registration
+// and its run record in one step, and the pair returned is always one
+// write's, never a registration with the run record of a later write.
+func (s *FileStore) GetWithRun(uid int, id string) (r Registration, ok bool, run Run, hasRun bool, err error) {
+	if !ValidID(id) {
+		return Registration{}, false, Run{}, false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u, err := s.loadLocked(uid)
+	if err != nil {
+		return Registration{}, false, Run{}, false, err
+	}
+	run, hasRun = u.runs[id]
+	for _, have := range u.regs {
+		if have.ID == id {
+			return have, true, run, hasRun, nil
+		}
+	}
+	return Registration{}, false, run, hasRun, nil
+}
+
 // Bind turns uid's pending, unexpired registration id live for the sandbox
 // b names. A binding id or sandbox id that matches a tombstone or a
-// retired sandbox, or that another registration of uid already holds, is
+// retired sandbox, or that another registration already holds, is
 // refused.
 func (s *FileStore) Bind(uid int, id string, b sandboxrelay.BindRequest) (Registration, error) {
 	if err := ValidBind(b); err != nil {
@@ -611,11 +694,42 @@ func (s *FileStore) Bind(uid int, id string, b sandboxrelay.BindRequest) (Regist
 	if !ValidID(id) {
 		return Registration{}, ErrNotFound
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.lockForWrite()()
 	u, err := s.loadLocked(uid)
 	if err != nil {
 		return Registration{}, err
+	}
+	// The IDs are caller supplied. A different account can make the same
+	// claim, so reserve each ID across the whole managed gateway.
+	uids, err := storeUIDs(s.dir)
+	if err != nil {
+		return Registration{}, err
+	}
+	seen := map[int]bool{}
+	for _, otherUID := range uids {
+		seen[otherUID] = true
+	}
+	for otherUID := range s.uids {
+		seen[otherUID] = true
+	}
+	for otherUID := range seen {
+		if otherUID == uid {
+			continue
+		}
+		other, err := s.loadLocked(otherUID)
+		if err != nil {
+			return Registration{}, err
+		}
+		for _, held := range other.regs {
+			if held.BindingID == b.BindingID || held.SandboxID == b.SandboxID {
+				return Registration{}, ErrInUse
+			}
+		}
+		for _, retired := range other.retired {
+			if retired.BindingID == b.BindingID || retired.SandboxID == b.SandboxID {
+				return Registration{}, ErrInUse
+			}
+		}
 	}
 	at := -1
 	for i, r := range u.regs {
@@ -651,13 +765,15 @@ func (s *FileStore) Bind(uid int, id string, b sandboxrelay.BindRequest) (Regist
 		return Registration{}, ErrExpired
 	case b.Driver != "" && r.Driver != "" && b.Driver != r.Driver:
 		return Registration{}, ErrDriverMismatch
+	case liveCount(u, now, r.ID) >= MaxLivePerUID:
+		return Registration{}, ErrTooManyLive
 	}
 	r.State, r.BoundAt, r.SeenAt = StateLive, now, now
 	r.GuestWatch, r.GuestSeenAt = true, time.Time{}
 	r.SandboxID, r.SandboxName, r.BindingID = b.SandboxID, b.SandboxName, b.BindingID
 	next := u.clone()
 	next.regs[at] = r
-	if err := s.saveLocked(uid, next); err != nil {
+	if err := s.saveLocked(uid, next, false); err != nil {
 		return Registration{}, err
 	}
 	return r, nil
@@ -669,8 +785,7 @@ func (s *FileStore) MarkGuestSeen(uid int, id string, at time.Time) error {
 	if !ValidID(id) {
 		return ErrNotFound
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.lockForWrite()()
 	u, err := s.loadLocked(uid)
 	if err != nil {
 		return err
@@ -692,7 +807,7 @@ func (s *FileStore) MarkGuestSeen(uid int, id string, at time.Time) error {
 		r.GuestSeenAt = at.UTC()
 		next := u.clone()
 		next.regs[i] = r
-		return s.saveLocked(uid, next)
+		return s.saveLocked(uid, next, false)
 	}
 	return ErrNotFound
 }
@@ -706,8 +821,7 @@ func (s *FileStore) Revoke(uid int, id, reason string) error {
 	}
 	var gone []Registration
 	defer func() { s.notifyGone(gone) }()
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.lockForWrite()()
 	u, err := s.loadLocked(uid)
 	if err != nil {
 		return err
@@ -722,7 +836,7 @@ func (s *FileStore) Revoke(uid int, id, reason string) error {
 		r.State, r.RevokedReason, r.RevokedAt = StateRevoked, boundedReason(reason), s.now()
 		next := u.clone()
 		next.regs[i] = r
-		if err := s.saveLocked(uid, next); err != nil {
+		if err := s.saveLocked(uid, next, u.regs[i].State == StateLive); err != nil {
 			return err
 		}
 		gone = append(gone, r)
@@ -744,8 +858,7 @@ func (s *FileStore) Deleted(uid int, id string) error {
 	}
 	var gone []Registration
 	defer func() { s.notifyGone(gone) }()
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.lockForWrite()()
 	u, err := s.loadLocked(uid)
 	if err != nil {
 		return err
@@ -760,13 +873,15 @@ func (s *FileStore) Deleted(uid int, id string) error {
 			r.State, r.RevokedReason, r.RevokedAt = StateRevoked, ReasonDeleted, s.now()
 			next.regs[i] = r
 		case StateRevoked:
-			s.retire(next, r)
-			next.regs = slices.Delete(next.regs, i, i+1)
+			if r.RevokedReason != ReasonPolicyChanged || !s.now().Before(r.RevokedAt.Add(RevokedTelemetryWindow)) {
+				s.retire(next, r)
+				next.regs = slices.Delete(next.regs, i, i+1)
+			}
 		default:
 			next.regs = slices.Delete(next.regs, i, i+1)
 		}
 		delete(next.runs, id)
-		if err := s.saveLocked(uid, next); err != nil {
+		if err := s.saveLocked(uid, next, u.regs[i].State == StateLive); err != nil {
 			return err
 		}
 		gone = append(gone, r)
@@ -783,13 +898,16 @@ const seenWriteEvery = 2 * time.Minute
 // Report records what uid's daemon sees of registration id's sandbox now
 // (GAP-0505):
 //
-//   - running: the registration is live again and its LiveLease renewed.
-//     After a stop (a not-running report, or none for LiveLease) the
-//     sandbox runs a new session from now on (SessionAt): the daemon ends
-//     its session decisions when it starts the sandbox again, and the
-//     gateway no longer applies its own record of them (GAP-0009);
-//   - not running: it is stopped, so it authorizes no relayed call until a
-//     running report.
+//   - running: the LiveLease of a live registration is renewed. One whose
+//     lease lapsed (no report for LiveLease: a lost connection, a sleeping
+//     computer, a restarted daemon) is live again and runs a new session
+//     from now on (SessionAt): the daemon ends its session decisions when
+//     it starts the sandbox again, and the gateway no longer applies its
+//     own record of them (GAP-0009). A registration whose daemon reported
+//     its sandbox stopped is ErrStopped and stays stopped: a report can
+//     only move a registration toward stopped, and a start registers the
+//     sandbox again (Restart, GAP-0673);
+//   - not running: it is stopped, so it authorizes no relayed call again.
 //
 // A pending entry is ErrNotPending (only a bound sandbox runs), a tombstone
 // ErrRevoked. It returns the registration as stored afterwards.
@@ -797,8 +915,7 @@ func (s *FileStore) Report(uid int, id string, running bool) (Registration, erro
 	if !ValidID(id) {
 		return Registration{}, ErrNotFound
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.lockForWrite()()
 	u, err := s.loadLocked(uid)
 	if err != nil {
 		return Registration{}, err
@@ -816,11 +933,17 @@ func (s *FileStore) Report(uid int, id string, running bool) (Registration, erro
 		now := s.now()
 		next := r
 		switch {
+		case running && r.State == StateStopped:
+			return r, ErrStopped
 		case running:
 			if r.State == StateLive && now.Sub(leaseStart(r)) < seenWriteEvery {
 				return r, nil
 			}
 			if EffectiveState(r, now) == StateStopped {
+				// A lapsed lease revives only within the account's cap.
+				if liveCount(u, now, r.ID) >= MaxLivePerUID {
+					return r, ErrTooManyLive
+				}
 				next.SessionAt = now
 			}
 			next.State, next.SeenAt = StateLive, now
@@ -831,12 +954,125 @@ func (s *FileStore) Report(uid int, id string, running bool) (Registration, erro
 		}
 		nu := u.clone()
 		nu.regs[i] = next
-		if err := s.saveLocked(uid, nu); err != nil {
+		if err := s.saveLocked(uid, nu, !running && r.State == StateLive); err != nil {
 			return r, err
 		}
 		return next, nil
 	}
 	return Registration{}, ErrNotFound
+}
+
+// Restart runs the sandbox of uid's bound registration id again under a new
+// registration, and returns it (GAP-0672, GAP-0673). The new registration
+// takes over the sandbox, the policy and the run record of id and is live
+// from now, in a new session, with its guest watched again (GuestWatch);
+// id becomes a tombstone (ReasonRestarted), so a relayed call or a report
+// that still names it is refused. A registration the gateway revoked
+// (ErrRevoked) or one never bound (ErrNotPending) does not restart.
+func (s *FileStore) Restart(uid int, id string) (Registration, error) {
+	if !ValidID(id) {
+		return Registration{}, ErrNotFound
+	}
+	newID, err := NewID()
+	if err != nil {
+		return Registration{}, err
+	}
+	var gone []Registration
+	defer func() { s.notifyGone(gone) }()
+	defer s.lockForWrite()()
+	u, err := s.loadLocked(uid)
+	if err != nil {
+		return Registration{}, err
+	}
+	at := slices.IndexFunc(u.regs, func(r Registration) bool { return r.ID == id })
+	if at < 0 {
+		return Registration{}, ErrNotFound
+	}
+	r := u.regs[at]
+	switch r.State {
+	case StateRevoked:
+		return r, ErrRevoked
+	case StatePending:
+		return r, ErrNotPending
+	}
+	now := s.now()
+	if liveCount(u, now, r.ID) >= MaxLivePerUID {
+		return r, ErrTooManyLive
+	}
+	old := r
+	old.State, old.RevokedReason, old.RevokedAt = StateRevoked, ReasonRestarted, now
+	fresh := r
+	fresh.ID, fresh.State = newID, StateLive
+	fresh.BoundAt, fresh.SeenAt, fresh.SessionAt = now, now, time.Time{}
+	fresh.GuestWatch, fresh.GuestSeenAt = true, time.Time{}
+	fresh.RevokedReason, fresh.RevokedAt = "", time.Time{}
+	next := u.clone()
+	next.regs[at] = old
+	if run, ok := next.runs[id]; ok {
+		delete(next.runs, id)
+		next.runs[newID] = run
+	}
+	var evicted []Registration
+	if len(next.regs) >= s.maxEntries() {
+		evicted = s.evict(next)
+		if len(next.regs) >= s.maxEntries() {
+			return r, ErrFull
+		}
+	}
+	next.regs = append(next.regs, fresh)
+	if err := s.saveLocked(uid, next, r.State == StateLive); err != nil {
+		return r, err
+	}
+	gone = append(evicted, old)
+	return fresh, nil
+}
+
+// ForgetOtherAccounts removes every registration of uid that another
+// account made: one whose subject key is not subjectKey. The account
+// database gives a deleted account's uid to the next new account, and a
+// renamed account keeps its uid; the account that holds the uid now never
+// inherits the earlier account's sandboxes, never sees them and never has
+// them counted against its MaxEntriesPerUID and MaxLivePerUID limits
+// (rel-1-0-6:GAP-0262). The sandbox ids of a removed bound registration
+// are retired, so that sandbox never registers again, and its run record
+// goes with it. It returns the removed registrations; with none, nothing
+// is written.
+func (s *FileStore) ForgetOtherAccounts(uid int, subjectKey string) ([]Registration, error) {
+	if subjectKey == "" {
+		return nil, fmt.Errorf("%w: subject key is required", ErrInvalid)
+	}
+	var gone []Registration
+	defer func() { s.notifyGone(gone) }()
+	defer s.lockForWrite()()
+	u, err := s.loadLocked(uid)
+	if err != nil {
+		return nil, err
+	}
+	other := func(r Registration) bool { return r.SubjectKey != subjectKey }
+	if !slices.ContainsFunc(u.regs, other) {
+		return nil, nil
+	}
+	next := u.clone()
+	var removed []Registration
+	withdrawLiveAuthority := false
+	now := s.now()
+	next.regs = slices.DeleteFunc(next.regs, func(r Registration) bool {
+		if !other(r) {
+			return false
+		}
+		if r.BindingID != "" || r.SandboxID != "" {
+			next.retired = append(next.retired, Retired{BindingID: r.BindingID, SandboxID: r.SandboxID, At: now})
+		}
+		withdrawLiveAuthority = withdrawLiveAuthority || r.State == StateLive
+		delete(next.runs, r.ID)
+		removed = append(removed, r)
+		return true
+	})
+	if err := s.saveLocked(uid, next, withdrawLiveAuthority); err != nil {
+		return nil, err
+	}
+	gone = removed
+	return removed, nil
 }
 
 // RevokeSandbox revokes uid's bound registrations of one sandbox, the one
@@ -849,14 +1085,14 @@ func (s *FileStore) RevokeSandbox(uid int, sandboxID, sandboxName, reason string
 	}
 	var gone []Registration
 	defer func() { s.notifyGone(gone) }()
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.lockForWrite()()
 	u, err := s.loadLocked(uid)
 	if err != nil {
 		return nil, err
 	}
 	var next *uidRecords
 	var revoked []Registration
+	withdrawLiveAuthority := false
 	now := s.now()
 	for i, r := range u.regs {
 		if r.State != StateLive && r.State != StateStopped {
@@ -872,6 +1108,7 @@ func (s *FileStore) RevokeSandbox(uid int, sandboxID, sandboxName, reason string
 		if next == nil {
 			next = u.clone()
 		}
+		withdrawLiveAuthority = withdrawLiveAuthority || r.State == StateLive
 		r.State, r.RevokedReason, r.RevokedAt = StateRevoked, boundedReason(reason), now
 		next.regs[i] = r
 		revoked = append(revoked, r)
@@ -879,7 +1116,7 @@ func (s *FileStore) RevokeSandbox(uid int, sandboxID, sandboxName, reason string
 	if next == nil {
 		return nil, nil
 	}
-	if err := s.saveLocked(uid, next); err != nil {
+	if err := s.saveLocked(uid, next, withdrawLiveAuthority); err != nil {
 		return nil, err
 	}
 	gone = revoked
@@ -925,8 +1162,8 @@ func (s *FileStore) ListAll() ([]Registration, error) {
 
 // Update rewrites uid's registration r.ID in place (re-match). The id, uid,
 // subject, state, sandbox and times stay the store's but for a later
-// PolicyAt; only the match, digests, generation and provisional flag
-// change. Its run record stays.
+// PolicyAt, and a CreateProfile once set stays; only the match, digests,
+// generation and provisional flag change. Its run record stays.
 func (s *FileStore) Update(uid int, r Registration) error {
 	return s.UpdateRun(uid, r, nil)
 }
@@ -942,8 +1179,7 @@ func (s *FileStore) UpdateRun(uid int, r Registration, run *Run) error {
 			return err
 		}
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.lockForWrite()()
 	u, err := s.loadLocked(uid)
 	if err != nil {
 		return err
@@ -953,8 +1189,15 @@ func (s *FileStore) UpdateRun(uid int, r Registration, run *Run) error {
 			continue
 		}
 		have.Profile, have.ProfileMatch, have.MatchedGroup = r.Profile, r.ProfileMatch, r.MatchedGroup
+		have.ProfileMembers = slices.Clone(r.ProfileMembers)
 		have.ProfileDigest, have.EffectiveDigest, have.FactsDigest = r.ProfileDigest, r.EffectiveDigest, r.FactsDigest
 		have.Generation, have.Provisional = r.Generation, r.Provisional
+		if have.CreateProfile == nil && r.CreateProfile != nil {
+			// Set once: the profile a sandbox was created under never moves.
+			created := *r.CreateProfile
+			have.CreateProfile = &created
+			have.CreateProfileMembers = slices.Clone(r.CreateProfileMembers)
+		}
 		if r.PolicyAt.After(have.PolicyAt) {
 			have.PolicyAt = r.PolicyAt
 		}
@@ -966,15 +1209,14 @@ func (s *FileStore) UpdateRun(uid int, r Registration, run *Run) error {
 			}
 			next.runs[r.ID] = *run
 		}
-		return s.saveLocked(uid, next)
+		return s.saveLocked(uid, next, false)
 	}
 	return ErrNotFound
 }
 
 // Purge removes the whole store.
 func (s *FileStore) Purge() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.lockForWrite()()
 	s.uids = make(map[int]*uidRecords)
 	if err := os.RemoveAll(s.dir); err != nil {
 		return fmt.Errorf("sandboxreg: purge %s: %w", s.dir, err)

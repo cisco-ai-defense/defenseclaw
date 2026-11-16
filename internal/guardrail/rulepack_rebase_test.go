@@ -494,14 +494,25 @@ func TestLiteralRuleExpressionsStayValidAndWithinBudget(t *testing.T) {
 	if err != nil || plan == nil {
 		t.Fatalf("PlanRulePackRebase = %+v, %v", plan, err)
 	}
-	full := len(plan.Expressed) - len(plan.WholeArgument)
-	if len(plan.Expressed) != 40 || len(plan.WholeArgument) == 0 || full == 0 ||
-		plan.WholeArgument[0] != fmt.Sprintf("MARKER-%02d", full) {
-		t.Fatalf("expressed %d, whole-argument %v", len(plan.Expressed), plan.WholeArgument)
-	}
 	var rules RulesFileYAML
 	if err := yaml.Unmarshal(plan.Files["rules/many.yaml"], &rules); err != nil {
 		t.Fatal(err)
+	}
+	// The first rules get the full form, the rest the whole-argument form;
+	// every one is marked as migrated.
+	full := 0
+	for full < len(rules.Rules) && rules.Rules[full].Expression ==
+		literalRuleExpression(fmt.Sprintf("marker-%02d.example", full), false, false, true) {
+		full++
+	}
+	if len(plan.Expressed) != 40 || full == 0 || full == len(rules.Rules) {
+		t.Fatalf("expressed %d, full forms %d", len(plan.Expressed), full)
+	}
+	for index, rule := range rules.Rules {
+		if !rule.MigratedLiteral || !MigratedLiteralRule(rule.Pattern, rule.Expression, rule.MigratedLiteral) ||
+			index >= full && rule.Expression != literalRuleExpression(fmt.Sprintf("marker-%02d.example", index), false, false, false) {
+			t.Fatalf("rule %d: %+v", index, rule)
+		}
 	}
 	if rules.Rules[0].Expression != literalRuleExpression("marker-00.example", false, false, true) ||
 		rules.Rules[39].Expression != literalRuleExpression("marker-39.example", false, false, false) {

@@ -189,6 +189,9 @@ func TestAgentCLIOfScriptControls(t *testing.T) {
 		{"unrelated module", []string{"python3", "-m", "http.server"}, ""},
 		{"claude", []string{"claude", "--resume"}, "claude"},
 		{"codex", []string{"codex", "exec"}, "codex"},
+		{"Antigravity CLI", []string{"agy", "--headless"}, "agy"},
+		{"Antigravity IDE", []string{"antigravity", "--type=renderer"}, ""},
+		{"Antigravity IDE helper", []string{"/opt/Antigravity/antigravity", "--type=gpu-process"}, ""},
 		{"hermes module", []string{"python3", "-m", "hermes_cli"}, "hermes"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -196,5 +199,22 @@ func TestAgentCLIOfScriptControls(t *testing.T) {
 				t.Fatalf("agentCLIOf(%q) = %q, want %q", tc.argv, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestDarwinRestartScanKeepsPsRowsOnNonzeroExit(t *testing.T) {
+	h, _, restored := macAgentSessionHost(t)
+	setDarwinProcessArgv(t, func(int) ([]string, error) { return []string{"hermes"}, nil })
+	h.runner.replies = map[string]fakeReply{
+		"ps -axww -o pid=,uid=,etime=,args=": {
+			result: CommandResult{Stdout: []byte(fmt.Sprintf("6101 %d 00:11:00 hermes\n", os.Getuid()))},
+			err:    errors.New("ps exited after printing rows"),
+		},
+	}
+	if sessions := h.env.agentSessionsStartedBefore(context.Background(), restored, 0); len(sessions) != 1 || sessions[0].PID != 6101 {
+		t.Fatalf("restart scan dropped ps output: %+v", sessions)
+	}
+	if _, err := h.env.darwinAgentSessionsWithError(context.Background()); err == nil {
+		t.Fatal("launch coverage scan treated a nonzero ps exit as verified")
 	}
 }

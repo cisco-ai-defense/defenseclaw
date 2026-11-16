@@ -25,13 +25,14 @@ func init() {
 // in hookGuardianRepairsFile, for the lifecycle's repair report, only when
 // it repaired one, and names each by account and connector; the pass's rows
 // give the account's uid. A pass that repaired nothing still drops the
-// entries of targets that left the manifest.
-func recordEnterpriseHookStandaloneUnixRestores(stderr io.Writer, dataDir string, since time.Time, run enterpriseHookReconcileRun) {
+// entries of targets that left the manifest. It returns the recorder's
+// error.
+func recordEnterpriseHookStandaloneUnixRestores(stderr io.Writer, dataDir string, since time.Time, run enterpriseHookReconcileRun) error {
 	var restored []enterpriseHookGuardianRestore
 	if run.Repairs > 0 {
 		restored = enterpriseHookStandaloneUnixRepairedTargets(dataDir, since, run.Rows)
 	}
-	recordEnterpriseHookGuardianRestores(stderr, dataDir, run.Rows, restored)
+	return recordEnterpriseHookGuardianRestores(stderr, dataDir, run.Rows, restored)
 }
 
 func enterpriseHookStandaloneUnixRepairedTargets(dataDir string, since time.Time, rows []enterpriseHookReconcileRow) []enterpriseHookGuardianRestore {

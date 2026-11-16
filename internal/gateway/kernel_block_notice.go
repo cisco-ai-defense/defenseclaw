@@ -39,7 +39,7 @@ import (
 // hookSpecificOutput.additionalContext, Copilot's additionalContext,
 // Cursor's additional_context, Devin's hookSpecificOutput.additionalContext.
 // The other harnesses' post-tool hooks have no such field (Hermes, Kiro,
-// OpenCode, OpenHands, Amp, Antigravity, OmniGent), so their agents are not
+// OpenCode, Amp, Antigravity), so their agents are not
 // told. Both the sandbox egress notice and the kernel block notice use it.
 var postToolContextEvents = map[string][]string{
 	"claudecode": {"posttooluse", "posttoolusefailure"},
@@ -118,6 +118,7 @@ func (a *APIServer) safeAddKernelBlockNotice(
 			a.handleHookPanic(ctx, connectorName, req.HookEventName, fmt.Sprintf("kernel block notice panic: %v", r))
 		}
 	}()
+	hookStageForTest(ctx, "kernel_notice")
 	peer, ok := managedHookRequestPeer(ctx)
 	if !ok || peer.PID <= 0 || sandboxHookForConnector(ctx, connectorName) {
 		// OSS and unmanaged hosts, and sandbox hooks: nothing to tell.
@@ -220,6 +221,9 @@ func kernelBlockSentence(block sensor.KernelBlock, earlier bool) string {
 	case block.Control == "kernel.persistence_write":
 		sentence = fmt.Sprintf("DefenseClaw blocked %s from changing your shell startup or autostart file (%s) under your organization's policy (%s, a kernel control).",
 			process, target, firstNonEmpty(block.RuleID, "persistence.shell_profile_write"))
+	case block.Control == "kernel.ssh_authorized_keys_write":
+		sentence = fmt.Sprintf("DefenseClaw blocked %s from changing your SSH authorized keys (%s) under your organization's policy (%s, a kernel control).",
+			process, target, firstNonEmpty(block.RuleID, "persistence.ssh_authorized_keys_write"))
 	default:
 		sentence = fmt.Sprintf("DefenseClaw blocked %s from opening %s under your organization's policy (a kernel control).", process, target)
 	}

@@ -19,6 +19,8 @@ import (
 	"strings"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // windowsPrincipalName is the account or group a SID names on this
@@ -85,6 +87,11 @@ func windowsAccessMaskWords(mask uint32) string {
 	return fmt.Sprintf("%s (0x%x)", strings.Join(words, ", "), mask)
 }
 
+// windowsWriterFix is the icacls command that takes a write-like entry of one
+// account off path; the rule (stock reader groups keep read where they held it,
+// DefenseClaw's own paths never) is managed.StandaloneWriterFix.
+func windowsWriterFix(path, sid string) string { return managed.StandaloneWriterFix(path, sid) }
+
 // Trust refusals named only a raw SID and a hex mask, for well-known
 // principals too (BUILTIN\Users, CREATOR OWNER, NT SERVICE accounts), and no
 // fix (GAP-0925). windowsEnterpriseNamePrincipals names the account next to
@@ -99,7 +106,7 @@ var windowsEnterprisePrincipalRewrites = []struct {
 		regexp.MustCompile(`untrusted principal (S-1-[0-9-]+) has write-like access to managed path: ([A-Za-z]:\\[^;)"]*)`),
 		func(m []string) string {
 			return windowsPrincipalLabel(m[1]) + " has write access to " + m[2] +
-				", which only SYSTEM, Administrators and TrustedInstaller may change. Fix: icacls \"" + m[2] + "\" /remove:g *" + m[1]
+				", which only SYSTEM, Administrators and TrustedInstaller may change. Fix: " + windowsWriterFix(m[2], m[1])
 		},
 	},
 	{
@@ -120,7 +127,7 @@ var windowsEnterprisePrincipalRewrites = []struct {
 		regexp.MustCompile(`([A-Za-z]:\\[^:;"]*): untrusted Windows principal (S-1-[0-9-]+) has write-like access mask 0x([0-9a-fA-F]+)`),
 		func(m []string) string {
 			return m[1] + ": " + windowsPrincipalLabel(m[2]) + " has write access (" + windowsHexMaskWords(m[3]) +
-				"), which only SYSTEM, Administrators and TrustedInstaller may hold. Fix: icacls \"" + m[1] + "\" /remove:g *" + m[2]
+				"), which only SYSTEM, Administrators and TrustedInstaller may hold. Fix: " + windowsWriterFix(m[1], m[2])
 		},
 	},
 	{
@@ -128,7 +135,7 @@ var windowsEnterprisePrincipalRewrites = []struct {
 		regexp.MustCompile(`untrusted Windows principal (S-1-[0-9-]+) has write-like access mask 0x([0-9a-fA-F]+) on ([A-Za-z]:\\[^;)"]*)`),
 		func(m []string) string {
 			return windowsPrincipalLabel(m[1]) + " has write access (" + windowsHexMaskWords(m[2]) + ") on " + m[3] +
-				", which only SYSTEM, Administrators and TrustedInstaller may hold. Fix: icacls \"" + m[3] + "\" /remove:g *" + m[1]
+				", which only SYSTEM, Administrators and TrustedInstaller may hold. Fix: " + windowsWriterFix(m[3], m[1])
 		},
 	},
 	{
@@ -159,6 +166,15 @@ func windowsEnterpriseNamePrincipals(message string) string {
 }
 
 func init() {
+	// The relaxed-ancestor advisory that status, verify and policy show
+	// print names the account and the fix too, not a raw SID and mask
+	// (GAP-0925).
+	managed.DescribeTrustAdvisoryReason = func(reason string) string {
+		if _, standalone := managedHostWindowsStandalone(); !standalone {
+			return reason
+		}
+		return windowsEnterpriseNamePrincipals(reason)
+	}
 	describeManagedConfigLoadError = func(err error) error {
 		if err == nil {
 			return nil

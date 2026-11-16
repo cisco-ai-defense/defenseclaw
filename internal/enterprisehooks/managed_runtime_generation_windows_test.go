@@ -19,6 +19,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func TestWindowsManagedRuntimeGenerationOldOrNewPublication(t *testing.T) {
@@ -28,11 +29,7 @@ func TestWindowsManagedRuntimeGenerationOldOrNewPublication(t *testing.T) {
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil || user == nil || user.User.Sid == nil {
-		t.Fatalf("resolve test SID: %v", err)
-	}
-	target := user.User.Sid
+	target := currentWindowsTestSID(t)
 	for _, path := range []string{dataDir, hookDir} {
 		if err := setWindowsUserPathProtection(path, target, true); err != nil {
 			t.Fatalf("protect target directory %s: %v", path, err)
@@ -214,13 +211,17 @@ func TestWindowsManagedRuntimeGenerationOldOrNewPublication(t *testing.T) {
 	if err != nil || !newSelector.Existed || newSelector.CAS == oldSelector.CAS {
 		t.Fatalf("capture new complete selector: existed=%v changed=%v err=%v", newSelector.Existed, newSelector.CAS != oldSelector.CAS, err)
 	}
-	if err := RestoreWindowsManagedRuntimeSelectorCAS(
+	restoredCAS, err := RestoreWindowsManagedRuntimeSelectorCAS(
 		WindowsManagedRuntimeSelectorFullRestoreOptions{
 			Snapshot:        oldSelector,
 			ExpectedCurrent: newSelector.CAS,
 		},
-	); err != nil {
+	)
+	if err != nil {
 		t.Fatalf("restore old complete selector by CAS: %v", err)
+	}
+	if restoredCAS != oldSelector.CAS {
+		t.Fatalf("restored selector CAS = %+v, want the snapshot's %+v", restoredCAS, oldSelector.CAS)
 	}
 	rolledBack, err := ResolveWindowsManagedRuntimeGeneration(resolve)
 	if err != nil || rolledBack.GenerationID != first.GenerationID() {
@@ -253,7 +254,7 @@ func TestWindowsManagedRuntimeGenerationOldOrNewPublication(t *testing.T) {
 	if err != nil || !thirdSelector.Existed {
 		t.Fatalf("capture outer complete selector: existed=%v err=%v", thirdSelector.Existed, err)
 	}
-	if err := RestoreWindowsManagedRuntimeSelectorCAS(
+	if _, err := RestoreWindowsManagedRuntimeSelectorCAS(
 		WindowsManagedRuntimeSelectorFullRestoreOptions{
 			Snapshot:        oldSelector,
 			ExpectedCurrent: thirdSelector.CAS,
@@ -264,7 +265,7 @@ func TestWindowsManagedRuntimeGenerationOldOrNewPublication(t *testing.T) {
 	if _, err := ResolveWindowsManagedRuntimeGeneration(resolve); err == nil {
 		t.Fatal("selector with a removed bundle resolved instead of failing closed")
 	}
-	if err := RestoreWindowsManagedRuntimeSelectorCAS(
+	if _, err := RestoreWindowsManagedRuntimeSelectorCAS(
 		WindowsManagedRuntimeSelectorFullRestoreOptions{
 			Snapshot:        thirdSelector,
 			ExpectedCurrent: oldSelector.CAS,
@@ -280,7 +281,25 @@ func TestWindowsManagedRuntimeGenerationOldOrNewPublication(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare unselected orphan generation: %v", err)
 	}
-	removed, err := GarbageCollectWindowsManagedRuntimeGenerations(
+	// GAP-1768: a bundle a guardian just prepared may be about to be
+	// selected by its commit; GC leaves it until it is older than the bound.
+	minAge := windowsManagedRuntimeGenerationGCMinAge
+	windowsManagedRuntimeGenerationGCMinAge = time.Hour
+	gcOpts := WindowsManagedRuntimeGenerationGCOptions{
+		Connector:      thirdDesired.Connector,
+		TargetSID:      thirdDesired.TargetSID,
+		DataDir:        thirdDesired.DataDir,
+		HookExecutable: thirdDesired.HookExecutable,
+	}
+	removed, err := GarbageCollectWindowsManagedRuntimeGenerations(gcOpts)
+	windowsManagedRuntimeGenerationGCMinAge = minAge
+	if err != nil || removed != 0 {
+		t.Fatalf("collect just-prepared generations: removed=%d err=%v, want them kept", removed, err)
+	}
+	if _, err := os.Lstat(orphan.BundlePath()); err != nil {
+		t.Fatalf("a just-prepared unselected bundle was collected: %v", err)
+	}
+	removed, err = GarbageCollectWindowsManagedRuntimeGenerations(
 		WindowsManagedRuntimeGenerationGCOptions{
 			Connector:      thirdDesired.Connector,
 			TargetSID:      thirdDesired.TargetSID,
@@ -298,6 +317,29 @@ func TestWindowsManagedRuntimeGenerationOldOrNewPublication(t *testing.T) {
 	}
 	if _, err := os.Lstat(third.BundlePath()); err != nil {
 		t.Fatalf("selected generation was removed by GC: %v", err)
+	}
+	// GAP-1986: the uninstall finalize has no later GC, so it collects a
+	// just-prepared unselected bundle too; the selected one stays.
+	retiredDesired := thirdDesired
+	retiredDesired.GatewayAddr = "127.0.0.1:18974"
+	retiredDesired.ScopedToken = "retired-scoped-test-token"
+	young, err := PrepareWindowsManagedRuntimeGeneration(retiredDesired)
+	if err != nil {
+		t.Fatalf("prepare young unselected generation: %v", err)
+	}
+	windowsManagedRuntimeGenerationGCMinAge = time.Hour
+	retiredOpts := gcOpts
+	retiredOpts.Retired = true
+	removed, err = GarbageCollectWindowsManagedRuntimeGenerations(retiredOpts)
+	windowsManagedRuntimeGenerationGCMinAge = minAge
+	if err != nil || removed != 1 {
+		t.Fatalf("uninstall finalize GC of a young bundle: removed=%d err=%v, want 1", removed, err)
+	}
+	if _, err := os.Lstat(young.BundlePath()); !os.IsNotExist(err) {
+		t.Fatalf("uninstall finalize GC left a young unselected bundle: %v", err)
+	}
+	if _, err := os.Lstat(third.BundlePath()); err != nil {
+		t.Fatalf("uninstall finalize GC removed the selected generation: %v", err)
 	}
 
 	// DataDir is intentionally left empty here: this is the
@@ -325,6 +367,10 @@ func TestWindowsManagedRuntimeGenerationOldOrNewPublication(t *testing.T) {
 		t.Fatalf("removed selector token bundle survived finalization: %v", err)
 	}
 }
+
+// The fixtures prepare bundles and collect them at once; the publication
+// bound (GAP-1768) is tested where it applies.
+func init() { windowsManagedRuntimeGenerationGCMinAge = 0 }
 
 func TestWindowsManagedRuntimeGenerationGCAllowsAbsentHooksWithoutSelection(t *testing.T) {
 	fixture := newWindowsManagedRuntimeGenerationMissingHooksGCFixture(t)
@@ -400,6 +446,11 @@ func TestWindowsManagedRuntimeGenerationGCFailsClosedWhenSelectedHooksAreAbsent(
 		t.Fatalf("publish protected selected-generation fixture: %v", err)
 	}
 
+	// GAP-1910: an absent selected folder is not a bundle the new release
+	// refuses, so the pre-transaction check does not stop a lifecycle for it.
+	if err := ClassifyWindowsManagedRuntimeGenerations(fixture.options); err == nil || errors.Is(err, ErrWindowsManagedRuntimeBundleRefused) {
+		t.Fatalf("classify of an absent selected folder: err=%v, want an error that is not a bundle refusal", err)
+	}
 	removed, err := GarbageCollectWindowsManagedRuntimeGenerations(fixture.options)
 	if err == nil || !errors.Is(err, os.ErrNotExist) || removed != 0 {
 		t.Fatalf("selected generation with absent hooks did not fail closed: removed=%d err=%v", removed, err)
@@ -464,11 +515,7 @@ func newWindowsManagedRuntimeGenerationMissingHooksGCFixture(
 	t *testing.T,
 ) windowsManagedRuntimeGenerationMissingHooksGCFixture {
 	t.Helper()
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil || user == nil || user.User.Sid == nil {
-		t.Fatalf("resolve test SID: %v", err)
-	}
-	target := user.User.Sid
+	target := currentWindowsTestSID(t)
 	home := newWindowsTargetOwnedTestHome(t, target)
 	dataDir := filepath.Join(home, ".defenseclaw")
 	descriptor, err := windowsTargetOwnedDirectorySecurityDescriptor(target)
@@ -746,6 +793,8 @@ func TestWindowsManagedRuntimeGenerationEqualityUsesConnectorScopedContractIdent
 }
 
 func TestWindowsManagedRuntimeGenerationEqualityRejectsEveryAuthenticatedContractDrift(t *testing.T) {
+	// The Secure Client profile of a verified install (GAP-0606).
+	setStandaloneProfileForTest(t, false)
 	desired := WindowsManagedRuntimeGenerationDesired{
 		Connector:                  "codex",
 		TargetSID:                  "S-1-5-21-1000-1000-1000-1001",
@@ -753,6 +802,7 @@ func TestWindowsManagedRuntimeGenerationEqualityRejectsEveryAuthenticatedContrac
 		HookExecutable:             `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`,
 		GatewayAddr:                "127.0.0.1:18970",
 		GatewayServiceName:         "DefenseClawGateway-Test",
+		FailMode:                   "open",
 		ScopedToken:                "scoped-codex-token",
 		HookContractID:             "codex-hooks-v1",
 		HookContractLockUpdatedAt:  "2026-08-24T10:00:03Z",
@@ -782,7 +832,7 @@ func TestWindowsManagedRuntimeGenerationEqualityRejectsEveryAuthenticatedContrac
 			want.GatewayServiceName = "DefenseClawGateway-Other"
 		}},
 		{name: "fail mode", mutate: func(got *windowsManagedRuntimeBundle, _ *WindowsManagedRuntimeGenerationDesired) {
-			got.FailMode = "open"
+			got.FailMode = "closed"
 		}},
 		{name: "scoped token", mutate: func(_ *windowsManagedRuntimeBundle, want *WindowsManagedRuntimeGenerationDesired) {
 			want.ScopedToken = "different-scoped-codex-token"
@@ -827,12 +877,212 @@ func TestWindowsManagedRuntimeGenerationGCRecoversSetupRelaxedHooks(t *testing.T
 		t.Fatalf("publish protected selector without target SID: %v", err)
 	}
 
+	// The classification before a transaction changes nothing: it reads the
+	// relaxed folder as it is (nothing refused here) and leaves its repair
+	// to this retire (GAP-1818).
+	if err := ClassifyWindowsManagedRuntimeGenerations(fixture.options); err != nil {
+		t.Fatalf("classify with a relaxed hooks directory: %v", err)
+	}
+	if err := validateWindowsManagedRuntimeGenerationRoots(fixture.options.DataDir, fixture.target); err == nil {
+		t.Fatal("classify repaired the relaxed hooks directory")
+	}
 	removed, err := GarbageCollectWindowsManagedRuntimeGenerations(fixture.options)
 	if err != nil || removed != 0 {
 		t.Fatalf("collect with a relaxed hooks directory: removed=%d err=%v", removed, err)
 	}
 	if err := validateWindowsManagedRuntimeGenerationRoots(fixture.options.DataDir, fixture.target); err != nil {
 		t.Fatalf("hooks directory was not restored to the canonical DACL: %v", err)
+	}
+}
+
+// GAP-1528: a Hermes repair of the running guardian can hold its setup shape
+// past the hook-side wait; the other routes of that account resolve while the
+// running guardian made the relax, and a relax no running guardian made stays
+// refused.
+func TestWindowsManagedRuntimeResolverAcceptsTheRunningGuardiansLongSetupRelax(t *testing.T) {
+	previousWait, previousLive := windowsManagedRuntimeSetupRelaxWait, windowsSetupRelaxByLiveGuardian
+	windowsManagedRuntimeSetupRelaxWait = 50 * time.Millisecond
+	t.Cleanup(func() {
+		windowsManagedRuntimeSetupRelaxWait, windowsSetupRelaxByLiveGuardian = previousWait, previousLive
+	})
+	fixture := newWindowsManagedRuntimeGenerationMissingHooksGCFixture(t)
+	createWindowsManagedRuntimeTestHooksWithDACL(t, filepath.Join(fixture.options.DataDir, "hooks"), fixture.target, windowsSetupRelaxedDirectorySDDL)
+	windowsSetupRelaxByLiveGuardian = func(string, *windows.SID) bool { return false }
+	if err := settledWindowsManagedRuntimeGenerationRoots(fixture.options.DataDir, fixture.target); !errors.Is(err, ErrWindowsManagedRuntimeGenerationDirectoryUntrusted) {
+		t.Fatalf("a relax no running guardian made: err=%v, want untrusted", err)
+	}
+	windowsSetupRelaxByLiveGuardian = func(string, *windows.SID) bool { return true }
+	if err := settledWindowsManagedRuntimeGenerationRoots(fixture.options.DataDir, fixture.target); err != nil {
+		t.Fatalf("the running guardian's long setup relax refused the route: %v", err)
+	}
+}
+
+// GAP-1334: a guardian stopped between relaxing the user's .defenseclaw
+// folder for a Hermes setup and hardening it again left LocalSystem and
+// OWNER RIGHTS full control (OI|CI). The retire refused the folder as
+// untrusted ("unexpected or duplicate ACE for principal SYSTEM"), and Setup
+// /repair failed 1603. The retire waits that exact shape out and then
+// restores the canonical DACL; another shape stays refused.
+func TestWindowsManagedRuntimeGenerationGCRecoversASetupRelaxedDataDirectory(t *testing.T) {
+	previousWait := windowsManagedRuntimeSetupRelaxWait
+	windowsManagedRuntimeSetupRelaxWait = 100 * time.Millisecond
+	t.Cleanup(func() { windowsManagedRuntimeSetupRelaxWait = previousWait })
+	fixture := newWindowsManagedRuntimeGenerationMissingHooksGCFixture(t)
+	if err := publishWindowsManagedRuntimeSelector(windowsManagedRuntimeSelector{
+		SchemaVersion: windowsManagedRuntimeGenerationSchema,
+		Connector:     fixture.options.Connector,
+		Targets:       []windowsManagedRuntimeSelectorTarget{},
+	}); err != nil {
+		t.Fatalf("publish protected selector without target SID: %v", err)
+	}
+	setDACL := func(t *testing.T, sddl string) {
+		t.Helper()
+		sd, err := windows.SecurityDescriptorFromString(sddl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := sd.DACL()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := windows.SetNamedSecurityInfo(fixture.options.DataDir, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+			nil, nil, dacl, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	validate := func() error {
+		return validateWindowsUserPathElement(fixture.options.DataDir, fixture.target, true, true, true)
+	}
+
+	setDACL(t, windowsSetupRelaxedDirectorySDDL)
+	if err := validate(); err == nil {
+		t.Fatal("relaxed data directory validated as canonical")
+	}
+	// GAP-1765: a relax the running guardian made (its own setup, which may
+	// last past the wait) is skipped, never hardened under it.
+	stale := windowsSetupRelaxIsStale
+	t.Cleanup(func() { windowsSetupRelaxIsStale = stale })
+	windowsSetupRelaxIsStale = func(string, *windows.SID) bool { return false }
+	if _, err := GarbageCollectWindowsManagedRuntimeGenerations(fixture.options); !errors.Is(err, ErrWindowsManagedRuntimeGenerationDirectoryUntrusted) {
+		t.Fatalf("collect over a running guardian's relax: err=%v, want the account skipped as untrusted", err)
+	}
+	if err := validate(); err == nil {
+		t.Fatal("a running guardian's relax was hardened")
+	}
+	windowsSetupRelaxIsStale = func(string, *windows.SID) bool { return true }
+	if removed, err := GarbageCollectWindowsManagedRuntimeGenerations(fixture.options); err != nil || removed != 0 {
+		t.Fatalf("collect with a relaxed data directory: removed=%d err=%v", removed, err)
+	}
+	if err := validate(); err != nil {
+		t.Fatalf("data directory was not restored to the canonical DACL: %v", err)
+	}
+
+	// Another owner-private shape (OWNER RIGHTS read only) is not the setup
+	// relax: it stays refused and unchanged.
+	setDACL(t, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+	if _, err := GarbageCollectWindowsManagedRuntimeGenerations(fixture.options); !errors.Is(err, ErrWindowsManagedRuntimeGenerationDirectoryUntrusted) {
+		t.Fatalf("collect with a foreign data directory DACL: err=%v, want untrusted", err)
+	}
+	if err := validate(); err == nil {
+		t.Fatal("a foreign data directory DACL was rewritten to the canonical one")
+	}
+}
+
+// GAP-1818: the classification Setup runs before an upgrade skipped a root a
+// stopped or running guardian left in its setup shape, so a bundle the new
+// release refuses there was found only by the retire after the commit (1603,
+// journal left, the GAP-0822 symptom). It now reads that exact shape as it is,
+// refuses the same bundle and repairs nothing; any other shape stays
+// untrusted and is left to that retire.
+func TestWindowsManagedRuntimeClassifyRefusesABundleInASetupRelaxedRoot(t *testing.T) {
+	setDACL := func(t *testing.T, path, sddl string) {
+		t.Helper()
+		sd, err := windows.SecurityDescriptorFromString(sddl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := sd.DACL()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+			nil, nil, dacl, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		relax   func(dataDir, hookDir string) string
+		refused bool
+	}{
+		{name: "hooks in the setup shape", relax: func(_, hookDir string) string { return hookDir }, refused: true},
+		{name: "data dir in the setup shape", relax: func(dataDir, _ string) string { return dataDir }, refused: true},
+		{name: "hooks in another shape", relax: func(_, hookDir string) string { return hookDir }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withWindowsStandaloneProcess(t)
+			fixture := newWindowsManagedRuntimeGenerationMissingHooksGCFixture(t)
+			if err := publishWindowsManagedRuntimeSelector(windowsManagedRuntimeSelector{
+				SchemaVersion: windowsManagedRuntimeGenerationSchema,
+				Connector:     fixture.options.Connector,
+				Targets:       []windowsManagedRuntimeSelectorTarget{},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			hookDir := filepath.Join(fixture.options.DataDir, "hooks")
+			if _, err := ensureWindowsTargetOwnedDirectoryTree(filepath.Dir(fixture.options.DataDir), hookDir, fixture.target); err != nil {
+				t.Fatal(err)
+			}
+			generationID := strings.Repeat("c", 32)
+			data, err := marshalWindowsManagedRuntimeBundle(windowsManagedRuntimeBundle{
+				SchemaVersion: windowsManagedRuntimeGenerationSchema + 1,
+				GenerationID:  generationID, Connector: fixture.options.Connector,
+				TargetSID: fixture.options.TargetSID, DataDir: fixture.options.DataDir,
+				HookExecutable: fixture.options.HookExecutable,
+				GatewayAddr:    "127.0.0.1:18970", GatewayServiceName: "DefenseClawGateway",
+				FailMode: "open", ScopedToken: "test token", HookContractID: "codex-hooks-v1",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			path, err := windowsManagedRuntimeBundlePath(fixture.options.DataDir, fixture.options.Connector, generationID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := connector.PublishManagedTargetRuntimeFileNoReplace(path, data); err != nil {
+				t.Fatal(err)
+			}
+			if err := ClassifyWindowsManagedRuntimeGenerations(fixture.options); !errors.Is(err, ErrWindowsManagedRuntimeBundleRefused) {
+				t.Fatalf("classify over canonical roots: err=%v, want the bundle refused", err)
+			}
+			relaxed := tc.relax(fixture.options.DataDir, hookDir)
+			sddl := windowsSetupRelaxedDirectorySDDL
+			if !tc.refused {
+				sddl += "(A;OICI;FR;;;WD)"
+			}
+			setDACL(t, relaxed, sddl)
+			if err := validateWindowsManagedRuntimeGenerationRoots(fixture.options.DataDir, fixture.target); err == nil {
+				t.Fatal("relaxed root validated as canonical")
+			}
+			err = ClassifyWindowsManagedRuntimeGenerations(fixture.options)
+			if tc.refused {
+				if !errors.Is(err, ErrWindowsManagedRuntimeBundleRefused) ||
+					!strings.Contains(err.Error(), "unsupported schema version") {
+					t.Fatalf("classify over a setup-relaxed root: err=%v, want the bundle refused", err)
+				}
+				if !windowsManagedRuntimeDirSetupRelaxed(relaxed, fixture.target) {
+					t.Fatal("classify repaired the setup-relaxed root")
+				}
+			} else if !errors.Is(err, ErrWindowsManagedRuntimeGenerationDirectoryUntrusted) ||
+				errors.Is(err, ErrWindowsManagedRuntimeBundleRefused) {
+				t.Fatalf("classify over another shape: err=%v, want untrusted", err)
+			}
+			if _, err := os.Lstat(path); err != nil {
+				t.Fatalf("classify removed the refused bundle: %v", err)
+			}
+		})
 	}
 }
 
@@ -930,5 +1180,409 @@ func TestWindowsManagedRuntimeGenerationGCCollectsLegacyContractlessBundle(t *te
 	}
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {
 		t.Fatalf("legacy bundle survived GC: %v", err)
+	}
+}
+
+// A replacement gateway retires the committed journal before Setup opens the
+// next transaction. This table is the same GC path used after a commit: only
+// the identity in the owned file name and target may authorize collection.
+func TestWindowsManagedRuntimeGenerationGCClassifiesPriorInstallState(t *testing.T) {
+	cases := []struct {
+		name       string
+		mutate     func(*windowsManagedRuntimeBundle)
+		mutateRaw  func([]byte) []byte
+		absentRoot bool
+		absentHook bool
+		selected   bool
+		extraID    string // another, collectable open generation beside it
+		strict     bool
+		invalid    bool
+		reason     string
+	}{
+		{name: "absent data root", absentRoot: true},
+		{name: "absent hooks folder", absentHook: true},
+		{name: "selected missing hooks folder", absentHook: true, selected: true, invalid: true},
+		{name: "selected closed generation stays in use", selected: true, mutate: func(b *windowsManagedRuntimeBundle) { b.FailMode = "closed" }},
+		// GC lists names in sorted order: a prior generation that sorts
+		// after or before the refused one must survive the refusal.
+		{name: "selected unsupported schema beside prior open generation", selected: true, extraID: strings.Repeat("f", 32), mutate: func(b *windowsManagedRuntimeBundle) {
+			b.FailMode = "closed"
+			b.SchemaVersion = 2
+		}, invalid: true, reason: "unsupported schema version"},
+		{name: "selected unsupported schema after prior open generation", selected: true, extraID: strings.Repeat("0", 32), mutate: func(b *windowsManagedRuntimeBundle) {
+			b.FailMode = "closed"
+			b.SchemaVersion = 2
+		}, invalid: true, reason: "unsupported schema version"},
+		{name: "selected malformed JSON beside prior open generation", selected: true, extraID: strings.Repeat("f", 32),
+			mutate:    func(b *windowsManagedRuntimeBundle) { b.FailMode = "closed" },
+			mutateRaw: func([]byte) []byte { return []byte("{\n") },
+			invalid:   true, reason: "decode managed runtime bundle"},
+		{name: "selected malformed JSON after prior open generation", selected: true, extraID: strings.Repeat("0", 32),
+			mutate:    func(b *windowsManagedRuntimeBundle) { b.FailMode = "closed" },
+			mutateRaw: func([]byte) []byte { return []byte("{\n") },
+			invalid:   true, reason: "decode managed runtime bundle"},
+		{name: "unsupported schema after collectable generation", extraID: strings.Repeat("0", 32),
+			mutate:  func(b *windowsManagedRuntimeBundle) { b.SchemaVersion = 2 },
+			invalid: true, reason: "unsupported schema version"},
+		{name: "invalid fail mode after collectable generation", extraID: strings.Repeat("0", 32),
+			mutate:  func(b *windowsManagedRuntimeBundle) { b.FailMode = "permissive" },
+			invalid: true, reason: "invalid fail mode"},
+		{name: "open generations on both sides", extraID: strings.Repeat("0", 32)},
+		{name: "selected closed generation beside prior open generation", selected: true, extraID: strings.Repeat("0", 32),
+			mutate: func(b *windowsManagedRuntimeBundle) { b.FailMode = "closed" }},
+		{name: "open generation"},
+		{name: "closed generation", mutate: func(b *windowsManagedRuntimeBundle) { b.FailMode = "closed" }},
+		{name: "prior data directory", mutate: func(b *windowsManagedRuntimeBundle) {
+			b.DataDir = filepath.Join(filepath.Dir(b.DataDir), "old", ".defenseclaw")
+		}},
+		{name: "prior hook binary", mutate: func(b *windowsManagedRuntimeBundle) {
+			b.HookExecutable = filepath.Join(filepath.Dir(b.HookExecutable), "old-hook.exe")
+		}},
+		{name: "strict prior data directory", strict: true, mutate: func(b *windowsManagedRuntimeBundle) {
+			b.DataDir = filepath.Join(filepath.Dir(b.DataDir), "old", ".defenseclaw")
+		}, invalid: true, reason: "does not match current install"},
+		{name: "strict prior hook binary", strict: true, mutate: func(b *windowsManagedRuntimeBundle) {
+			b.HookExecutable = filepath.Join(filepath.Dir(b.HookExecutable), "old-hook.exe")
+		}, invalid: true, reason: "does not match current install"},
+		{name: "prior gateway address", mutate: func(b *windowsManagedRuntimeBundle) { b.GatewayAddr = "127.0.0.1:18971" }},
+		{name: "prior gateway service", mutate: func(b *windowsManagedRuntimeBundle) { b.GatewayServiceName = "PriorGateway" }},
+		{name: "foreign generation", mutate: func(b *windowsManagedRuntimeBundle) { b.GenerationID = strings.Repeat("f", 32) }, invalid: true},
+		{name: "foreign connector", mutate: func(b *windowsManagedRuntimeBundle) { b.Connector = "cursor" }, invalid: true},
+		{name: "foreign SID", mutate: func(b *windowsManagedRuntimeBundle) { b.TargetSID = "S-1-5-21-1-2-3-1018" }, invalid: true},
+		{name: "schema 2", mutate: func(b *windowsManagedRuntimeBundle) { b.SchemaVersion = 2 }, invalid: true, reason: "unsupported schema version"},
+		{name: "schema string", mutateRaw: func(data []byte) []byte {
+			return bytes.Replace(data, []byte(`"schema_version":1`), []byte(`"schema_version":"1"`), 1)
+		}, invalid: true},
+		{name: "invalid fail mode", mutate: func(b *windowsManagedRuntimeBundle) { b.FailMode = "permissive" }, invalid: true, reason: "invalid fail mode"},
+		{name: "nonstring token", mutateRaw: func(data []byte) []byte {
+			return bytes.Replace(data, []byte(`"scoped_token":"test token"`), []byte(`"scoped_token":1`), 1)
+		}, invalid: true},
+		{name: "unknown field", mutateRaw: func(data []byte) []byte {
+			return bytes.Replace(data, []byte("}\n"), []byte(",\"unexpected\":\"value\"}\n"), 1)
+		}, invalid: true},
+		{name: "duplicate key", mutateRaw: func(data []byte) []byte {
+			return bytes.Replace(data, []byte(`"schema_version":1,`), []byte(`"schema_version":1,"schema_version":1,`), 1)
+		}, invalid: true},
+		{name: "malformed JSON", mutateRaw: func([]byte) []byte { return []byte("{\n") }, invalid: true},
+		{name: "noncanonical whitespace", mutateRaw: func(data []byte) []byte {
+			return append(data, ' ')
+		}, invalid: true},
+		{name: "extra newline", mutateRaw: func(data []byte) []byte {
+			return append(data, '\n')
+		}, invalid: true},
+		{name: "UTF-16", mutateRaw: func(data []byte) []byte {
+			encoded := []byte{0xff, 0xfe}
+			for _, b := range data {
+				encoded = append(encoded, b, 0)
+			}
+			return encoded
+		}, invalid: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withWindowsStandaloneProcess(t)
+			if tc.strict {
+				t.Setenv(managed.TrustStrictAncestorsEnv, "1")
+			}
+			fixture := newWindowsManagedRuntimeGenerationMissingHooksGCFixture(t)
+			selector := windowsManagedRuntimeSelector{
+				SchemaVersion: windowsManagedRuntimeGenerationSchema,
+				Connector:     fixture.options.Connector,
+				Targets:       []windowsManagedRuntimeSelectorTarget{},
+			}
+			if tc.selected {
+				selector.Targets = []windowsManagedRuntimeSelectorTarget{{
+					Connector: fixture.options.Connector, SID: fixture.options.TargetSID,
+					DataDir: fixture.options.DataDir, HookExecutable: fixture.options.HookExecutable,
+					GatewayAddr: "127.0.0.1:18970", GatewayServiceName: "DefenseClawGateway",
+					GenerationID: strings.Repeat("a", 32), BundleSHA256: "sha256:" + strings.Repeat("b", 64),
+				}}
+			}
+			if err := publishWindowsManagedRuntimeSelector(selector); err != nil {
+				t.Fatal(err)
+			}
+			if tc.absentRoot {
+				if err := os.Remove(fixture.options.DataDir); err != nil {
+					t.Fatal(err)
+				}
+			} else if !tc.absentHook {
+				hookDir := filepath.Join(fixture.options.DataDir, "hooks")
+				if _, err := ensureWindowsTargetOwnedDirectoryTree(filepath.Dir(fixture.options.DataDir), hookDir, fixture.target); err != nil {
+					t.Fatal(err)
+				}
+				generationID := strings.Repeat("a", 32)
+				bundle := windowsManagedRuntimeBundle{
+					SchemaVersion: windowsManagedRuntimeGenerationSchema,
+					GenerationID:  generationID, Connector: fixture.options.Connector,
+					TargetSID: fixture.options.TargetSID, DataDir: fixture.options.DataDir,
+					HookExecutable: fixture.options.HookExecutable,
+					GatewayAddr:    "127.0.0.1:18970", GatewayServiceName: "DefenseClawGateway",
+					FailMode: "open", ScopedToken: "test token", HookContractID: "codex-hooks-v1",
+				}
+				if tc.mutate != nil {
+					tc.mutate(&bundle)
+				}
+				data, err := marshalWindowsManagedRuntimeBundle(bundle)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tc.mutateRaw != nil {
+					data = tc.mutateRaw(data)
+				}
+				path, err := windowsManagedRuntimeBundlePath(fixture.options.DataDir, fixture.options.Connector, generationID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := connector.PublishManagedTargetRuntimeFileNoReplace(path, data); err != nil {
+					t.Fatal(err)
+				}
+				if tc.extraID != "" {
+					bundle.GenerationID = tc.extraID
+					bundle.SchemaVersion = windowsManagedRuntimeGenerationSchema
+					bundle.FailMode = "open"
+					data, err = marshalWindowsManagedRuntimeBundle(bundle)
+					if err != nil {
+						t.Fatal(err)
+					}
+					path, err = windowsManagedRuntimeBundlePath(fixture.options.DataDir, fixture.options.Connector, bundle.GenerationID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := connector.PublishManagedTargetRuntimeFileNoReplace(path, data); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			// GAP-0822: the classification Setup runs before the transaction
+			// refuses exactly what this GC refuses, for the same reason, and
+			// deletes nothing.
+			listHooks := func() []string {
+				entries, readErr := os.ReadDir(filepath.Join(fixture.options.DataDir, "hooks"))
+				if readErr != nil && !os.IsNotExist(readErr) {
+					t.Fatal(readErr)
+				}
+				names := make([]string, 0, len(entries))
+				for _, entry := range entries {
+					names = append(names, entry.Name())
+				}
+				return names
+			}
+			before := listHooks()
+			classifyErr := ClassifyWindowsManagedRuntimeGenerations(fixture.options)
+			if tc.invalid != (classifyErr != nil) {
+				t.Fatalf("classify: err=%v, want refused=%v", classifyErr, tc.invalid)
+			}
+			if tc.reason != "" && !strings.Contains(classifyErr.Error(), tc.reason) {
+				t.Fatalf("classify lost reason %q: %v", tc.reason, classifyErr)
+			}
+			if tc.invalid && tc.reason != "" && !errors.Is(classifyErr, ErrWindowsManagedRuntimeBundleRefused) {
+				t.Fatalf("bundle refusal %v does not carry ErrWindowsManagedRuntimeBundleRefused (GAP-1910)", classifyErr)
+			}
+			if errors.Is(classifyErr, os.ErrNotExist) && errors.Is(classifyErr, ErrWindowsManagedRuntimeBundleRefused) {
+				t.Fatalf("an absent selected folder %v is reported as a bundle refusal (GAP-1910)", classifyErr)
+			}
+			if after := listHooks(); strings.Join(after, "|") != strings.Join(before, "|") {
+				t.Fatalf("classify changed the hooks folder: before=%v after=%v", before, after)
+			}
+			removed, err := GarbageCollectWindowsManagedRuntimeGenerations(fixture.options)
+			if tc.invalid {
+				if err == nil || removed != 0 {
+					t.Fatalf("incompatible state: removed=%d err=%v", removed, err)
+				}
+				if tc.extraID != "" {
+					path, pathErr := windowsManagedRuntimeBundlePath(fixture.options.DataDir, fixture.options.Connector, tc.extraID)
+					if pathErr != nil {
+						t.Fatal(pathErr)
+					}
+					if _, statErr := os.Lstat(path); statErr != nil {
+						t.Fatalf("a refused GC deleted the prior open generation %s: %v", tc.extraID, statErr)
+					}
+				}
+				if tc.reason != "" && !strings.Contains(err.Error(), tc.reason) {
+					t.Fatalf("incompatible state lost reason %q: %v", tc.reason, err)
+				}
+				return
+			}
+			want := 1
+			if tc.absentRoot || tc.absentHook || tc.selected {
+				want = 0
+			}
+			if tc.extraID != "" {
+				want++
+			}
+			if err != nil || removed != want {
+				t.Fatalf("recoverable state: removed=%d, want=%d err=%v", removed, want, err)
+			}
+			if tc.selected && !tc.absentHook {
+				path, pathErr := windowsManagedRuntimeBundlePath(fixture.options.DataDir, fixture.options.Connector, strings.Repeat("a", 32))
+				if pathErr != nil {
+					t.Fatal(pathErr)
+				}
+				if _, statErr := os.Lstat(path); statErr != nil {
+					t.Fatalf("selected bundle was changed by preflight GC: %v", statErr)
+				}
+			}
+		})
+	}
+}
+
+// Generation GC deletes under the selector lock, so its DELETE opens retry a
+// sharing violation at most once each and share one bounded sleep budget per
+// pass instead of managed.RetryTransientOpen's multi-second backoff.
+func TestWindowsManagedRuntimeGCOpenRetryIsBounded(t *testing.T) {
+	originalSleep := windowsManagedRuntimeGCOpenSleep
+	t.Cleanup(func() { windowsManagedRuntimeGCOpenSleep = originalSleep })
+	var slept time.Duration
+	windowsManagedRuntimeGCOpenSleep = func(d time.Duration) { slept += d }
+
+	retry := newWindowsManagedRuntimeGCOpenRetry()
+	opens := 0
+	held := func() (windows.Handle, error) {
+		opens++
+		return windows.InvalidHandle, windows.ERROR_SHARING_VIOLATION
+	}
+	if _, err := retry.open(held); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+		t.Fatalf("held bundle open = %v, want the sharing violation", err)
+	}
+	if opens != 2 || slept != windowsManagedRuntimeGCOpenRetryDelay || slept > 250*time.Millisecond {
+		t.Fatalf("one held bundle: opens = %d, slept = %v; want one retry within 250ms", opens, slept)
+	}
+
+	// Many held bundles in one pass never sleep past the pass budget.
+	for i := 0; i < windowsManagedRuntimeGenerationGCMaxCandidates; i++ {
+		_, _ = retry.open(held)
+	}
+	if slept != windowsManagedRuntimeGCOpenRetryBudget {
+		t.Fatalf("pass slept %v, want the %v budget", slept, windowsManagedRuntimeGCOpenRetryBudget)
+	}
+	if windowsManagedRuntimeGCOpenRetryBudget >= windowsManagedRuntimeSelectorLockTimeout {
+		t.Fatal("GC retry budget does not fit inside the selector lock timeout")
+	}
+
+	// Anything but a sharing or lock violation is returned without a retry.
+	opens = 0
+	denied := func() (windows.Handle, error) {
+		opens++
+		return windows.InvalidHandle, windows.ERROR_ACCESS_DENIED
+	}
+	if _, err := newWindowsManagedRuntimeGCOpenRetry().open(denied); !errors.Is(err, windows.ERROR_ACCESS_DENIED) || opens != 1 {
+		t.Fatalf("access denied: err = %v, opens = %d; want one attempt", err, opens)
+	}
+}
+
+// GAP-0773: the uninstall finalize collects a target's runtime generations
+// after the selectors no longer name it (Retired). A link at the selector
+// folder is not read, so no selector names the target there either: the
+// bundles are collected, nothing behind the link is read or changed, and a
+// collection that is not the uninstall's still leaves them alone.
+func TestWindowsManagedRuntimeGenerationRetiredCollectionGoesOnBehindAKeptSelectorLink(t *testing.T) {
+	base := t.TempDir()
+	dataDir := filepath.Join(base, ".defenseclaw")
+	hookDir := filepath.Join(dataDir, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := currentWindowsTestSID(t)
+	for _, path := range []string{dataDir, hookDir} {
+		// An elevated administrator token owns what it creates as the
+		// Administrators group; the fixture is owned by the target account.
+		if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+			windows.OWNER_SECURITY_INFORMATION, target, nil, nil, nil); err != nil {
+			t.Fatalf("own target directory %s: %v", path, err)
+		}
+		if err := setWindowsUserPathProtection(path, target, true); err != nil {
+			t.Fatalf("protect target directory %s: %v", path, err)
+		}
+	}
+	selectorPath := filepath.Join(base, windowsManagedRuntimeSelectorFile)
+	originalPath := windowsManagedRuntimeSelectorPathResolver
+	originalOwner := windowsManagedPolicyOwnerSID
+	originalDirTrust := windowsManagedPolicyDirTrustCheck
+	originalAncestorTrust := windowsManagedPolicyAncestorTrustCheck
+	originalFileTrust := windowsManagedPolicyFileTrustCheck
+	originalMutation := windowsManagedRuntimeSelectorMutationAuthorize
+	originalVerifyAuthorize := windowsManagedRuntimeSelectorVerifyAuthorize
+	originalHookTrust := windowsEnterpriseHookTrustCheck
+	originalStandalone, originalProbe := windowsEnterpriseStandaloneProcess, windowsReparseChainProbe
+	windowsManagedRuntimeSelectorPathResolver = func(string) (string, error) { return selectorPath, nil }
+	windowsManagedPolicyOwnerSID = func() (*windows.SID, error) { return target, nil }
+	windowsManagedPolicyDirTrustCheck = func(string) error { return nil }
+	windowsManagedPolicyAncestorTrustCheck = func(string) error { return nil }
+	windowsManagedPolicyFileTrustCheck = func(string) error { return nil }
+	windowsManagedRuntimeSelectorMutationAuthorize = func() error { return nil }
+	windowsManagedRuntimeSelectorVerifyAuthorize = func() error { return nil }
+	windowsEnterpriseHookTrustCheck = func(string) error { return nil }
+	t.Cleanup(func() {
+		windowsManagedRuntimeSelectorPathResolver = originalPath
+		windowsManagedPolicyOwnerSID = originalOwner
+		windowsManagedPolicyDirTrustCheck = originalDirTrust
+		windowsManagedPolicyAncestorTrustCheck = originalAncestorTrust
+		windowsManagedPolicyFileTrustCheck = originalFileTrust
+		windowsManagedRuntimeSelectorMutationAuthorize = originalMutation
+		windowsManagedRuntimeSelectorVerifyAuthorize = originalVerifyAuthorize
+		windowsEnterpriseHookTrustCheck = originalHookTrust
+		windowsEnterpriseStandaloneProcess, windowsReparseChainProbe = originalStandalone, originalProbe
+		windowsManagedPolicyKept.Lock()
+		windowsManagedPolicyKept.paths = map[string]string{}
+		windowsManagedPolicyKept.Unlock()
+	})
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	desired := WindowsManagedRuntimeGenerationDesired{
+		Connector:                  "codex",
+		TargetSID:                  target.String(),
+		DataDir:                    dataDir,
+		HookExecutable:             filepath.Join(base, "defenseclaw-hook.exe"),
+		GatewayAddr:                "127.0.0.1:18970",
+		GatewayServiceName:         "DefenseClawGateway",
+		ScopedToken:                "scoped-test-token",
+		HookContractID:             "codex-hooks-v1",
+		HookContractLockUpdatedAt:  now,
+		HookContractEntryUpdatedAt: now,
+	}
+	selected, err := PrepareWindowsManagedRuntimeGeneration(desired)
+	if err != nil {
+		t.Fatalf("prepare the selected generation: %v", err)
+	}
+	if _, err := CommitWindowsManagedRuntimeGeneration(selected); err != nil {
+		t.Fatalf("commit the selected generation: %v", err)
+	}
+	other := desired
+	other.GatewayAddr = "127.0.0.1:18973"
+	other.ScopedToken = "other-scoped-test-token"
+	orphan, err := PrepareWindowsManagedRuntimeGeneration(other)
+	if err != nil {
+		t.Fatalf("prepare the unselected generation: %v", err)
+	}
+	selectorBefore, err := os.ReadFile(selectorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
+	windowsReparseChainProbe = linkProbe(base)
+	gc := WindowsManagedRuntimeGenerationGCOptions{
+		Connector: desired.Connector, TargetSID: desired.TargetSID, DataDir: desired.DataDir, HookExecutable: desired.HookExecutable,
+	}
+	// A collection that is not the uninstall's does not know what the link hides, so it leaves every bundle.
+	if removed, err := GarbageCollectWindowsManagedRuntimeGenerations(gc); err != nil || removed != 0 {
+		t.Fatalf("collection over a kept selector link: removed=%d err=%v, want it skipped", removed, err)
+	}
+	for _, bundle := range []string{selected.BundlePath(), orphan.BundlePath()} {
+		mustExist(t, bundle)
+	}
+	// The uninstall's collection runs after the selectors stopped naming the
+	// target, and a link's selector is not read: every bundle of the target goes.
+	gc.Retired = true
+	if removed, err := GarbageCollectWindowsManagedRuntimeGenerations(gc); err != nil || removed != 2 {
+		t.Fatalf("retired collection over a kept selector link: removed=%d err=%v, want 2", removed, err)
+	}
+	for _, bundle := range []string{selected.BundlePath(), orphan.BundlePath()} {
+		if _, err := os.Lstat(bundle); !os.IsNotExist(err) {
+			t.Fatalf("bundle %s survived the retired collection: %v", bundle, err)
+		}
+	}
+	selectorAfter, err := os.ReadFile(selectorPath)
+	if err != nil || !bytes.Equal(selectorBefore, selectorAfter) {
+		t.Fatalf("the selector behind the link was read or changed: err=%v", err)
 	}
 }

@@ -12,7 +12,6 @@ import (
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/version"
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -91,7 +90,7 @@ func (a *APIServer) recordHookLifecycleMetricsV8(
 				}
 				builder, err := observability.NewFamilyBuilder(
 					observability.ClockFunc(func() time.Time { return now }),
-					observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+					observability.TimeOrderedOccurrenceIDs,
 				)
 				if err != nil {
 					return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}

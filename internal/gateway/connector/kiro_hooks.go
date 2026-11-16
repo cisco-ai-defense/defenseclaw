@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 )
 
@@ -91,33 +92,46 @@ func patchKiroV3Hooks(path, hookScript string) error {
 	hooks, _ := cfg["hooks"].([]interface{})
 	kept := make([]interface{}, 0, len(hooks)+len(kiroV3HookSpecs))
 	for _, item := range hooks {
-		if kiroOwnedV3Hook(item, hookScript) {
+		if kiroOwnedV3Hook(item, hookScript) || kiroV3BoundTrigger(item) {
 			continue
 		}
 		kept = append(kept, item)
 	}
 	for _, spec := range kiroV3HookSpecs {
-		entry := map[string]interface{}{
-			"name":        spec.name,
-			"description": spec.description,
-			"trigger":     spec.trigger,
-			"action": map[string]interface{}{
-				"type":    "command",
-				"command": hookScript,
-			},
-			"timeout": 30,
-			"enabled": true,
-		}
-		if spec.matcher != "" {
-			entry["matcher"] = spec.matcher
-		}
-		kept = append(kept, entry)
+		kept = append(kept, kiroV3HookEntry(spec.name, spec.description, spec.trigger, spec.matcher, hookScript))
 	}
 	cfg["hooks"] = kept
 	return writeJSONObject(path, cfg)
 }
 
+// kiroV3HookEntry is the v3 hook entry Setup writes for one kiroV3HookSpecs
+// trigger.
+func kiroV3HookEntry(name, description, trigger, matcher, hookScript string) map[string]interface{} {
+	entry := map[string]interface{}{
+		"name":        name,
+		"description": description,
+		"trigger":     trigger,
+		"action": map[string]interface{}{
+			"type":    "command",
+			"command": hookScript,
+		},
+		"timeout": 30,
+		"enabled": true,
+	}
+	if matcher != "" {
+		entry["matcher"] = matcher
+	}
+	return entry
+}
+
 func removeKiroV3Hooks(path, hookScript string) error {
+	return removeKiroV3HooksKeeping(path, hookScript, false)
+}
+
+// removeKiroV3HooksKeeping is removeKiroV3Hooks that, with operatorFile,
+// keeps a file left with no hooks: the operator had it before Setup
+// (kiroPristineIsOperators).
+func removeKiroV3HooksKeeping(path, hookScript string, operatorFile bool) error {
 	cfg, err := readJSONObject(path)
 	if err != nil {
 		return err
@@ -134,7 +148,7 @@ func removeKiroV3Hooks(path, hookScript string) error {
 	// file that holds nothing else is DefenseClaw's own and goes, instead
 	// of staying behind as an empty {"hooks": []}.
 	cfg["hooks"] = kept
-	if len(kept) == 0 && kiroFileIsDefenseClawOwned(cfg, hookScript) {
+	if len(kept) == 0 && !operatorFile && kiroFileIsDefenseClawOwned(cfg, hookScript) {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return err
 		}
@@ -270,6 +284,13 @@ func kiroUniversalHooksCurrent(list []interface{}, hookScript string) bool {
 }
 
 func removeKiroV2AgentHooks(path, hookScript string) error {
+	return removeKiroV2AgentHooksKeeping(path, hookScript, false)
+}
+
+// removeKiroV2AgentHooksKeeping is removeKiroV2AgentHooks that, with
+// operatorFile, keeps an agent file left looking like DefenseClaw's overlay:
+// the operator had it before Setup (kiroPristineIsOperators).
+func removeKiroV2AgentHooksKeeping(path, hookScript string, operatorFile bool) error {
 	cfg, err := readJSONObject(path)
 	if err != nil {
 		return err
@@ -283,7 +304,7 @@ func removeKiroV2AgentHooks(path, hookScript string) error {
 		} else {
 			cfg["hooks"] = kept
 		}
-		if kiroV2AgentIsDefenseClawOverlay(cfg) {
+		if !operatorFile && kiroV2AgentIsDefenseClawOverlay(cfg) {
 			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 				return err
 			}
@@ -306,7 +327,7 @@ func removeKiroV2AgentHooks(path, hookScript string) error {
 	if len(hooks) == 0 {
 		delete(cfg, "hooks")
 	}
-	if kiroV2AgentIsDefenseClawOverlay(cfg) {
+	if !operatorFile && kiroV2AgentIsDefenseClawOverlay(cfg) {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return err
 		}
@@ -338,13 +359,14 @@ func kiroV3FileReferencesHook(path, hookScript string) (bool, error) {
 
 // kiroV3HooksCurrent reports whether the v3 hook file at path holds
 // DefenseClaw's entry for every kiroV3HookSpecs trigger exactly as Setup
-// writes it: the command hookCommand, the matcher, the 30-second timeout,
-// and not turned off. Kiro skips an entry with "enabled": false
+// writes it (kiroV3HookEntry), and no other entry on those triggers
+// (kiroV3BoundTrigger). Kiro skips an entry with "enabled": false
 // (kiro.dev/docs/hooks: "Set false to skip the hook without deleting it"),
 // and the presence check kiroV3FileReferencesHook, which teardown uses,
 // accepts any entry named defenseclaw-*, so a user who turned DefenseClaw's
-// entries off or pointed them at another command still passed verification
-// and the guardian never repaired the file.
+// entries off, pointed them at another command or gave them another key (a
+// per-entry env or cwd) still passed verification and the guardian never
+// repaired the file.
 func kiroV3HooksCurrent(path, hookCommand string) (bool, error) {
 	cfg, err := readJSONObject(path)
 	if err != nil {
@@ -352,26 +374,33 @@ func kiroV3HooksCurrent(path, hookCommand string) (bool, error) {
 	}
 	hooks, _ := cfg["hooks"].([]interface{})
 	for _, spec := range kiroV3HookSpecs {
-		current := false
-		for _, item := range hooks {
-			obj, _ := item.(map[string]interface{})
-			action, _ := obj["action"].(map[string]interface{})
-			if obj == nil || action == nil || obj["name"] != spec.name || obj["trigger"] != spec.trigger ||
-				action["type"] != "command" || action["command"] != hookCommand ||
-				obj["enabled"] == false || !kiroV2HookTimeoutIs(obj["timeout"], 30) {
-				continue
-			}
-			if matcher, _ := obj["matcher"].(string); matcher != spec.matcher {
-				continue
-			}
-			current = true
-			break
-		}
-		if !current {
+		want := kiroV3HookEntry(spec.name, spec.description, spec.trigger, spec.matcher, hookCommand)
+		if !slices.ContainsFunc(hooks, func(item interface{}) bool { return sameHookJSON(item, want) }) {
 			return false, nil
 		}
 	}
-	return true, nil
+	bound := 0
+	for _, item := range hooks {
+		if kiroV3BoundTrigger(item) {
+			bound++
+		}
+	}
+	return bound == len(kiroV3HookSpecs), nil
+}
+
+// kiroV3BoundTrigger reports whether item is a v3 hook entry on a trigger
+// DefenseClaw binds. defenseclaw.json is DefenseClaw's file, so on those
+// triggers it holds Setup's entries alone: another entry there (an old copy,
+// a wrapper, a renamed script) ran beside DefenseClaw's (rel-1-0-4 GAP-0600).
+func kiroV3BoundTrigger(item interface{}) bool {
+	obj, _ := item.(map[string]interface{})
+	trigger, _ := obj["trigger"].(string)
+	for _, spec := range kiroV3HookSpecs {
+		if trigger == spec.trigger {
+			return true
+		}
+	}
+	return false
 }
 
 // kiroV2AgentReferencesHook reports whether the CLI 2.x agent holds

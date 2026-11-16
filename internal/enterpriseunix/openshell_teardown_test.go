@@ -34,7 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 )
 
-var setupVMSettings = map[string]any{"install": "setup", "version": "0.1.3", "driver": "vm"}
+var setupVMSettings = map[string]any{"install": "setup", "version": "0.1.5", "driver": "vm"}
 
 // A purge deletes the account's sandboxes, providers and profiles through
 // its daemon and its OpenShell gateway, so `sandbox teardown` runs first,
@@ -44,7 +44,7 @@ func TestSandboxPurgeTearsDownBeforeTheUnitsStop(t *testing.T) {
 		t.Run(goos, func(t *testing.T) {
 			h := newOSHost(t, goos)
 			requireOK(t, h.ensure(sandboxConfig(t, goos, true, setupVMSettings)))
-			h.installTarballFiles(t, h.alice, "0.1.3")
+			h.installTarballFiles(t, h.alice, "0.1.5")
 			r := h.run(Options{Action: ActionUninstall, Purge: true})
 			requireOK(t, r)
 			if got := strings.Join(h.ops.events, ", "); got != "teardown alice, stop alice" {
@@ -81,7 +81,7 @@ func TestSandboxUninstallKeepsSandboxesAndUnpulledWork(t *testing.T) {
 		t.Helper()
 		h := newOSHost(t, goos)
 		requireOK(t, h.ensure(sandboxConfig(t, goos, true, setupVMSettings)))
-		h.installTarballFiles(t, h.alice, "0.1.3")
+		h.installTarballFiles(t, h.alice, "0.1.5")
 		for _, name := range []string{"sb-running", "sb-stopped"} {
 			for _, path := range sandboxFiles(h, name) {
 				writeHostFile(t, h.testHost, path, "work of "+name+"\n")
@@ -397,7 +397,7 @@ func TestSandboxPurgeRemovesImageBuildLogs(t *testing.T) {
 func TestSandboxPurgeReportsCleanupAfterTeardownFailure(t *testing.T) {
 	h := newOSHost(t, "darwin")
 	requireOK(t, h.ensure(sandboxConfig(t, "darwin", true, setupVMSettings)))
-	h.installTarballFiles(t, h.alice, "0.1.3")
+	h.installTarballFiles(t, h.alice, "0.1.5")
 	h.ops.teardownErr = errors.New("`defenseclaw sandbox teardown` exited 1: start Docker and rerun, or rerun with --keep-images; nothing was changed")
 	r := h.run(Options{Action: ActionUninstall, Purge: true})
 	requireOK(t, r)
@@ -436,7 +436,7 @@ func (o recordBackedOps) Accounts(ctx context.Context) []SandboxAccount {
 func TestSandboxTeardownFindsAccountsTheUninstallRecordsLose(t *testing.T) {
 	h := newOSHost(t, "linux")
 	requireOK(t, h.ensure(sandboxConfig(t, "linux", true, setupVMSettings)))
-	h.installTarballFiles(t, h.alice, "0.1.3")
+	h.installTarballFiles(t, h.alice, "0.1.5")
 	record := h.env.P(enterprisehooks.UnixEligibleAccountsPath(h.env.Layout.ManifestPath))
 	writeHostFile(t, h.testHost, enterprisehooks.UnixEligibleAccountsPath(h.env.Layout.ManifestPath),
 		fmt.Sprintf(`{"accounts":[{"user":"alice","uid":%d,"home":%q}]}`, h.alice.UID, h.alice.Home))

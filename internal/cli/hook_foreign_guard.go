@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // hookForeignGuardPayloadLimit bounds how much of the hook payload the
@@ -89,7 +90,10 @@ const foreignHookSessionUnavailableReason = "enterprise_foreign_hook_blocked: De
 // still evaluated and recorded, but hookexec answers it with the connector's
 // neutral allow: a block there would keep the agent running, not stop it.
 func applyEnterpriseForeignHookGuard(opts *hookexec.Options) {
-	startedAt := time.Now()
+	startedAt := opts.StartedAt
+	if startedAt.IsZero() {
+		startedAt = time.Now()
+	}
 	if opts.ManagedEnterprise && strings.TrimSpace(opts.ManagedRuntimeFailure) != "" {
 		return
 	}
@@ -139,7 +143,7 @@ func applyEnterpriseForeignHookGuard(opts *hookexec.Options) {
 	if event == "" {
 		event = facts.event
 	}
-	decision, accountHome := evaluateHookForeignGuard(name, summary.HookBinary, policy, facts, event, deadline)
+	decision, accountHome, _ := evaluateHookForeignGuard(name, summary.HookBinary, policy, facts, event, startedAt, deadline)
 	if decision.Deny {
 		if name == "devin" {
 			host := opts.AgentHost
@@ -258,6 +262,12 @@ type foreignHookCheckResult struct {
 	Deny     bool     `json:"deny"`
 	Reason   string   `json:"reason,omitempty"`
 	Warnings []string `json:"warnings,omitempty"`
+	// Retryable is set on a deny only because the gateway could not answer
+	// for the agent session and this scan found no unapproved hook
+	// (evaluateHookForeignGuard). A plugin retries its load-time check only
+	// then; a confirmed denial holds for the agent process, whatever its
+	// reason text says.
+	Retryable bool `json:"retryable,omitempty"`
 	// HookOutput is the Hermes block object hermes-hook.sh prints for a
 	// denied tool call (Hermes shows its message). Hermes only.
 	HookOutput *hermesForeignHookBlock `json:"hook_output,omitempty"`
@@ -324,10 +334,18 @@ func runForeignHookCheck(connectorName string, stdin io.Reader, stdout io.Writer
 	}
 	opts := hookexec.Options{Connector: name, Stdin: stdin}
 	facts := captureHookPayloadFacts(&opts)
-	decision, accountHome := evaluateHookForeignGuard(name, summary.HookBinary, policy, facts, facts.event, startedAt.Add(hookForeignGuardMaxScan))
+	decision, accountHome, unavailable := evaluateHookForeignGuard(name, summary.HookBinary, policy, facts, facts.event, startedAt, startedAt.Add(hookForeignGuardMaxScan))
+	if decision.Outage {
+		if !hookForeignGuardOutageFailsOpen(name, facts.event) {
+			decision = enterprisepolicy.GuardDecision{Deny: true, Reason: hookexec.ManagedGatewayNotRunningReason, Findings: decision.Findings}
+			unavailable = true
+		} else {
+			result.Warnings = append(result.Warnings, foreignHookCheckOutageWarning)
+		}
+	}
 	if decision.Deny {
 		_ = hookForeignGuardRecord(accountHome, name, facts.event, decision, time.Now())
-		result = foreignHookCheckResult{Deny: true, Reason: decision.Reason}
+		result = foreignHookCheckResult{Deny: true, Reason: decision.Reason, Retryable: unavailable}
 		// The plugin shows the reason as is: a stopped gateway or a held
 		// port gets the sentence the native hooks print, not its code.
 		if text, ok := hookexec.ManagedTransportFailureText(facts.event, decision.Reason); ok {
@@ -342,6 +360,10 @@ func runForeignHookCheck(connectorName string, stdin io.Reader, stdout io.Writer
 	}
 	return 0
 }
+
+// foreignHookCheckOutageWarning is the warning of a --foreign-hook-check
+// call let through a gateway outage by the administrator's open fail mode.
+const foreignHookCheckOutageWarning = "the DefenseClaw gateway is not running; your organization's fail mode lets this call run without DefenseClaw checks until it is back"
 
 // hookForeignGuardMaxScan caps the foreign-hook scan; real hook trees
 // take milliseconds.
@@ -368,8 +390,12 @@ func hookForeignGuardScanBudget(connector, event string) time.Duration {
 // with the session's state in the gateway (a session that started with an
 // unapproved hook stays denied until the agent restarts), and the agent's config-location environment is
 // recorded for the guardian's cleanup.
-func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.PublicConnectorPolicy, facts hookPayloadFacts, event string, deadline time.Time) (enterprisepolicy.GuardDecision, string) {
-	accountHome := hookForeignGuardAccountHome()
+//
+// unavailable reports a deny made only because the gateway could not answer
+// for the session while this scan found no unapproved hook: an availability
+// failure a later check may retry, never a confirmed finding.
+func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.PublicConnectorPolicy, facts hookPayloadFacts, event string, startedAt, deadline time.Time) (decision enterprisepolicy.GuardDecision, accountHome string, unavailable bool) {
+	accountHome = hookForeignGuardAccountHome()
 	owned := []string{}
 	if accountHome != "" {
 		owned = perUserOwnedHookCommandsForBinary(name, accountHome, "", hookBinary)
@@ -379,7 +405,7 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 		return enterprisepolicy.GuardDecision{
 			Deny:   true,
 			Reason: hookexec.ForeignHookBlockedReasonPrefix + " your organization blocks " + name + " hooks it has not approved, and DefenseClaw cannot determine your home directory to check for them.",
-		}, ""
+		}, "", false
 	}
 	sessionStart := hookForeignGuardSessionStart(event)
 	request := enterprisepolicy.GuardRequest{
@@ -399,9 +425,9 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 		request.WorkingDir = facts.workingDirs[0]
 		request.WorkingDirs = facts.workingDirs[1:]
 	}
-	decision := enterprisepolicy.EvaluateForeignHooks(request)
+	decision = enterprisepolicy.EvaluateForeignHooks(request)
 	if policy.ForeignHooks != config.ForeignHooksRemove {
-		return decision, accountHome
+		return decision, accountHome, false
 	}
 	now := time.Now()
 	if accountHome != "" {
@@ -427,9 +453,26 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 			Decision:     decision,
 			Now:          now,
 		})
-		return decision, accountHome
+		return decision, accountHome, false
 	}
-	decision, err := hookForeignGuardExchange(name, event, deadline, update)
+	decision, err := hookForeignGuardExchange(name, event, startedAt, deadline, update)
+	unavailable = err != nil && !update.Decision.Deny
+	// The gateway holds the session record in its protected data directory.
+	// When it cannot answer, the call is blocked in every fail mode unless
+	// the service is proven stopped and its read-only clean-session entries
+	// vouch for this agent process and session
+	// (hookForeignGuardCleanSessionOutage); then the managed outage fail mode
+	// decides.
+	if err != nil && hookForeignGuardCleanSessionOutage(name, update, err) {
+		// The gateway service is proven stopped, and it published, read-only,
+		// that this agent process's session was clean at its last answer
+		// (enterprisepolicy.CheckForeignHookCleanMirror). The guard stops
+		// claiming an unknown session; the hook's own request then meets the
+		// same stopped gateway, and hookexec's managed outage path decides
+		// with the administrator's fail mode (open allows with its warning,
+		// closed and strict block).
+		return enterprisepolicy.GuardDecision{Findings: update.Decision.Findings, Outage: true}, accountHome, false
+	}
 	if err != nil {
 		// The gateway holds the session record. Without its answer the call
 		// is blocked in every fail mode, and the reason must not suggest an
@@ -444,6 +487,19 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 			// says so in the words, and with the reason code, every other
 			// managed hook uses (GAP-0578, GAP-0639).
 			reason = hookexec.ManagedGatewayNotRunningReason
+		} else if hookexec.ManagedGatewayRestarting(err) {
+			// The gateway was still restarting at the end of the restart
+			// budget, counted from the invocation (#1278).
+			reason = hookexec.ManagedGatewayRestartingReason
+		} else if hookexec.ManagedGatewayNoAnswer(err) {
+			// The gateway took the exchange of a tool call but gave no
+			// answer within the hook's answer budget.
+			reason = hookexec.ManagedGatewayNoAnswerReason
+		} else if hookexec.ManagedHookSocketDirectoryUntrusted(err) {
+			// The hook socket directory is not owned by root or the
+			// gateway account: name it, as the managed shell hooks do
+			// (GAP-2405), not that the session record is unavailable.
+			reason = hookexec.ManagedHookSocketDirectoryUntrustedReason
 		} else if hookexec.ManagedGatewayPortHeld(err) {
 			// The gateway service runs but another process answers on its
 			// port: say so, not that the session record is unavailable
@@ -456,30 +512,86 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 			Findings: update.Decision.Findings,
 		}
 	}
-	return decision, accountHome
+	return decision, accountHome, unavailable
 }
 
 // hookForeignGuardGOOS is runtime.GOOS (replaceable in tests).
 var hookForeignGuardGOOS = runtime.GOOS
 
-// foreignHookSessionLocal reports a connector whose foreign-hook check cannot
-// reach the gateway's session store. On Windows the Amp plugin calls the
-// gateway with its own per-user token and has no hook-binary runtime
-// generation, so `hook --connector amp --foreign-hook-check` has no
-// credential for the exchange; every check failed closed and blocked each
-// Amp tool call. The plugin itself keeps the session.load
-// decision for the life of the Amp process.
-func foreignHookSessionLocal(name string) bool {
-	return hookForeignGuardGOOS == "windows" && strings.EqualFold(strings.TrimSpace(name), "amp")
+// hookForeignGuardCleanSessionOutage reports a failed session exchange that
+// the hook may treat as a gateway outage of a known clean session. All of
+// these must hold: the exchange error proves the gateway service is not
+// running; this scan found nothing blocking and the event is not a session
+// start; the host is Linux or macOS and the connector's session record is
+// the gateway's; and the gateway's clean-session entry of this agent process
+// is present, trusted and current. Anything else keeps the refusal.
+func hookForeignGuardCleanSessionOutage(name string, update enterprisepolicy.SessionExchange, err error) bool {
+	if !hookexec.ManagedGatewayNotRunning(err) || update.Decision.Deny || update.SessionStart {
+		return false
+	}
+	// Session-local connectors never get here (they return before the
+	// exchange).
+	if !enterprisepolicy.ForeignHookCleanMirrorOS(hookForeignGuardGOOS) {
+		return false
+	}
+	if update.Key.Process == "" {
+		return false
+	}
+	return hookForeignGuardCleanMirror(update.Key) == nil
 }
 
-func exchangeForeignHookSession(name, event string, scanDeadline time.Time, update enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+// hookForeignGuardCleanMirror checks the gateway's clean-session entry of
+// key's agent process for the calling account (replaceable in tests).
+var hookForeignGuardCleanMirror = func(key enterprisepolicy.SessionKey) error {
+	layout, _, _, err := standaloneEnterprisePolicyLayout()
+	if err != nil {
+		return err
+	}
+	serviceUID, err := enterprisepolicy.ForeignHookCleanServiceUID(layout.DataDir)
+	if err != nil {
+		return err
+	}
+	return enterprisepolicy.CheckForeignHookCleanMirror(enterprisepolicy.ForeignHookCleanMirrorCheck{
+		Root:       managed.ForeignHookCleanDir(layout.DataDir),
+		ServiceUID: serviceUID,
+		CallerUID:  os.Getuid(),
+		Key:        key,
+		Now:        time.Now(),
+	})
+}
+
+// hookForeignGuardOutageFailsOpen reports whether the administrator's fail
+// mode lets a guarded --foreign-hook-check call through a proven gateway
+// outage. That path has no hook request after it, so it asks the managed
+// outage rule itself with the options the hook request would use
+// (replaceable in tests).
+var hookForeignGuardOutageFailsOpen = func(name, event string) bool {
+	// The session exchange prepared the managed runtime in this process;
+	// prepare it again so this rule never reads an unprepared one.
+	if prepareEnterpriseManagedHookRuntime(name) {
+		return false
+	}
+	opts := buildHookOptionsForRuntime(name, event, "", "", true)
+	return hookexec.ManagedOutageFailsOpen(opts, hookexec.ErrManagedGatewayNotRunning)
+}
+
+// foreignHookSessionLocal reports a connector whose foreign-hook check cannot
+// reach the gateway's session store on this OS
+// (enterprisepolicy.ForeignHookSessionLocal).
+func foreignHookSessionLocal(name string) bool {
+	return enterprisepolicy.ForeignHookSessionLocal(name, hookForeignGuardGOOS)
+}
+
+func exchangeForeignHookSession(name, event string, startedAt, scanDeadline time.Time, update enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
 	// --foreign-hook-check exits before the ordinary hook preflight. Prepare
 	// its managed runtime here so this exchange uses the verified transport.
 	if prepareEnterpriseManagedHookRuntime(name) {
 		return enterprisepolicy.GuardDecision{}, fmt.Errorf("managed hook runtime has been retired")
 	}
 	opts := buildHookOptionsForRuntime(name, event, "", "closed", true)
+	// A restarting gateway is waited for within the restart budget of the
+	// invocation, not of the exchange: the scan before it counts.
+	opts.StartedAt = startedAt
 	deadline := scanDeadline.Add(hookForeignGuardScanBudget(name, event))
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
@@ -549,6 +661,9 @@ func captureHookPayloadFacts(opts *hookexec.Options) hookPayloadFacts {
 		source = os.Stdin
 	}
 	buffered, err := io.ReadAll(io.LimitReader(source, hookForeignGuardPayloadLimit))
+	// The facts and the hook read the payload without a UTF-8 byte order
+	// mark a Windows PowerShell wrapper put ahead of it (GAP-2449).
+	buffered = hookexec.TrimUTF8BOM(buffered)
 	opts.Stdin = io.MultiReader(bytes.NewReader(buffered), source)
 	if err != nil {
 		return facts

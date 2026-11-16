@@ -23,13 +23,17 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"regexp"
+	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 const (
@@ -63,6 +67,7 @@ const (
 	V8YAMLErrorVersionUpgrade      V8YAMLErrorCode = "config_version_upgrade_required"
 	V8YAMLErrorVersionUnsupported  V8YAMLErrorCode = "config_version_unsupported"
 	V8YAMLErrorLegacyKeyForbidden  V8YAMLErrorCode = "legacy_config_key_forbidden"
+	V8YAMLErrorProfileInvalid      V8YAMLErrorCode = "enterprise_profile_invalid"
 )
 
 // V8YAMLError never renders a mapping value or scalar payload. Paths retain
@@ -78,6 +83,9 @@ type V8YAMLError struct {
 	// FirstLine is the line of the first definition of a duplicate key, so
 	// the CLI can say "the first one is at line 3" (GAP-2188).
 	FirstLine int
+	// ConfigVersion is the integer declared by a version/profile refusal.
+	// It keeps structured diagnostics from stamping a source-9 file as v8.
+	ConfigVersion int
 }
 
 func (e *V8YAMLError) Error() string {
@@ -252,12 +260,20 @@ func parseV8YAML(source string, data []byte) (*V8YAMLDocument, error) {
 	if err := validateV8YAMLVersion(source, root); err != nil {
 		return nil, err
 	}
+	if err := validateCoworkVMSensorSource(source, root); err != nil {
+		return nil, err
+	}
 	if v9SecureClientDocument(root) {
 		// Secure Client stays on v8 and rejects v9-only provider routing.
 		if node := v8YAMLMapValue(root, "llm_providers"); node != nil {
 			return nil, v8Error(source, V8YAMLErrorLegacyKeyForbidden, "$.llm_providers", node,
 				"llm_providers is not accepted in Secure Client config_version 8",
 				"remove llm_providers from the Secure Client source")
+		}
+		if node := v8YAMLMapValue(root, "decision_model"); node != nil {
+			return nil, v8Error(source, V8YAMLErrorLegacyKeyForbidden, "$.decision_model", node,
+				"decision_model is not accepted in Secure Client config_version 8",
+				"remove decision_model from the Secure Client source")
 		}
 		// Keep the legacy-key errors of main (issue #1092); elsewhere
 		// the schema refuses those keys.
@@ -271,6 +287,7 @@ func parseV8YAML(source string, data []byte) (*V8YAMLDocument, error) {
 	if !v9SecureClientDocument(root) {
 		dropRetiredScannerKeys(root)
 	}
+	foldOpenShellEnumCase(root)
 	plainValue, err := projectV8YAML(source, root, "$")
 	if err != nil {
 		return nil, err
@@ -383,7 +400,7 @@ func (w *v8YAMLWalker) validate(node *yaml.Node, path string, depth int) error {
 	return nil
 }
 
-func validateV8YAMLVersion(source string, root *yaml.Node) error {
+func validateV8YAMLVersion(source string, root *yaml.Node) (err error) {
 	value := v8YAMLMapValue(root, "config_version")
 	if value == nil {
 		return v8Error(source, V8YAMLErrorVersionRequired, "$.config_version", root,
@@ -399,6 +416,17 @@ func validateV8YAMLVersion(source string, root *yaml.Node) error {
 	if err := value.Decode(&version); err != nil {
 		return v8Error(source, V8YAMLErrorVersionInvalid, "$.config_version", value,
 			"config_version must be an integer", "run `defenseclaw migrate` to create a current source")
+	}
+	defer func() {
+		if refusal, ok := err.(*V8YAMLError); ok {
+			refusal.ConfigVersion = int(version)
+		}
+	}()
+	if version >= ConfigVersionV9 && version <= MaxSupportedConfigVersion {
+		// Secure Client stays on config_version 8, with its own diagnostics.
+		if err := validateV8YAMLEnterpriseProfile(source, root); err != nil {
+			return err
+		}
 	}
 	switch {
 	case version > v8YAMLConfigVersion && v9SecureClientDocument(root):
@@ -418,6 +446,65 @@ func validateV8YAMLVersion(source string, root *yaml.Node) error {
 	default:
 		return v8Error(source, V8YAMLErrorVersionInvalid, "$.config_version", value,
 			"config_version must be a non-negative integer", "run `defenseclaw migrate` to create a current source")
+	}
+}
+
+// validateV8YAMLEnterpriseProfile refuses, at enterprise.profile, a managed
+// document whose profile does not resolve: a name that is no profile, one
+// that differs from the profile the installation is fixed to, or
+// secure_client on Linux. The version check would otherwise read such a
+// document as a Secure Client source and blame a supported config_version
+// (GAP-0023). The runtime loader refuses the same documents.
+func validateV8YAMLEnterpriseProfile(source string, root *yaml.Node) error {
+	if !v9ManagedDocument(root) {
+		return nil
+	}
+	enterprise := v8YAMLMapValue(root, "enterprise")
+	node := v8YAMLMapValue(enterprise, "profile")
+	allowed := "standalone or secure_client"
+	if runtime.GOOS == "linux" {
+		allowed = "standalone"
+	}
+	if node != nil && (node.Kind != yaml.ScalarNode || node.ShortTag() != "!!str") {
+		return v8Error(source, V8YAMLErrorProfileInvalid, "$.enterprise.profile", node,
+			"enterprise.profile must be a string", "set it to "+allowed)
+	}
+	declared := managed.NormalizeEnterpriseProfile(yamlScalarValue(node))
+	if node != nil && declared == "" {
+		return v8Error(source, V8YAMLErrorProfileInvalid, "$.enterprise.profile", node,
+			"enterprise.profile is not a supported profile", "set it to "+allowed)
+	}
+	pinned := managed.NormalizeEnterpriseProfile(os.Getenv(managed.EnterpriseProfileEnv))
+	if _, err := managed.ResolveEnterpriseProfile(runtime.GOOS, v9DocumentDeploymentMode(root), pinned, declared); err == nil {
+		return nil
+	}
+	at := node
+	if at == nil {
+		at = enterprise
+	}
+	if at == nil {
+		at = root
+	}
+	known := func(profile string) bool {
+		return profile == managed.ProfileStandalone || profile == managed.ProfileSecureClient
+	}
+	const path = "$.enterprise.profile"
+	switch {
+	case declared != "" && !known(declared):
+		return v8Error(source, V8YAMLErrorProfileInvalid, path, at,
+			"enterprise.profile is not a supported profile", "set it to "+allowed)
+	case pinned != "" && !known(pinned):
+		return v8Error(source, V8YAMLErrorProfileInvalid, path, at,
+			"this installation is fixed to an enterprise profile this release does not support",
+			"reinstall the DefenseClaw enterprise package")
+	case pinned != "" && declared != "" && pinned != declared:
+		return v8Error(source, V8YAMLErrorProfileInvalid, path, at,
+			"enterprise.profile is fixed to "+pinned+" on this host",
+			"set it to "+pinned+" or remove it; changing the profile needs a reinstall of the deployment")
+	default:
+		return v8Error(source, V8YAMLErrorProfileInvalid, path, at,
+			"enterprise.profile is fixed to standalone on Linux (secure_client is not available here)",
+			"set it to standalone or remove it; changing the profile needs a reinstall of the deployment on a supported platform")
 	}
 }
 
@@ -441,6 +528,7 @@ func rejectV9RemovedKeys(source string, root *yaml.Node) error {
 		{"skill_actions", "admission.skill.actions"},
 		{"mcp_actions", "admission.mcp.actions"},
 		{"plugin_actions", "admission.plugin.actions"},
+		{"update_check", "update.check"},
 	} {
 		if node := v8YAMLMapValue(root, removed.key); node != nil {
 			return v9RemovedKeyError(source, v8YAMLChildPath("$", removed.key), node, removed.target)
@@ -549,49 +637,68 @@ func rejectV9ConnectorRulePackDirs(source string, scope *yaml.Node, path string)
 	return nil
 }
 
-func rejectV8YAMLLegacyKeys(source string, root *yaml.Node) error {
-	for _, legacy := range []struct{ key, target string }{
-		{"otel", "observability resource, policies, and destinations"},
-		{"audit_sinks", "observability.destinations"},
-		{"audit_db", "observability.local.path"},
-		{"judge_bodies_db", "observability.local.judge_bodies_path"},
-	} {
-		if node := v8YAMLMapValue(root, legacy.key); node != nil {
-			return v8YAMLLegacyError(source, v8YAMLChildPath("$", legacy.key), node, legacy.target)
-		}
-	}
-	if privacy := v8YAMLMapValue(root, "privacy"); privacy != nil && privacy.Kind == yaml.MappingNode {
-		if node := v8YAMLMapValue(privacy, "disable_redaction"); node != nil {
-			return v8YAMLLegacyError(source, "$.privacy.disable_redaction", node,
-				"observability defaults, bucket policies, and destination routes")
-		}
-	}
-	if discovery := v8YAMLMapValue(root, "ai_discovery"); discovery != nil && discovery.Kind == yaml.MappingNode {
-		if node := v8YAMLMapValue(discovery, "emit_otel"); node != nil {
-			return v8YAMLLegacyError(source, "$.ai_discovery.emit_otel", node,
-				"the ai.discovery bucket and destination routing policy")
-		}
-	}
-	if node := v8YAMLMapValue(root, "splunk"); node != nil {
-		return v8YAMLLegacyError(source, "$.splunk", node, "an observability destination with kind: splunk_hec")
-	}
+// legacyV7RetiredKeys is the v7-to-v8 migration's key list. The Secure Client
+// source check and the schema diagnostic for later sources share these paths
+// and replacements so a retired name never gets a spelling suggestion.
+var legacyV7RetiredKeys = []struct {
+	path   []string
+	target string
+}{
+	{[]string{"otel"}, "observability resource, policies, and destinations"},
+	{[]string{"audit_sinks"}, "observability.destinations"},
+	{[]string{"audit_db"}, "observability.local.path"},
+	{[]string{"judge_bodies_db"}, "observability.local.judge_bodies_path"},
+	{[]string{"privacy", "disable_redaction"}, "observability defaults, bucket policies, and destination routes"},
+	{[]string{"ai_discovery", "emit_otel"}, "the ai.discovery bucket and destination routing policy"},
+	{[]string{"splunk"}, "an observability destination with kind: splunk_hec"},
+	{[]string{"observability", "connectors", "*", "audit_sinks"}, "observability destinations with connector selectors"},
+}
 
-	observability := v8YAMLMapValue(root, "observability")
-	if observability == nil || observability.Kind != yaml.MappingNode {
-		return nil
-	}
-	connectors := v8YAMLMapValue(observability, "connectors")
-	if connectors == nil || connectors.Kind != yaml.MappingNode {
-		return nil
-	}
-	for index := 0; index+1 < len(connectors.Content); index += 2 {
-		name, connector := connectors.Content[index], connectors.Content[index+1]
-		if name.Kind != yaml.ScalarNode || connector.Kind != yaml.MappingNode {
+func legacyV7RetiredReplacement(path []string) string {
+	for _, key := range legacyV7RetiredKeys {
+		if len(path) != len(key.path) {
 			continue
 		}
-		if node := v8YAMLMapValue(connector, "audit_sinks"); node != nil {
-			path := v8YAMLChildPath("$.observability.connectors", name.Value) + ".audit_sinks"
-			return v8YAMLLegacyError(source, path, node, "observability destinations with connector selectors")
+		matches := true
+		for index, part := range path {
+			if key.path[index] != "*" && key.path[index] != part {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			return key.target
+		}
+	}
+	return ""
+}
+
+func findLegacyV7Key(root *yaml.Node, parts []string, path string) (*yaml.Node, string) {
+	if len(parts) == 0 {
+		return root, path
+	}
+	if root == nil || root.Kind != yaml.MappingNode {
+		return nil, ""
+	}
+	if parts[0] == "*" {
+		for index := 0; index+1 < len(root.Content); index += 2 {
+			name := root.Content[index]
+			if name.Kind != yaml.ScalarNode {
+				continue
+			}
+			if node, found := findLegacyV7Key(root.Content[index+1], parts[1:], v8YAMLChildPath(path, name.Value)); node != nil {
+				return node, found
+			}
+		}
+		return nil, ""
+	}
+	return findLegacyV7Key(v8YAMLMapValue(root, parts[0]), parts[1:], v8YAMLChildPath(path, parts[0]))
+}
+
+func rejectV8YAMLLegacyKeys(source string, root *yaml.Node) error {
+	for _, key := range legacyV7RetiredKeys {
+		if node, path := findLegacyV7Key(root, key.path, "$"); node != nil {
+			return v8YAMLLegacyError(source, path, node, key.target)
 		}
 	}
 	return nil
@@ -748,17 +855,17 @@ func v8Error(source string, code V8YAMLErrorCode, path string, node *yaml.Node, 
 	return result
 }
 
-var v8YAMLSyntaxLine = regexp.MustCompile(`(?:^|[ :])line ([0-9]+)(?:[ :]|$)`)
+var v8YAMLSyntaxLine = lazyregexp.New(`(?:^|[ :])line ([0-9]+)(?:[ :]|$)`)
 
 // yaml.v3 reports parser errors (unlike scanner errors) with the 0-based
 // line of their context mark, one line before the bad line that Python and
 // editors name (GAP-1430).
-var v8YAMLParserError = regexp.MustCompile(
+var v8YAMLParserError = lazyregexp.New(
 	`did not find expected (?:<document start>|node content|key|'-' indicator|',' or '\]'|',' or '\}')`)
 
 // v8YAMLSyntaxReasonPrefix strips the "yaml: line N: " lead from a yaml.v3
 // error so only the parser's reason is left.
-var v8YAMLSyntaxReasonPrefix = regexp.MustCompile(`^(?:yaml: )?(?:line [0-9]+: )?`)
+var v8YAMLSyntaxReasonPrefix = lazyregexp.New(`^(?:yaml: )?(?:line [0-9]+: )?`)
 
 // v8YAMLSyntaxReason returns the parser's fixed-text reason, or "" when the
 // reason could quote the file (anchor or tag names) or is not a short phrase.

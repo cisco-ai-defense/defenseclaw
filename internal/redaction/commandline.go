@@ -18,9 +18,10 @@ package redaction
 
 import (
 	"path"
-	"regexp"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // The secret shapes of a process's argument vector:
@@ -45,14 +46,14 @@ import (
 // cmdlineSecretArg and cmdlineSecretKey also take the name after a flag or
 // key that carries it (--header=X-Api-Key: ..., header=Authorization: ...).
 var (
-	cmdlineSecretArg   = regexp.MustCompile(`(?i)^((?:-{0,2}[a-z0-9_.-]+=)?-{0,2}[a-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|auth|credential|private[_-]?key)[a-z0-9_.-]*[=:])(.+)$`)
-	cmdlineSecretFlag  = regexp.MustCompile(`(?i)^-{1,2}[a-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|auth|credential|private[_-]?key)[a-z0-9_.-]*$`)
-	cmdlineLongToken   = regexp.MustCompile(`^[A-Za-z0-9_\-+/=.]{32,}$`)
-	cmdlineUserFlag    = regexp.MustCompile(`^(?:-u|-U|--user|--proxy-user)$`)
-	cmdlineUserArg     = regexp.MustCompile(`^(-u|-U|--user=|--proxy-user=)([^:]*:)(.+)$`)
-	cmdlineURLPassword = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://(?:<redacted[^<>]{0,90}>|[^/@:\s])*:)((?:<redacted[^<>]{0,90}>|[^/@\s])+)@`)
-	cmdlineSecretKey   = regexp.MustCompile(`(?i)^(?:-{0,2}[a-z0-9_.-]+=)?[a-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|auth|credential|private[_-]?key)[a-z0-9_.-]*[=:]$`)
-	cmdlineAuthScheme  = regexp.MustCompile(`(?i)^(?:bearer|basic|token|digest|negotiate)$`)
+	cmdlineSecretArg   = lazyregexp.New(`(?i)^((?:-{0,2}[a-z0-9_.-]+=)?-{0,2}[a-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|auth|credential|private[_-]?key)[a-z0-9_.-]*[=:])(.+)$`)
+	cmdlineSecretFlag  = lazyregexp.New(`(?i)^-{1,2}[a-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|auth|credential|private[_-]?key)[a-z0-9_.-]*$`)
+	cmdlineLongToken   = lazyregexp.New(`^[A-Za-z0-9_\-+/=.]{32,}$`)
+	cmdlineUserFlag    = lazyregexp.New(`^(?:-u|-U|--user|--proxy-user)$`)
+	cmdlineUserArg     = lazyregexp.New(`^(-u|-U|--user=|--proxy-user=)([^:]*:)(.+)$`)
+	cmdlineURLPassword = lazyregexp.New(`([A-Za-z][A-Za-z0-9+.-]*://(?:<redacted[^<>]{0,90}>|[^/@:\s])*:)((?:<redacted[^<>]{0,90}>|[^/@\s])+)@`)
+	cmdlineSecretKey   = lazyregexp.New(`(?i)^(?:-{0,2}[a-z0-9_.-]+=)?[a-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|auth|credential|private[_-]?key)[a-z0-9_.-]*[=:]$`)
+	cmdlineAuthScheme  = lazyregexp.New(`(?i)^(?:bearer|basic|token|digest|negotiate)$`)
 )
 
 // WithheldArgv replaces the arguments of a Codex notify program, which

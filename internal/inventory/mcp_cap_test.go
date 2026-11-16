@@ -288,3 +288,43 @@ func TestMCPConfigNamesReadEachAgentsLayout(t *testing.T) {
 		}
 	}
 }
+
+// Claude Desktop's claude_desktop_config.json declares servers only under
+// mcpServers. The files Claude Desktop 4.16336 writes hold preferences (1P),
+// and deploymentMode and coworkUserFilesPath as well (3P): none of those keys
+// is an MCP server (cowork-1-0-8 GAP-0026).
+func TestSignalFromMCPConfigPathClaudeDesktopListsOnlyMCPServers(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, body string
+		want       []string
+	}{
+		{"preferences only", `{"preferences":{"coworkScheduledTasksEnabled":true,"launchPreviewPersistedWorkspaces":[]}}`, nil},
+		{"preferences and mcpServers", `{"preferences":{"coworkScheduledTasksEnabled":true},` +
+			`"mcpServers":{"filesystem":{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","/tmp"]}}}`, []string{"filesystem"}},
+		{"third-party deployment", `{"deploymentMode":"3p","coworkUserFilesPath":"C:\\Users\\dcadmin\\Claude",` +
+			`"preferences":{"coworkLegacyRootGrantsPruned":true,"coworkScheduledTasksEnabled":true}}`, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfgPath := filepath.Join(t.TempDir(), ".config", "Claude", "claude_desktop_config.json")
+			if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(cfgPath, []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			s := &ContinuousDiscoveryService{}
+			signal := s.signalFromMCPConfigPath(AISignature{ID: "claude-desktop", Name: "Claude Desktop"}, cfgPath)
+			var got []string
+			for _, ev := range signal.Evidence {
+				if ev.Type == "mcp_server" {
+					got = append(got, ev.Basename)
+				}
+			}
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") || signal.Partial {
+				t.Fatalf("mcp_server rows = %q (partial %v), want %q", got, signal.Partial, tc.want)
+			}
+		})
+	}
+}

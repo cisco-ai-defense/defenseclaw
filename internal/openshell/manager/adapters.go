@@ -90,10 +90,7 @@ func (b BuilderImages) Resolve(ctx context.Context, spec image.BuildSpec, build 
 	}
 	if rec, ok, err := b.Builder.Current(spec); err != nil {
 		return image.Record{}, err
-	} else if ok && rec.HookFireVerified && (!build || !rec.MicroVMUnchecked()) {
-		// An image for the MicroVM driver whose last MicroVM check settled
-		// nothing is checked again by the build below; without one, create
-		// refuses it with the command that checks it (microVMRefusal).
+	} else if ok && rec.HookFireVerified {
 		return rec, nil
 	}
 	if !build {
@@ -422,6 +419,39 @@ const (
 	otherGatewayTimeout = 5 * time.Second
 	maxOtherGateways    = 8
 )
+
+// RegistrationGateway is Options.GatewayAt: it connects to the account's
+// gateway registration name (the openshell CLI's) in workspace, when it
+// answers within otherGatewayTimeout, with the compute driver it runs, to
+// read what a record places there. It drives nothing on it.
+func RegistrationGateway(discover openshell.DiscoverOptions, client openshell.ClientOptions) func(context.Context, string, string) (*Gateway, error) {
+	return func(ctx context.Context, name, workspace string) (*Gateway, error) {
+		d := discover
+		d.Gateway = name
+		reg, err := openshell.Discover(d)
+		if err != nil {
+			return nil, err
+		}
+		o := client
+		o.Workspace = workspace
+		c, err := openshell.Dial(reg, o)
+		if err != nil {
+			return nil, err
+		}
+		hctx, cancel := context.WithTimeout(ctx, otherGatewayTimeout)
+		defer cancel()
+		if _, err := c.Health(hctx); err != nil {
+			_ = c.Close()
+			return nil, err
+		}
+		driver, err := connectedDriver(hctx, c)
+		if err != nil {
+			_ = c.Close()
+			return nil, err
+		}
+		return &Gateway{Client: c, Name: reg.Name, Endpoint: reg.Endpoint, Port: registrationPort(reg), Driver: driver, Close: c.Close}, nil
+	}
+}
 
 // OtherRegisteredGateways is Options.OtherGateways for a managed daemon: it
 // connects to each gateway registered with the account's openshell CLI

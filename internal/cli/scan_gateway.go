@@ -10,9 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,8 +22,8 @@ import (
 )
 
 // scan skill|mcp|plugin run the gateway's scanners through its API: on a
-// managed Windows computer, where the per-user Python CLI is not installed,
-// they are how an administrator scans with the scanners, policy and judge
+// managed computer, where the per-user Python CLI is not installed, they are
+// how an administrator scans with the scanners, policy and judge
 // the admin config sets (GAP-0132).
 var (
 	scanGatewayJSON bool
@@ -71,22 +73,29 @@ var scanGatewayEndpoint = func() (string, string, error) {
 	if cfg == nil {
 		return "", "", errors.New("no DefenseClaw config is loaded")
 	}
-	bind := strings.TrimSpace(cfg.Gateway.APIBind)
-	if bind == "" {
-		bind = "127.0.0.1"
-	}
 	token := strings.TrimSpace(cfg.Gateway.ResolvedToken())
 	if token == "" {
 		return "", "", errors.New("no gateway token is configured")
 	}
-	return fmt.Sprintf("http://%s:%d", bind, cfg.Gateway.APIPort), token, nil
+	return "http://" + net.JoinHostPort(gatewayClientHost(cfg), strconv.Itoa(cfg.Gateway.APIPort)), token, nil
+}
+
+// gatewayScanAdmission is the admission result a skill or plugin scan
+// response carries.
+type gatewayScanAdmission struct {
+	Verdict string `json:"verdict"`
+	Reason  string `json:"reason"`
 }
 
 type gatewayScanResponse struct {
 	Verdict  string         `json:"verdict"`
 	BySev    map[string]int `json:"findings_count_by_severity"`
 	Settings map[string]any `json:"scanner_settings"`
-	Result   struct {
+	Warnings []string       `json:"warnings"`
+	// Admission is what install admission would decide for the scanned
+	// skill or plugin; the scan itself blocks nothing (GAP-2635).
+	Admission *gatewayScanAdmission `json:"admission"`
+	Result    struct {
 		Target   string `json:"target"`
 		Duration int64  `json:"duration"`
 		Findings []struct {
@@ -108,6 +117,9 @@ func runGatewayScan(cmd *cobra.Command, kind, target string) error {
 		}
 		target = absolute
 	}
+	if err := managedScanUnavailable(kind, target); err != nil {
+		return err
+	}
 	base, token, err := scanGatewayEndpoint()
 	if err != nil {
 		return fmt.Errorf("scan %s: %w", kind, err)
@@ -115,7 +127,7 @@ func runGatewayScan(cmd *cobra.Command, kind, target string) error {
 	// A scan carries both gateway token headers. Check the configured listener
 	// before sending either header, as policy reload does.
 	if problem := foreignGatewayListener(cfg); problem != "" {
-		return fmt.Errorf("scan %s: %s; the gateway token was not sent. %s", kind, problem, foreignGatewayListenerFix(cfg))
+		return fmt.Errorf("scan %s: %s; the gateway token was not sent. %s", kind, problemClause(problem), foreignGatewayListenerFix(cfg))
 	}
 	body, _ := json.Marshal(map[string]string{"target": target})
 	request, err := http.NewRequest(http.MethodPost, base+"/v1/"+kind+"/scan", bytes.NewReader(body))
@@ -126,10 +138,11 @@ func runGatewayScan(cmd *cobra.Command, kind, target string) error {
 	request.Header.Set("X-DefenseClaw-Client", "cli")
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("X-DefenseClaw-Token", token)
-	response, err := (&http.Client{
-		Timeout:       5 * time.Minute,
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
-	}).Do(request)
+	client, err := gatewayPeerClientForURL(cfg, base, 5*time.Minute)
+	if err != nil {
+		return fmt.Errorf("scan %s: %w", kind, err)
+	}
+	response, err := client.Do(request)
 	if err != nil {
 		return fmt.Errorf("scan %s: the gateway at %s did not answer: %w", kind, base, err)
 	}
@@ -166,13 +179,24 @@ func runGatewayScan(cmd *cobra.Command, kind, target string) error {
 		if value == "" {
 			value = "(none)"
 		}
-		fmt.Fprintf(out, "  %-12s %s\n", strings.ReplaceAll(key, "_", " ")+":", value)
+		label := strings.ReplaceAll(key, "_", " ")
+		if key == "policy" {
+			// The scan preset; "policy:" is the admission result below.
+			label = "preset"
+		}
+		fmt.Fprintf(out, "  %-12s %s\n", label+":", value)
+	}
+	for _, warning := range parsed.Warnings {
+		fmt.Fprintf(out, "  %-12s %s\n", "warning:", warning)
 	}
 	verdict := parsed.Verdict
 	if len(parsed.Result.Findings) == 0 {
 		verdict = "clean"
 	}
 	fmt.Fprintf(out, "  %-12s %s (%d findings)\n", "verdict:", verdict, len(parsed.Result.Findings))
+	if line := gatewayScanPolicyLine(kind, parsed.Admission); line != "" {
+		fmt.Fprintf(out, "  %-12s %s\n", "policy:", line)
+	}
 	for _, finding := range parsed.Result.Findings {
 		label := finding.RuleID
 		if label == "" {
@@ -181,4 +205,28 @@ func runGatewayScan(cmd *cobra.Command, kind, target string) error {
 		fmt.Fprintf(out, "    [%s] %s: %s\n", finding.Severity, label, finding.Title)
 	}
 	return nil
+}
+
+// gatewayScanPolicyLine is the "policy:" line of a skill or plugin scan, in
+// the words of the per-user `skill scan` line (GAP-1592): what install
+// admission would decide for it. The scan itself blocks and quarantines
+// nothing (GAP-2635). "" when the gateway sent no admission result (MCP
+// scans, a Secure Client host, an older gateway).
+func gatewayScanPolicyLine(kind string, admission *gatewayScanAdmission) string {
+	if admission == nil {
+		return ""
+	}
+	reason := strings.TrimSpace(admission.Reason)
+	if reason != "" {
+		reason = " (" + reason + ")"
+	}
+	switch strings.ToLower(strings.TrimSpace(admission.Verdict)) {
+	case "rejected", "blocked":
+		return fmt.Sprintf("rejected - the policy would refuse this %s at install%s; this scan blocked nothing", kind, reason)
+	case "warning":
+		return fmt.Sprintf("accepted with a warning - the policy would admit this %s at install%s", kind, reason)
+	case "allowed", "clean":
+		return fmt.Sprintf("accepted - the policy would admit this %s at install%s", kind, reason)
+	}
+	return ""
 }

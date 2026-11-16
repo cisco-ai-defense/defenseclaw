@@ -25,8 +25,16 @@ end {
     $hook = '{{.HookBinaryPS}}'
     $exitCode = 2
     $responseWritten = $false
-    try {
-        if (-not (Test-Path -LiteralPath $hook -PathType Leaf)) {
+{{if .CursorTargetModesJSON64}}    $failMode = 'closed'
+{{end}}    try {
+{{if .CursorTargetModesJSON64}}        $targetModesJSON64 = '{{.CursorTargetModesJSON64}}'
+        $targetModes = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($targetModesJSON64)) | ConvertFrom-Json
+        $currentSID = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        $targetMode = $targetModes.PSObject.Properties[$currentSID]
+        if ($null -ne $targetMode -and $targetMode.Value -cin @('open', 'closed')) {
+            $failMode = [string]$targetMode.Value
+        }
+{{end}}        if (-not (Test-Path -LiteralPath $hook -PathType Leaf)) {
             throw "DefenseClaw hook launcher is missing: $hook"
         }
         $payload = $parts -join [Environment]::NewLine
@@ -129,17 +137,20 @@ end {
     }
     catch {
         [Console]::Error.WriteLine("defenseclaw: Cursor hook adapter failed: " + $_.Exception.Message)
-        if (-not $responseWritten) {
-{{if eq .FailMode "open"}}
-            [Console]::Out.Write('{"continue":true}')
-{{else}}
+{{if .CursorTargetModesJSON64}}        if (-not $responseWritten) {
+            if ($failMode -ceq 'open') {
+                [Console]::Error.WriteLine('defenseclaw: open gateway-outage mode does not apply to local Cursor adapter failure')
+            }
             [Console]::Out.Write('{"continue":false,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}')
-{{end}}
+            $exitCode = 2
         }
+{{else}}        if (-not $responseWritten) {
 {{if eq .FailMode "open"}}
-        $exitCode = 0
-{{else}}
-        $exitCode = 2
+            [Console]::Error.WriteLine('defenseclaw: open gateway-outage mode does not apply to local Cursor adapter failure')
+{{end}}
+            [Console]::Out.Write('{"continue":false,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}')
+            $exitCode = 2
+        }
 {{end}}
     }
     # powershell.exe -Command reduces a non-zero exit from an invoked script

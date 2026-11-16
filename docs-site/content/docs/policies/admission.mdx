@@ -15,51 +15,13 @@ keywords:
   - quarantine
 ---
 
-An admin config may contain at most 4 MiB of source text and 65,536 parsed
-YAML nodes, including repeated `asset_policy` entries. Split or simplify
-large lists before applying them.
+Admission decides whether a skill, MCP server or plugin may be installed and run. `config.yaml` (`config_version: 9`) answers it with two sections: `admission:` maps a scan severity to an action, and `asset_policy:` holds the block and allow lists. The decision flow is drawn on [Scanning and admission](/docs/scanning). To change the lists day to day, see [Change the lists](#change-the-lists).
 
-Admission is the check DefenseClaw runs when a skill, an MCP server or a plugin
-appears in a watched root, or when you install one with the CLI. It answers one
-question: may this asset be installed and run? Two sections of `config.yaml`
-(`config_version: 9`) answer it, and nothing else does:
+An admin config may contain at most 4 MiB of source text and 65,536 parsed YAML nodes, including repeated `asset_policy` entries. Split or simplify large lists before applying them. The parser also limits nesting depth to 32.
 
-- `admission:` says what a scan finding does. For each asset type it maps a
-  severity to an action: block it, quarantine it, warn, or allow it.
-- `asset_policy:` holds the block list and the allow list. A name you deny is
-  blocked without a scan. A name you allow skips the scan.
-
-This is one case of the rule that `config.yaml` is the only admin intent (see
-[Configuration: one source of truth](/docs/reference/source-of-truth)). The
-older homes of this policy are read once, by the version 9 migration, and are
-then ignored (Secure Client devices keep the version 8 behavior):
-`policies/rego/data.json`, the `skill_actions`, `mcp_actions` and
-`plugin_actions` keys, and the operator rows of the audit database's `actions`
-table. [Upgrading from config_version 8](#upgrading-from-config_version-8)
-says exactly what moves. Quarantine, disable and the scan-verdict blocks are
-[runtime state](#what-stays-runtime-state), never policy.
+This is one case of the rule that `config.yaml` is the only admin intent (see [Configuration: one source of truth](/docs/reference/source-of-truth)). Quarantine, disable and the scan-verdict blocks are [runtime state](#what-stays-runtime-state), never policy. Secure Client devices read the version 8 admission policy.
 
 ## How a verdict is reached
-
-<Flow
-  direction="TB"
-  caption="The admission check for one asset. The two lists are asset_policy rules and are checked first: a denied rule wins over an allowed one at the same scope. The first-party list belongs to admission and skips the scan only while allow_list_bypass_scan is true. With no scan result yet, scan_on_install decides between a scan and an immediate allow."
->
-  <Node id="asset" kind="agent">{`A skill, MCP server\nor plugin appears`}</Node>
-  <Node id="lists" kind="decision">{`On a list?\nasset_policy rules`}</Node>
-  <Node id="blocked" kind="generic">{`Blocked\ndenied rule matched`}</Node>
-  <Node id="allowed" kind="generic">{`Allowed\nscan skipped`}</Node>
-  <Node id="first" kind="decision">{`First party?\nadmission list`}</Node>
-  <Node id="scan" kind="policy">{`Scan, then apply\nthe severity action`}</Node>
-  <Node id="out" kind="generic">{`Clean, warning,\nallowed or rejected`}</Node>
-  <Edge from="asset" to="lists" label="checks" />
-  <Edge from="lists" to="blocked" label="denied rule" />
-  <Edge from="lists" to="allowed" label="allowed rule" />
-  <Edge from="lists" to="first" label="no rule" />
-  <Edge from="first" to="allowed" label="matches" />
-  <Edge from="first" to="scan" label="no match" />
-  <Edge from="scan" to="out" label="decides" />
-</Flow>
 
 The check ends in one of six verdicts:
 
@@ -89,7 +51,7 @@ link-local or multicast address, so the install scan of such a server fails
 and the verdict is `rejected` (fail-closed). An `allowed` rule with the
 `name` and `url` of the server (step 2) or `scan_on_install: false` for `mcp`
 (step 4) admits one you trust; see
-[Servers on local and internal addresses](/docs/scanning/mcp-scanner#servers-on-local-and-internal-addresses).
+[Scan an MCP server](/docs/scanning/mcp-scanner).
 
 Where it runs: the gateway's install watcher checks a skill, plugin or MCP
 server when it appears in a watched directory, and the `defenseclaw` install
@@ -108,17 +70,104 @@ periodic rescan (`watch.rescan_enabled`, on by default).
 Until then a managed computer's `status` and `verify` warn with
 `asset_rejected_not_enforced`.
 
-On managed Windows, the LocalSystem install watcher skips skill, plugin and
-MCP server roots inside enrolled users' profiles, so assets there do not
-receive its install-admission scan. Gateway health reports
+On managed Windows, the LocalSystem install watcher skips skill and plugin
+roots inside enrolled users' profiles, so assets there do not receive its
+install-admission scan. Enrolled users' Claude Code and Kiro MCP servers,
+including those of projects in profiles, are admitted: the hook enumerator
+starts each server as its user for the scan
+([MCP servers in user profiles](/docs/enterprise/windows)).
+Gateway health reports
 `watcher.details.profile_roots_skipped: true` when it skips those roots.
-Administrators can [scan a copy outside profiles](/docs/enterprise/windows#scan-skills-mcp-servers-and-plugins)
+Administrators can [scan a copy outside profiles](/docs/enterprise/windows)
 and keep shared skills outside profiles. For policy on profile assets, set
 `runtime_detection.enabled: true` so hooks apply default, registry and
 approval rules to profile assets; use `asset_policy.mode: action` to block.
 Set `asset_policy.enabled: true` as well. Denied names are refused by hooks
-even with runtime detection off. A brokered scan as the enrolled user is
-planned for a later release.
+even with runtime detection off. With asset policy in action mode and runtime
+detection on, the hook also sends the text of the selected profile skill or
+plugin, and the gateway refuses one the in-process prompt-injection detector
+rates HIGH or CRITICAL (role or instruction override, fake system or delimiter
+blocks, base64-hidden instructions, tag characters), and a skill or plugin whose
+text was not sent or could not be read in full. Profile skills and
+plugins are not scanned by the skill-scanner as the enrolled user.
+
+Each enrolled user's MCP server has its own verdict. The install block and
+runtime disable that admission records for one user's server apply to that
+user's server only (its connector, user and project), so another user's
+server with the same name is admitted, blocked and released on its own. A
+`denied` rule in `asset_policy` still applies by name to every user. If the
+gateway cannot tell which user made a tool call, any user's block of that
+server name refuses the call.
+
+A verdict is for a server's definition, not only its name. When the command,
+arguments, folder or environment of a server change under the same name,
+DefenseClaw starts admission for the new definition at once: at the first
+tool call, or within 30 seconds when no call comes first. While the scan is
+pending, the hook behavior follows the tier table below. The new verdict
+then decides. A rejected definition stays blocked. When a server
+that admission rejected is changed back to a definition that scans clean,
+DefenseClaw lifts its own block and the server's tool calls are allowed
+again. A block an administrator set stays. On a per-user gateway, two
+projects' servers of the same name share one block, which stays while
+another server of that name is configured.
+
+On a managed Windows computer the gateway service cannot read the users'
+profiles, so it learns their Claude Code and Kiro MCP servers from the hook
+enumerator service. Before it decides a Claude Code MCP tool call, the
+gateway has the enumerator read the users' server lists again, so the call
+is decided on the definition the user has now. If the enumerator is not
+running or does not answer within about 1.5 seconds, the call is refused as
+not scanned yet (the agent is told to try again in about a minute), never
+decided on the list read before, and the gateway log says why.
+
+Admission decides on tool calls, not on process starts. Claude Code starts
+the servers of a project it opens as soon as the user approves the
+project's `.mcp.json`, as the user and before DefenseClaw has scanned them.
+
+| Hook tier | New server while admission is pending or unavailable | Completed failed or rejected scan |
+| --- | --- | --- |
+| Per-user default or permissive | The call runs with a warning naming the server and pending scan. The audit records `allow`, `would_block=true`, and the admission reason. | A scan that found something blocks the server. A server DefenseClaw could not scan (see below) runs with a warning that names the cause and the next step; the audit records `allow` and `would_block=true`. |
+| Per-user strict or managed standalone | The call is blocked with the server name and a retry time based on the scan timeout. | The call is blocked. |
+
+A scan that cannot run is not a malicious verdict. A server whose launcher is
+not `npx` or `uvx` (for example `python3`, `node` or a local binary), or whose
+URL is a loopback, private or link-local address, cannot be scanned. The
+first call and every later call of such a server get the same decision: in the
+per-user default and permissive tiers the call runs with a warning, and in the
+strict tier and on a managed device it is blocked. The agent is told why the
+server could not be scanned and the one next step: `defenseclaw mcp allow
+<name>` (on a managed device, ask the administrator, because the managed launcher
+[refuses it](/docs/enterprise/managed-commands)), or start the server with `npx` or `uvx`, or serve it from a
+public URL. `defenseclaw mcp list` says the same.
+
+An administrator's allow rule for the server beats that block in every tier,
+the strict tier and managed profiles included. On a managed device add the
+rule to `asset_policy.mcp.allowed` in the machine policy, with the server's
+name and its URL (or its command and arguments), for example the loopback
+endpoint of a local agent gateway:
+
+```yaml
+asset_policy:
+  mcp:
+    allowed:
+      - name: gas
+        url: http://127.0.0.1:18795/mcp
+        reason: local agent gateway, reviewed
+```
+
+An explicit deny still wins over the allow rule. A server whose scan found
+something is not covered by this: allow it only after the finding is reviewed.
+
+An explicit asset-policy deny or runtime disable blocks in every tier. The
+server process itself can run until Claude Code stops it. It runs with the
+user's own rights, the same rights the user has to start any program.
+
+On managed Windows, a project server whose `cwd` is a relative path, or
+names a folder the server cannot start in, is blocked as not scanned. The
+scan error says that the server is not started in that folder, and why. If the hook enumerator cannot parse a user's
+Claude Code server list (`~/.claude.json` or a project `.mcp.json`), it does
+not guess: it refuses all of that user's Claude Code MCP servers, and
+`status` names the file until it parses again.
 
 ## The admission block
 
@@ -201,9 +250,21 @@ only when no shorthand fits.
 
 In a triple, `install` is `block`, `allow` or `none`; `file` is `none` or
 `quarantine`; `runtime` is `disable` or `enable`. A finding is `rejected`
-whenever `install` is `block` or `runtime` is `disable`. `warn` and `allow` do
+whenever `install` is `block`, `file` is `quarantine` or `runtime` is
+`disable`, so a file quarantine alone is never a warning. `warn` and `allow` do
 the same thing to the asset; they differ only in the verdict they record. A
 severity that no layer covers fails closed, as a block.
+
+A rejected verdict is always a refusal. `skill install` and `plugin install`
+scan and decide the new copy in a private staging folder before it is
+installed. A refused or quarantined copy never replaces what is installed:
+with `--force`, the skill or plugin that was there stays as it was. The
+install fails, with or without `--action`, and also when the quarantine move
+or the gateway disable fails. When you change the admission
+actions, the watcher's next rescan decides the installed skills, plugins and
+MCP servers again and applies the new verdict, so tightening a severity to
+`quarantine` or `block` refuses an unchanged asset that was admitted with a
+warning.
 
 Quarantine moves the files of a skill or plugin into DefenseClaw's quarantine
 area. An MCP server has no files to move, so for MCP `block` and `quarantine`
@@ -221,14 +282,18 @@ Each severity resolves on its own, first match wins:
 | Severity | Skill (default gate) | MCP server | Plugin |
 | --- | --- | --- | --- |
 | `critical` | `quarantine` | `quarantine` | `quarantine` |
-| `high` | `quarantine` | `quarantine` | `quarantine` |
-| `medium` | `warn` | `quarantine` | `warn` |
-| `low` | `allow` | install `none`, file `none`, runtime `disable` | `warn` |
+| `high` | `quarantine` | `warn` | `quarantine` |
+| `medium` | `warn` | `warn` | `warn` |
+| `low` | `allow` | `warn` | `warn` |
 | `info` | `allow` | `warn` | `warn` |
 
 The built-in first-party entries are `codeguard` for skills, `defenseclaw` for
 plugins, and none for MCP servers. Both names are DefenseClaw's own, so they
 trust only DefenseClaw's own content; see [First-party assets](#first-party-assets).
+
+Balanced MCP admission keeps HIGH, MEDIUM and LOW scan findings in the audit log and warns without disabling the server. CRITICAL findings still reject it. To refuse HIGH findings in a stricter deployment, set `admission.mcp.actions.high: quarantine` in `config.yaml`; an explicit organization setting wins over the built-in action. Secure Client retains its separate admission actions.
+
+A configuration migrated from the older strict preset keeps the MCP actions that preset enforced even if the old migration left them unset. This applies only when the migrated strict per-skill actions and disabled allow-list bypass identify that preset; an explicit MCP action still takes precedence.
 
 ### The scanner gate
 
@@ -348,7 +413,8 @@ stay in the file but every asset is scanned.
 
 ### Check what applies
 
-Read the compiled result for one type, with the layer it came from:
+For a per-user installation, read the compiled result for one type, with the
+layer it came from:
 
 ```bash
 defenseclaw config get admission.skill --effective
@@ -397,17 +463,6 @@ Add `--severity` and `--findings` to simulate a scan result:
 defenseclaw-gateway policy evaluate --target-type skill --target-name new-skill --severity HIGH --findings 3
 ```
 
-On a managed Linux or macOS host, run the gateway command as an administrator;
-it reads the managed configuration. On a managed Windows standalone host, use
-an elevated PowerShell prompt and the installed CLI:
-
-```powershell
-& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' policy evaluate --target-type skill --target-name risky-skill
-```
-
-The managed command reads the administrator's policy. A standard account
-cannot use its own `~/.defenseclaw/config.yaml` to check the managed verdict.
-
 ```text
 {
   "verdict": "rejected",
@@ -423,6 +478,29 @@ In the output, `runtime_action` uses the policy engine's spelling, `block` or
 and uses the path `/dry-run`, so rules scoped to a connector and allow rules
 pinned to a path do not match in it. `defenseclaw-gateway policy show` prints
 the whole compiled admission policy.
+
+The `defenseclaw config get ... --effective` reads above are for a per-user
+installation; they do not show the managed verdict. On managed Linux, the
+installed `defenseclaw` launcher accepts only the commands in [Managed command availability](/docs/enterprise/managed-commands). The managed
+Windows CLI has no `config get`.
+A standard account is refused when it tries to read the managed policy with
+the gateway command. To check the managed policy, run `policy evaluate` for
+one asset or `policy show` for the compiled policy as root on managed Linux:
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway policy evaluate --target-type skill --target-name risky-skill
+sudo /opt/defenseclaw/bin/defenseclaw-gateway policy show
+```
+
+On managed macOS, use the installed gateway at
+`/opt/cisco/defenseclaw/bin/defenseclaw-gateway` with `sudo`.
+
+On managed Windows, use an elevated PowerShell prompt and the installed CLI:
+
+```powershell
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' policy evaluate --target-type skill --target-name risky-skill
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' policy show
+```
 
 ## The block/allow list
 
@@ -472,8 +550,8 @@ asset_policy:
       description: "A note shown in listings and audit events.",
     },
     "url, command, args_prefix, transport": {
-      type: "string",
-      description: "MCP servers only. Match a server by where it points or how it starts, with or without a name. Every field you give must match. command compares the program's base name; args_prefix compares the first arguments exactly. At an agent hook these fields are compared with the server as the calling user's agent configures it (on a managed device the standalone hook reads that configuration as the user), so two users' servers with the same name are told apart. On a managed device that includes a definition the agent was started with on its command line (claude --mcp-config, which --strict-mcp-config makes the only source, or codex -c mcp_servers.<name>.url=...); when the hook cannot read such a source, a tool call to the server is refused while one of these rules applies, because where it points cannot be checked.",
+      type: "string (args_prefix is a list)",
+      description: "MCP servers only. Match a server by where it points or how it starts, with or without a name. Every field you give must match. command compares the program's base name; args_prefix is a list of strings (for example `[-y, acme-server]`) and compares the first arguments exactly; a single string is refused. At an agent hook these fields are compared with the server as the calling user's agent configures it (on a managed device the standalone hook reads that configuration as the user), so two users' servers with the same name are told apart. On a managed device that includes a definition the agent was started with on its command line (claude --mcp-config, which --strict-mcp-config makes the only source, or codex -c mcp_servers.<name>.url=...); when the hook cannot read such a source, a tool call to the server is refused while one of these rules applies, because where it points cannot be checked.",
     },
     "source_path_contains": {
       type: "list",
@@ -505,12 +583,19 @@ presented. The CLI writes a pin when you allow an installed skill or plugin,
 and never writes one on a block, so a block follows the name wherever the
 asset is installed.
 
-Claude Code's `Skill` hook call names the skill. DefenseClaw looks in the
+Claude Code's `Skill` hook call names the skill and carries no path. DefenseClaw looks in the
 connector's skill folders for folders that provide that name and judges each
 copy at its own path. An `asset_policy.skill.denied` rule pinned with
 `source_path_contains` to one copy blocks the call when that copy exists. If
 several copies exist, a matching deny on any copy blocks the call; a pin to a
 copy the caller does not have matches nothing.
+
+This per-copy check is for Linux and macOS. On managed Windows the gateway
+runs as LocalSystem and does not look inside user profiles, so it cannot see a
+skill folder under a user profile, and a deny pinned with
+`source_path_contains` to such a copy does not match at the Claude Code `Skill`
+hook. Write the deny by skill name there. Install admission and the folder
+watcher still act on a copy in a watched root.
 
 ### enabled and mode
 
@@ -543,6 +628,11 @@ Windows `status` and `verify` do not emit `asset_policy_not_enforced`; the
 gateway log is the only warning on Windows for skills and plugins when
 runtime detection is off and no watched folder admits them.
 
+MCP runtime detection is on by default. Set
+`asset_policy.mcp.runtime_detection.enabled: false` to turn it off, with
+`terminal_commands` set to either value; the hook then refuses only the `denied`
+list for MCP too.
+
 For MCP servers, an install admission scan can also record a runtime disable.
 That scan verdict still refuses MCP calls when
 `asset_policy.mcp.runtime_detection.enabled` is `false`; turning runtime
@@ -558,10 +648,10 @@ on its own skill loading, so asked for a skill in plain words it reads the
 skill's `SKILL.md` with a shell command and follows it. The Claude Code and
 Codex hooks therefore also refuse any tool call that reaches into the folder of
 a denied skill: a `.../skills/<name>/...` path in a command, a file path or a
-working folder. A skill that install admission blocked and disabled (one whose
-quarantine failed stays in its folder) is refused the same ways, also when
-Codex selects it by the name its `SKILL.md` declares rather than its folder
-name. Two things stay out of reach of a hook:
+working folder. After a quarantine failure, a blocked and disabled skill whose
+source remains in the watched folder is refused the same ways, also when Codex
+selects it by the name its `SKILL.md` declares rather than its folder name.
+Two things stay out of reach of a hook:
 
 - the skill's name and description, which Codex lists to the model from its
   own skill index before any hook runs;
@@ -603,7 +693,7 @@ without waiting for its files to change. An MCP server is matched on its
 definition too, so a `command` or `url` rule added later rejects a server
 that was already installed; the hooks refuse its tool calls once the config
 applies. Managed Windows profile assets and managed Linux/macOS connector
-assets are refused only by the hooks. Remove those assets with your device
+assets are refused only by the hooks (on managed Windows from their content, as above). Remove those assets with your device
 management tool while the hooks refuse them.
 
 A Claude Code plugin is refused at the hook as well. Claude Code runs a plugin
@@ -639,9 +729,23 @@ a tool that writes files still goes through CodeGuard.
 
 On managed Windows, Claude Code reports `Bash` for shell calls, `Read` for
 file reads, and `Skill` for skill calls. Codex reports `Bash` for shell
-commands and `apply_patch` for file edits. Codex has no `Read` or `Skill` tool
-name. Write these exact names, including capitals, in
+commands. A Codex build that edits files with its own patch tool reports
+`apply_patch` for those edits, but a Codex build that edits files through the
+shell reports them as `Bash`; check the `tool_name` of a real edit in the
+audit log of your Codex version before you write the rule. Codex has no `Read`
+or `Skill` tool name. Write these exact names, including capitals, in
 `asset_policy.tool.denied`; a lower-case spelling does not match.
+
+| Connector | Names the hook reports on managed Windows |
+| --- | --- |
+| Claude Code | `Bash`, `Read`, `Skill` |
+| Codex | `Bash`; `apply_patch` only on a build that edits files with its own patch tool |
+
+A rule whose name never matches is not reported anywhere: DefenseClaw shows no
+warning, notice or alert, and the call runs. For example, `name: bash` for Codex
+never matches, because Codex reports `Bash`; write `name: Bash` with
+`connector: codex`. After you add a rule, run one call that it should stop and
+check that it is refused.
 
 ## Change the lists
 
@@ -649,7 +753,7 @@ name. Write these exact names, including capitals, in
 | --- | --- |
 | `defenseclaw skill`, `mcp`, `plugin`, `tool` `block`, `allow`, `unblock` | The everyday way. Each command edits the list and the gateway applies it. |
 | `defenseclaw config set asset_policy...` | Anything the commands do not cover: URL or command rules, path pins, bulk edits. |
-| REST `POST` and `DELETE /enforce/block`, `POST /enforce/allow` | Scripts and other tools. See [Gateway API](/docs/reference/gateway-api#block-and-allow-lists). |
+| REST `POST` and `DELETE /enforce/block`, `POST /enforce/allow` | Scripts and other tools. See [Gateway API](/docs/reference/gateway-api). |
 | Editing `config.yaml` by hand | Works. The gateway applies a valid change within seconds and rejects an invalid one. `config set` checks the change before it writes. |
 
 Every writer goes through the one config writer, and the gateway applies the
@@ -681,7 +785,7 @@ delete_file  block    connector  destructive                               2026-
 read_file    allow    global     vetted                                    2026-10-06 18:19
 ```
 
-- Without `--connector`, a block or allow covers every connector. With
+- Without `--connector`, a block or allow covers every connector: `tool allow` names each guarded connector it covers (`covers connector=claudecode, connector=codex, ...`), and `tool list` prints one table per connector, where `UPDATED` shows `-` for an entry until it is changed. The sample above is from a host that guards only Claude Code. With
   `--connector`, it covers that one. `skill allow` and `plugin allow` on an
   installed copy write a rule scoped to the connector that has the copy and
   pinned to its path. `skill allow` on a quarantined copy pins the rule to the
@@ -692,7 +796,7 @@ read_file    allow    global     vetted                                    2026-
   `command` and `args_prefix` (and `transport` when the server sets one), read
   from the connector's MCP config. A different server added later under the
   same name is scanned again. For a server that is not configured (for
-  example one `mcp set` just rejected), pass the definition you reviewed:
+  example one that `mcp set` rejected), pass the definition you reviewed:
   `defenseclaw mcp allow context7 --command npx --args '["-y", "@upstash/context7-mcp"]'`.
   Without a configured copy or a pin the rule matches the name only, and
   `mcp allow` says so.
@@ -720,13 +824,79 @@ curl -s -X POST http://127.0.0.1:18970/enforce/block \
 {"effective_policy_digest":"sha256:8e6d614e5be0460109785e8e0d532aa980ab41dd87babf936d2675c4726f0c4b","generation":17,"status":"blocked"}
 ```
 
+### Block or allow an asset step by step
+
+Put a skill, MCP server, plugin or tool on the block list or the allow list. A blocked name is refused without a scan. An allowed name skips the scan.
+
+Before you start:
+
+- The gateway should be running so the change is audited. With it stopped, the commands still write `config.yaml` and warn that no audit event was recorded.
+- This is a per-user command. On a managed device the commands are refused (exit code 3) and the rules go in the admin config.
+
+1. Block by name.
+
+   ```bash
+   defenseclaw skill block risky-skill --reason "unvetted vendor skill"
+   ```
+
+   ```text
+   [skill] Blocked 'risky-skill' (every connector).
+   ```
+
+   The same works for `mcp`, `plugin` and `tool`. Add `--connector claudecode` to limit a rule to one connector.
+
+2. Allow a reviewed asset.
+
+   ```bash
+   defenseclaw skill allow ok-skill --reason reviewed
+   ```
+
+   ```text
+   [skill] 'ok-skill' added to allow list
+     Note: this rule matches the name only: any skill named 'ok-skill' on any connector skips the scan.
+   ```
+
+   When the asset is installed, `allow` pins the rule to that copy's path, so a different folder with the same name is still scanned. For an MCP server, `mcp allow` pins the rule to its URL or command.
+
+3. Edit the lists for anything the commands do not cover, such as URL or command rules.
+
+   ```bash
+   defenseclaw config set asset_policy.mcp.denied --json '[{"url":"https://mcp.example.net/v1","reason":"unknown vendor"}]'
+   ```
+
+4. Remove a rule.
+
+   ```bash
+   defenseclaw skill unblock risky-skill
+   ```
+
+   ```text
+   [skill] Unblocked 'risky-skill' (every connector).
+     It will be scanned on the next check.
+   ```
+
+   `unblock` removes the block or allow rule and clears the runtime state. It does not restore files; use `defenseclaw skill restore`.
+
+Which rule wins is explained under [Which rule wins](#which-rule-wins). A block does not touch an asset that is already running; use `disable` or `quarantine` for that.
+
+#### Check it worked
+
+```bash
+defenseclaw config get asset_policy.skill
+defenseclaw-gateway policy evaluate --target-type skill --target-name risky-skill
+```
+
+The dry run prints `"verdict": "blocked"` for a blocked name.
+
+To block plugins by scan severity at install, see [Block risky plugins at install](/docs/policies/defaults#block-risky-plugins-at-install).
+
 ### Managed devices
 
 On a managed standalone device the admin config is the only source. Every
 writer refuses, and the attempt is recorded in the audit log:
 
 ```text
-Error: This device is managed: add it to asset_policy in the admin config (MDM or management plane)
+This device is managed: the asset_policy block and allow lists are set in the admin config (MDM or management plane)
 ```
 
 The CLI exits with code 3, and `defenseclaw config set` refuses with the
@@ -767,7 +937,9 @@ name, so a later `restore` does not leave the asset blocked. On a managed
 device, which has no `enable` or `restore`, an `allowed` rule for a skill or
 plugin in the admin config clears its install block and runtime disable at
 the next admission or rescan. See
-[Release a blocked or quarantined skill](/docs/enterprise/windows#release-a-blocked-or-quarantined-skill).
+[Release a blocked or quarantined skill](/docs/enterprise/windows).
+
+On managed Windows, the journal keeps an enrolled user's MCP server under its name, connector, user and project. A row whose user cannot be told stays under the name and keeps refusing that server name for every user.
 
 ## Upgrading from config_version 8
 
@@ -789,8 +961,14 @@ rejected in a version 9 file.
 | `data.json` itself | Renamed `data.json.migrated-v9` |
 
 An operator row is an `actions` row whose `install` field is `block` or
-`allow`, unless its reason is a scan verdict (it starts with `auto-block`,
-`post-scan:`, `post-install scan:`, `scan:` or `scan clean or within policy`).
+`allow`, unless its reason is an automatic one. The migration matches the exact forms
+the scanners write: `post-scan: N findings, max=SEVERITY` (also with
+`post-install scan:` or `scan:` in front), `scan clean or within policy`,
+`auto-block: watch detected SEVERITY findings` with an optional scanner
+suffix, and the prefixes `scanner failure (fail-closed): `,
+`quarantine failed: ` and `link removed: `. A reason that only starts with the
+same words, such as free text after `auto-block`, is read as an operator
+reason and moved.
 Each moved row becomes a rule with its name, connector and reason. An allow
 also keeps its `source_path` as a `source_path_contains` pin; a block does not.
 A tool row named `@connector/tool` becomes a rule for `tool` on that connector,
@@ -825,10 +1003,9 @@ device they stay in the table, unchanged.
 ## Related
 
 <Cards>
-  <Card title="Thresholds" href="/docs/policies/thresholds" description="block_at and alert_at: when a guardrail finding blocks a prompt or tool call." />
-  <Card title="Rules and rule packs" href="/docs/policies/rules" description="guardrail.rules, rule packs and custom packs pinned by digest." />
+  <Card title="Scanning and admission" href="/docs/scanning" description="The decision flow in one diagram." />
+  <Card title="Scanners" href="/docs/scanning" description="Skill and MCP scanner settings and the gate." />
   <Card title="Registries" href="/docs/scanning/registries" description="Approved catalogs, deny-by-default and registry_required." />
-  <Card title="Skill scanner" href="/docs/scanning/skill-scanner" description="The scanner behind skill findings and its fail_on_severity gate." />
   <Card title="Gateway API" href="/docs/reference/gateway-api" description="The /enforce and /policy routes." />
   <Card title="Configuration reference" href="/docs/reference/configuration" description="Every key of config.yaml." />
 </Cards>

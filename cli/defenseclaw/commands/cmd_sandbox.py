@@ -88,7 +88,8 @@ _YES = _Flag("yes", "bool", "answer every question with its default", short="y")
 _SESSION_YES = _Flag(
     "yes",
     "bool",
-    "take the defaults at the end of the session (mount: keep the changes; copy: leave them in the sandbox for pull)",
+    "take the defaults at the end of the session (mount: keep the changes; copy: leave them in the sandbox for later "
+    "pull --apply, --branch or --patch-out FILE)",
     short="y",
 )
 
@@ -178,8 +179,7 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             "version and compute driver (on a Mac, the MicroVM driver: e2fsprogs, its signature, "
             "the sandbox identity and resources), bind mounts, telemetry, ports, the DefenseClaw "
             "daemon, harness images, shell wrappers and the organization policy. Exits 1 when a "
-            "check fails (with --output json the result is printed and the exit status is 0; read "
-            '"ok").'
+            "check fails, with --output json too and with --json (both print ok=false)."
         ),
         flags=(
             _OUTPUT,
@@ -195,13 +195,14 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             "Runs the harness in a new sandbox on the current folder: on Linux (the Docker driver) "
             "live-mounted by default with a pre-session snapshot, or a copy with --copy; on macOS "
             "(the MicroVM driver) every run works on a copy. The harness is claude, codex, "
-            "copilot, opencode, kiro, hermes, openhands, omnigent or antigravity (its command, agy, "
+            "copilot, opencode, kiro, hermes or antigravity (its command, agy, "
             "works too; amp, cursor-agent and devin are not verified yet, so they do not run). "
             "Skip-permissions mode is on by default; "
             "--safe keeps the harness's own prompts. The harness gets your terminal; when it exits "
             "you get a summary, a review of changed files that can run code on your machine, and "
             "the choice to keep or undo the changes (from a copy: to bring them back, or leave them "
-            "in the sandbox for pull). Arguments after -- go to the harness. A headless run in the "
+            "in the sandbox for later pull --apply, --branch or --patch-out FILE). Arguments after -- go to the "
+            "harness. A headless run in the "
             "foreground (--prompt, or the harness's own print flag after --) deletes its sandbox when "
             "it ends and nothing is left in it to bring back or undo, as --rm does; --keep (or "
             "openshell.keep_headless) keeps it. Interactive sessions and --detach runs keep their sandbox."
@@ -217,7 +218,8 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             _Flag(
                 "copy",
                 "bool",
-                "work on a copy of the folder with secrets held back; bring changes back with pull",
+                "work on a copy of the folder with secrets held back; bring changes back with pull --apply (or "
+                "--branch or --patch-out FILE)",
             ),
             _Flag("safe", "bool", "keep the harness's own permission prompts (skip-permissions off)"),
             _Flag(
@@ -364,7 +366,9 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             "Stops a sandbox and keeps it for start or connect. When its detached run is still going, "
             "the stop ends it: stop asks first on a terminal (--yes does not). Every stop, this one or "
             "one from the TUI, the macOS app or undo, marks the run interrupted and keeps its log, so "
-            '"sandbox logs" still shows it.'
+            '"sandbox logs" still shows it. A MicroVM\'s disk is synced before its stop; when that sync '
+            "fails the MicroVM keeps running, and stop says what a stop would lose and asks on a terminal "
+            "(--yes does not answer that): --discard-unsynced stops it anyway."
         ),
         args=(_Arg("name"),),
         flags=(
@@ -373,6 +377,11 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
                 "bool",
                 "stop without asking when a detached run or a session in another terminal is still going",
                 short="y",
+            ),
+            _Flag(
+                "discard-unsynced",
+                "bool",
+                "stop a MicroVM whose disk could not be synced first, losing what it wrote since its last sync",
             ),
         ),
     ),
@@ -394,6 +403,12 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
                 "bool",
                 "take a new snapshot even if the folder still has an earlier session's changes "
                 "(undo no longer reverts them)",
+            ),
+            _Flag(
+                "end-vm",
+                "bool",
+                "start a MicroVM whose workload completed or failed though its VM still runs: OpenShell ends "
+                "that VM with no flush first, so what it has not written to its disk is lost",
             ),
         ),
     ),
@@ -618,15 +633,27 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
     ),
     _Cmd(
         ("policy", "allow"),
-        "Add hosts to openshell.egress.allow (used by the balanced and strict profiles)",
+        "Allow a destination under your sandbox policy",
         args=(_Arg("hosts", many=True),),
-        flags=(_Flag("remove", "bool", "remove the hosts from openshell.egress.allow instead"),),
+        flags=(
+            _Flag("remove", "bool", "remove the hosts from openshell.egress.allow instead"),
+            _Flag(
+                "sandbox", "string", "on a managed computer, use this sandbox's policy to check the decision",
+                metavar="NAME",
+            ),
+        ),
     ),
     _Cmd(
         ("policy", "block"),
-        "Add hosts to openshell.egress.block",
+        "Block a destination under your sandbox policy",
         args=(_Arg("hosts", many=True),),
-        flags=(_Flag("remove", "bool", "remove the hosts from openshell.egress.block instead"),),
+        flags=(
+            _Flag("remove", "bool", "remove the hosts from openshell.egress.block instead"),
+            _Flag(
+                "sandbox", "string", "on a managed computer, use this sandbox's policy to check the decision",
+                metavar="NAME",
+            ),
+        ),
     ),
     _Cmd(("pack",), "Inspect sandbox policy packs"),
     _Cmd(("pack", "list"), "List the built-in and custom packs with their sha256 digests", flags=(_OUTPUT, _JSON)),
@@ -693,7 +720,8 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             "/usr/local/libexec/defenseclaw/defenseclaw-sensor-helper, checks that this host's Tetragon serves "
             "a root-owned unix socket (never a TCP address) and that Docker answers, then writes and starts "
             "defenseclaw-sandbox-feed.service. Run it again after an upgrade to update the feed. Refused on a "
-            "managed host, where sandboxes are not supported."
+            "managed host: its sandboxes are the managed deployment's, and this per-user feed installer is not "
+            "part of it."
         ),
     ),
     _Cmd(("kernel-feed", "uninstall"), "Stop and remove the sandbox kernel feed service (as root)"),

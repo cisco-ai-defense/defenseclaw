@@ -154,18 +154,15 @@ func (builder *FamilyBuilder) buildResolvedGeneratedLog(
 	resolvedContract := resolvedSchemaDerivedLogFamilyContract{
 		identity: contract.identity, mandatory: resolved.mandatory,
 	}
-	if err := preflightGeneratedLogRecord(recordInput, resolvedContract); err != nil {
+	checked, err := preflightGeneratedLogRecord(recordInput, resolvedContract)
+	if err != nil {
 		return Record{}, err
 	}
 	recordInput, err = builder.recordInputAt(recordInput, input.timestamp)
 	if err != nil {
 		return Record{}, err
 	}
-	record, err := newSchemaDerivedLogRecord(recordInput, resolvedContract)
-	if err != nil {
-		return Record{}, familyBuildFailure(FamilyBuildRecordRejected)
-	}
-	return record, nil
+	return checked.withOccurrence(recordInput.Timestamp, recordInput.RecordID), nil
 }
 
 func (builder *FamilyBuilder) buildGeneratedTrace(
@@ -328,18 +325,15 @@ func (builder *FamilyBuilder) buildGeneratedTrace(
 	}
 	recordInput.Body = body
 	recordInput.FieldClasses = classes
-	if err := preflightGeneratedRecord(recordInput); err != nil {
+	checked, err := preflightGeneratedRecord(recordInput)
+	if err != nil {
 		return Record{}, err
 	}
 	recordInput, err = builder.recordInputAt(recordInput, input.timestamp)
 	if err != nil {
 		return Record{}, err
 	}
-	record, err := newSchemaDerivedRecord(recordInput)
-	if err != nil {
-		return Record{}, familyBuildFailure(FamilyBuildRecordRejected)
-	}
-	return record, nil
+	return checked.withOccurrence(recordInput.Timestamp, recordInput.RecordID), nil
 }
 
 func activeFamilyTraceConditionFacts(
@@ -459,18 +453,15 @@ func (builder *FamilyBuilder) buildGeneratedMetric(
 	}
 	recordInput.InstrumentData = instrumentData
 	recordInput.FieldClasses = classes
-	if err := preflightGeneratedRecord(recordInput); err != nil {
+	checked, err := preflightGeneratedRecord(recordInput)
+	if err != nil {
 		return Record{}, err
 	}
 	recordInput, err = builder.recordInputAt(recordInput, input.timestamp)
 	if err != nil {
 		return Record{}, err
 	}
-	record, err := newSchemaDerivedRecord(recordInput)
-	if err != nil {
-		return Record{}, familyBuildFailure(FamilyBuildRecordRejected)
-	}
-	return record, nil
+	return checked.withOccurrence(recordInput.Timestamp, recordInput.RecordID), nil
 }
 
 func (builder *FamilyBuilder) ready() bool {
@@ -553,25 +544,37 @@ func familyRecordInput(envelope FamilyEnvelopeInput, identity EventIdentity) Rec
 	return result
 }
 
-func preflightGeneratedRecord(input RecordInput) error {
+// preflightGeneratedRecord builds the record with the largest occurrence a
+// record can get (the latest timestamp, a record ID of MaxRecordIDBytes
+// backslashes, each of which encodes as two bytes), before an occurrence ID
+// is spent. The occurrence is the only input the real record adds, and a
+// valid one never encodes longer (validateRequiredBoundedText allows no
+// control character, the one byte that encodes longer than a backslash), so
+// the checked record with the real occurrence (Record.withOccurrence) is the
+// record a second build would make, byte for byte. Building it once halves
+// the record work on every hook call (rel-1-0-6 GAP-0381).
+func preflightGeneratedRecord(input RecordInput) (Record, error) {
 	input.Timestamp = time.Date(9999, 12, 31, 23, 59, 59, 999_999_999, time.UTC)
 	input.RecordID = strings.Repeat("\\", MaxRecordIDBytes)
-	if _, err := newSchemaDerivedRecord(input); err != nil {
-		return familyBuildFailure(FamilyBuildRecordRejected)
+	record, err := newSchemaDerivedRecord(input)
+	if err != nil {
+		return Record{}, familyBuildFailure(FamilyBuildRecordRejected)
 	}
-	return nil
+	return record, nil
 }
 
+// preflightGeneratedLogRecord is preflightGeneratedRecord for a log family.
 func preflightGeneratedLogRecord(
 	input RecordInput,
 	contract resolvedSchemaDerivedLogFamilyContract,
-) error {
+) (Record, error) {
 	input.Timestamp = time.Date(9999, 12, 31, 23, 59, 59, 999_999_999, time.UTC)
 	input.RecordID = strings.Repeat("\\", MaxRecordIDBytes)
-	if _, err := newSchemaDerivedLogRecord(input, contract); err != nil {
-		return familyBuildFailure(FamilyBuildRecordRejected)
+	record, err := newSchemaDerivedLogRecord(input, contract)
+	if err != nil {
+		return Record{}, familyBuildFailure(FamilyBuildRecordRejected)
 	}
-	return nil
+	return record, nil
 }
 
 // recordInputAt is used only after a private accepted-record constructor has

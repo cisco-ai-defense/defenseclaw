@@ -12,6 +12,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -68,6 +69,19 @@ func alignEnterpriseACPCredentialOwner(dataDir, principal, client, agent, profil
 	serviceSID, err := enterpriseWindowsGatewayServiceSID()
 	if err != nil {
 		return err
+	}
+	// On standalone a credential folder or file another account can write or
+	// owns is refused and named, never re-stamped in place (GAP-0651: the
+	// stamp used to give such a folder a trusted descriptor back).
+	for _, directory := range []string{filepath.Join(dataDir, "acp"), filepath.Dir(path), filepath.Dir(indexPath)} {
+		if refused := managed.RefuseStandaloneInPlaceRepair(directory, managed.ObjectRuntimeDirectory); refused != nil {
+			return fmt.Errorf("enterprise ACP: the service credential directory was not hardened: %w", refused)
+		}
+	}
+	for _, file := range []string{path, indexPath} {
+		if refused := managed.RefuseStandaloneInPlaceRepair(file, managed.ObjectRuntimeSecretFile); refused != nil {
+			return fmt.Errorf("enterprise ACP: the service credential was not hardened: %w", refused)
+		}
 	}
 	for _, directory := range []string{filepath.Join(dataDir, "acp"), filepath.Dir(path), filepath.Dir(indexPath)} {
 		if err := setEnterpriseWindowsRuntimeProtection(directory, owner, serviceSID, true); err != nil {

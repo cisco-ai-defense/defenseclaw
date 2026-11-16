@@ -226,8 +226,9 @@ func ExactRemoteArtifactDownload(facts Facts) (PathFact, bool) {
 	return exactSingleCommandPath(facts, command.ID, PathAccessWrite)
 }
 
-// ExactRemoteArtifactDownloadIntent returns one exact literal-public-IP
-// download from an unconditional top-level command inside a larger action.
+// ExactRemoteArtifactDownloadIntent returns one exact remote download (a
+// literal public IP or an external hostname, remoteDownloadIntentPath) from
+// an unconditional top-level command inside a larger action.
 // Unlike ExactRemoteArtifactDownload, this detection-only helper permits
 // unrelated sibling commands. It rejects multiple candidate downloads and
 // any sibling write, append, move, or delete of the downloaded path because
@@ -237,7 +238,7 @@ func ExactRemoteArtifactDownloadIntent(facts Facts) (PathFact, bool) {
 }
 
 // BoundedRemoteArtifactDownloadIntent returns the exact artifact path named by
-// one literal-public-IP curl/wget candidate even when shell short-circuiting
+// one remote curl/wget candidate even when shell short-circuiting
 // makes reachability uncertain. It is detection-only evidence: callers must
 // join it to a later exact use of the same path and must never authorize a
 // synchronous deny from this fact alone.
@@ -245,37 +246,137 @@ func BoundedRemoteArtifactDownloadIntent(facts Facts) (PathFact, bool) {
 	return remoteArtifactDownloadIntent(facts, true)
 }
 
+// RemoteArtifactDownloadIntentHost returns the normalized source host of the
+// download BoundedRemoteArtifactDownloadIntent selects, so a caller can tell
+// whether the user asked for that download (#1390).
+func RemoteArtifactDownloadIntentHost(facts Facts) (string, bool) {
+	_, host, ok := remoteArtifactDownloadIntentSource(facts, true)
+	return host, ok
+}
+
 func remoteArtifactDownloadIntent(facts Facts, allowUncertainControlFlow bool) (PathFact, bool) {
-	if facts.Parse.Dialect != DialectPOSIX {
-		return PathFact{}, false
+	artifact, _, ok := remoteArtifactDownloadIntentSource(facts, allowUncertainControlFlow)
+	return artifact, ok
+}
+
+func remoteArtifactDownloadIntentSource(facts Facts, allowUncertainControlFlow bool) (PathFact, string, bool) {
+	// A generic shell call such as curl -o C:/x URL reads as CMD (curl.exe
+	// with a drive operand); its drive file is the same artifact a later
+	// Git Bash run names (rel-1-0-6:GAP-0077, agent-gateway route).
+	if facts.Parse.Dialect != DialectPOSIX && facts.Parse.Dialect != DialectCMD {
+		return PathFact{}, "", false
 	}
 	var selected PathFact
+	selectedHost := ""
 	selectedCommandID := int64(0)
 	count := 0
 	for _, command := range facts.Commands {
 		if command.ControlFlowUncertain && !allowUncertainControlFlow {
 			continue
 		}
-		artifact, ok := staticRemoteIPDownloadPath(facts, command)
+		artifact, host, ok := remoteDownloadIntentPath(facts, command)
 		if !ok {
 			continue
 		}
-		selected = artifact
+		selected, selectedHost = artifact, host
 		selectedCommandID = command.ID
 		count++
 	}
 	if count != 1 {
-		return PathFact{}, false
+		return PathFact{}, "", false
 	}
 	for _, command := range facts.Commands {
 		if command.ID == selectedCommandID {
 			continue
 		}
-		if commandMutatesResolvedPath(facts, command.ID, selected.Resolved) {
-			return PathFact{}, false
+		if commandMutatesIntentArtifact(facts, command.ID, selected) {
+			return PathFact{}, "", false
 		}
 	}
-	return selected, true
+	return selected, selectedHost, true
+}
+
+// remoteDownloadIntentPath is the detection-only download step of
+// chain.download_then_execute_same_artifact (#1390): one static curl or wget
+// that fetches from one remote host into one file. A remote host is a
+// literal public IP or a hostname that is not a local, internal or reserved
+// name (remoteDownloadHostname). The file may be named relative to the
+// call's directory: its resolved path is the join identity, as on the
+// execution side. staticRemoteIPDownloadPath stays the narrower same-action
+// proof.
+func remoteDownloadIntentPath(facts Facts, command CommandFact) (PathFact, string, bool) {
+	if !staticTopLevelProcess(command) || !onlyNullOutputRedirects(command.Redirects) ||
+		(command.Program != "curl" && command.Program != "wget") ||
+		!hasFactOperation(command, OperationFetch) {
+		return PathFact{}, "", false
+	}
+	host := ""
+	networkCount := 0
+	for _, candidate := range facts.Network {
+		if candidate.CommandID != command.ID || candidate.Action != NetworkDownload {
+			continue
+		}
+		if candidate.TargetKind != NetworkTargetSingleHost || !remoteDownloadSource(candidate) {
+			return PathFact{}, "", false
+		}
+		host = candidate.NormalizedHost
+		networkCount++
+	}
+	if networkCount != 1 {
+		return PathFact{}, "", false
+	}
+	var artifact PathFact
+	pathCount := 0
+	for _, candidate := range facts.Paths {
+		if candidate.CommandID != command.ID || candidate.Access != PathAccessWrite ||
+			candidate.Flavor == PathFlavorDevice {
+			continue
+		}
+		placed, ok := intentArtifact(facts, candidate)
+		if !ok && command.Dialect == DialectCMD {
+			placed, ok = cmdDriveArtifact(candidate)
+		}
+		if !ok {
+			return PathFact{}, "", false
+		}
+		artifact = placed
+		pathCount++
+	}
+	return artifact, host, pathCount == 1
+}
+
+// remoteDownloadSource reports a download source outside the machine and its
+// local network: a literal public IP, or a hostname (whose scope stays
+// unknown, since facts never resolve DNS) that remoteDownloadHostname admits.
+func remoteDownloadSource(candidate NetworkFact) bool {
+	host := strings.Trim(candidate.NormalizedHost, "[]")
+	if net.ParseIP(host) != nil {
+		return candidate.Scope == NetworkScopePublic
+	}
+	return candidate.Scope == NetworkScopeUnknown && remoteDownloadHostname(host)
+}
+
+// internalHostSuffixes are name suffixes for local, internal or reserved
+// networks (RFC 6761, 6762, 8375 and common private zones). A download from
+// such a mirror is not a remote source.
+var internalHostSuffixes = []string{
+	".localhost", ".local", ".localdomain", ".internal", ".intranet", ".lan",
+	".home", ".home.arpa", ".corp", ".private", ".test", ".invalid",
+}
+
+// remoteDownloadHostname reports a fully qualified hostname that is not
+// single-label (an internal short name) and not under internalHostSuffixes.
+func remoteDownloadHostname(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if host == "" || !strings.Contains(host, ".") {
+		return false
+	}
+	for _, suffix := range internalHostSuffixes {
+		if host == suffix[1:] || strings.HasSuffix(host, suffix) {
+			return false
+		}
+	}
+	return true
 }
 
 // ExactArtifactDecodeTransition returns the exact input and output of one
@@ -355,7 +456,7 @@ func ExactArtifactExecutionIntent(facts Facts) (PathFact, bool) {
 		if command.ID == selectedCommandID {
 			continue
 		}
-		if commandMutatesResolvedPath(facts, command.ID, selected.Resolved) {
+		if commandMutatesIntentArtifact(facts, command.ID, selected) {
 			return PathFact{}, false
 		}
 	}
@@ -428,7 +529,7 @@ func BoundedArtifactExecutionIntent(facts Facts) (PathFact, bool) {
 	}
 	for _, command := range facts.Commands {
 		if command.ID != selectedCommandID &&
-			commandMutatesResolvedPath(facts, command.ID, selected.Resolved) {
+			commandMutatesIntentArtifact(facts, command.ID, selected) {
 			return PathFact{}, false
 		}
 	}
@@ -455,12 +556,7 @@ func exactLiteralArgumentPath(facts Facts, command CommandFact, index int) (Path
 		facts.ActiveHome,
 		[]CommandFact{command},
 	)
-	candidate := candidates[0]
-	if candidate.Flavor != PathFlavorPOSIX || candidate.Resolved == "" ||
-		!strings.HasPrefix(candidate.Resolved, "/") {
-		return PathFact{}, false
-	}
-	return candidate, true
+	return intentArtifact(facts, candidates[0])
 }
 
 func exactSingleArtifactCommand(facts Facts, operation OperationKind) (CommandFact, bool) {
@@ -498,14 +594,84 @@ func exactSingleResolvedCommandPath(facts Facts, commandID int64, access PathAcc
 		if candidate.CommandID != commandID || candidate.Access != access {
 			continue
 		}
-		if candidate.Resolved == "" || candidate.Flavor != PathFlavorPOSIX ||
-			!strings.HasPrefix(candidate.Resolved, "/") {
+		placed, ok := intentArtifact(facts, candidate)
+		if !ok {
 			return PathFact{}, false
 		}
-		selected = candidate
+		selected = placed
 		count++
 	}
 	return selected, count == 1
+}
+
+// intentArtifact is the artifact a detection-only chain intent (#1390) may
+// name for a POSIX-shell operand: an absolute resolved path; a literal
+// drive-letter spelling (C:/x, C:\\x) that Git Bash on Windows opens as that
+// drive file although the POSIX reading leaves it relative
+// (rel-1-0-6:GAP-0182); or a literal relative operand of a call made in a
+// native Windows directory, which Git Bash opens under that directory, so it
+// is returned with that Windows path as Resolved (rel-1-0-6:GAP-0212).
+// Whether a drive path is an exact join identity is the caller's choice (the
+// gateway knows its host OS); the facts themselves are not changed.
+func intentArtifact(facts Facts, candidate PathFact) (PathFact, bool) {
+	if candidate.Flavor != PathFlavorPOSIX {
+		return PathFact{}, false
+	}
+	if strings.HasPrefix(candidate.Resolved, "/") || DriveLetterPath(candidate.Value) ||
+		DriveLetterPath(candidate.Resolved) {
+		// A drive path the facts already resolved under the caller's
+		// Windows home or directory is kept as it is.
+		return candidate, true
+	}
+	value := candidate.Value
+	if candidate.Resolved != "" || value == "" || strings.HasPrefix(value, "/") ||
+		strings.HasPrefix(value, "~") || syntaxForCWD(facts.CWD) != pathSyntaxWindows {
+		return PathFact{}, false
+	}
+	_, _, resolved, ok := derivePOSIXPathUnderWindowsCWD(value, facts.CWD, "", pathExpansionPolicy{})
+	if !ok || !DriveLetterPath(resolved) {
+		return PathFact{}, false
+	}
+	candidate.Resolved = resolved
+	return candidate, true
+}
+
+// cmdDriveArtifact is the download artifact of a CMD-dialect curl or wget:
+// an absolute Windows drive path the facts resolved (rel-1-0-6:GAP-0077).
+func cmdDriveArtifact(candidate PathFact) (PathFact, bool) {
+	if candidate.Flavor != PathFlavorWindows || !candidate.Absolute ||
+		!DriveLetterPath(candidate.Resolved) {
+		return PathFact{}, false
+	}
+	return candidate, true
+}
+
+// DriveLetterPath reports a literal drive-letter path spelling: one ASCII
+// letter, a colon, then a forward or back slash (C:/x, c:\x).
+func DriveLetterPath(value string) bool {
+	return len(value) >= 3 && isASCIILetter(value[0]) && value[1] == ':' &&
+		(value[2] == '/' || value[2] == '\\')
+}
+
+// commandMutatesIntentArtifact is commandMutatesResolvedPath for an intent
+// artifact. An operand the POSIX reading left unresolved (a drive spelling,
+// or a relative name under a Windows directory) is also matched by its
+// literal text, so a sibling write of the same name still breaks the join.
+func commandMutatesIntentArtifact(facts Facts, commandID int64, artifact PathFact) bool {
+	if artifact.Resolved != "" && commandMutatesResolvedPath(facts, commandID, artifact.Resolved) {
+		return true
+	}
+	for _, candidate := range facts.Paths {
+		if candidate.CommandID != commandID || candidate.Resolved != "" ||
+			candidate.Value != artifact.Value {
+			continue
+		}
+		switch candidate.Access {
+		case PathAccessWrite, PathAccessAppend, PathAccessDelete:
+			return true
+		}
+	}
+	return false
 }
 
 func hasExactFileProcessFileFlow(facts Facts, commandID int64) bool {

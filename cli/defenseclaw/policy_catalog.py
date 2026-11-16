@@ -334,16 +334,11 @@ def active_policy_name(policy_dir: str | os.PathLike[str] | None, cfg: Any = Non
 
     current = keys(cfg)
     sources = _policy_sources(policy_dir)
-    if (
-        getattr(cfg, "admission", None) == AdmissionConfig()
-        and current[1:] == ("", "", "full", True, 60)
-        and "default" in sources
-    ):
-        return "default"
-    for stem, (path, _bundled) in sorted(sources.items()):
-        data = load_policy_yaml(path)
+
+    def holds(stem: str) -> bool:
+        data = load_policy_yaml(sources[stem][0])
         if data is None or not is_named_policy(data):
-            continue
+            return False
         preset = copy.copy(cfg)
         preset.guardrail = copy.copy(cfg.guardrail)
         preset.watch = copy.copy(cfg.watch)
@@ -352,16 +347,96 @@ def active_policy_name(policy_dir: str | os.PathLike[str] | None, cfg: Any = Non
             _apply_policy_guardrail(preset, data)
             watch = data.get("watch") or {}
             if not isinstance(watch, dict):
-                continue
+                return False
             if "rescan_enabled" in watch:
                 preset.watch.rescan_enabled = watch["rescan_enabled"]
             if "rescan_interval_min" in watch:
                 preset.watch.rescan_interval_min = watch["rescan_interval_min"]
         except (TypeError, ValueError):
-            continue
-        if keys(preset) == current:
+            return False
+        return keys(preset) == current
+
+    # Two presets can hold the same values (a policy created from strict is
+    # strict until edited). The one `policy activate` named last wins while
+    # the config still holds it (the data-dir record, then the audit trail
+    # of releases that kept no record); otherwise the first match by name,
+    # as before (GAP-1022).
+    activated = _activated_policy_name(cfg)
+    if activated in sources and holds(activated):
+        return activated
+    # Releases before 1.0.6 recorded no name, but their `policy activate`
+    # wrote a policy-activate audit event: the newest one that the config
+    # still holds is the policy the user activated (GAP-1341).
+    for audited in _audited_activations(cfg):
+        if audited in sources and holds(audited):
+            return audited
+    if (
+        getattr(cfg, "admission", None) == AdmissionConfig()
+        and current[1:] == ("", "", "full", True, 60)
+        and "default" in sources
+    ):
+        return "default"
+    for stem in sorted(sources):
+        if holds(stem):
             return stem
     return ""
+
+
+#: The policy `policy activate` applied last, beside config.yaml in the data
+#: directory. It only breaks a tie between presets with the same values.
+_ACTIVATED_POLICY_FILE = "policy_activated.json"
+
+
+def record_activated_policy(cfg: Any, name: str) -> None:
+    """Remember *name* as the policy `policy activate` applied (best effort)."""
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if not data_dir or not name:
+        return
+    from defenseclaw.file_permissions import atomic_write_private_bytes
+
+    body = json.dumps({"version": 1, "name": name}).encode("utf-8")
+    try:
+        atomic_write_private_bytes(os.path.join(data_dir, _ACTIVATED_POLICY_FILE), body)
+    except OSError:
+        pass  # the list then falls back to the first preset with these values
+
+
+def _audited_activations(cfg: Any, limit: int = 20) -> list[str]:
+    """Policy names of the newest policy-activate audit events, newest first.
+
+    Read-only and best effort: no audit database, a locked one or an old
+    schema gives an empty list, and the list then falls back to the first
+    preset with these values.
+    """
+    audit_db = str(getattr(cfg, "audit_db", "") or "")
+    if not audit_db or not os.path.isfile(audit_db):
+        return []
+    from defenseclaw.audit_actions import ACTION_POLICY_ACTIVATE
+    from defenseclaw.db import Store
+
+    try:
+        store = Store.open_read_only(audit_db)
+    except Exception:  # noqa: BLE001 - sqlite3.Error, ValueError, OSError: the audit trail is only a hint
+        return []
+    try:
+        return store.recent_action_targets(ACTION_POLICY_ACTIVATE, limit)
+    except Exception:  # noqa: BLE001 - same: never fail `policy list` over the hint
+        return []
+    finally:
+        store.close()
+
+
+def _activated_policy_name(cfg: Any) -> str:
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if not data_dir:
+        return ""
+    try:
+        with open(os.path.join(data_dir, _ACTIVATED_POLICY_FILE), encoding="utf-8") as stream:
+            record = json.loads(stream.read(4096))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return ""
+    name = record.get("name") if isinstance(record, dict) and record.get("version") == 1 else None
+    return name if isinstance(name, str) else ""
 
 
 def _policy_sources(policy_dir: str | os.PathLike[str] | None) -> dict[str, tuple[str, bool]]:
@@ -496,9 +571,15 @@ def normalize_pack_path(path: str) -> str:
     return os.path.abspath(os.path.expanduser(raw))
 
 
-def _same_path(a: str, b: str) -> bool:
+def same_pack_path(a: str, b: str) -> bool:
     if not a or not b:
         return False
+    # One directory can have several spellings: a symlink, or another case
+    # on a case-insensitive volume (GAP-0476). The file system decides.
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        pass
     try:
         return os.path.realpath(a) == os.path.realpath(b)
     except OSError:
@@ -522,7 +603,7 @@ def _preset_candidates(cfg: Any, preset: str) -> list[str]:
 def pack_name_for_path(cfg: Any, path: str) -> tuple[str, str]:
     """Return ``(name, kind)`` for a rule-pack directory."""
     for preset in RULE_PACK_PRESETS:
-        if any(_same_path(path, cand) for cand in _preset_candidates(cfg, preset)):
+        if any(same_pack_path(path, cand) for cand in _preset_candidates(cfg, preset)):
             return preset, "preset"
     if is_protected_pack_path(path):
         # protected-<scope>/<profile>: name it after the scope folder.
@@ -542,18 +623,156 @@ def _guardrail(cfg: Any) -> Any:
     return getattr(cfg, "guardrail", None)
 
 
+# The guardrail.custom_packs pin of a pack with no files (the digest of an empty
+# file set): it proves no content (Go ``config.EmptyRulePackFilesDigest``).
+EMPTY_RULE_PACK_FILES_DIGEST = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+
+def custom_pack_dir(cfg: Any, entry: Any) -> str:
+    """The folder a ``guardrail.custom_packs`` entry names, "" when its path is blank.
+
+    An absolute path as written, a relative one against the absolute directory
+    of the config file recorded when the config was loaded (``config.load``),
+    never the working directory read now (Go ``customPackPathIn``). A config
+    built in code records none and takes the directory of its config path,
+    made absolute at this call. ``~`` is not expanded: the gateway does not.
+    """
+    raw = str(getattr(entry, "path", "") or "").strip()
+    if not raw:
+        return ""
+    if os.path.isabs(raw):
+        return os.path.normpath(raw)
+    base = str(getattr(_guardrail(cfg), "_custom_pack_base", "") or "")
+    if not base:
+        from defenseclaw.config import config_path_for_data_dir
+
+        base = os.path.dirname(os.path.abspath(str(config_path_for_data_dir(str(getattr(cfg, "data_dir", "") or "")))))
+    return os.path.abspath(os.path.join(base, raw))
+
+
+def _loader_verdict(path: str) -> tuple[str, str] | None:
+    """The Go rule loader verdict on pack folder *path*.
+
+    ``("", files_digest)`` for a pack it loads (``files_digest`` is the bare
+    hex ``guardrail.custom_packs`` pins as ``sha256:<hex>``), ``(reason, "")``
+    for a folder it refuses, ``None`` when the verdict is unavailable (no
+    trusted gateway binary, or a helper that does not answer). Python never
+    judges pack content itself: ``defenseclaw-gateway rulepack validate`` runs
+    the loader the gateway enforces with (``rulepack_validation``). The verdict
+    is asked on every read and never kept: any file or folder change, whatever
+    its size or time, reaches the next reader.
+    """
+    from defenseclaw import rulepack_validation
+
+    try:
+        result = rulepack_validation.validate_rule_pack(path)
+    except Exception:  # noqa: BLE001 - an unavailable helper is "unverified", never "usable".
+        return None
+    if result.valid:
+        return "", str((result.summary or {}).get("files_digest", "") or "").lower()
+    issue = result.error
+    return (f"{issue.code} at {issue.path}: {issue.reason}" if issue else "not a valid rule pack"), ""
+
+
+class StalePinProblem(str):
+    """The config error of an entry whose valid pack no longer hashes to its pin.
+
+    An integrity refusal, not a fallback (Go ``config.StalePinError``): the
+    gateway refuses the pack until the pin is reviewed and corrected, and no
+    built-in pack is enforced in its place.
+    """
+
+
+def custom_pack_check(cfg: Any, name: str) -> tuple[str, bool]:
+    """``(problem, verified)`` for ``guardrail.custom_packs.<name>``.
+
+    *problem* is the config error of the entry, "" when usable or not an
+    entry: Go ``Config.CustomRulePackError``. It is the structural check (a
+    path that is empty after trimming, an empty-file-set pin, a path that is
+    not a readable folder) and then the Go rule loader verdict: the folder
+    must load as a pack whose files hash to the pin (a missing pin matches
+    nothing). *verified* is False when the entry looks usable but the loader
+    verdict is unavailable; a caller that grants a posture from the pack must
+    treat that as strict, as the standalone hook does where the loader is not
+    linked (``HookPolicyTierForConnector``). Secure Client keeps its loader
+    own refusals: ("", True).
+    """
+    guardrail = _guardrail(cfg)
+    entry = (getattr(guardrail, "custom_packs", None) or {}).get(name)
+    if entry is None:
+        return "", True
+    secure_client = getattr(guardrail, "secure_client_hook_fail_modes", None)
+    if callable(secure_client) and secure_client():
+        return "", True
+    key = f"guardrail.custom_packs.{name}"
+    path = custom_pack_dir(cfg, entry)
+    pin = str(getattr(entry, "digest", "") or "").strip()
+    if not path:
+        return f"{key}.path is empty", True
+    if pin.lower() == EMPTY_RULE_PACK_FILES_DIGEST:
+        return f"{key}.digest pins an empty file set", True
+    if not os.path.isdir(path):
+        return f"{key}.path {path!r} is not a folder", True
+    try:
+        os.listdir(path)
+    except OSError as exc:
+        return f"{key}.path cannot be read: {exc.strerror or exc}", True
+    verdict = _loader_verdict(path)
+    if verdict is None:
+        return "", False
+    reason, files_digest = verdict
+    if reason:
+        return f"{key}.path {path!r} is not a valid rule pack: {reason}", True
+    if pin.lower() != f"sha256:{files_digest}":
+        return (
+            StalePinProblem(
+                f"the files in {path!r} hash to sha256:{files_digest}, which does not match {key}.digest; "
+                "review the pack, then pin that digest"
+            ),
+            True,
+        )
+    return "", True
+
+
+def custom_pack_problem(cfg: Any, name: str) -> str:
+    """The config error of ``guardrail.custom_packs.<name>`` (:func:`custom_pack_check`)."""
+    return custom_pack_check(cfg, name)[0]
+
+
+def custom_pack_falls_back(cfg: Any, name: str) -> bool:
+    """Whether the entry has a config error whose selection loads its built-in pack.
+
+    A stale pin does not (Go ``Config.CustomRulePackFallsBack``).
+    """
+    problem = custom_pack_problem(cfg, name)
+    return bool(problem) and not isinstance(problem, StalePinProblem)
+
+
+def builtin_rule_pack_fallback(name: str) -> str:
+    """The built-in pack a broken ``custom_packs`` entry's selection loads.
+
+    Its own name when built in (a custom pack never shadows a preset), else ``default``.
+    """
+    return name if name in RULE_PACK_PRESETS else "default"
+
+
 def configured_pack_dir(cfg: Any, block: Any) -> str:
     """The directory a guardrail scope block selects, "" when it selects none.
 
     A scope selects its ``rule_pack``: a preset name or a
     ``guardrail.custom_packs`` key (``config.ResolveRulePackDir`` in the gateway).
+    A custom entry with a config error (:func:`custom_pack_problem`) loads its
+    built-in fallback pack, as the gateway does, and never shadows a preset;
+    a stale pin keeps its folder, which the gateway refuses.
     """
     name = str(getattr(block, "rule_pack", "") or "").strip()
     if not name:
         return ""
     custom = (getattr(_guardrail(cfg), "custom_packs", None) or {}).get(name)
     if custom is not None:
-        return normalize_pack_path(str(getattr(custom, "path", "") or ""))
+        if custom_pack_falls_back(cfg, name):
+            return preset_pack_dir(cfg, builtin_rule_pack_fallback(name))
+        return custom_pack_dir(cfg, custom)
     if name in RULE_PACK_PRESETS:
         return preset_pack_dir(cfg, name)
     return ""
@@ -624,7 +843,7 @@ def discover_rule_packs(cfg: Any) -> list[RulePack]:
     entries: list[tuple[str, str, str]] = []  # (name, path, kind)
 
     def _add(name: str, path: str, kind: str) -> None:
-        if any(_same_path(path, existing) or path == existing for _, existing, _ in entries):
+        if any(same_pack_path(path, existing) or path == existing for _, existing, _ in entries):
             return
         entries.append((name, path, kind))
 
@@ -657,7 +876,7 @@ def discover_rule_packs(cfg: Any) -> list[RulePack]:
 
     out: list[RulePack] = []
     for name, path, kind in entries:
-        used_by = tuple(who for who, used in users if _same_path(used, path) or used == path)
+        used_by = tuple(who for who, used in users if same_pack_path(used, path) or used == path)
         out.append(RulePack(name=name, path=path, kind=kind, used_by=used_by))
     return out
 
@@ -1126,7 +1345,7 @@ def rule_families(pack_dir: str) -> list[RuleFamily]:
     default_dir = _bundled_default_pack_dir()
     for category, declared, enabled in _family_counts(default_dir):
         families[category] = (declared, enabled)
-    if pack_dir and not _same_path(pack_dir, default_dir):
+    if pack_dir and not same_pack_path(pack_dir, default_dir):
         for category, declared, enabled in _family_counts(pack_dir):
             if enabled:
                 families[category] = (declared, enabled)

@@ -17,7 +17,6 @@ import (
 	observabilityrouter "github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/version"
-	"github.com/google/uuid"
 )
 
 const eventRouterApprovalV8Producer = "gateway.event_router.approval"
@@ -127,11 +126,12 @@ func (r *EventRouter) emitApprovalResolutionV8(
 		return eventRouterApprovalFailed
 	}
 	outcome := observability.OutcomeDenied
-	if observation.result == "approved" {
+	switch observation.result {
+	case "approved":
 		outcome = observability.OutcomeApproved
-	} else if observation.result == "cancelled" {
+	case "cancelled":
 		outcome = observability.OutcomeCancelled
-	} else if observation.result == "expired" {
+	case "expired":
 		outcome = observability.OutcomeTimedOut
 	}
 	input := observability.SpanApprovalResolveInput{
@@ -300,7 +300,7 @@ func (r *EventRouter) emitEventRouterApprovalLogV8(
 			}
 			builder, buildErr := observability.NewRecordBuilder(
 				observability.ClockFunc(func() time.Time { return observedAt }),
-				observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+				observability.TimeOrderedOccurrenceIDs,
 			)
 			if buildErr != nil {
 				return observability.Record{}, buildErr
@@ -318,7 +318,7 @@ func (r *EventRouter) emitEventRouterApprovalLogV8(
 		}
 		builder, buildErr := observability.NewFamilyBuilder(
 			observability.ClockFunc(func() time.Time { return observedAt }),
-			observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+			observability.TimeOrderedOccurrenceIDs,
 		)
 		if buildErr != nil {
 			return observability.Record{}, buildErr
@@ -475,7 +475,7 @@ func (r *EventRouter) recordEventRouterApprovalMetricsV8(
 func eventRouterApprovalMetricBuilder(observedAt time.Time) (*observability.FamilyBuilder, error) {
 	return observability.NewFamilyBuilder(
 		observability.ClockFunc(func() time.Time { return observedAt }),
-		observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+		observability.TimeOrderedOccurrenceIDs,
 	)
 }
 

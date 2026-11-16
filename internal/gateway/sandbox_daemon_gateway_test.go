@@ -20,9 +20,11 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,8 +37,17 @@ import (
 // the linger after its last ready passed, so the next account gets the one
 // gateway port at once, not when the daemon idles out (GAP-0465). A running
 // sandbox keeps it, and another account's gateway is not this daemon's.
+//
+// GAP-1062: under the 16-shard race load the last idle pass found the
+// lifecycle still held by the daemon's own pass at start, or the gateway's
+// foreign sandbox sweep (a reconcile of the manager, which its own loop
+// may hold) cut short, and stopped nothing. The test now waits out the
+// pass at start (settle), and the sweep, which other tests cover, finds no
+// foreign sandbox.
 func TestSandboxDaemonStopsGatewayWhenNoSandboxRuns(t *testing.T) {
-	f := newSandboxDaemonFixture(t)
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		o.sweepForeign = func(context.Context) (bool, error) { return false, nil }
+	})
 	f.run(t)
 	ctx := context.Background()
 	f.os.holder.Store(int64(os.Getuid()))
@@ -60,9 +71,168 @@ func TestSandboxDaemonStopsGatewayWhenNoSandboxRuns(t *testing.T) {
 	}
 }
 
+// A completed stop or delete hands the shared port to the next account
+// before returning, even if the last preflight was less than a minute ago.
+func TestSandboxDaemonHandoverAfterLifecycle(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	f.run(t)
+	f.os.holder.Store(int64(os.Getuid()))
+	f.d.openShellUsed.Store(time.Now().UnixNano())
+	f.d.stops.Store(1)
+	f.running.Store(1)
+	f.d.handoverOpenShell(context.Background())
+	if n := f.os.stopped.Load(); n != 0 {
+		t.Fatalf("stopped under a running sandbox: %d", n)
+	}
+	f.running.Store(0)
+	f.d.handoverOpenShell(context.Background())
+	if n := f.os.stopped.Load(); n != 1 {
+		t.Fatalf("idle gateway was not handed over: %d", n)
+	}
+}
+
+// GAP-0237: a foreign sandbox that foreign_sandboxes: alert leaves running
+// keeps an idle gateway only while it runs: the daemon looks again soon and
+// stops the gateway once it ended. A stop or delete of the account's last
+// sandbox does not wait for it at all: the sweep records it and the gateway
+// stops with it, within the sweep's bound, so the next account can start.
+func TestSandboxDaemonForeignAlertSandboxDoesNotHoldTheHandover(t *testing.T) {
+	prev := foreignRecheckEvery
+	foreignRecheckEvery = 20 * time.Millisecond
+	t.Cleanup(func() { foreignRecheckEvery = prev })
+	var foreign atomic.Bool
+	var sweeps atomic.Int32
+	foreign.Store(true)
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		o.sweepForeign = func(context.Context) (bool, error) {
+			sweeps.Add(1)
+			return foreign.Load(), nil
+		}
+	})
+	f.run(t)
+	ctx := context.Background()
+	f.os.holder.Store(int64(os.Getuid()))
+	f.d.openShellUsed.Store(time.Now().Add(-2 * openShellGatewayLinger).UnixNano())
+	if f.d.check(ctx); f.os.stopped.Load() != 0 || sweeps.Load() == 0 {
+		t.Fatalf("an idle check stopped the gateway of a running foreign sandbox: stopped %d, sweeps %d", f.os.stopped.Load(), sweeps.Load())
+	}
+	foreign.Store(false)
+	deadline := time.Now().Add(5 * time.Second)
+	for f.os.stopped.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if f.os.stopped.Load() != 1 {
+		t.Fatal("the gateway stayed up after the foreign sandbox ended")
+	}
+
+	foreign.Store(true)
+	f.os.holder.Store(int64(os.Getuid()))
+	f.d.openShellUsed.Store(time.Now().UnixNano())
+	f.d.stops.Store(1)
+	start := time.Now()
+	f.d.handoverOpenShell(ctx)
+	if n := f.os.stopped.Load(); n != 2 {
+		t.Fatalf("the hand-over kept the gateway for a foreign sandbox: stopped %d", n)
+	}
+	if took := time.Since(start); took > foreignSweepTimeout+15*time.Second {
+		t.Fatalf("the hand-over took %s", took)
+	}
+	f.d.stops.Store(0)
+}
+
+// TestSandboxDaemonChecksAgainRightBeforeItStopsTheGateway: the idle stop
+// of the account's gateway counted its sandboxes once, then swept the
+// gateway, which reads OpenShell's sandboxes afresh, and stopped it: a
+// sandbox another OpenShell client started between the count and the
+// sweep went down with it, and so did every sandbox when the sweep could
+// not read OpenShell at all. Now the count is made again after the sweep,
+// under the same lifecycle, right before the stop, and a sweep that fails
+// keeps the gateway; it stops once the gateway holds nothing.
+func TestSandboxDaemonChecksAgainRightBeforeItStopsTheGateway(t *testing.T) {
+	prev := foreignRecheckEvery
+	foreignRecheckEvery = time.Hour
+	t.Cleanup(func() { foreignRecheckEvery = prev })
+	var fx *sandboxDaemonFixture
+	var startedMeanwhile, sweepFails atomic.Bool
+	fx = newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		o.sweepForeign = func(context.Context) (bool, error) {
+			if sweepFails.Load() {
+				return false, errors.New("openshell: list sandboxes: context deadline exceeded")
+			}
+			if startedMeanwhile.Load() {
+				fx.running.Store(1)
+			}
+			return false, nil
+		}
+	})
+	fx.run(t)
+	ctx := context.Background()
+	idle := func() {
+		fx.os.holder.Store(int64(os.Getuid()))
+		fx.d.openShellUsed.Store(time.Now().Add(-2 * openShellGatewayLinger).UnixNano())
+	}
+	idle()
+	startedMeanwhile.Store(true)
+	if fx.d.check(ctx); fx.os.stopped.Load() != 0 {
+		t.Fatal("stopped the gateway under a sandbox the sweep found started")
+	}
+	startedMeanwhile.Store(false)
+	fx.running.Store(0)
+	sweepFails.Store(true)
+	idle()
+	if fx.d.check(ctx); fx.os.stopped.Load() != 0 {
+		t.Fatal("stopped the gateway when OpenShell's sandboxes could not be read")
+	}
+	sweepFails.Store(false)
+	idle()
+	if fx.d.check(ctx); fx.os.stopped.Load() != 1 {
+		t.Fatalf("an idle gateway was not stopped: %d", fx.os.stopped.Load())
+	}
+	// One DefenseClaw cannot connect to (its registration or certificates
+	// broke) may still run MicroVMs, which the stop would end with no
+	// flush: it is stopped only once no MicroVM runs as the account, and
+	// kept when they cannot be counted. The daemon's stop on exit holds
+	// the same rule.
+	var vms atomic.Int64
+	var countFails atomic.Bool
+	unreachable := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		o.countMicroVMs = func(context.Context) (int, error) {
+			if countFails.Load() {
+				return 0, errors.New("ps failed")
+			}
+			return int(vms.Load()), nil
+		}
+	})
+	unreachable.run(t)
+	gone := func() {
+		unreachable.os.holder.Store(int64(os.Getuid()))
+		unreachable.d.openShellUsed.Store(time.Now().Add(-2 * openShellGatewayLinger).UnixNano())
+	}
+	vms.Store(1)
+	gone()
+	if unreachable.d.check(ctx); unreachable.os.stopped.Load() != 0 {
+		t.Fatal("stopped a gateway DefenseClaw cannot read under a live MicroVM")
+	}
+	if unreachable.d.stopOpenShellIfIdle(); unreachable.os.stopped.Load() != 0 {
+		t.Fatal("the stop on exit ended a live MicroVM")
+	}
+	vms.Store(0)
+	countFails.Store(true)
+	gone()
+	if unreachable.d.check(ctx); unreachable.os.stopped.Load() != 0 {
+		t.Fatal("stopped a gateway DefenseClaw cannot read with its MicroVMs not counted")
+	}
+	countFails.Store(false)
+	gone()
+	if unreachable.d.check(ctx); unreachable.os.stopped.Load() != 1 {
+		t.Fatalf("a gateway DefenseClaw cannot reach, with no MicroVM, was not stopped: %d", unreachable.os.stopped.Load())
+	}
+}
+
 // A stop or delete of a kept sandbox starts the account's gateway the daemon
 // stopped; one that listens is used as it is; another account's is refused
-// with the one-account-at-a-time text (GAP-0492). Status says that text too,
+// with the one-account-at-a-time text (GAP-0492), except for a delete of a
+// name the account has no sandbox of, which says so (GAP-0126). Status says that text too,
 // not certificates and CAs, and shows no sandbox port the daemon does not
 // hold (GAP-0461).
 func TestSandboxDaemonGatewayForKeptSandboxes(t *testing.T) {
@@ -80,9 +250,14 @@ func TestSandboxDaemonGatewayForKeptSandboxes(t *testing.T) {
 		t.Fatal("readied a gateway that listens")
 	}
 	f.os.holder.Store(4242)
+	// kept1 is a name the account has no sandbox of: that is the answer,
+	// whoever holds the port (GAP-0126).
 	_, err := c.Delete(ctx, "kept1", sandboxapi.DeleteRequest{})
-	if err == nil || !strings.Contains(err.Error(), "one account at a time") || f.os.prepared.Load() != 2 {
-		t.Fatalf("delete while another account holds the port: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "no DefenseClaw sandbox named") || f.os.prepared.Load() != 2 {
+		t.Fatalf("delete of an absent name while another account holds the port: %v", err)
+	}
+	if _, err := c.Stop(ctx, "kept1"); err == nil || !strings.Contains(err.Error(), "one account at a time") {
+		t.Fatalf("stop while another account holds the port: %v", err)
 	}
 	st, err := c.Status(ctx)
 	if err != nil || st.Available || st.GatewayElsewhere != "another account" || st.Reason != sandboxAccountBusyMessage ||
@@ -91,6 +266,54 @@ func TestSandboxDaemonGatewayForKeptSandboxes(t *testing.T) {
 	}
 	if strings.Contains(st.Reason, "certificate") || strings.Contains(st.Reason, " CA") {
 		t.Fatalf("status reason: %q", st.Reason)
+	}
+}
+
+// GAP-1421: with sandboxes off a managed list or get of a kept sandbox
+// answers at once from its record, never starting (and waiting for) the
+// account's OpenShell gateway, which cannot start without the managed setup.
+func TestManagedReadsWithSandboxesOffStartNoGateway(t *testing.T) {
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		seedSandboxRecord(t, o.StateDir, "kept", map[string]any{})
+		o.Settings.Enabled = false
+	})
+	f.run(t)
+	ctl := &managedSandboxController{Manager: f.d.rt.manager, d: f.d}
+	list, err := ctl.List(t.Context())
+	if err != nil || len(list) != 1 || list[0].Name != "kept" {
+		t.Fatalf("list with sandboxes off = %+v, %v", list, err)
+	}
+	if _, err := ctl.Get(t.Context(), "kept"); err != nil {
+		t.Fatalf("get with sandboxes off: %v", err)
+	}
+	if n := f.os.prepared.Load(); n != 0 {
+		t.Fatalf("readied the account's gateway %d times for a read with sandboxes off", n)
+	}
+}
+
+// A deleted sandbox with only a retained snapshot needs no gateway. A
+// different account can hold the shared port while its record is removed.
+func TestSandboxDaemonDeleteRetainedWhileOtherAccountHoldsGateway(t *testing.T) {
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		seedSandboxRecord(t, o.StateDir, "retained", map[string]any{"retained": true})
+	})
+	f.run(t)
+	f.os.holder.Store(4242)
+	ctl := &managedSandboxController{Manager: f.d.rt.manager, d: f.d}
+	resp, err := ctl.Delete(t.Context(), "retained", sandboxapi.DeleteRequest{})
+	if err != nil || resp == nil || !resp.Deleted {
+		t.Fatalf("delete retained with another account's gateway: %+v, %v", resp, err)
+	}
+	if f.os.prepared.Load() != 0 {
+		t.Fatal("readied a gateway to delete only a retained snapshot")
+	}
+	if _, err := ctl.Manager.Get(t.Context(), "retained"); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+		t.Fatalf("retained record survived: %v", err)
+	}
+	// A name with no sandbox at all says so, not that another account is
+	// using the sandboxes (GAP-0126).
+	if _, err := ctl.Delete(t.Context(), "never-made", sandboxapi.DeleteRequest{}); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+		t.Fatalf("delete of an absent name while another account holds the gateway: %v", err)
 	}
 }
 
@@ -175,5 +398,66 @@ func TestAccountOpenShellManagedGatewayCommandDrift(t *testing.T) {
 	r.args = "/usr/bin/openshell-gateway --config " + cfg
 	if drift, err := r.o.Drift(s); err != nil || len(drift) != 1 {
 		t.Fatalf("setup mode, another install: %v %v", drift, err)
+	}
+}
+
+func TestAccountOpenShellReportsChangedManagedRender(t *testing.T) {
+	r := newOpenShellRig(t, "linux")
+	r.holder = func(int) int { return 5001 }
+	r.active, r.pid = true, 77
+	r.o.adminBinary = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+	configPath := filepath.Join(t.TempDir(), openshell.GatewayTOMLFile)
+	r.args = "/usr/bin/openshell-gateway --config " + configPath
+	r.o.readRendered = func(string, string) (openshell.RenderedGateway, string, error) {
+		return openshell.RenderedGateway{BindAddress: "127.0.0.1:17671"}, "sha256:edited", nil
+	}
+	s := sandboxrelay.DaemonSettings{Enterprise: sandboxrelay.EnterpriseOpenShell{
+		Install: "prerequisite", Driver: "docker", GatewayPort: 17670,
+		GatewayConfigPath: configPath, GatewayConfigDigest: "sha256:installed",
+	}}
+	drift, err := r.o.Drift(s)
+	if err != nil || len(drift) != 1 || driftEventField(drift[0].Field) != "gateway_configuration" {
+		t.Fatalf("edited managed render drift = %v, %v", drift, err)
+	}
+	if !r.o.RenderedConfigDrift(s) {
+		t.Fatal("status missed the edited render")
+	}
+	r.o.readRendered = func(string, string) (openshell.RenderedGateway, string, error) {
+		return openshell.RenderedGateway{}, "", errors.New("invalid edited render")
+	}
+	if !r.o.RenderedConfigDrift(s) {
+		t.Fatal("status missed the malformed edited render")
+	}
+}
+
+// GAP-0730: install setup (the managed default on these hosts) runs the
+// administrator's rendered gateway.toml too, so the daemon reports its hand
+// edit as drift (the settings_drift event and counter) as status does; it is
+// no pause, and a render setup mode cannot read is no refusal.
+func TestAccountOpenShellReportsChangedRenderInSetupMode(t *testing.T) {
+	r := newOpenShellRig(t, "linux")
+	r.holder = func(int) int { return 5001 }
+	r.active, r.pid = true, 77
+	configPath := filepath.Join(t.TempDir(), openshell.GatewayTOMLFile)
+	r.args = filepath.Join(r.o.home, ".local", "bin", "openshell-gateway") + " --config " + configPath
+	r.o.readRendered = func(string, string) (openshell.RenderedGateway, string, error) {
+		return openshell.RenderedGateway{BindAddress: "127.0.0.1:17671"}, "sha256:edited", nil
+	}
+	s := sandboxrelay.DaemonSettings{Enterprise: sandboxrelay.EnterpriseOpenShell{
+		Install: "setup", Driver: "docker", GatewayPort: 17670,
+		GatewayConfigPath: configPath, GatewayConfigDigest: "sha256:installed",
+	}}
+	drift, err := r.o.Drift(s)
+	if err != nil || len(drift) != 1 || driftEventField(drift[0].Field) != "gateway_configuration" {
+		t.Fatalf("setup mode, edited render: drift = %v, %v", drift, err)
+	}
+	if len(blockingOpenShellDrift(drift)) != 0 {
+		t.Fatalf("the edited render pauses sandboxes: %v", drift)
+	}
+	r.o.readRendered = func(string, string) (openshell.RenderedGateway, string, error) {
+		return openshell.RenderedGateway{}, "", errors.New("unreadable")
+	}
+	if drift, err := r.o.Drift(s); err != nil || len(drift) != 0 {
+		t.Fatalf("setup mode, unreadable render: drift = %v, %v", drift, err)
 	}
 }

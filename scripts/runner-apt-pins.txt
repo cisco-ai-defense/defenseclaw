@@ -1,0 +1,6 @@
+# Packages runner-apt-install.sh installs from an Ubuntu mirror when apt
+# stays unreachable: package, Ubuntu codename, pool path, SHA-256 (the
+# SHA256 field of that release Packages index). Every pinned package needs
+# only libraries the runner image already has; dpkg fails the step if not.
+osslsigncode noble pool/universe/o/osslsigncode/osslsigncode_2.8-2_amd64.deb 1aee7be603102633e80b4c67cd939bba2e16a62813e4a3035696727783f632b0
+osslsigncode resolute pool/universe/o/osslsigncode/osslsigncode_2.13-1_amd64.deb 7d80c47e028989190da846518f83fd6afcbda05100d37affaaf36c9af9aa5e9b

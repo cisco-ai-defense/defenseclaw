@@ -55,6 +55,22 @@ func TestV9ValidationFailureNamesCurrentVersion(t *testing.T) {
 	}
 }
 
+func TestRetiredConfigKeyDiagnosticsNameMigration(t *testing.T) {
+	err := config.ValidateV8SchemaBytes("config.yaml", []byte("config_version: 9\naudit_sinks: []\n"))
+	if err == nil {
+		t.Fatal("retired key accepted")
+	}
+	const want = "audit_sinks was retired in config_version 8; use observability.destinations"
+	failure := configV8ValidationFailure(err)
+	if failure.Path != "$.audit_sinks" || !strings.Contains(failure.Reason, want) || strings.Contains(failure.Reason, "suggested field") {
+		t.Fatalf("validate diagnostic = %+v, want %q", failure, want)
+	}
+	problem, ok := configSchemaProblem(err)
+	if !ok || !strings.Contains(problem, want) || strings.Contains(problem, "did you mean") {
+		t.Fatalf("status diagnostic = %q (%t), want %q", problem, ok, want)
+	}
+}
+
 func TestLoadConfigV8FileValidatesTargetRuntimeConnectorRoster(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "config.yaml")
@@ -339,10 +355,45 @@ func TestConfigV8ValidateNamesTheUnknownProfile(t *testing.T) {
 	}
 }
 
+func TestConfigV8BlankProfileSelectorNamesThePathOnce(t *testing.T) {
+	for _, selector := range []string{"groups", "users"} {
+		t.Run(selector, func(t *testing.T) {
+			directory := t.TempDir()
+			path := filepath.Join(directory, "config.yaml")
+			source := "config_version: 9\ndata_dir: " + directory + "\nguardrail:\n  profiles:\n    contractors: {mode: action}\n" +
+				"  profile_assignments:\n    - profile: contractors\n      match: {" + selector + ": [\" \" ]}\n"
+			if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			previousPath, previousDataDir := configV8ConfigPath, configV8DataDir
+			previousOutput := configV8ValidateCmd.OutOrStdout()
+			configV8ConfigPath, configV8DataDir = path, directory
+			output := &strings.Builder{}
+			configV8ValidateCmd.SetOut(output)
+			t.Cleanup(func() {
+				configV8ConfigPath, configV8DataDir = previousPath, previousDataDir
+				configV8ValidateCmd.SetOut(previousOutput)
+			})
+			err := configV8ValidateCmd.RunE(configV8ValidateCmd, nil)
+			setting := "guardrail.profile_assignments[0].match." + selector
+			if err == nil || strings.Count(err.Error(), setting) != 1 || !strings.Contains(err.Error(), "an entry is empty") {
+				t.Fatalf("plain selector refusal: %v", err)
+			}
+			var failure configV8WireFailure
+			if err := json.Unmarshal([]byte(output.String()), &failure); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Count(failure.Reason, setting) > 0 || failure.Path != "$."+setting {
+				t.Fatalf("structured selector refusal repeats or loses the setting: %+v", failure)
+			}
+		})
+	}
+}
+
 // GAP-0553: a standalone config whose default OpenShell gateway port collides
 // with gateway.api_port was refused only as "configuration could not be
 // compiled safely" at "$". It names enterprise.openshell.gateway_port and the
-// port it collides with, and the same file with another API port validates.
+// port it collides with, and the same file with the managed API port validates.
 func TestConfigV8ValidateNamesTheOpenShellPortCollision(t *testing.T) {
 	validate := func(apiPort int) (configV8WireFailure, error) {
 		directory := t.TempDir()
@@ -376,8 +427,10 @@ func TestConfigV8ValidateNamesTheOpenShellPortCollision(t *testing.T) {
 		!strings.Contains(failure.Reason, strconv.Itoa(config.DefaultEnterpriseOpenShellGatewayPort)) {
 		t.Fatalf("structured validation failure = %+v", failure)
 	}
-	if _, err := validate(config.DefaultEnterpriseOpenShellGatewayPort + 1); err != nil {
-		t.Fatalf("the control with another API port does not validate: %v", err)
+	// The control is the managed API port, the only one ensure accepts
+	// (GAP-0601).
+	if _, err := validate(18970); err != nil {
+		t.Fatalf("the control with the managed API port does not validate: %v", err)
 	}
 }
 
@@ -415,6 +468,12 @@ func TestConfigV8MachineCommandsBypassRuntimeInitialization(t *testing.T) {
 	if configV8Cmd.PersistentPreRunE == nil || configV8Cmd.PersistentPostRun == nil {
 		t.Fatal("config-v8 helper must override root runtime hooks")
 	}
+	// Other tests of the package leave the runtime state set; start from
+	// none, so the check below sees only what the helper's hook set
+	// (rel-1-0-6 GAP-0306), and put it back after.
+	previousCfg, previousStore, previousLog := cfg, auditStore, auditLog
+	cfg, auditStore, auditLog = nil, nil, nil
+	t.Cleanup(func() { cfg, auditStore, auditLog = previousCfg, previousStore, previousLog })
 	if err := configV8Cmd.PersistentPreRunE(configV8Cmd, nil); err != nil {
 		t.Fatal(err)
 	}

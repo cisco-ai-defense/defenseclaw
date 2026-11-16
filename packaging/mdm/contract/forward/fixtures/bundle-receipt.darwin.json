@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "receipt_id": "b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
+  "bundle_id": "b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
+  "version": 13,
+  "state": "confirmed",
+  "actor": "root",
+  "principal": "control-plane:acme/dcad-macx@dclab.test",
+  "change_summary": "Profile for dcad-macnone",
+  "signer_key_id": "acme-2026a",
+  "delivery_id": "agent-7:delivery-12",
+  "effective_policy_digest": "sha256:4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f",
+  "enforcing_digest": "sha256:4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f",
+  "config_generation": 41,
+  "restart": true,
+  "sessions_restart_required": 2,
+  "applied_at": "2026-10-30T10:00:00Z",
+  "confirmed_at": "2026-10-30T10:00:05Z",
+  "finished_at": "2026-10-30T10:00:05Z",
+  "warning_codes": [],
+  "disabled_by_bundle": []
+}

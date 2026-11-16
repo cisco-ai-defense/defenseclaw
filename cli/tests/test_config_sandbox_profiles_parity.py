@@ -113,9 +113,8 @@ def test_profile_sandbox_parses_and_saves_only_set_keys(tmp_path, monkeypatch):
     assert sandbox.allowed is None and sandbox.allowed_harnesses == []
     assert cfg.openshell.admin.request_access == "it@example.com"
     assert cfg.openshell.admin.required_for is None
-    assert cfg.enterprise_openshell == cfgmod.EnterpriseOpenShellConfig(
-        install="setup", driver="vm", version="0.1.3", gateway_port=17671
-    )
+    # gateway_port and the other lifecycle keys still load (Go owns them).
+    assert cfg.enterprise_openshell == cfgmod.EnterpriseOpenShellConfig(driver="vm")
     data = cfgmod._config_to_dict(cfg)
     assert "enterprise_openshell" not in data and "enterprise" not in data
     assert data["guardrail"]["profiles"]["contractors"]["sandbox"] == {

@@ -36,7 +36,6 @@ from defenseclaw.bootstrap import BootstrapReport, _seed_guardrail_profiles
 from defenseclaw.tui.executor import CommandEvent, CommandExecutor
 
 pytestmark = [
-    pytest.mark.skipif(os.name != "nt", reason="native Windows Job Object lifecycle"),
     pytest.mark.allow_subprocess,
 ]
 
@@ -104,23 +103,34 @@ async def _wait_for_inactive(pid: int) -> None:
     raise AssertionError(f"PID {pid} remained active")
 
 
-def _gateway_status(port: int) -> dict[str, object]:
+def _gateway_status(port: int, *, timeout: float = 2) -> dict[str, object]:
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}/status",
         headers={"Authorization": f"Bearer {_TOKEN}"},
     )
-    with urllib.request.urlopen(request, timeout=2) as response:  # noqa: S310 - fixed loopback test URL.
+    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - fixed loopback test URL.
         return json.load(response)
 
 
-async def _assert_listener_owned(port: int, pid: int, data_dir: Path) -> None:
-    status = await asyncio.to_thread(_gateway_status, port)
-    runtime = status.get("runtime")
-    assert isinstance(runtime, dict)
-    assert runtime.get("pid") == pid
-    assert os.path.normcase(os.path.realpath(str(runtime.get("data_dir")))) == os.path.normcase(
-        os.path.realpath(data_dir)
-    )
+async def _assert_listener_owned(port: int, pid: int, data_dir: Path, *, budget_s: float = 2) -> None:
+    deadline = time.monotonic() + budget_s
+    last_error: OSError | ValueError | None = None
+    while (remaining := deadline - time.monotonic()) > 0:
+        try:
+            status = await asyncio.to_thread(_gateway_status, port, timeout=min(0.4, remaining))
+        except (OSError, ValueError) as exc:
+            last_error = exc
+        else:
+            runtime = status.get("runtime") if isinstance(status, dict) else None
+            if (
+                isinstance(runtime, dict)
+                and runtime.get("pid") == pid
+                and os.path.normcase(os.path.realpath(str(runtime.get("data_dir"))))
+                == os.path.normcase(os.path.realpath(data_dir))
+            ):
+                return
+        await asyncio.sleep(min(0.05, max(0, deadline - time.monotonic())))
+    raise AssertionError("gateway status did not match the expected listener within the status budget") from last_error
 
 
 async def _cleanup(binary: Path, env: dict[str, str]) -> None:
@@ -135,6 +145,57 @@ async def _cleanup(binary: Path, env: dict[str, str]) -> None:
 
 
 @pytest.mark.asyncio
+async def test_listener_readiness_retries_within_status_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+
+    def status(_port: int, *, timeout: float) -> dict[str, object]:
+        nonlocal calls
+        assert timeout <= 0.4
+        calls += 1
+        if calls == 1:
+            raise urllib.error.URLError("listener not ready")
+        return {"runtime": {"pid": 42, "data_dir": str(tmp_path)}}
+
+    monkeypatch.setattr(sys.modules[__name__], "_gateway_status", status)
+    await _assert_listener_owned(1, 42, tmp_path)
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_listener_readiness_retries_after_first_status_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+
+    def status(_port: int, *, timeout: float) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        assert 0 < timeout <= 0.4
+        if calls == 1:
+            time.sleep(timeout)
+            raise TimeoutError("status request timed out")
+        return {"runtime": {"pid": 42, "data_dir": str(tmp_path)}}
+
+    monkeypatch.setattr(sys.modules[__name__], "_gateway_status", status)
+    started = time.monotonic()
+    await _assert_listener_owned(1, 42, tmp_path)
+    assert calls == 2
+    assert time.monotonic() - started < 2
+
+
+@pytest.mark.asyncio
+async def test_listener_readiness_rejects_another_owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_gateway_status",
+        lambda _port, *, timeout: {"runtime": {"pid": 43, "data_dir": str(tmp_path)}},
+    )
+    with pytest.raises(AssertionError, match="expected listener"):
+        await _assert_listener_owned(1, 42, tmp_path, budget_s=0.02)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows Job Object lifecycle")
+@pytest.mark.asyncio
 async def test_tui_gateway_and_watchdog_survive_parent_exit_and_restart(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -147,9 +208,7 @@ async def test_tui_gateway_and_watchdog_survive_parent_exit_and_restart(
     seed_report = BootstrapReport()
     _seed_guardrail_profiles(str(data_dir / "policies"), seed_report)
     assert not seed_report.errors
-    assert "default" in (
-        seed_report.guardrail_profiles_seeded + seed_report.guardrail_profiles_preserved
-    )
+    assert "default" in (seed_report.guardrail_profiles_seeded + seed_report.guardrail_profiles_preserved)
     port = _reserve_port()
     (data_dir / "config.yaml").write_text(
         f"""config_version: 8
@@ -213,8 +272,7 @@ observability: {{}}
         # Python command remains in the TUI job, while only the Go-managed
         # daemon requests breakaway during the restart handoff.
         restart_wrapper = (
-            "import subprocess,sys; "
-            "raise SystemExit(subprocess.run([sys.argv[1], 'restart'], check=False).returncode)"
+            "import subprocess,sys; raise SystemExit(subprocess.run([sys.argv[1], 'restart'], check=False).returncode)"
         )
         await _run_tui_command(sys.executable, ("-c", restart_wrapper, str(binary)))
         third_gateway = await _wait_for_pid(gateway_pid_path, different_from=second_gateway)

@@ -70,11 +70,9 @@ ACTIVE_SCAN_CONNECTORS = (
     "hermes",
     "cursor",
     "copilot",
-    "openhands",
     "antigravity",
     "opencode",
     "amp",
-    "omnigent",
 )
 
 
@@ -171,7 +169,7 @@ class TestSkillScanConnectorMatrix(_MatrixBase):
 
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
-    def test_preamble_shows_connector_for_every_supported_value(
+    def test_explicit_path_outside_connector_dirs_is_adhoc_for_every_active_connector(
         self,
         mock_cls,
         _mock_info,
@@ -191,10 +189,10 @@ class TestSkillScanConnectorMatrix(_MatrixBase):
                 )
                 self.assertEqual(result.exit_code, 0, result.output)
                 self.assertIn(
-                    f"Scanning 1 skill on {connector} for:",
+                    "Scanning 1 skill at a path (not from a connector config) for:",
                     result.output,
-                    f"connector {connector!r} missing from preamble",
                 )
+                self.assertNotIn(f"Scanning 1 skill on {connector} for:", result.output)
 
 
 class TestMCPScanConnectorMatrix(_MatrixBase):

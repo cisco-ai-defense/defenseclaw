@@ -1,0 +1,10 @@
+_www                     70
+_wwwproxy                252
+daemon                   1
+nobody                   -2
+root                     0
+alice                    20
+carol                    20
+dave                    20 21
+josé                   20
+frank                     20 

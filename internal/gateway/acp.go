@@ -27,7 +27,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
-	"github.com/google/uuid"
 )
 
 func (a *APIServer) handleACPCatalog(w http.ResponseWriter, r *http.Request) {
@@ -48,9 +47,22 @@ func (a *APIServer) handleACPProfiles(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "configuration unavailable"})
 		return
 	}
+	// pair_profiles is the profile each configured pair resolves to in the
+	// policy this gateway has loaded, so `acp setup` can wait until a pair
+	// moved back to a profile that already exists is the one the guard will be
+	// held to (rel-1-0-6 GAP-0302: the profile table alone looks loaded).
+	pairs := make(map[string]string, len(cfg.ACP.Bindings))
+	for key := range cfg.ACP.Bindings {
+		if client, agent, ok := strings.Cut(key, "/"); ok {
+			if profile := cfg.ACP.ACPProfileForPair(client, agent); profile != "" {
+				pairs[key] = profile
+			}
+		}
+	}
 	a.writeJSON(w, http.StatusOK, map[string]any{
 		"enabled": cfg.ACP.Enabled, "mode": effectiveACPMode(cfg.ACP, ""),
 		"default_profile": cfg.ACP.DefaultProfile, "profiles": cfg.ACP.Profiles,
+		"pair_profiles": pairs,
 	})
 }
 
@@ -73,7 +85,16 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, acp.MaxTurnEvaluationBytes+(64<<10))
+	body := r.Body
+	if plaintext, ok := r.Context().Value(acpSignedPlaintextKey{}).([]byte); ok {
+		// The signed evaluation was opened and bounded by this route's own
+		// limit (authenticateACPSignedRequest). The generic 1 MiB API body cap
+		// that wraps r.Body after that refused full-size frames and completed
+		// turns the guard sends, which the editor read as a gateway that did
+		// not answer (GAP-1327, GAP-1318).
+		body = io.NopCloser(bytes.NewReader(plaintext))
+	}
+	r.Body = http.MaxBytesReader(w, body, acp.MaxTurnEvaluationBytes+(64<<10))
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	var req acp.Evaluation
@@ -173,7 +194,7 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		refuse("ACP client or agent binding is disabled or pinned to another profile", acp.RefusalBinding, nil)
 		return
 	}
-	if !acpBindingAllowed(profile.AllowedClients, req.ClientID) || !acpBindingAllowed(profile.AllowedAgents, req.AgentID) {
+	if len(profile.AllowListRefusals(profileName, req.ClientID, req.AgentID)) > 0 {
 		refuse("ACP client or agent is outside the selected profile", acp.RefusalBinding, nil)
 		return
 	}
@@ -195,17 +216,31 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	ctx := acpEvaluationContext(r.Context(), req, agent.ConnectorID, cfg.SecureClientIntegration())
+	// ACP frames are judged by inspectMessageContent, so profile selection
+	// must use that same path when an identity assignment is uncertain.
+	ctx := withProfilePath(acpEvaluationContext(r.Context(), req, agent.ConnectorID, cfg.SecureClientIntegration()), profilePathInspect)
 	// Resolve the identity-based guardrail profile once, with the ACP
 	// agent's connector, as the hook, proxy and inspect paths do: resolved
 	// lazily, the request had no connector, so a connectors assignment never
 	// selected ACP traffic (GAP-0311).
 	ctx = a.withGuardrailProfileDecision(ctx, agent.ConnectorID)
-	if slices.Contains(profile.DeniedMethods, req.Method) {
-		verdict := acp.Verdict{Action: "block", RawAction: "block", Severity: "HIGH", Reason: "method denied by ACP profile"}
-		if mode != string(acp.ModeAction) {
+	// Identity uncertainty refuses in every mode; an ACP method denial
+	// continues to use the mode's normal observe/action behavior.
+	blockReason, refused := "", profileRefusal(ctx)
+	if refused != "" {
+		blockReason = refused
+	} else if slices.Contains(profile.DeniedMethods, req.Method) {
+		blockReason = "method denied by ACP profile"
+	}
+	if blockReason != "" {
+		verdict := acp.Verdict{Action: "block", RawAction: "block", Severity: "HIGH", Reason: blockReason,
+			FailMode: acpProfileFailMode(profile, mode)}
+		if mode != string(acp.ModeAction) && refused == "" {
 			verdict.Action, verdict.WouldBlock = "allow", true
 		}
+		// Identity uncertainty is refused in every mode, so an observe
+		// guard must not pass the frame on (GAP-2103).
+		verdict.Enforced = refused != ""
 		a.traceACPDecisionV8(ctx, agent.ConnectorID, req, &ToolInspectVerdict{
 			Action: verdict.Action, RawAction: verdict.RawAction, Severity: verdict.Severity,
 			Reason: verdict.Reason, Mode: mode, WouldBlock: verdict.WouldBlock,
@@ -245,7 +280,7 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 	verdict.applyMode(mode)
 	result := acp.Verdict{
 		Action: verdict.Action, RawAction: verdict.RawAction, Severity: verdict.Severity,
-		Reason: verdict.Reason, WouldBlock: verdict.WouldBlock,
+		Reason: verdict.Reason, WouldBlock: verdict.WouldBlock, FailMode: acpProfileFailMode(profile, mode),
 	}
 	record := func(recordCtx context.Context) hookEvaluationContext {
 		var evaluation hookEvaluationContext
@@ -280,6 +315,21 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		result.Reason = acpWithheldOutputReason(result.Reason)
 	}
 	a.writeJSON(w, http.StatusOK, result)
+}
+
+// acpProfileFailMode is the Verdict.FailMode of profile in mode: its
+// explicit fail_mode ("open" or "closed") in observe mode, "" when unset or
+// in action mode, which is always closed (and keeps the verdict of a guard
+// that predates the field).
+func acpProfileFailMode(profile config.ACPProfile, mode string) string {
+	if mode == string(acp.ModeAction) {
+		return ""
+	}
+	switch failMode := strings.ToLower(strings.TrimSpace(profile.FailMode)); failMode {
+	case "open", "closed":
+		return failMode
+	}
+	return ""
 }
 
 // acpWithheldOutputReason words a block of the agent's own output
@@ -565,7 +615,7 @@ func (a *APIServer) recordACPEvaluationV8(
 		severity = "NONE"
 	}
 	facts, err := newAPIGuardrailEventV8Facts(ctx, connector, guardrailEventRequest{
-		EvaluationID: uuid.NewString(), Direction: direction, Action: action,
+		EvaluationID: observability.NewTimeOrderedID(), Direction: direction, Action: action,
 		RawAction: verdict.RawAction, WouldBlock: verdict.WouldBlock, Severity: severity,
 		Reason: verdict.Reason, Findings: findings,
 		ElapsedMs: float64(elapsed) / float64(time.Millisecond),
@@ -625,14 +675,6 @@ func effectiveACPMode(cfg config.ACPConfig, profileName string) string {
 		return "action"
 	}
 	return "observe"
-}
-
-func acpBindingAllowed(allow []string, value string) bool {
-	return len(allow) == 0 || slices.Contains(allow, value)
-}
-
-func isACPAPIPath(path string) bool {
-	return path == "/api/v1/acp/challenge" || path == "/api/v1/acp/evaluate" || strings.HasPrefix(path, "/v1/acp/")
 }
 
 type acpEnterpriseCredentialContextKey struct{}
@@ -697,24 +739,6 @@ func acpPrincipalIdentity(principal string) string {
 	return identity
 }
 
-// authenticateACPToken applies different custody models without widening the
-// bearer onto any non-ACP route. Unmanaged mode uses the single local sidecar;
-// managed enterprise mode requires one administrator-owned, per-principal and
-// per-binding credential record and carries its scope into evaluation.
-func (a *APIServer) authenticateACPToken(r *http.Request, candidate string) (*http.Request, bool) {
-	if a == nil || a.scannerCfg == nil || r == nil {
-		return r, false
-	}
-	if !managed.IsManagedEnterprise(a.scannerCfg.DeploymentMode) {
-		return r, a.acpAPITokenMatches(candidate)
-	}
-	credential, ok := acp.MatchEnterpriseCredential(a.scannerCfg.DataDir, candidate)
-	if !ok {
-		return r, false
-	}
-	return r.WithContext(withACPEnterpriseCredential(r.Context(), credential)), true
-}
-
 func (a *APIServer) authenticateACPSignedRequest(r *http.Request) (*http.Request, string, string, bool) {
 	if a == nil || a.scannerCfg == nil || r == nil || r.Method != http.MethodPost ||
 		(r.URL.Path != "/api/v1/acp/challenge" && r.URL.Path != "/api/v1/acp/evaluate") {
@@ -776,6 +800,7 @@ func (a *APIServer) authenticateACPSignedRequest(r *http.Request) (*http.Request
 			return r, "", "", false
 		}
 		r.Body = io.NopCloser(bytes.NewReader(plaintext))
+		r = r.WithContext(context.WithValue(r.Context(), acpSignedPlaintextKey{}, plaintext))
 		r.ContentLength = int64(len(plaintext))
 		r.Header.Set("Content-Type", "application/json")
 	}
@@ -783,6 +808,10 @@ func (a *APIServer) authenticateACPSignedRequest(r *http.Request) (*http.Request
 	r.Header.Set(acp.AuthNonceHeader, nonce)
 	return r, token, nonce, true
 }
+
+// acpSignedPlaintextKey carries the opened, size-checked plaintext of a
+// signed ACP evaluation to its handler.
+type acpSignedPlaintextKey struct{}
 
 type acpSignedResponse struct {
 	header http.Header
@@ -793,7 +822,8 @@ type acpSignedResponse struct {
 func (w *acpSignedResponse) Header() http.Header { return w.header }
 
 func (w *acpSignedResponse) WriteHeader(status int) {
-	if w.status == 0 {
+	// An informational response (a hook progress report) is not the answer.
+	if w.status == 0 && status >= 200 {
 		w.status = status
 	}
 }
@@ -828,17 +858,9 @@ func serveACPSignedResponse(w http.ResponseWriter, r *http.Request, next http.Ha
 	_, _ = w.Write(capture.body.Bytes())
 }
 
-// acpAPITokenMatches authenticates the guard with a credential that has no
-// authority outside ACP routes. The token stays in a mode-0600 sidecar rather
-// than IDE JSON or config.yaml.
-func (a *APIServer) acpAPITokenMatches(candidate string) bool {
-	if a == nil || a.scannerCfg == nil || candidate == "" {
-		return false
-	}
-	expected, ok := a.loadACPAPIToken()
-	return ok && constantTimeStringMatch(expected, candidate)
-}
-
+// loadACPAPIToken reads the per-user guard key. It signs the two guard
+// routes only and has no authority on any other route. It stays in a
+// mode-0600 sidecar rather than IDE JSON or config.yaml.
 func (a *APIServer) loadACPAPIToken() (string, bool) {
 	if a == nil || a.scannerCfg == nil {
 		return "", false

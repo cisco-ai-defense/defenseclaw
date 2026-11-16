@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -79,6 +80,90 @@ func TestGuardDeniesForeignUserAndProjectHooks(t *testing.T) {
 // hooks run url: a handler is DefenseClaw's only when every field the agent
 // may execute is an owned command and it carries nothing DefenseClaw does
 // not write.
+func TestGuardClaudeManagedExecFormAndLegacyOwnership(t *testing.T) {
+	req := guardRequest(t, "claudecode", config.ForeignHooksRemove)
+	path := filepath.Join(req.Home, ".claude", "settings.json")
+	for name, handler := range map[string]string{
+		"exec form":        `{"type":"command","command":"` + testHookBinary + `","args":["hook","--connector","claudecode","--enterprise-managed"]}`,
+		"prior shell form": `{"type":"command","command":"'` + testHookBinary + `' hook --connector claudecode --enterprise-managed"}`,
+	} {
+		writeFile(t, path, `{"hooks":{"PreToolUse":[{"hooks":[`+handler+`] }]}}`)
+		if decision := EvaluateForeignHooks(req); decision.Deny || len(decision.Findings) != 0 {
+			t.Fatalf("%s classified as foreign: %+v", name, decision)
+		}
+	}
+	for name, handler := range map[string]string{
+		"wrong connector": `{"type":"command","command":"` + testHookBinary + `","args":["hook","--connector","codex","--enterprise-managed"]}`,
+		"missing args":    `{"type":"command","command":"` + testHookBinary + `"}`,
+		"extra args":      `{"type":"command","command":"` + testHookBinary + `","args":["hook","--connector","claudecode","--enterprise-managed","--extra"]}`,
+		"changed path":    `{"type":"command","command":"` + testHookBinary + `.old","args":["hook","--connector","claudecode","--enterprise-managed"]}`,
+	} {
+		writeFile(t, path, `{"hooks":{"PreToolUse":[{"hooks":[`+handler+`] }]}}`)
+		if decision := EvaluateForeignHooks(req); !decision.Deny || len(decision.Findings) != 1 {
+			t.Fatalf("%s not classified as foreign: %+v", name, decision)
+		}
+	}
+}
+
+func TestR108ExecFormClaudeGuardOwnership(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		t.Run(goos, func(t *testing.T) {
+			req := GuardRequest{Connector: ConnectorClaudeCode, GOOS: goos, HookBinary: testHookBinary}
+			exec := map[string]any{"type": "command", "command": testHookBinary, "args": []any{"hook", "--connector", "claudecode", "--enterprise-managed"}}
+			legacy := map[string]any{"type": "command", "command": shellQuote(testHookBinary) + " hook --connector claudecode --enterprise-managed"}
+			for _, tc := range []struct {
+				name    string
+				handler map[string]any
+				owned   bool
+			}{
+				{"current exec form", exec, true},
+				{"prior Unix shell form", legacy, goos != "windows"},
+				{"case changed bare command", map[string]any{"type": "command", "command": strings.ToUpper(testHookBinary)}, false},
+				{"other connector shell form", map[string]any{"type": "command", "command": shellQuote(testHookBinary) + " hook --connector codex --enterprise-managed"}, false},
+				{"bare command", map[string]any{"type": "command", "command": testHookBinary}, false},
+				{"other connector exec form", map[string]any{"type": "command", "command": testHookBinary, "args": []any{"hook", "--connector", "codex", "--enterprise-managed"}}, false},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					if got := req.ownedHandler(tc.handler); got != tc.owned {
+						t.Fatalf("ownedHandler = %t, want %t", got, tc.owned)
+					}
+				})
+			}
+			if goos == "windows" {
+				caseChangedExec := map[string]any{"type": "command", "command": strings.ToUpper(testHookBinary), "args": exec["args"]}
+				if !req.ownedHandler(caseChangedExec) {
+					t.Fatal("Windows path case changed for the current exec form")
+				}
+			}
+		})
+	}
+}
+
+func TestR108ExecFormClaudeGuardDecision(t *testing.T) {
+	req := guardRequest(t, ConnectorClaudeCode, config.ForeignHooksRemove)
+	path := filepath.Join(req.Home, ".claude", "settings.json")
+	for _, tc := range []struct {
+		name, command string
+		deny          bool
+	}{
+		{"prior shell form", shellQuote(req.HookBinary) + " hook --connector claudecode --enterprise-managed", false},
+		{"case changed bare command", strings.ToUpper(req.HookBinary), true},
+		{"other connector shell form", shellQuote(req.HookBinary) + " hook --connector codex --enterprise-managed", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeFile(t, path, `{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":`+jsonString(tc.command)+`}] }]}}`)
+			decision := EvaluateForeignHooks(req)
+			wantFindings := 0
+			if tc.deny {
+				wantFindings = 1
+			}
+			if decision.Deny != tc.deny || len(decision.Findings) != wantFindings {
+				t.Fatalf("decision = %+v, want deny=%t", decision, tc.deny)
+			}
+		})
+	}
+}
+
 func TestGuardOwnershipCoversEveryExecutableField(t *testing.T) {
 	owned := `'` + testHookBinary + `' hook --connector copilot --enterprise-managed --event 'preToolUse'`
 	req := guardRequest(t, "copilot", config.ForeignHooksRemove)
@@ -602,6 +687,92 @@ func TestGuardApprovalCoversPluginDirectoryContent(t *testing.T) {
 	writeFile(t, filepath.Join(plugin, "lib", "rewrite.ts"), "export const x = 1")
 	if decision := EvaluateForeignHooks(req); !decision.Deny {
 		t.Fatalf("a changed plugin directory must deny: %+v", decision)
+	}
+}
+
+func TestGuardApprovalCoversConfiguredPluginDirectoryContent(t *testing.T) {
+	for _, form := range []string{"relative", "absolute", "file URL", "package options"} {
+		t.Run(form, func(t *testing.T) {
+			req := guardRequest(t, "opencode", config.ForeignHooksRemove)
+			configDir := filepath.Join(req.Home, ".config", "opencode")
+			plugin := filepath.Join(configDir, "local-helper")
+			writeFile(t, filepath.Join(plugin, "index.js"), "export default { id: 'fixture' }")
+			var spec any = "./local-helper"
+			switch form {
+			case "absolute":
+				spec = plugin
+			case "file URL":
+				spec = "file://" + filepath.ToSlash(plugin)
+			case "package options":
+				spec = map[string]any{"package": "./local-helper", "options": map[string]any{"strict": true}}
+			}
+			doc, err := json.Marshal(map[string]any{"plugins": []any{spec}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, filepath.Join(configDir, "opencode.json"), string(doc))
+			first := EvaluateForeignHooks(req)
+			if !first.Deny || len(first.Findings) != 1 {
+				t.Fatalf("configured plugin needs approval: %+v", first)
+			}
+			req.Policy.AllowedHooks = []string{first.Findings[0].Digest}
+			if again := EvaluateForeignHooks(req); again.Deny {
+				t.Fatalf("unchanged configured plugin must retain approval: %+v", again)
+			}
+			writeFile(t, filepath.Join(plugin, "index.js"), "export default { id: 'changed' }")
+			if again := EvaluateForeignHooks(req); !again.Deny {
+				t.Fatalf("changed index.js must invalidate approval: %+v", again)
+			}
+			writeFile(t, filepath.Join(plugin, "index.js"), "export default { id: 'fixture' }")
+			writeFile(t, filepath.Join(plugin, "lib", "nested.js"), "export const fixture = true")
+			if again := EvaluateForeignHooks(req); !again.Deny {
+				t.Fatalf("nested module changes must invalidate approval: %+v", again)
+			}
+		})
+	}
+}
+
+func TestGuardUnverifiableConfiguredPluginDirectoryCannotBeApproved(t *testing.T) {
+	req := guardRequest(t, "opencode", config.ForeignHooksRemove)
+	root := filepath.Join(req.Home, ".config", "opencode")
+	plugin := filepath.Join(root, "local-helper")
+	writeFile(t, filepath.Join(plugin, "index.js"), "fixture")
+	if err := os.Truncate(filepath.Join(plugin, "index.js"), guardReferencedFileLimit+1); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, "opencode.json"), `{"plugins":["./local-helper"]}`)
+	first := EvaluateForeignHooks(req)
+	if len(first.Findings) != 1 {
+		t.Fatalf("unverifiable configured plugin must be reported: %+v", first)
+	}
+	req.Policy.AllowedHooks = []string{first.Findings[0].Digest}
+	if again := EvaluateForeignHooks(req); !again.Deny || again.Findings[0].Allowed {
+		t.Fatalf("a configured tree beyond the verification limits cannot be approved: %+v", again)
+	}
+}
+
+func TestCleanupPreservesUnrelatedPluginFields(t *testing.T) {
+	for _, value := range []any{"unchanged", true, nil, map[string]any{"options": "unchanged"}} {
+		t.Run(fmt.Sprint(value), func(t *testing.T) {
+			req := guardRequest(t, "opencode", config.ForeignHooksRemove)
+			req.AccountHome = req.Home
+			path := filepath.Join(req.Home, ".config", "opencode", "opencode.json")
+			doc, err := json.Marshal(map[string]any{"plugin": []any{"foreign-fixture"}, "plugins": value})
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, path, string(doc))
+			if result, err := CleanUserForeignHooks(req, time.Now()); err != nil || len(result.Removed) != 1 {
+				t.Fatalf("cleanup must remove only the selected plugin: %+v, %v", result, err)
+			}
+			var actual map[string]any
+			if err := json.Unmarshal([]byte(readFile(t, path)), &actual); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(actual["plugins"], value) {
+				t.Fatalf("cleanup changed an unrelated plugin value: %#v, want %#v", actual["plugins"], value)
+			}
+		})
 	}
 }
 

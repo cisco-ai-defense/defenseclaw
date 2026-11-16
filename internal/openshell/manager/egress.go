@@ -30,6 +30,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
+
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
@@ -151,10 +153,6 @@ func (m *Manager) Decider() (*egress.Decider, error) {
 	return m.egressDecider(cfg, base)
 }
 
-// A daemon has one active manager. Keep overlapping refreshes ordered even
-// when a configuration check and an explicit adoption arrive together.
-var refreshEgressMu sync.Mutex
-
 // refreshEgress re-resolves every sandbox's policy, re-registers its proxy
 // credential with its rebuilt decider, and swaps in a new default decider,
 // which also retires the proxy's pooled upstream connections. It runs after
@@ -163,8 +161,8 @@ func (m *Manager) refreshEgress() {
 	// The config loop can still be resolving the closed floor when a
 	// managed daemon confirms a registration. Serialize the refreshes so
 	// an older resolution cannot overwrite the confirmed sandbox view.
-	refreshEgressMu.Lock()
-	defer refreshEgressMu.Unlock()
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
 	cfg := m.opts.Config()
 	m.mu.Lock()
 	m.cfgSeen = cfg
@@ -176,6 +174,7 @@ func (m *Manager) refreshEgress() {
 	}
 	proxy := m.proxy
 	m.mu.Unlock()
+	m.prefetchDecisions(boxes)
 	for _, b := range boxes {
 		eff, err := m.resolveBox(b)
 		if err != nil {
@@ -211,8 +210,23 @@ func (m *Manager) RefreshPolicies() { m.refreshEgress() }
 // feed says so once. Without a decider the credential is revoked.
 func (m *Manager) syncCredential(b *box, eff *packs.Effective) {
 	m.mu.Lock()
-	cred, rec, d := b.cred, b.rec, b.decider
+	cred, rec, d, phase := b.cred, b.rec, b.decider, b.phase
+	if b.sb != nil {
+		// Adoption recovers credentials before lifecycle republishes the
+		// phase. Use OpenShell's live phase so an old Completed record never
+		// gets an open proxy window during a daemon restart.
+		phase = auditPhase(b.sb.Status.Phase)
+		if phase == audit.SandboxPhaseError {
+			if said := openshell.FailureReason(b.sb); said != "" {
+				rec.PhaseReason = said
+			}
+		}
+	}
 	m.mu.Unlock()
+	if rec.OldSupervisorNetworkClosed || rec.Contained != "" || oldSupervisorLive(phase, rec) {
+		m.suspendOldSupervisorEgress(b)
+		return
+	}
 	if cred.Username == "" || rec.BindingID == "" || eff == nil {
 		return
 	}
@@ -231,6 +245,455 @@ func (m *Manager) syncCredential(b *box, eff *packs.Effective) {
 		m.noteEgressOff(b, "")
 	}
 	m.recheckEgress(rec.BindingID)
+}
+
+const oldSupervisorEgressOff = legacyUnprotected + ": it may run the supervisor of an OpenShell release older than " + openshell.SupportedMin +
+	", so DefenseClaw's egress proxy is closed to it until it stops"
+
+const containedEgressOff = containedUnprotected + ": DefenseClaw had to stop it but could not sync its MicroVM's disk first, " +
+	"so DefenseClaw's egress proxy is closed to it until its next session"
+
+// suspendOldSupervisorEgress closes the DefenseClaw proxy route, including
+// tunnels already open. Called again on policy refresh so a legacy or
+// contained guest (unprotectedLive) is never registered again while it
+// lives.
+func (m *Manager) suspendOldSupervisorEgress(b *box) {
+	m.mu.Lock()
+	cred, rec, phase := b.cred, b.rec, b.phase
+	m.mu.Unlock()
+	if rec.BindingID == "" {
+		return
+	}
+	reason := oldSupervisorEgressOff
+	if rec.Contained != "" && !oldSupervisorLive(phase, rec) {
+		reason = containedEgressOff
+	}
+	why := egress.Decision{Category: egress.CategoryEgressOff, Source: egress.SourceDefault, Reason: reason}
+	if cred.Username == "" || m.creds.Suspend(cred, m.principal(rec.BindingID, scopeID(rec.ID, rec.Name), rec.Name, nil, nil), why) != nil {
+		m.creds.Revoke(rec.BindingID)
+	}
+	m.recheckEgress(rec.BindingID)
+	m.noteEgressOff(b, reason)
+}
+
+// containOldSupervisorNetwork closes DefenseClaw's egress proxy to a live
+// legacy guest (oldSupervisorLive) and withdraws every OpenShell network
+// rule and provider of it. That is what DefenseClaw added to its network,
+// not a containment of the old broker, which passes a socket it cannot
+// inspect to the native call (GAP-0831): the guest stays reported
+// unprotected, and no new sandbox runs while it lives (legacyRunRefusal).
+// The proxy suspension runs first even if the gateway cannot be reached. A
+// rule update is conditional on the current resource version, so a
+// concurrent new session cannot have its rules stripped. Reconcile retries
+// failed or not-yet-loaded updates.
+func (m *Manager) containOldSupervisorNetwork(ctx context.Context, b *box) {
+	m.suspendOldSupervisorEgress(b)
+	if !b.op.TryLock() {
+		m.scheduleOldSupervisorNetwork(b)
+		return
+	}
+	defer b.op.Unlock()
+	m.containOldSupervisorNetworkLocked(ctx, b)
+}
+
+// networkWithdrawn refuses a network rule for sandbox name while DefenseClaw
+// keeps its network withdrawn (containOldSupervisorNetwork): a legacy guest
+// on an old supervisor gets no rule from DefenseClaw, whoever approved it
+// (the automatic approvals of an open pack, the user, a host port), until it
+// runs on the current supervisor; an approval would undo the containment
+// (GAP-1859). Callers must not hold m.mu.
+func (m *Manager) networkWithdrawn(name string) error {
+	m.mu.Lock()
+	b := m.boxes[name]
+	if b == nil {
+		m.mu.Unlock()
+		return nil
+	}
+	rec, phase := b.rec, b.phase
+	if b.sb != nil {
+		phase = auditPhase(b.sb.Status.Phase)
+	}
+	m.mu.Unlock()
+	if !rec.OldSupervisorNetworkClosed && !oldSupervisorLive(phase, rec) {
+		return nil
+	}
+	return sandboxapi.Errorf(sandboxapi.CodeConflict, "%s: %s: DefenseClaw withdrew its network rules and adds none while it runs on that supervisor; %s",
+		name, legacyUnprotected, legacyWayOn(name, phase, rec.Driver))
+}
+
+// scheduleOldSupervisorNetwork waits for a concurrent start, stop or delete
+// to finish before withdrawing rules. In particular, a start cannot read
+// the old record before containment and then launch under a stripped policy.
+func (m *Manager) scheduleOldSupervisorNetwork(b *box) {
+	m.mu.Lock()
+	if b.oldSupervisorNetworkBusy {
+		m.mu.Unlock()
+		return
+	}
+	b.oldSupervisorNetworkBusy = true
+	b.oldSupervisorNetworkErr = "network containment is pending behind a sandbox operation"
+	m.mu.Unlock()
+	m.tamperStops.Add(1)
+	go func() {
+		defer m.tamperStops.Done()
+		b.op.Lock()
+		defer b.op.Unlock()
+		defer func() {
+			m.mu.Lock()
+			b.oldSupervisorNetworkBusy = false
+			m.mu.Unlock()
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), defaultOpTimeout)
+		defer cancel()
+		m.containOldSupervisorNetworkLocked(ctx, b)
+	}()
+}
+
+// containOldSupervisorNetworkLocked runs with the sandbox operation lock,
+// so the start cannot race between closing its old rules and recording that
+// it must restore the create-time rules on the new supervisor. It withdraws
+// the network of a live legacy or contained guest (unprotectedLive).
+func (m *Manager) containOldSupervisorNetworkLocked(ctx context.Context, b *box) {
+	m.mu.Lock()
+	rec, phase := b.rec, b.phase
+	m.mu.Unlock()
+	if !unprotectedLive(phase, rec) {
+		m.mu.Lock()
+		b.oldSupervisorNetworkErr = ""
+		m.mu.Unlock()
+		return
+	}
+	_ = m.closeNetworkLocked(ctx, b)
+}
+
+// closeNetworkLocked withdraws every OpenShell network rule and provider of
+// b and confirms the closed policy loaded (withdrawOldSupervisorRules),
+// records it closed, and says once in the feed that a withdrawal failed.
+// It returns why it failed. The caller holds b's operation lock.
+func (m *Manager) closeNetworkLocked(ctx context.Context, b *box) error {
+	m.mu.Lock()
+	rec, phase := b.rec, b.phase
+	m.mu.Unlock()
+	err := m.withdrawOldSupervisorRules(ctx, b)
+	m.mu.Lock()
+	newlyClosed := err == nil && !b.rec.OldSupervisorNetworkClosed
+	if newlyClosed {
+		b.rec.OldSupervisorNetworkClosed = true
+	}
+	m.mu.Unlock()
+	if newlyClosed {
+		if saveErr := m.saveRecord(b); saveErr != nil {
+			err = fmt.Errorf("save the closed-network state: %w", saveErr)
+			m.mu.Lock()
+			b.rec.OldSupervisorNetworkClosed = false
+			m.mu.Unlock()
+		}
+	}
+	m.mu.Lock()
+	previous := b.oldSupervisorNetworkErr
+	b.oldSupervisorNetworkErr = ""
+	if err != nil {
+		b.oldSupervisorNetworkErr = err.Error()
+	}
+	changed := previous != b.oldSupervisorNetworkErr
+	m.mu.Unlock()
+	if err != nil && changed {
+		m.logf("cannot close the network of %s: %v", rec.Name, err)
+		reason, msg := sandboxapi.ReasonOldSupervisor, legacyUnprotected+": "+legacyRulesKept
+		if !oldSupervisorLive(phase, rec) {
+			reason, msg = sandboxapi.ReasonContained, containedUnprotected+": "+containedRulesKept
+		}
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: rec.Name, Severity: "HIGH",
+			Reason: reason, Message: "⚠ " + rec.Name + ": " + msg + err.Error() + "; " + legacyWayOn(rec.Name, phase, rec.Driver)})
+	}
+	return err
+}
+
+// containUnsynced keeps running, contained, the MicroVM of b that
+// DefenseClaw must not leave as it is (why: a security alarm's stop,
+// WithEmergencyStop, or a start that failed, stopUnverified) but cannot
+// stop without losing what its guest has not synced: DefenseClaw never
+// stops a MicroVM after a failed sync on its own (GAP-0902). The record
+// says so first (record.Contained), so a restarted daemon keeps it
+// contained and the next start restores its create-time network. Then
+// DefenseClaw's egress proxy closes to it, its ingress token is rotated
+// where a provider delivers it (the token a program on a lost listener may
+// have seen stops authenticating; the next start delivers a new one), and
+// the network rules (approved host ports among them) and providers it
+// added are withdrawn, confirmed loaded; reconcile retries a withdrawal
+// that failed. It is reported unprotected, no new sandbox runs while it
+// lives (containedLive), and the feed says so. It returns what could not
+// be done or confirmed. The caller holds b's operation lock.
+func (m *Manager) containUnsynced(ctx context.Context, b *box, why string) error {
+	// Exclusive: a create or start past its last run check (lockRun) runs
+	// its sandbox first, and every later one is refused.
+	m.runGate.Lock()
+	m.mu.Lock()
+	first := b.rec.Contained == ""
+	if first {
+		b.rec.Contained = why
+	}
+	m.mu.Unlock()
+	m.runGate.Unlock()
+	var errs []error
+	if first {
+		// Kept in memory when the record cannot say so: it fails closed.
+		if err := m.saveRecord(b); err != nil {
+			errs = append(errs, fmt.Errorf("record that it is contained: %w", err))
+		}
+	}
+	m.suspendOldSupervisorEgress(b)
+	if err := m.rotateContainedIngress(b); err != nil {
+		errs = append(errs, err)
+	}
+	if err := m.closeNetworkLocked(ctx, b); err != nil {
+		errs = append(errs, fmt.Errorf("withdraw its network rules and providers: %w", err))
+	}
+	err := errors.Join(errs...)
+	m.mu.Lock()
+	name, contained, phase, driver := b.rec.Name, b.rec.Contained, b.phase, b.rec.Driver
+	m.mu.Unlock()
+	msg := "⚠ " + name + ": " + containedWords(name, contained, phase, driver)
+	if err != nil {
+		msg += ". DefenseClaw could not confirm it contained: " + err.Error()
+	}
+	m.logf("sandbox %s: kept running, contained, for %s: %v", name, why, err)
+	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: name, Severity: "HIGH",
+		Reason: sandboxapi.ReasonContained, Message: truncate(msg, 2048)})
+	return err
+}
+
+// rotateContainedIngress rotates the ingress token of a contained sandbox
+// whose token a provider delivers: the guest's token stops authenticating
+// at once, and the next start delivers a new one. With token_delivery: env
+// the token is a variable of the sandbox spec, which OpenShell cannot
+// change after create, so it is kept, as a start keeps it.
+func (m *Manager) rotateContainedIngress(b *box) error {
+	m.mu.Lock()
+	id, delivery := b.rec.BindingID, b.rec.TokenDelivery
+	m.mu.Unlock()
+	if id == "" || delivery != config.OpenShellTokenDeliveryProvider {
+		return nil
+	}
+	binding, _, err := m.opts.Bindings.Rotate(id)
+	if err != nil {
+		return fmt.Errorf("rotate its ingress token: %w", err)
+	}
+	if m.opts.ForgetBinding != nil {
+		m.opts.ForgetBinding(binding.ID)
+	}
+	return nil
+}
+
+func (m *Manager) withdrawOldSupervisorRules(ctx context.Context, b *box) error {
+	m.mu.Lock()
+	rec := b.rec
+	m.mu.Unlock()
+	name := rec.Name
+	gw, err := m.gateway(ctx)
+	if err != nil {
+		return err
+	}
+	sb, err := m.getSandbox(ctx, gw, name)
+	if err != nil {
+		return err
+	}
+	if sb == nil || (sb.Status.Phase != openshell.PhaseReady && sb.Status.Phase != openshell.PhaseCompleted && sb.Status.Phase != openshell.PhaseError) {
+		return fmt.Errorf("OpenShell no longer reports this sandbox live")
+	}
+	// OpenShell composes attached providers' direct endpoints into the
+	// effective policy. Removing their generated rule names from the base
+	// policy cannot close those routes: detach first, and remember exactly
+	// what this containment detached for the next safe supervisor.
+	// Before the first change, the record says the next session must get
+	// the create-time network back (OldSupervisorNetworkRestore), whatever
+	// stops this containment later; a record that can't say so changes
+	// nothing.
+	active := slices.Clone(sb.Spec.Providers)
+	rec.OldSupervisorProviders = slices.Clone(rec.OldSupervisorProviders)
+	changed := !rec.OldSupervisorNetworkRestore
+	for _, provider := range active {
+		if slices.Contains(rec.Providers, provider) && !slices.Contains(rec.DetachedProviders, provider) &&
+			!slices.Contains(rec.OldSupervisorProviders, provider) {
+			rec.OldSupervisorProviders = append(rec.OldSupervisorProviders, provider)
+			changed = true
+		}
+	}
+	if changed {
+		slices.Sort(rec.OldSupervisorProviders)
+		m.mu.Lock()
+		restore, providers := b.rec.OldSupervisorNetworkRestore, b.rec.OldSupervisorProviders
+		b.rec.OldSupervisorNetworkRestore, b.rec.OldSupervisorProviders = true, rec.OldSupervisorProviders
+		m.mu.Unlock()
+		if err := m.saveRecord(b); err != nil {
+			m.mu.Lock()
+			b.rec.OldSupervisorNetworkRestore, b.rec.OldSupervisorProviders = restore, providers
+			m.mu.Unlock()
+			return fmt.Errorf("save the network to restore: %w", err)
+		}
+	}
+	for _, provider := range active {
+		if _, err := gw.Client.DetachProvider(ctx, name, provider); err != nil && !openshell.IsNotFound(err) {
+			return fmt.Errorf("detach the direct network of provider %s: %w", provider, err)
+		}
+	}
+	// Confirmed detached: OpenShell reports no provider attached any more.
+	if len(active) > 0 {
+		if sb, err = m.getSandbox(ctx, gw, name); err != nil {
+			return err
+		}
+		if sb == nil {
+			return fmt.Errorf("OpenShell no longer reports this sandbox live")
+		}
+		if len(sb.Spec.Providers) > 0 {
+			return fmt.Errorf("OpenShell still attaches provider %s, whose direct network stays open", strings.Join(sb.Spec.Providers, ", "))
+		}
+	}
+	// A gateway-global policy overrides every sandbox policy and locks it:
+	// it does not lock the providers, detached above, but nothing here can
+	// close the network it allows, so the withdrawal is not confirmed.
+	global, err := gw.Client.GlobalPolicy(ctx)
+	if err != nil {
+		return err
+	}
+	if global != nil {
+		return fmt.Errorf("a gateway-global policy (version %d) overrides this sandbox's network rules and locks them, so the network it allows "+
+			"stays open to the sandbox (its providers' direct network is detached)", global.Version)
+	}
+	cfg, err := gw.Client.SandboxConfig(ctx, name)
+	if err != nil {
+		return err
+	}
+	if cfg == nil || cfg.Policy == nil {
+		return fmt.Errorf("OpenShell returned no sandbox policy")
+	}
+	version := cfg.PolicyVersion
+	if len(cfg.Policy.NetworkPolicies) > 0 {
+		sb, err = m.getSandbox(ctx, gw, name)
+		if err != nil {
+			return err
+		}
+		if sb == nil || (sb.Status.Phase != openshell.PhaseReady && sb.Status.Phase != openshell.PhaseCompleted && sb.Status.Phase != openshell.PhaseError) {
+			return fmt.Errorf("OpenShell no longer reports this sandbox live")
+		}
+		names := make([]string, 0, len(cfg.Policy.NetworkPolicies))
+		for rule := range cfg.Policy.NetworkPolicies {
+			names = append(names, rule)
+		}
+		sort.Strings(names)
+		ops := make([]openshell.PolicyMergeOperation, 0, len(names))
+		for _, rule := range names {
+			ops = append(ops, openshell.PolicyMergeOperation{RemoveRule: &v1.RemoveNetworkRule{RuleName: rule}})
+		}
+		res, err := gw.Client.MergePolicy(ctx, name, ops, openshell.PolicyUpdateOptions{
+			ExpectedResourceVersion: sb.ResourceVersion,
+			Annotations:             map[string]string{"source": "defenseclaw", "reason": "old-supervisor-network"},
+		})
+		if err != nil {
+			return err
+		}
+		if res == nil {
+			return fmt.Errorf("OpenShell returned no policy revision")
+		}
+		version = res.Version
+	}
+	if err := waitNetworkPolicy(ctx, gw, name, version); err != nil {
+		return err
+	}
+	confirmed, err := gw.Client.SandboxConfig(ctx, name)
+	if err != nil {
+		return err
+	}
+	if confirmed == nil || confirmed.Policy == nil || len(confirmed.Policy.NetworkPolicies) != 0 {
+		return fmt.Errorf("OpenShell still reports network rules after the closed policy loaded")
+	}
+	return nil
+}
+
+// waitNetworkPolicy waits for the supervisor to load the revision: a
+// committed gateway revision alone does not close live egress.
+func waitNetworkPolicy(ctx context.Context, gw *Gateway, name string, version uint32) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		status, err := gw.Client.PolicyStatus(ctx, name, 0)
+		if err != nil {
+			return err
+		}
+		if status != nil && status.ActiveVersion == status.Revision.Version && status.ActiveVersion >= version {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("OpenShell did not load network policy revision %d: %w", version, ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+// restoreOldSupervisorNetwork restores only the create-time rules after a
+// new supervisor is ready. Old session approvals are not brought into it.
+func (m *Manager) restoreOldSupervisorNetwork(ctx context.Context, gw *Gateway, b *box, sb *openshell.Sandbox, eff *packs.Effective) error {
+	if sb == nil || sb.Spec.Policy == nil {
+		return fmt.Errorf("OpenShell returned no create-time policy")
+	}
+	m.mu.Lock()
+	rec := b.rec
+	m.mu.Unlock()
+	res, err := gw.Client.SetPolicy(ctx, sb.Name, sb.Spec.Policy, openshell.PolicyUpdateOptions{
+		Annotations: map[string]string{"source": "defenseclaw", "reason": "new-supervisor-network"},
+	})
+	if err != nil {
+		return err
+	}
+	if res == nil {
+		return fmt.Errorf("OpenShell returned no policy revision")
+	}
+	if err := waitNetworkPolicy(ctx, gw, sb.Name, res.Version); err != nil {
+		return err
+	}
+	attached := slices.Clone(sb.Spec.Providers)
+	for _, provider := range rec.OldSupervisorProviders {
+		if !slices.Contains(rec.Providers, provider) || slices.Contains(rec.DetachedProviders, provider) {
+			continue
+		}
+		if slices.Contains(attached, provider) {
+			continue
+		}
+		for _, ep := range rec.ProviderEndpoints {
+			if ep.Provider == provider {
+				if err := endpointRefusal(eff, ep); err != nil {
+					return fmt.Errorf("provider %s is no longer allowed: %w", provider, err)
+				}
+			}
+		}
+		if _, err := gw.Client.AttachProvider(ctx, sb.Name, provider); err != nil {
+			return fmt.Errorf("restore provider %s on the new supervisor: %w", provider, err)
+		}
+		attached = append(attached, provider)
+	}
+	if err := waitNetworkPolicy(ctx, gw, sb.Name, res.Version); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	b.rec.OldSupervisorNetworkClosed = false
+	b.rec.OldSupervisorProviders = nil
+	b.rec.OldSupervisorNetworkRestore = false
+	b.rec.Contained = ""
+	b.oldSupervisorNetworkErr = ""
+	m.mu.Unlock()
+	if err := m.saveRecord(b); err != nil {
+		m.mu.Lock()
+		b.rec.OldSupervisorNetworkClosed = rec.OldSupervisorNetworkClosed
+		b.rec.OldSupervisorProviders = rec.OldSupervisorProviders
+		b.rec.OldSupervisorNetworkRestore = rec.OldSupervisorNetworkRestore
+		b.rec.Contained = rec.Contained
+		m.mu.Unlock()
+		return err
+	}
+	return nil
 }
 
 // egressOffDecision is the refusal a sandbox's suspended egress proxy
@@ -374,13 +837,18 @@ func (m *Manager) enforceAll(ctx context.Context) bool {
 // sandbox reopens, which before stayed cut until the sandbox was created
 // again (GAP-0466). Each reattach is recorded and published; one that
 // fails is retried on the next pass. A sandbox whose policy cannot be
-// resolved (eff nil) gets nothing back.
+// resolved (eff nil) gets nothing back, and neither does a legacy guest
+// whose network DefenseClaw withdrew (networkWithdrawn): a provider rule
+// opens its endpoint around the egress proxy on a supervisor DefenseClaw
+// cannot contain, so it waits for the restart on the current supervisor
+// like every other rule (GAP-1859).
 func (m *Manager) restoreProviderEndpoints(ctx context.Context, gw *Gateway, b *box, eff *packs.Effective) {
 	m.mu.Lock()
 	rec, ready := b.rec, b.phase == audit.SandboxPhaseReady && !b.deleted && !b.creating
 	m.mu.Unlock()
 	if !ready || eff == nil || len(rec.DetachedProviders) == 0 ||
-		credentialsRefusal(m.floor(eff), rec.CredentialProfile, len(rec.Credentials) > 0) != nil {
+		credentialsRefusal(m.floor(eff), rec.CredentialProfile, len(rec.Credentials) > 0) != nil ||
+		m.networkWithdrawn(rec.Name) != nil {
 		return
 	}
 	for _, provider := range rec.DetachedProviders {
@@ -456,6 +924,18 @@ func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*
 	return m.unblock(ctx, req, "")
 }
 
+// modelHostUnblockNote ends the message of an unblock of the sandbox's own
+// model host. OpenShell's provider rule opens that host only to the
+// agent's own programs, for its model calls with the credential, and
+// DefenseClaw never adds another program to that rule (triage judgeRule),
+// so the other programs in the sandbox still cannot reach the host: the
+// unblock lifts only DefenseClaw's own refusal. A bare "unblocked" read as
+// done while the next fetch was refused again (GAP-0178, GAP-0183).
+func modelHostUnblockNote(host string) string {
+	return "; " + host + " is also this sandbox's model host, which OpenShell opens only to the agent's own programs " +
+		"for its model calls, so OpenShell still refuses the other programs in the sandbox there (an unblock or an allow entry does not change that)"
+}
+
 // unblock is Unblock for a decision that may answer an ask (approvalID: the
 // ask a proxy refusal raised, proxyAsk), so the managed gateway's record of
 // it names the ask.
@@ -471,7 +951,7 @@ func (m *Manager) unblock(ctx context.Context, req sandboxapi.UnblockRequest, ap
 		// The managed gateway keeps an "always" for the person, and
 		// learns who that is from one of their sandboxes: the one they
 		// run, else the one they name with --sandbox (GAP-0609).
-		name, err := m.personSandbox()
+		name, err := m.personSandbox("unblock")
 		if err != nil {
 			return nil, err
 		}
@@ -482,6 +962,9 @@ func (m *Manager) unblock(ctx context.Context, req sandboxapi.UnblockRequest, ap
 	// second must not be decided, and reported done, against the block
 	// list from before the write (GAP-0173).
 	m.syncConfig(ctx)
+	if req.Sandbox != "" {
+		m.confirmPolicy(ctx, req.Sandbox)
+	}
 	var (
 		b   *box
 		eff *packs.Effective
@@ -576,6 +1059,9 @@ func (m *Manager) unblock(ctx context.Context, req sandboxapi.UnblockRequest, ap
 		if m.managedMode() {
 			resp.Message += " until it stops"
 		}
+		if m.modelEndpointHost(b, host) {
+			resp.Message += modelHostUnblockNote(host)
+		}
 	}
 	if b != nil {
 		m.mu.Lock()
@@ -599,10 +1085,10 @@ func (m *Manager) unblock(ctx context.Context, req sandboxapi.UnblockRequest, ap
 }
 
 // personSandbox names the sandbox through which the managed gateway keeps
-// an "always" unblock made without --sandbox: the person's one sandbox.
+// a lasting decision made without --sandbox: the person's one sandbox.
 // Their sandboxes may match different profiles, whose floors check it, so
 // with several they name one.
-func (m *Manager) personSandbox() (string, error) {
+func (m *Manager) personSandbox(action string) (string, error) {
 	var names []string
 	for _, b := range m.liveBoxes() {
 		m.mu.Lock()
@@ -615,14 +1101,76 @@ func (m *Manager) personSandbox() (string, error) {
 	switch len(names) {
 	case 0:
 		return "", sandboxapi.Errorf(sandboxapi.CodeInvalid,
-			"on a managed computer, your organization's DefenseClaw gateway keeps an unblock for every sandbox through one of your sandboxes, "+
-				"and none is running; start one with `defenseclaw sandbox run`, then unblock again")
+			"start a sandbox with `defenseclaw sandbox run`, then %s again", action)
 	case 1:
 		return names[0], nil
 	}
+	hint := "--sandbox NAME"
+	if action == "unblock" {
+		hint += " --always"
+	}
 	return "", sandboxapi.Errorf(sandboxapi.CodeInvalid,
-		"you have several sandboxes (%s), whose profiles may differ: name the one whose policy checks the unblock, with --sandbox NAME --always",
-		strings.Join(names, ", "))
+		"you have several sandboxes (%s), whose profiles may differ: name one with %s",
+		strings.Join(names, ", "), hint)
+}
+
+// PolicyDecision records an always allow or block through the managed
+// gateway. Its registration selects the caller's own floor; the gateway
+// rechecks and records the decision before the daemon refreshes egress.
+func (m *Manager) PolicyDecision(ctx context.Context, req sandboxapi.PolicyDecisionRequest) (*sandboxapi.PolicyDecisionResponse, error) {
+	if m.authority() == nil {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "this command is for a managed computer")
+	}
+	host := triage.NormalizeHost(req.Host)
+	if host == "" || strings.ContainsAny(host, "*/ \t") || config.ValidateOpenShellEgressPattern(host) != nil {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "name one destination host or IP address")
+	}
+	if req.Kind != "allow" && req.Kind != "block" {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "choose allow or block")
+	}
+	name := req.Sandbox
+	if name == "" {
+		var err error
+		name, err = m.personSandbox("record this decision")
+		if err != nil {
+			return nil, err
+		}
+	}
+	b, err := m.box(name)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.refuseRetained(b); err != nil {
+		return nil, err
+	}
+	kind := sandboxrelay.DecisionEgressAllow
+	if req.Kind == "block" {
+		kind = sandboxrelay.DecisionEgressBlock
+	} else {
+		eff, err := m.resolveBox(b)
+		if err != nil {
+			return nil, err
+		}
+		if err := triage.CheckUnblock(eff, host); err != nil {
+			return nil, m.decisionViolation(ctx, err, b, eff, audit.SandboxEgressUnblock, host)
+		}
+		if err := triage.CheckApproval(eff, host, 0, true); err != nil {
+			return nil, m.decisionViolation(ctx, err, b, eff, audit.SandboxEgressUnblock, host)
+		}
+		floor := m.floor(eff)
+		if err := sandboxreg.CheckApprovals(floor, kind, sandboxrelay.DecisionScopeAlways); err != nil {
+			m.recordAdminRefusal(ctx, name, audit.SandboxEgressUnblock, host)
+			return nil, m.decisionRefusal(err, b, floor, host)
+		}
+	}
+	stored, err := m.keepDecision(ctx, b, kind, host, sandboxrelay.DecisionScopeAlways, "")
+	if err != nil {
+		return nil, err
+	}
+	if !stored {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeUnavailable, "the decision was not saved; try again")
+	}
+	return &sandboxapi.PolicyDecisionResponse{Sandbox: name, Host: host, Kind: req.Kind}, nil
 }
 
 // decisionViolation is violationErrorFor for a decision about host in
@@ -640,7 +1188,11 @@ func (m *Manager) decisionViolation(ctx context.Context, err error, b *box, eff 
 	}
 	var v *packs.Violation
 	if errors.As(err, &v) {
-		if rule := adminRule(v); rule != "" {
+		rule := adminRule(v)
+		if rule == "" && m.authority() != nil {
+			rule = floorRule(v, m.floor(eff))
+		}
+		if rule != "" {
 			m.logf("%s: sandbox %s: %s", gatewaylog.ErrCodeOpenShellAdminViolation, sandbox, v.Error())
 			m.recordAdminRefusal(ctx, sandbox, op, host)
 			// The check's words when they name the host ("… matches
@@ -658,6 +1210,22 @@ func (m *Manager) decisionViolation(ctx context.Context, err error, b *box, eff 
 	return m.violationErrorFor(ctx, err, sandbox, op, host)
 }
 
+// floorRule is the floor key behind a pack or profile refusal that the
+// organization imposed on a managed sandbox: its required pack's own block
+// list (required_pack), or the strict profile min_profile requires
+// (min_profile). The person can't change either, so the refusal reads as
+// every managed refusal does, with the request-access line (GAP-0175). ""
+// for a pack or profile the person chose.
+func floorRule(v *packs.Violation, f config.OpenShellAdminConfig) string {
+	switch {
+	case strings.HasPrefix(v.Constraint, "pack ") && strings.TrimSpace(f.RequiredPack) != "":
+		return "required_pack"
+	case v.Constraint == "profile "+config.OpenShellProfileStrict && sandboxreg.StrictFloor(f):
+		return sandboxreg.RuleMinProfile
+	}
+	return ""
+}
+
 // syncConfig loads config.yaml into the configuration snapshot
 // (Options.SyncConfig). A file the reload refuses keeps the snapshot as it
 // is; the reload reports why in the daemon's health.
@@ -667,6 +1235,14 @@ func (m *Manager) syncConfig(ctx context.Context) {
 	}
 	if err := m.opts.SyncConfig(ctx); err != nil {
 		m.logf("load config.yaml before the decision: %v", err)
+	}
+}
+
+// confirmPolicy brings sandbox's policy up to date before a decision for it
+// (Options.ConfirmPolicy).
+func (m *Manager) confirmPolicy(ctx context.Context, sandbox string) {
+	if m.opts.ConfirmPolicy != nil {
+		m.opts.ConfirmPolicy(ctx, sandbox)
 	}
 }
 
@@ -736,6 +1312,11 @@ type egressSink struct {
 	mu       sync.Mutex
 	recent   map[refusalKey]*refusal
 	overflow []egress.Event
+	// pendingAudit waits for the bounded OpenShell proxy-open matching window.
+	pendingAudit []pendingProxyAudit
+	// tunnelActors retains the first audit event's process, including an
+	// unknown process, for later records from that same tunnel.
+	tunnelActors map[proxyTunnelKey]proxyTunnelActor
 	// heldAt is when flush last reported what the pacing held back.
 	heldAt time.Time
 	// openshell folds OpenShell's own refusals like recent folds the
@@ -890,6 +1471,137 @@ type refusal struct {
 
 const egressSinkBuffer = 4096
 
+// pendingProxyAudit keeps a proxy record until OpenShell has had the same
+// matching window as the destinations view to report its process. A full
+// queue still records the oldest event, without making up an actor.
+type pendingProxyAudit struct {
+	box      *box
+	event    audit.SandboxEgressEvent
+	queued   time.Time
+	tunnelID string
+	kind     egress.EventKind
+}
+
+const maxPendingProxyAudit = egressSinkBuffer
+
+type proxyTunnelKey struct {
+	box *box
+	id  string
+}
+
+type proxyTunnelActor struct {
+	binary string
+	pid    int
+}
+
+type proxyAuditSource struct {
+	tunnelID string
+	kind     egress.EventKind
+}
+
+// The proxy limits active tunnels per binding. This additional bound also
+// limits retained actors if a close event is lost; eviction leaves the actor
+// of an older tunnel unknown.
+const maxProxyTunnelActors = egressSinkBuffer
+
+func (s *egressSink) recordProxyAudit(ctx context.Context, b *box, ev audit.SandboxEgressEvent, source ...proxyAuditSource) {
+	pending := pendingProxyAudit{box: b, event: ev, queued: s.m.now()}
+	if len(source) != 0 {
+		pending.tunnelID, pending.kind = source[0].tunnelID, source[0].kind
+	}
+	s.mu.Lock()
+	s.pendingAudit = append(s.pendingAudit, pending)
+	var oldest pendingProxyAudit
+	full := len(s.pendingAudit) > maxPendingProxyAudit
+	if full {
+		oldest = s.pendingAudit[0]
+		s.pendingAudit = s.pendingAudit[1:]
+	}
+	s.mu.Unlock()
+	if full {
+		// The matching window has not ended, so an early eviction cannot
+		// safely name a process that might be contradicted by a later open.
+		s.emitProxyAudit(ctx, oldest, false)
+	}
+}
+
+func (s *egressSink) emitProxyAudit(ctx context.Context, pending pendingProxyAudit, matchComplete bool) {
+	var key proxyTunnelKey
+	var actor proxyTunnelActor
+	if pending.tunnelID != "" {
+		key = proxyTunnelKey{box: pending.box, id: pending.tunnelID}
+		s.mu.Lock()
+		retained, seen := s.tunnelActors[key]
+		if seen && pending.kind == egress.EventClosed {
+			delete(s.tunnelActors, key)
+		}
+		s.mu.Unlock()
+		if seen {
+			// A later record keeps its opening actor, even when it was
+			// unknown and another program has since opened the proxy.
+			pending.event.Executable, pending.event.PID = retained.binary, retained.pid
+			s.m.tel.RecordSandboxEgress(ctx, pending.event)
+			return
+		}
+	}
+	if matchComplete {
+		s.m.mu.Lock()
+		opens := slices.Clone(pending.box.proxyOpens)
+		s.m.mu.Unlock()
+		at := pending.event.Timestamp
+		if at.IsZero() {
+			at = pending.queued
+		}
+		if binary, pid, _, ok := proxyActor(opens, at); ok {
+			actor = proxyTunnelActor{binary: binary, pid: pid}
+		}
+	}
+	if pending.tunnelID != "" {
+		s.mu.Lock()
+		if retained, seen := s.tunnelActors[key]; seen {
+			actor = retained
+			if pending.kind == egress.EventClosed {
+				delete(s.tunnelActors, key)
+			}
+		} else if pending.kind != egress.EventClosed {
+			if s.tunnelActors == nil {
+				s.tunnelActors = make(map[proxyTunnelKey]proxyTunnelActor)
+			}
+			if len(s.tunnelActors) >= maxProxyTunnelActors {
+				for oldest := range s.tunnelActors {
+					delete(s.tunnelActors, oldest)
+					break
+				}
+			}
+			s.tunnelActors[key] = actor
+		}
+		s.mu.Unlock()
+	}
+	pending.event.Executable, pending.event.PID = actor.binary, actor.pid
+	s.m.tel.RecordSandboxEgress(ctx, pending.event)
+}
+
+func (s *egressSink) flushProxyAudit(ctx context.Context, now time.Time, all bool) {
+	s.mu.Lock()
+	ready := make([]pendingProxyAudit, 0)
+	kept := s.pendingAudit[:0]
+	for _, pending := range s.pendingAudit {
+		if all || !now.Before(pending.queued.Add(proxyOpenWindow)) {
+			ready = append(ready, pending)
+		} else {
+			kept = append(kept, pending)
+		}
+	}
+	clear(s.pendingAudit[len(kept):])
+	s.pendingAudit = kept
+	s.mu.Unlock()
+	for _, pending := range ready {
+		// Shutdown cannot wait for a late OpenShell record. An already
+		// resolved tunnel actor is still safe to use for its later records.
+		s.emitProxyAudit(ctx, pending, !now.Before(pending.queued.Add(proxyOpenWindow)))
+	}
+}
+
 func newEgressSink(m *Manager) *egressSink {
 	return &egressSink{m: m, ch: make(chan sinkItem, egressSinkBuffer), wake: make(chan struct{}, 1),
 		blocked: newRateGate(blockedBurst, blockedRate), recent: map[refusalKey]*refusal{}}
@@ -979,6 +1691,7 @@ func (s *egressSink) run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			s.flushProxyAudit(context.WithoutCancel(ctx), s.m.now(), true)
 			return
 		case it := <-s.ch:
 			s.m.egressEvent(ctx, it.ev, it.repeats)
@@ -1007,6 +1720,7 @@ func (s *egressSink) drainOverflow(ctx context.Context) {
 // reports the refusals and feed events each sandbox's pacing held back.
 func (s *egressSink) flush(ctx context.Context) {
 	now := s.m.now()
+	s.flushProxyAudit(ctx, now, false)
 	s.m.reportAuthFailures(ctx, now)
 	s.flushOpenShell(ctx, now)
 	var folded []sinkItem
@@ -1146,7 +1860,7 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 			// audited, but no alert.
 			ev.DecisionCode, ev.Severity = audit.SandboxEgressCodeHarnessFetch, "INFO"
 		}
-		m.tel.RecordSandboxEgress(ctx, ev)
+		m.sink.recordProxyAudit(ctx, b, ev, proxyAuditSource{tunnelID: e.TunnelID, kind: e.Kind})
 		if fetch {
 			return
 		}
@@ -1196,7 +1910,7 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 		m.egressEnded(ctx, b, ident, e)
 	case egress.EventLargeUpload:
 		if e.Terminated {
-			m.largeUploadBlocked(ctx, ident, e)
+			m.largeUploadBlocked(ctx, b, ident, e)
 			return
 		}
 		remediation := "Review what the agent uploaded; block the destination if it is not expected " +
@@ -1255,7 +1969,7 @@ func (m *Manager) egressEnded(ctx context.Context, b *box, ident audit.SandboxId
 		ev.DecisionCode = "SANDBOX_EGRESS_UPSTREAM_FAILED"
 		ev.Reason = truncate(firstNonEmpty(e.Error, e.Reason), 512)
 	}
-	m.tel.RecordSandboxEgress(ctx, ev)
+	m.sink.recordProxyAudit(ctx, b, ev, proxyAuditSource{tunnelID: e.TunnelID, kind: e.Kind})
 	if ev.DecisionCode != "SANDBOX_EGRESS_UPSTREAM_FAILED" {
 		// The counter counted it: the destinations view keeps its totals.
 		m.touchDestinations(e.SandboxName)
@@ -1349,7 +2063,7 @@ func (m *Manager) reportAuthFailures(ctx context.Context, now time.Time) {
 // and a ✗ in the feed that names the threshold and, when an unblock lifts
 // the block, offers it. The proxy refuses the sandbox's later tunnels to
 // the destination with the same category, each an ordinary blocked event.
-func (m *Manager) largeUploadBlocked(ctx context.Context, ident audit.SandboxIdentity, e egress.Event) {
+func (m *Manager) largeUploadBlocked(ctx context.Context, b *box, ident audit.SandboxIdentity, e egress.Event) {
 	threshold := egress.FormatThreshold(e.Threshold)
 	remediation := "Review what the agent tried to upload. If the destination is expected, unblock it for the sandbox: " +
 		"defenseclaw sandbox unblock " + e.Host + " --sandbox " + e.SandboxName + "."
@@ -1365,12 +2079,12 @@ func (m *Manager) largeUploadBlocked(ctx context.Context, ident audit.SandboxIde
 			e.SandboxName, threshold, e.Host, e.BytesUp),
 		Evidence: truncate(e.Reason, 512), TargetRef: e.Host, Remediation: remediation, Timestamp: e.Time,
 	})
-	m.tel.RecordSandboxEgress(ctx, audit.SandboxEgressEvent{
+	m.sink.recordProxyAudit(ctx, b, audit.SandboxEgressEvent{
 		Sandbox: ident, Source: audit.SandboxEgressSourceProxy, Host: e.Host, Port: e.Port,
 		Scheme: egressScheme(e), ResolvedIP: remoteIP(e.RemoteAddr), Blocked: true,
 		DecisionCode: decisionCode(e), Reason: truncate(e.Reason, 512),
 		PolicyOutcome: policyOutcome(e), Severity: "HIGH", Timestamp: e.Time,
-	})
+	}, proxyAuditSource{tunnelID: e.TunnelID, kind: e.Kind})
 	m.feed.Publish(sandboxapi.ActivityEvent{Time: e.Time, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: e.SandboxName,
 		Host: e.Host, Port: e.Port, Method: e.Method, Source: sandboxapi.SourceProxy, Category: sandboxapi.CategoryLargeUpload,
 		Unblockable: e.Unblockable, BytesUp: e.BytesUp, Severity: "HIGH", Reason: truncate(e.Reason, 300),

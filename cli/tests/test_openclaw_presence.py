@@ -78,7 +78,7 @@ def _configure_openclaw(cfg: Config) -> None:
                 "connectors",
                 {"codex": PerConnectorGuardrailConfig(), "hermes": PerConnectorGuardrailConfig()},
             ),
-            True,
+            False,
         ),
         # Every other shape keeps the previous behaviour.
         (_configure_openclaw, False),
@@ -89,7 +89,17 @@ def _configure_openclaw(cfg: Config) -> None:
         (lambda cfg: setattr(cfg.gateway, "host", "gw.example.com"), False),
         (lambda cfg: setattr(cfg.gateway, "fleet_mode", "enabled"), False),
         (lambda cfg: setattr(cfg.gateway, "fleet_mode", "enabledd"), False),
-        (lambda cfg: setattr(cfg.gateway, "fleet_mode", "disabled"), False),
+        (lambda cfg: setattr(cfg.gateway, "fleet_mode", "disabled"), True),
+        (lambda cfg: setattr(cfg.gateway, "fleet_mode", "off"), True),
+        (lambda cfg: setattr(cfg.gateway, "fleet_mode", "false"), True),
+        (lambda cfg: setattr(cfg.gateway, "fleet_mode", False), True),
+        (
+            lambda cfg: (
+                setattr(cfg.gateway, "host", "gw.example.com"),
+                setattr(cfg.gateway, "fleet_mode", "disabled"),
+            ),
+            True,
+        ),
         (lambda cfg: setattr(cfg.claw, "mode", "zeptoclaw"), False),
         (lambda cfg: setattr(cfg.claw, "mode", "codex"), False),
     ],
@@ -110,6 +120,10 @@ def _configure_openclaw(cfg: Config) -> None:
         "fleet_mode_enabled",
         "fleet_mode_typo",
         "fleet_mode_disabled",
+        "fleet_mode_off",
+        "fleet_mode_false",
+        "fleet_mode_boolean_false",
+        "remote_fleet_mode_disabled",
         "zeptoclaw",
         "codex",
     ],
@@ -223,6 +237,11 @@ def test_doctor_sidecar_row_shows_the_gateway_summary(tmp_path, no_openclaw_bina
         "telemetry": {"state": "running"},
     }
     monkeypatch.setattr(cmd_doctor, "_http_probe", lambda *_a, **_k: (200, json.dumps(health)))
+    monkeypatch.setattr(
+        cmd_doctor,
+        "_trusted_gateway_listener",
+        lambda *_a, **_k: cmd_doctor._GatewayTrust("trusted", "fixture gateway", 4242, home_bound=True),
+    )
     cfg = _cfg(tmp_path)
 
     result = cmd_doctor._DoctorResult()

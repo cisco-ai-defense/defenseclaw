@@ -54,6 +54,25 @@ func TestManagedConfigPermissionErrorNamesAdministrator(t *testing.T) {
 	}
 }
 
+func TestManagedRootProvenanceShowDoesNotLoadPerUserConfig(t *testing.T) {
+	withUnixManagedHostDescriptor(t)
+	withManagedHostCallerUID(t, 0)
+	if provenanceShowCmd.Annotations["defenseclaw.skip-daemon-bootstrap"] != "true" {
+		t.Fatal("provenance show must skip the per-user gateway bootstrap on a managed host")
+	}
+	var out strings.Builder
+	provenanceShowCmd.SetOut(&out)
+	t.Cleanup(func() { provenanceShowCmd.SetOut(nil) })
+	if err := runProvenanceShow(provenanceShowCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"schema_version:", "content_hash:", "generation:", "binary_version:"} {
+		if !strings.Contains(out.String(), field) {
+			t.Fatalf("provenance missing %s", field)
+		}
+	}
+}
+
 func TestManagedStandardUserPolicyAndStatusRefuseBeforeUserConfig(t *testing.T) {
 	withUnixManagedHostDescriptor(t)
 	withManagedHostCallerUID(t, 1000)
@@ -238,6 +257,9 @@ func TestLifecycleGuardHonorsThePinOnlyForTheServiceAccount(t *testing.T) {
 	withManagedHostCallerUID(t, 1000)
 	if err := refuseGatewayLifecycleOnManagedHost(); err == nil || !strings.Contains(err.Error(), "managed by your organization") {
 		t.Fatalf("standard user with a hand-set pin = %v, want the managed-host refusal", err)
+	}
+	if err := watchdogCmd.PersistentPreRunE(watchdogCmd, nil); err == nil || !strings.Contains(err.Error(), "managed by your organization") {
+		t.Fatalf("per-user watchdog on a managed host = %v, want the managed-host refusal", err)
 	}
 	withManagedHostCallerUID(t, 0)
 	if err := refuseGatewayLifecycleOnManagedHost(); err == nil || !strings.Contains(err.Error(), "restart it with") {
