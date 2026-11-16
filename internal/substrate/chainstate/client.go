@@ -6,6 +6,7 @@ package chainstate
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/intentstore"
@@ -228,7 +229,8 @@ func (s *IntentStore) AppendToolCall(ctx context.Context, key string, call inten
 // (rel-1-0-10:GAP-0848). The leader reads only the verified actor's own
 // store, so a judge never sees another actor's or another person's request.
 // A call that is not an actor's reads the fallback when it is a Reader, and
-// finds nothing otherwise.
+// finds nothing otherwise. The read on the leader gives up after
+// intentLookupTimeout.
 func (s *IntentStore) Lookup(ctx context.Context, key string) (intentstore.Snapshot, bool, error) {
 	a, ok := s.actor(ctx)
 	if !ok {
@@ -242,6 +244,8 @@ func (s *IntentStore) Lookup(ctx context.Context, key string) (intentstore.Snaps
 		}
 		return reader.Lookup(ctx, key)
 	}
+	ctx, cancel := context.WithTimeout(ctx, intentLookupTimeout)
+	defer cancel()
 	var out IntentResponse
 	if err := s.Client.call(ctx, leader.MethodIntentGet, IntentRequest{Actor: a, Key: s.key(key)}, &out); err != nil {
 		return intentstore.Snapshot{}, false, err
@@ -251,6 +255,13 @@ func (s *IntentStore) Lookup(ctx context.Context, key string) (intentstore.Snaps
 	}
 	return out.snapshot(), true, nil
 }
+
+// intentLookupTimeout bounds a judge's read of the request on the leader,
+// as the egress callout's 1 s Retry bounds its calls. A miss only leaves the
+// request out of the judge's prompt (the judge still judges, and nothing
+// fails open), so during a leader change a tool-result judge must not wait
+// out the leader client's 45 s retry window on every call.
+const intentLookupTimeout = time.Second
 
 // snapshot is the intent store's view of a leader answer.
 func (out IntentResponse) snapshot() intentstore.Snapshot {

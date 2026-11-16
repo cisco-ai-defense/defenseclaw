@@ -18,8 +18,13 @@ package gateway
 
 import (
 	"context"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
 )
 
 // With Substrate chains on, a tool-result judge of an actor's call reads the
@@ -61,5 +66,30 @@ func TestSubstrateToolResultJudgeSeesTheUserRequest(t *testing.T) {
 	}
 	if got := replica2.sessionUserIntent(host); got != "" {
 		t.Fatalf("a host call's request left the process: %q", got)
+	}
+}
+
+// With the leader down (a leader change), a tool-result judge of an actor's
+// call judges promptly without the user request: its lookup gives up in
+// about a second, not after the leader client's 45 s retry window (the
+// gateway's client has Retry zero), and the judge still builds its prompt.
+func TestSubstrateToolResultJudgeLeaderDownJudgesWithoutTheRequest(t *testing.T) {
+	srv := httptest.NewServer(nil)
+	url, hc := srv.URL, srv.Client()
+	srv.Close() // the leader refuses connections from now on
+	useSubstrateChains(&chainstate.Client{Leader: &leader.Client{BaseURL: url, HTTP: hc}})
+	t.Cleanup(func() { useSubstrateChains(nil) })
+	ctx := withSubstrateActor(ContextWithSessionID(context.Background(), "s1"), chainTestActor())
+	judge := &LLMJudge{}
+	start := time.Now()
+	if got := judge.sessionUserIntent(ctx); got != "" {
+		t.Fatalf("the judge read %q with the leader down", got)
+	}
+	sections := judge.toolResultJudgeSections(withToolResultCall(ctx, "Bash", `{"command":"ls"}`), "Bash")
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("two judge reads with the leader down took %s, want about 2 s", elapsed)
+	}
+	if sections.sections == "" || strings.Contains(sections.sections, "SESSION_USER_INTENT") {
+		t.Fatalf("the judge's sections with the leader down:\n%s", sections.sections)
 	}
 }

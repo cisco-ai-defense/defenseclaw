@@ -5,10 +5,12 @@ package chainstate
 
 import (
 	"context"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/intentstore"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
 )
 
 // rel-1-0-10:GAP-0848 on Substrate: the leader's intent store is an
@@ -72,6 +74,26 @@ func TestIntentStoreLookupOnTheLeader(t *testing.T) {
 	}
 	if _, _, err := asReader(t, &IntentStore{Client: h.client, ActorOf: actorOf}).Lookup(context.Background(), "host"); err == nil {
 		t.Fatal("a host lookup without a fallback did not fail")
+	}
+}
+
+// With the leader down, a judge's lookup gives up in about a second
+// (intentLookupTimeout), not after the gateway leader client's 45 s retry
+// window (Retry zero), and finds nothing.
+func TestIntentStoreLookupLeaderDownGivesUpPromptly(t *testing.T) {
+	srv := httptest.NewServer(nil)
+	url, hc := srv.URL, srv.Client()
+	srv.Close() // the leader refuses connections from now on
+	type ctxKey struct{}
+	actorOf := func(ctx context.Context) (Actor, bool) { a, ok := ctx.Value(ctxKey{}).(Actor); return a, ok }
+	store := &IntentStore{Client: &Client{Leader: &leader.Client{BaseURL: url, HTTP: hc}}, Namespace: "judge", ActorOf: actorOf}
+	start := time.Now()
+	snap, found, err := store.Lookup(context.WithValue(context.Background(), ctxKey{}, actorA), "k1")
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("lookup with the leader down took %s, want about %s", elapsed, intentLookupTimeout)
+	}
+	if err == nil || found || snap.UserIntent != "" {
+		t.Fatalf("lookup with the leader down: %+v found=%v err=%v", snap, found, err)
 	}
 }
 
