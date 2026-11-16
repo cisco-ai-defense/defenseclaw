@@ -156,6 +156,11 @@ type Facts struct {
 	// is not complete, for the sender reader (ReadSenders) to read what the
 	// projection did not. Private, in process only.
 	sendSources []sendSource
+	// credentialPaths is the private record of the secret-read chain
+	// (credentialPathRecord, substrate-1:GAP-0341). Only the parse of the
+	// call sets it; it is unexported, never serialized and printed as a
+	// pointer. Read it with CredentialPathReads.
+	credentialPaths *credentialPathRecord
 	// SensitiveEgressArtifactWrites contains only exact local artifact paths.
 	// An entry proves that a closed structured-write schema created source text
 	// containing both a protected credential/secret path and a non-local literal

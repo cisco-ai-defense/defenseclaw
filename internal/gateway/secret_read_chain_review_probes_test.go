@@ -96,7 +96,8 @@ func TestSecretReadChainReviewProbes(t *testing.T) {
 // srd2ReviewProbeChain is the verdict of each probe id after the fix: the
 // chain is raised (true) or not. False rows are the documented limits: D5
 // (env -C runs the program elsewhere and records no read), F6 (a named read
-// and an unrelated named upload) and F7 (a move records no read). X1 and X2
+// and an unrelated named upload) and F7 (a move reads no content,
+// rel-1-0-10:GAP-1030). X1 and X2
 // (an upload with a dynamic word) join: the sender reader cannot read the
 // call in full, so its egress is the unknown tier, which joins the exact read
 // (GAP-0672).
