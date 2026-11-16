@@ -109,14 +109,12 @@ func gap0969LauncherReader(t *testing.T, tierIndex int) {
 				for _, w := range words {
 					argv = append(argv, w)
 				}
-				for _, w := range gap0805Argv(gap0805Wrapper{}, l, row.body) {
-					argv = append(argv, w)
-				}
+				argv = append(argv, gap0805Argv(gap0805Wrapper{}, l, row.body)...)
 				got, limit, action := decide(argv)
 				if row.want == bounded.Block && got != bounded.Block {
 					t.Errorf("%s/%s/%s/%s argv: action %s, want block", tier.name, chain.id, l.name, row.id, action)
 				}
-				if row.want == bounded.Allow && got != bounded.Allow && !(limit && got == floor) {
+				if row.want == bounded.Allow && got != bounded.Allow && (!limit || got != floor) {
 					t.Errorf("%s/%s/%s/%s argv: action %s, want allow (or the unknown tier at a cap)", tier.name, chain.id, l.name, row.id, action)
 				}
 			}
