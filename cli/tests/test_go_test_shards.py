@@ -345,7 +345,7 @@ def test_linux_gateway_shards_keep_ordinary_tests_covered() -> None:
         "internal/gateway"
     ]
     files = discover_test_files(root / "internal/gateway")
-    shards = partition_test_files(files, 54, seconds)
+    shards = partition_test_files(files, 72, seconds)
     names = [name for _, file_names in files for name in file_names]
     assert check_exact_cover(shards, names) == []
     assert sum("TestAgentHookDispatch_BlockFiresOnBlock" in shard for shard in shards) == 1
@@ -358,8 +358,8 @@ def test_linux_gateway_shard_timeouts_fit_the_job() -> None:
     ]
     # Substrate (#1456) added these before rel carried them: unrecorded, each
     # weighed the 0.24 s of "*", and together (186 s) they took shard 15 662 s
-    # into the flat 11m -timeout (run 43510035024). The refresh of 11-13 ran
-    # in a Substrate checkout, so rel weighs them before the hand-off. The
+    # into the flat 11m -timeout (run 43510035024); rel carries them since the
+    # hand-off, and its refreshes record them. The
     # same failure twice before (the 344 s GAP-0503 flood test with three slow
     # tests in shard 20; the 401 s Cowork corpus replay in a full shard 15)
     # had their own pinned checks; both tests now run in 6 to 20 s, so the
@@ -372,7 +372,7 @@ def test_linux_gateway_shard_timeouts_fit_the_job() -> None:
         assert seconds[name] > 30, name
     files = discover_test_files(root / "internal/gateway")
     weigh = go_test_shards.test_weigher(seconds)
-    for index, shard in enumerate(partition_test_files(files, 54, seconds)):
+    for index, shard in enumerate(partition_test_files(files, 72, seconds)):
         planned = sum(weigh(name) for name in shard)
         # No shard reaches the cap: each keeps its 1.5x headroom.
         wanted = planned * go_test_shards.TIMEOUT_HEADROOM + go_test_shards.TIMEOUT_PAD_SECONDS

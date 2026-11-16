@@ -43,19 +43,8 @@ test_windows_remaining_package_shards_leave_room_in_their_step) was set on
 median times (GAP-1066). Download each run into its own directory, for example
   for r in <run1> <run2> <run3>; do gh run download $r --pattern 'go-test-timings-*' --dir t/$r; done
   scripts/update_test_timings.py go t/<run1> t/<run2> t/<run3>
-A refresh drops the tests this tree does not define. The rule is to
-refresh from this tree's runs only.
-One exception, approved by the lead on 2026-11-13, lasts until the Substrate
-hand-off (planned Mon 2026-11-16). Until then, the internal/gateway times in
-go-linux.json also include the runs of PR #1456 (feat/substrate), refreshed
-in a feat/substrate checkout with this tree's scripts and copied back. Rel
-does not define the Substrate tests yet, and a test with no recorded time
-weighs "*" (about 0.24 s in the gateway). Three such tests (186 s in all)
-ran a gateway shard into its -timeout. A refresh on rel before the hand-off
-drops their times, and test_linux_gateway_shard_timeouts_fit_the_job then
-fails.
-The exception ends when rel/1.0.10 contains feat/substrate. From then on,
-refresh from this tree's runs only again.
+A refresh drops the tests this tree does not define: refresh from this
+tree's runs only.
 A top-level test weighs its share of the package wall time
 (go_test_report.TopLevelShares): parallel tests that ran side by side split
 the time they shared, and a test of parallel subtests weighs the time they held.
@@ -261,23 +250,50 @@ def _windows_package_times(files: list[Path]) -> dict[str, float]:
     return packages
 
 
+def _ended_and_cut_off(files: list[Path], module: str) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    """The top-level tests of files that ran to an end, and those a -timeout
+    cut off, by package. go_test_report.py writes a test still running when
+    the stream ended (the -timeout panic) as a fail after the end event of
+    its package: its Elapsed is the time it had run, a lower bound."""
+    ended: dict[str, set[str]] = {}
+    cut_off: dict[str, set[str]] = {}
+    for file in files:
+        closed: set[str] = set()
+        for event in _go_events([file]):
+            package, name, action = event.get("Package", ""), event.get("Test"), event.get("Action")
+            if name is None:
+                if action in ("pass", "fail"):
+                    closed.add(package)
+                elif action == "start":
+                    closed.discard(package)
+                continue
+            if action in ("pass", "fail", "skip") and "/" not in name:
+                into = cut_off if action == "fail" and package in closed else ended
+                into.setdefault(_rel(package, module), set()).add(name)
+    return ended, cut_off
+
+
 def keep_unreached_go_tests(old: dict, new: dict, files: list[Path], module: str, root: Path = ROOT) -> dict:
     """new, with the recorded time of each test its package still defines
     that no input ran to an end. The -timeout that ends a shard leaves the
     tests it had not reached without an event; without their old time they
     would weigh as unlisted tests, and the next plan could put them together
-    in one shard."""
-    ended: dict[str, set[str]] = {}
-    for event in _go_events(files):
-        name = event.get("Test")
-        if event.get("Action") in ("pass", "fail", "skip") and name and "/" not in name:
-            ended.setdefault(_rel(event.get("Package", ""), module), set()).add(name)
+    in one shard. The test the -timeout cut off has only the time it had run
+    (a lower bound), so it weighs at least its recorded time. Taken as its
+    time, it moved TestWindowsListedStatementBoundReachesTheCall from 116.6 s
+    to the 21 s it had run when shard 12 of run 43831888457 timed out, and
+    the next plan would crowd that shard again."""
+    ended, cut_off = _ended_and_cut_off(files, module)
     for rel, names in new.get("tests", {}).items():
         defined = set()
         for path in (root / rel).glob("*_test.go"):
             defined.update(TEST_FUNCTION_RE.findall(path.read_text(encoding="utf-8")))
         for name, seconds in old.get("tests", {}).get(rel, {}).items():
-            if name in defined and name not in names and name not in ended.get(rel, set()):
+            if name not in defined or name in ended.get(rel, set()):
+                continue
+            if name in cut_off.get(rel, set()):
+                names[name] = max(names.get(name, 0.0), seconds)
+            elif name not in names:
                 names[name] = seconds
         new["tests"][rel] = dict(sorted(names.items()))
     return new
