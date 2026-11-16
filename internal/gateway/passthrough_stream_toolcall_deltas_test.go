@@ -32,6 +32,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
+
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -42,11 +44,10 @@ const (
 )
 
 // streamToolCallCase is one streamed reply shape. end says how it ends:
-// "" whole; "cut" inside a call of an SSE stream (the fail mode applies:
-// refused in the fail-closed tiers); "cut-judged" inside a Bedrock call,
-// whose partial call is judged and, when allowed, forwarded (its own state
-// machine, not asserted here); "unnamed" a call whose name never comes
-// (logged only: what the rules make of an unnamed call is theirs).
+// "" whole; "cut" inside a call (the partial call is judged, then the fail
+// mode applies: refused in the fail-closed tiers; GAP-0987 for the Bedrock
+// eventstream); "unnamed" a call whose name never comes (logged only: what
+// the rules make of an unnamed call is theirs).
 type streamToolCallCase struct {
 	passthroughFieldCase
 	end string
@@ -140,7 +141,12 @@ func streamToolCallCases(t *testing.T, cmd string) []streamToolCallCase {
 		c("bedrock/eof_in_block", "bedrock", "/model/m/converse-stream", ctEvents, eventStreamBody(t,
 			"contentBlockStart", `{"contentBlockIndex":0,"start":{"toolUse":{"toolUseId":"t1","name":"Bash"}}}`,
 			"contentBlockDelta", `{"contentBlockIndex":0,"delta":{"toolUse":{"input":`+h1+`}}}`,
-			"contentBlockDelta", `{"contentBlockIndex":0,"delta":{"toolUse":{"input":`+h2+`}}}`), "cut-judged"),
+			"contentBlockDelta", `{"contentBlockIndex":0,"delta":{"toolUse":{"input":`+h2+`}}}`), "cut"),
+		c("bedrock/invoke_eof_in_block", "bedrock", "/model/anthropic.claude-test-v1:0/invoke-with-response-stream", ctEvents,
+			streamTailFrame(`{"type":"message_start","message":{"id":"msg_1","model":"claude-test"}}`)+
+				streamTailFrame(`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t","name":"Bash","input":{}}}`)+
+				streamTailFrame(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":`+h1+`}}`)+
+				streamTailFrame(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":`+h2+`}}`), "cut"),
 		// Gemini.
 		c("gemini/functionCall", "gemini", G, ctSSE, sseBody(
 			`{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"Bash","args":{"command":`+C+`}}}]}}]}`,
@@ -198,10 +204,30 @@ func streamToolCallRun(t *testing.T, c passthroughFieldCase, pack string, manage
 	return rec.Body.String()
 }
 
+// streamToolCallFrames is the event payloads of the eventstream chunk frames
+// in out (InvokeModelWithResponseStream carries each event base64 in one).
+func streamToolCallFrames(out string) string {
+	var sb strings.Builder
+	dec, r := eventstream.NewDecoder(), strings.NewReader(out)
+	for {
+		msg, err := dec.Decode(r, nil)
+		if err != nil {
+			return sb.String()
+		}
+		var chunk struct {
+			Bytes []byte `json:"bytes"`
+		}
+		if json.Unmarshal(msg.Payload, &chunk) == nil {
+			sb.Write(chunk.Bytes)
+		}
+	}
+}
+
 // streamToolCallOutcome reads what the client got: "pass" (the call reached
 // it: the end of the command, which every shape carries in one piece),
 // "block" (a DefenseClaw block in its place) or "empty".
 func streamToolCallOutcome(out, cmd string) string {
+	out += streamToolCallFrames(out)
 	switch {
 	case strings.Contains(out, cmd[len(cmd)-16:]):
 		return "pass"
@@ -223,7 +249,7 @@ func TestStreamToolCallDeltasReachTheToolRules(t *testing.T) {
 						t.Logf("TGWPROBE %s %s %s chunk=%d %s", tier.name, kind, c.name, chunk, got)
 						want := "block"
 						switch {
-						case c.end == "unnamed" || (c.end == "cut-judged" && kind == "good"):
+						case c.end == "unnamed":
 							return
 						case kind == "good" && !(c.end == "cut" && tier.failClosed):
 							want = "pass"

@@ -760,7 +760,14 @@ read:
 		} else {
 			s.bedrock.Finish()
 		}
-		sseRefused()
+		if !sseRefused() && s.bedrock != nil && s.bedrock.Cut() {
+			// The partial call passed the rules, but the stream was cut
+			// inside it: the tier's fail mode applies, as it does to an SSE
+			// stream cut inside a call (sseToolCalls.Finish, GAP-0987).
+			if p.uninspectableReply(ctx, label, mode, "the event stream ended inside a tool call") {
+				sseBlockMsg = blockMessage(s.customBlockMsg, "tool_call", "the provider reply could not be inspected")
+			}
+		}
 	}
 	if sseBlockMsg == "" && streamEnded && !stopped && s.bedrock == nil && framer.DataEvents == 0 && framer.Unframed > 0 {
 		// Labelled event-stream, but not framed as one: it cannot be read.
