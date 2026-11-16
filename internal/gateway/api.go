@@ -1946,6 +1946,7 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	administrator := a.healthAdministratorCaller(r, cfg)
 	if !administrator {
 		snap.Config = healthConfigLiveness(snap.Config)
+		snap.Routing = healthRoutingForOrdinaryAccount(snap.Routing)
 	}
 	raw, err := json.Marshal(snap)
 	if err != nil {

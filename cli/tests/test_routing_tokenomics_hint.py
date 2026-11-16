@@ -145,30 +145,3 @@ def test_doctor_row_gives_the_command() -> None:
     assert _doctor_rows(cfg)[0][0] == "warn"  # budgets, local store still off
     cfg.observability.tokenomics.local_store_enabled = True
     assert _doctor_rows(cfg) == []
-
-
-def test_doctor_names_an_allowed_model_without_a_credential_for_the_administrator() -> None:
-    routing = SimpleNamespace(
-        enabled=True,
-        route_only={
-            "connectors": ["codex"],
-            "upstreams": {"codex": {"api": "responses", "base_url": "https://api.openai.com"}},
-        },
-        models=[
-            {"name": "fixture-bedrock", "provider": "bedrock", "model": "m"},
-            {"name": "fixture-keyed", "provider": "bedrock", "model": "m", "credential": "fixture-key"},
-            {"name": "fixture-same", "provider": "openai", "model": "m"},
-        ],
-        admin={"rules": [{"id": "fixture-rule", "allow": ["fixture-bedrock", "fixture-keyed", "fixture-same"]}]},
-    )
-    cfg = SimpleNamespace(deployment_mode="managed_enterprise", routing=routing)
-    assert cmd_doctor.routing_allowed_aliases_without_key(cfg) == [("fixture-rule", "fixture-bedrock")]
-    seen: list[tuple] = []
-    orig = cmd_doctor._emit
-    cmd_doctor._emit = lambda status, label, detail="", **kw: seen.append((status, label, detail))
-    try:
-        cmd_doctor._check_routing_allowed_alias_credential(cfg, r=None)
-    finally:
-        cmd_doctor._emit = orig
-    assert len(seen) == 1 and seen[0][0] == "warn" and "fixture-bedrock (rule fixture-rule)" in seen[0][2]
-    assert cmd_doctor.routing_allowed_aliases_without_key(SimpleNamespace(deployment_mode="", routing=routing)) == []

@@ -42,44 +42,52 @@ func routeOnlyConnectorWideRule(rule config.RoutingAdminRule, connector string) 
 	return len(m.Connectors) == 0 || slices.ContainsFunc(m.Connectors, func(c string) bool { return strings.EqualFold(strings.TrimSpace(c), connector) })
 }
 
-// routeOnlyAllowedWithoutKey reports, for the routing.admin allow rules that
-// can refuse calls of connector, whether one that applies to every caller
-// allows only aliases the gateway cannot call (blocking: every call is
-// refused), and whether a scoped rule does (a warning: some callers are
-// refused). It reports no names: its result goes into the credentialless
-// /health, and an administrator sees which rule and model through doctor
-// (policy privacy, rel-1-0-10 GAP-0666). Managed hosts only: OSS reports an
-// allow list and keeps routing.
-func routeOnlyAllowedWithoutKey(cfg *config.Config, connector, provider string) (blocking, scoped bool) {
+// deadAllowRule is a routing.admin rule whose allowed models the gateway
+// cannot call.
+type deadAllowRule struct {
+	ID      string
+	Aliases []string
+}
+
+// routeOnlyAllowedWithoutKey returns, for the routing.admin allow rules that
+// can refuse calls of connector, the rules that apply to every caller and
+// allow only aliases the gateway cannot call (blocking: every call is
+// refused) and the scoped ones that do (scoped: some callers are refused).
+// It carries names: only the administrator readiness row keeps them
+// (publicRouteOnly). A rule with severity_at_least never applies on the
+// route-only listener (it runs no guardrail), so it is not counted. Managed
+// hosts only: OSS reports an allow list and keeps routing.
+func routeOnlyAllowedWithoutKey(cfg *config.Config, connector, provider string) (blocking, scoped []deadAllowRule) {
 	if cfg == nil || cfg.Routing.Admin == nil || !cfg.StandaloneEnterprise() {
-		return false, false
+		return nil, nil
 	}
 	for _, rule := range cfg.Routing.Admin.Rules {
-		if rule.Action == config.RoutingRuleActionDeny || len(rule.Allow) == 0 {
+		if rule.Action == config.RoutingRuleActionDeny || len(rule.Allow) == 0 || strings.TrimSpace(rule.Match.SeverityAtLeast) != "" {
 			continue
 		}
 		if len(rule.Match.Connectors) > 0 && !slices.ContainsFunc(rule.Match.Connectors, func(c string) bool { return strings.EqualFold(strings.TrimSpace(c), connector) }) {
 			continue
 		}
-		dead, usable := false, false
+		var dead []string
+		usable := false
 		for _, alias := range rule.Allow {
 			i := slices.IndexFunc(cfg.Routing.Models, func(m config.RoutingModelBackend) bool { return m.Name == alias })
 			if i < 0 {
 				continue
 			}
 			if routeOnlyAliasWithoutKey(cfg, cfg.Routing.Models[i], provider) {
-				dead = true
+				dead = append(dead, alias)
 			} else {
 				usable = true
 			}
 		}
-		if !dead || usable {
+		if len(dead) == 0 || usable {
 			continue
 		}
 		if routeOnlyConnectorWideRule(rule, connector) {
-			blocking = true
+			blocking = append(blocking, deadAllowRule{ID: rule.ID, Aliases: dead})
 		} else {
-			scoped = true
+			scoped = append(scoped, deadAllowRule{ID: rule.ID, Aliases: dead})
 		}
 	}
 	return blocking, scoped

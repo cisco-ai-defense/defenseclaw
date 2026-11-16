@@ -383,3 +383,25 @@ def test_enable_on_a_managed_host_names_the_bundle_and_custody_key(tmp_path: Pat
     cfg.deployment_mode = "managed_enterprise"
     with pytest.raises(ro.RouteOnlyError, match=r"policy bundle .*routing\.models\[\]\.credential"):
         ro.enable(cfg, "claudecode")
+
+
+def test_a_scoped_rule_warning_is_shown_with_its_detail(tmp_path: Path) -> None:
+    # GAP-0921: the gateway keeps the connector ready and says some callers are refused;
+    # the administrator row carries the rule and model names (an ordinary account gets none).
+    cfg = _cfg(tmp_path, {"claudecode": _ANTHROPIC})
+    live = _health(
+        {
+            "connector": "claudecode",
+            "ready": True,
+            "credential": "agent",
+            "provider": "anthropic",
+            "warning": "allowed_alias_no_credential",
+            "detail": "routing.admin rule fixture-rule (scoped to some callers) allows only fixture-model",
+        }
+    )
+    rows = _by_label(dro.route_only_rows(cfg, live, platform="linux"))
+    assert rows["Route-only claudecode"].tag == "pass"
+    warn = rows["Route-only claudecode allowed models"]
+    assert warn.tag == "warn" and "fixture-rule" in warn.detail and "fixture-model" in warn.detail
+    quiet = _health({"connector": "claudecode", "ready": True, "credential": "agent", "provider": "anthropic"})
+    assert "Route-only claudecode allowed models" not in _by_label(dro.route_only_rows(cfg, quiet, platform="linux"))

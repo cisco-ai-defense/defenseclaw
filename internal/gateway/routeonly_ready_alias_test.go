@@ -5,6 +5,8 @@ package gateway
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -27,6 +29,10 @@ func TestRouteOnlyReadinessAllowedAliasWithoutCredential(t *testing.T) {
 	r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "linux", &signers, nil))
 	if r.Ready || !strings.Contains(r.Problem, "every codex caller") || !strings.Contains(r.Fix, "enterprise secret set") || r.Cause != routeCauseAliasNoCredential {
 		t.Fatalf("allowed alias without a key: %+v", r)
+	}
+	// The administrator row names the rule and the model; an ordinary account does not read it.
+	if !strings.Contains(r.Problem, "fixture-rule") || !strings.Contains(r.Problem, "fixture-bedrock") {
+		t.Fatalf("administrator row does not name them: %+v", r)
 	}
 	assertNoPolicyNames(t, cfg, r)
 
@@ -67,7 +73,7 @@ func TestRouteOnlyReadinessAllowedAliasWithoutCredential(t *testing.T) {
 // account, names a rule id, a model alias or a credential of the policy.
 func assertNoPolicyNames(t *testing.T, cfg *config.Config, row routeOnlyReadiness) {
 	t.Helper()
-	raw, err := json.Marshal(routingWithRouteOnly(SubsystemHealth{}, []routeOnlyReadiness{row}))
+	raw, err := json.Marshal(healthRoutingForOrdinaryAccount(routingWithRouteOnly(SubsystemHealth{}, []routeOnlyReadiness{row})))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,18 +100,102 @@ func TestRouteOnlyReadinessScopedRuleIsAWarning(t *testing.T) {
 		"user":     {Users: []string{"fixture-user"}},
 		"agent":    {Agents: []string{"fixture-agent"}},
 		"category": {Categories: []string{"coding"}, Connectors: []string{"codex"}},
-		"severity": {SeverityAtLeast: "HIGH", Connectors: []string{"codex"}},
 	} {
 		cfg.Routing.Admin = &config.RoutingAdminConfig{Rules: []config.RoutingAdminRule{{ID: "fixture-rule", Match: match, Allow: []string{"fixture-bedrock"}}}}
 		r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "linux", &signers, nil))
 		if !r.Ready || r.Warning != routeCauseAliasNoCredential || r.Problem != "" {
 			t.Fatalf("%s rule: want ready with a warning, got %+v", name, r)
 		}
+		if !strings.Contains(r.Detail, "fixture-rule") {
+			t.Fatalf("%s rule: the administrator detail does not name the rule: %+v", name, r)
+		}
 		assertNoPolicyNames(t, cfg, r)
+	}
+	// severity_at_least never applies on the route-only listener (no guardrail runs there).
+	cfg.Routing.Admin = &config.RoutingAdminConfig{Rules: []config.RoutingAdminRule{{ID: "fixture-rule", Match: config.RoutingAdminMatch{SeverityAtLeast: "HIGH", Connectors: []string{"codex"}}, Allow: []string{"fixture-bedrock"}}}}
+	if r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "linux", &signers, nil)); !r.Ready || r.Warning != "" || r.Cause != "" {
+		t.Fatalf("severity rule counted on the route-only listener: %+v", r)
 	}
 	// A connector-wide rule (connectors only, or the connector is listed) blocks.
 	cfg.Routing.Admin = &config.RoutingAdminConfig{Rules: []config.RoutingAdminRule{{ID: "fixture-rule", Match: config.RoutingAdminMatch{Connectors: []string{"codex"}}, Allow: []string{"fixture-bedrock"}}}}
 	if r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "linux", &signers, nil)); r.Ready || r.Warning != "" {
 		t.Fatalf("connector-wide rule: %+v", r)
+	}
+}
+
+// routrev2 GAP-0985: a real GET /health by an ordinary account of a managed
+// host must carry only the closed cause and generic text of every route-only
+// state, on every platform path (custody macOS and Windows, unset upstream,
+// alias without a key), and an administrator (the gateway token) still reads
+// the full text.
+func TestHealthRouteOnlyNamesNothingToAnOrdinaryAccount(t *testing.T) {
+	const secretName, ruleID, aliasName, groupName = "rr2-credname-secret", "fixture-rule", "fixture-alias", "fixture-group"
+	useRoutingCredentials(t, map[string]string{})
+	var signers bedrockSigners
+	build := func(upstream config.RoutingUpstreamConfig, models []config.RoutingModelBackend, rules []config.RoutingAdminRule) *config.Config {
+		cfg := readinessConfig(upstream)
+		cfg.Routing.RouteOnly.Connectors = []string{"codex"}
+		cfg.Routing.RouteOnly.Upstreams = map[string]config.RoutingUpstreamConfig{"codex": upstream}
+		cfg.DeploymentMode, cfg.Enterprise.Profile = "managed_enterprise", "standalone"
+		cfg.Routing.Models = models
+		cfg.Routing.Admin = &config.RoutingAdminConfig{Rules: rules}
+		cfg.Gateway.Token = "fixture-gateway-token"
+		return cfg
+	}
+	openai := config.RoutingUpstreamConfig{BaseURL: "https://api.openai.com", API: config.RoutingAPIResponses}
+	named := []config.RoutingModelBackend{{Name: aliasName, Provider: "openai", Model: "m", Credential: secretName}}
+	bedrockKeyless := []config.RoutingModelBackend{{Name: aliasName, Provider: "bedrock", Model: "m", Credential: secretName}}
+	connectorRule := []config.RoutingAdminRule{{ID: ruleID, Match: config.RoutingAdminMatch{Connectors: []string{"codex"}}, Allow: []string{aliasName}}}
+	groupRule := []config.RoutingAdminRule{{ID: ruleID, Match: config.RoutingAdminMatch{Groups: []string{groupName}}, Allow: []string{aliasName}}}
+	cases := map[string]struct {
+		goos          string
+		cfg           *config.Config
+		cause, warned string
+	}{
+		"custody credential named but not stored": {"darwin", build(openai, named, nil), routeCauseCredentialStored, ""},
+		"custody credential not configured":       {"windows", build(openai, nil, nil), routeCauseNoCredential, ""},
+		"upstream not set":                        {"linux", build(config.RoutingUpstreamConfig{}, nil, nil), routeCauseUpstreamNotSet, ""},
+		"allowed alias without a key":             {"linux", build(openai, bedrockKeyless, connectorRule), routeCauseAliasNoCredential, ""},
+		"scoped rule is a warning":                {"linux", build(openai, bedrockKeyless, groupRule), "", routeCauseAliasNoCredential},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			store, logger := testStoreAndLogger(t)
+			health := NewSidecarHealth()
+			health.SetRouteOnlyReadiness(routeOnlyReadinessFor(tc.cfg, tc.goos, &signers, nil))
+			api := NewAPIServer("127.0.0.1:0", health, nil, store, logger, tc.cfg)
+			get := func(token string) string {
+				req := httptest.NewRequest(http.MethodGet, "/health", nil)
+				if token != "" {
+					req.Header.Set("Authorization", "Bearer "+token)
+				}
+				rec := httptest.NewRecorder()
+				api.handleHealth(rec, req)
+				if rec.Code != http.StatusOK {
+					t.Fatalf("GET /health = %d: %s", rec.Code, rec.Body)
+				}
+				return rec.Body.String()
+			}
+			ordinary := get("")
+			for _, leak := range []string{secretName, ruleID, aliasName, groupName, "fixture-gateway-token"} {
+				if strings.Contains(ordinary, leak) {
+					t.Fatalf("an ordinary account reads %q: %s", leak, ordinary)
+				}
+			}
+			if tc.cause != "" && !strings.Contains(ordinary, `"cause":"`+tc.cause+`"`) {
+				t.Fatalf("no closed cause %s: %s", tc.cause, ordinary)
+			}
+			if tc.warned != "" && !strings.Contains(ordinary, `"warning":"`+tc.warned+`"`) {
+				t.Fatalf("no closed warning %s: %s", tc.warned, ordinary)
+			}
+			if !strings.Contains(get("fixture-gateway-token"), "route_only") {
+				t.Fatal("the administrator lost the route-only rows")
+			}
+		})
+	}
+	// The administrator row keeps the names that doctor shows.
+	admin := routeOnlyReadinessFor(cases["custody credential named but not stored"].cfg, "darwin", &signers, nil)
+	if len(admin) != 1 || !strings.Contains(admin[0].Problem, secretName) {
+		t.Fatalf("the administrator row lost the credential name: %+v", admin)
 	}
 }
