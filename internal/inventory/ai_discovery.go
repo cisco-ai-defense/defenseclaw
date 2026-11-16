@@ -2740,6 +2740,11 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 				if detector == "skill" && isHiddenSkillStateFile(entry) {
 					continue
 				}
+				// A hidden folder beside the plugins is the agent's own working
+				// state (Codex .remote-plugin-install-staging), not a plugin.
+				if detector == "plugin" && strings.HasPrefix(entry.Name(), ".") {
+					continue
+				}
 				// Codex uses `.system` as a one-level skill container. Expand
 				// its children instead of presenting the container as a skill.
 				// Only the exact per-user `$CODEX_HOME/skills/.system` cache is

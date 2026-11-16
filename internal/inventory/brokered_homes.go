@@ -514,6 +514,9 @@ func (s *ContinuousDiscoveryService) brokeredChildrenSignal(sig AISignature, cat
 			if detector == "skill" && strings.HasPrefix(child.Name, ".") && child.Regular {
 				continue
 			}
+			if detector == "plugin" && strings.HasPrefix(child.Name, ".") {
+				continue
+			}
 			if detector == "skill" && strings.EqualFold(strings.TrimSpace(sig.ID), "codex") &&
 				enforce.IsBundledSkillContainerName(child.Name) {
 				partial = true
