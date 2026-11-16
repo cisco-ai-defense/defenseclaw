@@ -13,6 +13,7 @@ package cloudreg
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -92,6 +93,24 @@ type cachingProvider struct {
 	generation uint64
 	token      string
 	at         time.Time
+	// lastTokenAt is when Token last handed a consumer a token, cached or
+	// fetched (unix nanoseconds; zero until the first one). The endpoint
+	// health report reads it to tell whether any CMID token was available
+	// since its previous report.
+	lastTokenAt atomic.Int64
+}
+
+// LastTokenAt is when p last returned a token to any consumer. It is zero
+// for a provider WithTokenCache did not wrap and before the first token.
+func LastTokenAt(p Provider) time.Time {
+	c, ok := p.(*cachingProvider)
+	if !ok || c == nil {
+		return time.Time{}
+	}
+	if at := c.lastTokenAt.Load(); at != 0 {
+		return time.Unix(0, at)
+	}
+	return time.Time{}
 }
 
 func (c *cachingProvider) Token(ctx context.Context) (string, error) {
@@ -99,6 +118,7 @@ func (c *cachingProvider) Token(ctx context.Context) (string, error) {
 	if c.token != "" && time.Since(c.at) < c.ttl {
 		cached := c.token
 		c.mu.Unlock()
+		c.lastTokenAt.Store(time.Now().UnixNano())
 		return cached, nil
 	}
 	// Capture the generation so a concurrent Invalidate can invalidate
@@ -120,6 +140,7 @@ func (c *cachingProvider) Token(ctx context.Context) (string, error) {
 	// old tokens live briefly) but do not pollute the cache. The 401
 	// path will invalidate again if the token is truly rejected.
 	c.mu.Unlock()
+	c.lastTokenAt.Store(time.Now().UnixNano())
 	return token, nil
 }
 

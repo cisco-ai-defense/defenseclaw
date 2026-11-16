@@ -780,7 +780,7 @@ func runWindowsEnterpriseLifecycle(
 	if windowsEnterpriseStandalone(opts) {
 		return runWindowsEnterpriseStandaloneAction(ctx, cmd, action, opts, script, args)
 	}
-	return windowsEnterpriseCommandRunner(ctx, cmd, script, args)
+	return runWindowsSecureClientLifecycle(ctx, cmd, action, opts, script, args)
 }
 
 func writeWindowsEnterpriseLifecyclePreflightFailure(

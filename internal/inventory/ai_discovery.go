@@ -85,6 +85,11 @@ const (
 // consumers see each full scan, including IDE extensions, on that cadence.
 const secureClientScanInterval = 30 * time.Minute
 
+// SecureClientScanInterval is the Secure Client full-scan floor, which the
+// endpoint health reporter also uses as its interval while discovery is not
+// running.
+const SecureClientScanInterval = secureClientScanInterval
+
 // aiDiscoveryStateVersion is the schema version of the on-disk state file
 // (`ai_discovery_state.json`). v2 introduced per-signal `evidence_hash`,
 // `evidence`, `last_active_at`, `component`, and `runtime` so that:
@@ -700,6 +705,9 @@ type ContinuousDiscoveryService struct {
 	lastIDE       *IDEInventory
 	ideBaseline   map[string]IDEPlugin
 	ideRecordedAt time.Time
+	// lastFullScanAt is when the last full scan completed (guarded by mu),
+	// zero before the first one.
+	lastFullScanAt time.Time
 	// scanMu guards the per-scan privacy skip observation.
 	tccSkipped           bool
 	tccSkippedPaths      map[string]bool
@@ -1276,6 +1284,26 @@ func (s *ContinuousDiscoveryService) ConfidenceParams() ConfidenceParams {
 	return s.confidenceParams
 }
 
+// LastFullScanAt is when the last full scan completed, zero before the
+// first one or for a nil service.
+func (s *ContinuousDiscoveryService) LastFullScanAt() time.Time {
+	if s == nil {
+		return time.Time{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lastFullScanAt
+}
+
+// FullScanInterval is the effective full-scan cadence, after the managed
+// floor; zero for a nil service.
+func (s *ContinuousDiscoveryService) FullScanInterval() time.Duration {
+	if s == nil {
+		return 0
+	}
+	return s.opts.ScanInterval
+}
+
 func (s *ContinuousDiscoveryService) LastError() error {
 	if s == nil {
 		return nil
@@ -1404,6 +1432,7 @@ func (s *ContinuousDiscoveryService) runScanOnce(ctx context.Context, full bool,
 	s.lastErr = nil
 	if full {
 		s.lastIDE = report.IDEInventory
+		s.lastFullScanAt = time.Now()
 	}
 	s.mu.Unlock()
 
