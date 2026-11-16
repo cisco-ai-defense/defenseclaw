@@ -265,6 +265,19 @@ cmp -s "$canonical" "$dst" || fail "$dst differs from the canonical hooks"
 exec /usr/local/bin/agy "$@"
 `
 
+// GuardedDirs are the folders below the agent-owned HOME that hold
+// DefenseClaw's root-owned hook registration of connector. They are
+// root-owned, but the agent owns HOME, so it can still rename one away and
+// put its own in its place (GAP-0120: Antigravity 1.2.12 has no managed
+// hooks tier and hot-reloads ~/.gemini/config/hooks.json). The relay watches
+// them and stops the agent when one moves.
+func GuardedDirs(connector, home string) []string {
+	if connector == "antigravity" && home != "" {
+		return []string{path.Join(home, ".gemini")}
+	}
+	return nil
+}
+
 // wave2Harden applies the connector-specific ownership rules: Antigravity's
 // hooks directory is root-owned (see AntigravityStart).
 func wave2Harden(ov *Overlay, name string, o OverlayOptions) {

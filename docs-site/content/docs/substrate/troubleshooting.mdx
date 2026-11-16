@@ -157,6 +157,10 @@ An actor created and resumed outside DefenseClaw, inside one poll interval, gets
 
 The gateway accepts the kit from its own release and the one before. Rebuild the template with `template build`, then `defenseclaw substrate migrate NAME`.
 
+### The agent stopped with "DefenseClaw's hook folder ... was moved, replaced or removed"
+
+Antigravity keeps DefenseClaw's hook registration in `~/.gemini`, a root-owned folder in a home the agent owns. When that folder is renamed, replaced or removed, the relay stops the agent, because Antigravity could then load hooks without DefenseClaw's. The agent can't be attached to or given a task again: delete it (`defenseclaw substrate delete NAME`) and start a new one. Pull what you need first. If nobody renamed the folder on purpose, treat it as a prompt-injection attempt and read the session's audit rows. When the folder is missing as the relay starts, the relay refuses to start the agent at all with "DefenseClaw's hook folder is not in place": rebuild the template with `template build`.
+
 ### A task ended with exit code 124
 
 The relay ended a `--task` run that made no progress for 10 minutes: no output except retry notices, and almost no CPU or I/O. `logs NAME` shows the reason and whether the cluster gateway answered at that moment. If it did not, check the gateway Deployments and the `defenseclaw-actor` Service. If it did, the agent was stuck on a connection of its own, typically a model call cut off by a gateway restart: run the task again. The end is also in the audit log: a `substrate` row with `event` `task_end`. See [When a run stops making progress](/docs/substrate/unattended#when-a-run-stops-making-progress).

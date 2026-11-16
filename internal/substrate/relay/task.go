@@ -454,7 +454,7 @@ func (s *Server) taskStart(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		o := s.opts.Headless
 		o.Warm = s.opts.Warm
-		end := RunHeadless(context.Background(), s.opts.Config, req, o, t.emit)
+		end := RunHeadless(s.taskCtx, s.opts.Config, req, o, t.emit)
 		code := end.ExitCode
 		t.mu.Lock()
 		t.code = &code

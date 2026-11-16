@@ -50,7 +50,10 @@ type Options struct {
 	Report func(ctx context.Context, end TaskEnd) error
 	// Headless tunes the task watchdog (tests); its Warm is Warm.
 	Headless HeadlessOptions
-	Now      func() time.Time
+	// Guard are the folders the relay watches (GAP-0120); nil is
+	// kit.GuardedDirs of the connector in the relay's HOME, empty is none.
+	Guard []string
+	Now   func() time.Time
 }
 
 // Server is the relay. NewServer has no side effect: the golden snapshot of
@@ -78,6 +81,14 @@ type Server struct {
 	// first in inputOrder (GAP-0170).
 	inputs     map[string]*inputCount
 	inputOrder []string
+
+	// guardErr is set when a guarded folder moved (GAP-0120): the agent
+	// was stopped and nothing starts again. taskCtx ends the running task
+	// then.
+	guardMu  sync.Mutex
+	guardErr error
+	taskCtx  context.Context
+	taskStop context.CancelFunc
 }
 
 // maxInputCounts bounds the attachments whose input counts a reconnect can
@@ -158,6 +169,22 @@ func (s *Server) init() error {
 			s.log.Warn("relay.signin_warning", "connector", rc.Connector)
 			s.agent.Banner = d.Message
 		}
+		// The hook folders the agent could rename away are watched from
+		// here on, before the agent first runs (GAP-0120).
+		s.taskCtx, s.taskStop = context.WithCancel(context.Background())
+		guard := s.opts.Guard
+		if guard == nil {
+			home := os.Getenv("HOME")
+			if home == "" {
+				home = "/sandbox" // the kit's image HOME, as its start wrapper assumes
+			}
+			guard = kit.GuardedDirs(rc.Connector, home)
+		}
+		if err := watchGuarded(s.taskCtx, guard, s.guardBroken); err != nil {
+			s.log.Warn("relay.guard_refused", "connector", rc.Connector, "error", err.Error())
+			s.initErr = &signinRefusal{msg: "DefenseClaw's hook folder is not in place (" + err.Error() + "); refusing to start the agent without its hooks"}
+			return
+		}
 		if s.opts.Warm == nil || s.opts.Report == nil {
 			t, err := kit.NewTransport(s.opts.Config)
 			if err != nil {
@@ -177,8 +204,26 @@ func (s *Server) init() error {
 	return s.initErr
 }
 
+// guardBroken stops the agent and its task for good when a guarded folder
+// moved (GAP-0120).
+func (s *Server) guardBroken(reason string) {
+	msg := "DefenseClaw's hook folder " + reason + ", so the agent could run without DefenseClaw's hooks; the agent was stopped. Delete this agent and start a new one"
+	s.guardMu.Lock()
+	s.guardErr = &signinRefusal{msg: msg}
+	s.guardMu.Unlock()
+	s.log.Warn("relay.guard_tamper", "connector", s.opts.Config.Relay.Connector, "reason", reason)
+	s.agent.Stop(msg)
+	s.taskStop()
+}
+
+func (s *Server) guardError() error {
+	s.guardMu.Lock()
+	defer s.guardMu.Unlock()
+	return s.guardErr
+}
+
 // signinRefusal is the E9 refusal of an agent that signs in to a vendor
-// account, in a managed image.
+// account, in a managed image, and the guard's refusal (GAP-0120).
 type signinRefusal struct{ msg string }
 
 func (e *signinRefusal) Error() string { return e.msg }
@@ -289,6 +334,11 @@ func (s *Server) auth(w http.ResponseWriter, r *http.Request, what string, open 
 			status = http.StatusForbidden
 		}
 		http.Error(w, "relay: "+err.Error(), status)
+		return Session{}, false
+	}
+	if err := s.guardError(); err != nil && open {
+		s.log.Warn("relay.refused", "what", what, "reason", "hook folder moved", "person", sess.Person)
+		http.Error(w, "relay: "+err.Error(), http.StatusForbidden)
 		return Session{}, false
 	}
 	s.log.Info("relay.accepted", "what", what, "person", sess.Person, "actor", sess.Actor, "actor_uid", sess.ActorUID, "jti", sess.TokenID)

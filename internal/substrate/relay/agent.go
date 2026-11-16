@@ -222,6 +222,26 @@ func (t *Attachment) Resize(cols, rows uint16) {
 	}
 }
 
+// Stop shows why to every attachment and ends the agent's whole session
+// (its process group); the attachments then get its exit. The relay's
+// guard calls it (GAP-0120).
+func (a *Agent) Stop(why string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.running || a.cmd == nil {
+		return
+	}
+	line := []byte("\r\n\x1b[31mdefenseclaw: " + why + "\x1b[0m\r\n")
+	a.scroll = append(a.scroll, line...)
+	for _, s := range a.subs {
+		select {
+		case s.ch <- event{data: line}:
+		default:
+		}
+	}
+	_ = killProcessGroup(a.cmd)
+}
+
 // Close detaches; the agent keeps running.
 func (t *Attachment) Close() {
 	t.once.Do(func() {
