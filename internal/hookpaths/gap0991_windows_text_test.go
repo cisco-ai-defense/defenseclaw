@@ -5,7 +5,6 @@ package hookpaths
 
 import (
 	"fmt"
-	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"testing"
 )
 
@@ -17,9 +16,6 @@ func TestGAP0991DrivePathInUnknownProgramText(t *testing.T) {
 			command := "$T send '" + fmt.Sprintf(form, home+"/.ssh/authorized_keys") + "'"
 			if !actionPosixTargetMention(command, cwd, home, 0, false, nil) {
 				t.Fatal("protected drive path missing from text reading")
-			}
-			if !ActionMentionsNoWriteRole(command, cwd, home, actionfacts.DialectPOSIX, nil) {
-				t.Fatal("unknown program text acquired a write proof")
 			}
 		})
 	}

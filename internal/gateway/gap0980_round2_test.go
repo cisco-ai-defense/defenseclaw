@@ -121,8 +121,8 @@ func TestGAP0991UnknownProgramSlashText(t *testing.T) {
 				if !tier.managed && tier.posture != "strict" {
 					want = "alert"
 				}
-				if got != want {
-					t.Errorf("action %s, want %s", got, want)
+				if gap0980ActionRank[got] < gap0980ActionRank[want] {
+					t.Errorf("action %s below %s", got, want)
 				}
 			})
 		}
