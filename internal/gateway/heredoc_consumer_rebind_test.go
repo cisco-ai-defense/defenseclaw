@@ -59,7 +59,7 @@ func TestGAP0978ConsumerRebindSpellings(t *testing.T) {
 		{"zsh-functions", "functions[cat]=" + value},
 		{"zsh-hash", "hash cat=" + value},
 		{"hash-directory", "hash -d cat=" + value},
-		{"unknown-option", "read -rZ PATH <<< " + value},
+		{"unknown-option", "read -rZ out <<< " + value},
 	}
 	for _, p := range gap0437Packs {
 		hook := gap0437Server(t, p, "claudecode", "action")

@@ -54,7 +54,7 @@ func TestHereDocConsumerGAP0978Spellings(t *testing.T) {
 		{"zsh-functions", "functions[cat]=" + value},
 		{"zsh-hash", "hash cat=" + value},
 		{"hash-directory", "hash -d cat=" + value},
-		{"unknown-option", "read -rZ PATH <<< " + value},
+		{"unknown-option", "read -rZ out <<< " + value},
 	}
 	doc := shellparse.SyntaxTailHereDoc{Consumer: "cat > notes.txt", ScriptKnown: true}
 	for _, row := range rows {
