@@ -66,10 +66,12 @@ type SimpleCommand struct {
 	// and the directory the action starts in judges the command as well as
 	// any other (rel-1-0-6:GAP-0630 review 5).
 	AbsoluteOnly bool
-	// UnprovenHome means Text reads ~ or $HOME through a HOME the walk could
-	// not read (HOME=$(pwd); cp ~/../f d): Text spells the previous home, and
-	// the home the shell uses is known only when it runs. A reader judges Text
-	// and adds the unknown tier (rel-1-0-10:GAP-0996).
+	// UnprovenHome means Text reads a file through ~ or $HOME after HOME got
+	// a value the walk could not read (HOME=$(pwd); cp ~/../f d): Text spells
+	// the previous home, and the file the shell reads is known only when it
+	// runs. A reader judges Text and adds the unknown tier
+	// (rel-1-0-10:GAP-0996). A write there is judged against the previous
+	// home only (GAP-2476): a scratch HOME=$(mktemp -d) keeps its writes.
 	UnprovenHome bool
 	// EvaluationFailure is "limit" or "parse" when no complete per-command
 	// view can be produced, EvaluationFailureInternal when the reader
@@ -241,6 +243,25 @@ func (s *simpleShellState) noteHome(set, known bool) {
 	if set {
 		s.homeUnproven = !known
 	}
+}
+
+// simpleReadsThroughUnprovenHome reports whether the reading text of a
+// statement spelled with ~ or HOME (source) reads a path under the home of
+// state while that home is unproven (SimpleCommand.UnprovenHome).
+func simpleReadsThroughUnprovenHome(input Input, state simpleShellState, source, text string, resolved bool) bool {
+	home := state.vars["HOME"]
+	if !state.homeUnproven || !resolved || home == "" ||
+		!strings.Contains(source, "~") && !strings.Contains(source, "HOME") {
+		return false
+	}
+	reading := input
+	reading.Command, reading.Args, reading.Argv, reading.CWD = text, nil, nil, state.cwd
+	for _, path := range Analyze(reading).Paths {
+		if path.Access == PathAccessRead && (path.Value == home || strings.HasPrefix(path.Value, strings.TrimSuffix(home, "/")+"/")) {
+			return true
+		}
+	}
+	return false
 }
 
 // simpleHomeChanged reports whether state holds another HOME than prior.
@@ -646,8 +667,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				UnresolvedBoundVariable: simpleUnresolvedBoundVariable(text, effective, bound),
 				UnboundUser:             simpleUnboundUser(text, effective, bound),
 				AbsoluteOnly:            state.cwdUnknown && !relative,
-				UnprovenHome: state.homeUnproven && resolvedVariable &&
-					(strings.Contains(part.text, "~") || strings.Contains(part.text, "HOME"))}
+				UnprovenHome:            simpleReadsThroughUnprovenHome(input, state, part.text, text, resolvedVariable)}
 			if text == part.text {
 				pieces.add(command)
 			}
