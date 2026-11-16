@@ -878,11 +878,10 @@ func (a *APIServer) substrateChainUnrecorded(ctx context.Context, profile connec
 	// unchecked egress, and alerts elsewhere (GAP-0339). A leader that can't
 	// be reached fails the egress check itself (the chain failure mode).
 	if st := a.substrateState(); st != nil && st.cfg.Chains != nil {
-		uctx, cancel := context.WithTimeout(ctx, substrateUnrecordedTimeout)
-		if err := st.cfg.Chains.Unrecorded(uctx, chainstate.Actor{Atespace: actor.Atespace, UID: actor.UID}, why); err != nil {
-			why += "; the leader was not told either: " + err.Error()
+		note := substrateNote{client: st.cfg.Chains, actor: chainstate.Actor{Atespace: actor.Atespace, UID: actor.UID}, why: why}
+		if err := substrateNotes.deliver(ctx, note); err != nil {
+			why += "; the leader was not told yet (retrying): " + err.Error()
 		}
-		cancel()
 	}
 	// Refused on a managed install and with a strict pack, an alert
 	// elsewhere (refuse-by-default for what can't be checked, GAP-0339).
@@ -3566,9 +3565,140 @@ func (a *APIServer) noteUnclearedRead(ctx context.Context, connectorName string)
 	if !ok || st == nil || st.cfg.Chains == nil {
 		return
 	}
-	uctx, cancel := context.WithTimeout(ctx, substrateUnrecordedTimeout)
-	defer cancel()
-	_ = st.cfg.Chains.Uncleared(uctx, chainstate.Actor{Atespace: actor.Atespace, UID: actor.UID}, unclearedReadWhy(connectorName))
+	_ = substrateNotes.deliver(ctx, substrateNote{client: st.cfg.Chains, actor: chainstate.Actor{Atespace: actor.Atespace, UID: actor.UID},
+		why: unclearedReadWhy(connectorName), uncleared: true})
+}
+
+// substrateNote is an unrecorded step (or an uncleared read) of an actor for
+// the leader.
+type substrateNote struct {
+	client    *chainstate.Client
+	actor     chainstate.Actor
+	why       string
+	uncleared bool
+	since     time.Time
+}
+
+func (n substrateNote) key() string {
+	return n.actor.Atespace + "/" + n.actor.UID + "\x00" + strconv.FormatBool(n.uncleared)
+}
+
+func sendSubstrateNote(ctx context.Context, n substrateNote) error {
+	if n.uncleared {
+		return n.client.Uncleared(ctx, n.actor, n.why)
+	}
+	return n.client.Unrecorded(ctx, n.actor, n.why)
+}
+
+// substrateNoteQueue delivers the notes and keeps one that could not be
+// delivered, retrying it in the background until the leader takes it or
+// the chain window it is for has passed: a leader restart or a transient
+// error must not leave the callout checking an incomplete window as if it
+// were whole (GAP-0339 review F3). The newest note of an actor and kind
+// replaces an older one; the queue is bounded, oldest out first.
+type substrateNoteQueue struct {
+	send    func(context.Context, substrateNote) error
+	every   time.Duration
+	keep    time.Duration
+	timeout time.Duration
+
+	mu      sync.Mutex
+	pending map[string]substrateNote
+	order   []string
+	running bool
+}
+
+// maxPendingSubstrateNotes bounds the notes waiting for the leader.
+const maxPendingSubstrateNotes = 4096
+
+var substrateNotes = &substrateNoteQueue{send: sendSubstrateNote, every: 5 * time.Second,
+	keep: 30 * time.Minute, timeout: substrateUnrecordedTimeout}
+
+// deliver sends n once; on a failure it queues n for retry and returns the
+// error.
+func (q *substrateNoteQueue) deliver(ctx context.Context, n substrateNote) error {
+	uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), q.timeout)
+	err := q.send(uctx, n)
+	cancel()
+	if err == nil {
+		return nil
+	}
+	if n.since.IsZero() {
+		n.since = time.Now()
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.pending == nil {
+		q.pending = map[string]substrateNote{}
+	}
+	if _, ok := q.pending[n.key()]; !ok {
+		q.order = append(q.order, n.key())
+	}
+	q.pending[n.key()] = n
+	for len(q.order) > maxPendingSubstrateNotes {
+		delete(q.pending, q.order[0])
+		q.order = q.order[1:]
+	}
+	if !q.running {
+		q.running = true
+		go q.retry()
+	}
+	return err
+}
+
+// retry resends the pending notes every q.every until none is left.
+func (q *substrateNoteQueue) retry() {
+	for {
+		time.Sleep(q.every)
+		q.mu.Lock()
+		batch := make([]substrateNote, 0, len(q.order))
+		for _, k := range q.order {
+			batch = append(batch, q.pending[k])
+		}
+		q.mu.Unlock()
+		for _, n := range batch {
+			ctx, cancel := context.WithTimeout(context.Background(), q.timeout)
+			err := q.send(ctx, n)
+			cancel()
+			if err == nil || time.Since(n.since) > q.keep {
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "[substrate] warning: %s/%s: gave up telling the leader of an unrecorded tool step after %s: %v\n",
+						n.actor.Atespace, n.actor.UID, q.keep, err)
+				}
+				q.drop(n)
+			}
+		}
+		q.mu.Lock()
+		if len(q.order) == 0 {
+			q.running = false
+			q.mu.Unlock()
+			return
+		}
+		q.mu.Unlock()
+	}
+}
+
+// drop removes n unless a newer note of the same actor and kind replaced it.
+func (q *substrateNoteQueue) drop(n substrateNote) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if cur, ok := q.pending[n.key()]; !ok || cur.why != n.why || !cur.since.Equal(n.since) {
+		return
+	}
+	delete(q.pending, n.key())
+	for i, k := range q.order {
+		if k == n.key() {
+			q.order = append(q.order[:i], q.order[i+1:]...)
+			break
+		}
+	}
+}
+
+// pendingCount is the notes waiting for the leader.
+func (q *substrateNoteQueue) pendingCount() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.order)
 }
 
 // readOnlyPrograms are the plain readers whose own error lines can prove a

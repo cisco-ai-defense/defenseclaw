@@ -833,7 +833,9 @@ func (s *Service) copyFork(ctx context.Context, child *actorEntry, st *audit.Sto
 
 // forkClock starts a child's clock from its parent's, once: a late or
 // repeated fork event never resets the child's own time. The child takes
-// the parent's task if it has none.
+// the parent's task if it has none, and the parent's later unrecorded and
+// uncleared marks: the child goes on from the parent's work, as it inherits
+// its windows (GAP-0339 review F1).
 func forkClock(cst, pst actorState) actorState {
 	if !cst.Forked {
 		cst.UncountedNanos, cst.ActiveUnixNano = pst.UncountedNanos, pst.ActiveUnixNano
@@ -842,6 +844,12 @@ func forkClock(cst, pst actorState) actorState {
 	}
 	if cst.Task == "" {
 		cst.Task = pst.Task
+	}
+	if pst.UnrecordedUnixNano > cst.UnrecordedUnixNano {
+		cst.UnrecordedUnixNano, cst.UnrecordedWhy = pst.UnrecordedUnixNano, pst.UnrecordedWhy
+	}
+	if pst.UnclearedUnixNano > cst.UnclearedUnixNano {
+		cst.UnclearedUnixNano, cst.UnclearedWhy = pst.UnclearedUnixNano, pst.UnclearedWhy
 	}
 	return cst
 }

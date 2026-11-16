@@ -255,6 +255,10 @@ type attacher struct {
 	// bytes typed during the outage; lost is set while a lost connection is
 	// retried.
 	unsent, dropped atomic.Int64
+	// maybe counts bytes sent that the relay's next hello does not count
+	// (GAP-0170): it can read that count while the old connection still
+	// drains keys it got, so they are only possibly lost.
+	maybe atomic.Int64
 	// prevInput and prevSent are the last relay greeting's input count id
 	// and the bytes sent on that connection (GAP-0170).
 	prevInput string
@@ -594,17 +598,27 @@ func (a *attacher) outageStopped(wctx context.Context, res *Result) bool {
 // counting again); "" when nothing was lost.
 func (a *attacher) notSentNote(sep string, reset bool) string {
 	n := a.unsent.Load() + a.dropped.Load()
+	maybe := a.maybe.Load()
 	if reset {
 		a.unsent.Store(0)
 		a.dropped.Store(0)
+		a.maybe.Store(0)
 	}
+	note := ""
 	switch {
 	case n == 0:
-		return ""
 	case reset:
-		return sep + fmt.Sprintf("%d typed character(s) were not sent; type them again.", n)
+		note = sep + fmt.Sprintf("%d typed character(s) were not sent; type them again.", n)
+	default:
+		note = sep + fmt.Sprintf("(%d typed character(s) not sent)", n)
 	}
-	return sep + fmt.Sprintf("(%d typed character(s) not sent)", n)
+	if maybe > 0 && reset {
+		// Keys sent in the moment before the cut that the relay had not
+		// counted when it greeted again: they may have reached the agent
+		// after all (GAP-0170).
+		note += sep + fmt.Sprintf("%d character(s) typed just before the connection dropped may not have reached the agent; check the prompt.", maybe)
+	}
+	return note
 }
 
 func (a *attacher) notSentErr(err error) error {
@@ -683,7 +697,7 @@ func (a *attacher) once(ctx context.Context) (relay.AttachResult, bool, error) {
 					// Sent before the cut but never written to the
 					// agent: lost on the way (a suspend).
 					if lost := prevSent - *c.Received; lost > 0 {
-						a.unsent.Add(lost)
+						a.maybe.Add(lost)
 					}
 				}
 				a.endDrain()

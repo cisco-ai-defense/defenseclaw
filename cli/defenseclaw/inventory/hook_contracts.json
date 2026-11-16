@@ -1195,7 +1195,11 @@
                 "on_session_finalize",
                 "on_session_reset",
                 "subagent_start",
-                "subagent_stop"
+                "subagent_stop",
+                "transform_tool_result",
+                "transform_terminal_output",
+                "pre_approval_request",
+                "post_approval_response"
               ]
             },
             "covered_tool_surfaces": [
@@ -1357,7 +1361,12 @@
                 "on_session_finalize",
                 "on_session_reset",
                 "subagent_start",
-                "subagent_stop"
+                "subagent_stop",
+                "transform_tool_result",
+                "transform_terminal_output",
+                "pre_approval_request",
+                "post_approval_response",
+                "post_llm_call"
               ]
             },
             "covered_tool_surfaces": [
@@ -1546,7 +1555,9 @@
                 "subagentStart",
                 "subagentStop",
                 "stop",
-                "workspaceOpen"
+                "workspaceOpen",
+                "afterAgentResponse",
+                "afterAgentThought"
               ]
             },
             "covered_tool_surfaces": [

@@ -9,9 +9,9 @@ import (
 )
 
 // GAP-0170: keys the launcher sent in the moment before a suspend cut the
-// connection, which never reached the agent, are counted from the relay's
-// next hello (what it got from the last attachment) and the person is told
-// to type them again.
+// connection, which the relay had not counted when it greeted again, are
+// reported as possibly lost (the old connection may still drain them), so
+// the person checks the prompt instead of retyping keys that did arrive.
 func TestKeysLostBeforeASuspendAreCounted(t *testing.T) {
 	r, _, o := suspendRig(t)
 	run := r.start(o)
@@ -21,7 +21,7 @@ func TestKeysLostBeforeASuspendAreCounted(t *testing.T) {
 	r.typ("LOSE\r")
 	waitFor(t, "screen 2", func() bool { return strings.Contains(r.out.String(), "screen:2") })
 	waitFor(t, "reconnected with the count", func() bool {
-		return strings.Contains(r.errb.String(), "Reconnected. 5 typed character(s) were not sent; type them again.")
+		return strings.Contains(r.errb.String(), "Reconnected. 5 character(s) typed just before the connection dropped may not have reached the agent; check the prompt.")
 	})
 	r.typ("\x1d")
 	if got := r.wait(run); got.err != nil || !got.res.Detached {
@@ -49,7 +49,7 @@ func TestDeliveredKeysAreNotCountedAsLost(t *testing.T) {
 		if got := r.wait(run); got.err != nil || !got.res.Detached {
 			t.Fatalf("legacy=%v: %+v %v", legacy, got.res, got.err)
 		}
-		if strings.Contains(r.errb.String(), "typed character(s)") {
+		if strings.Contains(r.errb.String(), "character(s)") {
 			t.Fatalf("legacy=%v: a loss was claimed: %q", legacy, r.errb.String())
 		}
 	}

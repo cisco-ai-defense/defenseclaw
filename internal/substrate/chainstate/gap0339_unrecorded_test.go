@@ -44,3 +44,29 @@ func TestGAP0339UnrecordedStepReachesTheEgressVerdict(t *testing.T) {
 		t.Fatal("an unrecorded step without an actor was accepted")
 	}
 }
+
+// A fork inherits the parent's unrecorded and uncleared marks with its
+// windows: a child forked after the parent's unrecorded step is refused
+// where the parent is (GAP-0339 review F1).
+func TestGAP0339ForkInheritsTheUnrecordedMark(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, t.TempDir(), Options{})
+	ctx := context.Background()
+	if err := h.client.Unrecorded(ctx, actorA, "probe unrecorded read"); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.client.Uncleared(ctx, actorA, "credentials read could not be cleared: no result correlation for devin"); err != nil {
+		t.Fatal(err)
+	}
+	h.life(LifecycleEvent{Actor: actorB, Event: LifecycleForked, Parent: &actorA})
+	v, err := h.egress(actorB)
+	if err != nil || v.Unrecorded != "probe unrecorded read" {
+		t.Fatalf("fork child: %+v err=%v, want the parent's unrecorded step", v, err)
+	}
+	h.svc.mu.Lock()
+	st := h.svc.actors[actorB.key()].state
+	h.svc.mu.Unlock()
+	if st.UnclearedWhy == "" || st.UnclearedUnixNano == 0 {
+		t.Fatalf("fork child state %+v, want the parent's uncleared mark", st)
+	}
+}
