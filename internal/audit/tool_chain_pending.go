@@ -109,6 +109,13 @@ type ToolChainResolvePendingInput struct {
 	// secret-read step 1 alone is promoted, as a success promotes it; every
 	// other step of the proposal is dropped, as for any unsuccessful result.
 	UnsuccessfulMayHaveRead bool `json:"-"`
+	// ResultMayHaveRead marks a result, of any outcome but denied or
+	// cancelled, whose content does not prove its call read nothing. Only the
+	// Substrate leader reads it, for a further result of a call it already
+	// resolved (substrate-1 GAP-0348, GAP-0345): such a result is a replay,
+	// and one that may have read still starts the secret-read chain from the
+	// call's proposal, so a second result never clears a read.
+	ResultMayHaveRead bool `json:"-"`
 }
 
 type ToolChainResolvePendingResult struct {

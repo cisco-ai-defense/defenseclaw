@@ -575,12 +575,25 @@ func (a *APIServer) applyAgentHookToolChains(
 			SuccessfulS4UTargetPrincipalIdentityDigest: s4uTicketResult.TargetPrincipalIdentityDigest,
 			SuccessfulS4UTicketCacheDigest:             s4uTicketResult.TicketArtifactIdentityDigest,
 		}
+		ran := outcome != connector.ToolLifecycleOutcomeDenied && outcome != connector.ToolLifecycleOutcomeCancelled
 		if outcome == connector.ToolLifecycleOutcomeFailure || outcome == connector.ToolLifecycleOutcomeUnknown {
 			// The call ran (or may have) and did not succeed: the secret-read
 			// chain start decides by what it printed (GAP-0337).
 			resolveInput.UnsuccessfulMayHaveRead = !toolResultProvesNothingRead(req)
 		}
+		if substrateActor && ran {
+			// A further result of a call the leader already resolved (Claude
+			// Code and Cursor post a failure result and then a PostToolUse for
+			// one failed call; the kit retries a post) is a replay there, and
+			// one whose content may show a read still starts the secret-read
+			// chain from the call's proposal (GAP-0348, GAP-0345).
+			resolveInput.ResultMayHaveRead = resolveInput.UnsuccessfulMayHaveRead ||
+				outcome == connector.ToolLifecycleOutcomeSuccess && !toolResultProvesNothingRead(req)
+		}
 		resolved, resolveErr := repository.ResolvePending(ctx, resolveInput)
+		// rootJoined: the actor window knows the call (it took this result,
+		// or a result of the call before it).
+		rootJoined := false
 		if rootRepository != nil {
 			// The root scope promotes its own copy of the proposal; a failure
 			// there leaves the session verdict as it is.
@@ -590,6 +603,8 @@ func (a *APIServer) applyAgentHookToolChains(
 				rootResolved.Status == audit.ToolChainPendingResolved {
 				rootResult, rootResolvedSuccess = rootResolved.Observation, true
 			}
+			rootJoined = rootErr == nil && (rootResolved.Status == audit.ToolChainPendingResolved ||
+				rootResolved.Status == audit.ToolChainPendingReplay)
 			if rootErr != nil {
 				rootMissed = "the leader did not take the step: " + rootErr.Error()
 			}
@@ -597,15 +612,17 @@ func (a *APIServer) applyAgentHookToolChains(
 		if resolveErr != nil {
 			return resp, finalization
 		}
-		if substrateActor && resolved.Status == audit.ToolChainPendingMissing &&
-			outcome != connector.ToolLifecycleOutcomeDenied && outcome != connector.ToolLifecycleOutcomeCancelled &&
+		if substrateActor && resolved.Status == audit.ToolChainPendingMissing && !rootJoined && ran &&
 			resultMayBeAnUnjoinedRead(req, projection) {
-			// The call ran (or may have) but its proposal is not in the
-			// actor's window: its PreToolUse reached no leader (a replica
-			// cut off from it), so the read may be in no window at all. The
-			// step is reported unrecorded, and the leader keeps that for the
-			// callout (review rch3 R1). A repeated result of a resolved
-			// credentials read lands here too: the safe side.
+			// The call ran (or may have) but neither the session nor the
+			// actor window knows it: its PreToolUse reached no leader (a
+			// replica cut off from it, or a leader that lost it since), so
+			// the read may be in no window at all. The step is reported
+			// unrecorded, and the leader keeps that for the callout (review
+			// rch3 R1). A further result of a call the leader resolved is a
+			// replay, not missing, and a result after a turn boundary (Stop
+			// discards only the session's proposal) is joined in the actor
+			// window: neither is marked (GAP-0348, GAP-0345).
 			rootMissed = "a tool result whose call is not in the actor's chain window (its call did not reach the leader)"
 		}
 		resolvedInvocation = resolved.Status == audit.ToolChainPendingResolved

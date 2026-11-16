@@ -198,6 +198,10 @@ type actorEntry struct {
 	purgeIdle bool
 	// memo is what the callout's chain check answers from (GAP-0179).
 	memo egressMemo
+	// calls are the actor's tool calls this leader prepared or resolved, by
+	// scope, session and call (GAP-0348, GAP-0345; calls.go). The actor
+	// lock guards them.
+	calls map[callKey]callMemo
 	// stateMu orders the state file writes, so the newest memo is the one
 	// on the volume.
 	stateMu sync.Mutex
@@ -1048,7 +1052,12 @@ func (s *Service) Observe(ctx context.Context, in ObserveRequest) (ObserveRespon
 			return ObserveResponse{}, bad(err)
 		}
 		x.ConnectorInstanceID = instance
-		result, err = repo.ResolvePending(ctx, x)
+		var r audit.ToolChainResolvePendingResult
+		r, err = repo.ResolvePending(ctx, x)
+		if err == nil {
+			r, err = s.furtherResult(ctx, repo, e, in, x, r)
+		}
+		result = r
 	case OpPrepare:
 		var x audit.ToolChainPreparePendingInput
 		if err := decodeGob(in.Input, &x); err != nil {
@@ -1058,7 +1067,10 @@ func (s *Service) Observe(ctx context.Context, in ObserveRequest) (ObserveRespon
 		if err := s.notePending(e, in.Scope, x.Projection); err != nil {
 			return ObserveResponse{}, err
 		}
-		result, err = repo.PreparePending(ctx, x)
+		var r audit.ToolChainPreparePendingResult
+		r, err = repo.PreparePending(ctx, x)
+		s.noteCall(e, in, x, r.Status, err)
+		result = r
 	case OpDiscard:
 		var x audit.ToolChainDiscardPendingForEventSessionInput
 		if err := decodeGob(in.Input, &x); err != nil {
