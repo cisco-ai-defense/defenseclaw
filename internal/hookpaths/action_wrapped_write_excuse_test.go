@@ -64,10 +64,24 @@ func TestWrappedProtectedWriteIsNotExcused(t *testing.T) {
 		// A program named at run time without a -c option hands the text to
 		// something the scan cannot know: its operands stay data of unknown
 		// role (rel-1-0-10:GAP-0018), also when an option cluster has no c.
+		// On a Windows home the Git Bash reading judges a path in the Windows
+		// spelling as rel does and excuses no unknown role, so that spelling
+		// keeps the rel block in every tier there (as d4 and rel do); a ~/
+		// spelling takes the GAP-0018 reading on every OS.
+		tildeWrite := strings.Replace(write, target, "~/.ssh/authorized_keys", 1)
 		for _, form := range []string{"$T send '%s'", "\"$TOOL\" -v '%s'", "\"$TOOL\" -- -c '%s'", "\"$TOOL\" -o out -v '%s'"} {
-			command := strings.Replace(form, "%s", write, 1)
-			if !ActionMentionsNoWriteRole(command, cwd, home, actionfacts.DialectPOSIX, nil) {
-				t.Errorf("%q: a run-time program without -c is no longer data of unknown role", command)
+			for _, text := range []string{write, tildeWrite} {
+				command := strings.Replace(form, "%s", text, 1)
+				if got := ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, actionfacts.DialectPOSIX, nil); got != "protected-target" {
+					t.Errorf("%q: decision %q, want protected-target", command, got)
+				}
+				unknown := text == tildeWrite || !actionWindowsHome(home)
+				switch got := ActionMentionsNoWriteRole(command, cwd, home, actionfacts.DialectPOSIX, nil); {
+				case unknown && !got:
+					t.Errorf("%q: a run-time program without -c is no longer data of unknown role", command)
+				case !unknown && got:
+					t.Errorf("%q: the Windows spelling on a Windows home is excused, below the rel block", command)
+				}
 			}
 		}
 	}
