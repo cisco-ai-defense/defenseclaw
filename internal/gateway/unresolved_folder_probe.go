@@ -207,6 +207,31 @@ func unresolvedFolderMayNameProtectedFile(facts actionfacts.Facts, noFolder bool
 	return false
 }
 
+// unresolvedFolderCurrentFolderTwin reads a call with no folder from the
+// agent whose operand is spelled from the current folder ($PWD/.ssh/id_rsa,
+// $(pwd)/.aws/*): that folder is as unknown as after a cd the walk cannot
+// follow, so the twin that spells the operand alone
+// (actionfacts.CurrentFolderHeadsAsRelative, the walk's own reading after
+// such a cd) is read as the plain spelling is, the pattern and its cap
+// included (rel-1-0-10:GAP-1023).
+func unresolvedFolderCurrentFolderTwin(request trustedActionRequest) (bool, bounded.CapSet) {
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return false, bounded.CapSet{}
+	}
+	twin, ok := actionfacts.CurrentFolderHeadsAsRelative(command)
+	if !ok {
+		return false, bounded.CapSet{}
+	}
+	twinRequest := request
+	twinRequest.Input.Command, twinRequest.Input.Args, twinRequest.Input.Argv = twin, nil, nil
+	twinFacts := actionfacts.Analyze(twinRequest.Input)
+	if unresolvedFolderMayNameProtectedFile(twinFacts, true) {
+		return true, bounded.CapSet{}
+	}
+	return unresolvedFolderGlobMayNameProtectedFile(twinRequest, twinFacts, true)
+}
+
 // withUnresolvedFolderTier adds the unknown tier to the findings of a call,
 // or of one statement of a split call the walk could not place (statement),
 // whose relative operand may be a named protected file in a folder the call
@@ -229,6 +254,9 @@ func withUnresolvedFolderTier(findings []RuleFinding, request trustedActionReque
 	var truncated bounded.CapSet
 	if !names {
 		names, truncated = unresolvedFolderGlobMayNameProtectedFile(request, facts, noFolder || statement)
+	}
+	if !names && noFolder && !statement {
+		names, truncated = unresolvedFolderCurrentFolderTwin(request)
 	}
 	if names {
 		unknown := trustedActionLimitFindings(request.EnforcementCapable)

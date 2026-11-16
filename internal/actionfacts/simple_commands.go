@@ -611,6 +611,10 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					text = resolved
 					changed = true
 				}
+				if resolved, ok, held := simpleResolvedCurrentFolderHeads(text, &state); ok {
+					text = resolved
+					changed, resolvedVariable = true, resolvedVariable || held
+				}
 				if stripped, ok := withoutDescriptorDuplications(text); ok {
 					text = stripped
 					changed = true
@@ -2084,6 +2088,193 @@ func simpleResolvedDirectoryStackTildes(source string, state *simpleShellState, 
 		source = source[:r.start] + r.text + source[r.end:]
 	}
 	return source, true
+}
+
+// simpleResolvedCurrentFolderHeads writes the current-folder head of a word
+// ($PWD, ${PWD}, "$PWD", $(pwd), `pwd` and ~+ before a slash, alone or in
+// double quotes) as the folder the walk is in. After a cd the walk cannot
+// follow (cd "$X", cd "$(mktemp -d)": cwdUnknown, PWD dropped) the head is
+// the current folder itself, so the word is the relative operand it spells
+// there and takes the path of its plain spelling: $PWD/.ssh/id_rsa is
+// .ssh/id_rsa, where the head kept its $ or ~ and the operand named nothing
+// (rel-1-0-10:GAP-1023). The head and its slash go; it stays as "." where
+// the rest alone would be another word: the program word (a bare name is
+// looked up in PATH), or a rest that starts with -, ~, / or a quote. In a folder the walk knows, $(pwd) and
+// `pwd` are that folder, as $PWD and ~+ already are there
+// (simpleResolvedVariables, simpleResolvedDirectoryStackTildes,
+// rel-1-0-10:GAP-1024); held reports such a written folder. The value of an
+// assignment is left as written: the variable keeps the folder the shell
+// gave it, which a later cd does not move.
+func simpleResolvedCurrentFolderHeads(source string, state *simpleShellState) (resolved string, ok, held bool) {
+	if !strings.Contains(source, "PWD") && !strings.Contains(source, "pwd") && !strings.Contains(source, "~+") {
+		return "", false, false
+	}
+	unresolved := state.cwdUnknown
+	folder := ""
+	if !unresolved && strings.HasPrefix(state.cwd, "/") {
+		folder = simplePathClean(state.cwd)
+	}
+	if !unresolved && folder == "" {
+		return "", false, false
+	}
+	// A PWD the walk holds was written by simpleResolvedVariables already.
+	_, pwdHeld := state.vars["PWD"]
+	file, parsed := shellparse.Parse(source)
+	if !parsed {
+		return "", false, false
+	}
+	type replacement struct {
+		start, end int
+		text       string
+	}
+	var replacements []replacement
+	// programs are the program words: a head there stays "./".
+	programs := map[*syntax.Word]bool{}
+	add := func(word *syntax.Word, start, end int, text string) {
+		if start < 0 || end <= start || end > len(source) {
+			return
+		}
+		if text == "." && !programs[word] && end+1 < len(source) && source[end] == '/' &&
+			simpleBareOperandStart(source[end+1]) {
+			// The plain spelling: the head and its slash go.
+			text, end = "", end+1
+		}
+		replacements = append(replacements, replacement{start, end, text})
+	}
+	addNode := func(word *syntax.Word, node syntax.Node, text string) {
+		add(word, int(node.Pos().Offset()), int(node.End().Offset()), text)
+	}
+	// head is the text of a current-folder part: "." where the folder is
+	// not known, else the folder, quoted for where the part sits.
+	head := func(part syntax.WordPart, quoted bool) (string, bool) {
+		switch node := part.(type) {
+		case *syntax.ParamExp:
+			if !unresolved || pwdHeld || !simplePlainParameter(node, "PWD") {
+				return "", false
+			}
+		case *syntax.CmdSubst:
+			if !simplePwdSubstitution(node) {
+				return "", false
+			}
+		default:
+			return "", false
+		}
+		switch {
+		case unresolved:
+			return ".", true
+		case quoted:
+			return strings.NewReplacer(`\`, `\\`, `"`, `\"`, "$", `\$`, "`", "\\`").Replace(folder), true
+		default:
+			return "'" + strings.ReplaceAll(folder, "'", "'\\''") + "'", true
+		}
+	}
+	slashAt := func(parts []syntax.WordPart, index int) bool {
+		if index >= len(parts) {
+			return false
+		}
+		lit, ok := parts[index].(*syntax.Lit)
+		return ok && strings.HasPrefix(lit.Value, "/")
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.Redirect:
+			return node.Op != syntax.Hdoc && node.Op != syntax.DashHdoc
+		case *syntax.Assign:
+			return false
+		case *syntax.CallExpr:
+			if len(node.Args) != 0 {
+				programs[node.Args[0]] = true
+			}
+		case *syntax.Word:
+			if len(node.Parts) == 0 {
+				return true
+			}
+			switch first := node.Parts[0].(type) {
+			case *syntax.Lit:
+				if unresolved && !pwdHeld && strings.HasPrefix(first.Value, "~+/") {
+					start := int(first.Pos().Offset())
+					if start >= 0 && start+2 <= len(source) && source[start:start+2] == "~+" {
+						add(node, start, start+2, ".")
+					}
+					return false
+				}
+			case *syntax.DblQuoted:
+				if first.Dollar || len(first.Parts) == 0 {
+					break
+				}
+				if len(first.Parts) == 1 && slashAt(node.Parts, 1) {
+					// "$PWD"/x: the quoted head is the whole quote.
+					if text, ok := head(first.Parts[0], false); ok {
+						addNode(node, first, text)
+						return false
+					}
+				} else if slashAt(first.Parts, 1) {
+					// "$PWD/x": the head sits inside the quotes.
+					if text, ok := head(first.Parts[0], true); ok {
+						addNode(node, first.Parts[0], text)
+						return false
+					}
+				}
+			default:
+				if slashAt(node.Parts, 1) {
+					if text, ok := head(first, false); ok {
+						addNode(node, first, text)
+						return false
+					}
+				}
+			}
+		}
+		return true
+	})
+	if len(replacements) == 0 {
+		return "", false, false
+	}
+	slices.SortFunc(replacements, func(a, b replacement) int { return a.start - b.start })
+	for i := len(replacements) - 1; i >= 0; i-- {
+		r := replacements[i]
+		source = source[:r.start] + r.text + source[r.end:]
+	}
+	return source, true, !unresolved
+}
+
+// CurrentFolderHeadsAsRelative is command with each current-folder head
+// ($PWD/, ${PWD}/, "$PWD"/, $(pwd)/, `pwd`/, ~+/) written as the current
+// folder itself, as the walk writes it after a cd it cannot follow
+// (simpleResolvedCurrentFolderHeads): the operand alone. A gateway reads it
+// for a call with no folder from the agent at all, whose current folder is
+// as unknown (rel-1-0-10:GAP-1023). ok is false when command has no head.
+func CurrentFolderHeadsAsRelative(command string) (string, bool) {
+	state := simpleShellState{cwdUnknown: true, vars: map[string]string{}}
+	resolved, ok, _ := simpleResolvedCurrentFolderHeads(command, &state)
+	return resolved, ok
+}
+
+// simpleBareOperandStart reports a first character after which a word reads
+// the same with or without a leading ./: a letter, a digit, . _ or a
+// pattern character. A -, ~, / or quote there would make another word.
+func simpleBareOperandStart(char byte) bool {
+	return char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' ||
+		strings.IndexByte("._*?[", char) >= 0
+}
+
+// simplePlainParameter reports $name or ${name} with no operator, index or
+// flag: the value of name as it is.
+func simplePlainParameter(param *syntax.ParamExp, name string) bool {
+	return param.Param != nil && param.Param.Value == name && !param.Excl && !param.Length && !param.Width &&
+		!param.IsSet && param.Index == nil && param.Slice == nil && param.Repl == nil && param.Names == 0 &&
+		param.Exp == nil && param.Flags == nil && param.NestedParam == nil && len(param.Modifiers) == 0
+}
+
+// simplePwdSubstitution reports $(pwd) or `pwd`: a substitution of the pwd
+// program alone, which prints the current folder.
+func simplePwdSubstitution(subst *syntax.CmdSubst) bool {
+	if subst.TempFile || subst.ReplyVar || len(subst.Stmts) != 1 {
+		return false
+	}
+	stmt := subst.Stmts[0]
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	return ok && !stmt.Negated && !stmt.Background && !stmt.Coprocess && !stmt.Disown && len(stmt.Redirs) == 0 &&
+		len(call.Assigns) == 0 && len(call.Args) == 1 && call.Args[0].Lit() == "pwd"
 }
 
 // simpleOtherAccountHome is the home that the tilde-prefix ~name names, for an
