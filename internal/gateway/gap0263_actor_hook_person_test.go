@@ -70,12 +70,17 @@ func TestGAP0263ActorHookRowsNameTheVerifiedPerson(t *testing.T) {
 	if user.ID != "alice" || user.IDKind != substrateSubjectIDKind || user.Identity == nil {
 		t.Fatalf("hook user %+v", user)
 	}
+	// The name is the bare name, as on the host's verified path; the
+	// email-shaped principal is only the directory fact below.
+	if user.Name != "alice" {
+		t.Fatalf("hook user name %q, want the bare name alice", user.Name)
+	}
 	if d := user.Identity.Directory; d.Assurance != useridentity.AssuranceVerified || d.Source != substrateIdentitySourceOIDC || d.Principal != "alice@example.com" {
 		t.Fatalf("directory facts %+v: want principal alice@example.com, assurance verified, source oidc", d)
 	}
 	bobReg := aliceReg
 	bobReg.Name, bobReg.UID, bobReg.Person = "bob-1", subUID2, ownerOf(bob)
-	if user := resolveHookUserIdentity(ctxFor(bobReg), "claudecode", nil); user.ID != "bob" || user.Identity == nil || user.Identity.Directory.Principal != "bob@example.com" {
+	if user := resolveHookUserIdentity(ctxFor(bobReg), "claudecode", nil); user.ID != "bob" || user.Name != "bob" || user.Identity == nil || user.Identity.Directory.Principal != "bob@example.com" {
 		t.Fatalf("bob's actor names %+v", user)
 	}
 	attributed := registry.Registration{Atespace: "other", Name: "x-1", UID: subUID2, Connector: "claudecode", Attributed: true}

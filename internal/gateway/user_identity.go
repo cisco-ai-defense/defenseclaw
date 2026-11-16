@@ -138,14 +138,17 @@ func resolveHTTPUserIdentity(r *http.Request, rawBody []byte) llmEventUser {
 // actor listener attached from the registration (attachSubstrateSubject):
 // user.id the OIDC subject, id_kind oidc_subject, and, because the record
 // names the verified subject, its directory facts at assurance verified with
-// identity source oidc (requestIdentityFor). An actor with no bound person
+// identity source oidc (requestIdentityFor). user.name is the bare name, as
+// on the host's verified path: the email-shaped principal is a directory
+// fact, never the name (substrate-1 GAP-0263). An actor with no bound person
 // names nobody. Neither is the binding's host user: a Substrate binding has
 // none, and the local fallback named the gateway pod's own account (uid
 // 65532, nonroot) on every actor row (substrate-1 GAP-0263). Any other
 // sandbox names the host user its binding recorded.
 func sandboxRequestUser(ctx context.Context, binding sandboxauth.Binding) llmEventUser {
 	if subject, ok := verifiedSubjectFromContext(ctx); ok && isSubstrateSubjectSource(subject.Source) {
-		return llmEventUser{ID: subject.UserID, IDKind: subject.IDKind, Name: subject.UserName}
+		return llmEventUser{ID: subject.UserID, IDKind: subject.IDKind,
+			Name: useridentity.BareAccountName(sanitizeLLMEventUser(subject.UserName))}
 	}
 	if _, ok := substrateActorFrom(ctx); ok {
 		return llmEventUser{}
