@@ -117,24 +117,17 @@ func canonicalCiscoRuleFinding(value string) (string, string) {
 	if id := canonicalCiscoFindingID(value); id != ciscoUnknownFindingID {
 		return id, ciscoFindingDisplayLabel(id)
 	}
-	name := boundedCiscoRuleName(value)
+	name := normalizeCiscoRuleName(value)
 	if name == "" {
 		return ciscoUnknownFindingID, ciscoFindingDisplayLabel(ciscoUnknownFindingID)
 	}
 	normalized := strings.ToLower(strings.Join(strings.Fields(norm.NFKC.String(name)), " "))
 	sum := sha256.Sum256([]byte(normalized))
-	return fmt.Sprintf("%s%X", ciscoCustomFindingPrefix, sum[:12]), name
+	return fmt.Sprintf("%s%X", ciscoCustomFindingPrefix, sum[:12]), boundedCiscoRuleName(name)
 }
 
 func boundedCiscoRuleName(value string) string {
-	value = strings.TrimSpace(strings.ToValidUTF8(value, "\uFFFD"))
-	value = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
-			return -1
-		}
-		return r
-	}, value)
-	value = strings.Join(strings.Fields(value), " ")
+	value = normalizeCiscoRuleName(value)
 	if len(value) <= 256 {
 		return value
 	}
@@ -143,6 +136,17 @@ func boundedCiscoRuleName(value string) string {
 		cut--
 	}
 	return strings.TrimSpace(value[:cut])
+}
+
+func normalizeCiscoRuleName(value string) string {
+	value = strings.TrimSpace(strings.ToValidUTF8(value, "\uFFFD"))
+	value = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, value)
+	return strings.Join(strings.Fields(value), " ")
 }
 
 // inspectCall carries the per-endpoint pieces doInspectHTTP() needs. The

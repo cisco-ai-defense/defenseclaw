@@ -130,6 +130,16 @@ func TestNormalizeCiscoResponsePreservesDistinctCustomRuleNames(t *testing.T) {
 	if id1 != id2 || name1 != name2 {
 		t.Fatalf("normalized custom identity mismatch: (%q,%q) vs (%q,%q)", id1, name1, id2, name2)
 	}
+
+	sharedPrefix := strings.Repeat("a", 256)
+	id1, name1 = canonicalCiscoRuleFinding(sharedPrefix + " first")
+	id2, name2 = canonicalCiscoRuleFinding(sharedPrefix + " second")
+	if id1 == id2 {
+		t.Fatalf("custom identities collide after display-name truncation: %q", id1)
+	}
+	if name1 != sharedPrefix || name2 != sharedPrefix {
+		t.Fatalf("bounded display names = (%q, %q), want shared 256-byte prefix", name1, name2)
+	}
 }
 
 func TestNormalizeCiscoResponseKeepsMarkerWhenNoConcreteRuleExists(t *testing.T) {

@@ -20,6 +20,7 @@ import (
 	"context"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -65,6 +66,7 @@ func topRuleIDsAndNames(findings []scanner.InspectFinding, n int) ([]string, []s
 		if name == "" {
 			name = id
 		}
+		name = boundedRuleDisplayName(name, 256)
 		ids = append(ids, id)
 		names = append(names, name)
 		if len(ids) == n {
@@ -72,6 +74,18 @@ func topRuleIDsAndNames(findings []scanner.InspectFinding, n int) ([]string, []s
 		}
 	}
 	return ids, names
+}
+
+func boundedRuleDisplayName(value string, maxBytes int) string {
+	value = strings.ToValidUTF8(value, "\uFFFD")
+	if maxBytes <= 0 || len(value) <= maxBytes {
+		return value
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return value[:cut]
 }
 
 // emitHookRuleFindings fans the verdict's DetailedFindings through the audit
