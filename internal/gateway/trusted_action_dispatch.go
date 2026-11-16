@@ -823,9 +823,10 @@ func dispatchTrustedAction(
 	// places (a home form the tool does not expand, a drive-relative path, a
 	// device path) writes a file no path rule can name: it is judged at the
 	// unknown tier of the pack at least, never a clean allow
-	// (rel-1-0-10:GAP-1052, GAP-0947).
-	if facts.Parse.Status == actionfacts.StatusInvalid &&
-		actionfacts.PatchNamesUnplacedTarget(request.Input.Tool, request.Input.Args) {
+	// (rel-1-0-10:GAP-1052, GAP-0947). Whatever the parse status: the placed
+	// headers of the same envelope are facts the rules judge, and a block they
+	// prove stays a block (rel-1-0-10:GAP-1055).
+	if actionfacts.PatchNamesUnplacedTarget(request.Input.Tool, request.Input.Args) {
 		defer func() {
 			findings = withUnknownFinding(findings, unknownReasonFinding(unplacedPatchTargetTitle,
 				actionfacts.UnplacedPatchTargetReason, request.EnforcementCapable))

@@ -44,6 +44,9 @@ type patchEnvelopeResult struct {
 	// by a spelling no reader places (isAcceptedPatchPath). The tool writes
 	// that file, so the call is judged at the unknown tier
 	// (PatchNamesUnplacedTarget), never read as an envelope the tool rejects.
+	// The changes of the other headers are kept and judged as they are in an
+	// envelope of their own (rel-1-0-10:GAP-1055); when no header is placed,
+	// the status is invalid, since the envelope names nothing a rule reads.
 	unplaced bool
 }
 
@@ -254,6 +257,8 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 	updateContent := false
 	hasMove := false
 	unplaced := false
+	// unplacedChange marks the changes of changes whose file no reader places.
+	var unplacedChange []bool
 	for _, line := range lines[1 : len(lines)-1] {
 		// A carriage return that does not end a line is read only in a
 		// directive name, which the tools take without it.
@@ -316,6 +321,7 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 
 		kind := ""
 		pathValue := ""
+		headerUnplaced := false
 		for _, directive := range patchDirectives {
 			if strings.HasPrefix(line, directive.prefix) {
 				kind = directive.kind
@@ -331,6 +337,7 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 			// the rest of the envelope is still read, and a well formed
 			// one is unplaced, not invalid.
 			unplaced = true
+			headerUnplaced = true
 		} else if kind == "" || pathValue == "" ||
 			strings.TrimLeftFunc(pathValue, unicode.IsSpace) != pathValue ||
 			len(pathValue) > maxScalarBytes ||
@@ -358,6 +365,7 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 			changes = append(changes, patchPathChange{
 				path: pathValue, access: PathAccessWrite,
 			})
+			unplacedChange = append(unplacedChange, headerUnplaced)
 			pendingUpdate = -1
 			if kind == "update" {
 				pendingUpdate = len(changes) - 1
@@ -370,6 +378,7 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 			changes = append(changes, patchPathChange{
 				path: pathValue, access: PathAccessDelete,
 			})
+			unplacedChange = append(unplacedChange, headerUnplaced)
 			pendingUpdate = -1
 			activeDirective = kind
 			contentAfterDirective = false
@@ -384,6 +393,7 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 			changes = append(changes, patchPathChange{
 				path: pathValue, access: PathAccessWrite,
 			})
+			unplacedChange = append(unplacedChange, headerUnplaced)
 			pendingUpdate = -1
 			activeDirective = "update"
 			contentAfterDirective = false
@@ -399,15 +409,28 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 		return fail(StatusInvalid, IssueInvalidSyntax)
 	}
 	if unplaced {
-		result := fail(StatusInvalid, IssueInvalidSyntax)
-		result.unplaced = true
-		return result
+		// A header no reader places hides none of the others: each placed
+		// change is judged as its single-header patch is, and the caller adds
+		// the unknown-tier finding for the rest (rel-1-0-10:GAP-1055).
+		placed := make([]patchPathChange, 0, len(changes))
+		for index, change := range changes {
+			if !unplacedChange[index] {
+				placed = append(placed, change)
+			}
+		}
+		if len(placed) == 0 {
+			result := fail(StatusInvalid, IssueInvalidSyntax)
+			result.unplaced = true
+			return result
+		}
+		changes = placed
 	}
 	return patchEnvelopeResult{
 		canonical: strings.Join(append(canonical, patchEndLine), "\n"),
 		changes:   changes,
 		hasMove:   hasMove,
 		status:    StatusComplete,
+		unplaced:  unplaced,
 	}
 }
 
@@ -455,6 +478,13 @@ func classifyPOSIXApplyPatchStdin(out *parseOutput, command *CommandFact) {
 			out.markPartial(patch.issue)
 		}
 		return
+	}
+	if patch.unplaced {
+		// The placed files are judged below; the shell reading has no
+		// unknown-tier finding of its own for the file no reader places, so
+		// the command stays partial, as it was when that header made the
+		// whole envelope unread (rel-1-0-10:GAP-1055).
+		out.markPartial(IssueInvalidSyntax)
 	}
 	for _, change := range patch.changes {
 		switch change.access {

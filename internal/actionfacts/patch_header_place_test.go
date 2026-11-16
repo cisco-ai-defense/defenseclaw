@@ -84,10 +84,12 @@ func TestPatchHeaderOfAShareIsAWriteFact(t *testing.T) {
 
 // A header no reader places (a home form the tool does not expand, a
 // drive-relative path, a device or namespace path, a share without a file)
-// still names a file the tool writes. The call has no write fact, and
+// still names a file the tool writes. That file is no fact, and
 // PatchNamesUnplacedTarget reports it, so the gateway judges it at the unknown
-// tier instead of allowing it (GAP-1052). An envelope the tool rejects for its
-// syntax writes nothing and is not reported.
+// tier instead of allowing it (GAP-1052). The placed file of the same envelope
+// stays a fact: the source a Move to such a name removes is a delete fact
+// (rel-1-0-10:GAP-1055). An envelope the tool rejects for its syntax writes
+// nothing and is not reported.
 func TestPatchHeaderNoReaderPlacesIsUnplaced(t *testing.T) {
 	for _, target := range []string{
 		"~", "~/notes.txt", `~\notes.txt`, `C:notes.txt`, `\\.\pipe\notes`, `\\?\Volume{1234}\notes.txt`,
@@ -101,7 +103,12 @@ func TestPatchHeaderNoReaderPlacesIsUnplaced(t *testing.T) {
 						t.Fatal(err)
 					}
 					facts := Analyze(Input{Tool: "apply_patch", Args: args, CWD: `C:\workspace`, DialectHint: DialectPowerShell})
-					if facts.Authoritative() {
+					if directive == "move" {
+						if !facts.Authoritative() || len(facts.Paths) != 1 || facts.Paths[0].Value != "notes.txt" ||
+							facts.Paths[0].Access != PathAccessDelete {
+							t.Fatalf("the moved source is not the one delete fact: %#v %#v", facts.Parse, facts.Paths)
+						}
+					} else if facts.Authoritative() {
 						t.Fatalf("an unplaced header is a fact: %#v", facts.Paths)
 					}
 					if !PatchNamesUnplacedTarget("apply_patch", args) {
