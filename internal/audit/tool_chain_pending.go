@@ -116,10 +116,12 @@ type ToolChainResolvePendingInput struct {
 	// and one that may have read still starts the secret-read chain from the
 	// call's proposal, so a second result never clears a read.
 	ResultMayHaveRead bool `json:"-"`
-	// ResultShowsRead marks a result whose own content shows its call may
-	// have read: a line that is not blank, an exit status or a reader error
-	// naming the call's operand (GAP-0352). A further result of a call whose
-	// earlier result proved nothing was read starts the chain only on it.
+	// ResultShowsRead marks a result whose own output shows its call may
+	// have read: any output line but a blank one, an exit status line or a
+	// reader's error naming one of the call's operands, the harness's
+	// metadata and wrappers removed (GAP-0352, GAP-0353). A further result of
+	// a call whose earlier result proved nothing was read starts the chain
+	// only on it.
 	ResultShowsRead bool `json:"-"`
 }
 
