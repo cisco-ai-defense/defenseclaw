@@ -42,11 +42,14 @@ func clientWriteTarget(targets map[string]string, spelling string) (string, bool
 	if runtime.GOOS != "windows" || spelling == "" {
 		return "", false
 	}
-	native, resolved := hookpaths.ResolveWriteTarget(filepath.FromSlash(spelling))
-	if !resolved {
+	native := filepath.FromSlash(spelling)
+	if native == spelling {
 		return "", false
 	}
-	if native == spelling {
+	// The map is keyed by operand spelling, including an alias. Resolve the
+	// complete operand before matching, but never substitute the physical
+	// target as a key belonging to another operand (or directory-entry write).
+	if _, resolved := hookpaths.ResolveWriteTarget(native); !resolved {
 		return "", false
 	}
 	value, found := targets[native]

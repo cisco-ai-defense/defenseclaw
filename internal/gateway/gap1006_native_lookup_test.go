@@ -107,3 +107,34 @@ func TestGAP1006UnresolvableNativeLookupDoesNotUseCleanedKey(t *testing.T) {
 		t.Fatal("direct spelling lost")
 	}
 }
+
+// Native map keys retain the operand even when its target has a different
+// physical name. This preserves GAP-0982 across links and junctions.
+func TestGAP0982NativeAliasKeepsOperandKey(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native separators and junction")
+	}
+	root := t.TempDir()
+	real := filepath.Join(root, "actual")
+	if err := os.MkdirAll(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(real, "config.yaml")
+	if err := os.WriteFile(target, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias")
+	if err := exec.Command("cmd", "/c", "mklink", "/J", alias, real).Run(); err != nil {
+		t.Fatal("junction creation failed")
+	}
+	native := filepath.Join(alias, "config.yaml")
+	spelling := filepath.ToSlash(native)
+	targets := map[string]string{native: target}
+	if got, ok := clientWriteTarget(targets, spelling); !ok || got != target {
+		t.Fatal("native alias operand entry lost")
+	}
+	// An answer recorded for a different operand is not this alias's entry.
+	if _, ok := clientWriteTarget(map[string]string{target: target}, spelling); ok {
+		t.Fatal("different operand key matched")
+	}
+}
