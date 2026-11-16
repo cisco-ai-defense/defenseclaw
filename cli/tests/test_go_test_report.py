@@ -223,3 +223,45 @@ def test_a_rerun_or_a_restarted_package_starts_its_shares_again(tmp_path: Path) 
 
     tests = {t["Test"]: t["Elapsed"] for t in timings if "Test" in t}
     assert tests == {"TestTwice": 5.0, "TestKilled": 3.0}
+
+
+def _report(events: list[dict], *extra: str) -> subprocess.CompletedProcess[str]:
+    stream = "".join(json.dumps(e) + "\n" for e in events)
+    return subprocess.run([sys.executable, str(SCRIPT), *extra], input=stream, capture_output=True, text=True)
+
+
+def _result(test: str, action: str) -> dict:
+    return {"Action": action, "Package": "p", "Test": test, "Elapsed": 0.1}
+
+
+def test_expect_run_passes_when_every_selected_test_reported_a_result() -> None:
+    events = [_result("TestA", "pass"), _result("TestB/sub", "pass"), _result("TestB", "fail"), _result("TestC", "skip")]
+    result = _report(events, "--expect-run", "^(TestA|TestB|TestC)$")
+    assert result.returncode == 0
+    assert "3 of 3 selected tests reported a result" in result.stdout
+
+
+def test_expect_run_fails_when_a_selected_test_reported_nothing() -> None:
+    # go_test_shards.py prints ^(?:...)$ with re.escape; a subtest is no result.
+    events = [_result("TestA", "pass"), _result("TestB/sub", "pass")]
+    result = _report(events, "--annotate", "part 2 failed", "--expect-run", "^(?:TestA|TestB)$")
+    assert result.returncode == 1
+    assert "1 of 2 selected tests reported a result" in result.stdout
+    assert "::error title=part 2 failed::TestB reported no result" in result.stdout
+
+
+def test_expect_run_fails_when_no_test_ran() -> None:
+    events = [{"Action": "output", "Package": "p", "Output": "testing: warning: no tests to run\n"}]
+    events.append({"Action": "pass", "Package": "p", "Elapsed": 0})
+    result = _report(events, "--expect-run", "^(TestA|TestB)$")
+    assert result.returncode == 1
+    assert "0 of 2 selected tests reported a result" in result.stdout
+
+
+def test_expect_run_refuses_a_pattern_that_is_not_a_name_list() -> None:
+    for pattern in ("TestA", "^(TestA|Test.*)$", "^()$"):
+        assert _report([], "--expect-run", pattern).returncode == 2
+
+
+def test_without_expect_run_the_exit_status_stays_zero() -> None:
+    assert _report([_result("TestA", "fail")]).returncode == 0
