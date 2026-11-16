@@ -458,6 +458,25 @@ The text output adds one line, such as `Health report: degraded (HOOKS_PARTIAL) 
 The report never changes `ok`, `warnings` or the exit code, and `verify` does not check it. Read `status`, `stale`
 and `delivery.result` to find a device that needs attention. The gateway sends nothing until the Cisco AI Defense endpoint is configured.
 
+## Skill inventory
+
+The gateway sends Cisco AI Defense every skill the enrolled agents load, with its content hash, state
+(new, changed, unchanged or removed), scope, home-relative location, the agents that read it and its
+publisher. The fields are listed in [Managed skill inventory](/docs/ai-discovery#managed-skill-inventory).
+Nothing needs to be turned on.
+
+To also send the text of each skill's SKILL.md, add this to the config you install with `CONFIG=`, or apply
+it later with `/repair CONFIG=`:
+
+```yaml
+ai_discovery:
+  enabled: true
+  include_skill_manifests: true
+```
+
+SKILL.md text leaves the endpoint once per file version, through the `sensitive` redaction profile, which
+masks secrets before upload. Leave it off where skill text must stay on the device.
+
 ## Restart-required controls
 
 In managed mode, `config.yaml` is the only live configuration source. Hot

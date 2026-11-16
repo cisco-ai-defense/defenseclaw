@@ -1092,6 +1092,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 			s.currentConfig(), s.observabilityV8Emitter(), snapshotFn, s.inventoryPublish,
 		)
 		if discovery != nil {
+			s.inventoryPublish.SetSkillManifestReader(discovery.SkillManifest)
 			discovery.SetManagedInventoryEmitHook(inventoryEmit)
 		}
 		inventoryEmit(runCtx)
@@ -2643,6 +2644,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 			s.currentConfig(), s.observabilityV8Emitter(), snapshotFn, s.inventoryPublish,
 		)
 		if svc != nil {
+			s.inventoryPublish.SetSkillManifestReader(svc.SkillManifest)
 			svc.SetManagedInventoryEmitHook(inventoryEmit)
 		}
 		inventoryEmit(ctx)

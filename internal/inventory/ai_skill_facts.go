@@ -49,9 +49,13 @@ const (
 	maxSkillScanBytes   = 256 << 20
 	maxSkillDepth       = 12
 	maxSkillLocation    = 512
-	maxSkillManifest    = 64 << 10
+	maxSkillManifest    = 64 << 10 // the part skillAuthor reads
 	maxSkillAuthorBytes = 128
 )
+
+// maxSkillManifestFolders bounds the hash-to-folder index SkillManifest
+// reads from.
+const maxSkillManifestFolders = 4096
 
 var errSkillTooLarge = errors.New("skill folder exceeds the hash limits")
 
@@ -67,6 +71,10 @@ type AISkillFacts struct {
 	// Author is the skill's own unverified SKILL.md claim.
 	Author string         `json:"author,omitempty"`
 	Plugin *AISkillPlugin `json:"plugin,omitempty"`
+
+	// ManifestHash is the SHA-256 of the folder's SKILL.md; SkillManifest
+	// reads that file again for a managed publish.
+	ManifestHash string `json:"manifest_hash,omitempty"`
 }
 
 func (s *ContinuousDiscoveryService) resetSkillFacts() {
@@ -91,6 +99,9 @@ func (s *ContinuousDiscoveryService) skillFacts(path string, bundled bool) *AISk
 		ContentHash: hash, ContentStatus: status, Scope: SkillScopeUser,
 		Location: location, Author: skillAuthor(manifest),
 	}
+	if status == SkillContentOK && manifest != nil {
+		facts.ManifestHash = skillManifestHash(manifest)
+	}
 	switch {
 	case bundled:
 		facts.Scope = SkillScopeBundled
@@ -103,8 +114,41 @@ func (s *ContinuousDiscoveryService) skillFacts(path string, bundled bool) *AISk
 		s.skillFactsSeen = map[string]AISkillFacts{}
 	}
 	s.skillFactsSeen[path] = facts
+	if facts.ManifestHash != "" {
+		if s.skillManifests == nil || len(s.skillManifests) >= maxSkillManifestFolders {
+			s.skillManifests = map[string]string{}
+		}
+		s.skillManifests[facts.ManifestHash] = path
+	}
 	s.skillFactsMu.Unlock()
 	return &facts
+}
+
+// SkillManifest returns the SKILL.md a skill scan hashed to hash, read again
+// from its folder, or false when it is gone or changed since.
+func (s *ContinuousDiscoveryService) SkillManifest(hash string) ([]byte, bool) {
+	s.skillFactsMu.Lock()
+	dir := s.skillManifests[hash]
+	s.skillFactsMu.Unlock()
+	entries, err := os.ReadDir(dir)
+	if dir == "" || err != nil {
+		return nil, false
+	}
+	for _, entry := range entries {
+		if !strings.EqualFold(entry.Name(), "SKILL.md") || !entry.Type().IsRegular() {
+			continue
+		}
+		data, err := safefile.ReadRegularFileBounded(filepath.Join(dir, entry.Name()), maxSkillBytes)
+		if err == nil && skillManifestHash(data) == hash {
+			return data, true
+		}
+	}
+	return nil, false
+}
+
+func skillManifestHash(data []byte) string {
+	sum := sha256.Sum256(data)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // realChildDirs lists the folders in dir, never a link to one.
@@ -197,7 +241,7 @@ func hashSkillFolder(root string, limit int64) (hash, status string, manifest []
 			total += int64(len(data))
 			kind, payload = "file", data
 			if strings.EqualFold(rel, "SKILL.md") {
-				manifest = data[:min(len(data), maxSkillManifest)]
+				manifest = data
 			}
 		}
 		sum := sha256.Sum256(payload)
@@ -221,6 +265,7 @@ func hashSkillFolder(root string, limit int64) (hash, status string, manifest []
 // skillAuthor returns the author a SKILL.md frontmatter declares at the top
 // level or under metadata.
 func skillAuthor(manifest []byte) string {
+	manifest = manifest[:min(len(manifest), maxSkillManifest)]
 	lines := strings.Split(strings.TrimPrefix(string(manifest), "\ufeff"), "\n")
 	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
 		return ""
@@ -303,6 +348,9 @@ func validateSkillFacts(facts AISkillFacts) error {
 	}
 	if !userScanText(facts.Author, maxSkillAuthorBytes) {
 		return errors.New("skill author must be short printable text")
+	}
+	if facts.ManifestHash != "" && (facts.ContentStatus != SkillContentOK || !strings.HasPrefix(facts.ManifestHash, "sha256:") || !isSHA256Hash(facts.ManifestHash)) {
+		return errors.New("skill manifest hash must be a sha256 digest of an ok folder")
 	}
 	if plugin := facts.Plugin; plugin != nil && (!validPluginID(plugin.ID) ||
 		!userScanText(plugin.Version, 64) || !userScanText(plugin.Author, maxSkillAuthorBytes)) {
