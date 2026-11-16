@@ -157,6 +157,9 @@ type Service struct {
 	// maxGone; past it, Egress still asks Current while it holds the entry.
 	gone     map[string]bool
 	goneList []string
+	// calls are the tool calls this leader prepared or resolved, for a
+	// further result of a call (GAP-0348, GAP-0345, GAP-0350; calls.go).
+	calls *callTable
 	// diskHook, set by tests only, runs before every disk operation on an
 	// actor's files: a store open or access (storeOf), a state file write
 	// and a purge's removals. A test blocks it to stand for a disk that does
@@ -198,10 +201,6 @@ type actorEntry struct {
 	purgeIdle bool
 	// memo is what the callout's chain check answers from (GAP-0179).
 	memo egressMemo
-	// calls are the actor's tool calls this leader prepared or resolved, by
-	// scope, session and call (GAP-0348, GAP-0345; calls.go). The actor
-	// lock guards them.
-	calls map[callKey]callMemo
 	// stateMu orders the state file writes, so the newest memo is the one
 	// on the volume.
 	stateMu sync.Mutex
@@ -338,7 +337,8 @@ func New(opts Options) (*Service, error) {
 			return nil, err
 		}
 	}
-	s := &Service{opts: opts, actors: map[string]*actorEntry{}, purging: map[string]bool{}, gone: map[string]bool{}}
+	s := &Service{opts: opts, actors: map[string]*actorEntry{}, purging: map[string]bool{}, gone: map[string]bool{},
+		calls: newCallTable()}
 	s.action.Store(&opts.EgressAction)
 	if err := s.load(); err != nil {
 		return nil, err
@@ -639,6 +639,7 @@ func (s *Service) purgeLocked(e *actorEntry) {
 	}
 	e.purged = true
 	delete(s.actors, e.actor.key())
+	s.calls.dropActor(e.actor.key())
 	s.purging[e.actor.key()] = true
 	s.purges = append(s.purges, job)
 }
