@@ -1125,7 +1125,7 @@ func TestTrustedActionLegacyCommandsAndC2RequireActionFacts(t *testing.T) {
 	}
 }
 
-func TestTrustedActionLiteralCarriersKeepPartialEmbeddedExecutionShadowOnly(t *testing.T) {
+func TestTrustedActionLiteralCarriersRequireExecutionProof(t *testing.T) {
 	const connector = "trusted-action-literal-carrier-execution-test"
 	installDefaultProfileConnector(t, connector)
 	dangerous := "rm -rf " + "/"
@@ -1249,6 +1249,14 @@ func TestTrustedActionLiteralCarriersKeepPartialEmbeddedExecutionShadowOnly(t *t
 			command:     `sed -e '/fixture/e ` + dangerous + `' input.txt`,
 			wantFinding: true,
 		},
+		// Static stdin is independently parsed as shell text (GAP-0994).
+		// Its proof has the same authority as the literal -c control.
+		{
+			name:        "literal shell control",
+			command:     "bash -c '" + dangerous + "'",
+			wantFinding: true,
+			enforced:    true,
+		},
 		{
 			name:    "benign echo output",
 			command: `echo '` + dangerous + `'`,
@@ -1257,6 +1265,7 @@ func TestTrustedActionLiteralCarriersKeepPartialEmbeddedExecutionShadowOnly(t *t
 			name:        "echo payload to shell",
 			command:     `echo '` + dangerous + `' | bash`,
 			wantFinding: true,
+			enforced:    true,
 		},
 		{
 			name:    "benign printf output",
@@ -1266,6 +1275,7 @@ func TestTrustedActionLiteralCarriersKeepPartialEmbeddedExecutionShadowOnly(t *t
 			name:        "printf payload to shell",
 			command:     `printf '%s\n' '` + dangerous + `' | sh`,
 			wantFinding: true,
+			enforced:    true,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
