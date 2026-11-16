@@ -28,6 +28,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"sort"
@@ -3812,52 +3813,60 @@ var readErrorPhrases = []string{
 // maxProofResultBytes bounds the result text the proof reads.
 const maxProofResultBytes = 64 << 10
 
+// claudeCodeReadMissing begins the Read tool's error for a file that is not
+// there.
+const claudeCodeReadMissing = "File does not exist."
+
 // toolResultProvesNothingRead reports an unsuccessful result that proves its
-// call read no file (substrate-1 GAP-0337). The call is one plain reader
-// whose operands are all simple words (no operator, redirect, pipe, quote,
-// variable, glob or option), and the result's whole text is that reader's
-// error line for every operand ("cat: .env: No such file or directory")
-// plus an "Exit code N" line. Such a call cannot print anything but what
-// it read, and a file it printed would show as other lines. Anything else
-// (no result text, other output, any other command shape) proves nothing:
-// a failed call that printed a credentials file is a secret read.
+// call read no file (substrate-1 GAP-0337, GAP-0353). Its output lines
+// (resultOutputLines: the output fields only, the harness's wrappers
+// removed) must be one of:
+//   - for one plain reader whose operands are all simple words (no operator,
+//     redirect, pipe, quote, variable, glob or option): that reader's error
+//     line for every operand ("cat: .env: No such file or directory") and an
+//     exit status line. Such a call can print nothing but what it read, and a
+//     file it printed would show as other lines;
+//   - for that reader with its errors sent to /dev/null (cat .env
+//     2>/dev/null): an exit status line that is not 0 and nothing else. Its
+//     only channel printed nothing, and an empty file it read exits 0;
+//   - for one simple word assigned to a variable and that reader on the
+//     variable (F=.env; cat $F): as for the reader on the word;
+//   - for Claude Code's Read tool: its "File does not exist." error.
+//
+// Anything else (no result text, other output, any other command shape)
+// proves nothing: a failed call that printed a credentials file is a secret
+// read.
 func toolResultProvesNothingRead(req agentHookRequest) bool {
+	lines, ok := resultOutputLines(req.Payload)
+	if !ok || len(lines) == 0 {
+		return false
+	}
+	if claudeCodeReadToolMissing(req, lines) {
+		return true
+	}
 	command, ok := trustedBashCommandInput(actionfacts.Input{Tool: req.ToolName, Args: req.ToolArgs})
 	if !ok {
 		return false
 	}
-	words := strings.Fields(command)
-	if len(words) < 2 || strings.ContainsAny(command, "|&;<>()$`'\"\\*?[]{}!#=\n") {
+	program, operands, quiet, ok := plainReaderCall(command)
+	if !ok {
 		return false
 	}
-	program := words[0]
-	if _, ok := readOnlyPrograms[program]; !ok {
-		return false
-	}
-	operands := words[1:]
-	for _, operand := range operands {
-		if strings.HasPrefix(operand, "-") {
+	exit := ""
+	named := make(map[string]bool, len(operands))
+	for _, line := range lines {
+		if code, isExit := exitCodeOf(line); isExit {
+			exit = code
+			continue
+		}
+		operand, ok := readerErrorLine(program, line)
+		if !ok || !slices.Contains(operands, operand) {
 			return false
 		}
+		named[operand] = true
 	}
-	var text []string
-	size := 0
-	if !collectResultText(req.Payload, &text, &size) || len(text) == 0 {
-		return false
-	}
-	named := make(map[string]bool, len(operands))
-	for _, chunk := range text {
-		for _, line := range strings.Split(chunk, "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || isExitCodeLine(line) {
-				continue
-			}
-			operand, ok := readerErrorOperand(program, line)
-			if !ok || !slices.Contains(operands, operand) {
-				return false
-			}
-			named[operand] = true
-		}
+	if quiet {
+		return len(named) == 0 && exit != "" && exit != "0"
 	}
 	for _, operand := range operands {
 		if !named[operand] {
@@ -3867,60 +3876,128 @@ func toolResultProvesNothingRead(req agentHookRequest) bool {
 	return true
 }
 
-// resultShowsRead reports a result whose own content shows its call may have
-// read: a line that is not blank, an exit status line, or a reader's error
-// naming one of the command's operands (GAP-0352). A result too large to
-// read shows one. It is the evidence a further result of a call needs to
-// start the secret-read chain once an earlier result proved the read failed
-// (the 1.0.10 lead's rule, STEER 7 and 8 2026-11-16): one that repeats the
-// failure, or carries no output, shows none; one that printed shows one, so a
-// no-read result never clears a read another result shows.
+// resultShowsRead reports a result whose own output shows its call may have
+// read: any output line but a blank one, an exit status line, a reader's
+// error line naming one of the command's operands, or the Read tool's
+// missing-file error (GAP-0352, GAP-0353). A result too large to read shows
+// one. It is the evidence a further result of a call needs to start the
+// secret-read chain once an earlier result proved the read failed (the
+// 1.0.10 lead's rule, STEER 7 and 8 2026-11-16): one that repeats the
+// failure, carries no output or only the harness's metadata and wrappers
+// shows none; one that printed shows one, so a no-read result never clears a
+// read another result shows.
 func resultShowsRead(req agentHookRequest) bool {
-	var text []string
-	size := 0
-	if !collectResultText(req.Payload, &text, &size) {
+	lines, ok := resultOutputLines(req.Payload)
+	if !ok {
 		return true
+	}
+	if len(lines) == 0 || claudeCodeReadToolMissing(req, lines) {
+		return false
 	}
 	program, operands := "", []string(nil)
 	if command, ok := trustedBashCommandInput(actionfacts.Input{Tool: req.ToolName, Args: req.ToolArgs}); ok {
-		if words := strings.Fields(command); len(words) >= 2 {
+		if p, ops, _, plain := plainReaderCall(command); plain {
+			program, operands = p, ops
+		} else if words := strings.Fields(command); len(words) >= 2 {
 			program, operands = words[0], words[1:]
 		}
 	}
-	for _, chunk := range text {
-		for _, line := range strings.Split(chunk, "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || isExitCodeLine(line) {
-				continue
-			}
-			if operand, ok := readerErrorOperand(program, line); program != "" && ok && slices.Contains(operands, operand) {
-				continue
-			}
-			return true
+	for _, line := range lines {
+		if _, isExit := exitCodeOf(line); isExit {
+			continue
 		}
+		if operand, ok := readerErrorLine(program, line); program != "" && ok && slices.Contains(operands, operand) {
+			continue
+		}
+		return true
 	}
 	return false
 }
 
-// isExitCodeLine is the exit status line a connector adds to a failed
-// shell result ("Exit code 1").
-func isExitCodeLine(line string) bool {
-	rest, ok := strings.CutPrefix(line, "Exit code ")
-	if !ok {
+// claudeCodeReadToolMissing is Claude Code's Read tool answering that its
+// file does not exist: every output line is that error.
+func claudeCodeReadToolMissing(req agentHookRequest, lines []string) bool {
+	if req.ConnectorName != "claudecode" || req.ToolName != "Read" || len(lines) == 0 {
 		return false
 	}
-	_, err := strconv.Atoi(rest)
-	return err == nil
+	for _, line := range lines {
+		if !strings.HasPrefix(line, claudeCodeReadMissing) {
+			return false
+		}
+	}
+	return true
 }
 
-// readerErrorOperand is the operand of program's error line
-// "program: operand: phrase" (the program prefix may be absent).
-func readerErrorOperand(program, line string) (string, bool) {
-	line = strings.TrimPrefix(line, program+": ")
-	for _, phrase := range readErrorPhrases {
-		if operand, ok := strings.CutSuffix(line, ": "+phrase); ok && operand != "" {
-			return operand, true
+// assignedReaderRE is "F=word; reader $F" (or "&&", "$F" in double quotes,
+// ${F}) with a word of no shell syntax.
+var assignedReaderRE = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)=([A-Za-z0-9_./@%+,:-]+) *(?:;|&&) *([A-Za-z0-9_./-]+) (?:\$([A-Za-z_][A-Za-z0-9_]*)|"\$([A-Za-z_][A-Za-z0-9_]*)"|\$\{([A-Za-z_][A-Za-z0-9_]*)\})$`)
+
+// plainReaderCall reads command as one plain reader on simple-word operands:
+// its program (as typed), its operands, and whether its errors go to
+// /dev/null (a trailing "2>/dev/null"). A variable assigned one simple word
+// just before is read as that word.
+func plainReaderCall(command string) (program string, operands []string, quiet, ok bool) {
+	command = strings.TrimSpace(command)
+	if rest, cut := strings.CutSuffix(command, " 2>/dev/null"); cut {
+		command, quiet = strings.TrimSpace(rest), true
+	}
+	if m := assignedReaderRE.FindStringSubmatch(command); m != nil {
+		name := m[4] + m[5] + m[6]
+		if name != m[1] {
+			return "", nil, false, false
 		}
+		command = m[3] + " " + m[2]
+	}
+	words := strings.Fields(command)
+	if len(words) < 2 || strings.ContainsAny(command, "|&;<>()$`'\"\\*?[]{}!#=\n") {
+		return "", nil, false, false
+	}
+	if _, reader := readOnlyPrograms[path.Base(words[0])]; !reader {
+		return "", nil, false, false
+	}
+	for _, operand := range words[1:] {
+		if strings.HasPrefix(operand, "-") {
+			return "", nil, false, false
+		}
+	}
+	return words[0], words[1:], quiet, true
+}
+
+// exitCodeOf is the code of the exit status line a connector adds to a
+// failed shell result ("Exit code 1").
+func exitCodeOf(line string) (string, bool) {
+	rest, ok := strings.CutPrefix(line, "Exit code ")
+	if !ok {
+		return "", false
+	}
+	if _, err := strconv.Atoi(rest); err != nil {
+		return "", false
+	}
+	return rest, true
+}
+
+// readerErrorLine is the operand of program's error line "program: operand:
+// phrase". The program prefix may be absent, typed as a path (/bin/cat), or
+// the reader's own name; the operand may be in one pair of quotes, as GNU
+// coreutils quotes one that needs it ('.env' or "it's").
+func readerErrorLine(program, line string) (string, bool) {
+	if program != "" {
+		base := path.Base(program)
+		if i := strings.Index(line, ": "); i > 0 {
+			if prefix := line[:i]; prefix == program || prefix == base || strings.HasSuffix(prefix, "/"+base) {
+				line = line[i+2:]
+			}
+		}
+	}
+	for _, phrase := range readErrorPhrases {
+		operand, ok := strings.CutSuffix(line, ": "+phrase)
+		if !ok || operand == "" {
+			continue
+		}
+		if n := len(operand); n >= 2 && (operand[0] == '\'' && operand[n-1] == '\'' || operand[0] == '"' && operand[n-1] == '"') {
+			operand = operand[1 : n-1]
+		}
+		return operand, operand != ""
 	}
 	return "", false
 }
@@ -3935,20 +4012,59 @@ var resultTextKeys = []string{
 	"error", "error_message", "errorMessage", "error_details", "errorDetails",
 }
 
-// collectResultText gathers the text of a result payload: every string
-// under its result keys (and the same keys under extra), a string that holds
-// a JSON object or array read as that value, but status, type, kind and id
-// fields, bounded by maxProofResultBytes; false when the result is larger.
-// The payload is the harness plugin's, not the model's.
-func collectResultText(payload map[string]any, out *[]string, size *int) bool {
+// resultMetadataKeys are fields inside a result that a harness fills with
+// its own description of the call, never with what the call printed: Claude
+// Code's Bash result (interrupted, isImage, noOutputExpected,
+// returnCodeInterpretation, persistedOutputPath, backgroundTaskId, sandbox
+// fields) and the failure flags. An unknown field is read as output.
+var resultMetadataKeys = map[string]struct{}{
+	"interrupted": {}, "isimage": {}, "nooutputexpected": {}, "returncodeinterpretation": {},
+	"persistedoutputpath": {}, "persistedoutputsize": {}, "backgroundtaskid": {}, "is_error": {},
+	"is_interrupt": {}, "duration_ms": {}, "sandboxed": {}, "dangerouslydisablesandbox": {},
+}
+
+// resultOutputLines are the output lines of a result payload, as the proof
+// and resultShowsRead read them: every string under its result keys (and the
+// same keys under extra), a string that holds a JSON object or array read as
+// that value, but status, type, kind and id fields and the harness's
+// metadata fields (resultMetadataKeys); each line trimmed, with Claude
+// Code's wrappers removed (a <tool_use_error> tag, an "Error: " before the
+// exit status line, the "Shell cwd was reset to ..." trailer) and blank
+// lines dropped. ok is false when the result is larger than
+// maxProofResultBytes. The payload is the harness plugin's, not the model's.
+func resultOutputLines(payload map[string]any) (lines []string, ok bool) {
+	var text []string
+	size := 0
 	for _, scope := range []map[string]any{payload, nestedResultScope(payload)} {
 		for _, key := range resultTextKeys {
-			if value, ok := scope[key]; ok && !collectText(value, out, size) {
-				return false
+			if value, has := scope[key]; has && !collectText(value, &text, &size) {
+				return nil, false
 			}
 		}
 	}
-	return true
+	for _, chunk := range text {
+		for _, line := range strings.Split(chunk, "\n") {
+			if line = normalizeResultLine(line); line != "" {
+				lines = append(lines, line)
+			}
+		}
+	}
+	return lines, true
+}
+
+func normalizeResultLine(line string) string {
+	line = strings.TrimSpace(line)
+	line = strings.TrimSpace(strings.TrimPrefix(line, "<tool_use_error>"))
+	line = strings.TrimSpace(strings.TrimSuffix(line, "</tool_use_error>"))
+	if rest, ok := strings.CutPrefix(line, "Error: "); ok {
+		if _, isExit := exitCodeOf(rest); isExit || strings.HasPrefix(rest, claudeCodeReadMissing) {
+			line = rest
+		}
+	}
+	if strings.HasPrefix(line, "Shell cwd was reset to ") {
+		return ""
+	}
+	return line
 }
 
 func nestedResultScope(payload map[string]any) map[string]any {
@@ -3973,6 +4089,9 @@ func collectText(value any, out *[]string, size *int) bool {
 	case map[string]any:
 		for key, item := range v {
 			if resultEnumKey(key) {
+				continue
+			}
+			if _, meta := resultMetadataKeys[strings.ToLower(key)]; meta {
 				continue
 			}
 			if !collectText(item, out, size) {

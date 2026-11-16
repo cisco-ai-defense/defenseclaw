@@ -45,11 +45,14 @@ import (
 // so its further result is marked: availability, never a silent replay.
 
 const (
-	// callsPerActorMax bounds one actor's remembered calls: a hostile actor
-	// ages out its own calls first, not other actors'.
+	// callsPerActorMax bounds one actor's remembered calls: below the
+	// leader's bound a busy actor ages out its own calls, not other actors'.
+	// At the leader's bound (32 actors at this one) the oldest calls go,
+	// whoever's: their further results are marked (fail closed).
 	callsPerActorMax = 4096
-	// callsLeaderMax bounds the leader's remembered calls (under 1 KiB each,
-	// TestCallTableBytesPerCall: well under 160 MiB of the 2 GiB leader).
+	// callsLeaderMax bounds the leader's remembered calls (about 1 KiB each
+	// through noteCall and furtherResult, TestCallTableBytesPerCall: under
+	// 192 MiB of the 2 GiB leader).
 	callsLeaderMax = 131072
 )
 
@@ -200,12 +203,6 @@ func (t *callTable) dropActor(actor string) {
 		t.removeLocked(mine.Front().Value.(*callNode))
 		mine = t.byActor[actor]
 	}
-}
-
-func (t *callTable) len() int {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.all.Len()
 }
 
 // pruneLocked drops the calls past the window, oldest first: each call is
