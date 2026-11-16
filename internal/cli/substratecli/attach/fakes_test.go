@@ -269,10 +269,15 @@ type fakeRelay struct {
 	inputs    bytes.Buffer
 	polls     map[string]*fakePoll
 	nextPoll  int
+	// received is the DATA bytes each WebSocket attachment delivered, by
+	// the input id of its hello (GAP-0170); legacyHello sends a hello
+	// without one, as a relay from before it does.
+	received    map[string]int64
+	legacyHello bool
 }
 
 func newFakeRelay(tokens ...string) *fakeRelay {
-	f := &fakeRelay{tokens: map[string]bool{}, polls: map[string]*fakePoll{}}
+	f := &fakeRelay{tokens: map[string]bool{}, polls: map[string]*fakePoll{}, received: map[string]int64{}}
 	for _, t := range tokens {
 		f.tokens[t] = true
 	}
@@ -366,6 +371,16 @@ func (f *fakeRelay) serveWS(w http.ResponseWriter, r *http.Request) {
 	if rs, err := relay.DecodeResize([]byte(`{"cols":` + r.URL.Query().Get("cols") + `,"rows":` + r.URL.Query().Get("rows") + `}`)); err == nil {
 		f.resizes = append(f.resizes, rs)
 	}
+	hello := relay.Control{Type: relay.CtlHello, Version: relay.Version, Session: "sess-1", Mode: "interact"}
+	inID := ""
+	if !f.legacyHello {
+		inID = "in-" + strconv.Itoa(n)
+		f.received[inID] = 0
+		hello.Input = inID
+		if got, ok := f.received[r.URL.Query().Get("resume")]; ok {
+			hello.Received = &got
+		}
+	}
 	f.mu.Unlock()
 	var wmu sync.Mutex
 	send := func(b []byte) {
@@ -373,12 +388,22 @@ func (f *fakeRelay) serveWS(w http.ResponseWriter, r *http.Request) {
 		defer wmu.Unlock()
 		_ = conn.WriteMessage(websocket.BinaryMessage, b)
 	}
-	send(relay.EncodeControl(relay.Control{Type: relay.CtlHello, Version: relay.Version, Session: "sess-1", Mode: "interact"}))
+	send(relay.EncodeControl(hello))
 	send(relay.Encode(relay.FrameData, []byte("screen:"+strconv.Itoa(n)+"\r\n")))
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			return
+		}
+		if t, p, err := relay.Decode(msg); err == nil && t == relay.FrameData && strings.Contains(string(p), "LOSE") {
+			// Sent by the launcher but lost on the way to the agent (a
+			// suspend in that moment): never counted, never typed.
+			conn.UnderlyingConn().Close()
+			return
+		} else if err == nil && t == relay.FrameData {
+			f.mu.Lock()
+			f.received[inID] += int64(len(p))
+			f.mu.Unlock()
 		}
 		end, drop := f.react(msg, send)
 		if drop {

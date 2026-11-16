@@ -123,6 +123,9 @@ const (
 	uncheckedUnregistered = "unregistered"
 	// uncheckedLookup is a registration lookup that failed.
 	uncheckedLookup = "registration_unavailable"
+	// uncheckedUnrecorded is an actor one of whose tool steps in the chain
+	// window a gateway could not record (GAP-0339).
+	uncheckedUnrecorded = "unrecorded_step"
 	// uncheckedStale is a UID the leader answered stale again after the
 	// name was resolved afresh: refused, retryable (GAP-0234).
 	uncheckedStale = "registration_stale"

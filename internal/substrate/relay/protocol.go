@@ -77,6 +77,14 @@ type Control struct {
 	Mode    string `json:"mode,omitempty"`
 	Code    *int   `json:"code,omitempty"`
 	Message string `json:"message,omitempty"`
+	// Input (hello) names this attachment's input count. A client that
+	// reconnects passes the last one it got as the resume query parameter,
+	// and Received (hello) is the DATA bytes the relay wrote to the agent
+	// from that attachment, absent when the relay does not know it: input
+	// sent in the moment before a suspend can be lost on the way, and the
+	// client says how much (substrate-1 GAP-0170).
+	Input    string `json:"input,omitempty"`
+	Received *int64 `json:"received,omitempty"`
 }
 
 // Resize is a RESIZE frame.

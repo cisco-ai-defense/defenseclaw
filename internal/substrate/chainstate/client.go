@@ -131,6 +131,18 @@ func (c *Client) Lifecycle(ctx context.Context, ev LifecycleEvent) (LifecycleRes
 	return out, err
 }
 
+// Unrecorded tells the leader that a tool step of the actor is not in its
+// chain window (GAP-0339).
+func (c *Client) Unrecorded(ctx context.Context, actor Actor, why string) error {
+	return c.call(ctx, MethodChainUnrecorded, UnrecordedRequest{Actor: actor, Why: why}, nil)
+}
+
+// Uncleared tells the leader why a credentials read of the actor that
+// started the secret-read chain could not be cleared (GAP-0338).
+func (c *Client) Uncleared(ctx context.Context, actor Actor, why string) error {
+	return c.call(ctx, MethodChainUnrecorded, UnrecordedRequest{Actor: actor, Why: why, Uncleared: true}, nil)
+}
+
 // PutTask registers the --task text of an actor (the launcher, at create).
 func (c *Client) PutTask(ctx context.Context, actor Actor, text string) error {
 	return c.call(ctx, leader.MethodIntentPut, IntentRequest{Actor: actor, Op: IntentTask, Text: text}, nil)

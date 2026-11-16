@@ -511,6 +511,17 @@ func (e *Engine) decideHeaders(ctx context.Context, req *Request, p *pass) (v Ve
 				v.Findings = append(v.Findings, "chain_detected:"+id)
 			}
 		}
+		if cv.Unrecorded != "" {
+			// One of the actor's tool steps is not in its chain window, so
+			// this check saw an incomplete window: as unchecked egress
+			// (GAP-0339).
+			if e.chainFailClosed(pol) {
+				return deny(v, CategoryChainUnchecked, sourceChain, uncheckedUnrecorded,
+					clip("DefenseClaw could not record one of this actor's earlier tool calls, so it can't check this request against them, and this actor's policy refuses unchecked egress. Why: "+cv.Unrecorded, 320))
+			}
+			v.Alert = true
+			v.Findings = append(v.Findings, "chain_unrecorded:"+clip(cv.Unrecorded, 160))
+		}
 	case chainHit:
 		reason := cv.Reason
 		if reason == "" {

@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -73,6 +74,48 @@ type Server struct {
 	used map[string]time.Time
 	// lastWarm is how long the last pre-connect took (E6 measurements).
 	lastWarm time.Duration
+	// inputs are the input counts of recent attachments by id, oldest
+	// first in inputOrder (GAP-0170).
+	inputs     map[string]*inputCount
+	inputOrder []string
+}
+
+// maxInputCounts bounds the attachments whose input counts a reconnect can
+// ask for; the oldest go first.
+const maxInputCounts = 64
+
+// inputCount is the DATA bytes the relay wrote to the agent from one
+// attachment. It lives in the relay's memory, so it survives a suspend the
+// way the agent's terminal does.
+type inputCount struct {
+	person string
+	n      atomic.Int64
+}
+
+// countInput starts the input count of a new attachment of person and
+// returns its id, with the count of the attachment resume names when it
+// is this person's (nil when the relay does not know it).
+func (s *Server) countInput(person, resume string) (string, *inputCount, *int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.inputs == nil {
+		s.inputs = map[string]*inputCount{}
+	}
+	var received *int64
+	if c := s.inputs[resume]; resume != "" && c != nil && c.person == person {
+		n := c.n.Load()
+		received = &n
+	}
+	id, c := newID(), &inputCount{person: person}
+	s.inputs[id] = c
+	s.inputOrder = append(s.inputOrder, id)
+	if over := len(s.inputOrder) - maxInputCounts; over > 0 {
+		for _, old := range s.inputOrder[:over] {
+			delete(s.inputs, old)
+		}
+		s.inputOrder = append([]string(nil), s.inputOrder[over:]...)
+	}
+	return id, c, received
 }
 
 // NewServer builds a relay.
@@ -316,7 +359,7 @@ func (s *Server) open(ctx context.Context, cols, rows uint16) (*Attachment, erro
 
 // input applies one client frame to an attachment. It reports false when
 // the client detached.
-func input(a *Attachment, frame []byte, send func(Control)) bool {
+func input(a *Attachment, in *inputCount, frame []byte, send func(Control)) bool {
 	t, p, err := Decode(frame)
 	if err != nil {
 		send(Control{Type: CtlError, Message: err.Error()})
@@ -324,7 +367,8 @@ func input(a *Attachment, frame []byte, send func(Control)) bool {
 	}
 	switch t {
 	case FrameData:
-		_, _ = a.Write(p)
+		n, _ := a.Write(p)
+		in.n.Add(int64(n))
 	case FrameResize:
 		if rs, err := DecodeResize(p); err == nil {
 			a.Resize(rs.Cols, rs.Rows)
@@ -347,8 +391,10 @@ func input(a *Attachment, frame []byte, send func(Control)) bool {
 	return true
 }
 
-func (s *Server) hello() Control {
-	return Control{Type: CtlHello, Version: Version, Session: s.session, Mode: kit.ModeInteract}
+// hello is the first message of an attachment: its input count id, and
+// what the relay got from the attachment the client resumes (GAP-0170).
+func (s *Server) hello(input string, received *int64) Control {
+	return Control{Type: CtlHello, Version: Version, Session: s.session, Mode: kit.ModeInteract, Input: input, Received: received}
 }
 
 var upgrader = websocket.Upgrader{
@@ -387,7 +433,8 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer a.Close()
-	send(s.hello())
+	inID, in, received := s.countInput(sess.Person, r.URL.Query().Get("resume"))
+	send(s.hello(inID, received))
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -437,7 +484,7 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 		if mt != websocket.BinaryMessage {
 			continue
 		}
-		if !input(a, msg, send) {
+		if !input(a, in, msg, send) {
 			return
 		}
 	}
@@ -449,6 +496,7 @@ type pollAttachment struct {
 	id       string
 	person   string
 	jti      string
+	in       *inputCount
 	out      *ring
 	mu       sync.Mutex
 	lastSeen time.Time
@@ -493,9 +541,10 @@ func (s *Server) pollOpen(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "relay: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	p := &pollAttachment{Attachment: a, id: newID(), person: sess.Person, jti: sess.TokenID,
+	inID, in, received := s.countInput(sess.Person, r.URL.Query().Get("resume"))
+	p := &pollAttachment{Attachment: a, id: newID(), person: sess.Person, jti: sess.TokenID, in: in,
 		out: newRing(s.opts.Config.Relay.OutputBufferBytes), lastSeen: time.Now(), done: make(chan struct{})}
-	p.out.Append(EncodeControl(s.hello()))
+	p.out.Append(EncodeControl(s.hello(inID, received)))
 	s.mu.Lock()
 	s.polls[p.id] = p
 	s.mu.Unlock()
@@ -610,7 +659,7 @@ func (s *Server) pollWrite(w http.ResponseWriter, r *http.Request) {
 	}
 	send := func(c Control) { p.out.Append(EncodeControl(c)) }
 	for _, f := range frames {
-		if !input(p.Attachment, f, send) {
+		if !input(p.Attachment, p.in, f, send) {
 			p.end()
 			break
 		}

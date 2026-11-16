@@ -250,10 +250,20 @@ type attacher struct {
 	// Input while the link is down (GAP-0003): what was typed then is not
 	// sent (it would land on a screen the person cannot see), and the
 	// person is told. unsent counts bytes the relay client read but could
-	// not send when the connection ended; dropped the bytes typed during
-	// the outage; lost is set while a lost connection is retried.
+	// not send when the connection ended, and bytes it sent that the relay
+	// never got (the next hello's received count, GAP-0170); dropped the
+	// bytes typed during the outage; lost is set while a lost connection is
+	// retried.
 	unsent, dropped atomic.Int64
-	lost            atomic.Bool
+	// maybe counts bytes sent that the relay's next hello does not count
+	// (GAP-0170): it can read that count while the old connection still
+	// drains keys it got, so they are only possibly lost.
+	maybe atomic.Int64
+	// prevInput and prevSent are the last relay greeting's input count id
+	// and the bytes sent on that connection (GAP-0170).
+	prevInput string
+	prevSent  int64
+	lost      atomic.Bool
 	// drain is the outage reader: it runs from a lost connection until
 	// the relay greets the next one.
 	drainMu     sync.Mutex
@@ -588,17 +598,27 @@ func (a *attacher) outageStopped(wctx context.Context, res *Result) bool {
 // counting again); "" when nothing was lost.
 func (a *attacher) notSentNote(sep string, reset bool) string {
 	n := a.unsent.Load() + a.dropped.Load()
+	maybe := a.maybe.Load()
 	if reset {
 		a.unsent.Store(0)
 		a.dropped.Store(0)
+		a.maybe.Store(0)
 	}
+	note := ""
 	switch {
 	case n == 0:
-		return ""
 	case reset:
-		return sep + fmt.Sprintf("%d typed character(s) were not sent; type them again.", n)
+		note = sep + fmt.Sprintf("%d typed character(s) were not sent; type them again.", n)
+	default:
+		note = sep + fmt.Sprintf("(%d typed character(s) not sent)", n)
 	}
-	return sep + fmt.Sprintf("(%d typed character(s) not sent)", n)
+	if maybe > 0 && reset {
+		// Keys sent in the moment before the cut that the relay had not
+		// counted when it greeted again: they may have reached the agent
+		// after all (GAP-0170).
+		note += sep + fmt.Sprintf("%d character(s) typed just before the connection dropped may not have reached the agent; check the prompt.", maybe)
+	}
+	return note
 }
 
 func (a *attacher) notSentErr(err error) error {
@@ -660,16 +680,26 @@ func (a *attacher) once(ctx context.Context) (relay.AttachResult, bool, error) {
 		a.sizeMu.Unlock()
 	}()
 	var connected atomic.Bool
+	// The relay's hello is read on the client's reader goroutine: it gets
+	// copies, never the fields once() sets after the attach.
+	resume, prevSent := a.prevInput, a.prevSent
 	opts := relay.AttachOptions{
 		// Token is the person's bearer: the WebSocket handshake carries it
 		// from here, and HTTPClient puts a fresh one on every long-poll
 		// request.
 		BaseURL: a.tun.BaseURL(), Token: tok, Cols: sz.Cols, Rows: sz.Rows,
 		LongPoll: a.mode == TransportLongPoll, HTTPClient: a.tun.HTTPClient(), Dialer: a.tun.Dialer(), FlatRoutes: true,
-		Resize: ch, Dir: a.o.Dir,
+		Resize: ch, Dir: a.o.Dir, Resume: resume,
 		OnControl: func(c relay.Control) {
 			if c.Type == relay.CtlHello {
 				connected.Store(true)
+				if c.Received != nil && resume != "" {
+					// Sent before the cut but never written to the
+					// agent: lost on the way (a suspend).
+					if lost := prevSent - *c.Received; lost > 0 {
+						a.maybe.Add(lost)
+					}
+				}
 				a.endDrain()
 				in.openGate()
 				if a.lost.Swap(false) {
@@ -691,6 +721,9 @@ func (a *attacher) once(ctx context.Context) (relay.AttachResult, bool, error) {
 		defer a.asks.stop()
 	}
 	ar, err := relay.Attach(actx, r, a.scr, opts)
+	if ar.Input != "" {
+		a.prevInput, a.prevSent = ar.Input, ar.Sent
+	}
 	return ar, connected.Load(), err
 }
 

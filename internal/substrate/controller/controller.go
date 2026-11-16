@@ -1448,6 +1448,12 @@ func (id restoreID) freshSuspend() bool { return id.headGen == id.lastGen && (id
 func revertSeen(prev, cur ateapi.ActorState, was, now restoreID) bool {
 	suspendedSince := now.lastGen > was.lastGen // a suspend ran since the last pass
 	switch {
+	case prev == ateapi.ActorStateCrashed && cur != ateapi.ActorStateCrashed:
+		// Only a revert brings a crashed actor back, whatever state the
+		// next pass sees: SUSPENDED, or RUNNING after a revert and a resume
+		// inside one poll (GAP-0141). A REVERTING seen in a pass is sent by
+		// lifecycleOf; DELETING never gets here.
+		return cur != ateapi.ActorStateReverting
 	case prev == ateapi.ActorStateSuspended && cur == ateapi.ActorStateSuspended:
 		if suspendedSince { // resumed and suspended again inside one poll
 			return !now.freshSuspend()
@@ -1469,8 +1475,6 @@ func revertSeen(prev, cur ateapi.ActorState, was, now restoreID) bool {
 		switch prev {
 		case ateapi.ActorStateReverting:
 			return false // sent when REVERTING was seen
-		case ateapi.ActorStateCrashed:
-			return true // only a revert brings a crashed actor back
 		case ateapi.ActorStateRunning:
 			if !suspendedSince {
 				return true // a revert of the running actor: no new generation
