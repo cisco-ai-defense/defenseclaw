@@ -17,6 +17,7 @@
 package inventory
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -144,6 +145,27 @@ func TestDetectPlugins_EnumeratesChildBasenames(t *testing.T) {
 	// Codex's own install staging folder is not a plugin.
 	if slices.Contains(got.Basenames, ".remote-plugin-install-staging") {
 		t.Fatalf("staging folder reported as a plugin: %v", got.Basenames)
+	}
+}
+
+func TestDetectPluginsHiddenEntryAfterTheCapIsNotPartial(t *testing.T) {
+	tmp := t.TempDir()
+	pluginsDir := filepath.Join(tmp, ".codex", "plugins")
+	// "-" sorts before ".", so the hidden folder is listed after a full cap
+	// (the folder row plus maxEvidencePerSignal-1 plugins).
+	for i := range maxEvidencePerSignal - 1 {
+		if err := os.MkdirAll(filepath.Join(pluginsDir, fmt.Sprintf("-p%03d", i)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(pluginsDir, ".staging"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{Enabled: true, Mode: "enhanced", DataDir: filepath.Join(tmp, "data"), HomeDir: tmp},
+		[]AISignature{{ID: "codex", Category: SignalSupportedConnector, SupportedConnector: "codex", PluginPaths: []string{"~/.codex/plugins"}}})
+	cleanupPreparedDiscoveryService(t, svc)
+	if signals := svc.detectPlugins(); len(signals) != 1 || signals[0].Partial {
+		t.Fatalf("a skipped hidden entry made the plugin signal partial: %d signals", len(signals))
 	}
 }
 

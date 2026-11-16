@@ -2722,14 +2722,6 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 				break
 			}
 			for _, entry := range entries {
-				if len(evidence) >= maxEvidencePerSignal {
-					// Cap hit before we processed every child.
-					// Downstream must render "N of M" and must not
-					// treat this as authoritative.
-					partial = true
-					coverageReason = CoverageReasonCapExceeded
-					break
-				}
 				name := sanitizeBasenameValue(entry.Name())
 				if name == "" {
 					continue
@@ -2744,6 +2736,14 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 				// state (Codex .remote-plugin-install-staging), not a plugin.
 				if detector == "plugin" && strings.HasPrefix(entry.Name(), ".") {
 					continue
+				}
+				if len(evidence) >= maxEvidencePerSignal {
+					// Cap hit with a child left to keep (skipped entries
+					// above never count). Downstream must render "N of M"
+					// and must not treat this as authoritative.
+					partial = true
+					coverageReason = CoverageReasonCapExceeded
+					break
 				}
 				// Codex uses `.system` as a one-level skill container. Expand
 				// its children instead of presenting the container as a skill.
