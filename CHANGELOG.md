@@ -18,6 +18,7 @@ for current behavior.
 
 ### Added
 - **The managed skill inventory sends a content hash for each skill.** `defenseclaw.inventory.skill.content_hash` is a SHA-256 over every file of the skill folder, scripts and binaries included, so the same skill has the same hash on every endpoint. `content_status` says why a record has none (`symlink`, `too_large`, `unreadable`). Links are never followed.
+- **The managed skill inventory says whether a skill is new, changed, unchanged or removed.** The endpoint keeps the state, so each skill record carries `state`, `first_seen` and `last_seen`, and a removed skill is sent once as removed.
 
 ### Changed
 - **A command with more than 1024 operands is no longer blocked by the Windows hook deadline.** A Claude Code or Codex call with thousands of operands cost a few file reads each and reached the hook answer window though the gateway was up (GAP-0943). DefenseClaw now resolves the first 1024 operands and redirection targets of a call, counted over all its statements, with the file system, and matches every later word as text, decoded as the shell decodes it; a later name that is a link, or a second name of a protected key file, is resolved as before, and only the other plain names are not checked for links. `default` and `permissive` allow the call with the alert `ACTION-OPERAND-BOUND`, `strict` and managed strict block it with `ACTION-COMPOUND-LIMIT`. A protected file or link named directly stays blocked in every profile.

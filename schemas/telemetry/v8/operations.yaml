@@ -2139,6 +2139,49 @@ attributes:
       enum: [ok, symlink, too_large, unreadable]
     notes: ok carries content_hash; symlink is a skill entry that is itself a link (never followed); too_large exceeded the file, byte, or depth limit; unreadable failed to list or read
   introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.state
+  type: string
+  brief: Change of one skill since the last inventory this endpoint published
+  examples: [changed]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [new, changed, unchanged, removed]
+    notes: Kept on the endpoint per skill id and updated only after a successful publish. changed means content_hash differs from the last published one; removed is sent once, with active false, after a complete scan no longer finds the skill
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.first_seen
+  type: string
+  brief: RFC3339 time this endpoint first observed the skill
+  examples: ['2026-11-11T09:30:00Z']
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: high
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 64}
+    notes: UTC RFC3339 kept per skill id on the endpoint
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.last_seen
+  type: string
+  brief: RFC3339 time of the scan that last observed the skill
+  examples: ['2026-11-11T12:00:00Z']
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: high
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 64}
+    notes: UTC RFC3339. Publishes are change-gated with a daily complete bundle, so this advances at least daily; on a removed record it is the last publish that still found the skill
+  introduced_in: telemetry-registry-v3
 - id: defenseclaw.inventory.connector.identifiers
   type: array
   brief: Ordered identifier-class section of one complete connector inventory snapshot
@@ -8767,6 +8810,12 @@ groups:
   - ref: defenseclaw.inventory.skill.content_hash
     requirement_level: recommended
   - ref: defenseclaw.inventory.skill.content_status
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.skill.state
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.skill.first_seen
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.skill.last_seen
     requirement_level: recommended
   - ref: defenseclaw.ai.model.provenance.publisher
     requirement_level: recommended

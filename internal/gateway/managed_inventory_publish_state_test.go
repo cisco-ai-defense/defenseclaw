@@ -109,6 +109,7 @@ func managedPublishFullComponent() endpointInventoryComponent {
 		agentScannedAt:              "2026-09-15T10:00:00Z",
 		skillContentHash:            "sha256:" + strings.Repeat("a", 64),
 		skillContentStatus:          "ok",
+		skillFirstSeen:              "2026-11-11T09:00:00Z",
 	}
 }
 
@@ -219,6 +220,7 @@ func TestManagedInventoryDigestDetectsMeaningfulFields(t *testing.T) {
 		"agentVersion":                func(c *endpointInventoryComponent) { c.agentVersion = "1.2.4" },
 		"skillContentHash":            func(c *endpointInventoryComponent) { c.skillContentHash = "sha256:" + strings.Repeat("b", 64) },
 		"skillContentStatus":          func(c *endpointInventoryComponent) { c.skillContentStatus = "too_large" },
+		"skillFirstSeen":              func(c *endpointInventoryComponent) { c.skillFirstSeen = "2026-11-11T10:00:00Z" },
 	}
 	for name, mutate := range componentCases {
 		t.Run("component/"+name, func(t *testing.T) {
