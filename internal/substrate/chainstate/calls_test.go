@@ -51,23 +51,31 @@ func TestCallStartKeepsTheSecretReadStepOnly(t *testing.T) {
 
 func TestFurtherResultVerdict(t *testing.T) {
 	start := &callStart{ruleset: "r1"}
+	type in struct {
+		c                            scopeCall
+		remembered, mayRead, showsRd bool
+		ruleset                      string
+	}
+	cleared := scopeCall{known: true, resolved: true, cleared: true, start: start}
+	read := scopeCall{known: true, resolved: true, start: start}
 	for _, tc := range []struct {
-		name       string
-		c          scopeCall
-		remembered bool
-		mayRead    bool
-		ruleset    string
-		want       furtherVerdict
+		name string
+		in   in
+		want furtherVerdict
 	}{
-		{"never seen (another call id, session or actor; evicted; past the window; leader restart)", scopeCall{}, false, true, "r1", furtherMissing},
-		{"prepared, not resolved (its proposal was discarded)", scopeCall{known: true, start: start}, true, true, "r1", furtherMissing},
-		{"resolved, content proves nothing read", scopeCall{known: true, resolved: true, start: start}, true, false, "r1", furtherReplay},
-		{"resolved, may have read: chains", scopeCall{known: true, resolved: true, start: start}, true, true, "r1", furtherChain},
-		{"resolved, proposal read no credentials file", scopeCall{known: true, resolved: true}, true, true, "r1", furtherReplay},
-		{"resolved, proposal unknown (prepared before this leader)", scopeCall{resolved: true}, true, true, "r1", furtherMissing},
-		{"resolved, ruleset changed", scopeCall{known: true, resolved: true, start: start}, true, true, "r2", furtherMissing},
+		{"never seen (another call id, session or actor; evicted; past the window; leader restart)", in{scopeCall{}, false, true, true, "r1"}, furtherMissing},
+		{"prepared, not resolved (its proposal was discarded)", in{scopeCall{known: true, start: start}, true, true, true, "r1"}, furtherMissing},
+		{"resolved, content proves nothing read", in{read, true, false, false, "r1"}, furtherReplay},
+		{"resolved, may have read: chains", in{read, true, true, true, "r1"}, furtherChain},
+		{"resolved, proposal read no credentials file", in{scopeCall{known: true, resolved: true}, true, true, true, "r1"}, furtherReplay},
+		{"resolved, proposal unknown (prepared before this leader)", in{scopeCall{resolved: true}, true, true, true, "r1"}, furtherMissing},
+		{"resolved, ruleset changed", in{read, true, true, true, "r2"}, furtherMissing},
+		{"GAP-0352: cleared, then a result with no output", in{cleared, true, true, false, "r1"}, furtherReplay},
+		{"GAP-0352: cleared, then the same failure", in{cleared, true, false, false, "r1"}, furtherReplay},
+		{"GAP-0352: cleared, then a result that printed: chains", in{cleared, true, true, true, "r1"}, furtherChain},
+		{"cleared, printed, ruleset changed", in{cleared, true, true, true, "r2"}, furtherMissing},
 	} {
-		if got := furtherResultVerdict(tc.c, tc.remembered, tc.mayRead, tc.ruleset); got != tc.want {
+		if got := furtherResultVerdict(tc.in.c, tc.in.remembered, tc.in.mayRead, tc.in.showsRd, tc.in.ruleset); got != tc.want {
 			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
 		}
 	}
@@ -115,7 +123,7 @@ func TestCallTableBoundsOneBusyActor(t *testing.T) {
 		t.Fatalf("%d calls kept, want at most %d", got, callsPerActorMax+1)
 	}
 	c, ok := tb.lookup(callKey{"a/busy", hex64("s", 1), hex64("i", 0)}, ScopeSession, end)
-	if furtherResultVerdict(c, ok, true, "") != furtherMissing || furtherResultVerdict(c, ok, false, "") != furtherMissing {
+	if furtherResultVerdict(c, ok, true, true, "") != furtherMissing || furtherResultVerdict(c, ok, false, false, "") != furtherMissing {
 		t.Fatal("an evicted call is replayed")
 	}
 	if _, ok := tb.lookup(other, ScopeSession, end); !ok {

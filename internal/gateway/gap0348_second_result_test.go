@@ -217,3 +217,91 @@ func TestGAP0348CursorSecondResult(t *testing.T) {
 		})
 	}
 }
+
+// substrate-1 GAP-0352 (SMK-CH3 on stk at 2712b0be1b, 10 of 10 cells): after
+// the PostToolUseFailure of a missing .env.production, Claude Code's
+// PostToolUse for the same call carried no output; the replay took it for a
+// result that may have read and started the chain, so the upload was blocked.
+// The first result is the real Claude Code 2.1.322 body (captured on dev,
+// evidence/substrate-1/kind347/ccprobe). A further result of a call whose
+// read was proven to fail chains only if its own content shows a read.
+func gap0352RealFailure() map[string]interface{} {
+	return map[string]interface{}{
+		"hook_event_name": "PostToolUseFailure", "session_id": "s1", "permission_mode": "bypassPermissions",
+		"prompt_id": "8292d70b-0139-47c7-8641-286496fcc90f", "tool_name": "Bash", "tool_use_id": "read-1",
+		"tool_input": map[string]interface{}{"command": gap0348Read, "description": "Read .env.production file"},
+		"error":      "Exit code 1\n" + gap0348Missing, "is_interrupt": false, "duration_ms": float64(41),
+	}
+}
+
+func gap0352Post(response interface{}, set bool) map[string]interface{} {
+	post := claudeToolResult("PostToolUse", "s1", "read-1")
+	post["tool_input"] = map[string]interface{}{"command": gap0348Read, "description": "Read .env.production file"}
+	delete(post, "tool_response")
+	if set {
+		post["tool_response"] = response
+	}
+	return post
+}
+
+func TestGAP0352FurtherResultWithNoReadDoesNotChain(t *testing.T) {
+	seconds := []struct {
+		name string
+		post map[string]interface{}
+	}{
+		{"empty-stdout-stderr", gap0352Post(map[string]interface{}{"stdout": "", "stderr": "", "interrupted": false, "isImage": false}, true)},
+		{"no-tool-response", gap0352Post(nil, false)},
+		{"empty-string", gap0352Post("", true)},
+		{"repeats-the-failure", gap0352Post("Exit code 1\n"+gap0348Missing, true)},
+	}
+	orders := []struct {
+		name   string
+		layout func(fail, post map[string]interface{}) []gap0348Step
+	}{
+		{"same-replica", func(f, p map[string]interface{}) []gap0348Step {
+			return []gap0348Step{a348(gap0348Pre()), a348(f), a348(p)}
+		}},
+		{"failure-on-B", func(f, p map[string]interface{}) []gap0348Step {
+			return []gap0348Step{a348(gap0348Pre()), b348(f), a348(p)}
+		}},
+		{"posttooluse-on-B", func(f, p map[string]interface{}) []gap0348Step {
+			return []gap0348Step{a348(gap0348Pre()), a348(f), b348(p)}
+		}},
+	}
+	for _, o := range orders {
+		for _, s := range seconds {
+			t.Run(o.name+"/"+s.name, func(t *testing.T) {
+				hooks, upload, v := gap0348Run(t, o.layout(gap0352RealFailure(), s.post))
+				for i, h := range hooks {
+					if slices.Contains(h.RuleIDs, substrateChainUnrecordedRule) {
+						t.Fatalf("step %d: %q %v, want no unrecorded mark", i, h.Action, h.RuleIDs)
+					}
+				}
+				if v.Deny || v.Unrecorded != "" || upload.Action == guardrailActionBlock ||
+					slices.Contains(upload.RuleIDs, guardrail.ToolChainSecretReadThenEgress) {
+					t.Fatalf("upload %q %v, callout %+v: want allowed, no chain, no unrecorded mark", upload.Action, upload.RuleIDs, v)
+				}
+			})
+		}
+	}
+}
+
+// The positives stay refused when the further result shows the read.
+func TestGAP0352FurtherResultThatPrintedStillChains(t *testing.T) {
+	for _, row := range []struct {
+		name  string
+		steps []gap0348Step
+	}{
+		{"real-failure-then-printed-string", []gap0348Step{a348(gap0348Pre()), a348(gap0352RealFailure()), a348(gap0352Post("API_KEY=canary-1", true))}},
+		{"real-failure-on-B-then-printed-stdout", []gap0348Step{a348(gap0348Pre()), b348(gap0352RealFailure()),
+			a348(gap0352Post(map[string]interface{}{"stdout": "API_KEY=canary-1", "stderr": "", "interrupted": false, "isImage": false}, true))}},
+		{"real-failure-then-failure-that-printed", []gap0348Step{a348(gap0348Pre()), a348(gap0352RealFailure()),
+			a348(gap0348Fail("API_KEY=canary-1\n" + gap0348Missing))}},
+		{"printed-then-real-failure", []gap0348Step{a348(gap0348Pre()), a348(gap0348Post("read-1", "API_KEY=canary-1", "")), a348(gap0352RealFailure())}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			_, upload, v := gap0348Run(t, row.steps)
+			gap0342Refused(t, row.name, upload, v)
+		})
+	}
+}

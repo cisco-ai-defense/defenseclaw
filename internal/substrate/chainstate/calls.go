@@ -91,9 +91,14 @@ func (c *callStart) projection() guardrail.ToolChainProjection {
 // scopeCall is what one scope (session or actor window) knows of a call:
 // known, this leader took its proposal (start is its secret-read step, nil
 // when it read no credentials file); resolved, it took a result of it.
+//
+// cleared: the result that resolved the call proved its read failed (an
+// unsuccessful result whose content proves nothing was read, or a denied
+// call): a further result then starts the chain only if its own content
+// shows a read (GAP-0352).
 type scopeCall struct {
-	known, resolved bool
-	start           *callStart
+	known, resolved, cleared bool
+	start                    *callStart
 }
 
 func scopeIndex(s Scope) int {
@@ -235,10 +240,14 @@ const (
 
 // furtherResultVerdict decides a result whose ResolvePending found no
 // proposal, from what the scope remembers of its call.
-func furtherResultVerdict(c scopeCall, remembered, mayHaveRead bool, ruleset string) furtherVerdict {
+func furtherResultVerdict(c scopeCall, remembered, mayHaveRead, showsRead bool, ruleset string) furtherVerdict {
 	switch {
 	case !remembered || !c.resolved:
 		return furtherMissing
+	case c.cleared && !showsRead:
+		// An earlier result proved the read failed and this one shows no
+		// read: the same failure, or no output (GAP-0352).
+		return furtherReplay
 	case !mayHaveRead:
 		return furtherReplay
 	case c.start == nil && c.known:
@@ -286,14 +295,15 @@ func (s *Service) furtherResult(ctx context.Context, repo *audit.ToolChainReposi
 	now := s.opts.Now()
 	switch r.Status {
 	case audit.ToolChainPendingResolved:
-		s.calls.update(key, in.Scope, now, func(c *scopeCall) { c.resolved = true })
+		cleared := x.Outcome != audit.ToolChainPendingOutcomeSuccess && !x.ResultMayHaveRead
+		s.calls.update(key, in.Scope, now, func(c *scopeCall) { c.resolved, c.cleared = true, cleared })
 		return r, nil
 	case audit.ToolChainPendingMissing:
 	default:
 		return r, nil
 	}
 	c, remembered := s.calls.lookup(key, in.Scope, now)
-	switch furtherResultVerdict(c, remembered, x.ResultMayHaveRead, x.RulesetFingerprint) {
+	switch furtherResultVerdict(c, remembered, x.ResultMayHaveRead, x.ResultShowsRead, x.RulesetFingerprint) {
 	case furtherMissing:
 		return r, nil
 	case furtherReplay:

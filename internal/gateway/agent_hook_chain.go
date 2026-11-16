@@ -589,6 +589,10 @@ func (a *APIServer) applyAgentHookToolChains(
 			// chain from the call's proposal (GAP-0348, GAP-0345).
 			resolveInput.ResultMayHaveRead = resolveInput.UnsuccessfulMayHaveRead ||
 				outcome == connector.ToolLifecycleOutcomeSuccess && !toolResultProvesNothingRead(req)
+			// After an earlier result proved the read failed, only a result
+			// that shows a read chains: Claude Code's PostToolUse after a
+			// PostToolUseFailure carries no output (GAP-0352).
+			resolveInput.ResultShowsRead = resolveInput.ResultMayHaveRead && resultShowsRead(req)
 		}
 		resolved, resolveErr := repository.ResolvePending(ctx, resolveInput)
 		var rootStatus audit.ToolChainPendingStatus
@@ -3861,6 +3865,41 @@ func toolResultProvesNothingRead(req agentHookRequest) bool {
 		}
 	}
 	return true
+}
+
+// resultShowsRead reports a result whose own content shows its call may have
+// read: a line that is not blank, an exit status line, or a reader's error
+// naming one of the command's operands (GAP-0352). A result too large to
+// read shows one. It is the evidence a further result of a call needs to
+// start the secret-read chain once an earlier result proved the read failed
+// (the 1.0.10 lead's rule, STEER 7 and 8 2026-11-16): one that repeats the
+// failure, or carries no output, shows none; one that printed shows one, so a
+// no-read result never clears a read another result shows.
+func resultShowsRead(req agentHookRequest) bool {
+	var text []string
+	size := 0
+	if !collectResultText(req.Payload, &text, &size) {
+		return true
+	}
+	program, operands := "", []string(nil)
+	if command, ok := trustedBashCommandInput(actionfacts.Input{Tool: req.ToolName, Args: req.ToolArgs}); ok {
+		if words := strings.Fields(command); len(words) >= 2 {
+			program, operands = words[0], words[1:]
+		}
+	}
+	for _, chunk := range text {
+		for _, line := range strings.Split(chunk, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || isExitCodeLine(line) {
+				continue
+			}
+			if operand, ok := readerErrorOperand(program, line); program != "" && ok && slices.Contains(operands, operand) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
 }
 
 // isExitCodeLine is the exit status line a connector adds to a failed
