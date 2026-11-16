@@ -68,6 +68,16 @@ const (
 	inspectScanTimeout = 200 * time.Millisecond
 )
 
+// inspectScanBudget is the synchronous rule-scan deadline of the
+// /api/v1/inspect/* routes: inspectScanTimeout, unless a test set the
+// inspectToolScanTimeout seam (runtime constructors never do).
+func (a *APIServer) inspectScanBudget() time.Duration {
+	if a.inspectToolScanTimeout > 0 {
+		return a.inspectToolScanTimeout
+	}
+	return inspectScanTimeout
+}
+
 // scanWithTimeout runs ScanAllRules under a context deadline. Returns partial
 // results if the deadline fires — the caller should treat a timeout as a
 // high-severity finding.
@@ -192,7 +202,7 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 			deferManagedAIDFailOpenAccounting(r.Context()), "message", req.Content,
 		)
 	} else {
-		ruleFindings, err := scanWithTimeout(r.Context(), req.Content, "user-request", inspectScanTimeout)
+		ruleFindings, err := scanWithTimeout(r.Context(), req.Content, "user-request", a.inspectScanBudget())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[inspect] pre-request scan timeout after %s\n", time.Since(t0))
 			a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
@@ -300,7 +310,7 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 			deferManagedAIDFailOpenAccounting(r.Context()), "message", req.Content,
 		)
 	} else {
-		ruleFindings, err := scanWithTimeout(r.Context(), req.Content, "llm-response", inspectScanTimeout)
+		ruleFindings, err := scanWithTimeout(r.Context(), req.Content, "llm-response", a.inspectScanBudget())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[inspect] post-response scan timeout after %s\n", time.Since(t0))
 			a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
@@ -402,7 +412,7 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 			deferManagedAIDFailOpenAccounting(r.Context()), "message", aidContent,
 		)
 	} else {
-		ruleFindings, err := scanToolResultWithTimeout(r.Context(), outputStr, req.Tool+"-response", inspectScanTimeout)
+		ruleFindings, err := scanToolResultWithTimeout(r.Context(), outputStr, req.Tool+"-response", a.inspectScanBudget())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[inspect] post-tool scan timeout after %s\n", time.Since(t0))
 			a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})

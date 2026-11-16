@@ -212,11 +212,12 @@ type APIServer struct {
 	// executes scanner.ScanCode.
 	codeScanner func(context.Context, string, string) (*scanner.ScanResult, error)
 
-	// inspectToolScanTimeout optionally overrides the synchronous
-	// /api/v1/inspect/tool scan budget for this server. Runtime constructors
-	// leave it at zero and therefore retain inspectScanTimeout; tests that
-	// exercise policy semantics can use a larger budget so race-detector
-	// scheduler latency is not mistaken for a scanner verdict.
+	// inspectToolScanTimeout optionally overrides the synchronous rule-scan
+	// budget of the /api/v1/inspect/* routes (tool, request, response,
+	// tool-response) for this server; see inspectScanBudget. Runtime
+	// constructors leave it at zero and therefore retain inspectScanTimeout;
+	// tests that exercise policy semantics can use a larger budget so
+	// race-detector scheduler latency is not mistaken for a scanner verdict.
 	inspectToolScanTimeout time.Duration
 	// inspectToolWorkerDone is a test-only completion barrier for the detached
 	// scan worker. Production constructors leave it nil. It lets timeout tests
