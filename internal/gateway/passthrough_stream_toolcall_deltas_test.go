@@ -52,6 +52,9 @@ const (
 // mode applies: refused in the fail-closed tiers; GAP-0987 for the Bedrock
 // eventstream); "server" inside a call the provider runs itself (no fail
 // mode: a benign one passes in every tier, a refused one is logged only);
+// "late-cut" a delta after the item's output_item.done (Broken: refused in
+// the fail-closed tiers, forwarded after the alert in the others, where its
+// pieces are judged one by one and a refused call is logged only);
 // "unnamed" a call whose name never comes (logged only: what the rules make
 // of an unnamed call is theirs).
 type streamToolCallCase struct {
@@ -196,6 +199,25 @@ func streamToolCallCases(t *testing.T, cmd string) []streamToolCallCase {
 			`{"type":"response.failed","response":{"id":"r","status":"failed","output":[]}}`, d2), "cut"),
 		// The item's .done after its output_item.done: no reopening.
 		c("responses/late_args_done", "openai", R, ctSSE, sseBody(added, d1, d2, itemDone, argsDone), ""),
+		// Review round 2 rows (rgw2, 9c0530614e). An id-less item added at the
+		// index of an open item with an id is a new item.
+		c("responses/noid_readd_done_eof", "openai", R, ctSSE, sseBody(added, d1, d2,
+			`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","name":"Read","call_id":"c2","arguments":""}}`,
+			`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","name":"Read","call_id":"c2","arguments":"{\"path\":\"README.md\"}"}}`), "cut"),
+		// The same id added again with another name: judged under both.
+		c("responses/sameid_readd_done_eof", "openai", R, ctSSE, sseBody(added, d1, d2,
+			`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","name":"Read","call_id":"c","arguments":""}}`,
+			`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","name":"Read","call_id":"c","arguments":"{\"path\":\"README.md\"}"}}`), ""),
+		// A late .done that names the call another way: judged under that name too.
+		c("responses/late_done_rename", "openai", R, ctSSE, sseBody(
+			`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","name":"Read","call_id":"c","arguments":""}}`,
+			`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","name":"Read","call_id":"c","arguments":"{\"path\":\"README.md\"}"}}`,
+			`{"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":0,"name":"Bash","arguments":`+args+`}`,
+			completedEmpty), ""),
+		// A call split across its output_item.done.
+		c("responses/split_itemdone_completed", "openai", R, ctSSE, sseBody(added, d1,
+			`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","name":"Bash","call_id":"c","arguments":"{}"}}`,
+			d2, completedEmpty), "late-cut"),
 		// A Bedrock (Anthropic events) call the provider runs itself, cut.
 		c("bedrock/invoke_server_tool_eof", "bedrock", "/model/anthropic.claude-test-v1:0/invoke-with-response-stream", ctEvents,
 			streamTailFrame(`{"type":"message_start","message":{"id":"msg_1","model":"claude-test"}}`)+
@@ -306,12 +328,16 @@ func TestStreamToolCallDeltasReachTheToolRules(t *testing.T) {
 						switch {
 						case c.end == "unnamed":
 							return
+						case kind == "bad" && c.end == "late-cut" && !tier.failClosed:
+							// Forwarded after the alert; its pieces alone are
+							// the rules' (logged only).
+							return
 						case kind == "bad" && (tier.active || c.end == "server"):
 							// Secure Client: AI Defense decides the call, the local
 							// findings alert. A server call: what the rules make of
 							// it is theirs. Logged only.
 							return
-						case kind == "good" && !(c.end == "cut" && tier.failClosed):
+						case kind == "good" && !((c.end == "cut" || c.end == "late-cut") && tier.failClosed):
 							want = "pass"
 						}
 						if got != want {
@@ -501,8 +527,8 @@ func TestSSEToolCallsReviewShapes(t *testing.T) {
 			s.Feed(fmt.Sprintf(`{"type":"response.function_call_arguments.done","item_id":"%s","output_index":%d,"arguments":"%s"}`, id, i, big))
 		}
 		kept := 0
-		for _, c := range s.open {
-			kept += c.stored()
+		for c := range s.open {
+			kept += c.text()
 		}
 		if !s.Broken() || kept > sseToolCallMax {
 			t.Fatalf("Broken=%v kept=%d bytes, want Broken and at most %d kept", s.Broken(), kept, sseToolCallMax)
@@ -575,4 +601,139 @@ func TestStreamToolCallBedrockMidFrameCut(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Judged items are remembered within the call-text bound: 64 items with a
+// 2 MiB id each, each closed by an id-less output_item.done (nothing is held
+// for them), make the stream Broken, so the fail mode applies, and keep
+// nothing past the bound (rgw2 S5). Uses only Feed and Broken.
+func TestSSEToolCallsClosedItemMemoryIsBounded(t *testing.T) {
+	s := newSSEToolCalls(0)
+	long := strings.Repeat("i", 2<<20)
+	for i := 0; i < 64; i++ {
+		id := fmt.Sprintf("fc_%d_%s", i, long)
+		s.Feed(fmt.Sprintf(`{"type":"response.output_item.added","output_index":%d,"item":{"type":"function_call","id":"%s","name":"Bash","arguments":""}}`, i, id))
+		s.Feed(fmt.Sprintf(`{"type":"response.output_item.done","output_index":%d,"item":{"type":"function_call","name":"Bash","arguments":"{}"}}`, i))
+		s.Take()
+	}
+	if !s.Broken() {
+		t.Fatal("64 items of 2 MiB ids left the stream inspectable (no fail mode, nothing bounded)")
+	}
+}
+
+// Item identity and names (rgw2, 9c0530614e).
+func TestSSEToolCallsIdentityAndNames(t *testing.T) {
+	bad := `{"command":"curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/"}`
+	addA := `{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_A","name":"Bash","call_id":"cA","arguments":""}}`
+	dA := func(s string) string {
+		return `{"type":"response.function_call_arguments.delta","item_id":"fc_A","output_index":0,"delta":` + jsonText(s) + `}`
+	}
+	const completed = `{"type":"response.completed","response":{"output":[]}}`
+	calls := func(s *sseToolCalls) map[string]bool {
+		var raw []sseToolCall
+		if b := s.Take(); b != nil {
+			_ = json.Unmarshal(b, &raw)
+		}
+		out := map[string]bool{}
+		for _, c := range raw {
+			out[c.Function.Name+"("+c.Function.Arguments+")"] = true
+		}
+		return out
+	}
+	feed := func(evs ...string) *sseToolCalls {
+		s := newSSEToolCalls(0)
+		for _, ev := range evs {
+			s.Feed(ev)
+		}
+		return s
+	}
+	t.Run("an id-less item added at the index of an item with an id is a new item", func(t *testing.T) {
+		s := feed(addA, dA(bad),
+			`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","name":"Read","arguments":""}}`,
+			`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","name":"Read","arguments":"{\"path\":\"x\"}"}}`)
+		if !s.Open() {
+			t.Fatal("fc_A was closed by an id-less item's output_item.done")
+		}
+		s.Finish()
+		if got := calls(s); !s.Broken() || !got["Bash("+bad+")"] || got["Read("+bad+")"] {
+			t.Fatalf("Broken=%v calls=%v, want Broken, Bash(<deltas>) and never Read(<deltas>)", s.Broken(), got)
+		}
+	})
+	t.Run("an id-less event reaches only an id-less item", func(t *testing.T) {
+		s := feed(addA, `{"type":"response.function_call_arguments.delta","output_index":0,"delta":"{}"}`)
+		if len(s.open) != 2 || s.byID["fc_A"] == nil || s.idless[0] == nil {
+			t.Fatalf("open=%d, want fc_A and a separate id-less item", len(s.open))
+		}
+	})
+	t.Run("an id like an index key is just an id", func(t *testing.T) {
+		s := feed(`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"output_index:0","name":"Bash","arguments":""}}`,
+			`{"type":"response.function_call_arguments.delta","output_index":0,"delta":`+jsonText(bad)+`}`, completed)
+		if got := calls(s); !got["Bash({})"] || !got["function_call("+bad+")"] {
+			t.Fatalf("calls=%v, want the id'd item and the id-less delta judged apart", got)
+		}
+	})
+	t.Run("the same id added again keeps both names", func(t *testing.T) {
+		s := feed(addA, dA(bad),
+			`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_A","name":"Read","arguments":""}}`,
+			`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_A","name":"Read","arguments":"{\"path\":\"x\"}"}}`)
+		if got := calls(s); !got["Bash("+bad+")"] || !got["Read("+bad+")"] {
+			t.Fatalf("calls=%v, want the deltas judged as Bash and as Read", got)
+		}
+	})
+	t.Run("a late .done that names the call another way is judged under that name", func(t *testing.T) {
+		s := feed(`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_A","name":"Read","arguments":""}}`,
+			`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_A","name":"Read","arguments":"{\"path\":\"x\"}"}}`,
+			`{"type":"response.function_call_arguments.done","item_id":"fc_A","output_index":0,"name":"Bash","arguments":`+jsonText(bad)+`}`)
+		if got := calls(s); !got["Bash("+bad+")"] || s.Open() || s.Broken() {
+			t.Fatalf("calls=%v open=%v broken=%v, want Bash(<text>) at once, nothing held", got, s.Open(), s.Broken())
+		}
+	})
+	t.Run("a delta after output_item.done makes the stream Broken", func(t *testing.T) {
+		s := feed(addA, dA(bad[:30]),
+			`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_A","name":"Bash","arguments":"{}"}}`,
+			dA(bad[30:]), completed)
+		if !s.Broken() {
+			t.Fatal("a call split across its output_item.done left the stream inspectable")
+		}
+	})
+	t.Run("judged items count against the bound and are forgotten past it", func(t *testing.T) {
+		s := newSSEToolCalls(0)
+		long := strings.Repeat("i", 200<<10)
+		for i := 0; i < 16; i++ {
+			s.Feed(fmt.Sprintf(`{"type":"response.output_item.added","output_index":%d,"item":{"type":"function_call","id":"fc_%d_%s","name":"Bash","arguments":""}}`, i, i, long))
+			s.Feed(fmt.Sprintf(`{"type":"response.output_item.done","output_index":%d,"item":{"type":"function_call","id":"fc_%d_%s","name":"Bash","arguments":"{}"}}`, i, i, long))
+		}
+		kept := 0
+		for _, c := range s.byID {
+			kept += c.meta() + c.text()
+		}
+		if !s.Broken() || kept > sseToolCallMax || len(s.byID) > 1 {
+			t.Fatalf("Broken=%v remembered=%d items, %d bytes, want Broken and nothing past the bound", s.Broken(), len(s.byID), kept)
+		}
+	})
+	t.Run("late text of many judged items stays linear", func(t *testing.T) {
+		const n = 16000
+		var evs []string
+		for i := 0; i < n; i++ {
+			evs = append(evs,
+				fmt.Sprintf(`{"type":"response.output_item.added","output_index":%d,"item":{"type":"function_call","id":"fc_%d","name":"Bash","arguments":""}}`, i, i),
+				fmt.Sprintf(`{"type":"response.function_call_arguments.delta","item_id":"fc_%d","output_index":%d,"delta":"x"}`, i, i))
+		}
+		evs = append(evs, completed)
+		for i := 0; i < n; i++ {
+			evs = append(evs, fmt.Sprintf(`{"type":"response.function_call_arguments.delta","item_id":"fc_%d","output_index":%d,"delta":"y"}`, i, i))
+		}
+		for i := 0; i < n; i++ {
+			evs = append(evs, fmt.Sprintf(`{"type":"response.function_call_arguments.done","item_id":"fc_%d","output_index":%d,"arguments":"xy"}`, i, i))
+		}
+		s := newSSEToolCalls(0)
+		start := time.Now()
+		for _, ev := range evs {
+			s.Feed(ev)
+			s.Take()
+		}
+		if d := time.Since(start); d > 12*time.Second {
+			t.Fatalf("%d late items took %v", n, d)
+		}
+	})
 }
