@@ -140,6 +140,7 @@
       "local_endpoints": [],
       "skill_paths": [
         "~/.claude/skills",
+        "$CLAUDE_CONFIG_DIR/skills",
         ".claude/skills",
         "/Library/Application Support/ClaudeCode/.claude/skills",
         "$ProgramFiles/ClaudeCode/.claude/skills",
@@ -475,6 +476,7 @@
       "skill_paths": [
         ".github/skills",
         "~/.copilot/skills",
+        "$COPILOT_HOME/skills",
         ".agents/skills",
         "~/.agents/skills",
         "~/.claude/skills",
