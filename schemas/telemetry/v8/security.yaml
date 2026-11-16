@@ -2399,6 +2399,7 @@ groups:
   - ref: defenseclaw.guardrail.rule_ids
     requirement_level: recommended
   - ref: defenseclaw.guardrail.rule_names
+    requirement_level: recommended
   - ref: gen_ai.input.messages
     requirement_level: recommended
   - ref: defenseclaw.guardrail.judge_fallback
