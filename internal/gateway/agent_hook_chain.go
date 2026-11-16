@@ -507,7 +507,7 @@ func (a *APIServer) applyAgentHookToolChains(
 		observationProjection = terminalProjection
 	}
 
-	invocationDigest := exactToolChainInvocationDigest(lifecycle, req)
+	invocationDigest := exactToolChainInvocationDigest(ctx, lifecycle, req)
 	if structuredAction && invocationDigest == "" &&
 		lifecycle.IsPreProposalEvent(req.HookEventName) &&
 		resp.Action != guardrailActionBlock {
@@ -1135,7 +1135,15 @@ func toolChainProjectionHasSteps(projection guardrail.ToolChainProjection) bool 
 	return projection.DetectionStepMask != 0 || projection.EnforcementStepMask != 0
 }
 
+// exactToolChainInvocationDigest is the key that joins a tool call's result
+// to its pre-tool proposal. A verified Substrate actor's proposal lives on
+// the leader, and its result may reach another gateway replica than its
+// call: each replica keys its correlation digests with its own HMAC key,
+// derived from its own device key, so the key is the actor's own, not the
+// replica's (substrate-1 GAP-0342). Elsewhere it stays the local
+// correlation digest.
 func exactToolChainInvocationDigest(
+	ctx context.Context,
 	lifecycle connector.ToolCallLifecycleContract,
 	req agentHookRequest,
 ) string {
@@ -1147,10 +1155,28 @@ func exactToolChainInvocationDigest(
 		strings.TrimSpace(value.Value) == "" || value.Value != req.ToolInvocationID {
 		return ""
 	}
+	if actor, ok := substrateActorFrom(ctx); ok {
+		return substrateToolInvocationDigest(actor.Atespace, actor.UID, req.ConnectorName, req.SessionID, value)
+	}
 	return correlationValueDigest(
 		audit.ConnectorInstanceID(req.ConnectorInstanceID),
 		value,
 	)
+}
+
+// substrateToolInvocationDigest is a verified actor's tool invocation key:
+// the actor, its connector and session and the reported tool call id, the
+// same on every gateway replica. The id is the agent's own random call id;
+// the digest names it on the leader only.
+func substrateToolInvocationDigest(atespace, uid, connectorName, sessionID string, value connector.CorrelationValue) string {
+	digest := sha256.Sum256([]byte("defenseclaw/substrate/tool-invocation/v1\x00" + atespace + "\x00" + uid + "\x00" +
+		normalizeConnectorNameForDigest(connectorName) + "\x00" + sessionID + "\x00" +
+		typedCorrelationNamespace(value) + "\x00" + value.Value))
+	return hex.EncodeToString(digest[:])
+}
+
+func normalizeConnectorNameForDigest(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
 }
 
 func auditToolChainPendingOutcome(
