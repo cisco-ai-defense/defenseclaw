@@ -67,10 +67,11 @@ func (i *streamTailInspector) InspectMidStream(_ context.Context, direction, con
 const (
 	streamTailSSE         = "text/event-stream"
 	streamTailEventStream = "application/vnd.amazon.eventstream"
+	streamTailNDJSON      = "application/x-ndjson"
 )
 
-// streamTailFormat is one wire format of a provider-native stream (SSE, or
-// the binary Bedrock eventstream held in a string).
+// streamTailFormat is one wire format of a provider-native stream (SSE,
+// native Ollama NDJSON, or the binary Bedrock eventstream held in a string).
 type streamTailFormat struct {
 	name, provider, path, ctype string
 	head, tail                  string // events before the first and after the last text delta
@@ -141,6 +142,15 @@ var streamTailFormats = []streamTailFormat{
 		terminal: streamTailFrame(`{"type":"message_stop"}`),
 		delta: func(text string) string {
 			return streamTailFrame(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":` + streamTailJSON(text) + `}}`)
+		},
+	},
+	{
+		// Native Ollama /api/chat: one JSON event per line, streamed through
+		// passthroughStream (sseFramer ndjson mode, GAP-0370; GAP-0322).
+		name: "ollama", provider: "ollama", path: "/api/chat", ctype: streamTailNDJSON,
+		terminal: `{"model":"llama3","message":{"role":"assistant","content":""},"done":true}` + "\n",
+		delta: func(text string) string {
+			return `{"model":"llama3","message":{"role":"assistant","content":` + streamTailJSON(text) + `},"done":false}` + "\n"
 		},
 	},
 }
@@ -304,6 +314,10 @@ func streamTailReceivedText(f streamTailFormat, out string) string {
 		return sb.String()
 	}
 	for _, line := range strings.Split(out, "\n") {
+		if f.ctype == streamTailNDJSON {
+			sb.WriteString(streamTailEventText(f.provider, strings.TrimSpace(line)))
+			continue
+		}
 		if d, ok := strings.CutPrefix(strings.TrimSpace(line), "data: "); ok && d != "[DONE]" {
 			sb.WriteString(streamTailEventText(f.provider, d))
 		}
@@ -382,11 +396,15 @@ func streamTailSentTerminal(f streamTailFormat, out string) bool {
 
 // streamTailEventText is the text of one event of the test formats (read
 // here, not with the product extractor, so the tests stay independent of
-// it): an Anthropic text delta, a Responses output_text delta, Gemini parts.
+// it): an Anthropic text delta, a Responses output_text delta, Gemini parts,
+// an Ollama message.
 func streamTailEventText(provider, data string) string {
 	var ev struct {
-		Type  string          `json:"type"`
-		Delta json.RawMessage `json:"delta"`
+		Type    string          `json:"type"`
+		Delta   json.RawMessage `json:"delta"`
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
 		Cands []struct {
 			Content struct {
 				Parts []struct {
@@ -412,6 +430,8 @@ func streamTailEventText(provider, data string) string {
 		if ev.Type == "response.output_text.delta" && json.Unmarshal(ev.Delta, &d) == nil {
 			sb.WriteString(d)
 		}
+	case "ollama":
+		sb.WriteString(ev.Message.Content)
 	case "gemini":
 		for _, c := range ev.Cands {
 			for _, p := range c.Content.Parts {
@@ -913,7 +933,15 @@ func TestStreamTailStalledPartialLine(t *testing.T) {
 		for _, strict := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/strict=%v", f.name, strict), func(t *testing.T) {
 				unfinished := f.delta("an unfinished delta of plain words")
+				// The part of the event the upstream sends before it stalls:
+				// up to the middle of its text where the event carries the text as is
+				// (every NDJSON line of the format starts with the same 58
+				// bytes, so half a line is no mark of this one, GAP-0322),
+				// else half the event (a Bedrock frame carries it in base64).
 				partial := unfinished[:len(unfinished)/2]
+				if i := strings.Index(unfinished, "unfinished delta"); i >= 0 {
+					partial = unfinished[:i+len("unfinished")]
+				}
 				stall := make(chan struct{})
 				defer close(stall)
 				up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
