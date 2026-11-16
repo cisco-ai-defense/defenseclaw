@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -218,6 +219,27 @@ func streamToolCallCases(t *testing.T, cmd string) []streamToolCallCase {
 		c("responses/split_itemdone_completed", "openai", R, ctSSE, sseBody(added, d1,
 			`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","name":"Bash","call_id":"c","arguments":"{}"}}`,
 			d2, completedEmpty), "late-cut"),
+		// Review round 3 rows (353c7eeefd). Deltas without an item id at the
+		// index of an item that has one: judged under its name too.
+		c("responses/noid_delta_at_idA_completed", "openai", R, ctSSE, sseBody(added,
+			`{"type":"response.function_call_arguments.delta","output_index":0,"delta":`+h1+`}`,
+			`{"type":"response.function_call_arguments.delta","output_index":0,"delta":`+h2+`}`,
+			`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","name":"Bash","call_id":"c","arguments":"{}"}}`,
+			completedEmpty), ""),
+		// A 9th name: the text is judged under it once, then the stream is
+		// Broken.
+		c("responses/ninth_name", "openai", R, ctSSE, sseBody(
+			`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","name":"Note1","call_id":"c","arguments":""}}`,
+			`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","name":"Note2"}}`,
+			`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","name":"Note3"}}`,
+			`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","name":"Note4"}}`,
+			`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","name":"Note5"}}`,
+			`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","name":"Note6"}}`,
+			`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","name":"Note7"}}`,
+			`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","name":"Note8"}}`,
+			d1, d2,
+			`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","name":"Bash"}}`,
+			completedEmpty), "cut"),
 		// A Bedrock (Anthropic events) call the provider runs itself, cut.
 		c("bedrock/invoke_server_tool_eof", "bedrock", "/model/anthropic.claude-test-v1:0/invoke-with-response-stream", ctEvents,
 			streamTailFrame(`{"type":"message_start","message":{"id":"msg_1","model":"claude-test"}}`)+
@@ -712,7 +734,7 @@ func TestSSEToolCallsIdentityAndNames(t *testing.T) {
 		}
 	})
 	t.Run("late text of many judged items stays linear", func(t *testing.T) {
-		const n = 16000
+		const n = 8000 // within the byte bound: every item is remembered
 		var evs []string
 		for i := 0; i < n; i++ {
 			evs = append(evs,
@@ -732,8 +754,64 @@ func TestSSEToolCallsIdentityAndNames(t *testing.T) {
 			s.Feed(ev)
 			s.Take()
 		}
+		if s.Broken() {
+			t.Fatal("the stream went Broken: the guard would time the untracked path")
+		}
 		if d := time.Since(start); d > 12*time.Second {
 			t.Fatalf("%d late items took %v", n, d)
 		}
 	})
+	t.Run("a .done before any delta is kept beside the deltas", func(t *testing.T) {
+		s := feed(addA, `{"type":"response.function_call_arguments.done","item_id":"fc_A","output_index":0,"arguments":"{\"path\":\"x\"}"}`,
+			dA(bad), completed)
+		if got := calls(s); !got[`Bash({"path":"x"})`] || !got["Bash("+bad+")"] {
+			t.Fatalf("calls=%v, want the .done text and the deltas judged apart", got)
+		}
+	})
+	t.Run("a 9th name judges the text once, then Broken", func(t *testing.T) {
+		evs := []string{}
+		for i := 1; i <= 8; i++ {
+			evs = append(evs, fmt.Sprintf(`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_A","name":"Note%d"}}`, i))
+		}
+		evs = append(evs, dA(bad), `{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_A","name":"Bash"}}`)
+		s := feed(evs...)
+		if got := calls(s); !got["Bash("+bad+")"] || !s.Broken() {
+			t.Fatalf("calls=%v broken=%v, want Bash(<deltas>) and Broken", got, s.Broken())
+		}
+	})
+	t.Run("an id-less delta at the index of an item with an id is judged under its name", func(t *testing.T) {
+		s := feed(addA, `{"type":"response.function_call_arguments.delta","output_index":0,"delta":`+jsonText(bad)+`}`,
+			`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_A","name":"Bash","arguments":"{}"}}`, completed)
+		if got := calls(s); !got["Bash("+bad+")"] || s.byID["fc_A"].names[0] != "Bash" {
+			t.Fatalf("calls=%v, want Bash(<id-less deltas>), fc_A unchanged", got)
+		}
+	})
+}
+
+// Late .done texts under 8 names keep nothing per text past a digest
+// (rgw3 M1: 137 MiB retained for 16 MiB in on 353c7eeefd).
+func TestSSEToolCallsLateDoneManyNamesIsBounded(t *testing.T) {
+	runtime.GC()
+	var m0, m1 runtime.MemStats
+	runtime.ReadMemStats(&m0)
+	s := newSSEToolCalls(0)
+	for i := 1; i <= 8; i++ {
+		s.Feed(fmt.Sprintf(`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_A","name":"Note%d"}}`, i))
+	}
+	s.Feed(`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_A","name":"Note1","arguments":"{}"}}`)
+	s.Take()
+	for i := 0; i < 16; i++ {
+		text := fmt.Sprintf(`{"n":%d,"x":"%s"}`, i, strings.Repeat("a", 1<<20))
+		s.Feed(`{"type":"response.function_call_arguments.done","item_id":"fc_A","output_index":0,"arguments":` + jsonText(text) + `}`)
+		s.Take()
+	}
+	runtime.GC()
+	runtime.ReadMemStats(&m1)
+	if kept := int64(m1.HeapInuse) - int64(m0.HeapInuse); kept > 24<<20 {
+		t.Fatalf("16 late .done texts of 1 MiB under 8 names kept %d MiB", kept>>20)
+	}
+	if s.Open() {
+		t.Fatal("a late .done opened the item")
+	}
+	runtime.KeepAlive(s)
 }

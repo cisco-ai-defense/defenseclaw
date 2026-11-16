@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -92,8 +93,10 @@ type sseToolCalls struct {
 	closedIdless map[int]*sseRespCall
 	open         map[*sseRespCall]struct{}
 	late         []*sseRespCall
-	openSeq      int // the next item's place in the order items open
-	closedN      int // judged items remembered (at most sseRespClosedMax)
+	// idAt is the open items that have an id, by output_index: an event
+	// without an id at that index is judged under their names too.
+	idAt    map[int]map[*sseRespCall]struct{}
+	openSeq int // the next item's place in the order items open
 	// respHeld counts all the Responses items keep: the text of open items,
 	// text a response end kept, late text, and every remembered item's id,
 	// call id, type and names. With held (the Chat Completions and
@@ -106,11 +109,13 @@ type sseToolCalls struct {
 	// read when they end, never held.
 	serverBlocks map[int]*sseChatCall
 	done         []sseToolCall
-	seen         map[string]bool // finished calls, by name and arguments
-	held         int             // argument bytes of open calls
-	broken       bool
-	responses    bool // a Responses event was seen
-	nextIndex    int  // next free Responses output_index
+	// seen is the finished calls, by a digest of name and arguments: a
+	// fixed size per call, whatever the arguments.
+	seen      map[[sha256.Size]byte]struct{}
+	held      int // argument bytes of open calls
+	broken    bool
+	responses bool // a Responses event was seen
+	nextIndex int  // next free Responses output_index
 	// maxValues is the value cap of an event (guardrail.max_body_values).
 	maxValues int
 }
@@ -143,19 +148,18 @@ type sseRespCall struct {
 	seq        int    // the order the item opened in
 	args       strings.Builder
 	// doneText is the text of the item's *_call_*.done event when it
-	// differs from the deltas (when there were none it is in args).
+	// differs from the deltas (whether it comes before or after them).
 	doneText string
 	closed   bool // judged
 	// kept: judged by the end of a response, its text kept, so a delta that
 	// still comes joins it (judged whole with it at the end).
 	kept   bool
 	lateAt int // the item's place in sseToolCalls.late, -1 when not there
+	// idxNames are the names of the items with an id that were open at the
+	// index of this id-less item when its text came: it is judged under
+	// them too (an agent that builds a call by output_index runs it so).
+	idxNames []string
 }
-
-// sseRespClosedMax bounds the judged items a stream remembers by count, as
-// respHeld does by bytes. Past it they are forgotten (their late text judged
-// first): an event of a forgotten item makes a new one.
-const sseRespClosedMax = 1 << 14
 
 // sseRespNamesMax bounds the names one item collects; more make the stream
 // Broken.
@@ -167,6 +171,9 @@ const sseRespItemCost = 64
 func (c *sseRespCall) meta() int {
 	n := sseRespItemCost + len(c.id) + len(c.callID) + len(c.typ)
 	for _, nm := range c.names {
+		n += len(nm)
+	}
+	for _, nm := range c.idxNames {
 		n += len(nm)
 	}
 	return n
@@ -189,19 +196,32 @@ func (c *sseRespCall) texts() []string {
 
 func newSSEToolCalls(maxValues int) *sseToolCalls {
 	return &sseToolCalls{maxValues: maxValues, byID: map[string]*sseRespCall{}, idless: map[int]*sseRespCall{},
-		closedIdless: map[int]*sseRespCall{}, open: map[*sseRespCall]struct{}{}, chat: map[int]*sseChatCall{},
-		blocks: map[int]*sseChatCall{}, serverBlocks: map[int]*sseChatCall{}, seen: map[string]bool{}}
+		closedIdless: map[int]*sseRespCall{}, open: map[*sseRespCall]struct{}{}, idAt: map[int]map[*sseRespCall]struct{}{},
+		chat: map[int]*sseChatCall{}, blocks: map[int]*sseChatCall{}, serverBlocks: map[int]*sseChatCall{},
+		seen: map[[sha256.Size]byte]struct{}{}}
+}
+
+// callDigest is the key of a call in seen: sha256 of its name, NUL, its
+// arguments.
+func callDigest(c sseToolCall) [sha256.Size]byte {
+	h := sha256.New()
+	h.Write([]byte(c.Function.Name))
+	h.Write([]byte{0})
+	h.Write([]byte(c.Function.Arguments))
+	var d [sha256.Size]byte
+	h.Sum(d[:0])
+	return d
 }
 
 func (s *sseToolCalls) finished(c sseToolCall) {
-	s.seen[c.Function.Name+"\x00"+c.Function.Arguments] = true
+	s.seen[callDigest(c)] = struct{}{}
 	s.done = append(s.done, c)
 }
 
 // AddCalls adds calls that arrived whole in one event, once each.
 func (s *sseToolCalls) AddCalls(calls []sseToolCall) {
 	for _, c := range calls {
-		if !s.seen[c.Function.Name+"\x00"+c.Function.Arguments] {
+		if _, ok := s.seen[callDigest(c)]; !ok {
 			s.finished(c)
 		}
 	}
@@ -258,8 +278,44 @@ func (s *sseToolCalls) resolveResp(id string, idx int, added, create bool) *sseR
 	} else {
 		s.idless[idx] = c
 	}
-	s.open[c] = struct{}{}
+	s.openItem(c)
 	return c
+}
+
+// openItem adds c to the open items (and an item with an id to idAt).
+func (s *sseToolCalls) openItem(c *sseRespCall) {
+	s.open[c] = struct{}{}
+	if c.id != "" {
+		at := s.idAt[c.outIdx]
+		if at == nil {
+			at = map[*sseRespCall]struct{}{}
+			s.idAt[c.outIdx] = at
+		}
+		at[c] = struct{}{}
+	}
+}
+
+// noteIdxNames gives the id-less item c the names of the items with an id
+// open at its index (judge-only: nothing closes or is renamed).
+func (s *sseToolCalls) noteIdxNames(c *sseRespCall, texts ...string) {
+	at := s.idAt[c.outIdx]
+	if len(at) == 0 {
+		return
+	}
+	for _, o := range slices.SortedFunc(maps.Keys(at), func(a, b *sseRespCall) int { return a.seq - b.seq }) {
+		for _, n := range o.names {
+			if slices.Contains(c.idxNames, n) || slices.Contains(c.names, n) {
+				continue
+			}
+			if len(c.names)+len(c.idxNames) >= sseRespNamesMax {
+				s.overName(c, n, texts...)
+				return
+			}
+			if s.account(len(n)) {
+				c.idxNames = append(c.idxNames, n)
+			}
+		}
+	}
 }
 
 // reopen opens a judged item that is added again (its kept text stays).
@@ -268,22 +324,33 @@ func (s *sseToolCalls) reopen(c *sseRespCall) {
 		s.unlate(c)
 	}
 	c.closed, c.kept = false, false
-	s.closedN--
-	s.open[c] = struct{}{}
+	s.openItem(c)
 }
 
-// addName adds a name the item is given (once).
-func (s *sseToolCalls) addName(c *sseRespCall, name string) {
+// addName adds a name the item is given (once). texts are the text of the
+// event that names it, if any.
+func (s *sseToolCalls) addName(c *sseRespCall, name string, texts ...string) {
 	if name == "" || slices.Contains(c.names, name) {
 		return
 	}
-	if len(c.names) >= sseRespNamesMax {
-		s.setBroken()
+	if len(c.names)+len(c.idxNames) >= sseRespNamesMax {
+		s.overName(c, name, texts...)
 		return
 	}
 	if s.account(len(name)) {
 		c.names = append(c.names, name)
 	}
+}
+
+// overName is a name past sseRespNamesMax: the item's text (and the
+// event's) is judged under it once, and the stream is Broken.
+func (s *sseToolCalls) overName(c *sseRespCall, name string, texts ...string) {
+	for _, a := range append(c.texts(), texts...) {
+		tc := sseToolCall{ID: firstNonEmpty(c.callID, c.id), Type: "function"}
+		tc.Function.Name, tc.Function.Arguments = name, a
+		s.AddCalls([]sseToolCall{tc})
+	}
+	s.setBroken()
 }
 
 // setMeta fills the item's call id and type when it has none.
@@ -319,6 +386,12 @@ func (s *sseToolCalls) unlate(c *sseRespCall) {
 // text is let go.
 func (s *sseToolCalls) closeResp(c *sseRespCall, keep bool) {
 	delete(s.open, c)
+	if at := s.idAt[c.outIdx]; c.id != "" && at != nil {
+		delete(at, c)
+		if len(at) == 0 {
+			delete(s.idAt, c.outIdx)
+		}
+	}
 	if c.id == "" {
 		if s.idless[c.outIdx] == c {
 			delete(s.idless, c.outIdx)
@@ -334,10 +407,6 @@ func (s *sseToolCalls) closeResp(c *sseRespCall, keep bool) {
 		c.args.Reset()
 		c.doneText = ""
 	}
-	s.closedN++
-	if s.closedN > sseRespClosedMax {
-		s.forgetClosed()
-	}
 }
 
 // dropClosed forgets one judged item after its late text is judged.
@@ -347,7 +416,6 @@ func (s *sseToolCalls) dropClosed(c *sseRespCall) {
 		s.unlate(c)
 	}
 	s.respHeld -= c.meta() + c.text()
-	s.closedN--
 	if c.id != "" && s.byID[c.id] == c {
 		delete(s.byID, c.id)
 	}
@@ -373,11 +441,11 @@ func (s *sseToolCalls) forgetClosed() {
 		s.respHeld -= c.meta() + c.text()
 	}
 	s.closedIdless = map[int]*sseRespCall{}
-	s.closedN = 0
 }
 
 // judgeTexts adds the texts as calls of each of the item's names (of its
-// type when it has none, as textWalker.callObject names a call), once each.
+// type when it has none, as textWalker.callObject names a call) and of the
+// names it took at its index (idxNames), once each.
 func (s *sseToolCalls) judgeTexts(c *sseRespCall, texts []string) {
 	names := c.names
 	if len(names) == 0 {
@@ -387,6 +455,7 @@ func (s *sseToolCalls) judgeTexts(c *sseRespCall, texts []string) {
 		}
 		names = []string{name}
 	}
+	names = append(slices.Clip(names), c.idxNames...)
 	for _, name := range names {
 		for _, a := range texts {
 			tc := sseToolCall{ID: firstNonEmpty(c.callID, c.id), Type: "function"}
@@ -537,6 +606,9 @@ func (s *sseToolCalls) Feed(data string) {
 			if d == nil || d.kind != 's' {
 				break
 			}
+			if c.id == "" {
+				s.noteIdxNames(c, d.s)
+			}
 			switch {
 			case !c.closed:
 				if s.account(len(d.s)) {
@@ -558,7 +630,6 @@ func (s *sseToolCalls) Feed(data string) {
 			}
 			break
 		}
-		s.addName(c, root.str("name"))
 		var v *jnode
 		for _, f := range []string{"arguments", "input", "code"} {
 			if n := root.get(f); n != nil && n.kind == 's' {
@@ -566,18 +637,23 @@ func (s *sseToolCalls) Feed(data string) {
 				break
 			}
 		}
+		var vt []string
+		if v != nil {
+			vt = []string{v.s}
+		}
+		s.addName(c, root.str("name"), vt...)
+		if c.id == "" {
+			s.noteIdxNames(c, vt...)
+		}
 		switch {
 		case v == nil:
 		case c.closed:
 			// The whole text of a judged item: judged now, under every
 			// name it has, and nothing is held for it.
 			s.judgeTexts(c, []string{v.s})
-		case c.args.Len() == 0:
-			if s.account(len(v.s)) {
-				c.args.WriteString(v.s)
-			}
 		case v.s != c.args.String() && v.s != c.doneText:
-			// Kept beside the deltas, and counted like them.
+			// Kept beside the deltas (before or after them), and counted
+			// like them.
 			s.respHeld -= len(c.doneText)
 			c.doneText = ""
 			if s.account(len(v.s)) {
