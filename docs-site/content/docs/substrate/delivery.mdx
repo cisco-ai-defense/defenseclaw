@@ -80,6 +80,7 @@ On laptops, tamper protection keeps users from removing DefenseClaw. In a cluste
 | Someone starts an agent in a team atespace without DefenseClaw | Substrate access policy lets only DefenseClaw create agents there |
 | Someone builds a template without the kit | Its agents get no network, and the template is reported |
 | An agent tries to change its own hooks | The hook config is root-owned in the image. The agent runs as an ordinary user |
+| A base image sets an environment variable that makes git, a shell or an interpreter load code (`LD_PRELOAD`, `NODE_OPTIONS`, `NODE_PATH`, `BASH_ENV`, `PROMPT_COMMAND`, `PYTHONPATH`, `PERL5DB`, an exported bash function, or git's `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_n`, `GIT_SSH_COMMAND`, `GIT_EXEC_PATH` and the like) | `template build` stops with `env_loads_code` and names the variables; unset them in the base image or in your Dockerfile. The controller checks the image environment again when it admits the template, so a template built by an older DefenseClaw is refused (`env_loads_code`) if its image sets a variable added to the list since, and a clean template needs no rebuild. `EDITOR`, `PAGER` and `GIT_EDITOR` are not on the list |
 | Someone creates an atespace like `eng-evil` that matches a team pattern | Only Substrate global owners create atespaces, and patterns match only atespaces DefenseClaw created or you list |
 
 ## Uninstall

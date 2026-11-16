@@ -675,13 +675,9 @@ func serverTools(fsys *ImageFS, s MCPServer) ([]ToolDef, string) {
 // checkHooks verifies ownership of the expected files and the switches.
 func checkHooks(fsys *ImageFS, env map[string]string, user string, o ScanOptions) HookChecks {
 	hc := HookChecks{RootOwned: true, PhoneHomeOff: true, EnvClean: true}
-	for k := range env {
-		if unsafeEnv[strings.ToUpper(k)] {
-			hc.EnvClean = false
-			hc.UnsafeEnv = append(hc.UnsafeEnv, k)
-		}
+	if bad := unsafeEnvOf(env); len(bad) > 0 {
+		hc.EnvClean, hc.UnsafeEnv = false, bad
 	}
-	sort.Strings(hc.UnsafeEnv)
 	for _, ef := range o.Expected {
 		hf := HookFile{Path: ef.Path}
 		e, ok := fsys.Lookup(ef.Path)
@@ -960,10 +956,52 @@ func sevRank(s scanner.Severity) int {
 // FloorNone turns the severity floor off.
 const FloorNone scanner.Severity = "none"
 
-// unsafeEnv are image environment variables that make every process load
-// code or settings the template did not scan.
+// unsafeEnv are image environment variables that make every process (or
+// every git, shell or interpreter the agent runs) load code or settings the
+// template did not scan. Git's command-line configuration (GIT_CONFIG_COUNT
+// with GIT_CONFIG_KEY_n and GIT_CONFIG_VALUE_n, or GIT_CONFIG_PARAMETERS) can
+// set core.fsmonitor or core.hooksPath to a script, so every git status runs
+// it (substrate-1 GAP-0115). Commands a person sets on purpose and that run
+// only when asked (EDITOR, PAGER, GIT_EDITOR) are not on the list.
 var unsafeEnv = map[string]bool{
-	"LD_PRELOAD": true, "LD_LIBRARY_PATH": true, "LD_AUDIT": true, "NODE_OPTIONS": true, "BASH_ENV": true, "ENV": true,
-	"PYTHONSTARTUP": true, "PYTHONPATH": true, "PYTHONHOME": true, "RUBYOPT": true, "RUBYLIB": true, "PERL5OPT": true, "PERL5LIB": true,
-	"JAVA_TOOL_OPTIONS": true, "_JAVA_OPTIONS": true, "JDK_JAVA_OPTIONS": true, "DOTNET_STARTUP_HOOKS": true, "GIT_CONFIG_GLOBAL": true,
+	"LD_PRELOAD": true, "LD_LIBRARY_PATH": true, "LD_AUDIT": true, "NODE_OPTIONS": true, "NODE_PATH": true, "BASH_ENV": true, "ENV": true,
+	"PROMPT_COMMAND": true, "ZDOTDIR": true,
+	"PYTHONSTARTUP": true, "PYTHONPATH": true, "PYTHONHOME": true, "PYTHONUSERBASE": true, "RUBYOPT": true, "RUBYLIB": true,
+	"PERL5OPT": true, "PERL5LIB": true, "PERL5DB": true,
+	"JAVA_TOOL_OPTIONS": true, "_JAVA_OPTIONS": true, "JDK_JAVA_OPTIONS": true, "DOTNET_STARTUP_HOOKS": true,
+	"GIT_CONFIG_GLOBAL": true, "GIT_CONFIG_SYSTEM": true, "GIT_CONFIG": true, "GIT_CONFIG_COUNT": true, "GIT_CONFIG_PARAMETERS": true,
+	"GIT_SSH_COMMAND": true, "GIT_SSH": true, "GIT_EXEC_PATH": true, "GIT_TEMPLATE_DIR": true, "GIT_EXTERNAL_DIFF": true,
+	"GIT_PROXY_COMMAND": true, "GIT_ASKPASS": true, "SSH_ASKPASS": true,
+}
+
+// unsafeEnvPrefixes are the families of such variables: git's numbered
+// configuration pairs and bash exported functions (BASH_FUNC_name%%), which
+// every bash defines at start.
+var unsafeEnvPrefixes = []string{"GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_", "BASH_FUNC_"}
+
+// envLoadsCode reports whether the image environment variable k is one of
+// unsafeEnv or unsafeEnvPrefixes (names compared in upper case).
+func envLoadsCode(k string) bool {
+	u := strings.ToUpper(k)
+	if unsafeEnv[u] {
+		return true
+	}
+	for _, p := range unsafeEnvPrefixes {
+		if strings.HasPrefix(u, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// unsafeEnvOf lists, sorted, the variables of env that load code.
+func unsafeEnvOf(env map[string]string) []string {
+	var out []string
+	for k := range env {
+		if envLoadsCode(k) {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
 }

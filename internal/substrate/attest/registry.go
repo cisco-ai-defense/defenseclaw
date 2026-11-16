@@ -362,8 +362,12 @@ func (g *Registry) fetchToken(ctx context.Context, host, challenge, scope string
 	if realm == "" {
 		return "", errors.New("no realm")
 	}
+	// A plain-HTTP realm only for a registry that is itself reached over
+	// plain HTTP (listed in PlainHTTP, or on loopback): a registry reached
+	// over https cannot point the token request at http://127.0.0.1 or
+	// another plain-HTTP service (GAP-0115).
 	u, err := url.Parse(realm)
-	if err != nil || (u.Scheme != "https" && (u.Scheme != "http" || g.scheme(u.Host) != "http")) {
+	if err != nil || (u.Scheme != "https" && (u.Scheme != "http" || g.scheme(host) != "http" || g.scheme(u.Host) != "http")) {
 		return "", errors.New("bad realm")
 	}
 	q := u.Query()
@@ -611,7 +615,9 @@ func containsHost(hosts []string, host string) bool {
 
 // refuseUnsafeRedirect lets a registry send blobs to its storage over https
 // and nothing else: no downgrade to http, no private or loopback address
-// literal, at most 10 hops. Go drops Authorization on a change of host.
+// literal, at most 10 hops. Authorization goes only to exactly the scheme,
+// host and port of the first request: Go keeps it on a redirect to a
+// subdomain or to another port of the same host (GAP-0115).
 func refuseUnsafeRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= 10 {
 		return errors.New("registry: too many redirects")
@@ -623,6 +629,9 @@ func refuseUnsafeRedirect(req *http.Request, via []*http.Request) error {
 	if a, err := netip.ParseAddr(req.URL.Hostname()); err == nil && req.URL.Host != first.Host &&
 		(a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsUnspecified()) {
 		return errors.New("registry: redirect to a private address")
+	}
+	if !strings.EqualFold(req.URL.Host, first.Host) || req.URL.Scheme != first.Scheme {
+		req.Header.Del("Authorization")
 	}
 	return nil
 }

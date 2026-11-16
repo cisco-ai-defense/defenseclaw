@@ -369,6 +369,16 @@ func (v *Verifier) checkImage(ctx context.Context, ref Ref, digest string, kit K
 	if err != nil || kit.LayerIndex >= len(diffs) || diffs[kit.LayerIndex] != kit.LayerDiffID {
 		return reject(CodeImageMismatch, "the image config does not carry the attested kit layer")
 	}
+	// The environment is checked again against this build's list, so a
+	// template signed when the list was shorter is refused when its image
+	// sets a variable added since (GAP-0115); a clean image needs no rebuild.
+	env, err := img.Config.EnvMap()
+	if err != nil {
+		return reject(CodeImageMismatch, "the image config environment cannot be read")
+	}
+	if bad := unsafeEnvOf(env); len(bad) > 0 {
+		return reject(CodeEnvUnsafe, "the image environment sets variables that load code into every process: %s", strings.Join(bad, ", "))
+	}
 	return nil
 }
 
