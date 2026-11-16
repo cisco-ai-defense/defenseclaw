@@ -16,7 +16,11 @@
 
 import importlib.util
 import re
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 import yaml
 
@@ -162,8 +166,10 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     # unix and darwin tests by their macOS times once go-darwin.json records
     # internal/gateway and by their Linux times until then.
     assert workflow.count("--timings scripts/test-timings/go-linux.json") == 4
-    assert workflow.count("label: macos-latest darwin gateway ") == 6
-    assert workflow.count("            shards: 6\n") == 6
+    jobs = yaml.safe_load(workflow)["jobs"]
+    parts = jobs["darwin-gateway"]["strategy"]["matrix"]["include"]
+    assert parts == [{"part": shard + 1, "shard": shard} for shard in range(6)]
+    assert '--shard-count 6 \\\n            --shard-index "$GO_TEST_SHARD")"' in workflow
     assert (
         "--timings scripts/test-timings/go-darwin.json \\\n            --timings scripts/test-timings/go-linux.json \\"
         in workflow
@@ -172,7 +178,6 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     # count Combine Go coverage requires follows the shard counts (it stayed 52
     # when the remaining packages went from 12 to 16 shards and would have
     # failed the first run on which every shard passed).
-    jobs = yaml.safe_load(workflow)["jobs"]
     profiles = sum(
         len(jobs[name]["strategy"]["matrix"]["shard"]) for name in ("go-test-gateway", "go-test-audit", "go-test-other")
     )
@@ -206,8 +211,33 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     assert "--timings scripts/test-timings/go-darwin.json \\\n            --shard-count 4 \\" in workflow
     assert "name: go-test-timings-darwin-connector-${{ matrix.shard }}" in workflow
     assert "name: go-test-timings-darwin-gateway-${{ matrix.shard }}" in workflow
-    # Part 1 runs go test's vet checks for the whole package; the others skip them.
-    assert '[ "$GO_TEST_SHARD" -ne 0 ] || vet=' in workflow
+    # The darwin gateway parts share one test binary. go test -c runs go
+    # test's vet checks for the whole package once, under a memory limit that
+    # keeps the 8 GB compile inside the 7 GB macOS runner; every part runs the
+    # binary through test2json the way go test -json runs it, and keeps the
+    # check name of its old Unix Standalone Lifecycle part.
+    build = jobs["darwin-gateway-test-binary"]
+    assert build["runs-on"] == "macos-latest"
+    step = next(s for s in build["steps"] if s.get("name") == "Build the internal/gateway test binary")
+    assert step["env"]["GOMEMLIMIT"] == "3GiB"
+    assert "go test -c -gcflags=github.com/defenseclaw/defenseclaw/internal/gateway=-c=1 " in step["run"]
+    assert "-vet=off" not in step["run"]
+    gateway_parts = jobs["darwin-gateway"]
+    assert gateway_parts["name"] == "Unix Standalone Lifecycle (macos-latest darwin gateway ${{ matrix.part }} of 6)"
+    assert "darwin-gateway-test-binary" in gateway_parts["needs"]
+    assert "needs.darwin-gateway-test-binary.result == 'success'" in gateway_parts["if"]
+    run = next(s["run"] for s in gateway_parts["steps"] if "test2json" in s.get("run", ""))
+    assert '(cd "$pkg" && go tool test2json -t -p "github.com/defenseclaw/defenseclaw/$pkg"' in run
+    assert '"$RUNNER_TEMP/gateway.test" -test.paniconexit0 -test.v=test2json -test.count=1' in run
+    assert '-test.timeout=10m -test.run="$pattern"' in run
+    assert "go test" not in run.replace("go test -json", "")
+    assert not any(
+        "internal/gateway" == entry.get("package")
+        for entry in jobs["unix-standalone-lifecycle"]["strategy"]["matrix"]["include"]
+    )
+    required = jobs["enterprise-required"]
+    assert {"darwin-gateway-test-binary", "darwin-gateway"} <= set(required["needs"])
+    assert "UNIX_LIFECYCLE DARWIN_GATEWAY_BINARY DARWIN_GATEWAY; do" in workflow
     assert "DC_TEST_NATIVE_GATEWAY" in workflow
     needs = "needs: [changes, go-test-gateway, go-test-audit, go-test-other, go-test-throughput, go-test-frozen-gateway, go-pinned]"
     assert needs in workflow
@@ -387,3 +417,22 @@ def test_every_go_cache_save_writes_the_entry_its_job_restores() -> None:
                     assert saved == restored, (
                         f"{path.name}:{job_id} restores {key}={restored!r} but saves {key}={saved!r}"
                     )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the macOS jobs run this bash script")
+def test_go_unix_test_pattern_selects_the_unix_and_darwin_tests() -> None:
+    def names(path: Path) -> set[str]:
+        return set(re.findall(r"^func (Test\w+)\(t \*testing\.T\)", path.read_text(encoding="utf-8"), re.M))
+
+    script = ["bash", "scripts/go-unix-test-pattern.sh"]
+    out = subprocess.run([*script, "internal/gateway"], cwd=ROOT, check=True, capture_output=True, text=True)
+    pattern = out.stdout.strip()
+    assert pattern.startswith("^(") and pattern.endswith(")$")
+    selected = set(pattern[2:-2].split("|"))
+    gateway = ROOT / "internal/gateway"
+    darwin = set().union(*(names(path) for path in gateway.glob("*_darwin_test.go")))
+    assert darwin and darwin <= selected
+    # The open-loop throughput tests run alone in Go Throughput Test.
+    open_loop = names(gateway / "gap0490_open_loop_test.go")
+    assert open_loop and not open_loop & selected
+    assert subprocess.run([*script], cwd=ROOT, capture_output=True).returncode == 2

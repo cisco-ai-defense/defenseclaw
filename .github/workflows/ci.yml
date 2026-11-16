@@ -1424,14 +1424,14 @@ jobs:
     # check on Linux.
     # On macOS the Go tests run on separate runners so that each stays under
     # 15 minutes: the lifecycle packages, the darwin paths of the small
-    # connector packages (hookexec in two parts), the unix and
-    # darwin tests of internal/gateway (six time-balanced parts, which upload
-    # go-test-timings-darwin-gateway-* like the connector parts) and
-    # internal/cli ("darwin gateway and cli"), and the connector package in
+    # connector packages (hookexec in two parts), the unix and darwin tests
+    # of internal/cli and internal/hookcli, and the connector package in
     # four time-balanced parts
     # ("darwin connector", scripts/test-timings/go-darwin.json; each part
     # uploads its test times as a go-test-timings-darwin-connector-* artifact
-    # for scripts/update_test_timings.py).
+    # for scripts/update_test_timings.py). The unix and darwin tests of
+    # internal/gateway run in the darwin-gateway parts below, on the one test
+    # binary that darwin-gateway-test-binary builds.
     name: Unix Standalone Lifecycle (${{ matrix.label }})
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' }}
@@ -1473,53 +1473,13 @@ jobs:
             part: darwin
             shard: 1
           - os: macos-latest
-            label: macos-latest darwin gateway 1 of 6
-            part: darwin-unix
-            package: internal/gateway
-            shards: 6
-            shard: 0
-          - os: macos-latest
-            label: macos-latest darwin gateway 2 of 6
-            part: darwin-unix
-            package: internal/gateway
-            shards: 6
-            shard: 1
-          - os: macos-latest
-            label: macos-latest darwin gateway 3 of 6
-            part: darwin-unix
-            package: internal/gateway
-            shards: 6
-            shard: 2
-          - os: macos-latest
-            label: macos-latest darwin gateway 4 of 6
-            part: darwin-unix
-            package: internal/gateway
-            shards: 6
-            shard: 3
-          - os: macos-latest
-            label: macos-latest darwin gateway 5 of 6
-            part: darwin-unix
-            package: internal/gateway
-            shards: 6
-            shard: 4
-          - os: macos-latest
-            label: macos-latest darwin gateway 6 of 6
-            part: darwin-unix
-            package: internal/gateway
-            shards: 6
-            shard: 5
-          - os: macos-latest
             label: macos-latest darwin cli
             part: darwin-unix
             package: internal/cli
-            shards: 1
-            shard: 0
           - os: macos-latest
             label: macos-latest darwin hookcli
             part: darwin-unix
             package: internal/hookcli
-            shards: 1
-            shard: 0
           - os: macos-latest
             label: macos-latest darwin connector 1 of 4
             part: darwin-connector
@@ -1607,82 +1567,25 @@ jobs:
             --shard-count 2 \
             --shard-index "$GO_TEST_SHARD")"
           go test -count=1 -timeout 14m -run "$test_regex" ./internal/gateway/connector/hookexec
-      - name: Go tests of the darwin paths in the gateway and CLI packages
-        # In internal/gateway and internal/cli, the tests of their darwin,
+      - name: Go tests of the darwin paths in the CLI and hookcli packages
+        # In internal/cli and internal/hookcli, the tests of their darwin,
         # unix, linux||darwin and !windows test files plus the foreign-hook
-        # guard, which keys sessions by the agent process. The gateway package
-        # runs in six parts and the CLI package in one: the gateway package
-        # alone ran past its 10-minute -timeout as one test binary on the
-        # hosted macOS runner. Every part keeps the 10-minute -timeout.
-        # Each gateway part pays one fixed cost before its first test (the
-        # gateway test binary compile, 7 to 12 minutes on a warm Go cache),
-        # so the parts only share the tests: 1004 tests, 615 to 718 s on the
-        # macOS runner. In four parts one ran 1,124 s of its 1,200 s job
-        # (PR #1456, run 43491670912 cancelled 16 s after its tests passed).
+        # guard, which keys sessions by the agent process
+        # (scripts/go-unix-test-pattern.sh). internal/gateway runs the same
+        # selection in the darwin-gateway parts.
         if: runner.os == 'macOS' && matrix.part == 'darwin-unix'
         shell: bash
         env:
           UNIX_PACKAGE: ${{ matrix.package }}
-          GO_TEST_SHARDS: ${{ matrix.shards }}
-          GO_TEST_SHARD: ${{ matrix.shard }}
         run: |
           set -euo pipefail
           # A link-free TMPDIR, as in the darwin paths step.
           mkdir -p "$RUNNER_TEMP/go-tmp"
           TMPDIR="$(cd "$RUNNER_TEMP/go-tmp" && pwd -P)"
           export TMPDIR
-          unix_tests() { # unix_tests <test files...>: a -run pattern for their Test functions
-            local file names=()
-            for file in "$@"; do
-              case "$file" in
-                *_windows_test.go | *_linux_test.go) continue ;;
-                # The open-loop throughput tests measure wall-clock answers
-                # and run alone, without -race, in Go Throughput Test; on a
-                # shared macOS runner they only report INCONCLUSIVE and use
-                # the job time.
-                */gap0490_open_loop_test.go) continue ;;
-                *_darwin_test.go | *_unix_test.go | */hook_foreign_guard*_test.go) ;;
-                *) grep -Eq '^//go:build .*(darwin|unix|!windows|!linux)' "$file" || continue ;;
-              esac
-              names+=($(sed -n 's/^func \(Test[A-Za-z0-9_]*\)(t \*testing\.T).*/\1/p' "$file"))
-            done
-            [ "${#names[@]}" -gt 0 ] || { echo "no unix or darwin tests in $*" >&2; return 1; }
-            local IFS='|'
-            echo "^(${names[*]})\$"
-          }
-          pkg="$UNIX_PACKAGE"
-          pattern=$(unix_tests "$pkg"/*_test.go)
-          echo "$pkg: $(tr '|' '\n' <<<"$pattern" | wc -l | tr -d ' ') unix and darwin tests"
-          if [ "$GO_TEST_SHARDS" -eq 1 ]; then
-            go test -count=1 -timeout 10m -run "$pattern" "./$pkg"
-            exit 0
-          fi
-          # Time-balanced parts of the unix and darwin tests: the macOS times
-          # once go-darwin.json records this package, the Linux times until
-          # then (go_test_shards.py covers every selected test in exactly
-          # one part).
-          pattern="$(python3 scripts/go_test_shards.py \
-            --package-dir "$pkg" \
-            --match "$pattern" \
-            --timings scripts/test-timings/go-darwin.json \
-            --timings scripts/test-timings/go-linux.json \
-            --shard-count "$GO_TEST_SHARDS" \
-            --shard-index "$GO_TEST_SHARD")"
-          echo "part $((GO_TEST_SHARD + 1)) of $GO_TEST_SHARDS: $(tr '|' '\n' <<<"$pattern" | wc -l | tr -d ' ') tests"
-          # go test's vet checks the whole package whatever -run selects, so
-          # part 1 runs them and the other parts skip them (on 3 CPUs vet
-          # added 5 to 11 s to a 58 to 65 s gateway test compile).
-          vet=-vet=off
-          [ "$GO_TEST_SHARD" -ne 0 ] || vet=
-          # The test times of this part, for scripts/update_test_timings.py
-          # (go-test-timings-darwin-gateway-*), as in the connector parts.
-          set +e
-          go test -json $vet -count=1 -timeout 10m -run "$pattern" "./$pkg" 2>&1 |
-            python3 scripts/go_test_report.py --timings "go-test-timings-darwin-gateway-$GO_TEST_SHARD.json" \
-              --annotate "darwin gateway part $GO_TEST_SHARD failed"
-          test_status=${PIPESTATUS[0]}
-          set -e
-          exit "$test_status"
+          pattern="$(scripts/go-unix-test-pattern.sh "$UNIX_PACKAGE")"
+          echo "$UNIX_PACKAGE: $(tr '|' '\n' <<<"$pattern" | wc -l | tr -d ' ') unix and darwin tests"
+          go test -count=1 -timeout 10m -run "$pattern" "./$UNIX_PACKAGE"
       - name: Go tests of the darwin connector package, part ${{ matrix.shard }}
         # One of four time-balanced parts of the connector package's tests
         # (go_test_shards.py covers every test exactly once). The package
@@ -1731,14 +1634,6 @@ jobs:
           path: go-test-timings-darwin-connector-${{ matrix.shard }}.json
           retention-days: 14
           if-no-files-found: ignore
-      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
-        # The darwin gateway parts' test times, read the same way.
-        if: ${{ !cancelled() && matrix.part == 'darwin-unix' && matrix.package == 'internal/gateway' }}
-        with:
-          name: go-test-timings-darwin-gateway-${{ matrix.shard }}
-          path: go-test-timings-darwin-gateway-${{ matrix.shard }}.json
-          retention-days: 14
-          if-no-files-found: ignore
       - name: The shipped binaries start without stderr output
         # A dependency's start-up warning (for example sonic's Go-version
         # notice) would reach admin and MDM output and agent hook errors.
@@ -1755,6 +1650,133 @@ jobs:
         if: ${{ matrix.part == 'darwin-connector' && matrix.shard == 0 }}
         with:
           cache-hit: ${{ steps.go.outputs.cache-hit }}
+
+  darwin-gateway-test-binary:
+    # One internal/gateway test binary for the six darwin-gateway parts.
+    # The package's test compile (about 2,000 test files, 18 MB of test
+    # source in one compile unit) peaks at 7.8 to 8.4 GB, more than the 7 GB
+    # of the hosted macOS runner. With the same commit and restored cache it
+    # took 74 s on one runner and 900 to 1,000 s on others (rel/1.0.10 run
+    # 43831888457: parts 1 and 4 at 1,130 and 1,195 s of their 1,200 s;
+    # PR #1456 run 43864447390: every part 700 to 1,000 s before its first
+    # test, parts 1 and 5 cancelled), and every part paid it. Here it runs
+    # once, under a 3 GiB GOMEMLIMIT with one compiler backend worker
+    # (-c=1): 4.6 GB at its peak and 154 s on 3 CPUs of defenseclaw-dev,
+    # against 7.8 GB and 70 s by default. Both only pace the compiler's
+    # memory; the tests are the same. go test -c runs go test's vet checks
+    # for the whole package, which part 1 used to run.
+    name: Darwin Gateway Test Binary
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' }}
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go
+      - name: Build the internal/gateway test binary
+        shell: bash
+        env:
+          GOMEMLIMIT: 3GiB
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/gateway-test"
+          # time -l logs the compile's time and peak memory.
+          /usr/bin/time -l go test -c -gcflags=github.com/defenseclaw/defenseclaw/internal/gateway=-c=1 \
+            -o "$RUNNER_TEMP/gateway-test/gateway.test" ./internal/gateway
+          # upload-artifact drops the executable bit; the tar keeps it.
+          tar -C "$RUNNER_TEMP/gateway-test" -cf "$RUNNER_TEMP/darwin-gateway-test.tar" gateway.test
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: darwin-gateway-test-binary
+          path: ${{ runner.temp }}/darwin-gateway-test.tar
+          retention-days: 1
+          if-no-files-found: error
+          # A re-run of this job replaces the binary of its first attempt.
+          overwrite: true
+
+  darwin-gateway:
+    # The unix and darwin tests of internal/gateway in six time-balanced
+    # parts on the binary of darwin-gateway-test-binary: no part compiles
+    # the package, so a part is its set-up (about 60 s) and its tests (82 to
+    # 186 s on the macOS runner in the runs above), well inside go test's
+    # 10-minute -timeout. The check names stay those of the parts of Unix
+    # Standalone Lifecycle.
+    name: Unix Standalone Lifecycle (macos-latest darwin gateway ${{ matrix.part }} of 6)
+    needs: [changes, darwin-gateway-test-binary]
+    if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' && needs.darwin-gateway-test-binary.result == 'success' }}
+    runs-on: macos-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {part: 1, shard: 0}
+          - {part: 2, shard: 1}
+          - {part: 3, shard: 2}
+          - {part: 4, shard: 3}
+          - {part: 5, shard: 4}
+          - {part: 6, shard: 5}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      # Go for go tool test2json and for the tests that build helper binaries.
+      - uses: ./.github/actions/setup-go
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: darwin-gateway-test-binary
+          path: ${{ runner.temp }}
+      - name: Go tests of the darwin paths in the gateway package, part ${{ matrix.part }} of 6
+        shell: bash
+        env:
+          GO_TEST_SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          # A link-free TMPDIR, as in the darwin paths step of Unix Standalone
+          # Lifecycle.
+          mkdir -p "$RUNNER_TEMP/go-tmp"
+          TMPDIR="$(cd "$RUNNER_TEMP/go-tmp" && pwd -P)"
+          export TMPDIR
+          tar -C "$RUNNER_TEMP" -xf "$RUNNER_TEMP/darwin-gateway-test.tar"
+          pkg=internal/gateway
+          pattern="$(scripts/go-unix-test-pattern.sh "$pkg")"
+          echo "$pkg: $(tr '|' '\n' <<<"$pattern" | wc -l | tr -d ' ') unix and darwin tests"
+          # Time-balanced parts of the unix and darwin tests: the macOS times
+          # once go-darwin.json records this package, the Linux times until
+          # then (go_test_shards.py covers every selected test in exactly
+          # one part).
+          pattern="$(python3 scripts/go_test_shards.py \
+            --package-dir "$pkg" \
+            --match "$pattern" \
+            --timings scripts/test-timings/go-darwin.json \
+            --timings scripts/test-timings/go-linux.json \
+            --shard-count 6 \
+            --shard-index "$GO_TEST_SHARD")"
+          echo "part $((GO_TEST_SHARD + 1)) of 6: $(tr '|' '\n' <<<"$pattern" | wc -l | tr -d ' ') tests"
+          # The binary runs as go test -json runs it: in the package
+          # directory, with -test.v=test2json and -test.paniconexit0, and
+          # test2json writes the same events and exits with its status. The
+          # test times go to go-test-timings-darwin-gateway-* for
+          # scripts/update_test_timings.py, as in the connector parts.
+          set +e
+          (cd "$pkg" && go tool test2json -t -p "github.com/defenseclaw/defenseclaw/$pkg" \
+            "$RUNNER_TEMP/gateway.test" -test.paniconexit0 -test.v=test2json -test.count=1 \
+            -test.timeout=10m -test.run="$pattern") 2>&1 |
+            python3 scripts/go_test_report.py --timings "go-test-timings-darwin-gateway-$GO_TEST_SHARD.json" \
+              --annotate "darwin gateway part $GO_TEST_SHARD failed"
+          test_status=${PIPESTATUS[0]}
+          set -e
+          exit "$test_status"
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        # The test times scripts/update_test_timings.py go --update reads.
+        if: ${{ !cancelled() }}
+        with:
+          name: go-test-timings-darwin-gateway-${{ matrix.shard }}
+          path: go-test-timings-darwin-gateway-${{ matrix.shard }}.json
+          retention-days: 14
+          if-no-files-found: ignore
 
   # Standalone managed-enterprise install lanes: each one installs the real
   # package on a disposable host with the real service manager, converges,
@@ -2388,6 +2410,8 @@ jobs:
       - enterprise-setup-contracts
       - macos-enterprise-packaging
       - unix-standalone-lifecycle
+      - darwin-gateway-test-binary
+      - darwin-gateway
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -2406,12 +2430,14 @@ jobs:
           SETUP_CONTRACTS: ${{ needs.enterprise-setup-contracts.result }}
           MACOS_PACKAGING: ${{ needs.macos-enterprise-packaging.result }}
           UNIX_LIFECYCLE: ${{ needs.unix-standalone-lifecycle.result }}
+          DARWIN_GATEWAY_BINARY: ${{ needs.darwin-gateway-test-binary.result }}
+          DARWIN_GATEWAY: ${{ needs.darwin-gateway.result }}
           # false when the pull request changes nothing these gates consume.
           ENTERPRISE: ${{ needs.changes.outputs.enterprise }}
         shell: bash
         run: |
           status=0
-          for gate in INSTALL_ASSETS INSTALL_ASSETS_WINDOWS FLEET_COMPILER LINUX_INSTALL MACOS_INSTALL WINDOWS_INSTALL UPGRADE UPGRADE_PKG UPGRADE_WINDOWS SETUP_CONTRACTS MACOS_PACKAGING UNIX_LIFECYCLE; do
+          for gate in INSTALL_ASSETS INSTALL_ASSETS_WINDOWS FLEET_COMPILER LINUX_INSTALL MACOS_INSTALL WINDOWS_INSTALL UPGRADE UPGRADE_PKG UPGRADE_WINDOWS SETUP_CONTRACTS MACOS_PACKAGING UNIX_LIFECYCLE DARWIN_GATEWAY_BINARY DARWIN_GATEWAY; do
             result=${!gate}
             echo "$gate: $result"
             if [ "$ENTERPRISE" = false ] && [ "$result" = skipped ]; then
