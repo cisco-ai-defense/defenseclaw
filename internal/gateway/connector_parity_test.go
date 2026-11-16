@@ -170,6 +170,11 @@ func shapeParityNative(tool string, args map[string]any, cwd string) []shapePari
 			shapeParityCall{name: "amp/edit_file", conn: "amp", event: "tool.call",
 				body: shapeParityEnvelope("tool.call", cwd, "edit_file", map[string]any{"path": str("file_path"),
 					"old_str": str("old_string"), "new_str": str("new_string")})},
+			// The Update File of the same edit (rel-1-0-10:GAP-0947).
+			shapeParityCall{name: "codex/apply_patch-update", conn: "codex", event: "PreToolUse",
+				headers: map[string]string{"X-DefenseClaw-Hook-Event": "PreToolUse", "X-DefenseClaw-Hook-Contract": defaultTestCodexHookContract},
+				body: shapeParityEnvelope("PreToolUse", cwd, "apply_patch", map[string]any{"command": shapeParityUpdatePatch(
+					str("file_path"), str("old_string"), str("new_string"))})},
 		)
 	case "Read":
 		copilotArgs, _ := json.Marshal(map[string]any{"path": str("file_path")})
