@@ -957,36 +957,49 @@ func TestAdapterPanickingActivationResolverIsDropOnly(t *testing.T) {
 	}
 }
 
-func TestAdapterRejectsOversizedAcknowledgement(t *testing.T) {
-	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		writer.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(writer, strings.Repeat("x", maxResponseBytes+1))
-	}))
-	defer server.Close()
-	provider := &testProvider{token: "token"}
-	resolver := &testResolver{provider: provider}
-	source := testConfig(server.URL + config.ObservabilityV8ManagedAIDIngestPath)
-	source.Network.AllowPrivateNetworks = true
-	adapter, err := New(t.Context(), source, resolver)
-	if err != nil {
-		t.Fatal(err)
-	}
-	adapter.client = server.Client()
-	dispatcher := testDispatcher(t, adapter)
-	if result := dispatcher.Enqueue(testPayload(t)); !result.Accepted() {
-		t.Fatalf("enqueue = %+v", result)
-	}
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	if err := dispatcher.Flush(ctx); err != nil {
-		t.Fatal(err)
-	}
-	health := dispatcher.DeliveryHealthSnapshot()
-	if health.Counters.Delivered != 0 || health.Counters.Dropped != 1 || health.Counters.Failed != 1 {
-		t.Fatalf("oversized acknowledgement health = %+v", health)
-	}
-	if err := dispatcher.Close(ctx); err != nil {
-		t.Fatal(err)
+func TestAdapterAcknowledgementSize(t *testing.T) {
+	// AI Defense answers with one result per record, about 173 bytes each,
+	// so a full batch of the default 512 records is about 89 KB.
+	for _, tc := range []struct {
+		name                       string
+		size                       int
+		delivered, dropped, failed uint64
+	}{
+		{"full batch", 512 * 180, 1, 0, 0},
+		{"over the limit", maxResponseBytes + 1, 0, 1, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(writer, strings.Repeat("x", tc.size))
+			}))
+			defer server.Close()
+			provider := &testProvider{token: "token"}
+			resolver := &testResolver{provider: provider}
+			source := testConfig(server.URL + config.ObservabilityV8ManagedAIDIngestPath)
+			source.Network.AllowPrivateNetworks = true
+			adapter, err := New(t.Context(), source, resolver)
+			if err != nil {
+				t.Fatal(err)
+			}
+			adapter.client = server.Client()
+			dispatcher := testDispatcher(t, adapter)
+			if result := dispatcher.Enqueue(testPayload(t)); !result.Accepted() {
+				t.Fatalf("enqueue = %+v", result)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			if err := dispatcher.Flush(ctx); err != nil {
+				t.Fatal(err)
+			}
+			health := dispatcher.DeliveryHealthSnapshot()
+			if c := health.Counters; c.Delivered != tc.delivered || c.Dropped != tc.dropped || c.Failed != tc.failed {
+				t.Fatalf("acknowledgement health = %+v", health)
+			}
+			if err := dispatcher.Close(ctx); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
