@@ -86,7 +86,7 @@ func gap0749ResolveReaders(command, cwd, home string) {
 	}
 	// A shell named at run time is also read as the literal shell it names
 	// (rel-1-0-10:GAP-0980).
-	if shellTwin, ok := actionfacts.RunTimeShellTwin(command); ok && shellTwin != command {
+	if shellTwin, ok, _ := actionfacts.RunTimeShellTwin(command); ok && shellTwin != command {
 		readings = append(readings, shellTwin)
 		twin := fallback
 		twin.Command = shellTwin

@@ -2248,7 +2248,11 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					// reading too (actionfacts.RunTimeShellTwin), and behind
 					// ProtectHome reads its targets only from this map, also
 					// of the call it wraps (rel-1-0-10:GAP-0980).
-					if shellTwin, isTwin := actionfacts.RunTimeShellTwin(command); isTwin && shellTwin != command {
+					shellTwin, isTwin, shellCaps := actionfacts.RunTimeShellTwin(command)
+					// A program word past the bounds of that reading leaves
+					// the map incomplete (rel-1-0-10:GAP-1041).
+					truncated = truncated || shellCaps.Any()
+					if isTwin && shellTwin != command {
 						addReading(shellTwin, true)
 						protectedDecision = protectedDecision || clientProtectedDecision(shellTwin, cwd, home)
 						if wrapped, isTwin := actionfacts.WrapperUnwrapTwin(shellTwin); isTwin && wrapped != shellTwin {

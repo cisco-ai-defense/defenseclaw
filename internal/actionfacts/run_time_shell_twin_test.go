@@ -53,7 +53,7 @@ func TestRunTimeShellTwin(t *testing.T) {
 		{`"$(command -v bash)" -o pipefail -c 'make test'`, `bash -o pipefail -c 'make test'`},
 	}
 	for _, row := range rows {
-		got, ok := RunTimeShellTwin(row.command)
+		got, ok, _ := RunTimeShellTwin(row.command)
 		if !ok || got != row.want {
 			t.Errorf("RunTimeShellTwin(%q) = %q, %v; want %q", row.command, got, ok, row.want)
 		}
@@ -75,7 +75,7 @@ func TestRunTimeShellTwin(t *testing.T) {
 		`$(which grep) -c TODO notes.txt`,
 		`$(command -V bash) -c 'make test'`,
 	} {
-		if got, ok := RunTimeShellTwin(command); ok {
+		if got, ok, _ := RunTimeShellTwin(command); ok {
 			t.Errorf("RunTimeShellTwin(%q) = %q; want no reading", command, got)
 		}
 	}

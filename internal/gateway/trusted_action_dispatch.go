@@ -792,9 +792,18 @@ func dispatchTrustedAction(
 	// "$SHELL" -c TEXT, "$SHELL" <<< TEXT) runs TEXT as the literal shell
 	// call does: that reading is judged too, and the stricter of the two
 	// readings counts (rel-1-0-10:GAP-0980).
-	if twin, ok := runTimeShellTwinRequest(request); ok {
+	shellTwin, shellTwinOK, shellCaps := runTimeShellTwinRequest(request)
+	if shellTwinOK {
 		defer func() {
-			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
+			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, shellTwin))
+		}()
+	}
+	if shellCaps.Any() {
+		// A program word past the bounds of that reading (command
+		// substitutions nested past its depth, more words than its budget)
+		// is not read: the call is truncated (bound rule, rel-1-0-10:GAP-1041).
+		defer func() {
+			findings = withBoundedTruncation(findings, shellCaps, request)
 		}()
 	}
 	// The commands an awk program starts through system(), print | and
@@ -10047,20 +10056,21 @@ func wrapperUnwrapTwinRequest(request trustedActionRequest) (trustedActionReques
 // program word that names its shell at run time written as that shell.
 // Behind ProtectHome (managed hook peer) the hook client map lists the
 // targets of the same reading (hookpaths), so it is judged there too
-// (rel-1-0-10:GAP-0980).
-func runTimeShellTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+// (rel-1-0-10:GAP-0980). caps is the caps that reading hit
+// (rel-1-0-10:GAP-1041), with or without a twin.
+func runTimeShellTwinRequest(request trustedActionRequest) (twin trustedActionRequest, ok bool, caps bounded.CapSet) {
 	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
-		return trustedActionRequest{}, false
+		return trustedActionRequest{}, false, caps
 	}
 	command, known := trustedBashCommandInput(request.Input)
 	if !known {
-		return trustedActionRequest{}, false
+		return trustedActionRequest{}, false, caps
 	}
-	rewritten, ok := actionfacts.RunTimeShellTwin(command)
+	rewritten, ok, caps := actionfacts.RunTimeShellTwin(command)
 	if !ok || rewritten == command {
-		return trustedActionRequest{}, false
+		return trustedActionRequest{}, false, caps
 	}
-	return bashReadingRequest(request, command, rewritten), true
+	return bashReadingRequest(request, command, rewritten), true, caps
 }
 
 // stateGlobTwinRequest returns the request for actionfacts.StateGlobTwin of

@@ -25,23 +25,88 @@ import (
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
+
+// The run-time shell reading is bounded (the one bound rule,
+// internal/guardrail/bounded). A program word or text past a bound is
+// TRUNCATED: the reading keeps what it read before the cap and reports the
+// cap, and the gateway judges the call at the unknown tier of the pack at
+// least (rel-1-0-10:GAP-1041).
+const (
+	// maxRunTimeShellWordDepth bounds the command substitutions nested in
+	// one program word, $(which $(which ... sh)): the depth bound of the
+	// POSIX analysis (maxPOSIXDepth). The analysis of the call itself stops
+	// earlier (15 levels of $(which ...) pass its syntax depth), so such a
+	// call is TRUNCATED already; this reading still names the shell up to
+	// the bound, and the stricter of the two readings counts.
+	maxRunTimeShellWordDepth = maxPOSIXDepth
+	// maxRunTimeShellWords bounds the program words one reading expands,
+	// its nested texts included: the syntax node bound of the analysis
+	// (maxPOSIXNodes).
+	maxRunTimeShellWords = maxPOSIXNodes
+)
+
+// shellWordReader reads the program words of one run-time shell reading.
+// Each word is expanded once: its two expansions (with the shell's own
+// parameters unset and set) share the reading of every word nested in it,
+// so the cost grows with the word, not twofold per nested substitution
+// (rel-1-0-10:GAP-1041).
+type shellWordReader struct {
+	trunc *bounded.Truncated
+	words bounded.Counter
+	memo  map[shellWordKey]shellWordValue
+}
+
+type shellWordKey struct {
+	word        *syntax.Word
+	zeroIsShell bool
+	lastShell   string
+}
+
+type shellWordValue struct {
+	shell string
+	known bool
+}
+
+func newShellWordReader(trunc *bounded.Truncated) *shellWordReader {
+	r := &shellWordReader{trunc: trunc, memo: map[shellWordKey]shellWordValue{}}
+	r.words = bounded.NewCounter(trunc, bounded.Nodes, maxRunTimeShellWords)
+	return r
+}
 
 // RunTimeShellWord projects the program word symbolically, using shell-owned
 // parameter values and the shell expansion grammar. Quotes, concatenation and
 // parameter operators therefore have one reading rather than a list of shapes.
-// Unknown program variables stay unknown (GAP-0981). No command is executed.
+// Unknown program variables stay unknown (GAP-0981), and so does a word past
+// the reader's bounds. No command is executed.
 func RunTimeShellWord(word *syntax.Word, zeroIsShell bool) (string, bool) {
-	return symbolicShellWord(word, zeroIsShell, "")
+	var trunc bounded.Truncated
+	return newShellWordReader(&trunc).read(word, zeroIsShell, "", 0)
 }
 
-func symbolicShellWord(word *syntax.Word, zeroIsShell bool, lastShell string) (string, bool) {
+// read is the shell a program word names, read once per word. depth is the
+// number of command substitutions the word is nested in.
+func (r *shellWordReader) read(word *syntax.Word, zeroIsShell bool, lastShell string, depth int) (string, bool) {
 	if word == nil {
 		return "", false
 	}
+	key := shellWordKey{word: word, zeroIsShell: zeroIsShell, lastShell: lastShell}
+	if value, seen := r.memo[key]; seen {
+		return value.shell, value.known
+	}
+	shell, known := r.expand(word, zeroIsShell, lastShell, depth)
+	r.memo[key] = shellWordValue{shell: shell, known: known}
+	return shell, known
+}
+
+func (r *shellWordReader) expand(word *syntax.Word, zeroIsShell bool, lastShell string, depth int) (string, bool) {
 	projected := projectPOSIXWord(word)
 	if !projected.Expands && projected.Value != "/proc/self/exe" {
+		return "", false
+	}
+	if !r.words.Take() {
 		return "", false
 	}
 	safe := true
@@ -96,6 +161,10 @@ func symbolicShellWord(word *syntax.Word, zeroIsShell bool, lastShell string) (s
 		}
 		cfg := &expand.Config{Env: expand.ListEnviron(env...)}
 		cfg.CmdSubst = func(w io.Writer, sub *syntax.CmdSubst) error {
+			// A substitution nested past the bound is not read.
+			if !r.trunc.Within(bounded.Depth, depth+1, maxRunTimeShellWordDepth) {
+				return errors.New("unread command output")
+			}
 			shell, valid := "", true
 			syntax.Walk(sub, func(n syntax.Node) bool {
 				call, ok := n.(*syntax.CallExpr)
@@ -146,7 +215,7 @@ func symbolicShellWord(word *syntax.Word, zeroIsShell bool, lastShell string) (s
 					name := wrapperProgramName(value.Value)
 					if value.Expands {
 						var known bool
-						name, known = symbolicShellWord(arg, zeroIsShell, lastShell)
+						name, known = r.read(arg, zeroIsShell, lastShell, depth+1)
 						if !known {
 							valid = false
 							continue
@@ -194,11 +263,16 @@ func symbolicShellWord(word *syntax.Word, zeroIsShell bool, lastShell string) (s
 // Generic runtime programs retain their unknown operand roles (GAP-0981).
 // The gateway judges this reading beside the original and keeps the strictest
 // verdict; the hook client resolves its targets using the same reading.
-func RunTimeShellTwin(command string) (twin string, ok bool) {
-	return runTimeShellTwin(command, 0, true)
+// truncated is the caps the reading hit (the one bound rule): such a call is
+// TRUNCATED, and what the twin read before the cap is still judged.
+func RunTimeShellTwin(command string) (twin string, ok bool, truncated bounded.CapSet) {
+	var trunc bounded.Truncated
+	reader := newShellWordReader(&trunc)
+	twin, ok = runTimeShellTwin(command, 0, true, reader)
+	return twin, ok, trunc.Set(&reader.words)
 }
 
-func runTimeShellTwin(command string, depth int, zeroIsShell bool) (twin string, ok bool) {
+func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shellWordReader) (twin string, ok bool) {
 	defer func() {
 		if recover() != nil {
 			twin, ok = "", false
@@ -259,12 +333,12 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool) (twin string,
 				lastShell = wrapperProgramName(last.Value)
 			}
 		}
-		at, shell, found := shellCallProgram(call.Args, zeroIsShell, lastShell)
+		at, shell, found := shellCallProgram(reader, call.Args, zeroIsShell, lastShell)
 		program := wrapperProgramName(projectPOSIXWord(call.Args[at]).Value)
 		if program == "eval" {
 			body, _, nested, static := simpleNestedScript(&syntax.CallExpr{Args: call.Args[at:]}, nil, nil, nil)
 			if nested && static && depth < maxNestedShellStrings {
-				if twin, changed := runTimeShellTwin(body, depth+1, zeroIsShell); changed {
+				if twin, changed := runTimeShellTwin(body, depth+1, zeroIsShell, reader); changed {
 					start, end := int(call.Args[at].Pos().Offset()), int(call.End().Offset())
 					edits = append(edits, edit{start, end, "eval " + posixSingleQuoted(twin)})
 					return false
@@ -327,7 +401,7 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool) (twin string,
 			}
 			if known {
 				if depth < maxNestedShellStrings {
-					if nested, changed := runTimeShellTwin(body, depth+1, true); changed {
+					if nested, changed := runTimeShellTwin(body, depth+1, true, reader); changed {
 						body = nested
 					}
 				}
@@ -350,7 +424,7 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool) (twin string,
 			return true
 		}
 		// $0 of the STRING is its first operand after the STRING, if any.
-		if body, changed := runTimeShellTwin(value.Value, depth+1, text+1 >= len(call.Args) || wrappedShellPrograms[wrapperProgramName(projectPOSIXWord(call.Args[text+1]).Value)]); changed && body != value.Value {
+		if body, changed := runTimeShellTwin(value.Value, depth+1, text+1 >= len(call.Args) || wrappedShellPrograms[wrapperProgramName(projectPOSIXWord(call.Args[text+1]).Value)], reader); changed && body != value.Value {
 			replace(call.Args[text], posixSingleQuoted(body))
 		}
 		return true
@@ -379,14 +453,14 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool) (twin string,
 // wrappers (env, command, exec, nohup, nice, timeout, sudo, setsid, ...;
 // wrapperChildIndex): a shell named at run time (RunTimeShellWord, whose
 // static name is returned) or a static POSIX shell (an empty name).
-func shellCallProgram(args []*syntax.Word, zeroIsShell bool, lastShell string) (int, string, bool) {
+func shellCallProgram(reader *shellWordReader, args []*syntax.Word, zeroIsShell bool, lastShell string) (int, string, bool) {
 	// A wrapper reads the shell named at run time as the shell it names,
 	// so its options end where they end before the literal shell.
 	value := func(at int) (string, bool) {
 		if at >= len(args) {
 			return "", false
 		}
-		if shell, named := symbolicShellWord(args[at], zeroIsShell, lastShell); named {
+		if shell, named := reader.read(args[at], zeroIsShell, lastShell, 0); named {
 			return shell, true
 		}
 		word := projectPOSIXWord(args[at])
@@ -395,7 +469,7 @@ func shellCallProgram(args []*syntax.Word, zeroIsShell bool, lastShell string) (
 	var run PrefixWrapperRun
 	index := 0
 	for depth := 0; index < len(args) && depth < MaxPrefixWrapperChain; depth++ {
-		if shell, named := symbolicShellWord(args[index], zeroIsShell, lastShell); named {
+		if shell, named := reader.read(args[index], zeroIsShell, lastShell, 0); named {
 			return index, shell, true
 		}
 		word, static := value(index)
