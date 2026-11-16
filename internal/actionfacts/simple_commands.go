@@ -246,8 +246,12 @@ func (s *simpleShellState) noteHome(set, known bool) {
 }
 
 // simpleReadsThroughUnprovenHome reports whether the reading text of a
-// statement spelled with ~ or HOME (source) reads a path under the home of
-// state while that home is unproven (SimpleCommand.UnprovenHome).
+// statement spelled with ~ or HOME (source) reads, under the home of state
+// while that home is unproven (SimpleCommand.UnprovenHome), a path that
+// another home makes an account's file: one that climbs out of the home
+// (~/../f) or one of the credentials-file table (~/.git-credentials).
+// A test script that sets HOME to its own folder and reads its own files
+// there (export HOME=$T; tail "$HOME/init.log") reads no such path.
 func simpleReadsThroughUnprovenHome(input Input, state simpleShellState, source, text string, resolved bool) bool {
 	home := state.vars["HOME"]
 	if !state.homeUnproven || !resolved || home == "" ||
@@ -256,8 +260,16 @@ func simpleReadsThroughUnprovenHome(input Input, state simpleShellState, source,
 	}
 	reading := input
 	reading.Command, reading.Args, reading.Argv, reading.CWD = text, nil, nil, state.cwd
-	for _, path := range Analyze(reading).Paths {
-		if path.Access == PathAccessRead && (path.Value == home || strings.HasPrefix(path.Value, strings.TrimSuffix(home, "/")+"/")) {
+	prefix := strings.TrimSuffix(home, "/") + "/"
+	for _, fact := range Analyze(reading).Paths {
+		if fact.Access != PathAccessRead || !strings.HasPrefix(fact.Value, prefix) {
+			continue
+		}
+		relative := strings.TrimPrefix(fact.Value, prefix)
+		if slices.Contains(strings.Split(relative, "/"), "..") {
+			return true
+		}
+		if _, credential := MatchCredentialFileShape(relative); credential {
 			return true
 		}
 	}

@@ -95,7 +95,8 @@ func TestChainStatementFindingsAreTheUnion(t *testing.T) {
 // a later ~ is the home it had (as alone) or the one assigned, and the form is
 // never weaker than the statement alone. A HOME set at run time (a command
 // substitution, a variable, read) names a home the walk cannot know, so a
-// later ~ read is at least the unknown tier: an alert, a block in strict.
+// later ~ read of a credentials-table file, or of one past the home (~/..),
+// is at least the unknown tier: an alert, a block in strict.
 //
 // A benign statement in the same forms keeps its verdict.
 func TestChainStatementFindingsKeepTheStrictest(t *testing.T) {
@@ -185,9 +186,12 @@ func TestChainStatementFindingsKeepTheStrictest(t *testing.T) {
 				}
 			}
 		}
-		// A HOME set at run time that no later statement reads through
-		// changes nothing.
-		for _, command := range []string{"HOME=$(pwd); ls -la", "read HOME </dev/null; git status"} {
+		// A HOME set at run time that no later statement reads an account's
+		// file through changes nothing: a test script that points HOME at its
+		// own folder and reads its own log there is ordinary work.
+		for _, command := range []string{"HOME=$(pwd); ls -la", "read HOME </dev/null; git status",
+			"T=$(mktemp -d); export HOME=\"$T\"; tail -n 5 \"$HOME/init.log\"",
+			"export HOME=$(cat /tmp/n); cat ~/notes.txt"} {
 			if got := hook(command); got["action"] != "allow" {
 				t.Errorf("%s: %q: %v %v, want allow", pack.name, command, got["action"], got["rule_ids"])
 			}
