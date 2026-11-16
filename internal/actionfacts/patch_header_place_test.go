@@ -18,8 +18,19 @@ package actionfacts
 
 import (
 	"encoding/json"
+	"runtime"
+	"slices"
 	"testing"
 )
+
+// windowsPatchNames reads patch targets as the patch tool of a Windows host
+// does, for the rest of the test (patchTargetsAreWindowsNames).
+func windowsPatchNames(t *testing.T) {
+	t.Helper()
+	saved := patchTargetsAreWindowsNames
+	patchTargetsAreWindowsNames = true
+	t.Cleanup(func() { patchTargetsAreWindowsNames = saved })
+}
 
 type patchHeaderEnvelope struct {
 	text   string
@@ -43,6 +54,16 @@ func patchHeaderEnvelopes(target string) map[string]patchHeaderEnvelope {
 // apply_patch by hookpaths.ConnectorActionTool) and the other spellings the
 // reader takes.
 var patchHeaderFields = []string{"command", "input", "patch", "patchText", "patch_text"}
+
+// patchHomeTargets are the home forms, which the patch tool expands on no
+// host; patchWindowsOnlyUnplacedTargets are the names only a Windows host
+// leaves unplaced (a drive-relative path, a device or namespace path, a share
+// without a file).
+var (
+	patchHomeTargets                = []string{"~", "~/notes.txt", `~\notes.txt`}
+	patchWindowsOnlyUnplacedTargets = []string{`C:notes.txt`, `\\.\pipe\notes`, `\\?\Volume{1234}\notes.txt`,
+		`\\server\share`, `\\localhost\c$\`, `\\?\C:`, `\\`}
+)
 
 // A header that names a file of a share, of this machine or of another host,
 // admin shares included, is the write fact a Claude Code Write or Edit of the
@@ -91,10 +112,8 @@ func TestPatchHeaderOfAShareIsAWriteFact(t *testing.T) {
 // (rel-1-0-10:GAP-1055). An envelope the tool rejects for its syntax writes
 // nothing and is not reported.
 func TestPatchHeaderNoReaderPlacesIsUnplaced(t *testing.T) {
-	for _, target := range []string{
-		"~", "~/notes.txt", `~\notes.txt`, `C:notes.txt`, `\\.\pipe\notes`, `\\?\Volume{1234}\notes.txt`,
-		`\\server\share`, `\\localhost\c$\`, `\\?\C:`, `\\`,
-	} {
+	windowsPatchNames(t)
+	for _, target := range slices.Concat(patchHomeTargets, patchWindowsOnlyUnplacedTargets) {
 		for directive, envelope := range patchHeaderEnvelopes(target) {
 			for _, field := range patchHeaderFields {
 				t.Run(directive+" "+field+" "+target, func(t *testing.T) {
@@ -132,5 +151,49 @@ func TestPatchHeaderNoReaderPlacesIsUnplaced(t *testing.T) {
 				t.Fatal("an envelope with a stray line is reported")
 			}
 		})
+	}
+}
+
+// Off Windows the patch tool reads a backslash as a character of a file name
+// and a colon after a letter as nothing special, so a header that only a
+// Windows host leaves unplaced is a relative name of the working folder: the
+// path rules place it, it is the fact its directive gives, and the call is not
+// reported unplaced, as rel read it (rel-1-0-10:GAP-1056). The home forms stay
+// unplaced on every host (TestPatchHeaderNoReaderPlacesIsUnplaced).
+func TestPatchHeaderOffWindowsIsARelativeName(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a Windows host reads these names as Windows names (TestPatchHeaderNoReaderPlacesIsUnplaced)")
+	}
+	for _, target := range patchWindowsOnlyUnplacedTargets {
+		for directive, envelope := range patchHeaderEnvelopes(target) {
+			for _, field := range patchHeaderFields {
+				t.Run(directive+" "+field+" "+target, func(t *testing.T) {
+					args, err := json.Marshal(map[string]string{field: envelope.text})
+					if err != nil {
+						t.Fatal(err)
+					}
+					facts := Analyze(Input{Tool: "apply_patch", Args: args, CWD: "/srv/app"})
+					if !facts.Authoritative() {
+						t.Fatalf("parse = %#v", facts.Parse)
+					}
+					found := false
+					for _, path := range facts.Paths {
+						found = found || path.Value == target && path.Access == envelope.access
+					}
+					if !found {
+						t.Fatalf("no %s fact for the header: %#v", envelope.access, facts.Paths)
+					}
+					if PatchNamesUnplacedTarget("apply_patch", args) {
+						t.Fatal("a relative name is reported unplaced")
+					}
+				})
+			}
+		}
+	}
+	for _, target := range patchHomeTargets {
+		args, _ := json.Marshal(map[string]string{"command": "*** Begin Patch\n*** Add File: " + target + "\n+x\n*** End Patch"})
+		if !PatchNamesUnplacedTarget("apply_patch", args) {
+			t.Fatalf("the home form %q is not reported unplaced", target)
+		}
 	}
 }

@@ -18,6 +18,7 @@ package actionfacts
 
 import (
 	"encoding/json"
+	"runtime"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -112,19 +113,34 @@ func isPatchFileHeader(line string) bool {
 // does not expand them, nor are drive-relative paths (C:x), which name the
 // current directory of another drive: the tool writes a file no rule can
 // name, and the call is judged at the unknown tier (unplaced).
+//
+// The drive and backslash forms are read so only where the patch tool runs on
+// Windows (patchTargetsAreWindowsNames). On Linux and macOS a backslash is a
+// character of a file name and a colon after a letter means nothing, so a
+// drive-relative, device or share spelling is a relative name of the working
+// folder that the path rules place, as rel read it (rel-1-0-10:GAP-1056). The
+// home forms stay unplaced on every host.
 func isAcceptedPatchPath(value string) bool {
-	if strings.HasPrefix(value, `\\`) {
-		return isWindowsRootedPatchTarget(value)
-	}
 	if value == "" || value == "~" || strings.HasPrefix(value, "~/") ||
 		strings.HasPrefix(value, `~\`) {
 		return false
+	}
+	if !patchTargetsAreWindowsNames {
+		return true
+	}
+	if strings.HasPrefix(value, `\\`) {
+		return isWindowsRootedPatchTarget(value)
 	}
 	if len(value) >= 2 && isASCIILetter(value[0]) && value[1] == ':' {
 		return len(value) >= 3 && (value[2] == '/' || value[2] == '\\')
 	}
 	return true
 }
+
+// patchTargetsAreWindowsNames says the patch tool, which runs on the host of
+// this gateway, reads its targets as Windows names. A variable so a test can
+// read either host's names.
+var patchTargetsAreWindowsNames = runtime.GOOS == "windows"
 
 // isWindowsRootedPatchTarget reports a patch target that begins with two
 // backslashes and names a file below a root the path rules read
