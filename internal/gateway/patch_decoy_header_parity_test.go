@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -19,8 +20,7 @@ import (
 // never lowers a proven block (rel-1-0-10:GAP-1055). Before, that header
 // dropped every placed change and the envelope was judged at the unknown tier
 // only: alert in default, permissive and managed, where the single-header patch
-// blocks. One top-level test per tier, so the -race shards can take them apart
-// (each tier is about 30 s plain).
+// blocks. One top-level test per tier, so the -race shards can take them apart.
 func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchDefault(t *testing.T) {
 	patchDecoyHeaderNeverWeaker(t, "default")
 }
@@ -74,29 +74,32 @@ func patchDecoyHeaderNeverWeaker(t *testing.T, tier string) {
 	blocked := 0
 	for _, c := range cases {
 		str := func(key string) string { value, _ := c.args[key].(string); return value }
-		// The fixture name, and the same name with forward slashes (the
-		// spelling whose single-header patch a Linux gateway blocks).
-		for _, target := range []string{str("file_path"), strings.ReplaceAll(str("file_path"), `\`, "/")} {
-			single := shapeParityPatch(target, str("content"))
-			if c.tool == "Edit" {
-				single = shapeParityUpdatePatch(target, str("old_string"), str("new_string"))
+		// The fixture name on Windows; elsewhere the same name with forward
+		// slashes, the spelling whose single-header patch a Linux or macOS
+		// gateway blocks (there a backslash is a character of a file name).
+		target := str("file_path")
+		if runtime.GOOS != "windows" {
+			target = strings.ReplaceAll(target, `\`, "/")
+		}
+		single := shapeParityPatch(target, str("content"))
+		if c.tool == "Edit" {
+			single = shapeParityUpdatePatch(target, str("old_string"), str("new_string"))
+		}
+		body := strings.TrimSuffix(strings.TrimPrefix(single, "*** Begin Patch\n"), "\n*** End Patch")
+		decoys := map[string]string{
+			"unplaced-first": "*** Begin Patch\n*** Add File: C:decoy.txt\n+x\n" + body + "\n*** End Patch",
+			"unplaced-last":  "*** Begin Patch\n" + body + "\n*** Add File: ~/decoy.txt\n+x\n*** End Patch",
+		}
+		for route, call := range routes(single) {
+			want := shapeParityHook(t, handlers[call.conn], call, p.managed)
+			if want == "block" {
+				blocked++
 			}
-			body := strings.TrimSuffix(strings.TrimPrefix(single, "*** Begin Patch\n"), "\n*** End Patch")
-			decoys := map[string]string{
-				"unplaced-first": "*** Begin Patch\n*** Add File: C:decoy.txt\n+x\n" + body + "\n*** End Patch",
-				"unplaced-last":  "*** Begin Patch\n" + body + "\n*** Add File: ~/decoy.txt\n+x\n*** End Patch",
-			}
-			for route, call := range routes(single) {
-				want := shapeParityHook(t, handlers[call.conn], call, p.managed)
-				if want == "block" {
-					blocked++
-				}
-				for decoy, envelope := range decoys {
-					decoyCall := routes(envelope)[route]
-					got := shapeParityHook(t, handlers[decoyCall.conn], decoyCall, p.managed)
-					if shapeParityRank[got] < shapeParityRank[want] {
-						t.Errorf("%s %s %s %s: %q, the single-header patch %q", c.id, c.tool, route, decoy, got, want)
-					}
+			for decoy, envelope := range decoys {
+				decoyCall := routes(envelope)[route]
+				got := shapeParityHook(t, handlers[decoyCall.conn], decoyCall, p.managed)
+				if shapeParityRank[got] < shapeParityRank[want] {
+					t.Errorf("%s %s %s %s: %q, the single-header patch %q", c.id, c.tool, route, decoy, got, want)
 				}
 			}
 		}
