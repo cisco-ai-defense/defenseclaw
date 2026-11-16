@@ -8,6 +8,7 @@ package gateway
 import (
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -38,6 +39,20 @@ func TestUnresolvedFolderPatternsAndFolderSpellingsAreTheUnknownTier(t *testing.
 		".ssh/id_*", ".ss?/id_rsa", ".ssh/id_r*a", ".ssh/id_[er]*", ".aws/*", ".aws/cred*",
 		user + "/.ssh/id_rsa", "home/" + user + "/.ssh/id_rsa", "../x/.ssh/id_ed25519", user + "/.ss?/id_*",
 	}
+	// Each spelling of the review's targets with a leading ./, .// or
+	// ./.// reads as the plain spelling (rel-1-0-10:GAP-1013): built from
+	// the plain operands, so no new path text.
+	dot := "."
+	prefixes := []string{dot + "/", dot + "//", dot + "/" + dot + "//"}
+	plain := slices.DeleteFunc(slices.Clone(reads), func(operand string) bool {
+		return !strings.HasPrefix(operand, ".s") && !strings.HasPrefix(operand, ".a")
+	})
+	plain = append(plain, ".ssh/*", ".ssh/id_rsa", ".aws/credentials")
+	for _, prefix := range prefixes {
+		for _, operand := range plain {
+			reads = append(reads, prefix+operand)
+		}
+	}
 	type cell struct {
 		cwd, command, inHome string
 		floorOnly            bool // a glob copy: GAP-0944 family, at least the tier
@@ -52,9 +67,15 @@ func TestUnresolvedFolderPatternsAndFolderSpellingsAreTheUnknownTier(t *testing.
 				cell{"", inner, inner, globCopy})
 		}
 	}
-	for _, inner := range []string{
+	writes := []string{
 		"echo x >> .defenseclaw/config.yaml", "echo x > .defenseclaw/hooks/h.sh", "rm -f .defenseclaw/guardrail_runtime.json",
-	} {
+	}
+	for _, prefix := range prefixes {
+		for _, inner := range writes[:3] {
+			writes = append(writes, strings.Replace(inner, " .defenseclaw/", " "+prefix+".defenseclaw/", 1))
+		}
+	}
+	for _, inner := range writes {
 		cells = append(cells, cell{project, "cd \"$TD327_UNSET\" && " + inner, inner, false})
 	}
 	controls := []string{
@@ -122,6 +143,11 @@ func TestUnresolvedFolderWidePatternIsTruncatedNotNothing(t *testing.T) {
 	_, project := cdFirstFixture(t)
 	dot := "."
 	patterns := []string{dot + "*/*", dot + "[a-z]*/*"}
+	// The same patterns with a leading ./, .// or ././ name the cap too
+	// (rel-1-0-10:GAP-1013): the capped words and the operand compare cleaned.
+	for _, prefix := range []string{dot + "/", dot + "//", dot + "/" + dot + "/"} {
+		patterns = append(patterns, prefix+patterns[0], prefix+patterns[1])
+	}
 	for _, pattern := range patterns {
 		reading := actionfacts.RelativeGlobTwinsNamed("cat "+pattern, "/home/alice", unresolvedFolderGlobNames())
 		if !reading.Truncated.Has(bounded.Items) || len(reading.Twins) == 0 {

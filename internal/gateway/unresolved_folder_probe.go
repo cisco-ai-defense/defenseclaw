@@ -75,7 +75,10 @@ var (
 // of `credentials.py` and 3 of project folders named credentials
 // (s7-td327fix tdfx-h, tdfx-f, tdfx-z).
 func unresolvedFolderNamesProtectedFile(value, home string, access actionfacts.PathAccess) bool {
-	value = path.Clean(strings.TrimPrefix(value, "./"))
+	// Clean first: it drops every leading ./ (./x, .//x, ././/x read as x),
+	// where trimming one ./ before it left .//x as the absolute /x, which
+	// named nothing (rel-1-0-10:GAP-1013).
+	value = path.Clean(value)
 	if value == "." || value == ".." || strings.HasPrefix(value, "/") {
 		return false
 	}
@@ -157,7 +160,12 @@ func unresolvedFolderGlobMayNameProtectedFile(request trustedActionRequest, fact
 		names = names || unresolvedFolderMayNameProtectedFile(twinFacts, noFolder)
 		cappedOperand = cappedOperand || reading.Truncated.Any() && slices.ContainsFunc(twinFacts.Paths, func(candidate actionfacts.PathFact) bool {
 			return (noFolder || candidate.UnresolvedFolder()) && unresolvedFolderOperand(candidate) &&
-				slices.Contains(reading.Capped, strings.TrimPrefix(candidate.Value, "./"))
+				slices.ContainsFunc(reading.Capped, func(word string) bool {
+					// Cleaned on both sides: a capped ./.ssh/id_rsa is the
+					// operand ./.ssh/id_rsa, .//.ssh/id_rsa or .ssh/id_rsa
+					// (rel-1-0-10:GAP-1013).
+					return path.Clean(word) == path.Clean(candidate.Value)
+				})
 		})
 		if names && (cappedOperand || !reading.Truncated.Any()) {
 			break
