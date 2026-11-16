@@ -304,6 +304,29 @@ func TestRules(t *testing.T) {
 	if got := PathRules("read", "/repo/docs/etc/k8s/admin.conf.md", ""); len(got) != 0 {
 		t.Errorf("an unrooted look-alike matched: %v", got)
 	}
+	// rel-1-0-10:GAP-1002: the account's own scheduler folders are read below
+	// the active home the caller gives, whatever its shape (/home/u, /sandbox);
+	// the whole-path rules guess no home from the shape of a path.
+	for _, relative := range []string{".config/systemd/user/x.service", ".config/autostart/x.desktop", "Library/LaunchAgents/x.plist"} {
+		if got := HomePathRules("write", relative, ""); !slices.Equal(got, []string{"CMD-PERSIST-SYSTEM-SCHEDULE"}) {
+			t.Errorf("home %s = %v", relative, got)
+		}
+		if got := HomePathRules("read", relative, ""); len(got) != 0 {
+			t.Errorf("a read of home %s matched: %v", relative, got)
+		}
+		if got := HomePathRules("write", "proj/"+relative, ""); len(got) != 0 {
+			t.Errorf("a project copy of home %s matched: %v", relative, got)
+		}
+		if got := PathRules("write", "/home/u/"+relative, ""); len(got) != 0 {
+			t.Errorf("a home found by path shape matched %s: %v", relative, got)
+		}
+	}
+	if got := PathRules("write", "/etc/systemd/system/x.service", ""); !slices.Equal(got, []string{"CMD-PERSIST-SYSTEM-SCHEDULE"}) {
+		t.Errorf("system unit = %v", got)
+	}
+	if got := HomePathRules("write", "etc/systemd/system/x.service", ""); len(got) != 0 {
+		t.Errorf("a system folder below the home matched: %v", got)
+	}
 	if got := CommandRules("chmod", []string{"chmod", "u+s", "/x"}); !slices.Equal(got, []string{"CMD-PRIV-SETUID"}) {
 		t.Errorf("chmod = %v", got)
 	}

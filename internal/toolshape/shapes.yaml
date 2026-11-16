@@ -188,9 +188,12 @@ path_rules:
   # git hook does (the git program's own config calls have their rule in the pack).
   - {id: source.git_config_exec, access: [write, append], re: "(?i)(?:^|/)[.]git/config$"}
   - {id: PATH-ETC-PASSWD, access: [write, append, delete], re: "^/etc/passwd$", text_re: ":[^:[:space:]]*:0:0:"}
-  # A unit or launch file in an account's own scheduler folders runs at its next login or start, as a cron entry does: a systemd user unit, an XDG
-  # autostart entry, a launchd agent, in any home (/home/bob, /mnt/home/alice, /Users/carol, /root), and the system unit and launchd folders.
-  - {id: CMD-PERSIST-SYSTEM-SCHEDULE, access: [write, append], re: "(?i)^(?:/root|/(?:[^/]+/)*(?:home|homes|users)/[^/]+)/(?:[.]config/systemd/user/[^/]+[.](?:service|timer|socket|path|target)|[.]config/autostart/[^/]+[.]desktop|Library/LaunchAgents/[^/]+[.]plist)$|^/etc/systemd/system/[^/]+[.](?:service|timer|socket|path|target)$|^/Library/Launch(?:Agents|Daemons)/[^/]+[.]plist$"}
+  # A unit or launch file in the account's own scheduler folders runs at its next login or start, as a cron entry does: a systemd user unit, an XDG
+  # autostart entry, a launchd agent. home_re reads the path below the active home of the call (a laptop home, a sandbox home /sandbox), as
+  # persistence.shell_profile_write reads the profile, never a home guessed from the shape of the path (rel-1-0-10:GAP-1002).
+  - {id: CMD-PERSIST-SYSTEM-SCHEDULE, access: [write, append], home_re: "(?i)^(?:[.]config/systemd/user/[^/]+[.](?:service|timer|socket|path|target)|[.]config/autostart/[^/]+[.]desktop|Library/LaunchAgents/[^/]+[.]plist)$"}
+  # The system unit and launchd folders.
+  - {id: CMD-PERSIST-SYSTEM-SCHEDULE, access: [write, append], re: "(?i)^/etc/systemd/system/[^/]+[.](?:service|timer|socket|path|target)$|^/Library/Launch(?:Agents|Daemons)/[^/]+[.]plist$"}
   - {id: CMD-PERSIST-SYSTEM-SCHEDULE, access: [write, append], re: "^/etc/(cron[.](d|daily|hourly|weekly|monthly)/|crontab$|sudoers[.]d/)|^/var/spool/cron/", text_re: "(?i)(^|[^a-z])root[[:space:]]+([^[:space:]]+[[:space:]]+)*(/home/|/tmp/|/var/tmp/|/dev/shm/|~/)"}
 command_rules:
   - {id: CMD-SECRET-REVEAL, any_argv: ["--show-secrets", "--reveal"]}

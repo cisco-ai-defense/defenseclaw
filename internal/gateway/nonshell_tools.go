@@ -120,7 +120,15 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 			seenPath[key] = true
 			// The table's rules are cheap: every path effect is read, with a
 			// relative path resolved against the session's directory.
-			for _, id := range toolshape.PathRules(toolshape.PathAccessOf(e.Kind), nonShellResolvePath(request.Input.CWD, e.Path), content) {
+			access, resolved := toolshape.PathAccessOf(e.Kind), nonShellResolvePath(request.Input.CWD, e.Path)
+			ids := toolshape.PathRules(access, resolved, content)
+			// A file of the account's own home, below the active home of the
+			// call, as the native file tool reads it (rel-1-0-10:GAP-1002).
+			home := actionfacts.Facts{ActiveHome: request.Input.ActiveHome}
+			if relative, ok := activeHomeRelative(home, actionfacts.PathFact{Resolved: resolved}); ok {
+				ids = append(ids, toolshape.HomePathRules(access, relative, content)...)
+			}
+			for _, id := range ids {
 				add(id, "path in MCP tool arguments", false)
 			}
 			if twins >= maxNonShellPathTwins {
@@ -412,7 +420,8 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 		if fileText, ok := patchTexts[p.Value]; ok {
 			text = fileText
 		}
-		for _, id := range toolshape.PathRules(string(p.Access), path, text) {
+		ids := append(toolshape.PathRules(string(p.Access), path, text), homePathRuleIDs(facts, p, text)...)
+		for _, id := range ids {
 			// A link to /dev/null in a unit folder masks the unit: it stops
 			// what runs at boot or login, it does not start anything.
 			if id == "CMD-PERSIST-SYSTEM-SCHEDULE" && linksToDevNull(facts, p.CommandID) {
@@ -429,7 +438,38 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 			add("PATH-GIT-CREDS", "")
 		}
 	}
+	// A sandbox call's relative operands name files in the guest's own
+	// working directory, where "~" is the guest home: the request's directory
+	// is none in copy mode and the host mount in mount mode. The rules on a
+	// file of the home read the call placed there too (the lexical reading
+	// the semantic owners judge, sandboxGuestPlacedInput), so `printf ... >
+	// .config/systemd/user/x.service` from /sandbox gets the laptop's verdict
+	// (rel-1-0-10:GAP-1002).
+	if guest, ok := sandboxGuestPlacedInput(request, facts); ok {
+		guestFacts := actionfacts.Analyze(guest)
+		for _, p := range guestFacts.Paths {
+			for _, id := range homePathRuleIDs(guestFacts, p, text) {
+				if id == "CMD-PERSIST-SYSTEM-SCHEDULE" && linksToDevNull(guestFacts, p.CommandID) {
+					continue
+				}
+				add(id, "")
+			}
+		}
+	}
 	return out
+}
+
+// homePathRuleIDs are the table rules on a file of the account's own home
+// (toolshape.HomePathRules) that path fact p matches, read below the active
+// home of the call (activeHomeRelative) and never below a home guessed from
+// the shape of the path, so a sandbox actor (home /sandbox) and the laptop
+// get one verdict (rel-1-0-10:GAP-1002).
+func homePathRuleIDs(facts actionfacts.Facts, p actionfacts.PathFact, text string) []string {
+	relative, ok := activeHomeRelative(facts, p)
+	if !ok {
+		return nil
+	}
+	return toolshape.HomePathRules(string(p.Access), relative, text)
 }
 
 // linksToDevNull reports an ln whose source is /dev/null: the link it makes
