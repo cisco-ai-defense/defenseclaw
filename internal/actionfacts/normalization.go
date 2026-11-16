@@ -599,6 +599,7 @@ func canonicalWindowsFilesystemPath(value string) (string, bool) {
 	if value == "" {
 		return "", false
 	}
+	value = windowsWithoutDefaultStream(value)
 
 	lower := strings.ToLower(value)
 	providerQualified := false
@@ -781,6 +782,27 @@ func windowsPreADSComponent(component string) string {
 		return component[:index]
 	}
 	return component
+}
+
+// windowsWithoutDefaultStream drops a trailing default-stream suffix
+// (::$DATA, any case) from the last name of a Windows path: Win32 opens the
+// file itself for it, so a write to config.yaml::$DATA replaces the main
+// stream of config.yaml. The Bash and Write tool paths already judge that
+// spelling as the file (windowsOpenedPath in the gateway); without this the
+// "::" read as a provider qualifier and the PowerShell and cmd readings
+// minted no path fact for the operand (GAP-1060). A named stream
+// (file:name or file:name:$DATA) is another stream and is left as written.
+func windowsWithoutDefaultStream(value string) string {
+	start := strings.LastIndexAny(value, `\/`) + 1
+	last := value[start:]
+	name := windowsPreADSComponent(last)
+	if start == 0 && len(name) == 1 && isASCIILetter(name[0]) {
+		return value // a drive letter (C::$DATA): no file name to keep
+	}
+	if name != "" && strings.EqualFold(last[len(name):], "::$DATA") {
+		return value[:start] + name
+	}
+	return value
 }
 
 func windowsReservedDeviceComponent(component string) bool {
