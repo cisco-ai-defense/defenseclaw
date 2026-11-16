@@ -266,7 +266,7 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool) (twin string,
 			body, _, nested, static := simpleNestedScript(&syntax.CallExpr{Args: call.Args[at:]}, nil, nil, nil)
 			if nested && static && depth < maxNestedShellStrings {
 				if twin, changed := runTimeShellTwin(body, depth+1, zeroIsShell); changed {
-					start, end := int(call.Pos().Offset()), int(call.End().Offset())
+					start, end := int(call.Args[at].Pos().Offset()), int(call.End().Offset())
 					edits = append(edits, edit{start, end, "eval " + posixSingleQuoted(twin)})
 					return false
 				}
