@@ -79,44 +79,35 @@ func TestGAP0988PowerShellArgumentStatements(t *testing.T) {
 					for _, call := range calls {
 						got := shapeParityHook(t, handlers[call.conn], call, p.managed)
 						fmt.Printf("G88\t%s\t%s\t%s\t%s\t%s\n", p.name, where.name, r.id, call.name, got)
-						want := "alert"
-						if p.managed || strings.Contains(p.name, "strict") {
-							want = "block"
-						}
+						// Each row is judged against the same commands spelled as
+						// plain statements in the order PowerShell runs them: an
+						// argument command (a paren, subexpression, array,
+						// string or here-string expansion) runs before its
+						// parent opens a redirect target, while an invoked block
+						// runs after its own redirect opened (fixture 012,
+						// GAP-0946). Where that spelling blocks, the row blocks.
+						// No partial-reading floor raises a read call (GAP-1015).
+						normalText := tarPart + "; echo hi > " + target
 						switch r.id {
-						case "fixture-012":
-							// A plain native call also has the unknown-operand partial
-							// reading; a redirect proof does not erase that floor.
-						case "ps-paren", "ps-at", "ps-amp-block", "ps-dot-block", "ps-redirect-then-echo-paren":
-							// Whole-statement groupings are conservative readings. The
-							// partial floor applies even when no mutation is proven.
-							want = "alert"
-							if p.managed || strings.Contains(p.name, "strict") {
-								want = "block"
-							}
+						case "fixture-012", "ps-amp-block", "ps-dot-block":
+							normalText = f12
+						case "ps-redirect-then-echo-paren":
+							normalText = "echo hi > " + target + "; " + tarPart
+						case "ps-outfile-inputobject":
+							normalText = tarPart + "; Out-File -FilePath " + target + " -InputObject 0"
+						case "ps-here-outfile":
+							normalText = tarPart + "; 0 | Out-File " + target
 						}
-						wholeGrouping := r.id == "ps-paren" || r.id == "ps-sub" || r.id == "ps-at" || r.id == "ps-amp-block" || r.id == "ps-dot-block"
-						if r.id != "fixture-012" && r.id != "ps-redirect-then-echo-paren" && !wholeGrouping {
-							normalText := tarPart + "; echo hi > " + target
-							if r.id == "ps-outfile-inputobject" {
-								normalText = tarPart + "; Out-File -FilePath " + target + " -InputObject 0"
-							}
-							if r.id == "ps-here-outfile" {
-								normalText = tarPart + "; 0 | Out-File " + target
-							}
-							normalArgs := map[string]any{"command": normalText}
-							normal := shapeParityCall{name: "claudecode/PowerShell", conn: "claudecode", event: "PreToolUse",
-								body: shapeParityEnvelope("PreToolUse", where.cwd, "PowerShell", normalArgs)}
-							if call.conn == "antigravity" {
-								normal = shapeParityNative("Bash", normalArgs, where.cwd)[0]
-							}
-							control := shapeParityHook(t, handlers[normal.conn], normal, p.managed)
-							if shapeParityRank[control] > shapeParityRank[want] {
-								want = control
-							}
+						normalArgs := map[string]any{"command": normalText}
+						normal := shapeParityCall{name: "claudecode/PowerShell", conn: "claudecode", event: "PreToolUse",
+							body: shapeParityEnvelope("PreToolUse", where.cwd, "PowerShell", normalArgs)}
+						if call.conn == "antigravity" {
+							normal = shapeParityNative("Bash", normalArgs, where.cwd)[0]
 						}
-						if shapeParityRank[got] < shapeParityRank[want] {
-							t.Errorf("%s: got %s, want %s", call.name, got, want)
+						control := shapeParityHook(t, handlers[normal.conn], normal, p.managed)
+						fmt.Printf("G88C\t%s\t%s\t%s\t%s\t%s\n", p.name, where.name, r.id, call.name, control)
+						if control == "block" && got != "block" {
+							t.Errorf("%s: got %s, want block (the plain statements block)", call.name, got)
 						}
 					}
 				})
@@ -125,27 +116,75 @@ func TestGAP0988PowerShellArgumentStatements(t *testing.T) {
 	})
 }
 
-func TestGAP0988PowerShellPartialFloor(t *testing.T) {
+// TestGAP0988PowerShellUnreadFloor: a PowerShell call whose reading skipped
+// text it never read (actionfacts.ParseResult.Unread: no balanced end, a --%
+// remainder) gets the shared unknown tier, mapped by pack: an alert in
+// default, permissive and the managed default pack, a block in strict and
+// managed-strict (GAP-1016). An ordinary call that reads as partial only
+// because a command's operand grammar, a value or a call target is not
+// modeled was read, and keeps its verdict: allow (GAP-1015).
+func TestGAP0988PowerShellUnreadFloor(t *testing.T) {
 	previous := windowsHookHost
 	windowsHookHost = func() bool { return true }
 	t.Cleanup(func() { windowsHookHost = previous })
+	unread := []struct{ id, command string }{
+		{"unbalanced-subexpression", "Write-Output $(Get-Date"},
+		{"stop-parsing", "ping.exe --% -n 1 localhost"},
+	}
+	ordinary := []struct{ id, command string }{
+		{"listing", "Get-ChildItem -Path src -Recurse -Filter *.go | Select-Object -First 5"},
+		{"git", "git log --oneline -5; git status --short"},
+		{"search", "Get-Content README.md | Select-String -Pattern TODO"},
+		{"subexpression", windowsUnreadableStatement},
+		{"env-build", "$env:GOOS = 'windows'; go build ./..."},
+		{"hashtable", "@{ Name = 'x'; Count = 3 } | ConvertTo-Json"},
+		{"dotnet", "dotnet build -c Release"},
+	}
+	read := func(command string) actionfacts.ParseResult {
+		return actionfacts.Analyze(actionfacts.Input{Tool: "PowerShell", Command: command,
+			DialectHint: actionfacts.DialectPowerShell}).Parse
+	}
+	for _, row := range unread {
+		if parse := read(row.command); parse.Status != actionfacts.StatusPartial || !parse.Unread {
+			t.Fatalf("fixture %s must read partial with unread text: %+v", row.id, parse)
+		}
+	}
+	for _, row := range ordinary {
+		if parse := read(row.command); parse.Status != actionfacts.StatusPartial || parse.Unread {
+			t.Fatalf("fixture %s must read partial with no unread text: %+v", row.id, parse)
+		}
+	}
 	shapeParityTiers(t, func(t *testing.T, p gap0437Pack) {
-		srv := gap0437Server(t, p, "claudecode", "action")
-		installToolCallCorpusProfileConnector(t, "claudecode", p.pack)
-		command := windowsUnreadableStatement
-		facts := actionfacts.Analyze(actionfacts.Input{Tool: "PowerShell", Command: command})
-		if facts.Parse.Status != actionfacts.StatusPartial {
-			t.Fatal("fixture must be partial")
+		handlers := map[string]http.HandlerFunc{}
+		for _, conn := range []string{"claudecode", "antigravity"} {
+			srv := gap0437Server(t, p, conn, "action")
+			installToolCallCorpusProfileConnector(t, conn, p.pack)
+			handlers[conn] = srv.handleAgentHook(conn)
 		}
-		call := shapeParityCall{name: "claudecode/PowerShell", conn: "claudecode", event: "PreToolUse",
-			body: shapeParityEnvelope("PreToolUse", t.TempDir(), "PowerShell", map[string]any{"command": command})}
-		got := shapeParityHook(t, srv.handleAgentHook("claudecode"), call, p.managed)
-		want := "alert"
-		if p.managed || strings.Contains(p.name, "strict") {
-			want = "block"
+		cwd := t.TempDir()
+		judge := func(command string) []shapeParityCall {
+			args := map[string]any{"command": command}
+			cc := shapeParityCall{name: "claudecode/PowerShell", conn: "claudecode", event: "PreToolUse",
+				body: shapeParityEnvelope("PreToolUse", cwd, "PowerShell", args)}
+			return append([]shapeParityCall{cc}, shapeParityNative("Bash", args, cwd)...)
 		}
-		if got != want {
-			t.Errorf("got %s, want %s", got, want)
+		floor := "alert"
+		if p.pack == "strict" {
+			floor = "block"
+		}
+		for _, row := range unread {
+			for _, call := range judge(row.command) {
+				if got := shapeParityHook(t, handlers[call.conn], call, p.managed); got != floor {
+					t.Errorf("unread %s %s: got %s, want %s (the unknown tier of the pack)", row.id, call.name, got, floor)
+				}
+			}
+		}
+		for _, row := range ordinary {
+			for _, call := range judge(row.command) {
+				if got := shapeParityHook(t, handlers[call.conn], call, p.managed); got != "allow" {
+					t.Errorf("ordinary %s %s: got %s, want allow (read, only its grammar is not modeled)", row.id, call.name, got)
+				}
+			}
 		}
 	})
 }

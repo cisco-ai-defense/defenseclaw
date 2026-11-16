@@ -609,7 +609,8 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 			(i+3 == len(runes) || unicode.IsSpace(runes[i+3])) {
 			// PowerShell's stop-parsing token makes the native arguments
 			// opaque up to an unquoted pipe, &&, or the physical line end.
-			out.markPartial(IssueUnsupportedConstruct)
+			// That remainder is skipped, never lexed: it is unread.
+			out.markUnread(IssueUnsupportedConstruct)
 			wordExpands = true
 			for _, literal := range "--%" {
 				if !writeRune(literal) {
@@ -637,6 +638,8 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 			}
 			end, ok := windowsPowerShellOpaqueEnd(runes, i)
 			if !ok {
+				// No balanced end: the rest of the source is never lexed.
+				out.markUnread(IssueUnsupportedConstruct)
 				break
 			}
 			i = end

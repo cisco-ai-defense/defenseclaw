@@ -131,10 +131,16 @@ func windowsReadingTwin(request trustedActionRequest) trustedActionRequest {
 	return twin
 }
 
-// withPartialPowerShellFloor keeps an unread part of a PowerShell call from
-// becoming NONE. Proven findings remain decisive; only this uncertainty
-// follows the GAP-0988 default/permissive versus strict/managed floor.
-func withPartialPowerShellFloor(findings []RuleFinding, request trustedActionRequest, facts actionfacts.Facts) []RuleFinding {
+// withUnreadPowerShellFloor gives the unknown tier to a PowerShell call whose
+// reading skipped part of its text without reading it
+// (actionfacts.ParseResult.Unread, GAP-0988): no reader saw what that text
+// runs. A partial reading alone is not enough: almost every ordinary
+// PowerShell call reads as partial because a command's operand grammar is
+// not modeled, and those calls were read (GAP-1015). The finding is the
+// shared unknown-tier one, which the profile maps by pack: an alert in
+// default, permissive and the managed default pack, a block in strict and
+// managed-strict (GAP-1016). Proven findings keep their own verdict.
+func withUnreadPowerShellFloor(findings []RuleFinding, request trustedActionRequest, facts actionfacts.Facts) []RuleFinding {
 	if !request.windowsDialectReadings || request.readingTwin || request.simpleCommandPass {
 		return findings
 	}
@@ -144,21 +150,10 @@ func withPartialPowerShellFloor(findings []RuleFinding, request trustedActionReq
 		input.DialectHint = actionfacts.DialectPowerShell
 		facts = request.windowsPowerShellReading.factsFor(input)
 	}
-	if facts.Parse.Dialect != actionfacts.DialectPowerShell || facts.Parse.Status != actionfacts.StatusPartial {
+	if facts.Parse.Dialect != actionfacts.DialectPowerShell || facts.Parse.Status != actionfacts.StatusPartial ||
+		!facts.Parse.Unread {
 		return findings
 	}
-	floor := unknownReasonFinding("PowerShell call is only partially read", "powershell_partial", request.EnforcementCapable)
-	if !request.StrictPolicy && !request.ManagedInstall {
-		floor.enforcement = findingEnforcementAlertOnly
-	}
-	floor.partialPowerShellManaged = request.ManagedInstall
-	out := withUnknownFinding(findings, floor)
-	if request.ManagedInstall {
-		index := boundedLimitIndex(out)
-		if index >= 0 {
-			out[index].partialPowerShellManaged = true
-			out[index].enforcement = floor.enforcement
-		}
-	}
-	return out
+	return withUnknownFinding(findings, unknownReasonFinding("PowerShell call is only partly read",
+		"powershell_unread", request.EnforcementCapable))
 }

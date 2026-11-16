@@ -18,9 +18,7 @@ import (
 // a redirect that opens before the tar extraction of its call or of a later
 // statement (fixture rows gap/p0-round_GAP-1536/012 and 013) is judged once,
 // with that proof, in the Claude Code PowerShell reading as in agy's
-// run_command, inside and outside the home, as on Linux. A partial reading
-// still receives the GAP-0988 unknown floor; the open-before proof does not
-// prove the rest of that call. The PowerShell
+// run_command, inside and outside the home, as on Linux. The PowerShell
 // path fact spells the redirect C:/dir/file where the shell operand is
 // C:\dir\file; judged again under that spelling it lost the proof, so the
 // PowerShell reading warned or blocked and agy, where only its PowerShell
@@ -92,14 +90,8 @@ func TestPowerShellRedirectBeforeExtractionKeepsItsProof(t *testing.T) {
 					switch {
 					case r.block && (claude != "block" || agy != "block"):
 						t.Errorf("%s %s %s: Claude Code PowerShell %s, %s %s, want block", p.name, r.id, where, claude, call.name, agy)
-					case !r.block:
-						want := "alert"
-						if p.managed || strings.Contains(p.name, "strict") {
-							want = "block"
-						}
-						if claude != want || agy != want {
-							t.Errorf("%s %s %s: Claude Code PowerShell %s, %s %s, want %s (partial reading floor)", p.name, r.id, where, claude, call.name, agy, want)
-						}
+					case !r.block && (claude != "allow" || agy != "allow"):
+						t.Errorf("%s %s %s: Claude Code PowerShell %s, %s %s, want allow (the redirect opens before tar runs)", p.name, r.id, where, claude, call.name, agy)
 					}
 				}
 			}

@@ -117,9 +117,6 @@ type RuleFinding struct {
 	// enforces it too, as the failed-check answer of the hook recovery did
 	// (rel-1-0-10:GAP-0486). Private and value-free.
 	evaluationFault bool
-	// partialPowerShellManaged preserves the GAP-0988 managed floor for a
-	// partially read PowerShell call, independent of the general cap tier.
-	partialPowerShellManaged bool
 }
 
 type findingEnforcement uint8

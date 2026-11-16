@@ -877,7 +877,7 @@ func dispatchTrustedAction(
 		}()
 	}
 	defer func() {
-		findings = withPartialPowerShellFloor(findings, request, facts)
+		findings = withUnreadPowerShellFloor(findings, request, facts)
 	}()
 	windowsTwins, windowsTwinCut := windowsReadingTwinRequests(request, facts)
 	for _, twin := range windowsTwins {
