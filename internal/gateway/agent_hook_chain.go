@@ -595,6 +595,17 @@ func (a *APIServer) applyAgentHookToolChains(
 		if resolveErr != nil {
 			return resp, finalization
 		}
+		if substrateActor && resolved.Status == audit.ToolChainPendingMissing &&
+			outcome != connector.ToolLifecycleOutcomeDenied && outcome != connector.ToolLifecycleOutcomeCancelled &&
+			resultMayBeAnUnjoinedRead(req, projection) {
+			// The call ran (or may have) but its proposal is not in the
+			// actor's window: its PreToolUse reached no leader (a replica
+			// cut off from it), so the read may be in no window at all. The
+			// step is reported unrecorded, and the leader keeps that for the
+			// callout (review rch3 R1). A repeated result of a resolved
+			// credentials read lands here too: the safe side.
+			rootMissed = "a tool result whose call is not in the actor's chain window (its call did not reach the leader)"
+		}
 		resolvedInvocation = resolved.Status == audit.ToolChainPendingResolved
 		resolvedSuccess = outcome == connector.ToolLifecycleOutcomeSuccess &&
 			resolvedInvocation
@@ -3535,6 +3546,21 @@ func writeToolChainDigestPart(writer toolChainHashWriter, value string) {
 	binary.BigEndian.PutUint32(length[:], uint32(len(value)))
 	_, _ = writer.Write(length[:])
 	_, _ = writer.Write([]byte(value))
+}
+
+// resultMayBeAnUnjoinedRead reports a tool result whose own call may have
+// been a credentials read: its projection holds the secret-read step, its
+// tool input reads a credentials file (a result event runs no pre-tool rule
+// dispatch, so its facts are read here), or it names no tool to tell (R1).
+// A plain call (ls) does not.
+func resultMayBeAnUnjoinedRead(req agentHookRequest, projection guardrail.ToolChainProjection) bool {
+	if bit, ok := guardrail.ToolChainStepMask(guardrail.ToolChainSecretReadThenEgress, 1); ok && projection.DetectionStepMask&bit != 0 {
+		return true
+	}
+	if strings.TrimSpace(req.ToolName) == "" {
+		return true
+	}
+	return credentialFileContentRead(actionfacts.Analyze(actionfacts.Input{Tool: req.ToolName, Args: req.ToolArgs, CWD: req.CWD}))
 }
 
 // The secret-read chain start (owner decision 2026-11-13; substrate-1
