@@ -1241,6 +1241,12 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 			r.AddWarning(codeMachinePolicyIncomplete, problem)
 		}
 	}
+	if hasMessageCode(r.Warnings, codeConfigRejected) {
+		// The coverage the administrator's config asks for is not in place:
+		// the deployment runs the config it ran before (GAP-1027, as on
+		// Windows).
+		r.MarkCoverageIncomplete(codeConfigRejected)
+	}
 	if !r.Readiness.SensorHelper {
 		r.MarkSecurityIncomplete("the sensor helper is not ready")
 	}

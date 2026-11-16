@@ -1093,6 +1093,8 @@ func runWindowsEnterpriseStandaloneAction(
 	}
 	if (action == "status" || action == "verify") && report.Installed {
 		appendWindowsEnterpriseStatusAdvisories(ctx, result, report)
+		// The last config a run was given and could not apply (GAP-1027).
+		applyWindowsEnterpriseConfigRejected(result)
 		// A release below the confirmed bundle's floor (put there by a
 		// Setup without the floor check) is reported only: the warning
 		// starts no repair, reinstall or fail-mode change.
@@ -3929,6 +3931,9 @@ func finishWindowsEnterpriseStandalone(
 			windowsEnterpriseHealthNotChecked, "installer_pipe_wait_delayed")
 	}
 	exitCode := result.Finish("windows", failureCode)
+	// A failed run given a config records that the config is not applied,
+	// a successful one clears that record (GAP-1027).
+	recordWindowsEnterpriseConfigOutcome(result, opts)
 	result.LogPath = windowsEnterpriseStandaloneObserver(result, opts)
 	unknownProfile := windowsEnterpriseUnknownProfileRequested(opts) && exitCode != 0 && len(result.Errors) != 0
 	// A standard account's refusal ran none of the deployment's checks or

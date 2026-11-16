@@ -63,8 +63,16 @@ type windowsEnterpriseLifecycleOptions struct {
 	coworkPackagePath   string
 	coworkSignaturePath string
 	configPath          string
-	manifestPath        string
-	installerPath       string
+	// configRequestNoted, configRequestedSHA256 and
+	// configInstalledSHA256AtStart are the digests of the supplied config and
+	// of the installed config.yaml before this run changed anything; the
+	// finish records or clears the rejected-config record from them
+	// (windows_enterprise_config_rejected.go, GAP-1027).
+	configRequestNoted           bool
+	configRequestedSHA256        string
+	configInstalledSHA256AtStart string
+	manifestPath                 string
+	installerPath                string
 	// resolvedInstaller is the install-enterprise.ps1 the standalone
 	// lifecycle runs; the payload's scanner runtime is staged beside it.
 	resolvedInstaller             string
@@ -691,6 +699,10 @@ func runWindowsEnterpriseLifecycle(
 			return failPreflight(err)
 		}
 		opts.payloadPins = pins
+	}
+	if windowsEnterpriseStandalone(opts) {
+		// Before the first check that can refuse or change anything.
+		noteWindowsEnterpriseConfigRequest(action, opts)
 	}
 	if windowsEnterpriseStandalone(opts) && (action == "install" || action == "ensure" || action == "upgrade" ||
 		(action == "repair" && strings.TrimSpace(opts.configPath) != "")) {
