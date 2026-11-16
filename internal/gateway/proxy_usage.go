@@ -76,6 +76,7 @@ func usageRouteFacts(o SemanticRouteOutcome, routerOn bool) modelusage.RouteFact
 func usageIdentity(ctx context.Context, f *modelusage.CallFacts) {
 	if s, ok := verifiedSubjectFromContext(ctx); ok {
 		f.Subject, f.SubjectKind, f.IdentityVerified = s.UserID, s.Source, true
+		f.SubjectName = s.UserName
 	}
 	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && f.IdentityVerified {
 		f.ProfileName, f.ProfileDigest = resolved.decision.Name, resolved.decision.Digest

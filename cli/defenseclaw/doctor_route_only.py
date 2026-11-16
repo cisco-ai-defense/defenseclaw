@@ -563,6 +563,19 @@ def route_only_rows(
             enrolled = state.get("enrolled_users")
             routed = f"; {enrolled} enrolled account(s) with a route credential" if isinstance(enrolled, int) else ""
             rows.append(Row("pass", label, f"{provider} at {where}; {text}{routed}"))
+            if state.get("warning"):
+                # A routing.admin rule for some callers allows only models with no
+                # gateway credential (GAP-0921). The gateway names them to an
+                # administrator only.
+                rows.append(
+                    Row(
+                        "warn",
+                        f"{label} allowed models",
+                        str(state.get("detail") or "a routing.admin rule allows models with no gateway credential"),
+                        "name a protected credential in routing.models[].credential and store its key with "
+                        "defenseclaw-gateway enterprise secret set --name <name> --from-stdin",
+                    )
+                )
         else:
             rows.append(
                 Row(

@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -156,6 +157,14 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 			if d.FilteredBy == "" {
 				d.FilteredBy = why
 			}
+			switch why {
+			case "credential":
+				if !slices.Contains(d.NoCredential, c.alias) {
+					d.NoCredential = append(d.NoCredential, c.alias)
+				}
+			case "capability", "api":
+				d.OtherUnfit = true
+			}
 			if narrowed && localWhy == "" && slices.Contains(e.sensitive.Aliases, c.alias) {
 				localWhy = "local model " + c.alias + " cannot serve it (" + why + ")"
 			}
@@ -237,7 +246,32 @@ func (e *Engine) Gate(d Decision, target GateTarget) *DenyReason {
 	if e.admin == nil || !e.admin.Active() {
 		return nil
 	}
-	return e.admin.Gate(d.verdict, target, e.managed)
+	deny := e.admin.Gate(d.verdict, target, e.managed)
+	if deny != nil && deny.Code == "routing_admin_denied" && target.Alias == "" && len(d.NoCredential) > 0 {
+		// The administrator allows a model, but no credential is stored
+		// for it, so the request fell back to its own (disallowed) model:
+		// say what is missing, not that the model is disallowed.
+		return &DenyReason{Code: deny.Code, Message: NoCredentialMessage(d.NoCredential, d.verdict.RuleIDs, d.OtherUnfit)}
+	}
+	return deny
+}
+
+// NoCredentialMessage is the refusal text of a request whose allowed
+// models have no gateway credential. ruleIDs are the caller own matching
+// rules (AdminVerdict.RuleIDs, the same ids the evaluator hands the plain
+// refusal as BindRuleIDs); otherUnfit says another
+// allowed model did not fit the request for a reason that is not a
+// credential.
+func NoCredentialMessage(aliases, ruleIDs []string, otherUnfit bool) string {
+	msg := "The model your administrator allows for you (" + strings.Join(aliases, ", ") + ") has no gateway credential on this machine, so it cannot be used"
+	if len(ruleIDs) > 0 {
+		msg += " (rule " + strings.Join(ruleIDs, ", ") + ")"
+	}
+	msg += ". Ask your administrator to store the credential for it."
+	if otherUnfit {
+		msg += " Other models allowed for you do not fit this request."
+	}
+	return msg
 }
 
 func (e *Engine) classifierName() string {

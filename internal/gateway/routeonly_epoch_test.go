@@ -47,3 +47,64 @@ func TestRouteOnlyReadinessWaitsForAPublishedRouteEpoch(t *testing.T) {
 		t.Fatal("off Windows managed hosts there is no epoch problem")
 	}
 }
+
+// Readiness also reads the published epoch back: a missing, unreadable or
+// different file leaves every account unrendered even though the write
+// returned success. No live call is made.
+func TestRouteOnlyReadinessReadsThePublishedRouteEpochBack(t *testing.T) {
+	var onDisk *connector.RouteEpoch
+	var loadErr error
+	s := &routeEpochState{dataDir: func() string { return "fixture-dir" }, seen: map[string]bool{},
+		write: func(_ string, e connector.RouteEpoch) error { c := e; onDisk = &c; return nil },
+		load:  func(string) (*connector.RouteEpoch, error) { return onDisk, loadErr }}
+	if err := s.rotate(); err != nil || s.unpublished() != "" {
+		t.Fatalf("published and readable: %v %q", err, s.unpublished())
+	}
+	onDisk = nil
+	if got := s.unpublished(); !strings.Contains(got, "file is missing") {
+		t.Fatalf("missing file: %q", got)
+	}
+	loadErr = errors.New("route epoch fixture: not a private file")
+	if got := s.unpublished(); !strings.Contains(got, "cannot be read") || !strings.Contains(got, "not a private file") {
+		t.Fatalf("unreadable file: %q", got)
+	}
+	loadErr = nil
+	other, err := connector.NewRouteEpoch()
+	if err != nil {
+		t.Fatal(err)
+	}
+	onDisk = &other
+	if got := s.unpublished(); !strings.Contains(got, "not the one this gateway accepts") {
+		t.Fatalf("different epoch: %q", got)
+	}
+	out := withRouteEpochReadiness([]routeOnlyReadiness{{Connector: "codex", Ready: true}}, s.unpublished())
+	if out[0].Ready || out[0].Cause != routeCauseEpoch || !strings.Contains(out[0].Problem, "not the one this gateway accepts") {
+		t.Fatalf("readiness: %+v", out[0])
+	}
+}
+
+// routrev round 1 P3: an epoch rotated between the copy and the read-back
+// must not leave the connector not ready until the next recheck.
+func TestPublishedRouteEpochRotationBetweenCopyAndReadBackIsNotAProblem(t *testing.T) {
+	var s *routeEpochState
+	var onDisk *connector.RouteEpoch
+	first := true
+	s = &routeEpochState{dataDir: func() string { return "fixture-dir" }, seen: map[string]bool{},
+		write: func(_ string, e connector.RouteEpoch) error { c := e; onDisk = &c; return nil }}
+	s.load = func(string) (*connector.RouteEpoch, error) {
+		if first {
+			first = false
+			// The gateway rotates (and publishes) right after the copy was taken.
+			if err := s.rotate(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return onDisk, nil
+	}
+	if err := s.rotate(); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.unpublished(); got != "" {
+		t.Fatalf("a rotation during the read-back reported %q", got)
+	}
+}
