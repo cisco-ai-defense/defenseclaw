@@ -6,7 +6,6 @@ package chainstate
 import (
 	"fmt"
 	"runtime"
-	"strings"
 	"testing"
 	"time"
 
@@ -17,9 +16,15 @@ import (
 // The leader's call memory (calls.go; substrate-1 GAP-0348, GAP-0345,
 // GAP-0350, review rk347 P3-1/P3-2).
 
+// hex64 is a 64-character key, distinct for every (prefix, i).
 func hex64(prefix string, i int) string {
-	s := fmt.Sprintf("%s%x", prefix, i)
-	return s + strings.Repeat("0", 64-len(s))
+	return fmt.Sprintf("%s%0*x", prefix, 64-len(prefix), i)
+}
+
+func (t *callTable) len() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.all.Len()
 }
 
 func secretReadProposal(t *testing.T) guardrail.ToolChainProjection {
@@ -159,9 +164,10 @@ func TestCallTableBoundsTheLeader(t *testing.T) {
 	}
 }
 
-// A remembered call costs well under 1 KiB, its secret-read step included,
-// so callsLeaderMax calls stay far below the 2 GiB leader limit (GAP-0350:
-// the first version kept a whole projection, about 8 KiB a scope).
+// A remembered call costs about 1 KiB on the real path (a start per scope,
+// fresh strings per call), its secret-read steps included, so callsLeaderMax
+// calls stay far below the 2 GiB leader limit (GAP-0350: the first version
+// kept a whole projection, about 8 KiB a scope).
 func TestCallTableBytesPerCall(t *testing.T) {
 	const n = 20_000
 	p := secretReadProposal(t)
@@ -170,11 +176,18 @@ func TestCallTableBytesPerCall(t *testing.T) {
 	runtime.ReadMemStats(&before)
 	tb := newCallTable()
 	t0 := time.Unix(1_800_000_000, 0)
+	index, _ := guardrail.ToolChainIndexByID(guardrail.ToolChainSecretReadThenEgress)
 	for i := 0; i < n; i++ {
-		start := newCallStart(p, hex64("r", 1))
 		k := callKey{fmt.Sprintf("dc-eng/%08x-8d5c-4056-a730-5ca741ca31b0", i%64), hex64("s", i), hex64("i", i)}
-		tb.update(k, ScopeSession, t0, func(c *scopeCall) { *c = scopeCall{known: true, resolved: true, start: start} })
-		tb.update(k, ScopeActor, t0, func(c *scopeCall) { *c = scopeCall{known: true, resolved: true, start: start} })
+		for _, scope := range []Scope{ScopeSession, ScopeActor} {
+			// As noteCall then furtherResult: a start per scope, from a
+			// decoded request's own strings (rk347b P3-2).
+			q := p
+			q.EnforcementJoinDigests[index], q.EnforcementOutputJoinDigests[index] = hex64("j"+string(scope), i), hex64("o"+string(scope), i)
+			start := newCallStart(q, hex64("r"+string(scope), i))
+			tb.update(k, scope, t0, func(c *scopeCall) { *c = scopeCall{known: true, start: start} })
+			tb.update(k, scope, t0, func(c *scopeCall) { c.resolved = true })
+		}
 	}
 	runtime.GC()
 	runtime.ReadMemStats(&after)
@@ -182,11 +195,11 @@ func TestCallTableBytesPerCall(t *testing.T) {
 	runtime.KeepAlive(tb)
 	t.Logf("%.0f bytes per remembered call (both scopes, with its secret-read step); leader bound %d calls = %.0f MiB",
 		per, callsLeaderMax, per*callsLeaderMax/(1<<20))
-	if per > 1024 {
-		t.Fatalf("%.0f bytes per call, want under 1024", per)
+	if per > 1536 {
+		t.Fatalf("%.0f bytes per call, want about 1 KiB (at most 1.5 KiB)", per)
 	}
-	if per*callsLeaderMax > 160<<20 {
-		t.Fatalf("leader bound %.0f MiB, want under 160 MiB", per*callsLeaderMax/(1<<20))
+	if per*callsLeaderMax > 192<<20 {
+		t.Fatalf("leader bound %.0f MiB, want under 192 MiB", per*callsLeaderMax/(1<<20))
 	}
 }
 
