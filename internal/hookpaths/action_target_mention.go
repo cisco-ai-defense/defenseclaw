@@ -482,7 +482,17 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 						return false
 					}
 					for _, span := range actionWindowsMentionToken.FindAllStringIndex(value, -1) {
-						if check(value[span[0]:span[1]], false, effectiveCWD) {
+						token := value[span[0]:span[1]]
+						// The //host/... part of a URL in the text (pip
+						// install git+https://host/x) names no file of
+						// this machine; checking it would ask \\host\x
+						// and open an SMB session to the host the URL
+						// names, as the text scan below never does
+						// (rel-1-0-10:GAP-0920, GAP-1072).
+						if actionURLAuthorityToken(value, span[0], token) {
+							continue
+						}
+						if check(token, false, effectiveCWD) {
 							return true
 						}
 					}
