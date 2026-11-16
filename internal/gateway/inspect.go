@@ -2741,11 +2741,7 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(openClawInspectIdentity(r.Context(), serverConnector))
 	r = r.WithContext(withCascadeTrace(r.Context(), a.decisionConfig(r.Context()), serverConnector))
 
-	scanTimeout := inspectScanTimeout
-	if a.inspectToolScanTimeout > 0 {
-		scanTimeout = a.inspectToolScanTimeout
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), scanTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), a.inspectScanBudget())
 	defer cancel()
 	workerCtx := deferManagedAIDFailOpenAccounting(ctx)
 

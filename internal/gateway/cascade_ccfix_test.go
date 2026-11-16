@@ -188,13 +188,15 @@ func TestCascadeUninspectedMarkerWhateverTheVerdict(t *testing.T) {
 // over the cap is at least the unknown tier, never a silent allow, and a
 // policy that lowers everything cannot take it below that.
 func TestCascadeInspectContentCutIsUninspected(t *testing.T) {
-	// The gateway compiles its rule generation at boot (NewSidecar,
-	// publishRulePackOverrides); this test calls the handlers without a
-	// boot, so compile it first. Otherwise the one-time compile (about
-	// 240 ms under -race) runs inside the 200 ms inspectScanTimeout of the
-	// first scan and the route answers 504 instead of a verdict.
-	ensureDefaultRuleGeneration()
+	// The verdict on a cut, not the scan latency, is under test. Under
+	// -race with coverage on a 4-vCPU CI runner, the first scan of the
+	// 256 KiB kept prefix (with the rule generation the handlers compile on
+	// first use, which a booted gateway compiled already) can pass the
+	// 200 ms production deadline (inspectScanTimeout), and the route then
+	// answers 504 with no verdict (rel-1-0-10:GAP-0958, CI #1457 shard 23).
+	// TestInspectContentRoutesAnswer504PastTheScanBudget covers the deadline.
 	api := cascadeModuleConfig(t, "default", cascadeAllowAllModule, "")
+	api.inspectToolScanTimeout = 30 * time.Second
 	api.scannerCfg.Guardrail.Cascade.Policy.Lowest = "allow"
 	api.scannerCfg.Guardrail.Mode = "action"
 	big := strings.Repeat("hello world ", maxInspectContentLen/12+64)
@@ -209,12 +211,42 @@ func TestCascadeInspectContentCutIsUninspected(t *testing.T) {
 		raw, _ := json.Marshal(tc.body)
 		rec := httptest.NewRecorder()
 		tc.h(rec, httptest.NewRequest(http.MethodPost, tc.path, bytes.NewReader(raw)))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status %d %s", tc.path, rec.Code, rec.Body.String())
+		}
 		var got ToolInspectVerdict
 		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 			t.Fatalf("%s: %v (%d %s)", tc.path, err, rec.Code, rec.Body.String())
 		}
 		if cascadeRank(got.Action) < cascadeRank("alert") || !slices.Contains(got.Findings, hookOversizeUninspectedRuleID) {
 			t.Errorf("%s: content over the cap ended %s findings %v", tc.path, got.Action, got.Findings)
+		}
+	}
+}
+
+// The content inspect routes keep the 200 ms production scan deadline
+// unless a test widens it, and past the deadline they answer 504 with no
+// verdict, which the callers handle by their fail mode (GAP-0958).
+func TestInspectContentRoutesAnswer504PastTheScanBudget(t *testing.T) {
+	if got := (&APIServer{}).inspectScanBudget(); got != 200*time.Millisecond {
+		t.Fatalf("production inspect scan budget = %s, want 200ms", got)
+	}
+	api := cascadeModuleConfig(t, "default", cascadeAllowAllModule, "")
+	api.inspectToolScanTimeout = time.Nanosecond
+	big := strings.Repeat("hello world ", maxInspectContentLen/12)
+	for _, tc := range []struct {
+		path string
+		h    http.HandlerFunc
+		body any
+	}{
+		{"/api/v1/inspect/request", api.handleInspectRequest, RequestInspectRequest{Content: big}},
+		{"/api/v1/inspect/response", api.handleInspectResponse, ResponseInspectRequest{Content: big}},
+	} {
+		raw, _ := json.Marshal(tc.body)
+		rec := httptest.NewRecorder()
+		tc.h(rec, httptest.NewRequest(http.MethodPost, tc.path, bytes.NewReader(raw)))
+		if rec.Code != http.StatusGatewayTimeout || !strings.Contains(rec.Body.String(), "scan timeout") {
+			t.Errorf("%s past the scan budget: status %d %s, want 504 scan timeout", tc.path, rec.Code, rec.Body.String())
 		}
 	}
 }
