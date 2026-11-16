@@ -212,6 +212,10 @@ func TestHealthRouteOnlyNamesNothingToAnOrdinaryAccount(t *testing.T) {
 		if strings.Contains(rec.Body.String(), secretName) || strings.Contains(rec.Body.String(), "fixture start error") {
 			t.Fatalf("an ordinary account reads the routing start error: %s", rec.Body)
 		}
+		// GAP-1008: doctor reads this row, so the closed text points to status.
+		if !strings.Contains(rec.Body.String(), "can read the cause in defenseclaw status") || strings.Contains(rec.Body.String(), "defenseclaw doctor") {
+			t.Fatalf("the closed routing text must point to defenseclaw status: %s", rec.Body)
+		}
 		req := httptest.NewRequest(http.MethodGet, "/health", nil)
 		req.Header.Set("Authorization", "Bearer fixture-gateway-token")
 		rec = httptest.NewRecorder()

@@ -324,8 +324,9 @@ func publicRouteOnly(in routeOnlyReadiness) routeOnlyReadiness {
 func healthRoutingForOrdinaryAccount(routing SubsystemHealth) SubsystemHealth {
 	if routing.LastError != "" {
 		// The start error can quote a path, a credential or a model of the
-		// policy; an ordinary account reads a closed text, like config.
-		routing.LastError = "routing did not start; an administrator can read the cause in defenseclaw doctor"
+		// policy; an ordinary account reads a closed text, like config. The text
+		// points to status, not doctor: doctor reads this very row.
+		routing.LastError = "routing did not start; an administrator can read the cause in defenseclaw status"
 	}
 	rows, ok := routing.Details["route_only"].([]routeOnlyReadiness)
 	if !ok {

@@ -447,6 +447,11 @@ _PUBLIC = _health(
 )
 
 
+class _Refused(_FakeClient):
+    def health(self):
+        raise RuntimeError("401")
+
+
 def test_doctor_as_administrator_reads_the_authenticated_rows_and_names_the_models(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -474,16 +479,76 @@ def test_doctor_without_a_readable_token_keeps_the_public_rows(tmp_path: Path, m
     assert cmd_doctor._administrator_route_only_health(cfg, _PUBLIC) is _PUBLIC
     assert _FakeClient.token_seen == []
 
-    class _Refused(_FakeClient):
-        def health(self):
-            raise RuntimeError("401")
-
     monkeypatch.setattr("defenseclaw.gateway.OrchestratorClient", _Refused)
     cfg = _managed_cfg(tmp_path, "fixture-gateway-token")
     live = cmd_doctor._administrator_route_only_health(cfg, _PUBLIC)
     assert live is _PUBLIC
     row = _by_label(dro.route_only_rows(cfg, live, profile="standalone", platform="linux"))["Route-only codex"]
     assert row.tag == "fail" and "run defenseclaw doctor as an administrator" in row.fix
-    # An unmanaged account never asks.
+
+
+def test_unmanaged_account_never_asks_even_with_a_readable_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """GAP-1009: the standalone gate keeps an unmanaged account from sending its token.
+
+    The config has a readable token and a client that answers is patched in, so
+    only the gate stops the call: with the gate removed token_seen is not empty."""
+    from defenseclaw.commands import cmd_doctor
+
+    monkeypatch.setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "standalone")
+    monkeypatch.setattr("defenseclaw.gateway.OrchestratorClient", _FakeClient)
+    _FakeClient.token_seen.clear()
     plain = _cfg(tmp_path, {"codex": {"base_url": "https://api.openai.com", "api": "responses"}})
+    plain.gateway = SimpleNamespace(api_port=18970, resolved_token=lambda: "fixture-gateway-token")
+    assert getattr(plain, "deployment_mode", "") != "managed_enterprise"
     assert cmd_doctor._administrator_route_only_health(plain, _PUBLIC) is _PUBLIC
+    assert _FakeClient.token_seen == []
+
+
+class _ErrorClient(_FakeClient):
+    def health(self):
+        body = _FakeClient.health(self)
+        body["routing"].update({"state": "error", "last_error": "fixture start error: open fixture-credential"})
+        return body
+
+
+_PUBLIC_ERROR = {
+    **_PUBLIC,
+    "routing": {
+        **_PUBLIC["routing"],
+        "state": "error",
+        "last_error": "routing did not start; an administrator can read the cause in defenseclaw status",
+    },
+}
+
+
+def test_administrator_reads_the_routing_start_error_from_the_authenticated_health(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GAP-1008: the Semantic routing row is not circular for an administrator."""
+    from defenseclaw.commands import cmd_doctor
+
+    monkeypatch.setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "standalone")
+    monkeypatch.setattr("defenseclaw.gateway.OrchestratorClient", _ErrorClient)
+    _FakeClient.token_seen.clear()
+    cfg = _managed_cfg(tmp_path, "fixture-gateway-token")
+    cfg.routing = SimpleNamespace(enabled=True, classifier="vllm_sr", remote={}, port=8080, models=[])
+    r = cmd_doctor._DoctorResult(quiet=True)
+    live = cmd_doctor._administrator_health(cfg, r, _PUBLIC_ERROR)
+    cmd_doctor._check_semantic_routing(cfg, r, live_health=live)
+    row = next(c for c in r.checks if c["label"] == "Semantic routing")
+    assert row["status"] == "fail" and "fixture start error" in row["detail"]
+    assert "fixture-gateway-token" not in row["detail"] + str(row.get("remediation"))
+    # A refused call keeps the closed text, which points to status, never back to doctor.
+    r2 = cmd_doctor._DoctorResult(quiet=True)
+    monkeypatch.setattr("defenseclaw.gateway.OrchestratorClient", _Refused)
+    cmd_doctor._check_semantic_routing(cfg, r2, live_health=cmd_doctor._administrator_health(cfg, r2, _PUBLIC_ERROR))
+    row = next(c for c in r2.checks if c["label"] == "Semantic routing")
+    assert "fixture start error" not in row["detail"] and "defenseclaw status" in row["detail"]
+    assert "defenseclaw doctor" not in row["detail"]
+    # A gateway that is not this account's verified one is never asked.
+    r3 = cmd_doctor._DoctorResult(quiet=True)
+    r3.gateway_down = "foreign"
+    monkeypatch.setattr("defenseclaw.gateway.OrchestratorClient", _ErrorClient)
+    _FakeClient.token_seen.clear()
+    assert cmd_doctor._administrator_health(cfg, r3, _PUBLIC_ERROR) is _PUBLIC_ERROR
+    assert _FakeClient.token_seen == []
