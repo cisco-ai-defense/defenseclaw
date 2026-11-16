@@ -20,10 +20,9 @@ import (
 	"errors"
 	"io"
 	"sort"
-
-	"mvdan.cc/sh/v3/expand"
 	"strings"
 
+	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
